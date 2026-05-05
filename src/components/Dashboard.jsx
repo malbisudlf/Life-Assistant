@@ -1,0 +1,528 @@
+import { useState, useEffect } from "react";
+
+// ── DATOS DE PRUEBA ──────────────────────────────────────────────
+const TODAY_EVENTS = [
+  { time: "09:00", title: "Clase Redes",           loc: "Aula A-101",   past: true,  active: false },
+  { time: "10:00", title: "Clase Machine Learning", loc: "Aula B-204",   past: false, active: true  },
+  { time: "12:30", title: "Tutoría Matemáticas",    loc: "Despacho D-3", past: false, active: false },
+  { time: "15:00", title: "Gym",                    loc: "Campus",       past: false, active: false },
+  { time: "17:30", title: "Reunión grupo",           loc: "Online",       past: false, active: false },
+];
+
+const UPCOMING_EVENTS = [
+  { time: "Mañana 09:00", title: "Clase de Redes",          loc: "Aula A-101"   },
+  { time: "Mañana 11:00", title: "Entrega Lab Física",       loc: "Laboratorio"  },
+  { time: "Mié 10:00",    title: "Clase Machine Learning",   loc: "Aula B-204"   },
+  { time: "Jue 16:00",    title: "Cita Santander",           loc: "Santander"    },
+];
+
+const ENTREGAS = [
+  { title: "Clasificación supervisada", subject: "Machine Learning",        days: 3  },
+  { title: "Práctica de sockets",       subject: "Redes de Computadores",   days: 8  },
+  { title: "Análisis estadístico",      subject: "Matemáticas Aplicadas",   days: 14 },
+  { title: "Memoria proyecto",          subject: "Ingeniería del Software",  days: 21 },
+];
+
+const IDEAS = [
+  {
+    key:  "Dashboard para la Raspberry siempre encendido",
+    tag:  "proyecto",
+    full: "Comprar una Raspberry Pi Zero 2 W o Orange Pi Zero 3 y conectarla a una pantalla en el cuarto. El dashboard estaría siempre visible. De noche se apagaría automáticamente con un cron job.",
+  },
+  {
+    key:  "Wake-on-LAN desde el calendario",
+    tag:  "automatización",
+    full: "Cuando haga click en una entrega, enviar un paquete WOL al PC, esperar 30 s a que arranque y lanzar el script de automatización con Claude Computer Use.",
+  },
+  {
+    key:  "Módulo de ideas por audio con Whisper",
+    tag:  "ideas",
+    full: "Grabar audio desde el móvil, transcribirlo con Whisper, pasarlo a Claude para extraer la idea clave y guardarla en Supabase. Vista colapsada / expandible.",
+  },
+];
+
+// ── HELPERS ──────────────────────────────────────────────────────
+function urgencyColor(days) {
+  if (days <= 3) return "#d4645a";
+  if (days <= 7) return "#c8a45a";
+  return "#6aaa82";
+}
+
+const DAYS_ES   = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+const MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+// ── ESTILOS GLOBALES (inyectados una sola vez) ────────────────────
+const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0e0f11;
+    --surface:  #161719;
+    --surface2: #1e1f22;
+    --border:   rgba(255,255,255,0.07);
+    --border2:  rgba(255,255,255,0.12);
+    --text:     #e8e6e0;
+    --muted:    #7a7870;
+    --muted2:   #5a5850;
+    --accent:   #c8a96e;
+    --accent2:  #8bb4d4;
+    --green:    #6aaa82;
+    --node-line: rgba(200,169,110,0.3);
+  }
+
+  html, body, #root { height: 100%; background: var(--bg); }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    color: var(--text);
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+  }
+
+  @keyframes nodeGlow {
+    0%, 100% { box-shadow: 0 0 8px rgba(200,169,110,0.4); }
+    50%       { box-shadow: 0 0 16px rgba(200,169,110,0.7); }
+  }
+`;
+
+// ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
+export default function Dashboard() {
+  const [now, setNow]               = useState(new Date());
+  const [activeEvent, setActiveEvent] = useState(TODAY_EVENTS.find(e => e.active) || TODAY_EVENTS[0]);
+  const [openIdea, setOpenIdea]     = useState(null);
+
+  // Reloj
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Inyectar CSS global una sola vez
+  useEffect(() => {
+    if (document.getElementById("dashboard-global-css")) return;
+    const style = document.createElement("style");
+    style.id = "dashboard-global-css";
+    style.textContent = GLOBAL_CSS;
+    document.head.appendChild(style);
+  }, []);
+
+  const hh      = String(now.getHours()).padStart(2, "0");
+  const mm      = String(now.getMinutes()).padStart(2, "0");
+  const dateStr = `${DAYS_ES[now.getDay()]}, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
+  const hour    = now.getHours();
+  const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
+
+  return (
+    <div style={s.dashboard}>
+
+      {/* ── HEADER ── */}
+      <div style={s.header}>
+        <div>
+          <div style={s.clock}>{hh}:{mm}</div>
+          <div style={s.date}>{dateStr}</div>
+        </div>
+        <div style={s.greeting}>
+          {greeting}
+          <strong style={s.greetingStrong}>Outlook pendiente</strong>
+        </div>
+      </div>
+
+      {/* ── MAIN GRID ── */}
+      <div style={s.mainGrid}>
+
+        {/* COL IZQUIERDA */}
+        <div style={s.leftCol}>
+
+          {/* Timeline */}
+          <div style={s.card}>
+            <div style={s.sectionLabel}>Hoy</div>
+            <div style={s.timelineWrapper}>
+              <div style={s.timeline}>
+                {TODAY_EVENTS.map((ev, i) => (
+                  <div
+                    key={i}
+                    style={s.timelineItem}
+                    onClick={() => setActiveEvent(ev)}
+                  >
+                    {/* línea conectora */}
+                    {i < TODAY_EVENTS.length - 1 && (
+                      <div style={s.connectorLine} />
+                    )}
+                    <div style={{
+                      ...s.node,
+                      ...(ev.active ? s.nodeActive : {}),
+                      ...(ev.past   ? s.nodePast   : {}),
+                      ...(!ev.active && !ev.past ? s.nodeFuture : {}),
+                    }} />
+                    <div style={s.nodeLabel}>
+                      <div style={s.nodeTime}>{ev.time}</div>
+                      <div style={{ ...s.nodeTitle, ...(ev.active ? s.nodeTitleActive : {}) }}>
+                        {ev.title}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Evento activo */}
+            <div style={s.eventDetail}>
+              <div>
+                <div style={s.eventDetailTitle}>{activeEvent.title}</div>
+                <div style={s.eventDetailSub}>{activeEvent.loc}</div>
+              </div>
+              <div style={s.eventDetailTime}>{activeEvent.time}</div>
+            </div>
+          </div>
+
+          {/* Próximos eventos */}
+          <div style={s.card}>
+            <div style={s.sectionLabel}>Próximos eventos</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {UPCOMING_EVENTS.map((ev, i) => (
+                <div key={i} style={s.eventRow}>
+                  <div style={s.eventDot} />
+                  <div style={s.eventRowTime}>{ev.time}</div>
+                  <div style={s.eventRowTitle}>{ev.title}</div>
+                  <div style={s.eventRowLoc}>{ev.loc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* COL DERECHA */}
+        <div style={s.rightCol}>
+
+          {/* Entregas */}
+          <div style={s.card}>
+            <div style={s.sectionLabel}>Entregas pendientes</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {ENTREGAS.map((e, i) => {
+                const color = urgencyColor(e.days);
+                return (
+                  <div key={i} style={s.entregaRow}>
+                    <div style={{ ...s.urgencyBar, background: color }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={s.entregaTitle}>{e.title}</div>
+                      <div style={s.entregaSubject}>[ENTREGA] {e.subject}</div>
+                    </div>
+                    <div style={s.entregaCountdown}>
+                      <div style={{ ...s.daysNum, color }}>{e.days}</div>
+                      <span style={s.daysLabel}>días</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Ideas */}
+          <div style={s.card}>
+            <div style={s.sectionLabel}>Ideas</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {IDEAS.map((idea, i) => (
+                <div
+                  key={i}
+                  style={s.ideaCard}
+                  onClick={() => setOpenIdea(openIdea === i ? null : i)}
+                >
+                  <div style={s.ideaKey}>
+                    <span style={{ flex: 1 }}>{idea.key}</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      <span style={s.ideaTag}>{idea.tag}</span>
+                      <span style={{
+                        ...s.ideaChevron,
+                        transform: openIdea === i ? "rotate(90deg)" : "rotate(0deg)",
+                      }}>▶</span>
+                    </div>
+                  </div>
+                  {openIdea === i && (
+                    <div style={s.ideaFull}>{idea.full}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <button
+              style={s.newIdeaBtn}
+              onMouseOver={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)"; e.currentTarget.style.color = "#7a7870"; }}
+              onMouseOut={e  => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)"; e.currentTarget.style.color = "#5a5850"; }}
+            >
+              + Nueva idea por audio
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── FOOTER ── */}
+      <div style={s.footer}>
+        <span>
+          <span style={s.statusDot} />
+          Datos de prueba · Outlook pendiente de conectar
+        </span>
+        <span>Life Assistant v0.1</span>
+      </div>
+    </div>
+  );
+}
+
+// ── ESTILOS JS ───────────────────────────────────────────────────
+const s = {
+  dashboard: {
+    display: "flex",
+    flexDirection: "column",
+    minHeight: "100vh",
+    padding: 20,
+    gap: 16,
+    background: "var(--bg)",
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+    paddingBottom: 16,
+    borderBottom: "0.5px solid var(--border)",
+  },
+  clock: {
+    fontFamily: "'DM Mono', monospace",
+    fontSize: 48,
+    fontWeight: 400,
+    letterSpacing: -2,
+    color: "var(--text)",
+    lineHeight: 1,
+  },
+  date: {
+    fontSize: 13,
+    color: "var(--muted)",
+    marginTop: 4,
+    letterSpacing: "0.05em",
+    textTransform: "uppercase",
+  },
+  greeting: {
+    fontSize: 13,
+    color: "var(--muted)",
+    textAlign: "right",
+    fontFamily: "'DM Sans', sans-serif",
+  },
+  greetingStrong: {
+    display: "block",
+    fontSize: 16,
+    color: "var(--accent)",
+    fontWeight: 500,
+    marginTop: 2,
+  },
+  mainGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 320px",
+    gap: 16,
+    alignItems: "start",
+    flex: 1,
+  },
+  leftCol:  { display: "flex", flexDirection: "column", gap: 16 },
+  rightCol: { display: "flex", flexDirection: "column", gap: 16 },
+  card: {
+    background: "var(--surface)",
+    border: "0.5px solid var(--border)",
+    borderRadius: 12,
+    padding: "16px 20px",
+  },
+  sectionLabel: {
+    fontSize: 10,
+    fontWeight: 500,
+    letterSpacing: "0.15em",
+    textTransform: "uppercase",
+    color: "var(--muted2)",
+    marginBottom: 12,
+  },
+
+  // Timeline
+  timelineWrapper: { overflowX: "auto", paddingBottom: 4 },
+  timeline: {
+    display: "flex",
+    alignItems: "flex-start",
+    minWidth: 500,
+    padding: "8px 0 16px",
+    position: "relative",
+  },
+  timelineItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    flex: 1,
+    position: "relative",
+    cursor: "pointer",
+  },
+  connectorLine: {
+    position: "absolute",
+    top: 9,
+    left: "50%",
+    width: "100%",
+    height: 0.5,
+    background: "var(--node-line)",
+    zIndex: 0,
+  },
+  node: {
+    width: 18,
+    height: 18,
+    borderRadius: "50%",
+    border: "1.5px solid var(--accent)",
+    background: "var(--bg)",
+    zIndex: 1,
+    position: "relative",
+    flexShrink: 0,
+    transition: "all 0.2s",
+    cursor: "pointer",
+  },
+  nodeActive: {
+    background: "var(--accent)",
+    animation: "nodeGlow 2s infinite",
+  },
+  nodePast: {
+    borderColor: "var(--muted2)",
+    background: "var(--muted2)",
+    width: 12,
+    height: 12,
+    margin: "3px 0",
+  },
+  nodeFuture: {
+    borderColor: "var(--border2)",
+  },
+  nodeLabel: { marginTop: 10, textAlign: "center", maxWidth: 80 },
+  nodeTime:  { fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted)" },
+  nodeTitle: { fontSize: 11, color: "var(--text)", marginTop: 2, lineHeight: 1.3 },
+  nodeTitleActive: { color: "var(--accent)", fontWeight: 500 },
+
+  // Event detail
+  eventDetail: {
+    background: "var(--surface2)",
+    border: "0.5px solid var(--border2)",
+    borderLeft: "2px solid var(--accent)",
+    borderRadius: 8,
+    padding: "12px 16px",
+    marginTop: 4,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  eventDetailTitle: { fontSize: 15, fontWeight: 500, color: "var(--text)" },
+  eventDetailSub:   { fontSize: 12, color: "var(--muted)", marginTop: 3 },
+  eventDetailTime:  { fontFamily: "'DM Mono', monospace", fontSize: 20, color: "var(--accent)" },
+
+  // Event rows
+  eventRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "0.5px solid var(--border)",
+    background: "var(--surface2)",
+    cursor: "pointer",
+  },
+  eventDot:      { width: 6, height: 6, borderRadius: "50%", background: "var(--accent2)", flexShrink: 0 },
+  eventRowTime:  { fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted)", minWidth: 80 },
+  eventRowTitle: { fontSize: 13, color: "var(--text)", flex: 1 },
+  eventRowLoc:   { fontSize: 11, color: "var(--muted)" },
+
+  // Entregas
+  entregaRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "12px 14px",
+    borderRadius: 8,
+    border: "0.5px solid var(--border)",
+    background: "var(--surface2)",
+    cursor: "pointer",
+  },
+  urgencyBar:      { width: 3, height: 36, borderRadius: 2, flexShrink: 0 },
+  entregaTitle:    { fontSize: 13, fontWeight: 500, color: "var(--text)" },
+  entregaSubject:  { fontSize: 11, color: "var(--muted)", marginTop: 2 },
+  entregaCountdown: { textAlign: "right", flexShrink: 0 },
+  daysNum:  { fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 400, lineHeight: 1 },
+  daysLabel: { fontSize: 10, color: "var(--muted)", display: "block", marginTop: 1 },
+
+  // Ideas
+  ideaCard: {
+    background: "var(--surface2)",
+    border: "0.5px solid var(--border)",
+    borderRadius: 8,
+    padding: "12px 14px",
+    cursor: "pointer",
+  },
+  ideaKey: {
+    fontSize: 13,
+    fontWeight: 500,
+    color: "var(--text)",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    justifyContent: "space-between",
+  },
+  ideaTag: {
+    fontSize: 10,
+    color: "var(--muted)",
+    background: "var(--surface)",
+    padding: "2px 8px",
+    borderRadius: 4,
+    letterSpacing: "0.05em",
+    flexShrink: 0,
+  },
+  ideaChevron: {
+    fontSize: 10,
+    color: "var(--muted2)",
+    transition: "transform 0.3s",
+    flexShrink: 0,
+  },
+  ideaFull: {
+    fontSize: 12,
+    color: "var(--muted)",
+    marginTop: 8,
+    lineHeight: 1.6,
+  },
+  newIdeaBtn: {
+    width: "100%",
+    marginTop: 10,
+    padding: 8,
+    background: "transparent",
+    border: "0.5px dashed rgba(255,255,255,0.12)",
+    borderRadius: 8,
+    color: "#5a5850",
+    fontSize: 12,
+    cursor: "pointer",
+    fontFamily: "'DM Sans', sans-serif",
+    transition: "all 0.2s",
+  },
+
+  // Footer
+  footer: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 12,
+    borderTop: "0.5px solid var(--border)",
+    fontSize: 11,
+    color: "var(--muted2)",
+  },
+  statusDot: {
+    display: "inline-block",
+    width: 6,
+    height: 6,
+    borderRadius: "50%",
+    background: "var(--green)",
+    marginRight: 6,
+    animation: "pulse 2s infinite",
+    verticalAlign: "middle",
+  },
+};
