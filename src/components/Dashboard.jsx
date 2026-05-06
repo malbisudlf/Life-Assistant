@@ -241,11 +241,17 @@ export default function Dashboard() {
 
   // Cargar clases
   useEffect(() => {
+    if (!token) return;
     fetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${token}` } })
       .then(r => r.json())
-      .then(data => Array.isArray(data.events) && setClassEvents(data.events))
-      .catch(() => {});
-  }, []);
+      .then(data => {
+        if (Array.isArray(data.events)) {
+          console.log("Clases cargadas:", data.events.length, data.events.map(e => e.start));
+          setClassEvents(data.events);
+        }
+      })
+      .catch(e => console.error("Error cargando clases:", e));
+  }, [token]);
 
   // Cargar ideas
   useEffect(() => {
@@ -459,6 +465,7 @@ export default function Dashboard() {
                       </div>
                     ))}
                     {/* Nodo especial de Clases */}
+                    {(() => { console.log("classEvents total:", classEvents.length, "hoy:", classEvents.filter(e => isToday(e.start)).length); return null; })()}
                     {classEvents.filter(e => isToday(e.start)).length > 0 && (
                       <div style={s.timelineItem} onClick={() => setClassesOpen(true)}>
                         <div style={{
