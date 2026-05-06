@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+﻿import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
 
@@ -319,11 +319,11 @@ export default function Dashboard() {
       loc: e.location || "",
     }));
 
-  // Entregas ([ENTREGA] en el título)
+  // Entregas (📚 en el título)
   const entregas = allEvents
-    .filter(e => e.title && e.title.includes("[ENTREGA]") && isFuture(e.start))
+    .filter(e => e.title && e.title.includes("📚") && isFuture(e.start))
     .map(e => ({
-      title: e.title.replace("[ENTREGA]", "").trim(),
+      title: e.title.replace("📚", "").trim(),
       subject: e.title,
       days: daysUntil(e.start),
     }))
@@ -476,7 +476,7 @@ export default function Dashboard() {
             <div style={s.sectionLabel}>Entregas pendientes</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
               {entregas.length === 0 ? (
-                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con [ENTREGA] en el título</div>
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con 📚 en el título</div>
               ) : entregas.map((e, i) => {
                 const color = urgencyColor(e.days);
                 return (
