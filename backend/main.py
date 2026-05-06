@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+﻿from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -12,7 +12,6 @@ import requests
 import httpx
 import os
 import json
-
 load_dotenv()
 
 app = FastAPI()
@@ -58,6 +57,12 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
 SCOPES = ["Calendars.Read", "User.Read"]
 TOKEN_FILE = ".token"
 import json
+import re
+
+def _clean_class_title(subject: str) -> str:
+    s = re.sub(r"^\d+\s*-\s*", "", subject)
+    s = re.sub(r"\s*Grupo:\s*\d+\s*-\s*Asignatura\s*$", "", s, flags=re.IGNORECASE)
+    return s.strip()
 
 def save_token_data(data: dict):
     with open(TOKEN_FILE, "w") as f:
@@ -166,7 +171,7 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     for event in data.get("value", []):
         events.append({
             "id": event.get("id"),
-            "title": event.get("subject"),
+            "title": _clean_class_title(event.get("subject", "")),
             "start": normalize_dt(event.get("start", {})),
             "end": normalize_dt(event.get("end", {})),
             "location": event.get("location", {}).get("displayName"),
@@ -200,8 +205,11 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     if not cal:
         return {"error": "Calendario 'Clases' no encontrado", "available": [c["name"] for c in calendars]}
     cal_id = cal["id"]
-    start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Inicio del día en hora local (Europe/Madrid) para no perder clases de hoy
+    madrid_tz = ZoneInfo("Europe/Madrid")
+    today_start = datetime.now(madrid_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (today_start + timedelta(days=7)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     r2 = requests.get(
         f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
         f"?startDateTime={start}&endDateTime={end}&$top=50"
@@ -221,7 +229,7 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     for event in data2.get("value", []):
         events.append({
             "id": event.get("id"),
-            "title": event.get("subject"),
+            "title": _clean_class_title(event.get("subject", "")),
             "start": normalize_dt(event.get("start", {})),
             "end": normalize_dt(event.get("end", {})),
             "location": event.get("location", {}).get("displayName"),
@@ -367,3 +375,5 @@ async def create_idea_from_audio(
         json=payload,
     )
     return {"ok": True, "idea": r.json()[0] if r.status_code < 300 else payload, "transcript": text}
+
+
