@@ -5,3 +5,6 @@ requests
 python-dotenv
 python-jose[cryptography]
 passlib[bcrypt]
+openai
+httpx
+python-multipart

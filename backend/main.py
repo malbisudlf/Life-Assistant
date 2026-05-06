@@ -1,13 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from jose import JWTError, jwt
+from openai import OpenAI
 import msal
 import requests
+import httpx
 import os
+import json
 
 load_dotenv()
 
@@ -29,6 +32,11 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "changeme")
 SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 30
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 bearer_scheme = HTTPBearer()
 
@@ -169,3 +177,80 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
 @app.get("/")
 def root():
     return {"status": "Life Assistant API running"}
+
+
+# ── IDEAS ─────────────────────────────────────────────────────────
+
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+@app.get("/ideas")
+def get_ideas(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/ideas?order=created_at.desc",
+        headers=supabase_headers(),
+    )
+    return r.json()
+
+@app.delete("/ideas/{idea_id}")
+def delete_idea(idea_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/ideas?id=eq.{idea_id}",
+        headers=supabase_headers(),
+    )
+    return {"ok": r.status_code < 300}
+
+@app.post("/ideas/audio")
+async def create_idea_from_audio(
+    audio: UploadFile = File(...),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    # 1. Transcribir con Whisper
+    audio_bytes = await audio.read()
+    transcript = openai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
+        language="es",
+    )
+    text = transcript.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No se pudo transcribir el audio")
+
+    # 2. Extraer idea clave con GPT-4o mini
+    completion = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Eres un asistente que extrae ideas clave de notas de voz. "
+                    "Dado un texto transcrito, responde SOLO con un JSON válido con este formato exacto: "
+                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", "full_text": "Resumen claro y completo de la idea en 2-3 frases"}'
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        max_tokens=300,
+        temperature=0.3,
+    )
+    raw = completion.choices[0].message.content.strip()
+    # Limpiar posibles backticks
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    idea_data = json.loads(raw)
+
+    # 3. Guardar en Supabase
+    payload = {
+        "key": idea_data.get("key", text[:60]),
+        "full_text": idea_data.get("full_text", text),
+        "tag": idea_data.get("tag", "idea"),
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/ideas",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    return {"ok": True, "idea": r.json()[0] if r.status_code < 300 else payload, "transcript": text}
