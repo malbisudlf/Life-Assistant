@@ -202,8 +202,8 @@ export default function Dashboard() {
   const [ideas, setIdeas]               = useState([]);
   const [recording, setRecording]       = useState(false);
   const [processing, setProcessing]     = useState(false);
-  const [departureInfo, setDepartureInfo] = useState(null);
-  const [departureLoading, setDepartureLoading] = useState(false);
+  const [departureMap, setDepartureMap] = useState({});
+  const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const mediaRecorderRef                = useRef(null);
   const chunksRef                       = useRef([]);
 
@@ -272,8 +272,8 @@ export default function Dashboard() {
 
   async function fetchDeparture(ev) {
     if (!ev?.loc || !ev?.start) return;
-    setDepartureInfo(null);
-    setDepartureLoading(true);
+    const key = ev.id || ev.start;
+    setDepartureLoadingId(key);
     try {
       const res = await fetch(`${API}/maps/departure`, {
         method: "POST",
@@ -281,11 +281,46 @@ export default function Dashboard() {
         body: JSON.stringify({ destination: ev.loc, event_time: ev.start }),
       });
       const data = await res.json();
-      setDepartureInfo(data);
+      setDepartureMap(prev => ({ ...prev, [key]: data }));
     } catch {
-      setDepartureInfo({ error: "Error al calcular" });
+      setDepartureMap(prev => ({ ...prev, [key]: { error: "Error al calcular" } }));
     }
-    setDepartureLoading(false);
+    setDepartureLoadingId(null);
+  }
+
+  function DepartureWidget({ ev }) {
+    if (!ev?.loc) return null;
+    const key = ev.id || ev.start;
+    const info = departureMap[key];
+    const loading = departureLoadingId === key;
+    return (
+      <div style={{ marginTop: 6 }}>
+        {!info && !loading && (
+          <button
+            onClick={() => fetchDeparture(ev)}
+            style={{
+              background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)",
+              borderRadius: 6, color: "var(--accent)", fontSize: 11, padding: "4px 10px",
+              cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em",
+            }}
+          >
+            ¿A qué hora salir?
+          </button>
+        )}
+        {loading && <div style={{ fontSize: 11, color: "var(--muted)" }}>Calculando ruta...</div>}
+        {info && !info.error && (
+          <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.6 }}>
+            <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>
+              Salir a las {info.departure_time}
+            </span>
+            <span style={{ color: "var(--muted)", marginLeft: 8 }}>
+              {info.duration_text} · {info.distance_text}
+            </span>
+          </div>
+        )}
+        {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
+      </div>
+    );
   }
 
   async function deleteIdea(id) {
@@ -387,7 +422,7 @@ export default function Dashboard() {
                 <div style={s.timelineWrapper}>
                   <div style={s.timeline} className="timeline-inner">
                     {todayEvents.map((ev, i) => (
-                      <div key={i} style={s.timelineItem} onClick={() => { setActiveEvent(ev); setDepartureInfo(null); }}>
+                      <div key={i} style={s.timelineItem} onClick={() => setActiveEvent(ev)}>
                         {i < todayEvents.length - 1 && <div style={s.connectorLine} />}
                         <div style={{
                           ...s.node,
@@ -410,38 +445,7 @@ export default function Dashboard() {
                     <div style={{ flex: 1 }}>
                       <div style={s.eventDetailTitle}>{displayActive.title}</div>
                       <div style={s.eventDetailSub}>{displayActive.loc}</div>
-                      {displayActive.loc && (
-                        <div style={{ marginTop: 8 }}>
-                          {!departureInfo && !departureLoading && (
-                            <button
-                              onClick={() => fetchDeparture(displayActive)}
-                              style={{
-                                background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)",
-                                borderRadius: 6, color: "var(--accent)", fontSize: 11, padding: "4px 10px",
-                                cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em",
-                              }}
-                            >
-                              ¿A qué hora salir?
-                            </button>
-                          )}
-                          {departureLoading && (
-                            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Calculando ruta...</div>
-                          )}
-                          {departureInfo && !departureInfo.error && (
-                            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.6 }}>
-                              <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 14 }}>
-                                Salir a las {departureInfo.departure_time}
-                              </span>
-                              <span style={{ color: "var(--muted)", marginLeft: 8 }}>
-                                {departureInfo.duration_text} · {departureInfo.distance_text}
-                              </span>
-                            </div>
-                          )}
-                          {departureInfo?.error && (
-                            <div style={{ fontSize: 11, color: "#d4645a", marginTop: 4 }}>{departureInfo.error}</div>
-                          )}
-                        </div>
-                      )}
+                      <DepartureWidget ev={displayActive} />
                     </div>
                     <div style={s.eventDetailTime}>{displayActive.time}</div>
                   </div>
@@ -457,11 +461,14 @@ export default function Dashboard() {
               {upcomingEvents.length === 0 ? (
                 <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
               ) : upcomingEvents.map((ev, i) => (
-                <div key={i} style={s.eventRow}>
+                <div key={i} style={{ ...s.eventRow, flexWrap: "wrap", alignItems: "flex-start" }}>
                   <div style={s.eventDot} />
                   <div style={s.eventRowTime}>{ev.time}</div>
-                  <div style={s.eventRowTitle}>{ev.title}</div>
-                  <div style={s.eventRowLoc}>{ev.loc}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={s.eventRowTitle}>{ev.title}</div>
+                    {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
+                    <DepartureWidget ev={ev} />
+                  </div>
                 </div>
               ))}
             </div>
