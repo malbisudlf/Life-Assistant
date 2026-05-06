@@ -171,6 +171,16 @@ const GLOBAL_CSS = `
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
+  @keyframes slideInRight {
+    from { transform: translateX(100%); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+
+  @keyframes fadeInOverlay {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.4; }
@@ -204,6 +214,8 @@ export default function Dashboard() {
   const [processing, setProcessing]     = useState(false);
   const [departureMap, setDepartureMap] = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
+  const [classEvents, setClassEvents]   = useState([]);
+  const [classesOpen, setClassesOpen]   = useState(false);
   const mediaRecorderRef                = useRef(null);
   const chunksRef                       = useRef([]);
 
@@ -227,6 +239,14 @@ export default function Dashboard() {
         setLoading(false);
       })
       .catch(() => { setAuthNeeded(true); setLoading(false); });
+  }, []);
+
+  // Cargar clases
+  useEffect(() => {
+    fetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => Array.isArray(data.events) && setClassEvents(data.events))
+      .catch(() => {});
   }, []);
 
   // Cargar ideas
@@ -438,6 +458,23 @@ export default function Dashboard() {
                         </div>
                       </div>
                     ))}
+                    {/* Nodo especial de Clases */}
+                    {classEvents.filter(e => isToday(e.start)).length > 0 && (
+                      <div style={s.timelineItem} onClick={() => setClassesOpen(true)}>
+                        <div style={{
+                          ...s.node,
+                          background: "#8bb4d4",
+                          boxShadow: "0 0 8px rgba(139,180,212,0.5)",
+                          cursor: "pointer",
+                        }} />
+                        <div style={s.nodeLabel}>
+                          <div style={s.nodeTime}>🎓</div>
+                          <div style={{ ...s.nodeTitle, color: "var(--accent2)" }}>
+                            Clases ({classEvents.filter(e => isToday(e.start)).length})
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
                 {displayActive && (
@@ -565,6 +602,124 @@ export default function Dashboard() {
         <span>Life Assistant v0.1</span>
       </div>
     </div>
+
+    {/* ── PANEL LATERAL DE CLASES ── */}
+    {classesOpen && (
+      <>
+        {/* Overlay */}
+        <div
+          onClick={() => setClassesOpen(false)}
+          style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            backdropFilter: "blur(4px)",
+            zIndex: 100,
+            animation: "fadeInOverlay 0.25s ease",
+          }}
+        />
+        {/* Panel */}
+        <div style={{
+          position: "fixed", top: 0, right: 0, bottom: 0,
+          width: "min(420px, 92vw)",
+          background: "#161719",
+          borderLeft: "0.5px solid rgba(255,255,255,0.08)",
+          zIndex: 101,
+          display: "flex", flexDirection: "column",
+          animation: "slideInRight 0.3s cubic-bezier(0.22,1,0.36,1)",
+          boxShadow: "-20px 0 60px rgba(0,0,0,0.4)",
+        }}>
+          {/* Header del panel */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "24px 24px 16px",
+            borderBottom: "0.5px solid rgba(255,255,255,0.07)",
+          }}>
+            <div>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 16, color: "var(--accent2)" }}>
+                🎓 Clases de hoy
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                {classEvents.filter(e => isToday(e.start)).length} clases
+              </div>
+            </div>
+            <button
+              onClick={() => setClassesOpen(false)}
+              style={{
+                background: "none", border: "none", color: "var(--muted)",
+                fontSize: 20, cursor: "pointer", padding: "4px 8px",
+                borderRadius: 6, lineHeight: 1,
+                transition: "color 0.15s",
+              }}
+              onMouseEnter={e => e.target.style.color = "var(--text)"}
+              onMouseLeave={e => e.target.style.color = "var(--muted)"}
+            >×</button>
+          </div>
+
+          {/* Timeline de clases */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+            <div style={{ display: "flex", flexDirection: "column", position: "relative" }}>
+              {classEvents
+                .filter(e => isToday(e.start))
+                .sort((a, b) => new Date(a.start) - new Date(b.start))
+                .map((ev, i, arr) => {
+                  const past   = isPast(ev.end);
+                  const active = isActive(ev.start, ev.end);
+                  const nodeColor = active ? "var(--accent2)" : past ? "var(--muted2)" : "#8bb4d4";
+                  return (
+                    <div key={ev.id || i} style={{ display: "flex", gap: 16, position: "relative", paddingBottom: i < arr.length - 1 ? 24 : 0 }}>
+                      {/* Línea vertical */}
+                      {i < arr.length - 1 && (
+                        <div style={{
+                          position: "absolute", left: 7, top: 18,
+                          width: 1, bottom: 0,
+                          background: "rgba(139,180,212,0.2)",
+                        }} />
+                      )}
+                      {/* Nodo */}
+                      <div style={{ flexShrink: 0, marginTop: 2 }}>
+                        <div style={{
+                          width: 15, height: 15, borderRadius: "50%",
+                          background: nodeColor,
+                          boxShadow: active ? "0 0 10px rgba(139,180,212,0.7)" : "none",
+                          animation: active ? "nodeGlow 2s infinite" : "none",
+                          border: `1.5px solid ${nodeColor}`,
+                        }} />
+                      </div>
+                      {/* Contenido */}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
+                          <span style={{
+                            fontFamily: "'DM Mono', monospace", fontSize: 12,
+                            color: active ? "var(--accent2)" : "var(--muted)",
+                          }}>{formatTime(ev.start)} – {formatTime(ev.end)}</span>
+                          {active && (
+                            <span style={{
+                              fontSize: 9, background: "rgba(139,180,212,0.15)",
+                              color: "var(--accent2)", borderRadius: 4, padding: "1px 6px",
+                              letterSpacing: "0.06em", textTransform: "uppercase",
+                            }}>En curso</span>
+                          )}
+                        </div>
+                        <div style={{
+                          fontSize: 14, fontWeight: 500,
+                          color: past ? "var(--muted)" : "var(--text)",
+                          marginBottom: ev.location ? 2 : 0,
+                        }}>{ev.title}</div>
+                        {ev.location && (
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>
+                            📍 {ev.location}
+                          </div>
+                        )}
+                        <DepartureWidget ev={{ ...ev, loc: ev.location, start: ev.start }} />
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      </>
+    )}
   );
 }
 
