@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
 
@@ -124,23 +124,7 @@ function formatUpcomingTime(dateStr) {
   return `${DAYS[d.getDay()]} ${formatTime(dateStr)}`;
 }
 
-const IDEAS_DEFAULT = [
-  {
-    key:  "Dashboard para la Raspberry siempre encendido",
-    tag:  "proyecto",
-    full: "Comprar una Raspberry Pi Zero 2 W o Orange Pi Zero 3 y conectarla a una pantalla en el cuarto. El dashboard estaría siempre visible. De noche se apagaría automáticamente con un cron job.",
-  },
-  {
-    key:  "Wake-on-LAN desde el calendario",
-    tag:  "automatización",
-    full: "Cuando haga click en una entrega, enviar un paquete WOL al PC, esperar 30 s a que arranque y lanzar el script de automatización con Claude Computer Use.",
-  },
-  {
-    key:  "Módulo de ideas por audio con Whisper",
-    tag:  "ideas",
-    full: "Grabar audio desde el móvil, transcribirlo con Whisper, pasarlo a Claude para extraer la idea clave y guardarla en Supabase. Vista colapsada / expandible.",
-  },
-];
+const IDEAS_DEFAULT = [];
 
 // ── HELPERS ──────────────────────────────────────────────────────
 function urgencyColor(days) {
@@ -207,6 +191,11 @@ export default function Dashboard() {
   const [allEvents, setAllEvents]       = useState([]);
   const [loading, setLoading]           = useState(true);
   const [authNeeded, setAuthNeeded]     = useState(false);
+  const [ideas, setIdeas]               = useState([]);
+  const [recording, setRecording]       = useState(false);
+  const [processing, setProcessing]     = useState(false);
+  const mediaRecorderRef                = useRef(null);
+  const chunksRef                       = useRef([]);
 
   if (!token) return <LoginScreen onLogin={setToken} />;
 
@@ -229,6 +218,55 @@ export default function Dashboard() {
       })
       .catch(() => { setAuthNeeded(true); setLoading(false); });
   }, []);
+
+  // Cargar ideas
+  useEffect(() => {
+    fetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => Array.isArray(data) && setIdeas(data))
+      .catch(() => {});
+  }, []);
+
+  // Grabación de audio
+  async function startRecording() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mr = new MediaRecorder(stream);
+    chunksRef.current = [];
+    mr.ondataavailable = e => chunksRef.current.push(e.data);
+    mr.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      setProcessing(true);
+      const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+      const fd = new FormData();
+      fd.append("audio", blob, "audio.webm");
+      try {
+        const res = await fetch(`${API}/ideas/audio`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${token}` },
+          body: fd,
+        });
+        const data = await res.json();
+        if (data.ok) setIdeas(prev => [data.idea, ...prev]);
+      } catch {}
+      setProcessing(false);
+    };
+    mr.start();
+    mediaRecorderRef.current = mr;
+    setRecording(true);
+  }
+
+  function stopRecording() {
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  }
+
+  async function deleteIdea(id) {
+    await fetch(`${API}/ideas/${id}`, {
+      method: "DELETE",
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    setIdeas(prev => prev.filter(i => i.id !== id));
+  }
 
   // Eventos de hoy
   const todayEvents = allEvents
@@ -402,9 +440,17 @@ export default function Dashboard() {
           <div style={s.card}>
             <div style={s.sectionLabel}>Ideas</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-              {IDEAS_DEFAULT.map((idea, i) => (
+              {ideas.length === 0 && !processing && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin ideas todavía. ¡Graba una!</div>
+              )}
+              {processing && (
+                <div style={{ color: "var(--accent)", fontSize: 13, padding: "8px 0", animation: "pulse 1.5s infinite" }}>
+                  Procesando audio...
+                </div>
+              )}
+              {ideas.map((idea, i) => (
                 <div
-                  key={i}
+                  key={idea.id || i}
                   style={s.ideaCard}
                   onClick={() => setOpenIdea(openIdea === i ? null : i)}
                 >
@@ -412,6 +458,10 @@ export default function Dashboard() {
                     <span style={{ flex: 1 }}>{idea.key}</span>
                     <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                       <span style={s.ideaTag}>{idea.tag}</span>
+                      <span
+                        style={{ fontSize: 10, color: "var(--muted2)", cursor: "pointer", padding: "0 4px" }}
+                        onClick={e => { e.stopPropagation(); deleteIdea(idea.id); }}
+                      >✕</span>
                       <span style={{
                         ...s.ideaChevron,
                         transform: openIdea === i ? "rotate(90deg)" : "rotate(0deg)",
@@ -419,18 +469,21 @@ export default function Dashboard() {
                     </div>
                   </div>
                   {openIdea === i && (
-                    <div style={s.ideaFull}>{idea.full}</div>
+                    <div style={s.ideaFull}>{idea.full_text}</div>
                   )}
                 </div>
               ))}
             </div>
 
             <button
-              style={s.newIdeaBtn}
-              onMouseOver={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)"; e.currentTarget.style.color = "#7a7870"; }}
-              onMouseOut={e  => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)"; e.currentTarget.style.color = "#5a5850"; }}
+              style={{
+                ...s.newIdeaBtn,
+                ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}),
+              }}
+              onClick={recording ? stopRecording : startRecording}
+              disabled={processing}
             >
-              + Nueva idea por audio
+              {processing ? "Procesando..." : recording ? "⏹ Parar grabación" : "● Grabar idea"}
             </button>
           </div>
         </div>
