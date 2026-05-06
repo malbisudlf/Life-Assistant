@@ -20,7 +20,7 @@ function LoginScreen({ onLogin }) {
       });
       const data = await res.json();
       if (data.token) {
-        sessionStorage.setItem("la_token", data.token);
+        localStorage.setItem("la_token", data.token);
         onLogin(data.token);
       } else {
         setError("Contraseña incorrecta");
@@ -54,6 +54,7 @@ function LoginScreen({ onLogin }) {
               border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
               color: "#e8e6e0", fontSize: 14, outline: "none",
               fontFamily: "'DM Sans', sans-serif", boxSizing: "border-box",
+              WebkitAppearance: "none", boxShadow: "none",
             }}
           />
           {error && <div style={{ color: "#d4645a", fontSize: 12, marginTop: 8 }}>{error}</div>}
@@ -190,7 +191,7 @@ const GLOBAL_CSS = `
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
-  const [token, setToken]               = useState(() => sessionStorage.getItem("la_token") || "");
+  const [token, setToken]               = useState(() => localStorage.getItem("la_token") || "");
   const [now, setNow]                   = useState(new Date());
   const [activeEvent, setActiveEvent]   = useState(null);
   const [openIdea, setOpenIdea]         = useState(null);
