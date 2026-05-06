@@ -180,6 +180,14 @@ const GLOBAL_CSS = `
     0%, 100% { box-shadow: 0 0 8px rgba(200,169,110,0.4); }
     50%       { box-shadow: 0 0 16px rgba(200,169,110,0.7); }
   }
+
+  @media (max-width: 640px) {
+    .dashboard-grid { grid-template-columns: 1fr !important; }
+    .clock { font-size: 36px !important; letter-spacing: -1px !important; }
+    .dashboard-root { padding: 12px !important; gap: 12px !important; }
+    .header-greeting { display: none !important; }
+    .timeline-inner { min-width: 280px !important; }
+  }
 `;
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
@@ -320,22 +328,22 @@ export default function Dashboard() {
   const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
 
   return (
-    <div style={s.dashboard}>
+    <div style={s.dashboard} className="dashboard-root">
 
       {/* ── HEADER ── */}
       <div style={s.header}>
         <div>
-          <div style={s.clock}>{hh}:{mm}</div>
+          <div style={s.clock} className="clock">{hh}:{mm}</div>
           <div style={s.date}>{dateStr}</div>
         </div>
-        <div style={s.greeting}>
+        <div style={s.greeting} className="header-greeting">
           {greeting}
           <strong style={s.greetingStrong}>Mikel</strong>
         </div>
       </div>
 
       {/* ── MAIN GRID ── */}
-      <div style={s.mainGrid}>
+      <div style={s.mainGrid} className="dashboard-grid">
 
         {/* COL IZQUIERDA */}
         <div style={s.leftCol}>
@@ -357,7 +365,7 @@ export default function Dashboard() {
             ) : (
               <>
                 <div style={s.timelineWrapper}>
-                  <div style={s.timeline}>
+                  <div style={s.timeline} className="timeline-inner">
                     {todayEvents.map((ev, i) => (
                       <div key={i} style={s.timelineItem} onClick={() => setActiveEvent(ev)}>
                         {i < todayEvents.length - 1 && <div style={s.connectorLine} />}
