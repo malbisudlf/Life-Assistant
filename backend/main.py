@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from openai import OpenAI
@@ -175,6 +176,60 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     
     return {"events": events}
 
+@app.get("/calendar/calendars")
+def list_calendars(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    token = get_valid_token()
+    if not token:
+        return {"error": "No autenticado"}
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    data = r.json()
+    return [{"id": c["id"], "name": c["name"]} for c in data.get("value", [])]
+
+
+@app.get("/calendar/classes")
+def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    token = get_valid_token()
+    if not token:
+        return {"error": "No autenticado"}
+    headers = {"Authorization": f"Bearer {token}"}
+    # Buscar el calendario llamado 'Clases'
+    r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    calendars = r.json().get("value", [])
+    cal = next((c for c in calendars if c["name"].lower() == "clases"), None)
+    if not cal:
+        return {"error": "Calendario 'Clases' no encontrado", "available": [c["name"] for c in calendars]}
+    cal_id = cal["id"]
+    start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r2 = requests.get(
+        f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
+        f"?startDateTime={start}&endDateTime={end}&$top=50"
+        f"&$select=subject,start,end,location,isAllDay&$orderby=start/dateTime",
+        headers=headers
+    )
+    data2 = r2.json()
+
+    def normalize_dt(dt_obj):
+        dt_str = dt_obj.get("dateTime", "")
+        tz = dt_obj.get("timeZone", "")
+        if tz.upper() == "UTC" and dt_str and not dt_str.endswith("Z"):
+            return dt_str + "Z"
+        return dt_str
+
+    events = []
+    for event in data2.get("value", []):
+        events.append({
+            "id": event.get("id"),
+            "title": event.get("subject"),
+            "start": normalize_dt(event.get("start", {})),
+            "end": normalize_dt(event.get("end", {})),
+            "location": event.get("location", {}).get("displayName"),
+            "isAllDay": event.get("isAllDay"),
+        })
+    return {"events": events}
+
+
 @app.get("/")
 def root():
     return {"status": "Life Assistant API running"}
@@ -223,7 +278,9 @@ def get_departure_time(
         event_dt = datetime.fromisoformat(body.event_time.replace("Z", "+00:00"))
         # Añadir 10 min de margen
         departure_dt = event_dt - timedelta(seconds=duration_seconds) - timedelta(minutes=10)
-        departure_local = departure_dt.astimezone()
+        # Convertir siempre a hora de Bilbao (Europa/Madrid)
+        madrid_tz = ZoneInfo("Europe/Madrid")
+        departure_local = departure_dt.astimezone(madrid_tz)
 
         return {
             "duration_text": duration_text,
