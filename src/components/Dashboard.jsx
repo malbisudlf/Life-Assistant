@@ -8,6 +8,13 @@ function LoginScreen({ onLogin }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const style = document.createElement("style");
+    style.textContent = `@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap'); *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; } input, button { outline: none !important; box-shadow: none !important; -webkit-appearance: none; }`;
+    document.head.appendChild(style);
+    return () => document.head.removeChild(style);
+  }, []);
+
   async function handleSubmit(e) {
     e.preventDefault();
     setLoading(true);
@@ -21,7 +28,7 @@ function LoginScreen({ onLogin }) {
       const data = await res.json();
       if (data.token) {
         localStorage.setItem("la_token", data.token);
-        onLogin(data.token);
+        window.location.reload();
       } else {
         setError("Contraseña incorrecta");
       }
@@ -150,6 +157,8 @@ const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  input, button, textarea, select { outline: none !important; box-shadow: none !important; -webkit-appearance: none; }
 
   :root {
     --bg:       #0e0f11;
