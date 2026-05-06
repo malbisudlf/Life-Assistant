@@ -2,6 +2,80 @@ import { useState, useEffect } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
 
+// ── LOGIN SCREEN ─────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [pwd, setPwd] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API}/auth/password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pwd }),
+      });
+      const data = await res.json();
+      if (data.token) {
+        sessionStorage.setItem("la_token", data.token);
+        onLogin(data.token);
+      } else {
+        setError("Contraseña incorrecta");
+      }
+    } catch {
+      setError("Error de conexión");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: "100vh", background: "#0e0f11", fontFamily: "'DM Sans', sans-serif",
+    }}>
+      <div style={{
+        background: "#161719", border: "0.5px solid rgba(255,255,255,0.07)",
+        borderRadius: 16, padding: "40px 48px", width: 320,
+      }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, color: "#e8e6e0", marginBottom: 4 }}>Life Assistant</div>
+        <div style={{ fontSize: 12, color: "#7a7870", marginBottom: 32, letterSpacing: "0.05em", textTransform: "uppercase" }}>Acceso privado</div>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="password"
+            value={pwd}
+            onChange={e => setPwd(e.target.value)}
+            placeholder="Contraseña"
+            autoFocus
+            style={{
+              width: "100%", padding: "10px 14px", background: "#1e1f22",
+              border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+              color: "#e8e6e0", fontSize: 14, outline: "none",
+              fontFamily: "'DM Sans', sans-serif", boxSizing: "border-box",
+            }}
+          />
+          {error && <div style={{ color: "#d4645a", fontSize: 12, marginTop: 8 }}>{error}</div>}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              width: "100%", marginTop: 16, padding: "10px 0",
+              background: "#c8a96e", border: "none", borderRadius: 8,
+              color: "#0e0f11", fontSize: 14, fontWeight: 500,
+              cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1,
+              fontFamily: "'DM Sans', sans-serif",
+            }}
+          >
+            {loading ? "Verificando..." : "Entrar"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ── HELPERS DE FECHA ─────────────────────────────────────────────
 function isToday(dateStr) {
   const d = new Date(dateStr);
@@ -116,12 +190,15 @@ const GLOBAL_CSS = `
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
-  const [now, setNow]               = useState(new Date());
-  const [activeEvent, setActiveEvent] = useState(null);
-  const [openIdea, setOpenIdea]     = useState(null);
-  const [allEvents, setAllEvents]   = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [authNeeded, setAuthNeeded] = useState(false);
+  const [token, setToken]               = useState(() => sessionStorage.getItem("la_token") || "");
+  const [now, setNow]                   = useState(new Date());
+  const [activeEvent, setActiveEvent]   = useState(null);
+  const [openIdea, setOpenIdea]         = useState(null);
+  const [allEvents, setAllEvents]       = useState([]);
+  const [loading, setLoading]           = useState(true);
+  const [authNeeded, setAuthNeeded]     = useState(false);
+
+  if (!token) return <LoginScreen onLogin={setToken} />;
 
   // Reloj
   useEffect(() => {
@@ -131,7 +208,9 @@ export default function Dashboard() {
 
   // Cargar eventos reales
   useEffect(() => {
-    fetch(`${API}/calendar/events`)
+    fetch(`${API}/calendar/events`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    })
       .then(r => r.json())
       .then(data => {
         if (data.error) { setAuthNeeded(true); setLoading(false); return; }

@@ -3,3 +3,5 @@ uvicorn
 msal
 requests
 python-dotenv
+python-jose[cryptography]
+passlib[bcrypt]
