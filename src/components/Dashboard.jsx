@@ -219,8 +219,6 @@ export default function Dashboard() {
   const mediaRecorderRef                = useRef(null);
   const chunksRef                       = useRef([]);
 
-  if (!token) return <LoginScreen onLogin={setToken} />;
-
   // Reloj
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
@@ -401,6 +399,8 @@ export default function Dashboard() {
   const dateStr = `${DAYS_ES[now.getDay()]}, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
   const hour    = now.getHours();
   const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
+
+  if (!token) return <LoginScreen onLogin={setToken} />;
 
   return (
     <div style={s.dashboard} className="dashboard-root">
