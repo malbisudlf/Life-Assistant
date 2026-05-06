@@ -32,6 +32,7 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "changeme")
 SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 30
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -177,6 +178,61 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
 @app.get("/")
 def root():
     return {"status": "Life Assistant API running"}
+
+
+# ── MAPS ──────────────────────────────────────────────────────────────────────
+
+class DepartureRequest(BaseModel):
+    destination: str
+    event_time: str  # ISO string
+    origin: str = "Bilbao, España"
+
+@app.post("/maps/departure")
+def get_departure_time(
+    body: DepartureRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token)
+):
+    if not GOOGLE_MAPS_API_KEY:
+        raise HTTPException(status_code=500, detail="Google Maps API key no configurada")
+
+    # Calcular cuánto tarda en llegar
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": body.origin,
+        "destinations": body.destination,
+        "mode": "driving",
+        "departure_time": "now",
+        "traffic_model": "best_guess",
+        "language": "es",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
+    r = requests.get(url, params=params)
+    data = r.json()
+
+    try:
+        element = data["rows"][0]["elements"][0]
+        if element["status"] != "OK":
+            raise HTTPException(status_code=400, detail="No se pudo calcular la ruta")
+
+        # Duración con tráfico (en segundos)
+        duration_seconds = element.get("duration_in_traffic", element["duration"])["value"]
+        duration_text = element.get("duration_in_traffic", element["duration"])["text"]
+        distance_text = element["distance"]["text"]
+
+        # Calcular hora de salida
+        event_dt = datetime.fromisoformat(body.event_time.replace("Z", "+00:00"))
+        # Añadir 10 min de margen
+        departure_dt = event_dt - timedelta(seconds=duration_seconds) - timedelta(minutes=10)
+        departure_local = departure_dt.astimezone()
+
+        return {
+            "duration_text": duration_text,
+            "distance_text": distance_text,
+            "departure_time": departure_local.strftime("%H:%M"),
+            "departure_iso": departure_local.isoformat(),
+        }
+    except (KeyError, IndexError):
+        raise HTTPException(status_code=500, detail="Error procesando respuesta de Maps")
 
 
 # ── IDEAS ─────────────────────────────────────────────────────────

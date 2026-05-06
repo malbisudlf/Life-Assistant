@@ -202,6 +202,8 @@ export default function Dashboard() {
   const [ideas, setIdeas]               = useState([]);
   const [recording, setRecording]       = useState(false);
   const [processing, setProcessing]     = useState(false);
+  const [departureInfo, setDepartureInfo] = useState(null);
+  const [departureLoading, setDepartureLoading] = useState(false);
   const mediaRecorderRef                = useRef(null);
   const chunksRef                       = useRef([]);
 
@@ -266,6 +268,24 @@ export default function Dashboard() {
   function stopRecording() {
     mediaRecorderRef.current?.stop();
     setRecording(false);
+  }
+
+  async function fetchDeparture(ev) {
+    if (!ev?.loc || !ev?.start) return;
+    setDepartureInfo(null);
+    setDepartureLoading(true);
+    try {
+      const res = await fetch(`${API}/maps/departure`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ destination: ev.loc, event_time: ev.start }),
+      });
+      const data = await res.json();
+      setDepartureInfo(data);
+    } catch {
+      setDepartureInfo({ error: "Error al calcular" });
+    }
+    setDepartureLoading(false);
   }
 
   async function deleteIdea(id) {
@@ -367,7 +387,7 @@ export default function Dashboard() {
                 <div style={s.timelineWrapper}>
                   <div style={s.timeline} className="timeline-inner">
                     {todayEvents.map((ev, i) => (
-                      <div key={i} style={s.timelineItem} onClick={() => setActiveEvent(ev)}>
+                      <div key={i} style={s.timelineItem} onClick={() => { setActiveEvent(ev); setDepartureInfo(null); }}>
                         {i < todayEvents.length - 1 && <div style={s.connectorLine} />}
                         <div style={{
                           ...s.node,
@@ -387,9 +407,41 @@ export default function Dashboard() {
                 </div>
                 {displayActive && (
                   <div style={s.eventDetail}>
-                    <div>
+                    <div style={{ flex: 1 }}>
                       <div style={s.eventDetailTitle}>{displayActive.title}</div>
                       <div style={s.eventDetailSub}>{displayActive.loc}</div>
+                      {displayActive.loc && (
+                        <div style={{ marginTop: 8 }}>
+                          {!departureInfo && !departureLoading && (
+                            <button
+                              onClick={() => fetchDeparture(displayActive)}
+                              style={{
+                                background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)",
+                                borderRadius: 6, color: "var(--accent)", fontSize: 11, padding: "4px 10px",
+                                cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em",
+                              }}
+                            >
+                              ¿A qué hora salir?
+                            </button>
+                          )}
+                          {departureLoading && (
+                            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Calculando ruta...</div>
+                          )}
+                          {departureInfo && !departureInfo.error && (
+                            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.6 }}>
+                              <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 14 }}>
+                                Salir a las {departureInfo.departure_time}
+                              </span>
+                              <span style={{ color: "var(--muted)", marginLeft: 8 }}>
+                                {departureInfo.duration_text} · {departureInfo.distance_text}
+                              </span>
+                            </div>
+                          )}
+                          {departureInfo?.error && (
+                            <div style={{ fontSize: 11, color: "#d4645a", marginTop: 4 }}>{departureInfo.error}</div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div style={s.eventDetailTime}>{displayActive.time}</div>
                   </div>
