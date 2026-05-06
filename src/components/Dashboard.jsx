@@ -1,29 +1,48 @@
 import { useState, useEffect } from "react";
 
-// ── DATOS DE PRUEBA ──────────────────────────────────────────────
-const TODAY_EVENTS = [
-  { time: "09:00", title: "Clase Redes",           loc: "Aula A-101",   past: true,  active: false },
-  { time: "10:00", title: "Clase Machine Learning", loc: "Aula B-204",   past: false, active: true  },
-  { time: "12:30", title: "Tutoría Matemáticas",    loc: "Despacho D-3", past: false, active: false },
-  { time: "15:00", title: "Gym",                    loc: "Campus",       past: false, active: false },
-  { time: "17:30", title: "Reunión grupo",           loc: "Online",       past: false, active: false },
-];
+const API = "https://backend-tender-glow-160.fly.dev";
 
-const UPCOMING_EVENTS = [
-  { time: "Mañana 09:00", title: "Clase de Redes",          loc: "Aula A-101"   },
-  { time: "Mañana 11:00", title: "Entrega Lab Física",       loc: "Laboratorio"  },
-  { time: "Mié 10:00",    title: "Clase Machine Learning",   loc: "Aula B-204"   },
-  { time: "Jue 16:00",    title: "Cita Santander",           loc: "Santander"    },
-];
+// ── HELPERS DE FECHA ─────────────────────────────────────────────
+function isToday(dateStr) {
+  const d = new Date(dateStr);
+  const t = new Date();
+  return d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
+}
 
-const ENTREGAS = [
-  { title: "Clasificación supervisada", subject: "Machine Learning",        days: 3  },
-  { title: "Práctica de sockets",       subject: "Redes de Computadores",   days: 8  },
-  { title: "Análisis estadístico",      subject: "Matemáticas Aplicadas",   days: 14 },
-  { title: "Memoria proyecto",          subject: "Ingeniería del Software",  days: 21 },
-];
+function isFuture(dateStr) {
+  return new Date(dateStr) > new Date();
+}
 
-const IDEAS = [
+function isPast(dateStr) {
+  return new Date(dateStr) < new Date();
+}
+
+function isActive(startStr, endStr) {
+  const now = new Date();
+  return new Date(startStr) <= now && new Date(endStr) >= now;
+}
+
+function daysUntil(dateStr) {
+  const diff = new Date(dateStr) - new Date();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+function formatTime(dateStr) {
+  const d = new Date(dateStr);
+  return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+
+function formatUpcomingTime(dateStr) {
+  const d = new Date(dateStr);
+  const now = new Date();
+  const tomorrow = new Date(); tomorrow.setDate(now.getDate() + 1);
+  const DAYS = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+  if (isToday(dateStr)) return formatTime(dateStr);
+  if (d.toDateString() === tomorrow.toDateString()) return `Mañana ${formatTime(dateStr)}`;
+  return `${DAYS[d.getDay()]} ${formatTime(dateStr)}`;
+}
+
+const IDEAS_DEFAULT = [
   {
     key:  "Dashboard para la Raspberry siempre encendido",
     tag:  "proyecto",
@@ -98,14 +117,65 @@ const GLOBAL_CSS = `
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
   const [now, setNow]               = useState(new Date());
-  const [activeEvent, setActiveEvent] = useState(TODAY_EVENTS.find(e => e.active) || TODAY_EVENTS[0]);
+  const [activeEvent, setActiveEvent] = useState(null);
   const [openIdea, setOpenIdea]     = useState(null);
+  const [allEvents, setAllEvents]   = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [authNeeded, setAuthNeeded] = useState(false);
 
   // Reloj
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // Cargar eventos reales
+  useEffect(() => {
+    fetch(`${API}/calendar/events`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { setAuthNeeded(true); setLoading(false); return; }
+        setAllEvents(data.events || []);
+        setLoading(false);
+      })
+      .catch(() => { setAuthNeeded(true); setLoading(false); });
+  }, []);
+
+  // Eventos de hoy
+  const todayEvents = allEvents
+    .filter(e => isToday(e.start))
+    .map(e => ({
+      ...e,
+      time: formatTime(e.start),
+      title: e.title || "(Sin título)",
+      loc: e.location || "",
+      past: isPast(e.end),
+      active: isActive(e.start, e.end),
+    }));
+
+  // Próximos eventos (no hoy, próximos 7 días)
+  const upcomingEvents = allEvents
+    .filter(e => !isToday(e.start) && isFuture(e.start) && daysUntil(e.start) <= 7)
+    .slice(0, 5)
+    .map(e => ({
+      ...e,
+      time: formatUpcomingTime(e.start),
+      title: e.title || "(Sin título)",
+      loc: e.location || "",
+    }));
+
+  // Entregas ([ENTREGA] en el título)
+  const entregas = allEvents
+    .filter(e => e.title && e.title.includes("[ENTREGA]") && isFuture(e.start))
+    .map(e => ({
+      title: e.title.replace("[ENTREGA]", "").trim(),
+      subject: e.title,
+      days: daysUntil(e.start),
+    }))
+    .sort((a, b) => a.days - b.days);
+
+  // Evento activo (o el primero de hoy)
+  const displayActive = activeEvent || todayEvents.find(e => e.active) || todayEvents[0];
 
   // Inyectar CSS global una sola vez
   useEffect(() => {
@@ -133,7 +203,7 @@ export default function Dashboard() {
         </div>
         <div style={s.greeting}>
           {greeting}
-          <strong style={s.greetingStrong}>Outlook pendiente</strong>
+          <strong style={s.greetingStrong}>Mikel</strong>
         </div>
       </div>
 
@@ -146,50 +216,60 @@ export default function Dashboard() {
           {/* Timeline */}
           <div style={s.card}>
             <div style={s.sectionLabel}>Hoy</div>
-            <div style={s.timelineWrapper}>
-              <div style={s.timeline}>
-                {TODAY_EVENTS.map((ev, i) => (
-                  <div
-                    key={i}
-                    style={s.timelineItem}
-                    onClick={() => setActiveEvent(ev)}
-                  >
-                    {/* línea conectora */}
-                    {i < TODAY_EVENTS.length - 1 && (
-                      <div style={s.connectorLine} />
-                    )}
-                    <div style={{
-                      ...s.node,
-                      ...(ev.active ? s.nodeActive : {}),
-                      ...(ev.past   ? s.nodePast   : {}),
-                      ...(!ev.active && !ev.past ? s.nodeFuture : {}),
-                    }} />
-                    <div style={s.nodeLabel}>
-                      <div style={s.nodeTime}>{ev.time}</div>
-                      <div style={{ ...s.nodeTitle, ...(ev.active ? s.nodeTitleActive : {}) }}>
-                        {ev.title}
+            {loading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13, padding: "16px 0" }}>Cargando eventos...</div>
+            ) : authNeeded ? (
+              <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
+                <a href="http://localhost:8000/auth/login" target="_blank" rel="noreferrer"
+                  style={{ color: "var(--accent)", textDecoration: "none" }}>
+                  → Conectar Outlook
+                </a>
+              </div>
+            ) : todayEvents.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
+            ) : (
+              <>
+                <div style={s.timelineWrapper}>
+                  <div style={s.timeline}>
+                    {todayEvents.map((ev, i) => (
+                      <div key={i} style={s.timelineItem} onClick={() => setActiveEvent(ev)}>
+                        {i < todayEvents.length - 1 && <div style={s.connectorLine} />}
+                        <div style={{
+                          ...s.node,
+                          ...(ev.active ? s.nodeActive : {}),
+                          ...(ev.past   ? s.nodePast   : {}),
+                          ...(!ev.active && !ev.past ? s.nodeFuture : {}),
+                        }} />
+                        <div style={s.nodeLabel}>
+                          <div style={s.nodeTime}>{ev.time}</div>
+                          <div style={{ ...s.nodeTitle, ...(ev.active ? s.nodeTitleActive : {}) }}>
+                            {ev.title}
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Evento activo */}
-            <div style={s.eventDetail}>
-              <div>
-                <div style={s.eventDetailTitle}>{activeEvent.title}</div>
-                <div style={s.eventDetailSub}>{activeEvent.loc}</div>
-              </div>
-              <div style={s.eventDetailTime}>{activeEvent.time}</div>
-            </div>
+                </div>
+                {displayActive && (
+                  <div style={s.eventDetail}>
+                    <div>
+                      <div style={s.eventDetailTitle}>{displayActive.title}</div>
+                      <div style={s.eventDetailSub}>{displayActive.loc}</div>
+                    </div>
+                    <div style={s.eventDetailTime}>{displayActive.time}</div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
           {/* Próximos eventos */}
           <div style={s.card}>
             <div style={s.sectionLabel}>Próximos eventos</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-              {UPCOMING_EVENTS.map((ev, i) => (
+              {upcomingEvents.length === 0 ? (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
+              ) : upcomingEvents.map((ev, i) => (
                 <div key={i} style={s.eventRow}>
                   <div style={s.eventDot} />
                   <div style={s.eventRowTime}>{ev.time}</div>
@@ -208,14 +288,16 @@ export default function Dashboard() {
           <div style={s.card}>
             <div style={s.sectionLabel}>Entregas pendientes</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-              {ENTREGAS.map((e, i) => {
+              {entregas.length === 0 ? (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con [ENTREGA] en el título</div>
+              ) : entregas.map((e, i) => {
                 const color = urgencyColor(e.days);
                 return (
                   <div key={i} style={s.entregaRow}>
                     <div style={{ ...s.urgencyBar, background: color }} />
                     <div style={{ flex: 1 }}>
                       <div style={s.entregaTitle}>{e.title}</div>
-                      <div style={s.entregaSubject}>[ENTREGA] {e.subject}</div>
+                      <div style={s.entregaSubject}>{e.subject}</div>
                     </div>
                     <div style={s.entregaCountdown}>
                       <div style={{ ...s.daysNum, color }}>{e.days}</div>
@@ -231,7 +313,7 @@ export default function Dashboard() {
           <div style={s.card}>
             <div style={s.sectionLabel}>Ideas</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-              {IDEAS.map((idea, i) => (
+              {IDEAS_DEFAULT.map((idea, i) => (
                 <div
                   key={i}
                   style={s.ideaCard}
@@ -269,7 +351,7 @@ export default function Dashboard() {
       <div style={s.footer}>
         <span>
           <span style={s.statusDot} />
-          Datos de prueba · Outlook pendiente de conectar
+          {loading ? "Cargando..." : authNeeded ? "Outlook no conectado" : `${allEvents.length} eventos cargados`}
         </span>
         <span>Life Assistant v0.1</span>
       </div>
