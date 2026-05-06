@@ -1,7 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+from pydantic import BaseModel
+from jose import JWTError, jwt
 import msal
 import requests
 import os
@@ -22,6 +25,25 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "changeme")
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret")
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_DAYS = 30
+
+bearer_scheme = HTTPBearer()
+
+class LoginRequest(BaseModel):
+    password: str
+
+def create_token() -> str:
+    expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
+    return jwt.encode({"exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    try:
+        jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
 SCOPES = ["Calendars.Read", "User.Read"]
 TOKEN_FILE = ".token"
@@ -68,6 +90,12 @@ def _store_result(result: dict):
         "expires_at": expires_at,
     })
 
+@app.post("/auth/password")
+def login_password(body: LoginRequest):
+    if body.password != DASHBOARD_PASSWORD:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
+    return {"token": create_token()}
+
 @app.get("/auth/login")
 def login():
     app_msal = msal.ConfidentialClientApplication(
@@ -102,7 +130,7 @@ def callback(code: str):
     return {"error": result.get("error_description")}
 
 @app.get("/calendar/events")
-def get_events():
+def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     token = get_valid_token()
     if not token:
         return {"error": "No autenticado. Ve a /auth/login primero"}
@@ -116,13 +144,21 @@ def get_events():
     )
     data = response.json()
     
+    def normalize_dt(dt_obj: dict) -> str:
+        """Si la fecha viene en UTC, añade Z para que el navegador la convierta correctamente."""
+        dt_str = dt_obj.get("dateTime", "")
+        tz = dt_obj.get("timeZone", "")
+        if tz.upper() == "UTC" and dt_str and not dt_str.endswith("Z"):
+            return dt_str + "Z"
+        return dt_str
+
     events = []
     for event in data.get("value", []):
         events.append({
             "id": event.get("id"),
             "title": event.get("subject"),
-            "start": event.get("start", {}).get("dateTime"),
-            "end": event.get("end", {}).get("dateTime"),
+            "start": normalize_dt(event.get("start", {})),
+            "end": normalize_dt(event.get("end", {})),
             "location": event.get("location", {}).get("displayName"),
             "preview": event.get("bodyPreview"),
             "isAllDay": event.get("isAllDay"),
