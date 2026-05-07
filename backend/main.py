@@ -72,6 +72,7 @@ TOKEN_EXPIRE_DAYS = 30
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+HOME_ADDRESS = os.getenv("HOME_ADDRESS", "Calle Astigar 35, Durango, Vizcaya, España")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -276,7 +277,7 @@ def root():
 class DepartureRequest(BaseModel):
     destination: str
     event_time: str  # ISO string
-    origin: str = "Calle Astigar 35, Durango, Vizcaya, España"
+    origin: str = HOME_ADDRESS
 
 @app.post("/maps/departure")
 def get_departure_time(
