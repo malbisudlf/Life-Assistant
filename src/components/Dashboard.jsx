@@ -605,7 +605,7 @@ export default function Dashboard() {
                           {ev.location && (
                             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>📍 {ev.location}</div>
                           )}
-                          <DepartureWidget ev={{ ...ev, loc: ev.location }} />
+                          <DepartureWidget ev={{ ...ev, loc: CLASS_DESTINATION }} />
                         </div>
                       </div>
                     );
