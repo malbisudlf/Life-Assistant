@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
+const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -605,7 +606,7 @@ export default function Dashboard() {
                           {ev.location && (
                             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>📍 {ev.location}</div>
                           )}
-                          <DepartureWidget ev={{ ...ev, loc: ev.location }} />
+                          <DepartureWidget ev={{ ...ev, loc: CLASS_DESTINATION }} />
                         </div>
                       </div>
                     );
