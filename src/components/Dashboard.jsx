@@ -323,6 +323,19 @@ export default function Dashboard() {
   const displayActive = activeEvent || todayEvents.find(e => e.active) || todayEvents[0];
   const todayClasses  = classEvents.filter(e => isToday(e.start));
 
+  // Timeline combinado: eventos normales + nodo de clases, ordenado por hora
+  const classesNodeTime = todayClasses.length > 0
+    ? todayClasses.reduce((min, e) => e.start < min ? e.start : min, todayClasses[0].start)
+    : null;
+  const timelineNodes = [
+    ...todayEvents.map(ev => ({ type: "event", ev })),
+    ...(todayClasses.length > 0 ? [{ type: "classes", start: classesNodeTime }] : []),
+  ].sort((a, b) => {
+    const ta = a.type === "event" ? a.ev.start : a.start;
+    const tb = b.type === "event" ? b.ev.start : b.start;
+    return new Date(ta) - new Date(tb);
+  });
+
   const hh      = String(now.getHours()).padStart(2, "0");
   const mm      = String(now.getMinutes()).padStart(2, "0");
   const dateStr = `${DAYS_ES[now.getDay()]}, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
@@ -371,39 +384,36 @@ export default function Dashboard() {
                 <>
                   <div style={s.timelineWrapper}>
                     <div style={s.timeline} className="timeline-inner">
-                      {todayEvents.map((ev, i) => (
-                        <div key={i} style={s.timelineItem} onClick={() => setActiveEvent(ev)}>
-                          {i < todayEvents.length - 1 && <div style={s.connectorLine} />}
-                          <div style={{
-                            ...s.node,
-                            ...(ev.active ? s.nodeActive : {}),
-                            ...(ev.past   ? s.nodePast   : {}),
-                            ...(!ev.active && !ev.past ? s.nodeFuture : {}),
-                          }} />
-                          <div style={s.nodeLabel}>
-                            <div style={s.nodeTime}>{ev.time}</div>
-                            <div style={{ ...s.nodeTitle, ...(ev.active ? s.nodeTitleActive : {}) }}>{ev.title}</div>
-                          </div>
+                      {timelineNodes.map((node, i) => (
+                        <div key={i} style={s.timelineItem} onClick={() => {
+                          if (node.type === "event") setActiveEvent(node.ev);
+                          else setClassesOpen(true);
+                        }}>
+                          {i < timelineNodes.length - 1 && <div style={s.connectorLine} />}
+                          {node.type === "event" ? (
+                            <>
+                              <div style={{
+                                ...s.node,
+                                ...(node.ev.active ? s.nodeActive : {}),
+                                ...(node.ev.past   ? s.nodePast   : {}),
+                                ...(!node.ev.active && !node.ev.past ? s.nodeFuture : {}),
+                              }} />
+                              <div style={s.nodeLabel}>
+                                <div style={s.nodeTime}>{node.ev.time}</div>
+                                <div style={{ ...s.nodeTitle, ...(node.ev.active ? s.nodeTitleActive : {}) }}>{node.ev.title}</div>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div style={{ ...s.node, background: "#8bb4d4", border: "1.5px solid #8bb4d4", boxShadow: "0 0 8px rgba(139,180,212,0.5)" }} />
+                              <div style={s.nodeLabel}>
+                                <div style={s.nodeTime}>🎓</div>
+                                <div style={{ ...s.nodeTitle, color: "var(--accent2)" }}>Clases ({todayClasses.length})</div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       ))}
-
-                      {/* Nodo especial de Clases */}
-                      {todayClasses.length > 0 && (
-                        <div style={s.timelineItem} onClick={() => setClassesOpen(true)}>
-                          <div style={{
-                            ...s.node,
-                            background: "#8bb4d4",
-                            border: "1.5px solid #8bb4d4",
-                            boxShadow: "0 0 8px rgba(139,180,212,0.5)",
-                          }} />
-                          <div style={s.nodeLabel}>
-                            <div style={s.nodeTime}>🎓</div>
-                            <div style={{ ...s.nodeTitle, color: "var(--accent2)" }}>
-                              Clases ({todayClasses.length})
-                            </div>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
 
