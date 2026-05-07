@@ -241,17 +241,21 @@ export default function Dashboard() {
 
   // Cargar clases
   useEffect(() => {
-    if (!token) return;
-    fetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${token}` } })
+    const t = localStorage.getItem("la_token") || token;
+    if (!t) return;
+    fetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => {
+        console.log("[CLASES] respuesta:", data);
         if (Array.isArray(data.events)) {
-          console.log("Clases cargadas:", data.events.length, data.events.map(e => e.start));
+          console.log("[CLASES] total:", data.events.length, "hoy:", data.events.filter(e => isToday(e.start)).length);
           setClassEvents(data.events);
+        } else {
+          console.warn("[CLASES] error o array vacío:", data);
         }
       })
-      .catch(e => console.error("Error cargando clases:", e));
-  }, [token]);
+      .catch(e => console.error("[CLASES] fetch error:", e));
+  }, []);
 
   // Cargar ideas
   useEffect(() => {

@@ -12,6 +12,43 @@ import requests
 import httpx
 import os
 import json
+
+# Mapa de nombres de zona horaria de Windows a IANA
+WINDOWS_TZ_MAP = {
+    "Romance Standard Time": "Europe/Paris",
+    "Central European Standard Time": "Europe/Budapest",
+    "W. Europe Standard Time": "Europe/Berlin",
+    "GMT Standard Time": "Europe/London",
+    "UTC": "UTC",
+}
+
+def normalize_graph_dt(dt_obj: dict) -> str:
+    """Convierte un objeto {dateTime, timeZone} de Graph API a ISO UTC con Z."""
+    dt_str = dt_obj.get("dateTime", "")
+    tz_name = dt_obj.get("timeZone", "UTC")
+    if not dt_str:
+        return dt_str
+    # Si ya tiene offset/Z, parsear directamente
+    if dt_str.endswith("Z") or "+" in dt_str[10:] or (len(dt_str) > 10 and dt_str[10] == "T" and "-" in dt_str[16:]):
+        try:
+            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+    # Sin offset: el dateTime está en la zona indicada por timeZone
+    iana_tz = WINDOWS_TZ_MAP.get(tz_name, tz_name)
+    try:
+        local_tz = ZoneInfo(iana_tz)
+    except Exception:
+        local_tz = ZoneInfo("UTC")
+    try:
+        # Recortar microsegundos extra si los hay
+        clean = dt_str[:26].rstrip(".")
+        dt_local = datetime.fromisoformat(clean).replace(tzinfo=local_tz)
+        return dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return dt_str
+
 load_dotenv()
 
 app = FastAPI()
@@ -157,23 +194,16 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
         f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,bodyPreview,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
+    response.encoding = "utf-8"
     data = response.json()
     
-    def normalize_dt(dt_obj: dict) -> str:
-        """Si la fecha viene en UTC, añade Z para que el navegador la convierta correctamente."""
-        dt_str = dt_obj.get("dateTime", "")
-        tz = dt_obj.get("timeZone", "")
-        if tz.upper() == "UTC" and dt_str and not dt_str.endswith("Z"):
-            return dt_str + "Z"
-        return dt_str
-
     events = []
     for event in data.get("value", []):
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
-            "start": normalize_dt(event.get("start", {})),
-            "end": normalize_dt(event.get("end", {})),
+            "start": normalize_graph_dt(event.get("start", {})),
+            "end": normalize_graph_dt(event.get("end", {})),
             "location": event.get("location", {}).get("displayName"),
             "preview": event.get("bodyPreview"),
             "isAllDay": event.get("isAllDay"),
@@ -216,25 +246,23 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
         f"&$select=subject,start,end,location,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
+    r2.encoding = "utf-8"
     data2 = r2.json()
-
-    def normalize_dt(dt_obj):
-        dt_str = dt_obj.get("dateTime", "")
-        tz = dt_obj.get("timeZone", "")
-        if tz.upper() == "UTC" and dt_str and not dt_str.endswith("Z"):
-            return dt_str + "Z"
-        return dt_str
 
     events = []
     for event in data2.get("value", []):
+        raw_start = event.get("start", {})
+        raw_end = event.get("end", {})
+        print(f"[CLASES DEBUG] subject={event.get('subject')} tz={raw_start.get('timeZone')} start_raw={raw_start.get('dateTime')}")
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
-            "start": normalize_dt(event.get("start", {})),
-            "end": normalize_dt(event.get("end", {})),
+            "start": normalize_graph_dt(raw_start),
+            "end": normalize_graph_dt(raw_end),
             "location": event.get("location", {}).get("displayName"),
             "isAllDay": event.get("isAllDay"),
         })
+    print(f"[CLASES DEBUG] Total eventos devueltos: {len(events)}")
     return {"events": events}
 
 
@@ -248,7 +276,7 @@ def root():
 class DepartureRequest(BaseModel):
     destination: str
     event_time: str  # ISO string
-    origin: str = "Bilbao, España"
+    origin: str = "Calle Astigar 35, Durango, Vizcaya, España"
 
 @app.post("/maps/departure")
 def get_departure_time(
