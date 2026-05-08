@@ -74,6 +74,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "Calle Astigar 35, Durango, Vizcaya, España")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -81,6 +82,24 @@ bearer_scheme = HTTPBearer()
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class JobCreateRequest(BaseModel):
+    dedupe_key: str
+    payload: dict = {}
+
+class JobClaimRequest(BaseModel):
+    worker_id: str
+
+class JobStartRequest(BaseModel):
+    worker_id: str
+
+class JobFinishRequest(BaseModel):
+    worker_id: str
+    status: str  # done | failed
+
+class JobRetryRequest(BaseModel):
+    worker_id: str
 
 def create_token() -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
@@ -406,3 +425,98 @@ async def create_idea_from_audio(
     return {"ok": True, "idea": r.json()[0] if r.status_code < 300 else payload, "transcript": text}
 
 
+
+
+# ── JOB QUEUE (SUPABASE) ─────────────────────────────────────────────────────
+
+def _safe_worker(worker_id: str) -> str:
+    return worker_id.replace("'", "")
+
+@app.post("/jobs")
+def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/jobs",
+        headers={**supabase_headers(), "Prefer": "return=representation,resolution=merge-duplicates"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    data = r.json()
+    return {"ok": True, "job": data[0] if data else None}
+
+@app.post("/jobs/{job_id}/claim")
+def claim_job(job_id: str, body: JobClaimRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    worker = _safe_worker(body.worker_id)
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.pending",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"status": "claimed", "claimed_by": worker, "claimed_at": now_iso},
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    if len(rows) == 0:
+        return {"ok": False, "claimed": False, "reason": "already_claimed"}
+    return {"ok": True, "claimed": True, "job": rows[0]}
+
+@app.post("/jobs/{job_id}/start")
+def start_job(job_id: str, body: JobStartRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    worker = _safe_worker(body.worker_id)
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.claimed&claimed_by=eq.{worker}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"status": "running"},
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    if len(rows) == 0:
+        raise HTTPException(status_code=409, detail="El job no está en estado claimed para este worker")
+    return {"ok": True, "job": rows[0]}
+
+@app.post("/jobs/{job_id}/finish")
+def finish_job(job_id: str, body: JobFinishRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    if body.status not in ("done", "failed"):
+        raise HTTPException(status_code=400, detail="status debe ser done o failed")
+    worker = _safe_worker(body.worker_id)
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.running&claimed_by=eq.{worker}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"status": body.status},
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    if len(rows) == 0:
+        raise HTTPException(status_code=409, detail="El job no está en estado running para este worker")
+    return {"ok": True, "job": rows[0]}
+
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str, body: JobRetryRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    worker = _safe_worker(body.worker_id)
+    get_r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}&select=id,attempt",
+        headers=supabase_headers(),
+    )
+    if get_r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=get_r.text)
+    rows = get_r.json()
+    if len(rows) == 0:
+        raise HTTPException(status_code=409, detail="Job no elegible para retry")
+    attempt = int(rows[0].get("attempt", 0)) + 1
+    if attempt > MAX_JOB_ATTEMPTS:
+        raise HTTPException(status_code=409, detail=f"Máximo de reintentos alcanzado ({MAX_JOB_ATTEMPTS})")
+
+    patch_r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"status": "pending", "attempt": attempt, "claimed_by": None, "claimed_at": None},
+    )
+    if patch_r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=patch_r.text)
+    upd = patch_r.json()
+    if len(upd) == 0:
+        raise HTTPException(status_code=409, detail="Conflicto al aplicar retry")
+    return {"ok": True, "job": upd[0], "max_attempts": MAX_JOB_ATTEMPTS}
