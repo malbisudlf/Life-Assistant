@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
+const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
