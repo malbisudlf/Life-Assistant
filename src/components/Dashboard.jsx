@@ -166,6 +166,11 @@ export default function Dashboard() {
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [classEvents, setClassEvents] = useState([]);
   const [classesOpen, setClassesOpen] = useState(false);
+  const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
+  const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
+
+  const HA_URL   = "http://192.168.1.200:8123";
+  const HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI3YzI4ZGVkZjcxODI0YzRlOTNlMWZiMTk1N2EzYTkwZCIsImlhdCI6MTc3ODIyNDYzNSwiZXhwIjoyMDkzNTg0NjM1fQ.RcGfFHfQ49w_56gYl-VqCzPta7Fbi6W59MFW6An-TOU";
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
 
@@ -297,6 +302,28 @@ export default function Dashboard() {
         {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
       </div>
     );
+  }
+
+  async function wakePC() {
+    setWolStatus("loading");
+    try {
+      const res = await fetch(`${HA_URL}/api/services/button/press`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${HA_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ entity_id: "button.pc_mikel" }),
+      });
+      if (res.ok) {
+        setWolStatus("ok");
+        setTimeout(() => { setWolModal(null); setWolStatus(null); }, 2500);
+      } else {
+        setWolStatus("error");
+      }
+    } catch {
+      setWolStatus("error");
+    }
   }
 
   async function deleteIdea(id) {
@@ -464,7 +491,7 @@ export default function Dashboard() {
                 ) : entregas.map((e, i) => {
                   const color = urgencyColor(e.days);
                   return (
-                    <div key={i} style={s.entregaRow}>
+                    <div key={i} style={s.entregaRow} onClick={() => { setWolModal(e); setWolStatus(null); }}>
                       <div style={{ ...s.urgencyBar, background: color }} />
                       <div style={{ flex: 1 }}>
                         <div style={s.entregaTitle}>{e.title}</div>
@@ -527,6 +554,83 @@ export default function Dashboard() {
           <span>Life Assistant v0.1</span>
         </div>
       </div>
+
+      {/* ── MODAL WAKE ON LAN ── */}
+      {wolModal && (
+        <>
+          <div onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)",
+            zIndex: 200, animation: "fadeInOverlay 0.2s ease",
+          }} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+            borderRadius: 16, padding: "32px 36px", zIndex: 201,
+            width: "min(400px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+            animation: "fadeInOverlay 0.2s ease",
+          }}>
+
+            {wolStatus === null && (
+              <>
+                <div style={{ fontSize: 32, marginBottom: 16, textAlign: "center" }}>💻</div>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", marginBottom: 6, textAlign: "center" }}>
+                  ¿Encender PC?
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", marginBottom: 24, lineHeight: 1.6 }}>
+                  {wolModal.title}
+                  <br />
+                  <span style={{ color: urgencyColor(wolModal.days) }}>{wolModal.days} días restantes</span>
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
+                    flex: 1, padding: "10px 0", background: "transparent",
+                    border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                    color: "var(--muted)", fontSize: 13, cursor: "pointer",
+                    fontFamily: "'DM Sans', sans-serif",
+                  }}>Cancelar</button>
+                  <button onClick={wakePC} style={{
+                    flex: 1, padding: "10px 0", background: "var(--accent)",
+                    border: "none", borderRadius: 8,
+                    color: "#0e0f11", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    fontFamily: "'DM Sans', sans-serif",
+                  }}>Encender</button>
+                </div>
+              </>
+            )}
+
+            {wolStatus === "loading" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>⚡</div>
+                <div style={{ fontSize: 13, color: "var(--muted)" }}>Enviando señal WOL...</div>
+              </div>
+            )}
+
+            {wolStatus === "ok" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>✅</div>
+                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500 }}>¡Señal enviada!</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>El PC debería encenderse en unos segundos.</div>
+              </div>
+            )}
+
+            {wolStatus === "error" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>❌</div>
+                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>Error al conectar con Home Assistant</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>¿Estás conectado a la red local o VPN?</div>
+                <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
+                  padding: "8px 20px", background: "transparent",
+                  border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                  color: "var(--muted)", fontSize: 12, cursor: "pointer",
+                  fontFamily: "'DM Sans', sans-serif",
+                }}>Cerrar</button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* ── PANEL LATERAL DE CLASES ── */}
       {classesOpen && (
@@ -605,7 +709,7 @@ export default function Dashboard() {
                           {ev.location && (
                             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>📍 {ev.location}</div>
                           )}
-                          <DepartureWidget ev={{ ...ev, loc: CLASS_DESTINATION }} />
+                          <DepartureWidget ev={{ ...ev, loc: ev.location }} />
                         </div>
                       </div>
                     );
