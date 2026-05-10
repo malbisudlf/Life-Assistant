@@ -101,6 +101,13 @@ class JobFinishRequest(BaseModel):
 class JobRetryRequest(BaseModel):
     worker_id: str
 
+
+class AgentHeartbeatRequest(BaseModel):
+    agent_id: str
+    status: str  # starting | online | busy | offline
+    hostname: str | None = None
+    version: str | None = None
+
 def create_token() -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
     return jwt.encode({"exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
@@ -520,3 +527,54 @@ def retry_job(job_id: str, body: JobRetryRequest, credentials: HTTPAuthorization
     if len(upd) == 0:
         raise HTTPException(status_code=409, detail="Conflicto al aplicar retry")
     return {"ok": True, "job": upd[0], "max_attempts": MAX_JOB_ATTEMPTS}
+
+
+@app.post("/agents/heartbeat")
+def agent_heartbeat(body: AgentHeartbeatRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    if body.status not in ("starting", "online", "busy", "offline"):
+        raise HTTPException(status_code=400, detail="status inválido")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "agent_id": body.agent_id,
+        "status": body.status,
+        "last_seen_at": now_iso,
+        "hostname": body.hostname,
+        "version": body.version,
+        "updated_at": now_iso,
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/pc_agents",
+        headers={**supabase_headers(), "Prefer": "return=representation,resolution=merge-duplicates"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    return {"ok": True, "agent": rows[0] if rows else payload}
+
+
+@app.get("/agents/{agent_id}")
+def get_agent(agent_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/pc_agents?agent_id=eq.{agent_id}&select=agent_id,status,last_seen_at,hostname,version",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    if len(rows) == 0:
+        return {"exists": False, "status": "offline", "offline": True}
+
+    agent = rows[0]
+    try:
+        last_seen = datetime.fromisoformat(agent["last_seen_at"].replace("Z", "+00:00"))
+    except Exception:
+        last_seen = datetime.now(timezone.utc) - timedelta(seconds=9999)
+    silence_seconds = (datetime.now(timezone.utc) - last_seen).total_seconds()
+    offline = silence_seconds > 60
+    if offline:
+        agent["status"] = "offline"
+    agent["offline"] = offline
+    agent["silence_seconds"] = int(silence_seconds)
+    agent["heartbeat_timeout_seconds"] = 60
+    return agent
