@@ -218,7 +218,7 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     response = requests.get(
-        f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,bodyPreview,isAllDay&$orderby=start/dateTime",
+        f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
     response.encoding = "utf-8"
@@ -226,6 +226,10 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     
     events = []
     for event in data.get("value", []):
+        body_content = event.get("body", {}).get("content", "") or ""
+        import re as _re
+        alud_match = _re.search(r"alud_url:\s*(https?://\S+)", body_content)
+        alud_url = alud_match.group(1).rstrip("</>&;") if alud_match else None
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
@@ -233,6 +237,7 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
             "end": normalize_graph_dt(event.get("end", {})),
             "location": event.get("location", {}).get("displayName"),
             "preview": event.get("bodyPreview"),
+            "alud_url": alud_url,
             "isAllDay": event.get("isAllDay"),
         })
     
