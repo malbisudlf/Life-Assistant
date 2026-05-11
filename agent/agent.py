@@ -292,23 +292,25 @@ def main():
 
     try:
         # ── Playwright: login + extracción ──
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=False,
-                channel="chrome",
-            )
-            context = browser.new_context(viewport={"width": 1280, "height": 900})
-            page = context.new_page()
+        # Iniciamos playwright manualmente (sin `with`) para que el navegador
+        # permanezca abierto después de la extracción y Cowork pueda verlo.
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(
+            headless=False,
+            channel="chrome",
+        )
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        page = context.new_page()
 
-            log.info("Abriendo Alud...")
-            page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
-            login_alud_if_needed(page)
+        log.info("Abriendo Alud...")
+        page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
+        login_alud_if_needed(page)
 
-            enunciado = extract_enunciado(page, alud_url)
+        enunciado = extract_enunciado(page, alud_url)
 
-            # Dejar el navegador ABIERTO en la página de la entrega
-            # para que Cowork lo use directamente — NO llamar a browser.close()
-            log.info("Navegador abierto en la entrega. Pasando control a Cowork...")
+        # Navegador ABIERTO en la entrega — Cowork lo usará directamente.
+        # NO cerramos browser ni pw — el proceso termina y el navegador queda vivo.
+        log.info("Navegador abierto en la entrega. Pasando control a Cowork...")
 
         # ── pyautogui: Claude Desktop → Cowork ──
         launch_cowork(titulo, enunciado, alud_url)
