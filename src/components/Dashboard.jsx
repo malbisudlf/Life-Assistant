@@ -172,8 +172,7 @@ export default function Dashboard() {
   const [agentState, setAgentState]   = useState(null);
   const [wolStartedAt, setWolStartedAt] = useState(null);
 
-  const HA_URL   = "http://192.168.1.200:8123";
-  const HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI3YzI4ZGVkZjcxODI0YzRlOTNlMWZiMTk1N2EzYTkwZCIsImlhdCI6MTc3ODIyNDYzNSwiZXhwIjoyMDkzNTg0NjM1fQ.RcGfFHfQ49w_56gYl-VqCzPta7Fbi6W59MFW6An-TOU";
+
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
 
@@ -332,23 +331,19 @@ export default function Dashboard() {
   async function wakePC() {
     setWolStatus("loading");
     try {
-      // 1. WOL via Home Assistant — best effort, no bloquea el flujo
-      // (puede fallar si el dashboard se abre desde HTTPS y HA es HTTP local)
+      const t = localStorage.getItem("la_token") || "";
+
+      // 1. WOL via backend → Tailscale → HA (best-effort, no bloquea el flujo)
       try {
-        await fetch(`${HA_URL}/api/services/button/press`, {
+        await fetch(`${API}/wake-pc`, {
           method: "POST",
-          headers: {
-            "Authorization": `Bearer ${HA_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ entity_id: "button.pc_mikel" }),
+          headers: { "Authorization": `Bearer ${t}` },
         });
       } catch {
-        // WOL falló (mixed-content, red, etc.) — continuamos igualmente
+        // WOL falló — continuamos igualmente
       }
 
       // 2. Crear job en Supabase via backend — esto sí es crítico
-      const t = localStorage.getItem("la_token") || "";
       const jobRes = await fetch(`${API}/jobs`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
