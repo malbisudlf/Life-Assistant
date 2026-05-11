@@ -171,6 +171,9 @@ export default function Dashboard() {
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [agentState, setAgentState]   = useState(null);
   const [wolStartedAt, setWolStartedAt] = useState(null);
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [jobEvents, setJobEvents] = useState([]);
+  const [jobTerminal, setJobTerminal] = useState(null);
 
 
   const mediaRecorderRef = useRef(null);
@@ -356,6 +359,10 @@ export default function Dashboard() {
         }),
       });
       if (!jobRes.ok) { setWolStatus("error"); return; }
+      const jobData = await jobRes.json();
+      setActiveJobId(jobData?.job?.id || null);
+      setJobEvents([]);
+      setJobTerminal(null);
 
       setWolStatus("ok");
       setWolStartedAt(Date.now());
@@ -369,6 +376,35 @@ export default function Dashboard() {
     await fetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
     setIdeas(prev => prev.filter(i => i.id !== id));
   }
+
+
+  useEffect(() => {
+    if (!activeJobId || !token) return;
+    let mounted = true;
+    const t = localStorage.getItem("la_token") || "";
+    const id = setInterval(async () => {
+      try {
+        const [evRes, jobRes] = await Promise.all([
+          fetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
+          fetch(`${API}/jobs/by-id/${activeJobId}`, { headers: { "Authorization": `Bearer ${t}` } }),
+        ]);
+        const evData = await evRes.json();
+        const jobData = await jobRes.json();
+        if (!mounted) return;
+        setJobEvents(evData?.events || []);
+        const st = jobData?.job?.status;
+        if (st === "done" || st === "failed") {
+          setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
+        }
+      } catch {}
+    }, 2000);
+    return () => { mounted = false; clearInterval(id); };
+  }, [activeJobId, token]);
+
+  const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
+  const stageIndex = new Map(STAGES.map((st, i) => [st, i]));
+  const maxStage = jobEvents.reduce((max, ev) => Math.max(max, stageIndex.get(ev.stage) ?? -1), -1);
+  const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
 
   // Derivados
   const todayEvents = allEvents
@@ -670,14 +706,23 @@ export default function Dashboard() {
             {wolStatus === "ok" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>✅</div>
-                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500 }}>¡Señal enviada!</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
-                  ETA aprox tras WOL: {wolEtaSeconds ?? 90}s.
-                  {isAgentOnline ? " Agente detectado online." : " Esperando heartbeat online..."}
+                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500 }}>¡Job en progreso!</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 10 }}>
+                  Progreso por etapas: {progressPct}%
                 </div>
-                {!isAgentOnline && <div style={{ fontSize: 11, color: "#d4645a", marginTop: 8 }}>
-                  Bloqueado: no enviar jobs hasta que el agente esté en online.
-                </div>}
+                <div style={{ width: "100%", height: 8, background: "rgba(255,255,255,0.08)", borderRadius: 999, overflow: "hidden", marginBottom: 10 }}>
+                  <div style={{ width: `${progressPct}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                </div>
+                <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 130, overflowY: "auto" }}>
+                  {jobEvents.length === 0 ? "Esperando eventos del agente..." : jobEvents.map((ev, i) => (
+                    <div key={i} style={{ marginBottom: 4 }}>• {ev.stage}{ev.message ? ` — ${ev.message}` : ""}</div>
+                  ))}
+                </div>
+                {jobTerminal && (
+                  <div style={{ marginTop: 10, fontSize: 12, color: jobTerminal.status === "done" ? "var(--green)" : "#d4645a" }}>
+                    Estado terminal: {jobTerminal.status}{jobTerminal.reason ? ` — ${jobTerminal.reason}` : ""}
+                  </div>
+                )}
               </div>
             )}
 

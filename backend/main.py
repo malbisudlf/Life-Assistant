@@ -104,6 +104,11 @@ class JobRetryRequest(BaseModel):
     worker_id: str
 
 
+
+class JobEventCreateRequest(BaseModel):
+    stage: str
+    message: str | None = None
+
 class AgentHeartbeatRequest(BaseModel):
     agent_id: str
     status: str  # starting | online | busy | offline
@@ -480,6 +485,17 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data = r.json()
     return {"ok": True, "job": data[0] if data else None}
 
+@app.get("/jobs/by-id/{job_id}")
+def get_job_by_id(job_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=id,status,claimed_by,claimed_at,attempt,updated_at",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    return {"ok": True, "job": rows[0] if rows else None}
+
 @app.post("/jobs/{job_id}/claim")
 def claim_job(job_id: str, body: JobClaimRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -527,6 +543,34 @@ def finish_job(job_id: str, body: JobFinishRequest, credentials: HTTPAuthorizati
     if len(rows) == 0:
         raise HTTPException(status_code=409, detail="El job no está en estado running para este worker")
     return {"ok": True, "job": rows[0]}
+
+@app.post("/jobs/{job_id}/events")
+def create_job_event(job_id: str, body: JobEventCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    payload = {
+        "job_id": job_id,
+        "stage": body.stage,
+        "message": body.message,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/job_events",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    rows = r.json()
+    return {"ok": True, "event": rows[0] if rows else payload}
+
+@app.get("/jobs/{job_id}/events")
+def get_job_events(job_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/job_events?job_id=eq.{job_id}&select=job_id,stage,message,created_at&order=created_at.asc",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    return {"ok": True, "events": r.json()}
 
 @app.post("/jobs/{job_id}/retry")
 def retry_job(job_id: str, body: JobRetryRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
