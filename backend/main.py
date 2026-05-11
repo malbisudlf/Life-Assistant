@@ -488,7 +488,7 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
 @app.get("/jobs/by-id/{job_id}")
 def get_job_by_id(job_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=id,status,claimed_by,claimed_at,attempt,updated_at",
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=id,status,claimed_by,claimed_at,attempt,created_at",
         headers=supabase_headers(),
     )
     if r.status_code >= 300:

@@ -327,6 +327,7 @@ def main():
         log.info("Abriendo Alud...")
         page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
         login_alud_if_needed(page)
+        report_stage(job_id, "login_ok", "Sesión Alud activa")
 
         report_stage(job_id, "assignment_opened", f"Entrega abierta: {alud_url}")
         enunciado = extract_enunciado(page, alud_url)
@@ -348,7 +349,7 @@ def main():
     except Exception as e:
         log.error(f"Error: {e}", exc_info=True)
         finish_job(job_id, "failed")
-        report_stage(job_id, "job_done", "failed: missing alud_url")
+        report_stage(job_id, "job_done", f"failed: {e}")
 
     finally:
         heartbeat("offline")
