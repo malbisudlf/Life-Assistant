@@ -297,7 +297,7 @@ def main():
         pw = sync_playwright().start()
         browser = pw.chromium.launch(
             headless=False,
-            channel="chrome",
+            channel="msedge",
         )
         context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
