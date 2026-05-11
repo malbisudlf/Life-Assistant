@@ -88,6 +88,19 @@ def heartbeat(status: str):
     except Exception as e:
         log.warning(f"Heartbeat falló: {e}")
 
+
+def report_stage(job_id: str, stage: str, message: str = ""):
+    try:
+        requests.post(
+            f"{API_BASE}/jobs/{job_id}/events",
+            headers=api_headers(),
+            json={"stage": stage, "message": message},
+            timeout=10,
+        )
+        log.info(f"Stage → {stage}")
+    except Exception as e:
+        log.warning(f"No se pudo reportar stage '{stage}': {e}")
+
 def poll_pending_job():
     try:
         r = requests.get(
@@ -259,6 +272,8 @@ def main():
 
     while time.time() < deadline:
         heartbeat("online")
+        # hito de disponibilidad del agente
+        # (sin job todavía no se reporta en job_events)
         job = poll_pending_job()
         if job:
             break
@@ -279,14 +294,18 @@ def main():
     if not alud_url:
         log.error("El job no tiene 'alud_url' en el payload — abortando.")
         finish_job(job_id, "failed")
+        report_stage(job_id, "job_done", "failed: missing alud_url")
         heartbeat("offline")
         return
+
+    report_stage(job_id, "heartbeat_online", "Agente disponible y polling activo")
 
     if not claim_job(job_id):
         log.info("Job ya reclamado por otro worker.")
         heartbeat("offline")
         return
 
+    report_stage(job_id, "job_claimed", f"Worker {WORKER_ID} reclamó el job")
     start_job(job_id)
     heartbeat("busy")
 
@@ -309,21 +328,27 @@ def main():
         page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
         login_alud_if_needed(page)
 
+        report_stage(job_id, "assignment_opened", f"Entrega abierta: {alud_url}")
         enunciado = extract_enunciado(page, alud_url)
+        report_stage(job_id, "enunciado_extracted", f"{len(enunciado)} chars extraídos")
 
         # Navegador ABIERTO en la entrega — Cowork lo usará directamente.
         # NO cerramos browser ni pw — el proceso termina y el navegador queda vivo.
         log.info("Navegador abierto en la entrega. Pasando control a Cowork...")
 
         # ── pyautogui: Claude Desktop → Cowork ──
+        report_stage(job_id, "solver_started", "Iniciando Claude Cowork")
         launch_cowork(titulo, enunciado, alud_url)
+        report_stage(job_id, "result_saved", "Instrucción enviada a Cowork")
 
         finish_job(job_id, "done")
+        report_stage(job_id, "job_done", "done")
         log.info("✅ Job completado. Cowork está ejecutando la entrega.")
 
     except Exception as e:
         log.error(f"Error: {e}", exc_info=True)
         finish_job(job_id, "failed")
+        report_stage(job_id, "job_done", "failed: missing alud_url")
 
     finally:
         heartbeat("offline")
