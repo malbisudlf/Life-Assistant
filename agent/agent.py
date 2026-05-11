@@ -295,11 +295,14 @@ def main():
         # Iniciamos playwright manualmente (sin `with`) para que el navegador
         # permanezca abierto después de la extracción y Cowork pueda verlo.
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(
-            headless=False,
+        # Usar el perfil real de Edge para tener cookies y sesiones guardadas
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=r"C:\Users\malbi\AppData\Local\Microsoft\Edge\User Data",
             channel="msedge",
+            headless=False,
+            args=["--profile-directory=Default"],
+            viewport={"width": 1280, "height": 900},
         )
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
 
         log.info("Abriendo Alud...")
