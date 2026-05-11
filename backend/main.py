@@ -75,6 +75,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "Calle Astigar 35, Durango, Vizcaya, España")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
+HA_URL   = os.getenv("HA_URL", "http://100.84.40.119:8123")
+HA_TOKEN = os.getenv("HA_TOKEN")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -445,6 +447,27 @@ async def create_idea_from_audio(
 
 def _safe_worker(worker_id: str) -> str:
     return worker_id.replace("'", "")
+
+@app.post("/wake-pc")
+def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Llama a Home Assistant para encender el PC via WOL. Funciona desde Fly.io via Tailscale."""
+    if not HA_TOKEN:
+        raise HTTPException(status_code=503, detail="HA_TOKEN no configurado")
+    try:
+        r = requests.post(
+            f"{HA_URL}/api/services/button/press",
+            headers={
+                "Authorization": f"Bearer {HA_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={"entity_id": "button.pc_mikel"},
+            timeout=10,
+        )
+        if not r.ok:
+            raise HTTPException(status_code=502, detail=f"HA respondió {r.status_code}: {r.text}")
+        return {"ok": True}
+    except requests.exceptions.ConnectionError as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Home Assistant: {e}")
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
