@@ -839,3 +839,5 @@ const s = {
   footer: { display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 12, borderTop: "0.5px solid var(--border)", fontSize: 11, color: "var(--muted2)" },
   statusDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--green)", marginRight: 6, animation: "pulse 2s infinite", verticalAlign: "middle" },
 };
+
+
