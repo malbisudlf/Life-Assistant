@@ -234,16 +234,17 @@ export default function Dashboard() {
 
   // Estado del agente PC (heartbeat)
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    if (!t) return;
+    if (!token) return;
 
     let mounted = true;
     async function loadAgent() {
       try {
-        const r = await fetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${t}` } });
+        const r = await fetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
         const data = await r.json();
+        console.log("[AGENT] estado:", data);
         if (mounted) setAgentState(data);
-      } catch {
+      } catch (e) {
+        console.error("[AGENT] error:", e);
         if (mounted) setAgentState({ status: "offline", offline: true });
       }
     }
@@ -251,7 +252,7 @@ export default function Dashboard() {
     loadAgent();
     const id = setInterval(loadAgent, 10000);
     return () => { mounted = false; clearInterval(id); };
-  }, []);
+  }, [token]);
 
   // Audio
   async function startRecording() {
