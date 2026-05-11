@@ -227,8 +227,10 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     events = []
     for event in data.get("value", []):
         body_content = event.get("body", {}).get("content", "") or ""
+        preview_content = event.get("bodyPreview", "") or ""
         import re as _re
-        alud_match = _re.search(r"alud_url:\s*(https?://\S+)", body_content)
+        alud_match = _re.search(r"alud_url:\s*(https?://\S+)", body_content) or \
+                     _re.search(r"alud_url:\s*(https?://\S+)", preview_content)
         alud_url = alud_match.group(1).rstrip("</>&;") if alud_match else None
         events.append({
             "id": event.get("id"),
