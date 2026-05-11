@@ -14,3 +14,15 @@ create table if not exists public.jobs (
 
 create unique index if not exists jobs_dedupe_key_uidx on public.jobs (dedupe_key);
 create index if not exists jobs_status_created_at_idx on public.jobs (status, created_at);
+
+-- Estado/presencia de agentes PC
+create table if not exists public.pc_agents (
+  agent_id text primary key,
+  status text not null check (status in ('starting','online','busy','offline')),
+  last_seen_at timestamptz not null default now(),
+  hostname text,
+  version text,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists pc_agents_status_last_seen_idx on public.pc_agents (status, last_seen_at desc);

@@ -169,6 +169,8 @@ export default function Dashboard() {
   const [classesOpen, setClassesOpen] = useState(false);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
+  const [agentState, setAgentState]   = useState(null);
+  const [wolStartedAt, setWolStartedAt] = useState(null);
 
   const HA_URL   = "http://192.168.1.200:8123";
   const HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI3YzI4ZGVkZjcxODI0YzRlOTNlMWZiMTk1N2EzYTkwZCIsImlhdCI6MTc3ODIyNDYzNSwiZXhwIjoyMDkzNTg0NjM1fQ.RcGfFHfQ49w_56gYl-VqCzPta7Fbi6W59MFW6An-TOU";
@@ -228,6 +230,27 @@ export default function Dashboard() {
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
       .catch(() => {});
+  }, []);
+
+  // Estado del agente PC (heartbeat)
+  useEffect(() => {
+    const t = localStorage.getItem("la_token") || "";
+    if (!t) return;
+
+    let mounted = true;
+    async function loadAgent() {
+      try {
+        const r = await fetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${t}` } });
+        const data = await r.json();
+        if (mounted) setAgentState(data);
+      } catch {
+        if (mounted) setAgentState({ status: "offline", offline: true });
+      }
+    }
+
+    loadAgent();
+    const id = setInterval(loadAgent, 10000);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
 
   // Audio
@@ -318,7 +341,7 @@ export default function Dashboard() {
       });
       if (res.ok) {
         setWolStatus("ok");
-        setTimeout(() => { setWolModal(null); setWolStatus(null); }, 2500);
+        setWolStartedAt(Date.now());
       } else {
         setWolStatus("error");
       }
@@ -369,6 +392,9 @@ export default function Dashboard() {
   const dateStr = `${DAYS_ES[now.getDay()]}, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
   const hour    = now.getHours();
   const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
+
+  const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
+  const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
   if (!token) return <LoginScreen onLogin={() => window.location.reload()} />;
 
@@ -583,6 +609,10 @@ export default function Dashboard() {
                   {wolModal.title}
                   <br />
                   <span style={{ color: urgencyColor(wolModal.days) }}>{wolModal.days} días restantes</span>
+                  <br />
+                  <span style={{ color: isAgentOnline ? "var(--green)" : "#d4645a" }}>
+                    Agente: {isAgentOnline ? "online" : "offline / no listo"}
+                  </span>
                 </div>
                 <div style={{ display: "flex", gap: 10 }}>
                   <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
@@ -591,13 +621,28 @@ export default function Dashboard() {
                     color: "var(--muted)", fontSize: 13, cursor: "pointer",
                     fontFamily: "'DM Sans', sans-serif",
                   }}>Cancelar</button>
-                  <button onClick={wakePC} style={{
-                    flex: 1, padding: "10px 0", background: "var(--accent)",
-                    border: "none", borderRadius: 8,
-                    color: "#0e0f11", fontSize: 13, fontWeight: 600, cursor: "pointer",
-                    fontFamily: "'DM Sans', sans-serif",
-                  }}>Encender</button>
+                  <button
+                    onClick={!isAgentOnline ? wakePC : undefined}
+                    disabled={isAgentOnline}
+                    title={isAgentOnline ? "El PC ya está encendido y el agente está online" : "Enviar señal Wake-on-LAN"}
+                    style={{
+                      flex: 1, padding: "10px 0",
+                      background: isAgentOnline ? "rgba(255,255,255,0.08)" : "var(--accent)",
+                      border: "none", borderRadius: 8,
+                      color: isAgentOnline ? "var(--muted)" : "#0e0f11",
+                      fontSize: 13, fontWeight: 600,
+                      cursor: isAgentOnline ? "not-allowed" : "pointer",
+                      fontFamily: "'DM Sans', sans-serif",
+                      opacity: isAgentOnline ? 0.5 : 1,
+                      transition: "all 0.2s",
+                    }}
+                  >{isAgentOnline ? "Ya online" : "Encender"}</button>
                 </div>
+                {isAgentOnline && (
+                  <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 8 }}>
+                    El agente ya está online — no hace falta encender el PC.
+                  </div>
+                )}
               </>
             )}
 
@@ -612,7 +657,13 @@ export default function Dashboard() {
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>✅</div>
                 <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500 }}>¡Señal enviada!</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>El PC debería encenderse en unos segundos.</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
+                  ETA aprox tras WOL: {wolEtaSeconds ?? 90}s.
+                  {isAgentOnline ? " Agente detectado online." : " Esperando heartbeat online..."}
+                </div>
+                {!isAgentOnline && <div style={{ fontSize: 11, color: "#d4645a", marginTop: 8 }}>
+                  Bloqueado: no enviar jobs hasta que el agente esté en online.
+                </div>}
               </div>
             )}
 
