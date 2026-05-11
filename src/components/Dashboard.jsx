@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 const API = "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 const HA_URL = import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123";
+const HA_DASHBOARD = `${HA_URL}/dashboard-inicio`;
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -628,7 +629,7 @@ export default function Dashboard() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ display: "flex", gap: 3 }}>
               <span style={s.appTabActive}>LA</span>
-              <span style={s.appTabInactive} onClick={() => { window.top.location.href = HA_URL; }}>HA</span>
+              <span style={s.appTabInactive} onClick={() => { window.top.location.href = HA_DASHBOARD; }}>HA</span>
             </div>
             <span>
               <span style={s.statusDot} />
