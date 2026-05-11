@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
+const HA_URL = import.meta.env.VITE_HA_URL || "http://100.84.40.119:8123";
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -624,10 +625,16 @@ export default function Dashboard() {
 
         {/* FOOTER */}
         <div style={s.footer}>
-          <span>
-            <span style={s.statusDot} />
-            {loading ? "Cargando..." : authNeeded ? "Outlook no conectado" : `${allEvents.length} eventos cargados`}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ display: "flex", gap: 3 }}>
+              <span style={s.appTabActive}>LA</span>
+              <span style={s.appTabInactive} onClick={() => { window.top.location.href = HA_URL; }}>HA</span>
+            </div>
+            <span>
+              <span style={s.statusDot} />
+              {loading ? "Cargando..." : authNeeded ? "Outlook no conectado" : `${allEvents.length} eventos cargados`}
+            </span>
+          </div>
           <span>Life Assistant v0.1</span>
         </div>
       </div>
@@ -883,6 +890,8 @@ const s = {
   newIdeaBtn: { width: "100%", marginTop: 10, padding: 8, background: "transparent", border: "0.5px dashed rgba(255,255,255,0.12)", borderRadius: 8, color: "#5a5850", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "all 0.2s" },
   footer: { display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 12, borderTop: "0.5px solid var(--border)", fontSize: 11, color: "var(--muted2)" },
   statusDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--green)", marginRight: 6, animation: "pulse 2s infinite", verticalAlign: "middle" },
+  appTabActive: { fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 8px", borderRadius: 4, background: "var(--accent)", color: "#0e0f11", letterSpacing: "0.05em", userSelect: "none" },
+  appTabInactive: { fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 8px", borderRadius: 4, border: "0.5px solid var(--border2)", color: "var(--muted)", cursor: "pointer", letterSpacing: "0.05em", transition: "color 0.15s, border-color 0.15s" },
 };
 
 

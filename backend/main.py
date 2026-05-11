@@ -75,8 +75,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "Calle Astigar 35, Durango, Vizcaya, España")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
-HA_URL   = os.getenv("HA_URL", "http://100.84.40.119:8123")
-HA_TOKEN = os.getenv("HA_TOKEN")
+HA_URL        = os.getenv("HA_URL", "http://100.84.40.119:8123")
+HA_TOKEN      = os.getenv("HA_TOKEN")
+HA_POLL_TOKEN = os.getenv("HA_POLL_TOKEN", "")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -446,6 +447,37 @@ async def create_idea_from_audio(
     return {"ok": True, "idea": r.json()[0] if r.status_code < 300 else payload, "transcript": text}
 
 
+# ── HOME ASSISTANT INTEGRATION ────────────────────────────────────────────────
+
+@app.get("/ha/events/soon")
+def ha_events_soon(token: str = ""):
+    """Devuelve el primer evento que empieza en ~15 min. HA lo consulta cada minuto."""
+    if not HA_POLL_TOKEN or token != HA_POLL_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    graph_token = get_valid_token()
+    if not graph_token:
+        return {"event": None}
+
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(hours=1)
+    headers = {"Authorization": f"Bearer {graph_token}"}
+    response = requests.get(
+        "https://graph.microsoft.com/v1.0/me/calendarView"
+        f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime",
+        headers=headers,
+    )
+    for event in response.json().get("value", []):
+        if event.get("isAllDay"):
+            continue
+        start_iso = normalize_graph_dt(event.get("start", {}))
+        event_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        minutes_until = (event_dt - now).total_seconds() / 60
+        if 13 <= minutes_until <= 17:
+            return {"event": {"title": _clean_class_title(event.get("subject", "")), "start": start_iso}}
+    return {"event": None}
 
 
 # ── JOB QUEUE (SUPABASE) ─────────────────────────────────────────────────────
