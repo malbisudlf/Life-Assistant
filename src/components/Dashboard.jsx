@@ -332,6 +332,7 @@ export default function Dashboard() {
   async function wakePC() {
     setWolStatus("loading");
     try {
+      // 1. Enviar WOL via Home Assistant
       const res = await fetch(`${HA_URL}/api/services/button/press`, {
         method: "POST",
         headers: {
@@ -340,12 +341,24 @@ export default function Dashboard() {
         },
         body: JSON.stringify({ entity_id: "button.pc_mikel" }),
       });
-      if (res.ok) {
-        setWolStatus("ok");
-        setWolStartedAt(Date.now());
-      } else {
-        setWolStatus("error");
-      }
+      if (!res.ok) { setWolStatus("error"); return; }
+
+      // 2. Crear job en Supabase via backend
+      const t = localStorage.getItem("la_token") || "";
+      await fetch(`${API}/jobs`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dedupe_key: `entrega-${wolModal.title}-${Date.now()}`,
+          payload: {
+            titulo: wolModal.title,
+            alud_url: wolModal.alud_url,
+          },
+        }),
+      });
+
+      setWolStatus("ok");
+      setWolStartedAt(Date.now());
     } catch {
       setWolStatus("error");
     }
@@ -369,7 +382,7 @@ export default function Dashboard() {
 
   const entregas = allEvents
     .filter(e => e.title && e.title.includes("📚") && isFuture(e.start))
-    .map(e => ({ title: e.title.replace("📚", "").trim(), subject: e.title, days: daysUntil(e.start) }))
+    .map(e => ({ title: e.title.replace("📚", "").trim(), subject: e.title, days: daysUntil(e.start), alud_url: e.alud_url || null }))
     .sort((a, b) => a.days - b.days);
 
   const displayActive = activeEvent || todayEvents.find(e => e.active) || todayEvents[0];
