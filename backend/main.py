@@ -450,9 +450,9 @@ def _safe_worker(worker_id: str) -> str:
 
 @app.post("/wake-pc")
 def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Llama a Home Assistant para encender el PC via WOL. Funciona desde Fly.io via Tailscale."""
+    """Llama a Home Assistant para encender el PC via WOL. Best-effort: nunca falla el flujo."""
     if not HA_TOKEN:
-        raise HTTPException(status_code=503, detail="HA_TOKEN no configurado")
+        return {"ok": False, "reason": "HA_TOKEN no configurado"}
     try:
         r = requests.post(
             f"{HA_URL}/api/services/button/press",
@@ -461,13 +461,11 @@ def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
                 "Content-Type": "application/json",
             },
             json={"entity_id": "button.pc_mikel"},
-            timeout=10,
+            timeout=3,
         )
-        if not r.ok:
-            raise HTTPException(status_code=502, detail=f"HA respondió {r.status_code}: {r.text}")
-        return {"ok": True}
-    except requests.exceptions.ConnectionError as e:
-        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Home Assistant: {e}")
+        return {"ok": r.ok, "status": r.status_code}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
