@@ -332,20 +332,24 @@ export default function Dashboard() {
   async function wakePC() {
     setWolStatus("loading");
     try {
-      // 1. Enviar WOL via Home Assistant
-      const res = await fetch(`${HA_URL}/api/services/button/press`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${HA_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ entity_id: "button.pc_mikel" }),
-      });
-      if (!res.ok) { setWolStatus("error"); return; }
+      // 1. WOL via Home Assistant — best effort, no bloquea el flujo
+      // (puede fallar si el dashboard se abre desde HTTPS y HA es HTTP local)
+      try {
+        await fetch(`${HA_URL}/api/services/button/press`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${HA_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ entity_id: "button.pc_mikel" }),
+        });
+      } catch {
+        // WOL falló (mixed-content, red, etc.) — continuamos igualmente
+      }
 
-      // 2. Crear job en Supabase via backend
+      // 2. Crear job en Supabase via backend — esto sí es crítico
       const t = localStorage.getItem("la_token") || "";
-      await fetch(`${API}/jobs`, {
+      const jobRes = await fetch(`${API}/jobs`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -356,6 +360,7 @@ export default function Dashboard() {
           },
         }),
       });
+      if (!jobRes.ok) { setWolStatus("error"); return; }
 
       setWolStatus("ok");
       setWolStartedAt(Date.now());
