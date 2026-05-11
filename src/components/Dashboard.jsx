@@ -621,13 +621,28 @@ export default function Dashboard() {
                     color: "var(--muted)", fontSize: 13, cursor: "pointer",
                     fontFamily: "'DM Sans', sans-serif",
                   }}>Cancelar</button>
-                  <button onClick={wakePC} style={{
-                    flex: 1, padding: "10px 0", background: "var(--accent)",
-                    border: "none", borderRadius: 8,
-                    color: "#0e0f11", fontSize: 13, fontWeight: 600, cursor: "pointer",
-                    fontFamily: "'DM Sans', sans-serif",
-                  }}>Encender</button>
+                  <button
+                    onClick={!isAgentOnline ? wakePC : undefined}
+                    disabled={isAgentOnline}
+                    title={isAgentOnline ? "El PC ya está encendido y el agente está online" : "Enviar señal Wake-on-LAN"}
+                    style={{
+                      flex: 1, padding: "10px 0",
+                      background: isAgentOnline ? "rgba(255,255,255,0.08)" : "var(--accent)",
+                      border: "none", borderRadius: 8,
+                      color: isAgentOnline ? "var(--muted)" : "#0e0f11",
+                      fontSize: 13, fontWeight: 600,
+                      cursor: isAgentOnline ? "not-allowed" : "pointer",
+                      fontFamily: "'DM Sans', sans-serif",
+                      opacity: isAgentOnline ? 0.5 : 1,
+                      transition: "all 0.2s",
+                    }}
+                  >{isAgentOnline ? "Ya online" : "Encender"}</button>
                 </div>
+                {isAgentOnline && (
+                  <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 8 }}>
+                    El agente ya está online — no hace falta encender el PC.
+                  </div>
+                )}
               </>
             )}
 
