@@ -1,12 +1,18 @@
 """
 Life Assistant — Agente PC
 ==========================
-Arranca con Windows (Task Scheduler), recoge el primer job pendiente de
-Supabase, resuelve la entrega con Playwright + Claude API, guarda la
-solución en Supabase, y se para.
+Flujo:
+  1. Heartbeat → online
+  2. Recoge job pendiente de Supabase
+  3. Abre Alud con Playwright, gestiona login + Okta
+  4. Navega a la URL de la entrega y extrae el enunciado
+  5. Deja el navegador abierto en la página de la entrega
+  6. Abre Claude Desktop → Ctrl+2 (Cowork)
+  7. Escribe la instrucción completa con el enunciado y Enter
+  8. Heartbeat → offline, se para
 
-NO toca el formulario de entrega en Moodle en ningún momento.
-El usuario revisa la solución guardada y envía él mismo.
+El agente nunca toca el formulario de entrega.
+Cowork se encarga de resolver y rellenar — el usuario revisa y envía.
 """
 
 import os
@@ -15,8 +21,9 @@ import time
 import uuid
 import socket
 import logging
+import subprocess
 import requests
-import anthropic
+import pyautogui
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -24,17 +31,18 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
-LA_TOKEN      = os.getenv("LA_TOKEN")          # JWT del dashboard
+LA_TOKEN      = os.getenv("LA_TOKEN")
 SUPABASE_URL  = os.getenv("SUPABASE_URL")
 SUPABASE_KEY  = os.getenv("SUPABASE_KEY")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
-HEARTBEAT_INTERVAL = 10   # segundos entre heartbeats mientras espera
-POLL_INTERVAL      = 5    # segundos entre checks de job pendiente
-OKTA_TIMEOUT       = 120  # segundos máx esperando aprobación push Okta
+CLAUDE_EXE         = r"C:\Users\malbi\.local\bin\claude.exe"
+HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
+POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
+OKTA_TIMEOUT       = 120   # segundos máx esperando aprobación push Okta
+CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
 
 ALUD_HOME      = "https://alud.deusto.es"
 DEUSTO_BUTTON  = "@deusto | @opendeusto"
@@ -81,7 +89,6 @@ def heartbeat(status: str):
         log.warning(f"Heartbeat falló: {e}")
 
 def poll_pending_job():
-    """Devuelve el primer job pendiente o None."""
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&order=created_at.asc&limit=1",
@@ -102,8 +109,7 @@ def claim_job(job_id: str) -> bool:
             json={"worker_id": WORKER_ID},
             timeout=10,
         )
-        data = r.json()
-        return data.get("claimed", False)
+        return r.json().get("claimed", False)
     except Exception as e:
         log.warning(f"Error claiming job: {e}")
         return False
@@ -124,86 +130,58 @@ def finish_job(job_id: str, status: str):
         timeout=10,
     )
 
-def save_solution(job_id: str, titulo: str, enunciado: str, solucion: str):
-    """Guarda la solución en la tabla job_results de Supabase."""
-    payload = {
-        "job_id": job_id,
-        "titulo": titulo,
-        "enunciado": enunciado,
-        "solucion": solucion,
-    }
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/job_results",
-        headers=supabase_headers(),
-        json=payload,
-        timeout=10,
-    )
-    log.info(f"Solución guardada en Supabase ({r.status_code})")
-
 # ── Playwright: login Alud ────────────────────────────────────────────────────
 
 def login_alud_if_needed(page):
-    """
-    Gestiona el login en Alud si es necesario.
-    Pasos:
-      1. Si hay botón '@deusto | @opendeusto' → click
-      2. Seleccionar cuenta mikel.albisudela@opendeusto.es en Google
-      3. Si hay Okta push → esperar hasta OKTA_TIMEOUT segundos a que el
-         usuario lo apruebe desde el móvil
-    """
-    # ¿Estamos ya dentro? (comprobamos si aparece el botón de login)
     try:
         page.wait_for_selector(f"text={DEUSTO_BUTTON}", timeout=4000)
     except PWTimeout:
-        log.info("Login no requerido, ya autenticado.")
+        log.info("Login no requerido, sesión activa.")
         return
 
-    log.info("Pantalla de login detectada → click en @deusto")
+    log.info("Pantalla de login → click en @deusto")
     page.click(f"text={DEUSTO_BUTTON}")
 
-    # Selección de cuenta Google
     log.info("Esperando selección de cuenta Google...")
     page.wait_for_selector(f"text={TARGET_ACCOUNT}", timeout=15000)
     page.click(f"text={TARGET_ACCOUNT}")
 
     # ¿Redirige directamente o pide Okta?
     try:
-        # Si en 8s ya está en Alud, listo
         page.wait_for_url(f"{ALUD_HOME}/**", timeout=8000)
         log.info("Login completado sin Okta.")
         return
     except PWTimeout:
         pass
 
-    # Esperar Okta push (el usuario aprueba desde el móvil)
-    log.info(f"Okta push enviado — esperando aprobación del usuario (máx {OKTA_TIMEOUT}s)...")
+    # Esperar Okta push — el usuario aprueba desde el móvil
+    log.info(f"Okta push enviado. Esperando aprobación en el móvil (máx {OKTA_TIMEOUT}s)...")
     try:
         page.wait_for_url(f"{ALUD_HOME}/**", timeout=OKTA_TIMEOUT * 1000)
-        log.info("Okta aprobado, login completado.")
+        log.info("Okta aprobado, acceso a Alud confirmado.")
     except PWTimeout:
-        raise RuntimeError("Timeout esperando aprobación Okta. El usuario no aprobó a tiempo.")
+        raise RuntimeError("Timeout esperando aprobación Okta.")
 
 # ── Playwright: extraer enunciado ─────────────────────────────────────────────
 
 def extract_enunciado(page, alud_url: str) -> str:
-    """
-    Navega a la URL de la actividad y extrae el texto del enunciado.
-    Funciona para actividades tipo 'assign' (tarea) en Moodle.
-    """
-    log.info(f"Navegando a: {alud_url}")
+    log.info(f"Navegando a la entrega: {alud_url}")
     page.goto(alud_url, wait_until="networkidle", timeout=30000)
-    login_alud_if_needed(page)
 
-    # Esperar contenido principal
-    page.wait_for_selector(".page-content, #region-main, .assign-intro", timeout=15000)
+    # Si nos redirigen al login (sesión caducada)
+    if "login" in page.url:
+        login_alud_if_needed(page)
+        page.goto(alud_url, wait_until="networkidle", timeout=30000)
 
-    # Intentar selectores comunes de Moodle para el enunciado
+    page.wait_for_selector(".page-content, #region-main", timeout=15000)
+
     selectors = [
-        ".assign-intro",          # Tarea
-        ".que .formulation",      # Quiz / pregunta
-        "#intro",                 # Intro genérico Moodle
-        ".activity-description",  # Descripción de actividad
-        "#region-main",           # Fallback: todo el contenido principal
+        ".assign-intro",
+        ".que .formulation",
+        "#intro",
+        ".activity-description",
+        ".box.generalbox",
+        "#region-main",
     ]
 
     for sel in selectors:
@@ -211,47 +189,58 @@ def extract_enunciado(page, alud_url: str) -> str:
             el = page.query_selector(sel)
             if el:
                 texto = el.inner_text().strip()
-                if len(texto) > 50:   # descartar hits vacíos
-                    log.info(f"Enunciado extraído con selector '{sel}' ({len(texto)} chars)")
+                if len(texto) > 50:
+                    log.info(f"Enunciado extraído con '{sel}' ({len(texto)} chars)")
                     return texto
         except Exception:
             continue
 
     raise RuntimeError("No se pudo extraer el enunciado de la página.")
 
-# ── Claude API: resolver entrega ──────────────────────────────────────────────
+# ── Cowork: abrir Claude Desktop y escribir instrucción ───────────────────────
 
-def resolver_con_claude(titulo: str, enunciado: str) -> str:
-    log.info("Llamando a Claude API para resolver la entrega...")
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    prompt = f"""Eres un asistente académico que ayuda a un estudiante de la Universidad de Deusto.
-
-A continuación tienes el enunciado de una entrega universitaria. Tu tarea es:
-1. Entender exactamente qué pide el enunciado
-2. Elaborar una respuesta completa, bien estructurada y de calidad académica
-3. Ser claro sobre cualquier suposición que hagas si el enunciado es ambiguo
-
-IMPORTANTE: El estudiante revisará esta solución personalmente antes de entregarla.
-No indiques que eres una IA en la respuesta final — escribe directamente la solución.
-
----
-TÍTULO DE LA ENTREGA: {titulo}
-
-ENUNCIADO:
-{enunciado}
----
-
-Proporciona la solución completa:"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+def build_cowork_instruction(titulo: str, enunciado: str, alud_url: str) -> str:
+    return (
+        f"Tengo una entrega universitaria que resolver en Alud (Moodle de Deusto). "
+        f"El navegador ya está abierto y con sesión iniciada en la página de la entrega.\n\n"
+        f"URL de la entrega: {alud_url}\n\n"
+        f"Título: {titulo}\n\n"
+        f"Enunciado:\n{enunciado}\n\n"
+        f"Por favor:\n"
+        f"1. Ve al navegador que está abierto con esa URL\n"
+        f"2. Lee el enunciado en pantalla para confirmar que lo entiendes\n"
+        f"3. Resuelve la actividad y rellena el campo de respuesta\n"
+        f"4. NO pulses ningún botón de enviar, entregar ni submit — "
+        f"el usuario lo revisará y enviará manualmente cuando llegue a casa"
     )
-    solucion = message.content[0].text
-    log.info(f"Solución generada ({len(solucion)} chars)")
-    return solucion
+
+def launch_cowork(titulo: str, enunciado: str, alud_url: str):
+    instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
+
+    log.info("Abriendo Claude Desktop...")
+    subprocess.Popen([CLAUDE_EXE])
+    time.sleep(CLAUDE_LAUNCH_WAIT)
+
+    log.info("Ctrl+2 → Cowork...")
+    pyautogui.hotkey("ctrl", "2")
+    time.sleep(2)
+
+    # Click en el centro de la pantalla para asegurar foco en el chat
+    screen_w, screen_h = pyautogui.size()
+    pyautogui.click(screen_w // 2, screen_h - 120)  # área del input, parte baja
+    time.sleep(0.5)
+
+    # Copiar instrucción al portapapeles via PowerShell
+    # (pyautogui.write falla con tildes y caracteres especiales)
+    log.info("Copiando instrucción al portapapeles...")
+    ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
+    subprocess.run(ps_cmd, check=True)
+    time.sleep(0.3)
+
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.5)
+    pyautogui.press("enter")
+    log.info("Instrucción enviada a Cowork.")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -263,10 +252,10 @@ def main():
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
     heartbeat("starting")
 
-    # Esperar hasta encontrar un job pendiente
+    # Esperar job pendiente (máx 5 minutos)
     log.info("Buscando job pendiente...")
     job = None
-    deadline = time.time() + 300  # máx 5 minutos esperando job
+    deadline = time.time() + 300
 
     while time.time() < deadline:
         heartbeat("online")
@@ -276,26 +265,25 @@ def main():
         time.sleep(POLL_INTERVAL)
 
     if not job:
-        log.info("No hay jobs pendientes tras 5 minutos. El agente se para.")
+        log.info("No hay jobs tras 5 minutos. Agente finalizado.")
         heartbeat("offline")
         return
 
-    job_id  = job["id"]
-    payload = job.get("payload", {})
-    titulo  = payload.get("titulo", "Sin título")
+    job_id   = job["id"]
+    payload  = job.get("payload", {})
+    titulo   = payload.get("titulo", "Sin título")
     alud_url = payload.get("alud_url", "")
 
-    log.info(f"Job encontrado: {job_id} | '{titulo}' | {alud_url}")
+    log.info(f"Job: {job_id} | '{titulo}' | {alud_url}")
 
     if not alud_url:
-        log.error("El job no tiene 'alud_url' en el payload. Abortando.")
+        log.error("El job no tiene 'alud_url' en el payload — abortando.")
         finish_job(job_id, "failed")
         heartbeat("offline")
         return
 
-    # Intentar claim atómico
     if not claim_job(job_id):
-        log.info("El job ya fue reclamado por otro worker. Saliendo.")
+        log.info("Job ya reclamado por otro worker.")
         heartbeat("offline")
         return
 
@@ -303,31 +291,33 @@ def main():
     heartbeat("busy")
 
     try:
+        # ── Playwright: login + extracción ──
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)  # visible para que el usuario vea qué pasa
+            browser = pw.chromium.launch(
+                headless=False,
+                channel="chrome",
+            )
             context = browser.new_context(viewport={"width": 1280, "height": 900})
             page = context.new_page()
 
-            # Ir a Alud (puede pedir login)
             log.info("Abriendo Alud...")
             page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
             login_alud_if_needed(page)
 
-            # Navegar a la actividad concreta
             enunciado = extract_enunciado(page, alud_url)
-            browser.close()
 
-        # Resolver con Claude
-        solucion = resolver_con_claude(titulo, enunciado)
+            # Dejar el navegador ABIERTO en la página de la entrega
+            # para que Cowork lo use directamente — NO llamar a browser.close()
+            log.info("Navegador abierto en la entrega. Pasando control a Cowork...")
 
-        # Guardar en Supabase
-        save_solution(job_id, titulo, enunciado, solucion)
+        # ── pyautogui: Claude Desktop → Cowork ──
+        launch_cowork(titulo, enunciado, alud_url)
 
         finish_job(job_id, "done")
-        log.info("✅ Job completado. Solución guardada en Supabase.")
+        log.info("✅ Job completado. Cowork está ejecutando la entrega.")
 
     except Exception as e:
-        log.error(f"Error ejecutando job: {e}", exc_info=True)
+        log.error(f"Error: {e}", exc_info=True)
         finish_job(job_id, "failed")
 
     finally:

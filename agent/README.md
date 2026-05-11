@@ -1,25 +1,27 @@
 # Life Assistant — Agente PC
 
-Script Python que se ejecuta en el PC de casa cuando el dashboard envía una entrega vía Wake-on-LAN.
+Script Python que arranca automáticamente cuando el PC se enciende vía Wake-on-LAN
+desde el dashboard. No usa la API de Anthropic — controla el PC con pyautogui.
 
 ## Qué hace
 
-1. Arranca con Windows (Task Scheduler)
-2. Hace heartbeat al backend → dashboard ve "online"
-3. Recoge el primer job pendiente de Supabase
-4. Abre Alud con Playwright (gestiona login + Okta push si es necesario)
-5. Extrae el enunciado de la actividad
-6. Llama a Claude API y genera una solución
-7. Guarda título + enunciado + solución en Supabase
-8. Se para
+1. Arranca con Windows (Task Scheduler), heartbeat → "online"
+2. Recoge el primer job pendiente de Supabase
+3. Abre Alud con Playwright, gestiona login + Okta push si es necesario
+4. Navega a la URL de la entrega y extrae el enunciado
+5. Deja el navegador abierto en la página de la entrega
+6. Abre Claude Desktop → Ctrl+2 (Cowork)
+7. Escribe la instrucción completa con el enunciado
+8. Cowork resuelve y rellena el campo — sin pulsar submit
+9. Heartbeat → "offline", se para
 
-**El agente nunca toca el formulario de entrega.** El usuario revisa la solución y envía manualmente.
+**El agente nunca pulsa enviar.** El usuario revisa y entrega manualmente.
 
 ---
 
 ## Instalación (una sola vez)
 
-### 1. Python y dependencias
+### 1. Dependencias
 
 ```bash
 cd agent/
@@ -29,51 +31,48 @@ playwright install chromium
 
 ### 2. Variables de entorno
 
-```bash
-cp .env.example .env
+Crea un archivo `.env` en la carpeta `agent/` con este contenido:
+
+```
+LA_TOKEN=
+LA_API_BASE=https://backend-tender-glow-160.fly.dev
+SUPABASE_URL=
+SUPABASE_KEY=
 ```
 
-Edita `.env` y rellena:
+- `LA_TOKEN`: abre el dashboard en el navegador → F12 → Application → Local Storage → `la_token`
+- `SUPABASE_URL` y `SUPABASE_KEY`: están en `backend/.env`
 
-- `LA_TOKEN` — el JWT del dashboard. Cópialo desde las DevTools del navegador:
-  `F12 → Application → Local Storage → https://life-assistant-smoky.vercel.app → la_token`
-- `SUPABASE_URL` y `SUPABASE_KEY` — los mismos que en `backend/.env`
-- `ANTHROPIC_API_KEY` — tu clave de Anthropic
+### 3. Migración Supabase (solo si no se ha ejecutado ya)
 
-### 3. Migración de Supabase
+En el SQL Editor de Supabase, ejecutar el contenido de:
+`supabase/migrations/20260511_job_results.sql`
 
-Ejecuta en el SQL Editor de Supabase:
+### 4. Task Scheduler — arranque automático con Windows
 
-```sql
--- contenido de supabase/migrations/20260511_job_results.sql
-```
-
-### 4. Task Scheduler (arranque automático con Windows)
-
-Abre el Programador de tareas de Windows y crea una tarea nueva:
-
-- **Nombre:** Life Assistant Agent
-- **Desencadenador:** Al iniciar sesión (tu usuario)
-- **Acción:** Iniciar un programa
-  - Programa: `C:\ruta\a\python.exe`
-  - Argumentos: `C:\ruta\a\Life-Assistant\agent\agent.py`
-  - Iniciar en: `C:\ruta\a\Life-Assistant\agent\`
-- **Condiciones:** desmarcar "Solo si el equipo está conectado a la red eléctrica"
-- **Configuración:** marcar "Si la tarea ya se está ejecutando, no iniciar una nueva instancia"
-
-> Para encontrar la ruta de Python: abre una terminal y ejecuta `where python`
+1. Abre el **Programador de tareas** de Windows
+2. Crear tarea básica:
+   - **Nombre:** Life Assistant Agent
+   - **Desencadenador:** Al iniciar sesión (tu usuario)
+   - **Acción:** Iniciar un programa
+     - Programa: ruta a `python.exe` (encuéntrala con `where python` en la terminal)
+     - Argumentos: ruta completa a `agent.py`
+     - Iniciar en: ruta completa a la carpeta `agent/`
+3. En **Condiciones**: desmarcar "Solo si conectado a corriente"
+4. En **Configuración**: marcar "Si ya se ejecuta, no iniciar otra instancia"
 
 ---
 
 ## Añadir la URL de Alud al evento del calendario
 
-Para que el agente sepa a qué actividad ir, el evento de Outlook debe tener la URL de Alud en el campo **Descripción** o **Ubicación**, con este formato:
+El agente necesita saber a qué actividad ir. Cuando crees el evento de entrega
+en Outlook, añade en la **descripción** del evento:
 
 ```
 alud_url: https://alud.deusto.es/mod/assign/view.php?id=XXXXX
 ```
 
-El dashboard leerá ese campo y lo incluirá en el payload del job al hacer click en la entrega.
+El dashboard leerá ese campo y lo incluirá automáticamente en el payload del job.
 
 ---
 
