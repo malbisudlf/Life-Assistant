@@ -3,8 +3,6 @@ import { useState, useEffect, useRef } from "react";
 const API = "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 const HA_URL = import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123";
-const HA_TOKEN = import.meta.env.VITE_HA_TOKEN || "";
-const HA_TAILSCALE = "http://100.84.40.119:8123";
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -339,21 +337,14 @@ export default function Dashboard() {
     try {
       const t = localStorage.getItem("la_token") || "";
 
-      // 1. WOL directo a HA desde el frontend — prueba IP local, luego Tailscale
-      if (HA_TOKEN) {
-        for (const base of [HA_URL, HA_TAILSCALE]) {
-          try {
-            const r = await fetch(`${base}/api/services/button/press`, {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${HA_TOKEN}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ entity_id: "button.pc_mikel" }),
-              signal: AbortSignal.timeout(3000),
-            });
-            if (r.ok) break;
-          } catch {
-            // probar siguiente URL
-          }
-        }
+      // 1. WOL: pone flag en el backend → HA lo recoge en su poll y envía el magic packet
+      try {
+        await fetch(`${API}/wake-pc`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${t}` },
+        });
+      } catch {
+        // best-effort, no bloquea el flujo
       }
 
       // 2. Crear job en Supabase via backend — esto sí es crítico

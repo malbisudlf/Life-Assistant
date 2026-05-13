@@ -1,10 +1,10 @@
-﻿from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+﻿from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from jose import JWTError, jwt
 from openai import OpenAI
 import msal
@@ -84,37 +84,36 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 bearer_scheme = HTTPBearer()
 
 class LoginRequest(BaseModel):
-    password: str
+    password: str = Field(max_length=200)
 
 
 class JobCreateRequest(BaseModel):
-    dedupe_key: str
+    dedupe_key: str = Field(max_length=200)
     payload: dict = {}
 
 class JobClaimRequest(BaseModel):
-    worker_id: str
+    worker_id: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
 
 class JobStartRequest(BaseModel):
-    worker_id: str
+    worker_id: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
 
 class JobFinishRequest(BaseModel):
-    worker_id: str
+    worker_id: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
     status: str  # done | failed
 
 class JobRetryRequest(BaseModel):
-    worker_id: str
-
+    worker_id: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
 
 
 class JobEventCreateRequest(BaseModel):
-    stage: str
-    message: str | None = None
+    stage: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_]+$')
+    message: str | None = Field(None, max_length=1000)
 
 class AgentHeartbeatRequest(BaseModel):
-    agent_id: str
+    agent_id: str = Field(max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
     status: str  # starting | online | busy | offline
-    hostname: str | None = None
-    version: str | None = None
+    hostname: str | None = Field(None, max_length=255)
+    version: str | None = Field(None, max_length=64)
 
 def create_token() -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
@@ -130,6 +129,14 @@ SCOPES = ["Calendars.Read", "User.Read"]
 TOKEN_FILE = ".token"
 import json
 import re
+
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+_SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+
+_wol_pending = False
 
 def _clean_class_title(subject: str) -> str:
     s = re.sub(r"^\d+\s*-\s*", "", subject)
@@ -316,9 +323,18 @@ def root():
 # ── MAPS ──────────────────────────────────────────────────────────────────────
 
 class DepartureRequest(BaseModel):
-    destination: str
-    event_time: str  # ISO string
-    origin: str = HOME_ADDRESS
+    destination: str = Field(max_length=500)
+    event_time: str = Field(max_length=50)
+    origin: str = Field(default=HOME_ADDRESS, max_length=500)
+
+    @field_validator("event_time")
+    @classmethod
+    def validate_event_time(cls, v: str) -> str:
+        try:
+            datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("event_time debe ser una fecha ISO válida")
+        return v
 
 @app.post("/maps/departure")
 def get_departure_time(
@@ -388,7 +404,10 @@ def get_ideas(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
     return r.json()
 
 @app.delete("/ideas/{idea_id}")
-def delete_idea(idea_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def delete_idea(
+    idea_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     r = requests.delete(
         f"{SUPABASE_URL}/rest/v1/ideas?id=eq.{idea_id}",
         headers=supabase_headers(),
@@ -431,13 +450,16 @@ async def create_idea_from_audio(
     raw = completion.choices[0].message.content.strip()
     # Limpiar posibles backticks
     raw = raw.replace("```json", "").replace("```", "").strip()
-    idea_data = json.loads(raw)
+    try:
+        idea_data = json.loads(raw)
+    except json.JSONDecodeError:
+        idea_data = {}
 
     # 3. Guardar en Supabase
     payload = {
-        "key": idea_data.get("key", text[:60]),
-        "full_text": idea_data.get("full_text", text),
-        "tag": idea_data.get("tag", "idea"),
+        "key": str(idea_data.get("key", text[:60]))[:100],
+        "full_text": str(idea_data.get("full_text", text))[:2000],
+        "tag": str(idea_data.get("tag", "idea"))[:50],
     }
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/ideas",
@@ -483,26 +505,26 @@ def ha_events_soon(token: str = ""):
 # ── JOB QUEUE (SUPABASE) ─────────────────────────────────────────────────────
 
 def _safe_worker(worker_id: str) -> str:
-    return worker_id.replace("'", "")
+    if not _SAFE_ID_RE.match(worker_id):
+        raise HTTPException(status_code=400, detail="worker_id inválido")
+    return worker_id
 
 @app.post("/wake-pc")
 def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Llama a Home Assistant para encender el PC via WOL. Best-effort: nunca falla el flujo."""
-    if not HA_TOKEN:
-        return {"ok": False, "reason": "HA_TOKEN no configurado"}
-    try:
-        r = requests.post(
-            f"{HA_URL}/api/services/button/press",
-            headers={
-                "Authorization": f"Bearer {HA_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={"entity_id": "button.pc_mikel"},
-            timeout=3,
-        )
-        return {"ok": r.ok, "status": r.status_code}
-    except Exception as e:
-        return {"ok": False, "reason": str(e)}
+    """Marca WOL pendiente — HA lo recoge en su próximo poll y envía el magic packet."""
+    global _wol_pending
+    _wol_pending = True
+    return {"ok": True}
+
+@app.get("/ha/wol-pending")
+def ha_wol_pending(token: str = ""):
+    """HA sondea este endpoint cada 30s. Si hay WOL pendiente, devuelve pending=true y lo limpia."""
+    if token != HA_POLL_TOKEN or not HA_POLL_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    global _wol_pending
+    pending = _wol_pending
+    _wol_pending = False
+    return {"pending": pending}
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
@@ -517,8 +539,13 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data = r.json()
     return {"ok": True, "job": data[0] if data else None}
 
+_JOB_ID_PATH = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
 @app.get("/jobs/by-id/{job_id}")
-def get_job_by_id(job_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def get_job_by_id(
+    job_id: str = _JOB_ID_PATH,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=id,status,claimed_by,claimed_at,attempt,created_at",
         headers=supabase_headers(),
@@ -529,7 +556,11 @@ def get_job_by_id(job_id: str, credentials: HTTPAuthorizationCredentials = Depen
     return {"ok": True, "job": rows[0] if rows else None}
 
 @app.post("/jobs/{job_id}/claim")
-def claim_job(job_id: str, body: JobClaimRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def claim_job(
+    job_id: str = _JOB_ID_PATH,
+    body: JobClaimRequest = ...,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     now_iso = datetime.now(timezone.utc).isoformat()
     worker = _safe_worker(body.worker_id)
     r = requests.patch(
@@ -545,7 +576,11 @@ def claim_job(job_id: str, body: JobClaimRequest, credentials: HTTPAuthorization
     return {"ok": True, "claimed": True, "job": rows[0]}
 
 @app.post("/jobs/{job_id}/start")
-def start_job(job_id: str, body: JobStartRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def start_job(
+    job_id: str = _JOB_ID_PATH,
+    body: JobStartRequest = ...,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     worker = _safe_worker(body.worker_id)
     r = requests.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.claimed&claimed_by=eq.{worker}",
@@ -560,7 +595,11 @@ def start_job(job_id: str, body: JobStartRequest, credentials: HTTPAuthorization
     return {"ok": True, "job": rows[0]}
 
 @app.post("/jobs/{job_id}/finish")
-def finish_job(job_id: str, body: JobFinishRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def finish_job(
+    job_id: str = _JOB_ID_PATH,
+    body: JobFinishRequest = ...,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     if body.status not in ("done", "failed"):
         raise HTTPException(status_code=400, detail="status debe ser done o failed")
     worker = _safe_worker(body.worker_id)
@@ -577,7 +616,11 @@ def finish_job(job_id: str, body: JobFinishRequest, credentials: HTTPAuthorizati
     return {"ok": True, "job": rows[0]}
 
 @app.post("/jobs/{job_id}/events")
-def create_job_event(job_id: str, body: JobEventCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def create_job_event(
+    job_id: str = _JOB_ID_PATH,
+    body: JobEventCreateRequest = ...,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     payload = {
         "job_id": job_id,
         "stage": body.stage,
@@ -595,7 +638,10 @@ def create_job_event(job_id: str, body: JobEventCreateRequest, credentials: HTTP
     return {"ok": True, "event": rows[0] if rows else payload}
 
 @app.get("/jobs/{job_id}/events")
-def get_job_events(job_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def get_job_events(
+    job_id: str = _JOB_ID_PATH,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/job_events?job_id=eq.{job_id}&select=job_id,stage,message,created_at&order=created_at.asc",
         headers=supabase_headers(),
@@ -605,7 +651,11 @@ def get_job_events(job_id: str, credentials: HTTPAuthorizationCredentials = Depe
     return {"ok": True, "events": r.json()}
 
 @app.post("/jobs/{job_id}/retry")
-def retry_job(job_id: str, body: JobRetryRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def retry_job(
+    job_id: str = _JOB_ID_PATH,
+    body: JobRetryRequest = ...,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     worker = _safe_worker(body.worker_id)
     get_r = requests.get(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}&select=id,attempt",
@@ -658,7 +708,10 @@ def agent_heartbeat(body: AgentHeartbeatRequest, credentials: HTTPAuthorizationC
 
 
 @app.get("/agents/{agent_id}")
-def get_agent(agent_id: str, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def get_agent(
+    agent_id: str = Path(..., pattern=r'^[a-zA-Z0-9_-]{1,64}$'),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/pc_agents?agent_id=eq.{agent_id}&select=agent_id,status,last_seen_at,hostname,version",
         headers=supabase_headers(),
