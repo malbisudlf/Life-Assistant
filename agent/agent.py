@@ -38,7 +38,7 @@ AGENT_ID      = "pc-mikel"
 AGENT_VERSION = "1.1.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
-CLAUDE_EXE         = r"C:\Users\malbi\.local\bin\claude.exe"
+CLAUDE_APPID       = "Claude_pzs8sxrjxfjjc!Claude"  # MSIX Store app
 HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 OKTA_TIMEOUT       = 120   # segundos máx esperando aprobación push Okta
@@ -231,7 +231,7 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
 
     log.info("Abriendo Claude Desktop...")
-    subprocess.Popen([CLAUDE_EXE])
+    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{CLAUDE_APPID}"])
     time.sleep(CLAUDE_LAUNCH_WAIT)
 
     log.info("Ctrl+2 → Cowork...")
