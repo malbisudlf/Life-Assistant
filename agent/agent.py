@@ -238,17 +238,20 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     pyautogui.hotkey("ctrl", "2")
     time.sleep(2)
 
-    # Click en el centro de la pantalla para asegurar foco en el chat
-    screen_w, screen_h = pyautogui.size()
-    pyautogui.click(screen_w // 2, screen_h - 120)  # área del input, parte baja
-    time.sleep(0.5)
-
-    # Copiar instrucción al portapapeles via PowerShell
-    # (pyautogui.write falla con tildes y caracteres especiales)
+    # Copiar instrucción al portapapeles via PowerShell ANTES de hacer click
+    # (así el portapapeles está listo y el click solo da foco, sin interrumpir)
     log.info("Copiando instrucción al portapapeles...")
     ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
     subprocess.run(ps_cmd, check=True)
     time.sleep(0.3)
+
+    # Click en el textarea del input (parte inferior central de la ventana)
+    screen_w, screen_h = pyautogui.size()
+    pyautogui.click(screen_w // 2, screen_h - 80)
+    time.sleep(0.5)
+    # Segundo click para asegurar foco si la ventana no estaba activa
+    pyautogui.click(screen_w // 2, screen_h - 80)
+    time.sleep(0.5)
 
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.5)
