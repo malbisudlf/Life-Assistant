@@ -238,20 +238,29 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     pyautogui.hotkey("ctrl", "2")
     time.sleep(2)
 
-    # Copiar instrucción al portapapeles via PowerShell ANTES de hacer click
-    # (así el portapapeles está listo y el click solo da foco, sin interrumpir)
+    # Copiar instrucción al portapapeles ANTES de enfocar Claude Desktop
     log.info("Copiando instrucción al portapapeles...")
     ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
     subprocess.run(ps_cmd, check=True)
     time.sleep(0.3)
 
-    # Click en el textarea del input (parte inferior central de la ventana)
+    # Enfocar la ventana de Claude Desktop usando AppActivate (busca por título)
+    log.info("Enfocando ventana Claude Desktop...")
+    subprocess.run(
+        ["powershell", "-Command",
+         "(New-Object -ComObject WScript.Shell).AppActivate('Claude')"],
+        capture_output=True,
+    )
+    time.sleep(0.5)
+    # Maximizar la ventana activa para que el input esté en posición predecible
+    pyautogui.hotkey("win", "up")
+    time.sleep(0.8)
+
+    # Click en el input: parte inferior central de la pantalla maximizada
     screen_w, screen_h = pyautogui.size()
-    pyautogui.click(screen_w // 2, screen_h - 80)
-    time.sleep(0.5)
-    # Segundo click para asegurar foco si la ventana no estaba activa
-    pyautogui.click(screen_w // 2, screen_h - 80)
-    time.sleep(0.5)
+    input_y = screen_h - 90  # input de Claude Desktop en ventana maximizada
+    pyautogui.click(screen_w // 2, input_y)
+    time.sleep(0.4)
 
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.5)
@@ -336,9 +345,17 @@ def main():
         enunciado = extract_enunciado(page, alud_url)
         report_stage(job_id, "enunciado_extracted", f"{len(enunciado)} chars extraídos")
 
-        # Navegador ABIERTO en la entrega — Cowork lo usará directamente.
-        # NO cerramos browser ni pw — el proceso termina y el navegador queda vivo.
-        log.info("Navegador abierto en la entrega. Pasando control a Cowork...")
+        # Cerrar Playwright limpiamente y reabrir Edge de forma independiente.
+        # Si NO hacemos esto, cuando Python termina Playwright mata el navegador.
+        context.close()
+        pw.stop()
+        log.info("Playwright cerrado. Reabriendo Edge de forma independiente...")
+        subprocess.Popen(
+            [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", alud_url],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        time.sleep(3)  # dar tiempo a que Edge abra la URL
+        log.info("Edge abierto en la entrega. Pasando control a Cowork...")
 
         # ── pyautogui: Claude Desktop → Cowork ──
         report_stage(job_id, "solver_started", "Iniciando Claude Cowork")
