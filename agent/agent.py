@@ -148,7 +148,7 @@ def finish_job(job_id: str, status: str):
 
 # ── Playwright: login Alud ────────────────────────────────────────────────────
 
-def login_alud_if_needed(page):
+def login_alud_if_needed(page, context):
     try:
         page.wait_for_selector(f"text={DEUSTO_BUTTON}", timeout=4000)
     except PWTimeout:
@@ -156,15 +156,31 @@ def login_alud_if_needed(page):
         return
 
     log.info("Pantalla de login → click en @deusto")
-    page.click(f"text={DEUSTO_BUTTON}")
 
-    log.info("Esperando selección de cuenta Google...")
-    page.wait_for_selector(f"text={TARGET_ACCOUNT}", timeout=15000)
-    page.click(f"text={TARGET_ACCOUNT}")
-
-    # ¿Redirige directamente o pide Okta?
+    # Con el perfil real de Edge, Google puede abrir un popup o hacer SSO directo.
+    # Usamos expect_page para capturar el popup si aparece; si no, la misma página navega.
+    auth_page = None
     try:
-        page.wait_for_url(f"{ALUD_HOME}/**", timeout=8000)
+        with context.expect_page(timeout=5000) as popup_info:
+            page.click(f"text={DEUSTO_BUTTON}")
+        auth_page = popup_info.value
+        log.info("Google OAuth en ventana nueva (popup).")
+    except PWTimeout:
+        # Sin popup — la misma página navega (click ya ocurrió dentro del with)
+        log.info("Google OAuth navega en la misma página.")
+
+    # Intentar seleccionar cuenta si el picker aparece (puede saltarse por SSO)
+    target = auth_page if auth_page else page
+    try:
+        target.wait_for_selector(f"text={TARGET_ACCOUNT}", timeout=6000)
+        target.click(f"text={TARGET_ACCOUNT}")
+        log.info("Cuenta Google seleccionada.")
+    except Exception:
+        log.info("Selector de cuenta no apareció — SSO automático o ya seleccionada.")
+
+    # Esperar que la página principal llegue a Alud (con o sin Okta)
+    try:
+        page.wait_for_url(f"{ALUD_HOME}/**", timeout=10000)
         log.info("Login completado sin Okta.")
         return
     except PWTimeout:
@@ -180,13 +196,13 @@ def login_alud_if_needed(page):
 
 # ── Playwright: extraer enunciado ─────────────────────────────────────────────
 
-def extract_enunciado(page, alud_url: str) -> str:
+def extract_enunciado(page, context, alud_url: str) -> str:
     log.info(f"Navegando a la entrega: {alud_url}")
     page.goto(alud_url, wait_until="networkidle", timeout=30000)
 
     # Si nos redirigen al login (sesión caducada)
     if "login" in page.url:
-        login_alud_if_needed(page)
+        login_alud_if_needed(page, context)
         page.goto(alud_url, wait_until="networkidle", timeout=30000)
 
     page.wait_for_selector(".page-content, #region-main", timeout=15000)
@@ -228,6 +244,7 @@ def build_cowork_instruction(titulo: str, enunciado: str, alud_url: str) -> str:
         f"3. Resuelve la actividad y rellena el campo de respuesta\n"
         f"4. NO pulses ningún botón de enviar, entregar ni submit — "
         f"el usuario lo revisará y enviará manualmente cuando llegue a casa"
+        f"Ten en cuenta que el usuario no está en el ordenador, esto es un mensaje automatizado, por lo que no podrá responder preguntas. Si tienes alguna duda, elige la opción recomendada, o la que mas se ajuste a las intrsucciones"
     )
 
 def _focus_claude_window() -> bool:
@@ -362,11 +379,11 @@ def main():
 
         log.info("Abriendo Alud...")
         page.goto(ALUD_HOME, wait_until="networkidle", timeout=20000)
-        login_alud_if_needed(page)
+        login_alud_if_needed(page, context)
         report_stage(job_id, "login_ok", "Sesión Alud activa")
 
         report_stage(job_id, "assignment_opened", f"Entrega abierta: {alud_url}")
-        enunciado = extract_enunciado(page, alud_url)
+        enunciado = extract_enunciado(page, context, alud_url)
         report_stage(job_id, "enunciado_extracted", f"{len(enunciado)} chars extraídos")
 
         # NO cerramos el contexto de Playwright — el navegador queda abierto
