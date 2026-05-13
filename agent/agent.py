@@ -91,20 +91,23 @@ def heartbeat(status: str):
 
 def report_stage(job_id: str, stage: str, message: str = ""):
     try:
-        requests.post(
+        r = requests.post(
             f"{API_BASE}/jobs/{job_id}/events",
             headers=api_headers(),
             json={"stage": stage, "message": message},
             timeout=10,
         )
-        log.info(f"Stage → {stage}")
+        if r.status_code >= 300:
+            log.warning(f"Stage '{stage}' rechazado por el backend: {r.status_code} {r.text[:200]}")
+        else:
+            log.info(f"Stage → {stage}")
     except Exception as e:
         log.warning(f"No se pudo reportar stage '{stage}': {e}")
 
 def poll_pending_job():
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&order=created_at.asc&limit=1",
+            f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&order=created_at.desc&limit=1",
             headers=supabase_headers(),
             timeout=10,
         )

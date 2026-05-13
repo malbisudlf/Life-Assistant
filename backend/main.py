@@ -537,7 +537,15 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     if r.status_code >= 300:
         raise HTTPException(status_code=400, detail=r.text)
     data = r.json()
-    return {"ok": True, "job": data[0] if data else None}
+    if data:
+        return {"ok": True, "job": data[0]}
+    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente
+    r2 = requests.get(
+        f"{SUPABASE_URL}/rest/v1/jobs?dedupe_key=eq.{body.dedupe_key}&limit=1",
+        headers=supabase_headers(),
+    )
+    data2 = r2.json() if r2.status_code < 300 else []
+    return {"ok": True, "job": data2[0] if data2 else None}
 
 _JOB_ID_PATH = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
