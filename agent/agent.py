@@ -227,6 +227,34 @@ def build_cowork_instruction(titulo: str, enunciado: str, alud_url: str) -> str:
         f"el usuario lo revisará y enviará manualmente cuando llegue a casa"
     )
 
+def _focus_claude_window() -> bool:
+    """Enfoca la ventana de Claude Desktop usando PowerShell + win32. Devuelve True si tuvo éxito."""
+    result = subprocess.run(
+        ["powershell", "-Command", """
+$proc = Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($proc) {
+    Add-Type @'
+    using System;
+    using System.Runtime.InteropServices;
+    public class Win32 {
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    }
+'@
+    [Win32]::ShowWindow($proc.MainWindowHandle, 3)  # SW_MAXIMIZE = 3
+    [Win32]::SetForegroundWindow($proc.MainWindowHandle)
+    Write-Output "OK"
+} else {
+    Write-Output "NOT_FOUND"
+}
+"""],
+        capture_output=True, text=True,
+    )
+    ok = "OK" in result.stdout
+    log.info(f"Foco Claude Desktop: {'OK' if ok else 'no encontrado'}")
+    return ok
+
+
 def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
 
@@ -234,32 +262,25 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{CLAUDE_APPID}"])
     time.sleep(CLAUDE_LAUNCH_WAIT)
 
-    log.info("Ctrl+2 → Cowork...")
-    pyautogui.hotkey("ctrl", "2")
-    time.sleep(2)
-
-    # Copiar instrucción al portapapeles ANTES de enfocar Claude Desktop
+    # Copiar al portapapeles antes de interactuar con la ventana
     log.info("Copiando instrucción al portapapeles...")
     ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
     subprocess.run(ps_cmd, check=True)
     time.sleep(0.3)
 
-    # Enfocar la ventana de Claude Desktop usando AppActivate (busca por título)
-    log.info("Enfocando ventana Claude Desktop...")
-    subprocess.run(
-        ["powershell", "-Command",
-         "(New-Object -ComObject WScript.Shell).AppActivate('Claude')"],
-        capture_output=True,
-    )
-    time.sleep(0.5)
-    # Maximizar la ventana activa para que el input esté en posición predecible
-    pyautogui.hotkey("win", "up")
+    # Enfocar y maximizar Claude Desktop via win32 (más fiable que AppActivate)
+    log.info("Enfocando Claude Desktop...")
+    _focus_claude_window()
     time.sleep(0.8)
 
-    # Click en el input: parte inferior central de la pantalla maximizada
+    # Ctrl+2 → Cowork (con ventana ya en foco)
+    log.info("Ctrl+2 → Cowork...")
+    pyautogui.hotkey("ctrl", "2")
+    time.sleep(2)
+
+    # Click en el input del chat (ventana maximizada → posición estable)
     screen_w, screen_h = pyautogui.size()
-    input_y = screen_h - 90  # input de Claude Desktop en ventana maximizada
-    pyautogui.click(screen_w // 2, input_y)
+    pyautogui.click(screen_w // 2, screen_h - 90)
     time.sleep(0.4)
 
     pyautogui.hotkey("ctrl", "v")
@@ -345,17 +366,11 @@ def main():
         enunciado = extract_enunciado(page, alud_url)
         report_stage(job_id, "enunciado_extracted", f"{len(enunciado)} chars extraídos")
 
-        # Cerrar Playwright limpiamente y reabrir Edge de forma independiente.
-        # Si NO hacemos esto, cuando Python termina Playwright mata el navegador.
-        context.close()
-        pw.stop()
-        log.info("Playwright cerrado. Reabriendo Edge de forma independiente...")
-        subprocess.Popen(
-            [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", alud_url],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-        time.sleep(3)  # dar tiempo a que Edge abra la URL
-        log.info("Edge abierto en la entrega. Pasando control a Cowork...")
+        # NO cerramos el contexto de Playwright — el navegador queda abierto
+        # con la sesión activa en la página de la entrega. Python saldrá con
+        # os._exit(0) al final para no ejecutar el __del__ de Playwright que
+        # mataría el proceso de Edge.
+        log.info("Navegador Playwright abierto en la entrega. Pasando a Cowork...")
 
         # ── pyautogui: Claude Desktop → Cowork ──
         report_stage(job_id, "solver_started", "Iniciando Claude Cowork")
@@ -374,6 +389,9 @@ def main():
     finally:
         heartbeat("offline")
         log.info("Agente finalizado.")
+        # os._exit evita que Python ejecute __del__ de Playwright,
+        # lo que mataría el proceso de Edge que queremos mantener abierto.
+        os._exit(0)
 
 
 if __name__ == "__main__":
