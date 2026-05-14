@@ -532,6 +532,18 @@ export default function Dashboard() {
   const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
   const visibleWidgets = widgetConfig.filter(w => w.visible);
+  // Agrupa widgets en secciones: bloques de widgets normales entre widgets wide
+  const widgetSections = (() => {
+    const sections = [];
+    let buf = [];
+    const flush = () => { if (buf.length) { sections.push({ type: "normal", widgets: [...buf] }); buf = []; } };
+    visibleWidgets.forEach(w => {
+      if ((w.size || "normal") === "wide") { flush(); sections.push({ type: "wide", widget: w }); }
+      else buf.push(w);
+    });
+    flush();
+    return sections;
+  })();
 
   function renderWidget(id) {
     switch (id) {
@@ -756,12 +768,17 @@ export default function Dashboard() {
         </div>
 
         {/* GRID */}
-        <div style={s.mainGrid} className="dashboard-grid">
-          {visibleWidgets.map(w => (
-            <div key={w.id} style={{ gridColumn: w.size === "wide" ? "1 / -1" : "span 1" }}>
-              {renderWidget(w.id)}
-            </div>
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: 1 }}>
+          {widgetSections.map((sec, i) => {
+            if (sec.type === "wide") return <div key={sec.widget.id}>{renderWidget(sec.widget.id)}</div>;
+            const half = Math.ceil(sec.widgets.length / 2);
+            return (
+              <div key={`normal-${i}`} style={s.mainGrid} className="dashboard-grid">
+                <div style={s.leftCol}>{sec.widgets.slice(0, half).map(w => renderWidget(w.id))}</div>
+                <div style={s.rightCol}>{sec.widgets.slice(half).map(w => renderWidget(w.id))}</div>
+              </div>
+            );
+          })}
         </div>
 
         {/* FOOTER */}
