@@ -743,3 +743,124 @@ def get_agent(
     agent["silence_seconds"] = int(silence_seconds)
     agent["heartbeat_timeout_seconds"] = 60
     return agent
+
+
+# ── ENTRENAMIENTO ─────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+class TrainingSessionCreate(BaseModel):
+    date: str = Field(max_length=10)
+    duration_hours: float = Field(gt=0, le=24)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v):
+        if not _DATE_RE.match(v):
+            raise ValueError("date debe tener formato YYYY-MM-DD")
+        return v
+
+class TrainingPaymentCreate(BaseModel):
+    date: str = Field(max_length=10)
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v):
+        if not _DATE_RE.match(v):
+            raise ValueError("date debe tener formato YYYY-MM-DD")
+        return v
+
+def _get_training_client():
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_clients?limit=1&order=created_at.asc",
+        headers=supabase_headers(),
+    )
+    rows = r.json() if r.status_code < 300 else []
+    return rows[0] if rows else None
+
+@app.get("/training/summary")
+def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    client = _get_training_client()
+    if not client:
+        return {"client": None}
+
+    client_id = client["id"]
+    price = float(client["price_per_hour"])
+    sessions_per_payment = int(client["sessions_per_payment"])
+
+    r_pay = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=date.desc&limit=1",
+        headers=supabase_headers(),
+    )
+    payments = r_pay.json() if r_pay.status_code < 300 else []
+    last_payment = payments[0] if payments else None
+
+    date_filter = f"&date=gt.{last_payment['date']}" if last_payment else ""
+    r_sess = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}&order=date.desc",
+        headers=supabase_headers(),
+    )
+    sessions = r_sess.json() if r_sess.status_code < 300 else []
+
+    total_hours = sum(float(s["duration_hours"]) for s in sessions)
+    return {
+        "client": client,
+        "sessions_since_payment": len(sessions),
+        "hours_since_payment": total_hours,
+        "amount_owed": round(total_hours * price, 2),
+        "sessions_per_payment": sessions_per_payment,
+        "last_payment_date": last_payment["date"] if last_payment else None,
+        "last_session_date": sessions[0]["date"] if sessions else None,
+        "recent_sessions": sessions[:5],
+    }
+
+@app.post("/training/sessions")
+def add_training_session(
+    body: TrainingSessionCreate,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    client = _get_training_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="No hay ningún cliente de entrenamiento")
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/training_sessions",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"client_id": client["id"], "date": body.date, "duration_hours": body.duration_hours},
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    return {"ok": True, "session": r.json()[0]}
+
+@app.post("/training/payments")
+def add_training_payment(
+    body: TrainingPaymentCreate,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    client = _get_training_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="No hay ningún cliente de entrenamiento")
+
+    client_id = client["id"]
+    r_pay = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=date.desc&limit=1",
+        headers=supabase_headers(),
+    )
+    payments = r_pay.json() if r_pay.status_code < 300 else []
+    last_payment = payments[0] if payments else None
+
+    date_filter = f"&date=gt.{last_payment['date']}" if last_payment else ""
+    r_sess = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}",
+        headers=supabase_headers(),
+    )
+    sessions = r_sess.json() if r_sess.status_code < 300 else []
+    amount = round(sum(float(s["duration_hours"]) for s in sessions) * float(client["price_per_hour"]), 2)
+
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/training_payments",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"client_id": client_id, "date": body.date, "amount": amount},
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    return {"ok": True, "payment": r.json()[0]}

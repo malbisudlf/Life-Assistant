@@ -16,6 +16,12 @@ dist-ssr
 backend/.env
 backend/.token
 
+# Datos personales
+*.xlsx
+*.xls
+import_training.py
+supabase_training_schema.sql
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

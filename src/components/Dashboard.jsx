@@ -118,6 +118,11 @@ function urgencyColor(days) {
   if (days <= 7) return "#c8a45a";
   return "#6aaa82";
 }
+function formatShortDate(dateStr) {
+  if (!dateStr) return "";
+  const [, m, d] = dateStr.split("-").map(Number);
+  return `${d} ${MONTHS_ES[m - 1].slice(0, 3)}`;
+}
 
 const DAYS_ES   = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 const MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
@@ -175,7 +180,11 @@ export default function Dashboard() {
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
   const [jobTerminal, setJobTerminal] = useState(null);
-
+  const [training, setTraining]           = useState(null);
+  const [showSessionForm, setShowSessionForm] = useState(false);
+  const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
+  const [sessionHours, setSessionHours]   = useState("1");
+  const [trainingLoading, setTrainingLoading] = useState(false);
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
@@ -225,6 +234,9 @@ export default function Dashboard() {
       })
       .catch(e => console.error("[CLASES] error:", e));
   }, []);
+
+  // Cargar resumen entrenamiento
+  useEffect(() => { loadTraining(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cargar ideas
   useEffect(() => {
@@ -376,6 +388,47 @@ export default function Dashboard() {
     const t = localStorage.getItem("la_token") || "";
     await fetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
     setIdeas(prev => prev.filter(i => i.id !== id));
+  }
+
+  async function loadTraining() {
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      const r = await fetch(`${API}/training/summary`, { headers: { "Authorization": `Bearer ${t}` } });
+      const data = await r.json();
+      setTraining(data);
+    } catch {}
+  }
+
+  async function submitSession() {
+    if (trainingLoading) return;
+    setTrainingLoading(true);
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      await fetch(`${API}/training/sessions`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ date: sessionDate, duration_hours: parseFloat(sessionHours) }),
+      });
+      setShowSessionForm(false);
+      await loadTraining();
+    } catch {}
+    setTrainingLoading(false);
+  }
+
+  async function submitPayment() {
+    if (trainingLoading) return;
+    setTrainingLoading(true);
+    const t = localStorage.getItem("la_token") || "";
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      await fetch(`${API}/training/payments`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ date: today }),
+      });
+      await loadTraining();
+    } catch {}
+    setTrainingLoading(false);
   }
 
 
@@ -583,6 +636,69 @@ export default function Dashboard() {
                   );
                 })}
               </div>
+            </div>
+
+            {/* Entrenamiento */}
+            <div style={s.card}>
+              <div style={s.sectionLabel}>Entrenamiento</div>
+              {!training?.client ? (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos</div>
+              ) : (() => {
+                const { sessions_since_payment: sess, hours_since_payment: hrs, amount_owed, sessions_per_payment: spp, last_payment_date, last_session_date, client } = training;
+                const pct = Math.min((sess / spp) * 100, 100);
+                const warn = sess >= spp;
+                const barColor = warn ? "#d4645a" : "var(--accent)";
+                return (
+                  <>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 26, color: barColor, lineHeight: 1 }}>{sess}</span>
+                      <span style={{ fontSize: 12, color: "var(--muted)" }}>/ {spp} sesiones</span>
+                      <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 15, color: warn ? "#d4645a" : "var(--text)" }}>{amount_owed}€</span>
+                    </div>
+                    <div style={{ height: 2, background: "var(--border)", borderRadius: 1, marginBottom: 8 }}>
+                      <div style={{ height: "100%", borderRadius: 1, background: barColor, width: `${pct}%`, transition: "width 0.4s" }} />
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
+                      {hrs > 0 && <span>{hrs}h acumuladas</span>}
+                      {last_session_date && <span style={{ marginLeft: hrs > 0 ? 8 : 0 }}>· Última: {formatShortDate(last_session_date)}</span>}
+                      {last_payment_date && <><br />Cobro: {formatShortDate(last_payment_date)}</>}
+                    </div>
+                    {showSessionForm ? (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <input
+                          type="date"
+                          value={sessionDate}
+                          onChange={e => setSessionDate(e.target.value)}
+                          style={{ flex: 1, minWidth: 120, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}
+                        />
+                        <select
+                          value={sessionHours}
+                          onChange={e => setSessionHours(e.target.value)}
+                          style={{ padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}
+                        >
+                          {["0.5","1","1.5","2","2.5","3"].map(h => <option key={h} value={h}>{h}h</option>)}
+                        </select>
+                        <button onClick={submitSession} disabled={trainingLoading} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
+                        <button onClick={() => setShowSessionForm(false)} style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => { setSessionDate(new Date().toISOString().slice(0, 10)); setShowSessionForm(true); }}
+                          style={{ flex: 1, padding: "7px 0", background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 6, color: "var(--accent)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+                        >+ Sesión</button>
+                        {sess > 0 && (
+                          <button
+                            onClick={submitPayment}
+                            disabled={trainingLoading}
+                            style={{ flex: 1, padding: "7px 0", background: "rgba(106,170,130,0.12)", border: "0.5px solid rgba(106,170,130,0.3)", borderRadius: 6, color: "var(--green)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
+                          >Cobrado ({amount_owed}€)</button>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Ideas */}
