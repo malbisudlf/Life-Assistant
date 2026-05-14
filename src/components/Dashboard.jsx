@@ -189,11 +189,19 @@ export default function Dashboard() {
   const [widgetConfig, setWidgetConfig]   = useState(() => {
     try {
       const saved = localStorage.getItem("la_widget_config");
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (!parsed.find(w => w.id === "__split__")) {
+          const half = Math.floor(parsed.filter(w => w.id !== "__split__").length / 2);
+          parsed.splice(half, 0, { id: "__split__" });
+        }
+        return parsed;
+      }
     } catch {}
     return [
       { id: "timeline", label: "Hoy",             visible: true, size: "normal" },
       { id: "upcoming", label: "Próximos eventos", visible: true, size: "normal" },
+      { id: "__split__" },
       { id: "entregas", label: "Entregas",         visible: true, size: "normal" },
       { id: "training", label: "Entrenamiento",    visible: true, size: "normal" },
       { id: "ideas",    label: "Ideas",            visible: true, size: "normal" },
@@ -531,14 +539,15 @@ export default function Dashboard() {
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
   const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
-  const visibleWidgets = widgetConfig.filter(w => w.visible);
-  // Agrupa widgets en secciones: bloques de widgets normales entre widgets wide
+  // __split__ siempre incluido (es estructural, no un widget real)
+  const visibleWidgets = widgetConfig.filter(w => w.id === "__split__" || w.visible);
+  // Agrupa widgets en secciones: bloques normales (con separador de columna) y bloques wide
   const widgetSections = (() => {
     const sections = [];
     let buf = [];
     const flush = () => { if (buf.length) { sections.push({ type: "normal", widgets: [...buf] }); buf = []; } };
     visibleWidgets.forEach(w => {
-      if ((w.size || "normal") === "wide") { flush(); sections.push({ type: "wide", widget: w }); }
+      if ((w.size || "normal") === "wide" && w.id !== "__split__") { flush(); sections.push({ type: "wide", widget: w }); }
       else buf.push(w);
     });
     flush();
@@ -771,11 +780,13 @@ export default function Dashboard() {
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: 1 }}>
           {widgetSections.map((sec, i) => {
             if (sec.type === "wide") return <div key={sec.widget.id}>{renderWidget(sec.widget.id)}</div>;
-            const half = Math.ceil(sec.widgets.length / 2);
+            const splitIdx = sec.widgets.findIndex(w => w.id === "__split__");
+            const leftW = splitIdx >= 0 ? sec.widgets.slice(0, splitIdx) : sec.widgets.slice(0, Math.floor(sec.widgets.length / 2));
+            const rightW = splitIdx >= 0 ? sec.widgets.slice(splitIdx + 1) : sec.widgets.slice(Math.floor(sec.widgets.length / 2));
             return (
               <div key={`normal-${i}`} style={s.mainGrid} className="dashboard-grid">
-                <div style={s.leftCol}>{sec.widgets.slice(0, half).map(w => renderWidget(w.id))}</div>
-                <div style={s.rightCol}>{sec.widgets.slice(half).map(w => renderWidget(w.id))}</div>
+                <div style={s.leftCol}>{leftW.map(w => renderWidget(w.id))}</div>
+                <div style={s.rightCol}>{rightW.map(w => renderWidget(w.id))}</div>
               </div>
             );
           })}
@@ -922,7 +933,28 @@ export default function Dashboard() {
           }}>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 18, letterSpacing: "0.04em" }}>Widgets</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {widgetConfig.map((w, i) => (
+              {widgetConfig.map((w, i) => w.id === "__split__" ? (
+                <div key="__split__" style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "5px 10px", borderRadius: 8,
+                  background: "rgba(255,255,255,0.01)", border: "0.5px dashed rgba(255,255,255,0.12)",
+                }}>
+                  <div style={{ width: 16, height: 16, flexShrink: 0 }} />
+                  <span style={{ flex: 1, fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace", letterSpacing: "0.05em" }}>── col. derecha ──</span>
+                  <div style={{ display: "flex", gap: 0 }}>
+                    <button onClick={() => moveWidget("__split__", -1)} disabled={i === 0} style={{
+                      background: "transparent", border: "none",
+                      color: i === 0 ? "rgba(255,255,255,0.15)" : "var(--muted)",
+                      cursor: i === 0 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
+                    }}>↑</button>
+                    <button onClick={() => moveWidget("__split__", 1)} disabled={i === widgetConfig.length - 1} style={{
+                      background: "transparent", border: "none",
+                      color: i === widgetConfig.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
+                      cursor: i === widgetConfig.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
+                    }}>↓</button>
+                  </div>
+                </div>
+              ) : (
                 <div key={w.id} style={{
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "8px 10px", borderRadius: 8,
