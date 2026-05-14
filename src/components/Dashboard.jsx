@@ -185,6 +185,20 @@ export default function Dashboard() {
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
+  const [showSettings, setShowSettings]   = useState(false);
+  const [widgetConfig, setWidgetConfig]   = useState(() => {
+    try {
+      const saved = localStorage.getItem("la_widget_config");
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [
+      { id: "timeline", label: "Hoy",             visible: true },
+      { id: "upcoming", label: "Próximos eventos", visible: true },
+      { id: "entregas", label: "Entregas",         visible: true },
+      { id: "training", label: "Entrenamiento",    visible: true },
+      { id: "ideas",    label: "Ideas",            visible: true },
+    ];
+  });
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
@@ -431,6 +445,20 @@ export default function Dashboard() {
     setTrainingLoading(false);
   }
 
+  function saveWidgetConfig(cfg) {
+    setWidgetConfig(cfg);
+    localStorage.setItem("la_widget_config", JSON.stringify(cfg));
+  }
+  function toggleWidget(id) {
+    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, visible: !w.visible } : w));
+  }
+  function moveWidget(id, dir) {
+    const idx = widgetConfig.findIndex(w => w.id === id);
+    if (idx + dir < 0 || idx + dir >= widgetConfig.length) return;
+    const cfg = [...widgetConfig];
+    [cfg[idx], cfg[idx + dir]] = [cfg[idx + dir], cfg[idx]];
+    saveWidgetConfig(cfg);
+  }
 
   useEffect(() => {
     if (!activeJobId || !token) return;
@@ -500,6 +528,209 @@ export default function Dashboard() {
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
   const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
+  const visibleWidgets = widgetConfig.filter(w => w.visible);
+  const splitIdx = Math.floor(visibleWidgets.length / 2);
+  const leftWidgets = visibleWidgets.slice(0, splitIdx);
+  const rightWidgets = visibleWidgets.slice(splitIdx);
+
+  function renderWidget(id) {
+    switch (id) {
+      case "timeline": return (
+        <div style={s.card} key="timeline">
+          <div style={s.sectionLabel}>Hoy</div>
+          {loading ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "16px 0" }}>Cargando eventos...</div>
+          ) : authNeeded ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
+              <a href={`${API}/auth/login`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", textDecoration: "none" }}>
+                → Conectar Outlook
+              </a>
+            </div>
+          ) : todayEvents.length === 0 && todayClasses.length === 0 ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
+          ) : (
+            <>
+              <div style={s.timelineWrapper}>
+                <div style={s.timeline} className="timeline-inner">
+                  {timelineNodes.map((node, i) => (
+                    <div key={i} style={s.timelineItem} onClick={() => {
+                      if (node.type === "event") setActiveEvent(node.ev);
+                      else setClassesOpen(true);
+                    }}>
+                      {i < timelineNodes.length - 1 && <div style={s.connectorLine} />}
+                      {node.type === "event" ? (
+                        <>
+                          <div style={{
+                            ...s.node,
+                            ...(node.ev.active ? s.nodeActive : {}),
+                            ...(node.ev.past   ? s.nodePast   : {}),
+                            ...(!node.ev.active && !node.ev.past ? s.nodeFuture : {}),
+                          }} />
+                          <div style={s.nodeLabel}>
+                            <div style={s.nodeTime}>{node.ev.time}</div>
+                            <div style={{ ...s.nodeTitle, ...(node.ev.active ? s.nodeTitleActive : {}) }}>{node.ev.title}</div>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ ...s.node, background: "#8bb4d4", border: "1.5px solid #8bb4d4", boxShadow: "0 0 8px rgba(139,180,212,0.5)" }} />
+                          <div style={s.nodeLabel}>
+                            <div style={s.nodeTime}>🎓</div>
+                            <div style={{ ...s.nodeTitle, color: "var(--accent2)" }}>Clases ({todayClasses.length})</div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {displayActive && (
+                <div style={s.eventDetail}>
+                  <div style={{ flex: 1 }}>
+                    <div style={s.eventDetailTitle}>{displayActive.title}</div>
+                    <div style={s.eventDetailSub}>{displayActive.loc}</div>
+                    <DepartureWidget ev={displayActive} />
+                  </div>
+                  <div style={s.eventDetailTime}>{displayActive.time}</div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+      case "upcoming": return (
+        <div style={s.card} key="upcoming">
+          <div style={s.sectionLabel}>Próximos eventos</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+            {upcomingEvents.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
+            ) : upcomingEvents.map((ev, i) => (
+              <div key={i} style={{ ...s.eventRow, flexWrap: "wrap", alignItems: "flex-start" }}>
+                <div style={s.eventDot} />
+                <div style={s.eventRowTime}>{ev.time}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={s.eventRowTitle}>{ev.title}</div>
+                  {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
+                  <DepartureWidget ev={ev} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+      case "entregas": return (
+        <div style={s.card} key="entregas">
+          <div style={s.sectionLabel}>Entregas pendientes</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+            {entregas.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con 📚 en el título</div>
+            ) : entregas.map((e, i) => {
+              const color = urgencyColor(e.days);
+              return (
+                <div key={i} style={s.entregaRow} onClick={() => { setWolModal(e); setWolStatus(null); }}>
+                  <div style={{ ...s.urgencyBar, background: color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={s.entregaTitle}>{e.title}</div>
+                    <div style={s.entregaSubject}>{e.subject}</div>
+                  </div>
+                  <div style={s.entregaCountdown}>
+                    <div style={{ ...s.daysNum, color }}>{e.days}</div>
+                    <span style={s.daysLabel}>días</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+      case "training": return (
+        <div style={s.card} key="training">
+          <div style={s.sectionLabel}>Entrenamiento</div>
+          {!training?.client ? (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos</div>
+          ) : (() => {
+            const { sessions_since_payment: sess, hours_since_payment: hrs, amount_owed, sessions_per_payment: spp, last_payment_date, last_session_date } = training;
+            const pct = Math.min((sess / spp) * 100, 100);
+            const warn = sess >= spp;
+            const barColor = warn ? "#d4645a" : "var(--accent)";
+            return (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 26, color: barColor, lineHeight: 1 }}>{sess}</span>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>/ {spp} sesiones</span>
+                  <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 15, color: warn ? "#d4645a" : "var(--text)" }}>{amount_owed}€</span>
+                </div>
+                <div style={{ height: 2, background: "var(--border)", borderRadius: 1, marginBottom: 8 }}>
+                  <div style={{ height: "100%", borderRadius: 1, background: barColor, width: `${pct}%`, transition: "width 0.4s" }} />
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
+                  {hrs > 0 && <span>{hrs}h acumuladas</span>}
+                  {last_session_date && <span style={{ marginLeft: hrs > 0 ? 8 : 0 }}>· Última: {formatShortDate(last_session_date)}</span>}
+                  {last_payment_date && <><br />Cobro: {formatShortDate(last_payment_date)}</>}
+                </div>
+                {showSessionForm ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <input type="date" value={sessionDate} onChange={e => setSessionDate(e.target.value)}
+                      style={{ flex: 1, minWidth: 120, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                    <select value={sessionHours} onChange={e => setSessionHours(e.target.value)}
+                      style={{ padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}>
+                      {["0.5","1","1.5","2","2.5","3"].map(h => <option key={h} value={h}>{h}h</option>)}
+                    </select>
+                    <button onClick={submitSession} disabled={trainingLoading} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
+                    <button onClick={() => setShowSessionForm(false)} style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => { setSessionDate(new Date().toISOString().slice(0, 10)); setShowSessionForm(true); }}
+                      style={{ flex: 1, padding: "7px 0", background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 6, color: "var(--accent)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>+ Sesión</button>
+                    {sess > 0 && (
+                      <button onClick={submitPayment} disabled={trainingLoading}
+                        style={{ flex: 1, padding: "7px 0", background: "rgba(106,170,130,0.12)", border: "0.5px solid rgba(106,170,130,0.3)", borderRadius: 6, color: "var(--green)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>Cobrado ({amount_owed}€)</button>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      );
+      case "ideas": return (
+        <div style={s.card} key="ideas">
+          <div style={s.sectionLabel}>Ideas</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+            {ideas.length === 0 && !processing && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin ideas todavía. ¡Graba una!</div>
+            )}
+            {processing && (
+              <div style={{ color: "var(--accent)", fontSize: 13, padding: "8px 0", animation: "pulse 1.5s infinite" }}>
+                Procesando audio...
+              </div>
+            )}
+            {ideas.map((idea, i) => (
+              <div key={idea.id || i} style={s.ideaCard} onClick={() => setOpenIdea(openIdea === i ? null : i)}>
+                <div style={s.ideaKey}>
+                  <span style={{ flex: 1 }}>{idea.key}</span>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                    <span style={s.ideaTag}>{idea.tag}</span>
+                    <span style={{ fontSize: 10, color: "var(--muted2)", cursor: "pointer", padding: "0 4px" }}
+                      onClick={e => { e.stopPropagation(); deleteIdea(idea.id); }}>✕</span>
+                    <span style={{ ...s.ideaChevron, transform: openIdea === i ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
+                  </div>
+                </div>
+                {openIdea === i && <div style={s.ideaFull}>{idea.full_text}</div>}
+              </div>
+            ))}
+          </div>
+          <button style={{ ...s.newIdeaBtn, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
+            onClick={recording ? stopRecording : startRecording} disabled={processing}>
+            {processing ? "Procesando..." : recording ? "⏹ Parar grabación" : "● Grabar idea"}
+          </button>
+        </div>
+      );
+      default: return null;
+    }
+  }
+
   if (!token) return <LoginScreen onLogin={() => window.location.reload()} />;
 
   return (
@@ -516,6 +747,11 @@ export default function Dashboard() {
           <div style={s.greeting} className="header-greeting">
             {greeting}
             <strong style={s.greetingStrong}>Mikel</strong>
+            <button onClick={() => setShowSettings(true)} style={{
+              marginLeft: 14, background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
+              borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
+              padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
+            }} title="Ajustes de widgets">⚙</button>
           </div>
         </div>
 
@@ -524,218 +760,12 @@ export default function Dashboard() {
 
           {/* COL IZQUIERDA */}
           <div style={s.leftCol}>
-
-            {/* Timeline */}
-            <div style={s.card}>
-              <div style={s.sectionLabel}>Hoy</div>
-              {loading ? (
-                <div style={{ color: "var(--muted)", fontSize: 13, padding: "16px 0" }}>Cargando eventos...</div>
-              ) : authNeeded ? (
-                <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
-                  <a href={`${API}/auth/login`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", textDecoration: "none" }}>
-                    → Conectar Outlook
-                  </a>
-                </div>
-              ) : todayEvents.length === 0 && todayClasses.length === 0 ? (
-                <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
-              ) : (
-                <>
-                  <div style={s.timelineWrapper}>
-                    <div style={s.timeline} className="timeline-inner">
-                      {timelineNodes.map((node, i) => (
-                        <div key={i} style={s.timelineItem} onClick={() => {
-                          if (node.type === "event") setActiveEvent(node.ev);
-                          else setClassesOpen(true);
-                        }}>
-                          {i < timelineNodes.length - 1 && <div style={s.connectorLine} />}
-                          {node.type === "event" ? (
-                            <>
-                              <div style={{
-                                ...s.node,
-                                ...(node.ev.active ? s.nodeActive : {}),
-                                ...(node.ev.past   ? s.nodePast   : {}),
-                                ...(!node.ev.active && !node.ev.past ? s.nodeFuture : {}),
-                              }} />
-                              <div style={s.nodeLabel}>
-                                <div style={s.nodeTime}>{node.ev.time}</div>
-                                <div style={{ ...s.nodeTitle, ...(node.ev.active ? s.nodeTitleActive : {}) }}>{node.ev.title}</div>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div style={{ ...s.node, background: "#8bb4d4", border: "1.5px solid #8bb4d4", boxShadow: "0 0 8px rgba(139,180,212,0.5)" }} />
-                              <div style={s.nodeLabel}>
-                                <div style={s.nodeTime}>🎓</div>
-                                <div style={{ ...s.nodeTitle, color: "var(--accent2)" }}>Clases ({todayClasses.length})</div>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {displayActive && (
-                    <div style={s.eventDetail}>
-                      <div style={{ flex: 1 }}>
-                        <div style={s.eventDetailTitle}>{displayActive.title}</div>
-                        <div style={s.eventDetailSub}>{displayActive.loc}</div>
-                        <DepartureWidget ev={displayActive} />
-                      </div>
-                      <div style={s.eventDetailTime}>{displayActive.time}</div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* Próximos eventos */}
-            <div style={s.card}>
-              <div style={s.sectionLabel}>Próximos eventos</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-                {upcomingEvents.length === 0 ? (
-                  <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
-                ) : upcomingEvents.map((ev, i) => (
-                  <div key={i} style={{ ...s.eventRow, flexWrap: "wrap", alignItems: "flex-start" }}>
-                    <div style={s.eventDot} />
-                    <div style={s.eventRowTime}>{ev.time}</div>
-                    <div style={{ flex: 1 }}>
-                      <div style={s.eventRowTitle}>{ev.title}</div>
-                      {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
-                      <DepartureWidget ev={ev} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            {leftWidgets.map(w => renderWidget(w.id))}
           </div>
 
           {/* COL DERECHA */}
           <div style={s.rightCol}>
-
-            {/* Entregas */}
-            <div style={s.card}>
-              <div style={s.sectionLabel}>Entregas pendientes</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-                {entregas.length === 0 ? (
-                  <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con 📚 en el título</div>
-                ) : entregas.map((e, i) => {
-                  const color = urgencyColor(e.days);
-                  return (
-                    <div key={i} style={s.entregaRow} onClick={() => { setWolModal(e); setWolStatus(null); }}>
-                      <div style={{ ...s.urgencyBar, background: color }} />
-                      <div style={{ flex: 1 }}>
-                        <div style={s.entregaTitle}>{e.title}</div>
-                        <div style={s.entregaSubject}>{e.subject}</div>
-                      </div>
-                      <div style={s.entregaCountdown}>
-                        <div style={{ ...s.daysNum, color }}>{e.days}</div>
-                        <span style={s.daysLabel}>días</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Entrenamiento */}
-            <div style={s.card}>
-              <div style={s.sectionLabel}>Entrenamiento</div>
-              {!training?.client ? (
-                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos</div>
-              ) : (() => {
-                const { sessions_since_payment: sess, hours_since_payment: hrs, amount_owed, sessions_per_payment: spp, last_payment_date, last_session_date, client } = training;
-                const pct = Math.min((sess / spp) * 100, 100);
-                const warn = sess >= spp;
-                const barColor = warn ? "#d4645a" : "var(--accent)";
-                return (
-                  <>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
-                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 26, color: barColor, lineHeight: 1 }}>{sess}</span>
-                      <span style={{ fontSize: 12, color: "var(--muted)" }}>/ {spp} sesiones</span>
-                      <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 15, color: warn ? "#d4645a" : "var(--text)" }}>{amount_owed}€</span>
-                    </div>
-                    <div style={{ height: 2, background: "var(--border)", borderRadius: 1, marginBottom: 8 }}>
-                      <div style={{ height: "100%", borderRadius: 1, background: barColor, width: `${pct}%`, transition: "width 0.4s" }} />
-                    </div>
-                    <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
-                      {hrs > 0 && <span>{hrs}h acumuladas</span>}
-                      {last_session_date && <span style={{ marginLeft: hrs > 0 ? 8 : 0 }}>· Última: {formatShortDate(last_session_date)}</span>}
-                      {last_payment_date && <><br />Cobro: {formatShortDate(last_payment_date)}</>}
-                    </div>
-                    {showSessionForm ? (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <input
-                          type="date"
-                          value={sessionDate}
-                          onChange={e => setSessionDate(e.target.value)}
-                          style={{ flex: 1, minWidth: 120, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}
-                        />
-                        <select
-                          value={sessionHours}
-                          onChange={e => setSessionHours(e.target.value)}
-                          style={{ padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}
-                        >
-                          {["0.5","1","1.5","2","2.5","3"].map(h => <option key={h} value={h}>{h}h</option>)}
-                        </select>
-                        <button onClick={submitSession} disabled={trainingLoading} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
-                        <button onClick={() => setShowSessionForm(false)} style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          onClick={() => { setSessionDate(new Date().toISOString().slice(0, 10)); setShowSessionForm(true); }}
-                          style={{ flex: 1, padding: "7px 0", background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 6, color: "var(--accent)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
-                        >+ Sesión</button>
-                        {sess > 0 && (
-                          <button
-                            onClick={submitPayment}
-                            disabled={trainingLoading}
-                            style={{ flex: 1, padding: "7px 0", background: "rgba(106,170,130,0.12)", border: "0.5px solid rgba(106,170,130,0.3)", borderRadius: 6, color: "var(--green)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}
-                          >Cobrado ({amount_owed}€)</button>
-                        )}
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-
-            {/* Ideas */}
-            <div style={s.card}>
-              <div style={s.sectionLabel}>Ideas</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-                {ideas.length === 0 && !processing && (
-                  <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin ideas todavía. ¡Graba una!</div>
-                )}
-                {processing && (
-                  <div style={{ color: "var(--accent)", fontSize: 13, padding: "8px 0", animation: "pulse 1.5s infinite" }}>
-                    Procesando audio...
-                  </div>
-                )}
-                {ideas.map((idea, i) => (
-                  <div key={idea.id || i} style={s.ideaCard} onClick={() => setOpenIdea(openIdea === i ? null : i)}>
-                    <div style={s.ideaKey}>
-                      <span style={{ flex: 1 }}>{idea.key}</span>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                        <span style={s.ideaTag}>{idea.tag}</span>
-                        <span style={{ fontSize: 10, color: "var(--muted2)", cursor: "pointer", padding: "0 4px" }}
-                          onClick={e => { e.stopPropagation(); deleteIdea(idea.id); }}>✕</span>
-                        <span style={{ ...s.ideaChevron, transform: openIdea === i ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
-                      </div>
-                    </div>
-                    {openIdea === i && <div style={s.ideaFull}>{idea.full_text}</div>}
-                  </div>
-                ))}
-              </div>
-              <button
-                style={{ ...s.newIdeaBtn, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
-                onClick={recording ? stopRecording : startRecording}
-                disabled={processing}
-              >
-                {processing ? "Procesando..." : recording ? "⏹ Parar grabación" : "● Grabar idea"}
-              </button>
-            </div>
+            {rightWidgets.map(w => renderWidget(w.id))}
           </div>
         </div>
 
@@ -862,6 +892,58 @@ export default function Dashboard() {
                 }}>Cerrar</button>
               </div>
             )}
+          </div>
+        </>
+      )}
+
+      {/* ── AJUSTES ── */}
+      {showSettings && (
+        <>
+          <div onClick={() => setShowSettings(false)} style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)", zIndex: 200,
+          }} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+            background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+            borderRadius: 16, padding: "28px 32px", zIndex: 201,
+            width: "min(340px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+          }}>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 18, letterSpacing: "0.04em" }}>Widgets</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {widgetConfig.map((w, i) => (
+                <div key={w.id} style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 10px", borderRadius: 8,
+                  background: "rgba(255,255,255,0.03)", border: "0.5px solid rgba(255,255,255,0.06)",
+                }}>
+                  <button onClick={() => toggleWidget(w.id)} style={{
+                    width: 16, height: 16, borderRadius: 4,
+                    border: `0.5px solid ${w.visible ? "var(--accent)" : "rgba(255,255,255,0.2)"}`,
+                    background: w.visible ? "var(--accent)" : "transparent",
+                    cursor: "pointer", flexShrink: 0, padding: 0,
+                  }} />
+                  <span style={{ flex: 1, fontSize: 13, color: w.visible ? "var(--text)" : "var(--muted)", fontFamily: "'DM Sans', sans-serif" }}>{w.label}</span>
+                  <div style={{ display: "flex", gap: 0 }}>
+                    <button onClick={() => moveWidget(w.id, -1)} disabled={i === 0} style={{
+                      background: "transparent", border: "none",
+                      color: i === 0 ? "rgba(255,255,255,0.15)" : "var(--muted)",
+                      cursor: i === 0 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
+                    }}>↑</button>
+                    <button onClick={() => moveWidget(w.id, 1)} disabled={i === widgetConfig.length - 1} style={{
+                      background: "transparent", border: "none",
+                      color: i === widgetConfig.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
+                      cursor: i === widgetConfig.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
+                    }}>↓</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setShowSettings(false)} style={{
+              marginTop: 18, width: "100%", padding: "9px 0",
+              background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
+              borderRadius: 8, color: "var(--muted)", fontSize: 13, cursor: "pointer",
+              fontFamily: "'DM Sans', sans-serif",
+            }}>Cerrar</button>
           </div>
         </>
       )}
