@@ -192,11 +192,11 @@ export default function Dashboard() {
       if (saved) return JSON.parse(saved);
     } catch {}
     return [
-      { id: "timeline", label: "Hoy",             visible: true },
-      { id: "upcoming", label: "Próximos eventos", visible: true },
-      { id: "entregas", label: "Entregas",         visible: true },
-      { id: "training", label: "Entrenamiento",    visible: true },
-      { id: "ideas",    label: "Ideas",            visible: true },
+      { id: "timeline", label: "Hoy",             visible: true, size: "normal" },
+      { id: "upcoming", label: "Próximos eventos", visible: true, size: "normal" },
+      { id: "entregas", label: "Entregas",         visible: true, size: "normal" },
+      { id: "training", label: "Entrenamiento",    visible: true, size: "normal" },
+      { id: "ideas",    label: "Ideas",            visible: true, size: "normal" },
     ];
   });
 
@@ -459,6 +459,9 @@ export default function Dashboard() {
     [cfg[idx], cfg[idx + dir]] = [cfg[idx + dir], cfg[idx]];
     saveWidgetConfig(cfg);
   }
+  function resizeWidget(id, size) {
+    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, size } : w));
+  }
 
   useEffect(() => {
     if (!activeJobId || !token) return;
@@ -529,9 +532,6 @@ export default function Dashboard() {
   const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
   const visibleWidgets = widgetConfig.filter(w => w.visible);
-  const splitIdx = Math.floor(visibleWidgets.length / 2);
-  const leftWidgets = visibleWidgets.slice(0, splitIdx);
-  const rightWidgets = visibleWidgets.slice(splitIdx);
 
   function renderWidget(id) {
     switch (id) {
@@ -757,16 +757,11 @@ export default function Dashboard() {
 
         {/* GRID */}
         <div style={s.mainGrid} className="dashboard-grid">
-
-          {/* COL IZQUIERDA */}
-          <div style={s.leftCol}>
-            {leftWidgets.map(w => renderWidget(w.id))}
-          </div>
-
-          {/* COL DERECHA */}
-          <div style={s.rightCol}>
-            {rightWidgets.map(w => renderWidget(w.id))}
-          </div>
+          {visibleWidgets.map(w => (
+            <div key={w.id} style={{ gridColumn: w.size === "wide" ? "1 / -1" : "span 1" }}>
+              {renderWidget(w.id)}
+            </div>
+          ))}
         </div>
 
         {/* FOOTER */}
@@ -923,6 +918,16 @@ export default function Dashboard() {
                     cursor: "pointer", flexShrink: 0, padding: 0,
                   }} />
                   <span style={{ flex: 1, fontSize: 13, color: w.visible ? "var(--text)" : "var(--muted)", fontFamily: "'DM Sans', sans-serif" }}>{w.label}</span>
+                  <div style={{ display: "flex", gap: 3, marginRight: 4 }}>
+                    {["normal", "wide"].map(sz => (
+                      <button key={sz} onClick={() => resizeWidget(w.id, sz)} title={sz === "normal" ? "Normal" : "Ancho completo"} style={{
+                        background: w.size === sz ? "rgba(200,169,110,0.18)" : "transparent",
+                        border: `0.5px solid ${w.size === sz ? "rgba(200,169,110,0.5)" : "rgba(255,255,255,0.1)"}`,
+                        borderRadius: 4, cursor: "pointer", padding: "2px 5px", fontSize: 10,
+                        color: w.size === sz ? "var(--accent)" : "var(--muted)",
+                      }}>{sz === "normal" ? "▣" : "▣▣"}</button>
+                    ))}
+                  </div>
                   <div style={{ display: "flex", gap: 0 }}>
                     <button onClick={() => moveWidget(w.id, -1)} disabled={i === 0} style={{
                       background: "transparent", border: "none",
