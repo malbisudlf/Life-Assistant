@@ -303,8 +303,10 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     pyautogui.click(screen_w // 2, screen_h - 90)
     time.sleep(0.4)
 
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.5)
+    pyautogui.hotkey("win", "v")
+    time.sleep(0.8)  # esperar a que aparezca el panel de historial
+    pyautogui.press("enter")
+    time.sleep(0.3)
     pyautogui.press("enter")
     log.info("Instrucción enviada a Cowork.")
 
