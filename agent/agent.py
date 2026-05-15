@@ -370,7 +370,7 @@ def main():
         # permanezca abierto después de la extracción y Cowork pueda verlo.
         pw = sync_playwright().start()
         # Usar el perfil real de Edge para tener cookies y sesiones guardadas
-        edge_profile = os.getenv("EDGE_PROFILE_DIR", r"C:\Users\%USERNAME%\AppData\Local\Microsoft\Edge\User Data")
+        edge_profile = os.getenv("EDGE_PROFILE_DIR") or os.path.join(os.path.expanduser("~"), "AppData", "Local", "Microsoft", "Edge", "User Data")
         context = pw.chromium.launch_persistent_context(
             user_data_dir=edge_profile,
             channel="msedge",
