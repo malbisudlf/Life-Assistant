@@ -321,7 +321,7 @@ def main():
     # Esperar job pendiente (máx 5 minutos)
     log.info("Buscando job pendiente...")
     job = None
-    deadline = time.time() + 300
+    deadline = time.time() + 25
 
     while time.time() < deadline:
         heartbeat("online")
