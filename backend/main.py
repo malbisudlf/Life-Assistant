@@ -802,6 +802,12 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     )
     sessions = r_sess.json() if r_sess.status_code < 300 else []
 
+    r_all = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}&order=date.desc&limit=10",
+        headers=supabase_headers(),
+    )
+    all_sessions = r_all.json() if r_all.status_code < 300 else []
+
     total_hours = sum(float(s["duration_hours"]) for s in sessions)
     return {
         "client": client,
@@ -812,6 +818,7 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
         "last_payment_date": last_payment["date"] if last_payment else None,
         "last_session_date": sessions[0]["date"] if sessions else None,
         "recent_sessions": sessions[:5],
+        "all_recent_sessions": all_sessions,
     }
 
 @app.post("/training/sessions")
@@ -830,6 +837,45 @@ def add_training_session(
     if r.status_code >= 300:
         raise HTTPException(status_code=400, detail=r.text)
     return {"ok": True, "session": r.json()[0]}
+
+class TrainingClientUpdate(BaseModel):
+    price_per_hour: float | None = Field(None, gt=0, le=1000)
+    sessions_per_payment: int | None = Field(None, gt=0, le=100)
+
+@app.patch("/training/client")
+def update_training_client(
+    body: TrainingClientUpdate,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    client = _get_training_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="No hay ningún cliente de entrenamiento")
+    patch = {}
+    if body.price_per_hour is not None:
+        patch["price_per_hour"] = body.price_per_hour
+    if body.sessions_per_payment is not None:
+        patch["sessions_per_payment"] = body.sessions_per_payment
+    if not patch:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/training_clients?id=eq.{client['id']}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=patch,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=400, detail=r.text)
+    return {"ok": True, "client": r.json()[0]}
+
+@app.delete("/training/sessions/{session_id}")
+def delete_training_session(
+    session_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    r = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/training_sessions?id=eq.{session_id}",
+        headers=supabase_headers(),
+    )
+    return {"ok": r.status_code < 300}
 
 @app.post("/training/payments")
 def add_training_payment(

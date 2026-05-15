@@ -180,12 +180,17 @@ export default function Dashboard() {
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
   const [jobTerminal, setJobTerminal] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
   const [training, setTraining]           = useState(null);
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [showTrainingSettings, setShowTrainingSettings] = useState(false);
+  const [trainingSettingsPrice, setTrainingSettingsPrice] = useState("");
+  const [trainingSettingsSpp, setTrainingSettingsSpp]     = useState("");
+  const [trainingSettingsSaving, setTrainingSettingsSaving] = useState(false);
   const [widgetConfig, setWidgetConfig]   = useState(() => {
     try {
       const saved = localStorage.getItem("la_widget_config");
@@ -398,6 +403,7 @@ export default function Dashboard() {
       setActiveJobId(jobData?.job?.id || null);
       setJobEvents([]);
       setJobTerminal(null);
+      setJobStatus("pending");
 
       setWolStatus("ok");
       setWolStartedAt(Date.now());
@@ -435,6 +441,27 @@ export default function Dashboard() {
       await loadTraining();
     } catch {}
     setTrainingLoading(false);
+  }
+
+  async function deleteTrainingSession(sessionId) {
+    const t = localStorage.getItem("la_token") || "";
+    await fetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    await loadTraining();
+  }
+
+  async function updateTrainingClient(patch) {
+    if (trainingSettingsSaving) return;
+    setTrainingSettingsSaving(true);
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      await fetch(`${API}/training/client`, {
+        method: "PATCH",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      await loadTraining();
+    } catch {}
+    setTrainingSettingsSaving(false);
   }
 
   async function submitPayment() {
@@ -486,6 +513,7 @@ export default function Dashboard() {
         if (!mounted) return;
         setJobEvents(evData?.events || []);
         const st = jobData?.job?.status;
+        if (st) setJobStatus(st);
         if (st === "done" || st === "failed") {
           setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
         }
@@ -495,6 +523,23 @@ export default function Dashboard() {
   }, [activeJobId, token]);
 
   const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
+  const STAGE_LABELS = {
+    "heartbeat_online":     "Agente online",
+    "job_claimed":          "Job recogido",
+    "login_ok":             "Login en Alud OK",
+    "assignment_opened":    "Entrega abierta",
+    "enunciado_extracted":  "Enunciado extraído",
+    "solver_started":       "Cowork iniciado",
+    "result_saved":         "Instrucción enviada",
+    "job_done":             "Completado",
+  };
+  const JOB_STATUS_LABEL = {
+    "pending":  "En cola — esperando agente",
+    "claimed":  "Agente ha recogido el job",
+    "running":  "En ejecución",
+    "done":     "Completado",
+    "failed":   "Error",
+  };
   const stageIndex = new Map(STAGES.map((st, i) => [st, i]));
   const maxStage = jobEvents.reduce((max, ev) => Math.max(max, stageIndex.get(ev.stage) ?? -1), -1);
   const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
@@ -768,7 +813,11 @@ export default function Dashboard() {
           <div style={s.greeting} className="header-greeting">
             {greeting}
             <strong style={s.greetingStrong}>Mikel</strong>
-            <button onClick={() => setShowSettings(true)} style={{
+            <button onClick={() => {
+              setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
+              setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
+              setShowSettings(true);
+            }} style={{
               marginLeft: 14, background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
               borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
               padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
@@ -881,22 +930,44 @@ export default function Dashboard() {
 
             {wolStatus === "ok" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
-                <div style={{ fontSize: 32, marginBottom: 12 }}>✅</div>
-                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500 }}>¡Job en progreso!</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 10 }}>
-                  Progreso por etapas: {progressPct}%
+                <div style={{ fontSize: 32, marginBottom: 12 }}>
+                  {jobTerminal?.status === "done" ? "✅" : jobTerminal?.status === "failed" ? "❌" : "⚡"}
                 </div>
-                <div style={{ width: "100%", height: 8, background: "rgba(255,255,255,0.08)", borderRadius: 999, overflow: "hidden", marginBottom: 10 }}>
-                  <div style={{ width: `${progressPct}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500, marginBottom: 4 }}>
+                  {jobTerminal?.status === "done" ? "¡Entrega completada!" : jobTerminal?.status === "failed" ? "El agente ha fallado" : "Job enviado"}
                 </div>
-                <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 130, overflowY: "auto" }}>
-                  {jobEvents.length === 0 ? "Esperando eventos del agente..." : jobEvents.map((ev, i) => (
-                    <div key={i} style={{ marginBottom: 4 }}>• {ev.stage}{ev.message ? ` — ${ev.message}` : ""}</div>
-                  ))}
+                <div style={{
+                  display: "inline-block", fontSize: 10, padding: "2px 10px", borderRadius: 99,
+                  background: jobStatus === "running" ? "rgba(106,170,130,0.15)" : "rgba(255,255,255,0.06)",
+                  color: jobStatus === "running" ? "var(--green)" : "var(--muted)",
+                  border: `0.5px solid ${jobStatus === "running" ? "rgba(106,170,130,0.4)" : "rgba(255,255,255,0.1)"}`,
+                  marginBottom: 12, letterSpacing: "0.05em",
+                }}>
+                  {JOB_STATUS_LABEL[jobStatus] || jobStatus || "—"}
                 </div>
-                {jobTerminal && (
-                  <div style={{ marginTop: 10, fontSize: 12, color: jobTerminal.status === "done" ? "var(--green)" : "#d4645a" }}>
-                    Estado terminal: {jobTerminal.status}{jobTerminal.reason ? ` — ${jobTerminal.reason}` : ""}
+                <div style={{ width: "100%", height: 6, background: "rgba(255,255,255,0.08)", borderRadius: 999, overflow: "hidden", marginBottom: 10 }}>
+                  <div style={{ width: `${progressPct}%`, height: "100%", background: "var(--accent)", transition: "width 0.5s" }} />
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+                  {progressPct}%
+                </div>
+                <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 140, overflowY: "auto" }}>
+                  {jobEvents.length === 0
+                    ? <span style={{ color: "var(--muted2)", animation: "pulse 1.5s infinite", display: "inline-block" }}>Esperando al agente...</span>
+                    : jobEvents.map((ev, i) => (
+                      <div key={i} style={{ marginBottom: 5, display: "flex", gap: 6, alignItems: "baseline" }}>
+                        <span style={{ color: "var(--accent)", flexShrink: 0 }}>·</span>
+                        <span style={{ color: i === jobEvents.length - 1 ? "var(--text)" : "var(--muted)" }}>
+                          {STAGE_LABELS[ev.stage] || ev.stage}
+                          {ev.message ? <span style={{ color: "var(--muted2)" }}> — {ev.message}</span> : null}
+                        </span>
+                      </div>
+                    ))
+                  }
+                </div>
+                {jobTerminal?.status === "failed" && jobTerminal.reason && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>
+                    {jobTerminal.reason}
                   </div>
                 )}
               </div>
@@ -992,6 +1063,50 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+            {/* ── Sección entrenamiento ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Entrenamiento</div>
+
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>€ / hora</div>
+                  <input type="number" min="0" step="0.5" value={trainingSettingsPrice}
+                    onChange={e => setTrainingSettingsPrice(e.target.value)}
+                    style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Sesiones / cobro</div>
+                  <input type="number" min="1" step="1" value={trainingSettingsSpp}
+                    onChange={e => setTrainingSettingsSpp(e.target.value)}
+                    style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button disabled={trainingSettingsSaving} onClick={() => updateTrainingClient({
+                    price_per_hour: parseFloat(trainingSettingsPrice),
+                    sessions_per_payment: parseInt(trainingSettingsSpp),
+                  })} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                    Guardar
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Sesiones recientes</div>
+              {(!training?.all_recent_sessions || training.all_recent_sessions.length === 0) ? (
+                <div style={{ fontSize: 12, color: "var(--muted2)" }}>Sin sesiones</div>
+              ) : training.all_recent_sessions.map((s, i, arr) => (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 0", borderBottom: i < arr.length - 1 ? "0.5px solid var(--border)" : "none" }}>
+                  <div>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--text)" }}>{formatShortDate(s.date)}</span>
+                    <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{s.duration_hours}h</span>
+                  </div>
+                  <button onClick={() => deleteTrainingSession(s.id)} style={{
+                    background: "transparent", border: "none", color: "var(--muted2)", fontSize: 12,
+                    cursor: "pointer", padding: "2px 6px", lineHeight: 1,
+                  }}>✕</button>
+                </div>
+              ))}
+            </div>
+
             <button onClick={() => setShowSettings(false)} style={{
               marginTop: 18, width: "100%", padding: "9px 0",
               background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
