@@ -7,9 +7,8 @@ Flujo:
   3. Abre Alud con Playwright, gestiona login + Okta
   4. Navega a la URL de la entrega y extrae el enunciado
   5. Deja el navegador abierto en la página de la entrega
-  6. Abre Claude Desktop → Ctrl+2 (Cowork)
-  7. Escribe la instrucción completa con el enunciado y Enter
-  8. Heartbeat → offline, se para
+  6. Abre Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter
+  7. Heartbeat → offline, se para
 
 El agente nunca toca el formulario de entrega.
 Cowork se encarga de resolver y rellenar — el usuario revisa y envía.
@@ -43,6 +42,13 @@ HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 OKTA_TIMEOUT       = 120   # segundos máx esperando aprobación push Okta
 CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
+EDGE_DEBUG_PORT    = 9222  # puerto CDP para conectarse a Edge
+
+_EDGE_PATHS = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+]
+EDGE_EXE = next((p for p in _EDGE_PATHS if os.path.exists(p)), None)
 
 ALUD_HOME      = "https://alud.deusto.es"
 DEUSTO_BUTTON  = "@deusto | @opendeusto"
@@ -281,35 +287,37 @@ if ($proc) {
 def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
 
-    log.info("Abriendo Claude Desktop...")
-    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{CLAUDE_APPID}"])
-    time.sleep(CLAUDE_LAUNCH_WAIT)
-
-    # Copiar al portapapeles antes de interactuar con la ventana
+    # Copiar al portapapeles ANTES de abrir Claude, para no perder el foco
     log.info("Copiando instrucción al portapapeles...")
     ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
     subprocess.run(ps_cmd, check=True)
     time.sleep(0.3)
 
-    # Enfocar y maximizar Claude Desktop via win32 (más fiable que AppActivate)
+    log.info("Abriendo Claude Desktop...")
+    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{CLAUDE_APPID}"])
+    time.sleep(CLAUDE_LAUNCH_WAIT)
+
+    # Enfocar y maximizar Claude Desktop
     log.info("Enfocando Claude Desktop...")
     _focus_claude_window()
-    time.sleep(0.8)
+    time.sleep(1.5)  # tiempo suficiente para que la ventana esté lista
 
-    # Ctrl+2 → Cowork (con ventana ya en foco)
+    # Ctrl+2 → Cowork
     log.info("Ctrl+2 → Cowork...")
     pyautogui.hotkey("ctrl", "2")
-    time.sleep(2)
+    time.sleep(3)  # esperar a que Cowork cargue
 
-    # Click en el input del chat (ventana maximizada → posición estable)
+    # Click en el input del chat
     screen_w, screen_h = pyautogui.size()
     pyautogui.click(screen_w // 2, screen_h - 90)
-    time.sleep(0.4)
+    time.sleep(0.6)
 
+    # Win+V → abre historial → Enter selecciona el más reciente → Enter envía
+    log.info("Pegando instrucción via historial de portapapeles...")
     pyautogui.hotkey("win", "v")
-    time.sleep(0.8)  # esperar a que aparezca el panel de historial
+    time.sleep(1.0)  # esperar a que aparezca el panel
     pyautogui.press("enter")
-    time.sleep(0.3)
+    time.sleep(0.4)
     pyautogui.press("enter")
     log.info("Instrucción enviada a Cowork.")
 
@@ -368,19 +376,25 @@ def main():
     heartbeat("busy")
 
     try:
-        # ── Playwright: login + extracción ──
-        # Iniciamos playwright manualmente (sin `with`) para que el navegador
-        # permanezca abierto después de la extracción y Cowork pueda verlo.
-        pw = sync_playwright().start()
-        # Usar el perfil real de Edge para tener cookies y sesiones guardadas
+        # ── Lanzar Edge como proceso independiente (DETACHED) ──
+        # Al ser DETACHED, Edge no es hijo de Python — sobrevive cuando Python termina.
         edge_profile = os.getenv("EDGE_PROFILE_DIR") or os.path.join(os.path.expanduser("~"), "AppData", "Local", "Microsoft", "Edge", "User Data")
-        context = pw.chromium.launch_persistent_context(
-            user_data_dir=edge_profile,
-            channel="msedge",
-            headless=False,
-            args=["--profile-directory=Default"],
-            viewport={"width": 1280, "height": 900},
+        if not EDGE_EXE:
+            raise RuntimeError("No se encontró el ejecutable de Edge")
+        log.info(f"Lanzando Edge detached desde {EDGE_EXE}...")
+        subprocess.Popen(
+            [EDGE_EXE,
+             f"--user-data-dir={edge_profile}",
+             "--profile-directory=Default",
+             f"--remote-debugging-port={EDGE_DEBUG_PORT}",
+             "--no-first-run"],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        time.sleep(4)  # esperar a que Edge arranque y exponga el puerto CDP
+
+        pw = sync_playwright().start()
+        context = pw.chromium.connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")
         page = context.new_page()
 
         log.info("Abriendo Alud...")
@@ -392,11 +406,7 @@ def main():
         enunciado = extract_enunciado(page, context, alud_url)
         report_stage(job_id, "enunciado_extracted", f"{len(enunciado)} chars extraídos")
 
-        # NO cerramos el contexto de Playwright — el navegador queda abierto
-        # con la sesión activa en la página de la entrega. Python saldrá con
-        # os._exit(0) al final para no ejecutar el __del__ de Playwright que
-        # mataría el proceso de Edge.
-        log.info("Navegador Playwright abierto en la entrega. Pasando a Cowork...")
+        log.info("Navegador listo en la entrega. Pasando a Cowork...")
 
         # ── pyautogui: Claude Desktop → Cowork ──
         report_stage(job_id, "solver_started", "Iniciando Claude Cowork")
@@ -415,9 +425,6 @@ def main():
     finally:
         heartbeat("offline")
         log.info("Agente finalizado.")
-        # os._exit evita que Python ejecute __del__ de Playwright,
-        # lo que mataría el proceso de Edge que queremos mantener abierto.
-        os._exit(0)
 
 
 if __name__ == "__main__":
