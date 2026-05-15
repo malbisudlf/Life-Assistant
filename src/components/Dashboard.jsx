@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 
 const API = "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
-const HA_URL = import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123";
+const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/lovelace/tablet";
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
