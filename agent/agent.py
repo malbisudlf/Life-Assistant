@@ -394,7 +394,9 @@ def main():
         time.sleep(4)  # esperar a que Edge arranque y exponga el puerto CDP
 
         pw = sync_playwright().start()
-        context = pw.chromium.connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")
+        browser = pw.chromium.connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")
+        # Usar el contexto existente de Edge (el que tiene el perfil del usuario)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
 
         log.info("Abriendo Alud...")
