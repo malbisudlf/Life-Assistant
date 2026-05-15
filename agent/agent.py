@@ -171,12 +171,15 @@ def login_alud_if_needed(page, context):
 
     # Intentar seleccionar cuenta si el picker aparece (puede saltarse por SSO)
     target = auth_page if auth_page else page
-    try:
-        target.wait_for_selector(f"text={TARGET_ACCOUNT}", timeout=6000)
-        target.click(f"text={TARGET_ACCOUNT}")
-        log.info("Cuenta Google seleccionada.")
-    except Exception:
-        log.info("Selector de cuenta no apareció — SSO automático o ya seleccionada.")
+    if not TARGET_ACCOUNT:
+        log.warning("ALUD_ACCOUNT no configurado en .env — no se puede seleccionar cuenta automáticamente.")
+    else:
+        try:
+            target.wait_for_selector(f"text={TARGET_ACCOUNT}", timeout=6000)
+            target.click(f"text={TARGET_ACCOUNT}")
+            log.info("Cuenta Google seleccionada.")
+        except Exception:
+            log.info("Selector de cuenta no apareció — SSO automático o ya seleccionada.")
 
     # Esperar que la página principal llegue a Alud (con o sin Okta)
     try:
