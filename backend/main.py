@@ -72,10 +72,10 @@ TOKEN_EXPIRE_DAYS = 30
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-HOME_ADDRESS = os.getenv("HOME_ADDRESS", "Calle Astigar 35, Durango, Vizcaya, España")
+HOME_ADDRESS = os.getenv("HOME_ADDRESS", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
-HA_URL        = os.getenv("HA_URL", "http://100.84.40.119:8123")
+HA_URL        = os.getenv("HA_URL", "")
 HA_TOKEN      = os.getenv("HA_TOKEN")
 HA_POLL_TOKEN = os.getenv("HA_POLL_TOKEN", "")
 

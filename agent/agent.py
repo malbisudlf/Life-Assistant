@@ -46,7 +46,7 @@ CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
 
 ALUD_HOME      = "https://alud.deusto.es"
 DEUSTO_BUTTON  = "@deusto | @opendeusto"
-TARGET_ACCOUNT = "mikel.albisudela@opendeusto.es"
+TARGET_ACCOUNT = os.getenv("ALUD_ACCOUNT", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -368,8 +368,9 @@ def main():
         # permanezca abierto después de la extracción y Cowork pueda verlo.
         pw = sync_playwright().start()
         # Usar el perfil real de Edge para tener cookies y sesiones guardadas
+        edge_profile = os.getenv("EDGE_PROFILE_DIR", r"C:\Users\%USERNAME%\AppData\Local\Microsoft\Edge\User Data")
         context = pw.chromium.launch_persistent_context(
-            user_data_dir=r"C:\Users\malbi\AppData\Local\Microsoft\Edge\User Data",
+            user_data_dir=edge_profile,
             channel="msedge",
             headless=False,
             args=["--profile-directory=Default"],

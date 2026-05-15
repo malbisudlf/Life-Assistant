@@ -12,9 +12,12 @@ dist
 dist-ssr
 *.local
 
-# Backend secrets
+# Backend secrets y entorno
 backend/.env
 backend/.token
+backend/venv/
+backend/__pycache__/
+agent/.env
 
 # Datos personales
 *.xlsx
@@ -33,3 +36,7 @@ supabase_training_schema.sql
 *.sln
 *.sw?
 CLAUDE.md
+
+# Notas internas / contexto para Claude Code
+HOMEASSISTANT.md
+PROJECT_STATE.md
