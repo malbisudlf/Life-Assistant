@@ -148,14 +148,49 @@ const GLOBAL_CSS = `
   @keyframes fadeInOverlay { from { opacity: 0; } to { opacity: 1; } }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
   @keyframes nodeGlow { 0%, 100% { box-shadow: 0 0 8px rgba(200,169,110,0.4); } 50% { box-shadow: 0 0 16px rgba(200,169,110,0.7); } }
+  body.resizing { cursor: se-resize !important; user-select: none !important; }
+  body.dragging-widget { cursor: grabbing !important; user-select: none !important; }
+  .widget-wrap { position: relative; min-width: 0; }
+  .resize-handle {
+    position: absolute; bottom: 5px; right: 5px;
+    width: 20px; height: 20px; cursor: se-resize;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity 0.15s; border-radius: 3px; z-index: 4;
+  }
+  .widget-wrap:hover .resize-handle { opacity: 0.35; }
+  .resize-handle:hover { opacity: 1 !important; background: rgba(200,169,110,0.1); }
+  .drag-handle {
+    position: absolute; top: 8px; left: 8px; z-index: 5;
+    cursor: grab; padding: 4px 5px; border-radius: 4px;
+    opacity: 0; transition: opacity 0.15s;
+    color: var(--muted); font-size: 11px; line-height: 1;
+    background: rgba(14,15,17,0.7);
+  }
+  .widget-wrap:hover .drag-handle { opacity: 0.5; }
+  .drag-handle:hover { opacity: 1 !important; color: var(--accent); }
+  body.dragging-widget .drag-handle { opacity: 0 !important; }
+  body.dragging-widget .resize-handle { opacity: 0 !important; }
+  .snap-zone-bar { animation: fadeInOverlay 0.15s ease; }
   @media (max-width: 640px) {
-    .dashboard-grid { grid-template-columns: 1fr !important; }
     .clock { font-size: 36px !important; letter-spacing: -1px !important; }
     .dashboard-root { padding: 12px !important; gap: 12px !important; }
     .header-greeting { display: none !important; }
     .timeline-inner { min-width: 280px !important; }
+    .widget-wrap { width: 100% !important; }
+    .col-left, .col-right { width: 100% !important; min-width: 0 !important; }
+    .col-divider { display: none !important; }
   }
 `;
+
+const DEFAULT_COLUMN_SPLIT = 0.65;
+
+const DEFAULT_COLUMNS = {
+  timeline: "left",
+  upcoming: "left",
+  entregas: "right",
+  training: "right",
+  ideas:    "right",
+};
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
@@ -191,30 +226,51 @@ export default function Dashboard() {
   const [trainingSettingsPrice, setTrainingSettingsPrice] = useState("");
   const [trainingSettingsSpp, setTrainingSettingsSpp]     = useState("");
   const [trainingSettingsSaving, setTrainingSettingsSaving] = useState(false);
+  const [isEditMode, setIsEditMode]       = useState(false);
+  const [draggingId, setDraggingId]       = useState(null);
+  const [dragPos, setDragPos]             = useState(null);
+  const [dragOverId, setDragOverId]       = useState(null);
+  const [dragOverSide, setDragOverSide]   = useState("after");
+  const [colSplit, setColSplit]           = useState(() => {
+    try { const s = localStorage.getItem("la_column_split"); return s ? parseFloat(s) : DEFAULT_COLUMN_SPLIT; }
+    catch { return DEFAULT_COLUMN_SPLIT; }
+  });
+  const colSplitRef = useRef((() => {
+    try { const s = localStorage.getItem("la_column_split"); return s ? parseFloat(s) : DEFAULT_COLUMN_SPLIT; }
+    catch { return DEFAULT_COLUMN_SPLIT; }
+  })());
   const [widgetConfig, setWidgetConfig]   = useState(() => {
     try {
       const saved = localStorage.getItem("la_widget_config");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (!parsed.find(w => w.id === "__split__")) {
-          const half = Math.floor(parsed.filter(w => w.id !== "__split__").length / 2);
-          parsed.splice(half, 0, { id: "__split__" });
-        }
-        return parsed;
+        return parsed
+          .filter(w => w.id !== "__split__")
+          .map(w => ({
+            id: w.id,
+            label: w.label,
+            visible: w.visible !== false,
+            column: w.column || DEFAULT_COLUMNS[w.id] || "left",
+            width:  typeof w.width  === "number" ? w.width  : undefined,
+            height: typeof w.height === "number" ? w.height : undefined,
+          }));
       }
     } catch {}
     return [
-      { id: "timeline", label: "Hoy",             visible: true, size: "normal" },
-      { id: "upcoming", label: "Próximos eventos", visible: true, size: "normal" },
-      { id: "__split__" },
-      { id: "entregas", label: "Entregas",         visible: true, size: "normal" },
-      { id: "training", label: "Entrenamiento",    visible: true, size: "normal" },
-      { id: "ideas",    label: "Ideas",            visible: true, size: "normal" },
+      { id: "timeline", label: "Hoy",             visible: true, column: "left"  },
+      { id: "upcoming", label: "Próximos eventos", visible: true, column: "left"  },
+      { id: "entregas", label: "Entregas",         visible: true, column: "right" },
+      { id: "training", label: "Entrenamiento",    visible: true, column: "right" },
+      { id: "ideas",    label: "Ideas",            visible: true, column: "right" },
     ];
   });
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
+  const resizeDragRef    = useRef(null);
+  const dragStateRef     = useRef(null);
+
+  useEffect(() => { colSplitRef.current = colSplit; }, [colSplit]);
 
   // CSS global
   useEffect(() => {
@@ -494,8 +550,191 @@ export default function Dashboard() {
     [cfg[idx], cfg[idx + dir]] = [cfg[idx + dir], cfg[idx]];
     saveWidgetConfig(cfg);
   }
-  function resizeWidget(id, size) {
-    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, size } : w));
+  function resetWidgetSize(id) {
+    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, width: undefined, height: undefined } : w));
+  }
+
+  function handleDividerDrag(e) {
+    e.preventDefault();
+    const containerEl = document.getElementById("widget-grid-container");
+    if (!containerEl) return;
+    const startX = e.clientX;
+    const containerW = containerEl.offsetWidth;
+    const startSplit = colSplitRef.current;
+    document.body.classList.add("resizing");
+
+    function onMouseMove(me) {
+      const delta = (me.clientX - startX) / containerW;
+      const newSplit = Math.max(0.08, Math.min(0.92, startSplit + delta));
+      colSplitRef.current = newSplit;
+      setColSplit(newSplit);
+    }
+    function onMouseUp() {
+      document.body.classList.remove("resizing");
+      localStorage.setItem("la_column_split", String(colSplitRef.current));
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    }
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }
+
+  function handleResizeMouseDown(e, widgetId) {
+    e.preventDefault();
+    e.stopPropagation();
+    const wrapEl = document.getElementById(`widget-wrap-${widgetId}`);
+    if (!wrapEl) return;
+    const startW = wrapEl.offsetWidth;
+    const startH = wrapEl.offsetHeight;
+    resizeDragRef.current = { widgetId, startX: e.clientX, startY: e.clientY, startW, startH };
+    document.body.classList.add("resizing");
+
+    const SNAP_PX = 10;
+    const GUIDE_COLOR = "var(--accent2)";
+
+    function computeSnap(wid, rawW, rawH) {
+      const el = document.getElementById(`widget-wrap-${wid}`);
+      if (!el) return { w: rawW, h: rawH, guides: [] };
+      const elRect = el.getBoundingClientRect();
+      const pRight  = elRect.left + rawW;
+      const pBottom = elRect.top  + rawH;
+      let snapW = rawW, snapH = rawH;
+      const guides = [];
+
+      const others = Array.from(document.querySelectorAll(".widget-wrap[data-widget-id]"))
+        .filter(o => o.dataset.widgetId !== wid);
+
+      for (const other of others) {
+        const r = other.getBoundingClientRect();
+        // Snap borde derecho a borde izquierdo/derecho del otro
+        if (Math.abs(pRight - r.left) < SNAP_PX) {
+          snapW = r.left - elRect.left;
+          guides.push({ type: "v", x: r.left, y1: Math.min(elRect.top, r.top), y2: Math.max(elRect.top + rawH, r.bottom) });
+        } else if (Math.abs(pRight - r.right) < SNAP_PX) {
+          snapW = r.right - elRect.left;
+          guides.push({ type: "v", x: r.right, y1: Math.min(elRect.top, r.top), y2: Math.max(elRect.top + rawH, r.bottom) });
+        }
+        // Snap borde inferior a borde superior/inferior del otro
+        if (Math.abs(pBottom - r.top) < SNAP_PX) {
+          snapH = r.top - elRect.top;
+          guides.push({ type: "h", y: r.top, x1: Math.min(elRect.left, r.left), x2: Math.max(pRight, r.right) });
+        } else if (Math.abs(pBottom - r.bottom) < SNAP_PX) {
+          snapH = r.bottom - elRect.top;
+          guides.push({ type: "h", y: r.bottom, x1: Math.min(elRect.left, r.left), x2: Math.max(pRight, r.right) });
+        }
+      }
+      return { w: Math.max(120, snapW), h: Math.max(60, snapH), guides };
+    }
+
+    function renderGuides(guides) {
+      const c = document.getElementById("snap-guides");
+      if (!c) return;
+      while (c.firstChild) c.removeChild(c.firstChild);
+      for (const g of guides) {
+        const d = document.createElement("div");
+        d.style.cssText = g.type === "v"
+          ? `position:fixed;left:${g.x - 0.5}px;top:${g.y1}px;width:1px;height:${g.y2 - g.y1}px;background:${GUIDE_COLOR};opacity:.9;pointer-events:none;z-index:802;box-shadow:0 0 4px ${GUIDE_COLOR};`
+          : `position:fixed;left:${g.x1}px;top:${g.y - 0.5}px;width:${g.x2 - g.x1}px;height:1px;background:${GUIDE_COLOR};opacity:.9;pointer-events:none;z-index:802;box-shadow:0 0 4px ${GUIDE_COLOR};`;
+        c.appendChild(d);
+      }
+    }
+
+    function clearGuides() {
+      const c = document.getElementById("snap-guides");
+      if (c) while (c.firstChild) c.removeChild(c.firstChild);
+    }
+
+    function onMouseMove(me) {
+      if (!resizeDragRef.current) return;
+      const { startX, startY, startW: sw, startH: sh, widgetId: wid } = resizeDragRef.current;
+      const rawW = Math.max(120, sw + me.clientX - startX);
+      const rawH = Math.max(60,  sh + me.clientY - startY);
+      const { w, h, guides } = computeSnap(wid, rawW, rawH);
+      const el = document.getElementById(`widget-wrap-${wid}`);
+      if (el) { el.style.width = `${w}px`; el.style.height = `${h}px`; }
+      renderGuides(guides);
+    }
+
+    function onMouseUp(me) {
+      if (!resizeDragRef.current) return;
+      const { widgetId: wid, startX, startY, startW: sw, startH: sh } = resizeDragRef.current;
+      const rawW = Math.max(120, sw + me.clientX - startX);
+      const rawH = Math.max(60,  sh + me.clientY - startY);
+      const { w, h } = computeSnap(wid, rawW, rawH);
+      resizeDragRef.current = null;
+      document.body.classList.remove("resizing");
+      clearGuides();
+      saveWidgetConfig(widgetConfig.map(c => c.id === wid ? { ...c, width: w, height: h } : c));
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }
+
+  function handleDragHandleMouseDown(e, widgetId) {
+    e.preventDefault();
+    e.stopPropagation();
+    const cfg = widgetConfig.find(c => c.id === widgetId) || {};
+    dragStateRef.current = {
+      id: widgetId,
+      targetColumn: cfg.column || DEFAULT_COLUMNS[widgetId] || "left",
+      targetBefore: null,
+    };
+    setDraggingId(widgetId);
+    setDragPos({ x: e.clientX, y: e.clientY });
+    document.body.classList.add("dragging-widget");
+
+    function onMouseMove(me) {
+      setDragPos({ x: me.clientX, y: me.clientY });
+      const containerEl = document.getElementById("widget-grid-container");
+      if (!containerEl) return;
+      const rect = containerEl.getBoundingClientRect();
+      const dividerX = rect.left + rect.width * colSplitRef.current;
+      const targetCol = me.clientX < dividerX ? "left" : "right";
+
+      let targetBefore = null;
+      const colWidgets = Array.from(document.querySelectorAll(`.widget-wrap[data-column="${targetCol}"]`));
+      for (const el of colWidgets) {
+        if (el.dataset.widgetId === dragStateRef.current?.id) continue;
+        const r = el.getBoundingClientRect();
+        if (me.clientY < r.top + r.height / 2) { targetBefore = el.dataset.widgetId; break; }
+      }
+
+      if (dragStateRef.current) {
+        dragStateRef.current.targetColumn = targetCol;
+        dragStateRef.current.targetBefore = targetBefore;
+      }
+      setDragOverId(targetCol);
+      setDragOverSide(targetBefore || "__end__");
+    }
+
+    function onMouseUp() {
+      const ds = dragStateRef.current;
+      if (!ds) return;
+      dragStateRef.current = null;
+      document.body.classList.remove("dragging-widget");
+      const { id, targetColumn, targetBefore } = ds;
+      const moved = { ...widgetConfig.find(w => w.id === id), column: targetColumn };
+      const without = widgetConfig.filter(w => w.id !== id);
+      if (targetBefore && targetBefore !== "__end__") {
+        const idx = without.findIndex(w => w.id === targetBefore);
+        if (idx >= 0) without.splice(idx, 0, moved);
+        else without.push(moved);
+      } else {
+        const lastInCol = without.reduce((last, w, i) =>
+          (w.column || DEFAULT_COLUMNS[w.id] || "left") === targetColumn ? i : last, -1);
+        without.splice(lastInCol + 1, 0, moved);
+      }
+      saveWidgetConfig(without);
+      setDraggingId(null); setDragPos(null); setDragOverId(null); setDragOverSide(null);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
   }
 
   useEffect(() => {
@@ -584,25 +823,13 @@ export default function Dashboard() {
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
   const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
-  // __split__ siempre incluido (es estructural, no un widget real)
-  const visibleWidgets = widgetConfig.filter(w => w.id === "__split__" || w.visible);
-  // Agrupa widgets en secciones: bloques normales (con separador de columna) y bloques wide
-  const widgetSections = (() => {
-    const sections = [];
-    let buf = [];
-    const flush = () => { if (buf.length) { sections.push({ type: "normal", widgets: [...buf] }); buf = []; } };
-    visibleWidgets.forEach(w => {
-      if ((w.size || "normal") === "wide" && w.id !== "__split__") { flush(); sections.push({ type: "wide", widget: w }); }
-      else buf.push(w);
-    });
-    flush();
-    return sections;
-  })();
+  function renderWidget(id, cfg = {}) {
+    const fixedH = typeof cfg.height === "number";
+    const cardStyle = { ...s.card, ...(fixedH ? { height: "100%", overflowY: "auto" } : {}) };
 
-  function renderWidget(id) {
     switch (id) {
       case "timeline": return (
-        <div style={s.card} key="timeline">
+        <div style={cardStyle} data-card={id} key="timeline">
           <div style={s.sectionLabel}>Hoy</div>
           {loading ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "16px 0" }}>Cargando eventos...</div>
@@ -665,7 +892,7 @@ export default function Dashboard() {
         </div>
       );
       case "upcoming": return (
-        <div style={s.card} key="upcoming">
+        <div style={cardStyle} data-card={id} key="upcoming">
           <div style={s.sectionLabel}>Próximos eventos</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
             {upcomingEvents.length === 0 ? (
@@ -685,7 +912,7 @@ export default function Dashboard() {
         </div>
       );
       case "entregas": return (
-        <div style={s.card} key="entregas">
+        <div style={cardStyle} data-card={id} key="entregas">
           <div style={s.sectionLabel}>Entregas pendientes</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
             {entregas.length === 0 ? (
@@ -710,7 +937,7 @@ export default function Dashboard() {
         </div>
       );
       case "training": return (
-        <div style={s.card} key="training">
+        <div style={cardStyle} data-card={id} key="training">
           <div style={s.sectionLabel}>Entrenamiento</div>
           {!training?.client ? (
             <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos</div>
@@ -761,7 +988,7 @@ export default function Dashboard() {
         </div>
       );
       case "ideas": return (
-        <div style={s.card} key="ideas">
+        <div style={cardStyle} data-card={id} key="ideas">
           <div style={s.sectionLabel}>Ideas</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
             {ideas.length === 0 && !processing && (
@@ -797,6 +1024,54 @@ export default function Dashboard() {
     }
   }
 
+  function wrapResizable(w) {
+    const cfg       = widgetConfig.find(c => c.id === w.id) || w;
+    const widthPx   = typeof cfg.width  === "number" ? `${cfg.width}px`  : "100%";
+    const heightPx  = typeof cfg.height === "number" ? `${cfg.height}px` : "auto";
+    const isDragged = draggingId === w.id;
+    const col       = cfg.column || DEFAULT_COLUMNS[w.id] || "left";
+    const showIndicator = isEditMode && draggingId && dragOverId === col && dragOverSide === w.id;
+
+    return (
+      <div
+        key={w.id}
+        id={`widget-wrap-${w.id}`}
+        data-widget-id={w.id}
+        data-column={col}
+        className="widget-wrap"
+        style={{
+          width: widthPx,
+          height: heightPx,
+          minHeight: 80,
+          opacity: isDragged ? 0.3 : 1,
+          transition: "opacity 0.15s",
+          position: "relative",
+        }}
+      >
+        {showIndicator && (
+          <div style={{ position:"absolute", top:-9, left:0, right:0, height:3, background:"var(--accent)", borderRadius:2, zIndex:10 }} />
+        )}
+        {isEditMode && (
+          <div className="drag-handle" onMouseDown={e => handleDragHandleMouseDown(e, w.id)} title="Arrastrar para mover">⠿</div>
+        )}
+        {renderWidget(w.id, cfg)}
+        {isEditMode && (
+          <div
+            className="resize-handle"
+            onMouseDown={e => handleResizeMouseDown(e, w.id)}
+            onDoubleClick={() => resetWidgetSize(w.id)}
+            title="Arrastrar para cambiar tamaño · doble clic para restablecer"
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+              <line x1="10" y1="2" x2="2" y2="10" stroke="var(--accent)" strokeWidth="1.4" strokeLinecap="round"/>
+              <line x1="10" y1="6" x2="6" y2="10" stroke="var(--accent)" strokeWidth="1.4" strokeLinecap="round"/>
+            </svg>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (!token) return <LoginScreen onLogin={() => window.location.reload()} />;
 
   return (
@@ -826,20 +1101,126 @@ export default function Dashboard() {
         </div>
 
         {/* GRID */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: 1 }}>
-          {widgetSections.map((sec, i) => {
-            if (sec.type === "wide") return <div key={sec.widget.id}>{renderWidget(sec.widget.id)}</div>;
-            const splitIdx = sec.widgets.findIndex(w => w.id === "__split__");
-            const leftW = splitIdx >= 0 ? sec.widgets.slice(0, splitIdx) : sec.widgets.slice(0, Math.floor(sec.widgets.length / 2));
-            const rightW = splitIdx >= 0 ? sec.widgets.slice(splitIdx + 1) : sec.widgets.slice(Math.floor(sec.widgets.length / 2));
-            return (
-              <div key={`normal-${i}`} style={s.mainGrid} className="dashboard-grid">
-                <div style={s.leftCol}>{leftW.map(w => renderWidget(w.id))}</div>
-                <div style={s.rightCol}>{rightW.map(w => renderWidget(w.id))}</div>
+        {(() => {
+          const leftWidgets  = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "left");
+          const rightWidgets = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "right");
+          const leftPct  = Math.round(colSplit * 100);
+          const rightPct = 100 - leftPct;
+          return (
+            <div
+              id="widget-grid-container"
+              style={{ display: "flex", gap: 0, flex: 1, alignItems: "stretch", position: "relative" }}
+            >
+              {/* LEFT COLUMN */}
+              <div
+                className="col-left"
+                style={{
+                  width: `calc(${leftPct}% - 8px)`,
+                  display: "flex", flexDirection: "column", gap: 16,
+                  outline: isEditMode && draggingId && dragOverId === "left" ? "2px solid rgba(200,169,110,0.5)" : "none",
+                  borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "left" ? 6 : 0,
+                  transition: "outline 0.1s, padding 0.1s",
+                }}
+              >
+                {leftWidgets.map(w => wrapResizable(w))}
+                {isEditMode && draggingId && dragOverId === "left" && dragOverSide === "__end__" && (
+                  <div style={{ height: 3, background: "var(--accent)", borderRadius: 2, opacity: 0.7 }} />
+                )}
               </div>
-            );
-          })}
-        </div>
+
+              {/* DIVIDER */}
+              <div
+                className="col-divider"
+                onMouseDown={handleDividerDrag}
+                style={{
+                  width: 16, flexShrink: 0, cursor: "col-resize",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <div style={{ width: 3, height: 40, borderRadius: 2, background: "rgba(255,255,255,0.08)", transition: "background 0.15s" }}
+                  onMouseEnter={e => e.target.style.background = "rgba(200,169,110,0.4)"}
+                  onMouseLeave={e => e.target.style.background = "rgba(255,255,255,0.08)"}
+                />
+              </div>
+
+              {/* RIGHT COLUMN */}
+              <div
+                className="col-right"
+                style={{
+                  width: `calc(${rightPct}% - 8px)`,
+                  display: "flex", flexDirection: "column", gap: 16,
+                  outline: isEditMode && draggingId && dragOverId === "right" ? "2px solid rgba(200,169,110,0.5)" : "none",
+                  borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "right" ? 6 : 0,
+                  transition: "outline 0.1s, padding 0.1s",
+                }}
+              >
+                {rightWidgets.map(w => wrapResizable(w))}
+                {isEditMode && draggingId && dragOverId === "right" && dragOverSide === "__end__" && (
+                  <div style={{ height: 3, background: "var(--accent)", borderRadius: 2, opacity: 0.7 }} />
+                )}
+              </div>
+
+              {/* SNAP ZONE OVERLAY (edit mode drag) */}
+              {isEditMode && draggingId && (
+                <div style={{
+                  position: "absolute", inset: 0, display: "flex",
+                  pointerEvents: "none", zIndex: 50, borderRadius: 8, overflow: "hidden",
+                }}>
+                  <div style={{
+                    flex: colSplit, background: dragOverId === "left" ? "rgba(200,169,110,0.08)" : "transparent",
+                    border: dragOverId === "left" ? "2px solid rgba(200,169,110,0.4)" : "2px solid transparent",
+                    borderRadius: "8px 0 0 8px", transition: "all 0.12s",
+                    display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 12,
+                  }}>
+                    {dragOverId === "left" && <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "'DM Mono'", opacity: 0.8 }}>← columna izquierda</span>}
+                  </div>
+                  <div style={{
+                    flex: 1 - colSplit, background: dragOverId === "right" ? "rgba(200,169,110,0.08)" : "transparent",
+                    border: dragOverId === "right" ? "2px solid rgba(200,169,110,0.4)" : "2px solid transparent",
+                    borderRadius: "0 8px 8px 0", transition: "all 0.12s",
+                    display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 12,
+                  }}>
+                    {dragOverId === "right" && <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "'DM Mono'", opacity: 0.8 }}>columna derecha →</span>}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* GHOST LABEL */}
+        {isEditMode && draggingId && dragPos && (
+          <div style={{
+            position: "fixed", left: dragPos.x + 14, top: dragPos.y + 10,
+            zIndex: 901, pointerEvents: "none",
+            background: "var(--surface)", border: "1px solid var(--accent)",
+            borderRadius: 8, padding: "5px 12px", fontSize: 11,
+            color: "var(--accent)", fontFamily: "'DM Mono'", letterSpacing: "0.04em",
+            boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+          }}>
+            {widgetConfig.find(w => w.id === draggingId)?.label}
+          </div>
+        )}
+
+        {/* BOTÓN SALIR EDICIÓN */}
+        {isEditMode && (
+          <div style={{
+            position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)",
+            zIndex: 800, background: "rgba(22,23,25,0.96)", backdropFilter: "blur(8px)",
+            border: "0.5px solid rgba(200,169,110,0.4)", borderRadius: 10,
+            padding: "10px 20px", display: "flex", gap: 10, alignItems: "center",
+            boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
+          }}>
+            <span style={{ fontSize: 12, color: "var(--muted)", fontFamily: "'DM Sans'" }}>
+              ⠿ mover · ◢ altura · arrastra el divisor central para el ancho
+            </span>
+            <button onClick={() => setIsEditMode(false)} style={{
+              padding: "5px 14px", background: "var(--accent)", border: "none",
+              borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600,
+              cursor: "pointer", fontFamily: "'DM Sans'",
+            }}>Listo</button>
+          </div>
+        )}
 
         {/* FOOTER */}
         <div style={s.footer}>
@@ -1002,30 +1383,15 @@ export default function Dashboard() {
             borderRadius: 16, padding: "28px 32px", zIndex: 201,
             width: "min(340px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
           }}>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 18, letterSpacing: "0.04em" }}>Widgets</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>Widgets</div>
+            <button onClick={() => { setShowSettings(false); setIsEditMode(true); }} style={{
+              width: "100%", marginBottom: 14, padding: "9px 0",
+              background: "rgba(200,169,110,0.1)", border: "0.5px solid rgba(200,169,110,0.35)",
+              borderRadius: 8, color: "var(--accent)", fontSize: 12, cursor: "pointer",
+              fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.03em",
+            }}>Editar distribución →</button>
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {widgetConfig.map((w, i) => w.id === "__split__" ? (
-                <div key="__split__" style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "5px 10px", borderRadius: 8,
-                  background: "rgba(255,255,255,0.01)", border: "0.5px dashed rgba(255,255,255,0.12)",
-                }}>
-                  <div style={{ width: 16, height: 16, flexShrink: 0 }} />
-                  <span style={{ flex: 1, fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace", letterSpacing: "0.05em" }}>── col. derecha ──</span>
-                  <div style={{ display: "flex", gap: 0 }}>
-                    <button onClick={() => moveWidget("__split__", -1)} disabled={i === 0} style={{
-                      background: "transparent", border: "none",
-                      color: i === 0 ? "rgba(255,255,255,0.15)" : "var(--muted)",
-                      cursor: i === 0 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
-                    }}>↑</button>
-                    <button onClick={() => moveWidget("__split__", 1)} disabled={i === widgetConfig.length - 1} style={{
-                      background: "transparent", border: "none",
-                      color: i === widgetConfig.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
-                      cursor: i === widgetConfig.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
-                    }}>↓</button>
-                  </div>
-                </div>
-              ) : (
+              {widgetConfig.map((w, i) => (
                 <div key={w.id} style={{
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "8px 10px", borderRadius: 8,
@@ -1038,16 +1404,6 @@ export default function Dashboard() {
                     cursor: "pointer", flexShrink: 0, padding: 0,
                   }} />
                   <span style={{ flex: 1, fontSize: 13, color: w.visible ? "var(--text)" : "var(--muted)", fontFamily: "'DM Sans', sans-serif" }}>{w.label}</span>
-                  <div style={{ display: "flex", gap: 3, marginRight: 4 }}>
-                    {["normal", "wide"].map(sz => (
-                      <button key={sz} onClick={() => resizeWidget(w.id, sz)} title={sz === "normal" ? "Normal" : "Ancho completo"} style={{
-                        background: w.size === sz ? "rgba(200,169,110,0.18)" : "transparent",
-                        border: `0.5px solid ${w.size === sz ? "rgba(200,169,110,0.5)" : "rgba(255,255,255,0.1)"}`,
-                        borderRadius: 4, cursor: "pointer", padding: "2px 5px", fontSize: 10,
-                        color: w.size === sz ? "var(--accent)" : "var(--muted)",
-                      }}>{sz === "normal" ? "▣" : "▣▣"}</button>
-                    ))}
-                  </div>
                   <div style={{ display: "flex", gap: 0 }}>
                     <button onClick={() => moveWidget(w.id, -1)} disabled={i === 0} style={{
                       background: "transparent", border: "none",
@@ -1204,6 +1560,9 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      {/* Contenedor de guías de alineación (snap guides) */}
+      <div id="snap-guides" style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 801 }} />
     </>
   );
 }
@@ -1219,7 +1578,7 @@ const s = {
   mainGrid: { display: "grid", gridTemplateColumns: "1fr 320px", gap: 16, alignItems: "start", flex: 1 },
   leftCol:  { display: "flex", flexDirection: "column", gap: 16 },
   rightCol: { display: "flex", flexDirection: "column", gap: 16 },
-  card: { background: "var(--surface)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 20px" },
+  card: { background: "var(--surface)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 20px", boxSizing: "border-box", width: "100%" },
   sectionLabel: { fontSize: 10, fontWeight: 500, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 12 },
   timelineWrapper: { overflowX: "auto", paddingBottom: 4 },
   timeline: { display: "flex", alignItems: "flex-start", minWidth: 500, padding: "8px 0 16px", position: "relative" },
