@@ -1431,8 +1431,10 @@ export default function Dashboard() {
                 {recent.map((w, i) => {
                   const type = w.name || w.workoutActivityType || w.type || "Entrenamiento";
                   const icon = ICONS[type] || "💪";
-                  const mins = w.duration != null ? Math.round(Number(w.duration)) : null;
-                  const cal  = w.activeEnergy ?? w.totalEnergyBurned ?? w.activeEnergyBurned;
+                  const rawDur = Number(w.duration);
+                  const mins = !isNaN(rawDur) ? Math.round(rawDur > 300 ? rawDur / 60 : rawDur) : null;
+                  const rawCal = w.activeEnergy?.qty ?? w.activeEnergy ?? w.totalEnergyBurned?.qty ?? w.totalEnergyBurned ?? w.activeEnergyBurned?.qty ?? w.activeEnergyBurned;
+                  const cal = !isNaN(Number(rawCal)) && rawCal != null ? Number(rawCal) : null;
                   return (
                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: "var(--surface2)", borderRadius: 8, border: "0.5px solid var(--border)" }}>
                       <span style={{ fontSize: 18 }}>{icon}</span>
