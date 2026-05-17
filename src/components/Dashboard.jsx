@@ -371,8 +371,9 @@ export default function Dashboard() {
   const [jobTerminal, setJobTerminal] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [training, setTraining]           = useState(null);
-  const [healthData, setHealthData]       = useState(null);
-  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthData, setHealthData]         = useState(null);
+  const [healthLoading, setHealthLoading]   = useState(false);
+  const [healthLastSync, setHealthLastSync] = useState(null);
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -481,7 +482,7 @@ export default function Dashboard() {
     setHealthLoading(true);
     fetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
-      .then(data => { setHealthData(data.metrics || {}); setHealthLoading(false); })
+      .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
       .catch(() => setHealthLoading(false));
   }, []);
 
@@ -1331,6 +1332,15 @@ export default function Dashboard() {
                     <span style={{ color: "var(--accent)", fontWeight: 500 }}>Hoy → </span>{rec}
                   </div>
                 )}
+                {healthLastSync && (() => {
+                  const diff = Math.floor((Date.now() - new Date(healthLastSync)) / 60000);
+                  const label = diff < 2 ? "ahora mismo" : diff < 60 ? `hace ${diff} min` : diff < 1440 ? `hace ${Math.floor(diff/60)}h` : `hace ${Math.floor(diff/1440)}d`;
+                  return (
+                    <div style={{ marginTop: 10, fontSize: 10, color: "var(--muted2)", textAlign: "right", fontFamily: "'DM Mono', monospace" }}>
+                      sync {label}
+                    </div>
+                  );
+                })()}
               </>
             )}
           </div>
