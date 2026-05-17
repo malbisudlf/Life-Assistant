@@ -1191,7 +1191,7 @@ export default function Dashboard() {
         };
         const sleepRaw  = findMetric(healthData, "sleep_analysis", "sleep");
         const sleepData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
-        const last14    = sleepData.slice(-14);
+        const last14    = sleepData.slice(-7);
         const last7     = sleepData.slice(-7);
         const avg7      = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
         const latest    = sleepData[sleepData.length - 1];
@@ -1278,12 +1278,22 @@ export default function Dashboard() {
                     )}
                   </div>
                 )}
-                <SleepBars data={last14} />
-                <div style={{ display: "flex", gap: 10, marginTop: 8, fontSize: 10, color: "var(--muted2)" }}>
-                  <span><span style={{ color: "#4a72b0" }}>■</span> Profundo</span>
-                  <span><span style={{ color: "#8b68c4" }}>■</span> REM</span>
-                  <span><span style={{ color: "#4f8fa3" }}>■</span> Core</span>
-                </div>
+                {last14.length > 1 && (
+                  <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
+                    {last14.map((d, i) => {
+                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0);
+                      const c  = sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
+                      const date = new Date(d.date + "T12:00:00");
+                      const day  = ["D","L","M","X","J","V","S"][date.getDay()];
+                      return (
+                        <div key={i} style={{ flex: 1, textAlign: "center" }} title={`${day}: ${hoursToHM(d.value)}${sc != null ? ` · ${sc}pts` : ""}`}>
+                          <div style={{ height: 3, borderRadius: 2, background: c, opacity: 0.8 }} />
+                          <div style={{ fontSize: 9, color: "var(--muted2)", marginTop: 3, fontFamily: "'DM Mono', monospace" }}>{day}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1407,7 +1417,7 @@ export default function Dashboard() {
       }
       case "health_workouts": {
         const wData  = findMetric(healthData, "workouts", "workout");
-        const recent = wData.slice(-8).reverse();
+        const recent = wData.flatMap(d => (d.extra?.workouts || []).map(w => ({ ...w, _date: d.date }))).slice(-10).reverse();
         const ICONS  = { Running:"🏃", Walking:"🚶", Cycling:"🚴", Swimming:"🏊", "Strength Training":"🏋️", HIIT:"⚡", Yoga:"🧘", Basketball:"🏀", Soccer:"⚽", Tennis:"🎾", Hiking:"🥾" };
         return (
           <div style={cardStyle} data-card={id} key="health_workouts">
@@ -1419,16 +1429,16 @@ export default function Dashboard() {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {recent.map((w, i) => {
-                  const type = w.extra?.workoutActivityType || w.extra?.type || "Entrenamiento";
+                  const type = w.name || w.workoutActivityType || w.type || "Entrenamiento";
                   const icon = ICONS[type] || "💪";
-                  const mins = w.value ? Math.round(w.value * 60) : (w.extra?.duration ? Math.round(w.extra.duration) : null);
-                  const cal  = w.extra?.totalEnergyBurned || w.extra?.activeEnergyBurned;
+                  const mins = w.duration != null ? Math.round(Number(w.duration)) : null;
+                  const cal  = w.activeEnergy ?? w.totalEnergyBurned ?? w.activeEnergyBurned;
                   return (
                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: "var(--surface2)", borderRadius: 8, border: "0.5px solid var(--border)" }}>
                       <span style={{ fontSize: 18 }}>{icon}</span>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{type}</div>
-                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{formatShortDate(w.date)}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{formatShortDate((w.start || w._date || "").slice(0, 10))}</div>
                       </div>
                       <div style={{ textAlign: "right" }}>
                         {mins && <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--accent)" }}>{mins}min</div>}

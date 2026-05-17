@@ -887,9 +887,37 @@ async def health_ingest(request: Request, token: str = ""):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     body = await request.json()
-    metrics = body.get("data", {}).get("metrics", [])
+    data_block = body.get("data", {})
+    metrics    = data_block.get("metrics", [])
+    workouts   = data_block.get("workouts", [])
 
     upserted = 0
+
+    # ── Workouts: agrupar por fecha y guardar como una fila por día ──
+    if workouts:
+        from collections import defaultdict
+        by_date: dict = defaultdict(list)
+        for w in workouts:
+            date_raw = str(w.get("start", w.get("date", "")))
+            d = date_raw[:10] if len(date_raw) >= 10 else None
+            if d:
+                by_date[d].append(w)
+        for d, day_workouts in by_date.items():
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/health_metrics",
+                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+                json={
+                    "metric_date": d,
+                    "metric_name": "workouts",
+                    "value": float(len(day_workouts)),
+                    "unit": "count",
+                    "extra": {"workouts": day_workouts},
+                },
+            )
+            if r.status_code < 300:
+                upserted += 1
+
+    # ── Métricas normales ──
     for metric in metrics:
         name = metric.get("name", "")
         unit = metric.get("units", "")
@@ -899,15 +927,13 @@ async def health_ingest(request: Request, token: str = ""):
             if not metric_date:
                 continue
 
-            # Valor principal según el tipo de métrica
             raw_value = (
                 point.get("qty") if point.get("qty") is not None else
                 point.get("avg") if point.get("avg") is not None else
                 point.get("value") if point.get("value") is not None else
-                point.get("asleep")  # sleep_analysis
+                point.get("asleep")
             )
             value = float(raw_value) if raw_value is not None else None
-
             extra = {k: v for k, v in point.items() if k != "date"}
 
             r = requests.post(
