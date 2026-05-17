@@ -1101,7 +1101,14 @@ export default function Dashboard() {
         </div>
       );
       case "health_sleep": {
-        const sleepData = findMetric(healthData, "sleep_analysis", "sleep");
+        const sleepEff = d => {
+          if (d.value && d.value > 0) return d.value;
+          if (d.extra?.asleep && d.extra.asleep > 0) return Number(d.extra.asleep);
+          return (Number(d.extra?.deep) || 0) + (Number(d.extra?.rem) || 0)
+               + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
+        };
+        const sleepRaw  = findMetric(healthData, "sleep_analysis", "sleep");
+        const sleepData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
         const last14 = sleepData.slice(-14);
         const last7  = sleepData.slice(-7);
         const avg7   = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
