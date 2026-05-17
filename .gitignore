@@ -24,6 +24,7 @@ agent/.env
 *.xls
 import_training.py
 supabase_training_schema.sql
+supabase_health_schema.sql
 
 # Editor directories and files
 .vscode/*

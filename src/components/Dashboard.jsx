@@ -127,6 +127,58 @@ function formatShortDate(dateStr) {
 const DAYS_ES   = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 const MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 
+// ── HELPERS DE SALUD ─────────────────────────────────────────────
+function findMetric(metrics, ...names) {
+  if (!metrics) return [];
+  for (const name of names) {
+    if (metrics[name]?.length) return metrics[name];
+  }
+  return [];
+}
+
+function Sparkline({ data, color = "var(--accent)", height = 40 }) {
+  const pts = data.filter(d => d.value != null);
+  if (pts.length < 2) return (
+    <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <span style={{ fontSize: 11, color: "var(--muted2)" }}>—</span>
+    </div>
+  );
+  const vals = pts.map(d => d.value);
+  const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
+  const W = 200, H = height;
+  const points = pts.map((d, i) => {
+    const x = (i / (pts.length - 1)) * (W - 4) + 2;
+    const y = H - 4 - ((d.value - min) / range) * (H - 8);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={height} preserveAspectRatio="none" style={{ display: "block" }}>
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SleepBars({ data }) {
+  const maxVal = Math.max(...data.map(d => d.value || 0), 9);
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 52 }}>
+      {data.map((d, i) => {
+        const h = Math.max(2, ((d.value || 0) / maxVal) * 44);
+        const color = (d.value || 0) < 6 ? "#d4645a" : (d.value || 0) < 7 ? "#c8a45a" : "#6aaa82";
+        const date = new Date(d.date + "T12:00:00");
+        const day = ["D","L","M","X","J","V","S"][date.getDay()];
+        return (
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
+            title={`${d.date}: ${d.value?.toFixed(1)}h`}>
+            <div style={{ width: "100%", height: h, background: color, borderRadius: "2px 2px 0 0", opacity: 0.85 }} />
+            <div style={{ fontSize: 9, color: "var(--muted2)", fontFamily: "'DM Mono', monospace" }}>{day}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── ESTILOS GLOBALES ─────────────────────────────────────────────
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -185,12 +237,30 @@ const GLOBAL_CSS = `
 const DEFAULT_COLUMN_SPLIT = 0.65;
 
 const DEFAULT_COLUMNS = {
-  timeline: "left",
-  upcoming: "left",
-  entregas: "right",
-  training: "right",
-  ideas:    "right",
+  timeline:        "left",
+  upcoming:        "left",
+  entregas:        "right",
+  training:        "right",
+  ideas:           "right",
+  health_sleep:    "right",
+  health_heart:    "right",
+  health_hrv:      "right",
+  health_activity: "right",
+  health_workouts: "right",
 };
+
+const ALL_DEFAULT_WIDGETS = [
+  { id: "timeline",        label: "Hoy",              visible: true,  column: "left"  },
+  { id: "upcoming",        label: "Próximos eventos",  visible: true,  column: "left"  },
+  { id: "entregas",        label: "Entregas",          visible: true,  column: "right" },
+  { id: "training",        label: "Entrenamiento",     visible: true,  column: "right" },
+  { id: "ideas",           label: "Ideas",             visible: true,  column: "right" },
+  { id: "health_sleep",    label: "Sueño",             visible: true,  column: "right" },
+  { id: "health_heart",    label: "Freq. cardíaca",    visible: false, column: "right" },
+  { id: "health_hrv",      label: "HRV",               visible: false, column: "right" },
+  { id: "health_activity", label: "Actividad",         visible: false, column: "right" },
+  { id: "health_workouts", label: "Entrenamientos AW", visible: false, column: "right" },
+];
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
@@ -217,6 +287,8 @@ export default function Dashboard() {
   const [jobTerminal, setJobTerminal] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [training, setTraining]           = useState(null);
+  const [healthData, setHealthData]       = useState(null);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -243,26 +315,23 @@ export default function Dashboard() {
     try {
       const saved = localStorage.getItem("la_widget_config");
       if (saved) {
-        const parsed = JSON.parse(saved);
-        return parsed
-          .filter(w => w.id !== "__split__")
-          .map(w => ({
-            id: w.id,
-            label: w.label,
-            visible: w.visible !== false,
-            column: w.column || DEFAULT_COLUMNS[w.id] || "left",
-            width:  typeof w.width  === "number" ? w.width  : undefined,
-            height: typeof w.height === "number" ? w.height : undefined,
-          }));
+        const parsed = JSON.parse(saved).filter(w => w.id !== "__split__");
+        const savedIds = new Set(parsed.map(w => w.id));
+        const merged = parsed.map(w => ({
+          id: w.id,
+          label: ALL_DEFAULT_WIDGETS.find(d => d.id === w.id)?.label || w.label,
+          visible: w.visible !== false,
+          column: w.column || DEFAULT_COLUMNS[w.id] || "left",
+          width:  typeof w.width  === "number" ? w.width  : undefined,
+          height: typeof w.height === "number" ? w.height : undefined,
+        }));
+        for (const def of ALL_DEFAULT_WIDGETS) {
+          if (!savedIds.has(def.id)) merged.push(def);
+        }
+        return merged;
       }
     } catch {}
-    return [
-      { id: "timeline", label: "Hoy",             visible: true, column: "left"  },
-      { id: "upcoming", label: "Próximos eventos", visible: true, column: "left"  },
-      { id: "entregas", label: "Entregas",         visible: true, column: "right" },
-      { id: "training", label: "Entrenamiento",    visible: true, column: "right" },
-      { id: "ideas",    label: "Ideas",            visible: true, column: "right" },
-    ];
+    return ALL_DEFAULT_WIDGETS;
   });
 
   const mediaRecorderRef = useRef(null);
@@ -320,6 +389,17 @@ export default function Dashboard() {
 
   // Cargar resumen entrenamiento
   useEffect(() => { loadTraining(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cargar datos de salud
+  useEffect(() => {
+    const t = localStorage.getItem("la_token") || "";
+    if (!t) return;
+    setHealthLoading(true);
+    fetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
+      .then(r => r.json())
+      .then(data => { setHealthData(data.metrics || {}); setHealthLoading(false); })
+      .catch(() => setHealthLoading(false));
+  }, []);
 
   // Cargar ideas
   useEffect(() => {
@@ -1020,6 +1100,201 @@ export default function Dashboard() {
           </button>
         </div>
       );
+      case "health_sleep": {
+        const sleepData = findMetric(healthData, "sleep_analysis", "sleep");
+        const last14 = sleepData.slice(-14);
+        const last7  = sleepData.slice(-7);
+        const avg7   = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
+        const latest = sleepData[sleepData.length - 1];
+        const sleepColor = v => v >= 7 ? "var(--green)" : v >= 6 ? "var(--accent)" : "#d4645a";
+        return (
+          <div style={cardStyle} data-card={id} key="health_sleep">
+            <div style={s.sectionLabel}>Sueño</div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : last14.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de sueño aún — sincroniza Health Auto Export</div>
+            ) : (
+              <>
+                {latest && (
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: sleepColor(latest.value || 0), lineHeight: 1 }}>
+                      {(latest.value || 0).toFixed(1)}h
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>anoche</span>
+                    {avg7 != null && (
+                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                        media 7d: {avg7.toFixed(1)}h
+                      </span>
+                    )}
+                  </div>
+                )}
+                {latest?.extra && (latest.extra.deep != null || latest.extra.rem != null) && (
+                  <div style={{ display: "flex", gap: 14, marginBottom: 10, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
+                    {latest.extra.deep  != null && <span><span style={{ color: "var(--accent2)" }}>●</span> Profundo <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.deep).toFixed(1)}h</b></span>}
+                    {latest.extra.rem   != null && <span><span style={{ color: "#a87cc8" }}>●</span> REM <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.rem).toFixed(1)}h</b></span>}
+                    {latest.extra.awake != null && <span><span style={{ color: "var(--muted2)" }}>●</span> Despierto <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.awake).toFixed(1)}h</b></span>}
+                  </div>
+                )}
+                <SleepBars data={last14} />
+              </>
+            )}
+          </div>
+        );
+      }
+      case "health_heart": {
+        const hrData = findMetric(healthData, "heart_rate", "heartRate", "resting_heart_rate");
+        const last30 = hrData.slice(-30);
+        const latest = hrData[hrData.length - 1];
+        const vals   = last30.map(d => d.value).filter(Boolean);
+        const hrMin  = vals.length ? Math.min(...vals) : null;
+        const hrMax  = vals.length ? Math.max(...vals) : null;
+        return (
+          <div style={cardStyle} data-card={id} key="health_heart">
+            <div style={s.sectionLabel}>Frecuencia cardíaca</div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : last30.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de FC aún</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: "var(--accent)", lineHeight: 1 }}>
+                    {latest?.value?.toFixed(0)}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>bpm</span>
+                  {hrMin && hrMax && (
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                      {hrMin}–{hrMax} (30d)
+                    </span>
+                  )}
+                </div>
+                <Sparkline data={last30} color="var(--accent)" height={42} />
+              </>
+            )}
+          </div>
+        );
+      }
+      case "health_hrv": {
+        const hrvData = findMetric(healthData, "heart_rate_variability", "heartRateVariability", "hrv");
+        const last30  = hrvData.slice(-30);
+        const last7   = hrvData.slice(-7);
+        const latest  = hrvData[hrvData.length - 1];
+        const avg7    = last7.length  ? last7.reduce((s, d)  => s + (d.value || 0), 0) / last7.length  : null;
+        const avg30   = last30.length ? last30.reduce((s, d) => s + (d.value || 0), 0) / last30.length : null;
+        const trend   = avg7 && avg30 ? (avg7 > avg30 * 1.03 ? "↑" : avg7 < avg30 * 0.97 ? "↓" : "→") : null;
+        const trendColor = trend === "↑" ? "var(--green)" : trend === "↓" ? "#d4645a" : "var(--muted)";
+        return (
+          <div style={cardStyle} data-card={id} key="health_hrv">
+            <div style={s.sectionLabel}>HRV <span style={{ fontSize: 10, color: "var(--muted2)", textTransform: "none", letterSpacing: 0 }}>variabilidad cardíaca</span></div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : last30.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de HRV aún</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: "var(--accent2)", lineHeight: 1 }}>
+                    {latest?.value?.toFixed(0)}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>ms</span>
+                  {trend && <span style={{ fontSize: 18, color: trendColor, fontFamily: "'DM Mono', monospace" }}>{trend}</span>}
+                  {avg7 != null && (
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                      media 7d: {avg7.toFixed(0)}ms
+                    </span>
+                  )}
+                </div>
+                <Sparkline data={last30} color="var(--accent2)" height={42} />
+              </>
+            )}
+          </div>
+        );
+      }
+      case "health_activity": {
+        const stepsData   = findMetric(healthData, "step_count", "steps", "stepCount");
+        const caloriesData = findMetric(healthData, "active_energy", "activeEnergy");
+        const last7       = stepsData.slice(-7);
+        const latest      = stepsData[stepsData.length - 1];
+        const latestCal   = caloriesData[caloriesData.length - 1];
+        const maxSteps    = Math.max(...last7.map(d => d.value || 0), 10000);
+        return (
+          <div style={cardStyle} data-card={id} key="health_activity">
+            <div style={s.sectionLabel}>Actividad</div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : last7.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de actividad aún</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 24, color: "var(--green)", lineHeight: 1 }}>
+                    {(latest?.value || 0).toLocaleString("es")}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>pasos hoy</span>
+                  {latestCal?.value && (
+                    <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                      {latestCal.value.toFixed(0)} kcal
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 48 }}>
+                  {last7.map((d, i) => {
+                    const h = Math.max(2, ((d.value || 0) / maxSteps) * 40);
+                    const today_ = isToday(d.date + "T12:00:00");
+                    const date = new Date(d.date + "T12:00:00");
+                    const day = ["D","L","M","X","J","V","S"][date.getDay()];
+                    return (
+                      <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
+                        title={`${d.date}: ${(d.value || 0).toLocaleString("es")} pasos`}>
+                        <div style={{ width: "100%", height: h, background: today_ ? "var(--green)" : "rgba(106,170,130,0.4)", borderRadius: "2px 2px 0 0" }} />
+                        <div style={{ fontSize: 9, color: "var(--muted2)", fontFamily: "'DM Mono', monospace" }}>{day}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      }
+      case "health_workouts": {
+        const wData  = findMetric(healthData, "workouts", "workout");
+        const recent = wData.slice(-8).reverse();
+        const ICONS  = { Running:"🏃", Walking:"🚶", Cycling:"🚴", Swimming:"🏊", "Strength Training":"🏋️", HIIT:"⚡", Yoga:"🧘", Basketball:"🏀", Soccer:"⚽", Tennis:"🎾", Hiking:"🥾" };
+        return (
+          <div style={cardStyle} data-card={id} key="health_workouts">
+            <div style={s.sectionLabel}>Entrenamientos</div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : recent.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entrenamientos registrados</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {recent.map((w, i) => {
+                  const type = w.extra?.workoutActivityType || w.extra?.type || "Entrenamiento";
+                  const icon = ICONS[type] || "💪";
+                  const mins = w.value ? Math.round(w.value * 60) : (w.extra?.duration ? Math.round(w.extra.duration) : null);
+                  const cal  = w.extra?.totalEnergyBurned || w.extra?.activeEnergyBurned;
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: "var(--surface2)", borderRadius: 8, border: "0.5px solid var(--border)" }}>
+                      <span style={{ fontSize: 18 }}>{icon}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{type}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{formatShortDate(w.date)}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        {mins && <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--accent)" }}>{mins}min</div>}
+                        {cal  && <div style={{ fontSize: 11, color: "var(--muted)" }}>{Math.round(cal)}kcal</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      }
       default: return null;
     }
   }
