@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Path
+﻿from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -75,9 +75,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
-HA_URL        = os.getenv("HA_URL", "")
-HA_TOKEN      = os.getenv("HA_TOKEN")
-HA_POLL_TOKEN = os.getenv("HA_POLL_TOKEN", "")
+HA_URL              = os.getenv("HA_URL", "")
+HA_TOKEN            = os.getenv("HA_TOKEN")
+HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
+HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -876,6 +877,113 @@ def delete_training_session(
         headers=supabase_headers(),
     )
     return {"ok": r.status_code < 300}
+
+# ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
+
+@app.post("/health/ingest")
+async def health_ingest(request: Request, token: str = ""):
+    """Health Auto Export envía aquí los datos periódicamente."""
+    if not HEALTH_INGEST_TOKEN or token != HEALTH_INGEST_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    body = await request.json()
+    metrics = body.get("data", {}).get("metrics", [])
+
+    upserted = 0
+    for metric in metrics:
+        name = metric.get("name", "")
+        unit = metric.get("units", "")
+        for point in metric.get("data", []):
+            date_raw = str(point.get("date", ""))
+            metric_date = date_raw[:10] if len(date_raw) >= 10 else None
+            if not metric_date:
+                continue
+
+            # Valor principal según el tipo de métrica
+            raw_value = (
+                point.get("qty") if point.get("qty") is not None else
+                point.get("avg") if point.get("avg") is not None else
+                point.get("value") if point.get("value") is not None else
+                point.get("asleep")  # sleep_analysis
+            )
+            value = float(raw_value) if raw_value is not None else None
+
+            extra = {k: v for k, v in point.items() if k != "date"}
+
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/health_metrics",
+                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+                json={
+                    "metric_date": metric_date,
+                    "metric_name": name,
+                    "value": value,
+                    "unit": unit,
+                    "extra": extra,
+                },
+            )
+            if r.status_code < 300:
+                upserted += 1
+
+    return {"ok": True, "upserted": upserted}
+
+
+@app.get("/health/metrics")
+def get_health_metrics(
+    days: int = 30,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Devuelve todas las métricas de los últimos N días, agrupadas por nombre."""
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days debe estar entre 1 y 365")
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics"
+        f"?metric_date=gte.{since}&order=metric_date.asc&limit=5000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=r.text)
+
+    grouped: dict = {}
+    for row in r.json():
+        name = row["metric_name"]
+        if name not in grouped:
+            grouped[name] = []
+        grouped[name].append({
+            "date": row["metric_date"],
+            "value": row["value"],
+            "unit": row["unit"],
+            "extra": row.get("extra", {}),
+        })
+
+    return {"metrics": grouped}
+
+
+@app.get("/health/latest")
+def get_health_latest(
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Último valor disponible de cada métrica."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics?order=metric_date.desc&limit=500",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=r.text)
+
+    latest: dict = {}
+    for row in r.json():
+        name = row["metric_name"]
+        if name not in latest:
+            latest[name] = {
+                "date": row["metric_date"],
+                "value": row["value"],
+                "unit": row["unit"],
+                "extra": row.get("extra", {}),
+            }
+
+    return {"latest": latest}
+
 
 @app.post("/training/payments")
 def add_training_payment(
