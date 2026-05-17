@@ -128,6 +128,72 @@ const DAYS_ES   = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","S
 const MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 
 // ── HELPERS DE SALUD ─────────────────────────────────────────────
+function hoursToHM(h) {
+  if (h == null || isNaN(h)) return "—";
+  const hrs  = Math.floor(h);
+  const mins = Math.round((h - hrs) * 60);
+  if (mins === 0) return `${hrs}h`;
+  return `${hrs}h ${mins}m`;
+}
+
+function sleepScore(total, deep, rem, core, awake) {
+  if (!total || total < 0.5) return null;
+  let s = 0;
+  // Duración (40 pts)
+  if      (total >= 7 && total <= 9) s += 40;
+  else if (total >= 6.5)             s += 34;
+  else if (total >= 6)               s += 26;
+  else if (total >= 5)               s += 16;
+  else                               s += 6;
+  // Sueño profundo (25 pts)
+  const dp = deep ? (deep / total) * 100 : null;
+  if      (dp == null)            s += 12;
+  else if (dp >= 13 && dp <= 23)  s += 25;
+  else if (dp >= 10)              s += 19;
+  else if (dp >= 7)               s += 13;
+  else                            s += 6;
+  // REM (25 pts)
+  const rp = rem ? (rem / total) * 100 : null;
+  if      (rp == null)            s += 12;
+  else if (rp >= 20 && rp <= 25)  s += 25;
+  else if (rp >= 15)              s += 19;
+  else if (rp >= 10)              s += 13;
+  else                            s += 6;
+  // Tiempo despierto (10 pts)
+  const ap = awake ? (awake / total) * 100 : 0;
+  if      (ap < 5)   s += 10;
+  else if (ap < 10)  s += 7;
+  else if (ap < 15)  s += 4;
+  return Math.min(100, Math.round(s));
+}
+
+function SleepStageTooltip({ label, color, tip, children }) {
+  const [show, setShow] = useState(false);
+  const [pos,  setPos]  = useState({ x: 0, y: 0 });
+  return (
+    <span style={{ position: "relative", cursor: "default" }}
+      onMouseEnter={e => { setShow(true); setPos({ x: e.clientX, y: e.clientY }); }}
+      onMouseMove={e  => setPos({ x: e.clientX, y: e.clientY })}
+      onMouseLeave={() => setShow(false)}
+    >
+      {children}
+      {show && (
+        <div style={{
+          position: "fixed", left: pos.x + 14, top: pos.y + 10,
+          background: "#1a1b1e", border: "0.5px solid rgba(255,255,255,0.15)",
+          borderLeft: `2px solid ${color}`,
+          borderRadius: 8, padding: "10px 14px", zIndex: 2000,
+          maxWidth: 260, fontSize: 12, color: "#c8c6c0", lineHeight: 1.6,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.6)", pointerEvents: "none",
+        }}>
+          <div style={{ fontWeight: 600, color: "#e8e6e0", marginBottom: 4 }}>{label}</div>
+          {tip}
+        </div>
+      )}
+    </span>
+  );
+}
+
 function findMetric(metrics, ...names) {
   if (!metrics) return [];
   for (const name of names) {
@@ -161,16 +227,32 @@ function Sparkline({ data, color = "var(--accent)", height = 40 }) {
 function SleepBars({ data }) {
   const maxVal = Math.max(...data.map(d => d.value || 0), 9);
   return (
-    <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 52 }}>
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
       {data.map((d, i) => {
-        const h = Math.max(2, ((d.value || 0) / maxVal) * 44);
-        const color = (d.value || 0) < 6 ? "#d4645a" : (d.value || 0) < 7 ? "#c8a45a" : "#6aaa82";
+        const total = d.value || 0;
+        const h     = Math.max(3, (total / maxVal) * 54);
+        const deep  = Number(d.extra?.deep)  || 0;
+        const rem   = Number(d.extra?.rem)   || 0;
+        const core  = Number(d.extra?.core)  || Number(d.extra?.light) || 0;
+        const stagesKnown = deep > 0 || rem > 0 || core > 0;
+        const stageSum = deep + rem + core || total;
         const date = new Date(d.date + "T12:00:00");
-        const day = ["D","L","M","X","J","V","S"][date.getDay()];
+        const day  = ["D","L","M","X","J","V","S"][date.getDay()];
+        const fallColor = total >= 7 ? "#6aaa82" : total >= 6 ? "#c8a45a" : "#d4645a";
         return (
-          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
-            title={`${d.date}: ${d.value?.toFixed(1)}h`}>
-            <div style={{ width: "100%", height: h, background: color, borderRadius: "2px 2px 0 0", opacity: 0.85 }} />
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+            title={`${d.date}: ${hoursToHM(total)}`}>
+            <div style={{ width: "100%", height: h, borderRadius: "3px 3px 0 0", overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
+              {stagesKnown ? (
+                <>
+                  {deep > 0 && <div style={{ flex: deep / stageSum, background: "#4a72b0", minHeight: 1 }} />}
+                  {rem  > 0 && <div style={{ flex: rem  / stageSum, background: "#8b68c4", minHeight: 1 }} />}
+                  {core > 0 && <div style={{ flex: core / stageSum, background: "#4f8fa3", minHeight: 1 }} />}
+                </>
+              ) : (
+                <div style={{ flex: 1, background: fallColor, opacity: 0.85 }} />
+              )}
+            </div>
             <div style={{ fontSize: 9, color: "var(--muted2)", fontFamily: "'DM Mono', monospace" }}>{day}</div>
           </div>
         );
@@ -1109,41 +1191,99 @@ export default function Dashboard() {
         };
         const sleepRaw  = findMetric(healthData, "sleep_analysis", "sleep");
         const sleepData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
-        const last14 = sleepData.slice(-14);
-        const last7  = sleepData.slice(-7);
-        const avg7   = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
-        const latest = sleepData[sleepData.length - 1];
+        const last14    = sleepData.slice(-14);
+        const last7     = sleepData.slice(-7);
+        const avg7      = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
+        const latest    = sleepData[sleepData.length - 1];
         const sleepColor = v => v >= 7 ? "var(--green)" : v >= 6 ? "var(--accent)" : "#d4645a";
+
+        const lv  = latest?.value || 0;
+        const ld  = latest?.extra?.deep  != null ? Number(latest.extra.deep)  : null;
+        const lr  = latest?.extra?.rem   != null ? Number(latest.extra.rem)   : null;
+        const lc  = latest?.extra?.core  != null ? Number(latest.extra.core)  : (latest?.extra?.light != null ? Number(latest.extra.light) : null);
+        const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
+        const score = latest ? sleepScore(lv, ld, lr, lc, law) : null;
+        const scoreLabel = score == null ? null : score >= 85 ? "Excelente" : score >= 70 ? "Bueno" : score >= 55 ? "Regular" : "Mejorable";
+        const scoreColor = score == null ? null : score >= 85 ? "var(--green)" : score >= 70 ? "#6aaa82" : score >= 55 ? "var(--accent)" : "#d4645a";
+
+        const STAGE_TIPS = {
+          deep: { label: "Sueño profundo (N3)", color: "#4a72b0", tip: "Restaura el cuerpo, consolida la memoria muscular y libera hormona del crecimiento. Es el más reparador. Óptimo: 13–23% del total (≈1–2h en 8h de sueño). Disminuye con la edad." },
+          rem:  { label: "Sueño REM", color: "#8b68c4", tip: "Procesa emociones, consolida recuerdos y favorece la creatividad. Los sueños ocurren aquí. Óptimo: 20–25% del total (≈1.5–2h en 8h). Se acumula en la segunda mitad de la noche." },
+          core: { label: "Sueño ligero (N1/N2)", color: "#4f8fa3", tip: "Fase de transición y procesamiento de información. Ocupa la mayor parte del sueño. Normal: 50–60% del total. Necesario para consolidar el ciclo de sueño." },
+          awake:{ label: "Tiempo despierto", color: "var(--muted)", tip: "Microdespertares durante la noche. Normal: 10–30 min. Más de 45 min puede indicar apnea, estrés o mala higiene del sueño." },
+        };
+
         return (
           <div style={cardStyle} data-card={id} key="health_sleep">
-            <div style={s.sectionLabel}>Sueño</div>
+            <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span>Sueño</span>
+              {score != null && (
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none" }}>
+                  {score} — {scoreLabel}
+                </span>
+              )}
+            </div>
             {healthLoading ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
             ) : last14.length === 0 ? (
-              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de sueño aún — sincroniza Health Auto Export</div>
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de sueño aún</div>
             ) : (
               <>
                 {latest && (
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: sleepColor(latest.value || 0), lineHeight: 1 }}>
-                      {(latest.value || 0).toFixed(1)}h
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: sleepColor(lv), lineHeight: 1 }}>
+                      {hoursToHM(lv)}
                     </span>
                     <span style={{ fontSize: 11, color: "var(--muted)" }}>anoche</span>
                     {avg7 != null && (
                       <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
-                        media 7d: {avg7.toFixed(1)}h
+                        media 7d: {hoursToHM(avg7)}
                       </span>
                     )}
                   </div>
                 )}
-                {latest?.extra && (latest.extra.deep != null || latest.extra.rem != null) && (
-                  <div style={{ display: "flex", gap: 14, marginBottom: 10, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
-                    {latest.extra.deep  != null && <span><span style={{ color: "var(--accent2)" }}>●</span> Profundo <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.deep).toFixed(1)}h</b></span>}
-                    {latest.extra.rem   != null && <span><span style={{ color: "#a87cc8" }}>●</span> REM <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.rem).toFixed(1)}h</b></span>}
-                    {latest.extra.awake != null && <span><span style={{ color: "var(--muted2)" }}>●</span> Despierto <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{Number(latest.extra.awake).toFixed(1)}h</b></span>}
+                {latest?.extra && (ld != null || lr != null || lc != null) && (
+                  <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 11, flexWrap: "wrap" }}>
+                    {ld != null && (
+                      <SleepStageTooltip label={STAGE_TIPS.deep.label} color={STAGE_TIPS.deep.color} tip={STAGE_TIPS.deep.tip}>
+                        <span style={{ color: "var(--muted)" }}>
+                          <span style={{ color: "#4a72b0" }}>●</span> Profundo{" "}
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(ld)}</b>
+                        </span>
+                      </SleepStageTooltip>
+                    )}
+                    {lr != null && (
+                      <SleepStageTooltip label={STAGE_TIPS.rem.label} color={STAGE_TIPS.rem.color} tip={STAGE_TIPS.rem.tip}>
+                        <span style={{ color: "var(--muted)" }}>
+                          <span style={{ color: "#8b68c4" }}>●</span> REM{" "}
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lr)}</b>
+                        </span>
+                      </SleepStageTooltip>
+                    )}
+                    {lc != null && (
+                      <SleepStageTooltip label={STAGE_TIPS.core.label} color={STAGE_TIPS.core.color} tip={STAGE_TIPS.core.tip}>
+                        <span style={{ color: "var(--muted)" }}>
+                          <span style={{ color: "#4f8fa3" }}>●</span> Core{" "}
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lc)}</b>
+                        </span>
+                      </SleepStageTooltip>
+                    )}
+                    {law != null && (
+                      <SleepStageTooltip label={STAGE_TIPS.awake.label} color={STAGE_TIPS.awake.color} tip={STAGE_TIPS.awake.tip}>
+                        <span style={{ color: "var(--muted)" }}>
+                          <span style={{ color: "var(--muted2)" }}>●</span> Despierto{" "}
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(law)}</b>
+                        </span>
+                      </SleepStageTooltip>
+                    )}
                   </div>
                 )}
                 <SleepBars data={last14} />
+                <div style={{ display: "flex", gap: 10, marginTop: 8, fontSize: 10, color: "var(--muted2)" }}>
+                  <span><span style={{ color: "#4a72b0" }}>■</span> Profundo</span>
+                  <span><span style={{ color: "#8b68c4" }}>■</span> REM</span>
+                  <span><span style={{ color: "#4f8fa3" }}>■</span> Core</span>
+                </div>
               </>
             )}
           </div>
