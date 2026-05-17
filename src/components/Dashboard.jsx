@@ -319,29 +319,31 @@ const GLOBAL_CSS = `
 const DEFAULT_COLUMN_SPLIT = 0.65;
 
 const DEFAULT_COLUMNS = {
-  timeline:        "left",
-  upcoming:        "left",
-  entregas:        "right",
-  training:        "right",
-  ideas:           "right",
-  health_sleep:    "right",
-  health_heart:    "right",
-  health_hrv:      "right",
-  health_activity: "right",
-  health_workouts: "right",
+  timeline:          "left",
+  upcoming:          "left",
+  entregas:          "right",
+  training:          "right",
+  ideas:             "right",
+  health_wellness:   "left",
+  health_sleep:      "right",
+  health_heart:      "right",
+  health_hrv:        "right",
+  health_activity:   "right",
+  health_workouts:   "right",
 };
 
 const ALL_DEFAULT_WIDGETS = [
-  { id: "timeline",        label: "Hoy",              visible: true,  column: "left"  },
-  { id: "upcoming",        label: "Próximos eventos",  visible: true,  column: "left"  },
-  { id: "entregas",        label: "Entregas",          visible: true,  column: "right" },
-  { id: "training",        label: "Entrenamiento",     visible: true,  column: "right" },
-  { id: "ideas",           label: "Ideas",             visible: true,  column: "right" },
-  { id: "health_sleep",    label: "Sueño",             visible: true,  column: "right" },
-  { id: "health_heart",    label: "Freq. cardíaca",    visible: false, column: "right" },
-  { id: "health_hrv",      label: "HRV",               visible: false, column: "right" },
-  { id: "health_activity", label: "Actividad",         visible: false, column: "right" },
-  { id: "health_workouts", label: "Entrenamientos AW", visible: false, column: "right" },
+  { id: "timeline",          label: "Hoy",              visible: true,  column: "left"  },
+  { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
+  { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
+  { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
+  { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
+  { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
+  { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
+  { id: "health_heart",      label: "Freq. cardíaca",    visible: false, column: "right" },
+  { id: "health_hrv",        label: "HRV",               visible: false, column: "right" },
+  { id: "health_activity",   label: "Actividad",         visible: false, column: "right" },
+  { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
 ];
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
@@ -1182,6 +1184,158 @@ export default function Dashboard() {
           </button>
         </div>
       );
+      case "health_wellness": {
+        // ── datos base ──
+        const wSleepEff = d => {
+          if (d.value && d.value > 0) return d.value;
+          if (d.extra?.asleep > 0) return Number(d.extra.asleep);
+          return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
+        };
+        const wSleepRaw  = findMetric(healthData, "sleep_analysis", "sleep").map(d => ({ ...d, value: wSleepEff(d) }));
+        const wStepsRaw  = findMetric(healthData, "step_count", "steps");
+        const wHrvRaw    = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
+        const wWorkRaw   = findMetric(healthData, "workouts");
+
+        const last7Sleep  = wSleepRaw.slice(-7);
+        const last7Steps  = wStepsRaw.slice(-7);
+        const last7Hrv    = wHrvRaw.slice(-7);
+        const last7Work   = wWorkRaw.filter(d => {
+          const daysAgo = (new Date() - new Date(d.date + "T12:00:00")) / 86400000;
+          return daysAgo <= 7;
+        });
+
+        const avgSleep   = last7Sleep.length  ? last7Sleep.reduce((s,d)=>s+(d.value||0),0)/last7Sleep.length  : null;
+        const avgSteps   = last7Steps.length  ? last7Steps.reduce((s,d)=>s+(d.value||0),0)/last7Steps.length  : null;
+        const avgHrv     = last7Hrv.length    ? last7Hrv.reduce((s,d)=>s+(d.value||0),0)/last7Hrv.length      : null;
+        const prevHrv    = wHrvRaw.slice(-14,-7);
+        const avgHrvPrev = prevHrv.length     ? prevHrv.reduce((s,d)=>s+(d.value||0),0)/prevHrv.length        : null;
+
+        // Entrenamientos: contar workouts únicos de los últimos 7 días
+        const weekWorkoutCount = last7Work.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
+        const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
+        const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
+        const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
+
+        // ── puntuación semanal ──
+        let score = 0;
+        // Sueño (35 pts)
+        if (avgSleep != null) {
+          if      (avgSleep >= 7.5) score += 35;
+          else if (avgSleep >= 7)   score += 30;
+          else if (avgSleep >= 6.5) score += 22;
+          else if (avgSleep >= 6)   score += 14;
+          else                      score += 6;
+        }
+        // Entrenamientos (35 pts) — objetivo: 4/semana
+        if      (weekWorkoutCount >= 4) score += 35;
+        else if (weekWorkoutCount === 3) score += 24;
+        else if (weekWorkoutCount === 2) score += 14;
+        else if (weekWorkoutCount === 1) score += 6;
+        // Pasos (20 pts)
+        if (avgSteps != null) {
+          if      (avgSteps >= 10000) score += 20;
+          else if (avgSteps >= 8000)  score += 16;
+          else if (avgSteps >= 6000)  score += 11;
+          else if (avgSteps >= 4000)  score += 6;
+          else                        score += 2;
+        }
+        // HRV (10 pts)
+        if (avgHrv != null && avgHrvPrev != null) {
+          if      (avgHrv >= avgHrvPrev * 1.05) score += 10;
+          else if (avgHrv >= avgHrvPrev * 0.95) score += 7;
+          else                                   score += 3;
+        } else if (avgHrv != null) score += 5;
+
+        const scoreLabel = score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja";
+        const scoreColor = score >= 80 ? "var(--green)" : score >= 65 ? "#6aaa82" : score >= 50 ? "var(--accent)" : "#d4645a";
+
+        // ── insights ──
+        const insights = [];
+        if (avgSleep != null) {
+          const goodNights = last7Sleep.filter(d => d.value >= 7).length;
+          if      (avgSleep >= 7.5) insights.push({ icon: "😴", color: "var(--green)", text: `Sueño excelente — media de ${hoursToHM(avgSleep)}, ${goodNights} noches >7h` });
+          else if (avgSleep >= 7)   insights.push({ icon: "😴", color: "#6aaa82",     text: `Sueño bueno — media de ${hoursToHM(avgSleep)}` });
+          else if (avgSleep >= 6)   insights.push({ icon: "😴", color: "var(--accent)", text: `Sueño justo — media de ${hoursToHM(avgSleep)}. Intenta acostarte antes` });
+          else                      insights.push({ icon: "😴", color: "#d4645a",     text: `Sueño insuficiente — media de ${hoursToHM(avgSleep)}. Prioriza descansar` });
+        }
+        if (weekWorkoutCount > 0 || daysSinceWorkout != null) {
+          const remaining = Math.max(0, 4 - weekWorkoutCount);
+          if      (weekWorkoutCount >= 5) insights.push({ icon: "💪", color: "var(--green)",   text: `${weekWorkoutCount} entrenamientos esta semana — objetivo superado` });
+          else if (weekWorkoutCount === 4) insights.push({ icon: "💪", color: "var(--green)",   text: `4/4 entrenamientos esta semana — objetivo cumplido` });
+          else if (weekWorkoutCount === 3) insights.push({ icon: "💪", color: "#6aaa82",        text: `3/4 entrenamientos — te queda ${remaining} para llegar al objetivo` });
+          else if (weekWorkoutCount === 2) insights.push({ icon: "💪", color: "var(--accent)",  text: `2/4 entrenamientos — te quedan ${remaining} esta semana` });
+          else if (weekWorkoutCount === 1) insights.push({ icon: "💪", color: "#d4645a",        text: `1/4 entrenamientos — te quedan ${remaining} para cumplir el objetivo` });
+          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: "#d4645a",      text: `0/4 entrenamientos esta semana — llevas ${daysSinceWorkout} días sin ir al gym` });
+        }
+        if (avgSteps != null) {
+          if      (avgSteps >= 9000) insights.push({ icon: "🚶", color: "var(--green)",  text: `Muy activo — ${Math.round(avgSteps).toLocaleString("es")} pasos de media` });
+          else if (avgSteps >= 6000) insights.push({ icon: "🚶", color: "#6aaa82",       text: `Actividad moderada — ${Math.round(avgSteps).toLocaleString("es")} pasos de media` });
+          else                       insights.push({ icon: "🚶", color: "var(--accent)", text: `Poca actividad — ${Math.round(avgSteps).toLocaleString("es")} pasos. Intenta caminar más` });
+        }
+        if (avgHrv != null) {
+          const hrvTrendUp = avgHrvPrev && avgHrv > avgHrvPrev * 1.03;
+          const hrvTrendDn = avgHrvPrev && avgHrv < avgHrvPrev * 0.97;
+          if      (hrvTrendUp) insights.push({ icon: "❤️", color: "var(--green)",  text: `HRV en subida (${Math.round(avgHrv)}ms) — buena recuperación` });
+          else if (hrvTrendDn) insights.push({ icon: "❤️", color: "#d4645a",     text: `HRV bajando (${Math.round(avgHrv)}ms) — quizás necesitas más descanso` });
+          else                 insights.push({ icon: "❤️", color: "var(--muted)", text: `HRV estable en ${Math.round(avgHrv)}ms` });
+        }
+
+        // ── recomendación de hoy ──
+        let rec = null;
+        if (daysSinceWorkout != null && daysSinceWorkout >= 2 && avgHrv && avgHrv > 50)
+          rec = "Hoy es buen día para entrenar — llevas días de descanso y la recuperación es correcta.";
+        else if (avgHrv && avgHrv < 45)
+          rec = "Hoy mejor descanso activo — tu HRV indica que el cuerpo necesita recuperarse.";
+        else if (avgSleep && avgSleep < 6.5)
+          rec = "Esta semana el sueño ha sido escaso. Intenta acostarte 30 min antes esta noche.";
+        else if (weekWorkoutCount >= 4)
+          rec = "Semana intensa de entrenamiento. Asegúrate de incluir un día de descanso.";
+
+        const hasAnyData = avgSleep != null || avgSteps != null || weekWorkoutCount > 0;
+
+        return (
+          <div style={cardStyle} data-card={id} key="health_wellness">
+            <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span>Bienestar semanal</span>
+              {hasAnyData && (
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", textTransform: "none" }}>
+                  {score} — {scoreLabel}
+                </span>
+              )}
+            </div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : !hasAnyData ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos todavía — los insights aparecerán cuando haya varios días de datos.</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: rec ? 12 : 0 }}>
+                  {insights.map((ins, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <span style={{ fontSize: 16, lineHeight: 1.4, flexShrink: 0 }}>{ins.icon}</span>
+                      <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5 }}>
+                        <span style={{ color: ins.color, fontWeight: 500 }}>
+                          {ins.text.split("—")[0]}
+                        </span>
+                        {ins.text.includes("—") && <span style={{ color: "var(--muted)" }}> — {ins.text.split("—").slice(1).join("—")}</span>}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {rec && (
+                  <div style={{
+                    marginTop: 4, padding: "10px 14px",
+                    background: "rgba(200,169,110,0.06)", borderLeft: "2px solid var(--accent)",
+                    borderRadius: "0 8px 8px 0", fontSize: 12, color: "var(--muted)", lineHeight: 1.6,
+                  }}>
+                    <span style={{ color: "var(--accent)", fontWeight: 500 }}>Hoy → </span>{rec}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        );
+      }
       case "health_sleep": {
         const sleepEff = d => {
           if (d.value && d.value > 0) return d.value;
