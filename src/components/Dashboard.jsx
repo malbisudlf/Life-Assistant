@@ -1200,10 +1200,12 @@ export default function Dashboard() {
         const last7Sleep  = wSleepRaw.slice(-7);
         const last7Steps  = wStepsRaw.slice(-7);
         const last7Hrv    = wHrvRaw.slice(-7);
-        const last7Work   = wWorkRaw.filter(d => {
-          const daysAgo = (new Date() - new Date(d.date + "T12:00:00")) / 86400000;
-          return daysAgo <= 7;
-        });
+        // Semana actual: desde el lunes hasta hoy (no últimos 7 días rodantes)
+        const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+        const dayOfWeek = todayMidnight.getDay(); // 0=Dom, 1=Lun...
+        const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+        const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
+        const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
 
         const avgSleep   = last7Sleep.length  ? last7Sleep.reduce((s,d)=>s+(d.value||0),0)/last7Sleep.length  : null;
         const avgSteps   = last7Steps.length  ? last7Steps.reduce((s,d)=>s+(d.value||0),0)/last7Steps.length  : null;
@@ -1212,7 +1214,7 @@ export default function Dashboard() {
         const avgHrvPrev = prevHrv.length     ? prevHrv.reduce((s,d)=>s+(d.value||0),0)/prevHrv.length        : null;
 
         // Entrenamientos: contar workouts únicos de los últimos 7 días
-        const weekWorkoutCount = last7Work.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
+        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
         const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;

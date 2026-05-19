@@ -918,6 +918,11 @@ async def health_ingest(request: Request, token: str = ""):
                 upserted += 1
 
     # ── Métricas normales ──
+    # Métricas acumulativas: solo guardar si el nuevo valor es mayor que el almacenado
+    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy"}
+
+    # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
+    grouped_metrics: dict = {}
     for metric in metrics:
         name = metric.get("name", "")
         unit = metric.get("units", "")
@@ -936,19 +941,43 @@ async def health_ingest(request: Request, token: str = ""):
             value = float(raw_value) if raw_value is not None else None
             extra = {k: v for k, v in point.items() if k != "date"}
 
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/health_metrics",
-                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-                json={
-                    "metric_date": metric_date,
-                    "metric_name": name,
-                    "value": value,
-                    "unit": unit,
-                    "extra": extra,
-                },
+            key = (metric_date, name)
+            if key not in grouped_metrics:
+                grouped_metrics[key] = {"unit": unit, "value": value, "extra": extra}
+            elif name in CUMULATIVE_METRICS and value is not None:
+                # Para métricas acumulativas, conservar el mayor valor del batch
+                current = grouped_metrics[key]["value"]
+                if current is None or value > current:
+                    grouped_metrics[key] = {"unit": unit, "value": value, "extra": extra}
+
+    for (metric_date, name), data in grouped_metrics.items():
+        value = data["value"]
+
+        # Para métricas acumulativas, no sobreescribir si ya hay un valor mayor en BD
+        if name in CUMULATIVE_METRICS and value is not None:
+            existing = requests.get(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.{name}&select=value",
+                headers=supabase_headers(),
             )
-            if r.status_code < 300:
-                upserted += 1
+            if existing.status_code < 300:
+                rows = existing.json()
+                if rows and rows[0].get("value") is not None and float(rows[0]["value"]) >= value:
+                    continue
+
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/health_metrics",
+            headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+            json={
+                "metric_date": metric_date,
+                "metric_name": name,
+                "value": value,
+                "unit": data["unit"],
+                "extra": data["extra"],
+            },
+        )
+        if r.status_code < 300:
+            upserted += 1
 
     return {"ok": True, "upserted": upserted}
 
@@ -971,6 +1000,7 @@ def get_health_metrics(
         raise HTTPException(status_code=500, detail=r.text)
 
     grouped: dict = {}
+    last_sync: str | None = None
     for row in r.json():
         name = row["metric_name"]
         if name not in grouped:
@@ -981,8 +1011,11 @@ def get_health_metrics(
             "unit": row["unit"],
             "extra": row.get("extra", {}),
         })
+        ca = row.get("created_at")
+        if ca and (last_sync is None or ca > last_sync):
+            last_sync = ca
 
-    return {"metrics": grouped}
+    return {"metrics": grouped, "last_sync": last_sync}
 
 
 @app.get("/health/latest")
