@@ -136,7 +136,7 @@ function hoursToHM(h) {
   return `${hrs}h ${mins}m`;
 }
 
-function sleepScore(total, deep, rem, core, awake) {
+function sleepScore(total, deep, rem, core, awake, sleepStart) {
   if (!total || total < 0.5) return null;
   let s = 0;
   // Duración (40 pts)
@@ -164,8 +164,17 @@ function sleepScore(total, deep, rem, core, awake) {
   if      (ap < 5)   s += 10;
   else if (ap < 10)  s += 7;
   else if (ap < 15)  s += 4;
+  // Penalización por hora de acostarse
+  if (sleepStart) {
+    const h = parseInt(sleepStart.slice(0, 2), 10);
+    // Horas nocturnas tardías (0-5) se tratan como "pasada medianoche"
+    if      (h >= 2 && h < 6)  s -= 15;
+    else if (h >= 1)            s -= 10;
+    else if (h >= 0 && h < 1)  s -= 5;
+    // h >= 20 o h >= 12 → antes de medianoche → sin penalización
+  }
   const cap = total >= 7 ? 100 : total >= 6.5 ? 82 : total >= 6 ? 68 : 52;
-  return Math.min(cap, Math.round(s));
+  return Math.min(cap, Math.max(0, Math.round(s)));
 }
 
 function SleepStageTooltip({ label, color, tip, children }) {
@@ -1369,7 +1378,8 @@ export default function Dashboard() {
         const lr  = latest?.extra?.rem   != null ? Number(latest.extra.rem)   : null;
         const lc  = latest?.extra?.core  != null ? Number(latest.extra.core)  : (latest?.extra?.light != null ? Number(latest.extra.light) : null);
         const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
-        const score = latest ? sleepScore(lv, ld, lr, lc, law) : null;
+        const lss = latest?.extra?.sleep_start ?? null;
+        const score = latest ? sleepScore(lv, ld, lr, lc, law, lss) : null;
         const scoreLabel = score == null ? null : score >= 85 ? "Excelente" : score >= 70 ? "Bueno" : score >= 55 ? "Regular" : "Mejorable";
         const scoreColor = score == null ? null : score >= 85 ? "var(--green)" : score >= 70 ? "#6aaa82" : score >= 55 ? "var(--accent)" : "#d4645a";
 
@@ -1448,7 +1458,7 @@ export default function Dashboard() {
                 {last14.length > 1 && (
                   <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
                     {last14.map((d, i) => {
-                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0);
+                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null);
                       const c  = sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
                       const date = new Date(d.date + "T12:00:00");
                       const day  = ["D","L","M","X","J","V","S"][date.getDay()];

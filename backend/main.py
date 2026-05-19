@@ -940,6 +940,9 @@ async def health_ingest(request: Request, token: str = ""):
             )
             value = float(raw_value) if raw_value is not None else None
             extra = {k: v for k, v in point.items() if k != "date"}
+            # Para sleep_analysis, preservar la hora de inicio del sueño
+            if name == "sleep_analysis" and len(date_raw) >= 16:
+                extra["sleep_start"] = date_raw[11:16]  # "HH:MM"
 
             key = (metric_date, name)
             if key not in grouped_metrics:
