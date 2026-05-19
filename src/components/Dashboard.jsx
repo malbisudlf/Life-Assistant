@@ -164,7 +164,8 @@ function sleepScore(total, deep, rem, core, awake) {
   if      (ap < 5)   s += 10;
   else if (ap < 10)  s += 7;
   else if (ap < 15)  s += 4;
-  return Math.min(100, Math.round(s));
+  const cap = total >= 7 ? 100 : total >= 6.5 ? 82 : total >= 6 ? 68 : 52;
+  return Math.min(cap, Math.round(s));
 }
 
 function SleepStageTooltip({ label, color, tip, children }) {
