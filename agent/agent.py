@@ -112,8 +112,10 @@ def report_stage(job_id: str, stage: str, message: str = ""):
 
 def poll_pending_job():
     try:
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&order=created_at.desc&limit=1",
+            f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&created_at=gt.{cutoff}&order=created_at.desc&limit=1",
             headers=supabase_headers(),
             timeout=10,
         )
@@ -253,7 +255,7 @@ def build_cowork_instruction(titulo: str, enunciado: str, alud_url: str) -> str:
         f"3. Resuelve la actividad y rellena el campo de respuesta\n"
         f"4. NO pulses ningún botón de enviar, entregar ni submit — "
         f"el usuario lo revisará y enviará manualmente cuando llegue a casa"
-        f"Ten en cuenta que el usuario no está en el ordenador, esto es un mensaje automatizado, por lo que no podrá responder preguntas. Si tienes alguna duda, elige la opción recomendada, o la que mas se ajuste a las intrsucciones"
+        f"Ten en cuenta que el usuario no está en el ordenador, esto es un mensaje automatizado, por lo que no podrá responder preguntas. Si tienes alguna duda, elige la opción recomendada, o la que mas se ajuste a las instrucciones"
     )
 
 def _focus_claude_window() -> bool:

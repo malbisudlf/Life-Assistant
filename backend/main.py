@@ -932,12 +932,19 @@ async def health_ingest(request: Request, token: str = ""):
             if not metric_date:
                 continue
 
-            raw_value = (
-                point.get("qty") if point.get("qty") is not None else
-                point.get("avg") if point.get("avg") is not None else
-                point.get("value") if point.get("value") is not None else
-                point.get("asleep")
-            )
+            if name in CUMULATIVE_METRICS:
+                raw_value = (
+                    point.get("sum") if point.get("sum") is not None else
+                    point.get("qty") if point.get("qty") is not None else
+                    point.get("value")
+                )
+            else:
+                raw_value = (
+                    point.get("qty") if point.get("qty") is not None else
+                    point.get("avg") if point.get("avg") is not None else
+                    point.get("value") if point.get("value") is not None else
+                    point.get("asleep")
+                )
             value = float(raw_value) if raw_value is not None else None
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
