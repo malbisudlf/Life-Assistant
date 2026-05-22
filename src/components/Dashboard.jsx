@@ -452,6 +452,13 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []);
 
+  // Cerrar ajustes con Escape
+  useEffect(() => {
+    const handler = e => { if (e.key === "Escape") setShowSettings(false); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, []);
+
   // Cargar eventos
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
@@ -2047,6 +2054,7 @@ export default function Dashboard() {
             background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
             borderRadius: 16, padding: "28px 32px", zIndex: 201,
             width: "min(340px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+            maxHeight: "90vh", overflowY: "auto",
           }}>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>Widgets</div>
             <button onClick={() => { setShowSettings(false); setIsEditMode(true); }} style={{
