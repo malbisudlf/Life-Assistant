@@ -316,7 +316,7 @@ const GLOBAL_CSS = `
   body.dragging-widget .resize-handle { opacity: 0 !important; }
   .snap-zone-bar { animation: fadeInOverlay 0.15s ease; }
   @media (max-width: 640px) {
-    .clock { font-size: 36px !important; letter-spacing: -1px !important; }
+    .clock { font-size: 42px !important; letter-spacing: -1px !important; }
     .dashboard-root { padding: 12px !important; gap: 12px !important; }
     .header-greeting { display: none !important; }
     .timeline-inner { min-width: 280px !important; }
@@ -1132,14 +1132,14 @@ export default function Dashboard() {
             return (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 26, color: barColor, lineHeight: 1 }}>{sess}</span>
-                  <span style={{ fontSize: 12, color: "var(--muted)" }}>/ {spp} sesiones</span>
-                  <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 15, color: warn ? "#d4645a" : "var(--text)" }}>{amount_owed}€</span>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 31, color: barColor, lineHeight: 1 }}>{sess}</span>
+                  <span style={{ fontSize: 14, color: "var(--muted)" }}>/ {spp} sesiones</span>
+                  <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 17, color: warn ? "#d4645a" : "var(--text)" }}>{amount_owed}€</span>
                 </div>
                 <div style={{ height: 2, background: "var(--border)", borderRadius: 1, marginBottom: 8 }}>
                   <div style={{ height: "100%", borderRadius: 1, background: barColor, width: `${pct}%`, transition: "width 0.4s" }} />
                 </div>
-                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
+                <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
                   {hrs > 0 && <span>{hrs}h acumuladas</span>}
                   {last_session_date && <span style={{ marginLeft: hrs > 0 ? 8 : 0 }}>· Última: {formatShortDate(last_session_date)}</span>}
                   {last_payment_date && <><br />Cobro: {formatShortDate(last_payment_date)}</>}
@@ -1386,7 +1386,7 @@ export default function Dashboard() {
                   {insights.map((ins, i) => (
                     <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                       <span style={{ fontSize: 16, lineHeight: 1.4, flexShrink: 0 }}>{ins.icon}</span>
-                      <span style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5 }}>
+                      <span style={{ fontSize: 15, color: "var(--text)", lineHeight: 1.5 }}>
                         <span style={{ color: ins.color, fontWeight: 500 }}>
                           {ins.text.split("—")[0]}
                         </span>
@@ -1399,7 +1399,7 @@ export default function Dashboard() {
                   <div style={{
                     marginTop: 4, padding: "10px 14px",
                     background: "rgba(200,169,110,0.06)", borderLeft: "2px solid var(--accent)",
-                    borderRadius: "0 8px 8px 0", fontSize: 12, color: "var(--muted)", lineHeight: 1.6,
+                    borderRadius: "0 8px 8px 0", fontSize: 14, color: "var(--muted)", lineHeight: 1.6,
                   }}>
                     <span style={{ color: "var(--accent)", fontWeight: 500 }}>Hoy → </span>{rec}
                   </div>
@@ -1408,7 +1408,7 @@ export default function Dashboard() {
                   const diff = Math.floor((Date.now() - new Date(healthLastSync)) / 60000);
                   const label = diff < 2 ? "ahora mismo" : diff < 60 ? `hace ${diff} min` : diff < 1440 ? `hace ${Math.floor(diff/60)}h` : `hace ${Math.floor(diff/1440)}d`;
                   return (
-                    <div style={{ marginTop: 10, fontSize: 10, color: "var(--muted2)", textAlign: "right", fontFamily: "'DM Mono', monospace" }}>
+                    <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted2)", textAlign: "right", fontFamily: "'DM Mono', monospace" }}>
                       sync {label}
                     </div>
                   );
@@ -1468,19 +1468,19 @@ export default function Dashboard() {
               <>
                 {latest && (
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: sleepColor(lv), lineHeight: 1 }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 33, color: sleepColor(lv), lineHeight: 1 }}>
                       {hoursToHM(lv)}
                     </span>
-                    <span style={{ fontSize: 11, color: "var(--muted)" }}>anoche</span>
+                    <span style={{ fontSize: 13, color: "var(--muted)" }}>anoche</span>
                     {avg7 != null && (
-                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                      <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
                         media 7d: {hoursToHM(avg7)}
                       </span>
                     )}
                   </div>
                 )}
                 {latest?.extra && (ld != null || lr != null || lc != null) && (
-                  <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 11, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 13, flexWrap: "wrap" }}>
                     {ld != null && (
                       <SleepStageTooltip label={STAGE_TIPS.deep.label} color={STAGE_TIPS.deep.color} tip={STAGE_TIPS.deep.tip}>
                         <span style={{ color: "var(--muted)" }}>
@@ -1553,12 +1553,12 @@ export default function Dashboard() {
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: "var(--accent)", lineHeight: 1 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 33, color: "var(--accent)", lineHeight: 1 }}>
                     {latest?.value?.toFixed(0)}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>bpm</span>
+                  <span style={{ fontSize: 13, color: "var(--muted)" }}>bpm</span>
                   {hrMin && hrMax && (
-                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                    <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
                       {hrMin}–{hrMax} (30d)
                     </span>
                   )}
@@ -1580,7 +1580,7 @@ export default function Dashboard() {
         const trendColor = trend === "↑" ? "var(--green)" : trend === "↓" ? "#d4645a" : "var(--muted)";
         return (
           <div style={cardStyle} data-card={id} key="health_hrv">
-            <div style={s.sectionLabel}>HRV <span style={{ fontSize: 10, color: "var(--muted2)", textTransform: "none", letterSpacing: 0 }}>variabilidad cardíaca</span></div>
+            <div style={s.sectionLabel}>HRV <span style={{ fontSize: 12, color: "var(--muted2)", textTransform: "none", letterSpacing: 0 }}>variabilidad cardíaca</span></div>
             {healthLoading ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
             ) : last30.length === 0 ? (
@@ -1588,13 +1588,13 @@ export default function Dashboard() {
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: "var(--accent2)", lineHeight: 1 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 33, color: "var(--accent2)", lineHeight: 1 }}>
                     {latest?.value?.toFixed(0)}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>ms</span>
-                  {trend && <span style={{ fontSize: 18, color: trendColor, fontFamily: "'DM Mono', monospace" }}>{trend}</span>}
+                  <span style={{ fontSize: 13, color: "var(--muted)" }}>ms</span>
+                  {trend && <span style={{ fontSize: 20, color: trendColor, fontFamily: "'DM Mono', monospace" }}>{trend}</span>}
                   {avg7 != null && (
-                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                    <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
                       media 7d: {avg7.toFixed(0)}ms
                     </span>
                   )}
@@ -1623,12 +1623,12 @@ export default function Dashboard() {
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 24, color: "var(--green)", lineHeight: 1 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 29, color: "var(--green)", lineHeight: 1 }}>
                     {(latest?.value || 0).toLocaleString("es")}
                   </span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>pasos hoy</span>
+                  <span style={{ fontSize: 13, color: "var(--muted)" }}>pasos hoy</span>
                   {latestCal?.value && (
-                    <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                    <span style={{ marginLeft: "auto", fontSize: 15, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
                       {latestCal.value.toFixed(0)} kcal
                     </span>
                   )}
@@ -2244,15 +2244,15 @@ export default function Dashboard() {
 const s = {
   dashboard: { display: "flex", flexDirection: "column", minHeight: "100vh", padding: 20, gap: 16, background: "var(--bg)" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", paddingBottom: 16, borderBottom: "0.5px solid var(--border)" },
-  clock: { fontFamily: "'DM Mono', monospace", fontSize: 48, fontWeight: 400, letterSpacing: -2, color: "var(--text)", lineHeight: 1 },
-  date: { fontSize: 13, color: "var(--muted)", marginTop: 4, letterSpacing: "0.05em", textTransform: "uppercase" },
-  greeting: { fontSize: 13, color: "var(--muted)", textAlign: "right", fontFamily: "'DM Sans', sans-serif" },
-  greetingStrong: { display: "block", fontSize: 16, color: "var(--accent)", fontWeight: 500, marginTop: 2 },
+  clock: { fontFamily: "'DM Mono', monospace", fontSize: 56, fontWeight: 400, letterSpacing: -2, color: "var(--text)", lineHeight: 1 },
+  date: { fontSize: 15, color: "var(--muted)", marginTop: 4, letterSpacing: "0.05em", textTransform: "uppercase" },
+  greeting: { fontSize: 15, color: "var(--muted)", textAlign: "right", fontFamily: "'DM Sans', sans-serif" },
+  greetingStrong: { display: "block", fontSize: 19, color: "var(--accent)", fontWeight: 500, marginTop: 2 },
   mainGrid: { display: "grid", gridTemplateColumns: "1fr 320px", gap: 16, alignItems: "start", flex: 1 },
   leftCol:  { display: "flex", flexDirection: "column", gap: 16 },
   rightCol: { display: "flex", flexDirection: "column", gap: 16 },
   card: { background: "var(--surface)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 20px", boxSizing: "border-box", width: "100%" },
-  sectionLabel: { fontSize: 10, fontWeight: 500, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 12 },
+  sectionLabel: { fontSize: 12, fontWeight: 500, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 12 },
   timelineWrapper: { overflowX: "auto", paddingBottom: 4 },
   timeline: { display: "flex", alignItems: "flex-start", minWidth: 500, padding: "8px 0 16px", position: "relative" },
   timelineItem: { display: "flex", flexDirection: "column", alignItems: "center", flex: 1, position: "relative", cursor: "pointer" },
@@ -2262,35 +2262,35 @@ const s = {
   nodePast: { borderColor: "var(--muted2)", background: "var(--muted2)", width: 12, height: 12, margin: "3px 0" },
   nodeFuture: { borderColor: "var(--border2)" },
   nodeLabel: { marginTop: 10, textAlign: "center", maxWidth: 80 },
-  nodeTime:  { fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted)" },
-  nodeTitle: { fontSize: 11, color: "var(--text)", marginTop: 2, lineHeight: 1.3 },
+  nodeTime:  { fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--muted)" },
+  nodeTitle: { fontSize: 13, color: "var(--text)", marginTop: 2, lineHeight: 1.3 },
   nodeTitleActive: { color: "var(--accent)", fontWeight: 500 },
   eventDetail: { background: "var(--surface2)", border: "0.5px solid var(--border2)", borderLeft: "2px solid var(--accent)", borderRadius: 8, padding: "12px 16px", marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "center" },
-  eventDetailTitle: { fontSize: 15, fontWeight: 500, color: "var(--text)" },
-  eventDetailSub:   { fontSize: 12, color: "var(--muted)", marginTop: 3 },
-  eventDetailTime:  { fontFamily: "'DM Mono', monospace", fontSize: 20, color: "var(--accent)" },
+  eventDetailTitle: { fontSize: 17, fontWeight: 500, color: "var(--text)" },
+  eventDetailSub:   { fontSize: 14, color: "var(--muted)", marginTop: 3 },
+  eventDetailTime:  { fontFamily: "'DM Mono', monospace", fontSize: 24, color: "var(--accent)" },
   eventRow: { display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderRadius: 8, border: "0.5px solid var(--border)", background: "var(--surface2)", cursor: "pointer" },
   eventDot: { width: 6, height: 6, borderRadius: "50%", background: "var(--accent2)", flexShrink: 0 },
-  eventRowTime:  { fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted)", minWidth: 80 },
-  eventRowTitle: { fontSize: 13, color: "var(--text)", flex: 1 },
-  eventRowLoc:   { fontSize: 11, color: "var(--muted)" },
+  eventRowTime:  { fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--muted)", minWidth: 88 },
+  eventRowTitle: { fontSize: 15, color: "var(--text)", flex: 1 },
+  eventRowLoc:   { fontSize: 13, color: "var(--muted)" },
   entregaRow: { display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 8, border: "0.5px solid var(--border)", background: "var(--surface2)", cursor: "pointer" },
   urgencyBar: { width: 3, height: 36, borderRadius: 2, flexShrink: 0 },
-  entregaTitle:    { fontSize: 13, fontWeight: 500, color: "var(--text)" },
-  entregaSubject:  { fontSize: 11, color: "var(--muted)", marginTop: 2 },
+  entregaTitle:    { fontSize: 15, fontWeight: 500, color: "var(--text)" },
+  entregaSubject:  { fontSize: 13, color: "var(--muted)", marginTop: 2 },
   entregaCountdown: { textAlign: "right", flexShrink: 0 },
-  daysNum:  { fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 400, lineHeight: 1 },
-  daysLabel: { fontSize: 10, color: "var(--muted)", display: "block", marginTop: 1 },
+  daysNum:  { fontFamily: "'DM Mono', monospace", fontSize: 24, fontWeight: 400, lineHeight: 1 },
+  daysLabel: { fontSize: 12, color: "var(--muted)", display: "block", marginTop: 1 },
   ideaCard: { background: "var(--surface2)", border: "0.5px solid var(--border)", borderRadius: 8, padding: "12px 14px", cursor: "pointer" },
-  ideaKey: { fontSize: 13, fontWeight: 500, color: "var(--text)", display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" },
-  ideaTag: { fontSize: 10, color: "var(--muted)", background: "var(--surface)", padding: "2px 8px", borderRadius: 4, letterSpacing: "0.05em", flexShrink: 0 },
-  ideaChevron: { fontSize: 10, color: "var(--muted2)", transition: "transform 0.3s", flexShrink: 0 },
-  ideaFull: { fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.6 },
-  newIdeaBtn: { width: "100%", marginTop: 10, padding: 8, background: "transparent", border: "0.5px dashed rgba(255,255,255,0.12)", borderRadius: 8, color: "#5a5850", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "all 0.2s" },
-  footer: { display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 12, borderTop: "0.5px solid var(--border)", fontSize: 11, color: "var(--muted2)" },
+  ideaKey: { fontSize: 15, fontWeight: 500, color: "var(--text)", display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" },
+  ideaTag: { fontSize: 12, color: "var(--muted)", background: "var(--surface)", padding: "2px 8px", borderRadius: 4, letterSpacing: "0.05em", flexShrink: 0 },
+  ideaChevron: { fontSize: 12, color: "var(--muted2)", transition: "transform 0.3s", flexShrink: 0 },
+  ideaFull: { fontSize: 14, color: "var(--muted)", marginTop: 8, lineHeight: 1.6 },
+  newIdeaBtn: { width: "100%", marginTop: 10, padding: 8, background: "transparent", border: "0.5px dashed rgba(255,255,255,0.12)", borderRadius: 8, color: "#5a5850", fontSize: 14, cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "all 0.2s" },
+  footer: { display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 12, borderTop: "0.5px solid var(--border)", fontSize: 13, color: "var(--muted2)" },
   statusDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--green)", marginRight: 6, animation: "pulse 2s infinite", verticalAlign: "middle" },
-  appTabActive: { fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 8px", borderRadius: 4, background: "var(--accent)", color: "#0e0f11", letterSpacing: "0.05em", userSelect: "none" },
-  appTabInactive: { fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 8px", borderRadius: 4, border: "0.5px solid var(--border2)", color: "var(--muted)", cursor: "pointer", letterSpacing: "0.05em", transition: "color 0.15s, border-color 0.15s" },
+  appTabActive: { fontFamily: "'DM Mono', monospace", fontSize: 12, padding: "2px 8px", borderRadius: 4, background: "var(--accent)", color: "#0e0f11", letterSpacing: "0.05em", userSelect: "none" },
+  appTabInactive: { fontFamily: "'DM Mono', monospace", fontSize: 12, padding: "2px 8px", borderRadius: 4, border: "0.5px solid var(--border2)", color: "var(--muted)", cursor: "pointer", letterSpacing: "0.05em", transition: "color 0.15s, border-color 0.15s" },
 };
 
 
