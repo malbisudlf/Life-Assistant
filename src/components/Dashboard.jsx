@@ -847,7 +847,10 @@ export default function Dashboard() {
       resizeDragRef.current = null;
       document.body.classList.remove("resizing");
       clearGuides();
-      saveWidgetConfig(widgetConfig.map(c => c.id === wid ? { ...c, width: w, height: h } : c));
+      const el = document.getElementById(`widget-wrap-${wid}`);
+      const colW = el?.parentElement?.offsetWidth || w;
+      const widthPct = Math.round((w / colW) * 1000) / 1000;
+      saveWidgetConfig(widgetConfig.map(c => c.id === wid ? { ...c, widthPct, width: undefined, height: h } : c));
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     }
@@ -1698,7 +1701,7 @@ export default function Dashboard() {
 
   function wrapResizable(w) {
     const cfg       = widgetConfig.find(c => c.id === w.id) || w;
-    const widthPx   = typeof cfg.width  === "number" ? `${cfg.width}px`  : "100%";
+    const widthPx   = typeof cfg.widthPct === "number" ? `${Math.round(cfg.widthPct * 100)}%` : "100%";
     const heightPx  = typeof cfg.height === "number" ? `${cfg.height}px` : "auto";
     const isDragged = draggingId === w.id;
     const col       = cfg.column || DEFAULT_COLUMNS[w.id] || "left";
@@ -1713,7 +1716,6 @@ export default function Dashboard() {
         className="widget-wrap"
         style={{
           width: widthPx,
-          maxWidth: "100%",
           height: heightPx,
           minHeight: 80,
           opacity: isDragged ? 0.3 : 1,
