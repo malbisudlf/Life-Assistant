@@ -968,8 +968,8 @@ export default function Dashboard() {
     .slice(0, 5)
     .map(e => ({ ...e, time: formatUpcomingTime(e.start), title: e.title || "(Sin título)", loc: e.location || "" }));
 
-  const entregas = allEvents
-    .filter(e => e.title && e.title.includes("📚") && isFuture(e.start))
+  const entregas = [...allEvents, ...classEvents]
+    .filter(e => e.title && e.title.includes("📚") && (isFuture(e.start) || isToday(e.start)))
     .map(e => ({ title: e.title.replace("📚", "").trim(), subject: e.title, days: daysUntil(e.start), alud_url: e.alud_url || null }))
     .sort((a, b) => a.days - b.days);
 
@@ -1549,8 +1549,9 @@ export default function Dashboard() {
         const stepsData   = findMetric(healthData, "step_count", "steps", "stepCount");
         const caloriesData = findMetric(healthData, "active_energy", "activeEnergy");
         const last7       = stepsData.slice(-7);
-        const latest      = stepsData[stepsData.length - 1];
-        const latestCal   = caloriesData[caloriesData.length - 1];
+        const todayStr    = new Date().toLocaleDateString("sv"); // YYYY-MM-DD
+        const latest      = stepsData.find(d => d.date === todayStr) || null;
+        const latestCal   = caloriesData.find(d => d.date === todayStr) || null;
         const maxSteps    = Math.max(...last7.map(d => d.value || 0), 10000);
         return (
           <div style={cardStyle} data-card={id} key="health_activity">

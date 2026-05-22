@@ -289,10 +289,10 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     madrid_tz = ZoneInfo("Europe/Madrid")
     today_start = datetime.now(madrid_tz).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (today_start + timedelta(days=7)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (today_start + timedelta(days=60)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     r2 = requests.get(
         f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
-        f"?startDateTime={start}&endDateTime={end}&$top=50"
+        f"?startDateTime={start}&endDateTime={end}&$top=200"
         f"&$select=subject,start,end,location,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
@@ -933,11 +933,10 @@ async def health_ingest(request: Request, token: str = ""):
                 continue
 
             if name in CUMULATIVE_METRICS:
-                raw_value = (
-                    point.get("sum") if point.get("sum") is not None else
-                    point.get("qty") if point.get("qty") is not None else
-                    point.get("value")
-                )
+                # Health Auto Export v2 usa "qty" para el total diario; "sum" puede venir como 0.
+                # Tomamos el mayor valor no-None entre todos los campos posibles.
+                _candidates = [v for k in ("qty", "sum", "value") if (v := point.get(k)) is not None]
+                raw_value = max(_candidates) if _candidates else None
             else:
                 raw_value = (
                     point.get("qty") if point.get("qty") is not None else
@@ -972,8 +971,11 @@ async def health_ingest(request: Request, token: str = ""):
             )
             if existing.status_code < 300:
                 rows = existing.json()
-                if rows and rows[0].get("value") is not None and float(rows[0]["value"]) >= value:
-                    continue
+                if rows and rows[0].get("value") is not None:
+                    existing_val = float(rows[0]["value"])
+                    # Solo saltar si el valor existente es real (>0) y ya es mayor o igual
+                    if existing_val > 0 and existing_val >= value:
+                        continue
 
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/health_metrics",
