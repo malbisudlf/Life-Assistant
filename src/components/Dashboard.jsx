@@ -1789,7 +1789,6 @@ export default function Dashboard() {
                 className="col-left"
                 style={{
                   width: `calc(${leftPct}% - 8px)`,
-                  flexShrink: 0, minWidth: 0,
                   display: "flex", flexDirection: "column", gap: 16,
                   outline: isEditMode && draggingId && dragOverId === "left" ? "2px solid rgba(200,169,110,0.5)" : "none",
                   borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "left" ? 6 : 0,
@@ -1822,7 +1821,6 @@ export default function Dashboard() {
                 className="col-right"
                 style={{
                   width: `calc(${rightPct}% - 8px)`,
-                  flexShrink: 0, minWidth: 0,
                   display: "flex", flexDirection: "column", gap: 16,
                   outline: isEditMode && draggingId && dragOverId === "right" ? "2px solid rgba(200,169,110,0.5)" : "none",
                   borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "right" ? 6 : 0,
