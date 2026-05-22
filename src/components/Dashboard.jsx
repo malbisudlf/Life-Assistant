@@ -321,7 +321,7 @@ const GLOBAL_CSS = `
     .header-greeting { display: none !important; }
     .timeline-inner { min-width: 280px !important; }
     .widget-wrap { width: 100% !important; }
-    .col-left, .col-right { width: 100% !important; min-width: 0 !important; }
+    .col-left, .col-right { flex: 1 1 0 !important; min-width: 0 !important; }
     .col-divider { display: none !important; }
   }
 `;
@@ -1779,8 +1779,6 @@ export default function Dashboard() {
         {(() => {
           const leftWidgets  = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "left");
           const rightWidgets = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "right");
-          const leftPct  = Math.round(colSplit * 100);
-          const rightPct = 100 - leftPct;
           return (
             <div
               id="widget-grid-container"
@@ -1790,7 +1788,8 @@ export default function Dashboard() {
               <div
                 className="col-left"
                 style={{
-                  width: `calc(${leftPct}% - 8px)`,
+                  flex: `${colSplit} 1 0`,
+                  minWidth: 0,
                   display: "flex", flexDirection: "column", gap: 16,
                   outline: isEditMode && draggingId && dragOverId === "left" ? "2px solid rgba(200,169,110,0.5)" : "none",
                   borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "left" ? 6 : 0,
@@ -1822,7 +1821,8 @@ export default function Dashboard() {
               <div
                 className="col-right"
                 style={{
-                  width: `calc(${rightPct}% - 8px)`,
+                  flex: `${1 - colSplit} 1 0`,
+                  minWidth: 0,
                   display: "flex", flexDirection: "column", gap: 16,
                   outline: isEditMode && draggingId && dragOverId === "right" ? "2px solid rgba(200,169,110,0.5)" : "none",
                   borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "right" ? 6 : 0,
