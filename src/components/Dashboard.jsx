@@ -384,6 +384,7 @@ export default function Dashboard() {
   const [healthData, setHealthData]         = useState(null);
   const [healthLoading, setHealthLoading]   = useState(false);
   const [healthLastSync, setHealthLastSync] = useState(null);
+  const [wellnessView, setWellnessView]     = useState("weekly");
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -1212,104 +1213,156 @@ export default function Dashboard() {
         const last7Hrv    = wHrvRaw.slice(-7);
         // Semana actual: desde el lunes hasta hoy (no últimos 7 días rodantes)
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+        const todayStr = todayMidnight.toISOString().slice(0,10);
         const dayOfWeek = todayMidnight.getDay(); // 0=Dom, 1=Lun...
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
         const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
 
+        // ── vista semanal ──
         const avgSleep   = last7Sleep.length  ? last7Sleep.reduce((s,d)=>s+(d.value||0),0)/last7Sleep.length  : null;
         const avgSteps   = last7Steps.length  ? last7Steps.reduce((s,d)=>s+(d.value||0),0)/last7Steps.length  : null;
         const avgHrv     = last7Hrv.length    ? last7Hrv.reduce((s,d)=>s+(d.value||0),0)/last7Hrv.length      : null;
         const prevHrv    = wHrvRaw.slice(-14,-7);
         const avgHrvPrev = prevHrv.length     ? prevHrv.reduce((s,d)=>s+(d.value||0),0)/prevHrv.length        : null;
-
-        // Entrenamientos: contar workouts únicos de los últimos 7 días
         const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
         const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
 
-        // ── puntuación semanal ──
+        // ── vista diaria ──
+        const todaySleepEntry = wSleepRaw[wSleepRaw.length - 1];
+        const todaySleep  = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
+        const todayStepsEntry = wStepsRaw.find(d => d.date === todayStr) || wStepsRaw[wStepsRaw.length - 1];
+        const todaySteps  = todayStepsEntry?.value > 0 ? todayStepsEntry.value : null;
+        const todayHrvEntry = wHrvRaw.find(d => d.date === todayStr) || wHrvRaw[wHrvRaw.length - 1];
+        const todayHrv    = todayHrvEntry?.value > 0 ? todayHrvEntry.value : null;
+        const todayWorkEntry = wWorkRaw.find(d => d.date === todayStr);
+        const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
+
+        const isDaily = wellnessView === "daily";
+
+        // ── puntuación ──
         let score = 0;
-        // Sueño (35 pts)
-        if (avgSleep != null) {
-          if      (avgSleep >= 7.5) score += 35;
-          else if (avgSleep >= 7)   score += 30;
-          else if (avgSleep >= 6.5) score += 22;
-          else if (avgSleep >= 6)   score += 14;
+        const sleepVal = isDaily ? todaySleep : avgSleep;
+        const stepsVal = isDaily ? todaySteps : avgSteps;
+        const hrvVal   = isDaily ? todayHrv   : avgHrv;
+        const workVal  = isDaily ? todayWorkoutCount : weekWorkoutCount;
+
+        if (sleepVal != null) {
+          if      (sleepVal >= 7.5) score += 35;
+          else if (sleepVal >= 7)   score += 30;
+          else if (sleepVal >= 6.5) score += 22;
+          else if (sleepVal >= 6)   score += 14;
           else                      score += 6;
         }
-        // Entrenamientos (35 pts) — objetivo: 4/semana
-        if      (weekWorkoutCount >= 4) score += 35;
-        else if (weekWorkoutCount === 3) score += 24;
-        else if (weekWorkoutCount === 2) score += 14;
-        else if (weekWorkoutCount === 1) score += 6;
-        // Pasos (20 pts)
-        if (avgSteps != null) {
-          if      (avgSteps >= 10000) score += 20;
-          else if (avgSteps >= 8000)  score += 16;
-          else if (avgSteps >= 6000)  score += 11;
-          else if (avgSteps >= 4000)  score += 6;
+        if (isDaily) {
+          if (workVal >= 1) score += 35;
+        } else {
+          if      (workVal >= 4) score += 35;
+          else if (workVal === 3) score += 24;
+          else if (workVal === 2) score += 14;
+          else if (workVal === 1) score += 6;
+        }
+        if (stepsVal != null) {
+          if      (stepsVal >= 10000) score += 20;
+          else if (stepsVal >= 8000)  score += 16;
+          else if (stepsVal >= 6000)  score += 11;
+          else if (stepsVal >= 4000)  score += 6;
           else                        score += 2;
         }
-        // HRV (10 pts)
-        if (avgHrv != null && avgHrvPrev != null) {
-          if      (avgHrv >= avgHrvPrev * 1.05) score += 10;
-          else if (avgHrv >= avgHrvPrev * 0.95) score += 7;
+        if (hrvVal != null && avgHrvPrev != null) {
+          if      (hrvVal >= avgHrvPrev * 1.05) score += 10;
+          else if (hrvVal >= avgHrvPrev * 0.95) score += 7;
           else                                   score += 3;
-        } else if (avgHrv != null) score += 5;
+        } else if (hrvVal != null) score += 5;
 
-        const scoreLabel = score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja";
+        const scoreLabel = isDaily
+          ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
+          : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
         const scoreColor = score >= 80 ? "var(--green)" : score >= 65 ? "#6aaa82" : score >= 50 ? "var(--accent)" : "#d4645a";
 
         // ── insights ──
         const insights = [];
-        if (avgSleep != null) {
-          const goodNights = last7Sleep.filter(d => d.value >= 7).length;
-          if      (avgSleep >= 7.5) insights.push({ icon: "😴", color: "var(--green)", text: `Sueño excelente — media de ${hoursToHM(avgSleep)}, ${goodNights} noches >7h` });
-          else if (avgSleep >= 7)   insights.push({ icon: "😴", color: "#6aaa82",     text: `Sueño bueno — media de ${hoursToHM(avgSleep)}` });
-          else if (avgSleep >= 6)   insights.push({ icon: "😴", color: "var(--accent)", text: `Sueño justo — media de ${hoursToHM(avgSleep)}. Intenta acostarte antes` });
-          else                      insights.push({ icon: "😴", color: "#d4645a",     text: `Sueño insuficiente — media de ${hoursToHM(avgSleep)}. Prioriza descansar` });
+        if (sleepVal != null) {
+          if (isDaily) {
+            if      (sleepVal >= 7.5) insights.push({ icon: "😴", color: "var(--green)",   text: `Noche excelente — ${hoursToHM(sleepVal)} de sueño` });
+            else if (sleepVal >= 7)   insights.push({ icon: "😴", color: "#6aaa82",         text: `Buena noche — ${hoursToHM(sleepVal)} de sueño` });
+            else if (sleepVal >= 6)   insights.push({ icon: "😴", color: "var(--accent)",   text: `Noche justa — ${hoursToHM(sleepVal)}. Intenta acostarte antes` });
+            else                      insights.push({ icon: "😴", color: "#d4645a",         text: `Noche corta — ${hoursToHM(sleepVal)}. Prioriza descansar esta noche` });
+          } else {
+            const goodNights = last7Sleep.filter(d => d.value >= 7).length;
+            if      (sleepVal >= 7.5) insights.push({ icon: "😴", color: "var(--green)",   text: `Sueño excelente — media de ${hoursToHM(sleepVal)}, ${goodNights} noches >7h` });
+            else if (sleepVal >= 7)   insights.push({ icon: "😴", color: "#6aaa82",         text: `Sueño bueno — media de ${hoursToHM(sleepVal)}` });
+            else if (sleepVal >= 6)   insights.push({ icon: "😴", color: "var(--accent)",   text: `Sueño justo — media de ${hoursToHM(sleepVal)}. Intenta acostarte antes` });
+            else                      insights.push({ icon: "😴", color: "#d4645a",         text: `Sueño insuficiente — media de ${hoursToHM(sleepVal)}. Prioriza descansar` });
+          }
         }
-        if (weekWorkoutCount > 0 || daysSinceWorkout != null) {
-          const remaining = Math.max(0, 4 - weekWorkoutCount);
-          if      (weekWorkoutCount >= 5) insights.push({ icon: "💪", color: "var(--green)",   text: `${weekWorkoutCount} entrenamientos esta semana — objetivo superado` });
-          else if (weekWorkoutCount === 4) insights.push({ icon: "💪", color: "var(--green)",   text: `4/4 entrenamientos esta semana — objetivo cumplido` });
-          else if (weekWorkoutCount === 3) insights.push({ icon: "💪", color: "#6aaa82",        text: `3/4 entrenamientos — te queda ${remaining} para llegar al objetivo` });
-          else if (weekWorkoutCount === 2) insights.push({ icon: "💪", color: "var(--accent)",  text: `2/4 entrenamientos — te quedan ${remaining} esta semana` });
-          else if (weekWorkoutCount === 1) insights.push({ icon: "💪", color: "#d4645a",        text: `1/4 entrenamientos — te quedan ${remaining} para cumplir el objetivo` });
-          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: "#d4645a",      text: `0/4 entrenamientos esta semana — llevas ${daysSinceWorkout} días sin ir al gym` });
+        if (isDaily) {
+          if (todayWorkoutCount >= 1) insights.push({ icon: "💪", color: "var(--green)",  text: `${todayWorkoutCount > 1 ? todayWorkoutCount + " entrenamientos hoy" : "Entrenamiento completado hoy"} — objetivo diario cumplido` });
+          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: daysSinceWorkout >= 2 ? "#d4645a" : "var(--muted)", text: `Sin entrenamiento hoy — llevas ${daysSinceWorkout} día${daysSinceWorkout !== 1 ? "s" : ""} de descanso` });
+        } else {
+          if (workVal > 0 || daysSinceWorkout != null) {
+            const remaining = Math.max(0, 4 - workVal);
+            if      (workVal >= 5) insights.push({ icon: "💪", color: "var(--green)",   text: `${workVal} entrenamientos esta semana — objetivo superado` });
+            else if (workVal === 4) insights.push({ icon: "💪", color: "var(--green)",   text: `4/4 entrenamientos esta semana — objetivo cumplido` });
+            else if (workVal === 3) insights.push({ icon: "💪", color: "#6aaa82",        text: `3/4 entrenamientos — te queda ${remaining} para llegar al objetivo` });
+            else if (workVal === 2) insights.push({ icon: "💪", color: "var(--accent)",  text: `2/4 entrenamientos — te quedan ${remaining} esta semana` });
+            else if (workVal === 1) insights.push({ icon: "💪", color: "#d4645a",        text: `1/4 entrenamientos — te quedan ${remaining} para cumplir el objetivo` });
+            else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: "#d4645a", text: `0/4 entrenamientos esta semana — llevas ${daysSinceWorkout} días sin ir al gym` });
+          }
         }
-        if (avgSteps != null) {
-          if      (avgSteps >= 9000) insights.push({ icon: "🚶", color: "var(--green)",  text: `Muy activo — ${Math.round(avgSteps).toLocaleString("es")} pasos de media` });
-          else if (avgSteps >= 6000) insights.push({ icon: "🚶", color: "#6aaa82",       text: `Actividad moderada — ${Math.round(avgSteps).toLocaleString("es")} pasos de media` });
-          else                       insights.push({ icon: "🚶", color: "var(--accent)", text: `Poca actividad — ${Math.round(avgSteps).toLocaleString("es")} pasos. Intenta caminar más` });
+        if (stepsVal != null) {
+          if (isDaily) {
+            if      (stepsVal >= 9000) insights.push({ icon: "🚶", color: "var(--green)",  text: `Muy activo hoy — ${Math.round(stepsVal).toLocaleString("es")} pasos` });
+            else if (stepsVal >= 6000) insights.push({ icon: "🚶", color: "#6aaa82",       text: `Actividad moderada — ${Math.round(stepsVal).toLocaleString("es")} pasos` });
+            else                       insights.push({ icon: "🚶", color: "var(--accent)", text: `Poca actividad — ${Math.round(stepsVal).toLocaleString("es")} pasos hoy` });
+          } else {
+            if      (stepsVal >= 9000) insights.push({ icon: "🚶", color: "var(--green)",  text: `Muy activo — ${Math.round(stepsVal).toLocaleString("es")} pasos de media` });
+            else if (stepsVal >= 6000) insights.push({ icon: "🚶", color: "#6aaa82",       text: `Actividad moderada — ${Math.round(stepsVal).toLocaleString("es")} pasos de media` });
+            else                       insights.push({ icon: "🚶", color: "var(--accent)", text: `Poca actividad — ${Math.round(stepsVal).toLocaleString("es")} pasos. Intenta caminar más` });
+          }
         }
-        if (avgHrv != null) {
-          const hrvTrendUp = avgHrvPrev && avgHrv > avgHrvPrev * 1.03;
-          const hrvTrendDn = avgHrvPrev && avgHrv < avgHrvPrev * 0.97;
-          if      (hrvTrendUp) insights.push({ icon: "❤️", color: "var(--green)",  text: `HRV en subida (${Math.round(avgHrv)}ms) — buena recuperación` });
-          else if (hrvTrendDn) insights.push({ icon: "❤️", color: "#d4645a",     text: `HRV bajando (${Math.round(avgHrv)}ms) — quizás necesitas más descanso` });
-          else                 insights.push({ icon: "❤️", color: "var(--muted)", text: `HRV estable en ${Math.round(avgHrv)}ms` });
+        if (hrvVal != null) {
+          const hrvTrendUp = avgHrvPrev && hrvVal > avgHrvPrev * 1.03;
+          const hrvTrendDn = avgHrvPrev && hrvVal < avgHrvPrev * 0.97;
+          if      (hrvTrendUp) insights.push({ icon: "❤️", color: "var(--green)",  text: `HRV en subida (${Math.round(hrvVal)}ms) — buena recuperación` });
+          else if (hrvTrendDn) insights.push({ icon: "❤️", color: "#d4645a",       text: `HRV bajando (${Math.round(hrvVal)}ms) — quizás necesitas más descanso` });
+          else                 insights.push({ icon: "❤️", color: "var(--muted)",  text: `HRV estable en ${Math.round(hrvVal)}ms` });
         }
 
-        // ── recomendación de hoy ──
+        // ── recomendación ──
         let rec = null;
-        if (daysSinceWorkout != null && daysSinceWorkout >= 2 && avgHrv && avgHrv > 50)
+        if (daysSinceWorkout != null && daysSinceWorkout >= 2 && hrvVal && hrvVal > 50)
           rec = "Hoy es buen día para entrenar — llevas días de descanso y la recuperación es correcta.";
-        else if (avgHrv && avgHrv < 45)
+        else if (hrvVal && hrvVal < 45)
           rec = "Hoy mejor descanso activo — tu HRV indica que el cuerpo necesita recuperarse.";
-        else if (avgSleep && avgSleep < 6.5)
-          rec = "Esta semana el sueño ha sido escaso. Intenta acostarte 30 min antes esta noche.";
-        else if (weekWorkoutCount >= 4)
+        else if (sleepVal && sleepVal < 6.5)
+          rec = isDaily
+            ? "Noche corta. Intenta acostarte 30 min antes esta noche."
+            : "Esta semana el sueño ha sido escaso. Intenta acostarte 30 min antes esta noche.";
+        else if (!isDaily && workVal >= 4)
           rec = "Semana intensa de entrenamiento. Asegúrate de incluir un día de descanso.";
 
-        const hasAnyData = avgSleep != null || avgSteps != null || weekWorkoutCount > 0;
+        const hasAnyData = sleepVal != null || stepsVal != null || (isDaily ? todayWorkoutCount > 0 : weekWorkoutCount > 0);
+
+        const toggleStyle = (active) => ({
+          padding: "2px 8px", borderRadius: 4, fontSize: 11, cursor: "pointer", border: "none",
+          background: active ? "var(--accent)" : "transparent",
+          color: active ? "var(--bg)" : "var(--muted)",
+          fontFamily: "'DM Mono', monospace", letterSpacing: "0.03em", transition: "background 0.15s, color 0.15s",
+        });
 
         return (
           <div style={cardStyle} data-card={id} key="health_wellness">
             <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span>Bienestar semanal</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{isDaily ? "Bienestar hoy" : "Bienestar semanal"}</span>
+                <div style={{ display: "flex", background: "rgba(255,255,255,0.05)", borderRadius: 5, padding: 2, gap: 2 }}>
+                  <button style={toggleStyle(!isDaily)} onClick={() => setWellnessView("weekly")}>Semana</button>
+                  <button style={toggleStyle(isDaily)}  onClick={() => setWellnessView("daily")}>Hoy</button>
+                </div>
+              </div>
               {hasAnyData && (
                 <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", textTransform: "none" }}>
                   {score} — {scoreLabel}
