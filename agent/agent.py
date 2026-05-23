@@ -331,25 +331,13 @@ def main():
         sys.exit(1)
 
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
-    heartbeat("starting")
 
-    # Esperar job pendiente (máx 5 minutos)
+    # Comprobar si hay job pendiente — si no hay, salir sin hacer nada más
     log.info("Buscando job pendiente...")
-    job = None
-    deadline = time.time() + 25
-
-    while time.time() < deadline:
-        heartbeat("online")
-        # hito de disponibilidad del agente
-        # (sin job todavía no se reporta en job_events)
-        job = poll_pending_job()
-        if job:
-            break
-        time.sleep(POLL_INTERVAL)
+    job = poll_pending_job()
 
     if not job:
-        log.info("No hay jobs tras 5 minutos. Agente finalizado.")
-        heartbeat("offline")
+        log.info("No hay jobs pendientes. Agente finalizado sin acción.")
         return
 
     job_id   = job["id"]
@@ -358,6 +346,7 @@ def main():
     alud_url = payload.get("alud_url", "")
 
     log.info(f"Job: {job_id} | '{titulo}' | {alud_url}")
+    heartbeat("online")
 
     if not alud_url:
         log.error("El job no tiene 'alud_url' en el payload — abortando.")
@@ -365,8 +354,6 @@ def main():
         report_stage(job_id, "job_done", "failed: missing alud_url")
         heartbeat("offline")
         return
-
-    report_stage(job_id, "heartbeat_online", "Agente disponible y polling activo")
 
     if not claim_job(job_id):
         log.info("Job ya reclamado por otro worker.")
