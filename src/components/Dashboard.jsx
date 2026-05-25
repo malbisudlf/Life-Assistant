@@ -1281,6 +1281,9 @@ export default function Dashboard() {
         }
         if (isDaily) {
           if (workVal >= 1) score += 30;
+          else if (todayHrv != null && todayHrv >= 70) score += 18;
+          else if (todayHrv != null && todayHrv >= 50) score += 12;
+          else if (todayHrv != null)                   score += 6;
         } else {
           if      (workVal >= 4) score += 30;
           else if (workVal === 3) score += 21;
@@ -1336,7 +1339,8 @@ export default function Dashboard() {
         }
         if (isDaily) {
           if (todayWorkoutCount >= 1) insights.push({ icon: "💪", color: "var(--green)",  text: `${todayWorkoutCount > 1 ? todayWorkoutCount + " entrenamientos hoy" : "Entrenamiento completado hoy"} — objetivo diario cumplido` });
-          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: daysSinceWorkout >= 2 ? "#d4645a" : "var(--muted)", text: `Sin entrenamiento hoy — llevas ${daysSinceWorkout} día${daysSinceWorkout !== 1 ? "s" : ""} de descanso` });
+          else if (todayHrv != null && todayHrv >= 70) insights.push({ icon: "💪", color: "var(--muted)", text: `Día de descanso — recuperación buena (HRV ${Math.round(todayHrv)}ms)` });
+          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: daysSinceWorkout >= 3 ? "#d4645a" : "var(--muted)", text: `Sin entrenamiento hoy — llevas ${daysSinceWorkout} día${daysSinceWorkout !== 1 ? "s" : ""} de descanso` });
         } else {
           if (workVal > 0 || daysSinceWorkout != null) {
             const remaining = Math.max(0, 4 - workVal);
