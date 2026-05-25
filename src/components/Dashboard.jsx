@@ -1223,7 +1223,7 @@ export default function Dashboard() {
         const last7Hrv    = wHrvRaw.slice(-7);
         // Semana actual: desde el lunes hasta hoy (no últimos 7 días rodantes)
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
-        const todayStr = todayMidnight.toISOString().slice(0,10);
+        const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
         const dayOfWeek = todayMidnight.getDay(); // 0=Dom, 1=Lun...
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);

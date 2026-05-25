@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, field_validator
+from typing import Optional
 from jose import JWTError, jwt
 from openai import OpenAI
 import msal
@@ -992,6 +993,109 @@ async def health_ingest(request: Request, token: str = ""):
             upserted += 1
 
     return {"ok": True, "upserted": upserted}
+
+
+class SimpleHealthSample(BaseModel):
+    metric: str
+    date: str
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    extra: Optional[dict] = None
+
+
+@app.post("/health/ingest/simple")
+async def health_ingest_simple(request: Request, token: str = ""):
+    """Endpoint simplificado para iOS Shortcuts. Acepta array plano o dict único."""
+    if not HEALTH_INGEST_TOKEN or token != HEALTH_INGEST_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    body = await request.json()
+    if isinstance(body, dict):
+        # iOS Shortcuts serializa listas como NDJSON (un JSON por línea) dentro de un string
+        if len(body) == 1:
+            val = list(body.values())[0]
+            if isinstance(val, str):
+                import json as _json
+                body = [_json.loads(line) for line in val.strip().splitlines() if line.strip()]
+            elif isinstance(val, list):
+                body = val
+            else:
+                body = [body]
+        else:
+            body = [body]
+
+    samples = []
+    parse_errors = []
+    for item in body:
+        try:
+            v = item.get("value")
+            if v is None:
+                parse_errors.append({"metric": item.get("metric"), "reason": "value is None"})
+                continue
+            if v == "":
+                v = 0
+            samples.append(SimpleHealthSample(
+                metric=item["metric"],
+                date=item["date"],
+                value=float(v),
+                unit=item.get("unit"),
+                extra=item.get("extra"),
+            ))
+        except (KeyError, ValueError, TypeError) as e:
+            parse_errors.append({"item": str(item)[:200], "error": str(e)})
+            continue
+
+    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy"}
+    upserted = 0
+    skipped = []
+    errors = []
+
+    for s in samples:
+        metric_date = s.date[:10] if s.date and len(s.date) >= 10 else None
+        if not metric_date:
+            skipped.append(f"{s.metric}: fecha inválida")
+            continue
+
+        row_exists = False
+        if s.metric in CUMULATIVE_METRICS:
+            existing = requests.get(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}&select=value",
+                headers=supabase_headers(),
+            )
+            if existing.status_code < 300:
+                rows = existing.json()
+                if rows:
+                    row_exists = True
+                    if rows[0].get("value") is not None and float(rows[0]["value"]) >= s.value:
+                        skipped.append(f"{s.metric}: existente={rows[0]['value']} >= nuevo={s.value}")
+                        continue
+
+        if row_exists:
+            r = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json={"value": s.value, "unit": s.unit, "extra": s.extra or {}},
+            )
+        else:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/health_metrics",
+                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+                json={
+                    "metric_date": metric_date,
+                    "metric_name": s.metric,
+                    "value": s.value,
+                    "unit": s.unit,
+                    "extra": s.extra or {},
+                },
+            )
+        if r.status_code < 300:
+            upserted += 1
+        else:
+            errors.append(f"{s.metric}: HTTP {r.status_code} {r.text[:100]}")
+
+    return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
 
 
 @app.get("/health/metrics")
