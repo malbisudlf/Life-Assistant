@@ -1216,11 +1216,15 @@ export default function Dashboard() {
         const wSleepRaw  = findMetric(healthData, "sleep_analysis", "sleep").map(d => ({ ...d, value: wSleepEff(d) }));
         const wStepsRaw  = findMetric(healthData, "step_count", "steps");
         const wHrvRaw    = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
+        const wRhrRaw    = findMetric(healthData, "resting_heart_rate");
+        const wAeRaw     = findMetric(healthData, "active_energy");
         const wWorkRaw   = findMetric(healthData, "workouts");
 
         const last7Sleep  = wSleepRaw.slice(-7);
         const last7Steps  = wStepsRaw.slice(-7);
         const last7Hrv    = wHrvRaw.slice(-7);
+        const last7Rhr    = wRhrRaw.slice(-7);
+        const last7Ae     = wAeRaw.slice(-7);
         // Semana actual: desde el lunes hasta hoy (no últimos 7 días rodantes)
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
         const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
@@ -1235,6 +1239,8 @@ export default function Dashboard() {
         const avgHrv     = last7Hrv.length    ? last7Hrv.reduce((s,d)=>s+(d.value||0),0)/last7Hrv.length      : null;
         const prevHrv    = wHrvRaw.slice(-14,-7);
         const avgHrvPrev = prevHrv.length     ? prevHrv.reduce((s,d)=>s+(d.value||0),0)/prevHrv.length        : null;
+        const avgRhr     = last7Rhr.length    ? last7Rhr.reduce((s,d)=>s+(d.value||0),0)/last7Rhr.length      : null;
+        const avgAe      = last7Ae.length     ? last7Ae.reduce((s,d)=>s+(d.value||0),0)/last7Ae.length        : null;
         const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
@@ -1247,45 +1253,65 @@ export default function Dashboard() {
         const todaySteps  = todayStepsEntry?.value > 0 ? todayStepsEntry.value : null;
         const todayHrvEntry = wHrvRaw.find(d => d.date === todayStr) || wHrvRaw[wHrvRaw.length - 1];
         const todayHrv    = todayHrvEntry?.value > 0 ? todayHrvEntry.value : null;
+        const todayRhrEntry = wRhrRaw.find(d => d.date === todayStr) || wRhrRaw[wRhrRaw.length - 1];
+        const todayRhr    = todayRhrEntry?.value > 0 ? todayRhrEntry.value : null;
+        const todayAeEntry  = wAeRaw.find(d => d.date === todayStr) || wAeRaw[wAeRaw.length - 1];
+        const todayAe     = todayAeEntry?.value > 0 ? todayAeEntry.value : null;
         const todayWorkEntry = wWorkRaw.find(d => d.date === todayStr);
         const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
 
         const isDaily = wellnessView === "daily";
 
         // ── puntuación ──
+        // Sueño 25 | Entrenamientos 30 | Pasos 15 | Energía activa 10 | HRV 10 | FC reposo 10
         let score = 0;
         const sleepVal = isDaily ? todaySleep : avgSleep;
         const stepsVal = isDaily ? todaySteps : avgSteps;
         const hrvVal   = isDaily ? todayHrv   : avgHrv;
+        const rhrVal   = isDaily ? todayRhr   : avgRhr;
+        const aeVal    = isDaily ? todayAe    : avgAe;
         const workVal  = isDaily ? todayWorkoutCount : weekWorkoutCount;
 
         if (sleepVal != null) {
-          if      (sleepVal >= 7.5) score += 35;
-          else if (sleepVal >= 7)   score += 30;
-          else if (sleepVal >= 6.5) score += 22;
-          else if (sleepVal >= 6)   score += 14;
-          else                      score += 6;
+          if      (sleepVal >= 7.5) score += 25;
+          else if (sleepVal >= 7)   score += 21;
+          else if (sleepVal >= 6.5) score += 15;
+          else if (sleepVal >= 6)   score += 9;
+          else                      score += 4;
         }
         if (isDaily) {
-          if (workVal >= 1) score += 35;
+          if (workVal >= 1) score += 30;
         } else {
-          if      (workVal >= 4) score += 35;
-          else if (workVal === 3) score += 24;
-          else if (workVal === 2) score += 14;
-          else if (workVal === 1) score += 6;
+          if      (workVal >= 4) score += 30;
+          else if (workVal === 3) score += 21;
+          else if (workVal === 2) score += 12;
+          else if (workVal === 1) score += 5;
         }
         if (stepsVal != null) {
-          if      (stepsVal >= 10000) score += 20;
-          else if (stepsVal >= 8000)  score += 16;
-          else if (stepsVal >= 6000)  score += 11;
-          else if (stepsVal >= 4000)  score += 6;
-          else                        score += 2;
+          if      (stepsVal >= 10000) score += 15;
+          else if (stepsVal >= 8000)  score += 12;
+          else if (stepsVal >= 6000)  score += 8;
+          else if (stepsVal >= 4000)  score += 4;
+          else                        score += 1;
+        }
+        if (aeVal != null) {
+          if      (aeVal >= 600) score += 10;
+          else if (aeVal >= 400) score += 8;
+          else if (aeVal >= 250) score += 5;
+          else if (aeVal >= 100) score += 2;
         }
         if (hrvVal != null && avgHrvPrev != null) {
           if      (hrvVal >= avgHrvPrev * 1.05) score += 10;
           else if (hrvVal >= avgHrvPrev * 0.95) score += 7;
           else                                   score += 3;
         } else if (hrvVal != null) score += 5;
+        if (rhrVal != null) {
+          if      (rhrVal <= 50) score += 10;
+          else if (rhrVal <= 60) score += 8;
+          else if (rhrVal <= 70) score += 5;
+          else if (rhrVal <= 80) score += 2;
+          else                   score += 0;
+        }
 
         const scoreLabel = isDaily
           ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
@@ -1340,6 +1366,23 @@ export default function Dashboard() {
           else if (hrvTrendDn) insights.push({ icon: "❤️", color: "#d4645a",       text: `HRV bajando (${Math.round(hrvVal)}ms) — quizás necesitas más descanso` });
           else                 insights.push({ icon: "❤️", color: "var(--muted)",  text: `HRV estable en ${Math.round(hrvVal)}ms` });
         }
+        if (rhrVal != null) {
+          if      (rhrVal <= 50) insights.push({ icon: "🫀", color: "var(--green)",  text: `FC en reposo excelente — ${Math.round(rhrVal)} lpm` });
+          else if (rhrVal <= 60) insights.push({ icon: "🫀", color: "#6aaa82",       text: `FC en reposo buena — ${Math.round(rhrVal)} lpm` });
+          else if (rhrVal <= 70) insights.push({ icon: "🫀", color: "var(--muted)",  text: `FC en reposo normal — ${Math.round(rhrVal)} lpm` });
+          else                   insights.push({ icon: "🫀", color: "#d4645a",       text: `FC en reposo elevada — ${Math.round(rhrVal)} lpm` });
+        }
+        if (aeVal != null) {
+          if (isDaily) {
+            if      (aeVal >= 600) insights.push({ icon: "🔥", color: "var(--green)",  text: `Muy activo — ${Math.round(aeVal)} kcal quemadas hoy` });
+            else if (aeVal >= 400) insights.push({ icon: "🔥", color: "#6aaa82",       text: `Buen gasto calórico — ${Math.round(aeVal)} kcal activas` });
+            else if (aeVal >= 200) insights.push({ icon: "🔥", color: "var(--muted)",  text: `${Math.round(aeVal)} kcal activas hoy` });
+          } else {
+            if      (aeVal >= 500) insights.push({ icon: "🔥", color: "var(--green)",  text: `Gasto calórico alto — media de ${Math.round(aeVal)} kcal/día` });
+            else if (aeVal >= 350) insights.push({ icon: "🔥", color: "#6aaa82",       text: `Gasto calórico moderado — media de ${Math.round(aeVal)} kcal/día` });
+            else                   insights.push({ icon: "🔥", color: "var(--muted)",  text: `Gasto calórico bajo — media de ${Math.round(aeVal)} kcal/día` });
+          }
+        }
 
         // ── recomendación ──
         let rec = null;
@@ -1354,7 +1397,7 @@ export default function Dashboard() {
         else if (!isDaily && workVal >= 4)
           rec = "Semana intensa de entrenamiento. Asegúrate de incluir un día de descanso.";
 
-        const hasAnyData = sleepVal != null || stepsVal != null || (isDaily ? todayWorkoutCount > 0 : weekWorkoutCount > 0);
+        const hasAnyData = sleepVal != null || stepsVal != null || rhrVal != null || aeVal != null || (isDaily ? todayWorkoutCount > 0 : weekWorkoutCount > 0);
 
         const toggleStyle = (active) => ({
           padding: "2px 8px", borderRadius: 4, fontSize: 11, cursor: "pointer", border: "none",
