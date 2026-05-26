@@ -904,23 +904,31 @@ async def health_ingest(request: Request, token: str = ""):
             if d:
                 by_date[d].append(w)
         for d, day_workouts in by_date.items():
+            payload = {
+                "metric_date": d,
+                "metric_name": "workouts",
+                "value": float(len(day_workouts)),
+                "unit": "count",
+                "extra": {"workouts": day_workouts},
+            }
             r = requests.post(
                 f"{SUPABASE_URL}/rest/v1/health_metrics",
-                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-                json={
-                    "metric_date": d,
-                    "metric_name": "workouts",
-                    "value": float(len(day_workouts)),
-                    "unit": "count",
-                    "extra": {"workouts": day_workouts},
-                },
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json=payload,
             )
+            if r.status_code == 409:
+                r = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/health_metrics"
+                    f"?metric_date=eq.{d}&metric_name=eq.workouts",
+                    headers={**supabase_headers(), "Prefer": "return=minimal"},
+                    json={"value": payload["value"], "extra": payload["extra"]},
+                )
             if r.status_code < 300:
                 upserted += 1
 
     # ── Métricas normales ──
     # Métricas acumulativas: solo guardar si el nuevo valor es mayor que el almacenado
-    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy"}
+    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
 
     # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
     grouped_metrics: dict = {}
@@ -938,14 +946,26 @@ async def health_ingest(request: Request, token: str = ""):
                 # Tomamos el mayor valor no-None entre todos los campos posibles.
                 _candidates = [v for k in ("qty", "sum", "value") if (v := point.get(k)) is not None]
                 raw_value = max(_candidates) if _candidates else None
+            elif name == "sleep_analysis":
+                raw_value = (
+                    point.get("totalSleep") if point.get("totalSleep") else
+                    point.get("asleep") if point.get("asleep") else
+                    point.get("qty")
+                )
             else:
                 raw_value = (
                     point.get("qty") if point.get("qty") is not None else
                     point.get("avg") if point.get("avg") is not None else
-                    point.get("value") if point.get("value") is not None else
-                    point.get("asleep")
+                    point.get("value")
                 )
             value = float(raw_value) if raw_value is not None else None
+
+            # Normalizar energía de kJ a kcal
+            ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
+            if name in ENERGY_METRICS and unit == "kJ" and value is not None:
+                value = round(value / 4.184, 2)
+                unit = "kcal"
+
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
             if name == "sleep_analysis" and len(date_raw) >= 16:
@@ -1090,6 +1110,13 @@ async def health_ingest_simple(request: Request, token: str = ""):
                     "extra": s.extra or {},
                 },
             )
+        if r.status_code == 409:
+            r = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json={"value": s.value, "unit": s.unit, "extra": s.extra or {}},
+            )
         if r.status_code < 300:
             upserted += 1
         else:
@@ -1117,6 +1144,8 @@ def get_health_metrics(
 
     grouped: dict = {}
     last_sync: str | None = None
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    has_today = False
     for row in r.json():
         name = row["metric_name"]
         if name not in grouped:
@@ -1127,9 +1156,15 @@ def get_health_metrics(
             "unit": row["unit"],
             "extra": row.get("extra", {}),
         })
+        if row["metric_date"] == today_str:
+            has_today = True
         ca = row.get("created_at")
         if ca and (last_sync is None or ca > last_sync):
             last_sync = ca
+
+    # Si hay datos de hoy, el sync es reciente aunque created_at sea antiguo (PATCH no lo actualiza)
+    if has_today:
+        last_sync = datetime.now(timezone.utc).isoformat()
 
     return {"metrics": grouped, "last_sync": last_sync}
 

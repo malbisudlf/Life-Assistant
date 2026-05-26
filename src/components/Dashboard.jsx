@@ -385,6 +385,7 @@ export default function Dashboard() {
   const [healthLoading, setHealthLoading]   = useState(false);
   const [healthLastSync, setHealthLastSync] = useState(null);
   const [wellnessView, setWellnessView]     = useState("weekly");
+  const [scoreTooltip, setScoreTooltip]     = useState(false);
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -1213,107 +1214,232 @@ export default function Dashboard() {
           if (d.extra?.asleep > 0) return Number(d.extra.asleep);
           return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
         };
-        const wSleepRaw  = findMetric(healthData, "sleep_analysis", "sleep").map(d => ({ ...d, value: wSleepEff(d) }));
-        const wStepsRaw  = findMetric(healthData, "step_count", "steps");
-        const wHrvRaw    = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
-        const wRhrRaw    = findMetric(healthData, "resting_heart_rate");
-        const wAeRaw     = findMetric(healthData, "active_energy");
-        const wWorkRaw   = findMetric(healthData, "workouts");
+        const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").map(d => ({ ...d, value: wSleepEff(d) }));
+        const wStepsRaw     = findMetric(healthData, "step_count", "steps");
+        const wHrvRaw       = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
+        const wRhrRaw       = findMetric(healthData, "resting_heart_rate");
+        const wAeRaw        = findMetric(healthData, "active_energy");
+        const wWorkRaw      = findMetric(healthData, "workouts");
+        const wExerciseRaw  = findMetric(healthData, "apple_exercise_time", "exercise_time");
+        const wStandRaw     = findMetric(healthData, "apple_stand_hour", "stand_hour");
+        const wCardioRecRaw = findMetric(healthData, "cardio_recovery");
+        const wVo2Raw       = findMetric(healthData, "vo2_max", "cardioFitness");
+        const wWalkHrRaw    = findMetric(healthData, "walking_heart_rate_average");
+        const wDaylightRaw  = findMetric(healthData, "time_in_daylight");
+        const wRespRaw      = findMetric(healthData, "respiratory_rate");
 
-        const last7Sleep  = wSleepRaw.slice(-7);
-        const last7Steps  = wStepsRaw.slice(-7);
-        const last7Hrv    = wHrvRaw.slice(-7);
-        const last7Rhr    = wRhrRaw.slice(-7);
-        const last7Ae     = wAeRaw.slice(-7);
-        // Semana actual: desde el lunes hasta hoy (no últimos 7 días rodantes)
+        const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
+        const last7Sleep    = wSleepRaw.slice(-7);
+        const last7Steps    = wStepsRaw.slice(-7);
+        const last7Hrv      = wHrvRaw.slice(-7);
+        const last7Rhr      = wRhrRaw.slice(-7);
+        const last7Ae       = wAeRaw.slice(-7);
+        const last7Exercise = wExerciseRaw.slice(-7);
+        const last7Stand    = wStandRaw.slice(-7);
+        const last7WalkHr   = wWalkHrRaw.slice(-7);
+        const last7Daylight = wDaylightRaw.slice(-7);
+        const last7Resp     = wRespRaw.slice(-7);
+
+        // Semana actual desde el lunes
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
         const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
-        const dayOfWeek = todayMidnight.getDay(); // 0=Dom, 1=Lun...
+        const dayOfWeek = todayMidnight.getDay();
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
         const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
 
-        // ── vista semanal ──
-        const avgSleep   = last7Sleep.length  ? last7Sleep.reduce((s,d)=>s+(d.value||0),0)/last7Sleep.length  : null;
-        const avgSteps   = last7Steps.length  ? last7Steps.reduce((s,d)=>s+(d.value||0),0)/last7Steps.length  : null;
-        const avgHrv     = last7Hrv.length    ? last7Hrv.reduce((s,d)=>s+(d.value||0),0)/last7Hrv.length      : null;
-        const prevHrv    = wHrvRaw.slice(-14,-7);
-        const avgHrvPrev = prevHrv.length     ? prevHrv.reduce((s,d)=>s+(d.value||0),0)/prevHrv.length        : null;
-        const avgRhr     = last7Rhr.length    ? last7Rhr.reduce((s,d)=>s+(d.value||0),0)/last7Rhr.length      : null;
-        const avgAe      = last7Ae.length     ? last7Ae.reduce((s,d)=>s+(d.value||0),0)/last7Ae.length        : null;
+        // ── promedios semanales ──
+        const avgSleep    = avg7(last7Sleep);
+        const avgSteps    = avg7(last7Steps);
+        const avgHrv      = avg7(last7Hrv);
+        const prevHrv     = wHrvRaw.slice(-14,-7);
+        const avgHrvPrev  = avg7(prevHrv);
+        const avgRhr      = avg7(last7Rhr);
+        const avgAe       = avg7(last7Ae);
+        const avgExercise = avg7(last7Exercise);
+        const avgStand    = avg7(last7Stand);
+        const avgWalkHr   = avg7(last7WalkHr);
+        const avgDaylight = avg7(last7Daylight);
+        const avgResp     = avg7(last7Resp);
         const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
         const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
+        // VO2 max y cardio recovery: último valor disponible (actualizan infrecuente)
+        const lastVo2      = wVo2Raw.length ? wVo2Raw[wVo2Raw.length - 1].value : null;
+        const thisWeekRecov = wCardioRecRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+        const avgCardioRec = thisWeekRecov.length ? avg7(thisWeekRecov) : (wCardioRecRaw.length ? wCardioRecRaw[wCardioRecRaw.length - 1].value : null);
 
-        // ── vista diaria ──
-        const todaySleepEntry = wSleepRaw[wSleepRaw.length - 1];
-        const todaySleep  = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
-        const todayStepsEntry = wStepsRaw.find(d => d.date === todayStr) || wStepsRaw[wStepsRaw.length - 1];
-        const todaySteps  = todayStepsEntry?.value > 0 ? todayStepsEntry.value : null;
-        const todayHrvEntry = wHrvRaw.find(d => d.date === todayStr) || wHrvRaw[wHrvRaw.length - 1];
-        const todayHrv    = todayHrvEntry?.value > 0 ? todayHrvEntry.value : null;
-        const todayRhrEntry = wRhrRaw.find(d => d.date === todayStr) || wRhrRaw[wRhrRaw.length - 1];
-        const todayRhr    = todayRhrEntry?.value > 0 ? todayRhrEntry.value : null;
-        const todayAeEntry  = wAeRaw.find(d => d.date === todayStr) || wAeRaw[wAeRaw.length - 1];
-        const todayAe     = todayAeEntry?.value > 0 ? todayAeEntry.value : null;
-        const todayWorkEntry = wWorkRaw.find(d => d.date === todayStr);
+        // ── valores diarios ──
+        const latestOrToday = (arr) => arr.find(d => d.date === todayStr) || arr[arr.length - 1];
+        const todaySleepEntry   = wSleepRaw[wSleepRaw.length - 1];
+        const todaySleep        = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
+        const todaySteps        = latestOrToday(wStepsRaw)?.value > 0 ? latestOrToday(wStepsRaw).value : null;
+        const todayHrv          = latestOrToday(wHrvRaw)?.value > 0 ? latestOrToday(wHrvRaw).value : null;
+        const todayRhr          = latestOrToday(wRhrRaw)?.value > 0 ? latestOrToday(wRhrRaw).value : null;
+        const todayAe           = latestOrToday(wAeRaw)?.value > 0 ? latestOrToday(wAeRaw).value : null;
+        const todayWorkEntry    = wWorkRaw.find(d => d.date === todayStr);
         const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
+        const todayExercise     = latestOrToday(wExerciseRaw)?.value > 0 ? latestOrToday(wExerciseRaw).value : null;
+        const todayStand        = latestOrToday(wStandRaw)?.value > 0 ? latestOrToday(wStandRaw).value : null;
+        const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
+        const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
+        const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
 
         const isDaily = wellnessView === "daily";
 
-        // ── puntuación ──
-        // Sueño 25 | Entrenamientos 30 | Pasos 15 | Energía activa 10 | HRV 10 | FC reposo 10
-        let score = 0;
-        const sleepVal = isDaily ? todaySleep : avgSleep;
-        const stepsVal = isDaily ? todaySteps : avgSteps;
-        const hrvVal   = isDaily ? todayHrv   : avgHrv;
-        const rhrVal   = isDaily ? todayRhr   : avgRhr;
-        const aeVal    = isDaily ? todayAe    : avgAe;
-        const workVal  = isDaily ? todayWorkoutCount : weekWorkoutCount;
+        // ── valores según vista ──
+        const sleepVal    = isDaily ? todaySleep    : avgSleep;
+        const stepsVal    = isDaily ? todaySteps    : avgSteps;
+        const hrvVal      = isDaily ? todayHrv      : avgHrv;
+        const rhrVal      = isDaily ? todayRhr      : avgRhr;
+        const aeVal       = isDaily ? todayAe       : avgAe;
+        const exerciseVal = isDaily ? todayExercise : avgExercise;
+        const standVal    = isDaily ? todayStand    : avgStand;
+        const walkHrVal   = isDaily ? todayWalkHr   : avgWalkHr;
+        const daylightVal = isDaily ? todayDaylight : avgDaylight;
+        const respVal     = isDaily ? todayResp     : avgResp;
+        const workVal     = isDaily ? todayWorkoutCount : weekWorkoutCount;
 
+        // ── puntuación ──
+        // Sueño 25 | Actividad 30 (entreno 15 + pasos 8 + AE 5 + stand 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 10 (VO2 6 + walkHR 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
+        let score = 0;
+        const breakdown = []; // [{label, pts, max, detail}]
+
+        // Sueño (25 pts)
+        let sPts = 0;
         if (sleepVal != null) {
-          if      (sleepVal >= 7.5) score += 25;
-          else if (sleepVal >= 7)   score += 21;
-          else if (sleepVal >= 6.5) score += 15;
-          else if (sleepVal >= 6)   score += 9;
-          else                      score += 4;
+          if      (sleepVal >= 7.5) sPts = 25;
+          else if (sleepVal >= 7)   sPts = 21;
+          else if (sleepVal >= 6.5) sPts = 15;
+          else if (sleepVal >= 6)   sPts = 9;
+          else                      sPts = 4;
+          score += sPts;
         }
+        breakdown.push({ label: "😴 Sueño", pts: sPts, max: 25, detail: sleepVal != null ? hoursToHM(sleepVal) : "sin datos" });
+
+        // Actividad: entreno/ejercicio (15 pts)
+        let wPts = 0;
         if (isDaily) {
-          if (workVal >= 1) score += 30;
-          else if (todayHrv != null && todayHrv >= 70) score += 18;
-          else if (todayHrv != null && todayHrv >= 50) score += 12;
-          else if (todayHrv != null)                   score += 6;
+          if      (workVal >= 1)                                 wPts = 15;
+          else if (exerciseVal != null && exerciseVal >= 30)     wPts = 9;
+          else if (exerciseVal != null && exerciseVal >= 15)     wPts = 5;
+          else if (todayHrv != null && todayHrv >= 70)           wPts = 3;
+          else if (todayHrv != null && todayHrv >= 50)           wPts = 2;
+          else                                                   wPts = 1;
         } else {
-          if      (workVal >= 4) score += 30;
-          else if (workVal === 3) score += 21;
-          else if (workVal === 2) score += 12;
-          else if (workVal === 1) score += 5;
+          if      (workVal >= 4) wPts = 15;
+          else if (workVal === 3) wPts = 11;
+          else if (workVal === 2) wPts = 7;
+          else if (workVal === 1) wPts = 3;
         }
+        score += wPts;
+        breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 entrenamientos` });
+
+        // Actividad: pasos (8 pts)
+        let stPts = 0;
         if (stepsVal != null) {
-          if      (stepsVal >= 10000) score += 15;
-          else if (stepsVal >= 8000)  score += 12;
-          else if (stepsVal >= 6000)  score += 8;
-          else if (stepsVal >= 4000)  score += 4;
-          else                        score += 1;
+          if      (stepsVal >= 10000) stPts = 8;
+          else if (stepsVal >= 8000)  stPts = 6;
+          else if (stepsVal >= 6000)  stPts = 4;
+          else if (stepsVal >= 4000)  stPts = 2;
+          else                        stPts = 1;
+          score += stPts;
         }
+        breakdown.push({ label: "🚶 Pasos", pts: stPts, max: 8, detail: stepsVal != null ? `${Math.round(stepsVal).toLocaleString("es")}` : "sin datos" });
+
+        // Actividad: energía activa (5 pts)
+        let aePts = 0;
         if (aeVal != null) {
-          if      (aeVal >= 600) score += 10;
-          else if (aeVal >= 400) score += 8;
-          else if (aeVal >= 250) score += 5;
-          else if (aeVal >= 100) score += 2;
+          if      (aeVal >= 600) aePts = 5;
+          else if (aeVal >= 400) aePts = 4;
+          else if (aeVal >= 250) aePts = 3;
+          else if (aeVal >= 100) aePts = 1;
+          score += aePts;
         }
+        breakdown.push({ label: "🔥 Energía", pts: aePts, max: 5, detail: aeVal != null ? `${Math.round(aeVal)} kcal` : "sin datos" });
+
+        // Actividad: horas de pie (2 pts)
+        let sdPts = 0;
+        if (standVal != null) {
+          if      (standVal >= 12) sdPts = 2;
+          else if (standVal >= 8)  sdPts = 1;
+          score += sdPts;
+        }
+        breakdown.push({ label: "🧍 De pie", pts: sdPts, max: 2, detail: standVal != null ? `${Math.round(standVal)}h` : "sin datos" });
+
+        // Recuperación: HRV (12 pts)
+        let hrvPts = 0;
         if (hrvVal != null && avgHrvPrev != null) {
-          if      (hrvVal >= avgHrvPrev * 1.05) score += 10;
-          else if (hrvVal >= avgHrvPrev * 0.95) score += 7;
-          else                                   score += 3;
-        } else if (hrvVal != null) score += 5;
+          if      (hrvVal >= avgHrvPrev * 1.05) hrvPts = 12;
+          else if (hrvVal >= avgHrvPrev * 0.95) hrvPts = 8;
+          else                                   hrvPts = 4;
+        } else if (hrvVal != null) hrvPts = 6;
+        score += hrvPts;
+        breakdown.push({ label: "❤️ HRV", pts: hrvPts, max: 12, detail: hrvVal != null ? `${Math.round(hrvVal)}ms${avgHrvPrev != null ? ` (ref ${Math.round(avgHrvPrev)}ms)` : ""}` : "sin datos" });
+
+        // Recuperación: FC reposo (8 pts)
+        let rhrPts = 0;
         if (rhrVal != null) {
-          if      (rhrVal <= 50) score += 10;
-          else if (rhrVal <= 60) score += 8;
-          else if (rhrVal <= 70) score += 5;
-          else if (rhrVal <= 80) score += 2;
-          else                   score += 0;
+          if      (rhrVal <= 50) rhrPts = 8;
+          else if (rhrVal <= 55) rhrPts = 7;
+          else if (rhrVal <= 60) rhrPts = 6;
+          else if (rhrVal <= 65) rhrPts = 4;
+          else if (rhrVal <= 70) rhrPts = 3;
+          else if (rhrVal <= 80) rhrPts = 1;
+          score += rhrPts;
+        }
+        breakdown.push({ label: "🫀 FC reposo", pts: rhrPts, max: 8, detail: rhrVal != null ? `${Math.round(rhrVal)} lpm` : "sin datos" });
+
+        // Recuperación: cardio recovery (5 pts — solo si hay dato)
+        let crPts = 0;
+        if (avgCardioRec != null) {
+          if      (avgCardioRec >= 30) crPts = 5;
+          else if (avgCardioRec >= 20) crPts = 4;
+          else if (avgCardioRec >= 15) crPts = 3;
+          else if (avgCardioRec >= 10) crPts = 1;
+          score += crPts;
+        }
+        if (avgCardioRec != null) breakdown.push({ label: "💓 Recuperación cardio", pts: crPts, max: 5, detail: `${Math.round(avgCardioRec)} lpm/min` });
+
+        // Forma física (solo vista diaria): VO2 max (6 pts) + walking HR avg (4 pts)
+        let vo2Pts = 0, whrPts = 0;
+        if (isDaily) {
+          if (lastVo2 != null) {
+            if      (lastVo2 >= 50) vo2Pts = 6;
+            else if (lastVo2 >= 45) vo2Pts = 5;
+            else if (lastVo2 >= 40) vo2Pts = 4;
+            else if (lastVo2 >= 35) vo2Pts = 3;
+            else                    vo2Pts = 1;
+            score += vo2Pts;
+          }
+          if (walkHrVal != null) {
+            if      (walkHrVal <= 70)  whrPts = 4;
+            else if (walkHrVal <= 80)  whrPts = 3;
+            else if (walkHrVal <= 90)  whrPts = 2;
+            else if (walkHrVal <= 100) whrPts = 1;
+            score += whrPts;
+            breakdown.push({ label: "🏃 FC caminando", pts: whrPts, max: 4, detail: `${Math.round(walkHrVal)} lpm` });
+          }
+
+          // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
+          let dlPts = 0, respPts = 0;
+          if (daylightVal != null) {
+            if      (daylightVal >= 60) dlPts = 5;
+            else if (daylightVal >= 30) dlPts = 4;
+            else if (daylightVal >= 15) dlPts = 2;
+            else if (daylightVal >= 5)  dlPts = 1;
+            score += dlPts;
+          }
+          if (respVal != null) {
+            if      (respVal >= 12 && respVal <= 16) respPts = 5;
+            else if (respVal > 16 && respVal <= 18)  respPts = 4;
+            else if (respVal > 18 && respVal <= 20)  respPts = 3;
+            else if (respVal < 12)                   respPts = 4;
+            else                                     respPts = 1;
+            score += respPts;
+            breakdown.push({ label: "🌬️ Resp.", pts: respPts, max: 5, detail: `${respVal.toFixed(1)} rpm` });
+          }
         }
 
         const scoreLabel = isDaily
@@ -1339,18 +1465,17 @@ export default function Dashboard() {
         }
         if (isDaily) {
           if (todayWorkoutCount >= 1) insights.push({ icon: "💪", color: "var(--green)",  text: `${todayWorkoutCount > 1 ? todayWorkoutCount + " entrenamientos hoy" : "Entrenamiento completado hoy"} — objetivo diario cumplido` });
+          else if (exerciseVal != null && exerciseVal >= 15) insights.push({ icon: "💪", color: exerciseVal >= 30 ? "#6aaa82" : "var(--muted)", text: `${Math.round(exerciseVal)} min de ejercicio hoy${exerciseVal >= 30 ? " — día activo" : ""}` });
           else if (todayHrv != null && todayHrv >= 70) insights.push({ icon: "💪", color: "var(--muted)", text: `Día de descanso — recuperación buena (HRV ${Math.round(todayHrv)}ms)` });
           else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: daysSinceWorkout >= 3 ? "#d4645a" : "var(--muted)", text: `Sin entrenamiento hoy — llevas ${daysSinceWorkout} día${daysSinceWorkout !== 1 ? "s" : ""} de descanso` });
         } else {
-          if (workVal > 0 || daysSinceWorkout != null) {
-            const remaining = Math.max(0, 4 - workVal);
-            if      (workVal >= 5) insights.push({ icon: "💪", color: "var(--green)",   text: `${workVal} entrenamientos esta semana — objetivo superado` });
-            else if (workVal === 4) insights.push({ icon: "💪", color: "var(--green)",   text: `4/4 entrenamientos esta semana — objetivo cumplido` });
-            else if (workVal === 3) insights.push({ icon: "💪", color: "#6aaa82",        text: `3/4 entrenamientos — te queda ${remaining} para llegar al objetivo` });
-            else if (workVal === 2) insights.push({ icon: "💪", color: "var(--accent)",  text: `2/4 entrenamientos — te quedan ${remaining} esta semana` });
-            else if (workVal === 1) insights.push({ icon: "💪", color: "#d4645a",        text: `1/4 entrenamientos — te quedan ${remaining} para cumplir el objetivo` });
-            else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: "#d4645a", text: `0/4 entrenamientos esta semana — llevas ${daysSinceWorkout} días sin ir al gym` });
-          }
+          const remaining = Math.max(0, 4 - workVal);
+          if      (workVal >= 5) insights.push({ icon: "💪", color: "var(--green)",   text: `${workVal} entrenamientos esta semana — objetivo superado` });
+          else if (workVal === 4) insights.push({ icon: "💪", color: "var(--green)",   text: `4/4 entrenamientos esta semana — objetivo cumplido` });
+          else if (workVal === 3) insights.push({ icon: "💪", color: "#6aaa82",        text: `3/4 entrenamientos — te queda ${remaining} para el objetivo` });
+          else if (workVal === 2) insights.push({ icon: "💪", color: "var(--accent)",  text: `2/4 entrenamientos — te quedan ${remaining} esta semana` });
+          else if (workVal === 1) insights.push({ icon: "💪", color: "#d4645a",        text: `1/4 entrenamientos — te quedan ${remaining} para cumplir el objetivo` });
+          else if (daysSinceWorkout != null) insights.push({ icon: "💪", color: "#d4645a", text: `0/4 entrenamientos esta semana — llevas ${daysSinceWorkout} días sin ir al gym` });
         }
         if (stepsVal != null) {
           if (isDaily) {
@@ -1400,6 +1525,8 @@ export default function Dashboard() {
             : "Esta semana el sueño ha sido escaso. Intenta acostarte 30 min antes esta noche.";
         else if (!isDaily && workVal >= 4)
           rec = "Semana intensa de entrenamiento. Asegúrate de incluir un día de descanso.";
+        else if (daylightVal != null && daylightVal < 15)
+          rec = "Muy poca exposición a la luz natural. Salir 20-30 min al día mejora el ritmo circadiano y el estado de ánimo.";
 
         const hasAnyData = sleepVal != null || stepsVal != null || rhrVal != null || aeVal != null || (isDaily ? todayWorkoutCount > 0 : weekWorkoutCount > 0);
 
@@ -1421,9 +1548,39 @@ export default function Dashboard() {
                 </div>
               </div>
               {hasAnyData && (
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", textTransform: "none" }}>
-                  {score} — {scoreLabel}
-                </span>
+                <div style={{ position: "relative" }}
+                  onMouseEnter={() => setScoreTooltip(true)}
+                  onMouseLeave={() => setScoreTooltip(false)}
+                >
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", cursor: "default", borderBottom: "1px dotted currentColor" }}>
+                    {score} — {scoreLabel}
+                  </span>
+                  {scoreTooltip && (
+                    <div style={{
+                      position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 100,
+                      background: "var(--surface2)", border: "0.5px solid var(--border)",
+                      borderRadius: 8, padding: "10px 14px", minWidth: 220,
+                      boxShadow: "0 4px 16px rgba(0,0,0,0.4)", fontSize: 12,
+                      display: "flex", flexDirection: "column", gap: 5,
+                    }}>
+                      {breakdown.map((b, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                          <span style={{ color: "var(--muted)" }}>{b.label}</span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ color: "var(--text-2)", fontSize: 11 }}>{b.detail}</span>
+                            <span style={{ fontFamily: "'DM Mono', monospace", color: b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
+                              {b.pts}/{b.max}
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--muted)" }}>Total</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             {healthLoading ? (
