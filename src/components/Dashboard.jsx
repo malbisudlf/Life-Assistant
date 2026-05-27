@@ -1334,7 +1334,7 @@ export default function Dashboard() {
           else if (workVal === 1) wPts = 3;
         }
         score += wPts;
-        breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 entrenamientos` });
+        breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.` });
 
         // Actividad: pasos (8 pts)
         let stPts = 0;
@@ -1565,8 +1565,8 @@ export default function Dashboard() {
                     }}>
                       {breakdown.map((b, i) => (
                         <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                          <span style={{ color: "var(--muted)" }}>{b.label}</span>
-                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{b.label}</span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
                             <span style={{ color: "var(--text-2)", fontSize: 11 }}>{b.detail}</span>
                             <span style={{ fontFamily: "'DM Mono', monospace", color: b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
                               {b.pts}/{b.max}

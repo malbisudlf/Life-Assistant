@@ -983,6 +983,7 @@ async def health_ingest(request: Request, token: str = ""):
     for (metric_date, name), data in grouped_metrics.items():
         value = data["value"]
 
+        row_exists = False
         # Para métricas acumulativas, no sobreescribir si ya hay un valor mayor en BD
         if name in CUMULATIVE_METRICS and value is not None:
             existing = requests.get(
@@ -993,22 +994,41 @@ async def health_ingest(request: Request, token: str = ""):
             if existing.status_code < 300:
                 rows = existing.json()
                 if rows and rows[0].get("value") is not None:
+                    row_exists = True
                     existing_val = float(rows[0]["value"])
                     # Solo saltar si el valor existente es real (>0) y ya es mayor o igual
                     if existing_val > 0 and existing_val >= value:
                         continue
+                elif rows:
+                    row_exists = True  # fila existe pero value es None
 
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/health_metrics",
-            headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-            json={
-                "metric_date": metric_date,
-                "metric_name": name,
-                "value": value,
-                "unit": data["unit"],
-                "extra": data["extra"],
-            },
-        )
+        payload = {
+            "metric_date": metric_date,
+            "metric_name": name,
+            "value": value,
+            "unit": data["unit"],
+            "extra": data["extra"],
+        }
+        if row_exists:
+            r = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json=payload,
+            )
+        else:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/health_metrics",
+                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+                json=payload,
+            )
+            if r.status_code == 409:
+                r = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/health_metrics"
+                    f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
+                    headers={**supabase_headers(), "Prefer": "return=minimal"},
+                    json=payload,
+                )
         if r.status_code < 300:
             upserted += 1
 
