@@ -136,15 +136,15 @@ function hoursToHM(h) {
   return `${hrs}h ${mins}m`;
 }
 
-function sleepScore(total, deep, rem, core, awake, sleepStart) {
+function sleepScore(total, deep, rem, core, awake, sleepStart, recoveryMod = 0) {
   if (!total || total < 0.5) return null;
   let s = 0;
-  // Duración (40 pts)
-  if      (total >= 7 && total <= 9) s += 40;
-  else if (total >= 6.5)             s += 34;
-  else if (total >= 6)               s += 26;
-  else if (total >= 5)               s += 16;
-  else                               s += 6;
+  // Duración (40 pts) — objetivo 8h para adulto joven
+  if      (total >= 8 && total <= 9.5) s += 40;
+  else if (total >= 7.5)               s += 34;
+  else if (total >= 7)                 s += 26;
+  else if (total >= 6)                 s += 16;
+  else                                 s += 6;
   // Sueño profundo (25 pts)
   const dp = deep ? (deep / total) * 100 : null;
   if      (dp == null)            s += 12;
@@ -173,8 +173,36 @@ function sleepScore(total, deep, rem, core, awake, sleepStart) {
     else if (h >= 0 && h < 1)  s -= 5;
     // h >= 20 o h >= 12 → antes de medianoche → sin penalización
   }
-  const cap = total >= 7 ? 100 : total >= 6.5 ? 82 : total >= 6 ? 68 : 52;
-  return Math.min(cap, Math.max(0, Math.round(s)));
+  const cap = total >= 8 ? 100 : total >= 7.5 ? 82 : total >= 7 ? 68 : 52;
+  return Math.min(cap, Math.max(0, Math.round(s + recoveryMod)));
+}
+
+// Penalización por señales fisiológicas de recuperación deficiente (hasta -20 pts).
+// Compara HRV, FC reposo y frecuencia respiratoria contra baseline de 30 días.
+function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
+  let mod = 0;
+  // HRV bajo → recuperación deficiente (hasta -8 pts)
+  if (hrv != null && hrvBase > 0) {
+    const pct = (hrv - hrvBase) / hrvBase * 100;
+    if      (pct < -25) mod -= 8;
+    else if (pct < -15) mod -= 6;
+    else if (pct < -5)  mod -= 3;
+  }
+  // FC reposo elevada → carga acumulada (hasta -7 pts)
+  if (rhr != null && rhrBase > 0) {
+    const pct = (rhr - rhrBase) / rhrBase * 100;
+    if      (pct > 15) mod -= 7;
+    else if (pct > 10) mod -= 5;
+    else if (pct > 5)  mod -= 3;
+  }
+  // Frecuencia respiratoria elevada → estrés/inflamación (hasta -5 pts)
+  if (resp != null && respBase > 0) {
+    const pct = (resp - respBase) / respBase * 100;
+    if      (pct > 15) mod -= 5;
+    else if (pct > 10) mod -= 3;
+    else if (pct > 5)  mod -= 2;
+  }
+  return mod;
 }
 
 function SleepStageTooltip({ label, color, tip, children }) {
@@ -385,7 +413,8 @@ export default function Dashboard() {
   const [healthLoading, setHealthLoading]   = useState(false);
   const [healthLastSync, setHealthLastSync] = useState(null);
   const [wellnessView, setWellnessView]     = useState("weekly");
-  const [scoreTooltip, setScoreTooltip]     = useState(false);
+  const [scoreTooltip, setScoreTooltip]       = useState(false);
+  const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -1646,9 +1675,73 @@ export default function Dashboard() {
         const lc  = latest?.extra?.core  != null ? Number(latest.extra.core)  : (latest?.extra?.light != null ? Number(latest.extra.light) : null);
         const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
         const lss = latest?.extra?.sleep_start ?? null;
-        const score = latest ? sleepScore(lv, ld, lr, lc, law, lss) : null;
+
+        // Baselines de recuperación (últimos 30 días, excluyendo hoy)
+        const sleepTodayStr  = new Date().toLocaleDateString("sv");
+        const hrvAllData     = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
+        const rhrAllData     = findMetric(healthData, "resting_heart_rate");
+        const respAllData    = findMetric(healthData, "respiratory_rate");
+        const baseline30     = arr => { const v = arr.filter(d => d.date !== sleepTodayStr && d.value != null).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
+        const hrvBase        = baseline30(hrvAllData);
+        const rhrBase        = baseline30(rhrAllData);
+        const respBase       = baseline30(respAllData);
+        const metricValForDate = (arr, date) => { const d = arr.find(x => x.date === date); return d?.value != null ? Number(d.value) : null; };
+        const todayHrv       = metricValForDate(hrvAllData, sleepTodayStr) ?? (hrvAllData.length ? Number(hrvAllData[hrvAllData.length-1].value) : null);
+        const todayRhr       = metricValForDate(rhrAllData, sleepTodayStr) ?? (rhrAllData.length ? Number(rhrAllData[rhrAllData.length-1].value) : null);
+        const todayResp      = metricValForDate(respAllData, sleepTodayStr) ?? (respAllData.length ? Number(respAllData[respAllData.length-1].value) : null);
+        const recoveryMod    = (hrvBase || rhrBase || respBase) ? calcRecoveryMod(todayHrv, todayRhr, todayResp, hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0) : 0;
+        const recovModByDate = date => calcRecoveryMod(
+          metricValForDate(hrvAllData, date), metricValForDate(rhrAllData, date), metricValForDate(respAllData, date),
+          hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0
+        );
+
+        const score = latest ? sleepScore(lv, ld, lr, lc, law, lss, recoveryMod) : null;
         const scoreLabel = score == null ? null : score >= 85 ? "Excelente" : score >= 70 ? "Bueno" : score >= 55 ? "Regular" : "Mejorable";
         const scoreColor = score == null ? null : score >= 85 ? "var(--green)" : score >= 70 ? "#6aaa82" : score >= 55 ? "var(--accent)" : "#d4645a";
+
+        // Desglose del score para tooltip
+        const sleepBreakdown = (() => {
+          if (!latest) return [];
+          const rows = [];
+          // Duración
+          const durPts = lv >= 8 && lv <= 9.5 ? 40 : lv >= 7.5 ? 34 : lv >= 7 ? 26 : lv >= 6 ? 16 : 6;
+          rows.push({ label: "Duración", detail: hoursToHM(lv), pts: durPts, max: 40 });
+          // Profundo
+          const dp = ld && lv ? (ld / lv) * 100 : null;
+          const deepPts = dp == null ? 12 : dp >= 13 && dp <= 23 ? 25 : dp >= 10 ? 19 : dp >= 7 ? 13 : 6;
+          rows.push({ label: "Sueño profundo", detail: ld != null ? `${Math.round(dp ?? 0)}% · ${hoursToHM(ld)}` : "–", pts: deepPts, max: 25 });
+          // REM
+          const rp = lr && lv ? (lr / lv) * 100 : null;
+          const remPts = rp == null ? 12 : rp >= 20 && rp <= 25 ? 25 : rp >= 15 ? 19 : rp >= 10 ? 13 : 6;
+          rows.push({ label: "REM", detail: lr != null ? `${Math.round(rp ?? 0)}% · ${hoursToHM(lr)}` : "–", pts: remPts, max: 25 });
+          // Tiempo despierto
+          const ap = law && lv ? (law / lv) * 100 : 0;
+          const awakePts = ap < 5 ? 10 : ap < 10 ? 7 : ap < 15 ? 4 : 0;
+          rows.push({ label: "Tiempo despierto", detail: law != null ? `${Math.round(ap)}% · ${hoursToHM(law)}` : "–", pts: awakePts, max: 10 });
+          // Hora de acostarse
+          if (lss) {
+            const h = parseInt(lss.slice(0, 2), 10);
+            const latePen = h >= 2 && h < 6 ? -15 : h >= 1 ? -10 : h >= 0 && h < 1 ? -5 : 0;
+            if (latePen < 0) rows.push({ label: "Hora de acostarse", detail: lss.slice(0, 5), pts: latePen, max: 0 });
+          }
+          // Recuperación fisiológica — una subfila por métrica penalizada
+          if (recoveryMod < 0) {
+            rows.push({ label: "Recuperación", detail: "", pts: recoveryMod, max: 0 });
+            if (todayHrv != null && hrvBase && hrvBase > 0) {
+              const p = (() => { const pct = (todayHrv - hrvBase) / hrvBase * 100; return pct < -25 ? -8 : pct < -15 ? -6 : pct < -5 ? -3 : 0; })();
+              if (p < 0) rows.push({ label: "HRV", detail: `${Math.round(todayHrv)} vs ${Math.round(hrvBase)} ms`, pts: p, max: 0, indent: true });
+            }
+            if (todayRhr != null && rhrBase && rhrBase > 0) {
+              const p = (() => { const pct = (todayRhr - rhrBase) / rhrBase * 100; return pct > 15 ? -7 : pct > 10 ? -5 : pct > 5 ? -3 : 0; })();
+              if (p < 0) rows.push({ label: "FC reposo", detail: `${Math.round(todayRhr)} vs ${Math.round(rhrBase)} bpm`, pts: p, max: 0, indent: true });
+            }
+            if (todayResp != null && respBase && respBase > 0) {
+              const p = (() => { const pct = (todayResp - respBase) / respBase * 100; return pct > 15 ? -5 : pct > 10 ? -3 : pct > 5 ? -2 : 0; })();
+              if (p < 0) rows.push({ label: "Freq. resp.", detail: `${todayResp.toFixed(1)} vs ${respBase.toFixed(1)} rpm`, pts: p, max: 0, indent: true });
+            }
+          }
+          return rows;
+        })();
 
         const STAGE_TIPS = {
           deep: { label: "Sueño profundo (N3)", color: "#4a72b0", tip: "Restaura el cuerpo, consolida la memoria muscular y libera hormona del crecimiento. Es el más reparador. Óptimo: 13–23% del total (≈1–2h en 8h de sueño). Disminuye con la edad." },
@@ -1662,9 +1755,41 @@ export default function Dashboard() {
             <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span>Sueño</span>
               {score != null && (
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none" }}>
-                  {score} — {scoreLabel}
-                </span>
+                <div style={{ position: "relative" }}
+                  onMouseEnter={() => setSleepScoreTooltip(true)}
+                  onMouseLeave={() => setSleepScoreTooltip(false)}
+                >
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none", cursor: "default", borderBottom: "1px dotted currentColor" }}>
+                    {score} — {scoreLabel}
+                  </span>
+                  {sleepScoreTooltip && sleepBreakdown.length > 0 && (
+                    <div style={{
+                      position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 100,
+                      background: "var(--surface2)", border: "0.5px solid var(--border)",
+                      borderRadius: 8, padding: "10px 14px", minWidth: 240,
+                      boxShadow: "0 4px 16px rgba(0,0,0,0.4)", fontSize: 12,
+                      display: "flex", flexDirection: "column", gap: 4,
+                    }}>
+                      {sleepBreakdown.map((b, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16,
+                          paddingLeft: b.indent ? 12 : 0, opacity: b.indent ? 0.85 : 1 }}>
+                          <span style={{ color: b.indent ? "var(--muted2)" : "var(--muted)", whiteSpace: "nowrap", fontSize: b.indent ? 11 : 12 }}>{b.label}</span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                            {b.detail && <span style={{ color: "var(--text-2)", fontSize: 11, whiteSpace: "nowrap" }}>{b.detail}</span>}
+                            <span style={{ fontFamily: "'DM Mono', monospace", minWidth: 34, textAlign: "right", fontSize: b.indent ? 11 : 12,
+                              color: b.pts < 0 ? "#d4645a" : b.pts === b.max && b.max > 0 ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)" }}>
+                              {b.pts > 0 ? `${b.pts}/${b.max}` : b.pts || ""}
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 2, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ color: "var(--muted)" }}>Total</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             {healthLoading ? (
@@ -1725,7 +1850,7 @@ export default function Dashboard() {
                 {last14.length > 1 && (
                   <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
                     {last14.map((d, i) => {
-                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null);
+                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
                       const c  = sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
                       const date = new Date(d.date + "T12:00:00");
                       const day  = ["D","L","M","X","J","V","S"][date.getDay()];
