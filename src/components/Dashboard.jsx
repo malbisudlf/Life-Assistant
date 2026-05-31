@@ -415,6 +415,18 @@ export default function Dashboard() {
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
+  const [bodyGoals, setBodyGoals] = useState(() => {
+    try { const s = localStorage.getItem("la_body_goals"); return s ? JSON.parse(s) : { targetWeight: 67, targetBodyFat: null }; }
+    catch { return { targetWeight: 67, targetBodyFat: null }; }
+  });
+  const [bodyGoalWeight, setBodyGoalWeight] = useState(() => {
+    try { const s = localStorage.getItem("la_body_goals"); return s ? (JSON.parse(s).targetWeight ?? 67) : 67; }
+    catch { return 67; }
+  });
+  const [bodyGoalFat, setBodyGoalFat] = useState(() => {
+    try { const s = localStorage.getItem("la_body_goals"); return s ? (JSON.parse(s).targetBodyFat ?? "") : ""; }
+    catch { return ""; }
+  });
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -1256,6 +1268,9 @@ export default function Dashboard() {
         const wWalkHrRaw    = findMetric(healthData, "walking_heart_rate_average");
         const wDaylightRaw  = findMetric(healthData, "time_in_daylight");
         const wRespRaw      = findMetric(healthData, "respiratory_rate");
+        const wWeightRaw    = findMetric(healthData, "weight");
+        const wBodyFatRaw   = findMetric(healthData, "body_fat_percentage");
+        const wLeanMassRaw  = findMetric(healthData, "lean_body_mass");
 
         const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
         const last7Sleep    = wSleepRaw.slice(-7);
@@ -1314,6 +1329,24 @@ export default function Dashboard() {
         const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
         const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
         const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
+
+        // ── peso y composición corporal ──
+        const latestWeight  = wWeightRaw.length ? wWeightRaw[wWeightRaw.length - 1] : null;
+        const prevWeight    = wWeightRaw.length >= 2 ? wWeightRaw[wWeightRaw.length - 8] ?? wWeightRaw[0] : null;
+        const currentWeight = latestWeight?.value > 0 ? latestWeight.value : null;
+        const prevWeightVal = prevWeight?.value > 0 ? prevWeight.value : null;
+        const weightDelta   = currentWeight != null && prevWeightVal != null ? currentWeight - prevWeightVal : null;
+        const latestBodyFat = wBodyFatRaw.length ? wBodyFatRaw[wBodyFatRaw.length - 1] : null;
+        const currentBodyFat = latestBodyFat?.value > 0 ? latestBodyFat.value : null;
+        const prevBodyFat   = wBodyFatRaw.length >= 2 ? (wBodyFatRaw[wBodyFatRaw.length - 8] ?? wBodyFatRaw[0]) : null;
+        const bodyFatDelta  = currentBodyFat != null && prevBodyFat?.value > 0 ? currentBodyFat - prevBodyFat.value : null;
+        const latestLean    = wLeanMassRaw.length ? wLeanMassRaw[wLeanMassRaw.length - 1] : null;
+        const currentLean   = latestLean?.value > 0 ? latestLean.value : null;
+        const prevLean      = wLeanMassRaw.length >= 2 ? (wLeanMassRaw[wLeanMassRaw.length - 8] ?? wLeanMassRaw[0]) : null;
+        const leanDelta     = currentLean != null && prevLean?.value > 0 ? currentLean - prevLean.value : null;
+        const targetWeight  = bodyGoals.targetWeight;
+        const targetBodyFat = bodyGoals.targetBodyFat;
+        const weightToGoal  = currentWeight != null && targetWeight ? currentWeight - targetWeight : null;
 
         const isDaily = wellnessView === "daily";
 
@@ -1542,6 +1575,24 @@ export default function Dashboard() {
           }
         }
 
+        // Composición corporal: insight de peso
+        if (currentWeight != null) {
+          const wSign = weightDelta != null ? (weightDelta > 0 ? "+" : "") : "";
+          const wTrend = weightDelta != null ? ` (${wSign}${weightDelta.toFixed(1)} kg vs semana pasada)` : "";
+          if (weightToGoal != null && Math.abs(weightToGoal) < 0.5) {
+            insights.push({ icon: "⚖️", color: "var(--green)", text: `Peso objetivo alcanzado — ${currentWeight.toFixed(1)} kg${wTrend}` });
+          } else if (weightToGoal != null && weightToGoal > 0) {
+            // En definición: bajar peso es positivo
+            const color = weightDelta != null && weightDelta < -0.1 ? "#6aaa82" : weightDelta != null && weightDelta > 0.1 ? "#d4645a" : "var(--muted)";
+            insights.push({ icon: "⚖️", color, text: `${currentWeight.toFixed(1)} kg — faltan ${weightToGoal.toFixed(1)} kg para el objetivo${wTrend}` });
+          } else if (weightToGoal != null && weightToGoal < 0) {
+            insights.push({ icon: "⚖️", color: "var(--accent)", text: `${currentWeight.toFixed(1)} kg — ${Math.abs(weightToGoal).toFixed(1)} kg por debajo del objetivo${wTrend}` });
+          } else {
+            const color = weightDelta != null && weightDelta < -0.1 ? "#6aaa82" : weightDelta != null && weightDelta > 0.1 ? "#d4645a" : "var(--muted)";
+            insights.push({ icon: "⚖️", color, text: `Peso: ${currentWeight.toFixed(1)} kg${wTrend}` });
+          }
+        }
+
         // ── recomendación ──
         let rec = null;
         if (daysSinceWorkout != null && daysSinceWorkout >= 2 && hrvVal && hrvVal > 50)
@@ -1631,6 +1682,69 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
+                {/* ── Composición corporal ── */}
+                {(currentWeight != null || currentBodyFat != null) && (
+                  <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>Composición corporal</div>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      {currentWeight != null && (() => {
+                        const arrow = weightDelta != null ? (weightDelta < -0.05 ? " ↓" : weightDelta > 0.05 ? " ↑" : " →") : "";
+                        const arrowColor = weightDelta != null ? (weightDelta < -0.05 ? "var(--green)" : weightDelta > 0.05 ? "#d4645a" : "var(--muted)") : "var(--muted)";
+                        const toGoalText = weightToGoal != null ? (Math.abs(weightToGoal) < 0.2 ? " · objetivo ✓" : weightToGoal > 0 ? ` · −${weightToGoal.toFixed(1)} kg para ${targetWeight} kg` : ` · ${Math.abs(weightToGoal).toFixed(1)} kg bajo objetivo`) : "";
+                        return (
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, color: "var(--text)", letterSpacing: "-0.02em" }}>{currentWeight.toFixed(1)}</span>
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>kg</span>
+                            {weightDelta != null && <span style={{ fontSize: 12, color: arrowColor, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(weightDelta).toFixed(1)}</span>}
+                            {toGoalText && <span style={{ fontSize: 11, color: "var(--muted2)" }}>{toGoalText}</span>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    {(currentBodyFat != null || currentLean != null) && (
+                      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                        {currentBodyFat != null && (() => {
+                          const arrow = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "↓" : bodyFatDelta > 0.1 ? "↑" : "→") : "";
+                          const color = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "var(--green)" : bodyFatDelta > 0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
+                          const goalText = targetBodyFat ? (currentBodyFat <= targetBodyFat ? " · objetivo ✓" : ` · obj. ${targetBodyFat}%`) : "";
+                          return (
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentBodyFat.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>% grasa</span></span>
+                              {bodyFatDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(bodyFatDelta).toFixed(1)}</span>}
+                              {goalText && <span style={{ fontSize: 11, color: "var(--muted2)" }}>{goalText}</span>}
+                            </div>
+                          );
+                        })()}
+                        {currentLean != null && (() => {
+                          const arrow = leanDelta != null ? (leanDelta > 0.1 ? "↑" : leanDelta < -0.1 ? "↓" : "→") : "";
+                          const color = leanDelta != null ? (leanDelta > 0.1 ? "var(--green)" : leanDelta < -0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
+                          return (
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentLean.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>kg masa magra</span></span>
+                              {leanDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(leanDelta).toFixed(1)}</span>}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+                    {/* Barra de progreso hacia objetivo de peso */}
+                    {weightToGoal != null && currentWeight != null && (() => {
+                      const startWeight = Math.max(currentWeight, targetWeight + 5);
+                      const pct = Math.min(100, Math.max(0, ((startWeight - currentWeight) / (startWeight - targetWeight)) * 100));
+                      return (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", marginBottom: 4, fontFamily: "'DM Mono', monospace" }}>
+                            <span>progreso → {targetWeight} kg</span>
+                            <span>{pct.toFixed(0)}%</span>
+                          </div>
+                          <div style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${pct}%`, background: pct >= 100 ? "var(--green)" : "var(--accent)", borderRadius: 2, transition: "width 0.6s ease" }} />
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
                 {rec && (
                   <div style={{
                     marginTop: 4, padding: "10px 14px",
@@ -2466,6 +2580,35 @@ export default function Dashboard() {
                   }}>✕</button>
                 </div>
               ))}
+            </div>
+
+            {/* ── Sección composición corporal ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Composición corporal</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Objetivo peso (kg)</div>
+                  <input type="number" min="40" max="150" step="0.1" value={bodyGoalWeight}
+                    onChange={e => setBodyGoalWeight(e.target.value)}
+                    style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Objetivo % grasa</div>
+                  <input type="number" min="3" max="40" step="0.1" value={bodyGoalFat} placeholder="—"
+                    onChange={e => setBodyGoalFat(e.target.value)}
+                    style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button onClick={() => {
+                    const goals = { targetWeight: parseFloat(bodyGoalWeight) || 67, targetBodyFat: bodyGoalFat !== "" ? parseFloat(bodyGoalFat) : null };
+                    setBodyGoals(goals);
+                    localStorage.setItem("la_body_goals", JSON.stringify(goals));
+                  }} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                    Guardar
+                  </button>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>Fase de definición: el dashboard prioriza bajar % grasa conservando masa magra.</div>
             </div>
 
             <button onClick={() => setShowSettings(false)} style={{
