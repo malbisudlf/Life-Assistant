@@ -4,6 +4,8 @@ Dashboard personal que centraliza calendario, salud, entrenamientos, hogar intel
 
 **Demo:** [life-assistant-smoky.vercel.app](https://life-assistant-smoky.vercel.app)
 
+![Dashboard](public/screenshot.png)
+
 ---
 
 ## Funcionalidades
