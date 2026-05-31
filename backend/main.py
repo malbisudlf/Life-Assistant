@@ -1145,6 +1145,35 @@ async def health_ingest_simple(request: Request, token: str = ""):
     return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
 
 
+@app.patch("/health/sleep/{date}/exclude")
+def toggle_sleep_exclude(
+    date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Alterna el flag excluded en extra de sleep_analysis para una fecha dada."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics"
+        f"?metric_name=eq.sleep_analysis&metric_date=eq.{date}&select=extra",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=r.text)
+    rows = r.json()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No hay datos de sueño para esa fecha")
+    extra = rows[0].get("extra") or {}
+    extra["excluded"] = not extra.get("excluded", False)
+    patch = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/health_metrics"
+        f"?metric_name=eq.sleep_analysis&metric_date=eq.{date}",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json={"extra": extra},
+    )
+    if patch.status_code >= 300:
+        raise HTTPException(status_code=500, detail=patch.text)
+    return {"date": date, "excluded": extra["excluded"]}
+
+
 @app.get("/health/metrics")
 def get_health_metrics(
     days: int = 30,

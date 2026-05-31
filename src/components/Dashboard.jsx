@@ -415,6 +415,7 @@ export default function Dashboard() {
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
+  const [sleepExcluding, setSleepExcluding]       = useState(null); // date string being toggled
   const [bodyGoals, setBodyGoals] = useState(() => {
     try { const s = localStorage.getItem("la_body_goals"); return s ? JSON.parse(s) : { targetWeight: 67, targetBodyFat: null }; }
     catch { return { targetWeight: 67, targetBodyFat: null }; }
@@ -690,6 +691,33 @@ export default function Dashboard() {
       setWolStartedAt(Date.now());
     } catch {
       setWolStatus("error");
+    }
+  }
+
+  async function excludeSleepNight(date) {
+    const t = localStorage.getItem("la_token") || "";
+    setSleepExcluding(date);
+    try {
+      const r = await fetch(`${API}/health/sleep/${date}/exclude`, {
+        method: "PATCH",
+        headers: { "Authorization": `Bearer ${t}` },
+      });
+      if (r.ok) {
+        const { excluded } = await r.json();
+        setHealthData(prev => {
+          if (!prev?.sleep_analysis) return prev;
+          return {
+            ...prev,
+            sleep_analysis: prev.sleep_analysis.map(row =>
+              row.date === date
+                ? { ...row, extra: { ...(row.extra || {}), excluded } }
+                : row
+            ),
+          };
+        });
+      }
+    } finally {
+      setSleepExcluding(null);
     }
   }
 
@@ -1255,7 +1283,7 @@ export default function Dashboard() {
           if (d.extra?.asleep > 0) return Number(d.extra.asleep);
           return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
         };
-        const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").map(d => ({ ...d, value: wSleepEff(d) }));
+        const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: wSleepEff(d) }));
         const wStepsRaw     = findMetric(healthData, "step_count", "steps");
         const wHrvRaw       = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
         const wRhrRaw       = findMetric(healthData, "resting_heart_rate");
@@ -1775,14 +1803,26 @@ export default function Dashboard() {
           return (Number(d.extra?.deep) || 0) + (Number(d.extra?.rem) || 0)
                + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
         };
-        const sleepRaw  = findMetric(healthData, "sleep_analysis", "sleep");
-        const sleepData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
-        const last14    = sleepData.slice(-7);
-        const last7     = sleepData.slice(-7);
-        const avg7      = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
-        const latest    = sleepData[sleepData.length - 1];
+        const sleepRaw     = findMetric(healthData, "sleep_analysis", "sleep");
+        const sleepAllData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
+        const sleepData    = sleepAllData.filter(d => !d.extra?.excluded);
+        const last14       = sleepAllData.slice(-7);
+        const last7        = sleepData.slice(-7);
+        const avg7         = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
+        const latest       = sleepData[sleepData.length - 1];
         const sleepColor = v => v >= 7 ? "var(--green)" : v >= 6 ? "var(--accent)" : "#d4645a";
 
+        // latestDisplay: noche más reciente (para mostrar, incluso si está excluida)
+        const latestDisplay = sleepAllData[sleepAllData.length - 1];
+        const lvd  = latestDisplay?.value || 0;
+        const ldd  = latestDisplay?.extra?.deep  != null ? Number(latestDisplay.extra.deep)  : null;
+        const lrd  = latestDisplay?.extra?.rem   != null ? Number(latestDisplay.extra.rem)   : null;
+        const lcd  = latestDisplay?.extra?.core  != null ? Number(latestDisplay.extra.core)  : (latestDisplay?.extra?.light != null ? Number(latestDisplay.extra.light) : null);
+        const lawd = latestDisplay?.extra?.awake != null ? Number(latestDisplay.extra.awake) : null;
+        const lssd = latestDisplay?.extra?.sleep_start ?? null;
+        const latestExcluded = latestDisplay?.extra?.excluded ?? false;
+
+        // latest: noche más reciente no excluida (para score y cálculos)
         const lv  = latest?.value || 0;
         const ld  = latest?.extra?.deep  != null ? Number(latest.extra.deep)  : null;
         const lr  = latest?.extra?.rem   != null ? Number(latest.extra.rem)   : null;
@@ -1912,50 +1952,61 @@ export default function Dashboard() {
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de sueño aún</div>
             ) : (
               <>
-                {latest && (
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 33, color: sleepColor(lv), lineHeight: 1 }}>
-                      {hoursToHM(lv)}
-                    </span>
-                    <span style={{ fontSize: 13, color: "var(--muted)" }}>anoche</span>
-                    {avg7 != null && (
-                      <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
-                        media 7d: {hoursToHM(avg7)}
+                {latestDisplay && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 33, color: latestExcluded ? "var(--muted2)" : sleepColor(lvd), lineHeight: 1, opacity: latestExcluded ? 0.5 : 1, textDecoration: latestExcluded ? "line-through" : "none" }}>
+                        {hoursToHM(lvd)}
                       </span>
-                    )}
+                      <span style={{ fontSize: 13, color: "var(--muted)" }}>
+                        {latestExcluded ? "anoche (anulada)" : "anoche"}
+                      </span>
+                      {avg7 != null && (
+                        <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
+                          media 7d: {hoursToHM(avg7)}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => excludeSleepNight(latestDisplay.date)}
+                      disabled={sleepExcluding === latestDisplay.date}
+                      style={{ marginTop: 4, fontSize: 11, color: latestExcluded ? "var(--accent)" : "var(--muted2)", background: "none", border: "none", cursor: "pointer", padding: 0, textDecoration: "underline" }}
+                    >
+                      {sleepExcluding === latestDisplay.date ? "…" : latestExcluded ? "Restaurar noche" : "Anular noche"}
+                    </button>
                   </div>
                 )}
-                {latest?.extra && (ld != null || lr != null || lc != null) && (
+                {latestDisplay?.extra && (ldd != null || lrd != null || lcd != null) && !latestExcluded && (
                   <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 13, flexWrap: "wrap" }}>
-                    {ld != null && (
+                    {ldd != null && (
                       <SleepStageTooltip label={STAGE_TIPS.deep.label} color={STAGE_TIPS.deep.color} tip={STAGE_TIPS.deep.tip}>
                         <span style={{ color: "var(--muted)" }}>
                           <span style={{ color: "#4a72b0" }}>●</span> Profundo{" "}
-                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(ld)}</b>
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(ldd)}</b>
                         </span>
                       </SleepStageTooltip>
                     )}
-                    {lr != null && (
+                    {lrd != null && (
                       <SleepStageTooltip label={STAGE_TIPS.rem.label} color={STAGE_TIPS.rem.color} tip={STAGE_TIPS.rem.tip}>
                         <span style={{ color: "var(--muted)" }}>
                           <span style={{ color: "#8b68c4" }}>●</span> REM{" "}
-                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lr)}</b>
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lrd)}</b>
                         </span>
                       </SleepStageTooltip>
                     )}
-                    {lc != null && (
+                    {lcd != null && (
                       <SleepStageTooltip label={STAGE_TIPS.core.label} color={STAGE_TIPS.core.color} tip={STAGE_TIPS.core.tip}>
                         <span style={{ color: "var(--muted)" }}>
                           <span style={{ color: "#4f8fa3" }}>●</span> Core{" "}
-                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lc)}</b>
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lcd)}</b>
                         </span>
                       </SleepStageTooltip>
                     )}
-                    {law != null && (
+                    {lawd != null && (
                       <SleepStageTooltip label={STAGE_TIPS.awake.label} color={STAGE_TIPS.awake.color} tip={STAGE_TIPS.awake.tip}>
                         <span style={{ color: "var(--muted)" }}>
                           <span style={{ color: "var(--muted2)" }}>●</span> Despierto{" "}
-                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(law)}</b>
+                          <b style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace" }}>{hoursToHM(lawd)}</b>
                         </span>
                       </SleepStageTooltip>
                     )}
@@ -1964,14 +2015,21 @@ export default function Dashboard() {
                 {last14.length > 1 && (
                   <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
                     {last14.map((d, i) => {
-                      const sc = sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
-                      const c  = sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
+                      const excl = d.extra?.excluded ?? false;
+                      const sc = excl ? null : sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
+                      const c  = excl ? "var(--border2)" : sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
                       const date = new Date(d.date + "T12:00:00");
                       const day  = ["D","L","M","X","J","V","S"][date.getDay()];
+                      const isExcluding = sleepExcluding === d.date;
                       return (
-                        <div key={i} style={{ flex: 1, textAlign: "center" }} title={`${day}: ${hoursToHM(d.value)}${sc != null ? ` · ${sc}pts` : ""}`}>
-                          <div style={{ height: 3, borderRadius: 2, background: c, opacity: 0.8 }} />
-                          <div style={{ fontSize: 9, color: "var(--muted2)", marginTop: 3, fontFamily: "'DM Mono', monospace" }}>{day}</div>
+                        <div key={i} style={{ flex: 1, textAlign: "center", position: "relative", cursor: "pointer" }}
+                          title={excl ? `${day}: anulada` : `${day}: ${hoursToHM(d.value)}${sc != null ? ` · ${sc}pts` : ""}`}
+                          onClick={() => !isExcluding && excludeSleepNight(d.date)}
+                        >
+                          <div style={{ height: 3, borderRadius: 2, background: c, opacity: excl ? 0.3 : 0.8 }} />
+                          <div style={{ fontSize: 9, color: excl ? "var(--muted2)" : "var(--muted2)", marginTop: 3, fontFamily: "'DM Mono', monospace", opacity: excl ? 0.5 : 1 }}>
+                            {isExcluding ? "·" : excl ? "×" : day}
+                          </div>
                         </div>
                       );
                     })}
