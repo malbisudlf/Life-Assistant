@@ -438,6 +438,9 @@ export default function Dashboard() {
   const [trainingSettingsPrice, setTrainingSettingsPrice] = useState("");
   const [trainingSettingsSpp, setTrainingSettingsSpp]     = useState("");
   const [trainingSettingsSaving, setTrainingSettingsSaving] = useState(false);
+  const [trainingDays, setTrainingDays] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("la_training_days") || "[1,3,4,0]"); } catch { return [1,3,4,0]; }
+  });
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
   const [dragPos, setDragPos]             = useState(null);
@@ -1335,10 +1338,17 @@ export default function Dashboard() {
         // Semana actual desde el lunes
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
         const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
-        const dayOfWeek = todayMidnight.getDay();
+        const dayOfWeek = todayMidnight.getDay(); // 0=dom, 1=lun, ..., 6=sab
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
         const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+
+        // Días de entrenamiento planificados (configurables)
+        const trainingDaysSet = new Set(trainingDays);
+        let expectedByNow = 0;
+        for (let i = 0; i <= daysToMonday; i++) {
+          if (trainingDaysSet.has((1 + i) % 7)) expectedByNow++;
+        }
 
         // ── promedios semanales ──
         const avgSleep    = avg7(last7Sleep);
@@ -1441,10 +1451,11 @@ export default function Dashboard() {
           else if (todayHrv != null && todayHrv >= 50)           wPts = 2;
           else                                                   wPts = 1;
         } else {
-          if      (workVal >= 4) wPts = 15;
-          else if (workVal === 3) wPts = 11;
-          else if (workVal === 2) wPts = 7;
-          else if (workVal === 1) wPts = 3;
+          const scaledWork = expectedByNow > 0 ? Math.min(4, (workVal / expectedByNow) * 4) : workVal;
+          if      (scaledWork >= 4) wPts = 15;
+          else if (scaledWork >= 3) wPts = 11;
+          else if (scaledWork >= 2) wPts = 7;
+          else if (scaledWork >= 1) wPts = 3;
         }
         score += wPts;
         breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.` });
@@ -2640,6 +2651,29 @@ export default function Dashboard() {
             {/* ── Sección entrenamiento ── */}
             <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
               <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Entrenamiento</div>
+
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Días de entrenamiento</div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[["L",1],["M",2],["X",3],["J",4],["V",5],["S",6],["D",0]].map(([label, d]) => {
+                    const active = trainingDays.includes(d);
+                    return (
+                      <button key={d} onClick={() => {
+                        const next = active ? trainingDays.filter(x => x !== d) : [...trainingDays, d];
+                        setTrainingDays(next);
+                        localStorage.setItem("la_training_days", JSON.stringify(next));
+                      }} style={{
+                        width: 30, height: 30, borderRadius: 6, border: "0.5px solid",
+                        borderColor: active ? "var(--accent)" : "var(--border2)",
+                        background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                        color: active ? "var(--accent)" : "var(--muted)",
+                        fontSize: 11, fontWeight: active ? 600 : 400,
+                        cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                      }}>{label}</button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                 <div style={{ flex: 1 }}>
