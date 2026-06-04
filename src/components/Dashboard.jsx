@@ -1299,6 +1299,7 @@ export default function Dashboard() {
         const wWeightRaw    = findMetric(healthData, "weight");
         const wBodyFatRaw   = findMetric(healthData, "body_fat_percentage");
         const wLeanMassRaw  = findMetric(healthData, "lean_body_mass");
+        const wFlightsRaw   = findMetric(healthData, "flights_climbed");
 
         const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
         const last7Sleep    = wSleepRaw.slice(-7);
@@ -1311,6 +1312,7 @@ export default function Dashboard() {
         const last7WalkHr   = wWalkHrRaw.slice(-7);
         const last7Daylight = wDaylightRaw.slice(-7);
         const last7Resp     = wRespRaw.slice(-7);
+        const last7Flights  = wFlightsRaw.slice(-7);
 
         // Semana actual desde el lunes
         const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
@@ -1333,6 +1335,7 @@ export default function Dashboard() {
         const avgWalkHr   = avg7(last7WalkHr);
         const avgDaylight = avg7(last7Daylight);
         const avgResp     = avg7(last7Resp);
+        const avgFlights  = avg7(last7Flights);
         const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
@@ -1354,6 +1357,7 @@ export default function Dashboard() {
         const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
         const todayExercise     = latestOrToday(wExerciseRaw)?.value > 0 ? latestOrToday(wExerciseRaw).value : null;
         const todayStand        = latestOrToday(wStandRaw)?.value > 0 ? latestOrToday(wStandRaw).value : null;
+        const todayFlights      = latestOrToday(wFlightsRaw)?.value > 0 ? latestOrToday(wFlightsRaw).value : null;
         const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
         const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
         const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
@@ -1386,13 +1390,14 @@ export default function Dashboard() {
         const aeVal       = isDaily ? todayAe       : avgAe;
         const exerciseVal = isDaily ? todayExercise : avgExercise;
         const standVal    = isDaily ? todayStand    : avgStand;
+        const flightsVal  = isDaily ? todayFlights  : avgFlights;
         const walkHrVal   = isDaily ? todayWalkHr   : avgWalkHr;
         const daylightVal = isDaily ? todayDaylight : avgDaylight;
         const respVal     = isDaily ? todayResp     : avgResp;
         const workVal     = isDaily ? todayWorkoutCount : weekWorkoutCount;
 
         // ── puntuación ──
-        // Sueño 25 | Actividad 30 (entreno 15 + pasos 8 + AE 5 + stand 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 10 (VO2 6 + walkHR 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
+        // Sueño 25 | Actividad 32 (entreno 15 + pasos 8 + AE 5 + stand 2 + pisos 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 14 (VO2 6 + walkHR 4 + %grasa 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
         let score = 0;
         const breakdown = []; // [{label, pts, max, detail}]
 
@@ -1458,6 +1463,15 @@ export default function Dashboard() {
         }
         breakdown.push({ label: "🧍 De pie", pts: sdPts, max: 2, detail: standVal != null ? `${Math.round(standVal)}h` : "sin datos" });
 
+        // Actividad: pisos subidos (2 pts)
+        let flPts = 0;
+        if (flightsVal != null) {
+          if      (flightsVal >= 10) flPts = 2;
+          else if (flightsVal >= 5)  flPts = 1;
+          score += flPts;
+        }
+        breakdown.push({ label: "🪜 Pisos", pts: flPts, max: 2, detail: flightsVal != null ? `${Math.round(flightsVal)} pisos` : "sin datos" });
+
         // Recuperación: HRV (12 pts)
         let hrvPts = 0;
         if (hrvVal != null && avgHrvPrev != null) {
@@ -1510,6 +1524,15 @@ export default function Dashboard() {
             else if (walkHrVal <= 100) whrPts = 1;
             score += whrPts;
             breakdown.push({ label: "🏃 FC caminando", pts: whrPts, max: 4, detail: `${Math.round(walkHrVal)} lpm` });
+          }
+          if (currentBodyFat != null) {
+            let bfPts = 0;
+            if      (currentBodyFat < 12) bfPts = 4;
+            else if (currentBodyFat < 18) bfPts = 3;
+            else if (currentBodyFat < 25) bfPts = 2;
+            else if (currentBodyFat < 30) bfPts = 1;
+            score += bfPts;
+            breakdown.push({ label: "⚖️ % Grasa", pts: bfPts, max: 4, detail: `${currentBodyFat.toFixed(1)}%` });
           }
 
           // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
