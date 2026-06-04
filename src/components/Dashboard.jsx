@@ -398,6 +398,7 @@ export default function Dashboard() {
   const [processing, setProcessing]   = useState(false);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
+  const [departurePickingId, setDeparturePickingId] = useState(null);
   const [classEvents, setClassEvents] = useState([]);
   const [classesOpen, setClassesOpen] = useState(false);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
@@ -604,19 +605,20 @@ export default function Dashboard() {
   }
   function stopRecording() { mediaRecorderRef.current?.stop(); setRecording(false); }
 
-  async function fetchDeparture(ev) {
+  async function fetchDeparture(ev, mode) {
     if (!ev?.loc || !ev?.start) return;
     const key = ev.id || ev.start;
+    setDeparturePickingId(null);
     setDepartureLoadingId(key);
     try {
       const t = localStorage.getItem("la_token") || "";
       const res = await fetch(`${API}/maps/departure`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ destination: ev.loc, event_time: ev.start }),
+        body: JSON.stringify({ destination: ev.loc, event_time: ev.start, mode }),
       });
       const data = await res.json();
-      setDepartureMap(prev => ({ ...prev, [key]: data }));
+      setDepartureMap(prev => ({ ...prev, [key]: { ...data, mode } }));
     } catch {
       setDepartureMap(prev => ({ ...prev, [key]: { error: "Error al calcular" } }));
     }
@@ -628,24 +630,40 @@ export default function Dashboard() {
     const key = ev.id || ev.start;
     const info = departureMap[key];
     const isLoading = departureLoadingId === key;
+    const isPicking = departurePickingId === key;
+    const btnBase = { border: "0.5px solid", borderRadius: 6, fontSize: 11, padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" };
     return (
       <div style={{ marginTop: 6 }}>
-        {!info && !isLoading && (
-          <button onClick={e => { e.stopPropagation(); fetchDeparture(ev); }} style={{
-            background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)",
-            borderRadius: 6, color: "var(--accent)", fontSize: 11, padding: "4px 10px",
-            cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em",
+        {!info && !isLoading && !isPicking && (
+          <button onClick={e => { e.stopPropagation(); setDeparturePickingId(key); }} style={{
+            ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
           }}>¿A qué hora salir?</button>
+        )}
+        {isPicking && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "driving"); }} style={{
+              ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
+            }}>🚗 En coche</button>
+            <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "walking"); }} style={{
+              ...btnBase, background: "rgba(100,180,130,0.12)", borderColor: "rgba(100,180,130,0.3)", color: "var(--green)",
+            }}>🚶 Andando</button>
+            <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} style={{
+              ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "4px 6px",
+            }}>✕</button>
+          </div>
         )}
         {isLoading && <div style={{ fontSize: 11, color: "var(--muted)" }}>Calculando ruta...</div>}
         {info && !info.error && (
           <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.6 }}>
             <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>
-              Salir a las {info.departure_time}
+              {info.mode === "walking" ? "🚶" : "🚗"} Salir a las {info.departure_time}
             </span>
             <span style={{ color: "var(--muted)", marginLeft: 8 }}>
               {info.duration_text} · {info.distance_text}
             </span>
+            <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} style={{
+              ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
+            }}>↺</button>
           </div>
         )}
         {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}

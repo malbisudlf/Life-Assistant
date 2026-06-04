@@ -328,6 +328,7 @@ class DepartureRequest(BaseModel):
     destination: str = Field(max_length=500)
     event_time: str = Field(max_length=50)
     origin: str = Field(default=HOME_ADDRESS, max_length=500)
+    mode: str = Field(default="driving")
 
     @field_validator("event_time")
     @classmethod
@@ -336,6 +337,13 @@ class DepartureRequest(BaseModel):
             datetime.fromisoformat(v.replace("Z", "+00:00"))
         except ValueError:
             raise ValueError("event_time debe ser una fecha ISO válida")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("driving", "walking"):
+            raise ValueError("mode debe ser 'driving' o 'walking'")
         return v
 
 @app.post("/maps/departure")
@@ -351,12 +359,13 @@ def get_departure_time(
     params = {
         "origins": body.origin,
         "destinations": body.destination,
-        "mode": "driving",
-        "departure_time": "now",
-        "traffic_model": "best_guess",
+        "mode": body.mode,
         "language": "es",
         "key": GOOGLE_MAPS_API_KEY,
     }
+    if body.mode == "driving":
+        params["departure_time"] = "now"
+        params["traffic_model"] = "best_guess"
     r = requests.get(url, params=params)
     data = r.json()
 
@@ -365,7 +374,7 @@ def get_departure_time(
         if element["status"] != "OK":
             raise HTTPException(status_code=400, detail="No se pudo calcular la ruta")
 
-        # Duración con tráfico (en segundos)
+        # Duración con tráfico si es coche, sin tráfico si es a pie
         duration_seconds = element.get("duration_in_traffic", element["duration"])["value"]
         duration_text = element.get("duration_in_traffic", element["duration"])["text"]
         distance_text = element["distance"]["text"]
