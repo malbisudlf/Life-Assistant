@@ -460,6 +460,46 @@ def delete_idea(
     )
     return {"ok": r.status_code < 300}
 
+def extract_idea_from_text(text: str) -> dict:
+    """Extrae key/tag/full_text de un texto libre con GPT-4o mini."""
+    completion = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Eres un asistente que extrae ideas clave de notas de voz o texto. "
+                    "Dado un texto, responde SOLO con un JSON válido con este formato exacto: "
+                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", "full_text": "Resumen claro y completo de la idea en 2-3 frases"}'
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        max_tokens=300,
+        temperature=0.3,
+    )
+    raw = completion.choices[0].message.content.strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_idea(text: str, idea_data: dict) -> dict:
+    payload = {
+        "key": str(idea_data.get("key", text[:60]))[:100],
+        "full_text": str(idea_data.get("full_text", text))[:2000],
+        "tag": str(idea_data.get("tag", "idea"))[:50],
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/ideas",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    return r.json()[0] if r.status_code < 300 else payload
+
+
 @app.post("/ideas/audio")
 async def create_idea_from_audio(
     audio: UploadFile = File(...),
@@ -476,43 +516,28 @@ async def create_idea_from_audio(
     if not text:
         raise HTTPException(status_code=400, detail="No se pudo transcribir el audio")
 
-    # 2. Extraer idea clave con GPT-4o mini
-    completion = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres un asistente que extrae ideas clave de notas de voz. "
-                    "Dado un texto transcrito, responde SOLO con un JSON válido con este formato exacto: "
-                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", "full_text": "Resumen claro y completo de la idea en 2-3 frases"}'
-                ),
-            },
-            {"role": "user", "content": text},
-        ],
-        max_tokens=300,
-        temperature=0.3,
-    )
-    raw = completion.choices[0].message.content.strip()
-    # Limpiar posibles backticks
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    try:
-        idea_data = json.loads(raw)
-    except json.JSONDecodeError:
-        idea_data = {}
+    # 2. Extraer idea clave con GPT-4o mini y guardar en Supabase
+    idea_data = extract_idea_from_text(text)
+    idea = save_idea(text, idea_data)
+    return {"ok": True, "idea": idea, "transcript": text}
 
-    # 3. Guardar en Supabase
-    payload = {
-        "key": str(idea_data.get("key", text[:60]))[:100],
-        "full_text": str(idea_data.get("full_text", text))[:2000],
-        "tag": str(idea_data.get("tag", "idea"))[:50],
-    }
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/ideas",
-        headers={**supabase_headers(), "Prefer": "return=representation"},
-        json=payload,
-    )
-    return {"ok": True, "idea": r.json()[0] if r.status_code < 300 else payload, "transcript": text}
+
+class IdeaTextIn(BaseModel):
+    text: str
+
+
+@app.post("/ideas/text")
+def create_idea_from_text(
+    body: IdeaTextIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="El texto está vacío")
+
+    idea_data = extract_idea_from_text(text)
+    idea = save_idea(text, idea_data)
+    return {"ok": True, "idea": idea}
 
 
 # ── HOME ASSISTANT INTEGRATION ────────────────────────────────────────────────

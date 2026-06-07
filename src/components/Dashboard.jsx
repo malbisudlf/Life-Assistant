@@ -526,6 +526,10 @@ export default function Dashboard() {
   const [ideas, setIdeas]             = useState([]);
   const [recording, setRecording]     = useState(false);
   const [processing, setProcessing]   = useState(false);
+  const [showTextIdea, setShowTextIdea]     = useState(false);
+  const [textIdeaInput, setTextIdeaInput]   = useState("");
+  const [textIdeaSubmitting, setTextIdeaSubmitting] = useState(false);
+  const [textIdeaError, setTextIdeaError]   = useState(null);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
@@ -796,6 +800,41 @@ export default function Dashboard() {
     setRecording(true);
   }
   function stopRecording() { mediaRecorderRef.current?.stop(); setRecording(false); }
+
+  function openTextIdea() {
+    setTextIdeaInput("");
+    setTextIdeaError(null);
+    setShowTextIdea(true);
+  }
+
+  async function submitTextIdea() {
+    if (textIdeaSubmitting) return;
+    const text = textIdeaInput.trim();
+    if (!text) {
+      setTextIdeaError("Escribe algo primero");
+      return;
+    }
+    setTextIdeaSubmitting(true);
+    setTextIdeaError(null);
+    try {
+      const t = localStorage.getItem("la_token") || "";
+      const res = await apiFetch(`${API}/ideas/text`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setIdeas(prev => [data.idea, ...prev]);
+        setShowTextIdea(false);
+      } else {
+        setTextIdeaError("No se pudo guardar la idea");
+      }
+    } catch {
+      setTextIdeaError("Error de conexión con el backend");
+    }
+    setTextIdeaSubmitting(false);
+  }
 
   async function fetchDeparture(ev, mode) {
     if (!ev?.loc || !ev?.start) return;
@@ -1487,10 +1526,16 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
-          <button style={{ ...s.newIdeaBtn, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
-            onClick={recording ? stopRecording : startRecording} disabled={processing}>
-            {processing ? "Procesando..." : recording ? "⏹ Parar grabación" : "● Grabar idea"}
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
+              onClick={recording ? stopRecording : startRecording} disabled={processing}>
+              {processing ? "Procesando..." : recording ? "⏹ Parar grabación" : "● Grabar idea"}
+            </button>
+            <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }}
+              onClick={openTextIdea} disabled={processing || recording}>
+              ✎ Escribir idea
+            </button>
+          </div>
         </div>
       );
       case "health_wellness": {
@@ -2876,6 +2921,56 @@ export default function Dashboard() {
                 fontFamily: "'DM Sans', sans-serif", opacity: eventCreating ? 0.6 : 1,
                 transition: "all 0.2s",
               }}>{eventCreating ? "Creando..." : "Crear"}</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── ESCRIBIR IDEA ── */}
+      {showTextIdea && (
+        <>
+          <div onClick={() => !textIdeaSubmitting && setShowTextIdea(false)} style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)",
+            zIndex: 200, animation: "fadeInOverlay 0.2s ease",
+          }} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+            borderRadius: 16, padding: "28px 32px", zIndex: 201,
+            width: "min(420px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+            animation: "fadeInOverlay 0.2s ease",
+          }}>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", marginBottom: 18, textAlign: "center" }}>
+              Nueva idea por escrito
+            </div>
+            <textarea
+              placeholder="Escribe tu idea..."
+              value={textIdeaInput}
+              onChange={e => setTextIdeaInput(e.target.value)}
+              autoFocus
+              rows={5}
+              style={{ ...inputStyle, fontSize: 14, padding: "11px 12px", resize: "vertical", fontFamily: "'DM Sans', sans-serif" }}
+            />
+            {textIdeaError && (
+              <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{textIdeaError}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <button onClick={() => setShowTextIdea(false)} disabled={textIdeaSubmitting} style={{
+                flex: 1, padding: "10px 0", background: "transparent",
+                border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                color: "var(--muted)", fontSize: 13, cursor: "pointer",
+                fontFamily: "'DM Sans', sans-serif",
+              }}>Cancelar</button>
+              <button onClick={submitTextIdea} disabled={textIdeaSubmitting} style={{
+                flex: 1, padding: "10px 0",
+                background: "var(--accent)", border: "none", borderRadius: 8,
+                color: "#0e0f11", fontSize: 13, fontWeight: 600,
+                cursor: textIdeaSubmitting ? "not-allowed" : "pointer",
+                fontFamily: "'DM Sans', sans-serif", opacity: textIdeaSubmitting ? 0.6 : 1,
+                transition: "all 0.2s",
+              }}>{textIdeaSubmitting ? "Guardando..." : "Guardar"}</button>
             </div>
           </div>
         </>
