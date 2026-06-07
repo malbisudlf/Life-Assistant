@@ -83,6 +83,13 @@ HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
 bearer_scheme = HTTPBearer()
 
 class LoginRequest(BaseModel):
@@ -128,7 +135,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
-TOKEN_FILE = ".token"
+OAUTH_PROVIDER = "microsoft_graph"
 import json
 import re
 
@@ -146,13 +153,38 @@ def _clean_class_title(subject: str) -> str:
     return s.strip()
 
 def save_token_data(data: dict):
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(data, f)
+    """Persiste el token de Microsoft Graph en Supabase (sobrevive a redeploys del backend)."""
+    payload = {
+        "provider": OAUTH_PROVIDER,
+        "access_token": data["access_token"],
+        "refresh_token": data.get("refresh_token"),
+        "expires_at": data["expires_at"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}&select=provider",
+        headers=supabase_headers(),
+    )
+    if r.status_code < 300 and r.json():
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
+    else:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
 
 def load_token_data() -> dict | None:
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            return json.load(f)
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}&select=access_token,refresh_token,expires_at",
+        headers=supabase_headers(),
+    )
+    if r.status_code < 300 and r.json():
+        return r.json()[0]
     return None
 
 def get_valid_token() -> str | None:
@@ -433,13 +465,6 @@ def get_departure_time(
 
 
 # ── IDEAS ─────────────────────────────────────────────────────────
-
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
 
 @app.get("/ideas")
 def get_ideas(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
