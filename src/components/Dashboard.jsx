@@ -4,6 +4,16 @@ const API = "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/lovelace/tablet";
 
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    localStorage.removeItem("la_token");
+    window.location.reload();
+    return new Promise(() => {});
+  }
+  return res;
+}
+
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
   const [pwd, setPwd] = useState("");
@@ -509,7 +519,7 @@ export default function Dashboard() {
   // Cargar eventos
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
-    fetch(`${API}/calendar/events`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/calendar/events`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => {
         if (data.error) { setAuthNeeded(true); setLoading(false); return; }
@@ -523,7 +533,7 @@ export default function Dashboard() {
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
     if (!t) return;
-    fetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => {
         console.log("[CLASES] respuesta raw:", data);
@@ -545,7 +555,7 @@ export default function Dashboard() {
     const t = localStorage.getItem("la_token") || "";
     if (!t) return;
     setHealthLoading(true);
-    fetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
       .catch(() => setHealthLoading(false));
@@ -554,7 +564,7 @@ export default function Dashboard() {
   // Cargar ideas
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
-    fetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
       .catch(() => {});
@@ -567,7 +577,7 @@ export default function Dashboard() {
     let mounted = true;
     async function loadAgent() {
       try {
-        const r = await fetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
+        const r = await apiFetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
         const data = await r.json();
         console.log("[AGENT] estado:", data);
         if (mounted) setAgentState(data);
@@ -596,7 +606,7 @@ export default function Dashboard() {
       fd.append("audio", blob, "audio.webm");
       try {
         const t = localStorage.getItem("la_token") || "";
-        const res = await fetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
+        const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
         const data = await res.json();
         if (data.ok) setIdeas(prev => [data.idea, ...prev]);
       } catch {}
@@ -615,7 +625,7 @@ export default function Dashboard() {
     setDepartureLoadingId(key);
     try {
       const t = localStorage.getItem("la_token") || "";
-      const res = await fetch(`${API}/maps/departure`, {
+      const res = await apiFetch(`${API}/maps/departure`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({ destination: ev.loc, event_time: ev.start, mode }),
@@ -681,7 +691,7 @@ export default function Dashboard() {
 
       // 1. WOL: pone flag en el backend → HA lo recoge en su poll y envía el magic packet
       try {
-        await fetch(`${API}/wake-pc`, {
+        await apiFetch(`${API}/wake-pc`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${t}` },
         });
@@ -690,7 +700,7 @@ export default function Dashboard() {
       }
 
       // 2. Crear job en Supabase via backend — esto sí es crítico
-      const jobRes = await fetch(`${API}/jobs`, {
+      const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -719,7 +729,7 @@ export default function Dashboard() {
     const t = localStorage.getItem("la_token") || "";
     setSleepExcluding(date);
     try {
-      const r = await fetch(`${API}/health/sleep/${date}/exclude`, {
+      const r = await apiFetch(`${API}/health/sleep/${date}/exclude`, {
         method: "PATCH",
         headers: { "Authorization": `Bearer ${t}` },
       });
@@ -744,14 +754,14 @@ export default function Dashboard() {
 
   async function deleteIdea(id) {
     const t = localStorage.getItem("la_token") || "";
-    await fetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
     setIdeas(prev => prev.filter(i => i.id !== id));
   }
 
   async function loadTraining() {
     const t = localStorage.getItem("la_token") || "";
     try {
-      const r = await fetch(`${API}/training/summary`, { headers: { "Authorization": `Bearer ${t}` } });
+      const r = await apiFetch(`${API}/training/summary`, { headers: { "Authorization": `Bearer ${t}` } });
       const data = await r.json();
       setTraining(data);
     } catch {}
@@ -762,7 +772,7 @@ export default function Dashboard() {
     setTrainingLoading(true);
     const t = localStorage.getItem("la_token") || "";
     try {
-      await fetch(`${API}/training/sessions`, {
+      await apiFetch(`${API}/training/sessions`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({ date: sessionDate, duration_hours: parseFloat(sessionHours) }),
@@ -775,7 +785,7 @@ export default function Dashboard() {
 
   async function deleteTrainingSession(sessionId) {
     const t = localStorage.getItem("la_token") || "";
-    await fetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    await apiFetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
     await loadTraining();
   }
 
@@ -784,7 +794,7 @@ export default function Dashboard() {
     setTrainingSettingsSaving(true);
     const t = localStorage.getItem("la_token") || "";
     try {
-      await fetch(`${API}/training/client`, {
+      await apiFetch(`${API}/training/client`, {
         method: "PATCH",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify(patch),
@@ -800,7 +810,7 @@ export default function Dashboard() {
     const t = localStorage.getItem("la_token") || "";
     const today = new Date().toISOString().slice(0, 10);
     try {
-      await fetch(`${API}/training/payments`, {
+      await apiFetch(`${API}/training/payments`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
         body: JSON.stringify({ date: today }),
@@ -1021,8 +1031,8 @@ export default function Dashboard() {
     const id = setInterval(async () => {
       try {
         const [evRes, jobRes] = await Promise.all([
-          fetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
-          fetch(`${API}/jobs/by-id/${activeJobId}`, { headers: { "Authorization": `Bearer ${t}` } }),
+          apiFetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
+          apiFetch(`${API}/jobs/by-id/${activeJobId}`, { headers: { "Authorization": `Bearer ${t}` } }),
         ]);
         const evData = await evRes.json();
         const jobData = await jobRes.json();
