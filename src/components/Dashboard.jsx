@@ -323,6 +323,10 @@ const GLOBAL_CSS = `
   }
   html, body, #root { height: 100%; background: var(--bg); }
   body { font-family: 'DM Sans', sans-serif; color: var(--text); }
+  .la-time-input { transition: border-color 0.15s, box-shadow 0.15s; }
+  .la-time-input:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(200,169,110,0.14) !important; }
+  .la-time-option { transition: background 0.1s, color 0.1s; }
+  .la-time-option:hover { background: rgba(200,169,110,0.12); color: var(--accent); }
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
@@ -393,6 +397,122 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "health_activity",   label: "Actividad",         visible: false, column: "right" },
   { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
 ];
+
+const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
+  const totalMin = i * 30;
+  return `${String(Math.floor(totalMin / 60)).padStart(2, "0")}:${String(totalMin % 60).padStart(2, "0")}`;
+});
+
+function isoToDdMmYyyy(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+// Campo de fecha en formato DD/MM/AAAA fijo — independiente del locale del sistema/navegador
+function DateInput({ value, onChange }) {
+  const [text, setText] = useState(() => isoToDdMmYyyy(value));
+
+  useEffect(() => { setText(isoToDdMmYyyy(value)); }, [value]);
+
+  function commit(raw) {
+    const m = /^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\s*$/.exec(raw);
+    if (m) {
+      const dd = parseInt(m[1], 10);
+      const mm = parseInt(m[2], 10);
+      const yyyy = m[3].length === 2 ? 2000 + parseInt(m[3], 10) : parseInt(m[3], 10);
+      const d = new Date(yyyy, mm - 1, dd);
+      if (d.getFullYear() === yyyy && d.getMonth() === mm - 1 && d.getDate() === dd) {
+        const iso = `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+        setText(isoToDdMmYyyy(iso));
+        if (iso !== value) onChange(iso);
+        return;
+      }
+    }
+    setText(isoToDdMmYyyy(value));
+  }
+
+  return (
+    <input
+      type="text" inputMode="numeric" placeholder="DD/MM/AAAA" className="la-time-input"
+      value={text}
+      onChange={e => setText(e.target.value)}
+      onBlur={e => commit(e.target.value)}
+      onKeyDown={e => { if (e.key === "Enter") { commit(e.target.value); e.currentTarget.blur(); } }}
+      style={{
+        width: "100%", padding: "9px 12px", background: "var(--surface2)",
+        border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)",
+        fontSize: 14, fontFamily: "'DM Mono', monospace",
+      }}
+    />
+  );
+}
+
+// Campo de hora 24h: se puede escribir directamente o elegir de una lista pequeña y scrolleable
+function TimeInput({ value, onChange }) {
+  const [open, setOpen]   = useState(false);
+  const [text, setText]   = useState(value || "");
+  const wrapRef = useRef(null);
+
+  useEffect(() => { setText(value || ""); }, [value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onOutside = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, [open]);
+
+  function commit(raw) {
+    const m = /^(\d{1,2})[:hH]?(\d{2})?$/.exec(raw.trim());
+    if (m) {
+      const hh = Math.min(23, parseInt(m[1], 10));
+      const mm = m[2] ? Math.min(59, parseInt(m[2], 10)) : 0;
+      const formatted = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+      setText(formatted);
+      if (formatted !== value) onChange(formatted);
+    } else {
+      setText(value || "");
+    }
+  }
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", flex: 1 }}>
+      <input
+        type="text" className="la-time-input" inputMode="numeric" placeholder="HH:MM"
+        value={text}
+        onFocus={() => setOpen(true)}
+        onChange={e => setText(e.target.value)}
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") { commit(e.target.value); setOpen(false); e.currentTarget.blur(); } }}
+        style={{
+          width: "100%", padding: "9px 10px", background: "var(--surface2)",
+          border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)",
+          fontSize: 14, fontFamily: "'DM Mono', monospace", textAlign: "center",
+        }}
+      />
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0,
+          maxHeight: 160, overflowY: "auto", zIndex: 20,
+          background: "var(--surface2)", border: "0.5px solid var(--border2)",
+          borderRadius: 8, boxShadow: "0 12px 32px rgba(0,0,0,0.5)",
+        }}>
+          {TIME_OPTIONS.map(o => (
+            <div key={o} className="la-time-option"
+              onMouseDown={() => { commit(o); setOpen(false); }}
+              style={{
+                padding: "5px 10px", fontSize: 12, fontFamily: "'DM Mono', monospace",
+                textAlign: "center", cursor: "pointer",
+                color: o === text ? "var(--accent)" : "var(--text)",
+              }}
+            >{o}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── COMPONENTE PRINCIPAL ─────────────────────────────────────────
 export default function Dashboard() {
@@ -492,7 +612,8 @@ export default function Dashboard() {
     return ALL_DEFAULT_WIDGETS;
   });
 
-  const inputStyle = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif" };
+  const inputStyle = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif", width: "100%" };
+  const fieldLabelStyle = { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 6 };
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
@@ -538,8 +659,9 @@ export default function Dashboard() {
   useEffect(() => { loadEvents(); }, []);
 
   function openCreateEvent() {
-    const today = new Date().toISOString().slice(0, 10);
-    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "10:00", location: "", calendarId: "" });
+    const n = new Date();
+    const today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "09:30", location: "", calendarId: "" });
     setEventCreateError(null);
     setShowCreateEvent(true);
     if (calendarsList.length === 0) {
@@ -2692,30 +2814,49 @@ export default function Dashboard() {
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", marginBottom: 18, textAlign: "center" }}>
               Nuevo evento en Outlook
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <input type="text" placeholder="Título" value={eventForm.subject}
                 onChange={e => setEventForm(f => ({ ...f, subject: e.target.value }))}
-                style={inputStyle} />
-              <input type="date" value={eventForm.date}
-                onChange={e => setEventForm(f => ({ ...f, date: e.target.value }))}
-                style={inputStyle} />
-              <div style={{ display: "flex", gap: 10 }}>
-                <input type="time" value={eventForm.startTime}
-                  onChange={e => setEventForm(f => ({ ...f, startTime: e.target.value }))}
-                  style={{ ...inputStyle, flex: 1 }} />
-                <input type="time" value={eventForm.endTime}
-                  onChange={e => setEventForm(f => ({ ...f, endTime: e.target.value }))}
-                  style={{ ...inputStyle, flex: 1 }} />
+                style={{ ...inputStyle, fontSize: 15, padding: "11px 12px" }} />
+
+              <div>
+                <div style={fieldLabelStyle}>Fecha</div>
+                <DateInput value={eventForm.date} onChange={v => setEventForm(f => ({ ...f, date: v }))} />
+                <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 5 }}>
+                  {eventForm.date ? formatShortDate(eventForm.date) : ""}
+                </div>
               </div>
-              <input type="text" placeholder="Ubicación (opcional)" value={eventForm.location}
-                onChange={e => setEventForm(f => ({ ...f, location: e.target.value }))}
-                style={inputStyle} />
-              <select value={eventForm.calendarId}
-                onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
-                style={inputStyle}>
-                <option value="">Calendario por defecto</option>
-                {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
+
+              <div>
+                <div style={fieldLabelStyle}>Hora</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <TimeInput value={eventForm.startTime} onChange={v => setEventForm(f => {
+                    const [hh, mm] = v.split(":").map(Number);
+                    const total = (hh * 60 + mm + 30) % (24 * 60);
+                    const endTime = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+                    return { ...f, startTime: v, endTime };
+                  })} />
+                  <span style={{ color: "var(--muted2)", fontSize: 13 }}>→</span>
+                  <TimeInput value={eventForm.endTime} onChange={v => setEventForm(f => ({ ...f, endTime: v }))} />
+                </div>
+              </div>
+
+              <div>
+                <div style={fieldLabelStyle}>Ubicación</div>
+                <input type="text" placeholder="Opcional" value={eventForm.location}
+                  onChange={e => setEventForm(f => ({ ...f, location: e.target.value }))}
+                  style={inputStyle} />
+              </div>
+
+              <div>
+                <div style={fieldLabelStyle}>Calendario</div>
+                <select value={eventForm.calendarId}
+                  onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
+                  style={inputStyle}>
+                  <option value="">Por defecto</option>
+                  {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
             </div>
             {eventCreateError && (
               <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{eventCreateError}</div>
