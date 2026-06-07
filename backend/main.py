@@ -127,7 +127,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-SCOPES = ["Calendars.Read", "User.Read"]
+SCOPES = ["Calendars.ReadWrite", "User.Read"]
 TOKEN_FILE = ".token"
 import json
 import re
@@ -271,6 +271,41 @@ def list_calendars(credentials: HTTPAuthorizationCredentials = Depends(verify_to
     r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
     data = r.json()
     return [{"id": c["id"], "name": c["name"]} for c in data.get("value", [])]
+
+
+class CreateEventRequest(BaseModel):
+    subject: str = Field(max_length=300)
+    start: str  # ISO 8601 sin zona, p.ej. "2026-06-10T18:00:00"
+    end: str
+    location: str | None = Field(None, max_length=300)
+    is_all_day: bool = False
+    calendar_id: str | None = Field(None, max_length=200)
+
+
+@app.post("/calendar/events")
+def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    token = get_valid_token()
+    if not token:
+        return {"error": "No autenticado"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "subject": body.subject,
+        "start": {"dateTime": body.start, "timeZone": "Europe/Madrid"},
+        "end": {"dateTime": body.end, "timeZone": "Europe/Madrid"},
+        "isAllDay": body.is_all_day,
+    }
+    if body.location:
+        payload["location"] = {"displayName": body.location}
+    url = (
+        f"https://graph.microsoft.com/v1.0/me/calendars/{body.calendar_id}/events"
+        if body.calendar_id
+        else "https://graph.microsoft.com/v1.0/me/events"
+    )
+    r = requests.post(url, headers=headers, json=payload)
+    if r.status_code not in (200, 201):
+        return {"error": "No se pudo crear el evento en Outlook", "detail": r.json()}
+    data = r.json()
+    return {"status": "ok", "id": data.get("id")}
 
 
 @app.get("/calendar/classes")

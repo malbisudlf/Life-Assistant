@@ -411,6 +411,11 @@ export default function Dashboard() {
   const [departurePickingId, setDeparturePickingId] = useState(null);
   const [classEvents, setClassEvents] = useState([]);
   const [classesOpen, setClassesOpen] = useState(false);
+  const [showCreateEvent, setShowCreateEvent] = useState(false);
+  const [calendarsList, setCalendarsList]     = useState([]);
+  const [eventForm, setEventForm] = useState({ subject: "", date: "", startTime: "", endTime: "", location: "", calendarId: "" });
+  const [eventCreating, setEventCreating]     = useState(false);
+  const [eventCreateError, setEventCreateError] = useState(null);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [agentState, setAgentState]   = useState(null);
@@ -487,6 +492,8 @@ export default function Dashboard() {
     return ALL_DEFAULT_WIDGETS;
   });
 
+  const inputStyle = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif" };
+
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
   const resizeDragRef    = useRef(null);
@@ -517,9 +524,9 @@ export default function Dashboard() {
   }, []);
 
   // Cargar eventos
-  useEffect(() => {
+  function loadEvents() {
     const t = localStorage.getItem("la_token") || "";
-    apiFetch(`${API}/calendar/events`, { headers: { "Authorization": `Bearer ${t}` } })
+    return apiFetch(`${API}/calendar/events`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => {
         if (data.error) { setAuthNeeded(true); setLoading(false); return; }
@@ -527,7 +534,57 @@ export default function Dashboard() {
         setLoading(false);
       })
       .catch(() => { setAuthNeeded(true); setLoading(false); });
-  }, []);
+  }
+  useEffect(() => { loadEvents(); }, []);
+
+  function openCreateEvent() {
+    const today = new Date().toISOString().slice(0, 10);
+    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "10:00", location: "", calendarId: "" });
+    setEventCreateError(null);
+    setShowCreateEvent(true);
+    if (calendarsList.length === 0) {
+      const t = localStorage.getItem("la_token") || "";
+      apiFetch(`${API}/calendar/calendars`, { headers: { "Authorization": `Bearer ${t}` } })
+        .then(r => r.json())
+        .then(data => { if (Array.isArray(data)) setCalendarsList(data); })
+        .catch(() => {});
+    }
+  }
+
+  async function submitCreateEvent() {
+    if (eventCreating) return;
+    const { subject, date, startTime, endTime, location, calendarId } = eventForm;
+    if (!subject.trim() || !date || !startTime || !endTime) {
+      setEventCreateError("Completa título, fecha y horas");
+      return;
+    }
+    setEventCreating(true);
+    setEventCreateError(null);
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      const r = await apiFetch(`${API}/calendar/events`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subject: subject.trim(),
+          start: `${date}T${startTime}:00`,
+          end: `${date}T${endTime}:00`,
+          location: location.trim() || null,
+          calendar_id: calendarId || null,
+        }),
+      });
+      const data = await r.json();
+      if (data.error) {
+        setEventCreateError(data.error);
+      } else {
+        setShowCreateEvent(false);
+        await loadEvents();
+      }
+    } catch {
+      setEventCreateError("Error de conexión con el backend");
+    }
+    setEventCreating(false);
+  }
 
   // Cargar clases
   useEffect(() => {
@@ -1180,7 +1237,14 @@ export default function Dashboard() {
       );
       case "upcoming": return (
         <div style={cardStyle} data-card={id} key="upcoming">
-          <div style={s.sectionLabel}>Próximos eventos</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={s.sectionLabel}>Próximos eventos</div>
+            <span onClick={openCreateEvent} title="Crear evento en Outlook" style={{
+              cursor: "pointer", fontSize: 14, color: "var(--accent)", lineHeight: 1,
+              padding: "2px 8px", borderRadius: 6, border: "0.5px solid rgba(200,169,110,0.3)",
+              background: "rgba(200,169,110,0.1)", marginBottom: 12,
+            }}>+ Evento</span>
+          </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
             {upcomingEvents.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
@@ -2605,6 +2669,73 @@ export default function Dashboard() {
                 }}>Cerrar</button>
               </div>
             )}
+          </div>
+        </>
+      )}
+
+      {/* ── CREAR EVENTO ── */}
+      {showCreateEvent && (
+        <>
+          <div onClick={() => !eventCreating && setShowCreateEvent(false)} style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)",
+            zIndex: 200, animation: "fadeInOverlay 0.2s ease",
+          }} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+            borderRadius: 16, padding: "28px 32px", zIndex: 201,
+            width: "min(420px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+            animation: "fadeInOverlay 0.2s ease",
+          }}>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", marginBottom: 18, textAlign: "center" }}>
+              Nuevo evento en Outlook
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <input type="text" placeholder="Título" value={eventForm.subject}
+                onChange={e => setEventForm(f => ({ ...f, subject: e.target.value }))}
+                style={inputStyle} />
+              <input type="date" value={eventForm.date}
+                onChange={e => setEventForm(f => ({ ...f, date: e.target.value }))}
+                style={inputStyle} />
+              <div style={{ display: "flex", gap: 10 }}>
+                <input type="time" value={eventForm.startTime}
+                  onChange={e => setEventForm(f => ({ ...f, startTime: e.target.value }))}
+                  style={{ ...inputStyle, flex: 1 }} />
+                <input type="time" value={eventForm.endTime}
+                  onChange={e => setEventForm(f => ({ ...f, endTime: e.target.value }))}
+                  style={{ ...inputStyle, flex: 1 }} />
+              </div>
+              <input type="text" placeholder="Ubicación (opcional)" value={eventForm.location}
+                onChange={e => setEventForm(f => ({ ...f, location: e.target.value }))}
+                style={inputStyle} />
+              <select value={eventForm.calendarId}
+                onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
+                style={inputStyle}>
+                <option value="">Calendario por defecto</option>
+                {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            {eventCreateError && (
+              <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{eventCreateError}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <button onClick={() => setShowCreateEvent(false)} disabled={eventCreating} style={{
+                flex: 1, padding: "10px 0", background: "transparent",
+                border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                color: "var(--muted)", fontSize: 13, cursor: "pointer",
+                fontFamily: "'DM Sans', sans-serif",
+              }}>Cancelar</button>
+              <button onClick={submitCreateEvent} disabled={eventCreating} style={{
+                flex: 1, padding: "10px 0",
+                background: "var(--accent)", border: "none", borderRadius: 8,
+                color: "#0e0f11", fontSize: 13, fontWeight: 600,
+                cursor: eventCreating ? "not-allowed" : "pointer",
+                fontFamily: "'DM Sans', sans-serif", opacity: eventCreating ? 0.6 : 1,
+                transition: "all 0.2s",
+              }}>{eventCreating ? "Creando..." : "Crear"}</button>
+            </div>
           </div>
         </>
       )}
