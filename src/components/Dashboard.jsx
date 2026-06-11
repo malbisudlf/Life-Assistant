@@ -6,7 +6,7 @@ const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/
 
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
-  if (res.status === 401) {
+  if (res.status === 401 && localStorage.getItem("la_token")) {
     localStorage.removeItem("la_token");
     window.location.reload();
     return new Promise(() => {});

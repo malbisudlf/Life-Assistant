@@ -1190,6 +1190,18 @@ async def health_ingest_simple(request: Request, token: str = ""):
             skipped.append(f"{s.metric}: fecha inválida")
             continue
 
+        extra = s.extra or {}
+        if s.metric == "sleep_analysis":
+            existing_sleep = requests.get(
+                f"{SUPABASE_URL}/rest/v1/health_metrics"
+                f"?metric_date=eq.{metric_date}&metric_name=eq.sleep_analysis&select=extra",
+                headers=supabase_headers(),
+            )
+            if existing_sleep.status_code < 300:
+                rows = existing_sleep.json()
+                if rows and (rows[0].get("extra") or {}).get("excluded"):
+                    extra = {**extra, "excluded": True}
+
         row_exists = False
         if s.metric in CUMULATIVE_METRICS:
             existing = requests.get(
@@ -1210,7 +1222,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json={"value": s.value, "unit": s.unit, "extra": s.extra or {}},
+                json={"value": s.value, "unit": s.unit, "extra": extra},
             )
         else:
             r = requests.post(
@@ -1221,7 +1233,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
                     "metric_name": s.metric,
                     "value": s.value,
                     "unit": s.unit,
-                    "extra": s.extra or {},
+                    "extra": extra,
                 },
             )
         if r.status_code == 409:
@@ -1229,7 +1241,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json={"value": s.value, "unit": s.unit, "extra": s.extra or {}},
+                json={"value": s.value, "unit": s.unit, "extra": extra},
             )
         if r.status_code < 300:
             upserted += 1
