@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-const API = "https://backend-tender-glow-160.fly.dev";
+const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/lovelace/tablet";
 
@@ -9,7 +9,7 @@ async function apiFetch(url, options = {}) {
   if (res.status === 401 && localStorage.getItem("la_token")) {
     localStorage.removeItem("la_token");
     window.location.reload();
-    return new Promise(() => {});
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
   return res;
 }
@@ -518,6 +518,9 @@ function TimeInput({ value, onChange }) {
 export default function Dashboard() {
   const [token]               = useState(() => localStorage.getItem("la_token") || "");
   const [now, setNow]         = useState(new Date());
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    try { return localStorage.getItem("la_notifications") === "true" && Notification.permission === "granted"; } catch { return false; }
+  });
   const [activeEvent, setActiveEvent] = useState(null);
   const [openIdea, setOpenIdea]       = useState(null);
   const [allEvents, setAllEvents]     = useState([]);
@@ -537,7 +540,7 @@ export default function Dashboard() {
   const [classesOpen, setClassesOpen] = useState(false);
   const [showCreateEvent, setShowCreateEvent] = useState(false);
   const [calendarsList, setCalendarsList]     = useState([]);
-  const [eventForm, setEventForm] = useState({ subject: "", date: "", startTime: "", endTime: "", location: "", calendarId: "" });
+  const [eventForm, setEventForm] = useState({ subject: "", date: "", startTime: "", endTime: "", location: "", calendarId: "", alud_url: "" });
   const [eventCreating, setEventCreating]     = useState(false);
   const [eventCreateError, setEventCreateError] = useState(null);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
@@ -665,7 +668,7 @@ export default function Dashboard() {
   function openCreateEvent() {
     const n = new Date();
     const today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "09:30", location: "", calendarId: "" });
+    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "09:30", location: "", calendarId: "", alud_url: "" });
     setEventCreateError(null);
     setShowCreateEvent(true);
     if (calendarsList.length === 0) {
@@ -679,7 +682,7 @@ export default function Dashboard() {
 
   async function submitCreateEvent() {
     if (eventCreating) return;
-    const { subject, date, startTime, endTime, location, calendarId } = eventForm;
+    const { subject, date, startTime, endTime, location, calendarId, alud_url } = eventForm;
     if (!subject.trim() || !date || !startTime || !endTime) {
       setEventCreateError("Completa título, fecha y horas");
       return;
@@ -688,16 +691,20 @@ export default function Dashboard() {
     setEventCreateError(null);
     const t = localStorage.getItem("la_token") || "";
     try {
+      const payload = {
+        subject: subject.trim(),
+        start: `${date}T${startTime}:00`,
+        end: `${date}T${endTime}:00`,
+        location: location.trim() || null,
+        calendar_id: calendarId || null,
+      };
+      if (alud_url && alud_url.trim()) {
+        payload.description = `alud_url: ${alud_url.trim()}`;
+      }
       const r = await apiFetch(`${API}/calendar/events`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          subject: subject.trim(),
-          start: `${date}T${startTime}:00`,
-          end: `${date}T${endTime}:00`,
-          location: location.trim() || null,
-          calendar_id: calendarId || null,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await r.json();
       if (data.error) {
@@ -774,6 +781,67 @@ export default function Dashboard() {
     const id = setInterval(loadAgent, 10000);
     return () => { mounted = false; clearInterval(id); };
   }, [token]);
+
+  // Notificaciones del navegador — solicitar permiso
+  useEffect(() => {
+    if (!token || !notificationsEnabled) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission().then(perm => {
+        if (perm === "granted") {
+          localStorage.setItem("la_notifications", "true");
+          setNotificationsEnabled(true);
+        } else {
+          localStorage.setItem("la_notifications", "false");
+          setNotificationsEnabled(false);
+        }
+      });
+    }
+  }, [token, notificationsEnabled]);
+
+  // Notificaciones — eventos próximos (15 min antes)
+  useEffect(() => {
+    if (!token || !notificationsEnabled) return;
+    const notified = new Set();
+
+    function checkUpcoming() {
+      const now = new Date();
+      const fifteenMin = new Date(now.getTime() + 15 * 60 * 1000);
+      for (const ev of allEvents) {
+        if (ev.isAllDay) continue;
+        const start = new Date(ev.start.replace("Z", "+00:00"));
+        if (start > now && start <= fifteenMin) {
+          const key = ev.id || ev.start;
+          if (!notified.has(key)) {
+            notified.add(key);
+            try {
+              new Notification("Life Assistant — Evento en 15 min", {
+                body: ev.title,
+                icon: "/favicon.svg",
+              });
+            } catch {}
+          }
+        }
+      }
+    }
+
+    // Chequear cada minuto
+    const id = setInterval(checkUpcoming, 60000);
+    checkUpcoming();
+    return () => clearInterval(id);
+  }, [token, notificationsEnabled, allEvents]);
+
+  // Notificaciones — job completado
+  useEffect(() => {
+    if (!token || !notificationsEnabled) return;
+    if (jobTerminal?.status === "done") {
+      try {
+        new Notification("Life Assistant — Job completado", {
+          body: `La entrega se ha completado correctamente.`,
+          icon: "/favicon.svg",
+        });
+      } catch {}
+    }
+  }, [jobTerminal?.status]);
 
   // Audio
   async function startRecording() {
@@ -1558,7 +1626,7 @@ export default function Dashboard() {
         const wWalkHrRaw    = findMetric(healthData, "walking_heart_rate_average");
         const wDaylightRaw  = findMetric(healthData, "time_in_daylight");
         const wRespRaw      = findMetric(healthData, "respiratory_rate");
-        const wWeightRaw    = findMetric(healthData, "weight");
+        const wWeightRaw    = findMetric(healthData, "weight_body_mass", "weight");
         const wBodyFatRaw   = findMetric(healthData, "body_fat_percentage");
         const wLeanMassRaw  = findMetric(healthData, "lean_body_mass");
         const wFlightsRaw   = findMetric(healthData, "flights_climbed");
@@ -2004,50 +2072,50 @@ export default function Dashboard() {
                   ))}
                 </div>
                 {/* ── Composición corporal ── */}
-                {(currentWeight != null || currentBodyFat != null) && (
+                {(currentWeight != null || currentBodyFat != null || currentLean != null) && (
                   <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
                     <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>Composición corporal</div>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                       {currentWeight != null && (() => {
-                        const arrow = weightDelta != null ? (weightDelta < -0.05 ? " ↓" : weightDelta > 0.05 ? " ↑" : " →") : "";
-                        const arrowColor = weightDelta != null ? (weightDelta < -0.05 ? "var(--green)" : weightDelta > 0.05 ? "#d4645a" : "var(--muted)") : "var(--muted)";
-                        const toGoalText = weightToGoal != null ? (Math.abs(weightToGoal) < 0.2 ? " · objetivo ✓" : weightToGoal > 0 ? ` · −${weightToGoal.toFixed(1)} kg para ${targetWeight} kg` : ` · ${Math.abs(weightToGoal).toFixed(1)} kg bajo objetivo`) : "";
+                        // Verde si se acerca al objetivo, rojo si se aleja
+                        const goingRight = weightToGoal != null && weightDelta != null
+                          ? (weightToGoal > 0 ? weightDelta < -0.05 : weightDelta > 0.05)
+                          : weightDelta != null && weightDelta < -0.05;
+                        const goingWrong = weightToGoal != null && weightDelta != null
+                          ? (weightToGoal > 0 ? weightDelta > 0.05 : weightDelta < -0.05)
+                          : weightDelta != null && weightDelta > 0.05;
+                        const arrow = weightDelta != null ? (weightDelta < -0.05 ? "↓" : weightDelta > 0.05 ? "↑" : "→") : "";
+                        const arrowColor = goingRight ? "var(--green)" : goingWrong ? "#d4645a" : "var(--muted)";
                         return (
                           <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, color: "var(--text)", letterSpacing: "-0.02em" }}>{currentWeight.toFixed(1)}</span>
-                            <span style={{ fontSize: 11, color: "var(--muted)" }}>kg</span>
-                            {weightDelta != null && <span style={{ fontSize: 12, color: arrowColor, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(weightDelta).toFixed(1)}</span>}
-                            {toGoalText && <span style={{ fontSize: 11, color: "var(--muted2)" }}>{toGoalText}</span>}
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentWeight.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>kg</span></span>
+                            {weightDelta != null && <span style={{ fontSize: 11, color: arrowColor, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(weightDelta).toFixed(1)}</span>}
+                          </div>
+                        );
+                      })()}
+                      {currentBodyFat != null && (() => {
+                        const arrow = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "↓" : bodyFatDelta > 0.1 ? "↑" : "→") : "";
+                        const color = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "var(--green)" : bodyFatDelta > 0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
+                        const goalText = targetBodyFat ? (currentBodyFat <= targetBodyFat ? " · obj ✓" : ` · obj ${targetBodyFat}%`) : "";
+                        return (
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentBodyFat.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>% grasa</span></span>
+                            {bodyFatDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(bodyFatDelta).toFixed(1)}</span>}
+                            {goalText && <span style={{ fontSize: 11, color: "var(--muted2)" }}>{goalText}</span>}
+                          </div>
+                        );
+                      })()}
+                      {currentLean != null && (() => {
+                        const arrow = leanDelta != null ? (leanDelta > 0.1 ? "↑" : leanDelta < -0.1 ? "↓" : "→") : "";
+                        const color = leanDelta != null ? (leanDelta > 0.1 ? "var(--green)" : leanDelta < -0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
+                        return (
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentLean.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>kg magra</span></span>
+                            {leanDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(leanDelta).toFixed(1)}</span>}
                           </div>
                         );
                       })()}
                     </div>
-                    {(currentBodyFat != null || currentLean != null) && (
-                      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                        {currentBodyFat != null && (() => {
-                          const arrow = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "↓" : bodyFatDelta > 0.1 ? "↑" : "→") : "";
-                          const color = bodyFatDelta != null ? (bodyFatDelta < -0.1 ? "var(--green)" : bodyFatDelta > 0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
-                          const goalText = targetBodyFat ? (currentBodyFat <= targetBodyFat ? " · objetivo ✓" : ` · obj. ${targetBodyFat}%`) : "";
-                          return (
-                            <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentBodyFat.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>% grasa</span></span>
-                              {bodyFatDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(bodyFatDelta).toFixed(1)}</span>}
-                              {goalText && <span style={{ fontSize: 11, color: "var(--muted2)" }}>{goalText}</span>}
-                            </div>
-                          );
-                        })()}
-                        {currentLean != null && (() => {
-                          const arrow = leanDelta != null ? (leanDelta > 0.1 ? "↑" : leanDelta < -0.1 ? "↓" : "→") : "";
-                          const color = leanDelta != null ? (leanDelta > 0.1 ? "var(--green)" : leanDelta < -0.1 ? "#d4645a" : "var(--muted)") : "var(--muted)";
-                          return (
-                            <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>{currentLean.toFixed(1)}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>kg masa magra</span></span>
-                              {leanDelta != null && <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>{arrow} {Math.abs(leanDelta).toFixed(1)}</span>}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    )}
                     {/* Barra de progreso hacia objetivo de peso */}
                     {weightToGoal != null && currentWeight != null && (() => {
                       const startWeight = Math.max(currentWeight, targetWeight + 5);
@@ -2055,7 +2123,7 @@ export default function Dashboard() {
                       return (
                         <div>
                           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", marginBottom: 4, fontFamily: "'DM Mono', monospace" }}>
-                            <span>progreso → {targetWeight} kg</span>
+                            <span>objetivo {targetWeight} kg</span>
                             <span>{pct.toFixed(0)}%</span>
                           </div>
                           <div style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
@@ -2902,6 +2970,13 @@ export default function Dashboard() {
                   {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </div>
+
+              <div>
+                <div style={fieldLabelStyle}>URL de Alud (opcional)</div>
+                <input type="url" placeholder="https://alud.deusto.es/mod/assign/view.php?id=XXXXX" value={eventForm.alud_url}
+                  onChange={e => setEventForm(f => ({ ...f, alud_url: e.target.value }))}
+                  style={inputStyle} />
+              </div>
             </div>
             {eventCreateError && (
               <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{eventCreateError}</div>
@@ -3121,8 +3196,58 @@ export default function Dashboard() {
               <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>Fase de definición: el dashboard prioriza bajar % grasa conservando masa magra.</div>
             </div>
 
+            {/* ── Notificaciones ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Notificaciones</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <button onClick={() => {
+                  if (Notification.permission === "default") {
+                    Notification.requestPermission().then(perm => {
+                      if (perm === "granted") {
+                        localStorage.setItem("la_notifications", "true");
+                        setNotificationsEnabled(true);
+                      } else {
+                        localStorage.setItem("la_notifications", "false");
+                        setNotificationsEnabled(false);
+                      }
+                    });
+                  } else if (Notification.permission === "granted") {
+                    localStorage.setItem("la_notifications", "false");
+                    setNotificationsEnabled(false);
+                  }
+                }} style={{
+                  padding: "6px 12px",
+                  background: notificationsEnabled ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                  border: `0.5px solid ${notificationsEnabled ? "var(--accent)" : "var(--border2)"}`,
+                  borderRadius: 6,
+                  color: notificationsEnabled ? "var(--accent)" : "var(--muted)",
+                  fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                }}>
+                  {notificationsEnabled ? "Activadas" : "Desactivadas"}
+                </button>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
+                </span>
+              </div>
+            </div>
+
+            {/* ── Logout ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <button onClick={() => {
+                localStorage.removeItem("la_token");
+                window.location.reload();
+              }} style={{
+                width: "100%", padding: "9px 0",
+                background: "rgba(212,100,90,0.1)", border: "0.5px solid rgba(212,100,90,0.3)",
+                borderRadius: 8, color: "#d4645a", fontSize: 13, cursor: "pointer",
+                fontFamily: "'DM Sans', sans-serif", fontWeight: 500,
+              }}>
+                Cerrar sesión
+              </button>
+            </div>
+
             <button onClick={() => setShowSettings(false)} style={{
-              marginTop: 18, width: "100%", padding: "9px 0",
+              marginTop: 12, width: "100%", padding: "9px 0",
               background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
               borderRadius: 8, color: "var(--muted)", fontSize: 13, cursor: "pointer",
               fontFamily: "'DM Sans', sans-serif",

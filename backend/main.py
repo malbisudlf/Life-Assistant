@@ -312,6 +312,7 @@ class CreateEventRequest(BaseModel):
     location: str | None = Field(None, max_length=300)
     is_all_day: bool = False
     calendar_id: str | None = Field(None, max_length=200)
+    description: str | None = Field(None, max_length=5000)
 
 
 @app.post("/calendar/events")
@@ -328,6 +329,8 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
     }
     if body.location:
         payload["location"] = {"displayName": body.location}
+    if body.description:
+        payload["body"] = {"content": body.description, "bodyType": "text"}
     url = (
         f"https://graph.microsoft.com/v1.0/me/calendars/{body.calendar_id}/events"
         if body.calendar_id
