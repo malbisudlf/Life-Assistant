@@ -1651,6 +1651,9 @@ export default function Dashboard() {
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
         const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+        const thisWeekExercise = wExerciseRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+        const weekExerciseMinutes = thisWeekExercise.reduce((sum, d) => sum + (d.value || 0), 0);
+        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0) + (weekExerciseMinutes >= 30 ? 1 : 0);
 
         // Días de entrenamiento planificados (configurables)
         const trainingDaysSet = new Set(trainingDays);
@@ -1673,7 +1676,6 @@ export default function Dashboard() {
         const avgDaylight = avg7(last7Daylight);
         const avgResp     = avg7(last7Resp);
         const avgFlights  = avg7(last7Flights);
-        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
         const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
         const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
         const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
