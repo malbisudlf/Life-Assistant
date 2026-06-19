@@ -344,6 +344,50 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
     return {"status": "ok", "id": data.get("id")}
 
 
+class UpdateEventRequest(BaseModel):
+    subject: str | None = Field(None, max_length=300)
+    start: str | None = None  # ISO 8601 sin zona, p.ej. "2026-06-10T18:00:00"
+    end: str | None = None
+    location: str | None = Field(None, max_length=300)
+    is_all_day: bool | None = None
+    description: str | None = Field(None, max_length=5000)
+
+
+@app.patch("/calendar/events/{event_id}")
+def update_event(
+    event_id: str,
+    body: UpdateEventRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    token = get_valid_token()
+    if not token:
+        return {"error": "No autenticado"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {}
+    if body.subject is not None:
+        payload["subject"] = body.subject
+    if body.start is not None:
+        payload["start"] = {"dateTime": body.start, "timeZone": "Europe/Madrid"}
+    if body.end is not None:
+        payload["end"] = {"dateTime": body.end, "timeZone": "Europe/Madrid"}
+    if body.is_all_day is not None:
+        payload["isAllDay"] = body.is_all_day
+    if body.location is not None:
+        payload["location"] = {"displayName": body.location}
+    if body.description is not None:
+        payload["body"] = {"content": body.description, "bodyType": "text"}
+    if not payload:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    r = requests.patch(
+        f"https://graph.microsoft.com/v1.0/me/events/{event_id}",
+        headers=headers,
+        json=payload,
+    )
+    if r.status_code not in (200, 201):
+        return {"error": "No se pudo actualizar el evento en Outlook", "detail": r.json()}
+    return {"status": "ok"}
+
+
 @app.get("/calendar/classes")
 def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     token = get_valid_token()

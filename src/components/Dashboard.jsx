@@ -543,6 +543,7 @@ export default function Dashboard() {
   const [eventForm, setEventForm] = useState({ subject: "", date: "", startTime: "", endTime: "", location: "", calendarId: "", alud_url: "" });
   const [eventCreating, setEventCreating]     = useState(false);
   const [eventCreateError, setEventCreateError] = useState(null);
+  const [editingEventId, setEditingEventId]   = useState(null);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [agentState, setAgentState]   = useState(null);
@@ -669,6 +670,7 @@ export default function Dashboard() {
     const n = new Date();
     const today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
     setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "09:30", location: "", calendarId: "", alud_url: "" });
+    setEditingEventId(null);
     setEventCreateError(null);
     setShowCreateEvent(true);
     if (calendarsList.length === 0) {
@@ -678,6 +680,31 @@ export default function Dashboard() {
         .then(data => { if (Array.isArray(data)) setCalendarsList(data); })
         .catch(() => {});
     }
+  }
+
+  function openEditEvent(ev) {
+    const pad = n => String(n).padStart(2, "0");
+    const sd = new Date(ev.start);
+    const ed = new Date(ev.end);
+    const date = `${sd.getFullYear()}-${pad(sd.getMonth() + 1)}-${pad(sd.getDate())}`;
+    setEventForm({
+      subject: ev.title || "",
+      date,
+      startTime: `${pad(sd.getHours())}:${pad(sd.getMinutes())}`,
+      endTime: `${pad(ed.getHours())}:${pad(ed.getMinutes())}`,
+      location: ev.location || "",
+      calendarId: "",
+      alud_url: ev.alud_url || "",
+    });
+    setEditingEventId(ev.id);
+    setEventCreateError(null);
+    setShowCreateEvent(true);
+  }
+
+  function closeEventModal() {
+    if (eventCreating) return;
+    setShowCreateEvent(false);
+    setEditingEventId(null);
   }
 
   async function submitCreateEvent() {
@@ -696,21 +723,31 @@ export default function Dashboard() {
         start: `${date}T${startTime}:00`,
         end: `${date}T${endTime}:00`,
         location: location.trim() || null,
-        calendar_id: calendarId || null,
       };
       if (alud_url && alud_url.trim()) {
         payload.description = `alud_url: ${alud_url.trim()}`;
       }
-      const r = await apiFetch(`${API}/calendar/events`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      let r;
+      if (editingEventId) {
+        r = await apiFetch(`${API}/calendar/events/${editingEventId}`, {
+          method: "PATCH",
+          headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        payload.calendar_id = calendarId || null;
+        r = await apiFetch(`${API}/calendar/events`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
       const data = await r.json();
       if (data.error) {
         setEventCreateError(data.error);
       } else {
         setShowCreateEvent(false);
+        setEditingEventId(null);
         await loadEvents();
       }
     } catch {
@@ -1457,7 +1494,12 @@ export default function Dashboard() {
                     <div style={s.eventDetailSub}>{displayActive.loc}</div>
                     <DepartureWidget ev={displayActive} />
                   </div>
-                  <div style={s.eventDetailTime}>{displayActive.time}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={s.eventDetailTime}>{displayActive.time}</div>
+                    <span onClick={() => openEditEvent(displayActive)} title="Editar evento" style={{
+                      cursor: "pointer", fontSize: 12, color: "var(--muted)", padding: "2px 4px",
+                    }}>✎</span>
+                  </div>
                 </div>
               )}
             </>
@@ -1486,6 +1528,9 @@ export default function Dashboard() {
                   {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
                   <DepartureWidget ev={ev} />
                 </div>
+                <span onClick={() => openEditEvent(ev)} title="Editar evento" style={{
+                  cursor: "pointer", fontSize: 12, color: "var(--muted)", padding: "2px 4px", flexShrink: 0,
+                }}>✎</span>
               </div>
             ))}
           </div>
@@ -2944,7 +2989,7 @@ export default function Dashboard() {
       {/* ── CREAR EVENTO ── */}
       {showCreateEvent && (
         <>
-          <div onClick={() => !eventCreating && setShowCreateEvent(false)} style={{
+          <div onClick={closeEventModal} style={{
             position: "fixed", inset: 0,
             background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)",
             zIndex: 200, animation: "fadeInOverlay 0.2s ease",
@@ -2958,7 +3003,7 @@ export default function Dashboard() {
             animation: "fadeInOverlay 0.2s ease",
           }}>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", marginBottom: 18, textAlign: "center" }}>
-              Nuevo evento en Outlook
+              {editingEventId ? "Editar evento de Outlook" : "Nuevo evento en Outlook"}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <input type="text" placeholder="Título" value={eventForm.subject}
@@ -2994,15 +3039,17 @@ export default function Dashboard() {
                   style={inputStyle} />
               </div>
 
-              <div>
-                <div style={fieldLabelStyle}>Calendario</div>
-                <select value={eventForm.calendarId}
-                  onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
-                  style={inputStyle}>
-                  <option value="">Por defecto</option>
-                  {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
+              {!editingEventId && (
+                <div>
+                  <div style={fieldLabelStyle}>Calendario</div>
+                  <select value={eventForm.calendarId}
+                    onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
+                    style={inputStyle}>
+                    <option value="">Por defecto</option>
+                    {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <div style={fieldLabelStyle}>URL de Alud (opcional)</div>
@@ -3015,7 +3062,7 @@ export default function Dashboard() {
               <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{eventCreateError}</div>
             )}
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-              <button onClick={() => setShowCreateEvent(false)} disabled={eventCreating} style={{
+              <button onClick={closeEventModal} disabled={eventCreating} style={{
                 flex: 1, padding: "10px 0", background: "transparent",
                 border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
                 color: "var(--muted)", fontSize: 13, cursor: "pointer",
@@ -3028,7 +3075,7 @@ export default function Dashboard() {
                 cursor: eventCreating ? "not-allowed" : "pointer",
                 fontFamily: "'DM Sans', sans-serif", opacity: eventCreating ? 0.6 : 1,
                 transition: "all 0.2s",
-              }}>{eventCreating ? "Creando..." : "Crear"}</button>
+              }}>{eventCreating ? (editingEventId ? "Guardando..." : "Creando...") : (editingEventId ? "Guardar" : "Crear")}</button>
             </div>
           </div>
         </>
