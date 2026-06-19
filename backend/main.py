@@ -13,6 +13,7 @@ import requests
 import httpx
 import os
 import json
+from urllib.parse import quote
 
 # Mapa de nombres de zona horaria de Windows a IANA
 WINDOWS_TZ_MAP = {
@@ -888,13 +889,13 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     sessions_per_payment = int(client["sessions_per_payment"])
 
     r_pay = requests.get(
-        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=date.desc&limit=1",
+        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
         headers=supabase_headers(),
     )
     payments = r_pay.json() if r_pay.status_code < 300 else []
     last_payment = payments[0] if payments else None
 
-    date_filter = f"&date=gt.{last_payment['date']}" if last_payment else ""
+    date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
     r_sess = requests.get(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}&order=date.desc",
         headers=supabase_headers(),
@@ -1364,13 +1365,13 @@ def add_training_payment(
 
     client_id = client["id"]
     r_pay = requests.get(
-        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=date.desc&limit=1",
+        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
         headers=supabase_headers(),
     )
     payments = r_pay.json() if r_pay.status_code < 300 else []
     last_payment = payments[0] if payments else None
 
-    date_filter = f"&date=gt.{last_payment['date']}" if last_payment else ""
+    date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
     r_sess = requests.get(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}",
         headers=supabase_headers(),

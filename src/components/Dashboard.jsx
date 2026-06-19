@@ -1900,6 +1900,32 @@ export default function Dashboard() {
           : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
         const scoreColor = score >= 80 ? "var(--green)" : score >= 65 ? "#6aaa82" : score >= 50 ? "var(--accent)" : "#d4645a";
 
+        // ── potencial: componente con más margen de mejora ──
+        const POTENTIAL_VERBS = {
+          "😴 Sueño": "Durmiendo más",
+          "💪 Entreno": isDaily ? "Entrenando hoy" : "Sumando otra sesión de entreno",
+          "🚶 Pasos": "Caminando más pasos",
+          "🔥 Energía": "Quemando más calorías activas",
+          "🧍 De pie": "Pasando más horas de pie",
+          "🪜 Pisos": "Subiendo más pisos",
+          "❤️ HRV": "Mejorando tu recuperación (HRV)",
+          "🫀 FC reposo": "Bajando tu FC en reposo",
+          "💓 Recuperación cardio": "Mejorando tu recuperación cardio",
+          "🏃 FC caminando": "Bajando tu FC al caminar",
+          "⚖️ % Grasa": "Bajando tu % de grasa",
+          "🌬️ Resp.": "Estabilizando tu frecuencia respiratoria",
+        };
+        const improvable = breakdown.filter(b => b.pts < b.max && b.detail !== "sin datos");
+        let potential = null;
+        if (improvable.length > 0) {
+          const top = improvable.reduce((a, b) => (b.max - b.pts) > (a.max - a.pts) ? b : a);
+          const gap = top.max - top.pts;
+          if (gap >= 2) {
+            const verb = POTENTIAL_VERBS[top.label] || `Mejorando ${top.label.replace(/^\S+\s/, "")}`;
+            potential = `${verb} podrías sumar hasta ${gap} pts más (ahora ${top.pts}/${top.max} en ${top.label.replace(/^\S+\s/, "")}).`;
+          }
+        }
+
         // ── insights ──
         const insights = [];
         if (sleepVal != null) {
@@ -2060,6 +2086,11 @@ export default function Dashboard() {
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos todavía — los insights aparecerán cuando haya varios días de datos.</div>
             ) : (
               <>
+                {potential && (
+                  <div style={{ textAlign: "center", fontSize: 13, color: "var(--muted)", marginBottom: 12 }}>
+                    💡 {potential}
+                  </div>
+                )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: rec ? 12 : 0 }}>
                   {insights.map((ins, i) => (
                     <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
