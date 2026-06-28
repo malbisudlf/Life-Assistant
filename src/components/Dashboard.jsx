@@ -218,11 +218,18 @@ function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
 function SleepStageTooltip({ label, color, tip, children }) {
   const [show, setShow] = useState(false);
   const [pos,  setPos]  = useState({ x: 0, y: 0 });
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!show) return;
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setShow(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [show]);
+
   return (
-    <span style={{ position: "relative", cursor: "default" }}
-      onMouseEnter={e => { setShow(true); setPos({ x: e.clientX, y: e.clientY }); }}
-      onMouseMove={e  => setPos({ x: e.clientX, y: e.clientY })}
-      onMouseLeave={() => setShow(false)}
+    <span ref={ref} style={{ position: "relative", cursor: "pointer" }}
+      onClick={e => { e.stopPropagation(); setShow(v => !v); setPos({ x: e.clientX, y: e.clientY }); }}
     >
       {children}
       {show && (
@@ -232,7 +239,7 @@ function SleepStageTooltip({ label, color, tip, children }) {
           borderLeft: `2px solid ${color}`,
           borderRadius: 8, padding: "10px 14px", zIndex: 2000,
           maxWidth: 260, fontSize: 12, color: "#c8c6c0", lineHeight: 1.6,
-          boxShadow: "0 8px 32px rgba(0,0,0,0.6)", pointerEvents: "none",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
         }}>
           <div style={{ fontWeight: 600, color: "#e8e6e0", marginBottom: 4 }}>{label}</div>
           {tip}
@@ -904,6 +911,20 @@ export default function Dashboard() {
       } catch {}
     }
   }, [jobTerminal?.status]);
+
+  useEffect(() => {
+    if (!scoreTooltip) return;
+    const handler = () => setScoreTooltip(false);
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, [scoreTooltip]);
+
+  useEffect(() => {
+    if (!sleepScoreTooltip) return;
+    const handler = () => setSleepScoreTooltip(false);
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, [sleepScoreTooltip]);
 
   // Audio
   async function startRecording() {
@@ -2154,10 +2175,9 @@ export default function Dashboard() {
               </div>
               {hasAnyData && (
                 <div style={{ position: "relative" }}
-                  onMouseEnter={() => setScoreTooltip(true)}
-                  onMouseLeave={() => setScoreTooltip(false)}
+                  onClick={e => { e.stopPropagation(); setScoreTooltip(v => !v); }}
                 >
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", cursor: "default", borderBottom: "1px dotted currentColor" }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", cursor: "pointer", borderBottom: "1px dotted currentColor" }}>
                     {score} — {scoreLabel}
                   </span>
                   {scoreTooltip && (
@@ -2412,10 +2432,9 @@ export default function Dashboard() {
               <span>Sueño</span>
               {score != null && (
                 <div style={{ position: "relative" }}
-                  onMouseEnter={() => setSleepScoreTooltip(true)}
-                  onMouseLeave={() => setSleepScoreTooltip(false)}
+                  onClick={e => { e.stopPropagation(); setSleepScoreTooltip(v => !v); }}
                 >
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none", cursor: "default", borderBottom: "1px dotted currentColor" }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none", cursor: "pointer", borderBottom: "1px dotted currentColor" }}>
                     {score} — {scoreLabel}
                   </span>
                   {sleepScoreTooltip && sleepBreakdown.length > 0 && (
