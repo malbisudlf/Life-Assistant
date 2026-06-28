@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
 const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
@@ -368,7 +368,9 @@ const GLOBAL_CSS = `
   }
 `;
 
-const DEFAULT_COLUMN_SPLIT = 0.65;
+const DEFAULT_SPLITS  = { 2: [0.65], 3: [0.33, 0.67] };
+const ACTIVE_COLUMNS  = { 2: ["left", "right"], 3: ["left", "center", "right"] };
+const COLUMN_LABELS   = { left: "izquierda", center: "centro", right: "derecha" };
 
 const DEFAULT_COLUMNS = {
   timeline:          "left",
@@ -589,13 +591,36 @@ export default function Dashboard() {
   const [dragPos, setDragPos]             = useState(null);
   const [dragOverId, setDragOverId]       = useState(null);
   const [dragOverSide, setDragOverSide]   = useState("after");
-  const [colSplit, setColSplit]           = useState(() => {
-    try { const s = localStorage.getItem("la_column_split"); return s ? parseFloat(s) : DEFAULT_COLUMN_SPLIT; }
-    catch { return DEFAULT_COLUMN_SPLIT; }
+  const [numColumns, setNumColumns]       = useState(() => {
+    try { const s = localStorage.getItem("la_num_columns"); return s ? parseInt(s, 10) : 2; }
+    catch { return 2; }
   });
-  const colSplitRef = useRef((() => {
-    try { const s = localStorage.getItem("la_column_split"); return s ? parseFloat(s) : DEFAULT_COLUMN_SPLIT; }
-    catch { return DEFAULT_COLUMN_SPLIT; }
+  const numColumnsRef = useRef((() => {
+    try { const s = localStorage.getItem("la_num_columns"); return s ? parseInt(s, 10) : 2; }
+    catch { return 2; }
+  })());
+  const [colSplits, setColSplits]         = useState(() => {
+    try {
+      const n = parseInt(localStorage.getItem("la_num_columns") || "2", 10);
+      const s = localStorage.getItem("la_col_splits");
+      if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length === n - 1) return p; }
+      // migrar clave antigua
+      const old = localStorage.getItem("la_column_split");
+      if (old && n === 2) return [parseFloat(old)];
+      return DEFAULT_SPLITS[n] || [0.65];
+    }
+    catch { return [0.65]; }
+  });
+  const colSplitsRef = useRef((() => {
+    try {
+      const n = parseInt(localStorage.getItem("la_num_columns") || "2", 10);
+      const s = localStorage.getItem("la_col_splits");
+      if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length === n - 1) return p; }
+      const old = localStorage.getItem("la_column_split");
+      if (old && n === 2) return [parseFloat(old)];
+      return DEFAULT_SPLITS[n] || [0.65];
+    }
+    catch { return [0.65]; }
   })());
   const [widgetConfig, setWidgetConfig]   = useState(() => {
     try {
@@ -628,7 +653,7 @@ export default function Dashboard() {
   const resizeDragRef    = useRef(null);
   const dragStateRef     = useRef(null);
 
-  useEffect(() => { colSplitRef.current = colSplit; }, [colSplit]);
+  useEffect(() => { colSplitsRef.current = colSplits; numColumnsRef.current = numColumns; }, [colSplits, numColumns]);
 
   // CSS global
   useEffect(() => {
@@ -1161,29 +1186,68 @@ export default function Dashboard() {
     saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, width: undefined, height: undefined } : w));
   }
 
-  function handleDividerDrag(e) {
+  function handleDividerDrag(e, idx) {
     e.preventDefault();
     const containerEl = document.getElementById("widget-grid-container");
     if (!containerEl) return;
-    const startX = e.clientX;
+    const startX    = e.clientX;
     const containerW = containerEl.offsetWidth;
-    const startSplit = colSplitRef.current;
+    const startSplit = colSplitsRef.current[idx];
+    const minVal = idx > 0 ? colSplitsRef.current[idx - 1] + 0.08 : 0.08;
+    const maxVal = idx < colSplitsRef.current.length - 1 ? colSplitsRef.current[idx + 1] - 0.08 : 0.92;
     document.body.classList.add("resizing");
 
     function onMouseMove(me) {
       const delta = (me.clientX - startX) / containerW;
-      const newSplit = Math.max(0.08, Math.min(0.92, startSplit + delta));
-      colSplitRef.current = newSplit;
-      setColSplit(newSplit);
+      const newVal = Math.max(minVal, Math.min(maxVal, startSplit + delta));
+      const updated = [...colSplitsRef.current];
+      updated[idx] = newVal;
+      colSplitsRef.current = updated;
+      setColSplits([...updated]);
     }
     function onMouseUp() {
       document.body.classList.remove("resizing");
-      localStorage.setItem("la_column_split", String(colSplitRef.current));
+      localStorage.setItem("la_col_splits", JSON.stringify(colSplitsRef.current));
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     }
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
+  }
+
+  function getColumnAtX(clientX, rect) {
+    const splits = colSplitsRef.current;
+    const cols   = ACTIVE_COLUMNS[numColumnsRef.current];
+    const relX   = (clientX - rect.left) / rect.width;
+    for (let i = 0; i < splits.length; i++) {
+      if (relX < splits[i]) return cols[i];
+    }
+    return cols[cols.length - 1];
+  }
+
+  function changeNumColumns(n) {
+    const newSplits = DEFAULT_SPLITS[n] || [0.65];
+    let newConfig;
+    if (n > numColumnsRef.current) {
+      // 2→3: widgets en "right" pasan a "center"; "right" queda vacía
+      newConfig = widgetConfig.map(w => {
+        const col = w.column || DEFAULT_COLUMNS[w.id] || "left";
+        return col === "right" ? { ...w, column: "center" } : w;
+      });
+    } else {
+      // 3→2: "center" y "right" pasan a "right"
+      newConfig = widgetConfig.map(w => {
+        const col = w.column || DEFAULT_COLUMNS[w.id] || "left";
+        return (col === "center" || col === "right") ? { ...w, column: "right" } : w;
+      });
+    }
+    setNumColumns(n);
+    numColumnsRef.current = n;
+    setColSplits(newSplits);
+    colSplitsRef.current = newSplits;
+    saveWidgetConfig(newConfig);
+    localStorage.setItem("la_num_columns", String(n));
+    localStorage.setItem("la_col_splits", JSON.stringify(newSplits));
   }
 
   function handleResizeMouseDown(e, widgetId) {
@@ -1301,8 +1365,7 @@ export default function Dashboard() {
       const containerEl = document.getElementById("widget-grid-container");
       if (!containerEl) return;
       const rect = containerEl.getBoundingClientRect();
-      const dividerX = rect.left + rect.width * colSplitRef.current;
-      const targetCol = me.clientX < dividerX ? "left" : "right";
+      const targetCol = getColumnAtX(me.clientX, rect);
 
       let targetBefore = null;
       const colWidgets = Array.from(document.querySelectorAll(`.widget-wrap[data-column="${targetCol}"]`));
@@ -2717,63 +2780,62 @@ export default function Dashboard() {
 
         {/* GRID */}
         {(() => {
-          const leftWidgets  = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "left");
-          const rightWidgets = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === "right");
+          const activeCols = ACTIVE_COLUMNS[numColumns];
+          const colWidgetMap = {};
+          for (const col of activeCols) {
+            colWidgetMap[col] = widgetConfig.filter(w => w.visible && (w.column || DEFAULT_COLUMNS[w.id] || "left") === col);
+          }
+
+          function getColFlex(i) {
+            const lo = i > 0 ? colSplits[i - 1] : 0;
+            const hi = i < colSplits.length ? colSplits[i] : 1;
+            return hi - lo;
+          }
+
           return (
             <div
               id="widget-grid-container"
               style={{ display: "flex", gap: 0, flex: 1, alignItems: "stretch", position: "relative" }}
             >
-              {/* LEFT COLUMN */}
-              <div
-                className="col-left"
-                style={{
-                  flex: `${colSplit} 1 0`,
-                  minWidth: 0,
-                  display: "flex", flexDirection: "column", gap: 16,
-                  outline: isEditMode && draggingId && dragOverId === "left" ? "2px solid rgba(200,169,110,0.5)" : "none",
-                  borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "left" ? 6 : 0,
-                  transition: "outline 0.1s, padding 0.1s",
-                }}
-              >
-                {leftWidgets.map(w => wrapResizable(w))}
-                {isEditMode && draggingId && dragOverId === "left" && dragOverSide === "__end__" && (
-                  <div style={{ height: 3, background: "var(--accent)", borderRadius: 2, opacity: 0.7 }} />
-                )}
-              </div>
+              {activeCols.map((col, i) => (
+                <React.Fragment key={col}>
+                  {/* COLUMN */}
+                  <div
+                    className={`col-${col}`}
+                    style={{
+                      flex: `${getColFlex(i)} 1 0`,
+                      minWidth: 0,
+                      display: "flex", flexDirection: "column", gap: 16,
+                      outline: isEditMode && draggingId && dragOverId === col ? "2px solid rgba(200,169,110,0.5)" : "none",
+                      borderRadius: 8, padding: isEditMode && draggingId && dragOverId === col ? 6 : 0,
+                      transition: "outline 0.1s, padding 0.1s",
+                    }}
+                  >
+                    {colWidgetMap[col].map(w => wrapResizable(w))}
+                    {isEditMode && draggingId && dragOverId === col && dragOverSide === "__end__" && (
+                      <div style={{ height: 3, background: "var(--accent)", borderRadius: 2, opacity: 0.7 }} />
+                    )}
+                  </div>
 
-              {/* DIVIDER */}
-              <div
-                className="col-divider"
-                onMouseDown={handleDividerDrag}
-                style={{
-                  width: 16, flexShrink: 0, cursor: "col-resize",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}
-              >
-                <div style={{ width: 3, height: 40, borderRadius: 2, background: "rgba(255,255,255,0.08)", transition: "background 0.15s" }}
-                  onMouseEnter={e => e.target.style.background = "rgba(200,169,110,0.4)"}
-                  onMouseLeave={e => e.target.style.background = "rgba(255,255,255,0.08)"}
-                />
-              </div>
-
-              {/* RIGHT COLUMN */}
-              <div
-                className="col-right"
-                style={{
-                  flex: `${1 - colSplit} 1 0`,
-                  minWidth: 0,
-                  display: "flex", flexDirection: "column", gap: 16,
-                  outline: isEditMode && draggingId && dragOverId === "right" ? "2px solid rgba(200,169,110,0.5)" : "none",
-                  borderRadius: 8, padding: isEditMode && draggingId && dragOverId === "right" ? 6 : 0,
-                  transition: "outline 0.1s, padding 0.1s",
-                }}
-              >
-                {rightWidgets.map(w => wrapResizable(w))}
-                {isEditMode && draggingId && dragOverId === "right" && dragOverSide === "__end__" && (
-                  <div style={{ height: 3, background: "var(--accent)", borderRadius: 2, opacity: 0.7 }} />
-                )}
-              </div>
+                  {/* DIVIDER (entre columnas, no tras la última) */}
+                  {i < activeCols.length - 1 && (
+                    <div
+                      key={`divider-${i}`}
+                      className="col-divider"
+                      onMouseDown={ev => handleDividerDrag(ev, i)}
+                      style={{
+                        width: 16, flexShrink: 0, cursor: "col-resize",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}
+                    >
+                      <div style={{ width: 3, height: 40, borderRadius: 2, background: "rgba(255,255,255,0.08)", transition: "background 0.15s" }}
+                        onMouseEnter={e => e.target.style.background = "rgba(200,169,110,0.4)"}
+                        onMouseLeave={e => e.target.style.background = "rgba(255,255,255,0.08)"}
+                      />
+                    </div>
+                  )}
+                </React.Fragment>
+              ))}
 
               {/* SNAP ZONE OVERLAY (edit mode drag) */}
               {isEditMode && draggingId && (
@@ -2781,22 +2843,27 @@ export default function Dashboard() {
                   position: "absolute", inset: 0, display: "flex",
                   pointerEvents: "none", zIndex: 50, borderRadius: 8, overflow: "hidden",
                 }}>
-                  <div style={{
-                    flex: colSplit, background: dragOverId === "left" ? "rgba(200,169,110,0.08)" : "transparent",
-                    border: dragOverId === "left" ? "2px solid rgba(200,169,110,0.4)" : "2px solid transparent",
-                    borderRadius: "8px 0 0 8px", transition: "all 0.12s",
-                    display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 12,
-                  }}>
-                    {dragOverId === "left" && <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "'DM Mono'", opacity: 0.8 }}>← columna izquierda</span>}
-                  </div>
-                  <div style={{
-                    flex: 1 - colSplit, background: dragOverId === "right" ? "rgba(200,169,110,0.08)" : "transparent",
-                    border: dragOverId === "right" ? "2px solid rgba(200,169,110,0.4)" : "2px solid transparent",
-                    borderRadius: "0 8px 8px 0", transition: "all 0.12s",
-                    display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 12,
-                  }}>
-                    {dragOverId === "right" && <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "'DM Mono'", opacity: 0.8 }}>columna derecha →</span>}
-                  </div>
+                  {activeCols.map((col, i) => {
+                    const isOver = dragOverId === col;
+                    const isFirst = i === 0;
+                    const isLast  = i === activeCols.length - 1;
+                    return (
+                      <div key={col} style={{
+                        flex: getColFlex(i),
+                        background: isOver ? "rgba(200,169,110,0.08)" : "transparent",
+                        border: isOver ? "2px solid rgba(200,169,110,0.4)" : "2px solid transparent",
+                        borderRadius: isFirst ? "8px 0 0 8px" : isLast ? "0 8px 8px 0" : 0,
+                        transition: "all 0.12s",
+                        display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 12,
+                      }}>
+                        {isOver && (
+                          <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "'DM Mono'", opacity: 0.8 }}>
+                            {COLUMN_LABELS[col]}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3145,6 +3212,21 @@ export default function Dashboard() {
             maxHeight: "90vh", overflowY: "auto",
           }}>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>Widgets</div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Columnas</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[2, 3].map(n => (
+                  <button key={n} onClick={() => changeNumColumns(n)} style={{
+                    flex: 1, padding: "6px 0",
+                    background: numColumns === n ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                    border: `0.5px solid ${numColumns === n ? "var(--accent)" : "var(--border2)"}`,
+                    borderRadius: 6, color: numColumns === n ? "var(--accent)" : "var(--muted)",
+                    fontSize: 12, fontWeight: numColumns === n ? 600 : 400,
+                    cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                  }}>{n}</button>
+                ))}
+              </div>
+            </div>
             <button onClick={() => { setShowSettings(false); setIsEditMode(true); }} style={{
               width: "100%", marginBottom: 14, padding: "9px 0",
               background: "rgba(200,169,110,0.1)", border: "0.5px solid rgba(200,169,110,0.35)",
