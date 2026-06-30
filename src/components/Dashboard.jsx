@@ -1780,9 +1780,7 @@ export default function Dashboard() {
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
         const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
-        const thisWeekExercise = wExerciseRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
-        const weekExerciseMinutes = thisWeekExercise.reduce((sum, d) => sum + (d.value || 0), 0);
-        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0) + (weekExerciseMinutes >= 30 ? 1 : 0);
+        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
 
         // Días de entrenamiento planificados (configurables)
         const trainingDaysSet = new Set(trainingDays);
