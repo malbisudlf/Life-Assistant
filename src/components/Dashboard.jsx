@@ -586,6 +586,9 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
+  const [orientation, setOrientation]     = useState(() =>
+    (typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches) ? "portrait" : "landscape");
   const [showTrainingSettings, setShowTrainingSettings] = useState(false);
   const [trainingSettingsPrice, setTrainingSettingsPrice] = useState("");
   const [trainingSettingsSpp, setTrainingSettingsSpp]     = useState("");
@@ -683,6 +686,23 @@ export default function Dashboard() {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, []);
+
+  // Detectar orientación del dispositivo (para el modo simplificado)
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const handler = e => setOrientation(e.matches ? "portrait" : "landscape");
+    mq.addEventListener?.("change", handler);
+    return () => mq.removeEventListener?.("change", handler);
+  }, []);
+
+  function toggleSimpleMode() {
+    setSimpleMode(v => {
+      const nv = !v;
+      localStorage.setItem("la_simple_mode", nv ? "1" : "0");
+      if (nv) setIsEditMode(false);
+      return nv;
+    });
+  }
 
   // Cargar eventos
   function loadEvents() {
@@ -2767,6 +2787,54 @@ export default function Dashboard() {
     );
   }
 
+  // ── MODO SIMPLIFICADO (móvil) ──────────────────────────────────
+  // Vertical: foco en registrar rápido (entrenamiento + lo siguiente).
+  // Horizontal: vistazo general en dos columnas.
+  function renderSimple() {
+    const portrait = orientation === "portrait";
+
+    // Tarjeta compacta "Lo siguiente" (próximo evento de hoy o de la semana)
+    const nextEv = todayEvents.find(e => !e.past) || upcomingEvents[0];
+    const nextCard = (
+      <div style={s.card} key="simple-next">
+        <div style={s.sectionLabel}>Lo siguiente</div>
+        {nextEv ? (
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, color: "var(--accent)", lineHeight: 1 }}>{nextEv.time}</span>
+            <span style={{ fontSize: 15, color: "var(--text)" }}>{nextEv.title}</span>
+            {nextEv.loc && <span style={{ fontSize: 13, color: "var(--muted)" }}>· {nextEv.loc}</span>}
+          </div>
+        ) : (
+          <div style={{ color: "var(--muted)", fontSize: 13 }}>Nada próximamente</div>
+        )}
+      </div>
+    );
+
+    if (portrait) {
+      return (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+          {renderWidget("training")}
+          {nextCard}
+          {entregas.length > 0 && renderWidget("entregas")}
+        </div>
+      );
+    }
+
+    // Horizontal: dos columnas
+    return (
+      <div style={{ flex: 1, display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
+          {renderWidget("training")}
+          {entregas.length > 0 && renderWidget("entregas")}
+        </div>
+        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
+          {renderWidget("timeline")}
+          {renderWidget("upcoming")}
+        </div>
+      </div>
+    );
+  }
+
   if (!token) return <LoginScreen onLogin={() => window.location.reload()} />;
 
   return (
@@ -2780,23 +2848,27 @@ export default function Dashboard() {
             <div style={s.clock} className="clock">{hh}:{mm}</div>
             <div style={s.date}>{dateStr}</div>
           </div>
-          <div style={s.greeting} className="header-greeting">
-            {greeting}
-            <strong style={s.greetingStrong}>Mikel</strong>
-            <button onClick={() => {
-              setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
-              setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
-              setShowSettings(true);
-            }} style={{
-              marginLeft: 14, background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
-              borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
-              padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
-            }} title="Ajustes de widgets">⚙</button>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
+            <div style={s.greeting} className="header-greeting">
+              {greeting}
+              <strong style={s.greetingStrong}>Mikel</strong>
+            </div>
+            <div className="header-controls" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => {
+                setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
+                setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
+                setShowSettings(true);
+              }} style={{
+                background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
+                borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
+                padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
+              }} title="Ajustes de widgets">⚙</button>
+            </div>
           </div>
         </div>
 
-        {/* GRID */}
-        {(() => {
+        {/* CONTENIDO: modo simplificado o grid completo */}
+        {simpleMode ? renderSimple() : (() => {
           const activeCols = ACTIVE_COLUMNS[numColumns];
           const colWidgetMap = {};
           for (const col of activeCols) {
@@ -3228,6 +3300,27 @@ export default function Dashboard() {
             width: "min(340px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
             maxHeight: "90vh", overflowY: "auto",
           }}>
+            <div style={{ marginBottom: 18, paddingBottom: 16, borderBottom: "0.5px solid var(--border)" }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Modo de vista</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["full", "Completo"], ["simple", "Simple"]].map(([mode, label]) => {
+                  const active = mode === "simple" ? simpleMode : !simpleMode;
+                  return (
+                    <button key={mode} onClick={() => { if (active) return; toggleSimpleMode(); }} style={{
+                      flex: 1, padding: "6px 0",
+                      background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                      border: `0.5px solid ${active ? "var(--accent)" : "var(--border2)"}`,
+                      borderRadius: 6, color: active ? "var(--accent)" : "var(--muted)",
+                      fontSize: 12, fontWeight: active ? 600 : 400,
+                      cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                    }}>{label}</button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 6, lineHeight: 1.4 }}>
+                El modo simple se adapta a la orientación del móvil (vertical / horizontal).
+              </div>
+            </div>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>Widgets</div>
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Columnas</div>
