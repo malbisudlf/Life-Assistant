@@ -22,6 +22,7 @@ agent/.env
 # Datos personales
 *.xlsx
 *.xls
+*.zip
 import_training.py
 supabase_training_schema.sql
 supabase_health_schema.sql

@@ -13,7 +13,14 @@ import requests
 import httpx
 import os
 import json
+import time
+import hmac
+import logging
+import threading
 from urllib.parse import quote
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("life-assistant")
 
 # Mapa de nombres de zona horaria de Windows a IANA
 WINDOWS_TZ_MAP = {
@@ -67,8 +74,15 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "changeme")
-SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret")
+# Secretos obligatorios: la app NO debe arrancar con valores por defecto conocidos.
+# En un repo público, un fallback como "fallback-secret" permitiría forjar JWT válidos
+# si la variable no estuviera configurada en producción.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY no configurada — define la variable de entorno antes de arrancar")
+if not DASHBOARD_PASSWORD:
+    raise RuntimeError("DASHBOARD_PASSWORD no configurada — define la variable de entorno antes de arrancar")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 30
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
@@ -92,6 +106,74 @@ def supabase_headers():
     }
 
 bearer_scheme = HTTPBearer()
+
+# ── Seguridad: rate limiting del login ────────────────────────────────────────
+# Limitador en memoria por IP. Suficiente para un backend de una sola máquina que
+# escala a cero; se resetea en cold start, lo cual es aceptable para este caso.
+LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
+_login_attempts: dict = {}
+_login_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate(ip: str):
+    now = time.time()
+    with _login_lock:
+        attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
+        _login_attempts[ip] = attempts
+        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+            retry = int(LOGIN_WINDOW_SECONDS - (now - attempts[0]))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Demasiados intentos. Reintenta en {retry}s",
+                headers={"Retry-After": str(max(retry, 1))},
+            )
+
+
+def _register_login_failure(ip: str):
+    with _login_lock:
+        _login_attempts.setdefault(ip, []).append(time.time())
+
+
+def _reset_login_attempts(ip: str):
+    with _login_lock:
+        _login_attempts.pop(ip, None)
+
+
+def _extract_service_token(request: Request, token_qs: str = "") -> str:
+    """Token de servicio (HA / health): preferir header para que no quede en logs de acceso.
+
+    Orden: cabecera X-Auth-Token → Authorization: Bearer → query string (compat. con
+    integraciones ya desplegadas de Home Assistant y iOS Shortcuts).
+    """
+    hdr = request.headers.get("x-auth-token")
+    if hdr:
+        return hdr
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return token_qs
+
+
+def _token_ok(provided: str, expected: str) -> bool:
+    """Comparación en tiempo constante; falsa si el token esperado no está configurado."""
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+def _supabase_error(r) -> HTTPException:
+    """Loguea el detalle real de Supabase en el servidor y devuelve un error genérico al cliente."""
+    logger.error("Error de almacenamiento (%s): %s", r.status_code, (r.text or "")[:500])
+    return HTTPException(status_code=502, detail="Error en el almacenamiento de datos")
+
 
 class LoginRequest(BaseModel):
     password: str = Field(max_length=200)
@@ -220,9 +302,13 @@ def _store_result(result: dict):
     })
 
 @app.post("/auth/password")
-def login_password(body: LoginRequest):
-    if body.password != DASHBOARD_PASSWORD:
+def login_password(body: LoginRequest, request: Request):
+    ip = _client_ip(request)
+    _check_login_rate(ip)
+    if not hmac.compare_digest(body.password, DASHBOARD_PASSWORD):
+        _register_login_failure(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
+    _reset_login_attempts(ip)
     return {"token": create_token()}
 
 @app.get("/auth/login")
@@ -339,7 +425,8 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
     )
     r = requests.post(url, headers=headers, json=payload)
     if r.status_code not in (200, 201):
-        return {"error": "No se pudo crear el evento en Outlook", "detail": r.json()}
+        logger.error("Graph create_event %s: %s", r.status_code, (r.text or "")[:500])
+        return {"error": "No se pudo crear el evento en Outlook"}
     data = r.json()
     return {"status": "ok", "id": data.get("id")}
 
@@ -384,7 +471,8 @@ def update_event(
         json=payload,
     )
     if r.status_code not in (200, 201):
-        return {"error": "No se pudo actualizar el evento en Outlook", "detail": r.json()}
+        logger.error("Graph update_event %s: %s", r.status_code, (r.text or "")[:500])
+        return {"error": "No se pudo actualizar el evento en Outlook"}
     return {"status": "ok"}
 
 
@@ -419,7 +507,7 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     for event in data2.get("value", []):
         raw_start = event.get("start", {})
         raw_end = event.get("end", {})
-        print(f"[CLASES DEBUG] subject={event.get('subject')} tz={raw_start.get('timeZone')} start_raw={raw_start.get('dateTime')}")
+        logger.debug("[CLASES] subject=%s tz=%s start_raw=%s", event.get("subject"), raw_start.get("timeZone"), raw_start.get("dateTime"))
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
@@ -428,7 +516,7 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
             "location": event.get("location", {}).get("displayName"),
             "isAllDay": event.get("isAllDay"),
         })
-    print(f"[CLASES DEBUG] Total eventos devueltos: {len(events)}")
+    logger.debug("[CLASES] Total eventos devueltos: %d", len(events))
     return {"events": events}
 
 
@@ -616,9 +704,9 @@ def create_idea_from_text(
 # ── HOME ASSISTANT INTEGRATION ────────────────────────────────────────────────
 
 @app.get("/ha/events/soon")
-def ha_events_soon(token: str = ""):
+def ha_events_soon(request: Request, token: str = ""):
     """Devuelve el primer evento que empieza en ~15 min. HA lo consulta cada minuto."""
-    if not HA_POLL_TOKEN or token != HA_POLL_TOKEN:
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     graph_token = get_valid_token()
@@ -661,9 +749,9 @@ def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     return {"ok": True}
 
 @app.get("/ha/wol-pending")
-def ha_wol_pending(token: str = ""):
+def ha_wol_pending(request: Request, token: str = ""):
     """HA sondea este endpoint cada 30s. Si hay WOL pendiente, devuelve pending=true y lo limpia."""
-    if token != HA_POLL_TOKEN or not HA_POLL_TOKEN:
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
     global _wol_pending
     pending = _wol_pending
@@ -679,7 +767,7 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
         json=payload,
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     data = r.json()
     if data:
         return {"ok": True, "job": data[0]}
@@ -703,7 +791,7 @@ def get_job_by_id(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     return {"ok": True, "job": rows[0] if rows else None}
 
@@ -721,7 +809,7 @@ def claim_job(
         json={"status": "claimed", "claimed_by": worker, "claimed_at": now_iso},
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     if len(rows) == 0:
         return {"ok": False, "claimed": False, "reason": "already_claimed"}
@@ -740,7 +828,7 @@ def start_job(
         json={"status": "running"},
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     if len(rows) == 0:
         raise HTTPException(status_code=409, detail="El job no está en estado claimed para este worker")
@@ -761,7 +849,7 @@ def finish_job(
         json={"status": body.status},
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     if len(rows) == 0:
         raise HTTPException(status_code=409, detail="El job no está en estado running para este worker")
@@ -785,7 +873,7 @@ def create_job_event(
         json=payload,
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     return {"ok": True, "event": rows[0] if rows else payload}
 
@@ -799,7 +887,7 @@ def get_job_events(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     return {"ok": True, "events": r.json()}
 
 @app.post("/jobs/{job_id}/retry")
@@ -814,7 +902,7 @@ def retry_job(
         headers=supabase_headers(),
     )
     if get_r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=get_r.text)
+        raise _supabase_error(get_r)
     rows = get_r.json()
     if len(rows) == 0:
         raise HTTPException(status_code=409, detail="Job no elegible para retry")
@@ -828,7 +916,7 @@ def retry_job(
         json={"status": "pending", "attempt": attempt, "claimed_by": None, "claimed_at": None},
     )
     if patch_r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=patch_r.text)
+        raise _supabase_error(patch_r)
     upd = patch_r.json()
     if len(upd) == 0:
         raise HTTPException(status_code=409, detail="Conflicto al aplicar retry")
@@ -854,7 +942,7 @@ def agent_heartbeat(body: AgentHeartbeatRequest, credentials: HTTPAuthorizationC
         json=payload,
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     return {"ok": True, "agent": rows[0] if rows else payload}
 
@@ -869,7 +957,7 @@ def get_agent(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     if len(rows) == 0:
         return {"exists": False, "status": "offline", "offline": True}
@@ -979,7 +1067,7 @@ def add_training_session(
         json={"client_id": client["id"], "date": body.date, "duration_hours": body.duration_hours},
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     return {"ok": True, "session": r.json()[0]}
 
 class TrainingClientUpdate(BaseModel):
@@ -1007,7 +1095,7 @@ def update_training_client(
         json=patch,
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     return {"ok": True, "client": r.json()[0]}
 
 @app.delete("/training/sessions/{session_id}")
@@ -1026,7 +1114,7 @@ def delete_training_session(
 @app.post("/health/ingest")
 async def health_ingest(request: Request, token: str = ""):
     """Health Auto Export envía aquí los datos periódicamente."""
-    if not HEALTH_INGEST_TOKEN or token != HEALTH_INGEST_TOKEN:
+    if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     body = await request.json()
@@ -1188,7 +1276,7 @@ class SimpleHealthSample(BaseModel):
 @app.post("/health/ingest/simple")
 async def health_ingest_simple(request: Request, token: str = ""):
     """Endpoint simplificado para iOS Shortcuts. Acepta array plano o dict único."""
-    if not HEALTH_INGEST_TOKEN or token != HEALTH_INGEST_TOKEN:
+    if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     body = await request.json()
@@ -1311,7 +1399,7 @@ def toggle_sleep_exclude(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=r.text)
+        raise _supabase_error(r)
     rows = r.json()
     if not rows:
         raise HTTPException(status_code=404, detail="No hay datos de sueño para esa fecha")
@@ -1324,7 +1412,7 @@ def toggle_sleep_exclude(
         json={"extra": extra},
     )
     if patch.status_code >= 300:
-        raise HTTPException(status_code=500, detail=patch.text)
+        raise _supabase_error(patch)
     return {"date": date, "excluded": extra["excluded"]}
 
 
@@ -1343,7 +1431,7 @@ def get_health_metrics(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=r.text)
+        raise _supabase_error(r)
 
     grouped: dict = {}
     last_sync: str | None = None
@@ -1382,7 +1470,7 @@ def get_health_latest(
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=r.text)
+        raise _supabase_error(r)
 
     latest: dict = {}
     for row in r.json():
@@ -1429,5 +1517,5 @@ def add_training_payment(
         json={"client_id": client_id, "date": body.date, "amount": amount},
     )
     if r.status_code >= 300:
-        raise HTTPException(status_code=400, detail=r.text)
+        raise _supabase_error(r)
     return {"ok": True, "payment": r.json()[0]}

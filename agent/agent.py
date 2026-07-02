@@ -18,8 +18,10 @@ import os
 import sys
 import time
 import uuid
+import random
 import socket
 import logging
+import tempfile
 import subprocess
 import requests
 import pyautogui
@@ -42,7 +44,11 @@ HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 OKTA_TIMEOUT       = 120   # segundos máx esperando aprobación push Okta
 CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
-EDGE_DEBUG_PORT    = 9222  # puerto CDP para conectarse a Edge
+# Puerto CDP aleatorio por ejecución en vez de un 9222 fijo y predecible.
+# Chromium solo escucha el puerto de depuración en loopback (127.0.0.1), así que el
+# acceso queda restringido a procesos de la propia máquina; randomizarlo reduce la
+# ventana de exposición frente a algo que sondee el puerto conocido.
+EDGE_DEBUG_PORT    = random.randint(49200, 49900)
 
 _EDGE_PATHS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -289,10 +295,27 @@ if ($proc) {
 def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
 
-    # Copiar al portapapeles ANTES de abrir Claude, para no perder el foco
+    # Copiar al portapapeles ANTES de abrir Claude, para no perder el foco.
+    # El enunciado proviene de una página web externa (Alud): NUNCA se interpola en el
+    # comando de PowerShell. Se escribe a un fichero temporal (ruta generada por el SO,
+    # sin contenido no confiable) y Set-Clipboard lo lee de ahí → sin inyección posible.
     log.info("Copiando instrucción al portapapeles...")
-    ps_cmd = ["powershell", "-Command", f"Set-Clipboard -Value @'\n{instruccion}\n'@"]
-    subprocess.run(ps_cmd, check=True)
+    clip_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as tf:
+            tf.write(instruccion)
+            clip_path = tf.name
+        ps_cmd = [
+            "powershell", "-NoProfile", "-Command",
+            f"Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 -LiteralPath '{clip_path}')",
+        ]
+        subprocess.run(ps_cmd, check=True)
+    finally:
+        if clip_path:
+            try:
+                os.remove(clip_path)
+            except OSError:
+                pass
     time.sleep(0.3)
 
     log.info("Abriendo Claude Desktop...")
