@@ -68,6 +68,10 @@ function LoginScreen({ onLogin }) {
             onChange={e => setPwd(e.target.value)}
             placeholder="Contraseña"
             autoFocus
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="current-password"
+            enterKeyHint="go"
             style={{
               width: "100%", padding: "10px 14px", background: "#1e1f22",
               border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
@@ -324,7 +328,7 @@ const GLOBAL_CSS = `
   :root {
     --bg: #0e0f11; --surface: #161719; --surface2: #1e1f22;
     --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
-    --text: #e8e6e0; --muted: #7a7870; --muted2: #5a5850;
+    --text: #e8e6e0; --muted: #928f86; --muted2: #6e6b62;
     --accent: #c8a96e; --accent2: #8bb4d4; --green: #6aaa82;
     --node-line: rgba(200,169,110,0.3);
   }
@@ -340,6 +344,8 @@ const GLOBAL_CSS = `
   @keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes fadeInOverlay { from { opacity: 0; } to { opacity: 1; } }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes shimmer { 0% { background-position: -450px 0; } 100% { background-position: 450px 0; } }
+  .la-skel { background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%); background-size: 900px 100%; animation: shimmer 1.4s infinite linear; border-radius: 8px; }
   @keyframes nodeGlow { 0%, 100% { box-shadow: 0 0 8px rgba(200,169,110,0.4); } 50% { box-shadow: 0 0 16px rgba(200,169,110,0.7); } }
   body.resizing { cursor: se-resize !important; user-select: none !important; }
   body.dragging-widget { cursor: grabbing !important; user-select: none !important; }
@@ -534,6 +540,7 @@ export default function Dashboard() {
   const [openIdea, setOpenIdea]       = useState(null);
   const [allEvents, setAllEvents]     = useState([]);
   const [loading, setLoading]         = useState(true);
+  const [slowBoot, setSlowBoot]       = useState(false);
   const [authNeeded, setAuthNeeded]   = useState(false);
   const [ideas, setIdeas]             = useState([]);
   const [recording, setRecording]     = useState(false);
@@ -587,6 +594,7 @@ export default function Dashboard() {
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
+  const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
   const [orientation, setOrientation]     = useState(() =>
     (typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches) ? "portrait" : "landscape");
   const [showTrainingSettings, setShowTrainingSettings] = useState(false);
@@ -717,6 +725,14 @@ export default function Dashboard() {
       .catch(() => { setAuthNeeded(true); setLoading(false); });
   }
   useEffect(() => { loadEvents(); }, []);
+
+  // El backend (Fly.io) escala a cero: el primer arranque tarda ~10-15s. Si la carga
+  // inicial se demora, avisamos de que se está "despertando el servidor".
+  useEffect(() => {
+    if (!loading) { setSlowBoot(false); return; }
+    const id = setTimeout(() => setSlowBoot(true), 4000);
+    return () => clearTimeout(id);
+  }, [loading]);
 
   function openCreateEvent() {
     const n = new Date();
@@ -2299,14 +2315,31 @@ export default function Dashboard() {
                     {weightToGoal != null && currentWeight != null && (() => {
                       const startWeight = Math.max(currentWeight, targetWeight + 5);
                       const pct = Math.min(100, Math.max(0, ((startWeight - currentWeight) / (startWeight - targetWeight)) * 100));
+                      const remaining = Math.abs(weightToGoal);
+                      const reached = pct >= 100 || remaining < 0.1;
+                      // ¿La tendencia reciente acerca o aleja del objetivo?
+                      const approaching = weightDelta != null && Math.abs(weightDelta) > 0.05
+                        ? (weightToGoal > 0 ? weightDelta < 0 : weightDelta > 0)
+                        : null;
+                      const barColor = reached ? "var(--green)"
+                        : approaching === true  ? "var(--green)"
+                        : approaching === false ? "#d4645a"
+                        : "var(--accent)";
+                      const trendLabel = reached ? "objetivo alcanzado"
+                        : approaching === true  ? "acercándote"
+                        : approaching === false ? "alejándote"
+                        : null;
                       return (
                         <div>
                           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", marginBottom: 4, fontFamily: "'DM Mono', monospace" }}>
                             <span>objetivo {targetWeight} kg</span>
-                            <span>{pct.toFixed(0)}%</span>
+                            <span style={{ color: barColor }}>
+                              {reached ? "✓ objetivo" : `faltan ${remaining.toFixed(1)} kg`}
+                              {trendLabel && !reached && <span style={{ color: "var(--muted2)" }}> · {trendLabel}</span>}
+                            </span>
                           </div>
                           <div style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
-                            <div style={{ height: "100%", width: `${pct}%`, background: pct >= 100 ? "var(--green)" : "var(--accent)", borderRadius: 2, transition: "width 0.6s ease" }} />
+                            <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 2, transition: "width 0.6s ease, background 0.3s" }} />
                           </div>
                         </div>
                       );
@@ -2787,11 +2820,79 @@ export default function Dashboard() {
     );
   }
 
+  // ── SKELETON DE CARGA INICIAL ──────────────────────────────────
+  // Se muestra mientras llega la primera carga de eventos (cold start de Fly.io).
+  function renderBootSkeleton() {
+    const line = (w, h = 12, mt = 0) => (
+      <div className="la-skel" style={{ width: w, height: h, marginTop: mt }} />
+    );
+    const skelCard = (rows, key) => (
+      <div style={{ ...s.card, display: "flex", flexDirection: "column", gap: 10 }} key={key}>
+        {line("40%", 10)}
+        {line("70%", 22, 4)}
+        {rows > 1 && line("90%", 12, 6)}
+        {rows > 2 && line("55%", 12)}
+      </div>
+    );
+    const col = (keys) => (
+      <div style={{ flex: "1 1 280px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
+        {keys.map((k, i) => skelCard((i % 3) + 1, k))}
+      </div>
+    );
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+        {slowBoot && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted)", fontSize: 12, fontFamily: "'DM Mono', monospace" }}>
+            <span style={{ animation: "pulse 1.2s infinite", color: "var(--accent)" }}>●</span>
+            Despertando el servidor…
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 16, flex: 1, alignItems: "flex-start", flexWrap: "wrap" }}>
+          {col(["sk-l1", "sk-l2"])}
+          {col(["sk-r1", "sk-r2", "sk-r3"])}
+        </div>
+      </div>
+    );
+  }
+
   // ── MODO SIMPLIFICADO (móvil) ──────────────────────────────────
   // Vertical: foco en registrar rápido (entrenamiento + lo siguiente).
   // Horizontal: vistazo general en dos columnas.
   function renderSimple() {
     const portrait = orientation === "portrait";
+
+    // Bloque de salud con pestañas — más navegable en móvil que scroll largo.
+    const HEALTH_TABS = [
+      { id: "health_wellness", label: "Bienestar" },
+      { id: "health_sleep",    label: "Sueño" },
+      { id: "health_activity", label: "Actividad" },
+      { id: "health_hrv",      label: "HRV" },
+      { id: "health_heart",    label: "FC" },
+      { id: "health_workouts", label: "Entrenos" },
+    ];
+    const healthBlock = (
+      <div key="simple-health" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
+          {HEALTH_TABS.map(t => {
+            const active = simpleHealthTab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setSimpleHealthTab(t.id)}
+                style={{
+                  flexShrink: 0, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
+                  fontSize: 12, fontFamily: "'DM Sans', sans-serif",
+                  background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                  border: `0.5px solid ${active ? "var(--accent)" : "var(--border2)"}`,
+                  color: active ? "var(--accent)" : "var(--muted)",
+                }}
+              >{t.label}</button>
+            );
+          })}
+        </div>
+        {renderWidget(simpleHealthTab)}
+      </div>
+    );
 
     // Tarjeta compacta "Lo siguiente" (próximo evento de hoy o de la semana)
     const nextEv = todayEvents.find(e => !e.past) || upcomingEvents[0];
@@ -2816,6 +2917,7 @@ export default function Dashboard() {
           {renderWidget("training")}
           {nextCard}
           {entregas.length > 0 && renderWidget("entregas")}
+          {healthBlock}
         </div>
       );
     }
@@ -2826,6 +2928,7 @@ export default function Dashboard() {
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
           {renderWidget("training")}
           {entregas.length > 0 && renderWidget("entregas")}
+          {healthBlock}
         </div>
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
           {renderWidget("timeline")}
@@ -2867,8 +2970,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* CONTENIDO: modo simplificado o grid completo */}
-        {simpleMode ? renderSimple() : (() => {
+        {/* CONTENIDO: skeleton mientras carga · modo simplificado · grid completo */}
+        {loading ? renderBootSkeleton() : simpleMode ? renderSimple() : (() => {
           const activeCols = ACTIVE_COLUMNS[numColumns];
           const colWidgetMap = {};
           for (const col of activeCols) {
