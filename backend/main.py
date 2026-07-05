@@ -365,9 +365,11 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
         body_content = event.get("body", {}).get("content", "") or ""
         preview_content = event.get("bodyPreview", "") or ""
         import re as _re
-        alud_match = _re.search(r"alud_url:\s*(https?://\S+)", body_content) or \
-                     _re.search(r"alud_url:\s*(https?://\S+)", preview_content)
-        alud_url = alud_match.group(1).rstrip("</>&;") if alud_match else None
+        # No incluir <, > ni comillas en la URL: en cuerpos HTML la URL suele ir pegada
+        # a la etiqueta de cierre (p.ej. ...id=99</p>) y \S+ se la tragaba entera.
+        alud_match = _re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
+                     _re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
+        alud_url = alud_match.group(1).rstrip("&;.,") if alud_match else None
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
