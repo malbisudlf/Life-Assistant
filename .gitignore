@@ -42,3 +42,6 @@ CLAUDE.md
 # Notas internas / contexto para Claude Code
 HOMEASSISTANT.md
 PROJECT_STATE.md
+.venv/
+__pycache__/
+.pytest_cache/
