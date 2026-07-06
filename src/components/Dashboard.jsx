@@ -6,7 +6,6 @@ import {
 } from "../lib/helpers";
 
 const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
-const CLASS_DESTINATION = "Universidad de Deusto, Bilbao";
 const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/lovelace/tablet";
 
 async function apiFetch(url, options = {}) {
@@ -20,7 +19,7 @@ async function apiFetch(url, options = {}) {
 }
 
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
-function LoginScreen({ onLogin }) {
+function LoginScreen() {
   const [pwd, setPwd] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -164,43 +163,6 @@ function Sparkline({ data, color = "var(--accent)", height = 40 }) {
   );
 }
 
-function SleepBars({ data }) {
-  const maxVal = Math.max(...data.map(d => d.value || 0), 9);
-  return (
-    <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
-      {data.map((d, i) => {
-        const total = d.value || 0;
-        const h     = Math.max(3, (total / maxVal) * 54);
-        const deep  = Number(d.extra?.deep)  || 0;
-        const rem   = Number(d.extra?.rem)   || 0;
-        const core  = Number(d.extra?.core)  || Number(d.extra?.light) || 0;
-        const stagesKnown = deep > 0 || rem > 0 || core > 0;
-        const stageSum = deep + rem + core || total;
-        const date = new Date(d.date + "T12:00:00");
-        const day  = ["D","L","M","X","J","V","S"][date.getDay()];
-        const fallColor = total >= 7 ? "#6aaa82" : total >= 6 ? "#c8a45a" : "#d4645a";
-        return (
-          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
-            title={`${d.date}: ${hoursToHM(total)}`}>
-            <div style={{ width: "100%", height: h, borderRadius: "3px 3px 0 0", overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
-              {stagesKnown ? (
-                <>
-                  {deep > 0 && <div style={{ flex: deep / stageSum, background: "#4a72b0", minHeight: 1 }} />}
-                  {rem  > 0 && <div style={{ flex: rem  / stageSum, background: "#8b68c4", minHeight: 1 }} />}
-                  {core > 0 && <div style={{ flex: core / stageSum, background: "#4f8fa3", minHeight: 1 }} />}
-                </>
-              ) : (
-                <div style={{ flex: 1, background: fallColor, opacity: 0.85 }} />
-              )}
-            </div>
-            <div style={{ fontSize: 9, color: "var(--muted2)", fontFamily: "'DM Mono', monospace" }}>{day}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 // ── ESTILOS GLOBALES ─────────────────────────────────────────────
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -302,8 +264,12 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
 // Campo de fecha en formato DD/MM/AAAA fijo — independiente del locale del sistema/navegador
 function DateInput({ value, onChange }) {
   const [text, setText] = useState(() => isoToDdMmYyyy(value));
-
-  useEffect(() => { setText(isoToDdMmYyyy(value)); }, [value]);
+  // Resincronizar el texto cuando cambia la prop, sin efecto (evita un render en cascada)
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setText(isoToDdMmYyyy(value));
+  }
 
   function commit(raw) {
     const m = /^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\s*$/.exec(raw);
@@ -343,8 +309,12 @@ function TimeInput({ value, onChange }) {
   const [open, setOpen]   = useState(false);
   const [text, setText]   = useState(value || "");
   const wrapRef = useRef(null);
-
-  useEffect(() => { setText(value || ""); }, [value]);
+  // Resincronizar el texto cuando cambia la prop, sin efecto (evita un render en cascada)
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setText(value || "");
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -438,14 +408,15 @@ export default function Dashboard() {
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [agentState, setAgentState]   = useState(null);
-  const [wolStartedAt, setWolStartedAt] = useState(null);
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
   const [jobTerminal, setJobTerminal] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [training, setTraining]           = useState(null);
   const [healthData, setHealthData]         = useState(null);
-  const [healthLoading, setHealthLoading]   = useState(false);
+  // Con sesión iniciada, la carga de salud arranca en el mount: empezar ya en "cargando"
+  // evita un setState síncrono dentro del efecto.
+  const [healthLoading, setHealthLoading]   = useState(() => !!localStorage.getItem("la_token"));
   const [healthLastSync, setHealthLastSync] = useState(null);
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
@@ -472,7 +443,6 @@ export default function Dashboard() {
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
   const [orientation, setOrientation]     = useState(() =>
     (typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches) ? "portrait" : "landscape");
-  const [showTrainingSettings, setShowTrainingSettings] = useState(false);
   const [trainingSettingsPrice, setTrainingSettingsPrice] = useState("");
   const [trainingSettingsSpp, setTrainingSettingsSpp]     = useState("");
   const [trainingSettingsSaving, setTrainingSettingsSaving] = useState(false);
@@ -534,7 +504,7 @@ export default function Dashboard() {
         }
         return merged;
       }
-    } catch {}
+    } catch { /* mejor esfuerzo: ignorar */ }
     return ALL_DEFAULT_WIDGETS;
   });
 
@@ -604,7 +574,9 @@ export default function Dashboard() {
   // El backend (Fly.io) escala a cero: el primer arranque tarda ~10-15s. Si la carga
   // inicial se demora, avisamos de que se está "despertando el servidor".
   useEffect(() => {
-    if (!loading) { setSlowBoot(false); return; }
+    // El aviso solo se pinta dentro del skeleton (gated por `loading`), así que
+    // basta con cancelar el timeout al terminar la carga.
+    if (!loading) return;
     const id = setTimeout(() => setSlowBoot(true), 4000);
     return () => clearTimeout(id);
   }, [loading]);
@@ -718,13 +690,12 @@ export default function Dashboard() {
   }, []);
 
   // Cargar resumen entrenamiento
-  useEffect(() => { loadTraining(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { loadTraining(); }, []);
 
   // Cargar datos de salud
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
     if (!t) return;
-    setHealthLoading(true);
     apiFetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
@@ -798,7 +769,7 @@ export default function Dashboard() {
                 body: ev.title,
                 icon: "/favicon.svg",
               });
-            } catch {}
+            } catch { /* mejor esfuerzo: ignorar */ }
           }
         }
       }
@@ -819,9 +790,11 @@ export default function Dashboard() {
           body: `La entrega se ha completado correctamente.`,
           icon: "/favicon.svg",
         });
-      } catch {}
+      } catch { /* mejor esfuerzo: ignorar */ }
     }
-  }, [jobTerminal?.status]);
+    // Solo debe disparar cuando el job pasa a "done"; añadir token/notificationsEnabled
+    // notificaría tarde al activar las notificaciones con un job ya completado.
+  }, [jobTerminal?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!scoreTooltip) return;
@@ -854,7 +827,7 @@ export default function Dashboard() {
         const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
         const data = await res.json();
         if (data.ok) setIdeas(prev => [data.idea, ...prev]);
-      } catch {}
+      } catch { /* mejor esfuerzo: ignorar */ }
       setProcessing(false);
     };
     mr.start();
@@ -999,7 +972,6 @@ export default function Dashboard() {
       setJobStatus("pending");
 
       setWolStatus("ok");
-      setWolStartedAt(Date.now());
     } catch {
       setWolStatus("error");
     }
@@ -1044,7 +1016,7 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/training/summary`, { headers: { "Authorization": `Bearer ${t}` } });
       const data = await r.json();
       setTraining(data);
-    } catch {}
+    } catch { /* mejor esfuerzo: ignorar */ }
   }
 
   async function submitSession() {
@@ -1059,7 +1031,7 @@ export default function Dashboard() {
       });
       setShowSessionForm(false);
       await loadTraining();
-    } catch {}
+    } catch { /* mejor esfuerzo: ignorar */ }
     setTrainingLoading(false);
   }
 
@@ -1080,7 +1052,7 @@ export default function Dashboard() {
         body: JSON.stringify(patch),
       });
       await loadTraining();
-    } catch {}
+    } catch { /* mejor esfuerzo: ignorar */ }
     setTrainingSettingsSaving(false);
   }
 
@@ -1096,7 +1068,7 @@ export default function Dashboard() {
         body: JSON.stringify({ date: today }),
       });
       await loadTraining();
-    } catch {}
+    } catch { /* mejor esfuerzo: ignorar */ }
     setTrainingLoading(false);
   }
 
@@ -1361,7 +1333,7 @@ export default function Dashboard() {
         if (st === "done" || st === "failed") {
           setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
         }
-      } catch {}
+      } catch { /* mejor esfuerzo: ignorar */ }
     }, 2000);
     return () => { mounted = false; clearInterval(id); };
   }, [activeJobId, token]);
@@ -1426,7 +1398,6 @@ export default function Dashboard() {
   const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
 
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
-  const wolEtaSeconds = wolStartedAt ? Math.max(0, 90 - Math.floor((Date.now() - wolStartedAt) / 1000)) : null;
 
   function renderWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
@@ -1885,7 +1856,7 @@ export default function Dashboard() {
         if (avgCardioRec != null) breakdown.push({ label: "💓 Recuperación cardio", pts: crPts, max: 5, detail: `${Math.round(avgCardioRec)} lpm/min` });
 
         // Forma física (solo vista diaria): VO2 max (6 pts) + walking HR avg (4 pts)
-        let vo2Pts = 0, whrPts = 0;
+        let vo2Pts, whrPts = 0;
         if (isDaily) {
           if (lastVo2 != null) {
             if      (lastVo2 >= 50) vo2Pts = 6;
@@ -1914,7 +1885,7 @@ export default function Dashboard() {
           }
 
           // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
-          let dlPts = 0, respPts = 0;
+          let dlPts = 0, respPts;
           if (daylightVal != null) {
             if      (daylightVal >= 60) dlPts = 5;
             else if (daylightVal >= 30) dlPts = 4;
@@ -2267,7 +2238,6 @@ export default function Dashboard() {
         const lrd  = latestDisplay?.extra?.rem   != null ? Number(latestDisplay.extra.rem)   : null;
         const lcd  = latestDisplay?.extra?.core  != null ? Number(latestDisplay.extra.core)  : (latestDisplay?.extra?.light != null ? Number(latestDisplay.extra.light) : null);
         const lawd = latestDisplay?.extra?.awake != null ? Number(latestDisplay.extra.awake) : null;
-        const lssd = latestDisplay?.extra?.sleep_start ?? null;
         const latestExcluded = latestDisplay?.extra?.excluded ?? false;
 
         // latest: noche más reciente no excluida (para score y cálculos)
@@ -2813,7 +2783,7 @@ export default function Dashboard() {
     );
   }
 
-  if (!token) return <LoginScreen onLogin={() => window.location.reload()} />;
+  if (!token) return <LoginScreen />;
 
   return (
     <>
