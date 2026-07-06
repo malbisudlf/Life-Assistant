@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>💩 CacaMap — el mapa social de tus cagadas</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💩</text></svg>" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  :root {
+    --bg:        #1a1410;
+    --panel:     #241c15;
+    --panel-2:   #2e241b;
+    --borde:     #4a3a28;
+    --texto:     #f3e9dc;
+    --texto-2:   #b8a68f;
+    --marron:    #8b5a2b;
+    --marron-2:  #a0522d;
+    --acento:    #e8a33d;
+    --ok:        #7cb342;
+    --error:     #e05d44;
+    --radio:     14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--texto);
+    min-height: 100vh;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  input, textarea, select { font-family: inherit; }
+
+  /* ── PANTALLA DE LOGIN ── */
+  .login-fondo {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(ellipse at 20% 20%, rgba(139,90,43,.25), transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(232,163,61,.15), transparent 50%),
+      var(--bg);
+    padding: 20px;
+  }
+  .login-caja {
+    background: var(--panel);
+    border: 1px solid var(--borde);
+    border-radius: 22px;
+    padding: 38px 34px;
+    width: 100%;
+    max-width: 400px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    text-align: center;
+  }
+  .login-caja .logo { font-size: 64px; line-height: 1; }
+  .login-caja h1 { font-size: 28px; margin: 10px 0 4px; letter-spacing: -.5px; }
+  .login-caja .lema { color: var(--texto-2); font-size: 14px; margin-bottom: 26px; }
+  .login-caja input {
+    width: 100%;
+    padding: 13px 16px;
+    margin-bottom: 12px;
+    border: 1px solid var(--borde);
+    border-radius: 12px;
+    background: var(--panel-2);
+    color: var(--texto);
+    font-size: 15px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .login-caja input:focus { border-color: var(--acento); }
+  .btn-principal {
+    width: 100%;
+    padding: 13px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--marron-2), var(--marron));
+    color: #fff;
+    font-size: 16px;
+    font-weight: 600;
+    transition: transform .1s, filter .2s;
+  }
+  .btn-principal:hover { filter: brightness(1.15); }
+  .btn-principal:active { transform: scale(.98); }
+  .cambio-modo {
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--texto-2);
+  }
+  .cambio-modo a { color: var(--acento); cursor: pointer; text-decoration: none; font-weight: 600; }
+  .aviso {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    display: none;
+  }
+  .aviso.error { display: block; background: rgba(224,93,68,.15); color: var(--error); }
+  .aviso.ok    { display: block; background: rgba(124,179,66,.15); color: var(--ok); }
+
+  /* ── APP ── */
+  .app { display: none; height: 100vh; flex-direction: column; }
+  .app.visible { display: flex; }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--borde);
+    z-index: 1200;
+    flex-wrap: wrap;
+  }
+  header .titulo { font-size: 19px; font-weight: 700; white-space: nowrap; }
+  header .usuario { color: var(--texto-2); font-size: 13px; margin-left: auto; }
+  header button {
+    padding: 7px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--borde);
+    background: var(--panel-2);
+    color: var(--texto);
+    font-size: 13px;
+    transition: background .2s;
+  }
+  header button:hover { background: var(--borde); }
+  header button.destacado { background: var(--marron); border-color: var(--marron); }
+
+  .cuerpo { display: flex; flex: 1; min-height: 0; }
+  #mapa { flex: 1; z-index: 1; background: #0d0a07; }
+
+  /* ── PANEL LATERAL ── */
+  .lateral {
+    width: 340px;
+    background: var(--panel);
+    border-left: 1px solid var(--borde);
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .lateral h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--texto-2);
+    margin-bottom: 10px;
+  }
+  .tarjeta {
+    background: var(--panel-2);
+    border: 1px solid var(--borde);
+    border-radius: var(--radio);
+    padding: 14px;
+  }
+  .estadisticas { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center; }
+  .estadisticas .num { font-size: 26px; font-weight: 700; color: var(--acento); }
+  .estadisticas .etq { font-size: 11px; color: var(--texto-2); }
+
+  .ranking-fila {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--borde);
+  }
+  .ranking-fila .pos { font-size: 18px; width: 26px; text-align: center; }
+  .ranking-fila .nombre { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+  .ranking-fila .cuenta { font-size: 14px; color: var(--acento); font-weight: 700; white-space: nowrap; }
+  .ranking-fila .color-punto { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .ranking-fila.yo { border-color: var(--acento); }
+
+  .caca-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--borde);
+    cursor: pointer;
+    transition: border-color .2s;
+  }
+  .caca-item:hover { border-color: var(--acento); }
+  .caca-item .info { flex: 1; min-width: 0; }
+  .caca-item .lugar { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .caca-item .detalle { font-size: 12px; color: var(--texto-2); }
+  .caca-item .borrar {
+    border: none;
+    background: none;
+    color: var(--texto-2);
+    font-size: 16px;
+    padding: 4px;
+    border-radius: 6px;
+  }
+  .caca-item .borrar:hover { color: var(--error); }
+
+  .amigo-fila { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .amigo-fila label { flex: 1; font-size: 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .amigo-fila .quitar { border: none; background: none; color: var(--texto-2); font-size: 15px; }
+  .amigo-fila .quitar:hover { color: var(--error); }
+
+  .btn-secundario {
+    width: 100%;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--borde);
+    background: var(--panel-2);
+    color: var(--texto);
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 8px;
+    transition: background .2s;
+  }
+  .btn-secundario:hover { background: var(--borde); }
+  textarea.codigo {
+    width: 100%;
+    height: 64px;
+    margin-top: 8px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--borde);
+    background: var(--bg);
+    color: var(--texto);
+    font-size: 11px;
+    resize: vertical;
+  }
+  .pista { font-size: 12px; color: var(--texto-2); margin-top: 6px; line-height: 1.4; }
+
+  /* ── MODAL NUEVA CACA ── */
+  .modal-fondo {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-fondo.visible { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--borde);
+    border-radius: 20px;
+    padding: 26px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  .modal h3 { font-size: 20px; margin-bottom: 16px; }
+  .modal label { display: block; font-size: 12px; color: var(--texto-2); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .5px; }
+  .modal input, .modal textarea {
+    width: 100%;
+    padding: 11px 13px;
+    border: 1px solid var(--borde);
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--texto);
+    font-size: 14px;
+    outline: none;
+  }
+  .modal input:focus, .modal textarea:focus { border-color: var(--acento); }
+  .modal textarea { height: 60px; resize: vertical; }
+  .valoracion { display: flex; gap: 6px; font-size: 26px; }
+  .valoracion span { cursor: pointer; filter: grayscale(1) opacity(.4); transition: filter .15s, transform .1s; }
+  .valoracion span.activa { filter: none; }
+  .valoracion span:hover { transform: scale(1.2); }
+  .modal .botones { display: flex; gap: 10px; margin-top: 20px; }
+  .modal .botones button { flex: 1; padding: 11px; border-radius: 10px; font-size: 14px; font-weight: 600; border: none; }
+  .modal .cancelar { background: var(--panel-2); color: var(--texto); border: 1px solid var(--borde) !important; }
+  .modal .guardar { background: linear-gradient(135deg, var(--marron-2), var(--marron)); color: #fff; }
+
+  /* ── NOTIFICACIÓN TOAST ── */
+  #toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--panel);
+    border: 1px solid var(--acento);
+    color: var(--texto);
+    padding: 12px 22px;
+    border-radius: 12px;
+    font-size: 14px;
+    z-index: 3000;
+    transition: transform .3s;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  }
+  #toast.visible { transform: translateX(-50%) translateY(0); }
+
+  /* Marcadores emoji en el mapa */
+  .marcador-caca {
+    font-size: 26px;
+    text-align: center;
+    line-height: 1;
+    text-shadow: 0 2px 4px rgba(0,0,0,.6);
+    filter: drop-shadow(0 0 3px var(--color-marcador, transparent));
+  }
+  .leaflet-popup-content-wrapper { background: var(--panel); color: var(--texto); border-radius: 12px; }
+  .leaflet-popup-tip { background: var(--panel); }
+  .leaflet-popup-content { font-size: 13px; }
+  .leaflet-popup-content b { color: var(--acento); }
+
+  @media (max-width: 760px) {
+    .cuerpo { flex-direction: column; }
+    #mapa { min-height: 45vh; }
+    .lateral { width: 100%; border-left: none; border-top: 1px solid var(--borde); max-height: 55vh; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── PANTALLA DE LOGIN / REGISTRO ── -->
+<div class="login-fondo" id="pantallaLogin">
+  <div class="login-caja">
+    <div class="logo">💩</div>
+    <h1>CacaMap</h1>
+    <p class="lema">Marca tus territorios. Compara con tus amigos. Reina sobre el trono.</p>
+    <form id="formAuth">
+      <input type="text" id="campoUsuario" placeholder="Nombre de usuario" autocomplete="username" required maxlength="24" />
+      <input type="password" id="campoClave" placeholder="Contraseña" autocomplete="current-password" required minlength="4" />
+      <button type="submit" class="btn-principal" id="btnAuth">Iniciar sesión</button>
+    </form>
+    <p class="cambio-modo" id="cambioModo">
+      ¿No tienes cuenta? <a id="enlaceModo">Regístrate</a>
+    </p>
+    <div class="aviso" id="avisoAuth"></div>
+  </div>
+</div>
+
+<!-- ── APLICACIÓN ── -->
+<div class="app" id="app">
+  <header>
+    <span class="titulo">💩 CacaMap</span>
+    <button class="destacado" id="btnCentrar">📍 Mi ubicación</button>
+    <span class="usuario" id="etiquetaUsuario"></span>
+    <button id="btnSalir">Salir</button>
+  </header>
+  <div class="cuerpo">
+    <div id="mapa"></div>
+    <aside class="lateral">
+
+      <section>
+        <h2>Tus estadísticas</h2>
+        <div class="tarjeta estadisticas">
+          <div><div class="num" id="statTotal">0</div><div class="etq">total</div></div>
+          <div><div class="num" id="statMes">0</div><div class="etq">este mes</div></div>
+          <div><div class="num" id="statMedia">—</div><div class="etq">calidad media</div></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>🏆 Ranking de tronos</h2>
+        <div id="ranking"></div>
+      </section>
+
+      <section>
+        <h2>👥 Amigos</h2>
+        <div id="listaAmigos"></div>
+        <button class="btn-secundario" id="btnExportar">📤 Copiar mi caca-código</button>
+        <textarea class="codigo" id="campoImportar" placeholder="Pega aquí el caca-código de un amigo..."></textarea>
+        <button class="btn-secundario" id="btnImportar">📥 Importar amigo</button>
+        <p class="pista">Comparte tu caca-código con tus amigos y pega el suyo aquí para ver sus cagadas en tu mapa y competir en el ranking.</p>
+      </section>
+
+      <section>
+        <h2>📋 Tus cagadas</h2>
+        <div id="listaCacas"></div>
+        <p class="pista">Haz clic en cualquier punto del mapa para registrar una nueva cagada.</p>
+      </section>
+
+    </aside>
+  </div>
+</div>
+
+<!-- ── MODAL DE NUEVA CACA ── -->
+<div class="modal-fondo" id="modalFondo">
+  <div class="modal">
+    <h3>💩 Nueva cagada</h3>
+    <label for="modalLugar">¿Dónde ha sido?</label>
+    <input type="text" id="modalLugar" placeholder="Ej: Baño del bar Paco" maxlength="60" />
+    <label for="modalFecha">Fecha</label>
+    <input type="date" id="modalFecha" />
+    <label>Calidad de la experiencia</label>
+    <div class="valoracion" id="modalValoracion">
+      <span data-v="1">💩</span><span data-v="2">💩</span><span data-v="3">💩</span><span data-v="4">💩</span><span data-v="5">💩</span>
+    </div>
+    <label for="modalNota">Nota (opcional)</label>
+    <textarea id="modalNota" placeholder="Detalles para la posteridad..." maxlength="200"></textarea>
+    <div class="botones">
+      <button class="cancelar" id="modalCancelar">Cancelar</button>
+      <button class="guardar" id="modalGuardar">Guardar 💩</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   CacaMap — app autocontenida en un solo fichero.
+   Los datos viven en localStorage (prefijo cm_). La comparación
+   entre amigos funciona por intercambio de "caca-códigos"
+   (JSON en base64), sin necesidad de servidor.
+   ════════════════════════════════════════════════════════════════ */
+
+// ── UTILIDADES ──
+const $ = (id) => document.getElementById(id);
+
+function leerLS(clave, porDefecto) {
+  try {
+    const v = localStorage.getItem(clave);
+    return v ? JSON.parse(v) : porDefecto;
+  } catch { /* mejor esfuerzo: datos corruptos → valor por defecto */
+    return porDefecto;
+  }
+}
+function guardarLS(clave, valor) {
+  localStorage.setItem(clave, JSON.stringify(valor));
+}
+
+// Hash de contraseña: SHA-256 con sal si el navegador lo soporta
+// (contexto seguro); si no, un hash simple de respaldo. No es
+// seguridad real —todo vive en el navegador— pero evita guardar
+// la contraseña en claro.
+async function hashClave(clave, sal) {
+  const texto = sal + '::' + clave;
+  if (window.crypto && crypto.subtle) {
+    const datos  = new TextEncoder().encode(texto);
+    const buffer = await crypto.subtle.digest('SHA-256', datos);
+    return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 5381;
+  for (let i = 0; i < texto.length; i++) h = ((h << 5) + h + texto.charCodeAt(i)) >>> 0;
+  return 'basico-' + h.toString(16);
+}
+
+function mostrarToast(mensaje) {
+  const t = $('toast');
+  t.textContent = mensaje;
+  t.classList.add('visible');
+  clearTimeout(mostrarToast._timer);
+  mostrarToast._timer = setTimeout(() => t.classList.remove('visible'), 2600);
+}
+
+// Codificación base64 tolerante con tildes y emojis
+function aBase64(objeto)  { return btoa(unescape(encodeURIComponent(JSON.stringify(objeto)))); }
+function deBase64(texto)  { return JSON.parse(decodeURIComponent(escape(atob(texto.trim())))); }
+
+// ── ESTADO ──
+let usuarioActual = null;   // nombre del usuario con sesión iniciada
+let mapa          = null;   // instancia de Leaflet
+let capaMarcas    = null;   // capa con todos los marcadores
+let coordPendiente = null;  // coordenada del clic pendiente de guardar
+let valoracionSel  = 3;     // valoración elegida en el modal
+
+const COLORES_AMIGOS = ['#42a5f5', '#ab47bc', '#26a69a', '#ef5350', '#ffca28', '#8d6e63'];
+const COLOR_YO       = '#e8a33d';
+
+const claveCacas  = () => 'cm_cacas_'  + usuarioActual;
+const claveAmigos = () => 'cm_amigos_' + usuarioActual;
+
+// ── AUTENTICACIÓN ──
+let modoRegistro = false;
+
+function pintarModoAuth() {
+  $('btnAuth').textContent   = modoRegistro ? 'Crear cuenta' : 'Iniciar sesión';
+  $('cambioModo').innerHTML  = modoRegistro
+    ? '¿Ya tienes cuenta? <a id="enlaceModo">Inicia sesión</a>'
+    : '¿No tienes cuenta? <a id="enlaceModo">Regístrate</a>';
+  $('enlaceModo').addEventListener('click', () => {
+    modoRegistro = !modoRegistro;
+    $('avisoAuth').className = 'aviso';
+    pintarModoAuth();
+  });
+}
+
+function avisar(mensaje, tipo) {
+  const a = $('avisoAuth');
+  a.textContent = mensaje;
+  a.className   = 'aviso ' + tipo;
+}
+
+$('formAuth').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const nombre = $('campoUsuario').value.trim();
+  const clave  = $('campoClave').value;
+  if (!nombre || !clave) return;
+
+  const usuarios = leerLS('cm_usuarios', {});
+
+  if (modoRegistro) {
+    if (usuarios[nombre]) { avisar('Ese nombre ya está pillado. Elige otro.', 'error'); return; }
+    const sal = Math.random().toString(36).slice(2, 12);
+    usuarios[nombre] = { sal, hash: await hashClave(clave, sal), creado: new Date().toISOString() };
+    guardarLS('cm_usuarios', usuarios);
+    avisar('¡Cuenta creada! Entrando...', 'ok');
+  } else {
+    const u = usuarios[nombre];
+    if (!u || u.hash !== await hashClave(clave, u.sal)) {
+      avisar('Usuario o contraseña incorrectos.', 'error');
+      return;
+    }
+  }
+
+  guardarLS('cm_sesion', nombre);
+  entrar(nombre);
+});
+
+function entrar(nombre) {
+  usuarioActual = nombre;
+  $('pantallaLogin').style.display = 'none';
+  $('app').classList.add('visible');
+  $('etiquetaUsuario').textContent = '👤 ' + nombre;
+  iniciarMapa();
+  pintarTodo();
+}
+
+$('btnSalir').addEventListener('click', () => {
+  localStorage.removeItem('cm_sesion');
+  location.reload();
+});
+
+// ── MAPA ──
+function iniciarMapa() {
+  if (mapa) return;
+  if (typeof L === 'undefined') {
+    // Sin conexión, el CDN de Leaflet no carga: la app sigue funcionando sin mapa
+    $('mapa').innerHTML = '<div style="display:flex;height:100%;align-items:center;justify-content:center;color:var(--texto-2);text-align:center;padding:30px;">🗺️💨<br>No se pudo cargar el mapa (¿sin internet?).<br>Recarga cuando tengas conexión.</div>';
+    return;
+  }
+  mapa = L.map('mapa').setView([40.4168, -3.7038], 6); // España como vista inicial
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    maxZoom: 20,
+  }).addTo(mapa);
+  capaMarcas = L.layerGroup().addTo(mapa);
+
+  mapa.on('click', (e) => {
+    coordPendiente = e.latlng;
+    abrirModal();
+  });
+}
+
+$('btnCentrar').addEventListener('click', () => {
+  if (!mapa) return;
+  if (!navigator.geolocation) { mostrarToast('Tu navegador no soporta geolocalización'); return; }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => mapa.setView([pos.coords.latitude, pos.coords.longitude], 15),
+    ()    => mostrarToast('No se pudo obtener tu ubicación')
+  );
+});
+
+function crearMarcador(caca, color, propietario) {
+  const icono = L.divIcon({
+    className: '',
+    html: `<div class="marcador-caca" style="--color-marcador:${color}">💩</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 26],
+  });
+  const emojis = '💩'.repeat(caca.valoracion || 0) || '—';
+  const nota   = caca.nota ? `<br><i>«${escaparHTML(caca.nota)}»</i>` : '';
+  return L.marker([caca.lat, caca.lng], { icon: icono })
+    .bindPopup(`<b>${escaparHTML(caca.lugar)}</b><br>👤 ${escaparHTML(propietario)} · 📅 ${caca.fecha}<br>Calidad: ${emojis}${nota}`);
+}
+
+function escaparHTML(texto) {
+  const div = document.createElement('div');
+  div.textContent = texto || '';
+  return div.innerHTML;
+}
+
+function pintarMarcadores() {
+  if (!capaMarcas) return;
+  capaMarcas.clearLayers();
+  misCacas().forEach(c => crearMarcador(c, COLOR_YO, usuarioActual).addTo(capaMarcas));
+  amigos().forEach((amigo, i) => {
+    if (amigo.oculto) return;
+    const color = COLORES_AMIGOS[i % COLORES_AMIGOS.length];
+    (amigo.cacas || []).forEach(c => crearMarcador(c, color, amigo.nombre).addTo(capaMarcas));
+  });
+}
+
+// ── DATOS ──
+const misCacas = () => leerLS(claveCacas(), []);
+const amigos   = () => leerLS(claveAmigos(), []);
+
+// ── MODAL ──
+function abrirModal() {
+  $('modalLugar').value = '';
+  $('modalNota').value  = '';
+  $('modalFecha').value = new Date().toISOString().slice(0, 10);
+  valoracionSel = 3;
+  pintarValoracion();
+  $('modalFondo').classList.add('visible');
+  $('modalLugar').focus();
+}
+function cerrarModal() { $('modalFondo').classList.remove('visible'); }
+
+function pintarValoracion() {
+  document.querySelectorAll('#modalValoracion span').forEach(s => {
+    s.classList.toggle('activa', Number(s.dataset.v) <= valoracionSel);
+  });
+}
+$('modalValoracion').addEventListener('click', (e) => {
+  if (e.target.dataset.v) { valoracionSel = Number(e.target.dataset.v); pintarValoracion(); }
+});
+$('modalCancelar').addEventListener('click', cerrarModal);
+$('modalFondo').addEventListener('click', (e) => { if (e.target === $('modalFondo')) cerrarModal(); });
+
+$('modalGuardar').addEventListener('click', () => {
+  if (!coordPendiente) return;
+  const lugar = $('modalLugar').value.trim() || 'Lugar misterioso';
+  const nueva = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    lugar,
+    fecha: $('modalFecha').value || new Date().toISOString().slice(0, 10),
+    valoracion: valoracionSel,
+    nota: $('modalNota').value.trim(),
+    lat: coordPendiente.lat,
+    lng: coordPendiente.lng,
+  };
+  guardarLS(claveCacas(), [nueva, ...misCacas()]);
+  coordPendiente = null;
+  cerrarModal();
+  pintarTodo();
+  mostrarToast('💩 ¡Cagada registrada en ' + lugar + '!');
+});
+
+// ── PINTADO DE UI ──
+function pintarTodo() {
+  pintarMarcadores();
+  pintarEstadisticas();
+  pintarRanking();
+  pintarListaCacas();
+  pintarAmigos();
+}
+
+function pintarEstadisticas() {
+  const cacas   = misCacas();
+  const ahora   = new Date();
+  const mesStr  = ahora.toISOString().slice(0, 7);
+  const delMes  = cacas.filter(c => (c.fecha || '').startsWith(mesStr)).length;
+  const conVal  = cacas.filter(c => c.valoracion);
+  const media   = conVal.length
+    ? (conVal.reduce((s, c) => s + c.valoracion, 0) / conVal.length).toFixed(1)
+    : '—';
+  $('statTotal').textContent = cacas.length;
+  $('statMes').textContent   = delMes;
+  $('statMedia').textContent = media;
+}
+
+function pintarRanking() {
+  const filas = [
+    { nombre: usuarioActual + ' (tú)', cuenta: misCacas().length, color: COLOR_YO, yo: true },
+    ...amigos().map((a, i) => ({
+      nombre: a.nombre,
+      cuenta: (a.cacas || []).length,
+      color: COLORES_AMIGOS[i % COLORES_AMIGOS.length],
+      yo: false,
+    })),
+  ].sort((a, b) => b.cuenta - a.cuenta);
+
+  const medallas = ['🥇', '🥈', '🥉'];
+  $('ranking').innerHTML = filas.map((f, i) => `
+    <div class="ranking-fila${f.yo ? ' yo' : ''}">
+      <span class="pos">${medallas[i] || (i + 1) + 'º'}</span>
+      <span class="color-punto" style="background:${f.color}"></span>
+      <span class="nombre">${escaparHTML(f.nombre)}</span>
+      <span class="cuenta">${f.cuenta} 💩</span>
+    </div>`).join('');
+}
+
+function pintarListaCacas() {
+  const cacas = misCacas();
+  if (!cacas.length) {
+    $('listaCacas').innerHTML = '<p class="pista">Aún no has marcado territorio. ¡El mapa te espera!</p>';
+    return;
+  }
+  $('listaCacas').innerHTML = cacas.map(c => `
+    <div class="caca-item" data-id="${c.id}">
+      <div class="info">
+        <div class="lugar">💩 ${escaparHTML(c.lugar)}</div>
+        <div class="detalle">${c.fecha} · calidad ${c.valoracion}/5</div>
+      </div>
+      <button class="borrar" data-borrar="${c.id}" title="Borrar">🗑️</button>
+    </div>`).join('');
+
+  $('listaCacas').querySelectorAll('.caca-item').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.dataset.borrar) return;
+      const c = misCacas().find(x => x.id === el.dataset.id);
+      if (c && mapa) mapa.setView([c.lat, c.lng], 16);
+    });
+  });
+  $('listaCacas').querySelectorAll('[data-borrar]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      guardarLS(claveCacas(), misCacas().filter(c => c.id !== btn.dataset.borrar));
+      pintarTodo();
+      mostrarToast('Cagada borrada del historial');
+    });
+  });
+}
+
+// ── AMIGOS ──
+function pintarAmigos() {
+  const lista = amigos();
+  if (!lista.length) {
+    $('listaAmigos').innerHTML = '<p class="pista">Todavía no tienes rivales. ¡Importa a un amigo!</p>';
+    return;
+  }
+  $('listaAmigos').innerHTML = lista.map((a, i) => `
+    <div class="amigo-fila">
+      <label>
+        <input type="checkbox" data-amigo="${i}" ${a.oculto ? '' : 'checked'} />
+        <span class="color-punto" style="background:${COLORES_AMIGOS[i % COLORES_AMIGOS.length]}; width:10px; height:10px; border-radius:50%; display:inline-block;"></span>
+        ${escaparHTML(a.nombre)} (${(a.cacas || []).length})
+      </label>
+      <button class="quitar" data-quitar="${i}" title="Eliminar amigo">✖</button>
+    </div>`).join('');
+
+  $('listaAmigos').querySelectorAll('[data-amigo]').forEach(chk => {
+    chk.addEventListener('change', () => {
+      const lista = amigos();
+      lista[Number(chk.dataset.amigo)].oculto = !chk.checked;
+      guardarLS(claveAmigos(), lista);
+      pintarMarcadores();
+    });
+  });
+  $('listaAmigos').querySelectorAll('[data-quitar]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const lista = amigos();
+      const [fuera] = lista.splice(Number(btn.dataset.quitar), 1);
+      guardarLS(claveAmigos(), lista);
+      pintarTodo();
+      mostrarToast('Has eliminado a ' + fuera.nombre + '. Menos competencia.');
+    });
+  });
+}
+
+$('btnExportar').addEventListener('click', async () => {
+  const codigo = aBase64({ nombre: usuarioActual, cacas: misCacas() });
+  try {
+    await navigator.clipboard.writeText(codigo);
+    mostrarToast('📤 Caca-código copiado. ¡Mándaselo a tus amigos!');
+  } catch { /* mejor esfuerzo: sin permiso de portapapeles, lo mostramos */
+    $('campoImportar').value = codigo;
+    mostrarToast('Cópialo del cuadro de texto de abajo');
+  }
+});
+
+$('btnImportar').addEventListener('click', () => {
+  const texto = $('campoImportar').value;
+  if (!texto.trim()) { mostrarToast('Pega primero el caca-código de tu amigo'); return; }
+  let datos;
+  try {
+    datos = deBase64(texto);
+  } catch { /* mejor esfuerzo: código ilegible */
+    mostrarToast('Ese caca-código no hay quien lo digiera 🤢');
+    return;
+  }
+  if (!datos || typeof datos.nombre !== 'string' || !Array.isArray(datos.cacas)) {
+    mostrarToast('El código no tiene el formato esperado');
+    return;
+  }
+  if (datos.nombre === usuarioActual) { mostrarToast('Ese código es el tuyo, listillo 😏'); return; }
+
+  // Solo conservamos los campos conocidos y coordenadas válidas
+  const cacasLimpias = datos.cacas
+    .filter(c => typeof c.lat === 'number' && typeof c.lng === 'number')
+    .map(c => ({
+      id: String(c.id || Math.random().toString(36).slice(2)),
+      lugar: String(c.lugar || 'Lugar misterioso').slice(0, 60),
+      fecha: String(c.fecha || '').slice(0, 10),
+      valoracion: Math.min(5, Math.max(0, Number(c.valoracion) || 0)),
+      nota: String(c.nota || '').slice(0, 200),
+      lat: c.lat,
+      lng: c.lng,
+    }));
+
+  const lista  = amigos();
+  const indice = lista.findIndex(a => a.nombre === datos.nombre);
+  if (indice >= 0) lista[indice].cacas = cacasLimpias;
+  else lista.push({ nombre: String(datos.nombre).slice(0, 24), cacas: cacasLimpias, oculto: false });
+
+  guardarLS(claveAmigos(), lista);
+  $('campoImportar').value = '';
+  pintarTodo();
+  mostrarToast('📥 ¡' + datos.nombre + ' ha entrado en la competición!');
+});
+
+// ── ARRANQUE ──
+pintarModoAuth();
+const sesion = leerLS('cm_sesion', null);
+if (sesion && leerLS('cm_usuarios', {})[sesion]) entrar(sesion);
+</script>
+</body>
+</html>
