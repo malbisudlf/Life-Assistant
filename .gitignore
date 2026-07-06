@@ -37,9 +37,9 @@ supabase_health_schema.sql
 *.njsproj
 *.sln
 *.sw?
-CLAUDE.md
 
 # Notas internas / contexto para Claude Code
+# (CLAUDE.md sí se versiona: es la guía del repo para las sesiones de Claude Code)
 HOMEASSISTANT.md
 PROJECT_STATE.md
 .venv/
