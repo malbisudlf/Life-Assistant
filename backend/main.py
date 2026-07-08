@@ -95,6 +95,12 @@ HA_URL              = os.getenv("HA_URL", "")
 HA_TOKEN            = os.getenv("HA_TOKEN")
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
+# MyBMW (envío de destino al coche). Si faltan credenciales, la vía BMW se salta
+# y el destino se encola para Home Assistant (fallback).
+BMW_USERNAME = os.getenv("BMW_USERNAME", "")
+BMW_PASSWORD = os.getenv("BMW_PASSWORD", "")
+BMW_REGION   = os.getenv("BMW_REGION", "row")   # row | na | cn
+BMW_VIN      = os.getenv("BMW_VIN", "")          # opcional: si hay varios coches
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -734,6 +740,162 @@ def ha_events_soon(request: Request, token: str = ""):
         if 13 <= minutes_until <= 17:
             return {"event": {"title": _clean_class_title(event.get("subject", "")), "start": start_iso}}
     return {"event": None}
+
+
+# ── COCHE (BMW): enviar destino a la navegación ──────────────────────────────
+# Vía principal: API de MyBMW (bimmer_connected, la misma librería que usaba la
+# integración de Home Assistant). OJO: a mediados de 2025 BMW cambió su API y la
+# librería quedó no-funcional (0.17.4 lo avisa en el log); el código queda listo
+# para cuando revivan la librería o BMW abra su API oficial.
+# Fallback: cola en memoria que Home Assistant recoge en su poll (patrón WOL) —
+# desde HA se puede reenviar como notificación al móvil con enlace de navegación
+# (el coche la muestra por CarPlay/Android Auto).
+
+_car_destination_pending: dict | None = None
+
+BMW_OAUTH_PROVIDER = "bmw"
+
+
+class CarDestinationRequest(BaseModel):
+    address: str = Field(min_length=3, max_length=500)
+    name: str | None = Field(None, max_length=200)
+
+
+def _geocode_address(address: str) -> dict | None:
+    """Dirección → lat/lon con Google Geocoding (misma API key que Distance Matrix)."""
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    r = requests.get(
+        "https://maps.googleapis.com/maps/api/geocode/json",
+        params={"address": address, "language": "es", "key": GOOGLE_MAPS_API_KEY},
+    )
+    try:
+        results = r.json().get("results") or []
+    except Exception:
+        return None
+    if not results:
+        return None
+    loc = results[0]["geometry"]["location"]
+    return {
+        "lat": loc["lat"],
+        "lon": loc["lng"],
+        "formatted": results[0].get("formatted_address", address),
+    }
+
+
+def _load_bmw_tokens() -> dict | None:
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{BMW_OAUTH_PROVIDER}&select=access_token,refresh_token,extra",
+        headers=supabase_headers(),
+    )
+    if r.status_code < 300 and r.json():
+        return r.json()[0]
+    return None
+
+
+def _save_bmw_tokens(account) -> None:
+    """Persiste los tokens rotados de MyBMW en Supabase (mismo patrón que Graph).
+
+    La columna `extra` (gcid) requiere la migración 20260706_oauth_tokens_extra.sql;
+    si falta, el fallo se loguea y no interrumpe el envío ya realizado.
+    """
+    auth = account.config.authentication
+    payload = {
+        "provider": BMW_OAUTH_PROVIDER,
+        "access_token": auth.access_token or "",
+        "refresh_token": auth.refresh_token,
+        "expires_at": auth.expires_at.timestamp() if auth.expires_at else 0,
+        "extra": {"gcid": auth.gcid},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    existing = _load_bmw_tokens()
+    if existing is not None:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{BMW_OAUTH_PROVIDER}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
+    else:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
+    if r.status_code >= 300:
+        logger.error("BMW: no se pudieron persistir los tokens (%s): %s", r.status_code, (r.text or "")[:300])
+
+
+async def _send_poi_bmw(lat: float, lon: float, name: str) -> bool:
+    """Envía el destino por la API de MyBMW. False si no está configurado o falla."""
+    if not (BMW_USERNAME and BMW_PASSWORD):
+        return False
+    try:
+        from bimmer_connected.account import MyBMWAccount
+        from bimmer_connected.api.regions import Regions
+        from bimmer_connected.models import PointOfInterest
+    except ImportError:
+        logger.warning("BMW: bimmer_connected no está instalado; uso el fallback de HA")
+        return False
+    try:
+        region = {"na": Regions.NORTH_AMERICA, "cn": Regions.CHINA}.get(BMW_REGION, Regions.REST_OF_WORLD)
+        account = MyBMWAccount(BMW_USERNAME, BMW_PASSWORD, region)
+        stored = _load_bmw_tokens()
+        if stored and stored.get("refresh_token"):
+            account.set_refresh_token(
+                refresh_token=stored["refresh_token"],
+                gcid=(stored.get("extra") or {}).get("gcid"),
+                access_token=stored.get("access_token") or None,
+            )
+        await account.get_vehicles()
+        vehicle = account.get_vehicle(BMW_VIN) if BMW_VIN else (account.vehicles[0] if account.vehicles else None)
+        if not vehicle:
+            logger.error("BMW: la cuenta no tiene vehículos (VIN=%s)", BMW_VIN or "auto")
+            return False
+        await vehicle.remote_services.trigger_send_poi(PointOfInterest(lat=lat, lon=lon, name=name))
+        _save_bmw_tokens(account)
+        return True
+    except Exception as e:
+        logger.error("BMW: fallo enviando destino: %s", e)
+        return False
+
+
+@app.post("/car/send-destination")
+async def send_car_destination(
+    body: CarDestinationRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Envía la ubicación de un evento al coche: BMW API si funciona, si no cola de HA."""
+    geo = _geocode_address(body.address)
+    if not geo:
+        raise HTTPException(status_code=400, detail="No se pudo localizar la dirección")
+    name = body.name or body.address
+
+    if await _send_poi_bmw(geo["lat"], geo["lon"], name):
+        return {"ok": True, "via": "bmw"}
+
+    global _car_destination_pending
+    _car_destination_pending = {
+        "lat": geo["lat"],
+        "lon": geo["lon"],
+        "name": name,
+        "address": geo["formatted"],
+        # Enlace directo de navegación: útil para que HA lo reenvíe como
+        # notificación al móvil (CarPlay/Android Auto lo muestra en el coche)
+        "maps_url": f"https://www.google.com/maps/dir/?api=1&destination={geo['lat']},{geo['lon']}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return {"ok": True, "via": "ha"}
+
+
+@app.get("/ha/car-destination")
+def ha_car_destination(request: Request, token: str = ""):
+    """HA sondea este endpoint. Si hay destino pendiente, lo devuelve y lo limpia."""
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    global _car_destination_pending
+    destination = _car_destination_pending
+    _car_destination_pending = None
+    return {"destination": destination}
 
 
 # ── JOB QUEUE (SUPABASE) ─────────────────────────────────────────────────────

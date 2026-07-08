@@ -397,6 +397,7 @@ export default function Dashboard() {
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
+  const [carSendMap, setCarSendMap]               = useState({});   // key → 'sending' | 'bmw' | 'ha' | 'error'
   const [classEvents, setClassEvents] = useState([]);
   const [classesOpen, setClassesOpen] = useState(false);
   const [showCreateEvent, setShowCreateEvent] = useState(false);
@@ -891,12 +892,36 @@ export default function Dashboard() {
     setDepartureLoadingId(null);
   }
 
+  async function sendToCar(ev) {
+    if (!ev?.loc) return;
+    const key = ev.id || ev.start;
+    setDeparturePickingId(null);
+    setCarSendMap(prev => ({ ...prev, [key]: "sending" }));
+    let result = "error";
+    try {
+      const t = localStorage.getItem("la_token") || "";
+      const res = await apiFetch(`${API}/car/send-destination`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ address: ev.loc, name: ev.title || ev.loc }),
+      });
+      const data = await res.json();
+      if (data.ok) result = data.via === "bmw" ? "bmw" : "ha";
+    } catch { /* mejor esfuerzo: ignorar */ }
+    setCarSendMap(prev => ({ ...prev, [key]: result }));
+    // El aviso desaparece solo pasados unos segundos
+    setTimeout(() => {
+      setCarSendMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+    }, 6000);
+  }
+
   function DepartureWidget({ ev }) {
     if (!ev?.loc) return null;
     const key = ev.id || ev.start;
     const info = departureMap[key];
     const isLoading = departureLoadingId === key;
     const isPicking = departurePickingId === key;
+    const carState = carSendMap[key];
     const btnBase = { border: "0.5px solid", borderRadius: 6, fontSize: 11, padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" };
     return (
       <div style={{ marginTop: 6 }}>
@@ -913,6 +938,9 @@ export default function Dashboard() {
             <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "walking"); }} style={{
               ...btnBase, background: "rgba(100,180,130,0.12)", borderColor: "rgba(100,180,130,0.3)", color: "var(--green)",
             }}>🚶 Andando</button>
+            <button onClick={e => { e.stopPropagation(); sendToCar(ev); }} style={{
+              ...btnBase, background: "rgba(139,180,212,0.12)", borderColor: "rgba(139,180,212,0.3)", color: "var(--accent2)",
+            }}>📍 Al coche</button>
             <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} style={{
               ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "4px 6px",
             }}>✕</button>
@@ -933,6 +961,14 @@ export default function Dashboard() {
           </div>
         )}
         {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
+        {carState && (
+          <div style={{ fontSize: 11, marginTop: 4, color: carState === "error" ? "#d4645a" : "var(--accent2)" }}>
+            {carState === "sending" ? "Enviando destino al coche…"
+              : carState === "bmw"  ? "📍 Destino enviado al coche"
+              : carState === "ha"   ? "📍 Destino enviado (vía Home Assistant)"
+              : "No se pudo enviar el destino"}
+          </div>
+        )}
       </div>
     );
   }
