@@ -8,3 +8,4 @@ passlib[bcrypt]==1.7.4
 openai==2.41.1
 httpx==0.28.1
 python-multipart==0.0.32
+bimmer_connected==0.17.4
