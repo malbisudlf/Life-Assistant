@@ -274,3 +274,32 @@ def test_root(client):
     r = client.get("/")
     assert r.status_code == 200
     assert r.json() == {"status": "Life Assistant API running"}
+
+
+# ── Configuración de instancia (kit self-hosted) ──────────────────────────────
+
+class TestConfiguracionInstancia:
+    def test_cors_origins_es_lista_parseada(self):
+        assert isinstance(main.CORS_ORIGINS, list)
+        assert "http://localhost:5173" in main.CORS_ORIGINS
+
+    def test_timezone_por_defecto(self):
+        assert main.TIMEZONE == "Europe/Madrid"
+        assert str(main.LOCAL_TZ) == "Europe/Madrid"
+
+    def test_departure_usa_la_zona_configurada(self, client, auth_headers, mock_requests, monkeypatch):
+        from zoneinfo import ZoneInfo
+        monkeypatch.setattr(main, "LOCAL_TZ", ZoneInfo("America/New_York"))
+        mock_requests.add("GET", "maps.googleapis.com", FakeResponse({
+            "rows": [{"elements": [{
+                "status": "OK",
+                "duration": {"value": 1800, "text": "30 min"},
+                "duration_in_traffic": {"value": 1800, "text": "30 min"},
+                "distance": {"text": "20 km"},
+            }]}]
+        }))
+        r = client.post("/maps/departure", headers=auth_headers, json={
+            "destination": "X", "event_time": "2026-07-06T10:00:00+02:00",
+        })
+        # 08:00 UTC - 40 min = 07:20 UTC → 03:20 en Nueva York (UTC-4 en julio)
+        assert r.json()["departure_time"] == "03:20"

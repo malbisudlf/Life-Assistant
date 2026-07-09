@@ -5,8 +5,12 @@ import {
   hoursToHM, sleepScore, calcRecoveryMod, findMetric,
 } from "../lib/helpers";
 
+// Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
 const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
-const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") + "/lovelace/tablet";
+const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
+               (import.meta.env.VITE_HA_DASHBOARD_PATH || "/lovelace/tablet");
+// Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas
+const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
 
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
@@ -1371,8 +1375,8 @@ export default function Dashboard() {
     .map(e => ({ ...e, time: formatUpcomingTime(e.start), title: e.title || "(Sin título)", loc: e.location || "" }));
 
   const entregas = [...allEvents, ...classEvents]
-    .filter(e => e.title && e.title.includes("📚") && (isFuture(e.start) || isToday(e.start)))
-    .map(e => ({ title: e.title.replace("📚", "").trim(), subject: e.title, days: daysUntil(e.start), alud_url: e.alud_url || null }))
+    .filter(e => e.title && e.title.includes(ENTREGAS_MARKER) && (isFuture(e.start) || isToday(e.start)))
+    .map(e => ({ title: e.title.replace(ENTREGAS_MARKER, "").trim(), subject: e.title, days: daysUntil(e.start), alud_url: e.alud_url || null }))
     .sort((a, b) => a.days - b.days);
 
   const displayActive = activeEvent || todayEvents.find(e => e.active) || todayEvents[0];
@@ -1507,7 +1511,7 @@ export default function Dashboard() {
           <div style={s.sectionLabel}>Entregas pendientes</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
             {entregas.length === 0 ? (
-              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin entregas con 📚 en el título</div>
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>{`Sin entregas con ${ENTREGAS_MARKER} en el título`}</div>
             ) : entregas.map((e, i) => {
               const color = urgencyColor(e.days);
               return (
