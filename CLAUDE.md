@@ -118,14 +118,6 @@ Ficheros clave:
 - **WOL**: `_wol_pending` es un flag global en memoria. `/wake-pc` lo marca, HA lo
   recoge en `/ha/wol-pending` (que lo limpia al leerlo). No lo conviertas en estado
   persistente sin pensar en el poll de HA.
-- **Destino al coche (BMW)**: `POST /car/send-destination` geocodifica la dirección
-  del evento (Google Geocoding, misma key) e intenta la API de MyBMW
-  (`bimmer_connected`, credenciales `BMW_*`, tokens en `oauth_tokens` provider
-  `bmw`); si falla o no está configurada, encola el destino en
-  `_car_destination_pending` y HA lo recoge en `/ha/car-destination` (patrón WOL).
-  OJO: BMW rompió su API en 2025 y `bimmer_connected` 0.17.4 se declara
-  no-funcional — la vía BMW está lista pero inoperativa hasta que la librería
-  reviva; el primer login (captcha) se hace con `backend/bmw_login.py`.
 
 ## Frontend: cómo está organizado Dashboard.jsx
 
@@ -169,7 +161,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 115 tests)
+### Backend (`tests/backend`, 104 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
