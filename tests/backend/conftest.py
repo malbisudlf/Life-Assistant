@@ -84,16 +84,14 @@ def mock_requests(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Estado en memoria limpio entre tests (rate limiting, flag WOL, destino coche)."""
+    """Estado en memoria limpio entre tests (rate limiting y flag WOL)."""
     with main._login_lock:
         main._login_attempts.clear()
     main._wol_pending = False
-    main._car_destination_pending = None
     yield
     with main._login_lock:
         main._login_attempts.clear()
     main._wol_pending = False
-    main._car_destination_pending = None
 
 
 @pytest.fixture

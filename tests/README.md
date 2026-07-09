@@ -14,7 +14,6 @@ definen ahí antes de importar `backend/main.py`.
 | `test_ha.py` | `/ha/events/soon` (ventana de 15 min, tokens de servicio), flujo Wake-on-LAN |
 | `test_jobs.py` | Cola de jobs: create/claim/start/finish/retry, eventos de job, heartbeat y estado de agentes |
 | `test_health.py` | Ingesta de salud (`/health/ingest` y `/simple`): métricas acumulativas, kJ→kcal, sueño, workouts; métricas agregadas y entrenamiento |
-| `test_car.py` | Envío de destino al coche: geocodificación, vía BMW simulada, fallback y cola de Home Assistant |
 
 ```bash
 # Instalar dependencias (una vez)
