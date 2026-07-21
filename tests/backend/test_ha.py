@@ -70,3 +70,26 @@ class TestWakeOnLan:
         # El primer poll lo recoge y lo limpia
         assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": True}
         assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": False}
+
+
+class TestRelaunchAgent:
+    def test_relaunch_agent_requiere_jwt(self, client):
+        assert client.post("/relaunch-agent").status_code in (401, 403)
+
+    def test_relaunch_pending_requiere_token_servicio(self, client):
+        assert client.get("/ha/agent-relaunch-pending").status_code == 403
+
+    def test_flujo_completo(self, client, auth_headers):
+        # Sin relanzado marcado, el poll devuelve false
+        assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
+        # El dashboard marca relanzado
+        assert client.post("/relaunch-agent", headers=auth_headers).json() == {"ok": True}
+        # El primer poll lo recoge y lo limpia
+        assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": True}
+        assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
+
+    def test_wol_y_relanzado_son_flags_independientes(self, client, auth_headers):
+        # Marcar solo WOL no debe activar el relanzado
+        client.post("/wake-pc", headers=auth_headers)
+        assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
+        assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": True}
