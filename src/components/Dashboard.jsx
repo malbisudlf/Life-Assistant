@@ -256,6 +256,33 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
 ];
 
+// Carga una config de widgets desde localStorage, fusionándola con los defaults
+// (para incorporar widgets nuevos que aún no estén guardados) y saneando cada
+// entrada. Se usa tanto para el modo completo ("la_widget_config") como para el
+// simplificado ("la_simple_widget_config"), que tienen selecciones independientes.
+function loadWidgetConfig(storageKey) {
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      const parsed   = JSON.parse(saved).filter(w => w.id !== "__split__");
+      const savedIds = new Set(parsed.map(w => w.id));
+      const merged   = parsed.map(w => ({
+        id: w.id,
+        label: ALL_DEFAULT_WIDGETS.find(d => d.id === w.id)?.label || w.label,
+        visible: w.visible !== false,
+        column: w.column || DEFAULT_COLUMNS[w.id] || "left",
+        width:  typeof w.width  === "number" ? w.width  : undefined,
+        height: typeof w.height === "number" ? w.height : undefined,
+      }));
+      for (const def of ALL_DEFAULT_WIDGETS) {
+        if (!savedIds.has(def.id)) merged.push({ ...def });
+      }
+      return merged;
+    }
+  } catch { /* mejor esfuerzo: ignorar */ }
+  return ALL_DEFAULT_WIDGETS.map(w => ({ ...w }));
+}
+
 const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
   const totalMin = i * 30;
   return `${String(Math.floor(totalMin / 60)).padStart(2, "0")}:${String(totalMin % 60).padStart(2, "0")}`;
@@ -485,28 +512,11 @@ export default function Dashboard() {
     }
     catch { return [0.65]; }
   })());
-  const [widgetConfig, setWidgetConfig]   = useState(() => {
-    try {
-      const saved = localStorage.getItem("la_widget_config");
-      if (saved) {
-        const parsed = JSON.parse(saved).filter(w => w.id !== "__split__");
-        const savedIds = new Set(parsed.map(w => w.id));
-        const merged = parsed.map(w => ({
-          id: w.id,
-          label: ALL_DEFAULT_WIDGETS.find(d => d.id === w.id)?.label || w.label,
-          visible: w.visible !== false,
-          column: w.column || DEFAULT_COLUMNS[w.id] || "left",
-          width:  typeof w.width  === "number" ? w.width  : undefined,
-          height: typeof w.height === "number" ? w.height : undefined,
-        }));
-        for (const def of ALL_DEFAULT_WIDGETS) {
-          if (!savedIds.has(def.id)) merged.push(def);
-        }
-        return merged;
-      }
-    } catch { /* mejor esfuerzo: ignorar */ }
-    return ALL_DEFAULT_WIDGETS;
-  });
+  // Dos selecciones de widgets independientes: la del modo completo y la del
+  // modo simplificado. El panel de ajustes edita la que corresponde al modo
+  // activo, así cada modo recuerda sus propios widgets.
+  const [widgetConfig, setWidgetConfig]             = useState(() => loadWidgetConfig("la_widget_config"));
+  const [simpleWidgetConfig, setSimpleWidgetConfig] = useState(() => loadWidgetConfig("la_simple_widget_config"));
 
   const inputStyle = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif", width: "100%" };
   const fieldLabelStyle = { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 6 };
@@ -1076,15 +1086,28 @@ export default function Dashboard() {
     setWidgetConfig(cfg);
     localStorage.setItem("la_widget_config", JSON.stringify(cfg));
   }
+  function saveSimpleWidgetConfig(cfg) {
+    setSimpleWidgetConfig(cfg);
+    localStorage.setItem("la_simple_widget_config", JSON.stringify(cfg));
+  }
+  // Los ajustes de widgets (activar/desactivar y reordenar) actúan sobre la
+  // config del modo activo: en simplificado se edita la selección simple.
+  function activeWidgetCtx() {
+    return simpleMode
+      ? { cfg: simpleWidgetConfig, save: saveSimpleWidgetConfig }
+      : { cfg: widgetConfig,       save: saveWidgetConfig };
+  }
   function toggleWidget(id) {
-    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, visible: !w.visible } : w));
+    const { cfg, save } = activeWidgetCtx();
+    save(cfg.map(w => w.id === id ? { ...w, visible: !w.visible } : w));
   }
   function moveWidget(id, dir) {
-    const idx = widgetConfig.findIndex(w => w.id === id);
-    if (idx + dir < 0 || idx + dir >= widgetConfig.length) return;
-    const cfg = [...widgetConfig];
-    [cfg[idx], cfg[idx + dir]] = [cfg[idx + dir], cfg[idx]];
-    saveWidgetConfig(cfg);
+    const { cfg, save } = activeWidgetCtx();
+    const idx = cfg.findIndex(w => w.id === id);
+    if (idx + dir < 0 || idx + dir >= cfg.length) return;
+    const next = [...cfg];
+    [next[idx], next[idx + dir]] = [next[idx + dir], next[idx]];
+    save(next);
   }
   function resetWidgetSize(id) {
     saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, width: undefined, height: undefined } : w));
@@ -2701,83 +2724,105 @@ export default function Dashboard() {
   }
 
   // ── MODO SIMPLIFICADO (móvil) ──────────────────────────────────
-  // Vertical: foco en registrar rápido (entrenamiento + lo siguiente).
-  // Horizontal: vistazo general en dos columnas.
+  // Muestra los widgets marcados en la selección propia del modo simple
+  // (independiente de la del modo completo), en el orden configurado.
+  // Vertical: una sola columna. Horizontal: dos columnas según la columna
+  // asignada a cada widget.
   function renderSimple() {
     const portrait = orientation === "portrait";
 
-    // Bloque de salud con pestañas — más navegable en móvil que scroll largo.
-    const HEALTH_TABS = [
-      { id: "health_wellness", label: "Bienestar" },
-      { id: "health_sleep",    label: "Sueño" },
-      { id: "health_activity", label: "Actividad" },
-      { id: "health_hrv",      label: "HRV" },
-      { id: "health_heart",    label: "FC" },
-      { id: "health_workouts", label: "Entrenos" },
-    ];
-    const healthBlock = (
+    // Los widgets de salud se colapsan en un único bloque con pestañas — más
+    // navegable en móvil que apilar seis tarjetas grandes.
+    const HEALTH_TAB_LABELS = {
+      health_wellness: "Bienestar",
+      health_sleep:    "Sueño",
+      health_activity: "Actividad",
+      health_hrv:      "HRV",
+      health_heart:    "FC",
+      health_workouts: "Entrenos",
+    };
+
+    const visibleWidgets = simpleWidgetConfig.filter(w => w.visible);
+    const healthTabs = visibleWidgets
+      .filter(w => w.id in HEALTH_TAB_LABELS)
+      .map(w => ({ id: w.id, label: HEALTH_TAB_LABELS[w.id] }));
+
+    // Si la pestaña activa ya no está entre las visibles, cae en la primera.
+    const activeHealthTab = healthTabs.some(t => t.id === simpleHealthTab)
+      ? simpleHealthTab
+      : healthTabs[0]?.id;
+
+    const healthBlock = healthTabs.length ? (
       <div key="simple-health" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
-          {HEALTH_TABS.map(t => {
-            const active = simpleHealthTab === t.id;
-            return (
-              <button
-                key={t.id}
-                onClick={() => setSimpleHealthTab(t.id)}
-                style={{
-                  flexShrink: 0, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
-                  fontSize: 12, fontFamily: "'DM Sans', sans-serif",
-                  background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
-                  border: `0.5px solid ${active ? "var(--accent)" : "var(--border2)"}`,
-                  color: active ? "var(--accent)" : "var(--muted)",
-                }}
-              >{t.label}</button>
-            );
-          })}
-        </div>
-        {renderWidget(simpleHealthTab)}
-      </div>
-    );
-
-    // Tarjeta compacta "Lo siguiente" (próximo evento de hoy o de la semana)
-    const nextEv = todayEvents.find(e => !e.past) || upcomingEvents[0];
-    const nextCard = (
-      <div style={s.card} key="simple-next">
-        <div style={s.sectionLabel}>Lo siguiente</div>
-        {nextEv ? (
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, color: "var(--accent)", lineHeight: 1 }}>{nextEv.time}</span>
-            <span style={{ fontSize: 15, color: "var(--text)" }}>{nextEv.title}</span>
-            {nextEv.loc && <span style={{ fontSize: 13, color: "var(--muted)" }}>· {nextEv.loc}</span>}
+        {healthTabs.length > 1 && (
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
+            {healthTabs.map(t => {
+              const active = activeHealthTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setSimpleHealthTab(t.id)}
+                  style={{
+                    flexShrink: 0, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
+                    fontSize: 12, fontFamily: "'DM Sans', sans-serif",
+                    background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                    border: `0.5px solid ${active ? "var(--accent)" : "var(--border2)"}`,
+                    color: active ? "var(--accent)" : "var(--muted)",
+                  }}
+                >{t.label}</button>
+              );
+            })}
           </div>
-        ) : (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>Nada próximamente</div>
         )}
+        {renderWidget(activeHealthTab)}
       </div>
-    );
+    ) : null;
 
-    if (portrait) {
+    // Lista ordenada de bloques a renderizar. Los widgets de salud se sustituyen
+    // por el bloque de pestañas, insertado en la posición del primero visible.
+    const items = [];
+    let healthInserted = false;
+    for (const w of visibleWidgets) {
+      const column = w.column || DEFAULT_COLUMNS[w.id] || "left";
+      if (w.id in HEALTH_TAB_LABELS) {
+        if (!healthInserted) {
+          items.push({ key: "simple-health", column, node: healthBlock });
+          healthInserted = true;
+        }
+        continue;
+      }
+      items.push({ key: w.id, column, node: renderWidget(w.id) });
+    }
+
+    if (items.length === 0) {
       return (
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
-          {renderWidget("training")}
-          {nextCard}
-          {entregas.length > 0 && renderWidget("entregas")}
-          {healthBlock}
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>
+          <div style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", lineHeight: 1.5 }}>
+            No hay widgets activos en el modo simple.<br />Actívalos en ajustes ⚙
+          </div>
         </div>
       );
     }
 
-    // Horizontal: dos columnas
+    if (portrait) {
+      return (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+          {items.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>)}
+        </div>
+      );
+    }
+
+    // Horizontal: dos columnas (la columna "centro" del modo completo cuenta
+    // como derecha, porque el modo simple solo maneja izquierda/derecha).
+    const leftItems  = items.filter(it => it.column === "left");
+    const rightItems = items.filter(it => it.column !== "left");
     return (
       <div style={{ flex: 1, display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-          {renderWidget("training")}
-          {entregas.length > 0 && renderWidget("entregas")}
-          {healthBlock}
+          {leftItems.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>)}
         </div>
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-          {renderWidget("timeline")}
-          {renderWidget("upcoming")}
+          {rightItems.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>)}
         </div>
       </div>
     );
@@ -3266,33 +3311,42 @@ export default function Dashboard() {
                 })}
               </div>
               <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 6, lineHeight: 1.4 }}>
-                El modo simple se adapta a la orientación del móvil (vertical / horizontal).
+                Cada modo recuerda sus propios widgets. {simpleMode
+                  ? "El modo simple se adapta a la orientación del móvil (vertical / horizontal)."
+                  : "Estás editando los del modo completo."}
               </div>
             </div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>Widgets</div>
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Columnas</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {[2, 3].map(n => (
-                  <button key={n} onClick={() => changeNumColumns(n)} style={{
-                    flex: 1, padding: "6px 0",
-                    background: numColumns === n ? "rgba(200,169,110,0.15)" : "var(--surface2)",
-                    border: `0.5px solid ${numColumns === n ? "var(--accent)" : "var(--border2)"}`,
-                    borderRadius: 6, color: numColumns === n ? "var(--accent)" : "var(--muted)",
-                    fontSize: 12, fontWeight: numColumns === n ? 600 : 400,
-                    cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
-                  }}>{n}</button>
-                ))}
-              </div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--text)", marginBottom: 14, letterSpacing: "0.04em" }}>
+              Widgets · {simpleMode ? "modo simple" : "modo completo"}
             </div>
-            <button onClick={() => { setShowSettings(false); setIsEditMode(true); }} style={{
-              width: "100%", marginBottom: 14, padding: "9px 0",
-              background: "rgba(200,169,110,0.1)", border: "0.5px solid rgba(200,169,110,0.35)",
-              borderRadius: 8, color: "var(--accent)", fontSize: 12, cursor: "pointer",
-              fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.03em",
-            }}>Editar distribución →</button>
+            {/* Columnas y distribución solo aplican al grid del modo completo. */}
+            {!simpleMode && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Columnas</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[2, 3].map(n => (
+                    <button key={n} onClick={() => changeNumColumns(n)} style={{
+                      flex: 1, padding: "6px 0",
+                      background: numColumns === n ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                      border: `0.5px solid ${numColumns === n ? "var(--accent)" : "var(--border2)"}`,
+                      borderRadius: 6, color: numColumns === n ? "var(--accent)" : "var(--muted)",
+                      fontSize: 12, fontWeight: numColumns === n ? 600 : 400,
+                      cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                    }}>{n}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {!simpleMode && (
+              <button onClick={() => { setShowSettings(false); setIsEditMode(true); }} style={{
+                width: "100%", marginBottom: 14, padding: "9px 0",
+                background: "rgba(200,169,110,0.1)", border: "0.5px solid rgba(200,169,110,0.35)",
+                borderRadius: 8, color: "var(--accent)", fontSize: 12, cursor: "pointer",
+                fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.03em",
+              }}>Editar distribución →</button>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              {widgetConfig.map((w, i) => (
+              {(simpleMode ? simpleWidgetConfig : widgetConfig).map((w, i, arr) => (
                 <div key={w.id} style={{
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "8px 10px", borderRadius: 8,
@@ -3311,10 +3365,10 @@ export default function Dashboard() {
                       color: i === 0 ? "rgba(255,255,255,0.15)" : "var(--muted)",
                       cursor: i === 0 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
                     }}>↑</button>
-                    <button onClick={() => moveWidget(w.id, 1)} disabled={i === widgetConfig.length - 1} style={{
+                    <button onClick={() => moveWidget(w.id, 1)} disabled={i === arr.length - 1} style={{
                       background: "transparent", border: "none",
-                      color: i === widgetConfig.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
-                      cursor: i === widgetConfig.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
+                      color: i === arr.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
+                      cursor: i === arr.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
                     }}>↓</button>
                   </div>
                 </div>
