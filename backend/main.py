@@ -62,9 +62,17 @@ load_dotenv()
 
 app = FastAPI()
 
+# Orígenes permitidos, separados por comas. En tu instancia, añade tu dominio de Vercel.
+CORS_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,https://life-assistant-smoky.vercel.app",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://life-assistant-smoky.vercel.app"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,6 +103,14 @@ HA_URL              = os.getenv("HA_URL", "")
 HA_TOKEN            = os.getenv("HA_TOKEN")
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
+# Personalización de la instancia (kit self-hosted)
+TIMEZONE         = os.getenv("TIMEZONE", "Europe/Madrid")   # zona horaria IANA del usuario
+CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calendario de clases en Outlook
+
+try:
+    LOCAL_TZ = ZoneInfo(TIMEZONE)
+except Exception:
+    raise RuntimeError(f"TIMEZONE inválida: {TIMEZONE!r} — usa un nombre IANA, p.ej. Europe/Madrid")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -412,8 +428,8 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
         "subject": body.subject,
-        "start": {"dateTime": body.start, "timeZone": "Europe/Madrid"},
-        "end": {"dateTime": body.end, "timeZone": "Europe/Madrid"},
+        "start": {"dateTime": body.start, "timeZone": TIMEZONE},
+        "end": {"dateTime": body.end, "timeZone": TIMEZONE},
         "isAllDay": body.is_all_day,
     }
     if body.location:
@@ -456,9 +472,9 @@ def update_event(
     if body.subject is not None:
         payload["subject"] = body.subject
     if body.start is not None:
-        payload["start"] = {"dateTime": body.start, "timeZone": "Europe/Madrid"}
+        payload["start"] = {"dateTime": body.start, "timeZone": TIMEZONE}
     if body.end is not None:
-        payload["end"] = {"dateTime": body.end, "timeZone": "Europe/Madrid"}
+        payload["end"] = {"dateTime": body.end, "timeZone": TIMEZONE}
     if body.is_all_day is not None:
         payload["isAllDay"] = body.is_all_day
     if body.location is not None:
@@ -487,13 +503,12 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     # Buscar el calendario llamado 'Clases'
     r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
     calendars = r.json().get("value", [])
-    cal = next((c for c in calendars if c["name"].lower() == "clases"), None)
+    cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
     if not cal:
         return {"error": "Calendario 'Clases' no encontrado", "available": [c["name"] for c in calendars]}
     cal_id = cal["id"]
-    # Inicio del día en hora local (Europe/Madrid) para no perder clases de hoy
-    madrid_tz = ZoneInfo("Europe/Madrid")
-    today_start = datetime.now(madrid_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Inicio del día en hora local del usuario para no perder clases de hoy
+    today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (today_start + timedelta(days=60)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     r2 = requests.get(
@@ -588,9 +603,8 @@ def get_departure_time(
         event_dt = datetime.fromisoformat(body.event_time.replace("Z", "+00:00"))
         # Añadir 10 min de margen
         departure_dt = event_dt - timedelta(seconds=duration_seconds) - timedelta(minutes=10)
-        # Convertir siempre a hora de Bilbao (Europa/Madrid)
-        madrid_tz = ZoneInfo("Europe/Madrid")
-        departure_local = departure_dt.astimezone(madrid_tz)
+        # Convertir siempre a la hora local del usuario (TIMEZONE)
+        departure_local = departure_dt.astimezone(LOCAL_TZ)
 
         return {
             "duration_text": duration_text,

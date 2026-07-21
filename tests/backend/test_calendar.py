@@ -120,6 +120,16 @@ class TestClasses:
         assert ev["start"] == "2026-07-07T08:00:00Z"
         assert ev["location"] == "Lab 2"
 
+    def test_nombre_del_calendario_es_configurable(self, client, auth_headers, graph_token, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "CLASSES_CALENDAR", "horario")
+        mock_requests.add("GET", "/calendars/cal-h/calendarView", FakeResponse({"value": []}))
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-h", "name": "Horario"}]   # coincide sin distinguir mayúsculas
+        }))
+        r = client.get("/calendar/classes", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"events": []}
+
     def test_list_calendars(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "/me/calendars", FakeResponse({
             "value": [{"id": "c1", "name": "Calendario", "otros": "campos"}]
