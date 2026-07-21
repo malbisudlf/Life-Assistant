@@ -4,6 +4,10 @@ Dashboard personal que centraliza calendario, salud, entrenamientos, hogar intel
 
 **Demo:** [life-assistant-smoky.vercel.app](https://life-assistant-smoky.vercel.app)
 
+> **¿Quieres el tuyo?** El proyecto es replicable: cada instancia corre con tus
+> propias cuentas (Outlook, Supabase, API keys) sobre free tiers de Vercel y
+> Fly.io. Guía completa paso a paso en [`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md).
+
 ![Dashboard](public/screenshot.png)
 
 ---
@@ -166,7 +170,7 @@ HOME_ADDRESS=Tu dirección, Ciudad, País
 Autenticar con Outlook (primera vez):
 1. Visitar `http://localhost:8000/auth/login`
 2. Completar el flujo OAuth de Microsoft
-3. El refresh token se guarda en `backend/.token`
+3. El refresh token se guarda en la tabla `oauth_tokens` de Supabase (sobrevive a los redeploys)
 
 ### Agente PC
 

@@ -97,8 +97,16 @@ Ficheros clave:
 
 - **Zonas horarias**: Microsoft Graph devuelve fechas con nombres de zona de Windows
   ("Romance Standard Time"). `normalize_graph_dt()` + `WINDOWS_TZ_MAP` las convierten
-  SIEMPRE a ISO UTC con sufijo `Z`. El usuario vive en `Europe/Madrid` (hardcodeado en
-  maps y creación de eventos). Cualquier fecha nueva que salga de la API debe ser UTC-Z.
+  SIEMPRE a ISO UTC con sufijo `Z`. La zona del usuario es `TIMEZONE`/`LOCAL_TZ`
+  (env, default `Europe/Madrid`) — úsala en vez de hardcodear zonas. Cualquier
+  fecha nueva que salga de la API debe ser UTC-Z.
+- **Kit self-hosted**: la instancia se personaliza por env — `TIMEZONE`,
+  `CLASSES_CALENDAR`, `CORS_ORIGINS`, `HOME_ADDRESS` (backend, ver
+  `backend/.env.example` y `backend/check_config.py`) y `VITE_API_URL`,
+  `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`, `VITE_ENTREGAS_MARKER` (frontend).
+  La guía de despliegue para terceros es `docs/DESPLIEGUE.md`: si añades una
+  variable o migración, actualízala. No reintroduzcas valores personales
+  hardcodeados en el código.
 - **Tokens OAuth de Graph** se persisten en la tabla `oauth_tokens` de Supabase
   (sobreviven a los redeploys de Fly; la mención a `backend/.token` en el README está
   obsoleta). `get_valid_token()` renueva con el refresh token de forma transparente.
