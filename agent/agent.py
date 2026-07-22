@@ -1,16 +1,21 @@
 """
-Life Assistant — Agente PC
-==========================
-Flujo:
-  1. Heartbeat → online
-  2. Recoge job pendiente de Supabase
-  3. Abre Alud con Playwright, gestiona login + Okta
-  4. Navega a la URL de la entrega y extrae el enunciado
-  5. Deja el navegador abierto en la página de la entrega
-  6. Abre Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter
-  7. Heartbeat → offline, se para
+Life Assistant — Agente PC (efímero + despachador)
+==================================================
+Arranca con Windows (lo enciende el WOL cuando pulsas un botón desde el móvil),
+mira si hay algún job pendiente y, según su 'accion', DECIDE qué hacer. Cuando
+drena la cola, se apaga: NO se queda residente. El PC arranca casi "tonto" y el
+agente vive lo justo para ejecutar lo que le hayas pedido.
 
-El agente nunca toca el formulario de entrega.
+Flujo:
+  1. Mira si hay jobs pendientes. Si no hay nada → se cierra sin más.
+  2. Por cada job pendiente, lo reclama y despacha según payload["accion"]:
+       - "resolver_alud"   → abre Alud en Edge, extrae el enunciado y lanza Cowork
+       - "abrir_streaming" → lanza Sunshine para conectar con Moonlight desde el móvil
+  3. Cuando no quedan jobs: heartbeat offline y termina.
+
+Añadir una acción nueva = una función + una entrada en el diccionario ACCIONES.
+
+En "resolver_alud" el agente nunca toca el formulario de entrega:
 Cowork se encarga de resolver y rellenar — el usuario revisa y envía.
 """
 
@@ -55,6 +60,16 @@ _EDGE_PATHS = [
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
 EDGE_EXE = next((p for p in _EDGE_PATHS if os.path.exists(p)), None)
+
+# ── Sunshine (host de streaming para Moonlight) ────────────────────────────────
+# Sunshine NO arranca solo con Windows (su autoarranque se desactiva a propósito):
+# lo ÚNICO residente es este agente, que lo lanza bajo demanda cuando llega un job
+# de streaming. Ruta configurable por si se instala en otra ubicación.
+_SUNSHINE_PATHS = [
+    r"C:\Program Files\Sunshine\sunshine.exe",
+    r"C:\Program Files (x86)\Sunshine\sunshine.exe",
+]
+SUNSHINE_EXE = os.getenv("SUNSHINE_EXE") or next((p for p in _SUNSHINE_PATHS if os.path.exists(p)), None)
 
 ALUD_HOME      = "https://alud.deusto.es"
 DEUSTO_BUTTON  = "@deusto | @opendeusto"
@@ -346,66 +361,40 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     pyautogui.press("enter")
     log.info("Instrucción enviada a Cowork.")
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Acciones ──────────────────────────────────────────────────────────────────
+# Cada acción es una función (job_id, payload) que hace el trabajo y reporta sus
+# stages. Si algo va mal, lanza una excepción: procesar_job la captura y marca el
+# job como 'failed'. Para añadir una acción nueva: define la función y regístrala
+# en el diccionario ACCIONES.
 
-def main():
-    if not LA_TOKEN:
-        log.error("LA_TOKEN no configurado en .env — abortando.")
-        sys.exit(1)
-
-    log.info(f"Agente iniciado. Worker: {WORKER_ID}")
-
-    # Comprobar si hay job pendiente — si no hay, salir sin hacer nada más
-    log.info("Buscando job pendiente...")
-    job = poll_pending_job()
-
-    if not job:
-        log.info("No hay jobs pendientes. Agente finalizado sin acción.")
-        return
-
-    job_id   = job["id"]
-    payload  = job.get("payload", {})
+def accion_resolver_alud(job_id: str, payload: dict):
+    """Abre Alud en Edge, extrae el enunciado de la entrega y lanza Claude Cowork."""
     titulo   = payload.get("titulo", "Sin título")
     alud_url = payload.get("alud_url", "")
-
-    log.info(f"Job: {job_id} | '{titulo}' | {alud_url}")
-    heartbeat("online")
-
     if not alud_url:
-        log.error("El job no tiene 'alud_url' en el payload — abortando.")
-        finish_job(job_id, "failed")
-        report_stage(job_id, "job_done", "failed: missing alud_url")
-        heartbeat("offline")
-        return
+        raise RuntimeError("El job no tiene 'alud_url' en el payload")
 
-    if not claim_job(job_id):
-        log.info("Job ya reclamado por otro worker.")
-        heartbeat("offline")
-        return
+    log.info(f"Resolver Alud: '{titulo}' | {alud_url}")
 
-    report_stage(job_id, "job_claimed", f"Worker {WORKER_ID} reclamó el job")
-    start_job(job_id)
-    heartbeat("busy")
+    # ── Lanzar Edge como proceso independiente (DETACHED) ──
+    # Al ser DETACHED, Edge no es hijo de Python — sobrevive cuando Python termina.
+    edge_profile = os.getenv("EDGE_PROFILE_DIR") or os.path.join(os.path.expanduser("~"), "AppData", "Local", "Microsoft", "Edge", "User Data")
+    if not EDGE_EXE:
+        raise RuntimeError("No se encontró el ejecutable de Edge")
+    log.info(f"Lanzando Edge detached desde {EDGE_EXE}...")
+    subprocess.Popen(
+        [EDGE_EXE,
+         f"--user-data-dir={edge_profile}",
+         "--profile-directory=Default",
+         f"--remote-debugging-port={EDGE_DEBUG_PORT}",
+         "--no-first-run"],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    time.sleep(4)  # esperar a que Edge arranque y exponga el puerto CDP
 
+    pw = sync_playwright().start()
     try:
-        # ── Lanzar Edge como proceso independiente (DETACHED) ──
-        # Al ser DETACHED, Edge no es hijo de Python — sobrevive cuando Python termina.
-        edge_profile = os.getenv("EDGE_PROFILE_DIR") or os.path.join(os.path.expanduser("~"), "AppData", "Local", "Microsoft", "Edge", "User Data")
-        if not EDGE_EXE:
-            raise RuntimeError("No se encontró el ejecutable de Edge")
-        log.info(f"Lanzando Edge detached desde {EDGE_EXE}...")
-        subprocess.Popen(
-            [EDGE_EXE,
-             f"--user-data-dir={edge_profile}",
-             "--profile-directory=Default",
-             f"--remote-debugging-port={EDGE_DEBUG_PORT}",
-             "--no-first-run"],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        time.sleep(4)  # esperar a que Edge arranque y exponga el puerto CDP
-
-        pw = sync_playwright().start()
         browser = pw.chromium.connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")
         # Usar el contexto existente de Edge (el que tiene el perfil del usuario)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
@@ -426,16 +415,101 @@ def main():
         report_stage(job_id, "solver_started", "Iniciando Claude Cowork")
         launch_cowork(titulo, enunciado, alud_url)
         report_stage(job_id, "result_saved", "Instrucción enviada a Cowork")
+        log.info("✅ Cowork está ejecutando la entrega.")
+    finally:
+        # Cerramos solo la conexión de Playwright; Edge queda abierto (DETACHED) a propósito.
+        try:
+            pw.stop()
+        except Exception:
+            pass
 
+
+def accion_abrir_streaming(job_id: str, payload: dict):
+    """Lanza Sunshine bajo demanda para conectar con Moonlight desde el móvil."""
+    if not SUNSHINE_EXE:
+        raise RuntimeError("No se encontró Sunshine instalado (define SUNSHINE_EXE en .env)")
+    report_stage(job_id, "streaming_starting", "Lanzando Sunshine")
+    log.info(f"Lanzando Sunshine desde {SUNSHINE_EXE}...")
+    # DETACHED: Sunshine sobrevive a la salida del agente y sigue sirviendo el stream.
+    subprocess.Popen(
+        [SUNSHINE_EXE],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    report_stage(job_id, "streaming_ready", "Sunshine abierto — conéctate con Moonlight")
+    log.info("✅ Sunshine lanzado.")
+
+
+ACCIONES = {
+    "resolver_alud":   accion_resolver_alud,
+    "abrir_streaming": accion_abrir_streaming,
+}
+
+
+def resolver_accion(payload: dict) -> str:
+    """Determina la acción del job. Compatibilidad: los jobs antiguos no traían
+    'accion' pero sí 'alud_url' → se tratan como 'resolver_alud'."""
+    accion = payload.get("accion")
+    if not accion and payload.get("alud_url"):
+        accion = "resolver_alud"
+    return accion
+
+
+def procesar_job(job: dict):
+    """Reclama un job, ejecuta su acción y lo cierra (done/failed)."""
+    job_id  = job["id"]
+    payload = job.get("payload", {}) or {}
+    accion  = resolver_accion(payload)
+    handler = ACCIONES.get(accion)
+
+    if handler is None:
+        log.warning(f"Acción desconocida o ausente: {accion!r} — marcando job como fallido.")
+        if claim_job(job_id):
+            start_job(job_id)
+            finish_job(job_id, "failed")
+            report_stage(job_id, "job_done", f"failed: acción desconocida '{accion}'")
+        return
+
+    if not claim_job(job_id):
+        log.info("Job ya reclamado por otro worker.")
+        return
+
+    report_stage(job_id, "job_claimed", f"Worker {WORKER_ID} reclamó el job ({accion})")
+    start_job(job_id)
+    heartbeat("busy")
+    try:
+        handler(job_id, payload)
         finish_job(job_id, "done")
         report_stage(job_id, "job_done", "done")
-        log.info("✅ Job completado. Cowork está ejecutando la entrega.")
-
+        log.info(f"✅ Job '{accion}' completado.")
     except Exception as e:
-        log.error(f"Error: {e}", exc_info=True)
+        log.error(f"Error en job '{accion}': {e}", exc_info=True)
         finish_job(job_id, "failed")
         report_stage(job_id, "job_done", f"failed: {e}")
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    if not LA_TOKEN:
+        log.error("LA_TOKEN no configurado en .env — abortando.")
+        sys.exit(1)
+
+    log.info(f"Agente iniciado. Worker: {WORKER_ID}")
+    log.info(f"Sunshine: {SUNSHINE_EXE or 'NO ENCONTRADO'}")
+
+    # Efímero: mira si hay algo pendiente. Si no hay nada, se cierra sin más.
+    job = poll_pending_job()
+    if not job:
+        log.info("No hay jobs pendientes. Agente finalizado sin acción.")
+        return
+
+    heartbeat("online")
+    try:
+        # Drena la cola: procesa jobs mientras queden pendientes, luego termina.
+        while job:
+            procesar_job(job)
+            job = poll_pending_job()
     finally:
         heartbeat("offline")
         log.info("Agente finalizado.")

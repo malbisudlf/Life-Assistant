@@ -245,6 +245,10 @@ _UUID_RE = re.compile(
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 _wol_pending = False
+# El agente PC es efímero (arranca con Windows, drena la cola y se cierra). Si el PC
+# YA está encendido, el WOL no relanza nada: este flag pide a HA que arranque el
+# agente por SSH. Mismo patrón que _wol_pending: se marca aquí y HA lo limpia al leerlo.
+_agent_relaunch_pending = False
 
 def _clean_class_title(subject: str) -> str:
     s = re.sub(r"^\d+\s*-\s*", "", subject)
@@ -772,6 +776,24 @@ def ha_wol_pending(request: Request, token: str = ""):
     global _wol_pending
     pending = _wol_pending
     _wol_pending = False
+    return {"pending": pending}
+
+@app.post("/relaunch-agent")
+def relaunch_agent(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Marca relanzado del agente pendiente — para cuando el PC ya está encendido y
+    el agente efímero ya terminó. HA lo recoge en su poll y arranca el agente por SSH."""
+    global _agent_relaunch_pending
+    _agent_relaunch_pending = True
+    return {"ok": True}
+
+@app.get("/ha/agent-relaunch-pending")
+def ha_agent_relaunch_pending(request: Request, token: str = ""):
+    """HA sondea este endpoint. Si hay relanzado pendiente, devuelve pending=true y lo limpia."""
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    global _agent_relaunch_pending
+    pending = _agent_relaunch_pending
+    _agent_relaunch_pending = False
     return {"pending": pending}
 
 @app.post("/jobs")

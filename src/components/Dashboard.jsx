@@ -252,6 +252,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
+  { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
   { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
   { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
   { id: "health_heart",      label: "Freq. cardíaca",    visible: false, column: "right" },
@@ -438,6 +439,8 @@ export default function Dashboard() {
   const [editingEventId, setEditingEventId]   = useState(null);
   const [wolModal, setWolModal]       = useState(null);   // entrega seleccionada
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
+  const [pcModal, setPcModal]         = useState(false);  // panel "Streaming PC"
+  const [pcStatus, setPcStatus]       = useState(null);   // 'loading' | 'ok' | 'error'
   const [agentState, setAgentState]   = useState(null);
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
@@ -991,6 +994,54 @@ export default function Dashboard() {
     }
   }
 
+  // ── Streaming PC ─────────────────────────────────────────────────────────
+  // El agente es efímero: enciende el PC con WOL y encola el job. Al arrancar
+  // Windows, el agente ve el job de streaming y lanza Sunshine (que queda
+  // corriendo), luego se cierra. Conectas con Moonlight desde el móvil.
+  async function abrirStreaming() {
+    setPcModal(true);
+    setPcStatus("loading");
+    const t = localStorage.getItem("la_token") || "";
+    setActiveJobId(null);
+    setJobEvents([]);
+    setJobTerminal(null);
+    setJobStatus("pending");
+    try {
+      // 1. WOL (best-effort): enciende el PC si está apagado.
+      try {
+        await apiFetch(`${API}/wake-pc`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${t}` },
+        });
+      } catch { /* mejor esfuerzo: el job es lo crítico */ }
+
+      // 2. Relanzar agente (best-effort): si el PC ya estaba encendido, el agente
+      // efímero ya terminó; HA lo arranca por SSH al ver este flag.
+      try {
+        await apiFetch(`${API}/relaunch-agent`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${t}` },
+        });
+      } catch { /* mejor esfuerzo */ }
+
+      // 3. Job de abrir Sunshine (crítico): el agente lo despacha al arrancar.
+      const jobRes = await apiFetch(`${API}/jobs`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dedupe_key: `abrir_streaming-${Date.now()}`,
+          payload: { accion: "abrir_streaming" },
+        }),
+      });
+      if (!jobRes.ok) { setPcStatus("error"); return; }
+      const jobData = await jobRes.json();
+      setActiveJobId(jobData?.job?.id || null);
+      setPcStatus("ok");
+    } catch {
+      setPcStatus("error");
+    }
+  }
+
   async function excludeSleepNight(date) {
     const t = localStorage.getItem("la_token") || "";
     setSleepExcluding(date);
@@ -1374,6 +1425,8 @@ export default function Dashboard() {
     "enunciado_extracted":  "Enunciado extraído",
     "solver_started":       "Cowork iniciado",
     "result_saved":         "Instrucción enviada",
+    "streaming_starting":   "Lanzando Sunshine",
+    "streaming_ready":      "Sunshine listo — abre Moonlight",
     "job_done":             "Completado",
   };
   const JOB_STATUS_LABEL = {
@@ -1642,6 +1695,20 @@ export default function Dashboard() {
               ✎ Escribir idea
             </button>
           </div>
+        </div>
+      );
+      case "acciones_pc": return (
+        <div style={cardStyle} data-card={id} key="acciones_pc">
+          <div style={s.sectionLabel}>Streaming PC</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, marginBottom: 12, lineHeight: 1.5 }}>
+            Enciende el PC y abre Sunshine para conectar con Moonlight desde el móvil.
+          </div>
+          <button
+            style={{ ...s.newIdeaBtn, width: "100%", marginTop: 0 }}
+            onClick={abrirStreaming}
+          >
+            🎮 Abrir streaming
+          </button>
         </div>
       );
       case "health_wellness": {
@@ -3128,6 +3195,93 @@ export default function Dashboard() {
                 <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>Error al conectar con Home Assistant</div>
                 <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>¿Estás conectado a la red local o VPN?</div>
                 <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
+                  padding: "8px 20px", background: "transparent",
+                  border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                  color: "var(--muted)", fontSize: 12, cursor: "pointer",
+                  fontFamily: "'DM Sans', sans-serif",
+                }}>Cerrar</button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── STREAMING PC ── */}
+      {pcModal && (
+        <>
+          <div onClick={() => { setPcModal(false); setPcStatus(null); }} style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)",
+            zIndex: 200, animation: "fadeInOverlay 0.2s ease",
+          }} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+            borderRadius: 16, padding: "32px 36px", zIndex: 201,
+            width: "min(400px, 90vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+            animation: "fadeInOverlay 0.2s ease",
+          }}>
+
+            {pcStatus === "loading" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>⚡</div>
+                <div style={{ fontSize: 13, color: "var(--muted)" }}>Encendiendo el PC...</div>
+              </div>
+            )}
+
+            {pcStatus === "ok" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>
+                  {jobTerminal?.status === "done" ? "🎮" : jobTerminal?.status === "failed" ? "❌" : "⚡"}
+                </div>
+                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500, marginBottom: 12 }}>
+                  {jobTerminal?.status === "done" ? "Sunshine listo — abre Moonlight" : "Abriendo streaming"}
+                </div>
+                <div style={{
+                  display: "inline-block", fontSize: 10, padding: "2px 10px", borderRadius: 99,
+                  background: jobStatus === "running" ? "rgba(106,170,130,0.15)" : "rgba(255,255,255,0.06)",
+                  color: jobStatus === "running" ? "var(--green)" : "var(--muted)",
+                  border: `0.5px solid ${jobStatus === "running" ? "rgba(106,170,130,0.4)" : "rgba(255,255,255,0.1)"}`,
+                  marginBottom: 12, letterSpacing: "0.05em",
+                }}>
+                  {JOB_STATUS_LABEL[jobStatus] || jobStatus || "—"}
+                </div>
+                <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 140, overflowY: "auto" }}>
+                  {jobEvents.length === 0
+                    ? <span style={{ color: "var(--muted2)", animation: "pulse 1.5s infinite", display: "inline-block" }}>El PC se está encendiendo... el agente arrancará con Windows.</span>
+                    : jobEvents.map((ev, i) => (
+                      <div key={i} style={{ marginBottom: 5, display: "flex", gap: 6, alignItems: "baseline" }}>
+                        <span style={{ color: "var(--accent)", flexShrink: 0 }}>·</span>
+                        <span style={{ color: i === jobEvents.length - 1 ? "var(--text)" : "var(--muted)" }}>
+                          {STAGE_LABELS[ev.stage] || ev.stage}
+                          {ev.message ? <span style={{ color: "var(--muted2)" }}> — {ev.message}</span> : null}
+                        </span>
+                      </div>
+                    ))
+                  }
+                </div>
+                {jobTerminal?.status === "failed" && jobTerminal.reason && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>
+                    {jobTerminal.reason}
+                  </div>
+                )}
+
+                <button onClick={() => { setPcModal(false); setPcStatus(null); }} style={{
+                  width: "100%", marginTop: 12, padding: "10px 0", background: "transparent",
+                  border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
+                  color: "var(--muted)", fontSize: 13, cursor: "pointer",
+                  fontFamily: "'DM Sans', sans-serif",
+                }}>Cerrar</button>
+              </div>
+            )}
+
+            {pcStatus === "error" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>❌</div>
+                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>No se pudo completar la acción</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>¿Estás conectado a la red local o VPN?</div>
+                <button onClick={() => { setPcModal(false); setPcStatus(null); }} style={{
                   padding: "8px 20px", background: "transparent",
                   border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
                   color: "var(--muted)", fontSize: 12, cursor: "pointer",
