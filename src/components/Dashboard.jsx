@@ -703,15 +703,9 @@ export default function Dashboard() {
     apiFetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => {
-        console.log("[CLASES] respuesta raw:", data);
-        if (Array.isArray(data.events)) {
-          console.log("[CLASES] total:", data.events.length, "hoy:", data.events.filter(e => isToday(e.start)).length);
-          setClassEvents(data.events);
-        } else {
-          console.warn("[CLASES] no es array:", data);
-        }
+        if (Array.isArray(data.events)) setClassEvents(data.events);
       })
-      .catch(e => console.error("[CLASES] error:", e));
+      .catch(() => { /* mejor esfuerzo: sin clases si falla */ });
   }, []);
 
   // Cargar resumen entrenamiento
@@ -737,16 +731,17 @@ export default function Dashboard() {
   }, []);
 
   // Geolocalización del dispositivo (para clima y origen del cálculo de salida).
-  // Si el usuario no da permiso o no está disponible, geo = false → se usan los
+  // Solo se pide con sesión iniciada (si no, el prompt saldría en la pantalla de
+  // login). Si el usuario no da permiso o no hay soporte, geo = false → se usan los
   // valores fijos de siempre (WEATHER_LAT/LON y HOME_ADDRESS).
   useEffect(() => {
-    if (!navigator.geolocation) return;   // geo ya arranca en false
+    if (!token || !navigator.geolocation) return;   // geo ya arranca en false
     navigator.geolocation.getCurrentPosition(
       pos => setGeo({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
       () => setGeo(false),
       { timeout: 8000, maximumAge: 600000 },
     );
-  }, []);
+  }, [token]);
 
   // Cargar clima — con las coordenadas del dispositivo si las hay, si no las fijas.
   // Espera a que la geolocalización se resuelva (coords o false) para no pedir dos veces.
@@ -769,10 +764,8 @@ export default function Dashboard() {
       try {
         const r = await apiFetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
         const data = await r.json();
-        console.log("[AGENT] estado:", data);
         if (mounted) setAgentState(data);
-      } catch (e) {
-        console.error("[AGENT] error:", e);
+      } catch {
         if (mounted) setAgentState({ status: "offline", offline: true });
       }
     }

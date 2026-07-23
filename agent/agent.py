@@ -505,9 +505,14 @@ def main():
         return
 
     heartbeat("online")
+    # Cada job se intenta como máximo una vez por ejecución: si claim/finish falla por
+    # un error de red y el job sigue 'pending', evitamos volver a recogerlo en bucle
+    # (lo reintentará la próxima ejecución del agente).
+    attempted = set()
     try:
-        # Drena la cola: procesa jobs mientras queden pendientes, luego termina.
-        while job:
+        # Drena la cola: procesa jobs mientras queden pendientes nuevos, luego termina.
+        while job and job["id"] not in attempted:
+            attempted.add(job["id"])
             procesar_job(job)
             job = poll_pending_job()
     finally:
