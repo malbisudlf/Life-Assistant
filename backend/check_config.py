@@ -58,6 +58,7 @@ def main() -> int:
 
     print(f"\nCORS: {os.getenv('CORS_ORIGINS', '(default: localhost + dominio de Mikel — pon el tuyo)')}")
     print(f"Calendario de clases: {os.getenv('CLASSES_CALENDAR', 'clases')}")
+    print(f"Clima (lat, lon): {os.getenv('WEATHER_LAT', '40.4168')}, {os.getenv('WEATHER_LON', '-3.7038')}")
 
     if errores:
         print(f"\n{KO} {errores} error(es) bloqueante(s).")

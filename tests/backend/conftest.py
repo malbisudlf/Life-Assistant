@@ -89,11 +89,13 @@ def reset_state():
         main._login_attempts.clear()
     main._wol_pending = False
     main._agent_relaunch_pending = False
+    main._pc_power_action = None
     yield
     with main._login_lock:
         main._login_attempts.clear()
     main._wol_pending = False
     main._agent_relaunch_pending = False
+    main._pc_power_action = None
 
 
 @pytest.fixture
