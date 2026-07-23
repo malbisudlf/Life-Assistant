@@ -28,3 +28,20 @@ class TestWeather:
     def test_error_de_open_meteo_devuelve_502(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "open-meteo.com", FakeResponse({}, status_code=500))
         assert client.get("/weather", headers=auth_headers).status_code == 502
+
+    def test_acepta_lat_lon_del_dispositivo(self, client, auth_headers, mock_requests):
+        capturado = {}
+
+        def responder(url, **kwargs):
+            capturado["params"] = kwargs.get("params", {})
+            return FakeResponse(OPEN_METEO_OK)
+
+        mock_requests.add("GET", "open-meteo.com", responder)
+        r = client.get("/weather?lat=43.26&lon=-2.93", headers=auth_headers)
+        assert r.status_code == 200
+        # Las coordenadas del dispositivo llegan a Open-Meteo, no las fijas
+        assert capturado["params"]["latitude"] == 43.26
+        assert capturado["params"]["longitude"] == -2.93
+
+    def test_lat_lon_invalidos_devuelven_422(self, client, auth_headers):
+        assert client.get("/weather?lat=hola&lon=-2.93", headers=auth_headers).status_code == 422
