@@ -93,3 +93,34 @@ class TestRelaunchAgent:
         client.post("/wake-pc", headers=auth_headers)
         assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
         assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": True}
+
+
+class TestPcPower:
+    def test_shutdown_requiere_jwt(self, client):
+        assert client.post("/shutdown-pc").status_code in (401, 403)
+
+    def test_suspend_requiere_jwt(self, client):
+        assert client.post("/suspend-pc").status_code in (401, 403)
+
+    def test_power_pending_requiere_token_servicio(self, client):
+        assert client.get("/ha/pc-power-pending").status_code == 403
+
+    def test_flujo_apagar(self, client, auth_headers):
+        # Sin acción marcada, el poll devuelve null
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": None}
+        # El dashboard pide apagar
+        assert client.post("/shutdown-pc", headers=auth_headers).json() == {"ok": True}
+        # El primer poll la recoge y la limpia
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": "shutdown"}
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": None}
+
+    def test_flujo_suspender(self, client, auth_headers):
+        client.post("/suspend-pc", headers=auth_headers)
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": "suspend"}
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": None}
+
+    def test_la_ultima_accion_gana(self, client, auth_headers):
+        # Si se piden dos, prevalece la última marcada
+        client.post("/suspend-pc", headers=auth_headers)
+        client.post("/shutdown-pc", headers=auth_headers)
+        assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": "shutdown"}

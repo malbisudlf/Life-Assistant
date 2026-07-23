@@ -101,8 +101,8 @@ Ficheros clave:
   (env, default `Europe/Madrid`) — úsala en vez de hardcodear zonas. Cualquier
   fecha nueva que salga de la API debe ser UTC-Z.
 - **Kit self-hosted**: la instancia se personaliza por env — `TIMEZONE`,
-  `CLASSES_CALENDAR`, `CORS_ORIGINS`, `HOME_ADDRESS` (backend, ver
-  `backend/.env.example` y `backend/check_config.py`) y `VITE_API_URL`,
+  `CLASSES_CALENDAR`, `CORS_ORIGINS`, `HOME_ADDRESS`, `WEATHER_LAT`/`WEATHER_LON`
+  (backend, ver `backend/.env.example` y `backend/check_config.py`) y `VITE_API_URL`,
   `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`, `VITE_ENTREGAS_MARKER` (frontend).
   La guía de despliegue para terceros es `docs/DESPLIEGUE.md`: si añades una
   variable o migración, actualízala. No reintroduzcas valores personales

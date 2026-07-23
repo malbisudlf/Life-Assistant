@@ -2,7 +2,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric,
+  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -131,5 +131,12 @@ describe("helpers de salud", () => {
     expect(findMetric(metrics, "step_count", "steps")).toEqual([{ date: "2026-07-05", value: 100 }]);
     expect(findMetric(metrics, "no_existe")).toEqual([]);
     expect(findMetric(null, "steps")).toEqual([]);
+  });
+
+  test("weatherFromCode traduce códigos WMO y cae en un default", () => {
+    expect(weatherFromCode(0)).toEqual({ emoji: "☀️", label: "Despejado" });
+    expect(weatherFromCode(3)).toEqual({ emoji: "☁️", label: "Nublado" });
+    expect(weatherFromCode(95)).toEqual({ emoji: "⛈️", label: "Tormenta" });
+    expect(weatherFromCode(1234)).toEqual({ emoji: "🌡️", label: "—" });
   });
 });

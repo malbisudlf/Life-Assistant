@@ -65,6 +65,7 @@ fly secrets set \
   TIMEZONE=Europe/Madrid \
   HOME_ADDRESS="Tu dirección, Ciudad" \
   CLASSES_CALENDAR=clases \
+  WEATHER_LAT=40.4168 WEATHER_LON=-3.7038 \
   CORS_ORIGINS="http://localhost:5173,https://TU-APP.vercel.app"
 fly deploy
 ```
@@ -73,6 +74,8 @@ Notas:
 - `DASHBOARD_PASSWORD` **numérica**: el input del login es un teclado numérico.
 - `CLASSES_CALENDAR` es el nombre de un calendario de Outlook aparte para clases
   con horario; si no lo usas, ignora el panel de clases.
+- `WEATHER_LAT`/`WEATHER_LON` son las coordenadas del widget de clima (Open-Meteo,
+  gratis y sin API key). Por defecto Madrid.
 - Google Maps: activa **Distance Matrix API** en tu proyecto de Google Cloud y
   restringe la key a esa API.
 
@@ -163,7 +166,8 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `DASHBOARD_PASSWORD`*, `SUPABASE_URL`, `SUPABASE_KEY`, `CLIENT_ID`, `TENANT_ID`,
 `CLIENT_SECRET`, `REDIRECT_URI`, `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY`,
 `HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
-`CLASSES_CALENDAR`, `CORS_ORIGINS`. (* = obligatoria para arrancar.)
+`CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`.
+(* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
 `VITE_ENTREGAS_MARKER`.
