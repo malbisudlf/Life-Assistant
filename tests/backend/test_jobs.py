@@ -22,6 +22,25 @@ class TestCreateJob:
         r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": "alud-99"})
         assert r.json() == {"ok": True, "job": existing}
 
+    def test_dedupe_key_se_codifica_en_la_url(self, client, auth_headers, mock_requests):
+        # dedupe_key es entrada de usuario (lleva el título de la entrega). Caracteres
+        # como '&' o espacios deben ir codificados en la URL de recuperación, no crudos.
+        capturado = {}
+
+        def captura_get(url, **kwargs):
+            capturado["url"] = url
+            return FakeResponse([{"id": JOB_ID, "status": "running"}])
+
+        mock_requests.add("POST", "/rest/v1/jobs", FakeResponse([], 201))
+        mock_requests.add("GET", "/rest/v1/jobs?dedupe_key=", captura_get)
+        clave = "entrega-Física & Química-123"
+        r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": clave})
+        assert r.status_code == 200
+        # El '&' y el espacio crudos romperían la query de PostgREST
+        assert " " not in capturado["url"].split("dedupe_key=eq.")[1].split("&limit")[0]
+        assert "Química-123" not in capturado["url"]        # tildes y espacios codificados
+        assert "%26" in capturado["url"]                    # '&' → %26
+
     def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
         mock_requests.add("POST", "/rest/v1/jobs", FakeResponse(None, 500, "secreto interno"))
         r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": "k"})
