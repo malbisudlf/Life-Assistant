@@ -39,8 +39,16 @@ export function formatShortDate(dateStr) {
   return `${d} ${MONTHS_ES[m - 1].slice(0, 3)}`;
 }
 
-export const DAYS_ES   = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+export const DAYS_ES       = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+export const DAYS_SHORT_ES = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
 export const MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+// Día de la semana corto ("Lun", "Mar"…) de una fecha ISO "YYYY-MM-DD".
+// Se parsea como medianoche LOCAL para que no baile de día según la zona.
+export function weekdayShort(isoDate) {
+  const d = new Date(`${isoDate}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? "" : DAYS_SHORT_ES[d.getDay()];
+}
 
 export function isoToDdMmYyyy(iso) {
   if (!iso) return "";
