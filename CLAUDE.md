@@ -50,12 +50,14 @@ Browser (React 19 + Vite, Vercel)
 backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~1500 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
+    ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
     ├── Supabase REST ── ideas, jobs, pc_agents, training_*, health_metrics, oauth_tokens
-    └── Home Assistant ── HA sondea al backend (flag WOL cada 30s, eventos cada 60s)
+    └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
+                          apagado/suspensión del PC, que HA ejecuta por SSH)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
-agent/agent.py → agente Windows (Playwright + pyautogui); consume la cola de jobs
+agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
 ```
 
 Ficheros clave:
@@ -123,9 +125,25 @@ Ficheros clave:
   (÷ 4.184). `sleep_analysis` guarda `sleep_start` ("HH:MM") en `extra` y respeta el
   flag `excluded` (noches anuladas por el usuario). El patrón de escritura es
   POST → si 409, PATCH.
-- **WOL**: `_wol_pending` es un flag global en memoria. `/wake-pc` lo marca, HA lo
-  recoge en `/ha/wol-pending` (que lo limpia al leerlo). No lo conviertas en estado
-  persistente sin pensar en el poll de HA.
+- **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
+  en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
+  start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
+  poll de HA.
+  - `_wol_pending` → `/wake-pc` marca, `/ha/wol-pending` recoge (magic packet).
+  - `_agent_relaunch_pending` → `/relaunch-agent` marca, `/ha/agent-relaunch-pending`
+    recoge. Para relanzar el agente efímero por SSH cuando el PC ya está encendido.
+  - `_pc_power_action` (`"shutdown"|"suspend"|None`) → `/shutdown-pc` / `/suspend-pc`
+    marcan, `/ha/pc-power-pending` recoge. Apagar/suspender no pasa por el agente: HA
+    lo ejecuta por SSH directo (el agente es efímero y ya terminó).
+- **Agente PC efímero + despachador**: `agent/agent.py` arranca con Windows (vía WOL),
+  drena la cola y se cierra. Según `payload["accion"]` despacha a `ACCIONES`
+  (`resolver_alud`, `abrir_streaming`). Compatibilidad: jobs sin `accion` pero con
+  `alud_url` → `resolver_alud`. `resolver_accion()` + guard `attempted` (cada job se
+  intenta una vez por ejecución para no repetir en bucle si falla el claim por red).
+- **Clima**: `/weather` (Open-Meteo, gratis, sin API key) usa `WEATHER_LAT/LON`, o las
+  coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
+  cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
+  hay, con fallback a `HOME_ADDRESS`.
 
 ## Frontend: cómo está organizado Dashboard.jsx
 
@@ -134,11 +152,13 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 `--accent`...) → `DateInput`/`TimeInput` → COMPONENTE PRINCIPAL (estados, efectos,
 `renderWidget`, skeleton, modo simplificado móvil, modales, panel de clases).
 
-- **Widgets**: definidos en `ALL_DEFAULT_WIDGETS` (ids: `timeline`, `upcoming`,
-  `entregas`, `training`, `ideas`, `health_wellness`, `health_sleep`, `health_heart`,
-  `health_hrv`, `health_activity`, `health_workouts`). Cada uno se renderiza en
-  `renderWidget(id)`. La configuración (visibilidad, columna, orden, tamaño, splits)
-  se persiste en `localStorage`.
+- **Widgets**: definidos en `ALL_DEFAULT_WIDGETS` (ids: `timeline`, `weather`,
+  `upcoming`, `entregas`, `training`, `ideas`, `acciones_pc` (Streaming PC),
+  `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
+  `health_workouts`). Cada uno se renderiza en `renderWidget(id)`. La configuración
+  (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
+  selección independiente en modo completo (`la_widget_config`) y simple
+  (`la_simple_widget_config`).
 - **Claves de localStorage** (prefijo `la_`): `la_token` (JWT), `la_widget_config`,
   `la_num_columns`, `la_col_splits`, `la_notifications`, `la_simple_mode`,
   `la_body_goals`, `la_training_days`. Si añades una, mantén el prefijo y el
@@ -230,5 +250,7 @@ Trampas conocidas de jsdom:
 - No borres el soporte de token por query string en `_extract_service_token` sin
   migrar antes esas integraciones.
 - No subas `.env`, tokens ni el directorio `.venv` (ya están en `.gitignore`).
-- No hagas deploy del backend salvo que se pida: `fly deploy` es manual y afecta a
-  producción real.
+- No hagas deploy del backend salvo que se pida: afecta a producción real. El deploy
+  es manual — `fly deploy` desde `backend/`, o el workflow `Deploy backend (Fly.io)`
+  (`.github/workflows/deploy-backend.yml`, `workflow_dispatch`; usa el secret
+  `FLY_API_TOKEN`). Nunca en automático al hacer push.
