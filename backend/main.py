@@ -902,9 +902,12 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data = r.json()
     if data:
         return {"ok": True, "job": data[0]}
-    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente
+    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente.
+    # dedupe_key es entrada de usuario (p. ej. lleva el título de una entrega): se
+    # codifica antes de interpolarla en la URL de PostgREST para no romper la query
+    # ni permitir inyección de parámetros (mismo patrón que quote() en entrenamiento).
     r2 = requests.get(
-        f"{SUPABASE_URL}/rest/v1/jobs?dedupe_key=eq.{body.dedupe_key}&limit=1",
+        f"{SUPABASE_URL}/rest/v1/jobs?dedupe_key=eq.{quote(body.dedupe_key, safe='')}&limit=1",
         headers=supabase_headers(),
     )
     data2 = r2.json() if r2.status_code < 300 else []
