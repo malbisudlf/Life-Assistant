@@ -9,6 +9,20 @@ y encola el job de Sunshine; conectas con **Moonlight** desde el móvil.
 > Estos pasos son específicos del PC de Mikel (no forman parte del kit replicable):
 > requieren un Windows real con Edge, sesión activa y hardware con WOL.
 
+## 0. Sincronizar el repo en casa (antes de nada)
+
+CLAUDE.md pasó a estar **versionado** en el repo. Si tu copia local tenía un
+CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
+
+- [ ] `git status` **primero**, para ver el estado de CLAUDE.md:
+      - Sale limpio → `git pull origin main` sin más.
+      - Sale como *untracked* → guárdalo antes: `mv CLAUDE.md CLAUDE.local.md`, luego
+        `git pull origin main`. (Git rechaza el pull si sobrescribiría un fichero sin
+        trackear: *"untracked working tree files would be overwritten by merge"*.)
+      - Sale como *modified* → resuelve el conflicto de merge normal tras el pull.
+- [ ] Si tenías notas personales en tu CLAUDE.md, muévelas a un fichero ignorado
+      (p. ej. `NOTAS.local.md`) para no volver a chocar.
+
 ## 1. Actualizar el agente en el PC
 
 - [ ] `git pull` en la carpeta del repo (trae el `agent/agent.py` efímero + despachador).
