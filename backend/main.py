@@ -106,6 +106,8 @@ HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 # Personalización de la instancia (kit self-hosted)
 TIMEZONE         = os.getenv("TIMEZONE", "Europe/Madrid")   # zona horaria IANA del usuario
 CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calendario de clases en Outlook
+WEATHER_LAT      = os.getenv("WEATHER_LAT", "40.4168")      # coordenadas para el clima (Open-Meteo)
+WEATHER_LON      = os.getenv("WEATHER_LON", "-3.7038")      # por defecto Madrid
 
 try:
     LOCAL_TZ = ZoneInfo(TIMEZONE)
@@ -249,6 +251,10 @@ _wol_pending = False
 # YA está encendido, el WOL no relanza nada: este flag pide a HA que arranque el
 # agente por SSH. Mismo patrón que _wol_pending: se marca aquí y HA lo limpia al leerlo.
 _agent_relaunch_pending = False
+# Apagar/suspender el PC. No pasa por el agente (que es efímero y ya terminó cuando el
+# PC está encendido): HA lo ejecuta directo por SSH. Guarda la acción pendiente
+# ("shutdown" | "suspend" | None) y HA la lee y la limpia.
+_pc_power_action = None
 
 def _clean_class_title(subject: str) -> str:
     s = re.sub(r"^\d+\s*-\s*", "", subject)
@@ -620,6 +626,41 @@ def get_departure_time(
         raise HTTPException(status_code=500, detail="Error procesando respuesta de Maps")
 
 
+# ── CLIMA ─────────────────────────────────────────────────────────────────────
+
+@app.get("/weather")
+def get_weather(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Clima actual + máx/mín de hoy vía Open-Meteo (gratis, sin API key). Las
+    coordenadas salen de WEATHER_LAT/WEATHER_LON. El código WMO lo traduce el
+    frontend a icono/texto (helpers.weatherFromCode)."""
+    r = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": WEATHER_LAT,
+            "longitude": WEATHER_LON,
+            "current": "temperature_2m,weather_code",
+            "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+            "timezone": "auto",
+            "forecast_days": 1,
+        },
+        timeout=10,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=502, detail="No se pudo obtener el clima")
+    try:
+        data    = r.json()
+        current = data["current"]
+        daily   = data["daily"]
+        return {
+            "temp":     round(current["temperature_2m"]),
+            "code":     int(current["weather_code"]),
+            "temp_max": round(daily["temperature_2m_max"][0]),
+            "temp_min": round(daily["temperature_2m_min"][0]),
+        }
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail="Respuesta de clima inválida")
+
+
 # ── IDEAS ─────────────────────────────────────────────────────────
 
 @app.get("/ideas")
@@ -795,6 +836,30 @@ def ha_agent_relaunch_pending(request: Request, token: str = ""):
     pending = _agent_relaunch_pending
     _agent_relaunch_pending = False
     return {"pending": pending}
+
+@app.post("/shutdown-pc")
+def shutdown_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Marca apagado del PC pendiente — HA lo ejecuta por SSH en su próximo poll."""
+    global _pc_power_action
+    _pc_power_action = "shutdown"
+    return {"ok": True}
+
+@app.post("/suspend-pc")
+def suspend_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Marca suspensión del PC pendiente — HA lo ejecuta por SSH en su próximo poll."""
+    global _pc_power_action
+    _pc_power_action = "suspend"
+    return {"ok": True}
+
+@app.get("/ha/pc-power-pending")
+def ha_pc_power_pending(request: Request, token: str = ""):
+    """HA sondea este endpoint. Devuelve la acción pendiente ("shutdown"|"suspend"|null) y la limpia."""
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    global _pc_power_action
+    action = _pc_power_action
+    _pc_power_action = None
+    return {"action": action}
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):

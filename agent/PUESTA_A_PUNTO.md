@@ -84,10 +84,47 @@ automation:
 - [ ] Pegar el YAML con tu `HA_POLL_TOKEN` y la IP del PC.
 - [ ] Reiniciar HA y comprobar que aparece `sensor.agente_pc_relaunch_pending`.
 
+### Apagar / suspender el PC (botones del widget)
+
+Los botones "Apagar" y "Suspender" no pasan por el agente: HA ejecuta el comando por
+SSH directo. Mismo patrón que el relanzado, sondeando `/ha/pc-power-pending`.
+
+```yaml
+shell_command:
+  apagar_pc:    'ssh -i /config/.ssh/id_pc mikel@IP_DEL_PC "shutdown /s /t 0"'
+  suspender_pc: 'ssh -i /config/.ssh/id_pc mikel@IP_DEL_PC "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"'
+
+command_line:
+  - sensor:
+      name: pc_power_action
+      command: 'curl -s -H "X-Auth-Token: TU_HA_POLL_TOKEN" https://backend-tender-glow-160.fly.dev/ha/pc-power-pending'
+      value_template: "{{ value_json.action if value_json.action else 'none' }}"
+      scan_interval: 30
+
+automation:
+  - alias: Apagar/suspender PC cuando el dashboard lo pide
+    trigger:
+      - platform: state
+        entity_id: sensor.pc_power_action
+        to: "shutdown"
+      - platform: state
+        entity_id: sensor.pc_power_action
+        to: "suspend"
+    action:
+      - choose:
+          - conditions: "{{ trigger.to_state.state == 'shutdown' }}"
+            sequence: [{ service: shell_command.apagar_pc }]
+          - conditions: "{{ trigger.to_state.state == 'suspend' }}"
+            sequence: [{ service: shell_command.suspender_pc }]
+```
+
+- [ ] Pegar también este YAML si quieres los botones de apagar/suspender.
+
 ## 7. Desplegar el backend
 
-- [ ] `cd backend && fly deploy` (activa `/relaunch-agent` y `/ha/agent-relaunch-pending`
-      en producción). Si es la primera vez en ese equipo: `fly auth login`.
+- [ ] `cd backend && fly deploy` (activa `/relaunch-agent`, `/ha/agent-relaunch-pending`,
+      `/shutdown-pc`, `/suspend-pc`, `/ha/pc-power-pending` y `/weather` en producción).
+      Si es la primera vez en ese equipo: `fly auth login`.
 
 ## 8. Prueba end-to-end
 

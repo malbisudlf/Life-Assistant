@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric,
+  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -248,6 +248,7 @@ const DEFAULT_COLUMNS = {
 
 const ALL_DEFAULT_WIDGETS = [
   { id: "timeline",          label: "Hoy",              visible: true,  column: "left"  },
+  { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
@@ -441,6 +442,9 @@ export default function Dashboard() {
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [pcModal, setPcModal]         = useState(false);  // panel "Streaming PC"
   const [pcStatus, setPcStatus]       = useState(null);   // 'loading' | 'ok' | 'error'
+  const [pcPower, setPcPower]         = useState(null);   // feedback apagar/suspender
+  const [confirmShutdown, setConfirmShutdown] = useState(false); // confirmación de apagar
+  const [weather, setWeather]         = useState(null);
   const [agentState, setAgentState]   = useState(null);
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
@@ -725,6 +729,16 @@ export default function Dashboard() {
     apiFetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
+      .catch(() => {});
+  }, []);
+
+  // Cargar clima
+  useEffect(() => {
+    const t = localStorage.getItem("la_token") || "";
+    if (!t) return;
+    apiFetch(`${API}/weather`, { headers: { "Authorization": `Bearer ${t}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data && typeof data.temp === "number") setWeather(data); })
       .catch(() => {});
   }, []);
 
@@ -1039,6 +1053,23 @@ export default function Dashboard() {
       setPcStatus("ok");
     } catch {
       setPcStatus("error");
+    }
+  }
+
+  // Apagar/suspender: no pasa por el agente (efímero); marca el flag y HA lo
+  // ejecuta por SSH. accion: "shutdown" | "suspend".
+  async function pcPowerAction(accion) {
+    setConfirmShutdown(false);
+    setPcPower(accion === "shutdown" ? "shutting" : "suspending");
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      const r = await apiFetch(`${API}/${accion === "shutdown" ? "shutdown-pc" : "suspend-pc"}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}` },
+      });
+      setPcPower(r.ok ? (accion === "shutdown" ? "shutdown_sent" : "suspend_sent") : "error");
+    } catch {
+      setPcPower("error");
     }
   }
 
@@ -1709,8 +1740,69 @@ export default function Dashboard() {
           >
             🎮 Abrir streaming
           </button>
+          {/* Apagar / suspender: los ejecuta HA por SSH (el agente es efímero) */}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button
+              style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0, fontSize: 12 }}
+              onClick={() => pcPowerAction("suspend")}
+              disabled={pcPower === "suspending" || pcPower === "shutting"}
+            >
+              ⏸ Suspender
+            </button>
+            <button
+              style={{
+                ...s.newIdeaBtn, flex: 1, marginTop: 0, fontSize: 12,
+                ...(confirmShutdown ? { borderColor: "#d4645a", color: "#d4645a" } : {}),
+              }}
+              onClick={() => confirmShutdown ? pcPowerAction("shutdown") : setConfirmShutdown(true)}
+              disabled={pcPower === "suspending" || pcPower === "shutting"}
+            >
+              {confirmShutdown ? "¿Seguro? Apagar" : "⏻ Apagar"}
+            </button>
+          </div>
+          {pcPower && (
+            <div style={{
+              fontSize: 11, marginTop: 8, textAlign: "center",
+              color: pcPower === "error" ? "#d4645a" : "var(--muted)",
+            }}>
+              {pcPower === "suspending" ? "Enviando suspensión..."
+                : pcPower === "shutting" ? "Enviando apagado..."
+                : pcPower === "suspend_sent" ? "Suspensión enviada — HA la ejecutará"
+                : pcPower === "shutdown_sent" ? "Apagado enviado — HA lo ejecutará"
+                : "No se pudo enviar la orden"}
+            </div>
+          )}
         </div>
       );
+      case "weather": {
+        if (!weather) {
+          return (
+            <div style={cardStyle} data-card={id} key="weather">
+              <div style={s.sectionLabel}>Clima</div>
+              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>Sin datos de clima</div>
+            </div>
+          );
+        }
+        const { emoji, label } = weatherFromCode(weather.code);
+        return (
+          <div style={cardStyle} data-card={id} key="weather">
+            <div style={s.sectionLabel}>Clima</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6 }}>
+              <span style={{ fontSize: 40, lineHeight: 1 }}>{emoji}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 28, color: "var(--text)", lineHeight: 1 }}>
+                  {weather.temp}°
+                </div>
+                <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>{label}</div>
+              </div>
+              <div style={{ textAlign: "right", fontSize: 13, color: "var(--muted)" }}>
+                <div>máx <span style={{ color: "var(--text)" }}>{weather.temp_max}°</span></div>
+                <div>mín <span style={{ color: "var(--text)" }}>{weather.temp_min}°</span></div>
+              </div>
+            </div>
+          </div>
+        );
+      }
       case "health_wellness": {
         // ── datos base ──
         const wSleepEff = d => {

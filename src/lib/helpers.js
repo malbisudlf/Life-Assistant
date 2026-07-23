@@ -133,3 +133,40 @@ export function findMetric(metrics, ...names) {
   }
   return [];
 }
+
+// Traduce el código WMO de Open-Meteo a icono + texto en español.
+// Los códigos se agrupan por familia (grupos de la especificación WMO 4677).
+export function weatherFromCode(code) {
+  const map = {
+    0:  ["☀️", "Despejado"],
+    1:  ["🌤️", "Poco nuboso"],
+    2:  ["⛅", "Parcialmente nuboso"],
+    3:  ["☁️", "Nublado"],
+    45: ["🌫️", "Niebla"],
+    48: ["🌫️", "Niebla helada"],
+    51: ["🌦️", "Llovizna ligera"],
+    53: ["🌦️", "Llovizna"],
+    55: ["🌦️", "Llovizna intensa"],
+    56: ["🌧️", "Llovizna helada"],
+    57: ["🌧️", "Llovizna helada"],
+    61: ["🌧️", "Lluvia ligera"],
+    63: ["🌧️", "Lluvia"],
+    65: ["🌧️", "Lluvia fuerte"],
+    66: ["🌧️", "Lluvia helada"],
+    67: ["🌧️", "Lluvia helada"],
+    71: ["🌨️", "Nieve ligera"],
+    73: ["🌨️", "Nieve"],
+    75: ["❄️", "Nieve fuerte"],
+    77: ["🌨️", "Aguanieve"],
+    80: ["🌦️", "Chubascos"],
+    81: ["🌧️", "Chubascos"],
+    82: ["⛈️", "Chubascos fuertes"],
+    85: ["🌨️", "Chubascos de nieve"],
+    86: ["❄️", "Chubascos de nieve"],
+    95: ["⛈️", "Tormenta"],
+    96: ["⛈️", "Tormenta con granizo"],
+    99: ["⛈️", "Tormenta con granizo"],
+  };
+  const [emoji, label] = map[code] || ["🌡️", "—"];
+  return { emoji, label };
+}
