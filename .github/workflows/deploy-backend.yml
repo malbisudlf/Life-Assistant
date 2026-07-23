@@ -1,0 +1,20 @@
+name: Deploy backend (Fly.io)
+
+# Deploy manual del backend. Se lanza a mano desde la pestaña Actions
+# ("Run workflow") o vía API — nunca automáticamente al hacer push, porque
+# afecta a producción real. El token vive como secret de GitHub (FLY_API_TOKEN);
+# nunca se expone en el repo ni en el cliente.
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: fly deploy
+        working-directory: backend   # el fly.toml y el Dockerfile viven en backend/
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only
