@@ -445,6 +445,10 @@ export default function Dashboard() {
   const [pcPower, setPcPower]         = useState(null);   // feedback apagar/suspender
   const [confirmShutdown, setConfirmShutdown] = useState(false); // confirmación de apagar
   const [weather, setWeather]         = useState(null);
+  // {lat, lon} | false (sin permiso/soporte) | null (pendiente). Arranca en false
+  // si el navegador no tiene geolocalización, para no hacer setState síncrono en el efecto.
+  const [geo, setGeo] = useState(() =>
+    (typeof navigator !== "undefined" && navigator.geolocation) ? null : false);
   const [agentState, setAgentState]   = useState(null);
   const [activeJobId, setActiveJobId] = useState(null);
   const [jobEvents, setJobEvents] = useState([]);
@@ -732,15 +736,29 @@ export default function Dashboard() {
       .catch(() => {});
   }, []);
 
-  // Cargar clima
+  // Geolocalización del dispositivo (para clima y origen del cálculo de salida).
+  // Si el usuario no da permiso o no está disponible, geo = false → se usan los
+  // valores fijos de siempre (WEATHER_LAT/LON y HOME_ADDRESS).
+  useEffect(() => {
+    if (!navigator.geolocation) return;   // geo ya arranca en false
+    navigator.geolocation.getCurrentPosition(
+      pos => setGeo({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => setGeo(false),
+      { timeout: 8000, maximumAge: 600000 },
+    );
+  }, []);
+
+  // Cargar clima — con las coordenadas del dispositivo si las hay, si no las fijas.
+  // Espera a que la geolocalización se resuelva (coords o false) para no pedir dos veces.
   useEffect(() => {
     const t = localStorage.getItem("la_token") || "";
-    if (!t) return;
-    apiFetch(`${API}/weather`, { headers: { "Authorization": `Bearer ${t}` } })
+    if (!t || geo === null) return;
+    const q = geo ? `?lat=${geo.lat}&lon=${geo.lon}` : "";
+    apiFetch(`${API}/weather${q}`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data && typeof data.temp === "number") setWeather(data); })
       .catch(() => {});
-  }, []);
+  }, [geo]);
 
   // Estado del agente PC (heartbeat)
   useEffect(() => {
@@ -909,10 +927,14 @@ export default function Dashboard() {
     setDepartureLoadingId(key);
     try {
       const t = localStorage.getItem("la_token") || "";
+      // Origen = ubicación del dispositivo si hay geolocalización; si no, el backend
+      // usa HOME_ADDRESS por defecto (no mandamos 'origin').
+      const body = { destination: ev.loc, event_time: ev.start, mode };
+      if (geo) body.origin = `${geo.lat},${geo.lon}`;
       const res = await apiFetch(`${API}/maps/departure`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ destination: ev.loc, event_time: ev.start, mode }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       setDepartureMap(prev => ({ ...prev, [key]: { ...data, mode } }));

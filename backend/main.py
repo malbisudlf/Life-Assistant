@@ -629,15 +629,22 @@ def get_departure_time(
 # ── CLIMA ─────────────────────────────────────────────────────────────────────
 
 @app.get("/weather")
-def get_weather(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Clima actual + máx/mín de hoy vía Open-Meteo (gratis, sin API key). Las
-    coordenadas salen de WEATHER_LAT/WEATHER_LON. El código WMO lo traduce el
-    frontend a icono/texto (helpers.weatherFromCode)."""
+def get_weather(
+    lat: float | None = None,
+    lon: float | None = None,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Clima actual + máx/mín de hoy vía Open-Meteo (gratis, sin API key). Si el
+    dispositivo manda lat/lon (geolocalización del navegador) se usan esas; si no,
+    caen a WEATHER_LAT/WEATHER_LON. El código WMO lo traduce el frontend a
+    icono/texto (helpers.weatherFromCode)."""
+    latitude  = lat if lat is not None else WEATHER_LAT
+    longitude = lon if lon is not None else WEATHER_LON
     r = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
-            "latitude": WEATHER_LAT,
-            "longitude": WEATHER_LON,
+            "latitude": latitude,
+            "longitude": longitude,
             "current": "temperature_2m,weather_code",
             "daily": "temperature_2m_max,temperature_2m_min,weather_code",
             "timezone": "auto",
