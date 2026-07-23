@@ -2,7 +2,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode,
+  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -138,5 +138,10 @@ describe("helpers de salud", () => {
     expect(weatherFromCode(3)).toEqual({ emoji: "☁️", label: "Nublado" });
     expect(weatherFromCode(95)).toEqual({ emoji: "⛈️", label: "Tormenta" });
     expect(weatherFromCode(1234)).toEqual({ emoji: "🌡️", label: "—" });
+  });
+
+  test("weekdayShort da el día corto en español y '' si es inválido", () => {
+    expect(weekdayShort("2026-07-23")).toBe("Jue");
+    expect(weekdayShort("no-es-fecha")).toBe("");
   });
 });

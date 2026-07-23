@@ -645,10 +645,10 @@ def get_weather(
         params={
             "latitude": latitude,
             "longitude": longitude,
-            "current": "temperature_2m,weather_code",
-            "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+            "current": "temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
             "timezone": "auto",
-            "forecast_days": 1,
+            "forecast_days": 6,
         },
         timeout=10,
     )
@@ -658,11 +658,32 @@ def get_weather(
         data    = r.json()
         current = data["current"]
         daily   = data["daily"]
+
+        def _round_opt(v):
+            return round(v) if isinstance(v, (int, float)) else None
+
+        # Previsión por días (hoy incluido). El frontend deriva el día de la semana.
+        dias = []
+        for i in range(len(daily["time"])):
+            dias.append({
+                "date":        daily["time"][i],
+                "code":        int(daily["weather_code"][i]),
+                "max":         round(daily["temperature_2m_max"][i]),
+                "min":         round(daily["temperature_2m_min"][i]),
+                "precip_prob": _round_opt(daily.get("precipitation_probability_max", [None] * len(daily["time"]))[i]),
+            })
+
         return {
-            "temp":     round(current["temperature_2m"]),
-            "code":     int(current["weather_code"]),
-            "temp_max": round(daily["temperature_2m_max"][0]),
-            "temp_min": round(daily["temperature_2m_min"][0]),
+            "temp":       round(current["temperature_2m"]),
+            "code":       int(current["weather_code"]),
+            "temp_max":   dias[0]["max"],
+            "temp_min":   dias[0]["min"],
+            # Extras para la vista desplegada (opcionales por robustez).
+            "feels_like": _round_opt(current.get("apparent_temperature")),
+            "humidity":   _round_opt(current.get("relative_humidity_2m")),
+            "wind":       _round_opt(current.get("wind_speed_10m")),
+            "precip":     current.get("precipitation"),
+            "daily":      dias,
         }
     except (KeyError, IndexError, TypeError):
         raise HTTPException(status_code=502, detail="Respuesta de clima inválida")

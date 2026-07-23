@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode,
+  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -445,6 +445,7 @@ export default function Dashboard() {
   const [pcPower, setPcPower]         = useState(null);   // feedback apagar/suspender
   const [confirmShutdown, setConfirmShutdown] = useState(false); // confirmación de apagar
   const [weather, setWeather]         = useState(null);
+  const [weatherExpanded, setWeatherExpanded] = useState(false);
   // {lat, lon} | false (sin permiso/soporte) | null (pendiente). Arranca en false
   // si el navegador no tiene geolocalización, para no hacer setState síncrono en el efecto.
   const [geo, setGeo] = useState(() =>
@@ -1799,8 +1800,16 @@ export default function Dashboard() {
           );
         }
         const { emoji, label } = weatherFromCode(weather.code);
+        const stats = [];
+        if (weather.feels_like != null) stats.push(["Sensación", `${weather.feels_like}°`]);
+        if (weather.humidity   != null) stats.push(["Humedad", `${weather.humidity}%`]);
+        if (weather.wind       != null) stats.push(["Viento", `${weather.wind} km/h`]);
+        const hoyProb = weather.daily?.[0]?.precip_prob;
+        if (hoyProb != null) stats.push(["Lluvia", `${hoyProb}%`]);
         return (
-          <div style={cardStyle} data-card={id} key="weather">
+          <div style={{ ...cardStyle, cursor: "pointer" }} data-card={id} key="weather"
+               onClick={() => setWeatherExpanded(v => !v)}
+               title={weatherExpanded ? "Contraer" : "Ver más"}>
             <div style={s.sectionLabel}>Clima</div>
             <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6 }}>
               <span style={{ fontSize: 40, lineHeight: 1 }}>{emoji}</span>
@@ -1814,7 +1823,38 @@ export default function Dashboard() {
                 <div>máx <span style={{ color: "var(--text)" }}>{weather.temp_max}°</span></div>
                 <div>mín <span style={{ color: "var(--text)" }}>{weather.temp_min}°</span></div>
               </div>
+              <span style={{ fontSize: 11, color: "var(--muted2)", flexShrink: 0,
+                transform: weatherExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>▶</span>
             </div>
+
+            {weatherExpanded && (
+              <>
+                {stats.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 14, paddingTop: 14, borderTop: "0.5px solid var(--border2)" }}>
+                    {stats.map(([k, v]) => (
+                      <div key={k} style={{ fontSize: 12, color: "var(--muted)" }}>
+                        {k} <span style={{ color: "var(--text)" }}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {weather.daily?.length > 1 && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 14, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                    {weather.daily.map((d, i) => {
+                      const w = weatherFromCode(d.code);
+                      return (
+                        <div key={d.date} style={{ flexShrink: 0, textAlign: "center", minWidth: 46 }}>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>{i === 0 ? "Hoy" : weekdayShort(d.date)}</div>
+                          <div style={{ fontSize: 22, lineHeight: 1 }}>{w.emoji}</div>
+                          <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4 }}>{d.max}°</div>
+                          <div style={{ fontSize: 11, color: "var(--muted2)" }}>{d.min}°</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         );
       }
