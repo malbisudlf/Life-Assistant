@@ -3,6 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -238,6 +239,7 @@ const DEFAULT_COLUMNS = {
   entregas:          "right",
   training:          "right",
   ideas:             "right",
+  clothing:          "right",
   health_wellness:   "left",
   health_sleep:      "right",
   health_heart:      "right",
@@ -253,6 +255,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
+  { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
   { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
   { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
@@ -492,6 +495,16 @@ export default function Dashboard() {
   const [trainingDays, setTrainingDays] = useState(() => {
     try { return JSON.parse(localStorage.getItem("la_training_days") || "[1,3,4,0]"); } catch { return [1,3,4,0]; }
   });
+  // Conteo de ropa (widget temporal). Se persiste en el backend (Supabase); las
+  // fotos van como data URL redimensionada en el navegador antes de subirlas.
+  const [clothing, setClothing]                 = useState([]);
+  const [showClothingForm, setShowClothingForm] = useState(false);
+  const [clothingName, setClothingName]         = useState("");
+  const [clothingPrice, setClothingPrice]       = useState("");
+  const [clothingCurrency, setClothingCurrency] = useState("EUR");
+  const [clothingPhoto, setClothingPhoto]       = useState(null);
+  const [clothingSaving, setClothingSaving]     = useState(false);
+  const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
   const [dragPos, setDragPos]             = useState(null);
@@ -728,6 +741,16 @@ export default function Dashboard() {
     apiFetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
+      .catch(() => {});
+  }, []);
+
+  // Cargar conteo de ropa
+  useEffect(() => {
+    const t = localStorage.getItem("la_token") || "";
+    if (!t) return;
+    apiFetch(`${API}/clothing`, { headers: { "Authorization": `Bearer ${t}` } })
+      .then(r => r.json())
+      .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
   }, []);
 
@@ -1120,6 +1143,69 @@ export default function Dashboard() {
     const t = localStorage.getItem("la_token") || "";
     await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
     setIdeas(prev => prev.filter(i => i.id !== id));
+  }
+
+  // ── Conteo de ropa (widget temporal, persistido en el backend) ───────────
+  // Redimensiona la foto elegida a máx. 600px y la convierte a JPEG en base64,
+  // para no subir imágenes de varios MB al backend.
+  function onClothingPhoto(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 600;
+        let { width, height } = img;
+        if (width > max || height > max) {
+          const r = Math.min(max / width, max / height);
+          width  = Math.round(width  * r);
+          height = Math.round(height * r);
+        }
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = width; canvas.height = height;
+          canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+          setClothingPhoto(canvas.toDataURL("image/jpeg", 0.7));
+        } catch { setClothingPhoto(reader.result); }
+      };
+      img.onerror = () => setClothingPhoto(reader.result);
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function addClothing() {
+    if (clothingSaving) return;
+    const price = parseFloat(String(clothingPrice).replace(",", "."));
+    setClothingSaving(true);
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      const r = await apiFetch(`${API}/clothing`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:     clothingName.trim(),
+          price:    Number.isFinite(price) ? price : 0,
+          currency: clothingCurrency,
+          photo:    clothingPhoto,
+        }),
+      });
+      const data = await r.json();
+      if (data.ok && data.item) {
+        setClothing(prev => [data.item, ...prev]);
+        setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
+        setShowClothingForm(false);
+      }
+    } catch { /* mejor esfuerzo: ignorar */ }
+    finally { setClothingSaving(false); }
+  }
+
+  async function deleteClothing(id) {
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    } catch { /* mejor esfuerzo: ignorar */ }
+    setClothing(prev => prev.filter(c => c.id !== id));
   }
 
   async function loadTraining() {
@@ -1744,6 +1830,99 @@ export default function Dashboard() {
           </div>
         </div>
       );
+      case "clothing": {
+        const totals       = clothingTotals(clothing);
+        const totalEntries = Object.entries(totals);
+        return (
+          <div style={cardStyle} data-card={id} key="clothing">
+            <div style={s.sectionLabel}>Conteo ropa</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {clothing.length === 0 && !showClothingForm && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin prendas todavía. ¡Añade la primera!</div>
+              )}
+              {clothing.map(item => (
+                <div key={item.id} style={{ ...s.ideaCard, cursor: "default", display: "flex", alignItems: "center", gap: 12 }}>
+                  {item.photo ? (
+                    <img src={item.photo} alt={item.name || "Prenda"} onClick={() => setClothingZoom(item.photo)}
+                      style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 6, flexShrink: 0, cursor: "zoom-in", border: "0.5px solid var(--border2)" }} />
+                  ) : (
+                    <div style={{ width: 44, height: 44, borderRadius: 6, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--surface)", border: "0.5px solid var(--border2)", fontSize: 20 }}>👕</div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: item.name ? "var(--text)" : "var(--muted2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.name || "Sin nombre"}
+                    </div>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--accent)", marginTop: 2 }}>
+                      {formatMoney(item.price, item.currency)}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
+                    onClick={() => deleteClothing(item.id)}>✕</span>
+                </div>
+              ))}
+            </div>
+
+            {totalEntries.length > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "0.5px solid var(--border2)" }}>
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                  {clothing.length} {clothing.length === 1 ? "prenda" : "prendas"}
+                </span>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  {totalEntries.map(([cur, sum]) => (
+                    <span key={cur} style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)" }}>
+                      {formatMoney(sum, cur)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {showClothingForm ? (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                <input style={inputStyle} placeholder="Nombre (opcional)" value={clothingName}
+                  onChange={e => setClothingName(e.target.value)} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input style={{ ...inputStyle, flex: 1 }} type="text" inputMode="decimal" placeholder="Precio"
+                    value={clothingPrice} onChange={e => setClothingPrice(e.target.value)} />
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {Object.entries(CLOTHING_CURRENCIES).map(([code, sym]) => (
+                      <button key={code} type="button"
+                        style={{ ...s.newIdeaBtn, marginTop: 0, padding: "0 12px", minWidth: 40,
+                          ...(clothingCurrency === code ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                        onClick={() => setClothingCurrency(code)}>
+                        {sym}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label style={{ ...s.newIdeaBtn, marginTop: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer" }}>
+                  {clothingPhoto ? "✓ Foto añadida" : "📷 Añadir foto (opcional)"}
+                  <input type="file" accept="image/*" style={{ display: "none" }}
+                    onChange={e => onClothingPhoto(e.target.files?.[0])} />
+                </label>
+                {clothingPhoto && (
+                  <img src={clothingPhoto} alt="Vista previa" style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "var(--surface)" }} />
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }}
+                    onClick={() => { setShowClothingForm(false); setClothingName(""); setClothingPrice(""); setClothingPhoto(null); }}>
+                    Cancelar
+                  </button>
+                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
+                    ...(String(clothingPrice).trim() ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                    onClick={addClothing} disabled={!String(clothingPrice).trim() || clothingSaving}>
+                    {clothingSaving ? "Guardando..." : "Añadir"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button style={s.newIdeaBtn} onClick={() => setShowClothingForm(true)}>
+                + Añadir prenda
+              </button>
+            )}
+          </div>
+        );
+      }
       case "acciones_pc": return (
         <div style={cardStyle} data-card={id} key="acciones_pc">
           <div style={s.sectionLabel}>Streaming PC</div>
@@ -3219,6 +3398,18 @@ export default function Dashboard() {
           <span>Life Assistant v0.1</span>
         </div>
       </div>
+
+      {/* ── FOTO DE PRENDA A PANTALLA COMPLETA ── */}
+      {clothingZoom && (
+        <div onClick={() => setClothingZoom(null)} style={{
+          position: "fixed", inset: 0, zIndex: 300,
+          background: "rgba(0,0,0,0.85)", backdropFilter: "blur(6px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 24, cursor: "zoom-out", animation: "fadeInOverlay 0.2s ease",
+        }}>
+          <img src={clothingZoom} alt="Prenda" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 12 }} />
+        </div>
+      )}
 
       {/* ── MODAL WAKE ON LAN ── */}
       {wolModal && (
