@@ -495,16 +495,15 @@ export default function Dashboard() {
   const [trainingDays, setTrainingDays] = useState(() => {
     try { return JSON.parse(localStorage.getItem("la_training_days") || "[1,3,4,0]"); } catch { return [1,3,4,0]; }
   });
-  // Conteo de ropa (widget temporal). Se guarda solo en localStorage: las fotos
-  // van como data URL redimensionada para no reventar el cupo del navegador.
-  const [clothing, setClothing] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("la_clothing") || "[]"); } catch { return []; }
-  });
+  // Conteo de ropa (widget temporal). Se persiste en el backend (Supabase); las
+  // fotos van como data URL redimensionada en el navegador antes de subirlas.
+  const [clothing, setClothing]                 = useState([]);
   const [showClothingForm, setShowClothingForm] = useState(false);
   const [clothingName, setClothingName]         = useState("");
   const [clothingPrice, setClothingPrice]       = useState("");
   const [clothingCurrency, setClothingCurrency] = useState("EUR");
   const [clothingPhoto, setClothingPhoto]       = useState(null);
+  const [clothingSaving, setClothingSaving]     = useState(false);
   const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
@@ -742,6 +741,16 @@ export default function Dashboard() {
     apiFetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
+      .catch(() => {});
+  }, []);
+
+  // Cargar conteo de ropa
+  useEffect(() => {
+    const t = localStorage.getItem("la_token") || "";
+    if (!t) return;
+    apiFetch(`${API}/clothing`, { headers: { "Authorization": `Bearer ${t}` } })
+      .then(r => r.json())
+      .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
   }, []);
 
@@ -1136,15 +1145,9 @@ export default function Dashboard() {
     setIdeas(prev => prev.filter(i => i.id !== id));
   }
 
-  // ── Conteo de ropa (widget temporal, todo en localStorage) ───────────────
-  function persistClothing(next) {
-    setClothing(next);
-    try { localStorage.setItem("la_clothing", JSON.stringify(next)); }
-    catch { /* mejor esfuerzo: ignorar (cupo del navegador) */ }
-  }
-
-  // Redimensiona la foto elegida a máx. 600px y la guarda como JPEG en base64,
-  // para que localStorage no se llene con imágenes de varios MB.
+  // ── Conteo de ropa (widget temporal, persistido en el backend) ───────────
+  // Redimensiona la foto elegida a máx. 600px y la convierte a JPEG en base64,
+  // para no subir imágenes de varios MB al backend.
   function onClothingPhoto(file) {
     if (!file) return;
     const reader = new FileReader();
@@ -1171,22 +1174,38 @@ export default function Dashboard() {
     reader.readAsDataURL(file);
   }
 
-  function addClothing() {
+  async function addClothing() {
+    if (clothingSaving) return;
     const price = parseFloat(String(clothingPrice).replace(",", "."));
-    const item = {
-      id:       (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()),
-      name:     clothingName.trim(),
-      price:    Number.isFinite(price) ? price : 0,
-      currency: clothingCurrency,
-      photo:    clothingPhoto,
-    };
-    persistClothing([item, ...clothing]);
-    setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
-    setShowClothingForm(false);
+    setClothingSaving(true);
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      const r = await apiFetch(`${API}/clothing`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:     clothingName.trim(),
+          price:    Number.isFinite(price) ? price : 0,
+          currency: clothingCurrency,
+          photo:    clothingPhoto,
+        }),
+      });
+      const data = await r.json();
+      if (data.ok && data.item) {
+        setClothing(prev => [data.item, ...prev]);
+        setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
+        setShowClothingForm(false);
+      }
+    } catch { /* mejor esfuerzo: ignorar */ }
+    finally { setClothingSaving(false); }
   }
 
-  function deleteClothing(id) {
-    persistClothing(clothing.filter(c => c.id !== id));
+  async function deleteClothing(id) {
+    const t = localStorage.getItem("la_token") || "";
+    try {
+      await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    } catch { /* mejor esfuerzo: ignorar */ }
+    setClothing(prev => prev.filter(c => c.id !== id));
   }
 
   async function loadTraining() {
@@ -1891,8 +1910,8 @@ export default function Dashboard() {
                   </button>
                   <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
                     ...(String(clothingPrice).trim() ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-                    onClick={addClothing} disabled={!String(clothingPrice).trim()}>
-                    Añadir
+                    onClick={addClothing} disabled={!String(clothingPrice).trim() || clothingSaving}>
+                    {clothingSaving ? "Guardando..." : "Añadir"}
                   </button>
                 </div>
               </div>

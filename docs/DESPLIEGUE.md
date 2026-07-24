@@ -26,7 +26,7 @@ solo usuario).
 1. Crea un proyecto nuevo.
 2. En **SQL Editor**, ejecuta los ficheros de `supabase/migrations/` **en orden
    cronológico** (el nombre empieza por la fecha). Crean las tablas de jobs,
-   agentes, tokens OAuth, ideas, entrenamiento y salud, con RLS activado.
+   agentes, tokens OAuth, ideas, ropa, entrenamiento y salud, con RLS activado.
 3. Apunta de **Settings → API**: la `URL` del proyecto y la **`service_role` key**
    (no la `anon`; la service key solo vivirá en el backend).
 4. (Entrenamiento personal) Si usas el widget de entrenamiento, inserta tu cliente:
