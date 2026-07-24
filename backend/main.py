@@ -790,6 +790,75 @@ def create_idea_from_text(
     return {"ok": True, "idea": idea}
 
 
+# ── CONTEO DE ROPA (widget temporal) ──────────────────────────────────────────
+# Lleva la cuenta de la ropa comprada hasta saldar el gasto. La foto llega como
+# data URL ya redimensionada en el navegador; el backend solo la persiste.
+
+_CLOTHING_CURRENCIES = ("EUR", "THB")
+# Tope defensivo de la foto: el frontend la reduce a ~600px/JPEG (bastante menos),
+# pero limitamos el tamaño para no aceptar payloads arbitrariamente grandes.
+_CLOTHING_PHOTO_MAX = 3_000_000
+
+class ClothingItemIn(BaseModel):
+    name:     str = Field(default="", max_length=200)
+    price:    float = Field(default=0.0, ge=0)
+    currency: str = Field(default="EUR")
+    photo:    Optional[str] = Field(default=None, max_length=_CLOTHING_PHOTO_MAX)
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, v: str) -> str:
+        if v not in _CLOTHING_CURRENCIES:
+            raise ValueError("currency debe ser 'EUR' o 'THB'")
+        return v
+
+
+@app.get("/clothing")
+def get_clothing(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/clothing?order=created_at.desc",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return r.json()
+
+
+@app.post("/clothing")
+def create_clothing(
+    body: ClothingItemIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    payload = {
+        "name":     body.name.strip()[:200],
+        "price":    body.price,
+        "currency": body.currency,
+        "photo":    body.photo,
+    }
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/clothing",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True, "item": r.json()[0]}
+
+
+@app.delete("/clothing/{item_id}")
+def delete_clothing(
+    item_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    r = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/clothing?id=eq.{item_id}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
+
+
 # ── HOME ASSISTANT INTEGRATION ────────────────────────────────────────────────
 
 @app.get("/ha/events/soon")

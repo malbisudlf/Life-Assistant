@@ -52,7 +52,7 @@ backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~1500 líneas)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
-    ├── Supabase REST ── ideas, jobs, pc_agents, training_*, health_metrics, oauth_tokens
+    ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics, oauth_tokens
     └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
                           apagado/suspensión del PC, que HA ejecuta por SSH)
 
@@ -153,7 +153,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 `renderWidget`, skeleton, modo simplificado móvil, modales, panel de clases).
 
 - **Widgets**: definidos en `ALL_DEFAULT_WIDGETS` (ids: `timeline`, `weather`,
-  `upcoming`, `entregas`, `training`, `ideas`, `acciones_pc` (Streaming PC),
+  `upcoming`, `entregas`, `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
   `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
   `health_workouts`). Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
