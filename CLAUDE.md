@@ -159,6 +159,13 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
   (`la_simple_widget_config`).
+  - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
+    hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
+    "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,
+    los estados `clothing*`, el efecto de carga, las funciones `onClothingPhoto`/
+    `addClothing`/`deleteClothing`, el overlay de foto, los endpoints `/clothing`
+    del backend, los helpers `formatMoney`/`clothingTotals` (+ sus tests) y la tabla
+    `clothing` de Supabase (`drop table public.clothing;`).
 - **Claves de localStorage** (prefijo `la_`): `la_token` (JWT), `la_widget_config`,
   `la_num_columns`, `la_col_splits`, `la_notifications`, `la_simple_mode`,
   `la_body_goals`, `la_training_days`. Si añades una, mantén el prefijo y el
