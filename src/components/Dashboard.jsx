@@ -504,6 +504,7 @@ export default function Dashboard() {
   const [clothingCurrency, setClothingCurrency] = useState("EUR");
   const [clothingPhoto, setClothingPhoto]       = useState(null);
   const [clothingSaving, setClothingSaving]     = useState(false);
+  const [clothingError, setClothingError]       = useState(null); // mensaje de fallo al guardar
   const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
@@ -1178,6 +1179,7 @@ export default function Dashboard() {
     if (clothingSaving) return;
     const price = parseFloat(String(clothingPrice).replace(",", "."));
     setClothingSaving(true);
+    setClothingError(null);
     const t = localStorage.getItem("la_token") || "";
     try {
       const r = await apiFetch(`${API}/clothing`, {
@@ -1190,22 +1192,29 @@ export default function Dashboard() {
           photo:    clothingPhoto,
         }),
       });
-      const data = await r.json();
-      if (data.ok && data.item) {
+      let data = {};
+      try { data = await r.json(); } catch { /* respuesta sin cuerpo JSON */ }
+      if (r.ok && data.ok && data.item) {
         setClothing(prev => [data.item, ...prev]);
         setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
         setShowClothingForm(false);
+      } else {
+        // Surfacer el fallo: el código de estado dice qué pasó (404 = backend sin
+        // desplegar los endpoints, 502 = problema con la tabla, 401/403 = sesión).
+        setClothingError(`No se pudo guardar (error ${r.status})${data.detail ? `: ${data.detail}` : ""}`);
       }
-    } catch { /* mejor esfuerzo: ignorar */ }
+    } catch {
+      setClothingError("No se pudo conectar con el servidor.");
+    }
     finally { setClothingSaving(false); }
   }
 
   async function deleteClothing(id) {
     const t = localStorage.getItem("la_token") || "";
     try {
-      await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+      const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+      if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
     } catch { /* mejor esfuerzo: ignorar */ }
-    setClothing(prev => prev.filter(c => c.id !== id));
   }
 
   async function loadTraining() {
@@ -1903,9 +1912,12 @@ export default function Dashboard() {
                 {clothingPhoto && (
                   <img src={clothingPhoto} alt="Vista previa" style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "var(--surface)" }} />
                 )}
+                {clothingError && (
+                  <div style={{ fontSize: 12, color: "#d4645a", lineHeight: 1.4 }}>{clothingError}</div>
+                )}
                 <div style={{ display: "flex", gap: 8 }}>
                   <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }}
-                    onClick={() => { setShowClothingForm(false); setClothingName(""); setClothingPrice(""); setClothingPhoto(null); }}>
+                    onClick={() => { setShowClothingForm(false); setClothingError(null); setClothingName(""); setClothingPrice(""); setClothingPhoto(null); }}>
                     Cancelar
                   </button>
                   <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
@@ -1916,7 +1928,7 @@ export default function Dashboard() {
                 </div>
               </div>
             ) : (
-              <button style={s.newIdeaBtn} onClick={() => setShowClothingForm(true)}>
+              <button style={s.newIdeaBtn} onClick={() => { setClothingError(null); setShowClothingForm(true); }}>
                 + Añadir prenda
               </button>
             )}
