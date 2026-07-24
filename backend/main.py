@@ -830,7 +830,7 @@ def create_clothing(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     payload = {
-        "name":     body.name.strip()[:200],
+        "name":     body.name.strip(),   # el largo ya lo valida Pydantic (max_length=200)
         "price":    body.price,
         "currency": body.currency,
         "photo":    body.photo,
