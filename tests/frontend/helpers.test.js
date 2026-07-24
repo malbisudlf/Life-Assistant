@@ -3,6 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -143,5 +144,35 @@ describe("helpers de salud", () => {
   test("weekdayShort da el día corto en español y '' si es inválido", () => {
     expect(weekdayShort("2026-07-23")).toBe("Jue");
     expect(weekdayShort("no-es-fecha")).toBe("");
+  });
+});
+
+describe("helpers de conteo de ropa", () => {
+  test("formatMoney: entero sin decimales, decimal con coma", () => {
+    expect(formatMoney(20, "EUR")).toBe("20 €");
+    expect(formatMoney(12.5, "EUR")).toBe("12,50 €");
+    expect(formatMoney(450, "THB")).toBe("450 ฿");
+    expect(formatMoney(0, "EUR")).toBe("0 €");
+  });
+
+  test("formatMoney: valores inválidos cuentan como 0 y moneda desconocida sin símbolo", () => {
+    expect(formatMoney(null, "EUR")).toBe("0 €");
+    expect(formatMoney("abc", "THB")).toBe("0 ฿");
+    expect(formatMoney(10, "XXX")).toBe("10");
+  });
+
+  test("clothingTotals agrupa por moneda", () => {
+    const items = [
+      { price: 20, currency: "EUR" },
+      { price: 12.5, currency: "EUR" },
+      { price: 450, currency: "THB" },
+    ];
+    expect(clothingTotals(items)).toEqual({ EUR: 32.5, THB: 450 });
+  });
+
+  test("clothingTotals: default EUR, precios inválidos como 0, lista vacía", () => {
+    expect(clothingTotals([{ price: 5 }, { price: "x", currency: "EUR" }])).toEqual({ EUR: 5 });
+    expect(clothingTotals([])).toEqual({});
+    expect(clothingTotals(null)).toEqual({});
   });
 });

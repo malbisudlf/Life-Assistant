@@ -134,6 +134,31 @@ export function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
   return mod;
 }
 
+// ── Conteo de ropa (widget temporal) ────────────────────────────
+// Monedas soportadas: euro y baht tailandés (símbolo ฿).
+export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };
+
+// Formatea un importe con su símbolo de moneda al estilo español: coma decimal
+// y sin decimales si el importe es entero.
+export function formatMoney(amount, currency) {
+  const sym = CLOTHING_CURRENCIES[currency] || "";
+  const n   = Number(amount) || 0;
+  const txt = Number.isInteger(n) ? String(n) : n.toFixed(2).replace(".", ",");
+  return `${txt} ${sym}`.trim();
+}
+
+// Suma los precios de las prendas agrupados por moneda. Devuelve un objeto
+// { EUR: 12.5, THB: 450 } solo con las monedas presentes en la lista.
+export function clothingTotals(items) {
+  const totals = {};
+  for (const it of items || []) {
+    const cur   = it.currency || "EUR";
+    const price = Number(it.price) || 0;
+    totals[cur] = (totals[cur] || 0) + price;
+  }
+  return totals;
+}
+
 export function findMetric(metrics, ...names) {
   if (!metrics) return [];
   for (const name of names) {

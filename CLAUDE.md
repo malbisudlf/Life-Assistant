@@ -153,7 +153,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 `renderWidget`, skeleton, modo simplificado móvil, modales, panel de clases).
 
 - **Widgets**: definidos en `ALL_DEFAULT_WIDGETS` (ids: `timeline`, `weather`,
-  `upcoming`, `entregas`, `training`, `ideas`, `acciones_pc` (Streaming PC),
+  `upcoming`, `entregas`, `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
   `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
   `health_workouts`). Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
@@ -161,8 +161,9 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   (`la_simple_widget_config`).
 - **Claves de localStorage** (prefijo `la_`): `la_token` (JWT), `la_widget_config`,
   `la_num_columns`, `la_col_splits`, `la_notifications`, `la_simple_mode`,
-  `la_body_goals`, `la_training_days`. Si añades una, mantén el prefijo y el
-  `try/catch` al parsear.
+  `la_body_goals`, `la_training_days`, `la_clothing` (conteo de ropa, widget
+  temporal: lista con nombre/precio/moneda/foto en base64). Si añades una,
+  mantén el prefijo y el `try/catch` al parsear.
 - **`apiFetch()`**: wrapper de `fetch` que, ante un 401 con sesión activa, borra
   `la_token` y recarga. Úsalo para toda llamada autenticada al backend.
 - **URL del backend**: `VITE_API_URL` o el default de Fly. En local, apunta
