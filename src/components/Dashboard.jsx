@@ -1175,6 +1175,13 @@ export default function Dashboard() {
     reader.readAsDataURL(file);
   }
 
+  // Cierra el formulario de alta y limpia sus campos (guardado con éxito y Cancelar).
+  function closeClothingForm() {
+    setShowClothingForm(false);
+    setClothingError(null);
+    setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
+  }
+
   async function addClothing() {
     if (clothingSaving) return;
     const price = parseFloat(String(clothingPrice).replace(",", "."));
@@ -1196,10 +1203,9 @@ export default function Dashboard() {
       try { data = await r.json(); } catch { /* respuesta sin cuerpo JSON */ }
       if (r.ok && data.ok && data.item) {
         setClothing(prev => [data.item, ...prev]);
-        setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
-        setShowClothingForm(false);
+        closeClothingForm();
       } else {
-        // Surfacer el fallo: el código de estado dice qué pasó (404 = backend sin
+        // Mostrar el fallo: el código de estado dice qué pasó (404 = backend sin
         // desplegar los endpoints, 502 = problema con la tabla, 401/403 = sesión).
         setClothingError(`No se pudo guardar (error ${r.status})${data.detail ? `: ${data.detail}` : ""}`);
       }
@@ -1917,7 +1923,7 @@ export default function Dashboard() {
                 )}
                 <div style={{ display: "flex", gap: 8 }}>
                   <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }}
-                    onClick={() => { setShowClothingForm(false); setClothingError(null); setClothingName(""); setClothingPrice(""); setClothingPhoto(null); }}>
+                    onClick={closeClothingForm}>
                     Cancelar
                   </button>
                   <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
