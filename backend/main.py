@@ -13,6 +13,7 @@ import requests
 import httpx
 import os
 import json
+import re
 import time
 import hmac
 import logging
@@ -99,8 +100,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
-HA_URL              = os.getenv("HA_URL", "")
-HA_TOKEN            = os.getenv("HA_TOKEN")
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 # Personalización de la instancia (kit self-hosted)
@@ -237,13 +236,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
 
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
 OAUTH_PROVIDER = "microsoft_graph"
-import json
-import re
 
-_UUID_RE = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-    re.IGNORECASE,
-)
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 _wol_pending = False
@@ -363,9 +356,6 @@ def callback(code: str):
         redirect_uri=REDIRECT_URI,
     )
     if "access_token" in result:
-        token = result["access_token"]
-        # Guardamos el token en memoria por ahora
-        app.state.token = token
         _store_result(result)
         return {"status": "ok", "message": "Autenticado correctamente"}
     return {"error": result.get("error_description")}
@@ -390,11 +380,10 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     for event in data.get("value", []):
         body_content = event.get("body", {}).get("content", "") or ""
         preview_content = event.get("bodyPreview", "") or ""
-        import re as _re
         # No incluir <, > ni comillas en la URL: en cuerpos HTML la URL suele ir pegada
         # a la etiqueta de cierre (p.ej. ...id=99</p>) y \S+ se la tragaba entera.
-        alud_match = _re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
-                     _re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
+        alud_match = re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
+                     re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
         alud_url = alud_match.group(1).rstrip("&;.,") if alud_match else None
         events.append({
             "id": event.get("id"),
@@ -1485,8 +1474,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
         if len(body) == 1:
             val = list(body.values())[0]
             if isinstance(val, str):
-                import json as _json
-                body = [_json.loads(line) for line in val.strip().splitlines() if line.strip()]
+                body = [json.loads(line) for line in val.strip().splitlines() if line.strip()]
             elif isinstance(val, list):
                 body = val
             else:
