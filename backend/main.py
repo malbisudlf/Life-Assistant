@@ -1333,18 +1333,31 @@ def delete_training_session(
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
 
+def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
+    """Detalle de error que muestra qué llegó realmente al servidor, para poder
+    diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
+    return {
+        "error": msg,
+        "content_type": request.headers.get("content-type", ""),
+        "longitud_bytes": len(raw),
+        "inicio": raw[:400].decode("utf-8", errors="replace"),
+    }
+
+
 @app.post("/health/ingest")
 async def health_ingest(request: Request, token: str = ""):
     """Health Auto Export envía aquí los datos periódicamente."""
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    raw = await request.body()
     try:
-        body = await request.json()
+        body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
-        raise HTTPException(status_code=400, detail="El cuerpo de la petición no es JSON válido")
+        body = None
     if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON")
+        raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
+            request, raw, "El cuerpo no es un objeto JSON. Esto es lo que recibí:"))
     data_block = body.get("data", {})
     metrics    = data_block.get("metrics", [])
     workouts   = data_block.get("workouts", [])
@@ -1539,7 +1552,8 @@ async def health_ingest_simple(request: Request, token: str = ""):
     if body is None:
         body = _parse_ndjson(text)  # NDJSON crudo
         if not body:
-            raise HTTPException(status_code=400, detail="El cuerpo está vacío o no es JSON válido (ni JSON ni NDJSON)")
+            raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
+                request, raw, "No pude interpretar el cuerpo (ni JSON ni NDJSON). Esto es lo que recibí:"))
 
     if isinstance(body, dict):
         # iOS Shortcuts serializa listas como NDJSON dentro de un string bajo una clave
