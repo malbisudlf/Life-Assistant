@@ -155,7 +155,9 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 - **Widgets**: definidos en `ALL_DEFAULT_WIDGETS` (ids: `timeline`, `weather`,
   `upcoming`, `entregas`, `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
   `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
-  `health_workouts`). Cada uno se renderiza en `renderWidget(id)`. La configuración
+  `health_workouts`, `health_trends` (Tendencias salud: medias 7d vs 30d + correlación
+  hora de acostarse↔HRV, lógica pura en `seriesTrend`/`trendDirection`/`bedtimeHrvInsight`)).
+  Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
   (`la_simple_widget_config`).
