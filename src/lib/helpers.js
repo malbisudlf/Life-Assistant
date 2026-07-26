@@ -134,6 +134,69 @@ export function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
   return mod;
 }
 
+// ── Tendencias de salud ──────────────────────────────────────────
+// Compara la media de una ventana corta (por defecto 7 días) contra una larga
+// (30 días) para detectar señales tempranas: HRV cayendo, FC en reposo subiendo,
+// peso derivando, etc. `data` es la serie ya ordenada por fecha ascendente tal
+// como la sirve el backend ([{ date, value }, ...]). Devuelve null si no hay datos.
+export function seriesTrend(data, shortDays = 7, longDays = 30) {
+  const clean = (data || []).filter(d => d && d.value != null && !isNaN(Number(d.value)));
+  if (!clean.length) return null;
+  const nums     = clean.map(d => Number(d.value));
+  const shortArr = nums.slice(-shortDays);
+  const longArr  = nums.slice(-longDays);
+  const avg      = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const avgShort = avg(shortArr);
+  const avgLong  = avg(longArr);
+  // Delta de la ventana corta frente a la larga, en % (0 si la larga es 0).
+  const deltaPct = avgLong ? ((avgShort - avgLong) / avgLong) * 100 : 0;
+  return { latest: nums[nums.length - 1], avgShort, avgLong, deltaPct, n: clean.length };
+}
+
+// Dirección de una tendencia teniendo en cuenta si "más es mejor" (HRV, sueño) o
+// "menos es mejor" (FC reposo, frec. respiratoria, peso si se quiere bajar). Un
+// cambio por debajo de `threshold` (en %) se considera estable. Devuelve el signo
+// del cambio y su valoración ("bien" | "mal" | "estable") para colorear la flecha.
+export function trendDirection(deltaPct, higherIsBetter = true, threshold = 2) {
+  if (deltaPct == null || Math.abs(deltaPct) < threshold) {
+    return { arrow: "→", tone: "estable" };
+  }
+  const up = deltaPct > 0;
+  const good = up === higherIsBetter;
+  return { arrow: up ? "↑" : "↓", tone: good ? "bien" : "mal" };
+}
+
+// Correlación simple entre la hora de acostarse y la HRV de esa misma noche.
+// Agrupa las noches en "temprano" (acostarse antes de `cutoffHour`, tratando las
+// horas 18–23 como temprano y 0..cutoff como pasada medianoche pero aún temprano)
+// y "tarde", y compara la HRV media de cada grupo. `sleepData` son filas de
+// sleep_analysis (con extra.sleep_start "HH:MM"); `hrvData`, la serie de HRV.
+// Devuelve null si no hay muestras suficientes en ambos grupos (mín. 3 cada uno).
+export function bedtimeHrvInsight(sleepData, hrvData, cutoffHour = 1) {
+  const hrvByDate = {};
+  for (const d of hrvData || []) {
+    if (d && d.value != null) hrvByDate[d.date] = Number(d.value);
+  }
+  const early = [], late = [];
+  for (const s of sleepData || []) {
+    if (!s || s.extra?.excluded) continue;
+    const start = s.extra?.sleep_start;
+    const hrv   = hrvByDate[s.date];
+    if (!start || hrv == null || isNaN(hrv)) continue;
+    const h = parseInt(String(start).slice(0, 2), 10);
+    if (isNaN(h)) continue;
+    // Temprano: tarde/noche antes de medianoche (18–23) o madrugada antes del corte.
+    const isEarly = h >= 18 || h < cutoffHour;
+    (isEarly ? early : late).push(hrv);
+  }
+  if (early.length < 3 || late.length < 3) return null;
+  const avg      = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const avgEarly = avg(early);
+  const avgLate  = avg(late);
+  const deltaPct = avgLate ? ((avgEarly - avgLate) / avgLate) * 100 : 0;
+  return { avgEarly, avgLate, deltaPct, earlyN: early.length, lateN: late.length };
+}
+
 // ── Conteo de ropa (widget temporal) ────────────────────────────
 // Monedas soportadas: euro y baht tailandés (símbolo ฿).
 export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };
