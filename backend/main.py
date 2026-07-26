@@ -779,6 +779,39 @@ def create_idea_from_text(
     return {"ok": True, "idea": idea}
 
 
+# ── EXPORT / BACKUP ────────────────────────────────────────────────────────────
+# Volcado completo de los datos personales para tener un backup manual. Solo se
+# exportan los datos del usuario; nunca los tokens OAuth (secretos) ni la cola de
+# jobs (estado operativo efímero). El frontend descarga el JSON como fichero.
+
+# (tabla Supabase, clave de salida en el JSON). El orden es el que tiene sentido
+# leer en el backup, no el de creación.
+_EXPORT_TABLES = (
+    ("ideas",             "ideas",             "order=created_at.desc"),
+    ("training_clients",  "training_clients",  "order=created_at.asc"),
+    ("training_sessions", "training_sessions", "order=date.desc"),
+    ("training_payments", "training_payments", "order=date.desc"),
+    ("health_metrics",    "health_metrics",    "order=metric_date.desc"),
+    ("clothing",          "clothing",          "order=created_at.desc"),
+)
+
+
+@app.get("/export")
+def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Devuelve todos los datos personales en un único JSON para backup manual."""
+    export: dict = {"exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    for key, table, order in _EXPORT_TABLES:
+        # limit alto para traer el histórico completo de cada tabla en una llamada.
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}?{order}&limit=100000",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        export[key] = r.json()
+    return export
+
+
 # ── CONTEO DE ROPA (widget temporal) ──────────────────────────────────────────
 # Lleva la cuenta de la ropa comprada hasta saldar el gasto. La foto llega como
 # data URL ya redimensionada en el navegador; el backend solo la persiste.

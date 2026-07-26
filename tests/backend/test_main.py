@@ -233,6 +233,41 @@ class TestIdeas:
         assert out["tag"] == "idea"
         assert out["full_text"] == "x" * 100
 
+
+class TestExport:
+    def test_requiere_token(self, client):
+        assert client.get("/export").status_code in (401, 403)
+
+    def test_agrupa_cada_tabla_en_su_clave(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/ideas", FakeResponse([{"id": "i1"}]))
+        mock_requests.add("GET", "/rest/v1/training_clients", FakeResponse([{"id": "c1"}]))
+        mock_requests.add("GET", "/rest/v1/training_sessions", FakeResponse([{"id": "s1"}]))
+        mock_requests.add("GET", "/rest/v1/training_payments", FakeResponse([{"id": "p1"}]))
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([{"id": "h1"}]))
+        mock_requests.add("GET", "/rest/v1/clothing", FakeResponse([{"id": "r1"}]))
+        r = client.get("/export", headers=auth_headers)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ideas"] == [{"id": "i1"}]
+        assert data["training_clients"] == [{"id": "c1"}]
+        assert data["training_sessions"] == [{"id": "s1"}]
+        assert data["training_payments"] == [{"id": "p1"}]
+        assert data["health_metrics"] == [{"id": "h1"}]
+        assert data["clothing"] == [{"id": "r1"}]
+        assert "exported_at" in data
+
+    def test_no_exporta_tokens_oauth(self, client, auth_headers, mock_requests):
+        # Nunca debe consultarse la tabla de secretos oauth_tokens
+        r = client.get("/export", headers=auth_headers)
+        assert r.status_code == 200
+        assert "oauth_tokens" not in r.json()
+        assert not mock_requests.called("GET", "oauth_tokens")
+
+    def test_error_supabase_devuelve_502(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/ideas", FakeResponse(None, 500, "boom"))
+        r = client.get("/export", headers=auth_headers)
+        assert r.status_code == 502
+
     def test_extract_idea_parsea_json_con_fences(self, monkeypatch):
         class FakeCompletion:
             class Choice:
