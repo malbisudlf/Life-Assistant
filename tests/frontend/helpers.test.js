@@ -3,6 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  seriesTrend, trendDirection, bedtimeHrvInsight,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -144,6 +145,73 @@ describe("helpers de salud", () => {
   test("weekdayShort da el día corto en español y '' si es inválido", () => {
     expect(weekdayShort("2026-07-23")).toBe("Jue");
     expect(weekdayShort("no-es-fecha")).toBe("");
+  });
+});
+
+describe("helpers de tendencias de salud", () => {
+  test("seriesTrend calcula medias corta/larga y delta%", () => {
+    // 30 valores: primeros 23 a 40, últimos 7 a 50 → media 7d=50, media 30d≈42.33
+    const data = [];
+    for (let i = 0; i < 23; i++) data.push({ date: `d${i}`, value: 40 });
+    for (let i = 0; i < 7; i++)  data.push({ date: `e${i}`, value: 50 });
+    const t = seriesTrend(data, 7, 30);
+    expect(t.avgShort).toBe(50);
+    expect(t.avgLong).toBeCloseTo(42.33, 1);
+    expect(t.deltaPct).toBeGreaterThan(0);
+    expect(t.latest).toBe(50);
+    expect(t.n).toBe(30);
+  });
+
+  test("seriesTrend ignora valores nulos y devuelve null sin datos", () => {
+    expect(seriesTrend([])).toBe(null);
+    expect(seriesTrend([{ value: null }, { value: undefined }])).toBe(null);
+    expect(seriesTrend(null)).toBe(null);
+    const t = seriesTrend([{ value: 10 }, { value: null }, { value: 20 }], 2, 2);
+    expect(t.avgShort).toBe(15); // solo cuenta 10 y 20
+  });
+
+  test("trendDirection valora según si más es mejor y el umbral", () => {
+    expect(trendDirection(1, true)).toEqual({ arrow: "→", tone: "estable" });   // < umbral
+    expect(trendDirection(10, true)).toEqual({ arrow: "↑", tone: "bien" });      // sube y sube=bien
+    expect(trendDirection(10, false)).toEqual({ arrow: "↑", tone: "mal" });      // sube pero menos=mejor
+    expect(trendDirection(-10, false)).toEqual({ arrow: "↓", tone: "bien" });    // baja y menos=mejor
+    expect(trendDirection(-10, true)).toEqual({ arrow: "↓", tone: "mal" });
+    expect(trendDirection(null, true)).toEqual({ arrow: "→", tone: "estable" });
+  });
+
+  test("bedtimeHrvInsight compara HRV según hora de acostarse", () => {
+    const sleep = [
+      { date: "2026-07-01", extra: { sleep_start: "23:30" } }, // temprano
+      { date: "2026-07-02", extra: { sleep_start: "22:45" } }, // temprano
+      { date: "2026-07-03", extra: { sleep_start: "00:20" } }, // temprano (antes de la 01)
+      { date: "2026-07-04", extra: { sleep_start: "01:40" } }, // tarde
+      { date: "2026-07-05", extra: { sleep_start: "02:10" } }, // tarde
+      { date: "2026-07-06", extra: { sleep_start: "03:00" } }, // tarde
+    ];
+    const hrv = [
+      { date: "2026-07-01", value: 60 },
+      { date: "2026-07-02", value: 62 },
+      { date: "2026-07-03", value: 58 },
+      { date: "2026-07-04", value: 50 },
+      { date: "2026-07-05", value: 48 },
+      { date: "2026-07-06", value: 52 },
+    ];
+    const r = bedtimeHrvInsight(sleep, hrv);
+    expect(r.earlyN).toBe(3);
+    expect(r.lateN).toBe(3);
+    expect(r.avgEarly).toBeCloseTo(60, 5);
+    expect(r.avgLate).toBeCloseTo(50, 5);
+    expect(r.deltaPct).toBeCloseTo(20, 5); // HRV 20% mayor acostándose temprano
+  });
+
+  test("bedtimeHrvInsight devuelve null sin muestras suficientes o excluidas", () => {
+    expect(bedtimeHrvInsight([], [])).toBe(null);
+    const sleep = [
+      { date: "d1", extra: { sleep_start: "23:00", excluded: true } },
+      { date: "d2", extra: { sleep_start: "23:00" } },
+    ];
+    const hrv = [{ date: "d1", value: 60 }, { date: "d2", value: 60 }];
+    expect(bedtimeHrvInsight(sleep, hrv)).toBe(null); // solo 1 noche válida
   });
 });
 

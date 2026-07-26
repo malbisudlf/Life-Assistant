@@ -112,6 +112,35 @@ class TestHealthIngestSimple:
         assert body["upserted"] == 0
         assert body["skipped"]
 
+    def test_ndjson_linea_mal_formada_no_tumba_el_lote(self, client, mock_requests):
+        # Regresión: una sola línea con JSON inválido daba un 500 y el Shortcut
+        # dejaba de sincronizar. Ahora se descarta y las buenas se procesan igual.
+        ndjson = "\n".join([
+            json.dumps({"metric": "heart_rate", "date": "2026-07-26", "value": 60}),
+            '{"metric": "step_count", "date": "2026-07-26", "value":}',  # inválido
+        ])
+        r = client.post(self.URL, json={"data": ndjson})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["upserted"] == 1                       # la línea buena entra
+        assert any("JSON inválido" in e.get("error", "") for e in body["parse_errors"])
+
+    def test_cuerpo_no_json_devuelve_400(self, client):
+        r = client.post(self.URL, content=b"esto no es json",
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+
+
+class TestHealthIngestCuerpoInvalido:
+    def test_ingest_hae_no_json_devuelve_400(self, client):
+        r = client.post("/health/ingest?token=health-token", content=b"xxx",
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+
+    def test_ingest_hae_no_objeto_devuelve_400(self, client):
+        r = client.post("/health/ingest?token=health-token", json=[1, 2, 3])
+        assert r.status_code == 400
+
 
 class TestSleepExclude:
     def test_toggle(self, client, auth_headers, mock_requests):

@@ -3,6 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  seriesTrend, trendDirection, bedtimeHrvInsight,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -246,6 +247,7 @@ const DEFAULT_COLUMNS = {
   health_hrv:        "right",
   health_activity:   "right",
   health_workouts:   "right",
+  health_trends:     "left",
 };
 
 const ALL_DEFAULT_WIDGETS = [
@@ -263,6 +265,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "health_hrv",        label: "HRV",               visible: false, column: "right" },
   { id: "health_activity",   label: "Actividad",         visible: false, column: "right" },
   { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
+  { id: "health_trends",     label: "Tendencias salud",  visible: false, column: "left"  },
 ];
 
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
@@ -417,6 +420,7 @@ export default function Dashboard() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
     try { return localStorage.getItem("la_notifications") === "true" && Notification.permission === "granted"; } catch { return false; }
   });
+  const [exporting, setExporting] = useState(false);
   const [activeEvent, setActiveEvent] = useState(null);
   const [openIdea, setOpenIdea]       = useState(null);
   const [allEvents, setAllEvents]     = useState([]);
@@ -936,6 +940,28 @@ export default function Dashboard() {
       setTextIdeaError("Error de conexión con el backend");
     }
     setTextIdeaSubmitting(false);
+  }
+
+  // Descarga un backup JSON con todos los datos personales (ideas, entrenamiento,
+  // salud, ropa). El backend nunca incluye tokens ni la cola de jobs.
+  async function exportData() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const t   = localStorage.getItem("la_token") || "";
+      const res = await apiFetch(`${API}/export`, { headers: { "Authorization": `Bearer ${t}` } });
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `life-assistant-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch { /* mejor esfuerzo: si falla la descarga, no bloquear la UI */ }
+    setExporting(false);
   }
 
   async function fetchDeparture(ev, mode) {
@@ -3051,6 +3077,88 @@ export default function Dashboard() {
           </div>
         );
       }
+      case "health_trends": {
+        // Horas de sueño efectivas (mismo criterio que Bienestar), excluyendo noches anuladas.
+        const trSleepEff = d => {
+          if (d.value && d.value > 0) return d.value;
+          if (d.extra?.asleep > 0) return Number(d.extra.asleep);
+          return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
+        };
+        const trSleepRaw = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: trSleepEff(d) }));
+        const trHrv      = findMetric(healthData, "heart_rate_variability", "heartRateVariability", "hrv");
+        const trRhr      = findMetric(healthData, "resting_heart_rate");
+        const trResp     = findMetric(healthData, "respiratory_rate");
+        const trWeight   = findMetric(healthData, "weight_body_mass", "weight");
+
+        // key, etiqueta, serie, unidad, si "más es mejor" (o neutral), y formateo del valor.
+        const trConfig = [
+          { key: "sleep",  label: "Sueño",       data: trSleepRaw, unit: "",    better: true,  fmt: v => hoursToHM(v) },
+          { key: "hrv",    label: "HRV",          data: trHrv,      unit: "ms",  better: true,  fmt: v => v.toFixed(0) },
+          { key: "rhr",    label: "FC reposo",    data: trRhr,      unit: "bpm", better: false, fmt: v => v.toFixed(0) },
+          { key: "resp",   label: "Frec. resp.",  data: trResp,     unit: "rpm", better: false, fmt: v => v.toFixed(1) },
+          { key: "weight", label: "Peso",         data: trWeight,   unit: "kg",  better: null,  fmt: v => v.toFixed(1) },
+        ];
+        const trRows = trConfig
+          .map(c => ({ ...c, trend: seriesTrend(c.data, 7, 30) }))
+          .filter(c => c.trend);
+
+        const insight = bedtimeHrvInsight(
+          findMetric(healthData, "sleep_analysis", "sleep"),
+          trHrv,
+        );
+        const toneColor = { bien: "var(--green)", mal: "#d4645a", estable: "var(--muted)" };
+
+        return (
+          <div style={cardStyle} data-card={id} key="health_trends">
+            <div style={s.sectionLabel}>Tendencias <span style={{ fontSize: 12, color: "var(--muted2)", textTransform: "none", letterSpacing: 0 }}>7d vs 30d</span></div>
+            {healthLoading ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
+            ) : trRows.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de salud aún</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {trRows.map(c => {
+                    // El peso es neutral (subir o bajar depende del objetivo): sin color de valoración.
+                    const dir   = trendDirection(c.trend.deltaPct, c.better === null ? true : c.better);
+                    const color = c.better === null ? "var(--muted)" : toneColor[dir.tone];
+                    const last30 = c.data.slice(-30);
+                    return (
+                      <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 78, fontSize: 12, color: "var(--muted)" }}>{c.label}</div>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 4, width: 88 }}>
+                          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 16, color: "var(--text)" }}>{c.fmt(c.trend.latest)}</span>
+                          {c.unit && <span style={{ fontSize: 10, color: "var(--muted2)" }}>{c.unit}</span>}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Sparkline data={last30} color={color} height={22} />
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 3, width: 62, justifyContent: "flex-end" }}
+                          title={`Media 7d ${c.fmt(c.trend.avgShort)} vs 30d ${c.fmt(c.trend.avgLong)}`}>
+                          <span style={{ fontSize: 14, color, fontFamily: "'DM Mono', monospace" }}>{dir.arrow}</span>
+                          <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>
+                            {c.trend.deltaPct >= 0 ? "+" : ""}{c.trend.deltaPct.toFixed(0)}%
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {insight && Math.abs(insight.deltaPct) >= 3 && (
+                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--border)", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                    Acostándote antes de la 01:00 tu HRV es un{" "}
+                    <span style={{ color: insight.deltaPct >= 0 ? "var(--green)" : "#d4645a", fontFamily: "'DM Mono', monospace" }}>
+                      {insight.deltaPct >= 0 ? "+" : ""}{insight.deltaPct.toFixed(0)}%
+                    </span>{" "}
+                    {insight.deltaPct >= 0 ? "más alta" : "más baja"}{" "}
+                    <span style={{ color: "var(--muted2)" }}>({insight.earlyN} vs {insight.lateN} noches)</span>.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        );
+      }
       default: return null;
     }
   }
@@ -4016,6 +4124,22 @@ export default function Dashboard() {
                 <span style={{ fontSize: 11, color: "var(--muted)" }}>
                   {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
                 </span>
+              </div>
+            </div>
+
+            {/* ── Datos ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Datos</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button onClick={exportData} disabled={exporting} style={{
+                  padding: "6px 12px",
+                  background: "var(--surface2)", border: "0.5px solid var(--border2)",
+                  borderRadius: 6, color: exporting ? "var(--muted2)" : "var(--muted)",
+                  fontSize: 12, cursor: exporting ? "default" : "pointer", fontFamily: "'DM Sans', sans-serif",
+                }}>
+                  {exporting ? "Exportando…" : "Exportar backup"}
+                </button>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>Descarga un JSON con todos tus datos</span>
               </div>
             </div>
 
