@@ -130,6 +130,26 @@ class TestHealthIngestSimple:
                         headers={"Content-Type": "application/json"})
         assert r.status_code == 400
 
+    def test_ndjson_crudo_en_el_cuerpo(self, client, mock_requests):
+        # El Shortcut manda NDJSON directamente en el cuerpo (no envuelto en una clave):
+        # varias líneas => no es un JSON de una pieza, pero debe procesarse igual.
+        ndjson = "\n".join([
+            json.dumps({"metric": "heart_rate", "date": "2026-07-26", "value": 60}),
+            json.dumps({"metric": "respiratory_rate", "date": "2026-07-26", "value": 14}),
+        ])
+        r = client.post(self.URL, content=ndjson.encode("utf-8"),
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 200
+        assert r.json()["upserted"] == 2
+
+    def test_ndjson_crudo_con_bom(self, client, mock_requests):
+        # iOS a veces añade un BOM al principio del cuerpo; no debe romper el parseo.
+        one = json.dumps({"metric": "heart_rate", "date": "2026-07-26", "value": 61})
+        r = client.post(self.URL, content=b"\xef\xbb\xbf" + one.encode("utf-8"),
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 200
+        assert r.json()["upserted"] == 1
+
 
 class TestHealthIngestCuerpoInvalido:
     def test_ingest_hae_no_json_devuelve_400(self, client):
