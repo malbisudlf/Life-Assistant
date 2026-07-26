@@ -3,7 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
-  seriesTrend, trendDirection, bedtimeHrvInsight,
+  healthConclusions, healthOverall,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -247,7 +247,7 @@ const DEFAULT_COLUMNS = {
   health_hrv:        "right",
   health_activity:   "right",
   health_workouts:   "right",
-  health_trends:     "left",
+  health_hub:        "left",
 };
 
 const ALL_DEFAULT_WIDGETS = [
@@ -265,7 +265,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "health_hrv",        label: "HRV",               visible: false, column: "right" },
   { id: "health_activity",   label: "Actividad",         visible: false, column: "right" },
   { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
-  { id: "health_trends",     label: "Tendencias salud",  visible: false, column: "left"  },
+  { id: "health_hub",        label: "Salud",             visible: true,  column: "left"  },
 ];
 
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
@@ -489,6 +489,7 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
   const [orientation, setOrientation]     = useState(() =>
@@ -577,9 +578,9 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []);
 
-  // Cerrar ajustes con Escape
+  // Cerrar ajustes / modal de salud con Escape
   useEffect(() => {
-    const handler = e => { if (e.key === "Escape") setShowSettings(false); };
+    const handler = e => { if (e.key === "Escape") { setShowSettings(false); setHealthModalOpen(false); } };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, []);
@@ -3077,83 +3078,40 @@ export default function Dashboard() {
           </div>
         );
       }
-      case "health_trends": {
-        // Horas de sueño efectivas (mismo criterio que Bienestar), excluyendo noches anuladas.
-        const trSleepEff = d => {
-          if (d.value && d.value > 0) return d.value;
-          if (d.extra?.asleep > 0) return Number(d.extra.asleep);
-          return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
-        };
-        const trSleepRaw = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: trSleepEff(d) }));
-        const trHrv      = findMetric(healthData, "heart_rate_variability", "heartRateVariability", "hrv");
-        const trRhr      = findMetric(healthData, "resting_heart_rate");
-        const trResp     = findMetric(healthData, "respiratory_rate");
-        const trWeight   = findMetric(healthData, "weight_body_mass", "weight");
-
-        // key, etiqueta, serie, unidad, si "más es mejor" (o neutral), y formateo del valor.
-        const trConfig = [
-          { key: "sleep",  label: "Sueño",       data: trSleepRaw, unit: "",    better: true,  fmt: v => hoursToHM(v) },
-          { key: "hrv",    label: "HRV",          data: trHrv,      unit: "ms",  better: true,  fmt: v => v.toFixed(0) },
-          { key: "rhr",    label: "FC reposo",    data: trRhr,      unit: "bpm", better: false, fmt: v => v.toFixed(0) },
-          { key: "resp",   label: "Frec. resp.",  data: trResp,     unit: "rpm", better: false, fmt: v => v.toFixed(1) },
-          { key: "weight", label: "Peso",         data: trWeight,   unit: "kg",  better: null,  fmt: v => v.toFixed(1) },
-        ];
-        const trRows = trConfig
-          .map(c => ({ ...c, trend: seriesTrend(c.data, 7, 30) }))
-          .filter(c => c.trend);
-
-        const insight = bedtimeHrvInsight(
-          findMetric(healthData, "sleep_analysis", "sleep"),
-          trHrv,
-        );
-        const toneColor = { bien: "var(--green)", mal: "#d4645a", estable: "var(--muted)" };
-
+      case "health_hub": {
+        // Widget compacto: veredicto general + top conclusiones. Al pulsar abre el
+        // modal con el análisis completo (todas las conclusiones + widgets de detalle).
+        const conclusions = healthConclusions(healthData);
+        const overall     = healthOverall(conclusions);
+        const dot         = { good: "var(--green)", warn: "var(--accent)", bad: "#d4645a", info: "var(--muted)" };
         return (
-          <div style={cardStyle} data-card={id} key="health_trends">
-            <div style={s.sectionLabel}>Tendencias <span style={{ fontSize: 12, color: "var(--muted2)", textTransform: "none", letterSpacing: 0 }}>7d vs 30d</span></div>
+          <div style={{ ...cardStyle, cursor: "pointer" }} data-card={id} key="health_hub"
+            onClick={() => setHealthModalOpen(true)} title="Ver análisis completo">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={s.sectionLabel}>Salud</div>
+              <span style={{ fontSize: 16, color: "var(--muted2)", lineHeight: 1 }}>›</span>
+            </div>
             {healthLoading ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
-            ) : trRows.length === 0 ? (
+            ) : conclusions.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de salud aún</div>
             ) : (
               <>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {trRows.map(c => {
-                    // El peso es neutral (subir o bajar depende del objetivo): sin color de valoración.
-                    const dir   = trendDirection(c.trend.deltaPct, c.better === null ? true : c.better);
-                    const color = c.better === null ? "var(--muted)" : toneColor[dir.tone];
-                    const last30 = c.data.slice(-30);
-                    return (
-                      <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ width: 78, fontSize: 12, color: "var(--muted)" }}>{c.label}</div>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 4, width: 88 }}>
-                          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 16, color: "var(--text)" }}>{c.fmt(c.trend.latest)}</span>
-                          {c.unit && <span style={{ fontSize: 10, color: "var(--muted2)" }}>{c.unit}</span>}
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <Sparkline data={last30} color={color} height={22} />
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 3, width: 62, justifyContent: "flex-end" }}
-                          title={`Media 7d ${c.fmt(c.trend.avgShort)} vs 30d ${c.fmt(c.trend.avgLong)}`}>
-                          <span style={{ fontSize: 14, color, fontFamily: "'DM Mono', monospace" }}>{dir.arrow}</span>
-                          <span style={{ fontSize: 11, color, fontFamily: "'DM Mono', monospace" }}>
-                            {c.trend.deltaPct >= 0 ? "+" : ""}{c.trend.deltaPct.toFixed(0)}%
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: "50%", background: dot[overall.tone], flexShrink: 0 }} />
+                  <span style={{ fontSize: 17, color: dot[overall.tone], fontWeight: 500 }}>{overall.label}</span>
                 </div>
-                {insight && Math.abs(insight.deltaPct) >= 3 && (
-                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--border)", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
-                    Acostándote antes de la 01:00 tu HRV es un{" "}
-                    <span style={{ color: insight.deltaPct >= 0 ? "var(--green)" : "#d4645a", fontFamily: "'DM Mono', monospace" }}>
-                      {insight.deltaPct >= 0 ? "+" : ""}{insight.deltaPct.toFixed(0)}%
-                    </span>{" "}
-                    {insight.deltaPct >= 0 ? "más alta" : "más baja"}{" "}
-                    <span style={{ color: "var(--muted2)" }}>({insight.earlyN} vs {insight.lateN} noches)</span>.
-                  </div>
-                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {conclusions.slice(0, 3).map((c, i) => (
+                    <div key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, color: "var(--text)", lineHeight: 1.45 }}>
+                      <span style={{ color: dot[c.tone], flexShrink: 0 }}>•</span>
+                      <span>{c.text}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 12, fontSize: 11, color: "var(--accent2)" }}>
+                  Toca para ver el análisis completo →
+                </div>
               </>
             )}
           </div>
@@ -3903,6 +3861,78 @@ export default function Dashboard() {
       )}
 
       {/* ── AJUSTES ── */}
+      {healthModalOpen && (() => {
+        const conclusions = healthConclusions(healthData);
+        const overall     = healthOverall(conclusions);
+        const dot = { good: "var(--green)", warn: "var(--accent)", bad: "#d4645a", info: "var(--muted)" };
+        // Agrupar las conclusiones por dominio para leerlas por bloques.
+        const byDomain = {};
+        for (const c of conclusions) (byDomain[c.domain] ||= []).push(c);
+        return (
+          <>
+            <div onClick={() => setHealthModalOpen(false)} style={{
+              position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)", zIndex: 200,
+            }} />
+            <div style={{
+              position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+              background: "#161719", border: "0.5px solid rgba(255,255,255,0.1)",
+              borderRadius: 16, padding: "24px 26px", zIndex: 201,
+              width: "min(560px, 94vw)", boxShadow: "0 24px 80px rgba(0,0,0,0.6)",
+              maxHeight: "90vh", overflowY: "auto",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", background: dot[overall.tone] }} />
+                  <div>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)", letterSpacing: "0.04em" }}>Análisis de salud</div>
+                    <div style={{ fontSize: 12, color: dot[overall.tone] }}>{overall.label}</div>
+                  </div>
+                </div>
+                <button onClick={() => setHealthModalOpen(false)} style={{
+                  background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 8,
+                  color: "var(--muted)", fontSize: 18, lineHeight: 1, cursor: "pointer", padding: "4px 10px",
+                }}>×</button>
+              </div>
+
+              {conclusions.length === 0 ? (
+                <div style={{ color: "var(--muted)", fontSize: 13, padding: "20px 0" }}>
+                  Aún no hay datos de salud suficientes para sacar conclusiones. En cuanto el Apple Watch sincronice unos días, esto se irá llenando.
+                </div>
+              ) : (
+                <>
+                  {/* ── Conclusiones por dominio ── */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 22 }}>
+                    {Object.entries(byDomain).map(([domain, items]) => (
+                      <div key={domain}>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>{domain}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {items.map((c, i) => (
+                            <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot[c.tone], marginTop: 6, flexShrink: 0 }} />
+                              <span style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5 }}>{c.text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* ── Detalle: reutiliza los widgets de salud existentes ── */}
+                  <div style={{ borderTop: "0.5px solid var(--border)", paddingTop: 18 }}>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14 }}>Detalle</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                      {["health_wellness", "health_sleep", "health_hrv", "health_heart", "health_activity", "health_workouts"].map(wid => (
+                        <div key={wid}>{renderWidget(wid)}</div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        );
+      })()}
+
       {showSettings && (
         <>
           <div onClick={() => setShowSettings(false)} style={{
