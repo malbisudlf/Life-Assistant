@@ -4,6 +4,7 @@ import {
   urgencyColor, formatShortDate, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight,
+  healthConclusions, healthOverall,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -212,6 +213,63 @@ describe("helpers de tendencias de salud", () => {
     ];
     const hrv = [{ date: "d1", value: 60 }, { date: "d2", value: 60 }];
     expect(bedtimeHrvInsight(sleep, hrv)).toBe(null); // solo 1 noche válida
+  });
+});
+
+describe("motor de conclusiones de salud", () => {
+  // Genera una serie de N días con un valor constante (o función por índice).
+  const serie = (n, v) => Array.from({ length: n }, (_, i) => ({
+    date: `2026-06-${String(i + 1).padStart(2, "0")}`,
+    value: typeof v === "function" ? v(i) : v,
+  }));
+
+  test("HRV cayendo genera una conclusión roja de fatiga", () => {
+    // 23 días a 60ms y 7 a 45ms → media 7d muy por debajo de la de 30d
+    const hrv = [...serie(23, 60), ...serie(7, 45).map((d, i) => ({ ...d, date: `2026-07-${String(i + 1).padStart(2, "0")}` }))];
+    const c = healthConclusions({ heart_rate_variability: hrv });
+    const rec = c.find(x => x.domain === "Recuperación" && x.tone === "bad");
+    expect(rec).toBeTruthy();
+    expect(rec.text).toMatch(/HRV/);
+  });
+
+  test("sueño corto es conclusión roja; sueño bueno es verde", () => {
+    const corto = healthConclusions({ sleep_analysis: serie(7, 5.5) });
+    expect(corto.find(x => x.domain === "Sueño").tone).toBe("bad");
+    const bueno = healthConclusions({ sleep_analysis: serie(7, 8) });
+    expect(bueno.find(x => x.domain === "Sueño").tone).toBe("good");
+  });
+
+  test("cuenta entrenamientos de los últimos 7 días según 'now'", () => {
+    const now = new Date("2026-06-10T12:00:00");
+    const work = [
+      { date: "2026-06-09", extra: { workouts: [{}, {}] } }, // dentro
+      { date: "2026-06-01", extra: { workouts: [{}] } },     // fuera (>7d)
+    ];
+    const c = healthConclusions({ workouts: work }, now);
+    const w = c.find(x => x.domain === "Entrenamiento");
+    expect(w.text).toMatch(/^2 entrenamientos/);
+  });
+
+  test("las conclusiones se ordenan por prioridad (bad antes que good)", () => {
+    const c = healthConclusions({
+      heart_rate_variability: [...serie(23, 60), ...serie(7, 45).map((d, i) => ({ ...d, date: `2026-07-0${i + 1}` }))],
+      step_count: serie(7, 12000), // good
+    });
+    const idxBad  = c.findIndex(x => x.tone === "bad");
+    const idxGood = c.findIndex(x => x.tone === "good");
+    expect(idxBad).toBeLessThan(idxGood);
+  });
+
+  test("healthOverall resume el peor tono presente", () => {
+    expect(healthOverall([{ tone: "good" }, { tone: "warn" }, { tone: "bad" }]).tone).toBe("bad");
+    expect(healthOverall([{ tone: "good" }, { tone: "warn" }]).tone).toBe("warn");
+    expect(healthOverall([{ tone: "good" }]).tone).toBe("good");
+    expect(healthOverall([]).label).toMatch(/Sin datos/);
+  });
+
+  test("sin datos no revienta y devuelve lista vacía", () => {
+    expect(healthConclusions({})).toEqual([]);
+    expect(healthConclusions(null)).toEqual([]);
   });
 });
 

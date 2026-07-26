@@ -197,6 +197,143 @@ export function bedtimeHrvInsight(sleepData, hrvData, cutoffHour = 1) {
   return { avgEarly, avgLate, deltaPct, earlyN: early.length, lateN: late.length };
 }
 
+// ── Análisis de salud: conclusiones en lenguaje claro ───────────
+// Motor puro que exprime TODAS las métricas del Apple Watch y devuelve
+// conclusiones accionables (no solo números). Cada una lleva dominio, tono
+// (good|warn|bad|info) y texto. El widget compacto muestra el veredicto y las
+// principales; el modal las muestra todas. Se apoya en findMetric/seriesTrend/
+// bedtimeHrvInsight de este mismo fichero.
+
+const _avgVal = arr => (arr && arr.length) ? arr.reduce((s, d) => s + (Number(d.value) || 0), 0) / arr.length : null;
+
+// Horas de sueño efectivas (mismo criterio que el widget de Bienestar).
+function _sleepHours(d) {
+  if (d.value && d.value > 0) return Number(d.value);
+  if (d.extra?.asleep > 0) return Number(d.extra.asleep);
+  return (Number(d.extra?.deep) || 0) + (Number(d.extra?.rem) || 0) + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
+}
+
+// Prioridad de tono para ordenar (lo más accionable primero).
+const _TONE_ORDER = { bad: 0, warn: 1, good: 2, info: 3 };
+
+// `now` es inyectable para poder testear el cómputo de "últimos 7 días".
+export function healthConclusions(healthData, now = new Date()) {
+  const C = [];
+  const push = (domain, tone, text) => C.push({ domain, tone, text });
+  const round = n => Math.round(n);
+
+  // ── Sueño ──
+  const sleep = findMetric(healthData, "sleep_analysis", "sleep")
+    .filter(d => !d.extra?.excluded)
+    .map(d => ({ ...d, value: _sleepHours(d) }))
+    .filter(d => d.value > 0);
+  if (sleep.length) {
+    const a7 = _avgVal(sleep.slice(-7));
+    const t  = seriesTrend(sleep, 7, 30);
+    const tone = a7 >= 7.5 ? "good" : a7 >= 6.5 ? "warn" : "bad";
+    let text = `Duermes de media ${hoursToHM(a7)} las últimas ${Math.min(7, sleep.length)} noches`;
+    if      (a7 < 6.5)  text += " — por debajo de lo recomendable, prioriza descansar";
+    else if (a7 < 7.5)  text += " — algo justo, intenta acostarte antes";
+    else                text += " — buen descanso";
+    if (t && Math.abs(t.deltaPct) >= 8) text += t.deltaPct > 0 ? "; mejorando frente al mes" : "; empeorando frente al mes";
+    push("Sueño", tone, text);
+
+    // Fases (si hay desglose): sueño profundo bajo mantenido.
+    const withPhases = sleep.slice(-7).filter(d => Number(d.extra?.deep) > 0);
+    if (withPhases.length >= 3) {
+      const deepPct = _avgVal(withPhases.map(d => ({ value: (Number(d.extra.deep) / _sleepHours(d)) * 100 })));
+      if (deepPct != null && deepPct < 10) push("Sueño", "warn", `Tu sueño profundo está bajo (${round(deepPct)}% del total) — se asocia a peor recuperación física.`);
+    }
+  }
+
+  // ── Recuperación: HRV ──
+  const hrv = findMetric(healthData, "heart_rate_variability", "heartRateVariability").filter(d => d.value > 0);
+  if (hrv.length >= 3) {
+    const t  = seriesTrend(hrv, 7, 30);
+    const a7 = _avgVal(hrv.slice(-7));
+    if      (t && t.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(t.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
+    else if (t && t.deltaPct >= 8)  push("Recuperación", "good", `Tu HRV va al alza, un ${round(t.deltaPct)}% sobre tu media de 30 días (${round(a7)}ms) — buena recuperación.`);
+    else                            push("Recuperación", "info", `HRV estable en torno a ${round(a7)}ms.`);
+  }
+
+  // ── Recuperación: FC en reposo ──
+  const rhr = findMetric(healthData, "resting_heart_rate").filter(d => d.value > 0);
+  if (rhr.length >= 3) {
+    const t  = seriesTrend(rhr, 7, 30);
+    const a7 = _avgVal(rhr.slice(-7));
+    if (t && t.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(t.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
+    else                      push("Recuperación", "good", `FC en reposo en ${round(a7)} bpm${t && t.deltaPct <= -3 ? ", bajando (buena señal)" : ""}.`);
+  }
+
+  // ── Recuperación: frecuencia respiratoria ──
+  const resp = findMetric(healthData, "respiratory_rate").filter(d => d.value > 0);
+  if (resp.length >= 3) {
+    const t = seriesTrend(resp, 7, 30);
+    if (t && t.deltaPct >= 6) push("Recuperación", "warn", `Tu frecuencia respiratoria nocturna ha subido frente a tu media — a veces precede a un resfriado o refleja estrés.`);
+  }
+
+  // ── Actividad: pasos ──
+  const steps = findMetric(healthData, "step_count", "steps").filter(d => d.value > 0);
+  if (steps.length) {
+    const a7 = _avgVal(steps.slice(-7));
+    const tone = a7 >= 10000 ? "good" : a7 >= 7000 ? "info" : "warn";
+    push("Actividad", tone, `Media de ${round(a7).toLocaleString("es")} pasos al día${a7 >= 10000 ? " — objetivo cumplido" : a7 < 7000 ? " — algo bajo, intenta moverte más" : ""}.`);
+  }
+
+  // ── Actividad: minutos de ejercicio ──
+  const ex = findMetric(healthData, "apple_exercise_time", "exercise_time").filter(d => d.value > 0);
+  if (ex.length) {
+    const a7 = _avgVal(ex.slice(-7));
+    push("Actividad", a7 >= 30 ? "good" : "info", `${round(a7)} min de ejercicio al día de media.`);
+  }
+
+  // ── Forma física: VO2 max ──
+  const vo2 = findMetric(healthData, "vo2_max", "cardioFitness").filter(d => d.value > 0);
+  if (vo2.length) {
+    const v = vo2[vo2.length - 1].value;
+    const cat = v >= 50 ? "excelente" : v >= 45 ? "muy bueno" : v >= 40 ? "bueno" : v >= 35 ? "normal" : "mejorable";
+    push("Forma física", v >= 40 ? "good" : "info", `VO₂max de ${v.toFixed(1)} ml/kg/min — nivel ${cat}.`);
+  }
+
+  // ── Composición corporal: peso ──
+  const weight = findMetric(healthData, "weight_body_mass", "weight").filter(d => d.value > 0);
+  if (weight.length >= 2) {
+    const cur  = weight[weight.length - 1].value;
+    const prev = (weight[weight.length - 8] ?? weight[0]).value;
+    const d = cur - prev;
+    if (Math.abs(d) >= 0.3) push("Composición", "info", `Peso ${cur.toFixed(1)} kg (${d > 0 ? "+" : ""}${d.toFixed(1)} kg vs hace ~1 semana).`);
+    else                    push("Composición", "info", `Peso estable en ${cur.toFixed(1)} kg.`);
+  }
+
+  // ── Entrenamientos (últimos 7 días) ──
+  const work = findMetric(healthData, "workouts", "workout");
+  if (work.length) {
+    const cutoff = new Date(now.getTime() - 7 * 86400000).toISOString().slice(0, 10);
+    const count = work.filter(d => d.date >= cutoff).reduce((s, d) => s + (d.extra?.workouts?.length || 0), 0);
+    push("Entrenamiento", count >= 4 ? "good" : count >= 2 ? "info" : "warn",
+      `${count} entrenamiento${count !== 1 ? "s" : ""} en los últimos 7 días${count >= 4 ? " — buen ritmo" : count === 0 ? " — toca moverse" : ""}.`);
+  }
+
+  // ── Patrón: hora de acostarse ↔ HRV ──
+  const insight = bedtimeHrvInsight(findMetric(healthData, "sleep_analysis", "sleep"), hrv);
+  if (insight && Math.abs(insight.deltaPct) >= 5) {
+    push("Patrón", "info", `Las noches que te acuestas antes de la 01:00 tu HRV es un ${insight.deltaPct > 0 ? "+" : ""}${round(insight.deltaPct)}% ${insight.deltaPct > 0 ? "más alta" : "más baja"} (${insight.earlyN} vs ${insight.lateN} noches).`);
+  }
+
+  C.sort((a, b) => _TONE_ORDER[a.tone] - _TONE_ORDER[b.tone]);
+  return C;
+}
+
+// Veredicto general a partir de las conclusiones: rojo si hay algo que atender,
+// ámbar si hay matices, verde si todo va bien.
+export function healthOverall(conclusions) {
+  const has = tone => conclusions.some(c => c.tone === tone);
+  if (has("bad"))          return { tone: "bad",  label: "Requiere atención" };
+  if (has("warn"))         return { tone: "warn", label: "Bien, con matices" };
+  if (conclusions.length)  return { tone: "good", label: "Todo en orden" };
+  return { tone: "info", label: "Sin datos suficientes" };
+}
+
 // ── Conteo de ropa (widget temporal) ────────────────────────────
 // Monedas soportadas: euro y baht tailandés (símbolo ฿).
 export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };
