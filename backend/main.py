@@ -1339,7 +1339,12 @@ async def health_ingest(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="El cuerpo de la petición no es JSON válido")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON")
     data_block = body.get("data", {})
     metrics    = data_block.get("metrics", [])
     workouts   = data_block.get("workouts", [])
@@ -1501,22 +1506,40 @@ async def health_ingest_simple(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="El cuerpo de la petición no es JSON válido")
+
+    parse_errors = []
     if isinstance(body, dict):
         # iOS Shortcuts serializa listas como NDJSON (un JSON por línea) dentro de un string
         if len(body) == 1:
             val = list(body.values())[0]
             if isinstance(val, str):
-                body = [json.loads(line) for line in val.strip().splitlines() if line.strip()]
+                # Una línea mal formada NO debe tumbar el lote entero: se descarta y se
+                # reporta en parse_errors. Antes un solo json.loads fallido daba un 500 y
+                # el Shortcut dejaba de sincronizar sin explicación.
+                parsed = []
+                for line in val.strip().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed.append(json.loads(line))
+                    except (json.JSONDecodeError, ValueError):
+                        parse_errors.append({"line": line[:200], "error": "JSON inválido"})
+                body = parsed
             elif isinstance(val, list):
                 body = val
             else:
                 body = [body]
         else:
             body = [body]
+    if not isinstance(body, list):
+        body = [body]
 
     samples = []
-    parse_errors = []
     for item in body:
         try:
             v = item.get("value")
@@ -1532,7 +1555,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 unit=item.get("unit"),
                 extra=item.get("extra"),
             ))
-        except (KeyError, ValueError, TypeError) as e:
+        except (KeyError, ValueError, TypeError, AttributeError) as e:
             parse_errors.append({"item": str(item)[:200], "error": str(e)})
             continue
 
