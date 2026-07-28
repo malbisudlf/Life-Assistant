@@ -48,7 +48,6 @@ def main() -> int:
         ("Ideas por voz (Whisper + GPT)", ["OPENAI_API_KEY"]),
         ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
         ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
-        ("Notificaciones push (avisos con la app cerrada)", ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"]),
     ]
     for nombre, vars_ in grupos:
         faltan = [v for v in vars_ if not os.getenv(v)]

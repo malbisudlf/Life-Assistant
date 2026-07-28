@@ -149,48 +149,7 @@ automation:
 
 Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 
-## 7. Notificaciones push (opcional)
-
-Sin esto los avisos solo saltan con la pestaña abierta, que es justo cuando no hacen
-falta. Con push llegan al móvil con la app cerrada.
-
-1. Genera el par de claves VAPID y pégalas en el entorno del backend:
-
-   ```bash
-   python backend/generar_vapid.py
-   ```
-
-   Identifican a tu servidor ante el servicio de push del navegador. **No las cambies
-   una vez en marcha**: al hacerlo, todos los dispositivos tienen que volver a activar
-   las notificaciones.
-
-2. Aplica la migración `supabase/migrations/20260728_push_subscriptions.sql`.
-
-3. Instala la PWA en el móvil (en iOS es obligatorio: *Compartir → Añadir a pantalla de
-   inicio*; Safari no permite push desde una pestaña normal) y activa las notificaciones
-   en ⚙ → Notificaciones. El botón **Probar push** comprueba la cadena entera sin
-   esperar a que llegue un evento.
-
-4. El backend escala a cero, así que no hay ningún proceso vivo que mire el reloj: el
-   envío lo dispara HA con una llamada más por minuto. Añade a `configuration.yaml`:
-
-   ```yaml
-   rest_command:
-     la_push_eventos:
-       url: https://TU-BACKEND.fly.dev/ha/push-eventos
-       method: POST
-       headers: { X-Auth-Token: !secret la_poll_token }
-
-   automation:
-     - alias: "Life Assistant: push de eventos"
-       trigger: [{ platform: time_pattern, minutes: "/1" }]
-       action: [{ service: rest_command.la_push_eventos }]
-   ```
-
-   Da igual que se llame de más: el backend lleva el control de lo ya enviado en la
-   base de datos (no en memoria, que se perdería en cada arranque en frío de Fly).
-
-## 8. Checklist de verificación
+## 7. Checklist de verificación
 
 - [ ] `python backend/check_config.py` sin errores bloqueantes
 - [ ] `https://TU-BACKEND.fly.dev/` responde `{"status": "Life Assistant API running"}`
@@ -200,18 +159,15 @@ falta. Con push llegan al móvil con la app cerrada.
 - [ ] Grabar una idea por voz la transcribe y guarda (OpenAI configurado)
 - [ ] (Opcional) Llega una métrica de salud tras un export del Watch
 - [ ] (Opcional) Los sensores `la_*` de HA se actualizan
-- [ ] (Opcional) ⚙ → Notificaciones → «Probar push» llega al móvil con la app cerrada
 
-## 9. Referencia rápida de variables
+## Referencia rápida de variables
 
 Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `DASHBOARD_PASSWORD`*, `SUPABASE_URL`, `SUPABASE_KEY`, `CLIENT_ID`, `TENANT_ID`,
 `CLIENT_SECRET`, `REDIRECT_URI`, `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY`,
 `HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
-`CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`,
-`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (push), `HTTP_TIMEOUT`,
-`TRUST_FORWARDED_FOR`.
+`CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
-`VITE_ENTREGAS_MARKER`, `VITE_AGENT_ID`.
+`VITE_ENTREGAS_MARKER`.

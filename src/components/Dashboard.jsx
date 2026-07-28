@@ -24,14 +24,6 @@ const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avis
 // nadie y seguir preguntando no aporta nada.
 const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
 
-// La clave VAPID viaja como base64url; applicationServerKey la quiere en bytes.
-function claveVapidABytes(base64url) {
-  const relleno = "=".repeat((4 - (base64url.length % 4)) % 4);
-  const base64  = (base64url + relleno).replace(/-/g, "+").replace(/_/g, "/");
-  const binario = atob(base64);
-  return Uint8Array.from(binario, c => c.charCodeAt(0));
-}
-
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
   if (res.status === 401 && localStorage.getItem("la_token")) {
@@ -525,7 +517,6 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
-  const [pushEstado, setPushEstado]       = useState(null);   // estado de la suscripción push
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
@@ -1339,97 +1330,6 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
       if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
     } catch { /* mejor esfuerzo: ignorar */ }
-  }
-
-  // ── Notificaciones push ──────────────────────────────────────────────────
-  // La API Notification solo dispara con la pestaña abierta. Web Push llega con la app
-  // cerrada, que es cuando de verdad sirve que te avisen de un evento en 15 minutos.
-  // El service worker solo se registra en producción (ver main.jsx), así que en
-  // desarrollo esto se queda en "no soportado" — es lo esperado.
-  async function suscribirPush() {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      return { ok: false, motivo: "no-soportado" };
-    }
-    const t = localStorage.getItem("la_token") || "";
-    try {
-      const r = await apiFetch(`${API}/push/clave-publica`, { headers: { "Authorization": `Bearer ${t}` } });
-      const { habilitado, clave } = await r.json();
-      if (!habilitado || !clave) return { ok: false, motivo: "sin-configurar" };
-
-      const reg = await navigator.serviceWorker.ready;
-      const sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,   // obligatorio en Chrome: nada de push silencioso
-        applicationServerKey: claveVapidABytes(clave),
-      });
-      const j = sub.toJSON();
-      const alta = await apiFetch(`${API}/push/suscribir`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          endpoint: j.endpoint,
-          p256dh: j.keys?.p256dh,
-          auth: j.keys?.auth,
-          user_agent: navigator.userAgent.slice(0, 300),
-        }),
-      });
-      return alta.ok ? { ok: true } : { ok: false, motivo: "error" };
-    } catch {
-      return { ok: false, motivo: "error" };
-    }
-  }
-
-  async function desuscribirPush() {
-    if (!("serviceWorker" in navigator)) return;
-    const t = localStorage.getItem("la_token") || "";
-    try {
-      const reg = await navigator.serviceWorker.ready;
-      const sub = await reg.pushManager.getSubscription();
-      if (!sub) return;
-      const endpoint = sub.endpoint;
-      await sub.unsubscribe();
-      // Y borrarla también en el servidor, o seguiría intentando enviarle avisos.
-      await apiFetch(`${API}/push/desuscribir`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ endpoint, p256dh: "x", auth: "x" }),
-      });
-    } catch { /* mejor esfuerzo: si falla, el servidor la purga al recibir un 410 */ }
-  }
-
-  // Activa o desactiva las notificaciones: permiso del navegador + suscripción push.
-  async function alternarNotificaciones() {
-    if (notificationsEnabled) {
-      localStorage.setItem("la_notifications", "false");
-      setNotificationsEnabled(false);
-      setPushEstado(null);
-      await desuscribirPush();
-      return;
-    }
-    let permiso = Notification.permission;
-    if (permiso === "default") permiso = await Notification.requestPermission();
-    if (permiso !== "granted") {
-      localStorage.setItem("la_notifications", "false");
-      setNotificationsEnabled(false);
-      return;
-    }
-    localStorage.setItem("la_notifications", "true");
-    setNotificationsEnabled(true);
-    const res = await suscribirPush();
-    setPushEstado(res.ok ? "ok" : res.motivo);
-  }
-
-  async function probarPush() {
-    const t = localStorage.getItem("la_token") || "";
-    setPushEstado("probando");
-    try {
-      const r = await apiFetch(`${API}/push/prueba`, {
-        method: "POST", headers: { "Authorization": `Bearer ${t}` },
-      });
-      const d = await r.json();
-      setPushEstado(d.enviados > 0 ? "enviado" : "sin-dispositivos");
-    } catch {
-      setPushEstado("error");
-    }
   }
 
   // ── Estado del sistema ───────────────────────────────────────────────────
@@ -4295,7 +4195,22 @@ export default function Dashboard() {
             <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
               <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Notificaciones</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <button onClick={alternarNotificaciones} style={{
+                <button onClick={() => {
+                  if (Notification.permission === "default") {
+                    Notification.requestPermission().then(perm => {
+                      if (perm === "granted") {
+                        localStorage.setItem("la_notifications", "true");
+                        setNotificationsEnabled(true);
+                      } else {
+                        localStorage.setItem("la_notifications", "false");
+                        setNotificationsEnabled(false);
+                      }
+                    });
+                  } else if (Notification.permission === "granted") {
+                    localStorage.setItem("la_notifications", "false");
+                    setNotificationsEnabled(false);
+                  }
+                }} style={{
                   padding: "6px 12px",
                   background: notificationsEnabled ? "rgba(200,169,110,0.15)" : "var(--surface2)",
                   border: `0.5px solid ${notificationsEnabled ? "var(--accent)" : "var(--border2)"}`,
@@ -4309,25 +4224,6 @@ export default function Dashboard() {
                   {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
                 </span>
               </div>
-              {/* Con push, el aviso llega también con la app cerrada */}
-              {notificationsEnabled && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                  <button onClick={probarPush} disabled={pushEstado === "probando"} style={{
-                    padding: "5px 10px", background: "var(--surface2)", border: "0.5px solid var(--border2)",
-                    borderRadius: 6, color: "var(--muted)", fontSize: 11,
-                    cursor: pushEstado === "probando" ? "default" : "pointer", fontFamily: "'DM Sans', sans-serif",
-                  }}>{pushEstado === "probando" ? "Enviando…" : "Probar push"}</button>
-                  <span style={{ fontSize: 11, color: pushEstado === "ok" || pushEstado === "enviado" ? "var(--green)" : "var(--muted)" }}>
-                    {pushEstado === "ok"              ? "Este dispositivo recibirá avisos con la app cerrada"
-                      : pushEstado === "enviado"       ? "Enviado — deberías verlo en un momento"
-                      : pushEstado === "sin-dispositivos" ? "Ningún dispositivo suscrito todavía"
-                      : pushEstado === "sin-configurar"  ? "El servidor no tiene claves VAPID configuradas"
-                      : pushEstado === "no-soportado"    ? "Este navegador no soporta push (o estás en desarrollo)"
-                      : pushEstado === "error"           ? "No se pudo suscribir"
-                      : "Con la app cerrada solo llegan si el push está activo"}
-                  </span>
-                </div>
-              )}
             </div>
 
             {/* ── Estado del sistema ── */}

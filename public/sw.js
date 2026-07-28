@@ -17,44 +17,6 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// ── Notificaciones push ──────────────────────────────────────────────────────
-// Esto es lo que hace que el aviso llegue con la app cerrada: el service worker sigue
-// vivo aunque no haya ninguna pestaña. El backend manda {titulo, cuerpo, url}.
-self.addEventListener("push", (event) => {
-  let datos;
-  try {
-    datos = event.data ? event.data.json() : {};
-  } catch {
-    // Cuerpo que no es JSON: se muestra tal cual en vez de tragarse el aviso.
-    datos = { cuerpo: event.data ? event.data.text() : "" };
-  }
-  const titulo = datos.titulo || "Life Assistant";
-  event.waitUntil(
-    self.registration.showNotification(titulo, {
-      body: datos.cuerpo || "",
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      // Reemplaza el aviso anterior del mismo evento en vez de apilarlos.
-      tag: datos.url || titulo,
-      data: { url: datos.url || "/" },
-    })
-  );
-});
-
-// Al tocar el aviso: reutiliza la pestaña abierta si la hay, y si no abre una.
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  const destino = (event.notification.data && event.notification.data.url) || "/";
-  event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((lista) => {
-      for (const cliente of lista) {
-        if ("focus" in cliente) return cliente.focus();
-      }
-      return self.clients.openWindow ? self.clients.openWindow(destino) : undefined;
-    })
-  );
-});
-
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;
