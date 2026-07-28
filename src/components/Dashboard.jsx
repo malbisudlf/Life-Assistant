@@ -789,9 +789,12 @@ export default function Dashboard() {
       .catch(() => {});
   }, [geo]);
 
-  // Estado del agente PC (heartbeat)
+  // Estado del agente PC (heartbeat). Solo se sondea con el modal de encendido abierto:
+  // es el único sitio donde se pinta (isAgentOnline). Sondear siempre, cada 10s, mantenía
+  // despierta la máquina de Fly las 24 h y anulaba su auto_stop_machines / min_machines_running=0.
+  const wolModalAbierto = !!wolModal;
   useEffect(() => {
-    if (!token) return;
+    if (!token || !wolModalAbierto) return;
 
     let mounted = true;
     async function loadAgent() {
@@ -804,10 +807,10 @@ export default function Dashboard() {
       }
     }
 
-    loadAgent();
+    loadAgent();   // sin esperar los 10s: el modal necesita el estado ya
     const id = setInterval(loadAgent, 10000);
     return () => { mounted = false; clearInterval(id); };
-  }, [token]);
+  }, [token, wolModalAbierto]);
 
   // Notificaciones del navegador — solicitar permiso
   useEffect(() => {
