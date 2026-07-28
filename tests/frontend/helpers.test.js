@@ -3,8 +3,8 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
-  seriesTrend, trendDirection, bedtimeHrvInsight,
-  healthConclusions, healthOverall,
+  seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
+  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -300,5 +300,210 @@ describe("helpers de conteo de ropa", () => {
     expect(clothingTotals([{ price: 5 }, { price: "x", currency: "EUR" }])).toEqual({ EUR: 5 });
     expect(clothingTotals([])).toEqual({});
     expect(clothingTotals(null)).toEqual({});
+  });
+});
+
+// ── Puntuación de bienestar ─────────────────────────────────────
+describe("scoreFromBreakdown", () => {
+  test("el total sale de sumar el desglose, normalizado a 100", () => {
+    const b = [
+      { label: "Sueño", pts: 25, max: 25 },
+      { label: "Pasos", pts: 4,  max: 8 },
+      { label: "HRV",   pts: 6,  max: 12 },
+    ];
+    expect(scoreFromBreakdown(b)).toEqual({ pts: 35, max: 45, score: 78 });
+  });
+
+  test("las métricas sin dato no cuentan ni arriba ni abajo", () => {
+    // No tener sensor de pisos no debe penalizar la puntuación.
+    const conPisos = [
+      { label: "Sueño", pts: 25, max: 25 },
+      { label: "Pisos", pts: 0,  max: 2, sinDatos: true },
+    ];
+    expect(scoreFromBreakdown(conPisos)).toEqual({ pts: 25, max: 25, score: 100 });
+  });
+
+  test("semanal y diaria se comparan sobre la misma escala", () => {
+    // Antes: la semanal sumaba como mucho 82 y la diaria 106, pero ambas usaban el
+    // umbral fijo de 80 → "Semana excelente" exigía el 97% y "Día excelente" el 75%.
+    const semanal = [{ pts: 41, max: 82 }];
+    const diaria  = [{ pts: 53, max: 106 }];
+    expect(scoreFromBreakdown(semanal).score).toBe(50);
+    expect(scoreFromBreakdown(diaria).score).toBe(50);
+  });
+
+  test("desglose vacío o sin máximos devuelve score nulo", () => {
+    expect(scoreFromBreakdown([]).score).toBeNull();
+    expect(scoreFromBreakdown(null).score).toBeNull();
+    expect(scoreFromBreakdown([{ pts: 0, max: 0 }]).score).toBeNull();
+  });
+
+  test("ignora filas corruptas sin romper", () => {
+    const b = [{ pts: 5, max: 10 }, null, { pts: "x", max: 10 }];
+    expect(scoreFromBreakdown(b)).toEqual({ pts: 5, max: 20, score: 25 });
+  });
+});
+
+describe("wellnessBreakdown", () => {
+  const etiquetas = b => b.map(x => x.label);
+  const fila      = (b, txt) => b.find(x => x.label.includes(txt));
+
+  // Todas las métricas de la vista semanal con dato: 25+15+8+5+2+2+12+8 = 77
+  const semanaCompleta = { isDaily: false, sleep: 8, work: 4, expectedByNow: 4, steps: 12000,
+    activeEnergy: 700, stand: 13, flights: 12, hrv: 60, hrvPrev: 50, rhr: 48 };
+
+  test("la vista semanal no incluye los componentes que solo tienen sentido a diario", () => {
+    // VO₂max, FC caminando, % grasa, luz y respiración se actualizan de forma
+    // esporádica: promediarlos por semana no dice nada.
+    const b = wellnessBreakdown({ ...semanaCompleta, vo2: 50, walkHr: 65, bodyFat: 11, daylight: 90, resp: 14 });
+    expect(etiquetas(b).join()).not.toMatch(/VO₂max|caminando|Grasa|Luz|Resp/);
+    expect(scoreFromBreakdown(b).max).toBe(77);
+    // Con recuperación cardio son 5 más
+    expect(scoreFromBreakdown(wellnessBreakdown({ ...semanaCompleta, cardioRec: 35 })).max).toBe(82);
+  });
+
+  test("la vista diaria sí los incluye cuando hay dato", () => {
+    const b = wellnessBreakdown({ isDaily: true, sleep: 8, vo2: 50, walkHr: 65, bodyFat: 11, daylight: 90, resp: 14 });
+    expect(fila(b, "VO₂max").pts).toBe(6);
+    expect(fila(b, "caminando").pts).toBe(4);
+    expect(fila(b, "Grasa").pts).toBe(4);
+    expect(fila(b, "Luz").pts).toBe(5);
+    expect(fila(b, "Resp").pts).toBe(5);
+  });
+
+  test("todo lo que suma aparece en el desglose", () => {
+    // La regresión original: VO₂max y luz natural sumaban sin registrar su fila.
+    const b = wellnessBreakdown({
+      isDaily: true, sleep: 8, work: 1, steps: 12000, activeEnergy: 700, stand: 13,
+      flights: 12, hrv: 60, hrvPrev: 50, rhr: 48, cardioRec: 35, vo2: 52,
+      walkHr: 65, bodyFat: 10, daylight: 90, resp: 14,
+    });
+    const { pts, max, score } = scoreFromBreakdown(b);
+    expect(pts).toBe(max);        // todo al máximo
+    expect(score).toBe(100);
+    expect(b.every(f => f.pts <= f.max)).toBe(true);
+  });
+
+  test("una métrica sin dato se marca y no entra en la fracción", () => {
+    const b = wellnessBreakdown({ ...semanaCompleta, steps: null });
+    expect(fila(b, "Pasos").sinDatos).toBe(true);
+    expect(fila(b, "Sueño").sinDatos).toBe(false);
+    // Sin sensor de pasos, sus 8 puntos salen del denominador en vez de contar como 0
+    expect(scoreFromBreakdown(b).max).toBe(77 - 8);
+    // ...y por eso no baja la puntuación: el resto sigue al máximo
+    expect(scoreFromBreakdown(b).score).toBe(100);
+  });
+
+  test("el entreno semanal se escala por los días que ya han pasado", () => {
+    // 2 de 2 días esperados = objetivo al día, aunque la semana pida 4 en total.
+    const alDia = wellnessBreakdown({ isDaily: false, work: 2, expectedByNow: 2 });
+    expect(fila(alDia, "Entreno").pts).toBe(15);
+    // 2 de 4 esperados = va a medias
+    const aMedias = wellnessBreakdown({ isDaily: false, work: 2, expectedByNow: 4 });
+    expect(fila(aMedias, "Entreno").pts).toBe(7);
+  });
+
+  test("un día sin entreno puntúa algo si la recuperación es buena", () => {
+    const conHrvAlta = wellnessBreakdown({ isDaily: true, work: 0, hrv: 75 });
+    const conHrvBaja = wellnessBreakdown({ isDaily: true, work: 0, hrv: 40 });
+    expect(fila(conHrvAlta, "Entreno").pts).toBe(3);
+    expect(fila(conHrvBaja, "Entreno").pts).toBe(1);
+    // Pero 30 min de ejercicio pesan más que descansar bien
+    const conEjercicio = wellnessBreakdown({ isDaily: true, work: 0, exercise: 35, hrv: 75 });
+    expect(fila(conEjercicio, "Entreno").pts).toBe(9);
+  });
+
+  test("la HRV se puntúa contra su referencia, no en absoluto", () => {
+    expect(fila(wellnessBreakdown({ hrv: 60, hrvPrev: 50 }), "HRV").pts).toBe(12); // subiendo
+    expect(fila(wellnessBreakdown({ hrv: 50, hrvPrev: 50 }), "HRV").pts).toBe(8);  // estable
+    expect(fila(wellnessBreakdown({ hrv: 40, hrvPrev: 50 }), "HRV").pts).toBe(4);  // bajando
+    expect(fila(wellnessBreakdown({ hrv: 50 }), "HRV").pts).toBe(6);               // sin referencia
+  });
+
+  test("sin ningún dato devuelve el desglose base todo a cero", () => {
+    const b = wellnessBreakdown();
+    expect(b.length).toBeGreaterThan(0);
+    expect(b.every(f => f.pts === 0 || f.label.includes("Entreno"))).toBe(true);
+    expect(scoreFromBreakdown(b).score).toBe(0);
+  });
+});
+
+describe("correlaciones entre series", () => {
+  const serie = (desde, valores) => valores.map((v, i) => ({
+    date: new Date(Date.UTC(2026, 5, desde + i)).toISOString().slice(0, 10),
+    value: v,
+  }));
+
+  test("pairByDate cruza por fecha e ignora lo que no casa", () => {
+    const a = serie(1, [10, 20, 30]);
+    const b = [{ date: "2026-06-02", value: 7 }, { date: "2026-06-09", value: 9 }];
+    expect(pairByDate(a, b)).toEqual([{ date: "2026-06-02", x: 20, y: 7 }]);
+  });
+
+  test("pairByDate con desfase cruza el día D con el D+1", () => {
+    // "lo que hago hoy, ¿cómo me afecta mañana?"
+    const pasos = serie(1, [8000, 12000]);
+    const sueno = serie(2, [7, 8]);
+    expect(pairByDate(pasos, sueno, 1)).toEqual([
+      { date: "2026-06-01", x: 8000,  y: 7 },
+      { date: "2026-06-02", x: 12000, y: 8 },
+    ]);
+  });
+
+  test("pairByDate cruza bien el cambio de mes", () => {
+    const a = [{ date: "2026-06-30", value: 1 }];
+    const b = [{ date: "2026-07-01", value: 2 }];
+    expect(pairByDate(a, b, 1)).toEqual([{ date: "2026-06-30", x: 1, y: 2 }]);
+  });
+
+  test("splitCompare parte por la mediana y compara medias", () => {
+    const pares = [
+      { x: 1, y: 6 }, { x: 2, y: 6 }, { x: 3, y: 6 },
+      { x: 8, y: 8 }, { x: 9, y: 8 }, { x: 10, y: 8 },
+    ];
+    const r = splitCompare(pares);
+    expect(r.altoAvg).toBe(8);
+    expect(r.bajoAvg).toBe(6);
+    expect(r.deltaPct).toBeCloseTo(33.3, 1);
+    expect(r.altoN).toBe(3);
+    expect(r.bajoN).toBe(3);
+  });
+
+  test("splitCompare acepta un umbral fijo (entrené / no entrené)", () => {
+    const pares = [
+      { x: 0, y: 50 }, { x: 0, y: 52 }, { x: 0, y: 51 },
+      { x: 1, y: 55 }, { x: 2, y: 57 }, { x: 1, y: 56 },
+    ];
+    const r = splitCompare(pares, { umbral: 0 });
+    expect(r.bajoAvg).toBeCloseTo(51, 1);   // días de descanso
+    expect(r.altoAvg).toBeCloseTo(56, 1);   // día después de entrenar
+    expect(r.deltaPct).toBeGreaterThan(0);
+  });
+
+  test("splitCompare devuelve null sin muestras suficientes en ambos grupos", () => {
+    // Con pocos datos la comparación es ruido, no señal.
+    expect(splitCompare([{ x: 1, y: 1 }, { x: 9, y: 2 }])).toBe(null);
+    const casiTodoAlto = [
+      { x: 9, y: 1 }, { x: 9, y: 1 }, { x: 9, y: 1 },
+      { x: 9, y: 1 }, { x: 9, y: 1 }, { x: 1, y: 2 },
+    ];
+    expect(splitCompare(casiTodoAlto)).toBe(null);
+    expect(splitCompare([])).toBe(null);
+    expect(splitCompare(null)).toBe(null);
+  });
+
+  test("healthConclusions saca el patrón de pasos ↔ sueño", () => {
+    const dia = n => new Date(Date.UTC(2026, 5, n)).toISOString().slice(0, 10);
+    const step_count = [], sleep_analysis = [];
+    for (let i = 0; i < 8; i++) {
+      const muchos = i % 2 === 0;
+      step_count.push({ date: dia(1 + i), value: muchos ? 14000 : 3000 });
+      // La noche siguiente duerme más cuando ha andado mucho
+      sleep_analysis.push({ date: dia(2 + i), value: muchos ? 8.2 : 6.4, extra: {} });
+    }
+    const c = healthConclusions({ step_count, sleep_analysis }, new Date("2026-06-09T12:00:00Z"));
+    const patron = c.find(x => x.domain === "Patrón" && x.text.includes("pasos"));
+    expect(patron).toBeTruthy();
+    expect(patron.text).toMatch(/duermes/);
   });
 });

@@ -3,7 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
-  healthConclusions, healthOverall,
+  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -13,6 +13,16 @@ const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
                (import.meta.env.VITE_HA_DASHBOARD_PATH || "/lovelace/tablet");
 // Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas
 const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
+// Identificador del agente PC, el mismo que manda el heartbeat desde agent/agent.py
+const AGENT_ID = import.meta.env.VITE_AGENT_ID || "pc-mikel";
+
+// Ritmo del seguimiento de un job del agente PC.
+const JOB_POLL_ACTIVO_MS = 2_000;    // modal delante: la barra de progreso va en vivo
+const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avisar al acabar
+// Techo del seguimiento: el agente ignora los jobs de más de una hora (ver
+// poll_pending_job en agent/agent.py), así que pasado ese punto no lo va a recoger
+// nadie y seguir preguntando no aporta nada.
+const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
 
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
@@ -147,23 +157,32 @@ function SleepStageTooltip({ label, color, tip, children }) {
   );
 }
 
-function Sparkline({ data, color = "var(--accent)", height = 40 }) {
+// `objetivo` dibuja una línea discontinua de referencia (p. ej. el peso al que
+// quieres llegar) y entra en el rango vertical para que nunca quede fuera del
+// gráfico. `relleno` añade un área bajo la curva, útil cuando la serie es el
+// contenido principal del bloque y no un adorno al lado de una cifra.
+function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null, relleno = false }) {
   const pts = data.filter(d => d.value != null);
   if (pts.length < 2) return (
     <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <span style={{ fontSize: 11, color: "var(--muted2)" }}>—</span>
     </div>
   );
-  const vals = pts.map(d => d.value);
-  const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
+  const vals = pts.map(d => Number(d.value));
+  const todos = objetivo != null ? [...vals, Number(objetivo)] : vals;
+  const min = Math.min(...todos), max = Math.max(...todos), range = max - min || 1;
   const W = 200, H = height;
-  const points = pts.map((d, i) => {
-    const x = (i / (pts.length - 1)) * (W - 4) + 2;
-    const y = H - 4 - ((d.value - min) / range) * (H - 8);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+  const px = i => (i / (pts.length - 1)) * (W - 4) + 2;
+  const py = v => H - 4 - ((v - min) / range) * (H - 8);
+  const points = pts.map((d, i) => `${px(i).toFixed(1)},${py(Number(d.value)).toFixed(1)}`).join(" ");
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={height} preserveAspectRatio="none" style={{ display: "block" }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={height} preserveAspectRatio="none"
+      style={{ display: "block" }} role="img" aria-hidden="true">
+      {relleno && <polygon points={`2,${H} ${points} ${(W - 2).toFixed(1)},${H}`} fill={color} opacity="0.12" />}
+      {objetivo != null && (
+        <line x1="0" y1={py(Number(objetivo))} x2={W} y2={py(Number(objetivo))}
+          stroke="var(--green)" strokeWidth="1" strokeDasharray="3 3" opacity="0.75" />
+      )}
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -285,6 +304,10 @@ function loadWidgetConfig(storageKey) {
         column: w.column || DEFAULT_COLUMNS[w.id] || "left",
         width:  typeof w.width  === "number" ? w.width  : undefined,
         height: typeof w.height === "number" ? w.height : undefined,
+        // widthPct es lo que de verdad pinta el ancho (wrapResizable). Al reconstruir
+        // la entrada campo a campo se quedaba fuera, así que los anchos ajustados se
+        // perdían en cada recarga.
+        widthPct: typeof w.widthPct === "number" ? w.widthPct : undefined,
       }));
       for (const def of ALL_DEFAULT_WIDGETS) {
         if (!savedIds.has(def.id)) merged.push({ ...def });
@@ -430,6 +453,11 @@ export default function Dashboard() {
   const [ideas, setIdeas]             = useState([]);
   const [recording, setRecording]     = useState(false);
   const [processing, setProcessing]   = useState(false);
+  // Sugerencia de evento detectada por GPT al capturar una idea ("el martes al
+  // dentista"). Vive solo en la sesión: es una oferta de un toque justo después de
+  // dictarla, no un dato que haya que persistir.
+  const [eventoSugerido, setEventoSugerido] = useState(null);   // {ideaId, titulo, fecha, hora}
+  const [sugerenciaEstado, setSugerenciaEstado] = useState(null); // null | "creando" | "ok" | "error"
   const [showTextIdea, setShowTextIdea]     = useState(false);
   const [textIdeaInput, setTextIdeaInput]   = useState("");
   const [textIdeaSubmitting, setTextIdeaSubmitting] = useState(false);
@@ -489,6 +517,8 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
+  const [sysLoading, setSysLoading]       = useState(false);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
@@ -558,6 +588,8 @@ export default function Dashboard() {
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
+  // Cuándo empezó a seguirse el job actual, para el techo de una hora.
+  const jobInicioRef     = useRef({ id: null, t: 0 });
   const resizeDragRef    = useRef(null);
   const dragStateRef     = useRef(null);
 
@@ -785,14 +817,19 @@ export default function Dashboard() {
       .catch(() => {});
   }, [geo]);
 
-  // Estado del agente PC (heartbeat)
+  // Estado del agente PC (heartbeat). Solo se sondea con el modal de encendido abierto:
+  // es el único sitio donde se pinta (isAgentOnline). Sondear siempre, cada 10s, mantenía
+  // despierta la máquina de Fly las 24 h y anulaba su auto_stop_machines / min_machines_running=0.
+  const wolModalAbierto = !!wolModal;
+  // Cualquiera de los dos modales muestra el progreso del job en vivo.
+  const jobModalAbierto = wolModalAbierto || pcModal;
   useEffect(() => {
-    if (!token) return;
+    if (!token || !wolModalAbierto) return;
 
     let mounted = true;
     async function loadAgent() {
       try {
-        const r = await apiFetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${token}` } });
         const data = await r.json();
         if (mounted) setAgentState(data);
       } catch {
@@ -800,10 +837,10 @@ export default function Dashboard() {
       }
     }
 
-    loadAgent();
+    loadAgent();   // sin esperar los 10s: el modal necesita el estado ya
     const id = setInterval(loadAgent, 10000);
     return () => { mounted = false; clearInterval(id); };
-  }, [token]);
+  }, [token, wolModalAbierto]);
 
   // Notificaciones del navegador — solicitar permiso
   useEffect(() => {
@@ -898,7 +935,10 @@ export default function Dashboard() {
         const t = localStorage.getItem("la_token") || "";
         const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
         const data = await res.json();
-        if (data.ok) setIdeas(prev => [data.idea, ...prev]);
+        if (data.ok) {
+          setIdeas(prev => [data.idea, ...prev]);
+          recogerSugerencia(data);
+        }
       } catch { /* mejor esfuerzo: ignorar */ }
       setProcessing(false);
     };
@@ -907,6 +947,47 @@ export default function Dashboard() {
     setRecording(true);
   }
   function stopRecording() { mediaRecorderRef.current?.stop(); setRecording(false); }
+
+  // ── Idea → evento de Outlook ─────────────────────────────────────────────
+  // El backend detecta si la nota llevaba una cita ("el martes al dentista") y valida
+  // la fecha antes de proponerla. Aquí solo se ofrece: crear un evento en el calendario
+  // es una acción hacia fuera, así que la dispara el usuario con un toque, no sola.
+  function recogerSugerencia(data) {
+    const ev = data?.evento_sugerido;
+    if (!ev?.fecha) return;
+    setEventoSugerido({ ...ev, ideaId: data.idea?.id });
+    setSugerenciaEstado(null);
+  }
+
+  async function crearEventoDesdeIdea() {
+    if (!eventoSugerido || sugerenciaEstado === "creando") return;
+    setSugerenciaEstado("creando");
+    const t = localStorage.getItem("la_token") || "";
+    // Sin hora concreta se coloca a las 9:00 como marcador del día; con hora, una hora de duración.
+    const inicio = eventoSugerido.hora || "09:00";
+    const [hh, mm] = inicio.split(":").map(Number);
+    const fin = `${String((hh + 1) % 24).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    try {
+      const r = await apiFetch(`${API}/calendar/events`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subject: eventoSugerido.titulo,
+          start: `${eventoSugerido.fecha}T${inicio}:00`,
+          end: `${eventoSugerido.fecha}T${fin}:00`,
+        }),
+      });
+      const data = await r.json();
+      if (r.ok && !data.error) {
+        setSugerenciaEstado("ok");
+        await loadEvents();   // que aparezca ya en la agenda
+      } else {
+        setSugerenciaEstado("error");
+      }
+    } catch {
+      setSugerenciaEstado("error");
+    }
+  }
 
   function openTextIdea() {
     setTextIdeaInput("");
@@ -933,6 +1014,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.ok) {
         setIdeas(prev => [data.idea, ...prev]);
+        recogerSugerencia(data);
         setShowTextIdea(false);
       } else {
         setTextIdeaError("No se pudo guardar la idea");
@@ -1250,6 +1332,36 @@ export default function Dashboard() {
     } catch { /* mejor esfuerzo: ignorar */ }
   }
 
+  // ── Estado del sistema ───────────────────────────────────────────────────
+  // Las señales de si algo va mal ya existían, pero repartidas: si el backend
+  // responde, si la sesión de Outlook sigue viva, cuándo sincronizó el Watch, si el
+  // agente contesta. Juntarlas evita tener que abrir logs para saber qué se ha caído.
+  // Se refresca al abrir ajustes y con el botón, nunca en bucle.
+  async function cargarEstadoSistema() {
+    if (sysLoading) return;
+    setSysLoading(true);
+    const t  = localStorage.getItem("la_token") || "";
+    const t0 = (typeof performance !== "undefined" ? performance : Date).now();
+
+    // El backend escala a cero: la primera petición tras un rato mide el arranque en frío.
+    let backend = { ok: false, ms: null };
+    try {
+      const r = await fetch(`${API}/`);
+      backend = { ok: r.ok, ms: Math.round(((typeof performance !== "undefined" ? performance : Date).now()) - t0) };
+    } catch { /* sin red o backend caído: ok=false */ }
+
+    let agente = null;
+    if (backend.ok) {
+      try {
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${t}` } });
+        if (r.ok) agente = await r.json();
+      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+    }
+
+    setSysStatus({ backend, agente, comprobado: Date.now() });
+    setSysLoading(false);
+  }
+
   async function loadTraining() {
     const t = localStorage.getItem("la_token") || "";
     try {
@@ -1340,7 +1452,10 @@ export default function Dashboard() {
     save(next);
   }
   function resetWidgetSize(id) {
-    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, width: undefined, height: undefined } : w));
+    // widthPct también, o el doble clic no devolvía el ancho a su valor por defecto.
+    saveWidgetConfig(widgetConfig.map(w => w.id === id
+      ? { ...w, width: undefined, height: undefined, widthPct: undefined }
+      : w));
   }
 
   function handleDividerDrag(e, idx) {
@@ -1567,11 +1682,24 @@ export default function Dashboard() {
     window.addEventListener("mouseup", onMouseUp);
   }
 
+  // Seguimiento del job. El sondeo es solo de lectura: el job ya vive en Supabase y el
+  // agente lo recoge consultándola por su cuenta, así que esto no lo empuja ni lo frena
+  // — cerrar el modal no cancela nada. Pero sí alimenta `jobTerminal`, de donde cuelga
+  // la notificación de "job completado", así que sigue en marcha con el modal cerrado
+  // (más despacio) en vez de cortarse ahí. Antes no paraba nunca, ni siquiera al acabar.
   useEffect(() => {
-    if (!activeJobId || !token) return;
+    if (!activeJobId || !token || jobTerminal) return;   // terminal: ya no hay nada que mirar
+    // El cronómetro se reinicia por job, no al abrir o cerrar el modal.
+    if (jobInicioRef.current.id !== activeJobId) {
+      jobInicioRef.current = { id: activeJobId, t: Date.now() };
+    }
     let mounted = true;
     const t = localStorage.getItem("la_token") || "";
     const id = setInterval(async () => {
+      if (Date.now() - jobInicioRef.current.t > JOB_POLL_MAX_MS) {
+        if (mounted) setActiveJobId(null);   // el agente ya no lo va a recoger
+        return;
+      }
       try {
         const [evRes, jobRes] = await Promise.all([
           apiFetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
@@ -1587,9 +1715,9 @@ export default function Dashboard() {
           setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
         }
       } catch { /* mejor esfuerzo: ignorar */ }
-    }, 2000);
+    }, jobModalAbierto ? JOB_POLL_ACTIVO_MS : JOB_POLL_FONDO_MS);
     return () => { mounted = false; clearInterval(id); };
-  }, [activeJobId, token]);
+  }, [activeJobId, token, jobTerminal, jobModalAbierto]);
 
   const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
   const STAGE_LABELS = {
@@ -1860,6 +1988,45 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
+          {/* La nota traía una cita: se ofrece pasarla al calendario de un toque */}
+          {eventoSugerido && (
+            <div style={{
+              marginTop: 10, padding: "10px 12px", borderRadius: 8,
+              background: "rgba(139,180,212,0.08)", border: "0.5px solid rgba(139,180,212,0.3)",
+            }}>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>Esto parece una cita</div>
+              <div style={{ fontSize: 14, color: "var(--text)", marginBottom: 8 }}>
+                {eventoSugerido.titulo}
+                <span style={{ color: "var(--accent2)", fontFamily: "'DM Mono', monospace", marginLeft: 6 }}>
+                  {formatShortDate(eventoSugerido.fecha)}{eventoSugerido.hora ? ` · ${eventoSugerido.hora}` : ""}
+                </span>
+              </div>
+              {sugerenciaEstado === "ok" ? (
+                <div style={{ fontSize: 12, color: "var(--green)" }}>
+                  ✓ Añadido a Outlook
+                  <button onClick={() => { setEventoSugerido(null); setSugerenciaEstado(null); }} style={{
+                    background: "none", border: "none", color: "var(--muted2)", fontSize: 11,
+                    cursor: "pointer", marginLeft: 8, textDecoration: "underline", padding: 0,
+                  }}>Cerrar</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={crearEventoDesdeIdea} disabled={sugerenciaEstado === "creando"} style={{
+                    padding: "5px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                    background: "rgba(139,180,212,0.15)", border: "0.5px solid var(--accent2)",
+                    color: "var(--accent2)", fontFamily: "'DM Sans', sans-serif",
+                  }}>{sugerenciaEstado === "creando" ? "Añadiendo…" : "Añadir al calendario"}</button>
+                  <button onClick={() => { setEventoSugerido(null); setSugerenciaEstado(null); }} style={{
+                    background: "none", border: "none", color: "var(--muted)", fontSize: 12,
+                    cursor: "pointer", padding: "5px 4px", fontFamily: "'DM Sans', sans-serif",
+                  }}>Ahora no</button>
+                  {sugerenciaEstado === "error" && (
+                    <span style={{ fontSize: 11, color: "#d4645a" }}>No se pudo crear</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
               onClick={recording ? stopRecording : startRecording} disabled={processing}>
@@ -2210,165 +2377,33 @@ export default function Dashboard() {
         const workVal     = isDaily ? todayWorkoutCount : weekWorkoutCount;
 
         // ── puntuación ──
-        // Sueño 25 | Actividad 32 (entreno 15 + pasos 8 + AE 5 + stand 2 + pisos 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 14 (VO2 6 + walkHR 4 + %grasa 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
-        let score = 0;
-        const breakdown = []; // [{label, pts, max, detail}]
+        // Todos los umbrales viven en wellnessBreakdown (helpers), fuera del render.
+        // El desglose es la única fuente de verdad y el total sale de sumarlo, así que
+        // no se puede volver a sumar un componente sin que aparezca en el detalle.
+        const breakdown = wellnessBreakdown({
+          isDaily, expectedByNow,
+          sleep:        sleepVal,
+          work:         workVal,
+          exercise:     exerciseVal,
+          steps:        stepsVal,
+          activeEnergy: aeVal,
+          stand:        standVal,
+          flights:      flightsVal,
+          hrv:          hrvVal,
+          hrvPrev:      avgHrvPrev,
+          rhr:          rhrVal,
+          cardioRec:    avgCardioRec,
+          vo2:          lastVo2,
+          walkHr:       walkHrVal,
+          bodyFat:      currentBodyFat,
+          daylight:     daylightVal,
+          resp:         respVal,
+        });
 
-        // Sueño (25 pts)
-        let sPts = 0;
-        if (sleepVal != null) {
-          if      (sleepVal >= 7.5) sPts = 25;
-          else if (sleepVal >= 7)   sPts = 21;
-          else if (sleepVal >= 6.5) sPts = 15;
-          else if (sleepVal >= 6)   sPts = 9;
-          else                      sPts = 4;
-          score += sPts;
-        }
-        breakdown.push({ label: "😴 Sueño", pts: sPts, max: 25, detail: sleepVal != null ? hoursToHM(sleepVal) : "sin datos" });
-
-        // Actividad: entreno/ejercicio (15 pts)
-        let wPts = 0;
-        if (isDaily) {
-          if      (workVal >= 1)                                 wPts = 15;
-          else if (exerciseVal != null && exerciseVal >= 30)     wPts = 9;
-          else if (exerciseVal != null && exerciseVal >= 15)     wPts = 5;
-          else if (todayHrv != null && todayHrv >= 70)           wPts = 3;
-          else if (todayHrv != null && todayHrv >= 50)           wPts = 2;
-          else                                                   wPts = 1;
-        } else {
-          const scaledWork = expectedByNow > 0 ? Math.min(4, (workVal / expectedByNow) * 4) : workVal;
-          if      (scaledWork >= 4) wPts = 15;
-          else if (scaledWork >= 3) wPts = 11;
-          else if (scaledWork >= 2) wPts = 7;
-          else if (scaledWork >= 1) wPts = 3;
-        }
-        score += wPts;
-        breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.` });
-
-        // Actividad: pasos (8 pts)
-        let stPts = 0;
-        if (stepsVal != null) {
-          if      (stepsVal >= 10000) stPts = 8;
-          else if (stepsVal >= 8000)  stPts = 6;
-          else if (stepsVal >= 6000)  stPts = 4;
-          else if (stepsVal >= 4000)  stPts = 2;
-          else                        stPts = 1;
-          score += stPts;
-        }
-        breakdown.push({ label: "🚶 Pasos", pts: stPts, max: 8, detail: stepsVal != null ? `${Math.round(stepsVal).toLocaleString("es")}` : "sin datos" });
-
-        // Actividad: energía activa (5 pts)
-        let aePts = 0;
-        if (aeVal != null) {
-          if      (aeVal >= 600) aePts = 5;
-          else if (aeVal >= 400) aePts = 4;
-          else if (aeVal >= 250) aePts = 3;
-          else if (aeVal >= 100) aePts = 1;
-          score += aePts;
-        }
-        breakdown.push({ label: "🔥 Energía", pts: aePts, max: 5, detail: aeVal != null ? `${Math.round(aeVal)} kcal` : "sin datos" });
-
-        // Actividad: horas de pie (2 pts)
-        let sdPts = 0;
-        if (standVal != null) {
-          if      (standVal >= 12) sdPts = 2;
-          else if (standVal >= 8)  sdPts = 1;
-          score += sdPts;
-        }
-        breakdown.push({ label: "🧍 De pie", pts: sdPts, max: 2, detail: standVal != null ? `${Math.round(standVal)}h` : "sin datos" });
-
-        // Actividad: pisos subidos (2 pts)
-        let flPts = 0;
-        if (flightsVal != null) {
-          if      (flightsVal >= 10) flPts = 2;
-          else if (flightsVal >= 5)  flPts = 1;
-          score += flPts;
-        }
-        breakdown.push({ label: "🪜 Pisos", pts: flPts, max: 2, detail: flightsVal != null ? `${Math.round(flightsVal)} pisos` : "sin datos" });
-
-        // Recuperación: HRV (12 pts)
-        let hrvPts = 0;
-        if (hrvVal != null && avgHrvPrev != null) {
-          if      (hrvVal >= avgHrvPrev * 1.05) hrvPts = 12;
-          else if (hrvVal >= avgHrvPrev * 0.95) hrvPts = 8;
-          else                                   hrvPts = 4;
-        } else if (hrvVal != null) hrvPts = 6;
-        score += hrvPts;
-        breakdown.push({ label: "❤️ HRV", pts: hrvPts, max: 12, detail: hrvVal != null ? `${Math.round(hrvVal)}ms${avgHrvPrev != null ? ` (ref ${Math.round(avgHrvPrev)}ms)` : ""}` : "sin datos" });
-
-        // Recuperación: FC reposo (8 pts)
-        let rhrPts = 0;
-        if (rhrVal != null) {
-          if      (rhrVal <= 50) rhrPts = 8;
-          else if (rhrVal <= 55) rhrPts = 7;
-          else if (rhrVal <= 60) rhrPts = 6;
-          else if (rhrVal <= 65) rhrPts = 4;
-          else if (rhrVal <= 70) rhrPts = 3;
-          else if (rhrVal <= 80) rhrPts = 1;
-          score += rhrPts;
-        }
-        breakdown.push({ label: "🫀 FC reposo", pts: rhrPts, max: 8, detail: rhrVal != null ? `${Math.round(rhrVal)} lpm` : "sin datos" });
-
-        // Recuperación: cardio recovery (5 pts — solo si hay dato)
-        let crPts = 0;
-        if (avgCardioRec != null) {
-          if      (avgCardioRec >= 30) crPts = 5;
-          else if (avgCardioRec >= 20) crPts = 4;
-          else if (avgCardioRec >= 15) crPts = 3;
-          else if (avgCardioRec >= 10) crPts = 1;
-          score += crPts;
-        }
-        if (avgCardioRec != null) breakdown.push({ label: "💓 Recuperación cardio", pts: crPts, max: 5, detail: `${Math.round(avgCardioRec)} lpm/min` });
-
-        // Forma física (solo vista diaria): VO2 max (6 pts) + walking HR avg (4 pts)
-        let vo2Pts, whrPts = 0;
-        if (isDaily) {
-          if (lastVo2 != null) {
-            if      (lastVo2 >= 50) vo2Pts = 6;
-            else if (lastVo2 >= 45) vo2Pts = 5;
-            else if (lastVo2 >= 40) vo2Pts = 4;
-            else if (lastVo2 >= 35) vo2Pts = 3;
-            else                    vo2Pts = 1;
-            score += vo2Pts;
-          }
-          if (walkHrVal != null) {
-            if      (walkHrVal <= 70)  whrPts = 4;
-            else if (walkHrVal <= 80)  whrPts = 3;
-            else if (walkHrVal <= 90)  whrPts = 2;
-            else if (walkHrVal <= 100) whrPts = 1;
-            score += whrPts;
-            breakdown.push({ label: "🏃 FC caminando", pts: whrPts, max: 4, detail: `${Math.round(walkHrVal)} lpm` });
-          }
-          if (currentBodyFat != null) {
-            let bfPts = 0;
-            if      (currentBodyFat < 12) bfPts = 4;
-            else if (currentBodyFat < 18) bfPts = 3;
-            else if (currentBodyFat < 25) bfPts = 2;
-            else if (currentBodyFat < 30) bfPts = 1;
-            score += bfPts;
-            breakdown.push({ label: "⚖️ % Grasa", pts: bfPts, max: 4, detail: `${currentBodyFat.toFixed(1)}%` });
-          }
-
-          // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
-          let dlPts = 0, respPts;
-          if (daylightVal != null) {
-            if      (daylightVal >= 60) dlPts = 5;
-            else if (daylightVal >= 30) dlPts = 4;
-            else if (daylightVal >= 15) dlPts = 2;
-            else if (daylightVal >= 5)  dlPts = 1;
-            score += dlPts;
-          }
-          if (respVal != null) {
-            if      (respVal >= 12 && respVal <= 16) respPts = 5;
-            else if (respVal > 16 && respVal <= 18)  respPts = 4;
-            else if (respVal > 18 && respVal <= 20)  respPts = 3;
-            else if (respVal < 12)                   respPts = 4;
-            else                                     respPts = 1;
-            score += respPts;
-            breakdown.push({ label: "🌬️ Resp.", pts: respPts, max: 5, detail: `${respVal.toFixed(1)} rpm` });
-          }
-        }
-
+        // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,
+        // así que con umbrales fijos "Semana excelente" era casi inalcanzable y "Día
+        // excelente" bastante fácil. Sobre 100 las dos vistas significan lo mismo.
+        const { pts: scorePts, max: scoreMax, score } = scoreFromBreakdown(breakdown);
         const scoreLabel = isDaily
           ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
           : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
@@ -2385,11 +2420,13 @@ export default function Dashboard() {
           "❤️ HRV": "Mejorando tu recuperación (HRV)",
           "🫀 FC reposo": "Bajando tu FC en reposo",
           "💓 Recuperación cardio": "Mejorando tu recuperación cardio",
+          "🫁 VO₂max": "Subiendo tu VO₂max",
           "🏃 FC caminando": "Bajando tu FC al caminar",
           "⚖️ % Grasa": "Bajando tu % de grasa",
+          "☀️ Luz natural": "Saliendo más rato a la luz del día",
           "🌬️ Resp.": "Estabilizando tu frecuencia respiratoria",
         };
-        const improvable = breakdown.filter(b => b.pts < b.max && b.detail !== "sin datos");
+        const improvable = breakdown.filter(b => b.pts < b.max && !b.sinDatos);
         let potential = null;
         if (improvable.length > 0) {
           const top = improvable.reduce((a, b) => (b.max - b.pts) > (a.max - a.pts) ? b : a);
@@ -2523,7 +2560,7 @@ export default function Dashboard() {
                   onClick={e => { e.stopPropagation(); setScoreTooltip(v => !v); }}
                 >
                   <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", cursor: "pointer", borderBottom: "1px dotted currentColor" }}>
-                    {score} — {scoreLabel}
+                    {score}/100 — {scoreLabel}
                   </span>
                   {scoreTooltip && (
                     <div style={{
@@ -2534,19 +2571,23 @@ export default function Dashboard() {
                       display: "flex", flexDirection: "column", gap: 5,
                     }}>
                       {breakdown.map((b, i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, opacity: b.sinDatos ? 0.45 : 1 }}>
                           <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{b.label}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
                             <span style={{ color: "var(--text-2)", fontSize: 11 }}>{b.detail}</span>
-                            <span style={{ fontFamily: "'DM Mono', monospace", color: b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
-                              {b.pts}/{b.max}
+                            {/* Sin dato no suma ni resta: se marca con — para que las filas visibles cuadren con el total */}
+                            <span style={{ fontFamily: "'DM Mono', monospace", color: b.sinDatos ? "var(--muted2)" : b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
+                              {b.sinDatos ? "—" : `${b.pts}/${b.max}`}
                             </span>
                           </span>
                         </div>
                       ))}
-                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between", gap: 12 }}>
                         <span style={{ color: "var(--muted)" }}>Total</span>
-                        <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}</span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                          <span style={{ color: "var(--muted2)", fontSize: 11, fontFamily: "'DM Mono', monospace" }}>{scorePts}/{scoreMax}</span>
+                          <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}/100</span>
+                        </span>
                       </div>
                     </div>
                   )}
@@ -2622,6 +2663,33 @@ export default function Dashboard() {
                         );
                       })()}
                     </div>
+                    {/* Serie de peso con la línea del objetivo: el número de hoy no dice
+                        si vas hacia él o te alejas; la curva sí. */}
+                    {wWeightRaw.length >= 3 && (() => {
+                      const serie   = wWeightRaw.slice(-30);
+                      const primera = serie[0];
+                      const ultima  = serie[serie.length - 1];
+                      return (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                              Peso · {serie.length} registros
+                            </span>
+                            {targetWeight && (
+                              <span style={{ fontSize: 10, color: "var(--green)", fontFamily: "'DM Mono', monospace" }}>
+                                — — objetivo {targetWeight} kg
+                              </span>
+                            )}
+                          </div>
+                          <Sparkline data={serie} color="var(--accent)" height={46}
+                            objetivo={targetWeight || null} relleno />
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", marginTop: 3 }}>
+                            <span>{formatShortDate(primera.date)}</span>
+                            <span>{formatShortDate(ultima.date)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {/* Barra de progreso hacia objetivo de peso */}
                     {weightToGoal != null && currentWeight != null && (() => {
                       const startWeight = Math.max(currentWeight, targetWeight + 5);
@@ -3332,6 +3400,7 @@ export default function Dashboard() {
                 setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
                 setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
                 setShowSettings(true);
+                cargarEstadoSistema();
               }} style={{
                 background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
                 borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
@@ -4155,6 +4224,83 @@ export default function Dashboard() {
                   {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
                 </span>
               </div>
+            </div>
+
+            {/* ── Estado del sistema ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Estado del sistema</div>
+                <button onClick={cargarEstadoSistema} disabled={sysLoading} style={{
+                  background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6,
+                  color: "var(--muted)", fontSize: 11, cursor: sysLoading ? "default" : "pointer",
+                  padding: "3px 8px", fontFamily: "'DM Sans', sans-serif",
+                }}>{sysLoading ? "Comprobando…" : "Actualizar"}</button>
+              </div>
+              {(() => {
+                // tono: green | accent | red | muted. El texto dice siempre qué pasa,
+                // para no depender solo del color.
+                const filas = [];
+
+                const b = sysStatus?.backend;
+                filas.push({
+                  nombre: "Backend",
+                  tono: !sysStatus ? "muted" : b?.ok ? (b.ms > 3000 ? "accent" : "green") : "red",
+                  detalle: !sysStatus ? "sin comprobar"
+                    : !b?.ok ? "no responde"
+                    : b.ms > 3000 ? `despierto tras ${(b.ms / 1000).toFixed(1)}s (arranque en frío)`
+                    : `despierto · ${b.ms} ms`,
+                });
+
+                filas.push({
+                  nombre: "Outlook",
+                  tono: authNeeded ? "red" : allEvents.length ? "green" : "accent",
+                  detalle: authNeeded ? "sesión caducada — vuelve a conectar"
+                    : `${allEvents.length} eventos cargados`,
+                });
+
+                const minutos = healthLastSync ? Math.floor((Date.now() - new Date(healthLastSync)) / 60000) : null;
+                filas.push({
+                  nombre: "Salud (Watch)",
+                  tono: minutos == null ? "muted" : minutos < 120 ? "green" : minutos < 1440 ? "accent" : "red",
+                  detalle: minutos == null ? "sin datos aún"
+                    : minutos < 2 ? "sincronizado ahora mismo"
+                    : minutos < 60 ? `última sync hace ${minutos} min`
+                    : minutos < 1440 ? `última sync hace ${Math.floor(minutos / 60)} h`
+                    : `última sync hace ${Math.floor(minutos / 1440)} días`,
+                });
+
+                const ag = sysStatus?.agente;
+                filas.push({
+                  nombre: "Agente PC",
+                  tono: !sysStatus ? "muted" : !ag ? "muted" : ag.offline === false ? "green" : "muted",
+                  detalle: !sysStatus ? "sin comprobar"
+                    : !ag ? "sin respuesta"
+                    : ag.exists === false ? "nunca se ha registrado"
+                    : ag.offline === false ? `online${ag.hostname ? ` · ${ag.hostname}` : ""}`
+                    : `apagado (visto hace ${Math.floor((ag.silence_seconds ?? 0) / 60)} min)`,
+                });
+
+                filas.push({
+                  nombre: "Entrenamiento",
+                  tono: training?.client ? "green" : "muted",
+                  detalle: training?.client
+                    ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
+                    : "sin cliente configurado",
+                });
+
+                const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {filas.map(f => (
+                      <div key={f.nombre} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: color[f.tono], flexShrink: 0, alignSelf: "center" }} />
+                        <span style={{ fontSize: 12, color: "var(--text)", minWidth: 96 }}>{f.nombre}</span>
+                        <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{f.detalle}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* ── Datos ── */}

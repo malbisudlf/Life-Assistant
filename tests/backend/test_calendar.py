@@ -41,6 +41,26 @@ class TestGetEvents:
         r = client.get("/calendar/events", headers=auth_headers)
         assert r.json() == {"events": []}
 
+    def test_graph_401_no_se_confunde_con_agenda_vacia(self, client, auth_headers, graph_token, mock_requests):
+        """Antes un 401 caía en data.get("value", []) y salía como día sin eventos."""
+        mock_requests.add("GET", "graph.microsoft.com", FakeResponse({"error": "x"}, 401, "token caducado"))
+        r = client.get("/calendar/events", headers=auth_headers)
+        cuerpo = r.json()
+        assert "events" not in cuerpo
+        assert "caducada" in cuerpo["error"]
+        assert "token caducado" not in r.text   # el detalle real solo al log
+
+    def test_graph_500_devuelve_error_no_lista_vacia(self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("GET", "graph.microsoft.com", FakeResponse(None, 500, "boom interno"))
+        cuerpo = client.get("/calendar/events", headers=auth_headers).json()
+        assert "events" not in cuerpo and "error" in cuerpo
+        assert "boom" not in str(cuerpo)
+
+    def test_clases_con_graph_caido_devuelve_error(self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("GET", "/me/calendars", FakeResponse(None, 503, "no disponible"))
+        cuerpo = client.get("/calendar/classes", headers=auth_headers).json()
+        assert "events" not in cuerpo and "error" in cuerpo
+
 
 class TestCreateEvent:
     def test_crea_evento_en_outlook(self, client, auth_headers, graph_token, mock_requests):

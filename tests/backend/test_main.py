@@ -114,6 +114,75 @@ class TestAuthPassword:
             assert client.post("/auth/password", json={"password": "mala"}).status_code == 401
         assert client.post("/auth/password", json={"password": "mala"}).status_code == 429
 
+    def test_rate_limit_no_se_evade_rotando_x_forwarded_for(self, client):
+        """X-Forwarded-For la controla quien llama: rotarla no debe dar intentos nuevos.
+
+        Antes se cogía su PRIMERA entrada y bastaba cambiarla en cada petición para
+        tener intentos ilimitados. Ahora la cabecera se ignora salvo opt-in explícito.
+        """
+        codigos = [
+            client.post(
+                "/auth/password",
+                json={"password": "mala"},
+                headers={"X-Forwarded-For": f"9.9.9.{i}"},
+            ).status_code
+            for i in range(8)
+        ]
+        assert 429 in codigos, f"el límite se sigue evadiendo: {codigos}"
+
+    def test_fly_client_ip_se_ignora_fuera_de_fly(self, client):
+        """Sin el runtime de Fly nadie sobrescribe la cabecera, así que no vale nada."""
+        codigos = [
+            client.post(
+                "/auth/password",
+                json={"password": "mala"},
+                headers={"Fly-Client-IP": f"9.9.9.{i}"},
+            ).status_code
+            for i in range(8)
+        ]
+        assert 429 in codigos, f"cabecera de Fly aceptada fuera de Fly: {codigos}"
+
+    def test_rate_limit_usa_fly_client_ip_frente_a_forwarded_for(self, client, monkeypatch):
+        """En Fly, Fly-Client-IP la pone el proxy: manda sobre lo que declare el cliente."""
+        monkeypatch.setattr(main, "EN_FLY", True)
+        for _ in range(5):
+            client.post(
+                "/auth/password",
+                json={"password": "mala"},
+                headers={"Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "1.1.1.1"},
+            )
+        r = client.post(
+            "/auth/password",
+            json={"password": "mala"},
+            headers={"Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "2.2.2.2"},
+        )
+        assert r.status_code == 429
+
+    def test_con_trust_forwarded_for_usa_la_ultima_entrada(self, client, monkeypatch):
+        """Con proxy propio declarado, la entrada de confianza es la última.
+
+        Las anteriores las puede inventar el cliente, así que prefijarlas no debe
+        conseguir un cubo de intentos nuevo.
+        """
+        monkeypatch.setattr(main, "TRUST_FORWARDED_FOR", True)
+        for i in range(5):
+            client.post(
+                "/auth/password",
+                json={"password": "mala"},
+                headers={"X-Forwarded-For": f"1.1.1.{i}, 7.7.7.7"},
+            )
+        r = client.post(
+            "/auth/password",
+            json={"password": "mala"},
+            headers={"X-Forwarded-For": "9.9.9.9, 7.7.7.7"},
+        )
+        assert r.status_code == 429
+
+    def test_password_con_tilde_devuelve_401_no_500(self, client):
+        """compare_digest sobre str lanza TypeError con no-ASCII → antes era un 500."""
+        r = client.post("/auth/password", json={"password": "contraseña"})
+        assert r.status_code == 401
+
 
 # ── Protección con JWT ────────────────────────────────────────────────────────
 
@@ -216,7 +285,8 @@ class TestIdeas:
         mock_requests.add("POST", "/rest/v1/ideas", FakeResponse([saved], 201))
         r = client.post("/ideas/text", headers=auth_headers, json={"text": "comprar pan mañana"})
         assert r.status_code == 200
-        assert r.json() == {"ok": True, "idea": saved}
+        # evento_sugerido es null porque la extracción no devolvió fecha
+        assert r.json() == {"ok": True, "idea": saved, "evento_sugerido": None}
 
     def test_delete_idea_valida_uuid(self, client, auth_headers, mock_requests):
         assert client.delete("/ideas/no-uuid", headers=auth_headers).status_code == 422
@@ -283,7 +353,7 @@ class TestExport:
                     def create(**kwargs):
                         return FakeCompletion()
 
-        monkeypatch.setattr(main, "openai_client", FakeClient())
+        monkeypatch.setattr(main, "get_openai_client", lambda: FakeClient())
         assert main.extract_idea_from_text("hola") == {"key": "K", "tag": "t", "full_text": "F"}
 
     def test_extract_idea_json_invalido_devuelve_vacio(self, monkeypatch):
@@ -301,7 +371,7 @@ class TestExport:
                     def create(**kwargs):
                         return FakeCompletion()
 
-        monkeypatch.setattr(main, "openai_client", FakeClient())
+        monkeypatch.setattr(main, "get_openai_client", lambda: FakeClient())
         assert main.extract_idea_from_text("hola") == {}
 
 
@@ -390,3 +460,75 @@ class TestConfiguracionInstancia:
         })
         # 08:00 UTC - 40 min = 07:20 UTC → 03:20 en Nueva York (UTC-4 en julio)
         assert r.json()["departure_time"] == "03:20"
+
+
+# ── CLIENTE DE OPENAI PEREZOSO ────────────────────────────────────────────────
+
+class TestOpenAIOpcional:
+    """Las ideas por voz se documentan como opcionales (check_config.py, DESPLIEGUE.md).
+
+    Antes el cliente se construía al importar el módulo, así que el backend entero
+    no arrancaba sin OPENAI_API_KEY. Ahora se crea al usarlo y falta de clave = 503.
+    """
+
+    def test_sin_api_key_devuelve_503(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "")
+        monkeypatch.setattr(main, "_openai_client", None)
+        r = client.post("/ideas/text", headers=auth_headers, json={"text": "una idea"})
+        assert r.status_code == 503
+        assert "OPENAI_API_KEY" in r.json()["detail"]
+
+    def test_el_cliente_se_reutiliza_entre_llamadas(self, monkeypatch):
+        creados = []
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                creados.append(kwargs)
+
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(main, "_openai_client", None)
+        monkeypatch.setattr(main, "OpenAI", FakeOpenAI)
+        assert main.get_openai_client() is main.get_openai_client()
+        assert len(creados) == 1
+
+
+class TestSugerenciaEvento:
+    """Lo que propone el LLM no llega a Graph sin validar: solo pasa lo que tiene forma
+    de fecha (YYYY-MM-DD) y de hora (HH:MM), y el evento no se crea sin que el usuario
+    lo pulse."""
+
+    def test_fecha_y_hora_validas(self):
+        assert main.sugerencia_evento({
+            "key": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00",
+        }) == {"titulo": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00"}
+
+    def test_dia_sin_hora(self):
+        s = main.sugerencia_evento({"key": "Entrega TFG", "fecha": "2026-08-04", "hora": None})
+        assert s["hora"] is None and s["fecha"] == "2026-08-04"
+
+    def test_sin_fecha_no_hay_sugerencia(self):
+        assert main.sugerencia_evento({"key": "Idea suelta", "fecha": None}) is None
+        assert main.sugerencia_evento({"key": "Idea suelta"}) is None
+
+    def test_fecha_con_formato_o_valor_imposible_se_descarta(self):
+        for mala in ["mañana", "04/08/2026", "2026-13-45", "2026-02-30", "", 20260804]:
+            assert main.sugerencia_evento({"key": "X", "fecha": mala}) is None
+
+    def test_hora_invalida_se_ignora_pero_conserva_el_dia(self):
+        for mala in ["25:00", "17.00", "5pm", "", 1700]:
+            s = main.sugerencia_evento({"key": "X", "fecha": "2026-08-04", "hora": mala})
+            assert s["hora"] is None and s["fecha"] == "2026-08-04"
+
+    def test_sin_titulo_no_hay_sugerencia(self):
+        assert main.sugerencia_evento({"key": "   ", "fecha": "2026-08-04"}) is None
+
+    def test_el_endpoint_devuelve_la_sugerencia(self, client, auth_headers, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "extract_idea_from_text", lambda t: {
+            "key": "Llamar al dentista", "tag": "salud", "full_text": "...",
+            "fecha": "2026-08-04", "hora": "17:00",
+        })
+        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse([{"id": "abc"}], 201))
+        r = client.post("/ideas/text", headers=auth_headers, json={"text": "el martes al dentista"})
+        assert r.json()["evento_sugerido"] == {
+            "titulo": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00",
+        }

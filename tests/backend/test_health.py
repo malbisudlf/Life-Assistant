@@ -1,6 +1,7 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
 import json
 
+import main
 from conftest import FakeResponse
 
 
@@ -257,3 +258,40 @@ class TestTraining:
         assert r.json() == {"ok": True, "payment": payment}
         posted = mock_requests.called("POST", "training_payments")[0][2]["json"]
         assert posted["amount"] == 40.0
+
+
+class TestMetricasAcumulativasCompartidas:
+    """Las dos rutas de ingesta deben tratar igual las métricas acumulativas.
+
+    /health/ingest/simple tenía su propia copia del conjunto y le faltaba
+    resting_energy, así que por ahí un snapshot parcial podía pisar el total del día.
+    """
+
+    def test_ambas_rutas_usan_el_mismo_conjunto(self):
+        assert "resting_energy" in main.CUMULATIVE_METRICS
+        assert main.ENERGY_METRICS <= main.CUMULATIVE_METRICS
+
+    def test_simple_no_pisa_resting_energy_con_un_valor_menor(self, client, mock_requests):
+        mock_requests.add(
+            "GET", "metric_name=eq.resting_energy",
+            FakeResponse([{"value": 1800}]),
+        )
+        r = client.post(
+            "/health/ingest/simple",
+            headers={"X-Auth-Token": "health-token"},
+            json=[{"metric": "resting_energy", "date": "2026-07-28", "value": 900}],
+        )
+        cuerpo = r.json()
+        assert cuerpo["upserted"] == 0
+        assert any("resting_energy" in s for s in cuerpo["skipped"])
+        assert not mock_requests.called("PATCH", "metric_name=eq.resting_energy")
+
+    def test_error_de_supabase_no_filtra_su_texto_al_cliente(self, client, mock_requests):
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 500, "detalle interno de supabase"))
+        r = client.post(
+            "/health/ingest/simple",
+            headers={"X-Auth-Token": "health-token"},
+            json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}],
+        )
+        assert "detalle interno" not in r.text
+        assert "HTTP 500" in r.json()["errors"][0]
