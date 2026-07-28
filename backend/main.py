@@ -113,7 +113,40 @@ try:
 except Exception:
     raise RuntimeError(f"TIMEZONE inválida: {TIMEZONE!r} — usa un nombre IANA, p.ej. Europe/Madrid")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# ── Cliente HTTP saliente ─────────────────────────────────────────────────────
+# Sesión única para todo lo que sale del backend (Supabase, Graph, Maps, Open-Meteo).
+# Dos motivos: reutiliza conexiones (evita un handshake TLS por llamada, y algunos
+# endpoints encadenan media docena) y sobre todo IMPONE UN TIMEOUT POR DEFECTO. Sin él,
+# una llamada colgada retiene un hilo del pool de FastAPI para siempre; con suficientes,
+# el backend deja de responder entero y solo lo arregla un redeploy.
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
+
+
+class _SesionConTimeout(requests.Session):
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return super().request(method, url, **kwargs)
+
+
+http = _SesionConTimeout()
+
+# El cliente de OpenAI se crea perezosamente: construirlo al importar hacía que el
+# backend NO ARRANCARA sin OPENAI_API_KEY, aunque check_config.py y DESPLIEGUE.md
+# documentan las ideas por voz como funcionalidad opcional.
+_openai_client = None
+
+
+def get_openai_client() -> OpenAI:
+    global _openai_client
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Ideas por voz no disponible: falta OPENAI_API_KEY en el servidor",
+        )
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
+
 
 def supabase_headers():
     return {
@@ -129,14 +162,41 @@ bearer_scheme = HTTPBearer()
 # escala a cero; se resetea en cold start, lo cual es aceptable para este caso.
 LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
 LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
+# Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera
+# (en Fly no hace falta: ya manda Fly-Client-IP). Ver _client_ip.
+TRUST_FORWARDED_FOR  = os.getenv("TRUST_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
+# Lo define el runtime de Fly. Sirve para saber si Fly-Client-IP es de fiar.
+EN_FLY               = bool(os.getenv("FLY_APP_NAME"))
 _login_attempts: dict = {}
 _login_lock = threading.Lock()
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    """IP del cliente para el rate limiting, sin fiarse de lo que él mismo declare.
+
+    `X-Forwarded-For` la puede poner cualquiera: antes se cogía su PRIMERA entrada, así
+    que rotando la cabecera se conseguían intentos de login ilimitados. Por eso aquí solo
+    se usan fuentes que el cliente NO controla:
+
+      1. `Fly-Client-IP` — la pone el proxy de Fly, y solo se cree si de verdad estamos
+         corriendo en Fly (FLY_APP_NAME lo define su runtime). Fuera de Fly no hay nadie
+         que la sobrescriba, así que la mandaría el propio cliente: se ignora.
+      2. El socket real de la conexión.
+
+    Si alguien despliega detrás de otro proxy inverso propio, puede activar
+    TRUST_FORWARDED_FOR=1 y entonces se usa la ÚLTIMA entrada de X-Forwarded-For (la que
+    añade el proxy más cercano; las anteriores siguen siendo del cliente). Está apagado
+    por defecto a propósito: equivocarse aquí abre la puerta a la fuerza bruta.
+    """
+    if EN_FLY:
+        fly = request.headers.get("fly-client-ip")
+        if fly:
+            return fly.strip()
+    if TRUST_FORWARDED_FOR:
+        fwd = request.headers.get("x-forwarded-for", "")
+        partes = [p.strip() for p in fwd.split(",") if p.strip()]
+        if partes:
+            return partes[-1]
     return request.client.host if request.client else "unknown"
 
 
@@ -184,6 +244,26 @@ def _token_ok(provided: str, expected: str) -> bool:
     if not expected or not provided:
         return False
     return hmac.compare_digest(provided, expected)
+
+
+def _graph_fallo(r, contexto: str) -> dict | None:
+    """Devuelve un error para el cliente si la respuesta de Graph no vino bien.
+
+    Sin esta comprobación, un 401 o un 500 de Graph caían en `data.get("value", [])`
+    y salían como lista vacía: el dashboard pintaba "Sin eventos hoy" como si el día
+    estuviera libre. Un fallo de autenticación no puede parecerse a una agenda vacía.
+    """
+    if r.status_code < 300:
+        try:
+            r.json()
+        except ValueError:
+            logger.error("Graph %s: respuesta no-JSON (%s)", contexto, r.status_code)
+            return {"error": "Respuesta inesperada de Outlook"}
+        return None
+    logger.error("Graph %s %s: %s", contexto, r.status_code, (r.text or "")[:500])
+    if r.status_code in (401, 403):
+        return {"error": "Sesión de Outlook caducada. Vuelve a conectar en /auth/login"}
+    return {"error": "No se pudo consultar el calendario de Outlook"}
 
 
 def _supabase_error(r) -> HTTPException:
@@ -237,6 +317,10 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
 OAUTH_PROVIDER = "microsoft_graph"
 
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+DIAS_SEMANA = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 _wol_pending = False
@@ -263,25 +347,25 @@ def save_token_data(data: dict):
         "expires_at": data["expires_at"],
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}&select=provider",
         headers=supabase_headers(),
     )
     if r.status_code < 300 and r.json():
-        requests.patch(
+        http.patch(
             f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}",
             headers={**supabase_headers(), "Prefer": "return=minimal"},
             json=payload,
         )
     else:
-        requests.post(
+        http.post(
             f"{SUPABASE_URL}/rest/v1/oauth_tokens",
             headers={**supabase_headers(), "Prefer": "return=minimal"},
             json=payload,
         )
 
 def load_token_data() -> dict | None:
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}&select=access_token,refresh_token,expires_at",
         headers=supabase_headers(),
     )
@@ -305,6 +389,7 @@ def get_valid_token() -> str | None:
         CLIENT_ID,
         authority="https://login.microsoftonline.com/common",
         client_credential=CLIENT_SECRET,
+        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
     )
     result = msal_app.acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
     if "access_token" in result:
@@ -324,7 +409,9 @@ def _store_result(result: dict):
 def login_password(body: LoginRequest, request: Request):
     ip = _client_ip(request)
     _check_login_rate(ip)
-    if not hmac.compare_digest(body.password, DASHBOARD_PASSWORD):
+    # Comparar bytes: compare_digest sobre str exige ASCII puro y lanza TypeError con
+    # cualquier tilde, lo que devolvía un 500 (y además se saltaba el registro del intento).
+    if not hmac.compare_digest(body.password.encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8")):
         _register_login_failure(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
     _reset_login_attempts(ip)
@@ -336,6 +423,7 @@ def login():
         CLIENT_ID,
         authority="https://login.microsoftonline.com/common",
         client_credential=CLIENT_SECRET,
+        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
     )
     auth_url = app_msal.get_authorization_request_url(
         SCOPES,
@@ -349,6 +437,7 @@ def callback(code: str):
         CLIENT_ID,
         authority="https://login.microsoftonline.com/common",
         client_credential=CLIENT_SECRET,
+        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
     )
     result = app_msal.acquire_token_by_authorization_code(
         code,
@@ -369,11 +458,14 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     headers = {"Authorization": f"Bearer {token}"}
     start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    response = requests.get(
+    response = http.get(
         f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
     response.encoding = "utf-8"
+    fallo = _graph_fallo(response, "calendarView")
+    if fallo:
+        return fallo
     data = response.json()
     
     events = []
@@ -404,9 +496,11 @@ def list_calendars(credentials: HTTPAuthorizationCredentials = Depends(verify_to
     if not token:
         return {"error": "No autenticado"}
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
-    data = r.json()
-    return [{"id": c["id"], "name": c["name"]} for c in data.get("value", [])]
+    r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    fallo = _graph_fallo(r, "me/calendars")
+    if fallo:
+        return fallo
+    return [{"id": c["id"], "name": c["name"]} for c in r.json().get("value", [])]
 
 
 class CreateEventRequest(BaseModel):
@@ -440,7 +534,7 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
         if body.calendar_id
         else "https://graph.microsoft.com/v1.0/me/events"
     )
-    r = requests.post(url, headers=headers, json=payload)
+    r = http.post(url, headers=headers, json=payload)
     if r.status_code not in (200, 201):
         logger.error("Graph create_event %s: %s", r.status_code, (r.text or "")[:500])
         return {"error": "No se pudo crear el evento en Outlook"}
@@ -482,7 +576,7 @@ def update_event(
         payload["body"] = {"content": body.description, "bodyType": "text"}
     if not payload:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
-    r = requests.patch(
+    r = http.patch(
         f"https://graph.microsoft.com/v1.0/me/events/{event_id}",
         headers=headers,
         json=payload,
@@ -500,7 +594,10 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
         return {"error": "No autenticado"}
     headers = {"Authorization": f"Bearer {token}"}
     # Buscar el calendario llamado 'Clases'
-    r = requests.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    fallo = _graph_fallo(r, "me/calendars (clases)")
+    if fallo:
+        return fallo
     calendars = r.json().get("value", [])
     cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
     if not cal:
@@ -510,13 +607,16 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (today_start + timedelta(days=60)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    r2 = requests.get(
+    r2 = http.get(
         f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
         f"?startDateTime={start}&endDateTime={end}&$top=200"
         f"&$select=subject,start,end,location,isAllDay&$orderby=start/dateTime",
         headers=headers
     )
     r2.encoding = "utf-8"
+    fallo = _graph_fallo(r2, "calendarView (clases)")
+    if fallo:
+        return fallo
     data2 = r2.json()
 
     events = []
@@ -585,7 +685,7 @@ def get_departure_time(
     if body.mode == "driving":
         params["departure_time"] = "now"
         params["traffic_model"] = "best_guess"
-    r = requests.get(url, params=params)
+    r = http.get(url, params=params)
     data = r.json()
 
     try:
@@ -629,7 +729,7 @@ def get_weather(
     icono/texto (helpers.weatherFromCode)."""
     latitude  = lat if lat is not None else WEATHER_LAT
     longitude = lon if lon is not None else WEATHER_LON
-    r = requests.get(
+    r = http.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": latitude,
@@ -682,7 +782,7 @@ def get_weather(
 
 @app.get("/ideas")
 def get_ideas(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/ideas?order=created_at.desc",
         headers=supabase_headers(),
     )
@@ -693,28 +793,67 @@ def delete_idea(
     idea_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.delete(
+    r = http.delete(
         f"{SUPABASE_URL}/rest/v1/ideas?id=eq.{idea_id}",
         headers=supabase_headers(),
     )
     return {"ok": r.status_code < 300}
 
+_HORA_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+
+
+def sugerencia_evento(idea_data: dict) -> dict | None:
+    """Valida la fecha/hora que propone el modelo antes de ofrecerla al usuario.
+
+    Lo que devuelve un LLM no se envía a Graph tal cual: aquí solo pasa lo que tiene
+    forma de fecha (YYYY-MM-DD) y de hora (HH:MM). El evento no se crea solo — el
+    frontend enseña la sugerencia y solo la crea si el usuario la pulsa.
+    """
+    fecha = idea_data.get("fecha")
+    if not isinstance(fecha, str) or not _DATE_RE.match(fecha):
+        return None
+    try:
+        datetime.strptime(fecha, "%Y-%m-%d")   # descarta 2026-13-45
+    except ValueError:
+        return None
+    hora = idea_data.get("hora")
+    if not isinstance(hora, str) or not _HORA_RE.match(hora):
+        hora = None
+    titulo = str(idea_data.get("key") or "").strip()[:200]
+    if not titulo:
+        return None
+    return {"titulo": titulo, "fecha": fecha, "hora": hora}
+
+
 def extract_idea_from_text(text: str) -> dict:
-    """Extrae key/tag/full_text de un texto libre con GPT-4o mini."""
-    completion = openai_client.chat.completions.create(
+    """Extrae key/tag/full_text de un texto libre con GPT-4o mini.
+
+    También intenta detectar si la nota es en realidad algo con fecha ("el martes
+    tengo que llamar al dentista"). Se le da la fecha de hoy porque si no, no puede
+    resolver referencias relativas.
+    """
+    hoy = datetime.now(LOCAL_TZ)
+    completion = get_openai_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
                 "content": (
                     "Eres un asistente que extrae ideas clave de notas de voz o texto. "
+                    f"Hoy es {hoy.strftime('%Y-%m-%d')} ({DIAS_SEMANA[hoy.weekday()]}). "
                     "Dado un texto, responde SOLO con un JSON válido con este formato exacto: "
-                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", "full_text": "Resumen claro y completo de la idea en 2-3 frases"}'
+                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", '
+                    '"full_text": "Resumen claro y completo de la idea en 2-3 frases", '
+                    '"fecha": "YYYY-MM-DD o null", "hora": "HH:MM o null"}. '
+                    "Rellena fecha SOLO si el texto señala un momento concreto para hacer algo "
+                    "('el martes', 'mañana', 'el 3 de junio', 'la semana que viene'); resuélvelo a "
+                    "fecha absoluta usando la de hoy. Si es una idea sin cita, fecha y hora van a null. "
+                    "Si hay día pero no hora concreta, hora va a null."
                 ),
             },
             {"role": "user", "content": text},
         ],
-        max_tokens=300,
+        max_tokens=350,
         temperature=0.3,
     )
     raw = completion.choices[0].message.content.strip()
@@ -731,7 +870,7 @@ def save_idea(text: str, idea_data: dict) -> dict:
         "full_text": str(idea_data.get("full_text", text))[:2000],
         "tag": str(idea_data.get("tag", "idea"))[:50],
     }
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/ideas",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json=payload,
@@ -746,7 +885,7 @@ async def create_idea_from_audio(
 ):
     # 1. Transcribir con Whisper
     audio_bytes = await audio.read()
-    transcript = openai_client.audio.transcriptions.create(
+    transcript = get_openai_client().audio.transcriptions.create(
         model="whisper-1",
         file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
         language="es",
@@ -758,7 +897,7 @@ async def create_idea_from_audio(
     # 2. Extraer idea clave con GPT-4o mini y guardar en Supabase
     idea_data = extract_idea_from_text(text)
     idea = save_idea(text, idea_data)
-    return {"ok": True, "idea": idea, "transcript": text}
+    return {"ok": True, "idea": idea, "transcript": text, "evento_sugerido": sugerencia_evento(idea_data)}
 
 
 class IdeaTextIn(BaseModel):
@@ -776,7 +915,7 @@ def create_idea_from_text(
 
     idea_data = extract_idea_from_text(text)
     idea = save_idea(text, idea_data)
-    return {"ok": True, "idea": idea}
+    return {"ok": True, "idea": idea, "evento_sugerido": sugerencia_evento(idea_data)}
 
 
 # ── EXPORT / BACKUP ────────────────────────────────────────────────────────────
@@ -802,7 +941,7 @@ def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token
     export: dict = {"exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     for key, table, order in _EXPORT_TABLES:
         # limit alto para traer el histórico completo de cada tabla en una llamada.
-        r = requests.get(
+        r = http.get(
             f"{SUPABASE_URL}/rest/v1/{table}?{order}&limit=100000",
             headers=supabase_headers(),
         )
@@ -837,7 +976,7 @@ class ClothingItemIn(BaseModel):
 
 @app.get("/clothing")
 def get_clothing(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/clothing?order=created_at.desc",
         headers=supabase_headers(),
     )
@@ -857,7 +996,7 @@ def create_clothing(
         "currency": body.currency,
         "photo":    body.photo,
     }
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/clothing",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json=payload,
@@ -872,7 +1011,7 @@ def delete_clothing(
     item_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.delete(
+    r = http.delete(
         f"{SUPABASE_URL}/rest/v1/clothing?id=eq.{item_id}",
         headers=supabase_headers(),
     )
@@ -896,7 +1035,7 @@ def ha_events_soon(request: Request, token: str = ""):
     now = datetime.now(timezone.utc)
     end = now + timedelta(hours=1)
     headers = {"Authorization": f"Bearer {graph_token}"}
-    response = requests.get(
+    response = http.get(
         "https://graph.microsoft.com/v1.0/me/calendarView"
         f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
@@ -983,7 +1122,7 @@ def ha_pc_power_pending(request: Request, token: str = ""):
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/jobs",
         headers={**supabase_headers(), "Prefer": "return=representation,resolution=merge-duplicates"},
         json=payload,
@@ -993,9 +1132,12 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data = r.json()
     if data:
         return {"ok": True, "job": data[0]}
-    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente
-    r2 = requests.get(
-        f"{SUPABASE_URL}/rest/v1/jobs?dedupe_key=eq.{body.dedupe_key}&limit=1",
+    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente.
+    # quote() obligatorio: la clave lleva el título del evento, y un '&' abriría un
+    # parámetro nuevo mientras que un '#' convertiría el resto en fragmento (que ni
+    # siquiera se envía al servidor, perdiendo también el &limit=1).
+    r2 = http.get(
+        f"{SUPABASE_URL}/rest/v1/jobs?dedupe_key=eq.{quote(body.dedupe_key, safe='')}&limit=1",
         headers=supabase_headers(),
     )
     data2 = r2.json() if r2.status_code < 300 else []
@@ -1008,7 +1150,7 @@ def get_job_by_id(
     job_id: str = _JOB_ID_PATH,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=id,status,claimed_by,claimed_at,attempt,created_at",
         headers=supabase_headers(),
     )
@@ -1025,7 +1167,7 @@ def claim_job(
 ):
     now_iso = datetime.now(timezone.utc).isoformat()
     worker = _safe_worker(body.worker_id)
-    r = requests.patch(
+    r = http.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.pending",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"status": "claimed", "claimed_by": worker, "claimed_at": now_iso},
@@ -1044,7 +1186,7 @@ def start_job(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     worker = _safe_worker(body.worker_id)
-    r = requests.patch(
+    r = http.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.claimed&claimed_by=eq.{worker}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"status": "running"},
@@ -1065,7 +1207,7 @@ def finish_job(
     if body.status not in ("done", "failed"):
         raise HTTPException(status_code=400, detail="status debe ser done o failed")
     worker = _safe_worker(body.worker_id)
-    r = requests.patch(
+    r = http.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.running&claimed_by=eq.{worker}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"status": body.status},
@@ -1089,7 +1231,7 @@ def create_job_event(
         "message": body.message,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/job_events",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json=payload,
@@ -1104,7 +1246,7 @@ def get_job_events(
     job_id: str = _JOB_ID_PATH,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/job_events?job_id=eq.{job_id}&select=job_id,stage,message,created_at&order=created_at.asc",
         headers=supabase_headers(),
     )
@@ -1119,7 +1261,7 @@ def retry_job(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     worker = _safe_worker(body.worker_id)
-    get_r = requests.get(
+    get_r = http.get(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}&select=id,attempt",
         headers=supabase_headers(),
     )
@@ -1132,7 +1274,7 @@ def retry_job(
     if attempt > MAX_JOB_ATTEMPTS:
         raise HTTPException(status_code=409, detail=f"Máximo de reintentos alcanzado ({MAX_JOB_ATTEMPTS})")
 
-    patch_r = requests.patch(
+    patch_r = http.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"status": "pending", "attempt": attempt, "claimed_by": None, "claimed_at": None},
@@ -1158,7 +1300,7 @@ def agent_heartbeat(body: AgentHeartbeatRequest, credentials: HTTPAuthorizationC
         "version": body.version,
         "updated_at": now_iso,
     }
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/pc_agents",
         headers={**supabase_headers(), "Prefer": "return=representation,resolution=merge-duplicates"},
         json=payload,
@@ -1174,7 +1316,7 @@ def get_agent(
     agent_id: str = Path(..., pattern=r'^[a-zA-Z0-9_-]{1,64}$'),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/pc_agents?agent_id=eq.{agent_id}&select=agent_id,status,last_seen_at,hostname,version",
         headers=supabase_headers(),
     )
@@ -1201,8 +1343,6 @@ def get_agent(
 
 # ── ENTRENAMIENTO ─────────────────────────────────────────────────────────────
 
-_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-
 class TrainingSessionCreate(BaseModel):
     date: str = Field(max_length=10)
     duration_hours: float = Field(gt=0, le=24)
@@ -1225,7 +1365,7 @@ class TrainingPaymentCreate(BaseModel):
         return v
 
 def _get_training_client():
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/training_clients?limit=1&order=created_at.asc",
         headers=supabase_headers(),
     )
@@ -1242,7 +1382,7 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     price = float(client["price_per_hour"])
     sessions_per_payment = int(client["sessions_per_payment"])
 
-    r_pay = requests.get(
+    r_pay = http.get(
         f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
         headers=supabase_headers(),
     )
@@ -1250,13 +1390,13 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     last_payment = payments[0] if payments else None
 
     date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
-    r_sess = requests.get(
+    r_sess = http.get(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}&order=date.desc",
         headers=supabase_headers(),
     )
     sessions = r_sess.json() if r_sess.status_code < 300 else []
 
-    r_all = requests.get(
+    r_all = http.get(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}&order=date.desc&limit=10",
         headers=supabase_headers(),
     )
@@ -1283,7 +1423,7 @@ def add_training_session(
     client = _get_training_client()
     if not client:
         raise HTTPException(status_code=400, detail="No hay ningún cliente de entrenamiento")
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/training_sessions",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"client_id": client["id"], "date": body.date, "duration_hours": body.duration_hours},
@@ -1311,7 +1451,7 @@ def update_training_client(
         patch["sessions_per_payment"] = body.sessions_per_payment
     if not patch:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
-    r = requests.patch(
+    r = http.patch(
         f"{SUPABASE_URL}/rest/v1/training_clients?id=eq.{client['id']}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json=patch,
@@ -1325,13 +1465,21 @@ def delete_training_session(
     session_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    r = requests.delete(
+    r = http.delete(
         f"{SUPABASE_URL}/rest/v1/training_sessions?id=eq.{session_id}",
         headers=supabase_headers(),
     )
     return {"ok": r.status_code < 300}
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
+
+# Métricas que se acumulan a lo largo del día: llegan snapshots parciales, así que un
+# valor nuevo solo pisa al guardado si es MAYOR. Constantes de módulo y compartidas por
+# las dos rutas de ingesta — cuando cada una tenía su propia copia, a la del Shortcut le
+# faltaba resting_energy y un snapshot de mediodía podía pisar el total del día.
+CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
+# Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
+ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
@@ -1381,13 +1529,13 @@ async def health_ingest(request: Request, token: str = ""):
                 "unit": "count",
                 "extra": {"workouts": day_workouts},
             }
-            r = requests.post(
+            r = http.post(
                 f"{SUPABASE_URL}/rest/v1/health_metrics",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                 json=payload,
             )
             if r.status_code == 409:
-                r = requests.patch(
+                r = http.patch(
                     f"{SUPABASE_URL}/rest/v1/health_metrics"
                     f"?metric_date=eq.{d}&metric_name=eq.workouts",
                     headers={**supabase_headers(), "Prefer": "return=minimal"},
@@ -1396,9 +1544,7 @@ async def health_ingest(request: Request, token: str = ""):
             if r.status_code < 300:
                 upserted += 1
 
-    # ── Métricas normales ──
-    # Métricas acumulativas: solo guardar si el nuevo valor es mayor que el almacenado
-    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
+    # ── Métricas normales (CUMULATIVE_METRICS/ENERGY_METRICS son de módulo) ──
 
     # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
     grouped_metrics: dict = {}
@@ -1431,7 +1577,6 @@ async def health_ingest(request: Request, token: str = ""):
             value = float(raw_value) if raw_value is not None else None
 
             # Normalizar energía de kJ a kcal
-            ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
             if name in ENERGY_METRICS and unit == "kJ" and value is not None:
                 value = round(value / 4.184, 2)
                 unit = "kcal"
@@ -1456,7 +1601,7 @@ async def health_ingest(request: Request, token: str = ""):
         row_exists = False
         # Para métricas acumulativas, no sobreescribir si ya hay un valor mayor en BD
         if name in CUMULATIVE_METRICS and value is not None:
-            existing = requests.get(
+            existing = http.get(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{name}&select=value",
                 headers=supabase_headers(),
@@ -1480,20 +1625,20 @@ async def health_ingest(request: Request, token: str = ""):
             "extra": data["extra"],
         }
         if row_exists:
-            r = requests.patch(
+            r = http.patch(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                 json=payload,
             )
         else:
-            r = requests.post(
+            r = http.post(
                 f"{SUPABASE_URL}/rest/v1/health_metrics",
                 headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
                 json=payload,
             )
             if r.status_code == 409:
-                r = requests.patch(
+                r = http.patch(
                     f"{SUPABASE_URL}/rest/v1/health_metrics"
                     f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
                     headers={**supabase_headers(), "Prefer": "return=minimal"},
@@ -1590,7 +1735,6 @@ async def health_ingest_simple(request: Request, token: str = ""):
             parse_errors.append({"item": str(item)[:200], "error": str(e)})
             continue
 
-    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy"}
     upserted = 0
     skipped = []
     errors = []
@@ -1603,7 +1747,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
 
         extra = s.extra or {}
         if s.metric == "sleep_analysis":
-            existing_sleep = requests.get(
+            existing_sleep = http.get(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.sleep_analysis&select=extra",
                 headers=supabase_headers(),
@@ -1615,7 +1759,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
 
         row_exists = False
         if s.metric in CUMULATIVE_METRICS:
-            existing = requests.get(
+            existing = http.get(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}&select=value",
                 headers=supabase_headers(),
@@ -1629,14 +1773,14 @@ async def health_ingest_simple(request: Request, token: str = ""):
                         continue
 
         if row_exists:
-            r = requests.patch(
+            r = http.patch(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                 json={"value": s.value, "unit": s.unit, "extra": extra},
             )
         else:
-            r = requests.post(
+            r = http.post(
                 f"{SUPABASE_URL}/rest/v1/health_metrics",
                 headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
                 json={
@@ -1648,7 +1792,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 },
             )
         if r.status_code == 409:
-            r = requests.patch(
+            r = http.patch(
                 f"{SUPABASE_URL}/rest/v1/health_metrics"
                 f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
@@ -1657,7 +1801,10 @@ async def health_ingest_simple(request: Request, token: str = ""):
         if r.status_code < 300:
             upserted += 1
         else:
-            errors.append(f"{s.metric}: HTTP {r.status_code} {r.text[:100]}")
+            # El detalle real va al log del servidor; al cliente solo el código.
+            # Reenviar r.text filtraba mensajes internos de Supabase (invariante 5).
+            logger.error("Ingesta de salud %s (%s): %s", s.metric, r.status_code, (r.text or "")[:500])
+            errors.append(f"{s.metric}: HTTP {r.status_code}")
 
     return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
 
@@ -1668,7 +1815,7 @@ def toggle_sleep_exclude(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     """Alterna el flag excluded en extra de sleep_analysis para una fecha dada."""
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/health_metrics"
         f"?metric_name=eq.sleep_analysis&metric_date=eq.{date}&select=extra",
         headers=supabase_headers(),
@@ -1680,7 +1827,7 @@ def toggle_sleep_exclude(
         raise HTTPException(status_code=404, detail="No hay datos de sueño para esa fecha")
     extra = rows[0].get("extra") or {}
     extra["excluded"] = not extra.get("excluded", False)
-    patch = requests.patch(
+    patch = http.patch(
         f"{SUPABASE_URL}/rest/v1/health_metrics"
         f"?metric_name=eq.sleep_analysis&metric_date=eq.{date}",
         headers={**supabase_headers(), "Prefer": "return=minimal"},
@@ -1700,7 +1847,7 @@ def get_health_metrics(
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days debe estar entre 1 y 365")
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/health_metrics"
         f"?metric_date=gte.{since}&order=metric_date.asc&limit=5000",
         headers=supabase_headers(),
@@ -1740,7 +1887,7 @@ def get_health_latest(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     """Último valor disponible de cada métrica."""
-    r = requests.get(
+    r = http.get(
         f"{SUPABASE_URL}/rest/v1/health_metrics?order=metric_date.desc&limit=500",
         headers=supabase_headers(),
     )
@@ -1771,7 +1918,7 @@ def add_training_payment(
         raise HTTPException(status_code=400, detail="No hay ningún cliente de entrenamiento")
 
     client_id = client["id"]
-    r_pay = requests.get(
+    r_pay = http.get(
         f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
         headers=supabase_headers(),
     )
@@ -1779,14 +1926,14 @@ def add_training_payment(
     last_payment = payments[0] if payments else None
 
     date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
-    r_sess = requests.get(
+    r_sess = http.get(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}",
         headers=supabase_headers(),
     )
     sessions = r_sess.json() if r_sess.status_code < 300 else []
     amount = round(sum(float(s["duration_hours"]) for s in sessions) * float(client["price_per_hour"]), 2)
 
-    r = requests.post(
+    r = http.post(
         f"{SUPABASE_URL}/rest/v1/training_payments",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"client_id": client_id, "date": body.date, "amount": amount},

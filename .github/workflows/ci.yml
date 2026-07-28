@@ -1,0 +1,50 @@
+name: CI
+
+# Ejecuta la misma verificación obligatoria que CLAUDE.md pide antes de cada commit:
+#   npm run lint && npm test && pytest tests/backend && npm run build
+# Hasta ahora el único check era el deploy de Vercel, que solo comprueba que el
+# frontend compila: los tests no los ejecutaba nadie automáticamente.
+#
+# No despliega nada. El deploy del backend sigue siendo manual (deploy-backend.yml).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Si se empuja varias veces seguidas a la misma rama, cancela la ejecución anterior.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint · tests · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Lint (cero errores y cero warnings)
+        run: npm run lint -- --max-warnings 0
+      - name: Tests
+        run: npm test
+      - name: Build de producción
+        run: npm run build
+
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # misma versión que la imagen de Fly
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r backend/requirements.txt pytest
+      - name: Tests
+        # conftest.py define las variables de entorno simuladas: no hacen falta secretos.
+        run: python -m pytest tests/backend -q

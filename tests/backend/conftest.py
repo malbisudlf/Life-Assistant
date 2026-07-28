@@ -75,10 +75,11 @@ class MockRouter:
 @pytest.fixture
 def mock_requests(monkeypatch):
     router = MockRouter()
-    monkeypatch.setattr(main.requests, "get", router.get)
-    monkeypatch.setattr(main.requests, "post", router.post)
-    monkeypatch.setattr(main.requests, "patch", router.patch)
-    monkeypatch.setattr(main.requests, "delete", router.delete)
+    # main usa una sesión única (main.http) con timeout por defecto, no requests.* suelto.
+    monkeypatch.setattr(main.http, "get", router.get)
+    monkeypatch.setattr(main.http, "post", router.post)
+    monkeypatch.setattr(main.http, "patch", router.patch)
+    monkeypatch.setattr(main.http, "delete", router.delete)
     return router
 
 

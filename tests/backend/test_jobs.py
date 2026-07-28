@@ -22,6 +22,23 @@ class TestCreateJob:
         r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": "alud-99"})
         assert r.json() == {"ok": True, "job": existing}
 
+    def test_dedupe_key_con_caracteres_de_url_va_escapada(self, client, auth_headers, mock_requests):
+        """La clave lleva el título del evento: '&' y '#' romperían la query de Supabase.
+
+        Sin quote(), el '&' abre un parámetro nuevo y el '#' convierte el resto en
+        fragmento (que ni se envía), perdiendo también el &limit=1.
+        """
+        clave = "entrega-Deber & repaso #2-175"
+        existing = {"id": JOB_ID, "dedupe_key": clave, "status": "running"}
+        mock_requests.add("POST", "/rest/v1/jobs", FakeResponse([], 201))
+        mock_requests.add("GET", "/rest/v1/jobs?dedupe_key=eq.", FakeResponse([existing]))
+        r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": clave})
+        assert r.json() == {"ok": True, "job": existing}
+
+        url = mock_requests.called("GET", "/rest/v1/jobs")[0][1]
+        assert "%26" in url and "%23" in url, f"clave sin escapar: {url}"
+        assert url.endswith("&limit=1")
+
     def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
         mock_requests.add("POST", "/rest/v1/jobs", FakeResponse(None, 500, "secreto interno"))
         r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": "k"})
