@@ -53,8 +53,10 @@ backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~1500 líneas)
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics, oauth_tokens
-    └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
-                          apagado/suspensión del PC, que HA ejecuta por SSH)
+    ├── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
+    │                     apagado/suspensión del PC, que HA ejecuta por SSH), y
+    │                     dispara /ha/push-eventos cada minuto
+    └── Web Push ── avisos con la app cerrada (VAPID + pywebpush)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
@@ -86,7 +88,11 @@ Ficheros clave:
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
 3. **Rate limiting del login**: 5 intentos / 5 min por IP, en memoria (`_login_attempts`).
-   Se resetea en cold start de Fly, y eso es aceptable para este caso.
+   Se resetea en cold start de Fly, y eso es aceptable para este caso. La IP sale de
+   `_client_ip()`, que **solo usa fuentes que el cliente no controla**: `Fly-Client-IP`
+   (y solo si `FLY_APP_NAME` confirma que estamos en Fly) o el socket. Nunca fiarse de
+   `X-Forwarded-For` por defecto: coger su primera entrada dejaba el límite a merced de
+   quien rotara la cabecera. `TRUST_FORWARDED_FOR=1` es el opt-in para proxies propios.
 4. **Comparaciones de credenciales siempre con `hmac.compare_digest`**, nunca `==`.
 5. **Errores de Supabase**: usa `_supabase_error(r)` — loguea el detalle real en el
    servidor y devuelve un 502 genérico. Nunca reenvíes `r.text` de Supabase al cliente.
@@ -97,6 +103,17 @@ Ficheros clave:
 
 ## Backend: patrones que hay que conocer
 
+- **Cliente HTTP saliente**: TODO lo que sale del backend va por `http` (la sesión de
+  módulo), nunca por `requests.get` suelto. Impone `HTTP_TIMEOUT` por defecto y
+  reutiliza conexiones. Sin timeout, una llamada colgada retiene un hilo del pool de
+  FastAPI para siempre. Los tests mockean `main.http`, no `main.requests`.
+- **Dependencias opcionales**: lo que la documentación llame opcional no puede
+  impedir arrancar. El cliente de OpenAI y `pywebpush` se crean/importan de forma
+  perezosa y devuelven 503 si falta la configuración, nunca revientan el import.
+- **Notificaciones push**: claves VAPID por env (`generar_vapid.py` las genera). El
+  envío lo dispara HA llamando a `/ha/push-eventos` cada minuto, porque Fly escala a
+  cero y no hay proceso vivo que mire el reloj. El dedupe de avisos ya enviados vive
+  en la tabla `push_enviados` — en memoria se perdería en cada arranque en frío.
 - **Zonas horarias**: Microsoft Graph devuelve fechas con nombres de zona de Windows
   ("Romance Standard Time"). `normalize_graph_dt()` + `WINDOWS_TZ_MAP` las convierten
   SIEMPRE a ISO UTC con sufijo `Z`. La zona del usuario es `TIMEZONE`/`LOCAL_TZ`
@@ -161,7 +178,11 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   `renderWidget`)). El motor de conclusiones es lógica pura y testeada en
   `helpers.js`: `healthConclusions` (exprime todas las métricas del Watch y
   devuelve conclusiones `{domain, tone, text}`), `healthOverall` (veredicto),
-  apoyándose en `seriesTrend`/`trendDirection`/`bedtimeHrvInsight`.
+  apoyándose en `seriesTrend`/`trendDirection`/`bedtimeHrvInsight` y en
+  `pairByDate`/`splitCompare` para los cruces entre series. La puntuación de
+  bienestar también vive allí: `wellnessBreakdown` construye el desglose y
+  `scoreFromBreakdown` deriva de él el total normalizado a 100 — **el desglose es la
+  única fuente de verdad, nunca sumes al score por separado**.
   Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
@@ -175,7 +196,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
     `clothing` de Supabase (`drop table public.clothing;`).
 - **Claves de localStorage** (prefijo `la_`): `la_token` (JWT), `la_widget_config`,
   `la_num_columns`, `la_col_splits`, `la_notifications`, `la_simple_mode`,
-  `la_body_goals`, `la_training_days`. Si añades una, mantén el prefijo y el
+  `la_body_goals`, `la_training_days`, `la_simple_widget_config`. Si añades una, mantén el prefijo y el
   `try/catch` al parsear.
 - **`apiFetch()`**: wrapper de `fetch` que, ante un 401 con sesión activa, borra
   `la_token` y recarga. Úsalo para toda llamada autenticada al backend.
