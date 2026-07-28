@@ -14,6 +14,14 @@ const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
 // Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas
 const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
 
+// Ritmo del seguimiento de un job del agente PC.
+const JOB_POLL_ACTIVO_MS = 2_000;    // modal delante: la barra de progreso va en vivo
+const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avisar al acabar
+// Techo del seguimiento: el agente ignora los jobs de más de una hora (ver
+// poll_pending_job en agent/agent.py), así que pasado ese punto no lo va a recoger
+// nadie y seguir preguntando no aporta nada.
+const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
+
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
   if (res.status === 401 && localStorage.getItem("la_token")) {
@@ -562,6 +570,8 @@ export default function Dashboard() {
 
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
+  // Cuándo empezó a seguirse el job actual, para el techo de una hora.
+  const jobInicioRef     = useRef({ id: null, t: 0 });
   const resizeDragRef    = useRef(null);
   const dragStateRef     = useRef(null);
 
@@ -793,6 +803,8 @@ export default function Dashboard() {
   // es el único sitio donde se pinta (isAgentOnline). Sondear siempre, cada 10s, mantenía
   // despierta la máquina de Fly las 24 h y anulaba su auto_stop_machines / min_machines_running=0.
   const wolModalAbierto = !!wolModal;
+  // Cualquiera de los dos modales muestra el progreso del job en vivo.
+  const jobModalAbierto = wolModalAbierto || pcModal;
   useEffect(() => {
     if (!token || !wolModalAbierto) return;
 
@@ -1577,11 +1589,24 @@ export default function Dashboard() {
     window.addEventListener("mouseup", onMouseUp);
   }
 
+  // Seguimiento del job. El sondeo es solo de lectura: el job ya vive en Supabase y el
+  // agente lo recoge consultándola por su cuenta, así que esto no lo empuja ni lo frena
+  // — cerrar el modal no cancela nada. Pero sí alimenta `jobTerminal`, de donde cuelga
+  // la notificación de "job completado", así que sigue en marcha con el modal cerrado
+  // (más despacio) en vez de cortarse ahí. Antes no paraba nunca, ni siquiera al acabar.
   useEffect(() => {
-    if (!activeJobId || !token) return;
+    if (!activeJobId || !token || jobTerminal) return;   // terminal: ya no hay nada que mirar
+    // El cronómetro se reinicia por job, no al abrir o cerrar el modal.
+    if (jobInicioRef.current.id !== activeJobId) {
+      jobInicioRef.current = { id: activeJobId, t: Date.now() };
+    }
     let mounted = true;
     const t = localStorage.getItem("la_token") || "";
     const id = setInterval(async () => {
+      if (Date.now() - jobInicioRef.current.t > JOB_POLL_MAX_MS) {
+        if (mounted) setActiveJobId(null);   // el agente ya no lo va a recoger
+        return;
+      }
       try {
         const [evRes, jobRes] = await Promise.all([
           apiFetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
@@ -1597,9 +1622,9 @@ export default function Dashboard() {
           setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
         }
       } catch { /* mejor esfuerzo: ignorar */ }
-    }, 2000);
+    }, jobModalAbierto ? JOB_POLL_ACTIVO_MS : JOB_POLL_FONDO_MS);
     return () => { mounted = false; clearInterval(id); };
-  }, [activeJobId, token]);
+  }, [activeJobId, token, jobTerminal, jobModalAbierto]);
 
   const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
   const STAGE_LABELS = {
