@@ -317,6 +317,10 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
 OAUTH_PROVIDER = "microsoft_graph"
 
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+DIAS_SEMANA = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 _wol_pending = False
@@ -795,8 +799,40 @@ def delete_idea(
     )
     return {"ok": r.status_code < 300}
 
+_HORA_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+
+
+def sugerencia_evento(idea_data: dict) -> dict | None:
+    """Valida la fecha/hora que propone el modelo antes de ofrecerla al usuario.
+
+    Lo que devuelve un LLM no se envía a Graph tal cual: aquí solo pasa lo que tiene
+    forma de fecha (YYYY-MM-DD) y de hora (HH:MM). El evento no se crea solo — el
+    frontend enseña la sugerencia y solo la crea si el usuario la pulsa.
+    """
+    fecha = idea_data.get("fecha")
+    if not isinstance(fecha, str) or not _DATE_RE.match(fecha):
+        return None
+    try:
+        datetime.strptime(fecha, "%Y-%m-%d")   # descarta 2026-13-45
+    except ValueError:
+        return None
+    hora = idea_data.get("hora")
+    if not isinstance(hora, str) or not _HORA_RE.match(hora):
+        hora = None
+    titulo = str(idea_data.get("key") or "").strip()[:200]
+    if not titulo:
+        return None
+    return {"titulo": titulo, "fecha": fecha, "hora": hora}
+
+
 def extract_idea_from_text(text: str) -> dict:
-    """Extrae key/tag/full_text de un texto libre con GPT-4o mini."""
+    """Extrae key/tag/full_text de un texto libre con GPT-4o mini.
+
+    También intenta detectar si la nota es en realidad algo con fecha ("el martes
+    tengo que llamar al dentista"). Se le da la fecha de hoy porque si no, no puede
+    resolver referencias relativas.
+    """
+    hoy = datetime.now(LOCAL_TZ)
     completion = get_openai_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -804,13 +840,20 @@ def extract_idea_from_text(text: str) -> dict:
                 "role": "system",
                 "content": (
                     "Eres un asistente que extrae ideas clave de notas de voz o texto. "
+                    f"Hoy es {hoy.strftime('%Y-%m-%d')} ({DIAS_SEMANA[hoy.weekday()]}). "
                     "Dado un texto, responde SOLO con un JSON válido con este formato exacto: "
-                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", "full_text": "Resumen claro y completo de la idea en 2-3 frases"}'
+                    '{"key": "Título corto de la idea (máx 8 palabras)", "tag": "una palabra categoría", '
+                    '"full_text": "Resumen claro y completo de la idea en 2-3 frases", '
+                    '"fecha": "YYYY-MM-DD o null", "hora": "HH:MM o null"}. '
+                    "Rellena fecha SOLO si el texto señala un momento concreto para hacer algo "
+                    "('el martes', 'mañana', 'el 3 de junio', 'la semana que viene'); resuélvelo a "
+                    "fecha absoluta usando la de hoy. Si es una idea sin cita, fecha y hora van a null. "
+                    "Si hay día pero no hora concreta, hora va a null."
                 ),
             },
             {"role": "user", "content": text},
         ],
-        max_tokens=300,
+        max_tokens=350,
         temperature=0.3,
     )
     raw = completion.choices[0].message.content.strip()
@@ -854,7 +897,7 @@ async def create_idea_from_audio(
     # 2. Extraer idea clave con GPT-4o mini y guardar en Supabase
     idea_data = extract_idea_from_text(text)
     idea = save_idea(text, idea_data)
-    return {"ok": True, "idea": idea, "transcript": text}
+    return {"ok": True, "idea": idea, "transcript": text, "evento_sugerido": sugerencia_evento(idea_data)}
 
 
 class IdeaTextIn(BaseModel):
@@ -872,7 +915,7 @@ def create_idea_from_text(
 
     idea_data = extract_idea_from_text(text)
     idea = save_idea(text, idea_data)
-    return {"ok": True, "idea": idea}
+    return {"ok": True, "idea": idea, "evento_sugerido": sugerencia_evento(idea_data)}
 
 
 # ── EXPORT / BACKUP ────────────────────────────────────────────────────────────
@@ -1299,8 +1342,6 @@ def get_agent(
 
 
 # ── ENTRENAMIENTO ─────────────────────────────────────────────────────────────
-
-_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 class TrainingSessionCreate(BaseModel):
     date: str = Field(max_length=10)

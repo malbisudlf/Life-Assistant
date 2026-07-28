@@ -453,6 +453,11 @@ export default function Dashboard() {
   const [ideas, setIdeas]             = useState([]);
   const [recording, setRecording]     = useState(false);
   const [processing, setProcessing]   = useState(false);
+  // Sugerencia de evento detectada por GPT al capturar una idea ("el martes al
+  // dentista"). Vive solo en la sesión: es una oferta de un toque justo después de
+  // dictarla, no un dato que haya que persistir.
+  const [eventoSugerido, setEventoSugerido] = useState(null);   // {ideaId, titulo, fecha, hora}
+  const [sugerenciaEstado, setSugerenciaEstado] = useState(null); // null | "creando" | "ok" | "error"
   const [showTextIdea, setShowTextIdea]     = useState(false);
   const [textIdeaInput, setTextIdeaInput]   = useState("");
   const [textIdeaSubmitting, setTextIdeaSubmitting] = useState(false);
@@ -930,7 +935,10 @@ export default function Dashboard() {
         const t = localStorage.getItem("la_token") || "";
         const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
         const data = await res.json();
-        if (data.ok) setIdeas(prev => [data.idea, ...prev]);
+        if (data.ok) {
+          setIdeas(prev => [data.idea, ...prev]);
+          recogerSugerencia(data);
+        }
       } catch { /* mejor esfuerzo: ignorar */ }
       setProcessing(false);
     };
@@ -939,6 +947,47 @@ export default function Dashboard() {
     setRecording(true);
   }
   function stopRecording() { mediaRecorderRef.current?.stop(); setRecording(false); }
+
+  // ── Idea → evento de Outlook ─────────────────────────────────────────────
+  // El backend detecta si la nota llevaba una cita ("el martes al dentista") y valida
+  // la fecha antes de proponerla. Aquí solo se ofrece: crear un evento en el calendario
+  // es una acción hacia fuera, así que la dispara el usuario con un toque, no sola.
+  function recogerSugerencia(data) {
+    const ev = data?.evento_sugerido;
+    if (!ev?.fecha) return;
+    setEventoSugerido({ ...ev, ideaId: data.idea?.id });
+    setSugerenciaEstado(null);
+  }
+
+  async function crearEventoDesdeIdea() {
+    if (!eventoSugerido || sugerenciaEstado === "creando") return;
+    setSugerenciaEstado("creando");
+    const t = localStorage.getItem("la_token") || "";
+    // Sin hora concreta se coloca a las 9:00 como marcador del día; con hora, una hora de duración.
+    const inicio = eventoSugerido.hora || "09:00";
+    const [hh, mm] = inicio.split(":").map(Number);
+    const fin = `${String((hh + 1) % 24).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    try {
+      const r = await apiFetch(`${API}/calendar/events`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subject: eventoSugerido.titulo,
+          start: `${eventoSugerido.fecha}T${inicio}:00`,
+          end: `${eventoSugerido.fecha}T${fin}:00`,
+        }),
+      });
+      const data = await r.json();
+      if (r.ok && !data.error) {
+        setSugerenciaEstado("ok");
+        await loadEvents();   // que aparezca ya en la agenda
+      } else {
+        setSugerenciaEstado("error");
+      }
+    } catch {
+      setSugerenciaEstado("error");
+    }
+  }
 
   function openTextIdea() {
     setTextIdeaInput("");
@@ -965,6 +1014,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.ok) {
         setIdeas(prev => [data.idea, ...prev]);
+        recogerSugerencia(data);
         setShowTextIdea(false);
       } else {
         setTextIdeaError("No se pudo guardar la idea");
@@ -1938,6 +1988,45 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
+          {/* La nota traía una cita: se ofrece pasarla al calendario de un toque */}
+          {eventoSugerido && (
+            <div style={{
+              marginTop: 10, padding: "10px 12px", borderRadius: 8,
+              background: "rgba(139,180,212,0.08)", border: "0.5px solid rgba(139,180,212,0.3)",
+            }}>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>Esto parece una cita</div>
+              <div style={{ fontSize: 14, color: "var(--text)", marginBottom: 8 }}>
+                {eventoSugerido.titulo}
+                <span style={{ color: "var(--accent2)", fontFamily: "'DM Mono', monospace", marginLeft: 6 }}>
+                  {formatShortDate(eventoSugerido.fecha)}{eventoSugerido.hora ? ` · ${eventoSugerido.hora}` : ""}
+                </span>
+              </div>
+              {sugerenciaEstado === "ok" ? (
+                <div style={{ fontSize: 12, color: "var(--green)" }}>
+                  ✓ Añadido a Outlook
+                  <button onClick={() => { setEventoSugerido(null); setSugerenciaEstado(null); }} style={{
+                    background: "none", border: "none", color: "var(--muted2)", fontSize: 11,
+                    cursor: "pointer", marginLeft: 8, textDecoration: "underline", padding: 0,
+                  }}>Cerrar</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={crearEventoDesdeIdea} disabled={sugerenciaEstado === "creando"} style={{
+                    padding: "5px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                    background: "rgba(139,180,212,0.15)", border: "0.5px solid var(--accent2)",
+                    color: "var(--accent2)", fontFamily: "'DM Sans', sans-serif",
+                  }}>{sugerenciaEstado === "creando" ? "Añadiendo…" : "Añadir al calendario"}</button>
+                  <button onClick={() => { setEventoSugerido(null); setSugerenciaEstado(null); }} style={{
+                    background: "none", border: "none", color: "var(--muted)", fontSize: 12,
+                    cursor: "pointer", padding: "5px 4px", fontFamily: "'DM Sans', sans-serif",
+                  }}>Ahora no</button>
+                  {sugerenciaEstado === "error" && (
+                    <span style={{ fontSize: 11, color: "#d4645a" }}>No se pudo crear</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0, ...(recording ? { borderColor: "#d4645a", color: "#d4645a" } : {}) }}
               onClick={recording ? stopRecording : startRecording} disabled={processing}>

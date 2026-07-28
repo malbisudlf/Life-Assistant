@@ -285,7 +285,8 @@ class TestIdeas:
         mock_requests.add("POST", "/rest/v1/ideas", FakeResponse([saved], 201))
         r = client.post("/ideas/text", headers=auth_headers, json={"text": "comprar pan mañana"})
         assert r.status_code == 200
-        assert r.json() == {"ok": True, "idea": saved}
+        # evento_sugerido es null porque la extracción no devolvió fecha
+        assert r.json() == {"ok": True, "idea": saved, "evento_sugerido": None}
 
     def test_delete_idea_valida_uuid(self, client, auth_headers, mock_requests):
         assert client.delete("/ideas/no-uuid", headers=auth_headers).status_code == 422
@@ -489,3 +490,45 @@ class TestOpenAIOpcional:
         monkeypatch.setattr(main, "OpenAI", FakeOpenAI)
         assert main.get_openai_client() is main.get_openai_client()
         assert len(creados) == 1
+
+
+class TestSugerenciaEvento:
+    """Lo que propone el LLM no llega a Graph sin validar: solo pasa lo que tiene forma
+    de fecha (YYYY-MM-DD) y de hora (HH:MM), y el evento no se crea sin que el usuario
+    lo pulse."""
+
+    def test_fecha_y_hora_validas(self):
+        assert main.sugerencia_evento({
+            "key": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00",
+        }) == {"titulo": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00"}
+
+    def test_dia_sin_hora(self):
+        s = main.sugerencia_evento({"key": "Entrega TFG", "fecha": "2026-08-04", "hora": None})
+        assert s["hora"] is None and s["fecha"] == "2026-08-04"
+
+    def test_sin_fecha_no_hay_sugerencia(self):
+        assert main.sugerencia_evento({"key": "Idea suelta", "fecha": None}) is None
+        assert main.sugerencia_evento({"key": "Idea suelta"}) is None
+
+    def test_fecha_con_formato_o_valor_imposible_se_descarta(self):
+        for mala in ["mañana", "04/08/2026", "2026-13-45", "2026-02-30", "", 20260804]:
+            assert main.sugerencia_evento({"key": "X", "fecha": mala}) is None
+
+    def test_hora_invalida_se_ignora_pero_conserva_el_dia(self):
+        for mala in ["25:00", "17.00", "5pm", "", 1700]:
+            s = main.sugerencia_evento({"key": "X", "fecha": "2026-08-04", "hora": mala})
+            assert s["hora"] is None and s["fecha"] == "2026-08-04"
+
+    def test_sin_titulo_no_hay_sugerencia(self):
+        assert main.sugerencia_evento({"key": "   ", "fecha": "2026-08-04"}) is None
+
+    def test_el_endpoint_devuelve_la_sugerencia(self, client, auth_headers, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "extract_idea_from_text", lambda t: {
+            "key": "Llamar al dentista", "tag": "salud", "full_text": "...",
+            "fecha": "2026-08-04", "hora": "17:00",
+        })
+        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse([{"id": "abc"}], 201))
+        r = client.post("/ideas/text", headers=auth_headers, json={"text": "el martes al dentista"})
+        assert r.json()["evento_sugerido"] == {
+            "titulo": "Llamar al dentista", "fecha": "2026-08-04", "hora": "17:00",
+        }
