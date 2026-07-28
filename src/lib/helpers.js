@@ -334,6 +334,24 @@ export function healthOverall(conclusions) {
   return { tone: "info", label: "Sin datos suficientes" };
 }
 
+// ── Puntuación de bienestar ──────────────────────────────────────
+// El desglose (`breakdown`) es la única fuente de verdad: el total se deriva de él en
+// vez de acumularse aparte. Antes el widget hacía `score += x` en 14 sitios pero solo
+// registraba 12 filas, así que VO₂max y luz natural sumaban al número grande sin
+// aparecer en el detalle y el tooltip no cuadraba con su propio total.
+//
+// Además normaliza a 100: la vista semanal y la diaria no puntúan sobre el mismo máximo
+// (la diaria añade VO₂max, FC caminando, % grasa, luz y respiración), y usar los mismos
+// umbrales para ambas hacía que "Semana excelente" exigiera el 97% y "Día excelente" el 75%.
+export function scoreFromBreakdown(breakdown) {
+  // `sinDatos` queda fuera de la fracción entera: no tener el sensor de una métrica
+  // no debe puntuar como tenerlo y sacar un cero.
+  const filas = (breakdown || []).filter(b => b && !b.sinDatos && Number(b.max) > 0);
+  const pts   = filas.reduce((s, b) => s + (Number(b.pts) || 0), 0);
+  const max   = filas.reduce((s, b) => s + (Number(b.max) || 0), 0);
+  return { pts, max, score: max > 0 ? Math.round((pts / max) * 100) : null };
+}
+
 // ── Conteo de ropa (widget temporal) ────────────────────────────
 // Monedas soportadas: euro y baht tailandés (símbolo ฿).
 export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };

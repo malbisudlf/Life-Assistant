@@ -3,7 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
-  healthConclusions, healthOverall,
+  healthConclusions, healthOverall, scoreFromBreakdown,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -285,6 +285,10 @@ function loadWidgetConfig(storageKey) {
         column: w.column || DEFAULT_COLUMNS[w.id] || "left",
         width:  typeof w.width  === "number" ? w.width  : undefined,
         height: typeof w.height === "number" ? w.height : undefined,
+        // widthPct es lo que de verdad pinta el ancho (wrapResizable). Al reconstruir
+        // la entrada campo a campo se quedaba fuera, así que los anchos ajustados se
+        // perdían en cada recarga.
+        widthPct: typeof w.widthPct === "number" ? w.widthPct : undefined,
       }));
       for (const def of ALL_DEFAULT_WIDGETS) {
         if (!savedIds.has(def.id)) merged.push({ ...def });
@@ -1340,7 +1344,10 @@ export default function Dashboard() {
     save(next);
   }
   function resetWidgetSize(id) {
-    saveWidgetConfig(widgetConfig.map(w => w.id === id ? { ...w, width: undefined, height: undefined } : w));
+    // widthPct también, o el doble clic no devolvía el ancho a su valor por defecto.
+    saveWidgetConfig(widgetConfig.map(w => w.id === id
+      ? { ...w, width: undefined, height: undefined, widthPct: undefined }
+      : w));
   }
 
   function handleDividerDrag(e, idx) {
@@ -2211,8 +2218,15 @@ export default function Dashboard() {
 
         // ── puntuación ──
         // Sueño 25 | Actividad 32 (entreno 15 + pasos 8 + AE 5 + stand 2 + pisos 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 14 (VO2 6 + walkHR 4 + %grasa 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
-        let score = 0;
-        const breakdown = []; // [{label, pts, max, detail}]
+        //
+        // El desglose es la ÚNICA fuente de verdad: el total sale de sumarlo (ver
+        // scoreFromBreakdown en helpers). Antes se acumulaba en paralelo con `score +=`
+        // y era fácil sumar sin registrar la fila — pasaba con VO₂max y luz natural.
+        // Las métricas sin dato no cuentan ni arriba ni abajo de la fracción: no tener
+        // sensor de algo no debe penalizar.
+        const breakdown = []; // [{label, pts, max, detail, sinDatos}]
+        const add = (label, pts, max, detail, sinDatos = false) =>
+          breakdown.push({ label, pts, max, detail, sinDatos });
 
         // Sueño (25 pts)
         let sPts = 0;
@@ -2222,9 +2236,8 @@ export default function Dashboard() {
           else if (sleepVal >= 6.5) sPts = 15;
           else if (sleepVal >= 6)   sPts = 9;
           else                      sPts = 4;
-          score += sPts;
         }
-        breakdown.push({ label: "😴 Sueño", pts: sPts, max: 25, detail: sleepVal != null ? hoursToHM(sleepVal) : "sin datos" });
+        add("😴 Sueño", sPts, 25, sleepVal != null ? hoursToHM(sleepVal) : "sin datos", sleepVal == null);
 
         // Actividad: entreno/ejercicio (15 pts)
         let wPts = 0;
@@ -2242,8 +2255,7 @@ export default function Dashboard() {
           else if (scaledWork >= 2) wPts = 7;
           else if (scaledWork >= 1) wPts = 3;
         }
-        score += wPts;
-        breakdown.push({ label: "💪 Entreno", pts: wPts, max: 15, detail: isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.` });
+        add("💪 Entreno", wPts, 15, isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.`);
 
         // Actividad: pasos (8 pts)
         let stPts = 0;
@@ -2253,9 +2265,8 @@ export default function Dashboard() {
           else if (stepsVal >= 6000)  stPts = 4;
           else if (stepsVal >= 4000)  stPts = 2;
           else                        stPts = 1;
-          score += stPts;
         }
-        breakdown.push({ label: "🚶 Pasos", pts: stPts, max: 8, detail: stepsVal != null ? `${Math.round(stepsVal).toLocaleString("es")}` : "sin datos" });
+        add("🚶 Pasos", stPts, 8, stepsVal != null ? `${Math.round(stepsVal).toLocaleString("es")}` : "sin datos", stepsVal == null);
 
         // Actividad: energía activa (5 pts)
         let aePts = 0;
@@ -2264,27 +2275,24 @@ export default function Dashboard() {
           else if (aeVal >= 400) aePts = 4;
           else if (aeVal >= 250) aePts = 3;
           else if (aeVal >= 100) aePts = 1;
-          score += aePts;
         }
-        breakdown.push({ label: "🔥 Energía", pts: aePts, max: 5, detail: aeVal != null ? `${Math.round(aeVal)} kcal` : "sin datos" });
+        add("🔥 Energía", aePts, 5, aeVal != null ? `${Math.round(aeVal)} kcal` : "sin datos", aeVal == null);
 
         // Actividad: horas de pie (2 pts)
         let sdPts = 0;
         if (standVal != null) {
           if      (standVal >= 12) sdPts = 2;
           else if (standVal >= 8)  sdPts = 1;
-          score += sdPts;
         }
-        breakdown.push({ label: "🧍 De pie", pts: sdPts, max: 2, detail: standVal != null ? `${Math.round(standVal)}h` : "sin datos" });
+        add("🧍 De pie", sdPts, 2, standVal != null ? `${Math.round(standVal)}h` : "sin datos", standVal == null);
 
         // Actividad: pisos subidos (2 pts)
         let flPts = 0;
         if (flightsVal != null) {
           if      (flightsVal >= 10) flPts = 2;
           else if (flightsVal >= 5)  flPts = 1;
-          score += flPts;
         }
-        breakdown.push({ label: "🪜 Pisos", pts: flPts, max: 2, detail: flightsVal != null ? `${Math.round(flightsVal)} pisos` : "sin datos" });
+        add("🪜 Pisos", flPts, 2, flightsVal != null ? `${Math.round(flightsVal)} pisos` : "sin datos", flightsVal == null);
 
         // Recuperación: HRV (12 pts)
         let hrvPts = 0;
@@ -2293,8 +2301,7 @@ export default function Dashboard() {
           else if (hrvVal >= avgHrvPrev * 0.95) hrvPts = 8;
           else                                   hrvPts = 4;
         } else if (hrvVal != null) hrvPts = 6;
-        score += hrvPts;
-        breakdown.push({ label: "❤️ HRV", pts: hrvPts, max: 12, detail: hrvVal != null ? `${Math.round(hrvVal)}ms${avgHrvPrev != null ? ` (ref ${Math.round(avgHrvPrev)}ms)` : ""}` : "sin datos" });
+        add("❤️ HRV", hrvPts, 12, hrvVal != null ? `${Math.round(hrvVal)}ms${avgHrvPrev != null ? ` (ref ${Math.round(avgHrvPrev)}ms)` : ""}` : "sin datos", hrvVal == null);
 
         // Recuperación: FC reposo (8 pts)
         let rhrPts = 0;
@@ -2305,39 +2312,37 @@ export default function Dashboard() {
           else if (rhrVal <= 65) rhrPts = 4;
           else if (rhrVal <= 70) rhrPts = 3;
           else if (rhrVal <= 80) rhrPts = 1;
-          score += rhrPts;
         }
-        breakdown.push({ label: "🫀 FC reposo", pts: rhrPts, max: 8, detail: rhrVal != null ? `${Math.round(rhrVal)} lpm` : "sin datos" });
+        add("🫀 FC reposo", rhrPts, 8, rhrVal != null ? `${Math.round(rhrVal)} lpm` : "sin datos", rhrVal == null);
 
         // Recuperación: cardio recovery (5 pts — solo si hay dato)
-        let crPts = 0;
         if (avgCardioRec != null) {
+          let crPts = 0;
           if      (avgCardioRec >= 30) crPts = 5;
           else if (avgCardioRec >= 20) crPts = 4;
           else if (avgCardioRec >= 15) crPts = 3;
           else if (avgCardioRec >= 10) crPts = 1;
-          score += crPts;
+          add("💓 Recuperación cardio", crPts, 5, `${Math.round(avgCardioRec)} lpm/min`);
         }
-        if (avgCardioRec != null) breakdown.push({ label: "💓 Recuperación cardio", pts: crPts, max: 5, detail: `${Math.round(avgCardioRec)} lpm/min` });
 
         // Forma física (solo vista diaria): VO2 max (6 pts) + walking HR avg (4 pts)
-        let vo2Pts, whrPts = 0;
         if (isDaily) {
           if (lastVo2 != null) {
+            let vo2Pts;   // todas las ramas asignan, incluida la final
             if      (lastVo2 >= 50) vo2Pts = 6;
             else if (lastVo2 >= 45) vo2Pts = 5;
             else if (lastVo2 >= 40) vo2Pts = 4;
             else if (lastVo2 >= 35) vo2Pts = 3;
             else                    vo2Pts = 1;
-            score += vo2Pts;
+            add("🫁 VO₂max", vo2Pts, 6, `${lastVo2.toFixed(1)} ml/kg/min`);
           }
           if (walkHrVal != null) {
+            let whrPts = 0;
             if      (walkHrVal <= 70)  whrPts = 4;
             else if (walkHrVal <= 80)  whrPts = 3;
             else if (walkHrVal <= 90)  whrPts = 2;
             else if (walkHrVal <= 100) whrPts = 1;
-            score += whrPts;
-            breakdown.push({ label: "🏃 FC caminando", pts: whrPts, max: 4, detail: `${Math.round(walkHrVal)} lpm` });
+            add("🏃 FC caminando", whrPts, 4, `${Math.round(walkHrVal)} lpm`);
           }
           if (currentBodyFat != null) {
             let bfPts = 0;
@@ -2345,30 +2350,32 @@ export default function Dashboard() {
             else if (currentBodyFat < 18) bfPts = 3;
             else if (currentBodyFat < 25) bfPts = 2;
             else if (currentBodyFat < 30) bfPts = 1;
-            score += bfPts;
-            breakdown.push({ label: "⚖️ % Grasa", pts: bfPts, max: 4, detail: `${currentBodyFat.toFixed(1)}%` });
+            add("⚖️ % Grasa", bfPts, 4, `${currentBodyFat.toFixed(1)}%`);
           }
 
           // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
-          let dlPts = 0, respPts;
           if (daylightVal != null) {
+            let dlPts = 0;
             if      (daylightVal >= 60) dlPts = 5;
             else if (daylightVal >= 30) dlPts = 4;
             else if (daylightVal >= 15) dlPts = 2;
             else if (daylightVal >= 5)  dlPts = 1;
-            score += dlPts;
+            add("☀️ Luz natural", dlPts, 5, `${Math.round(daylightVal)} min`);
           }
           if (respVal != null) {
+            let respPts = 1;
             if      (respVal >= 12 && respVal <= 16) respPts = 5;
             else if (respVal > 16 && respVal <= 18)  respPts = 4;
             else if (respVal > 18 && respVal <= 20)  respPts = 3;
             else if (respVal < 12)                   respPts = 4;
-            else                                     respPts = 1;
-            score += respPts;
-            breakdown.push({ label: "🌬️ Resp.", pts: respPts, max: 5, detail: `${respVal.toFixed(1)} rpm` });
+            add("🌬️ Resp.", respPts, 5, `${respVal.toFixed(1)} rpm`);
           }
         }
 
+        // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,
+        // así que con umbrales fijos "Semana excelente" era casi inalcanzable y "Día
+        // excelente" bastante fácil. Sobre 100 las dos vistas significan lo mismo.
+        const { pts: scorePts, max: scoreMax, score } = scoreFromBreakdown(breakdown);
         const scoreLabel = isDaily
           ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
           : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
@@ -2385,11 +2392,13 @@ export default function Dashboard() {
           "❤️ HRV": "Mejorando tu recuperación (HRV)",
           "🫀 FC reposo": "Bajando tu FC en reposo",
           "💓 Recuperación cardio": "Mejorando tu recuperación cardio",
+          "🫁 VO₂max": "Subiendo tu VO₂max",
           "🏃 FC caminando": "Bajando tu FC al caminar",
           "⚖️ % Grasa": "Bajando tu % de grasa",
+          "☀️ Luz natural": "Saliendo más rato a la luz del día",
           "🌬️ Resp.": "Estabilizando tu frecuencia respiratoria",
         };
-        const improvable = breakdown.filter(b => b.pts < b.max && b.detail !== "sin datos");
+        const improvable = breakdown.filter(b => b.pts < b.max && !b.sinDatos);
         let potential = null;
         if (improvable.length > 0) {
           const top = improvable.reduce((a, b) => (b.max - b.pts) > (a.max - a.pts) ? b : a);
@@ -2523,7 +2532,7 @@ export default function Dashboard() {
                   onClick={e => { e.stopPropagation(); setScoreTooltip(v => !v); }}
                 >
                   <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: scoreColor, letterSpacing: "0.04em", cursor: "pointer", borderBottom: "1px dotted currentColor" }}>
-                    {score} — {scoreLabel}
+                    {score}/100 — {scoreLabel}
                   </span>
                   {scoreTooltip && (
                     <div style={{
@@ -2534,19 +2543,23 @@ export default function Dashboard() {
                       display: "flex", flexDirection: "column", gap: 5,
                     }}>
                       {breakdown.map((b, i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, opacity: b.sinDatos ? 0.45 : 1 }}>
                           <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{b.label}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
                             <span style={{ color: "var(--text-2)", fontSize: 11 }}>{b.detail}</span>
-                            <span style={{ fontFamily: "'DM Mono', monospace", color: b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
-                              {b.pts}/{b.max}
+                            {/* Sin dato no suma ni resta: se marca con — para que las filas visibles cuadren con el total */}
+                            <span style={{ fontFamily: "'DM Mono', monospace", color: b.sinDatos ? "var(--muted2)" : b.pts === b.max ? "var(--green)" : b.pts > 0 ? "var(--accent)" : "var(--muted)", minWidth: 36, textAlign: "right" }}>
+                              {b.sinDatos ? "—" : `${b.pts}/${b.max}`}
                             </span>
                           </span>
                         </div>
                       ))}
-                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+                      <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between", gap: 12 }}>
                         <span style={{ color: "var(--muted)" }}>Total</span>
-                        <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}</span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                          <span style={{ color: "var(--muted2)", fontSize: 11, fontFamily: "'DM Mono', monospace" }}>{scorePts}/{scoreMax}</span>
+                          <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}/100</span>
+                        </span>
                       </div>
                     </div>
                   )}

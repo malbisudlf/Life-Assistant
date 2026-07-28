@@ -4,7 +4,7 @@ import {
   urgencyColor, formatShortDate, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight,
-  healthConclusions, healthOverall,
+  healthConclusions, healthOverall, scoreFromBreakdown,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -300,5 +300,46 @@ describe("helpers de conteo de ropa", () => {
     expect(clothingTotals([{ price: 5 }, { price: "x", currency: "EUR" }])).toEqual({ EUR: 5 });
     expect(clothingTotals([])).toEqual({});
     expect(clothingTotals(null)).toEqual({});
+  });
+});
+
+// ── Puntuación de bienestar ─────────────────────────────────────
+describe("scoreFromBreakdown", () => {
+  test("el total sale de sumar el desglose, normalizado a 100", () => {
+    const b = [
+      { label: "Sueño", pts: 25, max: 25 },
+      { label: "Pasos", pts: 4,  max: 8 },
+      { label: "HRV",   pts: 6,  max: 12 },
+    ];
+    expect(scoreFromBreakdown(b)).toEqual({ pts: 35, max: 45, score: 78 });
+  });
+
+  test("las métricas sin dato no cuentan ni arriba ni abajo", () => {
+    // No tener sensor de pisos no debe penalizar la puntuación.
+    const conPisos = [
+      { label: "Sueño", pts: 25, max: 25 },
+      { label: "Pisos", pts: 0,  max: 2, sinDatos: true },
+    ];
+    expect(scoreFromBreakdown(conPisos)).toEqual({ pts: 25, max: 25, score: 100 });
+  });
+
+  test("semanal y diaria se comparan sobre la misma escala", () => {
+    // Antes: la semanal sumaba como mucho 82 y la diaria 106, pero ambas usaban el
+    // umbral fijo de 80 → "Semana excelente" exigía el 97% y "Día excelente" el 75%.
+    const semanal = [{ pts: 41, max: 82 }];
+    const diaria  = [{ pts: 53, max: 106 }];
+    expect(scoreFromBreakdown(semanal).score).toBe(50);
+    expect(scoreFromBreakdown(diaria).score).toBe(50);
+  });
+
+  test("desglose vacío o sin máximos devuelve score nulo", () => {
+    expect(scoreFromBreakdown([]).score).toBeNull();
+    expect(scoreFromBreakdown(null).score).toBeNull();
+    expect(scoreFromBreakdown([{ pts: 0, max: 0 }]).score).toBeNull();
+  });
+
+  test("ignora filas corruptas sin romper", () => {
+    const b = [{ pts: 5, max: 10 }, null, { pts: "x", max: 10 }];
+    expect(scoreFromBreakdown(b)).toEqual({ pts: 5, max: 20, score: 25 });
   });
 });
