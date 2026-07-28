@@ -53,10 +53,8 @@ backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~1500 líneas)
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics, oauth_tokens
-    ├── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
-    │                     apagado/suspensión del PC, que HA ejecuta por SSH), y
-    │                     dispara /ha/push-eventos cada minuto
-    └── Web Push ── avisos con la app cerrada (VAPID + pywebpush)
+    └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
+                          apagado/suspensión del PC, que HA ejecuta por SSH)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
@@ -108,12 +106,8 @@ Ficheros clave:
   reutiliza conexiones. Sin timeout, una llamada colgada retiene un hilo del pool de
   FastAPI para siempre. Los tests mockean `main.http`, no `main.requests`.
 - **Dependencias opcionales**: lo que la documentación llame opcional no puede
-  impedir arrancar. El cliente de OpenAI y `pywebpush` se crean/importan de forma
-  perezosa y devuelven 503 si falta la configuración, nunca revientan el import.
-- **Notificaciones push**: claves VAPID por env (`generar_vapid.py` las genera). El
-  envío lo dispara HA llamando a `/ha/push-eventos` cada minuto, porque Fly escala a
-  cero y no hay proceso vivo que mire el reloj. El dedupe de avisos ya enviados vive
-  en la tabla `push_enviados` — en memoria se perdería en cada arranque en frío.
+  impedir arrancar. El cliente de OpenAI se crea de forma perezosa y devuelve 503
+  si falta la configuración, nunca revienta el import.
 - **Zonas horarias**: Microsoft Graph devuelve fechas con nombres de zona de Windows
   ("Romance Standard Time"). `normalize_graph_dt()` + `WINDOWS_TZ_MAP` las convierten
   SIEMPRE a ISO UTC con sufijo `Z`. La zona del usuario es `TIMEZONE`/`LOCAL_TZ`
