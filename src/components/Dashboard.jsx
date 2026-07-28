@@ -13,6 +13,8 @@ const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
                (import.meta.env.VITE_HA_DASHBOARD_PATH || "/lovelace/tablet");
 // Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas
 const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
+// Identificador del agente PC, el mismo que manda el heartbeat desde agent/agent.py
+const AGENT_ID = import.meta.env.VITE_AGENT_ID || "pc-mikel";
 
 // Ritmo del seguimiento de un job del agente PC.
 const JOB_POLL_ACTIVO_MS = 2_000;    // modal delante: la barra de progreso va en vivo
@@ -155,23 +157,32 @@ function SleepStageTooltip({ label, color, tip, children }) {
   );
 }
 
-function Sparkline({ data, color = "var(--accent)", height = 40 }) {
+// `objetivo` dibuja una línea discontinua de referencia (p. ej. el peso al que
+// quieres llegar) y entra en el rango vertical para que nunca quede fuera del
+// gráfico. `relleno` añade un área bajo la curva, útil cuando la serie es el
+// contenido principal del bloque y no un adorno al lado de una cifra.
+function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null, relleno = false }) {
   const pts = data.filter(d => d.value != null);
   if (pts.length < 2) return (
     <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <span style={{ fontSize: 11, color: "var(--muted2)" }}>—</span>
     </div>
   );
-  const vals = pts.map(d => d.value);
-  const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
+  const vals = pts.map(d => Number(d.value));
+  const todos = objetivo != null ? [...vals, Number(objetivo)] : vals;
+  const min = Math.min(...todos), max = Math.max(...todos), range = max - min || 1;
   const W = 200, H = height;
-  const points = pts.map((d, i) => {
-    const x = (i / (pts.length - 1)) * (W - 4) + 2;
-    const y = H - 4 - ((d.value - min) / range) * (H - 8);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+  const px = i => (i / (pts.length - 1)) * (W - 4) + 2;
+  const py = v => H - 4 - ((v - min) / range) * (H - 8);
+  const points = pts.map((d, i) => `${px(i).toFixed(1)},${py(Number(d.value)).toFixed(1)}`).join(" ");
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={height} preserveAspectRatio="none" style={{ display: "block" }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={height} preserveAspectRatio="none"
+      style={{ display: "block" }} role="img" aria-hidden="true">
+      {relleno && <polygon points={`2,${H} ${points} ${(W - 2).toFixed(1)},${H}`} fill={color} opacity="0.12" />}
+      {objetivo != null && (
+        <line x1="0" y1={py(Number(objetivo))} x2={W} y2={py(Number(objetivo))}
+          stroke="var(--green)" strokeWidth="1" strokeDasharray="3 3" opacity="0.75" />
+      )}
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -501,6 +512,8 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
+  const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
+  const [sysLoading, setSysLoading]       = useState(false);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
@@ -811,7 +824,7 @@ export default function Dashboard() {
     let mounted = true;
     async function loadAgent() {
       try {
-        const r = await apiFetch(`${API}/agents/pc-mikel`, { headers: { "Authorization": `Bearer ${token}` } });
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${token}` } });
         const data = await r.json();
         if (mounted) setAgentState(data);
       } catch {
@@ -1267,6 +1280,36 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
       if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
     } catch { /* mejor esfuerzo: ignorar */ }
+  }
+
+  // ── Estado del sistema ───────────────────────────────────────────────────
+  // Las señales de si algo va mal ya existían, pero repartidas: si el backend
+  // responde, si la sesión de Outlook sigue viva, cuándo sincronizó el Watch, si el
+  // agente contesta. Juntarlas evita tener que abrir logs para saber qué se ha caído.
+  // Se refresca al abrir ajustes y con el botón, nunca en bucle.
+  async function cargarEstadoSistema() {
+    if (sysLoading) return;
+    setSysLoading(true);
+    const t  = localStorage.getItem("la_token") || "";
+    const t0 = (typeof performance !== "undefined" ? performance : Date).now();
+
+    // El backend escala a cero: la primera petición tras un rato mide el arranque en frío.
+    let backend = { ok: false, ms: null };
+    try {
+      const r = await fetch(`${API}/`);
+      backend = { ok: r.ok, ms: Math.round(((typeof performance !== "undefined" ? performance : Date).now()) - t0) };
+    } catch { /* sin red o backend caído: ok=false */ }
+
+    let agente = null;
+    if (backend.ok) {
+      try {
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${t}` } });
+        if (r.ok) agente = await r.json();
+      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+    }
+
+    setSysStatus({ backend, agente, comprobado: Date.now() });
+    setSysLoading(false);
   }
 
   async function loadTraining() {
@@ -2531,6 +2574,33 @@ export default function Dashboard() {
                         );
                       })()}
                     </div>
+                    {/* Serie de peso con la línea del objetivo: el número de hoy no dice
+                        si vas hacia él o te alejas; la curva sí. */}
+                    {wWeightRaw.length >= 3 && (() => {
+                      const serie   = wWeightRaw.slice(-30);
+                      const primera = serie[0];
+                      const ultima  = serie[serie.length - 1];
+                      return (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                              Peso · {serie.length} registros
+                            </span>
+                            {targetWeight && (
+                              <span style={{ fontSize: 10, color: "var(--green)", fontFamily: "'DM Mono', monospace" }}>
+                                — — objetivo {targetWeight} kg
+                              </span>
+                            )}
+                          </div>
+                          <Sparkline data={serie} color="var(--accent)" height={46}
+                            objetivo={targetWeight || null} relleno />
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", marginTop: 3 }}>
+                            <span>{formatShortDate(primera.date)}</span>
+                            <span>{formatShortDate(ultima.date)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {/* Barra de progreso hacia objetivo de peso */}
                     {weightToGoal != null && currentWeight != null && (() => {
                       const startWeight = Math.max(currentWeight, targetWeight + 5);
@@ -3241,6 +3311,7 @@ export default function Dashboard() {
                 setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
                 setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
                 setShowSettings(true);
+                cargarEstadoSistema();
               }} style={{
                 background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
                 borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
@@ -4064,6 +4135,83 @@ export default function Dashboard() {
                   {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
                 </span>
               </div>
+            </div>
+
+            {/* ── Estado del sistema ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Estado del sistema</div>
+                <button onClick={cargarEstadoSistema} disabled={sysLoading} style={{
+                  background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6,
+                  color: "var(--muted)", fontSize: 11, cursor: sysLoading ? "default" : "pointer",
+                  padding: "3px 8px", fontFamily: "'DM Sans', sans-serif",
+                }}>{sysLoading ? "Comprobando…" : "Actualizar"}</button>
+              </div>
+              {(() => {
+                // tono: green | accent | red | muted. El texto dice siempre qué pasa,
+                // para no depender solo del color.
+                const filas = [];
+
+                const b = sysStatus?.backend;
+                filas.push({
+                  nombre: "Backend",
+                  tono: !sysStatus ? "muted" : b?.ok ? (b.ms > 3000 ? "accent" : "green") : "red",
+                  detalle: !sysStatus ? "sin comprobar"
+                    : !b?.ok ? "no responde"
+                    : b.ms > 3000 ? `despierto tras ${(b.ms / 1000).toFixed(1)}s (arranque en frío)`
+                    : `despierto · ${b.ms} ms`,
+                });
+
+                filas.push({
+                  nombre: "Outlook",
+                  tono: authNeeded ? "red" : allEvents.length ? "green" : "accent",
+                  detalle: authNeeded ? "sesión caducada — vuelve a conectar"
+                    : `${allEvents.length} eventos cargados`,
+                });
+
+                const minutos = healthLastSync ? Math.floor((Date.now() - new Date(healthLastSync)) / 60000) : null;
+                filas.push({
+                  nombre: "Salud (Watch)",
+                  tono: minutos == null ? "muted" : minutos < 120 ? "green" : minutos < 1440 ? "accent" : "red",
+                  detalle: minutos == null ? "sin datos aún"
+                    : minutos < 2 ? "sincronizado ahora mismo"
+                    : minutos < 60 ? `última sync hace ${minutos} min`
+                    : minutos < 1440 ? `última sync hace ${Math.floor(minutos / 60)} h`
+                    : `última sync hace ${Math.floor(minutos / 1440)} días`,
+                });
+
+                const ag = sysStatus?.agente;
+                filas.push({
+                  nombre: "Agente PC",
+                  tono: !sysStatus ? "muted" : !ag ? "muted" : ag.offline === false ? "green" : "muted",
+                  detalle: !sysStatus ? "sin comprobar"
+                    : !ag ? "sin respuesta"
+                    : ag.exists === false ? "nunca se ha registrado"
+                    : ag.offline === false ? `online${ag.hostname ? ` · ${ag.hostname}` : ""}`
+                    : `apagado (visto hace ${Math.floor((ag.silence_seconds ?? 0) / 60)} min)`,
+                });
+
+                filas.push({
+                  nombre: "Entrenamiento",
+                  tono: training?.client ? "green" : "muted",
+                  detalle: training?.client
+                    ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
+                    : "sin cliente configurado",
+                });
+
+                const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {filas.map(f => (
+                      <div key={f.nombre} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: color[f.tono], flexShrink: 0, alignSelf: "center" }} />
+                        <span style={{ fontSize: 12, color: "var(--text)", minWidth: 96 }}>{f.nombre}</span>
+                        <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{f.detalle}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* ── Datos ── */}
