@@ -246,6 +246,26 @@ def _token_ok(provided: str, expected: str) -> bool:
     return hmac.compare_digest(provided, expected)
 
 
+def _graph_fallo(r, contexto: str) -> dict | None:
+    """Devuelve un error para el cliente si la respuesta de Graph no vino bien.
+
+    Sin esta comprobación, un 401 o un 500 de Graph caían en `data.get("value", [])`
+    y salían como lista vacía: el dashboard pintaba "Sin eventos hoy" como si el día
+    estuviera libre. Un fallo de autenticación no puede parecerse a una agenda vacía.
+    """
+    if r.status_code < 300:
+        try:
+            r.json()
+        except ValueError:
+            logger.error("Graph %s: respuesta no-JSON (%s)", contexto, r.status_code)
+            return {"error": "Respuesta inesperada de Outlook"}
+        return None
+    logger.error("Graph %s %s: %s", contexto, r.status_code, (r.text or "")[:500])
+    if r.status_code in (401, 403):
+        return {"error": "Sesión de Outlook caducada. Vuelve a conectar en /auth/login"}
+    return {"error": "No se pudo consultar el calendario de Outlook"}
+
+
 def _supabase_error(r) -> HTTPException:
     """Loguea el detalle real de Supabase en el servidor y devuelve un error genérico al cliente."""
     logger.error("Error de almacenamiento (%s): %s", r.status_code, (r.text or "")[:500])
@@ -439,6 +459,9 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
         headers=headers
     )
     response.encoding = "utf-8"
+    fallo = _graph_fallo(response, "calendarView")
+    if fallo:
+        return fallo
     data = response.json()
     
     events = []
@@ -470,8 +493,10 @@ def list_calendars(credentials: HTTPAuthorizationCredentials = Depends(verify_to
         return {"error": "No autenticado"}
     headers = {"Authorization": f"Bearer {token}"}
     r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
-    data = r.json()
-    return [{"id": c["id"], "name": c["name"]} for c in data.get("value", [])]
+    fallo = _graph_fallo(r, "me/calendars")
+    if fallo:
+        return fallo
+    return [{"id": c["id"], "name": c["name"]} for c in r.json().get("value", [])]
 
 
 class CreateEventRequest(BaseModel):
@@ -566,6 +591,9 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     headers = {"Authorization": f"Bearer {token}"}
     # Buscar el calendario llamado 'Clases'
     r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    fallo = _graph_fallo(r, "me/calendars (clases)")
+    if fallo:
+        return fallo
     calendars = r.json().get("value", [])
     cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
     if not cal:
@@ -582,6 +610,9 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
         headers=headers
     )
     r2.encoding = "utf-8"
+    fallo = _graph_fallo(r2, "calendarView (clases)")
+    if fallo:
+        return fallo
     data2 = r2.json()
 
     events = []
@@ -1401,6 +1432,14 @@ def delete_training_session(
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
 
+# Métricas que se acumulan a lo largo del día: llegan snapshots parciales, así que un
+# valor nuevo solo pisa al guardado si es MAYOR. Constantes de módulo y compartidas por
+# las dos rutas de ingesta — cuando cada una tenía su propia copia, a la del Shortcut le
+# faltaba resting_energy y un snapshot de mediodía podía pisar el total del día.
+CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
+# Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
+ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
+
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
     diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
@@ -1464,9 +1503,7 @@ async def health_ingest(request: Request, token: str = ""):
             if r.status_code < 300:
                 upserted += 1
 
-    # ── Métricas normales ──
-    # Métricas acumulativas: solo guardar si el nuevo valor es mayor que el almacenado
-    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
+    # ── Métricas normales (CUMULATIVE_METRICS/ENERGY_METRICS son de módulo) ──
 
     # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
     grouped_metrics: dict = {}
@@ -1499,7 +1536,6 @@ async def health_ingest(request: Request, token: str = ""):
             value = float(raw_value) if raw_value is not None else None
 
             # Normalizar energía de kJ a kcal
-            ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
             if name in ENERGY_METRICS and unit == "kJ" and value is not None:
                 value = round(value / 4.184, 2)
                 unit = "kcal"
@@ -1658,7 +1694,6 @@ async def health_ingest_simple(request: Request, token: str = ""):
             parse_errors.append({"item": str(item)[:200], "error": str(e)})
             continue
 
-    CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy"}
     upserted = 0
     skipped = []
     errors = []
@@ -1725,7 +1760,10 @@ async def health_ingest_simple(request: Request, token: str = ""):
         if r.status_code < 300:
             upserted += 1
         else:
-            errors.append(f"{s.metric}: HTTP {r.status_code} {r.text[:100]}")
+            # El detalle real va al log del servidor; al cliente solo el código.
+            # Reenviar r.text filtraba mensajes internos de Supabase (invariante 5).
+            logger.error("Ingesta de salud %s (%s): %s", s.metric, r.status_code, (r.text or "")[:500])
+            errors.append(f"{s.metric}: HTTP {r.status_code}")
 
     return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
 
