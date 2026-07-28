@@ -3,7 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
-  healthConclusions, healthOverall, scoreFromBreakdown,
+  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -2245,160 +2245,28 @@ export default function Dashboard() {
         const workVal     = isDaily ? todayWorkoutCount : weekWorkoutCount;
 
         // ── puntuación ──
-        // Sueño 25 | Actividad 32 (entreno 15 + pasos 8 + AE 5 + stand 2 + pisos 2) | Recuperación 25 (HRV 12 + RHR 8 + cardio 5) | Forma 14 (VO2 6 + walkHR 4 + %grasa 4, solo diario) | Estilo de vida 10 (luz 5 + resp 5, solo diario)
-        //
-        // El desglose es la ÚNICA fuente de verdad: el total sale de sumarlo (ver
-        // scoreFromBreakdown en helpers). Antes se acumulaba en paralelo con `score +=`
-        // y era fácil sumar sin registrar la fila — pasaba con VO₂max y luz natural.
-        // Las métricas sin dato no cuentan ni arriba ni abajo de la fracción: no tener
-        // sensor de algo no debe penalizar.
-        const breakdown = []; // [{label, pts, max, detail, sinDatos}]
-        const add = (label, pts, max, detail, sinDatos = false) =>
-          breakdown.push({ label, pts, max, detail, sinDatos });
-
-        // Sueño (25 pts)
-        let sPts = 0;
-        if (sleepVal != null) {
-          if      (sleepVal >= 7.5) sPts = 25;
-          else if (sleepVal >= 7)   sPts = 21;
-          else if (sleepVal >= 6.5) sPts = 15;
-          else if (sleepVal >= 6)   sPts = 9;
-          else                      sPts = 4;
-        }
-        add("😴 Sueño", sPts, 25, sleepVal != null ? hoursToHM(sleepVal) : "sin datos", sleepVal == null);
-
-        // Actividad: entreno/ejercicio (15 pts)
-        let wPts = 0;
-        if (isDaily) {
-          if      (workVal >= 1)                                 wPts = 15;
-          else if (exerciseVal != null && exerciseVal >= 30)     wPts = 9;
-          else if (exerciseVal != null && exerciseVal >= 15)     wPts = 5;
-          else if (todayHrv != null && todayHrv >= 70)           wPts = 3;
-          else if (todayHrv != null && todayHrv >= 50)           wPts = 2;
-          else                                                   wPts = 1;
-        } else {
-          const scaledWork = expectedByNow > 0 ? Math.min(4, (workVal / expectedByNow) * 4) : workVal;
-          if      (scaledWork >= 4) wPts = 15;
-          else if (scaledWork >= 3) wPts = 11;
-          else if (scaledWork >= 2) wPts = 7;
-          else if (scaledWork >= 1) wPts = 3;
-        }
-        add("💪 Entreno", wPts, 15, isDaily ? (workVal >= 1 ? `${workVal} entreno` : exerciseVal != null ? `${Math.round(exerciseVal)}min ejercicio` : "descanso") : `${workVal}/4 ses.`);
-
-        // Actividad: pasos (8 pts)
-        let stPts = 0;
-        if (stepsVal != null) {
-          if      (stepsVal >= 10000) stPts = 8;
-          else if (stepsVal >= 8000)  stPts = 6;
-          else if (stepsVal >= 6000)  stPts = 4;
-          else if (stepsVal >= 4000)  stPts = 2;
-          else                        stPts = 1;
-        }
-        add("🚶 Pasos", stPts, 8, stepsVal != null ? `${Math.round(stepsVal).toLocaleString("es")}` : "sin datos", stepsVal == null);
-
-        // Actividad: energía activa (5 pts)
-        let aePts = 0;
-        if (aeVal != null) {
-          if      (aeVal >= 600) aePts = 5;
-          else if (aeVal >= 400) aePts = 4;
-          else if (aeVal >= 250) aePts = 3;
-          else if (aeVal >= 100) aePts = 1;
-        }
-        add("🔥 Energía", aePts, 5, aeVal != null ? `${Math.round(aeVal)} kcal` : "sin datos", aeVal == null);
-
-        // Actividad: horas de pie (2 pts)
-        let sdPts = 0;
-        if (standVal != null) {
-          if      (standVal >= 12) sdPts = 2;
-          else if (standVal >= 8)  sdPts = 1;
-        }
-        add("🧍 De pie", sdPts, 2, standVal != null ? `${Math.round(standVal)}h` : "sin datos", standVal == null);
-
-        // Actividad: pisos subidos (2 pts)
-        let flPts = 0;
-        if (flightsVal != null) {
-          if      (flightsVal >= 10) flPts = 2;
-          else if (flightsVal >= 5)  flPts = 1;
-        }
-        add("🪜 Pisos", flPts, 2, flightsVal != null ? `${Math.round(flightsVal)} pisos` : "sin datos", flightsVal == null);
-
-        // Recuperación: HRV (12 pts)
-        let hrvPts = 0;
-        if (hrvVal != null && avgHrvPrev != null) {
-          if      (hrvVal >= avgHrvPrev * 1.05) hrvPts = 12;
-          else if (hrvVal >= avgHrvPrev * 0.95) hrvPts = 8;
-          else                                   hrvPts = 4;
-        } else if (hrvVal != null) hrvPts = 6;
-        add("❤️ HRV", hrvPts, 12, hrvVal != null ? `${Math.round(hrvVal)}ms${avgHrvPrev != null ? ` (ref ${Math.round(avgHrvPrev)}ms)` : ""}` : "sin datos", hrvVal == null);
-
-        // Recuperación: FC reposo (8 pts)
-        let rhrPts = 0;
-        if (rhrVal != null) {
-          if      (rhrVal <= 50) rhrPts = 8;
-          else if (rhrVal <= 55) rhrPts = 7;
-          else if (rhrVal <= 60) rhrPts = 6;
-          else if (rhrVal <= 65) rhrPts = 4;
-          else if (rhrVal <= 70) rhrPts = 3;
-          else if (rhrVal <= 80) rhrPts = 1;
-        }
-        add("🫀 FC reposo", rhrPts, 8, rhrVal != null ? `${Math.round(rhrVal)} lpm` : "sin datos", rhrVal == null);
-
-        // Recuperación: cardio recovery (5 pts — solo si hay dato)
-        if (avgCardioRec != null) {
-          let crPts = 0;
-          if      (avgCardioRec >= 30) crPts = 5;
-          else if (avgCardioRec >= 20) crPts = 4;
-          else if (avgCardioRec >= 15) crPts = 3;
-          else if (avgCardioRec >= 10) crPts = 1;
-          add("💓 Recuperación cardio", crPts, 5, `${Math.round(avgCardioRec)} lpm/min`);
-        }
-
-        // Forma física (solo vista diaria): VO2 max (6 pts) + walking HR avg (4 pts)
-        if (isDaily) {
-          if (lastVo2 != null) {
-            let vo2Pts;   // todas las ramas asignan, incluida la final
-            if      (lastVo2 >= 50) vo2Pts = 6;
-            else if (lastVo2 >= 45) vo2Pts = 5;
-            else if (lastVo2 >= 40) vo2Pts = 4;
-            else if (lastVo2 >= 35) vo2Pts = 3;
-            else                    vo2Pts = 1;
-            add("🫁 VO₂max", vo2Pts, 6, `${lastVo2.toFixed(1)} ml/kg/min`);
-          }
-          if (walkHrVal != null) {
-            let whrPts = 0;
-            if      (walkHrVal <= 70)  whrPts = 4;
-            else if (walkHrVal <= 80)  whrPts = 3;
-            else if (walkHrVal <= 90)  whrPts = 2;
-            else if (walkHrVal <= 100) whrPts = 1;
-            add("🏃 FC caminando", whrPts, 4, `${Math.round(walkHrVal)} lpm`);
-          }
-          if (currentBodyFat != null) {
-            let bfPts = 0;
-            if      (currentBodyFat < 12) bfPts = 4;
-            else if (currentBodyFat < 18) bfPts = 3;
-            else if (currentBodyFat < 25) bfPts = 2;
-            else if (currentBodyFat < 30) bfPts = 1;
-            add("⚖️ % Grasa", bfPts, 4, `${currentBodyFat.toFixed(1)}%`);
-          }
-
-          // Estilo de vida (solo vista diaria): luz natural (5 pts) + resp rate (5 pts)
-          if (daylightVal != null) {
-            let dlPts = 0;
-            if      (daylightVal >= 60) dlPts = 5;
-            else if (daylightVal >= 30) dlPts = 4;
-            else if (daylightVal >= 15) dlPts = 2;
-            else if (daylightVal >= 5)  dlPts = 1;
-            add("☀️ Luz natural", dlPts, 5, `${Math.round(daylightVal)} min`);
-          }
-          if (respVal != null) {
-            let respPts = 1;
-            if      (respVal >= 12 && respVal <= 16) respPts = 5;
-            else if (respVal > 16 && respVal <= 18)  respPts = 4;
-            else if (respVal > 18 && respVal <= 20)  respPts = 3;
-            else if (respVal < 12)                   respPts = 4;
-            add("🌬️ Resp.", respPts, 5, `${respVal.toFixed(1)} rpm`);
-          }
-        }
+        // Todos los umbrales viven en wellnessBreakdown (helpers), fuera del render.
+        // El desglose es la única fuente de verdad y el total sale de sumarlo, así que
+        // no se puede volver a sumar un componente sin que aparezca en el detalle.
+        const breakdown = wellnessBreakdown({
+          isDaily, expectedByNow,
+          sleep:        sleepVal,
+          work:         workVal,
+          exercise:     exerciseVal,
+          steps:        stepsVal,
+          activeEnergy: aeVal,
+          stand:        standVal,
+          flights:      flightsVal,
+          hrv:          hrvVal,
+          hrvPrev:      avgHrvPrev,
+          rhr:          rhrVal,
+          cardioRec:    avgCardioRec,
+          vo2:          lastVo2,
+          walkHr:       walkHrVal,
+          bodyFat:      currentBodyFat,
+          daylight:     daylightVal,
+          resp:         respVal,
+        });
 
         // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,
         // así que con umbrales fijos "Semana excelente" era casi inalcanzable y "Día

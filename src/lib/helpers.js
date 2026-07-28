@@ -197,6 +197,68 @@ export function bedtimeHrvInsight(sleepData, hrvData, cutoffHour = 1) {
   return { avgEarly, avgLate, deltaPct, earlyN: early.length, lateN: late.length };
 }
 
+// ── Correlaciones entre series ───────────────────────────────────
+// bedtimeHrvInsight demostró el patrón que más valor da de estos datos: cruzar dos
+// series y contar algo que ninguna dice por separado. Esto lo generaliza para poder
+// añadir cruces nuevos sin repetir la fontanería.
+
+// Suma días a una fecha ISO "YYYY-MM-DD". Se trabaja a mediodía UTC para que el
+// cambio de hora no desplace el día.
+function _sumarDias(iso, n) {
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Empareja dos series por fecha. `desfase` desplaza la serie `b`: con 1, el valor de
+// `a` del día D se cruza con el de `b` del día D+1 — que es lo que hace falta para
+// preguntas del tipo "lo que hago hoy, ¿cómo me afecta mañana?".
+export function pairByDate(a, b, desfase = 0) {
+  const porFecha = {};
+  for (const d of b || []) {
+    if (d && d.date != null && d.value != null) porFecha[d.date] = Number(d.value);
+  }
+  const out = [];
+  for (const d of a || []) {
+    if (!d || d.date == null || d.value == null) continue;
+    const fechaB = desfase ? _sumarDias(d.date, desfase) : d.date;
+    const y = fechaB == null ? undefined : porFecha[fechaB];
+    if (y == null || isNaN(y)) continue;
+    const x = Number(d.value);
+    if (isNaN(x)) continue;
+    out.push({ date: d.date, x, y });
+  }
+  return out;
+}
+
+// Parte los pares en dos grupos según `x` y compara la media de `y` entre ellos.
+// Sin `umbral` corta por la mediana (útil para métricas continuas como los pasos);
+// con `umbral` corta ahí (p. ej. 0 para separar "entrené" de "no entrené").
+// Devuelve null si algún grupo no llega a `minPorGrupo` — con menos muestras la
+// comparación es ruido, no señal.
+export function splitCompare(pares, { umbral = null, minPorGrupo = 3 } = {}) {
+  const limpios = (pares || []).filter(p => p && !isNaN(p.x) && !isNaN(p.y));
+  if (limpios.length < minPorGrupo * 2) return null;
+  let corte = umbral;
+  if (corte == null) {
+    const xs = limpios.map(p => p.x).sort((m, n) => m - n);
+    const mid = Math.floor(xs.length / 2);
+    corte = xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+  }
+  const alto = limpios.filter(p => p.x > corte).map(p => p.y);
+  const bajo = limpios.filter(p => p.x <= corte).map(p => p.y);
+  if (alto.length < minPorGrupo || bajo.length < minPorGrupo) return null;
+  const media = a => a.reduce((s, v) => s + v, 0) / a.length;
+  const altoAvg = media(alto);
+  const bajoAvg = media(bajo);
+  return {
+    corte, altoAvg, bajoAvg,
+    altoN: alto.length, bajoN: bajo.length,
+    deltaPct: bajoAvg ? ((altoAvg - bajoAvg) / bajoAvg) * 100 : 0,
+  };
+}
+
 // ── Análisis de salud: conclusiones en lenguaje claro ───────────
 // Motor puro que exprime TODAS las métricas del Apple Watch y devuelve
 // conclusiones accionables (no solo números). Cada una lleva dominio, tono
@@ -320,6 +382,32 @@ export function healthConclusions(healthData, now = new Date()) {
     push("Patrón", "info", `Las noches que te acuestas antes de la 01:00 tu HRV es un ${insight.deltaPct > 0 ? "+" : ""}${round(insight.deltaPct)}% ${insight.deltaPct > 0 ? "más alta" : "más baja"} (${insight.earlyN} vs ${insight.lateN} noches).`);
   }
 
+  // ── Patrón: pasos del día ↔ sueño de esa noche ──
+  // Desfase 1: el sueño de la noche del día D queda registrado en la fecha D+1.
+  const pasosSueno = splitCompare(pairByDate(steps, sleep, 1));
+  if (pasosSueno && Math.abs(pasosSueno.deltaPct) >= 5) {
+    const mas = pasosSueno.deltaPct > 0;
+    push("Patrón", mas ? "good" : "info",
+      `Los días que superas los ${round(pasosSueno.corte).toLocaleString("es")} pasos duermes ${hoursToHM(pasosSueno.altoAvg)} frente a ${hoursToHM(pasosSueno.bajoAvg)} — un ${Math.abs(round(pasosSueno.deltaPct))}% ${mas ? "más" : "menos"} (${pasosSueno.altoN} vs ${pasosSueno.bajoN} días).`);
+  }
+
+  // ── Patrón: entrenar ↔ FC en reposo del día siguiente ──
+  // Umbral 0: separa los días con entreno de los de descanso.
+  const entrenoRhr = splitCompare(pairByDate(work, rhr, 1), { umbral: 0 });
+  if (entrenoRhr && Math.abs(entrenoRhr.deltaPct) >= 3) {
+    const sube = entrenoRhr.deltaPct > 0;
+    push("Patrón", sube ? "info" : "good",
+      `El día después de entrenar tu FC en reposo ${sube ? "sube" : "baja"} a ${round(entrenoRhr.altoAvg)} bpm frente a ${round(entrenoRhr.bajoAvg)} los días de descanso${sube ? " — es el coste normal del esfuerzo, salvo que se mantenga días" : " — señal de que estás asimilando bien la carga"}.`);
+  }
+
+  // ── Patrón: luz natural ↔ sueño de esa noche ──
+  const luz = findMetric(healthData, "time_in_daylight").filter(d => d.value > 0);
+  const luzSueno = splitCompare(pairByDate(luz, sleep, 1));
+  if (luzSueno && luzSueno.deltaPct >= 5) {
+    push("Patrón", "good",
+      `Los días que pasas más de ${round(luzSueno.corte)} min al aire libre duermes ${hoursToHM(luzSueno.altoAvg)} frente a ${hoursToHM(luzSueno.bajoAvg)} — la luz de día ordena el ritmo circadiano.`);
+  }
+
   C.sort((a, b) => _TONE_ORDER[a.tone] - _TONE_ORDER[b.tone]);
   return C;
 }
@@ -343,6 +431,176 @@ export function healthOverall(conclusions) {
 // Además normaliza a 100: la vista semanal y la diaria no puntúan sobre el mismo máximo
 // (la diaria añade VO₂max, FC caminando, % grasa, luz y respiración), y usar los mismos
 // umbrales para ambas hacía que "Semana excelente" exigiera el 97% y "Día excelente" el 75%.
+// Construye el desglose de la puntuación de bienestar a partir de los valores ya
+// resueltos según la vista (diaria o semanal). Es lógica pura — todos los umbrales
+// viven aquí, fuera del render, para poder testearlos.
+//
+// Máximos: sueño 25 · entreno 15 · pasos 8 · energía 5 · de pie 2 · pisos 2 ·
+// HRV 12 · FC reposo 8 · recuperación cardio 5 · y, solo en la vista diaria,
+// VO₂max 6 · FC caminando 4 · % grasa 4 · luz natural 5 · respiración 5.
+// El total se saca con scoreFromBreakdown, que normaliza a 100.
+export function wellnessBreakdown({
+  isDaily = false, expectedByNow = 0,
+  sleep = null, work = 0, exercise = null, steps = null, activeEnergy = null,
+  stand = null, flights = null, hrv = null, hrvPrev = null, rhr = null,
+  cardioRec = null, vo2 = null, walkHr = null, bodyFat = null,
+  daylight = null, resp = null,
+} = {}) {
+  const b = [];
+  const add = (label, pts, max, detail, sinDatos = false) => b.push({ label, pts, max, detail, sinDatos });
+
+  // Sueño (25)
+  let sPts = 0;
+  if (sleep != null) {
+    if      (sleep >= 7.5) sPts = 25;
+    else if (sleep >= 7)   sPts = 21;
+    else if (sleep >= 6.5) sPts = 15;
+    else if (sleep >= 6)   sPts = 9;
+    else                   sPts = 4;
+  }
+  add("😴 Sueño", sPts, 25, sleep != null ? hoursToHM(sleep) : "sin datos", sleep == null);
+
+  // Entreno / ejercicio (15). En semanal se escala por los días de entreno que ya
+  // han pasado, para no puntuar como fallado un objetivo que aún no toca cumplir.
+  let wPts = 0;
+  if (isDaily) {
+    if      (work >= 1)                         wPts = 15;
+    else if (exercise != null && exercise >= 30) wPts = 9;
+    else if (exercise != null && exercise >= 15) wPts = 5;
+    else if (hrv != null && hrv >= 70)          wPts = 3;
+    else if (hrv != null && hrv >= 50)          wPts = 2;
+    else                                        wPts = 1;
+  } else {
+    const escalado = expectedByNow > 0 ? Math.min(4, (work / expectedByNow) * 4) : work;
+    if      (escalado >= 4) wPts = 15;
+    else if (escalado >= 3) wPts = 11;
+    else if (escalado >= 2) wPts = 7;
+    else if (escalado >= 1) wPts = 3;
+  }
+  add("💪 Entreno", wPts, 15,
+    isDaily
+      ? (work >= 1 ? `${work} entreno` : exercise != null ? `${Math.round(exercise)}min ejercicio` : "descanso")
+      : `${work}/4 ses.`);
+
+  // Pasos (8)
+  let stPts = 0;
+  if (steps != null) {
+    if      (steps >= 10000) stPts = 8;
+    else if (steps >= 8000)  stPts = 6;
+    else if (steps >= 6000)  stPts = 4;
+    else if (steps >= 4000)  stPts = 2;
+    else                     stPts = 1;
+  }
+  add("🚶 Pasos", stPts, 8, steps != null ? `${Math.round(steps).toLocaleString("es")}` : "sin datos", steps == null);
+
+  // Energía activa (5)
+  let aePts = 0;
+  if (activeEnergy != null) {
+    if      (activeEnergy >= 600) aePts = 5;
+    else if (activeEnergy >= 400) aePts = 4;
+    else if (activeEnergy >= 250) aePts = 3;
+    else if (activeEnergy >= 100) aePts = 1;
+  }
+  add("🔥 Energía", aePts, 5, activeEnergy != null ? `${Math.round(activeEnergy)} kcal` : "sin datos", activeEnergy == null);
+
+  // Horas de pie (2)
+  let sdPts = 0;
+  if (stand != null) {
+    if      (stand >= 12) sdPts = 2;
+    else if (stand >= 8)  sdPts = 1;
+  }
+  add("🧍 De pie", sdPts, 2, stand != null ? `${Math.round(stand)}h` : "sin datos", stand == null);
+
+  // Pisos subidos (2)
+  let flPts = 0;
+  if (flights != null) {
+    if      (flights >= 10) flPts = 2;
+    else if (flights >= 5)  flPts = 1;
+  }
+  add("🪜 Pisos", flPts, 2, flights != null ? `${Math.round(flights)} pisos` : "sin datos", flights == null);
+
+  // HRV (12), contra la referencia de la semana anterior
+  let hrvPts = 0;
+  if (hrv != null && hrvPrev != null) {
+    if      (hrv >= hrvPrev * 1.05) hrvPts = 12;
+    else if (hrv >= hrvPrev * 0.95) hrvPts = 8;
+    else                            hrvPts = 4;
+  } else if (hrv != null) hrvPts = 6;
+  add("❤️ HRV", hrvPts, 12,
+    hrv != null ? `${Math.round(hrv)}ms${hrvPrev != null ? ` (ref ${Math.round(hrvPrev)}ms)` : ""}` : "sin datos",
+    hrv == null);
+
+  // FC en reposo (8)
+  let rhrPts = 0;
+  if (rhr != null) {
+    if      (rhr <= 50) rhrPts = 8;
+    else if (rhr <= 55) rhrPts = 7;
+    else if (rhr <= 60) rhrPts = 6;
+    else if (rhr <= 65) rhrPts = 4;
+    else if (rhr <= 70) rhrPts = 3;
+    else if (rhr <= 80) rhrPts = 1;
+  }
+  add("🫀 FC reposo", rhrPts, 8, rhr != null ? `${Math.round(rhr)} lpm` : "sin datos", rhr == null);
+
+  // Recuperación cardio (5) — solo si el Watch la reporta
+  if (cardioRec != null) {
+    let crPts = 0;
+    if      (cardioRec >= 30) crPts = 5;
+    else if (cardioRec >= 20) crPts = 4;
+    else if (cardioRec >= 15) crPts = 3;
+    else if (cardioRec >= 10) crPts = 1;
+    add("💓 Recuperación cardio", crPts, 5, `${Math.round(cardioRec)} lpm/min`);
+  }
+
+  // Forma física y estilo de vida: solo en la vista diaria, porque son métricas que
+  // el Watch actualiza de forma esporádica y promediarlas por semana no dice nada.
+  if (isDaily) {
+    if (vo2 != null) {
+      let vo2Pts;   // todas las ramas asignan, incluida la final
+      if      (vo2 >= 50) vo2Pts = 6;
+      else if (vo2 >= 45) vo2Pts = 5;
+      else if (vo2 >= 40) vo2Pts = 4;
+      else if (vo2 >= 35) vo2Pts = 3;
+      else                vo2Pts = 1;
+      add("🫁 VO₂max", vo2Pts, 6, `${vo2.toFixed(1)} ml/kg/min`);
+    }
+    if (walkHr != null) {
+      let whrPts = 0;
+      if      (walkHr <= 70)  whrPts = 4;
+      else if (walkHr <= 80)  whrPts = 3;
+      else if (walkHr <= 90)  whrPts = 2;
+      else if (walkHr <= 100) whrPts = 1;
+      add("🏃 FC caminando", whrPts, 4, `${Math.round(walkHr)} lpm`);
+    }
+    if (bodyFat != null) {
+      let bfPts = 0;
+      if      (bodyFat < 12) bfPts = 4;
+      else if (bodyFat < 18) bfPts = 3;
+      else if (bodyFat < 25) bfPts = 2;
+      else if (bodyFat < 30) bfPts = 1;
+      add("⚖️ % Grasa", bfPts, 4, `${bodyFat.toFixed(1)}%`);
+    }
+    if (daylight != null) {
+      let dlPts = 0;
+      if      (daylight >= 60) dlPts = 5;
+      else if (daylight >= 30) dlPts = 4;
+      else if (daylight >= 15) dlPts = 2;
+      else if (daylight >= 5)  dlPts = 1;
+      add("☀️ Luz natural", dlPts, 5, `${Math.round(daylight)} min`);
+    }
+    if (resp != null) {
+      let respPts = 1;
+      if      (resp >= 12 && resp <= 16) respPts = 5;
+      else if (resp > 16 && resp <= 18)  respPts = 4;
+      else if (resp > 18 && resp <= 20)  respPts = 3;
+      else if (resp < 12)                respPts = 4;
+      add("🌬️ Resp.", respPts, 5, `${resp.toFixed(1)} rpm`);
+    }
+  }
+
+  return b;
+}
+
 export function scoreFromBreakdown(breakdown) {
   // `sinDatos` queda fuera de la fracción entera: no tener el sensor de una métrica
   // no debe puntuar como tenerlo y sacar un cero.
