@@ -1053,6 +1053,201 @@ def ha_events_soon(request: Request, token: str = ""):
     return {"event": None}
 
 
+# ── NOTIFICACIONES PUSH (Web Push) ───────────────────────────────────────────
+# La API Notification del navegador solo dispara con la pestaña abierta, que es justo
+# cuando no hace falta que te avisen. Web Push llega con la app cerrada.
+#
+# Quién dispara el envío: Home Assistant. El backend escala a cero en Fly, así que no
+# hay ningún proceso vivo que pueda mirar el reloj; HA ya sondea /ha/* cada minuto, así
+# que se le añade una llamada más. El dedupe vive en Supabase (ver la migración) porque
+# en memoria se perdería en cada arranque en frío y el aviso se repetiría cada minuto.
+
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY  = os.getenv("VAPID_PUBLIC_KEY", "")
+VAPID_SUBJECT     = os.getenv("VAPID_SUBJECT", "")
+PUSH_HABILITADO   = bool(VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY and VAPID_SUBJECT)
+
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str = Field(max_length=1000)
+    p256dh:   str = Field(max_length=200)
+    auth:     str = Field(max_length=100)
+    user_agent: str | None = Field(None, max_length=300)
+
+
+def _push_marcar_enviado(clave: str) -> bool:
+    """Devuelve True si a este aviso le toca salir ahora (y lo marca como enviado).
+
+    El insert hace de cerrojo: la clave es primary key, así que si choca es que otro
+    tick ya lo mandó. Atómico y a prueba de reinicios, al contrario que un set en memoria.
+    """
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/push_enviados",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json={"clave": clave[:200]},
+    )
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        logger.error("push: no se pudo marcar %s (%s)", clave, r.status_code)
+        return False   # ante la duda, no enviar: molesta menos que repetir
+    return True
+
+
+def _push_suscripciones() -> list:
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/push_subscriptions?select=endpoint,p256dh,auth",
+        headers=supabase_headers(),
+    )
+    return r.json() if r.status_code < 300 else []
+
+
+def _push_borrar(endpoint: str):
+    http.delete(
+        f"{SUPABASE_URL}/rest/v1/push_subscriptions?endpoint=eq.{quote(endpoint, safe='')}",
+        headers=supabase_headers(),
+    )
+
+
+def enviar_push(titulo: str, cuerpo: str, url: str = "/") -> dict:
+    """Manda el aviso a todos los dispositivos suscritos. Nunca lanza: es best-effort."""
+    if not PUSH_HABILITADO:
+        return {"enviados": 0, "motivo": "push no configurado"}
+    # Importación perezosa, misma razón que el cliente de OpenAI: que falte la
+    # dependencia no puede impedir que arranque el backend entero.
+    try:
+        from pywebpush import webpush, WebPushException
+    except ImportError:
+        logger.error("push: falta la dependencia pywebpush")
+        return {"enviados": 0, "motivo": "falta pywebpush"}
+
+    payload = json.dumps({"titulo": titulo, "cuerpo": cuerpo, "url": url})
+    enviados, caducadas = 0, 0
+    for s in _push_suscripciones():
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": s["endpoint"],
+                    "keys": {"p256dh": s["p256dh"], "auth": s["auth"]},
+                },
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_SUBJECT},
+                timeout=HTTP_TIMEOUT,
+            )
+            enviados += 1
+        except WebPushException as e:
+            codigo = getattr(e.response, "status_code", None)
+            # 404/410: el navegador desinstaló la PWA o revocó el permiso. La
+            # suscripción ya no sirve y hay que quitarla o se reintenta para siempre.
+            if codigo in (404, 410):
+                _push_borrar(s["endpoint"])
+                caducadas += 1
+            else:
+                logger.error("push: fallo enviando a %s… (%s)", s["endpoint"][:40], codigo)
+        except Exception as e:
+            logger.error("push: error inesperado: %s", e)
+    return {"enviados": enviados, "caducadas": caducadas}
+
+
+@app.get("/push/clave-publica")
+def push_clave_publica(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """La clave pública VAPID que el navegador necesita para suscribirse."""
+    return {"habilitado": PUSH_HABILITADO, "clave": VAPID_PUBLIC_KEY if PUSH_HABILITADO else None}
+
+
+@app.post("/push/suscribir")
+def push_suscribir(
+    body: PushSubscriptionIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    if not PUSH_HABILITADO:
+        raise HTTPException(status_code=503, detail="Push no configurado en el servidor (faltan claves VAPID)")
+    payload = {
+        "endpoint": body.endpoint,
+        "p256dh": body.p256dh,
+        "auth": body.auth,
+        "user_agent": body.user_agent,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/push_subscriptions",
+        headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
+
+
+@app.post("/push/desuscribir")
+def push_desuscribir(
+    body: PushSubscriptionIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    _push_borrar(body.endpoint)
+    return {"ok": True}
+
+
+@app.post("/push/prueba")
+def push_prueba(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Manda un aviso de prueba, para comprobar la cadena entera sin esperar a un evento."""
+    return enviar_push("Life Assistant", "Las notificaciones funcionan ✅")
+
+
+@app.post("/ha/push-eventos")
+def ha_push_eventos(request: Request, token: str = ""):
+    """HA llama aquí cada minuto: avisa de los eventos que empiezan en ~15 min.
+
+    Comparte la ventana de 13–17 min con /ha/events/soon para que un evento no caiga
+    entre dos sondeos. El dedupe por (id, inicio) evita repetir el aviso en cada tick
+    y respeta los eventos que se mueven de hora.
+    """
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not PUSH_HABILITADO:
+        return {"ok": True, "enviados": 0, "motivo": "push no configurado"}
+
+    graph_token = get_valid_token()
+    if not graph_token:
+        return {"ok": True, "enviados": 0, "motivo": "sin sesión de Outlook"}
+
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(hours=1)
+    r = http.get(
+        "https://graph.microsoft.com/v1.0/me/calendarView"
+        f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        "&$top=20&$select=id,subject,start,isAllDay,location&$orderby=start/dateTime",
+        headers={"Authorization": f"Bearer {graph_token}"},
+    )
+    if _graph_fallo(r, "calendarView (push)"):
+        return {"ok": False, "enviados": 0, "motivo": "Graph no disponible"}
+
+    total = 0
+    for event in r.json().get("value", []):
+        if event.get("isAllDay"):
+            continue
+        inicio_iso = normalize_graph_dt(event.get("start", {}))
+        try:
+            inicio = datetime.fromisoformat(inicio_iso.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        minutos = (inicio - now).total_seconds() / 60
+        if not (13 <= minutos <= 17):
+            continue
+        titulo = _clean_class_title(event.get("subject", "")) or "Evento"
+        clave = f"evento:{event.get('id', '')[:120]}:{inicio_iso}"
+        if not _push_marcar_enviado(clave):
+            continue
+        hora_local = inicio.astimezone(LOCAL_TZ).strftime("%H:%M")
+        lugar = (event.get("location") or {}).get("displayName") or ""
+        cuerpo = f"A las {hora_local}" + (f" · {lugar}" if lugar else "")
+        total += enviar_push(f"{titulo} — en 15 min", cuerpo).get("enviados", 0)
+
+    return {"ok": True, "enviados": total}
+
+
 # ── JOB QUEUE (SUPABASE) ─────────────────────────────────────────────────────
 
 def _safe_worker(worker_id: str) -> str:
