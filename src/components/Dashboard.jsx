@@ -2929,6 +2929,13 @@ export default function Dashboard() {
               if (p < 0) rows.push({ label: "Freq. resp.", detail: `${todayResp.toFixed(1)} vs ${respBase.toFixed(1)} rpm`, pts: p, max: 0, indent: true });
             }
           }
+          // El techo por duración también tiene que verse: con una noche corta y fases
+          // buenas recortaba el total sin aparecer en ninguna fila, y el tooltip volvía
+          // a no cuadrar consigo mismo (que es justo lo que se acaba de arreglar).
+          const bruto = base.filas.reduce((s, f) => s + f.pts, 0) + recoveryMod;
+          if (score != null && bruto > score) {
+            rows.push({ label: "Techo por duración", detail: `máx ${base.cap} con ${hoursToHM(lv)}`, pts: score - bruto, max: 0 });
+          }
           return rows;
         })();
 
