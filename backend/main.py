@@ -19,7 +19,7 @@ import hmac
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("life-assistant")
@@ -112,6 +112,29 @@ TIMEZONE         = os.getenv("TIMEZONE", "Europe/Madrid")   # zona horaria IANA 
 CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calendario de clases en Outlook
 WEATHER_LAT      = os.getenv("WEATHER_LAT", "40.4168")      # coordenadas para el clima (Open-Meteo)
 WEATHER_LON      = os.getenv("WEATHER_LON", "-3.7038")      # por defecto Madrid
+
+# Hosts a los que se permite apuntar `alud_url`. Esa URL sale del cuerpo HTML de un
+# evento de Outlook — dato NO confiable — y termina en `page.goto()` dentro del agente,
+# en un Edge que YA tiene la sesión de Alud/Okta iniciada, cuyo texto se le entrega
+# después a Cowork como instrucción. Sin lista blanca, quien pueda meter un evento en
+# el calendario elige adónde navega ese navegador y qué se le dicta al agente.
+# Se valida en tres sitios (extracción, alta del job y el propio agente) a propósito:
+# la cola es escribible desde fuera del backend.
+ALUD_ALLOWED_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.getenv("ALUD_ALLOWED_HOSTS", "alud.deusto.es").split(",")
+    if h.strip()
+)
+
+# Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
+# cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
+# pocos cuerpos grandes en paralelo para tumbarla.
+MAX_AUDIO_BYTES  = int(os.getenv("MAX_AUDIO_BYTES",  str(8 * 1024 * 1024)))
+MAX_INGEST_BYTES = int(os.getenv("MAX_INGEST_BYTES", str(4 * 1024 * 1024)))
+# La transcripción cuesta dinero en cada llamada: limitar el gasto de una sesión
+# comprometida, no solo el consumo de memoria.
+AUDIO_MAX_REQUESTS   = int(os.getenv("AUDIO_MAX_REQUESTS", "10"))
+AUDIO_WINDOW_SECONDS = int(os.getenv("AUDIO_WINDOW_SECONDS", "300"))
 
 try:
     LOCAL_TZ = ZoneInfo(TIMEZONE)
@@ -227,6 +250,79 @@ def _register_login_failure(ip: str):
 def _reset_login_attempts(ip: str):
     with _login_lock:
         _login_attempts.pop(ip, None)
+
+
+# Limitador genérico por (recurso, IP), aparte del del login. La diferencia con
+# _check_login_rate es qué se cuenta: allí solo los intentos FALLIDOS, porque lo que se
+# protege es una credencial; aquí TODAS las peticiones, porque lo que se protege es un
+# recurso caro (memoria, o una llamada de pago a Whisper) y una petición legítima
+# consume igual que una abusiva.
+_rate_buckets: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _check_rate(recurso: str, ip: str, maximo: int, ventana: int):
+    ahora = time.time()
+    clave = (recurso, ip)
+    with _rate_lock:
+        # Poda de claves caducadas: sin esto el diccionario crece sin techo con quien
+        # rote IPs (trivial en IPv6). Barato porque solo mira las que ya expiraron.
+        for k in [k for k, ts in _rate_buckets.items() if not ts or ahora - ts[-1] >= ventana]:
+            del _rate_buckets[k]
+        recientes = [t for t in _rate_buckets.get(clave, []) if ahora - t < ventana]
+        if len(recientes) >= maximo:
+            _rate_buckets[clave] = recientes
+            espera = int(ventana - (ahora - recientes[0]))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Demasiadas peticiones. Reintenta en {espera}s",
+                headers={"Retry-After": str(max(espera, 1))},
+            )
+        recientes.append(ahora)
+        _rate_buckets[clave] = recientes
+
+
+async def _leer_cuerpo_limitado(request: Request, limite: int) -> bytes:
+    """Lee el cuerpo abortando en cuanto se pasa del límite.
+
+    Se mira `Content-Length` primero para cortar sin leer nada, pero no se confía solo
+    en él: una petición con `Transfer-Encoding: chunked` no lo trae y el cliente
+    tampoco está obligado a decir la verdad. De ahí el contador sobre el propio stream.
+    """
+    exceso = HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=f"Cuerpo demasiado grande (máximo {limite} bytes)",
+    )
+    declarado = request.headers.get("content-length", "")
+    if declarado.isdigit() and int(declarado) > limite:
+        raise exceso
+    trozos, total = [], 0
+    async for trozo in request.stream():
+        total += len(trozo)
+        if total > limite:
+            raise exceso
+        trozos.append(trozo)
+    return b"".join(trozos)
+
+
+def alud_url_permitida(url: str) -> bool:
+    """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio).
+
+    Se exige https porque el agente abre esa URL con una sesión iniciada detrás: por
+    http, cualquiera en la red del PC vería (y podría reescribir) lo que se navega.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        partes = urlsplit(url)
+    except ValueError:
+        return False
+    if partes.scheme != "https":
+        return False
+    host = (partes.hostname or "").lower()
+    if not host:
+        return False
+    return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
 
 def _extract_service_token(request: Request, token_qs: str = "") -> str:
@@ -482,6 +578,12 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
         alud_match = re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
                      re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
         alud_url = alud_match.group(1).rstrip("&;.,") if alud_match else None
+        # El cuerpo del evento lo escribe quien lo crea, no necesariamente el usuario:
+        # una URL de un host ajeno acabaría abierta en el navegador con sesión del PC.
+        # Se descarta aquí, en el punto donde entra al sistema.
+        if alud_url and not alud_url_permitida(alud_url):
+            logger.warning("Evento %s: alud_url descartada (host no permitido)", event.get("id"))
+            alud_url = None
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
@@ -534,8 +636,11 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
         payload["location"] = {"displayName": body.location}
     if body.description:
         payload["body"] = {"content": body.description, "bodyType": "text"}
+    # quote() obligatorio: el id se interpola en la ruta de Graph y un valor con '/',
+    # '?' o '#' cambiaría el endpoint al que se llama. El token de Graph tiene alcance
+    # Calendars.ReadWrite sobre toda la cuenta, así que el margen no es estrecho.
     url = (
-        f"https://graph.microsoft.com/v1.0/me/calendars/{body.calendar_id}/events"
+        f"https://graph.microsoft.com/v1.0/me/calendars/{quote(body.calendar_id, safe='')}/events"
         if body.calendar_id
         else "https://graph.microsoft.com/v1.0/me/events"
     )
@@ -558,8 +663,11 @@ class UpdateEventRequest(BaseModel):
 
 @app.patch("/calendar/events/{event_id}")
 def update_event(
-    event_id: str,
-    body: UpdateEventRequest,
+    # Los ids de Graph no tienen una forma fija que se pueda validar con un patrón sin
+    # arriesgarse a rechazar ids reales, así que se acota el largo y se escapa al
+    # construir la URL (ver más abajo).
+    event_id: str = Path(..., max_length=512),
+    body: UpdateEventRequest = ...,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     token = get_valid_token()
@@ -582,7 +690,7 @@ def update_event(
     if not payload:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
     r = http.patch(
-        f"https://graph.microsoft.com/v1.0/me/events/{event_id}",
+        f"https://graph.microsoft.com/v1.0/me/events/{quote(event_id, safe='')}",
         headers=headers,
         json=payload,
     )
@@ -885,11 +993,20 @@ def save_idea(text: str, idea_data: dict) -> dict:
 
 @app.post("/ideas/audio")
 async def create_idea_from_audio(
+    request: Request,
     audio: UploadFile = File(...),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    # 1. Transcribir con Whisper
-    audio_bytes = await audio.read()
+    _check_rate("ideas_audio", _client_ip(request), AUDIO_MAX_REQUESTS, AUDIO_WINDOW_SECONDS)
+
+    # 1. Transcribir con Whisper. Se lee un byte más del tope para poder distinguir
+    # "justo en el límite" de "se ha pasado" sin cargar el resto en memoria.
+    audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Audio demasiado grande (máximo {MAX_AUDIO_BYTES // (1024 * 1024)} MB)",
+        )
     transcript = get_openai_client().audio.transcriptions.create(
         model="whisper-1",
         file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
@@ -1126,6 +1243,12 @@ def ha_pc_power_pending(request: Request, token: str = ""):
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    # Segunda barrera de la misma comprobación que hace /calendar/events: el payload de
+    # un job puede llegar por otras vías (una integración, un cliente manipulado), y lo
+    # que se guarde aquí es exactamente lo que el agente ejecutará en el PC.
+    alud_url = body.payload.get("alud_url") if isinstance(body.payload, dict) else None
+    if alud_url is not None and not alud_url_permitida(alud_url):
+        raise HTTPException(status_code=400, detail="alud_url no permitida")
     payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
     r = http.post(
         f"{SUPABASE_URL}/rest/v1/jobs",
@@ -1579,7 +1702,7 @@ async def health_ingest(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    raw = await request.body()
+    raw = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
     try:
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
@@ -1723,7 +1846,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
     # JSON por línea) directamente en el cuerpo — este último no es un JSON de una
     # pieza y `request.json()` fallaría. Leemos el cuerpo crudo y lo interpretamos:
     # utf-8-sig descarta el BOM que iOS a veces añade.
-    raw  = await request.body()
+    raw  = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
     text = raw.decode("utf-8-sig", errors="replace").strip()
     body = None
     if text:

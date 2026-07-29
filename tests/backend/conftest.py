@@ -83,20 +83,22 @@ def mock_requests(monkeypatch):
     return router
 
 
+def _limpiar_estado():
+    with main._login_lock:
+        main._login_attempts.clear()
+    with main._rate_lock:
+        main._rate_buckets.clear()
+    main._wol_pending = False
+    main._agent_relaunch_pending = False
+    main._pc_power_action = None
+
+
 @pytest.fixture(autouse=True)
 def reset_state():
     """Estado en memoria limpio entre tests (rate limiting y flags WOL/relanzado)."""
-    with main._login_lock:
-        main._login_attempts.clear()
-    main._wol_pending = False
-    main._agent_relaunch_pending = False
-    main._pc_power_action = None
+    _limpiar_estado()
     yield
-    with main._login_lock:
-        main._login_attempts.clear()
-    main._wol_pending = False
-    main._agent_relaunch_pending = False
-    main._pc_power_action = None
+    _limpiar_estado()
 
 
 @pytest.fixture

@@ -72,7 +72,7 @@ Ficheros clave:
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, sleepScore, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
-| `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones |
+| `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
 | `tests/frontend/setup.js` | Stubs de `matchMedia` y `Notification` que jsdom no implementa |
 
@@ -89,7 +89,13 @@ Ficheros clave:
      (tiempo constante, y **falso si el token esperado no está configurado**).
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
-3. **Rate limiting del login**: 5 intentos / 5 min por IP, en memoria (`_login_attempts`).
+3. **Rate limiting**: dos contadores distintos y no intercambiables. El del login
+   (`_login_attempts`, `_check_login_rate`) cuenta solo los intentos **fallidos**,
+   porque protege una credencial. El genérico (`_rate_buckets`, `_check_rate`) cuenta
+   **todas** las peticiones, porque protege un recurso caro — hoy `/ideas/audio`, que
+   es una llamada de pago a Whisper por petición. Al añadir un endpoint costoso, usa
+   el segundo. Detalles del primero:
+   5 intentos / 5 min por IP, en memoria (`_login_attempts`).
    Se resetea en cold start de Fly, y eso es aceptable para este caso. La IP sale de
    `_client_ip()`, que **solo usa fuentes que el cliente no controla**: `Fly-Client-IP`
    (y solo si `FLY_APP_NAME` confirma que estamos en Fly) o el socket. Nunca fiarse de
@@ -101,7 +107,24 @@ Ficheros clave:
 6. **Validación de parámetros**: los path params de recursos usan patrones regex
    (UUID para jobs/ideas/sesiones, `[a-zA-Z0-9_-]{1,64}` para worker/agent ids,
    `\d{4}-\d{2}-\d{2}` para fechas). Mantén esto en endpoints nuevos: los valores
-   se interpolan en URLs de Supabase.
+   se interpolan en URLs de Supabase. Los ids de Graph (`event_id`, `calendar_id`)
+   no tienen forma fija que se pueda validar con un patrón sin rechazar ids reales:
+   ahí la regla es `quote(..., safe='')` al construir la URL, más un `max_length`.
+7. **`alud_url` solo puede apuntar a `ALUD_ALLOWED_HOSTS`, y siempre por https.**
+   Esa URL sale del cuerpo HTML de un evento de Outlook (dato que escribe quien crea
+   el evento, no necesariamente el usuario) y acaba en `page.goto()` del agente, en un
+   Edge con la sesión de Alud/Okta ya iniciada, cuyo texto se le pasa después a Cowork
+   como instrucción. Se valida con `alud_url_permitida()` en **tres** sitios a
+   propósito: al extraerla en `/calendar/events`, al dar de alta el job en `POST /jobs`
+   y en el propio `agent.py` — la tabla `jobs` es escribible con la service key, así
+   que un payload puede llegar sin haber pasado por el backend. No quites ninguna de
+   las tres. El enunciado extraído va delimitado como DATO en la instrucción de Cowork
+   (`build_cowork_instruction`), no mezclado con las órdenes.
+8. **Cuerpos acotados**: nada de `await request.body()` ni `UploadFile.read()` sin
+   tope — cargan en memoria lo que mande el cliente y la VM de Fly tiene 1 GB. Usa
+   `_leer_cuerpo_limitado(request, limite)` (mira `Content-Length` y además cuenta el
+   stream, porque con `Transfer-Encoding: chunked` no hay cabecera que mirar).
+   Límites: `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`.
 
 ## Backend: patrones que hay que conocer
 
