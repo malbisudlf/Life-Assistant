@@ -18,6 +18,7 @@ import time
 import hmac
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 logging.basicConfig(level=logging.INFO)
@@ -100,6 +101,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 HOME_ADDRESS = os.getenv("HOME_ADDRESS", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
+# Techo de sesiones que trae /training/summary de una vez. De esa lista salen tanto
+# las posteriores al último cobro como las diez más recientes, así que basta con que
+# cubra un periodo de cobro con holgura.
+MAX_SESIONES_RESUMEN = int(os.getenv("MAX_SESIONES_RESUMEN", "200"))
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 # Personalización de la instancia (kit self-hosted)
@@ -1382,25 +1387,38 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     price = float(client["price_per_hour"])
     sessions_per_payment = int(client["sessions_per_payment"])
 
-    r_pay = http.get(
-        f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
-        headers=supabase_headers(),
-    )
-    payments = r_pay.json() if r_pay.status_code < 300 else []
+    # Antes esto eran cuatro viajes a Supabase en serie, y se ejecuta en cada carga del
+    # dashboard con el arranque en frío de Fly por delante. Ahora son dos: el pago y las
+    # sesiones no dependen entre sí, así que van en paralelo, y de una sola lista de
+    # sesiones salen tanto las posteriores al último cobro como las diez más recientes.
+    def _pago():
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
+            headers=supabase_headers(),
+        )
+        return r.json() if r.status_code < 300 else []
+
+    def _sesiones():
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}"
+            f"&select=id,date,duration_hours,created_at&order=date.desc&limit={MAX_SESIONES_RESUMEN}",
+            headers=supabase_headers(),
+        )
+        return r.json() if r.status_code < 300 else []
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_pay, f_sess = pool.submit(_pago), pool.submit(_sesiones)
+        payments, todas = f_pay.result(), f_sess.result()
+
     last_payment = payments[0] if payments else None
-
-    date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
-    r_sess = http.get(
-        f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}&order=date.desc",
-        headers=supabase_headers(),
-    )
-    sessions = r_sess.json() if r_sess.status_code < 300 else []
-
-    r_all = http.get(
-        f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}&order=date.desc&limit=10",
-        headers=supabase_headers(),
-    )
-    all_sessions = r_all.json() if r_all.status_code < 300 else []
+    all_sessions = todas[:10]
+    if last_payment:
+        # Mismo criterio que antes (created_at posterior al cobro), pero filtrando en
+        # memoria en vez de pidiendo otra vez lo mismo con otro filtro.
+        corte = last_payment["created_at"]
+        sessions = [s for s in todas if (s.get("created_at") or "") > corte]
+    else:
+        sessions = todas
 
     total_hours = sum(float(s["duration_hours"]) for s in sessions)
     return {
@@ -1491,6 +1509,69 @@ def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
         "inicio": raw[:400].decode("utf-8", errors="replace"),
     }
 
+
+
+def _existentes_por_clave(fechas: set, nombres: set) -> dict:
+    """Trae de una sola vez las filas ya guardadas para esas fechas y métricas.
+
+    Se filtra por rango de fechas (in.(...)) y por nombre: acotar por ambos evita
+    arrastrar el histórico entero cuando el lote toca solo un par de días.
+    """
+    if not fechas or not nombres:
+        return {}
+    f = ",".join(sorted(fechas))
+    n = ",".join(sorted(nombres))
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics"
+        f"?metric_date=in.({quote(f, safe=',')})&metric_name=in.({quote(n, safe=',')})"
+        f"&select=metric_date,metric_name,value,extra&limit=10000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Ingesta de salud: no se pudo leer lo existente (%s)", r.status_code)
+        return {}
+    return {(row["metric_date"], row["metric_name"]): row for row in r.json()}
+
+
+def _guardar_metricas(agrupadas: dict) -> int:
+    """Aplica la regla de las acumulativas y escribe todo en un upsert en bloque."""
+    if not agrupadas:
+        return 0
+    existentes = _existentes_por_clave(
+        {fecha for fecha, _ in agrupadas},
+        {nombre for _, nombre in agrupadas},
+    )
+
+    filas = []
+    for (metric_date, name), data in agrupadas.items():
+        value = data["value"]
+        if name in CUMULATIVE_METRICS and value is not None:
+            previo = (existentes.get((metric_date, name)) or {}).get("value")
+            # Solo se salta si lo guardado es un valor real (>0) y ya es mayor o igual:
+            # llegan snapshots parciales a lo largo del día y no deben pisar el total.
+            if previo is not None and float(previo) > 0 and float(previo) >= value:
+                continue
+        filas.append({
+            "metric_date": metric_date,
+            "metric_name": name,
+            "value": value,
+            "unit": data["unit"],
+            "extra": data["extra"],
+        })
+
+    if not filas:
+        return 0
+    # health_metrics tiene unique(metric_date, metric_name), así que merge-duplicates
+    # resuelve inserción y actualización en una sola llamada.
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/health_metrics",
+        headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+        json=filas,
+    )
+    if r.status_code >= 300:
+        logger.error("Ingesta de salud: upsert en bloque falló (%s)", r.status_code)
+        return 0
+    return len(filas)
 
 @app.post("/health/ingest")
 async def health_ingest(request: Request, token: str = ""):
@@ -1595,57 +1676,13 @@ async def health_ingest(request: Request, token: str = ""):
                 if current is None or value > current:
                     grouped_metrics[key] = {"unit": unit, "value": value, "extra": extra}
 
-    for (metric_date, name), data in grouped_metrics.items():
-        value = data["value"]
-
-        row_exists = False
-        # Para métricas acumulativas, no sobreescribir si ya hay un valor mayor en BD
-        if name in CUMULATIVE_METRICS and value is not None:
-            existing = http.get(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.{name}&select=value",
-                headers=supabase_headers(),
-            )
-            if existing.status_code < 300:
-                rows = existing.json()
-                if rows and rows[0].get("value") is not None:
-                    row_exists = True
-                    existing_val = float(rows[0]["value"])
-                    # Solo saltar si el valor existente es real (>0) y ya es mayor o igual
-                    if existing_val > 0 and existing_val >= value:
-                        continue
-                elif rows:
-                    row_exists = True  # fila existe pero value es None
-
-        payload = {
-            "metric_date": metric_date,
-            "metric_name": name,
-            "value": value,
-            "unit": data["unit"],
-            "extra": data["extra"],
-        }
-        if row_exists:
-            r = http.patch(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
-                headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json=payload,
-            )
-        else:
-            r = http.post(
-                f"{SUPABASE_URL}/rest/v1/health_metrics",
-                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-                json=payload,
-            )
-            if r.status_code == 409:
-                r = http.patch(
-                    f"{SUPABASE_URL}/rest/v1/health_metrics"
-                    f"?metric_date=eq.{metric_date}&metric_name=eq.{name}",
-                    headers={**supabase_headers(), "Prefer": "return=minimal"},
-                    json=payload,
-                )
-        if r.status_code < 300:
-            upserted += 1
+    # Escritura en dos viajes en vez de uno por métrica.
+    #
+    # Antes, por cada métrica: un GET para ver si existía, luego un POST y a veces un
+    # PATCH si salía 409. Un lote normal del Watch son decenas de métricas, o sea del
+    # orden de 60–90 viajes secuenciales a Supabase. Ahora es un GET que trae de golpe
+    # lo ya guardado de esas fechas y un upsert en bloque con el resto.
+    upserted += _guardar_metricas(grouped_metrics)
 
     return {"ok": True, "upserted": upserted}
 
@@ -1739,72 +1776,57 @@ async def health_ingest_simple(request: Request, token: str = ""):
     skipped = []
     errors = []
 
+    # Mismo patrón que /health/ingest (M4): una lectura en bloque de lo ya guardado y
+    # un upsert con el resto, en vez de dos GET y un POST/PATCH por muestra.
+    validas = []
     for s in samples:
         metric_date = s.date[:10] if s.date and len(s.date) >= 10 else None
         if not metric_date:
             skipped.append(f"{s.metric}: fecha inválida")
             continue
+        validas.append((metric_date, s))
 
+    existentes = _existentes_por_clave(
+        {d for d, _ in validas}, {m.metric for _, m in validas},
+    )
+
+    filas = []
+    for metric_date, s in validas:
+        previo = existentes.get((metric_date, s.metric)) or {}
         extra = s.extra or {}
-        if s.metric == "sleep_analysis":
-            existing_sleep = http.get(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.sleep_analysis&select=extra",
-                headers=supabase_headers(),
-            )
-            if existing_sleep.status_code < 300:
-                rows = existing_sleep.json()
-                if rows and (rows[0].get("extra") or {}).get("excluded"):
-                    extra = {**extra, "excluded": True}
 
-        row_exists = False
+        # Respetar las noches que el usuario anuló a mano: el flag vive en la fila
+        # guardada y una sincronización posterior no debe borrarlo.
+        if s.metric == "sleep_analysis" and (previo.get("extra") or {}).get("excluded"):
+            extra = {**extra, "excluded": True}
+
         if s.metric in CUMULATIVE_METRICS:
-            existing = http.get(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}&select=value",
-                headers=supabase_headers(),
-            )
-            if existing.status_code < 300:
-                rows = existing.json()
-                if rows:
-                    row_exists = True
-                    if rows[0].get("value") is not None and float(rows[0]["value"]) >= s.value:
-                        skipped.append(f"{s.metric}: existente={rows[0]['value']} >= nuevo={s.value}")
-                        continue
+            valor_previo = previo.get("value")
+            if valor_previo is not None and float(valor_previo) >= s.value:
+                skipped.append(f"{s.metric}: existente={valor_previo} >= nuevo={s.value}")
+                continue
 
-        if row_exists:
-            r = http.patch(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
-                headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json={"value": s.value, "unit": s.unit, "extra": extra},
-            )
-        else:
-            r = http.post(
-                f"{SUPABASE_URL}/rest/v1/health_metrics",
-                headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-                json={
-                    "metric_date": metric_date,
-                    "metric_name": s.metric,
-                    "value": s.value,
-                    "unit": s.unit,
-                    "extra": extra,
-                },
-            )
-        if r.status_code == 409:
-            r = http.patch(
-                f"{SUPABASE_URL}/rest/v1/health_metrics"
-                f"?metric_date=eq.{metric_date}&metric_name=eq.{s.metric}",
-                headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json={"value": s.value, "unit": s.unit, "extra": extra},
-            )
+        filas.append({
+            "metric_date": metric_date,
+            "metric_name": s.metric,
+            "value": s.value,
+            "unit": s.unit,
+            "extra": extra,
+        })
+
+    if filas:
+        r = http.post(
+            f"{SUPABASE_URL}/rest/v1/health_metrics",
+            headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+            json=filas,
+        )
         if r.status_code < 300:
-            upserted += 1
+            upserted += len(filas)
         else:
             # El detalle real va al log del servidor; al cliente solo el código.
             # Reenviar r.text filtraba mensajes internos de Supabase (invariante 5).
-            logger.error("Ingesta de salud %s (%s): %s", s.metric, r.status_code, (r.text or "")[:500])
-            errors.append(f"{s.metric}: HTTP {r.status_code}")
+            logger.error("Ingesta de salud (bloque de %d, %s): %s", len(filas), r.status_code, (r.text or "")[:500])
+            errors.append(f"upsert: HTTP {r.status_code}")
 
     return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
 
