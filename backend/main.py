@@ -166,6 +166,15 @@ bearer_scheme = HTTPBearer()
 # escala a cero; se resetea en cold start, lo cual es aceptable para este caso.
 LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
 LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
+# Cada vez que una misma IP agota los intentos, el bloqueo siguiente dura el DOBLE que
+# el anterior (5 min → 10 → 20 → …) hasta este techo. Quien se equivoca de contraseña
+# espera los 5 minutos de siempre; a quien insiste le sale cada vez más caro, sin
+# necesidad de dormir la petición (eso retendría un hilo del pool) ni de persistir nada.
+# Sigue reseteándose en el cold start de Fly, pero ahora cada reset le cuesta al atacante
+# esperar a que la máquina se pare, que es más tiempo del que ahorra.
+LOGIN_BLOQUEO_MAX_SECONDS = int(os.getenv("LOGIN_BLOQUEO_MAX_SECONDS", "3600"))
+# A partir de tantas IPs vigiladas se barren las caducadas (ver _purgar_login_attempts).
+_LOGIN_MAX_IPS = 1000
 # Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera
 # (en Fly no hace falta: ya manda Fly-Client-IP). Ver _client_ip.
 TRUST_FORWARDED_FOR  = os.getenv("TRUST_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
@@ -204,23 +213,62 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _rechazar_login(segundos: float):
+    retry = max(int(segundos), 1)
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"Demasiados intentos. Reintenta en {retry}s",
+        headers={"Retry-After": str(retry)},
+    )
+
+
+def _purgar_login_attempts(now: float):
+    """Quita las IPs sin fallos recientes ni bloqueo activo.
+
+    El diccionario solo se podaba para la IP que se estuviera consultando, así que
+    cualquier IP que probara una vez y no volviera se quedaba dentro para siempre: en
+    un backend que no se reinicia, un goteo de intentos sueltos lo hacía crecer sin
+    tope. Se llama solo cuando el diccionario pasa de _LOGIN_MAX_IPS, o sea casi nunca.
+    """
+    caducadas = [
+        ip for ip, e in _login_attempts.items()
+        if e["hasta"] <= now and all(now - t >= LOGIN_WINDOW_SECONDS for t in e["fallos"])
+    ]
+    for ip in caducadas:
+        del _login_attempts[ip]
+
+
 def _check_login_rate(ip: str):
     now = time.time()
     with _login_lock:
-        attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
-        _login_attempts[ip] = attempts
-        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
-            retry = int(LOGIN_WINDOW_SECONDS - (now - attempts[0]))
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Demasiados intentos. Reintenta en {retry}s",
-                headers={"Retry-After": str(max(retry, 1))},
+        if len(_login_attempts) > _LOGIN_MAX_IPS:
+            _purgar_login_attempts(now)
+        entrada = _login_attempts.get(ip)
+        if entrada is None:
+            return
+        # Bloqueo en curso: no se llega ni a comparar la contraseña.
+        if entrada["hasta"] > now:
+            _rechazar_login(entrada["hasta"] - now)
+        fallos = [t for t in entrada["fallos"] if now - t < LOGIN_WINDOW_SECONDS]
+        entrada["fallos"] = fallos
+        if len(fallos) >= LOGIN_MAX_ATTEMPTS:
+            # Los fallos acumulados se convierten en un bloqueo, y cada bloqueo que
+            # esta IP se gana dura el doble que el anterior.
+            entrada["bloqueos"] += 1
+            duracion = min(
+                LOGIN_WINDOW_SECONDS * (2 ** (entrada["bloqueos"] - 1)),
+                LOGIN_BLOQUEO_MAX_SECONDS,
             )
+            entrada["hasta"]  = now + duracion
+            entrada["fallos"] = []
+            logger.warning("Login bloqueado para %s durante %ss (bloqueo nº %d)", ip, int(duracion), entrada["bloqueos"])
+            _rechazar_login(duracion)
 
 
 def _register_login_failure(ip: str):
     with _login_lock:
-        _login_attempts.setdefault(ip, []).append(time.time())
+        entrada = _login_attempts.setdefault(ip, {"fallos": [], "bloqueos": 0, "hasta": 0.0})
+        entrada["fallos"].append(time.time())
 
 
 def _reset_login_attempts(ip: str):

@@ -1,4 +1,5 @@
 """Tests de autenticación, rate limiting, helpers puros, /maps/departure e ideas."""
+import time
 from datetime import datetime, timezone
 
 from jose import jwt
@@ -182,6 +183,90 @@ class TestAuthPassword:
         """compare_digest sobre str lanza TypeError con no-ASCII → antes era un 500."""
         r = client.post("/auth/password", json={"password": "contraseña"})
         assert r.status_code == 401
+
+
+def _envejecer_limitador(segundos: float):
+    """Envejece el estado del limitador en vez de tocar el reloj global (parchear
+    time.time afectaría también a las tripas del cliente de test)."""
+    with main._login_lock:
+        for e in main._login_attempts.values():
+            e["hasta"] -= segundos
+            e["fallos"] = [t - segundos for t in e["fallos"]]
+
+
+class TestBloqueoProgresivo:
+    """Agotar los intentos deja un bloqueo, y cada bloqueo que se gana la misma IP dura
+    el doble que el anterior. Un usuario que se equivoca ve los 5 min de siempre; quien
+    insiste se encuentra esperas que crecen solas, sin dormir la petición."""
+
+    def _agotar(self, client):
+        for _ in range(main.LOGIN_MAX_ATTEMPTS):
+            client.post("/auth/password", json={"password": "mala"})
+        return client.post("/auth/password", json={"password": "mala"})
+
+    def test_cada_bloqueo_dura_el_doble_que_el_anterior(self, client):
+        r1 = self._agotar(client)
+        assert r1.status_code == 429
+        assert int(r1.headers["Retry-After"]) == main.LOGIN_WINDOW_SECONDS
+
+        # Cumplido el castigo se puede reintentar, pero el siguiente sale al doble
+        _envejecer_limitador(main.LOGIN_WINDOW_SECONDS + 1)
+        r2 = self._agotar(client)
+        assert r2.status_code == 429
+        assert int(r2.headers["Retry-After"]) == main.LOGIN_WINDOW_SECONDS * 2
+
+        _envejecer_limitador(main.LOGIN_WINDOW_SECONDS * 2 + 1)
+        r3 = self._agotar(client)
+        assert int(r3.headers["Retry-After"]) == main.LOGIN_WINDOW_SECONDS * 4
+
+    def test_el_bloqueo_tiene_techo(self, client):
+        espera = main.LOGIN_WINDOW_SECONDS
+        for _ in range(6):
+            r = self._agotar(client)
+            espera = int(r.headers["Retry-After"])
+            _envejecer_limitador(espera + 1)
+        assert espera == main.LOGIN_BLOQUEO_MAX_SECONDS
+
+    def test_durante_el_bloqueo_ni_la_contrasena_buena_entra(self, client):
+        self._agotar(client)
+        assert client.post("/auth/password", json={"password": "1234"}).status_code == 429
+
+    def test_un_login_correcto_borra_tambien_el_historial_de_bloqueos(self, client):
+        self._agotar(client)
+        _envejecer_limitador(main.LOGIN_WINDOW_SECONDS + 1)
+        assert client.post("/auth/password", json={"password": "1234"}).status_code == 200
+        # Historial limpio: el próximo bloqueo vuelve a ser el de primera vez
+        r = self._agotar(client)
+        assert int(r.headers["Retry-After"]) == main.LOGIN_WINDOW_SECONDS
+
+
+class TestPurgaDelLimitador:
+    def test_las_ips_caducadas_no_se_acumulan(self, client):
+        """El diccionario solo se podaba para la IP consultada, así que cada IP que
+        probaba una vez y no volvía se quedaba dentro para siempre."""
+        viejo = time.time() - main.LOGIN_WINDOW_SECONDS - 60
+        with main._login_lock:
+            for i in range(main._LOGIN_MAX_IPS + 50):
+                main._login_attempts[f"10.0.{i // 256}.{i % 256}"] = {
+                    "fallos": [viejo], "bloqueos": 0, "hasta": 0.0,
+                }
+        assert len(main._login_attempts) > main._LOGIN_MAX_IPS
+
+        client.post("/auth/password", json={"password": "mala"})
+        # Solo sobrevive la IP del intento que se acaba de hacer
+        assert len(main._login_attempts) == 1
+
+    def test_una_ip_con_bloqueo_activo_no_se_purga(self, client):
+        with main._login_lock:
+            main._login_attempts["1.2.3.4"] = {
+                "fallos": [], "bloqueos": 3, "hasta": time.time() + 9999,
+            }
+            for i in range(main._LOGIN_MAX_IPS + 5):
+                main._login_attempts[f"10.1.{i // 256}.{i % 256}"] = {
+                    "fallos": [0.0], "bloqueos": 0, "hasta": 0.0,
+                }
+        client.post("/auth/password", json={"password": "mala"})
+        assert "1.2.3.4" in main._login_attempts
 
 
 # ── Protección con JWT ────────────────────────────────────────────────────────

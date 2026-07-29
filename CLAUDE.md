@@ -85,7 +85,14 @@ Ficheros clave:
      (tiempo constante, y **falso si el token esperado no está configurado**).
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
-3. **Rate limiting del login**: 5 intentos / 5 min por IP, en memoria (`_login_attempts`).
+3. **Rate limiting del login**: 5 intentos / 5 min por IP, en memoria (`_login_attempts`),
+   y **bloqueo progresivo**: cada vez que la misma IP agota los intentos, el bloqueo
+   siguiente dura el doble que el anterior (5 min → 10 → 20 → …) hasta
+   `LOGIN_BLOQUEO_MAX_SECONDS`. Un login correcto lo borra todo, incluido el contador de
+   bloqueos. Nunca se implemente esto durmiendo la petición: un `sleep` retiene un hilo
+   del pool de FastAPI y convierte la defensa en un vector de DoS. El diccionario se
+   purga de IPs caducadas al pasar de `_LOGIN_MAX_IPS` — antes solo se podaba la entrada
+   de la IP consultada, así que crecía sin tope.
    Se resetea en cold start de Fly, y eso es aceptable para este caso. La IP sale de
    `_client_ip()`, que **solo usa fuentes que el cliente no controla**: `Fly-Client-IP`
    (y solo si `FLY_APP_NAME` confirma que estamos en Fly) o el socket. Nunca fiarse de
@@ -186,6 +193,15 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   bienestar también vive allí: `wellnessBreakdown` construye el desglose y
   `scoreFromBreakdown` deriva de él el total normalizado a 100 — **el desglose es la
   única fuente de verdad, nunca sumes al score por separado**.
+  `wellnessHistory` reconstruye la puntuación DIARIA de cada día del histórico con
+  esas mismas dos funciones (modo diario) a partir de las series que ya sirve
+  `/health/metrics`: **no hay tabla ni endpoint de histórico, se deriva de lo que ya
+  hay**. Alimenta la sparkline de "Evolución" del widget de bienestar. Si añades un
+  componente a `wellnessBreakdown`, añádelo también al mapa de series de
+  `wellnessHistory` o los días antiguos puntuarán sobre menos componentes que hoy.
+  Las métricas esporádicas (VO₂max, % grasa, recuperación cardio) arrastran su último
+  valor conocido hasta cada fecha, y la referencia de HRV se ancla a la ventana
+  D-14..D-8 de ese día, no a hoy: así cada día puntúa como habría puntuado entonces.
   Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
@@ -227,7 +243,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 181 tests)
+### Backend (`tests/backend`, 187 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -241,7 +257,7 @@ WOL se resetean entre tests automáticamente.
 Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`.
 
-### Frontend (`tests/frontend`, 62 tests)
+### Frontend (`tests/frontend`, 71 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
