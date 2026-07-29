@@ -85,18 +85,19 @@ def mock_requests(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Estado en memoria limpio entre tests (rate limiting y flags WOL/relanzado)."""
-    with main._login_lock:
-        main._login_attempts.clear()
-    main._wol_pending = False
-    main._agent_relaunch_pending = False
-    main._pc_power_action = None
+    """Estado en memoria limpio entre tests (rate limiting, flags WOL/relanzado y la
+    copia en memoria del token de Graph)."""
+    def _limpiar():
+        with main._login_lock:
+            main._login_attempts.clear()
+        main._wol_pending = False
+        main._agent_relaunch_pending = False
+        main._pc_power_action = None
+        main._token_cache = None
+
+    _limpiar()
     yield
-    with main._login_lock:
-        main._login_attempts.clear()
-    main._wol_pending = False
-    main._agent_relaunch_pending = False
-    main._pc_power_action = None
+    _limpiar()
 
 
 @pytest.fixture

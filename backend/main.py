@@ -10,7 +10,6 @@ from jose import JWTError, jwt
 from openai import OpenAI
 import msal
 import requests
-import httpx
 import os
 import json
 import re
@@ -322,11 +321,44 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
 OAUTH_PROVIDER = "microsoft_graph"
 
+# Cliente MSAL compartido. Se construía de cero en /auth/login, /auth/callback y en
+# cada renovación de token, y cada construcción descubre la autoridad
+# (login.microsoftonline.com) por red antes de poder hacer nada. Perezoso, además,
+# para no exigir credenciales de Graph al importar el módulo.
+_msal_cliente = None
+_msal_lock = threading.Lock()
+
+
+def _msal_app() -> msal.ConfidentialClientApplication:
+    global _msal_cliente
+    with _msal_lock:
+        if _msal_cliente is None:
+            _msal_cliente = msal.ConfidentialClientApplication(
+                CLIENT_ID,
+                authority="https://login.microsoftonline.com/common",
+                client_credential=CLIENT_SECRET,
+                timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
+            )
+        return _msal_cliente
+
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 DIAS_SEMANA = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 _SAFE_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
+
+# Los ids de recurso se interpolan en las URLs de Supabase, así que todos los path
+# params que sean UUID se validan con este patrón. Estaba copiado literalmente en
+# cinco endpoints: una sola definición evita que a alguno se le olvide.
+_UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+
+def _uuid_path():
+    """Validador de path param UUID. Es una FÁBRICA, no una constante: FastAPI asocia
+    cada objeto Path() al nombre del parámetro que lo usa, así que compartir una única
+    instancia entre endpoints con nombres distintos (idea_id, item_id, session_id…)
+    hacía que todos heredaran el último nombre registrado y devolvieran 422."""
+    return Path(..., pattern=_UUID_PATTERN)
 
 _wol_pending = False
 # El agente PC es efímero (arranca con Windows, drena la cola y se cierra). Si el PC
@@ -343,6 +375,21 @@ def _clean_class_title(subject: str) -> str:
     s = re.sub(r"\s*Grupo:\s*\d+\s*-\s*Asignatura\s*$", "", s, flags=re.IGNORECASE)
     return s.strip()
 
+# Copia en memoria del token de Graph. Cada endpoint de calendario llamaba a
+# get_valid_token(), y este leía la tabla oauth_tokens de Supabase: una carga del
+# dashboard son dos viajes de red que solo sirven para releer un token que no ha
+# cambiado, y el sondeo de HA suma otro por minuto. El proceso es uno solo, así que
+# guardarlo aquí es seguro; expires_at manda y la escritura invalida la copia.
+_token_cache: dict | None = None
+_token_cache_lock = threading.Lock()
+
+
+def _cachear_token(data: dict | None):
+    global _token_cache
+    with _token_cache_lock:
+        _token_cache = data
+
+
 def save_token_data(data: dict):
     """Persiste el token de Microsoft Graph en Supabase (sobrevive a redeploys del backend)."""
     payload = {
@@ -357,25 +404,35 @@ def save_token_data(data: dict):
         headers=supabase_headers(),
     )
     if r.status_code < 300 and r.json():
-        http.patch(
+        w = http.patch(
             f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}",
             headers={**supabase_headers(), "Prefer": "return=minimal"},
             json=payload,
         )
     else:
-        http.post(
+        w = http.post(
             f"{SUPABASE_URL}/rest/v1/oauth_tokens",
             headers={**supabase_headers(), "Prefer": "return=minimal"},
             json=payload,
         )
+    # Si la escritura falla, el token renovado solo vive en memoria: al reiniciar Fly
+    # habrá que volver a pasar por /auth/login. Sin este log, en silencio.
+    if w.status_code >= 300:
+        logger.error("No se pudo persistir el token de Graph (%s): %s", w.status_code, (w.text or "")[:500])
+    _cachear_token(payload)
 
 def load_token_data() -> dict | None:
+    with _token_cache_lock:
+        if _token_cache is not None:
+            return _token_cache
     r = http.get(
         f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{OAUTH_PROVIDER}&select=access_token,refresh_token,expires_at",
         headers=supabase_headers(),
     )
     if r.status_code < 300 and r.json():
-        return r.json()[0]
+        data = r.json()[0]
+        _cachear_token(data)
+        return data
     return None
 
 def get_valid_token() -> str | None:
@@ -390,16 +447,14 @@ def get_valid_token() -> str | None:
     refresh_token = data.get("refresh_token")
     if not refresh_token:
         return None
-    msal_app = msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority="https://login.microsoftonline.com/common",
-        client_credential=CLIENT_SECRET,
-        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
-    )
-    result = msal_app.acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
+    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
     if "access_token" in result:
         _store_result(result)
         return result["access_token"]
+    # El refresh ha fallado (token revocado o caducado): tirar la copia para que el
+    # siguiente intento vuelva a leer de Supabase en vez de reintentar con lo mismo.
+    logger.error("Renovación del token de Graph fallida: %s", result.get("error_description", result.get("error", "?")))
+    _cachear_token(None)
     return None
 
 def _store_result(result: dict):
@@ -424,13 +479,7 @@ def login_password(body: LoginRequest, request: Request):
 
 @app.get("/auth/login")
 def login():
-    app_msal = msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority="https://login.microsoftonline.com/common",
-        client_credential=CLIENT_SECRET,
-        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
-    )
-    auth_url = app_msal.get_authorization_request_url(
+    auth_url = _msal_app().get_authorization_request_url(
         SCOPES,
         redirect_uri=REDIRECT_URI,
     )
@@ -438,13 +487,7 @@ def login():
 
 @app.get("/auth/callback")
 def callback(code: str):
-    app_msal = msal.ConfidentialClientApplication(
-        CLIENT_ID,
-        authority="https://login.microsoftonline.com/common",
-        client_credential=CLIENT_SECRET,
-        timeout=HTTP_TIMEOUT,   # msal usa su propia sesión: sin esto, sin timeout
-    )
-    result = app_msal.acquire_token_by_authorization_code(
+    result = _msal_app().acquire_token_by_authorization_code(
         code,
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
@@ -691,7 +734,20 @@ def get_departure_time(
         params["departure_time"] = "now"
         params["traffic_model"] = "best_guess"
     r = http.get(url, params=params)
-    data = r.json()
+    # Un error de Maps (cuota agotada, key inválida) no llega como JSON con la forma
+    # esperada: sin esta comprobación, `.json()` reventaba con ValueError sin registrar
+    # nada y el cliente veía un 500 pelado.
+    if r.status_code >= 300:
+        logger.error("Maps distancematrix %s: %s", r.status_code, (r.text or "")[:500])
+        raise HTTPException(status_code=502, detail="No se pudo consultar Google Maps")
+    try:
+        data = r.json()
+    except ValueError:
+        logger.error("Maps distancematrix: respuesta no-JSON")
+        raise HTTPException(status_code=502, detail="Respuesta inesperada de Google Maps")
+    if data.get("status") not in (None, "OK"):
+        logger.error("Maps distancematrix status=%s: %s", data.get("status"), data.get("error_message", "")[:300])
+        raise HTTPException(status_code=502, detail="No se pudo calcular la ruta")
 
     try:
         element = data["rows"][0]["elements"][0]
@@ -791,11 +847,15 @@ def get_ideas(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
         f"{SUPABASE_URL}/rest/v1/ideas?order=created_at.desc",
         headers=supabase_headers(),
     )
+    # Sin comprobar el estado, el cuerpo de error de Supabase (con sus mensajes
+    # internos) se reenviaba tal cual al cliente — justo lo que evita _supabase_error.
+    if r.status_code >= 300:
+        raise _supabase_error(r)
     return r.json()
 
 @app.delete("/ideas/{idea_id}")
 def delete_idea(
-    idea_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    idea_id: str = _uuid_path(),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     r = http.delete(
@@ -944,12 +1004,20 @@ _EXPORT_TABLES = (
 def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Devuelve todos los datos personales en un único JSON para backup manual."""
     export: dict = {"exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    for key, table, order in _EXPORT_TABLES:
+
+    def _tabla(table: str, order: str):
         # limit alto para traer el histórico completo de cada tabla en una llamada.
-        r = http.get(
+        return http.get(
             f"{SUPABASE_URL}/rest/v1/{table}?{order}&limit=100000",
             headers=supabase_headers(),
         )
+
+    # Las seis tablas son independientes entre sí: en serie el backup costaba la suma
+    # de las seis latencias (y aquí cada fila puede traer el histórico entero).
+    with ThreadPoolExecutor(max_workers=len(_EXPORT_TABLES)) as pool:
+        respuestas = list(pool.map(lambda t: _tabla(t[1], t[2]), _EXPORT_TABLES))
+
+    for (key, _table, _order), r in zip(_EXPORT_TABLES, respuestas):
         if r.status_code >= 300:
             raise _supabase_error(r)
         export[key] = r.json()
@@ -1013,7 +1081,7 @@ def create_clothing(
 
 @app.delete("/clothing/{item_id}")
 def delete_clothing(
-    item_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    item_id: str = _uuid_path(),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     r = http.delete(
@@ -1047,6 +1115,12 @@ def ha_events_soon(request: Request, token: str = ""):
         "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime",
         headers=headers,
     )
+    # Sin esta comprobación, un fallo de Graph acababa en `.json()` sobre un cuerpo que
+    # puede no ser JSON (500 con HTML → excepción y 500 propio) o en un `.get("value")`
+    # vacío que HA interpreta como "no hay nada a la vista". Se registra y se devuelve
+    # el mismo `{"event": None}` de siempre para no romper la automatización.
+    if _graph_fallo(response, "calendarView (ha/events/soon)"):
+        return {"event": None}
     for event in response.json().get("value", []):
         if event.get("isAllDay"):
             continue
@@ -1148,7 +1222,7 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data2 = r2.json() if r2.status_code < 300 else []
     return {"ok": True, "job": data2[0] if data2 else None}
 
-_JOB_ID_PATH = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_JOB_ID_PATH = _uuid_path()
 
 @app.get("/jobs/by-id/{job_id}")
 def get_job_by_id(
@@ -1480,7 +1554,7 @@ def update_training_client(
 
 @app.delete("/training/sessions/{session_id}")
 def delete_training_session(
-    session_id: str = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    session_id: str = _uuid_path(),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     r = http.delete(
