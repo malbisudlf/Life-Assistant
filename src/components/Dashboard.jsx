@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
@@ -23,6 +23,19 @@ const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avis
 // poll_pending_job en agent/agent.py), así que pasado ese punto no lo va a recoger
 // nadie y seguir preguntando no aporta nada.
 const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
+
+// Cabeceras de una llamada autenticada. El token se lee en el momento y no se captura
+// en un closure: si la sesión se renueva a mitad de una pantalla, la siguiente llamada
+// ya usa el nuevo. Único sitio que toca el esquema de autenticación.
+function authHeaders(extra = {}) {
+  const token = localStorage.getItem("la_token") || "";
+  return { "Authorization": `Bearer ${token}`, ...extra };
+}
+
+// Atajo para las llamadas que mandan JSON, que son casi todas las de escritura.
+function jsonHeaders() {
+  return authHeaders({ "Content-Type": "application/json" });
+}
 
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
@@ -185,6 +198,57 @@ function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null
       )}
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+// Fuera del componente a propósito. Definido dentro, cada render de Dashboard creaba
+// un TIPO de componente nuevo, así que React desmontaba y volvía a montar todo este
+// subárbol en lugar de actualizarlo — dos veces por minuto solo por el tic del reloj,
+// y cualquier estado propio que se le añadiera se habría perdido solo.
+function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickingId,
+                           setDeparturePickingId, setDepartureMap, fetchDeparture }) {
+  if (!ev?.loc) return null;
+  const key = ev.id || ev.start;
+  const info = departureMap[key];
+  const isLoading = departureLoadingId === key;
+  const isPicking = departurePickingId === key;
+  const btnBase = { border: "0.5px solid", borderRadius: 6, fontSize: 11, padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" };
+  return (
+    <div style={{ marginTop: 6 }}>
+      {!info && !isLoading && !isPicking && (
+        <button onClick={e => { e.stopPropagation(); setDeparturePickingId(key); }} style={{
+          ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
+        }}>¿A qué hora salir?</button>
+      )}
+      {isPicking && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "driving"); }} style={{
+            ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
+          }}>🚗 En coche</button>
+          <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "walking"); }} style={{
+            ...btnBase, background: "rgba(100,180,130,0.12)", borderColor: "rgba(100,180,130,0.3)", color: "var(--green)",
+          }}>🚶 Andando</button>
+          <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} style={{
+            ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "4px 6px",
+          }}>✕</button>
+        </div>
+      )}
+      {isLoading && <div style={{ fontSize: 11, color: "var(--muted)" }}>Calculando ruta...</div>}
+      {info && !info.error && (
+        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.6 }}>
+          <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>
+            {info.mode === "walking" ? "🚶" : "🚗"} Salir a las {info.departure_time}
+          </span>
+          <span style={{ color: "var(--muted)", marginLeft: 8 }}>
+            {info.duration_text} · {info.distance_text}
+          </span>
+          <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} style={{
+            ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
+          }}>↺</button>
+        </div>
+      )}
+      {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
+    </div>
   );
 }
 
@@ -636,8 +700,7 @@ export default function Dashboard() {
 
   // Cargar eventos
   function loadEvents() {
-    const t = localStorage.getItem("la_token") || "";
-    return apiFetch(`${API}/calendar/events`, { headers: { "Authorization": `Bearer ${t}` } })
+    return apiFetch(`${API}/calendar/events`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => {
         if (data.error) { setAuthNeeded(true); setLoading(false); return; }
@@ -666,8 +729,7 @@ export default function Dashboard() {
     setEventCreateError(null);
     setShowCreateEvent(true);
     if (calendarsList.length === 0) {
-      const t = localStorage.getItem("la_token") || "";
-      apiFetch(`${API}/calendar/calendars`, { headers: { "Authorization": `Bearer ${t}` } })
+      apiFetch(`${API}/calendar/calendars`, { headers: authHeaders() })
         .then(r => r.json())
         .then(data => { if (Array.isArray(data)) setCalendarsList(data); })
         .catch(() => {});
@@ -708,7 +770,6 @@ export default function Dashboard() {
     }
     setEventCreating(true);
     setEventCreateError(null);
-    const t = localStorage.getItem("la_token") || "";
     try {
       const payload = {
         subject: subject.trim(),
@@ -723,14 +784,14 @@ export default function Dashboard() {
       if (editingEventId) {
         r = await apiFetch(`${API}/calendar/events/${editingEventId}`, {
           method: "PATCH",
-          headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+          headers: jsonHeaders(),
           body: JSON.stringify(payload),
         });
       } else {
         payload.calendar_id = calendarId || null;
         r = await apiFetch(`${API}/calendar/events`, {
           method: "POST",
-          headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+          headers: jsonHeaders(),
           body: JSON.stringify(payload),
         });
       }
@@ -750,33 +811,30 @@ export default function Dashboard() {
 
   // Cargar clases
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    if (!t) return;
-    apiFetch(`${API}/calendar/classes`, { headers: { "Authorization": `Bearer ${t}` } })
+    if (!token) return;
+    apiFetch(`${API}/calendar/classes`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data.events)) setClassEvents(data.events);
       })
       .catch(() => { /* mejor esfuerzo: sin clases si falla */ });
-  }, []);
+  }, [token]);
 
   // Cargar resumen entrenamiento
   useEffect(() => { loadTraining(); }, []);
 
   // Cargar datos de salud
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    if (!t) return;
-    apiFetch(`${API}/health/metrics?days=30`, { headers: { "Authorization": `Bearer ${t}` } })
+    if (!token) return;
+    apiFetch(`${API}/health/metrics?days=30`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
       .catch(() => setHealthLoading(false));
-  }, []);
+  }, [token]);
 
   // Cargar ideas
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    apiFetch(`${API}/ideas`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/ideas`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
       .catch(() => {});
@@ -784,13 +842,12 @@ export default function Dashboard() {
 
   // Cargar conteo de ropa
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    if (!t) return;
-    apiFetch(`${API}/clothing`, { headers: { "Authorization": `Bearer ${t}` } })
+    if (!token) return;
+    apiFetch(`${API}/clothing`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
-  }, []);
+  }, [token]);
 
   // Geolocalización del dispositivo (para clima y origen del cálculo de salida).
   // Solo se pide con sesión iniciada (si no, el prompt saldría en la pantalla de
@@ -808,14 +865,13 @@ export default function Dashboard() {
   // Cargar clima — con las coordenadas del dispositivo si las hay, si no las fijas.
   // Espera a que la geolocalización se resuelva (coords o false) para no pedir dos veces.
   useEffect(() => {
-    const t = localStorage.getItem("la_token") || "";
-    if (!t || geo === null) return;
+    if (!token || geo === null) return;
     const q = geo ? `?lat=${geo.lat}&lon=${geo.lon}` : "";
-    apiFetch(`${API}/weather${q}`, { headers: { "Authorization": `Bearer ${t}` } })
+    apiFetch(`${API}/weather${q}`, { headers: authHeaders() })
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data && typeof data.temp === "number") setWeather(data); })
       .catch(() => {});
-  }, [geo]);
+  }, [geo, token]);
 
   // Estado del agente PC (heartbeat). Solo se sondea con el modal de encendido abierto:
   // es el único sitio donde se pinta (isAgentOnline). Sondear siempre, cada 10s, mantenía
@@ -829,7 +885,7 @@ export default function Dashboard() {
     let mounted = true;
     async function loadAgent() {
       try {
-        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${token}` } });
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() });
         const data = await r.json();
         if (mounted) setAgentState(data);
       } catch {
@@ -932,8 +988,7 @@ export default function Dashboard() {
       const fd = new FormData();
       fd.append("audio", blob, "audio.webm");
       try {
-        const t = localStorage.getItem("la_token") || "";
-        const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: { "Authorization": `Bearer ${t}` }, body: fd });
+        const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: authHeaders(), body: fd });
         const data = await res.json();
         if (data.ok) {
           setIdeas(prev => [data.idea, ...prev]);
@@ -962,7 +1017,6 @@ export default function Dashboard() {
   async function crearEventoDesdeIdea() {
     if (!eventoSugerido || sugerenciaEstado === "creando") return;
     setSugerenciaEstado("creando");
-    const t = localStorage.getItem("la_token") || "";
     // Sin hora concreta se coloca a las 9:00 como marcador del día; con hora, una hora de duración.
     const inicio = eventoSugerido.hora || "09:00";
     const [hh, mm] = inicio.split(":").map(Number);
@@ -970,7 +1024,7 @@ export default function Dashboard() {
     try {
       const r = await apiFetch(`${API}/calendar/events`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({
           subject: eventoSugerido.titulo,
           start: `${eventoSugerido.fecha}T${inicio}:00`,
@@ -1005,10 +1059,9 @@ export default function Dashboard() {
     setTextIdeaSubmitting(true);
     setTextIdeaError(null);
     try {
-      const t = localStorage.getItem("la_token") || "";
       const res = await apiFetch(`${API}/ideas/text`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({ text }),
       });
       const data = await res.json();
@@ -1031,8 +1084,7 @@ export default function Dashboard() {
     if (exporting) return;
     setExporting(true);
     try {
-      const t   = localStorage.getItem("la_token") || "";
-      const res = await apiFetch(`${API}/export`, { headers: { "Authorization": `Bearer ${t}` } });
+      const res = await apiFetch(`${API}/export`, { headers: authHeaders() });
       const data = await res.json();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url  = URL.createObjectURL(blob);
@@ -1053,14 +1105,13 @@ export default function Dashboard() {
     setDeparturePickingId(null);
     setDepartureLoadingId(key);
     try {
-      const t = localStorage.getItem("la_token") || "";
       // Origen = ubicación del dispositivo si hay geolocalización; si no, el backend
       // usa HOME_ADDRESS por defecto (no mandamos 'origin').
       const body = { destination: ev.loc, event_time: ev.start, mode };
       if (geo) body.origin = `${geo.lat},${geo.lon}`;
       const res = await apiFetch(`${API}/maps/departure`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -1071,62 +1122,16 @@ export default function Dashboard() {
     setDepartureLoadingId(null);
   }
 
-  function DepartureWidget({ ev }) {
-    if (!ev?.loc) return null;
-    const key = ev.id || ev.start;
-    const info = departureMap[key];
-    const isLoading = departureLoadingId === key;
-    const isPicking = departurePickingId === key;
-    const btnBase = { border: "0.5px solid", borderRadius: 6, fontSize: 11, padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" };
-    return (
-      <div style={{ marginTop: 6 }}>
-        {!info && !isLoading && !isPicking && (
-          <button onClick={e => { e.stopPropagation(); setDeparturePickingId(key); }} style={{
-            ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
-          }}>¿A qué hora salir?</button>
-        )}
-        {isPicking && (
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "driving"); }} style={{
-              ...btnBase, background: "rgba(200,169,110,0.12)", borderColor: "rgba(200,169,110,0.3)", color: "var(--accent)",
-            }}>🚗 En coche</button>
-            <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "walking"); }} style={{
-              ...btnBase, background: "rgba(100,180,130,0.12)", borderColor: "rgba(100,180,130,0.3)", color: "var(--green)",
-            }}>🚶 Andando</button>
-            <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} style={{
-              ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "4px 6px",
-            }}>✕</button>
-          </div>
-        )}
-        {isLoading && <div style={{ fontSize: 11, color: "var(--muted)" }}>Calculando ruta...</div>}
-        {info && !info.error && (
-          <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.6 }}>
-            <span style={{ color: "var(--accent)", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>
-              {info.mode === "walking" ? "🚶" : "🚗"} Salir a las {info.departure_time}
-            </span>
-            <span style={{ color: "var(--muted)", marginLeft: 8 }}>
-              {info.duration_text} · {info.distance_text}
-            </span>
-            <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} style={{
-              ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
-            }}>↺</button>
-          </div>
-        )}
-        {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
-      </div>
-    );
-  }
 
   async function wakePC() {
     setWolStatus("loading");
     try {
-      const t = localStorage.getItem("la_token") || "";
 
       // 1. WOL: pone flag en el backend → HA lo recoge en su poll y envía el magic packet
       try {
         await apiFetch(`${API}/wake-pc`, {
           method: "POST",
-          headers: { "Authorization": `Bearer ${t}` },
+          headers: authHeaders(),
         });
       } catch {
         // best-effort, no bloquea el flujo
@@ -1135,7 +1140,7 @@ export default function Dashboard() {
       // 2. Crear job en Supabase via backend — esto sí es crítico
       const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({
           dedupe_key: `entrega-${wolModal.title}-${Date.now()}`,
           payload: {
@@ -1164,7 +1169,6 @@ export default function Dashboard() {
   async function abrirStreaming() {
     setPcModal(true);
     setPcStatus("loading");
-    const t = localStorage.getItem("la_token") || "";
     setActiveJobId(null);
     setJobEvents([]);
     setJobTerminal(null);
@@ -1174,7 +1178,7 @@ export default function Dashboard() {
       try {
         await apiFetch(`${API}/wake-pc`, {
           method: "POST",
-          headers: { "Authorization": `Bearer ${t}` },
+          headers: authHeaders(),
         });
       } catch { /* mejor esfuerzo: el job es lo crítico */ }
 
@@ -1183,14 +1187,14 @@ export default function Dashboard() {
       try {
         await apiFetch(`${API}/relaunch-agent`, {
           method: "POST",
-          headers: { "Authorization": `Bearer ${t}` },
+          headers: authHeaders(),
         });
       } catch { /* mejor esfuerzo */ }
 
       // 3. Job de abrir Sunshine (crítico): el agente lo despacha al arrancar.
       const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({
           dedupe_key: `abrir_streaming-${Date.now()}`,
           payload: { accion: "abrir_streaming" },
@@ -1210,11 +1214,10 @@ export default function Dashboard() {
   async function pcPowerAction(accion) {
     setConfirmShutdown(false);
     setPcPower(accion === "shutdown" ? "shutting" : "suspending");
-    const t = localStorage.getItem("la_token") || "";
     try {
       const r = await apiFetch(`${API}/${accion === "shutdown" ? "shutdown-pc" : "suspend-pc"}`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}` },
+        headers: authHeaders(),
       });
       setPcPower(r.ok ? (accion === "shutdown" ? "shutdown_sent" : "suspend_sent") : "error");
     } catch {
@@ -1223,12 +1226,11 @@ export default function Dashboard() {
   }
 
   async function excludeSleepNight(date) {
-    const t = localStorage.getItem("la_token") || "";
     setSleepExcluding(date);
     try {
       const r = await apiFetch(`${API}/health/sleep/${date}/exclude`, {
         method: "PATCH",
-        headers: { "Authorization": `Bearer ${t}` },
+        headers: authHeaders(),
       });
       if (r.ok) {
         const { excluded } = await r.json();
@@ -1250,8 +1252,7 @@ export default function Dashboard() {
   }
 
   async function deleteIdea(id) {
-    const t = localStorage.getItem("la_token") || "";
-    await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: authHeaders() });
     setIdeas(prev => prev.filter(i => i.id !== id));
   }
 
@@ -1296,11 +1297,10 @@ export default function Dashboard() {
     const price = parseFloat(String(clothingPrice).replace(",", "."));
     setClothingSaving(true);
     setClothingError(null);
-    const t = localStorage.getItem("la_token") || "";
     try {
       const r = await apiFetch(`${API}/clothing`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({
           name:     clothingName.trim(),
           price:    Number.isFinite(price) ? price : 0,
@@ -1325,9 +1325,8 @@ export default function Dashboard() {
   }
 
   async function deleteClothing(id) {
-    const t = localStorage.getItem("la_token") || "";
     try {
-      const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+      const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: authHeaders() });
       if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
     } catch { /* mejor esfuerzo: ignorar */ }
   }
@@ -1340,7 +1339,6 @@ export default function Dashboard() {
   async function cargarEstadoSistema() {
     if (sysLoading) return;
     setSysLoading(true);
-    const t  = localStorage.getItem("la_token") || "";
     const t0 = (typeof performance !== "undefined" ? performance : Date).now();
 
     // El backend escala a cero: la primera petición tras un rato mide el arranque en frío.
@@ -1353,7 +1351,7 @@ export default function Dashboard() {
     let agente = null;
     if (backend.ok) {
       try {
-        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: { "Authorization": `Bearer ${t}` } });
+        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() });
         if (r.ok) agente = await r.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
     }
@@ -1363,9 +1361,8 @@ export default function Dashboard() {
   }
 
   async function loadTraining() {
-    const t = localStorage.getItem("la_token") || "";
     try {
-      const r = await apiFetch(`${API}/training/summary`, { headers: { "Authorization": `Bearer ${t}` } });
+      const r = await apiFetch(`${API}/training/summary`, { headers: authHeaders() });
       const data = await r.json();
       setTraining(data);
     } catch { /* mejor esfuerzo: ignorar */ }
@@ -1374,11 +1371,10 @@ export default function Dashboard() {
   async function submitSession() {
     if (trainingLoading) return;
     setTrainingLoading(true);
-    const t = localStorage.getItem("la_token") || "";
     try {
       await apiFetch(`${API}/training/sessions`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({ date: sessionDate, duration_hours: parseFloat(sessionHours) }),
       });
       setShowSessionForm(false);
@@ -1388,19 +1384,17 @@ export default function Dashboard() {
   }
 
   async function deleteTrainingSession(sessionId) {
-    const t = localStorage.getItem("la_token") || "";
-    await apiFetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: { "Authorization": `Bearer ${t}` } });
+    await apiFetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: authHeaders() });
     await loadTraining();
   }
 
   async function updateTrainingClient(patch) {
     if (trainingSettingsSaving) return;
     setTrainingSettingsSaving(true);
-    const t = localStorage.getItem("la_token") || "";
     try {
       await apiFetch(`${API}/training/client`, {
         method: "PATCH",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify(patch),
       });
       await loadTraining();
@@ -1411,12 +1405,11 @@ export default function Dashboard() {
   async function submitPayment() {
     if (trainingLoading) return;
     setTrainingLoading(true);
-    const t = localStorage.getItem("la_token") || "";
     const today = new Date().toISOString().slice(0, 10);
     try {
       await apiFetch(`${API}/training/payments`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${t}`, "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({ date: today }),
       });
       await loadTraining();
@@ -1694,7 +1687,6 @@ export default function Dashboard() {
       jobInicioRef.current = { id: activeJobId, t: Date.now() };
     }
     let mounted = true;
-    const t = localStorage.getItem("la_token") || "";
     const id = setInterval(async () => {
       if (Date.now() - jobInicioRef.current.t > JOB_POLL_MAX_MS) {
         if (mounted) setActiveJobId(null);   // el agente ya no lo va a recoger
@@ -1702,8 +1694,8 @@ export default function Dashboard() {
       }
       try {
         const [evRes, jobRes] = await Promise.all([
-          apiFetch(`${API}/jobs/${activeJobId}/events`, { headers: { "Authorization": `Bearer ${t}` } }),
-          apiFetch(`${API}/jobs/by-id/${activeJobId}`, { headers: { "Authorization": `Bearer ${t}` } }),
+          apiFetch(`${API}/jobs/${activeJobId}/events`, { headers: authHeaders() }),
+          apiFetch(`${API}/jobs/by-id/${activeJobId}`, { headers: authHeaders() }),
         ]);
         const evData = await evRes.json();
         const jobData = await jobRes.json();
@@ -1782,6 +1774,140 @@ export default function Dashboard() {
 
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
 
+  // Lo que necesita DepartureWidget, que ahora vive fuera del componente (ver M1).
+  const propsSalida = {
+    departureMap, departureLoadingId, departurePickingId,
+    setDeparturePickingId, setDepartureMap, fetchDeparture,
+  };
+
+  // El motor de conclusiones recorre todas las series y cruza varias entre sí. Lo
+  // llamaban por separado el widget compacto y el modal, así que se ejecutaba dos
+  // veces por render; ahora una vez por cambio de datos y compartido.
+  const conclusionesSalud = useMemo(() => healthConclusions(healthData), [healthData]);
+  const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
+
+  // ── Derivación de las métricas de salud (M2) ───────────────────────────
+  // Esto son ~17 findMetric, decenas de slice y todas las medias. Antes se rehacía
+  // entero en CADA render del Dashboard — o sea dos veces por minuto solo por el tic
+  // del reloj — sobre datos que únicamente cambian cuando llega la sincronización.
+  // `diaActual` está en las dependencias para que lo que depende del día de hoy
+  // (daysSinceWorkout, la semana desde el lunes) se recalcule al pasar la medianoche.
+  const diaActual = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  const datosSalud = useMemo(() => {
+          // ── datos base ──
+          const wSleepEff = d => {
+            if (d.value && d.value > 0) return d.value;
+            if (d.extra?.asleep > 0) return Number(d.extra.asleep);
+            return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
+          };
+          const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: wSleepEff(d) }));
+          const wStepsRaw     = findMetric(healthData, "step_count", "steps");
+          const wHrvRaw       = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
+          const wRhrRaw       = findMetric(healthData, "resting_heart_rate");
+          const wAeRaw        = findMetric(healthData, "active_energy");
+          const wWorkRaw      = findMetric(healthData, "workouts");
+          const wExerciseRaw  = findMetric(healthData, "apple_exercise_time", "exercise_time");
+          const wStandRaw     = findMetric(healthData, "apple_stand_hour", "stand_hour");
+          const wCardioRecRaw = findMetric(healthData, "cardio_recovery");
+          const wVo2Raw       = findMetric(healthData, "vo2_max", "cardioFitness");
+          const wWalkHrRaw    = findMetric(healthData, "walking_heart_rate_average");
+          const wDaylightRaw  = findMetric(healthData, "time_in_daylight");
+          const wRespRaw      = findMetric(healthData, "respiratory_rate");
+          const wWeightRaw    = findMetric(healthData, "weight_body_mass", "weight");
+          const wBodyFatRaw   = findMetric(healthData, "body_fat_percentage");
+          const wLeanMassRaw  = findMetric(healthData, "lean_body_mass");
+          const wFlightsRaw   = findMetric(healthData, "flights_climbed");
+
+          const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
+          const last7Sleep    = wSleepRaw.slice(-7);
+          const last7Steps    = wStepsRaw.slice(-7);
+          const last7Hrv      = wHrvRaw.slice(-7);
+          const last7Rhr      = wRhrRaw.slice(-7);
+          const last7Ae       = wAeRaw.slice(-7);
+          const last7Exercise = wExerciseRaw.slice(-7);
+          const last7Stand    = wStandRaw.slice(-7);
+          const last7WalkHr   = wWalkHrRaw.slice(-7);
+          const last7Daylight = wDaylightRaw.slice(-7);
+          const last7Resp     = wRespRaw.slice(-7);
+          const last7Flights  = wFlightsRaw.slice(-7);
+
+          // Semana actual desde el lunes
+          const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+          const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
+          const dayOfWeek = todayMidnight.getDay(); // 0=dom, 1=lun, ..., 6=sab
+          const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+          const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
+          const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+          const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
+
+          // Días de entrenamiento planificados (configurables)
+          const trainingDaysSet = new Set(trainingDays);
+          let expectedByNow = 0;
+          for (let i = 0; i <= daysToMonday; i++) {
+            if (trainingDaysSet.has((1 + i) % 7)) expectedByNow++;
+          }
+
+          // ── promedios semanales ──
+          const avgSleep    = avg7(last7Sleep);
+          const avgSteps    = avg7(last7Steps);
+          const avgHrv      = avg7(last7Hrv);
+          const prevHrv     = wHrvRaw.slice(-14,-7);
+          const avgHrvPrev  = avg7(prevHrv);
+          const avgRhr      = avg7(last7Rhr);
+          const avgAe       = avg7(last7Ae);
+          const avgExercise = avg7(last7Exercise);
+          const avgStand    = avg7(last7Stand);
+          const avgWalkHr   = avg7(last7WalkHr);
+          const avgDaylight = avg7(last7Daylight);
+          const avgResp     = avg7(last7Resp);
+          const avgFlights  = avg7(last7Flights);
+          const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
+          const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
+          const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
+          // VO2 max y cardio recovery: último valor disponible (actualizan infrecuente)
+          const lastVo2      = wVo2Raw.length ? wVo2Raw[wVo2Raw.length - 1].value : null;
+          const thisWeekRecov = wCardioRecRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
+          const avgCardioRec = thisWeekRecov.length ? avg7(thisWeekRecov) : (wCardioRecRaw.length ? wCardioRecRaw[wCardioRecRaw.length - 1].value : null);
+
+          // ── valores diarios ──
+          const latestOrToday = (arr) => arr.find(d => d.date === todayStr) || arr[arr.length - 1];
+          const todaySleepEntry   = wSleepRaw[wSleepRaw.length - 1];
+          const todaySleep        = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
+          const todaySteps        = latestOrToday(wStepsRaw)?.value > 0 ? latestOrToday(wStepsRaw).value : null;
+          const todayHrv          = latestOrToday(wHrvRaw)?.value > 0 ? latestOrToday(wHrvRaw).value : null;
+          const todayRhr          = latestOrToday(wRhrRaw)?.value > 0 ? latestOrToday(wRhrRaw).value : null;
+          const todayAe           = latestOrToday(wAeRaw)?.value > 0 ? latestOrToday(wAeRaw).value : null;
+          const todayWorkEntry    = wWorkRaw.find(d => d.date === todayStr);
+          const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
+          const todayExercise     = latestOrToday(wExerciseRaw)?.value > 0 ? latestOrToday(wExerciseRaw).value : null;
+          const todayStand        = latestOrToday(wStandRaw)?.value > 0 ? latestOrToday(wStandRaw).value : null;
+          const todayFlights      = latestOrToday(wFlightsRaw)?.value > 0 ? latestOrToday(wFlightsRaw).value : null;
+          const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
+          const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
+          const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
+
+          // ── peso y composición corporal ──
+          const latestWeight  = wWeightRaw.length ? wWeightRaw[wWeightRaw.length - 1] : null;
+          const prevWeight    = wWeightRaw.length >= 2 ? wWeightRaw[wWeightRaw.length - 8] ?? wWeightRaw[0] : null;
+          const currentWeight = latestWeight?.value > 0 ? latestWeight.value : null;
+          const prevWeightVal = prevWeight?.value > 0 ? prevWeight.value : null;
+          const weightDelta   = currentWeight != null && prevWeightVal != null ? currentWeight - prevWeightVal : null;
+          const latestBodyFat = wBodyFatRaw.length ? wBodyFatRaw[wBodyFatRaw.length - 1] : null;
+          const currentBodyFat = latestBodyFat?.value > 0 ? latestBodyFat.value : null;
+          const prevBodyFat   = wBodyFatRaw.length >= 2 ? (wBodyFatRaw[wBodyFatRaw.length - 8] ?? wBodyFatRaw[0]) : null;
+          const bodyFatDelta  = currentBodyFat != null && prevBodyFat?.value > 0 ? currentBodyFat - prevBodyFat.value : null;
+          const latestLean    = wLeanMassRaw.length ? wLeanMassRaw[wLeanMassRaw.length - 1] : null;
+          const currentLean   = latestLean?.value > 0 ? latestLean.value : null;
+          const prevLean      = wLeanMassRaw.length >= 2 ? (wLeanMassRaw[wLeanMassRaw.length - 8] ?? wLeanMassRaw[0]) : null;
+          const leanDelta     = currentLean != null && prevLean?.value > 0 ? currentLean - prevLean.value : null;
+          const targetWeight  = bodyGoals.targetWeight;
+          const targetBodyFat = bodyGoals.targetBodyFat;
+          const weightToGoal  = currentWeight != null && targetWeight ? currentWeight - targetWeight : null;
+
+    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [healthData, trainingDays, bodyGoals, diaActual]);
+
   function renderWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
     const cardStyle = { ...s.card, ...(fixedH ? { height: "100%", overflowY: "auto" } : {}) };
@@ -1841,7 +1967,7 @@ export default function Dashboard() {
                   <div style={{ flex: 1 }}>
                     <div style={s.eventDetailTitle}>{displayActive.title}</div>
                     <div style={s.eventDetailSub}>{displayActive.loc}</div>
-                    <DepartureWidget ev={displayActive} />
+                    <DepartureWidget ev={displayActive} {...propsSalida} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={s.eventDetailTime}>{displayActive.time}</div>
@@ -1875,7 +2001,7 @@ export default function Dashboard() {
                 <div style={{ flex: 1 }}>
                   <div style={s.eventRowTitle}>{ev.title}</div>
                   {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
-                  <DepartureWidget ev={ev} />
+                  <DepartureWidget ev={ev} {...propsSalida} />
                 </div>
                 <span onClick={() => openEditEvent(ev)} title="Editar evento" style={{
                   cursor: "pointer", fontSize: 12, color: "var(--muted)", padding: "2px 4px", flexShrink: 0,
@@ -2250,115 +2376,49 @@ export default function Dashboard() {
         );
       }
       case "health_wellness": {
-        // ── datos base ──
-        const wSleepEff = d => {
-          if (d.value && d.value > 0) return d.value;
-          if (d.extra?.asleep > 0) return Number(d.extra.asleep);
-          return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
-        };
-        const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: wSleepEff(d) }));
-        const wStepsRaw     = findMetric(healthData, "step_count", "steps");
-        const wHrvRaw       = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
-        const wRhrRaw       = findMetric(healthData, "resting_heart_rate");
-        const wAeRaw        = findMetric(healthData, "active_energy");
-        const wWorkRaw      = findMetric(healthData, "workouts");
-        const wExerciseRaw  = findMetric(healthData, "apple_exercise_time", "exercise_time");
-        const wStandRaw     = findMetric(healthData, "apple_stand_hour", "stand_hour");
-        const wCardioRecRaw = findMetric(healthData, "cardio_recovery");
-        const wVo2Raw       = findMetric(healthData, "vo2_max", "cardioFitness");
-        const wWalkHrRaw    = findMetric(healthData, "walking_heart_rate_average");
-        const wDaylightRaw  = findMetric(healthData, "time_in_daylight");
-        const wRespRaw      = findMetric(healthData, "respiratory_rate");
-        const wWeightRaw    = findMetric(healthData, "weight_body_mass", "weight");
-        const wBodyFatRaw   = findMetric(healthData, "body_fat_percentage");
-        const wLeanMassRaw  = findMetric(healthData, "lean_body_mass");
-        const wFlightsRaw   = findMetric(healthData, "flights_climbed");
-
-        const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
-        const last7Sleep    = wSleepRaw.slice(-7);
-        const last7Steps    = wStepsRaw.slice(-7);
-        const last7Hrv      = wHrvRaw.slice(-7);
-        const last7Rhr      = wRhrRaw.slice(-7);
-        const last7Ae       = wAeRaw.slice(-7);
-        const last7Exercise = wExerciseRaw.slice(-7);
-        const last7Stand    = wStandRaw.slice(-7);
-        const last7WalkHr   = wWalkHrRaw.slice(-7);
-        const last7Daylight = wDaylightRaw.slice(-7);
-        const last7Resp     = wRespRaw.slice(-7);
-        const last7Flights  = wFlightsRaw.slice(-7);
-
-        // Semana actual desde el lunes
-        const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
-        const todayStr = `${todayMidnight.getFullYear()}-${String(todayMidnight.getMonth()+1).padStart(2,'0')}-${String(todayMidnight.getDate()).padStart(2,'0')}`;
-        const dayOfWeek = todayMidnight.getDay(); // 0=dom, 1=lun, ..., 6=sab
-        const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-        const weekStart = new Date(todayMidnight); weekStart.setDate(todayMidnight.getDate() - daysToMonday);
-        const thisWeekWork = wWorkRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
-        const weekWorkoutCount = thisWeekWork.reduce((sum, d) => sum + (d.extra?.workouts?.length || 0), 0);
-
-        // Días de entrenamiento planificados (configurables)
-        const trainingDaysSet = new Set(trainingDays);
-        let expectedByNow = 0;
-        for (let i = 0; i <= daysToMonday; i++) {
-          if (trainingDaysSet.has((1 + i) % 7)) expectedByNow++;
-        }
-
-        // ── promedios semanales ──
-        const avgSleep    = avg7(last7Sleep);
-        const avgSteps    = avg7(last7Steps);
-        const avgHrv      = avg7(last7Hrv);
-        const prevHrv     = wHrvRaw.slice(-14,-7);
-        const avgHrvPrev  = avg7(prevHrv);
-        const avgRhr      = avg7(last7Rhr);
-        const avgAe       = avg7(last7Ae);
-        const avgExercise = avg7(last7Exercise);
-        const avgStand    = avg7(last7Stand);
-        const avgWalkHr   = avg7(last7WalkHr);
-        const avgDaylight = avg7(last7Daylight);
-        const avgResp     = avg7(last7Resp);
-        const avgFlights  = avg7(last7Flights);
-        const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
-        const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
-        const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
-        // VO2 max y cardio recovery: último valor disponible (actualizan infrecuente)
-        const lastVo2      = wVo2Raw.length ? wVo2Raw[wVo2Raw.length - 1].value : null;
-        const thisWeekRecov = wCardioRecRaw.filter(d => new Date(d.date + "T00:00:00") >= weekStart);
-        const avgCardioRec = thisWeekRecov.length ? avg7(thisWeekRecov) : (wCardioRecRaw.length ? wCardioRecRaw[wCardioRecRaw.length - 1].value : null);
-
-        // ── valores diarios ──
-        const latestOrToday = (arr) => arr.find(d => d.date === todayStr) || arr[arr.length - 1];
-        const todaySleepEntry   = wSleepRaw[wSleepRaw.length - 1];
-        const todaySleep        = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
-        const todaySteps        = latestOrToday(wStepsRaw)?.value > 0 ? latestOrToday(wStepsRaw).value : null;
-        const todayHrv          = latestOrToday(wHrvRaw)?.value > 0 ? latestOrToday(wHrvRaw).value : null;
-        const todayRhr          = latestOrToday(wRhrRaw)?.value > 0 ? latestOrToday(wRhrRaw).value : null;
-        const todayAe           = latestOrToday(wAeRaw)?.value > 0 ? latestOrToday(wAeRaw).value : null;
-        const todayWorkEntry    = wWorkRaw.find(d => d.date === todayStr);
-        const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
-        const todayExercise     = latestOrToday(wExerciseRaw)?.value > 0 ? latestOrToday(wExerciseRaw).value : null;
-        const todayStand        = latestOrToday(wStandRaw)?.value > 0 ? latestOrToday(wStandRaw).value : null;
-        const todayFlights      = latestOrToday(wFlightsRaw)?.value > 0 ? latestOrToday(wFlightsRaw).value : null;
-        const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
-        const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
-        const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
-
-        // ── peso y composición corporal ──
-        const latestWeight  = wWeightRaw.length ? wWeightRaw[wWeightRaw.length - 1] : null;
-        const prevWeight    = wWeightRaw.length >= 2 ? wWeightRaw[wWeightRaw.length - 8] ?? wWeightRaw[0] : null;
-        const currentWeight = latestWeight?.value > 0 ? latestWeight.value : null;
-        const prevWeightVal = prevWeight?.value > 0 ? prevWeight.value : null;
-        const weightDelta   = currentWeight != null && prevWeightVal != null ? currentWeight - prevWeightVal : null;
-        const latestBodyFat = wBodyFatRaw.length ? wBodyFatRaw[wBodyFatRaw.length - 1] : null;
-        const currentBodyFat = latestBodyFat?.value > 0 ? latestBodyFat.value : null;
-        const prevBodyFat   = wBodyFatRaw.length >= 2 ? (wBodyFatRaw[wBodyFatRaw.length - 8] ?? wBodyFatRaw[0]) : null;
-        const bodyFatDelta  = currentBodyFat != null && prevBodyFat?.value > 0 ? currentBodyFat - prevBodyFat.value : null;
-        const latestLean    = wLeanMassRaw.length ? wLeanMassRaw[wLeanMassRaw.length - 1] : null;
-        const currentLean   = latestLean?.value > 0 ? latestLean.value : null;
-        const prevLean      = wLeanMassRaw.length >= 2 ? (wLeanMassRaw[wLeanMassRaw.length - 8] ?? wLeanMassRaw[0]) : null;
-        const leanDelta     = currentLean != null && prevLean?.value > 0 ? currentLean - prevLean.value : null;
-        const targetWeight  = bodyGoals.targetWeight;
-        const targetBodyFat = bodyGoals.targetBodyFat;
-        const weightToGoal  = currentWeight != null && targetWeight ? currentWeight - targetWeight : null;
+        // Derivado una sola vez por cambio de datos, no por render (ver datosSalud).
+        const {
+          avgAe,
+          avgCardioRec,
+          avgDaylight,
+          avgExercise,
+          avgFlights,
+          avgHrv,
+          avgHrvPrev,
+          avgResp,
+          avgRhr,
+          avgSleep,
+          avgStand,
+          avgSteps,
+          avgWalkHr,
+          bodyFatDelta,
+          currentBodyFat,
+          currentLean,
+          currentWeight,
+          daysSinceWorkout,
+          expectedByNow,
+          last7Sleep,
+          lastVo2,
+          leanDelta,
+          targetBodyFat,
+          targetWeight,
+          todayAe,
+          todayDaylight,
+          todayExercise,
+          todayFlights,
+          todayHrv,
+          todayResp,
+          todayRhr,
+          todaySleep,
+          todayStand,
+          todaySteps,
+          todayWalkHr,
+          todayWorkoutCount,
+          wWeightRaw,
+          weekWorkoutCount,
+          weightDelta,
+          weightToGoal,
+        } = datosSalud;
 
         const isDaily = wellnessView === "daily";
 
@@ -3149,8 +3209,8 @@ export default function Dashboard() {
       case "health_hub": {
         // Widget compacto: veredicto general + top conclusiones. Al pulsar abre el
         // modal con el análisis completo (todas las conclusiones + widgets de detalle).
-        const conclusions = healthConclusions(healthData);
-        const overall     = healthOverall(conclusions);
+        const conclusions = conclusionesSalud;
+        const overall     = veredictoSalud;
         const dot         = { good: "var(--green)", warn: "var(--accent)", bad: "#d4645a", info: "var(--muted)" };
         return (
           <div style={{ ...cardStyle, cursor: "pointer" }} data-card={id} key="health_hub"
@@ -3931,8 +3991,8 @@ export default function Dashboard() {
 
       {/* ── AJUSTES ── */}
       {healthModalOpen && (() => {
-        const conclusions = healthConclusions(healthData);
-        const overall     = healthOverall(conclusions);
+        const conclusions = conclusionesSalud;
+        const overall     = veredictoSalud;
         const dot = { good: "var(--green)", warn: "var(--accent)", bad: "#d4645a", info: "var(--muted)" };
         // Agrupar las conclusiones por dominio para leerlas por bloques.
         const byDomain = {};
@@ -4421,7 +4481,7 @@ export default function Dashboard() {
                           {ev.location && (
                             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>📍 {ev.location}</div>
                           )}
-                          <DepartureWidget ev={{ ...ev, loc: ev.location }} />
+                          <DepartureWidget ev={{ ...ev, loc: ev.location }} {...propsSalida} />
                         </div>
                       </div>
                     );
