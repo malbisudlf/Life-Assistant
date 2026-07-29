@@ -2,7 +2,8 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
+  weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
   healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
   formatMoney, clothingTotals,
@@ -84,33 +85,72 @@ describe("helpers de salud", () => {
   });
 
   test("sleepScore: noche perfecta llega al máximo", () => {
-    // 8h, 18% profundo, 22% REM, resto core, 0 despierto, acostado a las 23h
-    const score = sleepScore(8, 1.44, 1.76, 4.8, 0, "23:00");
+    // 8h, 18% profundo, 22% REM, 0 despierto, acostado a las 23h
+    const score = sleepScore(8, 1.44, 1.76, 0, "23:00");
     expect(score).toBe(100);
   });
 
   test("sleepScore: cap por duración", () => {
     // 7h no puede superar 68 aunque las fases sean perfectas
-    const score = sleepScore(7, 1.26, 1.54, 4.2, 0, "23:00");
+    const score = sleepScore(7, 1.26, 1.54, 0, "23:00");
     expect(score).toBeLessThanOrEqual(68);
     // 6h queda capado a 52
-    const short = sleepScore(6, 1.08, 1.32, 3.6, 0, "23:00");
+    const short = sleepScore(6, 1.08, 1.32, 0, "23:00");
     expect(short).toBeLessThanOrEqual(52);
   });
 
   test("sleepScore: penaliza acostarse tarde", () => {
-    const early = sleepScore(8, 1.44, 1.76, 4.8, 0, "23:00");
-    const late  = sleepScore(8, 1.44, 1.76, 4.8, 0, "03:00");
+    const early = sleepScore(8, 1.44, 1.76, 0, "23:00");
+    const late  = sleepScore(8, 1.44, 1.76, 0, "03:00");
     expect(late).toBeLessThan(early);
     expect(early - late).toBe(15);
   });
 
   test("sleepScore: nunca es negativo y aplica recoveryMod", () => {
-    const bad = sleepScore(1, 0, 0, 0, 0.5, "04:00", -20);
+    const bad = sleepScore(1, 0, 0, 0.5, "04:00", -20);
     expect(bad).toBeGreaterThanOrEqual(0);
-    const base = sleepScore(8, 1.44, 1.76, 4.8, 0, "22:00", 0);
-    const modded = sleepScore(8, 1.44, 1.76, 4.8, 0, "22:00", -10);
+    const base = sleepScore(8, 1.44, 1.76, 0, "22:00", 0);
+    const modded = sleepScore(8, 1.44, 1.76, 0, "22:00", -10);
     expect(base - modded).toBe(10);
+  });
+
+  // El tooltip del widget de sueño llegó a tener su propia copia de los umbrales y se
+  // le coló otra vez el bug histórico del `h >= 1`: enseñaba -10 pts por acostarse a
+  // las 22:00 que la puntuación real nunca aplicaba. Ahora ambos salen del desglose.
+  test("sleepBreakdown: acostarse antes de medianoche no genera fila de penalización", () => {
+    for (const hora of ["21:30", "22:00", "23:45"]) {
+      const filas = sleepBreakdown(8, 1.44, 1.76, 0, hora).filas;
+      expect(filas.find(f => f.label === "Hora de acostarse")).toBeUndefined();
+    }
+    // A partir de medianoche sí penaliza, y con el peso que documenta sleepScore
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "00:30").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -5 });
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "01:15").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -10 });
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "03:00").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -15 });
+  });
+
+  test("sleepBreakdown: las filas suman exactamente el score (sin cap ni recoveryMod)", () => {
+    const casos = [
+      [8,   1.44, 1.76, 0,    "23:00"],
+      [8.5, 0.9,  2.2,  0.4,  "01:00"],
+      [9,   1.2,  1.5,  1.1,  "22:15"],
+    ];
+    for (const c of casos) {
+      const { filas } = sleepBreakdown(...c);
+      const suma = filas.reduce((s, f) => s + f.pts, 0);
+      expect(sleepScore(...c)).toBe(suma);
+    }
+  });
+
+  test("sleepBreakdown: null cuando no hay noche que puntuar", () => {
+    expect(sleepBreakdown(null)).toBeNull();
+    expect(sleepBreakdown(0.4)).toBeNull();
+  });
+
+  test("sleepHours: valor guardado, si no asleep, si no suma de fases", () => {
+    expect(sleepHours({ value: 7.5 })).toBe(7.5);
+    expect(sleepHours({ value: 0, extra: { asleep: 6.2 } })).toBe(6.2);
+    expect(sleepHours({ value: 0, extra: { deep: 1, rem: 1.5, core: 4, light: 0.5 } })).toBe(7);
+    expect(sleepHours(null)).toBe(0);
   });
 
   test("calcRecoveryMod: sin datos no penaliza", () => {

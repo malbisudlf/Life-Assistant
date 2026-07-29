@@ -65,45 +65,71 @@ export function hoursToHM(h) {
   return `${hrs}h ${mins}m`;
 }
 
-export function sleepScore(total, deep, rem, core, awake, sleepStart, recoveryMod = 0) {
+// Horas de sueño efectivas de una fila de sleep_analysis: el valor guardado si lo
+// hay y, si no, la suma de las fases. Vivía copiado en tres sitios (el motor de
+// conclusiones, el memo de métricas del Dashboard y el widget de sueño), con el
+// riesgo de que las copias se separaran.
+export function sleepHours(d) {
+  if (!d) return 0;
+  if (d.value && d.value > 0) return Number(d.value);
+  if (d.extra?.asleep > 0) return Number(d.extra.asleep);
+  return (Number(d.extra?.deep)  || 0) + (Number(d.extra?.rem)  || 0)
+       + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
+}
+
+// Desglose de la puntuación de sueño. Mismo patrón que `wellnessBreakdown`: el
+// desglose es la ÚNICA fuente de verdad de los umbrales y `sleepScore` se limita a
+// sumarlo. Cuando el tooltip del widget tenía su propia copia de estas reglas se le
+// coló otra vez el bug histórico del `h >= 1` en la hora de acostarse: enseñaba una
+// penalización de -10 pts para las 22:00–23:00 que la puntuación real no aplicaba,
+// así que las filas no cuadraban con su propio total. Con una sola fuente ya no
+// puede volver a desincronizarse.
+// Devuelve null si no hay noche suficiente que puntuar, y `{ filas, cap }` si la hay.
+export function sleepBreakdown(total, deep, rem, awake, sleepStart) {
   if (!total || total < 0.5) return null;
-  let s = 0;
+  const filas = [];
+  // Un valor de fase 0 (o ausente) no puntúa como "mal", sino como "sin dato".
+  const pct = parte => parte ? (parte / total) * 100 : null;
+
   // Duración (40 pts) — objetivo 8h para adulto joven
-  if      (total >= 8 && total <= 9.5) s += 40;
-  else if (total >= 7.5)               s += 34;
-  else if (total >= 7)                 s += 26;
-  else if (total >= 6)                 s += 16;
-  else                                 s += 6;
+  const durPts = total >= 8 && total <= 9.5 ? 40 : total >= 7.5 ? 34 : total >= 7 ? 26 : total >= 6 ? 16 : 6;
+  filas.push({ label: "Duración", detail: hoursToHM(total), pts: durPts, max: 40 });
+
   // Sueño profundo (25 pts)
-  const dp = deep ? (deep / total) * 100 : null;
-  if      (dp == null)            s += 12;
-  else if (dp >= 13 && dp <= 23)  s += 25;
-  else if (dp >= 10)              s += 19;
-  else if (dp >= 7)               s += 13;
-  else                            s += 6;
+  const dp = pct(deep);
+  const deepPts = dp == null ? 12 : dp >= 13 && dp <= 23 ? 25 : dp >= 10 ? 19 : dp >= 7 ? 13 : 6;
+  filas.push({ label: "Sueño profundo", detail: deep != null ? `${Math.round(dp ?? 0)}% · ${hoursToHM(deep)}` : "–", pts: deepPts, max: 25 });
+
   // REM (25 pts)
-  const rp = rem ? (rem / total) * 100 : null;
-  if      (rp == null)            s += 12;
-  else if (rp >= 20 && rp <= 25)  s += 25;
-  else if (rp >= 15)              s += 19;
-  else if (rp >= 10)              s += 13;
-  else                            s += 6;
+  const rp = pct(rem);
+  const remPts = rp == null ? 12 : rp >= 20 && rp <= 25 ? 25 : rp >= 15 ? 19 : rp >= 10 ? 13 : 6;
+  filas.push({ label: "REM", detail: rem != null ? `${Math.round(rp ?? 0)}% · ${hoursToHM(rem)}` : "–", pts: remPts, max: 25 });
+
   // Tiempo despierto (10 pts)
   const ap = awake ? (awake / total) * 100 : 0;
-  if      (ap < 5)   s += 10;
-  else if (ap < 10)  s += 7;
-  else if (ap < 15)  s += 4;
-  // Penalización por hora de acostarse
+  const awakePts = ap < 5 ? 10 : ap < 10 ? 7 : ap < 15 ? 4 : 0;
+  filas.push({ label: "Tiempo despierto", detail: awake != null ? `${Math.round(ap)}% · ${hoursToHM(awake)}` : "–", pts: awakePts, max: 10 });
+
+  // Penalización por hora de acostarse. Las horas 0–5 son "pasada medianoche"; de
+  // las 6 en adelante es tarde/noche del día anterior y NO se penaliza (el `h >= 1`
+  // "equivalente" castigaba las 22:00 igual que la 01:00 — ver CLAUDE.md).
   if (sleepStart) {
-    const h = parseInt(sleepStart.slice(0, 2), 10);
-    // Horas nocturnas tardías (0-5) se tratan como "pasada medianoche"
-    if      (h >= 2 && h < 6)  s -= 15;
-    else if (h === 1)          s -= 10;
-    else if (h === 0)          s -= 5;
-    // h >= 6 (tarde/noche antes de medianoche) → sin penalización
+    const h = parseInt(String(sleepStart).slice(0, 2), 10);
+    const pen = h >= 2 && h < 6 ? -15 : h === 1 ? -10 : h === 0 ? -5 : 0;
+    if (pen < 0) filas.push({ label: "Hora de acostarse", detail: String(sleepStart).slice(0, 5), pts: pen, max: 0 });
   }
+
+  // Techo por duración: dormir poco no puede dar una nota alta por muy buenas que
+  // sean las fases.
   const cap = total >= 8 ? 100 : total >= 7.5 ? 82 : total >= 7 ? 68 : 52;
-  return Math.min(cap, Math.max(0, Math.round(s + recoveryMod)));
+  return { filas, cap };
+}
+
+export function sleepScore(total, deep, rem, awake, sleepStart, recoveryMod = 0) {
+  const b = sleepBreakdown(total, deep, rem, awake, sleepStart);
+  if (!b) return null;
+  const bruto = b.filas.reduce((s, f) => s + f.pts, 0);
+  return Math.min(b.cap, Math.max(0, Math.round(bruto + recoveryMod)));
 }
 
 // Penalización por señales fisiológicas de recuperación deficiente (hasta -20 pts).
@@ -268,13 +294,6 @@ export function splitCompare(pares, { umbral = null, minPorGrupo = 3 } = {}) {
 
 const _avgVal = arr => (arr && arr.length) ? arr.reduce((s, d) => s + (Number(d.value) || 0), 0) / arr.length : null;
 
-// Horas de sueño efectivas (mismo criterio que el widget de Bienestar).
-function _sleepHours(d) {
-  if (d.value && d.value > 0) return Number(d.value);
-  if (d.extra?.asleep > 0) return Number(d.extra.asleep);
-  return (Number(d.extra?.deep) || 0) + (Number(d.extra?.rem) || 0) + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
-}
-
 // Prioridad de tono para ordenar (lo más accionable primero).
 const _TONE_ORDER = { bad: 0, warn: 1, good: 2, info: 3 };
 
@@ -287,7 +306,7 @@ export function healthConclusions(healthData, now = new Date()) {
   // ── Sueño ──
   const sleep = findMetric(healthData, "sleep_analysis", "sleep")
     .filter(d => !d.extra?.excluded)
-    .map(d => ({ ...d, value: _sleepHours(d) }))
+    .map(d => ({ ...d, value: sleepHours(d) }))
     .filter(d => d.value > 0);
   if (sleep.length) {
     const a7 = _avgVal(sleep.slice(-7));
@@ -303,7 +322,7 @@ export function healthConclusions(healthData, now = new Date()) {
     // Fases (si hay desglose): sueño profundo bajo mantenido.
     const withPhases = sleep.slice(-7).filter(d => Number(d.extra?.deep) > 0);
     if (withPhases.length >= 3) {
-      const deepPct = _avgVal(withPhases.map(d => ({ value: (Number(d.extra.deep) / _sleepHours(d)) * 100 })));
+      const deepPct = _avgVal(withPhases.map(d => ({ value: (Number(d.extra.deep) / sleepHours(d)) * 100 })));
       if (deepPct != null && deepPct < 10) push("Sueño", "warn", `Tu sueño profundo está bajo (${round(deepPct)}% del total) — se asocia a peor recuperación física.`);
     }
   }
