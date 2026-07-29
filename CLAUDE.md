@@ -34,12 +34,16 @@ python3 -m venv .venv
 cd backend && uvicorn main:app --reload   # http://localhost:8000
 ```
 
-**Verificación obligatoria antes de cada commit** (no hay CI de tests; el único
-check de GitHub es el deploy de Vercel, que solo valida que el frontend compila):
+**Verificación obligatoria antes de cada commit**:
 
 ```bash
 npm run lint && npm test && .venv/bin/python -m pytest tests/backend -q && npm run build
 ```
+
+Además hay CI (`.github/workflows/ci.yml`): ejecuta exactamente estos cuatro pasos
+en cada push a `main` y en cada PR, en dos jobs paralelos (frontend / backend). No
+despliega nada — el deploy de Vercel sigue siendo el check aparte que ya había, y
+el del backend sigue siendo manual (ver "Qué NO hacer").
 
 ## Arquitectura
 
@@ -64,7 +68,7 @@ Ficheros clave:
 
 | Fichero | Qué es |
 |---|---|
-| `src/components/Dashboard.jsx` | TODA la UI (~3.600 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/Dashboard.jsx` | TODA la UI (~4.550 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, sleepScore, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
@@ -108,6 +112,13 @@ Ficheros clave:
 - **Dependencias opcionales**: lo que la documentación llame opcional no puede
   impedir arrancar. El cliente de OpenAI se crea de forma perezosa y devuelve 503
   si falta la configuración, nunca revienta el import.
+- **Ideas → evento sugerido**: `extract_idea_from_text()` le pasa al modelo la fecha
+  de hoy (si no, no puede resolver "el martes" o "mañana") y le pide también
+  `fecha`/`hora` cuando la nota señala una cita. Lo que devuelve el LLM **nunca** se
+  manda a Graph sin pasar por `sugerencia_evento()`, que valida que la fecha/hora
+  tengan forma real (descarta cosas como `2026-02-30`) y exige un título no vacío.
+  El evento no se crea solo: el endpoint solo devuelve `evento_sugerido` y el
+  frontend lo ofrece como chip — crear el evento lo dispara el usuario.
 - **Zonas horarias**: Microsoft Graph devuelve fechas con nombres de zona de Windows
   ("Romance Standard Time"). `normalize_graph_dt()` + `WINDOWS_TZ_MAP` las convierten
   SIEMPRE a ISO UTC con sufijo `Z`. La zona del usuario es `TIMEZONE`/`LOCAL_TZ`
@@ -131,11 +142,17 @@ Ficheros clave:
   `dedupe_key` es único: el upsert con `resolution=merge-duplicates` devuelve 0 filas
   en conflicto y entonces se recupera el job existente.
 - **Ingesta de salud**: las métricas acumulativas (`step_count`, `active_energy`,
-  `basal_energy`, `resting_energy`) solo se sobreescriben si el valor nuevo es MAYOR
-  (llegan snapshots parciales a lo largo del día). Energía en kJ se convierte a kcal
-  (÷ 4.184). `sleep_analysis` guarda `sleep_start` ("HH:MM") en `extra` y respeta el
-  flag `excluded` (noches anuladas por el usuario). El patrón de escritura es
-  POST → si 409, PATCH.
+  `basal_energy`, `resting_energy`, definidas en `CUMULATIVE_METRICS`, constante de
+  módulo compartida por las dos rutas de ingesta) solo se sobreescriben si el valor
+  nuevo es MAYOR (llegan snapshots parciales a lo largo del día). Energía en kJ se
+  convierte a kcal (÷ 4.184, `ENERGY_METRICS`). `sleep_analysis` guarda `sleep_start`
+  ("HH:MM") en `extra` y respeta el flag `excluded` (noches anuladas por el usuario).
+  Escritura en **dos viajes por lote**, no uno por métrica: `_existentes_por_clave()`
+  trae de golpe lo ya guardado para las fechas/nombres del lote y `_guardar_metricas()`
+  hace un único upsert (`resolution=merge-duplicates`, aprovechando el
+  `unique(metric_date, metric_name)` de la tabla) con el resto. Un GET+POST por
+  métrica aquí son 60-90 viajes secuenciales a Supabase por sincronización del
+  Watch — no lo reintroduzcas.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
@@ -155,6 +172,11 @@ Ficheros clave:
   coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
   cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
   hay, con fallback a `HOME_ADDRESS`.
+- **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
+  (`/training/summary` pide el último pago y las sesiones a la vez con
+  `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
+  carga del dashboard, con el arranque en frío de Fly por delante. Si una depende del
+  resultado de otra, en serie.
 
 ## Frontend: cómo está organizado Dashboard.jsx
 
@@ -181,6 +203,13 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
   (`la_simple_widget_config`).
+  - **`Sparkline`** acepta `objetivo` (dibuja una línea discontinua de referencia,
+    metiéndolo en el rango vertical para que nunca quede fuera del gráfico) y
+    `relleno` (área bajo la curva). Se usa en el bloque de composición corporal
+    para la serie de peso con el objetivo encima.
+  - **Panel de estado del sistema** (en ajustes): backend, sesión de Outlook,
+    última sincronización del Watch, agente PC y entrenamiento, todo en un mismo
+    sitio. Se recarga al abrir ajustes y con su botón — nunca en un intervalo.
   - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
     hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
     "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,
@@ -194,6 +223,21 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   `try/catch` al parsear.
 - **`apiFetch()`**: wrapper de `fetch` que, ante un 401 con sesión activa, borra
   `la_token` y recarga. Úsalo para toda llamada autenticada al backend.
+- **`authHeaders()` / `jsonHeaders()`**: única forma de construir las cabeceras de
+  una llamada autenticada (la segunda añade `Content-Type: application/json`). No
+  vuelvas a escribir `localStorage.getItem("la_token")` suelto en un handler — por
+  eso había 28 lecturas repetidas del mismo valor.
+- **`datosSalud` (memo)**: toda la derivación de las métricas de salud (~17
+  `findMetric`, medias, valores de hoy vs. semana) vive en un único `useMemo` justo
+  antes de `renderWidget`, con `diaActual` en las dependencias además de
+  `healthData`/`trainingDays`/`bodyGoals` — sin eso, lo que depende del día de hoy
+  (días desde el último entreno, semana desde el lunes) se quedaría congelado al
+  pasar la medianoche con el dashboard abierto. Si un widget de salud nuevo
+  necesita un valor derivado, añádelo al `return` del memo y a su destructuring en
+  `case "health_wellness"`, no lo recalcules aparte. `healthConclusions`/
+  `healthOverall` están memorizados aparte (`conclusionesSalud`/`veredictoSalud`):
+  antes se llamaban dos veces por render, una por el widget compacto y otra por el
+  modal.
 - **URL del backend**: `VITE_API_URL` o el default de Fly. En local, apunta
   `VITE_API_URL` a `http://localhost:8000` (recuerda que el CORS del backend solo
   permite `localhost:5173` y el dominio de Vercel).
@@ -210,6 +254,12 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 - **`Dashboard.jsx` no puede exportar nada que no sea componente** (regla
   react-refresh). Por eso los helpers puros viven en `src/lib/helpers.js`. Si
   necesitas testear una función del Dashboard, extráela allí.
+- **Ningún componente se define dentro del cuerpo de `Dashboard`** (como sí puede
+  hacerse con una función auxiliar normal). `DepartureWidget` estaba así y cada
+  render de `Dashboard` creaba un TIPO de componente nuevo, así que React
+  desmontaba y remontaba todo su subárbol en vez de actualizarlo — con el reloj
+  cambiando cada 30s, dos veces por minuto. Los componentes van a nivel de módulo
+  (junto a `Sparkline`, `SleepStageTooltip`) y reciben lo que necesitan por props.
 - Los `catch { /* mejor esfuerzo: ignorar */ }` son deliberados (notificaciones,
   parseo de localStorage, llamadas fire-and-forget). Si añades uno, pon el comentario
   dentro o la regla `no-empty` fallará.
@@ -218,7 +268,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 104 tests)
+### Backend (`tests/backend`, 172 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -232,7 +282,7 @@ WOL se resetean entre tests automáticamente.
 Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`.
 
-### Frontend (`tests/frontend`, 21 tests)
+### Frontend (`tests/frontend`, 58 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
