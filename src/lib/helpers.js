@@ -427,6 +427,40 @@ export function healthConclusions(healthData, now = new Date()) {
       `Los días que pasas más de ${round(luzSueno.corte)} min al aire libre duermes ${hoursToHM(luzSueno.altoAvg)} frente a ${hoursToHM(luzSueno.bajoAvg)} — la luz de día ordena el ritmo circadiano.`);
   }
 
+  // ── Patrón: minutos de ejercicio ↔ sueño profundo de esa noche ──
+  // El sueño profundo es la fase que más se asocia a la recuperación física, así que
+  // es donde debería notarse el ejercicio. Se cruza contra los minutos en vez de
+  // contra "entrené sí/no" porque aquí importa la dosis, no el hecho.
+  const profundo = sleep
+    .filter(d => Number(d.extra?.deep) > 0)
+    .map(d => ({ date: d.date, value: Number(d.extra.deep) }));
+  const ejercicioProfundo = splitCompare(pairByDate(ex, profundo, 1));
+  if (ejercicioProfundo && Math.abs(ejercicioProfundo.deltaPct) >= 8) {
+    const mas = ejercicioProfundo.deltaPct > 0;
+    push("Patrón", mas ? "good" : "info",
+      `Los días que pasas de ${round(ejercicioProfundo.corte)} min de ejercicio duermes ${hoursToHM(ejercicioProfundo.altoAvg)} de sueño profundo frente a ${hoursToHM(ejercicioProfundo.bajoAvg)} — un ${Math.abs(round(ejercicioProfundo.deltaPct))}% ${mas ? "más" : "menos"} (${ejercicioProfundo.altoN} vs ${ejercicioProfundo.bajoN} días).`);
+  }
+
+  // ── Patrón: pasos ↔ FC en reposo del día siguiente ──
+  // Complementa el cruce de entrenos: recoge la carga del día a día (andar mucho),
+  // que no aparece como entrenamiento pero también deja huella al día siguiente.
+  const pasosRhr = splitCompare(pairByDate(steps, rhr, 1));
+  if (pasosRhr && Math.abs(pasosRhr.deltaPct) >= 3) {
+    const sube = pasosRhr.deltaPct > 0;
+    push("Patrón", sube ? "info" : "good",
+      `Tras los días de más de ${round(pasosRhr.corte).toLocaleString("es")} pasos tu FC en reposo ${sube ? "sube" : "baja"} a ${round(pasosRhr.altoAvg)} bpm frente a ${round(pasosRhr.bajoAvg)}${sube ? " — moverte mucho también es carga" : " — el movimiento suave te está sentando bien"}.`);
+  }
+
+  // ── Patrón: luz natural ↔ HRV de esa noche ──
+  // La luz de día ordena el ritmo circadiano, y eso se ve tanto en cuánto duermes
+  // (cruce de arriba) como en cómo te recuperas esa noche.
+  const luzHrv = splitCompare(pairByDate(luz, hrv, 1));
+  if (luzHrv && Math.abs(luzHrv.deltaPct) >= 5) {
+    const mejor = luzHrv.deltaPct > 0;
+    push("Patrón", mejor ? "good" : "info",
+      `Los días con más de ${round(luzHrv.corte)} min de luz natural tu HRV nocturna es de ${round(luzHrv.altoAvg)}ms frente a ${round(luzHrv.bajoAvg)}ms — un ${Math.abs(round(luzHrv.deltaPct))}% ${mejor ? "más alta" : "más baja"} (${luzHrv.altoN} vs ${luzHrv.bajoN} días).`);
+  }
+
   C.sort((a, b) => _TONE_ORDER[a.tone] - _TONE_ORDER[b.tone]);
   return C;
 }
@@ -627,6 +661,113 @@ export function scoreFromBreakdown(breakdown) {
   const pts   = filas.reduce((s, b) => s + (Number(b.pts) || 0), 0);
   const max   = filas.reduce((s, b) => s + (Number(b.max) || 0), 0);
   return { pts, max, score: max > 0 ? Math.round((pts / max) * 100) : null };
+}
+
+// ── Histórico de la puntuación de bienestar ─────────────────────
+// El widget solo enseña la foto de hoy o de la semana, así que no se ve si el mes va
+// a mejor o a peor. Esto reconstruye la puntuación DIARIA de cada día a partir de las
+// mismas series que ya sirve /health/metrics y con las mismas reglas
+// (`wellnessBreakdown` en modo diario + `scoreFromBreakdown`): el histórico se deriva
+// de lo que ya hay, sin tabla nueva ni nada que guardar.
+//
+// Como el score va normalizado a 100, los días con menos sensores siguen siendo
+// comparables con los que los tienen todos.
+
+// Índice fecha → valor numérico de una serie.
+function _porFecha(serie) {
+  const m = new Map();
+  for (const d of serie || []) {
+    if (d && d.date != null && d.value != null && !isNaN(Number(d.value))) m.set(d.date, Number(d.value));
+  }
+  return m;
+}
+
+// Referencia de HRV de un día: media de la ventana que va de D-14 a D-8. Es la misma
+// que usa la vista diaria del widget (`slice(-14, -7)`), pero anclada a esa fecha en
+// vez de a hoy, para que el día puntúe como habría puntuado entonces.
+function _refHrv(hrvPorFecha, fecha) {
+  const vals = [];
+  for (let i = 14; i >= 8; i--) {
+    const f = _sumarDias(fecha, -i);
+    const v = f == null ? null : hrvPorFecha.get(f);
+    if (v != null && v > 0) vals.push(v);
+  }
+  return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+}
+
+export function wellnessHistory(healthData, { dias = 30 } = {}) {
+  const series = {
+    sleep: _porFecha(findMetric(healthData, "sleep_analysis", "sleep")
+      .filter(d => !d.extra?.excluded)
+      .map(d => ({ date: d.date, value: sleepHours(d) }))),
+    work: _porFecha(findMetric(healthData, "workouts", "workout")
+      .map(d => ({ date: d.date, value: d.extra?.workouts?.length || 0 }))),
+    exercise: _porFecha(findMetric(healthData, "apple_exercise_time", "exercise_time")),
+    steps:    _porFecha(findMetric(healthData, "step_count", "steps")),
+    energia:  _porFecha(findMetric(healthData, "active_energy")),
+    stand:    _porFecha(findMetric(healthData, "apple_stand_hour", "stand_hour")),
+    flights:  _porFecha(findMetric(healthData, "flights_climbed")),
+    hrv:      _porFecha(findMetric(healthData, "heart_rate_variability", "heartRateVariability")),
+    rhr:      _porFecha(findMetric(healthData, "resting_heart_rate")),
+    walkHr:   _porFecha(findMetric(healthData, "walking_heart_rate_average")),
+    daylight: _porFecha(findMetric(healthData, "time_in_daylight")),
+    resp:     _porFecha(findMetric(healthData, "respiratory_rate")),
+  };
+  // El Watch actualiza estas de higos a brevas: para cada día vale el último valor
+  // conocido hasta esa fecha, que es lo que el widget habría mostrado ese día.
+  const esporadicas = {
+    vo2:       _porFecha(findMetric(healthData, "vo2_max", "cardioFitness")),
+    bodyFat:   _porFecha(findMetric(healthData, "body_fat_percentage")),
+    cardioRec: _porFecha(findMetric(healthData, "cardio_recovery")),
+  };
+
+  const fechas = new Set();
+  for (const m of [...Object.values(series), ...Object.values(esporadicas)]) {
+    for (const f of m.keys()) fechas.add(f);
+  }
+  const ordenadas = [...fechas].sort();
+
+  const ultimo = { vo2: null, bodyFat: null, cardioRec: null };
+  const salida = [];
+  for (const fecha of ordenadas) {
+    for (const k of Object.keys(ultimo)) {
+      const v = esporadicas[k].get(fecha);
+      if (v != null && v > 0) ultimo[k] = v;
+    }
+
+    // Un 0 en estas series es "no hubo dato", no "hubo cero" (igual que en el widget).
+    const val = k => {
+      const v = series[k].get(fecha);
+      return v != null && v > 0 ? v : null;
+    };
+    const work    = series.work.get(fecha) || 0;
+    const sleep   = val("sleep");
+    const steps   = val("steps");
+    const rhr     = val("rhr");
+    const energia = val("energia");
+    // Mismo criterio de "hay algo que puntuar" que el widget: si no, saldría un número
+    // construido casi entero a base de "sin datos".
+    if (sleep == null && steps == null && rhr == null && energia == null && work === 0) continue;
+
+    const { score } = scoreFromBreakdown(wellnessBreakdown({
+      isDaily: true,
+      sleep, work, steps, rhr,
+      exercise:     val("exercise"),
+      activeEnergy: energia,
+      stand:        val("stand"),
+      flights:      val("flights"),
+      hrv:          val("hrv"),
+      hrvPrev:      _refHrv(series.hrv, fecha),
+      cardioRec:    ultimo.cardioRec,
+      vo2:          ultimo.vo2,
+      walkHr:       val("walkHr"),
+      bodyFat:      ultimo.bodyFat,
+      daylight:     val("daylight"),
+      resp:         val("resp"),
+    }));
+    if (score != null) salida.push({ date: fecha, value: score });
+  }
+  return salida.slice(-dias);
 }
 
 // ── Conteo de ropa (widget temporal) ────────────────────────────

@@ -5,6 +5,7 @@ import {
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
+  wellnessHistory, seriesTrend, trendDirection,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -1853,6 +1854,15 @@ export default function Dashboard() {
   const conclusionesSalud = useMemo(() => healthConclusions(healthData), [healthData]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
 
+  // Histórico de la puntuación diaria de bienestar, reconstruido de las mismas series
+  // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
+  // memoizado como el resto: solo cambia cuando llega una sincronización nueva.
+  const historicoBienestar = useMemo(() => wellnessHistory(healthData), [healthData]);
+  const tendenciaBienestar = useMemo(
+    () => historicoBienestar.length >= 7 ? seriesTrend(historicoBienestar, 7, 30) : null,
+    [historicoBienestar],
+  );
+
   // ── Derivación de las métricas de salud (M2) ───────────────────────────
   // Esto son ~17 findMetric, decenas de slice y todas las medias. Antes se rehacía
   // entero en CADA render del Dashboard — o sea dos veces por minuto solo por el tic
@@ -2727,6 +2737,36 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
+                {/* ── Evolución de la puntuación ──
+                    El número de arriba es la foto de hoy (o de la semana); esto dice si
+                    el mes va a mejor. Se reconstruye de las mismas series, sin guardar
+                    nada aparte. */}
+                {historicoBienestar.length >= 3 && (() => {
+                  const serie   = historicoBienestar;
+                  const primera = serie[0];
+                  const ultima  = serie[serie.length - 1];
+                  const dir     = tendenciaBienestar ? trendDirection(tendenciaBienestar.deltaPct, true, 3) : null;
+                  const tonoDir = dir?.tone === "bien" ? "var(--green)" : dir?.tone === "mal" ? "#d4645a" : "var(--muted2)";
+                  return (
+                    <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                          Evolución · {serie.length} días
+                        </span>
+                        {tendenciaBienestar && (
+                          <span style={{ fontSize: 10, color: tonoDir, fontFamily: "'DM Mono', monospace" }}>
+                            {dir.arrow} media 7d {Math.round(tendenciaBienestar.avgShort)} vs {Math.round(tendenciaBienestar.avgLong)} del mes
+                          </span>
+                        )}
+                      </div>
+                      <Sparkline data={serie} color="var(--accent2)" height={40} relleno />
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", marginTop: 3 }}>
+                        <span>{formatShortDate(primera.date)} · {primera.value}</span>
+                        <span>{formatShortDate(ultima.date)} · {ultima.value}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {/* ── Composición corporal ── */}
                 {(currentWeight != null || currentBodyFat != null || currentLean != null) && (
                   <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
