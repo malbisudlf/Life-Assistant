@@ -46,6 +46,40 @@ class TestCreateJob:
         assert "secreto" not in r.text
 
 
+class TestPendingJob:
+    """El agente consulta esto en vez de llamar a Supabase con la service_role key
+    directamente (A1): esta es la única llamada que se la obligaba a tener."""
+
+    def test_requiere_jwt(self, client):
+        assert client.get("/jobs/pending").status_code in (401, 403)
+
+    def test_devuelve_el_mas_reciente(self, client, auth_headers, mock_requests):
+        job = {"id": JOB_ID, "status": "pending"}
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([job]))
+        r = client.get("/jobs/pending", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "job": job}
+
+    def test_sin_pendientes_devuelve_null(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        r = client.get("/jobs/pending", headers=auth_headers)
+        assert r.json() == {"ok": True, "job": None}
+
+    def test_filtra_por_pendiente_y_ultima_hora(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        client.get("/jobs/pending", headers=auth_headers)
+        url = mock_requests.called("GET", "/rest/v1/jobs")[0][1]
+        assert "status=eq.pending" in url
+        assert "created_at=gt." in url
+        assert "limit=1" in url
+
+    def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse(None, 500, "secreto interno"))
+        r = client.get("/jobs/pending", headers=auth_headers)
+        assert r.status_code == 502
+        assert "secreto" not in r.text
+
+
 class TestClaimStartFinish:
     def test_job_id_invalido(self, client, auth_headers):
         r = client.post("/jobs/../etc/claim", headers=auth_headers, json={"worker_id": "w1"})

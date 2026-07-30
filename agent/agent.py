@@ -39,8 +39,6 @@ load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
 LA_TOKEN      = os.getenv("LA_TOKEN")
-SUPABASE_URL  = os.getenv("SUPABASE_URL")
-SUPABASE_KEY  = os.getenv("SUPABASE_KEY")
 AGENT_ID      = "pc-mikel"
 AGENT_VERSION = "1.1.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
@@ -118,14 +116,6 @@ def alud_url_permitida(url: str) -> bool:
 def api_headers():
     return {"Authorization": f"Bearer {LA_TOKEN}", "Content-Type": "application/json"}
 
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
 def heartbeat(status: str):
     try:
         r = requests.post(
@@ -160,16 +150,18 @@ def report_stage(job_id: str, stage: str, message: str = ""):
         log.warning(f"No se pudo reportar stage '{stage}': {e}")
 
 def poll_pending_job():
+    """El job pendiente más reciente, vía backend (no contra Supabase directo).
+
+    Antes esta función llamaba a Supabase con la service_role key — la clave que salta
+    toda la RLS de la base, guardada en un .env en este PC. Era la única razón por la
+    que el agente la necesitaba; ahora usa el mismo JWT que el resto de llamadas.
+    """
     try:
-        from datetime import datetime, timezone, timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&created_at=gt.{cutoff}&order=created_at.desc&limit=1",
-            headers=supabase_headers(),
-            timeout=10,
-        )
-        jobs = r.json()
-        return jobs[0] if jobs else None
+        r = requests.get(f"{API_BASE}/jobs/pending", headers=api_headers(), timeout=10)
+        if r.status_code >= 300:
+            log.warning(f"Error polling jobs: HTTP {r.status_code}")
+            return None
+        return r.json().get("job")
     except Exception as e:
         log.warning(f"Error polling jobs: {e}")
         return None

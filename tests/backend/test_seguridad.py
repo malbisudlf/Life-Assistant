@@ -1,13 +1,22 @@
-"""Tests de los arreglos de la revisión de seguridad: C2, A3 y A4.
+"""Tests de los arreglos de la revisión de seguridad: C1, C2, C3, A3 y A4.
 
+- C1: /auth/login exige JWT y /auth/callback exige un `state` firmado — antes
+  cualquiera que supiera la URL del backend podía secuestrar la conexión de Outlook
+  completando SU PROPIO login de Microsoft.
 - C2: `alud_url` sale del cuerpo de un evento de Outlook y acaba en `page.goto()` del
   agente, en un navegador con la sesión de Alud iniciada. Solo pasan https y hosts de
   la lista blanca, y se comprueba tanto al extraerla como al dar de alta el job.
+- C3: el límite de intentos de login es global (no por IP) y vive en Supabase, no en
+  memoria — antes se reseteaba cada vez que Fly dormía la máquina.
 - A3: `event_id` y `calendar_id` se interpolan en la ruta de Graph — van escapados.
 - A4: `/ideas/audio` y `/health/ingest*` cargaban en memoria lo que mandara el cliente.
 
 (A2 es una migración SQL: `supabase/migrations/20260729_rls_jobs.sql`.)
 """
+from datetime import datetime, timedelta, timezone
+
+from jose import jwt as jose_jwt
+
 import main
 from conftest import FakeResponse
 
@@ -199,7 +208,9 @@ class TestAudioAcotado:
         assert r.status_code == 429
         assert r.headers.get("Retry-After")
 
-    def test_el_limitador_del_audio_no_afecta_al_del_login(self, client, auth_headers, monkeypatch):
+    def test_el_limitador_del_audio_no_afecta_al_del_login(
+        self, client, auth_headers, monkeypatch, login_attempts_mock,
+    ):
         """Son contadores distintos: agotar uno no debe bloquear el otro."""
         monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 50)
         monkeypatch.setattr(main, "AUDIO_MAX_REQUESTS", 1)
@@ -207,3 +218,141 @@ class TestAudioAcotado:
         client.post("/ideas/audio", headers=auth_headers, files=ficheros)
         assert client.post("/ideas/audio", headers=auth_headers, files=ficheros).status_code == 429
         assert client.post("/auth/password", json={"password": "1234"}).status_code == 200
+
+    def test_ip_spoofing_no_evade_el_limite_de_audio(self, client, auth_headers, monkeypatch):
+        """X-Forwarded-For la controla quien llama: rotarla no debe dar cupos nuevos.
+
+        Esta protección vivía antes en el limitador de login (por IP); ahora ese es
+        global y esta es la única ruta que sigue limitando por IP — la resistencia al
+        spoofing se prueba aquí. _client_ip() la ignora salvo opt-in (TRUST_FORWARDED_FOR).
+        """
+        monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 50)
+        monkeypatch.setattr(main, "AUDIO_MAX_REQUESTS", 3)
+        ficheros = {"audio": ("nota.webm", b"x" * 500, "audio/webm")}
+        codigos = [
+            client.post("/ideas/audio", headers={**auth_headers, "X-Forwarded-For": f"9.9.9.{i}"},
+                        files=ficheros).status_code
+            for i in range(6)
+        ]
+        assert 429 in codigos, f"el límite se evade rotando X-Forwarded-For: {codigos}"
+
+    def test_fly_client_ip_se_ignora_fuera_de_fly(self, client, auth_headers, monkeypatch):
+        """Sin el runtime de Fly nadie sobrescribe la cabecera, así que no vale nada."""
+        monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 50)
+        monkeypatch.setattr(main, "AUDIO_MAX_REQUESTS", 3)
+        ficheros = {"audio": ("nota.webm", b"x" * 500, "audio/webm")}
+        codigos = [
+            client.post("/ideas/audio", headers={**auth_headers, "Fly-Client-IP": f"9.9.9.{i}"},
+                        files=ficheros).status_code
+            for i in range(6)
+        ]
+        assert 429 in codigos, f"cabecera de Fly aceptada fuera de Fly: {codigos}"
+
+    def test_rate_limit_usa_fly_client_ip_frente_a_forwarded_for(self, client, auth_headers, monkeypatch):
+        """En Fly, Fly-Client-IP la pone el proxy: manda sobre lo que declare el cliente."""
+        monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 50)
+        monkeypatch.setattr(main, "AUDIO_MAX_REQUESTS", 3)
+        monkeypatch.setattr(main, "EN_FLY", True)
+        ficheros = {"audio": ("nota.webm", b"x" * 500, "audio/webm")}
+        for _ in range(3):
+            client.post(
+                "/ideas/audio",
+                headers={**auth_headers, "Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "1.1.1.1"},
+                files=ficheros,
+            )
+        r = client.post(
+            "/ideas/audio",
+            headers={**auth_headers, "Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "2.2.2.2"},
+            files=ficheros,
+        )
+        assert r.status_code == 429
+
+    def test_con_trust_forwarded_for_usa_la_ultima_entrada(self, client, auth_headers, monkeypatch):
+        """Con proxy propio declarado, la entrada de confianza es la última.
+
+        Las anteriores las puede inventar el cliente, así que prefijarlas no debe
+        conseguir un cupo de intentos nuevo.
+        """
+        monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 50)
+        monkeypatch.setattr(main, "AUDIO_MAX_REQUESTS", 3)
+        monkeypatch.setattr(main, "TRUST_FORWARDED_FOR", True)
+        ficheros = {"audio": ("nota.webm", b"x" * 500, "audio/webm")}
+        for i in range(3):
+            client.post(
+                "/ideas/audio",
+                headers={**auth_headers, "X-Forwarded-For": f"1.1.1.{i}, 7.7.7.7"},
+                files=ficheros,
+            )
+        r = client.post(
+            "/ideas/audio",
+            headers={**auth_headers, "X-Forwarded-For": "9.9.9.9, 7.7.7.7"},
+            files=ficheros,
+        )
+        assert r.status_code == 429
+
+
+class _FakeMsalApp:
+    """Sustituye a msal.ConfidentialClientApplication: sin red, sin credenciales reales."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def get_authorization_request_url(self, scopes, redirect_uri=None, state=None):
+        self.__class__.ultimo_state = state
+        return f"https://login.microsoftonline.com/fake/authorize?state={state}"
+
+    def acquire_token_by_authorization_code(self, code, scopes=None, redirect_uri=None):
+        return {"access_token": "tok-x", "refresh_token": "ref-x", "expires_in": 3600}
+
+
+class TestOAuthLoginProtegido:
+    def test_login_requiere_jwt(self, client):
+        assert client.get("/auth/login").status_code in (401, 403)
+
+    def test_login_con_jwt_genera_state_valido(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(main.msal, "ConfidentialClientApplication", _FakeMsalApp)
+        r = client.get("/auth/login", headers=auth_headers)
+        assert r.status_code == 200
+        state = _FakeMsalApp.ultimo_state
+        assert state and main._verify_oauth_state(state)
+
+
+class TestOAuthCallbackState:
+    def test_sin_state_da_403(self, client):
+        r = client.get("/auth/callback", params={"code": "abc"})
+        assert r.status_code == 403
+
+    def test_state_no_es_un_jwt_da_403(self, client):
+        r = client.get("/auth/callback", params={"code": "abc", "state": "no-es-un-jwt"})
+        assert r.status_code == 403
+
+    def test_state_de_otro_proposito_no_vale(self, client):
+        """Un JWT válido (el propio token del dashboard) pero sin purpose=oauth_state
+        no debe colarse como si fuera el state del flujo OAuth."""
+        token_dashboard = main.create_token()
+        r = client.get("/auth/callback", params={"code": "abc", "state": token_dashboard})
+        assert r.status_code == 403
+
+    def test_state_expirado_da_403(self, client):
+        expirado = jose_jwt.encode(
+            {"exp": datetime.now(timezone.utc) - timedelta(minutes=1), "purpose": "oauth_state"},
+            "test-secret-key", algorithm="HS256",
+        )
+        r = client.get("/auth/callback", params={"code": "abc", "state": expirado})
+        assert r.status_code == 403
+
+    def test_state_firmado_con_otra_clave_da_403(self, client):
+        ajeno = jose_jwt.encode(
+            {"exp": datetime.now(timezone.utc) + timedelta(minutes=5), "purpose": "oauth_state"},
+            "otra-clave", algorithm="HS256",
+        )
+        r = client.get("/auth/callback", params={"code": "abc", "state": ajeno})
+        assert r.status_code == 403
+
+    def test_state_valido_completa_el_flujo(self, client, mock_requests, monkeypatch):
+        monkeypatch.setattr(main.msal, "ConfidentialClientApplication", _FakeMsalApp)
+        estado = main._create_oauth_state()
+        r = client.get("/auth/callback", params={"code": "abc", "state": estado})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert mock_requests.called("POST", "/rest/v1/oauth_tokens")

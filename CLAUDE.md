@@ -89,18 +89,38 @@ Ficheros clave:
      (tiempo constante, y **falso si el token esperado no está configurado**).
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
-3. **Rate limiting**: dos contadores distintos y no intercambiables. El del login
-   (`_login_attempts`, `_check_login_rate`) cuenta solo los intentos **fallidos**,
-   porque protege una credencial. El genérico (`_rate_buckets`, `_check_rate`) cuenta
-   **todas** las peticiones, porque protege un recurso caro — hoy `/ideas/audio`, que
-   es una llamada de pago a Whisper por petición. Al añadir un endpoint costoso, usa
-   el segundo. Detalles del primero:
-   5 intentos / 5 min por IP, en memoria (`_login_attempts`).
-   Se resetea en cold start de Fly, y eso es aceptable para este caso. La IP sale de
-   `_client_ip()`, que **solo usa fuentes que el cliente no controla**: `Fly-Client-IP`
-   (y solo si `FLY_APP_NAME` confirma que estamos en Fly) o el socket. Nunca fiarse de
-   `X-Forwarded-For` por defecto: coger su primera entrada dejaba el límite a merced de
-   quien rotara la cabecera. `TRUST_FORWARDED_FOR=1` es el opt-in para proxies propios.
+   - *OAuth de Microsoft* (`/auth/login` → `/auth/callback`): `/auth/login` exige
+     `Depends(verify_token)` y genera un `state` firmado con `SECRET_KEY`
+     (`_create_oauth_state()`, 10 min de vida). `/auth/callback` no puede exigir JWT —
+     lo llama Microsoft por redirect, sin cabeceras propias — así que en su lugar
+     verifica ese `state` (`_verify_oauth_state()`) antes de canjear el código. Sin
+     esto, cualquiera que supiera la URL del backend (no es secreta: está en este
+     mismo fichero) podía completar SU PROPIO login de Microsoft y sus tokens pisaban
+     los del usuario en `oauth_tokens` (una sola fila, clave `provider`). El frontend
+     pide la `auth_url` con fetch autenticado (`conectarOutlook()` en Dashboard.jsx) y
+     navega a lo que devuelve — no uses un `<a href>` directo al backend, no manda el
+     JWT.
+3. **Rate limiting**: dos contadores distintos y no intercambiables.
+   - **Login** (`_check_login_rate`, `_register_login_failure`, `_reset_login_attempts`):
+     cuenta solo los intentos **fallidos**, porque protege una credencial. Es
+     **global, no por IP** — esto es una app de un solo usuario, así que limitar por
+     IP solo daba una vía de escape gratis (rotarla, trivial en IPv6) sin proteger
+     nada a cambio. Vive en Supabase (tabla `login_attempts`), no en memoria: un
+     contador en memoria se borraba en cada cold start de Fly, y bastaba esperar a
+     que la máquina se durmiera entre tandas para resetear el límite. Si Supabase no
+     responde, se deja pasar (fail-open): es el único endpoint que hoy no depende de
+     Supabase para nada más, y esa propiedad vale más que blindar una ventana de
+     fallo de infraestructura poco probable. 5 intentos / 5 min por defecto.
+   - **Genérico** (`_rate_buckets`, `_check_rate`, en memoria): cuenta **todas** las
+     peticiones, porque protege un recurso caro — hoy `/ideas/audio`, que es una
+     llamada de pago a Whisper por petición. Este SÍ es por IP (`_client_ip()`, ver
+     abajo) porque no hay una credencial de por medio que proteger de fuerza bruta,
+     solo gasto por IP abusiva. Al añadir un endpoint costoso, usa este.
+   - `_client_ip()` (compartida por los dos) **solo usa fuentes que el cliente no
+     controla**: `Fly-Client-IP` (y solo si `FLY_APP_NAME` confirma que estamos en
+     Fly) o el socket. Nunca fiarse de `X-Forwarded-For` por defecto: coger su
+     primera entrada dejaba el límite a merced de quien rotara la cabecera.
+     `TRUST_FORWARDED_FOR=1` es el opt-in para proxies propios.
 4. **Comparaciones de credenciales siempre con `hmac.compare_digest`**, nunca `==`.
 5. **Errores de Supabase**: usa `_supabase_error(r)` — loguea el detalle real en el
    servidor y devuelve un 502 genérico. Nunca reenvíes `r.text` de Supabase al cliente.
@@ -163,7 +183,11 @@ Ficheros clave:
   (incrementa `attempt`, máx. `MAX_JOB_ATTEMPTS=3`). El claim usa
   `?status=eq.pending` como guard: si devuelve 0 filas, otro worker ganó la carrera.
   `dedupe_key` es único: el upsert con `resolution=merge-duplicates` devuelve 0 filas
-  en conflicto y entonces se recupera el job existente.
+  en conflicto y entonces se recupera el job existente. `GET /jobs/pending` (JWT) es
+  lo que sondea `agent.py`: por eso el agente NO tiene `SUPABASE_KEY` en su `.env` — es
+  la única consulta que se lo exigía, y la service_role key salta toda la RLS de la
+  base. Si añades un endpoint nuevo que el agente necesite, que pase por el backend
+  con JWT en vez de darle más alcance de Supabase directo.
 - **Ingesta de salud**: las métricas acumulativas (`step_count`, `active_energy`,
   `basal_energy`, `resting_energy`, definidas en `CUMULATIVE_METRICS`, constante de
   módulo compartida por las dos rutas de ingesta) solo se sobreescriben si el valor

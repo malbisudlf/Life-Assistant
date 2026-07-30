@@ -80,14 +80,19 @@ class TestExtractServiceToken:
 # ── /auth/password ────────────────────────────────────────────────────────────
 
 class TestAuthPassword:
-    def test_password_correcta_devuelve_jwt_valido(self, client):
+    """El límite de intentos es GLOBAL (no por IP) y vive en Supabase (login_attempts),
+    no en memoria — ver _check_login_rate en main.py. Los tests de resistencia a
+    rotar X-Forwarded-For / Fly-Client-IP viven ahora en test_seguridad.py, contra
+    /ideas/audio: ese es el endpoint que sigue limitando por IP."""
+
+    def test_password_correcta_devuelve_jwt_valido(self, client, login_attempts_mock):
         r = client.post("/auth/password", json={"password": "1234"})
         assert r.status_code == 200
         token = r.json()["token"]
         claims = jwt.decode(token, "test-secret-key", algorithms=["HS256"])
         assert claims["exp"] > datetime.now(timezone.utc).timestamp()
 
-    def test_password_incorrecta(self, client):
+    def test_password_incorrecta(self, client, login_attempts_mock):
         r = client.post("/auth/password", json={"password": "mala"})
         assert r.status_code == 401
 
@@ -95,7 +100,7 @@ class TestAuthPassword:
         r = client.post("/auth/password", json={"password": "x" * 201})
         assert r.status_code == 422
 
-    def test_rate_limit_tras_5_fallos(self, client):
+    def test_rate_limit_tras_5_fallos(self, client, login_attempts_mock):
         for _ in range(5):
             assert client.post("/auth/password", json={"password": "mala"}).status_code == 401
         r = client.post("/auth/password", json={"password": "mala"})
@@ -105,7 +110,7 @@ class TestAuthPassword:
         r2 = client.post("/auth/password", json={"password": "1234"})
         assert r2.status_code == 429
 
-    def test_login_correcto_resetea_contador(self, client):
+    def test_login_correcto_resetea_contador(self, client, login_attempts_mock):
         for _ in range(3):
             client.post("/auth/password", json={"password": "mala"})
         assert client.post("/auth/password", json={"password": "1234"}).status_code == 200
@@ -114,71 +119,27 @@ class TestAuthPassword:
             assert client.post("/auth/password", json={"password": "mala"}).status_code == 401
         assert client.post("/auth/password", json={"password": "mala"}).status_code == 429
 
-    def test_rate_limit_no_se_evade_rotando_x_forwarded_for(self, client):
-        """X-Forwarded-For la controla quien llama: rotarla no debe dar intentos nuevos.
-
-        Antes se cogía su PRIMERA entrada y bastaba cambiarla en cada petición para
-        tener intentos ilimitados. Ahora la cabecera se ignora salvo opt-in explícito.
-        """
+    def test_limite_es_global_no_por_ip(self, client, login_attempts_mock):
+        """Antes el límite era por IP; ahora es global porque solo hay un usuario
+        legítimo, así que rotar de IP no da un cupo de intentos nuevo."""
         codigos = [
             client.post(
                 "/auth/password",
                 json={"password": "mala"},
                 headers={"X-Forwarded-For": f"9.9.9.{i}"},
             ).status_code
-            for i in range(8)
+            for i in range(6)
         ]
-        assert 429 in codigos, f"el límite se sigue evadiendo: {codigos}"
+        assert codigos[-1] == 429, f"el límite no aplica de forma global: {codigos}"
 
-    def test_fly_client_ip_se_ignora_fuera_de_fly(self, client):
-        """Sin el runtime de Fly nadie sobrescribe la cabecera, así que no vale nada."""
-        codigos = [
-            client.post(
-                "/auth/password",
-                json={"password": "mala"},
-                headers={"Fly-Client-IP": f"9.9.9.{i}"},
-            ).status_code
-            for i in range(8)
-        ]
-        assert 429 in codigos, f"cabecera de Fly aceptada fuera de Fly: {codigos}"
+    def test_supabase_caido_no_bloquea_el_login(self, client, mock_requests):
+        """Si Supabase no responde, se deja pasar en vez de tumbar el único endpoint
+        que hoy no depende de la base de datos para nada más."""
+        mock_requests.add("GET", "/rest/v1/login_attempts", FakeResponse(None, 500, "caído"))
+        r = client.post("/auth/password", json={"password": "1234"})
+        assert r.status_code == 200
 
-    def test_rate_limit_usa_fly_client_ip_frente_a_forwarded_for(self, client, monkeypatch):
-        """En Fly, Fly-Client-IP la pone el proxy: manda sobre lo que declare el cliente."""
-        monkeypatch.setattr(main, "EN_FLY", True)
-        for _ in range(5):
-            client.post(
-                "/auth/password",
-                json={"password": "mala"},
-                headers={"Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "1.1.1.1"},
-            )
-        r = client.post(
-            "/auth/password",
-            json={"password": "mala"},
-            headers={"Fly-Client-IP": "5.5.5.5", "X-Forwarded-For": "2.2.2.2"},
-        )
-        assert r.status_code == 429
-
-    def test_con_trust_forwarded_for_usa_la_ultima_entrada(self, client, monkeypatch):
-        """Con proxy propio declarado, la entrada de confianza es la última.
-
-        Las anteriores las puede inventar el cliente, así que prefijarlas no debe
-        conseguir un cubo de intentos nuevo.
-        """
-        monkeypatch.setattr(main, "TRUST_FORWARDED_FOR", True)
-        for i in range(5):
-            client.post(
-                "/auth/password",
-                json={"password": "mala"},
-                headers={"X-Forwarded-For": f"1.1.1.{i}, 7.7.7.7"},
-            )
-        r = client.post(
-            "/auth/password",
-            json={"password": "mala"},
-            headers={"X-Forwarded-For": "9.9.9.9, 7.7.7.7"},
-        )
-        assert r.status_code == 429
-
-    def test_password_con_tilde_devuelve_401_no_500(self, client):
+    def test_password_con_tilde_devuelve_401_no_500(self, client, login_attempts_mock):
         """compare_digest sobre str lanza TypeError con no-ASCII → antes era un 500."""
         r = client.post("/auth/password", json={"password": "contraseña"})
         assert r.status_code == 401
