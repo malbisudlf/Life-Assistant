@@ -26,9 +26,11 @@ solo usuario).
 1. Crea un proyecto nuevo.
 2. En **SQL Editor**, ejecuta los ficheros de `supabase/migrations/` **en orden
    cronológico** (el nombre empieza por la fecha). Crean las tablas de jobs,
-   agentes, tokens OAuth, ideas, ropa, entrenamiento y salud, con RLS activado.
+   agentes, tokens OAuth, ideas, ropa, entrenamiento, salud e intentos de login,
+   con RLS activado.
 3. Apunta de **Settings → API**: la `URL` del proyecto y la **`service_role` key**
-   (no la `anon`; la service key solo vivirá en el backend).
+   (no la `anon`; la service key solo vivirá en el backend — el agente PC ya no la
+   necesita, ver `agent/.env.example`).
 4. (Entrenamiento personal) Si usas el widget de entrenamiento, inserta tu cliente:
    ```sql
    insert into training_clients (name, price_per_hour, sessions_per_payment)
@@ -66,12 +68,18 @@ fly secrets set \
   HOME_ADDRESS="Tu dirección, Ciudad" \
   CLASSES_CALENDAR=clases \
   WEATHER_LAT=40.4168 WEATHER_LON=-3.7038 \
+  ALUD_ALLOWED_HOSTS=alud.deusto.es \
   CORS_ORIGINS="http://localhost:5173,https://TU-APP.vercel.app"
 fly deploy
 ```
 
 Notas:
 - `DASHBOARD_PASSWORD` **numérica**: el input del login es un teclado numérico.
+- `ALUD_ALLOWED_HOSTS` acota a qué hosts puede apuntar el `alud_url` de un evento.
+  Esa URL la acaba abriendo el agente en un navegador con la sesión iniciada, así que
+  solo se aceptan `https` y los hosts de esta lista (o sus subdominios). Si no usas el
+  agente PC, déjalo como está. **Pon el mismo valor en `agent/.env`**: se comprueba en
+  los dos sitios porque un job puede llegar a Supabase sin pasar por el backend.
 - `CLASSES_CALENDAR` es el nombre de un calendario de Outlook aparte para clases
   con horario; si no lo usas, ignora el panel de clases.
 - `WEATHER_LAT`/`WEATHER_LON` son las coordenadas del widget de clima (Open-Meteo,
@@ -167,7 +175,8 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `CLIENT_SECRET`, `REDIRECT_URI`, `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY`,
 `HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
 `CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`, `HTTP_TIMEOUT`,
-`TRUST_FORWARDED_FOR`.
+`TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
+`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,

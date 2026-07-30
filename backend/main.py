@@ -19,7 +19,7 @@ import hmac
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("life-assistant")
@@ -113,6 +113,29 @@ CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calenda
 WEATHER_LAT      = os.getenv("WEATHER_LAT", "40.4168")      # coordenadas para el clima (Open-Meteo)
 WEATHER_LON      = os.getenv("WEATHER_LON", "-3.7038")      # por defecto Madrid
 
+# Hosts a los que se permite apuntar `alud_url`. Esa URL sale del cuerpo HTML de un
+# evento de Outlook — dato NO confiable — y termina en `page.goto()` dentro del agente,
+# en un Edge que YA tiene la sesión de Alud/Okta iniciada, cuyo texto se le entrega
+# después a Cowork como instrucción. Sin lista blanca, quien pueda meter un evento en
+# el calendario elige adónde navega ese navegador y qué se le dicta al agente.
+# Se valida en tres sitios (extracción, alta del job y el propio agente) a propósito:
+# la cola es escribible desde fuera del backend.
+ALUD_ALLOWED_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.getenv("ALUD_ALLOWED_HOSTS", "alud.deusto.es").split(",")
+    if h.strip()
+)
+
+# Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
+# cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
+# pocos cuerpos grandes en paralelo para tumbarla.
+MAX_AUDIO_BYTES  = int(os.getenv("MAX_AUDIO_BYTES",  str(8 * 1024 * 1024)))
+MAX_INGEST_BYTES = int(os.getenv("MAX_INGEST_BYTES", str(4 * 1024 * 1024)))
+# La transcripción cuesta dinero en cada llamada: limitar el gasto de una sesión
+# comprometida, no solo el consumo de memoria.
+AUDIO_MAX_REQUESTS   = int(os.getenv("AUDIO_MAX_REQUESTS", "10"))
+AUDIO_WINDOW_SECONDS = int(os.getenv("AUDIO_WINDOW_SECONDS", "300"))
+
 try:
     LOCAL_TZ = ZoneInfo(TIMEZONE)
 except Exception:
@@ -163,8 +186,6 @@ def supabase_headers():
 bearer_scheme = HTTPBearer()
 
 # ── Seguridad: rate limiting del login ────────────────────────────────────────
-# Limitador en memoria por IP. Suficiente para un backend de una sola máquina que
-# escala a cero; se resetea en cold start, lo cual es aceptable para este caso.
 LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
 LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
 # Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera
@@ -172,8 +193,6 @@ LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
 TRUST_FORWARDED_FOR  = os.getenv("TRUST_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
 # Lo define el runtime de Fly. Sirve para saber si Fly-Client-IP es de fiar.
 EN_FLY               = bool(os.getenv("FLY_APP_NAME"))
-_login_attempts: dict = {}
-_login_lock = threading.Lock()
 
 
 def _client_ip(request: Request) -> str:
@@ -205,28 +224,132 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_login_rate(ip: str):
-    now = time.time()
-    with _login_lock:
-        attempts = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
-        _login_attempts[ip] = attempts
-        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
-            retry = int(LOGIN_WINDOW_SECONDS - (now - attempts[0]))
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Demasiados intentos. Reintenta en {retry}s",
-                headers={"Retry-After": str(max(retry, 1))},
-            )
+def _check_login_rate():
+    """Límite de intentos fallidos de login: GLOBAL (no por IP) y persistido en Supabase.
+
+    Global porque esto es una app de un solo usuario: limitar por IP dejaba una vía de
+    escape gratis (rotar de dirección, trivial en IPv6) sin proteger nada a cambio — al
+    ser global, cambiar de IP no le da a nadie un cupo de intentos nuevo.
+
+    En Supabase y no en memoria porque el contador en memoria se borraba en cada cold
+    start de Fly (`auto_stop_machines`): bastaba con esperar a que la máquina se
+    durmiera entre tandas para que el límite volviera a cero.
+
+    Si Supabase no responde, se deja pasar en vez de tumbar el login: es el único
+    endpoint de la app que hoy no depende de Supabase para nada más, y esa propiedad
+    (poder entrar aunque la base de datos esté caída, para al menos ver qué falla)
+    vale más que blindar una ventana de fallo de infraestructura poco probable.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(seconds=LOGIN_WINDOW_SECONDS)).isoformat()
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.{quote(since)}&select=created_at&order=created_at.asc",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Rate limit de login: no se pudo consultar Supabase (%s)", r.status_code)
+        return
+    attempts = r.json()
+    if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+        primero = datetime.fromisoformat(attempts[0]["created_at"].replace("Z", "+00:00"))
+        retry = int(LOGIN_WINDOW_SECONDS - (datetime.now(timezone.utc) - primero).total_seconds())
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Demasiados intentos. Reintenta en {retry}s",
+            headers={"Retry-After": str(max(retry, 1))},
+        )
 
 
 def _register_login_failure(ip: str):
-    with _login_lock:
-        _login_attempts.setdefault(ip, []).append(time.time())
+    logger.warning("Login fallido desde %s", ip)
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/login_attempts",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json={},
+    )
+    if r.status_code >= 300:
+        logger.error("No se pudo registrar el intento fallido de login (%s)", r.status_code)
 
 
-def _reset_login_attempts(ip: str):
-    with _login_lock:
-        _login_attempts.pop(ip, None)
+def _reset_login_attempts():
+    r = http.delete(
+        f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.1970-01-01T00:00:00Z",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("No se pudo limpiar login_attempts (%s)", r.status_code)
+
+
+# Limitador genérico por (recurso, IP), aparte del del login. La diferencia con
+# _check_login_rate es qué se cuenta: allí solo los intentos FALLIDOS, porque lo que se
+# protege es una credencial; aquí TODAS las peticiones, porque lo que se protege es un
+# recurso caro (memoria, o una llamada de pago a Whisper) y una petición legítima
+# consume igual que una abusiva.
+_rate_buckets: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _check_rate(recurso: str, ip: str, maximo: int, ventana: int):
+    ahora = time.time()
+    clave = (recurso, ip)
+    with _rate_lock:
+        # Poda de claves caducadas: sin esto el diccionario crece sin techo con quien
+        # rote IPs (trivial en IPv6). Barato porque solo mira las que ya expiraron.
+        for k in [k for k, ts in _rate_buckets.items() if not ts or ahora - ts[-1] >= ventana]:
+            del _rate_buckets[k]
+        recientes = [t for t in _rate_buckets.get(clave, []) if ahora - t < ventana]
+        if len(recientes) >= maximo:
+            _rate_buckets[clave] = recientes
+            espera = int(ventana - (ahora - recientes[0]))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Demasiadas peticiones. Reintenta en {espera}s",
+                headers={"Retry-After": str(max(espera, 1))},
+            )
+        recientes.append(ahora)
+        _rate_buckets[clave] = recientes
+
+
+async def _leer_cuerpo_limitado(request: Request, limite: int) -> bytes:
+    """Lee el cuerpo abortando en cuanto se pasa del límite.
+
+    Se mira `Content-Length` primero para cortar sin leer nada, pero no se confía solo
+    en él: una petición con `Transfer-Encoding: chunked` no lo trae y el cliente
+    tampoco está obligado a decir la verdad. De ahí el contador sobre el propio stream.
+    """
+    exceso = HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=f"Cuerpo demasiado grande (máximo {limite} bytes)",
+    )
+    declarado = request.headers.get("content-length", "")
+    if declarado.isdigit() and int(declarado) > limite:
+        raise exceso
+    trozos, total = [], 0
+    async for trozo in request.stream():
+        total += len(trozo)
+        if total > limite:
+            raise exceso
+        trozos.append(trozo)
+    return b"".join(trozos)
+
+
+def alud_url_permitida(url: str) -> bool:
+    """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio).
+
+    Se exige https porque el agente abre esa URL con una sesión iniciada detrás: por
+    http, cualquiera en la red del PC vería (y podría reescribir) lo que se navega.
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        partes = urlsplit(url)
+    except ValueError:
+        return False
+    if partes.scheme != "https":
+        return False
+    host = (partes.hostname or "").lower()
+    if not host:
+        return False
+    return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
 
 def _extract_service_token(request: Request, token_qs: str = "") -> str:
@@ -318,6 +441,29 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_sche
         jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+
+
+def _create_oauth_state() -> str:
+    """`state` del flujo OAuth de Microsoft: firmado y de corta duración.
+
+    /auth/login exige JWT, pero /auth/callback lo recibe Microsoft por redirect y no
+    puede llevar ese JWT (es una navegación de nivel superior, sin cabeceras propias).
+    Sin este `state`, cualquiera podía completar SU PROPIO login de Microsoft contra
+    /auth/callback y sus tokens pisaban los del usuario en `oauth_tokens` (una sola
+    fila). Firmado con SECRET_KEY en vez de guardado en memoria: sobrevive a que Fly
+    duerma la máquina mientras el usuario está en la pantalla de consentimiento.
+    """
+    expire = datetime.now(timezone.utc) + timedelta(minutes=10)
+    return jwt.encode({"exp": expire, "purpose": "oauth_state"}, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _verify_oauth_state(state: str) -> bool:
+    try:
+        claims = jwt.decode(state, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    return claims.get("purpose") == "oauth_state"
+
 
 SCOPES = ["Calendars.ReadWrite", "User.Read"]
 OAUTH_PROVIDER = "microsoft_graph"
@@ -412,18 +558,21 @@ def _store_result(result: dict):
 
 @app.post("/auth/password")
 def login_password(body: LoginRequest, request: Request):
-    ip = _client_ip(request)
-    _check_login_rate(ip)
+    _check_login_rate()
     # Comparar bytes: compare_digest sobre str exige ASCII puro y lanza TypeError con
     # cualquier tilde, lo que devolvía un 500 (y además se saltaba el registro del intento).
     if not hmac.compare_digest(body.password.encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8")):
-        _register_login_failure(ip)
+        _register_login_failure(_client_ip(request))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
-    _reset_login_attempts(ip)
+    _reset_login_attempts()
     return {"token": create_token()}
 
 @app.get("/auth/login")
-def login():
+def login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    # Exige el JWT del dashboard: sin esto, cualquiera que supiera esta URL (no es
+    # secreta — está en el propio CLAUDE.md, público en el repo) podía arrancar el
+    # consentimiento de Microsoft con SU cuenta y acabar pisando la conexión de
+    # Outlook del usuario.
     app_msal = msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority="https://login.microsoftonline.com/common",
@@ -433,11 +582,20 @@ def login():
     auth_url = app_msal.get_authorization_request_url(
         SCOPES,
         redirect_uri=REDIRECT_URI,
+        state=_create_oauth_state(),
     )
     return {"auth_url": auth_url}
 
 @app.get("/auth/callback")
-def callback(code: str):
+def callback(code: str, state: str = ""):
+    # El callback lo llama Microsoft por redirect: no puede llevar el JWT del
+    # dashboard. La prueba de que este código viene de un login que SÍ empezó con
+    # sesión iniciada es el `state` que /auth/login generó y firmó.
+    if not _verify_oauth_state(state):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solicitud de conexión no reconocida o caducada. Repite el proceso desde el dashboard.",
+        )
     app_msal = msal.ConfidentialClientApplication(
         CLIENT_ID,
         authority="https://login.microsoftonline.com/common",
@@ -482,6 +640,12 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
         alud_match = re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
                      re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
         alud_url = alud_match.group(1).rstrip("&;.,") if alud_match else None
+        # El cuerpo del evento lo escribe quien lo crea, no necesariamente el usuario:
+        # una URL de un host ajeno acabaría abierta en el navegador con sesión del PC.
+        # Se descarta aquí, en el punto donde entra al sistema.
+        if alud_url and not alud_url_permitida(alud_url):
+            logger.warning("Evento %s: alud_url descartada (host no permitido)", event.get("id"))
+            alud_url = None
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
@@ -534,8 +698,11 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
         payload["location"] = {"displayName": body.location}
     if body.description:
         payload["body"] = {"content": body.description, "bodyType": "text"}
+    # quote() obligatorio: el id se interpola en la ruta de Graph y un valor con '/',
+    # '?' o '#' cambiaría el endpoint al que se llama. El token de Graph tiene alcance
+    # Calendars.ReadWrite sobre toda la cuenta, así que el margen no es estrecho.
     url = (
-        f"https://graph.microsoft.com/v1.0/me/calendars/{body.calendar_id}/events"
+        f"https://graph.microsoft.com/v1.0/me/calendars/{quote(body.calendar_id, safe='')}/events"
         if body.calendar_id
         else "https://graph.microsoft.com/v1.0/me/events"
     )
@@ -558,8 +725,11 @@ class UpdateEventRequest(BaseModel):
 
 @app.patch("/calendar/events/{event_id}")
 def update_event(
-    event_id: str,
-    body: UpdateEventRequest,
+    # Los ids de Graph no tienen una forma fija que se pueda validar con un patrón sin
+    # arriesgarse a rechazar ids reales, así que se acota el largo y se escapa al
+    # construir la URL (ver más abajo).
+    event_id: str = Path(..., max_length=512),
+    body: UpdateEventRequest = ...,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     token = get_valid_token()
@@ -582,7 +752,7 @@ def update_event(
     if not payload:
         raise HTTPException(status_code=400, detail="Nada que actualizar")
     r = http.patch(
-        f"https://graph.microsoft.com/v1.0/me/events/{event_id}",
+        f"https://graph.microsoft.com/v1.0/me/events/{quote(event_id, safe='')}",
         headers=headers,
         json=payload,
     )
@@ -885,11 +1055,20 @@ def save_idea(text: str, idea_data: dict) -> dict:
 
 @app.post("/ideas/audio")
 async def create_idea_from_audio(
+    request: Request,
     audio: UploadFile = File(...),
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    # 1. Transcribir con Whisper
-    audio_bytes = await audio.read()
+    _check_rate("ideas_audio", _client_ip(request), AUDIO_MAX_REQUESTS, AUDIO_WINDOW_SECONDS)
+
+    # 1. Transcribir con Whisper. Se lee un byte más del tope para poder distinguir
+    # "justo en el límite" de "se ha pasado" sin cargar el resto en memoria.
+    audio_bytes = await audio.read(MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Audio demasiado grande (máximo {MAX_AUDIO_BYTES // (1024 * 1024)} MB)",
+        )
     transcript = get_openai_client().audio.transcriptions.create(
         model="whisper-1",
         file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
@@ -1126,6 +1305,12 @@ def ha_pc_power_pending(request: Request, token: str = ""):
 
 @app.post("/jobs")
 def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    # Segunda barrera de la misma comprobación que hace /calendar/events: el payload de
+    # un job puede llegar por otras vías (una integración, un cliente manipulado), y lo
+    # que se guarde aquí es exactamente lo que el agente ejecutará en el PC.
+    alud_url = body.payload.get("alud_url") if isinstance(body.payload, dict) else None
+    if alud_url is not None and not alud_url_permitida(alud_url):
+        raise HTTPException(status_code=400, detail="alud_url no permitida")
     payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
     r = http.post(
         f"{SUPABASE_URL}/rest/v1/jobs",
@@ -1147,6 +1332,26 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     )
     data2 = r2.json() if r2.status_code < 300 else []
     return {"ok": True, "job": data2[0] if data2 else None}
+
+@app.get("/jobs/pending")
+def get_pending_job(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """El job pendiente más reciente de la última hora, para que lo recoja el agente.
+
+    Antes esta consulta la hacía el propio agente directamente contra Supabase con la
+    service_role key — la clave que salta toda la RLS de la base entera — guardada en
+    un `.env` en el PC Windows. Era la única llamada que le obligaba a tenerla; con
+    este endpoint el agente solo necesita el JWT del dashboard, igual que para
+    claim/start/finish.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&created_at=gt.{cutoff}&order=created_at.desc&limit=1",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    rows = r.json()
+    return {"ok": True, "job": rows[0] if rows else None}
 
 _JOB_ID_PATH = Path(..., pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
@@ -1579,7 +1784,7 @@ async def health_ingest(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    raw = await request.body()
+    raw = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
     try:
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
@@ -1723,7 +1928,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
     # JSON por línea) directamente en el cuerpo — este último no es un JSON de una
     # pieza y `request.json()` fallaría. Leemos el cuerpo crudo y lo interpretamos:
     # utf-8-sig descarta el BOM que iOS a veces añade.
-    raw  = await request.body()
+    raw  = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
     text = raw.decode("utf-8-sig", errors="replace").strip()
     body = None
     if text:

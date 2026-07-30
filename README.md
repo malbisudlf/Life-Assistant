@@ -183,9 +183,8 @@ Crear `agent/.env`:
 ```env
 LA_TOKEN=          # JWT del dashboard (F12 → Application → Local Storage → la_token)
 LA_API_BASE=https://tu-backend.fly.dev
-SUPABASE_URL=
-SUPABASE_KEY=
 ALUD_ACCOUNT=tu.email@universidad.es
+ALUD_ALLOWED_HOSTS=alud.deusto.es   # mismo valor que en backend/.env
 EDGE_PROFILE_DIR=  # opcional, por defecto usa el perfil Default de Edge
 ```
 
