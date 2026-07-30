@@ -48,6 +48,7 @@ def main() -> int:
         ("Ideas por voz (Whisper + GPT)", ["OPENAI_API_KEY"]),
         ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
         ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
+        ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
     ]
     for nombre, vars_ in grupos:
         faltan = [v for v in vars_ if not os.getenv(v)]
@@ -59,6 +60,7 @@ def main() -> int:
     print(f"\nCORS: {os.getenv('CORS_ORIGINS', '(default: localhost + dominio de Mikel — pon el tuyo)')}")
     print(f"Calendario de clases: {os.getenv('CLASSES_CALENDAR', 'clases')}")
     print(f"Clima (lat, lon): {os.getenv('WEATHER_LAT', '40.4168')}, {os.getenv('WEATHER_LON', '-3.7038')}")
+    print(f"Marcador de entregas: {os.getenv('ENTREGAS_MARKER', '📚')} (debe coincidir con VITE_ENTREGAS_MARKER)")
 
     if errores:
         print(f"\n{KO} {errores} error(es) bloqueante(s).")
