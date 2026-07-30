@@ -219,6 +219,23 @@ Ficheros clave:
   coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
   cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
   hay, con fallback a `HOME_ADDRESS`.
+- **Resumen diario por correo** (`/brief`, `POST /brief/send`): manda a tu propio buzón
+  los datos del día **en crudo, sin interpretarlos**, porque quien los consume es una
+  rutina externa que lee el correo y redacta el resumen — ya es un modelo, así que aquí
+  **no hay ninguna llamada a un LLM** y no debe haberla. Tampoco hay conclusiones:
+  `healthConclusions` y compañía viven en `helpers.js`, son JavaScript y son la única
+  fuente de verdad de esa lógica; portarlas a Python la duplicaría. Lo único que se
+  replica es `_horas_sueno()` (equivalente a `_sleepHours`), que es forma del dato y no
+  regla — si cambia cómo llegan los datos del Watch, hay que tocar los dos.
+  `construir_brief()` llama a las funciones de los endpoints existentes con
+  `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
+  heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
+  en paralelo. Cada sección cae por su cuenta: un fallo de Graph deja la agenda vacía
+  pero el resto del correo sigue siendo útil. Envío por `smtplib` (librería estándar, sin
+  dependencias nuevas). El disparador es
+  `.github/workflows/resumen-diario.yml` (cron en UTC — ajústalo en los cambios de hora)
+  y usa `BRIEF_TOKEN`, token de servicio: un JWT de usuario caducaría a los 30 días y el
+  correo dejaría de llegar sin avisar.
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada

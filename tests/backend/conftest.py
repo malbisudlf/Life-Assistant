@@ -16,6 +16,7 @@ os.environ.setdefault("GOOGLE_MAPS_API_KEY", "maps-test-key")
 os.environ.setdefault("HA_POLL_TOKEN", "ha-poll-token")
 os.environ.setdefault("HEALTH_INGEST_TOKEN", "health-token")
 os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
+os.environ.setdefault("BRIEF_TOKEN", "brief-token")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
