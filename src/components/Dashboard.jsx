@@ -47,6 +47,20 @@ async function apiFetch(url, options = {}) {
   return res;
 }
 
+// /auth/login ahora exige el JWT del dashboard (ver backend/main.py): un <a href>
+// directo al backend no manda cabeceras, así que se pide con fetch autenticado y se
+// navega a la auth_url que devuelve — esa sí es la pantalla de consentimiento de
+// Microsoft, no el JSON del backend.
+async function conectarOutlook() {
+  try {
+    const res = await apiFetch(`${API}/auth/login`, { headers: authHeaders() });
+    const data = await res.json();
+    if (data.auth_url) window.open(data.auth_url, "_blank", "noopener,noreferrer");
+  } catch {
+    // mejor esfuerzo: si falla, el usuario puede pulsar otra vez
+  }
+}
+
 // ── LOGIN SCREEN ─────────────────────────────────────────────────
 function LoginScreen() {
   const [pwd, setPwd] = useState("");
@@ -1920,9 +1934,15 @@ export default function Dashboard() {
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "16px 0" }}>Cargando eventos...</div>
           ) : authNeeded ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
-              <a href={`${API}/auth/login`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", textDecoration: "none" }}>
+              <button
+                onClick={conectarOutlook}
+                style={{
+                  background: "none", border: "none", padding: 0, font: "inherit",
+                  color: "var(--accent)", cursor: "pointer",
+                }}
+              >
                 → Conectar Outlook
-              </a>
+              </button>
             </div>
           ) : todayEvents.length === 0 && todayClasses.length === 0 ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
