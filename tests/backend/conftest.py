@@ -92,11 +92,13 @@ def _limpiar_estado():
     main._wol_pending = False
     main._agent_relaunch_pending = False
     main._pc_power_action = None
+    main._token_cache = None
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Estado en memoria limpio entre tests (rate limiting y flags WOL/relanzado)."""
+    """Estado en memoria limpio entre tests (rate limiting, flags WOL/relanzado y la
+    copia en memoria del token de Graph)."""
     _limpiar_estado()
     yield
     _limpiar_estado()

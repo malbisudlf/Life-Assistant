@@ -2,9 +2,10 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
+  weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
-  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
+  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -84,33 +85,72 @@ describe("helpers de salud", () => {
   });
 
   test("sleepScore: noche perfecta llega al máximo", () => {
-    // 8h, 18% profundo, 22% REM, resto core, 0 despierto, acostado a las 23h
-    const score = sleepScore(8, 1.44, 1.76, 4.8, 0, "23:00");
+    // 8h, 18% profundo, 22% REM, 0 despierto, acostado a las 23h
+    const score = sleepScore(8, 1.44, 1.76, 0, "23:00");
     expect(score).toBe(100);
   });
 
   test("sleepScore: cap por duración", () => {
     // 7h no puede superar 68 aunque las fases sean perfectas
-    const score = sleepScore(7, 1.26, 1.54, 4.2, 0, "23:00");
+    const score = sleepScore(7, 1.26, 1.54, 0, "23:00");
     expect(score).toBeLessThanOrEqual(68);
     // 6h queda capado a 52
-    const short = sleepScore(6, 1.08, 1.32, 3.6, 0, "23:00");
+    const short = sleepScore(6, 1.08, 1.32, 0, "23:00");
     expect(short).toBeLessThanOrEqual(52);
   });
 
   test("sleepScore: penaliza acostarse tarde", () => {
-    const early = sleepScore(8, 1.44, 1.76, 4.8, 0, "23:00");
-    const late  = sleepScore(8, 1.44, 1.76, 4.8, 0, "03:00");
+    const early = sleepScore(8, 1.44, 1.76, 0, "23:00");
+    const late  = sleepScore(8, 1.44, 1.76, 0, "03:00");
     expect(late).toBeLessThan(early);
     expect(early - late).toBe(15);
   });
 
   test("sleepScore: nunca es negativo y aplica recoveryMod", () => {
-    const bad = sleepScore(1, 0, 0, 0, 0.5, "04:00", -20);
+    const bad = sleepScore(1, 0, 0, 0.5, "04:00", -20);
     expect(bad).toBeGreaterThanOrEqual(0);
-    const base = sleepScore(8, 1.44, 1.76, 4.8, 0, "22:00", 0);
-    const modded = sleepScore(8, 1.44, 1.76, 4.8, 0, "22:00", -10);
+    const base = sleepScore(8, 1.44, 1.76, 0, "22:00", 0);
+    const modded = sleepScore(8, 1.44, 1.76, 0, "22:00", -10);
     expect(base - modded).toBe(10);
+  });
+
+  // El tooltip del widget de sueño llegó a tener su propia copia de los umbrales y se
+  // le coló otra vez el bug histórico del `h >= 1`: enseñaba -10 pts por acostarse a
+  // las 22:00 que la puntuación real nunca aplicaba. Ahora ambos salen del desglose.
+  test("sleepBreakdown: acostarse antes de medianoche no genera fila de penalización", () => {
+    for (const hora of ["21:30", "22:00", "23:45"]) {
+      const filas = sleepBreakdown(8, 1.44, 1.76, 0, hora).filas;
+      expect(filas.find(f => f.label === "Hora de acostarse")).toBeUndefined();
+    }
+    // A partir de medianoche sí penaliza, y con el peso que documenta sleepScore
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "00:30").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -5 });
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "01:15").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -10 });
+    expect(sleepBreakdown(8, 1.44, 1.76, 0, "03:00").filas.at(-1)).toMatchObject({ label: "Hora de acostarse", pts: -15 });
+  });
+
+  test("sleepBreakdown: las filas suman exactamente el score (sin cap ni recoveryMod)", () => {
+    const casos = [
+      [8,   1.44, 1.76, 0,    "23:00"],
+      [8.5, 0.9,  2.2,  0.4,  "01:00"],
+      [9,   1.2,  1.5,  1.1,  "22:15"],
+    ];
+    for (const c of casos) {
+      const { filas } = sleepBreakdown(...c);
+      const suma = filas.reduce((s, f) => s + f.pts, 0);
+      expect(sleepScore(...c)).toBe(suma);
+    }
+  });
+
+  test("sleepBreakdown: null cuando no hay noche que puntuar", () => {
+    expect(sleepBreakdown(null)).toBeNull();
+    expect(sleepBreakdown(0.4)).toBeNull();
+  });
+
+  test("sleepHours: valor guardado, si no asleep, si no suma de fases", () => {
+    expect(sleepHours({ value: 7.5 })).toBe(7.5);
+    expect(sleepHours({ value: 0, extra: { asleep: 6.2 } })).toBe(6.2);
+    expect(sleepHours({ value: 0, extra: { deep: 1, rem: 1.5, core: 4, light: 0.5 } })).toBe(7);
+    expect(sleepHours(null)).toBe(0);
   });
 
   test("calcRecoveryMod: sin datos no penaliza", () => {
@@ -505,5 +545,123 @@ describe("correlaciones entre series", () => {
     const patron = c.find(x => x.domain === "Patrón" && x.text.includes("pasos"));
     expect(patron).toBeTruthy();
     expect(patron.text).toMatch(/duermes/);
+  });
+
+  // Fecha ISO del día n de junio de 2026, para construir series legibles.
+  const dia = n => new Date(Date.UTC(2026, 5, n)).toISOString().slice(0, 10);
+  const AHORA = new Date("2026-06-11T12:00:00Z");
+
+  test("healthConclusions cruza minutos de ejercicio ↔ sueño profundo de esa noche", () => {
+    const apple_exercise_time = [], sleep_analysis = [];
+    for (let i = 0; i < 8; i++) {
+      const duro = i % 2 === 0;
+      apple_exercise_time.push({ date: dia(1 + i), value: duro ? 65 : 5 });
+      // La noche siguiente hay más sueño profundo cuando ese día se ha entrenado fuerte
+      sleep_analysis.push({ date: dia(2 + i), value: 7.5, extra: { deep: duro ? 1.8 : 0.7 } });
+    }
+    const c = healthConclusions({ apple_exercise_time, sleep_analysis }, AHORA);
+    const patron = c.find(x => x.domain === "Patrón" && x.text.includes("sueño profundo"));
+    expect(patron).toBeTruthy();
+    expect(patron.tone).toBe("good");
+    expect(patron.text).toMatch(/min de ejercicio/);
+  });
+
+  test("healthConclusions cruza pasos ↔ FC en reposo del día siguiente", () => {
+    const step_count = [], resting_heart_rate = [];
+    for (let i = 0; i < 8; i++) {
+      const muchos = i % 2 === 0;
+      step_count.push({ date: dia(1 + i), value: muchos ? 18000 : 2500 });
+      // Andar mucho deja la FC en reposo más alta al día siguiente
+      resting_heart_rate.push({ date: dia(2 + i), value: muchos ? 62 : 54 });
+    }
+    const c = healthConclusions({ step_count, resting_heart_rate }, AHORA);
+    const patron = c.find(x => x.domain === "Patrón" && x.text.includes("FC en reposo"));
+    expect(patron).toBeTruthy();
+    expect(patron.text).toMatch(/sube/);
+    expect(patron.tone).toBe("info");
+  });
+
+  test("healthConclusions cruza luz natural ↔ HRV de esa noche", () => {
+    const time_in_daylight = [], heart_rate_variability = [];
+    for (let i = 0; i < 8; i++) {
+      const sol = i % 2 === 0;
+      time_in_daylight.push({ date: dia(1 + i), value: sol ? 120 : 8 });
+      heart_rate_variability.push({ date: dia(2 + i), value: sol ? 78 : 52 });
+    }
+    const c = healthConclusions({ time_in_daylight, heart_rate_variability }, AHORA);
+    const patron = c.find(x => x.domain === "Patrón" && x.text.includes("luz natural"));
+    expect(patron).toBeTruthy();
+    expect(patron.tone).toBe("good");
+    expect(patron.text).toMatch(/HRV nocturna/);
+  });
+
+  test("wellnessHistory: un día por fecha con datos, siempre normalizado a 100", () => {
+    const sleep_analysis = [], step_count = [];
+    for (let i = 1; i <= 5; i++) {
+      sleep_analysis.push({ date: dia(i), value: 7.5, extra: {} });
+      step_count.push({ date: dia(i), value: 11000 });
+    }
+    const h = wellnessHistory({ sleep_analysis, step_count });
+    expect(h.map(d => d.date)).toEqual([dia(1), dia(2), dia(3), dia(4), dia(5)]);
+    expect(h.every(d => d.value >= 0 && d.value <= 100)).toBe(true);
+  });
+
+  test("wellnessHistory: refleja la mejora del mes en la tendencia", () => {
+    const sleep_analysis = [], step_count = [];
+    for (let i = 1; i <= 20; i++) {
+      sleep_analysis.push({ date: dia(i), value: 5.5 + i * 0.12, extra: {} });
+      step_count.push({ date: dia(i), value: 4000 + i * 400 });
+    }
+    const h = wellnessHistory({ sleep_analysis, step_count });
+    expect(h[h.length - 1].value).toBeGreaterThan(h[0].value);
+    expect(seriesTrend(h, 7, 30).deltaPct).toBeGreaterThan(0);
+  });
+
+  test("wellnessHistory: se salta los días sin nada que puntuar y respeta noches anuladas", () => {
+    const h = wellnessHistory({
+      sleep_analysis: [
+        { date: dia(1), value: 8, extra: {} },
+        { date: dia(2), value: 8, extra: { excluded: true } },   // anulada a mano
+      ],
+      // dia(3) solo tiene una métrica que no cuenta como "hay algo que puntuar"
+      flights_climbed: [{ date: dia(3), value: 12 }],
+    });
+    expect(h.map(d => d.date)).toEqual([dia(1)]);
+  });
+
+  test("wellnessHistory: las métricas esporádicas arrastran su último valor conocido", () => {
+    const base = {
+      sleep_analysis: [1, 2, 3].map(i => ({ date: dia(i), value: 7.5, extra: {} })),
+      step_count:     [1, 2, 3].map(i => ({ date: dia(i), value: 11000 })),
+    };
+    const sinVo2 = wellnessHistory(base);
+    // Un VO2max excelente medido el día 1 debe seguir puntuando los días 2 y 3
+    const conVo2 = wellnessHistory({ ...base, vo2_max: [{ date: dia(1), value: 55 }] });
+    expect(conVo2).toHaveLength(3);
+    expect(conVo2[2].value).not.toBe(sinVo2[2].value);
+  });
+
+  test("wellnessHistory: sin datos devuelve lista vacía y recorta a `dias`", () => {
+    expect(wellnessHistory({})).toEqual([]);
+    expect(wellnessHistory(null)).toEqual([]);
+    const sleep_analysis = [], step_count = [];
+    for (let i = 1; i <= 12; i++) {
+      sleep_analysis.push({ date: dia(i), value: 7, extra: {} });
+      step_count.push({ date: dia(i), value: 9000 });
+    }
+    expect(wellnessHistory({ sleep_analysis, step_count }, { dias: 5 })).toHaveLength(5);
+  });
+
+  test("los cruces nuevos callan si no hay muestras suficientes en ambos grupos", () => {
+    // Dos días no dan para partir en dos grupos de 3 (mínimo de splitCompare)
+    const c = healthConclusions({
+      apple_exercise_time:      [{ date: dia(1), value: 60 }, { date: dia(2), value: 5 }],
+      time_in_daylight:         [{ date: dia(1), value: 90 }, { date: dia(2), value: 4 }],
+      step_count:               [{ date: dia(1), value: 15000 }, { date: dia(2), value: 2000 }],
+      resting_heart_rate:       [{ date: dia(2), value: 60 }, { date: dia(3), value: 55 }],
+      heart_rate_variability:   [{ date: dia(2), value: 70 }, { date: dia(3), value: 50 }],
+      sleep_analysis:           [{ date: dia(2), value: 7.5, extra: { deep: 1.2 } }],
+    }, AHORA);
+    expect(c.filter(x => x.domain === "Patrón")).toEqual([]);
   });
 });

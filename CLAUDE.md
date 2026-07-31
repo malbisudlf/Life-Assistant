@@ -69,7 +69,7 @@ Ficheros clave:
 | Fichero | Qué es |
 |---|---|
 | `src/components/Dashboard.jsx` | TODA la UI (~4.575 líneas, un componente principal + subcomponentes en el mismo fichero) |
-| `src/lib/helpers.js` | Helpers puros del frontend (fechas, sleepScore, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
+| `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
@@ -178,6 +178,15 @@ Ficheros clave:
 - **Tokens OAuth de Graph** se persisten en la tabla `oauth_tokens` de Supabase
   (sobreviven a los redeploys de Fly; la mención a `backend/.token` en el README está
   obsoleta). `get_valid_token()` renueva con el refresh token de forma transparente.
+  Además hay una **copia en memoria** (`_token_cache`): antes cada endpoint de
+  calendario leía la tabla, así que una carga del dashboard gastaba dos viajes de red
+  en releer un token que no había cambiado, y el sondeo de HA sumaba otro por minuto.
+  La copia se rellena al leer, se actualiza en `save_token_data()` y se tira si el
+  refresh falla. Si tocas la escritura del token, mantén esa invalidación (y resetéala
+  en `reset_state` de los tests, como el resto de estado de módulo).
+- **Cliente MSAL compartido** (`_msal_app()`, perezoso): construir un
+  `ConfidentialClientApplication` descubre la autoridad por red, y antes se construía
+  de cero en `/auth/login`, `/auth/callback` y en cada renovación de token.
 - **Cola de jobs** (máquina de estados estricta, transiciones vía PATCH condicional de
   Supabase para que sean atómicas):
   `pending → claimed → running → done | failed`, y `failed → pending` con `retry`
@@ -264,6 +273,15 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   bienestar también vive allí: `wellnessBreakdown` construye el desglose y
   `scoreFromBreakdown` deriva de él el total normalizado a 100 — **el desglose es la
   única fuente de verdad, nunca sumes al score por separado**.
+  `wellnessHistory` reconstruye la puntuación DIARIA de cada día del histórico con
+  esas mismas dos funciones (modo diario) a partir de las series que ya sirve
+  `/health/metrics`: **no hay tabla ni endpoint de histórico, se deriva de lo que ya
+  hay**. Alimenta la sparkline de "Evolución" del widget de bienestar. Si añades un
+  componente a `wellnessBreakdown`, añádelo también al mapa de series de
+  `wellnessHistory` o los días antiguos puntuarán sobre menos componentes que hoy.
+  Las métricas esporádicas (VO₂max, % grasa, recuperación cardio) arrastran su último
+  valor conocido hasta cada fecha, y la referencia de HRV se ancla a la ventana
+  D-14..D-8 de ese día, no a hoy: así cada día puntúa como habría puntuado entonces.
   Cada uno se renderiza en `renderWidget(id)`. La configuración
   (visibilidad, columna, orden, tamaño, splits) se persiste en `localStorage`, con
   selección independiente en modo completo (`la_widget_config`) y simple
@@ -333,7 +351,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 241 tests)
+### Backend (`tests/backend`, 250 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -352,7 +370,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 58 tests)
+### Frontend (`tests/frontend`, 71 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -372,6 +390,20 @@ Trampas conocidas de jsdom:
 - `sleepScore`: la penalización por hora de acostarse usa `h === 1` / `h === 0` para
   distinguir la 01:00 y las 00:00. Un `h >= 1` "equivalente" penalizaba también las
   22:00–23:00 (cualquier hora antes de medianoche). Hay test que lo cubre.
+  **Este bug se reintrodujo** en el tooltip del widget de sueño, que llevaba su propia
+  copia de los umbrales: enseñaba -10 pts por acostarse a las 22:00 que la puntuación
+  real no aplicaba, así que las filas no cuadraban con su propio total. Arreglado con
+  el mismo patrón que bienestar: `sleepBreakdown` (helpers) es la única fuente de
+  verdad de los umbrales y `sleepScore` se limita a sumarlo. **No vuelvas a escribir
+  esos umbrales fuera de `helpers.js`.**
+- `sleepScore` NO recibe `core`: era un parámetro muerto que nadie usaba pero que los
+  dos sitios que lo llaman se molestaban en calcular. Firma actual:
+  `sleepScore(total, deep, rem, awake, sleepStart, recoveryMod)`.
+- Los path params UUID del backend salen de `_uuid_path()`, que es una **fábrica**, no
+  una constante: FastAPI asocia cada objeto `Path()` al nombre del parámetro que lo
+  usa, así que compartir una instancia entre endpoints con nombres distintos
+  (`idea_id`, `item_id`, `session_id`…) hace que todos hereden el último nombre
+  registrado y devuelvan 422. Hay tests que lo cubren.
 - Extracción de `alud_url` en `/calendar/events`: los cuerpos de Graph son HTML y la
   URL suele venir pegada a la etiqueta de cierre (`...id=99</p>`). El patrón debe
   excluir `<>"'` — un `\S+` se traga la etiqueta y rompe el enlace. Hay test.

@@ -156,3 +156,44 @@ class TestClasses:
         }))
         r = client.get("/calendar/calendars", headers=auth_headers)
         assert r.json() == [{"id": "c1", "name": "Calendario"}]
+
+
+class TestCacheDelTokenDeGraph:
+    """El token de Graph vivía solo en Supabase: cada endpoint de calendario hacía un
+    viaje de red extra para releer algo que no cambia hasta que expira. Ahora se
+    guarda en memoria; estos tests fijan que la copia se usa y se invalida bien."""
+
+    def _token_vigente(self):
+        from datetime import datetime, timezone
+        return FakeResponse([{
+            "access_token": "tok-vigente",
+            "refresh_token": "refresh",
+            "expires_at": datetime.now(timezone.utc).timestamp() + 3600,
+        }])
+
+    def test_la_segunda_llamada_no_vuelve_a_supabase(self, mock_requests):
+        mock_requests.add("GET", "oauth_tokens", self._token_vigente())
+        assert main.get_valid_token() == "tok-vigente"
+        assert main.get_valid_token() == "tok-vigente"
+        assert len(mock_requests.called("GET", "oauth_tokens")) == 1
+
+    def test_guardar_un_token_nuevo_actualiza_la_copia(self, mock_requests):
+        from datetime import datetime, timezone
+        mock_requests.add("GET", "oauth_tokens", self._token_vigente())
+        assert main.get_valid_token() == "tok-vigente"
+        main.save_token_data({
+            "access_token": "tok-nuevo",
+            "refresh_token": "refresh",
+            "expires_at": datetime.now(timezone.utc).timestamp() + 3600,
+        })
+        # Sale el nuevo sin releer Supabase: la escritura ya dejó la copia al día.
+        assert main.get_valid_token() == "tok-nuevo"
+
+    def test_token_caducado_sin_refresh_no_se_sirve_de_la_copia(self, mock_requests):
+        from datetime import datetime, timezone
+        mock_requests.add("GET", "oauth_tokens", FakeResponse([{
+            "access_token": "tok-viejo",
+            "refresh_token": None,
+            "expires_at": datetime.now(timezone.utc).timestamp() - 10,
+        }]))
+        assert main.get_valid_token() is None

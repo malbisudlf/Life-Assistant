@@ -124,3 +124,24 @@ class TestPcPower:
         client.post("/suspend-pc", headers=auth_headers)
         client.post("/shutdown-pc", headers=auth_headers)
         assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": "shutdown"}
+
+
+class TestHaEventsSoonGraphCaido:
+    """Un fallo de Graph no puede parecerse a "no hay ningún evento a la vista": se
+    registra y se devuelve event=None sin reventar, que es lo que HA sabe leer."""
+
+    def test_graph_401_no_revienta_y_devuelve_event_none(self, client, graph_token, mock_requests):
+        mock_requests.add("GET", "graph.microsoft.com", FakeResponse({"error": {"code": "InvalidAuthenticationToken"}}, 401))
+        r = client.get("/ha/events/soon?token=ha-poll-token")
+        assert r.status_code == 200
+        assert r.json() == {"event": None}
+
+    def test_graph_responde_html_no_da_500(self, client, graph_token, mock_requests):
+        class RespuestaNoJson(FakeResponse):
+            def json(self):
+                raise ValueError("no es JSON")
+
+        mock_requests.add("GET", "graph.microsoft.com", RespuestaNoJson(None, 502, text="<html>502</html>"))
+        r = client.get("/ha/events/soon?token=ha-poll-token")
+        assert r.status_code == 200
+        assert r.json() == {"event": None}
