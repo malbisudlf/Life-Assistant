@@ -305,6 +305,33 @@ class TestEnvio:
         assert r.status_code == 503
         assert "SMTP_HOST" in r.json()["detail"]
 
+    def test_fallo_inesperado_da_502_con_el_motivo(self, client, mock_requests, graph_token, monkeypatch):
+        """Antes cualquier fallo no previsto (Graph, Supabase, SMTP) subía sin
+        capturar y el disparador solo veía un 'Internal Server Error' sin detalle."""
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        def _explota(asunto, cuerpo):
+            raise TimeoutError("[Errno 110] Connection timed out")
+
+        monkeypatch.setattr(main, "enviar_correo", _explota)
+        r = client.post("/brief/send?token=brief-token")
+        assert r.status_code == 502
+        assert "Connection timed out" in r.json()["detail"]
+
+    def test_fallo_inesperado_no_manda_correo(self, client, mock_requests, graph_token, monkeypatch):
+        """Si construir_brief() revienta, no debe intentarse enviar nada."""
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        def _explota():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(main, "construir_brief", _explota)
+        r = client.post("/brief/send?token=brief-token")
+        assert r.status_code == 502
+        assert _SMTPFalso.enviados == []
+
     def test_envia_por_smtp_con_starttls(self, client, mock_requests, graph_token, monkeypatch):
         montar_fuentes(mock_requests)
         configurar_smtp(monkeypatch, puerto=587)

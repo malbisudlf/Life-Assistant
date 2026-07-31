@@ -2677,7 +2677,18 @@ def send_brief(request: Request, token: str = ""):
     30 días y el correo dejaría de llegar sin avisar."""
     if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
-    datos = construir_brief()
-    enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+    # Sin este try/except, cualquier fallo (Graph, Supabase, SMTP) subía sin capturar
+    # y el disparador solo veía un "Internal Server Error" genérico y sin detalle —
+    # nada que distinguir un problema de Outlook de uno de credenciales SMTP. El
+    # llamador es el workflow de GitHub Actions, protegido por BRIEF_TOKEN, no un
+    # navegador: el mensaje de la excepción es diagnóstico útil, no un dato sensible.
+    try:
+        datos = construir_brief()
+        enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo")
+        raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     logger.info("Resumen diario enviado a %s (%s)", BRIEF_TO, datos["fecha"])
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
