@@ -27,7 +27,10 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
 
 - [ ] `git pull` en la carpeta del repo (trae el `agent/agent.py` efímero + despachador).
 - [ ] Reinstalar dependencias si hace falta: `pip install -r backend/requirements.txt`.
-- [ ] Revisar el `.env` del agente: `LA_TOKEN`, `SUPABASE_URL`, `SUPABASE_KEY`, `ALUD_ACCOUNT`.
+- [ ] Revisar el `.env` del agente: `LA_TOKEN`, `ALUD_ACCOUNT`, `ALUD_ALLOWED_HOSTS`.
+      **Ya NO hace falta `SUPABASE_URL`/`SUPABASE_KEY`**: el agente pide los jobs
+      pendientes al backend (`GET /jobs/pending`) en vez de a Supabase directo. Si tu
+      `.env` los tenía, puedes borrarlos.
       Opcional: `SUNSHINE_EXE` (solo si instalas Sunshine fuera de la ruta estándar).
 
 ## 2. Instalar Sunshine (host de streaming)
@@ -165,3 +168,93 @@ automation:
   una **VPN** (WireGuard/Tailscale): desde fuera "estás" en tu LAN, sin abrir puertos.
 - En reposo, lo único extra encendido es el servicio OpenSSH inactivo (coste
   despreciable). Sunshine solo consume mientras haces streaming.
+
+---
+
+# Resumen diario por correo (independiente de lo anterior)
+
+No tiene que ver con el streaming: cada mañana el backend manda a tu propio buzón los
+datos del día (agenda, clases, entregas, clima, salud, entrenamiento) **en crudo, sin
+interpretarlos**. De ahí los recoge tu rutina de Claude Code que ya lee el correo y
+compone el resumen diario — por eso el backend no llama a ningún LLM.
+
+> El código vive en la rama `claude/mejoras-analisis-seguridad-cj53hq`, todavía sin
+> fusionar a `main`. **El cron de GitHub Actions solo se dispara desde la rama por
+> defecto**, así que el paso 0 de esta lista es obligatorio antes que nada más.
+
+## 0. Fusionar la rama
+
+- [ ] Abrir el PR de `claude/mejoras-analisis-seguridad-cj53hq` contra `main` y
+      fusionarlo (squash, como el resto del repo).
+
+## 1. Contraseña de aplicación de Gmail
+
+- [ ] Crearla en [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+      (nombre: «Life Assistant»). Con 2FA activado, la contraseña normal de Gmail
+      **no** sirve por SMTP.
+- [ ] Si la copias con espacios (`abcd efgh ijkl mnop`), va entre comillas en el
+      comando del paso siguiente.
+
+## 2. Configurar el correo en Fly
+
+- [ ] Desde `backend/`, generar el token del disparador: `openssl rand -hex 24`
+      (apuntarlo, hace falta otra vez en el paso 4).
+- [ ] `fly secrets set`:
+      ```bash
+      fly secrets set \
+        BRIEF_TO=malbisudlf@gmail.com \
+        SMTP_HOST=smtp.gmail.com \
+        SMTP_PORT=587 \
+        SMTP_USER=malbisudlf@gmail.com \
+        SMTP_PASSWORD="tu-contraseña-de-aplicacion" \
+        BRIEF_TOKEN=el-token-del-paso-anterior \
+        ENTREGAS_MARKER="📚"
+      ```
+- [ ] `ENTREGAS_MARKER` debe coincidir con `VITE_ENTREGAS_MARKER` de Vercel (por
+      defecto los dos son 📚, así que si nunca tocaste el de Vercel ya cuadra).
+
+## 3. Desplegar el backend
+
+- [ ] `cd backend && fly deploy`.
+- [ ] Comprobar: `curl https://backend-tender-glow-160.fly.dev/` responde
+      `{"status": "Life Assistant API running"}`.
+
+## 4. Disparador en GitHub
+
+En el repo, Settings → Secrets and variables → Actions:
+
+- [ ] Pestaña **Variables**: `BACKEND_URL` = `https://backend-tender-glow-160.fly.dev`.
+- [ ] Pestaña **Secrets**: `BRIEF_TOKEN` = el mismo valor exacto que en Fly (si no
+      coinciden, el envío falla con 403).
+
+## 5. Ajustar la hora del envío
+
+`.github/workflows/resumen-diario.yml` trae `30 4 * * *` (cron en **UTC**, no
+entiende zonas horarias):
+
+| Cron (UTC) | Madrid verano | Madrid invierno |
+|---|---|---|
+| `30 4 * * *` | 06:30 | 05:30 |
+| `0 5 * * *` | 07:00 | 06:00 |
+
+- [ ] Déjale margen antes de que tu rutina lea el correo: los cron de Actions se
+      retrasan cuando GitHub va cargado (a veces 10-15 min).
+- [ ] Revisarlo en los cambios de hora si quieres que la hora local se mantenga fija.
+
+## 6. Probar sin esperar a mañana
+
+- [ ] Actions → **Resumen diario por correo** → *Run workflow*. Debe llegar un correo
+      con asunto `Life Assistant — datos del AAAA-MM-DD`.
+- [ ] Para ver los mismos datos en JSON sin mandar correo:
+      `curl https://backend-tender-glow-160.fly.dev/brief -H "Authorization: Bearer TU_JWT"`
+      (el JWT sale de DevTools → Application → Local Storage → `la_token`).
+
+## Si algo falla
+
+- **403** en el workflow → los `BRIEF_TOKEN` de Fly y de GitHub no coinciden.
+- **503** → falta alguna variable de SMTP (el mensaje de error dice cuál).
+- **404** → el backend no tiene el deploy nuevo (paso 3).
+- **Error de login SMTP** → estás usando la contraseña normal de Gmail, no la de
+  aplicación (paso 1).
+- **Llega sin entregas** → `ENTREGAS_MARKER` ≠ `VITE_ENTREGAS_MARKER` (paso 2).
+- **No aparece el workflow en Actions** → la rama no está fusionada (paso 0).

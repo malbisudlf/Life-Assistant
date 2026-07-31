@@ -1,0 +1,44 @@
+name: Resumen diario por correo
+
+# Dispara POST /brief/send cada mañana: el backend reúne agenda, clima, salud y
+# entrenamiento del día y los manda por correo COMO DATOS CRUDOS. De ese buzón los
+# recoge la rutina de Claude Code que compone el correo diario, así que este workflow
+# tiene que ejecutarse ANTES que esa rutina.
+#
+# El cron de GitHub Actions va en UTC y no admite zonas horarias, así que hay que
+# ajustarlo a mano en los cambios de hora: 04:30 UTC son las 06:30 en Madrid en verano
+# (CEST, UTC+2) y las 05:30 en invierno (CET, UTC+1).
+#
+# Además, los cron de Actions se retrasan cuando GitHub está cargado (a veces 10-15
+# min): programa esto con margen suficiente antes de tu rutina, no justo al lado.
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:        # también a mano, para probarlo sin esperar a mañana
+
+# Si un intento se solapa con el anterior, no mandes dos correos.
+concurrency:
+  group: resumen-diario
+  cancel-in-progress: false
+
+jobs:
+  enviar:
+    name: Enviar resumen
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /brief/send
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          BRIEF_TOKEN: ${{ secrets.BRIEF_TOKEN }}
+        # --retry con --retry-connrefused y un max-time generoso porque la máquina de
+        # Fly escala a cero: la primera petición del día paga el arranque en frío.
+        # El token va por cabecera, no por query string, para que no acabe en los logs.
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$BRIEF_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret BRIEF_TOKEN del repositorio." >&2
+            exit 1
+          fi
+          curl --fail-with-body -sS -X POST "$BACKEND_URL/brief/send" \
+            -H "X-Auth-Token: $BRIEF_TOKEN" \
+            --max-time 180 \
+            --retry 3 --retry-delay 15 --retry-connrefused

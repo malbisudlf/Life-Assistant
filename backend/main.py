@@ -17,8 +17,10 @@ import re
 import time
 import hmac
 import logging
+import smtplib
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from email.message import EmailMessage
 from urllib.parse import quote, urlsplit
 
 logging.basicConfig(level=logging.INFO)
@@ -125,6 +127,23 @@ ALUD_ALLOWED_HOSTS = tuple(
     for h in os.getenv("ALUD_ALLOWED_HOSTS", "alud.deusto.es").split(",")
     if h.strip()
 )
+
+# ── Resumen diario por correo ─────────────────────────────────────────────────
+# El backend NO redacta el resumen: manda los datos crudos a tu propio buzón y de ahí
+# los recoge la rutina de Claude Code que ya compone el correo diario (lee el buzón,
+# no llama a la API). Por eso aquí no hay ninguna llamada a un LLM: quien interpreta
+# los números es el que escribe el correo final, y ya es un modelo.
+BRIEF_TOKEN   = os.getenv("BRIEF_TOKEN", "")     # token de servicio del disparador diario
+BRIEF_TO      = os.getenv("BRIEF_TO", "")        # destinatario (tu propia dirección)
+BRIEF_FROM    = os.getenv("BRIEF_FROM", "")      # remitente; por defecto, SMTP_USER
+SMTP_HOST     = os.getenv("SMTP_HOST", "")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+# Marcador que convierte un evento en "entrega". Debe coincidir con
+# VITE_ENTREGAS_MARKER del frontend: el backend no ve las variables VITE_*.
+ENTREGAS_MARKER     = os.getenv("ENTREGAS_MARKER", "📚")
+BRIEF_DIAS_ENTREGAS = int(os.getenv("BRIEF_DIAS_ENTREGAS", "14"))
 
 # Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
@@ -2168,3 +2187,423 @@ def add_training_payment(
     if r.status_code >= 300:
         raise _supabase_error(r)
     return {"ok": True, "payment": r.json()[0]}
+
+
+# ── RESUMEN DIARIO POR CORREO ─────────────────────────────────────────────────
+# Reúne agenda, clima, salud y entrenamiento del día y los manda por correo COMO
+# DATOS CRUDOS, sin interpretarlos. El consumidor es la rutina de Claude Code que
+# compone el correo diario del usuario: lee su buzón, así que la vía de entrada tiene
+# que ser un email, no una llamada a la API.
+#
+# Deliberadamente NO hay conclusiones aquí. El motor de conclusiones
+# (`healthConclusions` y compañía) vive en src/lib/helpers.js, es JavaScript y son
+# ~135 líneas de reglas; portarlo a Python lo duplicaría en dos lenguajes y el propio
+# CLAUDE.md marca ese fichero como única fuente de verdad. Quien lee este correo ya es
+# un modelo capaz de sacar las conclusiones por su cuenta.
+
+# (clave de salida, nombres posibles en health_metrics, unidad)
+_BRIEF_METRICAS = (
+    ("hrv",         ("heart_rate_variability", "heartRateVariability"), "ms"),
+    ("fc_reposo",   ("resting_heart_rate",),                            "bpm"),
+    ("respiracion", ("respiratory_rate",),                              "rpm"),
+    ("pasos",       ("step_count", "steps"),                            "pasos"),
+    ("ejercicio",   ("apple_exercise_time", "exercise_time"),           "min"),
+    ("peso",        ("weight_body_mass", "weight"),                     "kg"),
+    ("vo2max",      ("vo2_max", "cardioFitness"),                       "ml/kg/min"),
+)
+
+
+def _horas_sueno(fila: dict) -> float:
+    """Horas de sueño efectivas de una fila de health_metrics.
+
+    Mismo criterio que `_sleepHours` en src/lib/helpers.js: si cambia la forma en que
+    llegan los datos del Watch, hay que tocar los dos. Es forma del dato, no regla de
+    negocio — las conclusiones siguen viviendo solo en el frontend.
+    """
+    try:
+        if fila.get("value") and float(fila["value"]) > 0:
+            return float(fila["value"])
+    except (TypeError, ValueError):
+        pass
+    extra = fila.get("extra") or {}
+
+    def _num(clave):
+        try:
+            return float(extra.get(clave) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if _num("asleep") > 0:
+        return _num("asleep")
+    return sum(_num(k) for k in ("deep", "rem", "light", "core"))
+
+
+def _media(valores: list) -> float | None:
+    return round(sum(valores) / len(valores), 2) if valores else None
+
+
+def _dias_hasta(iso: str) -> int | None:
+    """Días desde hoy hasta una fecha ISO-UTC, contados en la zona del usuario."""
+    try:
+        fecha = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(LOCAL_TZ).date()
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return (fecha - datetime.now(LOCAL_TZ).date()).days
+
+
+def _brief_salud() -> dict:
+    """Últimos valores y medias de 7/30 días de las métricas del Watch.
+
+    Un solo viaje a Supabase: se traen 30 días y se agrupa en memoria.
+    """
+    desde = (datetime.now(LOCAL_TZ) - timedelta(days=30)).strftime("%Y-%m-%d")
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc&limit=5000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Resumen diario: no se pudieron leer las métricas de salud (%s)", r.status_code)
+        return {}
+
+    por_nombre: dict = {}
+    for fila in r.json():
+        por_nombre.setdefault(fila["metric_name"], []).append(fila)
+
+    salud: dict = {}
+
+    for clave, nombres, unidad in _BRIEF_METRICAS:
+        filas = next((por_nombre[n] for n in nombres if por_nombre.get(n)), [])
+        validas = []
+        for f in filas:
+            try:
+                v = float(f["value"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if v > 0:
+                validas.append({"fecha": f["metric_date"], "valor": v})
+        if not validas:
+            continue
+        salud[clave] = {
+            "unidad":    unidad,
+            "ultimo":    validas[-1]["valor"],
+            "fecha":     validas[-1]["fecha"],
+            "media_7d":  _media([d["valor"] for d in validas[-7:]]),
+            "media_30d": _media([d["valor"] for d in validas]),
+        }
+
+    # Sueño: valor derivado y respetando las noches que el usuario anuló a mano.
+    noches = []
+    for f in next((por_nombre[n] for n in ("sleep_analysis", "sleep") if por_nombre.get(n)), []):
+        if (f.get("extra") or {}).get("excluded"):
+            continue
+        horas = _horas_sueno(f)
+        if horas > 0:
+            noches.append({"fecha": f["metric_date"], "valor": round(horas, 2),
+                           "inicio": (f.get("extra") or {}).get("sleep_start")})
+    if noches:
+        salud["sueno"] = {
+            "unidad":    "h",
+            "ultimo":    noches[-1]["valor"],
+            "fecha":     noches[-1]["fecha"],
+            "inicio":    noches[-1]["inicio"],
+            "media_7d":  _media([d["valor"] for d in noches[-7:]]),
+            "media_30d": _media([d["valor"] for d in noches]),
+        }
+
+    # Entrenos del Watch: cuántos días desde el último.
+    entrenos = next((por_nombre[n] for n in ("workouts", "workout") if por_nombre.get(n)), [])
+    fechas = sorted({f["metric_date"] for f in entrenos})
+    if fechas:
+        try:
+            ultima = datetime.strptime(fechas[-1], "%Y-%m-%d").date()
+            salud["ultimo_entreno"] = {
+                "fecha": fechas[-1],
+                "dias":  (datetime.now(LOCAL_TZ).date() - ultima).days,
+            }
+        except ValueError:
+            pass
+
+    return salud
+
+
+def _sin_error(resultado, clave: str) -> list:
+    """Lista de eventos de un endpoint de calendario, o [] si devolvió error.
+
+    Los endpoints de calendario devuelven {"error": ...} en vez de lanzar cuando Graph
+    falla o no hay sesión: un fallo de Outlook no debe tumbar el resumen entero, el
+    resto de secciones siguen siendo útiles.
+    """
+    if not isinstance(resultado, dict) or "error" in resultado:
+        return []
+    return resultado.get(clave) or []
+
+
+def construir_brief() -> dict:
+    """Reúne todo lo que va en el correo. Las cuatro fuentes son independientes, así
+    que se piden en paralelo: esto corre con el arranque en frío de Fly por delante."""
+    # Se llaman las funciones de los endpoints directamente (credentials=None): ninguna
+    # usa ese parámetro, lo resuelve FastAPI solo cuando entra por HTTP. Así el resumen
+    # hereda la normalización de fechas, el filtrado de alud_url y el manejo de errores
+    # que ya tienen, en vez de duplicar sus consultas.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        f_eventos = pool.submit(get_events, credentials=None)
+        f_clases  = pool.submit(get_class_events, credentials=None)
+        f_clima   = pool.submit(_brief_clima)
+        f_salud   = pool.submit(_brief_salud)
+        f_entren  = pool.submit(_brief_entrenamiento)
+        eventos = _sin_error(f_eventos.result(), "events")
+        clases  = _sin_error(f_clases.result(), "events")
+        clima, salud, entrenamiento = f_clima.result(), f_salud.result(), f_entren.result()
+
+    hoy = datetime.now(LOCAL_TZ).date()
+
+    def _es_hoy(ev):
+        d = _dias_hasta(ev.get("start", ""))
+        return d == 0
+
+    def _limpio(ev):
+        return {
+            "titulo": ev.get("title") or "(sin título)",
+            "inicio": ev.get("start"),
+            "fin":    ev.get("end"),
+            "lugar":  ev.get("location") or None,
+            "todo_el_dia": bool(ev.get("isAllDay")),
+        }
+
+    agenda = sorted(
+        [_limpio(e) for e in eventos if _es_hoy(e)],
+        key=lambda e: e["inicio"] or "",
+    )
+    clases_hoy = sorted(
+        [_limpio(e) for e in clases if _es_hoy(e)],
+        key=lambda e: e["inicio"] or "",
+    )
+
+    # Entregas: mismo criterio que el widget del dashboard (marcador en el título,
+    # de hoy en adelante), acotado a BRIEF_DIAS_ENTREGAS para que el correo no crezca.
+    entregas = []
+    for ev in [*eventos, *clases]:
+        titulo = ev.get("title") or ""
+        if ENTREGAS_MARKER not in titulo:
+            continue
+        dias = _dias_hasta(ev.get("start", ""))
+        if dias is None or dias < 0 or dias > BRIEF_DIAS_ENTREGAS:
+            continue
+        entregas.append({
+            "titulo": titulo.replace(ENTREGAS_MARKER, "").strip() or "(sin título)",
+            "dias":   dias,
+            "fecha":  (ev.get("start") or "")[:10],
+        })
+    entregas.sort(key=lambda e: e["dias"])
+
+    return {
+        "fecha":         hoy.isoformat(),
+        "dia_semana":    DIAS_SEMANA[hoy.weekday()],
+        "zona":          TIMEZONE,
+        "agenda":        agenda,
+        "clases":        clases_hoy,
+        "entregas":      entregas,
+        "clima":         clima,
+        "salud":         salud,
+        "entrenamiento": entrenamiento,
+    }
+
+
+def _brief_clima() -> dict:
+    try:
+        datos = get_weather(credentials=None)
+    except HTTPException as e:
+        logger.error("Resumen diario: clima no disponible (%s)", e.detail)
+        return {}
+    return {
+        "ahora":       datos.get("temp"),
+        "max":         datos.get("temp_max"),
+        "min":         datos.get("temp_min"),
+        "codigo_wmo":  datos.get("code"),
+        "sensacion":   datos.get("feels_like"),
+        "humedad":     datos.get("humidity"),
+        "viento":      datos.get("wind"),
+        "lluvia_prob": (datos.get("daily") or [{}])[0].get("precip_prob"),
+    }
+
+
+def _brief_entrenamiento() -> dict:
+    try:
+        resumen = training_summary(credentials=None)
+    except HTTPException as e:
+        logger.error("Resumen diario: entrenamiento no disponible (%s)", e.detail)
+        return {}
+    if not resumen.get("client"):
+        return {}
+    return {
+        "sesiones_desde_cobro": resumen.get("sessions_since_payment"),
+        "horas_desde_cobro":    resumen.get("hours_since_payment"),
+        "importe_pendiente":    resumen.get("amount_owed"),
+        "sesiones_por_cobro":   resumen.get("sessions_per_payment"),
+        "ultimo_cobro":         resumen.get("last_payment_date"),
+        "ultima_sesion":        resumen.get("last_session_date"),
+    }
+
+
+def _hora_local(iso: str | None) -> str:
+    if not iso:
+        return "--:--"
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(LOCAL_TZ).strftime("%H:%M")
+    except (ValueError, AttributeError):
+        return "--:--"
+
+
+def render_brief_texto(d: dict) -> str:
+    """Texto plano del correo. Datos etiquetados, sin interpretar: lo lee un modelo
+    que redacta el correo diario, y de paso es legible si lo abres tú."""
+    L = [
+        f"Datos de Life Assistant — {d['dia_semana']} {d['fecha']} ({d['zona']})",
+        "",
+        "Son datos crudos, sin interpretar, para el resumen diario.",
+        "",
+    ]
+
+    def _lineas_eventos(items):
+        if not items:
+            return ["  (nada)"]
+        salida = []
+        for e in items:
+            cuando = "todo el día" if e["todo_el_dia"] else f"{_hora_local(e['inicio'])}-{_hora_local(e['fin'])}"
+            lugar = f"  [{e['lugar']}]" if e["lugar"] else ""
+            salida.append(f"  {cuando}  {e['titulo']}{lugar}")
+        return salida
+
+    L.append("## AGENDA DE HOY")
+    L += _lineas_eventos(d["agenda"])
+    L.append("")
+    L.append("## CLASES DE HOY")
+    L += _lineas_eventos(d["clases"])
+    L.append("")
+
+    L.append(f"## ENTREGAS (próximos {BRIEF_DIAS_ENTREGAS} días)")
+    if d["entregas"]:
+        for e in d["entregas"]:
+            cuando = "hoy" if e["dias"] == 0 else "mañana" if e["dias"] == 1 else f"en {e['dias']} días"
+            L.append(f"  {e['titulo']} — {cuando} ({e['fecha']})")
+    else:
+        L.append("  (nada)")
+    L.append("")
+
+    c = d["clima"]
+    L.append("## CLIMA")
+    if c:
+        L.append(
+            f"  Ahora {c.get('ahora')}°, máx {c.get('max')}°, mín {c.get('min')}°, "
+            f"código WMO {c.get('codigo_wmo')}"
+        )
+        L.append(
+            f"  Sensación {c.get('sensacion')}°, humedad {c.get('humedad')}%, "
+            f"viento {c.get('viento')} km/h, prob. lluvia {c.get('lluvia_prob')}%"
+        )
+    else:
+        L.append("  (no disponible)")
+    L.append("")
+
+    s = d["salud"]
+    L.append("## SALUD  (último · media 7d · media 30d)")
+    if s:
+        etiquetas = [
+            ("sueno",       "Sueño anoche"),
+            ("hrv",         "HRV"),
+            ("fc_reposo",   "FC en reposo"),
+            ("respiracion", "Frec. respiratoria"),
+            ("pasos",       "Pasos"),
+            ("ejercicio",   "Min. ejercicio"),
+            ("peso",        "Peso"),
+            ("vo2max",      "VO2 máx"),
+        ]
+        for clave, etiqueta in etiquetas:
+            m = s.get(clave)
+            if not m:
+                continue
+            L.append(
+                f"  {etiqueta:<20} {m['ultimo']} {m['unidad']}"
+                f"   (7d: {m['media_7d']}, 30d: {m['media_30d']})   [{m['fecha']}]"
+            )
+        if s.get("sueno", {}).get("inicio"):
+            L.append(f"  {'Se acostó a las':<20} {s['sueno']['inicio']}")
+        if s.get("ultimo_entreno"):
+            ue = s["ultimo_entreno"]
+            dias = ue["dias"]
+            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
+            L.append(f"  {'Último entreno':<20} {cuando} ({ue['fecha']})")
+    else:
+        L.append("  (sin datos)")
+    L.append("")
+
+    t = d["entrenamiento"]
+    L.append("## ENTRENAMIENTO PERSONAL (cliente)")
+    if t:
+        L.append(
+            f"  {t.get('sesiones_desde_cobro')} sesiones desde el último cobro "
+            f"({t.get('horas_desde_cobro')} h) — {t.get('importe_pendiente')} €"
+        )
+        L.append(
+            f"  Cobra cada {t.get('sesiones_por_cobro')} sesiones · "
+            f"último cobro {t.get('ultimo_cobro') or 'nunca'} · "
+            f"última sesión {t.get('ultima_sesion') or '—'}"
+        )
+    else:
+        L.append("  (sin cliente configurado)")
+
+    return "\n".join(L) + "\n"
+
+
+def enviar_correo(asunto: str, cuerpo: str):
+    """Envía por SMTP con la librería estándar: no hace falta ninguna dependencia
+    nueva ni una cuenta en un servicio de envío. Con Gmail, usa una contraseña de
+    aplicación en SMTP_PASSWORD (la normal no sirve si tienes 2FA)."""
+    faltan = [n for n, v in (
+        ("SMTP_HOST", SMTP_HOST), ("SMTP_USER", SMTP_USER),
+        ("SMTP_PASSWORD", SMTP_PASSWORD), ("BRIEF_TO", BRIEF_TO),
+    ) if not v]
+    if faltan:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Envío de correo no configurado: falta {', '.join(faltan)}",
+        )
+    msg = EmailMessage()
+    msg["Subject"] = asunto
+    msg["From"] = BRIEF_FROM or SMTP_USER
+    msg["To"] = BRIEF_TO
+    msg.set_content(cuerpo)
+    # 465 abre TLS desde el principio (SMTPS); 587 empieza en claro y sube con
+    # STARTTLS. Gmail acepta los dos. Con timeout: sin él, un SMTP que no responde
+    # retiene el hilo igual que una llamada HTTP colgada.
+    if SMTP_PORT == 465:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+
+
+@app.get("/brief")
+def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Los mismos datos que van en el correo, en JSON. Para comprobar qué se enviaría
+    sin tener que esperar al disparador de la mañana."""
+    return construir_brief()
+
+
+@app.post("/brief/send")
+def send_brief(request: Request, token: str = ""):
+    """Compone el resumen y lo manda por correo. Lo llama el disparador diario
+    (.github/workflows/resumen-diario.yml), que es una máquina: token de servicio
+    dedicado, igual que HA y la ingesta de salud — un JWT de usuario caducaría a los
+    30 días y el correo dejaría de llegar sin avisar."""
+    if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    datos = construir_brief()
+    enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+    logger.info("Resumen diario enviado a %s (%s)", BRIEF_TO, datos["fecha"])
+    return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}

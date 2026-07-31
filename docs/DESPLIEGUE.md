@@ -157,7 +157,51 @@ automation:
 
 Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 
-## 7. Checklist de verificación
+## 7. Resumen diario por correo (opcional)
+
+Cada mañana el backend puede mandarte a tu propio buzón los datos del día —agenda,
+clases, entregas próximas, clima, métricas del Watch y estado del entrenamiento— **en
+crudo, sin interpretarlos**. Está pensado para que lo recoja de ahí una rutina que ya
+lea tu correo y componga tu resumen diario: quien redacta es esa rutina, no el backend.
+Por eso no hay ninguna llamada a un LLM aquí, ni coste asociado.
+
+El envío es por SMTP con la librería estándar de Python: sin dependencias nuevas y sin
+darse de alta en ningún servicio de envío.
+
+**1. Configura el correo** (`fly secrets set`):
+
+```bash
+fly secrets set \
+  BRIEF_TO=tu@correo.com \
+  SMTP_HOST=smtp.gmail.com SMTP_PORT=587 \
+  SMTP_USER=tu@gmail.com \
+  SMTP_PASSWORD="tu-contraseña-de-aplicacion" \
+  BRIEF_TOKEN="$(openssl rand -hex 24)" \
+  ENTREGAS_MARKER=📚
+```
+
+Con Gmail y 2FA activado hace falta una [contraseña de
+aplicación](https://myaccount.google.com/apppasswords) — la normal no sirve.
+`ENTREGAS_MARKER` debe coincidir con `VITE_ENTREGAS_MARKER` del frontend: el backend no
+ve las variables `VITE_*`.
+
+**2. Configura el disparador** en tu fork de GitHub:
+
+- **Settings → Secrets and variables → Actions → Variables**: `BACKEND_URL` =
+  `https://TU-BACKEND.fly.dev`
+- **Secrets**: `BRIEF_TOKEN`, el mismo valor que pusiste en Fly
+
+**3. Ajusta la hora** en `.github/workflows/resumen-diario.yml`. El cron va en **UTC**
+y no entiende de zonas horarias, así que hay que retocarlo en los cambios de hora:
+`30 4 * * *` son las 06:30 en Madrid en verano y las 05:30 en invierno. Los cron de
+GitHub Actions además se retrasan cuando GitHub está cargado (a veces 10-15 min), así
+que déjale margen antes de la rutina que lee el correo.
+
+**4. Pruébalo sin esperar a mañana**: Actions → *Resumen diario por correo* → *Run
+workflow*. Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
+los mismos datos en JSON.
+
+## 8. Checklist de verificación
 
 - [ ] `python backend/check_config.py` sin errores bloqueantes
 - [ ] `https://TU-BACKEND.fly.dev/` responde `{"status": "Life Assistant API running"}`
@@ -167,6 +211,7 @@ Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 - [ ] Grabar una idea por voz la transcribe y guarda (OpenAI configurado)
 - [ ] (Opcional) Llega una métrica de salud tras un export del Watch
 - [ ] (Opcional) Los sensores `la_*` de HA se actualizan
+- [ ] (Opcional) *Run workflow* del resumen diario deja el correo en tu buzón
 
 ## Referencia rápida de variables
 
@@ -176,7 +221,9 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
 `CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`, `HTTP_TIMEOUT`,
 `TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
-`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`.
+`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `BRIEF_TOKEN`, `BRIEF_TO`, `BRIEF_FROM`,
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ENTREGAS_MARKER`,
+`BRIEF_DIAS_ENTREGAS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,

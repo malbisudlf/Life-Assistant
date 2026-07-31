@@ -51,7 +51,7 @@ el del backend sigue siendo manual (ver "Qué NO hacer").
 Browser (React 19 + Vite, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~1500 líneas)
+backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~2600 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
@@ -68,7 +68,7 @@ Ficheros clave:
 
 | Fichero | Qué es |
 |---|---|
-| `src/components/Dashboard.jsx` | TODA la UI (~4.550 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/Dashboard.jsx` | TODA la UI (~4.575 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, sleepScore, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
@@ -84,8 +84,9 @@ Ficheros clave:
 2. **Dos niveles de auth:**
    - *Usuario*: `POST /auth/password` (contraseña → JWT HS256, 30 días). Los endpoints
      de usuario llevan `Depends(verify_token)`.
-   - *Servicio* (máquinas: HA, Health Auto Export, iOS Shortcuts): tokens dedicados
-     `HA_POLL_TOKEN` / `HEALTH_INGEST_TOKEN` comparados con `_token_ok()`
+   - *Servicio* (máquinas: HA, Health Auto Export, iOS Shortcuts, el disparador del
+     resumen diario): tokens dedicados `HA_POLL_TOKEN` / `HEALTH_INGEST_TOKEN` /
+     `BRIEF_TOKEN` comparados con `_token_ok()`
      (tiempo constante, y **falso si el token esperado no está configurado**).
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
@@ -219,6 +220,23 @@ Ficheros clave:
   coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
   cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
   hay, con fallback a `HOME_ADDRESS`.
+- **Resumen diario por correo** (`/brief`, `POST /brief/send`): manda a tu propio buzón
+  los datos del día **en crudo, sin interpretarlos**, porque quien los consume es una
+  rutina externa que lee el correo y redacta el resumen — ya es un modelo, así que aquí
+  **no hay ninguna llamada a un LLM** y no debe haberla. Tampoco hay conclusiones:
+  `healthConclusions` y compañía viven en `helpers.js`, son JavaScript y son la única
+  fuente de verdad de esa lógica; portarlas a Python la duplicaría. Lo único que se
+  replica es `_horas_sueno()` (equivalente a `_sleepHours`), que es forma del dato y no
+  regla — si cambia cómo llegan los datos del Watch, hay que tocar los dos.
+  `construir_brief()` llama a las funciones de los endpoints existentes con
+  `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
+  heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
+  en paralelo. Cada sección cae por su cuenta: un fallo de Graph deja la agenda vacía
+  pero el resto del correo sigue siendo útil. Envío por `smtplib` (librería estándar, sin
+  dependencias nuevas). El disparador es
+  `.github/workflows/resumen-diario.yml` (cron en UTC — ajústalo en los cambios de hora)
+  y usa `BRIEF_TOKEN`, token de servicio: un JWT de usuario caducaría a los 30 días y el
+  correo dejaría de llegar sin avisar.
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -315,7 +333,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 172 tests)
+### Backend (`tests/backend`, 241 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -323,11 +341,16 @@ el import revienta por los secretos obligatorios) y monkeypatchea `requests` con
 resuelven **en orden de registro** — registra primero la más específica
 (`/calendars/cal-x/calendarView` antes que `/me/calendars`, porque la primera URL
 contiene a la segunda). Fixtures: `client`, `auth_headers` (JWT válido),
-`mock_requests`, `graph_token` (simula sesión de Graph). El rate limiter y el flag
-WOL se resetean entre tests automáticamente.
+`mock_requests`, `graph_token` (simula sesión de Graph), `login_attempts_mock`
+(simula la tabla `login_attempts` de Supabase con una lista en memoria — sin esto,
+cualquier test que llame a `/auth/password` intentaría una llamada de red real). El
+limitador genérico (`_rate_buckets`) y los flags WOL se resetean entre tests
+automáticamente; los intentos de login NO, porque ya no viven en memoria — cada test
+que los necesite los mockea con el fixture de arriba.
 
 Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
-`HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`.
+`HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
+`BRIEF_TOKEN=brief-token`.
 
 ### Frontend (`tests/frontend`, 58 tests)
 
