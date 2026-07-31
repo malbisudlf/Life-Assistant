@@ -13,7 +13,7 @@ name: Resumen diario por correo
 # min): programa esto con margen suficiente antes de tu rutina, no justo al lado.
 on:
   schedule:
-    - cron: '30 4 * * *'
+    - cron: '30 5 * * *'
   workflow_dispatch:        # también a mano, para probarlo sin esperar a mañana
 
 # Si un intento se solapa con el anterior, no mandes dos correos.
