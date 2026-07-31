@@ -26,9 +26,11 @@ solo usuario).
 1. Crea un proyecto nuevo.
 2. En **SQL Editor**, ejecuta los ficheros de `supabase/migrations/` **en orden
    cronológico** (el nombre empieza por la fecha). Crean las tablas de jobs,
-   agentes, tokens OAuth, ideas, ropa, entrenamiento y salud, con RLS activado.
+   agentes, tokens OAuth, ideas, ropa, entrenamiento, salud e intentos de login,
+   con RLS activado.
 3. Apunta de **Settings → API**: la `URL` del proyecto y la **`service_role` key**
-   (no la `anon`; la service key solo vivirá en el backend).
+   (no la `anon`; la service key solo vivirá en el backend — el agente PC ya no la
+   necesita, ver `agent/.env.example`).
 4. (Entrenamiento personal) Si usas el widget de entrenamiento, inserta tu cliente:
    ```sql
    insert into training_clients (name, price_per_hour, sessions_per_payment)
@@ -66,12 +68,18 @@ fly secrets set \
   HOME_ADDRESS="Tu dirección, Ciudad" \
   CLASSES_CALENDAR=clases \
   WEATHER_LAT=40.4168 WEATHER_LON=-3.7038 \
+  ALUD_ALLOWED_HOSTS=alud.deusto.es \
   CORS_ORIGINS="http://localhost:5173,https://TU-APP.vercel.app"
 fly deploy
 ```
 
 Notas:
 - `DASHBOARD_PASSWORD` **numérica**: el input del login es un teclado numérico.
+- `ALUD_ALLOWED_HOSTS` acota a qué hosts puede apuntar el `alud_url` de un evento.
+  Esa URL la acaba abriendo el agente en un navegador con la sesión iniciada, así que
+  solo se aceptan `https` y los hosts de esta lista (o sus subdominios). Si no usas el
+  agente PC, déjalo como está. **Pon el mismo valor en `agent/.env`**: se comprueba en
+  los dos sitios porque un job puede llegar a Supabase sin pasar por el backend.
 - `CLASSES_CALENDAR` es el nombre de un calendario de Outlook aparte para clases
   con horario; si no lo usas, ignora el panel de clases.
 - `WEATHER_LAT`/`WEATHER_LON` son las coordenadas del widget de clima (Open-Meteo,
@@ -149,7 +157,51 @@ automation:
 
 Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 
-## 7. Checklist de verificación
+## 7. Resumen diario por correo (opcional)
+
+Cada mañana el backend puede mandarte a tu propio buzón los datos del día —agenda,
+clases, entregas próximas, clima, métricas del Watch y estado del entrenamiento— **en
+crudo, sin interpretarlos**. Está pensado para que lo recoja de ahí una rutina que ya
+lea tu correo y componga tu resumen diario: quien redacta es esa rutina, no el backend.
+Por eso no hay ninguna llamada a un LLM aquí, ni coste asociado.
+
+El envío es por SMTP con la librería estándar de Python: sin dependencias nuevas y sin
+darse de alta en ningún servicio de envío.
+
+**1. Configura el correo** (`fly secrets set`):
+
+```bash
+fly secrets set \
+  BRIEF_TO=tu@correo.com \
+  SMTP_HOST=smtp.gmail.com SMTP_PORT=587 \
+  SMTP_USER=tu@gmail.com \
+  SMTP_PASSWORD="tu-contraseña-de-aplicacion" \
+  BRIEF_TOKEN="$(openssl rand -hex 24)" \
+  ENTREGAS_MARKER=📚
+```
+
+Con Gmail y 2FA activado hace falta una [contraseña de
+aplicación](https://myaccount.google.com/apppasswords) — la normal no sirve.
+`ENTREGAS_MARKER` debe coincidir con `VITE_ENTREGAS_MARKER` del frontend: el backend no
+ve las variables `VITE_*`.
+
+**2. Configura el disparador** en tu fork de GitHub:
+
+- **Settings → Secrets and variables → Actions → Variables**: `BACKEND_URL` =
+  `https://TU-BACKEND.fly.dev`
+- **Secrets**: `BRIEF_TOKEN`, el mismo valor que pusiste en Fly
+
+**3. Ajusta la hora** en `.github/workflows/resumen-diario.yml`. El cron va en **UTC**
+y no entiende de zonas horarias, así que hay que retocarlo en los cambios de hora:
+`30 4 * * *` son las 06:30 en Madrid en verano y las 05:30 en invierno. Los cron de
+GitHub Actions además se retrasan cuando GitHub está cargado (a veces 10-15 min), así
+que déjale margen antes de la rutina que lee el correo.
+
+**4. Pruébalo sin esperar a mañana**: Actions → *Resumen diario por correo* → *Run
+workflow*. Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
+los mismos datos en JSON.
+
+## 8. Checklist de verificación
 
 - [ ] `python backend/check_config.py` sin errores bloqueantes
 - [ ] `https://TU-BACKEND.fly.dev/` responde `{"status": "Life Assistant API running"}`
@@ -159,6 +211,7 @@ Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 - [ ] Grabar una idea por voz la transcribe y guarda (OpenAI configurado)
 - [ ] (Opcional) Llega una métrica de salud tras un export del Watch
 - [ ] (Opcional) Los sensores `la_*` de HA se actualizan
+- [ ] (Opcional) *Run workflow* del resumen diario deja el correo en tu buzón
 
 ## Referencia rápida de variables
 
@@ -167,7 +220,10 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `CLIENT_SECRET`, `REDIRECT_URI`, `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY`,
 `HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
 `CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`, `HTTP_TIMEOUT`,
-`TRUST_FORWARDED_FOR`, `LOGIN_BLOQUEO_MAX_SECONDS`.
+`TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
+`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `BRIEF_TOKEN`, `BRIEF_TO`, `BRIEF_FROM`,
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ENTREGAS_MARKER`,
+`BRIEF_DIAS_ENTREGAS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,

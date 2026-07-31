@@ -16,6 +16,7 @@ os.environ.setdefault("GOOGLE_MAPS_API_KEY", "maps-test-key")
 os.environ.setdefault("HA_POLL_TOKEN", "ha-poll-token")
 os.environ.setdefault("HEALTH_INGEST_TOKEN", "health-token")
 os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
+os.environ.setdefault("BRIEF_TOKEN", "brief-token")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -83,21 +84,24 @@ def mock_requests(monkeypatch):
     return router
 
 
+def _limpiar_estado():
+    # Los intentos de login viven en Supabase (login_attempts), no en memoria: no hace
+    # falta limpiarlos aquí, cada test que los necesite mockea su propia respuesta.
+    with main._rate_lock:
+        main._rate_buckets.clear()
+    main._wol_pending = False
+    main._agent_relaunch_pending = False
+    main._pc_power_action = None
+    main._token_cache = None
+
+
 @pytest.fixture(autouse=True)
 def reset_state():
     """Estado en memoria limpio entre tests (rate limiting, flags WOL/relanzado y la
     copia en memoria del token de Graph)."""
-    def _limpiar():
-        with main._login_lock:
-            main._login_attempts.clear()
-        main._wol_pending = False
-        main._agent_relaunch_pending = False
-        main._pc_power_action = None
-        main._token_cache = None
-
-    _limpiar()
+    _limpiar_estado()
     yield
-    _limpiar()
+    _limpiar_estado()
 
 
 @pytest.fixture
@@ -115,3 +119,31 @@ def graph_token(monkeypatch):
     """Simula sesión de Microsoft Graph activa."""
     monkeypatch.setattr(main, "get_valid_token", lambda: "graph-token")
     return "graph-token"
+
+
+@pytest.fixture
+def login_attempts_mock(mock_requests):
+    """Simula la tabla login_attempts de Supabase con una lista en memoria.
+
+    _check_login_rate() ahora consulta Supabase en cada intento; sin este fixture,
+    cualquier test que llame a /auth/password intentaría una llamada de red real.
+    """
+    from datetime import datetime, timezone
+
+    fallos = []
+
+    def _get(url, **kwargs):
+        return FakeResponse([{"created_at": t} for t in fallos])
+
+    def _post(url, **kwargs):
+        fallos.append(datetime.now(timezone.utc).isoformat())
+        return FakeResponse([], 201)
+
+    def _delete(url, **kwargs):
+        fallos.clear()
+        return FakeResponse([], 204)
+
+    mock_requests.add("GET", "/rest/v1/login_attempts", _get)
+    mock_requests.add("POST", "/rest/v1/login_attempts", _post)
+    mock_requests.add("DELETE", "/rest/v1/login_attempts", _delete)
+    return fallos
