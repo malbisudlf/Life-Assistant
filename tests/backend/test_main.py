@@ -230,6 +230,35 @@ class TestMapsDeparture:
         })
         assert r.status_code == 500
 
+    def test_error_http_de_maps_da_502_y_no_filtra_el_cuerpo(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", FakeResponse(None, 403, text="API key inválida: AIza-secreta"))
+        r = client.post("/maps/departure", headers=auth_headers, json={
+            "destination": "X", "event_time": "2026-07-06T10:00:00Z",
+        })
+        assert r.status_code == 502
+        assert "AIza-secreta" not in r.text
+
+    def test_status_de_error_de_maps_da_502(self, client, auth_headers, mock_requests):
+        # Maps responde 200 con el error dentro (cuota agotada, key sin permisos…)
+        mock_requests.add("GET", "maps.googleapis.com", FakeResponse({
+            "status": "OVER_QUERY_LIMIT", "error_message": "quota", "rows": [],
+        }))
+        r = client.post("/maps/departure", headers=auth_headers, json={
+            "destination": "X", "event_time": "2026-07-06T10:00:00Z",
+        })
+        assert r.status_code == 502
+
+    def test_maps_no_json_da_502_en_vez_de_reventar(self, client, auth_headers, mock_requests):
+        class RespuestaNoJson(FakeResponse):
+            def json(self):
+                raise ValueError("no es JSON")
+
+        mock_requests.add("GET", "maps.googleapis.com", RespuestaNoJson(None, 200, text="<html>"))
+        r = client.post("/maps/departure", headers=auth_headers, json={
+            "destination": "X", "event_time": "2026-07-06T10:00:00Z",
+        })
+        assert r.status_code == 502
+
 
 # ── IDEAS ─────────────────────────────────────────────────────────────────────
 
@@ -248,6 +277,16 @@ class TestIdeas:
         assert r.status_code == 200
         # evento_sugerido es null porque la extracción no devolvió fecha
         assert r.json() == {"ok": True, "idea": saved, "evento_sugerido": None}
+
+    def test_listar_con_error_de_supabase_da_502_sin_filtrar_detalle(self, client, auth_headers, mock_requests):
+        # Antes se devolvía r.json() sin mirar el estado: el cuerpo de error de
+        # Supabase (con sus mensajes internos) llegaba tal cual al navegador.
+        mock_requests.add("GET", "/rest/v1/ideas", FakeResponse(
+            {"message": 'relation "public.ideas" does not exist', "hint": "interno"}, 500, text="detalle interno"))
+        r = client.get("/ideas", headers=auth_headers)
+        assert r.status_code == 502
+        assert "does not exist" not in r.text
+        assert r.json()["detail"] == "Error en el almacenamiento de datos"
 
     def test_delete_idea_valida_uuid(self, client, auth_headers, mock_requests):
         assert client.delete("/ideas/no-uuid", headers=auth_headers).status_code == 422

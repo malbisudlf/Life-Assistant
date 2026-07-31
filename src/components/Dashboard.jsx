@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
-  hoursToHM, sleepScore, calcRecoveryMod, findMetric, weatherFromCode, weekdayShort,
+  hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
+  weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
+  wellnessHistory, seriesTrend, trendDirection,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
 
@@ -331,10 +333,16 @@ const DEFAULT_SPLITS  = { 2: [0.65], 3: [0.33, 0.67] };
 const ACTIVE_COLUMNS  = { 2: ["left", "right"], 3: ["left", "center", "right"] };
 const COLUMN_LABELS   = { left: "izquierda", center: "centro", right: "derecha" };
 
+// Columna por defecto de cada widget. Tiene que cubrir TODOS los ids de
+// ALL_DEFAULT_WIDGETS: quien no aparezca aquí cae en "left" al reconstruir una
+// config guardada sin columna, aunque su default sea otro (le pasaba a
+// `acciones_pc`, que nacía a la derecha y reaparecía a la izquierda).
 const DEFAULT_COLUMNS = {
   timeline:          "left",
+  weather:           "left",
   upcoming:          "left",
   entregas:          "right",
+  acciones_pc:       "right",
   training:          "right",
   ideas:             "right",
   clothing:          "right",
@@ -394,6 +402,103 @@ function loadWidgetConfig(storageKey) {
     }
   } catch { /* mejor esfuerzo: ignorar */ }
   return ALL_DEFAULT_WIDGETS.map(w => ({ ...w }));
+}
+
+// ── Constantes de presentación ────────────────────────────────────
+// Todo esto vivía dentro del componente (o de `renderWidget`), así que se
+// reconstruía entero en cada render — incluido el tic del reloj. Son valores fijos:
+// aquí se crean una sola vez y además dejan de generar identidades nuevas que
+// obligan a React a rehacer estilos en cada pasada.
+
+// Etapas del job del agente PC, en orden: de ellas sale la barra de progreso.
+const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
+const STAGE_INDEX = new Map(STAGES.map((st, i) => [st, i]));
+const STAGE_LABELS = {
+  "heartbeat_online":     "Agente online",
+  "job_claimed":          "Job recogido",
+  "login_ok":             "Login en Alud OK",
+  "assignment_opened":    "Entrega abierta",
+  "enunciado_extracted":  "Enunciado extraído",
+  "solver_started":       "Cowork iniciado",
+  "result_saved":         "Instrucción enviada",
+  "streaming_starting":   "Lanzando Sunshine",
+  "streaming_ready":      "Sunshine listo — abre Moonlight",
+  "job_done":             "Completado",
+};
+const JOB_STATUS_LABEL = {
+  "pending":  "En cola — esperando agente",
+  "claimed":  "Agente ha recogido el job",
+  "running":  "En ejecución",
+  "done":     "Completado",
+  "failed":   "Error",
+};
+
+const INPUT_STYLE       = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif", width: "100%" };
+const FIELD_LABEL_STYLE = { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 6 };
+
+// Qué hacer para ganar los puntos que faltan en cada componente del bienestar.
+const POTENTIAL_VERBS = {
+  "😴 Sueño": "Durmiendo más",
+  "🚶 Pasos": "Caminando más pasos",
+  "🔥 Energía": "Quemando más calorías activas",
+  "🧍 De pie": "Pasando más horas de pie",
+  "🪜 Pisos": "Subiendo más pisos",
+  "❤️ HRV": "Mejorando tu recuperación (HRV)",
+  "🫀 FC reposo": "Bajando tu FC en reposo",
+  "💓 Recuperación cardio": "Mejorando tu recuperación cardio",
+  "🫁 VO₂max": "Subiendo tu VO₂max",
+  "🏃 FC caminando": "Bajando tu FC al caminar",
+  "⚖️ % Grasa": "Bajando tu % de grasa",
+  "☀️ Luz natural": "Saliendo más rato a la luz del día",
+  "🌬️ Resp.": "Estabilizando tu frecuencia respiratoria",
+};
+
+// Explicación de cada fase del sueño (tooltip del widget).
+const STAGE_TIPS = {
+  deep: { label: "Sueño profundo (N3)", color: "#4a72b0", tip: "Restaura el cuerpo, consolida la memoria muscular y libera hormona del crecimiento. Es el más reparador. Óptimo: 13–23% del total (≈1–2h en 8h de sueño). Disminuye con la edad." },
+  rem:  { label: "Sueño REM", color: "#8b68c4", tip: "Procesa emociones, consolida recuerdos y favorece la creatividad. Los sueños ocurren aquí. Óptimo: 20–25% del total (≈1.5–2h en 8h). Se acumula en la segunda mitad de la noche." },
+  core: { label: "Sueño ligero (N1/N2)", color: "#4f8fa3", tip: "Fase de transición y procesamiento de información. Ocupa la mayor parte del sueño. Normal: 50–60% del total. Necesario para consolidar el ciclo de sueño." },
+  awake:{ label: "Tiempo despierto", color: "var(--muted)", tip: "Microdespertares durante la noche. Normal: 10–30 min. Más de 45 min puede indicar apnea, estrés o mala higiene del sueño." },
+};
+
+const WORKOUT_ICONS = { Running:"🏃", Walking:"🚶", Cycling:"🚴", Swimming:"🏊", "Strength Training":"🏋️", HIIT:"⚡", Yoga:"🧘", Basketball:"🏀", Soccer:"⚽", Tennis:"🎾", Hiking:"🥾" };
+
+// Widgets de salud que en modo simple se colapsan en un bloque con pestañas.
+const HEALTH_TAB_LABELS = {
+  health_wellness: "Bienestar",
+  health_sleep:    "Sueño",
+  health_activity: "Actividad",
+  health_hrv:      "HRV",
+  health_heart:    "FC",
+  health_workouts: "Entrenos",
+};
+
+const DIAS_INICIAL = ["D","L","M","X","J","V","S"];
+
+// ── Preferencias de layout persistidas ───────────────────────────
+// Se leen dos veces (estado + ref que usan los manejadores de arrastre), así que el
+// parseo vive aquí una sola vez en lugar de copiado en cada inicializador.
+function leerNumColumnas() {
+  try { const s = localStorage.getItem("la_num_columns"); return s ? parseInt(s, 10) : 2; }
+  catch { return 2; }
+}
+
+function leerColSplits() {
+  try {
+    const n = leerNumColumnas();
+    const s = localStorage.getItem("la_col_splits");
+    if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length === n - 1) return p; }
+    // migrar clave antigua
+    const old = localStorage.getItem("la_column_split");
+    if (old && n === 2) return [parseFloat(old)];
+    return DEFAULT_SPLITS[n] || [0.65];
+  }
+  catch { return [0.65]; }
+}
+
+function leerBodyGoals() {
+  try { const s = localStorage.getItem("la_body_goals"); return s ? JSON.parse(s) : {}; }
+  catch { return {}; }
 }
 
 const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
@@ -578,18 +683,14 @@ export default function Dashboard() {
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
   const [sleepExcluding, setSleepExcluding]       = useState(null); // date string being toggled
+  // Los tres salen del mismo `la_body_goals`: se lee una vez en vez de parsearlo
+  // por separado en cada inicializador.
   const [bodyGoals, setBodyGoals] = useState(() => {
-    try { const s = localStorage.getItem("la_body_goals"); return s ? JSON.parse(s) : { targetWeight: 67, targetBodyFat: null }; }
-    catch { return { targetWeight: 67, targetBodyFat: null }; }
+    const g = leerBodyGoals();
+    return { targetWeight: g.targetWeight ?? 67, targetBodyFat: g.targetBodyFat ?? null };
   });
-  const [bodyGoalWeight, setBodyGoalWeight] = useState(() => {
-    try { const s = localStorage.getItem("la_body_goals"); return s ? (JSON.parse(s).targetWeight ?? 67) : 67; }
-    catch { return 67; }
-  });
-  const [bodyGoalFat, setBodyGoalFat] = useState(() => {
-    try { const s = localStorage.getItem("la_body_goals"); return s ? (JSON.parse(s).targetBodyFat ?? "") : ""; }
-    catch { return ""; }
-  });
+  const [bodyGoalWeight, setBodyGoalWeight] = useState(() => leerBodyGoals().targetWeight ?? 67);
+  const [bodyGoalFat, setBodyGoalFat]       = useState(() => leerBodyGoals().targetBodyFat ?? "");
   const [showSessionForm, setShowSessionForm] = useState(false);
   const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
   const [sessionHours, setSessionHours]   = useState("1");
@@ -624,48 +725,20 @@ export default function Dashboard() {
   const [dragPos, setDragPos]             = useState(null);
   const [dragOverId, setDragOverId]       = useState(null);
   const [dragOverSide, setDragOverSide]   = useState("after");
-  const [numColumns, setNumColumns]       = useState(() => {
-    try { const s = localStorage.getItem("la_num_columns"); return s ? parseInt(s, 10) : 2; }
-    catch { return 2; }
-  });
-  const numColumnsRef = useRef((() => {
-    try { const s = localStorage.getItem("la_num_columns"); return s ? parseInt(s, 10) : 2; }
-    catch { return 2; }
-  })());
-  const [colSplits, setColSplits]         = useState(() => {
-    try {
-      const n = parseInt(localStorage.getItem("la_num_columns") || "2", 10);
-      const s = localStorage.getItem("la_col_splits");
-      if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length === n - 1) return p; }
-      // migrar clave antigua
-      const old = localStorage.getItem("la_column_split");
-      if (old && n === 2) return [parseFloat(old)];
-      return DEFAULT_SPLITS[n] || [0.65];
-    }
-    catch { return [0.65]; }
-  });
-  const colSplitsRef = useRef((() => {
-    try {
-      const n = parseInt(localStorage.getItem("la_num_columns") || "2", 10);
-      const s = localStorage.getItem("la_col_splits");
-      if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length === n - 1) return p; }
-      const old = localStorage.getItem("la_column_split");
-      if (old && n === 2) return [parseFloat(old)];
-      return DEFAULT_SPLITS[n] || [0.65];
-    }
-    catch { return [0.65]; }
-  })());
+  const [numColumns, setNumColumns] = useState(leerNumColumnas);
+  const numColumnsRef               = useRef(leerNumColumnas());
+  const [colSplits, setColSplits]   = useState(leerColSplits);
+  const colSplitsRef                = useRef(leerColSplits());
   // Dos selecciones de widgets independientes: la del modo completo y la del
   // modo simplificado. El panel de ajustes edita la que corresponde al modo
   // activo, así cada modo recuerda sus propios widgets.
   const [widgetConfig, setWidgetConfig]             = useState(() => loadWidgetConfig("la_widget_config"));
   const [simpleWidgetConfig, setSimpleWidgetConfig] = useState(() => loadWidgetConfig("la_simple_widget_config"));
 
-  const inputStyle = { padding: "9px 12px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)", fontSize: 13, fontFamily: "'DM Sans', sans-serif", width: "100%" };
-  const fieldLabelStyle = { fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 6 };
-
   const mediaRecorderRef = useRef(null);
   const chunksRef        = useRef([]);
+  // Eventos de los que ya se ha lanzado la notificación de "en 15 min".
+  const notificadosRef   = useRef(new Set());
   // Cuándo empezó a seguirse el job actual, para el techo de una hora.
   const jobInicioRef     = useRef({ id: null, t: 0 });
   const resizeDragRef    = useRef(null);
@@ -682,10 +755,20 @@ export default function Dashboard() {
     document.head.appendChild(style);
   }, []);
 
-  // Reloj
+  // Reloj. Se engancha al cambio de minuto en vez de tirar cada 30 s: el reloj muestra
+  // HH:MM, así que la mitad de aquellos tics no cambiaba nada y la otra mitad llegaba
+  // con hasta 30 s de retraso. Cada tic re-renderiza el dashboard entero (de `now`
+  // cuelgan los estados "en curso"/"pasado" de los eventos), así que el ahorro es real
+  // y además la hora pasa a cambiar en el segundo exacto.
   useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30_000);
-    return () => clearInterval(id);
+    let id;
+    const programarSiguienteMinuto = () => {
+      const ahora = new Date();
+      const restanteMs = 60_000 - (ahora.getSeconds() * 1000 + ahora.getMilliseconds());
+      id = setTimeout(() => { setNow(new Date()); programarSiguienteMinuto(); }, restanteMs);
+    };
+    programarSiguienteMinuto();
+    return () => clearTimeout(id);
   }, []);
 
   // Cerrar ajustes / modal de salud con Escape
@@ -712,7 +795,9 @@ export default function Dashboard() {
     });
   }
 
-  // Cargar eventos
+  // Cargar eventos. Como el resto de cargas, solo con sesión: sin token la pantalla
+  // que se pinta es la de login, y estas llamadas solo servían para despertar la
+  // máquina de Fly y recibir un 401.
   function loadEvents() {
     return apiFetch(`${API}/calendar/events`, { headers: authHeaders() })
       .then(r => r.json())
@@ -723,7 +808,7 @@ export default function Dashboard() {
       })
       .catch(() => { setAuthNeeded(true); setLoading(false); });
   }
-  useEffect(() => { loadEvents(); }, []);
+  useEffect(() => { if (token) loadEvents(); }, [token]);
 
   // El backend (Fly.io) escala a cero: el primer arranque tarda ~10-15s. Si la carga
   // inicial se demora, avisamos de que se está "despertando el servidor".
@@ -835,7 +920,7 @@ export default function Dashboard() {
   }, [token]);
 
   // Cargar resumen entrenamiento
-  useEffect(() => { loadTraining(); }, []);
+  useEffect(() => { if (token) loadTraining(); }, [token]);
 
   // Cargar datos de salud
   useEffect(() => {
@@ -848,11 +933,12 @@ export default function Dashboard() {
 
   // Cargar ideas
   useEffect(() => {
+    if (!token) return;
     apiFetch(`${API}/ideas`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
       .catch(() => {});
-  }, []);
+  }, [token]);
 
   // Cargar conteo de ropa
   useEffect(() => {
@@ -928,10 +1014,13 @@ export default function Dashboard() {
     }
   }, [token, notificationsEnabled]);
 
-  // Notificaciones — eventos próximos (15 min antes)
+  // Notificaciones — eventos próximos (15 min antes).
+  // El registro de "ya avisado" vive en un ref y no dentro del efecto: `allEvents`
+  // está en las dependencias (recargar la agenda tras crear un evento lo cambia), y
+  // con el Set local eso lo vaciaba y volvía a notificar eventos ya avisados.
   useEffect(() => {
     if (!token || !notificationsEnabled) return;
-    const notified = new Set();
+    const notified = notificadosRef.current;
 
     function checkUpcoming() {
       const now = new Date();
@@ -1725,28 +1814,7 @@ export default function Dashboard() {
     return () => { mounted = false; clearInterval(id); };
   }, [activeJobId, token, jobTerminal, jobModalAbierto]);
 
-  const STAGES = ["heartbeat_online","job_claimed","login_ok","assignment_opened","enunciado_extracted","solver_started","result_saved","job_done"];
-  const STAGE_LABELS = {
-    "heartbeat_online":     "Agente online",
-    "job_claimed":          "Job recogido",
-    "login_ok":             "Login en Alud OK",
-    "assignment_opened":    "Entrega abierta",
-    "enunciado_extracted":  "Enunciado extraído",
-    "solver_started":       "Cowork iniciado",
-    "result_saved":         "Instrucción enviada",
-    "streaming_starting":   "Lanzando Sunshine",
-    "streaming_ready":      "Sunshine listo — abre Moonlight",
-    "job_done":             "Completado",
-  };
-  const JOB_STATUS_LABEL = {
-    "pending":  "En cola — esperando agente",
-    "claimed":  "Agente ha recogido el job",
-    "running":  "En ejecución",
-    "done":     "Completado",
-    "failed":   "Error",
-  };
-  const stageIndex = new Map(STAGES.map((st, i) => [st, i]));
-  const maxStage = jobEvents.reduce((max, ev) => Math.max(max, stageIndex.get(ev.stage) ?? -1), -1);
+  const maxStage = jobEvents.reduce((max, ev) => Math.max(max, STAGE_INDEX.get(ev.stage) ?? -1), -1);
   const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
 
   // Derivados
@@ -1800,6 +1868,15 @@ export default function Dashboard() {
   const conclusionesSalud = useMemo(() => healthConclusions(healthData), [healthData]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
 
+  // Histórico de la puntuación diaria de bienestar, reconstruido de las mismas series
+  // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
+  // memoizado como el resto: solo cambia cuando llega una sincronización nueva.
+  const historicoBienestar = useMemo(() => wellnessHistory(healthData), [healthData]);
+  const tendenciaBienestar = useMemo(
+    () => historicoBienestar.length >= 7 ? seriesTrend(historicoBienestar, 7, 30) : null,
+    [historicoBienestar],
+  );
+
   // ── Derivación de las métricas de salud (M2) ───────────────────────────
   // Esto son ~17 findMetric, decenas de slice y todas las medias. Antes se rehacía
   // entero en CADA render del Dashboard — o sea dos veces por minuto solo por el tic
@@ -1809,12 +1886,7 @@ export default function Dashboard() {
   const diaActual = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   const datosSalud = useMemo(() => {
           // ── datos base ──
-          const wSleepEff = d => {
-            if (d.value && d.value > 0) return d.value;
-            if (d.extra?.asleep > 0) return Number(d.extra.asleep);
-            return (Number(d.extra?.deep)||0)+(Number(d.extra?.rem)||0)+(Number(d.extra?.light)||0)+(Number(d.extra?.core)||0);
-          };
-          const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: wSleepEff(d) }));
+          const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: sleepHours(d) }));
           const wStepsRaw     = findMetric(healthData, "step_count", "steps");
           const wHrvRaw       = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
           const wRhrRaw       = findMetric(healthData, "resting_heart_rate");
@@ -2234,10 +2306,10 @@ export default function Dashboard() {
 
             {showClothingForm ? (
               <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                <input style={inputStyle} placeholder="Nombre (opcional)" value={clothingName}
+                <input style={INPUT_STYLE} placeholder="Nombre (opcional)" value={clothingName}
                   onChange={e => setClothingName(e.target.value)} />
                 <div style={{ display: "flex", gap: 8 }}>
-                  <input style={{ ...inputStyle, flex: 1 }} type="text" inputMode="decimal" placeholder="Precio"
+                  <input style={{ ...INPUT_STYLE, flex: 1 }} type="text" inputMode="decimal" placeholder="Precio"
                     value={clothingPrice} onChange={e => setClothingPrice(e.target.value)} />
                   <div style={{ display: "flex", gap: 4 }}>
                     {Object.entries(CLOTHING_CURRENCIES).map(([code, sym]) => (
@@ -2490,29 +2562,16 @@ export default function Dashboard() {
         const scoreColor = score >= 80 ? "var(--green)" : score >= 65 ? "#6aaa82" : score >= 50 ? "var(--accent)" : "#d4645a";
 
         // ── potencial: componente con más margen de mejora ──
-        const POTENTIAL_VERBS = {
-          "😴 Sueño": "Durmiendo más",
-          "💪 Entreno": isDaily ? "Entrenando hoy" : "Sumando otra sesión de entreno",
-          "🚶 Pasos": "Caminando más pasos",
-          "🔥 Energía": "Quemando más calorías activas",
-          "🧍 De pie": "Pasando más horas de pie",
-          "🪜 Pisos": "Subiendo más pisos",
-          "❤️ HRV": "Mejorando tu recuperación (HRV)",
-          "🫀 FC reposo": "Bajando tu FC en reposo",
-          "💓 Recuperación cardio": "Mejorando tu recuperación cardio",
-          "🫁 VO₂max": "Subiendo tu VO₂max",
-          "🏃 FC caminando": "Bajando tu FC al caminar",
-          "⚖️ % Grasa": "Bajando tu % de grasa",
-          "☀️ Luz natural": "Saliendo más rato a la luz del día",
-          "🌬️ Resp.": "Estabilizando tu frecuencia respiratoria",
-        };
+        // El verbo de "💪 Entreno" depende de la vista, el resto son fijos (POTENTIAL_VERBS).
         const improvable = breakdown.filter(b => b.pts < b.max && !b.sinDatos);
         let potential = null;
         if (improvable.length > 0) {
           const top = improvable.reduce((a, b) => (b.max - b.pts) > (a.max - a.pts) ? b : a);
           const gap = top.max - top.pts;
           if (gap >= 2) {
-            const verb = POTENTIAL_VERBS[top.label] || `Mejorando ${top.label.replace(/^\S+\s/, "")}`;
+            const verb = top.label === "💪 Entreno"
+              ? (isDaily ? "Entrenando hoy" : "Sumando otra sesión de entreno")
+              : POTENTIAL_VERBS[top.label] || `Mejorando ${top.label.replace(/^\S+\s/, "")}`;
             potential = `${verb} podrías sumar hasta ${gap} pts más (ahora ${top.pts}/${top.max} en ${top.label.replace(/^\S+\s/, "")}).`;
           }
         }
@@ -2698,6 +2757,36 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
+                {/* ── Evolución de la puntuación ──
+                    El número de arriba es la foto de hoy (o de la semana); esto dice si
+                    el mes va a mejor. Se reconstruye de las mismas series, sin guardar
+                    nada aparte. */}
+                {historicoBienestar.length >= 3 && (() => {
+                  const serie   = historicoBienestar;
+                  const primera = serie[0];
+                  const ultima  = serie[serie.length - 1];
+                  const dir     = tendenciaBienestar ? trendDirection(tendenciaBienestar.deltaPct, true, 3) : null;
+                  const tonoDir = dir?.tone === "bien" ? "var(--green)" : dir?.tone === "mal" ? "#d4645a" : "var(--muted2)";
+                  return (
+                    <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                          Evolución · {serie.length} días
+                        </span>
+                        {tendenciaBienestar && (
+                          <span style={{ fontSize: 10, color: tonoDir, fontFamily: "'DM Mono', monospace" }}>
+                            {dir.arrow} media 7d {Math.round(tendenciaBienestar.avgShort)} vs {Math.round(tendenciaBienestar.avgLong)} del mes
+                          </span>
+                        )}
+                      </div>
+                      <Sparkline data={serie} color="var(--accent2)" height={40} relleno />
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", marginTop: 3 }}>
+                        <span>{formatShortDate(primera.date)} · {primera.value}</span>
+                        <span>{formatShortDate(ultima.date)} · {ultima.value}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {/* ── Composición corporal ── */}
                 {(currentWeight != null || currentBodyFat != null || currentLean != null) && (
                   <div style={{ marginTop: 14, borderTop: "0.5px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2829,16 +2918,10 @@ export default function Dashboard() {
         );
       }
       case "health_sleep": {
-        const sleepEff = d => {
-          if (d.value && d.value > 0) return d.value;
-          if (d.extra?.asleep && d.extra.asleep > 0) return Number(d.extra.asleep);
-          return (Number(d.extra?.deep) || 0) + (Number(d.extra?.rem) || 0)
-               + (Number(d.extra?.light) || 0) + (Number(d.extra?.core) || 0);
-        };
         const sleepRaw     = findMetric(healthData, "sleep_analysis", "sleep");
-        const sleepAllData = sleepRaw.map(d => ({ ...d, value: sleepEff(d) }));
+        const sleepAllData = sleepRaw.map(d => ({ ...d, value: sleepHours(d) }));
         const sleepData    = sleepAllData.filter(d => !d.extra?.excluded);
-        const last14       = sleepAllData.slice(-7);
+        const ultimas7     = sleepAllData.slice(-7);
         const last7        = sleepData.slice(-7);
         const avg7         = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
         const latest       = sleepData[sleepData.length - 1];
@@ -2857,7 +2940,6 @@ export default function Dashboard() {
         const lv  = latest?.value || 0;
         const ld  = latest?.extra?.deep  != null ? Number(latest.extra.deep)  : null;
         const lr  = latest?.extra?.rem   != null ? Number(latest.extra.rem)   : null;
-        const lc  = latest?.extra?.core  != null ? Number(latest.extra.core)  : (latest?.extra?.light != null ? Number(latest.extra.light) : null);
         const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
         const lss = latest?.extra?.sleep_start ?? null;
 
@@ -2880,35 +2962,17 @@ export default function Dashboard() {
           hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0
         );
 
-        const score = latest ? sleepScore(lv, ld, lr, lc, law, lss, recoveryMod) : null;
+        const score = latest ? sleepScore(lv, ld, lr, law, lss, recoveryMod) : null;
         const scoreLabel = score == null ? null : score >= 85 ? "Excelente" : score >= 70 ? "Bueno" : score >= 55 ? "Regular" : "Mejorable";
         const scoreColor = score == null ? null : score >= 85 ? "var(--green)" : score >= 70 ? "#6aaa82" : score >= 55 ? "var(--accent)" : "#d4645a";
 
-        // Desglose del score para tooltip
-        const sleepBreakdown = (() => {
-          if (!latest) return [];
-          const rows = [];
-          // Duración
-          const durPts = lv >= 8 && lv <= 9.5 ? 40 : lv >= 7.5 ? 34 : lv >= 7 ? 26 : lv >= 6 ? 16 : 6;
-          rows.push({ label: "Duración", detail: hoursToHM(lv), pts: durPts, max: 40 });
-          // Profundo
-          const dp = ld && lv ? (ld / lv) * 100 : null;
-          const deepPts = dp == null ? 12 : dp >= 13 && dp <= 23 ? 25 : dp >= 10 ? 19 : dp >= 7 ? 13 : 6;
-          rows.push({ label: "Sueño profundo", detail: ld != null ? `${Math.round(dp ?? 0)}% · ${hoursToHM(ld)}` : "–", pts: deepPts, max: 25 });
-          // REM
-          const rp = lr && lv ? (lr / lv) * 100 : null;
-          const remPts = rp == null ? 12 : rp >= 20 && rp <= 25 ? 25 : rp >= 15 ? 19 : rp >= 10 ? 13 : 6;
-          rows.push({ label: "REM", detail: lr != null ? `${Math.round(rp ?? 0)}% · ${hoursToHM(lr)}` : "–", pts: remPts, max: 25 });
-          // Tiempo despierto
-          const ap = law && lv ? (law / lv) * 100 : 0;
-          const awakePts = ap < 5 ? 10 : ap < 10 ? 7 : ap < 15 ? 4 : 0;
-          rows.push({ label: "Tiempo despierto", detail: law != null ? `${Math.round(ap)}% · ${hoursToHM(law)}` : "–", pts: awakePts, max: 10 });
-          // Hora de acostarse
-          if (lss) {
-            const h = parseInt(lss.slice(0, 2), 10);
-            const latePen = h >= 2 && h < 6 ? -15 : h >= 1 ? -10 : h >= 0 && h < 1 ? -5 : 0;
-            if (latePen < 0) rows.push({ label: "Hora de acostarse", detail: lss.slice(0, 5), pts: latePen, max: 0 });
-          }
+        // Desglose del score para el tooltip. Las filas de puntuación salen del mismo
+        // helper que calcula el score (única fuente de verdad de los umbrales); aquí
+        // solo se añaden las subfilas de recuperación, que dependen de los baselines.
+        const desgloseSueno = (() => {
+          const base = latest ? sleepBreakdown(lv, ld, lr, law, lss) : null;
+          if (!base) return [];
+          const rows = [...base.filas];
           // Recuperación fisiológica — una subfila por métrica penalizada
           if (recoveryMod < 0) {
             rows.push({ label: "Recuperación", detail: "", pts: recoveryMod, max: 0 });
@@ -2925,15 +2989,15 @@ export default function Dashboard() {
               if (p < 0) rows.push({ label: "Freq. resp.", detail: `${todayResp.toFixed(1)} vs ${respBase.toFixed(1)} rpm`, pts: p, max: 0, indent: true });
             }
           }
+          // El techo por duración también tiene que verse: con una noche corta y fases
+          // buenas recortaba el total sin aparecer en ninguna fila, y el tooltip volvía
+          // a no cuadrar consigo mismo (que es justo lo que se acaba de arreglar).
+          const bruto = base.filas.reduce((s, f) => s + f.pts, 0) + recoveryMod;
+          if (score != null && bruto > score) {
+            rows.push({ label: "Techo por duración", detail: `máx ${base.cap} con ${hoursToHM(lv)}`, pts: score - bruto, max: 0 });
+          }
           return rows;
         })();
-
-        const STAGE_TIPS = {
-          deep: { label: "Sueño profundo (N3)", color: "#4a72b0", tip: "Restaura el cuerpo, consolida la memoria muscular y libera hormona del crecimiento. Es el más reparador. Óptimo: 13–23% del total (≈1–2h en 8h de sueño). Disminuye con la edad." },
-          rem:  { label: "Sueño REM", color: "#8b68c4", tip: "Procesa emociones, consolida recuerdos y favorece la creatividad. Los sueños ocurren aquí. Óptimo: 20–25% del total (≈1.5–2h en 8h). Se acumula en la segunda mitad de la noche." },
-          core: { label: "Sueño ligero (N1/N2)", color: "#4f8fa3", tip: "Fase de transición y procesamiento de información. Ocupa la mayor parte del sueño. Normal: 50–60% del total. Necesario para consolidar el ciclo de sueño." },
-          awake:{ label: "Tiempo despierto", color: "var(--muted)", tip: "Microdespertares durante la noche. Normal: 10–30 min. Más de 45 min puede indicar apnea, estrés o mala higiene del sueño." },
-        };
 
         return (
           <div style={cardStyle} data-card={id} key="health_sleep">
@@ -2946,7 +3010,7 @@ export default function Dashboard() {
                   <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: scoreColor, letterSpacing: "0.04em", textTransform: "none", cursor: "pointer", borderBottom: "1px dotted currentColor" }}>
                     {score} — {scoreLabel}
                   </span>
-                  {sleepScoreTooltip && sleepBreakdown.length > 0 && (
+                  {sleepScoreTooltip && desgloseSueno.length > 0 && (
                     <div style={{
                       position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 100,
                       background: "var(--surface2)", border: "0.5px solid var(--border)",
@@ -2954,7 +3018,7 @@ export default function Dashboard() {
                       boxShadow: "0 4px 16px rgba(0,0,0,0.4)", fontSize: 12,
                       display: "flex", flexDirection: "column", gap: 4,
                     }}>
-                      {sleepBreakdown.map((b, i) => (
+                      {desgloseSueno.map((b, i) => (
                         <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16,
                           paddingLeft: b.indent ? 12 : 0, opacity: b.indent ? 0.85 : 1 }}>
                           <span style={{ color: b.indent ? "var(--muted2)" : "var(--muted)", whiteSpace: "nowrap", fontSize: b.indent ? 11 : 12 }}>{b.label}</span>
@@ -2978,7 +3042,7 @@ export default function Dashboard() {
             </div>
             {healthLoading ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
-            ) : last14.length === 0 ? (
+            ) : ultimas7.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos de sueño aún</div>
             ) : (
               <>
@@ -3042,14 +3106,14 @@ export default function Dashboard() {
                     )}
                   </div>
                 )}
-                {last14.length > 1 && (
+                {ultimas7.length > 1 && (
                   <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
-                    {last14.map((d, i) => {
+                    {ultimas7.map((d, i) => {
                       const excl = d.extra?.excluded ?? false;
-                      const sc = excl ? null : sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.core)||Number(d.extra?.light)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
+                      const sc = excl ? null : sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
                       const c  = excl ? "var(--border2)" : sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
                       const date = new Date(d.date + "T12:00:00");
-                      const day  = ["D","L","M","X","J","V","S"][date.getDay()];
+                      const day  = DIAS_INICIAL[date.getDay()];
                       const isExcluding = sleepExcluding === d.date;
                       return (
                         <div key={i} style={{ flex: 1, textAlign: "center", position: "relative", cursor: "pointer" }}
@@ -3172,7 +3236,7 @@ export default function Dashboard() {
                     const h = Math.max(2, ((d.value || 0) / maxSteps) * 40);
                     const today_ = isToday(d.date + "T12:00:00");
                     const date = new Date(d.date + "T12:00:00");
-                    const day = ["D","L","M","X","J","V","S"][date.getDay()];
+                    const day = DIAS_INICIAL[date.getDay()];
                     return (
                       <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}
                         title={`${d.date}: ${(d.value || 0).toLocaleString("es")} pasos`}>
@@ -3190,7 +3254,6 @@ export default function Dashboard() {
       case "health_workouts": {
         const wData  = findMetric(healthData, "workouts", "workout");
         const recent = wData.flatMap(d => (d.extra?.workouts || []).map(w => ({ ...w, _date: d.date }))).slice(-10).reverse();
-        const ICONS  = { Running:"🏃", Walking:"🚶", Cycling:"🚴", Swimming:"🏊", "Strength Training":"🏋️", HIIT:"⚡", Yoga:"🧘", Basketball:"🏀", Soccer:"⚽", Tennis:"🎾", Hiking:"🥾" };
         return (
           <div style={cardStyle} data-card={id} key="health_workouts">
             <div style={s.sectionLabel}>Entrenamientos</div>
@@ -3202,7 +3265,7 @@ export default function Dashboard() {
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {recent.map((w, i) => {
                   const type = w.name || w.workoutActivityType || w.type || "Entrenamiento";
-                  const icon = ICONS[type] || "💪";
+                  const icon = WORKOUT_ICONS[type] || "💪";
                   const rawDur = Number(w.duration);
                   const mins = !isNaN(rawDur) ? Math.round(rawDur > 300 ? rawDur / 60 : rawDur) : null;
                   const rawCal = w.activeEnergy?.qty ?? w.activeEnergy ?? w.totalEnergyBurned?.qty ?? w.totalEnergyBurned ?? w.activeEnergyBurned?.qty ?? w.activeEnergyBurned;
@@ -3360,17 +3423,8 @@ export default function Dashboard() {
   function renderSimple() {
     const portrait = orientation === "portrait";
 
-    // Los widgets de salud se colapsan en un único bloque con pestañas — más
-    // navegable en móvil que apilar seis tarjetas grandes.
-    const HEALTH_TAB_LABELS = {
-      health_wellness: "Bienestar",
-      health_sleep:    "Sueño",
-      health_activity: "Actividad",
-      health_hrv:      "HRV",
-      health_heart:    "FC",
-      health_workouts: "Entrenos",
-    };
-
+    // Los widgets de salud se colapsan en un único bloque con pestañas
+    // (HEALTH_TAB_LABELS) — más navegable en móvil que apilar seis tarjetas grandes.
     const visibleWidgets = simpleWidgetConfig.filter(w => w.visible);
     const healthTabs = visibleWidgets
       .filter(w => w.id in HEALTH_TAB_LABELS)
@@ -3886,10 +3940,10 @@ export default function Dashboard() {
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <input type="text" placeholder="Título" value={eventForm.subject}
                 onChange={e => setEventForm(f => ({ ...f, subject: e.target.value }))}
-                style={{ ...inputStyle, fontSize: 15, padding: "11px 12px" }} />
+                style={{ ...INPUT_STYLE, fontSize: 15, padding: "11px 12px" }} />
 
               <div>
-                <div style={fieldLabelStyle}>Fecha</div>
+                <div style={FIELD_LABEL_STYLE}>Fecha</div>
                 <DateInput value={eventForm.date} onChange={v => setEventForm(f => ({ ...f, date: v }))} />
                 <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 5 }}>
                   {eventForm.date ? formatShortDate(eventForm.date) : ""}
@@ -3897,7 +3951,7 @@ export default function Dashboard() {
               </div>
 
               <div>
-                <div style={fieldLabelStyle}>Hora</div>
+                <div style={FIELD_LABEL_STYLE}>Hora</div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <TimeInput value={eventForm.startTime} onChange={v => setEventForm(f => {
                     const [hh, mm] = v.split(":").map(Number);
@@ -3911,18 +3965,18 @@ export default function Dashboard() {
               </div>
 
               <div>
-                <div style={fieldLabelStyle}>Ubicación</div>
+                <div style={FIELD_LABEL_STYLE}>Ubicación</div>
                 <input type="text" placeholder="Opcional" value={eventForm.location}
                   onChange={e => setEventForm(f => ({ ...f, location: e.target.value }))}
-                  style={inputStyle} />
+                  style={INPUT_STYLE} />
               </div>
 
               {!editingEventId && (
                 <div>
-                  <div style={fieldLabelStyle}>Calendario</div>
+                  <div style={FIELD_LABEL_STYLE}>Calendario</div>
                   <select value={eventForm.calendarId}
                     onChange={e => setEventForm(f => ({ ...f, calendarId: e.target.value }))}
-                    style={inputStyle}>
+                    style={INPUT_STYLE}>
                     <option value="">Por defecto</option>
                     {calendarsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
@@ -3930,10 +3984,10 @@ export default function Dashboard() {
               )}
 
               <div>
-                <div style={fieldLabelStyle}>URL de Alud (opcional)</div>
+                <div style={FIELD_LABEL_STYLE}>URL de Alud (opcional)</div>
                 <input type="url" placeholder="https://alud.deusto.es/mod/assign/view.php?id=XXXXX" value={eventForm.alud_url}
                   onChange={e => setEventForm(f => ({ ...f, alud_url: e.target.value }))}
-                  style={inputStyle} />
+                  style={INPUT_STYLE} />
               </div>
             </div>
             {eventCreateError && (
@@ -3984,7 +4038,7 @@ export default function Dashboard() {
               onChange={e => setTextIdeaInput(e.target.value)}
               autoFocus
               rows={5}
-              style={{ ...inputStyle, fontSize: 14, padding: "11px 12px", resize: "vertical", fontFamily: "'DM Sans', sans-serif" }}
+              style={{ ...INPUT_STYLE, fontSize: 14, padding: "11px 12px", resize: "vertical", fontFamily: "'DM Sans', sans-serif" }}
             />
             {textIdeaError && (
               <div style={{ fontSize: 12, color: "#d4645a", marginTop: 10, textAlign: "center" }}>{textIdeaError}</div>
@@ -4526,9 +4580,6 @@ const s = {
   date: { fontSize: 15, color: "var(--muted)", marginTop: 4, letterSpacing: "0.05em", textTransform: "uppercase" },
   greeting: { fontSize: 15, color: "var(--muted)", textAlign: "right", fontFamily: "'DM Sans', sans-serif" },
   greetingStrong: { display: "block", fontSize: 19, color: "var(--accent)", fontWeight: 500, marginTop: 2 },
-  mainGrid: { display: "grid", gridTemplateColumns: "1fr 320px", gap: 16, alignItems: "start", flex: 1 },
-  leftCol:  { display: "flex", flexDirection: "column", gap: 16 },
-  rightCol: { display: "flex", flexDirection: "column", gap: 16 },
   card: { background: "var(--surface)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 20px", boxSizing: "border-box", width: "100%" },
   sectionLabel: { fontSize: 12, fontWeight: 500, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 12 },
   timelineWrapper: { overflowX: "auto", paddingBottom: 4 },
