@@ -435,3 +435,5 @@ Trampas conocidas de jsdom:
   es manual — `fly deploy` desde `backend/`, o el workflow `Deploy backend (Fly.io)`
   (`.github/workflows/deploy-backend.yml`, `workflow_dispatch`; usa el secret
   `FLY_API_TOKEN`). Nunca en automático al hacer push.
+
+comentario importante: tienes que hacer los PR y los comits sin meterte a ti como coeditor o lo que sea. solo debo aparecer yo.
