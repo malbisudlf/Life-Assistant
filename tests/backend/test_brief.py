@@ -86,14 +86,41 @@ class _SMTPFalso:
         _SMTPFalso.enviados.append(msg)
 
 
+def montar_brief_sends(mock_requests, enviados=None):
+    """Simula la tabla brief_sends con un conjunto en memoria, respetando el unique de
+    `brief_date`: el segundo insert de la misma fecha devuelve 409, que es lo que el
+    backend lee como "el correo de hoy ya salió".
+
+    Devuelve el conjunto para que los tests puedan mirar qué quedó reservado.
+    """
+    reservados = set(enviados or ())
+
+    def _post(url, **kwargs):
+        fecha = kwargs["json"]["brief_date"]
+        if fecha in reservados:
+            return FakeResponse(None, 409, "duplicate key value violates unique constraint")
+        reservados.add(fecha)
+        return FakeResponse([], 201)
+
+    def _delete(url, **kwargs):
+        reservados.discard(url.rsplit("eq.", 1)[-1])
+        return FakeResponse([], 204)
+
+    mock_requests.add("POST", "/rest/v1/brief_sends", _post)
+    mock_requests.add("DELETE", "/rest/v1/brief_sends", _delete)
+    return reservados
+
+
 def montar_fuentes(mock_requests, eventos=None, clases=None, salud=None,
-                   graph_status=200, salud_status=200, con_cliente=True):
-    """Registra las cuatro fuentes del resumen (Graph, clima, salud, entrenamiento).
+                   graph_status=200, salud_status=200, con_cliente=True, enviados=None):
+    """Registra las cuatro fuentes del resumen (Graph, clima, salud, entrenamiento) y
+    la tabla de reservas de envío.
 
     El MockRouter resuelve en orden de REGISTRO y gana la primera coincidencia, así que
     todo lo que un test quiera cambiar tiene que pasarse por parámetro aquí: registrar
     otra ruta después no sobreescribe (ver CLAUDE.md).
     """
+    montar_brief_sends(mock_requests, enviados)
     if eventos is None:
         eventos = [
             _evento("Redes", _hoy_iso("10:00"), "Aula 3", _hoy_iso("12:00")),
@@ -379,3 +406,148 @@ class TestEnvio:
         configurar_smtp(monkeypatch)
         assert client.post("/brief/send?token=mal").status_code == 403
         assert _SMTPFalso.enviados == [], "no debe salir correo sin token válido"
+
+    def test_token_malo_no_reserva_el_dia(self, client, mock_requests, graph_token, monkeypatch):
+        """Si un 403 dejara la reserva puesta, cualquiera con la URL del backend podría
+        quedarse con el envío del día y bloquear el correo sin saber el token."""
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+        client.post("/brief/send?token=mal")
+        assert mock_requests.called("POST", "/rest/v1/brief_sends") == []
+
+
+class TestUnSoloCorreoAlDia:
+    """El workflow dispara tres veces por la mañana porque el cron de Actions se salta
+    ejecuciones. Que de ahí salga un solo correo depende de la reserva en brief_sends."""
+
+    def _hoy(self):
+        return datetime.now(main.LOCAL_TZ).date().isoformat()
+
+    def test_el_segundo_intento_del_dia_no_repite_correo(self, client, mock_requests, graph_token, monkeypatch):
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        primera = client.post("/brief/send?token=brief-token")
+        segunda = client.post("/brief/send?token=brief-token")
+
+        assert primera.status_code == 200
+        assert segunda.status_code == 200, "el respaldo no debe hacer fallar el workflow"
+        assert segunda.json()["omitido"] is True
+        assert len(_SMTPFalso.enviados) == 1, "solo un correo al día"
+
+    def test_el_intento_omitido_no_consulta_las_fuentes(self, client, mock_requests, graph_token, monkeypatch):
+        """El respaldo que llega tarde se va sin gastar Graph, Supabase ni Open-Meteo:
+        la reserva se pide antes de construir nada."""
+        montar_fuentes(mock_requests, enviados=[self._hoy()])
+        configurar_smtp(monkeypatch)
+
+        r = client.post("/brief/send?token=brief-token")
+
+        assert r.status_code == 200 and r.json()["omitido"] is True
+        assert mock_requests.called("GET", "graph.microsoft.com") == []
+        assert mock_requests.called("GET", "api.open-meteo.com") == []
+        assert _SMTPFalso.enviados == []
+
+    def test_dia_distinto_vuelve_a_enviar(self, client, mock_requests, graph_token, monkeypatch):
+        """La reserva es por fecha, no un interruptor: lo de ayer no bloquea lo de hoy."""
+        ayer = (datetime.now(main.LOCAL_TZ).date() - timedelta(days=1)).isoformat()
+        montar_fuentes(mock_requests, enviados=[ayer])
+        configurar_smtp(monkeypatch)
+
+        assert client.post("/brief/send?token=brief-token").status_code == 200
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_fallo_de_envio_libera_el_dia_para_el_siguiente_intento(self, client, mock_requests,
+                                                                    graph_token, monkeypatch):
+        """Lo importante del diseño: si la reserva se quedara puesta tras un fallo, un
+        SMTP que parpadea a las 07:30 dejaría al día entero sin correo."""
+        reservados = montar_brief_sends(mock_requests)
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        def _explota(asunto, cuerpo):
+            raise TimeoutError("[Errno 110] Connection timed out")
+
+        monkeypatch.setattr(main, "enviar_correo", _explota)
+        assert client.post("/brief/send?token=brief-token").status_code == 502
+        assert reservados == set(), "la reserva debe soltarse para que el respaldo reintente"
+
+    def test_tras_un_fallo_el_respaldo_si_manda_el_correo(self, client, mock_requests, graph_token, monkeypatch):
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        fallos = {"quedan": 1}
+        real = main.enviar_correo
+
+        def _falla_la_primera(asunto, cuerpo):
+            if fallos["quedan"]:
+                fallos["quedan"] -= 1
+                raise TimeoutError("SMTP no responde")
+            return real(asunto, cuerpo)
+
+        monkeypatch.setattr(main, "enviar_correo", _falla_la_primera)
+        assert client.post("/brief/send?token=brief-token").status_code == 502
+        assert client.post("/brief/send?token=brief-token").status_code == 200
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_falta_de_configuracion_tambien_libera_el_dia(self, client, mock_requests, graph_token, monkeypatch):
+        """El 503 sale de enviar_correo() como HTTPException, que no pasa por el except
+        del 502: sin el finally, la reserva se quedaba puesta."""
+        reservados = montar_brief_sends(mock_requests)
+        montar_fuentes(mock_requests)
+        monkeypatch.setattr(main, "SMTP_HOST", "")
+        monkeypatch.setattr(main, "BRIEF_TO", "yo@test")
+
+        assert client.post("/brief/send?token=brief-token").status_code == 503
+        assert reservados == set()
+
+    def test_forzar_manda_aunque_el_dia_ya_este_enviado(self, client, mock_requests, graph_token, monkeypatch):
+        """Los disparos a mano existen para probar el correo: si contestaran 'omitido'
+        no habría forma de verlo una vez salió el de la mañana."""
+        montar_fuentes(mock_requests, enviados=[self._hoy()])
+        configurar_smtp(monkeypatch)
+
+        # "true" y no "1": es lo que manda el workflow, que resuelve `FORZAR` con una
+        # comparación de Actions y por tanto escribe el booleano en letra.
+        r = client.post("/brief/send?token=brief-token&forzar=true")
+
+        assert r.status_code == 200
+        assert "omitido" not in r.json()
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_forzar_false_si_deduplica(self, client, mock_requests, graph_token, monkeypatch):
+        """Lo que mandan los disparos programados. Si `forzar=false` colara como cierto
+        (la cadena "false" es no vacía), los tres crons mandarían tres correos."""
+        montar_fuentes(mock_requests, enviados=[self._hoy()])
+        configurar_smtp(monkeypatch)
+
+        r = client.post("/brief/send?token=brief-token&forzar=false")
+
+        assert r.status_code == 200 and r.json()["omitido"] is True
+        assert _SMTPFalso.enviados == []
+
+    def test_forzar_no_toca_la_reserva_del_dia(self, client, mock_requests, graph_token, monkeypatch):
+        """Un envío a mano no debe consumir ni soltar la reserva: si la soltara, el
+        respaldo de las 07:00 mandaría un correo repetido."""
+        reservados = montar_brief_sends(mock_requests, [self._hoy()])
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        client.post("/brief/send?token=brief-token&forzar=1")
+
+        assert reservados == {self._hoy()}
+        assert mock_requests.called("DELETE", "/rest/v1/brief_sends") == []
+
+    def test_si_supabase_falla_al_reservar_no_se_manda_a_ciegas(self, client, mock_requests,
+                                                                graph_token, monkeypatch):
+        """Sin saber si el correo de hoy ya salió, mandar sería arriesgarse a duplicarlo:
+        mejor un 502 que el workflow registra y que el siguiente intento reintenta."""
+        mock_requests.add("POST", "/rest/v1/brief_sends", FakeResponse(None, 500, "boom"))
+        montar_fuentes(mock_requests)
+        configurar_smtp(monkeypatch)
+
+        r = client.post("/brief/send?token=brief-token")
+
+        assert r.status_code == 502
+        assert _SMTPFalso.enviados == []
+        assert "boom" not in r.text, "el detalle de Supabase no sale al cliente"

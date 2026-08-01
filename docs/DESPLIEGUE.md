@@ -193,13 +193,23 @@ ve las variables `VITE_*`.
 
 **3. Ajusta la hora** en `.github/workflows/resumen-diario.yml`. El cron va en **UTC**
 y no entiende de zonas horarias, así que hay que retocarlo en los cambios de hora:
-`30 4 * * *` son las 06:30 en Madrid en verano y las 05:30 en invierno. Los cron de
-GitHub Actions además se retrasan cuando GitHub está cargado (a veces 10-15 min), así
-que déjale margen antes de la rutina que lee el correo.
+`30 5 * * *` son las 07:30 en Madrid en verano y las 06:30 en invierno.
+
+El workflow trae **tres horas programadas**, no una: el planificador de Actions se
+retrasa cuando GitHub está cargado (10-15 min es normal) y a veces se salta la
+ejecución sin avisar y sin dejar rastro. Los dos disparos de respaldo cubren ese caso.
+Si mueves la hora buena, mueve los respaldos con ella y déjale margen antes de la
+rutina que lee el correo.
+
+De los tres intentos sale **un solo correo**: el backend reserva el día en la tabla
+`brief_sends` antes de componer nada y contesta `{"omitido": true}` si el de hoy ya
+salió. Por eso la migración `20260801_brief_sends.sql` es obligatoria — sin esa tabla
+la reserva falla y el resumen no se envía.
 
 **4. Pruébalo sin esperar a mañana**: Actions → *Resumen diario por correo* → *Run
-workflow*. Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
-los mismos datos en JSON.
+workflow*. Los disparos a mano mandan `?forzar=1` y se saltan la reserva, así que el
+correo sale aunque el del día ya haya salido. Para ver qué se enviaría sin mandar nada,
+`GET /brief` con tu JWT devuelve los mismos datos en JSON.
 
 ## 8. Checklist de verificación
 

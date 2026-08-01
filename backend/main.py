@@ -2662,6 +2662,45 @@ def enviar_correo(asunto: str, cuerpo: str):
             smtp.send_message(msg)
 
 
+def _reservar_envio_brief(fecha: str) -> bool:
+    """Reserva el envío del día. Devuelve True si es esta llamada la que tiene que
+    mandar el correo, y False si el de hoy ya salió.
+
+    El cron de Actions se retrasa y a veces se salta la ejecución sin avisar, así que
+    el workflow lo intenta varias veces por la mañana. La reserva es un insert contra
+    la clave primaria `brief_date`: el primero entra y los siguientes chocan con el
+    unique (409). Aquí el conflicto ES la respuesta, así que NO se manda
+    `resolution=merge-duplicates` a propósito — con él el insert se resolvería solo y
+    los tres intentos se creerían ganadores.
+
+    Persistido en Supabase y no en memoria porque la máquina de Fly escala a cero: se
+    duerme entre un intento y el siguiente, justo cuando el flag haría falta.
+    """
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/brief_sends",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json={"brief_date": fecha},
+    )
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return True
+
+
+def _liberar_envio_brief(fecha: str):
+    """Suelta la reserva cuando el envío falla, para que el siguiente intento del cron
+    lo vuelva a probar: si se quedara puesta, un fallo pasajero de Graph o de SMTP
+    dejaría al día entero sin correo. Un fallo al soltarla se loguea pero no se
+    propaga — el error que le interesa al workflow es el del envío, no este."""
+    r = http.delete(
+        f"{SUPABASE_URL}/rest/v1/brief_sends?brief_date=eq.{fecha}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Resumen diario: no se pudo liberar la reserva de %s (%s)", fecha, r.status_code)
+
+
 @app.get("/brief")
 def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Los mismos datos que van en el correo, en JSON. Para comprobar qué se enviaría
@@ -2670,25 +2709,50 @@ def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
 
 
 @app.post("/brief/send")
-def send_brief(request: Request, token: str = ""):
+def send_brief(request: Request, token: str = "", forzar: bool = False):
     """Compone el resumen y lo manda por correo. Lo llama el disparador diario
     (.github/workflows/resumen-diario.yml), que es una máquina: token de servicio
     dedicado, igual que HA y la ingesta de salud — un JWT de usuario caducaría a los
-    30 días y el correo dejaría de llegar sin avisar."""
+    30 días y el correo dejaría de llegar sin avisar.
+
+    El workflow dispara VARIAS veces por la mañana porque el cron de Actions se retrasa
+    y a veces se salta la ejecución sin avisar. Que de esos intentos salga un solo
+    correo es cosa de la reserva en `brief_sends`, no del workflow.
+
+    `forzar=1` se la salta entera (ni reserva ni comprueba): es lo que usan los disparos
+    a mano, donde la gracia es ver el correo aunque el del día ya haya salido.
+    """
     if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    # La reserva va ANTES de construir nada: los intentos de respaldo que llegan cuando
+    # el correo ya salió se van sin gastar las llamadas a Graph, Supabase y Open-Meteo.
+    # La fecha se calcula igual que en construir_brief() (LOCAL_TZ, no UTC): con el
+    # correo saliendo a las 07:30 de Madrid, usar UTC no cambiaría de día a la vez.
+    fecha = datetime.now(LOCAL_TZ).date().isoformat()
+    if not forzar and not _reservar_envio_brief(fecha):
+        logger.info("Resumen diario: el del %s ya salió, este intento no repite", fecha)
+        return {"ok": True, "omitido": True, "motivo": "ya enviado hoy", "fecha": fecha}
+
     # Sin este try/except, cualquier fallo (Graph, Supabase, SMTP) subía sin capturar
     # y el disparador solo veía un "Internal Server Error" genérico y sin detalle —
     # nada que distinguir un problema de Outlook de uno de credenciales SMTP. El
     # llamador es el workflow de GitHub Actions, protegido por BRIEF_TOKEN, no un
     # navegador: el mensaje de la excepción es diagnóstico útil, no un dato sensible.
+    enviado = False
     try:
         datos = construir_brief()
         enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+        enviado = True
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo")
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
+    finally:
+        # En finally y no en los except: cubre por igual el 503 de configuración, el 502
+        # inesperado y cualquier salida que no llegue a enviar.
+        if not enviado and not forzar:
+            _liberar_envio_brief(fecha)
     logger.info("Resumen diario enviado a %s (%s)", BRIEF_TO, datos["fecha"])
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}

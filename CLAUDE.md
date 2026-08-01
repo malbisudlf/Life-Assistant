@@ -246,6 +246,19 @@ Ficheros clave:
   `.github/workflows/resumen-diario.yml` (cron en UTC — ajústalo en los cambios de hora)
   y usa `BRIEF_TOKEN`, token de servicio: un JWT de usuario caducaría a los 30 días y el
   correo dejaría de llegar sin avisar.
+  El workflow tiene **tres crons** (05:30, 06:15 y 07:00 UTC) porque el planificador de
+  Actions se retrasa y a veces se salta la ejecución sin avisar ni dejar rastro — el
+  1 de agosto de 2026 no se disparó ni una vez y el correo no llegó. Que de esos tres
+  intentos salga UN correo lo garantiza el backend, no el workflow:
+  `_reservar_envio_brief()` inserta la fecha en `brief_sends`, cuya clave primaria es
+  `brief_date`, y el 409 del segundo insert es lo que se lee como "ya salió" (por eso
+  ahí **no** se manda `resolution=merge-duplicates`, que resolvería el conflicto y haría
+  que los tres se creyeran ganadores). La reserva se pide **antes** de construir el
+  resumen, para que los respaldos tardíos no gasten Graph/Supabase/Open-Meteo, y se
+  suelta en un `finally` si el envío no llegó a salir: si se quedara puesta, un SMTP que
+  parpadea una vez dejaría al día entero sin correo. No la pases a memoria — Fly escala
+  a cero y se duerme entre un intento y el siguiente. `?forzar=1` se salta la reserva
+  entera (ni reserva ni comprueba ni suelta) y es lo que usan los disparos a mano.
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -351,7 +364,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 250 tests)
+### Backend (`tests/backend`, 263 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
