@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
-  urgencyColor, formatShortDate, isoToDdMmYyyy,
+  urgencyColor, formatShortDate, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
@@ -66,6 +66,19 @@ describe("helpers de fecha", () => {
     expect(formatShortDate("")).toBe("");
     expect(isoToDdMmYyyy("2026-07-05")).toBe("05/07/2026");
     expect(isoToDdMmYyyy("")).toBe("");
+  });
+
+  test("formatLogTime: lo de hoy solo lleva la hora", () => {
+    const ahora = new Date(2026, 7, 2, 18, 0, 0);
+    expect(formatLogTime(new Date(2026, 7, 2, 9, 5, 30).toISOString(), ahora)).toBe("09:05:30");
+    // De otro día hace falta saber cuál, si no todas las entradas parecen de hoy.
+    expect(formatLogTime(new Date(2026, 6, 30, 9, 5, 30).toISOString(), ahora)).toBe("30 jul 09:05:30");
+  });
+
+  test("formatLogTime aguanta lo que no es una fecha", () => {
+    expect(formatLogTime("")).toBe("");
+    expect(formatLogTime(null)).toBe("");
+    expect(formatLogTime("no soy una fecha")).toBe("");
   });
 });
 
