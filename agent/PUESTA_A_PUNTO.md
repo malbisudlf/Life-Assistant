@@ -178,14 +178,27 @@ datos del día (agenda, clases, entregas, clima, salud, entrenamiento) **en crud
 interpretarlos**. De ahí los recoge tu rutina de Claude Code que ya lee el correo y
 compone el resumen diario — por eso el backend no llama a ningún LLM.
 
-> El código vive en la rama `claude/mejoras-analisis-seguridad-cj53hq`, todavía sin
-> fusionar a `main`. **El cron de GitHub Actions solo se dispara desde la rama por
-> defecto**, así que el paso 0 de esta lista es obligatorio antes que nada más.
+> Los pasos 1-4 ya están hechos desde el 31 de julio de 2026 (contraseña de aplicación,
+> secretos de Fly y disparador de GitHub): quedan aquí como referencia y para montarlo
+> de cero en otra instancia. Lo que sí está pendiente es el **paso 0**.
 
-## 0. Fusionar la rama
+## 0. Migración y rama (obligatorio antes que nada)
 
-- [ ] Abrir el PR de `claude/mejoras-analisis-seguridad-cj53hq` contra `main` y
-      fusionarlo (squash, como el resto del repo).
+El 1 de agosto de 2026 el correo no llegó. No es que fallara el envío: el cron de
+Actions **no se disparó ni una sola vez** (cero ejecuciones con `event=schedule`). El
+planificador de GitHub se retrasa y a veces se salta la ejecución sin avisar ni dejar
+rastro. La rama `claude/health-data-daily-email-gd2vn4` añade dos disparos de respaldo
+y la deduplicación que impide que de los tres salga más de un correo.
+
+- [ ] En Supabase → **SQL Editor**, ejecutar `supabase/migrations/20260801_brief_sends.sql`.
+      **Esto primero, antes del merge y del deploy**: el backend nuevo reserva el día en
+      esa tabla antes de componer nada, así que sin ella la reserva falla y el resumen
+      deja de enviarse *del todo*. Aplicarla antes no rompe nada — el código viejo ni la
+      mira.
+- [ ] Fusionar `claude/health-data-daily-email-gd2vn4` contra `main` (squash, como el
+      resto del repo). **El cron de Actions solo se dispara desde la rama por defecto.**
+- [ ] `cd backend && fly deploy`. Fusionar a `main` **no** despliega el backend: Vercel
+      es automático, Fly es manual.
 
 ## 1. Contraseña de aplicación de Gmail
 
@@ -229,17 +242,23 @@ En el repo, Settings → Secrets and variables → Actions:
 
 ## 5. Ajustar la hora del envío
 
-`.github/workflows/resumen-diario.yml` trae `30 4 * * *` (cron en **UTC**, no
-entiende zonas horarias):
+`.github/workflows/resumen-diario.yml` trae **tres** horas (cron en **UTC**, no entiende
+zonas horarias):
 
-| Cron (UTC) | Madrid verano | Madrid invierno |
-|---|---|---|
-| `30 4 * * *` | 06:30 | 05:30 |
-| `0 5 * * *` | 07:00 | 06:00 |
+| Cron (UTC) | Madrid verano | Madrid invierno | Para qué |
+|---|---|---|---|
+| `30 5 * * *` | 07:30 | 06:30 | el bueno |
+| `15 6 * * *` | 08:15 | 07:15 | respaldo |
+| `0 7 * * *` | 09:00 | 08:00 | último respaldo |
 
-- [ ] Déjale margen antes de que tu rutina lea el correo: los cron de Actions se
-      retrasan cuando GitHub va cargado (a veces 10-15 min).
+Son tres porque uno solo no basta: el 1 de agosto de 2026 no se disparó ninguno. De los
+tres sale **un solo correo** — el backend reserva el día en `brief_sends` y contesta
+`{"omitido": true}` a los que llegan cuando ya salió.
+
+- [ ] Déjale margen antes de que tu rutina lea el correo.
+- [ ] Si mueves la hora buena, mueve los respaldos con ella.
 - [ ] Revisarlo en los cambios de hora si quieres que la hora local se mantenga fija.
+      (El disparador de HA del paso 7 no necesita esto: va en hora local.)
 
 ## 6. Probar sin esperar a mañana
 
@@ -249,12 +268,60 @@ entiende zonas horarias):
       `curl https://backend-tender-glow-160.fly.dev/brief -H "Authorization: Bearer TU_JWT"`
       (el JWT sale de DevTools → Application → Local Storage → `la_token`).
 
+## 7. Disparador de respaldo en Home Assistant (recomendado)
+
+Los tres crons reducen mucho el riesgo, pero siguen dependiendo del mismo planificador
+que ya falló una vez: si GitHub se salta los tres, no hay correo. Un segundo disparador
+**independiente** lo cubre, y con la deduplicación ya no cuesta nada — llamen uno o
+cinco, sale un correo.
+
+HA es el que mejor encaja porque **ya está hablando con este backend**: sondea
+`/ha/wol-pending` cada 30s y `/ha/events/soon` cada 60s (sección 6 de arriba). No metes
+una pieza nueva, solo una automatización más. Y su disparador va en **hora local**, así
+que aplica el cambio de hora solo.
+
+Nota de por qué hace falta algo externo: el backend no puede programarse a sí mismo.
+Fly escala a cero, así que a las 07:30 la máquina está dormida y un cron interno no
+correría — quien dispara tiene que ser alguien de fuera que la despierte.
+
+- [ ] Guardar `BRIEF_TOKEN` (el mismo valor de Fly) como `la_brief_token` en
+      `secrets.yaml`. **Token aparte de `la_poll_token`**, no lo reutilices: cada
+      integración lleva el suyo a propósito.
+- [ ] En `configuration.yaml`, junto a lo que ya tienes de HA:
+      ```yaml
+      rest_command:
+        la_resumen_diario:
+          url: "https://backend-tender-glow-160.fly.dev/brief/send"
+          method: POST
+          headers: { X-Auth-Token: !secret la_brief_token }
+          timeout: 180        # el default son 10s y no basta: Fly arranca en frío
+
+      automation:
+        - alias: "Life Assistant: resumen diario"
+          trigger: [{ platform: time, at: "07:30:00" }]
+          action: [{ service: rest_command.la_resumen_diario }]
+      ```
+- [ ] Recargar la configuración de HA y probarlo desde Herramientas de desarrollo →
+      Acciones → `rest_command.la_resumen_diario`. Como no lleva `?forzar=1`, si el
+      correo del día ya salió no llegará otro: eso es exactamente lo que tiene que pasar.
+      Para verlo de verdad, mira que la respuesta sea 200.
+
+Pega a tener en cuenta: HA corre en casa, así que un corte de luz o de router lo deja
+sin disparar. Por eso se queda **además** de los crons de GitHub, no en su lugar — dos
+sistemas que fallan por motivos distintos.
+
 ## Si algo falla
 
 - **403** en el workflow → los `BRIEF_TOKEN` de Fly y de GitHub no coinciden.
 - **503** → falta alguna variable de SMTP (el mensaje de error dice cuál).
 - **404** → el backend no tiene el deploy nuevo (paso 3).
+- **502 al reservar el día** → falta la tabla `brief_sends` (migración del paso 0).
 - **Error de login SMTP** → estás usando la contraseña normal de Gmail, no la de
   aplicación (paso 1).
 - **Llega sin entregas** → `ENTREGAS_MARKER` ≠ `VITE_ENTREGAS_MARKER` (paso 2).
 - **No aparece el workflow en Actions** → la rama no está fusionada (paso 0).
+- **El workflow sale en verde pero no llega correo** → mira la respuesta del paso: si
+  dice `"omitido": true`, es que el correo de hoy ya había salido. Es lo normal en los
+  disparos de respaldo y en los de HA.
+- **No se dispara ninguno de los tres crons** → no es tuyo, es el planificador de
+  Actions. Es justo el caso que cubre el disparador de HA del paso 7.
