@@ -210,6 +210,15 @@ Ficheros clave:
   `unique(metric_date, metric_name)` de la tabla) con el resto. Un GET+POST por
   métrica aquí son 60-90 viajes secuenciales a Supabase por sincronización del
   Watch — no lo reintroduzcas.
+  La URL del upsert sale de `HEALTH_UPSERT_URL` y **lleva
+  `?on_conflict=metric_date,metric_name`**: PostgREST resuelve `merge-duplicates`
+  contra la CLAVE PRIMARIA salvo que se le nombre otra restricción, y aquí la primaria
+  es `id` (uuid nuevo en cada inserción, que no colisiona nunca), así que sin ese
+  parámetro cualquier fila repetida acaba en un 409 que tumba el lote entero. Mismo
+  criterio para cualquier tabla cuya unicidad real no sea su clave primaria.
+  Y un fallo de escritura **corta con 502**: los clientes son máquinas (Health Auto
+  Export, un Shortcut de iOS) que no miran el cuerpo de la respuesta, así que un 200
+  `{"ok": true}` con el error escondido dentro es indistinguible de haber sincronizado.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
@@ -387,6 +396,19 @@ Trampas conocidas de jsdom:
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **El Watch dejó de sincronizar sin que nada diera error.** El upsert en bloque de la
+  ingesta de salud (`resolution=merge-duplicates`) no llevaba `on_conflict`, así que
+  PostgREST lo resolvía contra la clave primaria (`id`) en vez de contra
+  `unique(metric_date, metric_name)`: en cuanto el lote traía una métrica que ya
+  existía para ese día, Supabase devolvía 409 y **no se guardaba nada**, ni siquiera lo
+  nuevo. Antes esto no se veía porque cada métrica se escribía por separado con un
+  `POST → si 409, PATCH`; el paso al lote se llevó por delante ese respaldo y dejó el
+  POST tal cual. Dos cosas lo mantuvieron invisible durante días: el endpoint respondía
+  `200 {"ok": true}` metiendo el fallo en una clave `errors` que nadie lee, y el único
+  síntoma visible era el "sync hace Nd" del dashboard. Los mocks de los tests no lo
+  cogían porque simulan Supabase, no PostgREST. Moraleja doble: **nombra la restricción
+  en todo upsert cuya unicidad no sea la clave primaria**, y **un fallo de escritura no
+  puede salir por una clave del cuerpo con un 200 delante**.
 - `sleepScore`: la penalización por hora de acostarse usa `h === 1` / `h === 0` para
   distinguir la 01:00 y las 00:00. Un `h >= 1` "equivalente" penalizaba también las
   22:00–23:00 (cualquier hora antes de medianoche). Hay test que lo cubre.

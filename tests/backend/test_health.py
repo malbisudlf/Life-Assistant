@@ -329,8 +329,8 @@ class TestMetricasAcumulativasCompartidas:
             headers={"X-Auth-Token": "health-token"},
             json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}],
         )
+        assert r.status_code == 502
         assert "detalle interno" not in r.text
-        assert "HTTP 500" in r.json()["errors"][0]
 
 
 class TestResumenEntrenamientoFiltrado:
@@ -405,5 +405,46 @@ class TestIngestaSimpleEnBloque:
     def test_un_fallo_del_upsert_no_filtra_el_texto_de_supabase(self, client, mock_requests):
         mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 500, "detalle interno"))
         r = client.post(self.URL, json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}])
+        assert r.status_code == 502
         assert "detalle interno" not in r.text
-        assert r.json()["errors"] == ["upsert: HTTP 500"]
+
+
+class TestUpsertContraLaRestriccionCorrecta:
+    """El upsert debe apuntar a unique(metric_date, metric_name), no a la clave primaria.
+
+    Regresión real: al pasar la ingesta a un upsert en bloque se perdió el PATCH de
+    respaldo que resolvía el 409, pero el POST seguía sin `on_conflict`. PostgREST, sin
+    ese parámetro, resuelve el conflicto contra la clave primaria (`id`, un uuid nuevo
+    en cada inserción, que nunca colisiona), así que la fila repetida llegaba al índice
+    único y Supabase devolvía 409 para el LOTE ENTERO. Resultado: el Watch dejó de
+    sincronizar mientras los dos endpoints seguían respondiendo 200 {"ok": true}.
+    """
+
+    MUESTRA = {"metric": "heart_rate", "date": "2026-07-28", "value": 60}
+
+    @staticmethod
+    def _url_del_upsert(mock_requests):
+        return mock_requests.called("POST", "health_metrics")[0][1]
+
+    def test_ingest_nombra_la_restriccion(self, client, mock_requests):
+        client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert "on_conflict=metric_date,metric_name" in self._url_del_upsert(mock_requests)
+
+    def test_ingest_simple_nombra_la_restriccion(self, client, mock_requests):
+        client.post("/health/ingest/simple?token=health-token", json=[self.MUESTRA])
+        assert "on_conflict=metric_date,metric_name" in self._url_del_upsert(mock_requests)
+
+    def test_un_409_no_se_da_por_sincronizado(self, client, mock_requests):
+        """Lo que veía el Shortcut: 200 y "ok" con cero filas guardadas."""
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 409, "duplicate key"))
+        r = client.post("/health/ingest/simple?token=health-token", json=[self.MUESTRA])
+        assert r.status_code == 502
+
+    def test_un_409_tampoco_en_la_ruta_de_health_auto_export(self, client, mock_requests):
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 409, "duplicate key"))
+        r = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert r.status_code == 502

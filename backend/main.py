@@ -1797,6 +1797,16 @@ CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_en
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
 ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 
+# El upsert de health_metrics tiene que resolverse contra unique(metric_date,
+# metric_name), y PostgREST solo lo hace si se le nombra la restricción: sin
+# on_conflict usa la CLAVE PRIMARIA, que aquí es `id`, un uuid generado en cada
+# inserción y que por tanto no colisiona nunca. La fila repetida llegaba entonces al
+# índice único y Supabase devolvía 409 para el lote ENTERO — también para las métricas
+# nuevas que venían en la misma llamada. Es exactamente el 409 que el esquema
+# documenta; antes no se notaba porque cada métrica se escribía por separado y tenía un
+# PATCH de respaldo, y al pasar a un upsert en bloque ese respaldo desapareció.
+HEALTH_UPSERT_URL = f"{SUPABASE_URL}/rest/v1/health_metrics?on_conflict=metric_date,metric_name"
+
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
     diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
@@ -1859,16 +1869,19 @@ def _guardar_metricas(agrupadas: dict) -> int:
 
     if not filas:
         return 0
-    # health_metrics tiene unique(metric_date, metric_name), así que merge-duplicates
-    # resuelve inserción y actualización en una sola llamada.
+    # merge-duplicates + on_conflict (ver HEALTH_UPSERT_URL): inserción y actualización
+    # en una sola llamada, resueltas contra unique(metric_date, metric_name).
     r = http.post(
-        f"{SUPABASE_URL}/rest/v1/health_metrics",
+        HEALTH_UPSERT_URL,
         headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
         json=filas,
     )
+    # Un fallo aquí es que no se ha guardado NADA del lote. Devolver 0 y seguir hacía
+    # que el endpoint respondiera 200 {"ok": true}, así que el Watch y el Shortcut
+    # daban la sincronización por buena mientras los datos se perdían en silencio.
     if r.status_code >= 300:
-        logger.error("Ingesta de salud: upsert en bloque falló (%s)", r.status_code)
-        return 0
+        logger.error("Ingesta de salud: upsert en bloque de %d filas falló", len(filas))
+        raise _supabase_error(r)
     return len(filas)
 
 @app.post("/health/ingest")
@@ -2072,7 +2085,6 @@ async def health_ingest_simple(request: Request, token: str = ""):
 
     upserted = 0
     skipped = []
-    errors = []
 
     # Mismo patrón que /health/ingest (M4): una lectura en bloque de lo ya guardado y
     # un upsert con el resto, en vez de dos GET y un POST/PATCH por muestra.
@@ -2114,19 +2126,20 @@ async def health_ingest_simple(request: Request, token: str = ""):
 
     if filas:
         r = http.post(
-            f"{SUPABASE_URL}/rest/v1/health_metrics",
+            HEALTH_UPSERT_URL,
             headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
             json=filas,
         )
-        if r.status_code < 300:
-            upserted += len(filas)
-        else:
-            # El detalle real va al log del servidor; al cliente solo el código.
-            # Reenviar r.text filtraba mensajes internos de Supabase (invariante 5).
-            logger.error("Ingesta de salud (bloque de %d, %s): %s", len(filas), r.status_code, (r.text or "")[:500])
-            errors.append(f"upsert: HTTP {r.status_code}")
+        # Igual que en /health/ingest: si el upsert falla no se ha guardado nada, y
+        # responder 200 {"ok": true} con el fallo escondido en `errors` es lo que hacía
+        # que el Shortcut no diera ningún error mientras dejaba de sincronizar. El
+        # detalle real va al log del servidor (invariante 5), al cliente solo el 502.
+        if r.status_code >= 300:
+            logger.error("Ingesta de salud (Shortcut): upsert en bloque de %d filas falló", len(filas))
+            raise _supabase_error(r)
+        upserted += len(filas)
 
-    return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "errors": errors, "parse_errors": parse_errors}
+    return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "parse_errors": parse_errors}
 
 
 @app.patch("/health/sleep/{date}/exclude")
