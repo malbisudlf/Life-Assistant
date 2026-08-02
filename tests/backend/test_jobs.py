@@ -16,11 +16,21 @@ class TestCreateJob:
 
     def test_dedupe_devuelve_job_existente(self, client, auth_headers, mock_requests):
         existing = {"id": JOB_ID, "dedupe_key": "alud-99", "status": "running"}
-        # El upsert con merge-duplicates no devuelve filas si ya existía
+        # Con ignore-duplicates el insert no devuelve filas si la clave ya existía
         mock_requests.add("POST", "/rest/v1/jobs", FakeResponse([], 201))
         mock_requests.add("GET", "/rest/v1/jobs?dedupe_key=eq.alud-99", FakeResponse([existing]))
         r = client.post("/jobs", headers=auth_headers, json={"dedupe_key": "alud-99"})
         assert r.json() == {"ok": True, "job": existing}
+
+    def test_el_insert_nombra_la_restriccion_de_dedupe(self, client, auth_headers, mock_requests):
+        """Sin on_conflict, PostgREST resuelve contra la primaria (`id`, uuid nuevo cada
+        vez) y la clave repetida acaba en un 409 que este endpoint traducía a 502: el
+        camino de "ya existe" no se alcanzaba nunca. Y la resolución tiene que ser
+        ignore-duplicates para no pisarle el payload a un job ya en marcha."""
+        client.post("/jobs", headers=auth_headers, json={"dedupe_key": "alud-99"})
+        _, url, kwargs = mock_requests.called("POST", "/rest/v1/jobs")[0]
+        assert "on_conflict=dedupe_key" in url
+        assert "resolution=ignore-duplicates" in kwargs["headers"]["Prefer"]
 
     def test_dedupe_key_con_caracteres_de_url_va_escapada(self, client, auth_headers, mock_requests):
         """La clave lleva el título del evento: '&' y '#' romperían la query de Supabase.

@@ -11,13 +11,17 @@ from openai import OpenAI
 import msal
 import requests
 import os
+import sys
 import json
 import re
 import time
 import hmac
+import atexit
 import logging
 import smtplib
 import threading
+import contextvars
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from urllib.parse import quote, urlsplit
@@ -202,6 +206,177 @@ def supabase_headers():
     }
 
 bearer_scheme = HTTPBearer()
+
+# ── REGISTRO PERSISTENTE (tabla app_logs) ─────────────────────────────────────
+# El backend ya llamaba a logger.error()/warning() en todos los sitios que importan. El
+# problema nunca fue que faltaran mensajes: es que van al stdout de una máquina de Fly
+# que ESCALA A CERO, así que se van con ella y solo se ven si alguien mira `fly logs`
+# justo en ese momento. El 409 que dejó al Watch sin sincronizar se registró cada vez,
+# durante días, sin que nadie lo viera.
+#
+# Este handler engancha el logger que ya existe, así que CUALQUIER logger.error() del
+# fichero —los de ahora y los que se añadan— pasa a ser visible desde el dashboard sin
+# tocar el sitio donde se llama. Reglas de diseño, todas por el mismo motivo: registrar
+# no puede tumbar ni frenar una petición.
+#   - La petición solo encola en memoria; a Supabase escribe un hilo de fondo, en lotes.
+#   - La cola está acotada: si se llena se tiran las más viejas y se deja constancia de
+#     cuántas, para que un pico de errores no se coma la RAM de la VM (1 GB).
+#   - Un fallo escribiendo el registro se traga y se avisa por stderr, nunca por logger:
+#     eso realimentaría la cola con el error de escribir la cola.
+LOG_PERSIST        = os.getenv("LOG_PERSIST", "1").lower() not in ("0", "false", "no")
+LOG_PERSIST_LEVEL  = os.getenv("LOG_PERSIST_LEVEL", "WARNING").upper()
+LOG_QUEUE_MAX      = int(os.getenv("LOG_QUEUE_MAX", "500"))
+LOG_FLUSH_SECONDS  = float(os.getenv("LOG_FLUSH_SECONDS", "2"))
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+# Por encima de esto una petición se considera lenta y se registra. El arranque en frío
+# de Fly ya se lleva unos segundos, así que el umbral va holgado para no marcar como
+# problema lo que solo es la máquina despertándose.
+LOG_SLOW_MS        = float(os.getenv("LOG_SLOW_MS", "8000"))
+
+NIVELES_LOG = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+# "MÉTODO /ruta" de la petición que se está atendiendo, para poder responder a "¿y esto
+# dónde reventó?" sin tener que deducirlo del texto del mensaje. Lo rellena el
+# middleware; fuera de una petición (hilo de volcado, arranque) se queda vacío.
+_peticion_actual: contextvars.ContextVar[str] = contextvars.ContextVar("peticion_actual", default="")
+
+
+class RegistroSupabase(logging.Handler):
+    """Handler que encola los registros y los escribe en app_logs desde otro hilo."""
+
+    def __init__(self, nivel: int):
+        super().__init__(level=nivel)
+        self._cola: deque = deque(maxlen=LOG_QUEUE_MAX)
+        self._lock = threading.Lock()
+        self._descartados = 0
+        self._purgado = False
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            fila = {
+                "level": record.levelname,
+                "source": record.name,
+                # format() y no getMessage(): así el traceback de logger.exception()
+                # queda guardado, que es justo lo que hace falta para diagnosticar.
+                "message": self.format(record)[:8000],
+                "created_at": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+                "context": {
+                    "origen": f"{record.module}:{record.lineno}",
+                    "peticion": _peticion_actual.get(""),
+                },
+            }
+        except Exception:   # noqa: BLE001 — un fallo formateando no puede propagarse
+            return
+        with self._lock:
+            if len(self._cola) == LOG_QUEUE_MAX:
+                self._descartados += 1
+            self._cola.append(fila)
+
+    def _tomar_lote(self) -> list:
+        with self._lock:
+            if not self._cola:
+                return []
+            lote = list(self._cola)
+            self._cola.clear()
+            descartados, self._descartados = self._descartados, 0
+        if descartados:
+            lote.append({
+                "level": "WARNING",
+                "source": logger.name,
+                "message": f"Se descartaron {descartados} entradas de registro: la cola se llenó "
+                           f"(LOG_QUEUE_MAX={LOG_QUEUE_MAX})",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "context": {"origen": "registro", "peticion": ""},
+            })
+        return lote
+
+    def volcar(self):
+        """Escribe lo encolado. Best-effort: nunca lanza."""
+        lote = self._tomar_lote()
+        if not lote:
+            return
+        try:
+            r = http.post(
+                f"{SUPABASE_URL}/rest/v1/app_logs",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json=lote,
+            )
+            if r.status_code >= 300:
+                print(f"[registro] no se pudo escribir en app_logs ({r.status_code})", file=sys.stderr)
+                return
+        except Exception as e:   # noqa: BLE001 — red caída, Supabase fuera... da igual
+            print(f"[registro] fallo escribiendo en app_logs: {e}", file=sys.stderr)
+            return
+        # Purga de lo viejo una sola vez por proceso. Fly arranca en frío a menudo, así
+        # que sale gratis y evita añadir un cron solo para esto.
+        if not self._purgado:
+            self._purgado = True
+            self._purgar()
+
+    def _purgar(self):
+        corte = (datetime.now(timezone.utc) - timedelta(days=LOG_RETENTION_DAYS)).isoformat()
+        try:
+            http.delete(
+                f"{SUPABASE_URL}/rest/v1/app_logs?created_at=lt.{quote(corte, safe='')}",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+            )
+        except Exception as e:   # noqa: BLE001 — la purga es mantenimiento, no crítica
+            print(f"[registro] fallo purgando app_logs: {e}", file=sys.stderr)
+
+
+_registro = RegistroSupabase(getattr(logging, LOG_PERSIST_LEVEL, logging.WARNING))
+
+
+def _bucle_de_volcado():
+    while True:
+        time.sleep(LOG_FLUSH_SECONDS)
+        _registro.volcar()
+
+
+def activar_registro_persistente():
+    """Engancha el handler y arranca el hilo de volcado. Idempotente."""
+    if _registro in logger.handlers:
+        return
+    logger.addHandler(_registro)
+    threading.Thread(target=_bucle_de_volcado, daemon=True, name="volcado-registro").start()
+    # Fly duerme la máquina en cuanto deja de haber tráfico: sin esto, lo encolado en los
+    # últimos LOG_FLUSH_SECONDS —justo lo que pasó antes de que todo se parase— se pierde.
+    atexit.register(_registro.volcar)
+
+
+if LOG_PERSIST and SUPABASE_URL:
+    activar_registro_persistente()
+
+
+@app.middleware("http")
+async def registrar_peticiones(request: Request, call_next):
+    """Deja constancia de lo que falla o va lento, sin depender de que cada endpoint se
+    acuerde de registrarlo. Es la mitad de "logs para todo" que no se puede escribir a
+    mano en 60 endpoints."""
+    # La ruta va SIN query string a propósito: por ahí viajan HEALTH_INGEST_TOKEN y
+    # HA_POLL_TOKEN (soportado por compatibilidad), y no pueden acabar en una tabla.
+    ruta = f"{request.method} {request.url.path}"
+    marca = _peticion_actual.set(ruta)
+    inicio = time.monotonic()
+    try:
+        respuesta = await call_next(request)
+        ms = (time.monotonic() - inicio) * 1000
+        if respuesta.status_code >= 500:
+            logger.error("%s → %d (%.0f ms)", ruta, respuesta.status_code, ms)
+        # El 401 se queda fuera: es el JWT caducando, que el frontend ya resuelve solo
+        # mandando al login. El 403 SÍ entra — es un token de servicio que no cuadra,
+        # o sea una integración (Watch, HA, Shortcut) que ha dejado de entrar.
+        elif respuesta.status_code >= 400 and respuesta.status_code != 401:
+            logger.warning("%s → %d (%.0f ms)", ruta, respuesta.status_code, ms)
+        elif ms > LOG_SLOW_MS:
+            logger.warning("%s tardó %.0f ms", ruta, ms)
+        return respuesta
+    except Exception:
+        logger.exception("%s: excepción no controlada", ruta)
+        raise
+    finally:
+        _peticion_actual.reset(marca)
+
 
 # ── Seguridad: rate limiting del login ────────────────────────────────────────
 LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
@@ -1405,9 +1580,17 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     if alud_url is not None and not alud_url_permitida(alud_url):
         raise HTTPException(status_code=400, detail="alud_url no permitida")
     payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
+    # `on_conflict=dedupe_key` es obligatorio (mismo motivo que en la ingesta de salud):
+    # sin él PostgREST resuelve el conflicto contra la clave primaria, que aquí es `id`
+    # —uuid nuevo en cada inserción, nunca colisiona—, así que la clave repetida acababa
+    # en el índice único y Supabase devolvía un 409 que salía como 502. El camino de
+    # "ya existe" de más abajo era, en la práctica, inalcanzable.
+    # Y la resolución es `ignore-duplicates`, no `merge-duplicates`: si ya hay un job con
+    # esa clave lo que queremos es devolverlo tal cual, no pisarle el payload — puede
+    # estar ya en claimed/running y el agente trabajando sobre lo que leyó.
     r = http.post(
-        f"{SUPABASE_URL}/rest/v1/jobs",
-        headers={**supabase_headers(), "Prefer": "return=representation,resolution=merge-duplicates"},
+        f"{SUPABASE_URL}/rest/v1/jobs?on_conflict=dedupe_key",
+        headers={**supabase_headers(), "Prefer": "return=representation,resolution=ignore-duplicates"},
         json=payload,
     )
     if r.status_code >= 300:
@@ -1415,7 +1598,7 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     data = r.json()
     if data:
         return {"ok": True, "job": data[0]}
-    # Conflicto de dedupe: el upsert no devolvió filas — recuperar el job existente.
+    # Conflicto de dedupe: el insert no devolvió filas — recuperar el job existente.
     # quote() obligatorio: la clave lleva el título del evento, y un '&' abriría un
     # parámetro nuevo mientras que un '#' convertiría el resto en fragmento (que ni
     # siquiera se envía al servidor, perdiendo también el &limit=1).
@@ -2705,3 +2888,56 @@ def send_brief(request: Request, token: str = ""):
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     logger.info("Resumen diario enviado a %s (%s)", BRIEF_TO, datos["fecha"])
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
+
+
+# ── REGISTRO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────────────
+
+@app.get("/logs")
+def get_logs(
+    nivel: str = "",
+    dias: int = 7,
+    limite: int = 100,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Últimas entradas de app_logs, para el panel de estado del sistema."""
+    if limite < 1 or limite > 500:
+        raise HTTPException(status_code=400, detail="limite debe estar entre 1 y 500")
+    if dias < 1 or dias > 90:
+        raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 90")
+    # `nivel` se interpola en la URL de Supabase (invariante 6): lista blanca, no regex.
+    filtro = ""
+    if nivel:
+        if nivel.upper() not in NIVELES_LOG:
+            raise HTTPException(status_code=400, detail="nivel inválido")
+        filtro = f"&level=eq.{nivel.upper()}"
+    # Volcado inmediato: sin esto, lo que acaba de fallar todavía está en la cola en
+    # memoria y el panel lo enseñaría hasta LOG_FLUSH_SECONDS más tarde — justo cuando
+    # abres el panel PORQUE algo acaba de fallar.
+    _registro.volcar()
+    desde = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/app_logs"
+        f"?created_at=gte.{quote(desde, safe='')}{filtro}"
+        f"&select=created_at,level,source,message,context"
+        f"&order=created_at.desc&limit={limite}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    entradas = r.json()
+    return {
+        "entradas": entradas,
+        "errores": sum(1 for e in entradas if e.get("level") in ("ERROR", "CRITICAL")),
+    }
+
+
+@app.delete("/logs")
+def borrar_logs(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Vacía el registro. Para dejarlo limpio y ver si un problema se reproduce."""
+    r = http.delete(
+        f"{SUPABASE_URL}/rest/v1/app_logs?id=not.is.null",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
