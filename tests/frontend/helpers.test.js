@@ -5,7 +5,8 @@ import {
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
-  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
+  healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
+  wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   formatMoney, clothingTotals,
 } from "../../src/lib/helpers";
 
@@ -676,5 +677,115 @@ describe("correlaciones entre series", () => {
       sleep_analysis:           [{ date: dia(2), value: 7.5, extra: { deep: 1.2 } }],
     }, AHORA);
     expect(c.filter(x => x.domain === "Patrón")).toEqual([]);
+  });
+});
+
+// ── Correlaciones sobre ventana larga (idea 14) ────────────────────────────────
+// Mismo motor que alimenta los patrones de healthConclusions, pero pensado para
+// correr sobre meses de datos y no sobre 30 días. Lo que se prueba aquí es que la
+// exigencia de muestra escala: con minPorGrupo alto, un patrón sostenido por pocos
+// días deja de contarse.
+describe("healthCorrelations", () => {
+  const d = n => new Date(Date.UTC(2026, 0, n)).toISOString().slice(0, 10);
+
+  // Construye n días alternando "mucho / poco" en la causa, con el efecto al día
+  // siguiente correlacionado.
+  function series(n, { causaAlta, causaBaja, efectoAlto, efectoBajo }) {
+    const causa = [], efecto = [];
+    for (let i = 0; i < n; i++) {
+      const alto = i % 2 === 0;
+      causa.push({ date: d(1 + i), value: alto ? causaAlta : causaBaja });
+      efecto.push({ date: d(2 + i), value: alto ? efectoAlto : efectoBajo });
+    }
+    return { causa, efecto };
+  }
+
+  test("saca el patrón de pasos ↔ sueño con muestra suficiente", () => {
+    const { causa, efecto } = series(40, {
+      causaAlta: 14000, causaBaja: 3000, efectoAlto: 8.2, efectoBajo: 6.4,
+    });
+    const r = healthCorrelations(
+      { step_count: causa, sleep_analysis: efecto.map(x => ({ ...x, extra: {} })) },
+      { minPorGrupo: 10 },
+    );
+    const p = r.find(x => x.id === "pasos_sueno");
+    expect(p).toBeTruthy();
+    expect(p.n).toBeGreaterThanOrEqual(20);
+    expect(p.text).toMatch(/duermes/);
+  });
+
+  test("con minPorGrupo alto, un patrón de pocos días deja de contarse", () => {
+    // 8 días dan 4 y 4: suficiente para el mínimo de 3, insuficiente para 10.
+    const { causa, efecto } = series(8, {
+      causaAlta: 14000, causaBaja: 3000, efectoAlto: 8.2, efectoBajo: 6.4,
+    });
+    const datos = { step_count: causa, sleep_analysis: efecto.map(x => ({ ...x, extra: {} })) };
+    expect(healthCorrelations(datos, { minPorGrupo: 3 }).some(x => x.id === "pasos_sueno")).toBe(true);
+    expect(healthCorrelations(datos, { minPorGrupo: 10 }).some(x => x.id === "pasos_sueno")).toBe(false);
+  });
+
+  test("ordena por fuerza del efecto, no por orden del catálogo", () => {
+    // Dos cruces a la vez: luz↔HRV con un efecto enorme y pasos↔FC con uno pequeño.
+    const luz = [], hrv = [], pasos = [], rhr = [];
+    for (let i = 0; i < 40; i++) {
+      const alto = i % 2 === 0;
+      luz.push({ date: d(1 + i), value: alto ? 150 : 5 });
+      hrv.push({ date: d(2 + i), value: alto ? 90 : 45 });        // +100%
+      pasos.push({ date: d(1 + i), value: alto ? 12000 : 4000 });
+      rhr.push({ date: d(2 + i), value: alto ? 58 : 55 });        // ~+5%
+    }
+    const r = healthCorrelations(
+      { time_in_daylight: luz, heart_rate_variability: hrv, step_count: pasos, resting_heart_rate: rhr },
+      { minPorGrupo: 10 },
+    );
+    const ids = r.map(x => x.id);
+    expect(ids.indexOf("luz_hrv")).toBeLessThan(ids.indexOf("pasos_rhr"));
+    expect(Math.abs(r[0].deltaPct)).toBeGreaterThanOrEqual(Math.abs(r[r.length - 1].deltaPct));
+  });
+
+  test("descarta los efectos por debajo del umbral de cada cruce", () => {
+    // Diferencia de sueño mínima (7.0 vs 7.05): no llega al 5% que exige el cruce.
+    const { causa, efecto } = series(40, {
+      causaAlta: 14000, causaBaja: 3000, efectoAlto: 7.05, efectoBajo: 7.0,
+    });
+    const r = healthCorrelations(
+      { step_count: causa, sleep_analysis: efecto.map(x => ({ ...x, extra: {} })) },
+      { minPorGrupo: 10 },
+    );
+    expect(r.some(x => x.id === "pasos_sueno")).toBe(false);
+  });
+
+  test("cruza sueño ↔ HRV del día siguiente", () => {
+    const { causa, efecto } = series(40, {
+      causaAlta: 8.5, causaBaja: 5.5, efectoAlto: 72, efectoBajo: 48,
+    });
+    const r = healthCorrelations(
+      { sleep_analysis: causa.map(x => ({ ...x, extra: {} })), heart_rate_variability: efecto },
+      { minPorGrupo: 10 },
+    );
+    const p = r.find(x => x.id === "sueno_hrv");
+    expect(p).toBeTruthy();
+    expect(p.text).toMatch(/HRV del día siguiente/);
+  });
+
+  test("sin datos devuelve lista vacía en vez de reventar", () => {
+    expect(healthCorrelations({})).toEqual([]);
+    expect(healthCorrelations(null)).toEqual([]);
+  });
+});
+
+describe("healthCoverageDays", () => {
+  test("cuenta días distintos, no filas", () => {
+    const datos = {
+      // La misma fecha en dos series cuenta una sola vez
+      step_count:     [{ date: "2026-01-01", value: 1 }, { date: "2026-01-02", value: 2 }],
+      sleep_analysis: [{ date: "2026-01-02", value: 7 }, { date: "2026-01-03", value: 8 }],
+    };
+    expect(healthCoverageDays(datos)).toBe(3);
+  });
+
+  test("sin datos devuelve 0", () => {
+    expect(healthCoverageDays(null)).toBe(0);
+    expect(healthCoverageDays({})).toBe(0);
   });
 });

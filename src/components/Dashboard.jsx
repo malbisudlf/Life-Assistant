@@ -4,7 +4,8 @@ import {
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
-  healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
+  healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
+  wellnessBreakdown, scoreFromBreakdown,
   wellnessHistory, seriesTrend, trendDirection,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
 } from "../lib/helpers";
@@ -25,6 +26,14 @@ const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avis
 // poll_pending_job en agent/agent.py), así que pasado ese punto no lo va a recoger
 // nadie y seguir preguntando no aporta nada.
 const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
+
+// Ventana del panel de patrones. Es el máximo que acepta /health/metrics: los cruces
+// entre series ganan mucho con meses de respaldo — con 30 días un grupo de 3 noches
+// ya cuenta como "hallazgo" y suele ser casualidad.
+const HEALTH_DIAS_PATRONES = 365;
+// Muestra mínima por grupo en la ventana larga. Muy por encima del 3 que usan las
+// conclusiones del día a día, justamente porque aquí sí hay datos de sobra.
+const HEALTH_MIN_MUESTRA_PATRONES = 10;
 
 // Cabeceras de una llamada autenticada. El token se lee en el momento y no se captura
 // en un closure: si la sesión se renueva a mitad de una pantalla, la siguiente llamada
@@ -700,6 +709,10 @@ export default function Dashboard() {
   const [sysLoading, setSysLoading]       = useState(false);
   const [logsAbiertos, setLogsAbiertos]   = useState(false);  // registro del backend, plegado por defecto
   const [healthModalOpen, setHealthModalOpen] = useState(false);
+  // Histórico largo, solo para el panel de patrones del modal (ver efecto de carga).
+  const [healthLargo, setHealthLargo]         = useState(null);
+  const [healthLargoFallo, setHealthLargoFallo] = useState(false);
+  const healthLargoPedido                     = useRef(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
   const [orientation, setOrientation]     = useState(() =>
@@ -931,6 +944,22 @@ export default function Dashboard() {
       .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
       .catch(() => setHealthLoading(false));
   }, [token]);
+
+  // Histórico largo para el panel de patrones. Se pide APARTE y solo al abrir el
+  // modal, no en la carga inicial: un año de métricas es bastante más payload que 30
+  // días y no hace falta para pintar el dashboard. Se pide una sola vez por sesión.
+  //
+  // El guard de "ya pedido" va en un ref y no en un estado a propósito: marcarlo con
+  // setState obligaría a llamarlo en el cuerpo del efecto, que es justo lo que
+  // prohíbe react-hooks. El estado de carga se deriva más abajo, no se guarda.
+  useEffect(() => {
+    if (!token || !healthModalOpen || healthLargoPedido.current) return;
+    healthLargoPedido.current = true;
+    apiFetch(`${API}/health/metrics?days=${HEALTH_DIAS_PATRONES}`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(data => setHealthLargo(data.metrics || {}))
+      .catch(() => setHealthLargoFallo(true));
+  }, [token, healthModalOpen]);
 
   // Cargar ideas
   useEffect(() => {
@@ -1884,6 +1913,13 @@ export default function Dashboard() {
   // veces por render; ahora una vez por cambio de datos y compartido.
   const conclusionesSalud = useMemo(() => healthConclusions(healthData), [healthData]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
+  // Patrones sobre el histórico largo: mismas fórmulas que las conclusiones, pero
+  // exigiendo mucha más muestra por grupo (ver HEALTH_MIN_MUESTRA_PATRONES).
+  const patronesLargos = useMemo(
+    () => (healthLargo ? healthCorrelations(healthLargo, { minPorGrupo: HEALTH_MIN_MUESTRA_PATRONES }) : []),
+    [healthLargo],
+  );
+  const diasPatrones = useMemo(() => healthCoverageDays(healthLargo), [healthLargo]);
 
   // Histórico de la puntuación diaria de bienestar, reconstruido de las mismas series
   // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
@@ -4135,6 +4171,47 @@ export default function Dashboard() {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  {/* ── Patrones sobre el histórico largo ── */}
+                  {/* Se separan de las conclusiones de arriba a propósito: aquellas
+                      miran los últimos 30 días, estas hasta un año. Al llevar la
+                      ventana y la muestra escritas, se ve de un vistazo cuánto
+                      respaldo tiene cada patrón. */}
+                  <div style={{ borderTop: "0.5px solid var(--border)", paddingTop: 18, marginBottom: 22 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12, gap: 10 }}>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Patrones a largo plazo</div>
+                      {diasPatrones > 0 && (
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10.5, color: "var(--muted2)" }}>
+                          {diasPatrones} días de datos
+                        </div>
+                      )}
+                    </div>
+                    {!healthLargo && !healthLargoFallo ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>Analizando el histórico…</div>
+                    ) : healthLargoFallo ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>No se pudo cargar el histórico largo.</div>
+                    ) : patronesLargos.length === 0 ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+                        Todavía no hay un patrón que aguante con el histórico entero. Hacen falta
+                        al menos {HEALTH_MIN_MUESTRA_PATRONES} días en cada lado de la comparación
+                        para que no sea casualidad.
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        {patronesLargos.map(p => (
+                          <div key={p.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                            <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot[p.tone], marginTop: 6, flexShrink: 0 }} />
+                            <span style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.5 }}>
+                              {p.text}{" "}
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", whiteSpace: "nowrap" }}>
+                                n={p.n}
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* ── Detalle: reutiliza los widgets de salud existentes ── */}

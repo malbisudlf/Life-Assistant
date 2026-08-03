@@ -18,4 +18,13 @@ export default defineConfig([
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
   },
+  {
+    // La config de Playwright y los tests E2E corren en Node, no en el navegador:
+    // usan `process` para distinguir CI. El código de dentro de page.evaluate() sí es
+    // de navegador, así que aquí hacen falta los dos conjuntos de globales.
+    files: ['playwright.config.js', 'tests/e2e/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.browser, ...globals.node },
+    },
+  },
 ])
