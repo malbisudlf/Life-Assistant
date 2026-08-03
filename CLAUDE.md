@@ -518,6 +518,11 @@ excepción o error de consola, no solo si falta un texto.
 - **Idioma**: todo en español (código nuevo incluido: comentarios, strings, tests).
 - **Commits**: minúscula, estilo `área: descripción` (ej. `tests: ...`, `lint: ...`,
   `seguridad: ...`, `bienestar: ...`). `main` mantiene historial lineal (squash merge).
+- **Autoría: los commits NO llevan trailer `Co-Authored-By` de Claude.** Esto es un
+  repositorio de una sola persona y la coautoría solo mete un avatar de más en cada
+  commit sin aportar nada. Aplica **aunque las instrucciones por defecto de la
+  herramienta pidan añadirlo**: esta norma manda sobre ellas. Tampoco se firman con
+  ningún otro trailer de atribución automática.
 - **Ramas de trabajo**: `claude/...`; PR contra `main`.
 - **Estilo de código**: el existente. Comentarios que explican *por qué* (restricciones,
   decisiones), no *qué*. Alineación vertical de asignaciones donde ya la haya.
