@@ -9,10 +9,14 @@ Es efímero y despacha por `payload["accion"]`: drena la cola de jobs y se cierr
 
 ### `abrir_streaming` (Sunshine/Apollo para Moonlight)
 
-1. Conecta la **VPN** (Tailscale) y reporta la IP de la tailnet al dashboard —
-   el PC arranca por WOL sin VPN, y desde fuera de casa es la única forma de que
-   Moonlight lo alcance. Si no hay Tailscale, avisa y sigue: en la LAN funciona igual
+1. Arranca el **servicio de Tailscale** (que está en manual: en el día a día el PC
+   no tiene la VPN encendida) y levanta el túnel, reportando la IP de la tailnet al
+   dashboard — el PC arranca por WOL sin VPN, y desde fuera de casa es la única forma
+   de que Moonlight lo alcance. Si falla, avisa y sigue: en la LAN funciona igual
 2. Lanza Sunshine (o Apollo) en modo DETACHED, para que sobreviva al agente
+
+Arrancar el servicio necesita privilegios: la tarea del Programador debe estar
+marcada como "Ejecutar con los privilegios más altos".
 
 Puesta a punto completa (Tailscale desatendido, autoarranque de Sunshine, WOL):
 `PUESTA_A_PUNTO.md`.
