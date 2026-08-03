@@ -250,6 +250,12 @@ Ficheros clave:
   (`resolver_alud`, `abrir_streaming`). Compatibilidad: jobs sin `accion` pero con
   `alud_url` → `resolver_alud`. `resolver_accion()` + guard `attempted` (cada job se
   intenta una vez por ejecución para no repetir en bucle si falla el claim por red).
+  `abrir_streaming` **levanta la VPN antes de lanzar Sunshine** (`conectar_vpn()`,
+  Tailscale): el PC lo enciende un WOL sin nadie delante, así que el túnel no está
+  arriba y desde fuera de casa Moonlight no llega. La IP de la tailnet viaja al modal
+  en el mensaje del stage `vpn_ready`, de donde la saca `hostStreaming()` (helpers) —
+  no se guarda en ningún sitio. Un fallo de VPN **no tumba el job**: se reporta
+  `vpn_error` y se abre Sunshine igual, que en la LAN sigue sirviendo.
 - **Clima**: `/weather` (Open-Meteo, gratis, sin API key) usa `WEATHER_LAT/LON`, o las
   coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
   cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la

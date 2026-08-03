@@ -8,6 +8,7 @@ import {
   wellnessBreakdown, scoreFromBreakdown,
   wellnessHistory, seriesTrend, trendDirection,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
+  hostStreaming,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -430,6 +431,9 @@ const STAGE_LABELS = {
   "enunciado_extracted":  "Enunciado extraído",
   "solver_started":       "Cowork iniciado",
   "result_saved":         "Instrucción enviada",
+  "vpn_connecting":       "Conectando la VPN",
+  "vpn_ready":            "VPN conectada",
+  "vpn_error":            "VPN no disponible",
   "streaming_starting":   "Lanzando Sunshine",
   "streaming_ready":      "Sunshine listo — abre Moonlight",
   "job_done":             "Completado",
@@ -1862,6 +1866,8 @@ export default function Dashboard() {
 
   const maxStage = jobEvents.reduce((max, ev) => Math.max(max, STAGE_INDEX.get(ev.stage) ?? -1), -1);
   const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
+  // IP de la VPN para meterla en Moonlight cuando no estás en casa.
+  const ipMoonlight = hostStreaming(jobEvents);
 
   // Derivados
   const todayEvents = allEvents
@@ -3925,6 +3931,15 @@ export default function Dashboard() {
                 }}>
                   {JOB_STATUS_LABEL[jobStatus] || jobStatus || "—"}
                 </div>
+                {ipMoonlight && (
+                  <div style={{
+                    marginBottom: 12, padding: "8px 10px", borderRadius: 8,
+                    background: "rgba(106,170,130,0.1)", border: "0.5px solid rgba(106,170,130,0.3)",
+                  }}>
+                    <div style={{ fontSize: 10, color: "var(--muted2)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Host para Moonlight</div>
+                    <div style={{ fontSize: 15, fontFamily: "monospace", color: "var(--green)", marginTop: 2 }}>{ipMoonlight}</div>
+                  </div>
+                )}
                 <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 140, overflowY: "auto" }}>
                   {jobEvents.length === 0
                     ? <span style={{ color: "var(--muted2)", animation: "pulse 1.5s infinite", display: "inline-block" }}>El PC se está encendiendo... el agente arrancará con Windows.</span>
