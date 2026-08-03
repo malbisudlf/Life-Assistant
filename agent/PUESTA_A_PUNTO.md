@@ -37,9 +37,9 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
 
 ## 2. Instalar el host de streaming (Sunshine o Apollo)
 
-- [ ] Instalar **Sunshine** en el PC — o **Apollo**, su fork, si quieres pantalla
-      virtual sin monitor conectado (el agente detecta los dos: mismo ejecutable,
-      `C:\Program Files\Apollo\sunshine.exe`).
+- [ ] Instalar **Sunshine** en el PC. (El agente también detecta **Apollo**, su fork:
+      mismo ejecutable en `C:\Program Files\Apollo\sunshine.exe`. Con un monitor
+      físico siempre conectado no hace falta — su ventaja es la pantalla virtual.)
 - [ ] **Desactivar su autoarranque**: Servicios de Windows → `SunshineService` → tipo de
       inicio **Manual**. Lo único residente debe ser el agente; Sunshine lo lanza el
       agente bajo demanda.

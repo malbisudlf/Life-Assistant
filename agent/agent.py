@@ -65,9 +65,8 @@ EDGE_EXE = next((p for p in _EDGE_PATHS if os.path.exists(p)), None)
 # ── Host de streaming (Sunshine o Apollo) ──────────────────────────────────────
 # NO arranca solo con Windows (su autoarranque se desactiva a propósito): lo ÚNICO
 # residente es este agente, que lo lanza bajo demanda cuando llega un job de
-# streaming. Se busca también Apollo (fork de Sunshine, mismo nombre de ejecutable)
-# porque el flujo de aquí es headless: el PC despierta por WOL, sin monitor delante,
-# y Apollo levanta una pantalla virtual sin necesidad de un dummy HDMI.
+# streaming. El host es Sunshine; se busca también Apollo (fork con el mismo nombre
+# de ejecutable) para no atarse a uno de los dos si algún día se cambia.
 _SUNSHINE_PATHS = [
     r"C:\Program Files\Apollo\sunshine.exe",
     r"C:\Program Files\Sunshine\sunshine.exe",
