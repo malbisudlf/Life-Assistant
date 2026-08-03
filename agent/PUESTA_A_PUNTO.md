@@ -54,16 +54,23 @@ para Home Assistant y el móvil lo ve como si estuvierais en la misma LAN.
 
 El problema que resuelve el agente: **el PC arranca sin VPN**. Lo enciende un WOL, no
 hay nadie delante iniciando sesión, y el túnel puede quedarse abajo. Por eso el job de
-streaming ahora **levanta Tailscale antes de lanzar Sunshine** y reporta la IP de la
-tailnet al modal del dashboard — esa es la que metes en Moonlight.
+streaming **arranca el servicio de Tailscale y levanta el túnel antes de lanzar
+Sunshine**, y reporta la IP de la tailnet al modal del dashboard — esa es la que metes
+en Moonlight.
+
+Mismo criterio que con Sunshine: **Tailscale queda apagado en el día a día** (servicio
+en manual, sin icono en la bandeja) y solo se enciende cuando pides streaming. Si
+prefieres tenerlo siempre conectado, deja el servicio en automático y salta los dos
+pasos marcados como *(apagado en el día a día)*: el agente lo detecta corriendo y no
+toca nada.
 
 - [ ] Instalar **Tailscale** en el PC e iniciar sesión con tu cuenta (una vez, a mano).
-- [ ] Dejarlo en modo desatendido — es lo que hace que el túnel sobreviva al arranque
-      sin sesión: en el icono de la bandeja, **"Run unattended"**, o por consola:
+- [ ] Dejarlo en modo desatendido — es lo que hace que el túnel suba sin nadie con
+      sesión iniciada, que es justo el escenario tras un WOL:
       ```
       tailscale up --unattended
       ```
-      Sin esto, tras el WOL el PC no aparece en la tailnet y Moonlight no lo encuentra.
+      Sin esto, el nodo no aparece en la tailnet y Moonlight no lo encuentra.
 - [ ] En la [consola de administración](https://login.tailscale.com/admin/machines),
       **desactivar la caducidad de la clave** (*Disable key expiry*) para esta máquina.
       Si no, cada ~6 meses el nodo pide login otra vez y el streaming deja de funcionar
@@ -71,6 +78,12 @@ tailnet al modal del dashboard — esa es la que metes en Moonlight.
 - [ ] Anotar la IP del PC en la tailnet (`tailscale ip -4`, una `100.x.y.z`): es fija.
 - [ ] Comprobar desde el móvil (con Tailscale activo): `ping` o abrir
       `https://100.x.y.z:47990` (la web de Sunshine, con Sunshine arrancado).
+- [ ] *(apagado en el día a día)* Servicios de Windows → servicio **`Tailscale`** →
+      tipo de inicio **Manual**. El agente lo arranca cuando hace falta.
+      Si tu servicio se llama de otra forma, ponlo en `TAILSCALE_SERVICIO`.
+- [ ] *(apagado en el día a día)* Quitar el icono de bandeja del arranque:
+      Administrador de tareas → pestaña **Inicio** → deshabilitar **Tailscale IPN**.
+      El túnel no lo necesita, solo la interfaz gráfica.
 
 > Si el agente no encuentra Tailscale instalado **no falla el job**: lanza Sunshine
 > igual y el streaming funciona en la LAN de casa. En el modal verás el aviso
@@ -93,7 +106,9 @@ tailnet al modal del dashboard — esa es la que metes en Moonlight.
       pyautogui ni la captura de pantalla de Sunshine.
 - [ ] **Task Scheduler** → tarea `LifeAssistantAgent`, disparador **"Al iniciar sesión"**,
       acción: `python.exe` con `agent.py`. Marcar "Ejecutar solo cuando el usuario haya
-      iniciado sesión".
+      iniciado sesión" y **"Ejecutar con los privilegios más altos"**: sin eso el agente
+      no puede arrancar el servicio de Tailscale (y lo dirá en el modal). Marcada, la
+      tarea no lanza aviso de UAC.
 - [ ] Confirmar que **WOL está habilitado** en BIOS y en la tarjeta de red (ya lo estaba
       para el flujo de Alud).
 
@@ -184,7 +199,7 @@ automation:
 ## 9. Prueba end-to-end
 
 - [ ] **En casa, PC apagado** → pulsar "Abrir streaming" en el móvil → el PC se enciende
-      (WOL) → el agente arranca → conecta la VPN → lanza Sunshine → el modal llega a
+      (WOL) → el agente arranca → arranca Tailscale y conecta → lanza Sunshine → el modal llega a
       "Sunshine listo" y muestra el **host para Moonlight** (la IP `100.x.y.z`).
 - [ ] Abrir **Moonlight** y conectar a esa IP.
 - [ ] **Fuera de casa** (datos móviles, con Tailscale activo en el móvil): repetir. Es la
@@ -196,8 +211,10 @@ automation:
 
 - **Auto-login obligatorio**: sin sesión activa tras el WOL, ni el agente ni Sunshine
   capturan pantalla.
-- **Tailscale en modo desatendido**: sin `--unattended` el túnel no sobrevive al arranque
-  sin sesión y el agente se quedará esperando hasta rendirse (`VPN_TIMEOUT`).
+- **Tailscale en modo desatendido**: sin `--unattended` el túnel no sube sin sesión
+  iniciada y el agente se quedará esperando hasta rendirse (`VPN_TIMEOUT`).
+- **Tarea del agente con privilegios elevados**: es lo que le permite arrancar el
+  servicio de Tailscale, que está en manual justo para no tenerlo encendido siempre.
 - **Sunshine con autoarranque OFF**: si lo dejas en automático, se pierde el sentido de
   "solo el agente residente".
 - **SSH solo por clave y en red local/VPN**: no expongas el puerto a internet.
