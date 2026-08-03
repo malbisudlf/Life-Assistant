@@ -48,20 +48,32 @@ export default defineConfig({
   ],
 
   // Playwright arranca y espera a los dos servidores, y los apaga al terminar.
+  // `stdout/stderr: 'pipe'` para que su salida acabe en el log: sin esto, un servidor
+  // que no arranca solo deja un "Timed out waiting from config.webServer" sin motivo.
   webServer: [
     {
       command: `python tests/e2e/servidor_pruebas.py ${PUERTO_API}`,
       url: `${URL_API}/`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
     },
     {
       // VITE_API_URL se hornea en el bundle, así que hay que construir apuntando ya
       // al backend de pruebas; no vale ponerlo solo al servir.
-      command: `VITE_API_URL=${URL_API} npm run build && npm run preview -- --port ${PUERTO_WEB} --strictPort`,
+      //
+      // --host 127.0.0.1 explícito: por defecto `vite preview` escucha en `localhost`,
+      // que en los runners de CI puede resolver a ::1 mientras Playwright sondea la
+      // 127.0.0.1 — y entonces el servidor está vivo pero nadie lo encuentra.
+      command: `VITE_API_URL=${URL_API} npm run build && npm run preview -- --host 127.0.0.1 --port ${PUERTO_WEB} --strictPort`,
       url: `http://127.0.0.1:${PUERTO_WEB}`,
       reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
+      // Holgado a propósito: aquí dentro entra un build de producción completo, y un
+      // runner frío tarda bastante más que una máquina de desarrollo.
+      timeout: 180_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
     },
   ],
 })
