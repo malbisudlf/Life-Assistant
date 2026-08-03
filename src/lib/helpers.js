@@ -56,6 +56,18 @@ export function isoToDdMmYyyy(iso) {
   return `${d}/${m}/${y}`;
 }
 
+// Marca de tiempo de una entrada del registro del backend, en hora local. Lo de hoy
+// solo lleva la hora: lo que se busca casi siempre es "¿y esto cuándo ha sido?", y las
+// entradas van ordenadas de más reciente a más antigua.
+export function formatLogTime(iso, ahora = new Date()) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const hora = `${formatTime(d)}:${String(d.getSeconds()).padStart(2, "0")}`;
+  if (d.toDateString() === ahora.toDateString()) return hora;
+  return `${d.getDate()} ${MONTHS_ES[d.getMonth()].slice(0, 3)} ${hora}`;
+}
+
 // ── Salud ────────────────────────────────────────────────────────
 export function hoursToHM(h) {
   if (h == null || isNaN(h)) return "—";

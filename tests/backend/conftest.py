@@ -17,6 +17,11 @@ os.environ.setdefault("HA_POLL_TOKEN", "ha-poll-token")
 os.environ.setdefault("HEALTH_INGEST_TOKEN", "health-token")
 os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 os.environ.setdefault("BRIEF_TOKEN", "brief-token")
+# El registro persistente escribe en Supabase desde un hilo de fondo. Encendido en los
+# tests, ese hilo colaría POSTs a app_logs en el MockRouter de cualquier test que además
+# registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los
+# tests del registro llaman a _registro.volcar() a mano, que es lo que hace el hilo.
+os.environ.setdefault("LOG_PERSIST", "0")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -93,6 +98,12 @@ def _limpiar_estado():
     main._agent_relaunch_pending = False
     main._pc_power_action = None
     main._token_cache = None
+    # El middleware registra todo 4xx/5xx, así que la cola arrastraría entradas de un
+    # test al siguiente. `_purgado` también se resetea: es "una purga por proceso".
+    with main._registro._lock:
+        main._registro._cola.clear()
+        main._registro._descartados = 0
+    main._registro._purgado = False
 
 
 @pytest.fixture(autouse=True)

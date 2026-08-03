@@ -48,8 +48,12 @@ create index if not exists training_payments_client_idx on public.training_payme
 alter table public.training_payments enable row level security;
 
 -- Métricas de salud (Apple Watch via Health Auto Export / iOS Shortcuts).
--- La unicidad (metric_date, metric_name) es la que produce el 409 que el backend
--- resuelve con PATCH (patrón POST → si 409, PATCH). No la quites.
+-- La unicidad (metric_date, metric_name) es la que hace idempotente la ingesta: es el
+-- destino del upsert del backend, que la nombra con `?on_conflict=metric_date,
+-- metric_name`. No la quites, y no quites tampoco ese parámetro de las URLs: sin él
+-- PostgREST resuelve el conflicto contra la clave primaria (`id`, uuid nuevo en cada
+-- inserción, que no colisiona nunca) y toda fila repetida acaba en un 409 que tumba el
+-- lote entero.
 create table if not exists public.health_metrics (
   id          uuid primary key default gen_random_uuid(),
   metric_date date not null,

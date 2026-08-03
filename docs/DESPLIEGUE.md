@@ -26,8 +26,8 @@ solo usuario).
 1. Crea un proyecto nuevo.
 2. En **SQL Editor**, ejecuta los ficheros de `supabase/migrations/` **en orden
    cronológico** (el nombre empieza por la fecha). Crean las tablas de jobs,
-   agentes, tokens OAuth, ideas, ropa, entrenamiento, salud e intentos de login,
-   con RLS activado.
+   agentes, tokens OAuth, ideas, ropa, entrenamiento, salud, intentos de login y
+   el registro del backend (`app_logs`), con RLS activado.
 3. Apunta de **Settings → API**: la `URL` del proyecto y la **`service_role` key**
    (no la `anon`; la service key solo vivirá en el backend — el agente PC ya no la
    necesita, ver `agent/.env.example`).
