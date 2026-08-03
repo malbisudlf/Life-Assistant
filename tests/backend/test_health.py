@@ -329,8 +329,8 @@ class TestMetricasAcumulativasCompartidas:
             headers={"X-Auth-Token": "health-token"},
             json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}],
         )
+        assert r.status_code == 502
         assert "detalle interno" not in r.text
-        assert "HTTP 500" in r.json()["errors"][0]
 
 
 class TestResumenEntrenamientoFiltrado:
@@ -405,5 +405,109 @@ class TestIngestaSimpleEnBloque:
     def test_un_fallo_del_upsert_no_filtra_el_texto_de_supabase(self, client, mock_requests):
         mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 500, "detalle interno"))
         r = client.post(self.URL, json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}])
+        assert r.status_code == 502
         assert "detalle interno" not in r.text
-        assert r.json()["errors"] == ["upsert: HTTP 500"]
+
+
+class TestSincronizacionVacia:
+    """Un cuerpo bien formado pero con la estructura equivocada pasaba todas las
+    validaciones y salía como `200 {"ok": true, "upserted": 0}`.
+
+    Es el mismo modo de fallo que el 409: el Shortcut enseña la respuesta en pantalla,
+    la da por buena y deja de sincronizar sin que nadie se entere. Un `{}` —lo que manda
+    "Get contents of URL" si no se le adjunta el fichero del exportador— entra por aquí.
+    """
+
+    def test_hae_sin_envoltorio_data_avisa(self, client, mock_requests):
+        r = client.post("/health/ingest?token=health-token", json={"metrics": [{"name": "step_count"}]})
+        cuerpo = r.json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["upserted"] == 0
+        # Las claves que llegaron son lo único que hace falta para ver que el envoltorio
+        # no es el que este endpoint lee.
+        assert cuerpo["recibido"]["claves"] == ["metrics"]
+        assert cuerpo["recibido"]["claves_de_data"] is None
+
+    def test_hae_con_cuerpo_vacio_avisa(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest?token=health-token", json={}).json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["recibido"]["claves"] == []
+
+    def test_el_resumen_no_lleva_valores_solo_claves(self, client, mock_requests):
+        """El resumen acaba en app_logs: claves y tamaños, nunca los datos."""
+        cuerpo = client.post("/health/ingest?token=health-token",
+                             json={"data": {"otra_cosa": [{"secreto": "no debe salir"}]}}).json()
+        assert cuerpo["recibido"]["claves_de_data"] == ["otra_cosa"]
+        assert "secreto" not in str(cuerpo)
+        assert "no debe salir" not in str(cuerpo)
+
+    def test_una_ingesta_normal_sigue_diciendo_que_va_bien(self, client, mock_requests):
+        r = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert r.json() == {"ok": True, "upserted": 1}
+
+    def test_un_cero_legitimo_no_se_marca_como_fallo(self, client, mock_requests):
+        """Todas las acumulativas ya guardadas con un valor mayor: se reconoce el lote,
+        no se escribe nada y eso es correcto. No puede confundirse con no recibir nada."""
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "step_count", "value": 9000}
+        ]))
+        cuerpo = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "step_count", "units": "count", "data": [{"date": "2026-07-05 08:00:00", "qty": 5000}]}
+        ]}}).json()
+        assert cuerpo == {"ok": True, "upserted": 0}
+
+    def test_shortcut_sin_muestras_legibles_avisa(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest/simple?token=health-token",
+                             json=[{"metric": "step_count", "date": "2026-07-28", "value": None}]).json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["received"] == 0
+        assert cuerpo["parse_errors"][0]["reason"] == "value is None"
+
+    def test_shortcut_con_muestras_sigue_diciendo_que_va_bien(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest/simple?token=health-token",
+                             json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}]).json()
+        assert cuerpo["ok"] is True
+        assert cuerpo["upserted"] == 1
+
+
+class TestUpsertContraLaRestriccionCorrecta:
+    """El upsert debe apuntar a unique(metric_date, metric_name), no a la clave primaria.
+
+    Regresión real: al pasar la ingesta a un upsert en bloque se perdió el PATCH de
+    respaldo que resolvía el 409, pero el POST seguía sin `on_conflict`. PostgREST, sin
+    ese parámetro, resuelve el conflicto contra la clave primaria (`id`, un uuid nuevo
+    en cada inserción, que nunca colisiona), así que la fila repetida llegaba al índice
+    único y Supabase devolvía 409 para el LOTE ENTERO. Resultado: el Watch dejó de
+    sincronizar mientras los dos endpoints seguían respondiendo 200 {"ok": true}.
+    """
+
+    MUESTRA = {"metric": "heart_rate", "date": "2026-07-28", "value": 60}
+
+    @staticmethod
+    def _url_del_upsert(mock_requests):
+        return mock_requests.called("POST", "health_metrics")[0][1]
+
+    def test_ingest_nombra_la_restriccion(self, client, mock_requests):
+        client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert "on_conflict=metric_date,metric_name" in self._url_del_upsert(mock_requests)
+
+    def test_ingest_simple_nombra_la_restriccion(self, client, mock_requests):
+        client.post("/health/ingest/simple?token=health-token", json=[self.MUESTRA])
+        assert "on_conflict=metric_date,metric_name" in self._url_del_upsert(mock_requests)
+
+    def test_un_409_no_se_da_por_sincronizado(self, client, mock_requests):
+        """Lo que veía el Shortcut: 200 y "ok" con cero filas guardadas."""
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 409, "duplicate key"))
+        r = client.post("/health/ingest/simple?token=health-token", json=[self.MUESTRA])
+        assert r.status_code == 502
+
+    def test_un_409_tampoco_en_la_ruta_de_health_auto_export(self, client, mock_requests):
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 409, "duplicate key"))
+        r = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert r.status_code == 502

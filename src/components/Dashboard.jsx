@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
-  urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
+  urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, wellnessBreakdown, scoreFromBreakdown,
@@ -698,6 +698,7 @@ export default function Dashboard() {
   const [showSettings, setShowSettings]   = useState(false);
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
+  const [logsAbiertos, setLogsAbiertos]   = useState(false);  // registro del backend, plegado por defecto
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
@@ -1451,16 +1452,32 @@ export default function Dashboard() {
       backend = { ok: r.ok, ms: Math.round(((typeof performance !== "undefined" ? performance : Date).now()) - t0) };
     } catch { /* sin red o backend caído: ok=false */ }
 
+    // Independientes entre sí: en serie sumarían dos idas y vueltas a Fly detrás del
+    // arranque en frío que acabamos de medir.
     let agente = null;
+    let registro = null;
     if (backend.ok) {
+      const [rAgente, rLogs] = await Promise.all([
+        apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
+      ]);
       try {
-        const r = await apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() });
-        if (r.ok) agente = await r.json();
+        if (rAgente?.ok) agente = await rAgente.json();
+      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      try {
+        if (rLogs?.ok) registro = await rLogs.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
     }
 
-    setSysStatus({ backend, agente, comprobado: Date.now() });
+    setSysStatus({ backend, agente, registro, comprobado: Date.now() });
     setSysLoading(false);
+  }
+
+  async function vaciarRegistro() {
+    try {
+      await apiFetch(`${API}/logs`, { method: "DELETE", headers: authHeaders() });
+      setSysStatus(s => (s ? { ...s, registro: { entradas: [], errores: 0 } } : s));
+    } catch { /* mejor esfuerzo: ignorar */ }
   }
 
   async function loadTraining() {
@@ -4422,6 +4439,20 @@ export default function Dashboard() {
                     : "sin cliente configurado",
                 });
 
+                // El registro del backend (app_logs). Las demás filas dicen si algo
+                // RESPONDE; esta dice si algo ha FALLADO — que es distinto, y es lo que
+                // faltaba: el 409 de la ingesta de salud se registró durante días en el
+                // stdout de una máquina que escala a cero y nadie llegó a verlo.
+                const reg = sysStatus?.registro;
+                filas.push({
+                  nombre: "Registro",
+                  tono: !reg ? "muted" : reg.errores ? "red" : reg.entradas.length ? "accent" : "green",
+                  detalle: !reg ? "sin comprobar"
+                    : reg.errores ? `${reg.errores} ${reg.errores === 1 ? "error" : "errores"} en 7 días`
+                    : reg.entradas.length ? `${reg.entradas.length} avisos en 7 días`
+                    : "sin incidencias en 7 días",
+                });
+
                 const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -4432,6 +4463,41 @@ export default function Dashboard() {
                         <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{f.detalle}</span>
                       </div>
                     ))}
+                    {!!reg?.entradas.length && (
+                      <div style={{ marginTop: 4 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <button onClick={() => setLogsAbiertos(v => !v)} style={{
+                            background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                            color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+                          }}>{logsAbiertos ? "Ocultar registro" : "Ver registro"}</button>
+                          {logsAbiertos && (
+                            <button onClick={vaciarRegistro} style={{
+                              background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                              color: "var(--muted2)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+                            }}>Vaciar</button>
+                          )}
+                        </div>
+                        {logsAbiertos && (
+                          <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+                            {reg.entradas.map((e, i) => (
+                              <div key={`${e.created_at}-${i}`} style={{
+                                borderLeft: `2px solid ${e.level === "ERROR" || e.level === "CRITICAL" ? "#d4645a" : "var(--accent)"}`,
+                                paddingLeft: 8,
+                              }}>
+                                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)" }}>
+                                  {formatLogTime(e.created_at)} · {e.level}
+                                  {e.context?.peticion ? ` · ${e.context.peticion}` : ""}
+                                </div>
+                                {/* pre-wrap: los logger.exception() traen traza de varias líneas */}
+                                <div style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                                  {e.message}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })()}

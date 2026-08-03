@@ -56,7 +56,8 @@ backend/main.py (FastAPI, Fly.io, UN SOLO FICHERO ~2600 líneas)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
-    ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics, oauth_tokens
+    ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
+    │                    oauth_tokens, login_attempts, app_logs
     └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
                           apagado/suspensión del PC, que HA ejecuta por SSH)
 
@@ -210,6 +211,22 @@ Ficheros clave:
   `unique(metric_date, metric_name)` de la tabla) con el resto. Un GET+POST por
   métrica aquí son 60-90 viajes secuenciales a Supabase por sincronización del
   Watch — no lo reintroduzcas.
+  La URL del upsert sale de `HEALTH_UPSERT_URL` y **lleva
+  `?on_conflict=metric_date,metric_name`**: PostgREST resuelve `merge-duplicates`
+  contra la CLAVE PRIMARIA salvo que se le nombre otra restricción, y aquí la primaria
+  es `id` (uuid nuevo en cada inserción, que no colisiona nunca), así que sin ese
+  parámetro cualquier fila repetida acaba en un 409 que tumba el lote entero. Mismo
+  criterio para cualquier tabla cuya unicidad real no sea su clave primaria.
+  Y un fallo de escritura **corta con 502**: los clientes son máquinas (Health Auto
+  Export, un Shortcut de iOS) que no miran el cuerpo de la respuesta, así que un 200
+  `{"ok": true}` con el error escondido dentro es indistinguible de haber sincronizado.
+  Por lo mismo, **una sincronización de la que no se reconoce nada responde `ok: false`**
+  con `_resumen_cuerpo()` (claves recibidas y tamaños, nunca valores) en el cuerpo y en
+  el registro: un JSON bien formado con la estructura equivocada —un `{}`, el envoltorio
+  de otro exportador— pasaba todas las validaciones y salía como `200 {"upserted": 0}`.
+  Ojo con la condición: se mira lo RECONOCIDO (`grouped_metrics`/`samples`), no lo
+  escrito, porque un lote de acumulativas que ya tenían un valor mayor escribe cero y es
+  correcto.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
@@ -251,6 +268,30 @@ Ficheros clave:
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
   carga del dashboard, con el arranque en frío de Fly por delante. Si una depende del
   resultado de otra, en serie.
+- **Registro persistente (`app_logs`)**: `logger.error()`/`warning()` van a stdout Y a
+  Supabase, porque el stdout se lo lleva la máquina de Fly al escalar a cero — que es
+  justo por lo que el 409 de la ingesta de salud estuvo días registrándose sin que nadie
+  lo viera. Lo hace `RegistroSupabase`, un `logging.Handler` enganchado al logger que ya
+  existía: **para que algo nuevo quede registrado basta con llamar a `logger.error()`,
+  no hay que tocar nada más**. Reglas que no se pueden relajar, todas por lo mismo
+  (registrar no puede tumbar ni frenar una petición): la petición solo encola en memoria
+  y escribe un hilo de fondo en lotes; la cola está acotada (`LOG_QUEUE_MAX`, tira las
+  viejas y deja constancia de cuántas); y un fallo escribiendo el registro **se avisa por
+  `stderr`, nunca por `logger`** — por `logger` se realimentaría con el error de escribir
+  el error. Se persiste WARNING+ (`LOG_PERSIST_LEVEL`); bajar a INFO llena la tabla de
+  ruido. En los tests va desactivado (`LOG_PERSIST=0` en `conftest.py`): encendido, el
+  hilo colaría POSTs a `app_logs` en el `MockRouter` de cualquier test que registre algo.
+- **Middleware `registrar_peticiones`**: la otra mitad de "logs para todo", la que no se
+  puede escribir a mano en 60 endpoints. Registra 5xx, 4xx (menos el 401, que es el JWT
+  caducando y el frontend ya lo resuelve), excepciones no controladas con su traza y las
+  peticiones que pasan de `LOG_SLOW_MS`. Guarda `"MÉTODO /ruta"` **sin query string**: por
+  ahí viajan `HEALTH_INGEST_TOKEN` y `HA_POLL_TOKEN` (soportados por compatibilidad con
+  las integraciones ya desplegadas) y no pueden acabar en una tabla. Esa ruta viaja en un
+  `ContextVar` hasta el handler, así que cada entrada dice en qué petición pasó.
+- **`GET /logs`** (JWT) lo consume el panel de ajustes. Vuelca la cola antes de leer: se
+  abre el panel PORQUE algo acaba de fallar, y si no, lo recién ocurrido tardaría
+  `LOG_FLUSH_SECONDS` en aparecer. `nivel` va con lista blanca (`NIVELES_LOG`), no con
+  regex: se interpola en la URL de Supabase (invariante 6).
 
 ## Frontend: cómo está organizado Dashboard.jsx
 
@@ -291,8 +332,11 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
     `relleno` (área bajo la curva). Se usa en el bloque de composición corporal
     para la serie de peso con el objetivo encima.
   - **Panel de estado del sistema** (en ajustes): backend, sesión de Outlook,
-    última sincronización del Watch, agente PC y entrenamiento, todo en un mismo
-    sitio. Se recarga al abrir ajustes y con su botón — nunca en un intervalo.
+    última sincronización del Watch, agente PC, entrenamiento y **Registro** (los
+    errores del backend, de `GET /logs`), todo en un mismo sitio. Se recarga al abrir
+    ajustes y con su botón — nunca en un intervalo. Las demás filas dicen si algo
+    RESPONDE; la del registro dice si algo ha FALLADO, que es distinto y es lo que
+    faltaba. El listado va plegado y se despliega con "Ver registro".
   - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
     hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
     "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,
@@ -387,6 +431,19 @@ Trampas conocidas de jsdom:
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **El Watch dejó de sincronizar sin que nada diera error.** El upsert en bloque de la
+  ingesta de salud (`resolution=merge-duplicates`) no llevaba `on_conflict`, así que
+  PostgREST lo resolvía contra la clave primaria (`id`) en vez de contra
+  `unique(metric_date, metric_name)`: en cuanto el lote traía una métrica que ya
+  existía para ese día, Supabase devolvía 409 y **no se guardaba nada**, ni siquiera lo
+  nuevo. Antes esto no se veía porque cada métrica se escribía por separado con un
+  `POST → si 409, PATCH`; el paso al lote se llevó por delante ese respaldo y dejó el
+  POST tal cual. Dos cosas lo mantuvieron invisible durante días: el endpoint respondía
+  `200 {"ok": true}` metiendo el fallo en una clave `errors` que nadie lee, y el único
+  síntoma visible era el "sync hace Nd" del dashboard. Los mocks de los tests no lo
+  cogían porque simulan Supabase, no PostgREST. Moraleja doble: **nombra la restricción
+  en todo upsert cuya unicidad no sea la clave primaria**, y **un fallo de escritura no
+  puede salir por una clave del cuerpo con un 200 delante**.
 - `sleepScore`: la penalización por hora de acostarse usa `h === 1` / `h === 0` para
   distinguir la 01:00 y las 00:00. Un `h >= 1` "equivalente" penalizaba también las
   22:00–23:00 (cualquier hora antes de medianoche). Hay test que lo cubre.
