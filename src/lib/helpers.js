@@ -938,6 +938,23 @@ export function clothingTotals(items) {
   return totals;
 }
 
+// ── Streaming PC ─────────────────────────────────────────────────────────
+// La IP a la que hay que apuntar Moonlight cuando estás fuera de casa. El agente
+// la reporta en el mensaje del stage `vpn_ready` (Tailscale da una IP fija por
+// máquina), así que se saca de ahí en vez de guardarla en ningún sitio: si el
+// túnel no llegó a levantar, no hay evento y no hay IP que enseñar.
+const RE_IPV4 = /\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/;
+
+export function hostStreaming(eventos) {
+  for (let i = (eventos?.length || 0) - 1; i >= 0; i--) {
+    const ev = eventos[i];
+    if (ev?.stage !== "vpn_ready") continue;
+    const m = RE_IPV4.exec(ev.message || "");
+    if (m && m.slice(1).every(oct => Number(oct) <= 255)) return m[0];
+  }
+  return null;
+}
+
 export function findMetric(metrics, ...names) {
   if (!metrics) return [];
   for (const name of names) {

@@ -4,7 +4,8 @@ Checklist para dejar operativo el control remoto del PC desde el móvil. La idea
 que el PC arranque casi "tonto": lo único residente es el **agente efímero**, que al
 iniciar Windows mira la cola de jobs, ejecuta lo que haya (resolver Alud o abrir
 Sunshine) y se cierra. El botón **"Streaming PC"** del dashboard enciende el PC (WOL)
-y encola el job de Sunshine; conectas con **Moonlight** desde el móvil.
+y encola el job de Sunshine; el agente conecta la VPN y abre Sunshine, y tú conectas
+con **Moonlight** desde el móvil.
 
 > Estos pasos son específicos del PC de Mikel (no forman parte del kit replicable):
 > requieren un Windows real con Edge, sesión activa y hardware con WOL.
@@ -31,24 +32,61 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
       **Ya NO hace falta `SUPABASE_URL`/`SUPABASE_KEY`**: el agente pide los jobs
       pendientes al backend (`GET /jobs/pending`) en vez de a Supabase directo. Si tu
       `.env` los tenía, puedes borrarlos.
-      Opcional: `SUNSHINE_EXE` (solo si instalas Sunshine fuera de la ruta estándar).
+      Opcional: `SUNSHINE_EXE` (solo si instalas Sunshine/Apollo fuera de la ruta
+      estándar), `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT` (ver paso 3).
 
-## 2. Instalar Sunshine (host de streaming)
+## 2. Instalar el host de streaming (Sunshine o Apollo)
 
-- [ ] Instalar **Sunshine** en el PC.
+- [ ] Instalar **Sunshine** en el PC — o **Apollo**, su fork, si quieres pantalla
+      virtual sin monitor conectado (el agente detecta los dos: mismo ejecutable,
+      `C:\Program Files\Apollo\sunshine.exe`).
 - [ ] **Desactivar su autoarranque**: Servicios de Windows → `SunshineService` → tipo de
       inicio **Manual**. Lo único residente debe ser el agente; Sunshine lo lanza el
       agente bajo demanda.
 - [ ] Confirmar la ruta del ejecutable: `C:\Program Files\Sunshine\sunshine.exe`
       (si es otra, ponerla en `SUNSHINE_EXE`).
 
-## 3. Moonlight en el móvil (emparejar una vez)
+## 3. Tailscale en el PC (para conectarte desde fuera de casa)
 
-- [ ] Instalar **Moonlight** en el móvil.
+Fuera de casa Moonlight no llega al PC por IP local, y abrir el puerto de Sunshine a
+internet no es una opción. Con Tailscale el PC entra en la misma tailnet que ya usas
+para Home Assistant y el móvil lo ve como si estuvierais en la misma LAN.
+
+El problema que resuelve el agente: **el PC arranca sin VPN**. Lo enciende un WOL, no
+hay nadie delante iniciando sesión, y el túnel puede quedarse abajo. Por eso el job de
+streaming ahora **levanta Tailscale antes de lanzar Sunshine** y reporta la IP de la
+tailnet al modal del dashboard — esa es la que metes en Moonlight.
+
+- [ ] Instalar **Tailscale** en el PC e iniciar sesión con tu cuenta (una vez, a mano).
+- [ ] Dejarlo en modo desatendido — es lo que hace que el túnel sobreviva al arranque
+      sin sesión: en el icono de la bandeja, **"Run unattended"**, o por consola:
+      ```
+      tailscale up --unattended
+      ```
+      Sin esto, tras el WOL el PC no aparece en la tailnet y Moonlight no lo encuentra.
+- [ ] En la [consola de administración](https://login.tailscale.com/admin/machines),
+      **desactivar la caducidad de la clave** (*Disable key expiry*) para esta máquina.
+      Si no, cada ~6 meses el nodo pide login otra vez y el streaming deja de funcionar
+      desde fuera sin previo aviso.
+- [ ] Anotar la IP del PC en la tailnet (`tailscale ip -4`, una `100.x.y.z`): es fija.
+- [ ] Comprobar desde el móvil (con Tailscale activo): `ping` o abrir
+      `https://100.x.y.z:47990` (la web de Sunshine, con Sunshine arrancado).
+
+> Si el agente no encuentra Tailscale instalado **no falla el job**: lanza Sunshine
+> igual y el streaming funciona en la LAN de casa. En el modal verás el aviso
+> "VPN no disponible". Para saltarte el paso a propósito: `VPN_TIPO=ninguna`.
+
+## 4. Moonlight en el móvil (emparejar una vez)
+
+- [ ] Instalar **Moonlight** en el móvil (o **Artemis** si has instalado Apollo).
+- [ ] Instalar también **Tailscale** en el móvil y dejarlo activo cuando estés fuera.
 - [ ] Con Sunshine abierto en el PC, emparejar con el **PIN** (solo la primera vez;
       luego es persistente).
+- [ ] Añadir el host **por la IP de la tailnet** (`100.x.y.z`), no por la IP local:
+      así el mismo host vale en casa y fuera. En casa Tailscale enruta directo por la
+      LAN, sin penalización.
 
-## 4. Que solo el agente arranque con Windows
+## 5. Que solo el agente arranque con Windows
 
 - [ ] **Auto-login de Windows** (`netplwiz` → desmarcar "los usuarios deben escribir
       contraseña"). Es **obligatorio**: tras el WOL, sin sesión activa no funcionan ni
@@ -59,7 +97,7 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
 - [ ] Confirmar que **WOL está habilitado** en BIOS y en la tarjeta de red (ya lo estaba
       para el flujo de Alud).
 
-## 5. OpenSSH en Windows (para el relanzado por HA) — de forma segura
+## 6. OpenSSH en Windows (para el relanzado por HA) — de forma segura
 
 Necesario solo para el caso "PC ya encendido": el agente efímero ya terminó, así que HA
 lo relanza por SSH.
@@ -72,7 +110,7 @@ lo relanza por SSH.
 - [ ] Restringir a **red local / VPN**, nunca exponerlo directo a internet.
 - [ ] Probar desde HA: `ssh mikel@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"`.
 
-## 6. Home Assistant (relanzado del agente)
+## 7. Home Assistant (relanzado del agente)
 
 HA sondea el backend y, si hay relanzado pendiente, dispara la tarea del agente por SSH.
 
@@ -137,17 +175,20 @@ automation:
 
 - [ ] Pegar también este YAML si quieres los botones de apagar/suspender.
 
-## 7. Desplegar el backend
+## 8. Desplegar el backend
 
 - [ ] `cd backend && fly deploy` (activa `/relaunch-agent`, `/ha/agent-relaunch-pending`,
       `/shutdown-pc`, `/suspend-pc`, `/ha/pc-power-pending` y `/weather` en producción).
       Si es la primera vez en ese equipo: `fly auth login`.
 
-## 8. Prueba end-to-end
+## 9. Prueba end-to-end
 
-- [ ] **PC apagado** → pulsar "Abrir streaming" en el móvil → el PC se enciende (WOL) →
-      el agente arranca → lanza Sunshine → el modal llega a "Sunshine listo".
-- [ ] Abrir **Moonlight** y conectar.
+- [ ] **En casa, PC apagado** → pulsar "Abrir streaming" en el móvil → el PC se enciende
+      (WOL) → el agente arranca → conecta la VPN → lanza Sunshine → el modal llega a
+      "Sunshine listo" y muestra el **host para Moonlight** (la IP `100.x.y.z`).
+- [ ] Abrir **Moonlight** y conectar a esa IP.
+- [ ] **Fuera de casa** (datos móviles, con Tailscale activo en el móvil): repetir. Es la
+      prueba que importa — es el caso que antes no funcionaba.
 - [ ] **PC ya encendido** → pulsar el botón otra vez → HA relanza el agente por SSH y
       Sunshine se abre igual.
 
@@ -155,6 +196,8 @@ automation:
 
 - **Auto-login obligatorio**: sin sesión activa tras el WOL, ni el agente ni Sunshine
   capturan pantalla.
+- **Tailscale en modo desatendido**: sin `--unattended` el túnel no sobrevive al arranque
+  sin sesión y el agente se quedará esperando hasta rendirse (`VPN_TIMEOUT`).
 - **Sunshine con autoarranque OFF**: si lo dejas en automático, se pierde el sentido de
   "solo el agente residente".
 - **SSH solo por clave y en red local/VPN**: no expongas el puerto a internet.
@@ -163,9 +206,10 @@ automation:
 
 - **Misma red (LAN/Wi-Fi de casa)**: Moonlight detecta el host y va directo. Mejor
   escenario: latencia mínima, 1080p/4K a 60-120 fps según GPU.
-- **Fuera de casa**: depende sobre todo de la **subida** de la conexión del PC
-  (~20-30 Mbps estables → 1080p60 sobrado) y de la latencia de red. Lo más robusto es
-  una **VPN** (WireGuard/Tailscale): desde fuera "estás" en tu LAN, sin abrir puertos.
+- **Fuera de casa**: vas por Tailscale, así que depende sobre todo de la **subida** de
+  la conexión del PC (~20-30 Mbps estables → 1080p60 sobrado) y de la latencia. Lo
+  normal es que Tailscale abra conexión directa (P2P) entre móvil y PC; si el NAT lo
+  impide, cae a un relé DERP y se nota — `tailscale status` dice cuál de los dos es.
 - En reposo, lo único extra encendido es el servicio OpenSSH inactivo (coste
   despreciable). Sunshine solo consume mientras haces streaming.
 

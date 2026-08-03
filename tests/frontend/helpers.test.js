@@ -7,7 +7,7 @@ import {
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
-  formatMoney, clothingTotals,
+  formatMoney, clothingTotals, hostStreaming,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -354,6 +354,38 @@ describe("helpers de conteo de ropa", () => {
     expect(clothingTotals([{ price: 5 }, { price: "x", currency: "EUR" }])).toEqual({ EUR: 5 });
     expect(clothingTotals([])).toEqual({});
     expect(clothingTotals(null)).toEqual({});
+  });
+});
+
+// ── Streaming PC ────────────────────────────────────────────────
+
+describe("hostStreaming", () => {
+  test("saca la IP del mensaje del stage vpn_ready", () => {
+    const eventos = [
+      { stage: "job_claimed", message: "Worker pc-mikel-ab12 reclamó el job" },
+      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.87.12.4" },
+      { stage: "streaming_ready", message: "Sunshine abierto" },
+    ];
+    expect(hostStreaming(eventos)).toBe("100.87.12.4");
+  });
+
+  test("se queda con el vpn_ready más reciente", () => {
+    const eventos = [
+      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.87.12.4" },
+      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.64.0.9" },
+    ];
+    expect(hostStreaming(eventos)).toBe("100.64.0.9");
+  });
+
+  test("sin vpn_ready no hay IP que enseñar", () => {
+    expect(hostStreaming([{ stage: "vpn_error", message: "La VPN no llegó a conectar" }])).toBe(null);
+    expect(hostStreaming([{ stage: "vpn_ready", message: "VPN conectada" }])).toBe(null);
+    expect(hostStreaming([])).toBe(null);
+    expect(hostStreaming(null)).toBe(null);
+  });
+
+  test("ignora números con forma de IP pero octetos fuera de rango", () => {
+    expect(hostStreaming([{ stage: "vpn_ready", message: "versión 1.999.12.4" }])).toBe(null);
   });
 });
 

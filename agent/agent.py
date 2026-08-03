@@ -10,7 +10,8 @@ Flujo:
   1. Mira si hay jobs pendientes. Si no hay nada → se cierra sin más.
   2. Por cada job pendiente, lo reclama y despacha según payload["accion"]:
        - "resolver_alud"   → abre Alud en Edge, extrae el enunciado y lanza Cowork
-       - "abrir_streaming" → lanza Sunshine para conectar con Moonlight desde el móvil
+       - "abrir_streaming" → conecta la VPN (Tailscale) y lanza Sunshine, para
+                             conectar con Moonlight desde el móvil
   3. Cuando no quedan jobs: heartbeat offline y termina.
 
 Añadir una acción nueva = una función + una entrada en el diccionario ACCIONES.
@@ -22,6 +23,7 @@ Cowork se encarga de resolver y rellenar — el usuario revisa y envía.
 import os
 import sys
 import time
+import json
 import uuid
 import random
 import socket
@@ -40,7 +42,7 @@ load_dotenv()
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
 LA_TOKEN      = os.getenv("LA_TOKEN")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
 CLAUDE_APPID       = "Claude_pzs8sxrjxfjjc!Claude"  # MSIX Store app
@@ -60,15 +62,40 @@ _EDGE_PATHS = [
 ]
 EDGE_EXE = next((p for p in _EDGE_PATHS if os.path.exists(p)), None)
 
-# ── Sunshine (host de streaming para Moonlight) ────────────────────────────────
-# Sunshine NO arranca solo con Windows (su autoarranque se desactiva a propósito):
-# lo ÚNICO residente es este agente, que lo lanza bajo demanda cuando llega un job
-# de streaming. Ruta configurable por si se instala en otra ubicación.
+# ── Host de streaming (Sunshine o Apollo) ──────────────────────────────────────
+# NO arranca solo con Windows (su autoarranque se desactiva a propósito): lo ÚNICO
+# residente es este agente, que lo lanza bajo demanda cuando llega un job de
+# streaming. Se busca también Apollo (fork de Sunshine, mismo nombre de ejecutable)
+# porque el flujo de aquí es headless: el PC despierta por WOL, sin monitor delante,
+# y Apollo levanta una pantalla virtual sin necesidad de un dummy HDMI.
 _SUNSHINE_PATHS = [
+    r"C:\Program Files\Apollo\sunshine.exe",
     r"C:\Program Files\Sunshine\sunshine.exe",
     r"C:\Program Files (x86)\Sunshine\sunshine.exe",
 ]
 SUNSHINE_EXE = os.getenv("SUNSHINE_EXE") or next((p for p in _SUNSHINE_PATHS if os.path.exists(p)), None)
+
+# ── VPN (Tailscale) ────────────────────────────────────────────────────────────
+# Fuera de casa Moonlight solo llega al PC por la VPN, pero el PC arranca SIN ella:
+# lo enciende un WOL, nadie inicia sesión a mano y el túnel puede quedarse abajo
+# (y, tras un arranque en frío, el servicio tarda en negociar). Por eso el job de
+# streaming levanta la VPN ANTES de lanzar Sunshine y reporta la IP de la tailnet:
+# es la que hay que meter en Moonlight, y con Tailscale es fija por máquina.
+#
+# VPN_TIPO: "auto" (usa Tailscale si está instalado), "tailscale" (exige que lo
+# esté: si falta, se avisa) o "ninguna" (salta el paso — solo LAN).
+VPN_TIPO = (os.getenv("VPN_TIPO") or "auto").strip().lower()
+
+_TAILSCALE_PATHS = [
+    r"C:\Program Files\Tailscale\tailscale.exe",
+    r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+]
+TAILSCALE_EXE = os.getenv("TAILSCALE_EXE") or next((p for p in _TAILSCALE_PATHS if os.path.exists(p)), None)
+
+try:
+    VPN_TIMEOUT = int(os.getenv("VPN_TIMEOUT") or 60)   # segundos máx esperando al túnel
+except ValueError:
+    VPN_TIMEOUT = 60
 
 ALUD_HOME      = "https://alud.deusto.es"
 DEUSTO_BUTTON  = "@deusto | @opendeusto"
@@ -397,6 +424,94 @@ def launch_cowork(titulo: str, enunciado: str, alud_url: str):
     pyautogui.press("enter")
     log.info("Instrucción enviada a Cowork.")
 
+# ── VPN: levantar el túnel antes de streamear ─────────────────────────────────
+
+def _tailscale(*args, timeout: int = 40):
+    """Ejecuta el CLI de Tailscale. Devuelve (returncode, stdout) y nunca lanza."""
+    try:
+        r = subprocess.run(
+            [TAILSCALE_EXE, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r.returncode, (r.stdout or "").strip()
+    except Exception as e:
+        log.warning(f"tailscale {' '.join(args)} falló: {e}")
+        return -1, ""
+
+
+def estado_tailscale():
+    """(BackendState, IPv4 de la tailnet). Cualquiera de los dos puede ser None.
+
+    Se parsea el stdout aunque el CLI devuelva un código != 0: con el túnel caído o
+    la sesión cerrada, `tailscale status --json` sigue imprimiendo el JSON con el
+    estado real ("Stopped", "NeedsLogin") y sale con error. Ese estado es justo lo
+    que hay que distinguir para saber si basta con levantar el túnel o hace falta
+    un login manual que aquí no se puede hacer.
+    """
+    _, salida = _tailscale("status", "--json")
+    if not salida.startswith("{"):
+        return None, None
+    try:
+        datos = json.loads(salida)
+    except ValueError:
+        return None, None
+    ips = (datos.get("Self") or {}).get("TailscaleIPs") or []
+    ipv4 = next((ip for ip in ips if ":" not in ip), None)
+    return datos.get("BackendState"), ipv4
+
+
+def conectar_vpn(job_id: str):
+    """Deja la VPN levantada y devuelve la IP para Moonlight (o None).
+
+    NUNCA lanza: sin VPN el streaming sigue sirviendo en la LAN de casa, así que un
+    fallo aquí se reporta como aviso y el job continúa hasta abrir Sunshine. Lo que
+    no se puede resolver desde aquí es un nodo sin sesión ("NeedsLogin"): el login
+    de Tailscale es interactivo y el usuario no está delante del PC.
+    """
+    if VPN_TIPO == "ninguna":
+        return None
+    if not TAILSCALE_EXE:
+        aviso = "Tailscale no está instalado (o define TAILSCALE_EXE en .env)"
+        log.warning(f"VPN: {aviso}")
+        if VPN_TIPO == "tailscale":
+            report_stage(job_id, "vpn_error", aviso)
+        return None
+
+    estado, ip = estado_tailscale()
+    if estado == "Running" and ip:
+        log.info(f"VPN ya conectada ({ip}).")
+        report_stage(job_id, "vpn_ready", f"VPN conectada — Moonlight: {ip}")
+        return ip
+
+    report_stage(job_id, "vpn_connecting", "Levantando la VPN")
+    log.info(f"VPN en estado {estado!r} — conectando...")
+    # --unattended: el túnel sigue arriba sin nadie con sesión iniciada, que es
+    # exactamente el escenario tras un WOL. --timeout: sin él, `up` con la sesión
+    # cerrada se queda esperando para siempre a que alguien abra la URL de login.
+    _tailscale("up", "--unattended", f"--timeout={VPN_TIMEOUT}s", timeout=VPN_TIMEOUT + 15)
+
+    limite = time.time() + VPN_TIMEOUT
+    while time.time() < limite:
+        estado, ip = estado_tailscale()
+        if estado == "Running" and ip:
+            log.info(f"VPN conectada ({ip}).")
+            report_stage(job_id, "vpn_ready", f"VPN conectada — Moonlight: {ip}")
+            return ip
+        if estado == "NeedsLogin":
+            break
+        time.sleep(2)
+
+    aviso = (
+        "El PC no tiene sesión de Tailscale: entra una vez y ejecuta "
+        "'tailscale up --unattended'"
+        if estado == "NeedsLogin"
+        else f"La VPN no llegó a conectar en {VPN_TIMEOUT}s (estado: {estado or 'desconocido'})"
+    )
+    log.warning(f"VPN: {aviso}")
+    report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Sunshine: en la LAN funcionará igual")
+    return None
+
+
 # ── Acciones ──────────────────────────────────────────────────────────────────
 # Cada acción es una función (job_id, payload) que hace el trabajo y reporta sus
 # stages. Si algo va mal, lanza una excepción: procesar_job la captura y marca el
@@ -467,9 +582,13 @@ def accion_resolver_alud(job_id: str, payload: dict):
 
 
 def accion_abrir_streaming(job_id: str, payload: dict):
-    """Lanza Sunshine bajo demanda para conectar con Moonlight desde el móvil."""
+    """Conecta la VPN y lanza Sunshine para conectar con Moonlight desde el móvil."""
     if not SUNSHINE_EXE:
         raise RuntimeError("No se encontró Sunshine instalado (define SUNSHINE_EXE en .env)")
+    # La VPN primero: Sunshine anuncia sus direcciones al arrancar, así que si el
+    # interfaz de Tailscale aparece después, el móvil puede no ver el host hasta
+    # reiniciarlo. Además así el modal enseña la IP antes de decir "listo".
+    ip_vpn = conectar_vpn(job_id)
     report_stage(job_id, "streaming_starting", "Lanzando Sunshine")
     log.info(f"Lanzando Sunshine desde {SUNSHINE_EXE}...")
     # DETACHED: Sunshine sobrevive a la salida del agente y sigue sirviendo el stream.
@@ -478,7 +597,11 @@ def accion_abrir_streaming(job_id: str, payload: dict):
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    report_stage(job_id, "streaming_ready", "Sunshine abierto — conéctate con Moonlight")
+    report_stage(
+        job_id, "streaming_ready",
+        f"Sunshine abierto — conéctate con Moonlight a {ip_vpn}" if ip_vpn
+        else "Sunshine abierto — conéctate con Moonlight",
+    )
     log.info("✅ Sunshine lanzado.")
 
 
@@ -539,6 +662,7 @@ def main():
 
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
     log.info(f"Sunshine: {SUNSHINE_EXE or 'NO ENCONTRADO'}")
+    log.info(f"VPN ({VPN_TIPO}): {TAILSCALE_EXE or 'Tailscale NO ENCONTRADO'}")
 
     # Efímero: mira si hay algo pendiente. Si no hay nada, se cierra sin más.
     job = poll_pending_job()

@@ -5,6 +5,20 @@ desde el dashboard. No usa la API de Anthropic — controla el PC con pyautogui.
 
 ## Qué hace
 
+Es efímero y despacha por `payload["accion"]`: drena la cola de jobs y se cierra.
+
+### `abrir_streaming` (Sunshine/Apollo para Moonlight)
+
+1. Conecta la **VPN** (Tailscale) y reporta la IP de la tailnet al dashboard —
+   el PC arranca por WOL sin VPN, y desde fuera de casa es la única forma de que
+   Moonlight lo alcance. Si no hay Tailscale, avisa y sigue: en la LAN funciona igual
+2. Lanza Sunshine (o Apollo) en modo DETACHED, para que sobreviva al agente
+
+Puesta a punto completa (Tailscale desatendido, autoarranque de Sunshine, WOL):
+`PUESTA_A_PUNTO.md`.
+
+### `resolver_alud`
+
 1. Arranca con Windows (Task Scheduler), heartbeat → "online"
 2. Recoge el primer job pendiente de Supabase
 3. Abre Alud con Playwright, gestiona login + Okta push si es necesario
@@ -36,12 +50,13 @@ Crea un archivo `.env` en la carpeta `agent/` con este contenido:
 ```
 LA_TOKEN=
 LA_API_BASE=https://backend-tender-glow-160.fly.dev
-SUPABASE_URL=
-SUPABASE_KEY=
 ```
 
 - `LA_TOKEN`: abre el dashboard en el navegador → F12 → Application → Local Storage → `la_token`
-- `SUPABASE_URL` y `SUPABASE_KEY`: están en `backend/.env`
+- Ya **no** hacen falta `SUPABASE_URL`/`SUPABASE_KEY`: los jobs pendientes se piden al
+  backend con el mismo JWT (`GET /jobs/pending`)
+- Opcionales de streaming: `SUNSHINE_EXE`, `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`
+  (ver `.env.example`)
 
 ### 3. Migración Supabase (solo si no se ha ejecutado ya)
 
