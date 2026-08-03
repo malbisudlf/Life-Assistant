@@ -48,3 +48,39 @@ jobs:
       - name: Tests
         # conftest.py define las variables de entorno simuladas: no hacen falta secretos.
         run: python -m pytest tests/backend -q
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: npm ci
+      - name: Instalar dependencias del backend
+        # El E2E levanta el backend de verdad (con los servicios externos simulados),
+        # así que necesita sus dependencias igual que el job de pytest.
+        run: pip install -r backend/requirements.txt
+      - name: Instalar Chromium
+        # Solo Chromium: los otros navegadores triplican el tiempo de instalación y
+        # aquí no aportan — lo que se prueba es que la app arranca y pinta.
+        run: npx playwright install --with-deps chromium
+      - name: Tests end-to-end
+        # playwright.config.js arranca y espera al backend simulado y al preview del
+        # build de producción, y los apaga al terminar.
+        run: npm run test:e2e
+      - name: Guardar el informe si algo falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
