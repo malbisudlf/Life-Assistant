@@ -28,7 +28,11 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
 
 - [ ] `git pull` en la carpeta del repo (trae el `agent/agent.py` efímero + despachador).
 - [ ] Reinstalar dependencias si hace falta: `pip install -r backend/requirements.txt`.
-- [ ] Revisar el `.env` del agente: `LA_TOKEN`, `ALUD_ACCOUNT`, `ALUD_ALLOWED_HOSTS`.
+- [ ] Revisar el `.env` del agente: `AGENT_TOKEN`, `ALUD_ACCOUNT`, `ALUD_ALLOWED_HOSTS`.
+      **`AGENT_TOKEN` sustituye a `LA_TOKEN`**: es un token de servicio que no caduca y
+      debe valer lo mismo que la variable `AGENT_TOKEN` del backend. El JWT del
+      dashboard duraba 30 días y al expirar el backend respondía 401 a todo, con lo que
+      el agente se cerraba en cada arranque diciendo "No hay jobs pendientes".
       **Ya NO hace falta `SUPABASE_URL`/`SUPABASE_KEY`**: el agente pide los jobs
       pendientes al backend (`GET /jobs/pending`) en vez de a Supabase directo. Si tu
       `.env` los tenía, puedes borrarlos.

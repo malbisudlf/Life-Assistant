@@ -64,6 +64,7 @@ fly secrets set \
   GOOGLE_MAPS_API_KEY=... OPENAI_API_KEY=... \
   HA_POLL_TOKEN="$(openssl rand -hex 24)" \
   HEALTH_INGEST_TOKEN="$(openssl rand -hex 24)" \
+  AGENT_TOKEN="$(openssl rand -hex 24)" \
   TIMEZONE=Europe/Madrid \
   HOME_ADDRESS="Tu dirección, Ciudad" \
   CLASSES_CALENDAR=clases \
@@ -80,6 +81,10 @@ Notas:
   solo se aceptan `https` y los hosts de esta lista (o sus subdominios). Si no usas el
   agente PC, déjalo como está. **Pon el mismo valor en `agent/.env`**: se comprueba en
   los dos sitios porque un job puede llegar a Supabase sin pasar por el backend.
+- `AGENT_TOKEN` es con lo que el agente PC sondea y cierra jobs. **Mismo valor en
+  `agent/.env`**; si no usas el agente, déjalo sin poner. Es un token de servicio y no
+  uno de usuario por lo mismo que `BRIEF_TOKEN`: el agente arranca solo, sin nadie
+  delante, y un JWT del dashboard caduca a los 30 días y lo deja mudo sin avisar.
 - `CLASSES_CALENDAR` es el nombre de un calendario de Outlook aparte para clases
   con horario; si no lo usas, ignora el panel de clases.
 - `WEATHER_LAT`/`WEATHER_LON` son las coordenadas del widget de clima (Open-Meteo,
@@ -218,7 +223,7 @@ los mismos datos en JSON.
 Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `DASHBOARD_PASSWORD`*, `SUPABASE_URL`, `SUPABASE_KEY`, `CLIENT_ID`, `TENANT_ID`,
 `CLIENT_SECRET`, `REDIRECT_URI`, `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY`,
-`HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
+`HA_POLL_TOKEN`, `HEALTH_INGEST_TOKEN`, `AGENT_TOKEN`, `TIMEZONE`, `HOME_ADDRESS`,
 `CLASSES_CALENDAR`, `WEATHER_LAT`, `WEATHER_LON`, `CORS_ORIGINS`, `HTTP_TIMEOUT`,
 `TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `BRIEF_TOKEN`, `BRIEF_TO`, `BRIEF_FROM`,

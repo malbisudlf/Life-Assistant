@@ -41,16 +41,30 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
-LA_TOKEN      = os.getenv("LA_TOKEN")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.2.0"
+AGENT_VERSION = "1.3.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
+
+# Token con el que el agente habla con el backend. AGENT_TOKEN es un token de servicio
+# y no caduca; LA_TOKEN es el JWT del dashboard, que sí — dura 30 días y luego el
+# backend responde 401 a todo. Eso es exactamente lo que pasó: el JWT copiado en el
+# .env expiró, `/jobs/pending` empezó a dar 401 y el agente se cerraba en cada arranque
+# diciendo que no había jobs. Se mantiene el JWT como respaldo para no romper una
+# instalación que aún no tenga AGENT_TOKEN, pero se avisa al arrancar.
+AGENT_TOKEN  = (os.getenv("AGENT_TOKEN") or "").strip()
+LA_TOKEN     = (os.getenv("LA_TOKEN") or "").strip()
+API_TOKEN    = AGENT_TOKEN or LA_TOKEN
+TOKEN_CADUCA = not AGENT_TOKEN and bool(LA_TOKEN)
 
 CLAUDE_APPID       = "Claude_pzs8sxrjxfjjc!Claude"  # MSIX Store app
 HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 OKTA_TIMEOUT       = 120   # segundos máx esperando aprobación push Okta
 CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
+# Ventana de reintentos del PRIMER sondeo. El agente arranca a la vez que Windows, y
+# tras un WOL la tarjeta puede no tener IP todavía: el primer intento moría con un
+# fallo de DNS a los 200 ms y el arranque se perdía entero — justo el que traía el job.
+ARRANQUE_ESPERA_RED = int(os.getenv("ARRANQUE_ESPERA_RED") or 90)
 # Puerto CDP aleatorio por ejecución en vez de un 9222 fijo y predecible.
 # Chromium solo escucha el puerto de depuración en loopback (127.0.0.1), así que el
 # acceso queda restringido a procesos de la propia máquina; randomizarlo reduce la
@@ -152,8 +166,16 @@ def alud_url_permitida(url: str) -> bool:
     return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
 
+class ErrorAuth(RuntimeError):
+    """El backend rechazó el token del agente (401/403). Reintentar no lo arregla."""
+
+
+class ErrorTransitorio(RuntimeError):
+    """Fallo de red o del backend. Reintentable: tras un WOL la red tarda en estar lista."""
+
+
 def api_headers():
-    return {"Authorization": f"Bearer {LA_TOKEN}", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 def heartbeat(status: str):
     try:
@@ -188,24 +210,54 @@ def report_stage(job_id: str, stage: str, message: str = ""):
     except Exception as e:
         log.warning(f"No se pudo reportar stage '{stage}': {e}")
 
-def poll_pending_job():
-    """El job pendiente más reciente, vía backend (no contra Supabase directo).
+def pedir_job_pendiente():
+    """El job pendiente más reciente (o None si no hay ninguno), vía backend.
 
     Antes esta función llamaba a Supabase con la service_role key — la clave que salta
     toda la RLS de la base, guardada en un .env en este PC. Era la única razón por la
-    que el agente la necesitaba; ahora usa el mismo JWT que el resto de llamadas.
+    que el agente la necesitaba; ahora usa el mismo token que el resto de llamadas.
+
+    Lanza en vez de devolver None ante un fallo, a propósito: "no hay nada que hacer" y
+    "no he podido preguntar" son cosas distintas, y confundirlas es lo que dejó al
+    agente cerrándose en silencio durante meses con el token caducado. Un 401 se
+    imprimía como "No hay jobs pendientes" y la tarea del Programador lo daba por bueno.
     """
     try:
         r = requests.get(f"{API_BASE}/jobs/pending", headers=api_headers(), timeout=10)
-        if r.status_code >= 300:
-            log.warning(f"Error polling jobs: HTTP {r.status_code}")
-            return None
+    except requests.RequestException as e:
+        raise ErrorTransitorio(f"no se pudo contactar con el backend: {e}") from e
+    if r.status_code in (401, 403):
+        raise ErrorAuth(f"el backend rechazó el token del agente (HTTP {r.status_code})")
+    if r.status_code >= 300:
+        raise ErrorTransitorio(f"el backend respondió HTTP {r.status_code}")
+    try:
         return r.json().get("job")
-    except Exception as e:
-        log.warning(f"Error polling jobs: {e}")
-        return None
+    except ValueError as e:
+        raise ErrorTransitorio(f"respuesta ilegible del backend: {e}") from e
+
+
+def esperar_primer_job(ventana: int = ARRANQUE_ESPERA_RED):
+    """Primer sondeo del arranque, reintentando mientras el fallo sea de red.
+
+    Solo reintenta los fallos transitorios: si el backend contesta y dice que no hay
+    jobs, se devuelve eso al momento, y si rechaza el token se aborta sin insistir.
+    """
+    limite = time.time() + ventana
+    intento = 0
+    while True:
+        intento += 1
+        try:
+            return pedir_job_pendiente()
+        except ErrorTransitorio as e:
+            if time.time() >= limite:
+                raise
+            log.info(f"Backend no disponible ({e}) — reintento {intento} en {POLL_INTERVAL}s")
+            time.sleep(POLL_INTERVAL)
 
 def claim_job(job_id: str) -> bool:
+    """True si este worker se quedó el job. False también cuando la llamada falla, así
+    que el motivo se registra: un 'no lo he podido reclamar' que se lee como 'lo tenía
+    otro' es el mismo fallo silencioso que tapaba el token caducado."""
     try:
         r = requests.post(
             f"{API_BASE}/jobs/{job_id}/claim",
@@ -213,9 +265,19 @@ def claim_job(job_id: str) -> bool:
             json={"worker_id": WORKER_ID},
             timeout=10,
         )
+    except requests.RequestException as e:
+        log.warning(f"No se pudo reclamar el job: {e}")
+        return False
+    if r.status_code in (401, 403):
+        log.error(f"El backend rechazó el token al reclamar el job (HTTP {r.status_code}) — revisa AGENT_TOKEN")
+        return False
+    if r.status_code >= 300:
+        log.warning(f"El backend respondió HTTP {r.status_code} al reclamar el job")
+        return False
+    try:
         return r.json().get("claimed", False)
-    except Exception as e:
-        log.warning(f"Error claiming job: {e}")
+    except ValueError as e:
+        log.warning(f"Respuesta ilegible al reclamar el job: {e}")
         return False
 
 def start_job(job_id: str):
@@ -745,16 +807,31 @@ def procesar_job(job: dict):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    if not LA_TOKEN:
-        log.error("LA_TOKEN no configurado en .env — abortando.")
+    if not API_TOKEN:
+        log.error("Sin token: define AGENT_TOKEN en agent/.env (o LA_TOKEN) — abortando.")
         sys.exit(1)
 
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
     log.info(f"Sunshine: {SUNSHINE_EXE or 'NO ENCONTRADO'}")
     log.info(f"VPN ({VPN_TIPO}): {TAILSCALE_EXE or 'Tailscale NO ENCONTRADO'}")
+    if TOKEN_CADUCA:
+        log.warning(
+            "Usando LA_TOKEN (JWT del dashboard): caduca a los 30 días y el agente se "
+            "quedará mudo. Configura AGENT_TOKEN aquí y en el backend."
+        )
 
-    # Efímero: mira si hay algo pendiente. Si no hay nada, se cierra sin más.
-    job = poll_pending_job()
+    # Efímero: mira si hay algo pendiente. Si no hay nada, se cierra sin más. Los fallos
+    # salen por sys.exit con código propio para que el Programador de tareas los marque
+    # como error en vez de dejar "Last Result: 0" en un arranque que no hizo nada.
+    try:
+        job = esperar_primer_job()
+    except ErrorAuth as e:
+        log.error(f"{e}. Renueva el token del agente (AGENT_TOKEN) — no se ha mirado la cola.")
+        sys.exit(2)
+    except ErrorTransitorio as e:
+        log.error(f"No se pudo consultar la cola tras {ARRANQUE_ESPERA_RED}s: {e}")
+        sys.exit(3)
+
     if not job:
         log.info("No hay jobs pendientes. Agente finalizado sin acción.")
         return
@@ -769,7 +846,13 @@ def main():
         while job and job["id"] not in attempted:
             attempted.add(job["id"])
             procesar_job(job)
-            job = poll_pending_job()
+            # Aquí un fallo ya no se puede confundir con "no queda nada": el trabajo que
+            # se pidió está hecho, así que se registra y se termina la ejecución.
+            try:
+                job = pedir_job_pendiente()
+            except (ErrorAuth, ErrorTransitorio) as e:
+                log.warning(f"No se pudo comprobar si quedan más jobs: {e}")
+                job = None
     finally:
         heartbeat("offline")
         log.info("Agente finalizado.")
