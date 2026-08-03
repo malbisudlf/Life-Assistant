@@ -1990,6 +1990,27 @@ ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 # PATCH de respaldo, y al pasar a un upsert en bloque ese respaldo desapareció.
 HEALTH_UPSERT_URL = f"{SUPABASE_URL}/rest/v1/health_metrics?on_conflict=metric_date,metric_name"
 
+def _resumen_cuerpo(request: Request, raw: bytes, body) -> dict:
+    """Qué forma tenía lo que llegó, para una sincronización que no guardó nada.
+
+    Un cuerpo bien formado pero con la estructura equivocada (`{}`, o el envoltorio de
+    otra versión del exportador) pasa todas las validaciones y sale como
+    `200 {"ok": true, "upserted": 0}`: exactamente igual de silencioso que el 409 que
+    dejó al Watch sin sincronizar. Esto dice qué claves traía, que es lo único que hace
+    falta para distinguir "el cliente no manda nada" de "manda otra cosa".
+
+    Solo claves y tamaños, nunca los valores: el resumen acaba en app_logs.
+    """
+    claves = sorted(body.keys()) if isinstance(body, dict) else f"<{type(body).__name__}>"
+    dentro = body.get("data") if isinstance(body, dict) else None
+    return {
+        "bytes": len(raw),
+        "content_type": request.headers.get("content-type", ""),
+        "claves": claves,
+        "claves_de_data": sorted(dentro.keys()) if isinstance(dentro, dict) else None,
+    }
+
+
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
     diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
@@ -2178,6 +2199,23 @@ async def health_ingest(request: Request, token: str = ""):
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
     upserted += _guardar_metricas(grouped_metrics)
 
+    # Una sincronización de la que no se reconoce NADA no es un éxito: el cuerpo no
+    # traía lo que este endpoint sabe leer (otro envoltorio, un `{}` porque el Shortcut
+    # no adjunta el fichero...). Eso pasaba todas las validaciones y salía como
+    # `200 {"ok": true, "upserted": 0}`, indistinguible de haber sincronizado.
+    #
+    # La condición mira lo RECONOCIDO, no lo escrito: un lote entero de acumulativas que
+    # ya tenían guardado un valor mayor escribe cero y es perfectamente correcto.
+    if not grouped_metrics and not workouts:
+        recibido = _resumen_cuerpo(request, raw, body)
+        logger.warning("Ingesta de salud: nada que guardar. Recibido: %s", recibido)
+        # El resumen va también en la respuesta, no solo al registro: el cliente es un
+        # Shortcut que enseña el cuerpo en pantalla, así que la siguiente ejecución ya
+        # dice qué llegó sin tener que ir a buscarlo a ningún sitio.
+        return {"ok": False, "upserted": 0,
+                "detalle": "No se guardó ninguna métrica: el cuerpo no traía datos legibles",
+                "recibido": recibido}
+
     return {"ok": True, "upserted": upserted}
 
 
@@ -2321,6 +2359,19 @@ async def health_ingest_simple(request: Request, token: str = ""):
             logger.error("Ingesta de salud (Shortcut): upsert en bloque de %d filas falló", len(filas))
             raise _supabase_error(r)
         upserted += len(filas)
+
+    # Mismo criterio que en /health/ingest, y con la misma precaución: se mira lo
+    # RECONOCIDO (`samples`), no lo escrito. Cero muestras legibles es que el cuerpo no
+    # traía nada aprovechable; cero escrituras teniendo muestras puede ser sencillamente
+    # que ya estuviera todo guardado con un valor mayor.
+    if not samples:
+        logger.warning(
+            "Ingesta de salud (Shortcut): ninguna muestra legible de %d elementos recibidos",
+            len(parse_errors),
+        )
+        return {"ok": False, "upserted": 0, "received": 0,
+                "detalle": "No se guardó ninguna métrica: el cuerpo no traía datos legibles",
+                "skipped": skipped, "parse_errors": parse_errors}
 
     return {"ok": True, "upserted": upserted, "received": len(samples), "skipped": skipped, "parse_errors": parse_errors}
 

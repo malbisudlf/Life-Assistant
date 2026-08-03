@@ -220,6 +220,13 @@ Ficheros clave:
   Y un fallo de escritura **corta con 502**: los clientes son máquinas (Health Auto
   Export, un Shortcut de iOS) que no miran el cuerpo de la respuesta, así que un 200
   `{"ok": true}` con el error escondido dentro es indistinguible de haber sincronizado.
+  Por lo mismo, **una sincronización de la que no se reconoce nada responde `ok: false`**
+  con `_resumen_cuerpo()` (claves recibidas y tamaños, nunca valores) en el cuerpo y en
+  el registro: un JSON bien formado con la estructura equivocada —un `{}`, el envoltorio
+  de otro exportador— pasaba todas las validaciones y salía como `200 {"upserted": 0}`.
+  Ojo con la condición: se mira lo RECONOCIDO (`grouped_metrics`/`samples`), no lo
+  escrito, porque un lote de acumulativas que ya tenían un valor mayor escribe cero y es
+  correcto.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el

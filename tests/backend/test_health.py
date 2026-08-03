@@ -409,6 +409,69 @@ class TestIngestaSimpleEnBloque:
         assert "detalle interno" not in r.text
 
 
+class TestSincronizacionVacia:
+    """Un cuerpo bien formado pero con la estructura equivocada pasaba todas las
+    validaciones y salía como `200 {"ok": true, "upserted": 0}`.
+
+    Es el mismo modo de fallo que el 409: el Shortcut enseña la respuesta en pantalla,
+    la da por buena y deja de sincronizar sin que nadie se entere. Un `{}` —lo que manda
+    "Get contents of URL" si no se le adjunta el fichero del exportador— entra por aquí.
+    """
+
+    def test_hae_sin_envoltorio_data_avisa(self, client, mock_requests):
+        r = client.post("/health/ingest?token=health-token", json={"metrics": [{"name": "step_count"}]})
+        cuerpo = r.json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["upserted"] == 0
+        # Las claves que llegaron son lo único que hace falta para ver que el envoltorio
+        # no es el que este endpoint lee.
+        assert cuerpo["recibido"]["claves"] == ["metrics"]
+        assert cuerpo["recibido"]["claves_de_data"] is None
+
+    def test_hae_con_cuerpo_vacio_avisa(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest?token=health-token", json={}).json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["recibido"]["claves"] == []
+
+    def test_el_resumen_no_lleva_valores_solo_claves(self, client, mock_requests):
+        """El resumen acaba en app_logs: claves y tamaños, nunca los datos."""
+        cuerpo = client.post("/health/ingest?token=health-token",
+                             json={"data": {"otra_cosa": [{"secreto": "no debe salir"}]}}).json()
+        assert cuerpo["recibido"]["claves_de_data"] == ["otra_cosa"]
+        assert "secreto" not in str(cuerpo)
+        assert "no debe salir" not in str(cuerpo)
+
+    def test_una_ingesta_normal_sigue_diciendo_que_va_bien(self, client, mock_requests):
+        r = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
+        ]}})
+        assert r.json() == {"ok": True, "upserted": 1}
+
+    def test_un_cero_legitimo_no_se_marca_como_fallo(self, client, mock_requests):
+        """Todas las acumulativas ya guardadas con un valor mayor: se reconoce el lote,
+        no se escribe nada y eso es correcto. No puede confundirse con no recibir nada."""
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "step_count", "value": 9000}
+        ]))
+        cuerpo = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "step_count", "units": "count", "data": [{"date": "2026-07-05 08:00:00", "qty": 5000}]}
+        ]}}).json()
+        assert cuerpo == {"ok": True, "upserted": 0}
+
+    def test_shortcut_sin_muestras_legibles_avisa(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest/simple?token=health-token",
+                             json=[{"metric": "step_count", "date": "2026-07-28", "value": None}]).json()
+        assert cuerpo["ok"] is False
+        assert cuerpo["received"] == 0
+        assert cuerpo["parse_errors"][0]["reason"] == "value is None"
+
+    def test_shortcut_con_muestras_sigue_diciendo_que_va_bien(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest/simple?token=health-token",
+                             json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}]).json()
+        assert cuerpo["ok"] is True
+        assert cuerpo["upserted"] == 1
+
+
 class TestUpsertContraLaRestriccionCorrecta:
     """El upsert debe apuntar a unique(metric_date, metric_name), no a la clave primaria.
 
