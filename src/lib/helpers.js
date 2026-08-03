@@ -297,6 +297,198 @@ export function splitCompare(pares, { umbral = null, minPorGrupo = 3 } = {}) {
   };
 }
 
+// ── Catálogo de cruces entre series ─────────────────────────────
+// Los cruces estaban escritos a mano, uno detrás de otro, dentro de
+// healthConclusions. Al declararlos aquí, el MISMO cruce sirve para dos ventanas
+// distintas sin duplicar la fórmula: la de 30 días que alimenta las conclusiones del
+// día a día, y la larga (hasta un año) del panel de patrones. Antes, ampliar la
+// ventana habría significado tener dos copias de cada fórmula que se podían
+// desincronizar y llegar a decir cosas contrarias en la misma pantalla.
+//
+// Cada entrada declara qué serie enfrenta a cuál, con qué desfase, a partir de qué
+// efecto merece contarse, y cómo se redacta. `minEfecto` va por cruce porque no
+// todos tienen la misma escala: un 3% en la FC en reposo es mucho, un 3% en el
+// sueño profundo es ruido.
+
+const _serieSueno = h => findMetric(h, "sleep_analysis", "sleep")
+  .filter(d => !d.extra?.excluded)
+  .map(d => ({ ...d, value: sleepHours(d) }))
+  .filter(d => d.value > 0);
+
+const _serieProfundo = h => _serieSueno(h)
+  .filter(d => Number(d.extra?.deep) > 0)
+  .map(d => ({ date: d.date, value: Number(d.extra.deep) }));
+
+const _positiva = (...nombres) => h => findMetric(h, ...nombres).filter(d => d.value > 0);
+
+const _r = n => Math.round(n);
+const _miles = n => _r(n).toLocaleString("es");
+
+const _CRUCES = [
+  {
+    id: "acostarse_hrv",
+    // No pasa por pairByDate/splitCompare: agrupa por hora de acostarse, no por
+    // mediana de un valor continuo. Por eso trae su propio cálculo.
+    calcular: (h, { minPorGrupo }) => {
+      const r = bedtimeHrvInsight(findMetric(h, "sleep_analysis", "sleep"),
+        _positiva("heart_rate_variability", "heartRateVariability")(h));
+      if (!r || r.earlyN < minPorGrupo || r.lateN < minPorGrupo) return null;
+      return { ...r, altoN: r.earlyN, bajoN: r.lateN, n: r.earlyN + r.lateN };
+    },
+    minEfecto: 5,
+    texto: r => ({
+      tone: "info",
+      text: `Las noches que te acuestas antes de la 01:00 tu HRV es un ${r.deltaPct > 0 ? "+" : ""}${_r(r.deltaPct)}% ${r.deltaPct > 0 ? "más alta" : "más baja"} (${r.earlyN} vs ${r.lateN} noches).`,
+    }),
+  },
+  {
+    // Desfase 1: el sueño de la noche del día D queda registrado en la fecha D+1.
+    id: "pasos_sueno",
+    causa: _positiva("step_count", "steps"),
+    efecto: _serieSueno,
+    desfase: 1,
+    minEfecto: 5,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "good" : "info",
+      text: `Los días que superas los ${_miles(r.corte)} pasos duermes ${hoursToHM(r.altoAvg)} frente a ${hoursToHM(r.bajoAvg)} — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más" : "menos"} (${r.altoN} vs ${r.bajoN} días).`,
+    }),
+  },
+  {
+    // Umbral 0: separa los días con entreno de los de descanso.
+    id: "entreno_rhr",
+    causa: h => findMetric(h, "workouts", "workout"),
+    efecto: _positiva("resting_heart_rate"),
+    desfase: 1,
+    umbral: 0,
+    minEfecto: 3,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "info" : "good",
+      text: `El día después de entrenar tu FC en reposo ${r.deltaPct > 0 ? "sube" : "baja"} a ${_r(r.altoAvg)} bpm frente a ${_r(r.bajoAvg)} los días de descanso${r.deltaPct > 0 ? " — es el coste normal del esfuerzo, salvo que se mantenga días" : " — señal de que estás asimilando bien la carga"}.`,
+    }),
+  },
+  {
+    id: "luz_sueno",
+    causa: _positiva("time_in_daylight"),
+    efecto: _serieSueno,
+    desfase: 1,
+    minEfecto: 5,
+    // Solo se cuenta si va a favor: que dormir menos con más luz sería un hallazgo
+    // raro, y casi siempre es ruido de muestra pequeña.
+    soloPositivo: true,
+    texto: r => ({
+      tone: "good",
+      text: `Los días que pasas más de ${_r(r.corte)} min al aire libre duermes ${hoursToHM(r.altoAvg)} frente a ${hoursToHM(r.bajoAvg)} — la luz de día ordena el ritmo circadiano.`,
+    }),
+  },
+  {
+    // El sueño profundo es la fase que más se asocia a la recuperación física, así
+    // que es donde debería notarse el ejercicio. Se cruza contra los minutos y no
+    // contra "entrené sí/no" porque aquí importa la dosis, no el hecho.
+    id: "ejercicio_profundo",
+    causa: _positiva("apple_exercise_time", "exercise_time"),
+    efecto: _serieProfundo,
+    desfase: 1,
+    minEfecto: 8,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "good" : "info",
+      text: `Los días que pasas de ${_r(r.corte)} min de ejercicio duermes ${hoursToHM(r.altoAvg)} de sueño profundo frente a ${hoursToHM(r.bajoAvg)} — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más" : "menos"} (${r.altoN} vs ${r.bajoN} días).`,
+    }),
+  },
+  {
+    // Complementa el cruce de entrenos: recoge la carga del día a día (andar mucho),
+    // que no aparece como entrenamiento pero también deja huella al día siguiente.
+    id: "pasos_rhr",
+    causa: _positiva("step_count", "steps"),
+    efecto: _positiva("resting_heart_rate"),
+    desfase: 1,
+    minEfecto: 3,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "info" : "good",
+      text: `Tras los días de más de ${_miles(r.corte)} pasos tu FC en reposo ${r.deltaPct > 0 ? "sube" : "baja"} a ${_r(r.altoAvg)} bpm frente a ${_r(r.bajoAvg)}${r.deltaPct > 0 ? " — moverte mucho también es carga" : " — el movimiento suave te está sentando bien"}.`,
+    }),
+  },
+  {
+    // La luz de día ordena el ritmo circadiano, y eso se ve tanto en cuánto duermes
+    // (cruce de arriba) como en cómo te recuperas esa noche.
+    id: "luz_hrv",
+    causa: _positiva("time_in_daylight"),
+    efecto: _positiva("heart_rate_variability", "heartRateVariability"),
+    desfase: 1,
+    minEfecto: 5,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "good" : "info",
+      text: `Los días con más de ${_r(r.corte)} min de luz natural tu HRV nocturna es de ${_r(r.altoAvg)}ms frente a ${_r(r.bajoAvg)}ms — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más alta" : "más baja"} (${r.altoN} vs ${r.bajoN} días).`,
+    }),
+  },
+  {
+    // Lo que peor se ve mirando una sola métrica: dormir poco hoy y recuperarse peor
+    // mañana. Solo aparece con ventana larga porque hacen falta bastantes noches
+    // malas para que los dos grupos tengan muestra suficiente.
+    id: "sueno_hrv",
+    causa: _serieSueno,
+    efecto: _positiva("heart_rate_variability", "heartRateVariability"),
+    desfase: 1,
+    minEfecto: 5,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "info" : "warn",
+      text: `Las noches que duermes más de ${hoursToHM(r.corte)} tu HRV del día siguiente es de ${_r(r.altoAvg)}ms frente a ${_r(r.bajoAvg)}ms — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más alta" : "más baja"} (${r.altoN} vs ${r.bajoN} noches).`,
+    }),
+  },
+  {
+    id: "sueno_rhr",
+    causa: _serieSueno,
+    efecto: _positiva("resting_heart_rate"),
+    desfase: 1,
+    minEfecto: 3,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "warn" : "good",
+      text: `Tras dormir más de ${hoursToHM(r.corte)} tu FC en reposo queda en ${_r(r.altoAvg)} bpm frente a ${_r(r.bajoAvg)} las noches cortas (${r.altoN} vs ${r.bajoN} noches).`,
+    }),
+  },
+];
+
+// Ejecuta el catálogo de cruces sobre las series que se le den.
+//
+// `minPorGrupo` es la palanca que separa los dos usos: con 3 (por defecto) sirve para
+// la ventana de 30 días de las conclusiones diarias; el panel de patrones lo sube
+// porque con un año de datos un grupo de 3 días ya no es un hallazgo, es una
+// casualidad que la muestra grande debería haber diluido.
+//
+// Devuelve, por cruce que supere el listón: el texto ya redactado, el tamaño de
+// muestra y el efecto — para poder ordenarlos por fuerza y para que quien lo lea
+// juzgue cuánto fiarse.
+export function healthCorrelations(healthData, { minPorGrupo = 3 } = {}) {
+  const salida = [];
+  for (const cruce of _CRUCES) {
+    let r;
+    if (cruce.calcular) {
+      r = cruce.calcular(healthData, { minPorGrupo });
+    } else {
+      const pares = pairByDate(cruce.causa(healthData), cruce.efecto(healthData), cruce.desfase);
+      r = splitCompare(pares, { umbral: cruce.umbral ?? null, minPorGrupo });
+      if (r) r = { ...r, n: r.altoN + r.bajoN };
+    }
+    if (!r) continue;
+    if (cruce.soloPositivo ? r.deltaPct < cruce.minEfecto : Math.abs(r.deltaPct) < cruce.minEfecto) continue;
+    const { tone, text } = cruce.texto(r);
+    salida.push({ id: cruce.id, domain: "Patrón", tone, text, deltaPct: r.deltaPct, n: r.n });
+  }
+  // Lo que más se desvía primero: con varios patrones a la vez, el orden por fuerza
+  // del efecto es el que pone arriba lo que de verdad mueve la aguja.
+  salida.sort((a, b) => Math.abs(b.deltaPct) - Math.abs(a.deltaPct));
+  return salida;
+}
+
+// Días distintos con dato en la serie más larga: es el respaldo real del análisis,
+// que no tiene por qué coincidir con los días pedidos a la API (puede haber huecos).
+export function healthCoverageDays(healthData) {
+  const fechas = new Set();
+  for (const serie of Object.values(healthData || {})) {
+    for (const d of serie || []) if (d?.date) fechas.add(d.date);
+  }
+  return fechas.size;
+}
+
 // ── Análisis de salud: conclusiones en lenguaje claro ───────────
 // Motor puro que exprime TODAS las métricas del Apple Watch y devuelve
 // conclusiones accionables (no solo números). Cada una lleva dominio, tono
@@ -407,71 +599,10 @@ export function healthConclusions(healthData, now = new Date()) {
       `${count} entrenamiento${count !== 1 ? "s" : ""} en los últimos 7 días${count >= 4 ? " — buen ritmo" : count === 0 ? " — toca moverse" : ""}.`);
   }
 
-  // ── Patrón: hora de acostarse ↔ HRV ──
-  const insight = bedtimeHrvInsight(findMetric(healthData, "sleep_analysis", "sleep"), hrv);
-  if (insight && Math.abs(insight.deltaPct) >= 5) {
-    push("Patrón", "info", `Las noches que te acuestas antes de la 01:00 tu HRV es un ${insight.deltaPct > 0 ? "+" : ""}${round(insight.deltaPct)}% ${insight.deltaPct > 0 ? "más alta" : "más baja"} (${insight.earlyN} vs ${insight.lateN} noches).`);
-  }
-
-  // ── Patrón: pasos del día ↔ sueño de esa noche ──
-  // Desfase 1: el sueño de la noche del día D queda registrado en la fecha D+1.
-  const pasosSueno = splitCompare(pairByDate(steps, sleep, 1));
-  if (pasosSueno && Math.abs(pasosSueno.deltaPct) >= 5) {
-    const mas = pasosSueno.deltaPct > 0;
-    push("Patrón", mas ? "good" : "info",
-      `Los días que superas los ${round(pasosSueno.corte).toLocaleString("es")} pasos duermes ${hoursToHM(pasosSueno.altoAvg)} frente a ${hoursToHM(pasosSueno.bajoAvg)} — un ${Math.abs(round(pasosSueno.deltaPct))}% ${mas ? "más" : "menos"} (${pasosSueno.altoN} vs ${pasosSueno.bajoN} días).`);
-  }
-
-  // ── Patrón: entrenar ↔ FC en reposo del día siguiente ──
-  // Umbral 0: separa los días con entreno de los de descanso.
-  const entrenoRhr = splitCompare(pairByDate(work, rhr, 1), { umbral: 0 });
-  if (entrenoRhr && Math.abs(entrenoRhr.deltaPct) >= 3) {
-    const sube = entrenoRhr.deltaPct > 0;
-    push("Patrón", sube ? "info" : "good",
-      `El día después de entrenar tu FC en reposo ${sube ? "sube" : "baja"} a ${round(entrenoRhr.altoAvg)} bpm frente a ${round(entrenoRhr.bajoAvg)} los días de descanso${sube ? " — es el coste normal del esfuerzo, salvo que se mantenga días" : " — señal de que estás asimilando bien la carga"}.`);
-  }
-
-  // ── Patrón: luz natural ↔ sueño de esa noche ──
-  const luz = findMetric(healthData, "time_in_daylight").filter(d => d.value > 0);
-  const luzSueno = splitCompare(pairByDate(luz, sleep, 1));
-  if (luzSueno && luzSueno.deltaPct >= 5) {
-    push("Patrón", "good",
-      `Los días que pasas más de ${round(luzSueno.corte)} min al aire libre duermes ${hoursToHM(luzSueno.altoAvg)} frente a ${hoursToHM(luzSueno.bajoAvg)} — la luz de día ordena el ritmo circadiano.`);
-  }
-
-  // ── Patrón: minutos de ejercicio ↔ sueño profundo de esa noche ──
-  // El sueño profundo es la fase que más se asocia a la recuperación física, así que
-  // es donde debería notarse el ejercicio. Se cruza contra los minutos en vez de
-  // contra "entrené sí/no" porque aquí importa la dosis, no el hecho.
-  const profundo = sleep
-    .filter(d => Number(d.extra?.deep) > 0)
-    .map(d => ({ date: d.date, value: Number(d.extra.deep) }));
-  const ejercicioProfundo = splitCompare(pairByDate(ex, profundo, 1));
-  if (ejercicioProfundo && Math.abs(ejercicioProfundo.deltaPct) >= 8) {
-    const mas = ejercicioProfundo.deltaPct > 0;
-    push("Patrón", mas ? "good" : "info",
-      `Los días que pasas de ${round(ejercicioProfundo.corte)} min de ejercicio duermes ${hoursToHM(ejercicioProfundo.altoAvg)} de sueño profundo frente a ${hoursToHM(ejercicioProfundo.bajoAvg)} — un ${Math.abs(round(ejercicioProfundo.deltaPct))}% ${mas ? "más" : "menos"} (${ejercicioProfundo.altoN} vs ${ejercicioProfundo.bajoN} días).`);
-  }
-
-  // ── Patrón: pasos ↔ FC en reposo del día siguiente ──
-  // Complementa el cruce de entrenos: recoge la carga del día a día (andar mucho),
-  // que no aparece como entrenamiento pero también deja huella al día siguiente.
-  const pasosRhr = splitCompare(pairByDate(steps, rhr, 1));
-  if (pasosRhr && Math.abs(pasosRhr.deltaPct) >= 3) {
-    const sube = pasosRhr.deltaPct > 0;
-    push("Patrón", sube ? "info" : "good",
-      `Tras los días de más de ${round(pasosRhr.corte).toLocaleString("es")} pasos tu FC en reposo ${sube ? "sube" : "baja"} a ${round(pasosRhr.altoAvg)} bpm frente a ${round(pasosRhr.bajoAvg)}${sube ? " — moverte mucho también es carga" : " — el movimiento suave te está sentando bien"}.`);
-  }
-
-  // ── Patrón: luz natural ↔ HRV de esa noche ──
-  // La luz de día ordena el ritmo circadiano, y eso se ve tanto en cuánto duermes
-  // (cruce de arriba) como en cómo te recuperas esa noche.
-  const luzHrv = splitCompare(pairByDate(luz, hrv, 1));
-  if (luzHrv && Math.abs(luzHrv.deltaPct) >= 5) {
-    const mejor = luzHrv.deltaPct > 0;
-    push("Patrón", mejor ? "good" : "info",
-      `Los días con más de ${round(luzHrv.corte)} min de luz natural tu HRV nocturna es de ${round(luzHrv.altoAvg)}ms frente a ${round(luzHrv.bajoAvg)}ms — un ${Math.abs(round(luzHrv.deltaPct))}% ${mejor ? "más alta" : "más baja"} (${luzHrv.altoN} vs ${luzHrv.bajoN} días).`);
-  }
+  // ── Patrones (cruces entre series) ──
+  // Todos salen del catálogo `_CRUCES`, para que el panel de patrones de ventana
+  // larga use exactamente las mismas fórmulas que estas conclusiones del día a día.
+  for (const p of healthCorrelations(healthData)) push(p.domain, p.tone, p.text);
 
   C.sort((a, b) => _TONE_ORDER[a.tone] - _TONE_ORDER[b.tone]);
   return C;

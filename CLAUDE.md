@@ -40,10 +40,17 @@ cd backend && uvicorn main:app --reload   # http://localhost:8000
 npm run lint && npm test && .venv/bin/python -m pytest tests/backend -q && npm run build
 ```
 
-Además hay CI (`.github/workflows/ci.yml`): ejecuta exactamente estos cuatro pasos
-en cada push a `main` y en cada PR, en dos jobs paralelos (frontend / backend). No
+Además hay CI (`.github/workflows/ci.yml`): ejecuta esos cuatro pasos en cada push a
+`main` y en cada PR, en **tres jobs paralelos** (frontend / backend / E2E). No
 despliega nada — el deploy de Vercel sigue siendo el check aparte que ya había, y
 el del backend sigue siendo manual (ver "Qué NO hacer").
+
+```bash
+npm run test:e2e          # Playwright: navegador real contra el build + backend real
+```
+
+El E2E no entra en la verificación obligatoria de arriba porque tarda bastante más
+(construye, levanta dos servidores y abre un navegador). En CI sí corre siempre.
 
 ## Arquitectura
 
@@ -76,6 +83,7 @@ Ficheros clave:
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
 | `tests/frontend/setup.js` | Stubs de `matchMedia` y `Notification` que jsdom no implementa |
+| `tests/e2e/servidor_pruebas.py` | Backend REAL con los servicios externos simulados, para el E2E. Importa `main.py` tal cual y solo sustituye `main.http` |
 
 ## Backend: modelo de seguridad (invariantes — no las relajes nunca)
 
@@ -310,7 +318,20 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
   `helpers.js`: `healthConclusions` (exprime todas las métricas del Watch y
   devuelve conclusiones `{domain, tone, text}`), `healthOverall` (veredicto),
   apoyándose en `seriesTrend`/`trendDirection`/`bedtimeHrvInsight` y en
-  `pairByDate`/`splitCompare` para los cruces entre series. La puntuación de
+  `pairByDate`/`splitCompare` para los cruces entre series.
+  - **Cruces entre series**: todos salen del catálogo `_CRUCES` y los ejecuta
+    `healthCorrelations()`. No los escribas a mano sueltos: el mismo cruce se usa con
+    DOS ventanas —los últimos 30 días para las conclusiones del día a día, y hasta un
+    año para el panel "Patrones a largo plazo" del modal— y tenerlos en un solo sitio
+    es lo que evita que las dos versiones se desincronicen y lleguen a decir cosas
+    contrarias en la misma pantalla. La palanca que las separa es `minPorGrupo` (3
+    para el día a día; `HEALTH_MIN_MUESTRA_PATRONES` para la ventana larga, mucho más
+    exigente porque con un año de datos un grupo de 3 días es casualidad, no
+    hallazgo). El histórico largo se pide APARTE y solo al abrir el modal
+    (`HEALTH_DIAS_PATRONES`): un año de métricas no debe pagarlo la carga inicial.
+    Cada cruce lleva su propio `minEfecto` porque no comparten escala: un 3% en la FC
+    en reposo es mucho y un 3% en sueño profundo es ruido.
+  La puntuación de
   bienestar también vive allí: `wellnessBreakdown` construye el desglose y
   `scoreFromBreakdown` deriva de él el total normalizado a 100 — **el desglose es la
   única fuente de verdad, nunca sumes al score por separado**.
@@ -395,7 +416,7 @@ LOGIN SCREEN → HELPERS → ESTILOS GLOBALES (`GLOBAL_CSS`, variables CSS `--bg
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 250 tests)
+### Backend (`tests/backend`, 293 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -414,7 +435,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 71 tests)
+### Frontend (`tests/frontend`, 81 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -428,6 +449,31 @@ Trampas conocidas de jsdom:
   fallo** — asegura el comportamiento comprobando `localStorage` en su lugar.
 - El test de login renderiza el `Dashboard` completo: cualquier error de runtime en
   el camino de montaje del componente hará fallar esos tests. Es intencionado.
+
+### E2E (`tests/e2e`, Playwright)
+
+`npm run test:e2e`. Navegador real contra el **build de producción** servido por
+`vite preview` y el **backend de verdad** — no una imitación:
+`tests/e2e/servidor_pruebas.py` importa `backend/main.py` tal cual y solo sustituye
+`main.http` por respuestas fijas (mismo truco que `conftest.py`, pero servido por
+uvicorn). Por eso este job pilla lo que los otros dos no: que el bundle compilado
+arranque, que el contrato entre frontend y backend siga cuadrando, y que no haya
+errores de runtime al montar. Los tests fallan si el navegador registra **cualquier**
+excepción o error de consola, no solo si falta un texto.
+
+- `playwright.config.js` arranca y apaga los dos servidores solo. `VITE_API_URL` se
+  hornea en el bundle, así que el build se hace apuntando ya al backend de pruebas.
+- **Los datos del simulador no son de adorno**: llevan una correlación plantada
+  (pasos ↔ sueño) para que el motor de patrones tenga algo que encontrar y el test
+  compruebe que el widget de salud llega a conclusiones, no solo que se pinta.
+- En `_RouterSimulado.RUTAS` **el orden importa**: gana la primera coincidencia y la
+  URL de `calendarView` del calendario de clases contiene `/me/calendars`. Ponerlas al
+  revés hacía que `/calendar/classes` recibiera calendarios donde espera eventos y
+  acabara en un 500 (que además el navegador reporta como error de CORS, porque una
+  excepción sin capturar se salta el middleware que pone las cabeceras).
+- `PLAYWRIGHT_CHROMIUM_PATH` apunta a un Chromium ya instalado en entornos que traen
+  el suyo y no coincide con la versión de Playwright. En CI no se usa: se descarga el
+  que toca.
 
 ## Bugs históricos (no los reintroduzcas)
 

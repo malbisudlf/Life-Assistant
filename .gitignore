@@ -45,3 +45,9 @@ PROJECT_STATE.md
 .venv/
 __pycache__/
 .pytest_cache/
+
+# Playwright (E2E): informes y trazas de cada ejecución
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
