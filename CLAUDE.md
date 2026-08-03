@@ -252,7 +252,13 @@ Ficheros clave:
   intenta una vez por ejecución para no repetir en bucle si falla el claim por red).
   `abrir_streaming` **levanta la VPN antes de lanzar Sunshine** (`conectar_vpn()`,
   Tailscale): el PC lo enciende un WOL sin nadie delante, así que el túnel no está
-  arriba y desde fuera de casa Moonlight no llega. La IP de la tailnet viaja al modal
+  arriba y desde fuera de casa Moonlight no llega. Mismo criterio que con Sunshine:
+  el servicio de Tailscale va en arranque MANUAL para que el PC no tenga la VPN
+  encendida en el día a día, y lo arranca el agente
+  (`arrancar_servicio_tailscale()`, que necesita que la tarea del Programador corra
+  con privilegios elevados). El estado del servicio se consulta con `Get-Service`,
+  no con `sc query`: este último traduce el estado y en un Windows en español
+  devuelve "EN EJECUCIÓN". La IP de la tailnet viaja al modal
   en el mensaje del stage `vpn_ready`, de donde la saca `hostStreaming()` (helpers) —
   no se guarda en ningún sitio. Un fallo de VPN **no tumba el job**: se reporta
   `vpn_error` y se abre Sunshine igual, que en la LAN sigue sirviendo.

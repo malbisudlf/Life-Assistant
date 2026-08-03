@@ -21,6 +21,7 @@ Cowork se encarga de resolver y rellenar — el usuario revisa y envía.
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -81,6 +82,12 @@ SUNSHINE_EXE = os.getenv("SUNSHINE_EXE") or next((p for p in _SUNSHINE_PATHS if 
 # streaming levanta la VPN ANTES de lanzar Sunshine y reporta la IP de la tailnet:
 # es la que hay que meter en Moonlight, y con Tailscale es fija por máquina.
 #
+# Mismo criterio que con Sunshine: el servicio de Tailscale se deja en arranque
+# MANUAL y sin su icono de bandeja, para que en el día a día el PC no tenga nada
+# de esto encendido ni a la vista. Levantarlo es trabajo del agente, así que aquí
+# se arranca el servicio primero y solo después se pide el túnel: `tailscale up`
+# contra un servicio parado falla sin más.
+#
 # VPN_TIPO: "auto" (usa Tailscale si está instalado), "tailscale" (exige que lo
 # esté: si falta, se avisa) o "ninguna" (salta el paso — solo LAN).
 VPN_TIPO = (os.getenv("VPN_TIPO") or "auto").strip().lower()
@@ -90,6 +97,12 @@ _TAILSCALE_PATHS = [
     r"C:\Program Files (x86)\Tailscale\tailscale.exe",
 ]
 TAILSCALE_EXE = os.getenv("TAILSCALE_EXE") or next((p for p in _TAILSCALE_PATHS if os.path.exists(p)), None)
+
+# Servicio de Windows que hay que arrancar antes de pedir el túnel. El nombre se
+# valida porque acaba interpolado en un comando de PowerShell.
+TAILSCALE_SERVICIO = (os.getenv("TAILSCALE_SERVICIO") or "Tailscale").strip()
+if not re.fullmatch(r"[A-Za-z0-9 _.-]{1,64}", TAILSCALE_SERVICIO):
+    raise RuntimeError(f"TAILSCALE_SERVICIO no válido: {TAILSCALE_SERVICIO!r}")
 
 try:
     VPN_TIMEOUT = int(os.getenv("VPN_TIMEOUT") or 60)   # segundos máx esperando al túnel
@@ -438,6 +451,64 @@ def _tailscale(*args, timeout: int = 40):
         return -1, ""
 
 
+def _powershell(comando: str, timeout: int = 40):
+    """Ejecuta un comando de PowerShell. Devuelve (rc, stdout, stderr), sin lanzar."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", comando],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    except Exception as e:
+        log.warning(f"PowerShell falló: {e}")
+        return -1, "", str(e)
+
+
+def estado_servicio_tailscale() -> str:
+    """"Running" / "Stopped" / "" si el servicio no existe.
+
+    Se consulta con Get-Service y no con `sc query` porque este último imprime el
+    estado traducido ("EN EJECUCIÓN") en un Windows en español, y el valor de
+    Get-Service es siempre el del enum en inglés.
+    """
+    _, salida, _ = _powershell(
+        f"(Get-Service -Name '{TAILSCALE_SERVICIO}' -ErrorAction SilentlyContinue).Status"
+    )
+    return salida
+
+
+def arrancar_servicio_tailscale() -> bool:
+    """Arranca el servicio de Tailscale si está parado. True si quedó corriendo.
+
+    El servicio se deja en arranque MANUAL a propósito (así el PC no tiene la VPN
+    encendida en el día a día), de modo que este paso es obligatorio tras cada
+    arranque. Requiere privilegios: la tarea del Programador que lanza el agente
+    tiene que estar marcada como "Ejecutar con los privilegios más altos".
+    """
+    estado = estado_servicio_tailscale()
+    if estado == "Running":
+        return True
+    if not estado:
+        log.warning(f"El servicio '{TAILSCALE_SERVICIO}' no existe (¿Tailscale instalado?).")
+        return False
+
+    log.info(f"Servicio '{TAILSCALE_SERVICIO}' en estado {estado} — arrancándolo...")
+    rc, _, err = _powershell(f"Start-Service -Name '{TAILSCALE_SERVICIO}'")
+    if rc != 0:
+        detalle = "faltan privilegios" if "denied" in err.lower() or "PermissionDenied" in err else err[:200]
+        log.warning(f"No se pudo arrancar el servicio de Tailscale: {detalle}")
+        return False
+
+    # Start-Service vuelve cuando el servicio dice estar arrancado, pero tailscaled
+    # tarda un poco más en aceptar órdenes por su socket local.
+    for _ in range(10):
+        if estado_servicio_tailscale() == "Running":
+            log.info("Servicio de Tailscale arrancado.")
+            return True
+        time.sleep(1)
+    return False
+
+
 def estado_tailscale():
     """(BackendState, IPv4 de la tailnet). Cualquiera de los dos puede ser None.
 
@@ -460,7 +531,7 @@ def estado_tailscale():
 
 
 def conectar_vpn(job_id: str):
-    """Deja la VPN levantada y devuelve la IP para Moonlight (o None).
+    """Arranca el servicio, deja la VPN levantada y devuelve la IP para Moonlight.
 
     NUNCA lanza: sin VPN el streaming sigue sirviendo en la LAN de casa, así que un
     fallo aquí se reporta como aviso y el job continúa hasta abrir Sunshine. Lo que
@@ -476,13 +547,32 @@ def conectar_vpn(job_id: str):
             report_stage(job_id, "vpn_error", aviso)
         return None
 
-    estado, ip = estado_tailscale()
+    # El servicio va en arranque manual, así que lo habitual tras un WOL es que ni
+    # siquiera esté corriendo: sin él, el CLI no tiene con quién hablar y cualquier
+    # consulta de estado devolvería "desconocido".
+    if estado_servicio_tailscale() != "Running":
+        report_stage(job_id, "vpn_connecting", "Arrancando Tailscale")
+        if not arrancar_servicio_tailscale():
+            aviso = (
+                f"No se pudo arrancar el servicio '{TAILSCALE_SERVICIO}'. Revisa que la "
+                "tarea del agente corra con privilegios elevados"
+            )
+            log.warning(f"VPN: {aviso}")
+            report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Sunshine: en la LAN funcionará igual")
+            return None
+        estado, ip = estado_tailscale()
+    else:
+        estado, ip = estado_tailscale()
+        if not (estado == "Running" and ip):
+            report_stage(job_id, "vpn_connecting", "Levantando la VPN")
+
+    # Con el servicio recién arrancado y las preferencias guardadas (--unattended),
+    # el túnel suele subir solo: si ya está, nos ahorramos el `up`.
     if estado == "Running" and ip:
-        log.info(f"VPN ya conectada ({ip}).")
+        log.info(f"VPN conectada ({ip}).")
         report_stage(job_id, "vpn_ready", f"VPN conectada — Moonlight: {ip}")
         return ip
 
-    report_stage(job_id, "vpn_connecting", "Levantando la VPN")
     log.info(f"VPN en estado {estado!r} — conectando...")
     # --unattended: el túnel sigue arriba sin nadie con sesión iniciada, que es
     # exactamente el escenario tras un WOL. --timeout: sin él, `up` con la sesión
