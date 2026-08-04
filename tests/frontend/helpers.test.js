@@ -775,6 +775,42 @@ describe("healthCorrelations", () => {
     expect(Math.abs(r[0].deltaPct)).toBeGreaterThanOrEqual(Math.abs(r[r.length - 1].deltaPct));
   });
 
+  test("cruza las horas fuera de casa (Home Assistant) con el sueño", () => {
+    // Única serie que no viene del Watch: la manda HA. `value` son las horas EN CASA
+    // y extra.fuera las de fuera; el cruce mira las de fuera.
+    const presencia = [], sueno = [];
+    for (let i = 0; i < 40; i++) {
+      const fuera = i % 2 === 0 ? 12 : 2;
+      presencia.push({ date: d(1 + i), value: 24 - fuera, extra: { fuera } });
+      sueno.push({ date: d(2 + i), value: fuera === 12 ? 6.2 : 8.0, extra: {} });
+    }
+    const r = healthCorrelations(
+      { time_at_home: presencia, sleep_analysis: sueno },
+      { minPorGrupo: 10 },
+    );
+    const p = r.find(x => x.id === "fuera_sueno");
+    expect(p).toBeTruthy();
+    expect(p.text).toMatch(/fuera de casa/);
+    expect(p.deltaPct).toBeLessThan(0);   // más horas fuera → menos sueño
+  });
+
+  test("los días sin cobertura de presencia no entran en el cruce", () => {
+    // HA caído media jornada deja el día con pocas horas en las DOS columnas. Sin el
+    // filtro de cobertura se colaría como "día tranquilo en casa", que es lo contrario
+    // de lo que dice el dato: el dato no dice nada.
+    const presencia = [], sueno = [];
+    for (let i = 0; i < 40; i++) {
+      const fuera = i % 2 === 0 ? 12 : 2;
+      presencia.push({ date: d(1 + i), value: 1, extra: { fuera } });   // cobertura ≪ 16 h
+      sueno.push({ date: d(2 + i), value: fuera === 12 ? 6.2 : 8.0, extra: {} });
+    }
+    const r = healthCorrelations(
+      { time_at_home: presencia, sleep_analysis: sueno },
+      { minPorGrupo: 10 },
+    );
+    expect(r.some(x => x.id === "fuera_sueno")).toBe(false);
+  });
+
   test("descarta los efectos por debajo del umbral de cada cruce", () => {
     // Diferencia de sueño mínima (7.0 vs 7.05): no llega al 5% que exige el cruce.
     const { causa, efecto } = series(40, {

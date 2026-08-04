@@ -74,6 +74,13 @@ def _metricas_salud():
                       "value": 56, "unit": "bpm", "extra": {}})
         filas.append({"metric_date": _dia(-i), "metric_name": "apple_exercise_time",
                       "value": 45 if activo else 8, "unit": "min", "extra": {}})
+        # Horas en casa/fuera (las manda Home Assistant, no el Watch). Van en el mismo
+        # sentido que los pasos para que el cruce presencia↔sueño también tenga algo
+        # que encontrar. La suma pasa de COBERTURA_PRESENCIA: si no, el día se
+        # descartaría por falta de cobertura y el cruce nunca aparecería.
+        fuera = 11 if activo else 2
+        filas.append({"metric_date": _dia(-i), "metric_name": "time_at_home",
+                      "value": 24 - fuera, "unit": "hr", "extra": {"fuera": fuera}})
     return filas
 
 
@@ -130,6 +137,14 @@ class _RouterSimulado:
         ("/rest/v1/pc_agents", lambda: _Respuesta([])),
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),
+        # Presencia vigente: el panel de estado la pide y /weather la usa como
+        # ubicación cuando el navegador no da permiso de geolocalización, que es
+        # justo lo que pasa en un Chromium sin cabeza.
+        ("/rest/v1/presence", lambda: _Respuesta([{
+            "zona": "casa", "en_casa": True, "lat": 43.26, "lon": -2.93,
+            "precision_m": 20.0, "fuente": "e2e",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }])),
         # El orden importa: la URL de calendarView del calendario de clases contiene
         # "/me/calendars", así que si la lista de calendarios fuera primero se comería
         # también esa llamada y /calendar/classes recibiría calendarios donde espera

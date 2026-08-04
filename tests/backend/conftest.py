@@ -99,6 +99,7 @@ def _limpiar_estado():
     main._agent_relaunch_pending = False
     main._pc_power_action = None
     main._token_cache = None
+    main._presencia_cache = None
     # El middleware registra todo 4xx/5xx, así que la cola arrastraría entradas de un
     # test al siguiente. `_purgado` también se resetea: es "una purga por proceso".
     with main._registro._lock:
@@ -109,8 +110,8 @@ def _limpiar_estado():
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Estado en memoria limpio entre tests (rate limiting, flags WOL/relanzado y la
-    copia en memoria del token de Graph)."""
+    """Estado en memoria limpio entre tests (rate limiting, flags WOL/relanzado y las
+    copias en memoria del token de Graph y de la presencia)."""
     _limpiar_estado()
     yield
     _limpiar_estado()

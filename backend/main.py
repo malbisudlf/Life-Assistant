@@ -119,6 +119,18 @@ CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calenda
 WEATHER_LAT      = os.getenv("WEATHER_LAT", "40.4168")      # coordenadas para el clima (Open-Meteo)
 WEATHER_LON      = os.getenv("WEATHER_LON", "-3.7038")      # por defecto Madrid
 
+# ── Presencia (la manda Home Assistant) ───────────────────────────────────────
+# Cuánto se considera vigente la última ubicación conocida. Pasado ese plazo NO se usa
+# para geolocalizar nada: HA puede estar caído, sin red o con la app cerrada, y una
+# ubicación de hace seis horas es peor que no tener ninguna — daría el clima de donde
+# estabas, presentado como si fuera el de donde estás. Igual que con la cola de jobs:
+# "no lo sé" no puede disfrazarse de dato.
+PRESENCE_TTL_MINUTES = int(os.getenv("PRESENCE_TTL_MINUTES", "45"))
+# Hueco máximo entre dos avisos que se sigue contabilizando como tiempo en esa zona.
+# Si HA estuvo doce horas sin mandar nada, no sabemos dónde estuviste: ese tramo se
+# descarta en vez de imputarlo entero a la última zona conocida.
+PRESENCE_MAX_GAP_HOURS = float(os.getenv("PRESENCE_MAX_GAP_HOURS", "3"))
+
 # Hosts a los que se permite apuntar `alud_url`. Esa URL sale del cuerpo HTML de un
 # evento de Outlook — dato NO confiable — y termina en `page.goto()` dentro del agente,
 # en un Edge que YA tiene la sesión de Alud/Okta iniciada, cuyo texto se le entrega
@@ -1086,7 +1098,11 @@ def root():
 class DepartureRequest(BaseModel):
     destination: str = Field(max_length=500)
     event_time: str = Field(max_length=50)
-    origin: str = Field(default=HOME_ADDRESS, max_length=500)
+    # Vacío = "resuélvelo tú": el endpoint cae a la ubicación que reporta HA y, si no
+    # la hay o está caducada, a HOME_ADDRESS. No puede tener HOME_ADDRESS como default
+    # del modelo porque entonces "no me mandaron origen" y "me mandaron justo mi casa"
+    # llegarían indistinguibles y la presencia nunca entraría en juego.
+    origin: str = Field(default="", max_length=500)
     mode: str = Field(default="driving")
 
     @field_validator("event_time")
@@ -1113,10 +1129,19 @@ def get_departure_time(
     if not GOOGLE_MAPS_API_KEY:
         raise HTTPException(status_code=500, detail="Google Maps API key no configurada")
 
+    # Orden de preferencia del origen: lo que mande el dispositivo (geolocalización del
+    # navegador) → dónde dice HA que estás → HOME_ADDRESS. El segundo escalón es el que
+    # arregla el caso real: en el móvil, con el navegador sin permiso de ubicación, la
+    # hora de salida se calculaba desde casa aunque estuvieras en la universidad.
+    origen = body.origin
+    if not origen:
+        coords = coords_presencia()
+        origen = f"{coords[0]},{coords[1]}" if coords else HOME_ADDRESS
+
     # Calcular cuánto tarda en llegar
     url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     params = {
-        "origins": body.origin,
+        "origins": origen,
         "destinations": body.destination,
         "mode": body.mode,
         "language": "es",
@@ -1176,10 +1201,18 @@ def get_weather(
     lon: float | None = None,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    """Clima actual + máx/mín de hoy vía Open-Meteo (gratis, sin API key). Si el
-    dispositivo manda lat/lon (geolocalización del navegador) se usan esas; si no,
-    caen a WEATHER_LAT/WEATHER_LON. El código WMO lo traduce el frontend a
-    icono/texto (helpers.weatherFromCode)."""
+    """Clima actual + máx/mín de hoy vía Open-Meteo (gratis, sin API key). El código
+    WMO lo traduce el frontend a icono/texto (helpers.weatherFromCode).
+
+    Tres escalones de ubicación, de más a menos fiable: lo que manda el dispositivo
+    (geolocalización del navegador) → dónde dice HA que estás → WEATHER_LAT/LON. El de
+    en medio es el que hace que el resumen diario, que no tiene navegador detrás, deje
+    de dar siempre el tiempo de casa.
+    """
+    if lat is None or lon is None:
+        coords = coords_presencia()
+        if coords:
+            lat, lon = coords
     latitude  = lat if lat is not None else WEATHER_LAT
     longitude = lon if lon is not None else WEATHER_LON
     r = http.get(
@@ -2540,6 +2573,240 @@ def add_training_payment(
     return {"ok": True, "payment": r.json()[0]}
 
 
+# ── PRESENCIA (la manda Home Assistant) ───────────────────────────────────────
+# Único punto del sistema donde HA EMPUJA un dato en vez de sondear: aquí el que sabe
+# es HA (tiene el device_tracker de la app del móvil) y el que necesita saber es el
+# backend, así que el patrón pull del resto de la integración no sirve — el backend no
+# puede llamar a HA, que vive en la LAN y no está expuesto (el mismo mixed content que
+# obligó a que el WOL pasara por aquí).
+#
+# Se guarda en Supabase y no en un flag de módulo por lo mismo que los intentos de
+# login: Fly escala a cero. La diferencia con los flags de WOL/apagado es que aquellos
+# son ÓRDENES pendientes (perderlas en un cold start solo cuesta volver a pulsar el
+# botón) y esto es ESTADO (perderlo deja al dashboard sin saber dónde estás hasta que
+# te muevas de zona, que puede ser mañana).
+
+PRESENCE_URL = f"{SUPABASE_URL}/rest/v1/presence"
+PRESENCE_ID  = "actual"
+# Nombre de la métrica diaria derivada. Va a health_metrics y no a una tabla propia
+# para que entre sola en /health/metrics y, con ella, en el motor de correlaciones del
+# frontend (`_CRUCES` en helpers.js) sin tener que abrirle otra vía de datos.
+PRESENCE_METRIC = "time_at_home"
+# Zonas de HA que cuentan como "en casa" si el aviso no trae `en_casa` explícito.
+ZONAS_CASA = {"home", "casa"}
+
+# Copia en memoria, igual que la del token de Graph y por el mismo motivo: /weather y
+# /maps/departure la consultan en cada carga del dashboard y el dato solo cambia cuando
+# HA manda un aviso, momento en el que esta copia se actualiza sola.
+_presencia_cache: dict | None = None
+_presencia_lock = threading.Lock()
+
+
+def _cachear_presencia(data: dict | None):
+    global _presencia_cache
+    with _presencia_lock:
+        _presencia_cache = data
+
+
+def _leer_presencia() -> dict | None:
+    with _presencia_lock:
+        if _presencia_cache is not None:
+            return _presencia_cache
+    r = http.get(
+        f"{PRESENCE_URL}?id=eq.{PRESENCE_ID}&select=zona,en_casa,lat,lon,precision_m,fuente,updated_at",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Presencia: no se pudo leer (%s)", r.status_code)
+        return None
+    filas = r.json()
+    if not filas:
+        return None
+    _cachear_presencia(filas[0])
+    return filas[0]
+
+
+def _edad_presencia(p: dict) -> float | None:
+    """Minutos desde el último aviso, o None si el timestamp no se puede leer."""
+    try:
+        visto = datetime.fromisoformat((p.get("updated_at") or "").replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if visto.tzinfo is None:
+        visto = visto.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - visto).total_seconds() / 60
+
+
+def presencia_vigente() -> dict | None:
+    """La ubicación actual solo si es reciente (PRESENCE_TTL_MINUTES).
+
+    Un dato caducado NO se devuelve: quien llama lo usa para geolocalizar, y dar el
+    clima de donde estabas hace horas como si fuera el de donde estás es peor que caer
+    a las coordenadas de casa, que al menos son un default declarado.
+    """
+    p = _leer_presencia()
+    if not p:
+        return None
+    edad = _edad_presencia(p)
+    if edad is None or edad > PRESENCE_TTL_MINUTES:
+        return None
+    return p
+
+
+def coords_presencia() -> tuple[float, float] | None:
+    """(lat, lon) actuales, o None. Hay device_trackers sin GPS: la zona puede ser
+    conocida y las coordenadas no."""
+    p = presencia_vigente()
+    if not p or p.get("lat") is None or p.get("lon") is None:
+        return None
+    return float(p["lat"]), float(p["lon"])
+
+
+def _tramos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, float]]:
+    """Trocea [inicio, fin) por día LOCAL → [(YYYY-MM-DD, horas), ...].
+
+    Sin trocear, el tramo que cruza la medianoche se imputaría entero al día en que
+    empezó — y ese tramo es justo el de la noche, el que más pesa en cualquier cruce
+    con el sueño."""
+    tramos: list[tuple[str, float]] = []
+    cursor = inicio.astimezone(LOCAL_TZ)
+    final  = fin.astimezone(LOCAL_TZ)
+    while cursor < final:
+        # Medianoche local del día siguiente. Se calcula sumando el día ANTES de poner
+        # la hora a cero para que un cambio de hora no deje el corte en las 23:00.
+        siguiente = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        corte = min(siguiente, final)
+        horas = (corte - cursor).total_seconds() / 3600
+        if horas > 0:
+            tramos.append((cursor.date().isoformat(), horas))
+        cursor = corte
+    return tramos
+
+
+def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
+    """Suma el tramo transcurrido a la métrica diaria `time_at_home`.
+
+    Se guardan HORAS, nunca lugares: la serie sirve para cruzarla con sueño y HRV, y
+    para eso basta cuánto tiempo estuviste en casa. `value` son las horas en casa y
+    `extra.fuera` las de fuera, así que un día con pocos avisos se distingue de uno
+    entero en la calle (los dos tendrían value≈0, pero solo el segundo tiene fuera>0).
+    """
+    horas_hueco = (hasta - desde).total_seconds() / 3600
+    if horas_hueco <= 0 or horas_hueco > PRESENCE_MAX_GAP_HOURS:
+        return
+
+    tramos = _tramos_por_dia(desde, hasta)
+    if not tramos:
+        return
+    existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
+
+    agrupadas = {}
+    for fecha, horas in tramos:
+        fila  = existentes.get((fecha, PRESENCE_METRIC)) or {}
+        extra = dict(fila.get("extra") or {})
+        casa  = float(fila.get("value") or 0)
+        fuera = float(extra.get("fuera") or 0)
+        if en_casa:
+            casa += horas
+        else:
+            fuera += horas
+        extra["fuera"] = round(fuera, 3)
+        agrupadas[(fecha, PRESENCE_METRIC)] = {
+            "value": round(casa, 3),
+            "unit":  "hr",
+            "extra": extra,
+        }
+
+    try:
+        _guardar_metricas(agrupadas)
+    except HTTPException:
+        # La serie diaria es un derivado: que no se pueda escribir no puede tumbar el
+        # aviso de presencia, cuyo efecto principal (saber dónde estás AHORA) sí ha
+        # funcionado. _guardar_metricas ya lo ha registrado.
+        pass
+
+
+class PresenciaRequest(BaseModel):
+    zona: str = Field(max_length=64)
+    en_casa: bool | None = None
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    precision_m: float | None = Field(default=None, ge=0, le=100000)
+    fuente: str = Field(default="ha_companion", max_length=32)
+
+
+@app.post("/ha/presencia")
+def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
+    """HA manda aquí cada cambio de zona Y un aviso periódico de refresco.
+
+    Los dos hacen falta: solo con los cambios, un dato se quedaría vigente durante
+    horas sin que nadie confirme que HA sigue vivo, y el TTL nunca podría distinguir
+    "sigues en casa" de "HA se cayó". El periódico es el que hace que el silencio
+    signifique algo.
+    """
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    zona    = body.zona.strip() or "desconocida"
+    en_casa = body.en_casa if body.en_casa is not None else zona.lower() in ZONAS_CASA
+    ahora   = datetime.now(timezone.utc)
+
+    # El tramo que acaba ahora se atribuye a donde se estaba ANTES, no a donde se está.
+    anterior = _leer_presencia()
+    if anterior:
+        try:
+            desde = datetime.fromisoformat((anterior.get("updated_at") or "").replace("Z", "+00:00"))
+            if desde.tzinfo is None:
+                desde = desde.replace(tzinfo=timezone.utc)
+            _acumular_presencia(desde, ahora, bool(anterior.get("en_casa")))
+        except (ValueError, AttributeError):
+            logger.warning("Presencia: updated_at anterior ilegible, no se acumula el tramo")
+
+    fila = {
+        "id":          PRESENCE_ID,
+        "zona":        zona,
+        "en_casa":     en_casa,
+        "lat":         body.lat,
+        "lon":         body.lon,
+        "precision_m": body.precision_m,
+        "fuente":      body.fuente,
+        "updated_at":  ahora.isoformat(),
+    }
+    r = http.post(
+        f"{PRESENCE_URL}?on_conflict=id",
+        headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+        json=[fila],
+    )
+    # Quien llama es una automatización de HA que no mira el cuerpo: un fallo de
+    # escritura tiene que salir como error HTTP, no escondido en una clave del JSON.
+    if r.status_code >= 300:
+        logger.error("Presencia: no se pudo guardar (%s)", r.status_code)
+        raise _supabase_error(r)
+
+    _cachear_presencia({k: v for k, v in fila.items() if k != "id"})
+    return {"ok": True, "zona": zona, "en_casa": en_casa}
+
+
+@app.get("/presencia")
+def get_presencia(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Lo que pinta la fila de presencia del panel de estado. Devuelve el dato aunque
+    esté caducado, marcándolo: "hace 6 h en casa" y "no se sabe" son cosas distintas y
+    el panel tiene que poder decir cuál de las dos es."""
+    p = _leer_presencia()
+    if not p:
+        return {"conocida": False}
+    edad = _edad_presencia(p)
+    return {
+        "conocida":     True,
+        "zona":         p.get("zona"),
+        "en_casa":      bool(p.get("en_casa")),
+        "hace_minutos": round(edad) if edad is not None else None,
+        "vigente":      edad is not None and edad <= PRESENCE_TTL_MINUTES,
+        "ttl_minutos":  PRESENCE_TTL_MINUTES,
+        "tiene_coords": p.get("lat") is not None and p.get("lon") is not None,
+    }
+
+
 # ── RESUMEN DIARIO POR CORREO ─────────────────────────────────────────────────
 # Reúne agenda, clima, salud y entrenamiento del día y los manda por correo COMO
 # DATOS CRUDOS, sin interpretarlos. El consumidor es la rutina de Claude Code que
@@ -2697,15 +2964,17 @@ def construir_brief() -> dict:
     # usa ese parámetro, lo resuelve FastAPI solo cuando entra por HTTP. Así el resumen
     # hereda la normalización de fechas, el filtrado de alud_url y el manejo de errores
     # que ya tienen, en vez de duplicar sus consultas.
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         f_eventos = pool.submit(get_events, credentials=None)
         f_clases  = pool.submit(get_class_events, credentials=None)
         f_clima   = pool.submit(_brief_clima)
         f_salud   = pool.submit(_brief_salud)
         f_entren  = pool.submit(_brief_entrenamiento)
+        f_presen  = pool.submit(_brief_presencia)
         eventos = _sin_error(f_eventos.result(), "events")
         clases  = _sin_error(f_clases.result(), "events")
         clima, salud, entrenamiento = f_clima.result(), f_salud.result(), f_entren.result()
+        presencia = f_presen.result()
 
     hoy = datetime.now(LOCAL_TZ).date()
 
@@ -2758,6 +3027,7 @@ def construir_brief() -> dict:
         "clima":         clima,
         "salud":         salud,
         "entrenamiento": entrenamiento,
+        "presencia":     presencia,
     }
 
 
@@ -2777,6 +3047,44 @@ def _brief_clima() -> dict:
         "viento":      datos.get("wind"),
         "lluvia_prob": (datos.get("daily") or [{}])[0].get("precip_prob"),
     }
+
+
+def _brief_presencia() -> dict:
+    """Dónde estás ahora y cuántas horas has estado en casa hoy y ayer.
+
+    Va en el correo porque es contexto que cambia cómo se leen el resto de los datos:
+    un día de 3.000 pasos con doce horas fuera no significa lo mismo que uno con doce
+    horas en casa. Nunca sale un lugar concreto: la zona (que la nombras tú en HA) y
+    horas, nada de coordenadas."""
+    ahora = _leer_presencia()
+    salida: dict = {}
+    if ahora:
+        edad = _edad_presencia(ahora)
+        salida.update({
+            "zona":         ahora.get("zona"),
+            "en_casa":      bool(ahora.get("en_casa")),
+            "hace_minutos": round(edad) if edad is not None else None,
+            "vigente":      edad is not None and edad <= PRESENCE_TTL_MINUTES,
+        })
+
+    hoy   = datetime.now(LOCAL_TZ).date()
+    ayer  = hoy - timedelta(days=1)
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics"
+        f"?metric_name=eq.{PRESENCE_METRIC}&metric_date=gte.{ayer.isoformat()}"
+        "&select=metric_date,value,extra",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Resumen diario: horas en casa no disponibles (%s)", r.status_code)
+        return salida
+    por_fecha = {fila["metric_date"]: fila for fila in r.json()}
+    for clave, fecha in (("horas_casa_hoy", hoy), ("horas_casa_ayer", ayer)):
+        fila = por_fecha.get(fecha.isoformat())
+        if fila:
+            salida[clave] = round(float(fila.get("value") or 0), 1)
+            salida[clave.replace("casa", "fuera")] = round(float((fila.get("extra") or {}).get("fuera") or 0), 1)
+    return salida
 
 
 def _brief_entrenamiento() -> dict:
@@ -2855,6 +3163,20 @@ def render_brief_texto(d: dict) -> str:
         )
     else:
         L.append("  (no disponible)")
+    L.append("")
+
+    p = d.get("presencia") or {}
+    L.append("## UBICACIÓN")
+    if p.get("zona"):
+        estado = "en casa" if p.get("en_casa") else f"fuera ({p['zona']})"
+        visto  = f"hace {p['hace_minutos']} min" if p.get("hace_minutos") is not None else "sin fecha"
+        L.append(f"  Ahora {estado} — dato de {visto}{'' if p.get('vigente') else ' (CADUCADO, puede haber cambiado)'}")
+    else:
+        L.append("  (sin datos de presencia)")
+    if p.get("horas_casa_hoy") is not None:
+        L.append(f"  Hoy  {p['horas_casa_hoy']} h en casa · {p.get('horas_fuera_hoy', 0)} h fuera")
+    if p.get("horas_casa_ayer") is not None:
+        L.append(f"  Ayer {p['horas_casa_ayer']} h en casa · {p.get('horas_fuera_ayer', 0)} h fuera")
     L.append("")
 
     s = d["salud"]
