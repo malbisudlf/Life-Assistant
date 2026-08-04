@@ -42,7 +42,7 @@ load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.3.0"
+AGENT_VERSION = "1.4.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
 # Token con el que el agente habla con el backend. AGENT_TOKEN es un token de servicio
@@ -88,6 +88,20 @@ _SUNSHINE_PATHS = [
     r"C:\Program Files (x86)\Sunshine\sunshine.exe",
 ]
 SUNSHINE_EXE = os.getenv("SUNSHINE_EXE") or next((p for p in _SUNSHINE_PATHS if os.path.exists(p)), None)
+
+# Se arranca por su SERVICIO, no ejecutando el .exe. El agente lo lanza el Programador
+# de tareas, que no corre en el escritorio del usuario: `sunshine.exe` arrancado desde
+# ahí se cerraba a los milisegundos sin dejar rastro (ni proceso, ni puertos), mientras
+# el agente reportaba "streaming_ready" tan contento. El servicio existe justo para
+# esto — sabe meter Sunshine en la sesión interactiva activa.
+SUNSHINE_SERVICIO = (os.getenv("SUNSHINE_SERVICIO") or "SunshineService").strip()
+if not re.fullmatch(r"[A-Za-z0-9 _.-]{1,64}", SUNSHINE_SERVICIO):
+    raise RuntimeError(f"SUNSHINE_SERVICIO no válido: {SUNSHINE_SERVICIO!r}")
+
+try:
+    SUNSHINE_TIMEOUT = int(os.getenv("SUNSHINE_TIMEOUT") or 30)   # segundos máx esperando al proceso
+except ValueError:
+    SUNSHINE_TIMEOUT = 30
 
 # ── VPN (Tailscale) ────────────────────────────────────────────────────────────
 # Fuera de casa Moonlight solo llega al PC por la VPN, pero el PC arranca SIN ella:
@@ -526,7 +540,7 @@ def _powershell(comando: str, timeout: int = 40):
         return -1, "", str(e)
 
 
-def estado_servicio_tailscale() -> str:
+def estado_servicio(nombre: str) -> str:
     """"Running" / "Stopped" / "" si el servicio no existe.
 
     Se consulta con Get-Service y no con `sc query` porque este último imprime el
@@ -534,41 +548,54 @@ def estado_servicio_tailscale() -> str:
     Get-Service es siempre el del enum en inglés.
     """
     _, salida, _ = _powershell(
-        f"(Get-Service -Name '{TAILSCALE_SERVICIO}' -ErrorAction SilentlyContinue).Status"
+        f"(Get-Service -Name '{nombre}' -ErrorAction SilentlyContinue).Status"
     )
     return salida
 
 
-def arrancar_servicio_tailscale() -> bool:
-    """Arranca el servicio de Tailscale si está parado. True si quedó corriendo.
+def arrancar_servicio(nombre: str) -> bool:
+    """Arranca un servicio de Windows si está parado. True si quedó corriendo.
 
-    El servicio se deja en arranque MANUAL a propósito (así el PC no tiene la VPN
-    encendida en el día a día), de modo que este paso es obligatorio tras cada
-    arranque. Requiere privilegios: la tarea del Programador que lanza el agente
-    tiene que estar marcada como "Ejecutar con los privilegios más altos".
+    Tanto el de Tailscale como el de Sunshine se dejan en arranque MANUAL a propósito
+    (así el PC no tiene ni la VPN ni el host de streaming encendidos en el día a día),
+    de modo que este paso es obligatorio tras cada arranque. Requiere privilegios: la
+    tarea del Programador que lanza el agente tiene que estar marcada como "Ejecutar
+    con los privilegios más altos".
     """
-    estado = estado_servicio_tailscale()
+    estado = estado_servicio(nombre)
     if estado == "Running":
         return True
     if not estado:
-        log.warning(f"El servicio '{TAILSCALE_SERVICIO}' no existe (¿Tailscale instalado?).")
+        log.warning(f"El servicio '{nombre}' no existe.")
         return False
 
-    log.info(f"Servicio '{TAILSCALE_SERVICIO}' en estado {estado} — arrancándolo...")
-    rc, _, err = _powershell(f"Start-Service -Name '{TAILSCALE_SERVICIO}'")
+    log.info(f"Servicio '{nombre}' en estado {estado} — arrancándolo...")
+    rc, _, err = _powershell(f"Start-Service -Name '{nombre}'")
     if rc != 0:
-        detalle = "faltan privilegios" if "denied" in err.lower() or "PermissionDenied" in err else err[:200]
-        log.warning(f"No se pudo arrancar el servicio de Tailscale: {detalle}")
+        # "Cannot open <servicio> service on computer" es lo que dice Start-Service
+        # cuando el proceso no está elevado: no menciona los permisos por ningún lado.
+        bajo = err.lower()
+        sin_permisos = "denied" in bajo or "permissiondenied" in bajo or "cannot open" in bajo
+        detalle = "faltan privilegios (¿la tarea corre elevada?)" if sin_permisos else err[:200]
+        log.warning(f"No se pudo arrancar el servicio '{nombre}': {detalle}")
         return False
 
-    # Start-Service vuelve cuando el servicio dice estar arrancado, pero tailscaled
-    # tarda un poco más en aceptar órdenes por su socket local.
+    # Start-Service vuelve cuando el servicio dice estar arrancado, pero el demonio de
+    # detrás (tailscaled, el lanzador de Sunshine) tarda un poco más en estar listo.
     for _ in range(10):
-        if estado_servicio_tailscale() == "Running":
-            log.info("Servicio de Tailscale arrancado.")
+        if estado_servicio(nombre) == "Running":
+            log.info(f"Servicio '{nombre}' arrancado.")
             return True
         time.sleep(1)
     return False
+
+
+def estado_servicio_tailscale() -> str:
+    return estado_servicio(TAILSCALE_SERVICIO)
+
+
+def arrancar_servicio_tailscale() -> bool:
+    return arrancar_servicio(TAILSCALE_SERVICIO)
 
 
 def estado_tailscale():
@@ -732,28 +759,75 @@ def accion_resolver_alud(job_id: str, payload: dict):
             pass
 
 
+def sunshine_vivo() -> bool:
+    """True si hay un proceso de Sunshine corriendo ahora mismo.
+
+    Es la comprobación que faltaba: antes se daba por bueno que `Popen` no lanzara
+    excepción, que solo dice que Windows aceptó crear el proceso — no que siga vivo
+    un segundo después. Se mira el proceso y no el puerto porque los puertos de
+    Sunshine son configurables desde su propia interfaz.
+    """
+    _, salida, _ = _powershell(
+        "@(Get-Process -Name sunshine -ErrorAction SilentlyContinue).Count"
+    )
+    return salida.isdigit() and int(salida) > 0
+
+
+def arrancar_sunshine():
+    """Deja Sunshine corriendo. Lanza si no lo consigue.
+
+    Vía servicio, que es la única que funciona cuando al agente lo lanza el
+    Programador de tareas fuera del escritorio del usuario. El `Popen` del .exe se
+    mantiene como respaldo para instalaciones que no registran servicio (portables,
+    algunos builds de Apollo), pero ya no se le cree sin comprobarlo.
+    """
+    if sunshine_vivo():
+        log.info("Sunshine ya estaba corriendo.")
+        return
+
+    if estado_servicio(SUNSHINE_SERVICIO):
+        arrancar_servicio(SUNSHINE_SERVICIO)
+    elif SUNSHINE_EXE:
+        log.info(f"Sin servicio '{SUNSHINE_SERVICIO}' — lanzando {SUNSHINE_EXE} directamente...")
+        # DETACHED: Sunshine sobrevive a la salida del agente y sigue sirviendo el stream.
+        subprocess.Popen(
+            [SUNSHINE_EXE],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        raise RuntimeError(
+            f"No se encontró Sunshine: ni el servicio '{SUNSHINE_SERVICIO}' ni el "
+            "ejecutable (define SUNSHINE_SERVICIO o SUNSHINE_EXE en .env)"
+        )
+
+    limite = time.time() + SUNSHINE_TIMEOUT
+    while time.time() < limite:
+        if sunshine_vivo():
+            log.info("✅ Sunshine corriendo.")
+            return
+        time.sleep(1)
+
+    raise RuntimeError(
+        f"Sunshine no llegó a arrancar en {SUNSHINE_TIMEOUT}s (servicio "
+        f"'{SUNSHINE_SERVICIO}': {estado_servicio(SUNSHINE_SERVICIO) or 'no existe'}). "
+        "Revisa que la tarea del agente corra con privilegios elevados"
+    )
+
+
 def accion_abrir_streaming(job_id: str, payload: dict):
-    """Conecta la VPN y lanza Sunshine para conectar con Moonlight desde el móvil."""
-    if not SUNSHINE_EXE:
-        raise RuntimeError("No se encontró Sunshine instalado (define SUNSHINE_EXE en .env)")
+    """Conecta la VPN y deja Sunshine corriendo para Moonlight desde el móvil."""
     # La VPN primero: Sunshine anuncia sus direcciones al arrancar, así que si el
     # interfaz de Tailscale aparece después, el móvil puede no ver el host hasta
     # reiniciarlo. Además así el modal enseña la IP antes de decir "listo".
     ip_vpn = conectar_vpn(job_id)
-    report_stage(job_id, "streaming_starting", "Lanzando Sunshine")
-    log.info(f"Lanzando Sunshine desde {SUNSHINE_EXE}...")
-    # DETACHED: Sunshine sobrevive a la salida del agente y sigue sirviendo el stream.
-    subprocess.Popen(
-        [SUNSHINE_EXE],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    report_stage(job_id, "streaming_starting", "Arrancando Sunshine")
+    arrancar_sunshine()
     report_stage(
         job_id, "streaming_ready",
-        f"Sunshine abierto — conéctate con Moonlight a {ip_vpn}" if ip_vpn
-        else "Sunshine abierto — conéctate con Moonlight",
+        f"Sunshine listo — conéctate con Moonlight a {ip_vpn}" if ip_vpn
+        else "Sunshine listo — conéctate con Moonlight",
     )
-    log.info("✅ Sunshine lanzado.")
 
 
 ACCIONES = {
@@ -812,7 +886,7 @@ def main():
         sys.exit(1)
 
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
-    log.info(f"Sunshine: {SUNSHINE_EXE or 'NO ENCONTRADO'}")
+    log.info(f"Sunshine: servicio '{SUNSHINE_SERVICIO}' / {SUNSHINE_EXE or 'exe NO ENCONTRADO'}")
     log.info(f"VPN ({VPN_TIPO}): {TAILSCALE_EXE or 'Tailscale NO ENCONTRADO'}")
     if TOKEN_CADUCA:
         log.warning(
