@@ -1647,7 +1647,9 @@ def get_pending_job(_auth = Depends(verify_agente)):
     este endpoint el agente solo necesita el JWT del dashboard, igual que para
     claim/start/finish.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    # Sufijo "Z" y no "+00:00": esto viaja en una query string, donde el "+" significa
+    # espacio, así que PostgREST recibía "...T05:10:01 00:00" y respondía 400 (22007).
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     r = http.get(
         f"{SUPABASE_URL}/rest/v1/jobs?status=eq.pending&created_at=gt.{cutoff}&order=created_at.desc&limit=1",
         headers=supabase_headers(),

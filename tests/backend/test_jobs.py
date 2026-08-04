@@ -84,6 +84,17 @@ class TestPendingJob:
         assert "created_at=gt." in url
         assert "limit=1" in url
 
+    def test_el_corte_no_lleva_un_mas_en_la_query(self, client, auth_headers, mock_requests):
+        """El "+" de "+00:00" es un espacio en una query string: PostgREST recibía
+        "...T05:10:01 00:00" y devolvía 400 (22007), así que /jobs/pending era un 502
+        fijo y el agente no podía recoger ningún job."""
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        client.get("/jobs/pending", headers=auth_headers)
+        url = mock_requests.called("GET", "/rest/v1/jobs")[0][1]
+        corte = url.split("created_at=gt.")[1].split("&")[0]
+        assert "+" not in corte
+        assert corte.endswith("Z")
+
     def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "/rest/v1/jobs", FakeResponse(None, 500, "secreto interno"))
         r = client.get("/jobs/pending", headers=auth_headers)
