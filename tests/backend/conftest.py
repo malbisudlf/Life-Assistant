@@ -17,6 +17,7 @@ os.environ.setdefault("HA_POLL_TOKEN", "ha-poll-token")
 os.environ.setdefault("HEALTH_INGEST_TOKEN", "health-token")
 os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 os.environ.setdefault("BRIEF_TOKEN", "brief-token")
+os.environ.setdefault("AGENT_TOKEN", "agent-token")
 # El registro persistente escribe en Supabase desde un hilo de fondo. Encendido en los
 # tests, ese hilo colaría POSTs a app_logs en el MockRouter de cualquier test que además
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los

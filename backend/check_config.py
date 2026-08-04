@@ -49,6 +49,7 @@ def main() -> int:
         ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
         ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
         ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
+        ("Agente PC (cola de jobs)", ["AGENT_TOKEN"]),
     ]
     for nombre, vars_ in grupos:
         faltan = [v for v in vars_ if not os.getenv(v)]

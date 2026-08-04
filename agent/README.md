@@ -52,13 +52,18 @@ playwright install chromium
 Crea un archivo `.env` en la carpeta `agent/` con este contenido:
 
 ```
-LA_TOKEN=
+AGENT_TOKEN=
 LA_API_BASE=https://backend-tender-glow-160.fly.dev
 ```
 
-- `LA_TOKEN`: abre el dashboard en el navegador → F12 → Application → Local Storage → `la_token`
+- `AGENT_TOKEN`: token de servicio, el **mismo valor** que la variable `AGENT_TOKEN` del
+  backend (genéralo con `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+  No caduca, que es justo el motivo de que exista: antes aquí iba `LA_TOKEN`, el JWT del
+  dashboard, y a los 30 días expiraba — el backend empezaba a responder 401 y el agente
+  se cerraba en cada arranque diciendo "No hay jobs pendientes". Se sigue aceptando
+  `LA_TOKEN` como respaldo, pero el agente avisa por el log de que va a caducar.
 - Ya **no** hacen falta `SUPABASE_URL`/`SUPABASE_KEY`: los jobs pendientes se piden al
-  backend con el mismo JWT (`GET /jobs/pending`)
+  backend (`GET /jobs/pending`)
 - Opcionales de streaming: `SUNSHINE_EXE`, `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`
   (ver `.env.example`)
 

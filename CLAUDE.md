@@ -94,9 +94,14 @@ Ficheros clave:
    - *Usuario*: `POST /auth/password` (contraseña → JWT HS256, 30 días). Los endpoints
      de usuario llevan `Depends(verify_token)`.
    - *Servicio* (máquinas: HA, Health Auto Export, iOS Shortcuts, el disparador del
-     resumen diario): tokens dedicados `HA_POLL_TOKEN` / `HEALTH_INGEST_TOKEN` /
-     `BRIEF_TOKEN` comparados con `_token_ok()`
+     resumen diario, el agente PC): tokens dedicados `HA_POLL_TOKEN` /
+     `HEALTH_INGEST_TOKEN` / `BRIEF_TOKEN` / `AGENT_TOKEN` comparados con `_token_ok()`
      (tiempo constante, y **falso si el token esperado no está configurado**).
+     **Nada que arranque solo puede autenticarse con un JWT de usuario**: caduca a los
+     30 días y el cliente se queda mudo sin avisar a nadie. Ya pasó dos veces — se
+     previó para `BRIEF_TOKEN` y se pasó por alto en el agente PC, que llevaba el JWT
+     del dashboard copiado a mano en su `.env`: cuando expiró, `/jobs/pending` empezó a
+     responder 401 y el agente se cerraba en cada arranque diciendo que no había jobs.
      Orden de extracción: header `X-Auth-Token` → `Authorization: Bearer` → query string
      (la query solo existe por compatibilidad con integraciones ya desplegadas).
    - *OAuth de Microsoft* (`/auth/login` → `/auth/callback`): `/auth/login` exige
@@ -202,11 +207,18 @@ Ficheros clave:
   (incrementa `attempt`, máx. `MAX_JOB_ATTEMPTS=3`). El claim usa
   `?status=eq.pending` como guard: si devuelve 0 filas, otro worker ganó la carrera.
   `dedupe_key` es único: el upsert con `resolution=merge-duplicates` devuelve 0 filas
-  en conflicto y entonces se recupera el job existente. `GET /jobs/pending` (JWT) es
+  en conflicto y entonces se recupera el job existente. `GET /jobs/pending` es
   lo que sondea `agent.py`: por eso el agente NO tiene `SUPABASE_KEY` en su `.env` — es
   la única consulta que se lo exigía, y la service_role key salta toda la RLS de la
   base. Si añades un endpoint nuevo que el agente necesite, que pase por el backend
-  con JWT en vez de darle más alcance de Supabase directo.
+  en vez de darle más alcance de Supabase directo.
+  Los seis endpoints del ciclo de vida de un job (`/jobs/pending`, `claim`, `start`,
+  `finish`, `POST .../events` y `/agents/heartbeat`) van con `Depends(verify_agente)`:
+  aceptan `AGENT_TOKEN` **o** el JWT del usuario (el dashboard también los consulta).
+  Los demás siguen con `verify_token` a propósito — el alcance de ese token es la cola
+  de jobs, no la sesión entera, y vive en un `.env` de un PC que arranca solo. Si
+  amplías `verify_agente` a un endpoint nuevo, añádelo a
+  `TestAuthAgente::test_cubre_todo_lo_que_usa_el_agente`.
 - **Ingesta de salud**: las métricas acumulativas (`step_count`, `active_energy`,
   `basal_energy`, `resting_energy`, definidas en `CUMULATIVE_METRICS`, constante de
   módulo compartida por las dos rutas de ingesta) solo se sobreescriben si el valor
@@ -246,7 +258,16 @@ Ficheros clave:
     marcan, `/ha/pc-power-pending` recoge. Apagar/suspender no pasa por el agente: HA
     lo ejecuta por SSH directo (el agente es efímero y ya terminó).
 - **Agente PC efímero + despachador**: `agent/agent.py` arranca con Windows (vía WOL),
-  drena la cola y se cierra. Según `payload["accion"]` despacha a `ACCIONES`
+  drena la cola y se cierra. Se autentica con `AGENT_TOKEN` (`LA_TOKEN`, el JWT, solo
+  como respaldo y avisando por el log de que caduca). **Un fallo al consultar la cola
+  no puede parecerse a una cola vacía**: `pedir_job_pendiente()` lanza `ErrorAuth` o
+  `ErrorTransitorio` en vez de devolver `None`, y `main()` sale con código 2 (auth) o 3
+  (red) para que el Programador de tareas lo marque como error en vez de dejar
+  "Last Result: 0" en un arranque que no hizo nada. El primer sondeo se reintenta
+  durante `ARRANQUE_ESPERA_RED` (90 s): el agente corre a la vez que Windows y tras un
+  WOL la tarjeta puede no tener IP todavía — el intento moría con un fallo de DNS a los
+  200 ms y se perdía justo el arranque que traía el job. Según `payload["accion"]`
+  despacha a `ACCIONES`
   (`resolver_alud`, `abrir_streaming`). Compatibilidad: jobs sin `accion` pero con
   `alud_url` → `resolver_alud`. `resolver_accion()` + guard `attempted` (cada job se
   intenta una vez por ejecución para no repetir en bucle si falla el claim por red).
@@ -489,6 +510,16 @@ excepción o error de consola, no solo si falta un texto.
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **El agente PC se cerraba en cada arranque diciendo "No hay jobs pendientes".** El
+  `LA_TOKEN` de su `.env` era un JWT del dashboard y caducó a los 30 días, así que
+  `GET /jobs/pending` devolvía 401. Pero `poll_pending_job()` capturaba *todo* con un
+  `except Exception` y devolvía `None`, el mismo valor que "la cola está vacía": el
+  agente registraba un WARNING y salía con código 0, con lo que la tarea del Programador
+  también lo daba por bueno. Desde fuera parecía que el WOL funcionaba y que
+  simplemente no había trabajo. Dos moralejas, las mismas que dejó el 409 del Watch:
+  **"no pude preguntar" no es "no hay nada que hacer"**, y **lo que arranca solo no
+  puede depender de una credencial que caduca** (ver `AGENT_TOKEN`). El caso está
+  cubierto por `TestAuthAgente::test_jwt_caducado_da_401`.
 - **El Watch dejó de sincronizar sin que nada diera error.** El upsert en bloque de la
   ingesta de salud (`resolution=merge-duplicates`) no llevaba `on_conflict`, así que
   PostgREST lo resolvía contra la clave primaria (`id`) en vez de contra
