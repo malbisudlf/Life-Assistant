@@ -95,10 +95,11 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
-    │                    oauth_tokens, login_attempts, app_logs, presence
-    └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
-                          apagado/suspensión del PC, que HA ejecuta por SSH) y EMPUJA
-                          la presencia (POST /ha/presencia, único sentido inverso)
+    │                    oauth_tokens, login_attempts, app_logs, presence, brief_envios
+    └── Home Assistant ── HA sondea al backend (WOL/eventos, flags de relanzado y
+                          apagado/suspensión del PC que ejecuta por SSH, y el reloj de
+                          respaldo del resumen diario) y EMPUJA la presencia
+                          (POST /ha/presencia, único sentido inverso)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
@@ -364,10 +365,76 @@ Ficheros clave:
   heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
   en paralelo. Cada sección cae por su cuenta: un fallo de Graph deja la agenda vacía
   pero el resto del correo sigue siendo útil. Envío por `smtplib` (librería estándar, sin
-  dependencias nuevas). El disparador es
-  `.github/workflows/resumen-diario.yml` (cron en UTC — ajústalo en los cambios de hora)
-  y usa `BRIEF_TOKEN`, token de servicio: un JWT de usuario caducaría a los 30 días y el
-  correo dejaría de llegar sin avisar.
+  dependencias nuevas). Todos los disparadores usan tokens de servicio: un JWT de
+  usuario caducaría a los 30 días y el correo dejaría de llegar sin avisar.
+- **Cuándo sale el correo: al despertarse, no a una hora fija.** Lo disparaba el cron de
+  `.github/workflows/resumen-diario.yml`, y Actions se retrasa 10-15 min cuando su cola
+  va cargada — un disparador que no sabe decirte a qué hora va a disparar no vale para
+  algo que tiene que pasar "al despertarte". Ahora hay tres fuentes y **`enviar_brief_si_toca()`
+  es la única puerta**: cada fuente sabe CUÁNDO llamar, y quien decide SI se manda es ella.
+  - `POST /despertar` (`BRIEF_TOKEN`) — el Atajo del iPhone al desenchufar el cargador.
+    Es la única señal exacta: instantánea y sin deducir nada.
+  - La llegada del sueño del Watch en la ingesta (`_avisar_sueno_recibido`) — **es una
+    deducción, no un aviso**. El reloj sabe cuándo te despiertas, pero el backend no se
+    entera hasta que el iPhone sincroniza, y ese sync puede traer una noche a medias
+    mientras sigues durmiendo. Por eso solo cuentan las noches de hoy y ayer (el Atajo
+    reenvía los últimos días en cada sync) y se puede apagar con `BRIEF_DISPARA_SUENO=0`.
+    Un fallo del correo **nunca** tumba la ingesta: guardar los datos del Watch importa
+    más, y el correo tiene otras dos fuentes.
+  - `POST /ha/brief-tick` (`HA_POLL_TOKEN`) — el reloj de respaldo. HA lo sondea cada
+    pocos minutos y solo hace algo pasada `BRIEF_HORA_TOPE` (10:00). El reloj lo pone HA
+    y no un hilo del backend porque **Fly escala a cero**: sin nadie que llame, aquí no
+    hay proceso vivo que pueda mirar la hora.
+
+  Dos invariantes que no se pueden relajar:
+  - **La idempotencia es la tabla `brief_envios`, no una comprobación previa.** Se
+    inserta la fila del día ANTES de mandar el correo, con un INSERT normal: el 409
+    contra la clave primaria es lo que hace la pregunta atómica. Con un GET previo, dos
+    disparadores que coincidan en el mismo minuto (el móvil y el sondeo de HA) leen los
+    dos "no enviado" y mandan dos correos. Y no puede ser un flag en memoria como los del
+    WOL: un cold start de Fly a media mañana lo borraría y mandaría el correo otra vez.
+  - **Si el envío falla, se libera la reserva** (`_liberar_envio`). Si no, un error
+    transitorio de SMTP de un minuto deja el día marcado como enviado y te quedas sin
+    briefing hasta mañana.
+
+  La **ventana de despertar** (`BRIEF_DESPERTAR_DESDE` 05:30 – `BRIEF_DESPERTAR_HASTA`
+  11:30) tiene los dos extremos, y cada uno protege de algo distinto: el suelo, de tomar
+  por despertar un desenchufe de madrugada camino del baño; el techo, de que el día en
+  que fallen todas las señales de la mañana una desconexión de las cinco de la tarde
+  mande el correo entonces, con los datos ya caducados y llamándolo "despertar". Es
+  propiedad de la SEÑAL,
+  no del envío: se comprueba en `/despertar` y en `_avisar_sueno_recibido`, nunca dentro
+  de `enviar_brief_si_toca` — la hora tope y la red de seguridad disparan por definición
+  fuera de ella. Todo el disparo mira la hora por `_ahora_local()`, punto único que
+  existe para poder fijarla en los tests.
+  El workflow de Actions **sigue existiendo pero ya no es el disparador**: es la red de
+  seguridad para cuando se cae la casa entera (HA apagado, router sin luz), dispara
+  tarde y a ciegas, y al pasar por la misma puerta idempotente no duplica nada.
+  `POST /brief/send?forzar=1` se salta la idempotencia: es como se prueba el correo a
+  mano sin esperar a mañana ni borrar la fila del día.
+- **Quién redacta el briefing, y cuándo** (`_lanzar_rutina`): el correo de datos no es
+  el final del camino — lo lee una rutina de Claude Code que redacta el briefing de
+  verdad. Las rutinas admiten **varios triggers a la vez** (horario, API, eventos de
+  GitHub), y aquí se usan dos porque las dos situaciones piden cosas distintas:
+  - Te despiertas **pronto** → el correo de datos sale pronto, pero el briefing todavía
+    no debe redactarse: recoge newsletters que a las 6 de la mañana no han llegado. De
+    eso se encarga el **trigger de horario** de la propia rutina (08:00) y el backend no
+    hace nada.
+  - Te despiertas **tarde** → esperar al reloj sería redactar el briefing sin los datos
+    del día o con horas de retraso. Ahí el backend dispara el **trigger de API**
+    (`POST .../routines/{trig_...}/fire`, bearer `sk-ant-oat01-...`) justo después de
+    mandar el correo, gobernado por `BRIEF_RUTINA_DESDE`.
+
+  El disparo **nunca puede tumbar el envío**: cuando se llama, el correo ya ha salido, y
+  eso es lo que importa. Un fallo se registra y se sigue. Si `RUTINA_FIRE_URL`/
+  `RUTINA_FIRE_TOKEN` no están configuradas no se dispara nada y la rutina se queda con
+  su horario — el sistema sigue funcionando, solo que sin esta mitad. El token se genera
+  en la web (`claude.ai/code/routines`), se enseña una sola vez y solo sirve para
+  disparar esa rutina. `RUTINA_BETA` es una cabecera beta **con fecha**: el endpoint está
+  en research preview y si un día devuelve 400, es lo primero que hay que mirar.
+  El campo `text` del disparo llega a la rutina envuelto y etiquetado como dato no
+  fiable, así que sirve de contexto para el registro de la sesión, no de instrucción: la
+  rutina no debe depender de él para saber qué hacer.
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -450,7 +517,9 @@ Ficheros clave:
 | `GET /health/latest` | JWT | Último valor de cada métrica |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
-| `POST /brief/send` | `BRIEF_TOKEN` | Envía el resumen diario por SMTP |
+| `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
+| `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |
+| `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
 
 **CORS**: los orígenes permitidos salen de `CORS_ORIGINS` (por defecto
@@ -481,6 +550,9 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `WEATHER_LAT`/`WEATHER_LON`, `ALUD_ALLOWED_HOSTS`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
+`BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
+`BRIEF_DISPARA_SUENO`,
+`RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
 `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`, y las de registro
@@ -808,6 +880,14 @@ sí coinciden.
 - **Bug conocido**: `respiratory_rate` puede acabar con el mismo valor que
   `heart_rate_variability` si el paso "Get Value from Item from List" queda DESPUÉS del
   Dictionary. Verificar que va antes.
+- **Trampa de "Obtener contenido de URL" con POST**: un `Request Body` de tipo JSON **sin
+  ningún campo** hace que Atajos construya una petición que muere sola, y el error que
+  enseña es `the network connection was lost` — que apunta a la red y no a lo que pasa de
+  verdad. La petición no llega a salir del teléfono: en los logs del backend no aparece
+  nada, y esa ausencia es justo lo que lo distingue de un problema de URL o de token (una
+  ruta mal escrita da 404 y un token malo da 403, pero los dos *llegan*). Se arregla
+  añadiendo cualquier campo al cuerpo, aunque el endpoint no lo lea, o cambiando el
+  cuerpo a tipo File. Le pasó al Atajo de `/despertar` el 2026-08-05.
 
 #### Pendientes del Shortcut
 
@@ -1003,6 +1083,14 @@ intervalo del periódico tiene que ser **menor** que el TTL, o el dato caducará
 avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la query
 string (el soporte de query solo existe por compatibilidad con integraciones ya
 desplegadas y expone el token en los logs de URLs).
+
+**Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
+`time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. HA pone el reloj
+porque está siempre encendido y es puntual al minuto, las dos cosas que el cron de
+GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un hilo
+dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
+vivo que mire la hora. Sondear cada 5 min es barato a propósito — antes de
+`BRIEF_HORA_TOPE` el endpoint no toca Supabase ni construye nada.
 
 ## Agente PC (`agent/agent.py`)
 
@@ -1297,7 +1385,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
 `20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
-`20260804_presence`.
+`20260804_presence`, `20260804_brief_envios`.
 
 ## Convenciones
 

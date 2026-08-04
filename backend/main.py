@@ -160,6 +160,36 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 # VITE_ENTREGAS_MARKER del frontend: el backend no ve las variables VITE_*.
 ENTREGAS_MARKER     = os.getenv("ENTREGAS_MARKER", "📚")
 BRIEF_DIAS_ENTREGAS = int(os.getenv("BRIEF_DIAS_ENTREGAS", "14"))
+# Ventana de despertar. Una señal anterior a BRIEF_DESPERTAR_DESDE no cuenta como
+# despertarse: levantarse a beber agua a las 04:00 o mirar la hora en el móvil no
+# tienen que traer el briefing del día. Y si a BRIEF_HORA_TOPE no ha llegado ninguna
+# señal, se manda igual — a esa hora la explicación probable es que algo falló, y un
+# briefing tardío es mejor que ninguno y que además nadie eche de menos.
+BRIEF_DESPERTAR_DESDE = os.getenv("BRIEF_DESPERTAR_DESDE", "05:30")
+# La ventana también tiene techo. Sin él, el día en que fallen todas las señales de la
+# mañana, desenchufar el cargador a las cinco de la tarde mandaría el correo del día
+# entonces, llamándolo "despertar": datos ya caducados y la palabra significando lo que
+# no es. Pasado este tope solo pueden mandarlo los disparadores que se declaran
+# respaldo, que es lo honesto.
+BRIEF_DESPERTAR_HASTA = os.getenv("BRIEF_DESPERTAR_HASTA", "11:30")
+BRIEF_HORA_TOPE       = os.getenv("BRIEF_HORA_TOPE", "10:00")
+# Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
+# _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
+BRIEF_DISPARA_SUENO   = os.getenv("BRIEF_DISPARA_SUENO", "1") not in ("0", "false", "False")
+# Disparo de la rutina de Claude Code que lee este correo y redacta el briefing.
+# Su trigger de API: la URL y el token se generan en claude.ai/code/routines (el token
+# se enseña UNA vez). Si faltan, no se dispara nada y la rutina se queda solo con su
+# trigger de horario — el sistema sigue funcionando, solo que sin esta mitad.
+RUTINA_FIRE_URL   = os.getenv("RUTINA_FIRE_URL", "")
+RUTINA_FIRE_TOKEN = os.getenv("RUTINA_FIRE_TOKEN", "")
+# Cabecera beta con fecha: el endpoint está en research preview y los cambios que
+# rompen salen bajo una fecha nueva, manteniendo las dos anteriores. Si un día empieza
+# a devolver 400, es esto lo que hay que actualizar.
+RUTINA_BETA       = os.getenv("RUTINA_BETA", "experimental-cc-routine-2026-04-01")
+# A partir de qué hora dispara el backend. Antes se encarga el trigger de horario de la
+# propia rutina: despertarse a las 6 no debe traer el briefing a las 6, porque recoge
+# newsletters que a esa hora todavía no han llegado.
+BRIEF_RUTINA_DESDE = os.getenv("BRIEF_RUTINA_DESDE", "08:00")
 
 # Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
@@ -2298,6 +2328,10 @@ async def health_ingest(request: Request, token: str = ""):
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
     upserted += _guardar_metricas(grouped_metrics)
 
+    # Si en el lote venía el sueño de esta noche, el Watch ya la ha cerrado: eso es lo
+    # más parecido a "ya está despierto" que sabe el backend por su cuenta.
+    _avisar_sueno_recibido({f for f, n in grouped_metrics if n == "sleep_analysis"})
+
     # Una sincronización de la que no se reconoce NADA no es un éxito: el cuerpo no
     # traía lo que este endpoint sabe leer (otro envoltorio, un `{}` porque el Shortcut
     # no adjunta el fichero...). Eso pasaba todas las validaciones y salía como
@@ -2464,6 +2498,10 @@ async def health_ingest_simple(request: Request, token: str = ""):
             logger.error("Ingesta de salud (Shortcut): upsert en bloque de %d filas falló", len(filas))
             raise _supabase_error(r)
         upserted += len(filas)
+
+    # Igual que en /health/ingest: el sueño de esta noche recién llegado es la señal de
+    # que el Watch ya ha cerrado la noche.
+    _avisar_sueno_recibido({d for d, s in validas if s.metric == "sleep_analysis"})
 
     # Mismo criterio que en /health/ingest, y con la misma precaución: se mira lo
     # RECONOCIDO (`samples`), no lo escrito. Cero muestras legibles es que el cuerpo no
@@ -3303,6 +3341,269 @@ def enviar_correo(asunto: str, cuerpo: str):
             smtp.send_message(msg)
 
 
+# ── DESPERTAR: CUÁNDO SALE EL RESUMEN ─────────────────────────────────────────
+#
+# El correo ya no sale a una hora fija, sino cuando te despiertas — y si nadie avisa
+# de que te has despertado, a BRIEF_HORA_TOPE como muy tarde.
+#
+# El disparador ya no puede ser el cron de GitHub Actions: se retrasa 10-15 min
+# cuando su cola va cargada, así que el correo llegaba tarde y a una hora distinta
+# cada día. Actions queda solo como red de seguridad por si se cae la casa entera, y
+# el reloj puntual lo pone Home Assistant, que está siempre encendido y ya sondea
+# este backend. Un hilo de fondo aquí dentro no serviría: Fly escala a cero, y sin
+# nadie que llame no hay proceso vivo que pueda mirar el reloj.
+#
+# Ojo con la intuición de "el reloj sabe cuándo me despierto": el Watch lo sabe, pero
+# el backend no se entera hasta que el iPhone sincroniza. De ahí que haya dos fuentes
+# y gane la que llegue antes.
+
+BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
+
+
+def _hora_config(valor: str, defecto: tuple) -> tuple:
+    """"HH:MM" → (hora, minuto). Una hora mal escrita cae al defecto en vez de tumbar
+    el arranque: dejar el dashboard entero sin backend por la hora de un correo sería
+    peor que ignorar la variable."""
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", valor or "")
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        logger.warning("Resumen diario: hora '%s' ilegible, se usa %02d:%02d", valor, *defecto)
+        return defecto
+    return int(m.group(1)), int(m.group(2))
+
+
+HORA_DESPERTAR_DESDE = _hora_config(BRIEF_DESPERTAR_DESDE, (5, 30))
+HORA_DESPERTAR_HASTA = _hora_config(BRIEF_DESPERTAR_HASTA, (11, 30))
+HORA_TOPE            = _hora_config(BRIEF_HORA_TOPE, (10, 0))
+HORA_RUTINA          = _hora_config(BRIEF_RUTINA_DESDE, (8, 0))
+
+
+def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
+    """Arranca la rutina que lee este correo y redacta el briefing.
+
+    Reparto de trabajo entre los dos triggers de la rutina, que existe porque las dos
+    situaciones piden cosas distintas:
+      - Te despiertas PRONTO → el correo de datos sale pronto, pero el briefing no debe
+        redactarse aún: recoge newsletters que a las 6 de la mañana no han llegado. De
+        eso se encarga el trigger de HORARIO de la propia rutina, y aquí no hacemos nada.
+      - Te despiertas TARDE → esperar al reloj significaría redactar el briefing sin los
+        datos del día, o con horas de retraso. Ahí dispara este.
+
+    Nunca puede tumbar el envío: cuando se llega aquí el correo YA ha salido, que es lo
+    que de verdad importa. Un fallo se registra y se sigue — la rutina siempre puede
+    ejecutarse a mano, y el correo con los datos está en el buzón de todos modos.
+    """
+    if not RUTINA_FIRE_URL or not RUTINA_FIRE_TOKEN:
+        return
+    if (ahora.hour, ahora.minute) < HORA_RUTINA:
+        return
+
+    try:
+        r = http.post(
+            RUTINA_FIRE_URL,
+            headers={
+                "Authorization":     f"Bearer {RUTINA_FIRE_TOKEN}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta":    RUTINA_BETA,
+                "Content-Type":      "application/json",
+            },
+            # `text` llega a la rutina envuelto y etiquetado como dato no fiable, así que
+            # es contexto para el registro de la sesión, no una instrucción: la rutina no
+            # debe depender de él para saber qué hacer.
+            json={"text": f"El correo de datos del {fecha} acaba de salir."},
+        )
+        if r.status_code >= 300:
+            logger.error("Rutina del briefing: el disparo devolvió %s", r.status_code)
+        else:
+            logger.info("Rutina del briefing lanzada tras el correo del %s", fecha)
+    except requests.RequestException:
+        logger.exception("Rutina del briefing: no se pudo lanzar el disparo")
+
+
+def _reservar_envio(fecha: str, fuente: str, despertar: Optional[datetime]) -> bool:
+    """Marca el día como enviado. True si la reserva es nuestra, False si ya estaba.
+
+    Se reserva ANTES de mandar el correo, y con un INSERT normal en vez de un upsert
+    con merge-duplicates a propósito: el 409 contra la clave primaria es lo que hace
+    la comprobación atómica. Comprobándolo con un GET previo, dos disparadores que
+    coincidan en el mismo minuto (el móvil al desenchufarse y el sondeo de HA) leerían
+    los dos "no enviado" y mandarían dos correos.
+    """
+    fila = {
+        "fecha":      fecha,
+        "fuente":     fuente,
+        "enviado_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if despertar is not None:
+        fila["despertar_at"] = despertar.astimezone(timezone.utc).isoformat()
+    r = http.post(
+        BRIEF_ENVIOS_URL,
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json=[fila],
+    )
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        logger.error("Resumen diario: no se pudo reservar el envío del %s (%s)", fecha, r.status_code)
+        raise _supabase_error(r)
+    return True
+
+
+def _liberar_envio(fecha: str) -> None:
+    """Retira la reserva cuando el correo no ha llegado a salir.
+
+    Sin esto, un fallo de SMTP o de Supabase dejaría el día marcado como enviado y
+    ningún disparador posterior lo reintentaría: un error transitorio de un minuto te
+    costaría el briefing de todo el día.
+    """
+    try:
+        r = http.delete(
+            f"{BRIEF_ENVIOS_URL}?fecha=eq.{fecha}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+        )
+        if r.status_code >= 300:
+            logger.error(
+                "Resumen diario: la reserva del %s se quedó puesta tras fallar el envío (%s). "
+                "Hoy ya no se reintentará solo", fecha, r.status_code,
+            )
+    except requests.RequestException:
+        logger.exception("Resumen diario: no se pudo liberar la reserva del %s", fecha)
+
+
+def _ahora_local() -> datetime:
+    """Punto único de "ahora" para todo el disparo del resumen. Existe para que los
+    tests puedan fijar la hora sin tocar el reloj del módulo entero: aquí casi todas
+    las decisiones dependen de qué hora es, y no habría forma de probarlas si no."""
+    return datetime.now(LOCAL_TZ)
+
+
+def _senal_de_despertar_valida(ahora: datetime) -> bool:
+    """Si una señal a esta hora cuenta como haberse despertado.
+
+    La ventana es propiedad de la SEÑAL, no del envío: la red de seguridad y la hora
+    tope disparan por definición fuera de ella y no deben pasar por aquí.
+
+    Tiene los dos extremos y cada uno protege de una cosa distinta: el suelo, de tomarse
+    por despertar un desenchufe de madrugada camino del baño; el techo, de que una señal
+    de media tarde mande el correo del día cuando ya no sirve de nada.
+    """
+    hm = (ahora.hour, ahora.minute)
+    return HORA_DESPERTAR_DESDE <= hm <= HORA_DESPERTAR_HASTA
+
+
+def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> dict:
+    """Manda el resumen del día si aún no ha salido. Idempotente por día.
+
+    Única puerta de entrada al envío automático: la usan la señal de despertar del
+    móvil, la llegada del sueño del Watch y el reloj de respaldo de HA. Cada uno sabe
+    CUÁNDO llamar; el que decide SI se manda es este.
+    """
+    ahora = _ahora_local()
+    fecha = ahora.date().isoformat()
+
+    if not _reservar_envio(fecha, fuente, despertar):
+        return {"enviado": False, "motivo": "el resumen de hoy ya se envió"}
+
+    try:
+        datos = construir_brief()
+        enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+    except Exception:
+        _liberar_envio(fecha)
+        raise
+
+    logger.info("Resumen diario enviado a %s (%s), disparado por: %s", BRIEF_TO, datos["fecha"], fuente)
+    _lanzar_rutina(datos["fecha"], ahora)
+    return {"enviado": True, "fecha": datos["fecha"], "fuente": fuente}
+
+
+def _avisar_sueno_recibido(fechas_sueno: set) -> None:
+    """Acaba de llegar el sueño de esta noche: si el Watch ya la ha cerrado y
+    sincronizado, lo probable es que estés despierto.
+
+    Es una deducción, no un aviso, y por eso lleva dos frenos: solo cuentan las noches
+    de hoy y ayer (el Atajo reenvía los últimos días en cada sync, y un backfill de la
+    semana pasada no significa nada), y el envío vuelve a comprobar la ventana horaria.
+    Aun así puede adelantarse si el iPhone sincroniza una noche a medias mientras
+    duermes: se puede desactivar con BRIEF_DISPARA_SUENO=0 y quedarse solo con la
+    señal del móvil, que sí es exacta.
+
+    Nunca puede tumbar la ingesta: guardar los datos del Watch importa más que el
+    correo, y el correo tiene otras dos fuentes que lo disparan.
+    """
+    if not BRIEF_DISPARA_SUENO or not fechas_sueno:
+        return
+    ahora = _ahora_local()
+    recientes = {ahora.date().isoformat(), (ahora.date() - timedelta(days=1)).isoformat()}
+    if not (set(fechas_sueno) & recientes) or not _senal_de_despertar_valida(ahora):
+        return
+    try:
+        enviar_brief_si_toca("sueno", despertar=ahora)
+    except Exception:
+        logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del Watch")
+
+
+@app.post("/despertar")
+def marcar_despertar(request: Request, token: str = "", fuente: str = ""):
+    """Alguien avisa de que ya estás despierto — el Atajo del iPhone al desenchufar el
+    cargador, o una automatización de HA. Si el resumen de hoy no ha salido aún, sale
+    ahora.
+
+    Va con BRIEF_TOKEN y no con un JWT de usuario: lo llama una máquina que arranca
+    sola, y un JWT caduca a los 30 días y dejaría de funcionar sin avisar a nadie
+    (ya pasó con el agente PC).
+    """
+    if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # La etiqueta acaba en una fila de Supabase: se limpia en vez de confiar en ella.
+    etiqueta = re.sub(r"[^a-zA-Z0-9_-]", "", fuente)[:40] or "despertar"
+    ahora    = _ahora_local()
+
+    # Fuera de la ventana no cuenta: ni un desenchufe de las 04:00 camino del baño, ni
+    # uno de media tarde cuando el correo del día ya no aporta nada.
+    if not _senal_de_despertar_valida(ahora):
+        return {"ok": True, "enviado": False,
+                "motivo": f"fuera de la ventana de despertar "
+                          f"({HORA_DESPERTAR_DESDE[0]:02d}:{HORA_DESPERTAR_DESDE[1]:02d}"
+                          f"–{HORA_DESPERTAR_HASTA[0]:02d}:{HORA_DESPERTAR_HASTA[1]:02d})"}
+    try:
+        resultado = enviar_brief_si_toca(etiqueta, despertar=ahora)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Despertar: fallo al construir o enviar el resumen")
+        raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
+    return {"ok": True, **resultado}
+
+
+@app.post("/ha/brief-tick")
+def ha_brief_tick(request: Request, token: str = ""):
+    """El reloj de respaldo, que sondea HA cada pocos minutos.
+
+    Solo hace algo pasada BRIEF_HORA_TOPE: si a esa hora no ha habido ninguna señal de
+    despertar, se asume que la señal falló (móvil descargado, Atajo desactivado) y se
+    manda el correo igual. Antes de esa hora no hace nada y contesta en un suspiro —
+    que es lo que permite sondearlo a menudo sin coste.
+
+    Es HA quien pone el reloj porque está siempre encendido y es puntual al minuto,
+    las dos cosas que el cron de Actions no garantiza.
+    """
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    ahora = _ahora_local()
+    if (ahora.hour, ahora.minute) < HORA_TOPE:
+        return {"enviado": False, "motivo": "aún no es la hora tope"}
+
+    try:
+        resultado = enviar_brief_si_toca("tope")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Resumen diario: fallo al enviarlo por hora tope")
+        raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
+    return {"ok": True, **resultado}
+
+
 @app.get("/brief")
 def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Los mismos datos que van en el correo, en JSON. Para comprobar qué se enviaría
@@ -3311,11 +3612,18 @@ def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
 
 
 @app.post("/brief/send")
-def send_brief(request: Request, token: str = ""):
-    """Compone el resumen y lo manda por correo. Lo llama el disparador diario
-    (.github/workflows/resumen-diario.yml), que es una máquina: token de servicio
-    dedicado, igual que HA y la ingesta de salud — un JWT de usuario caducaría a los
-    30 días y el correo dejaría de llegar sin avisar."""
+def send_brief(request: Request, token: str = "", forzar: int = 0):
+    """Compone el resumen y lo manda por correo, si hoy no ha salido ya.
+
+    Lo llama la red de seguridad (.github/workflows/resumen-diario.yml), que es una
+    máquina: token de servicio dedicado, igual que HA y la ingesta de salud — un JWT
+    de usuario caducaría a los 30 días y el correo dejaría de llegar sin avisar.
+
+    Pasa por `enviar_brief_si_toca` como todo lo demás, así que llegar tarde y
+    encontrarse el correo ya enviado no duplica nada: contesta que no hacía falta. Con
+    `?forzar=1` se salta esa comprobación, que es como se prueba el correo a mano sin
+    esperar a mañana ni tener que borrar la fila del día.
+    """
     if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
     # Sin este try/except, cualquier fallo (Graph, Supabase, SMTP) subía sin capturar
@@ -3324,15 +3632,18 @@ def send_brief(request: Request, token: str = ""):
     # llamador es el workflow de GitHub Actions, protegido por BRIEF_TOKEN, no un
     # navegador: el mensaje de la excepción es diagnóstico útil, no un dato sensible.
     try:
-        datos = construir_brief()
-        enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+        if forzar:
+            datos = construir_brief()
+            enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+            logger.info("Resumen diario enviado a %s (%s), forzado a mano", BRIEF_TO, datos["fecha"])
+            return {"ok": True, "enviado": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
+        resultado = enviar_brief_si_toca("respaldo")
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo")
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
-    logger.info("Resumen diario enviado a %s (%s)", BRIEF_TO, datos["fecha"])
-    return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
+    return {"ok": True, "enviado_a": BRIEF_TO, **resultado}
 
 
 # ── REGISTRO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────────────
