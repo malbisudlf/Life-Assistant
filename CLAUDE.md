@@ -510,6 +510,12 @@ excepción o error de consola, no solo si falta un texto.
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **`/jobs/pending` era un 502 fijo por un `+` en la query string.** El corte de "última
+  hora" se formateaba como `...T05:10:01+00:00` y se pegaba a la URL de Supabase; en una
+  query string el `+` significa espacio, así que PostgREST leía `...T05:10:01 00:00` y
+  devolvía 400 (`22007`, timestamp inválido). Estuvo tapado detrás del 401 del token
+  caducado del agente: solo se vio al arreglar la auth. **Los timestamps que viajan en
+  una URL van con sufijo `Z`, nunca con `+00:00`** (o `quote()`-ados). Hay test.
 - **El agente PC se cerraba en cada arranque diciendo "No hay jobs pendientes".** El
   `LA_TOKEN` de su `.env` era un JWT del dashboard y caducó a los 30 días, así que
   `GET /jobs/pending` devolvía 401. Pero `poll_pending_job()` capturaba *todo* con un
