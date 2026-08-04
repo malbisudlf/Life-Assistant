@@ -1542,13 +1542,24 @@ def ha_events_soon(request: Request, token: str = ""):
     now = datetime.now(timezone.utc)
     end = now + timedelta(hours=1)
     headers = {"Authorization": f"Bearer {graph_token}"}
-    response = http.get(
-        "https://graph.microsoft.com/v1.0/me/calendarView"
-        f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime",
-        headers=headers,
-    )
+    # La llamada va envuelta porque `_graph_fallo` solo cubre la mitad del problema:
+    # atiende las respuestas CON error (un 401, un 500 con HTML), pero no los fallos
+    # SIN respuesta —conexión cortada, DNS, timeout—, que salen como excepción, se
+    # saltan este manejo y acaban en un 500. HA no sabe leer un 500: espera el
+    # {"event": None} de siempre, y con cualquier otra cosa la automatización de voz
+    # se queda a medias. Es la misma regla que ya aplica al resto del endpoint, solo
+    # que le faltaba el caso en que Graph no llega ni a contestar.
+    try:
+        response = http.get(
+            "https://graph.microsoft.com/v1.0/me/calendarView"
+            f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime",
+            headers=headers,
+        )
+    except requests.RequestException as e:
+        logger.error("calendarView (ha/events/soon): sin respuesta de Graph (%s)", type(e).__name__)
+        return {"event": None}
     # Sin esta comprobación, un fallo de Graph acababa en `.json()` sobre un cuerpo que
     # puede no ser JSON (500 con HTML → excepción y 500 propio) o en un `.get("value")`
     # vacío que HA interpreta como "no hay nada a la vista". Se registra y se devuelve
@@ -2074,6 +2085,31 @@ def _resumen_cuerpo(request: Request, raw: bytes, body) -> dict:
     }
 
 
+def _lote_vacio(body) -> bool:
+    """True si el cuerpo tiene la forma que este endpoint espera pero venía sin nada.
+
+    "No tengo nada que exportar" y "te estoy hablando en otro idioma" son cosas
+    distintas y hasta ahora salían iguales: las dos como WARNING con `ok: false`.
+    Health Auto Export manda lotes vacíos varias veces al día cuando el Watch no ha
+    volcado nada nuevo —es su funcionamiento normal, no un fallo— y eso llenaba
+    `app_logs` de avisos que tapaban los que sí importan.
+
+    La forma se reconoce por `data` y por que dentro no haya claves ajenas: un `{}`
+    pelado o el envoltorio de otro exportador siguen siendo estructura desconocida,
+    que es justo lo que la protección del 409 existía para cazar. Y si `metrics` trae
+    muestras pero no se reconoce ninguna, tampoco es un lote vacío: llegaron datos y
+    no se entendió ni uno, que sí es un problema.
+    """
+    if not isinstance(body, dict):
+        return False
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return False
+    if set(data) - {"metrics", "workouts"}:
+        return False
+    return not data.get("metrics") and not data.get("workouts")
+
+
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
     diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
@@ -2271,6 +2307,12 @@ async def health_ingest(request: Request, token: str = ""):
     # ya tenían guardado un valor mayor escribe cero y es perfectamente correcto.
     if not grouped_metrics and not workouts:
         recibido = _resumen_cuerpo(request, raw, body)
+        # Un lote vacío del exportador es normal (ver _lote_vacio): se responde ok
+        # porque no hay nada roto, y se registra a INFO para que no se persista.
+        if _lote_vacio(body):
+            logger.info("Ingesta de salud: lote vacío, nada que exportar. Recibido: %s", recibido)
+            return {"ok": True, "upserted": 0, "vacio": True,
+                    "detalle": "El exportador no tenía datos nuevos que enviar"}
         logger.warning("Ingesta de salud: nada que guardar. Recibido: %s", recibido)
         # El resumen va también en la respuesta, no solo al registro: el cliente es un
         # Shortcut que enseña el cuerpo en pantalla, así que la siguiente ejecución ya

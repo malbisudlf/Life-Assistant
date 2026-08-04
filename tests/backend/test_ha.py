@@ -136,6 +136,30 @@ class TestHaEventsSoonGraphCaido:
         assert r.status_code == 200
         assert r.json() == {"event": None}
 
+    def test_sin_respuesta_de_graph_tampoco_revienta(self, client, graph_token, mock_requests):
+        """El caso que faltaba: Graph no llega ni a contestar (conexión cortada, DNS,
+        timeout). Eso sale como excepción, se salta el manejo de `_graph_fallo` y
+        acababa en un 500 — y HA solo sabe leer {"event": None}. Pasó de verdad el
+        2026-08-04, durante un reinicio de Home Assistant."""
+        import requests as _requests
+
+        def caerse(url, **kwargs):
+            raise _requests.exceptions.ConnectionError("conexión cortada")
+
+        mock_requests.add("GET", "graph.microsoft.com", caerse)
+        r = client.get("/ha/events/soon?token=ha-poll-token")
+        assert r.status_code == 200
+        assert r.json() == {"event": None}
+
+    def test_timeout_de_graph_tampoco_revienta(self, client, graph_token, mock_requests):
+        import requests as _requests
+
+        def agotarse(url, **kwargs):
+            raise _requests.exceptions.ReadTimeout("demasiado lento")
+
+        mock_requests.add("GET", "graph.microsoft.com", agotarse)
+        assert client.get("/ha/events/soon?token=ha-poll-token").json() == {"event": None}
+
     def test_graph_responde_html_no_da_500(self, client, graph_token, mock_requests):
         class RespuestaNoJson(FakeResponse):
             def json(self):
