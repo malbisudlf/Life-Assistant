@@ -95,9 +95,10 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
-    │                    oauth_tokens, login_attempts, app_logs
+    │                    oauth_tokens, login_attempts, app_logs, presence
     └── Home Assistant ── HA sondea al backend (WOL/eventos y flags de relanzado y
-                          apagado/suspensión del PC, que HA ejecuta por SSH)
+                          apagado/suspensión del PC, que HA ejecuta por SSH) y EMPUJA
+                          la presencia (POST /ha/presencia, único sentido inverso)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
@@ -313,10 +314,43 @@ Ficheros clave:
   - `_pc_power_action` (`"shutdown"|"suspend"|None`) → `/shutdown-pc` / `/suspend-pc`
     marcan, `/ha/pc-power-pending` recoge. Apagar/suspender no pasa por el agente: HA
     lo ejecuta por SSH directo (el agente es efímero y ya terminó).
-- **Clima**: `/weather` (Open-Meteo, gratis, sin API key) usa `WEATHER_LAT/LON`, o las
-  coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
-  cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
-  hay, con fallback a `HOME_ADDRESS`.
+- **Presencia (HA → backend)**: es el **único punto donde HA empuja un dato** en vez de
+  sondear, porque aquí el que sabe es HA (tiene el `device_tracker` de la app del móvil)
+  y el que necesita saber es el backend, que no puede llamar a HA (vive en la LAN, mismo
+  mixed content que obligó a que el WOL pasara por aquí). `POST /ha/presencia`
+  (`HA_POLL_TOKEN`) guarda zona, `en_casa` y coordenadas en la tabla `presence` — **una
+  sola fila que se sobreescribe, sin histórico a propósito**: un registro de por dónde
+  has pasado es el dato más sensible del proyecto y nada de lo que hay encima lo
+  necesita. No es un flag en memoria como el WOL: aquellos son ÓRDENES pendientes
+  (perderlas en un cold start cuesta volver a pulsar un botón) y esto es ESTADO
+  (perderlo deja al dashboard sin saber dónde estás hasta que te muevas de zona). Con
+  copia en memoria (`_presencia_cache`), igual que el token de Graph y por lo mismo:
+  `/weather` y `/maps/departure` lo consultan en cada carga.
+  **Un dato caducado no se usa**: `presencia_vigente()` devuelve `None` pasados
+  `PRESENCE_TTL_MINUTES`, porque dar el clima de donde estabas hace horas como si fuera
+  el de donde estás es peor que caer al default — la misma regla de siempre, "no lo sé"
+  no puede disfrazarse de dato. Por eso HA tiene que mandar **también un aviso periódico**,
+  no solo los cambios de zona: sin él el TTL no puede distinguir "sigues en casa" de
+  "HA se cayó". `GET /presencia` (JWT) sí devuelve lo caducado, marcado, para el panel
+  de estado.
+- **Serie diaria de presencia**: cada aviso acumula el tramo transcurrido en la métrica
+  `time_at_home` de `health_metrics` (`value` = horas en casa, `extra.fuera` = horas
+  fuera). Va ahí y no a una tabla propia para que entre sola en `/health/metrics` y con
+  ella en el motor de correlaciones del frontend. Solo se guardan HORAS, nunca lugares.
+  Dos cosas que no se pueden relajar: el tramo se **trocea por día local**
+  (`_tramos_por_dia`) porque el que cruza la medianoche es el de la noche, justo el que
+  más pesa al cruzarlo con el sueño; y un hueco de más de `PRESENCE_MAX_GAP_HOURS` **se
+  descarta** en vez de imputarse entero a la última zona conocida. Del lado del
+  frontend, `_serieFuera` exige `COBERTURA_PRESENCIA` horas contabilizadas en el día: si
+  HA estuvo caído media jornada, ese día sale bajo en las dos columnas y sin el filtro
+  se colaría como "día tranquilo en casa", que es lo contrario de lo que dice el dato.
+- **Clima**: `/weather` (Open-Meteo, gratis, sin API key) resuelve la ubicación en tres
+  escalones, de más a menos fiable: lo que mande el dispositivo (`?lat&lon`,
+  geolocalización del navegador) → la presencia vigente que reporta HA → `WEATHER_LAT/LON`.
+  El cálculo de salida (`/maps/departure`) hace lo mismo con `origin`, con fallback a
+  `HOME_ADDRESS`. Por eso `origin` **no puede tener `HOME_ADDRESS` como default del
+  modelo**: "no me mandaron origen" y "me mandaron justo mi casa" llegarían
+  indistinguibles y la presencia nunca entraría en juego.
 - **Resumen diario por correo** (`/brief`, `POST /brief/send`): manda a tu propio buzón
   los datos del día **en crudo, sin interpretarlos**, porque quien los consume es una
   rutina externa que lee el correo y redacta el resumen — ya es un modelo, así que aquí
@@ -389,6 +423,8 @@ Ficheros clave:
 | `GET /export` | JWT | Exportación de datos |
 | `GET/POST /clothing`, `DELETE /clothing/{item_id}` | JWT | Widget **temporal** de conteo de ropa (ver "Frontend") |
 | `GET /ha/events/soon` | servicio | Próximos eventos para las notificaciones de Alexa |
+| `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
+| `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
 | `POST /relaunch-agent` | JWT | Marca `_agent_relaunch_pending` |
@@ -444,7 +480,8 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 **Personalización**: `TIMEZONE`, `HOME_ADDRESS`, `CLASSES_CALENDAR`, `CORS_ORIGINS`,
 `WEATHER_LAT`/`WEATHER_LON`, `ALUD_ALLOWED_HOSTS`.
 
-**Opcionales**: `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
+**Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
+`MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`, y las de registro
 (`LOG_PERSIST`, `LOG_PERSIST_LEVEL`, `LOG_QUEUE_MAX`, `LOG_FLUSH_SECONDS`,
@@ -952,6 +989,21 @@ Problemas ya resueltos por el camino (no los reintroduzcas):
 Además, HA anuncia por Alexa el **nombre** del evento 15 minutos antes (no solo "evento en
 15 minutos"), usando `/ha/events/soon`.
 
+**Flujo de presencia** (el único que va de HA hacia el backend): el `device_tracker` de
+la app companion → automatización `la_presencia` → `rest_command` que hace
+`POST /ha/presencia`. Se dispara con **dos triggers**, y los dos hacen falta:
+
+- cambio de estado del `device_tracker` (te mueves de zona), y
+- un `time_pattern` cada 15 min (aviso periódico).
+
+El periódico no es redundancia: sin él, un dato se quedaría vigente durante horas sin
+que nadie confirme que HA sigue vivo, y `PRESENCE_TTL_MINUTES` no podría distinguir
+"sigues en casa" de "HA se cayó". Es el que hace que el silencio signifique algo. El
+intervalo del periódico tiene que ser **menor** que el TTL, o el dato caducará entre
+avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la query
+string (el soporte de query solo existe por compatibilidad con integraciones ya
+desplegadas y expone el token en los logs de URLs).
+
 ## Agente PC (`agent/agent.py`)
 
 Agente Windows **efímero**: arranca con Windows (vía WOL), drena la cola de jobs y se
@@ -1027,7 +1079,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 293 tests)
+### Backend (`tests/backend`, 333 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1046,7 +1098,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 81 tests)
+### Frontend (`tests/frontend`, 87 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -1187,7 +1239,8 @@ También está el workflow `Deploy backend (Fly.io)`
 **Migraciones de Supabase**: se aplican a mano desde el editor SQL. Las que hay:
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
 `20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
-`20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`.
+`20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
+`20260804_presence`.
 
 ## Convenciones
 

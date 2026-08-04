@@ -162,6 +162,56 @@ automation:
 
 Guarda `HA_POLL_TOKEN` como `la_poll_token` en `secrets.yaml`.
 
+### Presencia (opcional, requiere la app companion de HA)
+
+Es lo único que va en sentido contrario: aquí HA **empuja** el dato, porque el que sabe
+dónde estás es él. Con esto, `/weather` y `/maps/departure` dejan de calcular siempre
+desde casa, el resumen diario gana contexto y se guarda una serie diaria de horas en
+casa (métrica `time_at_home`) que el motor de correlaciones cruza con el sueño y la HRV.
+**No se guarda histórico de ubicación**: solo la posición actual, que se sobreescribe, y
+horas por día — nunca lugares.
+
+```yaml
+rest_command:
+  la_presencia:
+    url: https://TU-BACKEND.fly.dev/ha/presencia
+    method: POST
+    headers: { X-Auth-Token: !secret la_poll_token }
+    content_type: "application/json"
+    payload: >-
+      {"zona": "{{ zona }}", "en_casa": {{ en_casa }},
+       "lat": {{ lat }}, "lon": {{ lon }}}
+
+automation:
+  - alias: "Life Assistant: presencia"
+    mode: single
+    max_exceeded: silent
+    trigger:
+      # 1) Cuando cambias de zona. `not_to` lo convierte en un trigger de ESTADO: sin
+      #    él saltaría también con cada refresco de coordenadas del GPS, que son
+      #    cambios de atributo y llegan constantemente.
+      - platform: state
+        entity_id: device_tracker.TU_MOVIL
+        not_to: ["unknown", "unavailable"]
+      # 2) Aviso periódico. No es redundante: es lo que hace que el silencio
+      #    signifique algo. Sin él, el backend no puede distinguir "sigue en casa" de
+      #    "HA se ha caído", y seguiría dando por buena una ubicación de hace horas.
+      #    El intervalo tiene que ser MENOR que PRESENCE_TTL_MINUTES (45 por defecto).
+      - platform: time_pattern
+        minutes: "/15"
+    action:
+      - service: rest_command.la_presencia
+        data:
+          zona: "{{ states('device_tracker.TU_MOVIL') }}"
+          en_casa: "{{ 'true' if states('device_tracker.TU_MOVIL') == 'home' else 'false' }}"
+          lat: "{{ state_attr('device_tracker.TU_MOVIL', 'latitude') | default('null', true) }}"
+          lon: "{{ state_attr('device_tracker.TU_MOVIL', 'longitude') | default('null', true) }}"
+```
+
+Sin coordenadas (un `device_tracker` por presencia en la red, por ejemplo) también
+funciona: `lat`/`lon` viajan como `null` y se sigue registrando la zona y la serie
+diaria, pero el clima y la hora de salida se quedan en sus valores por defecto.
+
 ## 7. Resumen diario por correo (opcional)
 
 Cada mañana el backend puede mandarte a tu propio buzón los datos del día —agenda,
@@ -216,6 +266,7 @@ los mismos datos en JSON.
 - [ ] Grabar una idea por voz la transcribe y guarda (OpenAI configurado)
 - [ ] (Opcional) Llega una métrica de salud tras un export del Watch
 - [ ] (Opcional) Los sensores `la_*` de HA se actualizan
+- [ ] (Opcional) Ajustes → Estado del sistema muestra la presencia como vigente
 - [ ] (Opcional) *Run workflow* del resumen diario deja el correo en tu buzón
 
 ## Referencia rápida de variables
@@ -228,7 +279,7 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `BRIEF_TOKEN`, `BRIEF_TO`, `BRIEF_FROM`,
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ENTREGAS_MARKER`,
-`BRIEF_DIAS_ENTREGAS`.
+`BRIEF_DIAS_ENTREGAS`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
