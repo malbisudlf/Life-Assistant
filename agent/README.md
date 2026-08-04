@@ -13,10 +13,14 @@ Es efímero y despacha por `payload["accion"]`: drena la cola de jobs y se cierr
    no tiene la VPN encendida) y levanta el túnel, reportando la IP de la tailnet al
    dashboard — el PC arranca por WOL sin VPN, y desde fuera de casa es la única forma
    de que Moonlight lo alcance. Si falla, avisa y sigue: en la LAN funciona igual
-2. Lanza Sunshine (o Apollo) en modo DETACHED, para que sobreviva al agente
+2. Arranca el **servicio de Sunshine** (`SunshineService`, también en manual) y espera
+   a ver el proceso vivo antes de dar el job por hecho. Si no hay servicio registrado
+   cae a lanzar el `.exe` en modo DETACHED, pero la comprobación se hace igual
 
-Arrancar el servicio necesita privilegios: la tarea del Programador debe estar
-marcada como "Ejecutar con los privilegios más altos".
+Los dos pasos van por servicio y no ejecutando el binario: al agente lo lanza el
+Programador de tareas, fuera del escritorio del usuario, y un `sunshine.exe` arrancado
+desde ahí se cierra al instante. Arrancar servicios necesita privilegios: la tarea del
+Programador debe estar marcada como "Ejecutar con los privilegios más altos".
 
 Puesta a punto completa (Tailscale desatendido, autoarranque de Sunshine, WOL):
 `PUESTA_A_PUNTO.md`.

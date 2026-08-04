@@ -276,13 +276,21 @@ Ficheros clave:
   arriba y desde fuera de casa Moonlight no llega. Mismo criterio que con Sunshine:
   el servicio de Tailscale va en arranque MANUAL para que el PC no tenga la VPN
   encendida en el día a día, y lo arranca el agente
-  (`arrancar_servicio_tailscale()`, que necesita que la tarea del Programador corra
+  (`arrancar_servicio()`, que necesita que la tarea del Programador corra
   con privilegios elevados). El estado del servicio se consulta con `Get-Service`,
   no con `sc query`: este último traduce el estado y en un Windows en español
   devuelve "EN EJECUCIÓN". La IP de la tailnet viaja al modal
   en el mensaje del stage `vpn_ready`, de donde la saca `hostStreaming()` (helpers) —
   no se guarda en ningún sitio. Un fallo de VPN **no tumba el job**: se reporta
   `vpn_error` y se abre Sunshine igual, que en la LAN sigue sirviendo.
+  **Sunshine se arranca por su servicio** (`SUNSHINE_SERVICIO`, mismo
+  `arrancar_servicio()` que Tailscale), no ejecutando `sunshine.exe`: al agente lo
+  lanza el Programador de tareas fuera del escritorio del usuario, y el binario
+  arrancado desde ahí muere al instante. El `Popen` del exe queda solo como respaldo
+  para instalaciones sin servicio. Y **el job no se da por hecho sin comprobarlo**:
+  `arrancar_sunshine()` espera hasta `SUNSHINE_TIMEOUT` a ver el proceso vivo
+  (`sunshine_vivo()`) y si no aparece lanza, de modo que el job cae a `failed` en vez
+  de reportar `streaming_ready` sobre un PC sin nada abierto.
 - **Clima**: `/weather` (Open-Meteo, gratis, sin API key) usa `WEATHER_LAT/LON`, o las
   coordenadas que mande el dispositivo (`?lat&lon`, geolocalización del navegador). El
   cálculo de salida (`/maps/departure`) también usa esa ubicación como `origin` si la
@@ -510,6 +518,16 @@ excepción o error de consola, no solo si falta un texto.
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **El job de streaming decía "Sunshine abierto" con Sunshine sin abrir.** El agente
+  hacía `subprocess.Popen([SUNSHINE_EXE])` y reportaba `streaming_ready` acto seguido.
+  Pero `Popen` sin excepción solo dice que Windows aceptó *crear* el proceso, no que
+  siga vivo un segundo después: al agente lo lanza el Programador de tareas fuera del
+  escritorio del usuario, y Sunshine desde ahí se cierra al instante (ni proceso, ni
+  puertos escuchando, `SunshineService` en `Stopped`). El log del agente terminaba con
+  "✅ Sunshine lanzado" y el job en `done`. La tercera vez que aparece el mismo patrón
+  del proyecto —el 409 del Watch, el 401 del agente, esto—: **lanzar algo no es
+  comprobar que funciona**, y un job solo se marca `done` tras verificar el efecto.
+  Arreglado arrancando el servicio (como Tailscale) y esperando a ver el proceso vivo.
 - **`/jobs/pending` era un 502 fijo por un `+` en la query string.** El corte de "última
   hora" se formateaba como `...T05:10:01+00:00` y se pegaba a la URL de Supabase; en una
   query string el `+` significa espacio, así que PostgREST leía `...T05:10:01 00:00` y

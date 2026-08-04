@@ -45,10 +45,13 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
       mismo ejecutable en `C:\Program Files\Apollo\sunshine.exe`. Con un monitor
       físico siempre conectado no hace falta — su ventaja es la pantalla virtual.)
 - [ ] **Desactivar su autoarranque**: Servicios de Windows → `SunshineService` → tipo de
-      inicio **Manual**. Lo único residente debe ser el agente; Sunshine lo lanza el
-      agente bajo demanda.
-- [ ] Confirmar la ruta del ejecutable: `C:\Program Files\Sunshine\sunshine.exe`
-      (si es otra, ponerla en `SUNSHINE_EXE`).
+      inicio **Manual**. Lo único residente debe ser el agente; Sunshine lo arranca el
+      agente bajo demanda — pero **por el servicio, no ejecutando el binario**, así que
+      el servicio tiene que seguir existiendo (manual, no deshabilitado).
+- [ ] Confirmar el nombre del servicio con `Get-Service SunshineService`. Si tu
+      instalación lo registra con otro nombre, ponerlo en `SUNSHINE_SERVICIO`.
+- [ ] Solo si tu instalación **no** registra servicio (portables), confirmar la ruta del
+      ejecutable: `C:\Program Files\Sunshine\sunshine.exe` (si es otra, `SUNSHINE_EXE`).
 
 ## 3. Tailscale en el PC (para conectarte desde fuera de casa)
 
