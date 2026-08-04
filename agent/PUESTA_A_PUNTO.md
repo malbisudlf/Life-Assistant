@@ -111,11 +111,14 @@ toca nada.
 - [ ] **Auto-login de Windows** (`netplwiz` → desmarcar "los usuarios deben escribir
       contraseña"). Es **obligatorio**: tras el WOL, sin sesión activa no funcionan ni
       pyautogui ni la captura de pantalla de Sunshine.
-- [ ] **Task Scheduler** → tarea `LifeAssistantAgent`, disparador **"Al iniciar sesión"**,
+- [x] **Task Scheduler** → tarea `LifeAssistantAgent`, disparador **"Al iniciar sesión"**,
       acción: `python.exe` con `agent.py`. Marcar "Ejecutar solo cuando el usuario haya
       iniciado sesión" y **"Ejecutar con los privilegios más altos"**: sin eso el agente
       no puede arrancar el servicio de Tailscale (y lo dirá en el modal). Marcada, la
       tarea no lanza aviso de UAC.
+      Además, **"No iniciar una nueva instancia"** (`MultipleInstances IgnoreNew`): el
+      relanzado por HA dispara esta misma tarea, y sin eso pedir streaming con el agente
+      ya trabajando lanzaría un segundo agente compitiendo por la misma cola.
 - [ ] Confirmar que **WOL está habilitado** en BIOS y en la tarjeta de red (ya lo estaba
       para el flujo de Alud).
 
@@ -124,84 +127,93 @@ toca nada.
 Necesario solo para el caso "PC ya encendido": el agente efímero ya terminó, así que HA
 lo relanza por SSH.
 
-- [ ] Activar **OpenSSH Server**: Configuración → Aplicaciones → Características opcionales
-      → "Servidor de OpenSSH". Arrancar el servicio `sshd`.
-- [ ] **Solo clave, sin contraseña**: copiar la clave pública de HA a
-      `C:\Users\<usuario>\.ssh\authorized_keys` y en `sshd_config` poner
-      `PasswordAuthentication no`.
-- [ ] Restringir a **red local / VPN**, nunca exponerlo directo a internet.
-- [ ] Probar desde HA: `ssh mikel@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"`.
+- [x] Activar **OpenSSH Server**: Configuración → Aplicaciones → Características opcionales
+      → "Servidor de OpenSSH". Servicio `sshd` en **Automático** y arrancado (si queda en
+      Manual, tras un reinicio el relanzado deja de funcionar sin avisar).
+      Ojo: tener `ssh.exe` no significa tener servidor — el cliente viene de serie y el
+      servidor es una característica aparte. Se comprueba con `Test-Path
+      C:\Windows\System32\OpenSSH\sshd.exe`, no con `ssh -V`.
+- [x] **Solo clave, sin contraseña**: par ed25519 generado para HA. **Si tu usuario de
+      Windows es administrador, la clave pública NO va a `~\.ssh\authorized_keys`**: sshd
+      la ignora y usa `C:\ProgramData\ssh\administrators_authorized_keys`, que además debe
+      tener la ACL restringida a SYSTEM y Administradores o sshd la rechaza en silencio
+      (`icacls ... /inheritance:r /grant *S-1-5-18:F /grant *S-1-5-32-544:F` — por SID,
+      que los nombres de grupo cambian con el idioma de Windows).
+      En `sshd_config`, arriba del todo (gana el primer valor y las directivas globales
+      tras un bloque `Match` ya no se aplican): `PubkeyAuthentication yes`,
+      `PasswordAuthentication no`, `PermitEmptyPasswords no`. Validar con `sshd -t`.
+- [x] Restringir a **red local / VPN**, nunca exponerlo directo a internet: deshabilitada
+      la regla `OpenSSH-Server-In-TCP` (que abre el 22 a cualquier origen) y creada
+      `LifeAssistant-SSH-In` limitada a la subred de casa y a `100.64.0.0/10` (tailnet).
+- [x] Probar desde HA: `ssh -i /config/.ssh/id_pc <usuario>@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"`.
 
 ## 7. Home Assistant (relanzado del agente)
 
 HA sondea el backend y, si hay relanzado pendiente, dispara la tarea del agente por SSH.
 
+**Dónde vive esto**: no en `configuration.yaml`, sino en
+`/config/packages/life_assistant_pc.yaml` — el `configuration.yaml` ya trae
+`homeassistant: packages: !include_dir_named packages`, así que cada fichero de esa
+carpeta es un paquete independiente y esto no se mezcla con el resto de la casa. Los
+sensores van con la integración **`rest`** (no `command_line` + `curl`): es el mismo
+patrón que el sensor de WOL que ya existía, permite `!secret ha_poll_token` en vez de
+pegar el token en un comando, y no depende de que el contenedor traiga `curl`.
+
 ```yaml
-# configuration.yaml
+# /config/packages/life_assistant_pc.yaml
 shell_command:
-  relanzar_agente_pc: 'ssh -i /config/.ssh/id_pc mikel@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"'
+  la_relanzar_agente: >-
+    ssh -i /config/.ssh/id_pc -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10
+    <usuario>@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"
 
-command_line:
-  - sensor:
-      name: agente_pc_relaunch_pending
-      command: 'curl -s -H "X-Auth-Token: TU_HA_POLL_TOKEN" https://backend-tender-glow-160.fly.dev/ha/agent-relaunch-pending'
-      value_template: "{{ (value_json.pending) | lower }}"
-      scan_interval: 30
-
-automation:
-  - alias: Relanzar agente PC cuando el dashboard lo pide
-    trigger:
-      - platform: state
-        entity_id: sensor.agente_pc_relaunch_pending
-        to: "true"
-    action:
-      - service: shell_command.relanzar_agente_pc
+rest:
+  - resource: "https://backend-tender-glow-160.fly.dev/ha/agent-relaunch-pending"
+    params:
+      token: !secret ha_poll_token
+    scan_interval: 30
+    sensor:
+      - name: "Life Assistant Agent Relaunch Pending"
+        value_template: "{{ value_json.pending | string | lower }}"
 ```
 
-- [ ] Pegar el YAML con tu `HA_POLL_TOKEN` y la IP del PC.
-- [ ] Reiniciar HA y comprobar que aparece `sensor.agente_pc_relaunch_pending`.
+La automatización se crea por la **API** (`POST /api/config/automation/config/{id}`),
+como se hizo con `la_wol_poll`: dispara `shell_command.la_relanzar_agente` cuando
+`sensor.life_assistant_agent_relaunch_pending` pasa a `"true"`.
+
+- [x] Clave privada en `/config/.ssh/id_pc`, con `chmod 600` y `chown root:root` (el
+      contenedor de Core corre como root y ssh rechaza una clave legible por otros).
+      SFTP no está disponible en el add-on: se escribe con `sudo tee` por el canal SSH.
+- [x] Validar **antes** de reiniciar con `ha core check` (en shell de login: `bash -lc`,
+      si no el CLI no encuentra el token del supervisor y responde `unauthorized`).
+- [x] Reiniciar HA y comprobar que aparecen `sensor.life_assistant_agent_relaunch_pending`
+      y los servicios `shell_command.*` (los `rest` y `shell_command` de un paquete nuevo
+      solo se cargan reiniciando Core, no con una recarga).
+- [x] Probar el eslabón de verdad, no solo que la entidad exista: llamar al servicio con
+      `POST /api/services/shell_command/la_relanzar_agente?return_response` devuelve
+      `stdout`/`stderr`/`returncode`. Un `returncode: 0` con el arranque apareciendo en
+      `agent.log` es la única prueba de que la cadena entera funciona.
 
 ### Apagar / suspender el PC (botones del widget)
 
 Los botones "Apagar" y "Suspender" no pasan por el agente: HA ejecuta el comando por
 SSH directo. Mismo patrón que el relanzado, sondeando `/ha/pc-power-pending`.
 
-```yaml
-shell_command:
-  apagar_pc:    'ssh -i /config/.ssh/id_pc mikel@IP_DEL_PC "shutdown /s /t 0"'
-  suspender_pc: 'ssh -i /config/.ssh/id_pc mikel@IP_DEL_PC "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"'
+Van en el mismo paquete, con el mismo patrón: `shell_command.la_apagar_pc` /
+`la_suspender_pc` (`shutdown /s /t 0` y
+`rundll32.exe powrprof.dll,SetSuspendState 0,1,0`), el sensor `rest`
+`Life Assistant PC Power Action` sobre `/ha/pc-power-pending`, y una automatización con
+`choose` según el estado sea `shutdown` o `suspend`.
 
-command_line:
-  - sensor:
-      name: pc_power_action
-      command: 'curl -s -H "X-Auth-Token: TU_HA_POLL_TOKEN" https://backend-tender-glow-160.fly.dev/ha/pc-power-pending'
-      value_template: "{{ value_json.action if value_json.action else 'none' }}"
-      scan_interval: 30
-
-automation:
-  - alias: Apagar/suspender PC cuando el dashboard lo pide
-    trigger:
-      - platform: state
-        entity_id: sensor.pc_power_action
-        to: "shutdown"
-      - platform: state
-        entity_id: sensor.pc_power_action
-        to: "suspend"
-    action:
-      - choose:
-          - conditions: "{{ trigger.to_state.state == 'shutdown' }}"
-            sequence: [{ service: shell_command.apagar_pc }]
-          - conditions: "{{ trigger.to_state.state == 'suspend' }}"
-            sequence: [{ service: shell_command.suspender_pc }]
-```
-
-- [ ] Pegar también este YAML si quieres los botones de apagar/suspender.
+- [x] Configurado junto con el relanzado.
 
 ## 8. Desplegar el backend
 
-- [ ] `cd backend && fly deploy` (activa `/relaunch-agent`, `/ha/agent-relaunch-pending`,
+- [x] `cd backend && fly deploy` (activa `/relaunch-agent`, `/ha/agent-relaunch-pending`,
       `/shutdown-pc`, `/suspend-pc`, `/ha/pc-power-pending` y `/weather` en producción).
       Si es la primera vez en ese equipo: `fly auth login`.
+      Ya estaba desplegado: los tres endpoints `/ha/*` responden 200 con el
+      `HA_POLL_TOKEN`. Comprobarlo antes ahorra un deploy innecesario a producción.
 
 ## 9. Prueba end-to-end
 
