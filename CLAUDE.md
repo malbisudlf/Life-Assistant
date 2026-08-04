@@ -1026,6 +1026,38 @@ cierra. Se registra en el backend con heartbeat. **Solo funciona en un PC Window
   `resolver_accion()` + guard `attempted` (cada job se intenta una vez por ejecución para
   no repetir en bucle si falla el claim por red).
 
+### Nada de PowerShell en el camino crítico
+
+**La primera invocación de `powershell.exe` tras encender el PC tarda más de 40
+segundos** (carga del CLR sobre un disco frío, con Defender inspeccionando el binario
+por primera vez), y el agente arranca justo ahí, empujado por el WOL. Quedó medido en
+su log el 2026-08-04: `15:29:16 → 15:29:56` esperando un `Get-Service` hasta agotar el
+timeout, con el job entero tardando **65 s en frío contra 5 s con el PC caliente** —
+los "45 segundos en negro" al lanzar el streaming. Y no era una llamada: la ruta de
+`abrir_streaming` invoca PowerShell media docena de veces (estado del servicio,
+`Start-Service`, los sondeos de confirmación, `sunshine_vivo`).
+
+Por eso `estado_servicio`, `arrancar_servicio` y `sunshine_vivo` van por `sc.exe` y
+`tasklist.exe` (`_nativo()`), que son binarios de Win32 sin runtime detrás: 23 y 108 ms.
+Dos detalles que no se pueden relajar:
+
+- **Se lee el CÓDIGO numérico del estado, no el texto** (`_ESTADOS_SC`,
+  `STATE : 4`). El texto de `sc query` sí viene traducido ("EN EJECUCIÓN") en un
+  Windows en español — que es exactamente lo que en su día hizo elegir `Get-Service`.
+  El número no se traduce, así que sirve para las dos cosas. Lo mismo con `tasklist`:
+  su "no hay tareas" está traducido, pero la línea de un proceso encontrado empieza
+  siempre por `"sunshine.exe",` — se busca el nombre **entre comillas**.
+- **Cada camino nuevo conserva el de siempre como red de seguridad**: si `sc query` no
+  da una respuesta interpretable o `sc start` falla con algo que no sabemos leer, se
+  cae a PowerShell antes de darse por vencido. El agente no tiene tests ni puede
+  tenerlos, y un fallo suyo ocurre a las 6 de la mañana sin nadie delante: el objetivo
+  es que en el peor caso se comporte como antes, no que se quede sin saber el estado.
+  `ACCESS_DENIED` (rc 5) es la excepción y corta directamente — sin privilegios
+  PowerShell tampoco arrancaría el servicio, así que reintentar solo cuesta tiempo.
+
+Verificado comparando `sc query` contra `Get-Service` en **los 322 servicios** de la
+máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
+
 ### Acción `abrir_streaming`
 
 - **Levanta la VPN antes de lanzar Sunshine** (`conectar_vpn()`, Tailscale): el PC lo
@@ -1079,7 +1111,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 333 tests)
+### Backend (`tests/backend`, 342 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1139,6 +1171,31 @@ excepción o error de consola, no solo si falta un texto.
   que toca.
 
 ## Bugs históricos (no los reintroduzcas)
+
+- **El streaming tardaba 45 segundos "en negro" tras encender el PC.** No era la red,
+  ni el WOL, ni Sunshine: era la primera invocación de `powershell.exe` del arranque,
+  que agotaba el timeout de 40 s del agente antes de devolver un simple
+  `Get-Service`. Con el PC ya caliente el mismo job tardaba 5 s, así que desde fuera
+  parecía "a veces va lento". Ver "Nada de PowerShell en el camino crítico".
+  Moraleja: **en el arranque en frío, el coste de arrancar un intérprete supera con
+  mucho al del trabajo que va a hacer** — para preguntas de sistema simples, la
+  herramienta nativa.
+- **Un lote vacío del Watch se registraba como fallo.** La protección que detecta
+  "cuerpo con la estructura equivocada" (la del 409) también atrapaba los
+  `{"data": {}}` que Health Auto Export manda varias veces al día cuando no hay nada
+  nuevo que exportar, que es su funcionamiento normal. Resultado: 49 avisos en una
+  semana tapando en `app_logs` los que sí importaban, que es justo lo contrario de
+  para lo que se creó esa tabla. Ahora `_lote_vacio()` los separa: estructura
+  reconocida y sin muestras → INFO y `ok: true`; cualquier otra cosa (un `{}` pelado,
+  otro envoltorio, o muestras que no se reconocen) sigue siendo WARNING y `ok: false`.
+  Moraleja: **"no tengo nada que darte" y "te estoy hablando en otro idioma" no pueden
+  compartir nivel de log**, o el registro deja de ser señal.
+- **`/ha/events/soon` devolvía 500 si Graph no llegaba a contestar.** `_graph_fallo()`
+  cubría las respuestas CON error, pero un fallo de red (conexión cortada, DNS,
+  timeout) sale como excepción, se salta ese manejo y acaba en un 500 — y HA solo sabe
+  leer `{"event": None}`. Pasó el 2026-08-04 durante un reinicio de Home Assistant.
+  Al proteger un endpoint de un servicio externo, cubre los dos: el que responde mal
+  y el que no responde.
 
 - **El job de streaming decía "Sunshine abierto" con Sunshine sin abrir.** El agente
   hacía `subprocess.Popen([SUNSHINE_EXE])` y reportaba `streaming_ready` acto seguido.

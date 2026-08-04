@@ -540,17 +540,64 @@ def _powershell(comando: str, timeout: int = 40):
         return -1, "", str(e)
 
 
-def estado_servicio(nombre: str) -> str:
-    """"Running" / "Stopped" / "" si el servicio no existe.
+def _nativo(args: list, timeout: int = 15):
+    """Ejecuta una herramienta nativa de Windows. Devuelve (rc, stdout, stderr).
 
-    Se consulta con Get-Service y no con `sc query` porque este último imprime el
-    estado traducido ("EN EJECUCIÓN") en un Windows en español, y el valor de
-    Get-Service es siempre el del enum en inglés.
+    Existe para NO pagar el arranque de PowerShell en el camino crítico. La primera
+    invocación de `powershell.exe` tras encender el PC tarda más de 40 segundos —carga
+    del CLR sobre un disco frío, con Defender inspeccionando el binario por primera
+    vez— y el agente arranca justo ahí, empujado por el WOL. El 2026-08-04 quedó
+    medido en el log: 15:29:16 → 15:29:56 esperando un `Get-Service`, y el job entero
+    tardó 65 s en frío contra 5 s con el PC ya caliente. `sc.exe` y `tasklist.exe` son
+    binarios de Win32 sin runtime detrás: 23 y 108 ms.
     """
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    except Exception as e:
+        log.warning(f"{args[0]} falló: {e}")
+        return -1, "", str(e)
+
+
+# Estados del SCM (dwCurrentState). Se lee el NÚMERO y no el texto que hay al lado,
+# porque el texto sí viene traducido ("EN EJECUCIÓN") en un Windows en español — que
+# es justo lo que en su día descartó `sc query` en favor de Get-Service. El número no
+# se traduce, así que sirve para las dos cosas: es estable y no cuesta 40 segundos.
+_ESTADOS_SC = {
+    1: "Stopped", 2: "StartPending", 3: "StopPending", 4: "Running",
+    5: "ContinuePending", 6: "PausePending", 7: "Paused",
+}
+_RE_ESTADO_SC = re.compile(r"STATE\s*:\s*(\d+)")
+_SC_NO_EXISTE      = 1060   # ERROR_SERVICE_DOES_NOT_EXIST
+_SC_YA_ARRANCADO   = 1056   # ERROR_SERVICE_ALREADY_RUNNING
+_SC_ACCESO_DENEGADO = 5     # ERROR_ACCESS_DENIED
+
+
+def _estado_servicio_powershell(nombre: str) -> str:
+    """El camino de siempre, que ahora es solo la red de seguridad de `sc query`."""
     _, salida, _ = _powershell(
         f"(Get-Service -Name '{nombre}' -ErrorAction SilentlyContinue).Status"
     )
     return salida
+
+
+def estado_servicio(nombre: str) -> str:
+    """"Running" / "Stopped" / "" si el servicio no existe.
+
+    Se resuelve con `sc query` (nativo, ver `_nativo`) y solo se cae a PowerShell si
+    la respuesta no es concluyente: mientras el camino rápido funcione no se paga su
+    coste, y si algún día no funcionara el agente se comporta como antes en vez de
+    quedarse sin saber el estado.
+    """
+    rc, salida, _ = _nativo(["sc.exe", "query", nombre])
+    if rc == _SC_NO_EXISTE:
+        return ""
+    if rc == 0:
+        m = _RE_ESTADO_SC.search(salida)
+        if m:
+            return _ESTADOS_SC.get(int(m.group(1)), "")
+    log.warning(f"sc query '{nombre}' no concluyente (rc={rc}) — probando con PowerShell")
+    return _estado_servicio_powershell(nombre)
 
 
 def arrancar_servicio(nombre: str) -> bool:
@@ -570,15 +617,24 @@ def arrancar_servicio(nombre: str) -> bool:
         return False
 
     log.info(f"Servicio '{nombre}' en estado {estado} — arrancándolo...")
-    rc, _, err = _powershell(f"Start-Service -Name '{nombre}'")
-    if rc != 0:
-        # "Cannot open <servicio> service on computer" es lo que dice Start-Service
-        # cuando el proceso no está elevado: no menciona los permisos por ningún lado.
-        bajo = err.lower()
-        sin_permisos = "denied" in bajo or "permissiondenied" in bajo or "cannot open" in bajo
-        detalle = "faltan privilegios (¿la tarea corre elevada?)" if sin_permisos else err[:200]
-        log.warning(f"No se pudo arrancar el servicio '{nombre}': {detalle}")
+    rc, salida, err = _nativo(["sc.exe", "start", nombre])
+    if rc == _SC_ACCESO_DENEGADO:
+        log.warning(f"No se pudo arrancar el servicio '{nombre}': "
+                    "faltan privilegios (¿la tarea corre elevada?)")
         return False
+    if rc not in (0, _SC_YA_ARRANCADO):
+        # Antes de darlo por perdido, el camino de siempre: si `sc` falla por algo que
+        # no sabemos interpretar, Start-Service puede funcionar igualmente.
+        log.warning(f"sc start '{nombre}' devolvió rc={rc} — probando con PowerShell")
+        rc_ps, _, err_ps = _powershell(f"Start-Service -Name '{nombre}'")
+        if rc_ps != 0:
+            # "Cannot open <servicio> service on computer" es lo que dice Start-Service
+            # cuando el proceso no está elevado: no menciona los permisos por ningún lado.
+            bajo = (err_ps or err or salida).lower()
+            sin_permisos = "denied" in bajo or "permissiondenied" in bajo or "cannot open" in bajo
+            detalle = "faltan privilegios (¿la tarea corre elevada?)" if sin_permisos else (err_ps or err)[:200]
+            log.warning(f"No se pudo arrancar el servicio '{nombre}': {detalle}")
+            return False
 
     # Start-Service vuelve cuando el servicio dice estar arrancado, pero el demonio de
     # detrás (tailscaled, el lanzador de Sunshine) tarda un poco más en estar listo.
@@ -767,10 +823,29 @@ def sunshine_vivo() -> bool:
     un segundo después. Se mira el proceso y no el puerto porque los puertos de
     Sunshine son configurables desde su propia interfaz.
     """
+    vivo = _proceso_vivo("sunshine.exe")
+    if vivo is not None:
+        return vivo
     _, salida, _ = _powershell(
         "@(Get-Process -Name sunshine -ErrorAction SilentlyContinue).Count"
     )
     return salida.isdigit() and int(salida) > 0
+
+
+def _proceso_vivo(nombre_exe: str):
+    """True/False si `tasklist` responde, None si no se puede saber (→ PowerShell).
+
+    Se busca el nombre ENTRE COMILLAS porque es lo único de la salida que no está
+    traducido: con el filtro sin resultados, tasklist imprime un "INFO: No hay tareas
+    en ejecución..." que sí cambia con el idioma, mientras que la línea de un proceso
+    encontrado empieza siempre por `"sunshine.exe",`.
+    """
+    rc, salida, _ = _nativo(
+        ["tasklist.exe", "/FI", f"IMAGENAME eq {nombre_exe}", "/FO", "CSV", "/NH"]
+    )
+    if rc != 0:
+        return None
+    return f'"{nombre_exe}"'.lower() in salida.lower()
 
 
 def arrancar_sunshine():
