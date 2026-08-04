@@ -112,6 +112,7 @@ MAX_JOB_ATTEMPTS = int(os.getenv("MAX_JOB_ATTEMPTS", "3"))
 MAX_SESIONES_RESUMEN = int(os.getenv("MAX_SESIONES_RESUMEN", "200"))
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
+AGENT_TOKEN         = os.getenv("AGENT_TOKEN", "")   # el agente PC sondea y cierra jobs con este token
 # Personalización de la instancia (kit self-hosted)
 TIMEZONE         = os.getenv("TIMEZONE", "Europe/Madrid")   # zona horaria IANA del usuario
 CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calendario de clases en Outlook
@@ -632,6 +633,33 @@ def create_token() -> str:
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
     try:
         jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+
+
+def verify_agente(request: Request):
+    """Auth de los endpoints que usa el agente PC: token de servicio O JWT de usuario.
+
+    El agente es una máquina y llevaba un JWT del dashboard copiado a mano en su `.env`.
+    Ese JWT caduca a los 30 días, y cuando caducó el agente no dejó de funcionar de
+    forma visible: `GET /jobs/pending` empezó a responder 401, el agente lo tradujo a
+    "no hay jobs pendientes" y se cerró en silencio en cada arranque. Mismo criterio que
+    BRIEF_TOKEN: lo que no puede volver a hacer login por su cuenta no puede depender de
+    un token que expira.
+
+    Se sigue aceptando el JWT porque estos endpoints no son solo del agente — el
+    dashboard consulta el estado de un job con la sesión del usuario — y porque así una
+    instancia sin AGENT_TOKEN configurado sigue funcionando como antes.
+
+    El token se lee solo de cabeceras (`_extract_service_token` sin query string): aquí
+    el cliente es código propio, así que no hay ninguna integración desplegada que
+    migrar, y un token en la query acaba en los logs de acceso.
+    """
+    provisto = _extract_service_token(request)
+    if _token_ok(provisto, AGENT_TOKEN):
+        return
+    try:
+        jwt.decode(provisto, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
@@ -1610,7 +1638,7 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     return {"ok": True, "job": data2[0] if data2 else None}
 
 @app.get("/jobs/pending")
-def get_pending_job(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def get_pending_job(_auth = Depends(verify_agente)):
     """El job pendiente más reciente de la última hora, para que lo recoja el agente.
 
     Antes esta consulta la hacía el propio agente directamente contra Supabase con la
@@ -1649,7 +1677,7 @@ def get_job_by_id(
 def claim_job(
     job_id: str = _JOB_ID_PATH,
     body: JobClaimRequest = ...,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+    _auth = Depends(verify_agente),
 ):
     now_iso = datetime.now(timezone.utc).isoformat()
     worker = _safe_worker(body.worker_id)
@@ -1669,7 +1697,7 @@ def claim_job(
 def start_job(
     job_id: str = _JOB_ID_PATH,
     body: JobStartRequest = ...,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+    _auth = Depends(verify_agente),
 ):
     worker = _safe_worker(body.worker_id)
     r = http.patch(
@@ -1688,7 +1716,7 @@ def start_job(
 def finish_job(
     job_id: str = _JOB_ID_PATH,
     body: JobFinishRequest = ...,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+    _auth = Depends(verify_agente),
 ):
     if body.status not in ("done", "failed"):
         raise HTTPException(status_code=400, detail="status debe ser done o failed")
@@ -1709,7 +1737,7 @@ def finish_job(
 def create_job_event(
     job_id: str = _JOB_ID_PATH,
     body: JobEventCreateRequest = ...,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+    _auth = Depends(verify_agente),
 ):
     payload = {
         "job_id": job_id,
@@ -1774,7 +1802,7 @@ def retry_job(
 
 
 @app.post("/agents/heartbeat")
-def agent_heartbeat(body: AgentHeartbeatRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+def agent_heartbeat(body: AgentHeartbeatRequest, _auth = Depends(verify_agente)):
     if body.status not in ("starting", "online", "busy", "offline"):
         raise HTTPException(status_code=400, detail="status inválido")
     now_iso = datetime.now(timezone.utc).isoformat()

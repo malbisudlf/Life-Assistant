@@ -1,6 +1,7 @@
 """Tests de la cola de jobs (Supabase simulado) y heartbeat de agentes."""
 from datetime import datetime, timedelta, timezone
 
+import main
 from conftest import FakeResponse
 
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -88,6 +89,90 @@ class TestPendingJob:
         r = client.get("/jobs/pending", headers=auth_headers)
         assert r.status_code == 502
         assert "secreto" not in r.text
+
+
+class TestAuthAgente:
+    """El agente PC se autentica con AGENT_TOKEN, un token de servicio que no caduca.
+
+    Antes llevaba el JWT del dashboard copiado a mano en su `.env`. Ese JWT dura 30
+    días: cuando caducó, `/jobs/pending` empezó a devolver 401 y el agente —que no
+    distinguía un fallo de "no hay nada que hacer"— se cerró en silencio en cada
+    arranque durante meses. Mismo razonamiento que BRIEF_TOKEN.
+    """
+
+    AGENTE = {"Authorization": "Bearer agent-token"}
+
+    def test_token_de_servicio_vale(self, client, mock_requests):
+        job = {"id": JOB_ID, "status": "pending"}
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([job]))
+        r = client.get("/jobs/pending", headers=self.AGENTE)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "job": job}
+
+    def test_tambien_por_cabecera_x_auth_token(self, client, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        r = client.get("/jobs/pending", headers={"X-Auth-Token": "agent-token"})
+        assert r.status_code == 200
+
+    def test_token_equivocado_da_401(self, client):
+        r = client.get("/jobs/pending", headers={"Authorization": "Bearer no-soy-el-agente"})
+        assert r.status_code == 401
+
+    def test_sin_token_da_401(self, client):
+        assert client.get("/jobs/pending").status_code == 401
+
+    def test_no_se_acepta_por_query_string(self, client):
+        """El cliente es código propio, así que no hay integración desplegada que migrar
+        —al contrario que HA o los Shortcuts— y un token en la query acaba en los logs
+        de acceso del proveedor."""
+        r = client.get("/jobs/pending?token=agent-token")
+        assert r.status_code == 401
+
+    def test_jwt_caducado_da_401(self, client):
+        """El bug real, como test: el token del agente llevaba meses expirado."""
+        from jose import jwt
+
+        caducado = jwt.encode(
+            {"exp": datetime.now(timezone.utc) - timedelta(days=1)},
+            main.SECRET_KEY,
+            algorithm=main.ALGORITHM,
+        )
+        r = client.get("/jobs/pending", headers={"Authorization": f"Bearer {caducado}"})
+        assert r.status_code == 401
+
+    def test_el_jwt_del_dashboard_sigue_valiendo(self, client, auth_headers, mock_requests):
+        """El dashboard consulta estos endpoints con la sesión del usuario, y una
+        instancia sin AGENT_TOKEN configurado tiene que seguir funcionando."""
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        assert client.get("/jobs/pending", headers=auth_headers).status_code == 200
+
+    def test_cubre_todo_lo_que_usa_el_agente(self, client, mock_requests):
+        """Los seis endpoints del ciclo de vida de un job. Si uno se queda fuera, el
+        agente muere a mitad de trabajo: reclama el job y no puede cerrarlo."""
+        mock_requests.add("PATCH", "/rest/v1/jobs", FakeResponse([{"id": JOB_ID}]))
+        mock_requests.add("POST", "/rest/v1/job_events", FakeResponse([{"stage": "s"}], 201))
+        mock_requests.add("POST", "/rest/v1/pc_agents", FakeResponse([{"agent_id": "pc-mikel"}], 201))
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+
+        llamadas = [
+            ("GET",  "/jobs/pending", None),
+            ("POST", f"/jobs/{JOB_ID}/claim",  {"worker_id": "w1"}),
+            ("POST", f"/jobs/{JOB_ID}/start",  {"worker_id": "w1"}),
+            ("POST", f"/jobs/{JOB_ID}/finish", {"worker_id": "w1", "status": "done"}),
+            ("POST", f"/jobs/{JOB_ID}/events", {"stage": "job_done", "message": "ok"}),
+            ("POST", "/agents/heartbeat",      {"agent_id": "pc-mikel", "status": "online"}),
+        ]
+        for metodo, ruta, cuerpo in llamadas:
+            r = client.request(metodo, ruta, headers=self.AGENTE, json=cuerpo)
+            assert r.status_code != 401, f"{metodo} {ruta} rechaza el token del agente"
+
+    def test_no_abre_el_resto_de_la_api(self, client):
+        """El alcance del token es la cola de jobs, no la sesión del usuario: vive en un
+        `.env` de un PC de escritorio que arranca solo y sin nadie delante."""
+        assert client.post("/jobs", headers=self.AGENTE,
+                           json={"dedupe_key": "k"}).status_code == 401
+        assert client.get("/health/metrics", headers=self.AGENTE).status_code == 401
+        assert client.get(f"/jobs/{JOB_ID}/events", headers=self.AGENTE).status_code in (401, 403)
 
 
 class TestClaimStartFinish:
