@@ -1,5 +1,6 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
 import json
+import logging
 
 import main
 from conftest import FakeResponse
@@ -470,6 +471,67 @@ class TestSincronizacionVacia:
                              json=[{"metric": "heart_rate", "date": "2026-07-28", "value": 60}]).json()
         assert cuerpo["ok"] is True
         assert cuerpo["upserted"] == 1
+
+
+class TestLoteVacioNoEsUnFallo:
+    """Health Auto Export manda lotes vacíos varias veces al día cuando el Watch no ha
+    volcado nada nuevo: es su funcionamiento normal, no una sincronización rota.
+
+    Salían como WARNING con `ok: false` igual que un envoltorio desconocido, y 49 en
+    una semana tapaban en `app_logs` los avisos que sí importan. Lo que NO puede pasar
+    es que esto debilite la protección del 409: los tests de abajo fijan la frontera.
+    """
+
+    def test_data_vacio_responde_ok(self, client, mock_requests):
+        # {"data": {}} — lo que llegaba de verdad, 21 bytes.
+        cuerpo = client.post("/health/ingest?token=health-token", json={"data": {}}).json()
+        assert cuerpo["ok"] is True
+        assert cuerpo["vacio"] is True
+        assert cuerpo["upserted"] == 0
+
+    def test_metrics_vacio_responde_ok(self, client, mock_requests):
+        # {"data": {"metrics": []}} — el otro cuerpo real, 45 bytes.
+        cuerpo = client.post("/health/ingest?token=health-token", json={"data": {"metrics": []}}).json()
+        assert cuerpo["ok"] is True
+        assert cuerpo["vacio"] is True
+
+    def test_un_lote_vacio_no_se_registra_como_aviso(self, client, mock_requests, caplog):
+        """Va a INFO justamente para que no se persista en app_logs (WARNING+)."""
+        with caplog.at_level(logging.INFO, logger="main"):
+            client.post("/health/ingest?token=health-token", json={"data": {}})
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("lote vacío" in r.message for r in caplog.records)
+
+    # ── La frontera: lo de abajo SIGUE siendo un fallo ────────────────────────
+
+    def test_cuerpo_vacio_del_todo_sigue_avisando(self, client, mock_requests, caplog):
+        """`{}` es lo que manda "Get contents of URL" sin adjuntar el fichero: no tiene
+        el envoltorio `data`, así que no es un lote vacío sino otra cosa."""
+        with caplog.at_level(logging.INFO, logger="main"):
+            cuerpo = client.post("/health/ingest?token=health-token", json={}).json()
+        assert cuerpo["ok"] is False
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_envoltorio_desconocido_sigue_avisando(self, client, mock_requests):
+        cuerpo = client.post("/health/ingest?token=health-token",
+                             json={"data": {"otra_cosa": []}}).json()
+        assert cuerpo["ok"] is False
+
+    def test_muestras_que_no_se_reconocen_siguen_avisando(self, client, mock_requests):
+        """Llegaron datos y no se entendió ninguno: eso no es un lote vacío."""
+        cuerpo = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "metrica_inventada", "units": "x", "data": [{"sin_fecha": 1}]}
+        ]}}).json()
+        assert cuerpo["ok"] is False
+
+    def test_la_funcion_distingue_los_casos(self):
+        assert main._lote_vacio({"data": {}}) is True
+        assert main._lote_vacio({"data": {"metrics": [], "workouts": []}}) is True
+        assert main._lote_vacio({}) is False
+        assert main._lote_vacio({"metrics": []}) is False
+        assert main._lote_vacio({"data": {"otra": 1}}) is False
+        assert main._lote_vacio({"data": {"metrics": [{"name": "x"}]}}) is False
+        assert main._lote_vacio([]) is False
 
 
 class TestUpsertContraLaRestriccionCorrecta:
