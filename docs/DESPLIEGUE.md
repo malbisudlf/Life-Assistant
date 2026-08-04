@@ -246,14 +246,24 @@ ve las variables `VITE_*`.
   `https://TU-BACKEND.fly.dev`
 - **Secrets**: `BRIEF_TOKEN`, el mismo valor que pusiste en Fly
 
-**3. Ajusta la hora** en `.github/workflows/resumen-diario.yml`. El cron va en **UTC**
-y no entiende de zonas horarias, así que hay que retocarlo en los cambios de hora:
-`30 4 * * *` son las 06:30 en Madrid en verano y las 05:30 en invierno. Los cron de
-GitHub Actions además se retrasan cuando GitHub está cargado (a veces 10-15 min), así
-que déjale margen antes de la rutina que lee el correo.
+**3. Decide cuándo sale el correo.** Por defecto no sale a una hora fija, sino cuando
+te despiertas: quien avisa es `POST /despertar` (con `BRIEF_TOKEN`), que puedes llamar
+desde una automatización de Atajos de iOS, desde Home Assistant o desde donde quieras.
+Si nadie avisa, sale igual a `BRIEF_HORA_TOPE` (10:00 por defecto) — de eso se encarga
+el sondeo de HA a `POST /ha/brief-tick`, que basta con llamar cada pocos minutos.
+Manda **un solo correo al día** pase lo que pase: la tabla `brief_envios` lo garantiza,
+así que puedes enchufar tantos disparadores como quieras sin coordinarlos.
+
+Si prefieres la hora fija de siempre, no configures ninguna señal: el workflow de
+Actions sigue disparando por su cuenta. Su cron va en **UTC** y no entiende de zonas
+horarias, así que hay que retocarlo en los cambios de hora (`0 9 * * *` son las 11:00
+en Madrid en verano y las 10:00 en invierno). Ten en cuenta que los cron de Actions se
+retrasan cuando GitHub está cargado, a veces 10-15 min: por eso aquí es la red de
+seguridad y no el disparador.
 
 **4. Pruébalo sin esperar a mañana**: Actions → *Resumen diario por correo* → *Run
-workflow*. Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
+workflow*, o `POST /brief/send?forzar=1` con tu `BRIEF_TOKEN`, que se salta la
+comprobación de "ya se envió hoy". Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
 los mismos datos en JSON.
 
 ## 8. Checklist de verificación
@@ -279,7 +289,9 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `TRUST_FORWARDED_FOR`, `ALUD_ALLOWED_HOSTS`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `BRIEF_TOKEN`, `BRIEF_TO`, `BRIEF_FROM`,
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ENTREGAS_MARKER`,
-`BRIEF_DIAS_ENTREGAS`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`.
+`BRIEF_DIAS_ENTREGAS`, `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`,
+`BRIEF_HORA_TOPE`,
+`BRIEF_DISPARA_SUENO`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`.
 (* = obligatoria para arrancar.)
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,

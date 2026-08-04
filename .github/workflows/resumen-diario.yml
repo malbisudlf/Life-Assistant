@@ -1,19 +1,28 @@
-name: Resumen diario por correo
+name: Resumen diario por correo (red de seguridad)
 
-# Dispara POST /brief/send cada mañana: el backend reúne agenda, clima, salud y
-# entrenamiento del día y los manda por correo COMO DATOS CRUDOS. De ese buzón los
-# recoge la rutina de Claude Code que compone el correo diario, así que este workflow
-# tiene que ejecutarse ANTES que esa rutina.
+# ESTE WORKFLOW YA NO ES EL DISPARADOR DEL CORREO. Lo es la señal de despertar
+# (POST /despertar desde el iPhone), con el sondeo de Home Assistant (POST
+# /ha/brief-tick) como reloj de respaldo a partir de BRIEF_HORA_TOPE.
 #
-# El cron de GitHub Actions va en UTC y no admite zonas horarias, así que hay que
-# ajustarlo a mano en los cambios de hora: 04:30 UTC son las 06:30 en Madrid en verano
-# (CEST, UTC+2) y las 05:30 en invierno (CET, UTC+1).
+# Por qué dejó de serlo: el cron de GitHub Actions se retrasa 10-15 min cuando la
+# cola va cargada, así que el correo llegaba tarde y a una hora distinta cada día. Un
+# disparador que no sabe decirte a qué hora va a disparar no sirve para algo que tiene
+# que pasar "al despertarte".
 #
-# Además, los cron de Actions se retrasan cuando GitHub está cargado (a veces 10-15
-# min): programa esto con margen suficiente antes de tu rutina, no justo al lado.
+# Lo que sí cubre: que se caiga la casa entera (Home Assistant apagado, router sin
+# luz, móvil sin batería). En ese escenario nadie llama al backend y el correo no
+# saldría. Por eso sigue aquí, disparando tarde y a ciegas.
+#
+# Que llegue tarde y de más es inofensivo: /brief/send pasa por la misma puerta
+# idempotente que el resto (tabla brief_envios, una fila por día), así que si el
+# correo ya salió esto responde "no hacía falta" y no manda nada.
+#
+# El cron va en UTC y no admite zonas horarias: 09:00 UTC son las 11:00 en Madrid en
+# verano (CEST) y las 10:00 en invierno (CET). En los dos casos cae después de la hora
+# tope por defecto (10:00 local), que es lo único que importa aquí.
 on:
   schedule:
-    - cron: '30 5 * * *'
+    - cron: '0 9 * * *'
   workflow_dispatch:        # también a mano, para probarlo sin esperar a mañana
 
 # Si un intento se solapa con el anterior, no mandes dos correos.
@@ -23,7 +32,7 @@ concurrency:
 
 jobs:
   enviar:
-    name: Enviar resumen
+    name: Enviar resumen si no ha salido ya
     runs-on: ubuntu-latest
     steps:
       - name: POST /brief/send
