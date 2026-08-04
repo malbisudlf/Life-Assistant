@@ -1489,10 +1489,12 @@ export default function Dashboard() {
     // arranque en frío que acabamos de medir.
     let agente = null;
     let registro = null;
+    let presencia = null;
     if (backend.ok) {
-      const [rAgente, rLogs] = await Promise.all([
+      const [rAgente, rLogs, rPresencia] = await Promise.all([
         apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
       ]);
       try {
         if (rAgente?.ok) agente = await rAgente.json();
@@ -1500,9 +1502,12 @@ export default function Dashboard() {
       try {
         if (rLogs?.ok) registro = await rLogs.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      try {
+        if (rPresencia?.ok) presencia = await rPresencia.json();
+      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
     }
 
-    setSysStatus({ backend, agente, registro, comprobado: Date.now() });
+    setSysStatus({ backend, agente, registro, presencia, comprobado: Date.now() });
     setSysLoading(false);
   }
 
@@ -4521,6 +4526,28 @@ export default function Dashboard() {
                     : ag.exists === false ? "nunca se ha registrado"
                     : ag.offline === false ? `online${ag.hostname ? ` · ${ag.hostname}` : ""}`
                     : `apagado (visto hace ${Math.floor((ag.silence_seconds ?? 0) / 60)} min)`,
+                });
+
+                // Presencia (la empuja HA desde el device_tracker del móvil). Un dato
+                // caducado se muestra igual pero en gris y diciendo de cuándo es: no
+                // saber dónde estás y creer que sigues donde estabas hace seis horas
+                // son cosas distintas, y esta fila tiene que dejar claro cuál es.
+                const pre = sysStatus?.presencia;
+                filas.push({
+                  nombre: "Presencia",
+                  tono: !sysStatus ? "muted" : !pre?.conocida ? "muted" : pre.vigente ? "green" : "accent",
+                  detalle: !sysStatus ? "sin comprobar"
+                    // Sin respuesta ≠ sin datos: el backend puede no tener todavía el
+                    // endpoint (se despliega a mano, el frontend no) y decir "HA no ha
+                    // reportado nunca" mandaría a revisar HA, que no es el problema.
+                    : !pre ? "sin respuesta del backend"
+                    : !pre.conocida ? "HA no ha reportado nunca"
+                    : `${pre.en_casa ? "en casa" : pre.zona || "fuera"} · ${
+                        pre.hace_minutos == null ? "sin fecha"
+                        : pre.hace_minutos < 2 ? "ahora mismo"
+                        : pre.hace_minutos < 60 ? `hace ${pre.hace_minutos} min`
+                        : `hace ${Math.floor(pre.hace_minutos / 60)} h`
+                      }${pre.vigente ? "" : " (caducado)"}`,
                 });
 
                 filas.push({

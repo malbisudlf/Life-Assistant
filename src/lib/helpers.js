@@ -321,6 +321,17 @@ const _serieProfundo = h => _serieSueno(h)
 
 const _positiva = (...nombres) => h => findMetric(h, ...nombres).filter(d => d.value > 0);
 
+// Horas fuera de casa (las manda Home Assistant a `time_at_home`: `value` son las horas
+// en casa y `extra.fuera` las de fuera). Solo cuentan los días con COBERTURA_PRESENCIA
+// horas contabilizadas o más: si HA estuvo caído media jornada, ese día sale con pocas
+// horas en las dos columnas y sin el filtro se colaría como "día tranquilo en casa",
+// que es justo lo contrario de lo que dice el dato — no dice nada.
+export const COBERTURA_PRESENCIA = 16;
+
+const _serieFuera = h => findMetric(h, "time_at_home")
+  .map(d => ({ date: d.date, casa: Number(d.value) || 0, value: Number(d.extra?.fuera) || 0 }))
+  .filter(d => d.casa + d.value >= COBERTURA_PRESENCIA);
+
 const _r = n => Math.round(n);
 const _miles = n => _r(n).toLocaleString("es");
 
@@ -443,6 +454,31 @@ const _CRUCES = [
     texto: r => ({
       tone: r.deltaPct > 0 ? "warn" : "good",
       text: `Tras dormir más de ${hoursToHM(r.corte)} tu FC en reposo queda en ${_r(r.altoAvg)} bpm frente a ${_r(r.bajoAvg)} las noches cortas (${r.altoN} vs ${r.bajoN} noches).`,
+    }),
+  },
+  {
+    // Las horas fuera de casa son la única serie que no sale del Watch: la manda HA.
+    // Aporta el contexto que ninguna métrica de Apple recoge — un día de pocos pasos
+    // encerrado en casa y uno de pocos pasos en clase se parecen en todo lo demás.
+    id: "fuera_sueno",
+    causa: _serieFuera,
+    efecto: _serieSueno,
+    desfase: 1,
+    minEfecto: 5,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "info" : "warn",
+      text: `Los días que pasas más de ${_r(r.corte)} h fuera de casa duermes ${hoursToHM(r.altoAvg)} frente a ${hoursToHM(r.bajoAvg)} — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más" : "menos"} (${r.altoN} vs ${r.bajoN} días).`,
+    }),
+  },
+  {
+    id: "fuera_hrv",
+    causa: _serieFuera,
+    efecto: _positiva("heart_rate_variability", "heartRateVariability"),
+    desfase: 1,
+    minEfecto: 5,
+    texto: r => ({
+      tone: r.deltaPct > 0 ? "good" : "warn",
+      text: `Tras los días de más de ${_r(r.corte)} h fuera de casa tu HRV es de ${_r(r.altoAvg)}ms frente a ${_r(r.bajoAvg)}ms — un ${Math.abs(_r(r.deltaPct))}% ${r.deltaPct > 0 ? "más alta" : "más baja"} (${r.altoN} vs ${r.bajoN} días).`,
     }),
   },
 ];
