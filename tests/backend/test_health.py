@@ -42,6 +42,28 @@ class TestHealthIngest:
         assert fila["metric_name"] == "weight_body_mass"
         assert fila["value"] == 68.5
 
+    def test_avg_con_mayuscula_tambien_cuenta(self, client, mock_requests):
+        """heart_rate llega como rango diario: "Avg"/"Min"/"Max", con mayúscula inicial.
+
+        Solo se buscaba "avg" en minúscula, así que la fila se guardaba con value=None
+        mientras el promedio estaba entero en `extra`, a la vista y sin usar por nadie.
+        """
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min",
+             "data": [{"date": "2026-08-05 00:00:00", "Avg": 64.7, "Min": 47, "Max": 114}]}
+        ]}})
+        assert r.status_code == 200
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 64.7, "el promedio del día es el valor de la métrica"
+        assert fila["extra"]["Max"] == 114, "el rango completo se conserva en extra"
+
+    def test_avg_en_minuscula_sigue_funcionando(self, client, mock_requests):
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min",
+             "data": [{"date": "2026-08-05 00:00:00", "avg": 61.0}]}
+        ]}})
+        assert self._filas(mock_requests)[0]["value"] == 61.0
+
     def test_acumulativa_no_pisa_valor_mayor_existente(self, client, mock_requests):
         self._existentes(mock_requests, [
             {"metric_date": "2026-07-05", "metric_name": "step_count", "value": 9000}

@@ -951,6 +951,12 @@ UNIQUE(metric_date, metric_name)
   o un número directo según la versión.
 - **Sleep**: `value` puede ser 0 si Health Auto Export no rellena el campo principal; el
   frontend calcula la duración real desde `extra.asleep` o sumando las fases.
+- **Capitalización de los campos**: Health Auto Export no la mantiene entre métricas. Las
+  que exporta como rango diario (`heart_rate`) traen `Avg`/`Min`/`Max` con **mayúscula
+  inicial** y no tienen `avg`, así que buscar solo la minúscula guardaba `value: None`
+  con el promedio entero en `extra`. La extracción prueba las dos formas. Si añades una
+  métrica nueva y llega con `value` a null, mira el `extra` de la fila antes que nada:
+  el dato suele estar ahí con otro nombre.
 - **Extracción de valor acumulativo**: se toma el `max()` de todos los campos no-None
   (`qty`, `sum`, `value`) del punto JSON. Health Auto Export v2 usa `qty` para el total
   diario; `sum` puede llegar como 0 y no debe usarse como valor principal.
