@@ -2342,10 +2342,14 @@ async def health_ingest(request: Request, token: str = ""):
                     point.get("qty")
                 )
             else:
-                raw_value = (
-                    point.get("qty") if point.get("qty") is not None else
-                    point.get("avg") if point.get("avg") is not None else
-                    point.get("value")
+                # Health Auto Export no capitaliza igual todos los campos: las métricas
+                # que exporta como rango diario (heart_rate) traen "Avg"/"Min"/"Max" con
+                # mayúscula inicial y no tienen "avg". El valor se guardaba como None
+                # mientras el promedio estaba entero en `extra`, a la vista y sin que
+                # nadie lo usara. Por eso se prueban las dos formas.
+                raw_value = next(
+                    (v for k in ("qty", "avg", "Avg", "value") if (v := point.get(k)) is not None),
+                    None,
                 )
             value = float(raw_value) if raw_value is not None else None
 
