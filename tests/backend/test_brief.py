@@ -230,6 +230,62 @@ class TestConstruirBrief:
         assert d["salud"]["fc_reposo"]["ultimo"] == 58
 
 
+class TestMediasDeSalud:
+    """Las medias van por ventana de FECHAS y con su n.
+
+    Iban por "últimos N registros": con el histórico lleno de huecos (el Watch estuvo
+    semanas sin poder escribir), la "media de 7 días" promediaba datos de meses atrás y
+    una métrica con una sola observación salía con último, 7d y 30d idénticos. Quien
+    lee el correo lo interpretaba como normalidad perfecta en vez de como ausencia de
+    datos, y escribía conclusiones sobre desviaciones inexistentes.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def test_la_media_de_7d_no_alcanza_datos_mas_viejos(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [
+            {"metric_date": (hoy - timedelta(days=20)).isoformat(),
+             "metric_name": "resting_heart_rate", "value": 90, "unit": "bpm", "extra": {}},
+            {"metric_date": hoy.isoformat(),
+             "metric_name": "resting_heart_rate", "value": 50, "unit": "bpm", "extra": {}},
+        ]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["fc_reposo"]["media_7d"] == 50, "la de hace 20 días no entra en la ventana de 7"
+        assert s["fc_reposo"]["n_7d"] == 1
+        assert s["fc_reposo"]["media_30d"] == 70 and s["fc_reposo"]["n_30d"] == 2
+
+    def test_una_sola_observacion_se_declara_con_n(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [{"metric_date": hoy.isoformat(), "metric_name": "heart_rate_variability",
+                  "value": 94, "unit": "ms", "extra": {}}]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["hrv"]["n_7d"] == 1 and s["hrv"]["n_30d"] == 1
+        assert s["hrv"]["media_7d"] == s["hrv"]["ultimo"] == 94
+
+    def test_una_fecha_futura_no_puede_ser_el_ultimo_valor(self, client, auth_headers, graph_token, mock_requests):
+        """En la tabla hay un heart_rate fechado en diciembre: entraba en la ventana de
+        30 días (el filtro es `gte`) y se convertía en "el último dato"."""
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [
+            {"metric_date": hoy.isoformat(), "metric_name": "resting_heart_rate",
+             "value": 53, "unit": "bpm", "extra": {}},
+            {"metric_date": (hoy + timedelta(days=120)).isoformat(),
+             "metric_name": "resting_heart_rate", "value": 77, "unit": "bpm", "extra": {}},
+        ]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["fc_reposo"]["ultimo"] == 53 and s["fc_reposo"]["n_30d"] == 1
+
+    def test_dice_cuantos_dias_atras_es_el_ultimo_dato(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [{"metric_date": (hoy - timedelta(days=25)).isoformat(),
+                  "metric_name": "weight_body_mass", "value": 71.2, "unit": "kg", "extra": {}}]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["peso"]["dias_atras"] == 25
+
+
 class TestHorasSueno:
     """Mismo criterio que _sleepHours en helpers.js: value, luego asleep, luego fases."""
 
@@ -274,6 +330,18 @@ class TestRenderTexto:
         assert "6.2 h" in texto and "7d: 7.1" in texto
         assert "150.0 €" in texto
         assert "jueves 2026-07-30" in texto
+
+    def test_la_salud_lleva_el_n_y_la_edad_del_dato(self):
+        """Sin el n y sin la antigüedad, tres cifras iguales se leen como estabilidad."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-05", "dia_semana": "miércoles", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {"hrv": {"unidad": "ms", "ultimo": 94, "fecha": "2026-08-04",
+                              "dias_atras": 1, "media_7d": 94, "n_7d": 1,
+                              "media_30d": 94, "n_30d": 1}},
+        })
+        assert "n=1" in texto and "ayer" in texto
+        assert "no hay base para hablar de desviación" in texto
 
     def test_secciones_vacias_se_marcan(self):
         texto = main.render_brief_texto({

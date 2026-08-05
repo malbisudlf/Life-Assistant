@@ -2140,6 +2140,39 @@ def _lote_vacio(body) -> bool:
     return not data.get("metrics") and not data.get("workouts")
 
 
+def _normalizar_lote_salud(body):
+    """Lleva a `{"data": {...}}` las formas que manda Health Auto Export.
+
+    El endpoint solo aceptaba el envoltorio `{"data": {...}}` y devolvía 400 a todo lo
+    demás, incluida una LISTA de lotes con ese mismo envoltorio dentro — que es lo que
+    manda el exportador con "Batch requests" activado. Ahí se perdía la sincronización
+    entera por la forma del envoltorio, no por los datos.
+
+    Lo que NO se toca es un cuerpo con `metrics` en la raíz, sin `data`: ese sigue
+    saliendo por el aviso de "estructura desconocida", que existe a propósito para
+    cazar exportadores que hablan otro idioma (ver `_lote_vacio`). Tolerar formas que
+    nadie ha visto mandar solo sirve para tragarse en silencio el día que llegue una
+    de verdad equivocada.
+    """
+    if isinstance(body, list):
+        # Lista de lotes: se fusionan en uno. Cada elemento puede venir con envoltorio
+        # o sin él, así que se normaliza cada uno antes de juntarlos.
+        metrics, workouts, reconocido = [], [], False
+        for parte in body:
+            parte = _normalizar_lote_salud(parte)
+            if not isinstance(parte, dict) or not isinstance(parte.get("data"), dict):
+                continue
+            reconocido = True
+            metrics  += parte["data"].get("metrics") or []
+            workouts += parte["data"].get("workouts") or []
+        # Una lista de lotes vacíos sí se reconoce: es el exportador diciendo que no
+        # tiene nada, y eso lo resuelve `_lote_vacio` más adelante, no un 400.
+        if not reconocido:
+            return body
+        return {"data": {"metrics": metrics, "workouts": workouts}}
+    return body
+
+
 def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
     """Detalle de error que muestra qué llegó realmente al servidor, para poder
     diagnosticar por qué un cliente (Shortcut, app) no consigue enviar datos."""
@@ -2228,7 +2261,22 @@ async def health_ingest(request: Request, token: str = ""):
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
         body = None
+    body = _normalizar_lote_salud(body)
     if not isinstance(body, dict):
+        # El detalle del 400 solo lo veía el cliente, y el cliente es una app del móvil
+        # que no lo enseña: el endpoint llevaba semanas rechazando cada envío del Watch
+        # y en el registro solo constaba "400". Del cuerpo se registra la FORMA (tipo,
+        # tamaño, content-type), nunca los valores — son datos de salud y acaban en
+        # app_logs; los primeros bytes solo si ni siquiera era JSON, donde son la única
+        # pista de qué está mandando el cliente.
+        forma = {
+            "content_type":   request.headers.get("content-type", ""),
+            "bytes":          len(raw),
+            "tipo_json":      type(body).__name__ if body is not None else "no-json",
+        }
+        if body is None and raw.strip():
+            forma["inicio"] = raw[:120].decode("utf-8", errors="replace")
+        logger.warning("Ingesta de salud: cuerpo no reconocido, lote rechazado. Forma: %s", forma)
         raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
             request, raw, "El cuerpo no es un objeto JSON. Esto es lo que recibí:"))
     data_block = body.get("data", {})
@@ -2936,8 +2984,27 @@ def _horas_sueno(fila: dict) -> float:
     return sum(_num(k) for k in ("deep", "rem", "light", "core"))
 
 
-def _media(valores: list) -> float | None:
-    return round(sum(valores) / len(valores), 2) if valores else None
+def _dia(iso: str):
+    """Fecha ISO `AAAA-MM-DD` a `date`, o None si no lo es."""
+    try:
+        return datetime.strptime(str(iso)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _ventana(validas: list, desde: str) -> tuple:
+    """Media y número de días con dato desde una fecha, ambos.
+
+    La media va SIEMPRE con su n porque sin él miente: si el Watch lleva semanas sin
+    sincronizar y solo hay una observación, la "media de 7 días" es ese mismo valor y
+    quien lee el correo no tiene forma de saberlo — daba conclusiones sobre
+    desviaciones que no existían. Antes se promediaban los últimos N REGISTROS, no los
+    de los últimos N días: con huecos en el histórico, la "media de 7d" abarcaba meses.
+    """
+    vs = [d["valor"] for d in validas if d["fecha"] >= desde]
+    if not vs:
+        return None, 0
+    return round(sum(vs) / len(vs), 2), len(vs)
 
 
 def _dias_hasta(iso: str) -> int | None:
@@ -2964,11 +3031,36 @@ def _brief_salud() -> dict:
         logger.error("Resumen diario: no se pudieron leer las métricas de salud (%s)", r.status_code)
         return {}
 
+    hoy      = datetime.now(LOCAL_TZ).date()
+    desde_7  = (hoy - timedelta(days=6)).isoformat()
+    desde_30 = (hoy - timedelta(days=29)).isoformat()
+
+    # Una fila con fecha futura no es un dato, es basura: se cuela en la ventana de 30
+    # días (la query filtra por gte) y se lleva por delante el "último valor" de su
+    # métrica. Hay una así en la tabla, un heart_rate fechado en diciembre.
     por_nombre: dict = {}
     for fila in r.json():
+        d = _dia(fila.get("metric_date"))
+        if d is None or d > hoy:
+            continue
         por_nombre.setdefault(fila["metric_name"], []).append(fila)
+    for filas in por_nombre.values():
+        filas.sort(key=lambda f: f["metric_date"])
 
     salud: dict = {}
+
+    def _resumen_serie(validas: list, unidad: str) -> dict:
+        m7,  n7  = _ventana(validas, desde_7)
+        m30, n30 = _ventana(validas, desde_30)
+        ultimo = validas[-1]
+        return {
+            "unidad":     unidad,
+            "ultimo":     ultimo["valor"],
+            "fecha":      ultimo["fecha"],
+            "dias_atras": (hoy - _dia(ultimo["fecha"])).days,
+            "media_7d":   m7,  "n_7d":  n7,
+            "media_30d":  m30, "n_30d": n30,
+        }
 
     for clave, nombres, unidad in _BRIEF_METRICAS:
         filas = next((por_nombre[n] for n in nombres if por_nombre.get(n)), [])
@@ -2982,13 +3074,7 @@ def _brief_salud() -> dict:
                 validas.append({"fecha": f["metric_date"], "valor": v})
         if not validas:
             continue
-        salud[clave] = {
-            "unidad":    unidad,
-            "ultimo":    validas[-1]["valor"],
-            "fecha":     validas[-1]["fecha"],
-            "media_7d":  _media([d["valor"] for d in validas[-7:]]),
-            "media_30d": _media([d["valor"] for d in validas]),
-        }
+        salud[clave] = _resumen_serie(validas, unidad)
 
     # Sueño: valor derivado y respetando las noches que el usuario anuló a mano.
     noches = []
@@ -3000,14 +3086,7 @@ def _brief_salud() -> dict:
             noches.append({"fecha": f["metric_date"], "valor": round(horas, 2),
                            "inicio": (f.get("extra") or {}).get("sleep_start")})
     if noches:
-        salud["sueno"] = {
-            "unidad":    "h",
-            "ultimo":    noches[-1]["valor"],
-            "fecha":     noches[-1]["fecha"],
-            "inicio":    noches[-1]["inicio"],
-            "media_7d":  _media([d["valor"] for d in noches[-7:]]),
-            "media_30d": _media([d["valor"] for d in noches]),
-        }
+        salud["sueno"] = {**_resumen_serie(noches, "h"), "inicio": noches[-1]["inicio"]}
 
     # Entrenos del Watch: cuántos días desde el último.
     entrenos = next((por_nombre[n] for n in ("workouts", "workout") if por_nombre.get(n)), [])
@@ -3260,7 +3339,11 @@ def render_brief_texto(d: dict) -> str:
     L.append("")
 
     s = d["salud"]
-    L.append("## SALUD  (último · media 7d · media 30d)")
+    # El `n=` de cada media no es decoración: es lo que distingue "esto se desvía de tu
+    # media" de "esto es el único dato que hay". Sin él, una métrica con una sola
+    # observación sale con las tres cifras idénticas y se lee como normalidad absoluta.
+    L.append("## SALUD  (último · media 7d · media 30d; n = días con dato en la ventana)")
+    L.append("   Con n=1 la media ES el último valor: no hay base para hablar de desviación.")
     if s:
         etiquetas = [
             ("sueno",       "Sueño anoche"),
@@ -3276,9 +3359,17 @@ def render_brief_texto(d: dict) -> str:
             m = s.get(clave)
             if not m:
                 continue
+            dias = m.get("dias_atras")
+            edad = (
+                "hoy"   if dias == 0 else
+                "ayer"  if dias == 1 else
+                f"hace {dias} días" if dias is not None else "sin fecha"
+            )
             L.append(
                 f"  {etiqueta:<20} {m['ultimo']} {m['unidad']}"
-                f"   (7d: {m['media_7d']}, 30d: {m['media_30d']})   [{m['fecha']}]"
+                f"   (7d: {m['media_7d']} n={m.get('n_7d', '?')},"
+                f" 30d: {m['media_30d']} n={m.get('n_30d', '?')})"
+                f"   [{m['fecha']}, {edad}]"
             )
         if s.get("sueno", {}).get("inicio"):
             L.append(f"  {'Se acostó a las':<20} {s['sueno']['inicio']}")

@@ -429,6 +429,44 @@ class TestSincronizacionVacia:
         assert cuerpo["recibido"]["claves"] == ["metrics"]
         assert cuerpo["recibido"]["claves_de_data"] is None
 
+    def test_una_lista_de_lotes_se_acepta(self, client, mock_requests):
+        """Con "Batch requests" el exportador manda una lista de lotes, no un lote.
+
+        Daba 400 y se perdía la sincronización entera por el envoltorio, no por los
+        datos: el endpoint llevaba semanas rechazando cada envío del Watch.
+        """
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([]))
+        mock_requests.add("POST", "/rest/v1/health_metrics", FakeResponse(None, 201))
+        r = client.post("/health/ingest?token=health-token", json=[
+            {"data": {"metrics": [{"name": "step_count", "units": "count",
+                                   "data": [{"date": "2026-08-05 00:00:00 +0200", "qty": 9000}]}],
+                      "workouts": []}},
+            {"data": {"metrics": [{"name": "resting_heart_rate", "units": "bpm",
+                                   "data": [{"date": "2026-08-05 00:00:00 +0200", "qty": 53}]}],
+                      "workouts": []}},
+        ])
+        assert r.status_code == 200, r.text
+        cuerpo = r.json()
+        assert cuerpo["ok"] is True and cuerpo["upserted"] == 2
+
+    def test_una_lista_vacia_no_es_un_error(self, client, mock_requests):
+        """"No tengo nada que exportar" no puede salir como cuerpo ininteligible."""
+        r = client.post("/health/ingest?token=health-token", json=[{"data": {"metrics": [], "workouts": []}}])
+        assert r.status_code == 200 and r.json()["vacio"] is True
+
+    def test_una_lista_de_cualquier_cosa_sigue_siendo_400(self, client, mock_requests):
+        assert client.post("/health/ingest?token=health-token", json=[1, 2, 3]).status_code == 400
+
+    def test_el_400_deja_rastro_en_el_registro(self, client, mock_requests, caplog):
+        """El detalle solo lo veía el cliente, que es una app del móvil y no lo enseña:
+        en el registro constaba un 400 pelado y no había forma de saber qué llegaba."""
+        with caplog.at_level("WARNING"):
+            assert client.post("/health/ingest?token=health-token",
+                               content=b"no soy json", headers={"Content-Type": "application/json"}).status_code == 400
+        registrado = "\n".join(r.getMessage() for r in caplog.records)
+        assert "cuerpo no reconocido" in registrado
+        assert "no-json" in registrado
+
     def test_hae_con_cuerpo_vacio_avisa(self, client, mock_requests):
         cuerpo = client.post("/health/ingest?token=health-token", json={}).json()
         assert cuerpo["ok"] is False
