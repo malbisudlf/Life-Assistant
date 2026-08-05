@@ -42,6 +42,8 @@ supabase_health_schema.sql
 # (CLAUDE.md sí se versiona: es la guía del repo para las sesiones de Claude Code)
 HOMEASSISTANT.md
 PROJECT_STATE.md
+# Prompt de la rutina que redacta el briefing: lleva la dirección de correo personal
+RUTINA_BRIEFING.md
 .venv/
 __pycache__/
 .pytest_cache/
