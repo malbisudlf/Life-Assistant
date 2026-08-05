@@ -305,6 +305,14 @@ Ficheros clave:
   Ojo con la condición: se mira lo RECONOCIDO (`grouped_metrics`/`samples`), no lo
   escrito, porque un lote de acumulativas que ya tenían un valor mayor escribe cero y es
   correcto.
+  El cuerpo pasa antes por `_normalizar_lote_salud()`, que acepta la **lista de lotes**
+  que manda el exportador con "Batch requests" activado además del `{"data": {...}}`
+  suelto. Lo que no se reconozca sigue saliendo por un 400 — pero ese 400 **registra la
+  forma de lo que llegó** (tipo, tamaño, content-type; los primeros bytes solo si ni
+  siquiera era JSON): el detalle solo viajaba en la respuesta HTTP, que la app del móvil
+  no enseña, y eso tapó semanas de sincronizaciones perdidas. Lo que no se tolera a
+  propósito es `metrics` en la raíz sin `data`: esa forma no la manda nadie y sigue
+  saliendo por el aviso de estructura desconocida.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
@@ -360,6 +368,10 @@ Ficheros clave:
   fuente de verdad de esa lógica; portarlas a Python la duplicaría. Lo único que se
   replica es `_horas_sueno()` (equivalente a `_sleepHours`), que es forma del dato y no
   regla — si cambia cómo llegan los datos del Watch, hay que tocar los dos.
+  **Cada media va con su `n`** (días con dato dentro de la ventana) y cada último valor
+  con su antigüedad, y las ventanas se cuentan por fecha real, no por número de
+  registros: sin eso, una métrica con una sola observación sale con las tres cifras
+  iguales y quien lee el correo la toma por estabilidad en vez de por ausencia de datos.
   `construir_brief()` llama a las funciones de los endpoints existentes con
   `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
   heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
@@ -1259,6 +1271,30 @@ excepción o error de consola, no solo si falta un texto.
   que toca.
 
 ## Bugs históricos (no los reintroduzcas)
+
+- **El Watch dejó de sincronizar otra vez, y esta vez el registro decía "400" y nada
+  más.** `POST /health/ingest` rechazaba todos los envíos de Health Auto Export porque
+  el cuerpo llegaba como una LISTA de lotes (lo que manda con "Batch requests"
+  activado) y el endpoint solo aceptaba el `{"data": {...}}` suelto. Se perdía la
+  sincronización entera por el envoltorio, no por los datos. Lo que lo hizo durar
+  semanas no fue el 400: fue que **el detalle del error solo viajaba en la respuesta
+  HTTP**, y el cliente es una app del móvil que no la enseña — en `app_logs` constaba
+  `POST /health/ingest → 400 (1 ms)` repetido cientos de veces, sin una sola pista de
+  qué llegaba. Ahora el 400 registra la FORMA del cuerpo (tipo, tamaño, content-type;
+  los primeros bytes solo si ni siquiera era JSON, que es cuando no son datos de
+  salud). Moraleja, la misma del 409 pero por el otro lado: **un error que solo sabe
+  contarlo el cliente equivale a no haberlo registrado**.
+- **El correo del brief daba medias de 7 y 30 días que eran el mismo dato repetido.**
+  `_media` promediaba los últimos N **registros**, no los de los últimos N **días**: con
+  el histórico agujereado (por el 400 de arriba), la "media de 7d" abarcaba meses, y una
+  métrica con una sola observación salía con último, 7d y 30d idénticos. La rutina que
+  lee el correo lo interpretaba como estabilidad perfecta y escribía conclusiones sobre
+  desviaciones que no existían. Ahora las ventanas son por fecha real y **cada media
+  viaja con su `n`**. Moraleja: **una media sin el número de muestras detrás no es un
+  dato, es una afirmación sin respaldo** — y el que la lee no tiene forma de saberlo.
+  Relacionado: una fila con `metric_date` en el futuro (hay un `heart_rate` fechado en
+  diciembre) entraba en la ventana de 30 días, porque el filtro es `gte`, y se convertía
+  en "el último valor" de su métrica. `_brief_salud` descarta ahora las fechas futuras.
 
 - **El streaming tardaba 45 segundos "en negro" tras encender el PC.** No era la red,
   ni el WOL, ni Sunshine: era la primera invocación de `powershell.exe` del arranque,
