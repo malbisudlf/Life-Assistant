@@ -286,6 +286,265 @@ class TestMediasDeSalud:
         assert s["peso"]["dias_atras"] == 25
 
 
+class TestMasMetricas:
+    """El correo manda TODO lo que el Watch escribe, no una selección de siete.
+
+    La consulta de `_brief_salud` no filtra por nombre: ya se trae la tabla entera de la
+    ventana. Cada métrica que no se enviaba se estaba tirando después de haberla pedido.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def _una(self, nombre, valor, unidad="", extra=None, dias=0):
+        fecha = (datetime.now(main.LOCAL_TZ).date() - timedelta(days=dias)).isoformat()
+        return {"metric_date": fecha, "metric_name": nombre, "value": valor,
+                "unit": unidad, "extra": extra or {}}
+
+    def test_llegan_las_metricas_que_antes_se_tiraban(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests, [
+            self._una("active_energy", 640, "kcal"),
+            self._una("resting_energy", 1700, "kcal"),
+            self._una("body_fat_percentage", 17.4, "%"),
+            self._una("lean_body_mass", 61.2, "kg"),
+            self._una("walking_running_distance", 6.4, "km"),
+            self._una("time_in_daylight", 95, "min"),
+            self._una("cardio_recovery", 31, "bpm"),
+            self._una("walking_heart_rate_average", 104, "bpm"),
+            self._una("apple_stand_hour", 12, "h"),
+            self._una("flights_climbed", 9, "pisos"),
+            self._una("physical_effort", 4.2, "MET"),
+        ])
+        assert s["energia_activa"]["ultimo"] == 640
+        assert s["energia_basal"]["ultimo"] == 1700
+        assert s["grasa"]["ultimo"] == 17.4 and s["masa_magra"]["ultimo"] == 61.2
+        assert s["distancia"]["ultimo"] == 6.4 and s["luz_natural"]["ultimo"] == 95
+        assert s["recuperacion_fc"]["ultimo"] == 31 and s["fc_caminando"]["ultimo"] == 104
+        assert s["de_pie"]["ultimo"] == 12 and s["pisos"]["ultimo"] == 9
+        assert s["esfuerzo"]["ultimo"] == 4.2
+
+    def test_la_unidad_de_la_fila_manda_sobre_la_declarada(self, client, auth_headers, graph_token, mock_requests):
+        """La ingesta convierte kJ a kcal y no toda métrica llega en la unidad esperada."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       [self._una("walking_running_distance", 4200, "m")])
+        assert s["distancia"]["unidad"] == "m"
+
+    def test_el_hrv_no_viaja_con_quince_decimales(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests,
+                       [self._una("heart_rate_variability", 44.476655296663246, "ms")])
+        assert s["hrv"]["ultimo"] == 44.48
+
+
+class TestCerosLegitimos:
+    """Un 0 de pisos ocurrió; un 0 de HRV es el sensor sin medir.
+
+    Antes se descartaba todo lo que no fuera > 0, así que los días de sofá desaparecían
+    del cálculo y las medias de las acumulativas salían sesgadas al alza.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def _serie(self, nombre, valores, unidad=""):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        return [{"metric_date": (hoy - timedelta(days=i)).isoformat(),
+                 "metric_name": nombre, "value": v, "unit": unidad, "extra": {}}
+                for i, v in enumerate(reversed(valores))]
+
+    def test_el_cero_cuenta_en_una_acumulativa(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests, self._serie("flights_climbed", [10, 0, 2]))
+        assert s["pisos"]["n_7d"] == 3, "el día a cero es un día con dato"
+        assert s["pisos"]["media_7d"] == 4, "descartarlo daría 6"
+        assert s["pisos"]["ultimo"] == 2
+
+    def test_un_dia_entero_a_cero_sigue_siendo_el_ultimo_valor(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests, self._serie("step_count", [8000, 0]))
+        assert s["pasos"]["ultimo"] == 0 and s["pasos"]["n_7d"] == 2
+
+    def test_el_cero_de_un_sensor_se_descarta(self, client, auth_headers, graph_token, mock_requests):
+        """Promediar un 0 de FC en reposo sería inventarse una bradicardia."""
+        s = self._pide(client, auth_headers, mock_requests, self._serie("resting_heart_rate", [56, 0, 58]))
+        assert s["fc_reposo"]["n_7d"] == 2 and s["fc_reposo"]["media_7d"] == 57
+
+    def test_negativos_fuera_en_cualquier_caso(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests, self._serie("step_count", [-5, 900]))
+        assert s["pasos"]["n_7d"] == 1
+
+
+class TestRangoDeFrecuenciaCardiaca:
+    def test_min_y_max_salen_del_extra_con_mayuscula(self, client, auth_headers, graph_token, mock_requests):
+        """heart_rate se exporta como rango diario y trae Avg/Min/Max con mayúscula, sin
+        la versión en minúsculas: es la trampa que ya sorteaba la ingesta."""
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        montar_fuentes(mock_requests, salud=[
+            {"metric_date": hoy, "metric_name": "heart_rate", "value": 74,
+             "unit": "bpm", "extra": {"Min": 48, "Max": 163}},
+        ])
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert s["fc_media"]["ultimo"] == 74
+        assert s["fc_media"]["min"] == 48 and s["fc_media"]["max"] == 163
+
+    def test_sin_extremos_no_se_inventan(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        montar_fuentes(mock_requests, salud=[
+            {"metric_date": hoy, "metric_name": "heart_rate", "value": 74, "unit": "bpm", "extra": {}},
+        ])
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert "min" not in s["fc_media"] and "max" not in s["fc_media"]
+
+
+class TestSerieDiaria:
+    """Las medias dicen dónde estás; la serie, hacia dónde vas.
+
+    Y es lo único con lo que quien lee el correo puede cruzar dos métricas entre sí: el
+    motor de correlaciones vive en helpers.js y no se porta al backend a propósito.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def test_una_posicion_por_dia_con_los_huecos_marcados(self, client, auth_headers, graph_token, mock_requests):
+        """Comprimir los días sin dato desplazaría todo lo demás y cualquier cruce con
+        otra serie acabaría comparando fechas distintas."""
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [
+            {"metric_date": (hoy - timedelta(days=d)).isoformat(), "metric_name": "step_count",
+             "value": v, "unit": "pasos", "extra": {}}
+            for d, v in ((4, 1000), (2, 3000), (0, 5000))
+        ]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        serie = s["series"]["pasos"]
+        assert len(serie) == main.BRIEF_DIAS_SALUD
+        assert serie[-5:] == [1000, None, 3000, None, 5000]
+        assert s["series_hasta"] == hoy.isoformat()
+        assert s["series_desde"] == (hoy - timedelta(days=main.BRIEF_DIAS_SALUD - 1)).isoformat()
+
+    def test_sin_fondo_suficiente_no_hay_serie(self, client, auth_headers, graph_token, mock_requests):
+        """Con dos días la línea es casi toda huecos: el último valor ya lo cuenta."""
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = [
+            {"metric_date": (hoy - timedelta(days=d)).isoformat(), "metric_name": "vo2_max",
+             "value": 48, "unit": "ml/kg/min", "extra": {}} for d in (0, 3)
+        ]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["vo2max"]["ultimo"] == 48, "el resumen sigue saliendo"
+        assert "vo2max" not in (s.get("series") or {})
+
+    def test_sin_ninguna_serie_no_hay_seccion(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        s = self._pide(client, auth_headers, mock_requests, [
+            {"metric_date": hoy, "metric_name": "step_count", "value": 900,
+             "unit": "pasos", "extra": {}},
+        ])
+        assert "series" not in s
+
+
+class TestFasesDeSueno:
+    """Del sueño solo viajaba la cantidad: las fases son la diferencia entre haber
+    dormido siete horas y haber descansado."""
+
+    def _noches(self, n=4, **extra):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        return [{"metric_date": (hoy - timedelta(days=i)).isoformat(),
+                 "metric_name": "sleep_analysis", "value": 7.0, "unit": "h",
+                 "extra": {"sleep_start": "23:45", "deep": 1.1, "rem": 1.6,
+                           "core": 4.0, "awake": 0.3, **extra}}
+                for i in range(n)]
+
+    def test_las_fases_de_anoche_van_en_el_resumen(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._noches())
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert s["sueno"]["fases"] == {"profundo": 1.1, "rem": 1.6, "ligero": 4.0, "despierto": 0.3}
+
+    def test_core_y_light_son_la_misma_fase(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._noches(light=0.5))
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert s["sueno"]["fases"]["ligero"] == 4.5
+
+    def test_las_fases_tambien_tienen_serie(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._noches())
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert s["series"]["sueno_profundo"][-1] == 1.1
+        assert s["series"]["sueno_rem"][-4:] == [1.6, 1.6, 1.6, 1.6]
+        assert s["series"]["sueno_despierto"][-1] == 0.3
+
+    def test_sin_fases_no_se_inventan(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        montar_fuentes(mock_requests, salud=[
+            {"metric_date": hoy, "metric_name": "sleep_analysis", "value": 7.0,
+             "unit": "h", "extra": {"sleep_start": "23:45"}},
+        ])
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert "fases" not in s["sueno"] and s["sueno"]["ultimo"] == 7.0
+
+
+class TestDetalleDeEntrenos:
+    """"Hace 2 días" no dice si fue una caminata o una hora de pesas."""
+
+    def _con_entrenos(self, lista, dias=1):
+        fecha = (datetime.now(main.LOCAL_TZ).date() - timedelta(days=dias)).isoformat()
+        return [{"metric_date": fecha, "metric_name": "workouts", "value": len(lista),
+                 "unit": "count", "extra": {"workouts": lista}}]
+
+    def test_tipo_duracion_calorias_y_hora(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._con_entrenos([
+            {"name": "Fuerza funcional", "duration": 3720,
+             "start": "2026-08-05 19:15:00 +0200", "activeEnergy": {"qty": 412.4}},
+        ]))
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        e = s["entrenos"][0]
+        assert e["tipo"] == "Fuerza funcional"
+        assert e["minutos"] == 62.0, "la duración llega en segundos"
+        assert e["kcal"] == 412
+        assert e["hora"] == "19:15"
+
+    def test_las_calorias_pueden_venir_sueltas_o_con_otro_nombre(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._con_entrenos([
+            {"name": "Caminata", "duration": 1800, "totalEnergyBurned": 150},
+        ]))
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert s["entrenos"][0]["kcal"] == 150
+
+    def test_se_acotan_a_los_mas_recientes(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._con_entrenos(
+            [{"name": f"W{i}", "duration": 600} for i in range(main.BRIEF_MAX_ENTRENOS + 5)]))
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert len(s["entrenos"]) == main.BRIEF_MAX_ENTRENOS
+
+    def test_un_extra_sin_lista_no_revienta(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests, salud=self._con_entrenos(["no soy un dict"]))
+        s = client.get("/brief", headers=auth_headers).json()["salud"]
+        assert "entrenos" not in s
+        assert s["ultimo_entreno"]["dias"] == 1, "el contador de siempre sigue"
+
+
+class TestMinutosEntreno:
+    """Mismo umbral que el widget de entrenamientos del frontend: el correo y la
+    pantalla no pueden decir cosas distintas del mismo entreno."""
+
+    def test_segundos_a_minutos(self):
+        assert main._minutos_entreno(3600) == 60.0
+
+    def test_los_minutos_de_versiones_antiguas_se_respetan(self):
+        assert main._minutos_entreno(45) == 45.0
+
+    def test_basura_no_revienta(self):
+        assert main._minutos_entreno(None) is None
+        assert main._minutos_entreno("x") is None
+        assert main._minutos_entreno(0) is None
+
+
+class TestCifra:
+    def test_los_enteros_no_arrastran_el_punto_cero(self):
+        assert main._cifra(55.0) == "55"
+
+    def test_sin_dato_no_se_lee_como_valor(self):
+        assert main._cifra(None) == "-", "'None' en mitad de una fila de cifras engaña"
+
+
 class TestHorasSueno:
     """Mismo criterio que _sleepHours en helpers.js: value, luego asleep, luego fases."""
 
@@ -353,6 +612,64 @@ class TestRenderTexto:
         assert "(no disponible)" in texto
         assert "(sin datos)" in texto
         assert "(sin cliente configurado)" in texto
+
+    def test_la_serie_diaria_dice_su_ventana_y_marca_los_huecos(self):
+        """Sin las fechas de los extremos, una lista de treinta números no se puede
+        alinear con nada — y un hueco sin marcar desplaza todas las posiciones."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-06", "dia_semana": "jueves", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {
+                "pasos": {"unidad": "pasos", "ultimo": 5000, "fecha": "2026-08-06",
+                          "dias_atras": 0, "media_7d": 3000, "n_7d": 3,
+                          "media_30d": 3000, "n_30d": 3},
+                "series": {"pasos": [1000, None, 5000]},
+                "series_desde": "2026-08-04", "series_hasta": "2026-08-06",
+            },
+        })
+        assert "## SERIE DIARIA" in texto
+        assert "2026-08-04 → 2026-08-06" in texto
+        assert "Pasos                1000 - 5000" in texto
+
+    def test_los_entrenos_van_con_su_detalle(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-06", "dia_semana": "jueves", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {"entrenos": [
+                {"fecha": "2026-08-05", "tipo": "Fuerza funcional", "minutos": 62.0,
+                 "kcal": 412, "hora": "19:15"},
+                {"fecha": "2026-08-06", "tipo": "Caminata", "minutos": None,
+                 "kcal": None, "hora": None},
+            ]},
+        })
+        assert "## ENTRENOS DEL WATCH" in texto
+        assert "2026-08-05 19:15  Fuerza funcional — 62 min · 412 kcal" in texto
+        assert "2026-08-06  Caminata" in texto, "sin duración ni calorías, el tipo basta"
+
+    def test_las_fases_y_el_rango_de_fc_se_pintan(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-06", "dia_semana": "jueves", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {
+                "sueno": {"unidad": "h", "ultimo": 7.2, "fecha": "2026-08-06", "dias_atras": 0,
+                          "media_7d": 7.1, "n_7d": 5, "media_30d": 7.0, "n_30d": 20,
+                          "inicio": "23:45",
+                          "fases": {"profundo": 1.1, "rem": 1.6, "ligero": 4.2, "despierto": 0.3}},
+                "fc_media": {"unidad": "bpm", "ultimo": 74, "fecha": "2026-08-06", "dias_atras": 0,
+                             "media_7d": 75, "n_7d": 7, "media_30d": 76, "n_30d": 30,
+                             "min": 48, "max": 163},
+            },
+        })
+        assert "profundo 1.1 h · REM 1.6 h · ligero 4.2 h · despierto 0.3 h" in texto
+        assert "min 48 / máx 163" in texto
+
+    def test_sin_series_ni_entrenos_no_aparecen_las_secciones(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-06", "dia_semana": "jueves", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {},
+        })
+        assert "## SERIE DIARIA" not in texto and "## ENTRENOS DEL WATCH" not in texto
 
     def test_evento_de_todo_el_dia(self):
         texto = main.render_brief_texto({

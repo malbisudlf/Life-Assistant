@@ -372,6 +372,27 @@ Ficheros clave:
   con su antigüedad, y las ventanas se cuentan por fecha real, no por número de
   registros: sin eso, una métrica con una sola observación sale con las tres cifras
   iguales y quien lee el correo la toma por estabilidad en vez de por ausencia de datos.
+  **Qué va en la sección de salud**: la consulta de `_brief_salud()` es UNA y no filtra
+  por nombre, así que ya trae la tabla entera de la ventana — añadir una métrica a
+  `_BRIEF_METRICAS` no cuesta un viaje más de red, solo tamaño de correo. Por eso van
+  todas las que escribe el Watch (~19), no una selección. Tres cosas que no son
+  decoración:
+  - **La serie diaria** (`salud.series`, una posición por día, `None` en los huecos, solo
+    para métricas con `BRIEF_MIN_DIAS_SERIE`+ días de dato). Una media dice dónde estás y
+    una serie hacia dónde vas, y la segunda no se deduce de la primera. Es además lo
+    único con lo que quien lee el correo puede **cruzar dos métricas entre sí**: el motor
+    de correlaciones (`healthCorrelations`) vive en `helpers.js` y no se porta aquí, así
+    que sin los valores día a día ese cruce no existe para el correo. Los huecos se
+    marcan, nunca se comprimen: comprimirlos desplaza las posiciones y el cruce acabaría
+    comparando fechas distintas.
+  - **El cero es un dato en las acumulativas** (quinto campo de `_BRIEF_METRICAS`). Un
+    día de 0 pisos ocurrió y tiene que bajar la media; un 0 en HRV o FC en reposo es el
+    sensor sin medir y promediarlo sería inventarse una bradicardia. Antes se descartaba
+    todo lo que no fuera `> 0` y las acumulativas salían sesgadas al alza.
+  - **Fases del sueño y detalle de los entrenos**, que salen del `extra` y no de filas
+    propias. Sin las fases, del sueño solo viajaba la cantidad; sin el detalle, de los
+    entrenos solo "hace 2 días". `_minutos_entreno()` usa el mismo umbral que el widget
+    del frontend (>300 ⇒ segundos): forma del dato, como `_horas_sueno()`.
   `construir_brief()` llama a las funciones de los endpoints existentes con
   `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
   heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
@@ -1217,7 +1238,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 342 tests)
+### Backend (`tests/backend`, 407 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
