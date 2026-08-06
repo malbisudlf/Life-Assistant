@@ -2951,16 +2951,61 @@ def get_presencia(credentials: HTTPAuthorizationCredentials = Depends(verify_tok
 # CLAUDE.md marca ese fichero como única fuente de verdad. Quien lee este correo ya es
 # un modelo capaz de sacar las conclusiones por su cuenta.
 
-# (clave de salida, nombres posibles en health_metrics, unidad)
+# Ventana de la consulta de salud, en días. Es UNA sola query sin filtrar por nombre,
+# así que ya trae toda la tabla de esos días: añadir una métrica a la tabla de abajo no
+# cuesta un viaje más de red, solo tamaño de correo.
+BRIEF_DIAS_SALUD = 30
+# Una métrica solo lleva serie diaria si tiene al menos estos días con dato en la
+# ventana. Con menos, la línea es casi toda huecos y ocupa sin decir nada: el último
+# valor y la media ya cuentan lo que hay.
+BRIEF_MIN_DIAS_SERIE = 3
+BRIEF_MAX_ENTRENOS   = 10
+
+# (clave de salida, nombres posibles en health_metrics, unidad por defecto,
+#  el cero es un dato, etiqueta en el correo)
+#
+# "El cero es un dato" separa las acumulativas del resto: un día de 0 pisos o 0 horas
+# de pie ocurrió y tiene que bajar la media, mientras que un 0 en HRV o en FC en reposo
+# es el sensor sin medir y promediarlo sería inventarse una bradicardia. Antes se
+# descartaba todo lo que no fuera > 0 y las medias de las acumulativas salían sesgadas
+# al alza: los días de sofá simplemente desaparecían del cálculo.
 _BRIEF_METRICAS = (
-    ("hrv",         ("heart_rate_variability", "heartRateVariability"), "ms"),
-    ("fc_reposo",   ("resting_heart_rate",),                            "bpm"),
-    ("respiracion", ("respiratory_rate",),                              "rpm"),
-    ("pasos",       ("step_count", "steps"),                            "pasos"),
-    ("ejercicio",   ("apple_exercise_time", "exercise_time"),           "min"),
-    ("peso",        ("weight_body_mass", "weight"),                     "kg"),
-    ("vo2max",      ("vo2_max", "cardioFitness"),                       "ml/kg/min"),
+    ("hrv",             ("heart_rate_variability", "heartRateVariability"), "ms",        False, "HRV"),
+    ("fc_reposo",       ("resting_heart_rate",),                            "bpm",       False, "FC en reposo"),
+    ("fc_media",        ("heart_rate",),                                    "bpm",       False, "FC media del día"),
+    ("fc_caminando",    ("walking_heart_rate_average",),                    "bpm",       False, "FC caminando"),
+    ("recuperacion_fc", ("cardio_recovery",),                               "bpm",       False, "Recuperación cardio"),
+    ("respiracion",     ("respiratory_rate",),                              "rpm",       False, "Frec. respiratoria"),
+    ("vo2max",          ("vo2_max", "cardioFitness"),                       "ml/kg/min", False, "VO2 máx"),
+    ("pasos",           ("step_count", "steps"),                            "pasos",     True,  "Pasos"),
+    ("distancia",       ("walking_running_distance",),                      "km",        True,  "Distancia"),
+    ("pisos",           ("flights_climbed",),                               "pisos",     True,  "Pisos subidos"),
+    ("ejercicio",       ("apple_exercise_time", "exercise_time"),           "min",       True,  "Min. ejercicio"),
+    ("de_pie",          ("apple_stand_hour",),                              "h",         True,  "Horas de pie"),
+    ("esfuerzo",        ("physical_effort",),                               "",          True,  "Esfuerzo físico"),
+    ("energia_activa",  ("active_energy",),                                 "kcal",      True,  "Energía activa"),
+    ("energia_basal",   ("resting_energy", "basal_energy"),                 "kcal",      True,  "Energía basal"),
+    ("luz_natural",     ("time_in_daylight",),                              "min",       True,  "Luz natural"),
+    ("peso",            ("weight_body_mass", "weight"),                     "kg",        False, "Peso"),
+    ("grasa",           ("body_fat_percentage",),                           "%",         False, "% Grasa"),
+    ("masa_magra",      ("lean_body_mass",),                                "kg",        False, "Masa magra"),
 )
+
+# Series que no salen de _BRIEF_METRICAS: las fases del sueño viven en el `extra` de
+# sleep_analysis, no en filas propias.
+_BRIEF_SERIES_SUENO = (
+    ("sueno_profundo",  "Sueño profundo"),
+    ("sueno_rem",       "Sueño REM"),
+    ("sueno_despierto", "Tiempo despierto"),
+)
+
+# El sueño va primero: es el dato del que cuelga la lectura del resto del día.
+_BRIEF_ORDEN = ("sueno", *(clave for clave, *_ in _BRIEF_METRICAS))
+_BRIEF_ETIQUETA = {
+    "sueno": "Sueño anoche",
+    **{clave: etiqueta for clave, _, _, _, etiqueta in _BRIEF_METRICAS},
+    **dict(_BRIEF_SERIES_SUENO),
+}
 
 
 def _horas_sueno(fila: dict) -> float:
@@ -2986,6 +3031,62 @@ def _horas_sueno(fila: dict) -> float:
     if _num("asleep") > 0:
         return _num("asleep")
     return sum(_num(k) for k in ("deep", "rem", "light", "core"))
+
+
+def _num_extra(extra: dict, *claves) -> float | None:
+    """Primer valor numérico de `extra` entre varias claves, o None.
+
+    Se pasan varias porque Health Auto Export no mantiene la capitalización entre
+    métricas: el rango diario de `heart_rate` trae `Avg`/`Min`/`Max` con mayúscula y
+    sin la versión en minúsculas. Es la misma trampa que ya sortea la ingesta.
+    """
+    for clave in claves:
+        v = (extra or {}).get(clave)
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _fases_sueno(extra: dict) -> dict:
+    """Fases de una noche, en horas. `core` y `light` son la misma fase con dos nombres
+    según la fuente (el mismo criterio que `_sleepHours` en helpers.js)."""
+    def _n(*claves):
+        return sum(_num_extra(extra, c) or 0 for c in claves)
+
+    fases = {
+        "profundo":  round(_n("deep"), 2),
+        "rem":       round(_n("rem"), 2),
+        "ligero":    round(_n("core", "light"), 2),
+        "despierto": round(_n("awake"), 2),
+    }
+    return fases if any(fases.values()) else {}
+
+
+def _minutos_entreno(bruto) -> float | None:
+    """Duración de un entreno en minutos.
+
+    Health Auto Export v2 la manda en segundos y el Atajo de iOS también, pero versiones
+    antiguas mandaban minutos: mismo umbral que usa el widget de entrenamientos del
+    frontend (>300 ⇒ son segundos), para que el correo y la pantalla no digan cosas
+    distintas del mismo entreno.
+    """
+    try:
+        v = float(bruto)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return round(v / 60 if v > 300 else v, 1)
+
+
+def _hora_entreno(inicio) -> str | None:
+    """"HH:MM" de un inicio de entreno, venga como ISO o como texto del exportador."""
+    m = re.search(r"(\d{2}):(\d{2})", str(inicio or ""))
+    return f"{m.group(1)}:{m.group(2)}" if m else None
 
 
 def _dia(iso: str):
@@ -3021,11 +3122,19 @@ def _dias_hasta(iso: str) -> int | None:
 
 
 def _brief_salud() -> dict:
-    """Últimos valores y medias de 7/30 días de las métricas del Watch.
+    """Últimos valores, medias de 7/30 días y serie diaria de las métricas del Watch.
 
-    Un solo viaje a Supabase: se traen 30 días y se agrupa en memoria.
+    Un solo viaje a Supabase: se traen BRIEF_DIAS_SALUD días de la tabla ENTERA (la
+    query no filtra por nombre) y se agrupa en memoria.
+
+    Las series diarias van además de las medias, no en su lugar: una media dice dónde
+    estás y una serie dice hacia dónde vas, y quien lee el correo no puede deducir la
+    segunda de la primera. Es también lo único que le permite cruzar dos métricas entre
+    sí — el motor de correlaciones (`healthCorrelations`) vive en helpers.js y por
+    diseño no se porta aquí, así que sin los valores día a día ese cruce no existe para
+    el correo.
     """
-    desde = (datetime.now(LOCAL_TZ) - timedelta(days=30)).strftime("%Y-%m-%d")
+    desde = (datetime.now(LOCAL_TZ) - timedelta(days=BRIEF_DIAS_SALUD)).strftime("%Y-%m-%d")
     r = http.get(
         f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
         f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc&limit=5000",
@@ -3051,7 +3160,13 @@ def _brief_salud() -> dict:
     for filas in por_nombre.values():
         filas.sort(key=lambda f: f["metric_date"])
 
-    salud: dict = {}
+    salud:  dict = {}
+    series: dict = {}
+    # Un hueco en la serie tiene que verse COMO hueco: las posiciones son días
+    # consecutivos, así que comprimir los días sin dato desplazaría todo lo demás y
+    # cualquier cruce con otra serie compararía fechas distintas.
+    dias_ventana = [(hoy - timedelta(days=i)).isoformat()
+                    for i in range(BRIEF_DIAS_SALUD - 1, -1, -1)]
 
     def _resumen_serie(validas: list, unidad: str) -> dict:
         m7,  n7  = _ventana(validas, desde_7)
@@ -3066,35 +3181,98 @@ def _brief_salud() -> dict:
             "media_30d":  m30, "n_30d": n30,
         }
 
-    for clave, nombres, unidad in _BRIEF_METRICAS:
+    def _anotar(clave: str, validas: list, unidad: str) -> dict:
+        """Guarda el resumen de una serie y, si tiene fondo suficiente, su día a día."""
+        resumen = _resumen_serie(validas, unidad)
+        salud[clave] = resumen
+        if resumen["n_30d"] >= BRIEF_MIN_DIAS_SERIE:
+            por_fecha = {d["fecha"]: d["valor"] for d in validas}
+            series[clave] = [por_fecha.get(f) for f in dias_ventana]
+        return resumen
+
+    for clave, nombres, unidad, cero_es_dato, _ in _BRIEF_METRICAS:
         filas = next((por_nombre[n] for n in nombres if por_nombre.get(n)), [])
         validas = []
         for f in filas:
             try:
-                v = float(f["value"])
+                # Redondeado desde la entrada: el HRV llega del Watch con quince
+                # decimales y sin esto se cuelan enteros en el correo, uno por día de
+                # serie, sin que el decimoquinto signifique nada.
+                v = round(float(f["value"]), 2)
             except (TypeError, ValueError, KeyError):
                 continue
-            if v > 0:
+            if v > 0 or (v == 0 and cero_es_dato):
                 validas.append({"fecha": f["metric_date"], "valor": v})
         if not validas:
             continue
-        salud[clave] = _resumen_serie(validas, unidad)
+        # La unidad de la fila manda sobre la declarada: la ingesta ya convierte (kJ a
+        # kcal) y no todas las métricas se exportan en la unidad que uno supondría.
+        real = next((f.get("unit") for f in reversed(filas) if f.get("unit")), None)
+        _anotar(clave, validas, real or unidad)
+
+    # heart_rate se exporta como RANGO diario: el promedio va en `value` y los extremos
+    # en `extra`, con la capitalización que le dé la gana al exportador.
+    filas_fc = por_nombre.get("heart_rate") or []
+    if salud.get("fc_media") and filas_fc:
+        extra_fc = filas_fc[-1].get("extra") or {}
+        for destino, claves in (("min", ("min", "Min")), ("max", ("max", "Max"))):
+            v = _num_extra(extra_fc, *claves)
+            if v is not None:
+                salud["fc_media"][destino] = round(v, 2)
 
     # Sueño: valor derivado y respetando las noches que el usuario anuló a mano.
     noches = []
     for f in next((por_nombre[n] for n in ("sleep_analysis", "sleep") if por_nombre.get(n)), []):
-        if (f.get("extra") or {}).get("excluded"):
+        extra = f.get("extra") or {}
+        if extra.get("excluded"):
             continue
         horas = _horas_sueno(f)
         if horas > 0:
             noches.append({"fecha": f["metric_date"], "valor": round(horas, 2),
-                           "inicio": (f.get("extra") or {}).get("sleep_start")})
+                           "inicio": extra.get("sleep_start"), "fases": _fases_sueno(extra)})
     if noches:
-        salud["sueno"] = {**_resumen_serie(noches, "h"), "inicio": noches[-1]["inicio"]}
+        resumen = _anotar("sueno", noches, "h")
+        resumen["inicio"] = noches[-1]["inicio"]
+        # Las fases son la diferencia entre haber dormido siete horas y haber
+        # descansado: sin ellas, del sueño solo viajaba la cantidad.
+        if noches[-1]["fases"]:
+            resumen["fases"] = noches[-1]["fases"]
+        for clave, fase in (("sueno_profundo", "profundo"), ("sueno_rem", "rem"),
+                            ("sueno_despierto", "despierto")):
+            con_fase = [{"fecha": n["fecha"], "valor": n["fases"][fase]}
+                        for n in noches if n["fases"]]
+            if len(con_fase) >= BRIEF_MIN_DIAS_SERIE:
+                por_fecha = {d["fecha"]: d["valor"] for d in con_fase}
+                series[clave] = [por_fecha.get(f) for f in dias_ventana]
 
-    # Entrenos del Watch: cuántos días desde el último.
-    entrenos = next((por_nombre[n] for n in ("workouts", "workout") if por_nombre.get(n)), [])
-    fechas = sorted({f["metric_date"] for f in entrenos})
+    # Entrenos del Watch: cuándo fue el último y el detalle de los más recientes.
+    filas_entrenos = next((por_nombre[n] for n in ("workouts", "workout") if por_nombre.get(n)), [])
+    detalle = []
+    for f in filas_entrenos:
+        for w in ((f.get("extra") or {}).get("workouts") or []):
+            if not isinstance(w, dict):
+                continue
+            bruto_kcal = next(
+                (v for k in ("activeEnergy", "totalEnergyBurned", "activeEnergyBurned")
+                 if (v := w.get(k)) is not None), None)
+            if isinstance(bruto_kcal, dict):
+                bruto_kcal = bruto_kcal.get("qty")
+            try:
+                kcal = round(float(bruto_kcal)) if bruto_kcal is not None else None
+            except (TypeError, ValueError):
+                kcal = None
+            detalle.append({
+                "fecha":   f["metric_date"],
+                "tipo":    w.get("name") or w.get("workoutActivityType") or w.get("type") or "Entrenamiento",
+                "minutos": _minutos_entreno(w.get("duration")),
+                "kcal":    kcal,
+                "hora":    _hora_entreno(w.get("start")),
+            })
+    if detalle:
+        detalle.sort(key=lambda e: (e["fecha"], e["hora"] or ""))
+        salud["entrenos"] = detalle[-BRIEF_MAX_ENTRENOS:]
+
+    fechas = sorted({f["metric_date"] for f in filas_entrenos})
     if fechas:
         try:
             ultima = datetime.strptime(fechas[-1], "%Y-%m-%d").date()
@@ -3104,6 +3282,11 @@ def _brief_salud() -> dict:
             }
         except ValueError:
             pass
+
+    if series:
+        salud["series"] = series
+        salud["series_desde"] = dias_ventana[0]
+        salud["series_hasta"] = dias_ventana[-1]
 
     return salud
 
@@ -3268,6 +3451,17 @@ def _brief_entrenamiento() -> dict:
     }
 
 
+def _cifra(v) -> str:
+    """Número tal y como se lee en el correo: sin el `.0` de los enteros y con "-"
+    cuando no hay dato — "None" en mitad de una fila de cifras se lee como un valor."""
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def _hora_local(iso: str | None) -> str:
     if not iso:
         return "--:--"
@@ -3349,17 +3543,7 @@ def render_brief_texto(d: dict) -> str:
     L.append("## SALUD  (último · media 7d · media 30d; n = días con dato en la ventana)")
     L.append("   Con n=1 la media ES el último valor: no hay base para hablar de desviación.")
     if s:
-        etiquetas = [
-            ("sueno",       "Sueño anoche"),
-            ("hrv",         "HRV"),
-            ("fc_reposo",   "FC en reposo"),
-            ("respiracion", "Frec. respiratoria"),
-            ("pasos",       "Pasos"),
-            ("ejercicio",   "Min. ejercicio"),
-            ("peso",        "Peso"),
-            ("vo2max",      "VO2 máx"),
-        ]
-        for clave, etiqueta in etiquetas:
+        for clave in _BRIEF_ORDEN:
             m = s.get(clave)
             if not m:
                 continue
@@ -3369,14 +3553,25 @@ def render_brief_texto(d: dict) -> str:
                 "ayer"  if dias == 1 else
                 f"hace {dias} días" if dias is not None else "sin fecha"
             )
+            extremos = ""
+            if m.get("min") is not None or m.get("max") is not None:
+                extremos = f" · min {_cifra(m.get('min'))} / máx {_cifra(m.get('max'))}"
             L.append(
-                f"  {etiqueta:<20} {m['ultimo']} {m['unidad']}"
-                f"   (7d: {m['media_7d']} n={m.get('n_7d', '?')},"
-                f" 30d: {m['media_30d']} n={m.get('n_30d', '?')})"
+                f"  {_BRIEF_ETIQUETA[clave]:<20} {_cifra(m['ultimo'])} {m['unidad']}{extremos}"
+                f"   (7d: {_cifra(m['media_7d'])} n={m.get('n_7d', '?')},"
+                f" 30d: {_cifra(m['media_30d'])} n={m.get('n_30d', '?')})"
                 f"   [{m['fecha']}, {edad}]"
             )
-        if s.get("sueno", {}).get("inicio"):
-            L.append(f"  {'Se acostó a las':<20} {s['sueno']['inicio']}")
+        sueno = s.get("sueno") or {}
+        if sueno.get("inicio"):
+            L.append(f"  {'Se acostó a las':<20} {sueno['inicio']}")
+        if sueno.get("fases"):
+            f = sueno["fases"]
+            L.append(
+                f"  {'Fases de anoche':<20} profundo {_cifra(f['profundo'])} h"
+                f" · REM {_cifra(f['rem'])} h · ligero {_cifra(f['ligero'])} h"
+                f" · despierto {_cifra(f['despierto'])} h"
+            )
         if s.get("ultimo_entreno"):
             ue = s["ultimo_entreno"]
             dias = ue["dias"]
@@ -3385,6 +3580,34 @@ def render_brief_texto(d: dict) -> str:
     else:
         L.append("  (sin datos)")
     L.append("")
+
+    if s.get("entrenos"):
+        L.append(f"## ENTRENOS DEL WATCH (los {BRIEF_MAX_ENTRENOS} más recientes de la ventana)")
+        for e in s["entrenos"]:
+            partes = [p for p in (
+                f"{_cifra(e['minutos'])} min" if e["minutos"] is not None else None,
+                f"{_cifra(e['kcal'])} kcal"   if e["kcal"] is not None else None,
+            ) if p]
+            hora = f" {e['hora']}" if e.get("hora") else ""
+            L.append(f"  {e['fecha']}{hora}  {e['tipo']}" + (f" — {' · '.join(partes)}" if partes else ""))
+        L.append("")
+
+    # Las medias dicen dónde estás; la serie, hacia dónde vas. Y es lo único con lo que
+    # se pueden cruzar dos métricas entre sí, que es de donde salen las conclusiones que
+    # no se ven mirando un solo número.
+    if s.get("series"):
+        L.append(
+            f"## SERIE DIARIA  ({s.get('series_desde')} → {s.get('series_hasta')},"
+            " un valor por día en ese orden, sin saltarse ninguno; \"-\" = sin dato)"
+        )
+        L.append(f"   Solo las métricas con {BRIEF_MIN_DIAS_SERIE}+ días de dato en la ventana.")
+        for clave in (*_BRIEF_ORDEN, *(c for c, _ in _BRIEF_SERIES_SUENO)):
+            valores = s["series"].get(clave)
+            if not valores:
+                continue
+            pintados = " ".join(_cifra(v) for v in valores)
+            L.append(f"  {_BRIEF_ETIQUETA[clave]:<20} {pintados}")
+        L.append("")
 
     t = d["entrenamiento"]
     L.append("## ENTRENAMIENTO PERSONAL (cliente)")
