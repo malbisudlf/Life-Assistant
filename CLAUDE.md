@@ -545,6 +545,39 @@ Ficheros clave:
   modelo se lo diga al usuario en vez de insistir gastando vueltas. Es la misma moraleja
   del agente PC: *"no pude preguntar" no es "no hay nada que hacer"*.
 
+- **Jarvis: memoria persistente** (`recordar`, `olvidar`, tabla `jarvis_memoria`): los
+  HECHOS destilados de las conversaciones (preferencias, objetivos, nombres, decisiones)
+  se guardan con clave y se inyectan en el prompt de cada turno; el HISTORIAL sigue
+  viviendo en el cliente y el backend sigue sin guardar conversaciones — son datos
+  distintos con reglas distintas. El modelo guarda por iniciativa propia (se le pide en
+  el prompt de sistema), y por eso la clave se **normaliza a slug** en `_clave_recuerdo()`
+  antes de interpolarse en la URL de Supabase (invariante 6): el modelo la redacta con
+  espacios y acentos, y rebotarle el formato le gastaría una vuelta. El upsert lleva
+  `on_conflict=clave` explícito (la lección del 409) y un fallo leyendo la memoria **no
+  tumba el turno**: se sigue sin recuerdos, con `warning` en el registro. Los topes
+  (`JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`) existen porque los recuerdos viajan
+  dentro del prompt y se pagan por token en cada turno.
+- **Jarvis: cliente MCP** (`mcp_servidores`, `mcp_herramientas`, `mcp_usar`): conexión a
+  cualquier servidor MCP por Streamable HTTP (JSON-RPC sobre POST, sin dependencias
+  nuevas), con la sesión negociada en memoria (`_mcp_sesiones`, mismo criterio que
+  `_token_cache`). Tres invariantes de seguridad:
+  - **La lista blanca es del usuario** (`JARVIS_MCP_SERVERS`, env). El modelo elige
+    ENTRE los servidores aprobados, nunca añade uno: un modelo que decide sus propios
+    endpoints es un canal de exfiltración con tus datos como argumentos. Jarvis puede
+    proponer añadir un servidor; conectarlo es editar la variable.
+  - **La frontera de confirmación es por servidor** (`confiar` en la config, en falso
+    por defecto): sin confiar, cada `mcp_usar` queda `pendiente` y lo aprueba el usuario
+    con el botón, exactamente como `crear_evento`; con confiar, se ejecuta en el bucle.
+    Para eso `confirmar` en el registro puede ser una **función de los argumentos**
+    (`_jarvis_confirma()`), y la puerta de `/jarvis/ejecutar` admite lo confirmable
+    fijo o dinámico. El botón del dashboard enseña servidor, herramienta y argumentos
+    REALES (`jarvisEtiquetaAccion`), no lo que el modelo haya redactado.
+  - **Lo que devuelve un servidor es contenido externo**: resultados y descripciones de
+    herramientas van envueltos en `_AVISO_WEB`, como la web y el enunciado de Alud.
+  Sin servidores configurados, las herramientas `mcp_*` **no se anuncian en el esquema**
+  (herramientas muertas se pagan por token en cada turno). Hay tests del flujo completo
+  con sesión, del parseo SSE y de las dos fronteras.
+
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -665,7 +698,8 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `JARVIS_MAX_VUELTAS`, `JARVIS_MAX_HISTORIAL`, `JARVIS_MAX_MENSAJE`, `JARVIS_MAX_TOKENS`,
 `JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_WEB`,
 `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
-`TAVILY_API_KEY`, `BRAVE_API_KEY`.
+`TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
+`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
@@ -1334,7 +1368,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 482 tests)
+### Backend (`tests/backend`, 502 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1353,7 +1387,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 98 tests)
+### Frontend (`tests/frontend`, 108 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -1567,7 +1601,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
 `20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
-`20260804_presence`, `20260804_brief_envios`.
+`20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`.
 
 ## Convenciones
 
