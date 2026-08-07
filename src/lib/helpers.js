@@ -1035,3 +1035,54 @@ export function weatherFromCode(code) {
   const [emoji, label] = map[code] || ["🌡️", "—"];
   return { emoji, label };
 }
+
+// ── Jarvis ───────────────────────────────────────────────────────
+// Tope de turnos que se mandan al backend. Tiene que ser <= JARVIS_MAX_HISTORIAL del
+// backend (si no, el 422 llega en mitad de una conversación) y es lo único que hace
+// crecer el coste de un turno: el historial viaja entero en cada petición.
+export const JARVIS_MAX_HISTORIAL = 10;
+
+/** Turnos que se mandan como contexto: solo los que tienen texto, y solo los últimos.
+ *  Los mensajes de sistema (errores de red, avisos de la UI) no son conversación y no
+ *  deben viajar: pagarlos por token cada turno para que el modelo lea "Error de
+ *  conexión" no aporta nada. */
+export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
+  return (mensajes || [])
+    .filter(m => (m?.rol === "user" || m?.rol === "assistant") && (m?.texto || "").trim())
+    .slice(-max)
+    .map(m => ({ rol: m.rol, texto: m.texto }));
+}
+
+/** Descripción legible de la acción que Jarvis deja propuesta, para el botón de
+ *  confirmar. Sale de los argumentos que ya viajan en la respuesta: el usuario tiene
+ *  que poder ver QUÉ va a aprobar sin fiarse de cómo lo haya redactado el modelo. */
+export function jarvisEtiquetaAccion(pendiente) {
+  if (!pendiente || pendiente.herramienta !== "crear_evento") return null;
+  const a = pendiente.argumentos || {};
+  const titulo = (a.titulo || "").trim();
+  if (!titulo) return null;
+  const partes = [`Crear "${titulo}"`];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(a.fecha || "")) {
+    const [y, m, d] = a.fecha.split("-");
+    partes.push(`el ${d}/${m}/${y}`);
+  }
+  if (/^\d{2}:\d{2}$/.test(a.hora_inicio || "")) partes.push(`a las ${a.hora_inicio}`);
+  else partes.push("(todo el día)");
+  if ((a.lugar || "").trim()) partes.push(`en ${a.lugar.trim()}`);
+  return partes.join(" ");
+}
+
+/** Traduce un fallo de /jarvis a algo que se pueda leer y accionar.
+ *  Un "no he podido responder" a secas mandaba a mirar la red cuando el problema real
+ *  era un backend sin desplegar: cada código dice una cosa distinta y solo uno de ellos
+ *  se arregla reintentando. */
+export function jarvisMotivoError(status, detalle = "") {
+  const d = (detalle || "").trim();
+  if (status === 0)   return "No he podido conectar con el backend. ¿Está levantado?";
+  if (status === 404) return "Este backend todavía no tiene Jarvis: falta desplegarlo (fly deploy).";
+  if (status === 503) return d || "Falta configurar OPENAI_API_KEY en el backend.";
+  if (status === 429) return "Demasiadas peticiones seguidas. Espera un momento.";
+  if (status === 413 || status === 422) return d || "El mensaje es demasiado largo.";
+  if (status >= 500)  return `El backend ha fallado (${status}). Mira el registro en ajustes.`;
+  return d || `No he podido responder (error ${status}).`;
+}

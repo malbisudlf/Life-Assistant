@@ -86,3 +86,28 @@ test('el dashboard se pinta también en móvil', async ({ page }) => {
 
   expect(page.erroresDeNavegador).toEqual([])
 })
+
+test('Jarvis consulta la agenda y deja una acción por confirmar', async ({ page }) => {
+  await entrar(page)
+
+  const entrada = page.getByPlaceholder('Habla con Jarvis')
+  await expect(entrada).toBeVisible()
+
+  // Camino 1: consulta. El backend ejecuta la herramienta `agenda` de verdad contra el
+  // Graph simulado, así que si el contrato de /calendar/events se rompe, falla aquí.
+  await entrada.fill('¿qué tengo hoy?')
+  await entrada.press('Enter')
+  await expect(page.getByText('Hoy tienes el Evento de prueba E2E.')).toBeVisible({ timeout: 15_000 })
+  // La herramienta usada se muestra bajo la respuesta: es cómo se ve que consultó y no
+  // se lo inventó.
+  await expect(page.getByText('agenda', { exact: true })).toBeVisible()
+
+  // Camino 2: acción que NO se ejecuta sola. Tiene que aparecer el botón de confirmar
+  // con la descripción construida a partir de los argumentos reales.
+  await entrada.fill('apunta el dentista')
+  await entrada.press('Enter')
+  await expect(page.getByText(/Crear "Dentista" el \d{2}\/\d{2}\/\d{4} a las 17:00/)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('button', { name: 'Confirmar' })).toBeVisible()
+
+  expect(page.erroresDeNavegador).toEqual([])
+})

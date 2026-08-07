@@ -8,6 +8,7 @@ import {
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   formatMoney, clothingTotals, hostStreaming,
+  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -855,5 +856,113 @@ describe("healthCoverageDays", () => {
   test("sin datos devuelve 0", () => {
     expect(healthCoverageDays(null)).toBe(0);
     expect(healthCoverageDays({})).toBe(0);
+  });
+});
+
+// ── Jarvis ───────────────────────────────────────────────────────
+
+describe("jarvisHistorial", () => {
+  test("solo manda turnos de la conversación", () => {
+    const out = jarvisHistorial([
+      { rol: "user", texto: "hola" },
+      { rol: "aviso", texto: "Error de conexión" },
+      { rol: "assistant", texto: "buenas" },
+    ]);
+    expect(out).toEqual([
+      { rol: "user", texto: "hola" },
+      { rol: "assistant", texto: "buenas" },
+    ]);
+  });
+
+  test("descarta los mensajes vacíos", () => {
+    expect(jarvisHistorial([{ rol: "user", texto: "   " }])).toEqual([]);
+  });
+
+  test("se queda con los últimos y respeta el tope", () => {
+    const muchos = Array.from({ length: 30 }, (_, i) => ({ rol: "user", texto: `m${i}` }));
+    const out = jarvisHistorial(muchos);
+    expect(out).toHaveLength(JARVIS_MAX_HISTORIAL);
+    expect(out[out.length - 1].texto).toBe("m29");
+  });
+
+  test("no revienta sin datos", () => {
+    expect(jarvisHistorial(undefined)).toEqual([]);
+    expect(jarvisHistorial([null])).toEqual([]);
+  });
+
+  test("no arrastra campos de más al backend", () => {
+    const out = jarvisHistorial([{ rol: "assistant", texto: "ok", herramientas: ["clima"] }]);
+    expect(out[0]).toEqual({ rol: "assistant", texto: "ok" });
+  });
+});
+
+describe("jarvisEtiquetaAccion", () => {
+  test("describe el evento con fecha en formato local", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_evento",
+      argumentos: { titulo: "Dentista", fecha: "2026-09-01", hora_inicio: "10:00" },
+    })).toBe('Crear "Dentista" el 01/09/2026 a las 10:00');
+  });
+
+  test("sin hora se marca como todo el día", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_evento",
+      argumentos: { titulo: "Vacaciones", fecha: "2026-09-01" },
+    })).toBe('Crear "Vacaciones" el 01/09/2026 (todo el día)');
+  });
+
+  test("incluye el lugar si lo hay", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_evento",
+      argumentos: { titulo: "Café", fecha: "2026-09-01", hora_inicio: "17:30", lugar: "Bilbao" },
+    })).toContain("en Bilbao");
+  });
+
+  test("ignora fechas y horas con formato inválido", () => {
+    const out = jarvisEtiquetaAccion({
+      herramienta: "crear_evento",
+      argumentos: { titulo: "X", fecha: "mañana", hora_inicio: "por la tarde" },
+    });
+    expect(out).toBe('Crear "X" (todo el día)');
+  });
+
+  test("sin título no hay nada que confirmar", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "crear_evento", argumentos: { fecha: "2026-09-01" } })).toBeNull();
+  });
+
+  test("devuelve null si no hay acción pendiente", () => {
+    expect(jarvisEtiquetaAccion(null)).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "apagar_pc", argumentos: {} })).toBeNull();
+  });
+});
+
+describe("jarvisMotivoError", () => {
+  test("un 404 apunta al despliegue, no a la red", () => {
+    expect(jarvisMotivoError(404)).toContain("fly deploy");
+  });
+
+  test("sin conexión se distingue de un error del backend", () => {
+    expect(jarvisMotivoError(0)).toContain("conectar");
+  });
+
+  test("un 503 enseña el detalle del backend", () => {
+    expect(jarvisMotivoError(503, "falta OPENAI_API_KEY")).toBe("falta OPENAI_API_KEY");
+  });
+
+  test("un 503 sin detalle sigue diciendo algo útil", () => {
+    expect(jarvisMotivoError(503)).toContain("OPENAI_API_KEY");
+  });
+
+  test("el 429 invita a esperar, que es lo único que arregla un rate limit", () => {
+    expect(jarvisMotivoError(429)).toContain("Espera");
+  });
+
+  test("los 5xx mandan al registro", () => {
+    expect(jarvisMotivoError(500)).toContain("registro");
+    expect(jarvisMotivoError(502)).toContain("502");
+  });
+
+  test("un código desconocido no se queda mudo", () => {
+    expect(jarvisMotivoError(418)).toContain("418");
   });
 });

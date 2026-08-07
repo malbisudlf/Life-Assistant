@@ -10,8 +10,12 @@ import { defineConfig, devices } from '@playwright/test'
 // El frontend se sirve con `vite preview` sobre el build de producción, no con el
 // servidor de desarrollo: es lo que acaba en Vercel, y así el test también valida que
 // el bundle compilado funciona.
-const PUERTO_API  = 8000
-const PUERTO_WEB  = 4173
+// Overridables por entorno: en una máquina de desarrollo el 8000 suele estar ocupado
+// por el backend local, y en Windows un uvicorn muerto puede dejar el socket en
+// LISTENING con un PID que ya no existe, sin forma cómoda de liberarlo. En CI se usan
+// los de siempre.
+const PUERTO_API  = Number(process.env.E2E_PUERTO_API) || 8000
+const PUERTO_WEB  = Number(process.env.E2E_PUERTO_WEB) || 4173
 const URL_API     = `http://127.0.0.1:${PUERTO_API}`
 
 export default defineConfig({
