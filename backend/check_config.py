@@ -13,7 +13,15 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv()  # por si se ejecuta desde backend/
 
-OK, KO, WARN = "✅", "❌", "⚠️ "
+# La consola de Windows usa cp1252 por defecto y los emojis la hacen reventar con un
+# UnicodeEncodeError: el script que existe para ayudar a configurar el kit se caía en
+# la primera línea, justo en la máquina donde más falta hace. Se intenta pasar la salida
+# a UTF-8 y, si no se puede, se usan marcas ASCII.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    OK, KO, WARN = "✅", "❌", "⚠️ "
+except Exception:
+    OK, KO, WARN = "[OK]", "[--]", "[!!]"
 
 
 def _set(*names):
@@ -45,7 +53,7 @@ def main() -> int:
         ("Base de datos (ideas, salud, entrenamiento, jobs)", ["SUPABASE_URL", "SUPABASE_KEY"]),
         ("Calendario Outlook", ["CLIENT_ID", "TENANT_ID", "CLIENT_SECRET", "REDIRECT_URI"]),
         ("Hora de salida con tráfico", ["GOOGLE_MAPS_API_KEY", "HOME_ADDRESS"]),
-        ("Ideas por voz (Whisper + GPT)", ["OPENAI_API_KEY"]),
+        ("Ideas por voz y Jarvis (Whisper + GPT)", ["OPENAI_API_KEY"]),
         ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
         ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
         ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
