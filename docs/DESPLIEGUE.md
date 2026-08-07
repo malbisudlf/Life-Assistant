@@ -304,8 +304,13 @@ Jarvis pueda recordar entre conversaciones. Sin la tabla, el resto del asistente
 funciona igual y `recordar` devuelve un error que el propio chat te enseña.
 
 **Servidores MCP**: para darle a Jarvis herramientas de terceros, define
-`JARVIS_MCP_SERVERS` (JSON; ver `backend/.env.example`). Cada llamada a un servidor
-sin `confiar` se aprueba con un botón en el chat.
+`JARVIS_MCP_SERVERS` (JSON; ver `backend/.env.example`). Por defecto las consultas se
+ejecutan solas y todo lo que modifica algo se aprueba con un botón en el chat.
+Ejemplo con GitHub (47 herramientas: issues, PRs, commits, ficheros):
+
+```
+JARVIS_MCP_SERVERS={"github":{"url":"https://api.githubcopilot.com/mcp/","token":"ghp_..."}}
+```
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
 `VITE_ENTREGAS_MARKER`, `VITE_AGENT_ID`.

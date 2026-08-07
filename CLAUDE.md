@@ -565,13 +565,29 @@ Ficheros clave:
     ENTRE los servidores aprobados, nunca añade uno: un modelo que decide sus propios
     endpoints es un canal de exfiltración con tus datos como argumentos. Jarvis puede
     proponer añadir un servidor; conectarlo es editar la variable.
-  - **La frontera de confirmación es por servidor** (`confiar` en la config, en falso
-    por defecto): sin confiar, cada `mcp_usar` queda `pendiente` y lo aprueba el usuario
-    con el botón, exactamente como `crear_evento`; con confiar, se ejecuta en el bucle.
-    Para eso `confirmar` en el registro puede ser una **función de los argumentos**
-    (`_jarvis_confirma()`), y la puerta de `/jarvis/ejecutar` admite lo confirmable
-    fijo o dinámico. El botón del dashboard enseña servidor, herramienta y argumentos
-    REALES (`jarvisEtiquetaAccion`), no lo que el modelo haya redactado.
+  - **La frontera de confirmación se decide por llamada** (`_mcp_pide_confirmar()`), en
+    tres niveles: `confiar` → nada pregunta; por defecto (`lectura_directa`) → se
+    ejecutan solas las herramientas que el servidor declara de solo lectura
+    (`annotations.readOnlyHint`, del protocolo) y lo que escribe se propone; y
+    `lectura_directa: false` → todo se propone. Ante la duda (servidor que no anota, o
+    que no se pudo listar) **se pide confirmación**: falla hacia el lado seguro. La
+    anotación la da el propio servidor —contenido externo— y se acepta porque la
+    frontera de confianza real es la lista blanca que el usuario aprobó a mano, con un
+    token que él emitió.
+    **Que las consultas se ejecuten dentro del bucle no es comodidad, es lo que hace que
+    funcione**: al quedar pendiente, la llamada corta el bucle, así que el modelo nunca
+    veía que se había equivocado de herramienta y no podía corregirse. Contra el
+    servidor real de GitHub (47 herramientas) esa era la diferencia entre acertar a la
+    quinta y no acertar nunca.
+    Para todo esto `confirmar` en el registro puede ser una **función de los argumentos**
+    (`_jarvis_confirma()`), y la puerta de `/jarvis/ejecutar` admite lo confirmable fijo
+    o dinámico. El botón del dashboard enseña servidor, herramienta y argumentos REALES
+    (`jarvisEtiquetaAccion`), no lo que el modelo haya redactado.
+  - **`mcp_herramientas` se filtra con `buscar`**: volcar el catálogo entero cuesta
+    tokens en cada turno y, sobre todo, un modelo pequeño elige peor cuantas más
+    opciones parecidas ve juntas (probado: pidiéndole LEER issues escogía
+    `add_issue_comment`). Un filtro sin coincidencias devuelve los NOMBRES de todas, para
+    que pueda reintentar con otra palabra en vez de quedarse sin nada que mirar.
   - **Lo que devuelve un servidor es contenido externo**: resultados y descripciones de
     herramientas van envueltos en `_AVISO_WEB`, como la web y el enunciado de Alud.
   Sin servidores configurados, las herramientas `mcp_*` **no se anuncian en el esquema**
@@ -781,7 +797,11 @@ Qué hace cada uno:
    decisión vive en el backend. El botón 🎙 usa el reconocimiento de voz del NAVEGADOR
    (`SpeechRecognition`), que es gratis y no sale del dispositivo — no Whisper, que se
    paga por minuto y no compensa para dictar una frase. Donde no exista, el botón no
-   aparece y se escribe; no hay respaldo de pago. Las acciones que Jarvis propone pero
+   aparece y se escribe; no hay respaldo de pago. La voz de SALIDA es el espejo: el
+   botón 🔊 (`la_jarvis_voz`) lee las respuestas con `speechSynthesis` del navegador
+   (`elegirVozEspanola`/`textoHablable` en helpers), no con un TTS de pago. El toggle
+   habla desde el propio toque a propósito: iOS solo desbloquea el audio dentro de un
+   gesto del usuario. Las acciones que Jarvis propone pero
    no ejecuta salen como un botón de confirmar cuya etiqueta la construye
    `jarvisEtiquetaAccion` con los ARGUMENTOS reales, no con lo que el modelo haya
    redactado: hay que poder ver qué se aprueba.
@@ -972,7 +992,8 @@ modal.
 Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_splits`,
 `la_notifications`, `la_simple_mode`, `la_body_goals`, `la_training_days`,
 `la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
-guarda ninguna). Si añades una, mantén el prefijo y el `try/catch` al parsear.
+guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta). Si añades una,
+mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
 
@@ -1368,7 +1389,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 502 tests)
+### Backend (`tests/backend`, 514 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1387,7 +1408,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 108 tests)
+### Frontend (`tests/frontend`, 113 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:

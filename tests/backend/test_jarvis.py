@@ -621,11 +621,14 @@ class _RespuestaMcp:
         return self._json
 
 
-def _con_mcp(monkeypatch, confiar=False):
-    monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", json.dumps({
-        "pruebas": {"url": "https://servidor.mcp/rpc", "token": "tok", "confiar": confiar},
-    }))
+def _con_mcp(monkeypatch, confiar=False, lectura_directa=True, solo_lectura=()):
+    cfg = {"url": "https://servidor.mcp/rpc", "token": "tok", "confiar": confiar}
+    if not lectura_directa:
+        cfg["lectura_directa"] = False
+    monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", json.dumps({"pruebas": cfg}))
     monkeypatch.setattr(main, "_mcp_sesiones", {})
+    # Caché de anotaciones: si se deja a None, la frontera lista el servidor de verdad.
+    monkeypatch.setattr(main, "_mcp_lectura", {"pruebas": set(solo_lectura)})
 
 
 class TestJarvisMcp:
@@ -748,8 +751,106 @@ class TestJarvisMcp:
         client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
         assert "pruebas" in cliente.recibido[0]["messages"][0]["content"]
 
+    def test_sin_servidores_el_prompt_dice_como_se_conecta_uno(self, monkeypatch, mock_requests):
+        """El modelo tiene que saber que el soporte existe: sin esta línea contestaba
+        'no tengo acceso a MCP' en vez de explicar que se aprueban en la config."""
+        monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", "")
+        assert "JARVIS_MCP_SERVERS" in main._jarvis_sistema()
+
     def test_un_error_del_servidor_no_revienta(self, monkeypatch, mock_requests):
         _con_mcp(monkeypatch)
         mock_requests.add("POST", "servidor.mcp", _RespuestaMcp({}, 500))
         assert "error" in main._j_mcp_usar("pruebas", "h", {})
         assert "error" in main._j_mcp_herramientas("pruebas")
+
+
+class TestJarvisMcpFronteraLectura:
+    """Qué se ejecuta solo y qué espera al usuario.
+
+    Sin esto, TODA llamada quedaba pendiente: además de exigir un clic para cada
+    pregunta, cortaba el bucle antes de que el modelo pudiera ver que se había
+    equivocado de herramienta, así que no podía corregirse. Contra el servidor real de
+    GitHub (47 herramientas) esa era la diferencia entre acertar y no acertar nunca.
+    """
+
+    def test_una_herramienta_de_solo_lectura_se_ejecuta_sola(self, monkeypatch):
+        _con_mcp(monkeypatch, solo_lectura=["list_issues"])
+        assert main._mcp_pide_confirmar("pruebas", "list_issues") is False
+
+    def test_una_de_escritura_espera_al_usuario(self, monkeypatch):
+        _con_mcp(monkeypatch, solo_lectura=["list_issues"])
+        assert main._mcp_pide_confirmar("pruebas", "create_issue") is True
+
+    def test_sin_anotacion_conocida_se_confirma(self, monkeypatch):
+        """Ante la duda, se pregunta: la frontera falla hacia el lado seguro."""
+        _con_mcp(monkeypatch, solo_lectura=[])
+        assert main._mcp_pide_confirmar("pruebas", "lo_que_sea") is True
+
+    def test_lectura_directa_desactivada_confirma_todo(self, monkeypatch):
+        _con_mcp(monkeypatch, lectura_directa=False, solo_lectura=["list_issues"])
+        assert main._mcp_pide_confirmar("pruebas", "list_issues") is True
+
+    def test_un_servidor_confiado_no_pregunta_nunca(self, monkeypatch):
+        _con_mcp(monkeypatch, confiar=True, solo_lectura=[])
+        assert main._mcp_pide_confirmar("pruebas", "create_issue") is False
+
+    def test_un_servidor_fuera_de_la_lista_siempre_confirma(self, monkeypatch):
+        _con_mcp(monkeypatch, solo_lectura=["x"])
+        assert main._mcp_pide_confirmar("otro", "x") is True
+
+    def test_listar_aprende_que_herramientas_son_de_lectura(self, monkeypatch, mock_requests):
+        _con_mcp(monkeypatch, solo_lectura=[])
+        monkeypatch.setattr(main, "_mcp_rpc", lambda *a, **k: {"tools": [
+            {"name": "list_issues",  "description": "lista", "annotations": {"readOnlyHint": True}},
+            {"name": "create_issue", "description": "crea",  "annotations": {"readOnlyHint": False}},
+        ]})
+        main._j_mcp_herramientas("pruebas")
+        assert main._mcp_lectura["pruebas"] == {"list_issues"}
+
+    def test_la_consulta_se_ejecuta_dentro_del_bucle(self, client, auth_headers, monkeypatch):
+        """El caso completo: una lectura no interrumpe la conversación con un botón."""
+        _con_mcp(monkeypatch, solo_lectura=["list_issues"])
+        _herramienta(monkeypatch, "mcp_usar",
+                     lambda servidor, herramienta, argumentos=None: {"resultado": "0 issues"})
+        _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("mcp_usar", {
+                "servidor": "pruebas", "herramienta": "list_issues",
+            })]),
+            _mensaje("No tienes issues abiertos."),
+        ])
+        datos = client.post("/jarvis", json={"mensaje": "cuántos issues tengo"},
+                            headers=auth_headers).json()
+        assert datos["pendiente"] is None
+        assert datos["herramientas"] == ["mcp_usar"]
+
+
+class TestJarvisMcpFiltro:
+    def _con_catalogo(self, monkeypatch):
+        monkeypatch.setattr(main, "_mcp_rpc", lambda *a, **k: {"tools": [
+            {"name": "list_issues",   "description": "Lista los issues de un repo"},
+            {"name": "create_issue",  "description": "Crea un issue"},
+            {"name": "list_commits",  "description": "Lista commits"},
+            {"name": "get_file",      "description": "Lee un fichero"},
+        ]})
+
+    def test_el_filtro_reduce_la_lista(self, monkeypatch):
+        """Volcar 47 herramientas cuesta tokens y hace elegir peor a un modelo pequeño."""
+        _con_mcp(monkeypatch)
+        self._con_catalogo(monkeypatch)
+        r = main._j_mcp_herramientas("pruebas", buscar="issue")
+        assert {h["nombre"] for h in r["herramientas"]} == {"list_issues", "create_issue"}
+        assert r["total_en_el_servidor"] == 4
+
+    def test_sin_filtro_salen_todas(self, monkeypatch):
+        _con_mcp(monkeypatch)
+        self._con_catalogo(monkeypatch)
+        assert len(main._j_mcp_herramientas("pruebas")["herramientas"]) == 4
+
+    def test_un_filtro_sin_coincidencias_devuelve_los_nombres(self, monkeypatch):
+        """Quedarse sin nada que mirar dejaría al modelo atascado; con los nombres
+        delante puede reintentar con otra palabra."""
+        _con_mcp(monkeypatch)
+        self._con_catalogo(monkeypatch)
+        r = main._j_mcp_herramientas("pruebas", buscar="calendario")
+        assert r["herramientas"] == []
+        assert "list_issues" in r["nota"]

@@ -10,6 +10,7 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
+  elegirVozEspanola, textoHablable,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -292,6 +293,29 @@ const VOZ_NAVEGADOR = typeof window !== "undefined"
   ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
   : null;
 
+// El espejo del micrófono: la voz de Jarvis también la pone el navegador, y también es
+// gratis por lo mismo (la sintetiza el dispositivo). Nada de TTS de pago por carácter
+// para leer dos frases. Donde no exista, el botón 🔊 no aparece y se lee.
+const VOZ_SINTESIS = typeof window !== "undefined" && "speechSynthesis" in window
+  ? window.speechSynthesis
+  : null;
+
+function hablarJarvis(texto) {
+  if (!VOZ_SINTESIS) return;
+  try {
+    VOZ_SINTESIS.cancel();   // una respuesta nueva corta a la anterior a media frase
+    const dicho = textoHablable(texto);
+    if (!dicho) return;
+    const u = new SpeechSynthesisUtterance(dicho);
+    u.lang = "es-ES";
+    // getVoices() puede venir vacío en la primera llamada (Chrome las carga en
+    // diferido): entonces basta el lang y elige el navegador.
+    const voz = elegirVozEspanola(VOZ_SINTESIS.getVoices());
+    if (voz) u.voice = voz;
+    VOZ_SINTESIS.speak(u);
+  } catch { /* mejor esfuerzo: sin voz, se lee */ }
+}
+
 // Saca el motivo real de una respuesta de error de /jarvis. El detalle de FastAPI
 // viene en `detail`; si el cuerpo no es JSON (un 502 del proxy, por ejemplo), basta con
 // el código.
@@ -341,7 +365,7 @@ function JarvisMensaje({ m }) {
 function JarvisChat({
   mensajes, borrador, setBorrador, onEnviar, pensando,
   pendiente, onConfirmar, onDescartar, confirmando,
-  escuchando, onDictar, finRef,
+  escuchando, onDictar, habla, onHabla, finRef,
 }) {
   const etiqueta = jarvisEtiquetaAccion(pendiente);
   const puedeEnviar = borrador.trim() && !pensando;
@@ -408,6 +432,14 @@ function JarvisChat({
             border: "0.5px solid var(--border)", background: escuchando ? "var(--accent)" : "transparent",
             color: escuchando ? "var(--bg)" : "var(--muted)", flexShrink: 0,
           }}>🎙</button>
+        )}
+        {VOZ_SINTESIS && (
+          <button type="button" onClick={onHabla}
+            title={habla ? "Silenciar a Jarvis" : "Que Jarvis conteste en voz alta"} style={{
+              padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
+              border: "0.5px solid var(--border)", background: habla ? "var(--accent)" : "transparent",
+              color: habla ? "var(--bg)" : "var(--muted)", flexShrink: 0,
+            }}>{habla ? "🔊" : "🔇"}</button>
         )}
         <button type="submit" disabled={!puedeEnviar} style={{
           padding: "0 14px", borderRadius: 8, fontSize: 14, flexShrink: 0,
@@ -817,6 +849,9 @@ export default function Dashboard() {
   const [jarvisPendiente, setJarvisPendiente]   = useState(null);
   const [jarvisConfirmando, setJarvisConfirmando] = useState(false);
   const [jarvisEscuchando, setJarvisEscuchando] = useState(false);
+  const [jarvisHabla, setJarvisHabla] = useState(() => {
+    try { return localStorage.getItem("la_jarvis_voz") === "1"; } catch { return false; }
+  });
   const jarvisFinRef = useRef(null);
   const jarvisVozRef = useRef(null);
   const [departureMap, setDepartureMap]           = useState({});
@@ -1579,6 +1614,7 @@ export default function Dashboard() {
         herramientas: d.herramientas || [],
       }]);
       setJarvisPendiente(d.pendiente || null);
+      if (jarvisHabla) hablarJarvis(d.respuesta || "");
     } catch (e) {
       // Un fallo no puede parecerse a una respuesta: se marca como aviso, que se pinta
       // distinto y queda fuera del historial que viaja al backend. Y DICE QUÉ PASÓ: un
@@ -1611,6 +1647,7 @@ export default function Dashboard() {
       }]);
       if (bien) {
         setJarvisPendiente(null);
+        if (jarvisHabla) hablarJarvis("Hecho.");
         loadEvents();   // el evento nuevo tiene que aparecer ya en el resto del dashboard
       }
     } catch (e) {
@@ -1621,6 +1658,16 @@ export default function Dashboard() {
     } finally {
       setJarvisConfirmando(false);
     }
+  }
+
+  // El toggle habla DESDE el gesto del usuario a propósito: iOS solo desbloquea el
+  // audio de speechSynthesis dentro de un toque, y de paso se oye qué voz va a sonar.
+  function alternarVozJarvis() {
+    const ahora = !jarvisHabla;
+    setJarvisHabla(ahora);
+    try { localStorage.setItem("la_jarvis_voz", ahora ? "1" : "0"); } catch { /* mejor esfuerzo */ }
+    if (ahora) hablarJarvis("Voz activada.");
+    else VOZ_SINTESIS?.cancel();
   }
 
   // Dictado con el reconocimiento del navegador: no cuesta nada y no sale del
@@ -2528,6 +2575,8 @@ export default function Dashboard() {
             confirmando={jarvisConfirmando}
             escuchando={jarvisEscuchando}
             onDictar={dictarAJarvis}
+            habla={jarvisHabla}
+            onHabla={alternarVozJarvis}
             finRef={jarvisFinRef}
           />
         </div>

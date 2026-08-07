@@ -9,6 +9,7 @@ import {
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
+  elegirVozEspanola, textoHablable,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -953,6 +954,41 @@ describe("jarvisEtiquetaAccion", () => {
   test("una llamada MCP incompleta no pinta botón", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: { servidor: "correo" } })).toBeNull();
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: {} })).toBeNull();
+  });
+});
+
+describe("voz de Jarvis", () => {
+  test("elegirVozEspanola prefiere es-ES y las voces Natural", () => {
+    const voces = [
+      { name: "Google US English", lang: "en-US" },
+      { name: "Paulina", lang: "es-MX", localService: true },
+      { name: "Microsoft Elvira Online (Natural)", lang: "es-ES", localService: false },
+      { name: "Monica", lang: "es-ES", localService: true },
+    ];
+    expect(elegirVozEspanola(voces).name).toBe("Microsoft Elvira Online (Natural)");
+  });
+
+  test("elegirVozEspanola cae a cualquier variante de español", () => {
+    const voces = [
+      { name: "Google US English", lang: "en-US" },
+      { name: "Paulina", lang: "es-MX" },
+    ];
+    expect(elegirVozEspanola(voces).name).toBe("Paulina");
+  });
+
+  test("elegirVozEspanola devuelve null si no hay español", () => {
+    expect(elegirVozEspanola([{ name: "X", lang: "en-GB" }])).toBeNull();
+    expect(elegirVozEspanola([])).toBeNull();
+    expect(elegirVozEspanola(null)).toBeNull();
+  });
+
+  test("textoHablable quita URLs y adornos: deletrearlos es insufrible", () => {
+    expect(textoHablable("Míralo en https://example.com/a?b=1 — es **importante**"))
+      .toBe("Míralo en (enlace) — es importante");
+  });
+
+  test("textoHablable acota la longitud", () => {
+    expect(textoHablable("palabra ".repeat(200)).length).toBeLessThanOrEqual(600);
   });
 });
 
