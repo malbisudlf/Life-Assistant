@@ -565,13 +565,29 @@ Ficheros clave:
     ENTRE los servidores aprobados, nunca añade uno: un modelo que decide sus propios
     endpoints es un canal de exfiltración con tus datos como argumentos. Jarvis puede
     proponer añadir un servidor; conectarlo es editar la variable.
-  - **La frontera de confirmación es por servidor** (`confiar` en la config, en falso
-    por defecto): sin confiar, cada `mcp_usar` queda `pendiente` y lo aprueba el usuario
-    con el botón, exactamente como `crear_evento`; con confiar, se ejecuta en el bucle.
-    Para eso `confirmar` en el registro puede ser una **función de los argumentos**
-    (`_jarvis_confirma()`), y la puerta de `/jarvis/ejecutar` admite lo confirmable
-    fijo o dinámico. El botón del dashboard enseña servidor, herramienta y argumentos
-    REALES (`jarvisEtiquetaAccion`), no lo que el modelo haya redactado.
+  - **La frontera de confirmación se decide por llamada** (`_mcp_pide_confirmar()`), en
+    tres niveles: `confiar` → nada pregunta; por defecto (`lectura_directa`) → se
+    ejecutan solas las herramientas que el servidor declara de solo lectura
+    (`annotations.readOnlyHint`, del protocolo) y lo que escribe se propone; y
+    `lectura_directa: false` → todo se propone. Ante la duda (servidor que no anota, o
+    que no se pudo listar) **se pide confirmación**: falla hacia el lado seguro. La
+    anotación la da el propio servidor —contenido externo— y se acepta porque la
+    frontera de confianza real es la lista blanca que el usuario aprobó a mano, con un
+    token que él emitió.
+    **Que las consultas se ejecuten dentro del bucle no es comodidad, es lo que hace que
+    funcione**: al quedar pendiente, la llamada corta el bucle, así que el modelo nunca
+    veía que se había equivocado de herramienta y no podía corregirse. Contra el
+    servidor real de GitHub (47 herramientas) esa era la diferencia entre acertar a la
+    quinta y no acertar nunca.
+    Para todo esto `confirmar` en el registro puede ser una **función de los argumentos**
+    (`_jarvis_confirma()`), y la puerta de `/jarvis/ejecutar` admite lo confirmable fijo
+    o dinámico. El botón del dashboard enseña servidor, herramienta y argumentos REALES
+    (`jarvisEtiquetaAccion`), no lo que el modelo haya redactado.
+  - **`mcp_herramientas` se filtra con `buscar`**: volcar el catálogo entero cuesta
+    tokens en cada turno y, sobre todo, un modelo pequeño elige peor cuantas más
+    opciones parecidas ve juntas (probado: pidiéndole LEER issues escogía
+    `add_issue_comment`). Un filtro sin coincidencias devuelve los NOMBRES de todas, para
+    que pueda reintentar con otra palabra en vez de quedarse sin nada que mirar.
   - **Lo que devuelve un servidor es contenido externo**: resultados y descripciones de
     herramientas van envueltos en `_AVISO_WEB`, como la web y el enunciado de Alud.
   Sin servidores configurados, las herramientas `mcp_*` **no se anuncian en el esquema**
@@ -1373,7 +1389,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 503 tests)
+### Backend (`tests/backend`, 514 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un

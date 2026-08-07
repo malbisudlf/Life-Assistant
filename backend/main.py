@@ -4705,6 +4705,9 @@ _MCP_PROTOCOLO = "2025-06-18"
 # Sesión por servidor, en memoria (mismo criterio que _token_cache): se pierde en cold
 # start y se renegocia sola en la siguiente llamada.
 _mcp_sesiones: dict = {}
+# Herramientas que cada servidor declara de SOLO LECTURA (`annotations.readOnlyHint`).
+# Se rellena al listar y decide qué se ejecuta sin confirmar (ver _mcp_pide_confirmar).
+_mcp_lectura: dict = {}
 
 
 def _mcp_config() -> dict:
@@ -4733,12 +4736,50 @@ def _mcp_config() -> dict:
             "url":     url,
             "token":   str(cfg.get("token") or ""),
             "confiar": bool(cfg.get("confiar")),
+            # Por defecto sí: sin esto Jarvis no puede CONSULTAR nada sin que apruebes
+            # cada pregunta, y —peor— al quedarse la llamada pendiente el bucle se corta
+            # y el modelo no llega a ver que se equivocó de herramienta, así que no puede
+            # corregirse. Ponlo a false para que se confirme absolutamente todo.
+            "lectura_directa": cfg.get("lectura_directa", True) is not False,
         }
     return fuera
 
 
 def _mcp_confiado(servidor) -> bool:
     return bool(_mcp_config().get(str(servidor or ""), {}).get("confiar"))
+
+
+def _mcp_pide_confirmar(servidor, herramienta) -> bool:
+    """Si esta llamada concreta necesita el visto bueno del usuario.
+
+    Tres niveles, de más a menos permisivo: un servidor `confiar` no pregunta nunca; en
+    el resto se ejecutan directamente solo las herramientas que el servidor declara de
+    SOLO LECTURA (`annotations.readOnlyHint` del protocolo MCP), y todo lo demás —lo que
+    escribe, borra o publica— se propone y lo aprueba el usuario.
+
+    La anotación la da el propio servidor, que es contenido externo: uno malicioso podría
+    marcar como lectura algo que no lo es. Se acepta porque el servidor ya está en una
+    lista blanca que el usuario aprobó a mano y con un token que él mismo emitió — la
+    frontera de confianza es esa, no la anotación. Ante la duda (servidor que no anota,
+    o que no se ha podido listar) se pide confirmación: se falla hacia el lado seguro.
+    """
+    cfg = _mcp_config().get(str(servidor or ""))
+    if not cfg:
+        return True
+    if cfg["confiar"]:
+        return False
+    if not cfg["lectura_directa"]:
+        return True
+    conocidas = _mcp_lectura.get(servidor)
+    if conocidas is None:
+        # Todavía no se ha listado: se lista ahora. El modelo tiene instrucciones de
+        # llamar antes a mcp_herramientas, así que en la práctica ya suele estar.
+        try:
+            _j_mcp_herramientas(servidor)
+        except Exception:
+            return True
+        conocidas = _mcp_lectura.get(servidor)
+    return str(herramienta or "") not in (conocidas or set())
 
 
 def _mcp_post(cfg: dict, sesion, cuerpo: dict):
@@ -4833,7 +4874,20 @@ def _j_mcp_servidores() -> dict:
     } for n, c in cfg.items()]}
 
 
-def _j_mcp_herramientas(servidor: str) -> dict:
+def _mcp_encaja(t: dict, palabras: list) -> bool:
+    texto = f"{t.get('name') or ''} {t.get('description') or ''}".lower()
+    return all(p in texto for p in palabras)
+
+
+def _j_mcp_herramientas(servidor: str, buscar: str = "") -> dict:
+    """Herramientas de un servidor, filtrables por palabra.
+
+    El filtro no es comodidad: el servidor de GitHub publica ~47 herramientas y volcarlas
+    todas con su esquema hace dos cosas malas a la vez — se paga por token en cada turno
+    y, sobre todo, un modelo pequeño elige peor cuantas más opciones parecidas ve juntas
+    (probado: pidiéndole LEER issues escogía `add_issue_comment`). Con un filtro de una
+    palabra la lista baja a un puñado y acierta.
+    """
     servidor = str(servidor or "").strip()
     if servidor not in _mcp_config():
         return {"error": "Ese servidor no está en la lista blanca. Mira mcp_servidores."}
@@ -4842,12 +4896,38 @@ def _j_mcp_herramientas(servidor: str) -> dict:
     except Exception as e:
         logger.warning("Jarvis MCP: tools/list en %s falló: %s", servidor, e)
         return {"error": f"No se pudo consultar el servidor {servidor}"}
-    herramientas = [{
-        "nombre":      str(t.get("name") or "")[:100],
-        "descripcion": str(t.get("description") or "")[:300],
-        "esquema":     t.get("inputSchema") or {},
-    } for t in (resultado.get("tools") or [])[:40] if isinstance(t, dict)]
-    return {"aviso": _AVISO_WEB, "servidor": servidor, "herramientas": herramientas}
+
+    todas = [t for t in (resultado.get("tools") or []) if isinstance(t, dict)]
+    # Quién es de solo lectura, para la frontera de confirmación. Se guarda aquí porque
+    # es el único sitio donde se ven las anotaciones del servidor.
+    _mcp_lectura[servidor] = {
+        str(t.get("name") or "") for t in todas
+        if (t.get("annotations") or {}).get("readOnlyHint")
+    }
+    palabras = [p for p in str(buscar or "").lower().split() if p][:4]
+    elegidas = [t for t in todas if _mcp_encaja(t, palabras)] if palabras else todas
+    # Un filtro que no encuentra nada no puede dejar al modelo sin nada que mirar: se le
+    # devuelven los nombres de todas para que reintente con otra palabra.
+    if palabras and not elegidas:
+        return {
+            "servidor": servidor,
+            "herramientas": [],
+            "nota": f"Ninguna herramienta coincide con {buscar!r}. Nombres disponibles: "
+                    + ", ".join(str(t.get("name") or "") for t in todas[:60]),
+        }
+
+    recortadas = elegidas[:15]
+    return {
+        "aviso":        _AVISO_WEB,
+        "servidor":     servidor,
+        "herramientas": [{
+            "nombre":      str(t.get("name") or "")[:100],
+            "descripcion": str(t.get("description") or "")[:300],
+            "esquema":     t.get("inputSchema") or {},
+        } for t in recortadas],
+        "hay_mas": len(elegidas) > len(recortadas),
+        "total_en_el_servidor": len(todas),
+    }
 
 
 def _j_mcp_usar(servidor: str, herramienta: str, argumentos: dict | None = None) -> dict:
@@ -4992,15 +5072,20 @@ _JARVIS_HERRAMIENTAS = {
     "mcp_herramientas": {
         "confirmar":   False,
         "fn":          _j_mcp_herramientas,
-        "descripcion": "Descubre las herramientas que ofrece un servidor MCP conectado, con "
-                       "sus parámetros. Llámalo antes del primer mcp_usar a ese servidor.",
-        "parametros":  {"servidor": {"type": "string", "description": "Nombre del servidor (ver mcp_servidores)."}},
+        "descripcion": "Descubre las herramientas de un servidor MCP conectado, con sus parámetros. "
+                       "Llámalo SIEMPRE antes de mcp_usar, y filtra con `buscar` (p. ej. 'issue', "
+                       "'pull request', 'file') para ver solo las relevantes en vez de decenas.",
+        "parametros":  {
+            "servidor": {"type": "string", "description": "Nombre del servidor (ver mcp_servidores)."},
+            "buscar":   {"type": "string", "description": "Palabra o dos para filtrar por nombre y descripción."},
+        },
         "obligatorios": ["servidor"],
     },
     "mcp_usar": {
-        # Frontera por servidor: los marcados `confiar` en la configuración se ejecutan
-        # dentro del bucle; el resto se propone y lo aprueba el usuario, como crear_evento.
-        "confirmar":   lambda args: not _mcp_confiado((args or {}).get("servidor")),
+        # Frontera dinámica: depende del servidor y de si la herramienta es de solo
+        # lectura. Ver _mcp_pide_confirmar().
+        "confirmar":   lambda args: _mcp_pide_confirmar(
+            (args or {}).get("servidor"), (args or {}).get("herramienta")),
         "fn":          _j_mcp_usar,
         "descripcion": "Ejecuta una herramienta de un servidor MCP conectado. Puede quedar "
                        "pendiente de que el usuario la confirme: en ese caso no digas que está hecha.",
@@ -5136,6 +5221,9 @@ def _jarvis_sistema() -> str:
         "los des por buenos de turnos anteriores: vuelve a mirarlos.\n"
         "- Si una herramienta devuelve un error, dilo claramente en vez de rellenar el "
         "hueco con suposiciones.\n"
+        "- Los identificadores (URLs, hashes de commit, números, códigos) se copian "
+        "LITERALMENTE del resultado de la herramienta. No los reconstruyas de memoria ni "
+        "completes uno a medias: es preferible no dar el enlace que dar uno inventado.\n"
         "- Responde corto. Los datos que no te han pedido sobran.\n"
         "- Resuelve tú las fechas relativas ('mañana', 'el jueves') a fecha absoluta antes "
         "de llamar a una herramienta.\n"
@@ -5159,8 +5247,22 @@ def _jarvis_sistema() -> str:
     if servidores:
         partes.append(
             "\nServidores MCP conectados (aprobados por el usuario): "
-            + ", ".join(sorted(servidores)) + ". Descubre sus herramientas con "
-            "`mcp_herramientas` y úsalas con `mcp_usar` cuando la petición lo pida.\n"
+            + ", ".join(sorted(servidores)) + ". Tienes acceso real a ellos: si la "
+            "petición va de uno de esos servicios, ÚSALO en vez de decir que no puedes.\n"
+            "  1. `mcp_herramientas` con `buscar` (una o dos palabras del tema) para ver "
+            "solo las relevantes; nunca las pidas todas.\n"
+            "  2. Elige por el nombre según lo que haya que hacer: `list_`/`get_`/`search_` "
+            "para consultar, `create_`/`add_`/`update_` solo para modificar. Nunca uses "
+            "una de escritura para responder a una pregunta. Si te piden VARIOS elementos "
+            "('cuántos', 'cuáles', 'dime los'), usa la de listar o buscar; las de leer un "
+            "elemento suelto piden un identificador que no tienes y no puedes inventar.\n"
+            "  3. `mcp_usar` con los argumentos del esquema. Si te falta un dato "
+            "obligatorio (un usuario, un repositorio), míralo en tu memoria o pregúntaselo "
+            "al usuario — no te lo inventes ni pongas valores de relleno.\n"
+            "  4. Las consultas se ejecutan al momento; si una falla o devuelve algo que "
+            "no encaja, prueba otra herramienta en vez de rendirte. Lo que modifica algo "
+            "queda pendiente de que el usuario lo confirme: eso no es un error, y no debes "
+            "decir que está hecho.\n"
         )
     else:
         # Sin esto, el modelo no sabe que el soporte existe y contesta "no tengo acceso
@@ -5267,7 +5369,13 @@ def jarvis(
                 pendiente = {"herramienta": c.function.name, "argumentos": argumentos}
                 resultado = {
                     "estado": "pendiente_de_confirmacion",
-                    "aviso":  "El usuario todavía no lo ha aprobado. No digas que está hecho.",
+                    # Explícito hasta la pesadez a propósito: con un aviso más suave el
+                    # modelo redactaba "he creado el issue, pero necesito que confirmes",
+                    # que da por hecho algo que no ha ocurrido.
+                    "aviso":  "NO se ha ejecutado nada todavía. Está solo PROPUESTO, "
+                              "esperando a que el usuario pulse el botón de confirmar. "
+                              "No digas 'he creado', 'he enviado' ni 'está hecho': dilo "
+                              "en futuro, como algo que harás si lo aprueba.",
                 }
             else:
                 resultado = _jarvis_despachar(c.function.name, argumentos)
