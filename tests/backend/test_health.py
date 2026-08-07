@@ -633,3 +633,119 @@ class TestUpsertContraLaRestriccionCorrecta:
             {"name": "heart_rate", "units": "count/min", "data": [{"date": "2026-07-28 08:00:00", "qty": 60}]}
         ]}})
         assert r.status_code == 502
+
+
+class TestCeroQueNoEsUnaMedida:
+    """Un 0 en una métrica de sensor es "no se midió", y no puede escribirse.
+
+    Así se perdió un mes de métricas nocturnas sin un solo error: el Atajo de iOS manda
+    el campo vacío cuando su "Find Health Samples" no encuentra nada, eso se convertía
+    en un 0, y el 0 se escribía ENCIMA de la medida buena del día (el upsert resuelve
+    por metric_date+metric_name). Las acumulativas se libraron de rebote —solo se pisan
+    si el valor nuevo es mayor—, y de ahí que los pasos conservaran el histórico entero
+    mientras el sueño, el HRV, la FC en reposo y la respiración quedaban a cero.
+    """
+
+    HAE    = "/health/ingest?token=health-token"
+    SIMPLE = "/health/ingest/simple?token=health-token"
+
+    @staticmethod
+    def _filas(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "health_metrics"):
+            if isinstance(kw.get("json"), list):
+                return kw["json"]
+        return []
+
+    def test_el_hueco_del_shortcut_ya_no_se_guarda_como_cero(self, client, mock_requests):
+        r = client.post(self.SIMPLE, json=[
+            {"metric": "heart_rate_variability", "date": "2026-08-07", "value": ""}
+        ])
+        cuerpo = r.json()
+        assert cuerpo["received"] == 0
+        assert cuerpo["upserted"] == 0
+        assert not mock_requests.called("POST", "health_metrics"), "no se escribe nada"
+        assert "vacío" in cuerpo["parse_errors"][0]["reason"]
+
+    def test_un_cero_explicito_tampoco_pisa_la_medida(self, client, mock_requests):
+        r = client.post(self.SIMPLE, json=[
+            {"metric": "resting_heart_rate", "date": "2026-08-07", "value": 0}
+        ])
+        assert r.json()["upserted"] == 0
+        assert any("sin medida" in s for s in r.json()["skipped"])
+        assert not mock_requests.called("POST", "health_metrics")
+
+    def test_lo_que_si_trae_medida_se_guarda_igual(self, client, mock_requests):
+        """El filtro es por muestra: un hueco no puede llevarse por delante el lote."""
+        r = client.post(self.SIMPLE, json=[
+            {"metric": "heart_rate_variability", "date": "2026-08-07", "value": 0},
+            {"metric": "resting_heart_rate",     "date": "2026-08-07", "value": 51},
+        ])
+        assert r.json()["upserted"] == 1
+        assert [f["metric_name"] for f in self._filas(mock_requests)] == ["resting_heart_rate"]
+
+    def test_en_health_auto_export_vale_el_mismo_criterio(self, client, mock_requests):
+        r = client.post(self.HAE, json={"data": {"metrics": [
+            {"name": "respiratory_rate", "units": "count/min",
+             "data": [{"date": "2026-08-07 03:00:00", "qty": 0}]},
+            {"name": "vo2_max", "units": "ml/kg/min",
+             "data": [{"date": "2026-08-07 03:00:00", "qty": 47.5}]},
+        ]}})
+        assert r.status_code == 200
+        assert [f["metric_name"] for f in self._filas(mock_requests)] == ["vo2_max"]
+
+    def test_el_cero_de_una_acumulativa_si_es_un_dato(self, client, mock_requests):
+        """Un día de 0 pisos o 0 pasos ocurrió y tiene que bajar la media."""
+        client.post(self.SIMPLE, json=[
+            {"metric": "flights_climbed", "date": "2026-08-07", "value": 0},
+            {"metric": "step_count",      "date": "2026-08-07", "value": 0},
+        ])
+        assert {f["metric_name"] for f in self._filas(mock_requests)} == {"flights_climbed", "step_count"}
+
+    def test_una_noche_con_las_fases_en_extra_no_es_un_hueco(self, client, mock_requests):
+        """`value` puede llegar a 0 con la noche entera dentro de `extra`: ahí sí se
+        midió, y `_horas_sueno` la reconstruye desde las fases."""
+        client.post(self.SIMPLE, json=[
+            {"metric": "sleep_analysis", "date": "2026-08-07", "value": 0,
+             "extra": {"deep": 1.2, "rem": 1.5, "core": 4.1}},
+        ])
+        assert self._filas(mock_requests)[0]["metric_name"] == "sleep_analysis"
+
+    def test_una_noche_a_cero_y_sin_fases_no_se_guarda(self, client, mock_requests):
+        client.post(self.SIMPLE, json=[
+            {"metric": "sleep_analysis", "date": "2026-08-07", "value": 0, "extra": {}},
+        ])
+        assert not mock_requests.called("POST", "health_metrics")
+
+    def test_un_value_nulo_se_conserva_porque_la_medida_puede_estar_en_extra(self, client, mock_requests):
+        """heart_rate llega como rango y su promedio viene con mayúscula ("Avg"): la
+        fila con value=None sigue guardándose porque el dato va dentro de extra."""
+        client.post(self.HAE, json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min",
+             "data": [{"date": "2026-08-07 00:00:00", "Máximo": 120}]},
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] is None
+        assert fila["extra"]["Máximo"] == 120
+
+    def test_un_envio_entero_de_huecos_queda_registrado(self, client, mock_requests, caplog):
+        """Que se descarte una muestra suelta es normal; que no llegue NI UNA con
+        medida es que el Atajo está roto, y eso no puede pasar en silencio."""
+        with caplog.at_level(logging.WARNING):
+            client.post(self.SIMPLE, json=[
+                {"metric": "heart_rate_variability", "date": "2026-08-07", "value": 0},
+                {"metric": "resting_heart_rate",     "date": "2026-08-07", "value": 0},
+            ])
+        assert "0 sin medida" in caplog.text
+        assert "heart_rate_variability" in caplog.text
+
+    def test_no_se_desincroniza_del_criterio_del_resumen(self):
+        """`METRICAS_SIN_MEDIDA_EN_CERO` (por nombre en la tabla) y la columna
+        `cero_es_dato` de `_BRIEF_METRICAS` (por clave de salida) dicen lo mismo con
+        dos formas distintas. Si divergen, el resumen descarta ceros que la ingesta
+        guardó, o al revés."""
+        for _, nombres, _, cero_es_dato, etiqueta in main._BRIEF_METRICAS:
+            for nombre in nombres:
+                sin_medida = nombre in main.METRICAS_SIN_MEDIDA_EN_CERO
+                assert sin_medida == (not cero_es_dato), (
+                    f"{etiqueta} ({nombre}): la ingesta y el resumen no tratan igual el 0"
+                )
