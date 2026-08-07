@@ -11,9 +11,11 @@ de por el TestClient de pytest.
 
 Uso:  python tests/e2e/servidor_pruebas.py [puerto]
 """
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 # Igual que en conftest: el entorno se define ANTES de importar main, que exige los
 # secretos al arrancar. La contraseña es numérica porque el input del login lo es.
@@ -27,7 +29,14 @@ os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 # al test, y ensucia la salida.
 os.environ.setdefault("LOG_PERSIST", "0")
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
-os.environ.setdefault("CORS_ORIGINS", "http://localhost:4173,http://127.0.0.1:4173")
+# El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
+# un error de CORS que en el navegador NO se parece a un problema de puertos — es el
+# mismo despiste que documenta CLAUDE.md con el 5173 ocupado en desarrollo.
+_PUERTO_WEB = os.environ.get("E2E_PUERTO_WEB", "4173")
+os.environ.setdefault(
+    "CORS_ORIGINS",
+    f"http://localhost:{_PUERTO_WEB},http://127.0.0.1:{_PUERTO_WEB}",
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -167,6 +176,54 @@ class _RouterSimulado:
     delete = _responder
 
 
+class _ModeloSimulado:
+    """El modelo de Jarvis, con guion fijo.
+
+    Aquí no se prueba que el modelo acierte —eso no es determinista y no se puede
+    afirmar en un test— sino que el circuito entero funcione: el navegador manda un
+    mensaje, el backend ejecuta la herramienta DE VERDAD contra el Supabase y el Graph
+    simulados, el resultado vuelve al modelo y la respuesta acaba pintada en el hilo.
+    Ese recorrido es justo el que no cubren ni vitest ni los tests de backend.
+
+    El guion se decide por palabra clave para que el test pueda recorrer los dos caminos
+    que importan: el que ejecuta una consulta y el que deja una acción por confirmar.
+    """
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    @staticmethod
+    def _envolver(mensaje):
+        return SimpleNamespace(choices=[SimpleNamespace(message=mensaje)])
+
+    def _texto(self, texto):
+        return self._envolver(SimpleNamespace(content=texto, tool_calls=None))
+
+    def _herramienta(self, nombre, argumentos):
+        return self._envolver(SimpleNamespace(content=None, tool_calls=[SimpleNamespace(
+            id=f"call-{nombre}",
+            type="function",
+            function=SimpleNamespace(name=nombre, arguments=json.dumps(argumentos)),
+        )]))
+
+    def create(self, **kwargs):
+        mensajes = kwargs.get("messages", [])
+        # La llamada de cierre va sin `tools`: ahí toca redactar, no pedir nada más.
+        if "tools" not in kwargs or any(m.get("role") == "tool" for m in mensajes):
+            return self._texto("Hoy tienes el Evento de prueba E2E.")
+        ultimo = next((m.get("content") or "" for m in reversed(mensajes) if m.get("role") == "user"), "")
+        if "dentista" in ultimo.lower():
+            return self._herramienta("crear_evento", {
+                "titulo": "Dentista", "fecha": _dia(1), "hora_inicio": "17:00",
+            })
+        return self._herramienta("agenda", {"dias": 1})
+
+
 def _preparar():
     router = _RouterSimulado()
     main.http.get = router.get
@@ -175,6 +232,9 @@ def _preparar():
     main.http.delete = router.delete
     # Sesión de Graph siempre activa: el OAuth real no tiene sitio en un E2E.
     main.get_valid_token = lambda: "graph-token-e2e"
+    # Jarvis: lo único que se sustituye es el modelo. Las herramientas, el bucle y la
+    # frontera de confirmación son las de producción.
+    main.get_openai_client = lambda: _ModeloSimulado()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ dist-ssr
 
 # Backend secrets y entorno
 backend/.env
+# Copias de seguridad del .env: `backend/.env` NO las cubre y llevan los mismos
+# secretos dentro (.env.example sí se versiona, por eso el patrón no es .env.*).
+backend/.env.bak*
+backend/.env.local
 backend/.token
 backend/venv/
 backend/__pycache__/
@@ -47,6 +51,14 @@ RUTINA_BRIEFING.md
 .venv/
 __pycache__/
 .pytest_cache/
+
+# Skills de terceros instaladas con `npx skills add` (no son parte del proyecto).
+# El instalador las replica en tres sitios; `agent/skills/` NO tiene nada que ver
+# con el agente PC de `agent/agent.py`.
+.agents/
+agent/skills/
+.claude/skills/
+skills-lock.json
 
 # Playwright (E2E): informes y trazas de cada ejecución
 /test-results/

@@ -9,6 +9,7 @@ import {
   wellnessHistory, seriesTrend, trendDirection,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   hostStreaming,
+  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -278,6 +279,146 @@ function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickin
   );
 }
 
+// ── JARVIS ───────────────────────────────────────────────────────
+// El componente es tonto a propósito: pinta mensajes y avisa hacia arriba. Toda la
+// decisión (qué herramienta, qué se ejecuta, qué se propone) vive en el backend, para
+// que el día que se le hable desde otro sitio no haya que reimplementarla aquí.
+
+// Reconocimiento de voz del navegador. Es GRATIS —lo hace el propio dispositivo— frente
+// a Whisper, que cuesta por minuto: para dictar una frase corta al chat no compensa
+// pagar. Donde no exista (Firefox, algún WebView), simplemente no sale el botón y se
+// escribe; no hay respaldo de pago a propósito.
+const VOZ_NAVEGADOR = typeof window !== "undefined"
+  ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
+  : null;
+
+// Saca el motivo real de una respuesta de error de /jarvis. El detalle de FastAPI
+// viene en `detail`; si el cuerpo no es JSON (un 502 del proxy, por ejemplo), basta con
+// el código.
+async function motivoJarvis(r) {
+  let detalle = "";
+  try {
+    detalle = (await r.json())?.detail || "";
+  } catch { /* mejor esfuerzo: cuerpo vacío o no-JSON */ }
+  const e = new Error(jarvisMotivoError(r.status, typeof detalle === "string" ? detalle : ""));
+  // Marca para distinguir "el backend contestó un error" de "no llegué a hablar con él":
+  // sin esto, un fallo de red enseñaría el "Failed to fetch" del navegador.
+  e.explicado = true;
+  return e;
+}
+
+function JarvisMensaje({ m }) {
+  const esUsuario = m.rol === "user";
+  const esAviso   = m.rol === "aviso";
+  if (esAviso) {
+    return <div style={{ fontSize: 12, color: "#d4645a", textAlign: "center", padding: "2px 0" }}>{m.texto}</div>;
+  }
+  return (
+    <div style={{ display: "flex", justifyContent: esUsuario ? "flex-end" : "flex-start" }}>
+      <div style={{
+        maxWidth: "85%",
+        padding: "8px 12px",
+        borderRadius: 10,
+        fontSize: 14,
+        lineHeight: 1.5,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        color: esUsuario ? "var(--bg)" : "var(--text)",
+        background: esUsuario ? "var(--accent)" : "var(--surface2)",
+        border: esUsuario ? "none" : "0.5px solid var(--border)",
+      }}>
+        {m.texto}
+        {!esUsuario && m.herramientas?.length > 0 && (
+          <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted2)", letterSpacing: "0.05em" }}>
+            {m.herramientas.join(" · ")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function JarvisChat({
+  mensajes, borrador, setBorrador, onEnviar, pensando,
+  pendiente, onConfirmar, onDescartar, confirmando,
+  escuchando, onDictar, finRef,
+}) {
+  const etiqueta = jarvisEtiquetaAccion(pendiente);
+  const puedeEnviar = borrador.trim() && !pensando;
+
+  return (
+    <>
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 8,
+        maxHeight: 340, overflowY: "auto", padding: "2px 0", marginBottom: 10,
+      }}>
+        {mensajes.length === 0 && (
+          <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
+            Pregúntale por tu agenda, tu sueño, el tiempo o el PC. También puede actuar:
+            «enciende el PC», «apunta que tengo que llamar al dentista».
+          </div>
+        )}
+        {mensajes.map((m, i) => <JarvisMensaje key={i} m={m} />)}
+        {pensando && (
+          <div style={{ fontSize: 13, color: "var(--accent)", animation: "pulse 1.5s infinite" }}>
+            Pensando…
+          </div>
+        )}
+        <div ref={finRef} />
+      </div>
+
+      {/* Lo que Jarvis propone pero no ejecuta. La etiqueta se construye con los
+          argumentos reales, no con lo que el modelo haya dicho en su respuesta. */}
+      {etiqueta && (
+        <div style={{
+          marginBottom: 10, padding: "10px 12px", borderRadius: 8,
+          background: "var(--surface2)", border: "0.5px solid var(--accent2)",
+        }}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 8 }}>{etiqueta}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onConfirmar} disabled={confirmando} style={{
+              flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 13, cursor: "pointer",
+              border: "none", background: "var(--accent)", color: "var(--bg)",
+              opacity: confirmando ? 0.6 : 1,
+            }}>{confirmando ? "Creando…" : "Confirmar"}</button>
+            <button onClick={onDescartar} disabled={confirmando} style={{
+              padding: "6px 10px", borderRadius: 6, fontSize: 13, cursor: "pointer",
+              border: "0.5px solid var(--border)", background: "transparent", color: "var(--muted)",
+            }}>Descartar</button>
+          </div>
+        </div>
+      )}
+
+      <form onSubmit={e => { e.preventDefault(); if (puedeEnviar) onEnviar(borrador); }}
+            style={{ display: "flex", gap: 8 }}>
+        <input
+          value={borrador}
+          onChange={e => setBorrador(e.target.value)}
+          placeholder={escuchando ? "Escuchando…" : "Habla con Jarvis"}
+          disabled={pensando}
+          style={{
+            flex: 1, padding: "9px 12px", borderRadius: 8, fontSize: 14,
+            border: "0.5px solid var(--border)", background: "var(--surface2)",
+            color: "var(--text)", outline: "none", minWidth: 0,
+          }}
+        />
+        {VOZ_NAVEGADOR && (
+          <button type="button" onClick={onDictar} title="Dictar" style={{
+            padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
+            border: "0.5px solid var(--border)", background: escuchando ? "var(--accent)" : "transparent",
+            color: escuchando ? "var(--bg)" : "var(--muted)", flexShrink: 0,
+          }}>🎙</button>
+        )}
+        <button type="submit" disabled={!puedeEnviar} style={{
+          padding: "0 14px", borderRadius: 8, fontSize: 14, flexShrink: 0,
+          border: "none", background: "var(--accent)", color: "var(--bg)",
+          cursor: puedeEnviar ? "pointer" : "default", opacity: puedeEnviar ? 1 : 0.4,
+        }}>→</button>
+      </form>
+    </>
+  );
+}
+
 // ── ESTILOS GLOBALES ─────────────────────────────────────────────
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -348,6 +489,7 @@ const COLUMN_LABELS   = { left: "izquierda", center: "centro", right: "derecha" 
 // config guardada sin columna, aunque su default sea otro (le pasaba a
 // `acciones_pc`, que nacía a la derecha y reaparecía a la izquierda).
 const DEFAULT_COLUMNS = {
+  jarvis:            "left",
   timeline:          "left",
   weather:           "left",
   upcoming:          "left",
@@ -366,6 +508,7 @@ const DEFAULT_COLUMNS = {
 };
 
 const ALL_DEFAULT_WIDGETS = [
+  { id: "jarvis",            label: "Jarvis",            visible: true,  column: "left"  },
   { id: "timeline",          label: "Hoy",              visible: true,  column: "left"  },
   { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
@@ -658,6 +801,24 @@ export default function Dashboard() {
   const [textIdeaInput, setTextIdeaInput]   = useState("");
   const [textIdeaSubmitting, setTextIdeaSubmitting] = useState(false);
   const [textIdeaError, setTextIdeaError]   = useState(null);
+
+  // ── Jarvis ──
+  // La conversación vive en el cliente: el backend no guarda nada (ver /jarvis). Se
+  // persiste en localStorage para que no se pierda al recargar, con el mismo try/catch
+  // que el resto de claves `la_`.
+  const [jarvisMensajes, setJarvisMensajes] = useState(() => {
+    try {
+      const guardado = JSON.parse(localStorage.getItem("la_jarvis_chat") || "[]");
+      return Array.isArray(guardado) ? guardado.slice(-40) : [];
+    } catch { return []; /* mejor esfuerzo: empezar en blanco */ }
+  });
+  const [jarvisBorrador, setJarvisBorrador]     = useState("");
+  const [jarvisPensando, setJarvisPensando]     = useState(false);
+  const [jarvisPendiente, setJarvisPendiente]   = useState(null);
+  const [jarvisConfirmando, setJarvisConfirmando] = useState(false);
+  const [jarvisEscuchando, setJarvisEscuchando] = useState(false);
+  const jarvisFinRef = useRef(null);
+  const jarvisVozRef = useRef(null);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
@@ -1392,6 +1553,115 @@ export default function Dashboard() {
     await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: authHeaders() });
     setIdeas(prev => prev.filter(i => i.id !== id));
   }
+
+  // ── Jarvis ───────────────────────────────────────────────────────────────
+  async function enviarAJarvis(texto) {
+    const mensaje = (texto || "").trim();
+    if (!mensaje || jarvisPensando) return;
+    // El historial se toma ANTES de añadir el turno nuevo: el mensaje va aparte en el
+    // cuerpo, y mandarlo también dentro del historial lo duplicaría.
+    const historial = jarvisHistorial(jarvisMensajes);
+    setJarvisMensajes(prev => [...prev, { rol: "user", texto: mensaje }]);
+    setJarvisBorrador("");
+    setJarvisPendiente(null);
+    setJarvisPensando(true);
+    try {
+      const r = await apiFetch(`${API}/jarvis`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify({ mensaje, historial }),
+      });
+      if (!r.ok) throw await motivoJarvis(r);
+      const d = await r.json();
+      setJarvisMensajes(prev => [...prev, {
+        rol: "assistant",
+        texto: d.respuesta || "(sin respuesta)",
+        herramientas: d.herramientas || [],
+      }]);
+      setJarvisPendiente(d.pendiente || null);
+    } catch (e) {
+      // Un fallo no puede parecerse a una respuesta: se marca como aviso, que se pinta
+      // distinto y queda fuera del historial que viaja al backend. Y DICE QUÉ PASÓ: un
+      // "no he podido responder" a secas mandaba a mirar la red cuando el problema real
+      // era un backend sin desplegar. Es el mismo error que tapó el 400 del Watch.
+      setJarvisMensajes(prev => [...prev, {
+        rol: "aviso",
+        texto: e?.explicado ? e.message : jarvisMotivoError(0),
+      }]);
+    } finally {
+      setJarvisPensando(false);
+    }
+  }
+
+  async function confirmarAccionJarvis() {
+    if (!jarvisPendiente || jarvisConfirmando) return;
+    setJarvisConfirmando(true);
+    try {
+      const r = await apiFetch(`${API}/jarvis/ejecutar`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify(jarvisPendiente),
+      });
+      if (!r.ok) throw await motivoJarvis(r);
+      const d = await r.json();
+      const bien = Boolean(d?.ok);
+      setJarvisMensajes(prev => [...prev, {
+        rol:   bien ? "assistant" : "aviso",
+        texto: bien ? "Hecho." : `No se pudo: ${d?.resultado?.motivo || "error del servidor"}`,
+      }]);
+      if (bien) {
+        setJarvisPendiente(null);
+        loadEvents();   // el evento nuevo tiene que aparecer ya en el resto del dashboard
+      }
+    } catch (e) {
+      setJarvisMensajes(prev => [...prev, {
+        rol: "aviso",
+        texto: e?.explicado ? e.message : jarvisMotivoError(0),
+      }]);
+    } finally {
+      setJarvisConfirmando(false);
+    }
+  }
+
+  // Dictado con el reconocimiento del navegador: no cuesta nada y no sale del
+  // dispositivo. Rellena el borrador en vez de enviar solo, para poder corregir antes.
+  function dictarAJarvis() {
+    if (!VOZ_NAVEGADOR) return;
+    if (jarvisVozRef.current) {
+      jarvisVozRef.current.stop();
+      jarvisVozRef.current = null;
+      setJarvisEscuchando(false);
+      return;
+    }
+    try {
+      const rec = new VOZ_NAVEGADOR();
+      rec.lang = "es-ES";
+      rec.interimResults = false;
+      rec.onresult = e => {
+        const dicho = Array.from(e.results).map(r => r[0].transcript).join(" ").trim();
+        if (dicho) setJarvisBorrador(prev => (prev ? `${prev} ${dicho}` : dicho));
+      };
+      rec.onend = () => { jarvisVozRef.current = null; setJarvisEscuchando(false); };
+      rec.onerror = () => { jarvisVozRef.current = null; setJarvisEscuchando(false); };
+      rec.start();
+      jarvisVozRef.current = rec;
+      setJarvisEscuchando(true);
+    } catch {
+      setJarvisEscuchando(false);   // mejor esfuerzo: si el navegador lo niega, se escribe
+    }
+  }
+
+  // La conversación sobrevive a una recarga, acotada: guardar el hilo entero llenaría
+  // la cuota de localStorage con algo que nadie va a releer.
+  useEffect(() => {
+    try {
+      localStorage.setItem("la_jarvis_chat", JSON.stringify(jarvisMensajes.slice(-40)));
+    } catch { /* mejor esfuerzo: cuota llena o modo privado */ }
+  }, [jarvisMensajes]);
+
+  useEffect(() => {
+    jarvisFinRef.current?.scrollIntoView({ block: "nearest" });
+  }, [jarvisMensajes, jarvisPensando]);
 
   // ── Conteo de ropa (widget temporal, persistido en el backend) ───────────
   // Redimensiona la foto elegida a máx. 600px y la convierte a JPEG en base64,
@@ -2243,6 +2513,26 @@ export default function Dashboard() {
           })()}
         </div>
       );
+      case "jarvis": return (
+        <div style={cardStyle} data-card={id} key="jarvis">
+          <div style={s.sectionLabel}>Jarvis</div>
+          <JarvisChat
+            mensajes={jarvisMensajes}
+            borrador={jarvisBorrador}
+            setBorrador={setJarvisBorrador}
+            onEnviar={enviarAJarvis}
+            pensando={jarvisPensando}
+            pendiente={jarvisPendiente}
+            onConfirmar={confirmarAccionJarvis}
+            onDescartar={() => setJarvisPendiente(null)}
+            confirmando={jarvisConfirmando}
+            escuchando={jarvisEscuchando}
+            onDictar={dictarAJarvis}
+            finRef={jarvisFinRef}
+          />
+        </div>
+      );
+
       case "ideas": return (
         <div style={cardStyle} data-card={id} key="ideas">
           <div style={s.sectionLabel}>Ideas</div>

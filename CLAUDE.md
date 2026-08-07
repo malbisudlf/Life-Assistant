@@ -93,7 +93,8 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
-    ├── OpenAI ── Whisper (transcripción) + GPT-4o-mini (extracción de ideas)
+    ├── OpenAI ── Whisper (transcripción), GPT-4o-mini (extracción de ideas
+    │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
     │                    oauth_tokens, login_attempts, app_logs, presence, brief_envios
     └── Home Assistant ── HA sondea al backend (WOL/eventos, flags de relanzado y
@@ -485,6 +486,65 @@ Ficheros clave:
   El campo `text` del disparo llega a la rutina envuelto y etiquetado como dato no
   fiable, así que sirve de contexto para el registro de la sesión, no de instrucción: la
   rutina no debe depender de él para saber qué hacer.
+- **Jarvis** (`POST /jarvis`, `POST /jarvis/ejecutar`): un cerebro, muchas bocas. Entra
+  lenguaje natural y sale una respuesta, habiendo consultado o actuado por el camino. El
+  cliente solo manda texto: **la decisión de qué herramienta usar vive entera en el
+  backend**, para que el día que se le hable desde otro sitio (el PC, un altavoz) no haya
+  que reimplementarla. No metas lógica de herramientas en `Dashboard.jsx`.
+  Las herramientas **no son integraciones nuevas**: son envoltorios de los endpoints que
+  ya existen, llamados igual que en `construir_brief()` (`credentials=None`), para heredar
+  su normalización y su manejo de errores. `_JARVIS_HERRAMIENTAS` es la única fuente de
+  verdad — de ahí salen el esquema que ve el modelo, el despachador y la puerta de
+  confirmación. Añadir una capacidad es añadir una entrada.
+  Tres cosas que no se pueden relajar:
+  - **La frontera de confirmación.** Las consultas y las acciones que ya tienen un botón
+    en el dashboard (encender el PC, guardar una idea) las ejecuta el modelo; pedir
+    permiso para lo que se hace con un clic solo estorba. Lo que toca el calendario va
+    marcado `confirmar: True`: el modelo **propone** y devuelve `pendiente`, y solo
+    `/jarvis/ejecutar` lo crea. Es la misma regla que ya rige `sugerencia_evento()`. Y ese
+    endpoint **solo admite las herramientas marcadas** — abrirlo al registro entero lo
+    convertiría en un ejecutor de herramientas arbitrarias por HTTP.
+  - **El despachador filtra los argumentos a los declarados en el esquema.** Los redacta
+    un modelo a partir de texto: sin el filtro, un nombre inventado llegaría como kwarg a
+    la función envuelta (`credentials`, `days`…) y decidiría cosas que no le tocan.
+  - **Una herramienta que revienta no tumba la conversación**: el fallo vuelve al modelo
+    como resultado, que puede decirlo. Un `except` que devolviera `None` repetiría el bug
+    del agente PC — "no pude preguntar" no es "no hay nada".
+  El coste es la otra restricción de diseño: un turno son 2 llamadas de ~1.000 tokens de
+  entrada, y con `gpt-4o-mini` sale por céntimos al mes. `JARVIS_MAX_VUELTAS` es un
+  cortacircuitos de gasto (un modelo atascado pediría la misma herramienta sin avanzar) y
+  `JARVIS_MAX_HISTORIAL` es lo único que hace crecer el coste conforme avanza la
+  conversación — **si lo cambias, cambia también el de `helpers.js`**, o el cliente mandará
+  más de lo que acepta el backend y recibirá un 422 a media conversación.
+  El backend **no guarda conversaciones**: el historial viaja en cada petición y vive en
+  `localStorage`. Menos estado que mantener y nada que purgar, el mismo criterio que con
+  el histórico de presencia.
+
+- **Jarvis en internet** (`buscar_en_internet`, `leer_pagina`): dos invariantes, y las dos
+  son de seguridad, no de comodidad.
+  - **SSRF.** `leer_pagina` recibe una URL que en el mejor caso sale de un buscador y en
+    el peor la ha redactado un modelo leyendo una web. El backend vive donde
+    `169.254.169.254` son las credenciales de la instancia y `127.0.0.1` es él mismo, así
+    que `url_web_permitida()` resuelve el host y exige que **todas** sus IPs sean públicas.
+    Se revalida **en cada salto de redirección** (`_descargar` las sigue a mano con
+    `allow_redirects=False`): sin eso, un 302 a loopback se salta la comprobación entera.
+    Y el error **no dice por qué** se rechazó — distinguir "host inexistente" de "host
+    interno" convierte la herramienta en un escáner de la red. Hay tests de los dos.
+  - **Inyección de prompt.** Lo que vuelve de la web lo ha escrito un desconocido, y este
+    modelo tiene herramientas que encienden el PC. Va envuelto en `_AVISO_WEB` y
+    etiquetado como DATO NO FIABLE, igual que el enunciado de Alud en
+    `build_cowork_instruction()`. No es una garantía —contra la inyección no hay ninguna—
+    pero es la diferencia entre ponérselo difícil y servírselo en bandeja. Si añades una
+    herramienta que traiga contenido de fuera, envuélvela igual.
+
+  El buscador es enchufable (Brave → Tavily → DuckDuckGo, por clave configurada). **La
+  búsqueda gratuita no funciona en la práctica**: a agosto de 2026 DDG devuelve captcha a
+  las peticiones automatizadas, y los SearXNG públicos que se probaron dan 403/429. Por eso
+  existe `BuscadorBloqueado`, que separa "no hay resultados" de "no he podido buscar" y
+  devuelve un error **con el arreglo dentro** (configurar `TAVILY_API_KEY`) para que el
+  modelo se lo diga al usuario en vez de insistir gastando vueltas. Es la misma moraleja
+  del agente PC: *"no pude preguntar" no es "no hay nada que hacer"*.
+
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -571,6 +631,8 @@ Ficheros clave:
 | `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
+| `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |
+| `POST /jarvis/ejecutar` | JWT | Ejecuta una acción que Jarvis dejó propuesta. Solo admite las marcadas `confirmar` |
 
 **CORS**: los orígenes permitidos salen de `CORS_ORIGINS` (por defecto
 `http://localhost:5173` y el dominio de Vercel). Si añades otro origen de producción,
@@ -598,6 +660,12 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 
 **Personalización**: `TIMEZONE`, `HOME_ADDRESS`, `CLASSES_CALENDAR`, `CORS_ORIGINS`,
 `WEATHER_LAT`/`WEATHER_LON`, `ALUD_ALLOWED_HOSTS`.
+
+**Jarvis** (ninguna obligatoria; reutiliza `OPENAI_API_KEY`): `JARVIS_MODEL`,
+`JARVIS_MAX_VUELTAS`, `JARVIS_MAX_HISTORIAL`, `JARVIS_MAX_MENSAJE`, `JARVIS_MAX_TOKENS`,
+`JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_WEB`,
+`JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
+`TAVILY_API_KEY`, `BRAVE_API_KEY`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
@@ -666,13 +734,23 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
 Definidos en `ALL_DEFAULT_WIDGETS`. Ids: `timeline`, `weather`, `upcoming`, `entregas`,
 `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
 `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
-`health_workouts`, `health_hub` (Salud). Cada uno se renderiza en `renderWidget(id)`.
+`health_workouts`, `health_hub` (Salud), `jarvis`. Cada uno se renderiza en
+`renderWidget(id)`.
 La configuración (visibilidad, columna, orden, tamaño, splits) se persiste en
 `localStorage`, con selección independiente en modo completo (`la_widget_config`) y
 simple (`la_simple_widget_config`).
 
 Qué hace cada uno:
 
+0. **Jarvis (`jarvis`)** — chat con el asistente. El componente es tonto a propósito
+   (`JarvisChat`, a nivel de módulo): pinta mensajes y avisa hacia arriba; toda la
+   decisión vive en el backend. El botón 🎙 usa el reconocimiento de voz del NAVEGADOR
+   (`SpeechRecognition`), que es gratis y no sale del dispositivo — no Whisper, que se
+   paga por minuto y no compensa para dictar una frase. Donde no exista, el botón no
+   aparece y se escribe; no hay respaldo de pago. Las acciones que Jarvis propone pero
+   no ejecuta salen como un botón de confirmar cuya etiqueta la construye
+   `jarvisEtiquetaAccion` con los ARGUMENTOS reales, no con lo que el modelo haya
+   redactado: hay que poder ver qué se aprueba.
 1. **Hoy (`timeline`)** — mezcla eventos de Outlook + calendario de clases, ordenados
    por hora, con nodos activos/pasados/futuros y calculador de hora de salida por Google
    Maps. Al pulsar "¿A qué hora salir?" aparece un selector inline 🚗/🚶 antes de
@@ -859,7 +937,8 @@ modal.
 
 Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_splits`,
 `la_notifications`, `la_simple_mode`, `la_body_goals`, `la_training_days`,
-`la_simple_widget_config`. Si añades una, mantén el prefijo y el `try/catch` al parsear.
+`la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
+guarda ninguna). Si añades una, mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
 
@@ -1255,7 +1334,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 407 tests)
+### Backend (`tests/backend`, 482 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1274,7 +1353,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 87 tests)
+### Frontend (`tests/frontend`, 98 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
