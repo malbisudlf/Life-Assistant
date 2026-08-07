@@ -769,9 +769,10 @@ class TestEnvio:
 class TestHistoricoQueNoSeVeia:
     """Dos formas de tener el dato guardado y contarlo como si no existiera.
 
-    Las dos salieron del mismo apagón de la ingesta: con el exportador parado semanas,
-    lo poco que quedaba en la tabla era justo lo que el resumen descartaba, y las
-    medias salían con n=3 sobre un mes de datos.
+    Las dos hacen lo mismo por caminos distintos: dejan fuera de las medias y de las
+    series días que sí están en la tabla, y el `n` del correo los cuenta como ausencia
+    de datos. Es la peor forma de mentir de este resumen, porque quien lo lee no tiene
+    manera de distinguirlo de un sensor que no midió.
     """
 
     def _pide(self, client, auth_headers, mock_requests, filas):

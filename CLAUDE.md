@@ -1316,26 +1316,29 @@ excepción o error de consola, no solo si falta un texto.
 
 ## Bugs históricos (no los reintroduzcas)
 
-- **Un mes de métricas nocturnas planchado a cero, y el resumen contándolo como "sin
-  datos".** Con la ingesta de Health Auto Export parada (el 400 de aquí abajo), la única
-  fuente viva era el Atajo de iOS — y el Atajo manda el campo `value` **vacío** cuando su
-  "Find Health Samples" no encuentra nada. Ese `""` se convertía en un `0`
-  (`if v == "": v = 0`) y el 0 se escribía en la tabla, donde el upsert lo dejaba
-  **encima** de la medida buena del día. Las acumulativas se libraron de rebote (solo se
-  pisan si el valor nuevo es MAYOR, así que el 0 nunca ganaba), y por eso los pasos
-  conservaban 29 días de histórico mientras el sueño, el HRV, la FC en reposo y la
-  respiración salían con n=3: eran los tres días desde que se arregló el exportador. Sin
-  series no hay cruces, así que el correo llegaba además sin el bloque de patrones.
-  Tres moralejas: **un hueco no es un cero** —es la misma regla que ya obligó a que la
-  presencia caducada no se dé por vigente—; **escribir un dato falso es peor que no
-  escribir nada**, porque destruye el bueno y no deja rastro; y un cliente que manda
-  huecos **no falla nunca**, así que si no llega ni una muestra con medida eso se
-  registra (`logger.warning`), que si no vuelve a pasar un mes en silencio.
-  Dos cosas más de la misma tanda, que hacían que ni siquiera se viera lo que sí estaba
-  guardado: el resumen leía cada métrica **del primer nombre que tuviera filas**, así que
-  tres días de `apple_exercise_time` tapaban un mes de `exercise_time`; y descartaba las
-  filas con `value` a null aunque llevaran la medida dentro de `extra` (las que dejó el
-  bug del `Avg`). Ahora fusiona los nombres por fecha y mira el `extra`.
+- **Un mes de métricas nocturnas a n=3, y no había ningún bug: el reloj estaba en un
+  cajón.** El correo del 07/08 traía sueño, HRV, FC en reposo y respiración con tres
+  observaciones, y los pasos con 29. Parece una ingesta rota y no lo era: los pasos los
+  cuenta el iPhone él solo, y todo lo demás necesita el Watch puesto. Los tres días eran
+  los tres desde que volvió a llevarse. **Antes de buscar el fallo en el código,
+  comprueba si la métrica que falta necesita un sensor que estuviera puesto** — la
+  asimetría "pasos sí, todo lo demás no" es la huella de eso, no de un endpoint roto.
+  El `n` de cada media hizo justo su trabajo (avisar de que no hay base), y aun así se
+  leyó como avería: el resumen no puede distinguir "no se midió" de "no llegó", y quien
+  lo lee tampoco.
+  De diagnosticarlo salieron tres arreglos reales, ninguno causante de aquello:
+  - El Atajo manda `value` **vacío** cuando su "Find Health Samples" no encuentra nada
+    —cada día sin reloj—, y eso se guardaba como un `0` (`if v == "": v = 0`). Mientras
+    no hay medida solo ocupa sitio, pero el día que la haya, si el Atajo corre después,
+    ese 0 la **pisa**: el upsert resuelve por `(metric_date, metric_name)`. **Un hueco
+    no es un cero** — la misma regla que impide dar por vigente la presencia caducada.
+    Y como un cliente que manda huecos no falla nunca, si de un envío no llega ni una
+    muestra con medida se registra (`logger.warning`).
+  - El resumen leía cada métrica **del primer nombre que tuviera filas**, así que un día
+    suelto de `apple_exercise_time` tapaba meses de `exercise_time`. Ahora fusiona por
+    fecha (`_filas_por_alias`), como ya hacía `findMetric` en el frontend.
+  - Y descartaba las filas con `value` a null aunque llevaran la medida dentro de `extra`
+    (las que dejó el bug del `Avg`): histórico real que estaba guardado y no se leía.
 - **El Watch dejó de sincronizar otra vez, y esta vez el registro decía "400" y nada
   más.** `POST /health/ingest` rechazaba todos los envíos de Health Auto Export porque
   el cuerpo llegaba como una LISTA de lotes (lo que manda con "Batch requests"

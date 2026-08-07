@@ -2087,13 +2087,13 @@ ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 # Métricas en las que un 0 NO es un valor, es el sensor sin medir. Un día de 0 pisos o
 # de 0 pasos ocurrió; un HRV de 0 o una FC en reposo de 0 no le pasan a nadie vivo.
 #
-# La distinción no es teórica: el Shortcut de iOS manda el campo vacío cuando su "Find
-# Health Samples" no encuentra nada, eso se convertía en un 0 y el 0 se escribía encima
-# del valor bueno. Las acumulativas se salvaban de rebote (solo se pisan si el valor
-# nuevo es MAYOR, así que el 0 nunca ganaba), y por eso los pasos conservaban un mes de
-# histórico mientras el sueño, el HRV, la FC en reposo y la frecuencia respiratoria
-# quedaban planchados a cero — invisibles para el resumen diario, que descarta esos
-# ceros justamente porque no son medidas.
+# La distinción no es teórica: el Atajo de iOS manda el campo vacío cuando su "Find
+# Health Samples" no encuentra nada —lo que pasa TODOS los días que no llevas el reloj—
+# y eso se convertía en un 0 que se escribía en la tabla. Mientras no haya medida solo
+# ocupa sitio, pero el día que la haya y el Atajo se ejecute después, ese 0 la pisa: el
+# upsert resuelve por (metric_date, metric_name) y deja la fila buena irrecuperable.
+# Las acumulativas nunca corrieron ese riesgo, porque solo se pisan si el valor nuevo
+# es MAYOR y el 0 no gana nunca.
 #
 # Espejo de la columna `cero_es_dato` de _BRIEF_METRICAS (la de abajo va por clave de
 # salida y esta por nombre en la tabla; hay un test que comprueba que no se
@@ -2534,10 +2534,10 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 parse_errors.append({"metric": item.get("metric"), "reason": "value is None"})
                 continue
             if v == "":
-                # Campo vacío = el "Find Health Samples" del Shortcut no encontró nada.
-                # Se convertía en un 0 y ese 0 acababa escrito en la tabla, pisando la
-                # medida buena del día: así se planchó a cero un mes de HRV, FC en
-                # reposo, frecuencia respiratoria y sueño. Un hueco no es un cero.
+                # Campo vacío = el "Find Health Samples" del Atajo no encontró nada, que
+                # es lo normal cada día sin reloj. Se convertía en un 0 y ese 0 acababa
+                # escrito en la tabla, listo para pisar la medida del primer día que sí
+                # la hubiera. Un hueco no es un cero.
                 parse_errors.append({"metric": item.get("metric"),
                                      "reason": "valor vacío: el Shortcut no encontró muestra"})
                 continue
@@ -3150,10 +3150,9 @@ def _filas_por_alias(por_nombre: dict, nombres) -> list:
     Health Auto Export y el Atajo de iOS no coinciden en cómo llaman a todo
     (`apple_exercise_time` contra `exercise_time`), así que una misma métrica vive
     partida en dos nombres. Quedarse con el primero que tuviera filas —lo que se hacía
-    antes— descartaba el histórico ENTERO del otro: con el exportador parado semanas,
-    "Min. ejercicio" salía con tres días de dato teniendo un mes guardado bajo el otro
-    nombre. Se fusionan por fecha, y si los dos escribieron el mismo día gana el
-    primero de `nombres`.
+    antes— descartaba el histórico ENTERO del otro: bastaba un día suelto escrito por
+    una fuente para tapar meses guardados por la otra. Se fusionan por fecha, y si los
+    dos escribieron el mismo día gana el primero de `nombres`.
     """
     por_fecha: dict = {}
     for nombre in nombres:

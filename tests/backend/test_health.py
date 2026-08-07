@@ -638,12 +638,12 @@ class TestUpsertContraLaRestriccionCorrecta:
 class TestCeroQueNoEsUnaMedida:
     """Un 0 en una métrica de sensor es "no se midió", y no puede escribirse.
 
-    Así se perdió un mes de métricas nocturnas sin un solo error: el Atajo de iOS manda
-    el campo vacío cuando su "Find Health Samples" no encuentra nada, eso se convertía
-    en un 0, y el 0 se escribía ENCIMA de la medida buena del día (el upsert resuelve
-    por metric_date+metric_name). Las acumulativas se libraron de rebote —solo se pisan
-    si el valor nuevo es mayor—, y de ahí que los pasos conservaran el histórico entero
-    mientras el sueño, el HRV, la FC en reposo y la respiración quedaban a cero.
+    El Atajo de iOS manda el campo vacío cuando su "Find Health Samples" no encuentra
+    nada —cada día que el reloj se queda en el cajón—, eso se convertía en un 0 y el 0
+    se escribía en la tabla. El daño no es ocupar sitio: es que el upsert resuelve por
+    metric_date+metric_name, así que ese 0 pisa la medida del primer día que sí la haya
+    si el Atajo corre después. Las acumulativas nunca corrieron el riesgo, porque solo
+    se pisan si el valor nuevo es mayor.
     """
 
     HAE    = "/health/ingest?token=health-token"
