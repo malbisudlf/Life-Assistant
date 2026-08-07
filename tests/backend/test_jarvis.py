@@ -748,6 +748,12 @@ class TestJarvisMcp:
         client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
         assert "pruebas" in cliente.recibido[0]["messages"][0]["content"]
 
+    def test_sin_servidores_el_prompt_dice_como_se_conecta_uno(self, monkeypatch, mock_requests):
+        """El modelo tiene que saber que el soporte existe: sin esta línea contestaba
+        'no tengo acceso a MCP' en vez de explicar que se aprueban en la config."""
+        monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", "")
+        assert "JARVIS_MCP_SERVERS" in main._jarvis_sistema()
+
     def test_un_error_del_servidor_no_revienta(self, monkeypatch, mock_requests):
         _con_mcp(monkeypatch)
         mock_requests.add("POST", "servidor.mcp", _RespuestaMcp({}, 500))

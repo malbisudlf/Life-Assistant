@@ -5162,6 +5162,15 @@ def _jarvis_sistema() -> str:
             + ", ".join(sorted(servidores)) + ". Descubre sus herramientas con "
             "`mcp_herramientas` y úsalas con `mcp_usar` cuando la petición lo pida.\n"
         )
+    else:
+        # Sin esto, el modelo no sabe que el soporte existe y contesta "no tengo acceso
+        # a MCP" — la respuesta correcta es decir CÓMO se conecta uno.
+        partes.append(
+            "\nSoportas servidores MCP, pero ahora mismo no hay ninguno conectado. Si el "
+            "usuario te pide conectarte a un servicio externo, explícale que los "
+            "servidores se aprueban en la variable JARVIS_MCP_SERVERS del backend — tú "
+            "no puedes añadirlos, es una decisión suya.\n"
+        )
 
     recuerdos = _j_recuerdos()
     if recuerdos:

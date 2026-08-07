@@ -1098,3 +1098,34 @@ export function jarvisMotivoError(status, detalle = "") {
   if (status >= 500)  return `El backend ha fallado (${status}). Mira el registro en ajustes.`;
   return d || `No he podido responder (error ${status}).`;
 }
+
+/** La mejor voz en español de las que ofrece el navegador (speechSynthesis.getVoices()).
+ *  Preferencias, por orden: es-ES sobre otras variantes, y las voces "Natural"/"Neural"
+ *  (las de Edge y Windows 11, mucho mejores que las clásicas) sobre las locales de
+ *  sistema. Devuelve null si no hay ninguna en español: el que llama pone entonces solo
+ *  `lang`, y el navegador elige. */
+export function elegirVozEspanola(voces) {
+  const candidatas = (voces || []).filter(v =>
+    (v?.lang || "").toLowerCase().replace("_", "-").startsWith("es"));
+  if (!candidatas.length) return null;
+  const puntos = v => {
+    const lang   = (v.lang || "").toLowerCase().replace("_", "-");
+    const nombre = (v.name || "").toLowerCase();
+    return (lang === "es-es" ? 4 : 0)
+      + (/natural|neural/.test(nombre) ? 2 : 0)
+      + (v.localService === false ? 1 : 0);
+  };
+  return candidatas.reduce((mejor, v) => (puntos(v) > puntos(mejor) ? v : mejor));
+}
+
+/** Prepara una respuesta de Jarvis para leerla en voz alta: las URLs deletreadas son
+ *  insufribles y los adornos de markdown no se pronuncian. Acotado: una respuesta
+ *  kilométrica tampoco se escucha entera. */
+export function textoHablable(texto, max = 600) {
+  return String(texto || "")
+    .replace(/https?:\/\/\S+/g, "(enlace)")
+    .replace(/[*_#`]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
