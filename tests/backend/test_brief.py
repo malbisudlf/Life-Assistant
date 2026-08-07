@@ -764,3 +764,73 @@ class TestEnvio:
         configurar_smtp(monkeypatch)
         assert client.post("/brief/send?token=mal").status_code == 403
         assert _SMTPFalso.enviados == [], "no debe salir correo sin token válido"
+
+
+class TestHistoricoQueNoSeVeia:
+    """Dos formas de tener el dato guardado y contarlo como si no existiera.
+
+    Las dos hacen lo mismo por caminos distintos: dejan fuera de las medias y de las
+    series días que sí están en la tabla, y el `n` del correo los cuenta como ausencia
+    de datos. Es la peor forma de mentir de este resumen, porque quien lo lee no tiene
+    manera de distinguirlo de un sensor que no midió.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def _dias(self, n, nombre, valor=None, extra=None, unidad=""):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        return [{"metric_date": (hoy - timedelta(days=i)).isoformat(), "metric_name": nombre,
+                 "value": valor, "unit": unidad, "extra": dict(extra or {})} for i in range(n)]
+
+    def test_el_valor_que_quedo_en_extra_cuenta(self, client, auth_headers, graph_token, mock_requests):
+        """La ingesta guardó `value` a null y el promedio dentro de `extra` como "Avg"
+        (buscaba "avg" en minúscula). Está arreglada, pero esas filas siguen en la tabla
+        y son histórico real: descartarlas es tirar semanas de dato recibido."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       self._dias(6, "heart_rate", None, {"Avg": 64.7, "Min": 47, "Max": 114}, "bpm"))
+        assert s["fc_media"]["ultimo"] == 64.7
+        assert s["fc_media"]["n_30d"] == 6
+        assert len([v for v in s["series"]["fc_media"] if v is not None]) == 6
+
+    def test_los_dos_nombres_de_una_metrica_son_una_sola_serie(self, client, auth_headers, graph_token, mock_requests):
+        """Health Auto Export escribe `apple_exercise_time` y el Atajo `exercise_time`.
+        Quedarse con el primer nombre con filas descartaba el histórico del otro: tres
+        días de dato del exportador tapaban un mes entero del Atajo."""
+        filas = (self._dias(3, "apple_exercise_time", 42, unidad="min")
+                 + [f | {"metric_date": (datetime.now(main.LOCAL_TZ).date()
+                                          - timedelta(days=i + 3)).isoformat()}
+                    for i, f in enumerate(self._dias(20, "exercise_time", 35, unidad="min"))])
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["ejercicio"]["n_30d"] == 23, "los dos nombres suman, no se excluyen"
+        assert s["ejercicio"]["ultimo"] == 42, "el más reciente sigue siendo el último"
+
+    def test_si_los_dos_nombres_escriben_el_mismo_dia_manda_el_preferente(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        s = self._pide(client, auth_headers, mock_requests, [
+            {"metric_date": hoy, "metric_name": "exercise_time", "value": 35, "unit": "min", "extra": {}},
+            {"metric_date": hoy, "metric_name": "apple_exercise_time", "value": 42, "unit": "min", "extra": {}},
+        ])
+        assert s["ejercicio"]["ultimo"] == 42
+        assert s["ejercicio"]["n_30d"] == 1, "el mismo día no se cuenta dos veces"
+
+    def test_el_hueco_de_un_nombre_lo_rellena_el_otro(self, client, auth_headers, graph_token, mock_requests):
+        """El nombre preferente puede tener la fila sin medida: entonces vale la del otro."""
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        s = self._pide(client, auth_headers, mock_requests, [
+            {"metric_date": hoy, "metric_name": "apple_exercise_time", "value": None, "unit": "min", "extra": {}},
+            {"metric_date": hoy, "metric_name": "exercise_time", "value": 35, "unit": "min", "extra": {}},
+        ])
+        assert s["ejercicio"]["ultimo"] == 35
+
+    def test_el_sueño_tambien_fusiona_sus_dos_nombres(self, client, auth_headers, graph_token, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        s = self._pide(client, auth_headers, mock_requests, [
+            {"metric_date": (hoy - timedelta(days=1)).isoformat(), "metric_name": "sleep",
+             "value": 6.5, "unit": "h", "extra": {}},
+            {"metric_date": hoy.isoformat(), "metric_name": "sleep_analysis",
+             "value": 7.2, "unit": "h", "extra": {}},
+        ])
+        assert s["sueno"]["n_30d"] == 2
+        assert s["sueno"]["ultimo"] == 7.2
