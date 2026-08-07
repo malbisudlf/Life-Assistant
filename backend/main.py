@@ -2084,6 +2084,53 @@ CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_en
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
 ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 
+# Métricas en las que un 0 NO es un valor, es el sensor sin medir. Un día de 0 pisos o
+# de 0 pasos ocurrió; un HRV de 0 o una FC en reposo de 0 no le pasan a nadie vivo.
+#
+# La distinción no es teórica: el Atajo de iOS manda el campo vacío cuando su "Find
+# Health Samples" no encuentra nada —lo que pasa TODOS los días que no llevas el reloj—
+# y eso se convertía en un 0 que se escribía en la tabla. Mientras no haya medida solo
+# ocupa sitio, pero el día que la haya y el Atajo se ejecute después, ese 0 la pisa: el
+# upsert resuelve por (metric_date, metric_name) y deja la fila buena irrecuperable.
+# Las acumulativas nunca corrieron ese riesgo, porque solo se pisan si el valor nuevo
+# es MAYOR y el 0 no gana nunca.
+#
+# Espejo de la columna `cero_es_dato` de _BRIEF_METRICAS (la de abajo va por clave de
+# salida y esta por nombre en la tabla; hay un test que comprueba que no se
+# desincronizan). Si añades una métrica a una, mírate la otra.
+METRICAS_SIN_MEDIDA_EN_CERO = {
+    "heart_rate", "heart_rate_variability", "heartRateVariability",
+    "resting_heart_rate", "walking_heart_rate_average", "cardio_recovery",
+    "respiratory_rate", "vo2_max", "cardioFitness",
+    "weight_body_mass", "weight", "body_fat_percentage", "lean_body_mass",
+    "sleep_analysis", "sleep",
+}
+# Claves de `extra` en las que puede venir la medida del sueño cuando `value` llega a 0:
+# ahí la noche sí está medida y la fila tiene que guardarse (ver `_horas_sueno`).
+_CLAVES_SUENO = ("asleep", "totalSleep", "deep", "rem", "core", "light")
+
+
+def _cero_sin_medida(name: str, value, extra: dict | None = None) -> bool:
+    """True si esta muestra es un 0 que significa "no se midió", no "el valor fue 0".
+
+    Escribirla no solo no aporta: PISA la medida buena que ya hubiera para ese día
+    (el upsert resuelve por metric_date+metric_name), y la deja irrecuperable.
+
+    `value` a None se conserva a propósito: ahí la medida suele estar en `extra` con
+    otro nombre —el promedio de `heart_rate` llega como "Avg"— y el resumen sabe
+    buscarla. Un 0 explícito, en cambio, no esconde nada detrás.
+    """
+    if name not in METRICAS_SIN_MEDIDA_EN_CERO or value is None:
+        return False
+    try:
+        if float(value) != 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if name in ("sleep_analysis", "sleep"):
+        return not any((extra or {}).get(k) for k in _CLAVES_SUENO)
+    return True
+
 # El upsert de health_metrics tiene que resolverse contra unique(metric_date,
 # metric_name), y PostgREST solo lo hace si se le nombra la restricción: sin
 # on_conflict usa la CLAVE PRIMARIA, que aquí es `id`, un uuid generado en cada
@@ -2219,6 +2266,10 @@ def _guardar_metricas(agrupadas: dict) -> int:
     filas = []
     for (metric_date, name), data in agrupadas.items():
         value = data["value"]
+        # Un 0 que en realidad es "no se midió" no se guarda: pisaría la medida buena
+        # del día en el upsert (ver METRICAS_SIN_MEDIDA_EN_CERO).
+        if _cero_sin_medida(name, value, data.get("extra")):
+            continue
         if name in CUMULATIVE_METRICS and value is not None:
             previo = (existentes.get((metric_date, name)) or {}).get("value")
             # Solo se salta si lo guardado es un valor real (>0) y ya es mayor o igual:
@@ -2483,7 +2534,13 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 parse_errors.append({"metric": item.get("metric"), "reason": "value is None"})
                 continue
             if v == "":
-                v = 0
+                # Campo vacío = el "Find Health Samples" del Atajo no encontró nada, que
+                # es lo normal cada día sin reloj. Se convertía en un 0 y ese 0 acababa
+                # escrito en la tabla, listo para pisar la medida del primer día que sí
+                # la hubiera. Un hueco no es un cero.
+                parse_errors.append({"metric": item.get("metric"),
+                                     "reason": "valor vacío: el Shortcut no encontró muestra"})
+                continue
             samples.append(SimpleHealthSample(
                 metric=item["metric"],
                 date=item["date"],
@@ -2513,9 +2570,17 @@ async def health_ingest_simple(request: Request, token: str = ""):
     )
 
     filas = []
+    sin_medida = 0
     for metric_date, s in validas:
         previo = existentes.get((metric_date, s.metric)) or {}
         extra = s.extra or {}
+
+        # Mismo criterio que en /health/ingest: un 0 que significa "no se midió" no se
+        # escribe, porque el upsert lo dejaría encima de la medida real del día.
+        if _cero_sin_medida(s.metric, s.value, extra):
+            sin_medida += 1
+            skipped.append(f"{s.metric}: 0 sin medida (no se guarda para no pisar el valor real)")
+            continue
 
         # Respetar las noches que el usuario anuló a mano: el flag vive en la fila
         # guardada y una sincronización posterior no debe borrarlo.
@@ -2554,6 +2619,17 @@ async def health_ingest_simple(request: Request, token: str = ""):
     # Igual que en /health/ingest: el sueño de esta noche recién llegado es la señal de
     # que el Watch ya ha cerrado la noche.
     _avisar_sueno_recibido({d for d, s in validas if s.metric == "sleep_analysis"})
+
+    # Un Atajo que manda huecos no falla nunca y deja de aportar datos en silencio —
+    # es como se perdió un mes de métricas nocturnas sin un solo error en el registro.
+    # Que se descarte alguna muestra suelta es normal (va en `skipped`); que no llegue
+    # NI UNA con medida es que el Shortcut está roto, y eso sí se registra.
+    if sin_medida and sin_medida == len(validas):
+        logger.warning(
+            "Ingesta de salud (Shortcut): las %d muestras del envío llegaron a 0 sin medida "
+            "(%s). Revisa los pasos 'Find Health Samples' del Atajo.",
+            sin_medida, ", ".join(sorted({s.metric for _, s in validas})),
+        )
 
     # Mismo criterio que en /health/ingest, y con la misma precaución: se mira lo
     # RECONOCIDO (`samples`), no lo escrito. Cero muestras legibles es que el cuerpo no
@@ -3051,6 +3127,40 @@ def _num_extra(extra: dict, *claves) -> float | None:
     return None
 
 
+def _valor_metrica(fila: dict) -> float | None:
+    """Valor de una fila de health_metrics, mirando también en `extra`.
+
+    Hay filas guardadas con `value` a null y la medida entera dentro de `extra`: es lo
+    que hacía la ingesta con las métricas que Health Auto Export exporta como rango
+    diario, porque buscaba `avg` y el exportador manda `Avg`. La ingesta ya está
+    arreglada, pero las filas viejas siguen ahí y ese histórico es real — descartarlas
+    aquí es tirar semanas de dato que sí se recibió y sí está guardado.
+    """
+    try:
+        return round(float(fila["value"]), 2)
+    except (TypeError, ValueError, KeyError):
+        pass
+    v = _num_extra(fila.get("extra") or {}, "qty", "avg", "Avg", "value", "sum")
+    return round(v, 2) if v is not None else None
+
+
+def _filas_por_alias(por_nombre: dict, nombres) -> list:
+    """Filas de una métrica que las dos fuentes escriben con nombres distintos.
+
+    Health Auto Export y el Atajo de iOS no coinciden en cómo llaman a todo
+    (`apple_exercise_time` contra `exercise_time`), así que una misma métrica vive
+    partida en dos nombres. Quedarse con el primero que tuviera filas —lo que se hacía
+    antes— descartaba el histórico ENTERO del otro: bastaba un día suelto escrito por
+    una fuente para tapar meses guardados por la otra. Se fusionan por fecha, y si los
+    dos escribieron el mismo día gana el primero de `nombres`.
+    """
+    por_fecha: dict = {}
+    for nombre in nombres:
+        for f in por_nombre.get(nombre) or []:
+            por_fecha.setdefault(f["metric_date"], f)
+    return [f for _, f in sorted(por_fecha.items())]
+
+
 def _fases_sueno(extra: dict) -> dict:
     """Fases de una noche, en horas. `core` y `light` son la misma fase con dos nombres
     según la fuente (el mismo criterio que `_sleepHours` en helpers.js)."""
@@ -3191,18 +3301,19 @@ def _brief_salud() -> dict:
         return resumen
 
     for clave, nombres, unidad, cero_es_dato, _ in _BRIEF_METRICAS:
-        filas = next((por_nombre[n] for n in nombres if por_nombre.get(n)), [])
-        validas = []
-        for f in filas:
-            try:
-                # Redondeado desde la entrada: el HRV llega del Watch con quince
-                # decimales y sin esto se cuelan enteros en el correo, uno por día de
-                # serie, sin que el decimoquinto signifique nada.
-                v = round(float(f["value"]), 2)
-            except (TypeError, ValueError, KeyError):
-                continue
-            if v > 0 or (v == 0 and cero_es_dato):
-                validas.append({"fecha": f["metric_date"], "valor": v})
+        filas = _filas_por_alias(por_nombre, nombres)
+        # Un día vale si CUALQUIERA de los nombres trae medida para él: si el nombre
+        # preferente guardó un hueco y el otro el dato, el día cuenta igual. El valor
+        # ya viene redondeado —el HRV llega del Watch con quince decimales y sin esto
+        # se cuela un número interminable por cada día de serie.
+        por_fecha: dict = {}
+        for nombre in nombres:
+            for f in por_nombre.get(nombre) or []:
+                v = _valor_metrica(f)
+                if v is None or not (v > 0 or (v == 0 and cero_es_dato)):
+                    continue
+                por_fecha.setdefault(f["metric_date"], v)
+        validas = [{"fecha": fecha, "valor": v} for fecha, v in sorted(por_fecha.items())]
         if not validas:
             continue
         # La unidad de la fila manda sobre la declarada: la ingesta ya convierte (kJ a
@@ -3222,7 +3333,7 @@ def _brief_salud() -> dict:
 
     # Sueño: valor derivado y respetando las noches que el usuario anuló a mano.
     noches = []
-    for f in next((por_nombre[n] for n in ("sleep_analysis", "sleep") if por_nombre.get(n)), []):
+    for f in _filas_por_alias(por_nombre, ("sleep_analysis", "sleep")):
         extra = f.get("extra") or {}
         if extra.get("excluded"):
             continue
@@ -3246,7 +3357,7 @@ def _brief_salud() -> dict:
                 series[clave] = [por_fecha.get(f) for f in dias_ventana]
 
     # Entrenos del Watch: cuándo fue el último y el detalle de los más recientes.
-    filas_entrenos = next((por_nombre[n] for n in ("workouts", "workout") if por_nombre.get(n)), [])
+    filas_entrenos = _filas_por_alias(por_nombre, ("workouts", "workout"))
     detalle = []
     for f in filas_entrenos:
         for w in ((f.get("extra") or {}).get("workouts") or []):

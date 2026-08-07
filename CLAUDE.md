@@ -289,6 +289,14 @@ Ficheros clave:
   `unique(metric_date, metric_name)` de la tabla) con el resto. Un GET+POST por
   métrica aquí son 60-90 viajes secuenciales a Supabase por sincronización del
   Watch — no lo reintroduzcas.
+  **Un 0 en una métrica de sensor no se guarda** (`METRICAS_SIN_MEDIDA_EN_CERO` +
+  `_cero_sin_medida()`, compartidos por las dos rutas): en HRV, FC, respiración, VO₂max,
+  peso o sueño el 0 es "no se midió", y como el upsert resuelve por
+  `(metric_date, metric_name)` esa fila **pisa la medida buena del día** y la deja
+  irrecuperable. Es el espejo por nombre de la columna `cero_es_dato` de
+  `_BRIEF_METRICAS`, y hay un test que comprueba que las dos no se desincronizan. En las
+  acumulativas el 0 sí es un dato (un día de 0 pisos ocurrió) y se guarda. `value` a
+  `None` también se conserva: ahí la medida suele estar en `extra` con otro nombre.
   La URL del upsert sale de `HEALTH_UPSERT_URL` y **lleva
   `?on_conflict=metric_date,metric_name`**: PostgREST resuelve `merge-duplicates`
   contra la CLAVE PRIMARIA salvo que se le nombre otra restricción, y aquí la primaria
@@ -393,6 +401,15 @@ Ficheros clave:
     propias. Sin las fases, del sueño solo viajaba la cantidad; sin el detalle, de los
     entrenos solo "hace 2 días". `_minutos_entreno()` usa el mismo umbral que el widget
     del frontend (>300 ⇒ segundos): forma del dato, como `_horas_sueno()`.
+  - **Una métrica se lee de TODOS sus nombres, no del primero que tenga filas**
+    (`_filas_por_alias()`): Health Auto Export y el Atajo de iOS no coinciden en cómo
+    llaman a todo (`apple_exercise_time` contra `exercise_time`), así que el histórico
+    vive partido en dos nombres y quedarse con uno descarta el otro entero. Se fusiona
+    por fecha, con el orden de la tupla como preferencia. Es lo mismo que hace
+    `findMetric` en helpers.js, que ya recibía los dos nombres.
+  - **Si `value` es `null`, el valor se busca en `extra`** (`_valor_metrica()`). Hay
+    filas viejas guardadas así por el bug del `Avg`: son histórico real y descartarlas
+    es tirar semanas de dato que sí se recibió y sigue en la tabla.
   `construir_brief()` llama a las funciones de los endpoints existentes con
   `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
   heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
@@ -1299,6 +1316,29 @@ excepción o error de consola, no solo si falta un texto.
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Un mes de métricas nocturnas a n=3, y no había ningún bug: el reloj estaba en un
+  cajón.** El correo del 07/08 traía sueño, HRV, FC en reposo y respiración con tres
+  observaciones, y los pasos con 29. Parece una ingesta rota y no lo era: los pasos los
+  cuenta el iPhone él solo, y todo lo demás necesita el Watch puesto. Los tres días eran
+  los tres desde que volvió a llevarse. **Antes de buscar el fallo en el código,
+  comprueba si la métrica que falta necesita un sensor que estuviera puesto** — la
+  asimetría "pasos sí, todo lo demás no" es la huella de eso, no de un endpoint roto.
+  El `n` de cada media hizo justo su trabajo (avisar de que no hay base), y aun así se
+  leyó como avería: el resumen no puede distinguir "no se midió" de "no llegó", y quien
+  lo lee tampoco.
+  De diagnosticarlo salieron tres arreglos reales, ninguno causante de aquello:
+  - El Atajo manda `value` **vacío** cuando su "Find Health Samples" no encuentra nada
+    —cada día sin reloj—, y eso se guardaba como un `0` (`if v == "": v = 0`). Mientras
+    no hay medida solo ocupa sitio, pero el día que la haya, si el Atajo corre después,
+    ese 0 la **pisa**: el upsert resuelve por `(metric_date, metric_name)`. **Un hueco
+    no es un cero** — la misma regla que impide dar por vigente la presencia caducada.
+    Y como un cliente que manda huecos no falla nunca, si de un envío no llega ni una
+    muestra con medida se registra (`logger.warning`).
+  - El resumen leía cada métrica **del primer nombre que tuviera filas**, así que un día
+    suelto de `apple_exercise_time` tapaba meses de `exercise_time`. Ahora fusiona por
+    fecha (`_filas_por_alias`), como ya hacía `findMetric` en el frontend.
+  - Y descartaba las filas con `value` a null aunque llevaran la medida dentro de `extra`
+    (las que dejó el bug del `Avg`): histórico real que estaba guardado y no se leía.
 - **El Watch dejó de sincronizar otra vez, y esta vez el registro decía "400" y nada
   más.** `POST /health/ingest` rechazaba todos los envíos de Health Auto Export porque
   el cuerpo llegaba como una LISTA de lotes (lo que manda con "Batch requests"
