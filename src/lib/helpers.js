@@ -1057,7 +1057,19 @@ export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
  *  confirmar. Sale de los argumentos que ya viajan en la respuesta: el usuario tiene
  *  que poder ver QUÉ va a aprobar sin fiarse de cómo lo haya redactado el modelo. */
 export function jarvisEtiquetaAccion(pendiente) {
-  if (!pendiente || pendiente.herramienta !== "crear_evento") return null;
+  if (!pendiente) return null;
+  if (pendiente.herramienta === "mcp_usar") {
+    // Acción sobre un servidor MCP: se enseña el servidor, la herramienta y los
+    // argumentos TAL CUAL van a viajar — es lo que el usuario está aprobando.
+    const a = pendiente.argumentos || {};
+    const servidor = String(a.servidor || "").trim();
+    const util     = String(a.herramienta || "").trim();
+    if (!servidor || !util) return null;
+    const args  = JSON.stringify(a.argumentos || {});
+    const extra = args && args !== "{}" ? ` con ${args.slice(0, 160)}` : "";
+    return `Ejecutar "${util}" en el servidor ${servidor}${extra}`;
+  }
+  if (pendiente.herramienta !== "crear_evento") return null;
   const a = pendiente.argumentos || {};
   const titulo = (a.titulo || "").trim();
   if (!titulo) return null;

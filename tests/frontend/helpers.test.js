@@ -934,6 +934,26 @@ describe("jarvisEtiquetaAccion", () => {
     expect(jarvisEtiquetaAccion(null)).toBeNull();
     expect(jarvisEtiquetaAccion({ herramienta: "apagar_pc", argumentos: {} })).toBeNull();
   });
+
+  test("una llamada MCP enseña servidor, herramienta y argumentos reales", () => {
+    // El usuario aprueba lo que va a viajar de verdad, no lo que el modelo redactó.
+    expect(jarvisEtiquetaAccion({
+      herramienta: "mcp_usar",
+      argumentos: { servidor: "correo", herramienta: "enviar", argumentos: { para: "x@y.z" } },
+    })).toBe('Ejecutar "enviar" en el servidor correo con {"para":"x@y.z"}');
+  });
+
+  test("una llamada MCP sin argumentos no arrastra un {} vacío", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "mcp_usar",
+      argumentos: { servidor: "correo", herramienta: "listar" },
+    })).toBe('Ejecutar "listar" en el servidor correo');
+  });
+
+  test("una llamada MCP incompleta no pinta botón", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: { servidor: "correo" } })).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: {} })).toBeNull();
+  });
 });
 
 describe("jarvisMotivoError", () => {

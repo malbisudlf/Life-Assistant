@@ -293,8 +293,19 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ENTREGAS_MARKER`,
 `BRIEF_DIAS_ENTREGAS`, `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`,
 `BRIEF_HORA_TOPE`,
-`BRIEF_DISPARA_SUENO`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`.
+`BRIEF_DISPARA_SUENO`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
+`JARVIS_WEB`, `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
+`TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
+`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`.
 (* = obligatoria para arrancar.)
+
+**Memoria de Jarvis**: ejecuta la migración `20260807_jarvis_memoria.sql` para que
+Jarvis pueda recordar entre conversaciones. Sin la tabla, el resto del asistente
+funciona igual y `recordar` devuelve un error que el propio chat te enseña.
+
+**Servidores MCP**: para darle a Jarvis herramientas de terceros, define
+`JARVIS_MCP_SERVERS` (JSON; ver `backend/.env.example`). Cada llamada a un servidor
+sin `confiar` se aprueba con un botón en el chat.
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
 `VITE_ENTREGAS_MARKER`, `VITE_AGENT_ID`.
