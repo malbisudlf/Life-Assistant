@@ -134,6 +134,50 @@ class TestJarvisVoz:
 
 # ── Conciencia de las propias capacidades ─────────────────────────────────────
 
+class TestParametrosPorFamilia:
+    """Los modelos de razonamiento no aceptan los mismos parámetros que el resto.
+
+    Sin esto, cambiar JARVIS_MODEL a la familia barata de hoy (gpt-5-mini cuesta la
+    décima parte que gpt-4o) tumbaba Jarvis con un 400 de parámetro no soportado — y solo
+    al hablarle, no al desplegar.
+    """
+
+    def test_los_razonadores_van_con_sus_parametros(self):
+        for modelo in ("gpt-5-mini", "gpt-5-nano", "o4-mini"):
+            p = main._parametros_modelo(modelo, 400)
+            assert p == {"max_completion_tokens": 400, "reasoning_effort": "minimal"}, modelo
+
+    def test_el_resto_sigue_igual(self):
+        for modelo in ("gpt-4o-mini", "gpt-4o", "gemini-2.5-flash-lite"):
+            p = main._parametros_modelo(modelo, 400)
+            assert p == {"max_tokens": 400, "temperature": 0.3}, modelo
+
+    def test_el_bucle_los_aplica(self, client, auth_headers, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "JARVIS_MODEL", "gpt-5-nano")
+        monkeypatch.setattr(main, "JARVIS_MODEL_ACCION", "gpt-5-nano")
+        cliente = _con_modelo(monkeypatch, [_mensaje("Buenas.")])
+        client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
+        enviado = cliente.recibido[0]
+        assert "temperature" not in enviado
+        assert "max_tokens" not in enviado
+        assert enviado["max_completion_tokens"] == main.JARVIS_MAX_TOKENS
+
+
+class TestPrefijoCacheable:
+    """Lo que cambia a cada minuto no puede ir delante de lo que se quiere cachear."""
+
+    def test_la_hora_no_esta_en_el_prompt_de_sistema(self, mock_requests):
+        assert "Ahora son las" not in main._jarvis_sistema()
+
+    def test_la_hora_viaja_en_el_ultimo_mensaje_antes_del_usuario(
+            self, client, auth_headers, monkeypatch, mock_requests):
+        cliente = _con_modelo(monkeypatch, [_mensaje("Buenas.")])
+        client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
+        mensajes = cliente.recibido[0]["messages"]
+        assert "Ahora son las" in mensajes[-2]["content"]
+        assert mensajes[-1] == {"role": "user", "content": "hola"}
+
+
 class TestSuenaANegativa:
     """Qué cuenta como 'me quito de encima la petición'."""
 
