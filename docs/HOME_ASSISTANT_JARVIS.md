@@ -23,16 +23,19 @@ En `configuration.yaml`:
 
 ```yaml
 rest:
-  - resource: !secret la_url_ordenes        # https://TU-BACKEND/ha/ordenes-pending
-    scan_interval: 15
+  - resource: "https://TU-BACKEND/ha/ordenes-pending"
     headers:
       X-Auth-Token: !secret ha_poll_token
+    scan_interval: 15
     sensor:
-      - name: "Jarvis ordenes"
+      - name: "Life Assistant Casa Ordenes"
         value_template: "{{ value_json.ordenes | length }}"
         json_attributes:
           - ordenes
 ```
+
+El token va en **cabecera**, no en `params`: por la query acaba en los logs de URLs del
+backend (la query solo sigue soportada por las integraciones antiguas).
 
 **Ojo: leer ese endpoint VACÍA la cola** (igual que `/ha/wol-pending`). Es a propósito —
 así una orden no se ejecuta dos veces— pero significa que el sensor es el único que puede
@@ -41,8 +44,9 @@ consumirla: no lo consultes desde otro sitio.
 La automatización que las ejecuta (créala por la UI o por la API, como `la_wol_poll`):
 
 ```yaml
-alias: Jarvis - ejecutar ordenes de la casa
+alias: Life Assistant - Ejecutar ordenes de la casa
 mode: queued
+max: 10
 trigger:
   # Sin `to`/`from` dispara también cuando solo cambian los atributos: dos lecturas
   # seguidas con una orden cada una dejan el estado en "1" y aun así hay que ejecutarlas.
@@ -72,26 +76,28 @@ En `configuration.yaml`:
 ```yaml
 rest_command:
   jarvis_entidades:
-    url: !secret la_url_entidades           # https://TU-BACKEND/ha/entidades
+    url: "https://TU-BACKEND/ha/entidades"
     method: POST
-    content_type: "application/json"
     headers:
       X-Auth-Token: !secret ha_poll_token
+    content_type: "application/json"
+    timeout: 30
     payload: >-
-      {"entidades": [
-      {%- set ns = namespace(coma = false) -%}
-      {%- for dominio in ['light','switch','fan','cover','climate','media_player',
+      {%- set dominios = ['light','switch','fan','cover','climate','media_player',
                           'lock','scene','script','input_boolean','vacuum'] -%}
-        {%- for e in states[dominio] -%}
-          {%- if ns.coma %},{% endif -%}
-          {"id": "{{ e.entity_id }}",
-           "nombre": "{{ e.name | replace('"', '') }}",
-           "estado": "{{ e.state }}"}
-          {%- set ns.coma = true -%}
-        {%- endfor -%}
+      {%- set lista = (states | selectattr('domain','in',dominios) | list)[:400] -%}
+      {"entidades": [
+      {%- for e in lista -%}
+      {%- if not loop.first %},{% endif -%}
+      {"id": {{ e.entity_id | to_json }}, "nombre": {{ e.name | to_json }},
+       "estado": {{ e.state | to_json }}}
       {%- endfor -%}
       ]}
 ```
+
+Los valores van con `| to_json` y no entre comillas a mano: un nombre de dispositivo con
+comillas o acentos raros rompería el JSON entero, y ahí se pierde el catálogo completo.
+El `[:400]` es el mismo tope que impone el backend.
 
 Y una automatización que lo llame al arrancar HA y cada hora — al arrancar porque el
 catálogo puede haber cambiado mientras estaba apagado, y cada hora para que los estados
