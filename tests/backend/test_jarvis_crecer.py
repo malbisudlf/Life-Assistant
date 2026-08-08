@@ -68,6 +68,37 @@ class TestJarvisModelos:
         assert [c["model"] for c in cliente.recibido] == [
             "modelo-pequeno", "modelo-grande", "modelo-pequeno"]
 
+    def test_una_negativa_del_pequeno_la_revisa_el_grande(
+            self, client, auth_headers, monkeypatch, mock_requests):
+        """El agujero que tenía el reparto, visto en producción.
+
+        A «aprende a reservar mesa, importa un MCP o como sea» el pequeño contestó «no
+        puedo aprender habilidades nuevas de manera autónoma» — justo de lo que sí es
+        capaz— y, como no pidió ninguna herramienta, cerraba el turno sin que el grande
+        llegara a mirarlo. Negarse es la única respuesta que no puede darse sin haberla
+        comprobado.
+        """
+        _herramienta(monkeypatch, "mcp_catalogo", lambda: {"servidores": []})
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje("No puedo aprender habilidades nuevas de manera autónoma."),
+            _mensaje(tool_calls=[_llamada("mcp_catalogo")]),
+            _mensaje("Puedo conectarme a uno; necesito que me des el token."),
+        ])
+        datos = client.post("/jarvis", json={"mensaje": "aprende a reservar restaurantes"},
+                            headers=auth_headers).json()
+        assert datos["herramientas"] == ["mcp_catalogo"]
+        assert "No puedo" not in datos["respuesta"]
+        assert [c["model"] for c in cliente.recibido] == [
+            "modelo-pequeno", "modelo-grande", "modelo-grande"]
+
+    def test_una_respuesta_normal_no_se_relanza(
+            self, client, auth_headers, monkeypatch, mock_requests):
+        """El relanzamiento solo se paga cuando aparece un 'no': si no, esto encarecería
+        todas las conversaciones."""
+        cliente = _con_modelo(monkeypatch, [_mensaje("Buenas, ¿qué tal?")])
+        client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
+        assert [c["model"] for c in cliente.recibido] == ["modelo-pequeno"]
+
     def test_con_los_dos_modelos_iguales_no_hay_relanzamiento(
             self, client, auth_headers, monkeypatch, mock_requests):
         """La palanca para volver al comportamiento de antes sin tocar código."""
@@ -102,6 +133,30 @@ class TestJarvisVoz:
 
 
 # ── Conciencia de las propias capacidades ─────────────────────────────────────
+
+class TestSuenaANegativa:
+    """Qué cuenta como 'me quito de encima la petición'."""
+
+    def test_reconoce_las_formas_habituales(self):
+        for texto in (
+            "No puedo aprender habilidades nuevas de manera autónoma.",
+            "Solo puedo utilizar las herramientas que ya tengo conectadas.",
+            "No tengo acceso a ese servicio.",
+            "Eso está fuera de mis capacidades.",
+            "No soy capaz de hacer eso.",
+        ):
+            assert main._suena_a_negativa(texto) is True, texto
+
+    def test_no_se_dispara_con_una_respuesta_normal(self):
+        for texto in (
+            "Hoy tienes tres eventos: la entrega, el gimnasio y la cena.",
+            "Hace 21 grados y no va a llover.",
+            "Hecho, te he apuntado la idea.",
+            "",
+            None,
+        ):
+            assert main._suena_a_negativa(texto) is False, texto
+
 
 class TestJarvisCapacidades:
     def test_dice_lo_que_no_puede_y_por_que(self, monkeypatch, mock_requests):
