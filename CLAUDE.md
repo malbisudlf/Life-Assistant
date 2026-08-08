@@ -544,10 +544,14 @@ Ficheros clave:
   metida en el system invalidaba en cada minuto los ~4.800 tokens estables —reglas más el
   esquema de las 41 herramientas— que viajan en TODAS las llamadas. Si añades algo que
   cambie a menudo, no lo pongas delante.
-  El coste es la otra restricción de diseño, y ojo con las cifras viejas: con 41
-  herramientas la entrada real es de **~5.400 tokens por llamada** (3.740 solo de
-  esquema), no los ~1.000 de cuando había 21. Cada herramienta nueva la pagan todos los
-  turnos. `JARVIS_MAX_VUELTAS` es un
+  El coste es la otra restricción de diseño, y conviene medirlo en vez de estimarlo.
+  **Medido contra la API con las 41 herramientas: 3.667 tokens de entrada por llamada, de
+  los que se cachean 3.456 (el 94%)** — el esquema entra en el prefijo cacheable, así que
+  se paga a una décima parte. Por eso recortar el esquema NO es una palanca de coste
+  (ahorrarlo entero son céntimos al año); si algún día hay que adelgazarlo será por
+  PRECISIÓN, que es el problema real de tener muchas opciones parecidas juntas. Lo que sí
+  cuesta es la salida y el caché frío: OpenAI lo mantiene unos minutos, así que el primer
+  turno del día se paga entero. `JARVIS_MAX_VUELTAS` es un
   cortacircuitos de gasto (un modelo atascado pediría la misma herramienta sin avanzar) y
   `JARVIS_MAX_HISTORIAL` es lo único que hace crecer el coste conforme avanza la
   conversación — **si lo cambias, cambia también el de `helpers.js`**, o el cliente mandará
