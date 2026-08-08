@@ -1053,35 +1053,91 @@ export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
     .map(m => ({ rol: m.rol, texto: m.texto }));
 }
 
+/** Fecha ISO a DD/MM/AAAA para las etiquetas de confirmación. */
+function _fechaLegible(iso) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
 /** Descripción legible de la acción que Jarvis deja propuesta, para el botón de
- *  confirmar. Sale de los argumentos que ya viajan en la respuesta: el usuario tiene
- *  que poder ver QUÉ va a aprobar sin fiarse de cómo lo haya redactado el modelo. */
-export function jarvisEtiquetaAccion(pendiente) {
+ *  confirmar. Sale de los ARGUMENTOS que ya viajan en la respuesta, no de cómo lo haya
+ *  redactado el modelo: el usuario tiene que poder ver qué aprueba.
+ *
+ *  `contexto` trae lo que el dashboard YA tiene cargado (eventos, ideas) para traducir
+ *  un id a su nombre real. Un id de Graph no se puede leer, así que sin esto la etiqueta
+ *  de "borrar evento" sería un botón de confirmar a ciegas — y el nombre no puede salir
+ *  del modelo, que es justo de quien hay que desconfiar aquí. */
+export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
   if (!pendiente) return null;
-  if (pendiente.herramienta === "mcp_usar") {
-    // Acción sobre un servidor MCP: se enseña el servidor, la herramienta y los
-    // argumentos TAL CUAL van a viajar — es lo que el usuario está aprobando.
-    const a = pendiente.argumentos || {};
-    const servidor = String(a.servidor || "").trim();
-    const util     = String(a.herramienta || "").trim();
-    if (!servidor || !util) return null;
-    const args  = JSON.stringify(a.argumentos || {});
-    const extra = args && args !== "{}" ? ` con ${args.slice(0, 160)}` : "";
-    return `Ejecutar "${util}" en el servidor ${servidor}${extra}`;
-  }
-  if (pendiente.herramienta !== "crear_evento") return null;
   const a = pendiente.argumentos || {};
-  const titulo = (a.titulo || "").trim();
-  if (!titulo) return null;
-  const partes = [`Crear "${titulo}"`];
-  if (/^\d{4}-\d{2}-\d{2}$/.test(a.fecha || "")) {
-    const [y, m, d] = a.fecha.split("-");
-    partes.push(`el ${d}/${m}/${y}`);
+  const nombreDe = (lista, id, campo) => {
+    const encontrado = (lista || []).find(x => x?.id === id);
+    return encontrado ? `"${encontrado[campo]}"` : "(uno que no está en la lista de ahora)";
+  };
+
+  switch (pendiente.herramienta) {
+    case "crear_evento": {
+      const titulo = (a.titulo || "").trim();
+      if (!titulo) return null;
+      const partes = [`Crear "${titulo}"`];
+      const fecha = _fechaLegible(a.fecha);
+      if (fecha) partes.push(`el ${fecha}`);
+      if (/^\d{2}:\d{2}$/.test(a.hora_inicio || "")) partes.push(`a las ${a.hora_inicio}`);
+      else partes.push("(todo el día)");
+      if ((a.lugar || "").trim()) partes.push(`en ${a.lugar.trim()}`);
+      return partes.join(" ");
+    }
+    case "editar_evento": {
+      if (!a.evento_id) return null;
+      const cambios = [];
+      if ((a.titulo || "").trim()) cambios.push(`título "${a.titulo.trim()}"`);
+      const fecha = _fechaLegible(a.fecha);
+      if (fecha && /^\d{2}:\d{2}$/.test(a.hora_inicio || "")) cambios.push(`${fecha} a las ${a.hora_inicio}`);
+      if ((a.lugar || "").trim()) cambios.push(`en ${a.lugar.trim()}`);
+      if (!cambios.length) return null;
+      return `Cambiar el evento ${nombreDe(contexto.eventos, a.evento_id, "title")}: ${cambios.join(", ")}`;
+    }
+    case "borrar_evento":
+      if (!a.evento_id) return null;
+      return `Borrar del calendario el evento ${nombreDe(contexto.eventos, a.evento_id, "title")}`;
+    case "borrar_idea":
+      if (!a.idea_id) return null;
+      return `Borrar la nota ${nombreDe(contexto.ideas, a.idea_id, "key")}`;
+    case "cobrar_entrenamiento":
+      return "Marcar como cobradas las sesiones pendientes de entrenamiento";
+    case "casa_ordenar": {
+      // Solo llega aquí lo que no es un interruptor (cerraduras, persianas, alarma): se
+      // enseña el servicio y la entidad tal cual van a viajar a Home Assistant.
+      const servicio = String(a.servicio || "").trim();
+      const entidad  = String(a.entidad || "").trim();
+      if (!servicio || !entidad) return null;
+      return `En casa: ejecutar ${servicio} sobre ${entidad}`;
+    }
+    case "mcp_conectar": {
+      const nombre = String(a.nombre || "").trim();
+      const url    = String(a.url || "").trim();
+      if (!nombre || !url) return null;
+      // El token NUNCA se enseña: solo si lo lleva. Esta etiqueta acaba en pantalla.
+      const cred = String(a.token || "").trim() ? "con la credencial que le has dado" : "sin credencial";
+      return `Conectar el servidor MCP "${nombre}" (${url.slice(0, 120)}), ${cred}`;
+    }
+    case "mcp_desconectar":
+      if (!String(a.nombre || "").trim()) return null;
+      return `Desconectar el servidor MCP "${String(a.nombre).trim()}"`;
+    case "mcp_usar": {
+      // Acción sobre un servidor MCP: se enseña el servidor, la herramienta y los
+      // argumentos TAL CUAL van a viajar — es lo que el usuario está aprobando.
+      const servidor = String(a.servidor || "").trim();
+      const util     = String(a.herramienta || "").trim();
+      if (!servidor || !util) return null;
+      const args  = JSON.stringify(a.argumentos || {});
+      const extra = args && args !== "{}" ? ` con ${args.slice(0, 160)}` : "";
+      return `Ejecutar "${util}" en el servidor ${servidor}${extra}`;
+    }
+    default:
+      return null;
   }
-  if (/^\d{2}:\d{2}$/.test(a.hora_inicio || "")) partes.push(`a las ${a.hora_inicio}`);
-  else partes.push("(todo el día)");
-  if ((a.lugar || "").trim()) partes.push(`en ${a.lugar.trim()}`);
-  return partes.join(" ");
 }
 
 /** Traduce un fallo de /jarvis a algo que se pueda leer y accionar.
@@ -1128,4 +1184,27 @@ export function textoHablable(texto, max = 600) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+/** Silencio que se espera antes de dar por terminada una frase en el modo llamada.
+ *
+ *  Es la única pieza que decide si la conversación fluye o interrumpe. Demasiado corto y
+ *  te corta a mitad de frase mientras piensas; demasiado largo y cada turno arrastra un
+ *  silencio incómodo. 1,3 s es el punto donde una pausa normal al hablar todavía no
+ *  cuenta como final. No se fía del `isFinal` del navegador: Chrome lo emite muy pronto y
+ *  trocea una frase en tres. */
+export const JARVIS_SILENCIO_MS = 1300;
+
+/** Si lo que se ha dicho es una despedida, para colgar sin tocar el botón.
+ *
+ *  Deliberadamente corta y anclada al principio de la frase: "adiós" suelto cuelga, pero
+ *  "dile adiós a las vacaciones" no. Colgar por error a media conversación molesta más
+ *  que tener que pulsar. */
+export function esFinDeLlamada(texto) {
+  const t = String(texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Diacritic}/gu, "")   // adiós → adios
+    .replace(/[.,;!?¡¿]/g, " ")
+    .trim();
+  return /^(adios|chao|chau|cuelga|corta( la llamada)?|hasta luego|hasta ahora|nos vemos)( |$)/.test(t);
 }

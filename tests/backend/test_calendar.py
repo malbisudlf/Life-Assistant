@@ -108,6 +108,53 @@ class TestUpdateEvent:
         assert r.status_code == 400
 
 
+class TestDeleteEvent:
+    def test_requiere_token(self, client):
+        assert client.delete("/calendar/events/ev1").status_code in (401, 403)
+
+    def test_borra_en_graph(self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("DELETE", "graph.microsoft.com", FakeResponse({}, 204))
+        r = client.delete("/calendar/events/ev1", headers=auth_headers)
+        assert r.json() == {"status": "ok"}
+
+    def test_un_evento_que_ya_no_esta_cuenta_como_borrado(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Para quien borra, 'no existe' y 'ya no existe' son lo mismo."""
+        mock_requests.add("DELETE", "graph.microsoft.com", FakeResponse({}, 404))
+        assert client.delete("/calendar/events/ev1", headers=auth_headers).json() == {"status": "ok"}
+
+    def test_el_id_viaja_escapado(self, client, auth_headers, graph_token, mock_requests):
+        """Los ids de Graph llevan signos que en una URL significan otra cosa: sin
+        escaparlos, el borrado apunta a una ruta distinta de la que se pidió."""
+        mock_requests.add("DELETE", "graph.microsoft.com", FakeResponse({}, 204))
+        client.delete("/calendar/events/AAA=BBB+CCC", headers=auth_headers)
+        url = mock_requests.called("DELETE", "graph.microsoft.com")[0][1]
+        assert url.endswith("/me/events/AAA%3DBBB%2BCCC")
+
+
+class TestJarvisEditaElCalendario:
+    """Lo que Jarvis propone sobre el calendario. Solo llega aquí tras confirmarlo."""
+
+    def test_para_mover_la_hora_hace_falta_tambien_la_fecha(self, graph_token, mock_requests):
+        """Suponer el día es como se acaba moviendo una entrega a la semana que viene."""
+        r = main._j_editar_evento("ev1", hora_inicio="18:00")
+        assert r["ok"] is False
+        assert not mock_requests.called("PATCH", "graph.microsoft.com")
+
+    def test_compone_el_instante_entero(self, graph_token, mock_requests):
+        mock_requests.add("PATCH", "graph.microsoft.com", FakeResponse({}, 200))
+        r = main._j_editar_evento("ev1", fecha="2026-09-01", hora_inicio="18:00")
+        assert r["ok"] is True
+        payload = mock_requests.called("PATCH", "graph.microsoft.com")[0][2]["json"]
+        assert payload["start"]["dateTime"] == "2026-09-01T18:00:00"
+        # Sin hora de fin, una hora después: el mismo criterio que al crear.
+        assert payload["end"]["dateTime"] == "2026-09-01T19:00:00"
+
+    def test_sin_cambios_no_llama_a_graph(self, graph_token, mock_requests):
+        assert main._j_editar_evento("ev1")["ok"] is False
+        assert not mock_requests.called("PATCH", "graph.microsoft.com")
+
+
 class TestClasses:
     def test_calendario_clases_no_existe(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "/me/calendars", FakeResponse({

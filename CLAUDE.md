@@ -510,6 +510,21 @@ Ficheros clave:
   - **Una herramienta que revienta no tumba la conversación**: el fallo vuelve al modelo
     como resultado, que puede decirlo. Un `except` que devolviera `None` repetiría el bug
     del agente PC — "no pude preguntar" no es "no hay nada".
+  **Dos modelos, y la diferencia entre ellos es la que separa hablar de actuar.** El
+  pequeño (`JARVIS_MODEL`) acierta bien decidiendo SI hace falta una herramienta y falla
+  eligiendo CUÁL en cuanto hay muchas parecidas — está medido contra el MCP de GitHub:
+  pidiéndole leer issues escogía `add_issue_comment`, y ese fallo crece con el catálogo,
+  que aquí no para de crecer. Así que la primera vuelta la tira el pequeño y, **en cuanto
+  pide una herramienta, esa misma vuelta se relanza con `JARVIS_MODEL_ACCION`** (lo que
+  pidiera el pequeño se descarta sin ejecutarse) y el resto del bucle va con el grande. El
+  cierre vuelve al pequeño: para redactar con los datos delante, sobra. Una conversación
+  que no toca nada no le paga al grande ni una llamada. Igualar las dos variables desactiva
+  el reparto sin tocar código — es lo que hace `conftest.py`, porque si no cada vuelta con
+  herramienta consumiría dos respuestas del guion del modelo simulado.
+  **Por voz cambia el prompt, no el cerebro** (`voz: true` en el cuerpo): frases cortas,
+  sin listas ni markdown ni URLs, y `JARVIS_MAX_TOKENS_VOZ` en vez del techo normal. Lo
+  que se escucha no se puede ojear ni saltar, y un párrafo que se lee en dos segundos
+  tarda medio minuto en sonar.
   El coste es la otra restricción de diseño: un turno son 2 llamadas de ~1.000 tokens de
   entrada, y con `gpt-4o-mini` sale por céntimos al mes. `JARVIS_MAX_VUELTAS` es un
   cortacircuitos de gasto (un modelo atascado pediría la misma herramienta sin avanzar) y
@@ -590,9 +605,71 @@ Ficheros clave:
     que pueda reintentar con otra palabra en vez de quedarse sin nada que mirar.
   - **Lo que devuelve un servidor es contenido externo**: resultados y descripciones de
     herramientas van envueltos en `_AVISO_WEB`, como la web y el enunciado de Alud.
-  Sin servidores configurados, las herramientas `mcp_*` **no se anuncian en el esquema**
-  (herramientas muertas se pagan por token en cada turno). Hay tests del flujo completo
-  con sesión, del parseo SSE y de las dos fronteras.
+  Sin servidores configurados, las herramientas que **operan sobre uno** (`mcp_usar`,
+  `mcp_herramientas`, `mcp_desconectar`) no se anuncian en el esquema — herramientas
+  muertas se pagan por token en cada turno. Las que sirven para conectar el primero
+  (`mcp_catalogo`, `mcp_conectar`) se anuncian siempre: son justo las que hacen falta
+  entonces. La palanca es `requiere_mcp` en el registro, no el prefijo del nombre.
+  Hay tests del flujo completo con sesión, del parseo SSE y de las dos fronteras.
+
+- **Jarvis: conectar servidores MCP en caliente** (`mcp_conectar`, `mcp_desconectar`,
+  `mcp_catalogo`, tabla `jarvis_mcp_servidores`): **la regla de fondo no cambia — un
+  servidor entra en la lista blanca porque lo aprueba una PERSONA, nunca porque lo decida
+  el modelo.** Lo que cambia es el trámite: antes era editar un secret de Fly y
+  redesplegar, ahora es el mismo botón de confirmar que ya gobierna `crear_evento`, porque
+  `mcp_conectar` está marcada `confirmar: True`. `_mcp_config()` es la unión del env y la
+  tabla, y **el env manda** en caso de conflicto de nombre: lo que el usuario escribió a
+  mano no lo puede pisar algo aprobado de pasada en una conversación (ni desconectar —
+  `mcp_desconectar` se niega y dice dónde está). Tres cosas que lo sostienen:
+  - **La URL pasa por `url_web_permitida()` y exige https.** "Conéctate a este MCP" con
+    una URL sacada de una web es una forma muy educada de pedirle al backend que hable con
+    `169.254.169.254`. Y el rechazo **no dice por qué**, como en `leer_pagina`.
+  - **Se prueba la conexión antes de guardar** (`_mcp_probar`: initialize + tools/list). Un
+    alta que no se comprueba repetiría el bug del agente PC: *lanzar algo no es comprobar
+    que funciona*. De paso, el número de herramientas es la señal de que fue bien.
+  - **El botón enseña nombre y URL reales, nunca el token** (`jarvisEtiquetaAccion`).
+  La copia en memoria (`_mcp_guardados_cache`) existe porque `_mcp_config()` se consulta
+  varias veces por turno; se tira al escribir con `_mcp_invalidar()`, que **también limpia
+  sesiones y anotaciones** (podrían ser de una URL que ya no es esa). Resetéala en
+  `conftest.py` como el resto de estado de módulo.
+
+- **Jarvis: conciencia de sí mismo** (`mis_capacidades`): qué sabe hacer, qué tiene
+  apagado **y por qué**, y cómo puede crecer. Se deriva de `_jarvis_esquema()`, no del
+  registro entero, porque lo que importa es lo que puede usar EN ESTE TURNO. La mitad útil
+  es la segunda lista: un asistente que no sabe de lo que es capaz falla de las dos
+  maneras a la vez —dice que no puede lo que sí puede e inventa lo que no—, y un "no
+  puedo" sin el motivo detrás no se puede accionar. El prompt le manda mirarla antes de
+  negarse, y le da dos vías para crecer: conectar un servidor MCP (al momento) o, si eso
+  no lo arregla, **proponer la mejora como issue en su propio repositorio** (`JARVIS_REPO`
+  + un MCP de GitHub conectado), que es crecer por el camino revisable.
+
+- **La casa** (`casa_dispositivos`, `casa_ordenar`, `GET /ha/ordenes-pending`,
+  `POST /ha/entidades`): el backend sigue sin poder llamar a HA, así que se usan los dos
+  patrones que ya existen, cada uno para lo que sirve. Las **órdenes** van en una cola en
+  memoria que HA recoge al sondear (son ÓRDENES, como el WOL: perderlas en un cold start
+  solo cuesta volver a pedirlas) y el **catálogo de dispositivos** lo empuja HA a Supabase
+  (es ESTADO, como la presencia: el que lo sabe es HA). Tres reglas:
+  - **Lista blanca de dominios** (`_CASA_DOMINIOS`): la orden acaba en un `service call`
+    de HA, donde `hassio.*` o `shell_command.*` son bastante más que una luz.
+  - **La frontera de confirmación es por dominio** (`_casa_pide_confirmar`): una luz o un
+    enchufe equivalen a pulsar el interruptor y se ejecutan solos; cerraduras, persianas y
+    alarmas las aprueba el usuario. Un dominio desconocido se confirma: se falla al lado
+    seguro.
+  - **Una orden vieja no se ejecuta** (`CASA_ORDEN_TTL`). Si HA estuvo caído dos horas, al
+    volver no puede ponerse a encender lo que pediste al mediodía — la misma regla que hace
+    caducar la presencia.
+  Con catálogo cargado, una entidad que no está en él se rechaza: es una invención del
+  modelo. El YAML de HA está en `docs/HOME_ASSISTANT_JARVIS.md`.
+
+- **Recordatorios** (`recordarme`, `mis_recordatorios`, `cancelar_recordatorio`, tabla
+  `jarvis_recordatorios`): lo único que hace que Jarvis hable sin que le hablen. Las tres
+  decisiones son las que ya tomó el resumen diario, por lo mismo: viven en Supabase (Fly
+  escala a cero), **el reloj es el tick de HA** (`/ha/brief-tick`, que por eso ya no es
+  gratis antes de la hora tope: ~300 SELECT al día contra un índice) y **la reserva es un
+  PATCH condicional, no un GET previo** — es lo que hace la pregunta atómica, y con un GET
+  dos ticks solapados mandan el mismo aviso dos veces. Si el correo falla **se libera la
+  reserva**, o un error transitorio de SMTP se come el recordatorio. Un fallo despachando
+  **nunca** tumba el resumen diario: va aparte y se registra.
 
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
@@ -638,6 +715,7 @@ Ficheros clave:
 | `GET /calendar/events` | JWT | Eventos de los próximos 30 días (Graph). Extrae `alud_url` del cuerpo HTML |
 | `POST /calendar/events` | JWT | Crea evento en Outlook — `subject`, `start`, `end` (ISO sin zona, se asume `TIMEZONE`), `location?`, `is_all_day?`, `calendar_id?` |
 | `PATCH /calendar/events/{event_id}` | JWT | Edita un evento — mismos campos salvo `calendar_id` (no se puede mover de calendario); solo manda los campos presentes en el body |
+| `DELETE /calendar/events/{event_id}` | JWT | Borra un evento. Un 404 de Graph cuenta como borrado: para quien borra, "no existe" y "ya no existe" son lo mismo |
 | `GET /calendar/classes` | JWT | Eventos del calendario de clases (`CLASSES_CALENDAR`) — 60 días, máx. 200 |
 | `GET /calendar/calendars` | JWT | Lista de calendarios disponibles |
 | `POST /maps/departure` | JWT | Hora de salida (Google Maps Distance Matrix). `mode: "driving"` (con tráfico) o `"walking"` |
@@ -650,6 +728,8 @@ Ficheros clave:
 | `GET/POST /clothing`, `DELETE /clothing/{item_id}` | JWT | Widget **temporal** de conteo de ropa (ver "Frontend") |
 | `GET /ha/events/soon` | servicio | Próximos eventos para las notificaciones de Alexa |
 | `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
+| `POST /ha/entidades` | servicio | HA empuja el catálogo de la casa (id, nombre, estado). Sin él Jarvis no sabe qué dispositivos hay |
+| `GET /ha/ordenes-pending` | servicio | HA sondea y ejecuta lo que salga. Devuelve y **vacía** la cola; descarta lo que lleve más de `CASA_ORDEN_TTL` esperando |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
@@ -711,11 +791,12 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `WEATHER_LAT`/`WEATHER_LON`, `ALUD_ALLOWED_HOSTS`.
 
 **Jarvis** (ninguna obligatoria; reutiliza `OPENAI_API_KEY`): `JARVIS_MODEL`,
-`JARVIS_MAX_VUELTAS`, `JARVIS_MAX_HISTORIAL`, `JARVIS_MAX_MENSAJE`, `JARVIS_MAX_TOKENS`,
-`JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_WEB`,
+`JARVIS_MODEL_ACCION`, `JARVIS_MAX_VUELTAS`, `JARVIS_MAX_HISTORIAL`, `JARVIS_MAX_MENSAJE`,
+`JARVIS_MAX_TOKENS`, `JARVIS_MAX_TOKENS_VOZ`,
+`JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_REPO`, `JARVIS_WEB`,
 `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
-`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`.
+`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `CASA_ORDEN_TTL`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
@@ -804,7 +885,30 @@ Qué hace cada uno:
    gesto del usuario. Las acciones que Jarvis propone pero
    no ejecuta salen como un botón de confirmar cuya etiqueta la construye
    `jarvisEtiquetaAccion` con los ARGUMENTOS reales, no con lo que el modelo haya
-   redactado: hay que poder ver qué se aprueba.
+   redactado: hay que poder ver qué se aprueba. Cuando la acción va contra un id (borrar
+   un evento, una nota), la etiqueta lo **traduce al nombre real** con lo que el
+   dashboard ya tiene cargado (`contexto`): un id de Graph es ilegible, y el nombre no
+   puede venir del modelo, que es justo de quien hay que desconfiar ahí. Si el id no está
+   en lo cargado, se dice — no se calla.
+
+   **Modo llamada (📞)**: hablar seguido, sin pulsar enviar. Escucha en continuo →
+   detecta el fin de frase → manda → contesta en voz → vuelve a escuchar, hasta que
+   cuelgas (botón, o decir "adiós"/"cuelga": `esFinDeLlamada`). Cuatro cosas lo sostienen
+   y ninguna es opcional:
+   - **El micro se cierra mientras Jarvis habla** (`hablandoRef`). Por altavoz se oye a sí
+     mismo, se transcribe y se contesta solo: una llamada infinita que además se paga.
+   - **El fin de frase lo decide el SILENCIO** (`JARVIS_SILENCIO_MS`), no el `isFinal` del
+     navegador, que llega a la primera pausa y trocearía una frase pensada en tres.
+   - **La sesión se reabre sola en `onend`**: Chrome la corta cada pocos segundos y sin
+     eso la llamada se queda sorda sin avisar. Un permiso denegado, en cambio, cuelga con
+     el motivo: reintentar en bucle no lo arregla.
+   - **El ciclo se invoca a través de `cicloRef`**, un ref al último render. Los callbacks
+     del reconocimiento nacen una vez y viven muchos renders: sin esa indirección leerían
+     el `jarvisMensajes` de cuando empezó la llamada y Jarvis perdería el hilo de su
+     propia conversación a partir del segundo turno.
+   El saludo inicial se dice DENTRO del toque del botón (iOS solo desbloquea
+   `speechSynthesis` dentro de un gesto) y el cliente manda `voz: true`, que es lo que
+   hace al backend contestar en dos frases.
 1. **Hoy (`timeline`)** — mezcla eventos de Outlook + calendario de clases, ordenados
    por hora, con nodos activos/pasados/futuros y calculador de hora de salida por Google
    Maps. Al pulsar "¿A qué hora salir?" aparece un selector inline 🚗/🚶 antes de
@@ -1274,8 +1378,15 @@ avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la
 string (el soporte de query solo existe por compatibilidad con integraciones ya
 desplegadas y expone el token en los logs de URLs).
 
+**Flujo de la casa** (los dos sentidos a la vez, y cada uno por su motivo): HA **sondea**
+`GET /ha/ordenes-pending` cada 15 s y ejecuta lo que salga (órdenes: mismo patrón que el
+WOL), y **empuja** su catálogo de dispositivos a `POST /ha/entidades` al arrancar y cada
+hora (estado: mismo patrón que la presencia). Leer las órdenes las CONSUME, así que solo
+puede haber un consumidor. El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
+
 **Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
-`time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. HA pone el reloj
+`time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. Ese mismo tick es el
+que despacha los recordatorios de Jarvis: si funciona, los avisos salen solos. HA pone el reloj
 porque está siempre encendido y es puntual al minuto, las dos cosas que el cron de
 GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un hilo
 dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
@@ -1389,7 +1500,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 514 tests)
+### Backend (`tests/backend`, 571 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1408,7 +1519,7 @@ Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
 
-### Frontend (`tests/frontend`, 113 tests)
+### Frontend (`tests/frontend`, 125 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -1622,7 +1733,9 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
 `20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
-`20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`.
+`20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
+`20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
+`20260808_jarvis_recordatorios`.
 
 ## Convenciones
 

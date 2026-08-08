@@ -9,7 +9,7 @@ import {
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
-  elegirVozEspanola, textoHablable,
+  elegirVozEspanola, textoHablable, esFinDeLlamada,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -1020,5 +1020,94 @@ describe("jarvisMotivoError", () => {
 
   test("un código desconocido no se queda mudo", () => {
     expect(jarvisMotivoError(418)).toContain("418");
+  });
+});
+
+describe("jarvisEtiquetaAccion — lo que se aprueba con un botón", () => {
+  const contexto = {
+    eventos: [{ id: "ev1", title: "Entrega de Sistemas" }],
+    ideas:   [{ id: "id1", key: "Llamar al dentista" }],
+  };
+
+  test("un evento se nombra por su título real, no por su id", () => {
+    // El id de Graph es ilegible: sin traducirlo, confirmar sería aprobar a ciegas. Y el
+    // nombre no puede venir del modelo, que es justo de quien hay que desconfiar aquí.
+    const out = jarvisEtiquetaAccion(
+      { herramienta: "borrar_evento", argumentos: { evento_id: "ev1" } }, contexto);
+    expect(out).toContain("Entrega de Sistemas");
+  });
+
+  test("si el id no está en la lista cargada, se dice", () => {
+    const out = jarvisEtiquetaAccion(
+      { herramienta: "borrar_evento", argumentos: { evento_id: "otro" } }, contexto);
+    expect(out).toContain("no está en la lista");
+  });
+
+  test("editar enseña qué cambia", () => {
+    const out = jarvisEtiquetaAccion({
+      herramienta: "editar_evento",
+      argumentos: { evento_id: "ev1", fecha: "2026-09-01", hora_inicio: "18:00" },
+    }, contexto);
+    expect(out).toContain("Entrega de Sistemas");
+    expect(out).toContain("01/09/2026 a las 18:00");
+  });
+
+  test("editar sin ningún cambio no ofrece botón", () => {
+    expect(jarvisEtiquetaAccion(
+      { herramienta: "editar_evento", argumentos: { evento_id: "ev1" } }, contexto)).toBeNull();
+  });
+
+  test("una nota se nombra por su título", () => {
+    expect(jarvisEtiquetaAccion(
+      { herramienta: "borrar_idea", argumentos: { idea_id: "id1" } }, contexto))
+      .toContain("Llamar al dentista");
+  });
+
+  test("conectar un MCP enseña nombre y URL, NUNCA el token", () => {
+    const out = jarvisEtiquetaAccion({
+      herramienta: "mcp_conectar",
+      argumentos: { nombre: "github", url: "https://api.example/mcp", token: "ghp_secreto" },
+    });
+    expect(out).toContain("github");
+    expect(out).toContain("https://api.example/mcp");
+    expect(out).not.toContain("ghp_secreto");
+  });
+
+  test("una orden de casa enseña el servicio y la entidad tal cual viajan", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "casa_ordenar",
+      argumentos: { servicio: "lock.unlock", entidad: "lock.puerta" },
+    })).toBe("En casa: ejecutar lock.unlock sobre lock.puerta");
+  });
+
+  test("cobrar dice lo que hace sin necesitar contexto", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "cobrar_entrenamiento", argumentos: {} }))
+      .toContain("cobradas");
+  });
+
+  test("sin los argumentos mínimos no hay botón", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "mcp_conectar", argumentos: { nombre: "x" } })).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "borrar_idea", argumentos: {} })).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "casa_ordenar", argumentos: { servicio: "light.turn_on" } })).toBeNull();
+  });
+});
+
+describe("esFinDeLlamada", () => {
+  test("una despedida cuelga", () => {
+    expect(esFinDeLlamada("adiós")).toBe(true);
+    expect(esFinDeLlamada("Adios!")).toBe(true);
+    expect(esFinDeLlamada("cuelga")).toBe(true);
+    expect(esFinDeLlamada("hasta luego, gracias")).toBe(true);
+  });
+
+  test("una despedida dentro de una frase NO cuelga", () => {
+    // Colgar por error a media conversación molesta más que tener que pulsar el botón.
+    expect(esFinDeLlamada("dile adiós a las vacaciones")).toBe(false);
+    expect(esFinDeLlamada("apunta que tengo que despedirme de Ana")).toBe(false);
+  });
+
+  test("el silencio no cuelga", () => {
+    expect(esFinDeLlamada("")).toBe(false);
+    expect(esFinDeLlamada(null)).toBe(false);
   });
 });

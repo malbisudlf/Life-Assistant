@@ -23,6 +23,13 @@ os.environ.setdefault("AGENT_TOKEN", "agent-token")
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los
 # tests del registro llaman a _registro.volcar() a mano, que es lo que hace el hilo.
 os.environ.setdefault("LOG_PERSIST", "0")
+# Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
+# herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
+# reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada
+# vuelta con herramienta consumiría dos respuestas del guion del modelo simulado y todos
+# hablarían del enrutado en vez de de lo que prueban. El reparto tiene sus propios tests,
+# que lo encienden a mano (TestJarvisModelos).
+os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -100,6 +107,14 @@ def _limpiar_estado():
     main._pc_power_action = None
     main._token_cache = None
     main._presencia_cache = None
+    # Copias en memoria de la lista blanca de MCP y del catálogo de la casa: sin esto, un
+    # test que conecte un servidor o guarde dispositivos se los dejaría puestos al
+    # siguiente. Las sesiones MCP van con ellas, como en _mcp_invalidar().
+    main._mcp_guardados_cache = None
+    main._ha_entidades_cache = None
+    main._mcp_sesiones.clear()
+    main._mcp_lectura.clear()
+    main._ha_ordenes.clear()
     # El middleware registra todo 4xx/5xx, así que la cola arrastraría entradas de un
     # test al siguiente. `_purgado` también se resetea: es "una purga por proceso".
     with main._registro._lock:
