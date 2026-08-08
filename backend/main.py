@@ -225,7 +225,11 @@ AUDIO_WINDOW_SECONDS = int(os.getenv("AUDIO_WINDOW_SECONDS", "300"))
 JARVIS_MODEL         = os.getenv("JARVIS_MODEL", "gpt-4o-mini")
 # El que decide y encadena. Ponerlo al mismo valor que JARVIS_MODEL desactiva el reparto
 # y deja el comportamiento de antes (todo con el pequeño), sin tocar código.
-JARVIS_MODEL_ACCION  = os.getenv("JARVIS_MODEL_ACCION", "gpt-4o")
+# gpt-5-mini y no gpt-4o: cuesta la DÉCIMA parte ($0.25 contra $2.50 por millón de tokens
+# de entrada, agosto de 2026) y es dos generaciones más nuevo eligiendo herramientas, que
+# es justo para lo que está aquí. Ojo: es de la familia de razonamiento y no admite los
+# mismos parámetros — ver _parametros_modelo().
+JARVIS_MODEL_ACCION  = os.getenv("JARVIS_MODEL_ACCION", "gpt-5-mini")
 # Vueltas máximas del bucle herramienta→modelo. Es un cortacircuitos de gasto, no un
 # límite de capacidad: cada vuelta es una llamada de pago y un modelo que se atasca
 # pidiendo la misma herramienta gastaría sin avanzar. Subió de 3 a 6 al darle memoria y
@@ -6210,13 +6214,24 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
         return {"error": "La herramienta falló"}
 
 
+def _jarvis_ahora() -> str:
+    """El contexto que cambia a cada minuto, para mandarlo APARTE del prompt de sistema.
+
+    El caché de la API se calcula sobre el PREFIJO del prompt. Con la hora dentro del
+    system, cada minuto cambiaba el prefijo y con él se perdían los ~4.800 tokens estables
+    (reglas + esquema de 41 herramientas) que se repiten en TODAS las llamadas: se pagaban
+    enteros una y otra vez. Puesta al final, esos tokens entran como cacheados, que en
+    la familia GPT-5 cuestan la décima parte.
+    """
+    ahora = datetime.now(LOCAL_TZ)
+    return (f"Ahora son las {ahora.strftime('%H:%M')} del {ahora.strftime('%Y-%m-%d')} "
+            f"({DIAS_SEMANA[ahora.weekday()]}), zona horaria {TIMEZONE}.")
+
+
 def _jarvis_sistema(voz: bool = False) -> str:
-    ahora  = datetime.now(LOCAL_TZ)
     partes = [
         "Eres Jarvis, el asistente personal de este dashboard. Hablas español, en tono "
-        "cercano y directo, sin florituras ni disculpas.\n"
-        f"Ahora son las {ahora.strftime('%H:%M')} del {ahora.strftime('%Y-%m-%d')} "
-        f"({DIAS_SEMANA[ahora.weekday()]}), zona horaria {TIMEZONE}.\n\n"
+        "cercano y directo, sin florituras ni disculpas.\n\n"
         "Reglas:\n"
         "- Consulta las herramientas antes de responder cualquier cosa sobre la agenda, "
         "la salud, el clima, el PC, la ubicación o el entrenamiento. No inventes datos ni "
@@ -6362,6 +6377,22 @@ def _suena_a_negativa(texto) -> bool:
     return bool(_RE_NEGATIVA.search(str(texto or "")))
 
 
+# Los modelos de razonamiento (gpt-5*, o3, o4…) RECHAZAN con un 400 los dos parámetros
+# que usa el resto: `temperature` (solo admiten el valor por defecto) y `max_tokens` (para
+# ellos es `max_completion_tokens`). Sin esto, cambiar JARVIS_MODEL a uno de esa familia
+# —que hoy es la barata: gpt-5-mini cuesta la décima parte que gpt-4o— tumbaba Jarvis
+# entero con un error de parámetro, y encima solo al hablarle, no al desplegar.
+# `reasoning_effort: minimal` es deliberado: aquí el trabajo lo hacen las herramientas, y
+# los tokens de razonamiento se pagan a precio de salida y se notan en el modo llamada.
+_RE_RAZONADOR = re.compile(r"^(gpt-5|o\d)", re.I)
+
+
+def _parametros_modelo(modelo: str, techo: int) -> dict:
+    if _RE_RAZONADOR.match(str(modelo or "")):
+        return {"max_completion_tokens": techo, "reasoning_effort": "minimal"}
+    return {"max_tokens": techo, "temperature": 0.3}
+
+
 class JarvisTurno(BaseModel):
     rol:   str = Field(pattern=r'^(user|assistant)$')
     texto: str = Field(max_length=JARVIS_MAX_MENSAJE)
@@ -6407,6 +6438,9 @@ def jarvis(
     mensajes = [{"role": "system", "content": _jarvis_sistema(voz=voz)}]
     for turno in body.historial[-JARVIS_MAX_HISTORIAL:]:
         mensajes.append({"role": turno.rol, "content": turno.texto})
+    # La hora va aquí, al final y no en el prompt de sistema: lo que cambia a cada minuto
+    # no puede ir delante de lo que se quiere cachear (ver _jarvis_ahora).
+    mensajes.append({"role": "system", "content": _jarvis_ahora()})
     mensajes.append({"role": "user", "content": mensaje})
 
     cliente   = get_openai_client()
@@ -6421,8 +6455,7 @@ def jarvis(
             model=modelo_usado,
             messages=mensajes,
             tools=esquema,
-            max_tokens=techo,
-            temperature=0.3,
+            **_parametros_modelo(modelo_usado, techo),
         ).choices[0].message
 
     for _ in range(JARVIS_MAX_VUELTAS):
@@ -6500,7 +6533,7 @@ def jarvis(
     # vueltas. En ambos casos toca redactar la respuesta con lo que ya se sabe — y para
     # redactar con los datos delante basta el pequeño, que además contesta antes.
     cierre = cliente.chat.completions.create(
-        model=JARVIS_MODEL, messages=mensajes, max_tokens=techo, temperature=0.3,
+        model=JARVIS_MODEL, messages=mensajes, **_parametros_modelo(JARVIS_MODEL, techo),
     ).choices[0].message
     return {"respuesta": (cierre.content or "").strip(), "herramientas": usadas, "pendiente": pendiente}
 
