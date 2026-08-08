@@ -531,8 +531,23 @@ Ficheros clave:
   sin listas ni markdown ni URLs, y `JARVIS_MAX_TOKENS_VOZ` en vez del techo normal. Lo
   que se escucha no se puede ojear ni saltar, y un párrafo que se lee en dos segundos
   tarda medio minuto en sonar.
-  El coste es la otra restricción de diseño: un turno son 2 llamadas de ~1.000 tokens de
-  entrada, y con `gpt-4o-mini` sale por céntimos al mes. `JARVIS_MAX_VUELTAS` es un
+  **El modelo se elige por env, así que el código no puede dar por hecha su familia.**
+  Los de razonamiento (`gpt-5*`, `o3`, `o4`…) rechazan con un 400 los dos parámetros que
+  usa el resto: `temperature` (solo admiten el valor por defecto) y `max_tokens` (para
+  ellos es `max_completion_tokens`). `_parametros_modelo()` los separa; sin eso, cambiar
+  a la familia barata de hoy tumbaba Jarvis con un error de parámetro, y solo al
+  hablarle, no al desplegar. Va con `reasoning_effort: minimal` a propósito: aquí el
+  trabajo lo hacen las herramientas, y los tokens de razonamiento se pagan a precio de
+  salida y se notan en el modo llamada.
+  **Lo que cambia a cada minuto va al FINAL** (`_jarvis_ahora`, un mensaje aparte tras el
+  historial). El caché de la API se calcula sobre el PREFIJO del prompt, así que la hora
+  metida en el system invalidaba en cada minuto los ~4.800 tokens estables —reglas más el
+  esquema de las 41 herramientas— que viajan en TODAS las llamadas. Si añades algo que
+  cambie a menudo, no lo pongas delante.
+  El coste es la otra restricción de diseño, y ojo con las cifras viejas: con 41
+  herramientas la entrada real es de **~5.400 tokens por llamada** (3.740 solo de
+  esquema), no los ~1.000 de cuando había 21. Cada herramienta nueva la pagan todos los
+  turnos. `JARVIS_MAX_VUELTAS` es un
   cortacircuitos de gasto (un modelo atascado pediría la misma herramienta sin avanzar) y
   `JARVIS_MAX_HISTORIAL` es lo único que hace crecer el coste conforme avanza la
   conversación — **si lo cambias, cambia también el de `helpers.js`**, o el cliente mandará
@@ -1506,7 +1521,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 575 tests)
+### Backend (`tests/backend`, 580 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
