@@ -281,11 +281,16 @@ class TestJarvisDespachador:
         # Toda herramienta necesita descripción: es lo único que el modelo usa para elegir.
         assert all(h["function"]["description"] for h in esquema)
 
-    def test_sin_servidores_mcp_sus_herramientas_no_se_anuncian(self, monkeypatch):
-        """Un esquema con herramientas muertas se paga por token en cada turno."""
+    def test_sin_servidores_mcp_no_se_anuncia_lo_que_opera_sobre_uno(self, monkeypatch, mock_requests):
+        """Un esquema con herramientas muertas se paga por token en cada turno.
+
+        Pero las que sirven para conectar el PRIMER servidor sí se anuncian siempre: son
+        justo las que hacen falta cuando no hay ninguno.
+        """
         monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", "")
         nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
-        assert not any(n.startswith("mcp_") for n in nombres)
+        assert not {"mcp_usar", "mcp_herramientas", "mcp_desconectar"} & nombres
+        assert {"mcp_catalogo", "mcp_conectar"} <= nombres
         assert "agenda" in nombres
 
     def test_los_obligatorios_estan_declarados_como_parametros(self):
@@ -753,9 +758,9 @@ class TestJarvisMcp:
 
     def test_sin_servidores_el_prompt_dice_como_se_conecta_uno(self, monkeypatch, mock_requests):
         """El modelo tiene que saber que el soporte existe: sin esta línea contestaba
-        'no tengo acceso a MCP' en vez de explicar que se aprueban en la config."""
+        'no tengo acceso a MCP' en vez de ponerse a conectar uno."""
         monkeypatch.setattr(main, "JARVIS_MCP_SERVERS", "")
-        assert "JARVIS_MCP_SERVERS" in main._jarvis_sistema()
+        assert "mcp_conectar" in main._jarvis_sistema()
 
     def test_un_error_del_servidor_no_revienta(self, monkeypatch, mock_requests):
         _con_mcp(monkeypatch)

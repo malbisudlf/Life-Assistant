@@ -10,7 +10,7 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
-  elegirVozEspanola, textoHablable,
+  elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
 } from "../lib/helpers";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -300,20 +300,26 @@ const VOZ_SINTESIS = typeof window !== "undefined" && "speechSynthesis" in windo
   ? window.speechSynthesis
   : null;
 
-function hablarJarvis(texto) {
-  if (!VOZ_SINTESIS) return;
+/** Lee la respuesta en voz alta. `alTerminar` se llama SIEMPRE, hable o no: el modo
+ *  llamada encadena la escucha con él, y un camino que no avisara dejaría la llamada
+ *  colgada en silencio esperando a alguien que ya no va a hablar. */
+function hablarJarvis(texto, alTerminar) {
+  const fin = () => { try { alTerminar?.(); } catch { /* mejor esfuerzo */ } };
+  if (!VOZ_SINTESIS) { fin(); return; }
   try {
     VOZ_SINTESIS.cancel();   // una respuesta nueva corta a la anterior a media frase
     const dicho = textoHablable(texto);
-    if (!dicho) return;
+    if (!dicho) { fin(); return; }
     const u = new SpeechSynthesisUtterance(dicho);
     u.lang = "es-ES";
     // getVoices() puede venir vacío en la primera llamada (Chrome las carga en
     // diferido): entonces basta el lang y elige el navegador.
     const voz = elegirVozEspanola(VOZ_SINTESIS.getVoices());
     if (voz) u.voice = voz;
+    u.onend   = fin;
+    u.onerror = fin;
     VOZ_SINTESIS.speak(u);
-  } catch { /* mejor esfuerzo: sin voz, se lee */ }
+  } catch { fin(); }
 }
 
 // Saca el motivo real de una respuesta de error de /jarvis. El detalle de FastAPI
@@ -362,13 +368,28 @@ function JarvisMensaje({ m }) {
   );
 }
 
+// Reaperturas seguidas del micrófono sin oír nada antes de colgar. Chrome cierra la
+// sesión cada pocos segundos de silencio, así que esto son del orden de un minuto callado.
+const REAPERTURAS_MAX = 8;
+
+// Qué se ve en cada fase de la llamada. El usuario tiene que saber si le están
+// escuchando o no: un micrófono que parece abierto y no lo está es lo que hace que la
+// gente repita la frase tres veces.
+const FASES_LLAMADA = {
+  escuchando: { texto: "Te escucho…", color: "var(--accent)" },
+  pensando:   { texto: "Pensando…",   color: "var(--accent2)" },
+  hablando:   { texto: "Hablando…",   color: "var(--green)" },
+};
+
 function JarvisChat({
   mensajes, borrador, setBorrador, onEnviar, pensando,
   pendiente, onConfirmar, onDescartar, confirmando,
   escuchando, onDictar, habla, onHabla, finRef,
+  enLlamada, faseLlamada, parcial, onLlamar, onColgar, contexto,
 }) {
-  const etiqueta = jarvisEtiquetaAccion(pendiente);
+  const etiqueta = jarvisEtiquetaAccion(pendiente, contexto);
   const puedeEnviar = borrador.trim() && !pensando;
+  const fase = FASES_LLAMADA[faseLlamada] || FASES_LLAMADA.escuchando;
 
   return (
     <>
@@ -413,40 +434,73 @@ function JarvisChat({
         </div>
       )}
 
-      <form onSubmit={e => { e.preventDefault(); if (puedeEnviar) onEnviar(borrador); }}
-            style={{ display: "flex", gap: 8 }}>
-        <input
-          value={borrador}
-          onChange={e => setBorrador(e.target.value)}
-          placeholder={escuchando ? "Escuchando…" : "Habla con Jarvis"}
-          disabled={pensando}
-          style={{
-            flex: 1, padding: "9px 12px", borderRadius: 8, fontSize: 14,
-            border: "0.5px solid var(--border)", background: "var(--surface2)",
-            color: "var(--text)", outline: "none", minWidth: 0,
-          }}
-        />
-        {VOZ_NAVEGADOR && (
-          <button type="button" onClick={onDictar} title="Dictar" style={{
-            padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
-            border: "0.5px solid var(--border)", background: escuchando ? "var(--accent)" : "transparent",
-            color: escuchando ? "var(--bg)" : "var(--muted)", flexShrink: 0,
-          }}>🎙</button>
-        )}
-        {VOZ_SINTESIS && (
-          <button type="button" onClick={onHabla}
-            title={habla ? "Silenciar a Jarvis" : "Que Jarvis conteste en voz alta"} style={{
+      {/* En llamada no hay nada que escribir: el teclado sobra y lo que hace falta es
+          ver en qué fase va y poder colgar de un toque. */}
+      {enLlamada ? (
+        <div style={{
+          padding: "12px 14px", borderRadius: 10,
+          background: "var(--surface2)", border: `0.5px solid ${fase.color}`,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%", background: fase.color,
+              animation: "pulse 1.5s infinite", flexShrink: 0,
+            }} />
+            <span style={{ fontSize: 13, color: fase.color, flex: 1 }}>{fase.texto}</span>
+            <button type="button" onClick={onColgar} style={{
+              padding: "6px 14px", borderRadius: 6, fontSize: 13, cursor: "pointer",
+              border: "none", background: "#d4645a", color: "#fff", flexShrink: 0,
+            }}>Colgar</button>
+          </div>
+          {parcial && (
+            <div style={{ marginTop: 8, fontSize: 13, color: "var(--muted)", fontStyle: "italic" }}>
+              {parcial}
+            </div>
+          )}
+        </div>
+      ) : (
+        <form onSubmit={e => { e.preventDefault(); if (puedeEnviar) onEnviar(borrador); }}
+              style={{ display: "flex", gap: 8 }}>
+          <input
+            value={borrador}
+            onChange={e => setBorrador(e.target.value)}
+            placeholder={escuchando ? "Escuchando…" : "Habla con Jarvis"}
+            disabled={pensando}
+            style={{
+              flex: 1, padding: "9px 12px", borderRadius: 8, fontSize: 14,
+              border: "0.5px solid var(--border)", background: "var(--surface2)",
+              color: "var(--text)", outline: "none", minWidth: 0,
+            }}
+          />
+          {VOZ_NAVEGADOR && VOZ_SINTESIS && (
+            <button type="button" onClick={onLlamar} title="Hablar como en una llamada" style={{
               padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
-              border: "0.5px solid var(--border)", background: habla ? "var(--accent)" : "transparent",
-              color: habla ? "var(--bg)" : "var(--muted)", flexShrink: 0,
-            }}>{habla ? "🔊" : "🔇"}</button>
-        )}
-        <button type="submit" disabled={!puedeEnviar} style={{
-          padding: "0 14px", borderRadius: 8, fontSize: 14, flexShrink: 0,
-          border: "none", background: "var(--accent)", color: "var(--bg)",
-          cursor: puedeEnviar ? "pointer" : "default", opacity: puedeEnviar ? 1 : 0.4,
-        }}>→</button>
-      </form>
+              border: "0.5px solid var(--border)", background: "transparent",
+              color: "var(--green)", flexShrink: 0,
+            }}>📞</button>
+          )}
+          {VOZ_NAVEGADOR && (
+            <button type="button" onClick={onDictar} title="Dictar" style={{
+              padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
+              border: "0.5px solid var(--border)", background: escuchando ? "var(--accent)" : "transparent",
+              color: escuchando ? "var(--bg)" : "var(--muted)", flexShrink: 0,
+            }}>🎙</button>
+          )}
+          {VOZ_SINTESIS && (
+            <button type="button" onClick={onHabla}
+              title={habla ? "Silenciar a Jarvis" : "Que Jarvis conteste en voz alta"} style={{
+                padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
+                border: "0.5px solid var(--border)", background: habla ? "var(--accent)" : "transparent",
+                color: habla ? "var(--bg)" : "var(--muted)", flexShrink: 0,
+              }}>{habla ? "🔊" : "🔇"}</button>
+          )}
+          <button type="submit" disabled={!puedeEnviar} style={{
+            padding: "0 14px", borderRadius: 8, fontSize: 14, flexShrink: 0,
+            border: "none", background: "var(--accent)", color: "var(--bg)",
+            cursor: puedeEnviar ? "pointer" : "default", opacity: puedeEnviar ? 1 : 0.4,
+          }}>→</button>
+        </form>
+      )}
     </>
   );
 }
@@ -854,6 +908,26 @@ export default function Dashboard() {
   });
   const jarvisFinRef = useRef(null);
   const jarvisVozRef = useRef(null);
+
+  // ── Modo llamada ──
+  // Hablar con Jarvis como por teléfono: escucha seguida, se envía solo al detectar que
+  // has terminado la frase, contesta en voz y vuelve a escuchar. Todo el estado vivo va
+  // en refs y no en useState porque lo leen los callbacks del reconocimiento de voz, que
+  // se crean una vez y sobreviven a los renders: con estado normal leerían siempre el
+  // valor del render en que nacieron.
+  const [jarvisLlamada, setJarvisLlamada] = useState(false);
+  const [jarvisFase, setJarvisFase]       = useState("escuchando");
+  const [jarvisParcial, setJarvisParcial] = useState("");
+  const llamadaRef  = useRef(false);   // la llamada sigue viva
+  const recRef      = useRef(null);    // reconocimiento en curso
+  const silencioRef = useRef(null);    // temporizador de "ha terminado de hablar"
+  const buferRef    = useRef("");      // lo dicho en este turno
+  const hablandoRef = useRef(false);   // Jarvis habla: el micro está cerrado (anti-eco)
+  const reaperturasRef = useRef(0);    // veces seguidas que se ha reabierto sin oír nada
+  // Cada turno de voz lleva número. `speechSynthesis.cancel()` dispara el `onend` de lo
+  // que estuviera sonando, así que sin esto el callback de una respuesta ya descartada
+  // reabriría el micro justo cuando empieza a sonar la siguiente.
+  const vozTurnoRef = useRef(0);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
@@ -1590,9 +1664,12 @@ export default function Dashboard() {
   }
 
   // ── Jarvis ───────────────────────────────────────────────────────────────
-  async function enviarAJarvis(texto) {
+  /** Un turno. Devuelve el texto de la respuesta (o null si falló), que es lo que
+   *  encadena el modo llamada para leerlo y volver a escuchar. En llamada la lee siempre,
+   *  esté como esté el interruptor 🔊: para eso has llamado. */
+  async function enviarAJarvis(texto, { voz = false } = {}) {
     const mensaje = (texto || "").trim();
-    if (!mensaje || jarvisPensando) return;
+    if (!mensaje || jarvisPensando) return null;
     // El historial se toma ANTES de añadir el turno nuevo: el mensaje va aparte en el
     // cuerpo, y mandarlo también dentro del historial lo duplicaría.
     const historial = jarvisHistorial(jarvisMensajes);
@@ -1604,7 +1681,7 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/jarvis`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({ mensaje, historial }),
+        body: JSON.stringify({ mensaje, historial, voz }),
       });
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
@@ -1614,7 +1691,9 @@ export default function Dashboard() {
         herramientas: d.herramientas || [],
       }]);
       setJarvisPendiente(d.pendiente || null);
-      if (jarvisHabla) hablarJarvis(d.respuesta || "");
+      // En llamada habla el ciclo de la llamada, para poder encadenar con la escucha.
+      if (jarvisHabla && !voz) hablarJarvis(d.respuesta || "");
+      return d.respuesta || "";
     } catch (e) {
       // Un fallo no puede parecerse a una respuesta: se marca como aviso, que se pinta
       // distinto y queda fuera del historial que viaja al backend. Y DICE QUÉ PASÓ: un
@@ -1624,6 +1703,7 @@ export default function Dashboard() {
         rol: "aviso",
         texto: e?.explicado ? e.message : jarvisMotivoError(0),
       }]);
+      return null;
     } finally {
       setJarvisPensando(false);
     }
@@ -1697,6 +1777,155 @@ export default function Dashboard() {
       setJarvisEscuchando(false);   // mejor esfuerzo: si el navegador lo niega, se escribe
     }
   }
+
+  // ── Modo llamada ─────────────────────────────────────────────────────────
+  // El ciclo: escuchar → detectar que has terminado → enviar → contestar en voz →
+  // escuchar otra vez, hasta que cuelgues. Dos cosas lo sostienen y no son opcionales:
+  //
+  //   1. EL MICRÓFONO SE CIERRA MIENTRAS JARVIS HABLA. Por altavoz se oye a sí mismo, se
+  //      transcribe y se contesta solo: una llamada infinita que además cuesta dinero.
+  //   2. EL FIN DE FRASE LO DECIDE EL SILENCIO, no el `isFinal` del navegador, que llega
+  //      a la primera pausa y trocearía una frase pensada en tres mensajes sueltos.
+
+  function pararEscucha() {
+    if (silencioRef.current) { clearTimeout(silencioRef.current); silencioRef.current = null; }
+    const rec = recRef.current;
+    recRef.current = null;
+    try { rec?.stop(); } catch { /* mejor esfuerzo: ya estaba parado */ }
+  }
+
+  function colgarLlamada(aviso) {
+    llamadaRef.current  = false;
+    hablandoRef.current = false;
+    buferRef.current    = "";
+    vozTurnoRef.current++;          // invalida los callbacks de voz que estén en vuelo
+    pararEscucha();
+    try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+    setJarvisLlamada(false);
+    setJarvisParcial("");
+    if (aviso) setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: aviso }]);
+  }
+
+  function finDeFrase() {
+    const dicho = buferRef.current.trim();
+    if (!dicho) return;             // silencio sin nada dicho: se sigue escuchando
+    buferRef.current = "";
+    setJarvisParcial("");
+    if (esFinDeLlamada(dicho)) { colgarLlamada(); return; }
+    pararEscucha();
+    cicloRef.current.turno?.(dicho);
+  }
+
+  function escucharEnLlamada() {
+    if (!llamadaRef.current || hablandoRef.current || recRef.current || !VOZ_NAVEGADOR) return;
+    let rec;
+    try { rec = new VOZ_NAVEGADOR(); }
+    catch { colgarLlamada("Este navegador no sabe escuchar."); return; }
+    rec.lang           = "es-ES";
+    rec.continuous     = true;   // una llamada es seguida, no frase a frase
+    rec.interimResults = true;   // para ir enseñando lo que entiende mientras hablas
+
+    rec.onresult = e => {
+      reaperturasRef.current = 0;   // se ha oído algo: la cuenta atrás vuelve a empezar
+      let parcial = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const trozo = e.results[i][0]?.transcript || "";
+        if (e.results[i].isFinal) buferRef.current = `${buferRef.current} ${trozo}`.trim();
+        else parcial += trozo;
+      }
+      setJarvisParcial(`${buferRef.current} ${parcial}`.trim());
+      if (silencioRef.current) clearTimeout(silencioRef.current);
+      silencioRef.current = setTimeout(() => cicloRef.current.fin?.(), JARVIS_SILENCIO_MS);
+    };
+    rec.onend = () => {
+      // Chrome cierra la sesión él solo cada pocos segundos. Mientras la llamada siga y
+      // no estemos hablando, se reabre: sin esto la llamada se queda sorda sin avisar.
+      if (recRef.current !== rec) return;
+      recRef.current = null;
+      if (!llamadaRef.current || hablandoRef.current) return;
+      // Cada reapertura sin haber oído nada suma. Cubre dos cosas a la vez: una llamada
+      // olvidada abierta con el micro encendido, y un error que se repite (sin red, el
+      // reconocimiento falla y termina en bucle) reabriendo cinco veces por segundo.
+      reaperturasRef.current += 1;
+      if (reaperturasRef.current > REAPERTURAS_MAX) {
+        colgarLlamada("He colgado: llevabas un rato sin decir nada.");
+        return;
+      }
+      setTimeout(() => cicloRef.current.escuchar?.(), 200);
+    };
+    rec.onerror = ev => {
+      if (recRef.current === rec) recRef.current = null;
+      const motivo = ev?.error || "";
+      // Un permiso denegado no se arregla reintentando, y reintentar en bucle es peor que
+      // colgar: se dice qué pasa. Lo transitorio (no-speech, network) lo reabre onend.
+      if (motivo === "not-allowed" || motivo === "service-not-allowed") {
+        colgarLlamada("No tengo permiso para usar el micrófono.");
+      } else if (motivo === "audio-capture") {
+        colgarLlamada("No encuentro ningún micrófono.");
+      }
+    };
+    try {
+      rec.start();
+      recRef.current = rec;
+      setJarvisFase("escuchando");
+    } catch { /* start() sobre uno que ya arrancó: lo reabre onend */ }
+  }
+
+  async function turnoDeLlamada(dicho) {
+    setJarvisFase("pensando");
+    const respuesta = await enviarAJarvis(dicho, { voz: true });
+    if (!llamadaRef.current) return;            // han colgado mientras pensaba
+    if (!respuesta) { cicloRef.current.escuchar?.(); return; }
+    setJarvisFase("hablando");
+    hablandoRef.current = true;
+    const miTurno = ++vozTurnoRef.current;
+    hablarJarvis(respuesta, () => {
+      if (vozTurnoRef.current !== miTurno) return;
+      hablandoRef.current = false;
+      cicloRef.current.escuchar?.();
+    });
+  }
+
+  function iniciarLlamada() {
+    if (!VOZ_NAVEGADOR || !VOZ_SINTESIS || llamadaRef.current) return;
+    llamadaRef.current     = true;
+    hablandoRef.current    = true;
+    buferRef.current       = "";
+    reaperturasRef.current = 0;
+    setJarvisLlamada(true);
+    setJarvisParcial("");
+    setJarvisFase("hablando");
+    // Se saluda DESDE el toque a propósito: iOS solo desbloquea el audio de
+    // speechSynthesis dentro de un gesto del usuario, y si el primer `speak` llegara
+    // después del primer fetch la llamada sería muda en el móvil. De paso confirma que
+    // el audio va antes de ponerse a hablar solo.
+    const miTurno = ++vozTurnoRef.current;
+    hablarJarvis("Dime.", () => {
+      if (vozTurnoRef.current !== miTurno) return;
+      hablandoRef.current = false;
+      cicloRef.current.escuchar?.();
+    });
+  }
+
+  // Los callbacks del reconocimiento y de la síntesis nacen en un render y siguen vivos
+  // muchos renders después. Sin esta indirección leerían el `jarvisMensajes` del momento
+  // en que empezó la llamada, y Jarvis perdería el hilo de su propia conversación a
+  // partir del segundo turno.
+  const cicloRef = useRef({});
+  useEffect(() => {
+    cicloRef.current = {
+      escuchar: escucharEnLlamada, turno: turnoDeLlamada, fin: finDeFrase,
+    };
+  });
+
+  // Salir del dashboard con una llamada abierta dejaría el micro escuchando y la voz
+  // sonando sola. Solo toca refs: nada de estado sobre un componente ya desmontado.
+  useEffect(() => () => {
+    llamadaRef.current = false;
+    if (silencioRef.current) clearTimeout(silencioRef.current);
+    try { recRef.current?.stop(); } catch { /* mejor esfuerzo */ }
+    try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+  }, []);
 
   // La conversación sobrevive a una recarga, acotada: guardar el hilo entero llenaría
   // la cuota de localStorage con algo que nadie va a releer.
@@ -2578,6 +2807,14 @@ export default function Dashboard() {
             habla={jarvisHabla}
             onHabla={alternarVozJarvis}
             finRef={jarvisFinRef}
+            enLlamada={jarvisLlamada}
+            faseLlamada={jarvisFase}
+            parcial={jarvisParcial}
+            onLlamar={iniciarLlamada}
+            onColgar={() => colgarLlamada()}
+            // Para traducir el id de una acción propuesta al nombre real de lo que toca:
+            // el botón de confirmar no puede fiarse de cómo lo haya redactado el modelo.
+            contexto={{ eventos: [...allEvents, ...classEvents], ideas }}
           />
         </div>
       );
