@@ -296,7 +296,8 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `BRIEF_DISPARA_SUENO`, `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `JARVIS_WEB`, `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
-`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`.
+`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `JARVIS_MODEL_ACCION`,
+`JARVIS_MAX_TOKENS_VOZ`, `JARVIS_REPO`, `CASA_ORDEN_TTL`.
 (* = obligatoria para arrancar.)
 
 **Memoria de Jarvis**: ejecuta la migración `20260807_jarvis_memoria.sql` para que
@@ -311,6 +312,22 @@ Ejemplo con GitHub (47 herramientas: issues, PRs, commits, ficheros):
 ```
 JARVIS_MCP_SERVERS={"github":{"url":"https://api.githubcopilot.com/mcp/","token":"ghp_..."}}
 ```
+
+Con la migración `20260808_jarvis_mcp_servidores.sql` aplicada no hace falta editar esa
+variable cada vez: puedes pedirle a Jarvis que se conecte a un servidor, él te dice qué
+credencial necesita y deja el alta propuesta; se guarda cuando pulsas confirmar. Lo que
+haya en `JARVIS_MCP_SERVERS` manda sobre lo dado de alta así, y no se puede desconectar
+desde el chat.
+
+**Recordatorios**: migración `20260808_jarvis_recordatorios.sql`. Los despacha el mismo
+sondeo de Home Assistant que el resumen diario (`/ha/brief-tick`), así que necesitas esa
+automatización para que los avisos salgan. Llegan por correo, con la misma configuración
+SMTP del resumen.
+
+**Controlar la casa**: migración `20260808_ha_entidades.sql` y las dos automatizaciones de
+`docs/HOME_ASSISTANT_JARVIS.md` (una sondea las órdenes, otra empuja el catálogo de
+dispositivos). Sin ellas Jarvis dice que no sabe qué hay en casa, que es lo correcto: no
+se inventa nombres de entidades.
 
 Frontend: `VITE_API_URL`, `VITE_HA_URL`, `VITE_HA_DASHBOARD_PATH`,
 `VITE_ENTREGAS_MARKER`, `VITE_AGENT_ID`.
