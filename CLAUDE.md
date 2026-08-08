@@ -518,7 +518,13 @@ Ficheros clave:
   pide una herramienta, esa misma vuelta se relanza con `JARVIS_MODEL_ACCION`** (lo que
   pidiera el pequeño se descarta sin ejecutarse) y el resto del bucle va con el grande. El
   cierre vuelve al pequeño: para redactar con los datos delante, sobra. Una conversación
-  que no toca nada no le paga al grande ni una llamada. Igualar las dos variables desactiva
+  que no toca nada no le paga al grande ni una llamada.
+  **Y se relanza también cuando el pequeño se NIEGA** (`_suena_a_negativa`), que es el
+  agujero que tenía el reparto: al decidir que no hacía falta ninguna herramienta cerraba
+  el turno y el grande no llegaba a entrar nunca. *Negarse es la única respuesta que no
+  puede darse sin haberla comprobado*, así que la revisa el grande. La detección es por
+  frase hecha y se peca de generosa a propósito: un falso positivo cuesta una llamada, un
+  falso negativo devuelve el bug. Igualar las dos variables desactiva
   el reparto sin tocar código — es lo que hace `conftest.py`, porque si no cada vuelta con
   herramienta consumiría dos respuestas del guion del modelo simulado.
   **Por voz cambia el prompt, no el cerebro** (`voz: true` en el cuerpo): frases cortas,
@@ -1500,7 +1506,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 571 tests)
+### Backend (`tests/backend`, 575 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1560,6 +1566,20 @@ excepción o error de consola, no solo si falta un texto.
   que toca.
 
 ## Bugs históricos (no los reintroduzcas)
+
+- **Jarvis dijo que no sabía hacer justo lo que sabía hacer.** A «quiero que aprendas a
+  hacer reservas en restaurantes, aprende esa skill o importa mcps, como sea» contestó
+  «no puedo aprender nuevas habilidades ni importar capacidades de manera autónoma» — el
+  turno en que se estrenaba `mcp_conectar`, que hace exactamente eso. No fue el prompt:
+  las dos reglas estaban ahí («puedes AMPLIARTE tú mismo», «antes de decir que no, mira
+  `mis_capacidades`»). Fue el **reparto de modelos**: el pequeño decidió que no hacía
+  falta ninguna herramienta, y como el relanzamiento al grande solo se disparaba al PEDIR
+  una, el que sabe elegir no llegó a ver la petición. El sesgo de asistente («no puedo
+  hacer eso de forma autónoma») pesa más que cualquier instrucción cuando el modelo
+  contesta sin mirar. Moraleja doble: **delegar en el modelo pequeño la decisión de si
+  hace falta una herramienta le regala también la de rendirse**, y —la de siempre en este
+  proyecto, otra vez por el mismo sitio— *"no pude" no es "no hay nada que hacer"*.
+  Arreglado relanzando también las negativas, con test.
 
 - **Un mes de métricas nocturnas a n=3, y no había ningún bug: el reloj estaba en un
   cajón.** El correo del 07/08 traía sueño, HRV, FC en reposo y respiración con tres
