@@ -266,6 +266,15 @@ workflow*, o `POST /brief/send?forzar=1` con tu `BRIEF_TOKEN`, que se salta la
 comprobación de "ya se envió hoy". Para ver qué se enviaría sin mandar nada, `GET /brief` con tu JWT devuelve
 los mismos datos en JSON.
 
+**5. Apagarlo o pausarlo unos días** (migración `20260813_brief_ajustes.sql`): en el
+panel ⚙ del dashboard, sección *Resumen diario*. El interruptor gobierna las tres
+señales de disparo a la vez, y la pausa lleva fecha de fin: se agota sola y el correo
+vuelve al día siguiente, sin tener que acordarse de reactivarlo. Lo que **no** tapa es
+el envío pedido a mano (`?forzar=1` o pedírselo a Jarvis): ahí hay alguien pidiéndolo
+en ese momento. Sin la migración aplicada el resumen se comporta como siempre —el
+backend lo trata como activo y lo deja dicho en el registro—, pero el interruptor no
+guardará nada.
+
 ## 8. Checklist de verificación
 
 - [ ] `python backend/check_config.py` sin errores bloqueantes

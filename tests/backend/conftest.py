@@ -107,6 +107,9 @@ def _limpiar_estado():
     main._pc_power_action = None
     main._token_cache = None
     main._presencia_cache = None
+    # El interruptor del resumen diario: sin limpiarlo, un test que lo apague dejaría el
+    # correo apagado para todos los que vinieran detrás.
+    main._brief_ajustes_cache = None
     # Copias en memoria de la lista blanca de MCP y del catálogo de la casa: sin esto, un
     # test que conecte un servidor o guarde dispositivos se los dejaría puestos al
     # siguiente. Las sesiones MCP van con ellas, como en _mcp_invalidar().
