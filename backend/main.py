@@ -3903,6 +3903,96 @@ def enviar_correo(asunto: str, cuerpo: str):
 
 BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
 
+# ── El interruptor ────────────────────────────────────────────────────────────
+# Apagar el resumen tiene que ser estado persistido, no un flag en memoria: Fly escala
+# a cero y un apagado que no sobrevive al cold start se enciende solo a la mañana
+# siguiente. Mismo criterio que la presencia, y el contrario que el WOL (ver la tabla
+# `brief_ajustes`).
+#
+# La comprobación vive en `enviar_brief_si_toca()` y solo ahí, porque esa función es la
+# única puerta del envío automático: puesta ahí, apaga de una vez las tres fuentes (el
+# Atajo del móvil, la llegada del sueño del Watch y el reloj de HA) y ninguna futura se
+# puede olvidar de mirarla.
+#
+# Lo que NO tapa a propósito es el envío pedido a mano —`/brief/send?forzar=1` y la
+# herramienta `enviar_resumen` de Jarvis—: ahí hay una persona pidiéndolo en ese
+# momento, y negarle el correo por un interruptor que puede desactivar en el mismo
+# gesto sería obedecer al ajuste en vez de a quien lo puso.
+BRIEF_AJUSTES_URL = f"{SUPABASE_URL}/rest/v1/brief_ajustes"
+BRIEF_AJUSTES_ID  = "actual"
+BRIEF_AJUSTES_DEFECTO = {"activo": True, "pausado_hasta": None}
+
+# Copia en memoria, igual que la del token de Graph y la de la presencia: el ajuste se
+# consulta en cada disparo (el tick de HA entra cada 5 min) y solo cambia cuando lo
+# cambia el usuario, momento en el que esta copia se actualiza sola.
+_brief_ajustes_cache: dict | None = None
+_brief_ajustes_lock = threading.Lock()
+
+
+def _cachear_brief_ajustes(data: dict | None):
+    global _brief_ajustes_cache
+    with _brief_ajustes_lock:
+        _brief_ajustes_cache = data
+
+
+def _leer_brief_ajustes() -> dict:
+    """El ajuste guardado, o el defecto (activo, sin pausa) si no hay fila.
+
+    Un fallo leyendo NO apaga el resumen: se sigue con el defecto y se registra. El
+    envío necesita Supabase de todos modos para reservar el día, así que un Supabase
+    caído no manda nada por su cuenta; en cambio, tratar "no he podido leer" como
+    "estaba apagado" dejaría sin briefing un día entero por un fallo transitorio, y sin
+    que nada lo pareciera. Mismo criterio que la memoria de Jarvis.
+    """
+    with _brief_ajustes_lock:
+        if _brief_ajustes_cache is not None:
+            return _brief_ajustes_cache
+    try:
+        r = http.get(
+            f"{BRIEF_AJUSTES_URL}?id=eq.{BRIEF_AJUSTES_ID}&select=activo,pausado_hasta",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+    except Exception as e:
+        logger.warning("Resumen diario: no se pudo leer el interruptor (%s); se sigue como activo", e)
+        return dict(BRIEF_AJUSTES_DEFECTO)
+
+    fila = filas[0] if filas else {}
+    ajustes = {
+        "activo":        bool(fila.get("activo", True)),
+        "pausado_hasta": fila.get("pausado_hasta") or None,
+    }
+    _cachear_brief_ajustes(ajustes)
+    return ajustes
+
+
+def _estado_brief(hoy: str) -> dict:
+    """Qué dice hoy el interruptor: {activo, pausado_hasta, pausado, motivo}.
+
+    La pausa vencida se reporta como si no existiera (`pausado_hasta` a None) en vez de
+    devolver una fecha pasada: el panel de ajustes enseña lo que devuelve esto, y una
+    fecha que ya pasó al lado de un resumen que vuelve a salir se lee como un fallo.
+    """
+    a = _leer_brief_ajustes()
+    pausado_hasta = a.get("pausado_hasta")
+    if pausado_hasta and pausado_hasta < hoy:
+        pausado_hasta = None                       # la pausa se agotó sola
+    pausado = bool(pausado_hasta)
+
+    motivo = None
+    if not a.get("activo", True):
+        motivo = "el resumen diario está desactivado"
+    elif pausado:
+        motivo = f"el resumen diario está pausado hasta el {pausado_hasta}"
+    return {
+        "activo":        bool(a.get("activo", True)),
+        "pausado_hasta": pausado_hasta,
+        "pausado":       pausado,
+        "motivo":        motivo,
+    }
+
 
 def _hora_config(valor: str, defecto: tuple) -> tuple:
     """"HH:MM" → (hora, minuto). Una hora mal escrita cae al defecto en vez de tumbar
@@ -4044,6 +4134,13 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     ahora = _ahora_local()
     fecha = ahora.date().isoformat()
 
+    # El interruptor se mira ANTES de reservar: reservar el día de un correo que no va a
+    # salir dejaría marcado como enviado un día en el que no se envió nada, y al quitar
+    # la pausa esa fila seguiría ahí bloqueando el envío hasta el día siguiente.
+    estado = _estado_brief(fecha)
+    if estado["motivo"]:
+        return {"enviado": False, "motivo": estado["motivo"]}
+
     if not _reservar_envio(fecha, fuente, despertar):
         return {"enviado": False, "motivo": "el resumen de hoy ya se envió"}
 
@@ -4158,6 +4255,95 @@ def get_brief(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
     """Los mismos datos que van en el correo, en JSON. Para comprobar qué se enviaría
     sin tener que esperar al disparador de la mañana."""
     return construir_brief()
+
+
+class BriefAjustesUpdate(BaseModel):
+    activo:        Optional[bool] = None
+    # Último día sin resumen, inclusive. `null` explícito quita la pausa; omitirlo la
+    # deja como estaba (se distinguen con model_fields_set, más abajo).
+    pausado_hasta: Optional[str]  = None
+
+
+def _brief_ajustes_estado() -> dict:
+    """Lo que ve el panel de ajustes: el interruptor y si el correo de hoy ya salió.
+
+    Las dos cosas juntas porque separadas se malinterpretan: "hoy no ha llegado el
+    correo" significa cosas muy distintas según esté apagado o simplemente aún no haya
+    tocado, y esa es justo la pregunta que lleva a mirar aquí.
+    """
+    hoy    = _ahora_local().date().isoformat()
+    estado = _estado_brief(hoy)
+
+    enviado_hoy = None                              # None = no se pudo comprobar
+    try:
+        r = http.get(f"{BRIEF_ENVIOS_URL}?fecha=eq.{hoy}&select=fecha,fuente,enviado_at",
+                     headers=supabase_headers())
+        if r.status_code < 300:
+            enviado_hoy = bool(r.json())
+    except requests.RequestException:
+        logger.warning("Resumen diario: no se pudo comprobar si el de hoy ya salió")
+
+    return {**estado, "fecha": hoy, "enviado_hoy": enviado_hoy}
+
+
+@app.get("/brief/ajustes")
+def get_brief_ajustes(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Estado del interruptor del resumen diario."""
+    return _brief_ajustes_estado()
+
+
+@app.patch("/brief/ajustes")
+def update_brief_ajustes(
+    body: BriefAjustesUpdate,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Enciende, apaga o pausa el resumen diario.
+
+    Se escribe la fila ENTERA con un upsert (`on_conflict=id`, la lección del 409): el
+    estado deseado se conoce completo, así que un solo viaje evita tener que decidir si
+    la fila existe ya. Y el ajuste que se acaba de escribir se mete en la copia en
+    memoria, para que el siguiente disparo lo vea sin releer Supabase.
+    """
+    puestos = body.model_fields_set
+    if not puestos:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+
+    actual        = _leer_brief_ajustes()
+    activo        = actual["activo"] if body.activo is None else bool(body.activo)
+    pausado_hasta = actual["pausado_hasta"]
+
+    if "pausado_hasta" in puestos:
+        pausado_hasta = (body.pausado_hasta or "").strip() or None
+        if pausado_hasta:
+            if not _DATE_RE.match(pausado_hasta):
+                raise HTTPException(status_code=400, detail="pausado_hasta debe ser YYYY-MM-DD")
+            try:
+                datetime.strptime(pausado_hasta, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Esa fecha no existe")
+            # Una pausa que acaba antes de hoy no pausa nada: se rechaza en vez de
+            # guardarse, porque guardada se leería como "está pausado" en el panel.
+            if pausado_hasta < _ahora_local().date().isoformat():
+                raise HTTPException(status_code=400, detail="Esa fecha ya ha pasado")
+
+    fila = {
+        "id":            BRIEF_AJUSTES_ID,
+        "activo":        activo,
+        "pausado_hasta": pausado_hasta,
+        "updated_at":    datetime.now(timezone.utc).isoformat(),
+    }
+    r = http.post(
+        f"{BRIEF_AJUSTES_URL}?on_conflict=id",
+        headers={**supabase_headers(),
+                 "Prefer": "resolution=merge-duplicates,return=minimal"},
+        json=[fila],
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+
+    _cachear_brief_ajustes({"activo": activo, "pausado_hasta": pausado_hasta})
+    logger.info("Resumen diario: interruptor → activo=%s, pausado_hasta=%s", activo, pausado_hasta)
+    return {"ok": True, **_brief_ajustes_estado()}
 
 
 @app.post("/brief/send")
@@ -4811,6 +4997,31 @@ def _j_enviar_resumen() -> dict:
     enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
     logger.info("Resumen diario enviado a %s (%s), pedido a Jarvis", BRIEF_TO, datos["fecha"])
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
+
+
+def _j_estado_resumen_diario() -> dict:
+    return _brief_ajustes_estado()
+
+
+def _j_configurar_resumen_diario(activo=None, pausar_hasta=None) -> dict:
+    """Enciende, apaga o pausa el resumen de la mañana.
+
+    Va sin confirmar porque es exactamente el botón que ya está en el panel de ajustes,
+    y es reversible en el mismo gesto. Un rechazo del endpoint (una fecha que ya pasó)
+    vuelve como `motivo` en vez de reventar: así el modelo puede corregirse en la misma
+    conversación en lugar de dar el fallo por definitivo.
+    """
+    campos = {}
+    if activo is not None:
+        campos["activo"] = bool(activo)
+    if pausar_hasta is not None:
+        campos["pausado_hasta"] = str(pausar_hasta).strip() or None
+    if not campos:
+        return {"ok": False, "motivo": "Dime si lo activo, lo desactivo, o hasta qué día lo pauso"}
+    try:
+        return update_brief_ajustes(BriefAjustesUpdate(**campos), credentials=None)
+    except HTTPException as e:
+        return {"ok": False, "motivo": e.detail}
 
 
 def _j_cobrar_entrenamiento() -> dict:
@@ -6008,6 +6219,27 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion": "Manda ahora al correo del usuario el resumen con los datos del "
                        "día (agenda, salud, entrenamiento), sin esperar al de la mañana.",
         "parametros":  {},
+    },
+    "estado_resumen_diario": {
+        "confirmar":   False,
+        "fn":          _j_estado_resumen_diario,
+        "descripcion": "Si el resumen de la mañana está activo, pausado o apagado, y si el "
+                       "de hoy ya ha salido. Míralo antes de decir por qué no ha llegado.",
+        "parametros":  {},
+    },
+    "configurar_resumen_diario": {
+        # Es el mismo botón que ya está en el panel de ajustes, y se deshace igual de
+        # fácil: va directa, como encender el PC.
+        "confirmar":   False,
+        "fn":          _j_configurar_resumen_diario,
+        "descripcion": "Activa, desactiva o pausa el resumen de la mañana. Para unos días "
+                       "sin resumen (vacaciones) usa pausar_hasta, que se agota solo; "
+                       "activo=false es apagarlo hasta nueva orden.",
+        "parametros":  {
+            "activo": {"type": "boolean", "description": "true lo enciende, false lo apaga."},
+            "pausar_hasta": {"type": "string", "description": "YYYY-MM-DD: último día sin "
+                             "resumen, incluido. Cadena vacía para quitar la pausa."},
+        },
     },
     "errores": {
         "confirmar":   False,
