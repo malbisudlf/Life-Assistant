@@ -982,6 +982,11 @@ export default function Dashboard() {
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
   const [logsAbiertos, setLogsAbiertos]   = useState(false);  // registro del backend, plegado por defecto
+  // Interruptor del resumen diario. Vive en el backend (Supabase) y no en localStorage:
+  // quien manda el correo es el backend, que no ve el localStorage, y un flag en memoria
+  // suya se borraría en el próximo cold start de Fly.
+  const [briefCfg, setBriefCfg]           = useState(null);
+  const [briefGuardando, setBriefGuardando] = useState(false);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   // Histórico largo, solo para el panel de patrones del modal (ver efecto de carga).
   const [healthLargo, setHealthLargo]         = useState(null);
@@ -2037,10 +2042,11 @@ export default function Dashboard() {
     let registro = null;
     let presencia = null;
     if (backend.ok) {
-      const [rAgente, rLogs, rPresencia] = await Promise.all([
+      const [rAgente, rLogs, rPresencia, rBrief] = await Promise.all([
         apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/brief/ajustes`, { headers: authHeaders() }).catch(() => null),
       ]);
       try {
         if (rAgente?.ok) agente = await rAgente.json();
@@ -2051,10 +2057,28 @@ export default function Dashboard() {
       try {
         if (rPresencia?.ok) presencia = await rPresencia.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      try {
+        if (rBrief?.ok) setBriefCfg(await rBrief.json());
+      } catch { /* mejor esfuerzo: el interruptor se muestra como desconocido */ }
     }
 
     setSysStatus({ backend, agente, registro, presencia, comprobado: Date.now() });
     setSysLoading(false);
+  }
+
+  // Enciende, apaga o pausa el resumen diario. La respuesta del PATCH ya trae el estado
+  // completo (incluida la pausa vencida, que el backend reporta como si no existiera),
+  // así que se pinta lo que diga el backend y no lo que creamos haber puesto.
+  async function guardarBriefAjustes(cambios) {
+    if (briefGuardando) return;
+    setBriefGuardando(true);
+    try {
+      const r = await apiFetch(`${API}/brief/ajustes`, {
+        method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
+      });
+      if (r.ok) setBriefCfg(await r.json());
+    } catch { /* mejor esfuerzo: ignorar */ }
+    setBriefGuardando(false);
   }
 
   async function vaciarRegistro() {
@@ -5050,6 +5074,53 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {/* ── Resumen diario ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Resumen diario</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <button
+                  onClick={() => guardarBriefAjustes({ activo: !briefCfg?.activo })}
+                  disabled={!briefCfg || briefGuardando}
+                  style={{
+                    padding: "6px 12px",
+                    background: briefCfg?.activo ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+                    border: `0.5px solid ${briefCfg?.activo ? "var(--accent)" : "var(--border2)"}`,
+                    borderRadius: 6,
+                    color: briefCfg?.activo ? "var(--accent)" : "var(--muted)",
+                    fontSize: 12, cursor: !briefCfg || briefGuardando ? "default" : "pointer",
+                    fontFamily: "'DM Sans', sans-serif",
+                  }}>
+                  {!briefCfg ? "Comprobando…" : briefCfg.activo ? "Activado" : "Desactivado"}
+                </button>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {!briefCfg ? "abre y actualiza el estado del sistema"
+                    : briefCfg.activo ? "El correo con los datos del día sale al despertarte"
+                    : "No saldrá ningún correo hasta que lo vuelvas a activar"}
+                </span>
+              </div>
+              {/* La pausa se agota sola: es lo que separa "me voy una semana" de
+                  "no lo quiero más", y evita tener que acordarse de reactivarlo. */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>Pausar hasta</span>
+                <div style={{ width: 130 }}>
+                  <DateInput
+                    value={briefCfg?.pausado_hasta || ""}
+                    onChange={iso => guardarBriefAjustes({ pausado_hasta: iso })}
+                  />
+                </div>
+                {briefCfg?.pausado && (
+                  <button onClick={() => guardarBriefAjustes({ pausado_hasta: null })} disabled={briefGuardando} style={{
+                    background: "transparent", border: "none", padding: 0,
+                    cursor: briefGuardando ? "default" : "pointer",
+                    color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+                  }}>Quitar pausa</button>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 6 }}>
+                Último día sin resumen, incluido. Después vuelve solo.
+              </div>
+            </div>
+
             {/* ── Estado del sistema ── */}
             <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
@@ -5132,6 +5203,20 @@ export default function Dashboard() {
                   detalle: training?.client
                     ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
                     : "sin cliente configurado",
+                });
+
+                // El resumen diario. Apagado a propósito y roto se parecen mucho desde
+                // fuera —en los dos casos el correo no llega—, así que esta fila tiene
+                // que decir cuál de los dos es, y si el de hoy ya salió.
+                filas.push({
+                  nombre: "Resumen diario",
+                  tono: !briefCfg ? "muted" : !briefCfg.activo ? "muted" : briefCfg.pausado ? "accent" : "green",
+                  detalle: !briefCfg ? "sin comprobar"
+                    : !briefCfg.activo ? "desactivado"
+                    : briefCfg.pausado ? `pausado hasta el ${isoToDdMmYyyy(briefCfg.pausado_hasta)}`
+                    : briefCfg.enviado_hoy === true ? "activo · el de hoy ya ha salido"
+                    : briefCfg.enviado_hoy === false ? "activo · hoy aún no ha salido"
+                    : "activo",
                 });
 
                 // El registro del backend (app_logs). Las demás filas dicen si algo

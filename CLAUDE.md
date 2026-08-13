@@ -463,6 +463,31 @@ Ficheros clave:
   tarde y a ciegas, y al pasar por la misma puerta idempotente no duplica nada.
   `POST /brief/send?forzar=1` se salta la idempotencia: es como se prueba el correo a
   mano sin esperar a mañana ni borrar la fila del día.
+- **El interruptor** (`brief_ajustes`, `GET`/`PATCH /brief/ajustes`, panel ⚙ y las
+  herramientas `estado_resumen_diario`/`configurar_resumen_diario` de Jarvis): apagar el
+  resumen, o pausarlo hasta una fecha. Cuatro cosas que no son decoración:
+  - **Es estado, no una orden**: va a Supabase, no a un flag en memoria como el WOL. Un
+    apagado que no sobrevive al cold start de Fly se enciende solo a la mañana siguiente,
+    que es justo lo que se pidió que no pasara. Con copia en memoria
+    (`_brief_ajustes_cache`), como el token de Graph y la presencia; resetéala en
+    `conftest.py` como el resto de estado de módulo.
+  - **La comprobación va DENTRO de `enviar_brief_si_toca()` y solo ahí**, que es la única
+    puerta del envío automático: puesta ahí apaga de una vez las tres fuentes, y una
+    cuarta que se añada mañana no se puede olvidar de mirarla. Y va **antes de reservar**:
+    reservar el día de un correo que no va a salir lo deja marcado como enviado, y al
+    quitar la pausa no saldría hasta el día siguiente.
+  - **No tapa el envío pedido a mano** (`?forzar=1`, `enviar_resumen` de Jarvis): ahí hay
+    una persona pidiéndolo en ese momento, que puede apagar el interruptor en el mismo
+    gesto. Obedecer al ajuste antes que a quien lo puso sería el sitio equivocado.
+  - **Un fallo leyéndolo no apaga el correo**: se sigue con el defecto (activo) y se
+    registra. El envío necesita Supabase igualmente para reservar, así que un Supabase
+    caído no manda nada por su cuenta; en cambio leer "no he podido preguntar" como
+    "estaba apagado" cuesta un día entero de briefing sin que nada lo parezca — el mismo
+    error que cometió el agente PC con la cola de jobs.
+  La **pausa lleva fecha de fin, inclusive, y se agota sola**: es lo que separa "me voy
+  una semana" de "no lo quiero más". Una pausa vencida se reporta como si no existiera
+  (`pausado_hasta` a `None`), porque una fecha pasada al lado de un resumen que vuelve a
+  salir se lee como avería.
 - **Quién redacta el briefing, y cuándo** (`_lanzar_rutina`): el correo de datos no es
   el final del camino — lo lee una rutina de Claude Code que redacta el briefing de
   verdad. Las rutinas admiten **varios triggers a la vez** (horario, API, eventos de
@@ -782,6 +807,7 @@ Ficheros clave:
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
+| `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
 | `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
@@ -1064,9 +1090,15 @@ móvil no había forma de abrir los ajustes). `Escape` lo cierra; tiene `maxHeig
 - "Editar distribución →" — activa el modo edición del layout.
 - Ajustes de entrenamiento: precio/hora, sesiones por cobro, **días de entrenamiento**
   (selector L M X J V S D) e historial de sesiones.
+- **Resumen diario** — el interruptor del correo de la mañana ([Activado]/[Desactivado])
+  y la pausa con fecha. No va a `localStorage` como el resto de esta lista, y no puede
+  ir: quien manda el correo es el backend, que no lo ve (`GET`/`PATCH /brief/ajustes`).
+  El estado que se pinta es siempre el que devuelve el backend, nunca el que creíamos
+  haber puesto — es él quien decide si una pausa sigue viva.
 - **Panel de estado del sistema**: backend, sesión de Outlook, última sincronización del
-  Watch, agente PC, entrenamiento y **Registro** (los errores del backend, de `GET /logs`),
-  todo en un mismo sitio. Se recarga al abrir ajustes y con su botón — nunca en un
+  Watch, agente PC, entrenamiento, **Resumen diario** (apagado a propósito y roto se
+  parecen mucho desde fuera: en los dos casos el correo no llega) y **Registro** (los
+  errores del backend, de `GET /logs`), todo en un mismo sitio. Se recarga al abrir ajustes y con su botón — nunca en un
   intervalo. Las demás filas dicen si algo RESPONDE; la del registro dice si algo ha
   FALLADO, que es distinto y es lo que faltaba. El listado va plegado y se despliega con
   "Ver registro".
@@ -1525,7 +1557,7 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 580 tests)
+### Backend (`tests/backend`, 606 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -1774,7 +1806,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
 `20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
-`20260808_jarvis_recordatorios`.
+`20260808_jarvis_recordatorios`, `20260813_brief_ajustes`.
 
 ## Convenciones
 
