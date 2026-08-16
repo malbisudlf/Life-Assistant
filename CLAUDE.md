@@ -408,6 +408,33 @@ Ficheros clave:
     vive partido en dos nombres y quedarse con uno descarta el otro entero. Se fusiona
     por fecha, con el orden de la tupla como preferencia. Es lo mismo que hace
     `findMetric` en helpers.js, que ya recibía los dos nombres.
+  - **Qué días estuvo puesto el reloj** (`_uso_del_reloj()`, sección `## RELOJ`). Es el
+    denominador que le faltaba a todo lo demás: una métrica del Watch **no puede** tener
+    dato un día que estuvo en un cajón, así que su `n` hay que leerlo contra los días que
+    se pudo medir y no contra el calendario — por eso cada media del reloj sale como
+    `n=3/3` y las del teléfono siguen saliendo como `n=29`. Tres reglas:
+    - **Tres estados por día, no dos** (`A`/`D`/`N` con reloj, `.` sin reloj pero con
+      datos del móvil, `-` sin datos de nada). El tercero es el que impide repetir el
+      error de siempre por el otro lado: si no llegó NADA, no se sabe si hubo reloj o
+      falló la sincronización, y dar eso por "día sin reloj" convierte una caída de la
+      ingesta en un hábito. Los días `-` ni suman ni rompen la racha.
+    - **El reparto es día / noche, no por sensor**, porque son dos hábitos distintos:
+      llevarlo todo el día y quitárselo para dormir anula las nocturnas (HRV, FC en
+      reposo, sueño, respiración) y deja intactas las diurnas.
+    - **Una fila no es una medida** (`_hay_medida()`): el Atajo de iOS guarda ceros los
+      días que no encuentra muestras —todos los días sin reloj—, así que contar filas
+      daría por puesto justo el día que no lo estaba. Una noche anulada a mano
+      (`extra.excluded`) tampoco cuenta: se anulan las que salieron mal, y la razón
+      habitual es el reloj en el cargador. Por lo mismo, **un 0 de una
+      acumulativa del reloj un día sin reloj se descarta** en vez de promediarse: 0 horas
+      de pie con el reloj puesto es un día de sofá y tiene que bajar la media, pero con el
+      reloj en el cajón es un hueco disfrazado. Los pasos no entran ahí — los cuenta el
+      teléfono.
+    `vo2_max` queda fuera de la detección a propósito (el reloj lo estima con semanas de
+    caminatas: ni su presencia marca el día ni su ausencia dice nada), y el peso y la
+    grasa vienen de la báscula. El día de HOY cuenta en las ventanas —para que cuadren
+    con las medias, que también lo incluyen— pero no en la racha sin reloj: el correo sale
+    por la mañana y la jornada está a medias.
   - **Si `value` es `null`, el valor se busca en `extra`** (`_valor_metrica()`). Hay
     filas viejas guardadas así por el bug del `Avg`: son histórico real y descartarlas
     es tirar semanas de dato que sí se recibió y sigue en la tabla.
@@ -1642,6 +1669,10 @@ excepción o error de consola, no solo si falta un texto.
   El `n` de cada media hizo justo su trabajo (avisar de que no hay base), y aun así se
   leyó como avería: el resumen no puede distinguir "no se midió" de "no llegó", y quien
   lo lee tampoco.
+  **Ya sí puede** (agosto de 2026): la sección `## RELOJ` dice qué días estuvo puesto y
+  cada media del Watch viaja con el denominador de los días en que se pudo medir, así que
+  `n=3/3` (no falta ni un día de los que hubo) se distingue de `n=3/29` (ahí sí falta
+  ingesta) sin tener que reconocer la asimetría a ojo.
   De diagnosticarlo salieron tres arreglos reales, ninguno causante de aquello:
   - El Atajo manda `value` **vacío** cuando su "Find Health Samples" no encuentra nada
     —cada día sin reloj—, y eso se guardaba como un `0` (`if v == "": v = 0`). Mientras

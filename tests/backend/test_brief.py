@@ -373,6 +373,162 @@ class TestCerosLegitimos:
         assert s["pasos"]["n_7d"] == 1
 
 
+class TestUsoDelReloj:
+    """Saber cuándo estuvo puesto el reloj es lo que separa "no llegó el dato" de "no
+    se pudo medir".
+
+    El 07/08 el correo mandó sueño, HRV, FC en reposo y respiración con n=3 mientras los
+    pasos iban con n=29 y se leyó como una ingesta rota: el reloj llevaba un mes en un
+    cajón. La asimetría "pasos sí, todo lo demás no" es la huella de eso, y hasta ahora
+    había que reconocerla a ojo.
+    """
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def _fila(self, nombre, valor, dias=0, extra=None, unidad=""):
+        fecha = datetime.now(main.LOCAL_TZ).date() - timedelta(days=dias)
+        return {"metric_date": fecha.isoformat(), "metric_name": nombre,
+                "value": valor, "unit": unidad, "extra": extra or {}}
+
+    def _mes(self, dias_con_reloj=3, dias_total=30):
+        """Pasos todos los días (los cuenta el móvil) y reloj solo los más recientes."""
+        filas = [self._fila("step_count", 8000, i) for i in range(dias_total)]
+        for i in range(dias_con_reloj):
+            filas += [
+                self._fila("heart_rate_variability", 40 + i, i, unidad="ms"),
+                self._fila("heart_rate", 70, i, unidad="bpm"),
+                self._fila("sleep_analysis", 7.2, i, {"sleep_start": "23:40"}, "h"),
+            ]
+        return filas
+
+    def test_distingue_los_dias_con_reloj_de_los_dias_con_solo_movil(
+            self, client, auth_headers, graph_token, mock_requests):
+        r = self._pide(client, auth_headers, mock_requests, self._mes())["reloj"]
+        assert r["dias_puesto"] == 3 and r["noches_puesto"] == 3
+        assert r["marcas"].endswith("AAA"), r["marcas"]
+        assert set(r["marcas"][:-3]) == {"."}, "días con datos del móvil y sin reloj"
+        assert r["dias_desde"] == 0 and r["racha_sin_reloj"] == 0
+
+    def test_un_dia_sin_datos_de_nada_no_es_un_dia_sin_reloj(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Si no llegó NADA, no se sabe si hubo reloj o falló la sincronización. Darlo
+        por día sin reloj convertiría una caída de la ingesta en un hábito."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("heart_rate", 70, 3, unidad="bpm"),
+            self._fila("step_count", 8000, 0),
+        ])["reloj"]
+        assert r["marcas"].endswith("D--."), r["marcas"]
+        assert r["sin_datos"] == 28, "27 días vacíos por delante más los dos del hueco"
+        assert r["racha_sin_reloj"] == 0, "los días sin datos ni suman ni rompen la racha"
+
+    def test_la_racha_sin_reloj_no_cuenta_hoy(self, client, auth_headers, graph_token, mock_requests):
+        """El correo sale por la mañana, con el día a medias: contarlo se inventaría un
+        día sin reloj que todavía no ha pasado."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("heart_rate", 70, 3, unidad="bpm"),
+            *[self._fila("step_count", 8000, i) for i in range(4)],
+        ])["reloj"]
+        assert r["racha_sin_reloj"] == 2, "ayer y anteayer; hoy queda fuera"
+        assert r["hoy"] == "sin_reloj" and r["anoche"] is False
+
+    def test_quitarselo_para_dormir_marca_el_dia_pero_no_la_noche(
+            self, client, auth_headers, graph_token, mock_requests):
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("heart_rate", 72, 0, unidad="bpm"),
+            self._fila("apple_stand_hour", 11, 0, unidad="h"),
+        ])["reloj"]
+        assert r["dias_puesto"] == 1 and r["noches_puesto"] == 0
+        assert r["marcas"].endswith("D") and r["anoche"] is False
+
+    def test_los_ceros_del_atajo_no_dan_el_dia_por_llevado(
+            self, client, auth_headers, graph_token, mock_requests):
+        """El Atajo guarda 0 los días que no encuentra muestras — todos los días sin
+        reloj. La fila existe sin que se haya medido nada."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("heart_rate_variability", 0, 0, unidad="ms"),
+            self._fila("sleep_analysis", 0, 0, unidad="h"),
+            self._fila("step_count", 8000, 0),
+        ])["reloj"]
+        assert r["noches_puesto"] == 0 and r["marcas"].endswith(".")
+
+    def test_una_noche_anulada_a_mano_no_es_una_noche_con_reloj(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Se anulan las noches que salieron mal, y la razón habitual es el reloj en el
+        cargador: darla por medida le pondría a la media un denominador ya descartado."""
+        s = self._pide(client, auth_headers, mock_requests, [
+            self._fila("sleep_analysis", 7.2, 1, {"sleep_start": "23:40"}, "h"),
+            self._fila("sleep_analysis", 2.1, 0, {"excluded": True}, "h"),
+        ])
+        assert s["reloj"]["noches_puesto"] == 1 and s["reloj"]["anoche"] is False
+        assert s["sueno"]["n_7d"] == 1 and s["sueno"]["posibles_7d"] == 1
+
+    def test_el_sueno_con_las_fases_en_extra_si_cuenta(
+            self, client, auth_headers, graph_token, mock_requests):
+        """`value` a 0 con las fases dentro de `extra` es una noche medida de verdad."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("sleep_analysis", 0, 0, {"deep": 1.2, "rem": 1.5, "core": 4.0}, "h"),
+        ])["reloj"]
+        assert r["noches_puesto"] == 1 and r["anoche"] is True
+
+
+class TestMediasContraElReloj:
+    """Una métrica del Watch solo puede tener dato los días que estuvo puesto: su n hay
+    que leerlo contra eso, no contra el calendario."""
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def _fila(self, nombre, valor, dias=0, unidad=""):
+        fecha = datetime.now(main.LOCAL_TZ).date() - timedelta(days=dias)
+        return {"metric_date": fecha.isoformat(), "metric_name": nombre,
+                "value": valor, "unit": unidad, "extra": {}}
+
+    def test_la_media_del_reloj_lleva_su_denominador(
+            self, client, auth_headers, graph_token, mock_requests):
+        filas = [self._fila("step_count", 8000, i) for i in range(30)]
+        filas += [self._fila("heart_rate_variability", 40, i, "ms") for i in range(3)]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["hrv"]["n_30d"] == 3 and s["hrv"]["posibles_30d"] == 3
+        assert s["hrv"]["n_7d"] == 3 and s["hrv"]["posibles_7d"] == 3
+
+    def test_lo_que_cuenta_el_movil_no_lleva_denominador_de_reloj(
+            self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests,
+                       [self._fila("step_count", 8000, i) for i in range(3)])
+        assert s["pasos"]["n_7d"] == 3
+        assert "posibles_7d" not in s["pasos"], "los pasos no dependen de llevar el reloj"
+
+    def test_un_cero_del_reloj_un_dia_sin_reloj_es_un_hueco(
+            self, client, auth_headers, graph_token, mock_requests):
+        """0 horas de pie con el reloj en el cajón hunde la media igual que promediar
+        un HRV de 0 se inventaría una bradicardia."""
+        filas = [self._fila("apple_stand_hour", 0, i, "h") for i in range(1, 6)]
+        filas += [self._fila("apple_stand_hour", 12, 0, "h"),
+                  self._fila("heart_rate", 70, 0, "bpm"),
+                  *[self._fila("step_count", 8000, i) for i in range(6)]]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["de_pie"]["n_7d"] == 1 and s["de_pie"]["media_7d"] == 12
+
+    def test_un_cero_con_el_reloj_puesto_si_es_un_dato(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Un día de sofá con el reloj puesto ocurrió y tiene que bajar la media."""
+        filas = [self._fila("heart_rate", 70, i, "bpm") for i in range(2)]
+        filas += [self._fila("apple_stand_hour", 12, 1, "h"),
+                  self._fila("apple_stand_hour", 0, 0, "h")]
+        s = self._pide(client, auth_headers, mock_requests, filas)
+        assert s["de_pie"]["n_7d"] == 2 and s["de_pie"]["media_7d"] == 6
+
+    def test_el_cero_de_los_pasos_sigue_contando(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Los pasos los cuenta el teléfono: ahí un 0 no lo explica el reloj."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       [self._fila("step_count", 8000, 1), self._fila("step_count", 0, 0)])
+        assert s["pasos"]["n_7d"] == 2 and s["pasos"]["media_7d"] == 4000
+
+
 class TestRangoDeFrecuenciaCardiaca:
     def test_min_y_max_salen_del_extra_con_mayuscula(self, client, auth_headers, graph_token, mock_requests):
         """heart_rate se exporta como rango diario y trae Avg/Min/Max con mayúscula, sin
@@ -670,6 +826,65 @@ class TestRenderTexto:
             "salud": {},
         })
         assert "## SERIE DIARIA" not in texto and "## ENTRENOS DEL WATCH" not in texto
+        assert "## RELOJ" not in texto, "treinta huecos no dicen nada que no diga (sin datos)"
+
+    def test_el_uso_del_reloj_se_pinta_con_su_leyenda(self):
+        """Sin la leyenda, una fila de letras no se puede leer; sin las fechas de los
+        extremos, no se puede alinear con la serie diaria."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-16", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {"reloj": {
+                "desde": "2026-08-12", "hasta": "2026-08-16", "dias_ventana": 5,
+                "marcas": "..DAA", "dias_puesto": 3, "noches_puesto": 2,
+                "dias_puesto_7d": 3, "noches_puesto_7d": 2, "sin_datos": 0,
+                "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                "dias_desde": 0, "racha_sin_reloj": 0,
+            }},
+        })
+        assert "## RELOJ  (2026-08-12 → 2026-08-16, 5 días)" in texto
+        assert "Puesto 3/5 días y 2/5 noches" in texto
+        assert ". . D A A" in texto, "una posición por día, contable"
+        assert "A = día y noche" in texto and "- = sin datos de nada" in texto
+        assert "Anoche               con reloj" in texto
+
+    def test_la_media_del_reloj_se_pinta_contra_los_dias_que_se_pudo_medir(self):
+        """n=3 a secas se lee como ingesta rota; n=3/3 dice que no falta ni un día."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-16", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {
+                "hrv": {"unidad": "ms", "ultimo": 42, "fecha": "2026-08-16", "dias_atras": 0,
+                        "media_7d": 41, "n_7d": 3, "posibles_7d": 3,
+                        "media_30d": 41, "n_30d": 3, "posibles_30d": 3},
+                "pasos": {"unidad": "pasos", "ultimo": 8000, "fecha": "2026-08-16",
+                          "dias_atras": 0, "media_7d": 8100, "n_7d": 7,
+                          "media_30d": 8500, "n_30d": 29},
+                "reloj": {"desde": "2026-07-18", "hasta": "2026-08-16", "dias_ventana": 30,
+                          "marcas": "." * 27 + "AAA", "dias_puesto": 3, "noches_puesto": 3,
+                          "dias_puesto_7d": 3, "noches_puesto_7d": 3, "sin_datos": 0,
+                          "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                          "dias_desde": 0, "racha_sin_reloj": 0},
+            },
+        })
+        assert "n=3/3" in texto
+        assert "n=7," in texto and "n=29)" in texto, "los pasos no llevan denominador"
+        assert "falta reloj" in texto
+
+    def test_los_dias_sin_datos_de_nada_se_avisan_aparte(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-16", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {"reloj": {
+                "desde": "2026-08-12", "hasta": "2026-08-16", "dias_ventana": 5,
+                "marcas": "--..A", "dias_puesto": 1, "noches_puesto": 1,
+                "dias_puesto_7d": 1, "noches_puesto_7d": 1, "sin_datos": 2,
+                "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                "dias_desde": 0, "racha_sin_reloj": 2,
+            }},
+        })
+        assert "2 día(s) sin datos de NINGUNA fuente" in texto
+        assert "2 día(s) seguidos antes de hoy" in texto
 
     def test_evento_de_todo_el_dia(self):
         texto = main.render_brief_texto({
