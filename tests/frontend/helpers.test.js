@@ -7,6 +7,7 @@ import {
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
+  baselinePersonal, wellnessBaselines,
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
@@ -477,6 +478,91 @@ describe("conclusiones conscientes del reloj", () => {
   });
 });
 
+describe("firma de algo va mal", () => {
+  const HOY = "2026-07-30";
+  const AHORA = new Date(`${HOY}T12:00:00`);
+  const d = n => new Date(new Date(`${HOY}T12:00:00Z`).getTime() - n * 86400000)
+    .toISOString().slice(0, 10);
+  // 30 días terminando hoy: los 23 primeros marcan la media larga y los 7 últimos la
+  // corta, que es lo que compara `seriesTrend`.
+  const serie = (viejo, reciente) => Array.from({ length: 30 }, (_, i) => ({
+    date: d(29 - i), value: i < 23 ? viejo : reciente,
+  }));
+  const firma = c => c.find(x => x.domain === "Recuperación" && /señales de recuperación/.test(x.text));
+  // Las tres moviéndose a la vez, con margen de sobra en cada una.
+  const CLARO = { resting_heart_rate: serie(50, 60), heart_rate_variability: serie(60, 45), respiratory_rate: serie(14, 16) };
+  // Las tres en la dirección mala, pero cada una rozando su umbral.
+  const LEVE  = { resting_heart_rate: serie(50, 52), heart_rate_variability: serie(60, 55), respiratory_rate: serie(14, 14.6) };
+
+  test("las tres a la vez se cuentan como una sola señal, con las noches detrás", () => {
+    const f = firma(healthConclusions(CLARO, AHORA));
+    expect(f).toBeTruthy();
+    expect(f.text).toMatch(/7 noches medidas/);
+    expect(f.text).toMatch(/FC en reposo \+\d+%/);
+    expect(f.text).toMatch(/HRV -\d+%/);
+    expect(f.text).toMatch(/respiración \+\d+%/);
+  });
+
+  test("el tono sube a rojo solo cuando la señal es clara", () => {
+    expect(firma(healthConclusions(CLARO, AHORA)).tone).toBe("bad");
+    expect(firma(healthConclusions(LEVE, AHORA)).tone).toBe("warn");
+  });
+
+  test("dos de las tres no son una firma: por separado cada una es ruido", () => {
+    const dos = { ...CLARO, respiratory_rate: serie(14, 14) };
+    expect(firma(healthConclusions(dos, AHORA))).toBeUndefined();
+    // Y si la respiración va a mejor tampoco, aunque las otras dos empeoren mucho.
+    const contraria = { ...CLARO, respiratory_rate: serie(16, 14) };
+    expect(firma(healthConclusions(contraria, AHORA))).toBeUndefined();
+  });
+
+  test("con la firma dentro, el aviso suelto de respiración no se repite", () => {
+    const solaResp = healthConclusions({ respiratory_rate: serie(14, 16) }, AHORA);
+    expect(solaResp.some(x => /frecuencia respiratoria nocturna ha subido/.test(x.text))).toBe(true);
+    const conFirma = healthConclusions(CLARO, AHORA);
+    expect(conFirma.some(x => /frecuencia respiratoria nocturna ha subido/.test(x.text))).toBe(false);
+  });
+
+  test("sin noches suficientes se dice que no hay base, no un porcentaje", () => {
+    // Seis medidas viejas dentro del mes y dos recientes: la dirección se ve, pero una
+    // ventana corta de dos noches no sostiene una afirmación.
+    const corta = (viejo, reciente) => [
+      ...Array.from({ length: 6 }, (_, i) => ({ date: d(20 - i), value: viejo })),
+      { date: d(1), value: reciente }, { date: d(0), value: reciente },
+    ];
+    const c = healthConclusions({
+      resting_heart_rate:      corta(50, 60),
+      heart_rate_variability:  corta(60, 45),
+      respiratory_rate:        corta(14, 16),
+    }, AHORA);
+    const f = firma(c);
+    expect(f.tone).toBe("info");
+    expect(f.text).toMatch(/2 noches medidas/);
+    expect(f.text).toMatch(/no hay base para afirmarlo/);
+    expect(f.text).not.toMatch(/%/);
+  });
+
+  test("el reloj en el cajón tampoco da base, aunque haya números", () => {
+    // Los datos están (los escribe el teléfono con lo que sea), pero las noches con
+    // reloj son una: afirmar una firma nocturna sobre eso sería inventarla.
+    const reloj = { dias: Object.fromEntries(
+      [...Array(7)].map((_, i) => [d(i), i === 0 ? "ambos" : "sin_reloj"])) };
+    const f = firma(healthConclusions(CLARO, AHORA, { reloj }));
+    expect(f.tone).toBe("info");
+    expect(f.text).toMatch(/1 noche medida/);
+  });
+
+  test("con el reloj puesto toda la semana la firma sí se afirma", () => {
+    const reloj = { dias: Object.fromEntries([...Array(30)].map((_, i) => [d(i), "ambos"])) };
+    expect(firma(healthConclusions(CLARO, AHORA, { reloj })).tone).toBe("bad");
+  });
+
+  test("sin las tres series no hay firma que dar", () => {
+    expect(firma(healthConclusions({ resting_heart_rate: serie(50, 60) }, AHORA))).toBeUndefined();
+    expect(firma(healthConclusions({}, AHORA))).toBeUndefined();
+  });
+});
+
 describe("helpers de conteo de ropa", () => {
   test("formatMoney: entero sin decimales, decimal con coma", () => {
     expect(formatMoney(20, "EUR")).toBe("20 €");
@@ -663,6 +749,107 @@ describe("wellnessBreakdown", () => {
     expect(b.length).toBeGreaterThan(0);
     expect(b.every(f => f.pts === 0 || f.label.includes("Entreno"))).toBe(true);
     expect(scoreFromBreakdown(b).score).toBe(0);
+  });
+});
+
+describe("línea base personal", () => {
+  const HOY = "2026-07-30";
+  const dia = n => new Date(new Date(`${HOY}T12:00:00Z`).getTime() - n * 86400000)
+    .toISOString().slice(0, 10);
+  // `n` días consecutivos terminando el día ANTERIOR a HOY (la ventana de la baseline).
+  const atras = (n, v) => Array.from({ length: n }, (_, i) => ({
+    date: dia(n - i), value: typeof v === "function" ? v(i) : v,
+  }));
+  const fila = (b, txt) => b.find(x => x.label.includes(txt));
+  const BASE = { rhr: { p25: 60, p50: 63, p75: 66, n: 45 } };
+
+  test("con menos de tres semanas de histórico no hay línea base", () => {
+    // Un p25 sacado de cinco medidas no es una línea base: es la más baja de cinco.
+    expect(baselinePersonal(atras(20, 55), HOY)).toBeNull();
+    expect(baselinePersonal(atras(21, 55), HOY)).toMatchObject({ n: 21 });
+    expect(baselinePersonal(atras(30, 55), null)).toBeNull();
+    expect(baselinePersonal(null, HOY)).toBeNull();
+  });
+
+  test("los percentiles salen del propio histórico", () => {
+    // 30 valores de 50 a 79: p25 y p75 caen donde toca, con interpolación.
+    const b = baselinePersonal(atras(30, i => 50 + i), HOY);
+    expect(b.p25).toBeCloseTo(57.25);
+    expect(b.p50).toBeCloseTo(64.5);
+    expect(b.p75).toBeCloseTo(71.75);
+  });
+
+  test("un 0 no entra en la línea base: es un día sin medida, no una FC de cero", () => {
+    const b = baselinePersonal([...atras(25, 55), ...atras(5, 0)], HOY);
+    expect(b.n).toBe(25);
+    expect(b.p50).toBe(55);
+  });
+
+  test("la ventana se ancla al día que se puntúa, no a hoy", () => {
+    // FC en reposo bajando durante cuatro meses: la línea base de hace un mes tiene que
+    // ser más alta que la de hoy. Si se calculara "a día de hoy" serían la misma.
+    const serie = Array.from({ length: 120 }, (_, i) => ({ date: dia(120 - i), value: 70 - i * 0.2 }));
+    expect(baselinePersonal(serie, HOY).p50)
+      .toBeLessThan(baselinePersonal(serie, dia(30)).p50);
+  });
+
+  test("un día ya puntuado no cambia porque lleguen datos nuevos después", () => {
+    // El coste real de las baselines: si la ventana fuera "los últimos 90 días desde
+    // hoy", el mismo día del histórico puntuaría distinto según cuándo se mire y la
+    // sparkline dejaría de ser comparable consigo misma.
+    const rhr   = Array.from({ length: 120 }, (_, i) => ({ date: dia(120 - i), value: 60 - i * 0.1 }));
+    const pasos = rhr.map(d => ({ date: d.date, value: 9000 }));
+    const antes = wellnessHistory({ resting_heart_rate: rhr, step_count: pasos }, { dias: 200 });
+    const despues = wellnessHistory({
+      resting_heart_rate: [...rhr, { date: HOY, value: 44 }],
+      step_count:         [...pasos, { date: HOY, value: 25000 }],
+    }, { dias: 200 });
+    const sinHoy = h => h.filter(x => x.date !== HOY).map(x => `${x.date}:${x.value}`);
+    expect(sinHoy(despues)).toEqual(sinHoy(antes));
+    expect(despues.length).toBe(antes.length + 1);
+  });
+
+  test("la FC en reposo se puntúa contra tu propio rango, no contra 50 lpm", () => {
+    // El caso de manual: con una basal de 60 los 8 puntos del umbral fijo no se sacan
+    // nunca por mucho que se mejore. Contra el propio rango, un día en tu mejor cuarto
+    // vale lo que tiene que valer.
+    expect(fila(wellnessBreakdown({ rhr: 60 }), "FC reposo").pts).toBe(6);
+    expect(fila(wellnessBreakdown({ rhr: 60, baselines: BASE }), "FC reposo").pts).toBe(8);
+    // Y al revés: 68 lpm es un número decente en abstracto, pero por encima de TU p75.
+    expect(fila(wellnessBreakdown({ rhr: 68 }), "FC reposo").pts).toBe(3);
+    expect(fila(wellnessBreakdown({ rhr: 68, baselines: BASE }), "FC reposo").pts).toBe(2);
+  });
+
+  test("la FC caminando también, y con el mismo criterio", () => {
+    const base = { walkHr: { p25: 88, p50: 92, p75: 96, n: 30 } };
+    const diaria = extra => wellnessBreakdown({ isDaily: true, walkHr: 86, ...extra });
+    expect(fila(diaria({}), "caminando").pts).toBe(2);              // umbral general
+    expect(fila(diaria({ baselines: base }), "caminando").pts).toBe(4); // tu mejor cuarto
+  });
+
+  test("el desglose dice contra qué se está puntuando", () => {
+    // Quien abre el tooltip tiene que poder saber si el listón es suyo o el general.
+    expect(fila(wellnessBreakdown({ rhr: 60 }), "FC reposo").detail).toMatch(/umbral general/);
+    expect(fila(wellnessBreakdown({ rhr: 60, baselines: BASE }), "FC reposo").detail)
+      .toMatch(/tu rango 60–66 \(n=45\)/);
+  });
+
+  test("puntuar contra la línea base no cambia la escala", () => {
+    // El desglose sigue siendo la única fuente de verdad y los máximos no se mueven: un
+    // día con baseline y otro sin ella se comparan sobre los mismos 100.
+    const semana = { isDaily: false, sleep: 8, work: 4, expectedByNow: 4, steps: 12000,
+      activeEnergy: 700, stand: 13, flights: 12, hrv: 60, hrvPrev: 50, rhr: 60 };
+    expect(scoreFromBreakdown(wellnessBreakdown({ ...semana, baselines: BASE })).max)
+      .toBe(scoreFromBreakdown(wellnessBreakdown(semana)).max);
+  });
+
+  test("solo las métricas fisiológicas tienen línea base propia", () => {
+    // Pasos, energía o sueño son conducta, no constitución: puntuarlos contra la propia
+    // media es calificar en curva y premiaría el mes en el sofá. 7,5 h son 7,5 h.
+    expect(Object.keys(wellnessBaselines({}, HOY)).sort()).toEqual(["rhr", "walkHr"]);
+    const datos = { resting_heart_rate: atras(30, 62), step_count: atras(30, 9000) };
+    expect(wellnessBaselines(datos, HOY).rhr).toMatchObject({ n: 30, p50: 62 });
+    expect(wellnessBaselines(datos, HOY).walkHr).toBeNull();
   });
 });
 

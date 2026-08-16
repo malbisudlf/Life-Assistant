@@ -5,7 +5,7 @@ import {
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
-  wellnessBreakdown, scoreFromBreakdown,
+  wellnessBreakdown, scoreFromBreakdown, wellnessBaselines,
   wellnessHistory, seriesTrend, trendDirection,
   relojCobertura, relojRachaSinReloj, relojPuesto,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
@@ -2668,7 +2668,13 @@ export default function Dashboard() {
           const targetBodyFat = bodyGoals.targetBodyFat;
           const weightToGoal  = currentWeight != null && targetWeight ? currentWeight - targetWeight : null;
 
-    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
+          // ── línea base personal de las métricas que se puntúan contra uno mismo ──
+          // Anclada a HOY, que es el día que se está puntuando (la vista semanal puntúa
+          // la semana que termina hoy). El histórico de la sparkline calcula la suya por
+          // día dentro de wellnessHistory, para que cada día puntúe como puntuó entonces.
+          const baselines = wellnessBaselines(healthData, todayStr);
+
+    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, baselines, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [healthData, trainingDays, bodyGoals, diaActual]);
 
@@ -3191,6 +3197,7 @@ export default function Dashboard() {
           avgStand,
           avgSteps,
           avgWalkHr,
+          baselines,
           bodyFatDelta,
           currentBodyFat,
           currentLean,
@@ -3258,6 +3265,11 @@ export default function Dashboard() {
           bodyFat:      currentBodyFat,
           daylight:     daylightVal,
           resp:         respVal,
+          // FC en reposo y FC caminando se puntúan contra los percentiles del propio
+          // histórico cuando lo hay (ver "Línea base personal" en helpers): un umbral
+          // fijo ahí premia la constitución, no el progreso. El desglose dice en cada
+          // fila con cuál de los dos se ha puntuado.
+          baselines,
         });
 
         // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,

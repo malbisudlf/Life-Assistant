@@ -5,6 +5,7 @@ Claude Code que compone el correo diario del usuario leyendo su buzón. Por eso 
 no se comprueba ninguna conclusión — solo que los datos salen completos y correctos,
 y que un fallo de una fuente no tumba el resto del resumen.
 """
+import json
 from datetime import datetime, timedelta, timezone
 
 import main
@@ -911,7 +912,7 @@ class TestEnvio:
         montar_fuentes(mock_requests)
         configurar_smtp(monkeypatch)
 
-        def _explota(asunto, cuerpo):
+        def _explota(asunto, cuerpo, adjunto=None):
             raise TimeoutError("[Errno 110] Connection timed out")
 
         monkeypatch.setattr(main, "enviar_correo", _explota)
@@ -943,9 +944,16 @@ class TestEnvio:
         msg = _SMTPFalso.enviados[0]
         assert msg["To"] == "yo@test"
         assert "Life Assistant" in msg["Subject"]
-        cuerpo = msg.get_content()
+        cuerpo = msg.get_body(preferencelist=("plain",)).get_content()
         assert "## AGENDA DE HOY" in cuerpo
         assert "Redes" in cuerpo, "el correo debe llevar los datos ya reunidos"
+
+        # El texto lo lee una persona y eso le pone un techo a lo que cabe; el adjunto
+        # lleva lo mismo en JSON para quien lo procese, sin tener que elegir.
+        adjuntos = list(msg.iter_attachments())
+        assert len(adjuntos) == 1
+        assert adjuntos[0].get_filename().startswith("brief-")
+        assert json.loads(adjuntos[0].get_content())["agenda"][0]["titulo"] == "Redes"
 
     def test_puerto_465_usa_smtp_ssl(self, client, mock_requests, graph_token, monkeypatch):
         montar_fuentes(mock_requests)
@@ -1049,3 +1057,215 @@ class TestHistoricoQueNoSeVeia:
         ])
         assert s["sueno"]["n_30d"] == 2
         assert s["sueno"]["ultimo"] == 7.2
+
+
+class TestDiasAtipicos:
+    """Marcar dónde mirar no es interpretar: el correo manda ~600 números y sin marcas
+    hay que leerlos todos para encontrar el raro."""
+
+    def _serie(self, nombre, valores, unidad=""):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        return [{"metric_date": (hoy - timedelta(days=i)).isoformat(),
+                 "metric_name": nombre, "value": v, "unit": unidad, "extra": {}}
+                for i, v in enumerate(reversed(valores))]
+
+    def _pide(self, client, auth_headers, mock_requests, filas):
+        montar_fuentes(mock_requests, salud=filas)
+        return client.get("/brief", headers=auth_headers).json()["salud"]
+
+    def test_señala_el_dia_que_se_sale(self, client, auth_headers, graph_token, mock_requests):
+        s = self._pide(client, auth_headers, mock_requests,
+                       self._serie("resting_heart_rate", [55, 56, 57] * 5 + [80], "bpm"))
+        atipicos = s["atipicos"]
+        assert len(atipicos) == 1
+        assert atipicos[0]["metrica"] == "fc_reposo" and atipicos[0]["valor"] == 80
+        assert atipicos[0]["sigmas"] > 2
+
+    def test_la_media_se_calcula_sin_el_propio_dia(self, client, auth_headers, graph_token, mock_requests):
+        """Con ventanas cortas, un valor extremo arrastra la media hacia sí mismo y se
+        tapa solo: cuanto más raro es, menos raro parece."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       self._serie("resting_heart_rate", [55, 56, 57] * 5 + [80], "bpm"))
+        assert s["atipicos"][0]["media"] == 56, "la media de referencia excluye el día señalado"
+
+    def test_sin_fondo_no_se_señala_nada(self, client, auth_headers, graph_token, mock_requests):
+        """Con cuatro observaciones la sigma es tan ruidosa como el dato: marcaría todo."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       self._serie("resting_heart_rate", [56, 56, 56, 90], "bpm"))
+        assert "atipicos" not in s
+
+    def test_una_serie_sin_dispersion_no_señala_nada(self, client, auth_headers, graph_token, mock_requests):
+        """Sin dispersión no hay escala contra la que medir la desviación: la sigma es 0
+        y un día distinto quedaría a infinitas sigmas, que no es una cifra que decir."""
+        s = self._pide(client, auth_headers, mock_requests,
+                       self._serie("step_count", [8000] * 15, "pasos"))
+        assert "atipicos" not in s
+
+    def test_se_pintan_en_el_correo_con_su_referencia(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-16", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "entrenamiento": {},
+            "salud": {"atipicos": [{"metrica": "fc_reposo", "fecha": "2026-08-14", "valor": 80,
+                                    "unidad": "bpm", "media": 56, "sigmas": 3.2}]},
+        })
+        assert "## DÍAS ATÍPICOS" in texto
+        assert "2026-08-14" in texto and "80 bpm" in texto
+        assert "por encima" in texto and "su media 56" in texto
+
+
+class TestQueHaCambiado:
+    """El correo es idéntico al 90% en días consecutivos: lo que hace falta leer entero
+    es el otro 10%."""
+
+    def test_la_instantanea_guarda_solo_lo_comparable(self):
+        inst = main._instantanea_brief({
+            "fecha": "2026-08-16",
+            "salud": {"hrv": {"ultimo": 42, "fecha": "2026-08-16", "media_7d": 40},
+                      "series": {"hrv": [1, 2, 3]}, "reloj": {"ultimo": "2026-08-16", "racha_sin_reloj": 0}},
+            "entregas": [{"titulo": "Práctica 3", "dias": 2, "fecha": "2026-08-18"}],
+            "entrenamiento": {"sesiones_desde_cobro": 6, "importe_pendiente": 96.0},
+        })
+        assert inst["metricas"]["hrv"] == {"valor": 42, "fecha": "2026-08-16"}
+        assert inst["entregas"] == ["Práctica 3"]
+        assert "series" not in inst, "las series diarias no se guardan: su diff es la propia serie"
+
+    def _datos(self, hrv_valor, hrv_fecha, entregas=("Práctica 3",)):
+        return {
+            "fecha": "2026-08-16",
+            "salud": {"hrv": {"ultimo": hrv_valor, "fecha": hrv_fecha}},
+            "entregas": [{"titulo": t} for t in entregas],
+            "entrenamiento": {"sesiones_desde_cobro": 6, "importe_pendiente": 96.0},
+        }
+
+    def test_una_metrica_se_movio_si_trae_fecha_nueva(self):
+        previa  = main._instantanea_brief(self._datos(40, "2026-08-15"))
+        cambios = main._cambios_desde(previa, self._datos(55, "2026-08-16"))
+        assert cambios["metricas_nuevas"][0] == {
+            "metrica": "hrv", "antes": 40, "ahora": 55, "delta": 15, "fecha": "2026-08-16"}
+
+    def test_el_mismo_dato_releido_no_es_novedad(self):
+        """Comparar solo el valor daría por novedad el dato de ayer leído otra vez."""
+        previa  = main._instantanea_brief(self._datos(40, "2026-08-15"))
+        cambios = main._cambios_desde(previa, self._datos(40, "2026-08-15"))
+        assert "metricas_nuevas" not in cambios
+        assert cambios["metricas_sin_novedad"] == ["hrv"]
+
+    def test_las_entregas_nuevas_y_las_que_desaparecen(self):
+        previa  = main._instantanea_brief(self._datos(40, "2026-08-15", ("Práctica 3",)))
+        cambios = main._cambios_desde(previa, self._datos(40, "2026-08-15", ("Práctica 4",)))
+        assert cambios["entregas_nuevas"] == ["Práctica 4"]
+        assert cambios["entregas_fuera"] == ["Práctica 3"]
+
+    def test_sin_instantanea_previa_no_hay_seccion(self):
+        assert main._cambios_desde({}, self._datos(40, "2026-08-16")) == {}
+
+    def test_se_pinta_arriba_del_todo(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-16", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+            "cambios": {"desde": "2026-08-15",
+                        "entregas_nuevas": ["Práctica 4"],
+                        "metricas_nuevas": [{"metrica": "hrv", "antes": 40, "ahora": 55,
+                                             "delta": 15, "fecha": "2026-08-16"}],
+                        "metricas_sin_novedad": ["peso"]},
+        })
+        assert texto.index("## QUÉ HA CAMBIADO") < texto.index("## AGENDA DE HOY")
+        assert "Entrega nueva: Práctica 4" in texto
+        assert "40 → 55" in texto and "(+15)" in texto
+        assert "Sin dato nuevo desde entonces (1)" in texto
+
+    def test_un_fallo_leyendo_la_instantanea_no_tumba_el_resumen(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests)
+        mock_requests.add("GET", "/rest/v1/brief_envios", FakeResponse(None, 500, "no existe la columna"))
+        d = client.get("/brief", headers=auth_headers).json()
+        assert d["salud"] and "cambios" not in d
+
+
+class TestInformeSemanal:
+    """Una media de 30 días dice dónde estás; trece semanas seguidas, hacia dónde vas."""
+
+    def _filas(self, semanas=4, por_semana=5):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        filas = []
+        for s in range(semanas):
+            for d in range(por_semana):
+                fecha = (hoy - timedelta(weeks=s, days=d)).isoformat()
+                filas.append({"metric_date": fecha, "metric_name": "resting_heart_rate",
+                              "value": 55 + s, "unit": "bpm", "extra": {}})
+                filas.append({"metric_date": fecha, "metric_name": "heart_rate",
+                              "value": 70, "unit": "bpm", "extra": {}})
+        return filas
+
+    def test_agrupa_por_semana_con_su_n(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
+        d = client.get("/informe", headers=auth_headers).json()
+        fc = d["salud"]["metricas"]["fc_reposo"]["semanas"]
+        assert len(fc) == main.INFORME_SEMANAS
+        assert fc[-1]["n"] == 5 and fc[-1]["media"] == 55
+        assert fc[0] is None, "las semanas sin dato se marcan, no se comprimen"
+
+    def test_una_semana_con_dos_dias_no_es_una_semana_medida(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas(semanas=1, por_semana=2))
+        d = client.get("/informe", headers=auth_headers).json()
+        assert d["salud"]["metricas"]["fc_reposo"]["semanas"][-1] is None
+
+    def test_lleva_los_dias_de_reloj_como_denominador(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
+        d = client.get("/informe", headers=auth_headers).json()
+        assert d["salud"]["reloj"]["dia"][-1]["n"] == 5
+
+    def test_el_texto_dice_su_ventana_y_marca_los_huecos(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
+        texto = main.render_informe_texto(client.get("/informe", headers=auth_headers).json())
+        assert "## SEMANAS" in texto and "## MÉTRICAS POR SEMANA" in texto
+        assert "## RELOJ POR SEMANA" in texto
+        assert "-" in texto, "las semanas sin dato salen marcadas"
+
+    def test_requiere_jwt(self, client):
+        assert client.get("/informe").status_code in (401, 403)
+        assert client.post("/informe/send").status_code == 403
+
+    def test_no_se_manda_dos_veces_el_mismo_dia(self, client, mock_requests, monkeypatch):
+        """La reserva es un INSERT: el 409 contra la clave primaria es la pregunta."""
+        montar_fuentes(mock_requests, salud=self._filas())
+        configurar_smtp(monkeypatch)
+        mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse(None, 409, "duplicate"))
+        r = client.post("/informe/send?token=brief-token&forzar=1")
+        assert r.json()["informe_semanal"] is False
+        assert len(_SMTPFalso.enviados) == 0
+
+    def test_forzado_lo_manda_con_su_adjunto(self, client, mock_requests, monkeypatch):
+        montar_fuentes(mock_requests, salud=self._filas())
+        configurar_smtp(monkeypatch)
+        mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse([], 201))
+        r = client.post("/informe/send?token=brief-token&forzar=1")
+        assert r.json()["informe_semanal"] is True
+        assert len(_SMTPFalso.enviados) == 1
+        msg = _SMTPFalso.enviados[0]
+        assert "informe semanal" in msg["Subject"]
+        assert list(msg.iter_attachments())[0].get_filename().startswith("informe-")
+
+    def test_si_falla_el_envio_se_libera_la_reserva(self, client, mock_requests, monkeypatch):
+        montar_fuentes(mock_requests, salud=self._filas())
+        configurar_smtp(monkeypatch)
+        mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse([], 201))
+        monkeypatch.setattr(main, "enviar_correo",
+                            lambda *a, **k: (_ for _ in ()).throw(TimeoutError("SMTP caído")))
+        client.post("/informe/send?token=brief-token&forzar=1")
+        assert mock_requests.called("DELETE", "/rest/v1/informe_envios")
+
+    def test_solo_sale_el_dia_que_toca(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "INFORME_SEMANAL", True)
+        # Un martes: no toca (INFORME_DIA por defecto es 6, domingo).
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 11, 12, 0, tzinfo=main.LOCAL_TZ))
+        assert main._enviar_informe_si_toca() == {}
+        assert not mock_requests.called("POST", "/rest/v1/informe_envios")
+
+    def test_antes_de_su_hora_tampoco(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "INFORME_SEMANAL", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 16, 7, 0, tzinfo=main.LOCAL_TZ))
+        assert main._enviar_informe_si_toca() == {}
+        assert not mock_requests.called("POST", "/rest/v1/informe_envios")
