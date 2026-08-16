@@ -13,6 +13,7 @@ dos patrones que ya funcionan en el proyecto, cada uno para lo suyo:
 |---|---|---|---|
 | Órdenes ("enciende la luz") | HA **sondea** `GET /ha/ordenes-pending` | Memoria del backend | Son órdenes pendientes: perderlas en un cold start solo cuesta volver a pedirlas, igual que el WOL |
 | Catálogo de dispositivos | HA **empuja** a `POST /ha/entidades` | Supabase | Es estado, y el que lo sabe es HA. Igual que la presencia |
+| Avisos al móvil | HA **sondea** `GET /ha/avisos-pending` | Memoria del backend | Son órdenes también: "díselo al móvil". El backend no sabe a qué móvil — lo decide el `notify.*` de aquí |
 
 Sin el catálogo, Jarvis no sabe qué hay en casa y se niega a actuar en vez de inventarse
 nombres de entidades.
@@ -129,10 +130,71 @@ curl -X POST https://TU-BACKEND/ha/entidades \
 Y en el dashboard: «Jarvis, ¿qué luces tengo?». Si contesta que Home Assistant no ha
 mandado el catálogo, el `rest_command` no está llegando.
 
+## 4. Avisos al móvil
+
+Es el canal que hace que un recordatorio llegue **cuando toca** y no cuando abres el
+buzón. Mientras nadie recoja esta cola, todo sigue saliendo por correo exactamente como
+antes: el canal se enciende solo cuando alguien empieza a sondear, no hay nada que
+activar en el backend.
+
+En `configuration.yaml`, junto al sensor de las órdenes:
+
+```yaml
+rest:
+  - resource: "https://TU-BACKEND/ha/avisos-pending"
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+    scan_interval: 30
+    sensor:
+      - name: "Life Assistant Avisos"
+        value_template: "{{ value_json.avisos | length }}"
+        json_attributes:
+          - avisos
+```
+
+**Leerlo VACÍA la cola**, igual que las órdenes y el WOL: solo puede consumirlo este
+sensor. Y ese sondeo es además lo que declara vivo el canal — si HA deja de sondear más
+de `AVISO_MOVIL_VIVO` segundos (5 min por defecto), el backend vuelve al correo solo.
+
+La automatización que los manda al móvil (aquí sí va el nombre de tu dispositivo, que por
+eso no está en el backend):
+
+```yaml
+alias: Life Assistant - Avisos al movil
+mode: queued
+max: 10
+trigger:
+  # Sin `to`/`from`, igual que las órdenes: dos lecturas con un aviso cada una dejan el
+  # estado en "1" y las dos hay que mandarlas.
+  - platform: state
+    entity_id: sensor.life_assistant_avisos
+condition:
+  - condition: template
+    value_template: "{{ trigger.to_state.state | int(0) > 0 }}"
+action:
+  - repeat:
+      for_each: "{{ state_attr('sensor.life_assistant_avisos', 'avisos') | default([], true) }}"
+      sequence:
+        - service: notify.mobile_app_TU_MOVIL   # el nombre exacto sale de Ajustes → Companion
+          data:
+            title: "{{ repeat.item.titulo }}"
+            message: "{{ repeat.item.texto }}"
+```
+
+Para comprobarlo, el panel ⚙ del dashboard tiene una fila **Avisos** (dice por dónde
+están saliendo y cuánto hace que HA los recogió) y un botón **«Probar aviso»** que
+recorre la cadena entera. Si dice "enviado al móvil" y no llega nada, el problema está en
+esta automatización o en el nombre del `notify.*`.
+
+**Si el YAML se queda a medias** —el sensor puesto y la automatización no, por ejemplo—
+los avisos encolados se rescatan por correo pasados `AVISO_MOVIL_RESCATE` segundos (10
+min). El canal puede fallar; lo que no puede es tragarse avisos en silencio.
+
 ## Recordatorios: el mismo reloj
 
 Los recordatorios (`recordarme`) los despacha `POST /ha/brief-tick`, la automatización que
 ya existe para el resumen diario (`la_brief_tick`, cada 5 minutos). No hay que añadir
-nada: si ese tick funciona, los avisos salen. Si HA está apagado, no salen — es el mismo
+nada: si ese tick funciona, los avisos salen (por el móvil si el punto 4 está puesto, y
+si no por correo). Si HA está apagado, no salen — es el mismo
 compromiso que el resumen diario, y por eso el reloj vive en la casa y no en Fly, que
 escala a cero.

@@ -145,6 +145,11 @@ def _limpiar_estado():
     # El vigilante de la ingesta solo mira una vez por hora: sin resetear el reloj, el
     # primer test que lo dispare dejaría mudos a los siguientes.
     main._ultima_vigilancia = 0.0
+    # La cola de avisos al móvil y el reloj del último sondeo de HA: sin resetearlos, un
+    # test que encole un aviso se lo dejaría al siguiente, y el canal vivo de uno
+    # cambiaría el de otro.
+    main._avisos_movil.clear()
+    main._ultimo_sondeo_avisos = 0.0
 
 
 @pytest.fixture(autouse=True)
