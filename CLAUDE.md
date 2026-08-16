@@ -812,9 +812,39 @@ Ficheros clave:
     pasado deja de leerse a la tercera.
   - Antes de la hora no consulta nada: el tick tiene que seguir siendo barato.
 
+- **Vigilante de la ingesta** (`_vigilar_ingesta()`, mismo tick de HA): si no entra ni un
+  dato de salud en `INGESTA_AVISO_HORAS` (24), un `logger.error`; pasadas
+  `INGESTA_CORREO_HORAS` (48), además un recordatorio. Es el complemento del aviso del
+  reloj, no un duplicado: aquel salta cuando llegan datos del móvil y ninguno del Watch, y
+  **se calla a propósito cuando no llega NADA** porque entonces no se sabe qué falló. Este
+  cubre exactamente ese hueco, que es donde vivieron las tres averías grandes del proyecto
+  (el 409 del upsert, el 400 del envoltorio, el JWT caducado del agente): las tres son la
+  misma historia —los datos dejaron de llegar y el sistema siguió diciendo que todo iba
+  bien—, y **nadie vigila una ausencia salvo que se le pida**. Cuatro cosas:
+  - **Va por `logger.error`, no por un camino nuevo**: así sale en `app_logs`, en el panel
+    de ajustes y en el `diagnostico` de Jarvis sin tocar nada más.
+  - **Si no se puede preguntar, se calla** (`logger.warning` y fuera). Avisar ahí
+    convertiría un Supabase lento en "el Watch no sincroniza", que es mentira — la regla
+    de siempre, esta vez por el lado contrario.
+  - **El correo es un recordatorio normal**, con la misma idempotencia (`uuid5` del día
+    contra la clave primaria) para no mandar uno por hora.
+  - **Una consulta por hora como mucho** (`INGESTA_VIGILA_CADA_MIN`): el tick pasa cada 5
+    minutos. En memoria a propósito — perderlo en un cold start cuesta una consulta.
+
+- **De quién es cada fila** (columna `health_metrics.fuente`, `FUENTE_AUTO_EXPORT` /
+  `FUENTE_ATAJO` / `FUENTE_PRESENCIA`): las dos ingestas escriben en la MISMA tabla y
+  hasta ahora sin firma, así que "¿cuál de las dos ha dejado de correr?" se deducía a ojo
+  comparando qué métricas faltaban. **Nullable a propósito**: lo ya guardado no se puede
+  atribuir, y rellenarlo con una suposición sería inventarse el dato. Se lee en
+  `GET /health/diagnostico`, que es lo que antes solo se veía mirando la tabla en crudo:
+  huecos INTERCALADOS (los de antes del primer día medido no son huecos, es la prehistoria
+  de la métrica), filas de relleno que no son medidas (los ceros del Atajo, misma regla
+  que el uso del reloj) y la última escritura de cada cliente.
+
 - **Jarvis se diagnostica** (`diagnostico`): fallos de `app_logs` agrupados por origen,
-  estado del resumen diario, cuántos días lleva cada métrica sin dato y qué integraciones
-  están configuradas. Es la pregunta más frecuente que se le hace a un asistente que falla
+  estado del resumen diario, cuántos días lleva cada métrica sin dato, **quién escribió
+  por última vez** (de `/health/diagnostico`, ventana corta: es una lectura de tabla) y
+  qué integraciones están configuradas. Es la pregunta más frecuente que se le hace a un asistente que falla
   de vez en cuando —no "qué tiempo hace", sino "¿por qué no me llegó el correo?"— y toda
   la información existía sin forma de preguntarla hablando. **No devuelve cuerpos de error
   ni contextos**: nivel, origen, recuento y fecha. El detalle se queda en el servidor (la
@@ -930,6 +960,7 @@ Ficheros clave:
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
 | `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) |
 | `GET /health/latest` | JWT | Último valor de cada métrica |
+| `GET /health/diagnostico` | JWT | Por métrica: último día con MEDIDA, huecos intercalados, qué fuente la escribe y filas de relleno; más la última escritura de cada cliente. `?dias=` (1-365) |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
@@ -981,6 +1012,7 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
+`INGESTA_VIGILAR`, `INGESTA_AVISO_HORAS`, `INGESTA_CORREO_HORAS`, `INGESTA_VIGILA_CADA_MIN`,
 `INFORME_SEMANAL`, `INFORME_DIA`, `INFORME_HORA`, `INFORME_SEMANAS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
 `BRIEF_DISPARA_SUENO`,
@@ -2032,7 +2064,8 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
 `20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
-`20260816_brief_instantanea`, `20260816_informe_envios`.
+`20260816_brief_instantanea`, `20260816_informe_envios`,
+`20260816_health_fuente`.
 
 ## Convenciones
 

@@ -1,0 +1,16 @@
+-- De qué cliente vino cada fila de salud.
+--
+-- Health Auto Export y el Atajo de iOS escriben en la MISMA tabla sin dejar firma, así
+-- que cuando algo va mal hay que deducir a ojo cuál de los dos dejó de funcionar: es
+-- exactamente el trabajo manual que se repitió en el 409 del upsert, en el 400 del
+-- envoltorio y en el mes de métricas nocturnas vacías. Con la fuente guardada, "el
+-- Atajo lleva tres días sin correr" se lee en vez de inferirse.
+--
+-- Nullable a propósito: las filas que ya están en la tabla no se pueden atribuir a
+-- nadie, y rellenarlas con una suposición sería peor que dejarlas en blanco — un dato
+-- inventado es indistinguible de uno medido, que es el error contra el que va medio
+-- proyecto. Se van rellenando solas conforme llega cada sincronización.
+--
+-- Sin índice: la columna se lee agrupando la tabla entera de una ventana, nunca
+-- filtrando por ella.
+alter table public.health_metrics add column if not exists fuente text;

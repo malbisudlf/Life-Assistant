@@ -773,3 +773,141 @@ class TestCeroQueNoEsUnaMedida:
                 assert sin_medida == (not cero_es_dato), (
                     f"{etiqueta} ({nombre}): la ingesta y el resumen no tratan igual el 0"
                 )
+
+
+class TestFuenteDeCadaFila:
+    """Las dos ingestas escriben en la MISMA tabla, y hasta ahora sin dejar firma.
+
+    Por eso "¿cuál de las dos ha dejado de correr?" había que deducirlo a ojo cada vez
+    que algo iba mal — el mismo trabajo manual que ya costó semanas en el 409 y en el
+    400 del envoltorio.
+    """
+
+    HAE    = "/health/ingest?token=health-token"
+    SIMPLE = "/health/ingest/simple?token=health-token"
+
+    @staticmethod
+    def _filas(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "health_metrics"):
+            if isinstance(kw.get("json"), list):
+                return kw["json"]
+        return []
+
+    def test_health_auto_export_firma_lo_que_escribe(self, client, mock_requests):
+        client.post(self.HAE, json={"data": {"metrics": [
+            {"name": "step_count", "units": "count",
+             "data": [{"date": "2026-08-07 23:00:00", "qty": 9000}]}
+        ]}})
+        assert self._filas(mock_requests)[0]["fuente"] == main.FUENTE_AUTO_EXPORT
+
+    def test_el_atajo_firma_lo_suyo(self, client, mock_requests):
+        client.post(self.SIMPLE, json=[
+            {"metric": "resting_heart_rate", "date": "2026-08-07", "value": 52}
+        ])
+        assert self._filas(mock_requests)[0]["fuente"] == main.FUENTE_ATAJO
+
+    def test_sin_fuente_no_se_escribe_la_columna(self, mock_requests):
+        """Escribir `None` en el upsert BORRARÍA la atribución que ya tuviera la fila:
+        no saber quién escribe no puede desacreditar a quien escribió antes."""
+        mock_requests.add("POST", "health_metrics", FakeResponse([], 201))
+        main._guardar_metricas({("2026-08-07", "step_count"): {
+            "metric_date": "2026-08-07", "metric_name": "step_count",
+            "value": 9000, "unit": "count", "extra": {}}})
+        assert "fuente" not in self._filas(mock_requests)[0]
+
+
+class TestDiagnosticoDeDatos:
+    """Lo que solo se veía mirando la tabla en crudo: qué falta y de quién se ha dejado
+    de saber. La diferencia con `last_sync` es la de siempre — aquel dice si llega ALGO.
+    """
+
+    def _tabla(self, mock_requests, filas):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(filas))
+
+    @staticmethod
+    def _fila(nombre, fecha, valor=1, fuente=None, creado="2026-08-08T10:00:00+00:00"):
+        f = {"metric_date": fecha, "metric_name": nombre, "value": valor,
+             "extra": {}, "created_at": creado}
+        if fuente:
+            f["fuente"] = fuente
+        return f
+
+    def test_sin_token_no_se_diagnostica_nada(self, client):
+        """Es un endpoint de USUARIO (JWT), no de servicio: lo consume el panel, y lo
+        que enseña —qué falta y desde cuándo— no tiene por qué salir de la sesión."""
+        assert client.get("/health/diagnostico").status_code == 401
+
+    def test_cuenta_los_huecos_desde_el_primer_dia_medido(self, client, mock_requests,
+                                                          auth_headers, monkeypatch):
+        """Antes de empezar a medir no hay nada que echar en falta: un hueco es un día
+        sin medida ENTRE medidas, no la prehistoria de la métrica."""
+        hoy = main.datetime.now(main.LOCAL_TZ).date()
+        dia = lambda n: (hoy - main.timedelta(days=n)).isoformat()   # noqa: E731
+        self._tabla(mock_requests, [
+            self._fila("resting_heart_rate", dia(4)),
+            self._fila("resting_heart_rate", dia(1)),   # faltan el 3 y el 2
+        ])
+        r = client.get("/health/diagnostico?dias=10", headers=auth_headers)
+        assert r.status_code == 200
+        m = r.json()["metricas"]["resting_heart_rate"]
+        assert m["ultimo_dia"] == dia(1)
+        assert m["dias_atras"] == 1
+        assert m["dias_con_dato"] == 2
+        assert m["huecos"] == 3        # los dos de en medio y hoy
+
+    def test_una_fila_de_relleno_no_tapa_un_hueco(self, client, mock_requests, auth_headers):
+        """Los ceros que manda el Atajo los días sin reloj son filas, no medidas: la
+        misma regla que ya rige la detección de uso del reloj."""
+        hoy = main.datetime.now(main.LOCAL_TZ).date().isoformat()
+        self._tabla(mock_requests, [self._fila("heart_rate_variability", hoy, valor=0)])
+        m = client.get("/health/diagnostico", headers=auth_headers).json()["metricas"]
+        assert m["heart_rate_variability"]["dias_con_dato"] == 0
+        assert m["heart_rate_variability"]["filas_sin_medida"] == 1
+
+    def test_dice_quien_escribio_por_ultima_vez(self, client, mock_requests, auth_headers):
+        hoy = main.datetime.now(main.LOCAL_TZ).date().isoformat()
+        self._tabla(mock_requests, [
+            self._fila("step_count", hoy, fuente=main.FUENTE_AUTO_EXPORT,
+                       creado="2026-08-08T09:00:00+00:00"),
+            self._fila("resting_heart_rate", hoy, fuente=main.FUENTE_ATAJO,
+                       creado="2026-08-08T11:00:00+00:00"),
+            self._fila("flights_climbed", hoy, fuente=main.FUENTE_AUTO_EXPORT,
+                       creado="2026-08-08T07:00:00+00:00"),
+        ])
+        cuerpo = client.get("/health/diagnostico", headers=auth_headers).json()
+        assert cuerpo["fuentes"][main.FUENTE_AUTO_EXPORT]["ultima_escritura"] \
+            == "2026-08-08T09:00:00+00:00"
+        assert cuerpo["fuentes"][main.FUENTE_ATAJO]["ultima_escritura"] \
+            == "2026-08-08T11:00:00+00:00"
+        assert cuerpo["metricas"]["step_count"]["fuentes"] == [main.FUENTE_AUTO_EXPORT]
+
+    def test_las_filas_viejas_se_cuentan_pero_no_se_atribuyen(self, client, mock_requests,
+                                                              auth_headers):
+        """Rellenar la fuente de lo que ya estaba guardado sería inventarse un dato."""
+        hoy = main.datetime.now(main.LOCAL_TZ).date().isoformat()
+        self._tabla(mock_requests, [self._fila("step_count", hoy)])
+        cuerpo = client.get("/health/diagnostico", headers=auth_headers).json()
+        assert cuerpo["sin_fuente"] == 1
+        assert cuerpo["fuentes"] == {}
+        assert cuerpo["metricas"]["step_count"]["fuentes"] is None
+
+    def test_una_fecha_futura_no_cuenta(self, client, mock_requests, auth_headers):
+        """Hay filas fechadas en diciembre por el bug del Avg: entrarían como "el último
+        día con dato" y taparían justo el silencio que se viene a mirar."""
+        manana = (main.datetime.now(main.LOCAL_TZ).date()
+                  + main.timedelta(days=120)).isoformat()
+        self._tabla(mock_requests, [self._fila("step_count", manana)])
+        assert client.get("/health/diagnostico",
+                          headers=auth_headers).json()["metricas"] == {}
+
+    def test_la_ventana_tiene_limites(self, client, auth_headers):
+        assert client.get("/health/diagnostico?dias=0", headers=auth_headers).status_code == 400
+        assert client.get("/health/diagnostico?dias=900", headers=auth_headers).status_code == 400
+
+    def test_un_fallo_de_supabase_no_filtra_su_texto(self, client, mock_requests, auth_headers):
+        self._tabla(mock_requests, [])
+        mock_requests.routes.insert(0, ("GET", "/rest/v1/health_metrics",
+                                        FakeResponse(None, 500, "column x does not exist")))
+        r = client.get("/health/diagnostico", headers=auth_headers)
+        assert r.status_code == 502
+        assert "column x" not in r.text
