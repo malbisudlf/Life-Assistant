@@ -144,33 +144,16 @@ que escriba mal lo pisa sin dejar rastro.
 
 ---
 
-## 6. Entrenamiento
-
-### 6.1 Cruzar los entrenos del Watch con las sesiones cobradas ●
-
-**Qué.** Marcar en el widget de entrenamiento personal las sesiones que tienen un workout
-del Watch a esa hora, y avisar de los workouts con pinta de sesión que no están registrados.
-
-**Por qué.** Las sesiones se apuntan a mano y se cobran de cuatro en cuatro: una que se
-olvide es dinero perdido, silenciosamente. El Watch ya guardó la prueba de que ocurrió, en
-`extra.workouts` de `health_metrics`, con fecha y hora.
-
-**Cuidado.** Un entreno propio y una sesión dada se parecen mucho vistos desde el reloj.
-Esto **propone**, nunca registra solo — la misma frontera que ya rige `sugerencia_evento()`
-y `crear_evento` en Jarvis.
-
-### 6.2 Previsión de cobro ●
-
-**Qué.** "Al ritmo de las últimas semanas, el próximo cobro cae alrededor del día X."
-
-**Por qué.** Es aritmética sobre datos que ya están en `/training/summary` y responde la
-única pregunta que el widget hoy no responde: cuándo, no cuánto.
-
----
-
 ## Lo que se ha descartado a propósito
 
 Escrito aquí para no volver a proponerlo dentro de seis meses sin acordarse del motivo:
+
+- **Cruzar los entrenos del Watch con las sesiones de entrenamiento personal**, y la
+  previsión de la fecha del próximo cobro (lo que era el punto 6). Descartado en agosto de
+  2026: no interesa. La idea era detectar sesiones dadas y no apuntadas —dinero que se
+  pierde en silencio— cruzándolas con `extra.workouts`, pero un entreno propio y una sesión
+  dada se parecen demasiado vistos desde el reloj, así que habría propuesto y habría habido
+  que confirmar una por una.
 
 - **Guardar el historial de conversaciones de Jarvis en el backend.** Vive en
   `localStorage` por decisión, no por pereza: menos estado que mantener y nada que purgar.
