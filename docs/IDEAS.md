@@ -13,9 +13,10 @@ El hilo conductor de casi todas es el mismo que ya recorre el proyecto entero:
 **distinguir "no lo sé" de "es que no". La detección de uso del reloj es el último
 capítulo de esa historia, no el final.**
 
-> El **punto 1 está implementado** (agosto de 2026). Se deja escrito, con el resultado
-> debajo de cada idea, porque el porqué sigue valiendo y porque de hacerlo salió un bug
-> que no estaba previsto.
+> Los **puntos 1, 2, 3 y 4 están implementados** (agosto de 2026). Se dejan escritos, con
+> el resultado debajo de cada uno, porque el porqué sigue valiendo y porque de hacerlos
+> salieron dos cosas que no estaban previstas: un bug de ventanas por registros en el
+> dashboard y la frontera entre `_CRUCES` y `healthConclusions`.
 
 ---
 
@@ -52,129 +53,50 @@ sin reloj compararía dos épocas, no dos condiciones.
 
 ---
 
-## 2. Salud: de umbrales fijos a tu propia línea base
+## 2, 3 y 4 — ✅ HECHOS (agosto de 2026)
 
-### 2.1 Baselines personales en vez de números redondos ●●●
+Implementados en el mismo lote. Lo que quedó de cada uno, con lo que se decidió por el
+camino:
 
-**Qué.** Que los umbrales de `wellnessBreakdown` salgan de percentiles del propio
-histórico (p. ej. FC en reposo: comparar contra tu p25/p75 de 90 días) en vez de contra
-constantes.
+### 2. Salud
 
-**Por qué.** "FC en reposo ≤50 = 8 puntos" premia la genética, no el progreso. Alguien con
-una FC basal de 62 nunca sacará esos puntos por mucho que mejore, y alguien con 48 los saca
-durmiendo mal. Lo que interesa medir es el movimiento respecto a uno mismo, que es
-exactamente lo que ya hace el componente de HRV (referencia de la semana anterior) y lo que
-no hacen los demás.
+- **2.1 Baselines personales.** Solo en métricas de FISIOLOGÍA (FC en reposo y FC
+  caminando). Sueño, pasos, energía y compañía son CONDUCTA: puntuarlas contra la propia
+  media es calificar en curva. La ventana (90 días, hasta D-1) se ancla al día que se
+  puntúa, no a hoy — sin eso el histórico deja de ser reproducible. Sin 21 días de medida
+  se cae al umbral fijo, y el desglose dice contra cuál de los dos ha puntuado.
+- **2.2 Firma de "algo va mal".** Acabó como conclusión en `healthConclusions`, no como
+  cruce: `_CRUCES` describe hábitos estables y lo ejecuta también la ventana larga, donde
+  una firma de hace ocho meses no es un hallazgo. Umbrales de entrada más bajos que los
+  de cada métrica por separado, y sin base declarada no afirma nada.
+- **2.3 Días atípicos en el correo.** Con la media y la σ calculadas **sin el propio
+  día**: si no, un valor extremo tira de la media hacia sí mismo y se tapa solo.
 
-**Coste real.** La comparación entre días deja de ser estable: la misma jornada puntúa
-distinto según la ventana. Hay que fijar la baseline por día (como ya hace
-`wellnessHistory` anclando la referencia de HRV a D-14..D-8) o el histórico se vuelve
-irreproducible.
+### 3. El correo
 
-### 2.2 Firma de "algo va mal" ●●
+- **3.1 Informe semanal.** Domingos, medias por semana de las últimas 13, con los días de
+  reloj de cada semana como denominador. Tabla propia (`informe_envios`) para que una
+  migración sin aplicar no pueda romper el resumen diario.
+- **3.2 Qué ha cambiado desde ayer.** Va la primera del correo. Una métrica "se movió" si
+  trae fecha nueva, no valor distinto; y las que NO se movieron se cuentan también,
+  porque media tabla quieta no es que no pase nada, es que no ha llegado nada.
+- **3.3 El JSON adjunto.** Además del texto, sin quitarle nada.
 
-**Qué.** Detectar la combinación clásica —FC en reposo arriba, HRV abajo, frecuencia
-respiratoria arriba, todo a la vez respecto a la baseline— y decirlo antes de que se note.
+### 4. Jarvis
 
-**Por qué.** Por separado, cada una de las tres se mueve por ruido a diario y no significa
-nada; juntas y en la misma dirección son la señal más fiable que da el Watch. El motor de
-cruces (`_CRUCES`) ya sabe cruzar dos series: esto es un cruce de tres con una regla de
-dirección.
+- **4.1 Se diagnostica.** Fallos por origen, estado del resumen, frescura de cada métrica
+  y qué está configurado. Sin cuerpos de error: acabarían en el prompt de un modelo.
+- **4.2 Habla primero.** Una vez al día, con el listón en el código y el modelo solo
+  redactando. Si el modelo falla, sale en crudo.
+- **4.3 Destila la memoria.** Al cerrar turnos de conversaciones largas, con dos frenos
+  de coste.
 
-**Cuidado.** Es justo el tipo de conclusión que no se puede dar con `n` bajo ni con días
-sin reloj de por medio (ver 1.2). Si no hay base, la conclusión es "no hay base".
+Lo que se decidió NO hacer, y por qué:
 
-### 2.3 Días atípicos, marcados en el correo ●
-
-**Qué.** Una línea por métrica que se salga de ±2σ de su propia ventana de 30 días.
-
-**Por qué.** El correo manda hoy 19 métricas por 30 días: unos 570 números. Quien lo lee
-tiene que encontrar lo raro leyéndolo todo. Marcar los atípicos no interpreta nada (sigue
-siendo dato crudo, que es la regla del correo) y convierte una lectura completa en una
-mirada.
-
-**Por dónde.** `_brief_salud()`, junto a `_ventana()`. Es aritmética sobre datos que ya
-están cargados en memoria: cuesta cero viajes de red.
-
----
-
-## 3. El correo y quien lo lee
-
-### 3.1 Un informe semanal, con la ventana larga ●●
-
-**Qué.** Los domingos, un correo aparte con 90 días de ventana: tendencias, cruces con
-`HEALTH_MIN_MUESTRA_PATRONES`, entrenos por semana, dinero del entrenamiento personal.
-
-**Por qué.** El correo diario tiene una ventana de 30 días porque es lo que sirve para
-decidir el día de hoy. Pero las cosas que de verdad cambian una rutina se ven en meses, y
-hoy solo se pueden mirar abriendo el modal de patrones del dashboard — es decir, solo si a
-uno se le ocurre mirar.
-
-**Por dónde.** `construir_brief()` con la ventana parametrizada y otra entrada en la puerta
-idempotente (`brief_envios` con clave semanal). El disparador puede ser el mismo tick de HA.
-
-### 3.2 Qué ha cambiado desde ayer ●●
-
-**Qué.** Una sección corta al principio: lo que se movió respecto al correo de ayer
-(eventos nuevos o cancelados, métricas que cruzaron un umbral, entregas que se acercan).
-
-**Por qué.** El correo diario es idéntico al 90% en días consecutivos. Lo que hace falta
-leer entero es el 10% restante, y hoy hay que releerlo todo para encontrarlo.
-
-**Coste real.** Obliga a guardar el brief de ayer, que es estado nuevo (una fila más en
-`brief_envios`, no una tabla). Estado que hay que purgar, y hasta ahora el proyecto ha
-evitado guardar cosas a propósito.
-
-### 3.3 Adjuntar el JSON del brief ●
-
-**Qué.** El mismo `construir_brief()` como adjunto `.json`, además del texto.
-
-**Por qué.** El texto está pensado para que lo lea un modelo *y* una persona, y esa doble
-función le pone un techo: cualquier dato que solo sirva a la máquina se queda fuera para no
-ensuciar la lectura. Con el adjunto no hay que elegir.
-
----
-
-## 4. Jarvis
-
-### 4.1 Que sepa diagnosticarse ●
-
-**Qué.** Una herramienta que lea `GET /logs` y el estado de las integraciones, para poder
-responder a "¿por qué no me llegó el correo?" o "¿por qué no hay datos de ayer?".
-
-**Por qué.** Toda la información existe (la tabla `app_logs`, `brief_ajustes`, la última
-escritura de cada métrica) y no hay ninguna forma de preguntarla hablando. Es además la
-pregunta más frecuente que se le puede hacer a un asistente personal que falla de vez en
-cuando: no "qué tiempo hace", sino "qué te ha pasado".
-
-**Cuidado.** Los registros pueden llevar detalle de errores; ahí la regla del proyecto es
-que el detalle se queda en el servidor. Devolver nivel, ruta y recuento, no cuerpos.
-
-### 4.2 Que hable primero, con presupuesto ●●
-
-**Qué.** Que el tick de HA le dé a Jarvis la oportunidad de decidir si hay algo que decir
-(máximo uno al día, y solo si supera un listón claro: una entrega mañana sin haberla
-tocado, tres noches sin reloj, un cobro pendiente muy por encima de lo habitual).
-
-**Por qué.** Hoy Jarvis solo habla si le hablas, salvo los recordatorios que tú mismo le
-pusiste. Un asistente que solo contesta obliga a acordarse de preguntar, que es justo lo
-que no funciona.
-
-**Cuidado.** Es la idea con más potencial de volverse insoportable de toda la lista. El
-listón tiene que estar en el código como una regla explícita, no en el criterio del modelo,
-o acabará mandando avisos porque sí. Y con un interruptor, como el resumen diario.
-
-### 4.3 Destilar la memoria sola ●●
-
-**Qué.** Que al cerrar una conversación larga se extraigan los hechos nuevos y se guarden
-en `jarvis_memoria` sin que el modelo tenga que acordarse de llamar a `recordar`.
-
-**Por qué.** Guardar por iniciativa propia funciona a ratos: el modelo recuerda hacerlo
-cuando el hecho es evidente y lo olvida cuando está metido en otra cosa, que es cuando
-aparecen los hechos que valen. Un paso aparte al final del turno no compite con la tarea.
-
-**Coste real.** Una llamada más por conversación. Solo compensa disparándolo por longitud
-de la conversación, no en cada turno.
+- **El informe semanal no reutiliza `_brief_salud()`**: sus claves describen una ventana
+  de 30 días y estirarlas a 90 haría que los nombres mintieran.
+- **El aviso proactivo no incluye el reloj**: ya tiene el suyo, y dos correos por lo mismo
+  es la forma más rápida de que se dejen de leer los dos.
 
 ---
 
@@ -199,8 +121,13 @@ qué fuente la escribió y cuántos huecos tiene en 30 días.
 
 **Por qué.** Cada vez que ha habido un problema de datos, el diagnóstico ha sido el mismo
 trabajo manual: mirar la tabla, contar días, comparar nombres, deducir la fuente. Es
-exactamente lo que se automatiza bien, y encima es lo que necesita 4.1 para poder
-contestar.
+exactamente lo que se automatiza bien.
+
+**Qué queda tras el 4.1.** La herramienta `diagnostico` de Jarvis ya da la mitad: días sin
+dato de cada métrica, fallos por origen y qué está configurado. Falta lo que solo se ve
+mirando la tabla en crudo — QUÉ FUENTE escribió cada fila (Health Auto Export o el Atajo) y
+los huecos intercalados. Eso es lo que distingue "el Atajo dejó de correr" de "el reloj no
+se llevó", que hoy sigue habiendo que deducirlo.
 
 ### 5.3 Copia de seguridad de Supabase ●●
 

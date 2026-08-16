@@ -185,6 +185,14 @@ RELOJ_AVISO_HORA  = os.getenv("RELOJ_AVISO_HORA", "21:30")
 # Cuántas noches seguidas sin medir hacen falta para avisar de la racha. Con 1 saltaría
 # cada vez que se carga una noche, que es normal y volvería el aviso ruido.
 RELOJ_AVISO_NOCHES = int(os.getenv("RELOJ_AVISO_NOCHES", "2"))
+# Informe semanal. El resumen diario mira 30 días porque es lo que sirve para decidir
+# HOY; lo que de verdad cambia una rutina se ve en meses, y hoy eso solo se puede mirar
+# abriendo el modal de patrones del dashboard — o sea, solo si a uno se le ocurre.
+INFORME_SEMANAL = os.getenv("INFORME_SEMANAL", "1") not in ("0", "false", "False")
+# Día de la semana en que sale, con el criterio de `date.weekday()`: 0 = lunes … 6 = domingo.
+INFORME_DIA     = int(os.getenv("INFORME_DIA", "6"))
+INFORME_HORA    = os.getenv("INFORME_HORA", "10:00")
+INFORME_SEMANAS = int(os.getenv("INFORME_SEMANAS", "13"))
 # Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
 # _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
 BRIEF_DISPARA_SUENO   = os.getenv("BRIEF_DISPARA_SUENO", "1") not in ("0", "false", "False")
@@ -3178,6 +3186,13 @@ BRIEF_DIAS_SALUD = 30
 # valor y la media ya cuentan lo que hay.
 BRIEF_MIN_DIAS_SERIE = 3
 BRIEF_MAX_ENTRENOS   = 10
+# Días atípicos: cuántas desviaciones típicas hay que salirse para que un día se
+# señale, y con cuántos días de dato tiene sentido calcular esa desviación. Con menos
+# de una decena de observaciones la sigma es casi tan ruidosa como el propio dato y
+# marcaría cualquier cosa — que es la forma más rápida de que nadie mire las marcas.
+BRIEF_SIGMA_ATIPICO    = 2.0
+BRIEF_MIN_DIAS_ATIPICO = 10
+BRIEF_MAX_ATIPICOS     = 12
 
 # (clave de salida, nombres posibles en health_metrics, unidad por defecto,
 #  el cero es un dato, etiqueta en el correo)
@@ -3527,6 +3542,35 @@ def _dias_hasta(iso: str) -> int | None:
     return (fecha - datetime.now(LOCAL_TZ).date()).days
 
 
+def _atipicos(validas: list, clave: str, unidad: str) -> list:
+    """Días que se salen de ±BRIEF_SIGMA_ATIPICO de la propia ventana de la métrica.
+
+    No es interpretar nada —sigue siendo aritmética sobre el dato crudo, que es la
+    regla de este correo—: es señalar dónde mirar. El correo manda 19 métricas por 30
+    días, casi 600 números, y sin marcas hay que leerlos todos para encontrar el raro.
+
+    La media y la sigma se calculan SIN el propio día. Con ventanas cortas un valor
+    extremo arrastra la media hacia sí mismo y se tapa solo: cuanto más atípico es,
+    menos atípico parece.
+    """
+    if len(validas) < BRIEF_MIN_DIAS_ATIPICO:
+        return []
+    vals = [d["valor"] for d in validas]
+    salida = []
+    for i, d in enumerate(validas):
+        resto = vals[:i] + vals[i + 1:]
+        media = sum(resto) / len(resto)
+        var   = sum((v - media) ** 2 for v in resto) / len(resto)
+        sigma = var ** 0.5
+        if sigma <= 0:
+            continue
+        z = (d["valor"] - media) / sigma
+        if abs(z) >= BRIEF_SIGMA_ATIPICO:
+            salida.append({"metrica": clave, "fecha": d["fecha"], "valor": d["valor"],
+                           "unidad": unidad, "media": round(media, 2), "sigmas": round(z, 1)})
+    return salida
+
+
 def _brief_salud() -> dict:
     """Últimos valores, medias de 7/30 días y serie diaria de las métricas del Watch.
 
@@ -3592,9 +3636,12 @@ def _brief_salud() -> dict:
     # cajón, y sin eso su n bajo se lee como una ingesta rota.
     reloj, dias_puestos, noches_puestas = _uso_del_reloj(por_nombre, dias_ventana, hoy)
 
+    atipicos: list = []
+
     def _anotar(clave: str, validas: list, unidad: str, puestos: set | None = None) -> dict:
         """Guarda el resumen de una serie y, si tiene fondo suficiente, su día a día."""
         resumen = _resumen_serie(validas, unidad)
+        atipicos.extend(_atipicos(validas, clave, resumen["unidad"]))
         if puestos is not None:
             # Cuántos días DE LOS QUE SE PODÍA MEDIR trae la media. Con n=3 sobre 3 no
             # falta ingesta: faltan días de reloj, que es otra conversación. Es un techo
@@ -3721,12 +3768,132 @@ def _brief_salud() -> dict:
         salud["series_desde"] = dias_ventana[0]
         salud["series_hasta"] = dias_ventana[-1]
 
+    if atipicos:
+        # Lo más raro primero, y acotado: una lista larga de "días raros" deja de
+        # señalar nada.
+        atipicos.sort(key=lambda a: -abs(a["sigmas"]))
+        salud["atipicos"] = atipicos[:BRIEF_MAX_ATIPICOS]
+
     # Sin una sola métrica no hay nada que contextualizar, y una tira de treinta huecos
     # solo diría que no llegó nada — que es lo que ya dice la sección vacía.
     if salud:
         salud["reloj"] = reloj
 
     return salud
+
+
+# ── Qué ha cambiado desde el último resumen ───────────────────────────────────
+# El correo diario es idéntico al 90% en días consecutivos, y lo que hace falta leer
+# entero es el 10% restante. Para poder decirlo hay que recordar el de ayer: se guarda
+# una instantánea MÍNIMA (no el correo entero), porque lo único comparable es lo que
+# tiene identidad de un día para otro — el último valor de cada métrica, las entregas
+# por título y las dos cifras del entrenamiento. Las series diarias no entran: ocupan
+# lo que ocupa un mes de datos y su diff es la propia serie.
+
+def _instantanea_brief(datos: dict) -> dict:
+    salud = datos.get("salud") or {}
+    metricas = {
+        clave: {"valor": m.get("ultimo"), "fecha": m.get("fecha")}
+        for clave, m in salud.items()
+        if isinstance(m, dict) and m.get("fecha") and m.get("ultimo") is not None
+    }
+    entren = datos.get("entrenamiento") or {}
+    reloj  = salud.get("reloj") or {}
+    return {
+        "fecha":     datos.get("fecha"),
+        "metricas":  metricas,
+        "entregas":  sorted({e["titulo"] for e in (datos.get("entregas") or [])}),
+        "entreno":   {"sesiones": entren.get("sesiones_desde_cobro"),
+                      "importe":  entren.get("importe_pendiente")},
+        "reloj":     {"ultimo": reloj.get("ultimo"), "racha": reloj.get("racha_sin_reloj")},
+    }
+
+
+def _cambios_desde(previa: dict, datos: dict) -> dict:
+    """Diferencias entre la instantánea de un resumen anterior y el de ahora."""
+    if not previa:
+        return {}
+    ahora  = _instantanea_brief(datos)
+    salida: dict = {"desde": previa.get("fecha")}
+
+    nuevas = [t for t in ahora["entregas"] if t not in previa.get("entregas", [])]
+    fuera  = [t for t in previa.get("entregas", []) if t not in ahora["entregas"]]
+    if nuevas:
+        salida["entregas_nuevas"] = nuevas
+    if fuera:
+        salida["entregas_fuera"] = fuera
+
+    # Una métrica "se movió" si trae medida de una FECHA nueva. Comparar solo el valor
+    # daría por novedad el mismo dato de ayer leído otra vez, que es justo lo contrario.
+    movidas, quietas = [], []
+    for clave, m in ahora["metricas"].items():
+        antes = (previa.get("metricas") or {}).get(clave)
+        if not antes:
+            continue
+        if m["fecha"] != antes.get("fecha"):
+            delta = None
+            if isinstance(m["valor"], (int, float)) and isinstance(antes.get("valor"), (int, float)):
+                delta = round(m["valor"] - antes["valor"], 2)
+            movidas.append({"metrica": clave, "antes": antes.get("valor"),
+                            "ahora": m["valor"], "delta": delta, "fecha": m["fecha"]})
+        else:
+            quietas.append(clave)
+    if movidas:
+        salida["metricas_nuevas"] = sorted(movidas, key=lambda x: x["metrica"])
+    # Las que siguen con el dato del mismo día son la otra mitad de la información: si
+    # son muchas, no es que no pase nada, es que no ha llegado nada.
+    if quietas:
+        salida["metricas_sin_novedad"] = sorted(quietas)
+
+    for campo in ("sesiones", "importe"):
+        antes, despues = (previa.get("entreno") or {}).get(campo), ahora["entreno"][campo]
+        if antes != despues and despues is not None:
+            salida.setdefault("entreno", {})[campo] = {"antes": antes, "ahora": despues}
+
+    racha_antes = (previa.get("reloj") or {}).get("racha")
+    racha_ahora = ahora["reloj"]["racha"]
+    if racha_ahora and racha_ahora != racha_antes:
+        salida["reloj_racha"] = {"antes": racha_antes, "ahora": racha_ahora}
+
+    return salida if len(salida) > 1 else {}
+
+
+def _instantanea_previa(hoy: str) -> dict:
+    """La instantánea del último resumen anterior a hoy, o {} si no hay o no se pudo.
+
+    Un fallo aquí no puede costar el correo: la sección de cambios es un extra y el
+    resto del resumen sigue siendo lo que de verdad importa. Si la columna `datos` no
+    existe todavía (migración sin aplicar), esto es exactamente lo que pasa.
+    """
+    try:
+        r = http.get(
+            f"{BRIEF_ENVIOS_URL}?fecha=lt.{hoy}&datos=not.is.null"
+            "&select=fecha,datos&order=fecha.desc&limit=1",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+    except Exception as e:
+        logger.warning("Resumen diario: sin instantánea anterior para el diff (%s)", e)
+        return {}
+    return (filas[0].get("datos") or {}) if filas else {}
+
+
+def _guardar_instantanea(fecha: str, datos: dict) -> None:
+    """Guarda lo que se ha contado hoy, para el diff de mañana. Después de enviar, y
+    sin poder tumbar nada: el correo ya salió, que es lo que importaba."""
+    try:
+        r = http.patch(
+            f"{BRIEF_ENVIOS_URL}?fecha=eq.{fecha}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={"datos": _instantanea_brief(datos)},
+        )
+        if r.status_code >= 300:
+            logger.warning("Resumen diario: no se pudo guardar la instantánea del %s (%s)",
+                           fecha, r.status_code)
+    except Exception as e:
+        logger.warning("Resumen diario: no se pudo guardar la instantánea del %s (%s)", fecha, e)
 
 
 def _sin_error(resultado, clave: str) -> list:
@@ -3801,7 +3968,7 @@ def construir_brief() -> dict:
         })
     entregas.sort(key=lambda e: e["dias"])
 
-    return {
+    datos = {
         "fecha":         hoy.isoformat(),
         "dia_semana":    DIAS_SEMANA[hoy.weekday()],
         "zona":          TIMEZONE,
@@ -3813,6 +3980,10 @@ def construir_brief() -> dict:
         "entrenamiento": entrenamiento,
         "presencia":     presencia,
     }
+    cambios = _cambios_desde(_instantanea_previa(hoy.isoformat()), datos)
+    if cambios:
+        datos["cambios"] = cambios
+    return datos
 
 
 def _brief_clima() -> dict:
@@ -3928,6 +4099,36 @@ def render_brief_texto(d: dict) -> str:
             lugar = f"  [{e['lugar']}]" if e["lugar"] else ""
             salida.append(f"  {cuando}  {e['titulo']}{lugar}")
         return salida
+
+    # Lo primero de todo: el correo se parece al de ayer en un 90%, y lo que hace falta
+    # leer entero es el otro 10%. Va arriba porque es lo que decide si hay que seguir
+    # leyendo con atención o basta con echar un vistazo.
+    c = d.get("cambios") or {}
+    if c:
+        L.append(f"## QUÉ HA CAMBIADO  (desde el resumen del {c.get('desde')})")
+        for titulo in c.get("entregas_nuevas", []):
+            L.append(f"  + Entrega nueva: {titulo}")
+        for titulo in c.get("entregas_fuera", []):
+            L.append(f"  - Ya no aparece la entrega: {titulo}")
+        for m in c.get("metricas_nuevas", []):
+            etiqueta = _BRIEF_ETIQUETA.get(m["metrica"], m["metrica"])
+            delta = ""
+            if m.get("delta") is not None:
+                delta = f" ({'+' if m['delta'] > 0 else ''}{_cifra(m['delta'])})"
+            L.append(f"  · {etiqueta:<20} {_cifra(m['antes'])} → {_cifra(m['ahora'])}{delta}   [{m['fecha']}]")
+        ent = c.get("entreno") or {}
+        for campo, etiqueta in (("sesiones", "Sesiones pendientes"), ("importe", "Importe pendiente")):
+            if campo in ent:
+                L.append(f"  · {etiqueta:<20} {_cifra(ent[campo]['antes'])} → {_cifra(ent[campo]['ahora'])}")
+        if c.get("reloj_racha"):
+            L.append(f"  · Racha sin reloj      {c['reloj_racha']['antes']} → {c['reloj_racha']['ahora']} días")
+        # No es relleno: si media tabla sigue con el dato del mismo día, no es que no
+        # pase nada, es que no ha llegado nada.
+        quietas = c.get("metricas_sin_novedad") or []
+        if quietas:
+            nombres = ", ".join(_BRIEF_ETIQUETA.get(k, k) for k in quietas)
+            L.append(f"  Sin dato nuevo desde entonces ({len(quietas)}): {nombres}")
+        L.append("")
 
     L.append("## AGENDA DE HOY")
     L += _lineas_eventos(d["agenda"])
@@ -4074,6 +4275,22 @@ def render_brief_texto(d: dict) -> str:
         L.append("  (sin datos)")
     L.append("")
 
+    # Dónde mirar. No interpreta nada: dice qué días se salen de la propia costumbre de
+    # cada métrica, que es lo que no se ve leyendo seiscientos números en fila.
+    if s.get("atipicos"):
+        L.append(f"## DÍAS ATÍPICOS  (±{BRIEF_SIGMA_ATIPICO}σ sobre la propia ventana de cada métrica,"
+                 f" mínimo {BRIEF_MIN_DIAS_ATIPICO} días de dato)")
+        L.append("   La media y la σ se calculan SIN el día señalado: si no, un valor extremo tira de"
+                 " la media hacia sí mismo y se tapa solo.")
+        for a in s["atipicos"]:
+            signo = "por encima" if a["sigmas"] > 0 else "por debajo"
+            L.append(
+                f"  {a['fecha']}  {_BRIEF_ETIQUETA.get(a['metrica'], a['metrica']):<20}"
+                f" {_cifra(a['valor'])} {a['unidad']}"
+                f"   ({signo}, {_cifra(abs(a['sigmas']))}σ; su media {_cifra(a['media'])})"
+            )
+        L.append("")
+
     if s.get("entrenos"):
         L.append(f"## ENTRENOS DEL WATCH (los {BRIEF_MAX_ENTRENOS} más recientes de la ventana)")
         for e in s["entrenos"]:
@@ -4120,10 +4337,252 @@ def render_brief_texto(d: dict) -> str:
     return "\n".join(L) + "\n"
 
 
-def enviar_correo(asunto: str, cuerpo: str):
+# ── INFORME SEMANAL ───────────────────────────────────────────────────────────
+# Mismo material que el resumen diario y una lectura distinta: por SEMANAS, no por
+# días. Una media de 30 días dice dónde estás; trece semanas seguidas dicen hacia
+# dónde vas, y eso no se deduce mirando el correo de cada mañana.
+#
+# No reutiliza `_brief_salud()` a propósito: sus claves (`media_7d`, `n_30d`, la serie
+# día a día) describen una ventana de 30 días, y estirarlas a 90 haría que los nombres
+# mintieran. Lo que se comparte es la tabla de métricas y las funciones de lectura del
+# dato, que es donde estaba el valor.
+INFORME_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/informe_envios"
+# Una semana con dos observaciones no es una semana medida. Con menos que esto se
+# guarda el hueco, que dice más que una media de dos días presentada como semanal.
+INFORME_MIN_DIAS_SEMANA = 3
+
+
+def _lunes(fecha) -> str:
+    """El lunes de la semana de una fecha, como ISO. Se usa de clave de semana porque
+    una fecha real se lee y se ordena sola, y `(año, número de semana)` no."""
+    return (fecha - timedelta(days=fecha.weekday())).isoformat()
+
+
+def _informe_salud(semanas: int, hoy) -> dict:
+    """Medias por semana de cada métrica, más los días de reloj de cada una.
+
+    Los días de reloj no son un extra: son el denominador. Una semana de vacaciones sin
+    el Watch baja todas las medias nocturnas, y sin saber cuántas noches se pudo medir
+    esa caída se lee como un empeoramiento.
+    """
+    desde = (hoy - timedelta(weeks=semanas)).isoformat()
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc&limit=20000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Informe semanal: no se pudieron leer las métricas (%s)", r.status_code)
+        return {}
+
+    por_nombre: dict = {}
+    for fila in r.json():
+        d = _dia(fila.get("metric_date"))
+        if d is None or d > hoy:
+            continue
+        por_nombre.setdefault(fila["metric_name"], []).append(fila)
+
+    # Las semanas van completas y en orden, con los huecos incluidos: si una falta, la
+    # siguiente ocuparía su sitio y la lectura de la tendencia sería otra.
+    lunes = [_lunes(hoy - timedelta(weeks=i)) for i in range(semanas - 1, -1, -1)]
+    salida: dict = {"semanas": lunes, "metricas": {}}
+
+    def _medias(valores_por_fecha: dict) -> list:
+        por_semana: dict = {}
+        for fecha, valor in valores_por_fecha.items():
+            d = _dia(fecha)
+            if d is not None:
+                por_semana.setdefault(_lunes(d), []).append(valor)
+        fila = []
+        for l in lunes:
+            vs = por_semana.get(l) or []
+            fila.append({"media": round(sum(vs) / len(vs), 2), "n": len(vs)}
+                        if len(vs) >= INFORME_MIN_DIAS_SEMANA else None)
+        return fila
+
+    con_dia, con_noche, _ = _dias_de_reloj(f for filas in por_nombre.values() for f in filas)
+    salida["reloj"] = {
+        "dia":   _medias({f: 1 for f in con_dia}),
+        "noche": _medias({f: 1 for f in con_noche}),
+    }
+    # Aquí `media` siempre sale 1 (se cuentan unos): lo que importa es la `n`, o sea
+    # cuántos días de esa semana hubo reloj. Se reutiliza `_medias` para que las
+    # posiciones cuadren exactamente con las de las métricas.
+
+    for clave, nombres, unidad, cero_es_dato, _ in _BRIEF_METRICAS:
+        por_fecha: dict = {}
+        for nombre in nombres:
+            for f in por_nombre.get(nombre) or []:
+                v = _valor_metrica(f)
+                if v is None or v < 0 or (v == 0 and not cero_es_dato):
+                    continue
+                por_fecha.setdefault(f["metric_date"], v)
+        if not por_fecha:
+            continue
+        real = next((f.get("unit") for f in reversed(por_nombre.get(nombres[0]) or []) if f.get("unit")), None)
+        salida["metricas"][clave] = {"unidad": real or unidad, "semanas": _medias(por_fecha)}
+
+    noches = {}
+    for f in _filas_por_alias(por_nombre, ("sleep_analysis", "sleep")):
+        if (f.get("extra") or {}).get("excluded"):
+            continue
+        horas = _horas_sueno(f)
+        if horas > 0:
+            noches[f["metric_date"]] = round(horas, 2)
+    if noches:
+        salida["metricas"]["sueno"] = {"unidad": "h", "semanas": _medias(noches)}
+
+    # Entrenos por semana: se cuentan los del `extra`, no las filas (una fila es un día
+    # con entrenos, y un día puede traer dos).
+    entrenos: dict = {}
+    for f in _filas_por_alias(por_nombre, ("workouts", "workout")):
+        cuantos = len((f.get("extra") or {}).get("workouts") or [])
+        if cuantos:
+            d = _dia(f["metric_date"])
+            if d is not None:
+                entrenos[_lunes(d)] = entrenos.get(_lunes(d), 0) + cuantos
+    salida["entrenos"] = [entrenos.get(l, 0) for l in lunes]
+    return salida
+
+
+def construir_informe_semanal(hoy=None) -> dict:
+    hoy = hoy or _ahora_local().date()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_salud  = pool.submit(_informe_salud, INFORME_SEMANAS, hoy)
+        f_entren = pool.submit(_brief_entrenamiento)
+        salud, entrenamiento = f_salud.result(), f_entren.result()
+    return {
+        "fecha":         hoy.isoformat(),
+        "semanas":       INFORME_SEMANAS,
+        "zona":          TIMEZONE,
+        "salud":         salud,
+        "entrenamiento": entrenamiento,
+    }
+
+
+def render_informe_texto(d: dict) -> str:
+    """Texto del informe semanal. Como el diario: datos etiquetados, sin interpretar."""
+    s = d.get("salud") or {}
+    lunes = s.get("semanas") or []
+    L = [
+        f"Life Assistant — informe semanal del {d['fecha']} ({d['zona']})",
+        "",
+        f"Últimas {d['semanas']} semanas, una columna por semana en orden, de la más antigua a la más",
+        "reciente. Cada celda es la media de esa semana y, entre paréntesis, con cuántos días de dato.",
+        f"Una semana con menos de {INFORME_MIN_DIAS_SEMANA} días de dato sale como \"-\": no es una semana medida.",
+        "",
+    ]
+    if not lunes:
+        return "\n".join(L + ["(sin datos de salud)", ""]) + "\n"
+
+    L.append("## SEMANAS  (lunes de cada una)")
+    L.append("  " + " ".join(l[5:] for l in lunes))
+    L.append("")
+
+    reloj = s.get("reloj") or {}
+    if reloj:
+        L.append("## RELOJ POR SEMANA  (días con el reloj puesto / noches medidas)")
+        L.append("   Es el denominador de todo lo que viene debajo: una semana sin Watch baja las")
+        L.append("   medias nocturnas sin que haya empeorado nada.")
+        for clave, etiqueta in (("dia", "Días con reloj"), ("noche", "Noches con reloj")):
+            celdas = " ".join(f"{c['n']:>5}" if c else "    -" for c in reloj.get(clave, []))
+            L.append(f"  {etiqueta:<20}{celdas}")
+        L.append("")
+
+    L.append("## MÉTRICAS POR SEMANA")
+    for clave in ("sueno", *(c for c, *_ in _BRIEF_METRICAS)):
+        m = (s.get("metricas") or {}).get(clave)
+        if not m:
+            continue
+        celdas = " ".join(f"{_cifra(c['media']):>5}" if c else "    -" for c in m["semanas"])
+        ns     = " ".join(f"{c['n']:>5}" if c else "    -" for c in m["semanas"])
+        L.append(f"  {_BRIEF_ETIQUETA.get(clave, clave):<20}{celdas}   [{m['unidad']}]")
+        L.append(f"  {'  · días con dato':<20}{ns}")
+    L.append("")
+
+    if s.get("entrenos"):
+        L.append("## ENTRENOS DEL WATCH POR SEMANA")
+        L.append("  " + " ".join(f"{n:>5}" for n in s["entrenos"]))
+        L.append("")
+
+    t = d.get("entrenamiento") or {}
+    L.append("## ENTRENAMIENTO PERSONAL (estado a día de hoy)")
+    if t:
+        L.append(f"  {t.get('sesiones_desde_cobro')} sesiones desde el último cobro "
+                 f"({t.get('horas_desde_cobro')} h) — {t.get('importe_pendiente')} €")
+        L.append(f"  Último cobro {t.get('ultimo_cobro') or 'nunca'} · "
+                 f"última sesión {t.get('ultima_sesion') or '—'}")
+    else:
+        L.append("  (sin cliente configurado)")
+    return "\n".join(L) + "\n"
+
+
+def _enviar_informe_si_toca(forzar: bool = False) -> dict:
+    """Manda el informe semanal si toca hoy y no ha salido. Lo llama el tick de HA.
+
+    Idéntico en estructura al resumen diario y por los mismos motivos: reserva atómica
+    con un INSERT (el 409 es la pregunta), liberación si el envío falla, y no puede
+    tumbar a quien lo llama.
+    """
+    ahora = _ahora_local()
+    if not forzar:
+        if not INFORME_SEMANAL or ahora.date().weekday() != INFORME_DIA:
+            return {}
+        if (ahora.hour, ahora.minute) < HORA_INFORME:
+            return {}
+    fecha = ahora.date().isoformat()
+
+    r = http.post(
+        INFORME_ENVIOS_URL,
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+        json=[{"fecha": fecha, "enviado_at": datetime.now(timezone.utc).isoformat()}],
+    )
+    if r.status_code == 409:
+        return {}
+    if r.status_code >= 300:
+        logger.error("Informe semanal: no se pudo reservar el envío del %s (%s)", fecha, r.status_code)
+        return {}
+
+    try:
+        datos = construir_informe_semanal(ahora.date())
+        enviar_correo(
+            f"Life Assistant — informe semanal del {fecha}",
+            render_informe_texto(datos),
+            adjunto=(f"informe-{fecha}.json",
+                     json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
+        )
+    except Exception as e:
+        logger.error("Informe semanal: fallo al enviarlo (%s); se libera la reserva", e)
+        try:
+            http.delete(f"{INFORME_ENVIOS_URL}?fecha=eq.{fecha}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        except requests.RequestException:
+            logger.exception("Informe semanal: la reserva del %s se quedó puesta", fecha)
+        return {}
+    logger.info("Informe semanal enviado a %s (%s)", BRIEF_TO, fecha)
+    return {"informe_semanal": True}
+
+
+def _informe_semanal_seguro() -> dict:
+    """El tick existe sobre todo para el resumen diario: nada de esto puede tumbarlo.
+    Mismo criterio que los recordatorios y el disparo de la rutina."""
+    try:
+        return _enviar_informe_si_toca()
+    except Exception:
+        logger.exception("Informe semanal: fallo inesperado en el tick")
+        return {}
+
+
+def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     """Envía por SMTP con la librería estándar: no hace falta ninguna dependencia
     nueva ni una cuenta en un servicio de envío. Con Gmail, usa una contraseña de
-    aplicación en SMTP_PASSWORD (la normal no sirve si tienes 2FA)."""
+    aplicación en SMTP_PASSWORD (la normal no sirve si tienes 2FA).
+
+    `adjunto` es `(nombre, bytes, subtipo MIME)`. Existe por el resumen diario: su
+    texto lo tiene que poder leer un modelo Y una persona, y esa doble función le pone
+    un techo —lo que solo le sirve a la máquina se queda fuera para no ensuciar la
+    lectura—. Con el adjunto no hay que elegir.
+    """
     faltan = [n for n, v in (
         ("SMTP_HOST", SMTP_HOST), ("SMTP_USER", SMTP_USER),
         ("SMTP_PASSWORD", SMTP_PASSWORD), ("BRIEF_TO", BRIEF_TO),
@@ -4138,6 +4597,9 @@ def enviar_correo(asunto: str, cuerpo: str):
     msg["From"] = BRIEF_FROM or SMTP_USER
     msg["To"] = BRIEF_TO
     msg.set_content(cuerpo)
+    if adjunto:
+        nombre, datos, subtipo = adjunto
+        msg.add_attachment(datos, maintype="application", subtype=subtipo, filename=nombre)
     # 465 abre TLS desde el principio (SMTPS); 587 empieza en claro y sube con
     # STARTTLS. Gmail acepta los dos. Con timeout: sin él, un SMTP que no responde
     # retiene el hilo igual que una llamada HTTP colgada.
@@ -4277,6 +4739,7 @@ HORA_DESPERTAR_HASTA = _hora_config(BRIEF_DESPERTAR_HASTA, (11, 30))
 HORA_TOPE            = _hora_config(BRIEF_HORA_TOPE, (10, 0))
 HORA_RUTINA          = _hora_config(BRIEF_RUTINA_DESDE, (8, 0))
 HORA_AVISO_RELOJ     = _hora_config(RELOJ_AVISO_HORA, (21, 30))
+HORA_INFORME         = _hora_config(INFORME_HORA, (10, 0))
 
 
 def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
@@ -4414,12 +4877,20 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
 
     try:
         datos = construir_brief()
-        enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+        # El JSON va adjunto además del texto: el texto lo tiene que poder leer una
+        # persona, y eso le pone un techo a lo que cabe dentro. Así no hay que elegir.
+        enviar_correo(
+            f"Life Assistant — datos del {datos['fecha']}",
+            render_brief_texto(datos),
+            adjunto=(f"brief-{datos['fecha']}.json",
+                     json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
+        )
     except Exception:
         _liberar_envio(fecha)
         raise
 
     logger.info("Resumen diario enviado a %s (%s), disparado por: %s", BRIEF_TO, datos["fecha"], fuente)
+    _guardar_instantanea(fecha, datos)
     _lanzar_rutina(datos["fecha"], ahora)
     return {"enviado": True, "fecha": datos["fecha"], "fuente": fuente}
 
@@ -4505,8 +4976,10 @@ def ha_brief_tick(request: Request, token: str = ""):
 
     # El aviso del reloj va ANTES del despacho para que salga en este mismo tick: se
     # apunta con `cuando` = ahora, así que el despachador que viene detrás ya lo ve.
-    reloj  = _avisar_reloj_si_toca()
-    avisos = {**_despachar_recordatorios(), **reloj}
+    # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
+    # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
+    previos = {**_avisar_reloj_si_toca(), **_hablar_seguro()}
+    avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro()}
     ahora  = _ahora_local()
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
@@ -4650,6 +5123,27 @@ def send_brief(request: Request, token: str = "", forzar: int = 0):
         logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo")
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     return {"ok": True, "enviado_a": BRIEF_TO, **resultado}
+
+
+@app.get("/informe")
+def get_informe(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Los datos del informe semanal en JSON, sin mandar nada. Para ver qué saldría el
+    domingo sin esperar al domingo."""
+    return construir_informe_semanal()
+
+
+@app.post("/informe/send")
+def send_informe(request: Request, token: str = "", forzar: int = 0):
+    """Manda el informe semanal. Con `?forzar=1` se salta el día y la hora, no la
+    reserva: probarlo a mano no puede acabar mandando dos el mismo día."""
+    if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        resultado = _enviar_informe_si_toca(forzar=bool(forzar))
+    except Exception as e:
+        logger.exception("Informe semanal: fallo inesperado al construir o enviar")
+        raise HTTPException(status_code=502, detail=f"No se pudo enviar el informe: {e}")
+    return {"ok": True, "enviado_a": BRIEF_TO, **(resultado or {"informe_semanal": False})}
 
 
 # ── REGISTRO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────────────
@@ -5084,6 +5578,151 @@ def _avisar_reloj_si_toca() -> dict:
         return {}
     logger.info("Aviso de reloj apuntado para hoy (%s)", texto[:60])
     return {"aviso_reloj": True}
+
+
+# ── Jarvis habla primero ─────────────────────────────────────────────────────
+# Hoy Jarvis solo contesta si le hablas, salvo los recordatorios que tú mismo pusiste.
+# Un asistente que solo contesta obliga a acordarse de preguntar, que es justo lo que
+# no funciona. Esto le da una vez al día para decir algo por su cuenta.
+#
+# Es la idea con más potencial de volverse insoportable de todo el proyecto, así que:
+#   - **El listón está en el CÓDIGO, no en el criterio del modelo.** Las reglas de
+#     abajo deciden SI hay algo que decir; el modelo solo REDACTA lo que ya se decidió.
+#     Dejarle decidir a él cuándo hablar acaba en un aviso diario porque sí.
+#   - Como mucho uno al día, con la misma idempotencia que el aviso del reloj (uuid5 de
+#     la fecha contra la clave primaria de los recordatorios).
+#   - Interruptor propio, y apagado no cuesta ni una consulta.
+#   - Si el modelo falla, se manda igual con los hechos en crudo: la información es lo
+#     que vale, la redacción es el adorno.
+# El reloj no entra aquí: ya tiene su propio aviso, y dos correos por lo mismo es la
+# forma más rápida de que se dejen de leer los dos.
+JARVIS_PROACTIVO         = os.getenv("JARVIS_PROACTIVO", "1") not in ("0", "false", "False")
+JARVIS_PROACTIVO_HORA    = os.getenv("JARVIS_PROACTIVO_HORA", "19:00")
+# Se resuelve aquí y no con las demás horas de arriba porque la variable se declara en
+# este bloque: `_hora_config` ya existe a esta altura del módulo.
+HORA_PROACTIVO           = _hora_config(JARVIS_PROACTIVO_HORA, (19, 0))
+# Días sin un solo entreno del Watch a partir de los cuales merece mencionarse. El
+# objetivo declarado son 4 sesiones por semana: tres días en blanco ya se lo comen.
+JARVIS_PROACTIVO_SIN_ENTRENO = int(os.getenv("JARVIS_PROACTIVO_SIN_ENTRENO", "3"))
+_proactivo_dia: str | None = None
+
+_PROACTIVO_SISTEMA = (
+    "Eres Jarvis, el asistente personal de Mikel. Te paso HECHOS ya comprobados que "
+    "merece la pena que sepa hoy. Escríbelos en dos frases como mucho, en español, "
+    "directo y sin saludos ni despedidas. No inventes nada que no esté en los hechos, "
+    "no añadas ánimos genéricos y no preguntes nada: esto es un aviso, no una "
+    "conversación."
+)
+
+
+def _motivos_proactivos(ahora: datetime) -> list:
+    """Los hechos que justifican hablar hoy. Lista vacía = no hay nada que decir.
+
+    Cada regla es una condición cerrada sobre datos que ya existen. Ninguna se apoya en
+    "al modelo le parece relevante": eso no es un listón, es una excusa.
+    """
+    motivos = []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_eventos = pool.submit(get_events, credentials=None)
+        f_entren  = pool.submit(_brief_entrenamiento)
+        f_salud   = pool.submit(_brief_salud)
+        eventos = _sin_error(f_eventos.result(), "events")
+        entren  = f_entren.result()
+        salud   = f_salud.result()
+
+    # 1. Una entrega que vence hoy o mañana. Es lo único de la lista que tiene fecha
+    #    límite de verdad: enterarse un día tarde no tiene arreglo.
+    for ev in eventos:
+        titulo = ev.get("title") or ""
+        if ENTREGAS_MARKER not in titulo:
+            continue
+        dias = _dias_hasta(ev.get("start", ""))
+        if dias is not None and 0 <= dias <= 1:
+            limpio = titulo.replace(ENTREGAS_MARKER, "").strip() or "(sin título)"
+            motivos.append(f"Entrega '{limpio}' {'hoy' if dias == 0 else 'mañana'}.")
+
+    # 2. Se ha pasado el punto de cobro del entrenamiento personal. Es dinero que se
+    #    queda sin cobrar por no acordarse, que es exactamente lo que un asistente
+    #    tiene que evitar.
+    if entren:
+        hechas = entren.get("sesiones_desde_cobro") or 0
+        cada   = entren.get("sesiones_por_cobro") or 0
+        if cada and hechas >= cada:
+            motivos.append(
+                f"Llevas {hechas} sesiones sin cobrar (cobras cada {cada}): "
+                f"{entren.get('importe_pendiente')} € pendientes."
+            )
+
+    # 3. Días seguidos sin entrenar, contra el objetivo de 4 por semana. Solo se dice si
+    #    HAY histórico de entrenos: sin él no se sabe si es una racha o es que el Watch
+    #    nunca los ha registrado, y regañar por lo segundo sería inventarse el dato.
+    ultimo = (salud or {}).get("ultimo_entreno")
+    if ultimo and (ultimo.get("dias") or 0) >= JARVIS_PROACTIVO_SIN_ENTRENO:
+        motivos.append(f"{ultimo['dias']} días desde el último entreno (el objetivo son 4 por semana).")
+
+    return motivos
+
+
+def _hablar_si_hay_algo() -> dict:
+    """Una vez al día, si alguna regla se cumple, deja un aviso redactado."""
+    global _proactivo_dia
+    ahora = _ahora_local()
+    if not JARVIS_PROACTIVO or (ahora.hour, ahora.minute) < HORA_PROACTIVO:
+        return {}
+    hoy = ahora.date().isoformat()
+    if _proactivo_dia == hoy:
+        return {}
+
+    try:
+        motivos = _motivos_proactivos(ahora)
+    except Exception as e:
+        logger.error("Jarvis proactivo: no se pudieron reunir los motivos (%s)", e)
+        return {}
+    _proactivo_dia = hoy
+    if not motivos:
+        return {}
+
+    texto = " ".join(motivos)
+    try:
+        cliente = get_openai_client()
+        redactado = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": _PROACTIVO_SISTEMA},
+                      {"role": "user", "content": texto}],
+            **_parametros_modelo(JARVIS_MODEL, 200),
+        ).choices[0].message.content
+        if redactado and redactado.strip():
+            texto = redactado.strip()
+    except Exception as e:
+        # La información es lo que vale; la redacción es el adorno. Sale igual en crudo.
+        logger.warning("Jarvis proactivo: no se pudo redactar, va en crudo (%s)", e)
+
+    try:
+        r = http.post(
+            RECORDATORIOS_URL,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:jarvis-proactivo:{hoy}")),
+                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
+                  "cuando": datetime.now(timezone.utc).isoformat()},
+        )
+        if r.status_code == 409:
+            return {}
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Jarvis proactivo: no se pudo apuntar el aviso (%s)", e)
+        return {}
+    logger.info("Jarvis proactivo: aviso apuntado (%d motivo(s))", len(motivos))
+    return {"jarvis_proactivo": len(motivos)}
+
+
+def _hablar_seguro() -> dict:
+    """Nada de esto puede tumbar el tick, que existe sobre todo para el resumen diario."""
+    try:
+        return _hablar_si_hay_algo()
+    except Exception:
+        logger.exception("Jarvis proactivo: fallo inesperado en el tick")
+        return {}
 
 
 def _despachar_recordatorios() -> dict:
@@ -5783,6 +6422,73 @@ def _j_recordar(clave: str, contenido: str) -> dict:
     return {"ok": True, "clave": clave}
 
 
+# ── Destilar la memoria sola ─────────────────────────────────────────────────
+# Guardar por iniciativa propia (el prompt se lo pide) funciona a ratos: el modelo se
+# acuerda cuando el hecho es evidente y se olvida cuando está metido en otra cosa, que
+# es justo cuando aparecen los hechos que valen. Un paso APARTE al final del turno no
+# compite con la tarea que tiene entre manos.
+#
+# El coste es una llamada de más, así que va con dos frenos: solo en conversaciones ya
+# largas y como mucho una vez cada JARVIS_DESTILAR_MINUTOS. El freno del tiempo vive en
+# memoria a propósito — perderlo en un cold start cuesta una llamada, no un dato.
+JARVIS_DESTILAR         = os.getenv("JARVIS_DESTILAR", "1") not in ("0", "false", "False")
+JARVIS_DESTILAR_DESDE   = int(os.getenv("JARVIS_DESTILAR_DESDE", "6"))
+JARVIS_DESTILAR_MINUTOS = int(os.getenv("JARVIS_DESTILAR_MINUTOS", "30"))
+JARVIS_DESTILAR_MAX     = 5
+_ultima_destilacion = 0.0
+
+_DESTILAR_SISTEMA = (
+    "Extraes HECHOS DURADEROS sobre el usuario a partir de una conversación: "
+    "preferencias, objetivos, nombres de personas o sitios, decisiones que ha tomado, "
+    "restricciones suyas. NO extraigas: lo que preguntó, lo que hizo el asistente, "
+    "datos que caducan en horas (el tiempo que hace, la agenda de hoy) ni nada que no "
+    "esté dicho explícitamente — no deduzcas ni inventes.\n"
+    'Responde SOLO con JSON: {"recuerdos": [{"clave": "objetivo-peso", "contenido": "..."}]}. '
+    "Clave corta y descriptiva en minúsculas (el backend la normaliza). Si no hay "
+    "ningún hecho que merezca "
+    'guardarse, devuelve {"recuerdos": []}.'
+)
+
+
+def _quizas_destilar(cliente, turnos: list) -> None:
+    """Saca los hechos de una conversación larga y los guarda. Nunca tumba el turno."""
+    global _ultima_destilacion
+    if not JARVIS_DESTILAR or len(turnos) < JARVIS_DESTILAR_DESDE:
+        return
+    if time.time() - _ultima_destilacion < JARVIS_DESTILAR_MINUTOS * 60:
+        return
+    _ultima_destilacion = time.time()
+    try:
+        transcripcion = "\n".join(
+            f"{'Usuario' if t['rol'] == 'user' else 'Asistente'}: {t['texto'][:500]}"
+            for t in turnos[-JARVIS_MAX_HISTORIAL:]
+        )
+        respuesta = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": _DESTILAR_SISTEMA},
+                      {"role": "user", "content": transcripcion}],
+            **_parametros_modelo(JARVIS_MODEL, 400),
+        ).choices[0].message.content or "{}"
+        # El modelo a veces envuelve el JSON en ```; se busca el objeto y ya.
+        m = re.search(r"\{.*\}", respuesta, re.S)
+        recuerdos = json.loads(m.group(0))["recuerdos"] if m else []
+    except Exception as e:
+        logger.warning("Jarvis: no se pudo destilar la memoria (%s)", e)
+        return
+
+    guardados = 0
+    for r in recuerdos[:JARVIS_DESTILAR_MAX]:
+        if not isinstance(r, dict):
+            continue
+        try:
+            if _j_recordar(r.get("clave", ""), r.get("contenido", "")).get("ok"):
+                guardados += 1
+        except Exception as e:
+            logger.warning("Jarvis: no se pudo guardar un recuerdo destilado (%s)", e)
+    if guardados:
+        logger.info("Jarvis: %d recuerdo(s) destilados de la conversación", guardados)
+
+
 def _j_olvidar(clave: str) -> dict:
     clave = _clave_recuerdo(clave)
     if not clave:
@@ -6316,6 +7022,71 @@ def _j_mcp_desconectar(nombre: str) -> dict:
     return {"ok": True, "servidor": nombre}
 
 
+def _j_diagnostico(dias: int = 3) -> dict:
+    """Qué le ha pasado al sistema: fallos registrados, estado del resumen y frescura
+    de cada fuente de datos.
+
+    Es la pregunta más frecuente que se le hace a un asistente personal que falla de vez
+    en cuando: no "qué tiempo hace", sino "¿por qué no me llegó el correo?" o "¿por qué
+    no hay datos de ayer?". Toda la información ya existía —`app_logs`, `brief_ajustes`,
+    la última escritura de cada métrica— y no había forma de preguntarla hablando.
+
+    **No devuelve cuerpos de error ni contextos**: nivel, ruta y recuento. El detalle de
+    un fallo se queda en el servidor, que es la regla de `_supabase_error()`, y aquí
+    además ese texto acabaría dentro del prompt de un modelo.
+    """
+    dias = max(1, min(int(dias or 3), 30))
+    salida: dict = {"ventana_dias": dias}
+
+    try:
+        registro = get_logs(dias=dias, limite=200, credentials=None)
+        entradas = registro.get("entradas") or []
+        resumen: dict = {}
+        for e in entradas:
+            clave = f"{e.get('level')} {e.get('source') or '?'}"
+            fila  = resumen.setdefault(clave, {"veces": 0, "ultima": None})
+            fila["veces"] += 1
+            if not fila["ultima"] or (e.get("created_at") or "") > fila["ultima"]:
+                fila["ultima"] = e.get("created_at")
+        salida["fallos"] = {
+            "total":   len(entradas),
+            "errores": registro.get("errores", 0),
+            # Ordenado por frecuencia: lo que se repite es lo que está roto, no lo que
+            # pasó una vez.
+            "por_origen": dict(sorted(resumen.items(), key=lambda kv: -kv[1]["veces"])[:10]),
+        }
+    except Exception as e:
+        salida["fallos"] = {"error": f"no se pudo leer el registro: {e}"}
+
+    try:
+        salida["resumen_diario"] = _brief_ajustes_estado()
+    except Exception as e:
+        salida["resumen_diario"] = {"error": f"no se pudo comprobar: {e}"}
+
+    # Frescura de las fuentes: cuándo se escribió por última vez cada métrica. Es lo que
+    # convierte "no hay datos" en "la ingesta lleva dos días parada" o en "el reloj está
+    # en un cajón", que son problemas distintos con arreglos distintos.
+    try:
+        salud = _brief_salud()
+        salida["salud"] = {
+            "metricas": {clave: {"dias_atras": m.get("dias_atras"), "fecha": m.get("fecha")}
+                         for clave, m in salud.items()
+                         if isinstance(m, dict) and m.get("dias_atras") is not None},
+            "reloj": salud.get("reloj"),
+        }
+    except Exception as e:
+        salida["salud"] = {"error": f"no se pudo comprobar: {e}"}
+
+    salida["configurado"] = {
+        "correo":          bool(SMTP_HOST and BRIEF_TO),
+        "supabase":        bool(SUPABASE_URL and SUPABASE_KEY),
+        "graph":           bool(_token_cache or CLIENT_ID),
+        "busqueda_web":    bool(TAVILY_API_KEY or BRAVE_API_KEY),
+        "rutina_briefing": bool(RUTINA_FIRE_URL and RUTINA_FIRE_TOKEN),
+    }
+    return salida
+
+
 def _j_mis_capacidades() -> dict:
     """Qué sabe hacer Jarvis y qué NO, derivado del registro que hay justo debajo.
 
@@ -6374,6 +7145,16 @@ _JARVIS_HERRAMIENTAS = {
                        "puedes ampliarte. Úsalo cuando te pregunten qué puedes hacer o "
                        "cuando dudes de si algo está a tu alcance, antes de decir que no.",
         "parametros":  {},
+    },
+
+    "diagnostico": {
+        "confirmar":   False,
+        "fn":          _j_diagnostico,
+        "descripcion": "Qué te ha pasado a TI: fallos registrados por origen, si el resumen "
+                       "diario salió o está apagado, cuántos días lleva cada métrica sin dato "
+                       "y qué integraciones están configuradas. Úsalo cuando pregunten por qué "
+                       "algo no llegó o no funciona, en vez de suponerlo.",
+        "parametros":  {"dias": {"type": "integer", "description": "Días de registro a mirar (1-30)."}},
     },
 
     # ── Consultas ────────────────────────────────────────────────────────────
@@ -7062,6 +7843,14 @@ def jarvis(
             **_parametros_modelo(modelo_usado, techo),
         ).choices[0].message
 
+    def _responder(texto, pendiente_):
+        """Punto único de salida del turno: es donde cuelga la destilación de memoria,
+        para que no haya que acordarse de llamarla en cada `return`."""
+        turnos = [{"rol": t.rol, "texto": t.texto} for t in body.historial[-JARVIS_MAX_HISTORIAL:]]
+        turnos += [{"rol": "user", "texto": mensaje}, {"rol": "assistant", "texto": texto}]
+        _quizas_destilar(cliente, turnos)
+        return {"respuesta": texto, "herramientas": usadas, "pendiente": pendiente_}
+
     for _ in range(JARVIS_MAX_VUELTAS):
         salida   = _pensar(modelo)
         llamadas = salida.tool_calls or []
@@ -7086,7 +7875,7 @@ def jarvis(
             llamadas = salida.tool_calls or []
 
         if not llamadas:
-            return {"respuesta": (salida.content or "").strip(), "herramientas": usadas, "pendiente": None}
+            return _responder((salida.content or "").strip(), None)
 
         mensajes.append({
             "role":       "assistant",
@@ -7139,7 +7928,7 @@ def jarvis(
     cierre = cliente.chat.completions.create(
         model=JARVIS_MODEL, messages=mensajes, **_parametros_modelo(JARVIS_MODEL, techo),
     ).choices[0].message
-    return {"respuesta": (cierre.content or "").strip(), "herramientas": usadas, "pendiente": pendiente}
+    return _responder((cierre.content or "").strip(), pendiente)
 
 
 @app.post("/jarvis/ejecutar")

@@ -490,6 +490,54 @@ Ficheros clave:
   tarde y a ciegas, y al pasar por la misma puerta idempotente no duplica nada.
   `POST /brief/send?forzar=1` se salta la idempotencia: es como se prueba el correo a
   mano sin esperar a mañana ni borrar la fila del día.
+- **Días atípicos** (`_atipicos()`, sección `## DÍAS ATÍPICOS`): los días que se salen
+  de ±`BRIEF_SIGMA_ATIPICO` de la propia ventana de cada métrica. No interpreta nada
+  —sigue siendo aritmética sobre el dato crudo— pero convierte una lectura completa de
+  ~600 números en una mirada. Dos reglas: la media y la σ se calculan **sin el propio
+  día** (si no, un valor extremo tira de la media hacia sí mismo y se tapa solo: cuanto
+  más raro es, menos raro parece), y hacen falta `BRIEF_MIN_DIAS_ATIPICO` días de dato
+  (con cuatro observaciones la σ es tan ruidosa como el dato y marcaría cualquier cosa,
+  que es la forma más rápida de que nadie mire las marcas). Una serie sin dispersión
+  (σ=0) no señala nada: no hay escala contra la que medir.
+
+- **Qué ha cambiado desde el último resumen** (`_instantanea_brief`, `_cambios_desde`,
+  columna `brief_envios.datos`): va la PRIMERA del correo, porque es lo que decide si
+  hay que leer el resto con atención. Cuatro cosas:
+  - Se guarda una instantánea **mínima**, no el correo entero: solo lo que tiene
+    identidad de un día para otro (último valor de cada métrica, entregas por título y
+    las dos cifras del entrenamiento). Las series diarias no entran — su diff es la
+    propia serie.
+  - **Una métrica se movió si trae FECHA nueva, no valor distinto.** Comparando el valor
+    se daría por novedad el mismo dato de ayer leído otra vez, que es justo lo contrario.
+  - **Las que NO se han movido también se cuentan**: si media tabla sigue con el dato del
+    mismo día, no es que no pase nada, es que no ha llegado nada.
+  - Se escribe con un PATCH **después** de enviar y un fallo solo se registra: si la
+    migración no está aplicada, el resumen sale igual sin esa sección. Un resumen sin el
+    diff sigue siendo el resumen; uno que no sale por una columna que falta, no.
+
+- **El JSON va adjunto** además del texto (`enviar_correo(..., adjunto=...)`). El texto
+  lo tiene que poder leer un modelo Y una persona, y esa doble función le pone un techo a
+  lo que cabe dentro. Con el adjunto no hay que elegir.
+
+- **Informe semanal** (`construir_informe_semanal`, `render_informe_texto`,
+  `_enviar_informe_si_toca`, tabla `informe_envios`): los domingos (`INFORME_DIA`), medias
+  **por semana** de las últimas `INFORME_SEMANAS`. Una media de 30 días dice dónde estás;
+  trece semanas seguidas dicen hacia dónde vas, y eso hoy solo se veía abriendo el modal
+  de patrones — o sea, solo si a uno se le ocurría mirar. Cuatro decisiones:
+  - **No reutiliza `_brief_salud()`**: sus claves (`media_7d`, `n_30d`, la serie día a
+    día) describen una ventana de 30 días y estirarlas a 90 haría que los nombres
+    mintieran. Se comparte `_BRIEF_METRICAS` y las funciones de lectura del dato.
+  - **Tabla propia en vez de una columna en `brief_envios`**, aunque la forma sea idéntica:
+    si la migración no se aplica, lo único que no funciona es el informe. Metiéndolo en
+    `brief_envios` (cambiando su clave primaria para admitir dos tipos) una migración sin
+    aplicar rompería el resumen DIARIO.
+  - **Una semana con menos de `INFORME_MIN_DIAS_SEMANA` días de dato sale como hueco**: no
+    es una semana medida, y presentar la media de dos días como semanal es el mismo error
+    que las medias sin `n`.
+  - **Los días de reloj por semana van con las métricas**, en las mismas posiciones: una
+    semana de vacaciones sin el Watch baja todas las medias nocturnas, y sin el
+    denominador esa caída se lee como un empeoramiento.
+
 - **El interruptor** (`brief_ajustes`, `GET`/`PATCH /brief/ajustes`, panel ⚙ y las
   herramientas `estado_resumen_diario`/`configurar_resumen_diario` de Jarvis): apagar el
   resumen, o pausarlo hasta una fecha. Cuatro cosas que no son decoración:
@@ -764,6 +812,41 @@ Ficheros clave:
     pasado deja de leerse a la tercera.
   - Antes de la hora no consulta nada: el tick tiene que seguir siendo barato.
 
+- **Jarvis se diagnostica** (`diagnostico`): fallos de `app_logs` agrupados por origen,
+  estado del resumen diario, cuántos días lleva cada métrica sin dato y qué integraciones
+  están configuradas. Es la pregunta más frecuente que se le hace a un asistente que falla
+  de vez en cuando —no "qué tiempo hace", sino "¿por qué no me llegó el correo?"— y toda
+  la información existía sin forma de preguntarla hablando. **No devuelve cuerpos de error
+  ni contextos**: nivel, origen, recuento y fecha. El detalle se queda en el servidor (la
+  regla de `_supabase_error()`), y aquí además acabaría dentro del prompt de un modelo.
+
+- **Jarvis destila su memoria solo** (`_quizas_destilar`, colgado del punto único de
+  salida `_responder`): al cerrar un turno de una conversación ya larga, una llamada
+  aparte saca los HECHOS duraderos y los guarda con `_j_recordar`. Guardar por iniciativa
+  propia (lo pide el prompt) funciona a ratos: el modelo se acuerda cuando el hecho es
+  evidente y se olvida cuando está metido en otra cosa, que es justo cuando aparecen los
+  hechos que valen. Dos frenos de coste, porque es una llamada de más:
+  `JARVIS_DESTILAR_DESDE` turnos y como mucho una vez cada `JARVIS_DESTILAR_MINUTOS`. Ese
+  segundo freno vive en memoria a propósito — perderlo en un cold start cuesta una
+  llamada, no un dato. Un fallo o una respuesta ilegible no tumban el turno.
+
+- **Jarvis habla primero** (`_motivos_proactivos`, `_hablar_si_hay_algo`, en el tick de
+  HA): una vez al día, si alguna regla se cumple, deja un aviso. Un asistente que solo
+  contesta obliga a acordarse de preguntar, que es lo que no funciona. Es la idea con más
+  potencial de volverse insoportable de todo el proyecto, así que:
+  - **El listón está en el CÓDIGO, no en el criterio del modelo.** Las reglas deciden SI
+    hay algo que decir (entrega hoy o mañana, sesiones sin cobrar por encima del punto de
+    cobro, días seguidos sin entrenar); el modelo solo REDACTA lo ya decidido. Dejarle
+    decidir a él cuándo hablar acaba en un aviso diario porque sí.
+  - **Si el modelo falla, sale en crudo**: la información es lo que vale, la redacción es
+    el adorno.
+  - **Sin histórico de entrenos no se regaña**: sin él no se sabe si es una racha o es que
+    el Watch nunca los registró. La regla de siempre.
+  - **El reloj no entra aquí**: ya tiene su propio aviso, y dos correos por lo mismo es la
+    forma más rápida de que se dejen de leer los dos.
+  - Idempotencia con el mismo `uuid5` de la fecha contra la clave primaria de
+    `jarvis_recordatorios`, y apagado (`JARVIS_PROACTIVO=0`) no cuesta ni una consulta.
+
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -851,6 +934,8 @@ Ficheros clave:
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
 | `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
+| `GET /informe` | JWT | Datos del informe semanal (medias por semana) sin mandar nada |
+| `POST /informe/send` | `BRIEF_TOKEN` | Manda el informe semanal. `?forzar=1` se salta el día y la hora, **no** la reserva |
 | `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
@@ -890,10 +975,13 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_REPO`, `JARVIS_WEB`,
 `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
-`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `CASA_ORDEN_TTL`.
+`JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `CASA_ORDEN_TTL`,
+`JARVIS_DESTILAR`, `JARVIS_DESTILAR_DESDE`, `JARVIS_DESTILAR_MINUTOS`,
+`JARVIS_PROACTIVO`, `JARVIS_PROACTIVO_HORA`, `JARVIS_PROACTIVO_SIN_ENTRENO`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
+`INFORME_SEMANAL`, `INFORME_DIA`, `INFORME_HORA`, `INFORME_SEMANAS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
 `BRIEF_DISPARA_SUENO`,
 `RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
@@ -1093,6 +1181,46 @@ para los cruces entre series.
   (`HEALTH_DIAS_PATRONES`): un año de métricas no debe pagarlo la carga inicial.
   Cada cruce lleva su propio `minEfecto` porque no comparten escala: un 3% en la FC
   en reposo es mucho y un 3% en sueño profundo es ruido.
+
+- **Línea base personal** (`baselinePersonal`, `wellnessBaselines`, `BASELINE_DIAS`/
+  `BASELINE_MIN_DIAS`): los umbrales fijos premian la constitución, no el progreso — con
+  una FC basal de 62 los 8 puntos de "≤50" no se sacan nunca por mucho que se mejore, y
+  con 48 se sacan durmiendo mal. Donde eso pasa, el listón sale de los percentiles del
+  propio histórico. Cuatro reglas:
+  - **Solo en métricas de FISIOLOGÍA** (FC en reposo y FC caminando). Sueño, pasos,
+    energía, pisos y de pie son CONDUCTA: puntuarlas contra la propia media es calificar
+    en curva, y premiaría a quien lleva un mes en el sofá por un día algo menos sedentario.
+    7,5 h de sueño son 7,5 h para cualquiera. La HRV ya iba contra su referencia y no se
+    toca; la respiración se queda fuera porque su desviación ya la mide `calcRecoveryMod`
+    y meterla aquí dejaría dos reglas para la misma señal.
+  - **La ventana se ancla al día QUE SE PUNTÚA, nunca a hoy**, y termina en D-1. Es la
+    misma invariante que `_refHrv`, y es lo que hace que `wellnessHistory` sea
+    reproducible: sin ella, un día ya puntuado cambiaría de nota cada vez que llegan datos
+    nuevos.
+  - **Sin `BASELINE_MIN_DIAS` días de medida se cae al umbral fijo**: un p25 sacado de
+    cinco medidas no es una línea base, es la más baja de cinco. Los 0 no cuentan (son
+    días sin reloj).
+  - **El desglose DICE contra cuál se ha puntuado** (`tu rango 55–62 (n=45)` frente a
+    `umbral general`). Si añades un componente con baseline, mantén esa distinción: quien
+    mira el tooltip tiene que poder saber contra qué se le mide. Los `max` no cambian, así
+    que la escala normalizada sigue siendo comparable.
+
+- **Firma de "algo va mal"** (`_firmaMalestar`, `_FIRMA`): FC en reposo arriba + HRV abajo
+  + respiración arriba, las tres a la vez. Por separado cada una se mueve por ruido; juntas
+  y en la misma dirección son la señal más fiable que da el Watch. Sus umbrales de entrada
+  son **más bajos** que los que cada métrica exige para hablar sola: que coincidan es la
+  evidencia que a cada una le falta. Tres cosas:
+  - **Va en `healthConclusions`, no en `_CRUCES`.** Aquel catálogo describe HÁBITOS
+    estables entre dos series y lo ejecuta también el panel de patrones con ventana larga,
+    donde esto no significaría nada: una firma de hace ocho meses no es un hallazgo, es una
+    gripe que ya se pasó. Esto es un ESTADO de ahora. **Esa es la frontera para señales
+    nuevas.**
+  - **No afirma sin base**: si alguna tendencia no pasa el listón de fondo o el reloj
+    estuvo puesto menos de 3 noches, sale como "no hay base", sin porcentajes. Las noches
+    que declara son el mínimo de las tres y de las noches con reloj — no puede presumir del
+    respaldo de la métrica mejor medida.
+  - Si la firma salta, **se calla el aviso suelto de respiración**: dice lo mismo con menos
+    contexto. Los de HRV y FC en reposo se mantienen, porque cada uno aporta su valor real.
 
 La puntuación de bienestar también vive allí: `wellnessBreakdown` construye el desglose y
 `scoreFromBreakdown` deriva de él el total normalizado a 100 — **el desglose es la
@@ -1769,6 +1897,13 @@ excepción o error de consola, no solo si falta un texto.
   dos lados antes de hablar de tendencia, y con tests. Moraleja, la de siempre: **un
   arreglo que no se busca en los demás sitios donde vive el mismo patrón está a medias.**
 
+- **Un percentil calculado "a día de hoy" habría hecho el histórico irreproducible.** Al
+  meter líneas base personales, la tentación es calcular los percentiles con todo lo que
+  hay hasta ahora. Con eso, el mismo día del histórico puntúa distinto cada vez que se
+  abre el dashboard —y la sparkline de evolución deja de ser comparable consigo misma— sin
+  que nada parezca roto. La regla es la que ya había puesto `_refHrv` y que ahora está
+  escrita: **toda referencia se ancla a la fecha que se puntúa, no a hoy.**
+
 - **El streaming tardaba 45 segundos "en negro" tras encender el PC.** No era la red,
   ni el WOL, ni Sunshine: era la primera invocación de `powershell.exe` del arranque,
   que agotaba el timeout de 40 s del agente antes de devolver un simple
@@ -1896,7 +2031,8 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
 `20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
-`20260808_jarvis_recordatorios`, `20260813_brief_ajustes`.
+`20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
+`20260816_brief_instantanea`, `20260816_informe_envios`.
 
 ## Convenciones
 

@@ -644,6 +644,53 @@ const _avgVal = arr => (arr && arr.length) ? arr.reduce((s, d) => s + (Number(d.
 // Prioridad de tono para ordenar (lo más accionable primero).
 const _TONE_ORDER = { bad: 0, warn: 1, good: 2, info: 3 };
 
+// ── Firma de "algo va mal" ──────────────────────────────────────
+// FC en reposo ARRIBA + HRV ABAJO + frecuencia respiratoria ARRIBA, las tres a la vez
+// contra su media de 30 días. Por separado cada una se mueve por ruido casi a diario y
+// no dice nada; juntas y en la misma dirección son la señal más fiable que da el Watch,
+// y suelen adelantarse un día o dos a notar el resfriado o el exceso de carga.
+//
+// Los umbrales de entrada (3% / -5% / 3%) son más BAJOS que los que cada métrica exige
+// para hablar por su cuenta (5% / -8% / 6%): que las tres coincidan es precisamente la
+// evidencia que a cada una por separado le falta. Los `claro*` son el segundo escalón,
+// el que separa un "ojo con esto" (warn) de un "esto está pasando" (bad).
+const _FIRMA = { rhr: 3, hrv: -5, resp: 3, claroRhr: 6, claroHrv: -10, claroResp: 6, minNoches: 3 };
+
+// Devuelve `{ tone, text }` o null. No afirma nunca sin base: si las tres apuntan a peor
+// pero alguna tendencia no tiene fondo a los dos lados —o el reloj estuvo en el cajón la
+// mayoría de las noches—, lo que sale es "no hay base", sin porcentajes. Un aviso de
+// enfermedad calculado sobre dos noches sueltas es justo lo que enseña a ignorarlos.
+function _firmaMalestar({ tRhr, tHrv, tResp, fiable, nochesReloj = null }) {
+  if (!tRhr || !tHrv || !tResp) return null;
+  const apuntanMal = tRhr.deltaPct >= _FIRMA.rhr
+    && tHrv.deltaPct  <= _FIRMA.hrv
+    && tResp.deltaPct >= _FIRMA.resp;
+  if (!apuntanMal) return null;
+
+  const pct    = n => `${n > 0 ? "+" : ""}${Math.round(n)}%`;
+  // Sobre cuántas noches se apoya la pata más débil: la firma no puede presumir del
+  // respaldo de la métrica mejor medida. Si el reloj estuvo puesto menos noches de las
+  // que hay datos, manda el reloj — el resto lo escribió el teléfono.
+  let noches = Math.min(tRhr.nCorto, tHrv.nCorto, tResp.nCorto);
+  if (nochesReloj != null) noches = Math.min(noches, nochesReloj);
+
+  const conBase = fiable(tRhr) && fiable(tHrv) && fiable(tResp)
+    && (nochesReloj == null || nochesReloj >= _FIRMA.minNoches);
+  if (!conBase) {
+    return {
+      tone: "info",
+      text: `Las tres señales de recuperación (FC en reposo, HRV y respiración) apuntan a peor a la vez, pero solo hay ${noches} noche${noches === 1 ? "" : "s"} medida${noches === 1 ? "" : "s"} detrás — no hay base para afirmarlo. Ponte el reloj estas noches y se sabrá.`,
+    };
+  }
+  const claro = tRhr.deltaPct >= _FIRMA.claroRhr
+    && tHrv.deltaPct  <= _FIRMA.claroHrv
+    && tResp.deltaPct >= _FIRMA.claroResp;
+  return {
+    tone: claro ? "bad" : "warn",
+    text: `Las tres señales de recuperación se han movido a la vez sobre ${noches} noches medidas: FC en reposo ${pct(tRhr.deltaPct)}, HRV ${pct(tHrv.deltaPct)} y respiración ${pct(tResp.deltaPct)} frente a tu media de 30 días — es la firma de estar incubando algo o de haberte pasado de carga. ${claro ? "Descansa hoy" : "Baja intensidad"} y vigílalo mañana.`,
+  };
+}
+
 // `now` es inyectable para poder testear el cómputo de "últimos 7 días". `reloj` es lo
 // que manda /health/metrics: con él, las conclusiones saben cuándo NO se pudo medir y
 // dejan de confundirlo con "no ha pasado nada".
@@ -712,32 +759,43 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   // ── Recuperación: HRV ──
   const hrv  = findMetric(healthData, "heart_rate_variability", "heartRateVariability").filter(d => d.value > 0);
   const hrv7 = ventana(hrv);
+  const tHrv = seriesTrend(hrv, 7, 30, { hoy });
   if (hrv7.length) {
-    const t  = seriesTrend(hrv, 7, 30, { hoy });
     const a7 = _avgVal(hrv7);
-    if      (fiable(t) && t.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(t.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
-    else if (fiable(t) && t.deltaPct >= 8)  push("Recuperación", "good", `Tu HRV va al alza, un ${round(t.deltaPct)}% sobre tu media de 30 días (${round(a7)}ms) — buena recuperación.`);
-    else if (fiable(t))                     push("Recuperación", "info", `HRV estable en torno a ${round(a7)}ms.`);
+    if      (fiable(tHrv) && tHrv.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(tHrv.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
+    else if (fiable(tHrv) && tHrv.deltaPct >= 8)  push("Recuperación", "good", `Tu HRV va al alza, un ${round(tHrv.deltaPct)}% sobre tu media de 30 días (${round(a7)}ms) — buena recuperación.`);
+    else if (fiable(tHrv))                        push("Recuperación", "info", `HRV estable en torno a ${round(a7)}ms.`);
     // Sin fondo no se afirma tendencia ninguna: se dice el valor y sobre qué se apoya.
-    else                                    push("Recuperación", "info", `HRV en ${round(a7)}ms, sobre ${base(hrv7.length)} — sin base para hablar de tendencia.`);
+    else                                          push("Recuperación", "info", `HRV en ${round(a7)}ms, sobre ${base(hrv7.length)} — sin base para hablar de tendencia.`);
   }
 
   // ── Recuperación: FC en reposo ──
   const rhr  = findMetric(healthData, "resting_heart_rate").filter(d => d.value > 0);
   const rhr7 = ventana(rhr);
+  const tRhr = seriesTrend(rhr, 7, 30, { hoy });
   if (rhr7.length) {
-    const t  = seriesTrend(rhr, 7, 30, { hoy });
     const a7 = _avgVal(rhr7);
-    if (fiable(t) && t.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(t.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
-    else                              push("Recuperación", "good", `FC en reposo en ${round(a7)} bpm${fiable(t) && t.deltaPct <= -3 ? ", bajando (buena señal)" : ""}.`);
+    if (fiable(tRhr) && tRhr.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(tRhr.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
+    else                                    push("Recuperación", "good", `FC en reposo en ${round(a7)} bpm${fiable(tRhr) && tRhr.deltaPct <= -3 ? ", bajando (buena señal)" : ""}.`);
   }
 
-  // ── Recuperación: frecuencia respiratoria ──
-  const resp = findMetric(healthData, "respiratory_rate").filter(d => d.value > 0);
-  if (ventana(resp).length) {
-    const t = seriesTrend(resp, 7, 30, { hoy });
-    if (fiable(t) && t.deltaPct >= 6) push("Recuperación", "warn", `Tu frecuencia respiratoria nocturna ha subido frente a tu media — a veces precede a un resfriado o refleja estrés.`);
+  // ── Recuperación: frecuencia respiratoria y firma de "algo va mal" ──
+  const resp  = findMetric(healthData, "respiratory_rate").filter(d => d.value > 0);
+  const tResp = seriesTrend(resp, 7, 30, { hoy });
+  // La firma vive AQUÍ y no en el catálogo `_CRUCES` a propósito. Aquel cruza dos series
+  // entre sí para describir un hábito estable ("los días que…") y lo ejecuta también el
+  // panel de patrones sobre la ventana larga, donde esto no significaría nada: una firma
+  // de enfermedad de hace ocho meses no es un hallazgo, es una gripe que ya se pasó.
+  // Esto no es un patrón, es un ESTADO de ahora mismo contra la propia línea base, y
+  // caduca en cuanto la semana avanza. El sitio de eso son las conclusiones.
+  const firma = _firmaMalestar({ tRhr, tHrv, tResp, fiable, nochesReloj: cob ? cob.noche : null });
+  // La conclusión suelta de respiración dice lo mismo que la firma, con menos contexto y
+  // sin número: si la firma ha saltado, sobra. Se mantiene cuando no hay firma, porque la
+  // respiración subiendo sola también es señal, solo que más débil.
+  if (ventana(resp).length && fiable(tResp) && tResp.deltaPct >= 6 && !(firma && firma.tone !== "info")) {
+    push("Recuperación", "warn", `Tu frecuencia respiratoria nocturna ha subido frente a tu media — a veces precede a un resfriado o refleja estrés.`);
   }
+  if (firma) push("Recuperación", firma.tone, firma.text);
 
   // ── Actividad: pasos ──
   const steps7 = ventana(findMetric(healthData, "step_count", "steps").filter(d => d.value > 0));
@@ -809,6 +867,79 @@ export function healthOverall(conclusions) {
   return { tone: "info", label: "Sin datos suficientes" };
 }
 
+// ── Línea base personal ─────────────────────────────────────────
+// Los umbrales fijos de `wellnessBreakdown` ("FC en reposo ≤50 = 8 pts") premian la
+// constitución, no el progreso: con una basal de 62 esos puntos no se sacan nunca por
+// mucho que se mejore, y con 48 se sacan durmiendo mal. Donde eso pasa, el listón sale de
+// los percentiles del propio histórico — que es exactamente lo que ya hacía el componente
+// de HRV con su referencia de la semana anterior y no hacía ningún otro.
+//
+// Dos reglas que no se pueden relajar:
+//  1. La ventana se ancla a la FECHA QUE SE PUNTÚA, nunca a hoy. Con una baseline
+//     calculada "a día de hoy" el mismo día puntúa distinto según cuándo se mire y el
+//     histórico de `wellnessHistory` deja de ser reproducible. Es la misma solución que
+//     `_refHrv`, que ancla la referencia de HRV a la ventana D-14..D-8 de ESE día.
+//  2. Sin histórico suficiente se cae al umbral fijo de siempre. Un p25 sacado de cinco
+//     medidas no es una línea base: es la más baja de cinco. Y el desglose lo DICE, para
+//     que quien mira el tooltip sepa contra qué se le está puntuando.
+//
+// La ventana termina el día ANTERIOR al que se puntúa: incluir el propio día convertiría
+// la comparación en una consigo misma. En la vista semanal quedan solapados los 7 días
+// que se promedian, que sobre 90 son el 8% de la muestra y no mueven un percentil.
+export const BASELINE_DIAS     = 90;
+export const BASELINE_MIN_DIAS = 21;
+
+// Percentil con interpolación lineal sobre una lista YA ordenada.
+function _percentil(ordenados, p) {
+  if (!ordenados.length) return null;
+  const pos = (ordenados.length - 1) * (p / 100);
+  const lo  = Math.floor(pos), hi = Math.ceil(pos);
+  return lo === hi ? ordenados[lo] : ordenados[lo] + (ordenados[hi] - ordenados[lo]) * (pos - lo);
+}
+
+// Percentiles del propio histórico de una serie en la ventana anclada a `fecha`.
+// Devuelve null —y quien llama vuelve al umbral fijo— si no hay días suficientes.
+export function baselinePersonal(serie, fecha, { dias = BASELINE_DIAS, minDias = BASELINE_MIN_DIAS } = {}) {
+  const hasta = fecha ? _sumarDias(fecha, -1)    : null;
+  const desde = fecha ? _sumarDias(fecha, -dias) : null;
+  if (hasta == null || desde == null) return null;
+  const vals = (serie || [])
+    .filter(d => d && d.date != null && String(d.date) >= desde && String(d.date) <= hasta)
+    .map(d => Number(d.value))
+    // Un 0 en estas métricas es "no se midió" (el Atajo de iOS guarda ceros los días sin
+    // reloj): colarlo en los percentiles hundiría la línea base entera.
+    .filter(v => !isNaN(v) && v > 0)
+    .sort((a, b) => a - b);
+  if (vals.length < minDias) return null;
+  return {
+    p25: _percentil(vals, 25), p50: _percentil(vals, 50), p75: _percentil(vals, 75),
+    n: vals.length, dias,
+  };
+}
+
+// Qué componentes se puntúan contra uno mismo, y por qué solo estos:
+//  - FC en reposo y FC caminando son FISIOLOGÍA: su valor absoluto es sobre todo
+//    constitución, y lo que dice algo del día es dónde cae respecto a tu propio rango.
+//  - Sueño, pasos, energía, pisos y de pie son CONDUCTA: los decides tú. Puntuarlos
+//    contra la propia media es calificar en curva — premiaría a quien lleva un mes en el
+//    sofá por un día un poco menos sedentario, y 7,5 h de sueño son 7,5 h para cualquiera.
+//  - La HRV ya va contra su referencia (`hrvPrev`) desde siempre: no se toca.
+//  - La respiración se queda fuera a propósito aunque sea fisiológica: su desviación
+//    contra la baseline ya la mide `calcRecoveryMod`, y meterla aquí también dejaría dos
+//    reglas distintas para la misma señal, que es como se cuelan las incoherencias.
+const _SERIES_BASELINE = {
+  rhr:    h => findMetric(h, "resting_heart_rate"),
+  walkHr: h => findMetric(h, "walking_heart_rate_average"),
+};
+
+export function wellnessBaselines(healthData, fecha, opts = {}) {
+  const out = {};
+  for (const [clave, serie] of Object.entries(_SERIES_BASELINE)) {
+    out[clave] = baselinePersonal(serie(healthData), fecha, opts);
+  }
+  return out;
+}
+
 // ── Puntuación de bienestar ──────────────────────────────────────
 // El desglose (`breakdown`) es la única fuente de verdad: el total se deriva de él en
 // vez de acumularse aparte. Antes el widget hacía `score += x` en 14 sitios pero solo
@@ -826,12 +957,14 @@ export function healthOverall(conclusions) {
 // HRV 12 · FC reposo 8 · recuperación cardio 5 · y, solo en la vista diaria,
 // VO₂max 6 · FC caminando 4 · % grasa 4 · luz natural 5 · respiración 5.
 // El total se saca con scoreFromBreakdown, que normaliza a 100.
+// `baselines` es lo que devuelve `wellnessBaselines` para la fecha que se puntúa. Sin
+// él (o con histórico corto) los componentes que lo admiten caen al umbral fijo.
 export function wellnessBreakdown({
   isDaily = false, expectedByNow = 0,
   sleep = null, work = 0, exercise = null, steps = null, activeEnergy = null,
   stand = null, flights = null, hrv = null, hrvPrev = null, rhr = null,
   cardioRec = null, vo2 = null, walkHr = null, bodyFat = null,
-  daylight = null, resp = null,
+  daylight = null, resp = null, baselines = null,
 } = {}) {
   const b = [];
   const add = (label, pts, max, detail, sinDatos = false) => b.push({ label, pts, max, detail, sinDatos });
@@ -917,17 +1050,29 @@ export function wellnessBreakdown({
     hrv != null ? `${Math.round(hrv)}ms${hrvPrev != null ? ` (ref ${Math.round(hrvPrev)}ms)` : ""}` : "sin datos",
     hrv == null);
 
-  // FC en reposo (8)
+  // FC en reposo (8) — contra la línea base propia cuando la hay (ver arriba). Es el
+  // caso de manual: 50 lpm es un número, no un logro.
   let rhrPts = 0;
-  if (rhr != null) {
+  let rhrDetalle = "sin datos";
+  const bRhr = baselines && baselines.rhr;
+  if (rhr != null && bRhr) {
+    // Por cuartiles de tu propio histórico. El suelo es 2 y no 0 a propósito: estar por
+    // encima de tu p75 es un mal día para ti, no una urgencia.
+    if      (rhr <= bRhr.p25) rhrPts = 8;
+    else if (rhr <= bRhr.p50) rhrPts = 6;
+    else if (rhr <= bRhr.p75) rhrPts = 4;
+    else                      rhrPts = 2;
+    rhrDetalle = `${Math.round(rhr)} lpm · tu rango ${Math.round(bRhr.p25)}–${Math.round(bRhr.p75)} (n=${bRhr.n})`;
+  } else if (rhr != null) {
     if      (rhr <= 50) rhrPts = 8;
     else if (rhr <= 55) rhrPts = 7;
     else if (rhr <= 60) rhrPts = 6;
     else if (rhr <= 65) rhrPts = 4;
     else if (rhr <= 70) rhrPts = 3;
     else if (rhr <= 80) rhrPts = 1;
+    rhrDetalle = `${Math.round(rhr)} lpm · umbral general`;
   }
-  add("🫀 FC reposo", rhrPts, 8, rhr != null ? `${Math.round(rhr)} lpm` : "sin datos", rhr == null);
+  add("🫀 FC reposo", rhrPts, 8, rhrDetalle, rhr == null);
 
   // Recuperación cardio (5) — solo si el Watch la reporta
   if (cardioRec != null) {
@@ -952,12 +1097,26 @@ export function wellnessBreakdown({
       add("🫁 VO₂max", vo2Pts, 6, `${vo2.toFixed(1)} ml/kg/min`);
     }
     if (walkHr != null) {
+      // Mismo criterio que la FC en reposo: andar a 68 lpm o a 84 depende del corazón
+      // que te tocó tanto como de la forma física, y lo que informa del día es dónde cae
+      // respecto a tu propio rango.
+      const bWalk = baselines && baselines.walkHr;
       let whrPts = 0;
-      if      (walkHr <= 70)  whrPts = 4;
-      else if (walkHr <= 80)  whrPts = 3;
-      else if (walkHr <= 90)  whrPts = 2;
-      else if (walkHr <= 100) whrPts = 1;
-      add("🏃 FC caminando", whrPts, 4, `${Math.round(walkHr)} lpm`);
+      let whrDetalle;
+      if (bWalk) {
+        if      (walkHr <= bWalk.p25) whrPts = 4;
+        else if (walkHr <= bWalk.p50) whrPts = 3;
+        else if (walkHr <= bWalk.p75) whrPts = 2;
+        else                          whrPts = 1;
+        whrDetalle = `${Math.round(walkHr)} lpm · tu rango ${Math.round(bWalk.p25)}–${Math.round(bWalk.p75)} (n=${bWalk.n})`;
+      } else {
+        if      (walkHr <= 70)  whrPts = 4;
+        else if (walkHr <= 80)  whrPts = 3;
+        else if (walkHr <= 90)  whrPts = 2;
+        else if (walkHr <= 100) whrPts = 1;
+        whrDetalle = `${Math.round(walkHr)} lpm · umbral general`;
+      }
+      add("🏃 FC caminando", whrPts, 4, whrDetalle);
     }
     if (bodyFat != null) {
       let bfPts = 0;
@@ -1104,6 +1263,10 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
       flights:      val("flights"),
       hrv:          val("hrv"),
       hrvPrev:      _refHrv(series.hrv, fecha),
+      // Anclada a ESTE día, no a hoy: si no, el mismo día del histórico puntuaría
+      // distinto cada vez que se abre el dashboard y la sparkline dejaría de ser
+      // comparable consigo misma. Misma razón que `_refHrv`.
+      baselines:    wellnessBaselines(healthData, fecha),
       cardioRec:    ultimo.cardioRec,
       vo2:          ultimo.vo2,
       walkHr:       val("walkHr"),

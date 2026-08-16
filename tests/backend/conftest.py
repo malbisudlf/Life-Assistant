@@ -23,6 +23,15 @@ os.environ.setdefault("AGENT_TOKEN", "agent-token")
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los
 # tests del registro llaman a _registro.volcar() a mano, que es lo que hace el hilo.
 os.environ.setdefault("LOG_PERSIST", "0")
+# El informe semanal lo dispara el mismo tick de HA que el resumen diario, y sale el día
+# de la semana que toque. Muchos tests fijan el reloj a una fecha inventada: si esa fecha
+# cae en domingo, el tick manda DOS correos y los asertos de "cuántos se enviaron" fallan
+# por un motivo que no tiene nada que ver con lo que prueban. Mismo criterio que
+# LOG_PERSIST: apagado por defecto, y los tests del informe lo encienden a mano.
+os.environ.setdefault("INFORME_SEMANAL", "0")
+# Lo mismo con el aviso proactivo de Jarvis: lo dispara el mismo tick pasada su hora, y
+# varios tests fijan el reloj por la tarde para probar otra cosa. Sus tests lo encienden.
+os.environ.setdefault("JARVIS_PROACTIVO", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada
@@ -127,6 +136,8 @@ def _limpiar_estado():
     # La caché del aviso de reloj: sin resetearla, el primer test que lo dispare dejaría
     # marcado el día y los siguientes no verían nada (mismo criterio que _token_cache).
     main._reloj_avisado_dia = None
+    main._proactivo_dia = None
+    main._ultima_destilacion = 0.0
 
 
 @pytest.fixture(autouse=True)
