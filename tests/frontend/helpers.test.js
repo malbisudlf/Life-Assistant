@@ -7,6 +7,7 @@ import {
   seriesTrend, trendDirection, bedtimeHrvInsight, pairByDate, splitCompare,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
+  relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
@@ -219,6 +220,25 @@ describe("helpers de tendencias de salud", () => {
     expect(t.n).toBe(30);
   });
 
+  test("seriesTrend mide por fecha real, no por número de registros", () => {
+    // Un mes sin llevar el reloj deja la serie agujereada: `slice(-30)` alcanzaba
+    // hasta junio y la "media de 30 días" acababa comparando julio contra junio.
+    const data = [
+      ...Array.from({ length: 23 }, (_, i) => ({ date: `2026-06-${String(i + 1).padStart(2, "0")}`, value: 40 })),
+      ...Array.from({ length: 7 },  (_, i) => ({ date: `2026-07-${String(i + 25).padStart(2, "0")}`, value: 50 })),
+    ];
+    const t = seriesTrend(data, 7, 30, { hoy: "2026-07-31" });
+    expect(t.nCorto).toBe(7);
+    expect(t.nLargo).toBe(7);      // junio queda fuera de los 30 días reales
+    expect(t.avgLong).toBe(50);
+    expect(t.deltaPct).toBe(0);    // antes salía un +18% que no existía
+  });
+
+  test("seriesTrend no inventa tendencia si no hay nada reciente", () => {
+    const vieja = [{ date: "2026-06-01", value: 40 }, { date: "2026-06-02", value: 60 }];
+    expect(seriesTrend(vieja, 7, 30, { hoy: "2026-08-16" })).toBe(null);
+  });
+
   test("seriesTrend ignora valores nulos y devuelve null sin datos", () => {
     expect(seriesTrend([])).toBe(null);
     expect(seriesTrend([{ value: null }, { value: undefined }])).toBe(null);
@@ -279,20 +299,49 @@ describe("motor de conclusiones de salud", () => {
     value: typeof v === "function" ? v(i) : v,
   }));
 
+  // Las ventanas van por fecha real, así que `now` tiene que caer donde caen los datos:
+  // una serie de hace dos meses NO es "los últimos 7 días" y ya no se cuenta como tal.
+  const AHORA = new Date("2026-07-07T12:00:00");
+  const julio = (n, v) => Array.from({ length: n }, (_, i) => ({
+    date: `2026-07-${String(i + 1).padStart(2, "0")}`,
+    value: typeof v === "function" ? v(i) : v,
+  }));
+
   test("HRV cayendo genera una conclusión roja de fatiga", () => {
     // 23 días a 60ms y 7 a 45ms → media 7d muy por debajo de la de 30d
-    const hrv = [...serie(23, 60), ...serie(7, 45).map((d, i) => ({ ...d, date: `2026-07-${String(i + 1).padStart(2, "0")}` }))];
-    const c = healthConclusions({ heart_rate_variability: hrv });
+    const hrv = [...serie(23, 60), ...julio(7, 45)];
+    const c = healthConclusions({ heart_rate_variability: hrv }, AHORA);
     const rec = c.find(x => x.domain === "Recuperación" && x.tone === "bad");
     expect(rec).toBeTruthy();
     expect(rec.text).toMatch(/HRV/);
   });
 
   test("sueño corto es conclusión roja; sueño bueno es verde", () => {
-    const corto = healthConclusions({ sleep_analysis: serie(7, 5.5) });
+    const ahora = new Date("2026-06-07T12:00:00");
+    const corto = healthConclusions({ sleep_analysis: serie(7, 5.5) }, ahora);
     expect(corto.find(x => x.domain === "Sueño").tone).toBe("bad");
-    const bueno = healthConclusions({ sleep_analysis: serie(7, 8) });
+    const bueno = healthConclusions({ sleep_analysis: serie(7, 8) }, ahora);
     expect(bueno.find(x => x.domain === "Sueño").tone).toBe("good");
+  });
+
+  test("una serie vieja no se cuenta como 'las últimas 7 noches'", () => {
+    // El bug del correo, un piso más arriba: `slice(-7)` daba las últimas 7 MEDIDAS,
+    // aunque fueran de hace dos meses, y la frase las presentaba como de esta semana.
+    const c = healthConclusions({ sleep_analysis: serie(7, 5.5) }, new Date("2026-08-16T12:00:00"));
+    expect(c.find(x => x.domain === "Sueño")).toBeUndefined();
+  });
+
+  test("con pocas noches medidas se dice sobre qué se apoya, sin afirmar tendencia", () => {
+    const c = healthConclusions({
+      heart_rate_variability: [
+        ...serie(20, 60),                                   // junio, fuera de ventana
+        { date: "2026-07-06", value: 40 }, { date: "2026-07-07", value: 42 },
+      ],
+    }, AHORA);
+    const rec = c.find(x => x.domain === "Recuperación");
+    expect(rec.text).toMatch(/2 noches medidas/);
+    expect(rec.text).toMatch(/sin base para hablar de tendencia/);
+    expect(rec.tone).toBe("info");
   });
 
   test("cuenta entrenamientos de los últimos 7 días según 'now'", () => {
@@ -308,9 +357,9 @@ describe("motor de conclusiones de salud", () => {
 
   test("las conclusiones se ordenan por prioridad (bad antes que good)", () => {
     const c = healthConclusions({
-      heart_rate_variability: [...serie(23, 60), ...serie(7, 45).map((d, i) => ({ ...d, date: `2026-07-0${i + 1}` }))],
-      step_count: serie(7, 12000), // good
-    });
+      heart_rate_variability: [...serie(23, 60), ...julio(7, 45)],
+      step_count: julio(7, 12000), // good
+    }, AHORA);
     const idxBad  = c.findIndex(x => x.tone === "bad");
     const idxGood = c.findIndex(x => x.tone === "good");
     expect(idxBad).toBeLessThan(idxGood);
@@ -326,6 +375,105 @@ describe("motor de conclusiones de salud", () => {
   test("sin datos no revienta y devuelve lista vacía", () => {
     expect(healthConclusions({})).toEqual([]);
     expect(healthConclusions(null)).toEqual([]);
+  });
+});
+
+describe("uso del reloj", () => {
+  // `reloj` es lo que manda /health/metrics: fecha → estado.
+  const HOY = "2026-08-16";
+  const dias = pares => ({ dias: Object.fromEntries(pares) });
+  const menos = n => new Date(`${HOY}T12:00:00Z`).getTime() - n * 86400000;
+  const d = n => new Date(menos(n)).toISOString().slice(0, 10);
+
+  test("relojPuesto distingue los tres estados y el día de la noche", () => {
+    expect(relojPuesto("ambos")).toBe(true);
+    expect(relojPuesto("dia", "noche")).toBe(false);
+    expect(relojPuesto("noche", "noche")).toBe(true);
+    expect(relojPuesto("sin_reloj")).toBe(false);
+    expect(relojPuesto("sin_datos")).toBe(false);
+    expect(relojPuesto(undefined)).toBe(false);
+  });
+
+  test("relojCobertura cuenta días, noches y los días de los que no se sabe nada", () => {
+    const reloj = dias([
+      [d(0), "ambos"], [d(1), "dia"], [d(2), "sin_reloj"], [d(3), "sin_datos"],
+      [d(4), "noche"], [d(5), "sin_reloj"],
+      // d(6) no aparece: no llegó nada, que es lo mismo que "sin_datos"
+    ]);
+    const c = relojCobertura(reloj, { dias: 7, hoy: HOY });
+    expect(c.dia).toBe(2);          // ambos + dia
+    expect(c.noche).toBe(2);        // ambos + noche
+    expect(c.sinReloj).toBe(2);
+    expect(c.sinDatos).toBe(2);     // el declarado y el que falta
+    expect(c.ultimaNoche).toBe(d(0));
+  });
+
+  test("un día sin datos de nada no cuenta como día sin reloj", () => {
+    const c = relojCobertura(dias([[d(0), "sin_datos"]]), { dias: 3, hoy: HOY });
+    expect(c.sinReloj).toBe(0);
+    expect(c.sinDatos).toBe(3);
+    expect(c.hay).toBe(false);
+  });
+
+  test("la racha sin reloj no cuenta hoy y los huecos no la rompen", () => {
+    // Hoy sin señal (la jornada está a medias), ayer y anteayer sin reloj, con un día
+    // sin datos por medio, y hace cuatro días sí lo llevaba.
+    const reloj = dias([
+      [d(0), "sin_reloj"], [d(1), "sin_reloj"], [d(2), "sin_datos"],
+      [d(3), "sin_reloj"], [d(4), "ambos"],
+    ]);
+    expect(relojRachaSinReloj(reloj, { hoy: HOY })).toBe(2);
+  });
+
+  test("con el reloj puesto ayer no hay racha", () => {
+    expect(relojRachaSinReloj(dias([[d(1), "noche"]]), { hoy: HOY })).toBe(0);
+  });
+});
+
+describe("conclusiones conscientes del reloj", () => {
+  const HOY = "2026-07-07";
+  const AHORA = new Date(`${HOY}T12:00:00`);
+  const d = n => new Date(new Date(`${HOY}T12:00:00Z`).getTime() - n * 86400000)
+    .toISOString().slice(0, 10);
+  const reloj = pares => ({ dias: Object.fromEntries(pares) });
+
+  test("dice cuántas noches de la semana se pudo medir", () => {
+    const c = healthConclusions({}, AHORA, {
+      reloj: reloj([...Array(7)].map((_, i) => [d(i), i < 2 ? "ambos" : "sin_reloj"])),
+    });
+    const r = c.find(x => x.domain === "Reloj");
+    expect(r.text).toMatch(/Llevaste el reloj 2 de las 7 noches/);
+  });
+
+  test("avisa de la racha sin ponérselo", () => {
+    const c = healthConclusions({}, AHORA, {
+      reloj: reloj([...Array(7)].map((_, i) => [d(i), "sin_reloj"])),
+    });
+    expect(c.some(x => x.domain === "Reloj" && /días seguidos sin ponerte/.test(x.text))).toBe(true);
+    expect(c.some(x => x.domain === "Reloj" && /Sin rastro del reloj/.test(x.text))).toBe(true);
+  });
+
+  test("los días sin datos de nada se avisan aparte, no como días sin reloj", () => {
+    const c = healthConclusions({}, AHORA, {
+      reloj: reloj([[d(0), "ambos"], [d(1), "ambos"], [d(2), "ambos"],
+                    [d(3), "ambos"], [d(4), "ambos"]]),   // d(5) y d(6) no llegaron
+    });
+    const avisos = c.filter(x => x.domain === "Reloj");
+    expect(avisos.some(x => /no llegó ningún dato/.test(x.text))).toBe(true);
+    expect(avisos.some(x => /sin ponerte el reloj/.test(x.text))).toBe(false);
+  });
+
+  test("con el reloj puesto toda la semana no dice nada del reloj", () => {
+    const c = healthConclusions({}, AHORA, {
+      reloj: reloj([...Array(7)].map((_, i) => [d(i), "ambos"])),
+    });
+    expect(c.some(x => x.domain === "Reloj")).toBe(false);
+  });
+
+  test("sin sección de reloj (backend viejo) las conclusiones siguen saliendo", () => {
+    const c = healthConclusions({ step_count: [{ date: HOY, value: 12000 }] }, AHORA);
+    expect(c.some(x => x.domain === "Actividad")).toBe(true);
+    expect(c.some(x => x.domain === "Reloj")).toBe(false);
   });
 });
 
@@ -399,7 +547,9 @@ describe("scoreFromBreakdown", () => {
       { label: "Pasos", pts: 4,  max: 8 },
       { label: "HRV",   pts: 6,  max: 12 },
     ];
-    expect(scoreFromBreakdown(b)).toEqual({ pts: 35, max: 45, score: 78 });
+    expect(scoreFromBreakdown(b)).toMatchObject({ pts: 35, max: 45, score: 78 });
+    // Todo medido: la cobertura es completa.
+    expect(scoreFromBreakdown(b).cobertura).toBe(1);
   });
 
   test("las métricas sin dato no cuentan ni arriba ni abajo", () => {
@@ -408,7 +558,7 @@ describe("scoreFromBreakdown", () => {
       { label: "Sueño", pts: 25, max: 25 },
       { label: "Pisos", pts: 0,  max: 2, sinDatos: true },
     ];
-    expect(scoreFromBreakdown(conPisos)).toEqual({ pts: 25, max: 25, score: 100 });
+    expect(scoreFromBreakdown(conPisos)).toMatchObject({ pts: 25, max: 25, score: 100 });
   });
 
   test("semanal y diaria se comparan sobre la misma escala", () => {
@@ -428,7 +578,7 @@ describe("scoreFromBreakdown", () => {
 
   test("ignora filas corruptas sin romper", () => {
     const b = [{ pts: 5, max: 10 }, null, { pts: "x", max: 10 }];
-    expect(scoreFromBreakdown(b)).toEqual({ pts: 5, max: 20, score: 25 });
+    expect(scoreFromBreakdown(b)).toMatchObject({ pts: 5, max: 20, score: 25 });
   });
 });
 
@@ -662,7 +812,8 @@ describe("correlaciones entre series", () => {
     }
     const h = wellnessHistory({ sleep_analysis, step_count });
     expect(h[h.length - 1].value).toBeGreaterThan(h[0].value);
-    expect(seriesTrend(h, 7, 30).deltaPct).toBeGreaterThan(0);
+    // `hoy` anclado al final de la serie: las ventanas de seriesTrend van por fecha real.
+    expect(seriesTrend(h, 7, 30, { hoy: dia(20) }).deltaPct).toBeGreaterThan(0);
   });
 
   test("wellnessHistory: se salta los días sin nada que puntuar y respeta noches anuladas", () => {
@@ -687,6 +838,29 @@ describe("correlaciones entre series", () => {
     const conVo2 = wellnessHistory({ ...base, vo2_max: [{ date: dia(1), value: 55 }] });
     expect(conVo2).toHaveLength(3);
     expect(conVo2[2].value).not.toBe(sinVo2[2].value);
+  });
+
+  test("wellnessHistory: cada día dice con qué se midió", () => {
+    // Dos días idénticos en pasos y sueño, pero el segundo sin reloj: el score se
+    // parece y lo que cambia es sobre cuánto se ha calculado.
+    const h = wellnessHistory({
+      sleep_analysis: [{ date: dia(1), value: 7.5, extra: {} }, { date: dia(2), value: 7.5, extra: {} }],
+      step_count:     [{ date: dia(1), value: 11000 }, { date: dia(2), value: 11000 }],
+      heart_rate_variability: [{ date: dia(1), value: 55 }],
+    }, { reloj: { dias: { [dia(1)]: "ambos", [dia(2)]: "sin_reloj" } } });
+    expect(h[0].sinReloj).toBe(false);
+    expect(h[1].sinReloj).toBe(true);
+    expect(h[1].cobertura).toBeLessThan(h[0].cobertura);
+    expect(h[1].sinDatos).toBeGreaterThan(h[0].sinDatos);
+  });
+
+  test("wellnessHistory: sin datos de reloj no se inventa el estado", () => {
+    const h = wellnessHistory({
+      sleep_analysis: [{ date: dia(1), value: 7.5, extra: {} }],
+      step_count:     [{ date: dia(1), value: 11000 }],
+    });
+    expect(h[0].estadoReloj).toBe(null);
+    expect(h[0].sinReloj).toBe(false);
   });
 
   test("wellnessHistory: sin datos devuelve lista vacía y recorta a `dias`", () => {
