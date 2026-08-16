@@ -994,6 +994,7 @@ export default function Dashboard() {
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
   const [logsAbiertos, setLogsAbiertos]   = useState(false);  // registro del backend, plegado por defecto
+  const [avisoPrueba, setAvisoPrueba]     = useState("");     // resultado de "Probar aviso"
   // Interruptor del resumen diario. Vive en el backend (Supabase) y no en localStorage:
   // quien manda el correo es el backend, que no ve el localStorage, y un flag en memoria
   // suya se borraría en el próximo cold start de Fly.
@@ -2061,12 +2062,14 @@ export default function Dashboard() {
     let agente = null;
     let registro = null;
     let presencia = null;
+    let avisos = null;
     if (backend.ok) {
-      const [rAgente, rLogs, rPresencia, rBrief] = await Promise.all([
+      const [rAgente, rLogs, rPresencia, rBrief, rAvisos] = await Promise.all([
         apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/brief/ajustes`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/avisos/estado`, { headers: authHeaders() }).catch(() => null),
       ]);
       try {
         if (rAgente?.ok) agente = await rAgente.json();
@@ -2080,9 +2083,12 @@ export default function Dashboard() {
       try {
         if (rBrief?.ok) setBriefCfg(await rBrief.json());
       } catch { /* mejor esfuerzo: el interruptor se muestra como desconocido */ }
+      try {
+        if (rAvisos?.ok) avisos = await rAvisos.json();
+      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
     }
 
-    setSysStatus({ backend, agente, registro, presencia, comprobado: Date.now() });
+    setSysStatus({ backend, agente, registro, presencia, avisos, comprobado: Date.now() });
     setSysLoading(false);
   }
 
@@ -2099,6 +2105,22 @@ export default function Dashboard() {
       if (r.ok) setBriefCfg(await r.json());
     } catch { /* mejor esfuerzo: ignorar */ }
     setBriefGuardando(false);
+  }
+
+  // Manda un aviso de prueba por el canal que toque. Lo que se comprueba no es el
+  // backend —eso ya lo dice la fila de estado— sino la cadena entera: que HA lo recoja
+  // y que el móvil lo enseñe.
+  async function probarAviso() {
+    setAvisoPrueba("…");
+    try {
+      const r = await apiFetch(`${API}/avisos/probar`, { method: "POST", headers: authHeaders() });
+      const d = await r.json();
+      setAvisoPrueba(d.canal === "movil"
+        ? "enviado al móvil — si no llega, revisa la automatización de HA"
+        : "enviado por correo (nadie recoge los avisos del móvil)");
+    } catch {
+      setAvisoPrueba("no se pudo enviar");
+    }
   }
 
   async function vaciarRegistro() {
@@ -5312,6 +5334,24 @@ export default function Dashboard() {
                     : "activo",
                 });
 
+                // Por dónde salen los avisos. Que el correo funcione y que el aviso
+                // llegue A TIEMPO no son la misma pregunta: un "ponte el reloj" de las
+                // 21:30 leído al abrir el buzón mañana ya no sirve de nada. Y el canal
+                // del móvil se cae en silencio (basta con que HA deje de sondear), así
+                // que tiene que verse desde aquí.
+                const av = sysStatus?.avisos;
+                filas.push({
+                  nombre: "Avisos",
+                  tono: !av ? "muted" : !av.activo ? "muted" : av.canal === "movil" ? "green" : "accent",
+                  detalle: !av ? "sin comprobar"
+                    : !av.activo ? "al correo (móvil desactivado)"
+                    : av.canal === "movil"
+                      ? `al móvil · HA sondeó hace ${av.sondeo_hace_segundos ?? 0} s`
+                      : av.sondeo_hace_segundos == null
+                        ? "al correo · HA no los recoge todavía"
+                        : `al correo · HA lleva ${Math.floor(av.sondeo_hace_segundos / 60)} min sin recogerlos`,
+                });
+
                 // El registro del backend (app_logs). Las demás filas dicen si algo
                 // RESPONDE; esta dice si algo ha FALLADO — que es distinto, y es lo que
                 // faltaba: el 409 de la ingesta de salud se registró durante días en el
@@ -5336,6 +5376,19 @@ export default function Dashboard() {
                         <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{f.detalle}</span>
                       </div>
                     ))}
+                    {/* Instalar el YAML de HA y no saber si funciona hasta que toque un
+                        aviso de verdad es la forma más rápida de darlo por puesto sin
+                        estarlo: esto recorre la cadena entera. */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
+                      <button onClick={probarAviso} disabled={avisoPrueba === "…"} style={{
+                        background: "transparent", border: "none", padding: 0,
+                        cursor: avisoPrueba === "…" ? "default" : "pointer",
+                        color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+                      }}>Probar aviso</button>
+                      {!!avisoPrueba && (
+                        <span style={{ fontSize: 11, color: "var(--muted)" }}>{avisoPrueba}</span>
+                      )}
+                    </div>
                     {!!reg?.entradas.length && (
                       <div style={{ marginTop: 4 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
