@@ -2385,7 +2385,20 @@ def _existentes_por_clave(fechas: set, nombres: set) -> dict:
     return {(row["metric_date"], row["metric_name"]): row for row in r.json()}
 
 
-def _guardar_metricas(agrupadas: dict) -> int:
+# Quién escribió cada fila. Las dos fuentes usan la MISMA tabla y hasta ahora no
+# dejaban firma, así que "ha dejado de correr el Atajo" y "la app del Watch no exporta"
+# se distinguían a ojo, comparando qué métricas faltaban. Es el trabajo manual que se
+# repitió en las tres averías grandes del proyecto.
+FUENTE_AUTO_EXPORT = "auto_export"
+FUENTE_ATAJO       = "atajo"
+# La serie diaria de horas en casa también vive en health_metrics, pero no la escribe
+# ningún cliente del Watch: la empuja Home Assistant. Distinguirla importa justo para
+# lo que existe esta columna — si HA se cae, lo que enmudece es esa métrica y no la
+# ingesta, y sin firma las dos averías se leen igual.
+FUENTE_PRESENCIA   = "home_assistant"
+
+
+def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
     """Aplica la regla de las acumulativas y escribe todo en un upsert en bloque."""
     if not agrupadas:
         return 0
@@ -2407,13 +2420,18 @@ def _guardar_metricas(agrupadas: dict) -> int:
             # llegan snapshots parciales a lo largo del día y no deben pisar el total.
             if previo is not None and float(previo) > 0 and float(previo) >= value:
                 continue
-        filas.append({
+        fila = {
             "metric_date": metric_date,
             "metric_name": name,
             "value": value,
             "unit": data["unit"],
             "extra": data["extra"],
-        })
+        }
+        # Solo si se sabe: en el upsert, escribir `fuente: None` borraría la del último
+        # que sí la dejó, y un hueco vale más que una atribución equivocada.
+        if fuente:
+            fila["fuente"] = fuente
+        filas.append(fila)
 
     if not filas:
         return 0
@@ -2560,7 +2578,7 @@ async def health_ingest(request: Request, token: str = ""):
     # PATCH si salía 409. Un lote normal del Watch son decenas de métricas, o sea del
     # orden de 60–90 viajes secuenciales a Supabase. Ahora es un GET que trae de golpe
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
-    upserted += _guardar_metricas(grouped_metrics)
+    upserted += _guardar_metricas(grouped_metrics, FUENTE_AUTO_EXPORT)
 
     # Si en el lote venía el sueño de esta noche, el Watch ya la ha cerrado: eso es lo
     # más parecido a "ya está despierto" que sabe el backend por su cuenta.
@@ -2730,6 +2748,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
             "value": s.value,
             "unit": s.unit,
             "extra": extra,
+            "fuente": FUENTE_ATAJO,
         })
 
     if filas:
@@ -2868,6 +2887,86 @@ def get_health_metrics(
     }
 
     return {"metrics": grouped, "last_sync": last_sync, "reloj": reloj}
+
+
+# Ventana del diagnóstico de datos. Treinta días es lo que hace falta para ver un hueco
+# intercalado; con menos, una semana mala se confunde con el estado normal.
+DIAGNOSTICO_DIAS = 30
+
+
+@app.get("/health/diagnostico")
+def get_health_diagnostico(
+    dias: int = DIAGNOSTICO_DIAS,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Por métrica: cuándo llegó su último dato, QUIÉN lo escribió y cuántos huecos tiene.
+
+    Existe porque cada avería de datos de este proyecto se ha diagnosticado a mano y
+    siempre igual: mirar la tabla, contar días, comparar nombres y deducir la fuente. Lo
+    que no se podía deducir era justo la fuente —las dos escriben en la misma tabla— y
+    por eso ahora se guarda (columna `fuente`); aquí se enseña.
+
+    La diferencia con `last_sync` de `/health/metrics` es la misma de siempre: aquel dice
+    si llega ALGO, y esto dice qué falta y de quién se ha dejado de saber.
+    """
+    if dias < 1 or dias > 365:
+        raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 365")
+    hoy   = datetime.now(LOCAL_TZ).date()
+    desde = (hoy - timedelta(days=dias - 1)).isoformat()
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+        "&select=metric_date,metric_name,value,extra,fuente,created_at"
+        "&order=metric_date.asc&limit=20000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    filas = r.json()
+
+    por_nombre: dict = {}
+    for fila in filas:
+        d = _dia(fila.get("metric_date"))
+        if d is not None and d <= hoy:
+            por_nombre.setdefault(fila["metric_name"], []).append(fila)
+
+    ventana = {(hoy - timedelta(days=i)).isoformat() for i in range(dias)}
+    metricas = {}
+    for nombre, suyas in sorted(por_nombre.items()):
+        # Solo cuentan los días con MEDIDA: una fila de relleno (los ceros del Atajo) no
+        # tapa un hueco, es un hueco con una fila encima. Misma regla que el uso del reloj.
+        con_dato = {f["metric_date"] for f in suyas if _hay_medida(f)}
+        ultima   = max(con_dato) if con_dato else None
+        fuentes  = sorted({f.get("fuente") for f in suyas if f.get("fuente")})
+        metricas[nombre] = {
+            "ultimo_dia":  ultima,
+            "dias_atras":  (hoy - _dia(ultima)).days if ultima else None,
+            "dias_con_dato": len(con_dato),
+            # Los huecos son los días de la ventana SIN medida desde el primero que hubo:
+            # antes de empezar a medir no hay nada que echar en falta.
+            "huecos": (len([f for f in ventana if f > min(con_dato) and f not in con_dato])
+                       if con_dato else dias),
+            "fuentes": fuentes or None,
+            "filas_sin_medida": sum(1 for f in suyas if not _hay_medida(f)),
+        }
+
+    # Cuándo escribió por última vez cada cliente. Es la pregunta que de verdad se hace
+    # uno cuando algo falla: no "¿falta el sueño?" sino "¿quién ha dejado de mandar?".
+    por_fuente: dict = {}
+    for fila in filas:
+        f = fila.get("fuente")
+        if not f:
+            continue
+        creado = fila.get("created_at") or ""
+        if creado > por_fuente.get(f, ""):
+            por_fuente[f] = creado
+
+    return {
+        "ventana_dias": dias,
+        "metricas":     metricas,
+        "fuentes":      {f: {"ultima_escritura": c} for f, c in sorted(por_fuente.items())},
+        # Las filas viejas no tienen fuente y no se les puede inventar una.
+        "sin_fuente":   sum(1 for f in filas if not f.get("fuente")),
+    }
 
 
 @app.get("/health/latest")
@@ -3076,7 +3175,7 @@ def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
         }
 
     try:
-        _guardar_metricas(agrupadas)
+        _guardar_metricas(agrupadas, FUENTE_PRESENCIA)
     except HTTPException:
         # La serie diaria es un derivado: que no se pueda escribir no puede tumbar el
         # aviso de presencia, cuyo efecto principal (saber dónde estás AHORA) sí ha
@@ -4987,7 +5086,7 @@ def ha_brief_tick(request: Request, token: str = ""):
     # apunta con `cuando` = ahora, así que el despachador que viene detrás ya lo ve.
     # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
     # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
-    previos = {**_avisar_reloj_si_toca(), **_hablar_seguro()}
+    previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(), **_hablar_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro()}
     ahora  = _ahora_local()
     if (ahora.hour, ahora.minute) < HORA_TOPE:
@@ -5587,6 +5686,107 @@ def _avisar_reloj_si_toca() -> dict:
         return {}
     logger.info("Aviso de reloj apuntado para hoy (%s)", texto[:60])
     return {"aviso_reloj": True}
+
+
+# ── Vigilante de la ingesta ──────────────────────────────────────────────────
+# Nadie vigila el SILENCIO. Las tres averías grandes de este proyecto —el 409 del
+# upsert, el 400 del envoltorio y el JWT caducado del agente— tienen el mismo patrón:
+# los datos dejaron de llegar, el sistema siguió contestando que todo iba bien, y se
+# descubrió semanas después y de casualidad. Un fallo se registra solo; una ausencia
+# no la nota nadie a menos que se le pida.
+#
+# Es el complemento del aviso del reloj, no un duplicado: aquel salta cuando el reloj
+# está en un cajón (llegan datos del móvil y ninguno del Watch), y por diseño se calla
+# cuando no llega NADA, porque entonces no se sabe si fue el reloj o la sincronización.
+# Este cubre exactamente ese hueco.
+INGESTA_VIGILAR      = os.getenv("INGESTA_VIGILAR", "1") not in ("0", "false", "False")
+# Horas sin recibir un solo dato a partir de las cuales esto deja de ser normal. La
+# ingesta escribe varias veces al día; un día entero en blanco es una avería.
+INGESTA_AVISO_HORAS  = float(os.getenv("INGESTA_AVISO_HORAS", "24"))
+# Y a partir de aquí, además del registro, un correo: si en dos días no ha entrado nada,
+# nadie va a mirar el panel de ajustes por su cuenta.
+INGESTA_CORREO_HORAS = float(os.getenv("INGESTA_CORREO_HORAS", "48"))
+# El tick pasa cada 5 minutos y esto es una consulta a Supabase: se mira una vez por
+# hora. En memoria a propósito — perderlo en un cold start cuesta una consulta.
+INGESTA_VIGILA_CADA  = float(os.getenv("INGESTA_VIGILA_CADA_MIN", "60"))
+_ultima_vigilancia   = 0.0
+
+
+def _vigilar_ingesta() -> dict:
+    """Avisa si hace demasiado que no entra ningún dato de salud."""
+    global _ultima_vigilancia
+    if not INGESTA_VIGILAR:
+        return {}
+    if time.time() - _ultima_vigilancia < INGESTA_VIGILA_CADA * 60:
+        return {}
+    _ultima_vigilancia = time.time()
+
+    try:
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/health_metrics"
+            "?select=created_at&order=created_at.desc&limit=1",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+    except Exception as e:
+        # Si no se puede preguntar, no se sabe: callar es lo correcto. Avisar aquí
+        # convertiría un Supabase lento en "el Watch no sincroniza", que es mentira.
+        logger.warning("Vigilante de ingesta: no se pudo comprobar la última escritura (%s)", e)
+        return {}
+    if not filas:
+        return {}                      # tabla vacía: no hay silencio, es que no hay nada
+
+    escrito = str(filas[0].get("created_at") or "")
+    try:
+        cuando = datetime.fromisoformat(escrito.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Vigilante de ingesta: created_at ilegible (%r)", escrito[:40])
+        return {}
+    horas = (datetime.now(timezone.utc) - cuando).total_seconds() / 3600
+    if horas < INGESTA_AVISO_HORAS:
+        return {}
+
+    # Va por logger.error a propósito: así entra en `app_logs` y sale en el panel de
+    # ajustes y en el `diagnostico` de Jarvis sin ningún camino nuevo.
+    logger.error("Vigilante de ingesta: %d h sin recibir un solo dato de salud "
+                 "(última escritura %s)", round(horas), escrito[:19])
+    if horas < INGESTA_CORREO_HORAS:
+        return {"ingesta_silenciosa_horas": round(horas)}
+
+    # Pasado el segundo umbral, además del registro, un correo — por el camino que ya
+    # existe y con la misma idempotencia de siempre: un uuid5 del día contra la clave
+    # primaria de los recordatorios, para no mandar uno por hora.
+    hoy = _ahora_local().date().isoformat()
+    texto = (f"Llevas {round(horas)} h sin que llegue ningún dato de salud. "
+             "Mira si Health Auto Export o el Atajo de iOS han dejado de correr: "
+             "los días que pasen no se recuperan.")
+    try:
+        rp = http.post(
+            RECORDATORIOS_URL,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:ingesta-muda:{hoy}")),
+                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
+                  "cuando": datetime.now(timezone.utc).isoformat()},
+        )
+        if rp.status_code == 409:
+            return {"ingesta_silenciosa_horas": round(horas)}
+        if rp.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {rp.status_code}")
+    except Exception as e:
+        logger.error("Vigilante de ingesta: no se pudo apuntar el aviso (%s)", e)
+        return {"ingesta_silenciosa_horas": round(horas)}
+    return {"ingesta_silenciosa_horas": round(horas), "aviso_ingesta": True}
+
+
+def _vigilar_ingesta_seguro() -> dict:
+    """Nada de esto puede tumbar el tick, que existe sobre todo para el resumen diario."""
+    try:
+        return _vigilar_ingesta()
+    except Exception:
+        logger.exception("Vigilante de ingesta: fallo inesperado en el tick")
+        return {}
 
 
 # ── Jarvis habla primero ─────────────────────────────────────────────────────
@@ -7085,6 +7285,17 @@ def _j_diagnostico(dias: int = 3) -> dict:
         }
     except Exception as e:
         salida["salud"] = {"error": f"no se pudo comprobar: {e}"}
+
+    # Y QUIÉN escribió por última vez. Es la mitad que faltaba: "no hay datos de sueño"
+    # puede ser el reloj en un cajón o el Atajo que dejó de correr, y hasta que la fila
+    # no llevó firma eso solo se deducía comparando a ojo qué métricas faltaban. Ventana
+    # corta a propósito: aquí se pregunta por lo de ahora, y esto es una lectura de tabla.
+    try:
+        diag = get_health_diagnostico(dias=7, credentials=None)
+        salida["escrituras"] = {"fuentes": diag.get("fuentes") or {},
+                                "filas_sin_firmar": diag.get("sin_fuente")}
+    except Exception as e:
+        salida["escrituras"] = {"error": f"no se pudo comprobar: {e}"}
 
     salida["configurado"] = {
         "correo":          bool(SMTP_HOST and BRIEF_TO),

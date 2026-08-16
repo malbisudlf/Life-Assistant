@@ -102,7 +102,24 @@ Lo que se decidió NO hacer, y por qué:
 
 ## 5. Operación: que el sistema se vigile a sí mismo
 
-### 5.1 Vigilante de ingesta ●
+> **5.1 y 5.2 están hechos** (agosto de 2026). Lo que salió de hacerlos, antes del texto
+> original de cada uno:
+>
+> - **5.1** — `_vigilar_ingesta()` cuelga del tick de HA: 24 h sin recibir nada → un
+>   `logger.error` (que ya llega solo a `app_logs`, al panel y al `diagnostico` de
+>   Jarvis); 48 h → además un recordatorio, por el camino de correo que ya existía. Lo
+>   que costó decidir no fue el umbral: fue que **si la consulta falla se calla**. Avisar
+>   ahí convertiría un Supabase lento en "el Watch no sincroniza".
+> - **5.2** — Al ir a escribirlo se vio que la tabla **no guardaba de quién venía cada
+>   fila**, así que la mitad del endpoint no se podía escribir: hacía falta una columna
+>   (`health_metrics.fuente`, migración `20260816_health_fuente`), nullable, porque lo ya
+>   guardado no se puede atribuir sin inventárselo. `GET /health/diagnostico` da lo que
+>   antes solo se veía mirando la tabla en crudo, y el `diagnostico` de Jarvis enseña la
+>   última escritura de cada cliente.
+>
+> **5.3 sigue pendiente.**
+
+### 5.1 Vigilante de ingesta ● — ✅ HECHO
 
 **Qué.** Si no entra ningún dato de salud en más de N horas, un `logger.error()` (que ya
 persiste en `app_logs` y sale en el panel de ajustes) y, pasado más tiempo, un correo.
@@ -114,7 +131,7 @@ iba bien**. Nadie vigila la ausencia salvo que se le pida expresamente.
 
 **Por dónde.** El tick de HA otra vez: ya pasa cada 5 minutos y ya sabe mirar la hora.
 
-### 5.2 `GET /salud/diagnostico` ●
+### 5.2 `GET /health/diagnostico` ● — ✅ HECHO
 
 **Qué.** Un endpoint que responda, por métrica: último `metric_date`, última escritura,
 qué fuente la escribió y cuántos huecos tiene en 30 días.

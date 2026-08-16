@@ -32,6 +32,10 @@ os.environ.setdefault("INFORME_SEMANAL", "0")
 # Lo mismo con el aviso proactivo de Jarvis: lo dispara el mismo tick pasada su hora, y
 # varios tests fijan el reloj por la tarde para probar otra cosa. Sus tests lo encienden.
 os.environ.setdefault("JARVIS_PROACTIVO", "0")
+# Y con el vigilante de la ingesta, por la misma razón: cuelga del tick y consulta la
+# última escritura de health_metrics, así que sumaría un GET a los asertos de "cuántas
+# llamadas se hicieron" de cualquier test del tick. Sus tests lo encienden a mano.
+os.environ.setdefault("INGESTA_VIGILAR", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada
@@ -138,6 +142,9 @@ def _limpiar_estado():
     main._reloj_avisado_dia = None
     main._proactivo_dia = None
     main._ultima_destilacion = 0.0
+    # El vigilante de la ingesta solo mira una vez por hora: sin resetear el reloj, el
+    # primer test que lo dispare dejaría mudos a los siguientes.
+    main._ultima_vigilancia = 0.0
 
 
 @pytest.fixture(autouse=True)
