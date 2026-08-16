@@ -796,6 +796,35 @@ Ficheros clave:
   reserva**, o un error transitorio de SMTP se come el recordatorio. Un fallo despachando
   **nunca** tumba el resumen diario: va aparte y se registra.
 
+- **Avisos al móvil** (`_notificar`, `GET /ha/avisos-pending`): todo lo que Jarvis dice sin
+  que le hablen salía por correo, que es el único canal que llega con la web cerrada — y
+  se lee al abrir el buzón, así que un "ponte el reloj" de las 21:30 leído al día
+  siguiente no es un aviso. El canal nuevo es la app companion de HA, por el patrón de
+  siempre: **cola en memoria que HA sondea** (son ÓRDENES, como el WOL). El backend **no
+  sabe a qué móvil** se manda, eso lo decide el `notify.mobile_app_*` del YAML de HA: un
+  nombre de dispositivo personal no entra en un repo público. Tres reglas:
+  - **`_notificar()` es la única puerta**, y elige canal por sí sola. Nada manda un aviso
+    llamando a `enviar_correo` directamente; si mañana hay un canal más, se añade aquí y
+    lo heredan todos.
+  - **El canal se enciende solo: la señal es el propio sondeo.** Mientras nadie recoja la
+    cola, todo sale por correo exactamente como antes (así es el despliegue: el YAML se
+    instala cuando se instale, y hasta entonces no se pierde nada), y si HA deja de
+    sondear más de `AVISO_MOVIL_VIVO`, se vuelve al correo solo. No hay que configurar
+    nada en el backend, ni queda un interruptor que se olvide encendido apuntando a un HA
+    muerto.
+  - **Cambiar de canal no puede perder avisos** (`_rescatar_avisos`, en el mismo tick): un
+    aviso encolado que nadie recoge en `AVISO_MOVIL_RESCATE` se manda por correo. Cubre el
+    fallo realista —el YAML a medias: HA sigue con su tick y nadie lee la cola—, que sin
+    esto dejaría de entregar avisos que antes llegaban y **en silencio**. Si el rescate
+    falla, el aviso se queda en la cola para el siguiente tick; tirarlo ahí sería justo lo
+    que el rescate viene a evitar. Por lo mismo la cola **no caduca** como la de la casa:
+    encender una luz media hora tarde es peor que no encenderla, pero un aviso tarde sigue
+    valiendo.
+  El panel ⚙ tiene una fila **Avisos** (por dónde salen y cuánto hace del último sondeo) y
+  un botón «Probar aviso» que recorre la cadena entera: instalar el YAML y esperar a que
+  toque un aviso de verdad para saber si funciona es la forma más rápida de darlo por
+  puesto sin estarlo.
+
 - **Aviso de "ponte el reloj"** (`_avisar_reloj_si_toca()`, mismo tick de HA): si hoy no
   hay ni un dato del reloj —o si se acumulan `RELOJ_AVISO_NOCHES` noches sin medir—, deja
   un recordatorio a partir de `RELOJ_AVISO_HORA` (21:30). Sale **antes de dormir o no
@@ -936,6 +965,9 @@ Ficheros clave:
 | `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
 | `POST /ha/entidades` | servicio | HA empuja el catálogo de la casa (id, nombre, estado). Sin él Jarvis no sabe qué dispositivos hay |
 | `GET /ha/ordenes-pending` | servicio | HA sondea y ejecuta lo que salga. Devuelve y **vacía** la cola; descarta lo que lleve más de `CASA_ORDEN_TTL` esperando |
+| `GET /ha/avisos-pending` | servicio | HA sondea y los manda a la app del móvil. Devuelve y **vacía** la cola; sondearlo es lo que declara vivo el canal |
+| `GET /avisos/estado` | JWT | Por dónde salen los avisos (móvil o correo) y cuánto hace que HA los recogió |
+| `POST /avisos/probar` | JWT | Manda un aviso de prueba por el canal que toque |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
@@ -1012,6 +1044,7 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
+`AVISOS_MOVIL`, `AVISO_MOVIL_VIVO`, `AVISO_MOVIL_RESCATE`,
 `INGESTA_VIGILAR`, `INGESTA_AVISO_HORAS`, `INGESTA_CORREO_HORAS`, `INGESTA_VIGILA_CADA_MIN`,
 `INFORME_SEMANAL`, `INFORME_DIA`, `INFORME_HORA`, `INFORME_SEMANAS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
@@ -1667,6 +1700,11 @@ intervalo del periódico tiene que ser **menor** que el TTL, o el dato caducará
 avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la query
 string (el soporte de query solo existe por compatibilidad con integraciones ya
 desplegadas y expone el token en los logs de URLs).
+
+**Flujo de los avisos al móvil**: HA sondea `GET /ha/avisos-pending` cada 30 s y manda lo
+que salga con `notify.mobile_app_*`. Mismo patrón que el WOL (órdenes en memoria, leerlas
+las consume), y el nombre del dispositivo vive **solo** en el YAML de HA. El YAML completo
+está en `docs/HOME_ASSISTANT_JARVIS.md`.
 
 **Flujo de la casa** (los dos sentidos a la vez, y cada uno por su motivo): HA **sondea**
 `GET /ha/ordenes-pending` cada 15 s y ejecuta lo que salga (órdenes: mismo patrón que el

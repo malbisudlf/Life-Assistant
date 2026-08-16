@@ -317,3 +317,134 @@ class TestVigilanteDeIngesta:
         r = client.post("/ha/brief-tick", headers=CABECERA)
         assert r.status_code == 200
         assert r.json()["ingesta_silenciosa_horas"] == 30
+
+
+class TestAvisosAlMovil:
+    """El correo es el único canal que llega con la web cerrada, y se lee cuando se abre
+    el buzón: un "ponte el reloj" de las 21:30 leído al día siguiente no es un aviso.
+
+    Lo que se comprueba aquí es que el canal nuevo no pierda nada — encender un camino
+    nuevo y perder por el medio lo que antes llegaba es la avería típica de esto.
+    """
+
+    CABECERA = {"X-Auth-Token": "ha-poll-token"}
+
+    def _sondear(self, client):
+        return client.get("/ha/avisos-pending", headers=self.CABECERA).json()["avisos"]
+
+    def test_sin_nadie_recogiendo_todo_sigue_yendo_por_correo(self, correos):
+        """Antes de instalar el YAML nadie sondea: el canal se enciende solo cuando
+        alguien empieza a recoger, sin configurar nada."""
+        assert main._notificar("hola", "qué tal") == "correo"
+        assert len(correos) == 1
+
+    def test_con_ha_recogiendo_va_al_movil(self, client, correos):
+        self._sondear(client)                       # HA se declara vivo sondeando
+        assert main._notificar("⏰ pastilla", "tomar la pastilla") == "movil"
+        assert correos == [], "no se manda por los dos canales a la vez"
+        avisos = self._sondear(client)
+        assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla"}]
+
+    def test_la_cola_se_vacia_al_recogerla(self, client):
+        self._sondear(client)
+        main._notificar("uno", "uno")
+        assert len(self._sondear(client)) == 1
+        assert self._sondear(client) == [], "recoger consume, como el WOL"
+
+    def test_si_ha_deja_de_sondear_se_vuelve_al_correo(self, client, correos, monkeypatch):
+        self._sondear(client)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos",
+                            main.time.time() - main.AVISO_MOVIL_VIVO - 1)
+        assert main._notificar("hola", "qué tal") == "correo"
+        assert len(correos) == 1
+
+    def test_lo_que_el_movil_no_recoge_se_rescata_por_correo(self, client, correos):
+        """El fallo realista: el YAML a medias — HA sigue con su tick y nadie lee la
+        cola. Sin rescate dejarían de llegar avisos que antes llegaban, en silencio."""
+        self._sondear(client)
+        main._notificar("⏰ pastilla", "tomar la pastilla")
+        main._avisos_movil[0]["puesto"] -= main.AVISO_MOVIL_RESCATE + 1
+        assert main._rescatar_avisos() == {"avisos_rescatados": 1}
+        assert correos == [("⏰ pastilla", "tomar la pastilla")]
+        assert main._avisos_movil == []
+
+    def test_un_aviso_reciente_no_se_rescata_todavia(self, client, correos):
+        self._sondear(client)
+        main._notificar("⏰ pastilla", "tomar la pastilla")
+        assert main._rescatar_avisos() == {}
+        assert correos == []
+
+    def test_si_el_rescate_falla_el_aviso_se_queda_en_la_cola(self, client, monkeypatch):
+        """Tirarlo aquí sería justo lo que este rescate viene a evitar."""
+        self._sondear(client)
+        main._notificar("⏰ pastilla", "tomar la pastilla")
+        main._avisos_movil[0]["puesto"] -= main.AVISO_MOVIL_RESCATE + 1
+        def _revienta(asunto, cuerpo, adjunto=None):
+            raise RuntimeError("SMTP caído")
+        monkeypatch.setattr(main, "enviar_correo", _revienta)
+        assert main._rescatar_avisos() == {}
+        assert len(main._avisos_movil) == 1
+
+    def test_el_recordatorio_vencido_sale_por_el_canal_vivo(self, client, mock_requests,
+                                                            correos):
+        self._sondear(client)
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([{
+            "id": "11111111-2222-3333-4444-555555555555",
+            "cuando": "2026-08-08T05:00:00+00:00",
+            "texto": "tomar la pastilla",
+        }]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert correos == [], "va al móvil, no al correo"
+        assert len(self._sondear(client)) == 1
+
+    def test_un_fallo_del_correo_sigue_liberando_la_reserva(self, mock_requests,
+                                                            monkeypatch):
+        """Sin móvil vivo el aviso va por correo, y ahí sigue valiendo la regla de
+        siempre: un SMTP caído no puede consumir el recordatorio."""
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([{
+            "id": "11111111-2222-3333-4444-555555555555",
+            "cuando": "2026-08-08T05:00:00+00:00", "texto": "tomar la pastilla",
+        }]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+        def _revienta(asunto, cuerpo, adjunto=None):
+            raise RuntimeError("SMTP caído")
+        monkeypatch.setattr(main, "enviar_correo", _revienta)
+        assert main._despachar_recordatorios() == {"recordatorios": 0}
+        liberado = [c for c in mock_requests.called("PATCH", "jarvis_recordatorios")
+                    if c[2]["json"] == {"enviado": False}]
+        assert len(liberado) == 1
+
+    def test_la_cola_esta_acotada(self, client, correos):
+        """Es memoria de una VM de 1 GB: llena, se cae al correo en vez de crecer."""
+        self._sondear(client)
+        for i in range(main.AVISOS_MOVIL_MAX):
+            main._notificar(f"aviso {i}", "texto")
+        assert main._notificar("uno más", "texto") == "correo"
+
+    def test_apagado_por_env_no_usa_el_movil(self, client, correos, monkeypatch):
+        self._sondear(client)
+        monkeypatch.setattr(main, "AVISOS_MOVIL", False)
+        assert main._notificar("hola", "qué tal") == "correo"
+
+    def test_sondear_sigue_necesitando_el_token(self, client):
+        assert client.get("/ha/avisos-pending").status_code == 403
+
+    def test_el_estado_dice_por_donde_van_los_avisos(self, client, auth_headers):
+        antes = client.get("/avisos/estado", headers=auth_headers).json()
+        assert antes["canal"] == "correo" and antes["sondeo_hace_segundos"] is None
+        self._sondear(client)
+        despues = client.get("/avisos/estado", headers=auth_headers).json()
+        assert despues["canal"] == "movil"
+        assert despues["sondeo_hace_segundos"] == 0
+
+    def test_el_estado_es_del_usuario(self, client):
+        assert client.get("/avisos/estado").status_code == 401
+
+    def test_la_prueba_usa_el_canal_que_toque(self, client, auth_headers, correos):
+        r = client.post("/avisos/probar", headers=auth_headers)
+        assert r.json() == {"ok": True, "canal": "correo"}
+        self._sondear(client)
+        r = client.post("/avisos/probar", headers=auth_headers)
+        assert r.json()["canal"] == "movil"
+        assert len(self._sondear(client)) == 1

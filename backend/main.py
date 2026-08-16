@@ -5087,7 +5087,10 @@ def ha_brief_tick(request: Request, token: str = ""):
     # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
     # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
     previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(), **_hablar_seguro()}
-    avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro()}
+    avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
+               # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
+               # rescata por correo, para que cambiar de canal no pierda avisos.
+               **_rescatar_avisos_seguro()}
     ahora  = _ahora_local()
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
@@ -5934,6 +5937,144 @@ def _hablar_seguro() -> dict:
         return {}
 
 
+# ── Avisos al móvil ──────────────────────────────────────────────────────────
+# Hasta ahora, todo lo que Jarvis dice sin que le hablen salía por correo: el único canal
+# que llega con la web cerrada. Un correo se lee cuando se abre el buzón, y un aviso de
+# "ponte el reloj" a las 21:30 que se lee al día siguiente no es un aviso, es un
+# lamento.
+#
+# El canal nuevo es la app companion de Home Assistant, y va por donde ya va todo lo que
+# el backend le pide a HA: una cola en memoria que HA sondea (mismo patrón que el WOL y
+# que las órdenes de la casa). Son ÓRDENES, no estado. El backend NO sabe a qué móvil se
+# manda —eso lo decide el `notify.mobile_app_*` del YAML de HA— para no meter el nombre
+# de un dispositivo personal en un repo público.
+#
+# El correo se queda de red de seguridad, y de eso van las dos reglas que importan:
+#   - **Solo se usa el móvil si hay alguien recogiendo.** Antes de instalar el YAML nadie
+#     sondea, así que todo sigue saliendo por correo sin tocar nada; y si HA se cae, se
+#     vuelve al correo solo. La señal es el propio sondeo: no hay que configurar nada.
+#   - **Cambiar de canal no puede perder avisos.** Un aviso encolado que nadie recoge se
+#     rescata por correo (`_rescatar_avisos`), que es justo lo que pasa si el YAML se
+#     instala a medias: HA sigue con su tick pero nadie lee la cola, y sin el rescate
+#     dejarían de llegar avisos que antes llegaban, en silencio.
+AVISOS_MOVIL       = os.getenv("AVISOS_MOVIL", "1") not in ("0", "false", "False")
+AVISOS_MOVIL_MAX   = 20
+# Cuánto puede pasar desde el último sondeo de HA para seguir dando el móvil por vivo. HA
+# sondea cada 30 s: cinco minutos aguantan un puñado de sondeos perdidos sin dar por
+# muerta la casa a la primera.
+AVISO_MOVIL_VIVO   = int(os.getenv("AVISO_MOVIL_VIVO", "300"))
+# Y cuánto espera un aviso encolado antes de irse por correo. No es el TTL de las órdenes
+# de la casa —aquellas CADUCAN, porque encender una luz media hora tarde es peor que no
+# encenderla—: un aviso tarde sigue valiendo, así que aquí no se tira, se manda por el
+# otro canal.
+AVISO_MOVIL_RESCATE = int(os.getenv("AVISO_MOVIL_RESCATE", "600"))
+
+_avisos_movil: list = []
+# Cuándo sondeó HA por última vez. En memoria a propósito: un cold start lo pone a cero y
+# el primer aviso siguiente se va por correo, que es el lado seguro del error.
+_ultimo_sondeo_avisos: float = 0.0
+
+
+def _movil_vivo() -> bool:
+    """¿Hay alguien recogiendo los avisos? Es lo único que decide el canal."""
+    if not AVISOS_MOVIL or not _ultimo_sondeo_avisos:
+        return False
+    return time.time() - _ultimo_sondeo_avisos <= AVISO_MOVIL_VIVO
+
+
+def _notificar(titulo: str, texto: str) -> str:
+    """Única puerta de salida de un aviso. Devuelve el canal por el que salió.
+
+    Al móvil si hay quien lo recoja, y si no por correo. Un fallo del correo se propaga a
+    quien llama: es lo que permite al despachador liberar la reserva y reintentarlo.
+    """
+    if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
+        _avisos_movil.append({
+            "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
+        })
+        return "movil"
+    enviar_correo(titulo, texto)
+    return "correo"
+
+
+def _rescatar_avisos() -> dict:
+    """Lo que el móvil no recogió a tiempo se manda por correo.
+
+    Cubre el fallo realista de este canal: el YAML instalado a medias (HA sigue con su
+    tick pero nadie lee la cola). Sin esto dejarían de llegar avisos que antes llegaban,
+    y en silencio, que es el error que persigue medio proyecto.
+    """
+    ahora     = time.time()
+    caducados = [a for a in _avisos_movil if ahora - a["puesto"] > AVISO_MOVIL_RESCATE]
+    rescatados = 0
+    for aviso in caducados:
+        try:
+            enviar_correo(aviso["titulo"], aviso["texto"])
+        except Exception as e:
+            # Se queda en la cola: el siguiente tick lo reintenta. Perderlo aquí sería
+            # exactamente lo que este rescate viene a evitar.
+            logger.error("Avisos: no se pudo rescatar por correo (%s)", e)
+            continue
+        _avisos_movil.remove(aviso)
+        rescatados += 1
+    if rescatados:
+        logger.warning("Avisos: %d sin recoger por el móvil, enviados por correo", rescatados)
+        return {"avisos_rescatados": rescatados}
+    return {}
+
+
+def _rescatar_avisos_seguro() -> dict:
+    try:
+        return _rescatar_avisos()
+    except Exception:
+        logger.exception("Avisos: fallo inesperado rescatando los pendientes")
+        return {}
+
+
+@app.get("/ha/avisos-pending")
+def ha_avisos_pending(request: Request, token: str = ""):
+    """HA sondea esto y lo manda al móvil. Devuelve y VACÍA la cola, igual que el WOL.
+
+    Sondearlo es además lo que declara vivo al canal: no hay que configurar nada en el
+    backend para encenderlo, basta con que alguien empiece a recoger.
+    """
+    global _ultimo_sondeo_avisos
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _ultimo_sondeo_avisos = time.time()
+    pendientes = list(_avisos_movil)
+    _avisos_movil.clear()
+    return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"]} for a in pendientes]}
+
+
+@app.get("/avisos/estado")
+def get_avisos_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Si los avisos van al móvil o al correo, para el panel de estado.
+
+    Es la fila que faltaba: "el correo llega" y "el aviso llegó a tiempo" no son la misma
+    pregunta, y un canal que se cae en silencio es la avería típica de este proyecto.
+    """
+    desde = time.time() - _ultimo_sondeo_avisos if _ultimo_sondeo_avisos else None
+    return {
+        "activo":     AVISOS_MOVIL,
+        "canal":      "movil" if _movil_vivo() else "correo",
+        "sondeo_hace_segundos": int(desde) if desde is not None else None,
+        "pendientes": len(_avisos_movil),
+    }
+
+
+@app.post("/avisos/probar")
+def probar_aviso(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Manda un aviso de prueba por el canal que toque.
+
+    Instalar el YAML y no saber si funciona hasta que toque un aviso de verdad es la
+    forma más rápida de creer que está puesto cuando no lo está.
+    """
+    canal = _notificar("🔔 Prueba de Life Assistant",
+                       "Si lees esto en el móvil, los avisos ya no dependen del correo.")
+    return {"ok": True, "canal": canal}
+
+
 def _despachar_recordatorios() -> dict:
     """Manda los que ya han vencido. Lo llama el tick de HA.
 
@@ -5970,13 +6111,13 @@ def _despachar_recordatorios() -> dict:
             continue
         texto = str(fila.get("texto") or "")
         try:
-            enviar_correo(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis")
+            canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis")
             enviados += 1
-            logger.info("Recordatorio enviado: %s", texto[:80])
+            logger.info("Recordatorio enviado por %s: %s", canal, texto[:80])
         except Exception as e:
             # Un fallo transitorio de SMTP no puede consumir el recordatorio: se libera y
             # el siguiente tick lo reintenta. Igual que _liberar_envio en el brief.
-            logger.error("Recordatorio %s: fallo al enviar el correo (%s); se libera", rid, e)
+            logger.error("Recordatorio %s: fallo al enviar el aviso (%s); se libera", rid, e)
             http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
                        headers={**supabase_headers(), "Prefer": "return=minimal"},
                        json={"enviado": False})
