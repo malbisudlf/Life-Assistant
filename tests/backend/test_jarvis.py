@@ -906,6 +906,20 @@ class TestDiagnostico:
         d = main._j_diagnostico()
         assert d["salud"]["metricas"]["fc_reposo"]["dias_atras"] == 3
 
+    def test_dice_quien_escribio_por_ultima_vez(self, mock_requests):
+        """"No hay datos de sueño" puede ser el reloj en un cajón o el Atajo parado, y
+        son averías distintas con arreglos distintos."""
+        from datetime import datetime
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([
+            {"metric_date": hoy, "metric_name": "resting_heart_rate", "value": 56,
+             "unit": "bpm", "extra": {}, "fuente": main.FUENTE_ATAJO,
+             "created_at": "2026-08-16T07:00:00+00:00"},
+        ]))
+        d = main._j_diagnostico()
+        assert d["escrituras"]["fuentes"][main.FUENTE_ATAJO]["ultima_escritura"] \
+            == "2026-08-16T07:00:00+00:00"
+
     def test_esta_en_el_registro_de_herramientas(self):
         assert "diagnostico" in main._JARVIS_HERRAMIENTAS
         assert main._JARVIS_HERRAMIENTAS["diagnostico"]["confirmar"] is False

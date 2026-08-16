@@ -4,6 +4,7 @@ Lo que se comprueba es que un aviso no se pierda ni se duplique, que es donde fa
 estas cosas: la reserva tiene que ser atómica (como el INSERT del resumen diario) y un
 fallo de SMTP no puede consumir el recordatorio.
 """
+import uuid
 from datetime import datetime, timedelta
 
 import pytest
@@ -220,3 +221,99 @@ class TestAvisoDeReloj:
         monkeypatch.setattr(main, "RELOJ_AVISO", False)
         assert main._avisar_reloj_si_toca() == {}
         assert not mock_requests.called("GET", "/rest/v1/health_metrics")
+
+
+class TestVigilanteDeIngesta:
+    """El fallo que más veces ha ocurrido en este proyecto es el silencio: el 409 del
+    upsert, el 400 del envoltorio y el JWT caducado del agente dejaron de traer datos sin
+    que nada diera error. Lo que se comprueba aquí es que la AUSENCIA se note, y que no
+    se confunda con "no he podido preguntar".
+    """
+
+    # Antes de la hora tope del resumen: lo que se prueba es el vigilante, no el correo.
+    AHORA = datetime(2026, 8, 8, 8, 0, tzinfo=main.LOCAL_TZ)
+
+    @pytest.fixture(autouse=True)
+    def _encendido(self, monkeypatch):
+        monkeypatch.setattr(main, "INGESTA_VIGILAR", True)
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.AHORA)
+
+    def _ultima_escritura(self, mock_requests, horas):
+        cuando = datetime.now(main.timezone.utc) - timedelta(hours=horas)
+        mock_requests.add("GET", "/rest/v1/health_metrics",
+                          FakeResponse([{"created_at": cuando.isoformat()}]))
+
+    def test_calla_si_la_ingesta_va_al_dia(self, mock_requests, caplog):
+        self._ultima_escritura(mock_requests, 3)
+        assert main._vigilar_ingesta() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_un_dia_de_silencio_se_registra(self, mock_requests, caplog):
+        """Por logger.error a propósito: así sale en app_logs, en el panel de ajustes y en
+        el diagnóstico de Jarvis sin ningún camino nuevo."""
+        self._ultima_escritura(mock_requests, 30)
+        with caplog.at_level("ERROR"):
+            assert main._vigilar_ingesta() == {"ingesta_silenciosa_horas": 30}
+        assert "sin recibir un solo dato de salud" in caplog.text
+        # Todavía no hay correo: un registro basta mientras se pueda mirar el panel.
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_dos_dias_de_silencio_ya_son_un_correo(self, mock_requests):
+        self._ultima_escritura(mock_requests, 50)
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = main._vigilar_ingesta()
+        assert r == {"ingesta_silenciosa_horas": 50, "aviso_ingesta": True}
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert "50 h sin que llegue ningún dato" in apuntado["texto"]
+
+    def test_el_id_es_el_del_dia_para_que_el_segundo_choque(self, mock_requests):
+        """Misma idempotencia que el aviso del reloj: el 409 contra la clave primaria es
+        lo que impide un correo por hora."""
+        self._ultima_escritura(mock_requests, 50)
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._vigilar_ingesta()
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert apuntado["id"] == str(uuid.uuid5(
+            uuid.NAMESPACE_URL, "life-assistant:ingesta-muda:2026-08-08"))
+
+    def test_un_409_no_es_un_error(self, mock_requests):
+        self._ultima_escritura(mock_requests, 50)
+        mock_requests.add("POST", "jarvis_recordatorios",
+                          FakeResponse(None, 409, "duplicate key"))
+        assert main._vigilar_ingesta() == {"ingesta_silenciosa_horas": 50}
+
+    def test_si_no_se_puede_preguntar_se_calla(self, mock_requests):
+        """"No he podido preguntar" no es "no ha llegado nada" — la moraleja del agente
+        PC, aquí por el otro lado: avisar con esto sería acusar a la ingesta de un fallo
+        de Supabase."""
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(None, 500, "boom"))
+        assert main._vigilar_ingesta() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_la_tabla_vacia_no_es_silencio(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([]))
+        assert main._vigilar_ingesta() == {}
+
+    def test_solo_consulta_una_vez_por_hora(self, mock_requests):
+        """El tick pasa cada 5 minutos: sin este freno serían ~300 consultas al día."""
+        self._ultima_escritura(mock_requests, 3)
+        main._vigilar_ingesta()
+        main._vigilar_ingesta()
+        assert len(mock_requests.called("GET", "/rest/v1/health_metrics")) == 1
+
+    def test_apagado_no_cuesta_ni_una_consulta(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "INGESTA_VIGILAR", False)
+        assert main._vigilar_ingesta() == {}
+        assert not mock_requests.called("GET", "/rest/v1/health_metrics")
+
+    def test_un_fallo_inesperado_no_tumba_el_tick(self, monkeypatch):
+        def _explota():
+            raise RuntimeError("boom")
+        monkeypatch.setattr(main, "_vigilar_ingesta", _explota)
+        assert main._vigilar_ingesta_seguro() == {}
+
+    def test_cuelga_del_tick_de_ha(self, client, mock_requests, correos):
+        self._ultima_escritura(mock_requests, 30)
+        r = client.post("/ha/brief-tick", headers=CABECERA)
+        assert r.status_code == 200
+        assert r.json()["ingesta_silenciosa_horas"] == 30

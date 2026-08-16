@@ -317,6 +317,26 @@ class TestDisparoDeLaRutina:
         assert r.json()["enviado"] is True
         assert len(_SMTPFalso.enviados) == 1
 
+    def test_un_fallo_registra_el_motivo_y_la_beta(self, client, mock_requests, graph_token,
+                                                   monkeypatch, caplog):
+        """Con el código a secas no se puede diagnosticar: un 400 puede ser la cabecera
+        beta caducada, el trigger borrado o el cuerpo mal formado, y son arreglos
+        distintos. La respuesta la tenemos nosotros — tirarla es la lección del 400 de
+        la ingesta de salud repetida por el otro lado."""
+        preparar(mock_requests, monkeypatch)
+        monkeypatch.setattr(main, "RUTINA_FIRE_URL", "https://api.anthropic.test/v1/claude_code/routines/trig_x/fire")
+        monkeypatch.setattr(main, "RUTINA_FIRE_TOKEN", "sk-ant-oat01-secreto")
+        mock_requests.add("POST", "/fire", FakeResponse(
+            None, 400, '{"error": {"message": "unsupported beta header"}}'))
+        reloj(monkeypatch, 9, 35)
+
+        with caplog.at_level("ERROR"):
+            client.post("/despertar?token=brief-token")
+        registrado = "\n".join(r.getMessage() for r in caplog.records)
+        assert "unsupported beta header" in registrado
+        assert main.RUTINA_BETA in registrado, "hay que poder ver con qué beta se llamó"
+        assert "sk-ant-oat01-secreto" not in registrado, "el token no se registra"
+
 
 class TestRespaldoDeActions:
     def test_el_workflow_no_duplica_si_ya_se_envio(self, client, mock_requests, graph_token, monkeypatch):
