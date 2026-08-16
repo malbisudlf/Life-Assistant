@@ -29,6 +29,7 @@ import html as html_mod
 import ipaddress
 import socket
 import unicodedata
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("life-assistant")
@@ -177,6 +178,13 @@ BRIEF_DESPERTAR_DESDE = os.getenv("BRIEF_DESPERTAR_DESDE", "05:30")
 # respaldo, que es lo honesto.
 BRIEF_DESPERTAR_HASTA = os.getenv("BRIEF_DESPERTAR_HASTA", "11:30")
 BRIEF_HORA_TOPE       = os.getenv("BRIEF_HORA_TOPE", "10:00")
+# Aviso de "ponte el reloj". El dato de una noche sin medir no se recupera: al día
+# siguiente ya no hay nada que hacer, así que el aviso vale antes de dormir o no vale.
+RELOJ_AVISO       = os.getenv("RELOJ_AVISO", "1") not in ("0", "false", "False")
+RELOJ_AVISO_HORA  = os.getenv("RELOJ_AVISO_HORA", "21:30")
+# Cuántas noches seguidas sin medir hacen falta para avisar de la racha. Con 1 saltaría
+# cada vez que se carga una noche, que es normal y volvería el aviso ruido.
+RELOJ_AVISO_NOCHES = int(os.getenv("RELOJ_AVISO_NOCHES", "2"))
 # Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
 # _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
 BRIEF_DISPARA_SUENO   = os.getenv("BRIEF_DISPARA_SUENO", "1") not in ("0", "false", "False")
@@ -2808,11 +2816,12 @@ def get_health_metrics(
     if r.status_code >= 300:
         raise _supabase_error(r)
 
+    filas = r.json()
     grouped: dict = {}
     last_sync: str | None = None
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     has_today = False
-    for row in r.json():
+    for row in filas:
         name = row["metric_name"]
         if name not in grouped:
             grouped[name] = []
@@ -2832,7 +2841,25 @@ def get_health_metrics(
     if has_today:
         last_sync = datetime.now(timezone.utc).isoformat()
 
-    return {"metrics": grouped, "last_sync": last_sync}
+    # Qué días estuvo puesto el reloj. Va aquí y no en un endpoint aparte porque sale de
+    # las MISMAS filas que ya se han traído: cuesta un recorrido en memoria y ningún
+    # viaje de red más. `last_sync` responde "¿llegan datos?", que es la pregunta del
+    # sistema; esto responde "¿por qué mi HRV lleva tres días plano?", que es la del
+    # usuario, y hasta ahora se calculaba solo para el correo.
+    #
+    # `fuentes` viaja con los días a propósito: sin él, el frontend tendría que repetir
+    # la clasificación de métricas y las dos copias se desincronizarían a la primera
+    # métrica nueva. Es el mismo criterio por el que `findMetric` recibe los alias en vez
+    # de conocerlos.
+    con_dia, con_noche, con_movil = _dias_de_reloj(filas)
+    fechas = sorted({f["metric_date"] for f in filas})
+    reloj = {
+        "dias":    {f: _estado_reloj(f, con_dia, con_noche, con_movil) for f in fechas},
+        "fuentes": {n: ("noche" if n in _RELOJ_NOCHE else "dia")
+                    for n in grouped if n in _RELOJ_NOCHE or n in _RELOJ_DIA},
+    }
+
+    return {"metrics": grouped, "last_sync": last_sync, "reloj": reloj}
 
 
 @app.get("/health/latest")
@@ -3346,6 +3373,37 @@ def _fuente_reloj(nombres) -> str | None:
     return None
 
 
+def _dias_de_reloj(filas) -> tuple:
+    """`(con_dia, con_noche, con_movil)`: qué fechas tienen medida de cada cosa.
+
+    Recibe filas crudas de `health_metrics` (con `metric_name`/`metric_date`) porque lo
+    usan dos sitios que las agrupan distinto: el resumen diario y `/health/metrics`.
+    """
+    con_dia, con_noche, con_movil = set(), set(), set()
+    for f in filas:
+        nombre  = f.get("metric_name")
+        destino = (con_noche if nombre in _RELOJ_NOCHE else
+                   con_dia   if nombre in _RELOJ_DIA   else
+                   con_movil if nombre in _METRICAS_MOVIL else None)
+        if destino is not None and _hay_medida(f):
+            destino.add(f["metric_date"])
+    return con_dia, con_noche, con_movil
+
+
+def _estado_reloj(fecha: str, con_dia: set, con_noche: set, con_movil: set) -> str:
+    """El estado de un día. Son TRES, no dos, y el tercero es el importante: si no llegó
+    nada de ninguna fuente no se sabe si hubo reloj o falló la sincronización, y darlo
+    por "día sin reloj" convertiría una caída de la ingesta en un hábito del usuario."""
+    dia, noche = fecha in con_dia, fecha in con_noche
+    if dia and noche:
+        return "ambos"
+    if dia:
+        return "dia"
+    if noche:
+        return "noche"
+    return "sin_reloj" if fecha in con_movil else "sin_datos"
+
+
 def _uso_del_reloj(por_nombre: dict, dias_ventana: list, hoy) -> tuple:
     """Qué días estuvo puesto el reloj, y de día o de noche.
 
@@ -3359,28 +3417,10 @@ def _uso_del_reloj(por_nombre: dict, dias_ventana: list, hoy) -> tuple:
     jornada a medias, y contarlo como día sin reloj se inventaría una racha que aún no
     ha pasado.
     """
-    con_dia, con_noche, con_movil = set(), set(), set()
-    for nombre, filas in por_nombre.items():
-        destino = (con_noche if nombre in _RELOJ_NOCHE else
-                   con_dia   if nombre in _RELOJ_DIA   else
-                   con_movil if nombre in _METRICAS_MOVIL else None)
-        if destino is None:
-            continue
-        for f in filas:
-            if _hay_medida(f):
-                destino.add(f["metric_date"])
+    con_dia, con_noche, con_movil = _dias_de_reloj(
+        f for filas in por_nombre.values() for f in filas)
 
-    def _estado(fecha: str) -> str:
-        dia, noche = fecha in con_dia, fecha in con_noche
-        if dia and noche:
-            return "ambos"
-        if dia:
-            return "dia"
-        if noche:
-            return "noche"
-        return "sin_reloj" if fecha in con_movil else "sin_datos"
-
-    estados = [_estado(f) for f in dias_ventana]
+    estados = [_estado_reloj(f, con_dia, con_noche, con_movil) for f in dias_ventana]
     hoy_iso = hoy.isoformat()
     desde_7 = (hoy - timedelta(days=6)).isoformat()
 
@@ -4236,6 +4276,7 @@ HORA_DESPERTAR_DESDE = _hora_config(BRIEF_DESPERTAR_DESDE, (5, 30))
 HORA_DESPERTAR_HASTA = _hora_config(BRIEF_DESPERTAR_HASTA, (11, 30))
 HORA_TOPE            = _hora_config(BRIEF_HORA_TOPE, (10, 0))
 HORA_RUTINA          = _hora_config(BRIEF_RUTINA_DESDE, (8, 0))
+HORA_AVISO_RELOJ     = _hora_config(RELOJ_AVISO_HORA, (21, 30))
 
 
 def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
@@ -4462,7 +4503,10 @@ def ha_brief_tick(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    avisos = _despachar_recordatorios()
+    # El aviso del reloj va ANTES del despacho para que salga en este mismo tick: se
+    # apunta con `cuando` = ahora, así que el despachador que viene detrás ya lo ve.
+    reloj  = _avisar_reloj_si_toca()
+    avisos = {**_despachar_recordatorios(), **reloj}
     ahora  = _ahora_local()
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
@@ -4941,6 +4985,105 @@ def _j_cancelar_recordatorio(recordatorio_id: str) -> dict:
     if r.status_code >= 300:
         raise _supabase_error(r)
     return {"ok": True, "id": recordatorio_id}
+
+
+# ── Aviso de "ponte el reloj" ────────────────────────────────────────────────
+# Lo único que sabe el sistema y no servía de nada saber: que hoy el reloj está en un
+# cajón. El diagnóstico llegaba al día siguiente, cuando la noche ya no se puede medir
+# otra vez — por eso este aviso sale ANTES de dormir o no sale.
+#
+# Tres decisiones, y las tres son las de siempre en este proyecto:
+#   - La idempotencia es un INSERT con id determinista (uuid5 de la fecha) contra la
+#     clave primaria de `jarvis_recordatorios`: el 409 es lo que hace la pregunta
+#     atómica, igual que `brief_envios`. Un GET previo dejaría que dos ticks solapados
+#     mandaran el mismo aviso dos veces.
+#   - No hay camino de correo nuevo: se apunta como recordatorio y lo manda el
+#     despachador que ya existe, con su liberación de reserva si el SMTP falla.
+#   - Un día "sin_datos" NO dispara nada. Si no llegó nada, no se sabe si el reloj
+#     estaba en un cajón o si falló la sincronización, y un aviso que a veces regaña
+#     por algo que no ha pasado deja de leerse a la tercera.
+RELOJ_AVISO_VENTANA = 7
+# Solo evita repetir la CONSULTA dentro de la vida de la máquina: el tick pasa cada 5
+# min y sin esto serían ~30 lecturas de health_metrics cada noche. Quien impide el
+# aviso duplicado es el INSERT, no esto — un cold start lo borra y no pasa nada.
+_reloj_avisado_dia: str | None = None
+
+
+def _uuid_aviso_reloj(fecha: str) -> str:
+    """Id determinista del aviso de un día: dos ticks generan el mismo y el segundo
+    choca contra la clave primaria."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:aviso-reloj:{fecha}"))
+
+
+def _avisar_reloj_si_toca() -> dict:
+    """Si hoy no hay rastro del reloj, deja un recordatorio para esta noche.
+
+    Como los recordatorios, no puede tumbar a quien lo llama: el tick existe sobre todo
+    para el resumen diario.
+    """
+    global _reloj_avisado_dia
+    ahora = _ahora_local()
+    if not RELOJ_AVISO or (ahora.hour, ahora.minute) < HORA_AVISO_RELOJ:
+        return {}
+    hoy = ahora.date().isoformat()
+    if _reloj_avisado_dia == hoy:
+        return {}
+
+    try:
+        desde = (ahora.date() - timedelta(days=RELOJ_AVISO_VENTANA - 1)).isoformat()
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+            "&select=metric_date,metric_name,value,extra&limit=2000",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        con_dia, con_noche, con_movil = _dias_de_reloj(r.json())
+    except Exception as e:
+        logger.error("Aviso de reloj: no se pudo leer el uso del reloj (%s)", e)
+        return {}
+    _reloj_avisado_dia = hoy    # la comprobación de hoy ya está hecha, salga o no aviso
+
+    hoy_sin_reloj = _estado_reloj(hoy, con_dia, con_noche, con_movil) == "sin_reloj"
+    # Noches seguidas sin medir, sin contar la de hoy (que aún no ha pasado). Un día sin
+    # datos ni suma ni rompe: no se sabe qué ocurrió.
+    noches = 0
+    for i in range(1, RELOJ_AVISO_VENTANA):
+        fecha = (ahora.date() - timedelta(days=i)).isoformat()
+        if _estado_reloj(fecha, con_dia, con_noche, con_movil) == "sin_datos":
+            continue
+        if fecha in con_noche:
+            break
+        noches += 1
+
+    if not hoy_sin_reloj and noches < RELOJ_AVISO_NOCHES:
+        return {}
+
+    partes = []
+    if hoy_sin_reloj:
+        partes.append("Hoy no hay ni un dato del reloj.")
+    if noches >= RELOJ_AVISO_NOCHES:
+        partes.append(f"Llevas {noches} noches sin medir el sueño.")
+    partes.append("Si está en el cargador, póntelo antes de dormir: el sueño, la HRV y "
+                  "la FC en reposo de esta noche no se pueden recuperar mañana.")
+    texto = " ".join(partes)
+
+    try:
+        r = http.post(
+            RECORDATORIOS_URL,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={"id": _uuid_aviso_reloj(hoy), "texto": texto,
+                  "cuando": datetime.now(timezone.utc).isoformat()},
+        )
+        if r.status_code == 409:
+            return {}                      # ya avisado hoy: el 409 ES la respuesta
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Aviso de reloj: no se pudo apuntar el recordatorio (%s)", e)
+        return {}
+    logger.info("Aviso de reloj apuntado para hoy (%s)", texto[:60])
+    return {"aviso_reloj": True}
 
 
 def _despachar_recordatorios() -> dict:

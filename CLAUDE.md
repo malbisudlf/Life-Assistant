@@ -748,6 +748,22 @@ Ficheros clave:
   reserva**, o un error transitorio de SMTP se come el recordatorio. Un fallo despachando
   **nunca** tumba el resumen diario: va aparte y se registra.
 
+- **Aviso de "ponte el reloj"** (`_avisar_reloj_si_toca()`, mismo tick de HA): si hoy no
+  hay ni un dato del reloj —o si se acumulan `RELOJ_AVISO_NOCHES` noches sin medir—, deja
+  un recordatorio a partir de `RELOJ_AVISO_HORA` (21:30). Sale **antes de dormir o no
+  sale**: el dato de una noche sin medir no se recupera al día siguiente, así que un aviso
+  por la mañana solo sirve para dar la mala noticia. Cuatro cosas:
+  - **No hay camino de correo nuevo**: se apunta como recordatorio normal y lo manda el
+    despachador que ya existe, con su liberación de reserva si el SMTP falla.
+  - **La idempotencia es un INSERT con id determinista** (`uuid5` de la fecha) contra la
+    clave primaria de `jarvis_recordatorios`: el 409 es la pregunta atómica, igual que
+    `brief_envios`. `_reloj_avisado_dia` es solo una caché para no repetir la CONSULTA en
+    cada tick (el tick pasa cada 5 min); quien impide el duplicado es el INSERT.
+  - **Un día "sin_datos" no dispara nada.** Si no llegó nada, no se sabe si el reloj
+    estaba en un cajón o falló la sincronización, y un aviso que regaña por algo que no ha
+    pasado deja de leerse a la tercera.
+  - Antes de la hora no consulta nada: el tick tiene que seguir siendo barato.
+
 - **Peticiones a Supabase en paralelo**: cuando dos consultas no dependen entre sí
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
@@ -829,7 +845,7 @@ Ficheros clave:
 | `POST /training/payments` | JWT | Marca cobro de hoy (calcula el importe automáticamente) |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
-| `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` |
+| `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) |
 | `GET /health/latest` | JWT | Último valor de cada métrica |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
@@ -877,6 +893,7 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `CASA_ORDEN_TTL`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
+`RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
 `BRIEF_DISPARA_SUENO`,
 `RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
@@ -1045,6 +1062,25 @@ Qué hace cada uno:
 `seriesTrend`/`trendDirection`/`bedtimeHrvInsight` y en `pairByDate`/`splitCompare`
 para los cruces entre series.
 
+- **Todas las ventanas van por FECHA REAL, nunca por número de registros.**
+  `seriesTrend` y las medias de `healthConclusions` filtran por rango de fechas contra
+  un `hoy` inyectable. Con la serie agujereada —lo que deja un mes sin llevar el reloj—
+  `slice(-7)` no da los últimos 7 días: da las últimas 7 MEDIDAS, que pueden abarcar
+  meses, y `slice(-30)` puede abarcar el histórico entero, con lo que la "media de 7d" y
+  la de "30d" acaban siendo casi el mismo dato y sale una tendencia de comparar algo
+  consigo mismo. Es el bug que ya se corrigió en el correo (`_media`), aquí un piso más
+  arriba y peor, porque estas frases AFIRMAN. Una serie sin fechas utilizables mantiene
+  el conteo por registros, que es lo único que se puede hacer sin fechas.
+- **Una tendencia necesita fondo a los dos lados** (`nCorto >= 3` y `nLargo >= 7`). Con
+  menos, se dice el valor y sobre cuántas noches se apoya, en vez de un porcentaje.
+- **Las conclusiones saben cuándo NO se pudo medir**: `healthConclusions(datos, now,
+  { reloj })` recibe el `reloj` de `/health/metrics` y añade un dominio "Reloj" que dice
+  cuántas noches de la semana se llevó puesto, avisa de la racha y —aparte— de los días
+  en que no llegó nada, que no son lo mismo. La CLASIFICACIÓN de métricas (qué necesita
+  reloj de día y qué de noche) **se queda en el backend** y viaja en `reloj.fuentes`:
+  repetirla aquí daría dos listas que se desincronizan a la primera métrica nueva. Los
+  helpers del lado JS son `relojPuesto`/`relojCobertura`/`relojRachaSinReloj`.
+
 - **Cruces entre series**: todos salen del catálogo `_CRUCES` y los ejecuta
   `healthCorrelations()`. No los escribas a mano sueltos: el mismo cruce se usa con
   DOS ventanas —los últimos 30 días para las conclusiones del día a día, y hasta un
@@ -1070,10 +1106,18 @@ componente a `wellnessBreakdown`, añádelo también al mapa de series de
 Las métricas esporádicas (VO₂max, % grasa, recuperación cardio) arrastran su último
 valor conocido hasta cada fecha, y la referencia de HRV se ancla a la ventana
 D-14..D-8 de ese día, no a hoy: así cada día puntúa como habría puntuado entonces.
+**Cada punto lleva además con qué se midió** (`cobertura`, `sinDatos`, `estadoReloj`,
+`sinReloj`, pasándole el `reloj`): normalizar a 100 hace comparables un día de nueve
+componentes y otro de cuatro, pero también los deja indistinguibles, y en la sparkline
+un día medido a medias se pinta igual que un día malo. `scoreFromBreakdown` devuelve la
+`cobertura` por lo mismo, y el tooltip la enseña cuando falta algún componente.
+`estadoReloj` es `null` —no `"sin_datos"`— si no hay información de uso del reloj: no
+saber es distinto de saber que no llegó nada.
 
 - **`Sparkline`** acepta `objetivo` (dibuja una línea discontinua de referencia,
-  metiéndolo en el rango vertical para que nunca quede fuera del gráfico) y
-  `relleno` (área bajo la curva). Se usa en el bloque de composición corporal
+  metiéndolo en el rango vertical para que nunca quede fuera del gráfico),
+  `relleno` (área bajo la curva) y `marcar` (un predicado que señala puntos con un punto
+  gris: hoy, los días puntuados sin el reloj puesto). Se usa en el bloque de composición corporal
   para la serie de peso con el objetivo encima.
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
@@ -1123,7 +1167,9 @@ móvil no había forma de abrir los ajustes). `Escape` lo cierra; tiene `maxHeig
   El estado que se pinta es siempre el que devuelve el backend, nunca el que creíamos
   haber puesto — es él quien decide si una pausa sigue viva.
 - **Panel de estado del sistema**: backend, sesión de Outlook, última sincronización del
-  Watch, agente PC, entrenamiento, **Resumen diario** (apagado a propósito y roto se
+  Watch, **uso del reloj** (la fila de sync responde "¿llegan datos?", que es la pregunta
+  del sistema; esta responde "¿se pudieron medir?", que es la del usuario), agente PC,
+  entrenamiento, **Resumen diario** (apagado a propósito y roto se
   parecen mucho desde fuera: en los dos casos el correo no llega) y **Registro** (los
   errores del backend, de `GET /logs`), todo en un mismo sitio. Se recarga al abrir ajustes y con su botón — nunca en un
   intervalo. Las demás filas dicen si algo RESPONDE; la del registro dice si algo ha
@@ -1709,6 +1755,19 @@ excepción o error de consola, no solo si falta un texto.
   Relacionado: una fila con `metric_date` en el futuro (hay un `heart_rate` fechado en
   diciembre) entraba en la ventana de 30 días, porque el filtro es `gte`, y se convertía
   en "el último valor" de su métrica. `_brief_salud` descarta ahora las fechas futuras.
+
+- **El mismo bug de las medias del correo estaba también en el dashboard, y ahí
+  afirmaba.** `seriesTrend` y las medias de `healthConclusions` cogían los últimos N
+  REGISTROS (`slice(-7)`, `slice(-30)`), no los de los últimos N días. Con el histórico
+  agujereado por el mes sin reloj, la "media de 7 días" podía abarcar dos meses y la de
+  30 el histórico entero: las dos ventanas acababan siendo casi el mismo conjunto de
+  medidas y de compararlas salía una tendencia que no existía. El correo, con el mismo
+  fallo, solo daba una cifra sin base; aquí el resultado era una frase: *"tu HRV está un
+  12% por debajo de tu media de 30 días"*. Lo mismo hacía el peso, que comparaba con el
+  octavo registro hacia atrás llamándolo "hace ~1 semana" cuando uno no se pesa a diario.
+  Arreglado con ventanas por fecha real contra un `hoy` inyectable, exigiendo fondo a los
+  dos lados antes de hablar de tendencia, y con tests. Moraleja, la de siempre: **un
+  arreglo que no se busca en los demás sitios donde vive el mismo patrón está a medias.**
 
 - **El streaming tardaba 45 segundos "en negro" tras encender el PC.** No era la red,
   ni el WOL, ni Sunshine: era la primera invocación de `powershell.exe` del arranque,

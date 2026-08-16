@@ -7,6 +7,7 @@ import {
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown,
   wellnessHistory, seriesTrend, trendDirection,
+  relojCobertura, relojRachaSinReloj, relojPuesto,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
@@ -202,7 +203,11 @@ function SleepStageTooltip({ label, color, tip, children }) {
 // quieres llegar) y entra en el rango vertical para que nunca quede fuera del
 // gráfico. `relleno` añade un área bajo la curva, útil cuando la serie es el
 // contenido principal del bloque y no un adorno al lado de una cifra.
-function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null, relleno = false }) {
+// `marcar` señala puntos que hay que mirar distinto (hoy: los días puntuados sin el
+// reloj puesto). Sin la marca, un día medido con la mitad de los sensores se dibuja a
+// la misma altura que un día malo, y la línea cuenta una caída que no ocurrió.
+function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null, relleno = false,
+                     marcar = null, colorMarca = "var(--muted2)" }) {
   const pts = data.filter(d => d.value != null);
   if (pts.length < 2) return (
     <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -225,6 +230,9 @@ function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null
           stroke="var(--green)" strokeWidth="1" strokeDasharray="3 3" opacity="0.75" />
       )}
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {marcar && pts.map((d, i) => marcar(d) ? (
+        <circle key={i} cx={px(i)} cy={py(Number(d.value))} r="2" fill={colorMarca} opacity="0.85" />
+      ) : null)}
     </svg>
   );
 }
@@ -962,6 +970,10 @@ export default function Dashboard() {
   // evita un setState síncrono dentro del efecto.
   const [healthLoading, setHealthLoading]   = useState(() => !!localStorage.getItem("la_token"));
   const [healthLastSync, setHealthLastSync] = useState(null);
+  // Qué días estuvo puesto el reloj (lo calcula el backend en /health/metrics). Es la
+  // diferencia entre "no hay dato" y "no se pudo medir", que hasta ahora solo sabía el
+  // correo de la mañana.
+  const [healthReloj, setHealthReloj]       = useState(null);
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
@@ -1220,7 +1232,15 @@ export default function Dashboard() {
     if (!token) return;
     apiFetch(`${API}/health/metrics?days=30`, { headers: authHeaders() })
       .then(r => r.json())
-      .then(data => { setHealthData(data.metrics || {}); setHealthLastSync(data.last_sync || null); setHealthLoading(false); })
+      .then(data => {
+        setHealthData(data.metrics || {});
+        setHealthLastSync(data.last_sync || null);
+        // Qué días estuvo puesto el reloj. `null` si el backend no lo manda (no es lo
+        // mismo que "no lo llevaste": es que no se sabe), y las conclusiones lo tratan
+        // como tal.
+        setHealthReloj(data.reloj || null);
+        setHealthLoading(false);
+      })
       .catch(() => setHealthLoading(false));
   }, [token]);
 
@@ -2492,7 +2512,28 @@ export default function Dashboard() {
   // El motor de conclusiones recorre todas las series y cruza varias entre sí. Lo
   // llamaban por separado el widget compacto y el modal, así que se ejecutaba dos
   // veces por render; ahora una vez por cambio de datos y compartido.
-  const conclusionesSalud = useMemo(() => healthConclusions(healthData), [healthData]);
+  // El día de hoy, estable dentro de la jornada. Las ventanas de las conclusiones van
+  // por fecha real, así que el tic del reloj (dos veces por minuto) no debe rehacerlas
+  // pero pasar la medianoche sí. A mediodía para que el cambio de hora no lo mueva.
+  const diaActual = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  const hoyConclusiones = useMemo(() => {
+    const [a, m, d] = diaActual.split("-").map(Number);
+    return new Date(a, m, d, 12);
+  }, [diaActual]);
+  const conclusionesSalud = useMemo(
+    () => healthConclusions(healthData, hoyConclusiones, { reloj: healthReloj }),
+    [healthData, healthReloj, hoyConclusiones],
+  );
+  // Estado del reloj HOY. Se usa solo como matiz de la puntuación diaria: a media
+  // mañana "sin señal todavía" es de lo más normal y no es una conclusión de nada.
+  const relojHoy = useMemo(() => {
+    const mapa = healthReloj?.dias;
+    if (!mapa) return null;
+    const p = n => String(n).padStart(2, "0");
+    const iso = `${hoyConclusiones.getFullYear()}-${p(hoyConclusiones.getMonth() + 1)}-${p(hoyConclusiones.getDate())}`;
+    const estado = mapa[iso] || "sin_datos";
+    return { estado, puesto: relojPuesto(estado) };
+  }, [healthReloj, hoyConclusiones]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
   // Patrones sobre el histórico largo: mismas fórmulas que las conclusiones, pero
   // exigiendo mucha más muestra por grupo (ver HEALTH_MIN_MUESTRA_PATRONES).
@@ -2505,7 +2546,10 @@ export default function Dashboard() {
   // Histórico de la puntuación diaria de bienestar, reconstruido de las mismas series
   // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
   // memoizado como el resto: solo cambia cuando llega una sincronización nueva.
-  const historicoBienestar = useMemo(() => wellnessHistory(healthData), [healthData]);
+  const historicoBienestar = useMemo(
+    () => wellnessHistory(healthData, { reloj: healthReloj }),
+    [healthData, healthReloj],
+  );
   const tendenciaBienestar = useMemo(
     () => historicoBienestar.length >= 7 ? seriesTrend(historicoBienestar, 7, 30) : null,
     [historicoBienestar],
@@ -2515,9 +2559,9 @@ export default function Dashboard() {
   // Esto son ~17 findMetric, decenas de slice y todas las medias. Antes se rehacía
   // entero en CADA render del Dashboard — o sea dos veces por minuto solo por el tic
   // del reloj — sobre datos que únicamente cambian cuando llega la sincronización.
-  // `diaActual` está en las dependencias para que lo que depende del día de hoy
-  // (daysSinceWorkout, la semana desde el lunes) se recalcule al pasar la medianoche.
-  const diaActual = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  // `diaActual` (definido arriba, con las conclusiones) está en las dependencias para
+  // que lo que depende del día de hoy (daysSinceWorkout, la semana desde el lunes) se
+  // recalcule al pasar la medianoche.
   const datosSalud = useMemo(() => {
           // ── datos base ──
           const wSleepRaw     = findMetric(healthData, "sleep_analysis", "sleep").filter(d => !d.extra?.excluded).map(d => ({ ...d, value: sleepHours(d) }));
@@ -3219,7 +3263,8 @@ export default function Dashboard() {
         // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,
         // así que con umbrales fijos "Semana excelente" era casi inalcanzable y "Día
         // excelente" bastante fácil. Sobre 100 las dos vistas significan lo mismo.
-        const { pts: scorePts, max: scoreMax, score } = scoreFromBreakdown(breakdown);
+        const { pts: scorePts, max: scoreMax, score,
+                componentes: scoreComponentes, sinDatos: scoreSinDatos } = scoreFromBreakdown(breakdown);
         const scoreLabel = isDaily
           ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
           : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
@@ -3392,6 +3437,15 @@ export default function Dashboard() {
                           <span style={{ fontFamily: "'DM Mono', monospace", color: scoreColor, fontWeight: 600 }}>{score}/100</span>
                         </span>
                       </div>
+                      {/* Normalizar a 100 hace comparables un día con nueve componentes
+                          y otro con cuatro, pero también los deja indistinguibles. Esta
+                          línea es la que dice sobre cuánto está calculado. */}
+                      {scoreSinDatos > 0 && (
+                        <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.4 }}>
+                          Calculado sobre {scoreComponentes} de {scoreComponentes + scoreSinDatos} componentes
+                          {isDaily && relojHoy && !relojHoy.puesto ? " — hoy sin señal del reloj" : ""}.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3443,11 +3497,20 @@ export default function Dashboard() {
                           </span>
                         )}
                       </div>
-                      <Sparkline data={serie} color="var(--accent2)" height={40} relleno />
+                      <Sparkline data={serie} color="var(--accent2)" height={40} relleno
+                        marcar={d => d.sinReloj} />
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", marginTop: 3 }}>
                         <span>{formatShortDate(primera.date)} · {primera.value}</span>
                         <span>{formatShortDate(ultima.date)} · {ultima.value}</span>
                       </div>
+                      {/* Un día sin reloj puntúa sobre cuatro componentes en vez de
+                          sobre nueve: la línea baja porque falta medida, no porque el
+                          día fuera peor. */}
+                      {serie.filter(d => d.sinReloj).length > 0 && (
+                        <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 4, lineHeight: 1.4 }}>
+                          ● {serie.filter(d => d.sinReloj).length} día(s) puntuados sin el reloj puesto — menos sensores, no peor día.
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -5163,6 +5226,24 @@ export default function Dashboard() {
                     : minutos < 1440 ? `última sync hace ${Math.floor(minutos / 60)} h`
                     : `última sync hace ${Math.floor(minutos / 1440)} días`,
                 });
+
+                // La fila de arriba responde "¿llegan datos?", que es la pregunta del
+                // sistema. Esta responde "¿se pudieron medir?", que es la del usuario:
+                // sin ella, un mes de HRV plano por tener el reloj en un cajón parece
+                // una avería, que es justo como se leyó en su día.
+                if (healthReloj) {
+                  const cob   = relojCobertura(healthReloj, { dias: 7 });
+                  const racha = relojRachaSinReloj(healthReloj);
+                  const medibles = cob.dias - cob.sinDatos;
+                  filas.push({
+                    nombre: "Uso del reloj",
+                    tono: !medibles ? "muted" : racha >= 2 ? "red" : cob.noche < medibles ? "accent" : "green",
+                    detalle: !medibles ? "sin datos de los que deducirlo"
+                      : racha >= 2 ? `${racha} días seguidos sin ponértelo`
+                      : `${cob.noche}/${medibles} noches y ${cob.dia}/${medibles} días esta semana`
+                        + (cob.sinDatos ? ` · ${cob.sinDatos} día(s) sin datos` : ""),
+                  });
+                }
 
                 const ag = sysStatus?.agente;
                 filas.push({

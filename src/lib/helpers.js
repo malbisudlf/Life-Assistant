@@ -177,18 +177,53 @@ export function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
 // (30 días) para detectar señales tempranas: HRV cayendo, FC en reposo subiendo,
 // peso derivando, etc. `data` es la serie ya ordenada por fecha ascendente tal
 // como la sirve el backend ([{ date, value }, ...]). Devuelve null si no hay datos.
-export function seriesTrend(data, shortDays = 7, longDays = 30) {
+export function seriesTrend(data, shortDays = 7, longDays = 30, { hoy = null } = {}) {
   const clean = (data || []).filter(d => d && d.value != null && !isNaN(Number(d.value)));
   if (!clean.length) return null;
-  const nums     = clean.map(d => Number(d.value));
-  const shortArr = nums.slice(-shortDays);
-  const longArr  = nums.slice(-longDays);
-  const avg      = a => a.reduce((x, y) => x + y, 0) / a.length;
-  const avgShort = avg(shortArr);
-  const avgLong  = avg(longArr);
-  // Delta de la ventana corta frente a la larga, en % (0 si la larga es 0).
-  const deltaPct = avgLong ? ((avgShort - avgLong) / avgLong) * 100 : 0;
-  return { latest: nums[nums.length - 1], avgShort, avgLong, deltaPct, n: clean.length };
+  const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const fin = hoy || _isoHoy();
+
+  // Las ventanas van por FECHA REAL, no por número de registros. Con la serie
+  // agujereada —que es lo que deja un mes sin llevar el reloj— `slice(-7)` no coge los
+  // últimos siete días: coge las últimas siete MEDIDAS, que pueden abarcar dos meses, y
+  // `slice(-30)` puede abarcar el histórico entero. Así la "media de 7d" y la de "30d"
+  // acababan siendo casi el mismo dato y salía una tendencia de la comparación de algo
+  // consigo mismo. Es exactamente el bug que ya se corrigió en el correo (`_media`
+  // promediaba los últimos N registros), aquí un piso más arriba y peor: el correo daba
+  // una cifra sin base y esto AFIRMA ("tu HRV está un 12% por debajo de tu media").
+  const conFecha = clean.filter(d => _sumarDias(String(d.date), 0) != null);
+  if (!conFecha.length) {
+    // Serie sin fechas utilizables (la del histórico de bienestar en algunos tests, o
+    // cualquier serie ya recortada por quien llama): se mantiene el conteo por
+    // registros. No se puede hacer mejor sin fechas, pero tampoco se puede fingir.
+    const nums = clean.map(d => Number(d.value));
+    const avgShort = avg(nums.slice(-shortDays));
+    const avgLong  = avg(nums.slice(-longDays));
+    return {
+      latest: nums[nums.length - 1], avgShort, avgLong,
+      deltaPct: avgLong ? ((avgShort - avgLong) / avgLong) * 100 : 0,
+      n: clean.length, nCorto: Math.min(shortDays, nums.length), nLargo: Math.min(longDays, nums.length),
+      porFecha: false,
+    };
+  }
+
+  const desde = n => _sumarDias(fin, -(n - 1));
+  const enVentana = n => conFecha.filter(d => String(d.date) >= desde(n) && String(d.date) <= fin)
+    .map(d => Number(d.value));
+  const cortos = enVentana(shortDays);
+  const largos = enVentana(longDays);
+  // Sin nada reciente no hay tendencia que contar. Devolver una calculada sobre datos
+  // viejos sería el error de antes con otra cara.
+  if (!cortos.length || !largos.length) return null;
+  const avgShort = avg(cortos);
+  const avgLong  = avg(largos);
+  const ultimo   = conFecha[conFecha.length - 1];
+  return {
+    latest: Number(ultimo.value), avgShort, avgLong,
+    deltaPct: avgLong ? ((avgShort - avgLong) / avgLong) * 100 : 0,
+    n: clean.length, nCorto: cortos.length, nLargo: largos.length,
+    porFecha: true,
+  };
 }
 
 // Dirección de una tendencia teniendo en cuenta si "más es mejor" (HRV, sueño) o
@@ -242,11 +277,26 @@ export function bedtimeHrvInsight(sleepData, hrvData, cutoffHour = 1) {
 
 // Suma días a una fecha ISO "YYYY-MM-DD". Se trabaja a mediodía UTC para que el
 // cambio de hora no desplace el día.
+// Hoy en ISO "YYYY-MM-DD" con los componentes LOCALES: `toISOString()` desplaza el día
+// hacia atrás en Europe/Madrid al convertir a UTC (el mismo error que daba eventos
+// creados un día antes de lo pedido).
+function _isoHoy(ahora = new Date()) {
+  const p = n => String(n).padStart(2, "0");
+  return `${ahora.getFullYear()}-${p(ahora.getMonth() + 1)}-${p(ahora.getDate())}`;
+}
+
 function _sumarDias(iso, n) {
   const d = new Date(`${iso}T12:00:00Z`);
   if (isNaN(d.getTime())) return null;
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
+}
+
+// Días enteros entre dos fechas ISO, o null si alguna no lo es.
+function _diasEntre(desde, hasta) {
+  const a = new Date(`${desde}T12:00:00Z`), b = new Date(`${hasta}T12:00:00Z`);
+  if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
+  return Math.round((b - a) / 86400000);
 }
 
 // Empareja dos series por fecha. `desfase` desplaza la serie `b`: con 1, el valor de
@@ -525,6 +575,63 @@ export function healthCoverageDays(healthData) {
   return fechas.size;
 }
 
+// ── Uso del reloj ────────────────────────────────────────────────
+// El backend manda en /health/metrics un `reloj` con `dias` (fecha → estado) y
+// `fuentes` (métrica → "dia"|"noche"). La CLASIFICACIÓN de métricas se queda allí a
+// propósito: repetirla aquí crearía dos listas que se desincronizan a la primera
+// métrica nueva, que es la trampa que ya sortea `findMetric` recibiendo los alias en
+// vez de conocerlos.
+//
+// Estados: "ambos" | "dia" | "noche" (reloj puesto) · "sin_reloj" (hubo datos del
+// móvil, o sea que el reloj estaba en un cajón) · "sin_datos" (no llegó nada de nada:
+// no se sabe si fue el reloj o la sincronización, y no se puede dar por ninguna).
+const _PUESTO = { ambos: ["dia", "noche"], dia: ["dia"], noche: ["noche"] };
+
+export function relojPuesto(estado, fuente = null) {
+  const cubre = _PUESTO[estado];
+  if (!cubre) return false;
+  return fuente ? cubre.includes(fuente) : true;
+}
+
+// Cobertura del reloj en los últimos `dias`: cuántos se llevó puesto (de día y de
+// noche), cuántos no, y cuántos no se sabe. `medibles` es el denominador honesto de
+// cualquier media del Watch — los días sin datos de nada NO cuentan como días sin
+// reloj, pero tampoco como medibles: son un "no lo sé" y se cuentan aparte.
+export function relojCobertura(reloj, { dias = 7, hoy = null } = {}) {
+  const fin  = hoy || _isoHoy();
+  const mapa = (reloj && reloj.dias) || {};
+  const out  = { dias, dia: 0, noche: 0, sinReloj: 0, sinDatos: 0, ultimoDia: null, ultimaNoche: null, hay: false };
+  for (let i = 0; i < dias; i++) {
+    const f = _sumarDias(fin, -i);
+    if (f == null) break;
+    const estado = mapa[f];
+    if (estado == null || estado === "sin_datos") { out.sinDatos++; continue; }
+    out.hay = true;
+    if (relojPuesto(estado, "dia"))   { out.dia++;   out.ultimoDia   = out.ultimoDia   || f; }
+    if (relojPuesto(estado, "noche")) { out.noche++; out.ultimaNoche = out.ultimaNoche || f; }
+    if (!relojPuesto(estado))          out.sinReloj++;
+  }
+  return out;
+}
+
+// Días seguidos, contando desde AYER, con datos del móvil pero ninguno del reloj. Hoy
+// queda fuera porque la jornada está a medias: contarla se inventaría una racha que aún
+// no ha pasado. Un día "sin_datos" ni suma ni rompe — no se sabe qué pasó.
+export function relojRachaSinReloj(reloj, { hoy = null, max = 60 } = {}) {
+  const fin  = hoy || _isoHoy();
+  const mapa = (reloj && reloj.dias) || {};
+  let racha = 0;
+  for (let i = 1; i <= max; i++) {
+    const f = _sumarDias(fin, -i);
+    if (f == null) break;
+    const estado = mapa[f];
+    if (estado == null || estado === "sin_datos") continue;
+    if (relojPuesto(estado)) break;
+    racha++;
+  }
+  return racha;
+}
+
 // ── Análisis de salud: conclusiones en lenguaje claro ───────────
 // Motor puro que exprime TODAS las métricas del Apple Watch y devuelve
 // conclusiones accionables (no solo números). Cada una lleva dominio, tono
@@ -537,30 +644,65 @@ const _avgVal = arr => (arr && arr.length) ? arr.reduce((s, d) => s + (Number(d.
 // Prioridad de tono para ordenar (lo más accionable primero).
 const _TONE_ORDER = { bad: 0, warn: 1, good: 2, info: 3 };
 
-// `now` es inyectable para poder testear el cómputo de "últimos 7 días".
-export function healthConclusions(healthData, now = new Date()) {
+// `now` es inyectable para poder testear el cómputo de "últimos 7 días". `reloj` es lo
+// que manda /health/metrics: con él, las conclusiones saben cuándo NO se pudo medir y
+// dejan de confundirlo con "no ha pasado nada".
+export function healthConclusions(healthData, now = new Date(), { reloj = null } = {}) {
   const C = [];
   const push = (domain, tone, text) => C.push({ domain, tone, text });
   const round = n => Math.round(n);
+  const hoy = _isoHoy(now);
+
+  // Todas las ventanas van por FECHA, no por número de registros. Con la serie
+  // agujereada, `slice(-7)` no da "los últimos 7 días": da las últimas 7 medidas, que
+  // pueden abarcar meses. Es el bug que ya se corrigió en el correo, y aquí es peor
+  // porque estas frases AFIRMAN en vez de listar cifras.
+  const ventana = (serie, dias = 7) => {
+    const desde = _sumarDias(hoy, -(dias - 1));
+    return (serie || []).filter(d => String(d.date) >= desde && String(d.date) <= hoy);
+  };
+  // Una tendencia necesita fondo a los dos lados: con dos medidas sueltas comparadas
+  // contra otras dos, el % que sale es ruido con aspecto de hallazgo.
+  const fiable = t => !!t && t.nCorto >= 3 && t.nLargo >= 7;
+  const base = n => n === 1 ? "1 noche medida" : `${n} noches medidas`;
+
+  // ── Reloj: qué se ha podido medir esta semana ──
+  // Va primero porque condiciona todo lo que viene después. Sin esto, una semana con el
+  // reloj en el cajón se lee como una semana sin novedad.
+  const cob = reloj ? relojCobertura(reloj, { dias: 7, hoy }) : null;
+  if (cob && (cob.hay || cob.sinDatos)) {
+    const medibles = cob.dias - cob.sinDatos;
+    const racha    = relojRachaSinReloj(reloj, { hoy });
+    if (medibles > 0 && cob.noche === 0 && cob.dia === 0) {
+      push("Reloj", "warn", `Sin rastro del reloj en los últimos ${medibles} día${medibles === 1 ? "" : "s"} — sueño, HRV y FC en reposo no se han podido medir.`);
+    } else if (medibles > 0 && cob.noche < medibles) {
+      push("Reloj", "info", `Llevaste el reloj ${cob.noche} de las ${medibles} noches: el sueño, la HRV y la FC en reposo de esta semana se apoyan solo en esas.`);
+    }
+    if (racha >= 2) push("Reloj", "warn", `Llevas ${racha} días seguidos sin ponerte el reloj — lo de esas noches ya no se puede recuperar.`);
+    // "No llegó nada" no es "no llevabas el reloj": puede ser la sincronización caída, y
+    // darlo por hábito del usuario sería el error de siempre por el otro lado.
+    if (cob.sinDatos >= 2) push("Reloj", "warn", `${cob.sinDatos} de los últimos 7 días no llegó ningún dato: ahí no se sabe si fue el reloj o la sincronización.`);
+  }
 
   // ── Sueño ──
   const sleep = findMetric(healthData, "sleep_analysis", "sleep")
     .filter(d => !d.extra?.excluded)
     .map(d => ({ ...d, value: sleepHours(d) }))
     .filter(d => d.value > 0);
-  if (sleep.length) {
-    const a7 = _avgVal(sleep.slice(-7));
-    const t  = seriesTrend(sleep, 7, 30);
+  const sleep7 = ventana(sleep);
+  if (sleep7.length) {
+    const a7 = _avgVal(sleep7);
+    const t  = seriesTrend(sleep, 7, 30, { hoy });
     const tone = a7 >= 7.5 ? "good" : a7 >= 6.5 ? "warn" : "bad";
-    let text = `Duermes de media ${hoursToHM(a7)} las últimas ${Math.min(7, sleep.length)} noches`;
+    let text = `Duermes de media ${hoursToHM(a7)} ${sleep7.length >= 7 ? "las últimas 7 noches" : `sobre ${base(sleep7.length)} esta semana`}`;
     if      (a7 < 6.5)  text += " — por debajo de lo recomendable, prioriza descansar";
     else if (a7 < 7.5)  text += " — algo justo, intenta acostarte antes";
     else                text += " — buen descanso";
-    if (t && Math.abs(t.deltaPct) >= 8) text += t.deltaPct > 0 ? "; mejorando frente al mes" : "; empeorando frente al mes";
+    if (fiable(t) && Math.abs(t.deltaPct) >= 8) text += t.deltaPct > 0 ? "; mejorando frente al mes" : "; empeorando frente al mes";
     push("Sueño", tone, text);
 
     // Fases (si hay desglose): sueño profundo bajo mantenido.
-    const withPhases = sleep.slice(-7).filter(d => Number(d.extra?.deep) > 0);
+    const withPhases = sleep7.filter(d => Number(d.extra?.deep) > 0);
     if (withPhases.length >= 3) {
       const deepPct = _avgVal(withPhases.map(d => ({ value: (Number(d.extra.deep) / sleepHours(d)) * 100 })));
       if (deepPct != null && deepPct < 10) push("Sueño", "warn", `Tu sueño profundo está bajo (${round(deepPct)}% del total) — se asocia a peor recuperación física.`);
@@ -568,43 +710,47 @@ export function healthConclusions(healthData, now = new Date()) {
   }
 
   // ── Recuperación: HRV ──
-  const hrv = findMetric(healthData, "heart_rate_variability", "heartRateVariability").filter(d => d.value > 0);
-  if (hrv.length >= 3) {
-    const t  = seriesTrend(hrv, 7, 30);
-    const a7 = _avgVal(hrv.slice(-7));
-    if      (t && t.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(t.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
-    else if (t && t.deltaPct >= 8)  push("Recuperación", "good", `Tu HRV va al alza, un ${round(t.deltaPct)}% sobre tu media de 30 días (${round(a7)}ms) — buena recuperación.`);
-    else                            push("Recuperación", "info", `HRV estable en torno a ${round(a7)}ms.`);
+  const hrv  = findMetric(healthData, "heart_rate_variability", "heartRateVariability").filter(d => d.value > 0);
+  const hrv7 = ventana(hrv);
+  if (hrv7.length) {
+    const t  = seriesTrend(hrv, 7, 30, { hoy });
+    const a7 = _avgVal(hrv7);
+    if      (fiable(t) && t.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(t.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
+    else if (fiable(t) && t.deltaPct >= 8)  push("Recuperación", "good", `Tu HRV va al alza, un ${round(t.deltaPct)}% sobre tu media de 30 días (${round(a7)}ms) — buena recuperación.`);
+    else if (fiable(t))                     push("Recuperación", "info", `HRV estable en torno a ${round(a7)}ms.`);
+    // Sin fondo no se afirma tendencia ninguna: se dice el valor y sobre qué se apoya.
+    else                                    push("Recuperación", "info", `HRV en ${round(a7)}ms, sobre ${base(hrv7.length)} — sin base para hablar de tendencia.`);
   }
 
   // ── Recuperación: FC en reposo ──
-  const rhr = findMetric(healthData, "resting_heart_rate").filter(d => d.value > 0);
-  if (rhr.length >= 3) {
-    const t  = seriesTrend(rhr, 7, 30);
-    const a7 = _avgVal(rhr.slice(-7));
-    if (t && t.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(t.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
-    else                      push("Recuperación", "good", `FC en reposo en ${round(a7)} bpm${t && t.deltaPct <= -3 ? ", bajando (buena señal)" : ""}.`);
+  const rhr  = findMetric(healthData, "resting_heart_rate").filter(d => d.value > 0);
+  const rhr7 = ventana(rhr);
+  if (rhr7.length) {
+    const t  = seriesTrend(rhr, 7, 30, { hoy });
+    const a7 = _avgVal(rhr7);
+    if (fiable(t) && t.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(t.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
+    else                              push("Recuperación", "good", `FC en reposo en ${round(a7)} bpm${fiable(t) && t.deltaPct <= -3 ? ", bajando (buena señal)" : ""}.`);
   }
 
   // ── Recuperación: frecuencia respiratoria ──
   const resp = findMetric(healthData, "respiratory_rate").filter(d => d.value > 0);
-  if (resp.length >= 3) {
-    const t = seriesTrend(resp, 7, 30);
-    if (t && t.deltaPct >= 6) push("Recuperación", "warn", `Tu frecuencia respiratoria nocturna ha subido frente a tu media — a veces precede a un resfriado o refleja estrés.`);
+  if (ventana(resp).length) {
+    const t = seriesTrend(resp, 7, 30, { hoy });
+    if (fiable(t) && t.deltaPct >= 6) push("Recuperación", "warn", `Tu frecuencia respiratoria nocturna ha subido frente a tu media — a veces precede a un resfriado o refleja estrés.`);
   }
 
   // ── Actividad: pasos ──
-  const steps = findMetric(healthData, "step_count", "steps").filter(d => d.value > 0);
-  if (steps.length) {
-    const a7 = _avgVal(steps.slice(-7));
+  const steps7 = ventana(findMetric(healthData, "step_count", "steps").filter(d => d.value > 0));
+  if (steps7.length) {
+    const a7 = _avgVal(steps7);
     const tone = a7 >= 10000 ? "good" : a7 >= 7000 ? "info" : "warn";
     push("Actividad", tone, `Media de ${round(a7).toLocaleString("es")} pasos al día${a7 >= 10000 ? " — objetivo cumplido" : a7 < 7000 ? " — algo bajo, intenta moverte más" : ""}.`);
   }
 
   // ── Actividad: minutos de ejercicio ──
-  const ex = findMetric(healthData, "apple_exercise_time", "exercise_time").filter(d => d.value > 0);
-  if (ex.length) {
-    const a7 = _avgVal(ex.slice(-7));
+  const ex7 = ventana(findMetric(healthData, "apple_exercise_time", "exercise_time").filter(d => d.value > 0));
+  if (ex7.length) {
+    const a7 = _avgVal(ex7);
     push("Actividad", a7 >= 30 ? "good" : "info", `${round(a7)} min de ejercicio al día de media.`);
   }
 
@@ -619,10 +765,19 @@ export function healthConclusions(healthData, now = new Date()) {
   // ── Composición corporal: peso ──
   const weight = findMetric(healthData, "weight_body_mass", "weight").filter(d => d.value > 0);
   if (weight.length >= 2) {
-    const cur  = weight[weight.length - 1].value;
-    const prev = (weight[weight.length - 8] ?? weight[0]).value;
-    const d = cur - prev;
-    if (Math.abs(d) >= 0.3) push("Composición", "info", `Peso ${cur.toFixed(1)} kg (${d > 0 ? "+" : ""}${d.toFixed(1)} kg vs hace ~1 semana).`);
+    // La referencia se busca por FECHA (la última pesada de hace 7 días o más), no
+    // contando ocho registros hacia atrás: uno no se pesa a diario, así que ese octavo
+    // registro podía ser de hace un mes y la frase seguía diciendo "hace ~1 semana".
+    const ultimo = weight[weight.length - 1];
+    const corte  = _sumarDias(hoy, -7);
+    const previo = [...weight].reverse().find(d => String(d.date) <= corte) || weight[0];
+    const cur = ultimo.value;
+    const d   = cur - previo.value;
+    const dias = _diasEntre(previo.date, ultimo.date);
+    const cuando = dias == null ? "la medida anterior"
+      : dias >= 6 && dias <= 9 ? "hace ~1 semana"
+      : `hace ${dias} días`;
+    if (Math.abs(d) >= 0.3) push("Composición", "info", `Peso ${cur.toFixed(1)} kg (${d > 0 ? "+" : ""}${d.toFixed(1)} kg vs ${cuando}).`);
     else                    push("Composición", "info", `Peso estable en ${cur.toFixed(1)} kg.`);
   }
 
@@ -836,10 +991,22 @@ export function wellnessBreakdown({
 export function scoreFromBreakdown(breakdown) {
   // `sinDatos` queda fuera de la fracción entera: no tener el sensor de una métrica
   // no debe puntuar como tenerlo y sacar un cero.
-  const filas = (breakdown || []).filter(b => b && !b.sinDatos && Number(b.max) > 0);
+  const todas = (breakdown || []).filter(b => b && Number(b.max) > 0);
+  const filas = todas.filter(b => !b.sinDatos);
   const pts   = filas.reduce((s, b) => s + (Number(b.pts) || 0), 0);
   const max   = filas.reduce((s, b) => s + (Number(b.max) || 0), 0);
-  return { pts, max, score: max > 0 ? Math.round((pts / max) * 100) : null };
+  const maxTotal = todas.reduce((s, b) => s + (Number(b.max) || 0), 0);
+  // Sobre cuánto de lo puntuable se ha medido de verdad. Normalizar a 100 hace
+  // comparables un día con nueve componentes y otro con cuatro, pero los deja también
+  // INDISTINGUIBLES: un 78 medido con medio reloj se pinta a la misma altura que un 78
+  // completo. La cobertura es lo que permite decirlo sin romper la comparación.
+  return {
+    pts, max,
+    score:     max > 0 ? Math.round((pts / max) * 100) : null,
+    cobertura: maxTotal > 0 ? max / maxTotal : null,
+    componentes: filas.length,
+    sinDatos:    todas.length - filas.length,
+  };
 }
 
 // ── Histórico de la puntuación de bienestar ─────────────────────
@@ -874,7 +1041,7 @@ function _refHrv(hrvPorFecha, fecha) {
   return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
 }
 
-export function wellnessHistory(healthData, { dias = 30 } = {}) {
+export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
   const series = {
     sleep: _porFecha(findMetric(healthData, "sleep_analysis", "sleep")
       .filter(d => !d.extra?.excluded)
@@ -928,7 +1095,7 @@ export function wellnessHistory(healthData, { dias = 30 } = {}) {
     // construido casi entero a base de "sin datos".
     if (sleep == null && steps == null && rhr == null && energia == null && work === 0) continue;
 
-    const { score } = scoreFromBreakdown(wellnessBreakdown({
+    const { score, cobertura, sinDatos } = scoreFromBreakdown(wellnessBreakdown({
       isDaily: true,
       sleep, work, steps, rhr,
       exercise:     val("exercise"),
@@ -944,7 +1111,16 @@ export function wellnessHistory(healthData, { dias = 30 } = {}) {
       daylight:     val("daylight"),
       resp:         val("resp"),
     }));
-    if (score != null) salida.push({ date: fecha, value: score });
+    // Cada punto lleva con qué se midió, no solo cuánto puntuó: un día sin reloj puntúa
+    // sobre cuatro componentes en vez de sobre nueve, y en la sparkline eso se pinta
+    // exactamente igual que un día malo. `estadoReloj` es null cuando no hay dato de
+    // uso del reloj (histórico viejo o backend sin la sección), que no es lo mismo que
+    // "sin_datos" — ahí sabemos que no llegó nada; aquí no sabemos nada.
+    const estadoReloj = (reloj && reloj.dias) ? (reloj.dias[fecha] || "sin_datos") : null;
+    if (score != null) salida.push({
+      date: fecha, value: score, cobertura, sinDatos,
+      estadoReloj, sinReloj: estadoReloj != null && !relojPuesto(estadoReloj),
+    });
   }
   return salida.slice(-dias);
 }

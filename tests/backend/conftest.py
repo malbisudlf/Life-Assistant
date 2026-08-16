@@ -124,6 +124,9 @@ def _limpiar_estado():
         main._registro._cola.clear()
         main._registro._descartados = 0
     main._registro._purgado = False
+    # La caché del aviso de reloj: sin resetearla, el primer test que lo dispare dejaría
+    # marcado el día y los siguientes no verían nada (mismo criterio que _token_cache).
+    main._reloj_avisado_dia = None
 
 
 @pytest.fixture(autouse=True)

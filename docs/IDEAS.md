@@ -13,63 +13,42 @@ El hilo conductor de casi todas es el mismo que ya recorre el proyecto entero:
 **distinguir "no lo sé" de "es que no". La detección de uso del reloj es el último
 capítulo de esa historia, no el final.**
 
+> El **punto 1 está implementado** (agosto de 2026). Se deja escrito, con el resultado
+> debajo de cada idea, porque el porqué sigue valiendo y porque de hacerlo salió un bug
+> que no estaba previsto.
+
 ---
 
-## 1. El reloj, hasta el final
+## 1. El reloj, hasta el final — ✅ HECHO (agosto de 2026)
 
-La detección de uso del reloj vive hoy solo en el correo de datos. El resto del sistema
-sigue sin saberlo, y es donde más se nota.
+La detección de uso del reloj vivía solo en el correo de datos. Ya no: el dashboard, las
+conclusiones, la puntuación y un aviso nocturno saben lo mismo. Lo que se hizo de cada
+punto, por si hay que volver sobre ello:
 
-### 1.1 Que el dashboard sepa cuándo no llevaste el reloj ●●
+- **1.1 El dashboard sabe cuándo no llevaste el reloj.** `GET /health/metrics` devuelve
+  `reloj` (`dias`: fecha → estado, y `fuentes`: métrica → día/noche) desde las mismas
+  filas que ya traía, sin un viaje de red más. El panel de estado tiene una fila propia:
+  la de sincronización responde "¿llegan datos?" y esta "¿se pudieron medir?".
+- **1.2 Las conclusiones ya no hablan de tendencias que no existen.** Al mirarlo de cerca
+  el problema de fondo era peor de lo previsto: `seriesTrend` y las medias de
+  `healthConclusions` cogían los últimos N *registros*, no los de los últimos N *días* —
+  el mismo bug que el correo ya tenía corregido, pero aquí produciendo frases afirmativas.
+  Ahora las ventanas van por fecha real, una tendencia exige fondo a los dos lados
+  (`nCorto >= 3`, `nLargo >= 7`) y hay un dominio "Reloj" que dice cuántas noches se pudo
+  medir. La clasificación de métricas se queda en el backend y viaja en `reloj.fuentes`:
+  una sola lista, no dos que se desincronicen.
+- **1.3 Avisa de que te lo has dejado quitado.** `_avisar_reloj_si_toca()` en el tick de
+  HA, a partir de las 21:30, montado sobre los recordatorios que ya existían (idempotencia
+  por `uuid5` de la fecha contra la clave primaria). Un día sin datos de ninguna fuente no
+  dispara nada.
+- **1.4 La puntuación sabe sobre cuánto está calculada.** `scoreFromBreakdown` devuelve
+  `cobertura`, el tooltip dice "calculado sobre N de M componentes" y la sparkline de
+  evolución marca con un punto los días puntuados sin reloj: menos sensores, no peor día.
 
-**Qué.** Que los widgets de salud distingan "no hay dato" de "no llevabas el reloj". Una
-marca en el panel de estado (junto a "última sync") y, en las sparklines, un hueco
-etiquetado en vez de una línea que salta.
-
-**Por qué.** Hoy el dashboard solo dice cuándo fue la última sincronización, que es la
-pregunta *del sistema*. La pregunta *del usuario* es otra: "¿por qué mi HRV lleva tres
-días plano?". La respuesta ya se calcula en el backend y no llega a la pantalla.
-
-**Por dónde.** `_uso_del_reloj()` ya devuelve la serie de estados; hace falta exponerla en
-`GET /health/metrics` (mismo cálculo, misma consulta) y pintarla en `datosSalud`. Ojo con
-la regla de siempre: la lógica pura va a `helpers.js`, no a `Dashboard.jsx`.
-
-### 1.2 Que las conclusiones no hablen de tendencias que no existen ●●
-
-**Qué.** Que `healthConclusions` y `healthCorrelations` reciban los días con reloj y
-descarten los cruces cuyos grupos se apoyen en días sin medir.
-
-**Por qué.** Es el mismo error que cometió el correo, un piso más arriba y peor: el correo
-solo daba una media sin base, pero las conclusiones **afirman**. "Tu HRV ha bajado un 8%"
-cuando la mitad de la ventana no se midió no es un matiz, es una frase falsa. `minPorGrupo`
-protege del tamaño de la muestra, no de su procedencia.
-
-**Por dónde.** Depende de 1.1 (que el dato llegue al frontend). Después es un filtro en
-`pairByDate`/`splitCompare`.
-
-### 1.3 Avisar de que te lo has dejado quitado ●
-
-**Qué.** Un recordatorio que salte si el reloj lleva N noches sin señal, o si a la hora de
-acostarse no ha habido señal en toda la tarde (se quedó en el cargador).
-
-**Por qué.** El dato perdido no se recupera: una noche sin medir es una noche que ya no
-existirá en ningún histórico. El aviso vale más *antes* de dormir que el diagnóstico
-después.
-
-**Por dónde.** Toda la infraestructura está: `jarvis_recordatorios` + el tick de HA. Lo
-único nuevo es la condición. Y la regla que ya se aplica en todo el proyecto: **un día sin
-datos de NINGUNA fuente no dispara el aviso** — ahí no se sabe si fue el reloj o la
-sincronización, y avisar sobre un "no lo sé" es cómo se pierde la confianza en los avisos.
-
-### 1.4 Puntuación de bienestar consciente de su propia cobertura ●●
-
-**Qué.** Que `wellnessBreakdown` marque el día como "puntuación parcial" cuando los
-componentes ausentes lo son por falta de reloj, y que la sparkline de evolución lo pinte
-distinto de un día malo.
-
-**Por qué.** Un componente `sinDatos` ya queda fuera de la fracción, así que la nota no se
-hunde — pero tampoco avisa de que está midiendo otra cosa. Un 78 sobre nueve componentes y
-un 78 sobre cuatro no son el mismo 78, y la sparkline los pinta a la misma altura.
+Lo que queda pendiente de este bloque, y no es poco: **los cruces del catálogo `_CRUCES`
+siguen sin mirar la cobertura**. Hoy no es un problema —cada cruce solo empareja días con
+dato en las dos series—, pero un cruce cuyos dos grupos caigan a distintos lados de un mes
+sin reloj compararía dos épocas, no dos condiciones.
 
 ---
 

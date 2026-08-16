@@ -127,3 +127,96 @@ class TestElRelojEsElTickDeHa:
 
     def test_sigue_haciendo_falta_el_token(self, client):
         assert client.post("/ha/brief-tick").status_code == 403
+
+
+class TestAvisoDeReloj:
+    """El dato de una noche sin medir no se recupera: el aviso vale antes de dormir o
+    no vale. Y no puede regañar por algo que no ha pasado — de ahí que un día sin datos
+    de ninguna fuente no dispare nada.
+    """
+
+    NOCHE = datetime(2026, 8, 8, 22, 0, tzinfo=main.LOCAL_TZ)
+
+    def _salud(self, mock_requests, filas):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(filas))
+
+    def _fila(self, nombre, valor, dias, hoy=None):
+        fecha = (hoy or self.NOCHE.date()) - timedelta(days=dias)
+        return {"metric_date": fecha.isoformat(), "metric_name": nombre,
+                "value": valor, "extra": {}}
+
+    @pytest.fixture(autouse=True)
+    def _de_noche(self, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.NOCHE)
+
+    def test_avisa_si_hoy_no_hay_rastro_del_reloj(self, mock_requests):
+        self._salud(mock_requests, [self._fila("step_count", 9000, 0)])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._avisar_reloj_si_toca() == {"aviso_reloj": True}
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert "Hoy no hay ni un dato del reloj" in apuntado["texto"]
+        assert "cargador" in apuntado["texto"]
+
+    def test_no_avisa_si_lo_llevas_puesto(self, mock_requests):
+        self._salud(mock_requests, [
+            self._fila("heart_rate", 70, 0), self._fila("step_count", 9000, 0),
+            self._fila("sleep_analysis", 7.2, 1), self._fila("heart_rate", 70, 1),
+        ])
+        assert main._avisar_reloj_si_toca() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_un_dia_sin_datos_de_nada_no_dispara_el_aviso(self, mock_requests):
+        """No llegó nada: puede ser el reloj o la sincronización, y no se sabe cuál."""
+        self._salud(mock_requests, [])
+        assert main._avisar_reloj_si_toca() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_avisa_por_la_racha_de_noches_aunque_hoy_lo_lleves_de_dia(self, mock_requests):
+        self._salud(mock_requests, [
+            self._fila("heart_rate", 70, 0),                       # hoy: puesto de día
+            *[self._fila("step_count", 9000, i) for i in range(4)],  # datos todos los días
+            self._fila("sleep_analysis", 7.2, 3),                  # la última noche medida
+        ])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._avisar_reloj_si_toca() == {"aviso_reloj": True}
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "2 noches sin medir" in texto
+
+    def test_antes_de_la_hora_no_hace_nada_ni_consulta(self, mock_requests, monkeypatch):
+        """El tick pasa cada 5 min: fuera de la ventana tiene que salir sin tocar nada."""
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 8, 12, 0, tzinfo=main.LOCAL_TZ))
+        assert main._avisar_reloj_si_toca() == {}
+        assert not mock_requests.called("GET", "/rest/v1/health_metrics")
+
+    def test_el_id_es_el_del_dia_para_que_el_segundo_choque(self, mock_requests):
+        """La idempotencia es el 409 contra la clave primaria, como en brief_envios: dos
+        ticks solapados generan el MISMO id y solo uno entra."""
+        self._salud(mock_requests, [self._fila("step_count", 9000, 0)])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._avisar_reloj_si_toca()
+        primero = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["id"]
+        assert primero == main._uuid_aviso_reloj("2026-08-08")
+        assert primero != main._uuid_aviso_reloj("2026-08-09")
+
+    def test_un_409_no_es_un_error(self, mock_requests):
+        self._salud(mock_requests, [self._fila("step_count", 9000, 0)])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse(None, 409, "duplicate key"))
+        assert main._avisar_reloj_si_toca() == {}
+
+    def test_dos_veces_en_el_mismo_dia_no_repiten_la_consulta(self, mock_requests):
+        self._salud(mock_requests, [self._fila("step_count", 9000, 0)])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._avisar_reloj_si_toca()
+        main._avisar_reloj_si_toca()
+        assert len(mock_requests.called("GET", "/rest/v1/health_metrics")) == 1
+
+    def test_un_fallo_leyendo_la_salud_no_tumba_el_tick(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(None, 500, "boom"))
+        assert main._avisar_reloj_si_toca() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_apagado_por_env_no_hace_nada(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "RELOJ_AVISO", False)
+        assert main._avisar_reloj_si_toca() == {}
+        assert not mock_requests.called("GET", "/rest/v1/health_metrics")
