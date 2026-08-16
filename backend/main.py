@@ -3182,6 +3182,48 @@ _BRIEF_METRICAS = (
     ("masa_magra",      ("lean_body_mass",),                                "kg",        False, "Masa magra"),
 )
 
+# ── Uso del reloj ─────────────────────────────────────────────────────────────
+# Qué métricas PRUEBAN que el Watch estuvo en la muñeca. Sale de aquí una lectura que
+# el correo no tenía: la diferencia entre "esta métrica no llegó" y "esta métrica no
+# se pudo medir". El 07/08 el resumen mandó sueño, HRV, FC en reposo y respiración con
+# n=3 mientras los pasos iban con n=29, y se leyó como una ingesta rota; no lo era, el
+# reloj llevaba un mes en un cajón y esos tres días eran los tres desde que volvió a la
+# muñeca. La asimetría "pasos sí, todo lo demás no" ES la huella de eso, y hasta ahora
+# había que reconocerla a ojo.
+#
+# El reparto no es por sensor sino por CUÁNDO hace falta llevarlo puesto, porque son
+# dos hábitos distintos: se puede llevar todo el día y quitárselo para dormir (que es
+# justo lo que anula las métricas nocturnas y deja intactas las diurnas).
+_RELOJ_DIA = {
+    "heart_rate", "apple_stand_hour", "apple_exercise_time", "exercise_time",
+    "walking_heart_rate_average", "cardio_recovery", "physical_effort",
+    "time_in_daylight",
+}
+_RELOJ_NOCHE = {
+    "sleep_analysis", "sleep", "heart_rate_variability", "heartRateVariability",
+    "resting_heart_rate", "respiratory_rate",
+}
+# El teléfono cuenta esto SOLO, sin reloj de por medio. No dice nada del Watch: dice
+# que ese día la sincronización SÍ llegó, y es lo único que separa "el reloj estaba en
+# un cajón" de "no se sincronizó nada y no se sabe". Sin este tercer estado, un fallo
+# de ingesta se leería como un día sin reloj, que es el error de siempre en este
+# proyecto por el otro lado: "no pude preguntar" no es "no hay nada".
+_METRICAS_MOVIL = {
+    "step_count", "steps", "flights_climbed", "walking_running_distance",
+}
+# `vo2_max` queda fuera a propósito de las tres listas: el reloj lo estima con semanas
+# de caminatas al aire libre y lo escribe de higos a brevas, así que ni su presencia
+# marca el día ni su ausencia dice nada. Peso, grasa y masa magra vienen de la báscula.
+
+_MARCA_RELOJ = {"ambos": "A", "dia": "D", "noche": "N", "sin_reloj": ".", "sin_datos": "-"}
+_ESTADO_RELOJ = {
+    "ambos":     "puesto de día y de noche",
+    "dia":       "puesto de día",
+    "noche":     "puesto de noche",
+    "sin_reloj": "sin señal del reloj",
+    "sin_datos": "sin datos de ninguna fuente",
+}
+
 # Series que no salen de _BRIEF_METRICAS: las fases del sueño viven en el `extra` de
 # sleep_analysis, no en filas propias.
 _BRIEF_SERIES_SUENO = (
@@ -3274,6 +3316,105 @@ def _filas_por_alias(por_nombre: dict, nombres) -> list:
         for f in por_nombre.get(nombre) or []:
             por_fecha.setdefault(f["metric_date"], f)
     return [f for _, f in sorted(por_fecha.items())]
+
+
+def _hay_medida(fila: dict) -> bool:
+    """True si esa fila trae una medida de verdad, no un hueco.
+
+    El Atajo de iOS guarda ceros los días que su "Find Health Samples" no encuentra
+    nada —todos los días sin reloj—, así que la fila EXISTE sin que se haya medido
+    nada: contarla como señal de reloj daría por puesto justo el día que no lo estaba.
+    El sueño se mide aparte porque su `value` llega a 0 con las fases dentro de `extra`.
+    """
+    # Una noche anulada a mano es justo lo contrario de una noche medida: se anulan las
+    # que salieron mal, y la razón habitual es el reloj en el cargador. Contarla como
+    # noche con reloj le pondría a la media un denominador que el usuario ya descartó.
+    if (fila.get("extra") or {}).get("excluded"):
+        return False
+    if str(fila.get("metric_name", "")).startswith("sleep"):
+        return _horas_sueno(fila) > 0
+    v = _valor_metrica(fila)
+    return v is not None and v > 0
+
+
+def _fuente_reloj(nombres) -> str | None:
+    """"dia" | "noche" | None según lo que haga falta llevar puesto para medir esto."""
+    if any(n in _RELOJ_NOCHE for n in nombres):
+        return "noche"
+    if any(n in _RELOJ_DIA for n in nombres):
+        return "dia"
+    return None
+
+
+def _uso_del_reloj(por_nombre: dict, dias_ventana: list, hoy) -> tuple:
+    """Qué días estuvo puesto el reloj, y de día o de noche.
+
+    Devuelve `(resumen, dias_puestos, noches_puestas)`: el resumen viaja en el correo y
+    los dos conjuntos se quedan aquí para poner denominador a las medias — una métrica
+    del reloj solo puede tener dato los días que se llevó puesto, así que su n hay que
+    leerlo contra eso y no contra el calendario.
+
+    El día de hoy cuenta en las ventanas (para que cuadren con las medias, que también
+    lo incluyen) pero NO en la racha sin reloj: el correo sale por la mañana, con la
+    jornada a medias, y contarlo como día sin reloj se inventaría una racha que aún no
+    ha pasado.
+    """
+    con_dia, con_noche, con_movil = set(), set(), set()
+    for nombre, filas in por_nombre.items():
+        destino = (con_noche if nombre in _RELOJ_NOCHE else
+                   con_dia   if nombre in _RELOJ_DIA   else
+                   con_movil if nombre in _METRICAS_MOVIL else None)
+        if destino is None:
+            continue
+        for f in filas:
+            if _hay_medida(f):
+                destino.add(f["metric_date"])
+
+    def _estado(fecha: str) -> str:
+        dia, noche = fecha in con_dia, fecha in con_noche
+        if dia and noche:
+            return "ambos"
+        if dia:
+            return "dia"
+        if noche:
+            return "noche"
+        return "sin_reloj" if fecha in con_movil else "sin_datos"
+
+    estados = [_estado(f) for f in dias_ventana]
+    hoy_iso = hoy.isoformat()
+    desde_7 = (hoy - timedelta(days=6)).isoformat()
+
+    # Días seguidos sin rastro del reloj, contando hacia atrás desde AYER. Un día sin
+    # datos de ninguna fuente no rompe la racha ni la alarga: no se sabe qué pasó, y
+    # tratarlo como día sin reloj convertiría una caída de la ingesta en un hábito.
+    racha = 0
+    for fecha, estado in zip(reversed(dias_ventana), reversed(estados)):
+        if fecha >= hoy_iso:
+            continue
+        if estado in ("ambos", "dia", "noche"):
+            break
+        if estado == "sin_reloj":
+            racha += 1
+
+    puestos = [f for f, e in zip(dias_ventana, estados) if e in ("ambos", "dia", "noche")]
+    resumen = {
+        "desde":            dias_ventana[0],
+        "hasta":            dias_ventana[-1],
+        "marcas":           "".join(_MARCA_RELOJ[e] for e in estados),
+        "dias_ventana":     len(dias_ventana),
+        "dias_puesto":      len(con_dia   & set(dias_ventana)),
+        "noches_puesto":    len(con_noche & set(dias_ventana)),
+        "dias_puesto_7d":   sum(1 for f in dias_ventana if f >= desde_7 and f in con_dia),
+        "noches_puesto_7d": sum(1 for f in dias_ventana if f >= desde_7 and f in con_noche),
+        "sin_datos":        sum(1 for e in estados if e == "sin_datos"),
+        "hoy":              estados[-1],
+        "anoche":           hoy_iso in con_noche,
+        "ultimo":           puestos[-1] if puestos else None,
+        "racha_sin_reloj":  racha,
+    }
+    if resumen["ultimo"]:
+        resumen["dias_desde"] = (hoy - _dia(resumen["ultimo"])).days
+    return resumen, con_dia, con_noche
 
 
 def _fases_sueno(extra: dict) -> dict:
@@ -3406,9 +3547,21 @@ def _brief_salud() -> dict:
             "media_30d":  m30, "n_30d": n30,
         }
 
-    def _anotar(clave: str, validas: list, unidad: str) -> dict:
+    # Antes que nada: qué días estuvo puesto el reloj. Es el denominador de todo lo que
+    # viene después — una métrica del Watch no puede tener dato un día que estuvo en el
+    # cajón, y sin eso su n bajo se lee como una ingesta rota.
+    reloj, dias_puestos, noches_puestas = _uso_del_reloj(por_nombre, dias_ventana, hoy)
+
+    def _anotar(clave: str, validas: list, unidad: str, puestos: set | None = None) -> dict:
         """Guarda el resumen de una serie y, si tiene fondo suficiente, su día a día."""
         resumen = _resumen_serie(validas, unidad)
+        if puestos is not None:
+            # Cuántos días DE LOS QUE SE PODÍA MEDIR trae la media. Con n=3 sobre 3 no
+            # falta ingesta: faltan días de reloj, que es otra conversación. Es un techo
+            # —llevarlo puesto no garantiza que el Watch escriba todas sus métricas ese
+            # día—, pero es el techo real y hasta ahora no viajaba ninguno.
+            resumen["posibles_7d"]  = sum(1 for f in dias_ventana if f >= desde_7 and f in puestos)
+            resumen["posibles_30d"] = sum(1 for f in dias_ventana if f in puestos)
         salud[clave] = resumen
         if resumen["n_30d"] >= BRIEF_MIN_DIAS_SERIE:
             por_fecha = {d["fecha"]: d["valor"] for d in validas}
@@ -3417,6 +3570,9 @@ def _brief_salud() -> dict:
 
     for clave, nombres, unidad, cero_es_dato, _ in _BRIEF_METRICAS:
         filas = _filas_por_alias(por_nombre, nombres)
+        fuente  = _fuente_reloj(nombres)
+        puestos = (noches_puestas if fuente == "noche" else
+                   dias_puestos   if fuente == "dia"   else None)
         # Un día vale si CUALQUIERA de los nombres trae medida para él: si el nombre
         # preferente guardó un hueco y el otro el dato, el día cuenta igual. El valor
         # ya viene redondeado —el HRV llega del Watch con quince decimales y sin esto
@@ -3425,8 +3581,19 @@ def _brief_salud() -> dict:
         for nombre in nombres:
             for f in por_nombre.get(nombre) or []:
                 v = _valor_metrica(f)
-                if v is None or not (v > 0 or (v == 0 and cero_es_dato)):
+                if v is None or v < 0:
                     continue
+                if v == 0:
+                    # Las acumulativas del reloj son el único sitio donde el 0 cambia de
+                    # significado según el día: 0 horas de pie con el reloj puesto es un
+                    # día de sofá y tiene que bajar la media, pero 0 horas de pie con el
+                    # reloj en el cajón es un hueco disfrazado, y promediarlo hunde la
+                    # media igual que promediar un HRV de 0 se inventaría una
+                    # bradicardia. Los pasos no entran aquí: los cuenta el teléfono.
+                    if not cero_es_dato:
+                        continue
+                    if puestos is not None and f["metric_date"] not in puestos:
+                        continue
                 por_fecha.setdefault(f["metric_date"], v)
         validas = [{"fecha": fecha, "valor": v} for fecha, v in sorted(por_fecha.items())]
         if not validas:
@@ -3434,7 +3601,7 @@ def _brief_salud() -> dict:
         # La unidad de la fila manda sobre la declarada: la ingesta ya convierte (kJ a
         # kcal) y no todas las métricas se exportan en la unidad que uno supondría.
         real = next((f.get("unit") for f in reversed(filas) if f.get("unit")), None)
-        _anotar(clave, validas, real or unidad)
+        _anotar(clave, validas, real or unidad, puestos)
 
     # heart_rate se exporta como RANGO diario: el promedio va en `value` y los extremos
     # en `extra`, con la capitalización que le dé la gana al exportador.
@@ -3457,7 +3624,7 @@ def _brief_salud() -> dict:
             noches.append({"fecha": f["metric_date"], "valor": round(horas, 2),
                            "inicio": extra.get("sleep_start"), "fases": _fases_sueno(extra)})
     if noches:
-        resumen = _anotar("sueno", noches, "h")
+        resumen = _anotar("sueno", noches, "h", noches_puestas)
         resumen["inicio"] = noches[-1]["inicio"]
         # Las fases son la diferencia entre haber dormido siete horas y haber
         # descansado: sin ellas, del sueño solo viajaba la cantidad.
@@ -3513,6 +3680,11 @@ def _brief_salud() -> dict:
         salud["series"] = series
         salud["series_desde"] = dias_ventana[0]
         salud["series_hasta"] = dias_ventana[-1]
+
+    # Sin una sola métrica no hay nada que contextualizar, y una tira de treinta huecos
+    # solo diría que no llegó nada — que es lo que ya dice la sección vacía.
+    if salud:
+        salud["reloj"] = reloj
 
     return salud
 
@@ -3763,11 +3935,60 @@ def render_brief_texto(d: dict) -> str:
     L.append("")
 
     s = d["salud"]
+    # Va ANTES de la salud porque es lo que dice cómo hay que leerla: sin esto, un mes
+    # de métricas nocturnas a n=3 se lee como una ingesta rota y era el reloj en un cajón.
+    r = (s or {}).get("reloj")
+    if r:
+        L.append(f"## RELOJ  ({r['desde']} → {r['hasta']}, {r['dias_ventana']} días)")
+        L.append(
+            "   Una métrica del Watch solo puede tener dato los días que estuvo puesto:"
+            " ese es el denominador de sus medias."
+        )
+        L.append(
+            f"   Puesto {r['dias_puesto']}/{r['dias_ventana']} días"
+            f" y {r['noches_puesto']}/{r['dias_ventana']} noches"
+            f"   (últimos 7: {r['dias_puesto_7d']} días, {r['noches_puesto_7d']} noches)"
+        )
+        if r.get("ultimo"):
+            dias = r.get("dias_desde")
+            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
+            L.append(f"   {'Último rastro':<20} {r['ultimo']} ({cuando})")
+        else:
+            L.append(f"   {'Último rastro':<20} ninguno en la ventana")
+        racha = r.get("racha_sin_reloj") or 0
+        if racha:
+            L.append(
+                f"   {'Sin reloj':<20} {racha} día(s) seguidos antes de hoy"
+                " (días con datos del móvil pero ninguno del reloj)"
+            )
+        L.append(
+            f"   {'Anoche':<20} {'con reloj' if r.get('anoche') else 'sin reloj'}"
+            f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
+        )
+        if r.get("sin_datos"):
+            L.append(
+                f"   {'Ojo':<20} {r['sin_datos']} día(s) sin datos de NINGUNA fuente:"
+                " ahí no se sabe si hubo reloj o falló la sincronización"
+            )
+        L.append(
+            "   Marcas: A = día y noche · D = solo día · N = solo noche"
+            " · . = sin reloj (pero el móvil sí mandó datos) · - = sin datos de nada"
+        )
+        # Separadas por espacios aunque en los datos vayan pegadas: una tirada de
+        # veintiséis puntos seguidos no se cuenta bien, y estas posiciones tienen que
+        # poder alinearse una a una con las de la serie diaria.
+        L.append(f"   {'Día a día':<20} {' '.join(r['marcas'])}   (mismo orden que la serie diaria)")
+        L.append("")
+
     # El `n=` de cada media no es decoración: es lo que distingue "esto se desvía de tu
     # media" de "esto es el único dato que hay". Sin él, una métrica con una sola
     # observación sale con las tres cifras idénticas y se lee como normalidad absoluta.
-    L.append("## SALUD  (último · media 7d · media 30d; n = días con dato en la ventana)")
+    L.append("## SALUD  (último · media 7d · media 30d; n = días con dato / días que se pudo medir)")
     L.append("   Con n=1 la media ES el último valor: no hay base para hablar de desviación.")
+    if r:
+        # Solo si la sección existe: mandar a mirar algo que no está en el correo es
+        # peor que no decir nada.
+        L.append("   Si n iguala a su denominador no falta ingesta: falta reloj (ver ## RELOJ).")
     if s:
         for clave in _BRIEF_ORDEN:
             m = s.get(clave)
@@ -3782,10 +4003,16 @@ def render_brief_texto(d: dict) -> str:
             extremos = ""
             if m.get("min") is not None or m.get("max") is not None:
                 extremos = f" · min {_cifra(m.get('min'))} / máx {_cifra(m.get('max'))}"
+
+            def _n(ventana, m=m):
+                """"3/3" en lo que mide el reloj, "3" en lo que mide el teléfono."""
+                n, posibles = m.get(f"n_{ventana}", "?"), m.get(f"posibles_{ventana}")
+                return f"{n}/{posibles}" if posibles is not None else f"{n}"
+
             L.append(
                 f"  {_BRIEF_ETIQUETA[clave]:<20} {_cifra(m['ultimo'])} {m['unidad']}{extremos}"
-                f"   (7d: {_cifra(m['media_7d'])} n={m.get('n_7d', '?')},"
-                f" 30d: {_cifra(m['media_30d'])} n={m.get('n_30d', '?')})"
+                f"   (7d: {_cifra(m['media_7d'])} n={_n('7d')},"
+                f" 30d: {_cifra(m['media_30d'])} n={_n('30d')})"
                 f"   [{m['fecha']}, {edad}]"
             )
         sueno = s.get("sueno") or {}
@@ -6023,7 +6250,9 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   False,
         "fn":          _brief_salud,
         "descripcion": "Métricas del Apple Watch: sueño, HRV, frecuencia cardíaca, pasos, energía. "
-                       "Cada media viene con el número de días que la respaldan.",
+                       "Cada media viene con el número de días que la respaldan, y `reloj` dice "
+                       "qué días estuvo puesto: si una métrica tiene pocos días de dato pero "
+                       "todos los que se pudo medir, no falta ingesta, falta reloj.",
         "parametros":  {},
     },
     "sueno": {
