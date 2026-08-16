@@ -4777,7 +4777,16 @@ def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
             json={"text": f"El correo de datos del {fecha} acaba de salir."},
         )
         if r.status_code >= 300:
-            logger.error("Rutina del briefing: el disparo devolvió %s", r.status_code)
+            # Con el código a secas no se puede diagnosticar nada: un 400 de aquí puede
+            # ser la cabecera beta caducada (`RUTINA_BETA`), el trigger borrado o el
+            # cuerpo mal formado, y son arreglos distintos. Es la misma lección que dejó
+            # el 400 de la ingesta de salud —un error que solo sabe contarlo el otro lado
+            # equivale a no haberlo registrado—, pero aquí la respuesta la tenemos
+            # nosotros y la estábamos tirando. El cuerpo lo escribe la API de Anthropic,
+            # no un usuario, y va acotado por si acaso.
+            detalle = (r.text or "")[:300].replace("\n", " ").strip()
+            logger.error("Rutina del briefing: el disparo devolvió %s — beta '%s' — %s",
+                         r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
         else:
             logger.info("Rutina del briefing lanzada tras el correo del %s", fecha)
     except requests.RequestException:
