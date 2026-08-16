@@ -1,0 +1,17 @@
+-- Instantánea de lo que se contó en el resumen de cada día, para poder decir mañana
+-- qué ha cambiado.
+--
+-- El correo diario es idéntico al 90% en días consecutivos: lo que hace falta leer
+-- entero es el 10% restante, y hoy hay que releerlo todo para encontrarlo. Un diff
+-- necesita el de ayer, y el de ayer no se puede reconstruir — el calendario cambia y
+-- las métricas se pisan.
+--
+-- Va como columna de `brief_envios` y no como tabla nueva porque es exactamente un
+-- dato POR ENVÍO: ya hay una fila por día, con su clave primaria y su borrado al
+-- liberar la reserva, así que la instantánea se limpia sola con ella.
+--
+-- Nullable y escrita DESPUÉS de mandar el correo, con un PATCH aparte: si esta
+-- migración no se ha aplicado, el PATCH falla, se registra y el resumen sale igual.
+-- Un resumen sin la sección de cambios sigue siendo el resumen; uno que no sale por
+-- una columna que falta, no.
+alter table public.brief_envios add column if not exists datos jsonb;

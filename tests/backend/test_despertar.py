@@ -240,10 +240,10 @@ class TestReintento:
         real = main.enviar_correo
         caido = {"si": True}
 
-        def _quizas_explota(asunto, cuerpo):
+        def _quizas_explota(asunto, cuerpo, adjunto=None):
             if caido["si"]:
                 raise TimeoutError("SMTP caído")
-            return real(asunto, cuerpo)
+            return real(asunto, cuerpo, adjunto)
 
         monkeypatch.setattr(main, "enviar_correo", _quizas_explota)
         r = client.post("/despertar?token=brief-token")

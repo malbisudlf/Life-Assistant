@@ -859,3 +859,224 @@ class TestJarvisMcpFiltro:
         r = main._j_mcp_herramientas("pruebas", buscar="calendario")
         assert r["herramientas"] == []
         assert "list_issues" in r["nota"]
+
+
+class TestDiagnostico:
+    """La pregunta más frecuente a un asistente que falla de vez en cuando no es "qué
+    tiempo hace", es "¿qué te ha pasado?"."""
+
+    def test_agrupa_los_fallos_por_origen(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse([
+            {"created_at": "2026-08-16T10:00:00Z", "level": "ERROR", "source": "health",
+             "message": "409 al escribir", "context": {"detalle": "clave duplicada"}},
+            {"created_at": "2026-08-16T11:00:00Z", "level": "ERROR", "source": "health",
+             "message": "409 al escribir", "context": {}},
+            {"created_at": "2026-08-15T09:00:00Z", "level": "WARNING", "source": "brief",
+             "message": "sin instantánea", "context": {}},
+        ]))
+        d = main._j_diagnostico(dias=3)
+        assert d["fallos"]["total"] == 3 and d["fallos"]["errores"] == 2
+        assert d["fallos"]["por_origen"]["ERROR health"]["veces"] == 2
+        # Lo más repetido primero: lo que se repite es lo que está roto.
+        assert list(d["fallos"]["por_origen"])[0] == "ERROR health"
+
+    def test_no_devuelve_el_detalle_de_los_errores(self, mock_requests):
+        """El detalle se queda en el servidor (regla de _supabase_error), y aquí además
+        acabaría dentro del prompt de un modelo."""
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse([
+            {"created_at": "2026-08-16T10:00:00Z", "level": "ERROR", "source": "supabase",
+             "message": "connection string postgres://user:clave@host", "context": {"token": "secreto"}},
+        ]))
+        crudo = json.dumps(main._j_diagnostico(dias=1), default=str)
+        assert "secreto" not in crudo and "postgres://" not in crudo
+
+    def test_un_registro_caido_no_tumba_el_diagnostico(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse(None, 500, "boom"))
+        d = main._j_diagnostico()
+        assert "error" in d["fallos"]
+        assert "configurado" in d, "el resto del diagnóstico sigue saliendo"
+
+    def test_dice_cuantos_dias_lleva_cada_metrica_sin_dato(self, mock_requests):
+        from datetime import datetime, timedelta
+        hace3 = (datetime.now(main.LOCAL_TZ).date() - timedelta(days=3)).isoformat()
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([
+            {"metric_date": hace3, "metric_name": "resting_heart_rate",
+             "value": 56, "unit": "bpm", "extra": {}},
+        ]))
+        d = main._j_diagnostico()
+        assert d["salud"]["metricas"]["fc_reposo"]["dias_atras"] == 3
+
+    def test_esta_en_el_registro_de_herramientas(self):
+        assert "diagnostico" in main._JARVIS_HERRAMIENTAS
+        assert main._JARVIS_HERRAMIENTAS["diagnostico"]["confirmar"] is False
+
+
+class TestDestilarMemoria:
+    """Guardar por iniciativa propia funciona a ratos: el modelo se acuerda cuando el
+    hecho es evidente y se olvida cuando está metido en otra cosa."""
+
+    def _turnos(self, n=8):
+        return [{"rol": "user" if i % 2 == 0 else "assistant", "texto": f"turno {i}"}
+                for i in range(n)]
+
+    def test_guarda_los_hechos_que_saca(self, mock_requests, monkeypatch):
+        cliente = ClienteFalso([_mensaje(
+            '{"recuerdos": [{"clave": "objetivo peso", "contenido": "quiere bajar a 70 kg"}]}')])
+        mock_requests.add("POST", "/rest/v1/jarvis_memoria", FakeResponse([], 201))
+        main._quizas_destilar(cliente, self._turnos())
+        guardado = mock_requests.called("POST", "/rest/v1/jarvis_memoria")[0][2]["json"]
+        assert guardado["clave"] == "objetivo_peso", "la clave se normaliza con _clave_recuerdo"
+        assert guardado["contenido"] == "quiere bajar a 70 kg"
+
+    def test_una_conversacion_corta_no_paga_la_llamada(self, mock_requests, monkeypatch):
+        cliente = ClienteFalso([_mensaje('{"recuerdos": []}')])
+        main._quizas_destilar(cliente, self._turnos(3))
+        assert not cliente.recibido, "ni siquiera se llama al modelo"
+
+    def test_no_se_repite_antes_de_su_intervalo(self, mock_requests):
+        cliente = ClienteFalso([_mensaje('{"recuerdos": []}'), _mensaje('{"recuerdos": []}')])
+        main._quizas_destilar(cliente, self._turnos())
+        main._quizas_destilar(cliente, self._turnos())
+        assert len(cliente.recibido) == 1
+
+    def test_el_json_envuelto_en_markdown_tambien_vale(self, mock_requests):
+        cliente = ClienteFalso([_mensaje('```json\n{"recuerdos": [{"clave": "gato", "contenido": "se llama Lúa"}]}\n```')])
+        mock_requests.add("POST", "/rest/v1/jarvis_memoria", FakeResponse([], 201))
+        main._quizas_destilar(cliente, self._turnos())
+        assert mock_requests.called("POST", "/rest/v1/jarvis_memoria")
+
+    def test_una_respuesta_ilegible_no_revienta(self, mock_requests):
+        cliente = ClienteFalso([_mensaje("lo siento, no puedo")])
+        main._quizas_destilar(cliente, self._turnos())
+        assert not mock_requests.called("POST", "/rest/v1/jarvis_memoria")
+
+    def test_apagado_no_hace_nada(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_DESTILAR", False)
+        cliente = ClienteFalso([_mensaje('{"recuerdos": []}')])
+        main._quizas_destilar(cliente, self._turnos())
+        assert not cliente.recibido
+
+
+class TestJarvisProactivo:
+    """El listón está en el código, no en el criterio del modelo: dejarle decidir a él
+    cuándo hablar acaba en un aviso diario porque sí."""
+
+    from datetime import datetime as _dt
+    TARDE = _dt(2026, 8, 11, 20, 0)
+
+    @pytest.fixture(autouse=True)
+    def _encendido(self, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_PROACTIVO", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: self.TARDE.replace(tzinfo=main.LOCAL_TZ))
+
+    def _sin_motivos(self, monkeypatch):
+        monkeypatch.setattr(main, "_motivos_proactivos", lambda ahora: [])
+
+    def test_sin_motivos_no_dice_nada(self, mock_requests, monkeypatch):
+        self._sin_motivos(monkeypatch)
+        assert main._hablar_si_hay_algo() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_con_motivos_apunta_el_aviso_redactado(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_motivos_proactivos", lambda ahora: ["Entrega 'Práctica 3' mañana."])
+        _con_modelo(monkeypatch, [_mensaje("Mañana entregas la Práctica 3.")])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._hablar_si_hay_algo() == {"jarvis_proactivo": 1}
+        assert mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"] == \
+            "Mañana entregas la Práctica 3."
+
+    def test_si_el_modelo_falla_sale_en_crudo(self, mock_requests, monkeypatch):
+        """La información es lo que vale; la redacción es el adorno."""
+        monkeypatch.setattr(main, "_motivos_proactivos", lambda ahora: ["Entrega 'Práctica 3' mañana."])
+        monkeypatch.setattr(main, "get_openai_client",
+                            lambda: (_ for _ in ()).throw(RuntimeError("sin API key")))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._hablar_si_hay_algo() == {"jarvis_proactivo": 1}
+        assert "Práctica 3" in mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+
+    def test_antes_de_su_hora_no_consulta_nada(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: self.TARDE.replace(hour=9, tzinfo=main.LOCAL_TZ))
+        llamado = []
+        monkeypatch.setattr(main, "_motivos_proactivos", lambda ahora: llamado.append(1) or [])
+        assert main._hablar_si_hay_algo() == {}
+        assert not llamado
+
+    def test_una_vez_al_dia(self, mock_requests, monkeypatch):
+        veces = []
+        monkeypatch.setattr(main, "_motivos_proactivos",
+                            lambda ahora: veces.append(1) or ["algo"])
+        _con_modelo(monkeypatch, [_mensaje("aviso")])
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._hablar_si_hay_algo()
+        main._hablar_si_hay_algo()
+        assert len(veces) == 1
+
+    def test_apagado_no_cuesta_ni_una_consulta(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_PROACTIVO", False)
+        llamado = []
+        monkeypatch.setattr(main, "_motivos_proactivos", lambda ahora: llamado.append(1) or [])
+        assert main._hablar_si_hay_algo() == {}
+        assert not llamado
+
+    def test_un_fallo_reuniendo_los_motivos_no_tumba_el_tick(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_motivos_proactivos",
+                            lambda ahora: (_ for _ in ()).throw(RuntimeError("Graph caído")))
+        assert main._hablar_seguro() == {}
+
+
+class TestMotivosProactivos:
+    """Cada regla es una condición cerrada sobre datos que ya existen. Ninguna se apoya
+    en "al modelo le parece relevante"."""
+
+    from datetime import datetime as _dt
+
+    def _ahora(self):
+        return self._dt(2026, 8, 11, 20, 0, tzinfo=main.LOCAL_TZ)
+
+    def _fuentes(self, monkeypatch, eventos=None, entren=None, salud=None):
+        monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": eventos or []})
+        monkeypatch.setattr(main, "_brief_entrenamiento", lambda: entren or {})
+        monkeypatch.setattr(main, "_brief_salud", lambda: salud or {})
+
+    def test_una_entrega_manana(self, monkeypatch):
+        from datetime import datetime, timedelta
+        manana = (datetime.now(main.LOCAL_TZ) + timedelta(days=1)).strftime("%Y-%m-%dT10:00:00Z")
+        self._fuentes(monkeypatch, eventos=[{"title": f"{main.ENTREGAS_MARKER} Práctica 3",
+                                             "start": manana}])
+        motivos = main._motivos_proactivos(self._ahora())
+        assert any("Práctica 3" in m and "mañana" in m for m in motivos)
+
+    def test_una_entrega_lejana_no_es_motivo(self, monkeypatch):
+        from datetime import datetime, timedelta
+        lejos = (datetime.now(main.LOCAL_TZ) + timedelta(days=5)).strftime("%Y-%m-%dT10:00:00Z")
+        self._fuentes(monkeypatch, eventos=[{"title": f"{main.ENTREGAS_MARKER} Práctica 9",
+                                             "start": lejos}])
+        assert main._motivos_proactivos(self._ahora()) == []
+
+    def test_el_cobro_pasado_de_su_punto(self, monkeypatch):
+        self._fuentes(monkeypatch, entren={"sesiones_desde_cobro": 5, "sesiones_por_cobro": 4,
+                                           "importe_pendiente": 80.0})
+        motivos = main._motivos_proactivos(self._ahora())
+        assert any("5 sesiones sin cobrar" in m and "80.0 €" in m for m in motivos)
+
+    def test_sin_llegar_al_punto_de_cobro_no_se_dice_nada(self, monkeypatch):
+        self._fuentes(monkeypatch, entren={"sesiones_desde_cobro": 2, "sesiones_por_cobro": 4,
+                                           "importe_pendiente": 32.0})
+        assert main._motivos_proactivos(self._ahora()) == []
+
+    def test_los_dias_sin_entrenar(self, monkeypatch):
+        self._fuentes(monkeypatch, salud={"ultimo_entreno": {"fecha": "2026-08-07", "dias": 4}})
+        assert any("4 días desde el último entreno" in m for m in main._motivos_proactivos(self._ahora()))
+
+    def test_sin_historico_de_entrenos_no_se_regaña(self, monkeypatch):
+        """Sin histórico no se sabe si es una racha o es que el Watch nunca los registró."""
+        self._fuentes(monkeypatch, salud={})
+        assert main._motivos_proactivos(self._ahora()) == []
+
+    def test_el_reloj_no_entra_aqui(self, monkeypatch):
+        """Ya tiene su propio aviso: dos correos por lo mismo es la forma más rápida de
+        que se dejen de leer los dos."""
+        self._fuentes(monkeypatch, salud={"reloj": {"racha_sin_reloj": 5}})
+        assert main._motivos_proactivos(self._ahora()) == []
