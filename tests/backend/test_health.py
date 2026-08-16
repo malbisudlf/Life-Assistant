@@ -255,6 +255,30 @@ class TestHealthMetrics:
         assert len(data["metrics"]["step_count"]) == 2
         assert len(data["metrics"]["weight_body_mass"]) == 1
 
+    def test_dice_que_dias_estuvo_puesto_el_reloj(self, client, auth_headers, mock_requests):
+        """El frontend no puede repetir la clasificación de métricas: se le manda hecha,
+        junto con la fuente de cada una, para que no haya dos listas que se
+        desincronicen a la primera métrica nueva."""
+        mock_requests.add("GET", "health_metrics", FakeResponse([
+            {"metric_name": "step_count", "metric_date": "2026-07-04", "value": 9000, "unit": "count", "extra": {}},
+            {"metric_name": "step_count", "metric_date": "2026-07-05", "value": 9500, "unit": "count", "extra": {}},
+            {"metric_name": "heart_rate", "metric_date": "2026-07-05", "value": 70, "unit": "bpm", "extra": {}},
+            {"metric_name": "sleep_analysis", "metric_date": "2026-07-05", "value": 7.2, "unit": "h", "extra": {}},
+        ]))
+        reloj = client.get("/health/metrics?days=7", headers=auth_headers).json()["reloj"]
+        assert reloj["dias"] == {"2026-07-04": "sin_reloj", "2026-07-05": "ambos"}
+        assert reloj["fuentes"]["heart_rate"] == "dia"
+        assert reloj["fuentes"]["sleep_analysis"] == "noche"
+        assert "step_count" not in reloj["fuentes"], "los pasos no dependen del reloj"
+
+    def test_un_cero_del_atajo_no_da_el_dia_por_llevado(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "health_metrics", FakeResponse([
+            {"metric_name": "heart_rate_variability", "metric_date": "2026-07-05", "value": 0, "unit": "ms", "extra": {}},
+            {"metric_name": "step_count", "metric_date": "2026-07-05", "value": 9000, "unit": "count", "extra": {}},
+        ]))
+        reloj = client.get("/health/metrics?days=7", headers=auth_headers).json()["reloj"]
+        assert reloj["dias"]["2026-07-05"] == "sin_reloj"
+
     def test_latest_devuelve_ultimo_valor(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "health_metrics", FakeResponse([
             {"metric_name": "step_count", "metric_date": "2026-07-05", "value": 4000, "unit": "count", "extra": {}},
