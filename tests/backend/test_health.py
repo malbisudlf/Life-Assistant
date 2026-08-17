@@ -513,6 +513,45 @@ class TestSincronizacionVacia:
         assert "cuerpo no reconocido" in registrado
         assert "no-json" in registrado
 
+    def test_el_400_dice_quien_lo_mandó(self, client, mock_requests, caplog):
+        """Saber que llega basura no sirve si no se sabe cuál de los clientes la manda.
+
+        Con Health Auto Export y varios Atajos apuntando al mismo endpoint con el mismo
+        token, "400 en /health/ingest" no dice qué hay que abrir para arreglarlo.
+        """
+        with caplog.at_level("WARNING"):
+            client.post("/health/ingest?token=health-token", content=b"no soy json",
+                        headers={"Content-Type": "application/json",
+                                 "User-Agent": "HealthAutoExport/8.2"})
+        assert "HealthAutoExport/8.2" in "\n".join(r.getMessage() for r in caplog.records)
+
+    def test_un_cuerpo_vacio_no_se_confunde_con_uno_ininteligible(
+            self, client, mock_requests, caplog):
+        """0 bytes y "otro envoltorio" llevan a sitios opuestos y salían igual.
+
+        Un envoltorio desconocido se arregla en el backend; un cuerpo vacío es un cliente
+        que no llegó a construir la petición y no hay tolerancia del servidor que lo
+        arregle, porque no ha llegado ni un dato que interpretar.
+        """
+        with caplog.at_level("WARNING"):
+            r = client.post("/health/ingest?token=health-token", content=b"",
+                            headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+        registrado = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "VACÍO" in registrado
+        assert "'bytes': 0" in registrado
+
+    def test_el_atajo_tambien_deja_rastro_al_rechazar(self, client, mock_requests, caplog):
+        """El 400 de /simple no dejaba más rastro que el "→ 400" del middleware, que es
+        justo lo que hizo durar semanas el del envoltorio en /health/ingest."""
+        with caplog.at_level("WARNING"):
+            r = client.post("/health/ingest/simple?token=health-token", content=b"",
+                            headers={"Content-Type": "application/json",
+                                     "User-Agent": "Shortcuts/2600.1"})
+        assert r.status_code == 400
+        registrado = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "VACÍO" in registrado and "Shortcuts/2600.1" in registrado
+
     def test_hae_con_cuerpo_vacio_avisa(self, client, mock_requests):
         cuerpo = client.post("/health/ingest?token=health-token", json={}).json()
         assert cuerpo["ok"] is False
