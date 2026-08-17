@@ -7561,9 +7561,34 @@ def probar_aviso(credentials: HTTPAuthorizationCredentials = Depends(verify_toke
     Instalar el YAML y no saber si funciona hasta que toque un aviso de verdad es la
     forma más rápida de creer que está puesto cuando no lo está.
     """
+    # El aviso de prueba lleva una fila REAL detrás, ya marcada como enviada. Sin ella no
+    # hay id que votar, así que la notificación salía sin los botones y la única forma de
+    # comprobar que la valoración funciona era esperar a un aviso de verdad — que es
+    # exactamente lo que este botón existe para no tener que hacer. Se apunta como
+    # enviada para que el despachador no la vuelva a mandar, y con `regla` propia para
+    # que las pruebas no ensucien la estadística de una regla de verdad.
+    aviso_id = str(uuid.uuid4())
+    try:
+        r = http.post(RECORDATORIOS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"id": aviso_id, "texto": "Aviso de prueba",
+                            "regla": "prueba", "prioridad": PRIO_BAJA,
+                            "cuando": datetime.now(timezone.utc).isoformat(),
+                            "enviado": True,
+                            "enviado_at": datetime.now(timezone.utc).isoformat()})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        # Que no se pueda apuntar no impide probar el canal: sale sin botones y se dice,
+        # en vez de fingir que la prueba fue completa.
+        logger.warning("Prueba de aviso: sin fila que valorar (%s)", e)
+        aviso_id = ""
+
     canal = _notificar("🔔 Prueba de Life Assistant",
-                       "Si lees esto en el móvil, los avisos ya no dependen del correo.")
-    return {"ok": True, "canal": canal}
+                       "Si lees esto en el móvil, los avisos ya no dependen del correo. "
+                       "En iOS mantén pulsada la notificación para ver los botones.",
+                       aviso_id=aviso_id)
+    return {"ok": True, "canal": canal, "con_botones": bool(aviso_id)}
 
 
 class AvisoUtilRequest(BaseModel):
@@ -7606,7 +7631,12 @@ def marcar_aviso_util(request: Request, body: AvisoUtilRequest,
         logger.error("Avisos: no se pudo guardar la valoración de %s (%s)", aviso_id, e)
         raise HTTPException(status_code=502, detail="No se pudo guardar la valoración")
 
-    regla = str((filas[0] if filas else {}).get("regla") or "")
+    # Si el PATCH no tocó ninguna fila, ese aviso no existe y no se ha guardado nada.
+    # Devolver `ok` igualmente sería la misma mentira de siempre: quien pulsa el botón se
+    # quedaría creyendo que su voto contó.
+    if not filas:
+        raise HTTPException(status_code=404, detail="Ese aviso no existe")
+    regla = str(filas[0].get("regla") or "")
     if regla:
         _valorar_regla(regla, bool(body.util))
     return {"ok": True, "regla": regla or None}
