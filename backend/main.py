@@ -2287,10 +2287,45 @@ def _resumen_cuerpo(request: Request, raw: bytes, body) -> dict:
     dentro = body.get("data") if isinstance(body, dict) else None
     return {
         "bytes": len(raw),
+        "cliente": _cliente_http(request),
         "content_type": request.headers.get("content-type", ""),
         "claves": claves,
         "claves_de_data": sorted(dentro.keys()) if isinstance(dentro, dict) else None,
     }
+
+
+def _cliente_http(request: Request) -> str:
+    """Quién manda la petición, según su `User-Agent`.
+
+    Las dos ingestas comparten token y ruta con todo lo que el usuario haya configurado
+    en el móvil, así que un envío rechazado no decía QUIÉN lo mandaba: con Health Auto
+    Export y un par de Atajos apuntando aquí, "llega basura a /health/ingest" no se
+    puede accionar sin saber cuál de los tres hay que abrir. Es la misma lección del 400
+    del envoltorio, un paso más atrás: registrar el error no sirve de nada si no
+    identifica al cliente que hay que arreglar.
+
+    Se recorta porque va a app_logs y el UA lo escribe el cliente.
+    """
+    return (request.headers.get("user-agent") or "?")[:120]
+
+
+def _forma_cuerpo(request: Request, raw: bytes, body) -> dict:
+    """Qué forma tenía un cuerpo que no se pudo interpretar, y quién lo mandó.
+
+    Nunca los valores: esto acaba en app_logs y son datos de salud. Los primeros bytes
+    solo si ni siquiera era JSON, que es cuando son la única pista de qué está mandando
+    el cliente (y entonces no son datos de salud, porque no se han podido leer como
+    tales).
+    """
+    forma = {
+        "cliente":      _cliente_http(request),
+        "content_type": request.headers.get("content-type", ""),
+        "bytes":        len(raw),
+        "tipo_json":    type(body).__name__ if body is not None else "no-json",
+    }
+    if body is None and raw.strip():
+        forma["inicio"] = raw[:120].decode("utf-8", errors="replace")
+    return forma
 
 
 def _lote_vacio(body) -> bool:
@@ -2465,17 +2500,26 @@ async def health_ingest(request: Request, token: str = ""):
     if not isinstance(body, dict):
         # El detalle del 400 solo lo veía el cliente, y el cliente es una app del móvil
         # que no lo enseña: el endpoint llevaba semanas rechazando cada envío del Watch
-        # y en el registro solo constaba "400". Del cuerpo se registra la FORMA (tipo,
-        # tamaño, content-type), nunca los valores — son datos de salud y acaban en
-        # app_logs; los primeros bytes solo si ni siquiera era JSON, donde son la única
-        # pista de qué está mandando el cliente.
-        forma = {
-            "content_type":   request.headers.get("content-type", ""),
-            "bytes":          len(raw),
-            "tipo_json":      type(body).__name__ if body is not None else "no-json",
-        }
-        if body is None and raw.strip():
-            forma["inicio"] = raw[:120].decode("utf-8", errors="replace")
+        # y en el registro solo constaba "400". Por eso se registra la FORMA de lo que
+        # llegó (ver `_forma_cuerpo`).
+        forma = _forma_cuerpo(request, raw, body)
+        if not raw.strip():
+            # Un cuerpo VACÍO no es "un envoltorio que no sé leer": es un cliente que ni
+            # siquiera llegó a construir el JSON. Salían los dos por el mismo aviso, y
+            # llevan a sitios opuestos — el primero se arregla aquí, enseñando al
+            # endpoint una forma nueva; este se arregla en el teléfono, y ninguna
+            # tolerancia del servidor lo va a resolver porque no ha llegado ni un dato.
+            # Es la trampa conocida del "Obtener contenido de URL" con un Request Body
+            # JSON sin campos, y también lo que deja una automatización REST a medio
+            # configurar. Sigue siendo 400: para lo que quiera que haya al otro lado,
+            # este envío no ha guardado nada.
+            logger.warning(
+                "Ingesta de salud: cuerpo VACÍO (0 bytes), el cliente no mandó ningún dato. "
+                "Forma: %s", forma)
+            raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
+                request, raw,
+                "El cuerpo llegó vacío (0 bytes): el cliente no mandó ningún dato. "
+                "Revisa el paso que construye el cuerpo de la petición."))
         logger.warning("Ingesta de salud: cuerpo no reconocido, lote rechazado. Forma: %s", forma)
         raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
             request, raw, "El cuerpo no es un objeto JSON. Esto es lo que recibí:"))
@@ -2657,6 +2701,22 @@ async def health_ingest_simple(request: Request, token: str = ""):
     if body is None:
         body = _parse_ndjson(text)  # NDJSON crudo
         if not body:
+            # Este 400 no dejaba más rastro que el "→ 400" del middleware, que es
+            # exactamente lo que hizo durar semanas el del envoltorio en /health/ingest:
+            # el cliente es un Atajo del móvil y el detalle solo viajaba en la respuesta,
+            # que no enseña. Mismo criterio y mismo resumen que allí.
+            forma = _forma_cuerpo(request, raw, None)
+            if not text:
+                logger.warning(
+                    "Ingesta de salud (Atajo): cuerpo VACÍO (0 bytes), el cliente no mandó "
+                    "ningún dato. Forma: %s", forma)
+                raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
+                    request, raw,
+                    "El cuerpo llegó vacío (0 bytes): el cliente no mandó ningún dato. "
+                    "Revisa el paso que construye el cuerpo de la petición."))
+            logger.warning(
+                "Ingesta de salud (Atajo): cuerpo no interpretable (ni JSON ni NDJSON). "
+                "Forma: %s", forma)
             raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
                 request, raw, "No pude interpretar el cuerpo (ni JSON ni NDJSON). Esto es lo que recibí:"))
 

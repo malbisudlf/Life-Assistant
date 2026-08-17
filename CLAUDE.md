@@ -322,6 +322,19 @@ Ficheros clave:
   no enseña, y eso tapó semanas de sincronizaciones perdidas. Lo que no se tolera a
   propósito es `metrics` en la raíz sin `data`: esa forma no la manda nadie y sigue
   saliendo por el aviso de estructura desconocida.
+  Ese aviso dice además **quién lo mandó** (`_cliente_http`, el `User-Agent` recortado) y
+  separa el **cuerpo vacío** (0 bytes) del envoltorio ininteligible, en las dos rutas de
+  ingesta. Las dos cosas son la misma lección un paso más atrás: al endpoint apuntan
+  Health Auto Export y varios Atajos **con el mismo token y la misma URL**, así que "llega
+  basura a `/health/ingest`" no se puede accionar sin saber cuál de los tres hay que
+  abrir. Y los dos casos llevan a sitios opuestos: un envoltorio nuevo se arregla aquí,
+  enseñándoselo al endpoint; 0 bytes es un cliente que ni llegó a construir el JSON —la
+  trampa conocida del "Obtener contenido de URL" con un `Request Body` JSON sin campos, o
+  una automatización REST a medio configurar— y **ninguna tolerancia del servidor lo va a
+  arreglar, porque no ha llegado ni un dato**. Sigue siendo 400 en los dos casos: ese
+  envío no guardó nada. El 400 de `/health/ingest/simple` no registraba nada de esto, solo
+  el `→ 400` del middleware, que es exactamente lo que hizo durar semanas el del
+  envoltorio.
 - **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
   en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
   start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
