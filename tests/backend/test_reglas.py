@@ -410,3 +410,93 @@ class TestCorreoEntrante(_Reglas):
         main._revisar_correo()
         main._revisar_correo()
         assert len(vistas) == 1
+
+
+class TestReglasQueProponeJarvis(_Reglas):
+    """Que crezca hablando, sin que el listón se mueva al criterio del modelo.
+
+    Lo que lo reconcilia: el modelo NO escribe reglas, RELLENA plantillas. La condición
+    sigue estando en Python, revisable en un diff; en la base de datos solo se guarda
+    cuál y con qué valores.
+    """
+
+    def test_solo_admite_plantillas_que_el_codigo_sabe_evaluar(self, mock_requests):
+        r = main._j_proponer_regla("x", "haz_lo_que_quieras", {"a": 1})
+        assert r["ok"] is False and "No sé evaluar" in r["motivo"]
+        assert not mock_requests.called("POST", "reglas_usuario")
+
+    def test_filtra_los_campos_a_los_de_la_plantilla(self, mock_requests):
+        """Los redacta un modelo: sin el filtro, un nombre inventado acabaría guardado y
+        evaluándose como si significara algo."""
+        mock_requests.add("POST", "reglas_usuario", FakeResponse([], 201))
+        r = main._j_proponer_regla("basura", "dia_semana",
+                                   {"dia": "lunes", "hora": "09:00", "texto": "sacar",
+                                    "ejecutar_esto": "rm -rf"})
+        assert r["ok"] is True
+        guardado = mock_requests.called("POST", "reglas_usuario")[0][2]["json"]["parametros"]
+        assert "ejecutar_esto" not in guardado
+
+    def test_el_alta_pasa_por_el_boton_de_confirmar(self):
+        """Mismo patrón que mcp_conectar: el modelo propone, el usuario aprueba."""
+        assert main._JARVIS_HERRAMIENTAS["proponer_regla"]["confirmar"] is True
+
+    def test_la_plantilla_de_dia_dispara_su_dia(self, mock_requests):
+        lunes = datetime(2026, 8, 17, 10, 0, tzinfo=main.LOCAL_TZ)   # es lunes
+        p = {"dia": "lunes", "hora": "09:00", "texto": "sacar la basura"}
+        assert main._plantilla_dia_semana(p, lunes) == "sacar la basura"
+        martes = lunes + timedelta(days=1)
+        assert main._plantilla_dia_semana(p, martes) is None
+
+    def test_antes_de_evento_mira_el_titulo(self, monkeypatch):
+        ahora = self.AHORA
+        self._eventos(monkeypatch, [self._evento(ahora + timedelta(minutes=30),
+                                                 titulo="Examen de mates")])
+        p = {"palabra": "examen", "minutos": 60, "texto": "Lleva la calculadora"}
+        assert "calculadora" in main._plantilla_antes_de_evento(p, ahora)
+        p2 = {"palabra": "dentista", "minutos": 60, "texto": "x"}
+        assert main._plantilla_antes_de_evento(p2, ahora) is None
+
+    def test_la_metrica_tiene_que_existir(self, monkeypatch):
+        monkeypatch.setattr(main, "_brief_salud", lambda: {})
+        assert main._plantilla_metrica({"metrica": "chakras", "valor": 1}, self.AHORA) is None
+
+    def test_un_dato_viejo_no_dispara(self, monkeypatch):
+        """La métrica de hace una semana no dice nada de hoy."""
+        monkeypatch.setattr(main, "_brief_salud",
+                            lambda: {"hrv": {"ultimo": 20, "dias_atras": 8}})
+        p = {"metrica": "hrv", "direccion": "debajo", "valor": 40}
+        assert main._plantilla_metrica(p, self.AHORA) is None
+
+    def test_la_metrica_dispara_con_dato_fresco(self, monkeypatch):
+        monkeypatch.setattr(main, "_brief_salud",
+                            lambda: {"hrv": {"ultimo": 20, "dias_atras": 0}})
+        p = {"metrica": "hrv", "direccion": "debajo", "valor": 40}
+        assert "hrv" in main._plantilla_metrica(p, self.AHORA)
+
+    def test_una_regla_rota_no_se_lleva_a_las_demas(self, mock_requests, monkeypatch):
+        mock_requests.add("GET", "reglas_usuario", FakeResponse([
+            {"clave": "rota", "plantilla": "dia_semana", "parametros": None},
+            {"clave": "buena", "plantilla": "dia_semana",
+             "parametros": {"dia": _DIAS[self.AHORA.weekday()], "hora": "00:01",
+                            "texto": "hola"}},
+        ]))
+        assert main._correr_reglas_usuario() == 1
+
+    def test_una_plantilla_que_ya_no_existe_se_ignora(self, mock_requests):
+        mock_requests.add("GET", "reglas_usuario", FakeResponse([
+            {"clave": "vieja", "plantilla": "la_que_se_quito", "parametros": {}}]))
+        assert main._correr_reglas_usuario() == 0
+
+    def test_las_de_salud_no_cuestan_una_consulta_por_tick(self, mock_requests, monkeypatch):
+        """Traen 30 días de métricas: en cada tick serían ~300 consultas gordas al día."""
+        mock_requests.add("GET", "reglas_usuario", FakeResponse([
+            {"clave": "hrv", "plantilla": "metrica_umbral",
+             "parametros": {"metrica": "hrv", "direccion": "debajo", "valor": 40}}]))
+        pedidas = []
+        monkeypatch.setattr(main, "_brief_salud", lambda: pedidas.append(1) or {})
+        main._correr_reglas_usuario()
+        main._correr_reglas_usuario()
+        assert len(pedidas) == 1
+
+
+_DIAS = main._DIAS_SEMANA

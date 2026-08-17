@@ -186,6 +186,11 @@ RELOJ_AVISO_HORA  = os.getenv("RELOJ_AVISO_HORA", "21:30")
 # Cuántas noches seguidas sin medir hacen falta para avisar de la racha. Con 1 saltaría
 # cada vez que se carga una noche, que es normal y volvería el aviso ruido.
 RELOJ_AVISO_NOCHES = int(os.getenv("RELOJ_AVISO_NOCHES", "2"))
+# Cuánto antes de tu hora habitual de dormirte sale el aviso. La hora ya no es una
+# constante: sale de tus propias noches (ver `_hora_aviso_reloj`).
+RELOJ_AVISO_ANTES_MIN = int(os.getenv("RELOJ_AVISO_ANTES_MIN", "60"))
+# Y el tope: más tarde de esto ya no es "antes de dormir" para nadie.
+RELOJ_AVISO_TOPE      = (23, 30)
 # Informe semanal. El resumen diario mira 30 días porque es lo que sirve para decidir
 # HOY; lo que de verdad cambia una rutina se ve en meses, y hoy eso solo se puede mirar
 # abriendo el modal de patrones del dashboard — o sea, solo si a uno se le ocurre.
@@ -4616,18 +4621,41 @@ def _informe_salud(semanas: int, hoy) -> dict:
     return salida
 
 
+def _informe_avisos() -> dict:
+    """Cuántos avisos mandó cada regla y cuántos sirvieron.
+
+    Es la señal de utilidad mirada desde arriba, y lo que evita que el sistema envejezca
+    mal sin que nadie se entere: una regla que lleva veinte avisos y ninguna respuesta
+    puede estar funcionando perfectamente y no servir para nada, y eso no se ve mirando
+    los avisos de uno en uno.
+
+    Un fallo leyéndolo no tumba el informe: la sección se queda fuera y ya está.
+    """
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?select=regla,enviados,utiles,no_utiles,"
+                     "silenciada,ultima_vez&order=enviados.desc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"reglas": r.json()}
+    except Exception as e:
+        logger.warning("Informe semanal: no se pudo leer la utilidad de los avisos (%s)", e)
+        return {}
+
+
 def construir_informe_semanal(hoy=None) -> dict:
     hoy = hoy or _ahora_local().date()
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         f_salud  = pool.submit(_informe_salud, INFORME_SEMANAS, hoy)
         f_entren = pool.submit(_brief_entrenamiento)
-        salud, entrenamiento = f_salud.result(), f_entren.result()
+        f_avisos = pool.submit(_informe_avisos)
+        salud, entrenamiento, avisos = f_salud.result(), f_entren.result(), f_avisos.result()
     return {
         "fecha":         hoy.isoformat(),
         "semanas":       INFORME_SEMANAS,
         "zona":          TIMEZONE,
         "salud":         salud,
         "entrenamiento": entrenamiento,
+        "avisos":        avisos,
     }
 
 
@@ -4685,6 +4713,18 @@ def render_informe_texto(d: dict) -> str:
                  f"última sesión {t.get('ultima_sesion') or '—'}")
     else:
         L.append("  (sin cliente configurado)")
+
+    # Qué avisos mandó y cuáles sirvieron. Va aquí y no en el correo diario porque es
+    # una pregunta de tendencia: en un día no se ve si una regla ha dejado de valer.
+    reglas = ((d.get("avisos") or {}).get("reglas")) or []
+    if reglas:
+        L.append("")
+        L.append("## AVISOS: QUÉ SE MANDÓ Y QUÉ SIRVIÓ")
+        L.append("  Sin respuesta NO cuenta como \"no sirvió\": el silencio no vota.")
+        for r in reglas:
+            estado = " [SILENCIADA]" if r.get("silenciada") else ""
+            L.append(f"  {str(r.get('regla') or '?'):<16} {r.get('enviados', 0):>3} enviados · "
+                     f"{r.get('utiles', 0)} útiles · {r.get('no_utiles', 0)} no{estado}")
     return "\n".join(L) + "\n"
 
 
@@ -5881,12 +5921,51 @@ RELOJ_AVISO_VENTANA = 7
 # min y sin esto serían ~30 lecturas de health_metrics cada noche. Quien impide el
 # aviso duplicado es el INSERT, no esto — un cold start lo borra y no pasa nada.
 _reloj_avisado_dia: str | None = None
+# La hora aprendida se calcula una vez al día: es una consulta y el tick pasa cada
+# 5 minutos. Perderla en un cold start cuesta una consulta, no un dato.
+_reloj_hora_cache: dict = {}
 
 
 def _uuid_aviso_reloj(fecha: str) -> str:
     """Id determinista del aviso de un día: dos ticks generan el mismo y el segundo
     choca contra la clave primaria."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:aviso-reloj:{fecha}"))
+
+
+def _hora_aviso_reloj() -> tuple:
+    """A qué hora avisar de que te falta el reloj: una hora antes de que te duermas.
+
+    `RELOJ_AVISO_HORA` (21:30) era una constante elegida a ojo, y este aviso tiene una
+    condición dura: **o llega antes de que te duermas o no sirve de nada**, porque el
+    dato de la noche no se recupera al día siguiente. Quién sabe esa hora no es la
+    constante, son tus últimas treinta noches.
+
+    Sin base se cae al valor configurado: una mediana sacada de cuatro noches no es un
+    hábito. Y nunca se adelanta de la hora configurada — si te duermes muy temprano, el
+    aviso saldría a media tarde, cuando todavía no sabes si te lo vas a poner.
+    """
+    hoy = _ahora_local().date().isoformat()
+    if _reloj_hora_cache.get("dia") == hoy:
+        return _reloj_hora_cache["hora"]
+    habitual = _hora_habitual_dormir()
+    if not habitual:
+        _reloj_hora_cache.update(dia=hoy, hora=HORA_AVISO_RELOJ)
+        return HORA_AVISO_RELOJ
+    minutos = (habitual[0] * 60 + habitual[1]) - RELOJ_AVISO_ANTES_MIN
+    if habitual[0] < 12:            # te duermes pasada medianoche: cuenta como tarde
+        minutos += 24 * 60
+    if minutos >= 24 * 60:
+        # La hora calculada cae pasada la medianoche. No se puede usar tal cual por dos
+        # motivos, y el segundo es el que importa: un aviso a las 00:30 ya no llega
+        # "antes de dormir", y además toda la comparación de este módulo es (hora,
+        # minuto) DEL MISMO DÍA, donde 00:30 es menor que las 21:30 y el aviso saldría
+        # a media tarde. Se acota a la noche: para quien se duerme a la 01:00, las 23:30
+        # siguen siendo hora y media antes.
+        aprendida = RELOJ_AVISO_TOPE
+    else:
+        aprendida = max(((minutos // 60) % 24, minutos % 60), HORA_AVISO_RELOJ)
+    _reloj_hora_cache.update(dia=hoy, hora=aprendida)
+    return aprendida
 
 
 def _avisar_reloj_si_toca() -> dict:
@@ -5897,7 +5976,13 @@ def _avisar_reloj_si_toca() -> dict:
     """
     global _reloj_avisado_dia
     ahora = _ahora_local()
+    # La barrera BARATA primero: la hora aprendida nunca es anterior a la configurada
+    # (`_hora_aviso_reloj` devuelve el máximo de las dos), así que por debajo de esta no
+    # hace falta preguntarle nada a Supabase. El tick pasa cada 5 minutos y sin esto
+    # aprender la hora habría costado ~250 consultas al día.
     if not RELOJ_AVISO or (ahora.hour, ahora.minute) < HORA_AVISO_RELOJ:
+        return {}
+    if (ahora.hour, ahora.minute) < _hora_aviso_reloj():
         return {}
     hoy = ahora.date().isoformat()
     if _reloj_avisado_dia == hoy:
@@ -6826,7 +6911,211 @@ _REGLAS = (
     ("hueco_entreno", _regla_hueco_entreno),
     ("vigilancias",   lambda: _revisar_vigilancias()),
     ("correo",        lambda: _revisar_correo()),
+    ("tuyas",         lambda: _correr_reglas_usuario()),
 )
+
+
+# ── Reglas que Jarvis propone y tú apruebas ──────────────────────────────────
+# Las de `_REGLAS` son siete condiciones escritas a mano: crecer así cuesta un despliegue
+# por idea. Esto deja que crezca hablando — pero SIN romper la regla de fondo del
+# proyecto, que el listón vive en el código y no en el criterio del modelo.
+#
+# Lo que lo reconcilia: **el modelo no escribe reglas, RELLENA plantillas.** Las
+# condiciones siguen estando aquí, en Python, revisables en un diff; lo único que se
+# guarda en la base de datos es cuál de ellas y con qué parámetros. Un modelo que pudiera
+# definir la condición sería un modelo decidiendo cuándo interrumpirte, que es
+# exactamente lo que este proyecto lleva evitando desde el principio.
+#
+# Y el alta pasa por el botón de confirmar (`confirmar: True`), como `mcp_conectar`: el
+# modelo propone, tú apruebas, y lo aprobado queda escrito.
+REGLAS_USUARIO_URL = f"{SUPABASE_URL}/rest/v1/reglas_usuario"
+REGLAS_USUARIO_MAX = int(os.getenv("REGLAS_USUARIO_MAX", "10"))
+_DIAS_SEMANA = ("lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo")
+_ultima_regla_salud = 0.0
+
+
+def _plantilla_dia_semana(p: dict, ahora: datetime) -> Optional[str]:
+    """«Los <día> a las <hora>, recuérdame <texto>»."""
+    dia = _clave_recuerdo(str(p.get("dia") or ""))
+    if dia not in _DIAS_SEMANA or _DIAS_SEMANA[ahora.weekday()] != dia:
+        return None
+    hora = _hora_config(str(p.get("hora") or ""), (9, 0))
+    if (ahora.hour, ahora.minute) < hora:
+        return None
+    return str(p.get("texto") or "")[:150]
+
+
+def _plantilla_antes_de_evento(p: dict, ahora: datetime) -> Optional[str]:
+    """«Antes de los eventos que digan <palabra>, avísame de <texto>»."""
+    palabra = str(p.get("palabra") or "").strip().lower()
+    if not palabra:
+        return None
+    minutos = max(5, min(int(p.get("minutos") or 60), 24 * 60))
+    for ev in _eventos_con_fecha(dias=1):
+        if palabra not in (ev.get("title") or "").lower():
+            continue
+        falta = (ev["ini"] - ahora).total_seconds() / 60
+        if 0 < falta <= minutos:
+            return f"{str(p.get('texto') or 'Recuerda')[:120]} (para «{ev.get('title')}»)"
+    return None
+
+
+def _plantilla_metrica(p: dict, ahora: datetime) -> Optional[str]:
+    """«Si <métrica> baja de / sube de <valor>, dímelo»."""
+    clave = _clave_recuerdo(str(p.get("metrica") or ""))
+    if clave not in {c for c, *_ in _BRIEF_METRICAS}:
+        return None
+    try:
+        umbral = float(p.get("valor"))
+    except (TypeError, ValueError):
+        return None
+    m = (_brief_salud() or {}).get(clave) or {}
+    ultimo = m.get("ultimo")
+    # Un dato viejo no dispara nada: la métrica de hace una semana no dice nada de hoy.
+    # `dias_atras` se compara contra None y no con `or`: 0 es el dato de HOY, el más
+    # fresco que puede haber, y con `or 99` se descartaba justo ese. Es el mismo error
+    # que persigue medio proyecto — un cero no es un hueco.
+    dias_atras = m.get("dias_atras")
+    if ultimo is None or dias_atras is None or dias_atras > 2:
+        return None
+    debajo = str(p.get("direccion") or "debajo").startswith("deb")
+    if (ultimo < umbral) if debajo else (ultimo > umbral):
+        return (f"{clave.replace('_', ' ')} está en {_cifra(ultimo)} "
+                f"({'por debajo de' if debajo else 'por encima de'} {_cifra(umbral)}).")
+    return None
+
+
+# El catálogo cerrado. El modelo elige DE AQUÍ; no puede añadir una entrada.
+_PLANTILLAS_REGLA = {
+    "dia_semana": {
+        "fn":      _plantilla_dia_semana,
+        "campos":  ("dia", "hora", "texto"),
+        "que_es":  "Un aviso fijo un día de la semana a una hora (dia, hora HH:MM, texto).",
+        "salud":   False,
+    },
+    "antes_de_evento": {
+        "fn":      _plantilla_antes_de_evento,
+        "campos":  ("palabra", "minutos", "texto"),
+        "que_es":  "Antes de los eventos cuyo título contenga una palabra (palabra, "
+                   "minutos de antelación, texto).",
+        "salud":   False,
+    },
+    "metrica_umbral": {
+        "fn":      _plantilla_metrica,
+        "campos":  ("metrica", "direccion", "valor"),
+        "que_es":  "Cuando una métrica de salud pase de un valor (metrica, direccion "
+                   "'debajo' o 'encima', valor).",
+        "salud":   True,
+    },
+}
+
+
+def _j_proponer_regla(nombre: str, plantilla: str, parametros: dict | None = None) -> dict:
+    """Da de alta una regla. Solo se llega aquí desde /jarvis/ejecutar (confirmar)."""
+    plantilla = str(plantilla or "").strip()
+    if plantilla not in _PLANTILLAS_REGLA:
+        return {"ok": False, "motivo": f"No sé evaluar '{plantilla}'. Las que sé: "
+                                       f"{', '.join(_PLANTILLAS_REGLA)}"}
+    clave = _clave_recuerdo(nombre)[:40]
+    if not clave:
+        return {"ok": False, "motivo": "Necesito un nombre corto para la regla"}
+    # Solo los campos que la plantilla declara: los redacta un modelo, y sin el filtro
+    # un nombre inventado acabaría guardado y evaluándose como si significara algo.
+    campos = _PLANTILLAS_REGLA[plantilla]["campos"]
+    limpios = {k: v for k, v in (parametros or {}).items() if k in campos}
+    if not limpios:
+        return {"ok": False, "motivo": f"Faltan los datos de la regla ({', '.join(campos)})"}
+
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?select=clave", headers=supabase_headers())
+        existentes = {f.get("clave") for f in (r.json() if r.status_code < 300 else [])}
+    except Exception:
+        existentes = set()
+    if len(existentes) >= REGLAS_USUARIO_MAX and clave not in existentes:
+        return {"ok": False, "motivo": f"Ya tienes {len(existentes)} reglas (el máximo)"}
+
+    try:
+        r = http.post(f"{REGLAS_USUARIO_URL}?on_conflict=clave",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json={"clave": clave, "plantilla": plantilla,
+                            "parametros": limpios, "activa": True})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Reglas: no se pudo guardar '%s' (%s)", clave, e)
+        return {"ok": False, "motivo": "No se pudo guardar la regla"}
+    return {"ok": True, "clave": clave, "plantilla": plantilla, "parametros": limpios}
+
+
+def _j_mis_reglas() -> dict:
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?select=clave,plantilla,parametros,activa"
+                     "&order=creada.asc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"reglas": r.json(), "plantillas_que_se_pueden_crear":
+                {n: p["que_es"] for n, p in _PLANTILLAS_REGLA.items()}}
+    except Exception as e:
+        logger.warning("Reglas: no se pudieron listar (%s)", e)
+        return {"error": "No pude consultar tus reglas"}
+
+
+def _j_quitar_regla(nombre: str) -> dict:
+    clave = _clave_recuerdo(nombre)[:40]
+    try:
+        r = http.delete(f"{REGLAS_USUARIO_URL}?clave=eq.{quote(clave, safe='')}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Reglas: no se pudo quitar '%s' (%s)", clave, e)
+        return {"ok": False, "motivo": "No se pudo quitar"}
+    return {"ok": True, "clave": clave}
+
+
+def _correr_reglas_usuario() -> int:
+    """Evalúa las reglas aprobadas. Una rota no se lleva a las demás."""
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?activa=is.true"
+                     f"&select=clave,plantilla,parametros&limit={REGLAS_USUARIO_MAX}",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        reglas = r.json()
+    except Exception as e:
+        logger.warning("Reglas de usuario: no se pudieron leer (%s)", e)
+        return 0
+
+    ahora, puestos = _ahora_local(), 0
+    # Las plantillas que leen salud traen 30 días de métricas: se evalúan una vez por
+    # hora, no en cada tick. Las demás son baratas y van siempre.
+    global _ultima_regla_salud
+    toca_salud = time.time() - _ultima_regla_salud >= 3600
+    if toca_salud:
+        _ultima_regla_salud = time.time()
+
+    for regla in reglas:
+        plantilla = _PLANTILLAS_REGLA.get(str(regla.get("plantilla") or ""))
+        if plantilla and plantilla["salud"] and not toca_salud:
+            continue
+        if not plantilla:
+            # Una plantilla que ya no existe: se ignora en vez de reventar. Puede pasar
+            # si se quita del código una que había reglas usando.
+            continue
+        try:
+            texto = plantilla["fn"](regla.get("parametros") or {}, ahora)
+        except Exception:
+            logger.exception("Regla de usuario '%s': fallo evaluándola", regla.get("clave"))
+            continue
+        if not texto:
+            continue
+        # La huella lleva el día: una regla tuya puede repetirse mañana, pero no cada
+        # cinco minutos.
+        if _apuntar_aviso(f"tuya:{regla.get('clave')}", texto, prioridad=PRIO_NORMAL,
+                          huella=f"{regla.get('clave')}:{ahora.date().isoformat()}"):
+            puestos += 1
+    return puestos
 
 
 # ── El correo entrante ───────────────────────────────────────────────────────
@@ -8958,6 +9247,34 @@ _JARVIS_HERRAMIENTAS = {
             "contenido": {"type": "string", "description": "El dato, en una o dos frases."},
         },
         "obligatorios": ["clave", "contenido"],
+    },
+    "proponer_regla": {
+        "confirmar":   True,
+        "fn":          _j_proponer_regla,
+        "descripcion": "Crea una regla permanente para avisarle sin que pregunte. Solo "
+                       "puedes usar las plantillas que existen (mira `mis_reglas` para "
+                       "verlas): tú eliges cuál encaja y con qué valores, no inventas la "
+                       "condición. Úsalo cuando detectes algo que se repite.",
+        "parametros":  {
+            "nombre":     {"type": "string", "description": "Nombre corto de la regla."},
+            "plantilla":  {"type": "string", "description": "dia_semana | antes_de_evento | metrica_umbral"},
+            "parametros": {"type": "object", "description": "Los campos que pida la plantilla."},
+        },
+        "obligatorios": ["nombre", "plantilla", "parametros"],
+    },
+    "mis_reglas": {
+        "confirmar":   False,
+        "fn":          _j_mis_reglas,
+        "descripcion": "Las reglas que el usuario tiene aprobadas, y las plantillas que "
+                       "puedes proponer. Míralo antes de proponer una.",
+        "parametros":  {},
+    },
+    "quitar_regla": {
+        "confirmar":   False,
+        "fn":          _j_quitar_regla,
+        "descripcion": "Quita una regla suya por su nombre corto.",
+        "parametros":  {"nombre": {"type": "string", "description": "El nombre de la regla."}},
+        "obligatorios": ["nombre"],
     },
     "vigilar_pagina": {
         "confirmar":   False,
