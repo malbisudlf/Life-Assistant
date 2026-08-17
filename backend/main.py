@@ -4901,26 +4901,20 @@ HORA_AVISO_RELOJ     = _hora_config(RELOJ_AVISO_HORA, (21, 30))
 HORA_INFORME         = _hora_config(INFORME_HORA, (10, 0))
 
 
-def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
-    """Arranca la rutina que lee este correo y redacta el briefing.
+# Último fallo del disparo, para que el vigilante pueda reintentarlo. En memoria a
+# propósito: perderlo en un cold start cuesta un reintento, no un dato. Y una PAUSA se
+# marca aparte porque no es una avería — es una decisión del usuario, y reintentar
+# contra algo que se apagó a propósito es la definición de aviso que se deja de leer.
+_rutina_ultimo_fallo: dict | None = None
 
-    Reparto de trabajo entre los dos triggers de la rutina, que existe porque las dos
-    situaciones piden cosas distintas:
-      - Te despiertas PRONTO → el correo de datos sale pronto, pero el briefing no debe
-        redactarse aún: recoge newsletters que a las 6 de la mañana no han llegado. De
-        eso se encarga el trigger de HORARIO de la propia rutina, y aquí no hacemos nada.
-      - Te despiertas TARDE → esperar al reloj significaría redactar el briefing sin los
-        datos del día, o con horas de retraso. Ahí dispara este.
 
-    Nunca puede tumbar el envío: cuando se llega aquí el correo YA ha salido, que es lo
-    que de verdad importa. Un fallo se registra y se sigue — la rutina siempre puede
-    ejecutarse a mano, y el correo con los datos está en el buzón de todos modos.
+def _disparar_rutina(fecha: str) -> dict:
+    """El POST al trigger de API, sin las guardas de hora. Devuelve qué pasó.
+
+    Está separado de `_lanzar_rutina` para que el vigilante pueda reintentarlo: las
+    condiciones de horario solo tienen sentido en el disparo original, que decide SI
+    toca disparar; un reintento ya sabe que tocaba.
     """
-    if not RUTINA_FIRE_URL or not RUTINA_FIRE_TOKEN:
-        return
-    if (ahora.hour, ahora.minute) < HORA_RUTINA:
-        return
-
     try:
         r = http.post(
             RUTINA_FIRE_URL,
@@ -4935,21 +4929,52 @@ def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
             # debe depender de él para saber qué hacer.
             json={"text": f"El correo de datos del {fecha} acaba de salir."},
         )
-        if r.status_code >= 300:
-            # Con el código a secas no se puede diagnosticar nada: un 400 de aquí puede
-            # ser la cabecera beta caducada (`RUTINA_BETA`), el trigger borrado o el
-            # cuerpo mal formado, y son arreglos distintos. Es la misma lección que dejó
-            # el 400 de la ingesta de salud —un error que solo sabe contarlo el otro lado
-            # equivale a no haberlo registrado—, pero aquí la respuesta la tenemos
-            # nosotros y la estábamos tirando. El cuerpo lo escribe la API de Anthropic,
-            # no un usuario, y va acotado por si acaso.
-            detalle = (r.text or "")[:300].replace("\n", " ").strip()
-            logger.error("Rutina del briefing: el disparo devolvió %s — beta '%s' — %s",
-                         r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
-        else:
-            logger.info("Rutina del briefing lanzada tras el correo del %s", fecha)
-    except requests.RequestException:
+    except requests.RequestException as e:
         logger.exception("Rutina del briefing: no se pudo lanzar el disparo")
+        return {"ok": False, "pausada": False, "motivo": f"no se pudo conectar ({e})"}
+
+    if r.status_code < 300:
+        logger.info("Rutina del briefing lanzada tras el correo del %s", fecha)
+        return {"ok": True, "pausada": False, "motivo": ""}
+
+    # Con el código a secas no se puede diagnosticar nada: un 400 de aquí puede ser la
+    # cabecera beta caducada (`RUTINA_BETA`), el trigger borrado o el cuerpo mal formado,
+    # y son arreglos distintos. Es la misma lección que dejó el 400 de la ingesta de
+    # salud —un error que solo sabe contarlo el otro lado equivale a no haberlo
+    # registrado—, pero aquí la respuesta la tenemos nosotros y la estábamos tirando. El
+    # cuerpo lo escribe la API de Anthropic, no un usuario, y va acotado por si acaso.
+    detalle = (r.text or "")[:300].replace("\n", " ").strip()
+    logger.error("Rutina del briefing: el disparo devolvió %s — beta '%s' — %s",
+                 r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
+    return {"ok": False, "pausada": "routine_paused" in detalle,
+            "motivo": detalle or f"HTTP {r.status_code}"}
+
+
+def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
+    """Arranca la rutina que lee este correo y redacta el briefing.
+
+    Reparto de trabajo entre los dos triggers de la rutina, que existe porque las dos
+    situaciones piden cosas distintas:
+      - Te despiertas PRONTO → el correo de datos sale pronto, pero el briefing no debe
+        redactarse aún: recoge newsletters que a las 6 de la mañana no han llegado. De
+        eso se encarga el trigger de HORARIO de la propia rutina, y aquí no hacemos nada.
+      - Te despiertas TARDE → esperar al reloj significaría redactar el briefing sin los
+        datos del día, o con horas de retraso. Ahí dispara este.
+
+    Nunca puede tumbar el envío: cuando se llega aquí el correo YA ha salido, que es lo
+    que de verdad importa. Un fallo se registra y se sigue — la rutina siempre puede
+    ejecutarse a mano, y el correo con los datos está en el buzón de todos modos. Lo que
+    sí se hace es APUNTARLO, para que el vigilante lo reintente: registrar un fallo y no
+    volver a mirarlo es la mitad del trabajo.
+    """
+    global _rutina_ultimo_fallo
+    if not RUTINA_FIRE_URL or not RUTINA_FIRE_TOKEN:
+        return
+    if (ahora.hour, ahora.minute) < HORA_RUTINA:
+        return
+
+    resultado = _disparar_rutina(fecha)
+    _rutina_ultimo_fallo = None if resultado["ok"] else {"fecha": fecha, **resultado}
 
 
 def _reservar_envio(fecha: str, fuente: str, despertar: Optional[datetime]) -> bool:
@@ -5146,7 +5171,8 @@ def ha_brief_tick(request: Request, token: str = ""):
     # apunta con `cuando` = ahora, así que el despachador que viene detrás ya lo ve.
     # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
     # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
-    previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(), **_hablar_seguro()}
+    previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(),
+               **_vigilar_sistema_seguro(), **_hablar_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -5849,6 +5875,270 @@ def _vigilar_ingesta_seguro() -> dict:
         return _vigilar_ingesta()
     except Exception:
         logger.exception("Vigilante de ingesta: fallo inesperado en el tick")
+        return {}
+
+
+# ── Vigilante del sistema ────────────────────────────────────────────────────
+# El vigilante de la ingesta mira UNA cosa: que sigan entrando datos de salud. Esto mira
+# si el sistema se está rompiendo por cualquier otro sitio, que es donde vivieron las
+# averías grandes del proyecto: todas fueron LO MISMO —algo dejó de funcionar y el
+# sistema siguió diciendo que todo iba bien—, y todas se descubrieron por casualidad,
+# semanas después. `app_logs` y `diagnostico` ya guardaban la respuesta; lo que faltaba
+# era alguien que hiciera la pregunta sin que se lo pidieran.
+#
+# Tres decisiones que sostienen esto y que no se pueden relajar:
+#
+#   1. **El listón va en CÓDIGO, no en el criterio del modelo.** Las reglas de abajo
+#      deciden SI hay avería (umbrales, repeticiones); el modelo, si acaso, redacta.
+#      Dejarle decidir a él qué es un problema acaba en un aviso diario porque sí — es
+#      exactamente la misma frontera que ya rige `_motivos_proactivos`.
+#   2. **Reparar en silencio TAPA la avería.** Lo que se repara se dice, y se dice
+#      CUÁNTAS VECES lleva reparándose: un fallo que se arregla solo todos los días no
+#      está arreglado, está escondido. Por eso se cuenta en `vigilante_estado`.
+#   3. **Solo se repara lo que se puede verificar.** La lista es cerrada y corta a
+#      propósito: hoy únicamente el disparo de la rutina, porque su reintento devuelve
+#      un 2xx que confirma el efecto. Lanzar algo no es comprobar que funciona — el
+#      `streaming_ready` sobre un Sunshine que no estaba abierto salió de olvidarlo.
+#
+# Lo que NO entra aquí, y no es olvido:
+#   - La rutina PAUSADA: es una decisión del usuario, no una avería.
+#   - El silencio de la ingesta: ya tiene su vigilante, y dos avisos de lo mismo son la
+#     forma más rápida de que se dejen de leer los dos.
+#   - Los envíos fallidos del resumen y del informe, y los avisos que el móvil no
+#     recoge: ya se reintentan solos en cada tick (`_liberar_envio`, `_rescatar_avisos`).
+#   - Que HA deje de sondear. No se puede detectar desde aquí: este código lo ejecuta
+#     precisamente el tick de HA, así que si HA muere, el vigilante muere con él. Eso
+#     solo lo puede ver algo de fuera — hoy, el workflow de Actions de respaldo.
+VIGILANTE             = os.getenv("VIGILANTE", "1") not in ("0", "false", "False")
+# El tick pasa cada 5 min y esto lee `app_logs`: una vez por hora basta y sobra.
+VIGILANTE_CADA        = float(os.getenv("VIGILANTE_CADA_MIN", "60"))
+# Cuántas veces tiene que repetirse un error en la ventana para considerarlo avería. Uno
+# suelto es la vida; lo que se repite es lo que está roto.
+VIGILANTE_MIN_ERRORES = int(os.getenv("VIGILANTE_MIN_ERRORES", "3"))
+VIGILANTE_VENTANA_DIAS = int(os.getenv("VIGILANTE_VENTANA_DIAS", "1"))
+# Abrir issue en el repo para lo que necesite un cambio de código. Es la única forma de
+# "arreglarse a sí mismo" que cubre las averías reales de este proyecto: casi ninguna se
+# podía arreglar desde el backend, todas necesitaban tocar código.
+VIGILANTE_ISSUES      = os.getenv("VIGILANTE_ISSUES", "1") not in ("0", "false", "False")
+VIGILANTE_ESTADO_URL  = f"{SUPABASE_URL}/rest/v1/vigilante_estado"
+_ultima_vigilancia_sistema = 0.0
+
+
+def _vigilante_estado(clave: str) -> dict:
+    """Apunta que esta avería ha vuelto a verse y devuelve su historia.
+
+    Existe por dos cosas que el aviso necesita y que no se pueden deducir del registro:
+    desde cuándo pasa y cuántas veces lleva pasando. Y por una tercera que importa más:
+    sin memoria, el issue se abriría otra vez cada día.
+
+    Un fallo aquí NO calla el aviso: se devuelve `{}` y el aviso sale sin las cifras.
+    Perder el contexto es peor que perder el aviso, pero mucho menos peor que callarse.
+    """
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        r = http.get(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote(clave, safe='')}"
+                     "&select=clave,primera_vez,veces,issue_url",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+        if not filas:
+            http.post(VIGILANTE_ESTADO_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"clave": clave, "primera_vez": ahora, "ultima_vez": ahora, "veces": 1})
+            return {"veces": 1, "primera_vez": ahora, "issue_url": None}
+        fila  = filas[0]
+        veces = int(fila.get("veces") or 0) + 1
+        http.patch(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote(clave, safe='')}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"veces": veces, "ultima_vez": ahora})
+        return {"veces": veces, "primera_vez": fila.get("primera_vez"),
+                "issue_url": fila.get("issue_url")}
+    except Exception as e:
+        logger.warning("Vigilante: no se pudo apuntar el estado de '%s' (%s)", clave, e)
+        return {}
+
+
+# Nombres con los que los servidores de GitHub publican "crear issue", y qué argumentos
+# espera cada uno. Se buscan por nombre EXACTO y no por parecido: mandar los argumentos
+# equivocados a una herramienta que escribe es bastante peor que no abrir el issue.
+_VIGILANTE_ISSUE_TOOLS = {
+    "create_issue": lambda o, r, t, c: {"owner": o, "repo": r, "title": t, "body": c},
+    "issue_write":  lambda o, r, t, c: {"method": "create", "owner": o, "repo": r,
+                                        "title": t, "body": c},
+}
+
+
+def _vigilante_abrir_issue(titulo: str, cuerpo: str) -> str:
+    """Abre un issue en el repo de Jarvis por el MCP que haya conectado. "" si no puede.
+
+    No poder abrirlo no es un fallo del vigilante: sin `JARVIS_REPO` o sin un servidor de
+    GitHub en la lista blanca, el aviso sale igual y dice que hay que abrirlo a mano. El
+    sistema sigue funcionando sin esta mitad, como el disparo de la rutina.
+    """
+    if not VIGILANTE_ISSUES or "/" not in JARVIS_REPO:
+        return ""
+    owner, _, repo = JARVIS_REPO.partition("/")
+    for servidor in _mcp_config():
+        try:
+            herramientas = (_mcp_rpc(servidor, "tools/list", {}) or {}).get("tools") or []
+            nombre = next((t.get("name") for t in herramientas
+                           if t.get("name") in _VIGILANTE_ISSUE_TOOLS), None)
+            if not nombre:
+                continue
+            args = _VIGILANTE_ISSUE_TOOLS[nombre](owner, repo, titulo, cuerpo)
+            respuesta = _mcp_rpc(servidor, "tools/call", {"name": nombre, "arguments": args})
+        except Exception as e:
+            logger.warning("Vigilante: no se pudo abrir el issue en %s (%s)", servidor, e)
+            continue
+        # La URL viene dentro del contenido del resultado y cada servidor la envuelve a su
+        # manera; se busca en el texto en vez de asumir una forma. Si no aparece, el issue
+        # se creó igual: se devuelve una marca para no volver a abrirlo mañana.
+        texto = json.dumps(respuesta)[:4000]
+        m = re.search(r"https://github\.com/[\w.-]+/[\w.-]+/issues/\d+", texto)
+        url = m.group(0) if m else "creado"
+        logger.info("Vigilante: issue abierto en %s (%s)", JARVIS_REPO, url)
+        return url
+    return ""
+
+
+def _vigilante_guardar_issue(clave: str, url: str) -> None:
+    try:
+        http.patch(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote(clave, safe='')}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"issue_url": url})
+    except Exception as e:
+        # Solo cuesta que mañana se intente abrir otro: se registra y se sigue.
+        logger.warning("Vigilante: no se pudo guardar la URL del issue de '%s' (%s)", clave, e)
+
+
+def _averias_del_registro() -> list:
+    """Errores que se repiten en `app_logs`, agrupados por origen.
+
+    Solo ERROR: los WARNING son la vida normal de este sistema (un 400 de un cliente, un
+    429) y ya tienen quien los mire donde importa. Lo que se repite es lo que está roto.
+    """
+    try:
+        entradas = (get_logs(nivel="ERROR", dias=VIGILANTE_VENTANA_DIAS, limite=200,
+                             credentials=None) or {}).get("entradas") or []
+    except Exception as e:
+        # Si no se puede preguntar, no se sabe: callar. Avisar aquí convertiría un
+        # Supabase lento en "el sistema está roto", que es mentira.
+        logger.warning("Vigilante: no se pudo leer el registro (%s)", e)
+        return []
+
+    por_origen: dict = {}
+    for e in entradas:
+        origen = str(e.get("source") or "?")
+        fila = por_origen.setdefault(origen, {"veces": 0, "ultima": ""})
+        fila["veces"] += 1
+        if (e.get("created_at") or "") > fila["ultima"]:
+            fila["ultima"] = e.get("created_at") or ""
+
+    return [{
+        "clave":     f"errores:{origen}",
+        "texto":     (f"{datos['veces']} errores en {origen} en las últimas "
+                      f"{VIGILANTE_VENTANA_DIAS * 24} h."),
+        "issue":     True,
+    } for origen, datos in sorted(por_origen.items(), key=lambda kv: -kv[1]["veces"])
+        if datos["veces"] >= VIGILANTE_MIN_ERRORES]
+
+
+def _reparar_rutina(hoy: str) -> tuple[list, list]:
+    """Reintenta el disparo de la rutina si hoy falló por algo que no es una pausa.
+
+    Es la única reparación de la lista blanca porque es la única cuyo efecto se puede
+    comprobar en el acto: el 2xx del trigger ES la verificación.
+    """
+    global _rutina_ultimo_fallo
+    fallo = _rutina_ultimo_fallo
+    if not fallo or fallo.get("fecha") != hoy or fallo.get("pausada"):
+        return [], []
+
+    resultado = _disparar_rutina(hoy)
+    if resultado["ok"]:
+        _rutina_ultimo_fallo = None
+        return [], [{"clave": "rutina", "texto": "El disparo de la rutina del briefing "
+                                                 "había fallado; lo he relanzado y ha entrado."}]
+    _rutina_ultimo_fallo = {"fecha": hoy, **resultado}
+    return [{"clave": "rutina",
+             "texto": (f"El disparo de la rutina del briefing sigue fallando tras "
+                       f"reintentarlo: {resultado['motivo'][:120]}"),
+             "issue": False}], []
+
+
+def _vigilar_sistema() -> dict:
+    """Mira si algo se está rompiendo, repara lo que sabe reparar y lo cuenta."""
+    global _ultima_vigilancia_sistema
+    if not VIGILANTE:
+        return {}
+    if time.time() - _ultima_vigilancia_sistema < VIGILANTE_CADA * 60:
+        return {}
+    _ultima_vigilancia_sistema = time.time()
+
+    hoy = _ahora_local().date().isoformat()
+    averias, reparadas = _reparar_rutina(hoy)
+    averias += _averias_del_registro()
+    if not averias and not reparadas:
+        return {}
+
+    partes = []
+    for r in reparadas:
+        estado = _vigilante_estado(f"reparado:{r['clave']}")
+        veces  = estado.get("veces") or 0
+        # Que lleve reparándose muchos días NO es una buena noticia: es una avería que
+        # sigue ahí y que el parche esconde. Se dice.
+        partes.append(r["texto"] + (f" (van {veces} veces; si se repite, el arreglo no "
+                                    f"está aquí)" if veces > 1 else ""))
+
+    for a in averias:
+        estado = _vigilante_estado(a["clave"])
+        veces  = estado.get("veces") or 0
+        desde  = str(estado.get("primera_vez") or "")[:10]
+        detalle = a["texto"]
+        if veces > 1 and desde:
+            detalle += f" Lleva {veces} avisos desde el {desde}."
+        # El issue solo la primera vez: uno por día del mismo fallo convierte el repo en
+        # el mismo ruido del que este vigilante viene a salvarte.
+        if a.get("issue") and estado and not estado.get("issue_url"):
+            url = _vigilante_abrir_issue(
+                f"[vigilante] {a['texto'][:80]}",
+                f"Detectado por el vigilante del sistema el {hoy}.\n\n{a['texto']}\n\n"
+                "Abierto automáticamente: el fallo se repite y no se puede reparar desde "
+                "el backend, así que necesita un cambio de código.",
+            )
+            if url:
+                _vigilante_guardar_issue(a["clave"], url)
+                detalle += f" He abierto un issue: {url}"
+        partes.append(detalle)
+
+    texto = " ".join(partes)
+    logger.warning("Vigilante: %d avería(s), %d reparada(s)", len(averias), len(reparadas))
+    try:
+        r = http.post(
+            RECORDATORIOS_URL,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:vigilante:{hoy}")),
+                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
+                  "cuando": datetime.now(timezone.utc).isoformat()},
+        )
+        if r.status_code == 409:
+            return {"vigilante_averias": len(averias)}     # ya avisado hoy
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Vigilante: no se pudo apuntar el aviso (%s)", e)
+        return {"vigilante_averias": len(averias)}
+    return {"vigilante_averias": len(averias), "vigilante_reparadas": len(reparadas),
+            "aviso_vigilante": True}
+
+
+def _vigilar_sistema_seguro() -> dict:
+    """Nada de esto puede tumbar el tick, que existe sobre todo para el resumen diario."""
+    try:
+        return _vigilar_sistema()
+    except Exception:
+        logger.exception("Vigilante: fallo inesperado en el tick")
         return {}
 
 

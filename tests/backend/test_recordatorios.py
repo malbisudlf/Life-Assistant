@@ -448,3 +448,214 @@ class TestAvisosAlMovil:
         r = client.post("/avisos/probar", headers=auth_headers)
         assert r.json()["canal"] == "movil"
         assert len(self._sondear(client)) == 1
+
+
+class TestVigilanteDelSistema:
+    """El vigilante general: el de la ingesta mira que sigan entrando datos de salud,
+    este mira si el sistema se rompe por cualquier otro sitio.
+
+    Las tres averías grandes del proyecto fueron la misma historia —algo dejó de
+    funcionar y nada lo dijo— y se descubrieron por casualidad semanas después. Lo que
+    se comprueba aquí es que la pregunta se haga sola, que lo reparado se CUENTE (un
+    parche silencioso esconde la avería) y que "no he podido preguntar" siga sin
+    disfrazarse de "todo va bien".
+    """
+
+    AHORA = datetime(2026, 8, 17, 8, 0, tzinfo=main.LOCAL_TZ)
+    HOY   = "2026-08-17"
+
+    @pytest.fixture(autouse=True)
+    def _encendido(self, monkeypatch):
+        monkeypatch.setattr(main, "VIGILANTE", True)
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.AHORA)
+        monkeypatch.setattr(main, "RUTINA_FIRE_URL", "https://api.anthropic.com/fire")
+        monkeypatch.setattr(main, "RUTINA_FIRE_TOKEN", "sk-ant-oat01-x")
+
+    def _errores(self, mock_requests, veces, origen="POST /health/ingest"):
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse(
+            [{"level": "ERROR", "source": origen, "created_at": f"2026-08-17T0{i}:00:00Z"}
+             for i in range(veces)]))
+
+    def test_calla_si_no_hay_nada_roto(self, mock_requests):
+        self._errores(mock_requests, 0)
+        assert main._vigilar_sistema() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_un_error_suelto_no_es_una_averia(self, mock_requests):
+        """Uno es la vida; lo que se repite es lo que está roto."""
+        self._errores(mock_requests, 2)
+        assert main._vigilar_sistema() == {}
+
+    def test_errores_repetidos_avisan_diciendo_el_origen(self, mock_requests):
+        self._errores(mock_requests, 4)
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = main._vigilar_sistema()
+        assert r["vigilante_averias"] == 1 and r["aviso_vigilante"] is True
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "4 errores en POST /health/ingest" in texto
+
+    def test_si_no_se_puede_leer_el_registro_se_calla(self, mock_requests):
+        """La regla de siempre: "no he podido preguntar" no es "está roto"."""
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse(None, 500, "boom"))
+        assert main._vigilar_sistema() == {}
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_el_aviso_es_uno_al_dia(self, mock_requests):
+        """Mismo uuid5 del día contra la clave primaria que el resto de avisos."""
+        self._errores(mock_requests, 4)
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._vigilar_sistema()
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert apuntado["id"] == str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"life-assistant:vigilante:{self.HOY}"))
+
+    def test_solo_mira_una_vez_por_hora(self, mock_requests):
+        self._errores(mock_requests, 0)
+        main._vigilar_sistema()
+        main._vigilar_sistema()
+        assert len(mock_requests.called("GET", "/rest/v1/app_logs")) == 1
+
+    def test_apagado_no_cuesta_ni_una_consulta(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "VIGILANTE", False)
+        assert main._vigilar_sistema() == {}
+        assert not mock_requests.called("GET", "/rest/v1/app_logs")
+
+    # ── La única reparación de la lista blanca ────────────────────────────────
+    def test_reintenta_el_disparo_de_la_rutina_y_lo_cuenta(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_rutina_ultimo_fallo",
+                            {"fecha": self.HOY, "ok": False, "pausada": False, "motivo": "500"})
+        self._errores(mock_requests, 0)
+        mock_requests.add("POST", "api.anthropic.com/fire", FakeResponse({}, 200))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = main._vigilar_sistema()
+        assert r["vigilante_reparadas"] == 1
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "lo he relanzado y ha entrado" in texto
+        assert main._rutina_ultimo_fallo is None
+
+    def test_una_rutina_pausada_no_se_reintenta(self, mock_requests, monkeypatch):
+        """Pausada es una decisión del usuario, no una avería. Reintentar contra algo que
+        se apagó a propósito es la forma más rápida de que el aviso deje de leerse."""
+        monkeypatch.setattr(main, "_rutina_ultimo_fallo",
+                            {"fecha": self.HOY, "ok": False, "pausada": True,
+                             "motivo": "Routine is paused."})
+        self._errores(mock_requests, 0)
+        assert main._vigilar_sistema() == {}
+        assert not mock_requests.called("POST", "api.anthropic.com/fire")
+
+    def test_si_el_reintento_falla_se_dice(self, mock_requests, monkeypatch):
+        """Lanzar algo no es comprobar que funciona: el 2xx del trigger ES la
+        verificación, y sin él la avería sigue viva y se cuenta como tal."""
+        monkeypatch.setattr(main, "_rutina_ultimo_fallo",
+                            {"fecha": self.HOY, "ok": False, "pausada": False, "motivo": "500"})
+        self._errores(mock_requests, 0)
+        mock_requests.add("POST", "api.anthropic.com/fire", FakeResponse(None, 500, "boom"))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = main._vigilar_sistema()
+        assert r["vigilante_averias"] == 1 and "vigilante_reparadas" in r
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "sigue fallando" in texto
+
+    def test_lo_reparado_dice_cuantas_veces_lleva(self, mock_requests, monkeypatch):
+        """Un fallo que se repara solo todos los días no está arreglado, está escondido."""
+        monkeypatch.setattr(main, "_rutina_ultimo_fallo",
+                            {"fecha": self.HOY, "ok": False, "pausada": False, "motivo": "500"})
+        self._errores(mock_requests, 0)
+        mock_requests.add("GET", "/rest/v1/vigilante_estado",
+                          FakeResponse([{"clave": "reparado:rutina", "veces": 4,
+                                         "primera_vez": "2026-08-13T09:00:00Z", "issue_url": None}]))
+        mock_requests.add("POST", "api.anthropic.com/fire", FakeResponse({}, 200))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._vigilar_sistema()
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "van 5 veces" in texto and "el arreglo no está aquí" in texto
+
+    def test_un_fallo_de_la_memoria_no_calla_el_aviso(self, mock_requests):
+        """Perder las cifras es peor que no perderlas, y muchísimo menos peor que
+        callarse: si la migración no está aplicada, el vigilante sigue avisando."""
+        self._errores(mock_requests, 4)
+        mock_requests.add("GET", "/rest/v1/vigilante_estado",
+                          FakeResponse(None, 404, "no existe la tabla"))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._vigilar_sistema()["aviso_vigilante"] is True
+
+    def test_no_puede_tumbar_el_tick(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_vigilar_sistema",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert main._vigilar_sistema_seguro() == {}
+
+
+class TestVigilanteAbreIssues:
+    """Lo que necesita un cambio de código no se puede arreglar desde el backend: de las
+    averías reales del proyecto, ninguna se podía. Abrir el issue es la única forma de
+    "arreglarse a sí mismo" que cubre ese caso, y por el camino revisable."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, monkeypatch):
+        monkeypatch.setattr(main, "VIGILANTE_ISSUES", True)
+        monkeypatch.setattr(main, "JARVIS_REPO", "malbisudlf/Life-Assistant")
+
+    def _servidor(self, monkeypatch, herramientas, resultado=None):
+        monkeypatch.setattr(main, "_mcp_config", lambda: {"github": {"url": "https://x", "token": "t"}})
+        llamadas = []
+
+        def _rpc(servidor, metodo, params):
+            llamadas.append((servidor, metodo, params))
+            if metodo == "tools/list":
+                return {"tools": [{"name": n} for n in herramientas]}
+            return resultado or {"content": [{"type": "text", "text":
+                                 "https://github.com/malbisudlf/Life-Assistant/issues/70"}]}
+
+        monkeypatch.setattr(main, "_mcp_rpc", _rpc)
+        return llamadas
+
+    def test_abre_el_issue_y_devuelve_la_url(self, monkeypatch):
+        llamadas = self._servidor(monkeypatch, ["get_me", "create_issue"])
+        url = main._vigilante_abrir_issue("[vigilante] algo", "cuerpo")
+        assert url == "https://github.com/malbisudlf/Life-Assistant/issues/70"
+        args = [c for c in llamadas if c[1] == "tools/call"][0][2]["arguments"]
+        assert args == {"owner": "malbisudlf", "repo": "Life-Assistant",
+                        "title": "[vigilante] algo", "body": "cuerpo"}
+
+    def test_conoce_la_otra_forma_del_servidor_de_github(self, monkeypatch):
+        """`issue_write` pide `method`; `create_issue` no. Se buscan por nombre EXACTO:
+        mandar argumentos inventados a una herramienta que ESCRIBE es peor que no abrir
+        el issue."""
+        llamadas = self._servidor(monkeypatch, ["issue_write"])
+        main._vigilante_abrir_issue("t", "c")
+        args = [c for c in llamadas if c[1] == "tools/call"][0][2]["arguments"]
+        assert args["method"] == "create"
+
+    def test_sin_herramienta_conocida_no_inventa_nada(self, monkeypatch):
+        self._servidor(monkeypatch, ["add_issue_comment", "search_issues"])
+        assert main._vigilante_abrir_issue("t", "c") == ""
+
+    def test_sin_repo_configurado_no_se_intenta(self, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_REPO", "")
+        assert main._vigilante_abrir_issue("t", "c") == ""
+
+    def test_un_servidor_que_revienta_no_tumba_el_vigilante(self, monkeypatch):
+        monkeypatch.setattr(main, "_mcp_config", lambda: {"github": {}})
+        monkeypatch.setattr(main, "_mcp_rpc",
+                            lambda *a: (_ for _ in ()).throw(RuntimeError("caído")))
+        assert main._vigilante_abrir_issue("t", "c") == ""
+
+    def test_el_issue_solo_se_abre_la_primera_vez(self, mock_requests, monkeypatch):
+        """Uno por día del mismo fallo convertiría el repo en el ruido del que este
+        vigilante viene a salvarte."""
+        monkeypatch.setattr(main, "VIGILANTE", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 17, 8, 0, tzinfo=main.LOCAL_TZ))
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse(
+            [{"level": "ERROR", "source": "POST /x", "created_at": "2026-08-17T01:00:00Z"}] * 3))
+        mock_requests.add("GET", "/rest/v1/vigilante_estado", FakeResponse(
+            [{"clave": "errores:POST /x", "veces": 2, "primera_vez": "2026-08-15T09:00:00Z",
+              "issue_url": "https://github.com/malbisudlf/Life-Assistant/issues/70"}]))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        abiertos = []
+        monkeypatch.setattr(main, "_vigilante_abrir_issue",
+                            lambda t, c: abiertos.append(t) or "url")
+        main._vigilar_sistema()
+        assert abiertos == []
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "Lleva 3 avisos desde el 2026-08-15" in texto

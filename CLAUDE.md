@@ -876,6 +876,40 @@ Ficheros clave:
   - **Una consulta por hora como mucho** (`INGESTA_VIGILA_CADA_MIN`): el tick pasa cada 5
     minutos. En memoria a propósito — perderlo en un cold start cuesta una consulta.
 
+- **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
+  `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
+  salud—; este mira si el sistema se rompe por cualquier otro sitio. `app_logs` y
+  `diagnostico` ya guardaban la respuesta; lo que faltaba era **alguien que hiciera la
+  pregunta sin que se lo pidan**, que es lo que convirtió las tres averías grandes en
+  semanas de silencio. Tres reglas:
+  - **El listón va en CÓDIGO.** Las reglas deciden SI hay avería (hoy: ≥
+    `VIGILANTE_MIN_ERRORES` errores del mismo origen en la ventana, y el disparo de la
+    rutina fallado); el modelo, si acaso, redacta. Misma frontera que
+    `_motivos_proactivos`: dejarle decidir a él qué es un problema acaba en un aviso
+    diario porque sí.
+  - **Reparar en silencio TAPA la avería.** Lo reparado se dice, y se dice **cuántas
+    veces lleva** (`vigilante_estado.veces`): un fallo que se arregla solo todos los días
+    no está arreglado, está escondido.
+  - **Solo se repara lo que se puede verificar.** La lista blanca es cerrada y hoy tiene
+    UNA entrada, el disparo de la rutina, porque su 2xx ES la comprobación del efecto —
+    *lanzar algo no es comprobar que funciona*. Lo que necesita un cambio de código no se
+    repara: se abre un **issue** en `JARVIS_REPO` por el MCP de GitHub que haya conectado
+    (`_vigilante_abrir_issue`, solo la primera vez de cada avería: uno por día del mismo
+    fallo convierte el repo en el ruido del que esto viene a salvarte). Las herramientas
+    se buscan por nombre EXACTO (`create_issue`/`issue_write`, que piden argumentos
+    distintos): inventarle argumentos a una herramienta que ESCRIBE es peor que no abrir
+    el issue.
+  Lo que queda fuera **a propósito**: la rutina PAUSADA (es una decisión del usuario, no
+  una avería), el silencio de la ingesta (ya tiene vigilante, y dos avisos de lo mismo se
+  dejan de leer los dos), y los envíos fallidos del resumen/informe y los avisos que el
+  móvil no recoge — **ya se reintentan solos** en cada tick (`_liberar_envio`,
+  `_rescatar_avisos`). Y lo que **no se puede** detectar desde aquí: que HA deje de
+  sondear, porque a este código lo ejecuta ese mismo tick; si HA muere, el vigilante
+  muere con él y solo lo ve algo de fuera (el workflow de Actions de respaldo).
+  Un fallo leyendo el registro **calla** (la regla de siempre: "no he podido preguntar" no
+  es "está roto") y un fallo de `vigilante_estado` **no calla el aviso**: sale sin cifras
+  y sin issue. Si la migración no se aplica, lo único degradado es el vigilante.
+
 - **De quién es cada fila** (columna `health_metrics.fuente`, `FUENTE_AUTO_EXPORT` /
   `FUENTE_ATAJO` / `FUENTE_PRESENCIA`): las dos ingestas escriben en la MISMA tabla y
   hasta ahora sin firma, así que "¿cuál de las dos ha dejado de correr?" se deducía a ojo
@@ -1056,7 +1090,9 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
 `JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `CASA_ORDEN_TTL`,
 `JARVIS_DESTILAR`, `JARVIS_DESTILAR_DESDE`, `JARVIS_DESTILAR_MINUTOS`,
-`JARVIS_PROACTIVO`, `JARVIS_PROACTIVO_HORA`, `JARVIS_PROACTIVO_SIN_ENTRENO`.
+`JARVIS_PROACTIVO`, `JARVIS_PROACTIVO_HORA`, `JARVIS_PROACTIVO_SIN_ENTRENO`,
+`VIGILANTE`, `VIGILANTE_CADA_MIN`, `VIGILANTE_MIN_ERRORES`, `VIGILANTE_VENTANA_DIAS`,
+`VIGILANTE_ISSUES`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
@@ -2143,7 +2179,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
 `20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
 `20260816_brief_instantanea`, `20260816_informe_envios`,
-`20260816_health_fuente`.
+`20260816_health_fuente`, `20260817_vigilante_estado`.
 
 ## Convenciones
 
