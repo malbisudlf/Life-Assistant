@@ -876,6 +876,71 @@ Ficheros clave:
   - **Una consulta por hora como mucho** (`INGESTA_VIGILA_CADA_MIN`): el tick pasa cada 5
     minutos. En memoria a propósito — perderlo en un cold start cuesta una consulta.
 
+- **Reglas proactivas** (`_REGLAS`, `_correr_reglas()`, en el tick de HA): lo que Jarvis
+  dice sin que le hablen, aparte del aviso agrupado de `_motivos_proactivos`. Todas dejan
+  su aviso por `_apuntar_aviso`, así que heredan el presupuesto, el silenciado y la
+  memoria **sin poder olvidarse de mirarlos**; añadir una regla es escribir la función y
+  meterla en `_REGLAS`. Ninguna puede llevarse por delante a las demás ni al tick.
+  - **«Sal ya»** (`_regla_sal_ya`): el aviso se **PROGRAMA, no se manda** — la salida se
+    calcula UNA vez, cuando el evento entra en la ventana, y se apunta con `cuando` a su
+    hora. Calcularla en cada tick serían decenas de llamadas de pago a Maps por evento, y
+    por eso la huella se comprueba **antes** de llamar a Maps. Con `voz` si estás en casa:
+    el móvil puede estar en otra habitación y este es justo el aviso que no vale leído
+    diez minutos tarde. Si la hora de salir ya pasó **no se apunta**.
+  - **«No llegas»** (`_regla_no_llegas`): dos citas que no se solapan —así que Outlook las
+    da por buenas— pero entre las que no da tiempo a moverse. Se avisa **la noche antes**,
+    que es cuando todavía se puede mover algo.
+  - **«Mañana empiezas pronto»** (`_regla_madrugon`): cruza el primer evento de mañana con
+    tu hora habitual de dormirte (`_hora_habitual_dormir`, **mediana** de `sleep_start` —
+    una noche en vela desplaza la media y no dice nada del hábito; y una hora de madrugada
+    cuenta como "más tarde", no como dieciocho horas antes). Sin base, no habla.
+  - **Firma de malestar** (`_regla_malestar`): las tres señales a la vez. Es el espejo en
+    Python de `_firmaMalestar` de `helpers.js` — se acepta la duplicación a propósito
+    porque las conclusiones no se portan al backend, y allí solo se ve abriendo el
+    dashboard, que es justo lo que no vas a hacer el día que tu cuerpo dice que no.
+  - **Hueco para entrenar** (`_regla_hueco_entreno`): la hora concreta libre de mañana.
+    Sin histórico de entrenos no se regaña, la regla de siempre.
+  - **Al salir de casa** (`_regla_al_salir_de_casa`): se dispara en `POST /ha/presencia` al
+    CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **No apaga nada**:
+    el catálogo lo empuja HA cada hora y apagar con un dato viejo es peor que preguntar.
+    El PC solo si `PC_ENTIDAD` está declarada: adivinar cuál es por el nombre acaba
+    apagando otra cosa.
+  Las reglas que necesitan salud reciben la FUNCIÓN que la lee, no el dato: pasando el
+  dato, el tick de cada 5 minutos traía 30 días de métricas aunque la regla fuera a
+  salirse por su guarda de hora.
+
+- **Gobierno de los avisos** (`_apuntar_aviso`, el despacho de recordatorios, tabla
+  `avisos_reglas` + columnas nuevas en `jarvis_recordatorios`): un asistente proactivo
+  tiene **un solo modo de fallo, volverse ruido**, y no falla de golpe — falla porque cada
+  regla parece razonable por separado hasta que un día se dejan de leer todos los avisos a
+  la vez, buenos incluidos. Tres piezas, y las tres viven en la PUERTA y no en cada regla,
+  para que una regla nueva las herede sin poder olvidarse (misma razón que el interruptor
+  del resumen dentro de `enviar_brief_si_toca`):
+  - **Presupuesto**: los avisos compiten en vez de sumarse. `AVISOS_MAX_DIA` al día, el
+    despacho ordena **por prioridad y no por fecha** (con el orden por fecha, un "sal ya"
+    se quedaba fuera por tres avisos de la noche anterior) y lo que no entra **se pospone**
+    a `AVISOS_HORA_DIFERIDOS` en vez de perderse. Lo urgente (`PRIO_SIN_TOPE`) se salta el
+    tope: si el presupuesto pudiera con lo que caduca en minutos, el aviso que más corre
+    sería el primero en caerse. Un aviso con `caduca` vencida **no se manda**: llegar tarde
+    no es llegar, es mentir, y enseña a no fiarse del canal.
+  - **Utilidad** (`_valorar_regla`, `POST /avisos/{id}/util`): botones en la notificación
+    de HA. Es lo ÚNICO que hace que el sistema mejore sin que nadie lo toque — sin esa
+    señal, la única forma de que una regla mala desaparezca es dejar de mirar los avisos,
+    que se lleva por delante a los buenos. El contador de "no útil" es **consecutivo** y un
+    "útil" lo pone a cero (se busca una regla que dejó de valer, no una que tuvo un mal
+    día), y **no contestar no vota**. Silenciar es **visible**: se avisa al hacerlo, con
+    cómo revertirlo, y sale en `GET /avisos/estado`.
+  - **Memoria** (`_ya_dicho`, columna `huella`): la idempotencia vieja era por DÍA, así que
+    "llevas 3 días sin entrenar" salía el jueves, el viernes y el sábado y solo el primero
+    informaba. La huella es la SITUACIÓN, no el texto: en el proactivo son los motivos en
+    crudo, antes de que el modelo los redacte, porque dos redacciones del mismo hecho son
+    el mismo aviso.
+  Y la frontera que no se relaja: **lo que pediste tú no se gobierna**. Un recordatorio sin
+  `regla` (`recordarme`) no cuenta contra el tope ni se puede silenciar — la misma regla
+  que hace que el interruptor del resumen no tape un envío pedido a mano.
+  Los fallos caen hacia HABLAR: si no se puede comprobar el silenciado o la huella, se
+  avisa igual. Repetir un aviso molesta; callarlo puede costar el dato.
+
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
   salud—; este mira si el sistema se rompe por cualquier otro sitio. `app_logs` y
@@ -1092,7 +1157,10 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `JARVIS_DESTILAR`, `JARVIS_DESTILAR_DESDE`, `JARVIS_DESTILAR_MINUTOS`,
 `JARVIS_PROACTIVO`, `JARVIS_PROACTIVO_HORA`, `JARVIS_PROACTIVO_SIN_ENTRENO`,
 `VIGILANTE`, `VIGILANTE_CADA_MIN`, `VIGILANTE_MIN_ERRORES`, `VIGILANTE_VENTANA_DIAS`,
-`VIGILANTE_ISSUES`.
+`VIGILANTE_ISSUES`, `AVISOS_MAX_DIA`, `AVISOS_NO_UTILES`, `AVISOS_REPETIR_DIAS`,
+`AVISOS_HORA_DIFERIDOS`, `REGLAS_PROACTIVAS`, `SALIR_VENTANA_MIN`, `SALIR_ANTES_MIN`,
+`REGLAS_HORA_NOCHE`, `REGLAS_HORA_MANANA`, `MADRUGON_HASTA`, `SUENO_OBJETIVO_H`,
+`PREP_MANANA_MIN`, `HUECO_ENTRENO_MIN`, `PC_ENTIDAD`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
@@ -2179,7 +2247,8 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
 `20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
 `20260816_brief_instantanea`, `20260816_informe_envios`,
-`20260816_health_fuente`, `20260817_vigilante_estado`.
+`20260816_health_fuente`, `20260817_vigilante_estado`,
+`20260818_avisos_gobierno`.
 
 ## Convenciones
 

@@ -77,7 +77,10 @@ class TestDespacho:
         mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
         assert main._despachar_recordatorios() == {"recordatorios": 1}
         assert "llamar al dentista" in correos[0][0]
-        assert mock_requests.called("PATCH", "jarvis_recordatorios")[0][2]["json"] == {"enviado": True}
+        reserva = mock_requests.called("PATCH", "jarvis_recordatorios")[0][2]["json"]
+        # `enviado_at` es lo que cuenta el presupuesto diario: sin él no se sabe
+        # cuántos avisos han salido hoy, solo cuáles estaban programados para hoy.
+        assert reserva["enviado"] is True and reserva["enviado_at"]
 
     def test_si_otro_tick_se_lo_llevo_no_se_manda_dos_veces(self, mock_requests, correos):
         """La reserva ES la pregunta: un PATCH condicional que no devuelve fila significa
@@ -98,7 +101,9 @@ class TestDespacho:
 
         assert main._despachar_recordatorios() == {"recordatorios": 0}
         liberado = mock_requests.called("PATCH", "jarvis_recordatorios")[-1][2]["json"]
-        assert liberado == {"enviado": False}
+        # Se limpia también `enviado_at`: si se quedara puesto, el aviso liberado
+        # seguiría contando contra el presupuesto de hoy sin haberse entregado.
+        assert liberado == {"enviado": False, "enviado_at": None}
 
     def test_un_fallo_de_supabase_no_revienta(self, mock_requests, correos):
         """El tick existe sobre todo para el resumen diario: esto no puede tumbarlo."""
@@ -343,7 +348,8 @@ class TestAvisosAlMovil:
         assert main._notificar("⏰ pastilla", "tomar la pastilla") == "movil"
         assert correos == [], "no se manda por los dos canales a la vez"
         avisos = self._sondear(client)
-        assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla"}]
+        assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla",
+                           "voz": False, "id": ""}]
 
     def test_la_cola_se_vacia_al_recogerla(self, client):
         self._sondear(client)
@@ -412,7 +418,7 @@ class TestAvisosAlMovil:
         monkeypatch.setattr(main, "enviar_correo", _revienta)
         assert main._despachar_recordatorios() == {"recordatorios": 0}
         liberado = [c for c in mock_requests.called("PATCH", "jarvis_recordatorios")
-                    if c[2]["json"] == {"enviado": False}]
+                    if c[2]["json"].get("enviado") is False]
         assert len(liberado) == 1
 
     def test_la_cola_esta_acotada(self, client, correos):
@@ -659,3 +665,156 @@ class TestVigilanteAbreIssues:
         assert abiertos == []
         texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
         assert "Lleva 3 avisos desde el 2026-08-15" in texto
+
+
+class TestGobiernoDeAvisos:
+    """Las tres piezas que impiden que un asistente proactivo se vuelva ruido.
+
+    No fallan de golpe: cada regla parece razonable por separado hasta que un día se
+    dejan de leer todos los avisos a la vez, buenos incluidos. Lo que se comprueba aquí
+    es que los avisos COMPITAN (presupuesto), que una regla ignorada se calle SOLA y de
+    forma visible (utilidad), y que no se repita lo mismo mientras nada cambia (memoria).
+    """
+
+    AHORA = datetime(2026, 8, 17, 20, 0, tzinfo=main.LOCAL_TZ)
+
+    @pytest.fixture(autouse=True)
+    def _reloj(self, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.AHORA)
+
+    def _pendientes(self, mock_requests, filas):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse(filas))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+
+    def _fila(self, n=1, regla="proactivo", prioridad=main.PRIO_NORMAL, **extra):
+        return {"id": f"1111111{n}-2222-3333-4444-555555555555", "texto": f"aviso {n}",
+                "cuando": "2026-08-17T05:00:00+00:00", "regla": regla,
+                "prioridad": prioridad, **extra}
+
+    # ── 0.1 Presupuesto ───────────────────────────────────────────────────────
+    def test_lo_que_no_entra_en_el_tope_se_pospone_no_se_pierde(self, mock_requests,
+                                                                correos, monkeypatch):
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        self._pendientes(mock_requests, [self._fila()])
+        r = main._despachar_recordatorios()
+        assert r == {"recordatorios": 0, "avisos_pospuestos": 1}
+        assert correos == []
+        # Pospuesto a mañana por la mañana, no marcado como enviado.
+        pospuesto = mock_requests.called("PATCH", "jarvis_recordatorios")[-1][2]["json"]
+        assert pospuesto["cuando"].startswith("2026-08-18T06:30")   # 08:30 local
+
+    def test_lo_urgente_se_salta_el_presupuesto(self, mock_requests, correos, monkeypatch):
+        """Si el tope pudiera con lo urgente, el aviso que más corre sería el primero en
+        caerse — justo al revés de lo que tiene que pasar."""
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        self._pendientes(mock_requests, [self._fila(prioridad=main.PRIO_URGENTE)])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert len(correos) == 1
+
+    def test_lo_que_pediste_tu_no_se_gobierna(self, mock_requests, correos, monkeypatch):
+        """Un recordatorio sin regla lo pediste tú: obedecer al presupuesto antes que a
+        quien lo puso sería el sitio equivocado."""
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        self._pendientes(mock_requests, [self._fila(regla=None)])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+
+    def test_un_aviso_caducado_no_se_manda(self, mock_requests, correos):
+        """Un "sal ya" pasada la hora de salir no es un aviso tarde: es una mentira, y
+        enseña a no fiarse del canal."""
+        self._pendientes(mock_requests, [self._fila(caduca="2026-08-17T05:30:00+00:00")])
+        assert main._despachar_recordatorios() == {"recordatorios": 0,
+                                                   "avisos_caducados": 1}
+        assert correos == []
+
+    def test_se_gasta_en_lo_que_mas_corre(self, mock_requests):
+        """El orden es por prioridad, no por cuándo se apuntó."""
+        self._pendientes(mock_requests, [])
+        main._despachar_recordatorios()
+        url = mock_requests.called("GET", "jarvis_recordatorios")[0][1]
+        assert "order=prioridad.asc" in url
+
+    # ── 0.2 Utilidad ──────────────────────────────────────────────────────────
+    def test_marcar_no_util_tres_veces_silencia_la_regla(self, mock_requests, monkeypatch):
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([{"utiles": 0, "no_utiles": 2,
+                                                                "silenciada": False}]))
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        main._valorar_regla("proactivo", False)
+        guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
+        assert guardado["no_utiles"] == 3 and guardado["silenciada"] is True
+
+    def test_un_util_pone_el_contador_a_cero(self, mock_requests):
+        """Se busca una regla que ha dejado de valer, no una que tuvo un mal día."""
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([{"utiles": 1, "no_utiles": 2,
+                                                                "silenciada": False}]))
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        main._valorar_regla("proactivo", True)
+        guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
+        assert guardado["no_utiles"] == 0 and "silenciada" not in guardado
+
+    def test_silenciar_se_dice(self, mock_requests):
+        """Una regla apagada en silencio es el error que persigue el resto del proyecto."""
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([{"no_utiles": 2}]))
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._valorar_regla("reloj", False)
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert "He dejado de avisarte de 'reloj'" in apuntado["texto"]
+        assert apuntado["regla"] == "", "el aviso del silencio no puede silenciarse a sí mismo"
+
+    def test_una_regla_silenciada_no_apunta_nada(self, mock_requests):
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([{"silenciada": True}]))
+        assert main._apuntar_aviso("proactivo", "algo") is False
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_si_no_se_puede_preguntar_se_habla(self, mock_requests):
+        """Ante la duda se habla: callar por un fallo de Supabase es el lado que no se
+        recupera."""
+        mock_requests.add("GET", "avisos_reglas", FakeResponse(None, 500, "boom"))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._apuntar_aviso("proactivo", "algo") is True
+
+    def test_valorar_exige_credencial(self, client):
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/util",
+                        json={"util": True})
+        assert r.status_code == 403
+
+    def test_ha_puede_valorar_con_su_token(self, client, mock_requests):
+        mock_requests.add("PATCH", "jarvis_recordatorios",
+                          FakeResponse([{"id": "x", "regla": None}]))
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/util",
+                        json={"util": True}, headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    # ── 0.3 Memoria ───────────────────────────────────────────────────────────
+    def test_no_repite_la_misma_situacion(self, mock_requests):
+        """La idempotencia vieja era por día: "llevas 3 días sin entrenar" salía el
+        jueves, el viernes y el sábado, y solo el primero informaba de algo."""
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([]))
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([{"id": "ya"}]))
+        assert main._apuntar_aviso("proactivo", "algo", huella="sin_entrenar:3") is False
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_una_situacion_nueva_si_habla(self, mock_requests):
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([]))
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([]))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        assert main._apuntar_aviso("proactivo", "algo", huella="sin_entrenar:4") is True
+
+    def test_la_ventana_de_la_memoria_es_por_fecha(self, mock_requests):
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([]))
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([]))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._apuntar_aviso("proactivo", "algo", huella="x")
+        url = [c for c in mock_requests.called("GET", "jarvis_recordatorios")
+               if "huella=eq" in c[1]][0][1]
+        assert "creado=gte." in url
+
+    # ── El canal de voz (1.1) ─────────────────────────────────────────────────
+    def test_la_voz_viaja_hasta_ha(self, client, mock_requests):
+        """El backend decide QUÉ se oye; por qué altavoz lo decide el YAML de HA, igual
+        que con el móvil."""
+        client.get("/ha/avisos-pending", headers={"X-Auth-Token": "ha-poll-token"})
+        main._notificar("sal ya", "sal en 10 minutos", voz=True, aviso_id="abc")
+        avisos = client.get("/ha/avisos-pending",
+                            headers={"X-Auth-Token": "ha-poll-token"}).json()["avisos"]
+        assert avisos[0]["voz"] is True and avisos[0]["id"] == "abc"
