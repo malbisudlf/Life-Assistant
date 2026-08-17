@@ -909,6 +909,61 @@ Ficheros clave:
   dato, el tick de cada 5 minutos traía 30 días de métricas aunque la regla fuera a
   salirse por su guarda de hora.
 
+- **Reglas que Jarvis propone y tú apruebas** (`_PLANTILLAS_REGLA`, `proponer_regla`,
+  tabla `reglas_usuario`): las de `_REGLAS` son condiciones escritas a mano y crecer así
+  cuesta un despliegue por idea. Esto deja crecer hablando **sin mover el listón al
+  criterio del modelo**, y lo que lo reconcilia es una sola decisión: **el modelo no
+  escribe reglas, RELLENA plantillas**. Las condiciones siguen en Python, revisables en un
+  diff; en la tabla solo se guarda cuál y con qué parámetros. Un modelo que pudiera
+  definir la condición sería un modelo decidiendo cuándo interrumpirte, que es lo que el
+  proyecto lleva evitando desde el principio. Tres cosas más:
+  - **El alta pasa por el botón de confirmar** (`confirmar: True`), como `mcp_conectar`.
+  - **Los parámetros se filtran a los campos que declara la plantilla**: los redacta un
+    modelo, y sin el filtro un nombre inventado quedaría guardado y evaluándose como si
+    significara algo. Misma regla que el despachador de herramientas.
+  - **Las plantillas que leen salud se evalúan una vez por hora**, no en cada tick: traen
+    30 días de métricas. Y una plantilla que ya no exista en el código se ignora en vez de
+    reventar.
+
+- **La hora del aviso del reloj se aprende** (`_hora_aviso_reloj`): `RELOJ_AVISO_HORA` era
+  una constante elegida a ojo, y este aviso tiene una condición dura —o llega antes de que
+  te duermas o no sirve—. Sale de la mediana de tus `sleep_start`, una hora antes. Tres
+  cosas: la barrera barata (la hora configurada) se comprueba ANTES, porque la aprendida
+  nunca es anterior y así el tick de cada 5 min no paga una consulta; se cachea por día; y
+  si la hora calculada **cruza la medianoche se acota a `RELOJ_AVISO_TOPE`** (23:30),
+  porque 00:30 ya no es "antes de dormir" y además, en una comparación `(hora, minuto)`
+  del mismo día, es MENOR que las 21:30 y el aviso saldría a media tarde.
+
+- **Informe de utilidad** (`_informe_avisos`, sección `## AVISOS` del informe semanal):
+  cuántos avisos mandó cada regla y cuántos sirvieron. Va en el semanal y no en el diario
+  porque es una pregunta de tendencia: en un día no se ve si una regla ha dejado de valer.
+
+- **Vigilar una página** (`vigilar_pagina`, `_revisar_vigilancias`, tabla `vigilancias`):
+  la capacidad proactiva **genérica**. Las reglas de `_REGLAS` son condiciones escritas a
+  mano; esto es una que las cubre todas para lo de fuera (un precio, una plaza, una nota
+  publicada) y **se crea hablando**, sin tocar código. Cuatro cosas:
+  - **Dos preguntas distintas, no una**: "¿ha cambiado?" (huella del contenido) y "¿ya
+    aparece esto?" (`buscar`). Mezclarlas daría un aviso cada vez que cambia un banner.
+  - **La huella se guarda al dar de alta**, bajando la página en ese momento: si no, la
+    primera revisión avisaría de un cambio que no ha habido. De paso comprueba que la
+    página se puede leer — *dar por buena un alta que no funciona* es el bug del agente PC.
+  - **El aviso lleva la URL, no un trozo de la página.** El contenido lo controla un
+    desconocido y no se le pasa a ningún modelo para redactar nada.
+  - La URL pasa por `url_web_permitida()` (SSRF) y el rechazo **no dice por qué**, como en
+    `leer_pagina`.
+
+- **El correo entrante** (`_revisar_correo`, IMAP con la librería estándar): saca del buzón
+  lo **accionable con fecha** y lo deja como aviso. **No es resumir el correo** — eso ya lo
+  hace la rutina del briefing y hacerlo dos veces sería peor que no hacerlo. Es la
+  capacidad más delicada en privacidad del proyecto, así que las restricciones van por
+  delante y no como añadido: **apagada** sin `IMAP_HOST`; **solo cabeceras** (asunto,
+  remitente, fecha) — el cuerpo no se lee ni viaja a ningún modelo, y lo que no se lee no
+  se puede filtrar; **`BODY.PEEK`**, que no marca nada como leído (un asistente que te
+  descoloca el buzón deja de usarse en una semana); y **no se guarda nada** en Supabase.
+  Lo extraído se **propone como aviso**, nunca se crea en el calendario: lo que sale de un
+  asunto interpretado por un modelo no tiene la fiabilidad para tocar la agenda sola, misma
+  frontera que `sugerencia_evento()`.
+
 - **Gobierno de los avisos** (`_apuntar_aviso`, el despacho de recordatorios, tabla
   `avisos_reglas` + columnas nuevas en `jarvis_recordatorios`): un asistente proactivo
   tiene **un solo modo de fallo, volverse ruido**, y no falla de golpe — falla porque cada
@@ -1160,7 +1215,10 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `VIGILANTE_ISSUES`, `AVISOS_MAX_DIA`, `AVISOS_NO_UTILES`, `AVISOS_REPETIR_DIAS`,
 `AVISOS_HORA_DIFERIDOS`, `REGLAS_PROACTIVAS`, `SALIR_VENTANA_MIN`, `SALIR_ANTES_MIN`,
 `REGLAS_HORA_NOCHE`, `REGLAS_HORA_MANANA`, `MADRUGON_HASTA`, `SUENO_OBJETIVO_H`,
-`PREP_MANANA_MIN`, `HUECO_ENTRENO_MIN`, `PC_ENTIDAD`.
+`PREP_MANANA_MIN`, `HUECO_ENTRENO_MIN`, `PC_ENTIDAD`, `VIGILANCIAS_MAX`,
+`VIGILANCIA_CADA_MIN`, `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_CARPETA`,
+`CORREO_CADA_MIN`, `CORREO_HORAS`, `CORREO_MAX`, `REGLAS_USUARIO_MAX`,
+`RELOJ_AVISO_ANTES_MIN`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
@@ -2248,7 +2306,8 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
 `20260816_brief_instantanea`, `20260816_informe_envios`,
 `20260816_health_fuente`, `20260817_vigilante_estado`,
-`20260818_avisos_gobierno`.
+`20260818_avisos_gobierno`, `20260819_vigilancias`,
+`20260820_reglas_usuario`.
 
 ## Convenciones
 

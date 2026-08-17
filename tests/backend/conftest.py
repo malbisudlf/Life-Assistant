@@ -140,6 +140,7 @@ def _limpiar_estado():
     # La caché del aviso de reloj: sin resetearla, el primer test que lo dispare dejaría
     # marcado el día y los siguientes no verían nada (mismo criterio que _token_cache).
     main._reloj_avisado_dia = None
+    main._reloj_hora_cache.clear()
     main._proactivo_dia = None
     main._ultima_destilacion = 0.0
     # El vigilante de la ingesta solo mira una vez por hora: sin resetear el reloj, el
@@ -149,6 +150,10 @@ def _limpiar_estado():
     # rutina: sin resetearlo, un test que lo deje apuntado haría que el siguiente
     # reintentara un disparo que no le corresponde.
     main._ultima_vigilancia_sistema = 0.0
+    main._ultima_regla_salud = 0.0
+    main._ultima_vigilancia_web = 0.0
+    main._ultima_revision_correo = 0.0
+    main._reglas_dia.clear()
     main._rutina_ultimo_fallo = None
     # La cola de avisos al móvil y el reloj del último sondeo de HA: sin resetearlos, un
     # test que encole un aviso se lo dejaría al siguiente, y el canal vivo de uno
