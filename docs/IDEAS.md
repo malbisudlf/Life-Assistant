@@ -117,7 +117,8 @@ Lo que se decidió NO hacer, y por qué:
 >   antes solo se veía mirando la tabla en crudo, y el `diagnostico` de Jarvis enseña la
 >   última escritura de cada cliente.
 >
-> **5.3 sigue pendiente.**
+> **5.3 y 5.4 siguen pendientes.** El 5.3 nació de estrenar el canal de avisos al móvil:
+> el único fallo que ese canal no sabe detectar es justo el que ocurrió la primera noche.
 
 ### 5.1 Vigilante de ingesta ● — ✅ HECHO
 
@@ -146,7 +147,31 @@ mirando la tabla en crudo — QUÉ FUENTE escribió cada fila (Health Auto Expor
 los huecos intercalados. Eso es lo que distingue "el Atajo dejó de correr" de "el reloj no
 se llevó", que hoy sigue habiendo que deducirlo.
 
-### 5.3 Copia de seguridad de Supabase ●●
+### 5.3 El acuse de entrega de los avisos al móvil ●
+
+**Qué.** Que la automatización de HA confirme (`POST /ha/avisos-entregados`) que ha
+mandado cada aviso, y que lo recogido-pero-no-confirmado se rescate por correo igual que
+hoy se rescata lo que nadie recoge.
+
+**Por qué.** Es el punto ciego que dejó al descubierto el estreno del canal (ver "Bugs
+históricos" en `CLAUDE.md`): con el `notify` mal escrito, HA recogía el aviso y lo perdía
+al mandarlo, y desde el backend eso es **idéntico a haberlo entregado** — la única señal
+que hay es el sondeo. El rescate por correo no salta, porque cubre lo que nadie recoge, y
+un aviso recogido está fuera de la cola. Así que hoy el único fallo del canal que no se
+detecta es justo el que ocurrió.
+
+**Cuidado, que aquí está la parte que no es obvia.** El ack **no puede ser obligatorio**:
+si se da por perdido todo lo que no se confirma, una instalación que no haya añadido esa
+línea al YAML recibiría cada aviso dos veces, por móvil y por correo. Tiene que
+autodetectarse igual que el canal — mientras no llegue ni un ack, se sigue como ahora; en
+cuanto llega el primero, se puede exigir. Es la misma regla que ya gobierna el canal
+entero: **la señal es que alguien conteste, no un interruptor que haya que acordarse de
+poner**.
+
+**Por dónde.** Un id por aviso, una lista de "recogidos pendientes de confirmar" en
+memoria, y `_rescatar_avisos` mirando también esa lista pasado un plazo.
+
+### 5.4 Copia de seguridad de Supabase ●●
 
 **Qué.** Un volcado periódico de `health_metrics`, `training_*` y `jarvis_memoria` a un
 sitio que no sea Supabase.

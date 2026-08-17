@@ -8,6 +8,8 @@ y que un fallo de una fuente no tumba el resto del resumen.
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import main
 from conftest import FakeResponse
 
@@ -1185,8 +1187,20 @@ class TestQueHaCambiado:
 class TestInformeSemanal:
     """Una media de 30 días dice dónde estás; trece semanas seguidas, hacia dónde vas."""
 
+    # El reloj se fija a un DOMINGO a propósito. Las semanas del informe van de lunes a
+    # domingo, y estos tests construyen los días contando hacia atrás desde hoy: con el
+    # reloj real, un lunes esos cinco días caen casi todos en la semana ANTERIOR, la
+    # última sale con un solo día y —correctamente— como hueco, así que los asertos
+    # fallaban un par de días por semana sin que nada estuviera roto. Es la misma razón
+    # por la que existe _ahora_local(): poder fijar el reloj en los tests.
+    HOY = datetime(2026, 8, 16, 9, 0, tzinfo=main.LOCAL_TZ)   # domingo
+
+    @pytest.fixture(autouse=True)
+    def _reloj_fijo(self, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.HOY)
+
     def _filas(self, semanas=4, por_semana=5):
-        hoy = datetime.now(main.LOCAL_TZ).date()
+        hoy = self.HOY.date()
         filas = []
         for s in range(semanas):
             for d in range(por_semana):

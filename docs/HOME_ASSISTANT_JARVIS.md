@@ -42,7 +42,12 @@ backend (la query solo sigue soportada por las integraciones antiguas).
 así una orden no se ejecuta dos veces— pero significa que el sensor es el único que puede
 consumirla: no lo consultes desde otro sitio.
 
-La automatización que las ejecuta (créala por la UI o por la API, como `la_wol_poll`):
+La automatización que las ejecuta (créala por la UI o por la API, como `la_wol_poll`).
+**El `entity_id` del trigger tiene que ser el que HA le haya dado de verdad al sensor**
+—`name: "Life Assistant Casa Ordenes"` produce `sensor.life_assistant_casa_ordenes`—:
+míralo en Herramientas para desarrolladores → Estados antes de copiar, porque una
+automatización que escucha a una entidad que no existe no falla, simplemente no se
+dispara nunca.
 
 ```yaml
 alias: Life Assistant - Ejecutar ordenes de la casa
@@ -52,13 +57,13 @@ trigger:
   # Sin `to`/`from` dispara también cuando solo cambian los atributos: dos lecturas
   # seguidas con una orden cada una dejan el estado en "1" y aun así hay que ejecutarlas.
   - platform: state
-    entity_id: sensor.jarvis_ordenes
+    entity_id: sensor.life_assistant_casa_ordenes
 condition:
   - condition: template
     value_template: "{{ trigger.to_state.state | int(0) > 0 }}"
 action:
   - repeat:
-      for_each: "{{ state_attr('sensor.jarvis_ordenes', 'ordenes') | default([], true) }}"
+      for_each: "{{ state_attr('sensor.life_assistant_casa_ordenes', 'ordenes') | default([], true) }}"
       sequence:
         - service: "{{ repeat.item.servicio }}"
           target:
@@ -175,11 +180,28 @@ action:
   - repeat:
       for_each: "{{ state_attr('sensor.life_assistant_avisos', 'avisos') | default([], true) }}"
       sequence:
-        - service: notify.mobile_app_TU_MOVIL   # el nombre exacto sale de Ajustes → Companion
+        - service: notify.mobile_app_TU_MOVIL   # ← SUSTITÚYELO (ver abajo)
           data:
             title: "{{ repeat.item.titulo }}"
             message: "{{ repeat.item.texto }}"
 ```
+
+Tres trampas de este paso, las tres pisadas ya:
+
+- **`TU_MOVIL` hay que sustituirlo**, y si se queda tal cual el fallo es de los peores:
+  la automatización SÍ se dispara y revienta al mandar, así que el backend ve que HA
+  recogió el aviso, el panel dice "al móvil" y no llega nada. El nombre real es
+  `notify.mobile_app_` + el nombre del dispositivo en minúsculas, sin acentos y con
+  guiones bajos. Si no lo sabes, sale de tu propia automatización de presencia:
+  `grep -n "device_tracker\." /config/automations.yaml` — el mismo trozo detrás del
+  punto es el que va aquí.
+- **Si tocas la acción por el editor visual, se vacían `message` y `title`.** Al elegir
+  el servicio en el desplegable, HA rehace la acción y se lleva por delante las
+  plantillas `{{ repeat.item.* }}`. Vuelve a ponerlas, o edita en YAML (los tres puntos
+  de la PÁGINA, no los de la acción) y pega el bloque entero.
+- **Los errores de HA no están en `/config/home-assistant.log`** en una instalación con
+  Supervisor: se leen con `ha core logs`. Buscarlos en el fichero que no existe fue lo
+  que dejó esto a oscuras un buen rato.
 
 Para comprobarlo, el panel ⚙ del dashboard tiene una fila **Avisos** (dice por dónde
 están saliendo y cuánto hace que HA los recogió) y un botón **«Probar aviso»** que
