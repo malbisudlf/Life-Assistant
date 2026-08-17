@@ -184,7 +184,63 @@ action:
           data:
             title: "{{ repeat.item.titulo }}"
             message: "{{ repeat.item.texto }}"
+            data:
+              # Botones de valoración. Es la señal que hace que una regla que no sirve
+              # se calle sola: sin ella, la única forma de que un aviso inútil
+              # desaparezca es dejar de mirarlos todos.
+              actions:
+                - action: "LA_UTIL_{{ repeat.item.id }}"
+                  title: "Útil"
+                - action: "LA_NOUTIL_{{ repeat.item.id }}"
+                  title: "No"
+        # Y si el aviso pide voz (estás en casa), que además se oiga.
+        - if:
+            - condition: template
+              value_template: "{{ repeat.item.voz | default(false) }}"
+          then:
+            - service: notify.alexa_media_TU_ALTAVOZ   # ← SUSTITÚYELO
+              data:
+                message: "{{ repeat.item.texto }}"
+                data:
+                  type: announce
 ```
+
+Y la automatización que recoge la respuesta a los botones:
+
+```yaml
+alias: Life Assistant - Valoracion de avisos
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_(NO)?UTIL_') }}"
+action:
+  - service: rest_command.la_valorar_aviso
+    data:
+      aviso: "{{ trigger.event.data.action.split('_')[-1] }}"
+      util: "{{ 'NOUTIL' not in trigger.event.data.action }}"
+```
+
+```yaml
+rest_command:
+  la_valorar_aviso:
+    url: "https://TU-BACKEND/avisos/{{ aviso }}/util"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+      Content-Type: application/json
+    payload: '{"util": {{ util | lower }}}'
+```
+
+**No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
+silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no
+puede disfrazarse de dato.
+
+**La voz es opcional y falla hacia el lado bueno**: si no tienes Alexa configurada, borra
+ese bloque `if` y todo lo demás sigue igual. El backend no sabe si se oyó — como con el
+móvil, solo sabe que HA vino a recogerlo.
 
 Tres trampas de este paso, las tres pisadas ya:
 

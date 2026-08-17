@@ -3301,6 +3301,17 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
         raise _supabase_error(r)
 
     _cachear_presencia({k: v for k, v in fila.items() if k != "id"})
+
+    # Acabas de SALIR de casa: es el único momento en que avisar de lo que te dejaste
+    # encendido sirve de algo. Va aquí y no en el tick porque aquí es donde se sabe que
+    # ha habido un cambio, no solo cuál es el estado. Y no puede tumbar la escritura de
+    # la presencia, que es lo que de verdad venía a hacer esta petición.
+    if REGLAS_PROACTIVAS and anterior and anterior.get("en_casa") and not en_casa:
+        try:
+            _regla_al_salir_de_casa()
+        except Exception:
+            logger.exception("Regla 'al salir de casa': fallo inesperado")
+
     return {"ok": True, "zona": zona, "en_casa": en_casa}
 
 
@@ -5172,7 +5183,7 @@ def ha_brief_tick(request: Request, token: str = ""):
     # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
     # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
     previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(),
-               **_vigilar_sistema_seguro(), **_hablar_seguro()}
+               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -5612,6 +5623,177 @@ def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> d
 RECORDATORIOS_URL      = f"{SUPABASE_URL}/rest/v1/jarvis_recordatorios"
 RECORDATORIO_MAX_TEXTO = 200
 RECORDATORIOS_MAX      = 50
+
+# ── Gobierno de los avisos ───────────────────────────────────────────────────
+# Un asistente proactivo tiene un solo modo de fallo: volverse ruido. Y no falla de
+# golpe — falla porque cada regla nueva parece razonable por separado, hasta que un día
+# se dejan de leer todos los avisos a la vez, buenos incluidos. A partir de ahí da igual
+# lo buenas que sean las reglas siguientes.
+#
+# Tres piezas, y las tres van AQUÍ y no dentro de cada regla, para que una regla nueva
+# las herede sin poder olvidarse de mirarlas (misma razón por la que el interruptor del
+# resumen vive dentro de `enviar_brief_si_toca`):
+#   1. PRESUPUESTO — los avisos compiten en vez de sumarse. Un tope al día, por
+#      prioridad, y lo que no entra se POSPONE a la mañana siguiente en vez de perderse.
+#   2. UTILIDAD    — cada aviso se puede marcar útil/no útil, y una regla ignorada se
+#      silencia sola. Es lo único que hace que el sistema mejore sin que nadie lo toque.
+#   3. MEMORIA     — no repetir lo mismo mientras la situación no cambie.
+#
+# Y una frontera que no se relaja: **lo que pediste tú no se gobierna**. Un recordatorio
+# sin `regla` (`recordarme`) no cuenta contra el tope ni se puede silenciar. Es la misma
+# regla que hace que el interruptor del resumen no tape un envío pedido a mano: cuando
+# hay una persona pidiéndolo, obedecer al presupuesto antes que a ella es el sitio
+# equivocado.
+AVISOS_MAX_DIA      = int(os.getenv("AVISOS_MAX_DIA", "3"))
+# Cuántos "no útil" seguidos hacen falta para silenciar una regla. Con uno, un día malo
+# se lleva por delante una regla buena.
+AVISOS_NO_UTILES    = int(os.getenv("AVISOS_NO_UTILES", "3"))
+# Días que tiene que pasar una situación idéntica antes de volver a mencionarla.
+AVISOS_REPETIR_DIAS = int(os.getenv("AVISOS_REPETIR_DIAS", "5"))
+AVISOS_REGLAS_URL   = f"{SUPABASE_URL}/rest/v1/avisos_reglas"
+# A qué hora sale lo que no entró ayer en el presupuesto. Por la mañana, junto al resto
+# de lo que se lee de una sentada.
+HORA_DIFERIDOS      = _hora_config(os.getenv("AVISOS_HORA_DIFERIDOS", "08:30"), (8, 30))
+
+# Prioridades. La escala importa poco; lo que importa es que 1 y 2 se saltan el
+# presupuesto: son avisos que caducan en minutos y que llegar tarde deja sin valor.
+PRIO_URGENTE = 1     # "sal ya": o llega ahora o no sirve
+PRIO_ALTA    = 3     # entrega mañana, firma de malestar
+PRIO_NORMAL  = 5     # el resto
+PRIO_BAJA    = 8     # se puede leer mañana sin perder nada
+# Por debajo de esto, el presupuesto no se aplica.
+PRIO_SIN_TOPE = 2
+
+
+def _regla_silenciada(regla: str) -> bool:
+    """Si esta regla está callada por haber sido ignorada. Un fallo leyendo NO silencia:
+    ante la duda se habla, que es el lado recuperable del error."""
+    if not regla:
+        return False
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?regla=eq.{quote(regla, safe='')}&select=silenciada",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return False
+        filas = r.json()
+        return bool(filas and filas[0].get("silenciada"))
+    except Exception as e:
+        logger.warning("Avisos: no se pudo comprobar si '%s' está silenciada (%s)", regla, e)
+        return False
+
+
+def _ya_dicho(regla: str, huella: str) -> bool:
+    """Si ya se avisó de ESTA MISMA situación hace poco.
+
+    La idempotencia vieja era por día: impedía dos avisos iguales el mismo día pero no
+    el mismo aviso siete días seguidos. "Llevas 3 días sin entrenar" el jueves, el
+    viernes y el sábado son tres avisos de los que solo el primero informa de algo.
+    """
+    if not regla or not huella:
+        return False
+    desde = (datetime.now(timezone.utc) - timedelta(days=AVISOS_REPETIR_DIAS)).isoformat()
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?regla=eq.{quote(regla, safe='')}"
+                     f"&huella=eq.{quote(huella, safe='')}"
+                     f"&creado=gte.{quote(desde, safe='')}&select=id&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return False
+        return bool(r.json())
+    except Exception as e:
+        # Ante la duda se habla: repetir un aviso es molesto, callarlo puede costar el dato.
+        logger.warning("Avisos: no se pudo comprobar la huella de '%s' (%s)", regla, e)
+        return False
+
+
+def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
+                   cuando: Optional[datetime] = None, caduca: Optional[datetime] = None,
+                   huella: str = "", id: str = "", voz: bool = False) -> bool:
+    """Única puerta por la que una regla deja un aviso. True si quedó apuntado.
+
+    Aquí se aplican el silenciado y la memoria de lo ya dicho; el presupuesto se aplica
+    al despachar, porque hasta ese momento no se sabe cuántos habrán salido hoy.
+    """
+    if _regla_silenciada(regla):
+        return False
+    if huella and _ya_dicho(regla, huella):
+        return False
+
+    fila = {
+        "texto":     texto[:RECORDATORIO_MAX_TEXTO],
+        "cuando":    (cuando or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+        "regla":     regla,
+        "prioridad": prioridad,
+        "voz":       voz,
+    }
+    if id:
+        fila["id"] = id
+    if huella:
+        fila["huella"] = huella
+    if caduca:
+        fila["caduca"] = caduca.astimezone(timezone.utc).isoformat()
+    try:
+        r = http.post(RECORDATORIOS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"}, json=fila)
+        if r.status_code == 409:
+            return False            # ya apuntado: el 409 ES la respuesta
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Avisos: no se pudo apuntar el de '%s' (%s)", regla, e)
+        return False
+    return True
+
+
+def _contar_enviados_hoy() -> int:
+    """Cuántos avisos DE REGLA han salido hoy. Los que pediste tú no cuentan."""
+    desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?enviado=is.true&regla=not.is.null"
+                     f"&enviado_at=gte.{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
+                     "&select=id", headers=supabase_headers())
+        if r.status_code >= 300:
+            return 0
+        return len(r.json())
+    except Exception as e:
+        # Sin poder contar se deja pasar: quedarse mudo por no saber el recuento sería
+        # peor que pasarse de la cuenta un día.
+        logger.warning("Avisos: no se pudo contar los de hoy (%s)", e)
+        return 0
+
+
+def _posponer_aviso(rid: str) -> None:
+    """Lo que no entra en el presupuesto baja a mañana por la mañana, no se pierde."""
+    manana = (_ahora_local() + timedelta(days=1)).replace(
+        hour=HORA_DIFERIDOS[0], minute=HORA_DIFERIDOS[1], second=0, microsecond=0)
+    try:
+        http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"cuando": manana.astimezone(timezone.utc).isoformat()})
+    except Exception as e:
+        logger.warning("Avisos: no se pudo posponer %s (%s)", rid, e)
+
+
+def _apuntar_envio_regla(regla: str) -> None:
+    """Un envío más en la estadística de la regla, para el informe de utilidad."""
+    if not regla:
+        return
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?regla=eq.{quote(regla, safe='')}&select=enviados",
+                     headers=supabase_headers())
+        ahora = datetime.now(timezone.utc).isoformat()
+        filas = r.json() if r.status_code < 300 else []
+        if filas:
+            http.patch(f"{AVISOS_REGLAS_URL}?regla=eq.{quote(regla, safe='')}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"enviados": int(filas[0].get("enviados") or 0) + 1,
+                             "ultima_vez": ahora})
+        else:
+            http.post(AVISOS_REGLAS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"regla": regla, "enviados": 1, "ultima_vez": ahora})
+    except Exception as e:
+        logger.warning("Avisos: no se pudo apuntar el envío de '%s' (%s)", regla, e)
 # Cuántos se mandan por tick. Un tope bajo evita que una tanda acumulada (HA caído toda
 # la mañana) se convierta en veinte SMTP seguidos dentro de una petición.
 RECORDATORIOS_POR_TICK = 10
@@ -5759,19 +5941,12 @@ def _avisar_reloj_si_toca() -> dict:
                   "la FC en reposo de esta noche no se pueden recuperar mañana.")
     texto = " ".join(partes)
 
-    try:
-        r = http.post(
-            RECORDATORIOS_URL,
-            headers={**supabase_headers(), "Prefer": "return=minimal"},
-            json={"id": _uuid_aviso_reloj(hoy), "texto": texto,
-                  "cuando": datetime.now(timezone.utc).isoformat()},
-        )
-        if r.status_code == 409:
-            return {}                      # ya avisado hoy: el 409 ES la respuesta
-        if r.status_code >= 300:
-            raise RuntimeError(f"Supabase devolvió {r.status_code}")
-    except Exception as e:
-        logger.error("Aviso de reloj: no se pudo apuntar el recordatorio (%s)", e)
+    # Prioridad alta: el dato de una noche sin medir no se recupera, así que este aviso
+    # o llega antes de dormir o no sirve de nada. La huella es el motivo, no el día: si
+    # sigues sin ponértelo toda la semana, con decirlo una vez basta.
+    if not _apuntar_aviso("reloj", texto, prioridad=PRIO_ALTA,
+                          id=_uuid_aviso_reloj(hoy),
+                          huella=f"sin_reloj:{noches}" if noches else "hoy_sin_reloj"):
         return {}
     logger.info("Aviso de reloj apuntado para hoy (%s)", texto[:60])
     return {"aviso_reloj": True}
@@ -5851,20 +6026,12 @@ def _vigilar_ingesta() -> dict:
     texto = (f"Llevas {round(horas)} h sin que llegue ningún dato de salud. "
              "Mira si Health Auto Export o el Atajo de iOS han dejado de correr: "
              "los días que pasen no se recuperan.")
-    try:
-        rp = http.post(
-            RECORDATORIOS_URL,
-            headers={**supabase_headers(), "Prefer": "return=minimal"},
-            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:ingesta-muda:{hoy}")),
-                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
-                  "cuando": datetime.now(timezone.utc).isoformat()},
-        )
-        if rp.status_code == 409:
-            return {"ingesta_silenciosa_horas": round(horas)}
-        if rp.status_code >= 300:
-            raise RuntimeError(f"Supabase devolvió {rp.status_code}")
-    except Exception as e:
-        logger.error("Vigilante de ingesta: no se pudo apuntar el aviso (%s)", e)
+    # La huella son los días de silencio, no la fecha: así el segundo día de una caída
+    # no repite el aviso del primero, pero un silencio que se alarga sí vuelve a hablar.
+    if not _apuntar_aviso("ingesta", texto, prioridad=PRIO_ALTA,
+                          id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f"life-assistant:ingesta-muda:{hoy}")),
+                          huella=f"muda:{int(horas // 24)}d"):
         return {"ingesta_silenciosa_horas": round(horas)}
     return {"ingesta_silenciosa_horas": round(horas), "aviso_ingesta": True}
 
@@ -6114,20 +6281,13 @@ def _vigilar_sistema() -> dict:
 
     texto = " ".join(partes)
     logger.warning("Vigilante: %d avería(s), %d reparada(s)", len(averias), len(reparadas))
-    try:
-        r = http.post(
-            RECORDATORIOS_URL,
-            headers={**supabase_headers(), "Prefer": "return=minimal"},
-            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:vigilante:{hoy}")),
-                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
-                  "cuando": datetime.now(timezone.utc).isoformat()},
-        )
-        if r.status_code == 409:
-            return {"vigilante_averias": len(averias)}     # ya avisado hoy
-        if r.status_code >= 300:
-            raise RuntimeError(f"Supabase devolvió {r.status_code}")
-    except Exception as e:
-        logger.error("Vigilante: no se pudo apuntar el aviso (%s)", e)
+    # La huella son las averías concretas: mientras sean las mismas no hace falta
+    # repetirlo cada día, pero una avería NUEVA vuelve a hablar el mismo día.
+    huella = ",".join(sorted(a["clave"] for a in averias)) or "solo_reparaciones"
+    if not _apuntar_aviso("vigilante", texto, prioridad=PRIO_NORMAL,
+                          id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f"life-assistant:vigilante:{hoy}")),
+                          huella=huella):
         return {"vigilante_averias": len(averias)}
     return {"vigilante_averias": len(averias), "vigilante_reparadas": len(reparadas),
             "aviso_vigilante": True}
@@ -6259,20 +6419,13 @@ def _hablar_si_hay_algo() -> dict:
         # La información es lo que vale; la redacción es el adorno. Sale igual en crudo.
         logger.warning("Jarvis proactivo: no se pudo redactar, va en crudo (%s)", e)
 
-    try:
-        r = http.post(
-            RECORDATORIOS_URL,
-            headers={**supabase_headers(), "Prefer": "return=minimal"},
-            json={"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:jarvis-proactivo:{hoy}")),
-                  "texto": texto[:RECORDATORIO_MAX_TEXTO],
-                  "cuando": datetime.now(timezone.utc).isoformat()},
-        )
-        if r.status_code == 409:
-            return {}
-        if r.status_code >= 300:
-            raise RuntimeError(f"Supabase devolvió {r.status_code}")
-    except Exception as e:
-        logger.error("Jarvis proactivo: no se pudo apuntar el aviso (%s)", e)
+    # La huella son los motivos en crudo, ANTES de que el modelo los redacte: dos
+    # redacciones distintas del mismo hecho son el mismo aviso, y comparando el texto
+    # final la memoria no serviría de nada.
+    if not _apuntar_aviso("proactivo", texto, prioridad=PRIO_NORMAL,
+                          id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f"life-assistant:jarvis-proactivo:{hoy}")),
+                          huella="|".join(sorted(motivos))[:200]):
         return {}
     logger.info("Jarvis proactivo: aviso apuntado (%d motivo(s))", len(motivos))
     return {"jarvis_proactivo": len(motivos)}
@@ -6285,6 +6438,392 @@ def _hablar_seguro() -> dict:
     except Exception:
         logger.exception("Jarvis proactivo: fallo inesperado en el tick")
         return {}
+
+
+# ── Reglas proactivas ────────────────────────────────────────────────────────
+# Lo que Jarvis dice sin que le hablen, más allá del aviso diario de `_motivos_proactivos`
+# (que agrupa lo que no corre prisa). Cada una es una condición CERRADA sobre datos que ya
+# existen; ninguna se apoya en "al modelo le parece relevante", que no es un listón sino
+# una excusa.
+#
+# Todas dejan su aviso por `_apuntar_aviso`, así que heredan el presupuesto, el silenciado
+# y la memoria sin tener que acordarse de mirarlos. Añadir una regla es escribir la
+# función y meterla en `_REGLAS`: no hay que tocar nada más.
+#
+# Y ninguna puede llevarse por delante a las demás ni al tick — se registra y se sigue,
+# igual que cada sección del resumen diario.
+REGLAS_PROACTIVAS = os.getenv("REGLAS_PROACTIVAS", "1") not in ("0", "false", "False")
+# Cuánto por delante se mira para calcular la salida. Más de esto y el tráfico "de ahora"
+# ya no dice nada del tráfico de entonces.
+SALIR_VENTANA_MIN = int(os.getenv("SALIR_VENTANA_MIN", "180"))
+SALIR_ANTES_MIN   = int(os.getenv("SALIR_ANTES_MIN", "10"))
+# Las reglas que se calculan una vez al día: de noche (para lo de mañana) y de mañana
+# (para lo de hoy).
+HORA_REGLAS_NOCHE  = _hora_config(os.getenv("REGLAS_HORA_NOCHE", "21:30"), (21, 30))
+HORA_REGLAS_MANANA = _hora_config(os.getenv("REGLAS_HORA_MANANA", "08:00"), (8, 0))
+# A partir de qué hora deja de ser un madrugón.
+MADRUGON_HASTA     = _hora_config(os.getenv("MADRUGON_HASTA", "09:00"), (9, 0))
+SUENO_OBJETIVO_H   = float(os.getenv("SUENO_OBJETIVO_H", "7.5"))
+PREP_MANANA_MIN    = int(os.getenv("PREP_MANANA_MIN", "60"))
+HUECO_ENTRENO_MIN  = int(os.getenv("HUECO_ENTRENO_MIN", "90"))
+# La entidad del PC en Home Assistant, para saber si se quedó encendido. Sin ella la
+# regla no corre: adivinar cuál de las entidades del catálogo es el PC por su nombre es
+# la clase de suposición que acaba apagando otra cosa.
+PC_ENTIDAD         = os.getenv("PC_ENTIDAD", "")
+_reglas_dia: dict = {}
+
+
+def _toca_una_vez(clave: str, hora: tuple) -> bool:
+    """True como mucho una vez al día, pasada `hora`. Solo ahorra CONSULTAS: quien
+    impide el aviso duplicado es la huella, no esto (un cold start borra este dict)."""
+    ahora = _ahora_local()
+    if (ahora.hour, ahora.minute) < hora:
+        return False
+    hoy = ahora.date().isoformat()
+    if _reglas_dia.get(clave) == hoy:
+        return False
+    _reglas_dia[clave] = hoy
+    return True
+
+
+def _eventos_con_fecha(dias: int = 2) -> list:
+    """Los eventos de los próximos días con sus fechas ya parseadas a hora local.
+
+    Los de todo el día quedan fuera: no tienen hora a la que salir ni hueco que medir.
+    """
+    try:
+        datos = get_events(credentials=None)
+    except Exception as e:
+        logger.warning("Reglas: no se pudieron leer los eventos (%s)", e)
+        return []
+    if not isinstance(datos, dict) or datos.get("error"):
+        return []
+    limite, salida = _ahora_local() + timedelta(days=dias), []
+    for ev in datos.get("events") or []:
+        if ev.get("isAllDay"):
+            continue
+        try:
+            ini = datetime.fromisoformat(str(ev.get("start")).replace("Z", "+00:00"))
+            fin = datetime.fromisoformat(str(ev.get("end")).replace("Z", "+00:00"))
+        except (ValueError, AttributeError, TypeError):
+            continue
+        ini, fin = ini.astimezone(LOCAL_TZ), fin.astimezone(LOCAL_TZ)
+        if ini > limite:
+            continue
+        salida.append({**ev, "ini": ini, "fin": fin})
+    return sorted(salida, key=lambda e: e["ini"])
+
+
+def _hora_salida(destino: str, cuando_iso: str, origen: str = "") -> Optional[datetime]:
+    """A qué hora hay que salir para llegar, según el tráfico de ahora. None si no se pudo."""
+    if not GOOGLE_MAPS_API_KEY or not destino:
+        return None
+    try:
+        r = get_departure_time(DepartureRequest(destination=destino[:500],
+                                                event_time=cuando_iso[:50],
+                                                origin=origen[:500]), credentials=None)
+        return datetime.fromisoformat(r["departure_iso"])
+    except Exception as e:
+        logger.warning("Reglas: no se pudo calcular la salida a '%s' (%s)", destino[:40], e)
+        return None
+
+
+def _regla_sal_ya() -> int:
+    """1.1 — Un evento con sitio y el tráfico diciendo que hay que salir.
+
+    El aviso se PROGRAMA, no se manda: la salida se calcula UNA vez, cuando el evento
+    entra en la ventana, y se apunta con `cuando` a su hora para que lo suelte el
+    despachador. Calcularlo en cada tick serían decenas de llamadas de pago a Maps por
+    evento, y la comprobación de la huella va ANTES de llamar a Maps por lo mismo.
+
+    Si estás en casa va además con voz: el móvil puede estar en otra habitación, y este
+    es justo el aviso que no sirve de nada leído diez minutos tarde.
+    """
+    ahora, puestos = _ahora_local(), 0
+    for ev in _eventos_con_fecha(dias=1):
+        destino = (ev.get("location") or "").strip()
+        if not destino or ev["ini"] <= ahora:
+            continue
+        if (ev["ini"] - ahora).total_seconds() / 60 > SALIR_VENTANA_MIN:
+            continue
+        huella = f"salir:{str(ev.get('id') or '')[:60]}"
+        if _ya_dicho("salir", huella):
+            continue
+        salida = _hora_salida(destino, str(ev.get("start") or ""))
+        # Ya ha pasado la hora de salir: no se apunta. Un "sal ya" tarde no es un aviso
+        # tarde, es una mentira — y de eso ya se encargaría `caduca`, pero mejor ni
+        # gastar el aviso.
+        if not salida or salida < ahora:
+            continue
+        en_casa = bool((presencia_vigente() or {}).get("en_casa"))
+        if _apuntar_aviso(
+            "salir",
+            f"Sal a las {salida.strftime('%H:%M')} para «{ev.get('title') or 'tu cita'}».",
+            prioridad=PRIO_URGENTE,
+            cuando=max(salida - timedelta(minutes=SALIR_ANTES_MIN), ahora),
+            caduca=salida + timedelta(minutes=SALIR_ANTES_MIN),
+            huella=huella, voz=en_casa,
+        ):
+            puestos += 1
+    return puestos
+
+
+def _regla_no_llegas() -> int:
+    """1.2 — Dos citas seguidas entre las que no da tiempo a moverse.
+
+    Es un choque que el calendario no marca como choque: no se solapan, así que Outlook
+    las da por buenas. El conflicto solo existe al meter el desplazamiento, que es el
+    dato que ya sabemos pedir. Se avisa **la noche antes**, que es cuando todavía se
+    puede mover algo; por la mañana ya solo sirve para dar la mala noticia.
+    """
+    if not _toca_una_vez("no_llegas", HORA_REGLAS_NOCHE):
+        return 0
+    manana  = (_ahora_local() + timedelta(days=1)).date()
+    eventos = [e for e in _eventos_con_fecha(dias=2)
+               if e["ini"].date() == manana and (e.get("location") or "").strip()]
+    puestos = 0
+    for antes, despues in zip(eventos, eventos[1:]):
+        if (antes["location"] or "").strip() == (despues["location"] or "").strip():
+            continue
+        salida = _hora_salida(despues["location"], str(despues.get("start") or ""),
+                              origen=antes["location"])
+        # Si para llegar a la segunda hay que salir ANTES de que acabe la primera, no
+        # llegas. El margen ya lo mete `/maps/departure`.
+        if not salida or salida >= antes["fin"]:
+            continue
+        if _apuntar_aviso(
+            "no_llegas",
+            f"Mañana no llegas: «{antes.get('title')}» acaba a las "
+            f"{antes['fin'].strftime('%H:%M')} y para «{despues.get('title')}» "
+            f"tendrías que salir a las {salida.strftime('%H:%M')}.",
+            prioridad=PRIO_ALTA,
+            huella=f"{str(antes.get('id'))[:30]}>{str(despues.get('id'))[:30]}",
+        ):
+            puestos += 1
+    return puestos
+
+
+def _hora_habitual_dormir() -> Optional[tuple]:
+    """A qué hora te sueles dormir, de las últimas noches medidas. None si no hay base.
+
+    Sale de `extra.sleep_start` de `sleep_analysis`, que ya se guarda. Se usa la MEDIANA
+    y no la media porque una noche en vela desplaza la media y no dice nada del hábito.
+    """
+    desde = (_ahora_local().date() - timedelta(days=30)).isoformat()
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+                     "&metric_name=eq.sleep_analysis&select=extra&limit=60",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return None
+        filas = r.json()
+    except Exception:
+        return None
+
+    minutos = []
+    for f in filas:
+        extra = f.get("extra") or {}
+        if extra.get("excluded"):
+            continue
+        inicio = str(extra.get("sleep_start") or "")
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", inicio)
+        if not m:
+            continue
+        h = int(m.group(1))
+        # Acostarse a la 01:00 es "más tarde" que a las 23:00, no dieciocho horas antes:
+        # sin esto la mediana de un hábito que cruza medianoche sale a mediodía.
+        minutos.append((h + 24 if h < 12 else h) * 60 + int(m.group(2)))
+    if len(minutos) < 5:
+        return None
+    minutos.sort()
+    mediana = minutos[len(minutos) // 2]
+    return ((mediana // 60) % 24, mediana % 60)
+
+
+def _regla_madrugon() -> int:
+    """1.3 — Mañana empiezas antes de lo normal: a qué hora tendrías que dormirte.
+
+    El backend sabe a qué hora te duermes y a qué hora empiezas mañana, y nadie había
+    juntado las dos cosas. Es un aviso que se puede accionar en el momento en que llega,
+    que es la definición de aviso útil.
+    """
+    if not _toca_una_vez("madrugon", HORA_REGLAS_NOCHE):
+        return 0
+    manana   = (_ahora_local() + timedelta(days=1)).date()
+    primeros = [e for e in _eventos_con_fecha(dias=2) if e["ini"].date() == manana]
+    if not primeros:
+        return 0
+    primero = primeros[0]
+    if (primero["ini"].hour, primero["ini"].minute) >= MADRUGON_HASTA:
+        return 0
+
+    habitual = _hora_habitual_dormir()
+    if not habitual:
+        return 0        # sin base no se afirma: la regla de siempre
+    recomendada = primero["ini"] - timedelta(minutes=PREP_MANANA_MIN,
+                                             hours=SUENO_OBJETIVO_H)
+    # Solo si hay que adelantarse de verdad. Media hora es ruido.
+    hab_dt = recomendada.replace(hour=habitual[0], minute=habitual[1])
+    if habitual[0] < 12:
+        hab_dt += timedelta(days=1) if recomendada.hour >= 12 else timedelta(0)
+    if recomendada >= hab_dt - timedelta(minutes=30):
+        return 0
+    return int(_apuntar_aviso(
+        "madrugon",
+        f"Mañana empiezas a las {primero['ini'].strftime('%H:%M')} con "
+        f"«{primero.get('title')}». Para dormir {SUENO_OBJETIVO_H:g} h tendrías que "
+        f"estar dormido a las {recomendada.strftime('%H:%M')}.",
+        prioridad=PRIO_ALTA, huella=f"madrugon:{manana.isoformat()}",
+    ))
+
+
+def _regla_malestar(obtener_salud) -> int:
+    """1.4 — Las tres señales del Watch apuntando a la vez a que algo va mal.
+
+    FC en reposo arriba, HRV abajo y respiración arriba. Por separado cada una se mueve
+    por ruido; juntas y en la misma dirección son la señal más fiable que da el reloj.
+    Ya estaba calculada en `helpers.js`, pero ahí solo la ves si abres el dashboard — y
+    el día que tu cuerpo dice que no es exactamente el día en que no lo vas a abrir.
+
+    Los umbrales de entrada son MÁS BAJOS que los que cada métrica exige para hablar
+    sola: que las tres coincidan es la evidencia que a cada una le falta.
+    """
+    if not _toca_una_vez("malestar", HORA_REGLAS_MANANA):
+        return 0
+    salud = obtener_salud()
+    señales = {"fc_reposo": 1.03, "hrv": 0.95, "respiracion": 1.02}
+    for clave, factor in señales.items():
+        m = salud.get(clave) or {}
+        m7, m30 = m.get("media_7d"), m.get("media_30d")
+        # Sin fondo a los dos lados no se afirma nada. Es la misma exigencia que el
+        # dashboard: una tendencia necesita suelo debajo.
+        if not m7 or not m30 or (m.get("n_7d") or 0) < 3 or (m.get("n_30d") or 0) < 7:
+            return 0
+        if (m7 > m30 * factor) if factor > 1 else (m7 < m30 * factor):
+            continue
+        return 0
+    return int(_apuntar_aviso(
+        "malestar",
+        "Tus tres señales de recuperación apuntan a la vez a que algo va mal: FC en "
+        "reposo arriba, HRV abajo y respiración arriba respecto a tu mes. Hoy no fuerces.",
+        prioridad=PRIO_ALTA, huella=f"malestar:{_ahora_local().date().isoformat()}",
+    ))
+
+
+def _regla_hueco_entreno(obtener_salud) -> int:
+    """1.5 — Llevas días sin entrenar y mañana hay un hueco: a qué hora.
+
+    Convierte el reproche en una acción. El aviso viejo daba información que ya tenías
+    (sabes que no has entrenado); esto da la parte que no tenías, que es cuándo.
+    """
+    if not _toca_una_vez("hueco_entreno", HORA_REGLAS_NOCHE):
+        return 0
+    ultimo = (obtener_salud() or {}).get("ultimo_entreno") or {}
+    dias   = ultimo.get("dias")
+    # Sin histórico de entrenos no se regaña: no se sabe si es una racha o es que el
+    # Watch nunca los registró.
+    if not dias or dias < JARVIS_PROACTIVO_SIN_ENTRENO:
+        return 0
+
+    manana  = (_ahora_local() + timedelta(days=1)).date()
+    ocupado = [e for e in _eventos_con_fecha(dias=2) if e["ini"].date() == manana]
+    base    = _ahora_local().replace(year=manana.year, month=manana.month, day=manana.day,
+                                     second=0, microsecond=0)
+    inicio  = base.replace(hour=8,  minute=0)
+    fin_dia = base.replace(hour=22, minute=0)
+    hueco   = None
+    cursor  = inicio
+    for ev in ocupado + [{"ini": fin_dia, "fin": fin_dia}]:
+        libre = (ev["ini"] - cursor).total_seconds() / 60
+        if libre >= HUECO_ENTRENO_MIN:
+            hueco = (cursor, ev["ini"])
+            break
+        cursor = max(cursor, ev["fin"])
+    if not hueco:
+        return 0
+    return int(_apuntar_aviso(
+        "hueco_entreno",
+        f"Llevas {dias} días sin entrenar. Mañana tienes libre de "
+        f"{hueco[0].strftime('%H:%M')} a {hueco[1].strftime('%H:%M')}.",
+        prioridad=PRIO_NORMAL, huella=f"hueco:{manana.isoformat()}",
+    ))
+
+
+def _encendidos(dominios: tuple) -> list:
+    """Entidades del catálogo de HA que están encendidas, de esos dominios.
+
+    El catálogo lo empuja HA cada hora, así que puede ir con retraso: por eso esto sirve
+    para AVISAR y nunca para apagar nada por su cuenta.
+    """
+    encendidas = []
+    for e in _casa_entidades():
+        eid = str(e.get("id") or "")
+        if eid.split(".")[0] in dominios and str(e.get("estado") or "").lower() == "on":
+            encendidas.append(e.get("nombre") or eid)
+    return encendidas
+
+
+def _regla_al_salir_de_casa() -> int:
+    """1.6 y 1.7 — Te has ido y te dejaste algo encendido (y el PC, si está declarado).
+
+    Se dispara al CAMBIAR la presencia a fuera, no en el tick: es el único momento en
+    que este aviso sirve de algo. No apaga nada — el catálogo puede ir con una hora de
+    retraso y apagar a ciegas por un dato viejo es peor que preguntar.
+    """
+    luces = _encendidos(("light", "switch"))
+    puestos = 0
+    if luces:
+        puestos += int(_apuntar_aviso(
+            "al_salir",
+            f"Te has ido y quedan encendidas: {', '.join(luces[:5])}.",
+            prioridad=PRIO_ALTA, huella=f"encendido:{','.join(sorted(luces))[:120]}",
+        ))
+    if PC_ENTIDAD and any(str(e.get("id")) == PC_ENTIDAD
+                          and str(e.get("estado") or "").lower() == "on"
+                          for e in _casa_entidades()):
+        puestos += int(_apuntar_aviso(
+            "pc_encendido", "Te has ido con el PC encendido. ¿Lo suspendo?",
+            prioridad=PRIO_NORMAL, huella=f"pc:{_ahora_local().date().isoformat()}",
+        ))
+    return puestos
+
+
+def _correr_reglas() -> dict:
+    """Pasa por todas las reglas del tick. Ninguna puede llevarse a las demás."""
+    if not REGLAS_PROACTIVAS:
+        return {}
+    puestos = 0
+    # La salud la piden dos reglas y es la consulta más cara del tick (trae la tabla de
+    # 30 días): se lee como mucho una vez por pasada, y solo si alguna llega a pedirla.
+    cache: dict = {}
+
+    def _salud() -> dict:
+        if "v" not in cache:
+            try:
+                cache["v"] = _brief_salud()
+            except Exception:
+                logger.warning("Reglas: no se pudo leer la salud")
+                cache["v"] = {}
+        return cache["v"]
+
+    for nombre, fn in _REGLAS:
+        try:
+            # Se pasa la FUNCIÓN, no el dato: así una regla que se sale por su guarda de
+            # hora (casi todas, casi siempre) no paga la consulta. Pasando el valor, el
+            # tick de cada 5 minutos traía 30 días de métricas para nada.
+            puestos += fn(_salud) if fn.__code__.co_argcount else fn()
+        except Exception:
+            logger.exception("Regla '%s': fallo inesperado", nombre)
+    return {"reglas_avisos": puestos} if puestos else {}
+
+
+_REGLAS = (
+    ("sal_ya",        _regla_sal_ya),
+    ("no_llegas",     _regla_no_llegas),
+    ("madrugon",      _regla_madrugon),
+    ("malestar",      _regla_malestar),
+    ("hueco_entreno", _regla_hueco_entreno),
+)
 
 
 # ── Avisos al móvil ──────────────────────────────────────────────────────────
@@ -6332,15 +6871,21 @@ def _movil_vivo() -> bool:
     return time.time() - _ultimo_sondeo_avisos <= AVISO_MOVIL_VIVO
 
 
-def _notificar(titulo: str, texto: str) -> str:
+def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = "") -> str:
     """Única puerta de salida de un aviso. Devuelve el canal por el que salió.
 
     Al móvil si hay quien lo recoja, y si no por correo. Un fallo del correo se propaga a
     quien llama: es lo que permite al despachador liberar la reserva y reintentarlo.
+
+    `voz` pide además que se OIGA (Alexa). Igual que con el móvil, el backend no sabe por
+    qué altavoz —eso lo decide el YAML de HA— y si nadie recoge la cola se queda en el
+    correo, que no se puede escuchar pero llega. `aviso_id` viaja para que la
+    notificación pueda traer los botones de útil / no útil.
     """
     if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
         _avisos_movil.append({
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
+            "voz": bool(voz), "id": aviso_id,
         })
         return "movil"
     enviar_correo(titulo, texto)
@@ -6394,7 +6939,12 @@ def ha_avisos_pending(request: Request, token: str = ""):
     _ultimo_sondeo_avisos = time.time()
     pendientes = list(_avisos_movil)
     _avisos_movil.clear()
-    return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"]} for a in pendientes]}
+    # `voz` e `id` los decide el backend pero los EJECUTA el YAML de HA: con voz, además
+    # de la notificación, que lo diga el altavoz; con id, que la notificación traiga los
+    # botones de útil / no útil. Una instalación que no los mire sigue funcionando igual.
+    return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"],
+                        "voz": a.get("voz", False), "id": a.get("id", "")}
+                       for a in pendientes]}
 
 
 @app.get("/avisos/estado")
@@ -6405,11 +6955,17 @@ def get_avisos_estado(credentials: HTTPAuthorizationCredentials = Depends(verify
     pregunta, y un canal que se cae en silencio es la avería típica de este proyecto.
     """
     desde = time.time() - _ultimo_sondeo_avisos if _ultimo_sondeo_avisos else None
+    enviados_hoy = _contar_enviados_hoy()
     return {
         "activo":     AVISOS_MOVIL,
         "canal":      "movil" if _movil_vivo() else "correo",
         "sondeo_hace_segundos": int(desde) if desde is not None else None,
         "pendientes": len(_avisos_movil),
+        # El presupuesto del día y las reglas calladas. Un silencio que no se ve es un
+        # fallo: si una regla se ha silenciado sola, tiene que poder mirarse en algún
+        # sitio sin abrir la base de datos.
+        "presupuesto": {"gastado": enviados_hoy, "tope": AVISOS_MAX_DIA},
+        "silenciadas": _reglas_silenciadas(),
     }
 
 
@@ -6425,6 +6981,123 @@ def probar_aviso(credentials: HTTPAuthorizationCredentials = Depends(verify_toke
     return {"ok": True, "canal": canal}
 
 
+class AvisoUtilRequest(BaseModel):
+    util: bool
+
+
+@app.post("/avisos/{aviso_id}/util")
+def marcar_aviso_util(request: Request, body: AvisoUtilRequest,
+                      aviso_id: str = _uuid_path(), token: str = ""):
+    """La respuesta al botón del aviso: esto me sirvió / esto no.
+
+    Es la única señal que hace que el sistema mejore sin que nadie lo toque. Sin ella, la
+    única forma de que una regla mala desaparezca es que el usuario se acuerde de decirlo
+    — y no se va a acordar: va a dejar de mirar los avisos, que se lleva por delante a
+    los buenos.
+
+    Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT).
+    Que NO conteste no es un "no útil": el silencio no cuenta, ni a favor ni en contra.
+    """
+    provisto = _extract_service_token(request, token)
+    if not _token_ok(provisto, HA_POLL_TOKEN):
+        # Mismo criterio que `verify_agente`: token de servicio O JWT, porque a este
+        # endpoint llaman dos clientes distintos (la acción de la notificación de HA y
+        # el dashboard) y `Depends` solo sabe exigir uno.
+        try:
+            jwt.decode(provisto, SECRET_KEY, algorithms=[ALGORITHM])
+        except JWTError:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        r = http.patch(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"util": bool(body.util)})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Avisos: no se pudo guardar la valoración de %s (%s)", aviso_id, e)
+        raise HTTPException(status_code=502, detail="No se pudo guardar la valoración")
+
+    regla = str((filas[0] if filas else {}).get("regla") or "")
+    if regla:
+        _valorar_regla(regla, bool(body.util))
+    return {"ok": True, "regla": regla or None}
+
+
+def _valorar_regla(regla: str, util: bool) -> None:
+    """Apunta la valoración y silencia la regla si lleva demasiadas seguidas sin servir.
+
+    El contador de "no útil" es CONSECUTIVO y un "útil" lo pone a cero: lo que se busca
+    es una regla que ha dejado de valer, no una que tuvo un mal día.
+
+    Y silenciarla tiene que ser VISIBLE. Una regla apagada en silencio es exactamente el
+    error que persigue el resto del proyecto —algo deja de funcionar y nada lo dice—, así
+    que al callarla se avisa una última vez, diciendo cómo devolverla.
+    """
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?regla=eq.{quote(regla, safe='')}"
+                     "&select=utiles,no_utiles,silenciada", headers=supabase_headers())
+        fila = (r.json() or [{}])[0] if r.status_code < 300 else {}
+    except Exception as e:
+        logger.warning("Avisos: no se pudo leer la regla '%s' (%s)", regla, e)
+        return
+
+    utiles    = int(fila.get("utiles") or 0) + (1 if util else 0)
+    no_utiles = 0 if util else int(fila.get("no_utiles") or 0) + 1
+    silenciar = no_utiles >= AVISOS_NO_UTILES and not fila.get("silenciada")
+    cambios = {"regla": regla, "utiles": utiles, "no_utiles": no_utiles}
+    if silenciar:
+        cambios["silenciada"] = True
+        cambios["silenciada_desde"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
+                  headers={**supabase_headers(),
+                           "Prefer": "return=minimal,resolution=merge-duplicates"},
+                  json=cambios)
+    except Exception as e:
+        logger.warning("Avisos: no se pudo guardar la valoración de '%s' (%s)", regla, e)
+        return
+
+    if silenciar:
+        logger.warning("Avisos: regla '%s' silenciada tras %d valoraciones negativas",
+                       regla, no_utiles)
+        # Sin `regla`: este aviso no lo puede silenciar el propio silenciado, y tiene que
+        # salir aunque el presupuesto del día esté gastado.
+        _apuntar_aviso("", f"He dejado de avisarte de '{regla}': las últimas "
+                           f"{no_utiles} veces no te sirvió. Dime «reactiva {regla}» "
+                           f"si la quieres de vuelta.", prioridad=PRIO_BAJA)
+
+
+@app.post("/avisos/reglas/{regla}/reactivar")
+def reactivar_regla(regla: str = Path(..., pattern=r"^[a-z0-9_]{1,40}$"),
+                    credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Devuelve la voz a una regla silenciada."""
+    try:
+        http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
+                  headers={**supabase_headers(),
+                           "Prefer": "return=minimal,resolution=merge-duplicates"},
+                  json={"regla": regla, "silenciada": False, "silenciada_desde": None,
+                        "no_utiles": 0})
+    except Exception as e:
+        logger.error("Avisos: no se pudo reactivar '%s' (%s)", regla, e)
+        raise HTTPException(status_code=502, detail="No se pudo reactivar la regla")
+    return {"ok": True, "regla": regla}
+
+
+def _reglas_silenciadas() -> list:
+    """Las que están calladas, para el panel: un silencio que no se ve es un fallo."""
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?silenciada=is.true"
+                     "&select=regla,no_utiles,silenciada_desde", headers=supabase_headers())
+        return r.json() if r.status_code < 300 else []
+    except Exception:
+        return []
+
+
 def _despachar_recordatorios() -> dict:
     """Manda los que ya han vencido. Lo llama el tick de HA.
 
@@ -6435,7 +7108,11 @@ def _despachar_recordatorios() -> dict:
         ahora = datetime.now(timezone.utc).isoformat()
         r = http.get(
             f"{RECORDATORIOS_URL}?enviado=is.false&cuando=lte.{quote(ahora, safe='')}"
-            f"&select=id,cuando,texto&order=cuando.asc&limit={RECORDATORIOS_POR_TICK}",
+            f"&select=id,cuando,texto,regla,prioridad,caduca,voz"
+            # Por prioridad primero: el presupuesto se gasta en lo que más corre, no en
+            # lo que se apuntó antes. Con el orden por fecha, un aviso de "sal ya" podía
+            # quedarse fuera por tres avisos de la noche anterior.
+            f"&order=prioridad.asc,cuando.asc&limit={RECORDATORIOS_POR_TICK}",
             headers=supabase_headers(),
         )
         if r.status_code >= 300:
@@ -6445,24 +7122,51 @@ def _despachar_recordatorios() -> dict:
         logger.error("Recordatorios: no se pudieron consultar (%s)", e)
         return {"recordatorios": 0}
 
-    enviados = 0
+    presupuesto = max(0, AVISOS_MAX_DIA - _contar_enviados_hoy()) if vencidos else 0
+    enviados = pospuestos = caducados = 0
     for fila in vencidos:
         rid = str(fila.get("id") or "")
         if not re.match(_UUID_PATTERN, rid):
             continue
+        regla     = str(fila.get("regla") or "")
+        prioridad = int(fila.get("prioridad") or PRIO_NORMAL)
+
+        # Un aviso que llega tarde no es un aviso tarde: es una mentira. "Sal ya" pasada
+        # la hora de salir sobra, y decirlo igual enseña a no fiarse del canal.
+        caduca = str(fila.get("caduca") or "")
+        if caduca and caduca < ahora:
+            http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"enviado": True, "enviado_at": ahora})
+            logger.info("Aviso de '%s' caducado sin mandar", regla or "?")
+            caducados += 1
+            continue
+
+        # El presupuesto solo gobierna los avisos de REGLA: lo que pediste tú sale
+        # siempre. Y lo urgente también, o el tope convertiría el aviso que más corre en
+        # el primero en caerse.
+        if regla and prioridad > PRIO_SIN_TOPE and presupuesto <= 0:
+            _posponer_aviso(rid)
+            pospuestos += 1
+            continue
+
         # La reserva ES la pregunta: si el PATCH condicional no devuelve fila, otro tick
         # se lo llevó y aquí no hay nada que mandar.
         reserva = http.patch(
             f"{RECORDATORIOS_URL}?id=eq.{rid}&enviado=is.false",
             headers={**supabase_headers(), "Prefer": "return=representation"},
-            json={"enviado": True},
+            json={"enviado": True, "enviado_at": ahora},
         )
         if reserva.status_code >= 300 or not reserva.json():
             continue
         texto = str(fila.get("texto") or "")
         try:
-            canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis")
+            canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis",
+                               voz=bool(fila.get("voz")), aviso_id=rid)
             enviados += 1
+            if regla:
+                presupuesto -= 1
+                _apuntar_envio_regla(regla)
             logger.info("Recordatorio enviado por %s: %s", canal, texto[:80])
         except Exception as e:
             # Un fallo transitorio de SMTP no puede consumir el recordatorio: se libera y
@@ -6470,8 +7174,13 @@ def _despachar_recordatorios() -> dict:
             logger.error("Recordatorio %s: fallo al enviar el aviso (%s); se libera", rid, e)
             http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
                        headers={**supabase_headers(), "Prefer": "return=minimal"},
-                       json={"enviado": False})
-    return {"recordatorios": enviados}
+                       json={"enviado": False, "enviado_at": None})
+    salida = {"recordatorios": enviados}
+    if pospuestos:
+        salida["avisos_pospuestos"] = pospuestos
+    if caducados:
+        salida["avisos_caducados"] = caducados
+    return salida
 
 
 # ── JARVIS (asistente conversacional con herramientas) ────────────────────────
