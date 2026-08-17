@@ -215,7 +215,11 @@ class TestAvisoDeReloj:
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
         main._avisar_reloj_si_toca()
         main._avisar_reloj_si_toca()
-        assert len(mock_requests.called("GET", "/rest/v1/health_metrics")) == 1
+        # Solo la consulta del USO del reloj: la de la hora habitual de dormir es otra
+        # (filtra por sleep_analysis) y tiene su propia caché diaria.
+        uso = [c for c in mock_requests.called("GET", "/rest/v1/health_metrics")
+               if "sleep_analysis" not in c[1]]
+        assert len(uso) == 1
 
     def test_un_fallo_leyendo_la_salud_no_tumba_el_tick(self, mock_requests):
         mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(None, 500, "boom"))
@@ -818,3 +822,54 @@ class TestGobiernoDeAvisos:
         avisos = client.get("/ha/avisos-pending",
                             headers={"X-Auth-Token": "ha-poll-token"}).json()["avisos"]
         assert avisos[0]["voz"] is True and avisos[0]["id"] == "abc"
+
+
+class TestHoraAprendida:
+    """La hora del aviso del reloj sale de tus noches, no de una constante.
+
+    Este aviso tiene una condición dura: o llega antes de que te duermas o no sirve,
+    porque el dato de la noche no se recupera. Quién sabe esa hora no es la constante.
+    """
+
+    def _noches(self, mock_requests, horas):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(
+            [{"extra": {"sleep_start": h}} for h in horas]))
+
+    def test_sin_base_se_queda_con_la_configurada(self, mock_requests):
+        """Una mediana sacada de cuatro noches no es un hábito."""
+        self._noches(mock_requests, ["23:30", "23:45"])
+        assert main._hora_aviso_reloj() == main.HORA_AVISO_RELOJ
+
+    def test_con_base_se_adelanta_a_tu_hora(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "HORA_AVISO_RELOJ", (20, 0))
+        self._noches(mock_requests, ["23:30"] * 6)
+        assert main._hora_aviso_reloj() == (22, 30)      # una hora antes
+
+    def test_nunca_antes_de_la_configurada(self, mock_requests, monkeypatch):
+        """Si te duermes muy pronto, el aviso saldría a media tarde — cuando aún no sabes
+        si te lo vas a poner."""
+        monkeypatch.setattr(main, "HORA_AVISO_RELOJ", (21, 30))
+        self._noches(mock_requests, ["21:00"] * 6)
+        assert main._hora_aviso_reloj() == (21, 30)
+
+    def test_la_madrugada_se_acota_a_la_noche(self, mock_requests, monkeypatch):
+        """Acostarse a la 01:00 es más tarde que a las 23:00, no dieciocho horas antes —
+        pero la hora resultante (00:00) no vale: ya no llega antes de dormir, y en una
+        comparación (hora, minuto) del mismo día es MENOR que las 21:30, así que el
+        aviso saldría a media tarde. Se acota al tope de la noche."""
+        monkeypatch.setattr(main, "HORA_AVISO_RELOJ", (20, 0))
+        self._noches(mock_requests, ["01:00"] * 6)
+        assert main._hora_aviso_reloj() == main.RELOJ_AVISO_TOPE
+
+    def test_una_noche_anulada_no_cuenta(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "HORA_AVISO_RELOJ", (20, 0))
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse(
+            [{"extra": {"sleep_start": "23:30"}}] * 5
+            + [{"extra": {"sleep_start": "04:00", "excluded": True}}] * 20))
+        assert main._hora_aviso_reloj() == (22, 30)
+
+    def test_se_calcula_una_vez_al_dia(self, mock_requests):
+        self._noches(mock_requests, ["23:30"] * 6)
+        main._hora_aviso_reloj()
+        main._hora_aviso_reloj()
+        assert len(mock_requests.called("GET", "/rest/v1/health_metrics")) == 1

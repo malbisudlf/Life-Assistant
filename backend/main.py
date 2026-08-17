@@ -29,6 +29,7 @@ import html as html_mod
 import ipaddress
 import socket
 import unicodedata
+import hashlib
 import uuid
 
 logging.basicConfig(level=logging.INFO)
@@ -185,6 +186,11 @@ RELOJ_AVISO_HORA  = os.getenv("RELOJ_AVISO_HORA", "21:30")
 # Cuántas noches seguidas sin medir hacen falta para avisar de la racha. Con 1 saltaría
 # cada vez que se carga una noche, que es normal y volvería el aviso ruido.
 RELOJ_AVISO_NOCHES = int(os.getenv("RELOJ_AVISO_NOCHES", "2"))
+# Cuánto antes de tu hora habitual de dormirte sale el aviso. La hora ya no es una
+# constante: sale de tus propias noches (ver `_hora_aviso_reloj`).
+RELOJ_AVISO_ANTES_MIN = int(os.getenv("RELOJ_AVISO_ANTES_MIN", "60"))
+# Y el tope: más tarde de esto ya no es "antes de dormir" para nadie.
+RELOJ_AVISO_TOPE      = (23, 30)
 # Informe semanal. El resumen diario mira 30 días porque es lo que sirve para decidir
 # HOY; lo que de verdad cambia una rutina se ve en meses, y hoy eso solo se puede mirar
 # abriendo el modal de patrones del dashboard — o sea, solo si a uno se le ocurre.
@@ -4615,18 +4621,41 @@ def _informe_salud(semanas: int, hoy) -> dict:
     return salida
 
 
+def _informe_avisos() -> dict:
+    """Cuántos avisos mandó cada regla y cuántos sirvieron.
+
+    Es la señal de utilidad mirada desde arriba, y lo que evita que el sistema envejezca
+    mal sin que nadie se entere: una regla que lleva veinte avisos y ninguna respuesta
+    puede estar funcionando perfectamente y no servir para nada, y eso no se ve mirando
+    los avisos de uno en uno.
+
+    Un fallo leyéndolo no tumba el informe: la sección se queda fuera y ya está.
+    """
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?select=regla,enviados,utiles,no_utiles,"
+                     "silenciada,ultima_vez&order=enviados.desc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"reglas": r.json()}
+    except Exception as e:
+        logger.warning("Informe semanal: no se pudo leer la utilidad de los avisos (%s)", e)
+        return {}
+
+
 def construir_informe_semanal(hoy=None) -> dict:
     hoy = hoy or _ahora_local().date()
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         f_salud  = pool.submit(_informe_salud, INFORME_SEMANAS, hoy)
         f_entren = pool.submit(_brief_entrenamiento)
-        salud, entrenamiento = f_salud.result(), f_entren.result()
+        f_avisos = pool.submit(_informe_avisos)
+        salud, entrenamiento, avisos = f_salud.result(), f_entren.result(), f_avisos.result()
     return {
         "fecha":         hoy.isoformat(),
         "semanas":       INFORME_SEMANAS,
         "zona":          TIMEZONE,
         "salud":         salud,
         "entrenamiento": entrenamiento,
+        "avisos":        avisos,
     }
 
 
@@ -4684,6 +4713,18 @@ def render_informe_texto(d: dict) -> str:
                  f"última sesión {t.get('ultima_sesion') or '—'}")
     else:
         L.append("  (sin cliente configurado)")
+
+    # Qué avisos mandó y cuáles sirvieron. Va aquí y no en el correo diario porque es
+    # una pregunta de tendencia: en un día no se ve si una regla ha dejado de valer.
+    reglas = ((d.get("avisos") or {}).get("reglas")) or []
+    if reglas:
+        L.append("")
+        L.append("## AVISOS: QUÉ SE MANDÓ Y QUÉ SIRVIÓ")
+        L.append("  Sin respuesta NO cuenta como \"no sirvió\": el silencio no vota.")
+        for r in reglas:
+            estado = " [SILENCIADA]" if r.get("silenciada") else ""
+            L.append(f"  {str(r.get('regla') or '?'):<16} {r.get('enviados', 0):>3} enviados · "
+                     f"{r.get('utiles', 0)} útiles · {r.get('no_utiles', 0)} no{estado}")
     return "\n".join(L) + "\n"
 
 
@@ -5880,12 +5921,51 @@ RELOJ_AVISO_VENTANA = 7
 # min y sin esto serían ~30 lecturas de health_metrics cada noche. Quien impide el
 # aviso duplicado es el INSERT, no esto — un cold start lo borra y no pasa nada.
 _reloj_avisado_dia: str | None = None
+# La hora aprendida se calcula una vez al día: es una consulta y el tick pasa cada
+# 5 minutos. Perderla en un cold start cuesta una consulta, no un dato.
+_reloj_hora_cache: dict = {}
 
 
 def _uuid_aviso_reloj(fecha: str) -> str:
     """Id determinista del aviso de un día: dos ticks generan el mismo y el segundo
     choca contra la clave primaria."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:aviso-reloj:{fecha}"))
+
+
+def _hora_aviso_reloj() -> tuple:
+    """A qué hora avisar de que te falta el reloj: una hora antes de que te duermas.
+
+    `RELOJ_AVISO_HORA` (21:30) era una constante elegida a ojo, y este aviso tiene una
+    condición dura: **o llega antes de que te duermas o no sirve de nada**, porque el
+    dato de la noche no se recupera al día siguiente. Quién sabe esa hora no es la
+    constante, son tus últimas treinta noches.
+
+    Sin base se cae al valor configurado: una mediana sacada de cuatro noches no es un
+    hábito. Y nunca se adelanta de la hora configurada — si te duermes muy temprano, el
+    aviso saldría a media tarde, cuando todavía no sabes si te lo vas a poner.
+    """
+    hoy = _ahora_local().date().isoformat()
+    if _reloj_hora_cache.get("dia") == hoy:
+        return _reloj_hora_cache["hora"]
+    habitual = _hora_habitual_dormir()
+    if not habitual:
+        _reloj_hora_cache.update(dia=hoy, hora=HORA_AVISO_RELOJ)
+        return HORA_AVISO_RELOJ
+    minutos = (habitual[0] * 60 + habitual[1]) - RELOJ_AVISO_ANTES_MIN
+    if habitual[0] < 12:            # te duermes pasada medianoche: cuenta como tarde
+        minutos += 24 * 60
+    if minutos >= 24 * 60:
+        # La hora calculada cae pasada la medianoche. No se puede usar tal cual por dos
+        # motivos, y el segundo es el que importa: un aviso a las 00:30 ya no llega
+        # "antes de dormir", y además toda la comparación de este módulo es (hora,
+        # minuto) DEL MISMO DÍA, donde 00:30 es menor que las 21:30 y el aviso saldría
+        # a media tarde. Se acota a la noche: para quien se duerme a la 01:00, las 23:30
+        # siguen siendo hora y media antes.
+        aprendida = RELOJ_AVISO_TOPE
+    else:
+        aprendida = max(((minutos // 60) % 24, minutos % 60), HORA_AVISO_RELOJ)
+    _reloj_hora_cache.update(dia=hoy, hora=aprendida)
+    return aprendida
 
 
 def _avisar_reloj_si_toca() -> dict:
@@ -5896,7 +5976,13 @@ def _avisar_reloj_si_toca() -> dict:
     """
     global _reloj_avisado_dia
     ahora = _ahora_local()
+    # La barrera BARATA primero: la hora aprendida nunca es anterior a la configurada
+    # (`_hora_aviso_reloj` devuelve el máximo de las dos), así que por debajo de esta no
+    # hace falta preguntarle nada a Supabase. El tick pasa cada 5 minutos y sin esto
+    # aprender la hora habría costado ~250 consultas al día.
     if not RELOJ_AVISO or (ahora.hour, ahora.minute) < HORA_AVISO_RELOJ:
+        return {}
+    if (ahora.hour, ahora.minute) < _hora_aviso_reloj():
         return {}
     hoy = ahora.date().isoformat()
     if _reloj_avisado_dia == hoy:
@@ -6823,7 +6909,506 @@ _REGLAS = (
     ("madrugon",      _regla_madrugon),
     ("malestar",      _regla_malestar),
     ("hueco_entreno", _regla_hueco_entreno),
+    ("vigilancias",   lambda: _revisar_vigilancias()),
+    ("correo",        lambda: _revisar_correo()),
+    ("tuyas",         lambda: _correr_reglas_usuario()),
 )
+
+
+# ── Reglas que Jarvis propone y tú apruebas ──────────────────────────────────
+# Las de `_REGLAS` son siete condiciones escritas a mano: crecer así cuesta un despliegue
+# por idea. Esto deja que crezca hablando — pero SIN romper la regla de fondo del
+# proyecto, que el listón vive en el código y no en el criterio del modelo.
+#
+# Lo que lo reconcilia: **el modelo no escribe reglas, RELLENA plantillas.** Las
+# condiciones siguen estando aquí, en Python, revisables en un diff; lo único que se
+# guarda en la base de datos es cuál de ellas y con qué parámetros. Un modelo que pudiera
+# definir la condición sería un modelo decidiendo cuándo interrumpirte, que es
+# exactamente lo que este proyecto lleva evitando desde el principio.
+#
+# Y el alta pasa por el botón de confirmar (`confirmar: True`), como `mcp_conectar`: el
+# modelo propone, tú apruebas, y lo aprobado queda escrito.
+REGLAS_USUARIO_URL = f"{SUPABASE_URL}/rest/v1/reglas_usuario"
+REGLAS_USUARIO_MAX = int(os.getenv("REGLAS_USUARIO_MAX", "10"))
+_DIAS_SEMANA = ("lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo")
+_ultima_regla_salud = 0.0
+
+
+def _plantilla_dia_semana(p: dict, ahora: datetime) -> Optional[str]:
+    """«Los <día> a las <hora>, recuérdame <texto>»."""
+    dia = _clave_recuerdo(str(p.get("dia") or ""))
+    if dia not in _DIAS_SEMANA or _DIAS_SEMANA[ahora.weekday()] != dia:
+        return None
+    hora = _hora_config(str(p.get("hora") or ""), (9, 0))
+    if (ahora.hour, ahora.minute) < hora:
+        return None
+    return str(p.get("texto") or "")[:150]
+
+
+def _plantilla_antes_de_evento(p: dict, ahora: datetime) -> Optional[str]:
+    """«Antes de los eventos que digan <palabra>, avísame de <texto>»."""
+    palabra = str(p.get("palabra") or "").strip().lower()
+    if not palabra:
+        return None
+    minutos = max(5, min(int(p.get("minutos") or 60), 24 * 60))
+    for ev in _eventos_con_fecha(dias=1):
+        if palabra not in (ev.get("title") or "").lower():
+            continue
+        falta = (ev["ini"] - ahora).total_seconds() / 60
+        if 0 < falta <= minutos:
+            return f"{str(p.get('texto') or 'Recuerda')[:120]} (para «{ev.get('title')}»)"
+    return None
+
+
+def _plantilla_metrica(p: dict, ahora: datetime) -> Optional[str]:
+    """«Si <métrica> baja de / sube de <valor>, dímelo»."""
+    clave = _clave_recuerdo(str(p.get("metrica") or ""))
+    if clave not in {c for c, *_ in _BRIEF_METRICAS}:
+        return None
+    try:
+        umbral = float(p.get("valor"))
+    except (TypeError, ValueError):
+        return None
+    m = (_brief_salud() or {}).get(clave) or {}
+    ultimo = m.get("ultimo")
+    # Un dato viejo no dispara nada: la métrica de hace una semana no dice nada de hoy.
+    # `dias_atras` se compara contra None y no con `or`: 0 es el dato de HOY, el más
+    # fresco que puede haber, y con `or 99` se descartaba justo ese. Es el mismo error
+    # que persigue medio proyecto — un cero no es un hueco.
+    dias_atras = m.get("dias_atras")
+    if ultimo is None or dias_atras is None or dias_atras > 2:
+        return None
+    debajo = str(p.get("direccion") or "debajo").startswith("deb")
+    if (ultimo < umbral) if debajo else (ultimo > umbral):
+        return (f"{clave.replace('_', ' ')} está en {_cifra(ultimo)} "
+                f"({'por debajo de' if debajo else 'por encima de'} {_cifra(umbral)}).")
+    return None
+
+
+# El catálogo cerrado. El modelo elige DE AQUÍ; no puede añadir una entrada.
+_PLANTILLAS_REGLA = {
+    "dia_semana": {
+        "fn":      _plantilla_dia_semana,
+        "campos":  ("dia", "hora", "texto"),
+        "que_es":  "Un aviso fijo un día de la semana a una hora (dia, hora HH:MM, texto).",
+        "salud":   False,
+    },
+    "antes_de_evento": {
+        "fn":      _plantilla_antes_de_evento,
+        "campos":  ("palabra", "minutos", "texto"),
+        "que_es":  "Antes de los eventos cuyo título contenga una palabra (palabra, "
+                   "minutos de antelación, texto).",
+        "salud":   False,
+    },
+    "metrica_umbral": {
+        "fn":      _plantilla_metrica,
+        "campos":  ("metrica", "direccion", "valor"),
+        "que_es":  "Cuando una métrica de salud pase de un valor (metrica, direccion "
+                   "'debajo' o 'encima', valor).",
+        "salud":   True,
+    },
+}
+
+
+def _j_proponer_regla(nombre: str, plantilla: str, parametros: dict | None = None) -> dict:
+    """Da de alta una regla. Solo se llega aquí desde /jarvis/ejecutar (confirmar)."""
+    plantilla = str(plantilla or "").strip()
+    if plantilla not in _PLANTILLAS_REGLA:
+        return {"ok": False, "motivo": f"No sé evaluar '{plantilla}'. Las que sé: "
+                                       f"{', '.join(_PLANTILLAS_REGLA)}"}
+    clave = _clave_recuerdo(nombre)[:40]
+    if not clave:
+        return {"ok": False, "motivo": "Necesito un nombre corto para la regla"}
+    # Solo los campos que la plantilla declara: los redacta un modelo, y sin el filtro
+    # un nombre inventado acabaría guardado y evaluándose como si significara algo.
+    campos = _PLANTILLAS_REGLA[plantilla]["campos"]
+    limpios = {k: v for k, v in (parametros or {}).items() if k in campos}
+    if not limpios:
+        return {"ok": False, "motivo": f"Faltan los datos de la regla ({', '.join(campos)})"}
+
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?select=clave", headers=supabase_headers())
+        existentes = {f.get("clave") for f in (r.json() if r.status_code < 300 else [])}
+    except Exception:
+        existentes = set()
+    if len(existentes) >= REGLAS_USUARIO_MAX and clave not in existentes:
+        return {"ok": False, "motivo": f"Ya tienes {len(existentes)} reglas (el máximo)"}
+
+    try:
+        r = http.post(f"{REGLAS_USUARIO_URL}?on_conflict=clave",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json={"clave": clave, "plantilla": plantilla,
+                            "parametros": limpios, "activa": True})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Reglas: no se pudo guardar '%s' (%s)", clave, e)
+        return {"ok": False, "motivo": "No se pudo guardar la regla"}
+    return {"ok": True, "clave": clave, "plantilla": plantilla, "parametros": limpios}
+
+
+def _j_mis_reglas() -> dict:
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?select=clave,plantilla,parametros,activa"
+                     "&order=creada.asc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"reglas": r.json(), "plantillas_que_se_pueden_crear":
+                {n: p["que_es"] for n, p in _PLANTILLAS_REGLA.items()}}
+    except Exception as e:
+        logger.warning("Reglas: no se pudieron listar (%s)", e)
+        return {"error": "No pude consultar tus reglas"}
+
+
+def _j_quitar_regla(nombre: str) -> dict:
+    clave = _clave_recuerdo(nombre)[:40]
+    try:
+        r = http.delete(f"{REGLAS_USUARIO_URL}?clave=eq.{quote(clave, safe='')}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Reglas: no se pudo quitar '%s' (%s)", clave, e)
+        return {"ok": False, "motivo": "No se pudo quitar"}
+    return {"ok": True, "clave": clave}
+
+
+def _correr_reglas_usuario() -> int:
+    """Evalúa las reglas aprobadas. Una rota no se lleva a las demás."""
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?activa=is.true"
+                     f"&select=clave,plantilla,parametros&limit={REGLAS_USUARIO_MAX}",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        reglas = r.json()
+    except Exception as e:
+        logger.warning("Reglas de usuario: no se pudieron leer (%s)", e)
+        return 0
+
+    ahora, puestos = _ahora_local(), 0
+    # Las plantillas que leen salud traen 30 días de métricas: se evalúan una vez por
+    # hora, no en cada tick. Las demás son baratas y van siempre.
+    global _ultima_regla_salud
+    toca_salud = time.time() - _ultima_regla_salud >= 3600
+    if toca_salud:
+        _ultima_regla_salud = time.time()
+
+    for regla in reglas:
+        plantilla = _PLANTILLAS_REGLA.get(str(regla.get("plantilla") or ""))
+        if plantilla and plantilla["salud"] and not toca_salud:
+            continue
+        if not plantilla:
+            # Una plantilla que ya no existe: se ignora en vez de reventar. Puede pasar
+            # si se quita del código una que había reglas usando.
+            continue
+        try:
+            texto = plantilla["fn"](regla.get("parametros") or {}, ahora)
+        except Exception:
+            logger.exception("Regla de usuario '%s': fallo evaluándola", regla.get("clave"))
+            continue
+        if not texto:
+            continue
+        # La huella lleva el día: una regla tuya puede repetirse mañana, pero no cada
+        # cinco minutos.
+        if _apuntar_aviso(f"tuya:{regla.get('clave')}", texto, prioridad=PRIO_NORMAL,
+                          huella=f"{regla.get('clave')}:{ahora.date().isoformat()}"):
+            puestos += 1
+    return puestos
+
+
+# ── El correo entrante ───────────────────────────────────────────────────────
+# El backend sabía ESCRIBIR correo y no leerlo, y el buzón es la fuente de información
+# diaria más rica que hay. Lo que se busca NO es resumir el buzón —eso ya lo hace la
+# rutina del briefing, y hacerlo dos veces sería peor que no hacerlo— sino sacar lo
+# ACCIONABLE CON FECHA y meterlo donde vive lo demás: los avisos.
+#
+# Es la capacidad más delicada del proyecto en cuanto a privacidad, así que va con las
+# restricciones puestas por delante y no como añadido:
+#   - **Apagada mientras no se configure.** Sin `IMAP_HOST` no se conecta a nada.
+#   - **Solo cabeceras**: asunto, remitente y fecha. El CUERPO no se lee ni se manda a
+#     ningún modelo. Con el asunto se distingue de sobra "tu pedido llega mañana" de una
+#     newsletter, y lo que no se lee no se puede filtrar.
+#   - **No se marca como leído** (`BODY.PEEK`): un asistente que te descoloca el buzón
+#     deja de usarse a la semana.
+#   - **No se guarda nada.** Ni el asunto ni el remitente van a Supabase; lo único que
+#     persiste es el aviso que tú vas a leer.
+IMAP_HOST      = os.getenv("IMAP_HOST", "")
+IMAP_USER      = os.getenv("IMAP_USER", "") or SMTP_USER
+IMAP_PASSWORD  = os.getenv("IMAP_PASSWORD", "") or SMTP_PASSWORD
+IMAP_CARPETA   = os.getenv("IMAP_CARPETA", "INBOX")
+CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
+CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
+CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
+_ultima_revision_correo = 0.0
+
+_CORREO_SISTEMA = (
+    "Te paso ASUNTOS de correos recientes. Devuelve SOLO un JSON "
+    '{"acciones": [{"texto": "...", "fecha": "YYYY-MM-DD"}]} con lo que exija hacer algo '
+    "en una fecha concreta de los próximos días: una entrega, una cita, un pago, un "
+    "paquete. NADA de newsletters, promociones ni notificaciones sociales. Si no hay "
+    'nada accionable devuelve {"acciones": []}. El texto, en español y en una frase.'
+)
+
+
+def _cabeceras_recientes() -> list:
+    """Asunto, remitente y fecha de los correos sin leer de las últimas horas.
+
+    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+    """
+    import imaplib
+    from email.header import decode_header, make_header
+
+    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
+    buzon = imaplib.IMAP4_SSL(IMAP_HOST)
+    try:
+        buzon.login(IMAP_USER, IMAP_PASSWORD)
+        buzon.select(IMAP_CARPETA, readonly=True)
+        ok, datos = buzon.search(None, f'(UNSEEN SINCE {desde})')
+        if ok != "OK":
+            return []
+        ids = (datos[0] or b"").split()[-CORREO_MAX:]
+        salida = []
+        for i in ids:
+            ok, partes = buzon.fetch(i, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
+                continue
+            crudo = partes[0][1].decode("utf-8", "replace")
+            campos = {}
+            for linea in crudo.splitlines():
+                clave, _, valor = linea.partition(":")
+                if valor:
+                    campos[clave.strip().lower()] = valor.strip()
+            asunto = campos.get("subject", "")
+            try:
+                asunto = str(make_header(decode_header(asunto)))
+            except Exception:
+                pass
+            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80]})
+        return salida
+    finally:
+        try:
+            buzon.logout()
+        except Exception:
+            pass
+
+
+def _revisar_correo() -> int:
+    """Saca del buzón lo accionable con fecha y lo deja como aviso."""
+    global _ultima_revision_correo
+    if not (IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+        return 0
+    if time.time() - _ultima_revision_correo < CORREO_CADA_MIN * 60:
+        return 0
+    _ultima_revision_correo = time.time()
+
+    try:
+        cabeceras = _cabeceras_recientes()
+    except Exception as e:
+        # Un buzón que no responde no puede tumbar el tick ni inventarse tareas. Y el
+        # error va sin detalle del contenido: aquí lo que falla es la conexión.
+        logger.warning("Correo: no se pudo leer el buzón (%s)", type(e).__name__)
+        return 0
+    if not cabeceras:
+        return 0
+
+    hoy = _ahora_local().date().isoformat()
+    try:
+        cliente = get_openai_client()
+        respuesta = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": f"{_CORREO_SISTEMA} Hoy es {hoy}."},
+                      {"role": "user", "content": json.dumps(cabeceras, ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+            **_parametros_modelo(JARVIS_MODEL, 500),
+        ).choices[0].message.content
+        acciones = (json.loads(respuesta or "{}") or {}).get("acciones") or []
+    except Exception as e:
+        logger.warning("Correo: no se pudo extraer lo accionable (%s)", e)
+        return 0
+
+    puestos = 0
+    for a in acciones[:5]:
+        texto = str((a or {}).get("texto") or "").strip()
+        fecha  = str((a or {}).get("fecha") or "")
+        if not texto or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", fecha):
+            continue
+        # El aviso se PROPONE para esa fecha, no se crea nada en el calendario: lo que
+        # sale de un asunto de correo interpretado por un modelo no tiene la fiabilidad
+        # que hace falta para tocar la agenda sola. Misma frontera que sugerencia_evento.
+        if _apuntar_aviso("correo", f"Del buzón: {texto} ({fecha}).",
+                          prioridad=PRIO_NORMAL, huella=f"correo:{texto[:60]}"):
+            puestos += 1
+    return puestos
+
+
+# ── Vigilar páginas ──────────────────────────────────────────────────────────
+# La capacidad proactiva GENÉRICA. Las reglas de arriba son siete condiciones escritas a
+# mano; esto es una que las cubre todas para lo de fuera: un precio que baja, una plaza
+# que se libera, una nota que se publica, un horario que cambia. Y se crea hablando, sin
+# tocar código.
+#
+# Dos preguntas distintas y no una: "¿ha cambiado algo?" (huella del contenido) y "¿ya
+# aparece esto?" (`buscar`). Mezclarlas daría avisos por cualquier cambio de un banner.
+#
+# Lo que baja de la web sigue siendo contenido ajeno: se compara y se recorta, pero NO se
+# le pasa a ningún modelo para redactar el aviso. Un texto que un desconocido controla no
+# tiene por qué pasar cerca de algo que tiene herramientas.
+VIGILANCIAS_MAX      = int(os.getenv("VIGILANCIAS_MAX", "5"))
+VIGILANCIA_CADA_MIN  = float(os.getenv("VIGILANCIA_CADA_MIN", "60"))
+VIGILANCIAS_URL      = f"{SUPABASE_URL}/rest/v1/vigilancias"
+_ultima_vigilancia_web = 0.0
+
+
+def _huella_pagina(texto: str) -> str:
+    """Hash del contenido, normalizado. Sin normalizar, un espacio de más cuenta como
+    cambio y la vigilancia avisaría cada hora."""
+    limpio = re.sub(r"\s+", " ", texto or "").strip().lower()
+    return hashlib.sha256(limpio.encode("utf-8", "ignore")).hexdigest()
+
+
+def _j_vigilar_pagina(url: str, nombre: str = "", buscar: str = "") -> dict:
+    """Da de alta una vigilancia."""
+    if not JARVIS_WEB:
+        return {"error": "El acceso a internet está desactivado (JARVIS_WEB=0)"}
+    url = str(url or "").strip()
+    if not url_web_permitida(url):
+        # Sin decir por qué, igual que `leer_pagina`: distinguir "no existe" de "es
+        # interna" convertiría esto en un escáner de la red.
+        logger.warning("Jarvis: vigilar_pagina rechazó una URL no permitida")
+        return {"error": "Esa dirección no se puede vigilar"}
+    clave = _clave_recuerdo(nombre or urlsplit(url).netloc)[:40]
+    if not clave:
+        return {"error": "Necesito un nombre corto para la vigilancia"}
+
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=clave", headers=supabase_headers())
+        existentes = r.json() if r.status_code < 300 else []
+    except Exception as e:
+        logger.warning("Vigilancias: no se pudieron listar (%s)", e)
+        existentes = []
+    if len(existentes) >= VIGILANCIAS_MAX and clave not in {v.get("clave") for v in existentes}:
+        return {"error": f"Ya vigilo {len(existentes)} páginas (el máximo). Quita alguna "
+                         f"con dejar_de_vigilar."}
+
+    # Se baja una vez al darla de alta: así la huella de partida es la de AHORA y el
+    # primer aviso será por un cambio de verdad, no por la primera visita. De paso
+    # comprueba que la página se puede leer, en vez de dar por buena un alta que no
+    # funciona (la lección del agente PC: lanzar algo no es comprobar que funciona).
+    try:
+        bajada = _descargar(url)
+    except Exception:
+        bajada = None
+    if not bajada:
+        return {"error": "No pude abrir esa página, así que no la doy de alta"}
+    texto = _html_a_texto(bajada[1])
+
+    fila = {"clave": clave, "url": bajada[0], "buscar": (buscar or "").strip()[:120] or None,
+            "huella": _huella_pagina(texto),
+            "ultima_vez": datetime.now(timezone.utc).isoformat()}
+    try:
+        r = http.post(f"{VIGILANCIAS_URL}?on_conflict=clave",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json=fila)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Vigilancias: no se pudo guardar '%s' (%s)", clave, e)
+        return {"error": "No se pudo guardar la vigilancia"}
+    return {"ok": True, "clave": clave,
+            "vigilando": "que aparezca ese texto" if fila["buscar"] else "cualquier cambio"}
+
+
+def _j_mis_vigilancias() -> dict:
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=clave,url,buscar,ultima_vez,avisos"
+                     "&order=creada.asc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"vigilancias": r.json()}
+    except Exception as e:
+        logger.warning("Vigilancias: no se pudieron listar (%s)", e)
+        return {"error": "No pude consultar las vigilancias"}
+
+
+def _j_dejar_de_vigilar(nombre: str) -> dict:
+    clave = _clave_recuerdo(nombre)[:40]
+    if not clave:
+        return {"error": "Dime cuál"}
+    try:
+        r = http.delete(f"{VIGILANCIAS_URL}?clave=eq.{quote(clave, safe='')}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Vigilancias: no se pudo borrar '%s' (%s)", clave, e)
+        return {"error": "No se pudo quitar la vigilancia"}
+    return {"ok": True, "clave": clave}
+
+
+def _revisar_vigilancias() -> int:
+    """Mira las páginas vigiladas y avisa de lo que haya cambiado. Lo llama el tick."""
+    global _ultima_vigilancia_web
+    if not JARVIS_WEB:
+        return 0
+    if time.time() - _ultima_vigilancia_web < VIGILANCIA_CADA_MIN * 60:
+        return 0
+    _ultima_vigilancia_web = time.time()
+
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=id,clave,url,buscar,huella,avisos"
+                     f"&order=creada.asc&limit={VIGILANCIAS_MAX}", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        vigiladas = r.json()
+    except Exception as e:
+        # Si no se puede preguntar, no se sabe: callar. La regla de siempre.
+        logger.warning("Vigilancias: no se pudieron leer (%s)", e)
+        return 0
+
+    avisados = 0
+    for v in vigiladas:
+        try:
+            bajada = _descargar(str(v.get("url") or ""))
+        except Exception as e:
+            logger.warning("Vigilancias: '%s' no se pudo abrir (%s)", v.get("clave"), e)
+            continue
+        if not bajada:
+            continue
+        texto  = _html_a_texto(bajada[1])
+        huella = _huella_pagina(texto)
+        buscar = (v.get("buscar") or "").strip().lower()
+
+        if buscar:
+            # Modo "avísame cuando aparezca": mientras no esté, no hay nada que decir, y
+            # la huella no importa — la página puede cambiar mil veces sin que aparezca.
+            hay = buscar in texto.lower()
+            cambio = hay and v.get("huella") != "encontrado"
+            nueva_huella = "encontrado" if hay else ""
+            mensaje = f"Ya aparece «{v.get('buscar')}» en {v.get('clave')}."
+        else:
+            cambio = bool(v.get("huella")) and huella != v.get("huella")
+            nueva_huella = huella
+            mensaje = f"Ha cambiado la página que vigilas ({v.get('clave')})."
+
+        try:
+            http.patch(f"{VIGILANCIAS_URL}?id=eq.{v.get('id')}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"huella": nueva_huella,
+                             "ultima_vez": datetime.now(timezone.utc).isoformat(),
+                             "avisos": int(v.get("avisos") or 0) + (1 if cambio else 0)})
+        except Exception as e:
+            logger.warning("Vigilancias: no se pudo actualizar '%s' (%s)", v.get("clave"), e)
+
+        # El aviso lleva la URL, no un trozo de la página: el contenido lo controla un
+        # desconocido y aquí no aporta nada que no aporte abrirla.
+        if cambio and _apuntar_aviso("vigilancia", f"{mensaje} {bajada[0][:120]}",
+                                     prioridad=PRIO_NORMAL,
+                                     huella=f"{v.get('clave')}:{nueva_huella[:32]}"):
+            avisados += 1
+    return avisados
 
 
 # ── Avisos al móvil ──────────────────────────────────────────────────────────
@@ -8663,6 +9248,60 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["clave", "contenido"],
     },
+    "proponer_regla": {
+        "confirmar":   True,
+        "fn":          _j_proponer_regla,
+        "descripcion": "Crea una regla permanente para avisarle sin que pregunte. Solo "
+                       "puedes usar las plantillas que existen (mira `mis_reglas` para "
+                       "verlas): tú eliges cuál encaja y con qué valores, no inventas la "
+                       "condición. Úsalo cuando detectes algo que se repite.",
+        "parametros":  {
+            "nombre":     {"type": "string", "description": "Nombre corto de la regla."},
+            "plantilla":  {"type": "string", "description": "dia_semana | antes_de_evento | metrica_umbral"},
+            "parametros": {"type": "object", "description": "Los campos que pida la plantilla."},
+        },
+        "obligatorios": ["nombre", "plantilla", "parametros"],
+    },
+    "mis_reglas": {
+        "confirmar":   False,
+        "fn":          _j_mis_reglas,
+        "descripcion": "Las reglas que el usuario tiene aprobadas, y las plantillas que "
+                       "puedes proponer. Míralo antes de proponer una.",
+        "parametros":  {},
+    },
+    "quitar_regla": {
+        "confirmar":   False,
+        "fn":          _j_quitar_regla,
+        "descripcion": "Quita una regla suya por su nombre corto.",
+        "parametros":  {"nombre": {"type": "string", "description": "El nombre de la regla."}},
+        "obligatorios": ["nombre"],
+    },
+    "vigilar_pagina": {
+        "confirmar":   False,
+        "fn":          _j_vigilar_pagina,
+        "descripcion": "Vigila una página y avisa cuando cambie, o cuando aparezca un texto "
+                       "concreto. Es la forma de estar pendiente de algo de fuera (un precio, "
+                       "una plaza libre, una nota publicada) sin tener que mirarlo a mano.",
+        "parametros":  {
+            "url":    {"type": "string", "description": "Dirección https de la página."},
+            "nombre": {"type": "string", "description": "Nombre corto para referirse a ella después."},
+            "buscar": {"type": "string", "description": "Opcional: avisar solo cuando aparezca ESTE texto."},
+        },
+        "obligatorios": ["url"],
+    },
+    "mis_vigilancias": {
+        "confirmar":   False,
+        "fn":          _j_mis_vigilancias,
+        "descripcion": "Qué páginas estás vigilando y cuándo se miraron por última vez.",
+        "parametros":  {},
+    },
+    "dejar_de_vigilar": {
+        "confirmar":   False,
+        "fn":          _j_dejar_de_vigilar,
+        "descripcion": "Deja de vigilar una página, por su nombre corto.",
+        "parametros":  {"nombre": {"type": "string", "description": "El nombre con el que se dio de alta."}},
+        "obligatorios": ["nombre"],
+    },
     "olvidar": {
         "confirmar":   False,
         "fn":          _j_olvidar,
@@ -9136,6 +9775,10 @@ def _jarvis_sistema(voz: bool = False) -> str:
             "  5. Y puedes conectar MÁS. Que ya tengas estos no significa que sean todos "
             "los que puede haber: si hace falta uno que no está, mira `mcp_catalogo` o "
             "búscalo en internet y propónlo con `mcp_conectar`.\n"
+            "  6. Si alguno de esos servidores es un gestor de TAREAS, lo que el usuario "
+            "mencione como algo que tiene que hacer va ahí, sin que te lo pida: una tarea "
+            "que se queda en la conversación es una tarea perdida. Ofrécelo en el momento "
+            "en que aparece, no al final.\n"
         )
     else:
         # Sin esto, el modelo no sabe que el soporte existe y contesta "no tengo acceso
