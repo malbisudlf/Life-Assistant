@@ -8,6 +8,8 @@ y que un fallo de una fuente no tumba el resto del resumen.
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import main
 from conftest import FakeResponse
 
@@ -1185,16 +1187,19 @@ class TestQueHaCambiado:
 class TestInformeSemanal:
     """Una media de 30 días dice dónde estás; trece semanas seguidas, hacia dónde vas."""
 
-    # El día en que se ejecuta el test no puede cambiar el resultado. Las semanas se
-    # agrupan por su lunes, así que cinco días contados hacia atrás desde "hoy" caen
-    # repartidos en DOS semanas si hoy es lunes, martes o miércoles, y la última se
-    # quedaba en un día — por debajo de INFORME_MIN_DIAS_SEMANA, o sea `None`. El test
-    # pasaba de jueves a domingo y fallaba el resto, que es la peor forma de fallar:
-    # verde en el commit y rojo tres días después sin que nadie haya tocado nada.
+    # El reloj se fija a un DOMINGO a propósito. Las semanas del informe van de lunes a
+    # domingo, y estos tests construyen los días contando hacia atrás desde hoy: con el
+    # reloj real, un lunes esos cinco días caen casi todos en la semana ANTERIOR, la
+    # última sale con un solo día y —correctamente— como hueco, así que los asertos
+    # fallaban un par de días por semana sin que nada estuviera roto. Es la misma razón
+    # por la que existe _ahora_local(): poder fijar el reloj en los tests.
     HOY = datetime(2026, 8, 16, 9, 0, tzinfo=main.LOCAL_TZ)   # domingo
 
-    def _filas(self, monkeypatch, semanas=4, por_semana=5):
+    @pytest.fixture(autouse=True)
+    def _reloj_fijo(self, monkeypatch):
         monkeypatch.setattr(main, "_ahora_local", lambda: self.HOY)
+
+    def _filas(self, semanas=4, por_semana=5):
         hoy = self.HOY.date()
         filas = []
         for s in range(semanas):
@@ -1206,26 +1211,26 @@ class TestInformeSemanal:
                               "value": 70, "unit": "bpm", "extra": {}})
         return filas
 
-    def test_agrupa_por_semana_con_su_n(self, client, auth_headers, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+    def test_agrupa_por_semana_con_su_n(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
         d = client.get("/informe", headers=auth_headers).json()
         fc = d["salud"]["metricas"]["fc_reposo"]["semanas"]
         assert len(fc) == main.INFORME_SEMANAS
         assert fc[-1]["n"] == 5 and fc[-1]["media"] == 55
         assert fc[0] is None, "las semanas sin dato se marcan, no se comprimen"
 
-    def test_una_semana_con_dos_dias_no_es_una_semana_medida(self, client, auth_headers, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch, semanas=1, por_semana=2))
+    def test_una_semana_con_dos_dias_no_es_una_semana_medida(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas(semanas=1, por_semana=2))
         d = client.get("/informe", headers=auth_headers).json()
         assert d["salud"]["metricas"]["fc_reposo"]["semanas"][-1] is None
 
-    def test_lleva_los_dias_de_reloj_como_denominador(self, client, auth_headers, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+    def test_lleva_los_dias_de_reloj_como_denominador(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
         d = client.get("/informe", headers=auth_headers).json()
         assert d["salud"]["reloj"]["dia"][-1]["n"] == 5
 
-    def test_el_texto_dice_su_ventana_y_marca_los_huecos(self, client, auth_headers, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+    def test_el_texto_dice_su_ventana_y_marca_los_huecos(self, client, auth_headers, mock_requests):
+        montar_fuentes(mock_requests, salud=self._filas())
         texto = main.render_informe_texto(client.get("/informe", headers=auth_headers).json())
         assert "## SEMANAS" in texto and "## MÉTRICAS POR SEMANA" in texto
         assert "## RELOJ POR SEMANA" in texto
@@ -1237,7 +1242,7 @@ class TestInformeSemanal:
 
     def test_no_se_manda_dos_veces_el_mismo_dia(self, client, mock_requests, monkeypatch):
         """La reserva es un INSERT: el 409 contra la clave primaria es la pregunta."""
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+        montar_fuentes(mock_requests, salud=self._filas())
         configurar_smtp(monkeypatch)
         mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse(None, 409, "duplicate"))
         r = client.post("/informe/send?token=brief-token&forzar=1")
@@ -1245,7 +1250,7 @@ class TestInformeSemanal:
         assert len(_SMTPFalso.enviados) == 0
 
     def test_forzado_lo_manda_con_su_adjunto(self, client, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+        montar_fuentes(mock_requests, salud=self._filas())
         configurar_smtp(monkeypatch)
         mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse([], 201))
         r = client.post("/informe/send?token=brief-token&forzar=1")
@@ -1256,7 +1261,7 @@ class TestInformeSemanal:
         assert list(msg.iter_attachments())[0].get_filename().startswith("informe-")
 
     def test_si_falla_el_envio_se_libera_la_reserva(self, client, mock_requests, monkeypatch):
-        montar_fuentes(mock_requests, salud=self._filas(monkeypatch))
+        montar_fuentes(mock_requests, salud=self._filas())
         configurar_smtp(monkeypatch)
         mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse([], 201))
         monkeypatch.setattr(main, "enviar_correo",

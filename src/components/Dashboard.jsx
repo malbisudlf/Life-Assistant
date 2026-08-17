@@ -2115,8 +2115,14 @@ export default function Dashboard() {
     try {
       const r = await apiFetch(`${API}/avisos/probar`, { method: "POST", headers: authHeaders() });
       const d = await r.json();
+      // "Enviado" sería mentira en el caso del móvil: lo único que sabe el backend es
+      // que lo ha encolado y que HA está pasando a recoger. Si la automatización de HA
+      // falla —el `notify` mal escrito, por ejemplo— el aviso se pierde ahí y aquí no
+      // se puede saber. Decirlo es la diferencia entre buscar el fallo en el sitio
+      // correcto y darlo por enviado, que es el error de siempre de este proyecto.
       setAvisoPrueba(d.canal === "movil"
-        ? "enviado al móvil — si no llega, revisa la automatización de HA"
+        ? "encolado — HA lo recoge en ≤30 s. Si no suena nada, el fallo está en su "
+          + "automatización o en el nombre del notify"
         : "enviado por correo (nadie recoge los avisos del móvil)");
     } catch {
       setAvisoPrueba("no se pudo enviar");

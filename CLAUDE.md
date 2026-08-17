@@ -834,9 +834,12 @@ Ficheros clave:
     encender una luz media hora tarde es peor que no encenderla, pero un aviso tarde sigue
     valiendo.
   El panel ⚙ tiene una fila **Avisos** (por dónde salen y cuánto hace del último sondeo) y
-  un botón «Probar aviso» que recorre la cadena entera: instalar el YAML y esperar a que
-  toque un aviso de verdad para saber si funciona es la forma más rápida de darlo por
-  puesto sin estarlo.
+  un botón «Probar aviso»: instalar el YAML y esperar a que toque un aviso de verdad para
+  saber si funciona es la forma más rápida de darlo por puesto sin estarlo. Lo que ese
+  botón **no** puede decir es que el aviso llegara al bolsillo — desde aquí solo se ve que
+  HA vino a recogerlo, y si su automatización falla el aviso muere allí (ya pasó, ver
+  "Bugs históricos"). Por eso dice "encolado" y nombra a los sospechosos, en vez de
+  "enviado".
 
 - **Aviso de "ponte el reloj"** (`_avisar_reloj_si_toca()`, mismo tick de HA): si hoy no
   hay ni un dato del reloj —o si se acumulan `RELOJ_AVISO_NOCHES` noches sin medir—, deja
@@ -1856,6 +1859,12 @@ limitador genérico (`_rate_buckets`) y los flags WOL se resetean entre tests
 automáticamente; los intentos de login NO, porque ya no viven en memoria — cada test
 que los necesite los mockea con el fixture de arriba.
 
+**Un test que construya días hacia atrás desde hoy tiene que fijar el reloj**
+(`monkeypatch.setattr(main, "_ahora_local", ...)`). Los del informe semanal no lo hacían
+y fallaban los lunes y los martes: las semanas van de lunes a domingo, así que "los
+últimos cinco días" caen casi todos en la semana anterior y la última sale —bien— como
+hueco. Para eso existe `_ahora_local()` como punto único.
+
 Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
 `BRIEF_TOKEN=brief-token`.
@@ -1901,6 +1910,24 @@ excepción o error de consola, no solo si falta un texto.
   que toca.
 
 ## Bugs históricos (no los reintroduzcas)
+
+- **El primer aviso al móvil se perdió entero y el dashboard dijo que había salido.** Al
+  estrenar el canal, la automatización de HA llevaba `notify.mobile_app_TU_MOVIL` — el
+  hueco de la plantilla de `docs/HOME_ASSISTANT_JARVIS.md`, copiado tal cual. Ese servicio
+  no existe, así que la automatización se disparaba y reventaba al mandar. Y aquí está lo
+  que importa: **desde el backend eso es indistinguible del éxito**. HA había pasado a
+  recoger la cola, que es la única señal que hay, así que el panel decía "enviado al
+  móvil" mientras el aviso moría dentro de HA. Tres cosas que dejó:
+  - **Recoger no es entregar.** El botón de prueba ahora dice "encolado" y nombra los dos
+    sospechosos (la automatización y el `notify`), en vez de afirmar una entrega que no ha
+    comprobado. Es el mismo error que el `streaming_ready` del agente sobre un Sunshine
+    que no estaba abierto: *lanzar algo no es comprobar que funciona*.
+  - **El punto ciego sigue abierto**: un aviso recogido por HA y no entregado no lo
+    rescata nadie, porque el rescate solo cubre lo que NADIE recoge. Cerrarlo pide un ack
+    de HA — está propuesto en `docs/IDEAS.md`, sin hacer.
+  - Y una del lado de fuera: los errores de HA **no** están en `/config/home-assistant.log`
+    con Supervisor; se leen con `ha core logs`. Buscarlos donde no estaban fue lo que
+    alargó el diagnóstico.
 
 - **Jarvis dijo que no sabía hacer justo lo que sabía hacer.** A «quiero que aprendas a
   hacer reservas en restaurantes, aprende esa skill o importa mcps, como sea» contestó
