@@ -29,6 +29,7 @@ import html as html_mod
 import ipaddress
 import socket
 import unicodedata
+import hashlib
 import uuid
 
 logging.basicConfig(level=logging.INFO)
@@ -6823,7 +6824,302 @@ _REGLAS = (
     ("madrugon",      _regla_madrugon),
     ("malestar",      _regla_malestar),
     ("hueco_entreno", _regla_hueco_entreno),
+    ("vigilancias",   lambda: _revisar_vigilancias()),
+    ("correo",        lambda: _revisar_correo()),
 )
+
+
+# ── El correo entrante ───────────────────────────────────────────────────────
+# El backend sabía ESCRIBIR correo y no leerlo, y el buzón es la fuente de información
+# diaria más rica que hay. Lo que se busca NO es resumir el buzón —eso ya lo hace la
+# rutina del briefing, y hacerlo dos veces sería peor que no hacerlo— sino sacar lo
+# ACCIONABLE CON FECHA y meterlo donde vive lo demás: los avisos.
+#
+# Es la capacidad más delicada del proyecto en cuanto a privacidad, así que va con las
+# restricciones puestas por delante y no como añadido:
+#   - **Apagada mientras no se configure.** Sin `IMAP_HOST` no se conecta a nada.
+#   - **Solo cabeceras**: asunto, remitente y fecha. El CUERPO no se lee ni se manda a
+#     ningún modelo. Con el asunto se distingue de sobra "tu pedido llega mañana" de una
+#     newsletter, y lo que no se lee no se puede filtrar.
+#   - **No se marca como leído** (`BODY.PEEK`): un asistente que te descoloca el buzón
+#     deja de usarse a la semana.
+#   - **No se guarda nada.** Ni el asunto ni el remitente van a Supabase; lo único que
+#     persiste es el aviso que tú vas a leer.
+IMAP_HOST      = os.getenv("IMAP_HOST", "")
+IMAP_USER      = os.getenv("IMAP_USER", "") or SMTP_USER
+IMAP_PASSWORD  = os.getenv("IMAP_PASSWORD", "") or SMTP_PASSWORD
+IMAP_CARPETA   = os.getenv("IMAP_CARPETA", "INBOX")
+CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
+CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
+CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
+_ultima_revision_correo = 0.0
+
+_CORREO_SISTEMA = (
+    "Te paso ASUNTOS de correos recientes. Devuelve SOLO un JSON "
+    '{"acciones": [{"texto": "...", "fecha": "YYYY-MM-DD"}]} con lo que exija hacer algo '
+    "en una fecha concreta de los próximos días: una entrega, una cita, un pago, un "
+    "paquete. NADA de newsletters, promociones ni notificaciones sociales. Si no hay "
+    'nada accionable devuelve {"acciones": []}. El texto, en español y en una frase.'
+)
+
+
+def _cabeceras_recientes() -> list:
+    """Asunto, remitente y fecha de los correos sin leer de las últimas horas.
+
+    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+    """
+    import imaplib
+    from email.header import decode_header, make_header
+
+    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
+    buzon = imaplib.IMAP4_SSL(IMAP_HOST)
+    try:
+        buzon.login(IMAP_USER, IMAP_PASSWORD)
+        buzon.select(IMAP_CARPETA, readonly=True)
+        ok, datos = buzon.search(None, f'(UNSEEN SINCE {desde})')
+        if ok != "OK":
+            return []
+        ids = (datos[0] or b"").split()[-CORREO_MAX:]
+        salida = []
+        for i in ids:
+            ok, partes = buzon.fetch(i, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
+                continue
+            crudo = partes[0][1].decode("utf-8", "replace")
+            campos = {}
+            for linea in crudo.splitlines():
+                clave, _, valor = linea.partition(":")
+                if valor:
+                    campos[clave.strip().lower()] = valor.strip()
+            asunto = campos.get("subject", "")
+            try:
+                asunto = str(make_header(decode_header(asunto)))
+            except Exception:
+                pass
+            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80]})
+        return salida
+    finally:
+        try:
+            buzon.logout()
+        except Exception:
+            pass
+
+
+def _revisar_correo() -> int:
+    """Saca del buzón lo accionable con fecha y lo deja como aviso."""
+    global _ultima_revision_correo
+    if not (IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+        return 0
+    if time.time() - _ultima_revision_correo < CORREO_CADA_MIN * 60:
+        return 0
+    _ultima_revision_correo = time.time()
+
+    try:
+        cabeceras = _cabeceras_recientes()
+    except Exception as e:
+        # Un buzón que no responde no puede tumbar el tick ni inventarse tareas. Y el
+        # error va sin detalle del contenido: aquí lo que falla es la conexión.
+        logger.warning("Correo: no se pudo leer el buzón (%s)", type(e).__name__)
+        return 0
+    if not cabeceras:
+        return 0
+
+    hoy = _ahora_local().date().isoformat()
+    try:
+        cliente = get_openai_client()
+        respuesta = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": f"{_CORREO_SISTEMA} Hoy es {hoy}."},
+                      {"role": "user", "content": json.dumps(cabeceras, ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+            **_parametros_modelo(JARVIS_MODEL, 500),
+        ).choices[0].message.content
+        acciones = (json.loads(respuesta or "{}") or {}).get("acciones") or []
+    except Exception as e:
+        logger.warning("Correo: no se pudo extraer lo accionable (%s)", e)
+        return 0
+
+    puestos = 0
+    for a in acciones[:5]:
+        texto = str((a or {}).get("texto") or "").strip()
+        fecha  = str((a or {}).get("fecha") or "")
+        if not texto or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", fecha):
+            continue
+        # El aviso se PROPONE para esa fecha, no se crea nada en el calendario: lo que
+        # sale de un asunto de correo interpretado por un modelo no tiene la fiabilidad
+        # que hace falta para tocar la agenda sola. Misma frontera que sugerencia_evento.
+        if _apuntar_aviso("correo", f"Del buzón: {texto} ({fecha}).",
+                          prioridad=PRIO_NORMAL, huella=f"correo:{texto[:60]}"):
+            puestos += 1
+    return puestos
+
+
+# ── Vigilar páginas ──────────────────────────────────────────────────────────
+# La capacidad proactiva GENÉRICA. Las reglas de arriba son siete condiciones escritas a
+# mano; esto es una que las cubre todas para lo de fuera: un precio que baja, una plaza
+# que se libera, una nota que se publica, un horario que cambia. Y se crea hablando, sin
+# tocar código.
+#
+# Dos preguntas distintas y no una: "¿ha cambiado algo?" (huella del contenido) y "¿ya
+# aparece esto?" (`buscar`). Mezclarlas daría avisos por cualquier cambio de un banner.
+#
+# Lo que baja de la web sigue siendo contenido ajeno: se compara y se recorta, pero NO se
+# le pasa a ningún modelo para redactar el aviso. Un texto que un desconocido controla no
+# tiene por qué pasar cerca de algo que tiene herramientas.
+VIGILANCIAS_MAX      = int(os.getenv("VIGILANCIAS_MAX", "5"))
+VIGILANCIA_CADA_MIN  = float(os.getenv("VIGILANCIA_CADA_MIN", "60"))
+VIGILANCIAS_URL      = f"{SUPABASE_URL}/rest/v1/vigilancias"
+_ultima_vigilancia_web = 0.0
+
+
+def _huella_pagina(texto: str) -> str:
+    """Hash del contenido, normalizado. Sin normalizar, un espacio de más cuenta como
+    cambio y la vigilancia avisaría cada hora."""
+    limpio = re.sub(r"\s+", " ", texto or "").strip().lower()
+    return hashlib.sha256(limpio.encode("utf-8", "ignore")).hexdigest()
+
+
+def _j_vigilar_pagina(url: str, nombre: str = "", buscar: str = "") -> dict:
+    """Da de alta una vigilancia."""
+    if not JARVIS_WEB:
+        return {"error": "El acceso a internet está desactivado (JARVIS_WEB=0)"}
+    url = str(url or "").strip()
+    if not url_web_permitida(url):
+        # Sin decir por qué, igual que `leer_pagina`: distinguir "no existe" de "es
+        # interna" convertiría esto en un escáner de la red.
+        logger.warning("Jarvis: vigilar_pagina rechazó una URL no permitida")
+        return {"error": "Esa dirección no se puede vigilar"}
+    clave = _clave_recuerdo(nombre or urlsplit(url).netloc)[:40]
+    if not clave:
+        return {"error": "Necesito un nombre corto para la vigilancia"}
+
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=clave", headers=supabase_headers())
+        existentes = r.json() if r.status_code < 300 else []
+    except Exception as e:
+        logger.warning("Vigilancias: no se pudieron listar (%s)", e)
+        existentes = []
+    if len(existentes) >= VIGILANCIAS_MAX and clave not in {v.get("clave") for v in existentes}:
+        return {"error": f"Ya vigilo {len(existentes)} páginas (el máximo). Quita alguna "
+                         f"con dejar_de_vigilar."}
+
+    # Se baja una vez al darla de alta: así la huella de partida es la de AHORA y el
+    # primer aviso será por un cambio de verdad, no por la primera visita. De paso
+    # comprueba que la página se puede leer, en vez de dar por buena un alta que no
+    # funciona (la lección del agente PC: lanzar algo no es comprobar que funciona).
+    try:
+        bajada = _descargar(url)
+    except Exception:
+        bajada = None
+    if not bajada:
+        return {"error": "No pude abrir esa página, así que no la doy de alta"}
+    texto = _html_a_texto(bajada[1])
+
+    fila = {"clave": clave, "url": bajada[0], "buscar": (buscar or "").strip()[:120] or None,
+            "huella": _huella_pagina(texto),
+            "ultima_vez": datetime.now(timezone.utc).isoformat()}
+    try:
+        r = http.post(f"{VIGILANCIAS_URL}?on_conflict=clave",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json=fila)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Vigilancias: no se pudo guardar '%s' (%s)", clave, e)
+        return {"error": "No se pudo guardar la vigilancia"}
+    return {"ok": True, "clave": clave,
+            "vigilando": "que aparezca ese texto" if fila["buscar"] else "cualquier cambio"}
+
+
+def _j_mis_vigilancias() -> dict:
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=clave,url,buscar,ultima_vez,avisos"
+                     "&order=creada.asc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return {"vigilancias": r.json()}
+    except Exception as e:
+        logger.warning("Vigilancias: no se pudieron listar (%s)", e)
+        return {"error": "No pude consultar las vigilancias"}
+
+
+def _j_dejar_de_vigilar(nombre: str) -> dict:
+    clave = _clave_recuerdo(nombre)[:40]
+    if not clave:
+        return {"error": "Dime cuál"}
+    try:
+        r = http.delete(f"{VIGILANCIAS_URL}?clave=eq.{quote(clave, safe='')}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Vigilancias: no se pudo borrar '%s' (%s)", clave, e)
+        return {"error": "No se pudo quitar la vigilancia"}
+    return {"ok": True, "clave": clave}
+
+
+def _revisar_vigilancias() -> int:
+    """Mira las páginas vigiladas y avisa de lo que haya cambiado. Lo llama el tick."""
+    global _ultima_vigilancia_web
+    if not JARVIS_WEB:
+        return 0
+    if time.time() - _ultima_vigilancia_web < VIGILANCIA_CADA_MIN * 60:
+        return 0
+    _ultima_vigilancia_web = time.time()
+
+    try:
+        r = http.get(f"{VIGILANCIAS_URL}?select=id,clave,url,buscar,huella,avisos"
+                     f"&order=creada.asc&limit={VIGILANCIAS_MAX}", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        vigiladas = r.json()
+    except Exception as e:
+        # Si no se puede preguntar, no se sabe: callar. La regla de siempre.
+        logger.warning("Vigilancias: no se pudieron leer (%s)", e)
+        return 0
+
+    avisados = 0
+    for v in vigiladas:
+        try:
+            bajada = _descargar(str(v.get("url") or ""))
+        except Exception as e:
+            logger.warning("Vigilancias: '%s' no se pudo abrir (%s)", v.get("clave"), e)
+            continue
+        if not bajada:
+            continue
+        texto  = _html_a_texto(bajada[1])
+        huella = _huella_pagina(texto)
+        buscar = (v.get("buscar") or "").strip().lower()
+
+        if buscar:
+            # Modo "avísame cuando aparezca": mientras no esté, no hay nada que decir, y
+            # la huella no importa — la página puede cambiar mil veces sin que aparezca.
+            hay = buscar in texto.lower()
+            cambio = hay and v.get("huella") != "encontrado"
+            nueva_huella = "encontrado" if hay else ""
+            mensaje = f"Ya aparece «{v.get('buscar')}» en {v.get('clave')}."
+        else:
+            cambio = bool(v.get("huella")) and huella != v.get("huella")
+            nueva_huella = huella
+            mensaje = f"Ha cambiado la página que vigilas ({v.get('clave')})."
+
+        try:
+            http.patch(f"{VIGILANCIAS_URL}?id=eq.{v.get('id')}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"huella": nueva_huella,
+                             "ultima_vez": datetime.now(timezone.utc).isoformat(),
+                             "avisos": int(v.get("avisos") or 0) + (1 if cambio else 0)})
+        except Exception as e:
+            logger.warning("Vigilancias: no se pudo actualizar '%s' (%s)", v.get("clave"), e)
+
+        # El aviso lleva la URL, no un trozo de la página: el contenido lo controla un
+        # desconocido y aquí no aporta nada que no aporte abrirla.
+        if cambio and _apuntar_aviso("vigilancia", f"{mensaje} {bajada[0][:120]}",
+                                     prioridad=PRIO_NORMAL,
+                                     huella=f"{v.get('clave')}:{nueva_huella[:32]}"):
+            avisados += 1
+    return avisados
 
 
 # ── Avisos al móvil ──────────────────────────────────────────────────────────
@@ -8663,6 +8959,32 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["clave", "contenido"],
     },
+    "vigilar_pagina": {
+        "confirmar":   False,
+        "fn":          _j_vigilar_pagina,
+        "descripcion": "Vigila una página y avisa cuando cambie, o cuando aparezca un texto "
+                       "concreto. Es la forma de estar pendiente de algo de fuera (un precio, "
+                       "una plaza libre, una nota publicada) sin tener que mirarlo a mano.",
+        "parametros":  {
+            "url":    {"type": "string", "description": "Dirección https de la página."},
+            "nombre": {"type": "string", "description": "Nombre corto para referirse a ella después."},
+            "buscar": {"type": "string", "description": "Opcional: avisar solo cuando aparezca ESTE texto."},
+        },
+        "obligatorios": ["url"],
+    },
+    "mis_vigilancias": {
+        "confirmar":   False,
+        "fn":          _j_mis_vigilancias,
+        "descripcion": "Qué páginas estás vigilando y cuándo se miraron por última vez.",
+        "parametros":  {},
+    },
+    "dejar_de_vigilar": {
+        "confirmar":   False,
+        "fn":          _j_dejar_de_vigilar,
+        "descripcion": "Deja de vigilar una página, por su nombre corto.",
+        "parametros":  {"nombre": {"type": "string", "description": "El nombre con el que se dio de alta."}},
+        "obligatorios": ["nombre"],
+    },
     "olvidar": {
         "confirmar":   False,
         "fn":          _j_olvidar,
@@ -9136,6 +9458,10 @@ def _jarvis_sistema(voz: bool = False) -> str:
             "  5. Y puedes conectar MÁS. Que ya tengas estos no significa que sean todos "
             "los que puede haber: si hace falta uno que no está, mira `mcp_catalogo` o "
             "búscalo en internet y propónlo con `mcp_conectar`.\n"
+            "  6. Si alguno de esos servidores es un gestor de TAREAS, lo que el usuario "
+            "mencione como algo que tiene que hacer va ahí, sin que te lo pida: una tarea "
+            "que se queda en la conversación es una tarea perdida. Ofrécelo en el momento "
+            "en que aparece, no al final.\n"
         )
     else:
         # Sin esto, el modelo no sabe que el soporte existe y contesta "no tengo acceso
