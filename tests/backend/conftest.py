@@ -145,6 +145,11 @@ def _limpiar_estado():
     # El vigilante de la ingesta solo mira una vez por hora: sin resetear el reloj, el
     # primer test que lo dispare dejaría mudos a los siguientes.
     main._ultima_vigilancia = 0.0
+    # Lo mismo con el vigilante del sistema, y el fallo apuntado del disparo de la
+    # rutina: sin resetearlo, un test que lo deje apuntado haría que el siguiente
+    # reintentara un disparo que no le corresponde.
+    main._ultima_vigilancia_sistema = 0.0
+    main._rutina_ultimo_fallo = None
     # La cola de avisos al móvil y el reloj del último sondeo de HA: sin resetearlos, un
     # test que encole un aviso se lo dejaría al siguiente, y el canal vivo de uno
     # cambiaría el de otro.
