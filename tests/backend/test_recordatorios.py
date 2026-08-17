@@ -453,7 +453,7 @@ class TestAvisosAlMovil:
 
     def test_la_prueba_usa_el_canal_que_toque(self, client, auth_headers, correos):
         r = client.post("/avisos/probar", headers=auth_headers)
-        assert r.json() == {"ok": True, "canal": "correo"}
+        assert r.json()["canal"] == "correo" and r.json()["ok"] is True
         self._sondear(client)
         r = client.post("/avisos/probar", headers=auth_headers)
         assert r.json()["canal"] == "movil"
@@ -873,3 +873,33 @@ class TestHoraAprendida:
         main._hora_aviso_reloj()
         main._hora_aviso_reloj()
         assert len(mock_requests.called("GET", "/rest/v1/health_metrics")) == 1
+
+
+class TestLaPruebaEjercitaLosBotones:
+    """La herramienta que existe para comprobar el canal tiene que ejercitar lo que se
+    quiere comprobar. Salía sin `id`, así que la notificación llegaba sin botones y la
+    única forma de saber si la valoración funcionaba era esperar a un aviso de verdad —
+    justo lo que este botón evita."""
+
+    def test_la_prueba_lleva_una_fila_real_que_votar(self, client, auth_headers,
+                                                     mock_requests, correos):
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = client.post("/avisos/probar", headers=auth_headers)
+        assert r.json()["con_botones"] is True
+        fila = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        # Ya marcada como enviada: el despachador no puede volver a mandarla.
+        assert fila["enviado"] is True and fila["regla"] == "prueba"
+
+    def test_sin_poder_apuntarla_se_prueba_igual_y_se_dice(self, client, auth_headers,
+                                                           mock_requests, correos):
+        """Fingir que la prueba fue completa sería el error que esto viene a arreglar."""
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse(None, 500, "boom"))
+        r = client.post("/avisos/probar", headers=auth_headers)
+        assert r.json()["ok"] is True and r.json()["con_botones"] is False
+
+    def test_votar_un_aviso_que_no_existe_no_dice_que_si(self, client, mock_requests):
+        """Quien pulsa el botón se quedaría creyendo que su voto contó."""
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([]))
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/util",
+                        json={"util": True}, headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 404
