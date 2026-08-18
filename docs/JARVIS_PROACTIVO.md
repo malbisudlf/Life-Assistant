@@ -6,8 +6,8 @@ después) y **por dónde se empieza**, con el esfuerzo orientativo — ● una t
 ●●● grande o con partes fuera del código.
 
 Lo que ya está hecho (recordatorios, el proactivo de las 19:00, el aviso del reloj, los
-vigilantes de ingesta y de sistema) no se repite aquí; está en `CLAUDE.md`. Esto es lo
-que vendría después.
+vigilantes de ingesta y de sistema) no se repite aquí; está en
+`docs/JARVIS.md`. Esto es lo que vendría después.
 
 ---
 
@@ -225,7 +225,7 @@ envejezca mal sin que nadie se entere.
 
 ## Lo que no haría
 
-- **Dejar que el modelo decida cuándo hablar.** Ya está escrito en `CLAUDE.md` y sigue
+- **Dejar que el modelo decida cuándo hablar.** Ya está escrito en `docs/JARVIS.md` y sigue
   siendo verdad: acaba en un aviso diario porque sí. El modelo redacta lo que el código ha
   decidido.
 - **Avisos de ánimo o de coaching.** «¡Buen trabajo esta semana!» no es información, y
