@@ -196,6 +196,13 @@ backend está en `docs/BACKEND_PATRONES.md`.
     caído no manda nada por su cuenta; en cambio leer "no he podido preguntar" como
     "estaba apagado" cuesta un día entero de briefing sin que nada lo parezca — el mismo
     error que cometió el agente PC con la cola de jobs.
+
+    Pero ese defecto **viaja marcado** (`leido: False` en `_estado_brief`, y de ahí a
+    `GET /brief/ajustes`): seguir enviando a ciegas es lo correcto para el ENVÍO y lo
+    contrario de lo correcto para quien PREGUNTA por el estado. Sin la marca, el panel
+    pintaba un "activo" en verde sin haber podido leer nada —y el botón de apagarlo,
+    que escribe en esa misma tabla, tampoco iba a funcionar—: el "no pude preguntar"
+    disfrazado de respuesta, otra vez.
   La **pausa lleva fecha de fin, inclusive, y se agota sola**: es lo que separa "me voy
   una semana" de "no lo quiero más". Una pausa vencida se reporta como si no existiera
   (`pausado_hasta` a `None`), porque una fecha pasada al lado de un resumen que vuelve a

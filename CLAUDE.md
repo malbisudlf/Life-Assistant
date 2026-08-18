@@ -96,7 +96,7 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── OpenAI ── Whisper (transcripción), GPT-4o-mini (extracción de ideas
     │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
-    ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
+    ├── Supabase REST ── ideas, jobs, pc_agents, training_*, health_metrics,
     │                    oauth_tokens, login_attempts, app_logs, presence, brief_envios
     └── Home Assistant ── HA sondea al backend (WOL/eventos, flags de relanzado y
                           apagado/suspensión del PC que ejecuta por SSH, y el reloj de
@@ -257,12 +257,13 @@ También está el workflow `Deploy backend (Fly.io)`
 
 **Migraciones de Supabase**: se aplican a mano desde el editor SQL. Las que hay:
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
-`20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
-`20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
+`20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`
+(retirada por `20260814_drop_clothing`), `20260729_rls_jobs`,
+`20260730_login_attempts`, `20260802_app_logs`,
 `20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
 `20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
 `20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
-`20260816_brief_instantanea`, `20260816_informe_envios`,
+`20260814_drop_clothing`, `20260816_brief_instantanea`, `20260816_informe_envios`,
 `20260816_health_fuente`, `20260817_vigilante_estado`,
 `20260818_avisos_gobierno`, `20260819_vigilancias`,
 `20260820_reglas_usuario`.

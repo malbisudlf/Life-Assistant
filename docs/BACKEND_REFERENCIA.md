@@ -25,7 +25,6 @@
 | `POST /ideas/text` | JWT | Texto escrito → GPT-4o-mini → Supabase (mismo procesado, sin transcripción) |
 | `DELETE /ideas/{idea_id}` | JWT | Elimina una idea |
 | `GET /export` | JWT | Exportación de datos |
-| `GET/POST /clothing`, `DELETE /clothing/{item_id}` | JWT | Widget **temporal** de conteo de ropa (ver `docs/FRONTEND.md`) |
 | `GET /ha/events/soon` | servicio | Próximos eventos para las notificaciones de Alexa |
 | `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
 | `POST /ha/entidades` | servicio | HA empuja el catálogo de la casa (id, nombre, estado). Sin él Jarvis no sabe qué dispositivos hay |
@@ -61,7 +60,7 @@
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
-| `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
+| `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha, si el de hoy ya salió y `leido` (False = no se pudo leer el ajuste y lo devuelto es el defecto) |
 | `GET /informe` | JWT | Datos del informe semanal (medias por semana) sin mandar nada |
 | `POST /informe/send` | `BRIEF_TOKEN` | Manda el informe semanal. `?forzar=1` se salta el día y la hora, **no** la reserva |
 | `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |

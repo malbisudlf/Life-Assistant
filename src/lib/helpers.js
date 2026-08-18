@@ -68,6 +68,17 @@ export function formatLogTime(iso, ahora = new Date()) {
   return `${d.getDate()} ${MONTHS_ES[d.getMonth()].slice(0, 3)} ${hora}`;
 }
 
+// Por qué el dashboard no sabe qué dice el interruptor del resumen diario. El 404 es el
+// caso que más despista y el más probable: el frontend lo despliega Vercel solo al hacer
+// push y el backend va a mano (`fly deploy`), así que una interfaz nueva convive a ratos
+// con una API que todavía no tiene el endpoint. Sin decirlo, eso se leía como "aún no lo
+// he comprobado" y mandaba a pulsar "Actualizar" en bucle.
+export function motivoFalloBrief(status) {
+  if (status === 404) return "el backend aún no tiene este ajuste — falta desplegarlo";
+  if (!status)        return "sin respuesta del backend";
+  return `el backend respondió ${status}`;
+}
+
 // ── Salud ────────────────────────────────────────────────────────
 export function hoursToHM(h) {
   if (h == null || isNaN(h)) return "—";
@@ -1286,31 +1297,6 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
     });
   }
   return salida.slice(-dias);
-}
-
-// ── Conteo de ropa (widget temporal) ────────────────────────────
-// Monedas soportadas: euro y baht tailandés (símbolo ฿).
-export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };
-
-// Formatea un importe con su símbolo de moneda al estilo español: coma decimal
-// y sin decimales si el importe es entero.
-export function formatMoney(amount, currency) {
-  const sym = CLOTHING_CURRENCIES[currency] || "";
-  const n   = Number(amount) || 0;
-  const txt = Number.isInteger(n) ? String(n) : n.toFixed(2).replace(".", ",");
-  return `${txt} ${sym}`.trim();
-}
-
-// Suma los precios de las prendas agrupados por moneda. Devuelve un objeto
-// { EUR: 12.5, THB: 450 } solo con las monedas presentes en la lista.
-export function clothingTotals(items) {
-  const totals = {};
-  for (const it of items || []) {
-    const cur   = it.currency || "EUR";
-    const price = Number(it.price) || 0;
-    totals[cur] = (totals[cur] || 0) + price;
-  }
-  return totals;
 }
 
 // ── Streaming PC ─────────────────────────────────────────────────────────

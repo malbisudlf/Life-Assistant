@@ -46,7 +46,7 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
 ### Widgets
 
 Definidos en `ALL_DEFAULT_WIDGETS`. Ids: `timeline`, `weather`, `upcoming`, `entregas`,
-`training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
+`training`, `ideas`, `acciones_pc` (Streaming PC),
 `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
 `health_workouts`, `health_hub` (Salud), `jarvis`. Cada uno se renderiza en
 `renderWidget(id)`.
@@ -122,25 +122,24 @@ Qué hace cada uno:
 6. **Ideas (`ideas`)** — grabación de audio (Whisper) **o** texto escrito ("✎ Escribir
    idea") → extracción con GPT-4o-mini → Supabase. Si la nota señala una cita, ofrece un
    chip para crear el evento (nunca lo crea solo).
-7. **Conteo ropa (`clothing`)** — **TEMPORAL**, ver abajo.
-8. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
+7. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
    apagar/suspender. Barra de progreso con polling cada 2s y badge de estado
    (pending/claimed/running) con los stages en nombres legibles.
-9. **Bienestar (`health_wellness`)** — toggle "Semana | Hoy". Puntuación 0–100 +
+8. **Bienestar (`health_wellness`)** — toggle "Semana | Hoy". Puntuación 0–100 +
    insights + recomendación + hora de la última sync. Al final, el mini-apartado
    **Composición corporal**: peso (`weight_body_mass`), % grasa y masa magra en la misma
    fila, cada uno con flecha ↑↓ coloreada. La del peso se colorea según si te acercas o
    alejas del objetivo configurado en ⚙; la barra de progreso indica la **distancia real**
    ("faltan X.X kg", no solo un %) y se colorea según la tendencia reciente
    (`weightDelta`): verde si te acercas, rojo si te alejas.
-10. **Sueño (`health_sleep`)** — noche anterior: duración, fases (profundo/REM/core/
+9. **Sueño (`health_sleep`)** — noche anterior: duración, fases (profundo/REM/core/
     despierto) con tooltips, puntuación 0–100 y resumen de las últimas 7 noches. Botón
     **"Anular noche"** para excluir noches con datos malos (p. ej. el Watch en carga);
     las anuladas se omiten de todos los cálculos. Cada barra del historial es clickable
     para excluir/restaurar. El flag vive en `extra.excluded` de Supabase.
-11. **Freq. cardíaca / HRV / Actividad / Entrenamientos AW** — sparklines y listas de
+10. **Freq. cardíaca / HRV / Actividad / Entrenamientos AW** — sparklines y listas de
     detalle (ocultos por defecto; el hub de salud los reutiliza).
-12. **Salud (`health_hub`)** — widget compacto con veredicto general + top conclusiones;
+11. **Salud (`health_hub`)** — widget compacto con veredicto general + top conclusiones;
     al pulsar abre el modal `healthModalOpen` con TODAS las conclusiones por dominio + los
     widgets de salud de detalle reutilizados vía `renderWidget`.
 
@@ -247,13 +246,15 @@ saber es distinto de saber que no llegó nada.
   `relleno` (área bajo la curva) y `marcar` (un predicado que señala puntos con un punto
   gris: hoy, los días puntuados sin el reloj puesto). Se usa en el bloque de composición corporal
   para la serie de peso con el objetivo encima.
-- **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
-  hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
-  "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,
-  los estados `clothing*`, el efecto de carga, las funciones `onClothingPhoto`/
-  `addClothing`/`deleteClothing`, el overlay de foto, los endpoints `/clothing`
-  del backend, los helpers `formatMoney`/`clothingTotals` (+ sus tests) y la tabla
-  `clothing` de Supabase (`drop table public.clothing;`).
+- **El widget de conteo de ropa (`clothing`) ya no existe**: era temporal —llevaba la
+  cuenta de la ropa comprada hasta saldar el gasto— y se retiró entero en agosto de 2026
+  (widget, estados, endpoints `/clothing`, helpers `formatMoney`/`clothingTotals`, la
+  tabla del backup de `/export` y la tabla de Supabase, con la migración
+  `20260814_drop_clothing.sql`). Si aparece en algún sitio, es un resto: quítalo.
+  Al retirarlo se aprendió que **`loadWidgetConfig` conservaba los ids guardados que ya
+  no existen**: la entrada de `clothing` seguía en el `localStorage` de quien lo tuviera
+  y salía en la lista de ⚙ como una casilla que no pintaba nada. Ahora se descarta lo
+  que no esté en `ALL_DEFAULT_WIDGETS`, así que un widget retirado desaparece solo.
 
 ### Layout de 2 o 3 columnas con resize libre
 
@@ -294,11 +295,24 @@ móvil no había forma de abrir los ajustes). `Escape` lo cierra; tiene `maxHeig
   ir: quien manda el correo es el backend, que no lo ve (`GET`/`PATCH /brief/ajustes`).
   El estado que se pinta es siempre el que devuelve el backend, nunca el que creíamos
   haber puesto — es él quien decide si una pausa sigue viva.
+  **Y lo que no se pudo saber se dice, con el motivo** (`briefFallo` + `motivoFalloBrief`
+  en helpers): "no lo he preguntado" y "he preguntado y no me contestan" se pintaban los
+  dos como "sin comprobar", con el botón congelado en "Comprobando…". El caso probable
+  no es exótico: el frontend lo despliega Vercel al hacer push y el backend va a mano,
+  así que una interfaz nueva convive a ratos con una API que aún no tiene el endpoint y
+  devuelve 404. Lo mismo con los rechazos del `PATCH` (una pausa con fecha pasada, un
+  502 al escribir): antes se tragaban en un `catch` y el clic no hacía nada visible, y
+  el efecto real de este ajuste tarda un día en verse. Y si el backend sí contesta pero
+  con su defecto de emergencia (`leido: false` en la respuesta — ver
+  `docs/BACKEND_PATRONES.md`), el panel lo dice en vez de pintar un "Activado" que
+  esconde que el botón de apagarlo tampoco va a poder escribir.
 - **Panel de estado del sistema**: backend, sesión de Outlook, última sincronización del
   Watch, **uso del reloj** (la fila de sync responde "¿llegan datos?", que es la pregunta
   del sistema; esta responde "¿se pudieron medir?", que es la del usuario), agente PC,
-  entrenamiento, **Resumen diario** (apagado a propósito y roto se
-  parecen mucho desde fuera: en los dos casos el correo no llega) y **Registro** (los
+  entrenamiento, **Resumen diario** (apagado a propósito, roto y "no se pudo preguntar"
+  se parecen mucho desde fuera: en los tres casos el correo puede no llegar, y solo el
+  tercero se pinta en rojo con el motivo, porque es el único que hay que ir a arreglar)
+  y **Registro** (los
   errores del backend, de `GET /logs`), todo en un mismo sitio. Se recarga al abrir ajustes y con su botón — nunca en un
   intervalo. Las demás filas dicen si algo RESPONDE; la del registro dice si algo ha
   FALLADO, que es distinto y es lo que faltaba. El listado va plegado y se despliega con

@@ -314,7 +314,6 @@ class TestExport:
         mock_requests.add("GET", "/rest/v1/training_sessions", FakeResponse([{"id": "s1"}]))
         mock_requests.add("GET", "/rest/v1/training_payments", FakeResponse([{"id": "p1"}]))
         mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([{"id": "h1"}]))
-        mock_requests.add("GET", "/rest/v1/clothing", FakeResponse([{"id": "r1"}]))
         r = client.get("/export", headers=auth_headers)
         assert r.status_code == 200
         data = r.json()
@@ -323,7 +322,6 @@ class TestExport:
         assert data["training_sessions"] == [{"id": "s1"}]
         assert data["training_payments"] == [{"id": "p1"}]
         assert data["health_metrics"] == [{"id": "h1"}]
-        assert data["clothing"] == [{"id": "r1"}]
         assert "exported_at" in data
 
     def test_no_exporta_tokens_oauth(self, client, auth_headers, mock_requests):
@@ -373,58 +371,6 @@ class TestExport:
 
         monkeypatch.setattr(main, "get_openai_client", lambda: FakeClient())
         assert main.extract_idea_from_text("hola") == {}
-
-
-# ── CONTEO DE ROPA ────────────────────────────────────────────────────────────
-
-class TestClothing:
-    def test_listar_requiere_token(self, client):
-        assert client.get("/clothing").status_code in (401, 403)
-
-    def test_listar_devuelve_lista(self, client, auth_headers, mock_requests):
-        items = [{"id": "abc", "name": "Camiseta", "price": 20, "currency": "EUR", "photo": None}]
-        mock_requests.add("GET", "/rest/v1/clothing", FakeResponse(items))
-        r = client.get("/clothing", headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json() == items
-
-    def test_crear_prenda(self, client, auth_headers, mock_requests):
-        saved = {"id": "abc", "name": "Camiseta", "price": 20.0, "currency": "EUR", "photo": None}
-        mock_requests.add("POST", "/rest/v1/clothing", FakeResponse([saved], 201))
-        r = client.post("/clothing", headers=auth_headers,
-                        json={"name": "Camiseta", "price": 20, "currency": "EUR"})
-        assert r.status_code == 200
-        assert r.json() == {"ok": True, "item": saved}
-
-    def test_crear_prenda_minima_usa_defaults(self, client, auth_headers, mock_requests):
-        saved = {"id": "x", "name": "", "price": 0.0, "currency": "EUR", "photo": None}
-        mock_requests.add("POST", "/rest/v1/clothing", FakeResponse([saved], 201))
-        r = client.post("/clothing", headers=auth_headers, json={})
-        assert r.status_code == 200
-        # El payload enviado a Supabase aplica los defaults del modelo
-        sent = mock_requests.called("POST", "/rest/v1/clothing")[0][2]["json"]
-        assert sent == {"name": "", "price": 0.0, "currency": "EUR", "photo": None}
-
-    def test_moneda_invalida_rechazada(self, client, auth_headers):
-        r = client.post("/clothing", headers=auth_headers,
-                        json={"price": 10, "currency": "USD"})
-        assert r.status_code == 422
-
-    def test_precio_negativo_rechazado(self, client, auth_headers):
-        r = client.post("/clothing", headers=auth_headers, json={"price": -5})
-        assert r.status_code == 422
-
-    def test_error_supabase_al_crear(self, client, auth_headers, mock_requests):
-        mock_requests.add("POST", "/rest/v1/clothing", FakeResponse(None, 500, "boom"))
-        r = client.post("/clothing", headers=auth_headers, json={"price": 10})
-        assert r.status_code == 502
-
-    def test_borrar_valida_uuid(self, client, auth_headers, mock_requests):
-        assert client.delete("/clothing/no-uuid", headers=auth_headers).status_code == 422
-        mock_requests.add("DELETE", "/rest/v1/clothing", FakeResponse([], 204))
-        r = client.delete("/clothing/123e4567-e89b-12d3-a456-426614174000", headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json() == {"ok": True}
 
 
 def test_root(client):

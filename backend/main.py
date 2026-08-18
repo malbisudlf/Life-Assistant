@@ -1597,7 +1597,6 @@ _EXPORT_TABLES = (
     ("training_sessions", "training_sessions", "order=date.desc"),
     ("training_payments", "training_payments", "order=date.desc"),
     ("health_metrics",    "health_metrics",    "order=metric_date.desc"),
-    ("clothing",          "clothing",          "order=created_at.desc"),
 )
 
 
@@ -1613,8 +1612,8 @@ def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token
             headers=supabase_headers(),
         )
 
-    # Las seis tablas son independientes entre sí: en serie el backup costaba la suma
-    # de las seis latencias (y aquí cada fila puede traer el histórico entero).
+    # Las cinco tablas son independientes entre sí: en serie el backup costaba la suma
+    # de las cinco latencias (y aquí cada fila puede traer el histórico entero).
     with ThreadPoolExecutor(max_workers=len(_EXPORT_TABLES)) as pool:
         respuestas = list(pool.map(lambda t: _tabla(t[1], t[2]), _EXPORT_TABLES))
 
@@ -1623,75 +1622,6 @@ def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token
             raise _supabase_error(r)
         export[key] = r.json()
     return export
-
-
-# ── CONTEO DE ROPA (widget temporal) ──────────────────────────────────────────
-# Lleva la cuenta de la ropa comprada hasta saldar el gasto. La foto llega como
-# data URL ya redimensionada en el navegador; el backend solo la persiste.
-
-_CLOTHING_CURRENCIES = ("EUR", "THB")
-# Tope defensivo de la foto: el frontend la reduce a ~600px/JPEG (bastante menos),
-# pero limitamos el tamaño para no aceptar payloads arbitrariamente grandes.
-_CLOTHING_PHOTO_MAX = 3_000_000
-
-class ClothingItemIn(BaseModel):
-    name:     str = Field(default="", max_length=200)
-    price:    float = Field(default=0.0, ge=0)
-    currency: str = Field(default="EUR")
-    photo:    Optional[str] = Field(default=None, max_length=_CLOTHING_PHOTO_MAX)
-
-    @field_validator("currency")
-    @classmethod
-    def validate_currency(cls, v: str) -> str:
-        if v not in _CLOTHING_CURRENCIES:
-            raise ValueError("currency debe ser 'EUR' o 'THB'")
-        return v
-
-
-@app.get("/clothing")
-def get_clothing(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    r = http.get(
-        f"{SUPABASE_URL}/rest/v1/clothing?order=created_at.desc",
-        headers=supabase_headers(),
-    )
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    return r.json()
-
-
-@app.post("/clothing")
-def create_clothing(
-    body: ClothingItemIn,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
-):
-    payload = {
-        "name":     body.name.strip(),   # el largo ya lo valida Pydantic (max_length=200)
-        "price":    body.price,
-        "currency": body.currency,
-        "photo":    body.photo,
-    }
-    r = http.post(
-        f"{SUPABASE_URL}/rest/v1/clothing",
-        headers={**supabase_headers(), "Prefer": "return=representation"},
-        json=payload,
-    )
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    return {"ok": True, "item": r.json()[0]}
-
-
-@app.delete("/clothing/{item_id}")
-def delete_clothing(
-    item_id: str = _uuid_path(),
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
-):
-    r = http.delete(
-        f"{SUPABASE_URL}/rest/v1/clothing?id=eq.{item_id}",
-        headers=supabase_headers(),
-    )
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    return {"ok": True}
 
 
 # ── HOME ASSISTANT INTEGRATION ────────────────────────────────────────────────
@@ -4883,6 +4813,13 @@ def _leer_brief_ajustes() -> dict:
     caído no manda nada por su cuenta; en cambio, tratar "no he podido leer" como
     "estaba apagado" dejaría sin briefing un día entero por un fallo transitorio, y sin
     que nada lo pareciera. Mismo criterio que la memoria de Jarvis.
+
+    Pero el defecto viaja MARCADO (`leido: False`): seguir enviando a ciegas es la
+    decisión correcta para el envío y la equivocada para quien pregunta por el estado.
+    Sin la marca, el panel de ajustes pintaba un "activo" en verde cuando en realidad no
+    se había podido leer nada —y el botón de apagarlo, que escribe en esa misma tabla,
+    no iba a funcionar—: exactamente el "no pude preguntar" disfrazado de respuesta que
+    ya costó caro en la cola de jobs del agente.
     """
     with _brief_ajustes_lock:
         if _brief_ajustes_cache is not None:
@@ -4897,7 +4834,7 @@ def _leer_brief_ajustes() -> dict:
         filas = r.json()
     except Exception as e:
         logger.warning("Resumen diario: no se pudo leer el interruptor (%s); se sigue como activo", e)
-        return dict(BRIEF_AJUSTES_DEFECTO)
+        return {**BRIEF_AJUSTES_DEFECTO, "leido": False}
 
     fila = filas[0] if filas else {}
     ajustes = {
@@ -4931,6 +4868,8 @@ def _estado_brief(hoy: str) -> dict:
         "pausado_hasta": pausado_hasta,
         "pausado":       pausado,
         "motivo":        motivo,
+        # False = lo de arriba es el defecto de emergencia, no lo que hay guardado.
+        "leido":         bool(a.get("leido", True)),
     }
 
 

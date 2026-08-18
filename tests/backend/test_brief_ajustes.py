@@ -154,6 +154,26 @@ class TestEndpointAjustes:
 
         assert client.get("/brief/ajustes", headers=auth_headers).json()["enviado_hoy"] is True
 
+    def test_lo_leido_se_marca_como_leido(self, client, mock_requests, auth_headers, monkeypatch):
+        tabla_ajustes(mock_requests, activo=False)
+        reloj(monkeypatch, 9, 0)
+
+        assert client.get("/brief/ajustes", headers=auth_headers).json()["leido"] is True
+
+    def test_si_no_se_pudo_leer_lo_dice_en_vez_de_afirmar_que_esta_activo(
+            self, client, mock_requests, auth_headers, monkeypatch):
+        """El defecto de emergencia es la decisión correcta para el ENVÍO y la
+        equivocada para quien pregunta por el estado: el panel pintaba un "activo" en
+        verde sin haber podido leer nada, y el botón de apagarlo —que escribe en esa
+        misma tabla— tampoco iba a funcionar. Es el "no pude preguntar" disfrazado de
+        respuesta que ya costó caro en la cola de jobs del agente."""
+        mock_requests.add("GET", "/rest/v1/brief_ajustes", FakeResponse(None, 500, "boom"))
+        reloj(monkeypatch, 9, 0)
+
+        d = client.get("/brief/ajustes", headers=auth_headers).json()
+        assert d["leido"] is False
+        assert d["activo"] is True          # el envío sigue adelante: falla hacia el lado seguro
+
     def test_una_pausa_vencida_no_se_reporta(self, client, mock_requests, auth_headers, monkeypatch):
         """Una fecha pasada al lado de un resumen que vuelve a salir se lee como avería."""
         tabla_ajustes(mock_requests, pausado_hasta=(_hoy() - timedelta(days=3)).isoformat())

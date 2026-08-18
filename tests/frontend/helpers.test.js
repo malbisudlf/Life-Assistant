@@ -9,7 +9,7 @@ import {
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   baselinePersonal, wellnessBaselines,
   relojPuesto, relojCobertura, relojRachaSinReloj,
-  formatMoney, clothingTotals, hostStreaming,
+  motivoFalloBrief, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
 } from "../../src/lib/helpers";
@@ -84,6 +84,14 @@ describe("helpers de fecha", () => {
     expect(formatLogTime("")).toBe("");
     expect(formatLogTime(null)).toBe("");
     expect(formatLogTime("no soy una fecha")).toBe("");
+  });
+
+  test("motivoFalloBrief distingue el backend viejo del que no contesta", () => {
+    // El 404 es el caso probable y el único accionable: Vercel despliega el frontend
+    // solo y el backend va a mano, así que la respuesta tiene que decir qué hacer.
+    expect(motivoFalloBrief(404)).toContain("desplegarlo");
+    expect(motivoFalloBrief(undefined)).toBe("sin respuesta del backend");
+    expect(motivoFalloBrief(502)).toBe("el backend respondió 502");
   });
 });
 
@@ -560,36 +568,6 @@ describe("firma de algo va mal", () => {
   test("sin las tres series no hay firma que dar", () => {
     expect(firma(healthConclusions({ resting_heart_rate: serie(50, 60) }, AHORA))).toBeUndefined();
     expect(firma(healthConclusions({}, AHORA))).toBeUndefined();
-  });
-});
-
-describe("helpers de conteo de ropa", () => {
-  test("formatMoney: entero sin decimales, decimal con coma", () => {
-    expect(formatMoney(20, "EUR")).toBe("20 €");
-    expect(formatMoney(12.5, "EUR")).toBe("12,50 €");
-    expect(formatMoney(450, "THB")).toBe("450 ฿");
-    expect(formatMoney(0, "EUR")).toBe("0 €");
-  });
-
-  test("formatMoney: valores inválidos cuentan como 0 y moneda desconocida sin símbolo", () => {
-    expect(formatMoney(null, "EUR")).toBe("0 €");
-    expect(formatMoney("abc", "THB")).toBe("0 ฿");
-    expect(formatMoney(10, "XXX")).toBe("10");
-  });
-
-  test("clothingTotals agrupa por moneda", () => {
-    const items = [
-      { price: 20, currency: "EUR" },
-      { price: 12.5, currency: "EUR" },
-      { price: 450, currency: "THB" },
-    ];
-    expect(clothingTotals(items)).toEqual({ EUR: 32.5, THB: 450 });
-  });
-
-  test("clothingTotals: default EUR, precios inválidos como 0, lista vacía", () => {
-    expect(clothingTotals([{ price: 5 }, { price: "x", currency: "EUR" }])).toEqual({ EUR: 5 });
-    expect(clothingTotals([])).toEqual({});
-    expect(clothingTotals(null)).toEqual({});
   });
 });
 

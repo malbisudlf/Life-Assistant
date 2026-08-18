@@ -142,7 +142,6 @@ class _RouterSimulado:
             [{"id": "11111111-1111-4111-8111-111111111111", "key": "Idea de prueba",
               "full_text": "Contenido de la idea", "tag": "e2e",
               "created_at": f"{_dia(0)}T09:00:00Z"}])),
-        ("/rest/v1/clothing", lambda: _Respuesta([])),
         ("/rest/v1/pc_agents", lambda: _Respuesta([])),
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),

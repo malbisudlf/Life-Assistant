@@ -8,7 +8,7 @@ import {
   wellnessBreakdown, scoreFromBreakdown, wellnessBaselines,
   wellnessHistory, seriesTrend, trendDirection,
   relojCobertura, relojRachaSinReloj, relojPuesto,
-  formatMoney, clothingTotals, CLOTHING_CURRENCIES,
+  motivoFalloBrief,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -591,7 +591,6 @@ const DEFAULT_COLUMNS = {
   acciones_pc:       "right",
   training:          "right",
   ideas:             "right",
-  clothing:          "right",
   health_wellness:   "left",
   health_sleep:      "right",
   health_heart:      "right",
@@ -609,7 +608,6 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
-  { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
   { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
   { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
@@ -628,7 +626,12 @@ function loadWidgetConfig(storageKey) {
   try {
     const saved = localStorage.getItem(storageKey);
     if (saved) {
-      const parsed   = JSON.parse(saved).filter(w => w.id !== "__split__");
+      // Se descarta lo que ya no exista. La configuración guardada sobrevive a los
+      // widgets: al retirar el conteo de ropa, su entrada seguía en el localStorage de
+      // quien lo tuviera y se colaba en la lista de ⚙ como una casilla que no pinta
+      // nada. Un widget retirado tiene que desaparecer solo, sin borrar ajustes a mano.
+      const parsed   = JSON.parse(saved)
+        .filter(w => w.id !== "__split__" && ALL_DEFAULT_WIDGETS.some(d => d.id === w.id));
       const savedIds = new Set(parsed.map(w => w.id));
       const merged   = parsed.map(w => ({
         id: w.id,
@@ -1000,6 +1003,12 @@ export default function Dashboard() {
   // suya se borraría en el próximo cold start de Fly.
   const [briefCfg, setBriefCfg]           = useState(null);
   const [briefGuardando, setBriefGuardando] = useState(false);
+  // Por qué no se sabe (o no se pudo cambiar) el estado del interruptor. Null = sin
+  // problema. Existe porque "no lo he preguntado" y "he preguntado y no me contestan"
+  // se pintaban igual —"sin comprobar"—, que es justo la confusión que este panel
+  // existe para deshacer: un backend sin redesplegar (Vercel se despliega solo, Fly a
+  // mano) devuelve 404 aquí y dejaba el ajuste en "Comprobando…" para siempre.
+  const [briefFallo, setBriefFallo]       = useState(null);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   // Histórico largo, solo para el panel de patrones del modal (ver efecto de carga).
   const [healthLargo, setHealthLargo]         = useState(null);
@@ -1015,17 +1024,6 @@ export default function Dashboard() {
   const [trainingDays, setTrainingDays] = useState(() => {
     try { return JSON.parse(localStorage.getItem("la_training_days") || "[1,3,4,0]"); } catch { return [1,3,4,0]; }
   });
-  // Conteo de ropa (widget temporal). Se persiste en el backend (Supabase); las
-  // fotos van como data URL redimensionada en el navegador antes de subirlas.
-  const [clothing, setClothing]                 = useState([]);
-  const [showClothingForm, setShowClothingForm] = useState(false);
-  const [clothingName, setClothingName]         = useState("");
-  const [clothingPrice, setClothingPrice]       = useState("");
-  const [clothingCurrency, setClothingCurrency] = useState("EUR");
-  const [clothingPhoto, setClothingPhoto]       = useState(null);
-  const [clothingSaving, setClothingSaving]     = useState(false);
-  const [clothingError, setClothingError]       = useState(null); // mensaje de fallo al guardar
-  const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
   const [dragPos, setDragPos]             = useState(null);
@@ -1267,15 +1265,6 @@ export default function Dashboard() {
     apiFetch(`${API}/ideas`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => Array.isArray(data) && setIdeas(data))
-      .catch(() => {});
-  }, [token]);
-
-  // Cargar conteo de ropa
-  useEffect(() => {
-    if (!token) return;
-    apiFetch(`${API}/clothing`, { headers: authHeaders() })
-      .then(r => r.json())
-      .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
   }, [token]);
 
@@ -1965,81 +1954,6 @@ export default function Dashboard() {
     jarvisFinRef.current?.scrollIntoView({ block: "nearest" });
   }, [jarvisMensajes, jarvisPensando]);
 
-  // ── Conteo de ropa (widget temporal, persistido en el backend) ───────────
-  // Redimensiona la foto elegida a máx. 600px y la convierte a JPEG en base64,
-  // para no subir imágenes de varios MB al backend.
-  function onClothingPhoto(file) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const max = 600;
-        let { width, height } = img;
-        if (width > max || height > max) {
-          const r = Math.min(max / width, max / height);
-          width  = Math.round(width  * r);
-          height = Math.round(height * r);
-        }
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = width; canvas.height = height;
-          canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-          setClothingPhoto(canvas.toDataURL("image/jpeg", 0.7));
-        } catch { setClothingPhoto(reader.result); }
-      };
-      img.onerror = () => setClothingPhoto(reader.result);
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  }
-
-  // Cierra el formulario de alta y limpia sus campos (guardado con éxito y Cancelar).
-  function closeClothingForm() {
-    setShowClothingForm(false);
-    setClothingError(null);
-    setClothingName(""); setClothingPrice(""); setClothingPhoto(null);
-  }
-
-  async function addClothing() {
-    if (clothingSaving) return;
-    const price = parseFloat(String(clothingPrice).replace(",", "."));
-    setClothingSaving(true);
-    setClothingError(null);
-    try {
-      const r = await apiFetch(`${API}/clothing`, {
-        method: "POST",
-        headers: jsonHeaders(),
-        body: JSON.stringify({
-          name:     clothingName.trim(),
-          price:    Number.isFinite(price) ? price : 0,
-          currency: clothingCurrency,
-          photo:    clothingPhoto,
-        }),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { /* respuesta sin cuerpo JSON */ }
-      if (r.ok && data.ok && data.item) {
-        setClothing(prev => [data.item, ...prev]);
-        closeClothingForm();
-      } else {
-        // Mostrar el fallo: el código de estado dice qué pasó (404 = backend sin
-        // desplegar los endpoints, 502 = problema con la tabla, 401/403 = sesión).
-        setClothingError(`No se pudo guardar (error ${r.status})${data.detail ? `: ${data.detail}` : ""}`);
-      }
-    } catch {
-      setClothingError("No se pudo conectar con el servidor.");
-    }
-    finally { setClothingSaving(false); }
-  }
-
-  async function deleteClothing(id) {
-    try {
-      const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: authHeaders() });
-      if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
-    } catch { /* mejor esfuerzo: ignorar */ }
-  }
-
   // ── Estado del sistema ───────────────────────────────────────────────────
   // Las señales de si algo va mal ya existían, pero repartidas: si el backend
   // responde, si la sesión de Outlook sigue viva, cuándo sincronizó el Watch, si el
@@ -2080,12 +1994,20 @@ export default function Dashboard() {
       try {
         if (rPresencia?.ok) presencia = await rPresencia.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      // El interruptor es el único de los cinco que además se puede TOCAR desde aquí,
+      // así que un fallo suyo tiene que decirse con nombre y apellidos: si no, se
+      // pulsa un botón que no puede funcionar y no pasa nada visible.
       try {
-        if (rBrief?.ok) setBriefCfg(await rBrief.json());
-      } catch { /* mejor esfuerzo: el interruptor se muestra como desconocido */ }
+        if (rBrief?.ok) { setBriefCfg(await rBrief.json()); setBriefFallo(null); }
+        else            setBriefFallo(motivoFalloBrief(rBrief?.status));
+      } catch {
+        setBriefFallo("respuesta ilegible del backend");
+      }
       try {
         if (rAvisos?.ok) avisos = await rAvisos.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+    } else {
+      setBriefFallo("el backend no responde");
     }
 
     setSysStatus({ backend, agente, registro, presencia, avisos, comprobado: Date.now() });
@@ -2095,6 +2017,10 @@ export default function Dashboard() {
   // Enciende, apaga o pausa el resumen diario. La respuesta del PATCH ya trae el estado
   // completo (incluida la pausa vencida, que el backend reporta como si no existiera),
   // así que se pinta lo que diga el backend y no lo que creamos haber puesto.
+  // Un rechazo se ENSEÑA, no se traga: el backend rechaza una pausa con fecha pasada y
+  // devuelve 502 si no puede escribir, y las dos cosas se veían igual que un clic que
+  // no hizo nada. Apagar el correo es justo lo que hay que poder comprobar que ha
+  // pasado, porque el resultado —que mañana no llegue— tarda un día en verse.
   async function guardarBriefAjustes(cambios) {
     if (briefGuardando) return;
     setBriefGuardando(true);
@@ -2102,8 +2028,12 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/brief/ajustes`, {
         method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
       });
-      if (r.ok) setBriefCfg(await r.json());
-    } catch { /* mejor esfuerzo: ignorar */ }
+      const data = await r.json().catch(() => null);
+      if (r.ok) { setBriefCfg(data); setBriefFallo(null); }
+      else setBriefFallo(typeof data?.detail === "string" ? data.detail : motivoFalloBrief(r.status));
+    } catch {
+      setBriefFallo("sin respuesta del backend");
+    }
     setBriefGuardando(false);
   }
 
@@ -2999,102 +2929,6 @@ export default function Dashboard() {
           </div>
         </div>
       );
-      case "clothing": {
-        const totals       = clothingTotals(clothing);
-        const totalEntries = Object.entries(totals);
-        return (
-          <div style={cardStyle} data-card={id} key="clothing">
-            <div style={s.sectionLabel}>Conteo ropa</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-              {clothing.length === 0 && !showClothingForm && (
-                <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin prendas todavía. ¡Añade la primera!</div>
-              )}
-              {clothing.map(item => (
-                <div key={item.id} style={{ ...s.ideaCard, cursor: "default", display: "flex", alignItems: "center", gap: 12 }}>
-                  {item.photo ? (
-                    <img src={item.photo} alt={item.name || "Prenda"} onClick={() => setClothingZoom(item.photo)}
-                      style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 6, flexShrink: 0, cursor: "zoom-in", border: "0.5px solid var(--border2)" }} />
-                  ) : (
-                    <div style={{ width: 44, height: 44, borderRadius: 6, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--surface)", border: "0.5px solid var(--border2)", fontSize: 20 }}>👕</div>
-                  )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 500, color: item.name ? "var(--text)" : "var(--muted2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {item.name || "Sin nombre"}
-                    </div>
-                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "var(--accent)", marginTop: 2 }}>
-                      {formatMoney(item.price, item.currency)}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
-                    onClick={() => deleteClothing(item.id)}>✕</span>
-                </div>
-              ))}
-            </div>
-
-            {totalEntries.length > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "0.5px solid var(--border2)" }}>
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>
-                  {clothing.length} {clothing.length === 1 ? "prenda" : "prendas"}
-                </span>
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  {totalEntries.map(([cur, sum]) => (
-                    <span key={cur} style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text)" }}>
-                      {formatMoney(sum, cur)}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {showClothingForm ? (
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                <input style={INPUT_STYLE} placeholder="Nombre (opcional)" value={clothingName}
-                  onChange={e => setClothingName(e.target.value)} />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input style={{ ...INPUT_STYLE, flex: 1 }} type="text" inputMode="decimal" placeholder="Precio"
-                    value={clothingPrice} onChange={e => setClothingPrice(e.target.value)} />
-                  <div style={{ display: "flex", gap: 4 }}>
-                    {Object.entries(CLOTHING_CURRENCIES).map(([code, sym]) => (
-                      <button key={code} type="button"
-                        style={{ ...s.newIdeaBtn, marginTop: 0, padding: "0 12px", minWidth: 40,
-                          ...(clothingCurrency === code ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-                        onClick={() => setClothingCurrency(code)}>
-                        {sym}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <label style={{ ...s.newIdeaBtn, marginTop: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer" }}>
-                  {clothingPhoto ? "✓ Foto añadida" : "📷 Añadir foto (opcional)"}
-                  <input type="file" accept="image/*" style={{ display: "none" }}
-                    onChange={e => onClothingPhoto(e.target.files?.[0])} />
-                </label>
-                {clothingPhoto && (
-                  <img src={clothingPhoto} alt="Vista previa" style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "var(--surface)" }} />
-                )}
-                {clothingError && (
-                  <div style={{ fontSize: 12, color: "#d4645a", lineHeight: 1.4 }}>{clothingError}</div>
-                )}
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }}
-                    onClick={closeClothingForm}>
-                    Cancelar
-                  </button>
-                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
-                    ...(String(clothingPrice).trim() ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-                    onClick={addClothing} disabled={!String(clothingPrice).trim() || clothingSaving}>
-                    {clothingSaving ? "Guardando..." : "Añadir"}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button style={s.newIdeaBtn} onClick={() => { setClothingError(null); setShowClothingForm(true); }}>
-                + Añadir prenda
-              </button>
-            )}
-          </div>
-        );
-      }
       case "acciones_pc": return (
         <div style={cardStyle} data-card={id} key="acciones_pc">
           <div style={s.sectionLabel}>Streaming PC</div>
@@ -4453,18 +4287,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── FOTO DE PRENDA A PANTALLA COMPLETA ── */}
-      {clothingZoom && (
-        <div onClick={() => setClothingZoom(null)} style={{
-          position: "fixed", inset: 0, zIndex: 300,
-          background: "rgba(0,0,0,0.85)", backdropFilter: "blur(6px)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: 24, cursor: "zoom-out", animation: "fadeInOverlay 0.2s ease",
-        }}>
-          <img src={clothingZoom} alt="Prenda" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 12 }} />
-        </div>
-      )}
-
       {/* ── MODAL WAKE ON LAN ── */}
       {wolModal && (
         <>
@@ -5193,14 +5015,27 @@ export default function Dashboard() {
                     fontSize: 12, cursor: !briefCfg || briefGuardando ? "default" : "pointer",
                     fontFamily: "'DM Sans', sans-serif",
                   }}>
-                  {!briefCfg ? "Comprobando…" : briefCfg.activo ? "Activado" : "Desactivado"}
+                  {!briefCfg ? (briefFallo ? "No disponible" : "Comprobando…")
+                    : briefCfg.activo ? "Activado" : "Desactivado"}
                 </button>
-                <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                  {!briefCfg ? "abre y actualiza el estado del sistema"
+                <span style={{ fontSize: 11, color: briefFallo ? "#d4645a" : "var(--muted)" }}>
+                  {briefFallo ? briefFallo
+                    : !briefCfg ? "abre y actualiza el estado del sistema"
                     : briefCfg.activo ? "El correo con los datos del día sale al despertarte"
                     : "No saldrá ningún correo hasta que lo vuelvas a activar"}
                 </span>
               </div>
+              {/* Se pudo preguntar, pero el backend contestó con su defecto de
+                  emergencia: el interruptor no está donde debería y el botón de arriba
+                  no va a poder escribirlo. Decirlo aquí evita el "he pulsado y no pasa
+                  nada" — el efecto de este ajuste tarda un día en verse. */}
+              {briefCfg?.leido === false && (
+                <div style={{ fontSize: 11, color: "#d4645a", marginBottom: 10, lineHeight: 1.4 }}>
+                  El backend no pudo leer el ajuste guardado (¿falta la tabla
+                  <code style={{ fontFamily: "'DM Mono', monospace" }}> brief_ajustes </code>
+                  en Supabase?). Mientras tanto el correo sigue saliendo.
+                </div>
+              )}
               {/* La pausa se agota sola: es lo que separa "me voy una semana" de
                   "no lo quiero más", y evita tener que acordarse de reactivarlo. */}
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -5328,11 +5163,19 @@ export default function Dashboard() {
 
                 // El resumen diario. Apagado a propósito y roto se parecen mucho desde
                 // fuera —en los dos casos el correo no llega—, así que esta fila tiene
-                // que decir cuál de los dos es, y si el de hoy ya salió.
+                // que decir cuál de los dos es, y si el de hoy ya salió. Y hay un tercer
+                // caso que antes se disfrazaba del primero: que no se haya podido
+                // preguntar. En rojo y con el motivo, porque no es un estado del correo
+                // sino algo que hay que ir a arreglar.
                 filas.push({
                   nombre: "Resumen diario",
-                  tono: !briefCfg ? "muted" : !briefCfg.activo ? "muted" : briefCfg.pausado ? "accent" : "green",
-                  detalle: !briefCfg ? "sin comprobar"
+                  tono: briefFallo || briefCfg?.leido === false ? "red"
+                    : !briefCfg ? "muted"
+                    : !briefCfg.activo ? "muted"
+                    : briefCfg.pausado ? "accent" : "green",
+                  detalle: briefFallo ? briefFallo
+                    : !briefCfg ? "sin comprobar"
+                    : briefCfg.leido === false ? "no se pudo leer el ajuste guardado"
                     : !briefCfg.activo ? "desactivado"
                     : briefCfg.pausado ? `pausado hasta el ${isoToDdMmYyyy(briefCfg.pausado_hasta)}`
                     : briefCfg.enviado_hoy === true ? "activo · el de hoy ya ha salido"
