@@ -77,6 +77,10 @@ Además hay CI (`.github/workflows/ci.yml`): ejecuta esos cuatro pasos en cada p
 despliega nada — el deploy de Vercel sigue siendo el check aparte que ya había, y
 el del backend sigue siendo manual (ver "Qué NO hacer").
 
+Y hay un workflow nocturno (`revision-nocturna.yml`) que, si ese día entraron
+commits en `main`, lanza una sesión de Claude Code que los revisa y abre un issue
+con los hallazgos — ver `docs/REVISION_NOCTURNA.md`.
+
 ```bash
 npm run test:e2e          # Playwright: navegador real contra el build + backend real
 ```
@@ -147,6 +151,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
+| `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 
 **Al añadir documentación, va al fichero de su área, no aquí.** Este solo crece si lo
