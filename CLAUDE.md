@@ -190,6 +190,14 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
      pide la `auth_url` con fetch autenticado (`conectarOutlook()` en Dashboard.jsx) y
      navega a lo que devuelve — no uses un `<a href>` directo al backend, no manda el
      JWT.
+   - **La firma no basta para distinguir un token de otro.** Todos se firman con la
+     misma `SECRET_KEY`, así que validar solo la firma hacía que el `state` de OAuth
+     valiera como sesión completa del dashboard durante sus 10 minutos — y ese state
+     viaja como query param en el redirect de vuelta de Microsoft, o sea que queda en
+     la barra de direcciones, en el historial y en los logs de Microsoft. Los JWT de
+     usuario se validan con `_jwt_de_usuario()`, que **rechaza todo token con claim
+     `purpose`**. Si añades un JWT firmado para cualquier otra cosa, dale su `purpose`:
+     es lo que impide que sirva como credencial de usuario.
 3. **Rate limiting**: dos contadores distintos y no intercambiables.
    - **Login** (`_check_login_rate`, `_register_login_failure`, `_reset_login_attempts`):
      cuenta solo los intentos **fallidos**, porque protege una credencial. Es
@@ -201,8 +209,13 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
      responde, se deja pasar (fail-open): es el único endpoint que hoy no depende de
      Supabase para nada más, y esa propiedad vale más que blindar una ventana de
      fallo de infraestructura poco probable. 5 intentos / 5 min por defecto
-     (`LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_SECONDS`), con bloqueo progresivo que dobla
-     su duración hasta `LOGIN_BLOQUEO_MAX_SECONDS`. Devuelve `429` con `Retry-After`.
+     (`LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_SECONDS`), con bloqueo progresivo: cada
+     tanda completa de fallos dobla la espera (300s, 600s, 1.200s…) hasta
+     `LOGIN_BLOQUEO_MAX_SECONDS`, contada **desde el último fallo**, no desde el
+     primero. Devuelve `429` con `Retry-After`. El doblado estuvo documentado aquí
+     sin existir en el código hasta agosto de 2026: la ventana era plana, así que
+     esperar cinco minutos devolvía otros cinco intentos indefinidamente. Un login
+     correcto borra la tabla, de modo que el castigo acumulado no sobrevive a acertar.
    - **Genérico** (`_rate_buckets`, `_check_rate`, en memoria): cuenta **todas** las
      peticiones, porque protege un recurso caro — hoy `/ideas/audio`, que es una
      llamada de pago a Whisper por petición. Este SÍ es por IP (`_client_ip()`, ver

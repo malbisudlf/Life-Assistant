@@ -234,5 +234,20 @@
 - Extracción de `alud_url` en `/calendar/events`: los cuerpos de Graph son HTML y la
   URL suele venir pegada a la etiqueta de cierre (`...id=99</p>`). El patrón debe
   excluir `<>"'` — un `\S+` se traga la etiqueta y rompe el enlace. Hay test.
+- **Documentación que describe una defensa inexistente** (revisión de agosto de 2026).
+  `LOGIN_BLOQUEO_MAX_SECONDS` y su "bloqueo progresivo que dobla su duración" estaban
+  escritos en `CLAUDE.md`, en `backend/.env.example` y en `docs/BACKEND_REFERENCIA.md`.
+  En el código no existía: `grep LOGIN_BLOQUEO backend/main.py` no devolvía nada y
+  `_check_login_rate` solo tenía una ventana plana. Poner la variable no hacía nada y
+  eran 1.440 intentos al día contra la contraseña, para siempre. Ya está implementado.
+  La moraleja no es el bug: es que **tres documentos coincidiendo no son evidencia de
+  que el código haga eso**. Cuando la guía describa una defensa, compruébala con un
+  grep antes de fiarte, sobre todo si vas a apoyarte en ella para decidir otra cosa.
+- **Un JWT firmado no dice para qué es.** `verify_token` validaba solo la firma, así que
+  el `state` de OAuth — firmado con la misma `SECRET_KEY` y expuesto en la URL de vuelta
+  de Microsoft — servía como sesión completa del dashboard durante diez minutos. Ahora
+  `_jwt_de_usuario()` rechaza todo token con claim `purpose`. Se rechaza por presencia y
+  no exigiendo `purpose: "dashboard"` a propósito: los tokens ya emitidos duran 30 días
+  y no lo llevan, así que exigirlo habría echado al usuario de la sesión al desplegar.
 - Doble conteo de entrenos semanales y fugas de detalles de error ya se arreglaron
   en commits anteriores; si tocas bienestar o manejo de errores, revisa el historial.

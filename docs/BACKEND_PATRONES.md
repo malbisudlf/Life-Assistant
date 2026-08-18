@@ -7,6 +7,22 @@
   módulo), nunca por `requests.get` suelto. Impone `HTTP_TIMEOUT` por defecto y
   reutiliza conexiones. Sin timeout, una llamada colgada retiene un hilo del pool de
   FastAPI para siempre. Los tests mockean `main.http`, no `main.requests`.
+- **Interruptores booleanos por entorno**: siempre con `_flag("NOMBRE")`, nunca con una
+  comparación a mano. Normaliza espacios y mayúsculas y acepta `0`, `false`, `no`, `off`
+  y la cadena vacía como apagado. El patrón que había antes
+  (`os.getenv(...) not in ("0", "false", "False")`) dejaba la función ENCENDIDA si
+  escribías `FALSE`, `no` u `off`, y estaba repetido en once sitios. Todos esos flags
+  existen para apagar algo que molesta (avisos que siguen saliendo, un vigilante que no
+  para), así que fallar hacia "encendido" es fallar en la única dirección que importa.
+  La excepción deliberada es `TRUST_FORWARDED_FOR`, que usa una lista blanca estricta
+  (`in ("1", "true", "yes")`) porque es un opt-in de seguridad: ahí lo correcto es que
+  cualquier valor raro deje la protección puesta, no que la quite.
+- **Token de Graph**: una renovación puede traer `access_token` sin `refresh_token`; el
+  protocolo permite no rotarlo. `save_token_data()` conserva el anterior cuando no llega
+  uno nuevo. Escribir ese `None` encima mataba la conexión de Outlook de forma
+  permanente y silenciosa: el siguiente `get_valid_token()` se encontraba
+  `if not refresh_token: return None` y el calendario se quedaba vacío sin más salida
+  que rehacer `/auth/login` a mano.
 - **Dependencias opcionales**: lo que la documentación llame opcional no puede
   impedir arrancar. El cliente de OpenAI se crea de forma perezosa y devuelve 503
   si falta la configuración, nunca revienta el import.
