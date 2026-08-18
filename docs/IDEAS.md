@@ -153,8 +153,8 @@ se llevó", que hoy sigue habiendo que deducirlo.
 mandado cada aviso, y que lo recogido-pero-no-confirmado se rescate por correo igual que
 hoy se rescata lo que nadie recoge.
 
-**Por qué.** Es el punto ciego que dejó al descubierto el estreno del canal (ver "Bugs
-históricos" en `CLAUDE.md`): con el `notify` mal escrito, HA recogía el aviso y lo perdía
+**Por qué.** Es el punto ciego que dejó al descubierto el estreno del canal (ver
+`docs/BUGS_HISTORICOS.md`): con el `notify` mal escrito, HA recogía el aviso y lo perdía
 al mandarlo, y desde el backend eso es **idéntico a haberlo entregado** — la única señal
 que hay es el sondeo. El rescate por correo no salta, porque cubre lo que nadie recoge, y
 un aviso recogido está fuera de la cola. Así que hoy el único fallo del canal que no se

@@ -1,0 +1,74 @@
+<!-- Parte de la guía del repositorio. El índice y las reglas que aplican
+     SIEMPRE están en CLAUDE.md, en la raíz. -->
+
+## Home Assistant
+
+**Las credenciales, el token, la IP local y la estructura de ficheros están en
+`HOMEASSISTANT.md`, que está en `.gitignore`.** No los copies aquí: este fichero se
+versiona en un repo público.
+
+- Acceso por SSH con `paramiko` (Python) — `sshpass` no está disponible en Windows.
+- **Escritura de ficheros**: SFTP no está disponible; hay que usar `sudo tee` por el canal
+  SSH:
+  ```python
+  channel = client.get_transport().open_session()
+  channel.exec_command("sudo tee /config/archivo.yaml > /dev/null")
+  channel.sendall(contenido.encode())
+  channel.shutdown_write()
+  ```
+- **Automatizaciones vía API**: se crean/actualizan con
+  `POST /api/config/automation/config/{id}` — no hace falta tocar `automations.yaml`.
+- Tras cambiar `configuration.yaml` → reiniciar HA. Tras cambiar `automations.yaml` →
+  basta con recargar las automatizaciones.
+
+**Flujo WOL** (funcionando): frontend → `POST /wake-pc` (Fly) → flag `_wol_pending` en
+memoria → HA sondea `GET /ha/wol-pending` cada 30s vía
+`sensor.life_assistant_wol_pending` → la automatización `la_wol_poll` detecta el cambio a
+`true` → pulsa `button.pc_mikel`.
+
+Problemas ya resueltos por el camino (no los reintroduzcas):
+
+- *Mixed content* (HTTPS→HTTP): el navegador no puede llamar a HA directamente → por eso
+  el backend hace de intermediario.
+- `rest_command` en la automatización fallaba al parsear el JSON en la plantilla → la
+  solución fue un REST sensor + trigger de estado.
+- El sensor está definido en `configuration.yaml` (`scan_interval: 30`); la automatización
+  `la_wol_poll` se creó por la REST API y **no** está en `automations.yaml`.
+
+Además, HA anuncia por Alexa el **nombre** del evento 15 minutos antes (no solo "evento en
+15 minutos"), usando `/ha/events/soon`.
+
+**Flujo de presencia** (el único que va de HA hacia el backend): el `device_tracker` de
+la app companion → automatización `la_presencia` → `rest_command` que hace
+`POST /ha/presencia`. Se dispara con **dos triggers**, y los dos hacen falta:
+
+- cambio de estado del `device_tracker` (te mueves de zona), y
+- un `time_pattern` cada 15 min (aviso periódico).
+
+El periódico no es redundancia: sin él, un dato se quedaría vigente durante horas sin
+que nadie confirme que HA sigue vivo, y `PRESENCE_TTL_MINUTES` no podría distinguir
+"sigues en casa" de "HA se cayó". Es el que hace que el silencio signifique algo. El
+intervalo del periódico tiene que ser **menor** que el TTL, o el dato caducará entre
+avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la query
+string (el soporte de query solo existe por compatibilidad con integraciones ya
+desplegadas y expone el token en los logs de URLs).
+
+**Flujo de los avisos al móvil**: HA sondea `GET /ha/avisos-pending` cada 30 s y manda lo
+que salga con `notify.mobile_app_*`. Mismo patrón que el WOL (órdenes en memoria, leerlas
+las consume), y el nombre del dispositivo vive **solo** en el YAML de HA. El YAML completo
+está en `docs/HOME_ASSISTANT_JARVIS.md`.
+
+**Flujo de la casa** (los dos sentidos a la vez, y cada uno por su motivo): HA **sondea**
+`GET /ha/ordenes-pending` cada 15 s y ejecuta lo que salga (órdenes: mismo patrón que el
+WOL), y **empuja** su catálogo de dispositivos a `POST /ha/entidades` al arrancar y cada
+hora (estado: mismo patrón que la presencia). Leer las órdenes las CONSUME, así que solo
+puede haber un consumidor. El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
+
+**Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
+`time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. Ese mismo tick es el
+que despacha los recordatorios de Jarvis: si funciona, los avisos salen solos. HA pone el reloj
+porque está siempre encendido y es puntual al minuto, las dos cosas que el cron de
+GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un hilo
+dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
+vivo que mire la hora. Sondear cada 5 min es barato a propósito — antes de
+`BRIEF_HORA_TOPE` el endpoint no toca Supabase ni construye nada.
