@@ -52,6 +52,22 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   sin listas ni markdown ni URLs, y `JARVIS_MAX_TOKENS_VOZ` en vez del techo normal. Lo
   que se escucha no se puede ojear ni saltar, y un párrafo que se lee en dos segundos
   tarda medio minuto en sonar.
+  **Un turno NUNCA sale vacío, y el techo de tokens no es el mismo número para todos.**
+  Los dos son la misma historia: `JARVIS_MAX_TOKENS` acota la respuesta, pero un modelo de
+  razonamiento cobra su techo contra lo que piensa MÁS lo que dice, así que con el techo a
+  secas se lo gastaba pensando y devolvía `content=""` — y las peticiones grandes, que son
+  las que más piensa, eran justo las que se quedaban en blanco. De ahí
+  `JARVIS_RESERVA_RAZONAMIENTO` (sitio para pensar por encima del techo de la respuesta;
+  un tope solo se paga si se usa) y, por si acaso, la garantía en el punto único de salida
+  (`_texto_garantizado`): un vacío se **registra** —es una avería, y sale en `app_logs` y
+  en el `diagnostico`—, se reintenta el cierre con el pequeño y sitio de sobra, y si aun
+  así no hay nada se contesta con lo que el backend sabe: lo que alguna herramienta pidió
+  decir LITERALMENTE (`dile_al_usuario_literalmente`, el error que trae su arreglo dentro)
+  o, en su defecto, qué se llegó a consultar. *Una respuesta pobre pero cierta vale más que
+  un hueco en blanco*, y el cliente pintando «(sin respuesta)» dejaba al usuario sin saber
+  ni si la herramienta había funcionado. Por lo mismo, **agotar `JARVIS_MAX_VUELTAS` no es
+  silencioso**: se registra y se le dice al modelo antes del cierre, porque si no redactaba
+  la respuesta como si hubiera terminado la tarea.
   **El modelo se elige por env, así que el código no puede dar por hecha su familia.**
   Los de razonamiento (`gpt-5*`, `o3`, `o4`…) rechazan con un 400 los dos parámetros que
   usa el resto: `temperature` (solo admiten el valor por defecto) y `max_tokens` (para

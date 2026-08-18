@@ -145,7 +145,17 @@ class TestParametrosPorFamilia:
     def test_los_razonadores_van_con_sus_parametros(self):
         for modelo in ("gpt-5-mini", "gpt-5-nano", "o4-mini"):
             p = main._parametros_modelo(modelo, 400)
-            assert p == {"max_completion_tokens": 400, "reasoning_effort": "minimal"}, modelo
+            assert p == {
+                "max_completion_tokens": 400 + main.JARVIS_RESERVA_RAZONAMIENTO,
+                "reasoning_effort": "minimal",
+            }, modelo
+
+    def test_el_techo_del_razonador_deja_sitio_para_pensar(self):
+        """Su techo cubre lo que piensa MÁS lo que dice: con el techo de la respuesta a
+        secas se lo gastaban pensando y contestaban vacío."""
+        assert main.JARVIS_RESERVA_RAZONAMIENTO > 0
+        p = main._parametros_modelo("gpt-5-mini", main.JARVIS_MAX_TOKENS)
+        assert p["max_completion_tokens"] > main.JARVIS_MAX_TOKENS
 
     def test_el_resto_sigue_igual(self):
         for modelo in ("gpt-4o-mini", "gpt-4o", "gemini-2.5-flash-lite"):
@@ -160,7 +170,8 @@ class TestParametrosPorFamilia:
         enviado = cliente.recibido[0]
         assert "temperature" not in enviado
         assert "max_tokens" not in enviado
-        assert enviado["max_completion_tokens"] == main.JARVIS_MAX_TOKENS
+        assert enviado["max_completion_tokens"] == (
+            main.JARVIS_MAX_TOKENS + main.JARVIS_RESERVA_RAZONAMIENTO)
 
 
 class TestPrefijoCacheable:

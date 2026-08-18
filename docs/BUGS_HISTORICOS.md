@@ -3,6 +3,31 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Jarvis se quedaba MUDO justo en las peticiones interesantes.** Pedirle algo de varios
+  pasos («busca esto, mira la documentación y dime si hay MCP») devolvía una burbuja
+  vacía —el cliente pinta «(sin respuesta)»— con la herramienta ya ejecutada debajo. Las
+  preguntas fáciles iban bien, así que parecía cosa del modelo. No lo era: el techo de
+  tokens. `JARVIS_MAX_TOKENS` acota la RESPUESTA, pero un modelo de razonamiento
+  (`JARVIS_MODEL_ACCION` es uno) cobra su techo contra lo que piensa **más** lo que dice,
+  y cuanto más gorda es la petición más piensa — hasta que no le queda nada con que
+  hablar y devuelve `content=""` con `finish_reason="length"`. Un techo pensado para que
+  no se enrollara le estaba tapando la boca. Tres cosas que dejó:
+  - **`_parametros_modelo()` le da a los razonadores el techo de la respuesta MÁS
+    `JARVIS_RESERVA_RAZONAMIENTO`.** Un tope solo se paga si se usa; el que costaba
+    dinero era el otro, en respuestas perdidas.
+  - **Un turno no puede salir vacío**, venga de donde venga el vacío. En el punto único
+    de salida (`_texto_garantizado`): queda en el registro —así sale en `app_logs` y en
+    el `diagnostico`—, se reintenta el cierre con el modelo pequeño y sitio de sobra y,
+    si aun así no dice nada, se contesta con lo que el backend sí sabe (lo que la
+    herramienta pidió decir literalmente, o al menos qué se llegó a consultar). *Una
+    respuesta pobre pero cierta vale más que un hueco en blanco.*
+  - **El aviso accionable moría con la respuesta.** La búsqueda estaba devolviendo su
+    error con el arreglo dentro («configura `TAVILY_API_KEY`»), redactado para el
+    usuario, y el turno vacío se lo tragaba entero: en pantalla no quedaba ni el motivo.
+    Ahora esos textos se apartan al ejecutar la herramienta y son la primera red del
+    turno mudo. La moraleja de siempre, por un sitio nuevo: *"no pude" no es "no hay
+    nada"* — pero solo si llega a decirse.
+
 - **El primer aviso al móvil se perdió entero y el dashboard dijo que había salido.** Al
   estrenar el canal, la automatización de HA llevaba `notify.mobile_app_TU_MOVIL` — el
   hueco de la plantilla de `docs/HOME_ASSISTANT_JARVIS.md`, copiado tal cual. Ese servicio

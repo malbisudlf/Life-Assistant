@@ -270,6 +270,14 @@ JARVIS_MAX_TOKENS    = int(os.getenv("JARVIS_MAX_TOKENS", "400"))
 # en escucharse, y por el altavoz no se puede saltar líneas: en una conversación hablada
 # la respuesta larga no es generosidad, es que no te dejan hablar.
 JARVIS_MAX_TOKENS_VOZ = int(os.getenv("JARVIS_MAX_TOKENS_VOZ", "160"))
+# Y sitio para PENSAR, aparte del techo de la respuesta. Los modelos de razonamiento
+# (JARVIS_MODEL_ACCION es uno) cobran su techo contra la SUMA de lo que piensan y lo que
+# dicen, así que el techo de arriba —que existe para que no se enrolle— se lo gastaban
+# pensando y contestaban VACÍO: `content=""` y `finish_reason="length"`. Y pasaba justo
+# en lo interesante, porque cuanto más gorda es la petición más piensa y menos sitio le
+# queda para hablar: las preguntas fáciles salían bien y las de varios pasos devolvían
+# un hueco en blanco. La reserva solo se paga si de verdad la usa.
+JARVIS_RESERVA_RAZONAMIENTO = int(os.getenv("JARVIS_RESERVA_RAZONAMIENTO", "2000"))
 # Mismo criterio que /ideas/audio: es una llamada de pago por petición, así que va con
 # el limitador genérico por IP.
 JARVIS_MAX_REQUESTS   = int(os.getenv("JARVIS_MAX_REQUESTS", "30"))
@@ -9862,12 +9870,18 @@ def _suena_a_negativa(texto) -> bool:
 # entero con un error de parámetro, y encima solo al hablarle, no al desplegar.
 # `reasoning_effort: minimal` es deliberado: aquí el trabajo lo hacen las herramientas, y
 # los tokens de razonamiento se pagan a precio de salida y se notan en el modo llamada.
+#
+# Y el techo NO es el mismo número para los dos, aunque lo parezca: para el resto acota
+# la respuesta, y para estos acota lo que piensan MÁS lo que responden. Pasarles el techo
+# de la respuesta a secas es pedirles que contesten con lo que sobre de pensar, que
+# algunos turnos es nada — de ahí JARVIS_RESERVA_RAZONAMIENTO.
 _RE_RAZONADOR = re.compile(r"^(gpt-5|o\d)", re.I)
 
 
 def _parametros_modelo(modelo: str, techo: int) -> dict:
     if _RE_RAZONADOR.match(str(modelo or "")):
-        return {"max_completion_tokens": techo, "reasoning_effort": "minimal"}
+        return {"max_completion_tokens": techo + JARVIS_RESERVA_RAZONAMIENTO,
+                "reasoning_effort": "minimal"}
     return {"max_tokens": techo, "temperature": 0.3}
 
 
@@ -9924,28 +9938,81 @@ def jarvis(
     cliente   = get_openai_client()
     esquema   = _jarvis_esquema()      # una vez: ahora leer la config MCP toca Supabase
     usadas    = []
+    # Lo que alguna herramienta pidió decir LITERALMENTE (un error que trae su arreglo
+    # dentro). Se guarda por si el modelo acaba sin decir nada: ver _texto_garantizado.
+    avisos    = []
     pendiente = None
     # Abre el pequeño. Si hay que actuar, el grande toma el relevo para el resto del bucle.
     modelo    = JARVIS_MODEL
 
-    def _pensar(modelo_usado):
-        return cliente.chat.completions.create(
+    def _pensar(modelo_usado, con_herramientas=True, techo_usado=None):
+        """Una llamada al modelo. Devuelve (mensaje, motivo de parada).
+
+        El motivo hace falta para distinguir un modelo que no tiene nada que decir de uno
+        que se quedó sin tokens antes de decirlo, que se parecen mucho desde aquí: los dos
+        vuelven con `content` vacío.
+        """
+        extra    = {"tools": esquema} if con_herramientas else {}
+        eleccion = cliente.chat.completions.create(
             model=modelo_usado,
             messages=mensajes,
-            tools=esquema,
-            **_parametros_modelo(modelo_usado, techo),
-        ).choices[0].message
+            **extra,
+            **_parametros_modelo(modelo_usado, techo_usado or techo),
+        ).choices[0]
+        return eleccion.message, str(getattr(eleccion, "finish_reason", "") or "")
 
-    def _responder(texto, pendiente_):
+    def _texto_garantizado(texto, motivo, modelo_usado):
+        """Un turno NUNCA sale vacío.
+
+        Quedarse sin tokens no da una respuesta a medias: con un modelo de razonamiento da
+        una respuesta VACÍA, porque piensa hasta agotar el techo y ya no le queda con qué
+        hablar. El cliente pintaba «(sin respuesta)» y el usuario se quedaba sin saber ni
+        si la herramienta había funcionado — el bug del agente PC otra vez, callarse no es
+        contestar. Así que aquí se hace lo que se haría a mano: dejar constancia en el
+        registro, reintentar el cierre con sitio de sobra y, si aun así no dice nada,
+        contestar con lo que el backend SÍ sabe. Una respuesta pobre pero cierta vale más
+        que un hueco en blanco.
+        """
+        texto = (texto or "").strip()
+        if texto:
+            return texto
+        logger.error(
+            "Jarvis: el modelo devolvió una respuesta vacía (modelo=%s, parada=%s, "
+            "herramientas=%s); se reintenta el cierre",
+            modelo_usado or "?", motivo or "?", ",".join(usadas) or "ninguna",
+        )
+        try:
+            # Con el pequeño y sin herramientas: si el vacío vino de un razonador sin
+            # presupuesto, insistir con él es repetir el fallo.
+            reintento, _ = _pensar(JARVIS_MODEL, con_herramientas=False,
+                                   techo_usado=techo * 2)
+            texto = (reintento.content or "").strip()
+        except Exception as e:   # noqa: BLE001 — el reintento es un extra, no puede tumbar el turno
+            logger.error("Jarvis: el reintento del cierre también falló: %s", e)
+        if texto:
+            return texto
+        if avisos:
+            # Lo único accionable del turno moría con la respuesta vacía. Ya no.
+            return "\n".join(dict.fromkeys(avisos))
+        if usadas:
+            return ("Me he quedado sin respuesta al redactarla, pero he llegado a "
+                    "consultar: " + ", ".join(dict.fromkeys(usadas)) + ". Vuelve a "
+                    "pedírmelo por partes y te lo cuento.")
+        return ("Me he quedado sin respuesta. Vuelve a pedírmelo, a poder ser en pasos "
+                "más pequeños.")
+
+    def _responder(texto, pendiente_, motivo="", modelo_usado=""):
         """Punto único de salida del turno: es donde cuelga la destilación de memoria,
-        para que no haya que acordarse de llamarla en cada `return`."""
+        para que no haya que acordarse de llamarla en cada `return`. Y donde se garantiza
+        que hay algo que decir, por el mismo motivo."""
+        texto  = _texto_garantizado(texto, motivo, modelo_usado)
         turnos = [{"rol": t.rol, "texto": t.texto} for t in body.historial[-JARVIS_MAX_HISTORIAL:]]
         turnos += [{"rol": "user", "texto": mensaje}, {"rol": "assistant", "texto": texto}]
         _quizas_destilar(cliente, turnos)
         return {"respuesta": texto, "herramientas": usadas, "pendiente": pendiente_}
 
     for _ in range(JARVIS_MAX_VUELTAS):
-        salida   = _pensar(modelo)
+        salida, motivo = _pensar(modelo)
         llamadas = salida.tool_calls or []
 
         # El pequeño solo decide SI toca herramienta, que es lo que sabe hacer bien.
@@ -9963,12 +10030,12 @@ def jarvis(
         # revisa el grande. Solo cuesta una llamada de más cuando aparece un «no».
         if modelo == JARVIS_MODEL and JARVIS_MODEL_ACCION != JARVIS_MODEL and (
                 llamadas or _suena_a_negativa(salida.content)):
-            modelo   = JARVIS_MODEL_ACCION
-            salida   = _pensar(modelo)
-            llamadas = salida.tool_calls or []
+            modelo         = JARVIS_MODEL_ACCION
+            salida, motivo = _pensar(modelo)
+            llamadas       = salida.tool_calls or []
 
         if not llamadas:
-            return _responder((salida.content or "").strip(), None)
+            return _responder((salida.content or "").strip(), None, motivo, modelo)
 
         mensajes.append({
             "role":       "assistant",
@@ -10005,6 +10072,12 @@ def jarvis(
             else:
                 resultado = _jarvis_despachar(c.function.name, argumentos)
                 usadas.append(c.function.name)
+                # Un error que trae su arreglo dentro (`buscar_en_internet` sin clave de
+                # buscador es el caso de todos los días) llega ya redactado para el
+                # usuario. Se aparta aquí porque es lo primero que hay que decir si luego
+                # el modelo se queda mudo.
+                if isinstance(resultado, dict) and resultado.get("dile_al_usuario_literalmente"):
+                    avisos.append(str(resultado["dile_al_usuario_literalmente"]))
 
             mensajes.append({
                 "role":         "tool",
@@ -10014,14 +10087,28 @@ def jarvis(
 
         if pendiente:
             break
+    else:
+        # Se acabaron las vueltas con el modelo todavía pidiendo herramientas. Se dice en
+        # el registro (un turno que se queda a medias es un síntoma, no una curiosidad) y
+        # se le dice a él: sin esto redactaba el cierre como si hubiera terminado, que es
+        # peor que quedarse corto, porque no se nota.
+        logger.warning(
+            "Jarvis: se agotaron las %s vueltas del bucle (herramientas: %s)",
+            JARVIS_MAX_VUELTAS, ",".join(usadas) or "ninguna",
+        )
+        mensajes.append({
+            "role":    "system",
+            "content": "Se han agotado los pasos disponibles en este turno. Responde ya "
+                       "con lo que hayas averiguado, di claramente qué te ha quedado a "
+                       "medias y ofrece seguir en el siguiente mensaje. No des por hecho "
+                       "nada que no hayas comprobado.",
+        })
 
     # Cierre sin herramientas: o hay algo pendiente de confirmar, o se agotaron las
     # vueltas. En ambos casos toca redactar la respuesta con lo que ya se sabe — y para
     # redactar con los datos delante basta el pequeño, que además contesta antes.
-    cierre = cliente.chat.completions.create(
-        model=JARVIS_MODEL, messages=mensajes, **_parametros_modelo(JARVIS_MODEL, techo),
-    ).choices[0].message
-    return _responder((cierre.content or "").strip(), pendiente)
+    cierre, motivo = _pensar(JARVIS_MODEL, con_herramientas=False)
+    return _responder((cierre.content or "").strip(), pendiente, motivo, JARVIS_MODEL)
 
 
 @app.post("/jarvis/ejecutar")
