@@ -22,8 +22,10 @@ def _llamada(nombre, argumentos=None, id_="call-1"):
     )
 
 
-def _mensaje(content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
+def _mensaje(content=None, tool_calls=None, motivo="stop"):
+    """`motivo` es el finish_reason que acompañará al mensaje: "length" es el que devuelve
+    un modelo que se quedó sin tokens, que es distinto de no tener nada que decir."""
+    return SimpleNamespace(content=content, tool_calls=tool_calls, motivo=motivo)
 
 
 class ClienteFalso:
@@ -48,7 +50,8 @@ class ClienteFalso:
     def create(self, **kwargs):
         self.recibido.append(kwargs)
         mensaje = self.guion.pop(0) if self.guion else _mensaje("(sin guion)")
-        return SimpleNamespace(choices=[SimpleNamespace(message=mensaje)])
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=mensaje, finish_reason=getattr(mensaje, "motivo", "stop"))])
 
 
 def _con_modelo(monkeypatch, guion):
@@ -188,6 +191,99 @@ class TestJarvisBucle:
         assert len(cliente.recibido) == main.JARVIS_MAX_VUELTAS + 1
         # La de cierre va sin herramientas, para que no pueda pedir otra.
         assert "tools" not in cliente.recibido[-1]
+
+    def test_al_agotarlas_se_lo_dice_al_modelo(self, client, auth_headers, monkeypatch):
+        """Sin avisarle, redactaba el cierre como si hubiera terminado la tarea."""
+        _herramienta(monkeypatch, "clima", lambda: {"ahora": 21})
+        guion = [_mensaje(tool_calls=[_llamada("clima")]) for _ in range(main.JARVIS_MAX_VUELTAS)]
+        guion.append(_mensaje("He mirado el tiempo; lo demás me ha quedado a medias."))
+        cliente = _con_modelo(monkeypatch, guion)
+        client.post("/jarvis", json={"mensaje": "clima"}, headers=auth_headers)
+        sistema = [m["content"] for m in cliente.recibido[-1]["messages"] if m["role"] == "system"]
+        assert any("agotado los pasos" in c for c in sistema)
+
+    def test_sin_agotarlas_no_se_le_dice_nada(self, client, auth_headers, monkeypatch):
+        _herramienta(monkeypatch, "clima", lambda: {"ahora": 21})
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("clima")]),
+            _mensaje("Hace 21 grados."),
+        ])
+        client.post("/jarvis", json={"mensaje": "clima"}, headers=auth_headers)
+        sistema = [m["content"] for m in cliente.recibido[-1]["messages"] if m["role"] == "system"]
+        assert not any("agotado los pasos" in c for c in sistema)
+
+
+# ── Un turno nunca sale vacío ─────────────────────────────────────────────────
+
+class TestJarvisNuncaSeQuedaMudo:
+    """Un modelo de razonamiento que se queda sin tokens no contesta a medias: contesta
+    VACÍO, porque piensa hasta agotar el techo y ya no le queda con qué hablar. El cliente
+    pintaba «(sin respuesta)» y el usuario no se enteraba ni de si la herramienta había
+    funcionado."""
+
+    def test_reintenta_el_cierre_cuando_el_modelo_no_dice_nada(
+            self, client, auth_headers, monkeypatch):
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje("", motivo="length"),
+            _mensaje("Perdona: me quedé sin sitio. Te lo cuento en corto."),
+        ])
+        r = client.post("/jarvis", json={"mensaje": "hazme un resumen largo"},
+                        headers=auth_headers)
+        assert r.json()["respuesta"].startswith("Perdona")
+        # El reintento va sin herramientas (solo hay que redactar) y con más sitio.
+        assert "tools" not in cliente.recibido[-1]
+        assert cliente.recibido[-1]["max_tokens"] > main.JARVIS_MAX_TOKENS
+
+    def test_tampoco_sale_vacio_tras_una_herramienta(self, client, auth_headers, monkeypatch):
+        _herramienta(monkeypatch, "clima", lambda: {"ahora": 21})
+        _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("clima")]),
+            _mensaje("", motivo="length"),
+            _mensaje("", motivo="length"),
+        ])
+        r = client.post("/jarvis", json={"mensaje": "clima"}, headers=auth_headers)
+        datos = r.json()
+        assert datos["respuesta"].strip()
+        # Y dice qué llegó a mirar: una respuesta pobre pero cierta, no un hueco.
+        assert "clima" in datos["respuesta"]
+
+    def test_el_arreglo_que_trae_la_herramienta_sobrevive_al_silencio(
+            self, client, auth_headers, monkeypatch):
+        """El único aviso accionable del turno moría con la respuesta vacía."""
+        _herramienta(monkeypatch, "buscar_en_internet", lambda consulta, resultados=0: {
+            "error": "No he podido buscar.",
+            "dile_al_usuario_literalmente": "Configura TAVILY_API_KEY en el backend.",
+            "no_reintentar": True,
+        })
+        _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("buscar_en_internet", {"consulta": "mcp"})]),
+            _mensaje("", motivo="length"),
+            _mensaje(None, motivo="length"),
+        ])
+        r = client.post("/jarvis", json={"mensaje": "busca eso"}, headers=auth_headers)
+        assert "TAVILY_API_KEY" in r.json()["respuesta"]
+
+    def test_queda_registrado(self, client, auth_headers, monkeypatch, caplog):
+        """Un turno mudo es una avería, y una avería que no se registra no existe: esto
+        es lo que hace que salga en app_logs y en el `diagnostico`."""
+        _con_modelo(monkeypatch, [_mensaje("", motivo="length"), _mensaje("Ya voy.")])
+        with caplog.at_level("ERROR"):
+            client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
+        assert any("respuesta vacía" in r.getMessage() for r in caplog.records)
+
+    def test_un_reintento_que_tambien_falla_no_tumba_el_turno(
+            self, client, auth_headers, monkeypatch):
+        class ClienteRoto(ClienteFalso):
+            def create(self, **kwargs):
+                if self.recibido:
+                    raise RuntimeError("la API se cayó")
+                return super().create(**kwargs)
+
+        cliente = ClienteRoto([_mensaje("", motivo="length")])
+        monkeypatch.setattr(main, "get_openai_client", lambda: cliente)
+        r = client.post("/jarvis", json={"mensaje": "hola"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["respuesta"].strip()
 
 
 # ── La frontera de confirmación ───────────────────────────────────────────────
