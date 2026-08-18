@@ -137,6 +137,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BACKEND_PATRONES.md` | **Antes de tocar `backend/main.py`.** El núcleo: cliente HTTP saliente, ideas, zonas horarias, tokens de Graph, cola de jobs, ingesta de salud, flags del PC, presencia, clima, consultas en paralelo y registro persistente |
 | `docs/BRIEF.md` | El resumen diario por correo y el informe semanal: qué va dentro, cuándo sale, la idempotencia y el interruptor |
 | `docs/JARVIS.md` | Jarvis (herramientas, confirmación, memoria, MCP, web, la casa) y todo lo proactivo: recordatorios, avisos al móvil, reglas, vigilancias, correo entrante y los vigilantes |
+| `docs/NOTIFICACIONES.md` | Manual de uso de los avisos de Jarvis: canales, presupuesto diario, botones Útil/No y qué mirar si algo no llega. `docs/JARVIS.md` es la implementación; este es el manual |
 | `docs/BACKEND_REFERENCIA.md` | Referencia de endpoints (ruta → auth → qué hace) y catálogo de variables de entorno |
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
