@@ -57,8 +57,11 @@ __pycache__/
 # con el agente PC de `agent/agent.py`.
 .agents/
 agent/skills/
-.claude/skills/
+.claude/skills/*
 skills-lock.json
+# Las skills propias SÍ son parte del proyecto y se versionan: una routine de
+# Claude Code solo ve lo que está en el repositorio que clona.
+!.claude/skills/revision-nocturna/
 
 # Playwright (E2E): informes y trazas de cada ejecución
 /test-results/
