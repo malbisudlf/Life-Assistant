@@ -13,13 +13,38 @@ cuelan en un repositorio público.
 
 | Pieza | Dónde vive | Qué hace |
 |---|---|---|
-| La routine | En la cuenta de claude.ai (`claude.ai/code/routines`), **no en el repositorio** | La sesión que revisa: prompt guardado, modelo, repositorio y el endpoint de disparo |
+| La routine | En la cuenta de claude.ai (`claude.ai/code/routines`), **no en el repositorio** | La sesión que revisa: prompt guardado, modelo, repositorio y sus dos disparos (el endpoint de API y el barrido semanal) |
 | `.claude/skills/revision-nocturna/SKILL.md` | Versionado aquí | El checklist de verdad: qué buscar, cómo verificarlo y cómo escribir el issue |
 | `.github/workflows/revision-nocturna.yml` | Versionado aquí | El disparador: mira si hay commits nuevos y, solo entonces, llama a la routine |
 
 El prompt guardado en la routine es corto a propósito: **la revisión evoluciona en la
 skill**, que está en el repositorio y se cambia en un commit como todo lo demás. Las
 routines usan las skills del repositorio que clonan.
+
+## Los dos relojes
+
+El disparo primario es el workflow, no un schedule de la routine, por una razón: **es la
+única pieza que sabe gratis si hubo commits**. Las routines tienen tope diario de
+ejecuciones y una noche sin tocar el código no debe gastar una; mirar el `git log` en
+Actions no cuesta nada. El backend no puede hacer este papel: escala a cero y no tiene
+reloj propio —lo despiertan el iPhone o Home Assistant—, y además no sabe nada de git.
+
+El cron de Actions no es de fiar, y cada uno de sus fallos se tapa por separado:
+
+| Fallo | Quién lo cubre |
+|---|---|
+| Llega tarde | Nadie, y da igual: son las tres de la mañana |
+| No llega (Actions descarta la ejecución) | La etiqueta: no se movió, así que la noche siguiente arrastra el rango |
+| Llega, pero la sesión se cae a mitad de revisión | El barrido semanal de la routine |
+
+Ese tercer caso es el que obliga a tener dos relojes: la etiqueta se mueve cuando el
+disparo sale bien, no cuando la revisión termina, así que unos commits pueden quedar
+marcados como revisados sin haberlo sido. El barrido semanal vuelve a mirar los últimos
+siete días con orden expresa de no repetir hallazgos ya reportados, así que la semana
+normal termina sin abrir nada.
+
+Es la misma forma que el resumen diario: señal primaria, reloj de respaldo y una puerta
+que evita el duplicado.
 
 ## Cómo se montó (y cómo rehacerlo)
 
@@ -46,8 +71,9 @@ Revisa los cambios que han entrado hoy en main de este repositorio y abre un iss
 los hallazgos.
 
 El rango exacto viene en el bloque <routine-fire-payload> de esta sesión, en la línea
-"Rango a revisar: BASE..CABEZA". Úsalo. Si no hay bloque, revisa los commits de las
-últimas 24 horas en main.
+"Rango a revisar: BASE..CABEZA". Úsalo. Si no hay bloque, te ha disparado el barrido
+semanal de respaldo: revisa los últimos siete días sin repetir hallazgos que ya estén
+en issues de revisiones anteriores.
 
 Sigue la skill `revision-nocturna` del repositorio
 (.claude/skills/revision-nocturna/SKILL.md): ahí están el checklist, el formato del
@@ -73,7 +99,16 @@ another trigger** → **API**. El modal enseña la URL
 regenera desde el mismo sitio (y hay que actualizar el secret). Cada routine tiene su
 token y solo sirve para dispararla a ella.
 
-### 3. Configurar el repositorio
+### 3. Añadir el reloj de respaldo
+
+En la misma routine, **Add another trigger** → **Schedule**, semanal. La hora da igual
+mientras sea de madrugada; el domingo va bien.
+
+Este disparo llega **sin payload**, y la skill usa justo eso para saber que es un
+barrido: en vez de un rango concreto revisa los últimos siete días y no repite lo que ya
+esté reportado en issues anteriores.
+
+### 4. Configurar el repositorio
 
 En *Settings → Secrets and variables → Actions*:
 
@@ -85,7 +120,7 @@ En *Settings → Secrets and variables → Actions*:
 Si falta cualquiera de las dos, el workflow falla con un mensaje claro en vez de
 quedarse callado.
 
-### 4. Llevarlo a `main`
+### 5. Llevarlo a `main`
 
 Los workflows programados **solo corren desde la rama por defecto**. Mientras esto viva
 en una rama de trabajo no dispara nada, ni siquiera con `workflow_dispatch`.
@@ -99,6 +134,8 @@ en una rama de trabajo no dispara nada, ni siquiera con `workflow_dispatch`.
 - **Solo la revisión**, sin tocar Actions: **Run now** en la página de la routine. El
   cuadro admite texto, que llega igual que el `text` del disparo — pégale un
   `Rango a revisar: BASE..CABEZA` y revisará ese rango.
+- **El barrido semanal**: **Run now** dejando el cuadro de texto vacío. Sin payload, la
+  skill se va al camino de los últimos siete días.
 
 ## La etiqueta `ultima-revision-nocturna`
 
@@ -107,6 +144,9 @@ para calcular el rango y la mueve **solo si el disparo salió bien**.
 
 Existe para que una noche perdida no se trague esos commits: si Actions estaba caído o
 el disparo falló, la noche siguiente arrastra el rango completo desde donde se quedó.
+
+Marca lo **disparado**, no lo **revisado**: si la sesión se cae a mitad, esos commits
+quedan marcados sin haberse mirado. De ese hueco se ocupa el barrido semanal.
 
 ```bash
 git fetch --tags
@@ -118,7 +158,8 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
 ## Cómo apagarlo
 
 - **Una temporada**: desactiva el workflow desde *Actions* (menú `...` → *Disable
-  workflow*). La routine se queda sin disparo y no gasta nada.
+  workflow*) y pausa el schedule semanal desde la sección **Repeats** de la routine. Si
+  solo apagas el workflow, el barrido semanal sigue corriendo.
 - **Del todo**: borra la routine en claude.ai y este workflow. La skill puede quedarse:
   sirve a mano para revisar un rango cuando quieras.
 

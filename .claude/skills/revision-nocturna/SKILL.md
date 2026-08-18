@@ -22,13 +22,22 @@ cuelan en un repositorio público.
 
 ## 1. Delimitar el rango
 
-Si la sesión trae un bloque `<routine-fire-payload>`, dentro viene la línea
-`Rango a revisar: BASE..CABEZA` con la lista de commits. **Úsala**: es el rango exacto
-que aún no se ha revisado, lo calcula el workflow con la etiqueta
+Hay dos maneras de llegar aquí y se distinguen por el payload:
+
+**Con `<routine-fire-payload>`** — te disparó el workflow nocturno. Dentro viene la
+línea `Rango a revisar: BASE..CABEZA` con la lista de commits. **Úsala tal cual**: es el
+rango exacto que aún no se ha revisado, lo calcula el workflow con la etiqueta
 `ultima-revision-nocturna`.
 
-Si no hay payload (invocación a mano), usa `git log --since='24 hours ago' main` y dilo
-en el issue.
+**Sin payload** — te disparó el barrido semanal, que es la red de seguridad por si una
+noche el disparo salió pero la sesión se cayó a mitad. Revisa los commits de los
+**últimos 7 días** dando por hecho que casi todos ya se revisaron alguna noche: aquí tu
+trabajo es cazar solo lo que se perdió, así que la regla de no duplicar del paso 5 manda
+por encima de todo. Si no encuentras nada que no estuviera ya reportado, termina sin
+abrir issue — es el resultado esperado la mayoría de las semanas.
+
+(Si alguien pega un `Rango a revisar: ...` a mano en *Run now*, llega como payload y
+vale igual que el del workflow.)
 
 Con el rango en la mano:
 
@@ -115,13 +124,16 @@ Un hallazgo sin comprobar es ruido. Antes de escribirlo:
 **Si no hay hallazgos, no abras nada.** Una noche limpia es una noche sin issue; el
 propio run queda en el historial de la routine como prueba de que se revisó.
 
-Antes de abrir, mira los issues abiertos: si ya hay uno de una revisión anterior con el
-mismo hallazgo, comenta ahí en vez de duplicar.
+Antes de abrir, busca los issues que empiecen por `Revisión nocturna` —abiertos y
+también los cerrados de las últimas semanas—. **Un hallazgo ya reportado ahí no se
+vuelve a reportar**, ni en un issue nuevo ni como comentario, salvo que tengas algo que
+añadir que no estuviera. En el barrido semanal esto es lo normal, no la excepción.
 
 Abre el issue con las herramientas de GitHub que tenga la sesión (las MCP de GitHub, o
 `gh` si está disponible):
 
-- **Título**: `Revisión nocturna — AAAA-MM-DD`
+- **Título**: `Revisión nocturna — AAAA-MM-DD`, o
+  `Revisión nocturna — AAAA-MM-DD (barrido semanal)` si te disparó el respaldo.
 - **Etiqueta**: `revision-nocturna` si ya existe en el repositorio; no la crees.
 - **Cuerpo**:
 

@@ -17,14 +17,23 @@ name: Revisión nocturna del código
 # resumen diario eso lo echó de aquí (tenía que salir "al despertarte"); a esto le
 # da igual: a las 3 de la mañana nadie está mirando.
 #
-# El cron va en UTC: 01:00 UTC son las 03:00 en Madrid en verano (CEST) y las 02:00
+# El cron va en UTC: 01:37 UTC son las 03:37 en Madrid en verano (CEST) y las 02:37
 # en invierno (CET). Las dos horas caen de noche, que es lo único que importa aquí.
+#
+# El minuto no es en punto a propósito: Actions concentra la cola en :00, que es donde
+# más se retrasan y se descartan ejecuciones. Aquí el retraso da igual, pero el
+# descarte no, y un minuto raro lo hace menos probable.
+#
+# Que aun así se pierda una noche está contemplado: la etiqueta no se mueve si no hay
+# disparo, así que la noche siguiente arrastra el rango. Lo que la etiqueta NO cubre es
+# que el disparo salga bien y la sesión se caiga a mitad de revisión — de eso se ocupa
+# el barrido semanal de la propia routine (ver docs/REVISION_NOCTURNA.md).
 #
 # OJO: los workflows programados solo corren desde la rama por defecto. Esto no
 # dispara nada hasta que esté en main.
 on:
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '37 1 * * *'
   workflow_dispatch:        # también a mano, para probarlo sin esperar a mañana
 
 # Si un intento se solapa con el anterior, no dispares dos revisiones.
