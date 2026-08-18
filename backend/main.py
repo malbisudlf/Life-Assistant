@@ -106,6 +106,20 @@ if not DASHBOARD_PASSWORD:
     raise RuntimeError("DASHBOARD_PASSWORD no configurada — define la variable de entorno antes de arrancar")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 30
+
+
+def _flag(nombre: str, defecto: str = "1") -> bool:
+    """Lee una variable de entorno booleana aceptando las formas que la gente escribe.
+
+    Todos estos interruptores existen para APAGAR algo que molesta (avisos que siguen
+    saliendo, un vigilante que no para). La comparación sin normalizar que había antes
+    (`not in ("0", "false", "False")`) dejaba encendida la función si escribías `FALSE`,
+    `no` u `off`: justo el fallo que un interruptor de emergencia no se puede permitir,
+    y encima silencioso — pones la variable, redespliegas y el aviso sigue llegando.
+    """
+    return os.getenv(nombre, defecto).strip().lower() not in ("0", "false", "no", "off", "")
+
+
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -181,7 +195,7 @@ BRIEF_DESPERTAR_HASTA = os.getenv("BRIEF_DESPERTAR_HASTA", "11:30")
 BRIEF_HORA_TOPE       = os.getenv("BRIEF_HORA_TOPE", "10:00")
 # Aviso de "ponte el reloj". El dato de una noche sin medir no se recupera: al día
 # siguiente ya no hay nada que hacer, así que el aviso vale antes de dormir o no vale.
-RELOJ_AVISO       = os.getenv("RELOJ_AVISO", "1") not in ("0", "false", "False")
+RELOJ_AVISO       = _flag("RELOJ_AVISO")
 RELOJ_AVISO_HORA  = os.getenv("RELOJ_AVISO_HORA", "21:30")
 # Cuántas noches seguidas sin medir hacen falta para avisar de la racha. Con 1 saltaría
 # cada vez que se carga una noche, que es normal y volvería el aviso ruido.
@@ -194,14 +208,14 @@ RELOJ_AVISO_TOPE      = (23, 30)
 # Informe semanal. El resumen diario mira 30 días porque es lo que sirve para decidir
 # HOY; lo que de verdad cambia una rutina se ve en meses, y hoy eso solo se puede mirar
 # abriendo el modal de patrones del dashboard — o sea, solo si a uno se le ocurre.
-INFORME_SEMANAL = os.getenv("INFORME_SEMANAL", "1") not in ("0", "false", "False")
+INFORME_SEMANAL = _flag("INFORME_SEMANAL")
 # Día de la semana en que sale, con el criterio de `date.weekday()`: 0 = lunes … 6 = domingo.
 INFORME_DIA     = int(os.getenv("INFORME_DIA", "6"))
 INFORME_HORA    = os.getenv("INFORME_HORA", "10:00")
 INFORME_SEMANAS = int(os.getenv("INFORME_SEMANAS", "13"))
 # Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
 # _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
-BRIEF_DISPARA_SUENO   = os.getenv("BRIEF_DISPARA_SUENO", "1") not in ("0", "false", "False")
+BRIEF_DISPARA_SUENO   = _flag("BRIEF_DISPARA_SUENO")
 # Disparo de la rutina de Claude Code que lee este correo y redacta el briefing.
 # Su trigger de API: la URL y el token se generan en claude.ai/code/routines (el token
 # se enseña UNA vez). Si faltan, no se dispara nada y la rutina se queda solo con su
@@ -297,7 +311,7 @@ JARVIS_REPO           = os.getenv("JARVIS_REPO", "")
 # encontrarse un captcha: es el precio de no pagar ni registrarse.
 BRAVE_API_KEY         = os.getenv("BRAVE_API_KEY", "")
 TAVILY_API_KEY        = os.getenv("TAVILY_API_KEY", "")
-JARVIS_WEB            = os.getenv("JARVIS_WEB", "1") not in ("0", "false", "False")
+JARVIS_WEB            = _flag("JARVIS_WEB")
 JARVIS_WEB_RESULTADOS = int(os.getenv("JARVIS_WEB_RESULTADOS", "5"))
 # Topes de lo que entra desde fuera. El primero protege la memoria de la VM (1 GB) y el
 # segundo la factura: el texto de la página acaba dentro del prompt y se paga por token.
@@ -390,7 +404,7 @@ bearer_scheme = HTTPBearer()
 #     cuántas, para que un pico de errores no se coma la RAM de la VM (1 GB).
 #   - Un fallo escribiendo el registro se traga y se avisa por stderr, nunca por logger:
 #     eso realimentaría la cola con el error de escribir la cola.
-LOG_PERSIST        = os.getenv("LOG_PERSIST", "1").lower() not in ("0", "false", "no")
+LOG_PERSIST        = _flag("LOG_PERSIST")
 LOG_PERSIST_LEVEL  = os.getenv("LOG_PERSIST_LEVEL", "WARNING").upper()
 LOG_QUEUE_MAX      = int(os.getenv("LOG_QUEUE_MAX", "500"))
 LOG_FLUSH_SECONDS  = float(os.getenv("LOG_FLUSH_SECONDS", "2"))
@@ -548,6 +562,10 @@ async def registrar_peticiones(request: Request, call_next):
 # ── Seguridad: rate limiting del login ────────────────────────────────────────
 LOGIN_MAX_ATTEMPTS   = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
 LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
+# Techo del bloqueo progresivo: cada tanda de LOGIN_MAX_ATTEMPTS fallos dobla la espera
+# (300s, 600s, 1.200s…) hasta este tope. Sin el doblado, cinco intentos cada cinco
+# minutos son 1.440 al día contra la contraseña, indefinidamente y sin coste.
+LOGIN_BLOQUEO_MAX_SECONDS = int(os.getenv("LOGIN_BLOQUEO_MAX_SECONDS", "3600"))
 # Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera
 # (en Fly no hace falta: ya manda Fly-Client-IP). Ver _client_ip.
 TRUST_FORWARDED_FOR  = os.getenv("TRUST_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
@@ -599,8 +617,19 @@ def _check_login_rate():
     endpoint de la app que hoy no depende de Supabase para nada más, y esa propiedad
     (poder entrar aunque la base de datos esté caída, para al menos ver qué falla)
     vale más que blindar una ventana de fallo de infraestructura poco probable.
+
+    El bloqueo es PROGRESIVO: cada tanda completa de LOGIN_MAX_ATTEMPTS fallos dobla la
+    espera (300s, 600s, 1.200s…) hasta LOGIN_BLOQUEO_MAX_SECONDS, y se cuenta desde el
+    último fallo, no desde el primero. Con la ventana plana que había antes, aguantar
+    cinco minutos devolvía otros cinco intentos indefinidamente: 1.440 al día contra la
+    contraseña, gratis. Un login correcto borra la tabla (`_reset_login_attempts`), así
+    que al usuario legítimo el castigo acumulado no le sobrevive a acertar una vez.
     """
-    since = (datetime.now(timezone.utc) - timedelta(seconds=LOGIN_WINDOW_SECONDS)).isoformat()
+    # El horizonte de la consulta es el bloqueo máximo, no la ventana: para saber por
+    # cuántas tandas va hay que ver los fallos viejos, que con la ventana corta ya
+    # habrían desaparecido del recuento.
+    horizonte = max(LOGIN_WINDOW_SECONDS, LOGIN_BLOQUEO_MAX_SECONDS)
+    since = (datetime.now(timezone.utc) - timedelta(seconds=horizonte)).isoformat()
     r = http.get(
         f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.{quote(since)}&select=created_at&order=created_at.asc",
         headers=supabase_headers(),
@@ -609,13 +638,19 @@ def _check_login_rate():
         logger.error("Rate limit de login: no se pudo consultar Supabase (%s)", r.status_code)
         return
     attempts = r.json()
-    if len(attempts) >= LOGIN_MAX_ATTEMPTS:
-        primero = datetime.fromisoformat(attempts[0]["created_at"].replace("Z", "+00:00"))
-        retry = int(LOGIN_WINDOW_SECONDS - (datetime.now(timezone.utc) - primero).total_seconds())
+    if len(attempts) < LOGIN_MAX_ATTEMPTS:
+        return
+    # El exponente va acotado: con muchas tandas, 2**n es un entero enorme calculado para
+    # nada, porque el min() de la línea siguiente lo recorta igual.
+    tandas  = len(attempts) // LOGIN_MAX_ATTEMPTS
+    bloqueo = min(LOGIN_WINDOW_SECONDS * (2 ** min(tandas - 1, 32)), LOGIN_BLOQUEO_MAX_SECONDS)
+    ultimo  = datetime.fromisoformat(attempts[-1]["created_at"].replace("Z", "+00:00"))
+    retry   = int(bloqueo - (datetime.now(timezone.utc) - ultimo).total_seconds())
+    if retry > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Demasiados intentos. Reintenta en {retry}s",
-            headers={"Retry-After": str(max(retry, 1))},
+            headers={"Retry-After": str(retry)},
         )
 
 
@@ -796,11 +831,31 @@ def create_token() -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRE_DAYS)
     return jwt.encode({"exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+def _jwt_de_usuario(token: str) -> dict:
+    """Valida un JWT de sesión del dashboard y devuelve sus claims.
+
+    Firmar no basta: con SECRET_KEY se firma también el `state` del flujo OAuth
+    (`_create_oauth_state`), y ese state viaja como query param en el redirect de vuelta
+    de Microsoft, así que acaba en la barra de direcciones, en el historial del navegador
+    y en los logs de Microsoft. Si aquí solo se comprobara la firma, cualquiera que
+    leyera esa URL tendría diez minutos de acceso completo a la API.
+
+    Se rechaza por la presencia de `purpose` en vez de exigir `purpose: "dashboard"`
+    porque los tokens de sesión que ya están emitidos (30 días) no lo llevan: exigirlo
+    echaría al usuario de la sesión en el momento del despliegue. Todo token con un
+    propósito declarado es, por definición, de otra cosa.
+    """
     try:
-        jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        claims = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    if claims.get("purpose"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    return claims
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    _jwt_de_usuario(credentials.credentials)
 
 
 def verify_agente(request: Request):
@@ -824,10 +879,7 @@ def verify_agente(request: Request):
     provisto = _extract_service_token(request)
     if _token_ok(provisto, AGENT_TOKEN):
         return
-    try:
-        jwt.decode(provisto, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    _jwt_de_usuario(provisto)
 
 
 def _create_oauth_state() -> str:
@@ -926,10 +978,17 @@ def _cachear_token(data: dict | None):
 
 def save_token_data(data: dict):
     """Persiste el token de Microsoft Graph en Supabase (sobrevive a redeploys del backend)."""
+    # Una renovación puede devolver access_token SIN refresh_token: el protocolo permite
+    # que el servidor no rote el refresh y entonces simplemente no lo repite. Escribir
+    # ese None encima mataba la conexión de Outlook para siempre — el siguiente
+    # get_valid_token se encontraba `if not refresh_token: return None` y el calendario
+    # se quedaba mudo, sin más salida que rehacer /auth/login a mano. Si no viene uno
+    # nuevo, el anterior sigue siendo válido: se conserva.
+    refresh = data.get("refresh_token") or (load_token_data() or {}).get("refresh_token")
     payload = {
         "provider": OAUTH_PROVIDER,
         "access_token": data["access_token"],
-        "refresh_token": data.get("refresh_token"),
+        "refresh_token": refresh,
         "expires_at": data["expires_at"],
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -6057,7 +6116,7 @@ def _avisar_reloj_si_toca() -> dict:
 # está en un cajón (llegan datos del móvil y ninguno del Watch), y por diseño se calla
 # cuando no llega NADA, porque entonces no se sabe si fue el reloj o la sincronización.
 # Este cubre exactamente ese hueco.
-INGESTA_VIGILAR      = os.getenv("INGESTA_VIGILAR", "1") not in ("0", "false", "False")
+INGESTA_VIGILAR      = _flag("INGESTA_VIGILAR")
 # Horas sin recibir un solo dato a partir de las cuales esto deja de ser normal. La
 # ingesta escribe varias veces al día; un día entero en blanco es una avería.
 INGESTA_AVISO_HORAS  = float(os.getenv("INGESTA_AVISO_HORAS", "24"))
@@ -6170,7 +6229,7 @@ def _vigilar_ingesta_seguro() -> dict:
 #   - Que HA deje de sondear. No se puede detectar desde aquí: este código lo ejecuta
 #     precisamente el tick de HA, así que si HA muere, el vigilante muere con él. Eso
 #     solo lo puede ver algo de fuera — hoy, el workflow de Actions de respaldo.
-VIGILANTE             = os.getenv("VIGILANTE", "1") not in ("0", "false", "False")
+VIGILANTE             = _flag("VIGILANTE")
 # El tick pasa cada 5 min y esto lee `app_logs`: una vez por hora basta y sobra.
 VIGILANTE_CADA        = float(os.getenv("VIGILANTE_CADA_MIN", "60"))
 # Cuántas veces tiene que repetirse un error en la ventana para considerarlo avería. Uno
@@ -6180,7 +6239,7 @@ VIGILANTE_VENTANA_DIAS = int(os.getenv("VIGILANTE_VENTANA_DIAS", "1"))
 # Abrir issue en el repo para lo que necesite un cambio de código. Es la única forma de
 # "arreglarse a sí mismo" que cubre las averías reales de este proyecto: casi ninguna se
 # podía arreglar desde el backend, todas necesitaban tocar código.
-VIGILANTE_ISSUES      = os.getenv("VIGILANTE_ISSUES", "1") not in ("0", "false", "False")
+VIGILANTE_ISSUES      = _flag("VIGILANTE_ISSUES")
 VIGILANTE_ESTADO_URL  = f"{SUPABASE_URL}/rest/v1/vigilante_estado"
 _ultima_vigilancia_sistema = 0.0
 
@@ -6412,7 +6471,7 @@ def _vigilar_sistema_seguro() -> dict:
 #     que vale, la redacción es el adorno.
 # El reloj no entra aquí: ya tiene su propio aviso, y dos correos por lo mismo es la
 # forma más rápida de que se dejen de leer los dos.
-JARVIS_PROACTIVO         = os.getenv("JARVIS_PROACTIVO", "1") not in ("0", "false", "False")
+JARVIS_PROACTIVO         = _flag("JARVIS_PROACTIVO")
 JARVIS_PROACTIVO_HORA    = os.getenv("JARVIS_PROACTIVO_HORA", "19:00")
 # Se resuelve aquí y no con las demás horas de arriba porque la variable se declara en
 # este bloque: `_hora_config` ya existe a esta altura del módulo.
@@ -6546,7 +6605,7 @@ def _hablar_seguro() -> dict:
 #
 # Y ninguna puede llevarse por delante a las demás ni al tick — se registra y se sigue,
 # igual que cada sección del resumen diario.
-REGLAS_PROACTIVAS = os.getenv("REGLAS_PROACTIVAS", "1") not in ("0", "false", "False")
+REGLAS_PROACTIVAS = _flag("REGLAS_PROACTIVAS")
 # Cuánto por delante se mira para calcular la salida. Más de esto y el tráfico "de ahora"
 # ya no dice nada del tráfico de entonces.
 SALIR_VENTANA_MIN = int(os.getenv("SALIR_VENTANA_MIN", "180"))
@@ -7439,7 +7498,7 @@ def _revisar_vigilancias() -> int:
 #     rescata por correo (`_rescatar_avisos`), que es justo lo que pasa si el YAML se
 #     instala a medias: HA sigue con su tick pero nadie lee la cola, y sin el rescate
 #     dejarían de llegar avisos que antes llegaban, en silencio.
-AVISOS_MOVIL       = os.getenv("AVISOS_MOVIL", "1") not in ("0", "false", "False")
+AVISOS_MOVIL       = _flag("AVISOS_MOVIL")
 AVISOS_MOVIL_MAX   = 20
 # Cuánto puede pasar desde el último sondeo de HA para seguir dando el móvil por vivo. HA
 # sondea cada 30 s: cinco minutos aguantan un puñado de sondeos perdidos sin dar por
@@ -8463,7 +8522,7 @@ def _j_recordar(clave: str, contenido: str) -> dict:
 # El coste es una llamada de más, así que va con dos frenos: solo en conversaciones ya
 # largas y como mucho una vez cada JARVIS_DESTILAR_MINUTOS. El freno del tiempo vive en
 # memoria a propósito — perderlo en un cold start cuesta una llamada, no un dato.
-JARVIS_DESTILAR         = os.getenv("JARVIS_DESTILAR", "1") not in ("0", "false", "False")
+JARVIS_DESTILAR         = _flag("JARVIS_DESTILAR")
 JARVIS_DESTILAR_DESDE   = int(os.getenv("JARVIS_DESTILAR_DESDE", "6"))
 JARVIS_DESTILAR_MINUTOS = int(os.getenv("JARVIS_DESTILAR_MINUTOS", "30"))
 JARVIS_DESTILAR_MAX     = 5
