@@ -1,0 +1,112 @@
+name: Revisión nocturna del código
+
+# Dispara la routine de Claude Code que revisa los cambios del día mientras duermes.
+# El informe lo abre la propia routine como issue de este repositorio.
+#
+# Este workflow NO revisa nada: solo decide si hay algo que revisar y llama al
+# endpoint /fire de la routine. La revisión ocurre en una sesión cloud de Claude
+# Code (modelo Sonnet), que gasta suscripción, no API de pago. El montaje completo
+# —cómo crear la routine, el prompt que lleva guardado y los secretos— está en
+# docs/REVISION_NOCTURNA.md.
+#
+# Por qué el disparo va aquí y no como schedule de la propia routine: las routines
+# tienen un tope diario de ejecuciones por cuenta, y una noche sin commits no debe
+# gastar una. Mirar si hubo cambios es gratis en Actions; arrancar una sesión no.
+#
+# El cron de GitHub Actions se retrasa 10-15 min cuando la cola va cargada. Al
+# resumen diario eso lo echó de aquí (tenía que salir "al despertarte"); a esto le
+# da igual: a las 3 de la mañana nadie está mirando.
+#
+# El cron va en UTC: 01:00 UTC son las 03:00 en Madrid en verano (CEST) y las 02:00
+# en invierno (CET). Las dos horas caen de noche, que es lo único que importa aquí.
+#
+# OJO: los workflows programados solo corren desde la rama por defecto. Esto no
+# dispara nada hasta que esté en main.
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:        # también a mano, para probarlo sin esperar a mañana
+
+# Si un intento se solapa con el anterior, no dispares dos revisiones.
+concurrency:
+  group: revision-nocturna
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # para mover la etiqueta ultima-revision-nocturna
+
+jobs:
+  disparar:
+    name: Revisar los commits nuevos de main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # hace falta el historial entero y las etiquetas
+
+      - name: Disparar la revisión si hay commits nuevos
+        env:
+          ROUTINE_FIRE_URL: ${{ vars.ROUTINE_FIRE_URL }}
+          ROUTINE_TOKEN: ${{ secrets.ROUTINE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ROUTINE_FIRE_URL" ] || [ -z "$ROUTINE_TOKEN" ]; then
+            echo "Falta la variable ROUTINE_FIRE_URL o el secret ROUTINE_TOKEN del repositorio." >&2
+            echo "Ver docs/REVISION_NOCTURNA.md." >&2
+            exit 1
+          fi
+
+          ETIQUETA=ultima-revision-nocturna
+          CABEZA=$(git rev-parse HEAD)
+
+          # La etiqueta marca hasta dónde se revisó la última vez. Con ella, una noche
+          # perdida (Actions caído, workflow desactivado por inactividad, disparo
+          # fallido) no se traga esos commits: la noche siguiente arrastra el rango.
+          if git rev-parse -q --verify "refs/tags/$ETIQUETA^{commit}" >/dev/null; then
+            BASE=$(git rev-parse "refs/tags/$ETIQUETA^{commit}")
+          else
+            # Primera vez: solo el último día, para no soltarle el repositorio entero.
+            BASE=$(git rev-list -1 --before='24 hours ago' HEAD || true)
+            [ -n "$BASE" ] || BASE=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+
+          CUANTOS=$(git rev-list --count "$BASE..$CABEZA")
+          if [ "$CUANTOS" -eq 0 ]; then
+            echo "Sin commits nuevos desde $BASE. No hay nada que revisar."
+            echo "Sin commits nuevos: no se ha disparado la revisión." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "$CUANTOS commit(s) nuevos en $BASE..$CABEZA"
+
+          # El cuerpo del /fire llega a la routine envuelto en un bloque
+          # <routine-fire-payload> marcado como dato no fiable: el prompt guardado
+          # tiene que citarlo explícitamente para hacerle caso (lo hace).
+          TEXTO=$(printf 'Rango a revisar: %s..%s (%s commits nuevos en main).\n\nCommits:\n%s\n' \
+            "$BASE" "$CABEZA" "$CUANTOS" "$(git log --format='- %h %s' "$BASE..$CABEZA")")
+
+          # jq para escapar el JSON: los mensajes de commit llevan comillas y acentos.
+          CUERPO=$(jq -n --arg t "$TEXTO" '{text: $t}')
+
+          # --retry porque un 5xx puntual no debe costar la revisión de la noche.
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$ROUTINE_FIRE_URL" \
+            -H "Authorization: Bearer $ROUTINE_TOKEN" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            --max-time 60 \
+            --retry 3 --retry-delay 10 \
+            -d "$CUERPO")
+
+          SESION=$(echo "$RESPUESTA" | jq -r '.claude_code_session_url // empty')
+          echo "Revisión lanzada: ${SESION:-(sin URL en la respuesta)}"
+          {
+            echo "Revisando $CUANTOS commit(s): \`$BASE..$CABEZA\`"
+            [ -n "$SESION" ] && echo "Sesión: $SESION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # La etiqueta se mueve solo si el disparo salió bien (set -e): si falló, la
+          # noche siguiente vuelve a intentarlo con el rango completo.
+          git tag -f "$ETIQUETA" "$CABEZA"
+          git push -f origin "refs/tags/$ETIQUETA"
