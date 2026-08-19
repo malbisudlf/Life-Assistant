@@ -153,6 +153,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
+| `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
 
 **Al añadir documentación, va al fichero de su área, no aquí.** Este solo crece si lo
 nuevo aplica a todo el repositorio. Si creas un fichero nuevo en `docs/`, añádelo a

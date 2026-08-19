@@ -5854,10 +5854,16 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
 
 
 def _contar_enviados_hoy() -> int:
-    """Cuántos avisos DE REGLA han salido hoy. Los que pediste tú no cuentan."""
+    """Cuántos avisos DE REGLA han salido hoy. Los que pediste tú no cuentan.
+
+    Tampoco cuentan los de "prueba" del botón de `/avisos/probar`: llevan `regla` propia
+    para no ensuciar la estadística de una regla de verdad, pero por eso mismo caían
+    dentro de `regla=not.is.null` y gastaban presupuesto real — pulsar el botón tres
+    veces en un día bastaba para posponer a mañana los avisos normales.
+    """
     desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
     try:
-        r = http.get(f"{RECORDATORIOS_URL}?enviado=is.true&regla=not.is.null"
+        r = http.get(f"{RECORDATORIOS_URL}?enviado=is.true&regla=not.is.null&regla=neq.prueba"
                      f"&enviado_at=gte.{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
                      "&select=id", headers=supabase_headers())
         if r.status_code >= 300:
@@ -6299,7 +6305,14 @@ def _vigilante_abrir_issue(titulo: str, cuerpo: str) -> str:
     if not VIGILANTE_ISSUES or "/" not in JARVIS_REPO:
         return ""
     owner, _, repo = JARVIS_REPO.partition("/")
-    for servidor in _mcp_config():
+    for servidor, cfg in _mcp_config().items():
+        # El vigilante corre sin usuario delante: no hay nadie que apruebe la escritura
+        # de un `mcp_usar` normal (ver `_mcp_pide_confirmar`). Se limita a servidores con
+        # `confiar: true` en vez de intentar "confirmar" solo; un servidor sin confiar
+        # que por casualidad exponga una tool `create_issue`/`issue_write` para otra cosa
+        # se queda fuera, no se invoca a ciegas.
+        if not cfg.get("confiar"):
+            continue
         try:
             herramientas = (_mcp_rpc(servidor, "tools/list", {}) or {}).get("tools") or []
             nombre = next((t.get("name") for t in herramientas
@@ -6692,6 +6705,12 @@ def _regla_sal_ya() -> int:
     Si estás en casa va además con voz: el móvil puede estar en otra habitación, y este
     es justo el aviso que no sirve de nada leído diez minutos tarde.
     """
+    # Con la regla silenciada, `_apuntar_aviso` no llega a insertar la fila y por tanto
+    # nunca queda huella que `_ya_dicho` pueda encontrar: sin este corte, cada tick de 5
+    # min volvería a pagar la llamada a Maps para el mismo evento durante toda la
+    # ventana, sin producir jamás un aviso.
+    if _regla_silenciada("salir"):
+        return 0
     ahora, puestos = _ahora_local(), 0
     for ev in _eventos_con_fecha(dias=1):
         destino = (ev.get("location") or "").strip()
@@ -6731,7 +6750,9 @@ def _regla_no_llegas() -> int:
     """
     if not _toca_una_vez("no_llegas", HORA_REGLAS_NOCHE):
         return 0
-    manana  = (_ahora_local() + timedelta(days=1)).date()
+    medianoche = (_ahora_local() + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    manana  = medianoche.date()
     eventos = [e for e in _eventos_con_fecha(dias=2)
                if e["ini"].date() == manana and (e.get("location") or "").strip()]
     puestos = 0
@@ -6750,6 +6771,10 @@ def _regla_no_llegas() -> int:
             f"{antes['fin'].strftime('%H:%M')} y para «{despues.get('title')}» "
             f"tendrías que salir a las {salida.strftime('%H:%M')}.",
             prioridad=PRIO_ALTA,
+            # Caduca a medianoche: si el presupuesto del día lo pospone, que se calle en
+            # vez de reprogramarse justo para la mañana en la que "ya solo sirve para dar
+            # la mala noticia" (ver docstring).
+            caduca=medianoche,
             huella=f"{str(antes.get('id'))[:30]}>{str(despues.get('id'))[:30]}",
         ):
             puestos += 1
@@ -6826,7 +6851,11 @@ def _regla_madrugon() -> int:
         f"Mañana empiezas a las {primero['ini'].strftime('%H:%M')} con "
         f"«{primero.get('title')}». Para dormir {SUENO_OBJETIVO_H:g} h tendrías que "
         f"estar dormido a las {recomendada.strftime('%H:%M')}.",
-        prioridad=PRIO_ALTA, huella=f"madrugon:{manana.isoformat()}",
+        prioridad=PRIO_ALTA,
+        # Pasada la hora recomendada de dormir ya no se puede accionar: si el presupuesto
+        # lo pospone, mejor que caduque a que se reprograme para el día siguiente.
+        caduca=recomendada,
+        huella=f"madrugon:{manana.isoformat()}",
     ))
 
 
@@ -7228,7 +7257,7 @@ def _cabeceras_recientes() -> list:
     from email.header import decode_header, make_header
 
     desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
-    buzon = imaplib.IMAP4_SSL(IMAP_HOST)
+    buzon = imaplib.IMAP4_SSL(IMAP_HOST, timeout=HTTP_TIMEOUT)
     try:
         buzon.login(IMAP_USER, IMAP_PASSWORD)
         buzon.select(IMAP_CARPETA, readonly=True)
@@ -7759,11 +7788,15 @@ def reactivar_regla(regla: str = Path(..., pattern=r"^[a-z0-9_]{1,40}$"),
                     credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Devuelve la voz a una regla silenciada."""
     try:
-        http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
-                  headers={**supabase_headers(),
-                           "Prefer": "return=minimal,resolution=merge-duplicates"},
-                  json={"regla": regla, "silenciada": False, "silenciada_desde": None,
-                        "no_utiles": 0})
+        r = http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
+                       headers={**supabase_headers(),
+                                "Prefer": "return=minimal,resolution=merge-duplicates"},
+                       json={"regla": regla, "silenciada": False, "silenciada_desde": None,
+                             "no_utiles": 0})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Avisos: no se pudo reactivar '%s' (%s)", regla, e)
         raise HTTPException(status_code=502, detail="No se pudo reactivar la regla")
