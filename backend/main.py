@@ -9653,9 +9653,13 @@ _JARVIS_HERRAMIENTAS = {
     "recordarme": {
         "confirmar":   False,
         "fn":          _j_recordarme,
-        "descripcion": "Te apunta un aviso para una fecha y hora, y lo manda al correo del "
-                       "usuario cuando llegue. Es lo único que te permite hablarle sin que "
-                       "él empiece: ofrécelo cuando mencione algo que tiene que hacer luego.",
+        "descripcion": "Te apunta un aviso para una fecha y hora. Cuando llegue sale por "
+                       "la app del móvil si hay quien la recoja, y si no por correo — el "
+                       "canal lo decide el sistema solo y no se puede elegir ni cambiar "
+                       "para un aviso ya puesto. Si te piden 'que sea por notificación y "
+                       "no por correo' (o al revés), dilo tal cual en vez de prometerlo. "
+                       "Es lo único que te permite hablarle sin que él empiece: ofrécelo "
+                       "cuando mencione algo que tiene que hacer luego.",
         "parametros":  {
             "texto": {"type": "string", "description": "Qué recordarle, en una frase."},
             "fecha": {"type": "string", "description": "YYYY-MM-DD. Resuelve tú 'mañana' o 'el jueves'."},
@@ -9835,6 +9839,11 @@ def _jarvis_sistema(voz: bool = False) -> str:
         "- **'No puedo' es la única respuesta que no puedes dar sin comprobarla antes.** "
         "Mira `mis_capacidades`, que te dice qué tienes y qué tienes apagado y por qué. "
         "Un 'no puedo' solo vale acompañado de qué haría falta para poder.\n"
+        "- Al revés también: no digas que vas a cambiar o hacer algo si no hay una "
+        "herramienta que lo haga. Si el usuario pide un ajuste que ninguna herramienta "
+        "cubre (p. ej. fijar a mano el canal de un aviso), dilo claramente y explica qué "
+        "decide el sistema por su cuenta en su lugar — prometer algo que no vas a poder "
+        "cumplir es peor que decir que no se puede.\n"
         "- Si te piden APRENDER algo, conectarte a un servicio, importar un MCP o "
         "adquirir una capacidad nueva, NO lo niegues: eso sabes hacerlo. Busca el "
         "servidor en `mcp_catalogo` y, si no está, en internet ('<servicio> MCP server'), "
