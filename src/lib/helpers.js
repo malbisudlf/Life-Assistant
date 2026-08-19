@@ -1381,6 +1381,16 @@ export function weatherFromCode(code) {
 // crecer el coste de un turno: el historial viaja entero en cada petición.
 export const JARVIS_MAX_HISTORIAL = 10;
 
+// Tope de caracteres por turno. Tiene que ser <= JARVIS_MAX_MENSAJE del backend, que
+// valida cada turno del historial con el mismo límite que el mensaje nuevo (`JarvisTurno.
+// texto`, no solo `JarvisIn.mensaje`). Sin este recorte, una respuesta larga de Jarvis se
+// queda en el historial y el 422 lo dispara ella, no el mensaje que estás escribiendo
+// ahora — pero el error que se enseña dice "el mensaje es demasiado largo" igualmente,
+// porque `detail` de FastAPI para un 422 de validación es una lista, no un string, y
+// `motivoJarvis()` la descarta. Bloqueaba la conversación hasta que ese turno saliera de
+// la ventana de los últimos JARVIS_MAX_HISTORIAL.
+export const JARVIS_MAX_TURNO = 2000;
+
 /** Turnos que se mandan como contexto: solo los que tienen texto, y solo los últimos.
  *  Los mensajes de sistema (errores de red, avisos de la UI) no son conversación y no
  *  deben viajar: pagarlos por token cada turno para que el modelo lea "Error de
@@ -1389,7 +1399,7 @@ export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
   return (mensajes || [])
     .filter(m => (m?.rol === "user" || m?.rol === "assistant") && (m?.texto || "").trim())
     .slice(-max)
-    .map(m => ({ rol: m.rol, texto: m.texto }));
+    .map(m => ({ rol: m.rol, texto: m.texto.slice(0, JARVIS_MAX_TURNO) }));
 }
 
 /** Fecha ISO a DD/MM/AAAA para las etiquetas de confirmación. */
