@@ -442,7 +442,10 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     fallo convierte el repo en el ruido del que esto viene a salvarte). Las herramientas
     se buscan por nombre EXACTO (`create_issue`/`issue_write`, que piden argumentos
     distintos): inventarle argumentos a una herramienta que ESCRIBE es peor que no abrir
-    el issue.
+    el issue. Solo mira servidores con `confiar: true`: el vigilante corre sin usuario
+    delante, así que no hay quien apruebe un `mcp_usar` normal (`_mcp_pide_confirmar()`,
+    ver la frontera de confirmación por servidor más arriba) — un servidor sin confiar se
+    queda fuera aunque exponga una tool con ese nombre para otra cosa.
   Lo que queda fuera **a propósito**: la rutina PAUSADA (es una decisión del usuario, no
   una avería), el silencio de la ingesta (ya tiene vigilante, y dos avisos de lo mismo se
   dejan de leer los dos), y los envíos fallidos del resumen/informe y los avisos que el
