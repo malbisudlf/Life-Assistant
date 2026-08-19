@@ -10,7 +10,7 @@ import {
   baselinePersonal, wellnessBaselines,
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
-  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
+  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
 } from "../../src/lib/helpers";
 
@@ -1255,6 +1255,12 @@ describe("jarvisHistorial", () => {
   test("no arrastra campos de más al backend", () => {
     const out = jarvisHistorial([{ rol: "assistant", texto: "ok", herramientas: ["clima"] }]);
     expect(out[0]).toEqual({ rol: "assistant", texto: "ok" });
+  });
+
+  test("recorta un turno largo para no bloquear el mensaje nuevo con un 422", () => {
+    const largo = "a".repeat(JARVIS_MAX_TURNO + 500);
+    const out = jarvisHistorial([{ rol: "assistant", texto: largo }]);
+    expect(out[0].texto).toHaveLength(JARVIS_MAX_TURNO);
   });
 });
 
