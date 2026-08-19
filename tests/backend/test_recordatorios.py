@@ -605,8 +605,10 @@ class TestVigilanteAbreIssues:
         monkeypatch.setattr(main, "VIGILANTE_ISSUES", True)
         monkeypatch.setattr(main, "JARVIS_REPO", "malbisudlf/Life-Assistant")
 
-    def _servidor(self, monkeypatch, herramientas, resultado=None):
-        monkeypatch.setattr(main, "_mcp_config", lambda: {"github": {"url": "https://x", "token": "t"}})
+    def _servidor(self, monkeypatch, herramientas, resultado=None, confiar=True):
+        monkeypatch.setattr(main, "_mcp_config",
+                            lambda: {"github": {"url": "https://x", "token": "t",
+                                               "confiar": confiar}})
         llamadas = []
 
         def _rpc(servidor, metodo, params):
@@ -639,6 +641,14 @@ class TestVigilanteAbreIssues:
     def test_sin_herramienta_conocida_no_inventa_nada(self, monkeypatch):
         self._servidor(monkeypatch, ["add_issue_comment", "search_issues"])
         assert main._vigilante_abrir_issue("t", "c") == ""
+
+    def test_servidor_sin_confiar_no_se_invoca(self, monkeypatch):
+        """El vigilante corre sin usuario delante: no hay quien apruebe un `mcp_usar`
+        normal, así que un servidor con `confiar: false` se queda fuera aunque exponga
+        una tool `create_issue`/`issue_write` para otra cosa."""
+        llamadas = self._servidor(monkeypatch, ["create_issue"], confiar=False)
+        assert main._vigilante_abrir_issue("t", "c") == ""
+        assert llamadas == []
 
     def test_sin_repo_configurado_no_se_intenta(self, monkeypatch):
         monkeypatch.setattr(main, "JARVIS_REPO", "")
@@ -903,3 +913,37 @@ class TestLaPruebaEjercitaLosBotones:
         r = client.post("/avisos/11111111-2222-3333-4444-555555555555/util",
                         json={"util": True}, headers={"X-Auth-Token": "ha-poll-token"})
         assert r.status_code == 404
+
+    def test_la_prueba_no_gasta_presupuesto_real(self, mock_requests):
+        """La fila de prueba lleva `regla: "prueba"` para no ensuciar la estadística de
+        una regla de verdad, pero por eso mismo caía dentro de `regla=not.is.null` y
+        contaba para el presupuesto diario compartido: pulsar el botón tres veces bastaba
+        para posponer a mañana los avisos normales."""
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse(
+            [{"id": "1"}, {"id": "2"}, {"id": "3"}]))
+        assert main._contar_enviados_hoy() == 3
+        url = mock_requests.called("GET", "jarvis_recordatorios")[0][1]
+        assert "regla=neq.prueba" in url
+
+
+class TestReactivarRegla:
+    """Devolver la voz a una regla silenciada."""
+
+    def test_reactivar_limpia_el_silencio(self, client, auth_headers, mock_requests):
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        r = client.post("/avisos/reglas/reloj/reactivar", headers=auth_headers)
+        assert r.status_code == 200 and r.json()["ok"] is True
+        guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
+        assert guardado == {"regla": "reloj", "silenciada": False,
+                            "silenciada_desde": None, "no_utiles": 0}
+
+    def test_reactivar_exige_credencial(self, client):
+        assert client.post("/avisos/reglas/reloj/reactivar").status_code == 401
+
+    def test_si_supabase_rechaza_el_upsert_no_dice_que_si(self, client, auth_headers,
+                                                          mock_requests):
+        """Sin comprobar el status_code, un upsert rechazado por Supabase se devolvía
+        como éxito: el usuario veía "reactivada" y la regla seguía silenciada."""
+        mock_requests.add("POST", "avisos_reglas", FakeResponse(None, 500, "boom"))
+        r = client.post("/avisos/reglas/reloj/reactivar", headers=auth_headers)
+        assert r.status_code == 502
