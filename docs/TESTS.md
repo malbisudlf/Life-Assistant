@@ -3,7 +3,7 @@
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 606 tests)
+### Backend (`tests/backend`, 885 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -26,9 +26,12 @@ hueco. Para eso existe `_ahora_local()` como punto único.
 
 Valores del entorno de test: contraseña `1234`, `SECRET_KEY=test-secret-key`,
 `HA_POLL_TOKEN=ha-poll-token`, `HEALTH_INGEST_TOKEN=health-token`,
-`BRIEF_TOKEN=brief-token`.
+`BRIEF_TOKEN=brief-token`. Lo que se configura por `monkeypatch` en su propio fichero y
+no aquí es lo que está APAGADO por defecto en producción (`REVISION_TOKEN`,
+`ARREGLO_FIRE_URL`…): así el resto de la suite comprueba de paso que sin configurar no
+se enciende solo.
 
-### Frontend (`tests/frontend`, 125 tests)
+### Frontend (`tests/frontend`, 161 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:

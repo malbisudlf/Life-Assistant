@@ -185,14 +185,12 @@ action:
             title: "{{ repeat.item.titulo }}"
             message: "{{ repeat.item.texto }}"
             data:
-              # Botones de valoración. Es la señal que hace que una regla que no sirve
-              # se calle sola: sin ella, la única forma de que un aviso inútil
-              # desaparezca es dejar de mirarlos todos.
-              actions:
-                - action: "LA_UTIL_{{ repeat.item.id }}"
-                  title: "Útil"
-                - action: "LA_NOUTIL_{{ repeat.item.id }}"
-                  title: "No"
+              # Los botones los decide el BACKEND y vienen dentro del propio aviso,
+              # porque los decide quien hace la pregunta. Casi siempre son los de
+              # valoración (útil / no útil), que es la señal que hace que una regla que
+              # no sirve se calle sola; el aviso de la revisión nocturna trae los suyos
+              # («Arreglarlo» / «No hacer nada»), que no se valoran, se responden.
+              actions: "{{ repeat.item.acciones | default([], true) }}"
         # Y si el aviso pide voz (estás en casa), que además se oiga.
         - if:
             - condition: template
@@ -234,6 +232,46 @@ rest_command:
     payload: '{"util": {{ util | lower }}}'
 ```
 
+Y la de los botones de la **revisión nocturna**, que son otra pregunta distinta: no se
+valora el aviso, se decide si se arregla el código (ver `docs/REVISION_NOCTURNA.md`).
+
+```yaml
+alias: Life Assistant - Revision nocturna
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_(ARREGLAR|NADA)_') }}"
+action:
+  - service: rest_command.la_revision_accion
+    data:
+      aviso: "{{ trigger.event.data.action.split('_')[-1] }}"
+      accion: "{{ 'arreglar' if 'ARREGLAR' in trigger.event.data.action else 'nada' }}"
+```
+
+```yaml
+rest_command:
+  la_revision_accion:
+    url: "https://TU-BACKEND/revision/{{ aviso }}/accion"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+      Content-Type: application/json
+    payload: '{"accion": "{{ accion }}"}'
+    # Arrancar la sesión que arregla tarda: la máquina de Fly puede estar dormida y
+    # además hay que llamar a la API de Anthropic. Con el timeout por defecto (10 s) HA
+    # da el rest_command por fallido aunque el arreglo se haya lanzado.
+    timeout: 60
+```
+
+**«Arreglarlo» te contesta con otra notificación** («Voy a ello», con el enlace de la
+sesión). Si pulsas y no llega nada, el problema está en este `rest_command` o en el
+`notify` de arriba, no en el backend: él contesta siempre por el mismo canal.
+
+Las dos automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
+
 **No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
 silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no
 puede disfrazarse de dato.
@@ -251,6 +289,11 @@ Tres trampas de este paso, las tres pisadas ya:
   guiones bajos. Si no lo sabes, sale de tu propia automatización de presencia:
   `grep -n "device_tracker\." /config/automations.yaml` — el mismo trozo detrás del
   punto es el que va aquí.
+- **Si el YAML se quedó con los botones fijos de útil / no útil** (la versión anterior a
+  `repeat.item.acciones`), el aviso de la revisión nocturna llega con los botones
+  equivocados: pulsarlos manda una valoración de una regla en vez de una decisión, y el
+  informe se queda sin arreglar. El backend no puede detectarlo — desde aquí solo se ve
+  que HA recogió la cola, como siempre.
 - **Si tocas la acción por el editor visual, se vacían `message` y `title`.** Al elegir
   el servicio en el desplegable, HA rehace la acción y se lleva por delante las
   plantillas `{{ repeat.item.* }}`. Vuelve a ponerlas, o edita en YAML (los tres puntos

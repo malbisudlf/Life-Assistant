@@ -1455,6 +1455,11 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       return `Borrar la nota ${nombreDe(contexto.ideas, a.idea_id, "key")}`;
     case "cobrar_entrenamiento":
       return "Marcar como cobradas las sesiones pendientes de entrenamiento";
+    case "arreglar_revision":
+      // Sin argumentos que enseñar: lo que se aprueba es lanzar un agente que va a
+      // tocar el repositorio, así que la etiqueta dice exactamente eso.
+      return "Lanzar el agente que arregla los hallazgos de la última revisión nocturna "
+        + "(abrirá un PR y lo mergeará si el CI pasa)";
     case "casa_ordenar": {
       // Solo llega aquí lo que no es un interruptor (cerraduras, persianas, alarma): se
       // enseña el servicio y la entidad tal cual van a viajar a Home Assistant.

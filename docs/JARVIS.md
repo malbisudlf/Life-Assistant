@@ -417,8 +417,42 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   Y la frontera que no se relaja: **lo que pediste tú no se gobierna**. Un recordatorio sin
   `regla` (`recordarme`) no cuenta contra el tope ni se puede silenciar — la misma regla
   que hace que el interruptor del resumen no tape un envío pedido a mano.
+  **Y "pediste tú" incluye tus propias reglas** (`tuya:*`, `_es_tuyo()`). Esto se escribió
+  pensando solo en `recordarme`, y las reglas que TÚ apruebas llevan `regla` por sus
+  estadísticas: caían dentro del presupuesto (que son **tres** avisos al día por defecto)
+  y se posponían a `AVISOS_HORA_DIFERIDOS`, así que una regla tuya de las 20:30 llegaba
+  a las 08:30 — **doce horas tarde y sin dejar rastro de por qué**. El presupuesto existe
+  para que las reglas del SISTEMA compitan entre ellas, no para racionar lo que has pedido
+  a mano. Tampoco cuentan para el tope, o tres avisos tuyos callarían al sistema el resto
+  del día.
   Los fallos caen hacia HABLAR: si no se puede comprobar el silenciado o la huella, se
   avisa igual. Repetir un aviso molesta; callarlo puede costar el dato.
+
+- **El retraso de un aviso se registra** (`_registrar_retraso`, `_posponer_aviso`): un
+  aviso que llega tarde y uno que se apuntó a la hora equivocada son **indistinguibles
+  después**, y sin poder distinguirlos no se arregla ninguno de los dos — ese diagnóstico
+  se hizo a ciegas dos veces. El reloj es el tick de HA cada 5 minutos, así que un aviso
+  normal sale con menos de cinco de retraso; a partir de `AVISO_RETRASO_AVISA_MIN` (15) va
+  un `warning` y a partir de `AVISO_RETRASO_AVERIA_MIN` (60) un `error`, que es lo que lo
+  lleva a `app_logs`, al panel, al `diagnostico` y al vigilante **sin abrir un camino
+  nuevo**. Un aplazamiento por presupuesto no pasa por ahí —reescribe `cuando`, así que su
+  retraso medido es cero— y por eso lo registra `_posponer_aviso`, que es quien sabe que
+  fue una decisión y no una avería.
+  Del mismo diagnóstico salió otra cosa: **el despacho es lo ÚLTIMO que evalúa el tick**,
+  detrás de todo lo que apunta avisos, así que una excepción suelta en cualquiera de esos
+  pasos no costaba un aviso, costaba TODOS los recordatorios vencidos mientras durase (el
+  tick devolvía un 500 que solo veía HA). Ahora todos van envueltos (`_avisar_reloj_seguro`,
+  `_correr_reglas_seguro`); si añades algo al tick que apunte avisos, envuélvelo igual.
+
+- **La revisión nocturna, accionable** (`POST /revision/hallazgos`,
+  `POST /revision/{id}/accion`, tabla `revision_hallazgos`, herramienta
+  `arreglar_revision`): el issue que deja la revisión de madrugada llega al móvil por la
+  mañana con dos botones —«Arreglarlo» y «No hacer nada»—, y el primero lanza otra sesión
+  en la nube que lo arregla, abre PR y mergea si el CI pasa. Los botones los decide el
+  backend (`_acciones_aviso`) y viajan **dentro del aviso**: HA solo sabe a qué móvil van.
+  La decisión vive en Supabase porque entre el aviso y el toque pasan horas y Fly escala a
+  cero, y se consume con un **PATCH condicional** para que dos toques no lancen dos
+  agentes. El flujo entero, con las dos routines y el YAML, en `docs/REVISION_NOCTURNA.md`.
 
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
