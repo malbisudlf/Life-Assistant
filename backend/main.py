@@ -5286,12 +5286,16 @@ def ha_brief_tick(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # El aviso del reloj va ANTES del despacho para que salga en este mismo tick: se
-    # apunta con `cuando` = ahora, así que el despachador que viene detrás ya lo ve.
     # Todo lo que apunta un aviso va ANTES del despacho, para que salga en este mismo
     # tick: se apuntan con `cuando` = ahora y el despachador viene detrás.
-    previos = {**_avisar_reloj_si_toca(), **_vigilar_ingesta_seguro(),
-               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas()}
+    #
+    # Y todos van envueltos, porque lo que se protege aquí no es cada aviso: es EL
+    # DESPACHO que viene detrás. Python evalúa esta línea entera antes que la siguiente,
+    # así que una excepción suelta aquí dejaba sin entregar TODOS los recordatorios
+    # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
+    # Home Assistant.
+    previos = {**_avisar_reloj_seguro(), **_vigilar_ingesta_seguro(),
+               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -5751,8 +5755,21 @@ RECORDATORIOS_MAX      = 50
 # sin `regla` (`recordarme`) no cuenta contra el tope ni se puede silenciar. Es la misma
 # regla que hace que el interruptor del resumen no tape un envío pedido a mano: cuando
 # hay una persona pidiéndolo, obedecer al presupuesto antes que a ella es el sitio
-# equivocado.
+# equivocado. Y "pedido por ti" incluye las reglas que TÚ apruebas (`tuya:<clave>`), que
+# llevan `regla` por sus estadísticas pero no son ruido que el sistema haya decidido
+# soltar: ver `_es_tuyo()`.
 AVISOS_MAX_DIA      = int(os.getenv("AVISOS_MAX_DIA", "3"))
+# Prefijo de las reglas que aprobaste tú. Es un dato de la frontera de arriba, no un
+# detalle de `_correr_reglas_usuario`: quien decide si un aviso se gobierna es el
+# despachador, y necesita reconocerlas.
+REGLA_TUYA_PREFIJO  = "tuya:"
+# La regla del aviso de la revisión nocturna. Va aquí porque quien la mira es el
+# despachador, para darle a la notificación sus botones (`_acciones_aviso`).
+REGLA_REVISION      = "revision"
+# A partir de esta hora, un aviso que puede esperar espera a mañana. El de la revisión
+# nocturna se apunta a las tres y pico de la madrugada: entregarlo cuando se apunta
+# sería despertarte para contarte un informe de código.
+HORA_SILENCIO       = _hora_config(os.getenv("AVISOS_HORA_SILENCIO", "22:00"), (22, 0))
 # Cuántos "no útil" seguidos hacen falta para silenciar una regla. Con uno, un día malo
 # se lleva por delante una regla buena.
 AVISOS_NO_UTILES    = int(os.getenv("AVISOS_NO_UTILES", "3"))
@@ -5762,6 +5779,18 @@ AVISOS_REGLAS_URL   = f"{SUPABASE_URL}/rest/v1/avisos_reglas"
 # A qué hora sale lo que no entró ayer en el presupuesto. Por la mañana, junto al resto
 # de lo que se lee de una sentada.
 HORA_DIFERIDOS      = _hora_config(os.getenv("AVISOS_HORA_DIFERIDOS", "08:30"), (8, 30))
+# Cuánto puede tardar un aviso en salir desde su hora antes de que el retraso sea, en sí
+# mismo, la noticia. El reloj de todo esto es el sondeo de HA cada 5 minutos, así que un
+# aviso normal sale con menos de 5 min de retraso; a partir de un cuarto de hora ha
+# pasado algo, y a partir de una hora es una avería que hay que poder ver sin abrir la
+# base de datos. Existe porque un aviso que llega tarde no se distingue después de uno
+# que se apuntó a la hora equivocada, y sin poder distinguirlos no se arregla ninguno de
+# los dos: eso costó dos diagnósticos a ciegas. El de avería va por `logger.error`, así
+# que sale en `app_logs`, en el panel, en el `diagnostico` de Jarvis y en el vigilante,
+# sin camino nuevo. Y solo al registro: lo que devuelve el tick lo lee Home Assistant,
+# que no mira dentro.
+AVISO_RETRASO_AVISA_MIN  = float(os.getenv("AVISO_RETRASO_AVISA_MIN", "15"))
+AVISO_RETRASO_AVERIA_MIN = float(os.getenv("AVISO_RETRASO_AVERIA_MIN", "60"))
 
 # Prioridades. La escala importa poco; lo que importa es que 1 y 2 se saltan el
 # presupuesto: son avisos que caducan en minutos y que llegar tarde deja sin valor.
@@ -5853,6 +5882,20 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
     return True
 
 
+def _es_tuyo(regla: str) -> bool:
+    """Si este aviso lo pediste TÚ, aunque venga por una regla.
+
+    La frontera "lo que pediste tú no se gobierna" se escribió pensando solo en
+    `recordarme` (sin `regla`), y dejó fuera a las reglas que tú mismo apruebas
+    (`tuya:<clave>`, de `_correr_reglas_usuario`): esas llevan `regla`, así que caían
+    dentro del presupuesto y se posponían a la mañana siguiente como el ruido del
+    sistema. Una regla tuya de las 20:30 llegaba a las 08:30 — doce horas tarde y sin
+    dejar rastro de por qué. El presupuesto existe para que las reglas del SISTEMA
+    compitan entre ellas, no para racionar lo que has pedido a mano.
+    """
+    return regla.startswith(REGLA_TUYA_PREFIJO)
+
+
 def _contar_enviados_hoy() -> int:
     """Cuántos avisos DE REGLA han salido hoy. Los que pediste tú no cuentan.
 
@@ -5860,10 +5903,15 @@ def _contar_enviados_hoy() -> int:
     para no ensuciar la estadística de una regla de verdad, pero por eso mismo caían
     dentro de `regla=not.is.null` y gastaban presupuesto real — pulsar el botón tres
     veces en un día bastaba para posponer a mañana los avisos normales.
+
+    Ni los de tus reglas (`tuya:*`), por lo mismo que no se posponen: si contaran,
+    tres avisos tuyos gastarían el presupuesto del día y callarían a las reglas del
+    sistema, que es el reparto justo al revés del que se quiere.
     """
     desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
     try:
         r = http.get(f"{RECORDATORIOS_URL}?enviado=is.true&regla=not.is.null&regla=neq.prueba"
+                     f"&regla=not.like.{REGLA_TUYA_PREFIJO}*"
                      f"&enviado_at=gte.{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
                      "&select=id", headers=supabase_headers())
         if r.status_code >= 300:
@@ -5876,14 +5924,26 @@ def _contar_enviados_hoy() -> int:
         return 0
 
 
-def _posponer_aviso(rid: str) -> None:
-    """Lo que no entra en el presupuesto baja a mañana por la mañana, no se pierde."""
+def _posponer_aviso(rid: str, regla: str = "") -> None:
+    """Lo que no entra en el presupuesto baja a mañana por la mañana, no se pierde.
+
+    Se REGISTRA, y no como detalle: posponer un aviso de la noche a las 08:30 es
+    retrasarlo doce horas, que desde fuera es indistinguible de un reloj parado. Que el
+    tope se haya comido un aviso tiene que poder leerse en `app_logs` sin adivinarlo.
+    """
     manana = (_ahora_local() + timedelta(days=1)).replace(
         hour=HORA_DIFERIDOS[0], minute=HORA_DIFERIDOS[1], second=0, microsecond=0)
     try:
-        http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
-                   headers={**supabase_headers(), "Prefer": "return=minimal"},
-                   json={"cuando": manana.astimezone(timezone.utc).isoformat()})
+        r = http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"cuando": manana.astimezone(timezone.utc).isoformat()})
+        # El código sí se mira: un PATCH rechazado dejaba el aviso vencido para siempre,
+        # ocupando sitio en la ventana del despacho (que trae 10 por tick) sin salir
+        # nunca ni contarse como fallo.
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        logger.info("Aviso de '%s' pospuesto al %s: el presupuesto del día está gastado",
+                    regla or "?", manana.strftime("%Y-%m-%d %H:%M"))
     except Exception as e:
         logger.warning("Avisos: no se pudo posponer %s (%s)", rid, e)
 
@@ -6109,6 +6169,20 @@ def _avisar_reloj_si_toca() -> dict:
         return {}
     logger.info("Aviso de reloj apuntado para hoy (%s)", texto[:60])
     return {"aviso_reloj": True}
+
+
+def _avisar_reloj_seguro() -> dict:
+    """Nada de esto puede tumbar el tick.
+
+    No es simetría con el resto de los `_seguro`: el tick evalúa todo lo que apunta
+    avisos ANTES de despachar, así que una excepción aquí no cuesta este aviso — cuesta
+    la entrega de todos los recordatorios vencidos mientras dure la avería.
+    """
+    try:
+        return _avisar_reloj_si_toca()
+    except Exception:
+        logger.exception("Aviso de reloj: fallo inesperado en el tick")
+        return {}
 
 
 # ── Vigilante de la ingesta ──────────────────────────────────────────────────
@@ -6999,6 +7073,16 @@ def _correr_reglas() -> dict:
     return {"reglas_avisos": puestos} if puestos else {}
 
 
+def _correr_reglas_seguro() -> dict:
+    """Cada regla ya va protegida; esto protege lo de alrededor (leer el interruptor,
+    montar la caché), que también corre antes del despacho de los recordatorios."""
+    try:
+        return _correr_reglas()
+    except Exception:
+        logger.exception("Reglas: fallo inesperado en el tick")
+        return {}
+
+
 _REGLAS = (
     ("sal_ya",        _regla_sal_ya),
     ("no_llegas",     _regla_no_llegas),
@@ -7208,7 +7292,8 @@ def _correr_reglas_usuario() -> int:
             continue
         # La huella lleva el día: una regla tuya puede repetirse mañana, pero no cada
         # cinco minutos.
-        if _apuntar_aviso(f"tuya:{regla.get('clave')}", texto, prioridad=PRIO_NORMAL,
+        if _apuntar_aviso(f"{REGLA_TUYA_PREFIJO}{regla.get('clave')}", texto,
+                          prioridad=PRIO_NORMAL,
                           huella=f"{regla.get('clave')}:{ahora.date().isoformat()}"):
             puestos += 1
     return puestos
@@ -7552,7 +7637,25 @@ def _movil_vivo() -> bool:
     return time.time() - _ultimo_sondeo_avisos <= AVISO_MOVIL_VIVO
 
 
-def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = "") -> str:
+def _acciones_aviso(rid: str, regla: str) -> list:
+    """Los botones que lleva la notificación del móvil.
+
+    Los decide el backend porque son la PREGUNTA, y la pregunta la sabe quien manda el
+    aviso; HA solo sabe a qué móvil va. Por defecto es la valoración de siempre (útil /
+    no útil), que es lo que hace que una regla ignorada se calle sola. La revisión
+    nocturna trae otra: sus hallazgos no se valoran, se arreglan o no.
+    """
+    if not rid:
+        return []
+    if regla == REGLA_REVISION:
+        return [{"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"},
+                {"action": f"LA_NADA_{rid}",     "title": "No hacer nada"}]
+    return [{"action": f"LA_UTIL_{rid}",   "title": "Útil"},
+            {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
+
+
+def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = "",
+               acciones: Optional[list] = None) -> str:
     """Única puerta de salida de un aviso. Devuelve el canal por el que salió.
 
     Al móvil si hay quien lo recoja, y si no por correo. Un fallo del correo se propaga a
@@ -7561,12 +7664,15 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
     `voz` pide además que se OIGA (Alexa). Igual que con el móvil, el backend no sabe por
     qué altavoz —eso lo decide el YAML de HA— y si nadie recoge la cola se queda en el
     correo, que no se puede escuchar pero llega. `aviso_id` viaja para que la
-    notificación pueda traer los botones de útil / no útil.
+    notificación pueda traer botones, y `acciones` dice CUÁLES: por correo no hay
+    botones, así que un aviso que dependa de ellos tiene que decir por escrito qué se
+    puede hacer sin ellos.
     """
     if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
         _avisos_movil.append({
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
             "voz": bool(voz), "id": aviso_id,
+            "acciones": acciones if acciones is not None else _acciones_aviso(aviso_id, ""),
         })
         return "movil"
     enviar_correo(titulo, texto)
@@ -7620,11 +7726,14 @@ def ha_avisos_pending(request: Request, token: str = ""):
     _ultimo_sondeo_avisos = time.time()
     pendientes = list(_avisos_movil)
     _avisos_movil.clear()
-    # `voz` e `id` los decide el backend pero los EJECUTA el YAML de HA: con voz, además
-    # de la notificación, que lo diga el altavoz; con id, que la notificación traiga los
-    # botones de útil / no útil. Una instalación que no los mire sigue funcionando igual.
+    # `voz`, `id` y `acciones` los decide el backend pero los EJECUTA el YAML de HA: con
+    # voz, además de la notificación, que lo diga el altavoz; con id y acciones, que la
+    # notificación traiga sus botones. Una instalación que no los mire sigue funcionando
+    # igual — con la salvedad de que un YAML viejo pinta siempre útil / no útil, así que
+    # los avisos con botones propios (la revisión nocturna) piden actualizarlo.
     return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"],
-                        "voz": a.get("voz", False), "id": a.get("id", "")}
+                        "voz": a.get("voz", False), "id": a.get("id", ""),
+                        "acciones": a.get("acciones") or []}
                        for a in pendientes]}
 
 
@@ -7708,10 +7817,15 @@ def marcar_aviso_util(request: Request, body: AvisoUtilRequest,
     if not _token_ok(provisto, HA_POLL_TOKEN):
         # Mismo criterio que `verify_agente`: token de servicio O JWT, porque a este
         # endpoint llaman dos clientes distintos (la acción de la notificación de HA y
-        # el dashboard) y `Depends` solo sabe exigir uno.
+        # el dashboard) y `Depends` solo sabe exigir uno. Y el JWT se valida con
+        # `_jwt_de_usuario`, no con `jwt.decode` a secas: con la firma sola, el `state`
+        # del OAuth de Microsoft —que viaja en la barra de direcciones y acaba en el
+        # historial— valía aquí como sesión durante sus diez minutos. El 401 de
+        # `_jwt_de_usuario` se traduce a 403 para no cambiar lo que ya responde este
+        # endpoint: un 401 en el dashboard significa "vuelve a hacer login".
         try:
-            jwt.decode(provisto, SECRET_KEY, algorithms=[ALGORITHM])
-        except JWTError:
+            _jwt_de_usuario(provisto)
+        except HTTPException:
             raise HTTPException(status_code=403, detail="Forbidden")
 
     try:
@@ -7813,6 +7927,346 @@ def _reglas_silenciadas() -> list:
         return []
 
 
+# ── La revisión nocturna, accionable ─────────────────────────────────────────
+# De madrugada, si ese día entraron commits, una sesión de Claude Code revisa lo que se
+# tocó y abre un issue (`docs/REVISION_NOCTURNA.md`). Hasta aquí el informe se quedaba
+# en GitHub esperando a que alguien se acordara de mirarlo: leerlo por la mañana era un
+# acto de voluntad, y arreglarlo, otro.
+#
+# Esto convierte el issue en una pregunta con dos botones en el móvil —«Arreglarlo» o
+# «No hacer nada»— y hace que la primera respuesta lance OTRA sesión en la nube que
+# arregla lo que la de la noche encontró, abre PR y lo mergea si el CI pasa.
+#
+# Cinco decisiones, y ninguna es nueva en este proyecto:
+#   - **El aviso espera a que estés despierto** (`_cuando_avisar`). Se apunta a las 03:40
+#     y se entrega a las 08:30: es un aviso que no gana nada por llegar de madrugada y lo
+#     pierde todo si te despierta.
+#   - **La decisión vive en Supabase, no en la cola de avisos.** Entre el aviso y el
+#     botón pasan horas, y en ese hueco la máquina de Fly se duerme: un mapa en memoria
+#     de id → issue se habría evaporado, y el botón no haría nada. Es la misma razón por
+#     la que los recordatorios no viven en memoria.
+#   - **El id del aviso ES el de la fila**, derivado del número del issue (`uuid5`). Así
+#     el botón no necesita traer nada más que su propio id, y el INSERT repetido choca
+#     contra la clave primaria: el 409 es lo que impide dos avisos del mismo issue si el
+#     workflow reintenta.
+#   - **La transición es un PATCH condicional** (`estado=eq.pendiente`), no un GET y
+#     luego un UPDATE. Es la pregunta atómica de siempre: dos toques seguidos en la
+#     notificación no pueden lanzar dos agentes.
+#   - **Si el disparo falla, la decisión se libera** y se avisa. Igual que la reserva del
+#     despachador cuando el SMTP se cae: una decisión consumida sin efecto es peor que no
+#     haberla tomado, porque el botón ya no vuelve.
+REVISION_URL       = f"{SUPABASE_URL}/rest/v1/revision_hallazgos"
+# Token del workflow que avisa de que hay issue nuevo. Dedicado y de servicio, como el
+# resto de lo que arranca solo: un JWT de usuario caduca a los 30 días y el cliente se
+# queda mudo sin que nadie se entere (ya pasó dos veces).
+REVISION_TOKEN     = os.getenv("REVISION_TOKEN", "")
+# Disparo de la rutina que ARREGLA. Es otra rutina distinta de la que revisa, con su
+# propia URL y su propio token: la de la noche es de solo lectura a propósito, y darle
+# permiso de escritura para ahorrarse una rutina sería quitarle esa garantía. Sin esto
+# configurado, el botón «Arreglarlo» lo dice en vez de fallar en silencio.
+ARREGLO_FIRE_URL   = os.getenv("ARREGLO_FIRE_URL", "")
+ARREGLO_FIRE_TOKEN = os.getenv("ARREGLO_FIRE_TOKEN", "")
+
+
+def _uuid_revision(numero: int) -> str:
+    """Id determinista del aviso de un issue: el segundo intento choca con el primero."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:revision:{numero}"))
+
+
+def _cuando_avisar(ahora: datetime) -> datetime:
+    """Cuándo entregar un aviso que puede esperar: nunca de madrugada ni de noche."""
+    manana = ahora.replace(hour=HORA_DIFERIDOS[0], minute=HORA_DIFERIDOS[1],
+                           second=0, microsecond=0)
+    if ahora < manana:
+        return manana                                  # de madrugada: a primera hora
+    if (ahora.hour, ahora.minute) >= HORA_SILENCIO:
+        return manana + timedelta(days=1)              # de noche: mañana a primera hora
+    return ahora
+
+
+def _issue_url(numero: int) -> str:
+    """La URL del issue la construye el backend a partir de `JARVIS_REPO`.
+
+    Podría venir en el cuerpo del workflow, pero entonces sería un enlace de fuera
+    acabando en una notificación tuya. Lo que viene de fuera es el NÚMERO, que es un
+    entero y se valida como tal.
+    """
+    return f"https://github.com/{JARVIS_REPO}/issues/{numero}" if "/" in JARVIS_REPO else ""
+
+
+class RevisionHallazgos(BaseModel):
+    numero: int
+    titulo: str = ""
+
+
+@app.post("/revision/hallazgos")
+def revision_hallazgos(request: Request, body: RevisionHallazgos, token: str = ""):
+    """El workflow avisa de que la revisión nocturna ha abierto un issue.
+
+    Lo llama `.github/workflows/revision-aviso.yml` con `REVISION_TOKEN`. Podría hacerlo
+    la propia rutina al terminar, pero la rutina no tiene forma de guardar un secreto:
+    el evento `issues` de Actions sí, y de paso cubre el issue abierto a mano.
+    """
+    if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    numero = int(body.numero)
+    if numero <= 0 or numero > 1_000_000:
+        raise HTTPException(status_code=422, detail="Número de issue inválido")
+
+    rid    = _uuid_revision(numero)
+    titulo = str(body.titulo or "").strip()[:200]
+    url    = _issue_url(numero)
+    fila   = {"id": rid, "issue_numero": numero, "issue_titulo": titulo,
+              "issue_url": url, "estado": "pendiente"}
+    try:
+        r = http.post(REVISION_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json=fila)
+        if r.status_code == 409:
+            # Ya avisado: el 409 ES la respuesta, igual que en el resumen diario. Un
+            # reintento del workflow no puede convertirse en dos notificaciones.
+            return {"ok": True, "avisado": False, "motivo": "ya estaba apuntado"}
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Revisión: no se pudo apuntar el issue #%s (%s)", numero, e)
+        raise HTTPException(status_code=502, detail="No se pudo apuntar la revisión")
+
+    texto = (f"La revisión de anoche ha dejado hallazgos: «{titulo or f'issue #{numero}'}»."
+             + (f" {url}" if url else "")
+             + "\n\n¿Los arreglo? Responde con los botones del aviso, o dime «arregla "
+               "la revisión» — si esto te ha llegado por correo, no hay botones.")
+    apuntado = _apuntar_aviso(REGLA_REVISION, texto, prioridad=PRIO_NORMAL,
+                              cuando=_cuando_avisar(_ahora_local()), id=rid)
+    logger.info("Revisión: issue #%s apuntado (aviso %s)", numero,
+                "puesto" if apuntado else "no puesto")
+    return {"ok": True, "avisado": apuntado, "issue": numero}
+
+
+def _disparar_arreglo(numero: int, titulo: str, url: str) -> dict:
+    """Lanza la sesión que arregla los hallazgos. Devuelve qué pasó.
+
+    Mismo trato que `_disparar_rutina`: el cuerpo del error se registra acotado, porque
+    un 400 aquí puede ser la cabecera beta caducada, el trigger borrado o el cuerpo mal
+    formado, y son arreglos distintos.
+    """
+    if not ARREGLO_FIRE_URL or not ARREGLO_FIRE_TOKEN:
+        return {"ok": False, "sesion": "", "motivo": "no hay rutina de arreglo configurada "
+                                                     "(ARREGLO_FIRE_URL / ARREGLO_FIRE_TOKEN)"}
+    # `text` le llega a la rutina envuelto y etiquetado como dato no fiable, así que su
+    # prompt guardado tiene que citarlo para hacerle caso (ver docs/REVISION_NOCTURNA.md).
+    texto = (f"Arregla los hallazgos de la revisión nocturna del issue #{numero} "
+             f"({titulo or 'sin título'}) del repositorio {JARVIS_REPO}: {url}")
+    try:
+        r = http.post(
+            ARREGLO_FIRE_URL,
+            headers={
+                "Authorization":     f"Bearer {ARREGLO_FIRE_TOKEN}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta":    RUTINA_BETA,
+                "Content-Type":      "application/json",
+            },
+            json={"text": texto},
+        )
+    except requests.RequestException as e:
+        logger.exception("Revisión: no se pudo lanzar el arreglo del issue #%s", numero)
+        return {"ok": False, "sesion": "", "motivo": f"no se pudo conectar ({e})"}
+
+    if r.status_code >= 300:
+        detalle = (r.text or "")[:300].replace("\n", " ").strip()
+        logger.error("Revisión: el disparo del arreglo devolvió %s — beta '%s' — %s",
+                     r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
+        return {"ok": False, "sesion": "", "motivo": detalle or f"HTTP {r.status_code}"}
+
+    try:
+        sesion = str((r.json() or {}).get("claude_code_session_url") or "")
+    except ValueError:
+        sesion = ""
+    logger.info("Revisión: arreglo del issue #%s lanzado (%s)", numero, sesion or "sin URL")
+    return {"ok": True, "sesion": sesion, "motivo": ""}
+
+
+def _revision_decidir(rid: str, accion: str) -> dict:
+    """Consume la decisión de un aviso de revisión y actúa. La puerta de los dos caminos.
+
+    La usan el botón de la notificación y Jarvis, para que la regla de "una decisión se
+    toma una vez" no dependa de por dónde entre.
+    """
+    # El id se interpola en la URL de Supabase: se valida aquí también, aunque los dos
+    # caminos que llegan ya lo hayan hecho a su manera (invariante 6 de CLAUDE.md).
+    if not re.match(_UUID_PATTERN, rid):
+        raise HTTPException(status_code=422, detail="Id de revisión inválido")
+    nuevo = "arreglando" if accion == "arreglar" else "descartado"
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.pendiente",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": nuevo, "decidido_at": ahora})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Revisión: no se pudo guardar la decisión de %s (%s)", rid, e)
+        raise HTTPException(status_code=502, detail="No se pudo guardar la decisión")
+
+    if not filas:
+        # O no existe, o ya se decidió. Las dos cosas se contestan igual y sin ruido: un
+        # segundo toque en la notificación no es un error del usuario.
+        logger.info("Revisión: decisión '%s' sobre %s que ya no estaba pendiente", accion, rid)
+        return {"ok": True, "hecho": False, "motivo": "esa revisión ya estaba decidida"}
+
+    fila   = filas[0]
+    numero = int(fila.get("issue_numero") or 0)
+    if accion == "nada":
+        logger.info("Revisión: issue #%s descartado a mano", numero)
+        return {"ok": True, "hecho": True, "accion": "nada", "issue": numero}
+
+    resultado = _disparar_arreglo(numero, str(fila.get("issue_titulo") or ""),
+                                  str(fila.get("issue_url") or ""))
+    if not resultado["ok"]:
+        # La decisión se libera: si se quedara en "arreglando", el botón ya no volvería y
+        # el arreglo no se habría lanzado. Mismo criterio que liberar la reserva cuando
+        # el SMTP falla.
+        try:
+            http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"estado": "pendiente", "decidido_at": None})
+        except Exception as e:
+            logger.error("Revisión: no se pudo liberar la decisión de %s (%s)", rid, e)
+        return {"ok": False, "hecho": False, "issue": numero, "motivo": resultado["motivo"]}
+
+    try:
+        http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"sesion_url": resultado["sesion"]})
+    except Exception as e:
+        logger.warning("Revisión: no se pudo guardar la sesión de %s (%s)", rid, e)
+    return {"ok": True, "hecho": True, "accion": "arreglar", "issue": numero,
+            "sesion": resultado["sesion"]}
+
+
+def _acusar_recibo(titulo: str, texto: str) -> None:
+    """Contesta al botón por el canal por el que llegó la pregunta, sin poder romper.
+
+    El acuse es lo de menos de esta petición: si el SMTP está caído, el arreglo YA se ha
+    lanzado y devolver un 500 haría que Home Assistant lo diera por fallido. Mismo
+    criterio que el disparo de la rutina tras el resumen.
+    """
+    try:
+        _notificar(titulo, texto)
+    except Exception as e:
+        logger.warning("Revisión: no se pudo acusar recibo del botón (%s)", e)
+
+
+class RevisionAccionRequest(BaseModel):
+    accion: str
+
+
+@app.post("/revision/{aviso_id}/accion")
+def revision_accion(request: Request, body: RevisionAccionRequest,
+                    aviso_id: str = _uuid_path(), token: str = ""):
+    """La respuesta a los botones del aviso: «Arreglarlo» o «No hacer nada».
+
+    Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT),
+    igual que la valoración de avisos.
+    """
+    provisto = _extract_service_token(request, token)
+    if not _token_ok(provisto, HA_POLL_TOKEN):
+        try:
+            _jwt_de_usuario(provisto)
+        except HTTPException:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    accion = str(body.accion or "").strip().lower()
+    if accion not in ("arreglar", "nada"):
+        raise HTTPException(status_code=422, detail="La acción es 'arreglar' o 'nada'")
+
+    resultado = _revision_decidir(aviso_id, accion)
+    if resultado.get("ok") and resultado.get("accion") == "arreglar":
+        # Pulsar un botón y que no pase nada visible es la avería de siempre de este
+        # canal: se contesta por el mismo sitio por el que llegó la pregunta.
+        sesion = resultado.get("sesion") or ""
+        _acusar_recibo("🔧 Arreglando la revisión",
+                       f"Voy a por los hallazgos del issue #{resultado.get('issue')}. "
+                       f"Cuando termine habrá un PR."
+                       + (f"\n\n{sesion}" if sesion else ""))
+    elif not resultado.get("ok"):
+        _acusar_recibo("🔧 No he podido lanzar el arreglo",
+                       f"El botón de arreglar la revisión no ha llegado a lanzar nada: "
+                       f"{resultado.get('motivo')}. Sigue pendiente, puedes reintentarlo.")
+        raise HTTPException(status_code=502, detail="No se pudo lanzar el arreglo")
+    return resultado
+
+
+def _revision_pendiente() -> dict:
+    """La revisión sin decidir más reciente, para cuando el aviso llegó por correo."""
+    try:
+        r = http.get(f"{REVISION_URL}?estado=eq.pendiente"
+                     "&select=id,issue_numero,issue_titulo,issue_url"
+                     "&order=creado.desc&limit=1", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Revisión: no se pudo consultar lo pendiente (%s)", e)
+        raise HTTPException(status_code=502, detail="No se pudo consultar la revisión")
+    return filas[0] if filas else {}
+
+
+def _j_arreglar_revision() -> dict:
+    """Herramienta de Jarvis: lanza el arreglo de la revisión pendiente.
+
+    Existe porque el camino de los botones no siempre está: si el móvil no recogió el
+    aviso salió por correo, y un correo no tiene botones. Sin esto, la única forma de
+    decir que sí sería entrar en la base de datos.
+    """
+    fila = _revision_pendiente()
+    if not fila:
+        return {"ok": False, "motivo": "No hay ninguna revisión pendiente de decidir"}
+    resultado = _revision_decidir(str(fila.get("id")), "arreglar")
+    if not resultado.get("ok"):
+        return {"ok": False, "motivo": f"No se pudo lanzar: {resultado.get('motivo')}"}
+    return {"ok": True, "issue": resultado.get("issue"),
+            "sesion": resultado.get("sesion"),
+            "dile_al_usuario_literalmente":
+                f"Lanzado el arreglo del issue #{resultado.get('issue')}. "
+                f"Habrá PR cuando termine."}
+
+
+def _retraso_min(cuando: Optional[str], ahora: datetime) -> float:
+    """Minutos entre la hora a la que tocaba el aviso y la que es. 0 si no se sabe."""
+    try:
+        vencia = datetime.fromisoformat(str(cuando).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (ahora - vencia).total_seconds() / 60)
+
+
+def _registrar_retraso(retraso: float, regla: str, texto: str) -> None:
+    """Deja constancia de un aviso que salió tarde.
+
+    Un aplazamiento por presupuesto NO pasa por aquí: aquel reescribe `cuando`, así que
+    al salir por la mañana el retraso medido es cero — y lo registra `_posponer_aviso`,
+    que es quien sabe que fue una decisión y no una avería. Lo que se mide aquí es lo
+    otro: que entre la hora del aviso y su salida nadie llamó al tick.
+    """
+    if retraso < AVISO_RETRASO_AVISA_MIN:
+        return
+    quien = f"de '{regla}'" if regla else "que pediste tú"
+    if retraso >= AVISO_RETRASO_AVERIA_MIN:
+        logger.error("Aviso %s entregado con %d min de retraso (%s): el reloj de los "
+                     "avisos es el sondeo de Home Assistant a /ha/brief-tick",
+                     quien, int(retraso), texto[:60])
+    else:
+        logger.warning("Aviso %s entregado con %d min de retraso (%s)",
+                       quien, int(retraso), texto[:60])
+
+
 def _despachar_recordatorios() -> dict:
     """Manda los que ya han vencido. Lo llama el tick de HA.
 
@@ -7820,7 +8274,8 @@ def _despachar_recordatorios() -> dict:
     un fallo aquí se registra y se sigue. Mismo criterio que el disparo de la rutina.
     """
     try:
-        ahora = datetime.now(timezone.utc).isoformat()
+        ahora_dt = datetime.now(timezone.utc)
+        ahora    = ahora_dt.isoformat()
         r = http.get(
             f"{RECORDATORIOS_URL}?enviado=is.false&cuando=lte.{quote(ahora, safe='')}"
             f"&select=id,cuando,texto,regla,prioridad,caduca,voz"
@@ -7857,11 +8312,12 @@ def _despachar_recordatorios() -> dict:
             caducados += 1
             continue
 
-        # El presupuesto solo gobierna los avisos de REGLA: lo que pediste tú sale
-        # siempre. Y lo urgente también, o el tope convertiría el aviso que más corre en
-        # el primero en caerse.
-        if regla and prioridad > PRIO_SIN_TOPE and presupuesto <= 0:
-            _posponer_aviso(rid)
+        # El presupuesto solo gobierna los avisos de REGLA que ha decidido el SISTEMA:
+        # lo que pediste tú sale siempre, venga sin regla (`recordarme`) o por una regla
+        # tuya (`_es_tuyo`). Y lo urgente también, o el tope convertiría el aviso que más
+        # corre en el primero en caerse.
+        if regla and not _es_tuyo(regla) and prioridad > PRIO_SIN_TOPE and presupuesto <= 0:
+            _posponer_aviso(rid, regla)
             pospuestos += 1
             continue
 
@@ -7874,15 +8330,19 @@ def _despachar_recordatorios() -> dict:
         )
         if reserva.status_code >= 300 or not reserva.json():
             continue
-        texto = str(fila.get("texto") or "")
+        texto   = str(fila.get("texto") or "")
+        retraso = _retraso_min(fila.get("cuando"), ahora_dt)
         try:
             canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis",
-                               voz=bool(fila.get("voz")), aviso_id=rid)
+                               voz=bool(fila.get("voz")), aviso_id=rid,
+                               acciones=_acciones_aviso(rid, regla))
             enviados += 1
-            if regla:
+            if regla and not _es_tuyo(regla):
                 presupuesto -= 1
+            if regla:
                 _apuntar_envio_regla(regla)
             logger.info("Recordatorio enviado por %s: %s", canal, texto[:80])
+            _registrar_retraso(retraso, regla, texto)
         except Exception as e:
             # Un fallo transitorio de SMTP no puede consumir el recordatorio: se libera y
             # el siguiente tick lo reintenta. Igual que _liberar_envio en el brief.
@@ -9729,6 +10189,17 @@ _JARVIS_HERRAMIENTAS = {
         "parametros":  {"idea_id": {"type": "string", "description": "UUID de la idea, de `ideas`."}},
         "obligatorios": ["idea_id"],
     },
+    "arreglar_revision": {
+        "confirmar":   True,
+        "requiere_arreglo": True,
+        "fn":          _j_arreglar_revision,
+        "descripcion": "Lanza el agente que arregla los hallazgos de la última revisión "
+                       "nocturna pendiente: abre PR y lo mergea si el CI pasa. Es la "
+                       "misma decisión que el botón «Arreglarlo» del aviso, para cuando "
+                       "ese aviso llegó por correo y no traía botones. NO lo lanza sola: "
+                       "el usuario tiene que confirmarlo.",
+        "parametros":  {},
+    },
     "cobrar_entrenamiento": {
         # Cierra el ciclo de cobro y pone a cero el contador de sesiones pendientes:
         # deshacerlo es entrar en Supabase a mano.
@@ -9748,6 +10219,9 @@ def _jarvis_esquema() -> list:
     # (`mcp_catalogo`, `mcp_conectar`) sí se anuncian siempre — son justo las que hacen
     # falta cuando no hay ninguno.
     con_mcp = bool(_mcp_config())
+    # Por lo mismo, sin rutina de arreglo configurada `arreglar_revision` no puede hacer
+    # nada: se queda fuera del esquema en vez de anunciarse para fallar al usarla.
+    con_arreglo = bool(ARREGLO_FIRE_URL and ARREGLO_FIRE_TOKEN)
     return [{
         "type": "function",
         "function": {
@@ -9760,7 +10234,8 @@ def _jarvis_esquema() -> list:
             },
         },
     } for nombre, h in _JARVIS_HERRAMIENTAS.items()
-        if con_mcp or not h.get("requiere_mcp")]
+        if (con_mcp or not h.get("requiere_mcp"))
+        and (con_arreglo or not h.get("requiere_arreglo"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:

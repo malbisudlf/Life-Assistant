@@ -1322,6 +1322,14 @@ describe("jarvisEtiquetaAccion", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: { servidor: "correo" } })).toBeNull();
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: {} })).toBeNull();
   });
+
+  test("arreglar la revisión dice que va a tocar el repositorio", () => {
+    // No tiene argumentos que enseñar: lo que se aprueba es lanzar un agente que abre
+    // un PR y lo mergea, y eso es lo que tiene que poner el botón.
+    const out = jarvisEtiquetaAccion({ herramienta: "arreglar_revision", argumentos: {} });
+    expect(out).toContain("revisión nocturna");
+    expect(out).toContain("PR");
+  });
 });
 
 describe("voz de Jarvis", () => {

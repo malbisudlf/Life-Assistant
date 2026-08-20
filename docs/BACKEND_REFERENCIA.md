@@ -33,6 +33,9 @@
 | `GET /ha/avisos-pending` | servicio | HA sondea y los manda a la app del móvil. Devuelve y **vacía** la cola; sondearlo es lo que declara vivo el canal |
 | `GET /avisos/estado` | JWT | Por dónde salen los avisos (móvil o correo) y cuánto hace que HA los recogió |
 | `POST /avisos/probar` | JWT | Manda un aviso de prueba por el canal que toque |
+| `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
+| `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
+| `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
@@ -113,7 +116,8 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `PREP_MANANA_MIN`, `HUECO_ENTRENO_MIN`, `PC_ENTIDAD`, `VIGILANCIAS_MAX`,
 `VIGILANCIA_CADA_MIN`, `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD`, `IMAP_CARPETA`,
 `CORREO_CADA_MIN`, `CORREO_HORAS`, `CORREO_MAX`, `REGLAS_USUARIO_MAX`,
-`RELOJ_AVISO_ANTES_MIN`.
+`RELOJ_AVISO_ANTES_MIN`, `AVISOS_HORA_SILENCIO`, `AVISO_RETRASO_AVISA_MIN`,
+`AVISO_RETRASO_AVERIA_MIN`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
@@ -123,6 +127,9 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
 `BRIEF_DISPARA_SUENO`,
 `RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
+`REVISION_TOKEN`, `ARREGLO_FIRE_URL`, `ARREGLO_FIRE_TOKEN` (la revisión nocturna
+accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se puede
+arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
 `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`, y las de registro
