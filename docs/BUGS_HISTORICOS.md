@@ -3,6 +3,34 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Un aviso pedido a mano llegaba doce horas tarde, y dos veces.** El síntoma era
+  siempre el mismo: un recordatorio de la tarde apareciendo en el móvil a la mañana
+  siguiente. Lo que lo hacía difícil es que **el sistema no guardaba en ningún sitio con
+  cuánto retraso había salido cada aviso**, así que después no se podía distinguir de la
+  otra explicación posible —que el modelo lo hubiera apuntado a la hora equivocada al
+  resolver «a las 9»— y las dos se arreglan por sitios distintos. Se diagnosticó a ciegas
+  las dos veces. La causa era el presupuesto de avisos: `AVISOS_MAX_DIA` son **tres** al
+  día, y todo lo que lleva `regla` y no entra se pospone a `AVISOS_HORA_DIFERIDOS`
+  (08:30). La frontera "lo que pediste tú no se gobierna" solo miraba `regla IS NULL`
+  (`recordarme`), y las **reglas que aprueba el usuario** (`tuya:*`) llevan `regla` por
+  sus estadísticas: una regla tuya de las 20:30 caía en el tope y salía a las 08:30 del
+  día siguiente. Tres cosas que dejó:
+  - **El presupuesto es para el ruido del SISTEMA.** `_es_tuyo()` deja fuera del tope y
+    del aplazamiento a las reglas del usuario, y también las saca del recuento: si
+    contaran, tres avisos tuyos callarían a las reglas de verdad el resto del día.
+  - **Un aplazamiento se registra.** Posponer de la noche a las 08:30 es retrasar doce
+    horas, que desde fuera es idéntico a un reloj parado. Y `_posponer_aviso` ahora mira
+    el código de respuesta: un PATCH rechazado dejaba el aviso vencido para siempre,
+    ocupando sitio en la ventana del despacho (10 por tick) sin salir nunca.
+  - **El retraso de entrega se mide** (`_registrar_retraso`): `warning` a los 15 min,
+    `error` a la hora, que es lo que lo lleva a `app_logs`, al panel y al vigilante sin
+    abrir un camino nuevo. *Un fallo que no deja medida no se arregla, se adivina.*
+  Y de paso salió un segundo agujero por el mismo sitio: **el despacho de recordatorios es
+  lo último que evalúa el tick de HA**, detrás de todo lo que apunta avisos, así que una
+  excepción suelta en cualquiera de esos pasos no costaba un aviso —costaba TODOS los
+  recordatorios vencidos mientras durase la avería, en silencio, porque el 500 del tick
+  solo lo veía Home Assistant—. Ahora van todos envueltos.
+
 - **Jarvis se quedaba MUDO justo en las peticiones interesantes.** Pedirle algo de varios
   pasos («busca esto, mira la documentación y dime si hay MCP») devolvía una burbuja
   vacía —el cliente pinta «(sin respuesta)»— con la herramienta ya ejecutada debajo. Las

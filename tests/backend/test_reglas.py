@@ -66,7 +66,7 @@ class TestSalYa(_Reglas):
         self._eventos(monkeypatch, [self._evento(self.AHORA + timedelta(hours=1))])
         self._salida(monkeypatch, self.AHORA + timedelta(minutes=30))
         monkeypatch.setattr(main, "presencia_vigente", lambda: {"en_casa": True})
-        assert self._apuntados(mock_requests) == [] or True
+        assert self._apuntados(mock_requests) == []
         main._regla_sal_ya()
         assert self._apuntados(mock_requests)[0]["voz"] is True
 
@@ -76,6 +76,19 @@ class TestSalYa(_Reglas):
         monkeypatch.setattr(main, "presencia_vigente", lambda: {"en_casa": False})
         main._regla_sal_ya()
         assert self._apuntados(mock_requests)[0]["voz"] is False
+
+    def test_silenciada_no_llama_a_maps(self, monkeypatch, mock_requests):
+        """Con la regla callada, `_apuntar_aviso` nunca llega a insertar la huella: sin
+        este corte, cada tick de 5 min volvería a pagar la llamada a Maps para el mismo
+        evento durante toda la ventana, sin producir jamás un aviso."""
+        self._eventos(monkeypatch, [self._evento(self.AHORA + timedelta(hours=1))])
+        llamadas_maps = []
+        monkeypatch.setattr(main, "get_departure_time",
+                            lambda body, credentials=None: llamadas_maps.append(1) or {
+                                "departure_iso": (self.AHORA + timedelta(minutes=30)).isoformat()})
+        monkeypatch.setattr(main, "_regla_silenciada", lambda regla: regla == "salir")
+        assert main._regla_sal_ya() == 0
+        assert llamadas_maps == []
 
     def test_no_llama_a_maps_si_ya_se_aviso(self, monkeypatch, mock_requests):
         """La comprobación de la huella va ANTES de Maps, que es lo que cuesta dinero."""
@@ -122,7 +135,11 @@ class TestNoLlegas(_Reglas):
             "departure_iso": manana.replace(hour=10, minute=40).isoformat(),
             "departure_time": "10:40", "duration_text": "25 min", "distance_text": "8 km"})
         assert main._regla_no_llegas() == 1
-        assert "no llegas" in self._apuntados(mock_requests)[0]["texto"]
+        apuntado = self._apuntados(mock_requests)[0]
+        assert "no llegas" in apuntado["texto"]
+        # Caduca a medianoche: si el presupuesto lo pospone, mejor que se calle a que se
+        # reprograme para la mañana en la que "ya solo sirve para dar la mala noticia".
+        assert apuntado["caduca"].startswith("2026-08-17T22:00")   # 00:00 local del 18
 
     def test_si_da_tiempo_se_calla(self, monkeypatch):
         manana = self.AHORA + timedelta(days=1)

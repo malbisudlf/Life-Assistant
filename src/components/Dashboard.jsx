@@ -1735,6 +1735,17 @@ export default function Dashboard() {
     }
   }
 
+  /** Vacía la conversación visible y lo que viaja como contexto en el próximo turno.
+   *  No toca la memoria persistente (`jarvis_memoria`): eso es aparte y sigue en pie —
+   *  esto solo es el historial de turnos que se manda en cada petición a /jarvis. */
+  function nuevaConversacionJarvis() {
+    if (jarvisPensando) return;
+    setJarvisMensajes([]);
+    setJarvisPendiente(null);
+    setJarvisBorrador("");
+    try { localStorage.removeItem("la_jarvis_chat"); } catch { /* mejor esfuerzo */ }
+  }
+
   async function confirmarAccionJarvis() {
     if (!jarvisPendiente || jarvisConfirmando) return;
     setJarvisConfirmando(true);
@@ -2893,7 +2904,19 @@ export default function Dashboard() {
       );
       case "jarvis": return (
         <div style={cardStyle} data-card={id} key="jarvis">
-          <div style={s.sectionLabel}>Jarvis</div>
+          <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>Jarvis</span>
+            {jarvisMensajes.length > 0 && !jarvisLlamada && (
+              <button onClick={nuevaConversacionJarvis} disabled={jarvisPensando}
+                title="Empezar una conversación nueva (no borra lo que Jarvis recuerda de ti)"
+                style={{
+                  padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
+                  letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
+                  color: "var(--muted)", cursor: jarvisPensando ? "default" : "pointer",
+                  opacity: jarvisPensando ? 0.5 : 1,
+                }}>Nueva conversación</button>
+            )}
+          </div>
           <JarvisChat
             mensajes={jarvisMensajes}
             borrador={jarvisBorrador}

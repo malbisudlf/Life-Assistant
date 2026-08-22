@@ -4,18 +4,26 @@ Si durante el día han entrado commits en `main`, de madrugada se lanza una sesi
 Claude Code que los revisa y abre un issue con lo que haya encontrado. Por la mañana o
 hay issue o no lo hay; una noche sin hallazgos no deja ruido.
 
+Y si hay issue, **a las 08:30 llega al móvil una notificación con dos botones**:
+«Arreglarlo» —que lanza otra sesión en la nube, esta sí de escritura, que arregla los
+hallazgos, abre un PR y lo mergea si el CI pasa— y «No hacer nada», que no hace nada. La
+segunda mitad está en "El informe accionable", abajo.
+
 **No sustituye al CI.** `ci.yml` ya ejecuta lint, tests, build y E2E en cada push. Lo
 que esta revisión mira es lo que ninguna herramienta comprueba: las invariantes de
 `CLAUDE.md`, las moralejas de `docs/BUGS_HISTORICOS.md` y los datos personales que se
 cuelan en un repositorio público.
 
-## Las tres piezas
+## Las piezas
 
 | Pieza | Dónde vive | Qué hace |
 |---|---|---|
-| La routine | En la cuenta de claude.ai (`claude.ai/code/routines`), **no en el repositorio** | La sesión que revisa: prompt guardado, modelo, repositorio y sus dos disparos (el endpoint de API y el barrido semanal) |
+| La routine que revisa | En la cuenta de claude.ai (`claude.ai/code/routines`), **no en el repositorio** | La sesión que revisa: prompt guardado, modelo, repositorio y sus dos disparos (el endpoint de API y el barrido semanal) |
 | `.claude/skills/revision-nocturna/SKILL.md` | Versionado aquí | El checklist de verdad: qué buscar, cómo verificarlo y cómo escribir el issue |
 | `.github/workflows/revision-nocturna.yml` | Versionado aquí | El disparador: mira si hay commits nuevos y, solo entonces, llama a la routine |
+| `.github/workflows/revision-aviso.yml` | Versionado aquí | Ve el issue nuevo y se lo cuenta al backend, que es quien sabe llegar a tu móvil |
+| La routine que arregla | En claude.ai, **otra distinta** | La sesión que la pulsa el botón «Arreglarlo»: arregla, abre PR y mergea |
+| `.claude/skills/arreglar-revision/SKILL.md` | Versionado aquí | Qué arregla, qué no, y cuándo NO se mergea |
 
 El prompt guardado en la routine es corto a propósito: **la revisión evoluciona en la
 skill**, que está en el repositorio y se cambia en un commit como todo lo demás. Las
@@ -125,8 +133,118 @@ quedarse callado.
 Los workflows programados **solo corren desde la rama por defecto**. Mientras esto viva
 en una rama de trabajo no dispara nada, ni siquiera con `workflow_dispatch`.
 
+## El informe accionable
+
+Un issue que nadie abre es una revisión que no ha servido de nada. Esta mitad convierte
+el informe en una pregunta con dos botones en el móvil, y la respuesta en trabajo hecho.
+
+```
+03:37  revision-nocturna.yml → routine que revisa → issue en GitHub
+03:40  revision-aviso.yml (evento issues) → POST /revision/hallazgos
+       backend: apunta la decisión en `revision_hallazgos` + encola el aviso
+08:30  el despachador lo entrega: notificación con «Arreglarlo» / «No hacer nada»
+   ↓
+   «Arreglarlo» → HA → POST /revision/{id}/accion → routine que arregla → PR → merge
+   «No hacer nada» → la fila queda `descartado` y no pasa nada más
+```
+
+Cinco decisiones, y ninguna es nueva en este proyecto:
+
+- **El aviso lo manda Actions, no la routine que revisa.** La routine no tiene dónde
+  guardar un secreto: lo que se le pase acaba en la transcripción de la sesión. El evento
+  `issues` de Actions sí, y de paso cubre el issue que abras a mano con ese título.
+- **El aviso espera a que estés despierto.** Se apunta a las 03:40 con `cuando` a las
+  08:30 (`AVISOS_HORA_DIFERIDOS`): es un aviso que no gana nada por llegar de madrugada y
+  lo pierde todo si te despierta. Lo entrega el despachador de siempre, así que hereda el
+  canal, el rescate por correo y el registro sin camino nuevo.
+- **La decisión vive en Supabase.** Entre que sale el aviso y se pulsa el botón pasan
+  horas, y en ese hueco la máquina de Fly se duerme: un mapa en memoria de id → issue no
+  llegaría vivo al toque. Es la misma razón por la que los recordatorios no viven en
+  memoria.
+- **El id del aviso ES el de la fila**, derivado del número del issue (`uuid5`). El botón
+  no necesita llevar nada más que su propio id, y un reintento del workflow choca contra
+  la clave primaria en vez de mandar un segundo aviso del mismo informe.
+- **La transición es un PATCH condicional** (`estado=eq.pendiente`), no un GET y luego un
+  UPDATE: dos toques seguidos en la notificación no pueden lanzar dos agentes. Y si el
+  disparo falla, la decisión **se libera** y se avisa — una decisión consumida sin efecto
+  deja el botón muerto y el issue sin arreglar, que es el peor de los dos errores.
+
+Y una que no es técnica: **la routine que arregla es OTRA**. La de la noche es de solo
+lectura a propósito; darle permiso de escritura para ahorrarse una routine sería quitarle
+esa garantía justo en la sesión que corre sin nadie delante.
+
+### Montarlo
+
+1. **La migración**: aplica `supabase/migrations/20260820_revision_hallazgos.sql` en el
+   editor SQL de Supabase.
+
+2. **La routine que arregla**, en [claude.ai/code/routines](https://claude.ai/code/routines)
+   → **New routine**:
+
+   - **Nombre**: `Arreglar revisión — Life-Assistant`
+   - **Modelo**: el que quieras; aquí se escribe código, así que compensa el bueno.
+   - **Repositorio**: este. **Con permiso de escritura**, a diferencia de la que revisa.
+   - **Conectores**: los mínimos para GitHub (PR y merge). Nada más: durante una
+     ejecución Claude puede usar cualquier herramienta de un conector incluido, sin pedir
+     permiso.
+   - **Trigger**: **API**, y **sin schedule**. Esta no tiene reloj: la dispara el botón.
+   - **Instrucciones**:
+
+   ```text
+   Arregla los hallazgos de la revisión nocturna de este repositorio.
+
+   El issue concreto viene en el bloque <routine-fire-payload> de esta sesión, en la
+   línea "Arregla los hallazgos de la revisión nocturna del issue #N". Úsalo. Si no hay
+   bloque, coge el issue abierto más reciente cuyo título empiece por "Revisión
+   nocturna".
+
+   Sigue la skill `arreglar-revision` del repositorio
+   (.claude/skills/arreglar-revision/SKILL.md): ahí están qué se arregla, qué no, la
+   verificación obligatoria y cuándo NO se mergea.
+
+   No despliegues el backend nunca, ni aunque el hallazgo parezca urgente.
+   ```
+
+   La segunda frase no es de adorno, por lo mismo que en la routine que revisa: el `text`
+   del disparo llega envuelto en `<routine-fire-payload>` como dato no fiable, y la sesión
+   lo ignora salvo que el prompt guardado lo cite.
+
+3. **El token del disparo**: igual que el de la otra routine (lápiz → *Add another
+   trigger* → **API** → *Generate token*). **Se enseña una sola vez.**
+
+4. **El backend** (secrets de Fly, `fly secrets set`):
+
+   - `ARREGLO_FIRE_URL` y `ARREGLO_FIRE_TOKEN`: los del paso anterior.
+   - `REVISION_TOKEN`: invéntate uno (`openssl rand -hex 32`). Es el que usará Actions
+     para avisar al backend.
+
+5. **El repositorio** (*Settings → Secrets and variables → Actions*): **secret**
+   `REVISION_TOKEN`, el mismo valor. La variable `BACKEND_URL` ya está puesta si el
+   resumen diario funciona.
+
+6. **Home Assistant**: los botones los pinta HA, así que hay que actualizar la
+   automatización de avisos para que use `repeat.item.acciones` en vez de los dos botones
+   fijos de útil / no útil, y añadir la que recoge la respuesta. Está en
+   `docs/HOME_ASSISTANT_JARVIS.md`, punto 4. **Sin ese cambio el aviso llega igual, pero
+   con los botones equivocados.**
+
+Sin nada de esto configurado, el issue de la noche se sigue abriendo exactamente como
+antes: lo que no hay es aviso ni botón.
+
+### Si el aviso llega por correo
+
+El correo no tiene botones. Para eso está la herramienta `arreglar_revision` de Jarvis:
+«arregla la revisión» lanza lo mismo que el botón, pasando por el botón de confirmar del
+dashboard —toca el repositorio y lo mergea, así que no lo decide el modelo solo—. Si no
+hay rutina de arreglo configurada, la herramienta ni se anuncia.
+
 ## Cómo probarlo
 
+- **El aviso con botones**, sin esperar a la madrugada: abre a mano un issue titulado
+  `Revisión nocturna — prueba`. El workflow `revision-aviso.yml` lo verá y el aviso
+  quedará apuntado para las 08:30 (o para ya, si es de día). Para no esperar, mira la
+  fila en `revision_hallazgos` y llama a `POST /revision/{id}/accion` con
+  `{"accion": "nada"}`.
 - **El disparador entero**: *Actions → Revisión nocturna del código → Run workflow*.
   Si no hay commits nuevos desde la última revisión, dirá que no hay nada que revisar
   y terminará sin gastar una ejecución de la routine. Para forzarlo, borra la etiqueta
@@ -182,3 +300,14 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
 - **GitHub desactiva los workflows programados** en repositorios sin actividad durante
   60 días. Aquí no debería pasar, pero si el disparo deja de ocurrir sin más, es lo
   primero que hay que mirar.
+- **El título del issue es un contrato**, no un formato bonito: `revision-aviso.yml`
+  filtra por `Revisión nocturna` al principio del título (la etiqueta solo la pone la
+  skill si ya existe en el repositorio, así que no se puede depender de ella). Si cambias
+  el formato en `.claude/skills/revision-nocturna/SKILL.md`, cambia también el `if` del
+  workflow o el aviso deja de salir en silencio.
+- **«Arreglarlo» mergea, y mergear despliega el frontend** (Vercel va detrás de `main`).
+  El backend no: su deploy sigue siendo manual y la skill del arreglo tiene prohibido
+  tocarlo. Si un hallazgo era del backend, después del merge hay que hacer `fly deploy` a
+  mano.
+- **El agente que arregla no mergea en rojo.** Si el CI falla tras dos intentos deja el
+  PR abierto con una explicación, que es un resultado — el silencio no lo sería.

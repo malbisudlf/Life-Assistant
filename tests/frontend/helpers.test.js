@@ -10,7 +10,7 @@ import {
   baselinePersonal, wellnessBaselines,
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
-  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL,
+  jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
 } from "../../src/lib/helpers";
 
@@ -1256,6 +1256,12 @@ describe("jarvisHistorial", () => {
     const out = jarvisHistorial([{ rol: "assistant", texto: "ok", herramientas: ["clima"] }]);
     expect(out[0]).toEqual({ rol: "assistant", texto: "ok" });
   });
+
+  test("recorta un turno largo para no bloquear el mensaje nuevo con un 422", () => {
+    const largo = "a".repeat(JARVIS_MAX_TURNO + 500);
+    const out = jarvisHistorial([{ rol: "assistant", texto: largo }]);
+    expect(out[0].texto).toHaveLength(JARVIS_MAX_TURNO);
+  });
 });
 
 describe("jarvisEtiquetaAccion", () => {
@@ -1315,6 +1321,14 @@ describe("jarvisEtiquetaAccion", () => {
   test("una llamada MCP incompleta no pinta botón", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: { servidor: "correo" } })).toBeNull();
     expect(jarvisEtiquetaAccion({ herramienta: "mcp_usar", argumentos: {} })).toBeNull();
+  });
+
+  test("arreglar la revisión dice que va a tocar el repositorio", () => {
+    // No tiene argumentos que enseñar: lo que se aprueba es lanzar un agente que abre
+    // un PR y lo mergea, y eso es lo que tiene que poner el botón.
+    const out = jarvisEtiquetaAccion({ herramienta: "arreglar_revision", argumentos: {} });
+    expect(out).toContain("revisión nocturna");
+    expect(out).toContain("PR");
   });
 });
 

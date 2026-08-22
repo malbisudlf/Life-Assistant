@@ -1,0 +1,77 @@
+name: Avisar de la revisión nocturna
+
+# Cuando la revisión de madrugada abre su issue, esto se lo cuenta al backend para que
+# te llegue al móvil una notificación con dos botones: «Arreglarlo» o «No hacer nada».
+# El flujo entero está en docs/REVISION_NOCTURNA.md.
+#
+# Por qué el aviso lo manda Actions y no la propia rutina que revisa: la rutina no tiene
+# dónde guardar un secreto —lo que se le pase acaba en la transcripción de la sesión— y
+# el evento `issues` de Actions sí. De paso, esto cubre también el issue que abras a
+# mano con ese título, que es como se prueba el camino sin esperar a la madrugada.
+#
+# El disparo es `opened` y `labeled`: la skill pone la etiqueta `revision-nocturna` solo
+# si ya existe en el repositorio, así que el título es el filtro que siempre está.
+# Cambiar el formato del título de la skill deja esto mudo — están atados a propósito y
+# se dice en los dos sitios.
+on:
+  issues:
+    types: [opened, labeled]
+
+# Dos eventos del mismo issue (se abre y se etiqueta) no pueden mandar dos avisos. Y si
+# se colaran, el backend los para: el id del aviso sale del número del issue, así que el
+# segundo choca contra la clave primaria.
+concurrency:
+  group: revision-aviso-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  avisar:
+    name: Avisar al backend
+    # `startsWith` sobre el título, o la etiqueta si existe. Nada más entra aquí: este
+    # workflow corre en CADA issue que se abra en el repositorio.
+    if: >
+      startsWith(github.event.issue.title, 'Revisión nocturna') ||
+      contains(github.event.issue.labels.*.name, 'revision-nocturna')
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /revision/hallazgos
+        env:
+          BACKEND_URL:     ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN:  ${{ secrets.REVISION_TOKEN }}
+          ISSUE_NUMERO:    ${{ github.event.issue.number }}
+          ISSUE_TITULO:    ${{ github.event.issue.title }}
+        # El título va por variable de entorno y se mete en el JSON con jq, nunca
+        # interpolado en el script: lo escribe quien abre el issue y puede llevar
+        # comillas, acentos o algo peor.
+        #
+        # La URL del issue NO se manda: la construye el backend con JARVIS_REPO. Un
+        # enlace que viene de fuera y acaba en una notificación tuya es un enlace que no
+        # hace falta traerse.
+        #
+        # --retry con --retry-connrefused y un max-time generoso porque la máquina de
+        # Fly escala a cero: a las 3 de la mañana esta es la primera petición del día y
+        # paga el arranque en frío.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN del repositorio." >&2
+            echo "Ver docs/REVISION_NOCTURNA.md." >&2
+            exit 1
+          fi
+
+          CUERPO=$(jq -n --argjson n "$ISSUE_NUMERO" --arg t "$ISSUE_TITULO" \
+            '{numero: $n, titulo: $t}')
+
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/revision/hallazgos" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 180 \
+            --retry 3 --retry-delay 15 --retry-connrefused \
+            -d "$CUERPO")
+
+          echo "Aviso mandado para el issue #$ISSUE_NUMERO: $RESPUESTA"
+          echo "Aviso de la revisión #$ISSUE_NUMERO: \`$RESPUESTA\`" >> "$GITHUB_STEP_SUMMARY"

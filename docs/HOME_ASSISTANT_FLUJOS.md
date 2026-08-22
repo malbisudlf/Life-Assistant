@@ -58,6 +58,13 @@ que salga con `notify.mobile_app_*`. Mismo patrón que el WOL (órdenes en memor
 las consume), y el nombre del dispositivo vive **solo** en el YAML de HA. El YAML completo
 está en `docs/HOME_ASSISTANT_JARVIS.md`.
 
+Los **botones** de esa notificación van dentro del propio aviso (`acciones`), no fijos en
+el YAML: los decide quien hace la pregunta, que es el backend. Por defecto son útil / no
+útil (`POST /avisos/{id}/util`, la señal que hace que una regla inútil se calle sola) y el
+aviso de la revisión nocturna trae los suyos, «Arreglarlo» / «No hacer nada»
+(`POST /revision/{id}/accion`, ver `docs/REVISION_NOCTURNA.md`). HA solo pinta lo que le
+llega y devuelve la respuesta por el `rest_command` que toque.
+
 **Flujo de la casa** (los dos sentidos a la vez, y cada uno por su motivo): HA **sondea**
 `GET /ha/ordenes-pending` cada 15 s y ejecuta lo que salga (órdenes: mismo patrón que el
 WOL), y **empuja** su catálogo de dispositivos a `POST /ha/entidades` al arrancar y cada
@@ -66,7 +73,11 @@ puede haber un consumidor. El YAML completo está en `docs/HOME_ASSISTANT_JARVIS
 
 **Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
 `time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. Ese mismo tick es el
-que despacha los recordatorios de Jarvis: si funciona, los avisos salen solos. HA pone el reloj
+que despacha los recordatorios de Jarvis: si funciona, los avisos salen solos — y **si esa
+automatización se para, los avisos se quedan quietos aunque HA siga sondeando el resto**,
+que son dos cosas distintas y se caen por separado. Por eso el despacho registra con
+cuánto retraso sale cada aviso (`AVISO_RETRASO_AVERIA_MIN`): es la única forma de ver
+desde dentro que el reloj se paró. HA pone el reloj
 porque está siempre encendido y es puntual al minuto, las dos cosas que el cron de
 GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un hilo
 dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
