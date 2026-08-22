@@ -62,6 +62,7 @@ skills-lock.json
 # Las skills propias SÍ son parte del proyecto y se versionan: una routine de
 # Claude Code solo ve lo que está en el repositorio que clona.
 !.claude/skills/revision-nocturna/
+!.claude/skills/arreglar-revision/
 
 # Playwright (E2E): informes y trazas de cada ejecución
 /test-results/

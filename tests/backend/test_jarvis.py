@@ -368,9 +368,12 @@ class TestJarvisDespachador:
         assert main._jarvis_despachar("clima", {}) == {"error": "Supabase no responde"}
 
     def test_el_esquema_declara_todas_las_herramientas(self, monkeypatch):
-        # Con un servidor MCP configurado se anuncian todas, las mcp_* incluidas.
+        # Con un servidor MCP configurado se anuncian todas, las mcp_* incluidas. Y con
+        # rutina de arreglo, también `arreglar_revision`: sin ella no puede hacer nada.
         monkeypatch.setattr(main, "JARVIS_MCP_SERVERS",
                             json.dumps({"pruebas": {"url": "https://servidor.mcp/rpc"}}))
+        monkeypatch.setattr(main, "ARREGLO_FIRE_URL", "https://api.test/fire")
+        monkeypatch.setattr(main, "ARREGLO_FIRE_TOKEN", "arreglo-token")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

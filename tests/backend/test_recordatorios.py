@@ -5,7 +5,7 @@ estas cosas: la reserva tiene que ser atómica (como el INSERT del resumen diari
 fallo de SMTP no puede consumir el recordatorio.
 """
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -352,8 +352,10 @@ class TestAvisosAlMovil:
         assert main._notificar("⏰ pastilla", "tomar la pastilla") == "movil"
         assert correos == [], "no se manda por los dos canales a la vez"
         avisos = self._sondear(client)
+        # Sin id no hay botones que pintar: la notificación sale limpia en vez de con
+        # una acción que no lleva a ninguna parte.
         assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla",
-                           "voz": False, "id": ""}]
+                           "voz": False, "id": "", "acciones": []}]
 
     def test_la_cola_se_vacia_al_recogerla(self, client):
         self._sondear(client)
@@ -605,8 +607,10 @@ class TestVigilanteAbreIssues:
         monkeypatch.setattr(main, "VIGILANTE_ISSUES", True)
         monkeypatch.setattr(main, "JARVIS_REPO", "malbisudlf/Life-Assistant")
 
-    def _servidor(self, monkeypatch, herramientas, resultado=None):
-        monkeypatch.setattr(main, "_mcp_config", lambda: {"github": {"url": "https://x", "token": "t"}})
+    def _servidor(self, monkeypatch, herramientas, resultado=None, confiar=True):
+        monkeypatch.setattr(main, "_mcp_config",
+                            lambda: {"github": {"url": "https://x", "token": "t",
+                                               "confiar": confiar}})
         llamadas = []
 
         def _rpc(servidor, metodo, params):
@@ -639,6 +643,14 @@ class TestVigilanteAbreIssues:
     def test_sin_herramienta_conocida_no_inventa_nada(self, monkeypatch):
         self._servidor(monkeypatch, ["add_issue_comment", "search_issues"])
         assert main._vigilante_abrir_issue("t", "c") == ""
+
+    def test_servidor_sin_confiar_no_se_invoca(self, monkeypatch):
+        """El vigilante corre sin usuario delante: no hay quien apruebe un `mcp_usar`
+        normal, así que un servidor con `confiar: false` se queda fuera aunque exponga
+        una tool `create_issue`/`issue_write` para otra cosa."""
+        llamadas = self._servidor(monkeypatch, ["create_issue"], confiar=False)
+        assert main._vigilante_abrir_issue("t", "c") == ""
+        assert llamadas == []
 
     def test_sin_repo_configurado_no_se_intenta(self, monkeypatch):
         monkeypatch.setattr(main, "JARVIS_REPO", "")
@@ -721,6 +733,42 @@ class TestGobiernoDeAvisos:
         monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
         self._pendientes(mock_requests, [self._fila(regla=None)])
         assert main._despachar_recordatorios() == {"recordatorios": 1}
+
+    def test_una_regla_tuya_tampoco_se_gobierna(self, mock_requests, correos, monkeypatch):
+        """La frontera se escribió pensando solo en `recordarme`, y dejó fuera a las
+        reglas que apruebas tú: llevan `regla`, así que caían en el presupuesto y se
+        posponían a las 08:30. Una regla tuya de las 20:30 llegaba doce horas tarde."""
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        self._pendientes(mock_requests, [self._fila(regla="tuya:pastilla")])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert len(correos) == 1
+
+    def test_lo_tuyo_no_gasta_el_presupuesto_de_las_demas(self, mock_requests):
+        """Si contara, tres avisos tuyos callarían a las reglas del sistema el resto
+        del día: el reparto justo al revés del que se quiere."""
+        self._pendientes(mock_requests, [self._fila()])
+        main._despachar_recordatorios()
+        contador = [c for c in mock_requests.called("GET", "jarvis_recordatorios")
+                    if "enviado=is.true" in c[1]]
+        assert contador and "regla=not.like.tuya:*" in contador[0][1]
+
+    def test_posponer_deja_rastro(self, mock_requests, monkeypatch, caplog):
+        """Posponer un aviso de la noche a las 08:30 es retrasarlo doce horas, que desde
+        fuera es indistinguible de un reloj parado. Tiene que poder leerse."""
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        self._pendientes(mock_requests, [self._fila()])
+        with caplog.at_level("INFO"):
+            main._despachar_recordatorios()
+        assert any("pospuesto" in r.getMessage() for r in caplog.records)
+
+    def test_un_aplazamiento_rechazado_se_registra(self, mock_requests, monkeypatch, caplog):
+        """Sin mirar el código de respuesta, un PATCH rechazado dejaba el aviso vencido
+        para siempre, ocupando sitio en la ventana del despacho sin salir nunca."""
+        monkeypatch.setattr(main, "AVISOS_MAX_DIA", 0)
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([self._fila()]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse(None, 400, "boom"))
+        main._despachar_recordatorios()
+        assert any(r.levelname == "WARNING" for r in caplog.records)
 
     def test_un_aviso_caducado_no_se_manda(self, mock_requests, correos):
         """Un "sal ya" pasada la hora de salir no es un aviso tarde: es una mentira, y
@@ -903,3 +951,114 @@ class TestLaPruebaEjercitaLosBotones:
         r = client.post("/avisos/11111111-2222-3333-4444-555555555555/util",
                         json={"util": True}, headers={"X-Auth-Token": "ha-poll-token"})
         assert r.status_code == 404
+
+    def test_la_prueba_no_gasta_presupuesto_real(self, mock_requests):
+        """La fila de prueba lleva `regla: "prueba"` para no ensuciar la estadística de
+        una regla de verdad, pero por eso mismo caía dentro de `regla=not.is.null` y
+        contaba para el presupuesto diario compartido: pulsar el botón tres veces bastaba
+        para posponer a mañana los avisos normales."""
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse(
+            [{"id": "1"}, {"id": "2"}, {"id": "3"}]))
+        assert main._contar_enviados_hoy() == 3
+        url = mock_requests.called("GET", "jarvis_recordatorios")[0][1]
+        assert "regla=neq.prueba" in url
+
+
+class TestReactivarRegla:
+    """Devolver la voz a una regla silenciada."""
+
+    def test_reactivar_limpia_el_silencio(self, client, auth_headers, mock_requests):
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        r = client.post("/avisos/reglas/reloj/reactivar", headers=auth_headers)
+        assert r.status_code == 200 and r.json()["ok"] is True
+        guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
+        assert guardado == {"regla": "reloj", "silenciada": False,
+                            "silenciada_desde": None, "no_utiles": 0}
+
+    def test_reactivar_exige_credencial(self, client):
+        assert client.post("/avisos/reglas/reloj/reactivar").status_code == 401
+
+    def test_si_supabase_rechaza_el_upsert_no_dice_que_si(self, client, auth_headers,
+                                                          mock_requests):
+        """Sin comprobar el status_code, un upsert rechazado por Supabase se devolvía
+        como éxito: el usuario veía "reactivada" y la regla seguía silenciada."""
+        mock_requests.add("POST", "avisos_reglas", FakeResponse(None, 500, "boom"))
+        r = client.post("/avisos/reglas/reloj/reactivar", headers=auth_headers)
+        assert r.status_code == 502
+
+
+class TestElRetrasoSeVe:
+    """Un aviso que llega tarde y uno que se apuntó a la hora equivocada son
+    indistinguibles después. Sin poder distinguirlos no se arregla ninguno de los dos:
+    ese diagnóstico se hizo a ciegas dos veces."""
+
+    def _vencido(self, mock_requests, hace_minutos):
+        cuando = (datetime.now(timezone.utc) - timedelta(minutes=hace_minutos)).isoformat()
+        fila = {"id": "11111111-2222-3333-4444-555555555555", "texto": "la pastilla",
+                "cuando": cuando, "regla": None, "prioridad": main.PRIO_NORMAL}
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([fila]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+
+    def test_un_retraso_normal_no_dice_nada(self, mock_requests, correos, caplog):
+        """El tick pasa cada 5 minutos: salir con tres de retraso es funcionar bien."""
+        self._vencido(mock_requests, 3)
+        main._despachar_recordatorios()
+        assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+    def test_un_cuarto_de_hora_ya_se_apunta(self, mock_requests, correos, caplog):
+        self._vencido(mock_requests, 20)
+        main._despachar_recordatorios()
+        assert any(r.levelname == "WARNING" and "retraso" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_doce_horas_es_una_averia(self, mock_requests, correos, caplog):
+        """Por `logger.error`, que es lo que lo lleva a `app_logs`, al panel, al
+        diagnóstico de Jarvis y al vigilante sin abrir un camino nuevo."""
+        self._vencido(mock_requests, 12 * 60)
+        main._despachar_recordatorios()
+        averias = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert averias and "720 min de retraso" in averias[0]
+
+    def test_un_cuando_ilegible_no_revienta_el_despacho(self, mock_requests, correos):
+        fila = {"id": "11111111-2222-3333-4444-555555555555", "texto": "x",
+                "cuando": "ayer por la tarde", "regla": None, "prioridad": 5}
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([fila]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+
+
+class TestElTickDespachaPaseLoQuePase:
+    """El despacho de los recordatorios es lo ÚLTIMO que evalúa el tick, detrás de todo
+    lo que apunta avisos. Una excepción suelta ahí no costaba un aviso: costaba todos los
+    recordatorios vencidos mientras durase la avería, y en silencio (el tick devolvía un
+    500 que solo veía Home Assistant)."""
+
+    def _vencido(self, mock_requests):
+        fila = {"id": "11111111-2222-3333-4444-555555555555", "texto": "la pastilla",
+                "cuando": datetime.now(timezone.utc).isoformat(), "regla": None,
+                "prioridad": main.PRIO_NORMAL}
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([fila]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+
+    def _revienta(self, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    @pytest.fixture(autouse=True)
+    def _antes_de_la_hora_tope(self, monkeypatch):
+        """Antes de la hora tope el tick no manda el resumen: lo que se mira aquí es lo
+        que hace ANTES de eso."""
+        ahora = datetime.now(main.LOCAL_TZ).replace(hour=7, minute=0)
+        monkeypatch.setattr(main, "_ahora_local", lambda: ahora)
+
+    def test_un_aviso_de_reloj_que_revienta_no_se_lleva_el_despacho(self, client, mock_requests,
+                                                                    correos, monkeypatch):
+        monkeypatch.setattr(main, "_avisar_reloj_si_toca", self._revienta)
+        self._vencido(mock_requests)
+        r = client.post("/ha/brief-tick", headers=CABECERA)
+        assert r.status_code == 200 and r.json()["recordatorios"] == 1
+        assert len(correos) == 1
+
+    def test_una_regla_que_revienta_tampoco(self, client, mock_requests, correos, monkeypatch):
+        monkeypatch.setattr(main, "_correr_reglas", self._revienta)
+        self._vencido(mock_requests)
+        assert client.post("/ha/brief-tick", headers=CABECERA).json()["recordatorios"] == 1
