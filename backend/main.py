@@ -164,6 +164,25 @@ ALUD_ALLOWED_HOSTS = tuple(
     if h.strip()
 )
 
+# ── Finanzas (Indexa Capital) ─────────────────────────────────────────────────
+# Solo lectura, y a propósito: la API de Indexa tiene endpoints que mueven dinero y aquí
+# no se usa ninguno. Un token creado en "Configuración de usuario → Aplicaciones" da para
+# todo lo que hay debajo.
+INDEXA_API_URL = os.getenv("INDEXA_API_URL", "https://api.indexacapital.com").rstrip("/")
+INDEXA_TOKEN   = os.getenv("INDEXA_TOKEN", "")
+# Filtro opcional sobre las cuentas que devuelve /users/me (números separados por comas).
+# Vacío = todas. NO sustituye a esa llamada: el estado y el tipo de cada cuenta salen de
+# ahí, y una lista escrita a mano no sabría que una cuenta se canceló.
+INDEXA_CUENTAS = [c.strip() for c in os.getenv("INDEXA_CUENTAS", "").split(",") if c.strip()]
+# Cuánto vale una consulta antes de volver a preguntar. Indexa valora las carteras UNA VEZ
+# al día (y con un par de días de retraso): pedirlo en cada carga del dashboard son tres
+# llamadas de red por cuenta para devolver exactamente el mismo número. La copia vive en
+# memoria, así que un cold start de Fly la tira — aceptable, igual que las demás.
+INDEXA_TTL_MINUTOS = int(os.getenv("INDEXA_TTL_MINUTOS", "180"))
+# Cuántos días de la serie de valor se devuelven al frontend. La serie completa son todos
+# los días desde que abriste la cuenta y viaja entera en cada respuesta.
+INDEXA_SERIE_DIAS = int(os.getenv("INDEXA_SERIE_DIAS", "365"))
+
 # ── Resumen diario por correo ─────────────────────────────────────────────────
 # El backend NO redacta el resumen: manda los datos crudos a tu propio buzón y de ahí
 # los recoge la rutina de Claude Code que ya compone el correo diario (lee el buzón,
@@ -2277,6 +2296,343 @@ def delete_training_session(
         headers=supabase_headers(),
     )
     return {"ok": r.status_code < 300}
+
+# ── FINANZAS (Indexa Capital) ─────────────────────────────────────────────────
+# Qué se pide por cada cuenta y qué da cada llamada:
+#   GET /accounts/{n}/portfolio    → las posiciones de hoy (valor, coste, títulos, precio
+#                                    y la FECHA de esa valoración) y el efectivo sin
+#                                    invertir.
+#   GET /accounts/{n}/performance  → lo que las posiciones no pueden decir: cuánto has
+#                                    aportado en total, la rentabilidad ponderada por
+#                                    tiempo y la serie diaria del valor de la cartera.
+#
+# La segunda se tolera caída. Sin ella se sigue sabiendo lo que vale la cartera hoy, así
+# que se devuelve lo que hay con los campos que dependían de ella a None — y `None` aquí
+# significa "no lo sé", que el widget pinta como tal en vez de como un cero. Es la misma
+# regla que gobierna la presencia caducada y los días sin reloj.
+#
+# Todo esto es de SOLO LECTURA a propósito. La API de Indexa tiene endpoints que mueven
+# dinero; el dashboard es un sitio para mirarlo.
+
+_INDEXA_CUENTA_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+# Estados de cuenta en los que puede haber dinero. Los demás (contrato a medias, pendiente
+# de verificación) no tienen posiciones y pedir su cartera solo produce un 4xx cada tres
+# horas. Se omiten, pero se dice cuáles y por qué en la respuesta: una cuenta que no sale
+# tiene que distinguirse de una cuenta que no existe.
+_INDEXA_ESTADOS_CON_DINERO = {"active", "cancel-request"}
+
+# Clases de activo. Indexa las nombra con cadenas del tipo "equity_europe" o "fixed_euro",
+# así que se buscan por trozo y no por igualdad: la lista de subclases cambia cuando
+# cambian los fondos y una comparación exacta dejaría de reconocerlas en silencio.
+_INDEXA_CLASES = (("equity", "acciones"), ("fixed", "bonos"), ("cash", "monetario"))
+
+
+class _IndexaFallo(Exception):
+    """Fallo hablando con Indexa.
+
+    El detalle va al registro; al cliente le llega un 502 genérico. Mismo criterio que con
+    Supabase y con Graph: el cuerpo de error de un tercero no se reenvía.
+    """
+
+
+def _indexa_num(valor) -> float | None:
+    """Número, o None si no lo hay.
+
+    Un campo que Indexa no manda NO es un cero: es que no se sabe. Convertirlo a 0.0 haría
+    que una cartera sin datos de coste apareciera como una cartera que lo ha perdido todo.
+    """
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        return None
+    return float(valor)
+
+
+def _indexa_get(ruta: str, etiqueta: str) -> dict:
+    """GET autenticado contra la API de Indexa.
+
+    `etiqueta` es lo que se registra si falla — nunca la ruta, que lleva el número de
+    cuenta dentro. El registro persiste en Supabase y no necesita saberlo para nada.
+    """
+    if not INDEXA_TOKEN:
+        raise _IndexaFallo("INDEXA_TOKEN no configurado")
+    try:
+        r = http.get(
+            f"{INDEXA_API_URL}{ruta}",
+            headers={"X-AUTH-TOKEN": INDEXA_TOKEN, "Accept": "application/json"},
+        )
+    except requests.RequestException as e:
+        raise _IndexaFallo(f"{etiqueta}: {type(e).__name__}") from e
+    if r.status_code >= 300:
+        logger.error("Indexa %s → %s: %s", etiqueta, r.status_code, (r.text or "")[:300])
+        raise _IndexaFallo(f"{etiqueta}: HTTP {r.status_code}")
+    try:
+        datos = r.json()
+    except ValueError as e:
+        raise _IndexaFallo(f"{etiqueta}: la respuesta no era JSON") from e
+    if not isinstance(datos, dict):
+        raise _IndexaFallo(f"{etiqueta}: se esperaba un objeto")
+    return datos
+
+
+def _indexa_clase(asset_class) -> str:
+    ac = str(asset_class or "").lower()
+    for marca, nombre in _INDEXA_CLASES:
+        if marca in ac:
+            return nombre
+    return "otros"
+
+
+def _indexa_posiciones(cartera: dict) -> list[dict]:
+    """Aplana las posiciones de TODAS las carteras de instrumentos de una cuenta.
+
+    `instrument_accounts` es una lista y por ahí circulan clientes que leen siempre el
+    primer elemento. Quedarse con el primero convertiría una cuenta con dos carteras en
+    una cuenta a la que le falta dinero, y sin decirlo.
+    """
+    fuera = []
+    for ia in cartera.get("instrument_accounts") or []:
+        for p in (ia or {}).get("positions") or []:
+            inst  = (p or {}).get("instrument") or {}
+            valor = _indexa_num(p.get("amount"))
+            coste = _indexa_num(p.get("cost_amount"))
+            fuera.append({
+                "nombre":        inst.get("name") or "(sin nombre)",
+                # El identificador cambia de nombre según el producto (fondo → ISIN, plan
+                # de pensiones → DGS, EPSV → su código). Se coge el que venga.
+                "identificador": inst.get("isin_code") or inst.get("dgs_code") or inst.get("epsv_plan_code") or None,
+                "gestora":       inst.get("management_company_description") or None,
+                "clase":         _indexa_clase(inst.get("asset_class")),
+                "valor":         valor,
+                "coste":         coste,
+                "plusvalia":     None if valor is None or coste is None else round(valor - coste, 2),
+                "titulos":       _indexa_num(p.get("titles")),
+                "precio":        _indexa_num(p.get("price")),
+                "fecha":         p.get("date") or None,
+            })
+    return fuera
+
+
+def _indexa_serie(mapa, aportado=None) -> list[dict]:
+    """Serie diaria {fecha: valor} de Indexa → lista ordenada y recortada."""
+    if not isinstance(mapa, dict):
+        return []
+    aportado = aportado if isinstance(aportado, dict) else {}
+    serie = []
+    for fecha in sorted(mapa):
+        valor = _indexa_num(mapa[fecha])
+        if valor is None:
+            continue
+        serie.append({"fecha": fecha, "valor": round(valor, 2),
+                      "aportado": _indexa_num(aportado.get(fecha))})
+    return serie[-INDEXA_SERIE_DIAS:]
+
+
+def _finanzas_cuenta(numero: str, tipo) -> dict:
+    """Resumen de UNA cuenta: cartera + rendimiento, en paralelo.
+
+    Las dos llamadas no dependen entre sí y esto se ejecuta con el arranque en frío de Fly
+    por delante, así que van a la vez (mismo criterio que /training/summary). Si la de
+    rendimiento falla, la cuenta sale igual con lo que sí se sabe.
+    """
+    ruta = f"/accounts/{quote(numero, safe='')}"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_cartera = pool.submit(_indexa_get, f"{ruta}/portfolio",   "portfolio")
+        f_rend    = pool.submit(_indexa_get, f"{ruta}/performance", "performance")
+        try:
+            rendimiento = f_rend.result()
+        except _IndexaFallo as e:
+            logger.warning("Indexa: sin datos de rendimiento (%s)", e)
+            rendimiento = None
+        cartera = f_cartera.result()   # si esta falla, sube: sin cartera no hay cuenta
+
+    posiciones = _indexa_posiciones(cartera)
+    resumen    = cartera.get("portfolio") or {}
+    efectivo   = _indexa_num(resumen.get("cash_amount"))
+    valor      = _indexa_num(resumen.get("total_amount"))
+    if valor is None:
+        # Sin el total de Indexa se suma lo que hay. Es un apaño, no un equivalente: si
+        # faltara una posición, el total saldría más bajo sin avisar de nada.
+        valor = round(sum(p["valor"] for p in posiciones if p["valor"] is not None) + (efectivo or 0.0), 2)
+
+    coste = sum(p["coste"] for p in posiciones if p["coste"] is not None)
+    coste = round(coste, 2) if any(p["coste"] is not None for p in posiciones) else None
+
+    ret = (rendimiento or {}).get("return") or {}
+    aportado  = _indexa_num(ret.get("investment"))
+    plusvalia = _indexa_num(ret.get("pl"))
+    # De dónde sale la plusvalía, porque no significan lo mismo y la diferencia se nota:
+    # la de la CUENTA es todo lo ganado desde que la abriste (traspasos y ventas
+    # incluidos); la de las POSICIONES es solo lo que llevan ganado los fondos que hay
+    # ahora mismo. Sin el rendimiento solo se puede calcular la segunda, y decirlo es
+    # parte del dato.
+    origen = "cuenta" if plusvalia is not None else None
+    if plusvalia is None and coste is not None:
+        plusvalia = round(sum(p["plusvalia"] for p in posiciones if p["plusvalia"] is not None), 2)
+        origen    = "posiciones"
+
+    base = aportado if aportado else coste
+    pct  = round(plusvalia / base * 100, 2) if plusvalia is not None and base else None
+
+    # Reparto por clase de activo. El efectivo sin invertir va en su propia clase y no con
+    # los monetarios: uno es una decisión de la cartera y el otro es dinero esperando.
+    distribucion = {}
+    for p in posiciones:
+        if p["valor"] is None:
+            continue
+        distribucion[p["clase"]] = round(distribucion.get(p["clase"], 0.0) + p["valor"], 2)
+    if efectivo:
+        distribucion["efectivo"] = round(distribucion.get("efectivo", 0.0) + efectivo, 2)
+
+    fechas = sorted(p["fecha"] for p in posiciones if p["fecha"])
+    return {
+        "numero":             numero,
+        "tipo":               tipo or None,
+        "valor":              round(valor, 2) if valor is not None else None,
+        "efectivo":           round(efectivo, 2) if efectivo is not None else None,
+        "coste":              coste,
+        "aportado":           round(aportado, 2) if aportado is not None else None,
+        "plusvalia":          plusvalia,
+        "plusvalia_pct":      pct,
+        "plusvalia_origen":   origen,
+        # Rentabilidades tal cual las da Indexa: fracción (0.0523 = 5,23 %). El formateo
+        # es del frontend, aquí no se toca.
+        "rentabilidad":        _indexa_num(ret.get("time_return")),
+        "rentabilidad_anual":  _indexa_num(ret.get("time_return_annual")),
+        "volatilidad":         _indexa_num(ret.get("volatility")),
+        "rendimiento":         rendimiento is not None,
+        # A qué día corresponden los valores. Indexa reconcilia una vez al día y con
+        # retraso, así que enseñar esto no es un adorno: sin la fecha, una cartera de hace
+        # tres días se lee como la de hoy.
+        "fecha_valores":       fechas[-1] if fechas else None,
+        "distribucion":        distribucion,
+        "posiciones":          sorted(posiciones, key=lambda p: p["valor"] or 0, reverse=True),
+        "serie":               _indexa_serie(ret.get("total_amounts"), ret.get("net_amounts")),
+    }
+
+
+def _finanzas_total(cuentas: list[dict]) -> dict:
+    """Suma de todas las cuentas.
+
+    `completo` dice si en la suma están TODAS: si a una cuenta le faltó el rendimiento, su
+    aportación no se conoce y el total de plusvalía sería el de las demás presentado como
+    el de todas.
+    """
+    valor    = round(sum(c["valor"] for c in cuentas if c["valor"] is not None), 2)
+    aportado = [c["aportado"] for c in cuentas if c["aportado"] is not None]
+    plus     = [c["plusvalia"] for c in cuentas if c["plusvalia"] is not None]
+    completo = len(aportado) == len(cuentas) and len(plus) == len(cuentas)
+    total_aportado  = round(sum(aportado), 2) if aportado else None
+    total_plusvalia = round(sum(plus), 2) if plus else None
+    return {
+        "valor":         valor,
+        "aportado":      total_aportado,
+        "plusvalia":     total_plusvalia,
+        "plusvalia_pct": (round(total_plusvalia / total_aportado * 100, 2)
+                          if total_plusvalia is not None and total_aportado else None),
+        "completo":      completo,
+    }
+
+
+def _finanzas_serie_total(cuentas: list[dict]) -> list[dict]:
+    """Serie diaria sumada de todas las cuentas.
+
+    Solo se suman los días en los que TODAS tienen valor. Con dos cuentas abiertas en
+    fechas distintas, incluir los días en que solo existía una dibujaría un salto hacia
+    arriba el día que empieza la segunda: la línea diría "ganaste 20.000 € en un día"
+    cuando lo que pasó es que empezó a contar otra cuenta.
+    """
+    series = [c["serie"] for c in cuentas if c["serie"]]
+    if not series:
+        return []
+    por_fecha = [{p["fecha"]: p for p in serie} for serie in series]
+    comunes   = set.intersection(*[set(d) for d in por_fecha])
+    fuera     = []
+    for fecha in sorted(comunes):
+        puntos  = [d[fecha] for d in por_fecha]
+        aportes = [p["aportado"] for p in puntos]
+        fuera.append({
+            "fecha":    fecha,
+            "valor":    round(sum(p["valor"] for p in puntos), 2),
+            "aportado": round(sum(aportes), 2) if all(a is not None for a in aportes) else None,
+        })
+    return fuera[-INDEXA_SERIE_DIAS:]
+
+
+def _finanzas_datos() -> dict:
+    """Consulta Indexa y arma el resumen. Sin caché: eso lo pone el endpoint."""
+    yo       = _indexa_get("/users/me", "users/me")
+    en_bruto = yo.get("accounts")
+    elegidas, omitidas = [], []
+    for c in (en_bruto if isinstance(en_bruto, list) else []):
+        c      = c or {}
+        numero = str(c.get("account_number") or "")
+        estado = str(c.get("status") or "")
+        # El número se interpola en la URL de la siguiente llamada: se valida con patrón,
+        # igual que los path params de Supabase (invariante 6 de CLAUDE.md).
+        if not _INDEXA_CUENTA_RE.match(numero):
+            omitidas.append({"cuenta": None, "motivo": "número de cuenta con forma inesperada"})
+            continue
+        if INDEXA_CUENTAS and numero not in INDEXA_CUENTAS:
+            continue
+        if estado not in _INDEXA_ESTADOS_CON_DINERO:
+            omitidas.append({"cuenta": numero, "motivo": f"estado «{estado}»"})
+            continue
+        elegidas.append((numero, c.get("type")))
+
+    cuentas = []
+    if elegidas:
+        with ThreadPoolExecutor(max_workers=min(4, len(elegidas))) as pool:
+            futuros = [pool.submit(_finanzas_cuenta, n, t) for n, t in elegidas]
+            cuentas = [f.result() for f in futuros]
+
+    return {
+        "configurado": True,
+        "actualizado": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cuentas":     cuentas,
+        "total":       _finanzas_total(cuentas),
+        "serie":       _finanzas_serie_total(cuentas),
+        "omitidas":    omitidas,
+    }
+
+
+_finanzas_cache = None            # (momento_epoch, payload)
+_finanzas_lock  = threading.Lock()
+
+
+@app.get("/finanzas/resumen")
+def get_finanzas(
+    refrescar: bool = False,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie de valor.
+
+    Sin `INDEXA_TOKEN` no es un error: es una integración que no está puesta. Devuelve
+    `configurado: false` y el frontend dice qué falta, igual que hace el calendario cuando
+    no hay sesión de Outlook.
+    """
+    if not INDEXA_TOKEN:
+        return {"configurado": False, "motivo": "Falta INDEXA_TOKEN en el backend"}
+
+    global _finanzas_cache
+    if not refrescar:
+        with _finanzas_lock:
+            guardado = _finanzas_cache
+        if guardado and time.time() - guardado[0] < INDEXA_TTL_MINUTOS * 60:
+            return {**guardado[1], "de_cache": True}
+
+    # La consulta se hace FUERA del lock. Dos cargas simultáneas tras un cold start pueden
+    # preguntar las dos a Indexa; retenerlas aquí a cambio dejaría a la segunda esperando
+    # a una llamada de red que no es suya.
+    try:
+        datos = _finanzas_datos()
+    except _IndexaFallo as e:
+        logger.error("Indexa: no se pudo construir el resumen (%s)", e)
+        raise HTTPException(status_code=502, detail="No se pudo consultar Indexa Capital")
+
+    with _finanzas_lock:
+        _finanzas_cache = (time.time(), datos)
+    return {**datos, "de_cache": False}
+
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
 
@@ -8446,6 +8802,44 @@ def _j_estado_pc() -> dict:
         "hace_segundos":    agente.get("silence_seconds"),
     }
 
+def _j_finanzas() -> dict:
+    """La cartera de Indexa, recortada para el prompt.
+
+    El detalle entero son una decena de fondos por cuenta con gestora, ISIN, títulos y
+    precio, y todo eso se paga por token sin responder a nada de lo que de verdad se
+    pregunta ("¿cuánto tengo?", "¿cómo va?"). Van los totales, la mezcla y las cinco
+    posiciones mayores; el detalle está en el dashboard, que es donde se mira.
+    """
+    datos = get_finanzas(credentials=None)
+    if not datos.get("configurado"):
+        return {
+            "configurado": False,
+            "dile_al_usuario_literalmente": "No tengo conectada la cartera de Indexa "
+                                            "Capital: falta el token en el backend.",
+        }
+    return {
+        "total":         datos.get("total"),
+        "fecha_valores": next((c.get("fecha_valores") for c in datos.get("cuentas") or []
+                               if c.get("fecha_valores")), None),
+        "cuentas": [{
+            "numero":             c.get("numero"),
+            "tipo":               c.get("tipo"),
+            "valor":              c.get("valor"),
+            "aportado":           c.get("aportado"),
+            "plusvalia":          c.get("plusvalia"),
+            "plusvalia_pct":      c.get("plusvalia_pct"),
+            "plusvalia_origen":   c.get("plusvalia_origen"),
+            "rentabilidad_anual": c.get("rentabilidad_anual"),
+            "distribucion":       c.get("distribucion"),
+            "mayores":            [{"nombre": p["nombre"], "valor": p["valor"]}
+                                   for p in (c.get("posiciones") or [])[:5]],
+        } for c in datos.get("cuentas") or []],
+        # Las rentabilidades vienen en fracción (0.0523 = 5,23 %); dicho aquí para que no
+        # se lea un 0,05 como "cinco céntimos" ni como "un 0,05 %".
+        "unidades": "Euros. Las rentabilidades son fracciones: 0.0523 = 5,23 %.",
+    }
+
+
 
 def _j_ideas(limite: int = 10) -> dict:
     limite = max(1, min(int(limite or 10), 30))
@@ -9678,6 +10072,7 @@ def _j_diagnostico(dias: int = 3) -> dict:
         "graph":           bool(_token_cache or CLIENT_ID),
         "busqueda_web":    bool(TAVILY_API_KEY or BRAVE_API_KEY),
         "rutina_briefing": bool(RUTINA_FIRE_URL and RUTINA_FIRE_TOKEN),
+        "finanzas":        bool(INDEXA_TOKEN),
     }
     return salida
 
@@ -9711,6 +10106,9 @@ def _j_mis_capacidades() -> dict:
     if not JARVIS_REPO:
         apagado.append("No sé en qué repositorio vives (JARVIS_REPO), así que no puedo "
                        "proponer mejoras de mi propio código.")
+    if not INDEXA_TOKEN:
+        apagado.append("La cartera de Indexa Capital no está conectada (falta INDEXA_TOKEN), "
+                       "así que no puedo decir cuánto tienes invertido.")
 
     return {
         "herramientas": [{
@@ -9791,6 +10189,16 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   False,
         "fn":          lambda: training_summary(credentials=None),
         "descripcion": "Sesiones de entrenamiento personal pendientes de cobro, horas y euros.",
+        "parametros":  {},
+    },
+    "finanzas": {
+        "confirmar":   False,
+        "fn":          _j_finanzas,
+        "descripcion": "La cartera de Indexa Capital: cuánto vale, cuánto se ha aportado, "
+                       "la plusvalía y en qué está invertido. Mira `fecha_valores` antes "
+                       "de decir «hoy»: Indexa valora una vez al día y con retraso. "
+                       "`plusvalia_origen` dice si la ganancia es la de la cuenta entera o "
+                       "solo la de los fondos que hay ahora.",
         "parametros":  {},
     },
     "estado_pc": {

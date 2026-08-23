@@ -58,6 +58,7 @@ def main() -> int:
         ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
         ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
         ("Agente PC (cola de jobs)", ["AGENT_TOKEN"]),
+        ("Finanzas (cartera de Indexa Capital)", ["INDEXA_TOKEN"]),
         ("Revisión nocturna accionable (aviso con botones)",
          ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
     ]

@@ -212,6 +212,20 @@ Sin coordenadas (un `device_tracker` por presencia en la red, por ejemplo) tambi
 funciona: `lat`/`lon` viajan como `null` y se sigue registrando la zona y la serie
 diaria, pero el clima y la hora de salida se quedan en sus valores por defecto.
 
+## 6 bis. Cartera de Indexa Capital (opcional)
+
+Si tienes cuenta en [Indexa Capital](https://indexacapital.com), el dashboard puede
+enseñar la cartera. Crea un token en **Configuración de usuario → Aplicaciones** y ponlo
+en `INDEXA_TOKEN` del backend. Nada más: no hay migración ni tabla, porque el histórico
+lo sirve la propia API.
+
+El token va **solo en el backend**, nunca en una variable `VITE_*`: esas viajan al
+navegador y ese token abre la cuenta entera. El acceso es de solo lectura por diseño —
+el backend no llama a ningún endpoint de Indexa que mueva dinero.
+
+Sin la variable, el widget dice que no está conectado y el resto del dashboard funciona
+igual. Detalle en `docs/FINANZAS.md`.
+
 ## 7. Resumen diario por correo (opcional)
 
 Cada mañana el backend puede mandarte a tu propio buzón los datos del día —agenda,
@@ -307,7 +321,8 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
 `JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `JARVIS_MODEL_ACCION`,
 `JARVIS_MAX_TOKENS_VOZ`, `JARVIS_RESERVA_RAZONAMIENTO`, `JARVIS_REPO`,
-`CASA_ORDEN_TTL`.
+`CASA_ORDEN_TTL`, `INDEXA_TOKEN`, `INDEXA_API_URL`, `INDEXA_CUENTAS`,
+`INDEXA_TTL_MINUTOS`, `INDEXA_SERIE_DIAS`.
 (* = obligatoria para arrancar.)
 
 **Memoria de Jarvis**: ejecuta la migración `20260807_jarvis_memoria.sql` para que
