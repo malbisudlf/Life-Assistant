@@ -3931,7 +3931,11 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
 
     zona    = body.zona.strip() or "desconocida"
     en_casa = body.en_casa if body.en_casa is not None else zona.lower() in ZONAS_CASA
-    ahora   = datetime.now(timezone.utc)
+    # _ahora_local() y no datetime.now(timezone.utc) directo: mismo motivo que en el
+    # resumen diario — es el punto único que un test puede fijar sin tocar el reloj del
+    # módulo entero. Sin esto, un test que pidiera "60 minutos en casa" a caballo de la
+    # medianoche local veía el tramo partido entre ayer y hoy sin poder controlarlo.
+    ahora   = _ahora_local().astimezone(timezone.utc)
 
     # El tramo que acaba ahora se atribuye a donde se estaba ANTES, no a donde se está.
     anterior = _leer_presencia()
