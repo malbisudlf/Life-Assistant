@@ -14,6 +14,7 @@ dist-ssr
 
 # Backend secrets y entorno
 backend/.env
+backend/*.pem
 # Copias de seguridad del .env: `backend/.env` NO las cubre y llevan los mismos
 # secretos dentro (.env.example sí se versiona, por eso el patrón no es .env.*).
 backend/.env.bak*
