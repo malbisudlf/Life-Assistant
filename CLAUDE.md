@@ -101,6 +101,7 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
+    ├── Indexa Capital ── cartera de inversión (solo lectura, copia en memoria)
     ├── OpenAI ── Whisper (transcripción), GPT-4o-mini (extracción de ideas
     │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
@@ -148,6 +149,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
+| `docs/FINANZAS.md` | Módulo de finanzas: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no hay tabla) |
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/AGENTE_PC.md` | `agent/agent.py`: ciclo de vida, por qué no hay PowerShell en el camino crítico, streaming y Alud |
 | `docs/TESTS.md` | Antes de escribir tests: cómo está montado cada suite y sus trampas conocidas |

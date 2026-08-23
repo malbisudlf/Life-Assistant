@@ -117,30 +117,35 @@ Qué hace cada uno:
 4. **Entregas (`entregas`)** — eventos con el marcador `VITE_ENTREGAS_MARKER` (📚) en el
    título, buscados en **ambos** calendarios (`allEvents` + `classEvents`). Incluye los
    de hoy y los futuros.
-5. **Entrenamiento (`training`)** — sesiones desde el último cobro, euros pendientes,
+5. **Finanzas (`finanzas`)** — la cartera de Indexa Capital: valor total, plusvalía en
+   euros y en porcentaje, cuánto se movió desde el último día con dato, sparkline de la
+   serie, barra de mezcla por clase de activo y el detalle de posiciones plegado. El ↻
+   salta la caché del backend. Un dato que Indexa no dio sale como `—`, nunca como 0 €
+   (ver `docs/FINANZAS.md`).
+6. **Entrenamiento (`training`)** — sesiones desde el último cobro, euros pendientes,
    formulario de añadir sesión, botón de cobro.
-6. **Ideas (`ideas`)** — grabación de audio (Whisper) **o** texto escrito ("✎ Escribir
+7. **Ideas (`ideas`)** — grabación de audio (Whisper) **o** texto escrito ("✎ Escribir
    idea") → extracción con GPT-4o-mini → Supabase. Si la nota señala una cita, ofrece un
    chip para crear el evento (nunca lo crea solo).
-7. **Conteo ropa (`clothing`)** — **TEMPORAL**, ver abajo.
-8. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
+8. **Conteo ropa (`clothing`)** — **TEMPORAL**, ver abajo.
+9. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
    apagar/suspender. Barra de progreso con polling cada 2s y badge de estado
    (pending/claimed/running) con los stages en nombres legibles.
-9. **Bienestar (`health_wellness`)** — toggle "Semana | Hoy". Puntuación 0–100 +
-   insights + recomendación + hora de la última sync. Al final, el mini-apartado
-   **Composición corporal**: peso (`weight_body_mass`), % grasa y masa magra en la misma
-   fila, cada uno con flecha ↑↓ coloreada. La del peso se colorea según si te acercas o
-   alejas del objetivo configurado en ⚙; la barra de progreso indica la **distancia real**
-   ("faltan X.X kg", no solo un %) y se colorea según la tendencia reciente
-   (`weightDelta`): verde si te acercas, rojo si te alejas.
-10. **Sueño (`health_sleep`)** — noche anterior: duración, fases (profundo/REM/core/
+10. **Bienestar (`health_wellness`)** — toggle "Semana | Hoy". Puntuación 0–100 +
+    insights + recomendación + hora de la última sync. Al final, el mini-apartado
+    **Composición corporal**: peso (`weight_body_mass`), % grasa y masa magra en la misma
+    fila, cada uno con flecha ↑↓ coloreada. La del peso se colorea según si te acercas o
+    alejas del objetivo configurado en ⚙; la barra de progreso indica la **distancia real**
+    ("faltan X.X kg", no solo un %) y se colorea según la tendencia reciente
+    (`weightDelta`): verde si te acercas, rojo si te alejas.
+11. **Sueño (`health_sleep`)** — noche anterior: duración, fases (profundo/REM/core/
     despierto) con tooltips, puntuación 0–100 y resumen de las últimas 7 noches. Botón
     **"Anular noche"** para excluir noches con datos malos (p. ej. el Watch en carga);
     las anuladas se omiten de todos los cálculos. Cada barra del historial es clickable
     para excluir/restaurar. El flag vive en `extra.excluded` de Supabase.
-11. **Freq. cardíaca / HRV / Actividad / Entrenamientos AW** — sparklines y listas de
+12. **Freq. cardíaca / HRV / Actividad / Entrenamientos AW** — sparklines y listas de
     detalle (ocultos por defecto; el hub de salud los reutiliza).
-12. **Salud (`health_hub`)** — widget compacto con veredicto general + top conclusiones;
+13. **Salud (`health_hub`)** — widget compacto con veredicto general + top conclusiones;
     al pulsar abre el modal `healthModalOpen` con TODAS las conclusiones por dominio + los
     widgets de salud de detalle reutilizados vía `renderWidget`.
 
