@@ -18,6 +18,13 @@ os.environ.setdefault("HEALTH_INGEST_TOKEN", "health-token")
 os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 os.environ.setdefault("BRIEF_TOKEN", "brief-token")
 os.environ.setdefault("AGENT_TOKEN", "agent-token")
+# Sin esto, un backend/.env local con Enable Banking configurado (para probar el
+# saldo de Revolut a mano) se cuela en los tests vía load_dotenv() dentro de main.py:
+# load_dotenv() no pisa variables que YA existen en el entorno, así que fijarlas aquí
+# a vacío es lo que garantiza "sin configurar" pase lo que pase en la máquina de quien
+# ejecute la suite. Rompió un test que no tenía nada que ver con Revolut.
+os.environ.setdefault("ENABLE_BANKING_APPLICATION_ID", "")
+os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "")
 # El registro persistente escribe en Supabase desde un hilo de fondo. Encendido en los
 # tests, ese hilo colaría POSTs a app_logs en el MockRouter de cualquier test que además
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los
@@ -163,6 +170,9 @@ def _limpiar_estado():
     # La copia en memoria de la cartera de Indexa: sin tirarla, el primer test que la
     # llene dejaría a los siguientes leyendo su respuesta en vez de la que mockean.
     main._finanzas_cache = None
+    # Lo mismo con el saldo de Revolut y el JWT de aplicación de Enable Banking.
+    main._revolut_cache = None
+    main._eb_jwt_cache = None
 
 
 @pytest.fixture(autouse=True)

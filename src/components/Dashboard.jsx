@@ -2957,9 +2957,9 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="finanzas">
           <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Finanzas</span>
-            {finanzas?.configurado && (
+            {(finanzas?.configurado || finanzas?.revolut?.configurado) && (
               <button onClick={() => loadFinanzas({ refrescar: true })} disabled={finanzasCargando}
-                title="Volver a preguntar a Indexa (el dato normal es de hace unas horas)"
+                title="Volver a preguntar a Indexa y Revolut (el dato normal es de hace unas horas)"
                 style={{
                   padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
                   letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
@@ -2970,13 +2970,15 @@ export default function Dashboard() {
           </div>
           {!finanzas ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Cargando cartera...</div>
-          ) : finanzas.error ? (
-            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No se pudo consultar Indexa</div>
-          ) : !finanzas.configurado ? (
-            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0", lineHeight: 1.6 }}>
-              Sin conectar. {finanzas.motivo || "Falta el token de Indexa Capital."}
-            </div>
-          ) : (() => {
+          ) : (
+            <>
+              {finanzas.error ? (
+                <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No se pudo consultar Indexa</div>
+              ) : !finanzas.configurado ? (
+                <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0", lineHeight: 1.6 }}>
+                  Sin conectar. {finanzas.motivo || "Falta el token de Indexa Capital."}
+                </div>
+              ) : (() => {
             const { total, serie, cuentas = [] } = finanzas;
             const variacion = variacionCartera(serie);
             const positiva  = (total?.plusvalia ?? 0) >= 0;
@@ -3108,6 +3110,41 @@ export default function Dashboard() {
               </>
             );
           })()}
+
+              {finanzas.revolut && (
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--border2)" }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>
+                    Ahorro en Revolut
+                  </div>
+                  {!finanzas.revolut.configurado ? (
+                    <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.6 }}>
+                      Sin conectar. {finanzas.revolut.motivo}
+                    </div>
+                  ) : (
+                    <>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 18, color: "var(--text)" }}>
+                        {formatoEuros(finanzas.revolut.saldo)}
+                      </span>
+                      {/* Solo se ve la cuenta corriente: la de ahorro (vault) de Revolut no
+                          tiene IBAN propio y no aparece como cuenta separada en el
+                          consentimiento — no es un fallo de esta integración, Revolut no
+                          la expone por esta vía. */}
+                      {finanzas.revolut.cuentas.length > 1 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                          {finanzas.revolut.cuentas.map((c, i) => (
+                            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)" }}>
+                              <span>{c.nombre || "Cuenta"}</span>
+                              <span style={{ fontFamily: "'DM Mono', monospace" }}>{formatoEuros(c.saldo)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
       );
       case "jarvis": return (

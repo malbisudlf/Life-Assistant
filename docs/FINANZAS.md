@@ -1,15 +1,18 @@
 <!-- Parte de la guía del repositorio. El índice y las reglas que aplican
      SIEMPRE están en CLAUDE.md, en la raíz. -->
 
-## Finanzas: la cartera de Indexa Capital
+## Finanzas: la cartera de Indexa Capital + el ahorro en Revolut
+
+Un widget, dos fuentes. `GET /finanzas/resumen` devuelve la cartera de Indexa en las
+claves de siempre y el saldo de Revolut en `revolut`. No se suman entre sí — uno es
+inversión (con plusvalía, aportado, rentabilidad) y el otro es dinero parado en una
+cuenta corriente; sumarlos daría un "total" que no significa nada.
+
+### Indexa Capital
 
 Un widget que dice cuánto hay invertido, cuánto se ha aportado, cuánto lleva ganado y en
 qué está puesto. **Solo lectura**: la API de Indexa tiene endpoints que mueven dinero y
 aquí no se usa ninguno a propósito — el dashboard es un sitio para mirar el dinero.
-
-De momento **solo Indexa**. Revolut se dejó fuera a sabiendas: su API para particulares no
-da acceso a la cuenta personal sin montar una app de negocio con certificados y consentimiento
-periódico, que es un proyecto entero y no un widget (ver "Lo que no se hace y por qué").
 
 ### Cómo se saca el token
 
@@ -94,6 +97,9 @@ Los formateadores son puros y viven en `src/lib/helpers.js`: `formatoEuros`,
 `formatoPorcentaje`, `formatoRentabilidad` (fracción → porcentaje, en un solo sitio para que
 nadie multiplique por 100 a ojo), `mezclaCartera` y `variacionCartera`.
 
+Debajo, separado con una línea, el bloque de Revolut (`finanzas.revolut`): solo el saldo, sin
+serie ni mezcla — es un ahorro, no una cartera. El botón ↻ refresca los dos a la vez.
+
 ### Jarvis
 
 Herramienta `finanzas`, de consulta directa (no pide confirmación: no toca nada). Devuelve
@@ -112,6 +118,13 @@ dentro (`dile_al_usuario_literalmente`), y aparece también en `mis_capacidades`
 | `INDEXA_CUENTAS` | (todas) | Filtro de números de cuenta separados por comas. **No** sustituye a `/users/me`: el estado y el tipo salen de ahí, y una lista escrita a mano no sabría que una cuenta se canceló |
 | `INDEXA_TTL_MINUTOS` | `180` | Vida de la copia en memoria |
 | `INDEXA_SERIE_DIAS` | `365` | Días de serie que se devuelven al frontend (la completa es desde que abriste la cuenta y viaja entera en cada respuesta) |
+| `ENABLE_BANKING_APPLICATION_ID` | — | El `application_id` de la app registrada en su Control Panel |
+| `ENABLE_BANKING_PRIVATE_KEY_PATH` | — | Ruta al `.pem` descargado UNA VEZ al registrar la app (no se puede volver a descargar) |
+| `ENABLE_BANKING_API_URL` | `https://api.enablebanking.com` | Solo para pruebas |
+| `ENABLE_BANKING_ASPSP_NAME` / `_COUNTRY` | `Revolut` / `ES` | El banco al que se pide consentimiento |
+| `ENABLE_BANKING_REDIRECT_URL` | — | Debe estar en las "Redirect URLs" de la app y apuntar al backend, no al frontend. Tiene que ser `https`, incluso en local |
+| `ENABLE_BANKING_VALID_DIAS` | `180` | Cuánto dura el consentimiento antes de tener que repetirlo |
+| `ENABLE_BANKING_TTL_MINUTOS` | `60` | Vida de la copia en memoria del saldo |
 
 ### Los tests
 
@@ -124,13 +137,69 @@ viaja en cabecera y no en la URL.
 El E2E (`tests/e2e/servidor_pruebas.py`) trae una cartera simulada con 40 días de serie, así
 que el widget se pinta con números de verdad en un navegador real.
 
+### Revolut (vía Enable Banking)
+
+Enable Banking es un agregador PSD2/open banking (licencia AISP propia en la UE): no hace
+falta que el usuario del dashboard tenga su propia licencia regulatoria, algo que sí exigen
+GoCardless/Nordigen, Salt Edge o usar la API de Revolut directamente. Con eso resuelto, lo que
+da acceso NO es un token fijo como Indexa — es un consentimiento OAuth con el banco, con el
+mismo patrón que Microsoft Graph (`/auth/login` → `/auth/callback`, `state` firmado con
+`SECRET_KEY`), solo que aquí es `/auth/enablebanking/login` → `/auth/enablebanking/callback`.
+
+**El flujo:**
+
+1. `GET /auth/enablebanking/login` (JWT del dashboard) construye un JWT de *aplicación*
+   (`_enable_banking_jwt()`, RS256, firmado con la clave privada RSA que se descargó UNA VEZ
+   al registrar la app en su Control Panel — Enable Banking no la vuelve a enseñar; si se
+   pierde, hay que registrar otra app) y llama a `POST /auth` de Enable Banking. Devuelve una
+   `auth_url` a la que el usuario tiene que ir a autorizar con Revolut.
+2. Revolut redirige a `ENABLE_BANKING_REDIRECT_URL` (el backend, no el frontend — como Graph)
+   con un `code`. `GET /auth/enablebanking/callback` verifica el `state` (misma función que
+   Graph, `_verify_oauth_state`, genérica de sobra para reusarla) y canjea el `code` por una
+   sesión con `POST /sessions`.
+3. La sesión (`session_id` + `valid_until`, hasta `ENABLE_BANKING_VALID_DIAS` días — 180 por
+   defecto) se guarda en `oauth_tokens` (la misma tabla de Graph, `provider =
+   "enablebanking_revolut"`, sin `refresh_token`: a diferencia de Graph, una sesión caducada
+   **no se renueva sola** — hay que repetir el paso 1).
+4. `_revolut_datos()` usa esa sesión para pedir `GET /sessions/{id}` (la lista de cuentas
+   autorizadas), y por cada una `GET /accounts/{uid}/details` (nombre, moneda) y
+   `GET /accounts/{uid}/balances` (saldo; se prefiere el tipo `ITAV`, disponible, sobre `CLAV`,
+   contable). Se cachea con `ENABLE_BANKING_TTL_MINUTOS` (60 por defecto — un saldo de cuenta
+   corriente se mueve durante el día, así que el TTL es mucho más corto que el de Indexa).
+
+**Redirect URL: tiene que ser `https`, incluso en local.** Enable Banking rechaza `http://`
+con `REDIRECT_URI_NOT_ALLOWED` incluso para `localhost`. Para probar en local hace falta un
+certificado autofirmado (`openssl req -x509 -newkey rsa:2048 -nodes -keyout
+backend/localhost-key.pem -out backend/localhost-cert.pem -days 365 -subj "/CN=localhost"`,
+ambos en `.gitignore` vía `backend/*.pem`) y arrancar uvicorn con `--ssl-keyfile`/
+`--ssl-certfile`. El navegador avisará de certificado no confiable una vez; para una prueba
+propia vale con continuar.
+
+**La documentación pública de Enable Banking no coincide con la API real** en un punto
+concreto: dice que `accounts` en la respuesta de `POST /sessions` y `GET /sessions/{id}` son
+objetos con `uid`, `name`, `currency`... y en realidad son solo una lista de **UIDs (string)**.
+El nombre y la moneda hay que sacarlos aparte de `GET /accounts/{uid}/details`. Costó un 500
+descubrirlo — si su documentación cambia de forma otra vez, es aquí donde se nota primero.
+
+**Solo aparece la cuenta corriente, no la de ahorro (vault).** Se comprobó en la propia
+pantalla de consentimiento de Revolut: solo ofrece una cuenta para compartir, con el motivo de
+que el vault de ahorro no tiene IBAN propio — no es una cuenta de pago separada a ojos de
+Revolut, así que no la expone por PSD2. No hay nada que arreglar en este backend: es Revolut
+quien no la ofrece.
+
+**La cartera de inversión/cripto de Revolut es inalcanzable por esta vía, y por CUALQUIER
+agregador PSD2 (Enable Banking, GoCardless, Salt Edge, Tink...).** PSD2 solo cubre cuentas de
+*pago*; las posiciones de inversión quedan fuera de su ámbito legal hasta que entre en vigor
+FIDA (Financial Data Access), que a fecha de escribir esto no está desplegada en ningún banco.
+No es una limitación de esta integración: ningún AISP puede pedir ese dato hoy, venga de donde
+venga. Si algún día se quiere esa cartera en el dashboard, la única vía real es la API propia
+de la plataforma donde se invierta — igual que Indexa — y de los brokers de acciones/ETFs
+habituales (DEGIRO, Trade Republic, MyInvestor) **ninguno tiene API pública**; el único con API
+oficial documentada es Interactive Brokers (pendiente de evaluar: exige mantener corriendo su
+Client Portal Gateway, más trabajoso que un token fijo).
+
 ### Lo que no se hace y por qué
 
-- **Revolut.** Era la otra mitad de la idea. Su API abierta para particulares no existe como
-  tal: hay que darse de alta como negocio, generar un certificado, publicar una app y renovar
-  el consentimiento cada 90 días — y aun así lo que se saca son movimientos de cuenta, no una
-  cartera. No es un widget: es un proyecto. Queda fuera hasta que haya una razón mejor que
-  "estaría bien tenerlo todo junto".
 - **Escribir en Indexa** (aportaciones, traspasos). El token puede; el dashboard no debe. Un
   botón que mueve dinero de verdad no pinta en una pantalla que existe para mirar.
 - **Guardar el histórico en Supabase.** Ya está explicado arriba: lo da Indexa entero en cada
