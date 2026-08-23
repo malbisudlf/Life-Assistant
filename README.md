@@ -1,6 +1,6 @@
 # Life Assistant
 
-Dashboard personal que centraliza calendario, salud, entrenamientos, ideas, ropa, hogar
+Dashboard personal que centraliza calendario, salud, entrenamientos, finanzas, ideas, ropa, hogar
 inteligente y un agente PC autónomo — y, por encima de todo eso, un asistente (Jarvis)
 que consulta, actúa y avisa sin que se le pida.
 
@@ -42,6 +42,9 @@ Los datos llegan automáticamente desde Apple Watch via Health Auto Export e iOS
 - Contador de sesiones desde el último cobro, horas acumuladas e importe pendiente
 - Formulario para añadir sesiones y registrar cobros
 - Configuración de precio/hora y sesiones por cobro
+
+### Finanzas
+Cartera de [Indexa Capital](https://indexacapital.com) por su API oficial (solo lectura): valor total, cuánto se ha aportado, plusvalía en euros y en porcentaje, rentabilidad anualizada, mezcla por clase de activo y el detalle de posiciones. Enseña siempre a qué día corresponde la valoración —Indexa valora una vez al día y con retraso— y lo que no se sabe sale como `—`, nunca como 0 €.
 
 ### Ideas por voz
 Graba audio → Whisper transcribe → GPT-4o-mini extrae título, categoría y resumen → se guarda en Supabase. Si la nota apunta a una cita, el panel **ofrece** crear el evento con un chip; nunca lo crea solo.

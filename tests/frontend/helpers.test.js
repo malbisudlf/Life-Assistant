@@ -12,6 +12,7 @@ import {
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
+  formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -1484,5 +1485,72 @@ describe("esFinDeLlamada", () => {
   test("el silencio no cuelga", () => {
     expect(esFinDeLlamada("")).toBe(false);
     expect(esFinDeLlamada(null)).toBe(false);
+  });
+});
+
+describe("finanzas — formateo", () => {
+  test("formatoEuros: miles a la española y signo opcional", () => {
+    expect(formatoEuros(12500)).toBe("12.500 €");
+    // Sin punto en los de cuatro cifras: es la regla del español, y la aplica el
+    // propio Intl. No es un fallo del formateador.
+    expect(formatoEuros(1234.56, { decimales: 2 })).toBe("1234,56 €");
+    expect(formatoEuros(1500, { signo: true })).toBe("+1500 €");
+    expect(formatoEuros(-50, { signo: true })).toBe("-50 €");
+  });
+
+  test("lo que no se sabe no es cero", () => {
+    // El backend manda null cuando Indexa no dio el dato: pintarlo como 0 € sería
+    // afirmar algo sobre el dinero de alguien que nadie ha comprobado.
+    expect(formatoEuros(null)).toBe("—");
+    expect(formatoEuros(undefined)).toBe("—");
+    expect(formatoPorcentaje(null)).toBe("—");
+    expect(formatoRentabilidad(null)).toBe("—");
+    expect(formatoEuros(0)).toBe("0 €");
+  });
+
+  test("formatoPorcentaje y formatoRentabilidad no son lo mismo", () => {
+    // El primero recibe porcentajes; el segundo, las fracciones que da Indexa.
+    expect(formatoPorcentaje(13.64)).toBe("13,6 %");
+    expect(formatoPorcentaje(13.64, { signo: true })).toBe("+13,6 %");
+    expect(formatoRentabilidad(0.0523)).toBe("5,2 %");
+    expect(formatoRentabilidad(0.0523, { decimales: 2 })).toBe("5,23 %");
+  });
+});
+
+describe("mezclaCartera", () => {
+  test("reparte en porcentaje y mantiene el orden fijo", () => {
+    const tramos = mezclaCartera({ efectivo: 250, bonos: 3250, acciones: 9000 });
+    expect(tramos.map(t => t.clase)).toEqual(["acciones", "bonos", "efectivo"]);
+    expect(tramos[0].pct).toBeCloseTo(72, 0);
+    expect(tramos.reduce((a, t) => a + t.pct, 0)).toBeCloseTo(100, 5);
+  });
+
+  test("las clases vacías no salen y las desconocidas van al final", () => {
+    const tramos = mezclaCartera({ acciones: 100, bonos: 0, cripto: 50 });
+    expect(tramos.map(t => t.clase)).toEqual(["acciones", "cripto"]);
+  });
+
+  test("sin distribución no hay tramos", () => {
+    expect(mezclaCartera(null)).toEqual([]);
+    expect(mezclaCartera({})).toEqual([]);
+  });
+});
+
+describe("variacionCartera", () => {
+  test("compara contra el último día CON DATO, no contra ayer", () => {
+    // Indexa no valora fines de semana: el lunes se compara con el viernes.
+    const v = variacionCartera([
+      { fecha: "2026-08-21", valor: 12400 },
+      { fecha: "2026-08-24", valor: 12500 },
+    ]);
+    expect(v.desde).toBe("2026-08-21");
+    expect(v.valor).toBe(100);
+    expect(v.pct).toBeCloseTo(0.806, 2);
+  });
+
+  test("con un solo punto no hay variación que enseñar", () => {
+    expect(variacionCartera([{ fecha: "2026-08-21", valor: 12400 }])).toBeNull();
+    expect(variacionCartera([])).toBeNull();
+    expect(variacionCartera(null)).toBeNull();
   });
 });

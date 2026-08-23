@@ -3,7 +3,7 @@
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 885 tests)
+### Backend (`tests/backend`, 912 tests)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -31,7 +31,7 @@ no aquí es lo que está APAGADO por defecto en producción (`REVISION_TOKEN`,
 `ARREGLO_FIRE_URL`…): así el resto de la suite comprueba de paso que sin configurar no
 se enciende solo.
 
-### Frontend (`tests/frontend`, 161 tests)
+### Frontend (`tests/frontend`, 169 tests)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:
@@ -59,6 +59,10 @@ excepción o error de consola, no solo si falta un texto.
 
 - `playwright.config.js` arranca y apaga los dos servidores solo. `VITE_API_URL` se
   hornea en el bundle, así que el build se hace apuntando ya al backend de pruebas.
+- **Las respuestas simuladas de una API de terceros copian su forma real**, no una
+  cómoda: `tests/backend/test_finanzas.py` y el simulador del E2E llevan la cartera de
+  Indexa tal cual la devuelve (`instrument_accounts` → `positions`, series en
+  `return.total_amounts`). Ese fichero es lo que se entera primero si la API cambia.
 - **Los datos del simulador no son de adorno**: llevan una correlación plantada
   (pasos ↔ sueño) para que el motor de patrones tenga algo que encontrar y el test
   compruebe que el widget de salud llega a conclusiones, no solo que se pinta.

@@ -160,6 +160,9 @@ def _limpiar_estado():
     # cambiaría el de otro.
     main._avisos_movil.clear()
     main._ultimo_sondeo_avisos = 0.0
+    # La copia en memoria de la cartera de Indexa: sin tirarla, el primer test que la
+    # llene dejaría a los siguientes leyendo su respuesta en vez de la que mockean.
+    main._finanzas_cache = None
 
 
 @pytest.fixture(autouse=True)

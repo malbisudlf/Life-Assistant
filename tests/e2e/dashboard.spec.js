@@ -111,3 +111,26 @@ test('Jarvis consulta la agenda y deja una acción por confirmar', async ({ page
 
   expect(page.erroresDeNavegador).toEqual([])
 })
+
+test('el widget de finanzas pinta la cartera de Indexa', async ({ page }) => {
+  await entrar(page)
+
+  const widget = page.locator('[data-card="finanzas"]')
+  await expect(widget).toBeVisible({ timeout: 15_000 })
+  // "Sin conectar" significaría que el backend no llegó a preguntar, y "No se pudo
+  // consultar" que el contrato con la API cambió: las dos cosas son un fallo real.
+  await expect(widget).not.toContainText('Sin conectar')
+  await expect(widget).not.toContainText('No se pudo consultar')
+
+  // Los números salen del backend, que ha agregado las posiciones de la cartera simulada.
+  await expect(widget).toContainText('12.500 €')
+  await expect(widget).toContainText('+1500 €')
+  await expect(widget).toContainText('Acciones')
+
+  // El detalle está plegado a propósito: se despliega a mano.
+  await expect(widget).not.toContainText('Vanguard Global')
+  await widget.getByRole('button', { name: 'Ver posiciones' }).click()
+  await expect(widget).toContainText('Vanguard Global Stock Index Fund')
+
+  expect(page.erroresDeNavegador).toEqual([])
+})

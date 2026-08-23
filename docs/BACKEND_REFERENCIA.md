@@ -56,6 +56,7 @@
 | `POST /training/sessions` · `DELETE /training/sessions/{session_id}` | JWT | Añadir/borrar sesión `{date, duration_hours}` |
 | `PATCH /training/client` | JWT | Precio/hora y sesiones por cobro |
 | `POST /training/payments` | JWT | Marca cobro de hoy (calcula el importe automáticamente) |
+| `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie. `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
 | `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) |
@@ -90,6 +91,10 @@ verifica que la configuración está bien. Resumen:
 
 **Servicios externos**: `GOOGLE_MAPS_API_KEY`, `OPENAI_API_KEY` (opcional de verdad:
 sin ella el backend arranca y `/ideas/*` responde 503).
+
+**Finanzas** (todas opcionales; sin `INDEXA_TOKEN` el widget dice que no está conectado):
+`INDEXA_TOKEN`, `INDEXA_API_URL`, `INDEXA_CUENTAS`, `INDEXA_TTL_MINUTOS`,
+`INDEXA_SERIE_DIAS`.
 
 **Tokens de servicio** (valores aleatorios distintos entre sí): `HA_POLL_TOKEN`,
 `HEALTH_INGEST_TOKEN`, `BRIEF_TOKEN`, `AGENT_TOKEN`.

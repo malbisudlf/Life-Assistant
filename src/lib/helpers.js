@@ -1562,3 +1562,75 @@ export function esFinDeLlamada(texto) {
     .trim();
   return /^(adios|chao|chau|cuelga|corta( la llamada)?|hasta luego|hasta ahora|nos vemos)( |$)/.test(t);
 }
+
+// ── Finanzas (cartera de Indexa Capital) ─────────────────────────
+// Todo lo que llega del backend puede venir a `null`, y ahí `null` significa "no se
+// sabe" (Indexa no respondió a la parte de rendimiento), nunca cero. De ahí que los tres
+// formateadores devuelvan "—" en vez de "0 €": un cero es una afirmación sobre el dinero
+// de alguien y esa afirmación no la tenemos.
+
+/** Euros con separador de miles español. `signo` antepone el + a los positivos, que es
+ *  lo que quiere una plusvalía y no un saldo. */
+export function formatoEuros(valor, { decimales = 0, signo = false } = {}) {
+  if (typeof valor !== "number" || !Number.isFinite(valor)) return "—";
+  const txt = valor.toLocaleString("es-ES", {
+    minimumFractionDigits: decimales,
+    maximumFractionDigits: decimales,
+  });
+  return `${signo && valor > 0 ? "+" : ""}${txt} €`;
+}
+
+/** Un porcentaje que YA viene en porcentaje (13.64 → "13,6 %"). */
+export function formatoPorcentaje(pct, { decimales = 1, signo = false } = {}) {
+  if (typeof pct !== "number" || !Number.isFinite(pct)) return "—";
+  const txt = pct.toLocaleString("es-ES", {
+    minimumFractionDigits: decimales,
+    maximumFractionDigits: decimales,
+  });
+  return `${signo && pct > 0 ? "+" : ""}${txt} %`;
+}
+
+/** Las rentabilidades de Indexa vienen en FRACCIÓN (0.0523 = 5,23 %). Existe esta función
+ *  aparte para que la conversión esté en un solo sitio: multiplicar por 100 a ojo en cada
+ *  sitio donde se pinte es la forma segura de que algún día se muestre un 0,05 %. */
+export function formatoRentabilidad(fraccion, opciones = {}) {
+  if (typeof fraccion !== "number" || !Number.isFinite(fraccion)) return "—";
+  return formatoPorcentaje(fraccion * 100, opciones);
+}
+
+// Orden fijo de las clases de activo en la barra de mezcla. Fijo y no por tamaño a
+// propósito: si los tramos se reordenaran cada vez que una clase adelanta a otra, la
+// barra dejaría de poder compararse de un vistazo con la de la semana pasada.
+export const CLASES_CARTERA = ["acciones", "bonos", "monetario", "efectivo", "otros"];
+
+/** Distribución {clase: euros} → tramos ordenados con su peso en la cartera.
+ *  Las clases sin dinero no salen; una clase que el backend no conozca va al final. */
+export function mezclaCartera(distribucion) {
+  const entradas = Object.entries(distribucion || {})
+    .filter(([, v]) => typeof v === "number" && Number.isFinite(v) && v > 0);
+  const total = entradas.reduce((acc, [, v]) => acc + v, 0);
+  if (!total) return [];
+  return entradas
+    .sort((a, b) => {
+      const ia = CLASES_CARTERA.indexOf(a[0]), ib = CLASES_CARTERA.indexOf(b[0]);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    })
+    .map(([clase, valor]) => ({ clase, valor, pct: (valor / total) * 100 }));
+}
+
+/** Cuánto se ha movido la cartera desde el día anterior de la serie.
+ *
+ *  Se compara con el ÚLTIMO DÍA CON DATO, no con "ayer" del calendario: Indexa no valora
+ *  fines de semana ni festivos, así que restar contra una fecha que no existe en la serie
+ *  daría siempre 0 en lunes — un "no se movió" que sería mentira. */
+export function variacionCartera(serie) {
+  const puntos = (serie || []).filter(p => p && typeof p.valor === "number");
+  if (puntos.length < 2) return null;
+  const [anterior, ultimo] = [puntos[puntos.length - 2], puntos[puntos.length - 1]];
+  const delta = ultimo.valor - anterior.valor;
+  return {
+    desde: anterior.fecha,
+    valor: delta,
+    pct:   anterior.valor ? (delta / anterior.valor) * 100 : null,
+  };
+}

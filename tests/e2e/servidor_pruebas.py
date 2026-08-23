@@ -28,6 +28,9 @@ os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 # El hilo del registro persistente escribiría en el Supabase simulado sin aportar nada
 # al test, y ensucia la salida.
 os.environ.setdefault("LOG_PERSIST", "0")
+# La cartera de Indexa: con el token puesto, el widget de finanzas pide de verdad y el
+# router de abajo responde. Sin él saldría "Sin conectar", que no prueba nada.
+os.environ.setdefault("INDEXA_TOKEN", "indexa-e2e-token")
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el
@@ -49,6 +52,43 @@ def _dia(delta: int) -> str:
 
 def _iso(delta_horas: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=delta_horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cartera_indexa():
+    """Cartera de Indexa con la forma real de la API (`instrument_accounts` → `positions`)."""
+    return {
+        "portfolio": {"total_amount": 12500.0, "cash_amount": 250.0},
+        "instrument_accounts": [{"positions": [
+            {"instrument": {"name": "Vanguard Global Stock Index Fund",
+                            "isin_code": "IE00B03HCZ61", "identifier_name": "ISIN",
+                            "asset_class": "equity_world",
+                            "management_company_description": "Vanguard"},
+             "amount": 9000.0, "cost_amount": 7500.0, "titles": 300.0,
+             "price": 30.0, "date": _dia(-1)},
+            {"instrument": {"name": "Vanguard Euro Government Bond Index",
+                            "isin_code": "IE00B04GQR24", "identifier_name": "ISIN",
+                            "asset_class": "fixed_euro",
+                            "management_company_description": "Vanguard"},
+             "amount": 3250.0, "cost_amount": 3300.0, "titles": 200.0,
+             "price": 16.25, "date": _dia(-1)},
+        ]}],
+    }
+
+
+def _rendimiento_indexa():
+    """Serie de 40 días subiendo poco a poco, para que la sparkline tenga qué dibujar."""
+    totales, netos = {}, {}
+    for i in range(40, 0, -1):
+        totales[_dia(-i)] = round(11800 + (40 - i) * 17.5, 2)
+        netos[_dia(-i)]   = 11000.0
+    return {
+        "return": {
+            "total_amount": 12500.0, "investment": 11000.0, "pl": 1500.0,
+            "time_return": 0.1364, "time_return_annual": 0.0712, "volatility": 0.0891,
+            "total_amounts": totales, "net_amounts": netos,
+        },
+        "plan_expected_return": 0.0521,
+    }
 
 
 class _Respuesta:
@@ -162,6 +202,10 @@ class _RouterSimulado:
         ("/me/calendars", lambda: _Respuesta(_CALENDARIOS_GRAPH)),
         ("graph.microsoft.com", lambda: _Respuesta(_EVENTOS_GRAPH)),
         ("api.open-meteo.com", lambda: _Respuesta(_CLIMA)),
+        ("indexacapital.com/users/me", lambda: _Respuesta(
+            {"accounts": [{"account_number": "E2E12345", "type": "mutual", "status": "active"}]})),
+        ("/portfolio", lambda: _Respuesta(_cartera_indexa())),
+        ("/performance", lambda: _Respuesta(_rendimiento_indexa())),
     ]
 
     def _responder(self, url, **_):

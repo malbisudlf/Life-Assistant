@@ -9,6 +9,7 @@ import {
   wellnessHistory, seriesTrend, trendDirection,
   relojCobertura, relojRachaSinReloj, relojPuesto,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
+  formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -590,6 +591,7 @@ const DEFAULT_COLUMNS = {
   entregas:          "right",
   acciones_pc:       "right",
   training:          "right",
+  finanzas:          "right",
   ideas:             "right",
   clothing:          "right",
   health_wellness:   "left",
@@ -608,6 +610,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
+  { id: "finanzas",          label: "Finanzas",          visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
   { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
@@ -724,6 +727,26 @@ const HEALTH_TAB_LABELS = {
 };
 
 const DIAS_INICIAL = ["D","L","M","X","J","V","S"];
+
+// Barra de mezcla de la cartera. Una clase que Indexa estrene y el backend no sepa
+// clasificar cae en "otros" y se sigue viendo: desaparecer de la barra dejaría una
+// cartera que no suma 100 % sin decir por qué.
+const CLASES_CARTERA_COLOR = {
+  acciones:  "var(--accent)",
+  bonos:     "#4f8fa3",
+  monetario: "#8b68c4",
+  efectivo:  "#6aaa82",
+  otros:     "var(--muted2)",
+};
+// Tipos de cuenta de Indexa. Un tipo nuevo cae a su nombre en crudo, que es feo pero
+// cierto; inventarle una traducción sería peor.
+const CUENTA_INDEXA_LABEL = {
+  mutual: "Fondos", pension: "Pensiones", epsv: "EPSV", employment_plan: "Plan de empleo",
+};
+const CLASES_CARTERA_LABEL = {
+  acciones: "Acciones", bonos: "Bonos", monetario: "Monetario",
+  efectivo: "Efectivo", otros: "Otros",
+};
 
 // ── Preferencias de layout persistidas ───────────────────────────
 // Se leen dos veces (estado + ref que usan los manejadores de arrastre), así que el
@@ -1017,6 +1040,10 @@ export default function Dashboard() {
   });
   // Conteo de ropa (widget temporal). Se persiste en el backend (Supabase); las
   // fotos van como data URL redimensionada en el navegador antes de subirlas.
+  const [finanzas, setFinanzas]                 = useState(null);
+  const [finanzasCargando, setFinanzasCargando] = useState(false);
+  const [finanzasDetalle, setFinanzasDetalle]   = useState(false);   // posiciones desplegadas
+
   const [clothing, setClothing]                 = useState([]);
   const [showClothingForm, setShowClothingForm] = useState(false);
   const [clothingName, setClothingName]         = useState("");
@@ -1227,6 +1254,9 @@ export default function Dashboard() {
 
   // Cargar resumen entrenamiento
   useEffect(() => { if (token) loadTraining(); }, [token]);
+
+  // Cargar la cartera de Indexa
+  useEffect(() => { if (token) loadFinanzas(); }, [token]);
 
   // Cargar datos de salud
   useEffect(() => {
@@ -2147,6 +2177,27 @@ export default function Dashboard() {
     } catch { /* mejor esfuerzo: ignorar */ }
   }
 
+  // La cartera de Indexa. El backend la guarda en memoria unas horas (Indexa valora una
+  // vez al día), así que la carga normal no sale a la red; `refrescar` es lo que la
+  // obliga a preguntar de verdad, y por eso es un botón y no algo automático.
+  async function loadFinanzas({ refrescar = false } = {}) {
+    setFinanzasCargando(true);
+    try {
+      const r = await apiFetch(`${API}/finanzas/resumen${refrescar ? "?refrescar=true" : ""}`,
+                               { headers: authHeaders() });
+      // Un 502 (Indexa caído) trae `{detail}` y no `{configurado}`: sin mirar el estado,
+      // ese cuerpo se pintaba como "no está conectado", que manda a mirar el .env cuando
+      // el token está perfectamente puesto.
+      if (!r.ok) throw new Error("finanzas");
+      setFinanzas(await r.json());
+    } catch {
+      // Si ya había datos en pantalla se quedan: son de hace unas horas y siguen siendo
+      // ciertos. Solo cuando no hay nada que enseñar se dice que falló.
+      setFinanzas(previo => previo || { error: true });
+    }
+    setFinanzasCargando(false);
+  }
+
   async function loadTraining() {
     try {
       const r = await apiFetch(`${API}/training/summary`, { headers: authHeaders() });
@@ -2897,6 +2948,163 @@ export default function Dashboard() {
                     )}
                   </div>
                 )}
+              </>
+            );
+          })()}
+        </div>
+      );
+      case "finanzas": return (
+        <div style={cardStyle} data-card={id} key="finanzas">
+          <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>Finanzas</span>
+            {finanzas?.configurado && (
+              <button onClick={() => loadFinanzas({ refrescar: true })} disabled={finanzasCargando}
+                title="Volver a preguntar a Indexa (el dato normal es de hace unas horas)"
+                style={{
+                  padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
+                  letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
+                  color: "var(--muted)", cursor: finanzasCargando ? "default" : "pointer",
+                  opacity: finanzasCargando ? 0.5 : 1,
+                }}>↻</button>
+            )}
+          </div>
+          {!finanzas ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Cargando cartera...</div>
+          ) : finanzas.error ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No se pudo consultar Indexa</div>
+          ) : !finanzas.configurado ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0", lineHeight: 1.6 }}>
+              Sin conectar. {finanzas.motivo || "Falta el token de Indexa Capital."}
+            </div>
+          ) : (() => {
+            const { total, serie, cuentas = [] } = finanzas;
+            const variacion = variacionCartera(serie);
+            const positiva  = (total?.plusvalia ?? 0) >= 0;
+            const colorPl   = positiva ? "var(--green)" : "#d4645a";
+            const tramos    = mezclaCartera(
+              cuentas.reduce((acc, c) => {
+                for (const [clase, valor] of Object.entries(c.distribucion || {})) {
+                  acc[clase] = (acc[clase] || 0) + valor;
+                }
+                return acc;
+              }, {}),
+            );
+            // La fecha de valoración es la misma para todas las cuentas salvo que a una le
+            // falte: se enseña la más antigua, que es hasta dónde llega lo que se sabe.
+            const fechaValores = cuentas.map(c => c.fecha_valores).filter(Boolean).sort()[0];
+            return (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 31, color: "var(--text)", lineHeight: 1 }}>
+                    {formatoEuros(total?.valor)}
+                  </span>
+                  <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", fontSize: 15, color: colorPl }}>
+                    {formatoEuros(total?.plusvalia, { signo: true })}
+                  </span>
+                  <span style={{ fontSize: 13, color: colorPl }}>
+                    {formatoPorcentaje(total?.plusvalia_pct, { signo: true })}
+                  </span>
+                </div>
+
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.7 }}>
+                  {variacion && (
+                    <span style={{ color: variacion.valor >= 0 ? "var(--green)" : "#d4645a" }}>
+                      {formatoEuros(variacion.valor, { signo: true })} desde {formatShortDate(variacion.desde)}
+                    </span>
+                  )}
+                  {total?.aportado != null && (
+                    <span style={{ marginLeft: variacion ? 8 : 0 }}>· Aportado {formatoEuros(total.aportado)}</span>
+                  )}
+                  {/* La rentabilidad anualizada de Indexa (ponderada por tiempo) no es la
+                      plusvalía dividida entre los años: descuenta el efecto de cuándo
+                      metiste cada aportación. Con una sola cuenta cabe aquí; con varias
+                      va en cada fila, que es donde significa algo. */}
+                  {cuentas.length === 1 && cuentas[0].rentabilidad_anual != null && (
+                    <span style={{ marginLeft: 8 }}>· {formatoRentabilidad(cuentas[0].rentabilidad_anual)} anual</span>
+                  )}
+                  {/* Que falte el rendimiento de una cuenta cambia lo que significan estos
+                      números, así que se dice aquí y no solo en el detalle. */}
+                  {total && total.completo === false && (
+                    <><br /><span style={{ color: "var(--muted2)" }}>Sin datos de rendimiento de alguna cuenta</span></>
+                  )}
+                </div>
+
+                {serie?.length > 1 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <Sparkline data={serie.map(p => ({ value: p.valor }))}
+                      color={positiva ? "var(--green)" : "#d4645a"} height={38} relleno />
+                  </div>
+                )}
+
+                {tramos.length > 0 && (
+                  <>
+                    <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginBottom: 6 }}>
+                      {tramos.map(t => (
+                        <div key={t.clase} title={`${CLASES_CARTERA_LABEL[t.clase] || t.clase}: ${formatoEuros(t.valor)}`}
+                          style={{ width: `${t.pct}%`, background: CLASES_CARTERA_COLOR[t.clase] || CLASES_CARTERA_COLOR.otros }} />
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+                      {tramos.map(t => (
+                        <span key={t.clase} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: 3, background: CLASES_CARTERA_COLOR[t.clase] || CLASES_CARTERA_COLOR.otros }} />
+                          {CLASES_CARTERA_LABEL[t.clase] || t.clase} {formatoPorcentaje(t.pct, { decimales: 0 })}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {cuentas.length > 1 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 }}>
+                    {cuentas.map(c => (
+                      <div key={c.numero} style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 12, minWidth: 0 }}
+                        title={c.rentabilidad_anual != null ? `${formatoRentabilidad(c.rentabilidad_anual)} anual` : undefined}>
+                        <span style={{ color: "var(--muted)" }}>{CUENTA_INDEXA_LABEL[c.tipo] || c.tipo || c.numero}</span>
+                        <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace" }}>{formatoEuros(c.valor)}</span>
+                        <span style={{ color: (c.plusvalia ?? 0) >= 0 ? "var(--green)" : "#d4645a", minWidth: 52, textAlign: "right" }}>
+                          {formatoPorcentaje(c.plusvalia_pct, { signo: true })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {finanzasDetalle && cuentas.flatMap(c => c.posiciones || []).length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                    {cuentas.flatMap(c => (c.posiciones || []).map(p => ({ ...p, cuenta: c.numero }))).map(p => (
+                      <div key={`${p.cuenta}-${p.identificador || p.nombre}`} style={{ fontSize: 12, lineHeight: 1.5 }}>
+                        <div style={{ display: "flex", gap: 8, minWidth: 0 }}>
+                          {/* minWidth:0 para que el nombre largo se recorte en vez de
+                              estirar la tarjeta: un elemento flex no baja de su ancho
+                              de contenido si no se le dice. */}
+                          <span style={{ flex: 1, minWidth: 0, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {p.nombre}
+                          </span>
+                          <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace", color: "var(--muted)" }}>
+                            {formatoEuros(p.valor)}
+                          </span>
+                          <span style={{ color: (p.plusvalia ?? 0) >= 0 ? "var(--green)" : "#d4645a", minWidth: 62, textAlign: "right" }}>
+                            {formatoEuros(p.plusvalia, { signo: true })}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted2)" }}>
+                  {/* Indexa valora una vez al día y con retraso: sin esta fecha, una cartera
+                      del viernes se lee como la de hoy. */}
+                  <span>{fechaValores ? `Valores del ${formatShortDate(fechaValores)}` : "Sin fecha de valoración"}</span>
+                  {cuentas.some(c => (c.posiciones || []).length > 0) && (
+                    <button onClick={() => setFinanzasDetalle(v => !v)}
+                      style={{
+                        marginLeft: "auto", background: "none", border: "none", padding: 0,
+                        font: "inherit", color: "var(--accent)", cursor: "pointer",
+                      }}>{finanzasDetalle ? "Ocultar posiciones" : "Ver posiciones"}</button>
+                  )}
+                </div>
               </>
             );
           })()}
