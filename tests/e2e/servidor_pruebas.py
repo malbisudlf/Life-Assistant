@@ -31,6 +31,11 @@ os.environ.setdefault("LOG_PERSIST", "0")
 # La cartera de Indexa: con el token puesto, el widget de finanzas pide de verdad y el
 # router de abajo responde. Sin él saldría "Sin conectar", que no prueba nada.
 os.environ.setdefault("INDEXA_TOKEN", "indexa-e2e-token")
+# El saldo de Revolut: solo hace falta que _enable_banking_configurado() sea True — la
+# sesión y el JWT se sustituyen directamente en _preparar(), como get_valid_token con
+# Graph. El valor de la clave no importa: nunca se lee de disco en el E2E.
+os.environ.setdefault("ENABLE_BANKING_APPLICATION_ID", "app-e2e-id")
+os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "e2e-no-se-usa.pem")
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el
@@ -206,6 +211,13 @@ class _RouterSimulado:
             {"accounts": [{"account_number": "E2E12345", "type": "mutual", "status": "active"}]})),
         ("/portfolio", lambda: _Respuesta(_cartera_indexa())),
         ("/performance", lambda: _Respuesta(_rendimiento_indexa())),
+        # Revolut vía Enable Banking. La sesión ya se da por buena (ver _preparar): esto
+        # solo cubre lo que _revolut_datos() pide DESPUÉS de tenerla.
+        ("api.enablebanking.com/sessions/", lambda: _Respuesta({"accounts": ["uid-e2e"]})),
+        ("/accounts/uid-e2e/details", lambda: _Respuesta({"name": "Cuenta E2E", "currency": "EUR"})),
+        ("/accounts/uid-e2e/balances", lambda: _Respuesta({"balances": [{
+            "balance_type": "ITAV", "balance_amount": {"currency": "EUR", "amount": "79.70"},
+        }]})),
     ]
 
     def _responder(self, url, **_):
@@ -276,6 +288,13 @@ def _preparar():
     main.http.delete = router.delete
     # Sesión de Graph siempre activa: el OAuth real no tiene sitio en un E2E.
     main.get_valid_token = lambda: "graph-token-e2e"
+    # Lo mismo con Revolut: sesión de Enable Banking siempre vigente y JWT de aplicación
+    # sin firmar de verdad (no hay clave RSA en el entorno de CI, ni falta que hace).
+    main._enable_banking_jwt = lambda: "fake-jwt-e2e"
+    main._eb_cargar_sesion = lambda: {
+        "access_token": "session-e2e",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=180)).timestamp(),
+    }
     # Jarvis: lo único que se sustituye es el modelo. Las herramientas, el bucle y la
     # frontera de confirmación son las de producción.
     main.get_openai_client = lambda: _ModeloSimulado()
