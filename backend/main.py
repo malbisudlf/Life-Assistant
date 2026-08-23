@@ -183,6 +183,26 @@ INDEXA_TTL_MINUTOS = int(os.getenv("INDEXA_TTL_MINUTOS", "180"))
 # los días desde que abriste la cuenta y viaja entera en cada respuesta.
 INDEXA_SERIE_DIAS = int(os.getenv("INDEXA_SERIE_DIAS", "365"))
 
+# ── Finanzas: Enable Banking (Revolut) ─────────────────────────────────────────
+# Agregador PSD2/open banking. A diferencia de Indexa, aquí no hay un token fijo: hay
+# que pasar por un consentimiento OAuth con el banco (como Microsoft Graph), y ese
+# consentimiento caduca (ENABLE_BANKING_VALID_DIAS, tope 180 días marcado por Enable
+# Banking). La clave privada RSA se genera una sola vez al registrar la aplicación en su
+# Control Panel y NO la vuelven a enseñar: si se pierde, hay que registrar otra app.
+ENABLE_BANKING_API_URL         = os.getenv("ENABLE_BANKING_API_URL", "https://api.enablebanking.com").rstrip("/")
+ENABLE_BANKING_APPLICATION_ID  = os.getenv("ENABLE_BANKING_APPLICATION_ID", "")
+ENABLE_BANKING_PRIVATE_KEY_PATH = os.getenv("ENABLE_BANKING_PRIVATE_KEY_PATH", "")
+ENABLE_BANKING_ASPSP_NAME      = os.getenv("ENABLE_BANKING_ASPSP_NAME", "Revolut")
+ENABLE_BANKING_ASPSP_COUNTRY   = os.getenv("ENABLE_BANKING_ASPSP_COUNTRY", "ES")
+# Debe ser una de las "Redirect URLs" registradas para la app en el Control Panel de
+# Enable Banking. Apunta al backend (no al frontend): así el intercambio del código por
+# la sesión pasa por aquí, igual que /auth/callback de Microsoft.
+ENABLE_BANKING_REDIRECT_URL    = os.getenv("ENABLE_BANKING_REDIRECT_URL", "")
+ENABLE_BANKING_VALID_DIAS      = int(os.getenv("ENABLE_BANKING_VALID_DIAS", "180"))
+# El saldo de una cuenta corriente se mueve durante el día (a diferencia de Indexa, que
+# valora una vez): TTL corto, no diario.
+ENABLE_BANKING_TTL_MINUTOS     = int(os.getenv("ENABLE_BANKING_TTL_MINUTOS", "60"))
+
 # ── Resumen diario por correo ─────────────────────────────────────────────────
 # El backend NO redacta el resumen: manda los datos crudos a tu propio buzón y de ahí
 # los recoge la rutina de Claude Code que ya compone el correo diario (lee el buzón,
@@ -2604,21 +2624,27 @@ def get_finanzas(
     refrescar: bool = False,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    """Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie de valor.
+    """Cartera de Indexa Capital + saldo de Revolut: un solo widget, dos fuentes.
+
+    Son cosas distintas (inversión frente a ahorro en cuenta corriente) y el frontend
+    las pinta por separado dentro de la misma tarjeta — no se suman entre sí, porque
+    "plusvalía" y "aportado" no significan nada sobre un saldo en efectivo.
 
     Sin `INDEXA_TOKEN` no es un error: es una integración que no está puesta. Devuelve
     `configurado: false` y el frontend dice qué falta, igual que hace el calendario cuando
-    no hay sesión de Outlook.
+    no hay sesión de Outlook. Lo mismo para `revolut` si no hay sesión de Enable Banking.
     """
+    revolut = _revolut_datos_cache(refrescar)
+
     if not INDEXA_TOKEN:
-        return {"configurado": False, "motivo": "Falta INDEXA_TOKEN en el backend"}
+        return {"configurado": False, "motivo": "Falta INDEXA_TOKEN en el backend", "revolut": revolut}
 
     global _finanzas_cache
     if not refrescar:
         with _finanzas_lock:
             guardado = _finanzas_cache
         if guardado and time.time() - guardado[0] < INDEXA_TTL_MINUTOS * 60:
-            return {**guardado[1], "de_cache": True}
+            return {**guardado[1], "revolut": revolut, "de_cache": True}
 
     # La consulta se hace FUERA del lock. Dos cargas simultáneas tras un cold start pueden
     # preguntar las dos a Indexa; retenerlas aquí a cambio dejaría a la segunda esperando
@@ -2631,7 +2657,217 @@ def get_finanzas(
 
     with _finanzas_lock:
         _finanzas_cache = (time.time(), datos)
-    return {**datos, "de_cache": False}
+    return {**datos, "revolut": revolut, "de_cache": False}
+
+
+# ── FINANZAS: Enable Banking (Revolut) ─────────────────────────────────────────
+# El saldo de Revolut vive DENTRO de /finanzas/resumen (clave "revolut"), no en un
+# endpoint propio: es un ahorro, no una cartera, pero el usuario quiere verlo en el
+# mismo sitio. /auth/enablebanking/login + /auth/enablebanking/callback dan de alta la
+# sesión, igual que /auth/login y /auth/callback con Microsoft.
+#
+# Solo cuenta corriente: la cuenta de ahorro (vault) de Revolut no tiene IBAN propio y
+# no aparece como cuenta separada en el consentimiento — Revolut no la expone por esta
+# vía. Y la cartera de inversión/cripto de Revolut es inalcanzable por CUALQUIER
+# proveedor PSD2: la ley de open banking (PSD2) solo cubre cuentas de pago, las
+# posiciones de inversión quedan fuera de su ámbito hasta que entre en vigor FIDA
+# (todavía no desplegada en ningún banco a fecha de escribir esto).
+
+_eb_jwt_cache = None   # (token, expira_epoch) — el JWT de aplicación dura 5 min aquí
+_eb_jwt_lock  = threading.Lock()
+
+
+def _enable_banking_configurado() -> bool:
+    return bool(ENABLE_BANKING_APPLICATION_ID and ENABLE_BANKING_PRIVATE_KEY_PATH)
+
+
+def _enable_banking_jwt() -> str:
+    """JWT de la APLICACIÓN (no del usuario): firmado con la clave privada RSA que se
+    descargó una sola vez al registrar la app. `kid` en la cabecera es el
+    application_id — así identifica Enable Banking qué clave pública usar para
+    verificar la firma.
+    """
+    global _eb_jwt_cache
+    ahora = datetime.now(timezone.utc)
+    with _eb_jwt_lock:
+        if _eb_jwt_cache and ahora.timestamp() < _eb_jwt_cache[1] - 30:
+            return _eb_jwt_cache[0]
+    with open(ENABLE_BANKING_PRIVATE_KEY_PATH, "r", encoding="utf-8") as f:
+        clave_privada = f.read()
+    expira = ahora + timedelta(minutes=5)
+    token = jwt.encode(
+        {"iss": "enablebanking.com", "aud": "api.enablebanking.com", "iat": ahora, "exp": expira},
+        clave_privada,
+        algorithm="RS256",
+        headers={"kid": ENABLE_BANKING_APPLICATION_ID},
+    )
+    with _eb_jwt_lock:
+        _eb_jwt_cache = (token, expira.timestamp())
+    return token
+
+
+def _eb_headers() -> dict:
+    return {"Authorization": f"Bearer {_enable_banking_jwt()}", "Accept": "application/json"}
+
+
+ENABLE_BANKING_PROVIDER = "enablebanking_revolut"
+
+
+def _eb_guardar_sesion(session_id: str, expires_at: float):
+    """Persiste el session_id en `oauth_tokens` (misma tabla que Graph, otro `provider`).
+
+    No hay refresh_token: a diferencia de Graph, una sesión de Enable Banking caducada
+    no se renueva sola — hay que rehacer /auth/enablebanking/login y pasar otra vez por
+    el consentimiento del banco.
+    """
+    payload = {
+        "provider": ENABLE_BANKING_PROVIDER,
+        "access_token": session_id,
+        "refresh_token": None,
+        "expires_at": expires_at,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{ENABLE_BANKING_PROVIDER}&select=provider",
+        headers=supabase_headers(),
+    )
+    if r.status_code < 300 and r.json():
+        w = http.patch(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{ENABLE_BANKING_PROVIDER}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
+    else:
+        w = http.post(
+            f"{SUPABASE_URL}/rest/v1/oauth_tokens",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json=payload,
+        )
+    if w.status_code >= 300:
+        logger.error("No se pudo persistir la sesión de Enable Banking (%s): %s", w.status_code, (w.text or "")[:500])
+
+
+def _eb_cargar_sesion() -> dict | None:
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{ENABLE_BANKING_PROVIDER}&select=access_token,expires_at",
+        headers=supabase_headers(),
+    )
+    if r.status_code < 300 and r.json():
+        return r.json()[0]
+    return None
+
+
+@app.get("/auth/enablebanking/login")
+def enablebanking_login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    if not _enable_banking_configurado():
+        raise HTTPException(status_code=503, detail="Enable Banking no configurado en el backend")
+    valid_until = (datetime.now(timezone.utc) + timedelta(days=ENABLE_BANKING_VALID_DIAS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = {
+        "access": {"valid_until": valid_until, "balances": True, "transactions": True},
+        "aspsp": {"name": ENABLE_BANKING_ASPSP_NAME, "country": ENABLE_BANKING_ASPSP_COUNTRY},
+        "state": _create_oauth_state(),
+        "redirect_url": ENABLE_BANKING_REDIRECT_URL,
+        "psu_type": "personal",
+    }
+    r = http.post(f"{ENABLE_BANKING_API_URL}/auth", headers=_eb_headers(), json=body)
+    if r.status_code >= 300:
+        logger.error("Enable Banking POST /auth: %s %s", r.status_code, (r.text or "")[:500])
+        raise HTTPException(status_code=502, detail="No se pudo iniciar la conexión con Enable Banking")
+    return {"auth_url": r.json()["url"]}
+
+
+@app.get("/auth/enablebanking/callback")
+def enablebanking_callback(code: str, state: str = ""):
+    # Mismo motivo que /auth/callback de Microsoft: lo llama Enable Banking por
+    # redirect, sin el JWT del dashboard, así que el `state` firmado es la prueba de
+    # que esto arrancó desde una sesión iniciada.
+    if not _verify_oauth_state(state):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solicitud de conexión no reconocida o caducada. Repite el proceso desde el dashboard.",
+        )
+    r = http.post(f"{ENABLE_BANKING_API_URL}/sessions", headers=_eb_headers(), json={"code": code})
+    if r.status_code >= 300:
+        logger.error("Enable Banking POST /sessions: %s %s", r.status_code, (r.text or "")[:500])
+        raise HTTPException(status_code=502, detail="No se pudo completar la conexión con Enable Banking")
+    datos = r.json()
+    session_id = datos["session_id"]
+    valid_until_str = datos.get("access", {}).get("valid_until")
+    try:
+        expires_at = datetime.fromisoformat(valid_until_str.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=ENABLE_BANKING_VALID_DIAS)).timestamp()
+    _eb_guardar_sesion(session_id, expires_at)
+    return {"status": "ok", "message": "Cuenta de Revolut conectada", "cuentas": len(datos.get("accounts", []))}
+
+
+def _revolut_datos() -> dict:
+    """Saldo de las cuentas de Revolut enlazadas vía Enable Banking.
+
+    Sin sesión guardada o caducada no es un error: es una integración que no está
+    conectada todavía, igual que Indexa sin token.
+    """
+    if not _enable_banking_configurado():
+        return {"configurado": False, "motivo": "Enable Banking no configurado en el backend"}
+    sesion = _eb_cargar_sesion()
+    if not sesion:
+        return {"configurado": False, "motivo": "Ninguna cuenta conectada. Ve a /auth/enablebanking/login"}
+    if datetime.now(timezone.utc).timestamp() > sesion["expires_at"]:
+        return {"configurado": False, "motivo": "La conexión con Revolut ha caducado. Vuelve a conectar en /auth/enablebanking/login"}
+
+    session_id = sesion["access_token"]
+    r = http.get(f"{ENABLE_BANKING_API_URL}/sessions/{session_id}", headers=_eb_headers())
+    if r.status_code >= 300:
+        logger.error("Enable Banking GET /sessions/{id}: %s %s", r.status_code, (r.text or "")[:500])
+        return {"configurado": False, "motivo": "No se pudo consultar Revolut"}
+
+    # `accounts` en GET /sessions/{id} son solo UIDs (string): el nombre y la moneda
+    # están en /accounts/{uid}/details, no aquí — la documentación pública muestra
+    # objetos con esos campos ya incluidos, pero la API real no los da en este paso.
+    cuentas, saldo_total, moneda = [], 0.0, "EUR"
+    for uid in r.json().get("accounts", []):
+        rd = http.get(f"{ENABLE_BANKING_API_URL}/accounts/{uid}/details", headers=_eb_headers())
+        nombre = rd.json().get("name") if rd.status_code < 300 else None
+        if rd.status_code >= 300:
+            logger.error("Enable Banking GET /accounts/{id}/details: %s %s", rd.status_code, (rd.text or "")[:500])
+
+        rb = http.get(f"{ENABLE_BANKING_API_URL}/accounts/{uid}/balances", headers=_eb_headers())
+        if rb.status_code >= 300:
+            logger.error("Enable Banking GET /accounts/{id}/balances: %s %s", rb.status_code, (rb.text or "")[:500])
+            continue
+        # Puede haber varios tipos de saldo (disponible, contable...) para la misma
+        # cuenta: se prefiere el disponible (ITAV), que es lo que de verdad puedes gastar.
+        por_tipo = {b.get("balance_type"): b for b in rb.json().get("balances", [])}
+        elegido  = por_tipo.get("ITAV") or por_tipo.get("CLAV") or next(iter(por_tipo.values()), None)
+        if not elegido:
+            continue
+        monto = elegido.get("balance_amount", {})
+        try:
+            saldo = float(monto.get("amount", 0))
+        except (TypeError, ValueError):
+            saldo = 0.0
+        moneda = monto.get("currency") or moneda
+        saldo_total += saldo
+        cuentas.append({"nombre": nombre, "moneda": monto.get("currency") or moneda, "saldo": round(saldo, 2)})
+
+    return {"configurado": True, "saldo": round(saldo_total, 2), "moneda": moneda, "cuentas": cuentas}
+
+
+_revolut_cache = None            # (momento_epoch, payload)
+_revolut_lock  = threading.Lock()
+
+
+def _revolut_datos_cache(refrescar: bool) -> dict:
+    global _revolut_cache
+    if not refrescar:
+        with _revolut_lock:
+            guardado = _revolut_cache
+        if guardado and time.time() - guardado[0] < ENABLE_BANKING_TTL_MINUTOS * 60:
+            return guardado[1]
+    datos = _revolut_datos()
+    with _revolut_lock:
+        _revolut_cache = (time.time(), datos)
+    return datos
 
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
@@ -3695,7 +3931,11 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
 
     zona    = body.zona.strip() or "desconocida"
     en_casa = body.en_casa if body.en_casa is not None else zona.lower() in ZONAS_CASA
-    ahora   = datetime.now(timezone.utc)
+    # _ahora_local() y no datetime.now(timezone.utc) directo: mismo motivo que en el
+    # resumen diario — es el punto único que un test puede fijar sin tocar el reloj del
+    # módulo entero. Sin esto, un test que pidiera "60 minutos en casa" a caballo de la
+    # medianoche local veía el tramo partido entre ayer y hoy sin poder controlarlo.
+    ahora   = _ahora_local().astimezone(timezone.utc)
 
     # El tramo que acaba ahora se atribuye a donde se estaba ANTES, no a donde se está.
     anterior = _leer_presencia()
@@ -8803,21 +9043,28 @@ def _j_estado_pc() -> dict:
     }
 
 def _j_finanzas() -> dict:
-    """La cartera de Indexa, recortada para el prompt.
+    """La cartera de Indexa + el saldo de Revolut, recortados para el prompt.
 
     El detalle entero son una decena de fondos por cuenta con gestora, ISIN, títulos y
     precio, y todo eso se paga por token sin responder a nada de lo que de verdad se
     pregunta ("¿cuánto tengo?", "¿cómo va?"). Van los totales, la mezcla y las cinco
     posiciones mayores; el detalle está en el dashboard, que es donde se mira.
     """
-    datos = get_finanzas(credentials=None)
+    datos   = get_finanzas(credentials=None)
+    revolut = datos.get("revolut") or {}
+    ahorro_revolut = (
+        {"saldo": revolut.get("saldo"), "moneda": revolut.get("moneda")}
+        if revolut.get("configurado") else None
+    )
     if not datos.get("configurado"):
         return {
-            "configurado": False,
+            "configurado":    False,
+            "ahorro_revolut": ahorro_revolut,
             "dile_al_usuario_literalmente": "No tengo conectada la cartera de Indexa "
                                             "Capital: falta el token en el backend.",
         }
     return {
+        "ahorro_revolut": ahorro_revolut,
         "total":         datos.get("total"),
         "fecha_valores": next((c.get("fecha_valores") for c in datos.get("cuentas") or []
                                if c.get("fecha_valores")), None),
@@ -10198,7 +10445,9 @@ _JARVIS_HERRAMIENTAS = {
                        "la plusvalía y en qué está invertido. Mira `fecha_valores` antes "
                        "de decir «hoy»: Indexa valora una vez al día y con retraso. "
                        "`plusvalia_origen` dice si la ganancia es la de la cuenta entera o "
-                       "solo la de los fondos que hay ahora.",
+                       "solo la de los fondos que hay ahora. `ahorro_revolut` es el saldo "
+                       "de la cuenta corriente de Revolut (null si no está conectada) — "
+                       "no forma parte de la cartera, es dinero aparte.",
         "parametros":  {},
     },
     "estado_pc": {

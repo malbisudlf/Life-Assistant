@@ -6,12 +6,17 @@ solo día, y que un hueco largo (HA caído) se cuente como tiempo en la última 
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import main
 from conftest import FakeResponse
 
 
 def _presencia_guardada(zona="casa", en_casa=True, hace_minutos=1, lat=43.26, lon=-2.93):
-    visto = datetime.now(timezone.utc) - timedelta(minutes=hace_minutos)
+    # main._ahora_local() y no datetime.now() directo: así, en los tests que fijan el
+    # reloj (monkeypatch sobre main._ahora_local), "hace X minutos" se cuenta desde la
+    # hora fijada y no desde la hora real en que corre la suite.
+    visto = main._ahora_local().astimezone(timezone.utc) - timedelta(minutes=hace_minutos)
     return FakeResponse([{
         "zona": zona, "en_casa": en_casa, "lat": lat, "lon": lon,
         "precision_m": 15.0, "fuente": "ha_companion",
@@ -219,6 +224,15 @@ class TestTramosPorDia:
 
 
 class TestAcumulacionDiaria:
+    @pytest.fixture(autouse=True)
+    def _mediodia(self, monkeypatch):
+        # Fijo a mediodía local: sin esto, "60 minutos en casa" cruza la medianoche
+        # local cuando la suite corre justo después de las 22:00 UTC (verano, UTC+2) y
+        # el tramo se reparte entre ayer y hoy — que es justo lo que prueba
+        # TestPartidoEntreDias más abajo, pero no lo que quieren probar estos tests.
+        monkeypatch.setattr(main, "_ahora_local",
+                             lambda: datetime(2026, 8, 24, 12, 0, tzinfo=main.LOCAL_TZ))
+
     def _capturar_upsert(self, mock_requests):
         escrito = {}
 
@@ -253,7 +267,7 @@ class TestAcumulacionDiaria:
         assert 0.9 <= fila["extra"]["fuera"] <= 1.1
 
     def test_acumula_sobre_lo_ya_guardado(self, client, mock_requests):
-        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        hoy = main._ahora_local().date().isoformat()   # sigue al reloj fijado arriba
         mock_requests.add("GET", "/rest/v1/presence", _presencia_guardada(en_casa=True, hace_minutos=60))
         mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([
             {"metric_date": hoy, "metric_name": "time_at_home", "value": 5.0, "extra": {"fuera": 2.0}},

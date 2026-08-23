@@ -112,13 +112,15 @@ test('Jarvis consulta la agenda y deja una acción por confirmar', async ({ page
   expect(page.erroresDeNavegador).toEqual([])
 })
 
-test('el widget de finanzas pinta la cartera de Indexa', async ({ page }) => {
+test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', async ({ page }) => {
   await entrar(page)
 
   const widget = page.locator('[data-card="finanzas"]')
   await expect(widget).toBeVisible({ timeout: 15_000 })
   // "Sin conectar" significaría que el backend no llegó a preguntar, y "No se pudo
-  // consultar" que el contrato con la API cambió: las dos cosas son un fallo real.
+  // consultar" que el contrato con la API cambió: las dos cosas son un fallo real. Se
+  // comprueba en toda la tarjeta porque ahora hay dos integraciones dentro (Indexa y
+  // Revolut) y las dos tienen que salir conectadas.
   await expect(widget).not.toContainText('Sin conectar')
   await expect(widget).not.toContainText('No se pudo consultar')
 
@@ -126,6 +128,10 @@ test('el widget de finanzas pinta la cartera de Indexa', async ({ page }) => {
   await expect(widget).toContainText('12.500 €')
   await expect(widget).toContainText('+1500 €')
   await expect(widget).toContainText('Acciones')
+
+  // El saldo de Revolut vive en el mismo widget, aparte de la cartera.
+  await expect(widget).toContainText('Ahorro en Revolut')
+  await expect(widget).toContainText('80 €')
 
   // El detalle está plegado a propósito: se despliega a mano.
   await expect(widget).not.toContainText('Vanguard Global')

@@ -356,3 +356,19 @@ class TestOAuthCallbackState:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
         assert mock_requests.called("POST", "/rest/v1/oauth_tokens")
+
+
+class TestEnableBankingCallbackStateReutilizaLaMismaGuardia:
+    """/auth/enablebanking/callback comparte `_verify_oauth_state` con Graph: mismo
+    riesgo (lo llama Enable Banking por redirect, sin el JWT del dashboard) y misma
+    defensa. No repite los casos ya cubiertos arriba uno a uno — solo confirma que la
+    guardia está puesta en este endpoint también."""
+
+    def test_sin_state_da_403(self, client):
+        r = client.get("/auth/enablebanking/callback", params={"code": "abc"})
+        assert r.status_code == 403
+
+    def test_state_de_otro_proposito_no_vale(self, client):
+        token_dashboard = main.create_token()
+        r = client.get("/auth/enablebanking/callback", params={"code": "abc", "state": token_dashboard})
+        assert r.status_code == 403
