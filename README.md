@@ -1,6 +1,8 @@
 # Life Assistant
 
-Dashboard personal que centraliza calendario, salud, entrenamientos, hogar inteligente y un agente PC autónomo — todo en una sola pantalla.
+Dashboard personal que centraliza calendario, salud, entrenamientos, ideas, ropa, hogar
+inteligente y un agente PC autónomo — y, por encima de todo eso, un asistente (Jarvis)
+que consulta, actúa y avisa sin que se le pida.
 
 **Demo:** [life-assistant-smoky.vercel.app](https://life-assistant-smoky.vercel.app)
 
@@ -42,11 +44,28 @@ Los datos llegan automáticamente desde Apple Watch via Health Auto Export e iOS
 - Configuración de precio/hora y sesiones por cobro
 
 ### Ideas por voz
-Graba audio → Whisper transcribe → GPT-4o-mini extrae título, categoría y resumen → se guarda en Supabase
+Graba audio → Whisper transcribe → GPT-4o-mini extrae título, categoría y resumen → se guarda en Supabase. Si la nota apunta a una cita, el panel **ofrece** crear el evento con un chip; nunca lo crea solo.
+
+### Ropa
+Registro de prendas con foto, precio y moneda, y conteo/total acumulado por divisa.
+
+### Jarvis — el asistente
+Chat (texto y voz) que consulta y actúa sobre el resto del dashboard con más de 50 herramientas: calendario, salud, entrenamiento, hogar, PC, memoria de hechos duraderos, cliente MCP con lista blanca del usuario y búsqueda web con defensas contra SSRF e inyección de prompt. Reparte el trabajo entre un modelo pequeño (decide si hace falta actuar) y uno grande (elige y ejecuta la herramienta), y pide confirmación explícita antes de tocar el calendario, conectar un servidor MCP nuevo o abrir una cerradura.
+
+### Lo proactivo
+El sistema también habla sin que se le pregunte: avisa de la hora de salida con tráfico real, de que dos citas no dejan tiempo para moverse entre ellas, de que toca ponerse el reloj antes de dormir, de huecos libres para entrenar o de una posible bajada de forma. Los avisos compiten por un presupuesto diario, aprenden de si se marcan útiles o no, y no repiten la misma situación dos veces.
+
+### Resumen diario e informe semanal
+Un correo con los datos del día en crudo (sin interpretar por ningún modelo) que sale al detectar que te has despertado — o, como red de seguridad, a una hora tope si nada más lo dispara. Un solo envío garantizado por día. Los domingos se añade un informe semanal con la evolución de las últimas trece semanas.
 
 ### Hogar inteligente
 - **Wake-on-LAN** — enciende el PC físico desde el dashboard a través de Home Assistant, sin conexión directa desde el browser
+- **Apagado/suspensión remotos** del PC por SSH
 - **Notificaciones Alexa** — anuncia el nombre del evento 15 minutos antes en voz alta
+- **Avisos al móvil** — la app companion de Home Assistant entrega lo proactivo y las alertas del sistema con botones de acción
+
+### Revisión nocturna
+Cada madrugada, si hubo commits ese día en `main`, una sesión de Claude Code los revisa contra las invariantes del proyecto y abre un issue con lo que encuentre. Por la mañana llega una notificación al móvil con dos botones: «Arreglarlo» (lanza otra sesión que corrige, abre PR y mergea si el CI pasa) y «No hacer nada».
 
 ### Agente PC autónomo
 El agente recibe un job desde el dashboard y ejecuta la entrega universitaria de forma semiautónoma:
@@ -65,41 +84,44 @@ El dashboard muestra la barra de progreso en tiempo real con las etapas del agen
 
 | Capa | Tecnología |
 |---|---|
-| Frontend | React 19 + Vite, desplegado en Vercel |
-| Backend | FastAPI (Python 3.11), desplegado en Fly.io |
-| Base de datos | Supabase (PostgreSQL) |
+| Frontend | React 19 + Vite, desplegado en Vercel (PWA instalable) |
+| Backend | FastAPI (Python 3.11), un solo fichero, desplegado en Fly.io (escala a cero) |
+| Base de datos | Supabase (PostgreSQL vía REST, solo accesible con la service key) |
 | Calendario | Microsoft Graph API (Outlook) |
 | Mapas | Google Maps Distance Matrix API |
-| IA | OpenAI Whisper + GPT-4o-mini |
-| Salud | Apple Watch → Health Auto Export → iOS Shortcuts |
-| Smart home | Home Assistant (REST API + SSH) |
-| Agente | Playwright (Edge) + pyautogui + Claude Desktop |
+| Clima | Open-Meteo (gratis, sin API key) |
+| IA | OpenAI Whisper + GPT-4o-mini — transcripción, extracción de ideas y el cerebro de Jarvis |
+| Salud | Apple Watch → Health Auto Export + iOS Shortcuts |
+| Smart home | Home Assistant (sondeo REST + SSH) |
+| Agente PC | Playwright (Edge) + pyautogui + Claude Desktop, en Windows |
+| CI | GitHub Actions — lint, tests de frontend/backend y build en tres jobs paralelos |
 
 ---
 
 ## Arquitectura
 
 ```
-Browser (Vercel)
-    │  JWT auth + REST
+Browser (React 19 + Vite, Vercel)
+    │  JWT en localStorage + REST
     ▼
-Backend FastAPI (Fly.io)
-    ├── Microsoft Graph API  ─── Calendario Outlook
-    ├── Google Maps API      ─── Tiempos de salida con tráfico
-    ├── OpenAI API           ─── Whisper + GPT-4o-mini
-    ├── Supabase REST        ─── Ideas, jobs, agentes, entrenamiento, salud
-    └── Home Assistant API   ─── Flag WOL + eventos próximos
+backend/main.py (FastAPI, Fly.io, escala a cero — un solo fichero, ~10.700 líneas)
+    ├── Microsoft Graph API   ─── Calendario Outlook (tokens OAuth en Supabase)
+    ├── Google Maps API       ─── Hora de salida con tráfico real
+    ├── Open-Meteo            ─── Clima
+    ├── OpenAI API            ─── Whisper (voz) + GPT-4o-mini (ideas y Jarvis)
+    ├── Supabase REST         ─── Ideas, ropa, jobs, entrenamiento, salud, memoria...
+    └── Home Assistant        ─── HA sondea órdenes (WOL, avisos, apagado por SSH,
+                                   tick del resumen diario) y EMPUJA presencia
 
-Apple Watch
-    └── Health Auto Export + iOS Shortcuts → POST /health/ingest → Supabase
+Apple Watch ── Health Auto Export + iOS Shortcuts ──► POST /health/ingest
 
-Home Assistant (red local)
-    └── Sondea el backend cada 30s (WOL) y cada 60s (próximos eventos)
+Home Assistant (red local, siempre encendido)
+    └── Sondea el backend cada 15–30s y dispara el tick del resumen cada 5 min
 
-Agente PC (Windows, red local)
-    ├── Playwright + Edge    ─── Automatización web (Alud/Moodle)
-    ├── pyautogui            ─── Control de UI (Claude Desktop)
-    └── Supabase             ─── Cola de jobs (polling)
+Agente PC (Windows, efímero — arranca, drena la cola de jobs, se cierra)
+    ├── Playwright + Edge     ─── Automatización web (Alud/Moodle)
+    ├── pyautogui             ─── Control de UI (Claude Desktop)
+    └── Supabase              ─── Cola de jobs (polling con token propio)
 ```
 
 ### Layout del dashboard
@@ -116,7 +138,10 @@ Dos columnas redimensionables arrastrando el divisor central. Cada widget es con
 - Cuenta de Microsoft con Outlook y app registrada en Azure AD
 - Proyecto en Supabase
 - API keys: Google Maps, OpenAI
-- *(Opcional)* Home Assistant, Apple Watch con Health Auto Export
+- *(Opcional)* Home Assistant, Apple Watch con Health Auto Export, cuenta de Anthropic (agente PC)
+
+Guía completa paso a paso, con todas las variables explicadas una a una, en
+[`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md). Resumen rápido:
 
 ### Frontend
 
@@ -137,35 +162,9 @@ pip install -r requirements.txt
 uvicorn main:app --reload   # http://localhost:8000
 ```
 
-Crear `backend/.env`:
-```env
-# Microsoft Graph (Azure AD)
-CLIENT_ID=
-TENANT_ID=
-CLIENT_SECRET=
-REDIRECT_URI=http://localhost:8000/auth/callback
-
-# Dashboard
-DASHBOARD_PASSWORD=
-SECRET_KEY=
-
-# Servicios externos
-GOOGLE_MAPS_API_KEY=
-SUPABASE_URL=
-SUPABASE_KEY=
-OPENAI_API_KEY=
-
-# Home Assistant
-HA_URL=http://192.168.1.x:8123
-HA_TOKEN=
-HA_POLL_TOKEN=
-
-# Salud (Apple Watch)
-HEALTH_INGEST_TOKEN=
-
-# Dirección de origen para cálculo de rutas
-HOME_ADDRESS=Tu dirección, Ciudad, País
-```
+Copiar `backend/.env.example` a `backend/.env` y rellenar los valores (comprobar con
+`python backend/check_config.py`). `SECRET_KEY` y `DASHBOARD_PASSWORD` son obligatorias
+— el backend no arranca sin ellas, sin fallback, porque el repositorio es público.
 
 Autenticar con Outlook (primera vez):
 1. Visitar `http://localhost:8000/auth/login`
@@ -179,14 +178,10 @@ cd agent
 pip install -r requirements.txt
 ```
 
-Crear `agent/.env`:
-```env
-LA_TOKEN=          # JWT del dashboard (F12 → Application → Local Storage → la_token)
-LA_API_BASE=https://tu-backend.fly.dev
-ALUD_ACCOUNT=tu.email@universidad.es
-ALUD_ALLOWED_HOSTS=alud.deusto.es   # mismo valor que en backend/.env
-EDGE_PROFILE_DIR=  # opcional, por defecto usa el perfil Default de Edge
-```
+Copiar `agent/.env.example` a `agent/.env` y rellenar los valores — en particular
+`AGENT_TOKEN` (mismo valor que en `backend/.env`, no caduca) en vez del JWT del
+dashboard, que caduca a los 30 días. Solo funciona sobre un Windows real (Edge,
+pyautogui, Claude Desktop).
 
 ### Ingesta de salud (Apple Watch)
 
@@ -212,11 +207,22 @@ Los secrets se configuran con `fly secrets set KEY=value` y no se incluyen en el
 
 ```
 ├── src/
-│   └── components/
-│       └── Dashboard.jsx      # UI completa (~1800 líneas)
+│   ├── components/
+│   │   └── Dashboard.jsx      # UI completa (~5.600 líneas)
+│   └── lib/
+│       └── helpers.js         # Lógica pura del frontend, testeada aparte
 ├── backend/
-│   └── main.py                # API FastAPI (~1250 líneas)
+│   └── main.py                # API FastAPI, un solo fichero (~10.700 líneas, 73 endpoints)
 ├── agent/
-│   └── agent.py               # Agente PC autónomo
+│   └── agent.py                # Agente PC autónomo (solo funciona en Windows real)
+├── supabase/
+│   └── migrations/             # Esquema de BD (se aplican a mano en Supabase)
+├── tests/                       # Backend (pytest), frontend (vitest) y E2E (Playwright)
+├── docs/                        # Guía detallada por áreas (ver CLAUDE.md)
 └── public/
 ```
+
+Documentación completa del proyecto, para trabajar en él o para entenderlo desde fuera:
+[`CLAUDE.md`](CLAUDE.md) (índice de trabajo) y
+[`docs/EL_PROYECTO_EXPLICADO.md`](docs/EL_PROYECTO_EXPLICADO.md) (explicación de arriba
+abajo, sin necesidad de tocar código).
