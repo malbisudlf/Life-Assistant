@@ -36,6 +36,11 @@ export function urgencyColor(days) {
 export function formatShortDate(dateStr) {
   if (!dateStr) return "";
   const [, m, d] = dateStr.split("-").map(Number);
+  // No toda fecha que llega aquí viene garantizada como "YYYY-MM-DD" (p.ej. la serie de
+  // Indexa Capital): un mes fuera de 1-12 rompía toda la página, porque MONTHS_ES[m-1]
+  // salía undefined y .slice petaba sin que nada por encima lo capturara (no hay
+  // ErrorBoundary). Mejor "—" que tirar el árbol de React entero.
+  if (!Number.isInteger(m) || m < 1 || m > 12 || !Number.isFinite(d)) return "—";
   return `${d} ${MONTHS_ES[m - 1].slice(0, 3)}`;
 }
 

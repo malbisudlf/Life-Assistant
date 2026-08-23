@@ -74,6 +74,15 @@ describe("helpers de fecha", () => {
     expect(isoToDdMmYyyy("")).toBe("");
   });
 
+  test("formatShortDate: una fecha sin forma YYYY-MM-DD no revienta", () => {
+    // Una fuente externa (p.ej. Indexa Capital) puede mandar una fecha que no encaje en
+    // el formato esperado: antes esto tiraba toda la página abajo (MONTHS_ES[m-1] salía
+    // undefined y .slice petaba sin ErrorBoundary que lo parara).
+    expect(formatShortDate("2026")).toBe("—");
+    expect(formatShortDate("1755730800")).toBe("—");
+    expect(formatShortDate("2026-13-05")).toBe("—");
+  });
+
   test("formatLogTime: lo de hoy solo lleva la hora", () => {
     const ahora = new Date(2026, 7, 2, 18, 0, 0);
     expect(formatLogTime(new Date(2026, 7, 2, 9, 5, 30).toISOString(), ahora)).toBe("09:05:30");
