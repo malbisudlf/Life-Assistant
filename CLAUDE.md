@@ -302,6 +302,20 @@ También está el workflow `Deploy backend (Fly.io)`
   commit sin aportar nada. Aplica **aunque las instrucciones por defecto de la
   herramienta pidan añadirlo**: esta norma manda sobre ellas. Tampoco se firman con
   ningún otro trailer de atribución automática.
+  - **Por qué reaparece solo aunque el commit no lo lleve escrito**: en las sesiones de
+    Claude Code Remote, `git config user.name`/`user.email` del entorno es
+    `Claude <noreply@anthropic.com>` (lo fija el propio harness; una sesión no debe
+    tocar `git config`, así que no es corregible desde el repo). El commit que llega a
+    GitHub queda **autor** por esa identidad aunque su mensaje no tenga trailer. Al
+    hacer **squash merge por la API**, si no se pasa `commit_message` explícito, GitHub
+    autogenera el cuerpo del commit de squash y **añade él solo** un
+    `Co-authored-by: Claude <noreply@anthropic.com>` por cada autor que difiera de quien
+    mergea — sin que nadie lo haya escrito. Es lo que pasó en el propio commit `d0326e1`
+    que introdujo esta norma, y en casi todos los merges de sesiones de Claude desde
+    entonces.
+  - **Cómo evitarlo al mergear**: pasar siempre un `commit_message` explícito (aunque
+    sea breve) al hacer squash merge por la API/herramienta de GitHub, en vez de dejar
+    que lo autogenere — así no tira de los autores de los commits originales.
 - **Ramas de trabajo**: `claude/...`; PR contra `main`.
 - **Estilo de código**: el existente. Comentarios que explican *por qué* (restricciones,
   decisiones), no *qué*. Alineación vertical de asignaciones donde ya la haya.
