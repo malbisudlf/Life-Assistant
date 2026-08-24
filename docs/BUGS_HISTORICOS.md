@@ -277,5 +277,18 @@
   `_jwt_de_usuario()` rechaza todo token con claim `purpose`. Se rechaza por presencia y
   no exigiendo `purpose: "dashboard"` a propósito: los tokens ya emitidos duran 30 días
   y no lo llevan, así que exigirlo habría echado al usuario de la sesión al desplegar.
+- **Un error de otro sistema, tal cual, dentro de una notificación.** El botón
+  «Arreglarlo» de la revisión nocturna llegó al móvil con
+  `{"type":"error","error":{"type":"authentication_error","message":"OAuth access token
+  has been revoked."}}` y un «puedes reintentarlo» detrás (24 de agosto de 2026). El
+  disparo estaba bien hecho —la decisión se liberó y el aviso salió—, pero el motivo era
+  el cuerpo crudo de la API de Anthropic: nada ahí dice que lo que toca es regenerar el
+  token del trigger en claude.ai y volver a ponerlo con `fly secrets set`, y reintentar
+  el botón no podía funcionar hasta hacerlo. Ahora los dos disparos de rutina
+  (`_disparar_rutina` y `_disparar_arreglo`) pasan por `_motivo_disparo()`, que traduce
+  los fallos con arreglos distintos —credencial, trigger que ya no está, rutina pausada,
+  cupo agotado— y deja crudo el resto. La moraleja: **si un error de un tercero va a
+  acabar delante del usuario, tradúcelo al arreglo**; el cuerpo entero se registra en el
+  log, que es donde sirve.
 - Doble conteo de entrenos semanales y fugas de detalles de error ya se arreglaron
   en commits anteriores; si tocas bienestar o manejo de errores, revisa el historial.

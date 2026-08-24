@@ -5623,6 +5623,30 @@ HORA_INFORME         = _hora_config(INFORME_HORA, (10, 0))
 _rutina_ultimo_fallo: dict | None = None
 
 
+def _motivo_disparo(status: int, detalle: str) -> str:
+    """Traduce el fallo del `/fire` a algo que diga QUÉ hay que hacer.
+
+    El cuerpo crudo de la API acaba en una notificación del móvil, y
+    `{"type":"error","error":{"type":"authentication_error",...}}` no le dice a nadie
+    que lo que toca es regenerar el token del trigger en claude.ai y volver a ponerlo
+    con `fly secrets set`. Solo se traducen los casos con arreglos DISTINTOS; lo demás
+    se deja crudo, que sigue siendo más de lo que dice un número a secas.
+
+    El caso de la credencial no es hipotético: pasó el 2026-08-24 y el aviso de que el
+    botón no había lanzado nada llegó con el JSON de Anthropic dentro.
+    """
+    if status in (401, 403) or "authentication_error" in detalle or "permission_error" in detalle:
+        return ("el token del disparo ya no vale (caducado o revocado): regenéralo en "
+                "claude.ai/code/routines y vuelve a ponerlo en el backend")
+    if status == 404:
+        return "la rutina o su trigger ya no existen: revísalos en claude.ai/code/routines"
+    if "routine_paused" in detalle:
+        return "la rutina está pausada en claude.ai/code/routines"
+    if status == 429:
+        return "se ha agotado el cupo de ejecuciones de rutinas; vuelve a intentarlo más tarde"
+    return detalle or f"HTTP {status}"
+
+
 def _disparar_rutina(fecha: str) -> dict:
     """El POST al trigger de API, sin las guardas de hora. Devuelve qué pasó.
 
@@ -5662,7 +5686,7 @@ def _disparar_rutina(fecha: str) -> dict:
     logger.error("Rutina del briefing: el disparo devolvió %s — beta '%s' — %s",
                  r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
     return {"ok": False, "pausada": "routine_paused" in detalle,
-            "motivo": detalle or f"HTTP {r.status_code}"}
+            "motivo": _motivo_disparo(r.status_code, detalle)}
 
 
 def _lanzar_rutina(fecha: str, ahora: datetime) -> None:
@@ -8673,7 +8697,8 @@ def _disparar_arreglo(numero: int, titulo: str, url: str) -> dict:
         detalle = (r.text or "")[:300].replace("\n", " ").strip()
         logger.error("Revisión: el disparo del arreglo devolvió %s — beta '%s' — %s",
                      r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
-        return {"ok": False, "sesion": "", "motivo": detalle or f"HTTP {r.status_code}"}
+        return {"ok": False, "sesion": "",
+                "motivo": _motivo_disparo(r.status_code, detalle)}
 
     try:
         sesion = str((r.json() or {}).get("claude_code_session_url") or "")
