@@ -2943,9 +2943,49 @@ def _yahoo_precio_actual(simbolo: str) -> float:
     return float(precio)
 
 
-def _yahoo_precio_historico(simbolo: str, fecha: date) -> tuple[float, date]:
+def _yahoo_precio_historico_horario(simbolo: str, fecha: date, hora: str) -> float | None:
+    """Precio más cercano a `fecha hora` (hora LOCAL_TZ), con granularidad horaria.
+
+    Yahoo solo guarda velas de 60 minutos hasta ~730 días atrás (menos que eso para
+    intervalos más finos), así que esto es lo más preciso que da para una compra ya
+    antigua. Devuelve `None` (nunca lanza) si no hay datos horarios para esa fecha —
+    quien llama cae entonces al cierre diario, que sí cubre cualquier fecha.
+    """
+    try:
+        h, m = (int(x) for x in hora.split(":"))
+        objetivo = datetime(fecha.year, fecha.month, fecha.day, h, m, tzinfo=LOCAL_TZ)
+    except (ValueError, TypeError):
+        return None
+    desde = fecha - timedelta(days=3)
+    hasta = fecha + timedelta(days=1)
+    p1 = int(datetime(desde.year, desde.month, desde.day, tzinfo=timezone.utc).timestamp())
+    p2 = int(datetime(hasta.year, hasta.month, hasta.day, tzinfo=timezone.utc).timestamp())
+    try:
+        resultado = _yahoo_chart(simbolo, {"period1": p1, "period2": p2, "interval": "60m"})
+    except _YahooFallo:
+        return None
+    timestamps = resultado.get("timestamp") or []
+    cierres    = ((resultado.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    candidatos = [(datetime.fromtimestamp(t, tz=timezone.utc), c) for t, c in zip(timestamps, cierres) if c is not None]
+    if not candidatos:
+        return None
+    _, cierre = min(candidatos, key=lambda x: abs((x[0] - objetivo).total_seconds()))
+    return float(cierre)
+
+
+def _yahoo_precio_historico(simbolo: str, fecha: date, hora: str | None = None) -> tuple[float, date]:
     """Precio de cierre de `fecha`, o el del último día hábil anterior si `fecha`
-    cayó en fin de semana o festivo (no hay cotización ese día, no un precio a 0)."""
+    cayó en fin de semana o festivo (no hay cotización ese día, no un precio a 0).
+
+    Con `hora`, primero intenta el precio horario más cercano a ese momento
+    (`_yahoo_precio_historico_horario`) — más preciso que el cierre del día entero,
+    que puede diferir bastante del precio real de una compra hecha a media mañana.
+    """
+    if hora:
+        precio_horario = _yahoo_precio_historico_horario(simbolo, fecha, hora)
+        if precio_horario is not None:
+            return precio_horario, fecha
+
     p1 = int(datetime(*(fecha - timedelta(days=7)).timetuple()[:3], tzinfo=timezone.utc).timestamp())
     p2 = int(datetime(*fecha.timetuple()[:3], tzinfo=timezone.utc).timestamp()) + 86400
     resultado = _yahoo_chart(simbolo, {"period1": p1, "period2": p2, "interval": "1d"})
@@ -3004,6 +3044,9 @@ class EtfHoldingIn(BaseModel):
 class EtfAportacionIn(BaseModel):
     fecha:       date
     importe_eur: float = Field(gt=0, le=1_000_000)
+    # Opcional: con la hora exacta se pide el precio horario de Yahoo Finance (más
+    # preciso que el cierre del día) en vez de caer directo al cierre diario.
+    hora:        str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 def _ticker_path():
@@ -3053,6 +3096,19 @@ def get_cartera_etf(
             "valor_actual":    valor,
             "ganancia_eur":    ganancia_eur,
             "ganancia_pct":    ganancia_pct,
+            # Detalle para poder corregir una aportación mal metida (DELETE +
+            # volver a crearla): id, fecha/hora usadas y el precio que se calculó.
+            "aportaciones": [
+                {
+                    "id":              a["id"],
+                    "fecha":           a["fecha"],
+                    "hora":            a.get("hora"),
+                    "importe_eur":     a["importe_eur"],
+                    "participaciones": a["participaciones"],
+                    "precio_compra":   a["precio_compra"],
+                }
+                for a in propias
+            ],
         })
         total_aportado += aportado
         if total_valor is not None:
@@ -3109,7 +3165,7 @@ def crear_etf_aportacion(
         raise HTTPException(status_code=502, detail="Ese ETF no tiene símbolo de Yahoo Finance configurado")
 
     try:
-        precio, fecha_precio = _yahoo_precio_historico(simbolo, body.fecha)
+        precio, fecha_precio = _yahoo_precio_historico(simbolo, body.fecha, body.hora)
     except _YahooFallo as e:
         logger.error("Yahoo Finance: no se pudo calcular el precio histórico de %s en %s (%s)", ticker, body.fecha, e)
         raise HTTPException(status_code=502, detail="No se pudo consultar el precio histórico del ETF")
@@ -3117,6 +3173,7 @@ def crear_etf_aportacion(
     payload = {
         "ticker":          ticker,
         "fecha":           body.fecha.isoformat(),
+        "hora":            body.hora,
         "importe_eur":     body.importe_eur,
         "participaciones": round(body.importe_eur / precio, 8),
         "precio_compra":   precio,
@@ -3129,6 +3186,24 @@ def crear_etf_aportacion(
     if r2.status_code >= 300:
         raise _supabase_error(r2)
     return {"ok": True, "aportacion": r2.json()[0], "fecha_precio_usada": fecha_precio.isoformat()}
+
+
+@app.delete("/finanzas/etfs/{ticker}/aportaciones/{aportacion_id}")
+def borrar_etf_aportacion(
+    ticker: str = _ticker_path(),
+    aportacion_id: str = _uuid_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Para corregir una aportación mal metida (fecha, importe u hora equivocados):
+    se borra y se vuelve a crear, no hay PATCH — es una fila con muy pocos campos y
+    todos dependen entre sí (cambiar la fecha invalida el precio ya calculado)."""
+    r = http.delete(
+        f"{SUPABASE_URL}/rest/v1/etf_aportaciones?id=eq.{aportacion_id}&ticker=eq.{quote(ticker, safe='')}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
 
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────

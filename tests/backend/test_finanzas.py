@@ -403,6 +403,27 @@ def _yahoo_chart_error(url, **kwargs):
     return FakeResponse({"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}})
 
 
+def _yahoo_chart_por_intervalo(horario=None, diario=None, actual=None):
+    """Como _yahoo_chart_ok, pero distingue `interval=60m` (petición con hora — `horario`
+    es una lista de (datetime UTC, cierre)) de `interval=1d` (`diario`, igual que
+    `_yahoo_chart_ok`). Necesaria porque ambas peticiones llevan `period1` en los params."""
+    def _f(url, **kwargs):
+        params = kwargs.get("params") or {}
+        if params.get("interval") == "60m":
+            timestamps = [int(dt.timestamp()) for dt, _ in (horario or [])]
+            cierres    = [c for _, c in (horario or [])]
+        elif "period1" in params:
+            timestamps = [_epoch(f) for f, _ in (diario or [])]
+            cierres    = [c for _, c in (diario or [])]
+        else:
+            return FakeResponse({"chart": {"result": [{"meta": {"regularMarketPrice": actual}}]}, "error": None})
+        return FakeResponse({"chart": {"result": [{
+            "timestamp": timestamps,
+            "indicators": {"quote": [{"close": cierres}]},
+        }], "error": None}})
+    return _f
+
+
 class TestEtfAuth:
     def test_requiere_jwt(self, client):
         assert client.get("/finanzas/etfs").status_code in (401, 403)
@@ -490,3 +511,63 @@ class TestEtfAportacion:
                          json={"fecha": "2026-01-23", "importe_eur": 100})
         assert r.status_code == 502
         assert mock_requests.called("POST", "etf_aportaciones") == []
+
+
+class TestEtfAportacionHora:
+    # Con la hora exacta se pide el precio HORARIO más cercano (más preciso que el
+    # cierre del día), que fue justo lo que faltaba: sin hora, el cierre diario podía
+    # diferir del precio real de la operación en un ~0,1-0,2% acumulado.
+
+    def test_usa_el_precio_horario_mas_cercano_a_la_hora_de_compra(self, client, auth_headers, mock_requests):
+        # 23 ene 2026, 16:25 hora de Madrid (CET, UTC+1 en invierno) = 15:25 UTC. La
+        # vela de las 15:00 UTC (147.84) está a 25 min; la de las 16:00 (147.72), a 35.
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_por_intervalo(horario=[
+            (datetime.datetime(2026, 1, 23, 14, 0, tzinfo=datetime.timezone.utc), 147.5),
+            (datetime.datetime(2026, 1, 23, 15, 0, tzinfo=datetime.timezone.utc), 147.84),
+            (datetime.datetime(2026, 1, 23, 16, 0, tzinfo=datetime.timezone.utc), 147.72),
+        ]))
+        mock_requests.add("POST", "etf_aportaciones", FakeResponse([{
+            "id": "nuevo", "ticker": "VWCE", "fecha": "2026-01-23", "hora": "16:25",
+            "importe_eur": 318.51, "participaciones": 318.51 / 147.84, "precio_compra": 147.84,
+        }]))
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 318.51, "hora": "16:25"})
+        assert r.status_code == 200
+        enviado = mock_requests.called("POST", "etf_aportaciones")[0][2]["json"]
+        assert enviado["precio_compra"] == 147.84
+        assert enviado["hora"] == "16:25"
+
+    def test_sin_datos_horarios_cae_al_cierre_diario(self, client, auth_headers, mock_requests):
+        # Compra de hace más de ~730 días: Yahoo ya no guarda velas horarias tan atrás.
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_por_intervalo(diario=[("2026-01-23", 147.72)]))
+        mock_requests.add("POST", "etf_aportaciones", FakeResponse([{
+            "id": "nuevo", "ticker": "VWCE", "fecha": "2026-01-23", "hora": "16:25",
+            "importe_eur": 318.51, "participaciones": 318.51 / 147.72, "precio_compra": 147.72,
+        }]))
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 318.51, "hora": "16:25"})
+        assert r.status_code == 200
+        enviado = mock_requests.called("POST", "etf_aportaciones")[0][2]["json"]
+        assert enviado["precio_compra"] == 147.72
+
+    def test_hora_con_formato_invalido_la_rechaza(self, client, auth_headers, mock_requests):
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 100, "hora": "25:99"})
+        assert r.status_code == 422
+
+
+class TestEtfBorrarAportacion:
+    def test_requiere_jwt(self, client):
+        assert client.delete("/finanzas/etfs/VWCE/aportaciones/11111111-1111-1111-1111-111111111111").status_code in (401, 403)
+
+    def test_borra_la_fila(self, client, auth_headers, mock_requests):
+        mock_requests.add("DELETE", "etf_aportaciones", FakeResponse([], 200))
+        r = client.delete("/finanzas/etfs/VWCE/aportaciones/11111111-1111-1111-1111-111111111111",
+                           headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        borrado = mock_requests.called("DELETE", "etf_aportaciones")[0][1]
+        assert "ticker=eq.VWCE" in borrado
+        assert "id=eq.11111111-1111-1111-1111-111111111111" in borrado
