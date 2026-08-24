@@ -2,7 +2,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
@@ -202,6 +202,19 @@ ENABLE_BANKING_VALID_DIAS      = int(os.getenv("ENABLE_BANKING_VALID_DIAS", "180
 # El saldo de una cuenta corriente se mueve durante el día (a diferencia de Indexa, que
 # valora una vez): TTL corto, no diario.
 ENABLE_BANKING_TTL_MINUTOS     = int(os.getenv("ENABLE_BANKING_TTL_MINUTOS", "60"))
+
+# ── Finanzas: cartera manual de ETFs (Yahoo Finance) ───────────────────────────
+# Ni Indexa ni Enable Banking (ni ningún agregador PSD2) pueden leer la cartera de
+# inversión de Revolut: PSD2 solo cubre cuentas de pago. La única vía es llevarla a
+# mano aquí (ver docs/FINANZAS.md), con el precio real de cada ETF sacado del
+# endpoint de gráficas de Yahoo Finance — no oficial ni documentado, pero gratis, sin
+# clave y sin límite conocido. Se probaron Stooq (bloqueado por un reto anti-bot en
+# JavaScript) y Twelve Data (su plan gratuito no cubre ETFs de bolsas europeas como
+# XETR, ni precio actual ni histórico) antes de llegar aquí.
+YAHOO_FINANCE_API_URL = os.getenv("YAHOO_FINANCE_API_URL", "https://query1.finance.yahoo.com").rstrip("/")
+# El precio de un ETF no cambia segundo a segundo de forma que importe aquí: TTL en horas,
+# no minutos, para no machacar un endpoint no oficial en cada carga del dashboard.
+ETF_PRECIO_TTL_MINUTOS = int(os.getenv("ETF_PRECIO_TTL_MINUTOS", "60"))
 
 # ── Resumen diario por correo ─────────────────────────────────────────────────
 # El backend NO redacta el resumen: manda los datos crudos a tu propio buzón y de ahí
@@ -2868,6 +2881,254 @@ def _revolut_datos_cache(refrescar: bool) -> dict:
     with _revolut_lock:
         _revolut_cache = (time.time(), datos)
     return datos
+
+
+# ── FINANZAS: cartera manual de ETFs (Yahoo Finance) ───────────────────────────
+# Ni Indexa ni Enable Banking pueden leer la cartera de inversión de Revolut (PSD2
+# solo cubre cuentas de pago, ver el comentario de cabecera de Enable Banking más
+# arriba), así que esta cartera se lleva a mano: `etf_holdings` guarda qué ETFs hay
+# y `etf_aportaciones` cada aportación (fecha + importe), con las participaciones
+# que compró calculadas UNA VEZ, al darla de alta, con el precio de cierre real de
+# ese día — no se recalculan después. El valor actual sí es dinámico: participaciones
+# totales × precio de HOY.
+#
+# El precio sale del endpoint de gráficas de Yahoo Finance (no oficial ni
+# documentado — puede cambiar o bloquearse sin aviso, igual que le pasó a Stooq, que
+# se descartó por eso). Se llegó aquí tras comprobar en vivo que Stooq exige resolver
+# un reto anti-bot en JavaScript delante de sus CSV, y que el plan gratuito de Twelve
+# Data no cubre ETFs de bolsas europeas como XETR (ni precio actual ni histórico:
+# "This symbol is available starting with the Grow or Venture plan"). Yahoo, de
+# momento, da los dos sin clave y sin límite conocido — solo hace falta un
+# User-Agent de navegador, sin él responde 429 aunque no haya tráfico previo.
+
+_TICKER_RE = re.compile(r"^[A-Z0-9]{1,10}$")
+
+_YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+}
+
+
+class _YahooFallo(Exception):
+    """Fallo hablando con Yahoo Finance. El detalle va al registro, nunca al cliente."""
+
+
+def _yahoo_chart(simbolo: str, params: dict) -> dict:
+    try:
+        r = http.get(
+            f"{YAHOO_FINANCE_API_URL}/v8/finance/chart/{quote(simbolo, safe='')}",
+            params=params, headers=_YAHOO_HEADERS,
+        )
+    except requests.RequestException as e:
+        raise _YahooFallo(f"{simbolo}: {type(e).__name__}") from e
+    if r.status_code >= 300:
+        logger.error("Yahoo Finance %s → %s: %s", simbolo, r.status_code, (r.text or "")[:300])
+        raise _YahooFallo(f"{simbolo}: HTTP {r.status_code}")
+    try:
+        datos = r.json()
+    except ValueError as e:
+        raise _YahooFallo(f"{simbolo}: la respuesta no era JSON") from e
+    resultado = ((datos.get("chart") or {}).get("result") or [None])[0]
+    if not resultado:
+        error = ((datos.get("chart") or {}).get("error") or {}).get("description")
+        raise _YahooFallo(f"{simbolo}: {error or 'sin datos'}")
+    return resultado
+
+
+def _yahoo_precio_actual(simbolo: str) -> float:
+    resultado = _yahoo_chart(simbolo, {"range": "5d", "interval": "1d"})
+    precio = (resultado.get("meta") or {}).get("regularMarketPrice")
+    if precio is None:
+        raise _YahooFallo(f"{simbolo}: sin regularMarketPrice")
+    return float(precio)
+
+
+def _yahoo_precio_historico(simbolo: str, fecha: date) -> tuple[float, date]:
+    """Precio de cierre de `fecha`, o el del último día hábil anterior si `fecha`
+    cayó en fin de semana o festivo (no hay cotización ese día, no un precio a 0)."""
+    p1 = int(datetime(*(fecha - timedelta(days=7)).timetuple()[:3], tzinfo=timezone.utc).timestamp())
+    p2 = int(datetime(*fecha.timetuple()[:3], tzinfo=timezone.utc).timestamp()) + 86400
+    resultado = _yahoo_chart(simbolo, {"period1": p1, "period2": p2, "interval": "1d"})
+    timestamps = resultado.get("timestamp") or []
+    cierres    = ((resultado.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    candidatos = []
+    for t, c in zip(timestamps, cierres):
+        if c is None:
+            continue
+        d = datetime.fromtimestamp(t, tz=timezone.utc).date()
+        if d <= fecha:
+            candidatos.append((d, c))
+    if not candidatos:
+        raise _YahooFallo(f"{simbolo}: sin precio histórico cerca de {fecha}")
+    d, c = max(candidatos, key=lambda x: x[0])
+    return float(c), d
+
+
+_etf_precios_cache = None   # (momento_epoch, {ticker: precio})
+_etf_precios_lock  = threading.Lock()
+
+
+def _etf_precios_actuales(holdings: list[dict], refrescar: bool) -> dict:
+    """Precio actual de cada ETF en `holdings`, cacheado en conjunto.
+
+    Si un ETF concreto falla, se registra y ese ticker queda sin precio; no tumba a
+    los demás, mismo criterio que Indexa cuando falla /performance.
+    """
+    global _etf_precios_cache
+    if not refrescar:
+        with _etf_precios_lock:
+            guardado = _etf_precios_cache
+        if guardado and time.time() - guardado[0] < ETF_PRECIO_TTL_MINUTOS * 60:
+            return guardado[1]
+    precios = {}
+    for h in holdings:
+        simbolo = h.get("simbolo_yahoo")
+        if not simbolo:
+            logger.warning("Yahoo Finance: %s no tiene simbolo_yahoo en Supabase", h.get("ticker"))
+            continue
+        try:
+            precios[h["ticker"]] = _yahoo_precio_actual(simbolo)
+        except _YahooFallo as e:
+            logger.warning("Yahoo Finance: sin precio actual de %s (%s)", h["ticker"], e)
+    with _etf_precios_lock:
+        _etf_precios_cache = (time.time(), precios)
+    return precios
+
+
+class EtfHoldingIn(BaseModel):
+    ticker:        str = Field(pattern=_TICKER_RE.pattern)
+    nombre:        str = Field(max_length=200)
+    simbolo_yahoo: str = Field(max_length=20)   # ej. "VWCE.DE" — ticker + sufijo de bolsa
+
+
+class EtfAportacionIn(BaseModel):
+    fecha:       date
+    importe_eur: float = Field(gt=0, le=1_000_000)
+
+
+def _ticker_path():
+    """Fábrica del validador de `ticker` en la ruta — mismo motivo que _uuid_path():
+    FastAPI asocia cada Path() al nombre del parámetro que lo usa."""
+    return Path(..., pattern=_TICKER_RE.pattern)
+
+
+@app.get("/finanzas/etfs")
+def get_cartera_etf(
+    refrescar: bool = False,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Cartera manual de ETFs: participaciones y aportado siempre se conocen (son datos
+    propios); precio actual, valor y ganancia son `None` si Yahoo Finance falló para
+    ese ETF — nunca un 0 €, que sería una afirmación sobre el dinero."""
+    r = http.get(f"{SUPABASE_URL}/rest/v1/etf_holdings?select=*&order=ticker.asc", headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    holdings = r.json()
+
+    r2 = http.get(f"{SUPABASE_URL}/rest/v1/etf_aportaciones?select=*&order=fecha.asc", headers=supabase_headers())
+    if r2.status_code >= 300:
+        raise _supabase_error(r2)
+    aportaciones = r2.json()
+
+    precios = _etf_precios_actuales(holdings, refrescar)
+
+    etfs = []
+    total_aportado = 0.0
+    total_valor: float | None = 0.0
+    for h in holdings:
+        propias         = [a for a in aportaciones if a["ticker"] == h["ticker"]]
+        participaciones = round(sum(a["participaciones"] for a in propias), 8)
+        aportado        = round(sum(a["importe_eur"] for a in propias), 2)
+        precio          = precios.get(h["ticker"])
+        valor           = round(participaciones * precio, 2) if precio is not None else None
+        ganancia_eur    = round(valor - aportado, 2) if valor is not None else None
+        ganancia_pct    = round(ganancia_eur / aportado, 4) if ganancia_eur is not None and aportado else None
+
+        etfs.append({
+            "ticker":          h["ticker"],
+            "nombre":          h["nombre"],
+            "participaciones": participaciones,
+            "aportado_eur":    aportado,
+            "precio_actual":   precio,
+            "valor_actual":    valor,
+            "ganancia_eur":    ganancia_eur,
+            "ganancia_pct":    ganancia_pct,
+        })
+        total_aportado += aportado
+        if total_valor is not None:
+            total_valor = total_valor + valor if valor is not None else None
+
+    total_ganancia = round(total_valor - total_aportado, 2) if total_valor is not None else None
+    return {
+        "etfs": etfs,
+        "total": {
+            "aportado_eur": round(total_aportado, 2),
+            "valor_actual": round(total_valor, 2) if total_valor is not None else None,
+            "ganancia_eur": total_ganancia,
+            "ganancia_pct": round(total_ganancia / total_aportado, 4) if total_ganancia is not None and total_aportado else None,
+        },
+    }
+
+
+@app.post("/finanzas/etfs")
+def crear_etf_holding(
+    body: EtfHoldingIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Da de alta un ETF nuevo a trackear. Sin botón en el frontend a propósito: se usa
+    una vez por ETF (por curl), no es una acción del día a día."""
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/etf_holdings",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=body.model_dump(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True, "holding": r.json()[0]}
+
+
+@app.post("/finanzas/etfs/{ticker}/aportaciones")
+def crear_etf_aportacion(
+    body: EtfAportacionIn,
+    ticker: str = _ticker_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/etf_holdings?ticker=eq.{quote(ticker, safe='')}&select=*",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    holdings = r.json()
+    if not holdings:
+        raise HTTPException(status_code=404, detail="Ese ETF no está dado de alta")
+    h = holdings[0]
+    simbolo = h.get("simbolo_yahoo")
+    if not simbolo:
+        logger.error("Yahoo Finance: %s no tiene simbolo_yahoo en Supabase", ticker)
+        raise HTTPException(status_code=502, detail="Ese ETF no tiene símbolo de Yahoo Finance configurado")
+
+    try:
+        precio, fecha_precio = _yahoo_precio_historico(simbolo, body.fecha)
+    except _YahooFallo as e:
+        logger.error("Yahoo Finance: no se pudo calcular el precio histórico de %s en %s (%s)", ticker, body.fecha, e)
+        raise HTTPException(status_code=502, detail="No se pudo consultar el precio histórico del ETF")
+
+    payload = {
+        "ticker":          ticker,
+        "fecha":           body.fecha.isoformat(),
+        "importe_eur":     body.importe_eur,
+        "participaciones": round(body.importe_eur / precio, 8),
+        "precio_compra":   precio,
+    }
+    r2 = http.post(
+        f"{SUPABASE_URL}/rest/v1/etf_aportaciones",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    if r2.status_code >= 300:
+        raise _supabase_error(r2)
+    return {"ok": True, "aportacion": r2.json()[0], "fecha_precio_usada": fecha_precio.isoformat()}
 
 
 # ── SALUD (Apple Watch via Health Auto Export) ────────────────────────────────
