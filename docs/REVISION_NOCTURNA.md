@@ -357,26 +357,23 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
 - **Antes de dar por revocado el token, comprueba el NOMBRE del secret.** Fly acepta
   cualquier nombre en `fly secrets set` sin avisar de que nadie lo lee, así que una
   errata deja el token bueno guardado en un secret fantasma y el backend siguiendo con
-  el viejo — con el mismo síntoma exacto que un token caducado. Pasó el 2026-08-24:
-  el valor nuevo se puso en `AREGLO_FIRE_TOKEN` (una sola R) y `ARREGLO_FIRE_TOKEN`
-  seguía revocado, así que el botón falló otra vez después de "haber actualizado los
-  secrets". Se ve en un vistazo con `fly secrets list` (buscando nombres parecidos de
-  más), y se distingue token malo de nombre malo preguntándole a la API desde la
-  propia máquina, sin disparar nada:
-
-  ```bash
-  fly ssh console -C "python -c \"
-  import os, requests
-  r = requests.get(os.getenv('ARREGLO_FIRE_URL'),
-                   headers={'Authorization': 'Bearer ' + os.getenv('ARREGLO_FIRE_TOKEN', ''),
-                            'anthropic-version': '2023-06-01',
-                            'anthropic-beta': 'claude-code-routines-2025-11-20'})
-  print(r.status_code, r.text[:120])
-  \""
-  ```
-
-  `405 Method Not Allowed` significa que la credencial es buena (el GET solo sirve para
-  no disparar el arreglo de verdad); `401 authentication_error` es que de verdad está
-  revocada.
+  el viejo — con el mismo síntoma exacto que un token caducado. Pasó el 2026-08-24: el
+  valor nuevo se puso en `AREGLO_FIRE_TOKEN` (una sola R) y `ARREGLO_FIRE_TOKEN` seguía
+  revocado, así que el botón falló otra vez después de "haber actualizado los secrets".
+  Se ve en un vistazo con `fly secrets list`, buscando nombres parecidos de más.
+- **Cada trigger tiene SU token: el del briefing no vale para el del arreglo.** El mismo
+  2026-08-24, al arreglar lo de arriba se copió en `ARREGLO_FIRE_TOKEN` el valor de
+  `RUTINA_FIRE_TOKEN` —que es válido— y el disparo siguió dando 401, ahora con
+  `"Token is not authorized for this routine"`. Los tokens de trigger están atados a su
+  rutina; no son credenciales de la cuenta. Si `ARREGLO_FIRE_URL` y `RUTINA_FIRE_URL`
+  apuntan a triggers distintos, sus tokens también tienen que serlo.
+- **No intentes validar el token con un GET al trigger.** Es tentador (no dispara nada)
+  pero MIENTE: el `405 Method Not Allowed` se resuelve antes de comprobar a qué rutina
+  pertenece el token, así que un token de otra rutina también devuelve 405 y parece
+  bueno. Lo único que descarta un GET es que la credencial esté revocada del todo
+  (`401 authentication_error`). Para saber si el token es EL de esa rutina hay que
+  disparar de verdad, o leer el motivo que el backend ya traduce en el aviso del móvil:
+  «caducado o revocado» y «pertenece a OTRA rutina» son mensajes distintos a propósito
+  (`_motivo_disparo`).
 - **El agente que arregla no mergea en rojo.** Si el CI falla tras dos intentos deja el
   PR abierto con una explicación, que es un resultado — el silencio no lo sería.

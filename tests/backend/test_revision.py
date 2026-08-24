@@ -112,6 +112,20 @@ class TestElMotivoDelDisparo:
         motivo = main._motivo_disparo(401, '{"type":"authentication_error"}')
         assert "token" in motivo and "claude.ai/code/routines" in motivo
 
+    def test_el_token_de_otra_rutina_no_se_confunde_con_uno_caducado(self):
+        """Los dos son 401 y los arreglos son opuestos: regenerar vs. coger el token bueno.
+
+        Pasó de verdad: al fallar el disparo se puso en `ARREGLO_FIRE_TOKEN` el token del
+        briefing, que es válido, y el aviso del móvil siguió diciendo «caducado o
+        revocado» — mandando a regenerar un token que no tenía nada de malo.
+        """
+        motivo = main._motivo_disparo(
+            401, '{"error":{"message":"Token is not authorized for this routine",'
+                 '"type":"authentication_error"}}')
+        assert "OTRA rutina" in motivo
+        assert "ARREGLO_FIRE_TOKEN" in motivo
+        assert "caducado" not in motivo
+
     def test_un_trigger_que_ya_no_esta(self):
         assert "ya no existen" in main._motivo_disparo(404, "not_found")
 
