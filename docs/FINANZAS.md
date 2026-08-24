@@ -285,6 +285,18 @@ memoria, y el botón ↻ del widget la salta igual que con Indexa/Revolut. Si fa
 precio de UN ETF concreto, se registra y ese ticker se queda sin precio — no tumba a
 los demás.
 
+**El precio de Yahoo nunca va a coincidir exactamente con el que enseña Revolut, y no
+es un bug.** Comprobado en producción: con SECO a 16,64 € en Revolut, las siete
+cotizaciones reales que existen del mismo ETF (Xetra, Múnich, Düsseldorf, Hamburgo,
+Milán, Londres y SIX Suiza, convertidas a EUR donde hacía falta) daban entre 16,38 y
+16,57 € — ninguna coincidía, todas por debajo en la misma proporción. Revolut usa su
+propio feed de precios (con su propio margen al operar fracciones), que no está
+expuesto por ninguna API pública gratuita. Con Yahoo Finance como fuente, un margen
+de ruido de ~0,5-1 % frente al precio exacto de Revolut es el límite real, asumido a
+propósito — decisión tomada con Mikel tras comprobarlo en vivo, no algo pendiente de
+arreglar. El valor total y la tendencia (sube/baja) son correctos; el porcentaje
+exacto de ganancia puede variar un poco.
+
 ### Lo que no se hace y por qué
 
 - **Escribir en Indexa** (aportaciones, traspasos). El token puede; el dashboard no debe. Un
