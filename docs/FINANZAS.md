@@ -98,12 +98,17 @@ Los formateadores son puros y viven en `src/lib/helpers.js`: `formatoEuros`,
 `formatoPorcentaje`, `formatoRentabilidad` (fracción → porcentaje, en un solo sitio para que
 nadie multiplique por 100 a ojo), `mezclaCartera` y `variacionCartera`.
 
-Debajo, separado con una línea, el bloque de Revolut (`finanzas.revolut`): solo el saldo, sin
-serie ni mezcla — es un ahorro, no una cartera. Y debajo de ese, otra línea y la cartera
-manual de ETFs (`carteraEtf`, estado propio cargado con `GET /finanzas/etfs`): una fila por
-ETF con su valor y ganancia, y un botón "+ Añadir aportación" que abre un formulario inline
-(fecha + importe) y llama a `POST /finanzas/etfs/{ticker}/aportaciones`. El botón ↻ refresca
-las tres fuentes a la vez.
+Debajo, separadas por una sola línea, Revolut (`finanzas.revolut`) y la cartera manual de
+ETFs (`carteraEtf`, estado propio cargado con `GET /finanzas/etfs`) comparten UNA lista con
+el mismo estilo de fila compacta que ya usan las cuentas de Indexa cuando hay más de una
+(nombre a la izquierda, valor en monoespaciada a la derecha) — antes cada una tenía su
+propia caja con su propio título en mayúsculas, y se veían como tres widgets pegados en vez
+de una sola tarjeta. Siguen siendo datos que **no se suman entre sí** (inversión con
+plusvalía, saldo de cuenta corriente y cartera manual son cosas distintas), solo cambió
+cómo se presentan. Cada ETF muestra precio actual (`€/particip.`) y aportado en una línea
+secundaria, y un botón "+ Añadir aportación" que abre un formulario inline (fecha, hora
+opcional, importe) y llama a `POST /finanzas/etfs/{ticker}/aportaciones`. El botón ↻
+refresca las tres fuentes a la vez.
 
 ### Jarvis
 
@@ -252,10 +257,22 @@ que Indexa cuando falla `/performance`: `None` es "no lo sé", nunca un 0 €. U
 falla no tumba a los demás.
 
 **`POST /finanzas/etfs/{ticker}/aportaciones`** es el botón "+ Añadir aportación" del
-widget: recibe `fecha` + `importe_eur`, pide a Yahoo el precio de cierre de esa fecha
-(con una ventana de 7 días hacia atrás por si cae en fin de semana o festivo — se usa
-el último día hábil anterior, no un precio a 0) y calcula
-`participaciones = importe_eur / precio` antes de guardar.
+widget: recibe `fecha` + `importe_eur` y, opcionalmente, `hora` (HH:MM). Sin `hora`
+pide a Yahoo el precio de **cierre del día** (con una ventana de 7 días hacia atrás
+por si cae en fin de semana o festivo — se usa el último día hábil anterior, no un
+precio a 0). Con `hora`, primero intenta el precio **horario** más cercano a ese
+momento (`interval=60m`, convertida de la zona horaria del usuario a UTC) y solo cae
+al cierre diario si Yahoo no tiene velas horarias para esa fecha — pasa con compras
+de hace más de ~730 días, que es hasta donde llega esa granularidad. La diferencia
+importa: el cierre del día puede alejarse bastante del precio real de una compra
+hecha a media sesión, y sin `hora` esto se notó en producción como una ganancia
+mostrada por encima de la real. En los dos casos, `participaciones = importe_eur /
+precio` antes de guardar.
+
+**`DELETE /finanzas/etfs/{ticker}/aportaciones/{id}`** borra una aportación mal
+metida (fecha, importe u hora equivocados). No hay `PATCH`: todos los campos de una
+aportación dependen entre sí (cambiar la fecha invalida el precio ya calculado), así
+que corregir es borrar y volver a crear.
 
 **`POST /finanzas/etfs`** da de alta un ETF nuevo. Sin botón en el frontend a
 propósito: no es una acción del día a día, se usa una vez por ETF (por curl) cuando
