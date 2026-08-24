@@ -904,10 +904,18 @@ function _percentil(ordenados, p) {
 
 // Percentiles del propio histórico de una serie en la ventana anclada a `fecha`.
 // Devuelve null —y quien llama vuelve al umbral fijo— si no hay días suficientes.
-export function baselinePersonal(serie, fecha, { dias = BASELINE_DIAS, minDias = BASELINE_MIN_DIAS } = {}) {
+export function baselinePersonal(serie, fecha, {
+  dias = BASELINE_DIAS, minDias = BASELINE_MIN_DIAS, corte = null,
+} = {}) {
   const hasta = fecha ? _sumarDias(fecha, -1)    : null;
-  const desde = fecha ? _sumarDias(fecha, -dias) : null;
+  let   desde = fecha ? _sumarDias(fecha, -dias) : null;
   if (hasta == null || desde == null) return null;
+  // El corte por cambio de dispositivo manda sobre la ventana. Los días anteriores
+  // siguen enteros en la tabla y en las gráficas: lo que dejan de poder hacer es servir
+  // de referencia, porque los midió otro sensor. Si eso deja la muestra por debajo de
+  // `minDias`, la función devuelve null y quien llama cae al umbral fijo — que es
+  // exactamente lo que debe pasar mientras el aparato nuevo no tenga historia propia.
+  if (corte && String(corte) > desde) desde = String(corte);
   const vals = (serie || [])
     .filter(d => d && d.date != null && String(d.date) >= desde && String(d.date) <= hasta)
     .map(d => Number(d.value))
@@ -1152,6 +1160,68 @@ export function wellnessBreakdown({
   return b;
 }
 
+// ── Métricas que este aparato no mide ────────────────────────────
+// Hay dos cosas que el desglose pinta igual y no son lo mismo: "hoy no hay dato" —un
+// hueco, se arregla llevando el reloj puesto— y "tu aparato no mide esto", que no se
+// arregla nunca. Al cambiar de dispositivo media docena de componentes pasan a la
+// segunda categoría de golpe y para siempre: el Apple Watch DERIVA horas de pie,
+// minutos de ejercicio, recuperación cardíaca, FC caminando y luz natural, y ningún
+// otro fabricante escribe eso en Apple Health.
+//
+// Sin distinguirlas, el desglose se queda con seis filas en gris reclamando cada día
+// un dato que no va a llegar: una lista de reproches imposibles de cumplir.
+//
+// Se decide MIRANDO LOS DATOS, no con una lista fija de "lo que mide un Amazfit". Así
+// vale para cualquier aparato, y si el usuario vuelve al reloj de antes las filas
+// reaparecen solas en cuanto llegue una medida. Una lista fija habría que mantenerla a
+// mano cada vez que cambie el catálogo del fabricante, y nadie se acuerda de eso.
+export const METRICA_MUERTA_DIAS = 14;
+
+// Qué métricas alimentan cada fila del desglose. Un test comprueba que las claves de
+// aquí son exactamente las etiquetas que `wellnessBreakdown` puede emitir: si alguien
+// añade un componente y se olvida de esta tabla, salta ahí y no en producción.
+export const METRICAS_DEL_DESGLOSE = {
+  "😴 Sueño":               ["sleep_analysis", "sleep"],
+  "💪 Entreno":             ["workouts", "workout", "apple_exercise_time", "exercise_time"],
+  "🚶 Pasos":               ["step_count", "steps"],
+  "🔥 Energía":             ["active_energy"],
+  "🧍 De pie":              ["apple_stand_hour", "stand_hour"],
+  "🪜 Pisos":               ["flights_climbed"],
+  "❤️ HRV":                 ["heart_rate_variability", "heartRateVariability"],
+  "🫀 FC reposo":           ["resting_heart_rate"],
+  "💓 Recuperación cardio": ["cardio_recovery"],
+  "🫁 VO₂max":              ["vo2_max", "cardioFitness"],
+  "🏃 FC caminando":        ["walking_heart_rate_average"],
+  "⚖️ % Grasa":             ["body_fat_percentage"],
+  "☀️ Luz natural":         ["time_in_daylight"],
+  "🌬️ Resp.":               ["respiratory_rate"],
+};
+
+// Conjunto de etiquetas del desglose cuyas métricas llevan `dias` sin traer nada.
+//
+// La ventana arranca en el cambio de dispositivo cuando lo hay: recién cambiado no ha
+// dado tiempo a acumular `dias` de nada, y dar por muerta una métrica el primer día
+// sería tan falso como darla por viva. Por eso hace falta que el corte tenga ya al
+// menos `dias` de recorrido antes de declarar nada.
+export function metricasMuertas(healthData, {
+  hoy = null, dias = METRICA_MUERTA_DIAS, corte = null,
+} = {}) {
+  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const desde = _sumarDias(hasta, -(dias - 1));
+  if (desde == null) return new Set();
+  // Con un corte demasiado reciente no se puede afirmar nada todavía.
+  if (corte && String(corte) > desde) return new Set();
+
+  const muertas = new Set();
+  for (const [etiqueta, nombres] of Object.entries(METRICAS_DEL_DESGLOSE)) {
+    const hay = findMetric(healthData, ...nombres)
+      .some(d => d && d.date != null && String(d.date) >= desde && String(d.date) <= hasta
+                 && (Number(d.value) > 0 || (d.extra?.workouts?.length || 0) > 0));
+    if (!hay) muertas.add(etiqueta);
+  }
+  return muertas;
+}
+
 export function scoreFromBreakdown(breakdown) {
   // `sinDatos` queda fuera de la fracción entera: no tener el sensor de una métrica
   // no debe puntuar como tenerlo y sacar un cero.
@@ -1195,17 +1265,18 @@ function _porFecha(serie) {
 // Referencia de HRV de un día: media de la ventana que va de D-14 a D-8. Es la misma
 // que usa la vista diaria del widget (`slice(-14, -7)`), pero anclada a esa fecha en
 // vez de a hoy, para que el día puntúe como habría puntuado entonces.
-function _refHrv(hrvPorFecha, fecha) {
+function _refHrv(hrvPorFecha, fecha, corte = null) {
   const vals = [];
   for (let i = 14; i >= 8; i--) {
     const f = _sumarDias(fecha, -i);
-    const v = f == null ? null : hrvPorFecha.get(f);
+    if (f == null || (corte && f < String(corte))) continue;
+    const v = hrvPorFecha.get(f);
     if (v != null && v > 0) vals.push(v);
   }
   return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
 }
 
-export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
+export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = null } = {}) {
   const series = {
     sleep: _porFecha(findMetric(healthData, "sleep_analysis", "sleep")
       .filter(d => !d.extra?.excluded)
@@ -1267,11 +1338,11 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
       stand:        val("stand"),
       flights:      val("flights"),
       hrv:          val("hrv"),
-      hrvPrev:      _refHrv(series.hrv, fecha),
+      hrvPrev:      _refHrv(series.hrv, fecha, corte),
       // Anclada a ESTE día, no a hoy: si no, el mismo día del histórico puntuaría
       // distinto cada vez que se abre el dashboard y la sparkline dejaría de ser
       // comparable consigo misma. Misma razón que `_refHrv`.
-      baselines:    wellnessBaselines(healthData, fecha),
+      baselines:    wellnessBaselines(healthData, fecha, { corte }),
       cardioRec:    ultimo.cardioRec,
       vo2:          ultimo.vo2,
       walkHr:       val("walkHr"),
@@ -1295,6 +1366,116 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null } = {}) {
 
 // ── Conteo de ropa (widget temporal) ────────────────────────────
 // Monedas soportadas: euro y baht tailandés (símbolo ฿).
+// ── Calorías de mantenimiento MEDIDAS ────────────────────────────
+// Las fórmulas (Mifflin-St Jeor, Katch-McArdle, Cunningham) estiman el gasto a partir
+// de peso, altura, edad y masa magra, y se equivocan en ±300 kcal según lo musculado
+// que estés y cuánto te muevas fuera del gimnasio. El mantenimiento real no hay que
+// estimarlo: se deduce de dos series que ya están en la tabla.
+//
+// Si en una ventana comes una media de I kcal/día y tu peso sigue una pendiente de P
+// kg/día, la diferencia entre lo que comes y lo que gastas es justo lo que explica ese
+// movimiento del peso:
+//
+//     TDEE = I − P × KCAL_POR_KG
+//
+// El signo despista hasta que se piensa: si adelgazas, P es NEGATIVA, así que se RESTA
+// un número negativo y el gasto sale por encima de la ingesta. Correcto — adelgazar es
+// gastar más de lo que se come.
+//
+// La pendiente sale por mínimos cuadrados sobre todas las pesadas, no de restar la
+// primera a la última: uno no se pesa siempre en las mismas condiciones y un solo día
+// con retención de líquidos en cualquiera de los dos extremos se llevaría el número por
+// delante. Con la regresión, una pesada rara es un punto más entre veinte.
+//
+// 7.700 kcal por kilo es la convención (≈7,7 kcal por gramo de tejido adiposo). No es
+// exacta —parte del peso perdido es agua y glucógeno, sobre todo las dos primeras
+// semanas— y por eso la ventana mínima es de dos semanas y la función avisa de la
+// confianza que merece lo que devuelve.
+export const KCAL_POR_KG = 7700;
+
+// Pendiente de una serie (fecha, valor) por mínimos cuadrados, en unidades por día.
+// Devuelve null si no hay al menos dos puntos en fechas distintas.
+function _pendientePorDia(puntos) {
+  if (!puntos || puntos.length < 2) return null;
+  const base = puntos[0].date;
+  const xs = [], ys = [];
+  for (const p of puntos) {
+    const x = _diasEntre(base, p.date);
+    if (x == null) continue;
+    xs.push(x);
+    ys.push(p.value);
+  }
+  if (xs.length < 2) return null;
+  const n = xs.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i] - mx) * (ys[i] - my);
+    den += (xs[i] - mx) ** 2;
+  }
+  return den === 0 ? null : num / den;
+}
+
+// Qué le falta al cálculo para poder darse, en orden de lo que más cuesta conseguir.
+// Se devuelve siempre (no solo cuando falla) para que la interfaz pueda decir "te
+// faltan 4 días de registro" en vez de un hueco mudo, que es lo que hace que nadie
+// entienda por qué el widget no enseña nada.
+export function mantenimientoEstimado(healthData, {
+  dias = 28, hoy = null,
+  minDiasIngesta = 10, minPesadas = 5, minRecorridoDias = 14,
+} = {}) {
+  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const desde = _sumarDias(hasta, -(dias - 1));
+  const enVentana = serie => (serie || [])
+    .filter(d => d && d.date != null && d.value != null)
+    .filter(d => String(d.date) >= desde && String(d.date) <= hasta)
+    .map(d => ({ date: String(d.date), value: Number(d.value) }))
+    .filter(d => !isNaN(d.value) && d.value > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const ingesta = enVentana(findMetric(healthData, "dietary_energy"));
+  const peso    = enVentana(findMetric(healthData, "weight_body_mass", "weight"));
+
+  const mediaIngesta = ingesta.length
+    ? ingesta.reduce((s, d) => s + d.value, 0) / ingesta.length
+    : null;
+  const recorrido = peso.length >= 2
+    ? _diasEntre(peso[0].date, peso[peso.length - 1].date)
+    : 0;
+  const pendiente = _pendientePorDia(peso);
+
+  const base = {
+    kcal: null, confianza: null, falta: null,
+    desde, hasta, dias,
+    // Los mínimos viajan con el resultado para que la interfaz pueda decir "4 de 10
+    // días" sin tener que conocerlos por su cuenta: dos copias de un umbral es como
+    // empieza siempre la desincronización.
+    minimos: { ingesta: minDiasIngesta, pesadas: minPesadas, recorrido: minRecorridoDias },
+    diasIngesta: ingesta.length, mediaIngesta,
+    pesadas: peso.length, recorridoDias: recorrido,
+    pendienteKgSemana: pendiente == null ? null : pendiente * 7,
+  };
+
+  if (ingesta.length < minDiasIngesta) return { ...base, falta: "ingesta" };
+  if (peso.length    < minPesadas)     return { ...base, falta: "peso" };
+  if (recorrido == null || recorrido < minRecorridoDias || pendiente == null) {
+    return { ...base, falta: "recorrido" };
+  }
+
+  const kcal = Math.round(mediaIngesta - pendiente * KCAL_POR_KG);
+  // Un número imposible es un dato malo, no un metabolismo raro: una ingesta a medio
+  // registrar o una báscula que mandó un valor en libras salen por aquí. Enseñarlo
+  // sería peor que no enseñar nada, porque encima parece medido.
+  if (kcal < 800 || kcal > 6000) return { ...base, falta: "datos" };
+
+  const confianza =
+    ingesta.length >= 21 && peso.length >= 10 && recorrido >= 21 ? "alta"  :
+    ingesta.length >= 14 && peso.length >= 7  && recorrido >= 14 ? "media" : "baja";
+
+  return { ...base, kcal, confianza };
+}
+
 export const CLOTHING_CURRENCIES = { EUR: "€", THB: "฿" };
 
 // Formatea un importe con su símbolo de moneda al estilo español: coma decimal

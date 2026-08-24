@@ -63,7 +63,8 @@
 | `DELETE /finanzas/etfs/{ticker}/aportaciones/{id}` | JWT | Borra una aportación mal metida (no hay PATCH: para corregirla se borra y se vuelve a crear) |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
-| `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) |
+| `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) + `ajustes` (el corte por cambio de dispositivo) |
+| `PATCH /health/ajustes` | JWT | Fija o borra la fecha del cambio de dispositivo de salud (`cambio_dispositivo`, `dispositivo`). Rechaza fechas futuras: un corte por delante de hoy dejaría las líneas base sin ninguna referencia |
 | `GET /health/latest` | JWT | Último valor de cada métrica |
 | `GET /health/diagnostico` | JWT | Por métrica: último día con MEDIDA, huecos intercalados, qué fuente la escribe y filas de relleno; más la última escritura de cada cliente. `?dias=` (1-365) |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |

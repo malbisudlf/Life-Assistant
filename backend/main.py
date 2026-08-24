@@ -3212,9 +3212,13 @@ def borrar_etf_aportacion(
 # valor nuevo solo pisa al guardado si es MAYOR. Constantes de módulo y compartidas por
 # las dos rutas de ingesta — cuando cada una tenía su propia copia, a la del Shortcut le
 # faltaba resting_energy y un snapshot de mediodía podía pisar el total del día.
-CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy"}
+# `dietary_energy` (lo que se come) es acumulativa por la misma razón que las demás:
+# se va sumando comida a comida a lo largo del día, así que un sync de mediodía no
+# puede pisar el total de la noche.
+CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy",
+                      "dietary_energy"}
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
-ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
+ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy", "dietary_energy"}
 
 # Formas en las que puede llegar escrito "kilojulios". La comparación tiene que ser
 # LAXA: se hacía con `unit == "kJ"`, un igual exacto contra una cadena que decide el
@@ -3927,6 +3931,46 @@ def toggle_sleep_exclude(
     return {"date": date, "excluded": extra["excluded"]}
 
 
+# ── Ajustes de salud: el cambio de dispositivo ────────────────────────────────
+# Al cambiar de reloj las métricas siguen llamándose igual y pareciendo lo mismo, pero
+# las mide otro sensor con otro algoritmo. Y las puntuaciones no comparan valores
+# absolutos: comparan cada día contra la propia historia (HRV contra D-14..D-8,
+# respiración contra 30 días, FC en reposo contra los percentiles de 90). Sin saber
+# dónde está el corte, durante más de un mes se estaría midiendo la diferencia entre
+# dos fabricantes y leyéndola como fisiología del usuario.
+SALUD_AJUSTES_URL = f"{SUPABASE_URL}/rest/v1/salud_ajustes"
+
+
+class SaludAjustesUpdate(BaseModel):
+    # `null` explícito borra el corte; omitir el campo lo deja como estaba (se
+    # distinguen con model_fields_set, igual que en los ajustes del resumen).
+    cambio_dispositivo: Optional[str] = None
+    dispositivo:        Optional[str] = Field(None, max_length=64)
+
+
+def _leer_salud_ajustes() -> dict:
+    """Los ajustes de salud, o los valores por defecto si no hay fila ni Supabase.
+
+    Fail-open a propósito: sin corte, las líneas base se comportan igual que antes de
+    que esta tabla existiera. Que no se pueda leer un ajuste no puede dejar sin
+    puntuación un panel entero.
+    """
+    vacio = {"cambio_dispositivo": None, "dispositivo": None}
+    try:
+        r = http.get(f"{SALUD_AJUSTES_URL}?id=eq.actual&select=cambio_dispositivo,dispositivo",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return vacio
+        filas = r.json()
+    except requests.RequestException:
+        logger.warning("Ajustes de salud: no se pudieron leer")
+        return vacio
+    if not filas:
+        return vacio
+    return {"cambio_dispositivo": filas[0].get("cambio_dispositivo"),
+            "dispositivo":        filas[0].get("dispositivo")}
+
+
 @app.get("/health/metrics")
 def get_health_metrics(
     days: int = 30,
@@ -3987,7 +4031,54 @@ def get_health_metrics(
                     for n in grouped if n in _RELOJ_NOCHE or n in _RELOJ_DIA},
     }
 
-    return {"metrics": grouped, "last_sync": last_sync, "reloj": reloj}
+    # Los ajustes viajan con las métricas por lo mismo que `reloj`: el frontend ya está
+    # pidiendo esto y necesita el corte para calcular las líneas base. En un endpoint
+    # aparte serían dos viajes para pintar un solo panel.
+    return {"metrics": grouped, "last_sync": last_sync, "reloj": reloj,
+            "ajustes": _leer_salud_ajustes()}
+
+
+@app.patch("/health/ajustes")
+def update_salud_ajustes(
+    body: SaludAjustesUpdate,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Fija (o borra) la fecha del cambio de dispositivo de salud."""
+    puestos = body.model_fields_set
+    if not puestos:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+
+    actual = _leer_salud_ajustes()
+    fila   = {"id": "actual", **actual}
+
+    if "cambio_dispositivo" in puestos:
+        fecha = (body.cambio_dispositivo or "").strip() or None
+        if fecha:
+            if not _DATE_RE.match(fecha):
+                raise HTTPException(status_code=400, detail="cambio_dispositivo debe ser YYYY-MM-DD")
+            try:
+                d = datetime.strptime(fecha, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Esa fecha no existe")
+            # Un corte en el futuro dejaría las líneas base sin ninguna referencia
+            # válida hasta que llegara el día, que es peor que no tener corte.
+            if d > _ahora_local().date():
+                raise HTTPException(status_code=400, detail="El cambio de dispositivo no puede ser futuro")
+        fila["cambio_dispositivo"] = fecha
+
+    if "dispositivo" in puestos:
+        fila["dispositivo"] = (body.dispositivo or "").strip() or None
+
+    fila["updated_at"] = datetime.now(timezone.utc).isoformat()
+    r = http.post(
+        f"{SALUD_AJUSTES_URL}?on_conflict=id",
+        headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+        json=[fila],
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True, "cambio_dispositivo": fila["cambio_dispositivo"],
+            "dispositivo": fila["dispositivo"]}
 
 
 # Ventana del diagnóstico de datos. Treinta días es lo que hace falta para ver un hueco
@@ -4433,6 +4524,7 @@ _BRIEF_METRICAS = (
     ("esfuerzo",        ("physical_effort",),                               "",          True,  "Esfuerzo físico"),
     ("energia_activa",  ("active_energy",),                                 "kcal",      True,  "Energía activa"),
     ("energia_basal",   ("resting_energy", "basal_energy"),                 "kcal",      True,  "Energía basal"),
+    ("energia_ingerida", ("dietary_energy",),                               "kcal",      True,  "Energía ingerida"),
     ("luz_natural",     ("time_in_daylight",),                              "min",       True,  "Luz natural"),
     ("peso",            ("weight_body_mass", "weight"),                     "kg",        False, "Peso"),
     ("grasa",           ("body_fat_percentage",),                           "%",         False, "% Grasa"),

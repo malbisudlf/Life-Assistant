@@ -8,6 +8,8 @@ import {
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessHistory,
   baselinePersonal, wellnessBaselines,
+  mantenimientoEstimado, KCAL_POR_KG,
+  metricasMuertas, METRICAS_DEL_DESGLOSE, METRICA_MUERTA_DIAS,
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
@@ -1561,5 +1563,250 @@ describe("variacionCartera", () => {
     expect(variacionCartera([{ fecha: "2026-08-21", valor: 12400 }])).toBeNull();
     expect(variacionCartera([])).toBeNull();
     expect(variacionCartera(null)).toBeNull();
+  });
+});
+
+
+describe("mantenimientoEstimado", () => {
+  // Genera `dias` días consecutivos que acaban en `hasta`, con la ingesta fija y el
+  // peso siguiendo una pendiente exacta. Sirve para comprobar que el número que sale
+  // es el que dicta la aritmética, no "uno parecido".
+  const _serie = ({ hasta = "2026-08-24", dias = 28, kcal = 2000, pesoInicial = 71,
+                    kgPorSemana = 0, pesoCada = 1 } = {}) => {
+    const dietary_energy = [], weight_body_mass = [];
+    const base = new Date(`${hasta}T12:00:00Z`);
+    for (let i = dias - 1; i >= 0; i--) {
+      const d = new Date(base);
+      d.setUTCDate(d.getUTCDate() - i);
+      const fecha = d.toISOString().slice(0, 10);
+      const transcurridos = dias - 1 - i;
+      if (kcal != null) dietary_energy.push({ date: fecha, value: kcal });
+      if (transcurridos % pesoCada === 0) {
+        weight_body_mass.push({
+          date: fecha,
+          value: pesoInicial + (kgPorSemana / 7) * transcurridos,
+        });
+      }
+    }
+    return { dietary_energy, weight_body_mass };
+  };
+
+  test("peso estable: el mantenimiento es lo que se come", () => {
+    const r = mantenimientoEstimado(_serie({ kcal: 2400, kgPorSemana: 0 }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(2400);
+    expect(r.pendienteKgSemana).toBeCloseTo(0, 6);
+    expect(r.falta).toBe(null);
+  });
+
+  test("adelgazando: el gasto está POR ENCIMA de la ingesta", () => {
+    // −0,5 kg/semana son 0,5 × 7700 / 7 = 550 kcal/día de déficit.
+    const r = mantenimientoEstimado(_serie({ kcal: 2000, kgPorSemana: -0.5 }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(2000 + Math.round(0.5 * KCAL_POR_KG / 7));
+    expect(r.pendienteKgSemana).toBeCloseTo(-0.5, 6);
+  });
+
+  test("engordando: el gasto está POR DEBAJO de la ingesta", () => {
+    const r = mantenimientoEstimado(_serie({ kcal: 3000, kgPorSemana: 0.25 }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(3000 - Math.round(0.25 * KCAL_POR_KG / 7));
+  });
+
+  test("una pesada rara no se lleva el número por delante", () => {
+    // La misma ventana estable, pero con el último día 1,5 kg arriba por retención.
+    // Restar la primera pesada a la última daría una pendiente disparatada; la
+    // regresión reparte ese punto entre los otros veintisiete.
+    const datos = _serie({ kcal: 2400, kgPorSemana: 0 });
+    datos.weight_body_mass[datos.weight_body_mass.length - 1].value += 1.5;
+    const r = mantenimientoEstimado(datos, { hoy: "2026-08-24" });
+    expect(Math.abs(r.kcal - 2400)).toBeLessThan(200);
+  });
+
+  test("sin ingesta registrada no se inventa un número", () => {
+    const r = mantenimientoEstimado(_serie({ kcal: null }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(null);
+    expect(r.falta).toBe("ingesta");
+    expect(r.diasIngesta).toBe(0);
+  });
+
+  test("con pocas pesadas tampoco", () => {
+    const r = mantenimientoEstimado(_serie({ pesoCada: 20 }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(null);
+    expect(r.falta).toBe("peso");
+  });
+
+  test("pesadas suficientes pero todas apelotonadas: falta recorrido", () => {
+    // Seis pesadas en seis días seguidos dan una pendiente que es ruido, no tendencia.
+    const datos = _serie({ kcal: 2400, pesoCada: 1 });
+    datos.weight_body_mass = datos.weight_body_mass.filter(d => d.date >= "2026-08-19");
+    const r = mantenimientoEstimado(datos, { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(null);
+    expect(r.falta).toBe("recorrido");
+  });
+
+  test("un resultado imposible se descarta en vez de enseñarse", () => {
+    // Báscula que manda libras: el peso "sube" 30 unidades y el TDEE se dispara.
+    const r = mantenimientoEstimado(_serie({ kcal: 2000, kgPorSemana: -12 }), { hoy: "2026-08-24" });
+    expect(r.kcal).toBe(null);
+    expect(r.falta).toBe("datos");
+  });
+
+  test("la confianza baja cuando hay menos datos", () => {
+    const completo = mantenimientoEstimado(_serie({ dias: 28, pesoCada: 1 }), { hoy: "2026-08-24" });
+    expect(completo.confianza).toBe("alta");
+    // 16 días de ingesta y 6 pesadas repartidas: llega a los mínimos, no a "media".
+    const justo = mantenimientoEstimado(_serie({ dias: 16, pesoCada: 3 }), { hoy: "2026-08-24" });
+    expect(justo.kcal).not.toBe(null);
+    expect(justo.confianza).toBe("baja");
+  });
+
+  test("solo mira dentro de la ventana", () => {
+    const datos = _serie({ dias: 28, kcal: 2400, kgPorSemana: 0 });
+    datos.dietary_energy.unshift({ date: "2026-01-01", value: 9000 });
+    const r = mantenimientoEstimado(datos, { hoy: "2026-08-24" });
+    expect(r.diasIngesta).toBe(28);
+    expect(r.kcal).toBe(2400);
+  });
+});
+
+
+describe("corte por cambio de dispositivo", () => {
+  // Serie diaria con un valor antes del corte y otro después, para que la referencia
+  // salga distinta según se respete el corte o no.
+  const _hrv = (desde, hasta, valor) => {
+    const out = [];
+    for (let d = new Date(`${desde}T12:00:00Z`); d <= new Date(`${hasta}T12:00:00Z`);
+         d.setUTCDate(d.getUTCDate() + 1)) {
+      out.push({ date: d.toISOString().slice(0, 10), value: valor });
+    }
+    return out;
+  };
+
+  test("baselinePersonal ignora los días anteriores al corte", () => {
+    // 90 días a 60 bpm y luego 30 a 50: sin corte la mediana es la del reloj viejo.
+    const serie = [..._hrv("2026-05-01", "2026-07-31", 60), ..._hrv("2026-08-01", "2026-08-23", 50)];
+    const sinCorte = baselinePersonal(serie, "2026-08-24");
+    expect(sinCorte.p50).toBe(60);
+
+    const conCorte = baselinePersonal(serie, "2026-08-24", { corte: "2026-08-01", minDias: 10 });
+    expect(conCorte.p50).toBe(50);
+    expect(conCorte.n).toBe(23);
+  });
+
+  test("si el corte deja muy poca muestra, no se inventa una línea base", () => {
+    // Cinco medidas no son un percentil: son la más baja de cinco. Devolver null hace
+    // que quien llama caiga al umbral fijo, que es lo correcto mientras el aparato
+    // nuevo no tenga historia propia.
+    const serie = [..._hrv("2026-05-01", "2026-08-23", 60)];
+    expect(baselinePersonal(serie, "2026-08-24", { corte: "2026-08-19" })).toBe(null);
+  });
+
+  test("un corte anterior a la ventana no cambia nada", () => {
+    const serie = _hrv("2026-05-01", "2026-08-23", 60);
+    const sin = baselinePersonal(serie, "2026-08-24");
+    const con = baselinePersonal(serie, "2026-08-24", { corte: "2026-01-01" });
+    expect(con.n).toBe(sin.n);
+    expect(con.p50).toBe(sin.p50);
+  });
+
+  test("la referencia de HRV no cruza el corte", () => {
+    // La ventana de referencia es D-14..D-8. Con el corte en medio, solo cuentan los
+    // días posteriores; si no quedara ninguno, la referencia es null y el componente
+    // se queda sin puntuar en vez de compararse con otro aparato.
+    // Hace falta algo más que HRV para que el día llegue a puntuar: wellnessHistory
+    // solo emite los días con score, y con una sola métrica no lo hay.
+    const datos = {
+      heart_rate_variability: [
+        ..._hrv("2026-08-01", "2026-08-13", 40),   // reloj viejo
+        ..._hrv("2026-08-14", "2026-08-24", 80),   // reloj nuevo
+      ],
+      sleep_analysis: _hrv("2026-08-01", "2026-08-24", 7.5),
+      step_count:     _hrv("2026-08-01", "2026-08-24", 9000),
+    };
+    const ultimo = arr => arr[arr.length - 1];
+    // Ventana de referencia del 24: D-14..D-8 = del 10 al 16, que cruza el corte.
+    // Sin corte se promedian los cuatro días del aparato viejo (40) con los tres del
+    // nuevo (80); con corte solo cuentan los tres del nuevo.
+    //
+    // La consecuencia es la que importa, y es la que se comprueba: sin corte, la HRV
+    // del día (80) se compara contra 57 —una referencia medio hecha con el aparato
+    // viejo, que medía más bajo— y se lleva los 12 puntos enteros como si el usuario
+    // hubiera mejorado. Con el corte se compara contra 80, que es lo suyo de verdad,
+    // y saca 8. El score REGALADO es justo el fallo que el corte evita.
+    const sinCorte = ultimo(wellnessHistory(datos, { dias: 3, corte: null }));
+    const conCorte = ultimo(wellnessHistory(datos, { dias: 3, corte: "2026-08-14" }));
+    expect(sinCorte.value).toBeGreaterThan(conCorte.value);
+  });
+});
+
+
+describe("metricasMuertas", () => {
+  const _dias = (desde, hasta, valor) => {
+    const out = [];
+    for (let d = new Date(`${desde}T12:00:00Z`); d <= new Date(`${hasta}T12:00:00Z`);
+         d.setUTCDate(d.getUTCDate() + 1)) {
+      out.push({ date: d.toISOString().slice(0, 10), value: valor });
+    }
+    return out;
+  };
+
+  test("el catálogo cubre exactamente las etiquetas que emite el desglose", () => {
+    // Espejo defensivo, como el de cero_es_dato en el backend: si alguien añade un
+    // componente al score y se olvida de METRICAS_DEL_DESGLOSE, salta aquí y no en
+    // producción con una fila que no se puede clasificar.
+    const emitidas = wellnessBreakdown({
+      isDaily: true, expectedByNow: 4,
+      sleep: 7.5, work: 4, exercise: 40, steps: 9000, activeEnergy: 400,
+      stand: 12, flights: 10, hrv: 80, hrvPrev: 75, rhr: 52,
+      cardioRec: 30, vo2: 48, walkHr: 100, bodyFat: 16, daylight: 60, resp: 14,
+    }).map(b => b.label);
+    for (const etiqueta of emitidas) {
+      expect(METRICAS_DEL_DESGLOSE, `falta "${etiqueta}" en METRICAS_DEL_DESGLOSE`)
+        .toHaveProperty(etiqueta);
+    }
+    for (const clave of Object.keys(METRICAS_DEL_DESGLOSE)) {
+      expect(emitidas, `"${clave}" sobra: el desglose ya no lo emite`).toContain(clave);
+    }
+  });
+
+  test("una métrica que sigue llegando no está muerta", () => {
+    const datos = { step_count: _dias("2026-08-01", "2026-08-24", 9000) };
+    expect(metricasMuertas(datos, { hoy: "2026-08-24" }).has("🚶 Pasos")).toBe(false);
+  });
+
+  test("las que llevan la ventana entera sin nada sí", () => {
+    const datos = { step_count: _dias("2026-08-01", "2026-08-24", 9000) };
+    const muertas = metricasMuertas(datos, { hoy: "2026-08-24" });
+    // Las que el Apple Watch DERIVA y ningún otro fabricante escribe.
+    expect(muertas.has("🧍 De pie")).toBe(true);
+    expect(muertas.has("💓 Recuperación cardio")).toBe(true);
+    expect(muertas.has("☀️ Luz natural")).toBe(true);
+  });
+
+  test("un cero no cuenta como medida", () => {
+    // El Atajo de iOS guardaba ceros los días sin reloj: si contaran, una métrica
+    // muerta parecería viva para siempre.
+    const datos = { apple_stand_hour: _dias("2026-08-01", "2026-08-24", 0) };
+    expect(metricasMuertas(datos, { hoy: "2026-08-24" }).has("🧍 De pie")).toBe(true);
+  });
+
+  test("recién cambiado de aparato no se declara nada muerto", () => {
+    // Sin `dias` de recorrido desde el corte no hay forma de saberlo, y dar por muerta
+    // una métrica el primer día es tan falso como darla por viva.
+    const datos = { step_count: _dias("2026-08-01", "2026-08-24", 9000) };
+    const reciente = metricasMuertas(datos, { hoy: "2026-08-24", corte: "2026-08-20" });
+    expect(reciente.size).toBe(0);
+    // Con el corte ya fuera de la ventana, vuelve a poder afirmarse.
+    const asentado = metricasMuertas(datos, { hoy: "2026-08-24", corte: "2026-08-01" });
+    expect(asentado.has("🧍 De pie")).toBe(true);
+  });
+
+  test("los entrenos cuentan aunque su value sea el recuento en extra", () => {
+    const datos = {
+      workouts: [{ date: "2026-08-23", value: 0, extra: { workouts: [{ name: "Gimnasio" }] } }],
+    };
+    expect(metricasMuertas(datos, { hoy: "2026-08-24" }).has("💪 Entreno")).toBe(false);
+  });
+
+  test("la ventana por defecto son dos semanas", () => {
+    expect(METRICA_MUERTA_DIAS).toBe(14);
   });
 });

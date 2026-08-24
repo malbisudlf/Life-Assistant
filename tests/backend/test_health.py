@@ -1,6 +1,7 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
 import json
 import logging
+from datetime import timedelta
 
 import pytest
 
@@ -1048,3 +1049,76 @@ class TestNormalizacionEnergiaKj:
         ])
         assert r.json()["upserted"] == 0
         assert self._filas(mock_requests) == []
+
+
+class TestSaludAjustes:
+    """El corte por cambio de dispositivo.
+
+    Las puntuaciones comparan cada día contra la propia historia del usuario, así que
+    al cambiar de reloj hay más de un mes en el que la referencia es de otro aparato.
+    Esta fecha es lo que permite que las líneas base no crucen ese corte.
+    """
+
+    URL = "/health/ajustes"
+
+    @staticmethod
+    def _fila(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "salud_ajustes"):
+            cuerpo = kw["json"]
+            if isinstance(cuerpo, list):
+                return cuerpo[0]
+        return None
+
+    def test_sin_token(self, client):
+        assert client.patch(self.URL, json={"cambio_dispositivo": "2026-08-24"}).status_code in (401, 403)
+
+    def test_fija_la_fecha(self, client, mock_requests, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers,
+                         json={"cambio_dispositivo": "2026-08-20", "dispositivo": "Amazfit Helio Strap"})
+        assert r.status_code == 200
+        assert r.json()["cambio_dispositivo"] == "2026-08-20"
+        fila = self._fila(mock_requests)
+        assert fila["id"] == "actual"
+        assert fila["cambio_dispositivo"] == "2026-08-20"
+        assert fila["dispositivo"] == "Amazfit Helio Strap"
+
+    def test_formato_invalido(self, client, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": "20-08-2026"})
+        assert r.status_code == 400
+
+    def test_fecha_que_no_existe(self, client, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": "2026-02-30"})
+        assert r.status_code == 400
+
+    def test_no_admite_corte_futuro(self, client, auth_headers):
+        """Un corte por delante de hoy deja las líneas base sin ninguna referencia
+        válida hasta que llegue el día: es peor que no tener corte."""
+        futuro = (main._ahora_local().date() + timedelta(days=3)).isoformat()
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": futuro})
+        assert r.status_code == 400
+
+    def test_null_explicito_borra_el_corte(self, client, mock_requests, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": None})
+        assert r.status_code == 200
+        assert self._fila(mock_requests)["cambio_dispositivo"] is None
+
+    def test_cuerpo_vacio_no_hace_nada(self, client, auth_headers):
+        assert client.patch(self.URL, headers=auth_headers, json={}).status_code == 400
+
+    def test_las_metricas_traen_los_ajustes(self, client, mock_requests, auth_headers):
+        """El frontend necesita el corte para calcular las líneas base y ya está
+        pidiendo las métricas: en un endpoint aparte serían dos viajes por panel."""
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(
+            [{"cambio_dispositivo": "2026-08-20", "dispositivo": "Amazfit Helio Strap"}]
+        ))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ajustes"]["cambio_dispositivo"] == "2026-08-20"
+
+    def test_si_supabase_falla_no_tumba_las_metricas(self, client, mock_requests, auth_headers):
+        """Fail-open: sin corte todo se comporta como antes de que la tabla existiera.
+        Que no se lea un ajuste no puede dejar un panel entero sin datos."""
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(None, 500, "boom"))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ajustes"]["cambio_dispositivo"] is None

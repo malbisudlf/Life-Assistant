@@ -3,6 +3,7 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
+  mantenimientoEstimado, metricasMuertas,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessBaselines,
@@ -997,6 +998,16 @@ export default function Dashboard() {
   // diferencia entre "no hay dato" y "no se pudo medir", que hasta ahora solo sabía el
   // correo de la mañana.
   const [healthReloj, setHealthReloj]       = useState(null);
+  // Ajustes de salud: hoy solo la fecha del cambio de dispositivo. Las puntuaciones
+  // comparan cada día contra la propia historia, así que sin este corte se estaría
+  // midiendo la diferencia entre dos relojes y leyéndola como fisiología.
+  const [healthAjustes, setHealthAjustes]   = useState(null);
+  // Fecha a partir de la cual los datos son del aparato actual. `null` = nunca se ha
+  // cambiado, y entonces todo se comporta igual que antes de que esto existiera.
+  const corteDispositivo = healthAjustes?.cambio_dispositivo || null;
+  const [dispositivoGuardando, setDispositivoGuardando] = useState(false);
+  const [dispositivoFecha, setDispositivoFecha] = useState("");
+  const [dispositivoNombre, setDispositivoNombre] = useState("");
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
@@ -1279,6 +1290,7 @@ export default function Dashboard() {
         // mismo que "no lo llevaste": es que no se sabe), y las conclusiones lo tratan
         // como tal.
         setHealthReloj(data.reloj || null);
+        setHealthAjustes(data.ajustes || null);
         setHealthLoading(false);
       })
       .catch(() => setHealthLoading(false));
@@ -2157,6 +2169,24 @@ export default function Dashboard() {
     setBriefGuardando(false);
   }
 
+  // Fecha del cambio de dispositivo de salud. Se guarda en el servidor y no en
+  // localStorage porque el corte lo necesitan también las líneas base que calcula el
+  // backend para el resumen de la mañana, no solo este navegador.
+  async function guardarCambioDispositivo(cambios) {
+    if (dispositivoGuardando) return;
+    setDispositivoGuardando(true);
+    try {
+      const r = await apiFetch(`${API}/health/ajustes`, {
+        method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        setHealthAjustes({ cambio_dispositivo: d.cambio_dispositivo, dispositivo: d.dispositivo });
+      }
+    } catch { /* mejor esfuerzo: ignorar */ }
+    setDispositivoGuardando(false);
+  }
+
   // Manda un aviso de prueba por el canal que toque. Lo que se comprueba no es el
   // backend —eso ya lo dice la fila de estado— sino la cadena entera: que HA lo recoja
   // y que el móvil lo enseñe.
@@ -2679,8 +2709,15 @@ export default function Dashboard() {
   // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
   // memoizado como el resto: solo cambia cuando llega una sincronización nueva.
   const historicoBienestar = useMemo(
-    () => wellnessHistory(healthData, { reloj: healthReloj }),
-    [healthData, healthReloj],
+    () => wellnessHistory(healthData, { reloj: healthReloj, corte: corteDispositivo }),
+    [healthData, healthReloj, corteDispositivo],
+  );
+  // Componentes que llevan dos semanas sin traer nada: no es un hueco, es que este
+  // aparato no los mide. Se sacan del desglose en vez de dejarlos en gris pidiendo
+  // cada día un dato que ya no va a llegar.
+  const componentesNoMedidos = useMemo(
+    () => metricasMuertas(healthData, { corte: corteDispositivo }),
+    [healthData, corteDispositivo],
   );
   const tendenciaBienestar = useMemo(
     () => historicoBienestar.length >= 7 ? seriesTrend(historicoBienestar, 7, 30) : null,
@@ -3832,7 +3869,7 @@ export default function Dashboard() {
                       boxShadow: "0 4px 16px rgba(0,0,0,0.4)", fontSize: 12,
                       display: "flex", flexDirection: "column", gap: 5,
                     }}>
-                      {breakdown.map((b, i) => (
+                      {breakdown.filter(b => !componentesNoMedidos.has(b.label)).map((b, i) => (
                         <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, opacity: b.sinDatos ? 0.45 : 1 }}>
                           <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{b.label}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
@@ -3973,6 +4010,50 @@ export default function Dashboard() {
                         );
                       })()}
                     </div>
+                    {/* Mantenimiento MEDIDO, no estimado. Las fórmulas (Mifflin,
+                        Katch-McArdle) fallan ±300 kcal según lo musculado que estés;
+                        esto sale de tu ingesta contra la pendiente de tu peso, que es
+                        lo único que no supone nada. Solo aparece cuando hay datos
+                        suficientes, y dice qué falta cuando no. */}
+                    {(() => {
+                      const m = mantenimientoEstimado(healthData);
+                      if (m.kcal == null) {
+                        const queFalta = {
+                          ingesta:   `registra lo que comes (${m.diasIngesta}/${m.minimos.ingesta} días)`,
+                          peso:      `pésate más a menudo (${m.pesadas}/${m.minimos.pesadas} pesadas)`,
+                          recorrido: `hacen falta ${m.minimos.recorrido} días entre la primera pesada y la última`,
+                          datos:     "los datos dan un resultado imposible: revisa las unidades",
+                        }[m.falta];
+                        // Sin ingesta registrada no hay nada que enseñar y decirlo cada
+                        // día sería ruido: solo se avisa si ya se ha empezado a registrar.
+                        if (m.falta === "ingesta" && m.diasIngesta === 0) return null;
+                        return (
+                          <div style={{ marginTop: 10, fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>
+                            Mantenimiento: {queFalta}
+                          </div>
+                        );
+                      }
+                      const etiqueta = { alta: "", media: " · confianza media", baja: " · pocos datos aún" }[m.confianza];
+                      const kgSem = m.pendienteKgSemana;
+                      const rumbo = kgSem == null ? "" :
+                        Math.abs(kgSem) < 0.05 ? "peso estable" :
+                        `${kgSem < 0 ? "↓" : "↑"} ${Math.abs(kgSem).toFixed(2)} kg/sem`;
+                      return (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--border)" }}>
+                          <div style={{ fontSize: 10, color: "var(--muted2)", fontFamily: "'DM Mono', monospace", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 3 }}>Mantenimiento medido</div>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "var(--text-2)" }}>
+                              {m.kcal.toLocaleString("es")}<span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 2 }}>kcal</span>
+                            </span>
+                            {rumbo && <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>{rumbo}</span>}
+                          </div>
+                          <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 2 }}>
+                            {Math.round(m.mediaIngesta).toLocaleString("es")} kcal/día comidos · {m.diasIngesta} días{etiqueta}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {/* Serie de peso con la línea del objetivo: el número de hoy no dice
                         si vas hacia él o te alejas; la curva sí. */}
                     {wWeightRaw.length >= 3 && (() => {
@@ -4089,7 +4170,10 @@ export default function Dashboard() {
         const hrvAllData     = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
         const rhrAllData     = findMetric(healthData, "resting_heart_rate");
         const respAllData    = findMetric(healthData, "respiratory_rate");
-        const baseline30     = arr => { const v = arr.filter(d => d.date !== sleepTodayStr && d.value != null).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
+        // Las medias de referencia no cruzan el cambio de dispositivo: comparar la
+        // respiración de hoy contra una media hecha a medias con el reloj anterior
+        // convierte la diferencia entre dos sensores en una penalización de sueño.
+        const baseline30     = arr => { const v = arr.filter(d => d.date !== sleepTodayStr && d.value != null && (!corteDispositivo || String(d.date) >= corteDispositivo)).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
         const hrvBase        = baseline30(hrvAllData);
         const rhrBase        = baseline30(rhrAllData);
         const respBase       = baseline30(respAllData);
@@ -5514,6 +5598,51 @@ export default function Dashboard() {
                 </div>
               </div>
               <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>Fase de definición: el dashboard prioriza bajar % grasa conservando masa magra.</div>
+            </div>
+
+            {/* ── Cambio de dispositivo de salud ── */}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Dispositivo de salud</div>
+              {corteDispositivo ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: "var(--text)" }}>
+                    Datos del aparato actual desde <strong>{isoToDdMmYyyy(corteDispositivo)}</strong>
+                    {healthAjustes?.dispositivo ? ` · ${healthAjustes.dispositivo}` : ""}
+                  </div>
+                  <button onClick={() => guardarCambioDispositivo({ cambio_dispositivo: null, dispositivo: null })}
+                    disabled={dispositivoGuardando}
+                    style={{ marginLeft: "auto", padding: "4px 10px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                    Quitar
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Fecha del cambio</div>
+                    <input type="date" value={dispositivoFecha} max={new Date().toISOString().slice(0, 10)}
+                      onChange={e => setDispositivoFecha(e.target.value)}
+                      style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Aparato</div>
+                    <input type="text" value={dispositivoNombre} maxLength={64} placeholder="Amazfit Helio Strap"
+                      onChange={e => setDispositivoNombre(e.target.value)}
+                      style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "flex-end" }}>
+                    <button onClick={() => guardarCambioDispositivo({ cambio_dispositivo: dispositivoFecha, dispositivo: dispositivoNombre })}
+                      disabled={dispositivoGuardando || !dispositivoFecha}
+                      style={{ padding: "6px 12px", background: dispositivoFecha ? "var(--accent)" : "var(--surface2)", border: "none", borderRadius: 6, color: dispositivoFecha ? "#0e0f11" : "var(--muted2)", fontSize: 12, fontWeight: 600, cursor: dispositivoFecha ? "pointer" : "default", fontFamily: "'DM Sans', sans-serif" }}>
+                      Guardar
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>
+                Las puntuaciones comparan cada día contra tu propia historia (HRV, respiración, FC en reposo).
+                Marcar el cambio evita que la referencia se haga con datos del aparato anterior, que mide distinto.
+                El histórico no se borra: sigue en las gráficas, solo deja de servir de referencia.
+              </div>
             </div>
 
             {/* ── Notificaciones ── */}
