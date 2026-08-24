@@ -1,6 +1,9 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
 import json
 import logging
+from datetime import timedelta
+
+import pytest
 
 import main
 from conftest import FakeResponse
@@ -950,3 +953,172 @@ class TestDiagnosticoDeDatos:
         r = client.get("/health/diagnostico", headers=auth_headers)
         assert r.status_code == 502
         assert "column x" not in r.text
+
+
+class TestNormalizacionEnergiaKj:
+    """La energía se guarda SIEMPRE en kcal, venga como venga escrita la unidad.
+
+    Tres fallos distintos dejaban kilojulios crudos en la tabla, y las métricas de
+    energía son acumulativas (solo se pisan si el valor nuevo es MAYOR): un número
+    inflado x4,184 le gana siempre a la medida buena, así que ninguna sincronización
+    posterior lo puede corregir. El fallo se autobloquea, y por eso hay que probar
+    también que la comparación de acumulativas ocurre con los valores ya convertidos.
+    """
+
+    MASIVA = "/health/ingest?token=health-token"
+    ATAJO  = "/health/ingest/simple?token=health-token"
+
+    @staticmethod
+    def _filas(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "health_metrics"):
+            if isinstance(kw["json"], list):
+                return kw["json"]
+        return []
+
+    def test_se_convierten_todos_los_puntos_no_solo_el_primero(self, client, mock_requests):
+        """Regresión del ámbito de `unit`: se reasignaba a "kcal" dentro del bucle de
+        PUNTOS (el de dentro) tras convertir el primero, con lo que la condición fallaba
+        para el resto de días de esa métrica y entraban en kJ crudo. El test que ya
+        había mandaba un único punto, que es justo el caso en el que no se nota.
+        """
+        dias = [{"date": f"2026-07-0{i} 08:00:00", "qty": 4184} for i in range(1, 5)]
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kJ", "data": dias}
+        ]}})
+        assert r.json()["upserted"] == 4
+        filas = self._filas(mock_requests)
+        assert [f["value"] for f in filas] == [1000.0] * 4, "ningún día se queda en kJ"
+        assert {f["unit"] for f in filas} == {"kcal"}
+
+    @pytest.mark.parametrize("unidad", ["kJ", "kj", "KJ", " kJ ", "kilojoules", "Kilojoule"])
+    def test_la_unidad_se_reconoce_se_escriba_como_se_escriba(self, client, mock_requests, unidad):
+        """Se comparaba con `unit == "kJ"`, un igual exacto contra una cadena que
+        decide el exportador. Cualquier otra forma se colaba sin convertir."""
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": unidad,
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 4184}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 1000.0
+        assert fila["unit"] == "kcal"
+
+    def test_kcal_no_se_toca(self, client, mock_requests):
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kcal",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 366}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 366
+        assert fila["unit"] == "kcal"
+
+    def test_kcal_nunca_se_confunde_con_kilojulios(self):
+        assert not main._es_kilojulios("kcal")
+        assert not main._es_kilojulios("Cal")
+        assert not main._es_kilojulios("")
+        assert not main._es_kilojulios(None)
+        assert main._es_kilojulios("kJ") and main._es_kilojulios("kilojulios")
+
+    def test_el_atajo_tambien_convierte(self, client, mock_requests):
+        """`/health/ingest/simple` no convertía NADA: cogía el valor del Atajo tal cual,
+        así que un iPhone que exporte la energía en kJ metía el número crudo."""
+        r = client.post(self.ATAJO, json=[
+            {"metric": "active_energy", "date": "2026-07-05", "value": 4184, "unit": "kJ"}
+        ])
+        assert r.json()["upserted"] == 1
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 1000.0
+        assert fila["unit"] == "kcal"
+
+    def test_masiva_compara_acumulativas_ya_convertidas(self, client, mock_requests):
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "active_energy", "value": 500}
+        ]))
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kJ",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 1712}]}
+        ]}})
+        assert r.json()["upserted"] == 0, "1712 kJ son 409 kcal: no pisan 500 kcal reales"
+        assert self._filas(mock_requests) == []
+
+    def test_atajo_compara_acumulativas_ya_convertidas(self, client, mock_requests):
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "active_energy", "value": 500}
+        ]))
+        r = client.post(self.ATAJO, json=[
+            {"metric": "active_energy", "date": "2026-07-05", "value": 1712, "unit": "kJ"}
+        ])
+        assert r.json()["upserted"] == 0
+        assert self._filas(mock_requests) == []
+
+
+class TestSaludAjustes:
+    """El corte por cambio de dispositivo.
+
+    Las puntuaciones comparan cada día contra la propia historia del usuario, así que
+    al cambiar de reloj hay más de un mes en el que la referencia es de otro aparato.
+    Esta fecha es lo que permite que las líneas base no crucen ese corte.
+    """
+
+    URL = "/health/ajustes"
+
+    @staticmethod
+    def _fila(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "salud_ajustes"):
+            cuerpo = kw["json"]
+            if isinstance(cuerpo, list):
+                return cuerpo[0]
+        return None
+
+    def test_sin_token(self, client):
+        assert client.patch(self.URL, json={"cambio_dispositivo": "2026-08-24"}).status_code in (401, 403)
+
+    def test_fija_la_fecha(self, client, mock_requests, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers,
+                         json={"cambio_dispositivo": "2026-08-20", "dispositivo": "Amazfit Helio Strap"})
+        assert r.status_code == 200
+        assert r.json()["cambio_dispositivo"] == "2026-08-20"
+        fila = self._fila(mock_requests)
+        assert fila["id"] == "actual"
+        assert fila["cambio_dispositivo"] == "2026-08-20"
+        assert fila["dispositivo"] == "Amazfit Helio Strap"
+
+    def test_formato_invalido(self, client, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": "20-08-2026"})
+        assert r.status_code == 400
+
+    def test_fecha_que_no_existe(self, client, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": "2026-02-30"})
+        assert r.status_code == 400
+
+    def test_no_admite_corte_futuro(self, client, auth_headers):
+        """Un corte por delante de hoy deja las líneas base sin ninguna referencia
+        válida hasta que llegue el día: es peor que no tener corte."""
+        futuro = (main._ahora_local().date() + timedelta(days=3)).isoformat()
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": futuro})
+        assert r.status_code == 400
+
+    def test_null_explicito_borra_el_corte(self, client, mock_requests, auth_headers):
+        r = client.patch(self.URL, headers=auth_headers, json={"cambio_dispositivo": None})
+        assert r.status_code == 200
+        assert self._fila(mock_requests)["cambio_dispositivo"] is None
+
+    def test_cuerpo_vacio_no_hace_nada(self, client, auth_headers):
+        assert client.patch(self.URL, headers=auth_headers, json={}).status_code == 400
+
+    def test_las_metricas_traen_los_ajustes(self, client, mock_requests, auth_headers):
+        """El frontend necesita el corte para calcular las líneas base y ya está
+        pidiendo las métricas: en un endpoint aparte serían dos viajes por panel."""
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(
+            [{"cambio_dispositivo": "2026-08-20", "dispositivo": "Amazfit Helio Strap"}]
+        ))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ajustes"]["cambio_dispositivo"] == "2026-08-20"
+
+    def test_si_supabase_falla_no_tumba_las_metricas(self, client, mock_requests, auth_headers):
+        """Fail-open: sin corte todo se comporta como antes de que la tabla existiera.
+        Que no se lea un ajuste no puede dejar un panel entero sin datos."""
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(None, 500, "boom"))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ajustes"]["cambio_dispositivo"] is None
