@@ -129,8 +129,9 @@ test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', a
   await expect(widget).toContainText('+1500 €')
   await expect(widget).toContainText('Acciones')
 
-  // El saldo de Revolut vive en el mismo widget, aparte de la cartera.
-  await expect(widget).toContainText('Ahorro en Revolut')
+  // El saldo de Revolut vive en el mismo widget, aparte de la cartera — como una fila
+  // más de la lista unificada, sin su propia caja ni título.
+  await expect(widget).toContainText('Revolut')
   await expect(widget).toContainText('80 €')
 
   // El detalle está plegado a propósito: se despliega a mano.
