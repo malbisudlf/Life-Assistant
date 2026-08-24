@@ -114,6 +114,17 @@ UNIQUE(metric_date, metric_name)
 - **Extracción de valor acumulativo**: se toma el `max()` de todos los campos no-None
   (`qty`, `sum`, `value`) del punto JSON. Health Auto Export v2 usa `qty` para el total
   diario; `sum` puede llegar como 0 y no debe usarse como valor principal.
+- **Unidades de energía**: `active_energy`, `resting_energy` y `basal_energy` se
+  guardan **siempre en kcal**. Apple puede exportarlas en kilojulios, así que las dos
+  rutas de ingesta pasan por `_normalizar_energia()`, que reconoce la unidad de forma
+  laxa (`kJ`, `kj`, `kilojoules`, `kilojulios`…) porque el exportador no garantiza cómo
+  la escribe. La conversión va **antes** de la comparación de acumulativas: si no, un
+  valor en kJ le gana siempre al mismo dato en kcal solo por la unidad, y como esa
+  comparación solo pisa hacia arriba, el número inflado se queda para siempre. Si ves
+  energía absurdamente alta en el histórico, divide entre 4,184 antes de creértela y
+  mira `docs/BUGS_HISTORICOS.md`. Para reescribir filas ya guardadas está
+  `backend/corregir_energia_kj.py` (simulacro por defecto, `--aplicar` para escribir);
+  no basta con arreglar la ingesta, esas filas no se corrigen solas.
 - **Métricas acumulativas**: nunca se sobreescriben con un valor menor (previene que un
   sync parcial del día borre el total). Sí se sobreescribe si el valor existente es 0.
 - **Upsert en lote con `on_conflict`**: ver "Ingesta de salud" en
@@ -134,6 +145,73 @@ UNIQUE(metric_date, metric_name)
   lánzalo con
   `fly ssh console -a backend-tender-glow-160 -C "python3 /app/script.py"`.
   `fly sftp put` no funciona bien en Windows (problema de rutas).
+
+### Cambio de dispositivo
+
+La tabla `salud_ajustes` (una sola fila, `id = 'actual'`) guarda `cambio_dispositivo`:
+la fecha a partir de la cual los datos son del aparato actual. Se fija desde el panel ⚙
+(`PATCH /health/ajustes`) y viaja al frontend dentro de `GET /health/metrics`.
+
+**Por qué hace falta.** Las puntuaciones no comparan valores absolutos: comparan cada
+día contra la propia historia del usuario — la HRV contra la ventana D-14..D-8, la
+respiración contra 30 días, la FC en reposo contra los percentiles de 90. Al cambiar de
+reloj las métricas siguen llamándose igual y pareciendo lo mismo, pero las mide otro
+sensor con otro algoritmo, así que durante más de un mes se estaría midiendo la
+diferencia entre dos fabricantes y leyéndola como fisiología. **El histórico no se borra
+ni se toca**: sigue entero en las gráficas, solo deja de servir como referencia.
+
+Respetan el corte `baselinePersonal`, `_refHrv` (vía `wellnessHistory({ corte })`) y el
+`baseline30` de Dashboard.jsx. Si el corte deja la muestra por debajo del mínimo,
+`baselinePersonal` devuelve `null` y quien llama cae al umbral fijo — que es lo correcto
+mientras el aparato nuevo no tenga historia propia.
+
+**Lo que NO hizo falta tocar**: la detección de "reloj puesto" (`_dias_de_reloj`) se
+conforma con que llegue **cualquier** métrica de `_RELOJ_DIA` o `_RELOJ_NOCHE`, y
+`heart_rate` / `sleep_analysis` / `resting_heart_rate` los manda cualquier pulsera. El
+resumen diario tampoco: ya omite las métricas sin datos.
+
+### Métricas que el aparato no mide
+
+`metricasMuertas()` (helpers.js) distingue dos cosas que el desglose del score pintaba
+igual y no lo son: **"hoy no hay dato"** —un hueco, se arregla llevando el reloj— y
+**"tu aparato no mide esto"**, que no se arregla nunca. Al cambiar de dispositivo, los
+componentes que el Apple Watch *deriva* (horas de pie, minutos de ejercicio,
+recuperación cardíaca, FC caminando, luz natural) pasan a la segunda categoría de golpe,
+y dejarlos en gris reclamándolos cada día convierte el tooltip en una lista de reproches
+imposibles de cumplir.
+
+Se decide **mirando los datos** (14 días sin ninguna medida), no con una lista fija de
+lo que mide cada fabricante: así vale para cualquier aparato y las filas reaparecen
+solas si el usuario vuelve al anterior. `METRICAS_DEL_DESGLOSE` mapea etiqueta →
+métricas, y hay un test espejo que comprueba que sus claves son **exactamente** las
+etiquetas que `wellnessBreakdown` puede emitir.
+
+### Calorías de mantenimiento
+
+`mantenimientoEstimado()` (helpers.js) calcula el gasto real sin fórmulas:
+
+```
+TDEE = media de ingesta − pendiente_kg_por_día × 7700
+```
+
+(pendiente negativa = adelgazas = gastas MÁS de lo que comes, de ahí el signo). La
+ingesta sale de `dietary_energy`, que **cualquier app de registro de comida escribe en
+Apple Health** y Health Auto Export exporta; la pendiente del peso, por mínimos
+cuadrados sobre todas las pesadas de la ventana — no restando la primera a la última,
+porque un solo día con retención en cualquiera de los dos extremos se llevaría el número
+por delante.
+
+Mifflin-St Jeor y Katch-McArdle fallan ±300 kcal según lo musculado que esté uno y
+cuánto se mueva fuera del gimnasio. Esto no supone nada de eso, pero **exige constancia**:
+sin 10 días de ingesta, 5 pesadas y 14 días de recorrido entre la primera y la última,
+devuelve `kcal: null` y un campo `falta` que dice qué es lo que hace falta. Un resultado
+fuera de 800–6.000 kcal se descarta también: eso es un dato malo (una báscula en libras,
+una ingesta a medio registrar), y enseñarlo sería peor que no enseñar nada porque encima
+parece medido.
+
+`dietary_energy` está en `CUMULATIVE_METRICS` (se suma comida a comida, un sync de
+mediodía no puede pisar el total de la noche) y en `ENERGY_METRICS` (Apple la puede
+mandar en kJ).
 
 ### Puntuaciones (bienestar y sueño)
 
