@@ -101,6 +101,31 @@ class TestAvisarDelIssue:
         assert not mock_requests.called("POST", "revision_hallazgos")
 
 
+class TestElMotivoDelDisparo:
+    """`_motivo_disparo` la comparten las dos rutinas: la del briefing y la del arreglo.
+
+    Solo traduce lo que tiene arreglos distintos; lo demás pasa crudo, porque un cuerpo
+    que no se entiende sigue siendo más de lo que dice un número a secas.
+    """
+
+    def test_la_credencial_manda_a_regenerar_el_token(self):
+        motivo = main._motivo_disparo(401, '{"type":"authentication_error"}')
+        assert "token" in motivo and "claude.ai/code/routines" in motivo
+
+    def test_un_trigger_que_ya_no_esta(self):
+        assert "ya no existen" in main._motivo_disparo(404, "not_found")
+
+    def test_la_pausa_se_distingue_del_resto(self):
+        assert "pausada" in main._motivo_disparo(400, "routine_paused")
+
+    def test_el_cupo_agotado(self):
+        assert "cupo" in main._motivo_disparo(429, "rate_limit_error")
+
+    def test_lo_que_no_se_reconoce_pasa_crudo(self):
+        assert main._motivo_disparo(400, "invalid_request: text") == "invalid_request: text"
+        assert main._motivo_disparo(500, "") == "HTTP 500"
+
+
 class TestLosBotones:
     def _pendiente(self, mock_requests, filas=None):
         mock_requests.add("PATCH", "revision_hallazgos",
@@ -159,6 +184,29 @@ class TestLosBotones:
         assert liberado["estado"] == "pendiente"
         # Y se dice: un botón que no hace nada y no avisa es peor que uno que no está.
         assert len(correos) == 1 and "No he podido" in correos[0][0]
+
+    def test_un_token_revocado_dice_que_hay_que_regenerarlo(self, client, mock_requests,
+                                                            correos):
+        """El JSON de Anthropic no le dice a nadie qué hacer; el aviso sí tiene que.
+
+        Pasó de verdad el 2026-08-24: el aviso del botón llegó con
+        `{"type":"authentication_error","message":"OAuth access token has been revoked."}`
+        dentro y sin una sola pista de que había que regenerar el token del trigger.
+        """
+        self._pendiente(mock_requests)
+        mock_requests.add("POST", FIRE_URL, FakeResponse(
+            None, 401,
+            '{"type":"error","error":{"type":"authentication_error",'
+            '"message":"OAuth access token has been revoked."}}'))
+        r = client.post(f"/revision/{main._uuid_revision(83)}/accion",
+                        json={"accion": "arreglar"}, headers=CABECERA)
+        assert r.status_code == 502
+        cuerpo = correos[0][1]
+        assert "token" in cuerpo and "claude.ai/code/routines" in cuerpo
+        assert "authentication_error" not in cuerpo
+        # Y la decisión se libera igual: el botón tiene que seguir sirviendo cuando el
+        # token vuelva a valer.
+        assert mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]["estado"] == "pendiente"
 
     def test_sin_rutina_configurada_lo_dice_en_vez_de_callarse(self, client, mock_requests,
                                                                correos, monkeypatch):

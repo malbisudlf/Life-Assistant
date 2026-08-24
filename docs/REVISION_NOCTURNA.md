@@ -309,5 +309,15 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   El backend no: su deploy sigue siendo manual y la skill del arreglo tiene prohibido
   tocarlo. Si un hallazgo era del backend, después del merge hay que hacer `fly deploy` a
   mano.
+- **El token del disparo se puede revocar sin avisar.** Si el botón «Arreglarlo»
+  contesta que el token ya no vale (caducado o revocado), no hay nada que arreglar en el
+  código: regenera el trigger de API de la routine que arregla en
+  [claude.ai/code/routines](https://claude.ai/code/routines) (lápiz → *Select a trigger*
+  → **API** → *Generate token*) y ponlo en el backend con
+  `fly secrets set ARREGLO_FIRE_TOKEN=sk-ant-oat01-...`. La decisión no se pierde: el
+  disparo fallido la deja en `pendiente`, así que el botón —o «arregla la revisión» por
+  Jarvis— vuelve a servir en cuanto el token valga. Si se revocaron todos los tokens de
+  la cuenta, mira también `RUTINA_FIRE_TOKEN` (el del briefing, en Fly) y el secret
+  `ROUTINE_TOKEN` de Actions, que es el que dispara la revisión de la noche.
 - **El agente que arregla no mergea en rojo.** Si el CI falla tras dos intentos deja el
   PR abierto con una explicación, que es un resultado — el silencio no lo sería.
