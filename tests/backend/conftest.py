@@ -173,6 +173,8 @@ def _limpiar_estado():
     # Lo mismo con el saldo de Revolut y el JWT de aplicación de Enable Banking.
     main._revolut_cache = None
     main._eb_jwt_cache = None
+    # Y con los precios de la cartera manual de ETFs (Yahoo Finance).
+    main._etf_precios_cache = None
 
 
 @pytest.fixture(autouse=True)
