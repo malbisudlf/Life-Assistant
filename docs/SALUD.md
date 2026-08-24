@@ -114,6 +114,17 @@ UNIQUE(metric_date, metric_name)
 - **Extracción de valor acumulativo**: se toma el `max()` de todos los campos no-None
   (`qty`, `sum`, `value`) del punto JSON. Health Auto Export v2 usa `qty` para el total
   diario; `sum` puede llegar como 0 y no debe usarse como valor principal.
+- **Unidades de energía**: `active_energy`, `resting_energy` y `basal_energy` se
+  guardan **siempre en kcal**. Apple puede exportarlas en kilojulios, así que las dos
+  rutas de ingesta pasan por `_normalizar_energia()`, que reconoce la unidad de forma
+  laxa (`kJ`, `kj`, `kilojoules`, `kilojulios`…) porque el exportador no garantiza cómo
+  la escribe. La conversión va **antes** de la comparación de acumulativas: si no, un
+  valor en kJ le gana siempre al mismo dato en kcal solo por la unidad, y como esa
+  comparación solo pisa hacia arriba, el número inflado se queda para siempre. Si ves
+  energía absurdamente alta en el histórico, divide entre 4,184 antes de creértela y
+  mira `docs/BUGS_HISTORICOS.md`. Para reescribir filas ya guardadas está
+  `backend/corregir_energia_kj.py` (simulacro por defecto, `--aplicar` para escribir);
+  no basta con arreglar la ingesta, esas filas no se corrigen solas.
 - **Métricas acumulativas**: nunca se sobreescriben con un valor menor (previene que un
   sync parcial del día borre el total). Sí se sobreescribe si el valor existente es 0.
 - **Upsert en lote con `on_conflict`**: ver "Ingesta de salud" en

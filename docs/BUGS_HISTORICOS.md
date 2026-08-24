@@ -290,5 +290,33 @@
   cupo agotado— y deja crudo el resto. La moraleja: **si un error de un tercero va a
   acabar delante del usuario, tradúcelo al arreglo**; el cuerpo entero se registra en el
   log, que es donde sirve.
+- **La energía activa del Watch iba inflada x4,184 desde siempre, y el fallo se
+  autobloqueaba.** Salió al intentar estimar las calorías de mantenimiento: la media de
+  `active_energy` daba 1.712 «kcal»/día para alguien de 71 kg que hace 7.000 pasos y
+  cuatro sesiones de gimnasio. Eran kilojulios (1.712 / 4,184 = 409 kcal). Tres fallos
+  distintos por el mismo sitio:
+  - `unit == "kJ"`, un **igual exacto** contra una cadena que elige el exportador. Ni
+    Health Auto Export ni el Atajo garantizan capitalización ni si mandan el nombre
+    corto o el largo.
+  - **`unit` se reasignaba a `"kcal"` dentro del bucle de puntos**, y ese bucle es el de
+    DENTRO: `unit` pertenece al de fuera, el de métricas. Convertido el primer día, la
+    condición fallaba para todos los demás puntos de esa métrica. Con un punto por lote
+    no se nota — y el test que había mandaba exactamente un punto. Con el export de 30
+    días que recomienda `docs/SALUD.md`, entraban 29 de 30 filas en kJ crudo,
+    **etiquetadas como kcal**, con lo que la columna `unit` deja de servir para
+    detectarlas después.
+  - `/health/ingest/simple` **no convertía nada en absoluto**. La conversión vivía solo
+    en la ruta de Health Auto Export.
+  Lo que lo hace grave no es el factor, es que `active_energy` está en
+  `CUMULATIVE_METRICS`: una fila solo se pisa si el valor nuevo es **MAYOR**, y un
+  número en kJ es siempre 4,184 veces mayor que el mismo dato en kcal. El valor malo
+  gana a la medida buena para siempre y ninguna sincronización posterior lo corrige;
+  hizo falta `backend/corregir_energia_kj.py` para reescribir el histórico. La moraleja
+  es doble: **una normalización de unidades no se compara con `==`**, y **cuando una
+  métrica es de tipo "solo se pisa si es mayor", cualquier fallo que infle el valor es
+  permanente, no transitorio**. Además: el dato malo no lo destapó ningún test ni ningún
+  panel, lo destapó alguien mirando el número y pensando «esto no puede ser» — un
+  widget que pinta lo que le den no valida nada, y el score de bienestar llevaba
+  regalando los 5 puntos de energía activa (umbral ≥600) todos los días.
 - Doble conteo de entrenos semanales y fugas de detalles de error ya se arreglaron
   en commits anteriores; si tocas bienestar o manejo de errores, revisa el historial.

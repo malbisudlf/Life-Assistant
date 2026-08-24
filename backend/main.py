@@ -3216,6 +3216,35 @@ CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_en
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
 ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy"}
 
+# Formas en las que puede llegar escrito "kilojulios". La comparación tiene que ser
+# LAXA: se hacía con `unit == "kJ"`, un igual exacto contra una cadena que decide el
+# exportador, y ni Health Auto Export ni el Atajo garantizan la capitalización ni si
+# mandan el nombre corto o el largo. Cada fallo de coincidencia guarda el valor en
+# bruto —4,184 veces mayor— etiquetado como kcal, y como las de energía son
+# acumulativas (solo se pisan si el nuevo valor es MAYOR), ese número inflado ya no
+# lo puede corregir ninguna sincronización posterior: el fallo se autobloquea.
+_UNIDADES_KJ = {"kj", "kilojoule", "kilojoules", "kilojulio", "kilojulios"}
+_KJ_POR_KCAL = 4.184
+
+
+def _es_kilojulios(unit) -> bool:
+    """True si `unit` nombra kilojulios, se escriba como se escriba."""
+    if not unit:
+        return False
+    return re.sub(r"[\s._-]", "", str(unit)).lower() in _UNIDADES_KJ
+
+
+def _normalizar_energia(name: str, value, unit):
+    """Devuelve (valor, unidad) con la energía siempre en kcal.
+
+    Se llama desde las DOS rutas de ingesta a propósito. `/health/ingest/simple` no
+    convertía nada en absoluto: cogía el valor del Atajo tal cual, así que un iPhone
+    que exporte la energía en kJ metía el número crudo en la tabla.
+    """
+    if name not in ENERGY_METRICS or value is None or not _es_kilojulios(unit):
+        return value, unit
+    return round(float(value) / _KJ_POR_KCAL, 2), "kcal"
+
 # Métricas en las que un 0 NO es un valor, es el sensor sin medir. Un día de 0 pisos o
 # de 0 pasos ocurrió; un HRV de 0 o una FC en reposo de 0 no le pasan a nadie vivo.
 #
@@ -3598,10 +3627,14 @@ async def health_ingest(request: Request, token: str = ""):
                 )
             value = float(raw_value) if raw_value is not None else None
 
-            # Normalizar energía de kJ a kcal
-            if name in ENERGY_METRICS and unit == "kJ" and value is not None:
-                value = round(value / 4.184, 2)
-                unit = "kcal"
+            # Normalizar energía a kcal. OJO con no reasignar `unit`: es del bucle de
+            # FUERA (una métrica, con su unidad declarada) y aquí estamos en el de
+            # DENTRO (un punto por día). Al ponerle "kcal" después de convertir el
+            # primer punto, la condición fallaba para todos los demás puntos de esa
+            # misma métrica y el resto del lote se guardaba en kJ crudo etiquetado como
+            # kcal. Con un solo día por lote no se notaba; con el export de 30 días que
+            # recomienda docs/SALUD.md, 29 de 30 filas entraban infladas x4,184.
+            value, unidad_punto = _normalizar_energia(name, value, unit)
 
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
@@ -3610,12 +3643,14 @@ async def health_ingest(request: Request, token: str = ""):
 
             key = (metric_date, name)
             if key not in grouped_metrics:
-                grouped_metrics[key] = {"unit": unit, "value": value, "extra": extra}
+                grouped_metrics[key] = {"unit": unidad_punto, "value": value, "extra": extra}
             elif name in CUMULATIVE_METRICS and value is not None:
-                # Para métricas acumulativas, conservar el mayor valor del batch
+                # Para métricas acumulativas, conservar el mayor valor del batch. La
+                # comparación va sobre valores YA normalizados: si no, un punto en kJ
+                # ganaba siempre al mismo dato en kcal solo por la unidad.
                 current = grouped_metrics[key]["value"]
                 if current is None or value > current:
-                    grouped_metrics[key] = {"unit": unit, "value": value, "extra": extra}
+                    grouped_metrics[key] = {"unit": unidad_punto, "value": value, "extra": extra}
 
     # Escritura en dos viajes en vez de uno por métrica.
     #
@@ -3751,11 +3786,16 @@ async def health_ingest_simple(request: Request, token: str = ""):
                 parse_errors.append({"metric": item.get("metric"),
                                      "reason": "valor vacío: el Shortcut no encontró muestra"})
                 continue
+            # Igual que /health/ingest: la energía se guarda siempre en kcal. Esta
+            # ruta no convertía nada, así que un iPhone que exporte en kJ metía el
+            # número crudo. Va aquí, al construir la muestra, para que la comparación
+            # de acumulativas de más abajo compare kcal con kcal.
+            valor, unidad = _normalizar_energia(item["metric"], float(v), item.get("unit"))
             samples.append(SimpleHealthSample(
                 metric=item["metric"],
                 date=item["date"],
-                value=float(v),
-                unit=item.get("unit"),
+                value=valor,
+                unit=unidad,
                 extra=item.get("extra"),
             ))
         except (KeyError, ValueError, TypeError, AttributeError) as e:

@@ -2,6 +2,8 @@
 import json
 import logging
 
+import pytest
+
 import main
 from conftest import FakeResponse
 
@@ -950,3 +952,99 @@ class TestDiagnosticoDeDatos:
         r = client.get("/health/diagnostico", headers=auth_headers)
         assert r.status_code == 502
         assert "column x" not in r.text
+
+
+class TestNormalizacionEnergiaKj:
+    """La energía se guarda SIEMPRE en kcal, venga como venga escrita la unidad.
+
+    Tres fallos distintos dejaban kilojulios crudos en la tabla, y las métricas de
+    energía son acumulativas (solo se pisan si el valor nuevo es MAYOR): un número
+    inflado x4,184 le gana siempre a la medida buena, así que ninguna sincronización
+    posterior lo puede corregir. El fallo se autobloquea, y por eso hay que probar
+    también que la comparación de acumulativas ocurre con los valores ya convertidos.
+    """
+
+    MASIVA = "/health/ingest?token=health-token"
+    ATAJO  = "/health/ingest/simple?token=health-token"
+
+    @staticmethod
+    def _filas(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "health_metrics"):
+            if isinstance(kw["json"], list):
+                return kw["json"]
+        return []
+
+    def test_se_convierten_todos_los_puntos_no_solo_el_primero(self, client, mock_requests):
+        """Regresión del ámbito de `unit`: se reasignaba a "kcal" dentro del bucle de
+        PUNTOS (el de dentro) tras convertir el primero, con lo que la condición fallaba
+        para el resto de días de esa métrica y entraban en kJ crudo. El test que ya
+        había mandaba un único punto, que es justo el caso en el que no se nota.
+        """
+        dias = [{"date": f"2026-07-0{i} 08:00:00", "qty": 4184} for i in range(1, 5)]
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kJ", "data": dias}
+        ]}})
+        assert r.json()["upserted"] == 4
+        filas = self._filas(mock_requests)
+        assert [f["value"] for f in filas] == [1000.0] * 4, "ningún día se queda en kJ"
+        assert {f["unit"] for f in filas} == {"kcal"}
+
+    @pytest.mark.parametrize("unidad", ["kJ", "kj", "KJ", " kJ ", "kilojoules", "Kilojoule"])
+    def test_la_unidad_se_reconoce_se_escriba_como_se_escriba(self, client, mock_requests, unidad):
+        """Se comparaba con `unit == "kJ"`, un igual exacto contra una cadena que
+        decide el exportador. Cualquier otra forma se colaba sin convertir."""
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": unidad,
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 4184}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 1000.0
+        assert fila["unit"] == "kcal"
+
+    def test_kcal_no_se_toca(self, client, mock_requests):
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kcal",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 366}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 366
+        assert fila["unit"] == "kcal"
+
+    def test_kcal_nunca_se_confunde_con_kilojulios(self):
+        assert not main._es_kilojulios("kcal")
+        assert not main._es_kilojulios("Cal")
+        assert not main._es_kilojulios("")
+        assert not main._es_kilojulios(None)
+        assert main._es_kilojulios("kJ") and main._es_kilojulios("kilojulios")
+
+    def test_el_atajo_tambien_convierte(self, client, mock_requests):
+        """`/health/ingest/simple` no convertía NADA: cogía el valor del Atajo tal cual,
+        así que un iPhone que exporte la energía en kJ metía el número crudo."""
+        r = client.post(self.ATAJO, json=[
+            {"metric": "active_energy", "date": "2026-07-05", "value": 4184, "unit": "kJ"}
+        ])
+        assert r.json()["upserted"] == 1
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 1000.0
+        assert fila["unit"] == "kcal"
+
+    def test_masiva_compara_acumulativas_ya_convertidas(self, client, mock_requests):
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "active_energy", "value": 500}
+        ]))
+        r = client.post(self.MASIVA, json={"data": {"metrics": [
+            {"name": "active_energy", "units": "kJ",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 1712}]}
+        ]}})
+        assert r.json()["upserted"] == 0, "1712 kJ son 409 kcal: no pisan 500 kcal reales"
+        assert self._filas(mock_requests) == []
+
+    def test_atajo_compara_acumulativas_ya_convertidas(self, client, mock_requests):
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-07-05", "metric_name": "active_energy", "value": 500}
+        ]))
+        r = client.post(self.ATAJO, json=[
+            {"metric": "active_energy", "date": "2026-07-05", "value": 1712, "unit": "kJ"}
+        ])
+        assert r.json()["upserted"] == 0
+        assert self._filas(mock_requests) == []
