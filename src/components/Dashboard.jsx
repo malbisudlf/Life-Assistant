@@ -1044,6 +1044,12 @@ export default function Dashboard() {
   const [finanzasCargando, setFinanzasCargando] = useState(false);
   const [finanzasDetalle, setFinanzasDetalle]   = useState(false);   // posiciones desplegadas
 
+  // Cartera manual de ETFs (Revolut, precio real vía Twelve Data).
+  const [carteraEtf, setCarteraEtf]                 = useState(null);
+  const [carteraEtfCargando, setCarteraEtfCargando] = useState(false);
+  // Formulario de "+ Añadir aportación", uno por ticker: { [ticker]: { abierto, fecha, importe, guardando } }
+  const [etfAportForm, setEtfAportForm] = useState({});
+
   const [clothing, setClothing]                 = useState([]);
   const [showClothingForm, setShowClothingForm] = useState(false);
   const [clothingName, setClothingName]         = useState("");
@@ -1257,6 +1263,9 @@ export default function Dashboard() {
 
   // Cargar la cartera de Indexa
   useEffect(() => { if (token) loadFinanzas(); }, [token]);
+
+  // Cargar la cartera manual de ETFs
+  useEffect(() => { if (token) loadCarteraEtf(); }, [token]);
 
   // Cargar datos de salud
   useEffect(() => {
@@ -2198,6 +2207,39 @@ export default function Dashboard() {
     setFinanzasCargando(false);
   }
 
+  // La cartera manual de ETFs (Revolut). Igual que Indexa: el precio actual se cachea
+  // unas horas en el backend, `refrescar` es lo que fuerza a preguntar de verdad.
+  async function loadCarteraEtf({ refrescar = false } = {}) {
+    setCarteraEtfCargando(true);
+    try {
+      const r = await apiFetch(`${API}/finanzas/etfs${refrescar ? "?refrescar=true" : ""}`,
+                               { headers: authHeaders() });
+      if (!r.ok) throw new Error("cartera-etf");
+      setCarteraEtf(await r.json());
+    } catch {
+      setCarteraEtf(previo => previo || { error: true });
+    }
+    setCarteraEtfCargando(false);
+  }
+
+  async function submitEtfAportacion(ticker) {
+    const form = etfAportForm[ticker];
+    if (!form || form.guardando) return;
+    setEtfAportForm(f => ({ ...f, [ticker]: { ...f[ticker], guardando: true } }));
+    try {
+      const r = await apiFetch(`${API}/finanzas/etfs/${ticker}/aportaciones`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify({ fecha: form.fecha, importe_eur: parseFloat(form.importe) }),
+      });
+      if (!r.ok) throw new Error("aportacion");
+      setEtfAportForm(f => ({ ...f, [ticker]: { abierto: false, fecha: "", importe: "", guardando: false } }));
+      await loadCarteraEtf();
+    } catch {
+      setEtfAportForm(f => ({ ...f, [ticker]: { ...f[ticker], guardando: false, error: true } }));
+    }
+  }
+
   async function loadTraining() {
     try {
       const r = await apiFetch(`${API}/training/summary`, { headers: authHeaders() });
@@ -2957,14 +2999,15 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="finanzas">
           <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Finanzas</span>
-            {(finanzas?.configurado || finanzas?.revolut?.configurado) && (
-              <button onClick={() => loadFinanzas({ refrescar: true })} disabled={finanzasCargando}
-                title="Volver a preguntar a Indexa y Revolut (el dato normal es de hace unas horas)"
+            {(finanzas?.configurado || finanzas?.revolut?.configurado || carteraEtf?.etfs?.length > 0) && (
+              <button onClick={() => { loadFinanzas({ refrescar: true }); loadCarteraEtf({ refrescar: true }); }}
+                disabled={finanzasCargando || carteraEtfCargando}
+                title="Volver a preguntar a Indexa, Revolut y los precios de los ETFs (el dato normal es de hace unas horas)"
                 style={{
                   padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
                   letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
-                  color: "var(--muted)", cursor: finanzasCargando ? "default" : "pointer",
-                  opacity: finanzasCargando ? 0.5 : 1,
+                  color: "var(--muted)", cursor: (finanzasCargando || carteraEtfCargando) ? "default" : "pointer",
+                  opacity: (finanzasCargando || carteraEtfCargando) ? 0.5 : 1,
                 }}>↻</button>
             )}
           </div>
@@ -3140,6 +3183,64 @@ export default function Dashboard() {
                         </div>
                       )}
                     </>
+                  )}
+                </div>
+              )}
+
+              {carteraEtf && !carteraEtf.error && (
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--border2)" }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>
+                    Cartera de ETFs (manual)
+                  </div>
+                  {carteraEtf.etfs.length === 0 ? (
+                    <div style={{ color: "var(--muted)", fontSize: 12 }}>Sin ETFs dados de alta.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {carteraEtf.etfs.map(e => {
+                        const form = etfAportForm[e.ticker] || {};
+                        const positivaEtf = (e.ganancia_eur ?? 0) >= 0;
+                        return (
+                          <div key={e.ticker}>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 12, minWidth: 0 }}>
+                              <span style={{ color: "var(--text)" }}>{e.ticker}</span>
+                              <span style={{ marginLeft: "auto", fontFamily: "'DM Mono', monospace" }}>
+                                {formatoEuros(e.valor_actual)}
+                              </span>
+                              <span style={{ color: positivaEtf ? "var(--green)" : "#d4645a", minWidth: 52, textAlign: "right" }}>
+                                {formatoRentabilidad(e.ganancia_pct, { signo: true })}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 2 }}>
+                              Aportado {formatoEuros(e.aportado_eur)}
+                              {e.precio_actual == null && " · sin precio actual (Yahoo Finance no respondió)"}
+                            </div>
+
+                            {form.abierto ? (
+                              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                                <input type="date" value={form.fecha || ""}
+                                  onChange={ev => setEtfAportForm(f => ({ ...f, [e.ticker]: { ...f[e.ticker], fecha: ev.target.value } }))}
+                                  style={{ flex: 1, minWidth: 120, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                                <input type="number" min="0" step="0.01" placeholder="Importe €" value={form.importe || ""}
+                                  onChange={ev => setEtfAportForm(f => ({ ...f, [e.ticker]: { ...f[e.ticker], importe: ev.target.value } }))}
+                                  style={{ width: 90, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
+                                <button onClick={() => submitEtfAportacion(e.ticker)} disabled={form.guardando || !form.fecha || !form.importe}
+                                  style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
+                                <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: false } }))}
+                                  style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
+                                {form.error && (
+                                  <div style={{ width: "100%", fontSize: 11, color: "#d4645a" }}>No se pudo guardar la aportación.</div>
+                                )}
+                              </div>
+                            ) : (
+                              <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: true, fecha: new Date().toISOString().slice(0, 10), importe: "" } }))}
+                                style={{ marginTop: 4, padding: "4px 0", background: "none", border: "none", font: "inherit", fontSize: 11, color: "var(--accent)", cursor: "pointer" }}>
+                                + Añadir aportación
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               )}

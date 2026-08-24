@@ -57,6 +57,9 @@
 | `PATCH /training/client` | JWT | Precio/hora y sesiones por cobro |
 | `POST /training/payments` | JWT | Marca cobro de hoy (calcula el importe automáticamente) |
 | `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie. `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
+| `GET /finanzas/etfs` | JWT | Cartera manual de ETFs: participaciones, aportado, precio actual y ganancia por ETF (vía Yahoo Finance). `?refrescar=true` salta la caché de precios (ver `docs/FINANZAS.md`) |
+| `POST /finanzas/etfs` | JWT | Da de alta un ETF nuevo a trackear `{ticker, nombre, simbolo_twelvedata, bolsa_twelvedata}`. Sin botón en el frontend, se usa por curl |
+| `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur}`; calcula las participaciones con el precio de cierre real de esa fecha |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
 | `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) |
@@ -94,7 +97,8 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 
 **Finanzas** (todas opcionales; sin `INDEXA_TOKEN` el widget dice que no está conectado):
 `INDEXA_TOKEN`, `INDEXA_API_URL`, `INDEXA_CUENTAS`, `INDEXA_TTL_MINUTOS`,
-`INDEXA_SERIE_DIAS`.
+`INDEXA_SERIE_DIAS`. La cartera manual de ETFs no necesita ninguna clave (usa Yahoo
+Finance, sin autenticación): `YAHOO_FINANCE_API_URL`, `ETF_PRECIO_TTL_MINUTOS`.
 
 **Tokens de servicio** (valores aleatorios distintos entre sí): `HA_POLL_TOKEN`,
 `HEALTH_INGEST_TOKEN`, `BRIEF_TOKEN`, `AGENT_TOKEN`.

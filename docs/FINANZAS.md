@@ -1,12 +1,13 @@
 <!-- Parte de la guía del repositorio. El índice y las reglas que aplican
      SIEMPRE están en CLAUDE.md, en la raíz. -->
 
-## Finanzas: la cartera de Indexa Capital + el ahorro en Revolut
+## Finanzas: la cartera de Indexa Capital + el ahorro en Revolut + los ETFs manuales
 
-Un widget, dos fuentes. `GET /finanzas/resumen` devuelve la cartera de Indexa en las
-claves de siempre y el saldo de Revolut en `revolut`. No se suman entre sí — uno es
-inversión (con plusvalía, aportado, rentabilidad) y el otro es dinero parado en una
-cuenta corriente; sumarlos daría un "total" que no significa nada.
+Un widget, tres fuentes. `GET /finanzas/resumen` devuelve la cartera de Indexa en las
+claves de siempre y el saldo de Revolut en `revolut`; `GET /finanzas/etfs` (endpoint
+aparte) devuelve la cartera manual de ETFs. No se suman entre sí — inversión con
+plusvalía, dinero parado en una cuenta corriente y una cartera llevada a mano son tres
+cosas distintas, y sumarlas daría un "total" que no significa nada.
 
 ### Indexa Capital
 
@@ -98,7 +99,11 @@ Los formateadores son puros y viven en `src/lib/helpers.js`: `formatoEuros`,
 nadie multiplique por 100 a ojo), `mezclaCartera` y `variacionCartera`.
 
 Debajo, separado con una línea, el bloque de Revolut (`finanzas.revolut`): solo el saldo, sin
-serie ni mezcla — es un ahorro, no una cartera. El botón ↻ refresca los dos a la vez.
+serie ni mezcla — es un ahorro, no una cartera. Y debajo de ese, otra línea y la cartera
+manual de ETFs (`carteraEtf`, estado propio cargado con `GET /finanzas/etfs`): una fila por
+ETF con su valor y ganancia, y un botón "+ Añadir aportación" que abre un formulario inline
+(fecha + importe) y llama a `POST /finanzas/etfs/{ticker}/aportaciones`. El botón ↻ refresca
+las tres fuentes a la vez.
 
 ### Jarvis
 
@@ -125,6 +130,8 @@ dentro (`dile_al_usuario_literalmente`), y aparece también en `mis_capacidades`
 | `ENABLE_BANKING_REDIRECT_URL` | — | Debe estar en las "Redirect URLs" de la app y apuntar al backend, no al frontend. Tiene que ser `https`, incluso en local |
 | `ENABLE_BANKING_VALID_DIAS` | `180` | Cuánto dura el consentimiento antes de tener que repetirlo |
 | `ENABLE_BANKING_TTL_MINUTOS` | `60` | Vida de la copia en memoria del saldo |
+| `YAHOO_FINANCE_API_URL` | `https://query1.finance.yahoo.com` | Solo para pruebas |
+| `ETF_PRECIO_TTL_MINUTOS` | `60` | Vida de la copia en memoria de los precios actuales de la cartera manual de ETFs |
 
 ### Los tests
 
@@ -197,6 +204,69 @@ de la plataforma donde se invierta — igual que Indexa — y de los brokers de 
 habituales (DEGIRO, Trade Republic, MyInvestor) **ninguno tiene API pública**; el único con API
 oficial documentada es Interactive Brokers (pendiente de evaluar: exige mantener corriendo su
 Client Portal Gateway, más trabajoso que un token fijo).
+
+### Cartera manual de ETFs (Yahoo Finance)
+
+Ya que ningún agregador puede leer la cartera de inversión de Revolut, se lleva a mano:
+dos tablas en Supabase y el precio real de cada ETF sacado de Yahoo Finance, para que
+el valor no sea un número que se edite a ojo.
+
+**Por qué Yahoo Finance y no otra cosa.** Se probaron dos fuentes antes:
+- **Stooq**: gratis y sin clave sobre el papel, pero en algún momento de 2026 metió un
+  reto anti-bot (proof-of-work en JavaScript, SHA-256) delante de sus CSV — un backend
+  no puede resolverlo sin un navegador headless, así que quedó descartado.
+- **Twelve Data**: API con clave gratuita, pero su plan free **no cubre ETFs cotizados
+  en bolsas europeas como XETR** — ni el precio actual ni el histórico. Comprobado en
+  vivo, con una clave real: `GET /price?symbol=VWCE&exchange=XETR` devuelve 404 con
+  `"This symbol is available starting with the Grow or Venture plan"`.
+
+El endpoint de gráficas de Yahoo Finance (`/v8/finance/chart/{símbolo}`) **no es una
+API oficial ni documentada** — puede cambiar o bloquearse sin aviso, exactamente como
+le pasó a Stooq. Es la opción que queda tras descartar las otras dos, no una elección
+sin riesgo: si deja de funcionar algún día, este es el sitio donde mirar primero.
+Eso sí, de momento da tanto el precio actual como el histórico diario **sin clave y
+sin límite de peticiones conocido** — solo hace falta mandar un `User-Agent` de
+navegador, sin él responde `429` aunque no haya habido ningún tráfico previo.
+
+**El esquema** (`supabase/migrations/20260824_etf_cartera.sql`):
+- `etf_holdings`: qué ETFs se trackean — `ticker` (el que muestra Revolut, ej. `VWCE`),
+  `nombre`, y `simbolo_yahoo` (el símbolo + sufijo de bolsa que entiende Yahoo, ej.
+  `VWCE.DE` para XETRA).
+- `etf_aportaciones`: cada aportación real — `fecha`, `importe_eur` y las
+  `participaciones` que compró, calculadas UNA VEZ al darla de alta con el precio de
+  cierre real de ese día. No se recalculan después: lo que cambia con el tiempo es el
+  valor de esas participaciones, no cuántas hay.
+
+**El ticker de Revolut no siempre es el símbolo real.** El "SECO" que enseña Revolut
+para el iShares MSCI Global Semiconductors UCITS ETF es en realidad **`SEC0`** (con
+cero, no con la letra O) — se confunden con la tipografía de la app, y su
+`simbolo_yahoo` es `SEC0.DE`. El `ticker` que usa este dashboard es el de Revolut
+(para que Mikel lo reconozca); `simbolo_yahoo` es el real, y son campos separados a
+propósito.
+
+**`GET /finanzas/etfs`** agrupa las aportaciones por ticker y calcula, por ETF:
+`participaciones` y `aportado_eur` (siempre disponibles — son datos propios, no
+dependen de ninguna API externa), y `precio_actual` / `valor_actual` / `ganancia_eur`
+/ `ganancia_pct` a `None` si Yahoo Finance falló para ese ETF concreto. Mismo criterio
+que Indexa cuando falla `/performance`: `None` es "no lo sé", nunca un 0 €. Un ETF que
+falla no tumba a los demás.
+
+**`POST /finanzas/etfs/{ticker}/aportaciones`** es el botón "+ Añadir aportación" del
+widget: recibe `fecha` + `importe_eur`, pide a Yahoo el precio de cierre de esa fecha
+(con una ventana de 7 días hacia atrás por si cae en fin de semana o festivo — se usa
+el último día hábil anterior, no un precio a 0) y calcula
+`participaciones = importe_eur / precio` antes de guardar.
+
+**`POST /finanzas/etfs`** da de alta un ETF nuevo. Sin botón en el frontend a
+propósito: no es una acción del día a día, se usa una vez por ETF (por curl) cuando
+Mikel empieza a invertir en uno nuevo.
+
+**La caché de precios actuales** sigue el mismo patrón que la de Revolut:
+`ETF_PRECIO_TTL_MINUTOS` (60 por defecto — un ETF no cambia de precio segundo a
+segundo, y no conviene abusar de un endpoint no oficial), tupla `(epoch, precios)` en
+memoria, y el botón ↻ del widget la salta igual que con Indexa/Revolut. Si falla el
+precio de UN ETF concreto, se registra y ese ticker se queda sin precio — no tumba a
+los demás.
 
 ### Lo que no se hace y por qué
 

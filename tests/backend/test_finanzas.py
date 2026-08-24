@@ -5,6 +5,8 @@ Las respuestas simuladas copian la forma de la API de verdad (`instrument_accoun
 `positions`, `return.total_amounts`…), que es justo lo que hay que fijar aquí: si esa
 forma cambiara, es este fichero el que tiene que enterarse primero.
 """
+import datetime
+
 import pytest
 from conftest import FakeResponse
 
@@ -352,3 +354,139 @@ class TestFinanzasJarvis:
     def test_sin_configurar_trae_su_arreglo_dentro(self, monkeypatch):
         monkeypatch.setattr(main, "INDEXA_TOKEN", "")
         assert main._j_finanzas()["dile_al_usuario_literalmente"]
+
+
+# ── Cartera manual de ETFs (Yahoo Finance) ────────────────────────────────────
+# Ni Indexa ni Revolut pueden decir esto: aquí el "aportado" y las "participaciones" son
+# siempre datos propios (vienen de Supabase, no de una API externa), y solo el precio
+# actual / la ganancia dependen de Yahoo Finance — por eso los tests distinguen tan
+# bien entre "un ETF sin precio" y "los demás siguen saliendo".
+
+ETF_HOLDINGS = [
+    {"ticker": "VWCE", "nombre": "Vanguard FTSE All-World UCITS ETF (USD) Acc",
+     "simbolo_yahoo": "VWCE.DE"},
+    {"ticker": "SECO", "nombre": "iShares MSCI Global Semiconductors UCITS ETF USD (Acc)",
+     "simbolo_yahoo": "SEC0.DE"},
+]
+
+ETF_APORTACIONES = [
+    {"id": "a1", "ticker": "VWCE", "fecha": "2026-01-23", "importe_eur": 318.51,
+     "participaciones": 2.00320755, "precio_compra": 159.0},
+    {"id": "a2", "ticker": "SECO", "fecha": "2026-08-20", "importe_eur": 1000.0,
+     "participaciones": 60.3862, "precio_compra": 16.5600},
+]
+
+
+def _epoch(fecha_iso):
+    d = datetime.date.fromisoformat(fecha_iso)
+    return int(datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc).timestamp())
+
+
+def _yahoo_chart_ok(precio_actual=None, historico=None):
+    """Simula una respuesta de /v8/finance/chart. Con `period1` en los params (petición
+    de histórico) devuelve `historico` (lista de (fecha_iso, cierre)); si no, el precio
+    actual (petición con `range`)."""
+    def _f(url, **kwargs):
+        params = kwargs.get("params") or {}
+        if "period1" in params:
+            timestamps = [_epoch(f) for f, _ in (historico or [])]
+            cierres    = [c for _, c in (historico or [])]
+            return FakeResponse({"chart": {"result": [{
+                "timestamp": timestamps,
+                "indicators": {"quote": [{"close": cierres}]},
+            }], "error": None}})
+        return FakeResponse({"chart": {"result": [{"meta": {"regularMarketPrice": precio_actual}}]}, "error": None})
+    return _f
+
+
+def _yahoo_chart_error(url, **kwargs):
+    return FakeResponse({"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}})
+
+
+class TestEtfAuth:
+    def test_requiere_jwt(self, client):
+        assert client.get("/finanzas/etfs").status_code in (401, 403)
+
+
+class TestEtfResumen:
+    def test_calcula_valor_y_ganancia_con_precio(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse(ETF_HOLDINGS))
+        mock_requests.add("GET", "etf_aportaciones", FakeResponse(ETF_APORTACIONES))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_ok(precio_actual=166.0))
+        mock_requests.add("GET", "chart/SEC0.DE", _yahoo_chart_ok(precio_actual=16.6))
+        datos = client.get("/finanzas/etfs", headers=auth_headers).json()
+        vwce = next(e for e in datos["etfs"] if e["ticker"] == "VWCE")
+        assert vwce["aportado_eur"] == 318.51
+        assert vwce["participaciones"] == pytest.approx(2.00320755)
+        assert vwce["precio_actual"] == 166.0
+        assert vwce["valor_actual"] == pytest.approx(2.00320755 * 166.0, abs=0.01)
+        assert vwce["ganancia_eur"] == pytest.approx(vwce["valor_actual"] - 318.51, abs=0.01)
+        assert datos["total"]["valor_actual"] is not None
+
+    def test_un_etf_sin_precio_no_tumba_a_los_demas(self, client, auth_headers, mock_requests):
+        # Solo se sabe cotizar SEC0.DE: VWCE se queda sin precio, pero sigue en la respuesta.
+        mock_requests.add("GET", "etf_holdings", FakeResponse(ETF_HOLDINGS))
+        mock_requests.add("GET", "etf_aportaciones", FakeResponse(ETF_APORTACIONES))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_error)
+        mock_requests.add("GET", "chart/SEC0.DE", _yahoo_chart_ok(precio_actual=16.6))
+        datos = client.get("/finanzas/etfs", headers=auth_headers).json()
+        vwce = next(e for e in datos["etfs"] if e["ticker"] == "VWCE")
+        seco = next(e for e in datos["etfs"] if e["ticker"] == "SECO")
+        # Sin precio no hay valor: None, nunca un 0 € que afirmaría algo que no se sabe.
+        assert vwce["precio_actual"] is None
+        assert vwce["valor_actual"] is None
+        assert seco["precio_actual"] == 16.6
+        # El total no puede sumar lo que falta: incompleto es None, no un total más bajo.
+        assert datos["total"]["valor_actual"] is None
+
+    def test_caché_evita_repreguntar_a_yahoo(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse(ETF_HOLDINGS))
+        mock_requests.add("GET", "etf_aportaciones", FakeResponse(ETF_APORTACIONES))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_ok(precio_actual=166.0))
+        mock_requests.add("GET", "chart/SEC0.DE", _yahoo_chart_ok(precio_actual=16.6))
+        client.get("/finanzas/etfs", headers=auth_headers)
+        client.get("/finanzas/etfs", headers=auth_headers)
+        assert len(mock_requests.called("GET", "chart/VWCE.DE")) == 1   # una vez, no dos
+        assert len(mock_requests.called("GET", "chart/SEC0.DE")) == 1
+
+
+class TestEtfAportacion:
+    def test_calcula_participaciones_con_precio_historico(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_ok(historico=[("2026-01-23", 159.0)]))
+        mock_requests.add("POST", "etf_aportaciones", FakeResponse([{
+            "id": "nuevo", "ticker": "VWCE", "fecha": "2026-01-23",
+            "importe_eur": 318.51, "participaciones": 2.00320755, "precio_compra": 159.0,
+        }]))
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 318.51})
+        assert r.status_code == 200
+        assert r.json()["aportacion"]["participaciones"] == pytest.approx(2.00320755)
+
+    def test_fin_de_semana_usa_el_dia_habil_anterior(self, client, auth_headers, mock_requests):
+        # Yahoo no cotiza fines de semana: no hay valor para esa fecha exacta, se usa el
+        # último día hábil anterior dentro de la ventana pedida — nunca un precio a 0.
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_ok(historico=[("2026-08-21", 165.0)]))  # viernes
+        mock_requests.add("POST", "etf_aportaciones", FakeResponse([{
+            "id": "nuevo", "ticker": "VWCE", "fecha": "2026-08-23", "importe_eur": 100.0,
+            "participaciones": 0.60606061, "precio_compra": 165.0,
+        }]))
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-08-23", "importe_eur": 100.0})  # domingo
+        assert r.status_code == 200
+        assert r.json()["fecha_precio_usada"] == "2026-08-21"
+
+    def test_ticker_desconocido_da_404(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse([]))
+        r = client.post("/finanzas/etfs/ZZZZ/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 100})
+        assert r.status_code == 404
+
+    def test_fallo_de_yahoo_da_502_y_no_inserta_nada(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("GET", "chart/VWCE.DE", _yahoo_chart_error)
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers,
+                         json={"fecha": "2026-01-23", "importe_eur": 100})
+        assert r.status_code == 502
+        assert mock_requests.called("POST", "etf_aportaciones") == []
