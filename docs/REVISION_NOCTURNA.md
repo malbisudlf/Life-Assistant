@@ -255,6 +255,33 @@ hay rutina de arreglo configurada, la herramienta ni se anuncia.
 - **El barrido semanal**: **Run now** dejando el cuadro de texto vacío. Sin payload, la
   skill se va al camino de los últimos siete días.
 
+## Si pulsas «Arreglarlo» y no pasa nada
+
+La cadena tiene cuatro eslabones y se recorren en este orden: el primero que falle
+explica el silencio y los de abajo ya dan igual.
+
+1. **¿Se apuntó el aviso?** *Actions → Avisar de la revisión nocturna → la ejecución de
+   ese issue*. El log acaba con la respuesta del backend tal cual. `"avisado":true` es lo
+   que quieres ver. `"avisado":false` con `"ya estaba apuntado"` **no es un fallo**: son
+   los dos eventos del mismo issue (`opened` y `labeled`), y el segundo choca contra la
+   clave primaria a propósito — mira la otra ejecución, la de al lado.
+2. **¿Llegó con los botones buenos?** Si el aviso trae «útil / no útil» en vez de
+   «Arreglarlo / No hacer nada», el YAML de Home Assistant se quedó en la versión
+   anterior a `repeat.item.acciones` (`docs/HOME_ASSISTANT_JARVIS.md`, punto 4). Pulsar
+   entonces manda la valoración de una regla, no una decisión, y el backend no tiene
+   forma de detectarlo: desde aquí solo se ve que HA recogió la cola.
+3. **¿Llegó la pulsación al backend?** Tienen que existir el `rest_command`
+   `la_revision_accion` y la automatización que lo llama. Si faltan, pulsar no hace
+   nada en absoluto: no hay petición, así que tampoco hay error que contar.
+4. **¿Existe todavía la rutina que arregla?** En
+   [claude.ai/code/routines](https://claude.ai/code/routines). Es el eslabón que más
+   silenciosamente se rompe — ver "Trampas conocidas".
+
+**El backend siempre contesta**, y por el mismo canal por el que llegó la pregunta: «Voy
+a por los hallazgos» si el disparo salió, o «No he podido lanzar el arreglo» con el
+motivo si no. Un silencio absoluto significa que la petición nunca llegó, es decir, los
+eslabones 2 o 3 — no el backend.
+
 ## La etiqueta `ultima-revision-nocturna`
 
 Es una etiqueta ligera que marca hasta dónde se revisó la última vez. El workflow la lee
@@ -305,6 +332,14 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   skill si ya existe en el repositorio, así que no se puede depender de ella). Si cambias
   el formato en `.claude/skills/revision-nocturna/SKILL.md`, cambia también el `if` del
   workflow o el aviso deja de salir en silencio.
+- **La rutina que arregla puede desaparecer, y no te enteras hasta pulsar el botón.**
+  Pasó en agosto de 2026: la rutina se borró de `claude.ai/code/routines` y
+  `ARREGLO_FIRE_URL` se quedó apuntando a un trigger que ya no existía. Todo lo demás
+  siguió funcionando —el issue se abría, el aviso salía a las 08:30 con sus dos
+  botones—, así que desde fuera el montaje parecía sano y el fallo solo se veía al
+  pulsar. El backend hace lo correcto (libera la decisión y te cuenta el fallo), pero
+  para entonces la mañana ya se ha gastado. Borrar una rutina es un clic y no avisa a
+  nadie: si el arreglo deja de lanzarse, mira ahí ANTES que el código.
 - **«Arreglarlo» mergea, y mergear despliega el frontend** (Vercel va detrás de `main`).
   El backend no: su deploy sigue siendo manual y la skill del arreglo tiene prohibido
   tocarlo. Si un hallazgo era del backend, después del merge hay que hacer `fly deploy` a
