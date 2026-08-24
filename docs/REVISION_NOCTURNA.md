@@ -354,5 +354,29 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   Jarvis— vuelve a servir en cuanto el token valga. Si se revocaron todos los tokens de
   la cuenta, mira también `RUTINA_FIRE_TOKEN` (el del briefing, en Fly) y el secret
   `ROUTINE_TOKEN` de Actions, que es el que dispara la revisión de la noche.
+- **Antes de dar por revocado el token, comprueba el NOMBRE del secret.** Fly acepta
+  cualquier nombre en `fly secrets set` sin avisar de que nadie lo lee, así que una
+  errata deja el token bueno guardado en un secret fantasma y el backend siguiendo con
+  el viejo — con el mismo síntoma exacto que un token caducado. Pasó el 2026-08-24:
+  el valor nuevo se puso en `AREGLO_FIRE_TOKEN` (una sola R) y `ARREGLO_FIRE_TOKEN`
+  seguía revocado, así que el botón falló otra vez después de "haber actualizado los
+  secrets". Se ve en un vistazo con `fly secrets list` (buscando nombres parecidos de
+  más), y se distingue token malo de nombre malo preguntándole a la API desde la
+  propia máquina, sin disparar nada:
+
+  ```bash
+  fly ssh console -C "python -c \"
+  import os, requests
+  r = requests.get(os.getenv('ARREGLO_FIRE_URL'),
+                   headers={'Authorization': 'Bearer ' + os.getenv('ARREGLO_FIRE_TOKEN', ''),
+                            'anthropic-version': '2023-06-01',
+                            'anthropic-beta': 'claude-code-routines-2025-11-20'})
+  print(r.status_code, r.text[:120])
+  \""
+  ```
+
+  `405 Method Not Allowed` significa que la credencial es buena (el GET solo sirve para
+  no disparar el arreglo de verdad); `401 authentication_error` es que de verdad está
+  revocada.
 - **El agente que arregla no mergea en rojo.** Si el CI falla tras dos intentos deja el
   PR abierto con una explicación, que es un resultado — el silencio no lo sería.
