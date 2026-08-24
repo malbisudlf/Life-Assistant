@@ -5970,7 +5970,18 @@ def _motivo_disparo(status: int, detalle: str) -> str:
 
     El caso de la credencial no es hipotético: pasó el 2026-08-24 y el aviso de que el
     botón no había lanzado nada llegó con el JSON de Anthropic dentro.
+
+    Y los 401 no son todos el mismo 401. El mismo día, después de "arreglar" el token,
+    el botón volvió a fallar con «not authorized for this routine»: el valor puesto era
+    válido, pero era el del OTRO trigger (el del briefing). Con los dos casos traducidos
+    igual, el aviso del móvil decía «caducado o revocado» por segunda vez y mandaba a
+    regenerar un token que no tenía nada de malo. Los tokens de trigger son POR RUTINA,
+    así que el arreglo es distinto y el mensaje también tiene que serlo.
     """
+    if "not authorized for this routine" in detalle:
+        return ("el token del disparo es válido pero pertenece a OTRA rutina: cada trigger "
+                "tiene el suyo. Genera el de la rutina que arregla en claude.ai/code/routines "
+                "y ponlo en ARREGLO_FIRE_TOKEN")
     if status in (401, 403) or "authentication_error" in detalle or "permission_error" in detalle:
         return ("el token del disparo ya no vale (caducado o revocado): regenéralo en "
                 "claude.ai/code/routines y vuelve a ponerlo en el backend")
