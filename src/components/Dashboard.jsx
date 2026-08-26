@@ -2134,7 +2134,12 @@ export default function Dashboard() {
     } catch { vozPermisoRef.current = null; }
   }
 
-  useEffect(() => { pedirPermisoVoz(); /* una vez, al montar */ }, []);
+  // Con `token`, y no al montar a secas: este componente se monta TAMBIÉN en la
+  // pantalla de login —devuelve <LoginScreen/> al final, pero los hooks corren igual—
+  // y sin la guarda pedía el permiso sin sesión, con lo que cada carga dejaba un 401
+  // en la consola del navegador. El resto de efectos de datos llevan esta misma
+  // guarda; a este se le olvidó.
+  useEffect(() => { if (token) pedirPermisoVoz(); /* una vez, con sesión */ }, [token]);
 
   function iniciarLlamada() {
     if (!VOZ_NAVEGADOR || !VOZ_SINTESIS || llamadaRef.current) return;
