@@ -50,8 +50,41 @@ class ClienteFalso:
     def create(self, **kwargs):
         self.recibido.append(kwargs)
         mensaje = self.guion.pop(0) if self.guion else _mensaje("(sin guion)")
+        if kwargs.get("stream"):
+            return _partido(mensaje)
         return SimpleNamespace(choices=[SimpleNamespace(
             message=mensaje, finish_reason=getattr(mensaje, "motivo", "stop"))])
+
+
+def _partido(mensaje, tamano=7):
+    """El mismo mensaje, pero llegando a trozos como lo manda el streaming del SDK.
+
+    Se parte a propósito por donde peor viene: el texto cada pocos caracteres (a mitad de
+    palabra, que es como llega de verdad) y cada herramienta con el nombre y el `id` en un
+    trozo y los argumentos repartidos en varios más. Justo eso es lo que el backend tiene
+    que saber volver a juntar, así que el cliente falso no se lo pone fácil.
+    """
+    def _trozo(content=None, tool_calls=None, motivo=None):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+            finish_reason=motivo)])
+
+    texto = mensaje.content or ""
+    for i in range(0, len(texto), tamano):
+        yield _trozo(content=texto[i:i + tamano])
+
+    for indice, llamada in enumerate(mensaje.tool_calls or []):
+        yield _trozo(tool_calls=[SimpleNamespace(
+            index=indice, id=llamada.id,
+            function=SimpleNamespace(name=llamada.function.name, arguments=""))])
+        argumentos = llamada.function.arguments or ""
+        for i in range(0, len(argumentos), 3):
+            yield _trozo(tool_calls=[SimpleNamespace(
+                index=indice, id=None,
+                function=SimpleNamespace(name=None, arguments=argumentos[i:i + 3]))])
+
+    # El motivo de parada llega en el último trozo y solo en él.
+    yield _trozo(motivo=getattr(mensaje, "motivo", "stop"))
 
 
 def _con_modelo(monkeypatch, guion):

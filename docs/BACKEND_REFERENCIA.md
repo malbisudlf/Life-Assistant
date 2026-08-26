@@ -77,7 +77,9 @@
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
 | `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |
+| `POST /jarvis/voz` | JWT | El mismo turno que `/jarvis`, retransmitido por SSE: un evento `herramienta` (con la frase que decir en voz alta) antes de usar cada una, eventos `texto` con la respuesta según se escribe, y un `fin` con el resultado más `por_decir` (lo que aún no ha salido por el altavoz). Se consume con `fetch`+reader, no con `EventSource` |
 | `POST /jarvis/ejecutar` | JWT | Ejecuta una acción que Jarvis dejó propuesta. Solo admite las marcadas `confirmar` |
+| `POST /voz/token` | JWT | Emite un token de un solo uso de ElevenLabs (15 min) para que el navegador abra el WebSocket de voz. 503 si la voz de pago no está configurada. Rate limit por IP. Ver `docs/JARVIS_VOZ.md` |
 
 **CORS**: los orígenes permitidos salen de `CORS_ORIGINS` (por defecto
 `http://localhost:5173` y el dominio de Vercel). Si añades otro origen de producción,
@@ -113,7 +115,8 @@ Finance, sin autenticación): `YAHOO_FINANCE_API_URL`, `ETF_PRECIO_TTL_MINUTOS`.
 
 **Jarvis** (ninguna obligatoria; reutiliza `OPENAI_API_KEY`): `JARVIS_MODEL`,
 `JARVIS_MODEL_ACCION`, `JARVIS_MAX_VUELTAS`, `JARVIS_MAX_HISTORIAL`, `JARVIS_MAX_MENSAJE`,
-`JARVIS_MAX_TOKENS`, `JARVIS_MAX_TOKENS_VOZ`, `JARVIS_RESERVA_RAZONAMIENTO`,
+`JARVIS_MAX_TOKENS`, `JARVIS_MAX_TOKENS_VOZ`, `JARVIS_VOZ_MODELO_DIRECTO`,
+`JARVIS_RESERVA_RAZONAMIENTO`,
 `JARVIS_MAX_REQUESTS`, `JARVIS_WINDOW_SECONDS`, `PC_AGENT_ID`, `JARVIS_REPO`, `JARVIS_WEB`,
 `JARVIS_WEB_RESULTADOS`, `JARVIS_WEB_MAX_BYTES`, `JARVIS_WEB_MAX_TEXTO`,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
