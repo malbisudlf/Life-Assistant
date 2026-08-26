@@ -73,7 +73,11 @@ npm run lint && npm test && .venv/bin/python -m pytest tests/backend -q && npm r
 ```
 
 Además hay CI (`.github/workflows/ci.yml`): ejecuta esos cuatro pasos en cada push a
-`main` y en cada PR, en **tres jobs paralelos** (frontend / backend / E2E). No
+`main` y en cada PR, en **tres jobs paralelos** (frontend / backend / E2E). También se puede lanzar a
+mano (`gh workflow run CI --ref main`), que es la salida cuando un run se queda
+sin correr por algo ajeno al código: la concurrencia cancela el anterior si entran
+dos pushes seguidos, y una caída de Actions deja los disparos en `startup_failure`
+sin ejecutar un solo test. No
 despliega nada — el deploy de Vercel sigue siendo el check aparte que ya había, y
 el del backend sigue siendo manual (ver "Qué NO hacer").
 
