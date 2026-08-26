@@ -318,6 +318,16 @@
   panel, lo destapó alguien mirando el número y pensando «esto no puede ser» — un
   widget que pinta lo que le den no valida nada, y el score de bienestar llevaba
   regalando los 5 puntos de energía activa (umbral ≥600) todos los días.
+- **Un `useEffect` sin la guarda de sesión pide datos desde la pantalla de login.**
+  Hermano del de abajo y de la misma tanda de la voz: `pedirPermisoVoz()` colgaba de
+  un `useEffect(..., [])`, y `Dashboard` **se monta también sin sesión** — devuelve
+  `<LoginScreen/>` en la última línea, pero para entonces todos los hooks ya han
+  corrido. Resultado: un 401 en la consola del navegador en cada carga de la pantalla
+  de login. No rompía nada visible (`apiFetch` solo cierra la sesión si había token,
+  y ahí no lo hay), así que no lo encontró nadie mirando: lo encontró el E2E, que
+  exige **cero errores de consola** y por eso existe esa aserción. La moraleja:
+  **todo efecto que llame a la API lleva `if (!token) return;`** — el resto de
+  efectos de datos de `Dashboard.jsx` ya la llevan, a este se le olvidó.
 - **Una petición sin cabecera de auth echa al usuario de la sesión entera.** Al cablear
   la voz de ElevenLabs (agosto de 2026), `pedirPermisoVoz()` llamaba a `/voz/token` con
   `headers: { "Content-Type": "application/json" }` en vez de `jsonHeaders()`. El
