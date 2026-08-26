@@ -93,8 +93,9 @@ Cosas que no estaban en el plan y costaron encontrar. **Léelas antes de tocar n
 
 ## Cómo levantar esto en local
 
-El backend de producción **no tiene nada de esto desplegado** (el deploy es manual, ver
-`CLAUDE.md`). Para probar hace falta el backend local, y el frontend apuntando a él:
+Esto ya está **desplegado en producción** (backend en Fly y frontend en Vercel, el
+26 de agosto de 2026), así que se puede probar entrando al dashboard de siempre. Aun así
+lo normal es desarrollar contra el backend local, con el frontend apuntando a él:
 
 ```bash
 cd backend && ../.venv/Scripts/python -m uvicorn main:app --reload --port 8000
@@ -471,10 +472,11 @@ Lo que queda pendiente de la persona, no del código:
 
 1. **Meter saldo o subir de plan**, si se quiere una voz española de verdad (las de la
    Voice Library están cerradas en gratuito) o usar esto más de unos minutos al mes.
-2. **`fly secrets set --stage ELEVENLABS_API_KEY=… ELEVENLABS_VOICE_ID=…`** cuando toque
-   desplegar. `--stage` evita reiniciar las máquinas por una variable que el código
-   desplegado todavía no lee. El deploy sigue siendo manual: `fly deploy` desde
-   `backend/`.
+2. ~~Poner los secretos en Fly y desplegar.~~ Hecho el 26 de agosto de 2026:
+   `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` y `JARVIS_VOZ_ELEVENLABS=1` están puestos
+   y aplicados. Si algún día hay que rehacerlo: `fly secrets set --stage …` (con
+   `--stage` para no reiniciar las máquinas por una variable que el código desplegado
+   todavía no lee) y `fly deploy` desde `backend/`, que sigue siendo manual.
 3. **Decidir auriculares o altavoz** para la primera prueba del barge-in, cuando llegue
    la fase 6. Con auriculares primero, que es la que no depende de la cancelación de eco.
 
@@ -488,9 +490,9 @@ Honestamente, y para que no sorprenda después:
   habla **en iOS solamente** y detectar la interrupción por un toque en pantalla.
 - **Fly escala a cero.** La primera petición de una llamada despierta la máquina: 10–15 s.
   Ya está tapado en parte: `/voz/token` se pide al montar el dashboard, no al pulsar
-  llamar, así que la máquina suele estar despierta cuando hace falta. Pero **nada de esto
-  está desplegado todavía** — las medidas de arriba son con el backend en el portátil, y
-  contra Fly habrá que volver a medirlas.
+  llamar, así que la máquina suele estar despierta cuando hace falta. Pero **las medidas
+  de arriba son con el backend en el portátil**: contra Fly, ya desplegado, están sin
+  repetir. Eso es la fase 8.
 - **El MP3 troceado no está garantizado.** Cada trozo que llega por el WebSocket se
   decodifica suelto, y eso solo funciona si vienen alineados a frames. El que falla se
   guarda y se reintenta pegado al siguiente. En las pruebas ha ido bien (el primer trozo
