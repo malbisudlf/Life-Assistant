@@ -10,6 +10,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A mano: `gh workflow run CI --ref main`. Hace falta porque un run se puede
+  # quedar sin correr sin que el código tenga nada que ver — la concurrencia de
+  # aquí abajo cancela el anterior cuando entran dos pushes seguidos, y una caída
+  # de Actions (26 de agosto de 2026) deja los disparos en `startup_failure`. Sin
+  # esto, la única manera de volver a pedirlo era un commit vacío a `main`.
+  workflow_dispatch:
 
 # Si se empuja varias veces seguidas a la misma rama, cancela la ejecución anterior.
 concurrency:
