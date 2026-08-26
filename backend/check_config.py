@@ -61,6 +61,7 @@ def main() -> int:
         ("Finanzas (cartera de Indexa Capital)", ["INDEXA_TOKEN"]),
         ("Revisión nocturna accionable (aviso con botones)",
          ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
+        ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
     ]
     for nombre, vars_ in grupos:
         faltan = [v for v in vars_ if not os.getenv(v)]
@@ -68,6 +69,9 @@ def main() -> int:
             print(f"{OK} {nombre}")
         else:
             print(f"{WARN} {nombre}: sin configurar ({', '.join(faltan)}) — esa parte no funcionará")
+
+    if _set("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID") and os.getenv("JARVIS_VOZ_ELEVENLABS") != "1":
+        print(f"{WARN}  ElevenLabs configurado pero JARVIS_VOZ_ELEVENLABS no vale 1 — /voz/token responderá 503")
 
     print(f"\nCORS: {os.getenv('CORS_ORIGINS', '(default: localhost + dominio de Mikel — pon el tuyo)')}")
     print(f"Calendario de clases: {os.getenv('CLASSES_CALENDAR', 'clases')}")

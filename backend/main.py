@@ -1,11 +1,12 @@
 ﻿from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Optional, Literal
 from jose import JWTError, jwt
 from openai import OpenAI
 import msal
@@ -25,6 +26,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from urllib.parse import quote, urlsplit, urljoin, parse_qs
+from types import SimpleNamespace
 import html as html_mod
 import ipaddress
 import socket
@@ -336,6 +338,12 @@ JARVIS_MAX_TOKENS    = int(os.getenv("JARVIS_MAX_TOKENS", "400"))
 # en escucharse, y por el altavoz no se puede saltar líneas: en una conversación hablada
 # la respuesta larga no es generosidad, es que no te dejan hablar.
 JARVIS_MAX_TOKENS_VOZ = int(os.getenv("JARVIS_MAX_TOKENS_VOZ", "160"))
+# Y por voz se salta el reparto de dos modelos: se abre directamente con el grande. El
+# relevo cuesta una llamada entera al modelo, que por escrito no se nota (sigue saliendo
+# todo de golpe) pero hablando son un par de segundos de silencio ANTES de la primera
+# sílaba, justo lo que se viene a quitar. Se paga algo más por turno a cambio de eso.
+# Ver docs/JARVIS_VOZ.md. Con 0 vuelve el reparto también en las llamadas.
+JARVIS_VOZ_MODELO_DIRECTO = os.getenv("JARVIS_VOZ_MODELO_DIRECTO", "1") == "1"
 # Y sitio para PENSAR, aparte del techo de la respuesta. Los modelos de razonamiento
 # (JARVIS_MODEL_ACCION es uno) cobran su techo contra la SUMA de lo que piensan y lo que
 # dicen, así que el techo de arriba —que existe para que no se enrolle— se lo gastaban
@@ -11639,22 +11647,22 @@ class JarvisEjecutarIn(BaseModel):
     argumentos:  dict = {}
 
 
-@app.post("/jarvis")
-def jarvis(
-    body: JarvisIn,
-    request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
-):
-    """Un turno de conversación.
+def _jarvis_turno(body: JarvisIn):
+    """Un turno de conversación, como GENERADOR de eventos `(tipo, datos)`.
 
     El historial lo guarda el cliente y viaja en cada petición: el backend no almacena
     conversaciones. Es menos estado que mantener y, sobre todo, no hay nada que purgar el
     día que quieras borrarlas — el mismo criterio que con el histórico de presencia.
-    """
-    # Cada turno son una o varias llamadas de pago: va con el limitador genérico por IP,
-    # igual que /ideas/audio.
-    _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
 
+    Es un generador y no una función normal porque hay DOS clientes con necesidades
+    distintas y un solo bucle: `/jarvis` se lo bebe entero y devuelve el resultado, y
+    `/jarvis/voz` va retransmitiendo por el camino. Duplicar el bucle para eso habría
+    sido garantizar que los dos se separan en cuanto alguien toque uno.
+
+    Eventos: `("herramienta", {...})` justo antes de usar cada una —lo que permite
+    hablar mientras se trabaja— y `("fin", {...})` con el resultado del turno, que es
+    siempre el último y siempre llega.
+    """
     mensaje = body.mensaje.strip()
     if not mensaje:
         raise HTTPException(status_code=400, detail="El mensaje está vacío")
@@ -11681,6 +11689,12 @@ def jarvis(
     pendiente = None
     # Abre el pequeño. Si hay que actuar, el grande toma el relevo para el resto del bucle.
     modelo    = JARVIS_MODEL
+    # `reparto` es "todavía puede entrar el relevo del grande". Importa más allá del
+    # relevo en sí: mientras esté puesto, lo que diga el modelo puede acabar en la basura,
+    # y por voz eso significa que NO se puede ir diciendo según sale.
+    reparto   = JARVIS_MODEL_ACCION != JARVIS_MODEL
+    if voz and reparto and JARVIS_VOZ_MODELO_DIRECTO:
+        modelo, reparto = JARVIS_MODEL_ACCION, False
 
     def _pensar(modelo_usado, con_herramientas=True, techo_usado=None):
         """Una llamada al modelo. Devuelve (mensaje, motivo de parada).
@@ -11697,6 +11711,106 @@ def jarvis(
             **_parametros_modelo(modelo_usado, techo_usado or techo),
         ).choices[0]
         return eleccion.message, str(getattr(eleccion, "finish_reason", "") or "")
+
+    # Lo que ya ha salido por el altavoz de la ÚLTIMA llamada al modelo, para que el
+    # evento de cierre pueda decir qué queda por decir y no se repita la respuesta entera.
+    hablado = []
+
+    def _pensar_hablando(modelo_usado, con_herramientas=True, techo_usado=None):
+        """Como `_pensar`, pero retransmitiendo: generador que va soltando
+        `("texto", {"delta": …})` según el modelo escribe y DEVUELVE `(mensaje, motivo)`.
+
+        Es lo que quita los dos segundos de silencio del arranque de cada respuesta. Sin
+        esto la síntesis no empieza hasta que el modelo ha terminado de escribir y los dos
+        tiempos se SUMAN; con esto corren a la vez y se oye la primera frase mientras se
+        redacta la segunda.
+
+        Lo delicado no es el texto, es lo otro: por streaming las `tool_calls` llegan
+        partidas —el nombre en un trozo, los argumentos en cinco, y sin `id` salvo en el
+        primero— y no se pueden despachar hasta tenerlas enteras. Se juntan por `index`,
+        que es lo único que las identifica mientras van llegando.
+        """
+        extra    = {"tools": esquema} if con_herramientas else {}
+        partidas = {}
+        trozos   = []
+        motivo   = ""
+        hablado.clear()
+        try:
+            flujo = cliente.chat.completions.create(
+                model=modelo_usado,
+                messages=mensajes,
+                stream=True,
+                **extra,
+                **_parametros_modelo(modelo_usado, techo_usado or techo),
+            )
+        except Exception as e:   # noqa: BLE001 — sin streaming se contesta igual, más tarde
+            # No todo modelo deja retransmitir: OpenAI exige tener la organización
+            # verificada para hacerlo con la familia gpt-5, y JARVIS_MODEL_ACCION es una
+            # de ellas. Sin esta red, una cuenta sin verificar se quedaría sin modo
+            # llamada entero por un permiso — y el error saldría como "se ha roto el
+            # turno", que no apunta a ningún sitio. Así se pierde el adelanto de la
+            # primera frase y nada más. Si esto aparece en el registro a diario, o se
+            # verifica la cuenta o se baja JARVIS_MODEL_ACCION a un modelo que lo permita.
+            logger.warning("Jarvis por voz: %s no retransmite (%s); se pide de una pieza",
+                           modelo_usado, e)
+            return _pensar(modelo_usado, con_herramientas, techo_usado)
+        for parte in flujo:
+            eleccion = (getattr(parte, "choices", None) or [None])[0]
+            if eleccion is None:
+                continue
+            # El motivo llega en el último trozo y solo en él: los demás vienen a `None`,
+            # así que se guarda el último que diga algo, no el último a secas.
+            motivo = str(getattr(eleccion, "finish_reason", "") or "") or motivo
+            delta  = getattr(eleccion, "delta", None)
+            if delta is None:
+                continue
+            for llamada in (getattr(delta, "tool_calls", None) or []):
+                acumulada = partidas.setdefault(
+                    getattr(llamada, "index", 0) or 0,
+                    {"id": "", "nombre": "", "argumentos": ""},
+                )
+                if getattr(llamada, "id", ""):
+                    acumulada["id"] = llamada.id
+                funcion = getattr(llamada, "function", None)
+                if getattr(funcion, "name", ""):
+                    acumulada["nombre"] += funcion.name
+                if getattr(funcion, "arguments", ""):
+                    acumulada["argumentos"] += funcion.arguments
+            texto = getattr(delta, "content", "") or ""
+            if texto:
+                trozos.append(texto)
+                hablado.append(texto)
+                # Se manda tal cual, sin trocear: dónde se corta una frase para que suene
+                # bien lo decide el navegador (`trocearParaVoz`), que es el que sabe qué
+                # lleva dicho y qué tiene todavía en la cola.
+                yield ("texto", {"delta": texto})
+        # Una entrada sin nombre es una herramienta que se quedó a medias por el camino:
+        # despacharla sería inventarse cuál. Se tira, y el turno sigue como si el modelo
+        # no la hubiera pedido.
+        llamadas = [
+            SimpleNamespace(
+                id=trozo["id"] or f"call-{indice}",
+                type="function",
+                function=SimpleNamespace(name=trozo["nombre"], arguments=trozo["argumentos"]),
+            )
+            for indice, trozo in sorted(partidas.items()) if trozo["nombre"]
+        ]
+        return SimpleNamespace(content="".join(trozos), tool_calls=llamadas), motivo
+
+    def _por_decir(texto):
+        """Lo que queda por decir de la respuesta: lo que no haya salido ya por el altavoz.
+
+        Casi siempre es cadena vacía —la respuesta se fue diciendo mientras se escribía—,
+        pero no siempre, y ese es justo el caso que hay que cubrir: cuando el modelo acaba
+        sin decir nada, `_texto_garantizado` pone OTRO texto en su lugar que no se ha
+        dicho, y sin esto el turno terminaría mudo con una respuesta escrita en pantalla.
+        """
+        dicho = "".join(hablado).strip()
+        if not dicho:
+            return texto
+        if texto.startswith(dicho):
+            return texto[len(dicho):].lstrip()
+        return texto
 
     def _texto_garantizado(texto, motivo, modelo_usado):
         """Un turno NUNCA sale vacío.
@@ -11746,10 +11860,27 @@ def jarvis(
         turnos = [{"rol": t.rol, "texto": t.texto} for t in body.historial[-JARVIS_MAX_HISTORIAL:]]
         turnos += [{"rol": "user", "texto": mensaje}, {"rol": "assistant", "texto": texto}]
         _quizas_destilar(cliente, turnos)
-        return {"respuesta": texto, "herramientas": usadas, "pendiente": pendiente_}
+        cierre = {"respuesta": texto, "herramientas": usadas, "pendiente": pendiente_}
+        if voz:
+            # Solo por voz: por escrito no significa nada, y no hay motivo para que el
+            # chat reciba un campo que no va a mirar.
+            cierre["por_decir"] = _por_decir(texto)
+        return cierre
+
+    def _vuelta(modelo_usado, con_herramientas=True):
+        """La llamada al modelo de esta vuelta, retransmitida o no.
+
+        Se retransmite solo si es voz Y ya no puede entrar el relevo del grande: con el
+        relevo en juego, lo que dijera el pequeño se descarta sin ejecutarse, así que
+        decirlo en voz alta sería hablar por hablar y contradecirse dos segundos después.
+        """
+        if voz and not reparto:
+            resultado = yield from _pensar_hablando(modelo_usado, con_herramientas)
+            return resultado
+        return _pensar(modelo_usado, con_herramientas)
 
     for _ in range(JARVIS_MAX_VUELTAS):
-        salida, motivo = _pensar(modelo)
+        salida, motivo = yield from _vuelta(modelo)
         llamadas = salida.tool_calls or []
 
         # El pequeño solo decide SI toca herramienta, que es lo que sabe hacer bien.
@@ -11765,14 +11896,14 @@ def jarvis(
         # justo de lo que SÍ es capaz, y lo dijo sin mirar una sola herramienta. Negarse
         # es la única respuesta que no puede darse sin haberla comprobado, así que la
         # revisa el grande. Solo cuesta una llamada de más cuando aparece un «no».
-        if modelo == JARVIS_MODEL and JARVIS_MODEL_ACCION != JARVIS_MODEL and (
-                llamadas or _suena_a_negativa(salida.content)):
-            modelo         = JARVIS_MODEL_ACCION
-            salida, motivo = _pensar(modelo)
-            llamadas       = salida.tool_calls or []
+        if reparto and (llamadas or _suena_a_negativa(salida.content)):
+            modelo, reparto = JARVIS_MODEL_ACCION, False
+            salida, motivo  = yield from _vuelta(modelo)
+            llamadas        = salida.tool_calls or []
 
         if not llamadas:
-            return _responder((salida.content or "").strip(), None, motivo, modelo)
+            yield ("fin", _responder((salida.content or "").strip(), None, motivo, modelo))
+            return
 
         mensajes.append({
             "role":       "assistant",
@@ -11807,6 +11938,12 @@ def jarvis(
                               "en futuro, como algo que harás si lo aprueba.",
                 }
             else:
+                # Antes de trabajar, no después: es lo único que hay que decir mientras
+                # una herramienta tarda. Ver _relleno_herramienta.
+                yield ("herramienta", {
+                    "nombre": c.function.name,
+                    "decir":  _relleno_herramienta(c.function.name),
+                })
                 resultado = _jarvis_despachar(c.function.name, argumentos)
                 usadas.append(c.function.name)
                 # Un error que trae su arreglo dentro (`buscar_en_internet` sin clave de
@@ -11844,8 +11981,37 @@ def jarvis(
     # Cierre sin herramientas: o hay algo pendiente de confirmar, o se agotaron las
     # vueltas. En ambos casos toca redactar la respuesta con lo que ya se sabe — y para
     # redactar con los datos delante basta el pequeño, que además contesta antes.
-    cierre, motivo = _pensar(JARVIS_MODEL, con_herramientas=False)
-    return _responder((cierre.content or "").strip(), pendiente, motivo, JARVIS_MODEL)
+    cierre, motivo = yield from _vuelta(JARVIS_MODEL, con_herramientas=False)
+    yield ("fin", _responder((cierre.content or "").strip(), pendiente, motivo, JARVIS_MODEL))
+
+
+def _jarvis_resultado(body: JarvisIn):
+    """Bebe el generador entero y devuelve el resultado del turno.
+
+    El evento `fin` es siempre el último y siempre llega, pero si algún día no llegara,
+    quedarse sin nada que decir es justo lo que _texto_garantizado existe para evitar.
+    """
+    resultado = None
+    for tipo, datos in _jarvis_turno(body):
+        if tipo == "fin":
+            resultado = datos
+    if resultado is None:
+        logger.error("Jarvis: el turno terminó sin evento de cierre")
+        raise HTTPException(status_code=502, detail="El turno no ha llegado a terminar")
+    return resultado
+
+
+@app.post("/jarvis")
+def jarvis(
+    body: JarvisIn,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Un turno de conversación, de una pieza. Ver _jarvis_turno."""
+    # Cada turno son una o varias llamadas de pago: va con el limitador genérico por IP,
+    # igual que /ideas/audio.
+    _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
+    return _jarvis_resultado(body)
 
 
 @app.post("/jarvis/ejecutar")
@@ -11869,3 +12035,193 @@ def jarvis_ejecutar(
         raise HTTPException(status_code=400, detail="Esa acción no se confirma por aquí")
     resultado = _jarvis_despachar(body.herramienta, body.argumentos)
     return {"ok": bool(resultado.get("ok")), "resultado": resultado}
+# ── Jarvis: voz en tiempo real (ElevenLabs) ───────────────────────────────────
+# El navegador habla DIRECTAMENTE con ElevenLabs; el backend solo emite el permiso.
+# La alternativa —proxiar el audio por aquí— metía un salto a París en cada trozo de
+# sonido y obligaba a dejar una máquina siempre encendida (`min_machines_running = 1`),
+# porque el arranque en frío de 10–15 s caería justo en la primera palabra de cada
+# llamada. Ver docs/JARVIS_VOZ.md.
+#
+# Lo que hace posible eso sin exponer la clave es el token de un solo uso: se pide con
+# la clave desde el servidor, vale 15 minutos, se consume al abrir el WebSocket y no
+# sirve para nada más. La clave NUNCA sale de aquí — en particular, nunca como variable
+# VITE_*, que acabaría en el bundle público de Vercel.
+ELEVENLABS_API_KEY   = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID  = os.getenv("ELEVENLABS_VOICE_ID", "")
+ELEVENLABS_MODEL     = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+ELEVENLABS_STT_MODEL = os.getenv("ELEVENLABS_STT_MODEL", "scribe_v2_realtime")
+# El formato es configurable a propósito, no una constante. PCM es lo que permite cortar
+# a Jarvis al instante (entra como cola de buffers en un AudioContext y cortar es vaciar
+# la cola), pero los formatos PCM están restringidos por plan. Con MP3 todo funciona
+# igual salvo que al interrumpir queda una coleta de audio. El valor por defecto es el
+# que admite cualquier plan; súbelo a `pcm_24000` cuando la cuenta lo permita.
+ELEVENLABS_FORMATO   = os.getenv("ELEVENLABS_FORMATO", "mp3_44100_128")
+# Interruptor general. Apagado por defecto: sin esto encendido el frontend se queda con
+# el modo llamada actual (Web Speech del navegador, gratis).
+JARVIS_VOZ_ELEVENLABS = os.getenv("JARVIS_VOZ_ELEVENLABS", "0") == "1"
+# El STT cobra MICRÓFONO ABIERTO, no palabras dichas. Una llamada olvidada abierta es
+# dinero corriendo sin que nadie hable.
+JARVIS_VOZ_MAX_MINUTOS = int(os.getenv("JARVIS_VOZ_MAX_MINUTOS", "20"))
+# Limitador genérico por IP, como /ideas/audio y /jarvis: cada token emitido es una
+# sesión de pago potencial.
+VOZ_TOKEN_MAX_REQUESTS   = int(os.getenv("VOZ_TOKEN_MAX_REQUESTS", "60"))
+VOZ_TOKEN_WINDOW_SECONDS = int(os.getenv("VOZ_TOKEN_WINDOW_SECONDS", "300"))
+
+# Los dos únicos tipos que necesita el modo llamada: uno para el WebSocket de síntesis y
+# otro para el de transcripción en directo. Se valida como Literal y no se interpola un
+# valor libre en la URL de salida.
+VOZ_TIPOS = ("tts_websocket", "realtime_scribe")
+
+
+class VozTokenIn(BaseModel):
+    tipo: Literal["tts_websocket", "realtime_scribe"]
+
+
+def _eleven_token(tipo: str) -> str:
+    """Pide a ElevenLabs un token de un solo uso. Devuelve el token o lanza HTTPException.
+
+    El token no se registra en ningún sitio —ni en `logger` ni en `app_logs`—: es una
+    credencial viva durante 15 minutos.
+    """
+    r = http.post(
+        f"https://api.elevenlabs.io/v1/single-use-token/{quote(tipo, safe='')}",
+        headers={"xi-api-key": ELEVENLABS_API_KEY},
+    )
+    if r.status_code >= 400:
+        # El cuerpo del error sí es seguro de registrar (dice el tipo de fallo y el
+        # request_id, no la clave), pero al cliente le va un 502 genérico.
+        logger.error("ElevenLabs %s: %s %s", tipo, r.status_code, r.text[:300])
+        raise HTTPException(status_code=502, detail="ElevenLabs no ha dado el permiso de voz")
+    token = (r.json() or {}).get("token") or ""
+    if not token:
+        logger.error("ElevenLabs %s: respuesta sin token", tipo)
+        raise HTTPException(status_code=502, detail="ElevenLabs no ha dado el permiso de voz")
+    return token
+
+
+@app.post("/voz/token")
+def voz_token(
+    body: VozTokenIn,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Emite el permiso para que el navegador abra un WebSocket con ElevenLabs.
+
+    Endpoint de USUARIO (`verify_token`), no de servicio: lo llama el dashboard con el
+    JWT de la sesión. Nada que arranque solo necesita voz.
+    """
+    _check_rate("voz_token", _client_ip(request), VOZ_TOKEN_MAX_REQUESTS, VOZ_TOKEN_WINDOW_SECONDS)
+    # 503 y no 500: no es un fallo, es que la voz de pago no está configurada. El
+    # frontend lo lee y se queda con el modo llamada gratuito en vez de romperse.
+    if not (JARVIS_VOZ_ELEVENLABS and ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID):
+        raise HTTPException(status_code=503, detail="La voz de ElevenLabs no está configurada")
+    return {
+        "token":      _eleven_token(body.tipo),
+        "expira_en":  900,
+        "voice_id":   ELEVENLABS_VOICE_ID,
+        "model_id":   ELEVENLABS_MODEL if body.tipo == "tts_websocket" else ELEVENLABS_STT_MODEL,
+        "formato":    ELEVENLABS_FORMATO,
+        "max_minutos": JARVIS_VOZ_MAX_MINUTOS,
+    }
+# Lo que Jarvis dice EN VOZ ALTA mientras una herramienta trabaja.
+#
+# Por escrito no hace falta: ves el indicador de "pensando" y esperas. Hablando, el
+# silencio es el problema — preguntas por la agenda y se quedan diez segundos mudos, que
+# por teléfono es una eternidad y hace que repitas la pregunta encima. El bucle no puede
+# resolverlo solo: mientras da vueltas de herramientas el modelo NO emite texto, solo
+# `tool_calls`, así que no hay nada que ir diciendo.
+#
+# Son frases FIJAS y escritas a mano, no generadas: pedirle una a un modelo costaría otra
+# llamada justo donde sobra latencia, que es exactamente el problema que vienen a
+# arreglar. Van sin puntos suspensivos porque el TTS los alarga de forma rara.
+_JARVIS_RELLENOS = {
+    "agenda":             "Déjame mirar el calendario.",
+    "crear_evento":       "Voy con el calendario.",
+    "editar_evento":      "Voy con el calendario.",
+    "borrar_evento":      "Voy con el calendario.",
+    "clima":              "Miro el tiempo.",
+    "salud":              "Miro tus datos de salud.",
+    "sueno":              "Miro cómo has dormido.",
+    "entrenamiento":      "Miro lo del entrenamiento.",
+    "finanzas":           "Miro la cartera.",
+    "donde_estoy":        "A ver dónde estás.",
+    "ideas":              "Miro tus ideas.",
+    "guardar_idea":       "Te la apunto.",
+    "buscar_en_internet": "Lo busco.",
+    "leer_pagina":        "Abro la página.",
+    "recordar":           "Lo guardo en la memoria.",
+    "recordarme":         "Te lo apunto.",
+    "mis_recordatorios":  "Miro qué tienes apuntado.",
+    "estado_pc":          "Miro cómo está el ordenador.",
+    "encender_pc":        "Enciendo el ordenador.",
+    "casa_dispositivos":  "Miro la casa.",
+    "casa_ordenar":       "Voy con la casa.",
+    "errores":            "Miro el registro.",
+    "jobs":               "Miro la cola.",
+    "mcp_usar":           "Lo consulto.",
+}
+# El de por defecto tiene que valer para CUALQUIER herramienta, incluidas las que se
+# conecten por MCP después de escribir esto. Por eso no dice qué va a mirar.
+_JARVIS_RELLENO_GENERICO = "Dame un segundo."
+
+
+def _relleno_herramienta(nombre: str) -> str:
+    return _JARVIS_RELLENOS.get(nombre, _JARVIS_RELLENO_GENERICO)
+
+
+def _sse(tipo: str, datos: dict) -> str:
+    """Un evento en formato Server-Sent Events.
+
+    La línea en blanco del final no es estética: es lo que marca el fin del evento. Sin
+    ella el cliente se queda esperando a que termine uno que ya está entero.
+    """
+    return f"event: {tipo}\ndata: {json.dumps(datos, ensure_ascii=False, default=str)}\n\n"
+
+
+@app.post("/jarvis/voz")
+def jarvis_voz(
+    body: JarvisIn,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """El mismo turno que `/jarvis`, pero retransmitido según ocurre.
+
+    SSE y no WebSocket porque solo hace falta un sentido —el cliente ya mandó todo lo que
+    tenía que decir en el cuerpo— y porque cabe en un `def` normal: `main.py` no usa
+    asyncio en ninguna parte y no es aquí donde conviene empezar.
+
+    Se consume con `fetch` + `response.body.getReader()`, no con `EventSource`: éste no
+    admite ni POST ni cabecera `Authorization`, y meter el JWT en la query string lo
+    dejaría en los logs de URLs.
+
+    `/jarvis` sigue existiendo y es lo que usa el chat escrito. Esto es un añadido, no un
+    sustituto: si algo falla aquí, el cliente se vuelve al otro.
+    """
+    _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
+    if not body.mensaje.strip():
+        raise HTTPException(status_code=400, detail="El mensaje está vacío")
+    # Por voz se escucha, no se lee: frases cortas y sin markdown. Lo pide el endpoint y
+    # no el cliente — que este endpoint sirva texto de leer no tendría sentido.
+    turno = body.model_copy(update={"voz": True})
+
+    def eventos():
+        # Una vez empieza el stream ya se mandó el 200: un fallo a partir de aquí no
+        # puede ser un código de estado, tiene que ser un evento. Sin esto el cliente se
+        # queda con la conexión cortada a media frase y sin saber por qué.
+        try:
+            for tipo, datos in _jarvis_turno(turno):
+                yield _sse(tipo, datos)
+        except HTTPException as e:
+            yield _sse("error", {"detalle": str(e.detail)})
+        except Exception as e:   # noqa: BLE001 — al cliente hay que decirle algo siempre
+            logger.exception("Jarvis por voz: el turno se rompió: %s", e)
+            yield _sse("error", {"detalle": "Se ha roto el turno. Vuelve a pedírmelo."})
+
+    return StreamingResponse(
+        eventos(),
+        media_type="text/event-stream",
+        # `X-Accel-Buffering` es para los proxys que acumulan la respuesta antes de
+        # mandarla: con ella puesta, el streaming deja de serlo y llega todo de golpe al
+        # final, que es justo lo contrario de lo que se busca.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

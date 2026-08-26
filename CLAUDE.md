@@ -121,6 +121,8 @@ Ficheros clave:
 |---|---|
 | `src/components/Dashboard.jsx` | TODA la UI (~4.800 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
+| `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
+| `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
@@ -145,6 +147,8 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BACKEND_PATRONES.md` | **Antes de tocar `backend/main.py`.** El núcleo: cliente HTTP saliente, ideas, zonas horarias, tokens de Graph, cola de jobs, ingesta de salud, flags del PC, presencia, clima, consultas en paralelo y registro persistente |
 | `docs/BRIEF.md` | El resumen diario por correo y el informe semanal: qué va dentro, cuándo sale, la idempotencia y el interruptor |
 | `docs/JARVIS.md` | Jarvis (herramientas, confirmación, memoria, MCP, web, la casa) y todo lo proactivo: recordatorios, avisos al móvil, reglas, vigilancias, correo entrante y los vigilantes |
+| `docs/JARVIS_VOZ.md` | **En curso — léelo entero antes de tocar la voz.** Jarvis ya habla con ElevenLabs, avisa antes de usar cada herramienta y empieza a hablar mientras escribe; falta todo el micrófono (interrumpirle). Empieza por su sección «Dónde retomar». Plan para darle a Jarvis la voz de ElevenLabs con interrupciones y respuesta hablada mientras genera: decisiones, qué se toca, fases, coste y qué queda por resolver |
+| `docs/JARVIS_real_time_voice_stack.md` | El diseño conceptual de la voz en tiempo real, sin atarlo a este repositorio. Lo aterrizado está en `docs/JARVIS_VOZ.md` |
 | `docs/BACKEND_REFERENCIA.md` | Referencia de endpoints (ruta → auth → qué hace) y catálogo de variables de entorno |
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
