@@ -15,6 +15,8 @@ import {
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
 } from "../lib/helpers";
+import { partirEventosSse, trocearParaVoz } from "../lib/voz";
+import { abrirVozEleven } from "../lib/vozEleven";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
 const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
@@ -310,14 +312,30 @@ const VOZ_SINTESIS = typeof window !== "undefined" && "speechSynthesis" in windo
   ? window.speechSynthesis
   : null;
 
+// La voz de pago, cuando la hay. Es una variable de módulo y no estado de React a
+// propósito: `hablarJarvis` se llama desde callbacks del reconocimiento que nacieron
+// hace varios renders, y leer estado desde ahí es justo el bug que el `cicloRef` de más
+// abajo existe para evitar. Vale `null` mientras no haya llamada abierta con ElevenLabs
+// configurado, que es el caso por defecto.
+let vozDePago = null;
+
 /** Lee la respuesta en voz alta. `alTerminar` se llama SIEMPRE, hable o no: el modo
  *  llamada encadena la escucha con él, y un camino que no avisara dejaría la llamada
- *  colgada en silencio esperando a alguien que ya no va a hablar. */
-function hablarJarvis(texto, alTerminar) {
+ *  colgada en silencio esperando a alguien que ya no va a hablar.
+ *
+ *  Con `encolar` se pone a la cola en vez de cortar lo que esté sonando. Lo necesita el
+ *  texto que llega a trozos mientras el modelo escribe: son frases seguidas de la MISMA
+ *  respuesta, y si cada una cortase a la anterior solo se oiría la última. */
+function hablarJarvis(texto, alTerminar, { encolar = false } = {}) {
   const fin = () => { try { alTerminar?.(); } catch { /* mejor esfuerzo */ } };
+  // La voz de pago encola siempre por su cuenta (ver `decir` en vozEleven.js): cortar es
+  // trabajo de `callar`, que es cosa del barge-in.
+  if (vozDePago) { vozDePago.decir(texto, fin); return; }
   if (!VOZ_SINTESIS) { fin(); return; }
   try {
-    VOZ_SINTESIS.cancel();   // una respuesta nueva corta a la anterior a media frase
+    // Una respuesta NUEVA corta a la anterior a media frase; un trozo más de la misma
+    // respuesta, no.
+    if (!encolar) VOZ_SINTESIS.cancel();
     const dicho = textoHablable(texto);
     if (!dicho) { fin(); return; }
     const u = new SpeechSynthesisUtterance(dicho);
@@ -330,6 +348,31 @@ function hablarJarvis(texto, alTerminar) {
     u.onerror = fin;
     VOZ_SINTESIS.speak(u);
   } catch { fin(); }
+}
+
+/** Lee un stream SSE y va llamando a `alEvento(tipo, datos)` según llegan.
+ *
+ *  Con `fetch` y no con `EventSource` porque éste no admite ni POST ni cabecera
+ *  `Authorization`, y meter el JWT en la query string lo dejaría escrito en los logs de
+ *  URLs del servidor. */
+async function leerEventos(respuesta, alEvento) {
+  const lector = respuesta.body?.getReader();
+  if (!lector) return;
+  const utf8 = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await lector.read();
+    if (done) break;
+    // `stream: true` es lo que evita que un carácter acentuado partido entre dos
+    // lecturas se convierta en basura: sin él, "mañana" a caballo de dos trozos sale
+    // roto y además se dice roto.
+    buffer += utf8.decode(value, { stream: true });
+    const { eventos, resto } = partirEventosSse(buffer);
+    buffer = resto;
+    for (const [tipo, datos] of eventos) {
+      try { alEvento(tipo, datos); } catch { /* un evento no puede tumbar el turno */ }
+    }
+  }
 }
 
 // Saca el motivo real de una respuesta de error de /jarvis. El detalle de FastAPI
@@ -1889,6 +1932,10 @@ export default function Dashboard() {
     vozTurnoRef.current++;          // invalida los callbacks de voz que estén en vuelo
     pararEscucha();
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+    // Cerrar, no solo callar: el socket abierto seguiría vivo y el AudioContext también.
+    // Y el token ya está gastado, así que no sirve de nada guardárselo.
+    try { vozDePago?.cerrar(); } catch { /* mejor esfuerzo */ }
+    vozDePago = null;
     setJarvisLlamada(false);
     setJarvisParcial("");
     if (aviso) setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: aviso }]);
@@ -1959,23 +2006,164 @@ export default function Dashboard() {
     } catch { /* start() sobre uno que ya arrancó: lo reabre onend */ }
   }
 
+  /** Un turno de llamada, retransmitido.
+   *
+   *  Va contra `/jarvis/voz` y no contra `/jarvis` porque el silencio mientras Jarvis
+   *  trabaja es el problema que más se nota por teléfono: una pregunta que toca el
+   *  calendario son cinco segundos de nada. Este endpoint avisa antes de usar cada
+   *  herramienta y con eso se dice en voz alta "déjame mirar el calendario" mientras el
+   *  turno sigue su curso. Lo demás —historial, mensajes, errores— funciona igual.
+   *
+   *  Y la respuesta se va diciendo SEGÚN SE ESCRIBE: los trozos llegan por el evento
+   *  `texto` y se mandan al sintetizador sin esperar al final del turno. Es lo que hace
+   *  que hablar y pensar dejen de sumarse — antes la síntesis no arrancaba hasta que el
+   *  modelo había terminado, y eran dos segundos largos de silencio en cada respuesta.
+   */
   async function turnoDeLlamada(dicho) {
     setJarvisFase("pensando");
-    const respuesta = await enviarAJarvis(dicho, { voz: true });
-    if (!llamadaRef.current) return;            // han colgado mientras pensaba
-    if (!respuesta) { cicloRef.current.escuchar?.(); return; }
-    setJarvisFase("hablando");
-    hablandoRef.current = true;
+    const historial = jarvisHistorial(jarvisMensajes);
+    setJarvisMensajes(prev => [...prev, { rol: "user", texto: dicho }]);
+    setJarvisPensando(true);
     const miTurno = ++vozTurnoRef.current;
-    hablarJarvis(respuesta, () => {
-      if (vozTurnoRef.current !== miTurno) return;
+    hablandoRef.current = true;
+
+    // Se llama SIEMPRE, salga bien o mal: el ciclo de la llamada encadena la escucha con
+    // esto, y cualquier camino que no pase por aquí deja la llamada muda para siempre.
+    const seguir = () => {
+      if (vozTurnoRef.current !== miTurno || !llamadaRef.current) return;
       hablandoRef.current = false;
       cicloRef.current.escuchar?.();
-    });
+    };
+
+    try {
+      const r = await apiFetch(`${API}/jarvis/voz`, {
+        method:  "POST",
+        headers: jsonHeaders(),
+        body:    JSON.stringify({ mensaje: dicho, historial, voz: true }),
+      });
+      if (!r.ok) throw await motivoJarvis(r);
+      setJarvisFase("hablando");
+
+      // El texto del modelo llega a chorros irregulares —a veces media palabra— y eso no
+      // es una frase decible: `trocearParaVoz` decide dónde se corta para que suene a
+      // persona, y lo que no da todavía para un trozo digno se queda aquí esperando.
+      let porTrocear = "";
+      // Trozos mandados a hablar y todavía sin terminar. Solo cuando se vacíe la cola y
+      // el turno haya cerrado toca volver a escuchar: encadenar la escucha con el primer
+      // trozo dejaría a Jarvis oyéndose a sí mismo decir el resto.
+      let sonando    = 0;
+      let cerrado    = false;
+      let seguido    = false;
+
+      const escucharSiTocaYa = () => {
+        if (seguido || !cerrado || sonando > 0) return;
+        seguido = true;
+        seguir();
+      };
+      const decirTrozos = (trozos) => {
+        for (const trozo of trozos) {
+          sonando++;
+          hablarJarvis(trozo, () => { sonando--; escucharSiTocaYa(); }, { encolar: true });
+        }
+      };
+
+      await leerEventos(r, (tipo, datos) => {
+        if (vozTurnoRef.current !== miTurno) return;
+        // Lo que se dice mientras trabaja. No espera a nada ni encadena la escucha: es
+        // relleno, no la respuesta. Encolado, para que no corte lo que Jarvis ya iba
+        // diciendo antes de ponerse a mirar nada.
+        if (tipo === "herramienta" && datos.decir) hablarJarvis(datos.decir, null, { encolar: true });
+        if (tipo === "texto") {
+          porTrocear += datos.delta || "";
+          const { trozos, resto } = trocearParaVoz(porTrocear);
+          porTrocear = resto;
+          decirTrozos(trozos);
+        }
+        if (tipo === "error") {
+          setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: datos.detalle || jarvisMotivoError(0) }]);
+        }
+        if (tipo === "fin") {
+          setJarvisMensajes(prev => [...prev, {
+            rol:          "assistant",
+            texto:        datos.respuesta || "(sin respuesta)",
+            herramientas: datos.herramientas || [],
+          }]);
+          setJarvisPendiente(datos.pendiente || null);
+          // `por_decir` es lo que el backend sabe que NO ha salido ya por el altavoz:
+          // vacío cuando la respuesta se fue diciendo mientras se escribía, y la
+          // respuesta entera cuando no hubo deltas (el modelo se quedó mudo y el backend
+          // puso otro texto en su lugar). Decir `respuesta` a secas la repetiría entera.
+          const queda = datos.por_decir ?? datos.respuesta ?? "";
+          decirTrozos(trocearParaVoz(porTrocear + queda, { fin: true }).trozos);
+          porTrocear = "";
+          cerrado    = true;
+          escucharSiTocaYa();   // por si no quedaba nada que decir
+        }
+      });
+      // El stream se cortó sin evento de cierre (red caída a media respuesta): nadie iba
+      // a encadenar la escucha, así que la llamada se quedaría oyendo el silencio.
+      cerrado = true;
+      escucharSiTocaYa();
+    } catch (e) {
+      setJarvisMensajes(prev => [...prev, {
+        rol: "aviso", texto: e?.explicado ? e.message : jarvisMotivoError(0),
+      }]);
+      seguir();
+    } finally {
+      setJarvisPensando(false);
+    }
   }
+
+  // El permiso para hablar con ElevenLabs, pedido POR ADELANTADO. Dos motivos, y los dos
+  // son de latencia: el token dura 15 minutos y se consume al abrir el socket, así que
+  // pedirlo al pulsar "llamar" metería una ida y vuelta antes de la primera palabra; y
+  // como el backend escala a cero, esa ida y vuelta puede ser el arranque en frío de
+  // 10–15 segundos de Fly. Pidiéndolo antes, el backend ya está despierto cuando llamas.
+  const vozPermisoRef = useRef(null);
+
+  async function pedirPermisoVoz() {
+    try {
+      const r = await apiFetch(`${API}/voz/token`, {
+        method:  "POST",
+        headers: jsonHeaders(),
+        body:    JSON.stringify({ tipo: "tts_websocket" }),
+      });
+      // 503 es la respuesta normal cuando la voz de pago no está configurada, que es el
+      // caso por defecto. No es un error: se sigue con la voz del navegador.
+      vozPermisoRef.current = r.ok ? await r.json() : null;
+    } catch { vozPermisoRef.current = null; }
+  }
+
+  useEffect(() => { pedirPermisoVoz(); /* una vez, al montar */ }, []);
 
   function iniciarLlamada() {
     if (!VOZ_NAVEGADOR || !VOZ_SINTESIS || llamadaRef.current) return;
+    // Dentro del gesto y sin `await` de por medio A PROPÓSITO: iOS solo desbloquea el
+    // AudioContext dentro de un toque del usuario, y cualquier espera antes de crearlo
+    // deja la llamada muda en el móvil. Por eso el permiso se pidió por adelantado.
+    const permiso = vozPermisoRef.current;
+    if (permiso) {
+      vozDePago = abrirVozEleven({
+        token:   permiso.token,
+        voiceId: permiso.voice_id,
+        modelId: permiso.model_id,
+        formato: permiso.formato,
+        // ElevenLabs puede terminar un turno sin mandar audio y sin dar ningún error
+        // (una voz de la biblioteca en plan gratuito lo hace). Se renuncia a ella para
+        // el resto de la llamada y se dice lo que quedó pendiente con la del navegador:
+        // una voz robótica es mucho mejor que el silencio.
+        alFallar: (texto, alTerminar) => {
+          vozDePago = null;
+          setJarvisMensajes(prev => [...prev, {
+            rol: "aviso", texto: "La voz de ElevenLabs no ha sonado; sigo con la del navegador.",
+          }]);
+          hablarJarvis(texto, alTerminar);
+        },
+      });
+      // El token se acaba de gastar: se pide el de la siguiente llamada ya.
+      vozPermisoRef.current = null;
+      pedirPermisoVoz();
+    }
     llamadaRef.current     = true;
     hablandoRef.current    = true;
     buferRef.current       = "";
@@ -2013,6 +2201,10 @@ export default function Dashboard() {
     if (silencioRef.current) clearTimeout(silencioRef.current);
     try { recRef.current?.stop(); } catch { /* mejor esfuerzo */ }
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+    // El WebSocket y el AudioContext de ElevenLabs no se cierran solos al desmontar: sin
+    // esto se quedaría un socket abierto por cada vez que entras y sales.
+    try { vozDePago?.cerrar(); } catch { /* mejor esfuerzo */ }
+    vozDePago = null;
   }, []);
 
   // La conversación sobrevive a una recarga, acotada: guardar el hilo entero llenaría

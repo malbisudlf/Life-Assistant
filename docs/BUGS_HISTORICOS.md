@@ -318,5 +318,18 @@
   panel, lo destapó alguien mirando el número y pensando «esto no puede ser» — un
   widget que pinta lo que le den no valida nada, y el score de bienestar llevaba
   regalando los 5 puntos de energía activa (umbral ≥600) todos los días.
+- **Una petición sin cabecera de auth echa al usuario de la sesión entera.** Al cablear
+  la voz de ElevenLabs (agosto de 2026), `pedirPermisoVoz()` llamaba a `/voz/token` con
+  `headers: { "Content-Type": "application/json" }` en vez de `jsonHeaders()`. El
+  síntoma no se parecía en nada a la causa: metías la contraseña, entrabas, y medio
+  segundo después estabas otra vez en la pantalla de login, en bucle. El motivo es que
+  `apiFetch` **borra `la_token` y recarga la página ante cualquier 401**, que es lo
+  correcto cuando la sesión caduca de verdad; una llamada que se olvida las cabeceras
+  entra por ese mismo camino y es indistinguible desde ahí. Y como el permiso se pide en
+  un `useEffect` al montar, se disparaba solo, sin que el usuario tocara nada.
+  La moraleja: **en este frontend, un endpoint nuevo con `Depends(verify_token)` se pide
+  con `jsonHeaders()` o `authHeaders()`, nunca construyendo el objeto a mano**. Y si un
+  fallo de sesión aparece justo después de añadir una llamada, mira los 401 del log del
+  backend antes de sospechar de la contraseña.
 - Doble conteo de entrenos semanales y fugas de detalles de error ya se arreglaron
   en commits anteriores; si tocas bienestar o manejo de errores, revisa el historial.
