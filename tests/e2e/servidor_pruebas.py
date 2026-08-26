@@ -36,6 +36,13 @@ os.environ.setdefault("INDEXA_TOKEN", "indexa-e2e-token")
 # Graph. El valor de la clave no importa: nunca se lee de disco en el E2E.
 os.environ.setdefault("ENABLE_BANKING_APPLICATION_ID", "app-e2e-id")
 os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "e2e-no-se-usa.pem")
+# La voz de Jarvis, encendida: el dashboard pide /voz/token nada más entrar, y con la
+# voz apagada eso es un 503 en la consola del navegador en cada carga — que el E2E
+# cuenta como error, y con razón. Encendida, se ejerce el camino de verdad; la
+# llamada saliente a ElevenLabs la responde el router de abajo, no la red.
+os.environ.setdefault("JARVIS_VOZ_ELEVENLABS", "1")
+os.environ.setdefault("ELEVENLABS_API_KEY", "eleven-e2e-key")
+os.environ.setdefault("ELEVENLABS_VOICE_ID", "voz-e2e")
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el
@@ -207,6 +214,10 @@ class _RouterSimulado:
         ("/me/calendars", lambda: _Respuesta(_CALENDARIOS_GRAPH)),
         ("graph.microsoft.com", lambda: _Respuesta(_EVENTOS_GRAPH)),
         ("api.open-meteo.com", lambda: _Respuesta(_CLIMA)),
+        # El permiso de un solo uso para el WebSocket de voz. El navegador lo pide al
+        # entrar; que sea un token de mentira da igual, porque en el E2E nadie llega a
+        # abrir el socket (no hay micrófono ni altavoz que valgan en Chromium).
+        ("api.elevenlabs.io/v1/single-use-token", lambda: _Respuesta({"token": "sutkn_e2e"})),
         ("indexacapital.com/users/me", lambda: _Respuesta(
             {"accounts": [{"account_number": "E2E12345", "type": "mutual", "status": "active"}]})),
         ("/portfolio", lambda: _Respuesta(_cartera_indexa())),
