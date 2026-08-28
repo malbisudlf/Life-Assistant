@@ -116,7 +116,7 @@ backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 l
                           (POST /ha/presencia, único sentido inverso)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
-agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Sunshine)
+agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Apollo)
 ```
 
 Ficheros clave:

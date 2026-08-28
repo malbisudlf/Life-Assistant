@@ -32,9 +32,9 @@ su log el 2026-08-04: `15:29:16 → 15:29:56` esperando un `Get-Service` hasta a
 timeout, con el job entero tardando **65 s en frío contra 5 s con el PC caliente** —
 los "45 segundos en negro" al lanzar el streaming. Y no era una llamada: la ruta de
 `abrir_streaming` invoca PowerShell media docena de veces (estado del servicio,
-`Start-Service`, los sondeos de confirmación, `sunshine_vivo`).
+`Start-Service`, los sondeos de confirmación, `apollo_vivo`).
 
-Por eso `estado_servicio`, `arrancar_servicio` y `sunshine_vivo` van por `sc.exe` y
+Por eso `estado_servicio`, `arrancar_servicio` y `apollo_vivo` van por `sc.exe` y
 `tasklist.exe` (`_nativo()`), que son binarios de Win32 sin runtime detrás: 23 y 108 ms.
 Dos detalles que no se pueden relajar:
 
@@ -43,7 +43,9 @@ Dos detalles que no se pueden relajar:
   Windows en español — que es exactamente lo que en su día hizo elegir `Get-Service`.
   El número no se traduce, así que sirve para las dos cosas. Lo mismo con `tasklist`:
   su "no hay tareas" está traducido, pero la línea de un proceso encontrado empieza
-  siempre por `"sunshine.exe",` — se busca el nombre **entre comillas**.
+  siempre por `"sunshine.exe",` — se busca el nombre **entre comillas**. (Apollo no
+  renombró el binario de Sunshine, así que el nombre sigue siendo ese; `apollo.exe` se
+  mira también, por si un build futuro lo cambia.)
 - **Cada camino nuevo conserva el de siempre como red de seguridad**: si `sc query` no
   da una respuesta interpretable o `sc start` falla con algo que no sabemos leer, se
   cae a PowerShell antes de darse por vencido. El agente no tiene tests ni puede
@@ -57,24 +59,30 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
 
 ### Acción `abrir_streaming`
 
-- **Levanta la VPN antes de lanzar Sunshine** (`conectar_vpn()`, Tailscale): el PC lo
+- **Levanta la VPN antes de lanzar Apollo** (`conectar_vpn()`, Tailscale): el PC lo
   enciende un WOL sin nadie delante, así que el túnel no está arriba y desde fuera de casa
-  Moonlight no llega. Mismo criterio que con Sunshine: el servicio de Tailscale va en
+  Artemis no llega. Mismo criterio que con Apollo: el servicio de Tailscale va en
   arranque MANUAL para que el PC no tenga la VPN encendida en el día a día, y lo arranca
   el agente (`arrancar_servicio()`, que necesita que la tarea del Programador corra con
   privilegios elevados). El estado del servicio se consulta con `Get-Service`, no con
   `sc query`: este último traduce el estado y en un Windows en español devuelve
   "EN EJECUCIÓN". La IP de la tailnet viaja al modal en el mensaje del stage `vpn_ready`,
   de donde la saca `hostStreaming()` (helpers) — no se guarda en ningún sitio. Un fallo de
-  VPN **no tumba el job**: se reporta `vpn_error` y se abre Sunshine igual, que en la LAN
+  VPN **no tumba el job**: se reporta `vpn_error` y se abre Apollo igual, que en la LAN
   sigue sirviendo.
-- **Sunshine se arranca por su servicio** (`SUNSHINE_SERVICIO`, mismo `arrancar_servicio()`
+- **Apollo se arranca por su servicio** (`APOLLO_SERVICIO`, mismo `arrancar_servicio()`
   que Tailscale), no ejecutando `sunshine.exe`: al agente lo lanza el Programador de tareas
   fuera del escritorio del usuario, y el binario arrancado desde ahí muere al instante. El
   `Popen` del exe queda solo como respaldo para instalaciones sin servicio. Y **el job no
-  se da por hecho sin comprobarlo**: `arrancar_sunshine()` espera hasta `SUNSHINE_TIMEOUT`
-  a ver el proceso vivo (`sunshine_vivo()`) y si no aparece lanza, de modo que el job cae a
+  se da por hecho sin comprobarlo**: `arrancar_apollo()` espera hasta `APOLLO_TIMEOUT`
+  a ver el proceso vivo (`apollo_vivo()`) y si no aparece lanza, de modo que el job cae a
   `failed` en vez de reportar `streaming_ready` sobre un PC sin nada abierto.
+- **El nombre del servicio se resuelve en caliente** (`servicio_streaming()`): sin
+  `APOLLO_SERVICIO` en el `.env` se prueban `ApolloService` y `SunshineService`, en ese
+  orden. Es lo que permite que el mismo agente sirva antes y después de migrar el PC —
+  y por lo mismo `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` siguen aceptando las
+  `SUNSHINE_*` de siempre como respaldo. No quites ese respaldo sin repasar el `.env`
+  del PC: el agente no tiene tests y un fallo suyo se descubre a las 6 de la mañana.
 
 ### Acción `resolver_alud` — notas de Edge, Playwright y Claude Desktop
 

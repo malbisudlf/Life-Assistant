@@ -10,8 +10,8 @@ Flujo:
   1. Mira si hay jobs pendientes. Si no hay nada → se cierra sin más.
   2. Por cada job pendiente, lo reclama y despacha según payload["accion"]:
        - "resolver_alud"   → abre Alud en Edge, extrae el enunciado y lanza Cowork
-       - "abrir_streaming" → conecta la VPN (Tailscale) y lanza Sunshine, para
-                             conectar con Moonlight desde el móvil
+       - "abrir_streaming" → conecta la VPN (Tailscale) y lanza Apollo, para
+                             conectar con Artemis desde el móvil
   3. Cuando no quedan jobs: heartbeat offline y termina.
 
 Añadir una acción nueva = una función + una entrada en el diccionario ACCIONES.
@@ -42,7 +42,7 @@ load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.4.0"
+AGENT_VERSION = "1.5.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
 # Token con el que el agente habla con el backend. AGENT_TOKEN es un token de servicio
@@ -77,40 +77,57 @@ _EDGE_PATHS = [
 ]
 EDGE_EXE = next((p for p in _EDGE_PATHS if os.path.exists(p)), None)
 
-# ── Host de streaming (Sunshine o Apollo) ──────────────────────────────────────
+# ── Host de streaming (Apollo) ────────────────────────────────────────────────
 # NO arranca solo con Windows (su autoarranque se desactiva a propósito): lo ÚNICO
 # residente es este agente, que lo lanza bajo demanda cuando llega un job de
-# streaming. El host es Sunshine; se busca también Apollo (fork con el mismo nombre
-# de ejecutable) para no atarse a uno de los dos si algún día se cambia.
-_SUNSHINE_PATHS = [
+# streaming. El host es Apollo (fork de Sunshine) y el cliente del móvil es Artemis
+# (fork de Moonlight). Se mantienen las rutas, el servicio y las variables de entorno
+# de Sunshine como respaldo: Apollo conserva el `sunshine.exe` del original, así que
+# nada de esto distingue de verdad una instalación de la otra y no merece la pena
+# romper un PC que aún no se haya migrado.
+_APOLLO_PATHS = [
     r"C:\Program Files\Apollo\sunshine.exe",
+    r"C:\Program Files (x86)\Apollo\sunshine.exe",
     r"C:\Program Files\Sunshine\sunshine.exe",
     r"C:\Program Files (x86)\Sunshine\sunshine.exe",
 ]
-SUNSHINE_EXE = os.getenv("SUNSHINE_EXE") or next((p for p in _SUNSHINE_PATHS if os.path.exists(p)), None)
+APOLLO_EXE = (os.getenv("APOLLO_EXE") or os.getenv("SUNSHINE_EXE")
+              or next((p for p in _APOLLO_PATHS if os.path.exists(p)), None))
 
 # Se arranca por su SERVICIO, no ejecutando el .exe. El agente lo lanza el Programador
 # de tareas, que no corre en el escritorio del usuario: `sunshine.exe` arrancado desde
 # ahí se cerraba a los milisegundos sin dejar rastro (ni proceso, ni puertos), mientras
 # el agente reportaba "streaming_ready" tan contento. El servicio existe justo para
-# esto — sabe meter Sunshine en la sesión interactiva activa.
-SUNSHINE_SERVICIO = (os.getenv("SUNSHINE_SERVICIO") or "SunshineService").strip()
-if not re.fullmatch(r"[A-Za-z0-9 _.-]{1,64}", SUNSHINE_SERVICIO):
-    raise RuntimeError(f"SUNSHINE_SERVICIO no válido: {SUNSHINE_SERVICIO!r}")
+# esto — sabe meter el host en la sesión interactiva activa.
+#
+# Apollo registra el suyo como `ApolloService` y Sunshine como `SunshineService`. Sin
+# `APOLLO_SERVICIO` en el .env se prueban los dos EN ESE ORDEN y en caliente
+# (`servicio_streaming()`), no al importar: el nombre solo se puede confirmar con
+# `sc.exe`, y el agente también se importa desde sitios donde no hay Windows detrás.
+_SERVICIOS_STREAMING = ("ApolloService", "SunshineService")
+APOLLO_SERVICIO = (os.getenv("APOLLO_SERVICIO") or os.getenv("SUNSHINE_SERVICIO") or "").strip()
+if APOLLO_SERVICIO and not re.fullmatch(r"[A-Za-z0-9 _.-]{1,64}", APOLLO_SERVICIO):
+    raise RuntimeError(f"APOLLO_SERVICIO no válido: {APOLLO_SERVICIO!r}")
+
+# Nombres de proceso que valen como "el host está vivo". Apollo NO renombró el binario
+# de Sunshine (instala un `sunshine.exe` en `C:\Program Files\Apollo`), así que el
+# nombre de siempre sigue siendo el que se ve en `tasklist`; `apollo.exe` se mira
+# también por si un build futuro lo renombra.
+_PROCESOS_STREAMING = ("sunshine.exe", "apollo.exe")
 
 try:
-    SUNSHINE_TIMEOUT = int(os.getenv("SUNSHINE_TIMEOUT") or 30)   # segundos máx esperando al proceso
+    APOLLO_TIMEOUT = int(os.getenv("APOLLO_TIMEOUT") or os.getenv("SUNSHINE_TIMEOUT") or 30)
 except ValueError:
-    SUNSHINE_TIMEOUT = 30
+    APOLLO_TIMEOUT = 30   # segundos máx esperando al proceso
 
 # ── VPN (Tailscale) ────────────────────────────────────────────────────────────
-# Fuera de casa Moonlight solo llega al PC por la VPN, pero el PC arranca SIN ella:
+# Fuera de casa Artemis solo llega al PC por la VPN, pero el PC arranca SIN ella:
 # lo enciende un WOL, nadie inicia sesión a mano y el túnel puede quedarse abajo
 # (y, tras un arranque en frío, el servicio tarda en negociar). Por eso el job de
-# streaming levanta la VPN ANTES de lanzar Sunshine y reporta la IP de la tailnet:
-# es la que hay que meter en Moonlight, y con Tailscale es fija por máquina.
+# streaming levanta la VPN ANTES de lanzar Apollo y reporta la IP de la tailnet:
+# es la que hay que meter en Artemis, y con Tailscale es fija por máquina.
 #
-# Mismo criterio que con Sunshine: el servicio de Tailscale se deja en arranque
+# Mismo criterio que con Apollo: el servicio de Tailscale se deja en arranque
 # MANUAL y sin su icono de bandeja, para que en el día a día el PC no tenga nada
 # de esto encendido ni a la vista. Levantarlo es trabajo del agente, así que aquí
 # se arranca el servicio primero y solo después se pide el túnel: `tailscale up`
@@ -603,7 +620,7 @@ def estado_servicio(nombre: str) -> str:
 def arrancar_servicio(nombre: str) -> bool:
     """Arranca un servicio de Windows si está parado. True si quedó corriendo.
 
-    Tanto el de Tailscale como el de Sunshine se dejan en arranque MANUAL a propósito
+    Tanto el de Tailscale como el de Apollo se dejan en arranque MANUAL a propósito
     (así el PC no tiene ni la VPN ni el host de streaming encendidos en el día a día),
     de modo que este paso es obligatorio tras cada arranque. Requiere privilegios: la
     tarea del Programador que lanza el agente tiene que estar marcada como "Ejecutar
@@ -637,7 +654,7 @@ def arrancar_servicio(nombre: str) -> bool:
             return False
 
     # Start-Service vuelve cuando el servicio dice estar arrancado, pero el demonio de
-    # detrás (tailscaled, el lanzador de Sunshine) tarda un poco más en estar listo.
+    # detrás (tailscaled, el lanzador de Apollo) tarda un poco más en estar listo.
     for _ in range(10):
         if estado_servicio(nombre) == "Running":
             log.info(f"Servicio '{nombre}' arrancado.")
@@ -676,10 +693,10 @@ def estado_tailscale():
 
 
 def conectar_vpn(job_id: str):
-    """Arranca el servicio, deja la VPN levantada y devuelve la IP para Moonlight.
+    """Arranca el servicio, deja la VPN levantada y devuelve la IP para Artemis.
 
     NUNCA lanza: sin VPN el streaming sigue sirviendo en la LAN de casa, así que un
-    fallo aquí se reporta como aviso y el job continúa hasta abrir Sunshine. Lo que
+    fallo aquí se reporta como aviso y el job continúa hasta abrir Apollo. Lo que
     no se puede resolver desde aquí es un nodo sin sesión ("NeedsLogin"): el login
     de Tailscale es interactivo y el usuario no está delante del PC.
     """
@@ -703,7 +720,7 @@ def conectar_vpn(job_id: str):
                 "tarea del agente corra con privilegios elevados"
             )
             log.warning(f"VPN: {aviso}")
-            report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Sunshine: en la LAN funcionará igual")
+            report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Apollo: en la LAN funcionará igual")
             return None
         estado, ip = estado_tailscale()
     else:
@@ -715,7 +732,7 @@ def conectar_vpn(job_id: str):
     # el túnel suele subir solo: si ya está, nos ahorramos el `up`.
     if estado == "Running" and ip:
         log.info(f"VPN conectada ({ip}).")
-        report_stage(job_id, "vpn_ready", f"VPN conectada — Moonlight: {ip}")
+        report_stage(job_id, "vpn_ready", f"VPN conectada — Artemis: {ip}")
         return ip
 
     log.info(f"VPN en estado {estado!r} — conectando...")
@@ -729,7 +746,7 @@ def conectar_vpn(job_id: str):
         estado, ip = estado_tailscale()
         if estado == "Running" and ip:
             log.info(f"VPN conectada ({ip}).")
-            report_stage(job_id, "vpn_ready", f"VPN conectada — Moonlight: {ip}")
+            report_stage(job_id, "vpn_ready", f"VPN conectada — Artemis: {ip}")
             return ip
         if estado == "NeedsLogin":
             break
@@ -742,7 +759,7 @@ def conectar_vpn(job_id: str):
         else f"La VPN no llegó a conectar en {VPN_TIMEOUT}s (estado: {estado or 'desconocido'})"
     )
     log.warning(f"VPN: {aviso}")
-    report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Sunshine: en la LAN funcionará igual")
+    report_stage(job_id, "vpn_error", f"{aviso}. Sigo con Apollo: en la LAN funcionará igual")
     return None
 
 
@@ -815,19 +832,44 @@ def accion_resolver_alud(job_id: str, payload: dict):
             pass
 
 
-def sunshine_vivo() -> bool:
-    """True si hay un proceso de Sunshine corriendo ahora mismo.
+def servicio_streaming() -> str:
+    """Nombre del servicio del host de streaming instalado, o "" si no hay ninguno.
+
+    Con `APOLLO_SERVICIO` puesto se devuelve tal cual (el usuario manda, aunque el
+    servicio no exista: así el error dice el nombre que él configuró). Si no, se
+    prueban Apollo y Sunshine en ese orden — es lo que permite que el mismo agente
+    sirva antes y después de migrar el PC.
+    """
+    if APOLLO_SERVICIO:
+        return APOLLO_SERVICIO
+    for nombre in _SERVICIOS_STREAMING:
+        if estado_servicio(nombre):
+            return nombre
+    return ""
+
+
+def apollo_vivo() -> bool:
+    """True si hay un proceso del host de streaming corriendo ahora mismo.
 
     Es la comprobación que faltaba: antes se daba por bueno que `Popen` no lanzara
     excepción, que solo dice que Windows aceptó crear el proceso — no que siga vivo
     un segundo después. Se mira el proceso y no el puerto porque los puertos de
-    Sunshine son configurables desde su propia interfaz.
+    Apollo son configurables desde su propia interfaz.
+
+    Solo se cae a PowerShell si NINGÚN nombre dio respuesta concluyente: un
+    `tasklist` que contesta "no está" es una respuesta, no un fallo.
     """
-    vivo = _proceso_vivo("sunshine.exe")
-    if vivo is not None:
-        return vivo
+    concluyente = False
+    for nombre in _PROCESOS_STREAMING:
+        vivo = _proceso_vivo(nombre)
+        if vivo:
+            return True
+        if vivo is not None:
+            concluyente = True
+    if concluyente:
+        return False
     _, salida, _ = _powershell(
-        "@(Get-Process -Name sunshine -ErrorAction SilentlyContinue).Count"
+        "@(Get-Process -Name sunshine,apollo -ErrorAction SilentlyContinue).Count"
     )
     return salida.isdigit() and int(salida) > 0
 
@@ -848,60 +890,63 @@ def _proceso_vivo(nombre_exe: str):
     return f'"{nombre_exe}"'.lower() in salida.lower()
 
 
-def arrancar_sunshine():
-    """Deja Sunshine corriendo. Lanza si no lo consigue.
+def arrancar_apollo():
+    """Deja Apollo corriendo. Lanza si no lo consigue.
 
     Vía servicio, que es la única que funciona cuando al agente lo lanza el
     Programador de tareas fuera del escritorio del usuario. El `Popen` del .exe se
     mantiene como respaldo para instalaciones que no registran servicio (portables,
     algunos builds de Apollo), pero ya no se le cree sin comprobarlo.
     """
-    if sunshine_vivo():
-        log.info("Sunshine ya estaba corriendo.")
+    if apollo_vivo():
+        log.info("El host de streaming ya estaba corriendo.")
         return
 
-    if estado_servicio(SUNSHINE_SERVICIO):
-        arrancar_servicio(SUNSHINE_SERVICIO)
-    elif SUNSHINE_EXE:
-        log.info(f"Sin servicio '{SUNSHINE_SERVICIO}' — lanzando {SUNSHINE_EXE} directamente...")
-        # DETACHED: Sunshine sobrevive a la salida del agente y sigue sirviendo el stream.
+    servicio = servicio_streaming()
+    if servicio and estado_servicio(servicio):
+        arrancar_servicio(servicio)
+    elif APOLLO_EXE:
+        log.info(f"Sin servicio de streaming registrado — lanzando {APOLLO_EXE} directamente...")
+        # DETACHED: Apollo sobrevive a la salida del agente y sigue sirviendo el stream.
         subprocess.Popen(
-            [SUNSHINE_EXE],
+            [APOLLO_EXE],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     else:
+        esperados = servicio or "/".join(_SERVICIOS_STREAMING)
         raise RuntimeError(
-            f"No se encontró Sunshine: ni el servicio '{SUNSHINE_SERVICIO}' ni el "
-            "ejecutable (define SUNSHINE_SERVICIO o SUNSHINE_EXE en .env)"
+            f"No se encontró Apollo: ni el servicio '{esperados}' ni el "
+            "ejecutable (define APOLLO_SERVICIO o APOLLO_EXE en .env)"
         )
 
-    limite = time.time() + SUNSHINE_TIMEOUT
+    limite = time.time() + APOLLO_TIMEOUT
     while time.time() < limite:
-        if sunshine_vivo():
-            log.info("✅ Sunshine corriendo.")
+        if apollo_vivo():
+            log.info("✅ Apollo corriendo.")
             return
         time.sleep(1)
 
+    esperados = servicio or "/".join(_SERVICIOS_STREAMING)
     raise RuntimeError(
-        f"Sunshine no llegó a arrancar en {SUNSHINE_TIMEOUT}s (servicio "
-        f"'{SUNSHINE_SERVICIO}': {estado_servicio(SUNSHINE_SERVICIO) or 'no existe'}). "
+        f"Apollo no llegó a arrancar en {APOLLO_TIMEOUT}s (servicio "
+        f"'{esperados}': {(servicio and estado_servicio(servicio)) or 'no existe'}). "
         "Revisa que la tarea del agente corra con privilegios elevados"
     )
 
 
 def accion_abrir_streaming(job_id: str, payload: dict):
-    """Conecta la VPN y deja Sunshine corriendo para Moonlight desde el móvil."""
-    # La VPN primero: Sunshine anuncia sus direcciones al arrancar, así que si el
+    """Conecta la VPN y deja Apollo corriendo para Artemis desde el móvil."""
+    # La VPN primero: Apollo anuncia sus direcciones al arrancar, así que si el
     # interfaz de Tailscale aparece después, el móvil puede no ver el host hasta
     # reiniciarlo. Además así el modal enseña la IP antes de decir "listo".
     ip_vpn = conectar_vpn(job_id)
-    report_stage(job_id, "streaming_starting", "Arrancando Sunshine")
-    arrancar_sunshine()
+    report_stage(job_id, "streaming_starting", "Arrancando Apollo")
+    arrancar_apollo()
     report_stage(
         job_id, "streaming_ready",
-        f"Sunshine listo — conéctate con Moonlight a {ip_vpn}" if ip_vpn
-        else "Sunshine listo — conéctate con Moonlight",
+        f"Apollo listo — conéctate con Artemis a {ip_vpn}" if ip_vpn
+        else "Apollo listo — conéctate con Artemis",
     )
 
 
@@ -961,7 +1006,8 @@ def main():
         sys.exit(1)
 
     log.info(f"Agente iniciado. Worker: {WORKER_ID}")
-    log.info(f"Sunshine: servicio '{SUNSHINE_SERVICIO}' / {SUNSHINE_EXE or 'exe NO ENCONTRADO'}")
+    log.info(f"Apollo: servicio '{APOLLO_SERVICIO or 'auto (' + '/'.join(_SERVICIOS_STREAMING) + ')'}' "
+             f"/ {APOLLO_EXE or 'exe NO ENCONTRADO'}")
     log.info(f"VPN ({VPN_TIPO}): {TAILSCALE_EXE or 'Tailscale NO ENCONTRADO'}")
     if TOKEN_CADUCA:
         log.warning(
