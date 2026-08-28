@@ -611,16 +611,16 @@ describe("hostStreaming", () => {
   test("saca la IP del mensaje del stage vpn_ready", () => {
     const eventos = [
       { stage: "job_claimed", message: "Worker pc-mikel-ab12 reclamó el job" },
-      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.87.12.4" },
-      { stage: "streaming_ready", message: "Sunshine abierto" },
+      { stage: "vpn_ready", message: "VPN conectada — Artemis: 100.87.12.4" },
+      { stage: "streaming_ready", message: "Apollo abierto" },
     ];
     expect(hostStreaming(eventos)).toBe("100.87.12.4");
   });
 
   test("se queda con el vpn_ready más reciente", () => {
     const eventos = [
-      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.87.12.4" },
-      { stage: "vpn_ready", message: "VPN conectada — Moonlight: 100.64.0.9" },
+      { stage: "vpn_ready", message: "VPN conectada — Artemis: 100.87.12.4" },
+      { stage: "vpn_ready", message: "VPN conectada — Artemis: 100.64.0.9" },
     ];
     expect(hostStreaming(eventos)).toBe("100.64.0.9");
   });

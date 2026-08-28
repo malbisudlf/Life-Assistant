@@ -718,8 +718,8 @@ const STAGE_LABELS = {
   "vpn_connecting":       "Conectando la VPN",
   "vpn_ready":            "VPN conectada",
   "vpn_error":            "VPN no disponible",
-  "streaming_starting":   "Lanzando Sunshine",
-  "streaming_ready":      "Sunshine listo — abre Moonlight",
+  "streaming_starting":   "Lanzando Apollo",
+  "streaming_ready":      "Apollo listo — abre Artemis",
   "job_done":             "Completado",
 };
 const JOB_STATUS_LABEL = {
@@ -1691,8 +1691,8 @@ export default function Dashboard() {
 
   // ── Streaming PC ─────────────────────────────────────────────────────────
   // El agente es efímero: enciende el PC con WOL y encola el job. Al arrancar
-  // Windows, el agente ve el job de streaming y lanza Sunshine (que queda
-  // corriendo), luego se cierra. Conectas con Moonlight desde el móvil.
+  // Windows, el agente ve el job de streaming y lanza Apollo (que queda
+  // corriendo), luego se cierra. Conectas con Artemis desde el móvil.
   async function abrirStreaming() {
     setPcModal(true);
     setPcStatus("loading");
@@ -1718,7 +1718,7 @@ export default function Dashboard() {
         });
       } catch { /* mejor esfuerzo */ }
 
-      // 3. Job de abrir Sunshine (crítico): el agente lo despacha al arrancar.
+      // 3. Job de abrir Apollo (crítico): el agente lo despacha al arrancar.
       const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
         headers: jsonHeaders(),
@@ -2820,8 +2820,8 @@ export default function Dashboard() {
 
   const maxStage = jobEvents.reduce((max, ev) => Math.max(max, STAGE_INDEX.get(ev.stage) ?? -1), -1);
   const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
-  // IP de la VPN para meterla en Moonlight cuando no estás en casa.
-  const ipMoonlight = hostStreaming(jobEvents);
+  // IP de la VPN para meterla en Artemis cuando no estás en casa.
+  const ipArtemis = hostStreaming(jobEvents);
 
   // Derivados
   const todayEvents = allEvents
@@ -3707,7 +3707,7 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="acciones_pc">
           <div style={s.sectionLabel}>Streaming PC</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, marginBottom: 12, lineHeight: 1.5 }}>
-            Enciende el PC y abre Sunshine para conectar con Moonlight desde el móvil.
+            Enciende el PC y abre Apollo para conectar con Artemis desde el móvil.
           </div>
           <button
             style={{ ...s.newIdeaBtn, width: "100%", marginTop: 0 }}
@@ -5283,7 +5283,7 @@ export default function Dashboard() {
                   {jobTerminal?.status === "done" ? "🎮" : jobTerminal?.status === "failed" ? "❌" : "⚡"}
                 </div>
                 <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500, marginBottom: 12 }}>
-                  {jobTerminal?.status === "done" ? "Sunshine listo — abre Moonlight" : "Abriendo streaming"}
+                  {jobTerminal?.status === "done" ? "Apollo listo — abre Artemis" : "Abriendo streaming"}
                 </div>
                 <div style={{
                   display: "inline-block", fontSize: 10, padding: "2px 10px", borderRadius: 99,
@@ -5294,13 +5294,13 @@ export default function Dashboard() {
                 }}>
                   {JOB_STATUS_LABEL[jobStatus] || jobStatus || "—"}
                 </div>
-                {ipMoonlight && (
+                {ipArtemis && (
                   <div style={{
                     marginBottom: 12, padding: "8px 10px", borderRadius: 8,
                     background: "rgba(106,170,130,0.1)", border: "0.5px solid rgba(106,170,130,0.3)",
                   }}>
-                    <div style={{ fontSize: 10, color: "var(--muted2)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Host para Moonlight</div>
-                    <div style={{ fontSize: 15, fontFamily: "monospace", color: "var(--green)", marginTop: 2 }}>{ipMoonlight}</div>
+                    <div style={{ fontSize: 10, color: "var(--muted2)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Host para Artemis</div>
+                    <div style={{ fontSize: 15, fontFamily: "monospace", color: "var(--green)", marginTop: 2 }}>{ipArtemis}</div>
                   </div>
                 )}
                 <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 140, overflowY: "auto" }}>

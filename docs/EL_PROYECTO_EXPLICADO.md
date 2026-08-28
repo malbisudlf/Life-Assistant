@@ -124,7 +124,7 @@ En la red local, siempre encendido. Hace tres papeles distintos:
 ### Agente PC — `agent/agent.py`
 Un agente **efímero** de Windows: arranca con el PC (empujado por un Wake-on-LAN), drena
 la cola de jobs, y se cierra. ~1.000 líneas de Playwright + `pyautogui` + control de
-servicios. No tiene tests ni puede tenerlos: necesita un Windows real con Edge, Sunshine y
+servicios. No tiene tests ni puede tenerlos: necesita un Windows real con Edge, Apollo y
 Claude Desktop instalados.
 
 ### Apple Watch

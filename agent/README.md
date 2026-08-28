@@ -7,13 +7,13 @@ desde el dashboard. No usa la API de Anthropic — controla el PC con pyautogui.
 
 Es efímero y despacha por `payload["accion"]`: drena la cola de jobs y se cierra.
 
-### `abrir_streaming` (Sunshine/Apollo para Moonlight)
+### `abrir_streaming` (Apollo para Artemis)
 
 1. Arranca el **servicio de Tailscale** (que está en manual: en el día a día el PC
    no tiene la VPN encendida) y levanta el túnel, reportando la IP de la tailnet al
    dashboard — el PC arranca por WOL sin VPN, y desde fuera de casa es la única forma
-   de que Moonlight lo alcance. Si falla, avisa y sigue: en la LAN funciona igual
-2. Arranca el **servicio de Sunshine** (`SunshineService`, también en manual) y espera
+   de que Artemis lo alcance. Si falla, avisa y sigue: en la LAN funciona igual
+2. Arranca el **servicio de Apollo** (`ApolloService`, también en manual) y espera
    a ver el proceso vivo antes de dar el job por hecho. Si no hay servicio registrado
    cae a lanzar el `.exe` en modo DETACHED, pero la comprobación se hace igual
 
@@ -22,7 +22,7 @@ Programador de tareas, fuera del escritorio del usuario, y un `sunshine.exe` arr
 desde ahí se cierra al instante. Arrancar servicios necesita privilegios: la tarea del
 Programador debe estar marcada como "Ejecutar con los privilegios más altos".
 
-Puesta a punto completa (Tailscale desatendido, autoarranque de Sunshine, WOL):
+Puesta a punto completa (Tailscale desatendido, autoarranque de Apollo, WOL):
 `PUESTA_A_PUNTO.md`.
 
 ### `resolver_alud`
@@ -68,7 +68,8 @@ LA_API_BASE=https://backend-tender-glow-160.fly.dev
   `LA_TOKEN` como respaldo, pero el agente avisa por el log de que va a caducar.
 - Ya **no** hacen falta `SUPABASE_URL`/`SUPABASE_KEY`: los jobs pendientes se piden al
   backend (`GET /jobs/pending`)
-- Opcionales de streaming: `SUNSHINE_EXE`, `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`
+- Opcionales de streaming: `APOLLO_SERVICIO`, `APOLLO_EXE`, `APOLLO_TIMEOUT`,
+  `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`
   (ver `.env.example`)
 
 ### 3. Migración Supabase (solo si no se ha ejecutado ya)

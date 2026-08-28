@@ -1,11 +1,16 @@
-# Puesta a punto del PC: streaming remoto (Sunshine/Moonlight)
+# Puesta a punto del PC: streaming remoto (Apollo/Artemis)
 
 Checklist para dejar operativo el control remoto del PC desde el móvil. La idea es
 que el PC arranque casi "tonto": lo único residente es el **agente efímero**, que al
 iniciar Windows mira la cola de jobs, ejecuta lo que haya (resolver Alud o abrir
-Sunshine) y se cierra. El botón **"Streaming PC"** del dashboard enciende el PC (WOL)
-y encola el job de Sunshine; el agente conecta la VPN y abre Sunshine, y tú conectas
-con **Moonlight** desde el móvil.
+Apollo) y se cierra. El botón **"Streaming PC"** del dashboard enciende el PC (WOL)
+y encola el job de Apollo; el agente conecta la VPN y abre Apollo, y tú conectas
+con **Artemis** desde el móvil.
+
+> **Si vienes de Sunshine/Moonlight**: el paso 2 explica la migración. El agente sigue
+> aceptando las variables `SUNSHINE_*` del `.env` antiguo y el servicio
+> `SunshineService`, así que nada se rompe mientras no toques el PC — pero el
+> emparejamiento de Artemis con Apollo hay que rehacerlo (paso 4).
 
 > Estos pasos son específicos del PC de Mikel (no forman parte del kit replicable):
 > requieren un Windows real con Edge, sesión activa y hardware con WOL.
@@ -36,36 +41,51 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
       **Ya NO hace falta `SUPABASE_URL`/`SUPABASE_KEY`**: el agente pide los jobs
       pendientes al backend (`GET /jobs/pending`) en vez de a Supabase directo. Si tu
       `.env` los tenía, puedes borrarlos.
-      Opcional: `SUNSHINE_EXE` (solo si instalas Sunshine/Apollo fuera de la ruta
-      estándar), `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT` (ver paso 3).
+      Opcional: `APOLLO_SERVICIO` (solo si tu servicio no se llama `ApolloService`),
+      `APOLLO_EXE` (solo si instalas Apollo fuera de la ruta estándar), `APOLLO_TIMEOUT`,
+      `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT` (ver paso 3).
+      Si tu `.env` traía `SUNSHINE_SERVICIO`/`SUNSHINE_EXE`/`SUNSHINE_TIMEOUT`, siguen
+      funcionando como respaldo: renómbralos cuando migres, no hace falta a la vez.
 
-## 2. Instalar el host de streaming (Sunshine o Apollo)
+## 2. Instalar el host de streaming (Apollo)
 
-- [ ] Instalar **Sunshine** en el PC. (El agente también detecta **Apollo**, su fork:
-      mismo ejecutable en `C:\Program Files\Apollo\sunshine.exe`. Con un monitor
-      físico siempre conectado no hace falta — su ventaja es la pantalla virtual.)
-- [ ] **Desactivar su autoarranque**: Servicios de Windows → `SunshineService` → tipo de
-      inicio **Manual**. Lo único residente debe ser el agente; Sunshine lo arranca el
+**Apollo** es el fork de Sunshine de ClassicOldSong: su ventaja frente al original es la
+**pantalla virtual** a la resolución nativa del cliente (el móvil deja de heredar la del
+monitor del PC) y el emparejamiento permanente por cliente. Instala en
+`C:\Program Files\Apollo` y **conserva el nombre del binario de Sunshine**
+(`sunshine.exe`) — no te extrañe verlo así en el Administrador de tareas.
+
+- [ ] Si venías de Sunshine, **desinstálalo antes**: los dos escuchan los mismos puertos
+      (47984-47990) y con ambos servicios en marcha el que arranque segundo no sirve
+      nada. Anota antes tu configuración (aplicaciones, resolución) — Apollo no la
+      importa. Y si prefieres tenerlos los dos, deja el de Sunshine **deshabilitado**,
+      no en manual: el agente prueba `ApolloService` primero, pero el binario es el
+      mismo y `apollo_vivo()` no sabe distinguir cuál de los dos está vivo.
+- [ ] Instalar **Apollo** ([releases](https://github.com/ClassicOldSong/Apollo/releases))
+      y abrir su web (`https://localhost:47990`) para poner usuario y contraseña.
+- [ ] **Desactivar su autoarranque**: Servicios de Windows → `ApolloService` → tipo de
+      inicio **Manual**. Lo único residente debe ser el agente; Apollo lo arranca el
       agente bajo demanda — pero **por el servicio, no ejecutando el binario**, así que
       el servicio tiene que seguir existiendo (manual, no deshabilitado).
-- [ ] Confirmar el nombre del servicio con `Get-Service SunshineService`. Si tu
-      instalación lo registra con otro nombre, ponerlo en `SUNSHINE_SERVICIO`.
+- [ ] Confirmar el nombre del servicio con `Get-Service ApolloService`. Si tu
+      instalación lo registra con otro nombre, ponerlo en `APOLLO_SERVICIO`. En blanco,
+      el agente prueba `ApolloService` y luego `SunshineService`.
 - [ ] Solo si tu instalación **no** registra servicio (portables), confirmar la ruta del
-      ejecutable: `C:\Program Files\Sunshine\sunshine.exe` (si es otra, `SUNSHINE_EXE`).
+      ejecutable: `C:\Program Files\Apollo\sunshine.exe` (si es otra, `APOLLO_EXE`).
 
 ## 3. Tailscale en el PC (para conectarte desde fuera de casa)
 
-Fuera de casa Moonlight no llega al PC por IP local, y abrir el puerto de Sunshine a
+Fuera de casa Artemis no llega al PC por IP local, y abrir el puerto de Apollo a
 internet no es una opción. Con Tailscale el PC entra en la misma tailnet que ya usas
 para Home Assistant y el móvil lo ve como si estuvierais en la misma LAN.
 
 El problema que resuelve el agente: **el PC arranca sin VPN**. Lo enciende un WOL, no
 hay nadie delante iniciando sesión, y el túnel puede quedarse abajo. Por eso el job de
 streaming **arranca el servicio de Tailscale y levanta el túnel antes de lanzar
-Sunshine**, y reporta la IP de la tailnet al modal del dashboard — esa es la que metes
-en Moonlight.
+Apollo**, y reporta la IP de la tailnet al modal del dashboard — esa es la que metes
+en Artemis.
 
-Mismo criterio que con Sunshine: **Tailscale queda apagado en el día a día** (servicio
+Mismo criterio que con Apollo: **Tailscale queda apagado en el día a día** (servicio
 en manual, sin icono en la bandeja) y solo se enciende cuando pides streaming. Si
 prefieres tenerlo siempre conectado, deja el servicio en automático y salta los dos
 pasos marcados como *(apagado en el día a día)*: el agente lo detecta corriendo y no
@@ -77,14 +97,14 @@ toca nada.
       ```
       tailscale up --unattended
       ```
-      Sin esto, el nodo no aparece en la tailnet y Moonlight no lo encuentra.
+      Sin esto, el nodo no aparece en la tailnet y Artemis no lo encuentra.
 - [ ] En la [consola de administración](https://login.tailscale.com/admin/machines),
       **desactivar la caducidad de la clave** (*Disable key expiry*) para esta máquina.
       Si no, cada ~6 meses el nodo pide login otra vez y el streaming deja de funcionar
       desde fuera sin previo aviso.
 - [ ] Anotar la IP del PC en la tailnet (`tailscale ip -4`, una `100.x.y.z`): es fija.
 - [ ] Comprobar desde el móvil (con Tailscale activo): `ping` o abrir
-      `https://100.x.y.z:47990` (la web de Sunshine, con Sunshine arrancado).
+      `https://100.x.y.z:47990` (la web de Apollo, con Apollo arrancado).
 - [ ] *(apagado en el día a día)* Servicios de Windows → servicio **`Tailscale`** →
       tipo de inicio **Manual**. El agente lo arranca cuando hace falta.
       Si tu servicio se llama de otra forma, ponlo en `TAILSCALE_SERVICIO`.
@@ -92,16 +112,29 @@ toca nada.
       Administrador de tareas → pestaña **Inicio** → deshabilitar **Tailscale IPN**.
       El túnel no lo necesita, solo la interfaz gráfica.
 
-> Si el agente no encuentra Tailscale instalado **no falla el job**: lanza Sunshine
+> Si el agente no encuentra Tailscale instalado **no falla el job**: lanza Apollo
 > igual y el streaming funciona en la LAN de casa. En el modal verás el aviso
 > "VPN no disponible". Para saltarte el paso a propósito: `VPN_TIPO=ninguna`.
 
-## 4. Moonlight en el móvil (emparejar una vez)
+## 4. Artemis en el móvil (emparejar una vez)
 
-- [ ] Instalar **Moonlight** en el móvil (o **Artemis** si has instalado Apollo).
+**Artemis** es el fork de Moonlight que acompaña a Apollo (se distribuye como
+*Moonlight Noir*): es el que sabe pedir la pantalla virtual a la resolución del móvil.
+
+> ⚠️ **Artemis es solo Android.** En iPhone/iPad no existe todavía, así que ahí el
+> cliente sigue siendo **Moonlight**, que conecta contra Apollo igual (emparejamiento y
+> stream funcionan) pero sin el control de la pantalla virtual desde el cliente: la
+> resolución la fijas en la web de Apollo. Los textos del dashboard dicen "Artemis"
+> porque es el cliente objetivo; en iOS, léelo como "el cliente de streaming".
+
+- [ ] Instalar **Artemis** en el móvil Android
+      ([releases](https://github.com/ClassicOldSong/moonlight-android/releases)),
+      o **Moonlight** si es un iPhone. Puedes dejar los dos instalados: son apps
+      distintas.
 - [ ] Instalar también **Tailscale** en el móvil y dejarlo activo cuando estés fuera.
-- [ ] Con Sunshine abierto en el PC, emparejar con el **PIN** (solo la primera vez;
-      luego es persistente).
+- [ ] Con Apollo abierto en el PC, emparejar con el **PIN** (solo la primera vez;
+      luego es persistente). **El emparejamiento de Moonlight/Sunshine NO se hereda**:
+      hay que volver a emparejar aunque el host tenga la misma IP.
 - [ ] Añadir el host **por la IP de la tailnet** (`100.x.y.z`), no por la IP local:
       así el mismo host vale en casa y fuera. En casa Tailscale enruta directo por la
       LAN, sin penalización.
@@ -110,7 +143,7 @@ toca nada.
 
 - [ ] **Auto-login de Windows** (`netplwiz` → desmarcar "los usuarios deben escribir
       contraseña"). Es **obligatorio**: tras el WOL, sin sesión activa no funcionan ni
-      pyautogui ni la captura de pantalla de Sunshine.
+      pyautogui ni la captura de pantalla de Apollo.
 - [x] **Task Scheduler** → tarea `LifeAssistantAgent`, disparador **"Al iniciar sesión"**,
       acción: `python.exe` con `agent.py`. Marcar "Ejecutar solo cuando el usuario haya
       iniciado sesión" y **"Ejecutar con los privilegios más altos"**: sin eso el agente
@@ -218,36 +251,36 @@ Van en el mismo paquete, con el mismo patrón: `shell_command.la_apagar_pc` /
 ## 9. Prueba end-to-end
 
 - [ ] **En casa, PC apagado** → pulsar "Abrir streaming" en el móvil → el PC se enciende
-      (WOL) → el agente arranca → arranca Tailscale y conecta → lanza Sunshine → el modal llega a
-      "Sunshine listo" y muestra el **host para Moonlight** (la IP `100.x.y.z`).
-- [ ] Abrir **Moonlight** y conectar a esa IP.
+      (WOL) → el agente arranca → arranca Tailscale y conecta → lanza Apollo → el modal llega a
+      "Apollo listo" y muestra el **host para Artemis** (la IP `100.x.y.z`).
+- [ ] Abrir **Artemis** y conectar a esa IP.
 - [ ] **Fuera de casa** (datos móviles, con Tailscale activo en el móvil): repetir. Es la
       prueba que importa — es el caso que antes no funcionaba.
 - [ ] **PC ya encendido** → pulsar el botón otra vez → HA relanza el agente por SSH y
-      Sunshine se abre igual.
+      Apollo se abre igual.
 
 ## Avisos clave
 
-- **Auto-login obligatorio**: sin sesión activa tras el WOL, ni el agente ni Sunshine
+- **Auto-login obligatorio**: sin sesión activa tras el WOL, ni el agente ni Apollo
   capturan pantalla.
 - **Tailscale en modo desatendido**: sin `--unattended` el túnel no sube sin sesión
   iniciada y el agente se quedará esperando hasta rendirse (`VPN_TIMEOUT`).
 - **Tarea del agente con privilegios elevados**: es lo que le permite arrancar el
   servicio de Tailscale, que está en manual justo para no tenerlo encendido siempre.
-- **Sunshine con autoarranque OFF**: si lo dejas en automático, se pierde el sentido de
+- **Apollo con autoarranque OFF**: si lo dejas en automático, se pierde el sentido de
   "solo el agente residente".
 - **SSH solo por clave y en red local/VPN**: no expongas el puerto a internet.
 
 ## Rendimiento y red
 
-- **Misma red (LAN/Wi-Fi de casa)**: Moonlight detecta el host y va directo. Mejor
+- **Misma red (LAN/Wi-Fi de casa)**: Artemis detecta el host y va directo. Mejor
   escenario: latencia mínima, 1080p/4K a 60-120 fps según GPU.
 - **Fuera de casa**: vas por Tailscale, así que depende sobre todo de la **subida** de
   la conexión del PC (~20-30 Mbps estables → 1080p60 sobrado) y de la latencia. Lo
   normal es que Tailscale abra conexión directa (P2P) entre móvil y PC; si el NAT lo
   impide, cae a un relé DERP y se nota — `tailscale status` dice cuál de los dos es.
 - En reposo, lo único extra encendido es el servicio OpenSSH inactivo (coste
-  despreciable). Sunshine solo consume mientras haces streaming.
+  despreciable). Apollo solo consume mientras haces streaming.
 
 ---
 

@@ -1500,7 +1500,7 @@ export function clothingTotals(items) {
 }
 
 // ── Streaming PC ─────────────────────────────────────────────────────────
-// La IP a la que hay que apuntar Moonlight cuando estás fuera de casa. El agente
+// La IP a la que hay que apuntar Artemis cuando estás fuera de casa. El agente
 // la reporta en el mensaje del stage `vpn_ready` (Tailscale da una IP fija por
 // máquina), así que se saca de ahí en vez de guardarla en ningún sitio: si el
 // túnel no llegó a levantar, no hay evento y no hay IP que enseñar.
