@@ -156,6 +156,6 @@ está duplicado en los dos lados y **tienen que coincidir**.
 
 **Agente** (`agent/.env`): `AGENT_TOKEN` (mismo valor que en el backend), `LA_API_BASE`,
 `LA_TOKEN` (solo respaldo — caduca), `EDGE_PROFILE_DIR`, `ALUD_ACCOUNT`,
-`ALUD_ALLOWED_HOSTS`, `SUNSHINE_EXE`/`SUNSHINE_SERVICIO`/`SUNSHINE_TIMEOUT`,
+`ALUD_ALLOWED_HOSTS`, `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` (con las `SUNSHINE_*` como respaldo),
 `VPN_TIPO`/`TAILSCALE_EXE`/`TAILSCALE_SERVICIO`/`VPN_TIMEOUT`, `ARRANQUE_ESPERA_RED`.
 **Ya no lleva `SUPABASE_URL`/`SUPABASE_KEY`**: se quitaron a propósito (ver "Cola de jobs" en `docs/BACKEND_PATRONES.md`).

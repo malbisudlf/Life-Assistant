@@ -194,6 +194,9 @@
   del proyecto —el 409 del Watch, el 401 del agente, esto—: **lanzar algo no es
   comprobar que funciona**, y un job solo se marca `done` tras verificar el efecto.
   Arreglado arrancando el servicio (como Tailscale) y esperando a ver el proceso vivo.
+  (El host pasó después a Apollo y los símbolos se llaman hoy `APOLLO_EXE`,
+  `arrancar_apollo()` y `apollo_vivo()`; el fallo y su moraleja son los mismos, y el
+  binario sigue llamándose `sunshine.exe` porque Apollo no lo renombró.)
 - **`/jobs/pending` era un 502 fijo por un `+` en la query string.** El corte de "última
   hora" se formateaba como `...T05:10:01+00:00` y se pegaba a la URL de Supabase; en una
   query string el `+` significa espacio, así que PostgREST leía `...T05:10:01 00:00` y

@@ -7405,7 +7405,7 @@ def _vigilar_ingesta_seguro() -> dict:
 #   3. **Solo se repara lo que se puede verificar.** La lista es cerrada y corta a
 #      propósito: hoy únicamente el disparo de la rutina, porque su reintento devuelve
 #      un 2xx que confirma el efecto. Lanzar algo no es comprobar que funciona — el
-#      `streaming_ready` sobre un Sunshine que no estaba abierto salió de olvidarlo.
+#      `streaming_ready` sobre un Apollo que no estaba abierto salió de olvidarlo.
 #
 # Lo que NO entra aquí, y no es olvido:
 #   - La rutina PAUSADA: es una decisión del usuario, no una avería.
@@ -11163,7 +11163,7 @@ _JARVIS_HERRAMIENTAS = {
     "lanzar_streaming": {
         "confirmar":   False,
         "fn":          _j_lanzar_streaming,
-        "descripcion": "Encola el job que levanta la VPN y abre Sunshine en el PC para jugar en remoto. "
+        "descripcion": "Encola el job que levanta la VPN y abre Apollo en el PC para jugar en remoto. "
                        "Requiere que el PC esté encendido.",
         "parametros":  {},
     },
