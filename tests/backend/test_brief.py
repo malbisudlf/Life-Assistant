@@ -6,7 +6,7 @@ no se comprueba ninguna conclusión — solo que los datos salen completos y cor
 y que un fallo de una fuente no tumba el resto del resumen.
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -1182,6 +1182,236 @@ class TestQueHaCambiado:
         mock_requests.add("GET", "/rest/v1/brief_envios", FakeResponse(None, 500, "no existe la columna"))
         d = client.get("/brief", headers=auth_headers).json()
         assert d["salud"] and "cambios" not in d
+
+
+class TestEconomiaDelResumen:
+    """Titulares en crudo. Aquí no se elige cuál cuenta ni se explica ninguno: eso es de
+    quien redacta el correo. Lo que se prueba es que llegan enteros, que no se repiten y
+    que una fuente muerta se ve en vez de disimularse como un día sin noticias."""
+
+    @staticmethod
+    def _rfc822(horas_atras):
+        cuando = datetime.now(timezone.utc) - timedelta(hours=horas_atras)
+        return cuando.strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+    @classmethod
+    def _rss(cls, items, canal="El País Economía"):
+        """items: (titulo, enlace, extracto, horas_atrás | None)."""
+        entradas = ""
+        for titulo, enlace, extracto, horas in items:
+            fecha = f"<pubDate>{cls._rfc822(horas)}</pubDate>" if horas is not None else ""
+            entradas += (f"<item><title><![CDATA[{titulo}]]></title><link>{enlace}</link>"
+                         f"<description>&lt;p&gt;{extracto}&lt;/p&gt;</description>{fecha}</item>")
+        return f"<rss><channel><title>{canal}</title><link>x</link>{entradas}</channel></rss>"
+
+    @staticmethod
+    def _montar(monkeypatch, feeds):
+        """feeds: {url: xml, o None para una fuente que no responde}."""
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA", True)
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA_FEEDS", ",".join(feeds))
+        monkeypatch.setattr(main, "_descargar",
+                            lambda url, saltos=3: (url, feeds[url]) if feeds.get(url) else None)
+
+    def test_un_titular_llega_entero(self, monkeypatch):
+        self._montar(monkeypatch, {"https://feed.test/a": self._rss(
+            [("El BCE deja los tipos", "https://e.test/1", "Segunda reunión seguida", 2)])})
+        t = main._brief_economia()["titulares"][0]
+        assert t["titulo"] == "El BCE deja los tipos"
+        assert t["enlace"] == "https://e.test/1"
+        assert t["fuente"] == "El País Economía"
+        assert t["fecha"]
+        assert t["extracto"] == "Segunda reunión seguida", "el HTML escapado del extracto sobra"
+
+    def test_lee_tambien_atom(self, monkeypatch):
+        """Media España publica RSS y el resto Atom; el correo no puede depender de eso."""
+        cuando = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        atom = ("<feed><title>RTVE Economía</title>"
+                "<entry><title>La inflación baja al 2,1%</title>"
+                '<link rel="alternate" href="https://rtve.test/1"/>'
+                f"<updated>{cuando}</updated>"
+                "<summary>Dato adelantado del INE</summary></entry></feed>")
+        self._montar(monkeypatch, {"https://feed.test/atom": atom})
+        t = main._brief_economia()["titulares"][0]
+        assert t["titulo"] == "La inflación baja al 2,1%"
+        assert t["enlace"] == "https://rtve.test/1"
+        assert t["fuente"] == "RTVE Economía"
+
+    def test_lo_de_anteayer_no_entra(self, monkeypatch):
+        self._montar(monkeypatch, {"https://feed.test/a": self._rss([
+            ("De esta madrugada", "https://e.test/1", "", 3),
+            ("De hace dos días",  "https://e.test/2", "", 48),
+        ])})
+        assert [t["titulo"] for t in main._brief_economia()["titulares"]] == ["De esta madrugada"]
+
+    def test_sin_fecha_entra_pero_al_final(self, monkeypatch):
+        """Descartar lo que no trae fecha dejaría la sección vacía con feeds que no la
+        ponen, y no repetirlo mañana ya lo resuelve el descarte contra el anterior."""
+        self._montar(monkeypatch, {"https://feed.test/a": self._rss([
+            ("Sin fecha", "https://e.test/1", "", None),
+            ("De hace una hora", "https://e.test/2", "", 1),
+        ])})
+        assert [t["titulo"] for t in main._brief_economia()["titulares"]] == \
+            ["De hace una hora", "Sin fecha"]
+
+    def test_la_misma_noticia_en_dos_medios_va_una_vez(self, monkeypatch):
+        """Cada medio la publica con su URL: por enlace no se detecta, por titular sí."""
+        self._montar(monkeypatch, {
+            "https://feed.test/a": self._rss([("El BCE deja los tipos", "https://a.test/1", "", 2)]),
+            "https://feed.test/b": self._rss([("El BCE deja los tipos", "https://b.test/9", "", 1)],
+                                             canal="Cinco Días"),
+        })
+        e = main._brief_economia()
+        assert len(e["titulares"]) == 1
+        assert [f["titulares"] for f in e["fuentes"]] == [1, 0]
+
+    def test_una_fuente_caida_ni_vacia_la_seccion_ni_se_disimula(self, monkeypatch):
+        self._montar(monkeypatch, {
+            "https://feed.test/a": self._rss([("Sube el euríbor", "https://a.test/1", "", 2)]),
+            "https://feed.test/muerto": None,
+        })
+        e = main._brief_economia()
+        assert [t["titulo"] for t in e["titulares"]] == ["Sube el euríbor"]
+        caida = [f for f in e["fuentes"] if f["url"].endswith("muerto")][0]
+        assert caida["error"], "una URL muerta tiene que verse; si no, parece un día sin noticias"
+
+    def test_un_feed_que_revienta_no_tumba_el_resumen(self, monkeypatch):
+        def _explota(url, saltos=3):
+            raise RuntimeError("conexión cortada")
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA", True)
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA_FEEDS", "https://feed.test/a")
+        monkeypatch.setattr(main, "_descargar", _explota)
+        e = main._brief_economia()
+        assert e["titulares"] == [] and e["fuentes"][0]["error"]
+
+    def test_apagada_no_pide_nada(self, monkeypatch):
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA", False)
+        monkeypatch.setattr(main, "_descargar",
+                            lambda *a, **k: pytest.fail("con la sección apagada no se descarga nada"))
+        assert main._brief_economia() == {}
+
+    def test_los_de_ayer_se_quitan_y_el_tope_se_aplica_despues(self, monkeypatch):
+        """Recortar antes de descartar dejaría el correo con la mitad de titulares los
+        días en que se repite algo, que es justo cuando más falta hacen los nuevos."""
+        monkeypatch.setattr(main, "BRIEF_ECONOMIA_MAX", 2)
+        economia = {"titulares": [{"titulo": f"Noticia {i}"} for i in range(4)], "fuentes": []}
+        previa = {"economia": [main._clave_titular({"titulo": "Noticia 0"})]}
+        nuevos = main._titulares_nuevos(economia, previa)
+        assert [t["titulo"] for t in nuevos["titulares"]] == ["Noticia 1", "Noticia 2"]
+        assert nuevos["repetidos_del_anterior"] == 1
+
+    def test_sin_instantanea_previa_no_se_descarta_nada(self):
+        economia = {"titulares": [{"titulo": "Noticia"}], "fuentes": []}
+        assert len(main._titulares_nuevos(economia, {})["titulares"]) == 1
+
+    def test_la_instantanea_guarda_los_titulares_contados(self):
+        inst = main._instantanea_brief({
+            "fecha": "2026-08-29", "salud": {}, "entregas": [], "entrenamiento": {},
+            "economia": {"titulares": [{"titulo": "Sube el euríbor"}]},
+        })
+        assert inst["economia"] == [main._clave_titular({"titulo": "Sube el euríbor"})]
+
+    def test_las_dos_secciones_van_en_el_correo(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-29", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+            "economia": {
+                "ventana_horas": 30, "repetidos_del_anterior": 2,
+                "titulares": [{"titulo": "El BCE deja los tipos", "fuente": "El País Economía",
+                               "fecha": "2026-08-28T16:40:00+00:00", "enlace": "https://e.test/1",
+                               "extracto": "Segunda reunión seguida"}],
+                "fuentes": [{"fuente": "El País Economía", "url": "https://a.test", "titulares": 1,
+                             "error": None},
+                            {"fuente": "https://b.test", "url": "https://b.test", "titulares": 0,
+                             "error": "no se pudo descargar"}],
+            },
+            "termino_economico": {"termino": "Interés compuesto",
+                                  "anteriores": ["Euríbor", "Prima de riesgo"], "total": 150},
+        })
+        assert "## ECONOMÍA — TITULARES" in texto and "últimas 30 h" in texto
+        assert "2 ya iban en el resumen anterior" in texto
+        assert "ayer 18:40" in texto, "la hora en ISO obliga a traducirla mentalmente"
+        assert "El BCE deja los tipos" in texto and "https://e.test/1" in texto
+        assert "CAÍDA (no se pudo descargar)" in texto
+        assert "## TÉRMINO ECONÓMICO DEL DÍA" in texto and "Interés compuesto" in texto
+        assert "Euríbor · Prima de riesgo" in texto
+
+    def test_sin_titulares_lo_dice(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-29", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+            "economia": {"ventana_horas": 30, "titulares": [], "fuentes": []},
+        })
+        assert "(ningún titular nuevo en la ventana)" in texto
+
+    def test_apagada_no_deja_secciones_a_medias(self):
+        """Por defecto en los tests está apagada: ni titulares ni término en el correo."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-08-29", "dia_semana": "sábado", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+        })
+        assert "## ECONOMÍA" not in texto and "## TÉRMINO" not in texto
+
+    def test_entera_desde_el_endpoint(self, client, auth_headers, graph_token, mock_requests, monkeypatch):
+        """El cableado completo: los feeds entran en el paralelo de construir_brief y el
+        descarte se hace contra la instantánea del resumen anterior."""
+        montar_fuentes(mock_requests)
+        mock_requests.add("GET", "/rest/v1/brief_envios", FakeResponse([{
+            "fecha": "2026-08-28",
+            "datos": {"economia": [main._clave_titular({"titulo": "Noticia de ayer"})]},
+        }]))
+        self._montar(monkeypatch, {"https://feed.test/a": self._rss([
+            ("Noticia de ayer", "https://a.test/1", "", 20),
+            ("Sube el euríbor", "https://a.test/2", "", 2),
+        ])})
+        d = client.get("/brief", headers=auth_headers).json()
+        assert [t["titulo"] for t in d["economia"]["titulares"]] == ["Sube el euríbor"]
+        assert d["economia"]["repetidos_del_anterior"] == 1
+        assert d["termino_economico"]["termino"]
+
+
+class TestTerminoEconomicoDelDia:
+    """Un término al día, sin tabla que lo recuerde: la fecha basta."""
+
+    def test_el_mismo_dia_da_siempre_el_mismo(self):
+        """Reenviar el correo (?forzar=1) no puede gastar el término de mañana."""
+        dia = date(2026, 8, 29)
+        assert main._termino_del_dia(dia)["termino"] == main._termino_del_dia(dia)["termino"]
+
+    def test_dos_dias_seguidos_no_repiten(self):
+        hoy, manana = date(2026, 8, 29), date(2026, 8, 30)
+        assert main._termino_del_dia(hoy)["termino"] != main._termino_del_dia(manana)["termino"]
+
+    def test_recorre_el_glosario_entero_antes_de_repetir(self):
+        """El paso es primo respecto al total justamente para esto: con paso 1 saldrían
+        cinco días seguidos de hipotecas, y con un paso cualquiera se repetirían términos
+        dejándose otros sin salir nunca."""
+        total = len(main._GLOSARIO_ECONOMIA)
+        inicio = date(2026, 1, 1)
+        salidos = {main._termino_del_dia(inicio + timedelta(days=n))["termino"]
+                   for n in range(total)}
+        assert len(salidos) == total
+
+    def test_no_encadena_el_mismo_bloque_tematico(self):
+        seguidos = [main._GLOSARIO_ECONOMIA.index(
+            main._termino_del_dia(date(2026, 8, 29) + timedelta(days=n))["termino"])
+            for n in range(3)]
+        assert all(abs(b - a) > 1 for a, b in zip(seguidos, seguidos[1:]))
+
+    def test_lleva_los_dos_anteriores(self):
+        """Quien redacta el correo no recuerda lo de ayer: sin esto no puede enlazarlo."""
+        hoy = date(2026, 8, 29)
+        g = main._termino_del_dia(hoy)
+        assert g["anteriores"] == [main._termino_del_dia(hoy - timedelta(days=1))["termino"],
+                                   main._termino_del_dia(hoy - timedelta(days=2))["termino"]]
+
+    def test_los_terminos_no_llevan_definicion(self):
+        """La explicación la escribe quien redacta el correo. Un diccionario aquí sería
+        mantenerlo en el backend para el único lector que no lo necesita."""
+        assert all(isinstance(t, str) and len(t) < 80 for t in main._GLOSARIO_ECONOMIA)
+        assert len(set(main._GLOSARIO_ECONOMIA)) == len(main._GLOSARIO_ECONOMIA)
 
 
 class TestInformeSemanal:

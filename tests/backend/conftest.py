@@ -43,6 +43,10 @@ os.environ.setdefault("JARVIS_PROACTIVO", "0")
 # última escritura de health_metrics, así que sumaría un GET a los asertos de "cuántas
 # llamadas se hicieron" de cualquier test del tick. Sus tests lo encienden a mano.
 os.environ.setdefault("INGESTA_VIGILAR", "0")
+# Y con la economía del resumen: sus titulares salen de feeds por HTTP, así que
+# encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
+# en una suite que no toca la red. Sus tests la encienden a mano.
+os.environ.setdefault("BRIEF_ECONOMIA", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada

@@ -156,6 +156,56 @@ backend está en `docs/BACKEND_PATRONES.md`.
   lo tiene que poder leer un modelo Y una persona, y esa doble función le pone un techo a
   lo que cabe dentro. Con el adjunto no hay que elegir.
 
+- **Economía: titulares y término del día** (`_brief_economia`, `_titulares_nuevos`,
+  `_termino_del_dia`, secciones `## ECONOMÍA — TITULARES` y `## TÉRMINO ECONÓMICO DEL
+  DÍA`, interruptor `BRIEF_ECONOMIA`): las dos únicas secciones del correo que no salen
+  de un sensor. Un puñado de titulares de economía general y un término económico
+  distinto cada día. **Siguen siendo dato crudo**: el correo manda el titular con su
+  medio, su hora, su extracto y su enlace, y del término manda la PALABRA, no la
+  explicación. Elegir qué noticia cuenta y explicar el término es de quien redacta el
+  briefing, que ya es un modelo — meter aquí un diccionario sería mantenerlo en el
+  backend para el único lector que no lo necesita, el mismo motivo por el que no hay
+  conclusiones de salud.
+  - **La relevancia la decide la FUENTE, no un filtro.** Lo que se pide es economía que
+    te toca (tipos, hipotecas, empleo, precios), no la balanza comercial de Zimbabue, y
+    eso se consigue eligiendo secciones de economía de medios generalistas españoles
+    (`BRIEF_ECONOMIA_FEEDS`). Filtrar por palabras clave sería interpretar, y además
+    tiraría justo la noticia que no se te ocurrió nombrar. Si lo que llega no sirve, se
+    cambia la fuente.
+  - **Cada fuente sale en el correo con cuántos titulares aportó.** Un feed que muere
+    (una URL que el medio cambia sin avisar) no vacía la sección: la deja corta, y sin
+    esa línea eso se lee como un día tranquilo en vez de como una avería. Un 0 sostenido
+    o un `CAÍDA (...)` es la única forma de enterarse. Es también cómo se comprueban las
+    URLs por defecto sin desplegar nada: `GET /brief` y mirar `economia.fuentes`.
+  - **El feed se parsea con expresiones regulares, no con `xml.etree`.** `xml.etree` es
+    vulnerable a las bombas de entidades y `defusedxml` sería una dependencia nueva para
+    leer cuatro campos. Es tosco a propósito, como `_html_a_texto`. Se descarga con
+    `_descargar`, que es el único cliente saliente que valida SSRF en cada salto y corta
+    por bytes: las URLs vienen de configuración, pero un redirect no.
+  - **Los titulares del resumen anterior se descartan, y el tope se aplica DESPUÉS.** La
+    ventana es de `BRIEF_ECONOMIA_HORAS` (30) y no de 24 porque con 24 justas una noticia
+    publicada ayer a la hora de tu correo no entra hoy y ya no entra nunca. Ese solape lo
+    limpia comparar contra los titulares que se mandaron de verdad (`brief_envios.datos`,
+    la misma instantánea del diff), que es exacto y no depende de la hora a la que te
+    despiertes. Se comparan por titular normalizado y no por URL: la misma noticia llega
+    de dos medios con dos enlaces, y el mismo enlace cambia de parámetros de campaña
+    entre dos descargas. Y recortar antes de descartar dejaría el correo con la mitad de
+    titulares justo los días en que se repite algo.
+  - **El término del día no tiene tabla: lo decide la fecha.** `(ordinal del día × paso)
+    % total` sobre `_GLOSARIO_ECONOMIA`. Así es idempotente (reenviar el correo o probar
+    con `?forzar=1` no gasta el de mañana), sobrevive a un Supabase caído y no necesita
+    migración. El paso es un número primo respecto al total en vez de 1 porque la lista
+    está agrupada por temas: de uno en uno saldrían cinco días seguidos de hipotecas.
+    Se elige a partir del total (`_paso_glosario`) para que añadir términos no rompa la
+    propiedad de recorrer la lista entera sin repetir ninguno. Van también **los dos
+    términos anteriores**: quien redacta el correo no recuerda lo que escribió ayer, y sin
+    eso dos días seguidos se explican desde cero en vez de enlazarse.
+  - **Los dos bloques son independientes**: el término no toca la red, así que un feed
+    caído no se lo lleva por delante. `BRIEF_ECONOMIA=0` apaga los dos.
+  - **Falta la otra mitad, y no vive en este repositorio**: la rutina de Claude Code que
+    redacta el briefing tiene que saber que estas secciones existen. Sin tocar su prompt,
+    el correo llega con los titulares y el término dentro y el briefing no los cuenta.
+
 - **Informe semanal** (`construir_informe_semanal`, `render_informe_texto`,
   `_enviar_informe_si_toca`, tabla `informe_envios`): los domingos (`INFORME_DIA`), medias
   **por semana** de las últimas `INFORME_SEMANAS`. Una media de 30 días dice dónde estás;
