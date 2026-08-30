@@ -140,6 +140,9 @@ Finance, sin autenticación): `YAHOO_FINANCE_API_URL`, `ETF_PRECIO_TTL_MINUTOS`.
 `INFORME_SEMANAL`, `INFORME_DIA`, `INFORME_HORA`, `INFORME_SEMANAS`,
 `BRIEF_DESPERTAR_DESDE`, `BRIEF_DESPERTAR_HASTA`, `BRIEF_HORA_TOPE`,
 `BRIEF_DISPARA_SUENO`,
+`BRIEF_ECONOMIA`, `BRIEF_ECONOMIA_FEEDS`, `BRIEF_ECONOMIA_MAX`,
+`BRIEF_ECONOMIA_HORAS` (los titulares de economía y el término del día
+del resumen — ver `docs/BRIEF.md`),
 `RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
 `REVISION_TOKEN`, `ARREGLO_FIRE_URL`, `ARREGLO_FIRE_TOKEN` (la revisión nocturna
 accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se puede

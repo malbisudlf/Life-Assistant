@@ -15,6 +15,7 @@ import os
 import sys
 import json
 import re
+import math
 import time
 import hmac
 import atexit
@@ -25,6 +26,7 @@ import contextvars
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlsplit, urljoin, parse_qs
 from types import SimpleNamespace
 import html as html_mod
@@ -284,6 +286,32 @@ RUTINA_BETA       = os.getenv("RUTINA_BETA", "experimental-cc-routine-2026-04-01
 # propia rutina: despertarse a las 6 no debe traer el briefing a las 6, porque recoge
 # newsletters que a esa hora todavía no han llegado.
 BRIEF_RUTINA_DESDE = os.getenv("BRIEF_RUTINA_DESDE", "08:00")
+
+# Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
+# titulares de economía general y un término económico distinto cada día. Aquí solo se
+# RECOGEN (titular, fuente, hora, enlace, extracto y qué término toca hoy); quién elige
+# los que cuentan y quién explica el término es la rutina que redacta el correo, que es
+# el único modelo de todo este camino.
+BRIEF_ECONOMIA = _flag("BRIEF_ECONOMIA")
+# La elección de los feeds es la ÚNICA criba de relevancia que hay: son secciones de
+# economía de medios generalistas españoles, así que lo que traen es economía que a uno
+# le toca (tipos, hipotecas, empleo, precios) y no la balanza comercial de Zimbabue.
+# Filtrar por palabras clave sería interpretar, y aquí no se interpreta: si lo que llega
+# no sirve, se cambia la fuente. Separados por comas.
+BRIEF_ECONOMIA_FEEDS = os.getenv("BRIEF_ECONOMIA_FEEDS", ",".join((
+    "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/section/economia/portada",
+    "https://feeds.elpais.com/mrss-s/pages/cd/site/cincodias.elpais.com/portada",
+    "https://api2.rtve.es/rss/temas_economia.xml",
+)))
+BRIEF_ECONOMIA_MAX = int(os.getenv("BRIEF_ECONOMIA_MAX", "8"))
+# Ventana de los titulares. Más de 24 h a propósito: con 24 justas, una noticia
+# publicada a las 07:05 de ayer no entra en el correo de hoy si sale a las 07:00 y ya no
+# entra nunca. El solape que eso provoca lo limpia el descarte contra los titulares del
+# resumen anterior, que es exacto — no depende de la hora a la que te despiertes.
+BRIEF_ECONOMIA_HORAS = int(os.getenv("BRIEF_ECONOMIA_HORAS", "30"))
+# Tope por feed antes de mezclarlos: un feed con 200 entradas no debe decidir él solo
+# qué titulares se ven.
+BRIEF_ECONOMIA_POR_FUENTE = 25
 
 # Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
@@ -5097,6 +5125,370 @@ def _brief_salud() -> dict:
     return salud
 
 
+# ── Economía: titulares del día y término económico ───────────────────────────
+# Dos secciones que no salen de ningún sensor y que se comportan igual que el resto del
+# correo: DATO CRUDO. Los titulares se recogen de feeds y se mandan tal cual (titular,
+# medio, hora, extracto y enlace); el término del día es una palabra, no una
+# explicación. Quien elige qué noticias cuentan y quien explica el término es la rutina
+# que redacta el correo — igual que no se calculan aquí las conclusiones de salud.
+#
+# Tres decisiones que no son decoración:
+#  - El feed se parsea con expresiones regulares, no con un parser XML: `xml.etree`
+#    es vulnerable a las bombas de entidades ("billion laughs") y defusedxml sería una
+#    dependencia nueva para leer cuatro campos. Esto es tosco a propósito, como
+#    `_html_a_texto`: lo que hace falta es título, enlace, fecha y extracto.
+#  - Se descarga con `_descargar`, el único cliente saliente del proyecto que valida
+#    SSRF en cada salto y corta por bytes. Las URLs vienen de configuración, pero un
+#    redirect no lo controla la configuración.
+#  - Un feed caído no vacía la sección, y la sección no puede tumbar el correo. Cada
+#    fuente sale en el correo con cuántos titulares aportó: un 0 es la única forma de
+#    enterarse de que una URL lleva semanas muerta sin que nadie lo note.
+
+# Términos que se explican, uno por día. No llevan definición a propósito: la escribe
+# quien redacta el correo, que ya es un modelo, y meterla aquí sería mantener un
+# diccionario en el backend para el único lector que no lo necesita.
+_GLOSARIO_ECONOMIA = (
+    # Dinero, precios y tipos
+    "Interés compuesto",
+    "Interés simple",
+    "TIN y TAE (en qué se diferencian)",
+    "Euríbor",
+    "Los tipos de interés oficiales del BCE",
+    "La facilidad de depósito del BCE",
+    "Inflación",
+    "Inflación subyacente",
+    "IPC (Índice de Precios de Consumo)",
+    "Deflación",
+    "Estanflación",
+    "Poder adquisitivo",
+    "Salario real frente a salario nominal",
+    "Tipo de interés real (nominal menos inflación)",
+    "Revalorización con el IPC (indexación)",
+    "Valor temporal del dinero",
+    "Coste de oportunidad",
+    # Vivienda e hipoteca
+    "Hipoteca a tipo fijo, variable y mixta",
+    "El diferencial de una hipoteca",
+    "El sistema de amortización francés",
+    "Amortizar anticipadamente: bajar cuota o bajar plazo",
+    "Subrogación de hipoteca",
+    "Novación de hipoteca",
+    "Cláusula suelo",
+    "Loan to value (LTV)",
+    "La tasación de una vivienda",
+    "Los gastos de comprar una casa (ITP, AJD, notaría, registro)",
+    "El IBI",
+    "La plusvalía municipal",
+    "Rentabilidad bruta y neta de un alquiler",
+    "Derrama de una comunidad de propietarios",
+    "Avalar un préstamo",
+    "El seguro de vida vinculado a la hipoteca",
+    # Bancos, crédito y pagos
+    "Comisión de mantenimiento de una cuenta",
+    "Descubierto en cuenta (los números rojos)",
+    "Tarjeta revolving",
+    "Préstamo personal frente a crédito al consumo",
+    "El periodo de carencia de un préstamo",
+    "Cuadro de amortización: cuánto va a capital y cuánto a intereses",
+    "Los ficheros de morosos (ASNEF)",
+    "El scoring crediticio",
+    "El Fondo de Garantía de Depósitos",
+    "SEPA y las transferencias inmediatas",
+    "Domiciliación y devolución de un recibo",
+    "Cuenta remunerada frente a depósito a plazo fijo",
+    "Fondo monetario",
+    # Inversión
+    "Fondo indexado",
+    "ETF",
+    "Gestión activa y gestión pasiva",
+    "La comisión de gestión y el TER",
+    "Valor liquidativo de un fondo",
+    "Traspasar fondos sin tributar (diferimiento fiscal)",
+    "Aportar cada mes pase lo que pase (dollar cost averaging)",
+    "Rebalancear una cartera",
+    "Diversificación",
+    "Renta fija y renta variable",
+    "Bono y cupón",
+    "Letras del Tesoro",
+    "La prima de riesgo",
+    "El rating crediticio de un país o una empresa",
+    "La duración de un bono",
+    "La curva de tipos",
+    "Dividendo",
+    "Capitalización bursátil",
+    "El PER de una acción",
+    "Volatilidad",
+    "Qué es un índice bursátil (IBEX 35, S&P 500, MSCI World)",
+    "Mercado alcista y mercado bajista",
+    "Corrección, desplome y burbuja",
+    "La liquidez de una inversión",
+    "Riesgo divisa",
+    "Apalancamiento",
+    "Ponerse corto (vender en corto)",
+    "Comisión de custodia de un bróker",
+    "Robo-advisor (gestor automatizado)",
+    "El perfil de riesgo de un inversor",
+    "El horizonte temporal de una inversión",
+    "Rentabilidad pasada y rentabilidad esperada",
+    "TIR (tasa interna de retorno)",
+    "Rentabilidad anualizada (CAGR)",
+    "Interés compuesto aplicado a las comisiones",
+    "Los productos con garantía del capital y su letra pequeña",
+    "Criptomoneda: por qué se mueve tanto su precio",
+    "Stablecoin",
+    "Crowdlending y crowdfunding",
+    # Impuestos
+    "El IRPF y sus tramos",
+    "Tipo marginal y tipo efectivo",
+    "Retención a cuenta en la nómina",
+    "Base imponible general y base del ahorro",
+    "Por qué la renta sale a devolver o a ingresar",
+    "Deducción, reducción y desgravación",
+    "Plan de pensiones y su límite de aportación",
+    "Plan de pensiones de empleo",
+    "El IVA y sus tipos",
+    "El impuesto de sociedades",
+    "El impuesto de sucesiones y donaciones",
+    "Ganancia y pérdida patrimonial",
+    "La regla de los dos meses al vender acciones con pérdidas",
+    "El modelo 720 (bienes en el extranjero)",
+    "La exención por reinversión en vivienda habitual",
+    # Trabajo
+    "Salario bruto y salario neto",
+    "La base de cotización",
+    "Qué se paga a la Seguridad Social y quién lo paga",
+    "El SMI",
+    "El convenio colectivo",
+    "Devengos y deducciones de una nómina",
+    "Pagas extra prorrateadas",
+    "Finiquito e indemnización",
+    "Contrato fijo discontinuo",
+    "La cuota de autónomos por tramos de ingresos",
+    "Estimación directa y estimación objetiva (módulos)",
+    "La prestación por desempleo",
+    "La vida laboral y los años cotizados",
+    "La base reguladora de la jubilación",
+    "Jubilación anticipada y jubilación demorada",
+    "ERTE y ERE",
+    # Macro
+    "PIB",
+    "PIB per cápita",
+    "Recesión técnica",
+    "Déficit público",
+    "Deuda pública sobre PIB",
+    "Los Presupuestos Generales del Estado",
+    "Política monetaria y política fiscal",
+    "Expansión cuantitativa (QE)",
+    "Qué hace el Banco Central Europeo",
+    "Qué hace la Reserva Federal",
+    "Tipo de cambio",
+    "Devaluación de una moneda",
+    "Balanza comercial",
+    "Balanza por cuenta corriente",
+    "Productividad",
+    "La EPA y el paro registrado",
+    "Tasa de actividad",
+    "La espiral precios-salarios",
+    "Renta media y renta mediana",
+    "El coeficiente de Gini",
+    "Elasticidad de la demanda",
+    "Externalidad",
+    "Monopolio y oligopolio",
+    "Economía sumergida",
+    # Dinero del día a día
+    "El fondo de emergencia",
+    "El presupuesto 50/30/20",
+    "La regla del 4 %",
+    "Independencia financiera (FIRE)",
+    "Inflación del estilo de vida",
+    "El gasto hormiga",
+    "La prima y la franquicia de un seguro",
+    "Coberturas y exclusiones de una póliza",
+    "Nuda propiedad y usufructo",
+    "Testamento y herencia: qué hay que saber antes",
+)
+
+
+def _paso_glosario(total: int) -> int:
+    """Cuántas posiciones se avanza cada día en el glosario.
+
+    Avanzando de uno en uno saldrían cinco días seguidos de hipotecas y luego cinco de
+    impuestos, porque la lista está agrupada por temas. Con un paso primo respecto al
+    total se recorre la lista ENTERA sin repetir ninguno (el ciclo dura `total` días)
+    pero saltando de bloque en bloque. Se elige a partir del total en vez de fijarlo
+    para que añadir términos no rompa la propiedad sin que nadie se entere."""
+    for paso in (57, 53, 47, 43, 41, 37, 31, 29, 23, 19, 17, 13, 11, 7):
+        if math.gcd(paso, total) == 1:
+            return paso
+    return 1
+
+
+def _termino_del_dia(hoy: date) -> dict:
+    """El término que toca hoy, y los dos anteriores.
+
+    Sin estado en ninguna tabla: la fecha basta. Eso lo hace idempotente —reenviar el
+    correo de un día da el mismo término, y probar `?forzar=1` no gasta el de mañana— y
+    lo deja funcionando aunque Supabase esté caído. Los dos anteriores van porque quien
+    redacta el correo no recuerda lo que escribió ayer, y así puede enlazarlo en vez de
+    empezar de cero cada día."""
+    total = len(_GLOSARIO_ECONOMIA)
+    if not total:
+        return {}
+    paso = _paso_glosario(total)
+
+    def _de(dia: date) -> str:
+        return _GLOSARIO_ECONOMIA[(dia.toordinal() * paso) % total]
+
+    return {
+        "termino":    _de(hoy),
+        "anteriores": [_de(hoy - timedelta(days=n)) for n in (1, 2)],
+        "total":      total,
+    }
+
+
+_RE_ENTRADA  = re.compile(r"<(item|entry)\b[^>]*>(.*?)</\1>", re.S | re.I)
+_RE_CDATA    = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+_RE_HREF     = re.compile(r"<link\b[^>]*\bhref=[\"']([^\"']+)[\"']", re.I)
+_RE_CANAL    = re.compile(r"<(?:channel|feed)\b[^>]*>(.*?)<(?:item|entry)\b", re.S | re.I)
+
+
+def _campo_feed(bloque: str, *nombres: str) -> str:
+    """Primer campo con contenido de los que se le pidan, ya en texto plano."""
+    for nombre in nombres:
+        m = re.search(rf"<{nombre}\b[^>]*>(.*?)</{nombre}>", bloque, re.S | re.I)
+        if m and m.group(1).strip():
+            return _texto_feed(m.group(1))
+    return ""
+
+
+def _texto_feed(bruto: str) -> str:
+    """CDATA fuera y el resto por el mismo camino que cualquier HTML de la web.
+
+    Se desescapa ANTES de quitar etiquetas, no solo después: media docena de medios
+    mandan el extracto con el HTML escapado (`&lt;p&gt;`), y desescapando al final esas
+    etiquetas aparecen en el correo tal cual en vez de desaparecer."""
+    return _html_a_texto(html_mod.unescape(_RE_CDATA.sub(r"\1", bruto))).strip()
+
+
+def _fecha_feed(texto: str):
+    """La fecha de una entrada, en UTC. RSS la escribe en RFC 822 y Atom en ISO."""
+    if not texto:
+        return None
+    try:
+        fecha = parsedate_to_datetime(texto)
+    except (TypeError, ValueError):
+        try:
+            fecha = datetime.fromisoformat(texto.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if fecha is None:
+        return None
+    if fecha.tzinfo is None:
+        fecha = fecha.replace(tzinfo=timezone.utc)
+    return fecha.astimezone(timezone.utc)
+
+
+def _leer_feed(url: str) -> dict:
+    """Un feed convertido en titulares. Nunca lanza: devuelve el error dentro."""
+    try:
+        bajada = _descargar(url)
+        if not bajada:
+            return {"url": url, "fuente": url, "titulares": [], "error": "no se pudo descargar"}
+        _, crudo = bajada
+        cabecera = _RE_CANAL.search(crudo)
+        fuente   = _campo_feed(cabecera.group(1), "title") if cabecera else ""
+        titulares = []
+        for m in _RE_ENTRADA.finditer(crudo):
+            bloque = m.group(2)
+            titulo = _campo_feed(bloque, "title")
+            if not titulo:
+                continue
+            enlace = _campo_feed(bloque, "link", "guid")
+            if not enlace.startswith("http"):
+                href = _RE_HREF.search(bloque)
+                enlace = href.group(1) if href else ""
+            fecha = _fecha_feed(_campo_feed(bloque, "pubDate", "published", "updated", "date"))
+            titulares.append({
+                "titulo":   titulo[:300],
+                "enlace":   enlace,
+                "fuente":   fuente or url,
+                "fecha":    fecha.isoformat() if fecha else None,
+                "extracto": _campo_feed(bloque, "description", "summary", "content")[:400] or None,
+            })
+            if len(titulares) >= BRIEF_ECONOMIA_POR_FUENTE:
+                break
+        return {"url": url, "fuente": fuente or url, "titulares": titulares, "error": None}
+    except Exception as e:
+        logger.warning("Resumen diario: feed de economía %s no disponible (%s)", url, e)
+        return {"url": url, "fuente": url, "titulares": [], "error": str(e)[:120]}
+
+
+def _clave_titular(t: dict) -> str:
+    """Con qué se decide que dos titulares son el mismo. El enlace no vale por sí solo:
+    la misma noticia llega de dos medios con dos URLs, y la misma URL cambia de
+    parámetros de campaña entre una descarga y otra."""
+    titulo = unicodedata.normalize("NFKD", (t.get("titulo") or "").lower())
+    return re.sub(r"[^a-z0-9]+", "", titulo.encode("ascii", "ignore").decode())
+
+
+def _brief_economia() -> dict:
+    """Titulares de economía de las últimas BRIEF_ECONOMIA_HORAS, sin recortar todavía:
+    el recorte va después de quitar los que ya salieron en el resumen anterior, para que
+    descartar tres no deje el correo con cinco."""
+    if not BRIEF_ECONOMIA:
+        return {}
+    urls = [u.strip() for u in BRIEF_ECONOMIA_FEEDS.split(",") if u.strip()]
+    if not urls:
+        return {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(urls))) as pool:
+            leidos = list(pool.map(_leer_feed, urls))
+    except Exception as e:
+        logger.warning("Resumen diario: economía no disponible (%s)", e)
+        return {}
+
+    limite = datetime.now(timezone.utc) - timedelta(hours=BRIEF_ECONOMIA_HORAS)
+    titulares, vistos, fuentes = [], set(), []
+    for leido in leidos:
+        aportados = 0
+        for t in leido["titulares"]:
+            # Ya viene normalizada a UTC desde `_leer_feed`: aquí solo se relee.
+            fecha = datetime.fromisoformat(t["fecha"]) if t.get("fecha") else None
+            # Sin fecha se deja pasar: el feed puede no ponerla y descartarlo por eso
+            # dejaría la sección vacía sin decir por qué. El descarte contra el resumen
+            # anterior es lo que impide que se repita mañana.
+            if fecha is not None and fecha < limite:
+                continue
+            clave = _clave_titular(t)
+            if not clave or clave in vistos:
+                continue
+            vistos.add(clave)
+            titulares.append(t)
+            aportados += 1
+        fuentes.append({"fuente": leido["fuente"], "url": leido["url"],
+                        "titulares": aportados, "error": leido["error"]})
+
+    # Lo más reciente primero; los que no traen fecha, al final: no se sabe si son de hoy.
+    titulares.sort(key=lambda t: t["fecha"] or "", reverse=True)
+    return {"titulares": titulares, "fuentes": fuentes, "ventana_horas": BRIEF_ECONOMIA_HORAS}
+
+
+def _titulares_nuevos(economia: dict, previa: dict) -> dict:
+    """Quita los titulares que ya iban en el resumen anterior y recorta al tope.
+
+    La ventana es más ancha que un día a propósito (ver BRIEF_ECONOMIA_HORAS), así que
+    dos correos seguidos se solapan. Comparar contra lo que se mandó de verdad es exacto
+    y no depende de la hora a la que salga el correo, que es justamente lo que aquí
+    cambia cada día."""
+    if not economia:
+        return economia
+    ya_vistos = set((previa or {}).get("economia") or [])
+    frescos = [t for t in economia["titulares"] if _clave_titular(t) not in ya_vistos]
+    return {**economia,
+            "titulares": frescos[:BRIEF_ECONOMIA_MAX],
+            "repetidos_del_anterior": len(economia["titulares"]) - len(frescos)}
+
+
 # ── Qué ha cambiado desde el último resumen ───────────────────────────────────
 # El correo diario es idéntico al 90% en días consecutivos, y lo que hace falta leer
 # entero es el 10% restante. Para poder decirlo hay que recordar el de ayer: se guarda
@@ -5121,6 +5513,10 @@ def _instantanea_brief(datos: dict) -> dict:
         "entreno":   {"sesiones": entren.get("sesiones_desde_cobro"),
                       "importe":  entren.get("importe_pendiente")},
         "reloj":     {"ultimo": reloj.get("ultimo"), "racha": reloj.get("racha_sin_reloj")},
+        # Los titulares que se contaron, por su clave, no por su URL: es lo que mañana
+        # decide qué es noticia vieja. Ocupan una línea y tienen identidad de un día
+        # para otro, que es el criterio de esta instantánea.
+        "economia":  [_clave_titular(t) for t in ((datos.get("economia") or {}).get("titulares") or [])],
     }
 
 
@@ -5230,19 +5626,25 @@ def construir_brief() -> dict:
     # usa ese parámetro, lo resuelve FastAPI solo cuando entra por HTTP. Así el resumen
     # hereda la normalización de fechas, el filtrado de alud_url y el manejo de errores
     # que ya tienen, en vez de duplicar sus consultas.
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    hoy = datetime.now(LOCAL_TZ).date()
+    with ThreadPoolExecutor(max_workers=8) as pool:
         f_eventos = pool.submit(get_events, credentials=None)
         f_clases  = pool.submit(get_class_events, credentials=None)
         f_clima   = pool.submit(_brief_clima)
         f_salud   = pool.submit(_brief_salud)
         f_entren  = pool.submit(_brief_entrenamiento)
         f_presen  = pool.submit(_brief_presencia)
+        f_econom  = pool.submit(_brief_economia)
+        # La instantánea de ayer entra en el paralelo porque ahora la usan DOS cosas: el
+        # diff de siempre y el descarte de titulares ya contados. Pedirla después sería
+        # un viaje a Supabase en serie por delante del arranque en frío de Fly.
+        f_previa  = pool.submit(_instantanea_previa, hoy.isoformat())
         eventos = _sin_error(f_eventos.result(), "events")
         clases  = _sin_error(f_clases.result(), "events")
         clima, salud, entrenamiento = f_clima.result(), f_salud.result(), f_entren.result()
         presencia = f_presen.result()
-
-    hoy = datetime.now(LOCAL_TZ).date()
+        previa    = f_previa.result()
+        economia  = _titulares_nuevos(f_econom.result(), previa)
 
     def _es_hoy(ev):
         d = _dias_hasta(ev.get("start", ""))
@@ -5294,8 +5696,12 @@ def construir_brief() -> dict:
         "salud":         salud,
         "entrenamiento": entrenamiento,
         "presencia":     presencia,
+        "economia":      economia,
+        # El término no depende de la red ni de Supabase: es la fecha y una lista. Va
+        # aparte de los titulares para que un feed caído no se lo lleve por delante.
+        "termino_economico": _termino_del_dia(hoy) if BRIEF_ECONOMIA else {},
     }
-    cambios = _cambios_desde(_instantanea_previa(hoy.isoformat()), datos)
+    cambios = _cambios_desde(previa, datos)
     if cambios:
         datos["cambios"] = cambios
     return datos
@@ -5395,6 +5801,20 @@ def _hora_local(iso: str | None) -> str:
         return "--:--"
 
 
+def _cuando_titular(iso: str | None, hoy: str) -> str:
+    """Cuándo se publicó, relativo al día del correo: "ayer 18:40" se lee de un vistazo
+    y "2026-08-28T16:40:00+00:00" hay que traducirlo mentalmente cada vez."""
+    if not iso:
+        return "sin fecha"
+    try:
+        cuando = datetime.fromisoformat(iso).astimezone(LOCAL_TZ)
+        dias   = (date.fromisoformat(hoy) - cuando.date()).days
+    except (ValueError, TypeError):
+        return "sin fecha"
+    etiqueta = {0: "hoy", 1: "ayer"}.get(dias) or cuando.date().isoformat()
+    return f"{etiqueta} {cuando.strftime('%H:%M')}"
+
+
 def render_brief_texto(d: dict) -> str:
     """Texto plano del correo. Datos etiquetados, sin interpretar: lo lee un modelo
     que redacta el correo diario, y de paso es legible si lo abres tú."""
@@ -5475,6 +5895,42 @@ def render_brief_texto(d: dict) -> str:
     else:
         L.append("  (no disponible)")
     L.append("")
+
+    # Las dos únicas secciones que no salen de un sensor. Los titulares van en crudo,
+    # con su medio y su hora: elegir cuál cuenta es de quien redacta el correo. Y el
+    # término del día es una palabra, no una explicación, por lo mismo.
+    e = d.get("economia") or {}
+    if e:
+        cabecera = f"## ECONOMÍA — TITULARES  (últimas {e.get('ventana_horas')} h"
+        if e.get("repetidos_del_anterior"):
+            cabecera += f"; {e['repetidos_del_anterior']} ya iban en el resumen anterior, quitados"
+        L.append(cabecera + ")")
+        # Cada fuente con lo que aportó hoy. Un 0 sostenido es la única forma de
+        # enterarse de que una URL lleva semanas muerta: sin esto, la sección se queda
+        # corta y parece que no hubo noticias.
+        for f in e.get("fuentes", []):
+            estado = f"CAÍDA ({f['error']})" if f.get("error") else f"{f.get('titulares', 0)} titulares"
+            L.append(f"   · {f.get('fuente')}: {estado}")
+        for t in e.get("titulares", []):
+            L.append(f"  [{_cuando_titular(t.get('fecha'), d['fecha'])}] {t.get('titulo')}"
+                     f"  — {t.get('fuente')}")
+            if t.get("extracto"):
+                L.append(f"      {t['extracto']}")
+            if t.get("enlace"):
+                L.append(f"      {t['enlace']}")
+        if not e.get("titulares"):
+            L.append("  (ningún titular nuevo en la ventana)")
+        L.append("")
+
+    g = d.get("termino_economico") or {}
+    if g:
+        L.append("## TÉRMINO ECONÓMICO DEL DÍA")
+        L.append(f"  {g.get('termino')}")
+        if g.get("anteriores"):
+            # Quien redacta no recuerda lo de ayer: sin esto, dos días seguidos pueden
+            # explicar lo mismo desde cero en vez de enlazarlo.
+            L.append(f"  (los dos anteriores, ya explicados: {' · '.join(g['anteriores'])})")
+        L.append("")
 
     p = d.get("presencia") or {}
     L.append("## UBICACIÓN")
