@@ -1,0 +1,71 @@
+name: Avisar de que el CI se ha roto
+
+# Cuando el CI se pone rojo en `main`, esto se lo cuenta al backend, que lanza una sesión
+# a arreglarlo SIN preguntar nada. La pregunta llega después, cuando hay un PR con el CI
+# en verde esperando permiso para desplegarse (`pr-listo.yml`).
+#
+# El flujo entero está en docs/AVERIAS.md. Aquí solo importan dos cosas:
+#
+# - **Solo `main`.** Un CI rojo en una rama de trabajo es normal — estás trabajando. Lo
+#   que no es normal, y es lo único que justifica lanzar un agente solo, es que la rama
+#   por defecto se quede rota.
+#
+# - **`workflow_run` y no `push`.** Es la única forma de reaccionar al RESULTADO del CI
+#   en vez de a que alguien empuje. Ojo con lo de siempre en este disparador: se ejecuta
+#   con el workflow de la rama por defecto, así que mientras esto viva en una rama de
+#   trabajo no dispara nada, ni aunque el CI falle.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# Dos runs del mismo CI no pueden lanzar dos agentes. El backend además lo para solo: el
+# id de la avería sale del run, así que el segundo choca contra la clave primaria.
+concurrency:
+  group: ci-averiado-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  avisar:
+    name: Avisar al backend
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /averia
+        env:
+          BACKEND_URL:    ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN: ${{ secrets.REVISION_TOKEN }}
+          RUN_ID:         ${{ github.event.workflow_run.id }}
+          RUN_URL:        ${{ github.event.workflow_run.html_url }}
+          CABEZA:         ${{ github.event.workflow_run.head_sha }}
+        # El detalle va por variable de entorno y entra en el JSON con jq, nunca
+        # interpolado en el script: mismo criterio que `revision-aviso.yml`.
+        #
+        # --retry con --retry-connrefused porque la máquina de Fly escala a cero y esta
+        # puede ser la primera petición en horas: paga el arranque en frío.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN." >&2
+            echo "Ver docs/AVERIAS.md." >&2
+            exit 1
+          fi
+
+          DETALLE="el CI ha fallado en main (commit ${CABEZA:0:7})"
+          CUERPO=$(jq -n --arg r "$RUN_ID" --arg d "$DETALLE" \
+            '{origen: "ci", referencia: $r, detalle: $d}')
+
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/averia" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 180 \
+            --retry 3 --retry-delay 15 --retry-connrefused \
+            -d "$CUERPO")
+
+          echo "Avería avisada para el run $RUN_ID: $RESPUESTA"
+          echo "CI roto en \`main\` ($RUN_URL): \`$RESPUESTA\`" >> "$GITHUB_STEP_SUMMARY"

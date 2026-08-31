@@ -1,0 +1,87 @@
+name: Avisar de que el arreglo está listo
+
+# La otra mitad de `ci-averiado.yml`. Cuando el CI termina EN VERDE sobre un PR de una
+# rama de arreglo, esto se lo cuenta al backend, que te avisa al móvil y te llama por
+# teléfono: «he detectado un fallo, ya lo he corregido, ¿lo despliego?».
+#
+# Que quien avise sea el CI y no la sesión que arregló es la garantía que sostiene todo
+# el camino: **nunca se pide permiso para desplegar algo sin verificar**. La sesión puede
+# creer que ha terminado; el CI lo sabe. Por eso este workflow cuelga del resultado del
+# CI y no de que se abra el PR.
+#
+# El backend decide si ese PR cierra alguna avería o no (lo normal es que no: la mayoría
+# de los PR los abres tú). Aquí no se filtra por eso — filtrar en los dos sitios sería
+# tener dos definiciones de "PR de arreglo" que se separan en cuanto alguien toque una.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+concurrency:
+  group: pr-listo-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  avisar:
+    name: Avisar al backend
+    # Verde, y sobre una rama de trabajo de las que abren los agentes (`claude/...`, la
+    # convención de CLAUDE.md). Sin este segundo filtro, cada CI verde de cualquier rama
+    # despertaría a Fly para que contestara que no hay nada que hacer.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Buscar el PR de la rama
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ github.repository }}
+          RAMA:     ${{ github.event.workflow_run.head_branch }}
+        # El payload de `workflow_run` trae `pull_requests`, pero llega vacío en varios
+        # casos reales (PR desde un fork, y a veces sin más). Preguntarlo por la API es
+        # la forma que no se cae: si no hay PR abierto para esa rama, no hay nada que
+        # avisar y el paso siguiente se salta.
+        run: |
+          set -euo pipefail
+          NUMERO=$(gh pr list --repo "$REPO" --head "$RAMA" --state open \
+                     --json number --jq '.[0].number // empty')
+          if [ -z "$NUMERO" ]; then
+            echo "La rama $RAMA no tiene PR abierto; no hay nada que avisar."
+            echo "numero=" >> "$GITHUB_OUTPUT"
+          else
+            echo "PR encontrado: #$NUMERO"
+            echo "numero=$NUMERO" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: POST /revision/pr-listo
+        if: steps.pr.outputs.numero != ''
+        env:
+          BACKEND_URL:    ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN: ${{ secrets.REVISION_TOKEN }}
+          PR_NUMERO:      ${{ steps.pr.outputs.numero }}
+          RAMA:           ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN." >&2
+            echo "Ver docs/AVERIAS.md." >&2
+            exit 1
+          fi
+
+          CUERPO=$(jq -n --argjson n "$PR_NUMERO" --arg t "$RAMA" '{pr: $n, titulo: $t}')
+
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/revision/pr-listo" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 180 \
+            --retry 3 --retry-delay 15 --retry-connrefused \
+            -d "$CUERPO")
+
+          echo "PR #$PR_NUMERO avisado: $RESPUESTA"
+          echo "PR #$PR_NUMERO listo: \`$RESPUESTA\`" >> "$GITHUB_STEP_SUMMARY"

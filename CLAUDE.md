@@ -165,6 +165,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
+| `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. Incluye el puente de voz de Twilio, que es la única parte asíncrona del backend |
 | `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 | `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
@@ -300,7 +301,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260816_health_fuente`, `20260817_vigilante_estado`,
 `20260818_avisos_gobierno`, `20260819_vigilancias`,
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
-`20260824_salud_ajustes`, `20260830_avisos_entidades`.
+`20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`.
 
 ## Convenciones
 
@@ -348,3 +349,8 @@ También está el workflow `Deploy backend (Fly.io)`
   es manual — `fly deploy` desde `backend/`, o el workflow `Deploy backend (Fly.io)`
   (`.github/workflows/deploy-backend.yml`, `workflow_dispatch`; usa el secret
   `FLY_API_TOKEN`). Nunca en automático al hacer push.
+  - **La única excepción, y no es una excepción a esto**: el camino de las averías
+    (`docs/AVERIAS.md`) dispara ese mismo workflow cuando el usuario da el permiso desde
+    el móvil o por teléfono. Lo que lo lanza es una persona contestando, no un push ni
+    una sesión: **una sesión de Claude sigue sin desplegar nunca**, ni la que arregla la
+    avería (su skill se lo prohíbe explícitamente) ni ninguna otra.

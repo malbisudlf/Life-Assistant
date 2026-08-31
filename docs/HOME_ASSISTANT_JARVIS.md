@@ -299,6 +299,48 @@ rest_command:
       X-Auth-Token: !secret ha_poll_token
 ```
 
+Y la del botón **«Desplegar»**, que es la cuarta y la única que toca **producción**: el
+backend detectó que algo se rompió, ya lo ha arreglado y el PR está en verde esperando
+tu permiso (ver `docs/AVERIAS.md`). Va a un endpoint distinto del de la revisión
+nocturna a propósito, aunque el patrón sea idéntico — así se puede revocar este sin
+tocar aquél.
+
+```yaml
+alias: Life Assistant - Desplegar el arreglo
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_(DESPLEGAR|ESPERAR)_') }}"
+action:
+  - service: rest_command.la_despliegue_accion
+    data:
+      aviso: "{{ trigger.event.data.action.split('_')[-1] }}"
+      accion: "{{ 'desplegar' if 'DESPLEGAR' in trigger.event.data.action else 'nada' }}"
+```
+
+```yaml
+rest_command:
+  la_despliegue_accion:
+    url: "https://TU-BACKEND/despliegue/{{ aviso }}/accion"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+      Content-Type: application/json
+    payload: '{"accion": "{{ accion }}"}'
+    # Mergear el PR y disparar el workflow son dos llamadas a la API de GitHub detrás de
+    # un posible arranque en frío de Fly. Con el timeout por defecto (10 s), HA daría el
+    # despliegue por fallido cuando en realidad ya está en marcha — y ese es justo el
+    # error que hace pulsar el botón dos veces.
+    timeout: 60
+```
+
+**Si no instalas esta automatización no pasa nada malo**: el aviso sigue llegando y el
+permiso se puede dar hablando con Jarvis («despliega el arreglo»). Lo único que no
+funciona es el botón.
+
 **Apaga lo que decía el aviso, no lo que hay encendido al pulsar.** Las entidades viajan
 guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora
 puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló es peor que

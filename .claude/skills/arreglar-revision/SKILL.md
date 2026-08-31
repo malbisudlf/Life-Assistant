@@ -1,6 +1,6 @@
 ---
 name: arreglar-revision
-description: Arregla los hallazgos del issue que dejó la revisión nocturna, abre un PR y lo mergea si el CI pasa. La usa la routine que se dispara al pulsar «Arreglarlo» en el aviso del móvil; también vale a mano dándole un número de issue.
+description: Arregla los hallazgos del issue que dejó la revisión nocturna, abre un PR y lo mergea si el CI pasa. También arregla las averías que detecta el backend (CI roto en main), y esas NO se mergean. La usa la routine que se dispara al pulsar «Arreglarlo» en el aviso del móvil; también vale a mano dándole un número de issue.
 ---
 
 # Arreglar los hallazgos de la revisión nocturna
@@ -13,6 +13,24 @@ issue, abres un PR y lo mergeas si el CI pasa.
 Nadie está delante. Todo lo que hagas se lee después, así que **es peor un arreglo
 dudoso mergeado que un hallazgo sin arreglar**: lo segundo se ve en el issue, lo primero
 se descubre semanas más tarde.
+
+## 0. Mirar por cuál de los dos caminos te han lanzado
+
+Hay dos, y **la diferencia es si mergeas o no**:
+
+| Te dicen | Es | Qué haces al final |
+|---|---|---|
+| «Arregla los hallazgos de la revisión nocturna del issue #N» | La revisión de madrugada, que alguien decidió arreglar | Mergeas si el CI pasa (paso 5) |
+| «Arregla esta avería… **DÉJALO ABIERTO**» | Una avería que el backend detectó solo (hoy: el CI roto en `main`) | **Abres el PR y paras.** No mergeas, aunque el CI esté verde |
+
+La segunda no es una restricción arbitraria: en ese camino nadie ha aprobado nada
+todavía. El backend te lanzó sin preguntar porque abrir un PR es reversible, y la
+pregunta —«¿lo despliego?»— le llega a Mikel al móvil y al teléfono **cuando el CI pone
+tu PR en verde**. Si mergeas tú, te saltas la única aprobación humana que hay en todo el
+camino. El flujo entero está en `docs/AVERIAS.md`.
+
+En el camino de la avería, salta el paso 1 (no hay issue que leer: lo que se ha roto te
+lo dicen en la propia instrucción) y en el paso 5 haz solo lo de abrir el PR.
 
 ## 1. Encontrar el issue
 
@@ -93,6 +111,9 @@ Después:
 
 1. **Espera al CI** (`.github/workflows/ci.yml`: frontend, backend y E2E).
 2. **Si pasa entero, mergea** con squash, que es como se mantiene el historial lineal.
+   **Salvo que te hayan lanzado por una avería** (paso 0): ahí terminas aquí, con el PR
+   abierto y el CI en verde. Ese verde ES el aviso — lo recoge `pr-listo.yml` y se
+   convierte en la pregunta que le llega a Mikel.
 3. **Si falla, no mergees.** Arregla la causa y vuelve a esperar. Si tras dos intentos
    sigue rojo, deja el PR abierto, escribe en él qué falla y por qué no lo has resuelto,
    y termina. Un PR abierto con una explicación es un resultado; un merge en rojo, no.
@@ -101,9 +122,12 @@ Después:
 
 ## Reglas duras
 
-- **Nunca despliegues el backend.** El deploy es manual (`fly deploy` desde `backend/`) y
-  es una decisión de Mikel. Mergear ya despliega el frontend en Vercel; el backend no, y
-  así tiene que seguir.
+- **Nunca despliegues el backend.** El deploy es manual (`fly deploy` desde `backend/`, o
+  el workflow `Deploy backend (Fly.io)`) y es una decisión de Mikel. Que exista un camino
+  por el que ese workflow se dispara solo (`docs/AVERIAS.md`) no cambia nada para ti: ahí
+  quien lo dispara es Mikel dando el permiso, no la sesión que arregló.
+- **Si te lanzaron por una avería, no mergees NUNCA**, ni aunque el CI esté verde, ni
+  aunque el arreglo sea trivial. Ver el paso 0.
 - **Nunca relajes una invariante de seguridad de `CLAUDE.md`** para hacer callar a un
   test o a un hallazgo: sin secretos por defecto, `hmac.compare_digest`, errores de
   Supabase que no se reenvían, cuerpos acotados, la triple validación de `alud_url` y las

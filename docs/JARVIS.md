@@ -470,6 +470,17 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   cero, y se consume con un **PATCH condicional** para que dos toques no lancen dos
   agentes. El flujo entero, con las dos routines y el YAML, en `docs/REVISION_NOCTURNA.md`.
 
+- **El arreglo que pide permiso para desplegarse** (`POST /averia`,
+  `POST /revision/pr-listo`, `POST /despliegue/{id}/accion`, herramienta `desplegar`): el
+  camino inverso al de arriba. Cuando el CI se rompe en `main` no se pregunta nada — se
+  lanza el arreglo en el momento — y la pregunta llega DESPUÉS, cuando hay un PR con el
+  CI en verde: «he detectado un fallo, ya lo he corregido, ¿lo despliego?». Va al móvil
+  con botones **y hace sonar el teléfono**, que es el único canal que no espera a que
+  mires. La frontera es la de siempre en este fichero, aplicada a lo más caro que hay:
+  **arreglar solo, sí; desplegar solo, no** — abrir un PR es reversible, tocar producción
+  no. Todo en `docs/AVERIAS.md`, incluido el puente de voz con Jarvis al otro lado del
+  teléfono.
+
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
   salud—; este mira si el sistema se rompe por cualquier otro sitio. `app_logs` y
