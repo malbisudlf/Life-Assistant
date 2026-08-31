@@ -76,79 +76,23 @@ descartado → dijiste que no
 
 ## El teléfono
 
-El resto de canales del proyecto tienen todos el mismo techo: **hace falta que mires**.
-Un correo espera a que abras el buzón; una notificación, a que desbloquees. Los dos valen
-para casi todo y no valen para lo único que de verdad se queda parado: un arreglo hecho
-esperando permiso.
+Cuando hay un PR esperando permiso, además del aviso al móvil **suena el teléfono**:
+descuelgas y hablas con el Jarvis de siempre, que te cuenta qué se ha roto y despliega si
+le dices que sí. Es el único caso de todo el proyecto que hoy justifica llamar, porque es
+el único que **se queda parado hasta que contestes**.
 
-La llamada es el único canal que no espera a nadie, y en el coche suena por el manos
-libres. Por eso es el canal más caro que hay aquí —cuesta dinero e interrumpe de
-verdad— y por eso su regla es la más estrecha del proyecto:
+El canal entero —qué servicios se evaluaron y por qué se eligió Twilio, cómo está montado
+el puente de audio, qué protege sus dos endpoints públicos, cuánto cuesta y qué le
+falta— está en **`docs/LLAMADAS.md`**. Aquí solo importa quién llama y cuándo:
+`POST /revision/pr-listo` es el único sitio del backend que lo hace.
 
-> **Solo llama lo que se queda parado hasta que contestes.** No lo urgente, no lo
-> importante: lo BLOQUEADO. Hoy eso es exactamente una cosa, el permiso de despliegue.
-
-Si algún día llama una segunda cosa, tiene que estar justificada aquí. El día que el
-teléfono suene por algo que podía haber esperado, dejarás de cogerlo — y con él se irá
-también el aviso que sí importaba. Es el mismo fallo que el presupuesto de avisos
-previene en el canal de al lado, con la factura más alta.
-
-### Es una conversación, no un contestador
-
-Descuelgas y hablas con el Jarvis de siempre: el mismo `_jarvis_turno`, las mismas
-herramientas y la misma frontera de confirmación que en el chat y en el modo llamada del
-navegador. No hay un asistente nuevo, hay un **transporte** nuevo, y eso es deliberado:
-dos asistentes que responden distinto según por dónde entres son dos asistentes que
-mantener. Puedes preguntarle qué se ha roto, qué ha cambiado, y decirle que lo despliegue
-o que lo deje.
-
-```
-Twilio  ──WebSocket (μ-law 8 kHz)──▶  /telefono/media
-                                          │
-                              ┌───────────┴───────────┐
-                              │  VAD por energía      │  ¿ha terminado de hablar?
-                              │  Whisper              │  audio → texto
-                              │  _jarvis_turno        │  el cerebro de siempre
-                              │  ElevenLabs (ulaw)    │  texto → audio
-                              └───────────┬───────────┘
-                                          ▼
-                                  vuelve por el mismo WebSocket
-```
-
-Cuatro decisiones que conviene entender antes de tocar `# ── El puente de voz del
-teléfono ──` en `main.py`:
-
-- **Es la única parte asíncrona del backend.** El resto de `main.py` no usa `asyncio`, y
-  no es un descuido: los endpoints hacen E/S de bloque y viven mejor en el pool de hilos
-  de FastAPI. Un WebSocket no se puede servir así. Todo lo síncrono que se llama desde
-  dentro del puente va envuelto en `asyncio.to_thread`; llamarlo directo bloquearía el
-  bucle de eventos y con él el audio de la llamada, que **se oye como un corte**.
-
-- **El audio del teléfono es μ-law a 8 kHz**, que no es lo que come ninguno de los dos
-  extremos. Se convierte a mano (`_ulaw_a_pcm16`, tabla G.711) en vez de con `audioop`:
-  está en la stdlib de Python 3.11 pero **desaparece en 3.13**, y son treinta líneas que
-  no merecen atar el proyecto a una versión. A la vuelta no hace falta convertir nada: a
-  ElevenLabs se le pide `ulaw_8000` directamente, que además lo hace mejor que nosotros
-  porque tiene la señal sin comprimir delante.
-
-- **Quién habla lo decide el silencio.** No hay «pulsa para hablar» en una llamada: se
-  mide la energía de lo que entra y se da el turno por terminado tras `VOZ_SILENCIO_MS`
-  de calma. Es un VAD pobre a propósito — el bueno vive en ElevenLabs y cuesta, y para
-  «sí, despliégalo» éste llega de sobra.
+Dos cosas de allí que conviene saber sin abrirlo:
 
 - **Un «sí» no lo interpreta el modelo.** Antes de pasarle nada a Jarvis se mira si lo
-  que has dicho es la respuesta a la pregunta que ha motivado la llamada (`_sio_no`, con
-  una lista cerrada de formas de decir sí y no). Hacer que el permiso de despliegue
-  dependa de que el modelo elija bien la herramienta metería un fallo posible justo en la
-  puerta que toca producción. **Ante la duda no se despliega**: de los dos errores, ése
-  es el único que se puede deshacer solo.
-
-### Lo que le falta
-
-**Interrumpirle.** Mientras Jarvis piensa o habla, el audio que entra se tira. Es
-exactamente lo que también le falta al modo llamada del navegador (`docs/JARVIS_VOZ.md`,
-fases 5 a 7) y se resolverá en los dos sitios a la vez o en ninguno: hacerlo aquí aparte
-sería mantener dos micrófonos distintos.
+  dicho es la respuesta a la pregunta que motivó la llamada (`_sio_no`, lista cerrada).
+  Ante la duda **no se despliega**.
+- **El puente es la única parte asíncrona del backend**, y no está probado contra Twilio
+  real: la primera llamada de verdad es la prueba que falta.
 
 ## Montarlo
 
@@ -191,6 +135,7 @@ BACKEND_URL=https://...     # la URL pública del backend, para que Twilio vuelv
 
 No hay que configurar nada en la consola de Twilio: el webhook viaja en la propia
 petición que crea la llamada (`Url`), así que el número no necesita tener nada asociado.
+El detalle de cada variable y los ajustes finos del audio, en `docs/LLAMADAS.md`.
 
 **Coste**: el número son un par de euros al mes y la llamada, céntimos por minuto. A dos
 o tres avisos por semana no llega a un café al mes. Lo que sí cuesta de verdad si se
