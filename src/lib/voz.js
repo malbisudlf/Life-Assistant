@@ -132,3 +132,53 @@ export function aperturaDeLlamada(pendiente) {
   if (dicha) return dicha;
   return "Ya no hay nada esperando permiso. ¿Te ayudo con otra cosa?";
 }
+
+/** El juez del barge-in: decide, mirando la energía del micrófono, si te has puesto a
+ *  hablar encima de Jarvis. Puro y con el reloj por parámetro para poder probarlo sin
+ *  micrófono ni temporizadores; quien lo alimenta es `vigilarInterrupcion` en
+ *  vozMicro.js.
+ *
+ *  Las tres reglas salen del mismo miedo, que es cortar a Jarvis cuando NADIE ha
+ *  hablado:
+ *
+ *  - **Sostenido, no instantáneo.** Una puerta, una tos o un golpe en la mesa pasan el
+ *    umbral durante una muestra. Se exige voz seguida (`msSostenidos`) y cualquier
+ *    muestra por debajo reinicia la cuenta, que es justo lo que una sílaba suelta no
+ *    aguanta.
+ *  - **Con gracia al empezar.** Las primeras décimas tras arrancar la voz no cuentan: el
+ *    micro se abre con la cola de tu propia frase todavía en el aire y el eco del
+ *    altavoz aún sin domar por la cancelación del navegador.
+ *  - **Una sola vez.** En cuanto dispara se da por gastado. Quien lo usa corta la voz y
+ *    tira el detector; que volviera a disparar solo serviría para cortar dos veces.
+ *
+ *  El umbral es la pieza delicada y por eso entra por parámetro: si la cancelación de
+ *  eco del dispositivo no da abasto, Jarvis se oye a sí mismo y se interrumpe solo, y el
+ *  remedio es subirlo (lo hace la llamada sola, ver `interrumpirAJarvis`). */
+export function detectorDeHabla({ umbral = 0.055, msSostenidos = 300, msGracia = 400 } = {}) {
+  let arranque  = null;   // primera muestra: la gracia se cuenta desde aquí
+  let desde     = null;   // principio del tramo por encima del umbral
+  let gastado   = false;
+
+  return {
+    /** `true` la única vez que decide que estás hablando. */
+    mira(rms, ahora) {
+      if (gastado) return false;
+      if (arranque === null) arranque = ahora;
+      if (!(rms >= umbral)) { desde = null; return false; }   // NaN incluido
+      if (desde === null) desde = ahora;
+      if (ahora - arranque < msGracia) return false;
+      if (ahora - desde < msSostenidos) return false;
+      gastado = true;
+      return true;
+    },
+  };
+}
+
+/** La energía de un trozo de audio, entre 0 y 1. Es la misma media cuadrática que usa el
+ *  VAD del backend para el teléfono (`_rms`), aquí sobre muestras ya normalizadas. */
+export function rmsDeMuestras(muestras) {
+  if (!muestras || !muestras.length) return 0;
+  let suma = 0;
+  for (let i = 0; i < muestras.length; i++) suma += muestras[i] * muestras[i];
+  return Math.sqrt(suma / muestras.length);
+}

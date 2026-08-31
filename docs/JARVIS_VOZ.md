@@ -25,12 +25,43 @@ Lo que está hecho y funcionando, con el sitio exacto:
 | `JARVIS_VOZ_MODELO_DIRECTO` | `backend/main.py`, config de Jarvis | Por voz se abre con el modelo grande y se salta el relevo, que cuesta una llamada entera antes de la primera sílaba |
 | `src/lib/voz.js` | — | Puro: `trocearParaVoz`, `textoParaVoz`, `partirEventosSse` |
 | `src/lib/vozEleven.js` | — | El WebSocket multi-contexto y el reproductor. Sin clave dentro |
+| `src/lib/vozMicro.js` | — | El medidor de energía del micro mientras Jarvis habla. Solo decide si le has cortado; no transcribe |
+| `detectorDeHabla` | `src/lib/voz.js` | Las reglas del corte: voz sostenida, gracia al empezar, una sola vez |
+| `empezarAHablar` / `dejarDeHablar` / `interrumpirAJarvis` | `src/components/Dashboard.jsx` | El cableado del barge-in con el ciclo de la llamada |
 | `turnoDeLlamada()` | `src/components/Dashboard.jsx` | Consume el SSE y va hablando |
-| Tests | `tests/backend/test_voz.py`, `tests/backend/test_jarvis_voz.py`, `tests/frontend/voz.test.js`, `tests/frontend/vozEleven.test.js` | El de `vozEleven` prueba solo lo que se rompió de verdad: que al fallar la voz de pago no se pierda nada de lo que quedaba por decir |
+| Tests | `tests/backend/test_voz.py`, `tests/backend/test_jarvis_voz.py`, `tests/frontend/voz.test.js`, `tests/frontend/vozEleven.test.js`, `tests/frontend/vozMicro.test.js` | El de `vozEleven` prueba solo lo que se rompió de verdad: que al fallar la voz de pago no se pierda nada de lo que quedaba por decir. El de `vozMicro`, que un micrófono negado no tire la llamada y que el medidor quede cerrado antes de avisar |
 
-**Lo siguiente es el micrófono** (fases 5 a 7): Scribe v2 Realtime, VAD y barge-in. Ojo:
-**Scribe Realtime puede estar restringido en plan gratuito**; si sale un 401 de permisos,
-es eso y no un fallo del código.
+**Ya se le puede cortar** (agosto de 2026). Mientras Jarvis habla se abre un medidor de
+energía del micrófono —no el reconocimiento— y, en cuanto detecta voz sostenida, se calla
+a media frase y pasa a escucharte. Lo que hace el corte, además de callar:
+
+- **Guarda en el historial lo que llevaba dicho**, marcado como cortado. Sin esto le
+  dirías «no, la otra» y el modelo no tendría ni idea de qué hablas, porque el evento
+  `fin` —el que añade su respuesta— no llega nunca cuando se aborta el turno.
+- **Aborta el turno en el backend** con un `AbortController`. Si no, el modelo sigue
+  dando vueltas de herramientas y escribiendo texto que ya nadie va a oír, y se paga.
+- **Se corrige solo si corta en falso.** El miedo de todo barge-in es que el micro oiga
+  al altavoz y Jarvis se interrumpa a sí mismo. La primera defensa es
+  `echoCancellation` del navegador; la segunda es que, si tras un corte no se oye una
+  palabra en 2,5 s, el umbral se endurece para el resto de la sesión.
+
+**Lo que sigue sin estar, y conviene no confundirlo con esto:**
+
+- **El principio de tu frase se pierde.** El reconocimiento arranca DESPUÉS del corte, y
+  para entonces llevas unos 300 ms hablando (los que hacen falta para distinguir una voz
+  de un portazo). En la práctica se come el «oye» y coge el resto. Arreglarlo de verdad
+  pide un STT continuo, que es lo siguiente.
+- **Scribe v2 Realtime sigue sin usarse.** El backend sabe emitir su token
+  (`/voz/token` con `tipo: "realtime_scribe"`), pero el frontend no lo pide en ningún
+  sitio: escucha con la Web Speech API del navegador, que es gratis. Ojo: **Scribe
+  Realtime puede estar restringido en plan gratuito**; si sale un 401 de permisos, es eso
+  y no un fallo del código.
+- **La fase 8, medir la latencia otra vez**, sigue pendiente.
+
+Y la regla vieja **sigue en pie**: el reconocimiento se cierra mientras Jarvis habla. Lo
+que se abre en su lugar no transcribe, así que no puede oírle a él y contestarse solo. Y
+se abre y se cierra en cada turno para que nunca haya dos capturas del micrófono a la
+vez, que es lo que se rompe en iOS y en los WebView.
 
 Tres cosas del texto en streaming que conviene saber antes de tocarlo:
 

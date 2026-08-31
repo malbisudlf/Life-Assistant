@@ -17,6 +17,7 @@ import {
 } from "../lib/helpers";
 import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, aperturaDeLlamada } from "../lib/voz";
 import { abrirVozEleven } from "../lib/vozEleven";
+import { vigilarInterrupcion } from "../lib/vozMicro";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
 const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
@@ -434,6 +435,18 @@ const VOZ_TOKEN_VIDA_MS    = 14 * 60 * 1000;
 // Generoso a propósito: cubre el arranque en frío de Fly (10-15 s), que es exactamente
 // el caso, porque el aviso llega cuando hace rato que nadie toca el backend.
 const VOZ_ESPERA_MAX_MS    = 18 * 1000;
+
+// Cortar a Jarvis mientras habla. El umbral es el arranque, no la última palabra: si la
+// cancelación de eco del dispositivo no da abasto —altavoz a tope, sala que retumba— se
+// sube solo cuando un corte resulta haber sido en falso (ver `interrumpirAJarvis`).
+const BARGE_UMBRAL      = 0.055;
+const BARGE_SOSTENIDO_MS = 300;   // voz seguida antes de dar por bueno el corte
+const BARGE_GRACIA_MS    = 400;   // décimas de cortesía al empezar a hablar
+// Un corte de verdad va seguido de algo que decir. Si al cortar no se oye NADA en este
+// rato, es que Jarvis se cortó a sí mismo y el umbral se queda corto para este sitio.
+const BARGE_FALSO_MS     = 2500;
+const BARGE_SUBIDA       = 1.6;   // cuánto se endurece el umbral tras un corte en falso
+const BARGE_UMBRAL_MAX   = 0.4;   // tope: por encima de esto ya no cortaría ni gritando
 
 // Qué se ve en cada fase de la llamada. El usuario tiene que saber si le están
 // escuchando o no: un micrófono que parece abierto y no lo está es lo que hace que la
@@ -1082,6 +1095,16 @@ export default function Dashboard() {
   const buferRef    = useRef("");      // lo dicho en este turno
   const hablandoRef = useRef(false);   // Jarvis habla: el micro está cerrado (anti-eco)
   const reaperturasRef = useRef(0);    // veces seguidas que se ha reabierto sin oír nada
+  // El barge-in: mientras Jarvis habla, el medidor de energía del micro (vozMicro.js).
+  // No transcribe nada — solo decide si te has puesto a hablar encima.
+  const bargeRef       = useRef(null);
+  const bargeUmbralRef = useRef(BARGE_UMBRAL);   // se endurece solo si corta en falso
+  const bargeFalsoRef  = useRef(null);           // temporizador del corte en falso
+  // Lo que Jarvis LLEVA DICHO en voz alta este turno. Al cortarle, el evento `fin` no
+  // llega nunca y sin esto su media respuesta no entraría en el historial: le dirías
+  // «no, la otra» y el modelo no sabría de qué hablas.
+  const dichoEnVozRef  = useRef("");
+  const abortoTurnoRef = useRef(null);           // para cortar el SSE del turno cortado
   // Cada turno de voz lleva número. `speechSynthesis.cancel()` dispara el `onend` de lo
   // que estuviera sonando, así que sin esto el callback de una respuesta ya descartada
   // reabriría el micro justo cuando empieza a sonar la siguiente.
@@ -2018,11 +2041,100 @@ export default function Dashboard() {
     try { rec?.stop(); } catch { /* mejor esfuerzo: ya estaba parado */ }
   }
 
+  /** Jarvis empieza a hablar: se cierra el micro del reconocimiento (regla 1 de arriba)
+   *  y se abre en su lugar el medidor que permite cortarle.
+   *
+   *  El medidor se pide con `await` pero NO se espera a nada: abrirlo tarda unos
+   *  milisegundos y la voz no puede quedarse esperando al micrófono. Si para cuando
+   *  llega ya se ha dejado de hablar, se tira. */
+  function empezarAHablar() {
+    hablandoRef.current = true;
+    if (bargeRef.current) return;   // ya vigilando: los rellenos no reabren nada
+    const miTurno = vozTurnoRef.current;
+    bargeRef.current = "pidiendo";  // marca para que dos frases seguidas no pidan dos micros
+    vigilarInterrupcion({
+      umbral:       bargeUmbralRef.current,
+      msSostenidos: BARGE_SOSTENIDO_MS,
+      msGracia:     BARGE_GRACIA_MS,
+      alHablar:     () => {
+        bargeRef.current = null;    // el vigilante ya se paró él solo antes de avisar
+        if (vozTurnoRef.current !== miTurno) return;
+        interrumpirAJarvis();
+      },
+    }).then((vigilante) => {
+      // Llegó tarde: o se dejó de hablar, o la llamada se colgó mientras se abría.
+      if (bargeRef.current !== "pidiendo" || !hablandoRef.current || !llamadaRef.current) {
+        vigilante?.parar();
+        if (bargeRef.current === "pidiendo") bargeRef.current = null;
+        return;
+      }
+      // `null` es que no hay micro (permiso denegado, navegador sin getUserMedia). No se
+      // avisa de nada: la llamada sigue funcionando por turnos, como toda la vida.
+      bargeRef.current = vigilante;
+    }).catch(() => {
+      // Sin barge-in y sin ruido: la llamada sigue por turnos, que es como funcionaba
+      // antes de todo esto.
+      if (bargeRef.current === "pidiendo") bargeRef.current = null;
+    });
+  }
+
+  /** Jarvis deja de hablar (haya terminado o le hayan cortado). */
+  function dejarDeHablar() {
+    hablandoRef.current = false;
+    const vigilante = bargeRef.current;
+    bargeRef.current = null;
+    if (vigilante && vigilante !== "pidiendo") { try { vigilante.parar(); } catch { /* mejor esfuerzo */ } }
+  }
+
+  /** Te has puesto a hablar encima: Jarvis se calla a media frase y pasa a escucharte.
+   *
+   *  Lo importante aquí no es callar —eso es una línea— sino no dejar la conversación
+   *  incoherente: se guarda en el historial lo que llevaba dicho (marcado como cortado,
+   *  para que el modelo sepa que no llegó a terminar), se aborta el turno en el backend
+   *  para no seguir pagando texto que nadie va a oír, y se invalida el número de turno
+   *  para que ningún callback en vuelo reabra el micro por su cuenta. */
+  function interrumpirAJarvis() {
+    if (!llamadaRef.current || !hablandoRef.current) return;
+    vozTurnoRef.current++;            // todo lo que estuviera en el aire queda descartado
+    try { vozDePago?.callar(); } catch { /* mejor esfuerzo */ }
+    try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+    try { abortoTurnoRef.current?.abort(); } catch { /* mejor esfuerzo */ }
+    abortoTurnoRef.current = null;
+    const dicho = dichoEnVozRef.current.trim();
+    dichoEnVozRef.current = "";
+    if (dicho) {
+      setJarvisMensajes(prev => [...prev, { rol: "assistant", texto: `${dicho} (te pusiste a hablar y me cortaste aquí)` }]);
+    }
+    setJarvisPensando(false);
+    dejarDeHablar();
+    // La vigilancia del corte en falso: si de aquí a un rato no se ha oído una palabra,
+    // es que le cortó su propio eco y no una persona. No se puede deshacer —el audio ya
+    // está cancelado—, pero sí evitar que se repita el resto de la llamada.
+    if (bargeFalsoRef.current) clearTimeout(bargeFalsoRef.current);
+    // Lo cancela el primer `onresult` del reconocimiento, parcial incluido: en cuanto se
+    // oye media palabra, el corte era de verdad. Mirar el búfer no bastaría, porque a los
+    // 2,5 s una frase normal todavía puede ir por el parcial y aún no haberse cerrado.
+    bargeFalsoRef.current = setTimeout(() => {
+      bargeFalsoRef.current = null;
+      if (!llamadaRef.current) return;
+      bargeUmbralRef.current = Math.min(bargeUmbralRef.current * BARGE_SUBIDA, BARGE_UMBRAL_MAX);
+    }, BARGE_FALSO_MS);
+    setJarvisFase("escuchando");
+    cicloRef.current.escuchar?.();
+  }
+
   function colgarLlamada(aviso) {
     llamadaRef.current  = false;
-    hablandoRef.current = false;
     buferRef.current    = "";
     vozTurnoRef.current++;          // invalida los callbacks de voz que estén en vuelo
+    dejarDeHablar();                // cierra de paso el medidor del barge-in
+    if (bargeFalsoRef.current) { clearTimeout(bargeFalsoRef.current); bargeFalsoRef.current = null; }
+    // El turno que quedara a medias se corta de verdad: el SSE sigue vivo si nadie lo
+    // aborta, y el backend seguiría dando vueltas de herramientas para una llamada que
+    // ya ha colgado.
+    try { abortoTurnoRef.current?.abort(); } catch { /* mejor esfuerzo */ }
+    abortoTurnoRef.current = null;
+    dichoEnVozRef.current  = "";
     pararEscucha();
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
     // Cerrar, no solo callar: el socket abierto seguiría vivo y el AudioContext también.
@@ -2055,6 +2167,9 @@ export default function Dashboard() {
 
     rec.onresult = e => {
       reaperturasRef.current = 0;   // se ha oído algo: la cuenta atrás vuelve a empezar
+      // Y si veníamos de cortar a Jarvis, queda demostrado que le cortó una persona y no
+      // su propio eco: el umbral se queda como está.
+      if (bargeFalsoRef.current) { clearTimeout(bargeFalsoRef.current); bargeFalsoRef.current = null; }
       let parcial = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const trozo = e.results[i][0]?.transcript || "";
@@ -2118,21 +2233,29 @@ export default function Dashboard() {
     setJarvisMensajes(prev => [...prev, { rol: "user", texto: dicho }]);
     setJarvisPensando(true);
     const miTurno = ++vozTurnoRef.current;
-    hablandoRef.current = true;
+    dichoEnVozRef.current = "";
+    empezarAHablar();
 
     // Se llama SIEMPRE, salga bien o mal: el ciclo de la llamada encadena la escucha con
     // esto, y cualquier camino que no pase por aquí deja la llamada muda para siempre.
     const seguir = () => {
       if (vozTurnoRef.current !== miTurno || !llamadaRef.current) return;
-      hablandoRef.current = false;
+      dejarDeHablar();
       cicloRef.current.escuchar?.();
     };
+
+    // Con mando de apagado: si le cortas a media respuesta, el turno se aborta de verdad
+    // en vez de seguir corriendo en el backend —gastando modelo y herramientas— para un
+    // texto que ya nadie va a oír. Fuera del `try` porque el `finally` lo necesita.
+    const aborto = typeof AbortController !== "undefined" ? new AbortController() : null;
+    abortoTurnoRef.current = aborto;
 
     try {
       const r = await apiFetch(`${API}/jarvis/voz`, {
         method:  "POST",
         headers: jsonHeaders(),
         body:    JSON.stringify({ mensaje: dicho, historial, voz: true }),
+        signal:  aborto?.signal,
       });
       if (!r.ok) throw await motivoJarvis(r);
       setJarvisFase("hablando");
@@ -2156,6 +2279,11 @@ export default function Dashboard() {
       const decirTrozos = (trozos) => {
         for (const trozo of trozos) {
           sonando++;
+          // Se apunta al MANDARLO, no al terminarlo: si te pones a hablar encima, lo que
+          // estaba sonando en ese instante es justo lo que hay que dejar en el historial,
+          // y esperar a su `onended` sería perder la frase que provocó el corte. A cambio
+          // puede apuntarse media frase de más, que es el error barato de los dos.
+          dichoEnVozRef.current = `${dichoEnVozRef.current} ${trozo}`.trim();
           hablarJarvis(trozo, () => { sonando--; escucharSiTocaYa(); }, { encolar: true });
         }
       };
@@ -2198,11 +2326,17 @@ export default function Dashboard() {
       cerrado = true;
       escucharSiTocaYa();
     } catch (e) {
+      // Cortar a Jarvis aborta este fetch, y eso llega aquí como un error que NO lo es:
+      // avisar de un fallo cada vez que le interrumpes sería absurdo, y `seguir()` volvería
+      // a abrir el micro que `interrumpirAJarvis` acaba de abrir. El turno ya está
+      // invalidado, así que basta con salir sin ruido.
+      if (vozTurnoRef.current !== miTurno) return;
       setJarvisMensajes(prev => [...prev, {
         rol: "aviso", texto: e?.explicado ? e.message : jarvisMotivoError(0),
       }]);
       seguir();
     } finally {
+      if (abortoTurnoRef.current === aborto) abortoTurnoRef.current = null;
       setJarvisPensando(false);
     }
   }
@@ -2313,7 +2447,6 @@ export default function Dashboard() {
       pedirPermisoVoz();
     }
     llamadaRef.current     = true;
-    hablandoRef.current    = true;
     buferRef.current       = "";
     reaperturasRef.current = 0;
     setJarvisLlamada(true);
@@ -2330,9 +2463,11 @@ export default function Dashboard() {
     if (primera !== "Dime.") {
       setJarvisMensajes(prev => [...prev, { rol: "assistant", texto: primera }]);
     }
+    dichoEnVozRef.current = "";
+    empezarAHablar();
     hablarJarvis(primera, () => {
       if (vozTurnoRef.current !== miTurno) return;
-      hablandoRef.current = false;
+      dejarDeHablar();
       cicloRef.current.escuchar?.();
     });
   }
@@ -2425,8 +2560,16 @@ export default function Dashboard() {
   useEffect(() => () => {
     llamadaRef.current = false;
     if (silencioRef.current) clearTimeout(silencioRef.current);
+    if (bargeFalsoRef.current) clearTimeout(bargeFalsoRef.current);
     try { recRef.current?.stop(); } catch { /* mejor esfuerzo */ }
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
+    // El medidor del barge-in tiene un micrófono abierto: sin cerrarlo aquí, el punto
+    // rojo de "esta pestaña te está grabando" se queda puesto al salir del dashboard.
+    try { abortoTurnoRef.current?.abort(); } catch { /* mejor esfuerzo */ }
+    if (bargeRef.current && bargeRef.current !== "pidiendo") {
+      try { bargeRef.current.parar(); } catch { /* mejor esfuerzo */ }
+    }
+    bargeRef.current = null;
     // El WebSocket y el AudioContext de ElevenLabs no se cierran solos al desmontar: sin
     // esto se quedaría un socket abierto por cada vez que entras y sales.
     try { vozDePago?.cerrar(); } catch { /* mejor esfuerzo */ }
