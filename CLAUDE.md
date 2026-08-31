@@ -165,6 +165,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
+| `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 | `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
 | `docs/EL_PROYECTO_EXPLICADO.md` | Explicación del proyecto entero para alguien de fuera: qué es, qué hace y por qué está construido así. No es guía de trabajo |
