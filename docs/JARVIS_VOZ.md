@@ -26,7 +26,7 @@ Lo que está hecho y funcionando, con el sitio exacto:
 | `src/lib/voz.js` | — | Puro: `trocearParaVoz`, `textoParaVoz`, `partirEventosSse` |
 | `src/lib/vozEleven.js` | — | El WebSocket multi-contexto y el reproductor. Sin clave dentro |
 | `turnoDeLlamada()` | `src/components/Dashboard.jsx` | Consume el SSE y va hablando |
-| Tests | `tests/backend/test_voz.py`, `tests/backend/test_jarvis_voz.py`, `tests/frontend/voz.test.js` | 28 de backend, 22 de frontend |
+| Tests | `tests/backend/test_voz.py`, `tests/backend/test_jarvis_voz.py`, `tests/frontend/voz.test.js`, `tests/frontend/vozEleven.test.js` | El de `vozEleven` prueba solo lo que se rompió de verdad: que al fallar la voz de pago no se pierda nada de lo que quedaba por decir |
 
 **Lo siguiente es el micrófono** (fases 5 a 7): Scribe v2 Realtime, VAD y barge-in. Ojo:
 **Scribe Realtime puede estar restringido en plan gratuito**; si sale un 401 de permisos,
@@ -80,6 +80,31 @@ Cosas que no estaban en el plan y costaron encontrar. **Léelas antes de tocar n
   De 22 voces por defecto probadas, 14 funcionan en gratuito y **ninguna es española**;
   todas son anglosajonas hablando español con acento. La voz nativa que se quería es lo
   que compra pagar. La puesta ahora es George (`JBFqnCBsd6RMkjVDRZzb`).
+- **El token de `/voz/token` dura 15 minutos, y en el móvil eso se agota siempre.** Se
+  pedía UNA vez, al cargar el dashboard. En el ordenador da igual; en el teléfono lo
+  normal es abrir la app, guardárselo en el bolsillo y llamar media hora después — con el
+  token muerto. Y el fallo era otra vez de los mudos: ElevenLabs **acepta el socket** y
+  acto seguido manda `{"error":"invalid_token","message":"Token not found or has
+  expired."}` y lo cierra con código 1008. Ese mensaje no lleva `audio` ni `isFinal`, así
+  que el cliente lo tiraba sin mirarlo, y el `onclose` se trataba como el final normal de
+  un turno: la frase siguiente se "arrancaba" contra un socket cerrado, `enviar` la
+  descartaba sin ruido y **nadie volvía a llamar a `alTerminar`**, con lo que la llamada
+  se quedaba colgada oyendo el silencio. Ni voz de pago, ni voz del navegador, ni aviso.
+  Ahora: el token se renueva al volver a la pestaña (que es justo lo que pasa al
+  desbloquear el móvil) y cada diez minutos mientras esté a la vista; uno de más de
+  catorce minutos ni se estrena; y cualquier mensaje de error o cierre inesperado del
+  socket se trata como fallo de la voz, no como fin de turno.
+- **Lo que importa no es que llegue audio, sino que suene.** La detección de "turno mudo"
+  miraba si habían llegado bytes; ahora mira si se llegó a programar una muestra en el
+  `AudioContext`. Cubre de paso el caso de los trozos MP3 que llegan y no hay manera de
+  decodificar, que antes daba silencio sin aviso.
+- **Al rendirse se devuelve la cola entera, no solo la frase en el aire.** Un turno son
+  varias frases seguidas (el relleno y luego la respuesta); rescatar solo una dejaba a
+  Jarvis diciendo "déjame mirar el calendario" y comiéndose lo que había encontrado.
+- **Los avisos rojos del chat ya no se guardan en `localStorage`.** Cuentan algo de la
+  sesión en curso, y al restaurar el hilo se leían como si estuviera pasando ahora: al
+  abrir el dashboard en el móvil lo primero que se veía era el error de una llamada de
+  anteayer. El síntoma parecía "la voz falla al entrar" cuando ni siquiera había llamada.
 - **`eleven_multilingual_v2` pronuncia algo mejor que Flash, pero no lo bastante para
   pagar su latencia.** Probado y descartado; si se retoma, hay que medirlo.
 - **`decir()` encola, no pisa.** Un turno son varias frases seguidas (el relleno y luego
