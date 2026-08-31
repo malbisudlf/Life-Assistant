@@ -270,7 +270,42 @@ rest_command:
 sesión). Si pulsas y no llega nada, el problema está en este `rest_command` o en el
 `notify` de arriba, no en el backend: él contesta siempre por el mismo canal.
 
-Las dos automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
+Y la del botón **«Apagar»** del aviso de salir de casa, que es la tercera pregunta
+distinta: no se valora el aviso ni se decide nada de código, se apaga lo que te dejaste
+encendido (el backend encola las órdenes y las recoge el sondeo de `ordenes-pending` que
+ya tienes puesto, así que no hace falta nada más).
+
+```yaml
+alias: Life Assistant - Apagar al salir
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_APAGAR_') }}"
+action:
+  - service: rest_command.la_apagar_aviso
+    data:
+      aviso: "{{ trigger.event.data.action.split('_')[-1] }}"
+```
+
+```yaml
+rest_command:
+  la_apagar_aviso:
+    url: "https://TU-BACKEND/avisos/{{ aviso }}/apagar"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+```
+
+**Apaga lo que decía el aviso, no lo que hay encendido al pulsar.** Las entidades viajan
+guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora
+puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló es peor que
+no tener botón. Y **el PC no entra**, aunque el aviso lo nombre: cortarle la corriente a
+un enchufe no es apagarlo. Para eso está su propio aviso.
+
+Las tres automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
 
 **No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
 silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no
@@ -293,7 +328,9 @@ Tres trampas de este paso, las tres pisadas ya:
   `repeat.item.acciones`), el aviso de la revisión nocturna llega con los botones
   equivocados: pulsarlos manda una valoración de una regla en vez de una decisión, y el
   informe se queda sin arreglar. El backend no puede detectarlo — desde aquí solo se ve
-  que HA recogió la cola, como siempre.
+  que HA recogió la cola, como siempre. Lo mismo con el «Apagar» del aviso de salir de
+  casa: sin `repeat.item.acciones` el botón no llega a pintarse, y sin la automatización
+  de abajo se pinta pero no hace nada.
 - **Si tocas la acción por el editor visual, se vacían `message` y `title`.** Al elegir
   el servicio en el desplegable, HA rehace la acción y se lleva por delante las
   plantillas `{{ repeat.item.* }}`. Vuelve a ponerlas, o edita en YAML (los tres puntos

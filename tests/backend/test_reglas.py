@@ -226,11 +226,37 @@ class TestAlSalirDeCasa(_Reglas):
 
     def test_no_apaga_nada(self, monkeypatch, mock_requests):
         """El catálogo lo empuja HA cada hora: apagar a ciegas con un dato de hace una
-        hora es peor que preguntar."""
+        hora es peor que preguntar. Lo apagas tú, con el botón del aviso."""
         monkeypatch.setattr(main, "_casa_entidades",
                             lambda: [{"id": "light.salon", "nombre": "Salón", "estado": "on"}])
         main._regla_al_salir_de_casa()
         assert not mock_requests.called("POST", "/ha/ordenes")
+        assert main._ha_ordenes == []
+
+    def test_guarda_los_ids_para_poder_apagarlos(self, monkeypatch, mock_requests):
+        """El aviso dice nombres, pero el botón necesita entity_ids, y los de ESE
+        momento: el catálogo de dentro de una hora ya no habla de lo mismo."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+            {"id": "switch.lampara", "nombre": "Lámpara", "estado": "on"},
+        ])
+        main._regla_al_salir_de_casa()
+        apuntado = self._apuntados(mock_requests)[0]
+        assert apuntado["entidades"] == ["light.salon", "switch.lampara"]
+        assert apuntado["regla"] == main.REGLA_AL_SALIR
+
+    def test_el_pc_se_nombra_pero_no_se_apaga_con_el_boton(self, monkeypatch, mock_requests):
+        """Cortarle la corriente a un switch no es apagar un PC, es tirar del cable. Para
+        eso está su propio aviso, que ofrece suspenderlo por SSH."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "switch.pc", "nombre": "PC", "estado": "on"},
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "PC_ENTIDAD", "switch.pc")
+        main._regla_al_salir_de_casa()
+        apuntado = self._apuntados(mock_requests)[0]
+        assert "PC" in apuntado["texto"]
+        assert apuntado["entidades"] == ["light.salon"]
 
     def test_con_todo_apagado_se_calla(self, monkeypatch):
         monkeypatch.setattr(main, "_casa_entidades",
