@@ -41,9 +41,15 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
 
   let contexto     = null;   // id del contexto vivo (el turno que suena ahora)
   let alTerminar   = null;
+  let turnoVivo    = false;  // hay un turno en marcha (aunque nadie espere su final)
   let finRecibido  = false;
-  let huboAudio    = false;
+  let sono         = false;  // no "llegaron bytes": SONÓ. Ver `quizasTerminar`
   let ultimoTexto  = "";     // para poder repetirlo con otra voz si esta no suena
+  // Esta voz ya no vale para nada más (token caducado, socket caído, turno mudo). Se
+  // marca para que las frases siguientes se caigan a la voz del navegador AL INSTANTE en
+  // vez de encolarse contra un socket que no las va a sintetizar nunca.
+  let muerto       = false;
+  let cerradoAqui  = false;  // el cierre lo pedimos nosotros: no es una caída
   // Frases esperando su turno. Se dicen de una en una, en orden: dos contextos a la
   // vez sonarían solapados, que es peor que esperar.
   const pendientesDeDecir = [];
@@ -73,21 +79,22 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
     // Jarvis y volver a hablarle hacía que la frase interrumpida sonara encima de la
     // nueva.
     if (dato.contextId && contexto && dato.contextId !== contexto) return;
-    if (dato.audio) { huboAudio = true; reproducir(dato.audio); }
-    if (dato.isFinal) {
-      finRecibido = true;
-      // TERMINADO SIN UNA SOLA MUESTRA DE AUDIO. Pasa, y no manda ningún error al
-      // hacerlo: con una voz de la biblioteca en plan gratuito, ElevenLabs contesta
-      // `isFinal` y cero bytes, tan tranquilo. Sin esto Jarvis se queda mudo y no hay
-      // nada en ningún sitio que diga por qué — el peor fallo posible en algo cuyo
-      // único trabajo es sonar. Así que se avisa y se cae a la voz del navegador.
-      if (!huboAudio) { rendirse(); return; }
-      quizasTerminar();
-    }
+    // El servidor manda los fallos POR EL SOCKET y luego lo cierra. El más frecuente con
+    // diferencia es `invalid_token` ("Token not found or has expired"): el token de
+    // /voz/token dura 15 minutos, y en el móvil es normalísimo abrir el dashboard, dejar
+    // el teléfono en el bolsillo y llamar media hora después. Sin mirar esto, el error se
+    // ignoraba en silencio y Jarvis se quedaba mudo sin decir por qué.
+    if (dato.error || dato.message) { rendirse(); return; }
+    if (dato.audio) reproducir(dato.audio);
+    if (dato.isFinal) { finRecibido = true; quizasTerminar(); }
   };
 
-  ws.onerror = () => { terminarTurno(); };
-  ws.onclose = () => { terminarTurno(); };
+  // Una caída del socket a media llamada NO es el final normal de un turno: quien
+  // esperaba la voz tiene que enterarse y seguir con la del navegador. Tratarlo como un
+  // final normal dejaba la llamada colgada — el turno siguiente se "arrancaba" contra un
+  // socket cerrado, `enviar` lo tiraba sin ruido y nadie volvía a llamar a `alTerminar`.
+  ws.onerror = () => { if (!cerradoAqui) rendirse(); };
+  ws.onclose = () => { if (!cerradoAqui) rendirse(); };
 
   function reproducir(base64) {
     pendientes++;
@@ -102,6 +109,7 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
       // que es lo que hace que no se oigan costuras entre frases.
       const inicio = Math.max(ctx.currentTime + 0.06, finProgramado);
       fuente.start(inicio);
+      sono = true;
       finProgramado = inicio + buffer.duration;
       fuentes.add(fuente);
       fuente.onended = () => { fuentes.delete(fuente); quizasTerminar(); };
@@ -138,20 +146,30 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
   }
 
   function quizasTerminar() {
-    if (!alTerminar || pendientes > 0 || fuentes.size > 0 || !finRecibido) return;
+    if (!turnoVivo || pendientes > 0 || fuentes.size > 0 || !finRecibido) return;
+    // TURNO TERMINADO SIN QUE HAYA SONADO NADA. Dos casos distintos con el mismo
+    // remedio: ElevenLabs contesta `isFinal` con cero bytes y ningún error (lo hace con
+    // una voz de la biblioteca en plan gratuito), o los bytes llegan pero no hay manera
+    // de decodificarlos. Lo que importa no es que llegara audio, sino que sonara; medir
+    // lo primero daba por buena una respuesta que nadie oyó.
+    if (!sono) { rendirse(); return; }
     terminarTurno();
   }
 
   /** Manda una frase a sintetizar y la deja sonando. */
   function arrancar(dicho, alFinal) {
+    ultimoTexto = dicho;
+    alTerminar  = alFinal || null;
+    // Contra un socket ya cerrado no se arranca nada: `enviar` tiraría los mensajes sin
+    // ruido y el turno se quedaría esperando un `isFinal` que no va a llegar.
+    if (muerto || ws.readyState > WebSocket.OPEN) { rendirse(); return; }
     // iOS suspende el AudioContext salvo que se reanude dentro de un gesto; llamarlo
     // aquí también cubre el caso de que el móvil lo haya suspendido a media llamada.
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
     contexto    = `t${Date.now()}${Math.random().toString(36).slice(2, 7)}`;
-    alTerminar  = alFinal || null;
+    turnoVivo   = true;
     finRecibido = false;
-    huboAudio   = false;
-    ultimoTexto = dicho;
+    sono        = false;
     // El primer mensaje de un contexto abre el contexto: por eso va un espacio y no el
     // texto. Y el flush es lo que le dice que ya puede sintetizar sin esperar más.
     enviar({ text: " ", context_id: contexto });
@@ -163,21 +181,33 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
     const avisar = alTerminar;
     alTerminar   = null;
     contexto     = null;
+    turnoVivo    = false;
     try { avisar?.(); } catch { /* mejor esfuerzo */ }
     const siguiente = pendientesDeDecir.shift();
     if (siguiente) arrancar(siguiente[0], siguiente[1]);
   }
 
-  /** Esta voz no sirve: se le devuelve el turno a quien la abrió, con el texto que se
-   *  quedó sin decir, para que lo diga como pueda. Se entrega el `alTerminar` también:
-   *  el modo llamada encadena la escucha con él y perderlo dejaría la llamada colgada. */
+  /** Esta voz no sirve: se le devuelve a quien la abrió TODO lo que se quedó sin decir
+   *  —la frase que estaba en el aire y las que esperaban cola— para que lo diga como
+   *  pueda. Cada una va con su `alFinal`: el modo llamada encadena la escucha con el de
+   *  la última, y perderlo dejaría la llamada colgada oyendo el silencio.
+   *
+   *  A partir de aquí la voz queda muerta: lo que se le mande después se cae al
+   *  navegador sin pasar por el socket. */
   function rendirse() {
-    const avisar = alTerminar;
-    const texto  = ultimoTexto;
-    alTerminar   = null;
-    contexto     = null;
-    if (alFallar) { try { alFallar(texto, avisar); return; } catch { /* abajo */ } }
-    try { avisar?.(); } catch { /* mejor esfuerzo */ }
+    const seguiaVivo = turnoVivo || pendientesDeDecir.length > 0;
+    const sinDecir   = turnoVivo ? [[ultimoTexto, alTerminar]] : [];
+    sinDecir.push(...pendientesDeDecir);
+    pendientesDeDecir.length = 0;
+    muerto     = true;
+    turnoVivo  = false;
+    alTerminar = null;
+    contexto   = null;
+    if (!seguiaVivo) return;   // se cayó sin nada en la boca: no hay nada que rescatar
+    if (alFallar) { try { alFallar(sinDecir); return; } catch { /* abajo */ } }
+    for (const [, avisar] of sinDecir) {
+      try { avisar?.(); } catch { /* mejor esfuerzo */ }
+    }
   }
 
   return {
@@ -187,6 +217,14 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
     decir(texto, alFinal) {
       const dicho = textoParaVoz(texto);
       if (!dicho) { try { alFinal?.(); } catch { /* mejor esfuerzo */ } return; }
+      // Voz ya descartada: se devuelve en el acto en vez de encolar contra un socket
+      // muerto. Quien la abrió puede seguir teniendo la referencia un instante más —
+      // `alFallar` es asíncrono para él— y esa frase no puede perderse.
+      if (muerto) {
+        if (alFallar) { try { alFallar([[dicho, alFinal]]); return; } catch { /* abajo */ } }
+        try { alFinal?.(); } catch { /* mejor esfuerzo */ }
+        return;
+      }
       // Se ENCOLA, no se pisa. Un turno son varias frases seguidas —"Déjame mirar el
       // calendario" y, cuatro segundos después, lo que ha encontrado— y si la segunda
       // cortara a la primera, el relleno no serviría para nada: se oiría media palabra.
@@ -210,10 +248,14 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
       // hablar encima, lo que Jarvis tenía preparado ya no viene a cuento.
       pendientesDeDecir.length = 0;
       contexto = null;
+      turnoVivo = false;
       alTerminar = null;
     },
 
     cerrar() {
+      // Antes de cerrar: este cierre es nuestro, y `onclose` no debe confundirlo con una
+      // caída y ponerse a rescatar frases de una llamada que ya se ha colgado.
+      cerradoAqui = true;
       this.callar();
       try { enviar({ close_socket: true }); } catch { /* mejor esfuerzo */ }
       try { ws.close(); } catch { /* mejor esfuerzo */ }
