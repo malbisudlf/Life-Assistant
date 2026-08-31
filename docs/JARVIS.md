@@ -478,8 +478,8 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   con botones **y hace sonar el teléfono**, que es el único canal que no espera a que
   mires. La frontera es la de siempre en este fichero, aplicada a lo más caro que hay:
   **arreglar solo, sí; desplegar solo, no** — abrir un PR es reversible, tocar producción
-  no. Todo en `docs/AVERIAS.md`, incluido el puente de voz con Jarvis al otro lado del
-  teléfono.
+  no. El flujo entero en `docs/AVERIAS.md`; el teléfono —con Jarvis al otro lado,
+  contestándote— en `docs/LLAMADAS.md`.
 
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
