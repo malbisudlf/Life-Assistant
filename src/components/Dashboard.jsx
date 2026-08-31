@@ -430,6 +430,10 @@ const REAPERTURAS_MAX = 8;
 // socket con un token muerto es dejar a Jarvis sin voz de pago para toda la llamada.
 const VOZ_TOKEN_RENUEVA_MS = 10 * 60 * 1000;
 const VOZ_TOKEN_VIDA_MS    = 14 * 60 * 1000;
+// Lo que la pantalla de llamada espera al permiso de voz antes de dejar descolgar igual.
+// Generoso a propósito: cubre el arranque en frío de Fly (10-15 s), que es exactamente
+// el caso, porque el aviso llega cuando hace rato que nadie toca el backend.
+const VOZ_ESPERA_MAX_MS    = 18 * 1000;
 
 // Qué se ve en cada fase de la llamada. El usuario tiene que saber si le están
 // escuchando o no: un micrófono que parece abierto y no lo está es lo que hace que la
@@ -440,13 +444,18 @@ const FASES_LLAMADA = {
   hablando:   { texto: "Hablando…",   color: "var(--green)" },
 };
 
-/** La pantalla de llamada entrante: lo que ves al abrir el aviso del móvil.
+/** La pantalla de llamada: lo que ves al abrir el aviso del móvil, y **lo que sigues
+ *  viendo mientras hablas**.
  *
- *  Está pensada para leerse en el coche de un vistazo y para tocarse sin apuntar: dos
- *  botones grandes y separados, y el motivo en una línea. Ocupa la pantalla entera a
- *  propósito — si esto fuera una tarjeta más del dashboard habría que buscarla, y el
- *  caso de uso es justo el contrario. */
-function PantallaLlamada({ motivo, onContestar, onRechazar }) {
+ *  No se va al descolgar a propósito. Devolver el dashboard a mitad de frase convierte
+ *  una llamada en una web con voz: en el coche lo que hace falta es una sola cosa en
+ *  pantalla que se lea de un vistazo y diga si te están escuchando. Por eso ocupa todo y
+ *  por eso los botones son grandes y separados: se tocan sin apuntar.
+ *
+ *  `estado` es "sonando" (dos botones) u "hablando" (la conversación y colgar). */
+function PantallaLlamada({ estado, motivo, fase, parcial, lista, onContestar, onRechazar, onColgar }) {
+  const enCurso = estado === "hablando";
+  const f = FASES_LLAMADA[fase] || FASES_LLAMADA.escuchando;
   const boton = {
     width: 72, height: 72, borderRadius: "50%", border: "none",
     fontSize: 28, cursor: "pointer", color: "#fff", lineHeight: 1,
@@ -458,28 +467,51 @@ function PantallaLlamada({ motivo, onContestar, onRechazar }) {
       alignItems: "center", justifyContent: "center", gap: 10, padding: 24,
     }}>
       <div style={{ fontSize: 13, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase" }}>
-        Llamada entrante
+        {enCurso ? "En llamada" : "Llamada entrante"}
       </div>
-      <div style={{ fontSize: 34, fontWeight: 600, color: "var(--text)", animation: "pulse 1.5s infinite" }}>
-        Jarvis
-      </div>
-      {motivo && (
+      <div style={{
+        fontSize: 34, fontWeight: 600, color: "var(--text)",
+        animation: enCurso ? "none" : "pulse 1.5s infinite",
+      }}>Jarvis</div>
+
+      {enCurso ? (
+        <>
+          {/* Saber si te escuchan o no es lo único imprescindible aquí: un micrófono que
+              parece abierto y no lo está es lo que hace repetir la frase tres veces. */}
+          <div style={{ fontSize: 15, color: f.color, marginTop: 6 }}>{f.texto}</div>
+          <div style={{
+            fontSize: 17, color: "var(--text)", textAlign: "center", maxWidth: 460,
+            minHeight: 52, lineHeight: 1.45, marginTop: 10,
+          }}>{parcial}</div>
+        </>
+      ) : motivo && (
         <div style={{
           fontSize: 15, color: "var(--muted)", textAlign: "center",
           maxWidth: 420, lineHeight: 1.5, marginTop: 4,
         }}>{motivo}</div>
       )}
-      <div style={{ display: "flex", gap: 56, marginTop: 40 }}>
+
+      <div style={{ display: "flex", gap: 56, marginTop: enCurso ? 30 : 40 }}>
         <div style={{ textAlign: "center" }}>
-          <button onClick={onRechazar} title="Ahora no"
+          <button onClick={enCurso ? onColgar : onRechazar} title={enCurso ? "Colgar" : "Ahora no"}
                   style={{ ...boton, background: "var(--red, #d9534f)", transform: "rotate(135deg)" }}>✆</button>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Ahora no</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+            {enCurso ? "Colgar" : "Ahora no"}
+          </div>
         </div>
-        <div style={{ textAlign: "center" }}>
-          <button onClick={onContestar} title="Contestar"
-                  style={{ ...boton, background: "var(--green, #4caf50)" }}>✆</button>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Contestar</div>
-        </div>
+        {!enCurso && (
+          <div style={{ textAlign: "center" }}>
+            {/* Deshabilitado hasta que llega el permiso de voz: descolgar antes deja la
+                llamada entera con la voz del navegador. Ver `VOZ_ESPERA_MAX_MS`. */}
+            <button onClick={onContestar} disabled={!lista} title="Contestar" style={{
+              ...boton, background: "var(--green, #4caf50)",
+              opacity: lista ? 1 : 0.4, cursor: lista ? "pointer" : "default",
+            }}>✆</button>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
+              {lista ? "Contestar" : "Conectando…"}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1055,8 +1087,15 @@ export default function Dashboard() {
   // reabriría el micro justo cuando empieza a sonar la siguiente.
   const vozTurnoRef = useRef(0);
   // La llamada entrante: lo que se ve al abrir el dashboard desde el aviso del móvil.
-  // `null` es "no hay llamada"; con objeto, se pinta la pantalla de descolgar.
+  // `null` es "no hay llamada". Con objeto se pinta la pantalla, y `estado` dice si está
+  // sonando o si ya has descolgado — la pantalla NO se va al contestar: una llamada que
+  // te devuelve a un panel de widgets a mitad de frase no es una llamada.
   const [llamadaEntrante, setLlamadaEntrante] = useState(null);
+  // Si ya se puede descolgar. La máquina de Fly escala a cero, así que el permiso de voz
+  // puede tardar 10-15 s en llegar mientras despierta; descolgar antes dejaba la llamada
+  // ENTERA con la voz del navegador, porque `iniciarLlamada` mira el permiso una vez y
+  // dentro del gesto (no puede esperar sin romper el desbloqueo de audio de iOS).
+  const [vozLista, setVozLista] = useState(false);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
@@ -2175,6 +2214,9 @@ export default function Dashboard() {
   // 10–15 segundos de Fly. Pidiéndolo antes, el backend ya está despierto cuando llamas.
   const vozPermisoRef  = useRef(null);
   const vozPidiendoRef = useRef(false);
+  // `true` cuando el backend ha dicho que no hay voz de pago (503) o no se le ha podido
+  // preguntar. Distinto de "aún no ha contestado", que es lo que se espera al descolgar.
+  const vozNoDisponibleRef = useRef(false);
 
   async function pedirPermisoVoz() {
     if (vozPidiendoRef.current) return;   // ya hay uno en vuelo: pedir dos gasta dos
@@ -2188,7 +2230,12 @@ export default function Dashboard() {
       // 503 es la respuesta normal cuando la voz de pago no está configurada, que es el
       // caso por defecto. No es un error: se sigue con la voz del navegador.
       vozPermisoRef.current = r.ok ? { ...await r.json(), pedidoEn: Date.now() } : null;
-    } catch { vozPermisoRef.current = null; }
+      // Que no haya voz de pago es una respuesta, no un fallo, y hay que distinguirla de
+      // "todavía no ha llegado": la pantalla de llamada espera al permiso antes de dejar
+      // descolgar, y sin esto esperaría el timeout entero cada vez para nada. Se limpia al
+      // acertar, porque un 401 de paso no puede condenar la voz para el resto de la sesión.
+      vozNoDisponibleRef.current = !r.ok;
+    } catch { vozPermisoRef.current = null; vozNoDisponibleRef.current = true; }
     finally { vozPidiendoRef.current = false; }
   }
 
@@ -2313,18 +2360,53 @@ export default function Dashboard() {
         const r = await apiFetch(`${API}/despliegue/pendiente`, { headers: authHeaders() });
         if (r.ok) pendiente = (await r.json())?.pendiente || null;
       } catch { /* sin red se descuelga igual, con la frase de respaldo */ }
-      if (vivo) setLlamadaEntrante({ ...(pendiente || {}), apertura: aperturaDeLlamada(pendiente) });
+      if (vivo) {
+        setLlamadaEntrante({ ...(pendiente || {}), estado: "sonando",
+                             apertura: aperturaDeLlamada(pendiente) });
+      }
     })();
     return () => { vivo = false; };
   }, [token]);
+
+  // Esperar al permiso de voz ANTES de dejar descolgar, y esperarlo aquí, que es donde
+  // esperar no molesta: un teléfono también tarda un momento en dar línea. Antes se podía
+  // descolgar en el acto y, con la máquina de Fly despertando, el permiso llegaba tarde:
+  // la llamada salía con la voz del navegador y parecía que ElevenLabs no funcionaba.
+  useEffect(() => {
+    if (llamadaEntrante?.estado !== "sonando") return;
+    setVozLista(false);
+    const desde = Date.now();
+    const mirar = () => {
+      // Se descuelga en cuanto hay permiso, o si ya se sabe que no hay voz de pago, o si
+      // tarda demasiado: quedarse sin poder contestar es peor que contestar con la voz
+      // del navegador. La llamada nunca se bloquea por esto.
+      if (vozPermisoRef.current || vozNoDisponibleRef.current
+          || Date.now() - desde > VOZ_ESPERA_MAX_MS) {
+        setVozLista(true);
+        clearInterval(reloj);
+      }
+    };
+    const reloj = setInterval(mirar, 250);
+    mirar();
+    return () => clearInterval(reloj);
+  }, [llamadaEntrante?.estado]);
+
+  // Colgar hablando («adiós») cierra la llamada por dentro, pero la pantalla se quedaría
+  // puesta tapando el dashboard. Se cierra cuando la llamada deja de estar viva.
+  useEffect(() => {
+    if (llamadaEntrante?.estado === "hablando" && !jarvisLlamada) setLlamadaEntrante(null);
+  }, [jarvisLlamada, llamadaEntrante?.estado]);
 
   /** Descolgar. Todo lo de dentro va SIN `await` por delante: es el gesto que desbloquea
    *  el audio en iOS y cualquier espera antes de hablar deja la llamada muda en el móvil,
    *  que es el mismo motivo por el que `iniciarLlamada` saluda desde el toque. */
   function contestarLlamada() {
-    const apertura = llamadaEntrante?.apertura;
-    setLlamadaEntrante(null);
-    iniciarLlamada(apertura);
+    if (!vozLista) return;
+    iniciarLlamada(llamadaEntrante?.apertura);
+    // Solo se pasa a "hablando" si la llamada ha arrancado de verdad: `iniciarLlamada` se
+    // sale sin hacer nada en un navegador que no sabe escuchar, y dejar la pantalla puesta
+    // sería quedarse mirando un «Te escucho…» que no escucha a nadie.
+    setLlamadaEntrante(prev => (prev && llamadaRef.current ? { ...prev, estado: "hablando" } : null));
   }
 
   // Los callbacks del reconocimiento y de la síntesis nacen en un render y siguen vivos
@@ -5081,14 +5163,19 @@ export default function Dashboard() {
 
   return (
     <>
-      {/* Va antes que el dashboard y por encima de todo: cuando suena, es lo único que
-          importa. Al contestar se desmonta sola y debajo queda el dashboard con la
-          conversación ya abierta en la tarjeta de Jarvis. */}
+      {/* Va antes que el dashboard y por encima de todo: mientras la llamada dure, es lo
+          único que importa. Se cierra al colgar —con el botón o diciendo «adiós»— y la
+          conversación queda debajo, en la tarjeta de Jarvis. */}
       {llamadaEntrante && (
         <PantallaLlamada
+          estado={llamadaEntrante.estado}
           motivo={llamadaEntrante.motivo}
+          fase={jarvisFase}
+          parcial={jarvisParcial}
+          lista={vozLista}
           onContestar={contestarLlamada}
           onRechazar={() => setLlamadaEntrante(null)}
+          onColgar={() => { colgarLlamada(); setLlamadaEntrante(null); }}
         />
       )}
 
