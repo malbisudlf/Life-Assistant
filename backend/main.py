@@ -7298,6 +7298,10 @@ def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> d
 RECORDATORIOS_URL      = f"{SUPABASE_URL}/rest/v1/jarvis_recordatorios"
 RECORDATORIO_MAX_TEXTO = 200
 RECORDATORIOS_MAX      = 50
+# Cuántas entidades puede llevar un aviso con botón de apagar. Son las que están
+# encendidas al salir de casa: con una casa entera encendida, apagarlas todas de golpe
+# llenaría la cola de órdenes (CASA_MAX_ORDENES) y se perderían las primeras.
+AVISO_MAX_ENTIDADES    = 15
 
 # ── Gobierno de los avisos ───────────────────────────────────────────────────
 # Un asistente proactivo tiene un solo modo de fallo: volverse ruido. Y no falla de
@@ -7329,6 +7333,10 @@ REGLA_TUYA_PREFIJO  = "tuya:"
 # La regla del aviso de la revisión nocturna. Va aquí porque quien la mira es el
 # despachador, para darle a la notificación sus botones (`_acciones_aviso`).
 REGLA_REVISION      = "revision"
+# La del aviso de "te has ido con algo encendido". Está aquí por el mismo motivo que la
+# de arriba: quien la mira es el despachador, para darle a la notificación su botón de
+# apagar (`_acciones_aviso`).
+REGLA_AL_SALIR      = "al_salir"
 # A partir de esta hora, un aviso que puede esperar espera a mañana. El de la revisión
 # nocturna se apunta a las tres y pico de la madrugada: entregarlo cuando se apunta
 # sería despertarte para contarte un informe de código.
@@ -7408,11 +7416,17 @@ def _ya_dicho(regla: str, huella: str) -> bool:
 
 def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
                    cuando: Optional[datetime] = None, caduca: Optional[datetime] = None,
-                   huella: str = "", id: str = "", voz: bool = False) -> bool:
+                   huella: str = "", id: str = "", voz: bool = False,
+                   entidades: Optional[list] = None) -> bool:
     """Única puerta por la que una regla deja un aviso. True si quedó apuntado.
 
     Aquí se aplican el silenciado y la memoria de lo ya dicho; el presupuesto se aplica
     al despachar, porque hasta ese momento no se sabe cuántos habrán salido hoy.
+
+    `entidades` son los `entity_id` sobre los que va el aviso, para el aviso que además
+    trae un botón que actúa sobre ellos (hoy solo "te has ido con esto encendido").
+    Se guardan CON el aviso a propósito: son las de ese momento, no las de cuando
+    pulses.
     """
     if _regla_silenciada(regla):
         return False
@@ -7432,6 +7446,8 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
         fila["huella"] = huella
     if caduca:
         fila["caduca"] = caduca.astimezone(timezone.utc).isoformat()
+    if entidades:
+        fila["entidades"] = [str(e)[:120] for e in entidades[:AVISO_MAX_ENTIDADES]]
     try:
         r = http.post(RECORDATORIOS_URL,
                       headers={**supabase_headers(), "Prefer": "return=minimal"}, json=fila)
@@ -8573,12 +8589,17 @@ def _encendidos(dominios: tuple) -> list:
 
     El catálogo lo empuja HA cada hora, así que puede ir con retraso: por eso esto sirve
     para AVISAR y nunca para apagar nada por su cuenta.
+
+    Devuelve id y nombre. El nombre es lo que se lee en el aviso; el id es lo que hace
+    falta para apagarlo si contestas que sí al botón, y tiene que quedar guardado con el
+    aviso: releer el catálogo al pulsar apagaría lo que estaba encendido hace una hora,
+    no lo que decía el aviso.
     """
     encendidas = []
     for e in _casa_entidades():
         eid = str(e.get("id") or "")
         if eid.split(".")[0] in dominios and str(e.get("estado") or "").lower() == "on":
-            encendidas.append(e.get("nombre") or eid)
+            encendidas.append({"id": eid, "nombre": e.get("nombre") or eid})
     return encendidas
 
 
@@ -8592,10 +8613,15 @@ def _regla_al_salir_de_casa() -> int:
     luces = _encendidos(("light", "switch"))
     puestos = 0
     if luces:
+        nombres = [l["nombre"] for l in luces]
+        # El PC se nombra en el aviso pero NO se apaga con el botón: cortarle la
+        # corriente a un switch no es apagar un PC, es tirar del cable. Para eso está su
+        # propio aviso, que ofrece suspenderlo por SSH.
         puestos += int(_apuntar_aviso(
-            "al_salir",
-            f"Te has ido y quedan encendidas: {', '.join(luces[:5])}.",
-            prioridad=PRIO_ALTA, huella=f"encendido:{','.join(sorted(luces))[:120]}",
+            REGLA_AL_SALIR,
+            f"Te has ido y quedan encendidas: {', '.join(nombres[:5])}.",
+            prioridad=PRIO_ALTA, huella=f"encendido:{','.join(sorted(nombres))[:120]}",
+            entidades=[l["id"] for l in luces if l["id"] != PC_ENTIDAD],
         ))
     if PC_ENTIDAD and any(str(e.get("id")) == PC_ENTIDAD
                           and str(e.get("estado") or "").lower() == "on"
@@ -9207,12 +9233,21 @@ def _acciones_aviso(rid: str, regla: str) -> list:
     aviso; HA solo sabe a qué móvil va. Por defecto es la valoración de siempre (útil /
     no útil), que es lo que hace que una regla ignorada se calle sola. La revisión
     nocturna trae otra: sus hallazgos no se valoran, se arreglan o no.
+
+    Y el de salir de casa lleva las dos cosas: apagar es lo que has venido a hacer al
+    leerlo —un aviso que te obliga a abrir la app para resolverlo no ha terminado el
+    trabajo—, pero la regla sigue necesitando saber si sirvió, así que la valoración se
+    queda detrás.
     """
     if not rid:
         return []
     if regla == REGLA_REVISION:
         return [{"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"},
                 {"action": f"LA_NADA_{rid}",     "title": "No hacer nada"}]
+    if regla == REGLA_AL_SALIR:
+        return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
+                {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
+                {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
     return [{"action": f"LA_UTIL_{rid}",   "title": "Útil"},
             {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
 
@@ -9359,6 +9394,26 @@ def probar_aviso(credentials: HTTPAuthorizationCredentials = Depends(verify_toke
     return {"ok": True, "canal": canal, "con_botones": bool(aviso_id)}
 
 
+def _auth_boton(request: Request, token: str) -> None:
+    """Quién puede contestar al botón de una notificación: HA o el dashboard.
+
+    Token de servicio O JWT, porque a estos endpoints llaman dos clientes distintos (la
+    acción de la notificación de HA y el dashboard) y `Depends` solo sabe exigir uno. Y
+    el JWT se valida con `_jwt_de_usuario`, no con `jwt.decode` a secas: con la firma
+    sola, el `state` del OAuth de Microsoft —que viaja en la barra de direcciones y acaba
+    en el historial— valía aquí como sesión durante sus diez minutos. El 401 de
+    `_jwt_de_usuario` se traduce a 403 para no cambiar lo que ya responden estos
+    endpoints: un 401 en el dashboard significa "vuelve a hacer login".
+    """
+    provisto = _extract_service_token(request, token)
+    if _token_ok(provisto, HA_POLL_TOKEN):
+        return
+    try:
+        _jwt_de_usuario(provisto)
+    except HTTPException:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 class AvisoUtilRequest(BaseModel):
     util: bool
 
@@ -9376,20 +9431,8 @@ def marcar_aviso_util(request: Request, body: AvisoUtilRequest,
     Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT).
     Que NO conteste no es un "no útil": el silencio no cuenta, ni a favor ni en contra.
     """
-    provisto = _extract_service_token(request, token)
-    if not _token_ok(provisto, HA_POLL_TOKEN):
-        # Mismo criterio que `verify_agente`: token de servicio O JWT, porque a este
-        # endpoint llaman dos clientes distintos (la acción de la notificación de HA y
-        # el dashboard) y `Depends` solo sabe exigir uno. Y el JWT se valida con
-        # `_jwt_de_usuario`, no con `jwt.decode` a secas: con la firma sola, el `state`
-        # del OAuth de Microsoft —que viaja en la barra de direcciones y acaba en el
-        # historial— valía aquí como sesión durante sus diez minutos. El 401 de
-        # `_jwt_de_usuario` se traduce a 403 para no cambiar lo que ya responde este
-        # endpoint: un 401 en el dashboard significa "vuelve a hacer login".
-        try:
-            _jwt_de_usuario(provisto)
-        except HTTPException:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    # Mismo criterio que `verify_agente`: ver `_auth_boton`.
+    _auth_boton(request, token)
 
     try:
         r = http.patch(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}",
@@ -9458,6 +9501,102 @@ def _valorar_regla(regla: str, util: bool) -> None:
         _apuntar_aviso("", f"He dejado de avisarte de '{regla}': las últimas "
                            f"{no_utiles} veces no te sirvió. Dime «reactiva {regla}» "
                            f"si la quieres de vuelta.", prioridad=PRIO_BAJA)
+
+
+def _apagar_entidades(ids: list) -> list:
+    """Encola el apagado de esas entidades. Devuelve las que se pudieron encolar.
+
+    Pasa por `_j_casa_ordenar` a propósito, que es la única puerta que valida contra el
+    catálogo y contra la lista blanca de dominios: la lista sale de una fila de Supabase,
+    y la tabla es escribible con la service key. Que un id de aquí acabara en un
+    `service call` sin pasar por esas dos comprobaciones sería la misma puerta trasera
+    que `alud_url` cierra por tres sitios.
+    """
+    apagadas = []
+    for eid in ids:
+        dominio = str(eid).split(".")[0]
+        # Solo lo que se apaga como un interruptor de la pared. El aviso solo mira
+        # `light` y `switch`, pero quien lee la fila no puede darlo por hecho.
+        if dominio not in ("light", "switch"):
+            logger.warning("Al salir: no apago '%s', no es una luz ni un enchufe", eid)
+            continue
+        r = _j_casa_ordenar(f"{dominio}.turn_off", str(eid))
+        if r.get("ok"):
+            apagadas.append(str(eid))
+        else:
+            logger.warning("Al salir: no se pudo encolar el apagado de '%s' (%s)",
+                           eid, r.get("motivo"))
+    return apagadas
+
+
+@app.post("/avisos/{aviso_id}/apagar")
+def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""):
+    """El tercer botón del aviso de salir de casa: apágalo tú.
+
+    Hasta aquí el aviso te decía que te habías dejado la luz del salón encendida y ahí se
+    acababa: para apagarla había que abrir el dashboard o hablar con Jarvis, que es
+    exactamente la fricción que hace que un aviso se lea y no se resuelva. Este endpoint
+    es el «sí, apágalas» de esa pregunta.
+
+    **Apaga lo que decía el aviso, no lo que hay ahora.** La lista viaja guardada en la
+    fila desde que se apuntó (`entidades`) porque el catálogo de HA llega con hasta una
+    hora de retraso: releerlo al pulsar apagaría cosas de las que el aviso no habló, y un
+    botón que apaga algo que no te dijo es peor que no tenerlo. La regla de "no apagar a
+    ciegas" no se rompe — sigue sin apagar nada por su cuenta; ahora lo apagas tú.
+
+    Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT),
+    igual que la valoración de avisos.
+    """
+    _auth_boton(request, token)
+
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}&select=regla,entidades",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Avisos: no se pudo leer el aviso %s para apagar (%s)", aviso_id, e)
+        raise HTTPException(status_code=502, detail="No se pudo leer el aviso")
+
+    if not filas:
+        raise HTTPException(status_code=404, detail="Ese aviso no existe")
+    if str(filas[0].get("regla") or "") != REGLA_AL_SALIR:
+        # Solo ese aviso lleva este botón. Si llega otro id es que el YAML de HA lo está
+        # mandando a donde no toca, y apagar "lo que sea" del aviso equivocado es
+        # justamente lo que no puede pasar.
+        raise HTTPException(status_code=422, detail="Ese aviso no es de los que se apagan")
+
+    entidades = filas[0].get("entidades") or []
+    if not isinstance(entidades, list) or not entidades:
+        # Un aviso anterior a esta columna, o uno en el que lo único encendido era el PC.
+        raise HTTPException(status_code=422, detail="Ese aviso no dice qué apagar")
+
+    apagadas = _apagar_entidades(entidades[:AVISO_MAX_ENTIDADES])
+    if not apagadas:
+        _acusar_recibo("💡 No he podido apagar nada",
+                       "Pulsaste apagar y no ha salido ninguna orden. Sigue encendido: "
+                       "míralo desde el dashboard o dímelo a mí.")
+        raise HTTPException(status_code=502, detail="No se pudo encolar ningún apagado")
+
+    # Pulsar "apagar" es la valoración más fuerte que existe de este aviso: no es que te
+    # haya parecido interesante, es que has actuado sobre él. Contarlo como útil es lo
+    # que impide que la regla se silencie sola por no haber pulsado además el otro botón.
+    try:
+        http.patch(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"util": True})
+        _valorar_regla(REGLA_AL_SALIR, True)
+    except Exception as e:
+        # El apagado ya está encolado: fallar aquí solo cuesta una estadística.
+        logger.warning("Avisos: apagado hecho pero sin apuntar la valoración de %s (%s)",
+                       aviso_id, e)
+
+    logger.info("Al salir: apagando %s", ", ".join(apagadas))
+    return {"ok": True, "apagadas": apagadas,
+            "sin_apagar": [str(e) for e in entidades if str(e) not in apagadas]}
 
 
 @app.post("/avisos/reglas/{regla}/reactivar")
@@ -9737,12 +9876,7 @@ def revision_accion(request: Request, body: RevisionAccionRequest,
     Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT),
     igual que la valoración de avisos.
     """
-    provisto = _extract_service_token(request, token)
-    if not _token_ok(provisto, HA_POLL_TOKEN):
-        try:
-            _jwt_de_usuario(provisto)
-        except HTTPException:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    _auth_boton(request, token)
 
     accion = str(body.accion or "").strip().lower()
     if accion not in ("arreglar", "nada"):

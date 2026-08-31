@@ -300,7 +300,7 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260816_health_fuente`, `20260817_vigilante_estado`,
 `20260818_avisos_gobierno`, `20260819_vigilancias`,
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
-`20260824_salud_ajustes`.
+`20260824_salud_ajustes`, `20260830_avisos_entidades`.
 
 ## Convenciones
 

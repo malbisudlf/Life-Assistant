@@ -325,10 +325,26 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - **Hueco para entrenar** (`_regla_hueco_entreno`): la hora concreta libre de mañana.
     Sin histórico de entrenos no se regaña, la regla de siempre.
   - **Al salir de casa** (`_regla_al_salir_de_casa`): se dispara en `POST /ha/presencia` al
-    CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **No apaga nada**:
-    el catálogo lo empuja HA cada hora y apagar con un dato viejo es peor que preguntar.
-    El PC solo si `PC_ENTIDAD` está declarada: adivinar cuál es por el nombre acaba
-    apagando otra cosa.
+    CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **No apaga nada
+    por su cuenta**: el catálogo lo empuja HA cada hora y apagar con un dato viejo es
+    peor que preguntar. El PC solo si `PC_ENTIDAD` está declarada: adivinar cuál es por
+    el nombre acaba apagando otra cosa.
+    Su notificación lleva un botón más, **«Apagar»** (`POST /avisos/{id}/apagar`), porque
+    un aviso que te obliga a abrir la app para resolverlo no ha terminado el trabajo. Tres
+    cosas de ese botón:
+    - **Apaga lo que decía el aviso, no lo que hay ahora.** Los `entity_id` se guardan con
+      el aviso (columna `entidades`, `20260830_avisos_entidades`) en el momento de
+      apuntarlo. Releer el catálogo al pulsar apagaría cosas de las que el aviso no habló
+      —llega con hasta una hora de retraso—, y un botón que apaga algo que no te dijo es
+      peor que no tenerlo. La regla de "no apagar a ciegas" sigue intacta: ahora lo apagas
+      tú.
+    - **El PC se nombra pero no se apaga con él.** Cortarle la corriente a un `switch` no
+      es apagar un PC, es tirar del cable; para eso está su propio aviso, que ofrece
+      suspenderlo por SSH. Se excluye `PC_ENTIDAD` de la lista.
+    - **Pulsarlo cuenta como «útil»**, y pasa por `_j_casa_ordenar` como cualquier otra
+      orden de la casa: la lista viene de una fila de Supabase, que es escribible con la
+      service key, así que tiene que pasar por la lista blanca de dominios y por el
+      catálogo igual que si la hubiera pedido el modelo.
   Las reglas que necesitan salud reciben la FUNCIÓN que la lee, no el dato: pasando el
   dato, el tick de cada 5 minutos traía 30 días de métricas aunque la regla fuera a
   salirse por su guarda de hora.
