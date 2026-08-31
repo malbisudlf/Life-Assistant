@@ -425,6 +425,12 @@ function JarvisMensaje({ m }) {
 // sesión cada pocos segundos de silencio, así que esto son del orden de un minuto callado.
 const REAPERTURAS_MAX = 8;
 
+// El token de ElevenLabs vale 15 minutos. Se renueva a los 10 —con margen para que uno
+// recién renovado aguante la llamada entera— y no se usa uno que pase de 14: abrir el
+// socket con un token muerto es dejar a Jarvis sin voz de pago para toda la llamada.
+const VOZ_TOKEN_RENUEVA_MS = 10 * 60 * 1000;
+const VOZ_TOKEN_VIDA_MS    = 14 * 60 * 1000;
+
 // Qué se ve en cada fase de la llamada. El usuario tiene que saber si le están
 // escuchando o no: un micrófono que parece abierto y no lo está es lo que hace que la
 // gente repita la frase tres veces.
@@ -2119,9 +2125,12 @@ export default function Dashboard() {
   // pedirlo al pulsar "llamar" metería una ida y vuelta antes de la primera palabra; y
   // como el backend escala a cero, esa ida y vuelta puede ser el arranque en frío de
   // 10–15 segundos de Fly. Pidiéndolo antes, el backend ya está despierto cuando llamas.
-  const vozPermisoRef = useRef(null);
+  const vozPermisoRef  = useRef(null);
+  const vozPidiendoRef = useRef(false);
 
   async function pedirPermisoVoz() {
+    if (vozPidiendoRef.current) return;   // ya hay uno en vuelo: pedir dos gasta dos
+    vozPidiendoRef.current = true;
     try {
       const r = await apiFetch(`${API}/voz/token`, {
         method:  "POST",
@@ -2130,8 +2139,9 @@ export default function Dashboard() {
       });
       // 503 es la respuesta normal cuando la voz de pago no está configurada, que es el
       // caso por defecto. No es un error: se sigue con la voz del navegador.
-      vozPermisoRef.current = r.ok ? await r.json() : null;
+      vozPermisoRef.current = r.ok ? { ...await r.json(), pedidoEn: Date.now() } : null;
     } catch { vozPermisoRef.current = null; }
+    finally { vozPidiendoRef.current = false; }
   }
 
   // Con `token`, y no al montar a secas: este componente se monta TAMBIÉN en la
@@ -2139,7 +2149,28 @@ export default function Dashboard() {
   // y sin la guarda pedía el permiso sin sesión, con lo que cada carga dejaba un 401
   // en la consola del navegador. El resto de efectos de datos llevan esta misma
   // guarda; a este se le olvidó.
-  useEffect(() => { if (token) pedirPermisoVoz(); /* una vez, con sesión */ }, [token]);
+  //
+  // Y no basta con pedirlo una vez: EL TOKEN CADUCA A LOS 15 MINUTOS. En el móvil lo
+  // normal es abrir el dashboard, guardarse el teléfono y llamar mucho después; con el
+  // token muerto, ElevenLabs cierra el socket con `invalid_token` y Jarvis se queda sin
+  // su voz. Así que se renueva al volver a la pestaña (que es justo lo que pasa al
+  // desbloquear el móvil) y, mientras siga a la vista, cada diez minutos.
+  useEffect(() => {
+    if (!token) return;
+    const caducado = () => {
+      const p = vozPermisoRef.current;
+      return !p || Date.now() - (p.pedidoEn || 0) > VOZ_TOKEN_RENUEVA_MS;
+    };
+    const renovar = () => { if (caducado()) pedirPermisoVoz(); };
+    renovar();
+    const reloj = setInterval(renovar, VOZ_TOKEN_RENUEVA_MS);
+    const alVolver = () => { if (document.visibilityState === "visible") renovar(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => {
+      clearInterval(reloj);
+      document.removeEventListener("visibilitychange", alVolver);
+    };
+  }, [token]);
 
   function iniciarLlamada() {
     if (!VOZ_NAVEGADOR || !VOZ_SINTESIS || llamadaRef.current) return;
@@ -2147,22 +2178,36 @@ export default function Dashboard() {
     // AudioContext dentro de un toque del usuario, y cualquier espera antes de crearlo
     // deja la llamada muda en el móvil. Por eso el permiso se pidió por adelantado.
     const permiso = vozPermisoRef.current;
-    if (permiso) {
+    // Un token pasado de fecha no se estrena: el socket lo rechazaría con
+    // `invalid_token` y la llamada empezaría con un aviso rojo y la voz robótica. Se
+    // tira y se pide otro para la siguiente; esta va con la del navegador desde el
+    // principio, sin dar el rodeo.
+    const fresco  = permiso && Date.now() - (permiso.pedidoEn || 0) < VOZ_TOKEN_VIDA_MS;
+    if (permiso && !fresco) { vozPermisoRef.current = null; pedirPermisoVoz(); }
+    if (fresco) {
       vozDePago = abrirVozEleven({
         token:   permiso.token,
         voiceId: permiso.voice_id,
         modelId: permiso.model_id,
         formato: permiso.formato,
-        // ElevenLabs puede terminar un turno sin mandar audio y sin dar ningún error
-        // (una voz de la biblioteca en plan gratuito lo hace). Se renuncia a ella para
-        // el resto de la llamada y se dice lo que quedó pendiente con la del navegador:
-        // una voz robótica es mucho mejor que el silencio.
-        alFallar: (texto, alTerminar) => {
+        // La voz de pago puede fallar de tres maneras: terminar un turno sin mandar
+        // audio y sin error (una voz de la biblioteca en plan gratuito lo hace), caerse
+        // el socket a media llamada, o rechazar el token por caducado. Se renuncia a
+        // ella para el resto de la llamada y se dice con la del navegador todo lo que
+        // quedó sin decir: una voz robótica es mucho mejor que el silencio.
+        alFallar: (sinDecir) => {
+          const primera = vozDePago !== null;
           vozDePago = null;
-          setJarvisMensajes(prev => [...prev, {
-            rol: "aviso", texto: "La voz de ElevenLabs no ha sonado; sigo con la del navegador.",
-          }]);
-          hablarJarvis(texto, alTerminar);
+          if (primera) {
+            setJarvisMensajes(prev => [...prev, {
+              rol: "aviso", texto: "La voz de ElevenLabs no ha sonado; sigo con la del navegador.",
+            }]);
+          }
+          // En orden y encolando: son frases seguidas de la misma respuesta, y si cada
+          // una cortara a la anterior solo se oiría la última.
+          sinDecir.forEach(([texto, alTerminar], i) => {
+            hablarJarvis(texto, alTerminar, { encolar: i > 0 });
+          });
         },
       });
       // El token se acaba de gastar: se pide el de la siguiente llamada ya.
@@ -2216,7 +2261,12 @@ export default function Dashboard() {
   // la cuota de localStorage con algo que nadie va a releer.
   useEffect(() => {
     try {
-      localStorage.setItem("la_jarvis_chat", JSON.stringify(jarvisMensajes.slice(-40)));
+      // Los avisos NO se guardan. Cuentan algo de la sesión en curso ("la voz no ha
+      // sonado", "he colgado porque llevabas un rato callado") y al volver a entrar se
+      // leen como si estuviera pasando ahora: abrías el dashboard en el móvil y lo
+      // primero que veías era un error en rojo de una llamada de anteayer.
+      const guardable = jarvisMensajes.filter(m => m.rol !== "aviso").slice(-40);
+      localStorage.setItem("la_jarvis_chat", JSON.stringify(guardable));
     } catch { /* mejor esfuerzo: cuota llena o modo privado */ }
   }, [jarvisMensajes]);
 
