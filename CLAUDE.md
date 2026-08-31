@@ -127,6 +127,7 @@ Ficheros clave:
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
+| `src/lib/vozMicro.js` | El micrófono mientras Jarvis habla: mide energía para saber si le has cortado (barge-in). No transcribe nada |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |

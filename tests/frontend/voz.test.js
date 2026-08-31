@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse,
-  llamadaEntranteDeUrl, aperturaDeLlamada,
+  llamadaEntranteDeUrl, aperturaDeLlamada, detectorDeHabla, rmsDeMuestras,
 } from "../../src/lib/voz.js";
 
 describe("trocearParaVoz", () => {
@@ -229,5 +229,82 @@ describe("aperturaDeLlamada", () => {
     for (const vacio of [null, undefined, {}, { apertura: "   " }]) {
       expect(aperturaDeLlamada(vacio).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("detectorDeHabla", () => {
+  /** Alimenta el detector con un nivel constante durante `ms`, muestreando cada 40 ms
+   *  como hace vozMicro.js. Devuelve el instante del disparo, o `null`. */
+  function alimentar(det, { rms, ms, desde = 0 }) {
+    for (let t = desde; t < desde + ms; t += 40) {
+      if (det.mira(rms, t)) return t;
+    }
+    return null;
+  }
+
+  it("no corta a Jarvis por el ruido de la sala", () => {
+    const det = detectorDeHabla();
+    expect(alimentar(det, { rms: 0.01, ms: 5000 })).toBe(null);
+  });
+
+  it("corta cuando hablas encima", () => {
+    const det = detectorDeHabla();
+    // Voz clara y seguida: dispara, pero no antes de la gracia ni antes del sostenido.
+    const cuando = alimentar(det, { rms: 0.2, ms: 3000 });
+    expect(cuando).not.toBe(null);
+    expect(cuando).toBeGreaterThanOrEqual(400);
+  });
+
+  it("un portazo no es hablar", () => {
+    // Lo que distingue una voz de un golpe es que la voz SIGUE. Un pico de dos muestras
+    // pasa el umbral y no debe cortar nada: cortar a Jarvis cada vez que alguien cierra
+    // una puerta haría la llamada inservible.
+    const det = detectorDeHabla();
+    let disparo = null;
+    for (let t = 0; t < 6000; t += 40) {
+      const pico = t % 1000 < 80;   // 80 ms de golpe por segundo
+      if (det.mira(pico ? 0.5 : 0.005, t)) { disparo = t; break; }
+    }
+    expect(disparo).toBe(null);
+  });
+
+  it("no cuenta las primeras décimas, que son la cola de tu propia frase", () => {
+    const det = detectorDeHabla({ msGracia: 400, msSostenidos: 300 });
+    // Voz desde el instante cero: aun así no puede disparar dentro de la gracia.
+    for (let t = 0; t < 400; t += 40) expect(det.mira(0.3, t)).toBe(false);
+  });
+
+  it("dispara una sola vez: quien lo usa ya ha cortado y lo tira", () => {
+    const det = detectorDeHabla();
+    expect(alimentar(det, { rms: 0.3, ms: 3000 })).not.toBe(null);
+    expect(alimentar(det, { rms: 0.3, ms: 3000, desde: 5000 })).toBe(null);
+  });
+
+  it("con el umbral subido aguanta lo que antes cortaba", () => {
+    // Es lo que hace la llamada sola cuando un corte resulta ser el eco de Jarvis.
+    const flojo = detectorDeHabla({ umbral: 0.055 });
+    const duro  = detectorDeHabla({ umbral: 0.4 });
+    expect(alimentar(flojo, { rms: 0.1, ms: 3000 })).not.toBe(null);
+    expect(alimentar(duro,  { rms: 0.1, ms: 3000 })).toBe(null);
+  });
+
+  it("una lectura rota no dispara", () => {
+    // NaN saliendo del analizador no puede leerse como "está hablando".
+    const det = detectorDeHabla();
+    expect(alimentar(det, { rms: NaN, ms: 3000 })).toBe(null);
+  });
+});
+
+describe("rmsDeMuestras", () => {
+  it("el silencio es cero y una onda llena es casi uno", () => {
+    expect(rmsDeMuestras(new Float32Array(64))).toBe(0);
+    expect(rmsDeMuestras(new Float32Array(64).fill(1))).toBeCloseTo(1);
+    expect(rmsDeMuestras([])).toBe(0);
+    expect(rmsDeMuestras(null)).toBe(0);
+  });
+
+  it("no depende del signo: una onda es tan alta abajo como arriba", () => {
+    const alterna = Float32Array.from({ length: 64 }, (_, i) => (i % 2 ? 0.5 : -0.5));
+    expect(rmsDeMuestras(alterna)).toBeCloseTo(0.5);
   });
 });
