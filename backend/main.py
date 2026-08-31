@@ -7348,6 +7348,10 @@ REGLA_AL_SALIR      = "al_salir"
 # desplegar— y porque son las dos únicas que pueden tocar producción: tenerlas
 # distinguibles es lo que permite silenciar una sin callar la otra.
 REGLA_DESPLIEGUE    = "despliegue"
+# La URL pública del dashboard. Solo sirve para una cosa: el botón «Hablarlo» del aviso
+# de despliegue, que abre la pantalla de llamada. Vacía, el aviso sigue teniendo sus dos
+# botones de siempre y lo único que se pierde es poder contestar hablando.
+FRONTEND_URL        = os.getenv("FRONTEND_URL", "").rstrip("/")
 # A partir de esta hora, un aviso que puede esperar espera a mañana. El de la revisión
 # nocturna se apunta a las tres y pico de la madrugada: entregarlo cuando se apunta
 # sería despertarte para contarte un informe de código.
@@ -9256,8 +9260,17 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         return [{"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"},
                 {"action": f"LA_NADA_{rid}",     "title": "No hacer nada"}]
     if regla == REGLA_DESPLIEGUE:
-        return [{"action": f"LA_DESPLEGAR_{rid}", "title": "Desplegar"},
-                {"action": f"LA_ESPERAR_{rid}",   "title": "Ahora no"}]
+        botones = [{"action": f"LA_DESPLEGAR_{rid}", "title": "Desplegar"},
+                   {"action": f"LA_ESPERAR_{rid}",   "title": "Ahora no"}]
+        # El tercero abre la pantalla de llamada del dashboard, que es el canal para
+        # cuando no puedes leer ni pulsar dos botones pequeños: en el coche. `action:
+        # "URI"` es el nombre reservado de la app de HA para "esto abre un enlace", no un
+        # id nuestro. Va el último a propósito: decidir de un toque sigue siendo lo
+        # normal, y hablarlo es lo que se hace cuando no puedes mirar.
+        if FRONTEND_URL:
+            botones.append({"action": "URI", "title": "Hablarlo",
+                            "uri": f"{FRONTEND_URL}/?llamada=1"})
+        return botones
     if regla == REGLA_AL_SALIR:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
                 {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
@@ -10291,10 +10304,10 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
              f"correo, no hay botones.")
     apuntado = _apuntar_aviso(REGLA_DESPLIEGUE, texto, prioridad=PRIO_ALTA,
                               cuando=_cuando_avisar(_ahora_local()), id=rid)
-    # Y además suena el teléfono. Un PR esperando permiso es exactamente el caso que
-    # justifica el canal caro: se queda parado hasta que contestes.
-    _llamar(f"He detectado un fallo, {que[:80]}. Ya lo he corregido y el CI está en "
-            f"verde. ¿Quieres que lo despliegue?", rid=rid)
+    # Y además suena el teléfono, SI está encendido. Hoy nace apagado y el canal de voz
+    # real es la pantalla de llamada del dashboard, que abre el propio aviso: ver
+    # `GET /despliegue/pendiente` y `docs/LLAMADAS.md` para por qué se aparcó Twilio.
+    _llamar(_apertura_despliegue(que), rid=rid)
     logger.info("PR #%s listo para desplegar (avería %s)", numero, fila.get("origen"))
     return {"ok": True, "avisado": apuntado, "pr": numero}
 
@@ -10407,6 +10420,18 @@ def _despliegue_decidir(rid: str, accion: str) -> dict:
     return {"ok": True, "hecho": True, "accion": "desplegar", "pr": pr}
 
 
+def _apertura_despliegue(que: str) -> str:
+    """La primera frase que dice Jarvis al descolgar, para los dos canales de voz.
+
+    Una sola fuente a propósito: la dicen el teléfono (`_llamar`) y la pantalla de
+    llamada del dashboard (`GET /despliegue/pendiente`). Escrita en cada sitio, Jarvis
+    acabaría contando lo mismo de dos maneras distintas según por dónde le cogieras, que
+    es justo lo que evita tener un solo cerebro detrás de los dos transportes.
+    """
+    return (f"He detectado un fallo, {que[:80]}. Ya lo he corregido y el CI está en "
+            f"verde. ¿Quieres que lo despliegue?")
+
+
 def _despliegue_pendiente() -> dict:
     """El despliegue esperando permiso más reciente, para cuando el aviso no trajo botones."""
     try:
@@ -10422,6 +10447,25 @@ def _despliegue_pendiente() -> dict:
         logger.error("Despliegue: no se pudo consultar lo pendiente (%s)", e)
         raise HTTPException(status_code=502, detail="No se pudo consultar el despliegue")
     return filas[0] if filas else {}
+
+
+@app.get("/despliegue/pendiente")
+def despliegue_pendiente_endpoint(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Qué hay esperando permiso, para la pantalla de llamada del dashboard.
+
+    Solo LEE. La decisión sigue pasando por `POST /despliegue/{id}/accion` con su PATCH
+    condicional: esto le dice a la pantalla qué anunciar al descolgar, no la autoriza a
+    nada. Devuelve el `id` para que la respuesta hablada se aplique a ESE despliegue y no
+    al «más reciente» resuelto otra vez más tarde, que es la frontera 2 de docs/AVERIAS.md.
+    """
+    fila = _despliegue_pendiente()
+    if not fila:
+        return {"pendiente": None}
+    que = str(fila.get("detalle") or fila.get("issue_titulo") or "algo")
+    return {"pendiente": {"id":       fila.get("id"),
+                          "pr":       fila.get("pr_numero"),
+                          "motivo":   que,
+                          "apertura": _apertura_despliegue(que)}}
 
 
 class DespliegueAccionRequest(BaseModel):
