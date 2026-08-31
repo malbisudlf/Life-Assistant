@@ -403,10 +403,13 @@ class TestJarvisDespachador:
     def test_el_esquema_declara_todas_las_herramientas(self, monkeypatch):
         # Con un servidor MCP configurado se anuncian todas, las mcp_* incluidas. Y con
         # rutina de arreglo, también `arreglar_revision`: sin ella no puede hacer nada.
+        # Lo mismo con `desplegar` y la credencial de despliegue.
         monkeypatch.setattr(main, "JARVIS_MCP_SERVERS",
                             json.dumps({"pruebas": {"url": "https://servidor.mcp/rpc"}}))
         monkeypatch.setattr(main, "ARREGLO_FIRE_URL", "https://api.test/fire")
         monkeypatch.setattr(main, "ARREGLO_FIRE_TOKEN", "arreglo-token")
+        monkeypatch.setattr(main, "DEPLOY_GITHUB_TOKEN", "gh-token")
+        monkeypatch.setattr(main, "JARVIS_REPO", "usuario/Life-Assistant")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)
