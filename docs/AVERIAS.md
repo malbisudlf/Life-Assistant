@@ -11,8 +11,8 @@ camino inverso, y es el que de verdad quita trabajo:
         ↓  la sesión arregla y abre un PR. NO lo mergea.
    El CI aprueba el PR
         ↓  pr-listo.yml  →  POST /revision/pr-listo
-   Suena el teléfono: «he detectado un fallo, ya lo he corregido, ¿lo despliego?»
-        ↓  dices que sí — por teléfono, por el botón del móvil o hablando con Jarvis
+   Te avisa: «he detectado un fallo, ya lo he corregido, ¿lo despliego?»
+        ↓  dices que sí — con el botón del móvil, o descolgando en «Hablarlo» y contestando
    Se mergea el PR y se dispara el deploy del backend.
 ```
 
@@ -57,7 +57,9 @@ Ninguna de estas se relaja. Son lo que separa esto de un sistema que despliega s
 | La routine que arregla | claude.ai — **la misma** que la de la revisión nocturna | Arregla y abre PR. La instrucción le dice que NO mergee |
 | `.claude/skills/arreglar-revision/SKILL.md` | Aquí | Su paso 0 distingue los dos caminos: con issue se mergea, con avería no |
 | `.github/workflows/pr-listo.yml` | Aquí | Ve el CI verde sobre una rama `claude/…` con PR y llama a `POST /revision/pr-listo` |
-| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo`, deja el aviso con botones y **llama por teléfono** |
+| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono si `LLAMADAS=1`) |
+| `GET /despliegue/pendiente` | `backend/main.py` | Qué anunciar al descolgar la pantalla de llamada. Solo lee |
+| `PantallaLlamada` | `src/components/Dashboard.jsx` | La pantalla de llamada entrante que abre el botón «Hablarlo» |
 | `POST /despliegue/{id}/accion` | `backend/main.py` | La respuesta al botón: mergea el PR y dispara `deploy-backend.yml` |
 | Herramienta `desplegar` | El registro de Jarvis | Lo mismo, hablando, para cuando el aviso salió por correo y no traía botones |
 | `supabase/migrations/20260831_averias.sql` | Aquí | Las columnas `origen`, `pr_numero` y `detalle` sobre `revision_hallazgos` |
@@ -74,23 +76,26 @@ desplegado → dijiste que sí y se desplegó
 descartado → dijiste que no
 ```
 
-## El teléfono
+## Contestar hablando
 
-Cuando hay un PR esperando permiso, además del aviso al móvil **suena el teléfono**:
-descuelgas y hablas con el Jarvis de siempre, que te cuenta qué se ha roto y despliega si
-le dices que sí. Es el único caso de todo el proyecto que hoy justifica llamar, porque es
-el único que **se queda parado hasta que contestes**.
+Cuando hay un PR esperando permiso, el aviso al móvil trae un tercer botón, **«Hablarlo»**,
+que abre el dashboard en una pantalla de llamada entrante: descuelgas con el botón verde y
+hablas con el Jarvis de siempre, que te cuenta qué se ha roto y despliega si le dices que
+sí. Es el canal para cuando no puedes leer ni acertar a dos botones pequeños — en el coche.
 
-El canal entero —qué servicios se evaluaron y por qué se eligió Twilio, cómo está montado
-el puente de audio, qué protege sus dos endpoints públicos, cuánto cuesta y qué le
-falta— está en **`docs/LLAMADAS.md`**. Aquí solo importa quién llama y cuándo:
-`POST /revision/pr-listo` es el único sitio del backend que lo hace.
+**El teléfono de verdad (Twilio) está escrito pero apagado** (`LLAMADAS=0`). No se llegó a
+hacer ni una llamada: la cuenta de prueba de Twilio no deja verificar un número español ni
+por llamada ni por SMS, el regulador español prohíbe usar móviles con prefijo 71Y como
+Caller ID, y comprar número se sale del presupuesto. Todo el detalle, más las alternativas
+gratuitas que se descartaron (Telegram, WhatsApp, SIP) y por qué ninguna sirve, en
+`docs/LLAMADAS.md`. El código sigue ahí y se enciende con la variable.
 
-Dos cosas de allí que conviene saber sin abrirlo:
+Aquí solo importa quién pregunta y cuándo: `POST /revision/pr-listo` es el único sitio del
+backend que abre este canal. Dos cosas de `docs/LLAMADAS.md` que conviene saber sin abrirlo:
 
-- **Un «sí» no lo interpreta el modelo.** Antes de pasarle nada a Jarvis se mira si lo
-  dicho es la respuesta a la pregunta que motivó la llamada (`_sio_no`, lista cerrada).
-  Ante la duda **no se despliega**.
+- **Un «sí» por teléfono no lo interpreta el modelo.** Antes de pasarle nada a Jarvis se
+  mira si lo dicho es la respuesta a la pregunta que motivó la llamada (`_sio_no`, lista
+  cerrada). Ante la duda **no se despliega**.
 - **El puente es la única parte asíncrona del backend**, y no está probado contra Twilio
   real: la primera llamada de verdad es la prueba que falta.
 
@@ -119,31 +124,48 @@ repositorio). **Es la credencial más peligrosa del backend**: con ella se toca
 producción. Sin configurar, el botón de desplegar lo dice en vez de fallar en silencio, y
 todo lo demás —detectar, arreglar, avisar, llamar— sigue funcionando igual.
 
-### 4. El teléfono
+### 4. Contestar hablando
 
-En [twilio.com](https://www.twilio.com): compra un número con voz, y apunta el Account
-SID y el Auth Token. En el backend:
+Una sola variable, y es la que hace aparecer el botón «Hablarlo» en el aviso:
+
+```bash
+FRONTEND_URL=https://tu-dashboard.vercel.app
+```
+
+Sin ella el aviso conserva «Desplegar» y «Ahora no»: lo único que se pierde es poder
+contestar hablando. Y comprueba en la app de HA que las **notificaciones críticas** están
+permitidas para este canal — es lo que hace que suene con el móvil en silencio, que es la
+mitad del valor en el coche.
+
+### 5. El teléfono (opcional, hoy apagado)
+
+Lo de abajo describe el canal de Twilio, que **está escrito pero no llegó a funcionar**:
+las cuentas de prueba no dejan verificar un número español ni por llamada ni por SMS, y el
+regulador español prohíbe los prefijos 71Y como Caller ID. Ver `docs/LLAMADAS.md` antes de
+intentarlo otra vez. Si aun así lo enciendes, en [twilio.com](https://www.twilio.com) crea
+la cuenta, apunta el Account SID y el Auth Token y consigue un `From` válido. En el backend:
 
 ```bash
 LLAMADAS=1
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
-TWILIO_NUMERO=+34...        # el número que compras
-TWILIO_MI_NUMERO=+34...     # tu móvil
+TWILIO_NUMERO=+34...        # el From: tu móvil verificado (o un número comprado)
+TWILIO_MI_NUMERO=+34...     # tu móvil (puede ser el mismo de arriba)
 BACKEND_URL=https://...     # la URL pública del backend, para que Twilio vuelva
 ```
 
-No hay que configurar nada en la consola de Twilio: el webhook viaja en la propia
-petición que crea la llamada (`Url`), así que el número no necesita tener nada asociado.
+No hay que configurar nada más en la consola de Twilio: el webhook viaja en la propia
+petición que crea la llamada (`Url`), así que no hace falta un número con nada asociado.
 El detalle de cada variable y los ajustes finos del audio, en `docs/LLAMADAS.md`.
 
-**Coste**: el número son un par de euros al mes y la llamada, céntimos por minuto. A dos
-o tres avisos por semana no llega a un café al mes. Lo que sí cuesta de verdad si se
+**Coste**: la pantalla de llamada no cuesta nada. El teléfono, si se enciende, son los
+minutos más la cuota del número (que es lo que lo dejó fuera del presupuesto de un euro al
+mes). Lo que sí cuesta de verdad en los dos si se
 descuida es lo de dentro: cada turno de la llamada es una transcripción de Whisper, una
 vuelta de Jarvis y una síntesis de ElevenLabs. De ahí `LLAMADA_MAX_SEG`, que es un tope
 duro — una llamada que no se cierra sigue cobrando por minuto.
 
-### 5. El interruptor
+### 6. El interruptor
 
 `AVERIA_CI=1` enciende el arreglo automático. **Los dos flags nuevos (`AVERIA_CI` y
 `LLAMADAS`) nacen apagados**, al revés que el resto de `_flag()` del proyecto: uno lanza

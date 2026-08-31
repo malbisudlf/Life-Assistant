@@ -15,7 +15,7 @@ import {
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
 } from "../lib/helpers";
-import { partirEventosSse, trocearParaVoz } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, aperturaDeLlamada } from "../lib/voz";
 import { abrirVozEleven } from "../lib/vozEleven";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -439,6 +439,51 @@ const FASES_LLAMADA = {
   pensando:   { texto: "Pensando…",   color: "var(--accent2)" },
   hablando:   { texto: "Hablando…",   color: "var(--green)" },
 };
+
+/** La pantalla de llamada entrante: lo que ves al abrir el aviso del móvil.
+ *
+ *  Está pensada para leerse en el coche de un vistazo y para tocarse sin apuntar: dos
+ *  botones grandes y separados, y el motivo en una línea. Ocupa la pantalla entera a
+ *  propósito — si esto fuera una tarjeta más del dashboard habría que buscarla, y el
+ *  caso de uso es justo el contrario. */
+function PantallaLlamada({ motivo, onContestar, onRechazar }) {
+  const boton = {
+    width: 72, height: 72, borderRadius: "50%", border: "none",
+    fontSize: 28, cursor: "pointer", color: "#fff", lineHeight: 1,
+  };
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 100,
+      background: "var(--bg)", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", gap: 10, padding: 24,
+    }}>
+      <div style={{ fontSize: 13, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase" }}>
+        Llamada entrante
+      </div>
+      <div style={{ fontSize: 34, fontWeight: 600, color: "var(--text)", animation: "pulse 1.5s infinite" }}>
+        Jarvis
+      </div>
+      {motivo && (
+        <div style={{
+          fontSize: 15, color: "var(--muted)", textAlign: "center",
+          maxWidth: 420, lineHeight: 1.5, marginTop: 4,
+        }}>{motivo}</div>
+      )}
+      <div style={{ display: "flex", gap: 56, marginTop: 40 }}>
+        <div style={{ textAlign: "center" }}>
+          <button onClick={onRechazar} title="Ahora no"
+                  style={{ ...boton, background: "var(--red, #d9534f)", transform: "rotate(135deg)" }}>✆</button>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Ahora no</div>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <button onClick={onContestar} title="Contestar"
+                  style={{ ...boton, background: "var(--green, #4caf50)" }}>✆</button>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>Contestar</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function JarvisChat({
   mensajes, borrador, setBorrador, onEnviar, pensando,
@@ -1009,6 +1054,9 @@ export default function Dashboard() {
   // que estuviera sonando, así que sin esto el callback de una respuesta ya descartada
   // reabriría el micro justo cuando empieza a sonar la siguiente.
   const vozTurnoRef = useRef(0);
+  // La llamada entrante: lo que se ve al abrir el dashboard desde el aviso del móvil.
+  // `null` es "no hay llamada"; con objeto, se pinta la pantalla de descolgar.
+  const [llamadaEntrante, setLlamadaEntrante] = useState(null);
   const [departureMap, setDepartureMap]           = useState({});
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
@@ -2172,7 +2220,10 @@ export default function Dashboard() {
     };
   }, [token]);
 
-  function iniciarLlamada() {
+  /** Abre la llamada. `apertura` es lo primero que se dice: por defecto «Dime.», porque
+   *  la llamas tú y ya sabes a qué; con texto cuando la llamada la ha provocado algo
+   *  (un arreglo esperando permiso) y hay que contarlo antes de escuchar. */
+  function iniciarLlamada(apertura) {
     if (!VOZ_NAVEGADOR || !VOZ_SINTESIS || llamadaRef.current) return;
     // Dentro del gesto y sin `await` de por medio A PROPÓSITO: iOS solo desbloquea el
     // AudioContext dentro de un toque del usuario, y cualquier espera antes de crearlo
@@ -2226,11 +2277,54 @@ export default function Dashboard() {
     // después del primer fetch la llamada sería muda en el móvil. De paso confirma que
     // el audio va antes de ponerse a hablar solo.
     const miTurno = ++vozTurnoRef.current;
-    hablarJarvis("Dime.", () => {
+    const primera = (typeof apertura === "string" && apertura.trim()) || "Dime.";
+    // La apertura entra en el historial cuando la hay: es Jarvis diciendo algo, y sin
+    // esto tu «sí, despliégalo» llegaría al modelo sin la pregunta a la que contesta.
+    if (primera !== "Dime.") {
+      setJarvisMensajes(prev => [...prev, { rol: "assistant", texto: primera }]);
+    }
+    hablarJarvis(primera, () => {
       if (vozTurnoRef.current !== miTurno) return;
       hablandoRef.current = false;
       cicloRef.current.escuchar?.();
     });
+  }
+
+  // ── La llamada entrante ───────────────────────────────────────────────────
+  // El aviso del móvil abre el dashboard con `?llamada=1` y eso pinta una pantalla de
+  // llamada, no una pestaña más. Existe por una razón concreta y no estética: **iOS solo
+  // desbloquea el audio dentro de un gesto del usuario**, así que la llamada no puede
+  // arrancar sola al cargar. Hacía falta un toque de todas formas, y un botón verde de
+  // «Contestar» es la forma honesta de pedirlo: convierte la limitación del navegador en
+  // la parte que hace que esto se parezca a coger el teléfono.
+  useEffect(() => {
+    if (!token || !llamadaEntranteDeUrl(window.location.search)) return;
+    let vivo = true;
+    // Se quita el parámetro ya: si te quedas en el dashboard y recargas más tarde, no
+    // debe volver a sonar una llamada que ya contestaste.
+    try {
+      const limpia = new URL(window.location.href);
+      limpia.searchParams.delete("llamada");
+      window.history.replaceState({}, "", limpia);
+    } catch { /* mejor esfuerzo: no vale tirar la llamada por no poder limpiar la barra */ }
+    (async () => {
+      let pendiente = null;
+      try {
+        const r = await apiFetch(`${API}/despliegue/pendiente`, { headers: authHeaders() });
+        if (r.ok) pendiente = (await r.json())?.pendiente || null;
+      } catch { /* sin red se descuelga igual, con la frase de respaldo */ }
+      if (vivo) setLlamadaEntrante({ ...(pendiente || {}), apertura: aperturaDeLlamada(pendiente) });
+    })();
+    return () => { vivo = false; };
+  }, [token]);
+
+  /** Descolgar. Todo lo de dentro va SIN `await` por delante: es el gesto que desbloquea
+   *  el audio en iOS y cualquier espera antes de hablar deja la llamada muda en el móvil,
+   *  que es el mismo motivo por el que `iniciarLlamada` saluda desde el toque. */
+  function contestarLlamada() {
+    const apertura = llamadaEntrante?.apertura;
+    setLlamadaEntrante(null);
+    iniciarLlamada(apertura);
   }
 
   // Los callbacks del reconocimiento y de la síntesis nacen en un render y siguen vivos
@@ -3570,7 +3664,7 @@ export default function Dashboard() {
             enLlamada={jarvisLlamada}
             faseLlamada={jarvisFase}
             parcial={jarvisParcial}
-            onLlamar={iniciarLlamada}
+            onLlamar={() => iniciarLlamada()}
             onColgar={() => colgarLlamada()}
             // Para traducir el id de una acción propuesta al nombre real de lo que toca:
             // el botón de confirmar no puede fiarse de cómo lo haya redactado el modelo.
@@ -4987,6 +5081,17 @@ export default function Dashboard() {
 
   return (
     <>
+      {/* Va antes que el dashboard y por encima de todo: cuando suena, es lo único que
+          importa. Al contestar se desmonta sola y debajo queda el dashboard con la
+          conversación ya abierta en la tarjeta de Jarvis. */}
+      {llamadaEntrante && (
+        <PantallaLlamada
+          motivo={llamadaEntrante.motivo}
+          onContestar={contestarLlamada}
+          onRechazar={() => setLlamadaEntrante(null)}
+        />
+      )}
+
       {/* ── DASHBOARD PRINCIPAL ── */}
       <div style={s.dashboard} className="dashboard-root">
 

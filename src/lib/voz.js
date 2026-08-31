@@ -105,3 +105,30 @@ export function partirEventosSse(buffer) {
 export function segundosPendientes(finProgramado, ahora) {
   return Math.max(0, (finProgramado || 0) - (ahora || 0));
 }
+
+/** ¿Esta carga de la página viene de contestar al aviso del móvil?
+ *
+ *  El aviso de «hay un arreglo esperando permiso» abre el dashboard con `?llamada=1`, y
+ *  eso es lo que convierte una pestaña en una llamada entrante. Se mira la query y no el
+ *  hash porque el hash se lo come el `scrollRestoration` de algunos navegadores al
+ *  volver atrás, y una llamada que aparece sola al navegar es peor que una que no
+ *  aparece. */
+export function llamadaEntranteDeUrl(busqueda) {
+  try {
+    return new URLSearchParams(busqueda || "").get("llamada") === "1";
+  } catch {
+    return false;   // una query rota no abre una llamada
+  }
+}
+
+/** La primera frase al descolgar.
+ *
+ *  La escribe el backend (`_apertura_despliegue`), que es quien sabe qué hay pendiente;
+ *  aquí solo se decide el respaldo para cuando la pantalla se abre sin nada que
+ *  anunciar — el aviso llegó tarde, ya se decidió desde otro sitio, o alguien guardó el
+ *  enlace. Descolgar y oír silencio parecería que la llamada se ha roto. */
+export function aperturaDeLlamada(pendiente) {
+  const dicha = (pendiente?.apertura || "").trim();
+  if (dicha) return dicha;
+  return "Ya no hay nada esperando permiso. ¿Te ayudo con otra cosa?";
+}
