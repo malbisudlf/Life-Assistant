@@ -837,6 +837,101 @@ class TestGobiernoDeAvisos:
                         json={"util": True}, headers={"X-Auth-Token": "ha-poll-token"})
         assert r.status_code == 200 and r.json()["ok"] is True
 
+    # ── 0.2b El botón de apagar ───────────────────────────────────────────────
+    def _aviso_al_salir(self, mock_requests, fila):
+        """El GET del aviso que lee el endpoint de apagar."""
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([fila] if fila else []))
+
+    def test_el_aviso_de_salir_de_casa_trae_el_boton_de_apagar(self):
+        """Y la valoración detrás: apagar es lo que has venido a hacer, pero la regla
+        sigue necesitando saber si sirvió."""
+        acciones = main._acciones_aviso("11111111-2222-3333-4444-555555555555",
+                                        main.REGLA_AL_SALIR)
+        assert [a["title"] for a in acciones] == ["Apagar", "Útil", "No"]
+        assert acciones[0]["action"].startswith("LA_APAGAR_")
+
+    def test_los_demas_avisos_siguen_con_los_dos_de_siempre(self):
+        acciones = main._acciones_aviso("11111111-2222-3333-4444-555555555555", "reloj")
+        assert [a["title"] for a in acciones] == ["Útil", "No"]
+
+    def test_apagar_encola_lo_que_decia_el_aviso(self, client, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+            {"id": "switch.lampara", "nombre": "Lámpara", "estado": "on"},
+        ])
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir",
+                                             "entidades": ["light.salon", "switch.lampara"]})
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 200
+        assert r.json()["apagadas"] == ["light.salon", "switch.lampara"]
+        assert [(o["servicio"], o["entidad"]) for o in main._ha_ordenes] == [
+            ("light.turn_off", "light.salon"), ("switch.turn_off", "switch.lampara")]
+
+    def test_apaga_lo_que_dijo_el_aviso_y_no_lo_que_hay_ahora(self, client, mock_requests,
+                                                              monkeypatch):
+        """El catálogo llega con hasta una hora de retraso: releerlo al pulsar apagaría
+        cosas de las que el aviso no habló, que es peor que no tener botón."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+            {"id": "light.cocina", "nombre": "Cocina", "estado": "on"},
+        ])
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir",
+                                             "entidades": ["light.salon"]})
+        client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                    headers={"X-Auth-Token": "ha-poll-token"})
+        assert [o["entidad"] for o in main._ha_ordenes] == ["light.salon"]
+
+    def test_apagar_cuenta_como_util(self, client, mock_requests, monkeypatch):
+        """No es que te haya parecido interesante: has actuado sobre él. Sin esto, la
+        regla podía silenciarse sola por no haber pulsado además el otro botón."""
+        monkeypatch.setattr(main, "_casa_entidades",
+                            lambda: [{"id": "light.salon", "estado": "on"}])
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir",
+                                             "entidades": ["light.salon"]})
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                    headers={"X-Auth-Token": "ha-poll-token"})
+        assert mock_requests.called("PATCH", "jarvis_recordatorios")[0][2]["json"] == {"util": True}
+        assert mock_requests.called("POST", "avisos_reglas")[0][2]["json"]["utiles"] == 1
+
+    def test_no_apaga_lo_que_no_es_una_luz_ni_un_enchufe(self, client, mock_requests,
+                                                         monkeypatch):
+        """La lista sale de Supabase, que es escribible con la service key: un id de ahí
+        no puede acabar en un service call sin pasar por la lista blanca."""
+        monkeypatch.setattr(main, "_casa_entidades",
+                            lambda: [{"id": "lock.puerta", "estado": "on"}])
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir",
+                                             "entidades": ["lock.puerta"]})
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 502
+        assert main._ha_ordenes == []
+
+    def test_solo_se_apaga_el_aviso_de_salir_de_casa(self, client, mock_requests):
+        self._aviso_al_salir(mock_requests, {"regla": "reloj", "entidades": ["light.salon"]})
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 422 and main._ha_ordenes == []
+
+    def test_un_aviso_sin_entidades_lo_dice(self, client, mock_requests):
+        """Uno anterior a la columna, o en el que lo único encendido era el PC."""
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir", "entidades": None})
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 422
+
+    def test_un_aviso_que_no_existe_no_apaga_nada(self, client, mock_requests):
+        self._aviso_al_salir(mock_requests, None)
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 404 and main._ha_ordenes == []
+
+    def test_apagar_exige_credencial(self, client, mock_requests):
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar")
+        assert r.status_code == 403
+        assert not mock_requests.called("GET", "jarvis_recordatorios")
+
     # ── 0.3 Memoria ───────────────────────────────────────────────────────────
     def test_no_repite_la_misma_situacion(self, mock_requests):
         """La idempotencia vieja era por día: "llevas 3 días sin entrenar" salía el

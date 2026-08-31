@@ -34,6 +34,7 @@
 | `GET /avisos/estado` | JWT | Por dónde salen los avisos (móvil o correo) y cuánto hace que HA los recogió |
 | `POST /avisos/probar` | JWT | Manda un aviso de prueba por el canal que toque |
 | `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
+| `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón «Apagar» del aviso de salir de casa: encola el apagado de las entidades que llevaba ese aviso |
 | `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
 | `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
