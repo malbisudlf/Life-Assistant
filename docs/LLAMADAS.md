@@ -181,6 +181,22 @@ Las piezas:
 - **La apertura entra en el historial.** Es Jarvis diciendo algo, y sin meterla, tu «sí,
   despliégalo» llegaría al modelo **sin la pregunta a la que contesta**.
 
+- **No se puede descolgar hasta que llega el permiso de voz**, y por eso el botón verde
+  nace en «Conectando…». Esto costó una sesión entera de buscar donde no era: la voz de
+  ElevenLabs «no funcionaba» —siempre sonaba la del navegador— y **no había nada roto**.
+  El backend escala a cero, el aviso llega cuando hace horas que nadie lo toca, y la
+  primera petición despierta la máquina: 10-15 segundos. Tú descuelgas en uno.
+  `iniciarLlamada` mira el permiso **una sola vez y dentro del gesto** (no puede esperar
+  sin romper el desbloqueo de audio de iOS), no lo encuentra, y la llamada entera sale con
+  la voz del navegador. Sin error, sin log y sin nada que mirar. Se espera en la pantalla
+  de llamada, que es donde esperar no molesta —un teléfono también tarda en dar línea— con
+  un tope de `VOZ_ESPERA_MAX_MS`: quedarse sin poder contestar sería peor que contestar con
+  la voz fea.
+
+  **Moraleja para la próxima**: cuando la voz de pago «no funciona», comprueba primero
+  **cuándo** se pide el permiso, no si ElevenLabs responde. Aquí ElevenLabs respondía
+  perfectamente por HTTP y por WebSocket; lo que fallaba era el reloj.
+
 Y una que se hereda del teléfono y no se relaja: **la pantalla informa y pregunta, pero
 no decide.** `GET /despliegue/pendiente` solo lee; el «sí» acaba en `_despliegue_decidir`
 con su PATCH condicional, como el botón.
