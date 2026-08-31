@@ -6,7 +6,10 @@
  * tren, y no hace falta un navegador para comprobarlo. Ver docs/JARVIS_VOZ.md.
  */
 import { describe, it, expect } from "vitest";
-import { trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse } from "../../src/lib/voz.js";
+import {
+  trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse,
+  llamadaEntranteDeUrl, aperturaDeLlamada,
+} from "../../src/lib/voz.js";
 
 describe("trocearParaVoz", () => {
   it("no suelta nada hasta que hay bastante que decir", () => {
@@ -196,5 +199,35 @@ describe("el troceado tal y como lo usa el modo llamada", () => {
     // dos veces seguidas.
     const dichos = decirSegunLlega(comoLlegaDelModelo("Hecho."), "");
     expect(dichos.join(" ")).toBe("Hecho.");
+  });
+});
+
+describe("llamadaEntranteDeUrl", () => {
+  it("reconoce la llegada desde el aviso del móvil", () => {
+    expect(llamadaEntranteDeUrl("?llamada=1")).toBe(true);
+    expect(llamadaEntranteDeUrl("?otra=x&llamada=1")).toBe(true);
+  });
+
+  it("no abre una llamada por entrar al dashboard de siempre", () => {
+    // El caso que importa: abrir el dashboard a diario no puede hacer sonar nada.
+    expect(llamadaEntranteDeUrl("")).toBe(false);
+    expect(llamadaEntranteDeUrl("?llamada=0")).toBe(false);
+    expect(llamadaEntranteDeUrl("?llamada=si")).toBe(false);
+    expect(llamadaEntranteDeUrl(undefined)).toBe(false);
+  });
+});
+
+describe("aperturaDeLlamada", () => {
+  it("dice lo que manda el backend, que es quien sabe qué hay pendiente", () => {
+    const dicha = aperturaDeLlamada({ apertura: "He detectado un fallo. ¿Lo despliego?" });
+    expect(dicha).toBe("He detectado un fallo. ¿Lo despliego?");
+  });
+
+  it("nunca descuelga en silencio", () => {
+    // Descolgar y no oír nada parece que la llamada se ha roto. Pasa de verdad: el aviso
+    // llega tarde, o ya decidiste desde el botón del móvil.
+    for (const vacio of [null, undefined, {}, { apertura: "   " }]) {
+      expect(aperturaDeLlamada(vacio).length).toBeGreaterThan(0);
+    }
   });
 });

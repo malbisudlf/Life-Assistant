@@ -239,3 +239,50 @@ class TestElPermisoDeDespliegue:
         r = client.post(f"/despliegue/{rid}/accion", json={"accion": "arreglar"},
                         headers=CABECERA)
         assert r.status_code == 422
+
+
+class TestLaPantallaDeLlamada:
+    """`GET /despliegue/pendiente`: lo que la pantalla de llamada anuncia al descolgar."""
+
+    def test_cuenta_lo_que_espera_permiso(self, client, mock_requests, auth_headers):
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("GET", "revision_hallazgos",
+                          FakeResponse([{"id": rid, "pr_numero": 122,
+                                         "detalle": "el CI ha fallado en main"}]))
+        r = client.get("/despliegue/pendiente", headers=auth_headers)
+        assert r.status_code == 200
+        pendiente = r.json()["pendiente"]
+        # El id viaja para que el «sí» se aplique a ESTE despliegue y no al más reciente
+        # resuelto otra vez al contestar (frontera 2 de docs/AVERIAS.md).
+        assert pendiente["id"] == rid and pendiente["pr"] == 122
+        # Y la frase es LA MISMA que diría el teléfono: un solo Jarvis, dos transportes.
+        assert pendiente["apertura"] == main._apertura_despliegue("el CI ha fallado en main")
+
+    def test_sin_nada_pendiente_no_inventa_una_llamada(self, client, mock_requests, auth_headers):
+        mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
+        r = client.get("/despliegue/pendiente", headers=auth_headers)
+        assert r.status_code == 200 and r.json()["pendiente"] is None
+
+    def test_no_es_publico(self, client):
+        """Dice qué se ha roto en producción y qué PR lo arregla: pide sesión."""
+        assert client.get("/despliegue/pendiente").status_code in (401, 403)
+
+
+class TestElBotonDeHablarlo:
+    """El tercer botón del aviso: el que abre la pantalla de llamada."""
+
+    def test_aparece_cuando_hay_dashboard_configurado(self, monkeypatch):
+        monkeypatch.setattr(main, "FRONTEND_URL", "https://panel.ejemplo")
+        rid = main._uuid_averia("ci", "1")
+        acciones = main._acciones_aviso(rid, main.REGLA_DESPLIEGUE)
+        assert [a["title"] for a in acciones] == ["Desplegar", "Ahora no", "Hablarlo"]
+        # "URI" es el nombre reservado de la app de HA, no un id nuestro: si esto cambia,
+        # el botón deja de abrir nada y no lo dice.
+        assert acciones[-1]["action"] == "URI"
+        assert acciones[-1]["uri"] == "https://panel.ejemplo/?llamada=1"
+
+    def test_sin_dashboard_el_aviso_sigue_sirviendo(self, monkeypatch):
+        """Lo que se pierde es hablarlo, no decidir: los dos botones siguen ahí."""
+        monkeypatch.setattr(main, "FRONTEND_URL", "")
+        acciones = main._acciones_aviso(main._uuid_averia("ci", "1"), main.REGLA_DESPLIEGUE)
+        assert [a["title"] for a in acciones] == ["Desplegar", "Ahora no"]
