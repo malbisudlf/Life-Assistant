@@ -8,3 +8,7 @@ passlib[bcrypt]==1.7.4
 openai==2.41.1
 httpx==0.28.1
 python-multipart==0.0.32
+# Lo pide uvicorn para servir el WebSocket del puente de voz del teléfono. Sin esto,
+# `/telefono/media` responde 404 en producción y todo lo demás funciona igual, que es
+# el peor de los fallos posibles: silencioso y solo en el camino nuevo.
+websockets==15.0.1

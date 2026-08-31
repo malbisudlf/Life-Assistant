@@ -1,6 +1,7 @@
-﻿from fastapi import FastAPI, Depends, HTTPException, Request, status, UploadFile, File, Path
+﻿from fastapi import (FastAPI, Depends, HTTPException, Request, status, UploadFile,
+                     File, Path, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +35,10 @@ import ipaddress
 import socket
 import unicodedata
 import hashlib
+# Solo los usa el puente de voz del teléfono, que es la única parte asíncrona del
+# backend (ver esa sección): el audio de la llamada va en base64 y se sirve por WebSocket.
+import base64
+import asyncio
 import uuid
 
 logging.basicConfig(level=logging.INFO)
@@ -7337,6 +7342,12 @@ REGLA_REVISION      = "revision"
 # de arriba: quien la mira es el despachador, para darle a la notificación su botón de
 # apagar (`_acciones_aviso`).
 REGLA_AL_SALIR      = "al_salir"
+# La del aviso de "lo he arreglado, ¿lo despliego?". Misma razón que las dos de arriba:
+# quien la mira es el despachador, para darle a la notificación sus botones. Va aparte de
+# REGLA_REVISION porque la pregunta es OTRA —aquella pregunta si arreglar, ésta si
+# desplegar— y porque son las dos únicas que pueden tocar producción: tenerlas
+# distinguibles es lo que permite silenciar una sin callar la otra.
+REGLA_DESPLIEGUE    = "despliegue"
 # A partir de esta hora, un aviso que puede esperar espera a mañana. El de la revisión
 # nocturna se apunta a las tres y pico de la madrugada: entregarlo cuando se apunta
 # sería despertarte para contarte un informe de código.
@@ -9244,6 +9255,9 @@ def _acciones_aviso(rid: str, regla: str) -> list:
     if regla == REGLA_REVISION:
         return [{"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"},
                 {"action": f"LA_NADA_{rid}",     "title": "No hacer nada"}]
+    if regla == REGLA_DESPLIEGUE:
+        return [{"action": f"LA_DESPLEGAR_{rid}", "title": "Desplegar"},
+                {"action": f"LA_ESPERAR_{rid}",   "title": "Ahora no"}]
     if regla == REGLA_AL_SALIR:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
                 {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
@@ -9275,6 +9289,113 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
         return "movil"
     enviar_correo(titulo, texto)
     return "correo"
+
+
+# ── El teléfono: cuando el aviso no puede esperar a que mires el móvil ────────
+# El resto de canales de este fichero tienen todos el mismo techo: hace falta que MIRES.
+# Un correo espera a que abras el buzón, una notificación a que desbloquees. Los dos
+# valen para casi todo y no valen para lo único que de verdad corre — algo se ha roto,
+# ya está arreglado, y el arreglo se queda parado hasta que des el permiso.
+#
+# La llamada es el único canal que no espera a nadie: suena, y en el coche suena por el
+# manos libres. Por eso es el canal más caro que hay aquí (cuesta dinero por llamada y
+# te interrumpe de verdad), y por eso su regla es la más estrecha del fichero:
+#
+#   **Solo llama lo que se queda parado hasta que contestes.** No lo urgente, no lo
+#   importante: lo BLOQUEADO. Hoy eso es exactamente una cosa, el permiso de despliegue.
+#   Si algún día llama una segunda, este comentario tiene que decir por qué — el día que
+#   el teléfono suene por algo que podía haber esperado, dejarás de cogerlo, y con él se
+#   va también el aviso que sí importaba. Es el mismo fallo que el presupuesto de avisos
+#   previene en el canal de al lado, con la factura más alta.
+#
+# Y una frontera que no se relaja: **la llamada informa y pregunta, pero no es quien
+# decide**. Lo que se hable por teléfono acaba en `_despliegue_decidir` como cualquier
+# botón, con su PATCH condicional: quien llama no se salta la puerta, la usa.
+LLAMADAS         = _flag("LLAMADAS", "0")
+TWILIO_SID       = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_DESDE     = os.getenv("TWILIO_NUMERO", "")
+TWILIO_HASTA     = os.getenv("TWILIO_MI_NUMERO", "")
+# La URL pública del backend, para decirle a Twilio dónde devolver la llamada. No se
+# deduce de la petición entrante: aquí no hay petición, la llamada la empieza el backend.
+BACKEND_URL      = os.getenv("BACKEND_URL", "")
+# Cuánto vale el contexto de una llamada. Corto a propósito: es el permiso para abrir el
+# puente de voz, y una llamada que no se contesta en cinco minutos ya no vale de nada.
+LLAMADA_TTL      = int(os.getenv("LLAMADA_TTL", "300"))
+# Cuánto puede durar una llamada. Tope duro: al otro lado hay un modelo que cobra por
+# minuto y una llamada colgada mal puede quedarse abierta.
+LLAMADA_MAX_SEG  = int(os.getenv("LLAMADA_MAX_SEG", "300"))
+
+
+def _llamada_configurada() -> bool:
+    return bool(LLAMADAS and TWILIO_SID and TWILIO_TOKEN and TWILIO_DESDE
+                and TWILIO_HASTA and BACKEND_URL)
+
+
+def _contexto_llamada(texto: str, rid: str) -> str:
+    """Firma el contexto de UNA llamada: qué va a decir y sobre qué decisión va.
+
+    Va firmado y no en la query a pelo porque esa URL se la damos a Twilio, que la llama
+    de vuelta desde internet: sin firma, cualquiera que la adivinara podría hacer que el
+    puente de voz se abriera con el texto que quisiera y con el id de decisión que
+    quisiera — es decir, pedirle a Jarvis por teléfono que despliegue.
+
+    Lleva `purpose` porque lo exige la invariante 2 de CLAUDE.md: todos los JWT se firman
+    con la misma `SECRET_KEY`, y es el claim `purpose` lo que impide que este token valga
+    como sesión de usuario (`_jwt_de_usuario` rechaza todo token que lo lleve).
+    """
+    ahora = datetime.now(timezone.utc)
+    return jwt.encode({"purpose": "llamada", "texto": texto[:400], "rid": rid,
+                       "iat": ahora, "exp": ahora + timedelta(seconds=LLAMADA_TTL)},
+                      SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _leer_contexto_llamada(ctx: str) -> dict:
+    """Lo contrario. Devuelve {} si no vale: el puente se abre mudo antes que con algo ajeno."""
+    try:
+        datos = jwt.decode(ctx, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return {}
+    if datos.get("purpose") != "llamada":
+        # Un JWT válido de OTRA cosa (el `state` del OAuth, el token de usuario) no abre
+        # el teléfono. Es la misma comprobación que hace `_jwt_de_usuario` al revés.
+        return {}
+    return {"texto": str(datos.get("texto") or ""), "rid": str(datos.get("rid") or "")}
+
+
+def _llamar(texto: str, *, rid: str = "") -> bool:
+    """Hace sonar el teléfono. True si la llamada llegó a lanzarse.
+
+    No propaga el fallo: quien llama a esto ya ha dejado el aviso por los canales de
+    siempre, y que el teléfono no suene no puede tumbar el aviso que sí salió. Se
+    registra y se sigue — es un canal de refuerzo, no el único.
+    """
+    if not _llamada_configurada():
+        return False
+    ctx = _contexto_llamada(texto, rid)
+    try:
+        r = http.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{quote(TWILIO_SID, safe='')}/Calls.json",
+            auth=(TWILIO_SID, TWILIO_TOKEN),
+            data={"To": TWILIO_HASTA, "From": TWILIO_DESDE,
+                  "Url": f"{BACKEND_URL}/telefono/voz?ctx={quote(ctx, safe='')}",
+                  "Method": "POST",
+                  # Si no lo coges en 30 s, se cae. El aviso ya está en el móvil: dejar
+                  # el teléfono sonando un minuto no añade nada y sí molesta.
+                  "Timeout": "30"},
+        )
+        if r.status_code >= 300:
+            # El cuerpo de Twilio dice el código exacto del error (número no verificado,
+            # saldo agotado, número mal formado) y son arreglos distintos. Sin la clave
+            # dentro: va en la cabecera de auth, no en el cuerpo.
+            logger.error("Llamada: Twilio devolvió %s — %s", r.status_code,
+                         (r.text or "")[:200].replace("\n", " ").strip() or "(sin cuerpo)")
+            return False
+    except requests.RequestException as e:
+        logger.exception("Llamada: no se pudo conectar con Twilio (%s)", e)
+        return False
+    logger.info("Llamada lanzada (%s)", rid or "sin decisión asociada")
+    return True
 
 
 def _rescatar_avisos() -> dict:
@@ -9746,20 +9867,26 @@ def revision_hallazgos(request: Request, body: RevisionHallazgos, token: str = "
     return {"ok": True, "avisado": apuntado, "issue": numero}
 
 
-def _disparar_arreglo(numero: int, titulo: str, url: str) -> dict:
+def _disparar_arreglo(numero: int, titulo: str, url: str, instruccion: str = "") -> dict:
     """Lanza la sesión que arregla los hallazgos. Devuelve qué pasó.
 
     Mismo trato que `_disparar_rutina`: el cuerpo del error se registra acotado, porque
     un 400 aquí puede ser la cabecera beta caducada, el trigger borrado o el cuerpo mal
     formado, y son arreglos distintos.
+
+    `instruccion` la usa el camino de las averías, que no tiene issue que citar y sobre
+    todo NO quiere que la sesión mergee: ahí el merge lo decides tú después, viendo el PR
+    ya en verde. Que la diferencia viaje en la instrucción y no en un flag de la rutina
+    es lo que permite tener UNA sola rutina de arreglo para los dos caminos.
     """
     if not ARREGLO_FIRE_URL or not ARREGLO_FIRE_TOKEN:
         return {"ok": False, "sesion": "", "motivo": "no hay rutina de arreglo configurada "
                                                      "(ARREGLO_FIRE_URL / ARREGLO_FIRE_TOKEN)"}
     # `text` le llega a la rutina envuelto y etiquetado como dato no fiable, así que su
     # prompt guardado tiene que citarlo para hacerle caso (ver docs/REVISION_NOCTURNA.md).
-    texto = (f"Arregla los hallazgos de la revisión nocturna del issue #{numero} "
-             f"({titulo or 'sin título'}) del repositorio {JARVIS_REPO}: {url}")
+    texto = instruccion or (
+        f"Arregla los hallazgos de la revisión nocturna del issue #{numero} "
+        f"({titulo or 'sin título'}) del repositorio {JARVIS_REPO}: {url}")
     try:
         r = http.post(
             ARREGLO_FIRE_URL,
@@ -9934,6 +10061,417 @@ def _j_arreglar_revision() -> dict:
             "dile_al_usuario_literalmente":
                 f"Lanzado el arreglo del issue #{resultado.get('issue')}. "
                 f"Habrá PR cuando termine."}
+
+
+# ── Averías que se arreglan solas y solo piden el último permiso ──────────────
+# La revisión nocturna pregunta antes de arreglar: te llega el informe y decides. Esto es
+# el camino inverso, y es el que de verdad quita trabajo: el CI se pone rojo en `main`,
+# no se pregunta nada, se lanza el arreglo en el momento, y la pregunta llega DESPUÉS —
+# cuando ya hay un PR con el CI en verde esperando y lo único que falta es desplegarlo.
+#
+# La diferencia no es de comodidad, es de calidad de la decisión: preguntar antes te hace
+# decidir con lo que menos sabes ("¿quieres que mire un fallo que aún no he mirado?");
+# preguntar después te deja decidir viendo el arreglo hecho y verificado por el CI.
+#
+# Cuatro fronteras, y ninguna se relaja:
+#   - **Arreglar solo, sí; desplegar solo, NO.** Abrir un PR es reversible y no lo ve
+#     nadie más; desplegar toca producción. Por eso el arreglo no pregunta y el despliegue
+#     siempre pregunta, aunque el CI esté verde. Es la misma frontera que separa las
+#     herramientas de Jarvis que se ejecutan solas de las que pasan por confirmación.
+#   - **El permiso vale para UN PR concreto**, el que estaba verde cuando se preguntó
+#     (`pr_numero`). Entre la pregunta y tu respuesta pueden pasar horas: resolver "el PR
+#     más reciente" al contestar podría desplegar otro que entró por el medio.
+#   - **Solo se despliega lo que el CI ha aprobado.** El permiso no salta la verificación,
+#     la sigue: quien avisa de que hay algo que desplegar es el propio CI al ponerse verde.
+#   - **Una avería que se repite no se arregla, se cuenta.** Igual que el vigilante: un CI
+#     que se pone rojo por lo mismo tres veces no tiene un fallo que arreglar, tiene un
+#     arreglo que no funciona, y seguir lanzando sesiones lo esconde.
+AVERIA_CI       = _flag("AVERIA_CI", "0")
+# Cuántas veces se intenta arreglar la misma avería antes de dejar de intentarlo y
+# limitarse a avisar. Con una sola no se tolera un fallo transitorio del CI; sin tope, un
+# arreglo que no arregla lanza una sesión por cada push.
+AVERIA_MAX_INTENTOS = int(os.getenv("AVERIA_MAX_INTENTOS", "2"))
+# El PAT que mergea el PR y dispara el deploy. Es la credencial más peligrosa del
+# backend: con ella se toca producción. Sin configurar, el botón de desplegar lo DICE en
+# vez de fallar en silencio, y todo lo demás (detectar, arreglar, avisar) sigue igual.
+DEPLOY_GITHUB_TOKEN = os.getenv("DEPLOY_GITHUB_TOKEN", "")
+# El workflow que despliega, por nombre de fichero. Fijo y no configurable desde fuera:
+# es un nombre que se interpola en la URL de la API de GitHub.
+DEPLOY_WORKFLOW     = "deploy-backend.yml"
+
+
+def _uuid_averia(origen: str, referencia: str) -> str:
+    """Id determinista de una avería. Mismo papel que `_uuid_revision` con el issue.
+
+    Dos avisos del mismo CI rojo chocan contra la clave primaria en vez de convertirse en
+    dos sesiones de arreglo: el reintento del workflow es gratis y no cuesta un agente.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:averia:{origen}:{referencia}"))
+
+
+def _averia_intentos(origen: str) -> int:
+    """Cuántas averías de este origen se han intentado arreglar sin llegar a desplegarse.
+
+    Un fallo leyendo devuelve 0, que deja pasar el arreglo: el lado recuperable del error
+    es intentarlo de más, no callarse una avería real.
+    """
+    desde = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    try:
+        r = http.get(f"{REVISION_URL}?origen=eq.{quote(origen, safe='')}"
+                     f"&estado=in.(arreglando,listo)&creado=gte.{quote(desde, safe='')}"
+                     "&select=id", headers=supabase_headers())
+        if r.status_code >= 300:
+            return 0
+        return len(r.json() or [])
+    except Exception as e:
+        logger.warning("Avería: no se pudieron contar los intentos de '%s' (%s)", origen, e)
+        return 0
+
+
+class AveriaIn(BaseModel):
+    origen: str = "ci"
+    referencia: str = ""
+    detalle: str = ""
+
+
+@app.post("/averia")
+def averia(request: Request, body: AveriaIn, token: str = ""):
+    """Algo se ha roto y hay que arreglarlo YA, sin preguntar.
+
+    Lo llama `.github/workflows/ci-averiado.yml` cuando el CI se pone rojo en `main`, con
+    el mismo `REVISION_TOKEN` que el aviso de la revisión nocturna: son la misma clase de
+    cliente (un workflow que arranca solo) y separar los tokens no protegería de nada que
+    no proteja ya tener uno.
+
+    No avisa: lanza el arreglo y calla. El aviso llega cuando hay algo que enseñar
+    (`/revision/pr-listo`). Un "estoy en ello" a las tres de la mañana no es información,
+    es ruido — y si el arreglo sale bien, el único aviso que hacía falta es el segundo.
+    """
+    if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not AVERIA_CI:
+        return {"ok": True, "lanzado": False, "motivo": "el arreglo automático está apagado"}
+
+    origen = re.sub(r"[^a-z0-9_-]", "", str(body.origen or "ci").lower())[:32] or "ci"
+    referencia = re.sub(r"[^A-Za-z0-9_.-]", "", str(body.referencia or ""))[:64]
+    if not referencia:
+        raise HTTPException(status_code=422, detail="Falta la referencia de la avería")
+    detalle = str(body.detalle or "").strip()[:300]
+
+    intentos = _averia_intentos(origen)
+    if intentos >= AVERIA_MAX_INTENTOS:
+        # Un arreglo que no arregla y se relanza en cada push esconde el problema en vez
+        # de resolverlo. Aquí se deja de intentar y se dice, que es lo contrario.
+        logger.error("Avería '%s': %s intentos sin desplegar; no se lanza otro arreglo",
+                     origen, intentos)
+        _apuntar_aviso(REGLA_DESPLIEGUE,
+                       f"El {origen} lleva {intentos} arreglos seguidos sin llegar a "
+                       f"desplegarse. No voy a lanzar otro: esto no es un fallo suelto, "
+                       f"es un arreglo que no funciona.\n\n{detalle}",
+                       prioridad=PRIO_ALTA, cuando=_cuando_avisar(_ahora_local()))
+        return {"ok": True, "lanzado": False, "motivo": f"{intentos} intentos sin desplegar"}
+
+    rid  = _uuid_averia(origen, referencia)
+    fila = {"id": rid, "issue_numero": 0, "origen": origen, "detalle": detalle,
+            "issue_titulo": f"{origen}: {detalle[:120]}" if detalle else origen,
+            "estado": "arreglando"}
+    try:
+        r = http.post(REVISION_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json=fila)
+        if r.status_code == 409:
+            return {"ok": True, "lanzado": False, "motivo": "esa avería ya estaba en marcha"}
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Avería '%s': no se pudo apuntar (%s)", origen, e)
+        raise HTTPException(status_code=502, detail="No se pudo apuntar la avería")
+
+    # La instrucción dice explícitamente que NO se mergee: en este camino el PR se queda
+    # abierto esperando tu permiso, y quien avisa de que está listo es el CI.
+    resultado = _disparar_arreglo(0, fila["issue_titulo"], "", instruccion=(
+        f"Arregla esta avería del repositorio {JARVIS_REPO}: {fila['issue_titulo']}. "
+        f"Es una AVERÍA, no un issue de la revisión nocturna: no hay issue que leer. "
+        f"Abre un PR con el arreglo y DÉJALO ABIERTO — no lo mergees, aunque el CI pase. "
+        f"El permiso para desplegarlo lo da Mikel después."))
+    if not resultado["ok"]:
+        # Igual que en la revisión: una fila en "arreglando" sin nadie arreglando deja la
+        # avería invisible. Se cierra y se avisa, que es el error recuperable.
+        try:
+            http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"estado": "descartado",
+                             "decidido_at": datetime.now(timezone.utc).isoformat()})
+        except Exception as e:
+            logger.error("Avería '%s': no se pudo liberar la fila (%s)", origen, e)
+        logger.error("Avería '%s': no se pudo lanzar el arreglo (%s)", origen, resultado["motivo"])
+        _apuntar_aviso(REGLA_DESPLIEGUE,
+                       f"Se ha roto algo ({origen}) y no he podido lanzar el arreglo: "
+                       f"{resultado['motivo']}.\n\n{detalle}",
+                       prioridad=PRIO_ALTA, cuando=_cuando_avisar(_ahora_local()))
+        return {"ok": False, "lanzado": False, "motivo": resultado["motivo"]}
+
+    try:
+        http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"sesion_url": resultado["sesion"]})
+    except Exception as e:
+        logger.warning("Avería '%s': no se pudo guardar la sesión (%s)", origen, e)
+    logger.info("Avería '%s' (%s): arreglo lanzado (%s)", origen, referencia,
+                resultado["sesion"] or "sin URL")
+    return {"ok": True, "lanzado": True, "sesion": resultado["sesion"]}
+
+
+class PrListoIn(BaseModel):
+    pr: int
+    titulo: str = ""
+
+
+@app.post("/revision/pr-listo")
+def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
+    """El arreglo ya está hecho y el CI lo ha aprobado: ahora sí se pregunta.
+
+    Lo llama `.github/workflows/pr-listo.yml` cuando el CI termina en verde sobre un PR
+    de una rama de arreglo. Es el aviso que de verdad quería este camino: «he detectado
+    un fallo, ya lo he corregido, ¿lo despliego?».
+
+    Que quien avise sea el CI y no la sesión que arregló no es un detalle: es lo que
+    garantiza que nunca se pida permiso para desplegar algo sin verificar. La sesión
+    puede creer que ha terminado; el CI lo sabe.
+    """
+    if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    numero = int(body.pr)
+    if numero <= 0 or numero > 1_000_000:
+        raise HTTPException(status_code=422, detail="Número de PR inválido")
+
+    # La avería que este PR viene a cerrar es la que sigue en "arreglando". Se busca la
+    # más reciente y no una por id porque la sesión de arreglo no puede devolvernos el
+    # nuestro: lo que ata las dos mitades es el orden, no una referencia.
+    try:
+        r = http.get(f"{REVISION_URL}?estado=eq.arreglando"
+                     "&select=id,origen,detalle,issue_titulo&order=creado.desc&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PR listo: no se pudo buscar la avería de #%s (%s)", numero, e)
+        raise HTTPException(status_code=502, detail="No se pudo buscar la avería")
+    if not filas:
+        # Un PR verde que no cierra ninguna avería es lo normal: la mayoría de los PR los
+        # abres tú. No es un error y no se avisa de él.
+        return {"ok": True, "avisado": False, "motivo": "ese PR no cierra ninguna avería"}
+
+    fila = filas[0]
+    rid  = str(fila.get("id") or "")
+    # PATCH condicional, igual que el resto de transiciones: dos ejecuciones del workflow
+    # sobre el mismo PR no pueden dejar dos avisos pidiendo el mismo permiso.
+    try:
+        r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.arreglando",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": "listo", "pr_numero": numero})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        if not r.json():
+            return {"ok": True, "avisado": False, "motivo": "esa avería ya no estaba en arreglo"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PR listo: no se pudo marcar la avería de #%s (%s)", numero, e)
+        raise HTTPException(status_code=502, detail="No se pudo marcar la avería")
+
+    que   = str(fila.get("detalle") or fila.get("issue_titulo") or "algo")
+    texto = (f"He detectado un fallo ({que}) y ya lo he corregido. El PR #{numero} está "
+             f"abierto con el CI en verde.\n\n¿Lo despliego? Responde con los botones "
+             f"del aviso, o dime «despliega el arreglo» — si esto te ha llegado por "
+             f"correo, no hay botones.")
+    apuntado = _apuntar_aviso(REGLA_DESPLIEGUE, texto, prioridad=PRIO_ALTA,
+                              cuando=_cuando_avisar(_ahora_local()), id=rid)
+    # Y además suena el teléfono. Un PR esperando permiso es exactamente el caso que
+    # justifica el canal caro: se queda parado hasta que contestes.
+    _llamar(f"He detectado un fallo, {que[:80]}. Ya lo he corregido y el CI está en "
+            f"verde. ¿Quieres que lo despliegue?", rid=rid)
+    logger.info("PR #%s listo para desplegar (avería %s)", numero, fila.get("origen"))
+    return {"ok": True, "avisado": apuntado, "pr": numero}
+
+
+def _desplegar(pr: int) -> dict:
+    """Mergea el PR y lanza el deploy. El único sitio del backend que toca producción.
+
+    Squash con `commit_message` explícito a propósito: dejar que GitHub lo autogenere
+    hace que añada él solo un `Co-authored-by` por cada autor distinto de quien mergea,
+    que es justo lo que `CLAUDE.md` prohíbe y lo que ya se coló una vez.
+    """
+    if not DEPLOY_GITHUB_TOKEN or "/" not in JARVIS_REPO:
+        return {"ok": False, "motivo": "no hay credencial de despliegue configurada "
+                                       "(DEPLOY_GITHUB_TOKEN / JARVIS_REPO)"}
+    cabeceras = {"Authorization": f"Bearer {DEPLOY_GITHUB_TOKEN}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"}
+    base = f"https://api.github.com/repos/{JARVIS_REPO}"
+    try:
+        r = http.put(f"{base}/pulls/{int(pr)}/merge", headers=cabeceras,
+                     json={"merge_method": "squash",
+                           "commit_title": f"arreglo automático (#{int(pr)})",
+                           "commit_message": "Arreglo lanzado por la detección de averías."})
+        if r.status_code >= 300:
+            detalle = (r.text or "")[:200].replace("\n", " ").strip()
+            logger.error("Despliegue: el merge del PR #%s devolvió %s — %s",
+                         pr, r.status_code, detalle or "(sin cuerpo)")
+            return {"ok": False, "motivo": f"no se pudo mergear el PR ({r.status_code})"}
+    except requests.RequestException as e:
+        logger.exception("Despliegue: no se pudo mergear el PR #%s", pr)
+        return {"ok": False, "motivo": f"no se pudo mergear el PR ({e})"}
+
+    try:
+        r = http.post(f"{base}/actions/workflows/{DEPLOY_WORKFLOW}/dispatches",
+                      headers=cabeceras, json={"ref": "main"})
+        if r.status_code >= 300:
+            detalle = (r.text or "")[:200].replace("\n", " ").strip()
+            logger.error("Despliegue: el disparo de %s devolvió %s — %s",
+                         DEPLOY_WORKFLOW, r.status_code, detalle or "(sin cuerpo)")
+            # El merge YA está hecho: esto no se puede deshacer, y decir "no se ha
+            # desplegado" a secas escondería que `main` ya lleva el cambio.
+            return {"ok": False, "mergeado": True,
+                    "motivo": f"el PR se mergeó pero el deploy no arrancó ({r.status_code}); "
+                              f"lánzalo a mano desde Actions"}
+    except requests.RequestException as e:
+        logger.exception("Despliegue: no se pudo disparar %s", DEPLOY_WORKFLOW)
+        return {"ok": False, "mergeado": True,
+                "motivo": f"el PR se mergeó pero el deploy no arrancó ({e}); "
+                          f"lánzalo a mano desde Actions"}
+    logger.info("Despliegue: PR #%s mergeado y deploy lanzado", pr)
+    return {"ok": True, "mergeado": True}
+
+
+def _despliegue_decidir(rid: str, accion: str) -> dict:
+    """Consume el permiso de despliegue y actúa. Hermana de `_revision_decidir`.
+
+    Va aparte y no como una rama más de aquella porque la transición es otra
+    (`listo` → `desplegado`) y porque mezclarlas haría que un fallo leyendo la acción
+    pudiera desplegar cuando se quería arreglar. Son las dos únicas puertas que tocan
+    producción: conviene que ni siquiera compartan el `if`.
+    """
+    if not re.match(_UUID_PATTERN, rid):
+        raise HTTPException(status_code=422, detail="Id de despliegue inválido")
+    nuevo = "desplegando" if accion == "desplegar" else "descartado"
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.listo",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": nuevo, "decidido_at": ahora})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Despliegue: no se pudo guardar la decisión de %s (%s)", rid, e)
+        raise HTTPException(status_code=502, detail="No se pudo guardar la decisión")
+
+    if not filas:
+        logger.info("Despliegue: decisión '%s' sobre %s que ya no estaba lista", accion, rid)
+        return {"ok": True, "hecho": False, "motivo": "ese despliegue ya estaba decidido"}
+
+    pr = int(filas[0].get("pr_numero") or 0)
+    if accion != "desplegar":
+        logger.info("Despliegue del PR #%s descartado a mano", pr)
+        return {"ok": True, "hecho": True, "accion": "nada", "pr": pr}
+    if pr <= 0:
+        return {"ok": False, "hecho": False, "motivo": "esa avería no tiene PR apuntado"}
+
+    resultado = _desplegar(pr)
+    if not resultado["ok"]:
+        # Se vuelve a "listo" solo si el merge NO llegó a hacerse: si ya está mergeado,
+        # volver atrás ofrecería desplegar un PR que ya no existe.
+        estado = "desplegado" if resultado.get("mergeado") else "listo"
+        try:
+            http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"estado": estado,
+                             "decidido_at": ahora if estado == "desplegado" else None})
+        except Exception as e:
+            logger.error("Despliegue: no se pudo liberar la decisión de %s (%s)", rid, e)
+        return {"ok": False, "hecho": False, "pr": pr, "motivo": resultado["motivo"]}
+
+    try:
+        http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"estado": "desplegado"})
+    except Exception as e:
+        logger.warning("Despliegue: no se pudo cerrar la fila de %s (%s)", rid, e)
+    return {"ok": True, "hecho": True, "accion": "desplegar", "pr": pr}
+
+
+def _despliegue_pendiente() -> dict:
+    """El despliegue esperando permiso más reciente, para cuando el aviso no trajo botones."""
+    try:
+        r = http.get(f"{REVISION_URL}?estado=eq.listo"
+                     "&select=id,pr_numero,detalle,issue_titulo&order=creado.desc&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Despliegue: no se pudo consultar lo pendiente (%s)", e)
+        raise HTTPException(status_code=502, detail="No se pudo consultar el despliegue")
+    return filas[0] if filas else {}
+
+
+class DespliegueAccionRequest(BaseModel):
+    accion: str
+
+
+@app.post("/despliegue/{aviso_id}/accion")
+def despliegue_accion(request: Request, body: DespliegueAccionRequest,
+                      aviso_id: str = _uuid_path(), token: str = ""):
+    """La respuesta a los botones del aviso: «Desplegar» o «Ahora no».
+
+    Endpoint aparte de `/revision/{id}/accion` por la misma razón que `_despliegue_decidir`
+    va aparte de `_revision_decidir`: es la única ruta HTTP del backend cuyo efecto es
+    tocar producción, y conviene poder leerla, auditarla y revocarla sin arrastrar la otra.
+    """
+    _auth_boton(request, token)
+
+    accion = str(body.accion or "").strip().lower()
+    if accion not in ("desplegar", "nada"):
+        raise HTTPException(status_code=422, detail="La acción es 'desplegar' o 'nada'")
+
+    resultado = _despliegue_decidir(aviso_id, accion)
+    if resultado.get("ok") and resultado.get("accion") == "desplegar":
+        _acusar_recibo("🚀 Desplegando",
+                       f"El PR #{resultado.get('pr')} está mergeado y el deploy en marcha.")
+    elif not resultado.get("ok"):
+        _acusar_recibo("🚀 No he podido desplegar",
+                       f"El botón de desplegar no ha llegado a hacerlo: "
+                       f"{resultado.get('motivo')}.")
+        raise HTTPException(status_code=502, detail="No se pudo desplegar")
+    return resultado
+
+
+def _j_desplegar() -> dict:
+    """Herramienta de Jarvis: despliega el arreglo que está esperando permiso.
+
+    Existe por lo mismo que `_j_arreglar_revision`: si el aviso salió por correo no hay
+    botones, y sin esto la única forma de dar el permiso sería entrar en la base de
+    datos. Solo se llega aquí desde `/jarvis/ejecutar`, es decir, después de que lo
+    hayas confirmado.
+    """
+    fila = _despliegue_pendiente()
+    if not fila:
+        return {"ok": False, "motivo": "No hay ningún arreglo esperando permiso"}
+    resultado = _despliegue_decidir(str(fila.get("id")), "desplegar")
+    if not resultado.get("ok"):
+        return {"ok": False, "motivo": f"No se pudo desplegar: {resultado.get('motivo')}"}
+    return {"ok": True, "pr": resultado.get("pr"),
+            "dile_al_usuario_literalmente":
+                f"Desplegando el PR #{resultado.get('pr')}."}
 
 
 def _retraso_min(cuando: Optional[str], ahora: datetime) -> float:
@@ -11959,6 +12497,19 @@ _JARVIS_HERRAMIENTAS = {
                        "el usuario tiene que confirmarlo.",
         "parametros":  {},
     },
+    "desplegar": {
+        # La única herramienta del registro que toca PRODUCCIÓN. Confirmación obligatoria
+        # y no negociable: el permiso no lo da el modelo eligiendo bien, lo das tú.
+        "confirmar":   True,
+        "requiere_despliegue": True,
+        "fn":          _j_desplegar,
+        "descripcion": "Propone desplegar el arreglo que está esperando permiso: mergea "
+                       "el PR y lanza el deploy del backend. NO lo despliega: lo aprueba "
+                       "el usuario. Es la misma decisión que el botón «Desplegar» del "
+                       "aviso, para cuando ese aviso llegó por correo y no traía botones. "
+                       "Solo sirve si hay un arreglo con el CI en verde esperando.",
+        "parametros":  {},
+    },
     "cobrar_entrenamiento": {
         # Cierra el ciclo de cobro y pone a cero el contador de sesiones pendientes:
         # deshacerlo es entrar en Supabase a mano.
@@ -11981,6 +12532,8 @@ def _jarvis_esquema() -> list:
     # Por lo mismo, sin rutina de arreglo configurada `arreglar_revision` no puede hacer
     # nada: se queda fuera del esquema en vez de anunciarse para fallar al usarla.
     con_arreglo = bool(ARREGLO_FIRE_URL and ARREGLO_FIRE_TOKEN)
+    # Y sin credencial de despliegue, `desplegar` tampoco puede hacer nada.
+    con_deploy  = bool(DEPLOY_GITHUB_TOKEN and "/" in JARVIS_REPO)
     return [{
         "type": "function",
         "function": {
@@ -11994,7 +12547,8 @@ def _jarvis_esquema() -> list:
         },
     } for nombre, h in _JARVIS_HERRAMIENTAS.items()
         if (con_mcp or not h.get("requiere_mcp"))
-        and (con_arreglo or not h.get("requiere_arreglo"))]
+        and (con_arreglo or not h.get("requiere_arreglo"))
+        and (con_deploy or not h.get("requiere_despliegue"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -12815,3 +13369,384 @@ def jarvis_voz(
         # final, que es justo lo contrario de lo que se busca.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── El puente de voz del teléfono ────────────────────────────────────────────
+# Twilio abre un WebSocket y va mandando el audio de la llamada en trozos de 20 ms; por
+# el mismo WebSocket se le devuelve lo que tiene que sonar en el auricular. En medio va
+# el Jarvis de siempre: `_jarvis_turno`, el mismo bucle y las mismas herramientas que
+# usan el chat y el modo llamada del navegador. Aquí no hay un asistente nuevo, hay un
+# transporte nuevo — y eso es a propósito: dos asistentes que responden distinto según
+# por dónde entres son dos asistentes que mantener.
+#
+# Cuatro decisiones que conviene entender antes de tocar esto:
+#
+#   - **Es la única parte asíncrona del backend.** `main.py` no usa `asyncio` en ninguna
+#     otra parte, y no es un descuido: los endpoints normales hacen E/S de bloque y viven
+#     mejor en el pool de hilos de FastAPI. Un WebSocket no se puede servir así, así que
+#     aquí sí, y todo lo síncrono que se llama desde dentro (Whisper, Jarvis, ElevenLabs)
+#     va envuelto en `asyncio.to_thread` — llamarlo directo bloquearía el bucle de
+#     eventos y con él el audio de la llamada, que se oye como un corte.
+#
+#   - **El audio del teléfono es μ-law a 8 kHz**, que no es lo que come ninguno de los
+#     dos extremos. Se convierte a mano (`_ulaw_a_pcm16`) en vez de con `audioop`:
+#     está en la stdlib de Python 3.11 pero desaparece en 3.13, y son treinta líneas de
+#     tabla que no merecen un bloqueo de versión. A la vuelta no hace falta convertir
+#     nada: a ElevenLabs se le pide `ulaw_8000` directamente.
+#
+#   - **Quién habla lo decide el silencio, no un botón.** No hay "pulsa para hablar" en
+#     una llamada: se mide la energía de lo que entra y se da el turno por terminado tras
+#     `VOZ_SILENCIO_MS` de calma. Es un VAD pobre a propósito — el bueno vive en
+#     ElevenLabs y cuesta, y para "sí, despliégalo" este llega de sobra.
+#
+#   - **Mientras Jarvis piensa, no escucha.** El audio que entra durante un turno se tira.
+#     Interrumpirle (barge-in) es justo lo que le falta también al modo llamada del
+#     navegador (`docs/JARVIS_VOZ.md`, fases 5 a 7) y se resolverá en los dos sitios a la
+#     vez o en ninguno: hacerlo aquí aparte sería mantener dos micrófonos distintos.
+#
+# Y la frontera de siempre, que aquí importa más que en ningún otro sitio: **por teléfono
+# Jarvis no se salta ninguna confirmación**. Las herramientas que piden aprobación la
+# siguen pidiendo; lo único que el teléfono sabe resolver por su cuenta es el permiso de
+# despliegue, porque ES la pregunta que ha motivado la llamada.
+VOZ_SILENCIO_MS   = int(os.getenv("VOZ_SILENCIO_MS", "800"))
+# Por debajo de esta energía media, un trozo de 20 ms es silencio. La línea telefónica
+# tiene ruido de fondo, así que no vale con "distinto de cero".
+VOZ_UMBRAL_RMS    = int(os.getenv("VOZ_UMBRAL_RMS", "500"))
+# Lo mínimo que tiene que durar algo para tratarlo como una frase. Sin esto, una tos o un
+# golpe al móvil abren un turno entero contra Whisper.
+VOZ_MIN_HABLA_MS  = int(os.getenv("VOZ_MIN_HABLA_MS", "300"))
+# Twilio manda tramas de 20 ms; todo lo de aquí cuenta en tramas para no arrastrar
+# milisegundos por el código.
+_TRAMA_MS         = 20
+
+# Tabla μ-law → PCM16, la de siempre (G.711). Se construye una vez al importar: son 256
+# valores y calcularlos por muestra costaría 8.000 operaciones por segundo de llamada.
+def _tabla_ulaw() -> list:
+    tabla = []
+    for byte in range(256):
+        u = ~byte & 0xFF
+        t = (((u & 0x0F) << 3) + 0x84) << ((u & 0x70) >> 4)
+        tabla.append((0x84 - t) if (u & 0x80) else (t - 0x84))
+    return tabla
+
+
+_ULAW_PCM = _tabla_ulaw()
+
+
+def _ulaw_a_pcm16(datos: bytes) -> bytes:
+    """μ-law 8 kHz (lo que manda el teléfono) → PCM16 little-endian (lo que come Whisper)."""
+    salida = bytearray(len(datos) * 2)
+    for i, byte in enumerate(datos):
+        salida[2 * i:2 * i + 2] = (_ULAW_PCM[byte] & 0xFFFF).to_bytes(2, "little")
+    return bytes(salida)
+
+
+def _rms(pcm16: bytes) -> float:
+    """Energía media de un trozo de PCM16. Es todo el VAD que hay aquí."""
+    if not pcm16:
+        return 0.0
+    total = 0
+    for i in range(0, len(pcm16) - 1, 2):
+        m = int.from_bytes(pcm16[i:i + 2], "little", signed=True)
+        total += m * m
+    return math.sqrt(total / (len(pcm16) / 2))
+
+
+def _wav_de_pcm16(pcm16: bytes, hz: int = 8000) -> bytes:
+    """Envuelve PCM16 en una cabecera WAV. Whisper necesita un fichero, no muestras sueltas.
+
+    A mano y no con el módulo `wave` porque escribir 44 bytes conocidos es más corto que
+    montar un fichero en memoria para que otro módulo escriba los mismos 44 bytes.
+    """
+    n = len(pcm16)
+    return (b"RIFF" + (36 + n).to_bytes(4, "little") + b"WAVEfmt "
+            + (16).to_bytes(4, "little") + (1).to_bytes(2, "little")
+            + (1).to_bytes(2, "little") + hz.to_bytes(4, "little")
+            + (hz * 2).to_bytes(4, "little") + (2).to_bytes(2, "little")
+            + (16).to_bytes(2, "little") + b"data" + n.to_bytes(4, "little") + pcm16)
+
+
+def _transcribir_llamada(pcm16: bytes) -> str:
+    """Lo que se ha oído, en texto. Cadena vacía si no se entendió nada.
+
+    Un fallo aquí NO tumba la llamada: se devuelve vacío y el bucle vuelve a escuchar,
+    que por teléfono se traduce en "no te he entendido, repite" — mucho mejor que colgar.
+    """
+    if len(pcm16) < 2:
+        return ""
+    try:
+        r = get_openai_client().audio.transcriptions.create(
+            model="whisper-1",
+            file=("llamada.wav", _wav_de_pcm16(pcm16), "audio/wav"),
+            language="es")
+        return (getattr(r, "text", "") or "").strip()
+    except Exception as e:
+        logger.warning("Teléfono: no se pudo transcribir (%s)", e)
+        return ""
+
+
+def _tts_ulaw(texto: str) -> bytes:
+    """Texto → audio μ-law 8 kHz listo para meter en la llamada.
+
+    Se le pide a ElevenLabs el formato del teléfono directamente (`ulaw_8000`) en vez de
+    convertirlo aquí: la conversión de bajada la hace mejor quien sintetiza, que tiene la
+    señal sin comprimir delante.
+    """
+    if not (ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID) or not texto.strip():
+        return b""
+    try:
+        r = http.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{quote(ELEVENLABS_VOICE_ID, safe='')}"
+            "?output_format=ulaw_8000",
+            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+            json={"text": texto[:1000], "model_id": ELEVENLABS_MODEL},
+        )
+        if r.status_code >= 300:
+            logger.error("Teléfono: ElevenLabs devolvió %s — %s", r.status_code,
+                         (r.text or "")[:200].replace("\n", " ").strip())
+            return b""
+        return r.content
+    except requests.RequestException as e:
+        logger.warning("Teléfono: no se pudo sintetizar (%s)", e)
+        return b""
+
+
+def _firma_twilio_ok(request: Request, cuerpo: dict) -> bool:
+    """Comprueba que la petición la manda Twilio de verdad.
+
+    Este endpoint es público —lo tiene que llamar Twilio desde internet, sin cabeceras
+    nuestras— y lo que devuelve abre un puente de voz contra Jarvis. La firma es lo único
+    que separa eso de que cualquiera que adivine la URL haga sonar el teléfono; el `ctx`
+    firmado cubre el resto (qué se dice y sobre qué decisión).
+
+    Es HMAC-SHA1 sobre la URL completa más los campos del formulario concatenados en
+    orden alfabético, que es lo que Twilio documenta. Comparación en tiempo constante,
+    como todas las de credenciales de este fichero.
+    """
+    firma = request.headers.get("X-Twilio-Signature", "")
+    if not firma or not TWILIO_TOKEN:
+        return False
+    url = str(request.url)
+    datos = url + "".join(f"{k}{cuerpo[k]}" for k in sorted(cuerpo))
+    esperada = base64.b64encode(
+        hmac.new(TWILIO_TOKEN.encode(), datos.encode("utf-8"), hashlib.sha1).digest()
+    ).decode()
+    return hmac.compare_digest(firma, esperada)
+
+
+@app.post("/telefono/voz")
+async def telefono_voz(request: Request, ctx: str = ""):
+    """Lo que Twilio pregunta al descolgar: «¿y ahora qué hago con esta llamada?».
+
+    Se le contesta con TwiML: abre un WebSocket contra nosotros y mándanos el audio. El
+    `ctx` firmado viaja hasta ese WebSocket, que es donde de verdad se usa.
+    """
+    formulario = dict(await request.form())
+    if not _firma_twilio_ok(request, formulario):
+        logger.warning("Teléfono: petición con firma inválida")
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not _leer_contexto_llamada(ctx):
+        # El contexto caducado es el caso normal de esto: alguien devuelve la llamada
+        # perdida veinte minutos después. Se dice y se cuelga, en vez de abrir un puente
+        # mudo que cobra por minuto.
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response>'
+                                '<Say language="es-ES">Esta llamada ya ha caducado.</Say>'
+                                '</Response>', media_type="application/xml")
+    destino = BACKEND_URL.replace("https://", "wss://").replace("http://", "ws://")
+    return Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response><Connect>'
+                f'<Stream url="{destino}/telefono/media?ctx={quote(ctx, safe="")}" />'
+                '</Connect></Response>',
+        media_type="application/xml")
+
+
+async def _decir(ws, stream_sid: str, texto: str) -> None:
+    """Mete una frase en el auricular. El TTS va a un hilo: bloquear aquí corta el audio."""
+    audio = await asyncio.to_thread(_tts_ulaw, texto)
+    if not audio or not stream_sid:
+        return
+    # En trozos de 20 ms, que es el tamaño de trama que Twilio espera. De una pieza
+    # también lo acepta, pero trozo a trozo se puede dejar de mandar en cuanto haya que
+    # callarse, que es lo que hará falta el día que se implemente la interrupción.
+    for i in range(0, len(audio), 160):
+        await ws.send_text(json.dumps({
+            "event": "media", "streamSid": stream_sid,
+            "media": {"payload": base64.b64encode(audio[i:i + 160]).decode()},
+        }))
+
+
+@app.websocket("/telefono/media")
+async def telefono_media(ws: WebSocket, ctx: str = ""):
+    """El audio de la llamada, en los dos sentidos. Aquí vive la conversación.
+
+    La autenticación es el `ctx` firmado de la query: un WebSocket que abre Twilio no
+    puede traer cabeceras nuestras, así que no hay dónde poner un token. Es la misma
+    excepción que ya se tolera en `_extract_service_token` para HA y el Atajo de iOS, con
+    una diferencia a favor: esto caduca en cinco minutos y solo vale para una llamada.
+    """
+    datos = _leer_contexto_llamada(ctx)
+    if not datos:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+
+    historial:  list = []
+    stream_sid       = ""
+    hablado:    bytearray = bytearray()   # lo que lleva dicho el usuario en este turno
+    silencio_ms      = 0
+    habla_ms         = 0
+    ocupado          = False              # mientras Jarvis piensa, lo que entra se tira
+    empezo           = time.monotonic()
+
+    try:
+        while True:
+            if time.monotonic() - empezo > LLAMADA_MAX_SEG:
+                # Tope duro. Una llamada que no se cierra sigue cobrando por minuto y
+                # sigue teniendo un modelo al otro lado.
+                logger.info("Teléfono: llamada cerrada por duración máxima")
+                await _decir(ws, stream_sid, "Tengo que colgar. Seguimos en el móvil.")
+                break
+
+            evento = json.loads(await ws.receive_text())
+            tipo   = evento.get("event")
+
+            if tipo == "start":
+                stream_sid = str((evento.get("start") or {}).get("streamSid") or "")
+                # El motivo de la llamada se dice ENTERO antes de escuchar nada: es lo que
+                # has cogido el teléfono para oír, y preguntarte algo antes de contarte de
+                # qué va sería empezar por el final.
+                await _decir(ws, stream_sid, datos["texto"])
+                continue
+
+            if tipo == "stop":
+                break
+
+            if tipo != "media":
+                continue
+
+            if ocupado:
+                continue
+
+            pcm = _ulaw_a_pcm16(base64.b64decode((evento.get("media") or {}).get("payload") or ""))
+            if _rms(pcm) >= VOZ_UMBRAL_RMS:
+                hablado.extend(pcm)
+                habla_ms   += _TRAMA_MS
+                silencio_ms = 0
+                continue
+
+            if habla_ms:
+                # Silencio DESPUÉS de haber hablado: puede ser una pausa o el final del
+                # turno. Se guarda igual, porque cortar en la primera pausa se come la
+                # segunda mitad de la frase.
+                hablado.extend(pcm)
+                silencio_ms += _TRAMA_MS
+
+            if not habla_ms or silencio_ms < VOZ_SILENCIO_MS:
+                continue
+            if habla_ms < VOZ_MIN_HABLA_MS:
+                # Una tos, un golpe al móvil, el intermitente. No es un turno.
+                hablado.clear()
+                habla_ms = silencio_ms = 0
+                continue
+
+            ocupado = True
+            audio   = bytes(hablado)
+            hablado.clear()
+            habla_ms = silencio_ms = 0
+
+            dicho = await asyncio.to_thread(_transcribir_llamada, audio)
+            if not dicho:
+                await _decir(ws, stream_sid, "Perdona, no te he entendido.")
+                ocupado = False
+                continue
+
+            logger.info("Teléfono: «%s»", dicho[:100])
+            respuesta = await asyncio.to_thread(_turno_telefonico, dicho, historial,
+                                                datos.get("rid", ""))
+            # `user`/`assistant` y no `usuario`/`asistente`: son los valores que valida
+            # `JarvisTurno`, que es adonde va esto en el turno siguiente.
+            historial.append({"rol": "user",      "texto": dicho})
+            historial.append({"rol": "assistant", "texto": respuesta})
+            # El historial se recorta por el mismo motivo que en el chat: cada turno viaja
+            # entero al modelo y una llamada larga acabaría pagando el doble por vuelta.
+            del historial[:-JARVIS_MAX_HISTORIAL]
+            await _decir(ws, stream_sid, respuesta)
+            ocupado = False
+
+    except WebSocketDisconnect:
+        # Colgar es la forma normal de terminar una llamada, no un error.
+        pass
+    except Exception as e:
+        logger.exception("Teléfono: la llamada se cortó por un fallo (%s)", e)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+def _turno_telefonico(dicho: str, historial: list, rid: str) -> str:
+    """Un turno de conversación por teléfono. Síncrono: lo llama `to_thread`.
+
+    Antes de pasarle la pregunta a Jarvis se mira si es la respuesta a la pregunta que
+    ha motivado la llamada. Ese atajo existe por una razón concreta: el permiso de
+    despliegue es la ÚNICA cosa que esta llamada necesita resolver, y hacerlo depender de
+    que el modelo elija bien la herramienta metería un fallo posible justo en la puerta
+    que toca producción. Un «sí» tiene que valer un sí.
+    """
+    if rid:
+        decision = _sio_no(dicho)
+        if decision is True:
+            resultado = _despliegue_decidir(rid, "desplegar")
+            if resultado.get("ok") and resultado.get("hecho"):
+                return f"Hecho. El PR {resultado.get('pr')} está mergeado y desplegando."
+            return (f"No he podido: {resultado.get('motivo', 'no lo sé')}. "
+                    f"Te lo dejo en el móvil.")
+        if decision is False:
+            _despliegue_decidir(rid, "nada")
+            return "Vale, lo dejo. Lo tienes en el móvil por si cambias de idea."
+
+    # Cualquier otra cosa es una conversación normal con el Jarvis de siempre.
+    try:
+        turnos = [JarvisTurno(rol=h["rol"], texto=h["texto"]) for h in historial]
+    except Exception as e:
+        # Perder el contexto es perder la conversación anterior, no la llamada.
+        logger.warning("Teléfono: historial descartado (%s)", e)
+        turnos = []
+    cuerpo = JarvisIn(mensaje=dicho[:JARVIS_MAX_MENSAJE], historial=turnos, voz=True)
+    try:
+        return str(_jarvis_resultado(cuerpo).get("respuesta") or "No sé qué decirte.")
+    except HTTPException as e:
+        logger.warning("Teléfono: el turno de Jarvis falló (%s)", e.detail)
+        return "Me he liado. Te lo dejo en el móvil."
+
+
+# Las formas de decir que sí y que no que hay que entender por teléfono. Es una lista
+# cerrada y corta a propósito: lo que no esté aquí no se interpreta como un permiso para
+# desplegar, se le pasa al modelo como una frase más. Ante la duda, NO se despliega —
+# desplegar de más es el único error de los dos que no se puede deshacer solo.
+_SI = ("si", "sí", "claro", "vale", "adelante", "despliega", "despliegalo", "despliégalo",
+       "hazlo", "venga", "ok", "okey", "perfecto", "dale", "por supuesto", "afirmativo")
+_NO = ("no", "ahora no", "espera", "para", "deja", "dejalo", "déjalo", "mejor no",
+       "todavia no", "todavía no", "luego", "negativo", "cancela")
+
+
+def _sio_no(dicho: str) -> Optional[bool]:
+    """¿Es esto un sí, un no, o ninguna de las dos? None significa "no lo sé".
+
+    Se mira solo el principio de la frase (las tres primeras palabras): «sí, despliégalo»
+    es un sí, pero «no sé si esto sirve para desplegar algo» no puede serlo por llevar la
+    palabra dentro.
+    """
+    limpio   = re.sub(r"[^\w\sáéíóúñ]", "", dicho.lower(), flags=re.UNICODE).strip()
+    palabras = limpio.split()
+    if not palabras:
+        return None
+    principio = " ".join(palabras[:3])
+    for frase in _NO:                      # el no se mira primero: "no, espera" empieza
+        if principio == frase or principio.startswith(frase + " "):
+            return False
+    for frase in _SI:
+        if principio == frase or principio.startswith(frase + " "):
+            return True
+    return None

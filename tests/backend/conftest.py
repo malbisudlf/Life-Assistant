@@ -106,6 +106,9 @@ class MockRouter:
     def delete(self, url, **kwargs):
         return self._dispatch("DELETE", url, **kwargs)
 
+    def put(self, url, **kwargs):
+        return self._dispatch("PUT", url, **kwargs)
+
     def called(self, method, fragment):
         return [c for c in self.calls if c[0] == method.upper() and fragment in c[1]]
 
@@ -118,6 +121,8 @@ def mock_requests(monkeypatch):
     monkeypatch.setattr(main.http, "post", router.post)
     monkeypatch.setattr(main.http, "patch", router.patch)
     monkeypatch.setattr(main.http, "delete", router.delete)
+    # PUT lo usa el merge del PR al desplegar (`_desplegar`), y solo eso.
+    monkeypatch.setattr(main.http, "put", router.put)
     return router
 
 

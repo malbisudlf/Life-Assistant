@@ -9,6 +9,12 @@ Y si hay issue, **a las 08:30 llega al móvil una notificación con dos botones*
 hallazgos, abre un PR y lo mergea si el CI pasa— y «No hacer nada», que no hace nada. La
 segunda mitad está en "El informe accionable", abajo.
 
+**Hay un camino hermano, y va al revés**: cuando el CI se rompe en `main`, el backend
+lanza el arreglo **sin preguntar** y la pregunta llega cuando el PR ya está en verde
+(«¿lo despliego?»), al móvil y por teléfono. Está en `docs/AVERIAS.md`, reutiliza la
+misma rutina de arreglo y la misma tabla, y la diferencia de cuándo se pregunta está
+explicada allí.
+
 **No sustituye al CI.** `ci.yml` ya ejecuta lint, tests, build y E2E en cada push. Lo
 que esta revisión mira es lo que ninguna herramienta comprueba: las invariantes de
 `CLAUDE.md`, las moralejas de `docs/BUGS_HISTORICOS.md` y los datos personales que se

@@ -37,6 +37,11 @@
 | `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón «Apagar» del aviso de salir de casa: encola el apagado de las entidades que llevaba ese aviso |
 | `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
 | `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta |
+| `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
+| `POST /revision/pr-listo` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI ha puesto en verde el PR del arreglo: deja el aviso con botones y llama por teléfono |
+| `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` mergea el PR y lanza el deploy, `nada` lo descarta. **La única ruta que toca producción** |
+| `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
+| `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
@@ -148,6 +153,12 @@ del resumen — ver `docs/BRIEF.md`),
 `REVISION_TOKEN`, `ARREGLO_FIRE_URL`, `ARREGLO_FIRE_TOKEN` (la revisión nocturna
 accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se puede
 arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
+`AVERIA_CI`, `AVERIA_MAX_INTENTOS`, `DEPLOY_GITHUB_TOKEN` (el arreglo automático del
+CI roto y el despliegue con permiso — ver `docs/AVERIAS.md`),
+`LLAMADAS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMERO`,
+`TWILIO_MI_NUMERO`, `BACKEND_URL`, `LLAMADA_TTL`, `LLAMADA_MAX_SEG`,
+`VOZ_SILENCIO_MS`, `VOZ_UMBRAL_RMS`, `VOZ_MIN_HABLA_MS` (el teléfono: sin ellas no
+suena nada y el resto de canales siguen igual — ver `docs/AVERIAS.md`),
 `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`, y las de registro

@@ -62,6 +62,11 @@ def main() -> int:
         ("Revisión nocturna accionable (aviso con botones)",
          ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
         ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
+        ("Despliegue con permiso (arreglo automático del CI roto)",
+         ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "DEPLOY_GITHUB_TOKEN", "JARVIS_REPO"]),
+        ("El teléfono (Jarvis te llama)",
+         ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",
+          "BACKEND_URL", "ELEVENLABS_API_KEY", "OPENAI_API_KEY"]),
     ]
     for nombre, vars_ in grupos:
         faltan = [v for v in vars_ if not os.getenv(v)]
