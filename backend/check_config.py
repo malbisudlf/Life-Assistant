@@ -1,8 +1,11 @@
 """Comprobador de configuración del kit self-hosted.
 
-Uso:  python backend/check_config.py
+Uso:  python backend/check_config.py [--probar-voz]
 Lee backend/.env (o el entorno) y dice qué funciona y qué falta, agrupado por
 funcionalidad, sin llamar a ningún servicio externo.
+
+`--probar-voz` es la única excepción, y es opt-in por eso: sintetiza una palabra con
+ElevenLabs para saber si la voz configurada se puede usar de verdad. Ver `probar_voz`.
 """
 import os
 import sys
@@ -26,6 +29,45 @@ except Exception:
 
 def _set(*names):
     return all(os.getenv(n) for n in names)
+
+
+def probar_voz() -> int:
+    """Comprueba que ELEVENLABS_VOICE_ID se puede usar con esta clave. Devuelve errores.
+
+    Existe porque este fallo es MUDO por el camino que usa el modo llamada. El navegador
+    sintetiza por WebSocket, y ahí una voz que la cuenta no puede usar no da error: llega
+    `isFinal` con cero bytes y el frontend, que no tiene forma de distinguirlo de un
+    fallo cualquiera, se cae a la voz del navegador sin decir por qué. Ya pasó: el secret
+    de Fly tenía una voz de la Voice Library, que el plan gratuito no permite por API, y
+    la llamada llevaba semanas sonando robótica sin un solo rastro en los logs.
+
+    Por HTTP el mismo intento SÍ dice el motivo (402 `paid_plan_required`), así que la
+    comprobación va por HTTP a propósito. Gasta unos pocos caracteres de la cuota.
+    """
+    clave = os.getenv("ELEVENLABS_API_KEY", "")
+    voz   = os.getenv("ELEVENLABS_VOICE_ID", "")
+    if not (clave and voz):
+        print(f"{WARN} Voz: sin ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID, no hay nada que probar")
+        return 0
+    try:
+        import httpx
+        r = httpx.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voz}",
+            headers={"xi-api-key": clave},
+            json={"text": "Prueba.", "model_id": os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")},
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"{KO} Voz: no se ha podido hablar con ElevenLabs ({e})")
+        return 1
+    if r.status_code == 200 and r.content:
+        print(f"{OK} Voz: la voz {voz} sintetiza ({len(r.content)} bytes)")
+        return 0
+    print(f"{KO} Voz: la voz {voz} NO se puede usar — HTTP {r.status_code}: {r.text[:200]}")
+    if r.status_code == 402:
+        print("     Es una voz de la Voice Library y la cuenta es de plan gratuito. Pon una")
+        print("     voz por defecto (p. ej. George, JBFqnCBsd6RMkjVDRZzb) o sube de plan.")
+    return 1
 
 
 def main() -> int:
@@ -82,6 +124,10 @@ def main() -> int:
     print(f"Calendario de clases: {os.getenv('CLASSES_CALENDAR', 'clases')}")
     print(f"Clima (lat, lon): {os.getenv('WEATHER_LAT', '40.4168')}, {os.getenv('WEATHER_LON', '-3.7038')}")
     print(f"Marcador de entregas: {os.getenv('ENTREGAS_MARKER', '📚')} (debe coincidir con VITE_ENTREGAS_MARKER)")
+
+    if "--probar-voz" in sys.argv:
+        print()
+        errores += probar_voz()
 
     if errores:
         print(f"\n{KO} {errores} error(es) bloqueante(s).")

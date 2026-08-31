@@ -80,6 +80,14 @@ Cosas que no estaban en el plan y costaron encontrar. **Léelas antes de tocar n
   De 22 voces por defecto probadas, 14 funcionan en gratuito y **ninguna es española**;
   todas son anglosajonas hablando español con acento. La voz nativa que se quería es lo
   que compra pagar. La puesta ahora es George (`JBFqnCBsd6RMkjVDRZzb`).
+  **Y volvió a pasar, en producción y solo en producción** (agosto de 2026): el secret
+  `ELEVENLABS_VOICE_ID` de Fly tenía la voz española de la biblioteca, mientras el `.env`
+  local tenía George. En local sonaba; en el móvil la llamada llevaba semanas cayendo a
+  la voz del navegador, sin una línea en los logs de Fly, porque el WebSocket no dice
+  nada. La moraleja es que **la configuración de la voz hay que comprobarla donde corre,
+  no donde se desarrolla**: `fly ssh console -C "..."` o, desde local,
+  `python backend/check_config.py --probar-voz`, que sintetiza una palabra por HTTP y
+  dice el motivo exacto en vez de dejarte adivinando.
 - **El token de `/voz/token` dura 15 minutos, y en el móvil eso se agota siempre.** Se
   pedía UNA vez, al cargar el dashboard. En el ordenador da igual; en el teléfono lo
   normal es abrir la app, guardárselo en el bolsillo y llamar media hora después — con el
