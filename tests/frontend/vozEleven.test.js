@@ -37,12 +37,15 @@ class WebSocketFalso {
   get contexto() { return this.enviados.at(-1)?.context_id; }
 }
 
+let fuentesCreadas = [];
+
 class AudioContextFalso {
   constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; }
   createGain()  { return { connect() {} }; }
   createBufferSource() {
     // El trozo "suena" en el tick siguiente: es `onended` lo que cierra el turno.
     const f = { connect() {}, stop() {}, start() { setTimeout(() => f.onended?.(), 0); } };
+    fuentesCreadas.push(f);
     return f;
   }
   createBuffer(canales, largo, hz) {
@@ -55,6 +58,7 @@ class AudioContextFalso {
 
 beforeEach(() => {
   socket = null;
+  fuentesCreadas = [];
   vi.stubGlobal("WebSocket", WebSocketFalso);
   vi.stubGlobal("AudioContext", AudioContextFalso);
   vi.stubGlobal("atob", (s) => s);
@@ -153,5 +157,28 @@ describe("cuando la voz suena", () => {
     expect(primera).toHaveBeenCalled();
     // Y la segunda ya está en el aire: un contexto nuevo con su texto.
     expect(socket.enviados.some(m => m.text === "Dos.")).toBe(true);
+  });
+
+  it("el resto de un turno cortado no suena mezclado con el turno siguiente", async () => {
+    // La decodificación (`decodeAudioData`) es asíncrona. Si el trozo del turno viejo
+    // llega justo antes de `callar()` pero termina de decodificarse DESPUÉS de que ya
+    // haya arrancado el turno nuevo, `contexto` vuelve a ser verdadero —pero del turno
+    // nuevo— y un chequeo de "¿hay contexto?" en vez de "¿es EL MISMO contexto?" dejaba
+    // pasar ese resto, que sonaba encima de la respuesta nueva.
+    const voz = abrir(() => {});
+
+    voz.decir("Turno viejo.", () => {});
+    socket.recibir({ audio: "viejo", contextId: socket.contexto });
+    // Se corta y se arranca el turno nuevo ANTES de que la promesa de arriba resuelva.
+    voz.callar();
+    voz.decir("Turno nuevo.", () => {});
+    socket.recibir({ audio: "nuevo", contextId: socket.contexto });
+
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    // Solo debería haber sonado el trozo del turno nuevo.
+    expect(fuentesCreadas.length).toBe(1);
   });
 });

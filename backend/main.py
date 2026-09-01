@@ -28,7 +28,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote, urlsplit, urljoin, parse_qs
+from urllib.parse import quote, urlsplit, urljoin, parse_qs, parse_qsl
 from types import SimpleNamespace
 import html as html_mod
 import ipaddress
@@ -321,8 +321,14 @@ BRIEF_ECONOMIA_POR_FUENTE = 25
 # Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
 # pocos cuerpos grandes en paralelo para tumbarla.
-MAX_AUDIO_BYTES  = int(os.getenv("MAX_AUDIO_BYTES",  str(8 * 1024 * 1024)))
-MAX_INGEST_BYTES = int(os.getenv("MAX_INGEST_BYTES", str(4 * 1024 * 1024)))
+MAX_AUDIO_BYTES    = int(os.getenv("MAX_AUDIO_BYTES",    str(8 * 1024 * 1024)))
+MAX_INGEST_BYTES   = int(os.getenv("MAX_INGEST_BYTES",   str(4 * 1024 * 1024)))
+# El formulario que manda Twilio al descolgar son unos pocos campos de texto (CallSid,
+# From, To...); nunca ha llegado a los KB. El tope es generoso de todos modos porque es
+# el único de los tres que un desconocido puede disparar sin ningún token previo — la
+# firma se comprueba DESPUÉS de leer el cuerpo, así que hasta entonces cualquiera que
+# adivine la URL puede mandarlo.
+MAX_TELEFONO_BYTES = int(os.getenv("MAX_TELEFONO_BYTES", str(64 * 1024)))
 # La transcripción cuesta dinero en cada llamada: limitar el gasto de una sesión
 # comprometida, no solo el consumo de memoria.
 AUDIO_MAX_REQUESTS   = int(os.getenv("AUDIO_MAX_REQUESTS", "10"))
@@ -13584,8 +13590,14 @@ async def telefono_voz(request: Request, ctx: str = ""):
 
     Se le contesta con TwiML: abre un WebSocket contra nosotros y mándanos el audio. El
     `ctx` firmado viaja hasta ese WebSocket, que es donde de verdad se usa.
+
+    El cuerpo se lee acotado (invariante 8 de `CLAUDE.md`) ANTES de tocarlo: este
+    endpoint es público —lo llama Twilio sin cabeceras nuestras— y hasta que
+    `_firma_twilio_ok` no lo confirma, el cuerpo puede venir de cualquiera. Con
+    `request.form()` ese cuerpo se cargaba entero en memoria antes de comprobar nada.
     """
-    formulario = dict(await request.form())
+    raw = await _leer_cuerpo_limitado(request, MAX_TELEFONO_BYTES)
+    formulario = dict(parse_qsl(raw.decode("utf-8", errors="replace"), keep_blank_values=True))
     if not _firma_twilio_ok(request, formulario):
         logger.warning("Teléfono: petición con firma inválida")
         raise HTTPException(status_code=403, detail="Forbidden")
