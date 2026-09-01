@@ -153,9 +153,14 @@ class TestElArregloEstaListo:
 
         client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
         assert llamadas and llamadas[0][1] == rid
-        # Lo que se oye tiene que decir QUÉ se rompió: una llamada que solo dice "mira el
-        # móvil" no ahorra mirar el móvil.
-        assert "CI ha fallado" in llamadas[0][0]
+        # Y lo que se oye NO recita el motivo, aunque quien llama lo tenga delante. Este
+        # test pedía justo lo contrario ("una llamada que solo dice mira el móvil no
+        # ahorra mirar el móvil") y estaba escrito pensando en un aviso de un solo
+        # sentido. Pero esto es una conversación: si quieres saber qué se rompió, lo
+        # preguntas. Recitar el título del fallo del CI antes de la pregunta solo mete
+        # veinte segundos de altavoz por delante de la única decisión que hay que tomar.
+        assert "CI ha fallado" not in llamadas[0][0]
+        assert "despliegue" in llamadas[0][0]
 
 
 class TestElPermisoDeDespliegue:
@@ -256,7 +261,7 @@ class TestLaPantallaDeLlamada:
         # resuelto otra vez al contestar (frontera 2 de docs/AVERIAS.md).
         assert pendiente["id"] == rid and pendiente["pr"] == 122
         # Y la frase es LA MISMA que diría el teléfono: un solo Jarvis, dos transportes.
-        assert pendiente["apertura"] == main._apertura_despliegue("el CI ha fallado en main")
+        assert pendiente["apertura"] == main._apertura_despliegue()
 
     def test_sin_nada_pendiente_no_inventa_una_llamada(self, client, mock_requests, auth_headers):
         mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
@@ -286,3 +291,40 @@ class TestElBotonDeHablarlo:
         monkeypatch.setattr(main, "FRONTEND_URL", "")
         acciones = main._acciones_aviso(main._uuid_averia("ci", "1"), main.REGLA_DESPLIEGUE)
         assert [a["title"] for a in acciones] == ["Desplegar", "Ahora no"]
+
+
+class TestElContextoDeLaLlamada:
+    """Lo que Jarvis ya sabe al descolgar, sin tener que ir a buscarlo.
+
+    Es una optimización de LATENCIA, no de capacidad: sin esto Jarvis contesta lo mismo,
+    pero tardando una herramienta más. Y hablando eso se nota — medido, 1,7 s contra
+    9,7 s. Se prueba aquí porque lo que se le mete al contexto es la avería.
+    """
+
+    def test_por_voz_ya_sabe_que_hay_pendiente(self, mock_requests):
+        mock_requests.add("GET", "revision_hallazgos",
+                          FakeResponse([{"id": main._uuid_averia("ci", "1"), "pr_numero": 126,
+                                         "detalle": "el CI ha fallado en main"}]))
+        sistema = main._jarvis_sistema(voz=True)
+        assert "126" in sistema
+        assert "el CI ha fallado en main" in sistema
+        # Y lo importante no es que lo sepa, es que se le diga que NO vaya a buscarlo:
+        # sabiéndolo pero sin esta línea, el modelo pide la herramienta igual.
+        assert "SIN llamar a" in sistema
+
+    def test_por_escrito_no_se_paga_la_consulta(self, mock_requests, monkeypatch):
+        """El chat no va casi nunca de esto y los segundos ahí no se notan."""
+        def _no(*a, **k):
+            raise AssertionError("el contexto escrito no debe consultar el despliegue")
+        monkeypatch.setattr(main, "_despliegue_pendiente", _no)
+        main._jarvis_sistema(voz=False)
+
+    def test_si_supabase_se_cae_la_llamada_sigue(self, mock_requests, monkeypatch):
+        """El dato es adorno: un 502 aquí no puede llevarse por delante la conversación."""
+        monkeypatch.setattr(main, "_despliegue_pendiente",
+                            lambda: (_ for _ in ()).throw(RuntimeError("Supabase caído")))
+        assert "Jarvis" in main._jarvis_sistema(voz=True)
+
+    def test_sin_nada_pendiente_no_se_inventa_contexto(self, mock_requests):
+        mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
+        assert "ESPERANDO TU PERMISO" not in main._jarvis_sistema(voz=True)

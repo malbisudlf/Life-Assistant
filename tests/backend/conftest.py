@@ -64,11 +64,13 @@ import main
 
 
 class FakeResponse:
-    def __init__(self, json_data=None, status_code=200, text=""):
+    def __init__(self, json_data=None, status_code=200, text="", content=b""):
         self._json = json_data if json_data is not None else []
         self.status_code = status_code
         self.text = text or ""
         self.encoding = "utf-8"
+        # Cuerpo binario, para lo que no devuelve JSON: hoy el audio de Azure Speech.
+        self.content = content
 
     def json(self):
         return self._json

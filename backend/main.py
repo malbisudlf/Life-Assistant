@@ -10313,7 +10313,7 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     # Y además suena el teléfono, SI está encendido. Hoy nace apagado y el canal de voz
     # real es la pantalla de llamada del dashboard, que abre el propio aviso: ver
     # `GET /despliegue/pendiente` y `docs/LLAMADAS.md` para por qué se aparcó Twilio.
-    _llamar(_apertura_despliegue(que), rid=rid)
+    _llamar(_apertura_despliegue(), rid=rid)
     logger.info("PR #%s listo para desplegar (avería %s)", numero, fila.get("origen"))
     return {"ok": True, "avisado": apuntado, "pr": numero}
 
@@ -10426,16 +10426,24 @@ def _despliegue_decidir(rid: str, accion: str) -> dict:
     return {"ok": True, "hecho": True, "accion": "desplegar", "pr": pr}
 
 
-def _apertura_despliegue(que: str) -> str:
+def _apertura_despliegue() -> str:
     """La primera frase que dice Jarvis al descolgar, para los dos canales de voz.
 
     Una sola fuente a propósito: la dicen el teléfono (`_llamar`) y la pantalla de
     llamada del dashboard (`GET /despliegue/pendiente`). Escrita en cada sitio, Jarvis
     acabaría contando lo mismo de dos maneras distintas según por dónde le cogieras, que
     es justo lo que evita tener un solo cerebro detrás de los dos transportes.
+
+    Y NO lleva dentro el motivo de la avería, aunque quien llama lo tenga a mano. Antes
+    se interpolaba (`{que[:80]}`) y el resultado era que al descolgar te leía el título
+    entero del fallo del CI —texto escrito para un issue, no para un altavoz— antes de
+    llegar a la única pregunta que importa. Por escrito ese contexto se salta con la
+    vista; hablando hay que esperarlo entero. El motivo sigue estando en el aviso del
+    móvil y en `GET /despliegue/pendiente`, y si lo preguntas Jarvis lo cuenta: la
+    diferencia es que ahora lo pides tú en vez de que te lo recite él.
     """
-    return (f"He detectado un fallo, {que[:80]}. Ya lo he corregido y el CI está en "
-            f"verde. ¿Quieres que lo despliegue?")
+    return ("He detectado un fallo y ya lo he corregido. El CI está en verde. "
+            "¿Quieres que lo despliegue?")
 
 
 def _despliegue_pendiente() -> dict:
@@ -10455,6 +10463,22 @@ def _despliegue_pendiente() -> dict:
     return filas[0] if filas else {}
 
 
+def _despliegue_pendiente_seguro() -> dict:
+    """Lo mismo, pero sin poder tumbar a quien pregunta.
+
+    `_despliegue_pendiente` levanta un 502 cuando Supabase no contesta, y en un endpoint
+    eso está bien: el usuario ha pedido justo ese dato y merece saber que no se sabe. Pero
+    `_jarvis_sistema` lo consulta de refilón para adornar el contexto de una llamada, y
+    ahí ese 502 se llevaría por delante la conversación entera por un dato accesorio.
+    Mismo criterio que `_vigilar_sistema_seguro` y compañía.
+    """
+    try:
+        return _despliegue_pendiente()
+    except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
+        logger.warning("Jarvis por voz: sin contexto del despliegue pendiente (%s)", e)
+        return {}
+
+
 @app.get("/despliegue/pendiente")
 def despliegue_pendiente_endpoint(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Qué hay esperando permiso, para la pantalla de llamada del dashboard.
@@ -10471,7 +10495,7 @@ def despliegue_pendiente_endpoint(credentials: HTTPAuthorizationCredentials = De
     return {"pendiente": {"id":       fila.get("id"),
                           "pr":       fila.get("pr_numero"),
                           "motivo":   que,
-                          "apertura": _apertura_despliegue(que)}}
+                          "apertura": _apertura_despliegue()}}
 
 
 class DespliegueAccionRequest(BaseModel):
@@ -12708,6 +12732,29 @@ def _jarvis_sistema(voz: bool = False) -> str:
             "- Si no has entendido bien, pregunta en corto en vez de suponer: la "
             "transcripción puede traer errores.\n"
         )
+        # Y el dato que ha motivado la llamada, ya mirado y metido aquí. Esta consulta se
+        # paga en CADA turno hablado y aun así sale a cuenta de largo: sin ella, la
+        # pregunta más probable de esta conversación —«¿qué hay pendiente?», «¿qué se ha
+        # roto?»— obliga al modelo a pedir una herramienta, y eso son dos llamadas al
+        # modelo más el viaje a Supabase en lugar de una. Medido contra producción: 1,7 s
+        # cuando contesta de lo que ya sabe y 9,7 s cuando tiene que ir a buscarlo, y
+        # hablando esos ocho segundos son la diferencia entre una conversación y un
+        # formulario. Por escrito no se hace: ahí los segundos no se notan y el chat casi
+        # nunca va de esto, así que solo pagaría la consulta sin cobrar el beneficio.
+        pendiente = _despliegue_pendiente_seguro()
+        if pendiente:
+            motivo = str(pendiente.get("detalle") or pendiente.get("issue_titulo") or "")
+            partes.append(
+                "\nHAY UN DESPLIEGUE ESPERANDO TU PERMISO y es lo que ha motivado esta "
+                f"llamada. Los datos ya están mirados: es el PR número "
+                f"{pendiente.get('pr_numero')}"
+                + (f", y el fallo que se arregló fue: {motivo[:200]}" if motivo else "")
+                + ".\n"
+                "- Contesta con estos datos lo que te pregunte del asunto, SIN llamar a "
+                "ninguna herramienta: ya los tienes aquí.\n"
+                "- No los sueltes por tu cuenta. El motivo se cuenta si lo pregunta.\n"
+                "- Si te dice que sí, que adelante o que lo despliegues, usa `desplegar`.\n"
+            )
 
     if JARVIS_REPO:
         partes.append(
@@ -13266,6 +13313,119 @@ VOZ_TOKEN_WINDOW_SECONDS = int(os.getenv("VOZ_TOKEN_WINDOW_SECONDS", "300"))
 # valor libre en la URL de salida.
 VOZ_TIPOS = ("tts_websocket", "realtime_scribe")
 
+# ── Azure Speech: la voz que sí habla español ────────────────────────────────
+# ElevenLabs sigue arriba y sigue funcionando, pero su problema no se arreglaba con
+# ajustes: en el plan gratuito las voces españolas están en la Voice Library, que está
+# cerrada, así que lo que había era una voz BRITÁNICA leyendo español con el modelo más
+# rápido y peor (`eleven_flash_v2_5`). Azure tiene voces nativas de España y 500.000
+# caracteres al mes gratis para siempre, que a una llamada corta al día no se acercan ni
+# de lejos.
+#
+# Y AQUÍ EL AUDIO SÍ PASA POR EL BACKEND, al revés que con ElevenLabs. Es un cambio
+# deliberado sobre la decisión de la sección de arriba, no un descuido, y conviene
+# entender por qué se puede revisar:
+#
+#   - El argumento contra proxiar era el arranque en frío: 10–15 s de Fly cayendo justo
+#     en la primera palabra, y por tanto `min_machines_running = 1` y una máquina
+#     encendida a todas horas. Pero eso NO aplica al camino real: para cuando hay algo
+#     que sintetizar, el backend acaba de escribir ese texto él mismo en `/jarvis/voz`.
+#     La máquina lleva despierta todo el turno. El frío se paga al descolgar, una vez, y
+#     se pagaba igual antes.
+#   - El otro argumento era el salto a París. Fly está en `cdg` y el recurso de Azure en
+#     `francecentral`: son la misma ciudad. Medido desde dentro de la máquina, una frase
+#     entera tarda 0,7 s.
+#   - Y a cambio se gana lo que de verdad costaba caro: no hay WebSocket propietario que
+#     hablar, no hay SDK de un mega que meter en el bundle (la norma del proyecto es no
+#     añadir dependencias), y la clave no tiene ni que salir en forma de token. Menos
+#     superficie donde volver a tener un fallo MUDO, que es el que nos ha costado dos
+#     tardes ya.
+AZURE_SPEECH_KEY     = os.getenv("AZURE_SPEECH_KEY", "")
+AZURE_SPEECH_REGION  = os.getenv("AZURE_SPEECH_REGION", "")
+AZURE_SPEECH_VOICE   = os.getenv("AZURE_SPEECH_VOICE", "es-ES-SaulNeural")
+# 24 kHz y 48 kbit/s: se oye igual por un altavoz de móvil que el doble de bitrate y pesa
+# la mitad, que es lo que se nota cuando cada frase es una petición aparte.
+AZURE_SPEECH_FORMATO = os.getenv("AZURE_SPEECH_FORMATO", "audio-24khz-48kbitrate-mono-mp3")
+# Una frase hablada, no un discurso. El troceado lo hace el cliente (`src/lib/voz.js`) y
+# esto es solo el tope de lo que se acepta por petición: sin él, un turno largo se
+# convertiría en un minuto de audio que nadie va a escuchar entero.
+VOZ_DECIR_MAX_CHARS  = int(os.getenv("VOZ_DECIR_MAX_CHARS", "600"))
+VOZ_DECIR_MAX_REQUESTS   = int(os.getenv("VOZ_DECIR_MAX_REQUESTS", "240"))
+VOZ_DECIR_WINDOW_SECONDS = int(os.getenv("VOZ_DECIR_WINDOW_SECONDS", "300"))
+
+
+def _voz_azure_configurada() -> bool:
+    return bool(AZURE_SPEECH_KEY and AZURE_SPEECH_REGION and AZURE_SPEECH_VOICE)
+
+
+def _ssml(texto: str, voz: str) -> str:
+    """Envuelve el texto para Azure, ESCAPADO.
+
+    El escapado no es cosmética: lo que entra aquí lo ha escrito el modelo, y el modelo
+    escribe lo que le han dicho por el micrófono. Sin escapar, un `<` cualquiera rompe el
+    documento y Azure devuelve 400 (o peor: un `<voice name=...>` metido a mano cambiaría
+    la voz, y un `<audio src=...>` haría que el altavoz reprodujera lo que hubiera al otro
+    lado de una URL ajena). Es la misma familia que la regla del enunciado de Alud: el
+    texto de fuera va como DATO, nunca como marcado.
+    """
+    return ('<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            'xml:lang="es-ES"><voice name="' + html_mod.escape(voz, quote=True) + '">'
+            + html_mod.escape(texto, quote=False) + '</voice></speak>')
+
+
+class VozDecirIn(BaseModel):
+    texto: str = Field(max_length=VOZ_DECIR_MAX_CHARS)
+
+
+@app.post("/voz/decir")
+def voz_decir(
+    body: VozDecirIn,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Sintetiza UNA frase con Azure y la devuelve como MP3.
+
+    Endpoint de usuario: lo llama el modo llamada del dashboard, una vez por frase. El
+    límite es generoso (240 en 5 minutos) porque una conversación normal son bastantes
+    frases cortas seguidas; sigue estando para que una pestaña en bucle no se coma la
+    cuota gratuita del mes en una tarde.
+
+    Devuelve 503 y no 500 si falta configuración: no es un error, es que esta voz no está
+    puesta, y el cliente sabe caerse a la del navegador con eso.
+    """
+    _check_rate("voz_decir", _client_ip(request), VOZ_DECIR_MAX_REQUESTS,
+                VOZ_DECIR_WINDOW_SECONDS)
+    texto = body.texto.strip()
+    if not texto:
+        raise HTTPException(status_code=400, detail="No hay nada que decir")
+    if not _voz_azure_configurada():
+        raise HTTPException(status_code=503, detail="La voz de Azure no está configurada")
+    try:
+        r = http.post(
+            f"https://{quote(AZURE_SPEECH_REGION, safe='')}"
+            ".tts.speech.microsoft.com/cognitiveservices/v1",
+            data=_ssml(texto, AZURE_SPEECH_VOICE).encode("utf-8"),
+            headers={"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+                     "Content-Type": "application/ssml+xml",
+                     "X-Microsoft-OutputFormat": AZURE_SPEECH_FORMATO,
+                     "User-Agent": "life-assistant"},
+        )
+    except Exception as e:   # noqa: BLE001 — la llamada sigue con la voz del navegador
+        logger.error("Azure Speech: no se pudo sintetizar (%s)", e)
+        raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
+    if r.status_code >= 400:
+        # El cuerpo dice el motivo (voz inexistente, cuota agotada, clave mala) y no
+        # lleva la clave dentro, así que se registra: sin esto, quedarse sin cuota el día
+        # 20 del mes sería otro fallo mudo más.
+        logger.error("Azure Speech: %s %s", r.status_code, r.text[:300])
+        raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
+    # Un 200 con el cuerpo vacío es el fallo mudo de siempre con otra cara: el cliente se
+    # quedaría esperando un audio que no existe. Mejor decirlo aquí.
+    if not r.content:
+        logger.error("Azure Speech: 200 sin audio para %d caracteres", len(texto))
+        raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
+    return Response(content=r.content, media_type="audio/mpeg",
+                    headers={"Cache-Control": "no-store"})
+
 
 class VozTokenIn(BaseModel):
     tipo: Literal["tts_websocket", "realtime_scribe"]
@@ -13293,23 +13453,74 @@ def _eleven_token(tipo: str) -> str:
     return token
 
 
+_calentando = threading.Lock()
+
+
+def _calentar_para_hablar() -> None:
+    """Deja hechas, ANTES de descolgar, las consultas que pagaría la primera frase.
+
+    El dashboard pide `/voz/token` por adelantado y cada diez minutos justo para que la
+    máquina esté despierta cuando llames. Esto aprovecha ese mismo viaje para lo otro que
+    solo se paga la primera vez en cada proceso: el catálogo de la casa y la lista de
+    servidores MCP, que son cachés de proceso y en Fly se vacían en cada arranque en frío.
+
+    Son ~0,9 s medidos, no diez: se midió antes de escribirlo. No arregla una llamada
+    lenta —la varianza de OpenAI es bastante mayor que esto— pero es el único trozo del
+    arranque que está en nuestra mano y sale gratis, porque va en un viaje que ya se hacía.
+
+    Va en un hilo y con `Lock` no bloqueante: quien pide el permiso de voz no tiene por
+    qué esperar a esto, y diez peticiones seguidas no pueden lanzar diez calentamientos.
+    """
+    if not _calentando.acquire(blocking=False):
+        return
+    def _trabajo():
+        try:
+            _casa_entidades()
+            _mcp_config()
+        except Exception as e:   # noqa: BLE001 — es adelantar trabajo, no hacerlo
+            logger.warning("Voz: no se pudo calentar el contexto (%s)", e)
+        finally:
+            _calentando.release()
+    threading.Thread(target=_trabajo, daemon=True, name="calentar-voz").start()
+
+
 @app.post("/voz/token")
 def voz_token(
     body: VozTokenIn,
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    """Emite el permiso para que el navegador abra un WebSocket con ElevenLabs.
+    """Dice con qué voz se puede hablar, y emite el permiso si hace falta uno.
 
     Endpoint de USUARIO (`verify_token`), no de servicio: lo llama el dashboard con el
     JWT de la sesión. Nada que arranque solo necesita voz.
+
+    Devuelve `proveedor` para que el cliente sepa a qué atenerse, y AZURE VA PRIMERO
+    cuando está configurado: es el que tiene voces españolas de verdad. Se responde aquí
+    y no en un endpoint aparte para no meter otra ida y vuelta antes de descolgar — el
+    dashboard ya pide esto por adelantado justo para eso, y una llamada más volvería a
+    poner el arranque en frío de Fly delante de la primera palabra.
+
+    Azure no necesita permiso ninguno: su audio no lo pide el navegador, lo sirve
+    `POST /voz/decir` con el JWT de siempre. Por eso la respuesta va sin `token`, y el
+    cliente distingue por `proveedor` en vez de por la ausencia de un campo.
     """
     _check_rate("voz_token", _client_ip(request), VOZ_TOKEN_MAX_REQUESTS, VOZ_TOKEN_WINDOW_SECONDS)
+    # La transcripción en directo sigue siendo cosa de ElevenLabs: Azure está aquí solo
+    # para hablar. Pedir `realtime_scribe` no puede acabar en la voz de Azure.
+    if body.tipo == "tts_websocket" and _voz_azure_configurada():
+        # Con Azure esto importa MÁS que antes: el audio pasa por aquí, así que una
+        # máquina dormida ya no retrasa solo la respuesta, retrasa también la voz. Antes
+        # el audio venía directo de ElevenLabs al navegador y se saltaba a Fly entero.
+        _calentar_para_hablar()
+        return {"proveedor": "azure", "voz": AZURE_SPEECH_VOICE,
+                "max_minutos": JARVIS_VOZ_MAX_MINUTOS}
     # 503 y no 500: no es un fallo, es que la voz de pago no está configurada. El
     # frontend lo lee y se queda con el modo llamada gratuito en vez de romperse.
     if not (JARVIS_VOZ_ELEVENLABS and ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID):
-        raise HTTPException(status_code=503, detail="La voz de ElevenLabs no está configurada")
+        raise HTTPException(status_code=503, detail="No hay ninguna voz de pago configurada")
     return {
+        "proveedor":  "elevenlabs",
         "token":      _eleven_token(body.tipo),
         "expira_en":  900,
         "voice_id":   ELEVENLABS_VOICE_ID,
