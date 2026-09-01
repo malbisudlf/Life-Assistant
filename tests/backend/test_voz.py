@@ -4,10 +4,25 @@ Lo que se protege aquí es que la clave de ElevenLabs nunca salga del backend y 
 token de un solo uso —que es una credencial viva durante 15 minutos— no acabe en ningún
 registro. Ver docs/JARVIS_VOZ.md.
 """
+import pytest
+
 import main
 from conftest import FakeResponse
 
 TOKEN_FALSO = "sutkn_pruebaquenodeberiaverse"
+
+
+@pytest.fixture(autouse=True)
+def _sin_azure(monkeypatch):
+    """Este fichero prueba la rama de ElevenLabs, así que Azure va apagado.
+
+    Y no es una formalidad: `main` carga el `.env` del desarrollador al importarse, así
+    que en cuanto alguien configura Azure en su máquina, `/voz/token` empieza a devolver
+    `proveedor: azure` y estos tests se caen todos a la vez sin que nadie haya tocado el
+    código. En CI no pasaba —allí no hay `.env`—, que es la peor versión del problema:
+    verde en el CI y rojo en local.
+    """
+    monkeypatch.setattr(main, "AZURE_SPEECH_KEY", "")
 
 
 def _configurar(monkeypatch, mock_requests, respuesta=None):

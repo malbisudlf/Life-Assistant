@@ -17,6 +17,7 @@ import {
 } from "../lib/helpers";
 import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, aperturaDeLlamada } from "../lib/voz";
 import { abrirVozEleven } from "../lib/vozEleven";
+import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
@@ -2380,6 +2381,24 @@ export default function Dashboard() {
     finally { vozPidiendoRef.current = false; }
   }
 
+  /** El audio de una frase, para la voz de Azure. Se le pasa a `abrirVozAzure`, que no
+   *  sabe de red ni de sesión: solo llama a esto y reproduce lo que le devuelva.
+   *
+   *  La `señal` llega desde el barge-in — al cortar a Jarvis se aborta lo que hubiera
+   *  pedido y no se espera un audio que ya no viene a cuento. */
+  async function pedirAudioVoz(texto, señal) {
+    const r = await apiFetch(`${API}/voz/decir`, {
+      method:  "POST",
+      headers: jsonHeaders(),
+      body:    JSON.stringify({ texto }),
+      signal:  señal,
+    });
+    // Un 503 aquí es "esta voz no está puesta" y un 502 es "Azure no ha contestado"; los
+    // dos acaban igual, en la voz del navegador, así que no hace falta distinguirlos.
+    if (!r.ok) throw new Error(`voz/decir devolvió ${r.status}`);
+    return await r.arrayBuffer();
+  }
+
   // Con `token`, y no al montar a secas: este componente se monta TAMBIÉN en la
   // pantalla de login —devuelve <LoginScreen/> al final, pero los hooks corren igual—
   // y sin la guarda pedía el permiso sin sesión, con lo que cada carga dejaba un 401
@@ -2421,33 +2440,45 @@ export default function Dashboard() {
     // `invalid_token` y la llamada empezaría con un aviso rojo y la voz robótica. Se
     // tira y se pide otro para la siguiente; esta va con la del navegador desde el
     // principio, sin dar el rodeo.
-    const fresco  = permiso && Date.now() - (permiso.pedidoEn || 0) < VOZ_TOKEN_VIDA_MS;
+    // El permiso de Azure no caduca porque no hay tal permiso: su audio lo sirve el
+    // backend con el JWT de siempre. Solo el de ElevenLabs tiene fecha.
+    const fresco  = permiso && (permiso.proveedor === "azure"
+      || Date.now() - (permiso.pedidoEn || 0) < VOZ_TOKEN_VIDA_MS);
     if (permiso && !fresco) { vozPermisoRef.current = null; pedirPermisoVoz(); }
-    if (fresco) {
+    // Cualquiera de las dos voces de pago puede quedarse muda a media llamada, y las dos
+    // se rinden igual: se renuncia a ella para el resto de la llamada y se dice con la
+    // del navegador todo lo que quedó sin decir. Una voz robótica es mucho mejor que el
+    // silencio, y el silencio es el fallo que no se ve.
+    const caerAlNavegador = (quien) => (sinDecir) => {
+      const primera = vozDePago !== null;
+      vozDePago = null;
+      if (primera) {
+        setJarvisMensajes(prev => [...prev, {
+          rol: "aviso", texto: `La voz de ${quien} no ha sonado; sigo con la del navegador.`,
+        }]);
+      }
+      // En orden y encolando: son frases seguidas de la misma respuesta, y si cada una
+      // cortara a la anterior solo se oiría la última.
+      sinDecir.forEach(([texto, alTerminar], i) => {
+        hablarJarvis(texto, alTerminar, { encolar: i > 0 });
+      });
+    };
+    if (fresco && permiso.proveedor === "azure") {
+      // Sin token que gastar ni que renovar: por eso aquí no se vuelve a pedir permiso,
+      // al revés que en la rama de ElevenLabs.
+      vozDePago = abrirVozAzure({
+        pedirAudio: pedirAudioVoz,
+        alFallar:   caerAlNavegador("Azure"),
+      });
+    } else if (fresco) {
       vozDePago = abrirVozEleven({
         token:   permiso.token,
         voiceId: permiso.voice_id,
         modelId: permiso.model_id,
         formato: permiso.formato,
-        // La voz de pago puede fallar de tres maneras: terminar un turno sin mandar
-        // audio y sin error (una voz de la biblioteca en plan gratuito lo hace), caerse
-        // el socket a media llamada, o rechazar el token por caducado. Se renuncia a
-        // ella para el resto de la llamada y se dice con la del navegador todo lo que
-        // quedó sin decir: una voz robótica es mucho mejor que el silencio.
-        alFallar: (sinDecir) => {
-          const primera = vozDePago !== null;
-          vozDePago = null;
-          if (primera) {
-            setJarvisMensajes(prev => [...prev, {
-              rol: "aviso", texto: "La voz de ElevenLabs no ha sonado; sigo con la del navegador.",
-            }]);
-          }
-          // En orden y encolando: son frases seguidas de la misma respuesta, y si cada
-          // una cortara a la anterior solo se oiría la última.
-          sinDecir.forEach(([texto, alTerminar], i) => {
-            hablarJarvis(texto, alTerminar, { encolar: i > 0 });
-          });
-        },
+        // Aquí el mudo tiene además una causa propia: ElevenLabs termina el turno sin
+        // mandar audio y sin error con una voz de la biblioteca en plan gratuito.
+        alFallar: caerAlNavegador("ElevenLabs"),
       });
       // El token se acaba de gastar: se pide el de la siguiente llamada ya.
       vozPermisoRef.current = null;
