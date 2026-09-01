@@ -113,6 +113,20 @@ class TestPuertaDeEntrada:
         r = client.post("/telefono/voz?ctx=loquesea", data={"CallSid": "CA1"})
         assert r.status_code == 403
 
+    def test_cuerpo_grande_da_413_antes_de_comprobar_la_firma(self, client, monkeypatch):
+        """Invariante 8 de CLAUDE.md: el endpoint es público (lo llama Twilio sin
+        cabeceras nuestras), así que hasta que la firma no se comprueba el cuerpo puede
+        venir de cualquiera. El tamaño se corta antes de mirar la firma, no después."""
+        monkeypatch.setattr(main, "MAX_TELEFONO_BYTES", 100)
+        r = client.post("/telefono/voz?ctx=loquesea", content=b"CallSid=" + b"x" * 500,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 413
+
+    def test_cuerpo_dentro_del_limite_sigue_pasando_por_la_firma(self, client, monkeypatch):
+        monkeypatch.setattr(main, "MAX_TELEFONO_BYTES", 100)
+        r = client.post("/telefono/voz?ctx=loquesea", data={"CallSid": "CA1"})
+        assert r.status_code == 403
+
 
 class TestSiONo:
     """Lo que se entiende por un permiso para desplegar.

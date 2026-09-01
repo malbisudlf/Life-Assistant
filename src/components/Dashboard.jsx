@@ -2062,6 +2062,12 @@ export default function Dashboard() {
         interrumpirAJarvis();
       },
     }).then((vigilante) => {
+      // Colgar y volver a llamar en la ventana en la que esto sigue en vuelo deja a
+      // `bargeRef.current` en "pidiendo" otra vez, pero de OTRA llamada: ese valor no
+      // distingue a quién pertenece la petición, el número de turno sí (como en
+      // `alHablar`). Sin este chequeo, el micro de la llamada vieja podía acabar activo
+      // en vez del de la nueva.
+      if (vozTurnoRef.current !== miTurno) { vigilante?.parar(); return; }
       // Llegó tarde: o se dejó de hablar, o la llamada se colgó mientras se abría.
       if (bargeRef.current !== "pidiendo" || !hablandoRef.current || !llamadaRef.current) {
         vigilante?.parar();
@@ -2074,6 +2080,7 @@ export default function Dashboard() {
     }).catch(() => {
       // Sin barge-in y sin ruido: la llamada sigue por turnos, que es como funcionaba
       // antes de todo esto.
+      if (vozTurnoRef.current !== miTurno) return;
       if (bargeRef.current === "pidiendo") bargeRef.current = null;
     });
   }

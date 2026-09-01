@@ -77,15 +77,17 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
     if (!dato) return;
     // Audio de un contexto que ya se canceló: llegó tarde, se tira. Sin esto, cortar a
     // Jarvis y volver a hablarle hacía que la frase interrumpida sonara encima de la
-    // nueva.
-    if (dato.contextId && contexto && dato.contextId !== contexto) return;
+    // nueva. Se compara SIEMPRE, no solo cuando `contexto` está a algo: `callar()` lo
+    // deja a null, y comparar solo si es verdadero dejaba pasar el resto de un turno
+    // cortado durante esa ventana.
+    if (dato.contextId && dato.contextId !== contexto) return;
     // El servidor manda los fallos POR EL SOCKET y luego lo cierra. El más frecuente con
     // diferencia es `invalid_token` ("Token not found or has expired"): el token de
     // /voz/token dura 15 minutos, y en el móvil es normalísimo abrir el dashboard, dejar
     // el teléfono en el bolsillo y llamar media hora después. Sin mirar esto, el error se
     // ignoraba en silencio y Jarvis se quedaba mudo sin decir por qué.
     if (dato.error || dato.message) { rendirse(); return; }
-    if (dato.audio) reproducir(dato.audio);
+    if (dato.audio) reproducir(dato.audio, contexto);
     if (dato.isFinal) { finRecibido = true; quizasTerminar(); }
   };
 
@@ -96,11 +98,15 @@ export function abrirVozEleven({ token, voiceId, modelId, formato = "mp3_44100_1
   ws.onerror = () => { if (!cerradoAqui) rendirse(); };
   ws.onclose = () => { if (!cerradoAqui) rendirse(); };
 
-  function reproducir(base64) {
+  function reproducir(base64, contextoDeEstaFrase) {
     pendientes++;
     cola = cola.then(() => decodificar(base64)).then((buffer) => {
       pendientes--;
-      if (!buffer || !contexto) { quizasTerminar(); return; }
+      // La decodificación es asíncrona: si para cuando termina ya se ha cortado el
+      // turno (`callar()`) y arrancado el siguiente, `contexto` vuelve a ser verdadero
+      // pero de OTRO turno. Comparar con el que tenía este trozo al llegar —no solo
+      // mirar si hay alguno— es lo que evita que suene mezclado con la respuesta nueva.
+      if (!buffer || contexto !== contextoDeEstaFrase) { quizasTerminar(); return; }
       const fuente = ctx.createBufferSource();
       fuente.buffer = buffer;
       fuente.connect(salida);
