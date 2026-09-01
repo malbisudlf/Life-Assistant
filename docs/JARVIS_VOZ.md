@@ -5,10 +5,12 @@ por qué. El diseño conceptual (agnóstico del proyecto) está en
 `docs/JARVIS_real_time_voice_stack.md`; aquí se aterriza sobre `backend/main.py`,
 `src/components/Dashboard.jsx` y `src/lib/`.
 
-**Estado: hechas las fases 1 a 4.** Jarvis ya habla con la voz de ElevenLabs, avisa en
-voz alta antes de usar cada herramienta y **empieza a hablar mientras escribe la
-respuesta**, no cuando termina. Interrumpirle todavía no se puede: el micrófono sigue
-cerrándose mientras habla, y eso es lo que queda (fases 5 a 7).
+**Estado: hechas las fases 1 a 7, y la voz ya no es la de ElevenLabs.** Jarvis habla,
+avisa en voz alta antes de usar cada herramienta, **empieza a hablar mientras escribe la
+respuesta** y **se le puede cortar a media frase**. Desde septiembre de 2026 la voz por
+defecto es **Azure Speech**, con una voz nativa de España; ElevenLabs sigue en el código
+como alternativa y como el único que sabe transcribir en directo. Ver «La voz se mudó a
+Azure» más abajo.
 
 ## Dónde retomar
 
@@ -16,7 +18,9 @@ Lo que está hecho y funcionando, con el sitio exacto:
 
 | Pieza | Dónde | Qué hace |
 |---|---|---|
-| `POST /voz/token` | `backend/main.py`, sección `# ── Jarvis: voz en tiempo real` | Emite el token de un solo uso de ElevenLabs. 503 si la voz no está configurada |
+| `POST /voz/token` | `backend/main.py`, sección `# ── Jarvis: voz en tiempo real` | Dice con qué voz se habla (`proveedor`) y emite el token de ElevenLabs si toca. Azure va primero. 503 si no hay ninguna |
+| `POST /voz/decir` | `backend/main.py`, sección `# ── Azure Speech` | Sintetiza una frase con Azure y la devuelve como MP3. El texto va **escapado** a SSML |
+| `src/lib/vozAzure.js` | — | El reproductor de Azure. Misma interfaz que `vozEleven.js` (`decir`/`callar`/`cerrar`) para que el modo llamada no sepa cuál tiene delante. No sabe de red: recibe `pedirAudio` y lo llama |
 | `POST /jarvis/voz` | misma sección | El turno de `/jarvis` retransmitido por SSE |
 | `_jarvis_turno()` | `backend/main.py`, antes de `/jarvis` | El bucle de siempre, ahora como generador de eventos. **`/jarvis` y `/jarvis/voz` lo comparten**; un test comprueba que dan lo mismo |
 | `_JARVIS_RELLENOS` | misma sección de voz | Las frases fijas que se dicen mientras trabaja una herramienta |
@@ -56,7 +60,60 @@ a media frase y pasa a escucharte. Lo que hace el corte, además de callar:
   sitio: escucha con la Web Speech API del navegador, que es gratis. Ojo: **Scribe
   Realtime puede estar restringido en plan gratuito**; si sale un 401 de permisos, es eso
   y no un fallo del código.
-- **La fase 8, medir la latencia otra vez**, sigue pendiente.
+- **La fase 8 ya se midió** (septiembre de 2026), y el resultado está abajo.
+
+## La voz se mudó a Azure (septiembre de 2026)
+
+**El problema no era el modelo, era el idioma.** En plan gratuito las voces españolas de
+ElevenLabs están en la Voice Library, que está cerrada, así que lo que se oía era George
+—una voz **británica**— leyendo español con `eleven_flash_v2_5`, que además es el modelo
+optimizado para latencia y el peor de los tres en calidad. Ningún ajuste dentro de
+ElevenLabs arreglaba eso sin pagar.
+
+Azure da voces nativas de España (`es-ES-SaulNeural` es la puesta) y **500.000 caracteres
+al mes gratis para siempre** en el nivel F0. Una llamada corta al día no llega a unos
+pocos miles: es gratis de verdad, no gratis hasta que lo uses.
+
+**Y aquí el audio SÍ pasa por el backend**, al revés que con ElevenLabs. Es una revisión
+deliberada de la decisión de la fase 2, no un descuido:
+
+- El argumento en contra era el **arranque en frío**: 10–15 s de Fly cayendo justo en la
+  primera palabra. Pero no aplica al camino real — para cuando hay algo que sintetizar,
+  el backend acaba de escribir ese texto él mismo en `/jarvis/voz`. Lleva despierto todo
+  el turno. El frío se paga al descolgar, una vez, y se pagaba igual antes.
+- El otro era **el salto a París**. Fly está en `cdg` y el recurso de Azure en
+  `francecentral`: la misma ciudad. Medido desde dentro de la máquina, **0,7 s** por
+  frase entera.
+- A cambio desaparecen un WebSocket propietario, un SDK de un mega en el bundle (la norma
+  del proyecto es no añadir dependencias) y hasta la necesidad de un token. Menos sitios
+  donde volver a tener un **fallo mudo**, que es el que ha costado dos tardes.
+
+Lo que se conserva de `vozEleven.js` es el diseño, no el código: cola de frases en orden,
+`alFallar` que devuelve **todo lo que quedó sin decir con su `alFinal`**, y el corte que
+no rescata nada (si le has hablado encima, lo que tenía preparado ya no viene a cuento).
+`vozAzure.js` añade una cosa que el otro no necesitaba: **va pidiendo la frase siguiente
+mientras suena la actual**, que es lo que quita la costura entre frases cuando cada una
+es una petición aparte.
+
+### La latencia, medida (fase 8)
+
+Desde dentro de la máquina de Fly, o sea **sin la red del móvil y sin la síntesis**:
+
+| Turno | Primer byte | Completo |
+|---|---|---|
+| «Hola» (sin herramientas) | 1,63 s | 1,72 s |
+| «¿Qué hay pendiente de desplegar?» (con herramientas) | 2,67 s | 9,69 s |
+
+Los ocho segundos de diferencia **no son el modelo pensando**: `reasoning_effort` ya está
+en `minimal`. Son el bucle — pedir la herramienta es una llamada entera, ejecutarla es un
+viaje a Supabase, y redactar la respuesta con el resultado es otra llamada entera. Subir
+de modelo no lo arregla; lo encarece.
+
+Lo que sí lo arregla es **no tener que ir a buscar el dato**. Cuando Jarvis llama por un
+despliegue, el backend ya sabe cuál es, así que `_jarvis_sistema(voz=True)` se lo mete en
+el contexto ya mirado, con la orden de no llamar a ninguna herramienta para eso. La
+pregunta más probable de esa llamada pasa de 9,7 s a 1,7 s. Por escrito no se hace: ahí
+los segundos no se notan y solo se pagaría la consulta.
 
 Y la regla vieja **sigue en pie**: el reconocimiento se cierra mientras Jarvis habla. Lo
 que se abre en su lugar no transcribe, así que no puede oírle a él y contestarse solo. Y

@@ -85,7 +85,8 @@
 | `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |
 | `POST /jarvis/voz` | JWT | El mismo turno que `/jarvis`, retransmitido por SSE: un evento `herramienta` (con la frase que decir en voz alta) antes de usar cada una, eventos `texto` con la respuesta según se escribe, y un `fin` con el resultado más `por_decir` (lo que aún no ha salido por el altavoz). Se consume con `fetch`+reader, no con `EventSource` |
 | `POST /jarvis/ejecutar` | JWT | Ejecuta una acción que Jarvis dejó propuesta. Solo admite las marcadas `confirmar` |
-| `POST /voz/token` | JWT | Emite un token de un solo uso de ElevenLabs (15 min) para que el navegador abra el WebSocket de voz. 503 si la voz de pago no está configurada. Rate limit por IP. Ver `docs/JARVIS_VOZ.md` |
+| `POST /voz/token` | JWT | Dice con qué voz se habla y emite el permiso si hace falta. Devuelve `proveedor`: `azure` (sin token — su audio va por `/voz/decir`) o `elevenlabs` (token de un solo uso, 15 min, para el WebSocket). Azure va primero cuando está configurado. 503 si no hay ninguna. Rate limit por IP. Ver `docs/JARVIS_VOZ.md` |
+| `POST /voz/decir` | JWT | Sintetiza UNA frase con Azure Speech y la devuelve como `audio/mpeg`. El texto va escapado a SSML: lo escribe el modelo a partir de lo que oye, así que entra como dato y nunca como marcado. 503 si Azure no está configurado, 502 si no contesta o devuelve un 200 vacío. Rate limit por IP |
 
 **CORS**: los orígenes permitidos salen de `CORS_ORIGINS` (por defecto
 `http://localhost:5173` y el dominio de Vercel). Si añades otro origen de producción,
