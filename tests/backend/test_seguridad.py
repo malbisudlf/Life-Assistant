@@ -120,6 +120,26 @@ class TestAludUrlEnAltaDeJob:
         })
         assert r.status_code == 200
 
+    def test_entrega_sin_alud_url_da_400(self, client, auth_headers, mock_requests):
+        """Sin URL el agente no tiene qué abrir: fallaba en el PC con 'acción
+        desconocida: None' minutos después. Se corta aquí, con el usuario delante."""
+        r = client.post("/jobs", headers=auth_headers, json={
+            "dedupe_key": "entrega-x",
+            "payload": {"accion": "resolver_alud", "titulo": "Práctica 3"},
+        })
+        assert r.status_code == 400
+        assert "alud_url" in r.json()["detail"]
+        assert not mock_requests.called("POST", "/rest/v1/jobs"), "no debe llegar a guardarse"
+
+    def test_entrega_antigua_sin_accion_ni_url_da_400(self, client, auth_headers, mock_requests):
+        """El payload que mandaba el dashboard antes: solo titulo y una alud_url nula."""
+        r = client.post("/jobs", headers=auth_headers, json={
+            "dedupe_key": "entrega-y",
+            "payload": {"titulo": "Práctica 3", "alud_url": None},
+        })
+        assert r.status_code == 400
+        assert not mock_requests.called("POST", "/rest/v1/jobs")
+
 
 class TestIdsDeGraphEscapados:
     def test_event_id_con_caracteres_de_ruta(self, client, auth_headers, graph_token, mock_requests):

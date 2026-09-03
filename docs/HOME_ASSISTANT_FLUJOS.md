@@ -26,6 +26,44 @@ memoria → HA sondea `GET /ha/wol-pending` cada 30s vía
 `sensor.life_assistant_wol_pending` → la automatización `la_wol_poll` detecta el cambio a
 `true` → pulsa `button.pc_mikel`.
 
+**Flujo del relanzado del agente**: el agente es efímero y al PC lo despierta el WOL,
+pero con el PC ya encendido no arranca nadie. Para eso está `POST /relaunch-agent` →
+flag `_agent_relaunch_pending` → `GET /ha/agent-relaunch-pending`, que el dashboard llama
+al abrir el streaming y (desde 2026-09-03) también al encolar una entrega.
+
+**La mitad de HA vive en `/config/packages/life_assistant_pc.yaml`**, no en
+`configuration.yaml` — por eso no aparece buscando en los sitios de siempre y es fácil
+darla por inexistente. Ese package define:
+
+- `shell_command.la_relanzar_agente`, `la_apagar_pc` y `la_suspender_pc`: SSH con
+  `/config/.ssh/id_pc` a `malbi@mikel.local`, y el relanzado dispara
+  `schtasks /run /tn LifeAssistantAgent` (la misma tarea del Programador que arranca el
+  agente al encender el PC).
+- Los sensores REST `Life Assistant Agent Relaunch Pending` y
+  `Life Assistant PC Power Action`, ambos con `scan_interval: 30`.
+
+La automatización que los une es `la_agent_relaunch`, en `automations.yaml`.
+
+**Se usa el hostname `mikel.local`, no la IP, y con motivo**: la IP del PC cambió por
+DHCP (a 2026-09-03, `mikel.local` resuelve a una IP distinta de la que había cableada
+antes, y en la vieja ya responde otra máquina). Si el relanzado deja de funcionar, mira
+primero a dónde resuelve el nombre; el PC no contesta a ping (firewall de Windows), así
+que la prueba buena es abrir SSH contra él, no hacerle ping.
+
+**`last_reported` de un sensor NO dice cuándo se sondeó por última vez.** En HA 2026.7
+solo avanza cuando el valor **cambia**, así que un sensor sano que lleva días valiendo
+`false` muestra una fecha antigua y parece muerto. Se cayó en esa trampa el 2026-09-03:
+`agent_relaunch_pending` marcaba 22 h y `pc_power_action` dos días, y se dieron por
+congelados; tras reiniciar el core, los tres reportaron a la vez y volvieron a quedarse
+quietos un minuto y medio después — que es exactamente lo que hacen cuando funcionan.
+**Para saber si la cadena va, la prueba es de extremo a extremo**: pulsar el botón del
+dashboard y mirar si avanza el `last_triggered` de la automatización `la_agent_relaunch`.
+
+Y tras editar un fichero de `packages/` hay que recargar la config (`ha core check` y
+luego reiniciar): editarlo a mano no basta para que el cambio entre. Es lo único que
+hacía falta de verdad ese día — el `shell_command` había pasado de la IP al hostname
+esa misma mañana y podía seguir cargado el valor viejo.
+
 Problemas ya resueltos por el camino (no los reintroduzcas):
 
 - *Mixed content* (HTTPS→HTTP): el navegador no puede llamar a HA directamente → por eso
