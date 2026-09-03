@@ -32,6 +32,11 @@ import_training.py
 supabase_training_schema.sql
 supabase_health_schema.sql
 
+# Copias de seguridad de Supabase (scripts/copia_supabase.py). Van cifradas, pero un
+# .gpg de datos de salud no pinta nada en un repositorio público ni por accidente.
+copias/
+*.json.gpg
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -70,3 +75,7 @@ skills-lock.json
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Evals de Jarvis: la salida de cada tirada (evals/correr.py). Es un resultado, no
+# código, y cambia en cada ejecución; el histórico vive en los artefactos del workflow.
+evals/resultados.json

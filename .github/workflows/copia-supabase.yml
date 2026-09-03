@@ -1,0 +1,115 @@
+name: Copia de seguridad de Supabase
+
+# Vuelca a un JSON cifrado las tablas de Supabase que no se pueden regenerar
+# (`health_metrics` sobre todo) y lo guarda como artefacto de la ejecución.
+#
+# ESTE REPOSITORIO ES PÚBLICO, y los artefactos de Actions de un repositorio público
+# los puede descargar cualquiera que pase por la pestaña Actions. Por eso el fichero
+# sale ya cifrado del propio script (`gpg --symmetric`, AES256, la frase en
+# COPIA_PASSPHRASE) y nunca existe en claro en el disco del runner: el JSON va de
+# memoria a la entrada estándar de gpg. Lo que se sube es el `.gpg`.
+#
+# Nada de lo que se imprime aquí puede llevar datos ni secretos: el log también es
+# público. El script solo escribe nombres de tabla y recuentos, y los secretos van por
+# `env`, nunca interpolados en la línea de órdenes (`${{ secrets.X }}` dentro de un
+# `run` acaba escrito en el shell y basta un `set -x` para que salga).
+#
+# Documentación completa, y sobre todo CÓMO SE RESTAURA: `docs/COPIA_SEGURIDAD.md`.
+
+on:
+  schedule:
+    # Lunes a las 04:17 UTC. El minuto raro es a propósito: en punto es cuando GitHub
+    # tiene la cola llena y los crons se retrasan. Aquí llegar tarde da igual, pero no
+    # ejecutarse, no.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:        # también a mano, antes de tocar algo que escriba en la BD
+
+# Que dos ejecuciones no se pisen escribiendo el mismo fichero del día.
+concurrency:
+  group: copia-supabase
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  copiar:
+    name: Volcar y cifrar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install --quiet requests
+
+      - name: Volcar Supabase a un fichero cifrado
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          COPIA_PASSPHRASE: ${{ secrets.COPIA_PASSPHRASE }}
+        # El script falla con código 1 si falta una variable, si Supabase responde mal,
+        # si una tabla obligatoria viene vacía o si el fichero cifrado no se puede
+        # volver a abrir. Cualquiera de esas cosas tiene que tumbar el workflow: una
+        # copia que falla en silencio es peor que no tener copia.
+        run: python scripts/copia_supabase.py --salida copias
+
+      - name: Comprobar que la copia se abre
+        env:
+          COPIA_PASSPHRASE: ${{ secrets.COPIA_PASSPHRASE }}
+        # Redundante con la comprobación que ya hace el script, y a propósito: esta
+        # abre el fichero tal y como está en disco, que es exactamente lo que se sube.
+        run: |
+          fichero=$(ls copias/*.json.gpg | head -1)
+          python scripts/copia_supabase.py --verificar "$fichero"
+
+      - name: Subir la copia cifrada como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: copia-supabase
+          path: copias/*.json.gpg
+          # 90 días es el máximo de un plan gratuito. La copia semanal deja unas doce
+          # generaciones vivas, suficiente para volver atrás de un fallo que tarde
+          # semanas en notarse (que es justo el que preocupa: la ingesta pisando filas).
+          retention-days: 90
+          if-no-files-found: error
+
+      # ── Segundo destino, opcional ────────────────────────────────────────────
+      # Los artefactos caducan. Si hay configurados un repositorio PRIVADO
+      # (variable BACKUP_REPO, formato "usuario/repo") y un token con permiso de
+      # escritura sobre él (secret BACKUP_REPO_TOKEN), la copia cifrada se empuja
+      # también ahí y deja de tener fecha de caducidad. Sin esas dos cosas, este paso
+      # se salta sin ruido.
+      - name: Empujar la copia al repositorio privado
+        if: ${{ vars.BACKUP_REPO != '' && vars.BACKUP_REPO != null }}
+        env:
+          BACKUP_REPO: ${{ vars.BACKUP_REPO }}
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+        run: |
+          if [ -z "$BACKUP_REPO_TOKEN" ]; then
+            echo "BACKUP_REPO está configurado pero falta el secret BACKUP_REPO_TOKEN." >&2
+            exit 1
+          fi
+          # El token va en la URL del remoto y no en ningún `echo`: el runner es
+          # efímero y ese .git se destruye con él. `--quiet` para que git no imprima
+          # la URL al clonar.
+          git clone --quiet --depth 1 \
+            "https://x-access-token:${BACKUP_REPO_TOKEN}@github.com/${BACKUP_REPO}.git" \
+            destino
+          mkdir -p destino/supabase
+          cp copias/*.json.gpg destino/supabase/
+          cd destino
+          git config user.name  "copia-supabase[bot]"
+          git config user.email "copia-supabase@users.noreply.github.com"
+          git add supabase
+          # Sin cambios (una segunda ejecución el mismo día con los mismos datos) no es
+          # un error: la copia ya está donde tiene que estar.
+          if git diff --cached --quiet; then
+            echo "Sin cambios que empujar."
+            exit 0
+          fi
+          git commit --quiet -m "copia: volcado cifrado de Supabase"
+          git push --quiet origin HEAD
