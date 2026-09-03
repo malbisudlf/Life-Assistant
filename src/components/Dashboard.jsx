@@ -15,6 +15,11 @@ import {
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
 } from "../lib/helpers";
+import {
+  construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
+  posicionAhora,
+  FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_AUSENTE, FUENTE_PARCIAL,
+} from "../lib/lineaTiempo";
 import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, aperturaDeLlamada } from "../lib/voz";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
@@ -655,6 +660,282 @@ function JarvisChat({
   );
 }
 
+// ── EL DÍA EN UNA LÍNEA DE TIEMPO ────────────────────────────────
+// Eventos, sueño, entrenos, presencia, avisos y casa sobre un MISMO eje de 24 h, un
+// carril por familia, con navegación a días anteriores. La razón de existir del
+// widget es que se vean las COINCIDENCIAS —dormir mal la noche de una cita tarde—
+// que hoy hay que cruzar a ojo entre seis widgets distintos.
+//
+// Toda la lógica (normalizar cada fuente, recortar lo que cruza la medianoche,
+// resolver solapes y pasar a porcentajes) vive en src/lib/lineaTiempo.js; aquí solo
+// se pinta. El componente está a nivel de módulo, no dentro de `Dashboard`, por la
+// misma razón que el resto: uno definido en el cuerpo se recrearía como TIPO nuevo en
+// cada tic del reloj y React remontaría su subárbol entero dos veces por minuto.
+//
+// Un carril del que no se sabe nada NO se pinta vacío: sale con el borde discontinuo
+// y dice por qué no lo sabe. "No hay dato" y "no pasó nada" son cosas distintas y esa
+// diferencia es el hilo conductor de todo el proyecto.
+const LINEA_DIAS_ATRAS = 29;   // lo que cubre /health/metrics?days=30
+const LINEA_ALTO_FILA  = 20;
+const LINEA_ANCHO_MIN  = 640;  // en móvil el eje se desplaza en horizontal, no se aplasta
+
+// Los avisos que salieron hoy, y con qué números se dispararon.
+//
+// La señal de utilidad (el botón «me sirvió / no me sirvió») dice QUÉ reglas se ignoran;
+// esto dice POR QUÉ fallan, que es lo único que permite arreglarlas en vez de
+// silenciarlas. Los números se piden solo al abrir uno: son una consulta más y casi
+// nunca se miran.
+function AvisosDeHoy({ avisos }) {
+  const [abierto, setAbierto] = useState("");
+  const [porque, setPorque]   = useState({});   // id → { cargando } | { motivo } | { error }
+
+  async function verPorque(id) {
+    if (abierto === id) { setAbierto(""); return; }
+    setAbierto(id);
+    if (porque[id]) return;                      // ya pedido: no se vuelve a pagar el viaje
+    setPorque(p => ({ ...p, [id]: { cargando: true } }));
+    try {
+      const r = await apiFetch(`${API}/avisos/${id}/porque`, { headers: authHeaders() });
+      if (!r.ok) throw new Error("no");
+      const d = await r.json();
+      setPorque(p => ({ ...p, [id]: { motivo: d.motivo?.datos || null } }));
+    } catch {
+      // "No se pudo preguntar" no es "no hay motivo": son cosas distintas y se dicen
+      // distinto, que es la regla de todo el proyecto.
+      setPorque(p => ({ ...p, [id]: { error: true } }));
+    }
+  }
+
+  if (!avisos.length) return null;
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ fontSize: 11, color: "var(--muted2)", marginBottom: 4 }}>
+        {avisos.length} {avisos.length === 1 ? "aviso hoy" : "avisos hoy"}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {avisos.map(a => {
+          const estado = porque[a.id];
+          return (
+            <div key={a.id} style={{ borderLeft: "2px solid var(--border2)", paddingLeft: 8 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)" }}>
+                {formatLogTime(a.enviado_at)} · {a.regla || "tuyo"}
+                {a.util === true ? " · te sirvió" : a.util === false ? " · no te sirvió" : ""}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>{a.texto}</div>
+              <button onClick={() => verPorque(a.id)} style={{
+                background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                color: "var(--accent)", fontSize: 10, fontFamily: "'DM Sans', sans-serif",
+              }}>{abierto === a.id ? "Ocultar" : "¿Por qué?"}</button>
+              {abierto === a.id && (
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 2 }}>
+                  {estado?.cargando ? "…"
+                    : estado?.error ? "No se ha podido consultar"
+                    : estado?.motivo ? JSON.stringify(estado.motivo, null, 1)
+                    : "Este aviso no guardó con qué se disparó"}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// El gasto del modelo repartido por boca. El total ya sale en la fila de arriba; esto es
+// la pregunta que no se podía responder: por dónde se va el dinero. El modo llamada es
+// el candidato obvio — paga salida por token Y segundos de voz.
+function DesgloseGasto({ gasto }) {
+  const [abierto, setAbierto] = useState(false);
+  const bocas = Object.entries(gasto.por_boca || {})
+    .sort((a, b) => b[1].euros - a[1].euros);
+  return (
+    <div style={{ marginTop: 4 }}>
+      <button onClick={() => setAbierto(v => !v)} style={{
+        background: "transparent", border: "none", padding: 0, cursor: "pointer",
+        color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+      }}>{abierto ? "Ocultar coste" : "Ver coste por boca"}</button>
+      {abierto && (
+        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+          {bocas.map(([boca, d]) => (
+            <div key={boca} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "var(--text)", minWidth: 80 }}>{boca}</span>
+              <span style={{ fontSize: 10, color: "var(--muted2)", flex: 1, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>
+                {d.euros.toFixed(3)} €{d.euros_incompleto ? "+" : ""} · {d.llamadas} · {(d.entrada / 1000).toFixed(1)}k ent / {(d.salida / 1000).toFixed(1)}k sal
+                {d.segundos_audio ? ` · ${Math.round(d.segundos_audio)} s audio` : ""}
+              </span>
+            </div>
+          ))}
+          {!!gasto.sin_tarifa?.length && (
+            <div style={{ fontSize: 10, color: "var(--muted2)" }}>
+              Sin tarifa configurada: {gasto.sin_tarifa.join(", ")} — sus tokens cuentan,
+              sus euros no. Se pone en MODELO_TARIFAS.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LineaCarril({ carril, ahora }) {
+  const estado = textoEstadoCarril(carril);
+  const alto   = Math.max(carril.filas, 1) * LINEA_ALTO_FILA + 4;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {/* La etiqueta se queda pegada a la izquierda al desplazar el eje: sin esto, en
+          móvil se pierde de vista justo cuando hace falta saber de qué carril es la
+          barra que se está mirando. */}
+      <div style={{
+        position: "sticky", left: 0, width: "max-content", zIndex: 2,
+        display: "flex", alignItems: "center", gap: 6, marginBottom: 3,
+        background: "var(--surface)", paddingRight: 10,
+      }}>
+        <span style={{ fontSize: 12 }} aria-hidden="true">{carril.icono}</span>
+        <span style={{
+          fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+          color: "var(--muted2)",
+        }}>{carril.etiqueta}</span>
+        {estado && (
+          <span style={{
+            fontSize: 10, fontStyle: "italic",
+            color: carril.conocido ? "var(--muted2)" : "var(--accent2)",
+          }}>· {estado}</span>
+        )}
+        {carril.nota && (
+          <span style={{ fontSize: 10, color: "var(--muted2)" }}>({carril.nota})</span>
+        )}
+      </div>
+      <div
+        role="group"
+        aria-label={`${carril.etiqueta}: ${estado || `${carril.items.length + carril.sinHora.length} elementos`}`}
+        style={{
+          position: "relative", height: alto, borderRadius: 6,
+          background: carril.conocido ? "var(--surface2)" : "transparent",
+          border: carril.conocido ? "0.5px solid var(--border)" : "1px dashed var(--border2)",
+        }}
+      >
+        {/* Rejilla cada 3 h: es lo que permite comparar de un vistazo dos carriles
+            distintos sin seguir la barra hasta el eje de arriba. */}
+        {[3, 6, 9, 12, 15, 18, 21].map(h => (
+          <div key={h} style={{
+            position: "absolute", left: `${(h / 24) * 100}%`, top: 0, bottom: 0,
+            width: 1, background: "var(--border)",
+          }} />
+        ))}
+        {ahora && (
+          <div title="Ahora" style={{
+            position: "absolute", left: `${ahora.izquierdaPct}%`, top: 0, bottom: 0,
+            width: 1, background: "var(--accent)", opacity: 0.7,
+          }} />
+        )}
+        {carril.items.map(it => (
+          <div
+            key={it.id}
+            title={`${it.etiqueta} · ${it.horaTexto}${it.detalle ? ` · ${it.detalle}` : ""}`}
+            aria-label={`${it.etiqueta}, ${it.horaTexto}${it.detalle ? `, ${it.detalle}` : ""}`}
+            style={{
+              position: "absolute",
+              left: `${it.izquierdaPct}%`, width: `${it.anchoPct}%`,
+              top: it.fila * LINEA_ALTO_FILA + 2, height: LINEA_ALTO_FILA - 4,
+              background: it.tono === "atenuado" ? "transparent" : carril.color,
+              border: `1px solid ${carril.color}`,
+              opacity: it.tono === "atenuado" ? 0.55 : 0.9,
+              // Esquina recta del lado por el que el tramo se sale del día: es lo que
+              // hace visible que el sueño viene de ayer y no empezó a medianoche.
+              borderRadius: 4,
+              borderTopLeftRadius:     it.cortadoAntes   ? 0 : 4,
+              borderBottomLeftRadius:  it.cortadoAntes   ? 0 : 4,
+              borderTopRightRadius:    it.cortadoDespues ? 0 : 4,
+              borderBottomRightRadius: it.cortadoDespues ? 0 : 4,
+              overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis",
+              fontSize: 10, lineHeight: `${LINEA_ALTO_FILA - 6}px`,
+              color: it.tono === "atenuado" ? "var(--muted)" : "#14150f",
+              padding: "0 4px",
+            }}
+          >{it.etiqueta}</div>
+        ))}
+      </div>
+      {/* Lo que ocurrió pero no se sabe CUÁNDO. Va debajo del carril y no dentro: una
+          sesión de entrenamiento sin hora colocada en un punto del eje sería una hora
+          inventada, que es justo lo que este widget existe para no hacer. */}
+      {carril.sinHora.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+          {carril.sinHora.map(it => (
+            <span key={it.id} title={it.detalle || it.etiqueta} style={{
+              fontSize: 10, padding: "1px 6px", borderRadius: 10,
+              border: `1px dashed ${carril.color}`, color: "var(--muted)",
+            }}>{it.etiqueta}{it.detalle ? ` · ${it.detalle}` : ""} · sin hora</span>
+          ))}
+        </div>
+      )}
+      {carril.resumen && (
+        <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>
+          {carril.resumen.texto}
+          {carril.resumen.nota && (
+            <span style={{ color: "var(--muted2)", fontStyle: "italic" }}> — {carril.resumen.nota}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LineaDelDia({ dia, datos, onDia, cardStyle }) {
+  const puedeAtras  = dia > desplazarDia(datos.hoy, -LINEA_DIAS_ATRAS);
+  const puedeAlante = dia < datos.hoy;
+  const botonNav = habilitado => ({
+    background: "none", border: "0.5px solid var(--border)", borderRadius: 6,
+    color: habilitado ? "var(--muted)" : "var(--muted2)", cursor: habilitado ? "pointer" : "default",
+    fontSize: 13, padding: "2px 9px", opacity: habilitado ? 1 : 0.4,
+  });
+  return (
+    <div style={cardStyle} data-card="dia_linea" key="dia_linea">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={s.sectionLabel}>El día · {etiquetaDia(dia, datos.hoy)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 12 }}>
+          <button type="button" aria-label="Día anterior" disabled={!puedeAtras}
+                  onClick={() => onDia(desplazarDia(dia, -1))} style={botonNav(puedeAtras)}>‹</button>
+          <button type="button" disabled={datos.esHoy} onClick={() => onDia(datos.hoy)}
+                  style={{ ...botonNav(!datos.esHoy), fontSize: 11 }}>Hoy</button>
+          <button type="button" aria-label="Día siguiente" disabled={!puedeAlante}
+                  onClick={() => onDia(desplazarDia(dia, 1))} style={botonNav(puedeAlante)}>›</button>
+        </div>
+      </div>
+
+      {/* Cuántos carriles se pudieron mirar de verdad. Un día con dos de seis carriles
+          conocidos no es un día tranquilo: es un día sin datos, y hay que poder verlo
+          antes de sacar ninguna conclusión de las coincidencias. */}
+      <div style={{ fontSize: 11, color: "var(--muted2)", marginBottom: 8 }}>
+        {datos.conocidos} de {datos.total} carriles con datos disponibles
+      </div>
+
+      <div
+        role="region"
+        tabIndex={0}
+        aria-label={`Línea de tiempo de ${etiquetaDia(dia, datos.hoy)}`}
+        className="la-linea-scroll"
+        style={{ overflowX: "auto", overflowY: "hidden" }}
+      >
+        <div style={{ minWidth: LINEA_ANCHO_MIN, position: "relative" }}>
+          <div style={{ position: "relative", height: 14, marginBottom: 4 }}>
+            {datos.horas.map(h => (
+              <span key={h.hora} style={{
+                position: "absolute", left: `${h.izquierdaPct}%`,
+                transform: h.izquierdaPct === 0 ? "none" : "translateX(-50%)",
+                fontSize: 9, color: "var(--muted2)", fontFamily: "'DM Mono', monospace",
+              }}>{h.etiqueta}</span>
+            ))}
+          </div>
+          {datos.carriles.map(c => (
+            <LineaCarril key={c.id} carril={c} ahora={datos.ahora} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── ESTILOS GLOBALES ─────────────────────────────────────────────
 const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
@@ -705,6 +986,11 @@ const GLOBAL_CSS = `
   body.dragging-widget .drag-handle { opacity: 0 !important; }
   body.dragging-widget .resize-handle { opacity: 0 !important; }
   .snap-zone-bar { animation: fadeInOverlay 0.15s ease; }
+  /* El eje del widget «El día» se desplaza en horizontal dentro de su card: en móvil
+     un eje de 24 h no cabe, y aplastarlo haría ilegible justo lo que hay que ver.
+     El foco se marca porque la región es desplazable con el teclado. */
+  .la-linea-scroll { scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+  .la-linea-scroll:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
   @media (max-width: 640px) {
     .clock { font-size: 42px !important; letter-spacing: -1px !important; }
     .dashboard-root { padding: 12px !important; gap: 12px !important; }
@@ -727,6 +1013,7 @@ const COLUMN_LABELS   = { left: "izquierda", center: "centro", right: "derecha" 
 const DEFAULT_COLUMNS = {
   jarvis:            "left",
   timeline:          "left",
+  dia_linea:         "left",
   weather:           "left",
   upcoming:          "left",
   entregas:          "right",
@@ -747,6 +1034,7 @@ const DEFAULT_COLUMNS = {
 const ALL_DEFAULT_WIDGETS = [
   { id: "jarvis",            label: "Jarvis",            visible: true,  column: "left"  },
   { id: "timeline",          label: "Hoy",              visible: true,  column: "left"  },
+  { id: "dia_linea",         label: "El día",            visible: true,  column: "left"  },
   { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
@@ -1127,6 +1415,16 @@ export default function Dashboard() {
   const [departurePickingId, setDeparturePickingId] = useState(null);
   const [classEvents, setClassEvents] = useState([]);
   const [classesOpen, setClassesOpen] = useState(false);
+
+  // ── Widget «El día» ──
+  // Qué jornada se está mirando, en ISO local. Arranca en hoy y se puede retroceder
+  // hasta donde llegue /health/metrics (LINEA_DIAS_ATRAS).
+  const [lineaDia, setLineaDia] = useState(() => fechaLocalISO(new Date()));
+  // Estado de las fuentes que no carga nadie más. El `estado` importa tanto como el
+  // dato: sin él, un carril vacío por un fallo de red se pintaría igual que una
+  // jornada tranquila, que es justo la confusión que este widget no puede permitirse.
+  const [lineaAvisos, setLineaAvisos] = useState({ estado: FUENTE_CARGANDO, datos: null });
+  const [lineaPresenciaAhora, setLineaPresenciaAhora] = useState(null);
   const [showCreateEvent, setShowCreateEvent] = useState(false);
   const [calendarsList, setCalendarsList]     = useState([]);
   const [eventForm, setEventForm] = useState({ subject: "", date: "", startTime: "", endTime: "", location: "", calendarId: "", alud_url: "" });
@@ -1473,6 +1771,31 @@ export default function Dashboard() {
       .then(data => setHealthLargo(data.metrics || {}))
       .catch(() => setHealthLargoFallo(true));
   }, [token, healthModalOpen]);
+
+  // ¿Está puesto el widget «El día»? Sus dos llamadas propias solo se hacen si se va a
+  // pintar: son datos que ningún otro widget necesita y no tienen por qué pesar en la
+  // carga inicial de quien lo tenga oculto.
+  const lineaVisible = useMemo(
+    () => (simpleMode ? simpleWidgetConfig : widgetConfig)
+      .some(w => w.id === "dia_linea" && w.visible !== false),
+    [simpleMode, simpleWidgetConfig, widgetConfig],
+  );
+
+  useEffect(() => {
+    if (!token || !lineaVisible) return;
+    let vivo = true;
+    apiFetch(`${API}/avisos/estado`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(d => { if (vivo) setLineaAvisos({ estado: FUENTE_OK, datos: d }); })
+      .catch(() => { if (vivo) setLineaAvisos({ estado: FUENTE_ERROR, datos: null }); });
+    // La presencia de AHORA, solo como matiz del carril del día en curso: la serie
+    // diaria (time_at_home) ya viene dentro de /health/metrics.
+    apiFetch(`${API}/presencia`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (vivo) setLineaPresenciaAhora(d); })
+      .catch(() => { /* mejor esfuerzo: el carril se pinta igual, sin el matiz */ });
+    return () => { vivo = false; };
+  }, [token, lineaVisible]);
 
   // Cargar ideas
   useEffect(() => {
@@ -2731,13 +3054,17 @@ export default function Dashboard() {
     let registro = null;
     let presencia = null;
     let avisos = null;
+    let gasto = null;
+    let enviados = [];
     if (backend.ok) {
-      const [rAgente, rLogs, rPresencia, rBrief, rAvisos] = await Promise.all([
+      const [rAgente, rLogs, rPresencia, rBrief, rAvisos, rGasto, rEnviados] = await Promise.all([
         apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/brief/ajustes`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/avisos/estado`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/gasto?dias=30`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}/avisos/enviados`, { headers: authHeaders() }).catch(() => null),
       ]);
       try {
         if (rAgente?.ok) agente = await rAgente.json();
@@ -2754,9 +3081,16 @@ export default function Dashboard() {
       try {
         if (rAvisos?.ok) avisos = await rAvisos.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      try {
+        if (rGasto?.ok) gasto = await rGasto.json();
+      } catch { /* mejor esfuerzo: la fila del coste se muestra como desconocida */ }
+      try {
+        if (rEnviados?.ok) enviados = (await rEnviados.json()).avisos || [];
+      } catch { /* mejor esfuerzo: sin lista de avisos, el resto del panel sigue */ }
     }
 
-    setSysStatus({ backend, agente, registro, presencia, avisos, comprobado: Date.now() });
+    setSysStatus({ backend, agente, registro, presencia, avisos, gasto, enviados,
+                   comprobado: Date.now() });
     setSysLoading(false);
   }
 
@@ -3453,11 +3787,72 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [healthData, trainingDays, bodyGoals, diaActual]);
 
+  // ── Widget «El día»: todo lo del día sobre un mismo eje ──
+  // Cada fuente entra con su ESTADO, no solo con sus datos: es lo único que separa
+  // "no pasó nada" de "no lo sé", y sin esa distinción una coincidencia que no está
+  // se lee igual que una que nadie ha podido comprobar.
+  const hoyLinea = useMemo(() => fechaLocalISO(hoyConclusiones), [hoyConclusiones]);
+  const lineaDatos = useMemo(() => construirLineaTiempo({
+    dia: lineaDia,
+    hoy: hoyLinea,
+    fuentes: {
+      // /calendar/events y /calendar/classes se piden DESDE hoy (ver el backend), así
+      // que de un día pasado el calendario no sabe nada: decir "sin eventos" ahí sería
+      // afirmar algo que nadie ha comprobado.
+      eventos: authNeeded ? { estado: FUENTE_ERROR, nota: "Outlook sin conectar" }
+             : loading    ? { estado: FUENTE_CARGANDO }
+             : lineaDia < hoyLinea
+               ? { estado: FUENTE_PARCIAL, nota: "el calendario solo se consulta desde hoy" }
+               : { estado: FUENTE_OK, datos: [...allEvents, ...classEvents] },
+      sueno: healthLoading ? { estado: FUENTE_CARGANDO }
+           : !healthData   ? { estado: FUENTE_ERROR }
+           : { estado: FUENTE_OK, datos: findMetric(healthData, "sleep_analysis") },
+      entrenos: healthLoading ? { estado: FUENTE_CARGANDO }
+              : !healthData   ? { estado: FUENTE_ERROR }
+              : { estado: FUENTE_OK,
+                  datos: {
+                    workouts: findMetric(healthData, "workouts", "workout"),
+                    sesiones: training?.all_recent_sessions || [],
+                  },
+                  nota: training ? "sesiones: solo las 10 últimas"
+                                 : "sin las sesiones de entrenamiento personal" },
+      presencia: healthLoading ? { estado: FUENTE_CARGANDO }
+               : !healthData   ? { estado: FUENTE_ERROR }
+               : { estado: FUENTE_OK,
+                   datos: { filas: findMetric(healthData, "time_at_home") },
+                   nota: lineaDia === hoyLinea && lineaPresenciaAhora?.conocida
+                     ? `solo el total del día · ahora ${lineaPresenciaAhora.en_casa ? "en casa" : "fuera"}`
+                     : "solo el total del día, sin tramos" },
+      avisos: lineaAvisos,
+      // El catálogo que empuja Home Assistant (POST /ha/entidades) es una foto del
+      // AHORA, sin marcas de tiempo, así que no puede alimentar el eje de ningún día.
+      // Mientras no haya histórico de acciones, el carril dice que no lo sabe.
+      casa: { estado: FUENTE_AUSENTE, nota: "el backend no guarda cuándo actuó la casa" },
+    },
+  }), [lineaDia, hoyLinea, authNeeded, loading, allEvents, classEvents,
+       healthLoading, healthData, training, lineaAvisos, lineaPresenciaAhora]);
+
+  // La línea del "ahora" se recalcula con el tic del reloj, pero aparte: meterla en el
+  // memo de arriba rehaced todo el día dos veces por minuto para mover un píxel.
+  const lineaAhora = useMemo(
+    () => (lineaDatos.esHoy ? posicionAhora(lineaDatos.dia, now) : null),
+    [lineaDatos, now],
+  );
+
   function renderWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
     const cardStyle = { ...s.card, ...(fixedH ? { height: "100%", overflowY: "auto" } : {}) };
 
     switch (id) {
+      case "dia_linea": return (
+        <LineaDelDia
+          key="dia_linea"
+          dia={lineaDia}
+          onDia={setLineaDia}
+          datos={{ ...lineaDatos, ahora: lineaAhora }}
+          cardStyle={cardStyle}
+        />
+      );
       case "timeline": return (
         <div style={cardStyle} data-card={id} key="timeline">
           <div style={s.sectionLabel}>Hoy</div>
@@ -6497,6 +6892,22 @@ export default function Dashboard() {
                     : "sin incidencias en 7 días",
                 });
 
+                // Lo que cuesta hablar con Jarvis, medido y no estimado. La cifra de
+                // euros se marca como incompleta si algún modelo no tiene tarifa puesta:
+                // un total que no incluye todo el gasto y no lo dice engaña más que no
+                // darlo. Y el % cacheado va al lado porque es LA palanca de coste: si se
+                // hunde, algo que cambia a menudo se ha colado delante del prompt.
+                const gas = sysStatus?.gasto;
+                filas.push({
+                  nombre: "Coste del modelo",
+                  tono: !gas ? "muted" : gas.total.euros_incompleto ? "accent" : "green",
+                  detalle: !gas ? "sin comprobar"
+                    : gas.total.llamadas === 0 ? "sin gasto en 30 días"
+                    : `${gas.total.euros.toFixed(2)} € en 30 días · ${gas.total.llamadas} llamadas`
+                      + (gas.cacheado_pct != null ? ` · ${gas.cacheado_pct}% cacheado` : "")
+                      + (gas.total.euros_incompleto ? " · falta tarifa de algún modelo" : ""),
+                });
+
                 const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -6520,6 +6931,12 @@ export default function Dashboard() {
                         <span style={{ fontSize: 11, color: "var(--muted)" }}>{avisoPrueba}</span>
                       )}
                     </div>
+                    {/* Los avisos que SALIERON hoy, y por qué. Antes de esto un aviso
+                        enviado desaparecía: lo único que quedaba era la notificación del
+                        móvil, que se borra. Sin poder volver sobre uno, la señal de
+                        utilidad dice QUÉ reglas se ignoran pero nunca POR QUÉ fallan. */}
+                    <AvisosDeHoy avisos={sysStatus?.enviados || []} />
+                    {!!gas?.total?.llamadas && <DesgloseGasto gasto={gas} />}
                     {!!reg?.entradas.length && (
                       <div style={{ marginTop: 4 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
