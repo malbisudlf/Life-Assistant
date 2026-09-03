@@ -169,6 +169,8 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. El canal de la llamada, aparte, en `docs/LLAMADAS.md` |
 | `docs/LLAMADAS.md` | El teléfono: que Jarvis te llame y puedas contestarle hablando. Qué servicios se evaluaron (y por qué gratis no da bidireccional), el puente de audio con Twilio, su seguridad, su coste y lo que costó descubrir |
 | `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
+| `docs/REVISION_BACKEND.md` | Revisión antigua de `backend/main.py` fichero a fichero. Histórico: mira antes si el hallazgo sigue vivo |
+| `docs/REVISION_PROYECTO.md` | Lo mismo para el resto del repositorio (agente, tests, config). Histórico, igual que el anterior |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 | `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
 | `docs/EL_PROYECTO_EXPLICADO.md` | Explicación del proyecto entero para alguien de fuera: qué es, qué hace y por qué está construido así. No es guía de trabajo |
