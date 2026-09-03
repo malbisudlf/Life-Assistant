@@ -205,6 +205,12 @@ INDEXA_SERIE_DIAS = int(os.getenv("INDEXA_SERIE_DIAS", "365"))
 ENABLE_BANKING_API_URL         = os.getenv("ENABLE_BANKING_API_URL", "https://api.enablebanking.com").rstrip("/")
 ENABLE_BANKING_APPLICATION_ID  = os.getenv("ENABLE_BANKING_APPLICATION_ID", "")
 ENABLE_BANKING_PRIVATE_KEY_PATH = os.getenv("ENABLE_BANKING_PRIVATE_KEY_PATH", "")
+# La misma clave, pero por variable. Es la vía que sobrevive al despliegue y por eso gana
+# a la del fichero: el `.pem` está en `.gitignore` porque es un secreto, así que un
+# `fly deploy` lanzado desde el workflow —donde el repositorio no lo tiene— construye una
+# imagen SIN clave. Eso no se nota al desplegar, se nota días después en `/finanzas/
+# resumen`, y así estuvo (ver `_enable_banking_configurado`).
+ENABLE_BANKING_PRIVATE_KEY     = os.getenv("ENABLE_BANKING_PRIVATE_KEY", "")
 ENABLE_BANKING_ASPSP_NAME      = os.getenv("ENABLE_BANKING_ASPSP_NAME", "Revolut")
 ENABLE_BANKING_ASPSP_COUNTRY   = os.getenv("ENABLE_BANKING_ASPSP_COUNTRY", "ES")
 # Debe ser una de las "Redirect URLs" registradas para la app en el Control Panel de
@@ -2987,8 +2993,32 @@ _eb_jwt_cache = None   # (token, expira_epoch) — el JWT de aplicación dura 5 
 _eb_jwt_lock  = threading.Lock()
 
 
+def _enable_banking_clave() -> str:
+    """La clave privada RSA de la aplicación: de la variable, o del fichero. "" si no hay.
+
+    La variable gana al fichero por la razón de arriba. Se toleran los `\\n` escritos como
+    dos caracteres porque una clave PEM son varias líneas y casi todas las formas de meter
+    un secreto multilínea (consolas, CI) las escapan por el camino.
+    """
+    if ENABLE_BANKING_PRIVATE_KEY:
+        return ENABLE_BANKING_PRIVATE_KEY.replace("\\n", "\n")
+    if ENABLE_BANKING_PRIVATE_KEY_PATH and os.path.exists(ENABLE_BANKING_PRIVATE_KEY_PATH):
+        with open(ENABLE_BANKING_PRIVATE_KEY_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+
 def _enable_banking_configurado() -> bool:
-    return bool(ENABLE_BANKING_APPLICATION_ID and ENABLE_BANKING_PRIVATE_KEY_PATH)
+    """Configurado es tener el id de la aplicación Y una clave privada que exista de verdad.
+
+    Mirar solo que las variables estuvieran puestas dejaba pasar el caso que de verdad
+    ocurrió: la ruta configurada en Fly y el fichero ausente de la imagen, así que
+    `_enable_banking_jwt()` reventaba con `FileNotFoundError` DENTRO de
+    `/finanzas/resumen` y se llevaba por delante la cartera de Indexa, que funcionaba
+    perfectamente. Una integración a medio poner tiene que decir que no está puesta, no
+    romper el resumen entero.
+    """
+    return bool(ENABLE_BANKING_APPLICATION_ID and _enable_banking_clave())
 
 
 def _enable_banking_jwt() -> str:
@@ -3002,8 +3032,7 @@ def _enable_banking_jwt() -> str:
     with _eb_jwt_lock:
         if _eb_jwt_cache and ahora.timestamp() < _eb_jwt_cache[1] - 30:
             return _eb_jwt_cache[0]
-    with open(ENABLE_BANKING_PRIVATE_KEY_PATH, "r", encoding="utf-8") as f:
-        clave_privada = f.read()
+    clave_privada = _enable_banking_clave()
     expira = ahora + timedelta(minutes=5)
     token = jwt.encode(
         {"iss": "enablebanking.com", "aud": "api.enablebanking.com", "iat": ahora, "exp": expira},
@@ -3118,6 +3147,11 @@ def _revolut_datos() -> dict:
     conectada todavía, igual que Indexa sin token.
     """
     if not _enable_banking_configurado():
+        # Se distingue el "no lo has puesto" del "lo pusiste y falta la clave", porque el
+        # segundo se arregla poniendo un secreto y en el primero no hay nada que arreglar.
+        if ENABLE_BANKING_APPLICATION_ID:
+            return {"configurado": False,
+                    "motivo": "Falta la clave privada de Enable Banking en el backend"}
         return {"configurado": False, "motivo": "Enable Banking no configurado en el backend"}
     sesion = _eb_cargar_sesion()
     if not sesion:
@@ -3174,7 +3208,14 @@ def _revolut_datos_cache(refrescar: bool) -> dict:
             guardado = _revolut_cache
         if guardado and time.time() - guardado[0] < ENABLE_BANKING_TTL_MINUTOS * 60:
             return guardado[1]
-    datos = _revolut_datos()
+    # Revolut es una fuente SECUNDARIA dentro de un endpoint que sirve otra cosa: pase lo
+    # que pase aquí, la cartera de Indexa tiene que seguir saliendo. Sin esta red, un
+    # fallo inesperado de esta mitad devolvía un 500 en todo `/finanzas/resumen`.
+    try:
+        datos = _revolut_datos()
+    except Exception as e:
+        logger.error("Revolut: no se pudo leer el saldo (%s)", e)
+        datos = {"configurado": False, "motivo": "No se pudo consultar Revolut"}
     with _revolut_lock:
         _revolut_cache = (time.time(), datos)
     return datos
@@ -8367,13 +8408,18 @@ def _vigilante_abrir_issue(titulo: str, cuerpo: str) -> str:
         return ""
     owner, _, repo = JARVIS_REPO.partition("/")
     for servidor, cfg in _mcp_config().items():
-        # El vigilante corre sin usuario delante: no hay nadie que apruebe la escritura
-        # de un `mcp_usar` normal (ver `_mcp_pide_confirmar`). Se limita a servidores con
-        # `confiar: true` en vez de intentar "confirmar" solo; un servidor sin confiar
-        # que por casualidad exponga una tool `create_issue`/`issue_write` para otra cosa
-        # se queda fuera, no se invoca a ciegas.
-        if not cfg.get("confiar"):
-            continue
+        # El vigilante corre sin usuario delante: no hay nadie que apruebe la escritura de
+        # un `mcp_usar` normal (ver `_mcp_pide_confirmar`). Durante meses eso se resolvió
+        # exigiendo `confiar: true`, y el resultado fue que esta función NUNCA se ejecutó:
+        # el único servidor dado de alta es el de GitHub y está —correctamente— sin
+        # confiar, así que 281 avisos del mismo fallo pasaron sin abrir un solo issue.
+        #
+        # Lo que sustituye a esa condición es más estrecho, no más ancho: se invoca solo
+        # una herramienta cuyo nombre esté en `_VIGILANTE_ISSUE_TOOLS`, una lista cerrada
+        # NUESTRA de dos nombres, con los argumentos que escribimos aquí. No se elige
+        # herramienta por parecido ni se pasa nada que venga del servidor. Y no cambia
+        # nada de lo que Jarvis puede hacer hablando contigo: `_mcp_pide_confirmar` sigue
+        # exactamente igual, así que escribir desde el chat sigue pasando por ti.
         try:
             herramientas = (_mcp_rpc(servidor, "tools/list", {}) or {}).get("tools") or []
             nombre = next((t.get("name") for t in herramientas
@@ -9705,7 +9751,7 @@ def _acciones_aviso(rid: str, regla: str) -> list:
 
 
 def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = "",
-               acciones: Optional[list] = None) -> str:
+               acciones: Optional[list] = None, critico: bool = False) -> str:
     """Única puerta de salida de un aviso. Devuelve el canal por el que salió.
 
     Al móvil si hay quien lo recoja, y si no por correo. Un fallo del correo se propaga a
@@ -9717,11 +9763,17 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
     notificación pueda traer botones, y `acciones` dice CUÁLES: por correo no hay
     botones, así que un aviso que dependa de ellos tiene que decir por escrito qué se
     puede hacer sin ellos.
+
+    `critico` pide que suene **aunque el móvil esté en silencio**. Lo decide el backend por
+    la misma regla que el teléfono (`docs/LLAMADAS.md`): solo lo que se queda BLOQUEADO
+    hasta que contestes, que hoy es exactamente una cosa, el permiso de despliegue. Si
+    algún día suena por algo que podía esperar, dejarás de mirarlo — y con él se irá el
+    aviso que sí importaba.
     """
     if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
         _avisos_movil.append({
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
-            "voz": bool(voz), "id": aviso_id,
+            "voz": bool(voz), "id": aviso_id, "critico": bool(critico),
             "acciones": acciones if acciones is not None else _acciones_aviso(aviso_id, ""),
         })
         return "movil"
@@ -9890,6 +9942,7 @@ def ha_avisos_pending(request: Request, token: str = ""):
     # los avisos con botones propios (la revisión nocturna) piden actualizarlo.
     return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"],
                         "voz": a.get("voz", False), "id": a.get("id", ""),
+                        "critico": a.get("critico", False),
                         "acciones": a.get("acciones") or []}
                        for a in pendientes]}
 
@@ -11151,7 +11204,11 @@ def _despachar_recordatorios() -> dict:
         try:
             canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis",
                                voz=bool(fila.get("voz")), aviso_id=rid,
-                               acciones=_acciones_aviso(rid, regla))
+                               acciones=_acciones_aviso(rid, regla),
+                               # El único que suena con el móvil en silencio: un arreglo
+                               # ya hecho y verificado, parado hasta que des el permiso.
+                               # Es la misma frontera que decide quién puede llamarte.
+                               critico=(regla == REGLA_DESPLIEGUE))
             enviados += 1
             if regla and not _es_tuyo(regla):
                 presupuesto -= 1

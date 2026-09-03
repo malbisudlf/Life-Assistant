@@ -191,6 +191,15 @@ action:
               # no sirve se calle sola; el aviso de la revisión nocturna trae los suyos
               # («Arreglarlo» / «No hacer nada»), que no se valoran, se responden.
               actions: "{{ repeat.item.acciones | default([], true) }}"
+              # Y si el aviso viene marcado como crítico, que suene AUNQUE el móvil esté
+              # en silencio o en modo concentración. Quién lo marca lo decide el backend
+              # y hoy es una sola cosa —el permiso de despliegue—, por la misma regla que
+              # el teléfono: solo lo que se queda bloqueado hasta que contestes. Requiere
+              # dar permiso de "notificaciones críticas" a la app en el iPhone; sin él la
+              # notificación llega igual, pero callada.
+              push: >-
+                {{ {'sound': {'name': 'default', 'critical': 1, 'volume': 1.0}}
+                   if repeat.item.critico | default(false) else {} }}
         # Y si el aviso pide voz (estás en casa), que además se oiga.
         - if:
             - condition: template

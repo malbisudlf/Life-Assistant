@@ -293,6 +293,32 @@ class TestElBotonDeHablarlo:
         assert [a["title"] for a in acciones] == ["Desplegar", "Ahora no"]
 
 
+class TestElAvisoQueSuenaEnSilencio:
+    """Qué avisos atraviesan el silencio del móvil. Hoy: exactamente uno.
+
+    Es la misma frontera que decide quién puede llamarte por teléfono
+    (`docs/LLAMADAS.md`): solo lo que se queda BLOQUEADO hasta que contestes. Si algún día
+    suena por algo que podía esperar, dejarás de mirarlo — y con él se irá el aviso que sí
+    importaba. Por eso está fijado en un test y no solo en un comentario.
+    """
+
+    def _cola(self, monkeypatch):
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
+        monkeypatch.setattr(main, "_avisos_movil", [])
+        return main._avisos_movil
+
+    def test_el_permiso_de_despliegue_es_critico(self, monkeypatch):
+        cola = self._cola(monkeypatch)
+        assert main._notificar("t", "x", critico=True) == "movil"
+        assert cola[0]["critico"] is True
+
+    def test_lo_demas_no(self, monkeypatch):
+        cola = self._cola(monkeypatch)
+        main._notificar("t", "x")
+        assert cola[0]["critico"] is False
+
+
 class TestElContextoDeLaLlamada:
     """Lo que Jarvis ya sabe al descolgar, sin tener que ir a buscarlo.
 

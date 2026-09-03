@@ -425,3 +425,22 @@
   de UI depende de un atajo de otra aplicación, deja constancia de en qué versión
   funcionaba** — y si el resultado final no es el esperado, sospecha del paso que "no
   falla" antes que del que sí.
+- **El secreto que solo existía en el portátil de quien desplegó.** `/finanzas/resumen`
+  llevaba días devolviendo un 500 —ocho al día— y nadie se enteró: el widget se veía
+  vacío y no hay nadie mirando `fly logs`. La causa,
+  `FileNotFoundError: 'enable_banking_key.pem'`. La clave privada de Enable Banking está
+  en `.gitignore` **porque es un secreto**, así que viaja en un `fly deploy` desde local
+  (el `.pem` está en el contexto de build) y **no** en uno lanzado desde
+  `deploy-backend.yml`, donde el repositorio no lo tiene. Un despliegue por el camino
+  bueno la borró de producción sin decir nada. Tres moralejas, y la tercera es la que más
+  se repite en este proyecto:
+  - **Un secreto que solo existe en el disco de quien desplegó no existe.** Va en una
+    variable (`ENABLE_BANKING_PRIVATE_KEY`), que es lo único que sobrevive a los dos
+    caminos de despliegue.
+  - **«Configurado» tiene que significar «esto puede funcionar».** Comprobar que la
+    variable con la RUTA estaba escrita no comprueba nada: `_enable_banking_configurado()`
+    mira ahora que la clave exista de verdad.
+  - **Una fuente secundaria que puede lanzar tumba el endpoint entero.** El saldo de
+    Revolut es un extra dentro de un endpoint que sirve la cartera de Indexa, y se llevó
+    por delante la cartera —que funcionaba perfectamente— porque su excepción subía sin
+    red. Al añadir una fuente dentro de una respuesta que ya sirve otra, envuélvela.

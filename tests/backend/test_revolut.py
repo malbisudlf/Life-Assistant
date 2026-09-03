@@ -18,10 +18,19 @@ import main
 
 
 @pytest.fixture
-def enable_banking(monkeypatch):
-    """App de Enable Banking configurada; la firma del JWT se sustituye por una fija."""
+def enable_banking(monkeypatch, tmp_path):
+    """App de Enable Banking configurada; la firma del JWT se sustituye por una fija.
+
+    La clave privada se escribe de verdad en disco (aunque no sea una RSA válida: nadie
+    la lee, `_enable_banking_jwt` está sustituido) porque "configurado" incluye desde
+    agosto de 2026 que el fichero EXISTA. Apuntar a un `fake.pem` inexistente probaba el
+    caso contrario sin querer.
+    """
+    clave = tmp_path / "enable_banking_key.pem"
+    clave.write_text("no es una clave real", encoding="utf-8")
     monkeypatch.setattr(main, "ENABLE_BANKING_APPLICATION_ID", "app-test-id")
-    monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY_PATH", "fake.pem")
+    monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY", "")
+    monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY_PATH", str(clave))
     monkeypatch.setattr(main, "ENABLE_BANKING_ASPSP_NAME", "Revolut")
     monkeypatch.setattr(main, "ENABLE_BANKING_ASPSP_COUNTRY", "ES")
     monkeypatch.setattr(main, "ENABLE_BANKING_REDIRECT_URL", "https://backend.test/auth/enablebanking/callback")
@@ -115,6 +124,64 @@ class TestRevolutCallback:
         r = client.get("/auth/enablebanking/callback", params={"code": "abc", "state": estado})
         assert r.status_code == 502
         assert "invalid_grant" not in r.text
+
+
+class TestRevolutClaveQueNoEsta:
+    """El fallo real de septiembre de 2026: la ruta configurada, el fichero no.
+
+    `ENABLE_BANKING_PRIVATE_KEY_PATH` estaba puesto en Fly pero la clave no viajaba en la
+    imagen, así que `_enable_banking_jwt()` lanzaba `FileNotFoundError` dentro del
+    endpoint: `/finanzas/resumen` devolvía 500 entero y la cartera de Indexa, que iba
+    bien, dejaba de verse. Ocho excepciones al día durante días.
+    """
+
+    @pytest.fixture
+    def sin_clave(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main, "ENABLE_BANKING_APPLICATION_ID", "app-test-id")
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY", "")
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY_PATH", str(tmp_path / "no-existe.pem"))
+
+    def test_la_clave_puede_venir_por_variable(self, monkeypatch, tmp_path):
+        # La vía que sobrevive al despliegue: sin fichero, pero con el secreto puesto,
+        # Enable Banking cuenta como configurado.
+        monkeypatch.setattr(main, "ENABLE_BANKING_APPLICATION_ID", "app-test-id")
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY_PATH", str(tmp_path / "no-existe.pem"))
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY",
+                            "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----")
+        assert main._enable_banking_configurado() is True
+        # Y los `\n` escapados vuelven a ser saltos de línea: un PEM de una sola línea no
+        # lo firma nadie.
+        assert main._enable_banking_clave().count("\n") == 2
+
+    def test_la_variable_gana_al_fichero(self, monkeypatch, tmp_path):
+        clave = tmp_path / "clave.pem"
+        clave.write_text("la del fichero", encoding="utf-8")
+        monkeypatch.setattr(main, "ENABLE_BANKING_APPLICATION_ID", "app-test-id")
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY_PATH", str(clave))
+        monkeypatch.setattr(main, "ENABLE_BANKING_PRIVATE_KEY", "la de la variable")
+        assert main._enable_banking_clave() == "la de la variable"
+
+    def test_la_clave_que_falta_no_tumba_el_resumen(self, client, auth_headers, mock_requests, sin_clave):
+        mock_requests.add("GET", "provider=eq.enablebanking_revolut", _sesion_guardada(expires_at=99999999999.0))
+        r = client.get("/finanzas/resumen", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["revolut"] == {
+            "configurado": False,
+            "motivo": "Falta la clave privada de Enable Banking en el backend",
+        }
+        # Y ni se sale a la red: sin clave no hay JWT que firmar.
+        assert mock_requests.called("GET", "enablebanking.com") == []
+
+    def test_un_fallo_inesperado_tampoco_lo_tumba(self, client, auth_headers, monkeypatch, enable_banking):
+        # La red de `_revolut_datos_cache`: Revolut es una fuente secundaria dentro de un
+        # endpoint que sirve otra cosa, y ninguna sorpresa suya puede costar la cartera.
+        def _explota():
+            raise RuntimeError("algo que no habíamos previsto")
+
+        monkeypatch.setattr(main, "_revolut_datos", _explota)
+        r = client.get("/finanzas/resumen", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["revolut"] == {"configurado": False, "motivo": "No se pudo consultar Revolut"}
 
 
 class TestRevolutSaldo:
