@@ -105,8 +105,8 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
 ### Acción `resolver_alud` — notas de Edge y Claude Desktop
 
 Flujo: `msedge.exe <url>` → la entrega abierta en el Edge del usuario → Claude Desktop →
-Ctrl+2 (Cowork) → Win+V → Enter → Enter. **El agente no controla el navegador**: lo abre
-y se aparta.
+clic en «New» → clic en «Cowork» → Win+V → Enter → Enter. **El agente no controla el
+navegador**: lo abre y se aparta.
 
 - **Se llama a `msedge.exe <url>` sin un solo flag**, y cada ausencia cuenta:
   - Sin `--user-data-dir`, Edge arranca con el perfil de siempre y **la cuenta del
@@ -152,6 +152,20 @@ y se aparta.
   sobre la página entera: lo que hay escrito ahí lo pone un tercero y no puede valer como
   orden. La validación de `alud_url` contra la lista blanca no se toca: sigue en los tres
   sitios.
+- **Para llegar a Cowork hay que pinchar: no hay atajo de teclado.** Aquí había un
+  `Ctrl+2` que funcionaba con una versión anterior de la app. Cuando dejó de existir, el
+  síntoma fue engañoso: todo el camino parecía ir bien —Claude se abría, la instrucción
+  se pegaba, se enviaba— pero aterrizaba en el **chat normal**, que contesta en vez de
+  ponerse a trabajar. Cambiar entre Chat, Cowork y Code solo se puede con el ratón; lo
+  pide una issue abierta (anthropics/claude-code#18818). Y la app es Electron: UI
+  Automation no ve su contenido (solo los tres botones de la barra de título), así que
+  tampoco se puede localizar el botón por accesibilidad.
+- **Los dos clics** (`COWORK_NEW_XY`, `COWORK_TOGGLE_XY`) van en **fracción de pantalla**,
+  no en píxeles, y salen del entorno para poder ajustarlos sin tocar el código. Primero
+  «New» en la barra lateral —que deja la pantalla inicial, donde el compositor está
+  centrado y en un sitio predecible; con una conversación abierta está abajo— y luego
+  «Cowork» en el selector Chat/Cowork del propio compositor. Ese segundo clic deja el
+  cursor dentro del campo de texto, así que no hace falta un tercero para enfocarlo.
 - **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
   `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
 - **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
