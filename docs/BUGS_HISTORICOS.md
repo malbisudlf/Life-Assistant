@@ -383,8 +383,10 @@
   existente y se cierra**: el puerto llegó a escuchar unos seis segundos y desapareció, y
   `connect_over_cdp` fallaba con un `ECONNREFUSED` que no dice nada de la causa. El
   puerto aleatorio lo hacía irreparable: aunque el Edge abierto tuviera depuración, cada
-  arranque buscaba un número distinto. Ahora el puerto es fijo, el agente **reutiliza** el
-  Edge vivo si responde, y si no hay CDP el error explica qué hacer. Moraleja:
+  arranque buscaba un número distinto. El arreglo, tras dos intentos, no fue afinar el CDP sino
+  **quitarlo**: el agente abre la URL con `msedge.exe <url>` y deja que Claude lea la
+  página. Controlar el navegador solo hacía falta para extraer el enunciado, y costaba
+  todo esto. Moraleja de la primera parte:
   **un flag de línea de comandos de Chromium solo lo aplica la primera instancia**; las
   siguientes son mensajeros que le pasan la URL y se mueren.
 - **`localhost` no es `127.0.0.1` en Windows.** La misma conexión CDP iba a
@@ -394,3 +396,21 @@
 - **Un `sleep` fijo esperando a que un servicio levante es un bug esperando su turno.**
   Los cuatro segundos que se dormían tras lanzar Edge bastaban en caliente y no en frío.
   Sustituido por espera activa contra el puerto, con límite.
+- **Y la moraleja de fondo de esa tarde**: se persiguieron dos capas de síntomas (el
+  puerto aleatorio, `localhost` contra `::1`) sin mirar antes **cómo estaba hecho antes**
+  ni preguntar para qué servía la pieza que fallaba. El historial lo decía: hasta
+  `e29d302` no había CDP, y el cambio se hizo por un motivo concreto y menor (que Edge
+  sobreviviera al agente) que se resuelve con `DETACHED_PROCESS` a secas. `git log -S`
+  sobre la línea que falla, antes de arreglarla.
+- **El perfil por defecto de Edge no admite depuración remota, y no lo dice.** El remate
+  de esa misma tarde. Tras dos intentos de arreglar el CDP (puerto fijo en vez de
+  aleatorio, `127.0.0.1` en vez de `localhost`) el navegador seguía sin abrir el puerto —
+  arrancando con el flag puesto, visible en su línea de comandos, sin un solo error.
+  Chromium **desactiva la depuración remota cuando se usa el directorio de datos de
+  usuario por defecto** (desde Chrome 136; aquí, Edge 152), para que ningún proceso local
+  pueda vaciarle las cookies al navegador donde están todas las sesiones. Con un
+  `--user-data-dir` propio el mismo comando sí abre el puerto. La moraleja no es el dato
+  concreto sino el patrón: **cuando un flag no hace nada y no hay error, sospecha de una
+  restricción deliberada antes que de tu forma de usarlo**, y compruébalo con el
+  experimento mínimo que separa las dos hipótesis (aquí, el mismo comando con y sin
+  `--user-data-dir`). Media noche de arreglos habría sobrado con hacerlo primero.
