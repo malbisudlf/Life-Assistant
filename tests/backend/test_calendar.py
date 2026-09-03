@@ -36,6 +36,24 @@ class TestGetEvents:
         assert ev["alud_url"] == "https://alud.deusto.es/mod/assign/view.php?id=99"
         assert ev["isAllDay"] is False
 
+    def test_url_convertida_en_enlace_por_outlook(self, client, auth_headers, graph_token, mock_requests):
+        """Outlook web enlaza sola la URL que pegas: tras "alud_url:" ya no hay un http
+        sino un "<a href=...". El texto plano dejaba de existir y la entrega se quedaba
+        sin URL sin que nada lo dijera."""
+        mock_requests.add("GET", "graph.microsoft.com", FakeResponse({
+            "value": [{
+                "id": "ev1", "subject": "Entrega",
+                "start": {"dateTime": "2026-07-06T10:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-07-06T12:00:00Z", "timeZone": "UTC"},
+                "location": {"displayName": ""},
+                "body": {"content": '<p>alud_url: <a href="https://alud.deusto.es/mod/assign/view.php?id=99" '
+                                    'rel="noopener">https://alud.deusto.es/mod/assign/view.php?id=99</a></p>'},
+                "bodyPreview": "", "isAllDay": False,
+            }]
+        }))
+        ev = client.get("/calendar/events", headers=auth_headers).json()["events"][0]
+        assert ev["alud_url"] == "https://alud.deusto.es/mod/assign/view.php?id=99"
+
     def test_sin_eventos(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "graph.microsoft.com", FakeResponse({"value": []}))
         r = client.get("/calendar/events", headers=auth_headers)
@@ -186,6 +204,43 @@ class TestClasses:
         assert ev["title"] == "Sistemas Operativos"
         assert ev["start"] == "2026-07-07T08:00:00Z"
         assert ev["location"] == "Lab 2"
+
+    def test_clases_extraen_alud_url(self, client, auth_headers, graph_token, mock_requests):
+        """Las entregas se crean en el calendario Clases: si este endpoint no saca la
+        URL, el dashboard encola un job que el agente no sabe despachar."""
+        mock_requests.add("GET", "/calendars/cal-clases/calendarView", FakeResponse({
+            "value": [{
+                "id": "cl1",
+                "subject": "📚 Redes – Practica 3",
+                "start": {"dateTime": "2026-07-07T21:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-07-07T21:59:00Z", "timeZone": "UTC"},
+                "location": {"displayName": ""},
+                "body": {"content": "alud_url: https://alud.deusto.es/mod/assign/view.php?id=99</p>"},
+                "bodyPreview": "alud_url: https://alud.deusto.es/mod/assign/view.php?id=99",
+                "isAllDay": False,
+            }]
+        }))
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-clases", "name": "Clases"}]
+        }))
+        ev = client.get("/calendar/classes", headers=auth_headers).json()["events"][0]
+        assert ev["alud_url"] == "https://alud.deusto.es/mod/assign/view.php?id=99"
+
+    def test_clases_filtran_host_ajeno(self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("GET", "/calendars/cal-clases/calendarView", FakeResponse({
+            "value": [{
+                "id": "cl1", "subject": "Entrega",
+                "start": {"dateTime": "2026-07-07T21:00:00Z", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-07-07T21:59:00Z", "timeZone": "UTC"},
+                "location": {"displayName": ""},
+                "body": {"content": "alud_url: https://atacante.example/x"},
+                "bodyPreview": "", "isAllDay": False,
+            }]
+        }))
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-clases", "name": "Clases"}]
+        }))
+        assert client.get("/calendar/classes", headers=auth_headers).json()["events"][0]["alud_url"] is None
 
     def test_nombre_del_calendario_es_configurable(self, client, auth_headers, graph_token, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "CLASSES_CALENDAR", "horario")

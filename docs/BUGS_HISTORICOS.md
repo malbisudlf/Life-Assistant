@@ -346,3 +346,33 @@
   backend antes de sospechar de la contraseña.
 - Doble conteo de entrenos semanales y fugas de detalles de error ya se arreglaron
   en commits anteriores; si tocas bienestar o manejo de errores, revisa el historial.
+- **El campo que un endpoint no pide, no existe — aunque su hermano sí lo saque.**
+  `/calendar/events` extraía `alud_url` del cuerpo del evento desde el principio, pero
+  `/calendar/classes` ni siquiera pedía `body` en su `$select`. Y las entregas se crean
+  en el calendario **Clases**, que es donde las mete la rutina de ALUD: llegaban al
+  dashboard con `alud_url: null`, el widget de entregas las pintaba igual (solo mira el
+  📚 del título) y el botón «Encender» encolaba un job con un payload sin `accion` ni
+  `alud_url`. El agente lo recogía en el PC y lo cerraba con `failed: acción desconocida
+  'None'` — un mensaje que no menciona ni el calendario ni la URL, que es donde estaba
+  el fallo. Dos agravantes que lo tapaban: el dashboard mandaba el job **sin `accion`
+  explícita** (el agente solo deduce `resolver_alud` a partir de la propia `alud_url`,
+  por compatibilidad con jobs viejos), y `POST /jobs` aceptaba ese payload sin rechistar.
+  Arreglado en las tres capas, con la extracción ya compartida en `_extraer_alud_url()`.
+  Moraleja: **cuando dos endpoints devuelven la misma clase de objeto, la normalización
+  va en una función común**, no copiada en uno de los dos.
+- **Outlook web convierte en enlace la URL que pegas en la descripción.** El texto pasa
+  a ser `alud_url: <a href="https://...">…</a>`, y el regex —que busca un `http` justo
+  detrás de los dos puntos— dejaba de encontrar nada. Mismo síntoma que el anterior y
+  ninguna pista de por qué: el evento «tenía» su URL a la vista. Ahora hay un segundo
+  patrón que la rescata del `href`, con la misma lista blanca después.
+- **El agente es efímero: encolar un job no lo despierta.** Con el PC ya encendido, el
+  agente de su último arranque terminó hace rato y el WOL no despierta a nadie.
+  `abrirStreaming()` lo tenía en cuenta y llamaba a `/relaunch-agent`; el camino de las
+  entregas no, así que pulsar el botón con el PC encendido no hacía absolutamente nada.
+  Y una moraleja de la propia investigación: **que algo no esté en la documentación no
+  prueba que no exista**. Se dio por no montada la mitad de HA de este flujo (sensor +
+  automatización + `shell_command`) y estaba entera desde hacía semanas, solo que en
+  `/config/packages/life_assistant_pc.yaml` en vez de en `configuration.yaml`. Y de propina, la
+  segunda conclusión precipitada del mismo día: sus sensores parecían congelados porque
+  `last_reported` llevaba un día sin moverse, cuando ese campo solo avanza si el valor
+  **cambia** (ver `docs/HOME_ASSISTANT_FLUJOS.md`).

@@ -2093,6 +2093,9 @@ export default function Dashboard() {
 
 
   async function wakePC() {
+    // Sin URL no hay nada que resolver: el agente cerraría el job como "acción
+    // desconocida" desde el PC, minutos después y sin decir qué faltaba.
+    if (!wolModal?.alud_url) { setWolStatus("sin_url"); return; }
     setWolStatus("loading");
     try {
 
@@ -2106,13 +2109,28 @@ export default function Dashboard() {
         // best-effort, no bloquea el flujo
       }
 
-      // 2. Crear job en Supabase via backend — esto sí es crítico
+      // 2. Relanzar agente (best-effort): mismo motivo que en abrirStreaming. El agente
+      // es EFÍMERO — si el PC ya estaba encendido, el de su último arranque ya terminó y
+      // el WOL no despierta a nadie. Sin esto, encolar el job con el PC encendido no
+      // hacía absolutamente nada hasta el siguiente reinicio.
+      try {
+        await apiFetch(`${API}/relaunch-agent`, {
+          method: "POST",
+          headers: authHeaders(),
+        });
+      } catch { /* mejor esfuerzo: el job es lo crítico */ }
+
+      // 3. Crear job en Supabase via backend — esto sí es crítico.
+      // La acción va EXPLÍCITA: el agente solo deduce "resolver_alud" a partir de
+      // `alud_url` por compatibilidad con jobs antiguos, y si esa URL falta el payload
+      // se queda sin nada que despachar.
       const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({
           dedupe_key: `entrega-${wolModal.title}-${Date.now()}`,
           payload: {
+            accion: "resolver_alud",
             titulo: wolModal.title,
             alud_url: wolModal.alud_url,
           },
@@ -5971,6 +5989,14 @@ export default function Dashboard() {
                   <span style={{ color: isAgentOnline ? "var(--green)" : "#d4645a" }}>
                     Agente: {isAgentOnline ? "online" : "offline / no listo"}
                   </span>
+                  {!wolModal.alud_url && (
+                    <>
+                      <br />
+                      <span style={{ color: "#d4645a" }}>
+                        Sin alud_url en el evento — no hay entrega que abrir
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div style={{ display: "flex", gap: 10 }}>
                   <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
@@ -5980,25 +6006,30 @@ export default function Dashboard() {
                     fontFamily: "'DM Sans', sans-serif",
                   }}>Cancelar</button>
                   <button
-                    onClick={!isAgentOnline ? wakePC : undefined}
-                    disabled={isAgentOnline}
-                    title={isAgentOnline ? "El PC ya está encendido y el agente está online" : "Enviar señal Wake-on-LAN"}
+                    onClick={wolModal.alud_url ? wakePC : undefined}
+                    disabled={!wolModal.alud_url}
+                    title={!wolModal.alud_url
+                      ? "El evento no tiene 'alud_url: https://...' en su descripción"
+                      : isAgentOnline
+                        ? "Encolar la entrega — el agente está online y la cogerá"
+                        : "Encender el PC y encolar la entrega"}
                     style={{
                       flex: 1, padding: "10px 0",
-                      background: isAgentOnline ? "rgba(255,255,255,0.08)" : "var(--accent)",
+                      background: wolModal.alud_url ? "var(--accent)" : "rgba(255,255,255,0.08)",
                       border: "none", borderRadius: 8,
-                      color: isAgentOnline ? "var(--muted)" : "#0e0f11",
+                      color: wolModal.alud_url ? "#0e0f11" : "var(--muted)",
                       fontSize: 13, fontWeight: 600,
-                      cursor: isAgentOnline ? "not-allowed" : "pointer",
+                      cursor: wolModal.alud_url ? "pointer" : "not-allowed",
                       fontFamily: "'DM Sans', sans-serif",
-                      opacity: isAgentOnline ? 0.5 : 1,
+                      opacity: wolModal.alud_url ? 1 : 0.5,
                       transition: "all 0.2s",
                     }}
-                  >{isAgentOnline ? "Ya online" : "Encender"}</button>
+                  >{isAgentOnline ? "Resolver" : "Encender"}</button>
                 </div>
-                {isAgentOnline && (
-                  <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 8 }}>
-                    El agente ya está online — no hace falta encender el PC.
+                {!wolModal.alud_url && (
+                  <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 8, lineHeight: 1.5 }}>
+                    Añade <code>alud_url: https://...</code> a la descripción del evento
+                    en Outlook (o edítalo desde aquí) y vuelve a intentarlo.
                   </div>
                 )}
               </>
@@ -6008,6 +6039,16 @@ export default function Dashboard() {
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>⚡</div>
                 <div style={{ fontSize: 13, color: "var(--muted)" }}>Enviando señal WOL...</div>
+              </div>
+            )}
+
+            {wolStatus === "sin_url" && (
+              <div style={{ textAlign: "center", padding: "16px 0" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>🔗</div>
+                <div style={{ fontSize: 13, color: "#d4645a", lineHeight: 1.6 }}>
+                  Esta entrega no tiene <code>alud_url</code> en la descripción del
+                  evento, así que el agente no sabría qué abrir.
+                </div>
               </div>
             )}
 

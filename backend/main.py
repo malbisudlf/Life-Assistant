@@ -1237,6 +1237,43 @@ def _clean_class_title(subject: str) -> str:
     s = re.sub(r"\s*Grupo:\s*\d+\s*-\s*Asignatura\s*$", "", s, flags=re.IGNORECASE)
     return s.strip()
 
+
+# La URL de la entrega dentro del cuerpo del evento. Dos formas: en texto plano y,
+# cuando Outlook la ha convertido en enlace, dentro del href.
+_ALUD_URL_RE      = re.compile(r"alud_url:\s*(https?://[^\s<>\"']+)")
+_ALUD_URL_HREF_RE = re.compile(r"alud_url:\s*<a[^>]+href=[\"'](https?://[^\"'<>]+)", re.IGNORECASE)
+
+
+def _extraer_alud_url(event: dict):
+    """Saca la `alud_url` del cuerpo de un evento de Graph, ya filtrada por lista blanca.
+
+    Compartida por `/calendar/events` y `/calendar/classes`. Vivía solo en el primero, y
+    las entregas se crean en el calendario **Clases** —es donde las mete la rutina de
+    ALUD—, así que llegaban al dashboard con `alud_url: null` y el botón de resolver
+    encolaba un job que el agente no sabía despachar.
+
+    El cuerpo de un evento lo escribe quien lo crea, no necesariamente el usuario: una
+    URL de un host ajeno acabaría abierta en un navegador con la sesión del PC iniciada.
+    Se descarta aquí, en el punto donde entra al sistema (invariante 7 de CLAUDE.md).
+    """
+    body_content    = event.get("body", {}).get("content", "") or ""
+    preview_content = event.get("bodyPreview", "") or ""
+    # No incluir <, > ni comillas en la URL: en cuerpos HTML la URL suele ir pegada
+    # a la etiqueta de cierre (p.ej. ...id=99</p>) y \S+ se la tragaba entera.
+    m = _ALUD_URL_RE.search(body_content) or _ALUD_URL_RE.search(preview_content)
+    if not m:
+        # Outlook web convierte en enlace la URL que pegas: el texto pasa a ser
+        # `alud_url: <a href="https://...">`, donde tras los dos puntos ya no hay un
+        # http sino un `<`. Se rescata del href y pasa la misma lista blanca.
+        m = _ALUD_URL_HREF_RE.search(body_content)
+    if not m:
+        return None
+    url = m.group(1).rstrip("&;.,")
+    if not alud_url_permitida(url):
+        logger.warning("Evento %s: alud_url descartada (host no permitido)", event.get("id"))
+        return None
+    return url
+
 # Copia en memoria del token de Graph. Cada endpoint de calendario llamaba a
 # get_valid_token(), y este leía la tabla oauth_tokens de Supabase: una carga del
 # dashboard son dos viajes de red que solo sirven para releer un token que no ha
@@ -1399,19 +1436,7 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     
     events = []
     for event in data.get("value", []):
-        body_content = event.get("body", {}).get("content", "") or ""
-        preview_content = event.get("bodyPreview", "") or ""
-        # No incluir <, > ni comillas en la URL: en cuerpos HTML la URL suele ir pegada
-        # a la etiqueta de cierre (p.ej. ...id=99</p>) y \S+ se la tragaba entera.
-        alud_match = re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", body_content) or \
-                     re.search(r"alud_url:\s*(https?://[^\s<>\"']+)", preview_content)
-        alud_url = alud_match.group(1).rstrip("&;.,") if alud_match else None
-        # El cuerpo del evento lo escribe quien lo crea, no necesariamente el usuario:
-        # una URL de un host ajeno acabaría abierta en el navegador con sesión del PC.
-        # Se descarta aquí, en el punto donde entra al sistema.
-        if alud_url and not alud_url_permitida(alud_url):
-            logger.warning("Evento %s: alud_url descartada (host no permitido)", event.get("id"))
-            alud_url = None
+        alud_url = _extraer_alud_url(event)
         events.append({
             "id": event.get("id"),
             "title": _clean_class_title(event.get("subject", "")),
@@ -1572,7 +1597,9 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     r2 = http.get(
         f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
         f"?startDateTime={start}&endDateTime={end}&$top=200"
-        f"&$select=subject,start,end,location,isAllDay&$orderby=start/dateTime",
+        # `body`/`bodyPreview` en el $select: sin ellos Graph no manda el cuerpo, y la
+        # alud_url de las entregas —que se crean en ESTE calendario— no existía.
+        f"&$select=subject,start,end,location,isAllDay,body,bodyPreview&$orderby=start/dateTime",
         headers=headers
     )
     r2.encoding = "utf-8"
@@ -1592,6 +1619,8 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
             "start": normalize_graph_dt(raw_start),
             "end": normalize_graph_dt(raw_end),
             "location": event.get("location", {}).get("displayName"),
+            "preview": event.get("bodyPreview"),
+            "alud_url": _extraer_alud_url(event),
             "isAllDay": event.get("isAllDay"),
         })
     logger.debug("[CLASES] Total eventos devueltos: %d", len(events))
@@ -2169,6 +2198,20 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     alud_url = body.payload.get("alud_url") if isinstance(body.payload, dict) else None
     if alud_url is not None and not alud_url_permitida(alud_url):
         raise HTTPException(status_code=400, detail="alud_url no permitida")
+
+    # Un job de entrega sin URL no lo puede ejecutar nadie: el agente lo recoge, no
+    # encuentra ni `accion` ni `alud_url`, y lo cierra como "acción desconocida: None"
+    # dos minutos después, en el PC, donde el fallo ya no dice qué faltaba. Se rechaza
+    # aquí, que es donde todavía hay alguien mirando la pantalla. Pasa cuando el evento
+    # de Outlook no lleva "alud_url: ..." en el cuerpo, o cuando su host no está en
+    # ALUD_ALLOWED_HOSTS y /calendar/events lo descartó.
+    if isinstance(body.payload, dict) and not alud_url:
+        accion = body.payload.get("accion")
+        if accion == "resolver_alud" or (not accion and "titulo" in body.payload):
+            raise HTTPException(
+                status_code=400,
+                detail="La entrega no tiene alud_url: añade 'alud_url: https://...' "
+                       "a la descripción del evento de Outlook")
 
     # El encargo en lenguaje natural se FIRMA AQUÍ, y siempre de cero: la firma no se
     # acepta del cliente ni aunque venga correcta. Este endpoint es el único sitio del
