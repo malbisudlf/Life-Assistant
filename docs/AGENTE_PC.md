@@ -102,40 +102,46 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   `SUNSHINE_*` de siempre como respaldo. No quites ese respaldo sin repasar el `.env`
   del PC: el agente no tiene tests y un fallo suyo se descubre a las 6 de la mañana.
 
-### Acción `resolver_alud` — notas de Edge y Claude Desktop
+### Acción `resolver_alud` — notas de Edge, Playwright y Claude Desktop
 
-Flujo: `msedge.exe <url>` → la entrega abierta en el Edge del usuario → Claude Desktop →
-Ctrl+2 (Cowork) → Win+V → Enter → Enter. **El agente no controla el navegador**: lo abre
-y se aparta.
+Flujo: Edge (proceso detached) → CDP → login en Alud → extracción del enunciado →
+Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
-- **Se llama a `msedge.exe <url>` sin un solo flag**, y cada ausencia cuenta:
-  - Sin `--user-data-dir`, Edge arranca con el perfil de siempre y **la cuenta del
-    usuario**. Pasarlo explícitamente —como se hacía— abría una ventana sin su sesión.
-  - Si Edge ya está abierto, el proceso nuevo le pasa la URL, él abre la pestaña y el
-    proceso se cierra. Es el comportamiento que se quiere.
-  - DETACHED (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`): el navegador no es hijo de
-    Python y **sobrevive cuando el agente termina**. Es el requisito que en su día hizo
-    abandonar `launch_persistent_context`, que se llevaba Edge por delante al salir.
-- **El enunciado ya no se extrae**: lo lee Claude de la pestaña que le queda delante.
-  Era lo único que obligaba a controlar el navegador, y ese control es lo que fallaba.
-- **Playwright ya no se usa aquí** (fuera de `requirements.txt`). Con él se fueron el
-  CDP, el puerto de depuración, `login_alud_if_needed()` y `extract_enunciado()`.
-- **El login en Alud lo hace ahora Claude**, no el agente. La sesión del navegador
-  caduca, así que dar por hecho que está iniciada no vale: al abrir Alud sale la pantalla
-  de login más veces de las que uno esperaría. Eso es lo que hacía
-  `login_alud_if_needed()` y por lo que existía Playwright aquí. Los mismos pasos viajan
-  ahora dentro de la instrucción de Cowork —pulsar «@deusto | @opendeusto», elegir la
-  cuenta de `ALUD_ACCOUNT`, esperar el push de Okta— porque quien tiene el navegador
-  delante es Claude. `ALUD_ACCOUNT` sigue haciendo falta en `agent/.env`, solo que ahora
-  se lee para redactar la instrucción, no para pulsar.
-- **La advertencia sobre el contenido de la página sigue en la instrucción de Cowork**
-  (`build_cowork_instruction`). Antes el enunciado llegaba copiado y se delimitaba entre
-  marcadores; ahora no pasa por el agente, así que la advertencia se da por adelantado
-  sobre la página entera: lo que hay escrito ahí lo pone un tercero y no puede valer como
-  orden. La validación de `alud_url` contra la lista blanca no se toca: sigue en los tres
-  sitios.
-- **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
-  `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
+- **Primero se intenta REUTILIZAR el Edge que ya está abierto**
+  (`asegurar_edge_con_cdp()`): si algo escucha en `EDGE_DEBUG_PORT`, se usa ese navegador y
+  no se lanza ninguno. Es el que tiene la sesión de Alud y Okta iniciada. Solo si no hay
+  nadie escuchando se arranca uno.
+- **El puerto es FIJO** (`EDGE_DEBUG_PORT`, 49605 por defecto), ya no aleatorio. Lo fue
+  —para no exponer un `9222` predecible— hasta que se vio lo que rompía: **con Edge ya
+  abierto, lanzar otro proceso con `--remote-debugging-port` no abre nada**. El segundo
+  delega en la instancia existente y se cierra; el puerto llegó a escuchar unos seis
+  segundos y desapareció (medido el 2026-09-03). Con un puerto distinto en cada arranque
+  no hay forma de conectarse al Edge que ya corre, así que el agente **solo funcionaba si
+  Edge no estaba abierto** — es decir, justo después de un WOL, y nunca con el PC ya
+  encendido. Chromium sigue exponiendo el puerto solo en loopback.
+- **El Edge del usuario tiene que arrancar con el flag**, porque manda la PRIMERA
+  instancia: el acceso directo de la barra de tareas lleva
+  `--remote-debugging-port=49605` y hay un `.lnk` en la carpeta Inicio que lo lanza así al
+  entrar en Windows, de modo que las ventanas que se abran después (desde un enlace, por
+  ejemplo) deleguen en ella y hereden el puerto. La contrapartida, aceptada a sabiendas:
+  el CDP queda abierto de forma permanente en el navegador donde están todas las sesiones,
+  y cualquier proceso local puede controlarlo.
+- Si al final no hay CDP, el error **dice qué hacer** (cerrar Edge o arrancarlo con el
+  flag) en vez del `ECONNREFUSED` pelado, que no apuntaba a ninguna causa.
+- Edge se lanza como proceso DETACHED
+  (`subprocess.Popen(..., creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`), así
+  no es hijo de Python y sobrevive cuando el agente termina. La espera es activa hasta que
+  el puerto acepta (antes, un `sleep(4)` fijo que se quedaba corto en arranques en frío).
+- **Playwright se conecta con `connect_over_cdp(f"http://127.0.0.1:{EDGE_DEBUG_PORT}")`**
+  — `127.0.0.1`, **nunca `localhost`**: en Windows ese nombre resuelve primero a `::1` y
+  Edge escucha solo en IPv4, así que por `localhost` fallaba con
+  `ECONNREFUSED ::1:<puerto>` aunque el navegador estuviera vivo. La llamada
+  que devuelve un `Browser`, NO un `BrowserContext`. Hay que usar `browser.contexts[0]`
+  para quedarse con el contexto del perfil real (cookies, sesión de Alud/Okta). Al final se
+  cierra solo la conexión de Playwright; Edge queda abierto a propósito.
+- El perfil sale de `EDGE_PROFILE_DIR` (por defecto el perfil de usuario de Edge).
+- **`ALUD_ACCOUNT`** debe estar en `agent/.env`: si está vacío, aparece el selector de
+  cuentas y el agente no sabe en cuál pulsar (deja un WARNING en el log).
 - **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
   `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
 - **Foco de la ventana**: `_focus_claude_window()` usa PowerShell + win32
