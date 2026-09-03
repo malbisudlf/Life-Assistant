@@ -107,13 +107,35 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
 Flujo: Edge (proceso detached) → CDP → login en Alud → extracción del enunciado →
 Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
 
-- **Edge se lanza como proceso DETACHED**
-  (`subprocess.Popen(..., creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`) con
-  `--remote-debugging-port=<aleatorio 49200–49900>` (`EDGE_DEBUG_PORT = random.randint(...)`,
-  ya no un `9222` fijo: Chromium solo lo expone en loopback, pero randomizarlo reduce la
-  ventana frente a sondeos del puerto conocido). Al ser DETACHED, Edge no es hijo de Python
-  y sobrevive cuando el agente termina.
-- **Playwright se conecta con `connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")`**,
+- **Primero se intenta REUTILIZAR el Edge que ya está abierto**
+  (`asegurar_edge_con_cdp()`): si algo escucha en `EDGE_DEBUG_PORT`, se usa ese navegador y
+  no se lanza ninguno. Es el que tiene la sesión de Alud y Okta iniciada. Solo si no hay
+  nadie escuchando se arranca uno.
+- **El puerto es FIJO** (`EDGE_DEBUG_PORT`, 49605 por defecto), ya no aleatorio. Lo fue
+  —para no exponer un `9222` predecible— hasta que se vio lo que rompía: **con Edge ya
+  abierto, lanzar otro proceso con `--remote-debugging-port` no abre nada**. El segundo
+  delega en la instancia existente y se cierra; el puerto llegó a escuchar unos seis
+  segundos y desapareció (medido el 2026-09-03). Con un puerto distinto en cada arranque
+  no hay forma de conectarse al Edge que ya corre, así que el agente **solo funcionaba si
+  Edge no estaba abierto** — es decir, justo después de un WOL, y nunca con el PC ya
+  encendido. Chromium sigue exponiendo el puerto solo en loopback.
+- **El Edge del usuario tiene que arrancar con el flag**, porque manda la PRIMERA
+  instancia: el acceso directo de la barra de tareas lleva
+  `--remote-debugging-port=49605` y hay un `.lnk` en la carpeta Inicio que lo lanza así al
+  entrar en Windows, de modo que las ventanas que se abran después (desde un enlace, por
+  ejemplo) deleguen en ella y hereden el puerto. La contrapartida, aceptada a sabiendas:
+  el CDP queda abierto de forma permanente en el navegador donde están todas las sesiones,
+  y cualquier proceso local puede controlarlo.
+- Si al final no hay CDP, el error **dice qué hacer** (cerrar Edge o arrancarlo con el
+  flag) en vez del `ECONNREFUSED` pelado, que no apuntaba a ninguna causa.
+- Edge se lanza como proceso DETACHED
+  (`subprocess.Popen(..., creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`), así
+  no es hijo de Python y sobrevive cuando el agente termina. La espera es activa hasta que
+  el puerto acepta (antes, un `sleep(4)` fijo que se quedaba corto en arranques en frío).
+- **Playwright se conecta con `connect_over_cdp(f"http://127.0.0.1:{EDGE_DEBUG_PORT}")`**
+  — `127.0.0.1`, **nunca `localhost`**: en Windows ese nombre resuelve primero a `::1` y
+  Edge escucha solo en IPv4, así que por `localhost` fallaba con
+  `ECONNREFUSED ::1:<puerto>` aunque el navegador estuviera vivo. La llamada
   que devuelve un `Browser`, NO un `BrowserContext`. Hay que usar `browser.contexts[0]`
   para quedarse con el contexto del perfil real (cookies, sesión de Alud/Okta). Al final se
   cierra solo la conexión de Playwright; Edge queda abierto a propósito.

@@ -26,7 +26,6 @@ import sys
 import time
 import json
 import uuid
-import random
 import socket
 import logging
 import hmac
@@ -67,11 +66,16 @@ CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
 # tras un WOL la tarjeta puede no tener IP todavía: el primer intento moría con un
 # fallo de DNS a los 200 ms y el arranque se perdía entero — justo el que traía el job.
 ARRANQUE_ESPERA_RED = int(os.getenv("ARRANQUE_ESPERA_RED") or 90)
-# Puerto CDP aleatorio por ejecución en vez de un 9222 fijo y predecible.
-# Chromium solo escucha el puerto de depuración en loopback (127.0.0.1), así que el
-# acceso queda restringido a procesos de la propia máquina; randomizarlo reduce la
-# ventana de exposición frente a algo que sondee el puerto conocido.
-EDGE_DEBUG_PORT    = random.randint(49200, 49900)
+# Puerto CDP FIJO (configurable), no aleatorio. Lo era —para no exponer un 9222
+# predecible—, pero un puerto distinto en cada arranque hace imposible lo único que
+# funciona cuando el PC ya lleva rato encendido: **reutilizar el Edge que el usuario ya
+# tiene abierto**. Con Edge en marcha, lanzar otro proceso con `--remote-debugging-port`
+# no abre nada: el segundo delega en la instancia existente y se cierra a los pocos
+# segundos (comprobado el 2026-09-03: el puerto escuchaba ~6 s y luego desaparecía),
+# así que `connect_over_cdp` llegaba tarde y fallaba con ECONNREFUSED. Chromium solo
+# escucha el puerto en loopback, de modo que el acceso sigue limitado a procesos de esta
+# misma máquina.
+EDGE_DEBUG_PORT    = int(os.getenv("EDGE_DEBUG_PORT") or 49605)
 
 _EDGE_PATHS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -893,6 +897,79 @@ def conectar_vpn(job_id: str):
 # job como 'failed'. Para añadir una acción nueva: define la función y regístrala
 # en el diccionario ACCIONES.
 
+def cdp_escucha(puerto: int, espera: float = 0.6) -> bool:
+    """True si algo acepta conexiones en 127.0.0.1:puerto (el CDP de un Chromium vivo)."""
+    try:
+        with socket.create_connection(("127.0.0.1", puerto), timeout=espera):
+            return True
+    except OSError:
+        return False
+
+
+def asegurar_edge_con_cdp(edge_profile: str, espera_max: int = 15):
+    """Deja un Edge accesible por CDP en EDGE_DEBUG_PORT, o explica por qué no puede.
+
+    El orden importa. Si el usuario ya tiene Edge abierto CON el puerto (su acceso
+    directo lo lleva), se reutiliza tal cual: es el navegador con su sesión de Alud y
+    Okta ya iniciada, que es justo lo que necesita el agente. Solo si no hay nadie
+    escuchando se lanza uno.
+
+    Y si hay un Edge abierto SIN el puerto, lanzar otro no sirve de nada: el proceso
+    nuevo delega en el que ya corre y se cierra, dejando el puerto muerto a los pocos
+    segundos. Eso daba un `ECONNREFUSED` a secas, que no dice nada de la causa; aquí se
+    convierte en un error que sí dice qué hacer.
+    """
+    if cdp_escucha(EDGE_DEBUG_PORT):
+        log.info(f"Reutilizando el Edge ya abierto (CDP en {EDGE_DEBUG_PORT}).")
+        return
+
+    if not EDGE_EXE:
+        raise RuntimeError("No se encontró el ejecutable de Edge")
+
+    edge_abierto = edge_en_marcha()
+    log.info(f"Lanzando Edge detached desde {EDGE_EXE} (CDP {EDGE_DEBUG_PORT})...")
+    subprocess.Popen(
+        [EDGE_EXE,
+         f"--user-data-dir={edge_profile}",
+         "--profile-directory=Default",
+         f"--remote-debugging-port={EDGE_DEBUG_PORT}",
+         "--no-first-run"],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    # Espera activa en vez de un sleep fijo: arrancar Edge en frío pasa de los 4 s que
+    # se dormían antes, y cuando delega el puerto puede aparecer y desaparecer.
+    limite = time.time() + espera_max
+    while time.time() < limite:
+        if cdp_escucha(EDGE_DEBUG_PORT):
+            log.info("Edge responde por CDP.")
+            return
+        time.sleep(0.5)
+
+    if edge_abierto:
+        raise RuntimeError(
+            f"Edge ya estaba abierto sin el puerto de depuración, así que el que se ha "
+            f"lanzado ha delegado en él y se ha cerrado. Cierra Edge del todo, o "
+            f"arráncalo siempre con --remote-debugging-port={EDGE_DEBUG_PORT}."
+        )
+    raise RuntimeError(
+        f"Edge no ha abierto el puerto de depuración {EDGE_DEBUG_PORT} en {espera_max}s"
+    )
+
+
+def edge_en_marcha() -> bool:
+    """¿Hay algún msedge.exe corriendo? Sin dependencias nuevas: tasklist basta."""
+    try:
+        salida = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "msedge.exe" in salida.lower()
+
+
 def accion_resolver_alud(job_id: str, payload: dict):
     """Abre Alud en Edge, extrae el enunciado de la entrega y lanza Claude Cowork."""
     titulo   = payload.get("titulo", "Sin título")
@@ -913,21 +990,14 @@ def accion_resolver_alud(job_id: str, payload: dict):
     edge_profile = os.getenv("EDGE_PROFILE_DIR") or os.path.join(os.path.expanduser("~"), "AppData", "Local", "Microsoft", "Edge", "User Data")
     if not EDGE_EXE:
         raise RuntimeError("No se encontró el ejecutable de Edge")
-    log.info(f"Lanzando Edge detached desde {EDGE_EXE}...")
-    subprocess.Popen(
-        [EDGE_EXE,
-         f"--user-data-dir={edge_profile}",
-         "--profile-directory=Default",
-         f"--remote-debugging-port={EDGE_DEBUG_PORT}",
-         "--no-first-run"],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    time.sleep(4)  # esperar a que Edge arranque y exponga el puerto CDP
+    asegurar_edge_con_cdp(edge_profile)
 
     pw = sync_playwright().start()
     try:
-        browser = pw.chromium.connect_over_cdp(f"http://localhost:{EDGE_DEBUG_PORT}")
+        # 127.0.0.1 y no "localhost": en Windows el nombre resuelve primero a ::1 y
+        # Edge escucha SOLO en IPv4, así que por "localhost" el intento moría con
+        # `ECONNREFUSED ::1:<puerto>` aunque el navegador estuviera perfectamente vivo.
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{EDGE_DEBUG_PORT}")
         # Usar el contexto existente de Edge (el que tiene el perfil del usuario)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
