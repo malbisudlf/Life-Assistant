@@ -130,10 +130,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
        cuerpo JSON `{"mensaje": <Texto dictado>}`.
     3. *Obtener valor del diccionario* → clave `texto`.
     4. *Hablar texto*.
+    El campo `mensaje` del cuerpo JSON tiene que ser de tipo **Text**; con cualquier otro,
+    el backend responde 422.
     Nombre corto y pronunciable, que es lo que habrá que decirle a Siri cada vez. En el
-    reloj aparece en la app Atajos y puede ponerse como complicación de la esfera. Sube el
-    tiempo de espera de la petición: Fly escala a cero y el primer arranque del día tarda
-    10–15 s, que con el tope por defecto se queda en un error sin explicación.
+    reloj aparece en la app Atajos y puede ponerse como complicación de la esfera.
+    Y una cosa que NO hay que buscar: *Obtener contenido de URL* **no tiene ajuste de
+    tiempo de espera**. No hace falta — su límite propio ronda el minuto y el arranque en
+    frío de Fly son 10–15 s la primera vez del día. Si el atajo falla, no es por ahí.
 
 - **Jarvis en internet** (`buscar_en_internet`, `leer_pagina`): dos invariantes, y las dos
   son de seguridad, no de comodidad.
