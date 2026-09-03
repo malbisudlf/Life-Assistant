@@ -172,6 +172,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. El canal de la llamada, aparte, en `docs/LLAMADAS.md` |
+| `docs/AVISAME.md` | **Diseñado, sin implementar.** Que una sesión de Claude Code te avise al móvil al terminar (o al quedarse bloqueada) y puedas contestarle hablando, por el mismo canal que el permiso de despliegue |
 | `docs/LLAMADAS.md` | El teléfono: que Jarvis te llame y puedas contestarle hablando. Qué servicios se evaluaron (y por qué gratis no da bidireccional), el puente de audio con Twilio, su seguridad, su coste y lo que costó descubrir |
 | `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
 | `docs/REVISION_BACKEND.md` | Revisión antigua de `backend/main.py` fichero a fichero. Histórico: mira antes si el hallazgo sigue vivo |

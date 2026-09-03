@@ -229,3 +229,5 @@ curl -X POST "$BACKEND_URL/revision/pr-listo" -H "X-Auth-Token: $REVISION_TOKEN"
 
 El segundo hace sonar el teléfono, así que es la forma de probar la llamada sin romper el
 CI. Para probar solo el aviso sin gastar una llamada, apaga `LLAMADAS`.
+
+<!-- Canal probado el 2026-09-03: aviso, botones y pantalla de llamada. -->
