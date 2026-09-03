@@ -120,6 +120,33 @@ try:
 except ValueError:
     APOLLO_TIMEOUT = 30   # segundos máx esperando al proceso
 
+# ── Pantallas mientras se streamea ─────────────────────────────────────────────
+# Por Artemis solo se ve UNA pantalla, así que con el escritorio extendido lo que
+# Windows abra en el otro monitor queda fuera de alcance: se ve en el PC de casa y no
+# en el móvil, y desde fuera no hay forma de arrastrarlo hasta la pantalla que sí
+# viaja. Por eso el job de streaming pone Windows en DUPLICAR antes de abrir Apollo:
+# los dos monitores enseñan lo mismo y nada puede esconderse en el que no se ve.
+#
+# El cambio va ANTES de arrancar Apollo a propósito: el host elige qué salida captura
+# al arrancar, y reconfigurar los monitores por debajo le deja el stream mirando a una
+# pantalla que ya no existe.
+#
+# PANTALLAS_STREAMING (al abrir el streaming) y PANTALLAS_RESTAURAR (el modo al que se
+# vuelve, para el atajo `--pantallas` que dispara Home Assistant antes de apagar o
+# suspender el PC) aceptan: "clone" (duplicar), "extend" (extender), "internal" (solo
+# la principal), "external" (solo la segunda) y "ninguna" (no tocar las pantallas).
+_MODOS_PANTALLA = ("clone", "extend", "internal", "external")
+PANTALLAS_STREAMING = (os.getenv("PANTALLAS_STREAMING") or "clone").strip().lower()
+PANTALLAS_RESTAURAR = (os.getenv("PANTALLAS_RESTAURAR") or "extend").strip().lower()
+
+# DisplaySwitch.exe es el propio conmutador de Win+P: no hay API pública para esto y es
+# lo que usa Windows, así que se prefiere a tocar el registro o a mover ventanas a mano.
+# Se construye desde %SystemRoot% en vez de fijar C:\Windows por si el sistema no está
+# en C:, y `System32` no se toca (con Python de 64 bits no hay redirección WOW64).
+DISPLAYSWITCH_EXE = os.getenv("DISPLAYSWITCH_EXE") or os.path.join(
+    os.environ.get("SystemRoot", r"C:\Windows"), "System32", "DisplaySwitch.exe"
+)
+
 # ── VPN (Tailscale) ────────────────────────────────────────────────────────────
 # Fuera de casa Artemis solo llega al PC por la VPN, pero el PC arranca SIN ella:
 # lo enciende un WOL, nadie inicia sesión a mano y el túnel puede quedarse abajo
@@ -935,12 +962,57 @@ def arrancar_apollo():
     )
 
 
+def cambiar_modo_pantallas(modo: str) -> bool:
+    """Pone Windows en ese modo de pantallas. Devuelve si se pudo. NUNCA lanza.
+
+    El modo se comprueba contra `_MODOS_PANTALLA` aunque viaje como argumento de un
+    exe y no por un shell: sale de una variable de entorno, y un valor inventado haría
+    que DisplaySwitch abriera su interfaz gráfica y se quedara ahí esperando a que
+    alguien elija — con el PC vacío, eso es un job colgado hasta el timeout.
+
+    Un fallo aquí no tumba nada: el stream se ve igual, solo que con el escritorio
+    como estuviera.
+    """
+    if modo == "ninguna":
+        return True
+    if modo not in _MODOS_PANTALLA:
+        log.warning(f"Modo de pantallas no válido: {modo!r} (opciones: "
+                    f"{', '.join(_MODOS_PANTALLA)}, ninguna). No se toca nada.")
+        return False
+    if not os.path.exists(DISPLAYSWITCH_EXE):
+        log.warning(f"No se encontró DisplaySwitch.exe en {DISPLAYSWITCH_EXE}")
+        return False
+
+    rc, _, err = _nativo([DISPLAYSWITCH_EXE, f"/{modo}"])
+    if rc != 0:
+        log.warning(f"DisplaySwitch /{modo} falló (rc={rc}): {err}")
+        return False
+    # DisplaySwitch vuelve en cuanto le pasa el encargo al sistema, no cuando los
+    # monitores han terminado de reconfigurarse. Apollo captura justo después, así que
+    # se le deja acabar antes de seguir.
+    time.sleep(2)
+    log.info(f"Pantallas en modo '{modo}'.")
+    return True
+
+
 def accion_abrir_streaming(job_id: str, payload: dict):
     """Conecta la VPN y deja Apollo corriendo para Artemis desde el móvil."""
     # La VPN primero: Apollo anuncia sus direcciones al arrancar, así que si el
     # interfaz de Tailscale aparece después, el móvil puede no ver el host hasta
     # reiniciarlo. Además así el modal enseña la IP antes de decir "listo".
     ip_vpn = conectar_vpn(job_id)
+
+    # Y las pantallas antes que Apollo: lo que quede en un monitor que no se ve por
+    # Artemis es inalcanzable desde fuera de casa.
+    if PANTALLAS_STREAMING != "ninguna":
+        if cambiar_modo_pantallas(PANTALLAS_STREAMING):
+            report_stage(job_id, "pantallas_ok",
+                         f"Pantallas en modo '{PANTALLAS_STREAMING}'")
+        else:
+            report_stage(job_id, "pantallas_error",
+                         "No se pudo cambiar el modo de pantallas — puede que algo "
+                         "quede en un monitor que no ves")
+
     report_stage(job_id, "streaming_starting", "Arrancando Apollo")
     arrancar_apollo()
     report_stage(
@@ -1009,6 +1081,7 @@ def main():
     log.info(f"Apollo: servicio '{APOLLO_SERVICIO or 'auto (' + '/'.join(_SERVICIOS_STREAMING) + ')'}' "
              f"/ {APOLLO_EXE or 'exe NO ENCONTRADO'}")
     log.info(f"VPN ({VPN_TIPO}): {TAILSCALE_EXE or 'Tailscale NO ENCONTRADO'}")
+    log.info(f"Pantallas al streamear: '{PANTALLAS_STREAMING}'")
     if TOKEN_CADUCA:
         log.warning(
             "Usando LA_TOKEN (JWT del dashboard): caduca a los 30 días y el agente se "
@@ -1054,4 +1127,14 @@ def main():
 
 
 if __name__ == "__main__":
+    # Atajo al margen del ciclo de jobs: `agent.py --pantallas [modo]` cambia el modo de
+    # pantallas y sale. Lo usa Home Assistant antes de apagar o suspender el PC para
+    # devolver el escritorio a como estaba antes de streamear, y tiene que ir por la
+    # tarea del Programador (`schtasks /run /tn LifeAssistantPantallas`), NO por el SSH
+    # directo: lo que entra por SSH corre en la sesión 0, sin escritorio que
+    # reconfigurar, y DisplaySwitch no hace nada — sin fallar, que es lo peor.
+    if "--pantallas" in sys.argv:
+        _i = sys.argv.index("--pantallas")
+        _modo = sys.argv[_i + 1] if len(sys.argv) > _i + 1 else PANTALLAS_RESTAURAR
+        sys.exit(0 if cambiar_modo_pantallas(_modo.strip().lower()) else 1)
     main()
