@@ -1,0 +1,95 @@
+name: Evals de Jarvis
+
+# Mide el acierto de Jarvis eligiendo herramienta, contra la API real de OpenAI.
+#
+# NO va en el CI y no se dispara con `push` a propósito: cada tirada son ~130 llamadas
+# de pago al modelo. Es una medida de tendencia, no una puerta de mérito por commit —
+# lo que se busca es que el catálogo, que no para de crecer, no degrade el enrutado sin
+# que nadie se entere. Ver `docs/EVALS.md`.
+#
+# A mano:  gh workflow run "Evals de Jarvis" --ref main
+#          gh workflow run "Evals de Jarvis" -f modelos="gpt-5-nano gpt-5-mini"
+on:
+  workflow_dispatch:
+    inputs:
+      modelos:
+        description: 'Modelos a medir, separados por espacios. Vacío = JARVIS_MODEL y JARVIS_MODEL_ACCION.'
+        required: false
+        default: ''
+      umbral:
+        description: 'Acierto mínimo (0-1). Vacío = el de evals/casos.json.'
+        required: false
+        default: ''
+  schedule:
+    # Lunes a las 05:20 UTC. Semanal y no diario: es una medida de tendencia y el
+    # catálogo no cambia todos los días. Lunes temprano para que el resultado esté
+    # cuando empieza la semana.
+    - cron: '20 5 * * 1'
+
+# Dos tiradas a la vez serían dinero gastado dos veces para medir lo mismo.
+concurrency:
+  group: evals-jarvis
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: Acierto eligiendo herramienta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # misma versión que la imagen de Fly
+          cache: pip
+      - name: Instalar dependencias del backend
+        # El runner importa `backend/main.py` tal cual para sacar de ahí el esquema de
+        # herramientas: la única fuente de verdad es `_JARVIS_HERRAMIENTAS`.
+        run: pip install -r backend/requirements.txt
+
+      - name: Correr las evals
+        id: evals
+        env:
+          # El ÚNICO secreto que hace falta: no se toca Supabase, ni Graph, ni HA. Lo
+          # que el prompt leería de Supabase lo sustituye el propio runner por datos
+          # fijos, para que dos tiradas sean comparables.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Los mismos modelos que producción salvo que se pidan otros a mano.
+          JARVIS_MODEL: ${{ vars.JARVIS_MODEL || 'gpt-4o-mini' }}
+          JARVIS_MODEL_ACCION: ${{ vars.JARVIS_MODEL_ACCION || 'gpt-5-mini' }}
+          # Por env y no interpolados en el `run`: lo que escribe una persona en un
+          # formulario no se pega dentro de un script de shell (la misma regla que en
+          # el backend con lo que redacta un modelo).
+          MODELOS: ${{ github.event.inputs.modelos }}
+          UMBRAL:  ${{ github.event.inputs.umbral }}
+        run: |
+          set -o pipefail
+          # Con `if` y no con `[ … ] && …`: el shell de Actions corre con `-e`, así que
+          # un test falso en la última línea abortaría el paso sin haber medido nada.
+          ARGS=""
+          if [ -n "$MODELOS" ]; then ARGS="$ARGS --modelos $MODELOS"; fi
+          if [ -n "$UMBRAL" ];  then ARGS="$ARGS --umbral $UMBRAL";   fi
+          python evals/correr.py $ARGS 2>&1 | tee evals/salida.txt
+
+      - name: Publicar el resultado en el resumen del run
+        # Siempre, también cuando el paso anterior sale con código 1 por bajar del
+        # umbral: ese es justo el run cuyo detalle hay que poder leer sin abrir logs.
+        if: always()
+        run: |
+          {
+            echo '## Evals de Jarvis'
+            echo
+            echo '```'
+            # Las líneas de progreso (una por caso) no aportan nada en el resumen.
+            grep -vE '^  (ok|sin medir|FALLO) ' evals/salida.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar los resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-jarvis
+          path: |
+            evals/resultados.json
+            evals/salida.txt
+          retention-days: 90

@@ -385,3 +385,53 @@ mantén el prefijo y el `try/catch` al parsear.
   dentro o la regla `no-empty` fallará.
 - El lint debe quedar a **cero errores y cero warnings**. Se limpió por completo en
   julio de 2026; no dejes que se vuelva a degradar.
+
+## El widget «El día» (`dia_linea`)
+
+Una línea de tiempo con todo lo que le pasó a un día sobre el mismo eje: eventos, sueño,
+entrenos, presencia, avisos y casa, un carril por familia. Existe porque el motor de
+conclusiones cruza **series** (dos métricas a lo largo de semanas) y esto cruza
+**momentos**, que es justo lo que un cruce estadístico no puede ver: que se duerme mal las
+noches después de una cita tarde, que los días con el PC encendido hasta las dos el sueño
+se hunde.
+
+La lógica pura vive en `src/lib/lineaTiempo.js` (normalizar cada fuente a tramos, repartir
+los solapes en subfilas, recortar lo que cruza la medianoche, pasar horas a porcentajes);
+el componente, dentro de `Dashboard.jsx` como todos. Lo que conviene saber antes de
+tocarlo:
+
+- **El eje mide el día REAL, no 24 h fijas.** Se calcula entre dos medianoches locales
+  (1.380 / 1.440 / 1.500 min). Con 1.440 clavado, media jornada de los dos domingos de
+  cambio de hora se pintaría corrida.
+- **El sueño va a caballo entre dos días.** La fila de `sleep_analysis` se guarda con la
+  fecha del DESPERTAR y `extra.sleep_start` es hora de pared: si es ≥ 12:00 la noche
+  empezó el día anterior. Para pintar un día se miran **dos** filas, y los cortes se
+  marcan (`←` / `→`) en vez de disimularse.
+- **«Sin hora» no es «a medianoche».** Lo que ocurrió sin momento conocido (eventos de
+  todo el día, sesiones de entrenamiento —la tabla solo guarda `date`—, noches sin
+  `sleep_start`) sale como chip debajo del carril, nunca colocado en el eje. Un evento de
+  todo el día pintado de 00:00 a 24:00 taparía el carril entero.
+- **Fuente ausente ≠ fuente vacía.** Cada carril lleva estado (`ok` / `cargando` /
+  `error` / `parcial` / `ausente`): con fuente `ok` y sin datos dice «Nada este día»; en
+  cualquier otro caso, borde discontinuo y «no lo sé». La cabecera dice cuántos carriles
+  de seis tienen datos, porque un día con dos carriles conocidos no es un día tranquilo.
+- **Lo que hoy no se puede pintar, y por qué**: `/calendar/events` solo consulta **desde
+  hoy**, así que al retroceder el carril de eventos es `parcial`; la presencia da horas al
+  día pero no tramos (el histórico de presencia está descartado a propósito); y de la casa
+  no hay histórico ninguno — `/ha/entidades` es POST-only y su contenido es una foto del
+  ahora sin marcas de tiempo. Los avisos SÍ tienen horas desde `GET /avisos/enviados`.
+
+## Panel ⚙: coste y por qué
+
+Dos añadidos al bloque de estado del sistema, los dos con el mismo criterio de siempre —
+que lo que no se sabe se diga:
+
+- **Fila «Coste del modelo»** (`GET /gasto?dias=30`): euros del mes, llamadas y % cacheado,
+  con desglose por boca al desplegar. Si algún modelo no tiene tarifa configurada, el
+  total se marca y se dice cuál falta: un número que no incluye todo el gasto y no lo
+  advierte engaña más que no darlo.
+- **Los avisos de hoy** (`GET /avisos/enviados`), cada uno con un «¿Por qué?» que pide
+  `GET /avisos/{id}/porque` y enseña los valores crudos con los que se disparó. Se piden
+  **solo al abrir uno**: son una consulta más y casi nunca se miran. Y «no se ha podido
+  consultar» se pinta distinto de «este aviso no guardó con qué se disparó».
+

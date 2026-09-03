@@ -176,3 +176,17 @@ está duplicado en los dos lados y **tienen que coincidir**.
 `VPN_TIPO`/`TAILSCALE_EXE`/`TAILSCALE_SERVICIO`/`VPN_TIMEOUT`,
 `PANTALLAS_STREAMING`/`PANTALLAS_RESTAURAR`/`DISPLAYSWITCH_EXE`, `ARRANQUE_ESPERA_RED`.
 **Ya no lleva `SUPABASE_URL`/`SUPABASE_KEY`**: se quitaron a propósito (ver "Cola de jobs" en `docs/BACKEND_PATRONES.md`).
+
+## Endpoints añadidos en septiembre de 2026
+
+| Ruta | Auth | Qué hace |
+|---|---|---|
+| `POST /jarvis/atajo` | `JARVIS_TOKEN` (cabecera) o JWT | Un turno suelto de Jarvis para el Atajo de iOS. Sin historial, siempre `voz`, y dice en voz alta lo que queda pendiente de confirmar. Ver `docs/JARVIS.md` |
+| `GET /avisos/enviados?dia=&limite=` | JWT | Los avisos que salieron ese día (por defecto hoy), con hora y con su valoración. Ventana desde la medianoche **local** |
+| `GET /avisos/{id}/porque` | JWT | Los valores crudos con los que se disparó ese aviso. `motivo: null` con 200 si no se guardó |
+| `GET /gasto?dias=` | JWT | Lo que ha costado el modelo, agregado por boca y por modelo, con el % cacheado y los modelos sin tarifa |
+
+Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
+`GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`.
+Todas documentadas una a una en `backend/.env.example`.
+

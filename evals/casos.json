@@ -1,0 +1,97 @@
+{
+  "_comentario": [
+    "Casos de evaluación del enrutado de herramientas de Jarvis.",
+    "Cada caso es UNA petición en lenguaje natural y qué herramienta debería pedir el",
+    "modelo en la PRIMERA vuelta, con el esquema real que expone el backend.",
+    "",
+    "  espera        : lista de nombres ACEPTABLES. Basta con que el modelo pida uno de",
+    "                  ellos para dar el caso por acertado. Varias entradas no es tibieza:",
+    "                  es que hay peticiones con dos caminos igual de correctos (mirar el",
+    "                  catálogo de la casa antes de ordenar, listar antes de borrar).",
+    "  espera_todas  : si está, TODAS tienen que aparecer en la misma vuelta. Para las",
+    "                  peticiones que de verdad necesitan dos herramientas a la vez.",
+    "  espera: []    : caso NEGATIVO — no debe pedir ninguna herramienta.",
+    "  confundible   : la herramienta con la que se espera que se equivoque. No puntúa;",
+    "                  sirve para que el informe distinga un fallo previsto de uno nuevo.",
+    "",
+    "Al añadir una herramienta a _JARVIS_HERRAMIENTAS, añade aquí su caso: el runner",
+    "avisa de las herramientas del esquema que ningún caso cubre."
+  ],
+  "umbral": 0.85,
+  "casos": [
+    { "id": "agenda-manana", "grupo": "consultas", "peticion": "¿Qué tengo mañana en el calendario?", "espera": ["agenda"] },
+    { "id": "agenda-semana", "grupo": "consultas", "peticion": "Dime todo lo que tengo esta semana, clases incluidas.", "espera": ["agenda"] },
+    { "id": "clima-hoy", "grupo": "consultas", "peticion": "¿Va a llover hoy? ¿Cojo paraguas?", "espera": ["clima"] },
+    { "id": "salud-hrv", "grupo": "pares", "peticion": "¿Cómo llevo la variabilidad cardíaca estos días?", "espera": ["salud"], "confundible": "sueno", "nota": "salud vs sueno: la HRV es una métrica media, no una noche concreta." },
+    { "id": "sueno-noches", "grupo": "pares", "peticion": "Cuéntame cómo dormí las tres últimas noches, con las fases de cada una.", "espera": ["sueno"], "confundible": "salud", "nota": "El detalle noche a noche es `sueno`; la media agregada es `salud`." },
+    { "id": "salud-pasos", "grupo": "consultas", "peticion": "¿Cuántos pasos estoy haciendo de media?", "espera": ["salud"] },
+    { "id": "donde-estoy", "grupo": "consultas", "peticion": "¿Estoy en casa ahora mismo?", "espera": ["donde_estoy"] },
+    { "id": "entrenamiento-pendiente", "grupo": "pares", "peticion": "¿Cuántas sesiones de entrenamiento llevo sin cobrar?", "espera": ["entrenamiento"], "confundible": "salud", "nota": "salud vs entrenamiento: aquí 'entrenamiento' es el trabajo que da, no el ejercicio que hace." },
+    { "id": "salud-vs-entreno", "grupo": "pares", "peticion": "¿Cuánta energía activa he quemado esta semana según el reloj?", "espera": ["salud"], "confundible": "entrenamiento" },
+    { "id": "finanzas", "grupo": "consultas", "peticion": "¿Cuánto vale ahora mismo mi cartera de Indexa?", "espera": ["finanzas"] },
+    { "id": "estado-pc", "grupo": "consultas", "peticion": "¿Está el agente del PC conectado?", "espera": ["estado_pc"] },
+    { "id": "ideas-listar", "grupo": "pares", "peticion": "¿Qué ideas tengo apuntadas últimamente?", "espera": ["ideas"], "confundible": "guardar_idea" },
+    { "id": "capacidades", "grupo": "consultas", "peticion": "¿Qué cosas sabes hacer exactamente?", "espera": ["mis_capacidades"] },
+    { "id": "diagnostico", "grupo": "pares", "peticion": "Llevo dos días sin recibir el correo de la mañana, ¿qué te ha pasado?", "espera": ["diagnostico", "estado_resumen_diario"], "confundible": "errores" },
+    { "id": "errores", "grupo": "pares", "peticion": "¿Qué ha fallado en el backend en las últimas horas?", "espera": ["errores", "diagnostico"] },
+
+    { "id": "recordatorios-listar", "grupo": "pares", "peticion": "¿Qué recordatorios tengo pendientes?", "espera": ["mis_recordatorios"], "confundible": "recordarme", "nota": "consultar vs crear." },
+    { "id": "recordatorio-crear", "grupo": "pares", "peticion": "Recuérdame mañana a las nueve que llame al dentista.", "espera": ["recordarme"], "confundible": "mis_recordatorios" },
+    { "id": "recordatorio-cancelar", "grupo": "pares", "peticion": "Anula el recordatorio del dentista, ya he llamado.", "espera": ["cancelar_recordatorio", "mis_recordatorios"], "confundible": "recordarme" },
+    { "id": "reglas-listar", "grupo": "pares", "peticion": "¿Qué reglas de aviso tengo aprobadas?", "espera": ["mis_reglas"], "confundible": "proponer_regla" },
+    { "id": "regla-crear", "grupo": "pares", "peticion": "Quiero que me avises siempre que lleve tres días seguidos sin entrenar.", "espera": ["proponer_regla"], "confundible": "recordarme", "nota": "Una condición permanente es una regla; un aviso con fecha es un recordatorio." },
+    { "id": "regla-quitar", "grupo": "pares", "peticion": "Quítame la regla esa de los entrenos, me está dando la brasa.", "espera": ["quitar_regla", "mis_reglas"], "confundible": "proponer_regla" },
+    { "id": "vigilancias-listar", "grupo": "pares", "peticion": "¿Qué páginas estás vigilando ahora mismo?", "espera": ["mis_vigilancias"], "confundible": "vigilar_pagina" },
+    { "id": "vigilar-pagina", "grupo": "pares", "peticion": "Vigila https://example.com/notas y avísame cuando aparezca la palabra 'publicadas'.", "espera": ["vigilar_pagina"], "confundible": "leer_pagina", "nota": "leer una vez vs vigilar en el tiempo." },
+    { "id": "dejar-de-vigilar", "grupo": "pares", "peticion": "Deja de vigilar la página de las notas.", "espera": ["dejar_de_vigilar", "mis_vigilancias"] },
+
+    { "id": "recordar-hecho", "grupo": "pares", "peticion": "Que te quede claro para siempre: la hora de entrenamiento personal la cobro a 16 euros.", "espera": ["recordar"], "confundible": "guardar_idea", "nota": "memoria (hecho duradero) vs idea (nota del usuario)." },
+    { "id": "guardar-idea", "grupo": "pares", "peticion": "Apúntame esta idea: un carril horizontal con todo el día sobre el mismo eje.", "espera": ["guardar_idea"], "confundible": "recordar" },
+    { "id": "olvidar", "grupo": "pares", "peticion": "Lo que guardaste sobre mi horario de gimnasio ya no vale, bórralo de tu memoria.", "espera": ["olvidar"], "confundible": "borrar_idea" },
+    { "id": "borrar-idea", "grupo": "pares", "peticion": "Borra la nota que guardé sobre la lista de la compra.", "espera": ["borrar_idea", "ideas"], "confundible": "olvidar" },
+
+    { "id": "evento-crear", "grupo": "calendario", "peticion": "Ponme una cita con el fisio el jueves que viene a las cinco de la tarde.", "espera": ["crear_evento"], "confundible": "recordarme", "nota": "calendario vs recordatorio: 'ponme una cita' es un evento." },
+    { "id": "evento-editar", "grupo": "calendario", "peticion": "Mueve la reunión de mañana por la mañana a las doce.", "espera": ["editar_evento", "agenda"], "confundible": "crear_evento" },
+    { "id": "evento-borrar", "grupo": "calendario", "peticion": "Quita del calendario la clase del viernes, que se ha caído.", "espera": ["borrar_evento", "agenda"], "confundible": "editar_evento" },
+    { "id": "agenda-vs-crear", "grupo": "calendario", "peticion": "¿Tengo algo el jueves a las cinco?", "espera": ["agenda"], "confundible": "crear_evento", "nota": "consultar vs crear con la misma frase de fecha." },
+
+    { "id": "sesion-anadir", "grupo": "pares", "peticion": "Apunta que hoy le he dado una sesión de hora y media a Ane.", "espera": ["anadir_sesion_entrenamiento"], "confundible": "crear_evento" },
+    { "id": "cobro-marcar", "grupo": "pares", "peticion": "Marca como cobradas las sesiones que tengo pendientes.", "espera": ["cobrar_entrenamiento"], "confundible": "entrenamiento" },
+
+    { "id": "pc-encender", "grupo": "pc", "peticion": "Enciende el PC, anda.", "espera": ["encender_pc"], "confundible": "estado_pc" },
+    { "id": "pc-apagar", "grupo": "pc", "peticion": "Apágame el ordenador de casa.", "espera": ["apagar_pc"], "confundible": "suspender_pc" },
+    { "id": "pc-suspender", "grupo": "pc", "peticion": "Deja el PC suspendido, que vuelvo en un rato y no quiero que arranque de cero.", "espera": ["suspender_pc"], "confundible": "apagar_pc" },
+    { "id": "pc-streaming", "grupo": "pc", "peticion": "Prepárame el PC para jugar en remoto desde el sofá.", "espera": ["lanzar_streaming"], "confundible": "encender_pc" },
+    { "id": "jobs-listar", "grupo": "pc", "peticion": "¿Cómo van los últimos trabajos que se encolaron para el PC?", "espera": ["jobs"], "confundible": "reintentar_job" },
+    { "id": "job-reintentar", "grupo": "pc", "peticion": "El último job falló; vuelve a encolarlo.", "espera": ["reintentar_job", "jobs"], "confundible": "relanzar_agente" },
+    { "id": "agente-relanzar", "grupo": "pc", "peticion": "El PC está encendido pero el agente no da señales, relánzalo.", "espera": ["relanzar_agente"], "confundible": "encender_pc" },
+
+    { "id": "casa-listar", "grupo": "casa", "peticion": "¿Qué luces tengo encendidas en casa?", "espera": ["casa_dispositivos"], "confundible": "casa_ordenar" },
+    { "id": "casa-ordenar", "grupo": "casa", "peticion": "Enciende la luz del salón.", "espera": ["casa_ordenar", "casa_dispositivos"], "nota": "La descripción de casa_ordenar pide mirar el catálogo antes: las dos valen." },
+
+    { "id": "resumen-estado", "grupo": "resumen", "peticion": "¿Está activo el resumen de la mañana?", "espera": ["estado_resumen_diario"], "confundible": "configurar_resumen_diario" },
+    { "id": "resumen-configurar", "grupo": "resumen", "peticion": "Pausa el resumen diario hasta el lunes que viene, que estoy de viaje.", "espera": ["configurar_resumen_diario"], "confundible": "estado_resumen_diario" },
+    { "id": "resumen-enviar", "grupo": "resumen", "peticion": "Mándame ahora mismo el resumen al correo.", "espera": ["enviar_resumen"], "confundible": "configurar_resumen_diario" },
+
+    { "id": "buscar-internet", "grupo": "web", "peticion": "¿Cuándo juega el Athletic la próxima jornada de liga?", "espera": ["buscar_en_internet"] },
+    { "id": "leer-pagina", "grupo": "web", "peticion": "Ábreme https://es.wikipedia.org/wiki/Bilbao y dime de qué habla la entradilla.", "espera": ["leer_pagina"], "confundible": "buscar_en_internet" },
+
+    { "id": "mcp-servidores", "grupo": "mcp", "peticion": "¿Qué servidores MCP tengo conectados ahora mismo?", "espera": ["mcp_servidores"], "confundible": "mcp_catalogo" },
+    { "id": "mcp-catalogo", "grupo": "mcp", "peticion": "¿A qué servidores MCP me podría conectar que todavía no tenga?", "espera": ["mcp_catalogo"], "confundible": "mcp_servidores" },
+    { "id": "mcp-conectar", "grupo": "mcp", "peticion": "Conéctate al MCP de Notion, quiero que puedas leer mis páginas.", "espera": ["mcp_conectar", "mcp_catalogo", "buscar_en_internet"], "confundible": "mcp_servidores" },
+    { "id": "mcp-herramientas", "grupo": "mcp", "peticion": "¿Qué herramientas trae el servidor de GitHub que tienes conectado?", "espera": ["mcp_herramientas"], "confundible": "mcp_usar" },
+    { "id": "mcp-leer-issues", "grupo": "mcp", "peticion": "Dime los issues abiertos que tengo en el repositorio.", "espera": ["mcp_herramientas", "mcp_usar"], "confundible": "mcp_usar", "nota": "El fallo documentado en docs/JARVIS.md: pidiéndole LEER issues escogía add_issue_comment. Aquí se comprueba el paso previo: buscar la herramienta antes de usarla." },
+    { "id": "mcp-desconectar", "grupo": "mcp", "peticion": "Desconecta el servidor de Notion, ya no lo uso.", "espera": ["mcp_desconectar"], "confundible": "mcp_conectar" },
+
+    { "id": "anular-noche", "grupo": "salud", "peticion": "La noche del 30 de agosto dormí con el reloj mal puesto; anúlala para que no cuente en las medias.", "espera": ["anular_noche"], "confundible": "sueno" },
+    { "id": "arreglar-revision", "grupo": "mantenimiento", "peticion": "Ponte a arreglar lo que salió en la revisión de anoche.", "espera": ["arreglar_revision"], "confundible": "errores" },
+    { "id": "desplegar", "grupo": "mantenimiento", "peticion": "Adelante, despliega el arreglo que está esperando permiso.", "espera": ["desplegar"], "confundible": "arreglar_revision" },
+
+    { "id": "neg-saludo", "grupo": "negativos", "peticion": "Buenas, ¿qué tal andas?", "espera": [] },
+    { "id": "neg-gracias", "grupo": "negativos", "peticion": "Vale, gracias, eso era todo por hoy.", "espera": [] },
+    { "id": "neg-repetir", "grupo": "negativos", "peticion": "¿Puedes repetirme lo último pero más corto?", "espera": [] },
+    { "id": "neg-olvida-eso", "grupo": "negativos", "peticion": "Perdona, me he liado, olvida lo que acabo de decir.", "espera": [], "confundible": "olvidar", "nota": "Negativo a propósito: 'olvida eso' es lenguaje de conversación, no la herramienta `olvidar`." },
+    { "id": "neg-aritmetica", "grupo": "negativos", "peticion": "¿Cuánto es el 15% de 240?", "espera": [], "confundible": "buscar_en_internet" },
+    { "id": "neg-haiku", "grupo": "negativos", "peticion": "Escríbeme un haiku sobre el Cantábrico.", "espera": [] }
+  ]
+}

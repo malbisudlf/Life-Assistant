@@ -128,7 +128,10 @@ Ficheros clave:
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
 | `src/lib/vozMicro.js` | El micrófono mientras Jarvis habla: mide energía para saber si le has cortado (barge-in). No transcribe nada |
+| `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
+| `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
+| `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
@@ -162,6 +165,8 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/AGENTE_PC.md` | `agent/agent.py`: ciclo de vida, por qué no hay PowerShell en el camino crítico, streaming y Alud |
 | `docs/TESTS.md` | Antes de escribir tests: cómo está montado cada suite y sus trampas conocidas |
+| `docs/EVALS.md` | Las evals de Jarvis: cuánto acierta eligiendo herramienta, contra la API real. Qué mide, cómo se corre, qué cuesta y por qué NO vive en `tests/backend` |
+| `docs/COPIA_SEGURIDAD.md` | La copia de seguridad de Supabase: qué tablas se copian y cuáles no, por qué el volcado nace cifrado (el repositorio es público), los secrets del workflow y **cómo se restaura** |
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
@@ -273,7 +278,19 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
    `_leer_cuerpo_limitado(request, limite)` (mira `Content-Length` y además cuenta el
    stream, porque con `Transfer-Encoding: chunked` no hay cabecera que mirar).
    Límites: `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`.
-9. **Sin inyección en el agente**: el enunciado extraído de Alud **nunca** se interpola
+9. **Lo que el agente ejecuta y no se puede validar contra una lista blanca va
+   FIRMADO.** El encargo en lenguaje natural (`accion: "encargo"`) rompe la premisa del
+   punto 7 —hasta él, todo lo que el PC ejecutaba venía de una URL de
+   `ALUD_ALLOWED_HOSTS`—, porque no hay forma de comprobar QUÉ dice un texto libre. Lo
+   que se comprueba es QUIÉN lo escribió: `POST /jobs` firma la instrucción con
+   `AGENT_TOKEN` (`firma_encargo()`) y el agente la verifica antes de tocar nada
+   (`encargo_firmado()`). La firma se calcula **siempre de cero en el backend** y nunca
+   se acepta la que traiga el cliente, aunque venga bien: ese endpoint es el único sitio
+   donde consta que detrás había un JWT de usuario, y eso es justo lo que la firma
+   transporta. Sin `AGENT_TOKEN` no hay firma posible y el encargo se rechaza con un 503
+   que dice qué falta — nunca "va sin firmar". Y la herramienta de Jarvis va
+   `confirmar: True`: la propone el modelo, la aprueba una persona.
+10. **Sin inyección en el agente**: el enunciado extraído de Alud **nunca** se interpola
    en un comando de PowerShell. Se escribe a un fichero temporal UTF-8 (ruta generada
    por el SO) y `Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 -LiteralPath ...)`
    lo lee de ahí. Antes se usaba un here-string `@'...'@`, vulnerable si el texto
@@ -305,7 +322,8 @@ También está el workflow `Deploy backend (Fly.io)`
 `20260816_health_fuente`, `20260817_vigilante_estado`,
 `20260818_avisos_gobierno`, `20260819_vigilancias`,
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
-`20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`.
+`20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`,
+`20260903_avisos_motivo`, `20260903_gasto_modelo`.
 
 ## Convenciones
 
