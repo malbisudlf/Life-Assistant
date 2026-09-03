@@ -180,6 +180,12 @@ except ValueError:
 # Supabase es escribible con la service key, así que un payload puede llegar sin haber
 # pasado por el backend. Y lo que hay al otro lado de este goto es un Edge con la
 # sesión de Alud y Okta ya iniciada.
+# Datos del login de Alud. Ya no los usa el agente para pulsar nada: viajan dentro de
+# la instrucción de Cowork, porque quien tiene el navegador delante es Claude. La cuenta
+# sale del entorno y nunca del código — es un dato personal y el repositorio es público.
+DEUSTO_BUTTON  = "@deusto | @opendeusto"
+TARGET_ACCOUNT = os.getenv("ALUD_ACCOUNT", "")
+
 ALUD_ALLOWED_HOSTS = tuple(
     h.strip().lower()
     for h in os.getenv("ALUD_ALLOWED_HOSTS", "alud.deusto.es").split(",")
@@ -389,10 +395,15 @@ def build_cowork_instruction(titulo: str, alud_url: str) -> str:
     """
     return (
         f"Tengo una entrega universitaria que resolver en Alud (Moodle de Deusto).\n\n"
-        f"Ya te la he dejado abierta en una pestaña de Edge, con la sesión iniciada.\n\n"
+        f"Ya te la he dejado abierta en una pestaña de Edge.\n\n"
         f"URL de la entrega: {alud_url}\n\n"
         f"Título: {titulo}\n\n"
-        f"Por favor:\n"
+        + (
+            f"Si al llegar te encuentras la pantalla de inicio de sesión de Alud en vez de la entrega, entra tú: pulsa el botón «{DEUSTO_BUTTON}», y cuando Google pregunte por la cuenta elige {TARGET_ACCOUNT}. Puede abrirse en una ventana nueva. Si después salta Okta pidiendo aprobación en el móvil, espera a que llegue: el usuario la acepta desde el teléfono.\n\n"
+            if TARGET_ACCOUNT else
+            f"Si al llegar te encuentras la pantalla de inicio de sesión de Alud en vez de la entrega, entra tú: pulsa el botón «{DEUSTO_BUTTON}» y sigue el proceso con la cuenta de la universidad.\n\n"
+        )
+        + f"Por favor:\n"
         f"1. Ve a la ventana de Edge que está abierta en esa URL\n"
         f"2. Lee el enunciado de la entrega en pantalla\n"
         f"3. Resuelve la actividad y rellena el campo de respuesta\n"

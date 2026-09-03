@@ -119,9 +119,15 @@ y se aparta.
 - **El enunciado ya no se extrae**: lo lee Claude de la pestaña que le queda delante.
   Era lo único que obligaba a controlar el navegador, y ese control es lo que fallaba.
 - **Playwright ya no se usa aquí** (fuera de `requirements.txt`). Con él se fueron el
-  CDP, el puerto de depuración, `login_alud_if_needed()` y `extract_enunciado()`. El
-  login automático en Alud desaparece con ellos: el plan es otro, y más simple — el Edge
-  del usuario ya tiene la sesión iniciada, que es de dónde salía esa sesión igualmente.
+  CDP, el puerto de depuración, `login_alud_if_needed()` y `extract_enunciado()`.
+- **El login en Alud lo hace ahora Claude**, no el agente. La sesión del navegador
+  caduca, así que dar por hecho que está iniciada no vale: al abrir Alud sale la pantalla
+  de login más veces de las que uno esperaría. Eso es lo que hacía
+  `login_alud_if_needed()` y por lo que existía Playwright aquí. Los mismos pasos viajan
+  ahora dentro de la instrucción de Cowork —pulsar «@deusto | @opendeusto», elegir la
+  cuenta de `ALUD_ACCOUNT`, esperar el push de Okta— porque quien tiene el navegador
+  delante es Claude. `ALUD_ACCOUNT` sigue haciendo falta en `agent/.env`, solo que ahora
+  se lee para redactar la instrucción, no para pulsar.
 - **La advertencia sobre el contenido de la página sigue en la instrucción de Cowork**
   (`build_cowork_instruction`). Antes el enunciado llegaba copiado y se delimitaba entre
   marcadores; ahora no pasa por el agente, así que la advertencia se da por adelantado
