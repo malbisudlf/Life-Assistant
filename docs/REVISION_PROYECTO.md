@@ -66,14 +66,18 @@ el log no distingue entre "Claude no está abierto" y "PowerShell reventó".
 
 ## `agent/.env`
 
-### `AGENT_TOKEN` en el fichero (informativo)
+### `AGENT_TOKEN` en el fichero (correcto)
 
-```
-AGENT_TOKEN=1yAsFPQyOtFZFOjWDHdtHRF2CNDOCnHWUqLOMDp4alw
-```
+`agent/.env` está en `.gitignore`, que es justo donde tiene que vivir el token de
+servicio del agente. Nada que arreglar ahí.
 
-Está en `.gitignore` — correcto. Solo mencionarlo porque si alguien hace `git log`
-o `git diff` sin pensar, podría exponerlo.
+> **Aquí sí hubo una fuga, y era esta misma sección.** La revisión original pegó el
+> valor real del token dentro de este fichero —que **sí** se versiona— para ilustrar
+> que en `agent/.env` estaba bien guardado. El token quedó publicado en un repo
+> público durante once días (issue #95, 2026-08-23 → arreglado el 2026-09-03) y hubo
+> que rotarlo. La moraleja no es sobre `.gitignore`: **al documentar un secreto no se
+> copia su valor jamás, ni siquiera para decir que está a salvo.** Se nombra la
+> variable y se acabó.
 
 ---
 
