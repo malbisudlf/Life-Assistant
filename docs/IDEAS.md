@@ -186,6 +186,171 @@ que escriba mal lo pisa sin dejar rastro.
 
 ---
 
+## 6. Ronda de septiembre de 2026
+
+> **Las siete están HECHAS** (3 de septiembre de 2026), en el mismo día en que se
+> escribieron. Se deja el texto original de cada una porque el porqué sigue valiendo, y
+> debajo de este aviso lo que salió de hacerlas que no estaba previsto:
+>
+> - **6.2 obligó a una invariante nueva de seguridad** (la 9 de `CLAUDE.md`): un encargo
+>   en lenguaje natural no se puede validar contra una lista blanca, así que se firma con
+>   `AGENT_TOKEN` y el agente verifica la firma. Al escribirlo se vio además que el camino
+>   hasta Cowork tenía que ser UNO (`_pegar_en_cowork`), porque es donde vive la propiedad
+>   que no se puede perder: la instrucción nunca se interpola en un comando.
+> - **6.3 no podía ser una columna.** Empezó como un campo más en `jarvis_recordatorios`
+>   y acabó en tabla propia al caer en la cuenta de que, con la migración sin aplicar, el
+>   insert del aviso devolvería 400 — o sea que añadir una función de diagnóstico dejaría
+>   al sistema SIN AVISOS. Y obligó a que el backend ponga siempre el `id` del aviso.
+> - **6.4 midió algo que no se esperaba**: `gpt-4o-mini` acierta 63/63 eligiendo
+>   herramienta y `gpt-5-mini` 51/63, pero cinco de esos doce fallos son el mismo patrón
+>   (pedir `estado_pc` antes de actuar), que en el bucle real se resolvería solo. La cifra
+>   del modelo grande es un SUELO, no su acierto: no se puede quitar el reparto de modelos
+>   con ese número solo. Está escrito en `docs/EVALS.md` para que nadie lo haga.
+> - **6.5 descubrió que por streaming el `usage` hay que pedirlo** (`include_usage`): sin
+>   eso, el modo llamada —el que más gasta— era justo el único que no se podía medir.
+> - **6.7 se topó con tres huecos del backend** y de ellos salió un endpoint nuevo
+>   (`GET /avisos/enviados`, que además es donde se cuelga el 6.3). Los otros dos siguen
+>   abiertos: `/calendar/events` solo consulta desde hoy, así que al retroceder el carril
+>   de eventos dice «no lo sé»; y de la casa no hay histórico ninguno.
+
+Siete ideas propuestas y aprobadas el 3 de septiembre de 2026. Ninguna repite nada de las
+listas anteriores ni de `docs/JARVIS_PROACTIVO.md`: se escribieron después de comprobar
+en el código qué estaba ya hecho (las reglas proactivas, el presupuesto de avisos, la
+señal de utilidad, las vigilancias web y el correo entrante lo están).
+
+Se descartó una octava —**los movimientos de Revolut**, categorizados y cruzados con los
+cobros de entrenamiento— y conviene dejar escrito que se descartó por decisión, no por
+imposibilidad: el consentimiento de Enable Banking **ya pide `transactions: True`**
+(`main.py`, `/auth/enablebanking/login`), así que el permiso está concedido y sin usar.
+Si alguna vez se retoma, lo que hay que saber es que aquí sí haría falta tabla propia, al
+revés que con Indexa: un movimiento antiguo se cae del ventanal de la API y el histórico
+de gasto es justo el dato con valor.
+
+### 6.1 Jarvis en la muñeca ●
+
+**Qué.** Un Atajo de iOS —«Oye Siri, dile a Jarvis…»— que dicta, llama a `POST /jarvis`
+con `voz: true` y lee la respuesta en alto. Desde el reloj, sin sacar el móvil.
+
+**Por qué.** Jarvis vive hoy dentro del dashboard: para hablarle hay que desbloquear el
+móvil, abrir la web y esperar el arranque en frío de Fly. La decisión de diseño de que
+**la elección de herramienta viva entera en el backend** («un cerebro, muchas bocas») se
+tomó precisamente para este día, y todavía no ha cobrado: solo hay una boca.
+
+**Por dónde.** La pieza que falta no es el Atajo, es la auth. Un Atajo **no puede llevar
+un JWT de usuario** (invariante 2 de `CLAUDE.md`): caduca a los 30 días y el cliente se
+queda mudo sin avisar a nadie, que es exactamente como se rompió el agente PC. Hace falta
+un `JARVIS_TOKEN` de servicio con `_token_ok()`, el limitador genérico por IP
+(`_check_rate`, el mismo que protege `/ideas/audio`, porque cada turno es una llamada de
+pago) y una respuesta pensada para oírse, no para leerse — que es lo que ya hace
+`voz: true`.
+
+**Cuidado.** Un token de servicio que puede hablar con Jarvis puede, por el camino, llegar
+a las herramientas de Jarvis. La frontera de confirmación tiene que seguir siendo la
+misma: lo marcado `confirmar: True` devuelve `pendiente` y no se ejecuta, venga de donde
+venga.
+
+### 6.2 Encargarle trabajo al PC hablando ●●
+
+**Qué.** Un tipo de job nuevo, genérico: una instrucción en lenguaje natural para
+Cowork/Claude Desktop, creada desde Jarvis. «Que el PC me deje preparado el resumen de
+esto para cuando llegue.»
+
+**Por qué.** Hay una cola de jobs con reintentos, eventos, streaming y un agente Windows
+que sabe conducir Edge y Claude Desktop — y todo eso sirve hoy a **un solo caso de uso**,
+Alud. Es la infraestructura más cara del proyecto y la menos aprovechada. Esto es lo que
+convierte el dashboard en algo que *hace* cosas en vez de contarlas.
+
+**Cuidado, y es la parte importante.** Todo el modelo de seguridad del agente
+(invariantes 7 y 9 de `CLAUDE.md`) se apoya en una premisa: la instrucción sale de una URL
+de `ALUD_ALLOWED_HOSTS` y se valida en tres sitios. **Un job genérico rompe esa premisa**,
+así que necesita la suya, igual de explícita:
+
+- La instrucción solo puede venir de un job creado con **JWT de usuario** y marcado
+  `confirmar: True` en Jarvis (el modelo propone, tú apruebas, `/jarvis/ejecutar` crea).
+  Nunca de una fila escrita en `jobs` con la service key, que es escribible.
+- Sigue escribiéndose a **fichero temporal UTF-8** y leyéndose con
+  `Get-Content -LiteralPath`: jamás interpolada en un comando (invariante 9, la lección
+  del here-string).
+- El agente tiene que poder distinguir el tipo de job y **negarse a lo que no conozca**,
+  no intentar adivinarlo.
+
+### 6.3 Por qué te dije eso ●
+
+**Qué.** Que cada aviso guarde los valores que lo dispararon y que se puedan consultar
+después: «te avisé porque la FC en reposo iba a 62 contra 55 de tu base, el HRV a 31
+contra 44, y con 4 noches medidas».
+
+**Por qué.** Es el hilo conductor del proyecto entero —distinguir «no lo sé» de «es que
+no»— aplicado al último sitio donde todavía no está. Hoy un aviso es una frase redactada
+por un modelo, y cuando se equivoca no hay forma de reconstruir de dónde salió. Y encaja
+justo debajo de la señal de utilidad, que ya existe: `_valorar_regla` dice **qué** reglas
+se ignoran, pero nunca **por qué** fallan, que es lo único que permite arreglarlas en vez
+de silenciarlas.
+
+**Por dónde.** `_apuntar_aviso()` es el punto único por donde pasan todos: la instantánea
+entra ahí, al lado de la prioridad y la caducidad. Guardar los números crudos, no la
+frase — la frase ya está.
+
+### 6.4 Evals de Jarvis ●●
+
+**Qué.** Un conjunto de casos («¿qué tengo mañana?» → `calendario`) y una tirada que mide
+el acierto al elegir herramienta. A mano o semanal, contra la API real; no en cada push,
+que cuesta dinero.
+
+**Por qué.** Está medido y escrito en `docs/JARVIS.md` que el modelo pequeño falla
+eligiendo entre herramientas parecidas —pidiéndole leer issues escogía
+`add_issue_comment`— y que **ese fallo crece con el catálogo**, que va por 41 herramientas
+y no para de crecer. Hoy esa regresión solo se detecta hablándole y notando que hace algo
+raro. Además es la medida que falta para tomar la decisión de coste que hoy no se puede
+tomar: si `JARVIS_MODEL_ACCION` puede bajar a algo más barato, o si el reparto de modelos
+sigue mereciendo la pena.
+
+**Cuidado.** Esto NO va a `tests/backend`: allí el modelo está simulado por `conftest.py`
+a propósito, y mezclarlo metería llamadas de pago y fallos intermitentes en la suite que
+tiene que poder correr siempre. Es un job aparte, con su propia salida.
+
+### 6.5 El coste de Jarvis, en el panel ●
+
+**Qué.** Guardar el `usage` de cada llamada (entrada, entrada cacheada, salida, modelo) y
+enseñar el gasto del mes en el panel ⚙, desglosado por boca: chat, voz, teléfono, resumen
+diario.
+
+**Por qué.** Los números que hay en `docs/JARVIS.md` (3.667 tokens de entrada, 94%
+cacheado) se midieron **una vez y a mano**. Desde entonces han entrado el streaming, las
+frases de relleno, el modo llamada y el teléfono, cada uno con un patrón de gasto
+distinto, y la única alarma de coste que existe hoy es la factura. El modo llamada es el
+candidato obvio a sorpresa: paga salida por token *y* segundos de ElevenLabs, y encima es
+el que más se usa cuando funciona bien.
+
+**Por dónde.** El punto único de salida ya existe (el cierre de `_jarvis_turno` y
+`_texto_garantizado`). Las tarifas van en configuración, no en el código: cambian solas.
+
+### 6.6 Copia de seguridad de Supabase ●
+
+Es el punto **5.4**, que sigue pendiente y que en esta ronda sube de prioridad. El motivo
+para subirlo: `health_metrics` es el único dato del proyecto que no se puede regenerar, la
+ingesta resuelve por upsert `(metric_date, metric_name)` —un cliente que escriba mal pisa
+el histórico sin dejar rastro— y ya hay meses de serie detrás. Es la idea menos vistosa de
+la lista y la única cuyo coste, si no se hace, es irreversible. El aviso de siempre: el
+repositorio es público, así que el destino tiene que ser privado.
+
+### 6.7 El día en una línea de tiempo ●●
+
+**Qué.** Un carril horizontal por día con todo sobre el mismo eje: eventos, sueño,
+entrenos, presencia, avisos mandados y acciones de la casa.
+
+**Por qué.** Los datos están todos y cada uno vive en su widget, así que las coincidencias
+las tiene que ver el usuario: que se duerme mal las noches después de una cita tarde, que
+los días con el PC encendido hasta las dos el sueño se hunde. El motor de conclusiones
+cruza **series** (dos métricas a lo largo de semanas); esto cruza **momentos**, que es
+justo lo que un cruce estadístico no puede ver.
+
+**Cuidado.** Es la única de las siete que es sobre todo frontend, y `Dashboard.jsx` va por
+6.700 líneas. La lógica pura —colocar cada cosa en su carril y su hueco— va a `src/lib/`,
+no al componente.
+
+---
+
 ## Lo que se ha descartado a propósito
 
 Escrito aquí para no volver a proponerlo dentro de seis meses sin acordarse del motivo:

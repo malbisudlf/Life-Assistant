@@ -131,3 +131,53 @@ Claude Desktop → Ctrl+2 (Cowork) → Win+V → Enter → Enter.
   una web externa) dentro del comando de PowerShell — ver la invariante 9 del modelo de seguridad (`CLAUDE.md`).
 - El log del agente se escribe en el working directory del proceso, que puede no ser el
   directorio del script cuando lo lanza el Programador de tareas.
+
+## El encargo libre (`accion: "encargo"`)
+
+Además de resolver una entrega de Alud y de abrir el streaming, el agente sabe hacer una
+tercera cosa: **un encargo en lenguaje natural**, dictado a Jarvis y ejecutado con Claude
+Desktop en el PC. «Que el PC me deje preparado el resumen de esto para cuando llegue.»
+
+La cola de jobs, con sus reintentos, sus eventos y su streaming, existía desde el
+principio y servía a un solo caso de uso. Esto es lo que la aprovecha — y es también lo
+que obliga a añadir una defensa nueva, porque **rompe la premisa en la que se apoyaban
+todas las demás**.
+
+### Por qué hace falta una defensa distinta
+
+Todo lo que el agente ejecutaba hasta ahora venía de una URL, y una URL se puede validar
+contra `ALUD_ALLOWED_HOSTS` — de hecho se valida en tres sitios, porque la tabla `jobs`
+es escribible con la service key de Supabase y un payload puede llegar sin haber pasado
+por el backend.
+
+Un texto libre no se puede validar contra ninguna lista: **no hay forma de comprobar QUÉ
+dice**. Así que se comprueba **QUIÉN lo escribió**:
+
+- `POST /jobs` calcula `firma_encargo(instruccion)` = HMAC-SHA256 con `AGENT_TOKEN`, el
+  único secreto que backend y agente comparten. Ese endpoint exige JWT de usuario, así
+  que la firma transporta hasta el agente el único hecho que importa: **detrás había una
+  persona con sesión**.
+- La firma se calcula **siempre de cero** y **nunca se acepta la que traiga el cliente**,
+  aunque venga correcta. Si se aceptara, la propiedad anterior desaparecería.
+- El agente verifica con `encargo_firmado()` (`hmac.compare_digest`) antes de tocar nada,
+  y **sin `AGENT_TOKEN` devuelve False**: lo que no se puede comprobar no se ejecuta.
+- Sin `AGENT_TOKEN` en el backend, el encargo se rechaza con un **503 que dice qué
+  falta**, en vez de encolar algo que el agente rechazará después. Misma moraleja que el
+  buscador bloqueado: un error con el arreglo dentro.
+- La herramienta de Jarvis va `confirmar: True` — **siempre**. Las demás acciones del PC
+  hacen una cosa concreta y acotada; esta abre Claude Desktop con la sesión del usuario
+  iniciada en todo, así que cae claramente del lado de proponer.
+
+### El camino hasta Cowork es UNO
+
+`_pegar_en_cowork()` está extraído a propósito: hay dos encargos distintos (la entrega de
+Alud y el encargo libre) y un solo camino hasta Claude Desktop. Ese camino es el que
+tiene la propiedad que no se puede perder — la instrucción **nunca** se interpola en un
+comando de PowerShell, se escribe a un fichero temporal UTF-8 y `Set-Clipboard` lo lee de
+ahí. Duplicarlo sería duplicar el sitio donde volver a equivocarse.
+
+La instrucción va delimitada entre marcadores igual que el enunciado de Alud, aunque aquí
+el texto salga del usuario: lo ha redactado un modelo a partir de lo que dictó, el formato
+ya está probado y mantenerlo no cuesta nada. Y lleva dentro las dos reglas de siempre,
+que existen porque **el usuario no está delante**: nada irreversible (ni enviar, ni
+publicar, ni comprar, ni borrar) y nada de esperar una respuesta que no va a llegar.

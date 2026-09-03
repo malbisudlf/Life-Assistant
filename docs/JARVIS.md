@@ -97,6 +97,44 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   `localStorage`. Menos estado que mantener y nada que purgar, el mismo criterio que con
   el histórico de presencia.
 
+- **Jarvis en la muñeca** (`POST /jarvis/atajo`): la segunda boca del mismo cerebro. Un
+  Atajo de iOS —«Oye Siri, dile a Jarvis…»— dicta, llama a este endpoint y lee la
+  respuesta en alto; desde el reloj, sin desbloquear el móvil ni esperar a que cargue el
+  dashboard. Es lo que hace que la decisión de diseño de siempre (la elección de
+  herramienta vive ENTERA en el backend) por fin cobre: hasta aquí había un solo cliente.
+  - **Auth con `JARVIS_TOKEN`, token de servicio, nunca un JWT** (`verify_jarvis`). Un
+    Atajo se dispara solo y no sabe volver a hacer login: con un JWT de 30 días se
+    quedaría mudo el día que caducara, sin avisar a nadie. Es exactamente como se rompió
+    el agente PC, y por eso esta regla ya está en `CLAUDE.md`. Se lee **solo de
+    cabeceras** (`X-Auth-Token`): aquí no hay integración desplegada que migrar, así que
+    no se hereda la excepción de la query que arrastran HA y el Atajo de salud.
+  - **Sin historial.** El historial vive en `localStorage` del navegador y un Atajo no
+    tiene dónde guardarlo: cada petición es una conversación entera. La alternativa
+    —inventarse una sesión en el servidor— rompería que el backend no guarda
+    conversaciones, y sería el primer sitio donde habría que purgarlas.
+  - **`voz: true` siempre**, con el mismo prompt que el modo llamada: frases cortas, sin
+    listas, sin markdown y sin URLs.
+  - **Lo pendiente se DICE.** La frontera de confirmación no se relaja —lo marcado
+    `confirmar: True` sigue devolviendo `pendiente` sin ejecutarse—, pero por aquí no hay
+    botón que pulsar. Callarlo dejaría al usuario creyendo que su cita está creada, así
+    que la respuesta añade que hace falta confirmarlo en el dashboard.
+  - **El Atajo, paso a paso** (app Atajos de iOS; se sincroniza al Apple Watch solo).
+    Antes de nada, lo que NO funciona como uno espera: **Siri no aprende frases nuevas y
+    no sabe pasarle a un atajo el texto que va detrás del nombre**. No hay «Oye Siri, dile
+    a Jarvis que mire mi agenda». Lo que hay es que **el nombre del atajo ES la frase que
+    lo lanza**, y el texto se dicta después, ya dentro del atajo. Así que se llama
+    `Jarvis`, se dice «Oye Siri, Jarvis», suena el tono y entonces hablas.
+    1. *Dictar texto* — idioma español, detener «tras una pausa».
+    2. *Obtener contenido de URL*: `https://<tu-backend>/jarvis/atajo`, método `POST`,
+       cabeceras `X-Auth-Token: <JARVIS_TOKEN>` y `Content-Type: application/json`,
+       cuerpo JSON `{"mensaje": <Texto dictado>}`.
+    3. *Obtener valor del diccionario* → clave `texto`.
+    4. *Hablar texto*.
+    Nombre corto y pronunciable, que es lo que habrá que decirle a Siri cada vez. En el
+    reloj aparece en la app Atajos y puede ponerse como complicación de la esfera. Sube el
+    tiempo de espera de la petición: Fly escala a cero y el primer arranque del día tarda
+    10–15 s, que con el tope por defecto se queda en un error sin explicación.
+
 - **Jarvis en internet** (`buscar_en_internet`, `leer_pagina`): dos invariantes, y las dos
   son de seguridad, no de comodidad.
   - **SSRF.** `leer_pagina` recibe una URL que en el mejor caso sale de un buscador y en
@@ -554,3 +592,74 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     forma más rápida de que se dejen de leer los dos.
   - Idempotencia con el mismo `uuid5` de la fecha contra la clave primaria de
     `jarvis_recordatorios`, y apagado (`JARVIS_PROACTIVO=0`) no cuesta ni una consulta.
+
+## Por qué te dije eso: la instantánea de cada aviso
+
+La señal de utilidad (`avisos_reglas`, el botón «me sirvió / no me sirvió») dice **qué**
+reglas se ignoran. No dice **por qué** fallan, y esa es la única información con la que
+una regla mala se puede arreglar en vez de silenciarse. Hasta aquí un aviso era una frase
+redactada por un modelo: cuando se equivocaba, no había forma de reconstruir de dónde
+había salido, porque los datos que lo dispararon ya eran otros al día siguiente.
+
+- `_apuntar_aviso(..., motivo={...})` acepta los **valores crudos** con los que se
+  decidió: las medias contra las que se comparó, el listón, cuántos días de fondo había.
+  Los números, no la frase — la frase ya está en el aviso.
+- Se guardan en **`avisos_motivos`, una tabla aparte** (migración `20260903_avisos_motivo`)
+  y no en una columna de `jarvis_recordatorios`. El motivo es el mismo que llevó a
+  `informe_envios` a tener tabla propia, pero aquí es más grave: una columna nueva haría
+  que el insert del aviso devolviera 400 mientras la migración no estuviera aplicada, o
+  sea que **añadir una función de diagnóstico dejaría al sistema sin avisos**.
+- Por lo mismo, `_guardar_motivo()` **solo registra sus fallos**: guardar el porqué nunca
+  puede impedir el aviso. Se llama después de que el aviso ya esté apuntado.
+- El aviso lleva ahora **siempre un `id` puesto por el backend** (antes lo generaba
+  Supabase salvo en el del reloj). Sin conocerlo no hay de qué colgar la instantánea, y
+  el insert va con `return=minimal`: pedir la fila de vuelta solo para leer el id
+  costaría una respuesta en cada aviso.
+- Se consulta con `GET /avisos/{id}/porque`, y los avisos del día con
+  `GET /avisos/enviados?dia=AAAA-MM-DD` (ventana construida desde la medianoche **local**:
+  la tabla guarda UTC y los avisos de la noche caerían en el día que no es). Los dos son
+  endpoints de usuario: esto es para mirarlo, no para que lo consuma una automatización.
+  Salen en el panel ⚙, bajo el bloque de avisos.
+- Un aviso sin motivo guardado responde `motivo: null` con **200, no 404**: los avisos
+  anteriores a esto no tienen explicación, y un 404 diría que el aviso no existe, que es
+  otra cosa.
+
+Reglas que ya lo rellenan: `salir` (la hora que dio Maps, el destino, la antelación),
+`no_llegas` (las dos citas y la hora de salida), `madrugon` (tu hora habitual de dormir y
+la recomendada), `malestar` (los tres pares semana/mes con su factor y su fondo),
+`hueco_entreno` (días sin entrenar y el hueco encontrado) y el de salir de casa (qué
+quedaba encendido y cuántas entidades tenía el catálogo — que distingue «no había nada
+más» de «el catálogo llegó a medias»).
+
+## Lo que cuesta: la contabilidad del modelo
+
+Los números de más arriba (3.667 tokens de entrada, 94% cacheado) se midieron **una vez y
+a mano**. Después entraron el streaming, las frases de relleno, el modo llamada y el
+teléfono, cada uno con un patrón de gasto distinto, y la única alarma de coste que quedaba
+era la factura. Ahora se mide solo (tabla `jarvis_gasto`, migración `20260903_gasto_modelo`):
+
+- **Una fila por LLAMADA, no por turno.** Un turno con tres vueltas de herramientas y un
+  relevo de modelo son cuatro llamadas de precios distintos; agregarlas antes de
+  guardarlas perdería justo lo que se quiere mirar.
+- **Se guardan tokens, no euros.** Las tarifas cambian y una cifra en euros escrita hoy
+  sería mentira dentro de seis meses sin que nadie se entere. El precio vive en
+  `MODELO_TARIFAS` y se aplica **al leer**, en `GET /gasto`.
+- **Un modelo sin tarifa sale con `euros: null` y sus tokens contados**, y su nombre en
+  `sin_tarifa`. No saber lo que cuesta algo no es que sea gratis, y un total que no
+  incluye todo el gasto se marca como `euros_incompleto` en vez de callarlo.
+- **`boca`** es por dónde entró la petición (`chat`, `voz`, `atajo`, `telefono`,
+  `proactivo`, `correo`, `destilar`, `ideas`). Es una `contextvar` (`_boca_actual`), como
+  `_peticion_actual` en el registro, porque el alternativa era pasarla por seis funciones
+  que no pintan nada en esto. Es la pregunta que no se podía responder: **por dónde se va
+  el dinero**.
+- **Se apunta en memoria y lo escribe el hilo de fondo del registro**, que ya existía y
+  ya resuelve el mismo problema (Fly duerme la máquina y se lleva lo encolado). Esto
+  cuelga del camino crítico de la voz: una escritura a Supabase por llamada al modelo se
+  oiría. Y un fallo apuntando el gasto **nunca toca la respuesta**: es contabilidad, no
+  funcionalidad.
+- **Por streaming el `usage` hay que pedirlo** (`stream_options: {include_usage: true}`):
+  sin eso, el modo llamada —el que más gasta— sería justo el único que no se puede medir.
+  Llega en un trozo final sin `choices`, que el bucle ya sabía saltarse.
+- El **% cacheado** es la palanca de coste real: si se hunde, algo que cambia a menudo se
+  ha colado delante del prompt. Sale en el panel ⚙ al lado del total.
+
