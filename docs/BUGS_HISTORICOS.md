@@ -414,3 +414,14 @@
   restricción deliberada antes que de tu forma de usarlo**, y compruébalo con el
   experimento mínimo que separa las dos hipótesis (aquí, el mismo comando con y sin
   `--user-data-dir`). Media noche de arreglos habría sobrado con hacerlo primero.
+- **El atajo que deja de existir y no falla: `Ctrl+2` para ir a Cowork.** El agente lo
+  usaba para saltar del chat a Cowork en Claude Desktop. La app lo retiró, y el síntoma
+  no se parecía a un error: Claude se abría, la instrucción se pegaba y se enviaba, el
+  log decía «Instrucción enviada a Cowork» — pero aterrizaba en el **chat normal**, que
+  responde en vez de ponerse a trabajar. Un atajo que ya no existe no da error: la
+  pulsación simplemente no hace nada. Hoy se llega con dos clics, porque cambiar de
+  sección solo se puede con el ratón (anthropics/claude-code#18818) y la app es Electron,
+  así que UI Automation tampoco ve el botón. Moraleja: **cuando un paso de automatización
+  de UI depende de un atajo de otra aplicación, deja constancia de en qué versión
+  funcionaba** — y si el resultado final no es el esperado, sospecha del paso que "no
+  falla" antes que del que sí.

@@ -60,6 +60,24 @@ CLAUDE_APPID       = "Claude_pzs8sxrjxfjjc!Claude"  # MSIX Store app
 HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
+
+# Los dos clics que llevan a Cowork, en fracción de pantalla (no en píxeles: así el
+# mismo número vale si cambia la resolución). Claude Desktop **no tiene atajo de teclado
+# para cambiar entre Chat, Cowork y Code** — lo pide una issue abierta (anthropics/
+# claude-code#18818) y hoy solo se llega pinchando. El Ctrl+2 que había aquí funcionaba
+# con una versión anterior de la app; cuando dejó de existir, la instrucción se quedaba
+# escrita en el chat normal, que responde en vez de ponerse a trabajar.
+#
+# Son lo único de todo este camino que depende de dónde estén las cosas en pantalla, por
+# eso salen del entorno: si la app mueve el compositor, se ajustan sin tocar el código.
+# Medidos sobre 2560x1440 con la ventana maximizada.
+#   1) «New» en la barra lateral, para dejar la pantalla inicial: ahí el compositor está
+#      centrado y su posición es predecible (en una conversación abierta está abajo).
+#   2) «Cowork» en el selector Chat/Cowork del propio compositor.
+COWORK_NEW_XY    = (float(os.getenv("COWORK_NEW_X")    or 0.0219),
+                    float(os.getenv("COWORK_NEW_Y")    or 0.0757))
+COWORK_TOGGLE_XY = (float(os.getenv("COWORK_TOGGLE_X") or 0.4629),
+                    float(os.getenv("COWORK_TOGGLE_Y") or 0.4431))
 # Ventana de reintentos del PRIMER sondeo. El agente arranca a la vez que Windows, y
 # tras un WOL la tarjeta puede no tener IP todavía: el primer intento moría con un
 # fallo de DNS a los 200 ms y el arranque se perdía entero — justo el que traía el job.
@@ -547,15 +565,19 @@ def _pegar_en_cowork(instruccion: str):
     _focus_claude_window()
     time.sleep(1.5)  # tiempo suficiente para que la ventana esté lista
 
-    # Ctrl+2 → Cowork
-    log.info("Ctrl+2 → Cowork...")
-    pyautogui.hotkey("ctrl", "2")
-    time.sleep(3)  # esperar a que Cowork cargue
-
-    # Click en el input del chat
+    # ── Hasta Cowork, a base de clics (no hay atajo; ver COWORK_NEW_XY) ──
     screen_w, screen_h = pyautogui.size()
-    pyautogui.click(screen_w // 2, screen_h - 90)
-    time.sleep(0.6)
+
+    # 1) «New»: deja la pantalla inicial, con el compositor centrado y en sitio conocido.
+    log.info("Clic en «New»...")
+    pyautogui.click(int(screen_w * COWORK_NEW_XY[0]), int(screen_h * COWORK_NEW_XY[1]))
+    time.sleep(2)
+
+    # 2) «Cowork» en el selector Chat/Cowork del compositor. Deja el cursor dentro del
+    #    campo de texto, así que no hace falta un tercer clic para enfocarlo.
+    log.info("Clic en «Cowork»...")
+    pyautogui.click(int(screen_w * COWORK_TOGGLE_XY[0]), int(screen_h * COWORK_TOGGLE_XY[1]))
+    time.sleep(1.5)
 
     # Win+V → abre historial → Enter selecciona el más reciente → Enter envía
     log.info("Pegando instrucción via historial de portapapeles...")
