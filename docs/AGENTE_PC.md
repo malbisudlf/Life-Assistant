@@ -77,6 +77,24 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   se da por hecho sin comprobarlo**: `arrancar_apollo()` espera hasta `APOLLO_TIMEOUT`
   a ver el proceso vivo (`apollo_vivo()`) y si no aparece lanza, de modo que el job cae a
   `failed` en vez de reportar `streaming_ready` sobre un PC sin nada abierto.
+- **Las pantallas se duplican antes de abrir Apollo** (`cambiar_modo_pantallas()`,
+  `DisplaySwitch.exe /clone`, configurable con `PANTALLAS_STREAMING`): por Artemis se ve
+  una sola pantalla, y con el escritorio extendido lo que Windows abra en el otro
+  monitor queda inalcanzable desde fuera — no puedes arrastrar una ventana a un monitor
+  que el stream no manda. Va **antes** de arrancar Apollo porque el host elige la salida
+  que captura al arrancar: reconfigurar los monitores por debajo le deja el stream
+  mirando a una pantalla que ya no existe. Un fallo aquí **no tumba el job** (stage
+  `pantallas_error`): el stream se ve igual, solo que con el escritorio como estuviera.
+  El modo se valida contra `_MODOS_PANTALLA` aunque no pase por ningún shell — con un
+  valor inventado, DisplaySwitch abre su interfaz y se queda esperando a que alguien
+  elija, con el PC vacío.
+- **Deshacerlo es cosa de Home Assistant**, no del agente: cuando cierras el stream el
+  agente hace rato que terminó. El atajo `agent.py --pantallas [modo]`
+  (`PANTALLAS_RESTAURAR`, `extend` por defecto) existe para que HA lo dispare antes de
+  apagar o suspender el PC, y tiene que ir por una tarea del Programador
+  (`schtasks /run /tn LifeAssistantPantallas`), **no** por el SSH directo: lo que entra
+  por SSH corre en la sesión 0, sin escritorio que reconfigurar, y ahí DisplaySwitch no
+  hace nada *y no falla*. Montaje en `agent/PUESTA_A_PUNTO.md`, paso 4bis.
 - **El nombre del servicio se resuelve en caliente** (`servicio_streaming()`): sin
   `APOLLO_SERVICIO` en el `.env` se prueban `ApolloService` y `SunshineService`, en ese
   orden. Es lo que permite que el mismo agente sirva antes y después de migrar el PC —

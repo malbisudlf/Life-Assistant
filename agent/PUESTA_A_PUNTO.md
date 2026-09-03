@@ -43,7 +43,8 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
       `.env` los tenía, puedes borrarlos.
       Opcional: `APOLLO_SERVICIO` (solo si tu servicio no se llama `ApolloService`),
       `APOLLO_EXE` (solo si instalas Apollo fuera de la ruta estándar), `APOLLO_TIMEOUT`,
-      `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT` (ver paso 3).
+      `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT` (ver paso 3),
+      `PANTALLAS_STREAMING`, `PANTALLAS_RESTAURAR` (ver paso 4bis).
       Si tu `.env` traía `SUNSHINE_SERVICIO`/`SUNSHINE_EXE`/`SUNSHINE_TIMEOUT`, siguen
       funcionando como respaldo: renómbralos cuando migres, no hace falta a la vez.
 
@@ -138,6 +139,42 @@ toca nada.
 - [ ] Añadir el host **por la IP de la tailnet** (`100.x.y.z`), no por la IP local:
       así el mismo host vale en casa y fuera. En casa Tailscale enruta directo por la
       LAN, sin penalización.
+
+## 4bis. Las pantallas mientras streameas
+
+Por Artemis se ve **una sola pantalla**. Con el escritorio extendido, todo lo que
+Windows abra en el otro monitor se queda donde no lo ves y desde fuera de casa no hay
+forma de traerlo: no puedes arrastrar una ventana a un monitor que el stream no manda.
+Por eso el job de streaming pone Windows en **duplicar** (`DisplaySwitch.exe /clone`)
+justo antes de abrir Apollo — los dos monitores enseñan lo mismo y nada puede
+esconderse.
+
+- [ ] Nada que instalar: `DisplaySwitch.exe` viene con Windows (es el propio Win+P).
+- [ ] Para cambiar el modo: `PANTALLAS_STREAMING` en `agent/.env` — `clone` (por
+      defecto), `extend`, `internal` (solo la principal), `external` (solo la segunda)
+      o `ninguna` para que el agente no toque las pantallas.
+- [ ] En el modal verás el paso "Pantallas preparadas". Si algo falla, sale "Pantallas
+      sin cambiar" y **el job sigue**: el stream se ve igual, solo que con el escritorio
+      como estuviera.
+
+### Volver a extender al terminar
+
+El agente es efímero: cuando cierras el stream ya no queda nadie para deshacer el
+cambio, así que el PC se queda duplicado hasta que lo cambies con Win+P. Para que
+vuelva solo, se aprovecha el apagado/suspensión que ya lanza Home Assistant:
+
+- [ ] Crear en el Programador de tareas una tarea `LifeAssistantPantallas` con las
+      mismas opciones que `LifeAssistantAgent` (sin disparador; "Ejecutar solo cuando el
+      usuario haya iniciado sesión"), acción `python.exe` con
+      `agent.py --pantallas extend`.
+- [ ] En el `shell_command` de HA que apaga/suspende el PC, ejecutar antes
+      `schtasks /run /tn LifeAssistantPantallas`.
+
+> **Por qué la tarea y no el SSH directo**: lo que entra por SSH corre en la sesión 0,
+> que no tiene escritorio que reconfigurar. Ahí `DisplaySwitch.exe` **no hace nada y no
+> falla**, que es la peor combinación posible. La tarea del Programador es la que sabe
+> ejecutarlo en la sesión interactiva — el mismo truco que ya usa el relanzado del
+> agente.
 
 ## 5. Que solo el agente arranque con Windows
 

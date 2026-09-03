@@ -69,7 +69,8 @@ LA_API_BASE=https://backend-tender-glow-160.fly.dev
 - Ya **no** hacen falta `SUPABASE_URL`/`SUPABASE_KEY`: los jobs pendientes se piden al
   backend (`GET /jobs/pending`)
 - Opcionales de streaming: `APOLLO_SERVICIO`, `APOLLO_EXE`, `APOLLO_TIMEOUT`,
-  `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`
+  `VPN_TIPO`, `TAILSCALE_EXE`, `VPN_TIMEOUT`, `PANTALLAS_STREAMING`,
+  `PANTALLAS_RESTAURAR`, `DISPLAYSWITCH_EXE`
   (ver `.env.example`)
 
 ### 3. Migración Supabase (solo si no se ha ejecutado ya)

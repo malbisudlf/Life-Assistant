@@ -815,6 +815,8 @@ const STAGE_LABELS = {
   "vpn_connecting":       "Conectando la VPN",
   "vpn_ready":            "VPN conectada",
   "vpn_error":            "VPN no disponible",
+  "pantallas_ok":         "Pantallas preparadas",
+  "pantallas_error":      "Pantallas sin cambiar",
   "streaming_starting":   "Lanzando Apollo",
   "streaming_ready":      "Apollo listo — abre Artemis",
   "job_done":             "Completado",
@@ -1215,7 +1217,7 @@ export default function Dashboard() {
   const [finanzasCargando, setFinanzasCargando] = useState(false);
   const [finanzasDetalle, setFinanzasDetalle]   = useState(false);   // posiciones desplegadas
 
-  // Cartera manual de ETFs (Revolut, precio real vía Twelve Data).
+  // Cartera manual de ETFs (Revolut, precio real vía Yahoo Finance).
   const [carteraEtf, setCarteraEtf]                 = useState(null);
   const [carteraEtfCargando, setCarteraEtfCargando] = useState(false);
   // Formulario de "+ Añadir aportación", uno por ticker: { [ticker]: { abierto, fecha, importe, guardando } }

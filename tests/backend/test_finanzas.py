@@ -471,6 +471,55 @@ class TestEtfResumen:
         assert len(mock_requests.called("GET", "chart/SEC0.DE")) == 1
 
 
+class TestEtfAlta:
+    # El alta no tiene botón en el frontend (se hace por curl, una vez por ETF), así que
+    # es el único sitio donde `EtfHoldingIn` se ejercita: sin estos tests, su patrón de
+    # ticker no lo comprobaba nadie.
+
+    def test_requiere_jwt(self, client):
+        r = client.post("/finanzas/etfs", json={
+            "ticker": "VWCE", "nombre": "Vanguard FTSE All-World", "simbolo_yahoo": "VWCE.DE",
+        })
+        assert r.status_code in (401, 403)
+
+    def test_da_de_alta_el_holding(self, client, auth_headers, mock_requests):
+        mock_requests.add("POST", "etf_holdings", FakeResponse([{
+            "ticker": "VWCE", "nombre": "Vanguard FTSE All-World", "simbolo_yahoo": "VWCE.DE",
+        }]))
+        r = client.post("/finanzas/etfs", headers=auth_headers, json={
+            "ticker": "VWCE", "nombre": "Vanguard FTSE All-World", "simbolo_yahoo": "VWCE.DE",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert r.json()["holding"]["ticker"] == "VWCE"
+        enviado = mock_requests.called("POST", "etf_holdings")[0][2]["json"]
+        assert enviado["simbolo_yahoo"] == "VWCE.DE"
+
+    def test_ticker_en_minusculas_lo_rechaza(self, client, auth_headers, mock_requests):
+        # `_TICKER_RE` es ^[A-Z0-9]{1,10}$: en minúscula no vale, porque el ticker se
+        # interpola luego en las URLs de Supabase y en la ruta de las aportaciones.
+        r = client.post("/finanzas/etfs", headers=auth_headers, json={
+            "ticker": "vwce", "nombre": "Vanguard FTSE All-World", "simbolo_yahoo": "VWCE.DE",
+        })
+        assert r.status_code == 422
+        assert mock_requests.called("POST", "etf_holdings") == []
+
+    def test_ticker_demasiado_largo_lo_rechaza(self, client, auth_headers, mock_requests):
+        r = client.post("/finanzas/etfs", headers=auth_headers, json={
+            "ticker": "A" * 11, "nombre": "Demasiado largo", "simbolo_yahoo": "AAA.DE",
+        })
+        assert r.status_code == 422
+        assert mock_requests.called("POST", "etf_holdings") == []
+
+    def test_un_fallo_de_supabase_no_se_reenvia_al_cliente(self, client, auth_headers, mock_requests):
+        mock_requests.add("POST", "etf_holdings", FakeResponse({"message": "duplicate key value"}, 409))
+        r = client.post("/finanzas/etfs", headers=auth_headers, json={
+            "ticker": "VWCE", "nombre": "Vanguard FTSE All-World", "simbolo_yahoo": "VWCE.DE",
+        })
+        assert r.status_code == 502
+        assert "duplicate key" not in r.text
+
+
 class TestEtfAportacion:
     def test_calcula_participaciones_con_precio_historico(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
