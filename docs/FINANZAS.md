@@ -129,7 +129,8 @@ dentro (`dile_al_usuario_literalmente`), y aparece también en `mis_capacidades`
 | `INDEXA_TTL_MINUTOS` | `180` | Vida de la copia en memoria |
 | `INDEXA_SERIE_DIAS` | `365` | Días de serie que se devuelven al frontend (la completa es desde que abriste la cuenta y viaja entera en cada respuesta) |
 | `ENABLE_BANKING_APPLICATION_ID` | — | El `application_id` de la app registrada en su Control Panel |
-| `ENABLE_BANKING_PRIVATE_KEY_PATH` | — | Ruta al `.pem` descargado UNA VEZ al registrar la app (no se puede volver a descargar) |
+| `ENABLE_BANKING_PRIVATE_KEY_PATH` | — | Ruta al `.pem` descargado UNA VEZ al registrar la app (no se puede volver a descargar). Vale en local; **en producción no** (ver abajo) |
+| `ENABLE_BANKING_PRIVATE_KEY` | — | La misma clave pegada dentro de la variable. **Es la de producción** y gana a la ruta si están las dos |
 | `ENABLE_BANKING_API_URL` | `https://api.enablebanking.com` | Solo para pruebas |
 | `ENABLE_BANKING_ASPSP_NAME` / `_COUNTRY` | `Revolut` / `ES` | El banco al que se pide consentimiento |
 | `ENABLE_BANKING_REDIRECT_URL` | — | Debe estar en las "Redirect URLs" de la app y apuntar al backend, no al frontend. Tiene que ser `https`, incluso en local |
@@ -137,6 +138,29 @@ dentro (`dile_al_usuario_literalmente`), y aparece también en `mis_capacidades`
 | `ENABLE_BANKING_TTL_MINUTOS` | `60` | Vida de la copia en memoria del saldo |
 | `YAHOO_FINANCE_API_URL` | `https://query1.finance.yahoo.com` | Solo para pruebas |
 | `ETF_PRECIO_TTL_MINUTOS` | `60` | Vida de la copia en memoria de los precios actuales de la cartera manual de ETFs |
+
+### La clave privada NO puede vivir en un fichero de la imagen
+
+Costó ocho excepciones al día durante días, todas invisibles: `ENABLE_BANKING_PRIVATE_KEY_PATH`
+apuntaba a `enable_banking_key.pem`, que está en `.gitignore` **porque es un secreto**. Un
+`fly deploy` desde el portátil lo sube (está en el contexto de build); uno lanzado desde el
+workflow `deploy-backend.yml` construye la imagen sin él, porque ahí el repositorio no lo
+tiene. El fallo no aparece al desplegar, aparece la próxima vez que alguien abre el widget de
+finanzas — y aparecía como un **500 en todo `/finanzas/resumen`**, llevándose por delante la
+cartera de Indexa, que funcionaba.
+
+Tres cosas cambiaron a raíz de eso, y las tres importan por separado:
+
+1. **`ENABLE_BANKING_PRIVATE_KEY`**: la clave por variable, que es lo único que sobrevive a
+   un despliegue venga de donde venga. Gana a la ruta.
+2. **`_enable_banking_configurado()` comprueba que la clave EXISTE**, no que la variable esté
+   escrita. "Configurado" tiene que significar "esto puede funcionar".
+3. **`_revolut_datos_cache` atrapa cualquier excepción.** Revolut es una fuente secundaria
+   dentro de un endpoint que sirve otra cosa: ninguna sorpresa suya puede costar la cartera.
+
+La moraleja general, que aplica a cualquier integración que se añada aquí: **una fuente
+secundaria que puede lanzar tumba el endpoint entero**, y un secreto que solo existe en el
+disco de quien desplegó no existe.
 
 ### Los tests
 

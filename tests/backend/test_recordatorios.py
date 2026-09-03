@@ -355,7 +355,7 @@ class TestAvisosAlMovil:
         # Sin id no hay botones que pintar: la notificación sale limpia en vez de con
         # una acción que no lleva a ninguna parte.
         assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla",
-                           "voz": False, "id": "", "acciones": []}]
+                           "voz": False, "id": "", "critico": False, "acciones": []}]
 
     def test_la_cola_se_vacia_al_recogerla(self, client):
         self._sondear(client)
@@ -644,13 +644,20 @@ class TestVigilanteAbreIssues:
         self._servidor(monkeypatch, ["add_issue_comment", "search_issues"])
         assert main._vigilante_abrir_issue("t", "c") == ""
 
-    def test_servidor_sin_confiar_no_se_invoca(self, monkeypatch):
-        """El vigilante corre sin usuario delante: no hay quien apruebe un `mcp_usar`
-        normal, así que un servidor con `confiar: false` se queda fuera aunque exponga
-        una tool `create_issue`/`issue_write` para otra cosa."""
+    def test_un_servidor_sin_confiar_tambien_sirve(self, monkeypatch):
+        """Lo que autoriza esta llamada es la LISTA CERRADA de herramientas, no `confiar`.
+
+        Exigir `confiar: true` sonaba prudente y en la práctica apagó la función entera:
+        el único servidor dado de alta es el de GitHub y está —correctamente— sin
+        confiar, así que 281 avisos del mismo fallo pasaron sin abrir un solo issue. Un
+        interruptor de seguridad que nadie enciende no protege, esconde.
+
+        Lo que NO cambia: `_mcp_pide_confirmar`, o sea que Jarvis escribiendo desde el
+        chat sigue pasando por el usuario. Eso lo fija `test_jarvis.py`.
+        """
         llamadas = self._servidor(monkeypatch, ["create_issue"], confiar=False)
-        assert main._vigilante_abrir_issue("t", "c") == ""
-        assert llamadas == []
+        assert main._vigilante_abrir_issue("t", "c").endswith("/issues/70")
+        assert [c for c in llamadas if c[1] == "tools/call"]
 
     def test_sin_repo_configurado_no_se_intenta(self, monkeypatch):
         monkeypatch.setattr(main, "JARVIS_REPO", "")

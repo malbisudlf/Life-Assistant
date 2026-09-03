@@ -33,9 +33,12 @@ os.environ.setdefault("LOG_PERSIST", "0")
 os.environ.setdefault("INDEXA_TOKEN", "indexa-e2e-token")
 # El saldo de Revolut: solo hace falta que _enable_banking_configurado() sea True — la
 # sesión y el JWT se sustituyen directamente en _preparar(), como get_valid_token con
-# Graph. El valor de la clave no importa: nunca se lee de disco en el E2E.
+# Graph. El CONTENIDO de la clave no importa (nunca se firma nada aquí), pero tiene que
+# haber una: desde septiembre de 2026 "configurado" significa que la clave existe, no que
+# la variable esté escrita, precisamente porque una ruta a un fichero ausente tumbaba
+# `/finanzas/resumen` entero en producción. Por eso va por variable y no por ruta.
 os.environ.setdefault("ENABLE_BANKING_APPLICATION_ID", "app-e2e-id")
-os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "e2e-no-se-usa.pem")
+os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY", "no-es-una-clave-real")
 # La voz de Jarvis, encendida: el dashboard pide /voz/token nada más entrar, y con la
 # voz apagada eso es un 503 en la consola del navegador en cada carga — que el E2E
 # cuenta como error, y con razón. Encendida, se ejerce el camino de verdad; la

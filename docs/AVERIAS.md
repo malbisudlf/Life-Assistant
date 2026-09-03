@@ -133,9 +133,22 @@ FRONTEND_URL=https://tu-dashboard.vercel.app
 ```
 
 Sin ella el aviso conserva «Desplegar» y «Ahora no»: lo único que se pierde es poder
-contestar hablando. Y comprueba en la app de HA que las **notificaciones críticas** están
-permitidas para este canal — es lo que hace que suene con el móvil en silencio, que es la
-mitad del valor en el coche.
+contestar hablando.
+
+Y en HA hacen falta **tres cosas** que es fácil dar por hechas (ninguna estaba puesta hasta
+septiembre de 2026, así que el camino entero llegaba hasta el aviso y ahí se paraba):
+
+1. La automatización **«Life Assistant - Desplegar el arreglo»** y su
+   `rest_command.la_despliegue_accion` (`docs/HOME_ASSISTANT_JARVIS.md`). Sin ellas el
+   aviso llega con sus tres botones y los dos primeros **no hacen nada** — el permiso solo
+   se puede dar hablando. Se nota tarde y en el peor momento.
+2. Que el `notify` del aviso pase el bloque **`push`** con `critical: 1` cuando
+   `repeat.item.critico` viene a `true`. El backend marca así **un solo aviso**, el del
+   permiso de despliegue, por la misma regla que decide quién puede llamarte por teléfono:
+   solo lo que se queda bloqueado hasta que contestes.
+3. Dar permiso de **notificaciones críticas** a la app en el iPhone (Ajustes → la app de
+   HA). Sin él la notificación llega igual, pero **callada** — y con el móvil en silencio
+   en el coche, callada es no llegar, que es justo lo que este canal viene a evitar.
 
 ### 5. El teléfono (opcional, hoy apagado)
 
