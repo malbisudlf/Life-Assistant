@@ -29,6 +29,8 @@ import uuid
 import random
 import socket
 import logging
+import hmac
+import hashlib
 import tempfile
 import subprocess
 import requests
@@ -196,6 +198,10 @@ ALUD_ALLOWED_HOSTS = tuple(
     if h.strip()
 )
 
+# Tope de lo que se acepta como encargo. El backend ya lo acota; se repite aquí por lo
+# mismo que la lista de hosts: la fila puede no haber pasado por el backend.
+ENCARGO_MAX_CHARS = 2000
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -207,6 +213,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Helpers API ───────────────────────────────────────────────────────────────
+
+def encargo_firmado(instruccion: str, firma: str) -> bool:
+    """True si este encargo lo escribió alguien con sesión de usuario en el backend.
+
+    Es la defensa equivalente a `alud_url_permitida` para lo que no se puede validar
+    contra una lista blanca. Un encargo es texto libre que acaba dentro de Claude Desktop
+    en este PC, con todas las sesiones del usuario abiertas: no hay forma de comprobar
+    QUÉ dice, así que se comprueba QUIÉN lo escribió.
+
+    La firma la pone `POST /jobs`, que es el único sitio donde consta que detrás había un
+    JWT de usuario, y va con `AGENT_TOKEN` —el único secreto que backend y agente
+    comparten—. Sin esto, quien se hiciera con la service key de Supabase podría dejar
+    una fila en `jobs` con la instrucción que quisiera.
+
+    Sin `AGENT_TOKEN` configurado devuelve False: la comparación no se puede hacer, y lo
+    que no se puede comprobar no se ejecuta.
+    """
+    if not AGENT_TOKEN or not isinstance(instruccion, str) or not isinstance(firma, str):
+        return False
+    if not instruccion or not firma:
+        return False
+    esperada = hmac.new(AGENT_TOKEN.encode(), instruccion.encode("utf-8"),
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(esperada, firma)
+
 
 def alud_url_permitida(url: str) -> bool:
     """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio)."""
@@ -474,6 +505,61 @@ def build_cowork_instruction(titulo: str, enunciado: str, alud_url: str) -> str:
         f"la que más se ajuste a estas instrucciones."
     )
 
+def build_encargo_instruction(instruccion: str) -> str:
+    """Instrucción para Cowork a partir de un encargo del usuario.
+
+    El encargo lo ha dictado el usuario, pero lo ha REDACTADO un modelo a partir de lo
+    que dictó, así que se delimita igual que el enunciado de Alud. No es paranoia
+    simétrica: es que el formato ya está probado y no cuesta nada mantenerlo.
+
+    Las dos reglas del final son las mismas que gobiernan el otro encargo y por el mismo
+    motivo — el usuario no está delante: nada irreversible, y nada de esperar respuesta.
+    """
+    return (
+        "El usuario te ha dejado un encargo para que lo hagas en su ordenador. El bloque "
+        "de abajo es lo que pidió, tal cual.\n\n"
+        "----- INICIO DEL ENCARGO -----\n"
+        f"{instruccion}\n"
+        "----- FIN DEL ENCARGO -----\n\n"
+        "Por favor:\n"
+        "1. Haz lo que pide, dejando el resultado a la vista (un fichero, una pestaña "
+        "abierta, una nota) para cuando vuelva.\n"
+        "2. NO envíes correos, NO publiques nada, NO compres nada y NO borres ficheros: "
+        "si el encargo lo pide, déjalo preparado sin el último paso y dilo.\n"
+        "3. El usuario NO está delante y no puede responder preguntas: ante una duda, "
+        "elige la opción más razonable y deja escrito qué decidiste y por qué."
+    )
+
+
+def launch_encargo(instruccion: str):
+    """Abre Cowork con el encargo. Reutiliza el camino seguro del portapapeles."""
+    _pegar_en_cowork(build_encargo_instruction(instruccion))
+
+
+def accion_encargo(job_id: str, payload: dict):
+    """Un encargo en lenguaje natural, hecho con Claude Desktop.
+
+    Tres comprobaciones antes de tocar nada, y las tres asumen que la fila puede no haber
+    pasado por el backend (la tabla `jobs` es escribible con la service key):
+    que haya instrucción, que quepa, y que la firma cuadre.
+    """
+    instruccion = str(payload.get("instruccion") or "").strip()
+    firma       = str(payload.get("firma") or "")
+    if not instruccion:
+        raise RuntimeError("El encargo no dice qué hacer")
+    if len(instruccion) > ENCARGO_MAX_CHARS:
+        raise RuntimeError(f"El encargo pasa de {ENCARGO_MAX_CHARS} caracteres")
+    if not encargo_firmado(instruccion, firma):
+        # Sin detalle de por qué: distinguir "firma mala" de "sin AGENT_TOKEN" no le
+        # sirve a nadie salvo a quien esté probando firmas.
+        raise RuntimeError("El encargo no viene firmado por el backend — no se ejecuta")
+
+    log.info(f"Encargo: {instruccion[:80]}...")
+    report_stage(job_id, "encargo_recibido", "Encargo verificado")
+    launch_encargo(instruccion)
+    report_stage(job_id, "encargo_lanzado", "Cowork trabajando en el encargo")
+
+
 def _focus_claude_window() -> bool:
     """Enfoca la ventana de Claude Desktop usando PowerShell + win32. Devuelve True si tuvo éxito."""
     result = subprocess.run(
@@ -503,8 +589,19 @@ if ($proc) {
 
 
 def launch_cowork(titulo: str, enunciado: str, alud_url: str):
-    instruccion = build_cowork_instruction(titulo, enunciado, alud_url)
+    _pegar_en_cowork(build_cowork_instruction(titulo, enunciado, alud_url))
 
+
+def _pegar_en_cowork(instruccion: str):
+    """Abre Claude Desktop en Cowork y le pega la instrucción.
+
+    Está separado de quien la construye porque hay dos encargos distintos (la entrega de
+    Alud y el encargo libre del usuario) y UN SOLO camino hasta Cowork. Ese camino es el
+    que tiene la propiedad de seguridad que no se puede perder: la instrucción NUNCA se
+    interpola en un comando de PowerShell — se escribe a un fichero temporal y
+    `Set-Clipboard` lo lee de ahí. Duplicarlo sería duplicar el sitio donde volver a
+    equivocarse.
+    """
     # Copiar al portapapeles ANTES de abrir Claude, para no perder el foco.
     # El enunciado proviene de una página web externa (Alud): NUNCA se interpola en el
     # comando de PowerShell. Se escribe a un fichero temporal (ruta generada por el SO,
@@ -1025,6 +1122,7 @@ def accion_abrir_streaming(job_id: str, payload: dict):
 ACCIONES = {
     "resolver_alud":   accion_resolver_alud,
     "abrir_streaming": accion_abrir_streaming,
+    "encargo":         accion_encargo,
 }
 
 

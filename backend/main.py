@@ -142,6 +142,10 @@ MAX_SESIONES_RESUMEN = int(os.getenv("MAX_SESIONES_RESUMEN", "200"))
 HA_POLL_TOKEN       = os.getenv("HA_POLL_TOKEN", "")
 HEALTH_INGEST_TOKEN = os.getenv("HEALTH_INGEST_TOKEN", "")
 AGENT_TOKEN         = os.getenv("AGENT_TOKEN", "")   # el agente PC sondea y cierra jobs con este token
+# Con el que habla el Atajo de iOS («Oye Siri, dile a Jarvis…»). Token de servicio y no
+# JWT por la misma razón que el del agente PC: un Atajo no sabe volver a hacer login, y
+# el día que el JWT caducara se quedaría mudo sin avisar a nadie. Ver /jarvis/atajo.
+JARVIS_TOKEN        = os.getenv("JARVIS_TOKEN", "")
 # Personalización de la instancia (kit self-hosted)
 TIMEZONE         = os.getenv("TIMEZONE", "Europe/Madrid")   # zona horaria IANA del usuario
 CLASSES_CALENDAR = os.getenv("CLASSES_CALENDAR", "clases")  # nombre del calendario de clases en Outlook
@@ -322,6 +326,10 @@ BRIEF_ECONOMIA_POR_FUENTE = 25
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
 # pocos cuerpos grandes en paralelo para tumbarla.
 MAX_AUDIO_BYTES    = int(os.getenv("MAX_AUDIO_BYTES",    str(8 * 1024 * 1024)))
+# Para estimar cuánto dura una nota de voz sin decodificarla: el navegador graba en
+# Opus/WebM a unos 24 kbit/s, o sea ~3 KB por segundo. Solo se usa para la contabilidad
+# de gasto, donde una estimación declarada vale; nunca para decidir nada.
+AUDIO_BYTES_POR_SEGUNDO = float(os.getenv("AUDIO_BYTES_POR_SEGUNDO", "3000"))
 MAX_INGEST_BYTES   = int(os.getenv("MAX_INGEST_BYTES",   str(4 * 1024 * 1024)))
 # El formulario que manda Twilio al descolgar son unos pocos campos de texto (CallSid,
 # From, To...); nunca ha llegado a los KB. El tope es generoso de todos modos porque es
@@ -478,6 +486,110 @@ def get_openai_client() -> OpenAI:
     return _openai_client
 
 
+# ── Lo que cuesta el modelo ──────────────────────────────────────────────────
+# Medir en vez de estimar. Los números de docs/JARVIS.md se tomaron una vez y a mano, y
+# desde entonces han entrado el streaming, el modo llamada y el teléfono: hoy la única
+# alarma de coste es la factura.
+#
+# Tres decisiones que no son obvias:
+#   - **Se guardan tokens, no euros.** Las tarifas cambian y una cifra en euros escrita
+#     hoy sería mentira dentro de seis meses sin que nadie se entere. El precio vive en
+#     configuración y se aplica AL LEER.
+#   - **Se apunta en memoria y lo escribe el hilo de fondo**, igual que el registro
+#     persistente y por lo mismo: esto cuelga del camino crítico de la voz, donde una
+#     escritura a Supabase por llamada al modelo se oiría.
+#   - **Un fallo apuntando el gasto no puede tocar la respuesta.** Es contabilidad, no
+#     funcionalidad.
+GASTO_PERSIST   = _flag("GASTO_PERSIST", "1")
+GASTO_QUEUE_MAX = int(os.getenv("GASTO_QUEUE_MAX", "500"))
+GASTO_URL       = f"{SUPABASE_URL}/rest/v1/jarvis_gasto"
+# €/millón de tokens (entrada, entrada cacheada, salida) por modelo, y €/minuto para el
+# audio. Configurable porque cambia sola: `MODELO_TARIFAS` es un JSON
+# {"modelo": [entrada, cacheada, salida]}. Lo de aquí son los precios de referencia de
+# los modelos que usa el proyecto por defecto; un modelo sin tarifa sale con coste null,
+# que es la respuesta honesta ("no sé lo que cuesta"), no un cero que parezca gratis.
+_TARIFAS_POR_DEFECTO = {
+    "gpt-4o-mini":  [0.14, 0.07, 0.56],
+    "gpt-4.1-mini": [0.37, 0.09, 1.47],
+    "gpt-5-mini":   [0.23, 0.02, 1.84],
+    "gpt-5":        [1.15, 0.11, 9.20],
+    "whisper-1":    [0.0,  0.0,  0.0],
+}
+
+
+def _tarifas() -> dict:
+    try:
+        propias = json.loads(os.getenv("MODELO_TARIFAS", "") or "{}")
+    except ValueError:
+        logger.warning("MODELO_TARIFAS no es JSON válido; se usan las tarifas por defecto")
+        propias = {}
+    return {**_TARIFAS_POR_DEFECTO, **(propias if isinstance(propias, dict) else {})}
+
+
+# €/minuto de audio transcrito (Whisper). Aparte porque no se cobra por tokens.
+TARIFA_AUDIO_MINUTO = float(os.getenv("TARIFA_AUDIO_MINUTO", "0.0055"))
+
+# Por dónde entró lo que se está pagando (chat, voz, telefono, atajo, brief...). Es
+# una contextvar y no un parámetro porque tendría que atravesar seis funciones que no
+# pintan nada en esto, igual que `_peticion_actual` con el registro.
+_boca_actual: contextvars.ContextVar[str] = contextvars.ContextVar("boca_actual", default="sistema")
+
+_gasto_cola: deque = deque(maxlen=GASTO_QUEUE_MAX)
+_gasto_lock = threading.Lock()
+
+
+def _apuntar_gasto(boca: str, modelo: str, usage=None, segundos_audio: float = 0.0) -> None:
+    """Encola lo que ha costado una llamada al modelo. Nunca lanza.
+
+    `usage` es el objeto que devuelve el SDK. Puede no venir —el streaming solo lo manda
+    si se le pide, y un modelo simulado no lo trae— y eso NO es un error: es una llamada
+    de la que no sabemos el gasto, y así se queda. Inventarse un número sería peor que no
+    tenerlo, que es la regla de todo el proyecto.
+    """
+    if not GASTO_PERSIST:
+        return
+    try:
+        entrada = salida = cacheados = 0
+        if usage is not None:
+            entrada = int(getattr(usage, "prompt_tokens", 0) or 0)
+            salida  = int(getattr(usage, "completion_tokens", 0) or 0)
+            detalle = getattr(usage, "prompt_tokens_details", None)
+            cacheados = int(getattr(detalle, "cached_tokens", 0) or 0) if detalle else 0
+        if not (entrada or salida or segundos_audio):
+            return
+        fila = {
+            "creado":           datetime.now(timezone.utc).isoformat(),
+            "boca":             (boca or "?")[:40],
+            "modelo":           (modelo or "?")[:80],
+            "tokens_entrada":   entrada,
+            "tokens_cacheados": cacheados,
+            "tokens_salida":    salida,
+            "segundos_audio":   round(float(segundos_audio), 2),
+        }
+        with _gasto_lock:
+            _gasto_cola.append(fila)
+    except Exception as e:   # noqa: BLE001 — contabilidad, nunca funcionalidad
+        print(f"[gasto] no se pudo apuntar: {e}", file=sys.stderr)
+
+
+def _volcar_gasto() -> None:
+    """Escribe lo encolado. Best-effort: nunca lanza, y nunca por `logger` —eso
+    realimentaría la cola del registro con el error de escribir la contabilidad."""
+    with _gasto_lock:
+        if not _gasto_cola:
+            return
+        lote = list(_gasto_cola)
+        _gasto_cola.clear()
+    try:
+        r = http.post(GASTO_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json=lote)
+        if r.status_code >= 300:
+            print(f"[gasto] no se pudo escribir en jarvis_gasto ({r.status_code})",
+                  file=sys.stderr)
+    except Exception as e:   # noqa: BLE001
+        print(f"[gasto] fallo escribiendo en jarvis_gasto: {e}", file=sys.stderr)
+
+
 def supabase_headers():
     return {
         "apikey": SUPABASE_KEY,
@@ -611,20 +723,36 @@ def _bucle_de_volcado():
     while True:
         time.sleep(LOG_FLUSH_SECONDS)
         _registro.volcar()
+        # La contabilidad del modelo va en el mismo hilo: es el mismo problema (Fly
+        # duerme la máquina y se lleva lo encolado) y no merece uno propio.
+        _volcar_gasto()
+
+
+_hilo_de_volcado = None
 
 
 def activar_registro_persistente():
-    """Engancha el handler y arranca el hilo de volcado. Idempotente."""
-    if _registro in logger.handlers:
+    """Engancha el handler y arranca el hilo de volcado. Idempotente.
+
+    El handler solo se engancha si LOG_PERSIST: el hilo lo comparten el registro y la
+    contabilidad del modelo, así que arranca aunque los registros estén apagados. Si no,
+    apagar LOG_PERSIST dejaba el gasto encolándose en memoria para siempre y sin escribir.
+    """
+    global _hilo_de_volcado
+    if LOG_PERSIST and _registro not in logger.handlers:
+        logger.addHandler(_registro)
+    if _hilo_de_volcado is not None:
         return
-    logger.addHandler(_registro)
-    threading.Thread(target=_bucle_de_volcado, daemon=True, name="volcado-registro").start()
+    _hilo_de_volcado = threading.Thread(target=_bucle_de_volcado, daemon=True,
+                                        name="volcado-registro")
+    _hilo_de_volcado.start()
     # Fly duerme la máquina en cuanto deja de haber tráfico: sin esto, lo encolado en los
     # últimos LOG_FLUSH_SECONDS —justo lo que pasó antes de que todo se parase— se pierde.
     atexit.register(_registro.volcar)
+    atexit.register(_volcar_gasto)
 
 
-if LOG_PERSIST and SUPABASE_URL:
+if (LOG_PERSIST or GASTO_PERSIST) and SUPABASE_URL:
     activar_registro_persistente()
 
 
@@ -846,6 +974,36 @@ def alud_url_permitida(url: str) -> bool:
     return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
 
+# Tope de lo que se le puede encargar al PC de una vez. No es una defensa de seguridad
+# —para eso está la firma— sino de sentido: una instrucción de diez mil caracteres
+# dictada por voz es un error de transcripción, no un encargo.
+ENCARGO_MAX_CHARS = int(os.getenv("ENCARGO_MAX_CHARS", "2000"))
+
+
+def firma_encargo(instruccion: str) -> str:
+    """Firma HMAC de un encargo en lenguaje natural para el PC.
+
+    Existe porque el encargo genérico ROMPE la premisa en la que se apoyan las
+    invariantes 7 y 9 de `CLAUDE.md`: hasta ahora lo único que el agente ejecutaba venía
+    de una URL de `ALUD_ALLOWED_HOSTS`, validada en tres sitios. Un texto libre no se
+    puede validar contra ninguna lista blanca, así que lo que se valida es QUIÉN lo
+    escribió.
+
+    Se firma con `AGENT_TOKEN` y no con `SECRET_KEY` porque el que tiene que comprobarla
+    es el agente, y `AGENT_TOKEN` es el único secreto que backend y agente ya comparten.
+    La tabla `jobs` es escribible con la service key: sin firma, quien se hiciera con esa
+    key podría dejar una instrucción arbitraria que el PC ejecutaría con la sesión del
+    usuario abierta. Con firma, además necesita el token del agente.
+
+    Cadena vacía si no hay `AGENT_TOKEN`: sin secreto no hay firma que valga, y el que
+    llama tiene que tratarlo como "esto no se puede encargar", nunca como "va sin firma".
+    """
+    if not AGENT_TOKEN:
+        return ""
+    return hmac.new(AGENT_TOKEN.encode(), instruccion.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
 def _extract_service_token(request: Request, token_qs: str = "") -> str:
     """Token de servicio (HA / health): preferir header para que no quede en logs de acceso.
 
@@ -977,6 +1135,25 @@ def verify_agente(request: Request):
     """
     provisto = _extract_service_token(request)
     if _token_ok(provisto, AGENT_TOKEN):
+        return
+    _jwt_de_usuario(provisto)
+
+
+def verify_jarvis(request: Request):
+    """Auth de /jarvis/atajo: token de servicio JARVIS_TOKEN O JWT de usuario.
+
+    Mismo criterio que `verify_agente`, y por el mismo motivo: el cliente es un Atajo de
+    iOS que se dispara solo por voz, y lo que arranca sin nadie delante no puede
+    autenticarse con un token que caduca a los 30 días. Ya pasó con el agente PC.
+
+    Se sigue aceptando el JWT para poder probar el endpoint desde el dashboard sin tener
+    que configurar nada, y para que una instancia sin `JARVIS_TOKEN` no se quede sin esta
+    puerta. Solo de cabeceras (`_extract_service_token` sin query string): un Atajo sabe
+    mandar cabeceras y no hay ninguna integración desplegada que migrar, así que aquí no
+    se hereda la excepción de la query que arrastran HA y el Atajo de salud.
+    """
+    provisto = _extract_service_token(request)
+    if _token_ok(provisto, JARVIS_TOKEN):
         return
     _jwt_de_usuario(provisto)
 
@@ -1679,6 +1856,7 @@ def extract_idea_from_text(text: str) -> dict:
         max_tokens=350,
         temperature=0.3,
     )
+    _apuntar_gasto(_boca_actual.get(), "gpt-4o-mini", getattr(completion, "usage", None))
     raw = completion.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     try:
@@ -1708,6 +1886,7 @@ async def create_idea_from_audio(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
     _check_rate("ideas_audio", _client_ip(request), AUDIO_MAX_REQUESTS, AUDIO_WINDOW_SECONDS)
+    _boca_actual.set("ideas")
 
     # 1. Transcribir con Whisper. Se lee un byte más del tope para poder distinguir
     # "justo en el límite" de "se ha pasado" sin cargar el resto en memoria.
@@ -1722,6 +1901,12 @@ async def create_idea_from_audio(
         file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
         language="es",
     )
+    # Whisper no cobra por tokens sino por duración, y la respuesta no la trae: se estima
+    # desde el tamaño con el bitrate típico de una nota de voz. Es una estimación
+    # DECLARADA, no un dato — por eso va en su columna y no mezclada con los tokens, que
+    # sí son un hecho.
+    _apuntar_gasto("ideas", "whisper-1",
+                   segundos_audio=len(audio_bytes) / AUDIO_BYTES_POR_SEGUNDO)
     text = transcript.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="No se pudo transcribir el audio")
@@ -1984,7 +2169,29 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
     alud_url = body.payload.get("alud_url") if isinstance(body.payload, dict) else None
     if alud_url is not None and not alud_url_permitida(alud_url):
         raise HTTPException(status_code=400, detail="alud_url no permitida")
-    payload = {"dedupe_key": body.dedupe_key, "payload": body.payload}
+
+    # El encargo en lenguaje natural se FIRMA AQUÍ, y siempre de cero: la firma no se
+    # acepta del cliente ni aunque venga correcta. Este endpoint es el único sitio del
+    # sistema donde consta que detrás hay un JWT de usuario, y esa es justo la propiedad
+    # que la firma transporta hasta el agente. Ver `firma_encargo`.
+    entrada = body.payload if isinstance(body.payload, dict) else {}
+    if entrada.get("accion") == "encargo":
+        instruccion = str(entrada.get("instruccion") or "").strip()
+        if not instruccion:
+            raise HTTPException(status_code=400, detail="El encargo no dice qué hacer")
+        if len(instruccion) > ENCARGO_MAX_CHARS:
+            raise HTTPException(status_code=400,
+                                detail=f"El encargo pasa de {ENCARGO_MAX_CHARS} caracteres")
+        if not AGENT_TOKEN:
+            # Error con el arreglo dentro, como con el buscador: sin AGENT_TOKEN el
+            # agente rechazaría el job y el usuario vería "falló" sin saber por qué.
+            raise HTTPException(
+                status_code=503,
+                detail="Encargar trabajo al PC necesita AGENT_TOKEN configurado en el backend")
+        entrada = {**entrada, "instruccion": instruccion,
+                   "firma": firma_encargo(instruccion)}
+
+    payload = {"dedupe_key": body.dedupe_key, "payload": entrada}
     # `on_conflict=dedupe_key` es obligatorio (mismo motivo que en la ingesta de salud):
     # sin él PostgREST resuelve el conflicto contra la clave primaria, que aquí es `id`
     # —uuid nuevo en cada inserción, nunca colisiona—, así que la clave repetida acababa
@@ -7040,6 +7247,101 @@ def send_informe(request: Request, token: str = "", forzar: int = 0):
     return {"ok": True, "enviado_a": BRIEF_TO, **(resultado or {"informe_semanal": False})}
 
 
+# ── GASTO DEL MODELO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────
+
+def _euros(modelo: str, entrada: int, cacheados: int, salida: int,
+           segundos: float) -> Optional[float]:
+    """Lo que costó, con las tarifas de HOY. None si el modelo no tiene tarifa puesta.
+
+    None y no cero: "no sé lo que cuesta este modelo" y "es gratis" son cosas distintas,
+    y un cero en el panel se lee como la segunda. Es la misma regla que gobierna el resto
+    del proyecto.
+    """
+    if segundos:
+        return round(segundos / 60 * TARIFA_AUDIO_MINUTO, 6)
+    tarifa = _tarifas().get(modelo)
+    if not tarifa:
+        return None
+    # Los cacheados vienen DENTRO de los de entrada, no aparte: cobrarlos dos veces
+    # inflaría el total justo en el caso que el proyecto optimiza (el prefijo estable de
+    # 3.456 tokens que viaja en cada llamada).
+    frescos = max(entrada - cacheados, 0)
+    return round((frescos * tarifa[0] + cacheados * tarifa[1] + salida * tarifa[2]) / 1_000_000, 6)
+
+
+@app.get("/gasto")
+def get_gasto(dias: int = 30,
+              credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Lo que ha costado hablar con Jarvis, por boca y por modelo.
+
+    La agregación se hace AQUÍ y no en la tabla porque el precio no es un dato: las
+    tarifas cambian, y guardar euros habría dejado escrita una cifra que dentro de seis
+    meses sería mentira sin que nadie se entere. Se guardan tokens, que son un hecho.
+
+    Un modelo sin tarifa configurada sale con `euros: null` y sus tokens contados: no
+    saber lo que cuesta no es lo mismo que no gastar, y el panel tiene que poder decir
+    la diferencia. `sin_tarifa` lista esos modelos para que se pueda arreglar.
+    """
+    if dias < 1 or dias > 365:
+        raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 365")
+    # Igual que /logs: lo que se acaba de gastar sigue en la cola en memoria, y se mira
+    # el panel justo después de usarlo.
+    _volcar_gasto()
+    desde = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+    r = http.get(
+        f"{GASTO_URL}?creado=gte.{quote(desde, safe='')}"
+        "&select=creado,boca,modelo,tokens_entrada,tokens_cacheados,tokens_salida,segundos_audio"
+        "&order=creado.desc&limit=20000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    filas = r.json() or []
+
+    def _vacio():
+        return {"llamadas": 0, "entrada": 0, "cacheados": 0, "salida": 0,
+                "segundos_audio": 0.0, "euros": 0.0, "euros_incompleto": False}
+
+    total, por_boca, por_modelo, sin_tarifa = _vacio(), {}, {}, set()
+    for f in filas:
+        entrada   = int(f.get("tokens_entrada") or 0)
+        cacheados = int(f.get("tokens_cacheados") or 0)
+        salida    = int(f.get("tokens_salida") or 0)
+        segundos  = float(f.get("segundos_audio") or 0)
+        modelo    = str(f.get("modelo") or "?")
+        euros     = _euros(modelo, entrada, cacheados, salida, segundos)
+        if euros is None:
+            sin_tarifa.add(modelo)
+        for cubo in (total,
+                     por_boca.setdefault(str(f.get("boca") or "?"), _vacio()),
+                     por_modelo.setdefault(modelo, _vacio())):
+            cubo["llamadas"]       += 1
+            cubo["entrada"]        += entrada
+            cubo["cacheados"]      += cacheados
+            cubo["salida"]         += salida
+            cubo["segundos_audio"] += segundos
+            cubo["euros"]          += euros or 0.0
+            # El total en euros se marca como incompleto en vez de callarlo: un número
+            # que no incluye todo el gasto y no lo dice es peor que no darlo.
+            cubo["euros_incompleto"] = cubo["euros_incompleto"] or euros is None
+
+    for cubo in [total, *por_boca.values(), *por_modelo.values()]:
+        cubo["euros"] = round(cubo["euros"], 4)
+        cubo["segundos_audio"] = round(cubo["segundos_audio"], 1)
+
+    return {
+        "dias":       dias,
+        "total":      total,
+        "por_boca":   por_boca,
+        "por_modelo": por_modelo,
+        # Que el prefijo del prompt se esté cacheando es la palanca de coste de Jarvis:
+        # si este porcentaje se hunde, algo que cambia a menudo se ha colado delante.
+        "cacheado_pct": (round(100 * total["cacheados"] / total["entrada"], 1)
+                         if total["entrada"] else None),
+        "sin_tarifa": sorted(sin_tarifa),
+    }
+
+
 # ── REGISTRO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────────────
 
 @app.get("/logs")
@@ -7313,6 +7615,10 @@ RECORDATORIOS_MAX      = 50
 # encendidas al salir de casa: con una casa entera encendida, apagarlas todas de golpe
 # llenaría la cola de órdenes (CASA_MAX_ORDENES) y se perderían las primeras.
 AVISO_MAX_ENTIDADES    = 15
+# La instantánea de por qué se disparó un aviso (ver _guardar_motivo). Tabla aparte para
+# que una migración sin aplicar no pueda dejar al sistema sin avisos.
+AVISOS_MOTIVOS_URL     = f"{SUPABASE_URL}/rest/v1/avisos_motivos"
+AVISO_MOTIVO_MAX       = 2000
 
 # ── Gobierno de los avisos ───────────────────────────────────────────────────
 # Un asistente proactivo tiene un solo modo de fallo: volverse ruido. Y no falla de
@@ -7435,10 +7741,39 @@ def _ya_dicho(regla: str, huella: str) -> bool:
         return False
 
 
+def _guardar_motivo(aviso_id: str, regla: str, datos: dict) -> None:
+    """La instantánea de por qué se disparó este aviso. Los números, no la frase.
+
+    Va a una tabla APARTE (`avisos_motivos`) y no a una columna de `jarvis_recordatorios`
+    por la misma razón que `informe_envios`: si la migración no está aplicada, lo único
+    que se pierde es la explicación. Una columna nueva haría que el insert del aviso
+    devolviera 400 mientras tanto — o sea, dejaría al sistema sin avisos por añadir una
+    función de diagnóstico.
+
+    Por eso un fallo aquí solo se registra: guardar el porqué NUNCA puede impedir el
+    aviso. Ya está apuntado cuando se llama.
+    """
+    if not datos:
+        return
+    try:
+        recortado = json.dumps(datos, ensure_ascii=False, default=str)[:AVISO_MOTIVO_MAX]
+        r = http.post(AVISOS_MOTIVOS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"aviso_id": aviso_id, "regla": regla,
+                            "datos": json.loads(recortado) if len(recortado) < AVISO_MOTIVO_MAX
+                                     else {"truncado": recortado[:AVISO_MOTIVO_MAX]}})
+        if r.status_code >= 300 and r.status_code != 409:
+            logger.warning("Avisos: no se pudo guardar el motivo de '%s' (%s)",
+                           regla, r.status_code)
+    except Exception as e:
+        logger.warning("Avisos: no se pudo guardar el motivo de '%s' (%s)", regla, e)
+
+
 def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
                    cuando: Optional[datetime] = None, caduca: Optional[datetime] = None,
                    huella: str = "", id: str = "", voz: bool = False,
-                   entidades: Optional[list] = None) -> bool:
+                   entidades: Optional[list] = None,
+                   motivo: Optional[dict] = None) -> bool:
     """Única puerta por la que una regla deja un aviso. True si quedó apuntado.
 
     Aquí se aplican el silenciado y la memoria de lo ya dicho; el presupuesto se aplica
@@ -7448,6 +7783,11 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
     trae un botón que actúa sobre ellos (hoy solo "te has ido con esto encendido").
     Se guardan CON el aviso a propósito: son las de ese momento, no las de cuando
     pulses.
+
+    `motivo` son los VALORES que dispararon la regla: contra qué se comparó y con cuántos
+    datos detrás. Es lo único que no se puede reconstruir después, porque la frase la
+    redacta un modelo y los datos siguen cambiando. Se guarda aparte (ver
+    `_guardar_motivo`) y su fallo nunca impide el aviso.
     """
     if _regla_silenciada(regla):
         return False
@@ -7461,8 +7801,10 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
         "prioridad": prioridad,
         "voz":       voz,
     }
-    if id:
-        fila["id"] = id
+    # El id se pone SIEMPRE aquí, aunque la tabla tenga default: sin conocerlo no se
+    # puede colgar de él la instantánea del motivo, y el insert va con `return=minimal`
+    # (pedir la fila de vuelta solo para leer el id costaría una respuesta en cada aviso).
+    fila["id"] = id or str(uuid.uuid4())
     if huella:
         fila["huella"] = huella
     if caduca:
@@ -7479,6 +7821,8 @@ def _apuntar_aviso(regla: str, texto: str, *, prioridad: int = PRIO_NORMAL,
     except Exception as e:
         logger.error("Avisos: no se pudo apuntar el de '%s' (%s)", regla, e)
         return False
+    if motivo:
+        _guardar_motivo(fila["id"], regla, motivo)
     return True
 
 
@@ -8247,12 +8591,14 @@ def _hablar_si_hay_algo() -> dict:
     texto = " ".join(motivos)
     try:
         cliente = get_openai_client()
-        redactado = cliente.chat.completions.create(
+        completa = cliente.chat.completions.create(
             model=JARVIS_MODEL,
             messages=[{"role": "system", "content": _PROACTIVO_SISTEMA},
                       {"role": "user", "content": texto}],
             **_parametros_modelo(JARVIS_MODEL, 200),
-        ).choices[0].message.content
+        )
+        _apuntar_gasto("proactivo", JARVIS_MODEL, getattr(completa, "usage", None))
+        redactado = completa.choices[0].message.content
         if redactado and redactado.strip():
             texto = redactado.strip()
     except Exception as e:
@@ -8409,6 +8755,12 @@ def _regla_sal_ya() -> int:
             cuando=max(salida - timedelta(minutes=SALIR_ANTES_MIN), ahora),
             caduca=salida + timedelta(minutes=SALIR_ANTES_MIN),
             huella=huella, voz=en_casa,
+            # Los números, no la frase: la hora que dio Maps, desde dónde y con cuánta
+            # antelación. Sin esto, un "sal ya" que salió tarde no se puede distinguir de
+            # uno que salió a tiempo con el tráfico mal calculado.
+            motivo={"evento": ev.get("title"), "destino": destino,
+                    "empieza": ev["ini"].isoformat(), "salida": salida.isoformat(),
+                    "aviso_antes_min": SALIR_ANTES_MIN, "en_casa": en_casa},
         ):
             puestos += 1
     return puestos
@@ -8450,6 +8802,10 @@ def _regla_no_llegas() -> int:
             # la mala noticia" (ver docstring).
             caduca=medianoche,
             huella=f"{str(antes.get('id'))[:30]}>{str(despues.get('id'))[:30]}",
+            motivo={"acaba": antes["fin"].isoformat(),
+                    "siguiente_empieza": despues["ini"].isoformat(),
+                    "hay_que_salir": salida.isoformat(),
+                    "desde": antes.get("location"), "hasta": despues.get("location")},
         ):
             puestos += 1
     return puestos
@@ -8530,6 +8886,10 @@ def _regla_madrugon() -> int:
         # lo pospone, mejor que caduque a que se reprograme para el día siguiente.
         caduca=recomendada,
         huella=f"madrugon:{manana.isoformat()}",
+        motivo={"primer_evento": primero["ini"].isoformat(),
+                "hora_habitual_dormir": f"{habitual[0]:02d}:{habitual[1]:02d}",
+                "recomendada": recomendada.isoformat(),
+                "sueno_objetivo_h": SUENO_OBJETIVO_H, "prep_manana_min": PREP_MANANA_MIN},
     ))
 
 
@@ -8548,6 +8908,10 @@ def _regla_malestar(obtener_salud) -> int:
         return 0
     salud = obtener_salud()
     señales = {"fc_reposo": 1.03, "hrv": 0.95, "respiracion": 1.02}
+    # Los tres pares (semana contra mes) con los que se decidió, para poder mirar después
+    # si la firma fue clara o pasó raspando. Es lo que no se puede reconstruir: mañana
+    # las medias ya son otras.
+    vistos = {}
     for clave, factor in señales.items():
         m = salud.get(clave) or {}
         m7, m30 = m.get("media_7d"), m.get("media_30d")
@@ -8555,6 +8919,8 @@ def _regla_malestar(obtener_salud) -> int:
         # dashboard: una tendencia necesita suelo debajo.
         if not m7 or not m30 or (m.get("n_7d") or 0) < 3 or (m.get("n_30d") or 0) < 7:
             return 0
+        vistos[clave] = {"media_7d": m7, "media_30d": m30, "factor": factor,
+                         "n_7d": m.get("n_7d"), "n_30d": m.get("n_30d")}
         if (m7 > m30 * factor) if factor > 1 else (m7 < m30 * factor):
             continue
         return 0
@@ -8563,6 +8929,7 @@ def _regla_malestar(obtener_salud) -> int:
         "Tus tres señales de recuperación apuntan a la vez a que algo va mal: FC en "
         "reposo arriba, HRV abajo y respiración arriba respecto a tu mes. Hoy no fuerces.",
         prioridad=PRIO_ALTA, huella=f"malestar:{_ahora_local().date().isoformat()}",
+        motivo=vistos,
     ))
 
 
@@ -8602,6 +8969,9 @@ def _regla_hueco_entreno(obtener_salud) -> int:
         f"Llevas {dias} días sin entrenar. Mañana tienes libre de "
         f"{hueco[0].strftime('%H:%M')} a {hueco[1].strftime('%H:%M')}.",
         prioridad=PRIO_NORMAL, huella=f"hueco:{manana.isoformat()}",
+        motivo={"dias_sin_entrenar": dias, "listón_dias": JARVIS_PROACTIVO_SIN_ENTRENO,
+                "hueco": [hueco[0].isoformat(), hueco[1].isoformat()],
+                "hueco_minimo_min": HUECO_ENTRENO_MIN, "eventos_manana": len(ocupado)},
     ))
 
 
@@ -8643,6 +9013,10 @@ def _regla_al_salir_de_casa() -> int:
             f"Te has ido y quedan encendidas: {', '.join(nombres[:5])}.",
             prioridad=PRIO_ALTA, huella=f"encendido:{','.join(sorted(nombres))[:120]}",
             entidades=[l["id"] for l in luces if l["id"] != PC_ENTIDAD],
+            # El tamaño del catálogo va dentro a propósito: distingue "no había nada más
+            # encendido" de "el catálogo llegó a medias", que desde el aviso se ven igual.
+            motivo={"encendidas": nombres, "cuantas": len(luces),
+                    "entidades_en_catalogo": len(_casa_entidades())},
         ))
     if PC_ENTIDAD and any(str(e.get("id")) == PC_ENTIDAD
                           and str(e.get("estado") or "").lower() == "on"
@@ -9007,13 +9381,15 @@ def _revisar_correo() -> int:
     hoy = _ahora_local().date().isoformat()
     try:
         cliente = get_openai_client()
-        respuesta = cliente.chat.completions.create(
+        completa = cliente.chat.completions.create(
             model=JARVIS_MODEL,
             messages=[{"role": "system", "content": f"{_CORREO_SISTEMA} Hoy es {hoy}."},
                       {"role": "user", "content": json.dumps(cabeceras, ensure_ascii=False)}],
             response_format={"type": "json_object"},
             **_parametros_modelo(JARVIS_MODEL, 500),
-        ).choices[0].message.content
+        )
+        _apuntar_gasto("correo", JARVIS_MODEL, getattr(completa, "usage", None))
+        respuesta = completa.choices[0].message.content
         acciones = (json.loads(respuesta or "{}") or {}).get("acciones") or []
     except Exception as e:
         logger.warning("Correo: no se pudo extraer lo accionable (%s)", e)
@@ -9552,6 +9928,93 @@ def _auth_boton(request: Request, token: str) -> None:
         _jwt_de_usuario(provisto)
     except HTTPException:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@app.get("/avisos/enviados")
+def get_avisos_enviados(dia: str = "", limite: int = 50,
+                        credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Los avisos que SALIERON, con su hora. Por defecto, los de hoy.
+
+    Hasta aquí un aviso enviado desaparecía de la vista: `/avisos/estado` dice cuántos
+    van hoy y nada más, así que lo único que quedaba de un aviso era la notificación del
+    móvil, que se borra. Esto es lo que permite volver sobre uno —para ver por qué se
+    disparó (`/avisos/{id}/porque`) o para valorarlo tarde— y lo que da horas reales al
+    carril de avisos de la línea del día.
+
+    `dia` va en local, que es en lo que piensa quien pregunta; la tabla guarda UTC, así
+    que la ventana se construye desde la medianoche LOCAL de ese día. Sin eso, los avisos
+    de la noche (que en verano son del día siguiente en UTC) saldrían en el día que no es.
+    """
+    if limite < 1 or limite > 200:
+        raise HTTPException(status_code=400, detail="limite debe estar entre 1 y 200")
+    if dia:
+        if not _DATE_RE.match(dia):
+            raise HTTPException(status_code=400, detail="dia debe ser AAAA-MM-DD")
+        try:
+            fecha = datetime.strptime(dia, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="dia no es una fecha real")
+    else:
+        fecha = _ahora_local().date()
+    desde = datetime(fecha.year, fecha.month, fecha.day, tzinfo=LOCAL_TZ)
+    hasta = desde + timedelta(days=1)
+    r = http.get(
+        f"{RECORDATORIOS_URL}?enviado=is.true"
+        f"&enviado_at=gte.{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
+        f"&enviado_at=lt.{quote(hasta.astimezone(timezone.utc).isoformat(), safe='')}"
+        f"&select=id,texto,regla,prioridad,enviado_at,util"
+        f"&order=enviado_at.desc&limit={limite}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"dia": fecha.isoformat(), "avisos": r.json() or []}
+
+
+@app.get("/avisos/{aviso_id}/porque")
+def porque_el_aviso(aviso_id: str = _uuid_path(),
+                    credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Con qué números se disparó este aviso.
+
+    Endpoint de USUARIO y no de servicio: esto es para mirarlo, no para que lo consuma
+    ninguna automatización. Y devuelve los valores crudos sin redactar nada — la frase ya
+    está en el aviso; lo que falta es contra qué se comparó.
+
+    Si no hay motivo guardado responde `motivo: null` con 200, no 404: el aviso existe y
+    la ausencia de explicación es una respuesta legítima (reglas anteriores a esto, o la
+    migración sin aplicar). Un 404 diría que el aviso no existe, que es otra cosa.
+    """
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}"
+                     "&select=id,texto,regla,cuando,enviado,enviado_at,util&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Avisos: no se pudo leer el aviso %s (%s)", aviso_id, e)
+        raise HTTPException(status_code=502, detail="Error en el almacenamiento de datos")
+    if not filas:
+        raise HTTPException(status_code=404, detail="Ese aviso no existe")
+
+    motivo = None
+    try:
+        rm = http.get(f"{AVISOS_MOTIVOS_URL}?aviso_id=eq.{aviso_id}&select=datos,creado&limit=1",
+                      headers=supabase_headers())
+        if rm.status_code < 300:
+            filas_m = rm.json()
+            motivo = filas_m[0] if filas_m else None
+        else:
+            # La tabla puede no existir todavía (migración sin aplicar): eso no es un
+            # error del aviso, es que no hay explicación que dar.
+            logger.warning("Avisos: no se pudo leer el motivo de %s (%s)",
+                           aviso_id, rm.status_code)
+    except Exception as e:
+        logger.warning("Avisos: no se pudo leer el motivo de %s (%s)", aviso_id, e)
+
+    return {"aviso": filas[0], "motivo": motivo}
 
 
 class AvisoUtilRequest(BaseModel):
@@ -10837,6 +11300,31 @@ def _j_lanzar_streaming() -> dict:
     return {"ok": True, "job_id": (creado.get("job") or {}).get("id")}
 
 
+def _j_encargar_al_pc(instruccion: str) -> dict:
+    """Deja un encargo en lenguaje natural para que lo haga el PC con Cowork.
+
+    Solo se llega aquí desde `/jarvis/ejecutar`, o sea después de que el usuario haya
+    pulsado confirmar: esta herramienta va marcada `confirmar: True` y NO es negociable.
+    Las demás acciones del PC (encenderlo, suspenderlo, abrir el streaming) hacen una
+    cosa concreta y acotada; esta abre una sesión de Claude Desktop con la sesión del
+    usuario iniciada en todo. La frontera del proyecto —lo que ya tiene un botón lo hace
+    el modelo, lo demás se propone— cae claramente del lado de proponer.
+    """
+    instruccion = str(instruccion or "").strip()
+    if not instruccion:
+        return {"ok": False, "error": "No has dicho qué quieres que haga el PC"}
+    creado = create_job(
+        body=JobCreateRequest(
+            dedupe_key=f"encargo-{int(time.time() * 1000)}",
+            payload={"accion": "encargo", "instruccion": instruccion[:ENCARGO_MAX_CHARS]},
+        ),
+        credentials=None,
+    )
+    return {"ok": True, "job_id": (creado.get("job") or {}).get("id"),
+            "dile_al_usuario_literalmente":
+                "Se lo he dejado encargado al PC. Si está apagado, lo hará al encenderse."}
+
+
 def _j_anadir_sesion(fecha: str, horas: float = 1.0) -> dict:
     add_training_session(
         body=TrainingSessionCreate(date=str(fecha), duration_hours=float(horas)),
@@ -11402,12 +11890,14 @@ def _quizas_destilar(cliente, turnos: list) -> None:
             f"{'Usuario' if t['rol'] == 'user' else 'Asistente'}: {t['texto'][:500]}"
             for t in turnos[-JARVIS_MAX_HISTORIAL:]
         )
-        respuesta = cliente.chat.completions.create(
+        completa = cliente.chat.completions.create(
             model=JARVIS_MODEL,
             messages=[{"role": "system", "content": _DESTILAR_SISTEMA},
                       {"role": "user", "content": transcripcion}],
             **_parametros_modelo(JARVIS_MODEL, 400),
-        ).choices[0].message.content or "{}"
+        )
+        _apuntar_gasto("destilar", JARVIS_MODEL, getattr(completa, "usage", None))
+        respuesta = completa.choices[0].message.content or "{}"
         # El modelo a veces envuelve el JSON en ```; se busca el objeto y ya.
         m = re.search(r"\{.*\}", respuesta, re.S)
         recuerdos = json.loads(m.group(0))["recuerdos"] if m else []
@@ -12369,6 +12859,21 @@ _JARVIS_HERRAMIENTAS = {
                        "Requiere que el PC esté encendido.",
         "parametros":  {},
     },
+    "encargar_al_pc": {
+        # Confirmación SIEMPRE. Es la única herramienta que acaba en un texto libre
+        # dentro de Claude Desktop en el PC del usuario, con todas sus sesiones abiertas.
+        "confirmar":   True,
+        "fn":          _j_encargar_al_pc,
+        "descripcion": "Deja un encargo escrito para que lo haga el PC con Claude Desktop "
+                       "(buscar algo y dejarlo preparado, redactar, ordenar ficheros…). "
+                       "Se ejecuta cuando el PC está encendido y el agente en marcha. "
+                       "No sirve para acciones inmediatas del propio dashboard.",
+        "parametros":  {"instruccion": {
+            "type": "string",
+            "description": "Lo que tiene que hacer el PC, en una o dos frases claras.",
+        }},
+        "obligatorios": ["instruccion"],
+    },
     "guardar_idea": {
         "confirmar":   False,
         "fn":          _j_guardar_idea,
@@ -12945,12 +13450,17 @@ def _jarvis_turno(body: JarvisIn):
         vuelven con `content` vacío.
         """
         extra    = {"tools": esquema} if con_herramientas else {}
-        eleccion = cliente.chat.completions.create(
+        completa = cliente.chat.completions.create(
             model=modelo_usado,
             messages=mensajes,
             **extra,
             **_parametros_modelo(modelo_usado, techo_usado or techo),
-        ).choices[0]
+        )
+        # Una fila por LLAMADA y no por turno: un turno con tres vueltas de herramientas
+        # y un relevo de modelo son cuatro llamadas de precios distintos, y agregarlas
+        # aquí perdería justo lo que se quiere mirar.
+        _apuntar_gasto(_boca_actual.get(), modelo_usado, getattr(completa, "usage", None))
+        eleccion = completa.choices[0]
         return eleccion.message, str(getattr(eleccion, "finish_reason", "") or "")
 
     # Lo que ya ha salido por el altavoz de la ÚLTIMA llamada al modelo, para que el
@@ -12981,6 +13491,10 @@ def _jarvis_turno(body: JarvisIn):
                 model=modelo_usado,
                 messages=mensajes,
                 stream=True,
+                # Sin esto el streaming NO devuelve `usage`, y el modo llamada —el que
+                # más gasta— sería justo el que no se puede medir. Llega en un trozo
+                # final con `choices` vacío, que el bucle de abajo ya sabe saltarse.
+                stream_options={"include_usage": True},
                 **extra,
                 **_parametros_modelo(modelo_usado, techo_usado or techo),
             )
@@ -12996,6 +13510,11 @@ def _jarvis_turno(body: JarvisIn):
                            modelo_usado, e)
             return _pensar(modelo_usado, con_herramientas, techo_usado)
         for parte in flujo:
+            # El trozo del `usage` viene SIN `choices` (por eso se pidió
+            # `include_usage`): se apunta y se sigue, que para el turno no dice nada.
+            uso = getattr(parte, "usage", None)
+            if uso is not None:
+                _apuntar_gasto(_boca_actual.get(), modelo_usado, uso)
             eleccion = (getattr(parte, "choices", None) or [None])[0]
             if eleccion is None:
                 continue
@@ -13252,7 +13771,11 @@ def jarvis(
     # Cada turno son una o varias llamadas de pago: va con el limitador genérico por IP,
     # igual que /ideas/audio.
     _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
-    return _jarvis_resultado(body)
+    marca = _boca_actual.set("chat")
+    try:
+        return _jarvis_resultado(body)
+    finally:
+        _boca_actual.reset(marca)
 
 
 @app.post("/jarvis/ejecutar")
@@ -13276,6 +13799,63 @@ def jarvis_ejecutar(
         raise HTTPException(status_code=400, detail="Esa acción no se confirma por aquí")
     resultado = _jarvis_despachar(body.herramienta, body.argumentos)
     return {"ok": bool(resultado.get("ok")), "resultado": resultado}
+
+
+class JarvisAtajoIn(BaseModel):
+    mensaje: str = Field(max_length=JARVIS_MAX_MENSAJE)
+
+
+@app.post("/jarvis/atajo")
+def jarvis_atajo(
+    body: JarvisAtajoIn,
+    request: Request,
+    _auth = Depends(verify_jarvis),
+):
+    """Un turno suelto de Jarvis para una boca que no es el dashboard.
+
+    Existe para el Atajo de iOS —«Oye Siri, dile a Jarvis…»— que dicta desde el reloj y
+    lee la respuesta en alto. Toda la inteligencia sigue donde estaba: esto es `/jarvis`
+    con otra puerta de entrada, no un segundo cerebro. Es la razón por la que la elección
+    de herramienta vive en el backend y no en `Dashboard.jsx`.
+
+    Tres diferencias con `/jarvis`, y las tres salen de que al otro lado hay una voz y no
+    una pantalla:
+
+    - **Sin historial.** El historial vive en el cliente (`localStorage`) y un Atajo no
+      tiene dónde guardarlo. Cada petición es una conversación entera. Mejor eso que
+      inventarse una sesión en el servidor: el backend no guarda conversaciones, y
+      empezar a hacerlo aquí sería el primer sitio donde habría que purgarlas.
+    - **`voz=True` siempre.** Frases cortas, sin listas, sin markdown y sin URLs: lo que
+      se escucha no se puede ojear ni saltar.
+    - **Lo pendiente se DICE.** La frontera de confirmación no se relaja —lo marcado
+      `confirmar: True` sigue devolviendo `pendiente` sin ejecutarse—, pero aquí no hay
+      botón que pulsar, así que callarlo dejaría al usuario creyendo que su cita está
+      creada. Se le dice que hace falta confirmarlo en el dashboard, que es donde está el
+      botón.
+
+    Devuelve `texto` en vez de `respuesta` para que el Atajo lea una sola clave sin tener
+    que saber nada del resto del contrato.
+    """
+    # Mismo cubo que /jarvis: es el mismo gasto, y da igual por qué puerta entre.
+    _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
+    marca = _boca_actual.set("atajo")
+    try:
+        resultado = _jarvis_resultado(JarvisIn(mensaje=body.mensaje, historial=[], voz=True))
+    finally:
+        _boca_actual.reset(marca)
+    texto = (resultado.get("respuesta") or "").strip()
+    pendiente = resultado.get("pendiente")
+    if pendiente:
+        texto = (texto + " Te lo he dejado propuesto, pero eso tengo que confirmarlo "
+                         "en el dashboard.").strip()
+    return {
+        "ok":        True,
+        "texto":     texto,
+        # Para que el Atajo pueda enseñar (o decir) qué llegó a mirar cuando la respuesta
+        # sale corta, y para poder depurar sin abrir los logs.
+        "herramientas": resultado.get("herramientas") or [],
+        "pendiente":    bool(pendiente),
+    }
 # ── Jarvis: voz en tiempo real (ElevenLabs) ───────────────────────────────────
 # El navegador habla DIRECTAMENTE con ElevenLabs; el backend solo emite el permiso.
 # La alternativa —proxiar el audio por aquí— metía un salto a París en cada trozo de
@@ -13613,6 +14193,9 @@ def jarvis_voz(
         # Una vez empieza el stream ya se mandó el 200: un fallo a partir de aquí no
         # puede ser un código de estado, tiene que ser un evento. Sin esto el cliente se
         # queda con la conexión cortada a media frase y sin saber por qué.
+        # La boca se marca DENTRO del generador: se consume ya fuera del endpoint, y una
+        # contextvar puesta arriba no llegaría hasta aquí.
+        _boca_actual.set("voz")
         try:
             for tipo, datos in _jarvis_turno(turno):
                 yield _sse(tipo, datos)
@@ -13740,6 +14323,8 @@ def _transcribir_llamada(pcm16: bytes) -> str:
             model="whisper-1",
             file=("llamada.wav", _wav_de_pcm16(pcm16), "audio/wav"),
             language="es")
+        # PCM de 16 bits a 8 kHz: dos bytes por muestra. Aquí la duración sí se sabe.
+        _apuntar_gasto("telefono", "whisper-1", segundos_audio=len(pcm16) / 2 / 8000)
         return (getattr(r, "text", "") or "").strip()
     except Exception as e:
         logger.warning("Teléfono: no se pudo transcribir (%s)", e)
@@ -13982,7 +14567,11 @@ def _turno_telefonico(dicho: str, historial: list, rid: str) -> str:
         turnos = []
     cuerpo = JarvisIn(mensaje=dicho[:JARVIS_MAX_MENSAJE], historial=turnos, voz=True)
     try:
-        return str(_jarvis_resultado(cuerpo).get("respuesta") or "No sé qué decirte.")
+        marca = _boca_actual.set("telefono")
+        try:
+            return str(_jarvis_resultado(cuerpo).get("respuesta") or "No sé qué decirte.")
+        finally:
+            _boca_actual.reset(marca)
     except HTTPException as e:
         logger.warning("Teléfono: el turno de Jarvis falló (%s)", e.detail)
         return "Me he liado. Te lo dejo en el móvil."
