@@ -127,7 +127,8 @@ Ficheros clave:
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
-| `src/lib/vozMicro.js` | El micrófono mientras Jarvis habla: mide energía para saber si le has cortado (barge-in). No transcribe nada |
+| `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
+| `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
