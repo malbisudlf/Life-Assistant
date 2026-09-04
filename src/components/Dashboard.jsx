@@ -2410,6 +2410,11 @@ export default function Dashboard() {
     // avisa de que le has cortado es el propio transcriptor (`parcialDeScribe`). Abrir
     // aquí el medidor sería una SEGUNDA captura del micrófono, que es lo que se rompe en
     // iOS y en los WebView, y encima para decidir lo mismo dos veces.
+    //
+    // Vale también mientras Scribe se está montando ("pidiendo"). El precio, si al final
+    // no viene, es que ESE turno se queda sin poder cortarse — en la práctica el saludo
+    // de apertura. Es mejor que la alternativa: abrir el medidor y que sea la segunda
+    // captura del micrófono justo en el momento en que Scribe pide la suya.
     if (scribeRef.current) return;
     if (bargeRef.current) return;   // ya vigilando: los rellenos no reabren nada
     const miTurno = vozTurnoRef.current;
@@ -2508,7 +2513,9 @@ export default function Dashboard() {
     // Scribe cobra micrófono abierto, silencios incluidos: un socket que sobreviva a la
     // llamada es dinero corriendo sin que nadie lo vea. Se cierra aquí, que es el único
     // sitio por el que pasan todas las formas de terminar una llamada.
-    try { scribeRef.current?.parar(); } catch { /* mejor esfuerzo */ }
+    // Ojo con la marca: mientras vale "pidiendo" no hay nada que parar todavía, pero el
+    // `.then()` que está en vuelo sí mira `llamadaRef` y cierra lo que llegue tarde.
+    try { scribeRef.current?.parar?.(); } catch { /* mejor esfuerzo */ }
     scribeRef.current = null;
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
     // Cerrar, no solo callar: el socket abierto seguiría vivo y el AudioContext también.
@@ -2578,6 +2585,10 @@ export default function Dashboard() {
     // Con el transcriptor de pago no hay nada que abrir: el micrófono lleva abierto desde
     // que descolgaste y sigue abierto mientras Jarvis habla. Lo único que cambia por
     // turnos es lo que se pinta.
+    // Con Scribe ya montado no hay nada que abrir. Y con Scribe MONTÁNDOSE tampoco: se
+    // espera a saber si viene, en vez de abrir un micro que sobraría en medio segundo y
+    // que mientras tanto sería una segunda captura. Si al final no viene, `alNavegador`
+    // vuelve a llamar aquí con la marca ya quitada.
     if (scribeRef.current) {
       if (llamadaRef.current && !hablandoRef.current) setJarvisFase("escuchando");
       return;
@@ -2837,6 +2848,22 @@ export default function Dashboard() {
     }
     const miTurno = vozTurnoRef.current;
     scribePermisoRef.current = null;   // de un solo uso: gastado
+    // Marca mientras se monta, con el mismo truco que `bargeRef`. Sin ella hay una
+    // ventana —desde que se descuelga hasta que el socket abre— en la que el
+    // reconocimiento del navegador ya está escuchando y Scribe está pidiendo el
+    // micrófono: DOS capturas a la vez, que es exactamente lo que este repositorio tiene
+    // documentado que se rompe en iOS y en los WebView. Con la marca, quien escucha
+    // espera en vez de abrir un micro que va a sobrar en medio segundo.
+    scribeRef.current = "pidiendo";
+    /** Renunciar a Scribe en esta llamada y volver al micrófono del navegador. Se pasa
+     *  por aquí en TODOS los caminos que no acaban en un socket vivo: si alguno se
+     *  dejara la marca puesta, la llamada se quedaría sorda para siempre esperando a un
+     *  transcriptor que no viene, y sin un solo error en ninguna consola. */
+    const alNavegador = () => {
+      if (scribeRef.current !== "pidiendo") return;
+      scribeRef.current = null;
+      if (llamadaRef.current && !hablandoRef.current) cicloRef.current.escuchar?.();
+    };
     escucharConScribe({
       token:  permiso.token,
       modelo: permiso.model_id,
@@ -2856,14 +2883,16 @@ export default function Dashboard() {
     }).then((escucha) => {
       // Colgar mientras esto seguía en vuelo dejaría un micrófono abierto y pagándose
       // para una llamada que ya no existe. El número de turno dice de quién es.
-      if (!escucha) return;
-      if (!llamadaRef.current || vozTurnoRef.current < miTurno) { escucha.parar(); return; }
+      // `null` es "aquí no hay Scribe" (sin micro, sin permiso, sin WebSocket): no es un
+      // fallo que anunciar, es esta llamada escuchando como toda la vida.
+      if (!escucha) { alNavegador(); return; }
+      if (!llamadaRef.current || vozTurnoRef.current < miTurno) { escucha.parar(); alNavegador(); return; }
       scribeRef.current = escucha;
-      // Ya no hace falta el del navegador: se cierra para no tener dos capturas del
-      // micrófono a la vez, que es lo que se rompe en iOS y en los WebView.
+      // Y se cierra el del navegador por si llegó a abrirse: dos capturas del micrófono
+      // a la vez es lo que se rompe en iOS y en los WebView.
       pararEscucha();
       pedirPermisoEscucha();   // el de la siguiente llamada, ya
-    }).catch(() => { /* sin Scribe: la llamada sigue con el navegador */ });
+    }).catch(() => { alNavegador(); });
   }
 
   /** El audio de una frase, para la voz de Azure. Se le pasa a `abrirVozAzure`, que no
@@ -3100,7 +3129,7 @@ export default function Dashboard() {
     if (silencioRef.current) clearTimeout(silencioRef.current);
     if (bargeFalsoRef.current) clearTimeout(bargeFalsoRef.current);
     try { recRef.current?.stop(); } catch { /* mejor esfuerzo */ }
-    try { scribeRef.current?.parar(); } catch { /* mejor esfuerzo */ }
+    try { scribeRef.current?.parar?.(); } catch { /* mejor esfuerzo */ }
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
     // El medidor del barge-in tiene un micrófono abierto: sin cerrarlo aquí, el punto
     // rojo de "esta pestaña te está grabando" se queda puesto al salir del dashboard.

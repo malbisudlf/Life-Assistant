@@ -214,6 +214,15 @@ llamada. Lo que eso cambia:
   cambiado de sitio. Con tope, para que un socket que no abre nunca no se coma la memoria.
 - **Un `onclose` inesperado es un fallo, no el final de nada.** Aquí no hay turnos que
   terminen. Es literalmente la lección que costó una tarde con el TTS.
+- **Mientras Scribe se monta, el reconocimiento del navegador NO se abre.** Va marcado
+  con un `"pidiendo"` en `scribeRef`, el mismo truco que ya usaba el barge-in. Sin él hay
+  una ventana —desde que descuelgas hasta que el socket abre— con DOS capturas del
+  micrófono a la vez, que es justo lo que este fichero lleva documentado que se rompe en
+  iOS y en los WebView. El precio, cuando Scribe no llega a montarse, es que el saludo de
+  apertura se queda sin poder cortarse; la alternativa era peor. Y todos los caminos que
+  no acaban en socket vivo pasan por `alNavegador()`: si alguno se dejara la marca
+  puesta, la llamada se quedaría sorda para siempre esperando a un transcriptor que no
+  viene, y sin un solo error en ninguna consola.
 - **Dos tokens distintos y por separado.** El de hablar y el de escuchar son tokens de un
   solo uso independientes, y hoy van a proveedores distintos (Azure habla, ElevenLabs
   escucha). Los dos se renuevan con el mismo reloj de 15 minutos, y **uno pasado de fecha
