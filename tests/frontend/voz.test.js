@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse,
   llamadaEntranteDeUrl, aperturaDeLlamada, detectorDeHabla, rmsDeMuestras,
+  pcm16DesdeFloat32, base64DeBytes, pareceEco,
 } from "../../src/lib/voz.js";
 
 describe("trocearParaVoz", () => {
@@ -306,5 +307,68 @@ describe("rmsDeMuestras", () => {
   it("no depende del signo: una onda es tan alta abajo como arriba", () => {
     const alterna = Float32Array.from({ length: 64 }, (_, i) => (i % 2 ? 0.5 : -0.5));
     expect(rmsDeMuestras(alterna)).toBeCloseTo(0.5);
+  });
+});
+
+
+describe("pcm16DesdeFloat32", () => {
+  it("escala el rango entero", () => {
+    const pcm = pcm16DesdeFloat32(new Float32Array([0, 1, -1]));
+    expect(pcm[0]).toBe(0);
+    expect(pcm[1]).toBe(32767);
+    expect(pcm[2]).toBe(-32768);
+  });
+
+  it("recorta los picos en vez de dar la vuelta al entero", () => {
+    // Sin el recorte, un pico por encima de 1 sale como un valor negativo enorme y suena
+    // como un chasquido. Es de las pocas cosas que un transcriptor no perdona.
+    const pcm = pcm16DesdeFloat32(new Float32Array([2, -2]));
+    expect(pcm[0]).toBe(32767);
+    expect(pcm[1]).toBe(-32768);
+  });
+
+  it("aguanta lo vacío", () => {
+    expect(pcm16DesdeFloat32(null)).toHaveLength(0);
+  });
+});
+
+describe("base64DeBytes", () => {
+  it("codifica lo que le den", () => {
+    expect(base64DeBytes(new Uint8Array([104, 111, 108, 97]))).toBe("aG9sYQ==");
+  });
+
+  it("no revienta con un buffer grande", () => {
+    // Un `fromCharCode(...bytes)` de una vez peta la pila en Safari, y lo hace a media
+    // llamada, que es el peor sitio para descubrirlo.
+    expect(base64DeBytes(new Uint8Array(200000)).length).toBeGreaterThan(0);
+  });
+});
+
+describe("pareceEco", () => {
+  const suyo = "He detectado un fallo y ya lo he corregido. El CI está en verde.";
+
+  it("reconoce a Jarvis oyéndose a sí mismo", () => {
+    expect(pareceEco("he detectado un fallo y ya lo he corregido", suyo)).toBe(true);
+  });
+
+  it("NO se traga una interrupción de verdad", () => {
+    expect(pareceEco("no, espera, mejor lo dejamos", suyo)).toBe(false);
+  });
+
+  it("deja pasar las palabras sueltas con las que se corta a alguien", () => {
+    // «sí», «vale», «no» son justo lo que dirías para cortarle, y con una o dos palabras
+    // cualquier cosa se parece a cualquier cosa. Confundirlas con eco sería peor que el
+    // eco: te quedarías sin poder interrumpir.
+    for (const corte of ["vale", "no", "sí", "para ya"]) {
+      expect(pareceEco(corte, suyo)).toBe(false);
+    }
+  });
+
+  it("sin nada dicho no hay eco posible", () => {
+    expect(pareceEco("cualquier cosa que diga", "")).toBe(false);
+  });
+
+  it("compara sin acentos ni signos, que es como llega la transcripción", () => {
+    expect(pareceEco("el ci esta en verde", suyo)).toBe(true);
   });
 });

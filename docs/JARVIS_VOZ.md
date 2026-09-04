@@ -5,12 +5,16 @@ por qué. El diseño conceptual (agnóstico del proyecto) está en
 `docs/JARVIS_real_time_voice_stack.md`; aquí se aterriza sobre `backend/main.py`,
 `src/components/Dashboard.jsx` y `src/lib/`.
 
-**Estado: hechas las fases 1 a 7, y la voz ya no es la de ElevenLabs.** Jarvis habla,
-avisa en voz alta antes de usar cada herramienta, **empieza a hablar mientras escribe la
-respuesta** y **se le puede cortar a media frase**. Desde septiembre de 2026 la voz por
-defecto es **Azure Speech**, con una voz nativa de España; ElevenLabs sigue en el código
-como alternativa y como el único que sabe transcribir en directo. Ver «La voz se mudó a
-Azure» más abajo.
+**Estado: el plan está entero.** Jarvis habla, avisa en voz alta antes de usar cada
+herramienta, **empieza a hablar mientras escribe la respuesta**, **se le puede cortar a
+media frase** y, desde el 4 de septiembre de 2026, **escucha con Scribe v2 Realtime en
+vez de con el reconocimiento del navegador**. El reparto de hoy: **habla Azure**, con voz
+nativa de España, y **escucha ElevenLabs**, que es el único de los dos que transcribe en
+directo. Ver «La voz se mudó a Azure» y «El micrófono ya no se cierra» más abajo.
+
+Lo que queda no es código: **probar el barge-in por altavoz en el iPhone**, que es el
+riesgo que este fichero lleva señalando desde el principio y que ningún test puede
+cubrir.
 
 ## Dónde retomar
 
@@ -29,7 +33,10 @@ Lo que está hecho y funcionando, con el sitio exacto:
 | `JARVIS_VOZ_MODELO_DIRECTO` | `backend/main.py`, config de Jarvis | Por voz se abre con el modelo grande y se salta el relevo, que cuesta una llamada entera antes de la primera sílaba |
 | `src/lib/voz.js` | — | Puro: `trocearParaVoz`, `textoParaVoz`, `partirEventosSse` |
 | `src/lib/vozEleven.js` | — | El WebSocket multi-contexto y el reproductor. Sin clave dentro |
-| `src/lib/vozMicro.js` | — | El medidor de energía del micro mientras Jarvis habla. Solo decide si le has cortado; no transcribe |
+| `src/lib/vozScribe.js` | — | **El micrófono de la llamada.** Scribe v2 Realtime por WebSocket, sin SDK. El micro se abre al descolgar y NO se cierra hasta colgar |
+| `pareceEco` | `src/lib/voz.js` | La segunda defensa contra el acople: si lo transcrito se parece a lo que Jarvis está diciendo, no cuenta |
+| `parcialDeScribe` / `cerradaDeScribe` | `src/components/Dashboard.jsx` | Lo que llega del transcriptor. **El barge-in vive aquí ahora** |
+| `src/lib/vozMicro.js` | — | El medidor de energía del micro. **Solo se usa cuando no hay Scribe** (sin ElevenLabs configurado, sin permiso de micro o si el socket se cae) |
 | `detectorDeHabla` | `src/lib/voz.js` | Las reglas del corte: voz sostenida, gracia al empezar, una sola vez |
 | `empezarAHablar` / `dejarDeHablar` / `interrumpirAJarvis` | `src/components/Dashboard.jsx` | El cableado del barge-in con el ciclo de la llamada |
 | `turnoDeLlamada()` | `src/components/Dashboard.jsx` | Consume el SSE y va hablando |
@@ -49,18 +56,16 @@ a media frase y pasa a escucharte. Lo que hace el corte, además de callar:
   `echoCancellation` del navegador; la segunda es que, si tras un corte no se oye una
   palabra en 2,5 s, el umbral se endurece para el resto de la sesión.
 
-**Lo que sigue sin estar, y conviene no confundirlo con esto:**
+~~**El principio de tu frase se pierde.**~~ Arreglado el 4 de septiembre de 2026 al
+poner el micrófono continuo: ya no hay un instante en que el reconocimiento esté cerrado,
+así que cuando la llamada decide que le has cortado, tu primera palabra ya está
+transcrita. Ver «El micrófono ya no se cierra».
 
-- **El principio de tu frase se pierde.** El reconocimiento arranca DESPUÉS del corte, y
-  para entonces llevas unos 300 ms hablando (los que hacen falta para distinguir una voz
-  de un portazo). En la práctica se come el «oye» y coge el resto. Arreglarlo de verdad
-  pide un STT continuo, que es lo siguiente.
-- **Scribe v2 Realtime sigue sin usarse.** El backend sabe emitir su token
-  (`/voz/token` con `tipo: "realtime_scribe"`), pero el frontend no lo pide en ningún
-  sitio: escucha con la Web Speech API del navegador, que es gratis. Ojo: **Scribe
-  Realtime puede estar restringido en plan gratuito**; si sale un 401 de permisos, es eso
-  y no un fallo del código.
-- **La fase 8 ya se midió** (septiembre de 2026), y el resultado está abajo.
+~~**Scribe v2 Realtime sigue sin usarse.**~~ Ya se usa. Ojo con lo que decía este punto y
+sigue siendo verdad: **si sale un `auth_error` o un error de tier al abrir el socket, es
+el plan y no el código.**
+
+**La fase 8 ya se midió** (septiembre de 2026), y el resultado está abajo.
 
 ## La voz se mudó a Azure (septiembre de 2026)
 
@@ -153,6 +158,95 @@ empezaba hasta que el modelo terminaba. El relleno hablado tapó el caso de las
 herramientas y el streaming quita los dos segundos de la charla — ahora el TTS arranca
 con la primera frase hecha, no con la última. **Está sin volver a medir**: hacerlo es la
 fase 8 y sigue pendiente.
+
+## El micrófono ya no se cierra (septiembre de 2026)
+
+Hasta aquí, el modo llamada **cerraba el micrófono mientras Jarvis hablaba**. No por
+ahorrar: por altavoz se oía a sí mismo, se transcribía y se contestaba solo. Para poder
+cortarle se abría en su lugar un medidor de energía que no transcribía nada
+(`vozMicro.js`), y por eso el corte necesitaba ~300 ms de voz sostenida antes de decidir
+que eras tú y no un portazo. Funcionaba, y tenía un precio conocido y documentado: **se
+comía el principio de tu frase**.
+
+Ahora escucha **Scribe v2 Realtime** y el micrófono está abierto de punta a punta de la
+llamada. Lo que eso cambia:
+
+- **El barge-in deja de ser una pieza aparte.** Quien avisa de que te has puesto a hablar
+  es el mismo que transcribe: llega un `partial_transcript` mientras Jarvis habla y eso ya
+  es la interrupción, con el texto dentro. «Te has puesto a hablar» y «esto es lo que has
+  dicho» pasan a ser el mismo evento en vez de dos piezas que pueden no coincidir.
+- **El VAD lo hace ElevenLabs** (`commit_strategy=vad`), así que aquí no hay umbrales que
+  calibrar. Lo que sí se conserva es que **el fin de frase lo decide el silencio de este
+  lado** (`JARVIS_SILENCIO_MS`) y no el `committed` del transcriptor, por la misma razón
+  por la que no se usaba el `isFinal` del navegador: cierra a la primera pausa y trocearía
+  una frase pensada en tres mensajes sueltos.
+- **`vozMicro.js` no se borra: se queda de respaldo.** Sin ElevenLabs configurado, sin
+  permiso de micrófono o si el socket se cae a media llamada, se vuelve al reconocimiento
+  del navegador con su medidor de energía — que es como funcionaba antes, y es gratis.
+
+### Las tres cosas que lo sostienen, y ninguna es opcional
+
+1. **`echoCancellation` del navegador.** Es la que hace posible tener micro y altavoz
+   abiertos a la vez. Sin ella, la voz de Jarvis entra por el micro con energía de sobra.
+2. **`pareceEco()`** (`src/lib/voz.js`), la segunda defensa: si lo transcrito se parece a
+   lo que Jarvis está diciendo en ese momento, se ignora. **Ante la duda decide que NO es
+   eco**, y eso es deliberado: tragarse una interrupción de verdad se nota mucho más que
+   cortar de más, que además la llamada ya sabe corregir sola. Por eso exige un mínimo de
+   tres palabras — «sí», «vale» y «no» son justo lo que dirías para cortarle.
+3. **Cerrar al colgar, siempre.** Scribe **cobra micrófono abierto**, silencios incluidos:
+   un socket que sobreviva a la llamada es dinero corriendo que no aparece en ninguna
+   pantalla. Se cierra en `colgarLlamada`, que es el único sitio por el que pasan todas
+   las formas de terminar una llamada, y también al desmontar el dashboard.
+
+### Detalles de implementación que conviene no deshacer
+
+- **Sin SDK.** La documentación cliente de ElevenLabs enseña su paquete; el protocolo
+  crudo son cuatro mensajes y la norma del proyecto es no añadir dependencias. Es lo mismo
+  que ya se hizo con el TTS en `vozEleven.js`.
+- **`createScriptProcessor` está deprecado y aun así es lo que hay**: es lo único que
+  funciona igual en todos los Safari a los que va esto, y un AudioWorklet obligaría a
+  servir un módulo aparte. El trabajo por muestra son cuatro operaciones sobre audio mono
+  a 16 kHz. Si algún día se oyen cortes en la captura, ese es el sitio.
+- **El AudioContext se pide ya a 16 kHz** en vez de remuestrear a mano: lo hace el
+  navegador, mejor y gratis.
+- **Lo capturado antes de que el socket abra se guarda y se manda al abrir.** Son las
+  primeras décimas, o sea justo el «hola»: perderlas sería el mismo fallo de siempre
+  cambiado de sitio. Con tope, para que un socket que no abre nunca no se coma la memoria.
+- **Un `onclose` inesperado es un fallo, no el final de nada.** Aquí no hay turnos que
+  terminen. Es literalmente la lección que costó una tarde con el TTS.
+- **Mientras Scribe se monta, el reconocimiento del navegador NO se abre.** Va marcado
+  con un `"pidiendo"` en `scribeRef`, el mismo truco que ya usaba el barge-in. Sin él hay
+  una ventana —desde que descuelgas hasta que el socket abre— con DOS capturas del
+  micrófono a la vez, que es justo lo que este fichero lleva documentado que se rompe en
+  iOS y en los WebView. El precio, cuando Scribe no llega a montarse, es que el saludo de
+  apertura se queda sin poder cortarse; la alternativa era peor. Y todos los caminos que
+  no acaban en socket vivo pasan por `alNavegador()`: si alguno se dejara la marca
+  puesta, la llamada se quedaría sorda para siempre esperando a un transcriptor que no
+  viene, y sin un solo error en ninguna consola.
+- **Dos tokens distintos y por separado.** El de hablar y el de escuchar son tokens de un
+  solo uso independientes, y hoy van a proveedores distintos (Azure habla, ElevenLabs
+  escucha). Los dos se renuevan con el mismo reloj de 15 minutos, y **uno pasado de fecha
+  no se estrena**: el socket lo aceptaría y lo cerraría con `invalid_token`, que es el
+  fallo mudo que ya costó una tarde.
+
+### Lo que esto cuesta
+
+**0,39 $/hora de micrófono abierto**, y el micrófono ahora está abierto toda la llamada
+—silencios incluidos—, que antes no lo estaba. Una llamada de diez minutos son ~0,07 $ de
+transcripción. Aprobado explícitamente el 4 de septiembre de 2026 sabiendo esto.
+
+Frente a ello, **Azure da 5 horas de STT al mes gratis para siempre** en el nivel F0 y la
+clave ya está configurada. Se descartó porque desde el navegador pide su SDK (~1 MB en el
+bundle) o implementar un protocolo bastante más feo, y porque Scribe trae el VAD hecho y
+va a ~150 ms. Si algún día la factura molesta, ese es el camino de vuelta y está medido.
+
+### La limitación que queda
+
+`iniciarLlamada` sigue exigiendo `SpeechRecognition` para arrancar, aunque con Scribe ya
+no haría falta: es la garantía de que siempre hay un respaldo gratis al que caer. En la
+práctica no se nota (iOS Safari y Chrome lo tienen), pero significa que en **Firefox no se
+puede llamar** aunque Scribe funcionaría perfectamente. Quitarlo pide decidir antes qué
+pasa cuando el socket se cae y no hay respaldo ninguno.
 
 ## Lo que se aprendió probándolo de verdad
 

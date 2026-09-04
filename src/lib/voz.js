@@ -187,3 +187,69 @@ export function rmsDeMuestras(muestras) {
   for (let i = 0; i < muestras.length; i++) suma += muestras[i] * muestras[i];
   return Math.sqrt(suma / muestras.length);
 }
+
+// ── El micrófono que no se cierra nunca (Scribe v2 Realtime) ────────────────────────
+// Lo que sigue es la parte pura de mandarle audio a ElevenLabs y de fiarse o no de lo
+// que devuelve. El WebSocket y el AudioContext viven en vozScribe.js.
+
+/** Convierte las muestras del micrófono (float, −1..1) al PCM de 16 bits que pide
+ *  Scribe. Se recorta a propósito antes de escalar: un pico por encima de 1 daría la
+ *  vuelta al entero y sonaría como un chasquido, que es de las pocas cosas que un
+ *  transcriptor no perdona. */
+export function pcm16DesdeFloat32(muestras) {
+  const salida = new Int16Array(muestras?.length || 0);
+  for (let i = 0; i < salida.length; i++) {
+    const x = Math.max(-1, Math.min(1, muestras[i] || 0));
+    salida[i] = Math.round(x < 0 ? x * 0x8000 : x * 0x7fff);
+  }
+  return salida;
+}
+
+/** Los bytes de un buffer en base64, que es como viaja el audio por el WebSocket.
+ *
+ *  A trozos y no con un `String.fromCharCode(...bytes)` de una vez: esparcir un array de
+ *  decenas de miles de elementos en argumentos revienta la pila en Safari, y lo hace con
+ *  un `RangeError` en mitad de una llamada, que es el peor sitio para descubrirlo. */
+export function base64DeBytes(bytes) {
+  const vista = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes?.buffer || bytes || 0);
+  let binario = "";
+  const TROZO = 0x8000;
+  for (let i = 0; i < vista.length; i += TROZO) {
+    binario += String.fromCharCode.apply(null, vista.subarray(i, i + TROZO));
+  }
+  return typeof btoa === "function" ? btoa(binario) : "";
+}
+
+/** Deja el texto en palabras comparables: sin acentos, sin signos y en minúsculas. */
+function palabrasDe(texto) {
+  return (texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9ñ\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** ¿Lo que acaba de transcribirse es Jarvis oyéndose a sí mismo?
+ *
+ *  Es la SEGUNDA defensa contra el acople, no la primera: la primera es la cancelación de
+ *  eco del navegador. Existe porque esa cancelación no se comporta igual en todos los
+ *  dispositivos —en iOS por altavoz es el riesgo conocido de todo esto— y el fallo que
+ *  evita es el peor de la llamada: Jarvis se oye, se transcribe, se contesta y se queda
+ *  conversando solo mientras corre el contador del micrófono abierto.
+ *
+ *  La regla es "casi todo lo que he oído estaba en lo que yo estaba diciendo". No se pide
+ *  que sea idéntico porque nunca lo es: el transcriptor se come palabras y añade otras.
+ *  Y se exige un mínimo de palabras porque con una o dos sueltas cualquier cosa se parece
+ *  a cualquier cosa — «sí», «vale» y «no» son justo las que dirías para cortarle, y
+ *  confundirlas con eco sería peor que el eco.
+ *
+ *  Ante la duda, NO es eco: tragarse una interrupción de verdad se nota mucho más que
+ *  cortarse una vez de más, que además la llamada ya sabe corregir (`BARGE_FALSO_MS`). */
+export function pareceEco(texto, dicho, { minPalabras = 3, proporcion = 0.8 } = {}) {
+  const oidas = palabrasDe(texto);
+  const suyas = new Set(palabrasDe(dicho));
+  if (oidas.length < minPalabras || suyas.size === 0) return false;
+  const coinciden = oidas.filter(p => suyas.has(p)).length;
+  return coinciden / oidas.length >= proporcion;
+}
