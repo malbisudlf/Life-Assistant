@@ -350,13 +350,49 @@ rest_command:
 permiso se puede dar hablando con Jarvis («despliega el arreglo»). Lo único que no
 funciona es el botón.
 
+Y la del botón **«Vale»**, que es la quinta y la más tonta de todas: una sesión de Claude
+Code te ha dejado un aviso (`docs/AVISAME.md`), lo has leído y no hay nada que contestar.
+Cierra el aviso y ya está. Existe para que un aviso leído deje de estar pendiente — si
+no, seguiría siendo lo que Jarvis anuncia al descolgar por cualquier otra cosa, y el
+canal se convertiría en un contestador que repite el mismo mensaje.
+
+```yaml
+alias: Life Assistant - Vale, aviso leído
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_VALE_') }}"
+action:
+  - service: rest_command.la_sesion_accion
+    data:
+      aviso: "{{ trigger.event.data.action.split('_')[-1] }}"
+```
+
+```yaml
+rest_command:
+  la_sesion_accion:
+    url: "https://TU-BACKEND/sesion/{{ aviso }}/accion"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+      Content-Type: application/json
+    payload: '{"accion": "vale"}'
+```
+
+El otro botón de ese aviso, **«Hablarlo»**, no necesita automatización ninguna: es un
+`action: "URI"` que abre el dashboard con `?llamada=1`, y de ahí en adelante todo pasa en
+el navegador. Por eso ese sí funciona aunque no instales nada de esto.
+
 **Apaga lo que decía el aviso, no lo que hay encendido al pulsar.** Las entidades viajan
 guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora
 puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló es peor que
 no tener botón. Y **el PC no entra**, aunque el aviso lo nombre: cortarle la corriente a
 un enchufe no es apagarlo. Para eso está su propio aviso.
 
-Las tres automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
+Las cinco automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
 
 **No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
 silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no

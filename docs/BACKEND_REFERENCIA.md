@@ -40,6 +40,9 @@
 | `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
 | `POST /revision/pr-listo` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI ha puesto en verde el PR del arreglo: deja el aviso con botones y llama por teléfono |
 | `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` mergea el PR y lanza el deploy, `nada` lo descarta. **La única ruta que toca producción** |
+| `POST /sesion/aviso` | servicio (`SESION_TOKEN`) | Una sesión de Claude Code deja «esto me pediste, esto he hecho»: guarda el contexto y encola el aviso con sus botones |
+| `POST /sesion/{aviso_id}/accion` | servicio o JWT | La respuesta al botón «Vale»: cierra el aviso sin disparar nada |
+| `GET /llamada/pendiente` | JWT | Qué anunciar al descolgar: primero el despliegue esperando permiso, si no el aviso de sesión más reciente. Solo lee |
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
@@ -156,6 +159,9 @@ accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se p
 arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
 `AVERIA_CI`, `AVERIA_MAX_INTENTOS`, `DEPLOY_GITHUB_TOKEN` (el arreglo automático del
 CI roto y el despliegue con permiso — ver `docs/AVERIAS.md`),
+`SESION_TOKEN`, `SESION_FIRE_URL`, `SESION_FIRE_TOKEN`, `SESION_AVISO_TTL_HORAS`
+(«avísame»: que una sesión de Claude Code te avise al móvil y puedas contestarle
+hablando — ver `docs/AVISAME.md`),
 `LLAMADAS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMERO`,
 `TWILIO_MI_NUMERO`, `BACKEND_URL`, `LLAMADA_TTL`, `LLAMADA_MAX_SEG`,
 `VOZ_SILENCIO_MS`, `VOZ_UMBRAL_RMS`, `VOZ_MIN_HABLA_MS` (el teléfono: sin ellas no

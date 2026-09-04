@@ -69,6 +69,7 @@ skills-lock.json
 # Claude Code solo ve lo que está en el repositorio que clona.
 !.claude/skills/revision-nocturna/
 !.claude/skills/arreglar-revision/
+!.claude/skills/avisame/
 
 # Playwright (E2E): informes y trazas de cada ejecución
 /test-results/
