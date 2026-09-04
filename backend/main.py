@@ -14293,11 +14293,20 @@ def jarvis_voz(
         # Una vez empieza el stream ya se mandó el 200: un fallo a partir de aquí no
         # puede ser un código de estado, tiene que ser un evento. Sin esto el cliente se
         # queda con la conexión cortada a media frase y sin saber por qué.
-        # La boca se marca DENTRO del generador: se consume ya fuera del endpoint, y una
-        # contextvar puesta arriba no llegaría hasta aquí.
-        _boca_actual.set("voz")
+        # La boca se marca DENTRO del generador, y en CADA vuelta, no solo al empezar:
+        # Starlette consume este generador síncrono con `iterate_in_threadpool`, que
+        # reparte cada `next()` en una copia de contexto nueva. Marcarla una sola vez
+        # antes del bucle solo llega a la primera llamada — el resto vuelve a ver la
+        # boca por defecto ("sistema") y el gasto de esa llamada, que es la que más
+        # cuesta, queda mal apuntado.
+        turno_iter = _jarvis_turno(turno)
         try:
-            for tipo, datos in _jarvis_turno(turno):
+            while True:
+                _boca_actual.set("voz")
+                try:
+                    tipo, datos = next(turno_iter)
+                except StopIteration:
+                    break
                 yield _sse(tipo, datos)
         except HTTPException as e:
             yield _sse("error", {"detalle": str(e.detail)})
