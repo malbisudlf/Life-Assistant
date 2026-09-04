@@ -151,6 +151,9 @@ vez de intentar un login interactivo.
 
 En `claude.ai/code/routines`, una rutina **nueva** (no reutilices la que revisa ni la que
 arregla: un token no vale para dos rutinas, y aquella es de solo lectura a propósito).
+Nómbrala **«Retomar aviso — Life-Assistant»**, en la línea de «Arreglar revisión —
+Life-Assistant»: el nombre es lo único que distingue tres rutinas parecidas en una lista,
+y ya costó media tarde de diagnóstico que la del briefing se llame «Test Newsletter».
 Apuntando a este repositorio, con este prompt guardado:
 
 ```
