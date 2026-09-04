@@ -393,6 +393,31 @@ export function normalizarEntrenos({ workouts = [], sesiones = [] } = {}, diaISO
   return salida;
 }
 
+// `/avisos/enviados`: {dia, avisos: [{id, texto, regla, prioridad, enviado_at, util}]}.
+// A diferencia de `/avisos/estado` (que solo da el recuento del día en curso),
+// `enviado_at` es una hora real por aviso, para cualquier día — así que cada aviso entra
+// como un instante en el eje (inicio == fin, ver `recortarAlDia`), no como un resumen.
+export function normalizarAvisos(avisos, diaISO) {
+  const salida = [];
+  (avisos || []).forEach((a, i) => {
+    if (!a) return;
+    const base = {
+      id: `aviso-${a.id || i}`,
+      carril: "avisos",
+      etiqueta: a.texto || "Aviso",
+      detalle: a.regla || "",
+    };
+    const momento = aFechaLocal(a.enviado_at);
+    if (!momento) { salida.push(sinTramo(base)); return; }
+    // `null` aquí es que el momento cae fuera de este día (el backend ya filtra por
+    // `dia`, pero un cambio de huso podría desplazar la medianoche): se queda fuera del
+    // todo, no se cuela como "sin hora" — eso sería un dato inventado.
+    const item = conTramo(base, momento, momento, diaISO);
+    if (item) salida.push(item);
+  });
+  return salida;
+}
+
 // Presencia: la serie diaria `time_at_home` (horas en casa en `value`, horas fuera en
 // `extra.fuera`). NO hay tramos horarios y no los va a haber: guardar un histórico de
 // presencia está descartado a propósito en docs/IDEAS.md por ser el dato más sensible
@@ -469,31 +494,17 @@ export function construirLineaTiempo({ dia, hoy = null, ahora = null, fuentes = 
   const entrenos  = f.entrenos?.estado  === FUENTE_OK ? normalizarEntrenos(f.entrenos.datos, diaISO) : [];
   const presencia = f.presencia?.estado === FUENTE_OK ? normalizarPresencia(f.presencia.datos?.filas, diaISO) : null;
 
-  // Avisos: `/avisos/estado` no da marcas de tiempo, solo el gasto del día en curso.
-  // Se puede decir CUÁNTOS salieron hoy, nunca cuándo, y de otros días no se sabe nada.
-  let avisosFuente = f.avisos;
-  let resumenAvisos = null;
-  if (f.avisos?.estado === FUENTE_OK) {
-    if (diaISO === hoyISO) {
-      const gastado = Number(f.avisos.datos?.presupuesto?.gastado);
-      if (Number.isFinite(gastado)) {
-        resumenAvisos = {
-          texto: gastado === 0 ? "Ningún aviso hoy" : `${gastado} aviso${gastado === 1 ? "" : "s"} hoy`,
-          nota: "el backend no guarda a qué hora salió cada uno",
-        };
-      }
-    } else {
-      avisosFuente = { ...f.avisos, estado: FUENTE_PARCIAL,
-                       nota: f.avisos.nota || "solo se conoce el recuento del día en curso" };
-    }
-  }
+  // Avisos: `/avisos/enviados` da la hora real de cada uno, para cualquier día —a
+  // diferencia de `/avisos/estado`, que solo sabe el recuento del día en curso—, así que
+  // el carril se construye igual que eventos/sueño/entrenos, con items de verdad.
+  const avisos = f.avisos?.estado === FUENTE_OK ? normalizarAvisos(f.avisos.datos, diaISO) : [];
 
   const carriles = [
     construirCarril("eventos",   f.eventos,   eventos),
     construirCarril("sueno",     f.sueno,     sueno),
     construirCarril("entrenos",  f.entrenos,  entrenos),
     construirCarril("presencia", f.presencia, [], { resumen: presencia }),
-    construirCarril("avisos",    avisosFuente, [], { resumen: resumenAvisos }),
+    construirCarril("avisos",    f.avisos,    avisos),
     construirCarril("casa",      f.casa,      []),
   ];
 

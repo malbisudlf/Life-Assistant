@@ -6,7 +6,7 @@ import {
   fechaLocalISO, inicioDelDiaLocal, desplazarDia, largoDelDiaMin, tieneHora,
   aFechaLocal, formatoHora, porcentajeDelDia, recortarAlDia, tramoDelDia,
   horasDelEje, posicionAhora, repartirEnFilas,
-  normalizarEventos, normalizarSueno, normalizarEntrenos, normalizarPresencia,
+  normalizarEventos, normalizarSueno, normalizarEntrenos, normalizarPresencia, normalizarAvisos,
   construirLineaTiempo, textoEstadoCarril, etiquetaDia,
 } from "../../src/lib/lineaTiempo";
 
@@ -343,6 +343,32 @@ describe("normalizarPresencia", () => {
   });
 });
 
+describe("normalizarAvisos", () => {
+  test("cada aviso entra como un instante, con la hora real de enviado_at", () => {
+    const avisos = [
+      { id: "a1", texto: "Sal ya", regla: "salida", enviado_at: "2026-06-15T08:05:00" },
+      { id: "a2", texto: "Vuelve a casa", regla: "vuelta", enviado_at: "2026-06-15T19:30:00" },
+    ];
+    const r = normalizarAvisos(avisos, DIA);
+    expect(r).toHaveLength(2);
+    expect(r[0].sinHora).toBe(false);
+    expect(r[0].desdeMin).toBe(r[0].hastaMin);
+    expect(r[0].horaTexto).toBe("08:05 – 08:05");
+    expect(r[0].etiqueta).toBe("Sal ya");
+    expect(r[0].detalle).toBe("salida");
+  });
+
+  test("un aviso de otro día no entra", () => {
+    const avisos = [{ id: "a1", texto: "Sal ya", enviado_at: "2026-06-14T08:05:00" }];
+    expect(normalizarAvisos(avisos, DIA)).toEqual([]);
+  });
+
+  test("sin lista, o un aviso sin enviado_at, no revienta", () => {
+    expect(normalizarAvisos(null, DIA)).toEqual([]);
+    expect(normalizarAvisos([{ id: "a1", texto: "Sal ya" }], DIA)[0].sinHora).toBe(true);
+  });
+});
+
 describe("construirLineaTiempo: fuente ausente contra fuente vacía", () => {
   const soloEventos = extra => construirLineaTiempo({
     dia: DIA, hoy: DIA, fuentes: { eventos: extra },
@@ -400,29 +426,26 @@ describe("construirLineaTiempo: fuente ausente contra fuente vacía", () => {
     expect(linea.conocidos).toBe(2);
   });
 
-  test("los avisos solo se conocen del día en curso", () => {
-    const datos = { presupuesto: { gastado: 3, tope: 8 } };
-    const hoyLinea = construirLineaTiempo({
-      dia: DIA, hoy: DIA, fuentes: { avisos: { estado: FUENTE_OK, datos } },
-    }).carriles.find(c => c.id === "avisos");
-    expect(hoyLinea.estado).toBe(CARRIL_CON_DATOS);
-    expect(hoyLinea.resumen.texto).toBe("3 avisos hoy");
-    expect(hoyLinea.resumen.nota).toContain("no guarda a qué hora");
-
-    const otroDia = construirLineaTiempo({
-      dia: AYER, hoy: DIA, fuentes: { avisos: { estado: FUENTE_OK, datos } },
-    }).carriles.find(c => c.id === "avisos");
-    expect(otroDia.estado).toBe(FUENTE_PARCIAL);
-    expect(otroDia.conocido).toBe(false);
-  });
-
-  test("cero avisos hoy sí es un dato y se dice", () => {
+  test("los avisos entran con hora real, no como un resumen — de cualquier día", () => {
+    const datos = [
+      { id: "a1", texto: "Sal ya", enviado_at: "2026-06-14T08:05:00" },
+    ];
     const c = construirLineaTiempo({
-      dia: DIA, hoy: DIA,
-      fuentes: { avisos: { estado: FUENTE_OK, datos: { presupuesto: { gastado: 0 } } } },
+      dia: AYER, hoy: DIA, fuentes: { avisos: { estado: FUENTE_OK, datos } },
     }).carriles.find(c2 => c2.id === "avisos");
     expect(c.estado).toBe(CARRIL_CON_DATOS);
-    expect(c.resumen.texto).toBe("Ningún aviso hoy");
+    expect(c.resumen).toBeNull();
+    expect(c.items).toHaveLength(1);
+    expect(c.items[0].horaTexto).toBe("08:05 – 08:05");
+  });
+
+  test("cero avisos ese día sí es un dato y se dice", () => {
+    const c = construirLineaTiempo({
+      dia: DIA, hoy: DIA,
+      fuentes: { avisos: { estado: FUENTE_OK, datos: [] } },
+    }).carriles.find(c2 => c2.id === "avisos");
+    expect(c.estado).toBe(CARRIL_VACIO);
+    expect(textoEstadoCarril(c)).toBe("Nada este día");
   });
 });
 
