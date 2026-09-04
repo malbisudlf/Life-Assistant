@@ -35,8 +35,8 @@ al abrir el streaming y (desde 2026-09-03) también al encolar una entrega.
 `configuration.yaml` — por eso no aparece buscando en los sitios de siempre y es fácil
 darla por inexistente. Ese package define:
 
-- `shell_command.la_relanzar_agente`, `la_apagar_pc` y `la_suspender_pc`: SSH con
-  `/config/.ssh/id_pc` a `malbi@mikel.local`, y el relanzado dispara
+- `shell_command.la_relanzar_agente`, `la_apagar_pc` y `la_suspender_pc`: por SSH (ver
+  `HOMEASSISTANT.md` para la clave, el usuario y el host), y el relanzado dispara
   `schtasks /run /tn LifeAssistantAgent` (la misma tarea del Programador que arranca el
   agente al encender el PC).
 - Los sensores REST `Life Assistant Agent Relaunch Pending` y
@@ -44,9 +44,9 @@ darla por inexistente. Ese package define:
 
 La automatización que los une es `la_agent_relaunch`, en `automations.yaml`.
 
-**Se usa el hostname `mikel.local`, no la IP, y con motivo**: la IP del PC cambió por
-DHCP (a 2026-09-03, `mikel.local` resuelve a una IP distinta de la que había cableada
-antes, y en la vieja ya responde otra máquina). Si el relanzado deja de funcionar, mira
+**Se usa el hostname del PC, no la IP, y con motivo** (el hostname concreto está en
+`HOMEASSISTANT.md`): la IP cambia por DHCP, así que apuntar a una IP fija se rompe en
+cuanto el router se la reasigna a otra cosa. Si el relanzado deja de funcionar, mira
 primero a dónde resuelve el nombre; el PC no contesta a ping (firewall de Windows), así
 que la prueba buena es abrir SSH contra él, no hacerle ping.
 

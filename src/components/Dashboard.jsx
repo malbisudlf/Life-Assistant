@@ -1784,9 +1784,12 @@ export default function Dashboard() {
   useEffect(() => {
     if (!token || !lineaVisible) return;
     let vivo = true;
-    apiFetch(`${API}/avisos/estado`, { headers: authHeaders() })
+    // /avisos/enviados y no /avisos/estado: éste solo da el recuento del día en curso,
+    // aquél da la hora real de cada aviso (de cualquier día) — es lo que permite
+    // colocar un punto en el eje en vez de un simple resumen.
+    apiFetch(`${API}/avisos/enviados?dia=${lineaDia}`, { headers: authHeaders() })
       .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then(d => { if (vivo) setLineaAvisos({ estado: FUENTE_OK, datos: d }); })
+      .then(d => { if (vivo) setLineaAvisos({ estado: FUENTE_OK, datos: d.avisos || [] }); })
       .catch(() => { if (vivo) setLineaAvisos({ estado: FUENTE_ERROR, datos: null }); });
     // La presencia de AHORA, solo como matiz del carril del día en curso: la serie
     // diaria (time_at_home) ya viene dentro de /health/metrics.
@@ -1795,7 +1798,7 @@ export default function Dashboard() {
       .then(d => { if (vivo) setLineaPresenciaAhora(d); })
       .catch(() => { /* mejor esfuerzo: el carril se pinta igual, sin el matiz */ });
     return () => { vivo = false; };
-  }, [token, lineaVisible]);
+  }, [token, lineaVisible, lineaDia]);
 
   // Cargar ideas
   useEffect(() => {
@@ -3841,6 +3844,8 @@ export default function Dashboard() {
                    nota: lineaDia === hoyLinea && lineaPresenciaAhora?.conocida
                      ? `solo el total del día · ahora ${lineaPresenciaAhora.en_casa ? "en casa" : "fuera"}`
                      : "solo el total del día, sin tramos" },
+      // lineaAvisos viene de /avisos/enviados: trae la hora real de cada aviso del día
+      // pedido, así que el carril coloca un punto por aviso igual que el resto.
       avisos: lineaAvisos,
       // El catálogo que empuja Home Assistant (POST /ha/entidades) es una foto del
       // AHORA, sin marcas de tiempo, así que no puede alimentar el eje de ningún día.

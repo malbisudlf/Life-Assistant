@@ -185,6 +185,24 @@ class TestBocas:
                     headers={"X-Auth-Token": "jarvis-token"})
         assert [f["boca"] for f in main._gasto_cola] == ["atajo"]
 
+    def test_la_voz_se_apunta_en_todas_las_llamadas_del_turno(
+            self, client, auth_headers, monkeypatch):
+        """`/jarvis/voz` marca la boca DENTRO del generador que consume Starlette con
+        `iterate_in_threadpool`, que reparte cada `next()` en una copia de contexto
+        nueva. Una sola herramienta ya hace DOS rondas al modelo -y por tanto dos
+        apuntes de gasto-: si solo la primera queda con boca "voz" y la segunda cae al
+        valor por defecto ("sistema"), es justo el bug que se está probando aquí."""
+        from test_jarvis import _con_modelo, _herramienta, _llamada, _mensaje
+
+        _herramienta(monkeypatch, "clima", lambda: {"ahora": 21})
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("clima")]),
+            _mensaje("Hace 21 grados."),
+        ])
+        monkeypatch.setattr(cliente, "create", _create_con_usage(cliente), raising=False)
+        client.post("/jarvis/voz", json={"mensaje": "que tiempo hace"}, headers=auth_headers)
+        assert [f["boca"] for f in main._gasto_cola] == ["voz", "voz"]
+
 
 def _create_con_usage(cliente):
     """El cliente falso no devuelve `usage`; aquí se le añade para poder mirar la boca.

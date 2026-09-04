@@ -30,6 +30,10 @@ os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "")
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los
 # tests del registro llaman a _registro.volcar() a mano, que es lo que hace el hilo.
 os.environ.setdefault("LOG_PERSIST", "0")
+# Mismo motivo que LOG_PERSIST: GASTO_PERSIST vale "1" por defecto en main.py, y con
+# SUPABASE_URL ya fijado arriba el hilo de fondo `volcado-registro` arrancaría en toda
+# la suite e intentaría un POST real a jarvis_gasto cada LOG_FLUSH_SECONDS.
+os.environ.setdefault("GASTO_PERSIST", "0")
 # El informe semanal lo dispara el mismo tick de HA que el resumen diario, y sale el día
 # de la semana que toque. Muchos tests fijan el reloj a una fecha inventada: si esa fecha
 # cae en domingo, el tick manda DOS correos y los asertos de "cuántos se enviaron" fallan

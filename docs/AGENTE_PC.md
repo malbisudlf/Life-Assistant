@@ -168,15 +168,13 @@ navegador**: lo abre y se aparta.
   cursor dentro del campo de texto, así que no hace falta un tercero para enfocarlo.
 - **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
   `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
-- **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
-  `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
 - **Foco de la ventana**: `_focus_claude_window()` usa PowerShell + win32
   (`SetForegroundWindow`, `ShowWindow`) buscando el proceso `claude` por `MainWindowHandle`.
   No uses `AppActivate` por título: falla si el título no coincide exactamente.
 - **Clipboard**: el enunciado se escribe a un fichero temporal UTF-8 y
   `Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 -LiteralPath ...)` lo carga →
   `Win+V` + Enter (historial) + Enter (enviar). **Nunca interpoles el enunciado** (texto de
-  una web externa) dentro del comando de PowerShell — ver la invariante 9 del modelo de seguridad (`CLAUDE.md`).
+  una web externa) dentro del comando de PowerShell — ver la invariante 10 del modelo de seguridad (`CLAUDE.md`).
 - El log del agente se escribe en el working directory del proceso, que puede no ser el
   directorio del script cuando lo lanza el Programador de tareas.
 

@@ -261,7 +261,7 @@ Alud. Es la infraestructura más cara del proyecto y la menos aprovechada. Esto 
 convierte el dashboard en algo que *hace* cosas en vez de contarlas.
 
 **Cuidado, y es la parte importante.** Todo el modelo de seguridad del agente
-(invariantes 7 y 9 de `CLAUDE.md`) se apoya en una premisa: la instrucción sale de una URL
+(invariantes 7 y 10 de `CLAUDE.md`) se apoya en una premisa: la instrucción sale de una URL
 de `ALUD_ALLOWED_HOSTS` y se valida en tres sitios. **Un job genérico rompe esa premisa**,
 así que necesita la suya, igual de explícita:
 
@@ -269,7 +269,7 @@ así que necesita la suya, igual de explícita:
   `confirmar: True` en Jarvis (el modelo propone, tú apruebas, `/jarvis/ejecutar` crea).
   Nunca de una fila escrita en `jobs` con la service key, que es escribible.
 - Sigue escribiéndose a **fichero temporal UTF-8** y leyéndose con
-  `Get-Content -LiteralPath`: jamás interpolada en un comando (invariante 9, la lección
+  `Get-Content -LiteralPath`: jamás interpolada en un comando (invariante 10, la lección
   del here-string).
 - El agente tiene que poder distinguir el tipo de job y **negarse a lo que no conozca**,
   no intentar adivinarlo.

@@ -397,8 +397,6 @@ def finish_job(job_id: str, status: str):
         timeout=10,
     )
 
-# ── Playwright: login Alud ────────────────────────────────────────────────────
-
 # ── Cowork: abrir Claude Desktop y escribir instrucción ───────────────────────
 
 def build_cowork_instruction(titulo: str, alud_url: str) -> str:
