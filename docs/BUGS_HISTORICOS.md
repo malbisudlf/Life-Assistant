@@ -444,3 +444,25 @@
     Revolut es un extra dentro de un endpoint que sirve la cartera de Indexa, y se llevó
     por delante la cartera —que funcionaba perfectamente— porque su excepción subía sin
     red. Al añadir una fuente dentro de una respuesta que ya sirve otra, envuélvela.
+- **El permiso de despliegue que no caducaba nunca, y secuestró la pantalla de llamada.**
+  Salió probando «avísame» el 4 de septiembre de 2026: se manda el aviso de prueba, llega
+  al móvil con sus dos botones, se pulsa «Hablarlo»… y Jarvis descuelga diciendo «he
+  detectado un fallo y ya lo he corregido, ¿quieres que lo despliegue?». No era un fallo
+  del canal nuevo: era el orden funcionando. `GET /llamada/pendiente` anuncia **primero**
+  el despliegue esperando permiso, porque es el que tiene trabajo parado, y había una fila
+  en `listo` de la prueba del canal de averías de la víspera que nadie llegó a contestar.
+  Dos caras del mismo descuido, y ninguna avisaba de sí misma:
+  - **Un permiso sin contestar se quedaba pendiente para siempre**, así que ningún aviso
+    de sesión llegaría a anunciarse nunca mientras esa fila siguiera ahí. Un camino nuevo
+    que no funciona porque otro viejo no se cerró.
+  - **Ofrecía desplegar un PR que ya no existía** (mergeado a mano por el medio). Decir
+    que sí habría fallado contra la API de GitHub.
+  Moraleja: **si le pones caducidad a lo que escribes, mira si la tiene lo que está al
+  lado.** El aviso de sesión nació con TTL de 48 h el mismo día, y el permiso de
+  despliegue —que es más peligroso— llevaba sin ninguna desde que se escribió; se diseñó
+  mirando solo la pieza nueva. Hoy `DESPLIEGUE_TTL_HORAS` (48 h) se aplica **al leer**,
+  igual que el del aviso: un permiso caducado no se cierra —nadie decidió nada, y eso es
+  justo lo que interesa poder ver después—, simplemente deja de anunciarse. Y la segunda
+  moraleja, más general: **esto no salía leyendo el código.** Salió a la primera al
+  probarlo de punta a punta, que es lo que dice `docs/AVISAME.md` que hay que hacer antes
+  de fiarse.

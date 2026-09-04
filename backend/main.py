@@ -10696,6 +10696,15 @@ DEPLOY_GITHUB_TOKEN = os.getenv("DEPLOY_GITHUB_TOKEN", "")
 # El workflow que despliega, por nombre de fichero. Fijo y no configurable desde fuera:
 # es un nombre que se interpola en la URL de la API de GitHub.
 DEPLOY_WORKFLOW     = "deploy-backend.yml"
+# Cuánto vale un permiso de despliegue sin contestar. Nació sin caducidad y eso resultó
+# ser un fallo con dos caras, las dos vistas al probar «avísame» el 2026-09-04: un permiso
+# que nadie contestó **secuestraba la pantalla de llamada para siempre** —se anuncia antes
+# que cualquier otra cosa, por diseño, así que ningún aviso de sesión llegaba a
+# anunciarse—, y encima ofrecía desplegar un PR que para entonces ya estaba mergeado a
+# mano y no existía. 48 horas, las mismas que el contexto de un aviso de sesión: pasadas,
+# el CI que puso ese PR en verde ya no dice gran cosa de un `main` que ha seguido
+# andando.
+DESPLIEGUE_TTL_HORAS = int(os.getenv("DESPLIEGUE_TTL_HORAS", "48"))
 
 
 def _uuid_averia(origen: str, referencia: str) -> str:
@@ -11026,9 +11035,22 @@ def _apertura_despliegue() -> str:
 
 
 def _despliegue_pendiente() -> dict:
-    """El despliegue esperando permiso más reciente, para cuando el aviso no trajo botones."""
+    """El despliegue esperando permiso más reciente, para cuando el aviso no trajo botones.
+
+    La caducidad se aplica AQUÍ, al leer, y no con un barrido que cierre filas: un permiso
+    caducado no es uno que haya que descartar —nadie decidió nada, y eso es justo lo que
+    interesa poder ver después—, es uno que ya no se anuncia. Mismo criterio que
+    `_sesion_pendiente`.
+
+    Lo que NO cambia es el botón de la notificación (`POST /despliegue/{id}/accion`): ahí
+    hay un id concreto y una persona que lo ha pulsado a propósito, que es otra cosa que
+    "lo más reciente que haya". Si ese PR ya no está, el merge falla y se dice.
+    """
+    desde = (datetime.now(timezone.utc)
+             - timedelta(hours=DESPLIEGUE_TTL_HORAS)).isoformat()
     try:
         r = http.get(f"{REVISION_URL}?estado=eq.listo"
+                     f"&creado=gte.{quote(desde, safe='')}"
                      "&select=id,pr_numero,detalle,issue_titulo&order=creado.desc&limit=1",
                      headers=supabase_headers())
         if r.status_code >= 300:
