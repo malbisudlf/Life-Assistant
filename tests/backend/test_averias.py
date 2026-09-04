@@ -354,3 +354,35 @@ class TestElContextoDeLaLlamada:
     def test_sin_nada_pendiente_no_se_inventa_contexto(self, mock_requests):
         mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
         assert "ESPERANDO TU PERMISO" not in main._jarvis_sistema(voz=True)
+
+
+class TestElPermisoCaduca:
+    """Un permiso de despliegue que nadie contestó no vale para siempre.
+
+    Nació sin caducidad, y el fallo salió probando «avísame» el 2026-09-04: una fila en
+    «listo» de la prueba de la víspera **secuestraba la pantalla de llamada** —el
+    despliegue se anuncia antes que cualquier otra cosa, por diseño— y encima ofrecía
+    desplegar un PR que ya estaba mergeado a mano y no existía.
+    """
+
+    def test_no_se_anuncia_uno_viejo(self, client, mock_requests, auth_headers):
+        client.get("/despliegue/pendiente", headers=auth_headers)
+        url = mock_requests.called("GET", "revision_hallazgos")[0][1]
+        # Va en la consulta, no en un barrido que cierre filas: nadie decidió nada, y
+        # poder ver después cuántos permisos se quedaron sin respuesta es justo el dato.
+        assert "creado=gte." in url and "estado=eq.listo" in url
+
+    def test_la_llamada_tampoco_se_queda_atascada(self, client, mock_requests, auth_headers):
+        """Con el permiso caducado, lo que se anuncia es lo siguiente que haya."""
+        mock_requests.add("GET", "sesion_avisos",
+                          FakeResponse([{"id": "11111111-2222-3333-4444-555555555555",
+                                         "titulo": "un aviso de sesión",
+                                         "bloqueado": False}]))
+        r = client.get("/llamada/pendiente", headers=auth_headers)
+        assert r.json()["pendiente"]["tipo"] == "sesion"
+
+    def test_la_herramienta_de_jarvis_usa_la_misma_puerta(self, mock_requests):
+        """Si es demasiado viejo para anunciarlo, es demasiado viejo para desplegarlo."""
+        r = main._j_desplegar()
+        assert r["ok"] is False
+        assert not mock_requests.called("PUT", "pulls")

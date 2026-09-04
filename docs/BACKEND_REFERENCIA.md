@@ -157,8 +157,8 @@ del resumen — ver `docs/BRIEF.md`),
 `REVISION_TOKEN`, `ARREGLO_FIRE_URL`, `ARREGLO_FIRE_TOKEN` (la revisión nocturna
 accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se puede
 arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
-`AVERIA_CI`, `AVERIA_MAX_INTENTOS`, `DEPLOY_GITHUB_TOKEN` (el arreglo automático del
-CI roto y el despliegue con permiso — ver `docs/AVERIAS.md`),
+`AVERIA_CI`, `AVERIA_MAX_INTENTOS`, `DEPLOY_GITHUB_TOKEN`, `DESPLIEGUE_TTL_HORAS`
+(el arreglo automático del CI roto y el despliegue con permiso — ver `docs/AVERIAS.md`),
 `SESION_TOKEN`, `SESION_FIRE_URL`, `SESION_FIRE_TOKEN`, `SESION_AVISO_TTL_HORAS`
 («avísame»: que una sesión de Claude Code te avise al móvil y puedas contestarle
 hablando — ver `docs/AVISAME.md`),
