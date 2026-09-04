@@ -522,6 +522,17 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   no. El flujo entero en `docs/AVERIAS.md`; el teléfono —con Jarvis al otro lado,
   contestándote— en `docs/LLAMADAS.md`.
 
+- **El aviso que deja una sesión de Claude Code** (`POST /sesion/aviso`, tabla
+  `sesion_avisos`, `GET /llamada/pendiente`, herramienta `responder_a_la_sesion`): el
+  mismo canal que el de arriba, pero hablando de otra cosa. Una sesión que ha estado
+  trabajando en el repositorio deja «esto me pediste, esto he hecho, esto ha quedado a
+  medias»; al descolgar Jarvis **ya lo sabe** (va en el prompt de la llamada, delimitado
+  como dato) y lo que contestes hablando dispara una sesión NUEVA que sigue el trabajo.
+  Dos cosas que no son detalles: **solo avisa si lo pediste o si la sesión se quedó
+  bloqueada** —nunca por terminar algo sin más, que es lo que llenaría el canal de ruido—
+  y **solo lo bloqueado atraviesa el silencio del móvil**, por la misma regla que decide
+  quién puede llamarte por teléfono. El flujo entero en `docs/AVISAME.md`.
+
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
   salud—; este mira si el sistema se rompe por cualquier otro sitio. `app_logs` y

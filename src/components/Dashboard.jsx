@@ -2873,7 +2873,11 @@ export default function Dashboard() {
     (async () => {
       let pendiente = null;
       try {
-        const r = await apiFetch(`${API}/despliegue/pendiente`, { headers: authHeaders() });
+        // `/llamada/pendiente` y no `/despliegue/pendiente`: la pantalla ya no sabe por
+        // qué suena. Un permiso de despliegue, un aviso que dejó una sesión de Claude
+        // Code, o lo que venga después — quien ordena qué se anuncia primero es el
+        // backend, que es el único que los conoce todos.
+        const r = await apiFetch(`${API}/llamada/pendiente`, { headers: authHeaders() });
         if (r.ok) pendiente = (await r.json())?.pendiente || null;
       } catch { /* sin red se descuelga igual, con la frase de respaldo */ }
       if (vivo) {

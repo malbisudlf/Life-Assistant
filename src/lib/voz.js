@@ -123,14 +123,19 @@ export function llamadaEntranteDeUrl(busqueda) {
 
 /** La primera frase al descolgar.
  *
- *  La escribe el backend (`_apertura_despliegue`), que es quien sabe qué hay pendiente;
- *  aquí solo se decide el respaldo para cuando la pantalla se abre sin nada que
- *  anunciar — el aviso llegó tarde, ya se decidió desde otro sitio, o alguien guardó el
- *  enlace. Descolgar y oír silencio parecería que la llamada se ha roto. */
+ *  La escribe el backend (`_apertura_despliegue` o `_apertura_sesion`, según por qué
+ *  suene), que es quien sabe qué hay pendiente; aquí solo se decide el respaldo para
+ *  cuando la pantalla se abre sin nada que anunciar — el aviso llegó tarde, ya se
+ *  decidió desde otro sitio, o alguien guardó el enlace. Descolgar y oír silencio
+ *  parecería que la llamada se ha roto.
+ *
+ *  El respaldo no nombra el despliegue aunque ése fuera el primer motivo por el que esto
+ *  existió: desde que el canal admite avisos de sesión, decir «ya no hay nada esperando
+ *  permiso» sería contestar por un motivo que igual no era el de esta llamada. */
 export function aperturaDeLlamada(pendiente) {
   const dicha = (pendiente?.apertura || "").trim();
   if (dicha) return dicha;
-  return "Ya no hay nada esperando permiso. ¿Te ayudo con otra cosa?";
+  return "Ya no hay nada pendiente. ¿Te ayudo con otra cosa?";
 }
 
 /** El juez del barge-in: decide, mirando la energía del micrófono, si te has puesto a

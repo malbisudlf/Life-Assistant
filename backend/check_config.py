@@ -106,6 +106,8 @@ def main() -> int:
         ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
         ("Despliegue con permiso (arreglo automático del CI roto)",
          ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "DEPLOY_GITHUB_TOKEN", "JARVIS_REPO"]),
+        ("Avísame (una sesión te avisa y le contestas hablando)",
+         ["SESION_TOKEN", "SESION_FIRE_URL", "SESION_FIRE_TOKEN"]),
         ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
         ("El teléfono (Jarvis te llama)",
          ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",

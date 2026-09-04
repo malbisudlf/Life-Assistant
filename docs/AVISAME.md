@@ -3,8 +3,23 @@
 
 # Avísame: que una sesión de Claude Code te avise al móvil y puedas contestarle hablando
 
-**Estado: diseñado, sin implementar.** Este fichero es el plan. Cuando la fase 1 esté
-hecha, esta línea cambia y no antes.
+**Estado: implementado (4 de septiembre de 2026), sin probar de punta a punta.** Las
+cuatro fases están escritas; lo que falta no es código:
+
+- **La migración `20260904_sesion_avisos` no está aplicada** en Supabase. Se aplica a
+  mano desde el editor SQL, como todas.
+- **Las variables no están puestas** en Fly: `SESION_TOKEN` (fase 1) y
+  `SESION_FIRE_URL` / `SESION_FIRE_TOKEN` (fase 3).
+- **La rutina que retoma el trabajo no existe todavía.** La crea Mikel en claude.ai; una
+  sesión no puede crearla. Es la que da esas dos variables, y hasta que exista Jarvis ni
+  siquiera anuncia la herramienta `responder_a_la_sesion` — no se ofrece lo que no puede
+  hacer nada.
+- **El botón «Vale» necesita su automatización en HA** (`docs/HOME_ASSISTANT_JARVIS.md`).
+  Sin ella el aviso llega igual y «Hablarlo» funciona; lo único que no hace nada es ese
+  botón.
+
+Hasta que eso esté, el backend responde y los tests pasan, pero **nadie ha visto llegar
+un aviso al móvil por este camino**. El del despliegue tampoco funcionó a la primera.
 
 Hoy el proyecto tiene un canal que hace exactamente esto y **solo sabe hablar de una
 cosa**: el permiso de despliegue (`docs/AVERIAS.md`). El aviso llega al móvil, el botón
@@ -90,13 +105,21 @@ Cada una responde a una pregunta que se hizo antes de escribir una línea de có
 
 ## Las fases
 
-1. **El aviso.** Tabla, `POST /sesion/aviso`, el aviso al móvil con sus dos botones.
-   Al final de esta fase ya sirve para algo: te avisa y lo lees. Sin hablar todavía.
-2. **Descolgar y que lo sepa.** `GET /llamada/pendiente` y `_apertura_sesion()`; la
-   pantalla de llamada anuncia el contexto y Jarvis lo tiene en el historial.
-3. **La vuelta.** La herramienta de Jarvis, la routine y el disparo con tu respuesta.
-4. **Que sea cómodo de usar.** Una skill (`avisame`) para que mis sesiones lo llamen sin
-   que haya que acordarse del formato.
+1. ~~**El aviso.**~~ Hecha. Tabla `sesion_avisos`, `POST /sesion/aviso` con
+   `SESION_TOKEN`, y el aviso al móvil con sus dos botones («Hablarlo» y «Vale», este
+   último por `POST /sesion/{id}/accion`). Dos reglas de aviso y no una —`REGLA_SESION`
+   y `REGLA_SESION_BLOQUEADA`— porque el despachador decide `critico` mirando solo la
+   regla: es ahí donde tiene que estar la diferencia, no dentro del texto.
+2. ~~**Descolgar y que lo sepa.**~~ Hecha. `GET /llamada/pendiente` (que ordena:
+   primero el despliegue, luego el aviso), `_apertura_sesion()`, y el contexto
+   delimitado dentro de `_jarvis_sistema(voz=True)`. La pantalla de llamada ya no
+   pregunta por `/despliegue/pendiente`: no sabe por qué suena, y así puede sonar por
+   cosas nuevas sin tocarla.
+3. ~~**La vuelta.**~~ Escrita: `responder_a_la_sesion` (`confirmar: True`),
+   `_disparar_sesion()` y `SESION_FIRE_URL` / `SESION_FIRE_TOKEN`. **Le falta la rutina
+   de claude.ai**, que no puede crear una sesión.
+4. ~~**Que sea cómodo de usar.**~~ Hecha: `.claude/skills/avisame/SKILL.md`, con el
+   cuándo (que es lo difícil) y el formato de los cinco campos.
 
 Las fases 1 y 2 valen por sí solas. La 3 es la que convierte esto en una conversación.
 
