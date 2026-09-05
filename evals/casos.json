@@ -92,6 +92,10 @@
     { "id": "neg-repetir", "grupo": "negativos", "peticion": "¿Puedes repetirme lo último pero más corto?", "espera": [] },
     { "id": "neg-olvida-eso", "grupo": "negativos", "peticion": "Perdona, me he liado, olvida lo que acabo de decir.", "espera": [], "confundible": "olvidar", "nota": "Negativo a propósito: 'olvida eso' es lenguaje de conversación, no la herramienta `olvidar`." },
     { "id": "neg-aritmetica", "grupo": "negativos", "peticion": "¿Cuánto es el 15% de 240?", "espera": [], "confundible": "buscar_en_internet" },
-    { "id": "neg-haiku", "grupo": "negativos", "peticion": "Escríbeme un haiku sobre el Cantábrico.", "espera": [] }
+    { "id": "neg-haiku", "grupo": "negativos", "peticion": "Escríbeme un haiku sobre el Cantábrico.", "espera": [] },
+    { "id": "encargo-readme", "grupo": "encargos", "peticion": "Añade una línea que diga hola al final del README.", "espera": ["encargar_a_una_sesion"], "confundible": "mcp_usar", "nota": "El caso que lo destapó: con mcp_usar acabó en un commit directo a main que borró 222 líneas del README. Jarvis no toca el código, lo encarga." },
+    { "id": "encargo-arreglo", "grupo": "encargos", "peticion": "Arréglame el widget del clima, que en el móvil se ve cortado.", "espera": ["encargar_a_una_sesion"] },
+    { "id": "encargo-funcion-nueva", "grupo": "encargos", "peticion": "Ponme un botón para silenciar los avisos durante una hora.", "espera": ["encargar_a_una_sesion"], "confundible": "silenciar_regla", "nota": "Pedir un BOTÓN es pedir código; silenciar una regla ahora mismo es otra cosa y tiene su herramienta." },
+    { "id": "encargo-solo-preguntan", "grupo": "encargos", "peticion": "¿Qué widgets tiene el dashboard?", "espera": [], "confundible": "encargar_a_una_sesion", "nota": "Preguntar POR el proyecto no es pedir un cambio EN el proyecto." }
   ]
 }
