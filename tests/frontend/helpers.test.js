@@ -10,6 +10,8 @@ import {
   baselinePersonal, wellnessBaselines,
   mantenimientoEstimado, KCAL_POR_KG,
   metricasMuertas, METRICAS_DEL_DESGLOSE, METRICA_MUERTA_DIAS,
+  METRICA_MUERTA_DIAS_TRAS_CAMBIO, fechaCambioSugerida,
+  mediaReciente, refHrv, HRV_SUAVIZADO_DIAS,
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
@@ -1046,7 +1048,10 @@ describe("correlaciones entre series", () => {
     const h = wellnessHistory({
       sleep_analysis: [{ date: dia(1), value: 7.5, extra: {} }, { date: dia(2), value: 7.5, extra: {} }],
       step_count:     [{ date: dia(1), value: 11000 }, { date: dia(2), value: 11000 }],
-      heart_rate_variability: [{ date: dia(1), value: 55 }],
+      // FC en reposo y no HRV: la HRV se puntúa con la media de tres días, así que un
+      // hueco de un día no le quita el componente al siguiente — que es justo lo que
+      // hace el suavizado y no lo que este test quiere medir.
+      resting_heart_rate: [{ date: dia(1), value: 52 }],
     }, { reloj: { dias: { [dia(1)]: "ambos", [dia(2)]: "sin_reloj" } } });
     expect(h[0].sinReloj).toBe(false);
     expect(h[1].sinReloj).toBe(true);
@@ -1809,6 +1814,141 @@ describe("metricasMuertas", () => {
 
   test("la ventana por defecto son dos semanas", () => {
     expect(METRICA_MUERTA_DIAS).toBe(14);
+  });
+
+  test("tras un cambio de aparato bastan cinco días, si la métrica llegaba a diario", () => {
+    // El cambio es una explicación: una métrica que llegaba todos los días y deja de
+    // llegar justo el día que cambias de pulsera no es un hueco. Sin el corte estos
+    // mismos datos no bastarían — la ventana larga no ha pasado.
+    const datos = {
+      step_count:       _dias("2026-08-01", "2026-08-24", 9000),
+      apple_stand_hour: _dias("2026-08-01", "2026-08-19", 11),
+    };
+    const muertas = metricasMuertas(datos, { hoy: "2026-08-24", corte: "2026-08-20" });
+    expect(muertas.has("🧍 De pie")).toBe(true);
+    expect(muertas.has("🚶 Pasos")).toBe(false);
+    // Sin corte no se puede afirmar: la ventana larga todavía ve días con dato.
+    expect(metricasMuertas(datos, { hoy: "2026-08-24" }).has("🧍 De pie")).toBe(false);
+  });
+
+  test("la ventana corta no vale para las métricas esporádicas", () => {
+    // El VO₂max o la recuperación cardíaca pueden pasarse cinco días sin dar señal con
+    // el aparato VIEJO puesto: ahí cinco días no prueban nada.
+    const datos = {
+      step_count:     _dias("2026-08-01", "2026-08-24", 9000),
+      cardio_recovery: [{ date: "2026-08-12", value: 30 }, { date: "2026-08-18", value: 28 }],
+    };
+    const muertas = metricasMuertas(datos, { hoy: "2026-08-24", corte: "2026-08-20" });
+    expect(muertas.has("💓 Recuperación cardio")).toBe(false);
+  });
+
+  test("la ventana corta nunca mira días del aparato anterior", () => {
+    // Con el corte de anteayer la ventana de cinco días no cabe entera después de él,
+    // así que no se declara nada aunque la métrica lleve tiempo sin llegar.
+    const datos = {
+      step_count:       _dias("2026-08-01", "2026-08-24", 9000),
+      apple_stand_hour: _dias("2026-08-01", "2026-08-19", 11),
+    };
+    expect(metricasMuertas(datos, { hoy: "2026-08-24", corte: "2026-08-23" }).size).toBe(0);
+  });
+
+  test("la ventana tras un cambio son cinco días", () => {
+    expect(METRICA_MUERTA_DIAS_TRAS_CAMBIO).toBe(5);
+  });
+});
+
+describe("fechaCambioSugerida", () => {
+  const _dias = (desde, hasta, valor) => {
+    const out = [];
+    for (let d = new Date(`${desde}T12:00:00Z`); d <= new Date(`${hasta}T12:00:00Z`);
+         d.setUTCDate(d.getUTCDate() + 1)) {
+      out.push({ date: d.toISOString().slice(0, 10), value: valor });
+    }
+    return out;
+  };
+
+  test("varias métricas muertas a la vez, y el resto viva, es un cambio de aparato", () => {
+    const datos = {
+      step_count:               _dias("2026-08-01", "2026-08-24", 9000),
+      sleep_analysis:           _dias("2026-08-01", "2026-08-24", 7.5),
+      apple_stand_hour:         _dias("2026-08-01", "2026-08-19", 11),
+      flights_climbed:          _dias("2026-08-01", "2026-08-19", 8),
+      time_in_daylight:         _dias("2026-08-01", "2026-08-18", 40),
+    };
+    const s = fechaCambioSugerida(datos, { hoy: "2026-08-24" });
+    // El primer día del aparato nuevo es el siguiente al último dato del viejo.
+    expect(s.fecha).toBe("2026-08-20");
+    expect(s.etiquetas).toContain("🧍 De pie");
+    expect(s.etiquetas).toHaveLength(3);
+  });
+
+  test("si no llega NADA es que no llevas aparato, no que hayas cambiado", () => {
+    const datos = {
+      step_count:       _dias("2026-08-01", "2026-08-19", 9000),
+      sleep_analysis:   _dias("2026-08-01", "2026-08-19", 7.5),
+      apple_stand_hour: _dias("2026-08-01", "2026-08-19", 11),
+    };
+    expect(fechaCambioSugerida(datos, { hoy: "2026-08-24" })).toBe(null);
+  });
+
+  test("una sola métrica caída es una avería suya, no un cambio", () => {
+    const datos = {
+      step_count:       _dias("2026-08-01", "2026-08-24", 9000),
+      sleep_analysis:   _dias("2026-08-01", "2026-08-24", 7.5),
+      apple_stand_hour: _dias("2026-08-01", "2026-08-19", 11),
+    };
+    expect(fechaCambioSugerida(datos, { hoy: "2026-08-24" })).toBe(null);
+  });
+
+  test("un retraso de sync de un día no cuenta como cambio", () => {
+    const datos = {
+      step_count:       _dias("2026-08-01", "2026-08-24", 9000),
+      apple_stand_hour: _dias("2026-08-01", "2026-08-23", 11),
+      flights_climbed:  _dias("2026-08-01", "2026-08-23", 8),
+      time_in_daylight: _dias("2026-08-01", "2026-08-23", 40),
+    };
+    expect(fechaCambioSugerida(datos, { hoy: "2026-08-24" })).toBe(null);
+  });
+});
+
+describe("HRV promediada", () => {
+  test("mediaReciente promedia los días con dato de la ventana", () => {
+    const serie = [
+      { date: "2026-08-22", value: 40 },
+      { date: "2026-08-23", value: 50 },
+      { date: "2026-08-24", value: 60 },
+    ];
+    expect(mediaReciente(serie, "2026-08-24")).toEqual({ valor: 50, n: 3 });
+    // Un 0 es "no se midió", no un cero real.
+    expect(mediaReciente([...serie.slice(0, 2), { date: "2026-08-24", value: 0 }], "2026-08-24"))
+      .toEqual({ valor: 45, n: 2 });
+    expect(mediaReciente(serie, "2026-08-24", { corte: "2026-08-24" })).toEqual({ valor: 60, n: 1 });
+    expect(mediaReciente([], "2026-08-24")).toBe(null);
+  });
+
+  test("la ventana de suavizado son tres días", () => {
+    expect(HRV_SUAVIZADO_DIAS).toBe(3);
+  });
+
+  test("refHrv va por fecha y respeta el corte de dispositivo", () => {
+    // D-14..D-8 de 2026-08-24 es 2026-08-10..2026-08-16.
+    const serie = [
+      { date: "2026-08-10", value: 40 }, { date: "2026-08-16", value: 60 },
+      { date: "2026-08-24", value: 99 },
+    ];
+    expect(refHrv(serie, "2026-08-24")).toBe(50);
+    // Con el corte dentro de la ventana solo cuenta lo del aparato nuevo.
+    expect(refHrv(serie, "2026-08-24", "2026-08-15")).toBe(60);
+    // Y si el corte se la come entera, no hay referencia: el componente cae a "sin
+    // referencia" en vez de compararse contra el aparato anterior.
+    expect(refHrv(serie, "2026-08-24", "2026-08-20")).toBe(null);
+  });
+
+  test("el desglose dice cuando la HRV va promediada", () => {
+    const fila = n => wellnessBreakdown({ isDaily: true, hrv: 55, hrvPrev: 50, hrvN: n })
+      .find(b => b.label === "❤️ HRV");
+    expect(fila(3).detail).toBe("55ms (media 3d) · ref 50ms");
+    expect(fila(1).detail).toBe("55ms · ref 50ms");
   });
 });
 
