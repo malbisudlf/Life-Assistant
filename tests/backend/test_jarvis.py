@@ -600,6 +600,51 @@ class TestJarvisSSRF:
         assert main._descargar("https://publico.example/") is None
 
 
+class TestCodificacionDeDescargas:
+    """Con qué códec se lee lo que baja. `requests` decide **ISO-8859-1** para cualquier
+    `text/*` sin charset (el viejo RFC 2616), que para un XML es casi siempre falso: es
+    lo que llevaba años sirviendo el feed de RTVE con los acentos rotos («EconomÃ­a»)."""
+
+    @staticmethod
+    def _respuesta(cuerpo: bytes, content_type: str, encoding):
+        class _R:
+            status_code = 200
+            headers = {"content-type": content_type}
+
+            def __init__(self):
+                self.encoding = encoding
+
+            def close(self): pass
+            def iter_content(self, _n): return iter([cuerpo])
+        return _R()
+
+    def _bajar(self, monkeypatch, cuerpo, content_type, encoding="ISO-8859-1"):
+        monkeypatch.setattr(main, "url_web_permitida", lambda u: True)
+        monkeypatch.setattr(main.http, "get",
+                            lambda *a, **k: self._respuesta(cuerpo, content_type, encoding))
+        return main._descargar("https://feed.example/rss")[1]
+
+    def test_el_prologo_del_xml_manda_sobre_lo_que_adivina_requests(self, monkeypatch):
+        cuerpo = '<?xml version="1.0" encoding="UTF-8"?><title>Economía</title>'.encode("utf-8")
+        assert "Economía" in self._bajar(monkeypatch, cuerpo, "text/xml")
+
+    def test_el_charset_de_la_cabecera_manda_sobre_el_documento(self, monkeypatch):
+        # Si la cabecera lo declara, es la fuente más fiable y no se discute.
+        cuerpo = '<?xml version="1.0" encoding="UTF-8"?><t>Economía</t>'.encode("latin-1")
+        assert "Economía" in self._bajar(monkeypatch, cuerpo, "text/xml; charset=ISO-8859-1")
+
+    def test_el_meta_charset_del_html_tambien_cuenta(self, monkeypatch):
+        cuerpo = '<html><head><meta charset="utf-8"></head><body>Economía</body></html>'.encode("utf-8")
+        assert "Economía" in self._bajar(monkeypatch, cuerpo, "text/html")
+
+    def test_sin_ninguna_declaracion_se_lee_como_utf8(self, monkeypatch):
+        assert "Economía" in self._bajar(monkeypatch, "Economía".encode("utf-8"), "text/plain")
+
+    def test_un_charset_inventado_no_tumba_la_descarga(self, monkeypatch):
+        # Los hay: un códec que Python no conoce no puede costar la página entera.
+        assert self._bajar(monkeypatch, b"hola", "text/xml; charset=x-inventado-9") == "hola"
+
+
 class TestJarvisWeb:
     def test_el_contenido_web_llega_marcado_como_no_fiable(self, monkeypatch):
         monkeypatch.setattr(main.socket, "getaddrinfo",
