@@ -1232,3 +1232,80 @@ class TestMotivosProactivos:
         que se dejen de leer los dos."""
         self._fuentes(monkeypatch, salud={"reloj": {"racha_sin_reloj": 5}})
         assert main._motivos_proactivos(self._ahora()) == []
+
+
+class TestElMcpNoEscribeEnElProyecto:
+    """Sobre ESTE repositorio, el MCP solo lee. Lo demás va por `encargar_a_una_sesion`.
+
+    Pasó el 5 de septiembre de 2026: se le pidió a Jarvis por voz «añade hola al README»
+    y, en vez de encargárselo a una sesión, lo hizo él con `create_or_update_file` del MCP
+    de GitHub — commit directo a `main`, sin rama, sin PR y sin CI. Y como esa herramienta
+    reemplaza el fichero ENTERO con lo que le pases, el README pasó de 231 líneas a 9.
+
+    El prompt ya lo prohibía. Una regla en el prompt es una sugerencia: esto es el muro.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _proyecto(self, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_REPO", "malbisudlf/Life-Assistant")
+
+    def _sin_red(self, monkeypatch):
+        """El MCP no se puede ni llegar a llamar: si se llama, el test tiene que romper."""
+        def _no(*a, **k):
+            raise AssertionError("no se puede llegar al servidor: esto debía bloquearse")
+        monkeypatch.setattr(main, "_mcp_rpc", _no)
+
+    def test_escribir_un_fichero_del_proyecto_se_rechaza(self, monkeypatch):
+        _con_mcp(monkeypatch)
+        self._sin_red(monkeypatch)
+        r = main._j_mcp_usar("pruebas", "create_or_update_file",
+                             {"owner": "malbisudlf", "repo": "Life-Assistant",
+                              "path": "README.md", "content": "hola"})
+        assert "error" in r
+        assert "encargar_a_una_sesion" in r["error"]
+
+    def test_da_igual_como_se_llame_la_herramienta(self, monkeypatch):
+        """Lista blanca de lectura, no lista negra de verbos: el día que el servidor
+        estrene `replace_file_contents`, una lista negra lo deja pasar."""
+        _con_mcp(monkeypatch)
+        self._sin_red(monkeypatch)
+        for nombre in ("push_files", "replace_file_contents", "delete_file", "merge_pull_request"):
+            r = main._j_mcp_usar("pruebas", nombre,
+                                 {"owner": "malbisudlf", "repo": "Life-Assistant"})
+            assert "error" in r, nombre
+
+    def test_leer_el_proyecto_sigue_valiendo(self, monkeypatch):
+        """Bloquear la lectura dejaría a Jarvis sin poder mirar un issue ni un PR, que es
+        justo para lo que se conectó el servidor."""
+        _con_mcp(monkeypatch)
+        monkeypatch.setattr(main, "_mcp_rpc", lambda *a, **k: {
+            "content": [{"type": "text", "text": "el issue 42"}]})
+        r = main._j_mcp_usar("pruebas", "get_issue",
+                             {"owner": "malbisudlf", "repo": "Life-Assistant", "issue_number": 42})
+        assert r.get("resultado") == "el issue 42"
+
+    def test_escribir_en_OTRO_repositorio_no_se_toca(self, monkeypatch):
+        """La regla protege este repositorio, no capa el servidor entero."""
+        _con_mcp(monkeypatch)
+        monkeypatch.setattr(main, "_mcp_rpc", lambda *a, **k: {
+            "content": [{"type": "text", "text": "hecho"}]})
+        r = main._j_mcp_usar("pruebas", "create_or_update_file",
+                             {"owner": "otra", "repo": "cosa", "path": "x"})
+        assert r.get("resultado") == "hecho"
+
+    def test_tambien_si_el_repo_viene_junto_en_un_texto(self, monkeypatch):
+        _con_mcp(monkeypatch)
+        self._sin_red(monkeypatch)
+        r = main._j_mcp_usar("pruebas", "create_or_update_file",
+                             {"repositorio": "malbisudlf/Life-Assistant"})
+        assert "error" in r
+
+    def test_sin_JARVIS_REPO_configurado_no_se_bloquea_nada(self, monkeypatch):
+        """Sin saber cuál es «este» repositorio no hay nada que proteger, y capar el
+        servidor por si acaso dejaría a Jarvis sin MCP en cualquier despliegue nuevo."""
+        monkeypatch.setattr(main, "JARVIS_REPO", "")
+        _con_mcp(monkeypatch)
+        monkeypatch.setattr(main, "_mcp_rpc", lambda *a, **k: {
+            "content": [{"type": "text", "text": "hecho"}]})
+        r = main._j_mcp_usar("pruebas", "create_or_update_file", {"owner": "a", "repo": "b"})
+        assert r.get("resultado") == "hecho"
