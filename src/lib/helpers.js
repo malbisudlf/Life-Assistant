@@ -1749,6 +1749,62 @@ export function esFinDeLlamada(texto) {
   return /^(adios|chao|chau|cuelga|corta( la llamada)?|hasta luego|hasta ahora|nos vemos)( |$)/.test(t);
 }
 
+/** Lo dicho, normalizado para compararlo con una lista cerrada: sin tildes, sin signos,
+ *  en minúsculas y sin cortesías al final ("sí, por favor" y "sí" son lo mismo). */
+function respuestaNormalizada(texto) {
+  return String(texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Diacritic}/gu, "")
+    .replace(/[.,;!?¡¿]/g, " ")
+    .replace(/\b(por favor|porfa|porfi|gracias|jarvis)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Órdenes, no opiniones. "perfecto", "correcto" o "eso es" se quedan FUERA a propósito:
+// son cosas que se dicen al oír una propuesta sin haber decidido nada todavía, y lo que
+// hay al otro lado ejecuta acciones de verdad. Ante la duda, que conteste el modelo.
+const CONFIRMACIONES = new Set([
+  "si", "si si", "si claro", "si vale", "si adelante", "si hazlo", "si dale",
+  "vale", "venga", "venga va", "va", "dale", "adelante", "hazlo", "hazlo ya",
+  "confirmo", "confirmado", "ok", "okey", "oka", "de acuerdo", "procede", "tira",
+]);
+
+const NEGACIONES = new Set([
+  "no", "no no", "no gracias", "dejalo", "dejalo estar", "deja", "cancela",
+  "cancelalo", "olvidalo", "mejor no", "no lo hagas", "no hagas nada", "para",
+  "quita", "anula",
+]);
+
+/** Si lo dicho es un «sí» a secas: el equivalente hablado de pulsar «Confirmar».
+ *
+ *  Existe porque por teléfono NO HAY BOTÓN. Hasta que esto se escribió, una acción
+ *  propuesta en el modo llamada solo se podía ejecutar tocando la pantalla: decías «sí»,
+ *  el turno volvía al modelo, y el modelo —que no puede ejecutar lo que está pendiente de
+ *  confirmar— volvía a proponer lo mismo. Un bucle en el que la conversación se quedaba
+ *  atascada y cada vuelta costaba dinero.
+ *
+ *  La lista es CERRADA y se compara con la frase entera, no por palabras sueltas. Eso
+ *  hace que «sí, pero cambia el título» no confirme nada: no está en la lista, así que va
+ *  al modelo como cualquier otra frase — que es exactamente lo que hay que hacer con un
+ *  sí que trae condiciones. Aquí solo pasa lo inequívoco.
+ *
+ *  Y la garantía de fondo no se toca: quien decide sigue siendo una persona. Lo que se
+ *  reconoce aquí es su decisión dicha en voz alta, y acaba en el MISMO endpoint que el
+ *  botón (`/jarvis/ejecutar`). El modelo no puede autoconfirmarse por este camino. */
+export function esConfirmacionHablada(texto) {
+  return CONFIRMACIONES.has(respuestaNormalizada(texto));
+}
+
+/** Lo contrario: un «no» a secas descarta la acción propuesta.
+ *
+ *  Sin esto, decir «no, déjalo» mandaba el turno al modelo con la acción todavía
+ *  pendiente, y volvía a ofrecerla. Descartar es tan necesario como aceptar para que la
+ *  conversación pueda seguir a otra cosa. */
+export function esNegacionHablada(texto) {
+  return NEGACIONES.has(respuestaNormalizada(texto));
+}
+
 // ── Finanzas (cartera de Indexa Capital) ─────────────────────────
 // Todo lo que llega del backend puede venir a `null`, y ahí `null` significa "no se
 // sabe" (Indexa no respondió a la parte de rendimiento), nunca cero. De ahí que los tres

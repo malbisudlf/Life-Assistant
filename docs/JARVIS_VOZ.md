@@ -67,6 +67,17 @@ el plan y no el código.**
 
 **La fase 8 ya se midió** (septiembre de 2026), y el resultado está abajo.
 
+~~**Por teléfono no se podía confirmar nada.**~~ Arreglado el 5 de septiembre de 2026.
+Las acciones que se confirman (`crear_evento`, `encargar_a_una_sesion`…) solo se podían
+ejecutar **pulsando el botón**: decías «sí», el turno volvía al modelo, y el modelo —que
+no puede ejecutar lo que está pendiente— volvía a proponer lo mismo. Un bucle del que no
+se salía hablando, y cada vuelta costaba una llamada. Hoy `esConfirmacionHablada` y
+`esNegacionHablada` (en `src/lib/helpers.js`, puras y con lista cerrada) reconocen el «sí»
+o el «no» a secas y van al **mismo endpoint que el botón**, `/jarvis/ejecutar`. La
+garantía no cambia: quien decide es una persona, y el modelo no participa en esa decisión
+ni puede confirmarse a sí mismo. Un «sí, pero cambia el título» no está en la lista y sigue
+su camino al modelo, que es lo que hay que hacer con un sí que trae condiciones.
+
 ~~**Diez segundos mudos entre que Jarvis calla y vuelve a escucharte.**~~ Arreglado el 5
 de septiembre de 2026, y no estaba en la voz: **la destilación de memoria corría antes de
 emitir el `fin`** —una llamada al modelo entera más hasta cinco escrituras a Supabase—, y
