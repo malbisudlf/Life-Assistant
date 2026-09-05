@@ -14,6 +14,7 @@ import {
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
+  esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
 } from "../../src/lib/helpers";
 
@@ -1808,5 +1809,66 @@ describe("metricasMuertas", () => {
 
   test("la ventana por defecto son dos semanas", () => {
     expect(METRICA_MUERTA_DIAS).toBe(14);
+  });
+});
+
+describe("confirmar hablando", () => {
+  /* Por teléfono no hay botón. Antes de esto, decir «sí» a una acción propuesta mandaba
+     el turno al modelo, que no puede ejecutar lo que está pendiente de confirmar y volvía
+     a proponer lo mismo: un bucle del que no se salía hablando, y cada vuelta costaba una
+     llamada al modelo. */
+  test("un sí a secas confirma, con sus formas habituales", () => {
+    for (const dicho of ["sí", "Sí.", "si", "vale", "Vale!", "venga", "dale", "adelante",
+                         "hazlo", "confirmo", "ok", "de acuerdo", "sí, por favor",
+                         "sí claro", "procede"]) {
+      expect(esConfirmacionHablada(dicho)).toBe(true);
+    }
+  });
+
+  test("un no a secas descarta", () => {
+    for (const dicho of ["no", "No.", "déjalo", "cancela", "olvídalo", "mejor no",
+                         "no lo hagas", "no, gracias"]) {
+      expect(esNegacionHablada(dicho)).toBe(true);
+    }
+  });
+
+  test("un sí CON CONDICIONES no confirma: eso lo tiene que leer el modelo", () => {
+    // Es el caso peligroso: ejecutar la propuesta original cuando lo que se ha pedido es
+    // otra cosa. La lista es cerrada y se compara con la frase entera justo por esto.
+    for (const dicho of ["sí, pero cambia el título",
+                         "sí pero en la rama de pruebas",
+                         "vale, y añade también el logo",
+                         "sí, ¿cuánto tarda?",
+                         "no sé, ¿tú qué harías?",
+                         "no, mejor añade dos líneas"]) {
+      expect(esConfirmacionHablada(dicho)).toBe(false);
+      expect(esNegacionHablada(dicho)).toBe(false);
+    }
+  });
+
+  test("las opiniones no son órdenes", () => {
+    // "perfecto" o "correcto" se dicen al oír una propuesta sin haber decidido nada, y al
+    // otro lado hay acciones de verdad. Que conteste el modelo.
+    for (const dicho of ["perfecto", "correcto", "eso es", "exacto", "qué bien"]) {
+      expect(esConfirmacionHablada(dicho)).toBe(false);
+    }
+  });
+
+  test("no confunde una frase que EMPIEZA por sí con un sí", () => {
+    expect(esConfirmacionHablada("si puedes, mira el calendario")).toBe(false);
+    expect(esNegacionHablada("no tengo nada mañana, ¿verdad?")).toBe(false);
+  });
+
+  test("aguanta cómo llega una transcripción: sin tildes, con signos y con cortesías", () => {
+    expect(esConfirmacionHablada("  SÍ,  por favor.  ")).toBe(true);
+    expect(esConfirmacionHablada("¿sí?")).toBe(true);
+    expect(esNegacionHablada("No, gracias.")).toBe(true);
+  });
+
+  test("lo vacío no decide nada", () => {
+    for (const dicho of ["", "   ", null, undefined]) {
+      expect(esConfirmacionHablada(dicho)).toBe(false);
+      expect(esNegacionHablada(dicho)).toBe(false);
+    }
   });
 });

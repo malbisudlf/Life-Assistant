@@ -14,6 +14,7 @@ import {
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
+  esConfirmacionHablada, esNegacionHablada,
 } from "../lib/helpers";
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
@@ -2527,12 +2528,102 @@ export default function Dashboard() {
     if (aviso) setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: aviso }]);
   }
 
+  /** Lo que Jarvis ha dejado propuesto, en un ref.
+   *
+   *  El ciclo de la llamada corre desde callbacks de audio y de WebSocket, que ven el
+   *  estado de React congelado en el render en el que se crearon. Todo lo que la llamada
+   *  necesita saber vive en refs por esa razón, y esto no es una excepción. */
+  const pendienteRef = useRef(null);
+  useEffect(() => { pendienteRef.current = jarvisPendiente; }, [jarvisPendiente]);
+
+  /** Ejecutar hablando lo que estaba propuesto. El «sí» dicho ES el botón.
+   *
+   *  Va al MISMO endpoint que el botón (`/jarvis/ejecutar`), y eso es lo que mantiene en
+   *  pie la garantía de las acciones que se confirman: quien decide es una persona. Lo
+   *  único que cambia es cómo dice que sí — con el dedo o con la boca—, y por teléfono
+   *  solo hay una de las dos. El modelo no participa en esta decisión: no puede llegar
+   *  aquí ni proponerse a sí mismo la confirmación. */
+  async function confirmarEnLlamada() {
+    const pendiente = pendienteRef.current;
+    if (!pendiente) { cicloRef.current.escuchar?.(); return; }
+    const miTurno = ++vozTurnoRef.current;
+    dichoEnVozRef.current = "";
+    empezarAHablar();
+    setJarvisFase("pensando");
+    // Igual que en un turno normal: se llama SIEMPRE, salga bien o mal. Un camino que no
+    // pase por aquí deja la llamada muda para siempre.
+    const seguir = () => {
+      if (vozTurnoRef.current !== miTurno || !llamadaRef.current) return;
+      dejarDeHablar();
+      cicloRef.current.escuchar?.();
+    };
+
+    let frase;
+    try {
+      const r = await apiFetch(`${API}/jarvis/ejecutar`, {
+        method:  "POST",
+        headers: jsonHeaders(),
+        body:    JSON.stringify(pendiente),
+      });
+      if (!r.ok) throw await motivoJarvis(r);
+      const d    = await r.json();
+      const bien = Boolean(d?.ok);
+      // Las herramientas que tienen algo concreto que decir lo traen escrito para
+      // decirlo tal cual («Hecho, se lo encargo. Te aviso cuando esté.»). Un «Hecho.»
+      // a secas se entiende leyéndolo en el chat, pero por el altavoz no dice si lo que
+      // pediste está en marcha o ya terminado.
+      frase = bien
+        ? (d?.resultado?.dile_al_usuario_literalmente || "Hecho.")
+        : `No he podido: ${d?.resultado?.motivo || "ha fallado"}`;
+      if (bien) setJarvisPendiente(null);
+      // Entra en el historial que se manda en el turno siguiente. Sin esto el modelo no
+      // se entera de que ya está hecho y lo vuelve a ofrecer, que es la mitad del bucle
+      // que esto viene a cortar.
+      setJarvisMensajes(prev => [...prev, { rol: bien ? "assistant" : "aviso", texto: frase }]);
+      if (bien) loadEvents();
+    } catch (e) {
+      frase = e?.explicado ? e.message : "No he podido hacerlo.";
+      setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: frase }]);
+    }
+    if (vozTurnoRef.current !== miTurno || !llamadaRef.current) return;
+    setJarvisFase("hablando");
+    hablarJarvis(frase, seguir);
+  }
+
+  /** Y el «no»: se descarta lo propuesto y se sigue hablando.
+   *
+   *  Descartar hace tanta falta como aceptar. Sin esto, «no, déjalo» iba al modelo con la
+   *  acción todavía pendiente y volvía a ofrecerla: el mismo bucle por el otro lado. */
+  function descartarEnLlamada() {
+    setJarvisPendiente(null);
+    setJarvisMensajes(prev => [...prev, { rol: "assistant", texto: "Vale, lo dejo." }]);
+    const miTurno = ++vozTurnoRef.current;
+    dichoEnVozRef.current = "";
+    empezarAHablar();
+    setJarvisFase("hablando");
+    hablarJarvis("Vale, lo dejo.", () => {
+      if (vozTurnoRef.current !== miTurno || !llamadaRef.current) return;
+      dejarDeHablar();
+      cicloRef.current.escuchar?.();
+    });
+  }
+
   function finDeFrase() {
     const dicho = buferRef.current.trim();
     if (!dicho) return;             // silencio sin nada dicho: se sigue escuchando
     buferRef.current = "";
     setJarvisParcial("");
     if (esFinDeLlamada(dicho)) { colgarLlamada(); return; }
+    // Un «sí» o un «no» a secas deciden sobre lo que Jarvis dejó propuesto, sin pasar por
+    // el modelo. Por teléfono no hay botón que pulsar, y antes de esto el «sí» volvía al
+    // modelo, que no puede ejecutar lo que está pendiente de confirmar y se limitaba a
+    // proponerlo otra vez: la conversación se quedaba dando vueltas y cada vuelta costaba
+    // una llamada. Solo entra lo inequívoco (ver `esConfirmacionHablada`); un «sí, pero
+    // cambia el título» sigue su camino normal hasta el modelo.
+    if (pendienteRef.current) {
+      if (esConfirmacionHablada(dicho)) { pararEscucha(); cicloRef.current.confirmar?.(); return; }
+      if (esNegacionHablada(dicho))     { pararEscucha(); cicloRef.current.descartar?.(); return; }
+    }
     pararEscucha();
     cicloRef.current.turno?.(dicho);
   }
@@ -3119,6 +3210,7 @@ export default function Dashboard() {
     cicloRef.current = {
       escuchar: escucharEnLlamada, turno: turnoDeLlamada, fin: finDeFrase,
       parcial:  parcialDeScribe,   cerrada: cerradaDeScribe,
+      confirmar: confirmarEnLlamada, descartar: descartarEnLlamada,
     };
   });
 
