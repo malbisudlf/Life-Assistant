@@ -466,3 +466,34 @@
   moraleja, más general: **esto no salía leyendo el código.** Salió a la primera al
   probarlo de punta a punta, que es lo que dice `docs/AVISAME.md` que hay que hacer antes
   de fiarse.
+- **Los diez segundos mudos al final de cada respuesta hablada.** Reportado el 5 de
+  septiembre de 2026: «desde que deja de hablar hasta que empieza a escucharme fácilmente
+  pasan 10 segundos». No era el micrófono, ni Scribe, ni el barge-in — el sitio donde se
+  buscó primero, porque el micro es lo que se había tocado la víspera. Era el backend:
+  **la destilación de memoria corría antes de emitir el evento `fin`**. Colgaba de
+  `_responder()`, «el punto único de salida del turno», puesta ahí a propósito *para que
+  no haya que acordarse de llamarla en cada `return`* — una buena razón que resultó ser
+  el sitio exacto donde más duele. Lo que hace: una llamada al modelo entera (400 tokens)
+  más hasta cinco escrituras a Supabase.
+  - **Por escrito no se nota y por eso duró.** Cuando eso corre, la respuesta ya está
+    leída en la pantalla; el turno tarda más en cerrar y da igual. Hablando no: el modo
+    llamada no vuelve a escuchar hasta que llega el `fin` (`escucharSiTocaYa` en
+    Dashboard.jsx espera a que la cola de audio se vacíe **y** el turno cierre), así que
+    ese trabajo se pagaba en silencio, con el micrófono cerrado, justo cuando ibas a
+    contestar.
+  - **Y era intermitente**, que es lo que lo hacía difícil de creer: hay un freno de 30
+    minutos entre destilaciones y un mínimo de 6 turnos. Aparecía a mitad de una
+    conversación larga y no volvía a aparecer, o aparecía en la primera respuesta después
+    de un arranque en frío de Fly, porque el freno vive en memoria.
+  - El arreglo es de orden, no de velocidad: `_jarvis_turno` envuelve ahora a
+    `_jarvis_turno_bruto` y destila **después** de agotarlo. Sigue siendo síncrona y sigue
+    sin ser un hilo — es el mismo generador continuando tras el último `yield`, y el
+    consumidor ya mandó el `fin` al cliente antes de pedir el siguiente elemento.
+  Moraleja: **el «punto único de salida» es el peor sitio para colgar trabajo que no
+  forma parte de la respuesta.** Todo lo que se enganche ahí se cobra en la latencia
+  percibida de cada turno, y lo hace en el único momento en que el usuario está esperando
+  a poder hablar. Antes de colgar algo del cierre de un turno, pregunta si el cliente
+  necesita ese trabajo para seguir; si no lo necesita, va después del `fin`. Y la
+  segunda, para diagnosticar: **un fallo de latencia en la voz no tiene por qué estar en
+  la voz.** Se buscó en el micrófono porque era lo último tocado; estaba a 2.000 líneas
+  de allí, en un sitio que no menciona la voz por ninguna parte.
