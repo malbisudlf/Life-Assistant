@@ -46,13 +46,38 @@ class AudioContextFalso {
     this.cerrado  = false;
     contexto      = this;
   }
-  createMediaStreamSource() { return { connect: () => {}, disconnect: () => {} }; }
-  createScriptProcessor()   {
-    this.procesador = { connect: () => {}, disconnect: () => {}, onaudioprocess: null };
+  // Los nodos apuntan a dónde se conectan: sin eso no se puede comprobar que el audio
+  // llega al destino, que es justo el fallo que este mock no vio (ver la prueba del grafo).
+  _nodo(tipo) {
+    const nodo = { tipo, destinos: [], onaudioprocess: null,
+                   connect: (d) => nodo.destinos.push(d), disconnect: () => {} };
+    return nodo;
+  }
+  createMediaStreamSource() { this.fuente = this._nodo("fuente"); return this.fuente; }
+  createScriptProcessor(bufer, entradas, salidas) {
+    this.salidasPedidas = salidas;
+    this.procesador = this._nodo("procesador");
     return this.procesador;
+  }
+  createGain() {
+    this.gain = { ...this._nodo("gain"), gain: { value: 1 } };
+    return this.gain;
+  }
+  get destination() {
+    this._destino = this._destino || this._nodo("destino");
+    return this._destino;
   }
   resume() {}
   close()  { this.cerrado = true; }
+}
+
+/** ¿Hay un camino del nodo al destino del contexto? Es lo que hace que un
+ *  ScriptProcessor llegue a ejecutarse: si nadie tira de él, `onaudioprocess` no se
+ *  llama nunca. */
+function llegaAlDestino(nodo, destino, vistos = new Set()) {
+  if (!nodo || vistos.has(nodo)) return false;
+  vistos.add(nodo);
+  return (nodo.destinos || []).some(d => d === destino || llegaAlDestino(d, destino, vistos));
 }
 
 /** Simula un trozo de audio capturado por el micrófono. */
@@ -172,5 +197,33 @@ describe("escucharConScribe", () => {
     // reconocimiento del navegador. Lo que no puede hacer nunca es tirar la llamada.
     globalThis.navigator.mediaDevices.getUserMedia = vi.fn(async () => { throw new Error("denegado"); });
     expect(await escucharConScribe({ token: "t" })).toBeNull();
+  });
+
+  describe("el grafo de audio", () => {
+    /* El fallo del 5 de septiembre de 2026: el procesador se creaba con CERO canales de
+       salida y no se conectaba a nada aguas abajo, por miedo a que el altavoz se oyera a
+       sí mismo. Sin un camino hasta el destino, `onaudioprocess` no se llama nunca: el
+       socket abría, no recibía una sola muestra y ElevenLabs lo cerraba por inactividad.
+       Se veía como «se cerró la conexión con el transcriptor» — que parece red o plan, y
+       no era ninguna de las dos. */
+    it("el procesador llega hasta el destino, o no se ejecuta nunca", async () => {
+      await escucharConScribe({ token: "t" });
+      expect(llegaAlDestino(contexto.procesador, contexto.destination)).toBe(true);
+    });
+
+    it("pero por el altavoz no sale nada: la ganancia va a cero", async () => {
+      await escucharConScribe({ token: "t" });
+      expect(contexto.gain.gain.value).toBe(0);
+      // Y el camino pasa POR esa ganancia: conectar el procesador directo al destino
+      // dejaría el micro sonando por el altavoz, que es el acople que hay que evitar.
+      expect(contexto.procesador.destinos).toContain(contexto.gain);
+    });
+
+    it("se pide al menos un canal de salida", async () => {
+      // Con cero, Chrome lanza IndexSizeError al crear el nodo y la llamada se queda sin
+      // transcriptor antes de empezar.
+      await escucharConScribe({ token: "t" });
+      expect(contexto.salidasPedidas).toBeGreaterThan(0);
+    });
   });
 });
