@@ -8,6 +8,7 @@ y tienen que seguir siéndolo. Ver docs/JARVIS_VOZ.md.
 import json
 
 import main
+from conftest import FakeResponse
 from test_jarvis import _con_modelo, _herramienta, _llamada, _mensaje
 
 
@@ -310,3 +311,51 @@ class TestTextoMientrasSeGenera:
         assert _sin_texto(eventos) == ["fin"]
         assert eventos[-1][1]["respuesta"] == "Buenas."
         assert eventos[-1][1]["por_decir"] == "Buenas."
+
+
+class TestDestilarNoRetrasaElFin:
+    """La destilación va DESPUÉS del `fin`, y esto es lo que impide que vuelva a colarse.
+
+    Colgaba del punto de salida del turno, así que corría antes de emitir el `fin`: una
+    llamada al modelo entera más hasta cinco escrituras a Supabase. Por escrito no se
+    nota —ya has leído la respuesta—, pero el modo llamada no vuelve a escuchar hasta que
+    llega ese evento, así que hablando eran hasta diez segundos de micrófono cerrado justo
+    cuando ibas a contestar. Y de forma intermitente, por el freno de 30 minutos, que es
+    lo que lo hacía difícil de creer.
+    """
+
+    def _historial(self, n=8):
+        return [{"rol": "user" if i % 2 == 0 else "assistant", "texto": f"turno {i}"}
+                for i in range(n)]
+
+    def test_el_fin_sale_antes_de_destilar(self, monkeypatch, mock_requests):
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje("hecho"),
+            _mensaje('{"recuerdos": []}'),   # la destilación, si llega a pedirse
+        ])
+        mock_requests.add("POST", "/rest/v1/jarvis_memoria", FakeResponse([], 201))
+
+        eventos = main._jarvis_turno(main.JarvisIn(mensaje="hola",
+                                                   historial=self._historial(), voz=True))
+        llamadas_al_fin = None
+        for tipo, _ in eventos:
+            if tipo == "fin":
+                # En el momento de entregar el `fin`, la única llamada al modelo que puede
+                # haber es la del propio turno. Si aquí hubiera dos, el cliente estaría
+                # esperando a una destilación para volver a escuchar.
+                llamadas_al_fin = len(cliente.recibido)
+        assert llamadas_al_fin == 1
+
+    def test_pero_se_destila(self, monkeypatch, mock_requests):
+        """Sacarla del camino crítico no es quitarla: al agotar el generador tiene que
+        haber corrido. El consumidor SSE lo agota siempre (lee hasta StopIteration)."""
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje("hecho"),
+            _mensaje('{"recuerdos": [{"clave": "gato", "contenido": "se llama Lúa"}]}'),
+        ])
+        mock_requests.add("POST", "/rest/v1/jarvis_memoria", FakeResponse([], 201))
+
+        list(main._jarvis_turno(main.JarvisIn(mensaje="hola",
+                                              historial=self._historial(), voz=True)))
+        assert len(cliente.recibido) == 2
+        assert mock_requests.called("POST", "/rest/v1/jarvis_memoria")

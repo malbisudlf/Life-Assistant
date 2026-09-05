@@ -14137,7 +14137,39 @@ class JarvisEjecutarIn(BaseModel):
 
 
 def _jarvis_turno(body: JarvisIn):
-    """Un turno de conversación, como GENERADOR de eventos `(tipo, datos)`.
+    """Un turno de conversación. Lo que consumen los dos endpoints.
+
+    Es el turno de `_jarvis_turno_bruto` y, cuando ya ha terminado, la destilación de
+    memoria. Ese orden es el arreglo de un fallo que se notaba muchísimo hablando: **la
+    llamada se quedaba muda hasta diez segundos** entre que Jarvis acababa la frase y
+    volvía a escucharte.
+
+    La destilación colgaba del punto de salida del turno (`_responder`), o sea que corría
+    ANTES de emitir el `fin`: una llamada al modelo entera más hasta cinco escrituras a
+    Supabase. Por escrito eso no se nota, porque para entonces ya has leído la respuesta.
+    Hablando sí: el modo llamada no vuelve a escuchar hasta que llega el `fin`
+    (`escucharSiTocaYa` en Dashboard.jsx), así que ese trabajo se pagaba en silencio, con
+    el micrófono cerrado, justo cuando ibas a contestar. Y de forma intermitente —hay un
+    freno de 30 minutos entre destilaciones—, que es lo que lo hacía difícil de creer.
+
+    Aquí sigue siendo síncrona: no es un hilo, es el mismo generador continuando después
+    del último `yield`. El consumidor ya ha mandado el `fin` al cliente antes de pedir el
+    siguiente elemento, así que el navegador vuelve a escuchar mientras esto corre.
+    """
+    destilar_luego = []
+    yield from _jarvis_turno_bruto(body, destilar_luego)
+    # El `fin` ya salió. Lo que se tarde a partir de aquí no lo espera nadie.
+    for cliente, turnos in destilar_luego:
+        _quizas_destilar(cliente, turnos)
+
+
+def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
+    """El turno en sí. Envuelto por `_jarvis_turno`, que es lo que hay que usar.
+
+    Existe separado por una sola razón: que la destilación de memoria corra DESPUÉS del
+    evento `fin` y no antes. Ver `_jarvis_turno`.
+
+    Un turno de conversación, como GENERADOR de eventos `(tipo, datos)`.
 
     El historial lo guarda el cliente y viaja en cada petición: el backend no almacena
     conversaciones. Es menos estado que mantener y, sobre todo, no hay nada que purgar el
@@ -14362,7 +14394,9 @@ def _jarvis_turno(body: JarvisIn):
         texto  = _texto_garantizado(texto, motivo, modelo_usado)
         turnos = [{"rol": t.rol, "texto": t.texto} for t in body.historial[-JARVIS_MAX_HISTORIAL:]]
         turnos += [{"rol": "user", "texto": mensaje}, {"rol": "assistant", "texto": texto}]
-        _quizas_destilar(cliente, turnos)
+        # Apuntado, no hecho: destilar es otra llamada al modelo entera, y aquí dentro se
+        # pagaba antes de emitir el `fin`. Lo cobra `_jarvis_turno` cuando ya no molesta.
+        destilar_luego.append((cliente, turnos))
         cierre = {"respuesta": texto, "herramientas": usadas, "pendiente": pendiente_}
         if voz:
             # Solo por voz: por escrito no significa nada, y no hay motivo para que el

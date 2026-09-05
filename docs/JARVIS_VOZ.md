@@ -67,6 +67,14 @@ el plan y no el código.**
 
 **La fase 8 ya se midió** (septiembre de 2026), y el resultado está abajo.
 
+~~**Diez segundos mudos entre que Jarvis calla y vuelve a escucharte.**~~ Arreglado el 5
+de septiembre de 2026, y no estaba en la voz: **la destilación de memoria corría antes de
+emitir el `fin`** —una llamada al modelo entera más hasta cinco escrituras a Supabase—, y
+la llamada no vuelve a escuchar hasta que llega ese evento. Hoy `_jarvis_turno` destila
+después de agotar el turno. Está entero en `docs/BUGS_HISTORICOS.md`, con la moraleja:
+todo lo que se cuelgue del cierre de un turno se cobra en el silencio que el usuario está
+esperando para hablar.
+
 ## La voz se mudó a Azure (septiembre de 2026)
 
 **El problema no era el modelo, era el idioma.** En plan gratuito las voces españolas de
