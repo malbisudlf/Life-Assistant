@@ -386,3 +386,114 @@ class TestLaHerramientaDeJarvis:
         monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "sesion-fire-token")
         nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
         assert "responder_a_la_sesion" in nombres
+
+
+class TestElEncargoNuevo:
+    """La otra mitad del canal: le encargas hablando un trabajo que no existía.
+
+    Sin esto solo se podía CONTESTAR a un trabajo ya empezado, así que por voz no había
+    forma de empezar ninguno. Lo que se prueba aquí es lo que separa un encargo de una
+    respuesta: que no necesita ningún aviso detrás, que dice que no hay contexto anterior
+    y que pide avisar al terminar — sin esa última frase, el trabajo se hace y no se
+    entera nadie.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _con_rutina(self, monkeypatch):
+        monkeypatch.setattr(main, "SESION_FIRE_URL", "https://api.test/fire-sesion")
+        monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "sesion-fire-token")
+        monkeypatch.setattr(main, "JARVIS_REPO", "usuario/Life-Assistant")
+
+    def _rutina_responde(self, mock_requests):
+        mock_requests.add("POST", "fire-sesion",
+                          FakeResponse({"claude_code_session_url": "https://sesion.nueva"}))
+        mock_requests.add("POST", "sesion_avisos", FakeResponse({}, 201))
+
+    def test_encargar_lanza_la_sesion(self, mock_requests):
+        self._rutina_responde(mock_requests)
+        r = main._j_encargar_a_una_sesion("añade un botón para silenciar los avisos")
+        assert r["ok"] is True and r["sesion"] == "https://sesion.nueva"
+
+        texto = mock_requests.called("POST", "fire-sesion")[0][2]["json"]["text"]
+        assert "añade un botón para silenciar los avisos" in texto
+        # Delimitado y etiquetado, igual que la respuesta: viene de un micrófono.
+        assert "ENCARGO_DEL_USUARIO" in texto
+        # Y se dice que no hay nada que retomar: el prompt guardado de la rutina habla de
+        # retomar un trabajo a medias, y sin esto se pondría a buscar un aviso que no hay.
+        assert "No hay contexto de ninguna sesión anterior" in texto
+
+    def test_pide_avisar_al_terminar(self, mock_requests):
+        """La regla de `avisame` es avisar solo si te lo pidieron. Encargar hablando ES
+        pedirlo, pero la sesión que nace de aquí no tiene forma de saberlo."""
+        self._rutina_responde(mock_requests)
+        main._j_encargar_a_una_sesion("arregla el lint")
+        texto = mock_requests.called("POST", "fire-sesion")[0][2]["json"]["text"]
+        assert "avisame" in texto and "bloqueado" in texto
+
+    def test_no_necesita_ningun_aviso_detras(self, mock_requests):
+        """Un encargo no consulta ni consume nada: no hay trabajo anterior que retomar."""
+        self._rutina_responde(mock_requests)
+        main._j_encargar_a_una_sesion("sube el timeout del agente")
+        assert not mock_requests.called("GET", "sesion_avisos")
+        assert not mock_requests.called("PATCH", "sesion_avisos")
+
+    def test_un_aviso_sin_leer_no_bloquea_un_encargo(self, mock_requests):
+        """Son dos trabajos distintos. Si un «ya está hecho» sin leer impidiera pedir algo
+        nuevo, un aviso olvidado se convertiría en un candado."""
+        mock_requests.add("GET", "sesion_avisos", FakeResponse([{"id": UN_UUID,
+                                                                "titulo": "otra cosa"}]))
+        self._rutina_responde(mock_requests)
+        r = main._j_encargar_a_una_sesion("cambia el color del botón")
+        assert r["ok"] is True
+
+    def test_deja_constancia_pero_no_como_pendiente(self, mock_requests):
+        """El rastro se guarda; entrar como `pendiente` haría que Jarvis te anunciara al
+        descolgar, como novedad, algo que acabas de dictarle tú."""
+        self._rutina_responde(mock_requests)
+        main._j_encargar_a_una_sesion("quita el widget del clima")
+        fila = mock_requests.called("POST", "sesion_avisos")[0][2]["json"]
+        assert fila["estado"] == "encargado"
+        assert fila["pedido"] == "quita el widget del clima"
+        assert fila["sesion_url"] == "https://sesion.nueva"
+
+    def test_si_no_se_puede_guardar_el_rastro_el_encargo_sigue_valiendo(self, mock_requests):
+        """Para cuando esto corre, la sesión ya está trabajando: decir «no he podido»
+        sobre un trabajo que sí está en marcha es peor que perder la fila."""
+        mock_requests.add("POST", "sesion_avisos", FakeResponse({}, 500))
+        mock_requests.add("POST", "fire-sesion",
+                          FakeResponse({"claude_code_session_url": "https://sesion.nueva"}))
+        r = main._j_encargar_a_una_sesion("añade tests al helper de sueño")
+        assert r["ok"] is True
+
+    def test_sin_encargo_no_se_lanza_nada(self, mock_requests):
+        r = main._j_encargar_a_una_sesion("   ")
+        assert r["ok"] is False
+        assert not mock_requests.called("POST", "fire-sesion")
+
+    def test_si_falla_el_disparo_no_se_deja_rastro_de_un_trabajo_que_no_existe(self, mock_requests):
+        mock_requests.add("POST", "fire-sesion", FakeResponse({}, 500))
+        r = main._j_encargar_a_una_sesion("haz algo")
+        assert r["ok"] is False
+        assert not mock_requests.called("POST", "sesion_avisos")
+
+    def test_sin_rutina_configurada_lo_dice(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "SESION_FIRE_URL", "")
+        r = main._j_encargar_a_una_sesion("haz algo")
+        assert r["ok"] is False and "SESION_FIRE_URL" in r["motivo"]
+
+    def test_la_aprueba_una_persona(self):
+        """Texto libre nacido de una transcripción que va a dirigir a un agente con
+        permisos sobre el repositorio. La confirmación es donde eso se mira."""
+        assert main._JARVIS_HERRAMIENTAS["encargar_a_una_sesion"]["confirmar"] is True
+
+    def test_sin_rutina_no_se_anuncia(self, monkeypatch):
+        monkeypatch.setattr(main, "SESION_FIRE_URL", "")
+        monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "")
+        nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
+        assert "encargar_a_una_sesion" not in nombres
+
+    def test_con_rutina_se_anuncia(self, monkeypatch):
+        monkeypatch.setattr(main, "SESION_FIRE_URL", "https://api.test/fire-sesion")
+        monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "sesion-fire-token")
+        nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
+        assert "encargar_a_una_sesion" in nombres

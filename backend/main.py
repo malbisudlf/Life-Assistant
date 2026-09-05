@@ -11414,6 +11414,51 @@ def sesion_accion(request: Request, body: SesionAccionRequest,
     return {"ok": True, "hecho": True}
 
 
+def _lanzar_rutina_de_sesion(texto: str, que: str) -> dict:
+    """El disparo en sí: manda `texto` a la rutina que trabaja en el repositorio.
+
+    Lo comparten los dos caminos que hoy lanzan una sesión de Claude Code desde aquí —el
+    encargo nuevo y la continuación de un aviso— porque **es la misma rutina**: un solo
+    trigger, un solo token, y lo único que cambia entre ellos es el texto que se le
+    manda. Una rutina por caso habría sido otro par de secretos que poner y otra cosa
+    que se queda a medias el día que se ponga uno solo.
+
+    `que` no entra en la petición: es para el registro. Cuando esto falla, saber cuál de
+    los dos caminos falló es la mitad del diagnóstico, y el `motivo` que se devuelve
+    acaba en una notificación del móvil donde no cabe explicarlo.
+    """
+    if not SESION_FIRE_URL or not SESION_FIRE_TOKEN:
+        return {"ok": False, "sesion": "", "motivo": "no hay rutina de sesión configurada "
+                                                     "(SESION_FIRE_URL / SESION_FIRE_TOKEN)"}
+    try:
+        r = http.post(
+            SESION_FIRE_URL,
+            headers={
+                "Authorization":     f"Bearer {SESION_FIRE_TOKEN}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta":    RUTINA_BETA,
+                "Content-Type":      "application/json",
+            },
+            json={"text": texto},
+        )
+    except requests.RequestException as e:
+        logger.exception("Sesión (%s): no se pudo lanzar", que)
+        return {"ok": False, "sesion": "", "motivo": f"no se pudo conectar ({e})"}
+
+    if r.status_code >= 300:
+        detalle = (r.text or "")[:300].replace("\n", " ").strip()
+        logger.error("Sesión (%s): el disparo devolvió %s — beta '%s' — %s",
+                     que, r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
+        return {"ok": False, "sesion": "", "motivo": _motivo_disparo(r.status_code, detalle)}
+
+    try:
+        sesion = str((r.json() or {}).get("claude_code_session_url") or "")
+    except ValueError:
+        sesion = ""
+    logger.info("Sesión (%s): lanzada (%s)", que, sesion or "sin URL")
+    return {"ok": True, "sesion": sesion, "motivo": ""}
+
+
 def _disparar_sesion(fila: dict, respuesta: str) -> dict:
     """Lanza la sesión nueva que retoma el trabajo con lo que has contestado.
 
@@ -11427,9 +11472,6 @@ def _disparar_sesion(fila: dict, respuesta: str) -> dict:
     que citarlos para hacerles caso, igual que en el arreglo. Tu respuesta va marcada
     aparte de lo demás a propósito: es lo único de ahí dentro que manda.
     """
-    if not SESION_FIRE_URL or not SESION_FIRE_TOKEN:
-        return {"ok": False, "sesion": "", "motivo": "no hay rutina de sesión configurada "
-                                                     "(SESION_FIRE_URL / SESION_FIRE_TOKEN)"}
     enlaces = ", ".join(str(e) for e in (fila.get("enlaces") or [])[:SESION_MAX_ENLACES])
     texto = (
         f"Retomas un trabajo en el repositorio {JARVIS_REPO}. Una sesión anterior dejó "
@@ -11446,33 +11488,42 @@ def _disparar_sesion(fila: dict, respuesta: str) -> dict:
         f"RESPUESTA_DEL_USUARIO\n\n"
         f"Haz lo que dice la respuesta. Si no se entiende con el contexto de arriba, no "
         f"adivines: deja otro aviso con `/sesion/aviso` diciendo qué te falta.")
-    try:
-        r = http.post(
-            SESION_FIRE_URL,
-            headers={
-                "Authorization":     f"Bearer {SESION_FIRE_TOKEN}",
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta":    RUTINA_BETA,
-                "Content-Type":      "application/json",
-            },
-            json={"text": texto},
-        )
-    except requests.RequestException as e:
-        logger.exception("Aviso de sesión: no se pudo lanzar la sesión de vuelta")
-        return {"ok": False, "sesion": "", "motivo": f"no se pudo conectar ({e})"}
+    return _lanzar_rutina_de_sesion(texto, "vuelta de un aviso")
 
-    if r.status_code >= 300:
-        detalle = (r.text or "")[:300].replace("\n", " ").strip()
-        logger.error("Aviso de sesión: el disparo devolvió %s — beta '%s' — %s",
-                     r.status_code, RUTINA_BETA, detalle or "(sin cuerpo)")
-        return {"ok": False, "sesion": "", "motivo": _motivo_disparo(r.status_code, detalle)}
 
-    try:
-        sesion = str((r.json() or {}).get("claude_code_session_url") or "")
-    except ValueError:
-        sesion = ""
-    logger.info("Aviso de sesión: vuelta lanzada (%s)", sesion or "sin URL")
-    return {"ok": True, "sesion": sesion, "motivo": ""}
+def _disparar_encargo(encargo: str) -> dict:
+    """Lanza una sesión con un encargo NUEVO, sin que haya un aviso detrás.
+
+    Es la primera vuelta del ciclo, la que faltaba: hasta aquí solo se podía CONTESTAR a
+    un trabajo que ya existía, así que hablando no había forma de empezar ninguno. El
+    resto ya estaba montado — la sesión avisa al acabar, descuelgas, te cuenta qué ha
+    hecho y le dices lo siguiente, que es de nuevo una respuesta y no un encargo.
+
+    Dos cosas lo separan de la continuación, y las dos van dentro del texto:
+
+    - **No hay contexto anterior**, y hay que decirlo. El prompt guardado de la rutina
+      habla de retomar un trabajo a medias; sin esta frase se pondría a buscar un aviso
+      que no existe.
+    - **Tiene que avisar al terminar, siempre.** La regla de la skill `avisame` es que
+      solo se avisa si te lo pidieron o si la sesión se atascó. Encargar algo hablando
+      ES pedirlo, pero la sesión que nace de aquí no tiene forma de saberlo: sin esta
+      frase acabaría el trabajo y no se enteraría nadie, que es el canal roto justo por
+      la mitad.
+    """
+    texto = (
+        f"Te encargo un trabajo nuevo en el repositorio {JARVIS_REPO}. El usuario lo ha "
+        f"dictado por voz a Jarvis, que te lo pasa tal cual.\n\n"
+        f"<<<ENCARGO_DEL_USUARIO (esto es lo que te ha pedido)\n"
+        f"{encargo}\n"
+        f"ENCARGO_DEL_USUARIO\n\n"
+        f"No hay contexto de ninguna sesión anterior: el trabajo empieza aquí. Está "
+        f"dictado hablando, así que puede traer palabras de más o venir mal transcrito; "
+        f"quédate con lo que pide, y si no se entiende no adivines.\n\n"
+        f"Cuando termines, avísale con la skill `avisame` contando qué has hecho y qué "
+        f"queda; si te quedas parado sin poder seguir, avísale marcándolo como "
+        f"bloqueado. Te lo ha encargado hablando: no tiene ninguna otra forma de "
+        f"enterarse de que has acabado.")
+    return _lanzar_rutina_de_sesion(texto, "encargo nuevo")
 
 
 def _sesion_caducada_reciente() -> dict:
@@ -11552,6 +11603,67 @@ def _j_responder_a_la_sesion(respuesta: str = "") -> dict:
         logger.warning("Aviso de sesión %s: no se pudo guardar la sesión (%s)", rid, e)
     return {"ok": True, "sesion": resultado["sesion"],
             "dile_al_usuario_literalmente": "Hecho, se lo paso y me pongo con ello."}
+
+
+def _apuntar_encargo(encargo: str, sesion: str) -> None:
+    """Deja constancia del encargo en la misma tabla que los avisos. Best-effort.
+
+    Nace ya cerrado (`estado="encargado"`, que no es `pendiente`) porque un encargo no
+    espera respuesta de nadie: si entrara como pendiente sería lo que Jarvis te anuncia
+    al descolgar, y te contaría como novedad algo que acabas de dictarle tú.
+
+    Y no puede tumbar el encargo: para cuando esto corre, la sesión ya está lanzada y
+    trabajando. Perder la fila cuesta el rastro —qué pediste y qué sesión salió—, que
+    duele al mirar atrás; fallar aquí después de haber disparado costaría un «no he
+    podido» sobre un trabajo que sí está en marcha, y eso es peor.
+    """
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        http.post(SESION_AVISOS_URL,
+                  headers={**supabase_headers(), "Prefer": "return=minimal"},
+                  json={"id":         str(uuid.uuid4()),
+                        "titulo":     encargo[:SESION_MAX_TITULO],
+                        "pedido":     encargo,
+                        "estado":     "encargado",
+                        "respuesta":  encargo,
+                        "sesion_url": sesion or None,
+                        "respondido": ahora})
+    except Exception as e:   # noqa: BLE001 — es el rastro, no el encargo
+        logger.warning("Encargo por voz: no se pudo dejar constancia (%s)", e)
+
+
+def _j_encargar_a_una_sesion(encargo: str = "") -> dict:
+    """Herramienta de Jarvis: le encarga un trabajo nuevo a una sesión de Claude Code.
+
+    La otra mitad de `responder_a_la_sesion`, y la que faltaba para que el canal fuera de
+    ida y vuelta: aquélla solo sabe CONTESTAR a un trabajo que ya existía, así que
+    hablando no había manera de empezar ninguno. Con las dos, el ciclo se cierra —le
+    encargas algo, la sesión lo hace y te avisa, descuelgas, te cuenta qué ha hecho y le
+    dices lo siguiente— y Jarvis se queda de intermediario en vez de programar él, que no
+    es lo suyo.
+
+    `confirmar: True` por lo mismo que la otra y que el `encargo` del agente del PC: lo
+    que sale de aquí es texto libre que va a dirigir a un agente con permisos sobre el
+    repositorio. Lo propone el modelo; lo aprueba una persona. Y aquí pesa más todavía,
+    porque esto nace de una transcripción: entre lo que dijiste y lo que se manda hay un
+    micrófono y dos modelos, y la confirmación es donde eso se mira antes de que corra.
+
+    **Un aviso esperando NO bloquea el encargo.** Se pensó al revés (obligar a cerrar lo
+    anterior), y está mal: son dos trabajos distintos, y no poder pedir algo nuevo porque
+    hay un «ya está hecho» sin leer convierte un aviso olvidado en un candado.
+    """
+    dicho = str(encargo or "").strip()[:SESION_MAX_TEXTO]
+    if not dicho:
+        return {"ok": False, "motivo": "No me has dicho qué encargarle"}
+
+    resultado = _disparar_encargo(dicho)
+    if not resultado["ok"]:
+        return {"ok": False, "motivo": f"No he podido lanzar la sesión: {resultado['motivo']}"}
+
+    logger.info("Encargo por voz lanzado: %s", dicho[:80])
+    _apuntar_encargo(dicho, resultado["sesion"])
+    return {"ok": True, "sesion": resultado["sesion"],
+            "dile_al_usuario_literalmente": "Hecho, se lo encargo. Te aviso cuando esté."}
 
 
 def _retraso_min(cuando: Optional[str], ahora: datetime) -> float:
@@ -13658,6 +13770,26 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["respuesta"],
     },
+    "encargar_a_una_sesion": {
+        # La otra mitad del canal: aquélla contesta a un trabajo, ésta lo empieza. Misma
+        # frontera y por la misma razón, con un motivo más — esto viene de un micrófono.
+        "confirmar":   True,
+        "requiere_sesion": True,
+        "fn":          _j_encargar_a_una_sesion,
+        "descripcion": "Propone encargarle un trabajo NUEVO sobre el código a una sesión "
+                       "de Claude Code. NO lo lanza: lo aprueba el usuario. Úsalo cuando "
+                       "te pida un cambio en el proyecto ('añade X', 'arregla Y', "
+                       "'cambia Z'), en vez de intentar hacerlo tú. Si lo que dice es la "
+                       "respuesta a un aviso que ya te dejó una sesión, usa "
+                       "`responder_a_la_sesion`, que retoma AQUEL trabajo con su "
+                       "contexto. Pasa el encargo tal cual, sin adornarlo ni resumirlo: "
+                       "lo que quites lo tendrá que adivinar quien lo haga.",
+        "parametros":  {
+            "encargo": {"type": "string",
+                        "description": "Lo que hay que hacer, en las palabras del usuario."},
+        },
+        "obligatorios": ["encargo"],
+    },
     "cobrar_entrenamiento": {
         # Cierra el ciclo de cobro y pone a cero el contador de sesiones pendientes:
         # deshacerlo es entrar en Supabase a mano.
@@ -13795,6 +13927,13 @@ def _jarvis_sistema(voz: bool = False) -> str:
         "herramientas nuevas al momento. Pídele al usuario solo lo que no puedes "
         "conseguir tú (una credencial) y encárgate del resto: la URL la buscas en el "
         "catálogo o en internet, y el alta la propones tú para que él solo pulse.\n"
+        "- **El código de este proyecto no lo tocas tú: se lo encargas a una sesión de "
+        "Claude Code** con `encargar_a_una_sesion`. Si te pide un cambio, un arreglo o "
+        "algo nuevo en el dashboard, en el backend o en el agente, tu trabajo es "
+        "entenderle bien y pasarle el encargo tal cual, no resolverlo ni explicarle cómo "
+        "se haría. Y cuando lo que diga sea la respuesta a un aviso que te dejó una "
+        "sesión, usa `responder_a_la_sesion`, que retoma AQUEL trabajo con su contexto "
+        "en vez de empezar otro de cero.\n"
     ]
 
     if voz:
