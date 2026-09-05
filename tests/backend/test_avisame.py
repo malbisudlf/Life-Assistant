@@ -497,3 +497,28 @@ class TestElEncargoNuevo:
         monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "sesion-fire-token")
         nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
         assert "encargar_a_una_sesion" in nombres
+
+
+class TestJarvisSabeQueTieneQueEncargar:
+    """La instrucción vive en el prompt, y el prompt no lo cubre ningún otro test.
+
+    El 5 de septiembre de 2026 se probó por primera vez pidiéndole «añade hola al README»
+    y contestó «¿quieres que lo encargue?» sin llamar a nada. Preguntar antes deja al
+    usuario diciendo que sí a algo que no ejecuta nada, y por voz es un bucle: llamar a la
+    herramienta NO la ejecuta, solo se la propone. Sin esta regla el modelo no lo deduce.
+    """
+
+    def test_el_prompt_dice_que_llame_directamente(self):
+        sistema = main._jarvis_sistema()
+        assert "encargar_a_una_sesion" in sistema
+        assert "sin preguntar antes" in sistema
+
+    def test_y_tambien_por_voz(self):
+        # El prompt de voz añade cosas al de siempre; si algún día se separan, la regla
+        # tiene que seguir estando en los dos.
+        assert "encargar_a_una_sesion" in main._jarvis_sistema(voz=True)
+
+    def test_la_descripcion_de_la_herramienta_tambien_lo_dice(self):
+        """El modelo mira el esquema de la herramienta antes que el prompt."""
+        d = main._JARVIS_HERRAMIENTAS["encargar_a_una_sesion"]["descripcion"]
+        assert "DIRECTAMENTE" in d
