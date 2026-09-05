@@ -12928,6 +12928,33 @@ def _j_mcp_herramientas(servidor: str, buscar: str = "") -> dict:
     }
 
 
+# Lo que una herramienta MCP puede hacer sobre ESTE repositorio sin pasar por un PR:
+# leer. Nada más. Los prefijos son de lectura conocida y todo lo demás cuenta como
+# escritura — al revés (una lista negra de verbos) envejece mal: el día que el servidor
+# de GitHub estrene `replace_file_contents`, una lista negra lo deja pasar y una lista
+# blanca no.
+_MCP_PREFIJOS_DE_LECTURA = ("get_", "list_", "search_", "read_", "download_")
+
+
+def _mcp_apunta_al_proyecto(argumentos: dict) -> bool:
+    """Si esta llamada MCP va contra el repositorio de este proyecto.
+
+    Mira primero `owner`/`repo` por separado, que es como los pide el servidor de GitHub,
+    y si no vienen busca el `owner/nombre` completo entre los valores de texto. Lo segundo
+    puede dar algún falso positivo —una búsqueda que mencione el repo—, y es aceptable:
+    solo se usa para decidir si algo que NO es de lectura se bloquea.
+    """
+    if not JARVIS_REPO or "/" not in JARVIS_REPO:
+        return False
+    duenyo, _, nombre = JARVIS_REPO.partition("/")
+    a_duenyo = str(argumentos.get("owner") or "").strip().lower()
+    a_nombre = str(argumentos.get("repo") or "").strip().lower()
+    if a_duenyo and a_nombre:
+        return (a_duenyo, a_nombre) == (duenyo.strip().lower(), nombre.strip().lower())
+    junto = " ".join(str(v) for v in argumentos.values() if isinstance(v, str)).lower()
+    return JARVIS_REPO.strip().lower() in junto
+
+
 def _j_mcp_usar(servidor: str, herramienta: str, argumentos: dict | None = None) -> dict:
     servidor    = str(servidor or "").strip()
     herramienta = str(herramienta or "").strip()[:100]
@@ -12937,6 +12964,19 @@ def _j_mcp_usar(servidor: str, herramienta: str, argumentos: dict | None = None)
         return {"error": "Falta el nombre de la herramienta"}
     if not isinstance(argumentos, dict):
         argumentos = {}
+    # El código de este proyecto NO se toca desde aquí. Pasó el 5 de septiembre de 2026:
+    # se le pidió a Jarvis por voz «añade hola al README», y en vez de encargárselo a una
+    # sesión lo hizo él con `create_or_update_file` del MCP de GitHub — commit directo a
+    # `main`, sin rama, sin PR y sin CI. Y como esa herramienta reemplaza el fichero
+    # ENTERO con lo que le pases, el README pasó de 231 líneas a 9: escribió lo que le
+    # cabía en el argumento y lo demás se perdió. El prompt ya decía que había que
+    # encargarlo; una regla en el prompt es una sugerencia, y esto tiene que ser un muro.
+    if (not herramienta.lower().startswith(_MCP_PREFIJOS_DE_LECTURA)
+            and _mcp_apunta_al_proyecto(argumentos)):
+        return {"error": "Sobre este repositorio solo puedo leer. Para cambiar el código "
+                         "usa `encargar_a_una_sesion`, que se lo pasa a una sesión de "
+                         "Claude Code: trabaja en una rama, abre un PR y lo comprueba el "
+                         "CI. Escribir aquí directamente se salta todo eso."}
     try:
         resultado = _mcp_rpc(servidor, "tools/call",
                              {"name": herramienta, "arguments": argumentos})
@@ -13927,13 +13967,22 @@ def _jarvis_sistema(voz: bool = False) -> str:
         "herramientas nuevas al momento. Pídele al usuario solo lo que no puedes "
         "conseguir tú (una credencial) y encárgate del resto: la URL la buscas en el "
         "catálogo o en internet, y el alta la propones tú para que él solo pulse.\n"
-        "- **El código de este proyecto no lo tocas tú: se lo encargas a una sesión de "
-        "Claude Code** con `encargar_a_una_sesion`. Si te pide un cambio, un arreglo o "
-        "algo nuevo en el dashboard, en el backend o en el agente, tu trabajo es "
+        "- **El código de este proyecto no lo tocas tú NUNCA: se lo encargas a una "
+        "sesión de Claude Code** con `encargar_a_una_sesion`. Cualquier cambio en el "
+        "repositorio —el dashboard, el backend, el agente, los tests, la documentación y "
+        "también un README— va por ahí, por pequeño que parezca. Tu trabajo es "
         "entenderle bien y pasarle el encargo tal cual, no resolverlo ni explicarle cómo "
-        "se haría. Y cuando lo que diga sea la respuesta a un aviso que te dejó una "
-        "sesión, usa `responder_a_la_sesion`, que retoma AQUEL trabajo con su contexto "
-        "en vez de empezar otro de cero.\n"
+        "se haría.\n"
+        "- **No uses el MCP de GitHub para escribir en este repositorio**: nada de "
+        "`create_or_update_file`, `push_files` ni ningún primo suyo. De ahí solo se LEE "
+        "(mirar un issue, un PR, un fichero). Escribir por ahí hace un commit directo a "
+        "`main` sin rama, sin PR y sin CI, y además esas herramientas reemplazan el "
+        "fichero ENTERO por lo que les pases: un «añade una línea» se lleva por delante "
+        "todo lo que no hayas copiado. Ya pasó con el README. El backend lo rechaza de "
+        "todas formas, así que intentarlo solo gasta un turno.\n"
+        "- Cuando lo que diga sea la respuesta a un aviso que te dejó una sesión, usa "
+        "`responder_a_la_sesion`, que retoma AQUEL trabajo con su contexto en vez de "
+        "empezar otro de cero.\n"
     ]
 
     if voz:

@@ -497,3 +497,30 @@
   segunda, para diagnosticar: **un fallo de latencia en la voz no tiene por qué estar en
   la voz.** Se buscó en el micrófono porque era lo último tocado; estaba a 2.000 líneas
   de allí, en un sitio que no menciona la voz por ninguna parte.
+- **Jarvis se cargó el README por hacer él lo que tenía que encargar.** El 5 de
+  septiembre de 2026, estrenando el encargo por voz, se le pidió lo más pequeño que se
+  nos ocurrió —«añade hola al README»— justo para ver si llamaba a
+  `encargar_a_una_sesion`. No la llamó: tiró del MCP de GitHub y ejecutó
+  `create_or_update_file`. El resultado fue un commit directo a `main` (sin rama, sin PR,
+  sin CI) que dejó el README en 9 líneas de las 231 que tenía. Tres fallos encadenados, y
+  el tercero es el que hace daño:
+  - **Eligió la herramienta equivocada** aunque el prompt de sistema ya decía, ese mismo
+    día, que el código no lo toca él. Tenía delante dos caminos y el del MCP era más
+    corto.
+  - **Escribió en `main` sin pasar por nada.** Todo el proyecto está montado sobre que
+    los cambios entran por rama y PR con el CI en verde; el MCP era un agujero lateral en
+    esa regla que nadie había mirado, porque hasta entonces solo se había usado para leer
+    issues.
+  - **`create_or_update_file` reemplaza el fichero ENTERO.** No añade: sustituye por lo
+    que le pases. Un «añade una línea» se convierte en «déjalo con lo que quepa en el
+    argumento», y lo demás desaparece sin que nada falle. El commit se llamaba «Añadir
+    hola al README» y borraba 222 líneas.
+  Moraleja: **una regla que solo vive en el prompt es una sugerencia, no una garantía.**
+  Si algo no debe poder pasar, el muro va en el código. Hoy `_j_mcp_usar` rechaza sobre
+  `JARVIS_REPO` toda herramienta que no empiece por un prefijo de lectura conocido
+  (`get_`, `list_`, `search_`, `read_`, `download_`), y el mensaje de error dice cuál es
+  el camino bueno. Es lista BLANCA de lectura y no lista negra de verbos a propósito: el
+  día que el servidor estrene `replace_file_contents`, una lista negra lo dejaría pasar.
+  Y la segunda, sobre herramientas ajenas: **antes de dejar que un modelo llame a algo,
+  mira qué hace la herramienta con lo que NO le pasas.** Aquí lo que no se pasaba se
+  borraba.

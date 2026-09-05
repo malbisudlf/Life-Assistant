@@ -94,6 +94,14 @@ que Jarvis elija bien entre las dos herramientas, y de eso se encarga su prompt:
 dices es la respuesta a un aviso que te dejó una sesión, va `responder_a_la_sesion`, que
 retoma *aquel* trabajo con su contexto; si es algo nuevo, `encargar_a_una_sesion`.
 
+**Y Jarvis no puede hacerlo él, aunque quiera.** El primer encargo de verdad —«añade
+hola al README»— acabó con Jarvis usando `create_or_update_file` del MCP de GitHub en vez
+de la herramienta nueva: commit directo a `main` y el README de 231 líneas a 9, porque esa
+herramienta reemplaza el fichero entero por lo que le pases. El prompt ya lo prohibía; una
+regla en el prompt es una sugerencia. Hoy `_j_mcp_usar` rechaza sobre `JARVIS_REPO` toda
+herramienta MCP que no sea de lectura, y el error dice cuál es el camino bueno. Está
+entero en `docs/BUGS_HISTORICOS.md`.
+
 **El rastro se guarda en la misma tabla**, con `estado = "encargado"` — un estado que no
 es `pendiente` a propósito: si entrara como pendiente, sería lo que Jarvis te anuncia la
 próxima vez que descuelgues, contándote como novedad algo que acabas de dictarle tú. Y su
