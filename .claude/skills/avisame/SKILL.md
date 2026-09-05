@@ -17,6 +17,10 @@ Solo hay dos motivos válidos:
 
 1. **Te lo ha pedido.** «Avísame cuando acabes», «dime algo cuando esté», «me voy, ya me
    contarás». Entonces la interrupción la ha elegido él.
+   - **Un trabajo que te llegó dictado por voz entra siempre aquí**, aunque nadie diga
+     «avísame»: si tu sesión nació de un `<routine-fire-payload>` con un
+     `ENCARGO_DEL_USUARIO` o una `RESPUESTA_DEL_USUARIO` dentro, te lo pidió hablando y
+     no tiene ninguna otra forma de enterarse de que has acabado. Avisa al terminar.
 2. **Te has quedado bloqueado.** El trabajo está PARADO hasta que conteste: falta una
    credencial que no puedes crear, hay que decidir entre dos caminos que no son
    equivalentes, o lo que ibas a hacer es irreversible y no tienes permiso.
