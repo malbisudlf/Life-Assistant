@@ -229,3 +229,5 @@ Documentación completa del proyecto, para trabajar en él o para entenderlo des
 [`CLAUDE.md`](CLAUDE.md) (índice de trabajo) y
 [`docs/EL_PROYECTO_EXPLICADO.md`](docs/EL_PROYECTO_EXPLICADO.md) (explicación de arriba
 abajo, sin necesidad de tocar código).
+
+hola
