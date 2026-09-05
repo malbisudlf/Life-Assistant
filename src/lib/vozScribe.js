@@ -72,7 +72,7 @@ export async function escucharConScribe({
     return null;   // permiso denegado o micro ocupado: se cae al reconocimiento de siempre
   }
 
-  let ctx, fuente, procesador, socket;
+  let ctx, fuente, procesador, mudo, socket;
   let vivo = true;
 
   function parar() {
@@ -81,6 +81,7 @@ export async function escucharConScribe({
     // los últimos trozos se mandarían contra un socket cerrado y algunos navegadores
     // lanzan por eso en mitad de un callback de audio.
     try { procesador?.disconnect(); } catch { /* mejor esfuerzo */ }
+    try { mudo?.disconnect(); } catch { /* mejor esfuerzo */ }
     try { fuente?.disconnect(); } catch { /* mejor esfuerzo */ }
     try { stream.getTracks().forEach(t => t.stop()); } catch { /* mejor esfuerzo */ }
     try { ctx?.close(); } catch { /* mejor esfuerzo */ }
@@ -102,7 +103,16 @@ export async function escucharConScribe({
     // servir un módulo aparte. El trabajo por muestra son cuatro operaciones sobre audio
     // mono a 16 kHz, así que el coste en el hilo principal es despreciable. Si algún día
     // se oyen cortes en la captura, este es el sitio.
-    procesador = ctx.createScriptProcessor(BUFER, 1, 0);
+    // Un canal de salida y no cero: con cero, Chrome lanza `IndexSizeError` al crearlo
+    // ("number of output channels must be greater than 0"), y donde no lanza, el nodo
+    // igualmente no corre. La salida no se oye — va a un `GainNode` a cero, abajo.
+    procesador = ctx.createScriptProcessor(BUFER, 1, 1);
+    // El sumidero mudo. Un ScriptProcessor SOLO dispara `onaudioprocess` si algo tira de
+    // él aguas abajo: sin un camino hasta `ctx.destination` el callback no se llama nunca
+    // y el socket se queda sin recibir una sola muestra. Con ganancia a cero se cumplen
+    // las dos cosas a la vez — el grafo tira del nodo y por el altavoz no sale nada.
+    mudo = ctx.createGain();
+    mudo.gain.value = 0;
   } catch {
     parar();
     return null;
@@ -157,10 +167,16 @@ export async function escucharConScribe({
     }
     mandar(base64);
   };
-  // El procesador no se conecta a `ctx.destination`: se oiría a sí mismo por el altavoz,
-  // que es el acople que todo esto existe para evitar. Con cero canales de salida basta
-  // con enchufarle la fuente para que corra.
+  // El grafo entero: micro → procesador → ganancia cero → altavoz. El último tramo es
+  // el que hacía falta y no estaba. Iba sin él por miedo al acople —"se oiría a sí mismo
+  // por el altavoz"—, y el miedo era razonable pero el remedio dejaba el nodo sin nadie
+  // que tirara de él: `onaudioprocess` no se llamaba, no se mandaba audio, y ElevenLabs
+  // cerraba la sesión por inactividad a los pocos segundos. Se veía como «se cerró la
+  // conexión con el transcriptor», que parecía un problema de red o de plan y no lo era.
+  // Con la ganancia a cero no se oye nada, así que el acople sigue sin poder pasar.
   fuente.connect(procesador);
+  procesador.connect(mudo);
+  mudo.connect(ctx.destination);
 
   socket.onopen = () => {
     const pendientes = esperando;
