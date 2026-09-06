@@ -1,0 +1,9 @@
+# El add-on se copia desde Windows al Home Assistant Green por Samba, tal cual
+# está en el working copy. Un shell script con finales de línea CRLF falla en
+# Linux con `bad interpreter: /usr/bin/env bash^M`, y el síntoma en el Green es
+# un add-on que arranca y muere sin explicar por qué. Por eso estos ficheros se
+# fuerzan a LF también al hacer checkout en Windows.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*/Dockerfile    text eol=lf
+addon/**        text eol=lf

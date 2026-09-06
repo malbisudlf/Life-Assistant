@@ -1,0 +1,53 @@
+# Add-on local de Home Assistant que corre el backend dentro del Green.
+#
+# Se instala copiando esta carpeta a `/addons/life-assistant` del Green (por el
+# Samba que ya está instalado) y pulsando "Buscar actualizaciones" en la tienda
+# de add-ons. Todo el procedimiento está en `docs/MIGRACION_BACKEND.md`.
+#
+# Por qué aquí y no en una nube: medido el 2026-09-06, el Green tiene 2.070 MB
+# de RAM disponibles y una carga de 0.05 sobre 4 núcleos. El backend usa 196 MB.
+# Sobra sitio, no cuesta nada y nadie puede retirarlo — que es exactamente lo
+# que pasó con Fly y, cuatro meses después, con Koyeb.
+name: Life Assistant Backend
+version: "1.0.0"
+slug: life-assistant
+description: El backend de Life Assistant (FastAPI) corriendo en el propio Green
+
+# El Green es aarch64. Se declara solo esa: si algún día el add-on acaba en otro
+# aparato, es mejor que falle al instalar que a mitad de arranque.
+arch:
+  - aarch64
+
+# `boot: auto` para que vuelva solo tras un corte de luz; el Green tarda más en
+# arrancar que el backend, así que no hay carrera con HA Core.
+#
+# `init: false` porque el arranque lo lleva `run.sh`, que termina en `exec`: sin
+# eso uvicorn no queda de PID 1 y no recibe el SIGTERM del Supervisor, y cada
+# reinicio del add-on acabaría en SIGKILL a los 30 segundos.
+startup: application
+boot: auto
+init: false
+
+# 8080 dentro; fuera se publica igual para que HA Core lo llame por la IP local
+# del propio Green y para que Tailscale Funnel pueda exponerlo.
+ports:
+  8080/tcp: 8080
+ports_description:
+  8080/tcp: API del backend (HA Core la llama por aquí, en local)
+
+# Acceso de solo lectura a /config: ahí vive el fichero con las variables de
+# entorno (ver `fichero_env`). No pide más permisos que ese a propósito — este
+# add-on no tiene por qué tocar la configuración de la casa.
+map:
+  - homeassistant_config:ro
+
+options:
+  # Un único fichero en vez de 54 campos en la interfaz. Se copia por Samba y se
+  # edita con un editor de verdad; 54 casillas en un formulario web es una
+  # invitación a pegar mal la clave PEM multilínea de Enable Banking.
+  fichero_env: /homeassistant/life_assistant.env
+  nivel_log: info
+
+schema:
+  fichero_env: str
+  nivel_log: list(critical|error|warning|info|debug)
