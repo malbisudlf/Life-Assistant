@@ -19,6 +19,12 @@ backend/*.pem
 # secretos dentro (.env.example sí se versiona, por eso el patrón no es .env.*).
 backend/.env.bak*
 backend/.env.local
+# Cualquier .env con sufijo, venga de donde venga. Durante la mudanza a Koyeb se
+# generan volcados del entorno de produccion y ninguno de los patrones de arriba
+# los cubria: `backend/.env.produccion` habria entrado en un repo PUBLICO con los
+# 54 secretos dentro. El .env.example se salva con la negacion de abajo.
+backend/.env.*
+!backend/.env.example
 backend/.token
 backend/venv/
 backend/__pycache__/
