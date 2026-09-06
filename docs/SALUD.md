@@ -160,10 +160,30 @@ sensor con otro algoritmo, así que durante más de un mes se estaría midiendo 
 diferencia entre dos fabricantes y leyéndola como fisiología. **El histórico no se borra
 ni se toca**: sigue entero en las gráficas, solo deja de servir como referencia.
 
-Respetan el corte `baselinePersonal`, `_refHrv` (vía `wellnessHistory({ corte })`) y el
-`baseline30` de Dashboard.jsx. Si el corte deja la muestra por debajo del mínimo,
-`baselinePersonal` devuelve `null` y quien llama cae al umbral fijo — que es lo correcto
-mientras el aparato nuevo no tenga historia propia.
+Respetan el corte `baselinePersonal`, `refHrv` (vía `wellnessHistory({ corte })` y el
+widget), `mediaReciente` y el `baseline30` de Dashboard.jsx. Si el corte deja la muestra
+por debajo del mínimo, `baselinePersonal` devuelve `null` y quien llama cae al umbral
+fijo — que es lo correcto mientras el aparato nuevo no tenga historia propia.
+
+**El widget diario se saltaba el corte, y es el número que se mira todos los días.** El
+histórico (`wellnessHistory`) lo pasaba desde el principio, pero en `Dashboard.jsx` la
+`baselines` del widget se calculaba con `wellnessBaselines(healthData, todayStr)` sin
+`corte`, así que la FC en reposo y la FC caminando se puntuaban contra los percentiles
+del reloj anterior. Y la referencia de HRV se calculaba aparte, con
+`avg7(wHrvRaw.slice(-14,-7))`: por **número de registros** en vez de por fecha —con la
+serie agujereada que deja un mes sin reloj, esas "últimas siete medidas" pueden abarcar
+meses— y sin corte, de modo que justo después de cambiar comparaba el HRV nuevo contra
+la referencia del viejo. Las dos vías salen ahora de `refHrv()`, en helpers, para que no
+vuelva a haber dos reglas para la misma señal. Si añades otro sitio que compare contra
+la historia, pásale el corte: el ajuste no sirve de nada si quien puntúa lo ignora.
+
+**El corte se sugiere solo.** `fechaCambioSugerida()` (helpers.js) lo detecta en los
+propios datos: un cambio de aparato deja una firma que no se parece a nada más —**varias**
+métricas del desglose mueren a la vez mientras **otras siguen llegando**—. Una semana sin
+llevar nada las mata todas; una métrica que falla por su cuenta mata una sola. Ninguna de
+las dos dispara la sugerencia. Como en `metricasMuertas`, no hay lista de "lo que mide
+cada fabricante": lo que se detecta es el corte simultáneo. El panel ⚙ la propone con un
+botón «Usar»; decidir sigue siendo del usuario.
 
 **Lo que NO hizo falta tocar**: la detección de "reloj puesto" (`_dias_de_reloj`) se
 conforma con que llegue **cualquier** métrica de `_RELOJ_DIA` o `_RELOJ_NOCHE`, y
@@ -180,11 +200,50 @@ recuperación cardíaca, FC caminando, luz natural) pasan a la segunda categorí
 y dejarlos en gris reclamándolos cada día convierte el tooltip en una lista de reproches
 imposibles de cumplir.
 
-Se decide **mirando los datos** (14 días sin ninguna medida), no con una lista fija de
-lo que mide cada fabricante: así vale para cualquier aparato y las filas reaparecen
-solas si el usuario vuelve al anterior. `METRICAS_DEL_DESGLOSE` mapea etiqueta →
-métricas, y hay un test espejo que comprueba que sus claves son **exactamente** las
-etiquetas que `wellnessBreakdown` puede emitir.
+Se decide **mirando los datos**, no con una lista fija de lo que mide cada fabricante:
+así vale para cualquier aparato y las filas reaparecen solas si el usuario vuelve al
+anterior. `METRICAS_DEL_DESGLOSE` mapea etiqueta → métricas, y hay un test espejo que
+comprueba que sus claves son **exactamente** las etiquetas que `wellnessBreakdown` puede
+emitir.
+
+Hay **dos ventanas**, y una métrica muere por la que se cumpla antes:
+
+| | Cuándo | Para quién |
+|---|---|---|
+| Larga (`METRICA_MUERTA_DIAS`, 14) | Siempre, en cuanto el corte lleva 14 días de recorrido | Todas |
+| Corta (`METRICA_MUERTA_DIAS_TRAS_CAMBIO`, 5) | Solo con corte puesto, y solo si la ventana cabe **entera** después de él | Solo las que llegaban a diario antes del corte (`_eraRegular`, ≥50% de los 14 días previos) |
+
+La corta existe porque el cambio de aparato es una **explicación**: una métrica que
+llegaba todos los días, que deja de llegar justo el día que cambias de pulsera y sigue
+sin llegar cinco días, no es un hueco. Sin esa explicación catorce días son lo mínimo
+para no confundir "métrica muerta" con "semana sin llevar el reloj"; con ella, esperar
+dos semanas solo sirve para que el desglose pase ese tiempo reclamando datos que ya
+sabemos que no van a llegar. La ventana corta **se gana**: las esporádicas —VO₂max,
+% grasa, recuperación cardíaca— pueden pasarse cinco días sin dar señal con el aparato
+viejo puesto, así que para ellas cinco días no prueban nada y se quedan con los catorce.
+
+### La HRV se puntúa promediada, no día a día
+
+El componente de HRV (12 puntos, el segundo de más peso) compara el valor de **un** día
+contra la media de **siete** (D-14..D-8). Esa asimetría es la que convierte el ruido en
+puntuación: el numerador se mueve solo y el denominador no, así que cruzar la banda del
+±5% depende tanto del azar como de la fisiología. La HRV día a día es ruidosa con
+cualquier aparato; con uno que solo exporta tres o cuatro lecturas sueltas al día en vez
+de la serie nocturna entera —el caso de Zepp escribiendo en Apple Health— deja de ser una
+señal y pasa a ser un sorteo.
+
+La corrección no es tocar los umbrales ni el peso: es **medir los dos lados con la misma
+vara**. `HRV_SUAVIZADO_DIAS` (3) promedia el día con sus dos anteriores, la varianza cae
+~3× y la comparación vuelve a hablar de recuperación. Vale para cualquier aparato, así
+que no hay nada de fabricante que mantener. Dos consecuencias que conviene saber:
+
+- **La tarjeta sigue enseñando el dato del día**; lo promediado es lo que *puntúa*. El
+  desglose lo dice (`55ms (media 3d) · ref 50ms`) para que el tooltip no parezca
+  contradecir a la gráfica.
+- **Un hueco de un día ya no borra el componente**: la media lo cubre con los vecinos.
+  Es deseable con una fuente de 3–4 lecturas, pero cambia el fixture de cualquier test
+  que use la HRV para provocar un "sin datos" — usa `resting_heart_rate`, que no se
+  suaviza.
 
 ### Calorías de mantenimiento
 

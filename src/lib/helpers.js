@@ -953,6 +953,51 @@ export function wellnessBaselines(healthData, fecha, opts = {}) {
   return out;
 }
 
+// ── HRV: el día promediado, no el día suelto ─────────────────────
+// El componente de HRV compara el valor de UN día contra la media de SIETE (D-14..D-8).
+// Esa asimetría es la que convierte el ruido en puntuación: el numerador se mueve solo y
+// el denominador no, así que cruzar el ±5% de la banda depende tanto del azar como de la
+// fisiología. La HRV día a día es ruidosa con cualquier aparato, y con uno que solo
+// exporta tres o cuatro lecturas sueltas al día en vez de la serie nocturna entera —el
+// caso de Zepp escribiendo en Apple Health— deja de ser una señal y pasa a ser un sorteo.
+//
+// La corrección no es tocar los umbrales ni el peso del componente: es medir los dos
+// lados con la misma vara. Promediando el día contra sus dos anteriores la varianza cae
+// ~3× y la comparación vuelve a hablar de recuperación. Vale para cualquier aparato, así
+// que no hay nada específico de fabricante que mantener.
+export const HRV_SUAVIZADO_DIAS = 3;
+
+// Media de los días con dato en la ventana que termina en `fecha`. Devuelve
+// `{ valor, n }` —`n` es cuántos días entraron de verdad, que el desglose enseña— o null.
+function _mediaVentana(porFecha, fecha, dias, corte) {
+  let desde = _sumarDias(fecha, -(dias - 1));
+  if (desde == null) return null;
+  if (corte && String(corte) > desde) desde = String(corte);
+  const vals = [];
+  for (let f = desde; f != null && f <= String(fecha); f = _sumarDias(f, 1)) {
+    const v = porFecha.get(f);
+    // Un 0 es "no se midió", igual que en el resto del módulo.
+    if (v != null && v > 0) vals.push(v);
+  }
+  if (!vals.length) return null;
+  return { valor: vals.reduce((s, v) => s + v, 0) / vals.length, n: vals.length };
+}
+
+// La misma media sobre una serie `[{ date, value }]`, para quien no tenga el índice.
+export function mediaReciente(serie, fecha, { dias = HRV_SUAVIZADO_DIAS, corte = null } = {}) {
+  return _mediaVentana(_porFecha(serie), fecha, dias, corte);
+}
+
+// Referencia de HRV (media de D-14..D-8) sobre una serie, respetando el corte de
+// dispositivo. El widget la calculaba por su cuenta con `slice(-14,-7)` —últimas siete
+// MEDIDAS, no últimos siete días: con la serie agujereada que deja un mes sin reloj eso
+// puede abarcar meses— y sin corte, así que justo después de cambiar de aparato comparaba
+// el HRV nuevo contra la referencia del viejo. Dos reglas distintas para la misma señal:
+// ahora las dos salen de aquí.
+export function refHrv(serie, fecha, corte = null) {
+  return _refHrv(_porFecha(serie), fecha, corte);
+}
+
 // ── Puntuación de bienestar ──────────────────────────────────────
 // El desglose (`breakdown`) es la única fuente de verdad: el total se deriva de él en
 // vez de acumularse aparte. Antes el widget hacía `score += x` en 14 sitios pero solo
@@ -975,7 +1020,7 @@ export function wellnessBaselines(healthData, fecha, opts = {}) {
 export function wellnessBreakdown({
   isDaily = false, expectedByNow = 0,
   sleep = null, work = 0, exercise = null, steps = null, activeEnergy = null,
-  stand = null, flights = null, hrv = null, hrvPrev = null, rhr = null,
+  stand = null, flights = null, hrv = null, hrvPrev = null, hrvN = 1, rhr = null,
   cardioRec = null, vo2 = null, walkHr = null, bodyFat = null,
   daylight = null, resp = null, baselines = null,
 } = {}) {
@@ -1052,7 +1097,10 @@ export function wellnessBreakdown({
   }
   add("🪜 Pisos", flPts, 2, flights != null ? `${Math.round(flights)} pisos` : "sin datos", flights == null);
 
-  // HRV (12), contra la referencia de la semana anterior
+  // HRV (12), contra la referencia de la semana anterior. `hrv` llega ya promediado
+  // sobre los últimos `hrvN` días (ver "HRV: el día promediado, no el día suelto"): los
+  // dos lados de la comparación se miden con la misma vara, y el detalle lo dice para
+  // que el tooltip no parezca contradecir a la gráfica, que sigue enseñando el día.
   let hrvPts = 0;
   if (hrv != null && hrvPrev != null) {
     if      (hrv >= hrvPrev * 1.05) hrvPts = 12;
@@ -1060,7 +1108,10 @@ export function wellnessBreakdown({
     else                            hrvPts = 4;
   } else if (hrv != null) hrvPts = 6;
   add("❤️ HRV", hrvPts, 12,
-    hrv != null ? `${Math.round(hrv)}ms${hrvPrev != null ? ` (ref ${Math.round(hrvPrev)}ms)` : ""}` : "sin datos",
+    hrv != null
+      ? `${Math.round(hrv)}ms${hrvN > 1 ? ` (media ${hrvN}d)` : ""}`
+        + `${hrvPrev != null ? ` · ref ${Math.round(hrvPrev)}ms` : ""}`
+      : "sin datos",
     hrv == null);
 
   // FC en reposo (8) — contra la línea base propia cuando la hay (ver arriba). Es el
@@ -1177,6 +1228,40 @@ export function wellnessBreakdown({
 // mano cada vez que cambie el catálogo del fabricante, y nadie se acuerda de eso.
 export const METRICA_MUERTA_DIAS = 14;
 
+// Con un cambio de aparato confirmado la espera es más corta, porque el cambio es una
+// EXPLICACIÓN: una métrica que llegaba todos los días, que deja de llegar justo el día
+// que cambias de pulsera y sigue sin llegar cinco días seguidos, no es un hueco. Sin esa
+// explicación catorce días son lo mínimo para no confundir "métrica muerta" con "semana
+// sin llevar el reloj"; con ella, esperar dos semanas solo sirve para que el desglose
+// pase ese tiempo reclamando datos que ya sabemos que no van a llegar.
+//
+// La ventana corta se gana, no se regala: solo la usan las métricas que llegaban con
+// REGULARIDAD antes del corte. Las esporádicas —VO₂max, % grasa, recuperación cardíaca—
+// pueden pasarse cinco días sin dar señal con el aparato viejo puesto, así que para ellas
+// cinco días no prueban nada y se quedan con los catorce de siempre.
+export const METRICA_MUERTA_DIAS_TRAS_CAMBIO = 5;
+export const METRICA_REGULAR_MIN_FRACCION    = 0.5;
+
+// ¿Este punto de la serie trae una medida de verdad? Un 0 es "no se midió" (el Atajo de
+// iOS guarda ceros los días sin reloj), y los entrenos vienen en `extra`, no en `value`.
+function _tieneMedida(d) {
+  return Number(d.value) > 0 || (d.extra?.workouts?.length || 0) > 0;
+}
+
+// ¿La métrica llegaba con regularidad en los `dias` anteriores al corte?
+function _eraRegular(serie, corte, dias, minFraccion = METRICA_REGULAR_MIN_FRACCION) {
+  const hasta = _sumarDias(corte, -1);
+  const desde = _sumarDias(corte, -dias);
+  if (hasta == null || desde == null) return false;
+  const fechas = new Set();
+  for (const d of serie || []) {
+    if (!d || d.date == null) continue;
+    const f = String(d.date);
+    if (f >= desde && f <= hasta && _tieneMedida(d)) fechas.add(f);
+  }
+  return fechas.size >= Math.ceil(dias * minFraccion);
+}
+
 // Qué métricas alimentan cada fila del desglose. Un test comprueba que las claves de
 // aquí son exactamente las etiquetas que `wellnessBreakdown` puede emitir: si alguien
 // añade un componente y se olvida de esta tabla, salta ahí y no en producción.
@@ -1197,29 +1282,90 @@ export const METRICAS_DEL_DESGLOSE = {
   "🌬️ Resp.":               ["respiratory_rate"],
 };
 
-// Conjunto de etiquetas del desglose cuyas métricas llevan `dias` sin traer nada.
+// Conjunto de etiquetas del desglose cuyas métricas llevan sin traer nada el tiempo
+// suficiente como para darlas por muertas.
 //
-// La ventana arranca en el cambio de dispositivo cuando lo hay: recién cambiado no ha
-// dado tiempo a acumular `dias` de nada, y dar por muerta una métrica el primer día
-// sería tan falso como darla por viva. Por eso hace falta que el corte tenga ya al
-// menos `dias` de recorrido antes de declarar nada.
+// Hay dos ventanas, y una métrica muere por la que se cumpla antes:
+//  - La LARGA (`dias`) vale siempre, con cambio de aparato o sin él, pero no puede
+//    empezar antes del corte: recién cambiado no ha dado tiempo a acumular `dias` de
+//    nada, y dar por muerta una métrica el primer día sería tan falso como darla por
+//    viva.
+//  - La CORTA (`diasTrasCambio`) solo existe habiendo corte, y solo para las métricas
+//    que llegaban a diario antes de él (ver `METRICA_MUERTA_DIAS_TRAS_CAMBIO`).
 export function metricasMuertas(healthData, {
   hoy = null, dias = METRICA_MUERTA_DIAS, corte = null,
+  diasTrasCambio = METRICA_MUERTA_DIAS_TRAS_CAMBIO,
 } = {}) {
   const hasta = hoy || new Date().toISOString().slice(0, 10);
-  const desde = _sumarDias(hasta, -(dias - 1));
-  if (desde == null) return new Set();
-  // Con un corte demasiado reciente no se puede afirmar nada todavía.
-  if (corte && String(corte) > desde) return new Set();
+  const desdeLargo = _sumarDias(hasta, -(dias - 1));
+  if (desdeLargo == null) return new Set();
+  const corteStr   = corte ? String(corte) : null;
+  const desdeCorto = _sumarDias(hasta, -(diasTrasCambio - 1));
 
   const muertas = new Set();
   for (const [etiqueta, nombres] of Object.entries(METRICAS_DEL_DESGLOSE)) {
-    const hay = findMetric(healthData, ...nombres)
-      .some(d => d && d.date != null && String(d.date) >= desde && String(d.date) <= hasta
-                 && (Number(d.value) > 0 || (d.extra?.workouts?.length || 0) > 0));
-    if (!hay) muertas.add(etiqueta);
+    const serie = findMetric(healthData, ...nombres);
+    const hayEn = (desde, fin) => serie.some(
+      d => d && d.date != null && String(d.date) >= desde && String(d.date) <= fin && _tieneMedida(d));
+
+    if ((corteStr == null || corteStr <= desdeLargo) && !hayEn(desdeLargo, hasta)) {
+      muertas.add(etiqueta);
+      continue;
+    }
+    // La ventana corta tiene que caber ENTERA después del corte: mirar días del aparato
+    // anterior sería contar como prueba justo lo que se quiere descartar.
+    if (corteStr != null && desdeCorto != null && desdeCorto >= corteStr
+        && !hayEn(desdeCorto, hasta) && _eraRegular(serie, corteStr, dias)) {
+      muertas.add(etiqueta);
+    }
   }
   return muertas;
+}
+
+// ── Sugerir la fecha del cambio de aparato ───────────────────────
+// El corte solo sirve si está puesto, y ponerlo exige acordarse del día exacto en que
+// dejaste el reloj anterior. La fecha está en los propios datos: cambiar de aparato deja
+// una firma inconfundible —VARIAS métricas mueren el mismo día mientras OTRAS siguen
+// llegando— que no se parece a nada más. Una semana sin llevar nada mata todas a la vez;
+// una métrica que falla por su cuenta mata una sola.
+//
+// Por eso no hay lista de "lo que mide cada fabricante", igual que en `metricasMuertas`:
+// lo que se detecta es el corte simultáneo, no el catálogo de nadie.
+export const CAMBIO_MIN_METRICAS = 3;   // cuántas tienen que morir a la vez
+export const CAMBIO_MIN_DIAS     = 3;   // sin datos, para no confundirlo con un retraso de sync
+export const CAMBIO_VENTANA_DIAS = 2;   // holgura: no todas dejan de llegar el mismo día
+
+// Devuelve `{ fecha, etiquetas }` con el primer día del aparato nuevo, o null si los
+// datos no dibujan un cambio de aparato. Nunca decide sola: alimenta la sugerencia del
+// panel ⚙, que el usuario confirma.
+export function fechaCambioSugerida(healthData, {
+  hoy = null, minMetricas = CAMBIO_MIN_METRICAS, minDias = CAMBIO_MIN_DIAS,
+  ventana = CAMBIO_VENTANA_DIAS,
+} = {}) {
+  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const limite = _sumarDias(hasta, -minDias);
+  if (limite == null) return null;
+
+  const ultimas = new Map();
+  for (const [etiqueta, nombres] of Object.entries(METRICAS_DEL_DESGLOSE)) {
+    const fechas = findMetric(healthData, ...nombres)
+      .filter(d => d && d.date != null && _tieneMedida(d))
+      .map(d => String(d.date));
+    if (fechas.length) ultimas.set(etiqueta, fechas.reduce((a, b) => (a > b ? a : b)));
+  }
+
+  const paradas = [...ultimas].filter(([, f]) => f <= limite);
+  // Si no sigue llegando NADA es que no llevas aparato, no que hayas cambiado de uno.
+  if (paradas.length === 0 || paradas.length === ultimas.size) return null;
+
+  // El grupo se ancla a la última de las que murieron: es el borde del cambio.
+  const borde   = paradas.reduce((a, [, f]) => (f > a ? f : a), "");
+  const minimo  = _sumarDias(borde, -ventana);
+  if (minimo == null) return null;
+  const grupo = paradas.filter(([, f]) => f >= minimo).map(([etiqueta]) => etiqueta).sort();
+  if (grupo.length < minMetricas) return null;
+
+  return { fecha: _sumarDias(borde, 1), etiquetas: grupo };
 }
 
 export function scoreFromBreakdown(breakdown) {
@@ -1321,7 +1467,8 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = n
       const v = series[k].get(fecha);
       return v != null && v > 0 ? v : null;
     };
-    const work    = series.work.get(fecha) || 0;
+    const work     = series.work.get(fecha) || 0;
+    const hrvMedia = _mediaVentana(series.hrv, fecha, HRV_SUAVIZADO_DIAS, corte);
     const sleep   = val("sleep");
     const steps   = val("steps");
     const rhr     = val("rhr");
@@ -1337,7 +1484,8 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = n
       activeEnergy: energia,
       stand:        val("stand"),
       flights:      val("flights"),
-      hrv:          val("hrv"),
+      hrv:          hrvMedia ? hrvMedia.valor : null,
+      hrvN:         hrvMedia ? hrvMedia.n : 1,
       hrvPrev:      _refHrv(series.hrv, fecha, corte),
       // Anclada a ESTE día, no a hoy: si no, el mismo día del histórico puntuaría
       // distinto cada vez que se abre el dashboard y la sparkline dejaría de ser

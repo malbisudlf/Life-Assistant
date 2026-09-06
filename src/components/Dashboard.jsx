@@ -3,7 +3,8 @@ import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
-  mantenimientoEstimado, metricasMuertas,
+  mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
+  mediaReciente, refHrv,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessBaselines,
@@ -3960,6 +3961,13 @@ export default function Dashboard() {
     () => historicoBienestar.length >= 7 ? seriesTrend(historicoBienestar, 7, 30) : null,
     [historicoBienestar],
   );
+  // Solo se busca mientras el corte no esté puesto: con el ajuste ya guardado la
+  // sugerencia no aporta nada y las métricas muertas por el aparato viejo la seguirían
+  // disparando para siempre.
+  const cambioSugerido = useMemo(
+    () => corteDispositivo ? null : fechaCambioSugerida(healthData),
+    [healthData, corteDispositivo],
+  );
 
   // ── Derivación de las métricas de salud (M2) ───────────────────────────
   // Esto son ~17 findMetric, decenas de slice y todas las medias. Antes se rehacía
@@ -4021,8 +4029,11 @@ export default function Dashboard() {
           const avgSleep    = avg7(last7Sleep);
           const avgSteps    = avg7(last7Steps);
           const avgHrv      = avg7(last7Hrv);
-          const prevHrv     = wHrvRaw.slice(-14,-7);
-          const avgHrvPrev  = avg7(prevHrv);
+          // Por FECHA y respetando el corte de dispositivo, no por número de registros
+          // (ver `refHrv` en helpers): con la serie agujereada las "últimas 7 medidas"
+          // pueden abarcar meses, y sin el corte la referencia se hacía con el aparato
+          // anterior justo cuando más importa no mezclarlos.
+          const avgHrvPrev  = refHrv(wHrvRaw, todayStr, corteDispositivo);
           const avgRhr      = avg7(last7Rhr);
           const avgAe       = avg7(last7Ae);
           const avgExercise = avg7(last7Exercise);
@@ -4045,6 +4056,10 @@ export default function Dashboard() {
           const todaySleep        = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
           const todaySteps        = latestOrToday(wStepsRaw)?.value > 0 ? latestOrToday(wStepsRaw).value : null;
           const todayHrv          = latestOrToday(wHrvRaw)?.value > 0 ? latestOrToday(wHrvRaw).value : null;
+          // Para PUNTUAR se usa la media de tres días, no el valor suelto: es el mismo
+          // suavizado que aplica el histórico y por la misma razón (ver HRV_SUAVIZADO_DIAS
+          // en helpers). La tarjeta sigue enseñando `todayHrv`, que es el dato del día.
+          const todayHrvMedia     = mediaReciente(wHrvRaw, todayStr, { corte: corteDispositivo });
           const todayRhr          = latestOrToday(wRhrRaw)?.value > 0 ? latestOrToday(wRhrRaw).value : null;
           const todayAe           = latestOrToday(wAeRaw)?.value > 0 ? latestOrToday(wAeRaw).value : null;
           const todayWorkEntry    = wWorkRaw.find(d => d.date === todayStr);
@@ -4078,11 +4093,15 @@ export default function Dashboard() {
           // Anclada a HOY, que es el día que se está puntuando (la vista semanal puntúa
           // la semana que termina hoy). El histórico de la sparkline calcula la suya por
           // día dentro de wellnessHistory, para que cada día puntúe como puntuó entonces.
-          const baselines = wellnessBaselines(healthData, todayStr);
+          // El corte por cambio de aparato NO es opcional aquí: sin él la FC en reposo y
+          // la FC caminando se puntúan contra los percentiles del reloj anterior, que es
+          // justo lo que el ajuste existe para evitar. El histórico ya lo pasaba; el
+          // número que se ve cada día, no.
+          const baselines = wellnessBaselines(healthData, todayStr, { corte: corteDispositivo });
 
-    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, baselines, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
+    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, baselines, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayHrvMedia, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [healthData, trainingDays, bodyGoals, diaActual]);
+  }, [healthData, trainingDays, bodyGoals, diaActual, corteDispositivo]);
 
   // ── Widget «El día»: todo lo del día sobre un mismo eje ──
   // Cada fuente entra con su ESTADO, no solo con sus datos: es lo único que separa
@@ -4953,6 +4972,7 @@ export default function Dashboard() {
           todayExercise,
           todayFlights,
           todayHrv,
+          todayHrvMedia,
           todayResp,
           todayRhr,
           todaySleep,
@@ -4972,6 +4992,10 @@ export default function Dashboard() {
         const sleepVal    = isDaily ? todaySleep    : avgSleep;
         const stepsVal    = isDaily ? todaySteps    : avgSteps;
         const hrvVal      = isDaily ? todayHrv      : avgHrv;
+        // Lo que PUNTÚA: la media de tres días en la vista diaria (misma vara que la
+        // referencia de siete), la media semanal en la semanal, que ya lo está.
+        const hrvScoreVal = isDaily ? (todayHrvMedia?.valor ?? null) : avgHrv;
+        const hrvScoreN   = isDaily ? (todayHrvMedia?.n ?? 1) : 1;
         const rhrVal      = isDaily ? todayRhr      : avgRhr;
         const aeVal       = isDaily ? todayAe       : avgAe;
         const exerciseVal = isDaily ? todayExercise : avgExercise;
@@ -4995,7 +5019,8 @@ export default function Dashboard() {
           activeEnergy: aeVal,
           stand:        standVal,
           flights:      flightsVal,
-          hrv:          hrvVal,
+          hrv:          hrvScoreVal,
+          hrvN:         hrvScoreN,
           hrvPrev:      avgHrvPrev,
           rhr:          rhrVal,
           cardioRec:    avgCardioRec,
@@ -6955,6 +6980,19 @@ export default function Dashboard() {
                   </button>
                 </div>
               ) : (
+                <>
+                {cambioSugerido && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "8px 10px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>
+                      Parece que cambiaste de aparato el <strong style={{ color: "var(--text)" }}>{isoToDdMmYyyy(cambioSugerido.fecha)}</strong>:
+                      {" "}{cambioSugerido.etiquetas.join(", ")} dejaron de llegar a la vez y el resto sigue entrando.
+                    </div>
+                    <button onClick={() => setDispositivoFecha(cambioSugerido.fecha)}
+                      style={{ marginLeft: "auto", flexShrink: 0, padding: "4px 10px", background: "var(--surface)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                      Usar
+                    </button>
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Fecha del cambio</div>
@@ -6976,6 +7014,7 @@ export default function Dashboard() {
                     </button>
                   </div>
                 </div>
+                </>
               )}
               <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>
                 Las puntuaciones comparan cada día contra tu propia historia (HRV, respiración, FC en reposo).
