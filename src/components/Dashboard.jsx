@@ -29,7 +29,7 @@ import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
-const API = import.meta.env.VITE_API_URL || "https://backend-tender-glow-160.fly.dev";
+const API = import.meta.env.VITE_API_URL || "https://api.lifeassistantbackend.bid";
 const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
                (import.meta.env.VITE_HA_DASHBOARD_PATH || "/lovelace/tablet");
 // Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas

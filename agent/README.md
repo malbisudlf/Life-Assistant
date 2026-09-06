@@ -57,7 +57,7 @@ Crea un archivo `.env` en la carpeta `agent/` con este contenido:
 
 ```
 AGENT_TOKEN=
-LA_API_BASE=https://backend-tender-glow-160.fly.dev
+LA_API_BASE=https://api.lifeassistantbackend.bid
 ```
 
 - `AGENT_TOKEN`: token de servicio, el **mismo valor** que la variable `AGENT_TOKEN` del

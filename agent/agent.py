@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-API_BASE      = os.getenv("LA_API_BASE", "https://backend-tender-glow-160.fly.dev")
+API_BASE      = os.getenv("LA_API_BASE", "https://api.lifeassistantbackend.bid")
 AGENT_ID      = "pc-mikel"
 AGENT_VERSION = "1.5.0"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"

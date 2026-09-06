@@ -238,7 +238,7 @@ shell_command:
     <usuario>@IP_DEL_PC "schtasks /run /tn LifeAssistantAgent"
 
 rest:
-  - resource: "https://backend-tender-glow-160.fly.dev/ha/agent-relaunch-pending"
+  - resource: "https://api.lifeassistantbackend.bid/ha/agent-relaunch-pending"
     params:
       token: !secret ha_poll_token
     scan_interval: 30
@@ -366,14 +366,14 @@ compone el resumen diario — por eso el backend no llama a ningún LLM.
 ## 3. Desplegar el backend
 
 - [ ] `cd backend && fly deploy`.
-- [ ] Comprobar: `curl https://backend-tender-glow-160.fly.dev/` responde
+- [ ] Comprobar: `curl https://api.lifeassistantbackend.bid/` responde
       `{"status": "Life Assistant API running"}`.
 
 ## 4. Disparador en GitHub
 
 En el repo, Settings → Secrets and variables → Actions:
 
-- [ ] Pestaña **Variables**: `BACKEND_URL` = `https://backend-tender-glow-160.fly.dev`.
+- [ ] Pestaña **Variables**: `BACKEND_URL` = `https://api.lifeassistantbackend.bid`.
 - [ ] Pestaña **Secrets**: `BRIEF_TOKEN` = el mismo valor exacto que en Fly (si no
       coinciden, el envío falla con 403).
 
@@ -396,7 +396,7 @@ entiende zonas horarias):
 - [ ] Actions → **Resumen diario por correo** → *Run workflow*. Debe llegar un correo
       con asunto `Life Assistant — datos del AAAA-MM-DD`.
 - [ ] Para ver los mismos datos en JSON sin mandar correo:
-      `curl https://backend-tender-glow-160.fly.dev/brief -H "Authorization: Bearer TU_JWT"`
+      `curl https://api.lifeassistantbackend.bid/brief -H "Authorization: Bearer TU_JWT"`
       (el JWT sale de DevTools → Application → Local Storage → `la_token`).
 
 ## Si algo falla

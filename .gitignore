@@ -29,6 +29,11 @@ backend/.token
 backend/venv/
 backend/__pycache__/
 agent/.env
+# Y sus copias: `agent/.env` no las cubre y llevan los mismos secretos dentro. Un
+# `agent/.env.bak-cloudflare` estuvo a punto de entrar en este repo PUBLICO durante
+# la mudanza al Green. Mismo criterio que en backend/.env.*
+agent/.env.*
+!agent/.env.example
 
 # Datos personales
 *.xlsx

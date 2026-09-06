@@ -9,12 +9,18 @@ Esas filas NO se arreglan solas. Las métricas de energía son acumulativas y so
 pisan si el valor nuevo es MAYOR; un número inflado x4,184 le gana siempre a la medida
 buena, así que ninguna sincronización posterior lo puede corregir. Hay que reescribirlas.
 
-Uso (desde la máquina de Fly, que es donde están SUPABASE_URL/SUPABASE_KEY):
+Uso. Solo necesita SUPABASE_URL y SUPABASE_KEY en el entorno, asi que se lanza desde
+donde sea comodo. Lo mas simple es desde tu propio equipo, con el volcado del entorno
+de produccion (ver `docs/MIGRACION_BACKEND.md`):
 
-    fly ssh console -a backend-tender-glow-160 \\
-        -C "python3 /app/corregir_energia_kj.py"            # simulacro, no escribe
-    fly ssh console -a backend-tender-glow-160 \\
-        -C "python3 /app/corregir_energia_kj.py --aplicar"   # escribe de verdad
+    set -a && . ~/.life-assistant/backend.env.produccion && set +a
+    python backend/corregir_energia_kj.py             # simulacro, no escribe
+    python backend/corregir_energia_kj.py --aplicar   # escribe de verdad
+
+Antes vivia en la maquina de Fly y se lanzaba con `fly ssh console`. Ahora el backend
+corre como add-on del Home Assistant Green, donde `docker exec` esta bloqueado por el
+`Protection mode` del add-on de SSH: por eso se ejecuta desde fuera contra Supabase,
+que ademas evita tener que meter el script en el contenedor
 
 Sin --aplicar solo enseña lo que haría. Míralo antes: la conversión es irreversible en
 la práctica, porque después ya no se distingue un 409 corregido de un 409 medido.
