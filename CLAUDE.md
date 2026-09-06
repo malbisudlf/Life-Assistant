@@ -13,7 +13,7 @@ salud del Apple Watch, entrenamientos personales, ideas por voz, hogar inteligen
 comentarios, commits, strings de UI y mensajes de error de la API.
 
 - **Producción frontend**: https://life-assistant-smoky.vercel.app (Vercel, deploy automático al hacer push a `main`)
-- **Producción backend**: https://backend-tender-glow-160.fly.dev (Fly.io, deploy manual con `fly deploy`). **En mudanza a Koyeb** por coste — ver `docs/MIGRACION_BACKEND.md`
+- **Producción backend**: https://backend-tender-glow-160.fly.dev (Fly.io, deploy manual con `fly deploy`). **En mudanza al Home Assistant Green** por coste — ver `docs/MIGRACION_BACKEND.md`
 - **Base de datos**: Supabase (PostgreSQL vía REST), solo accesible desde el backend con la service key
 
 ## ⚠️ Repo público — reglas de seguridad
@@ -133,6 +133,8 @@ Ficheros clave:
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
+| `scripts/verificar_backend.py` | Smoke test de un backend recién desplegado (arranque, CORS, login, auth de servicio) contra cualquier URL. Lo que no puede probar lo marca SALTADA, nunca OK |
+| `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, para correrlo dentro del Green. Se copia a `/addons` por Samba; el `Dockerfile` clona este repositorio, así que desplegar es reconstruir el add-on |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
@@ -171,7 +173,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
-| `docs/MIGRACION_BACKEND.md` | **Mudanza del backend de Fly a Koyeb**: por qué (el backend nunca escaló a cero), por qué Koyeb y no Oracle/Cloud Run/Render, dónde están los 54 secretos que Fly no deja leer, y los pasos que quedan por dar a mano |
+| `docs/MIGRACION_BACKEND.md` | **Mudanza del backend de Fly al propio Home Assistant Green**: por qué (el backend nunca escaló a cero), por qué al Green y no a Koyeb/Render/Oracle/Cloud Run, dónde están los 54 secretos que Fly no deja leer, y los pasos que quedan por dar a mano |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. El canal de la llamada, aparte, en `docs/LLAMADAS.md` |
 | `docs/AVISAME.md` | Que una sesión de Claude Code te avise al móvil al terminar (o al quedarse bloqueada) y puedas contestarle hablando, por el mismo canal que el permiso de despliegue. **Escrito entero, sin probar de punta a punta**: falta aplicar la migración, poner las variables y crear la rutina que retoma el trabajo |
