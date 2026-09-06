@@ -43,6 +43,12 @@ def _peticion(url, metodo="GET", cabeceras=None, cuerpo=None):
     verificador declaraba roto un CORS que funcionaba.
     """
     req = urllib.request.Request(url, method=metodo, data=cuerpo)
+    # Identificarse explícitamente, y no por cortesía: el User-Agent que urllib
+    # pone por defecto (`Python-urllib/3.x`) está en las reglas de bots de
+    # Cloudflare y responde **403**. Con el backend detrás de un túnel de
+    # Cloudflare, el verificador daba por caído un servicio que funcionaba —
+    # justo el falso negativo que este script existe para evitar.
+    req.add_header("User-Agent", "life-assistant-verificador/1.0")
     for k, v in (cabeceras or {}).items():
         req.add_header(k, v)
     try:

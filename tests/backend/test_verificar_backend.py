@@ -165,3 +165,36 @@ def test_backend_caido_se_reporta_sin_reventar(monkeypatch):
     )
     verificar.comprobar_vivo(BASE)
     assert verificar.fallos == ["responde"]
+
+
+# ── Identidad del cliente ────────────────────────────────────────────────────
+
+def test_manda_un_user_agent_propio(monkeypatch):
+    """El User-Agent por defecto de urllib (`Python-urllib/3.x`) está en las
+    reglas de bots de Cloudflare y responde 403. Con el backend detrás de un
+    túnel de Cloudflare, el verificador declaraba caído un servicio que
+    respondía 200 a curl y a `requests`. Se comprobó UA por UA."""
+    vistas = {}
+
+    class RespuestaFalsa:
+        status = 200
+        headers = {}
+
+        def read(self):
+            return b'{"status": "Life Assistant API running"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen_falso(req, timeout=None):
+        vistas["ua"] = req.get_header("User-agent")
+        return RespuestaFalsa()
+
+    monkeypatch.setattr(verificar.urllib.request, "urlopen", urlopen_falso)
+    verificar.comprobar_vivo("https://backend.test")
+
+    assert vistas["ua"], "no se mandó ningún User-Agent"
+    assert "urllib" not in vistas["ua"].lower()
