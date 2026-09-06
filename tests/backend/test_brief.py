@@ -1283,6 +1283,29 @@ class TestEconomiaDelResumen:
         e = main._brief_economia()
         assert e["titulares"] == [] and e["fuentes"][0]["error"]
 
+    def test_una_fuente_congelada_se_dice_con_su_fecha(self, monkeypatch):
+        """El caso feo: responde 200, con XML válido, y sus noticias son de hace años.
+        Por el número de titulares es idéntico a un día tranquilo, así que sin esto una
+        fuente puede pasarse desde 2022 sin aportar nada — que es lo que hizo la de
+        RTVE — y el correo lo cuenta cada mañana como que no hubo noticias."""
+        self._montar(monkeypatch, {"https://feed.test/viejo": self._rss(
+            [("El Congreso aprueba la ley de pensiones", "https://e.test/1", "", 24 * 400)],
+            canal="Economía en rtve.es")})
+        f = main._brief_economia()["fuentes"][0]
+        assert f["titulares"] == 0
+        assert not f["error"], "un feed congelado no falla: responde 200 y con XML válido"
+        assert f["congelado_dias"] >= 399
+        assert f["congelado_desde"]
+
+    def test_un_dia_tranquilo_no_es_una_fuente_congelada(self, monkeypatch):
+        """Lo que trae es reciente, solo que ya salió en el correo anterior o cae fuera
+        de la ventana: eso es una jornada sin novedades, no una URL que hay que cambiar."""
+        self._montar(monkeypatch, {"https://feed.test/a": self._rss(
+            [("De hace dos días", "https://e.test/1", "", 48)])})
+        f = main._brief_economia()["fuentes"][0]
+        assert f["titulares"] == 0
+        assert "congelado_desde" not in f
+
     def test_apagada_no_pide_nada(self, monkeypatch):
         monkeypatch.setattr(main, "BRIEF_ECONOMIA", False)
         monkeypatch.setattr(main, "_descargar",

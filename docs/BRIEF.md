@@ -202,6 +202,41 @@ backend está en `docs/BACKEND_PATRONES.md`.
     eso dos días seguidos se explican desde cero en vez de enlazarse.
   - **Los dos bloques son independientes**: el término no toca la red, así que un feed
     caído no se lo lleva por delante. `BRIEF_ECONOMIA=0` apaga los dos.
+  - **Una fuente muere de dos maneras, y solo una se veía.** Las tres URL originales
+    duraron menos de lo que parecía: en septiembre de 2026 **dos de las tres estaban
+    muertas** y todos los titulares salían de EL PAÍS.
+    - *Caída*: CincoDías responde **403** con cualquier User-Agent, el de un navegador
+      incluido. Sale en el correo como `CAÍDA`, que es lo correcto.
+    - *Congelada*: RTVE (`api2.rtve.es/rss/temas_economia.xml`) responde **200** con
+      288 KB de XML impecable cuya entrada más reciente es del **9 de junio de 2022**.
+      No falla, no avisa, y por el número de titulares es idéntico a un día tranquilo.
+      Se pasó así **más de cuatro años**. Por eso `_leer_feed` devuelve ahora
+      `mas_reciente` y `_brief_economia` marca `congelado_desde` / `congelado_dias`
+      cuando una fuente no aporta nada y lo último que trae pasa de
+      `FEED_CONGELADO_DIAS` (9, para que un puente largo no lo dispare). El correo lo
+      escribe con la fecha y con un «Cambia la fuente».
+
+    Las tres de ahora son **un generalista, un diario económico y una agencia** (EL PAÍS,
+    Expansión, Europa Press), y son tres papeles distintos a propósito: con tres versiones
+    de lo mismo, la caída de una deja el bloque igual de cojo. Comprobadas vivas el
+    2026-09-05. Si cambias una, mira que traiga `pubDate` de verdad — eldiario.es lo
+    manda vacío, y sin fecha las entradas se cuelan sin pasar por la ventana.
+
+    **Ojo**: `BRIEF_ECONOMIA_FEEDS` es variable de entorno. Si está puesta en los secrets
+    de Fly, cambiar el valor por defecto del código no cambia nada en producción.
+  - **La codificación no se le pregunta a `requests`.** `_descargar` decide el códec con
+    `_codificacion()`: charset de la cabecera → declaración del propio documento (prólogo
+    XML o `<meta charset>`) → UTF-8. Usar `r.encoding` era el bug: para cualquier `text/*`
+    sin charset, requests aplica el viejo RFC 2616 y decide **ISO-8859-1**, que para un
+    XML es casi siempre falso. Es lo que hacía llegar «EconomÃ­a en rtve.es» al correo, y
+    lo que EL PAÍS se libraba de sufrir solo por servirse como `application/xml`, donde
+    requests no adivina nada.
+  - **El clima se reintenta.** El correo se compone una vez al día: un parpadeo de red de
+    dos segundos en ese instante dejaba el bloque en `(no disponible)` hasta mañana, y en
+    el correo eso se lee igual que Open-Meteo caído de verdad. `BRIEF_CLIMA_INTENTOS` (2)
+    y `BRIEF_CLIMA_ESPERA` (2 s). `_brief_clima` captura además `requests.RequestException`:
+    `get_weather` traduce a `HTTPException` lo que *responde* Open-Meteo, pero un timeout
+    subía sin capturar hasta el `.result()` del pool.
   - **Falta la otra mitad, y no vive en este repositorio**: la rutina de Claude Code que
     redacta el briefing tiene que saber que estas secciones existen. Sin tocar su prompt,
     el correo llega con los titulares y el término dentro y el briefing no los cuenta.

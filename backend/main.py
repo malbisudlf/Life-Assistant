@@ -313,11 +313,34 @@ BRIEF_ECONOMIA = _flag("BRIEF_ECONOMIA")
 # le toca (tipos, hipotecas, empleo, precios) y no la balanza comercial de Zimbabue.
 # Filtrar por palabras clave sería interpretar, y aquí no se interpreta: si lo que llega
 # no sirve, se cambia la fuente. Separados por comas.
+#
+# Tres fuentes con TRES PAPELES distintos —un generalista, un diario económico y una
+# agencia— y no tres versiones de lo mismo: es lo que hace que caiga una y el bloque siga
+# diciendo algo. Comprobadas vivas el 2026-09-05.
+#
+# Las dos que había antes estaban MUERTAS, y de dos maneras que conviene reconocer:
+#  - CincoDías (`feeds.elpais.com/.../cincodias...`) responde **403** con cualquier
+#    User-Agent, incluido el de un navegador. Eso al menos se veía: salía como caída.
+#  - RTVE (`api2.rtve.es/rss/temas_economia.xml`) es el caso feo: responde **200** con
+#    288 KB de XML perfectamente válido cuya entrada más reciente es del **9 de junio de
+#    2022**. Un feed congelado no falla, no avisa y no se distingue de "hoy no ha
+#    publicado nada" mirando solo el número de titulares. Por eso `_leer_feed` reporta
+#    ahora la fecha de lo más reciente que trae (ver `FEED_CONGELADO_DIAS`): sin esa
+#    señal, una fuente puede pasarse años sin aportar nada y el correo lo cuenta como
+#    una jornada tranquila.
 BRIEF_ECONOMIA_FEEDS = os.getenv("BRIEF_ECONOMIA_FEEDS", ",".join((
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/section/economia/portada",
-    "https://feeds.elpais.com/mrss-s/pages/cd/site/cincodias.elpais.com/portada",
-    "https://api2.rtve.es/rss/temas_economia.xml",
+    "https://www.expansion.com/rss/economia.xml",
+    "https://www.europapress.es/rss/rss.aspx?ch=00340",
 )))
+# A partir de cuántos días sin publicar una fuente deja de ser "hoy no ha traído nada"
+# y pasa a ser un feed abandonado que hay que cambiar. Nueve días para que un puente
+# largo o unas navidades no lo disparen.
+FEED_CONGELADO_DIAS = int(os.getenv("FEED_CONGELADO_DIAS", "9"))
+# Intentos de leer el clima al componer el correo, y la espera entre ellos. Ver
+# `_brief_clima`: el correo sale una vez al día y no hay segunda oportunidad.
+BRIEF_CLIMA_INTENTOS = int(os.getenv("BRIEF_CLIMA_INTENTOS", "2"))
+BRIEF_CLIMA_ESPERA   = float(os.getenv("BRIEF_CLIMA_ESPERA", "2"))
 BRIEF_ECONOMIA_MAX = int(os.getenv("BRIEF_ECONOMIA_MAX", "8"))
 # Ventana de los titulares. Más de 24 h a propósito: con 24 justas, una noticia
 # publicada a las 07:05 de ayer no entra en el correo de hoy si sale a las 07:00 y ya no
@@ -5695,7 +5718,8 @@ def _leer_feed(url: str) -> dict:
     try:
         bajada = _descargar(url)
         if not bajada:
-            return {"url": url, "fuente": url, "titulares": [], "error": "no se pudo descargar"}
+            return {"url": url, "fuente": url, "titulares": [], "error": "no se pudo descargar",
+                    "mas_reciente": None}
         _, crudo = bajada
         cabecera = _RE_CANAL.search(crudo)
         fuente   = _campo_feed(cabecera.group(1), "title") if cabecera else ""
@@ -5719,10 +5743,17 @@ def _leer_feed(url: str) -> dict:
             })
             if len(titulares) >= BRIEF_ECONOMIA_POR_FUENTE:
                 break
-        return {"url": url, "fuente": fuente or url, "titulares": titulares, "error": None}
+        # Lo más reciente que trae el feed, aportara o no a esta edición. Es lo único que
+        # separa "hoy no ha publicado" de "esta fuente está abandonada": un feed
+        # congelado responde 200 y con XML válido, así que por el número de titulares los
+        # dos casos son idénticos (ver BRIEF_ECONOMIA_FEEDS).
+        fechas = [t["fecha"] for t in titulares if t.get("fecha")]
+        return {"url": url, "fuente": fuente or url, "titulares": titulares, "error": None,
+                "mas_reciente": max(fechas) if fechas else None}
     except Exception as e:
         logger.warning("Resumen diario: feed de economía %s no disponible (%s)", url, e)
-        return {"url": url, "fuente": url, "titulares": [], "error": str(e)[:120]}
+        return {"url": url, "fuente": url, "titulares": [], "error": str(e)[:120],
+                "mas_reciente": None}
 
 
 def _clave_titular(t: dict) -> str:
@@ -5767,8 +5798,22 @@ def _brief_economia() -> dict:
             vistos.add(clave)
             titulares.append(t)
             aportados += 1
-        fuentes.append({"fuente": leido["fuente"], "url": leido["url"],
-                        "titulares": aportados, "error": leido["error"]})
+        # Una fuente que no aporta nada puede estar teniendo un día tranquilo o llevar
+        # años abandonada, y en el correo las dos se leían igual. `congelado_desde` lo
+        # dice con todas las letras para que la rutina pueda escribirlo y la fuente se
+        # cambie, en vez de contarlo cada mañana como una jornada sin noticias.
+        fuente = {"fuente": leido["fuente"], "url": leido["url"],
+                  "titulares": aportados, "error": leido["error"]}
+        reciente = leido.get("mas_reciente")
+        if reciente and not aportados:
+            try:
+                edad = (datetime.now(timezone.utc) - datetime.fromisoformat(reciente)).days
+                if edad >= FEED_CONGELADO_DIAS:
+                    fuente["congelado_desde"] = reciente[:10]
+                    fuente["congelado_dias"]  = edad
+            except ValueError:
+                pass
+        fuentes.append(fuente)
 
     # Lo más reciente primero; los que no traen fecha, al final: no se sabe si son de hoy.
     titulares.sort(key=lambda t: t["fecha"] or "", reverse=True)
@@ -6010,11 +6055,29 @@ def construir_brief() -> dict:
 
 
 def _brief_clima() -> dict:
-    try:
-        datos = get_weather(credentials=None)
-    except HTTPException as e:
-        logger.error("Resumen diario: clima no disponible (%s)", e.detail)
-        return {}
+    """El tiempo de hoy, con un reintento.
+
+    El correo se compone UNA vez al día: un parpadeo de red de dos segundos justo en ese
+    instante te dejaba sin bloque de clima hasta mañana, y en el correo se lee igual que
+    si Open-Meteo estuviera caído de verdad. La llamada es gratis y tarda décimas, así
+    que reintentarla una vez cuesta nada y convierte el parpadeo en nada.
+
+    Y se capturan también los errores de red: `get_weather` traduce a `HTTPException` lo
+    que responde Open-Meteo, pero un timeout o una conexión rota levantan
+    `requests.RequestException`, que subía sin capturar hasta el `.result()` del pool."""
+    datos = None
+    for intento in range(BRIEF_CLIMA_INTENTOS):
+        try:
+            datos = get_weather(credentials=None)
+            break
+        except (HTTPException, requests.RequestException) as e:
+            detalle = getattr(e, "detail", None) or str(e)
+            if intento + 1 < BRIEF_CLIMA_INTENTOS:
+                logger.warning("Resumen diario: clima falló (%s), reintentando", detalle)
+                time.sleep(BRIEF_CLIMA_ESPERA)
+                continue
+            logger.error("Resumen diario: clima no disponible (%s)", detalle)
+            return {}
     return {
         "ahora":       datos.get("temp"),
         "max":         datos.get("temp_max"),
@@ -6209,9 +6272,18 @@ def render_brief_texto(d: dict) -> str:
         L.append(cabecera + ")")
         # Cada fuente con lo que aportó hoy. Un 0 sostenido es la única forma de
         # enterarse de que una URL lleva semanas muerta: sin esto, la sección se queda
-        # corta y parece que no hubo noticias.
+        # corta y parece que no hubo noticias. Y un feed CONGELADO ni siquiera da un 0
+        # que llame la atención —responde 200, con XML válido y noticias de hace años—,
+        # así que se dice con su fecha: es la diferencia entre "hoy no ha publicado" y
+        # "cambia esta fuente". El de RTVE se pasó así desde 2022.
         for f in e.get("fuentes", []):
-            estado = f"CAÍDA ({f['error']})" if f.get("error") else f"{f.get('titulares', 0)} titulares"
+            if f.get("error"):
+                estado = f"CAÍDA ({f['error']})"
+            elif f.get("congelado_desde"):
+                estado = (f"CONGELADA — no publica desde {f['congelado_desde']} "
+                          f"({f['congelado_dias']} días). Cambia la fuente")
+            else:
+                estado = f"{f.get('titulares', 0)} titulares"
             L.append(f"   · {f.get('fuente')}: {estado}")
         for t in e.get("titulares", []):
             L.append(f"  [{_cuando_titular(t.get('fecha'), d['fecha'])}] {t.get('titulo')}"
@@ -12286,6 +12358,37 @@ def _html_a_texto(bruto: str) -> str:
     return _RE_LINEAS.sub("\n\n", txt).strip()
 
 
+_RE_CT_CHARSET  = re.compile(r'charset=["\']?([\w.:-]+)', re.I)
+_RE_XML_DECL    = re.compile(rb'<\?xml[^>]*?encoding=["\']([\w.:-]+)', re.I)
+_RE_META_CHARSET = re.compile(rb'<meta[^>]+charset=["\']?([\w.:-]+)', re.I)
+
+
+def _codificacion(content_type: str, crudo: bytes) -> str:
+    """Con qué códec decodificar lo que ha llegado.
+
+    NO se usa `r.encoding` de requests: cuando el Content-Type es `text/*` sin charset,
+    requests aplica el viejo RFC 2616 y decide **ISO-8859-1** — que para un XML es casi
+    siempre falso. Es lo que llevaba años rompiendo el feed de economía de RTVE, que se
+    sirve como `text/xml` a secas con el documento en UTF-8: los acentos llegaban al
+    correo como «EconomÃ­a». EL PAÍS no lo sufría solo porque manda `application/xml`,
+    donde requests no adivina nada y se cae al utf-8 de aquí.
+
+    El orden es el de RFC 7303 para XML: el charset explícito de la cabecera manda; si no
+    lo hay, lo que declare el propio documento (prólogo XML o `<meta charset>`); y solo
+    entonces UTF-8, que es lo que es la web hoy."""
+    m = _RE_CT_CHARSET.search(content_type or "")
+    if m:
+        return m.group(1)
+    cabeza = crudo[:2048]
+    m = _RE_XML_DECL.search(cabeza) or _RE_META_CHARSET.search(cabeza)
+    if m:
+        try:
+            return m.group(1).decode("ascii")
+        except UnicodeDecodeError:
+            pass
+    return "utf-8"
+
+
 def _descargar(url: str, saltos: int = 3):
     """GET siguiendo redirecciones A MANO, validando cada salto (ver regla 1) y leyendo
     como mucho JARVIS_WEB_MAX_BYTES. Devuelve (url_final, texto) o None."""
@@ -12309,7 +12412,14 @@ def _descargar(url: str, saltos: int = 3):
             if total >= JARVIS_WEB_MAX_BYTES:
                 break
         r.close()
-        crudo = b"".join(trozos).decode(r.encoding or "utf-8", errors="replace")
+        datos = b"".join(trozos)
+        codec = _codificacion(r.headers.get("content-type", ""), datos)
+        try:
+            crudo = datos.decode(codec, errors="replace")
+        except LookupError:
+            # Un charset que Python no conoce (los hay inventados) no puede tumbar la
+            # descarga entera: se lee como UTF-8 y los bytes raros salen como reemplazo.
+            crudo = datos.decode("utf-8", errors="replace")
         return url, crudo
     return None
 
