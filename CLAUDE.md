@@ -13,7 +13,7 @@ salud del Apple Watch, entrenamientos personales, ideas por voz, hogar inteligen
 comentarios, commits, strings de UI y mensajes de error de la API.
 
 - **Producción frontend**: https://life-assistant-smoky.vercel.app (Vercel, deploy automático al hacer push a `main`)
-- **Producción backend**: https://backend-tender-glow-160.fly.dev (Fly.io, deploy manual con `fly deploy`, escala a cero)
+- **Producción backend**: https://backend-tender-glow-160.fly.dev (Fly.io, deploy manual con `fly deploy`). **En mudanza a Koyeb** por coste — ver `docs/MIGRACION_BACKEND.md`
 - **Base de datos**: Supabase (PostgreSQL vía REST), solo accesible desde el backend con la service key
 
 ## ⚠️ Repo público — reglas de seguridad
@@ -171,6 +171,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
+| `docs/MIGRACION_BACKEND.md` | **Mudanza del backend de Fly a Koyeb**: por qué (el backend nunca escaló a cero), por qué Koyeb y no Oracle/Cloud Run/Render, dónde están los 54 secretos que Fly no deja leer, y los pasos que quedan por dar a mano |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. El canal de la llamada, aparte, en `docs/LLAMADAS.md` |
 | `docs/AVISAME.md` | Que una sesión de Claude Code te avise al móvil al terminar (o al quedarse bloqueada) y puedas contestarle hablando, por el mismo canal que el permiso de despliegue. **Escrito entero, sin probar de punta a punta**: falta aplicar la migración, poner las variables y crear la rutina que retoma el trabajo |
@@ -310,8 +311,19 @@ cd backend && fly deploy
 
 También está el workflow `Deploy backend (Fly.io)`
 (`.github/workflows/deploy-backend.yml`, `workflow_dispatch`, usa el secret
-`FLY_API_TOKEN`). El backend escala a cero cuando no hay tráfico
-(`min_machines_running = 0`), de ahí el arranque en frío de 10–15s.
+`FLY_API_TOKEN`).
+
+**El backend NO escala a cero, aunque `fly.toml` lo pida.** Aquí ponía lo
+contrario desde mayo de 2026 y era falso: `min_machines_running = 0` y
+`auto_stop_machines = 'stop'` están puestos, pero Home Assistant sondea seis
+endpoints REST cada 15-60 s (~18.700 peticiones al día) y una máquina que recibe
+algo cada pocos segundos no se apaga nunca. Escaló a cero durante su primera
+semana de vida, hasta que el 13/05/2026 entró el primer sensor; ninguna más.
+Consecuencia: **no hay arranque en frío, y la factura es la de una máquina
+encendida 24/7** — 1 GB de RAM para usar ~200 MB, $5.92/mes. Nadie lo miró en
+cuatro meses porque este fichero decía que dormía. La moraleja no es sobre Fly:
+**un dato de infraestructura escrito aquí y nunca vuelto a comprobar acaba
+sustituyendo a la realidad.**
 
 **Migraciones de Supabase**: se aplican a mano desde el editor SQL. Las que hay:
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
