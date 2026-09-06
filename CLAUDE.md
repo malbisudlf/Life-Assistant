@@ -13,7 +13,12 @@ salud del Apple Watch, entrenamientos personales, ideas por voz, hogar inteligen
 comentarios, commits, strings de UI y mensajes de error de la API.
 
 - **Producción frontend**: https://life-assistant-smoky.vercel.app (Vercel, deploy automático al hacer push a `main`)
-- **Producción backend**: https://backend-tender-glow-160.fly.dev (Fly.io, deploy manual con `fly deploy`). **En mudanza al Home Assistant Green** por coste — ver `docs/MIGRACION_BACKEND.md`
+- **Producción backend**: https://api.lifeassistantbackend.bid — corre **en el Home
+  Assistant Green de casa**, como add-on (`addon/life-assistant/`), y sale a internet
+  por Cloudflare Tunnel sin abrir puertos del router. Desplegar = *Reconstruir* el
+  add-on desde la interfaz de HA, que clona este repositorio. Ver
+  `docs/MIGRACION_BACKEND.md`. **Fly.io queda en pie pero ya sin tráfico**, pendiente
+  de apagar
 - **Base de datos**: Supabase (PostgreSQL vía REST), solo accesible desde el backend con la service key
 
 ## ⚠️ Repo público — reglas de seguridad
@@ -101,7 +106,7 @@ El E2E no entra en la verificación obligatoria de arriba porque tarda bastante 
 Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI + Uvicorn, Fly.io región cdg, UN SOLO FICHERO ~3.000 líneas)
+backend/main.py (FastAPI + Uvicorn, add-on del HA Green, UN SOLO FICHERO ~3.000 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
@@ -305,27 +310,19 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
 
 **Frontend**: push a `main` → Vercel despliega automáticamente.
 
-**Backend (Fly.io)** — manual, nunca en automático:
+**Backend** — manual, nunca en automático. Vive como add-on del Home Assistant Green:
+desplegar es pulsar **Reconstruir** en la página del add-on, porque su `Dockerfile`
+clona este repositorio en cada construcción. No hay workflow ni comando remoto: el
+`Protection mode` del add-on de SSH bloquea `docker`, y con razón.
 
-```bash
-cd backend && fly deploy
-```
-
-También está el workflow `Deploy backend (Fly.io)`
-(`.github/workflows/deploy-backend.yml`, `workflow_dispatch`, usa el secret
-`FLY_API_TOKEN`).
-
-**El backend NO escala a cero, aunque `fly.toml` lo pida.** Aquí ponía lo
-contrario desde mayo de 2026 y era falso: `min_machines_running = 0` y
-`auto_stop_machines = 'stop'` están puestos, pero Home Assistant sondea seis
-endpoints REST cada 15-60 s (~18.700 peticiones al día) y una máquina que recibe
-algo cada pocos segundos no se apaga nunca. Escaló a cero durante su primera
-semana de vida, hasta que el 13/05/2026 entró el primer sensor; ninguna más.
-Consecuencia: **no hay arranque en frío, y la factura es la de una máquina
-encendida 24/7** — 1 GB de RAM para usar ~200 MB, $5.92/mes. Nadie lo miró en
-cuatro meses porque este fichero decía que dormía. La moraleja no es sobre Fly:
-**un dato de infraestructura escrito aquí y nunca vuelto a comprobar acaba
-sustituyendo a la realidad.**
+**Ya no escala a cero, y ya no importa.** Cuando estaba en Fly, este fichero afirmaba
+que dormía sin tráfico y era **falso** desde el 13/05/2026: Home Assistant sondeaba seis
+endpoints REST cada 15-60 s (~18.700 peticiones al día) y una máquina que recibe algo
+cada pocos segundos no se apaga nunca. Nadie miró la factura en cuatro meses porque
+aquí ponía lo contrario. Ahora ese sondeo es **local** (HA y backend en el mismo
+aparato), no cuesta nada y no sale a internet. La moraleja no era sobre Fly: **un dato
+de infraestructura escrito aquí y nunca vuelto a comprobar acaba sustituyendo a la
+realidad.**
 
 **Migraciones de Supabase**: se aplican a mano desde el editor SQL. Las que hay:
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
@@ -384,11 +381,16 @@ sustituyendo a la realidad.**
 - No metas datos personales (IPs, direcciones, rutas de usuario, tokens) en ficheros
   versionados — este incluido. Van a `HOMEASSISTANT.md` o a un `.env`.
 - No hagas deploy del backend salvo que se pida: afecta a producción real. El deploy
-  es manual — `fly deploy` desde `backend/`, o el workflow `Deploy backend (Fly.io)`
-  (`.github/workflows/deploy-backend.yml`, `workflow_dispatch`; usa el secret
-  `FLY_API_TOKEN`). Nunca en automático al hacer push.
-  - **La única excepción, y no es una excepción a esto**: el camino de las averías
-    (`docs/AVERIAS.md`) dispara ese mismo workflow cuando el usuario da el permiso desde
-    el móvil o por teléfono. Lo que lo lanza es una persona contestando, no un push ni
-    una sesión: **una sesión de Claude sigue sin desplegar nunca**, ni la que arregla la
-    avería (su skill se lo prohíbe explícitamente) ni ninguna otra.
+  es **pulsar *Reconstruir* en el add-on `local_life-assistant`** desde la interfaz de
+  Home Assistant, que clona este repositorio. Nunca en automático al hacer push, y
+  **una sesión de Claude no despliega nunca** — ni la que arregla una avería (su skill
+  se lo prohíbe explícitamente) ni ninguna otra.
+  - **⚠️ El camino de las averías quedó a medias con la mudanza al Green.**
+    `docs/AVERIAS.md` describe que el permiso desde el móvil o por teléfono dispara el
+    workflow `Deploy backend (Fly.io)` (`.github/workflows/deploy-backend.yml`). Ese
+    workflow **sigue existiendo y sigue desplegando a Fly**, que ya no atiende tráfico:
+    aprobar un despliegue por ahí hoy no cambia nada en producción y no avisa de ello.
+    Antes de apagar Fly hay que decidir qué hace ese botón — reconstruir el add-on no
+    se puede lanzar desde GitHub, porque el `Protection mode` del add-on de SSH bloquea
+    `docker` y no hay API del Supervisor expuesta a internet. Mientras no se resuelva,
+    **el permiso de despliegue del móvil es un botón que no hace nada.**

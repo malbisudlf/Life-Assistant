@@ -140,11 +140,13 @@ UNIQUE(metric_date, metric_name)
   tenía `extra.excluded=true` y, si es así, se preserva — evita que un reenvío "resucite"
   una noche que el usuario había anulado a mano.
 - **Scripts de mantenimiento en Supabase**: `backend/.env` local **no contiene**
-  `SUPABASE_URL`/`SUPABASE_KEY` (solo están en los secrets de Fly). Para ejecutar un
-  script contra la BD: mételo en `backend/` (se copia al contenedor en `fly deploy`) y
-  lánzalo con
-  `fly ssh console -a backend-tender-glow-160 -C "python3 /app/script.py"`.
-  `fly sftp put` no funciona bien en Windows (problema de rutas).
+  `SUPABASE_URL`/`SUPABASE_KEY`. Con el backend en el Green ya no hace falta entrar en
+  la máquina: esas dos variables están en el volcado del entorno
+  (`~/.life-assistant/backend.env.produccion`, ver `docs/MIGRACION_BACKEND.md`), así que
+  un script contra la BD se lanza desde tu propio equipo:
+  `set -a && . ~/.life-assistant/backend.env.produccion && set +a && python backend/script.py`.
+  Es además la única vía cómoda hoy: en el Green, `docker exec` está bloqueado por el
+  `Protection mode` del add-on de SSH.
 
 ### Cambio de dispositivo
 

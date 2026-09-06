@@ -199,11 +199,15 @@ Como todas: aquí no hay tooling de migraciones.
 
 ```bash
 openssl rand -hex 32          # o: python -c "import secrets; print(secrets.token_hex(32))"
-fly secrets set SESION_TOKEN=<lo que salga> -a backend-tender-glow-160
+# y se añade a /config/life_assistant.env del Green:
+#   SESION_TOKEN='<lo que salga>'
 ```
 
-`fly secrets set` **reinicia la máquina sola** (unos segundos, y el backend escala a cero
-de todas formas): no hace falta un `fly deploy` detrás, y no lo hagas — el deploy del
+Con el backend en el Green, las variables viven en `/config/life_assistant.env` (ver
+`docs/MIGRACION_BACKEND.md`). **Todo valor va entre comillas simples**: el fichero se lee
+con `source` y un valor con espacios sin comillas tumba el arranque. Después, *Reiniciar*
+el add-on `local_life-assistant`. Antes esto era `fly secrets set`, que reiniciaba la
+máquina sola: no hace falta un despliegue detrás, y no lo hagas — el deploy del
 backend es manual y aparte, por lo que dice `CLAUDE.md`.
 
 Ese mismo valor es el que llevan las sesiones en `X-Auth-Token` al llamar a
@@ -257,11 +261,12 @@ ignora salvo que el prompt guardado lo cite. Y el aviso del final tampoco: sin �
 encargo dictado por voz se haría entero sin que el usuario se enterase de que acabó.
 
 Luego, en la rutina: lápiz → *Add another trigger* → **API** → *Generate token*. Da una
-URL y un token, **y el token se enseña una sola vez**. Los dos van a Fly:
+URL y un token, **y el token se enseña una sola vez**. Los dos van al entorno del backend:
 
 ```bash
-fly secrets set SESION_FIRE_URL=<la url> SESION_FIRE_TOKEN=<el token> \
-                -a backend-tender-glow-160
+# En /config/life_assistant.env del Green, y reiniciar el add-on:
+SESION_FIRE_URL='<la url>'
+SESION_FIRE_TOKEN='<el token>'
 ```
 
 Hasta que estén, Jarvis **no anuncia** la herramienta `responder_a_la_sesion`: se cae del
@@ -279,7 +284,7 @@ Instalado el 4 de septiembre de 2026: `rest_command.la_sesion_accion` en
 Sin esperar a que ninguna sesión termine nada:
 
 ```bash
-curl -sS -X POST https://backend-tender-glow-160.fly.dev/sesion/aviso \
+curl -sS -X POST https://api.lifeassistantbackend.bid/sesion/aviso \
   -H "X-Auth-Token: $SESION_TOKEN" -H "Content-Type: application/json" \
   -d '{"titulo":"Prueba del canal de avisos","pedido":"probar que esto llega",
        "hecho":"nada, es una prueba","pendiente":"","bloqueado":false}'
