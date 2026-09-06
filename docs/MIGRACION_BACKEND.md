@@ -8,8 +8,11 @@ instalado, arrancado y verificado con `scripts/verificar_backend.py` contra la I
 local: responde, CORS, login y auth de servicio, las cuatro en verde. **Fly sigue
 en producción** y no se ha cambiado ningún apuntador todavía.
 
-Lo que falta: exponerlo a internet (paso 4, con Cloudflare Tunnel) y los
-apuntadores (paso 6).
+**Y ya está publicado en internet**: `https://api.lifeassistantbackend.bid`, por
+Cloudflare Tunnel, sin abrir un solo puerto del router. Verificado también desde
+fuera, las cuatro comprobaciones en verde.
+
+Lo que falta: **los apuntadores** (paso 6) y apagar Fly (paso 7).
 
 ### Por qué nos vamos de Fly
 
@@ -188,8 +191,35 @@ pública, la vía es **Cloudflare Tunnel** (add-on `9074a9fa_cloudflared`, ya
 instalado): no abre ningún puerto del router porque el túnel sale de dentro
 hacia fuera. Necesita **un dominio propio en Cloudflare** — hay TLDs desde 1-3
 €/año, y comprarlo en Cloudflare Registrar ahorra el trámite de los nameservers.
-El backend se publica con `additional_hosts`, apuntando a
-`http://127.0.0.1:8080`.
+El backend se publica con `additional_hosts`. **El destino NO es
+`http://127.0.0.1:8080`**, y esto cuesta un 502 descubrirlo: a diferencia del
+add-on de Tailscale, cloudflared **no corre en la red del host** (su log delata
+una IP `172.30.x`), así que su `localhost` es él mismo. El destino correcto es el
+hostname interno del add-on:
+
+```yaml
+additional_hosts:
+  - hostname: api.lifeassistantbackend.bid
+    service: http://local-life-assistant:8080
+```
+
+Valen también `http://172.30.32.1:8080` (la pasarela) y la IP LAN del Green, pero
+el hostname es el único que sobrevive a un cambio de DHCP.
+
+**`external_hostname` se deja vacío a propósito**: esa opción publicaría la
+interfaz de Home Assistant en internet, y aquí solo queremos el backend.
+
+Dos cosas más del montaje real:
+
+- **Los «prechecks» de cloudflared avisan de fallos y el túnel funciona igual.**
+  Dicen `SUMMARY: Environment has critical failures` porque `region2` está
+  bloqueada (cosa de la operadora), pero `region1` pasa y las cuatro conexiones
+  se registran. No persigas ese aviso.
+- **Cloudflare responde 403 al User-Agent `Python-urllib`**, que está en sus
+  reglas de bots. `scripts/verificar_backend.py` daba por caído un backend que
+  respondía 200 a curl, a `requests` y a un navegador; ahora manda un User-Agent
+  propio. Si algún cliente nuevo empieza a recibir 403 sin explicación, mira su
+  User-Agent antes que nada.
 
 Descartadas por el camino: **ngrok** (regala un dominio estático permanente, pero
 desde febrero de 2026 corta las sesiones **a las 2 horas**), **DuckDNS** (gratis y
