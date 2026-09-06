@@ -3,8 +3,13 @@
 
 ## Mudanza del backend: de Fly.io al Home Assistant Green
 
-**Estado: preparada, sin ejecutar.** El add-on está escrito (`addon/life-assistant/`)
-y Fly sigue en producción hasta el último paso.
+**Estado (2026-09-06): el backend YA CORRE en el Green.** El add-on está
+instalado, arrancado y verificado con `scripts/verificar_backend.py` contra la IP
+local: responde, CORS, login y auth de servicio, las cuatro en verde. **Fly sigue
+en producción** y no se ha cambiado ningún apuntador todavía.
+
+Lo que falta: exponerlo a internet (paso 4, con Cloudflare Tunnel) y los
+apuntadores (paso 6).
 
 ### Por qué nos vamos de Fly
 
@@ -89,9 +94,23 @@ copia completa que existe.** Esa vía solo funciona mientras la máquina siga
 viva: el día que hagas `fly apps destroy`, el almacén se va con la app y no hay
 proceso al que entrar. Por eso apagar Fly es el último paso y no el primero.
 
-`ENABLE_BANKING_PRIVATE_KEY` es una clave PEM **multilínea** y va entrecomillada
-en el fichero. `run.sh` lo lee con `.` en vez de parsearlo línea a línea
-justamente para que sobreviva entera.
+**TODO valor va entre comillas simples, no solo los multilínea.** El fichero se
+lee con `source`, así que un valor con espacios sin comillas hace que bash intente
+ejecutar la segunda palabra como un comando. La primera versión solo entrecomilló
+`ENABLE_BANKING_PRIVATE_KEY` (multilínea) y el add-on murió en el arranque con
+`line 87: Astigar: command not found` — la segunda palabra de `HOME_ADDRESS`. Se
+generan así:
+
+```python
+def citar(v):
+    # Dentro de comillas simples bash no interpreta NADA: ni espacios, ni $, ni
+    # saltos de línea. Solo hay que escapar la propia comilla simple.
+    return "'" + v.replace("'", "'\''") + "'"
+```
+
+Y se valida **antes** de subirlo: `bash -n <fichero>`, y un `source` de prueba
+comprobando que las variables cargan enteras. `run.sh` lo lee con `.` en vez de
+parsearlo línea a línea por la misma razón: para que la PEM sobreviva.
 
 `.gitignore` cubre `backend/.env.*` con excepción para `.env.example`: antes, un
 `backend/.env.produccion` **no** estaba cubierto y habría entrado en un repo
@@ -109,33 +128,73 @@ teléfono de `docs/LLAMADAS.md` no está activo en producción hoy.**
 
 Se puede hacer sin cortar el servicio: los dos backends conviven hasta el 6.
 
-**1. Copiar el add-on al Green.** La carpeta `addon/life-assistant/` de este
-repositorio va a `/addons/life-assistant` del Green, por el Samba que ya está
-instalado (`\\<ip-del-green>\addons`). Está vacía hoy: no hay ningún otro add-on
-local que romper.
+Los pasos 1 a 3 **ya están hechos** (2026-09-06). Se dejan escritos porque
+ninguno salió a la primera y las trampas son reutilizables.
 
-**2. Poner el fichero de entorno.** Copia
-`~/.life-assistant/backend.env.produccion` a `/config/life_assistant.env` (por
-Samba, `\\<ip-del-green>\config`). Es la ruta que espera `config.yaml`; si la
-cambias, cámbiala también en las opciones del add-on. Queda en texto plano en el
-Green, como `secrets.yaml` de HA — es tu aparato, en tu casa, y no sale de ahí.
+**1. Copiar el add-on al Green.** La carpeta `addon/life-assistant/` va a
+`/addons/life-assistant`. Dos cosas que cuestan un rato descubrir:
 
-**3. Instalar.** Ajustes → Add-ons → Tienda → ⋮ → *Buscar actualizaciones*. El
-add-on aparece bajo «Local add-ons». Instálalo (la primera construcción tarda
-varios minutos: clona el repo e instala las dependencias) y arráncalo. Si algo
-falla, el log del add-on lo dice: `run.sh` comprueba a mano que existan
-`SECRET_KEY` y `DASHBOARD_PASSWORD` y aborta con un mensaje legible en vez de
-dejar que el backend reviente al importar.
+- **`/addons` pertenece a `root` y el add-on de SSH entra como `hassio`.** Sin
+  `sudo` la escritura falla con `Permission denied`, y si el script no comprueba
+  el código de salida se queda tan tranquilo diciendo «copiado» sobre ficheros
+  que no existen. Pasó exactamente eso. Usa `sudo tee` y **verifica con
+  `sha256sum` a los dos lados**.
+- **El add-on de SSH no tiene subsistema SFTP** (`paramiko.open_sftp()` falla con
+  `Channel closed`). Se escribe con `exec_command("sudo tee <ruta>")` +
+  `sendall`, que es el patrón que ya documenta `HOMEASSISTANT.md`.
 
-**4. Exponerlo a internet.** Hace falta porque el frontend de Vercel, el Atajo
-de iOS, Health Auto Export y los workflows de GitHub llaman desde fuera. Ya
-tienes el add-on de **Tailscale** instalado, así que la vía corta es **Tailscale
-Funnel** sobre el puerto 8080; da una URL `https://<host>.<tailnet>.ts.net`
-válida y con TLS. Dos avisos: hay que **habilitar Funnel en la ACL del tailnet**
-desde la consola de Tailscale (no basta con el add-on), y Funnel solo publica en
-los puertos 443, 8443 y 10000, así que el mapeo va de uno de esos al 8080. Si no
-quieres depender de Tailscale, el add-on de **Cloudflare Tunnel** hace lo mismo
-con un dominio propio.
+**2. Poner el fichero de entorno.** `~/.life-assistant/backend.env.produccion` va
+a `/config/life_assistant.env`, con `chmod 600` y `chown root:root` (el add-on
+corre como root; nadie más necesita leerlo). Es la ruta que espera `config.yaml`.
+Queda en texto plano en el Green, como `secrets.yaml` de HA — es tu aparato, en
+tu casa, y no sale de ahí. **Léete antes la sección de los secretos**: las
+comillas simples no son un detalle de estilo.
+
+**3. Instalar.** Y aquí la trampa mayor:
+
+- **Home Assistant renombró los add-ons a «apps» en 2026.2.** El comando para que
+  el Supervisor detecte un add-on local **no** es `ha addons reload` (que existe,
+  no falla y no hace lo que crees) sino **`ha store reload`**.
+- **`ha apps` lista los INSTALADOS, no los disponibles.** Para ver si el
+  Supervisor ha detectado el add-on local hay que mirar **`ha store apps`**. Se
+  perdió un buen rato creyendo que el `config.yaml` estaba mal cuando ya estaba
+  bien: solo se estaba mirando la lista equivocada.
+- El slug queda como `local_life-assistant`. Instalar con
+  `ha apps install local_life-assistant`; la construcción tardó **2 minutos** en
+  el Green.
+- Si algo falla, `ha apps logs local_life-assistant` lo dice: `run.sh` comprueba a
+  mano `SECRET_KEY` y `DASHBOARD_PASSWORD` y aborta con un mensaje legible en vez
+  de dejar que el backend reviente al importar.
+
+**4. Exponerlo a internet.** Hace falta porque el frontend de Vercel, el Atajo de
+iOS, Health Auto Export y los workflows de GitHub llaman desde fuera.
+
+**Tailscale NO sirve para esto, aunque lo parezca.** El add-on ofrece dos cosas y
+ninguna es lo que se necesita:
+
+- `share_homeassistant: funnel` publica **la interfaz de Home Assistant** en
+  internet. No es nuestro backend, y activarlo expone la casa entera.
+- La lista `services` son *Tailscale Services*, que por debajo ejecutan
+  `tailscale serve`, **no `funnel`**: publican dentro del tailnet, no en
+  internet. Además exigen que el nodo esté **etiquetado** (`service hosts must be
+  tagged nodes`), lo que obliga a definir `tagOwners` en la ACL y
+  `advertise_tags` en el add-on, y a **declarar el servicio en la consola antes
+  de anunciarlo** (el orden es Define → Advertise → Approve; al revés no aparece
+  nada). Se llegó hasta el final de ese camino y lo que da es acceso por VPN, que
+  no vale si quieres que la web sea pública.
+
+Si lo que quieres es acceso por tailnet, sirve y es más seguro. Si quieres URL
+pública, la vía es **Cloudflare Tunnel** (add-on `9074a9fa_cloudflared`, ya
+instalado): no abre ningún puerto del router porque el túnel sale de dentro
+hacia fuera. Necesita **un dominio propio en Cloudflare** — hay TLDs desde 1-3
+€/año, y comprarlo en Cloudflare Registrar ahorra el trámite de los nameservers.
+El backend se publica con `additional_hosts`, apuntando a
+`http://127.0.0.1:8080`.
+
+Descartadas por el camino: **ngrok** (regala un dominio estático permanente, pero
+desde febrero de 2026 corta las sesiones **a las 2 horas**), **DuckDNS** (gratis y
+estable, pero obliga a abrir el 443 del router y el Green lleva también la casa) y
+**`.eu.org`** (gratis, pero la aprobación es manual y tarda semanas).
 
 **5. Verificar, con Fly todavía en marcha:**
 
@@ -197,6 +256,17 @@ prompt de la rutina del briefing.
   memoria de verdad, la primera señal a mirar es HA yendo lento.
 - **La luz y la línea de casa.** Si se van, se va el backend. Antes solo se iba
   media función; ahora se va entera. A cambio, HA ya dependía de eso.
+- **`Protection mode` del add-on de SSH.** Está activado, y eso bloquea el acceso
+  a Docker desde la sesión SSH (`docker exec` responde con un aviso, no con un
+  error claro). Es una buena defensa y no hay que desactivarla a la ligera: casi
+  todo se puede hacer con el CLI `ha` y la API del Supervisor, que sí funcionan.
+- **La API del Supervisor REEMPLAZA las opciones de un add-on, no las fusiona.**
+  Mandar solo el campo que quieres cambiar falla con `Missing option '...'`. Hay
+  que leer las opciones actuales, modificar la clave y devolver el objeto entero.
+- **Publicar el puerto en el host no es opcional.** `ports: 8080/tcp: 8080` en
+  `config.yaml` es lo que permite que Cloudflared (y Tailscale) lleguen al backend
+  por `http://127.0.0.1:8080`: sus validaciones solo aceptan `127.0.0.1`, no la IP
+  de la red local ni el nombre del contenedor.
 - **El sondeo, que ahora es local.** Si un día vuelve a apuntar a la URL pública
   por error, el tráfico sale a internet y vuelve, y todo seguirá funcionando —
   peor y sin avisar. Al tocar los sensores, mira que la URL sea la IP local.
