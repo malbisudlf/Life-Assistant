@@ -20,11 +20,14 @@ on:
         description: 'Acierto mínimo (0-1). Vacío = el de evals/casos.json.'
         required: false
         default: ''
-  schedule:
-    # Lunes a las 05:20 UTC. Semanal y no diario: es una medida de tendencia y el
-    # catálogo no cambia todos los días. Lunes temprano para que el resultado esté
-    # cuando empieza la semana.
-    - cron: '20 5 * * 1'
+# SIN `schedule`, y esto es una decisión, no un olvido. Nació con un cron semanal (lunes
+# 05:20 UTC) que **nunca llegó a medir nada**: `OPENAI_API_KEY` no estaba configurado
+# como secret, así que cada lunes el run moría en 17 segundos diciéndolo, sin que nadie
+# lo mirara. Se quitó el 2026-09-07 en vez de poner la clave porque un cron que gasta
+# ~130 llamadas de pago a la semana, para siempre y sin que nadie mire el resultado, es
+# exactamente la forma de la factura de Fly que este proyecto ya se comió una vez. Las
+# evals se lanzan a mano cuando cambia el catálogo de herramientas, que es cuando dicen
+# algo. Ver `docs/EVALS.md`.
 
 # Dos tiradas a la vez serían dinero gastado dos veces para medir lo mismo.
 concurrency:

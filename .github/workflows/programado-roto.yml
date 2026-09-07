@@ -1,0 +1,71 @@
+name: Avisar de que un programado se ha roto
+
+# Los workflows que corren SOLOS no tienen quien los mire. Este se lo cuenta al backend,
+# que deja un aviso en el móvil (`POST /programado/roto`).
+#
+# Por qué existe: el 2026-09-07 se descubrió que la copia de seguridad semanal de Supabase
+# **no se había ejecutado nunca**. Le faltaban los secrets, así que cada lunes moría en
+# diez segundos en un log público que nadie abre, mientras `docs/COPIA_SEGURIDAD.md`
+# describía un respaldo que no existía. El canal de averías (`ci-averiado.yml`) no lo
+# cazó porque solo mira el CI.
+#
+# Diferencia con `ci-averiado.yml`, y es toda la diferencia: aquel LANZA un agente que
+# arregla el código; éste solo avisa. Un cron roto casi nunca es código —es un secret que
+# falta, una cuota agotada, una migración sin aplicar— y ninguna de esas cosas las puede
+# tocar una sesión de Claude Code.
+#
+# El CI no está en la lista: ya tiene su propio camino, que además sabe arreglarlo.
+on:
+  workflow_run:
+    workflows:
+      - Copia de seguridad de Supabase
+      - Revisión nocturna del código
+      - Evals de Jarvis          # hoy solo se lanza a mano, pero si falla tampoco lo ve nadie
+    types: [completed]
+
+# Un aviso por run. Si dos programados se rompen a la vez, son dos avisos distintos y
+# tienen que salir los dos: la clave lleva el id del run.
+concurrency:
+  group: programado-roto-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  avisar:
+    name: Avisar al backend
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /programado/roto
+        env:
+          BACKEND_URL:    ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN: ${{ secrets.REVISION_TOKEN }}
+          NOMBRE:         ${{ github.event.workflow_run.name }}
+          RUN_URL:        ${{ github.event.workflow_run.html_url }}
+          CABEZA:         ${{ github.event.workflow_run.head_sha }}
+        # Todo por variable de entorno y dentro del JSON con jq, nunca interpolado en el
+        # script: `github.event.workflow_run.name` lo escribe quien edita un workflow, y
+        # la regla del proyecto es que nada que escriba una persona se pega en un shell.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN." >&2
+            exit 1
+          fi
+
+          DETALLE="Ha fallado sobre ${CABEZA:0:7}."
+          CUERPO=$(jq -n --arg w "$NOMBRE" --arg u "$RUN_URL" --arg d "$DETALLE" \
+            '{workflow: $w, url: $u, detalle: $d}')
+
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/programado/roto" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 60 \
+            --retry 3 --retry-delay 10 --retry-connrefused \
+            -d "$CUERPO")
+
+          echo "Avisado: $RESPUESTA"
+          echo "\`$NOMBRE\` roto ($RUN_URL): \`$RESPUESTA\`" >> "$GITHUB_STEP_SUMMARY"

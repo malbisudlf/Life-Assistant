@@ -60,7 +60,7 @@ Ninguna de estas se relaja. Son lo que separa esto de un sistema que despliega s
 | `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono si `LLAMADAS=1`) |
 | `GET /despliegue/pendiente` | `backend/main.py` | Qué anunciar al descolgar la pantalla de llamada. Solo lee |
 | `PantallaLlamada` | `src/components/Dashboard.jsx` | La pantalla de llamada entrante que abre el botón «Hablarlo» |
-| `POST /despliegue/{id}/accion` | `backend/main.py` | La respuesta al botón: mergea el PR y dispara `deploy-backend.yml` |
+| `POST /despliegue/{id}/accion` | `backend/main.py` | La respuesta al botón: mergea el PR. **No despliega** — ver «El último paso lo das tú» |
 | Herramienta `desplegar` | El registro de Jarvis | Lo mismo, hablando, para cuando el aviso salió por correo y no traía botones |
 | `supabase/migrations/20260831_averias.sql` | Aquí | Las columnas `origen`, `pr_numero` y `detalle` sobre `revision_hallazgos` |
 
@@ -72,9 +72,37 @@ dónde vino y hasta dónde llega. Los estados son ahora:
 pendiente  → hay algo que decidir (el camino del issue nocturno)
 arreglando → hay una sesión trabajando en ello
 listo      → hay un PR con el CI en verde esperando tu permiso
-desplegado → dijiste que sí y se desplegó
+mergeando  → dijiste que sí y se está mergeando (transitorio)
+mergeado   → dijiste que sí y el arreglo está en `main`
 descartado → dijiste que no
 ```
+
+`mergeado` se llamaba `desplegado` y se renombró el 2026-09-07, cuando el botón dejó de
+fingir que desplegaba. Las filas viejas conservan el nombre antiguo: son estados de un
+camino que ya no existe y no hay nada que migrar.
+
+## El último paso lo das tú
+
+**El botón mergea. No despliega, y no puede.** Con el backend en el Green, desplegar es
+pulsar *Reconstruir* en el add-on `local_life-assistant` desde la interfaz de Home
+Assistant. No hay nada que GitHub pueda disparar para conseguirlo: el `Protection mode`
+del add-on de SSH bloquea `docker` y la API del Supervisor no está expuesta a internet.
+
+Hasta el 2026-09-07 esto no era así **de la peor manera posible**: el botón seguía
+disparando `deploy-backend.yml`, que desplegaba a Fly, una máquina que desde la mudanza ya
+no atendía tráfico. Dar el permiso desde el móvil no cambiaba nada en producción, y el
+aviso contestaba «desplegando» igualmente. Un botón que miente es peor que no tener botón,
+porque además te hace creer que el arreglo ya está puesto.
+
+Ahora el aviso, la respuesta hablada y la herramienta de Jarvis dicen los dos pasos: el
+que doy yo (subirlo a `main`) y el que das tú (reconstruir el add-on). `deploy-backend.yml`
+y `backend/fly.toml` se retiraron en el mismo cambio.
+
+**Si algún día se quiere automatizar de verdad**: el add-on puede reconstruirse a sí mismo
+llamando a la API del Supervisor (`POST /addons/local_life-assistant/rebuild`) si se le dan
+`hassio_api: true` y `hassio_role: manager` en `config.yaml`. Se descartó a propósito: si la
+construcción falla, el add-on se queda parado y te quedas sin backend **y sin nadie que te
+avise**, que es justo el escenario que este canal existe para evitar.
 
 ## Contestar hablando
 
@@ -118,11 +146,11 @@ una rama de trabajo no salta, ni aunque el CI falle.
 
 ### 3. La credencial de despliegue
 
-`DEPLOY_GITHUB_TOKEN` es un PAT de GitHub con permiso para mergear PRs y lanzar
-workflows (`contents: write`, `pull_requests: write`, `actions: write` sobre este
-repositorio). **Es la credencial más peligrosa del backend**: con ella se toca
-producción. Sin configurar, el botón de desplegar lo dice en vez de fallar en silencio, y
-todo lo demás —detectar, arreglar, avisar, llamar— sigue funcionando igual.
+`DEPLOY_GITHUB_TOKEN` es un PAT de GitHub con permiso para mergear PRs (`contents: write`,
+`pull_requests: write` sobre este repositorio). Ya no hace falta `actions: write`: no queda
+ningún workflow que disparar. **Es la credencial más peligrosa del backend**: con ella se
+escribe en `main`. Sin configurar, el botón lo dice en vez de fallar en silencio, y todo lo
+demás —detectar, arreglar, avisar, llamar— sigue funcionando igual.
 
 ### 4. Contestar hablando
 

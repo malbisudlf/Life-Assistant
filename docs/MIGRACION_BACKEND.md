@@ -251,7 +251,7 @@ justo por lo que se olvidan.
 | **`PROJECT_STATE.md`** | notas — **ignorado por git** |
 | iPhone | el Atajo de iOS y Health Auto Export |
 | claude.ai | las rutinas que llaman al backend |
-| GitHub | `revision-aviso.yml` y los workflows que apunten al backend |
+| GitHub | `revision-aviso.yml` y los workflows que apunten al backend, **y la variable de Actions `BACKEND_URL`**, que no está en ningún fichero y por eso se olvidó |
 | Azure | **`REDIRECT_URI` está registrado en el App Registration**: añade el nuevo antes de probar el login de Microsoft, o el OAuth falla con un error de redirect que no dice nada útil |
 | Código | `src/components/Dashboard.jsx:31` y `agent/agent.py:43`, que llevan la URL de Fly por defecto |
 | Docs | `CLAUDE.md`, `docs/DESPLIEGUE.md`, `docs/SALUD.md`, `docs/AVISAME.md`, `agent/README.md`, `agent/PUESTA_A_PUNTO.md`, `backend/corregir_energia_kj.py` |
@@ -259,8 +259,21 @@ justo por lo que se olvidan.
 **7. Apagar Fly, y no antes.** Deja pasar unos días y mira `fly logs`: si no
 llega tráfico, no queda nada apuntando ahí. Es mejor detector de olvidos que
 releer la tabla. Cuando esté mudo: `fly apps destroy <app>` y quita el método de
-pago. Después, retirar `backend/fly.toml` y
-`.github/workflows/deploy-backend.yml`.
+pago.
+
+`backend/fly.toml` y `.github/workflows/deploy-backend.yml` **ya están retirados**
+(2026-09-07), junto con el botón que disparaba aquel workflow: ver
+`docs/AVERIAS.md`, «El último paso lo das tú». Queda destruir la app y quitar la
+tarjeta, que son los dos pasos que solo se pueden dar desde la web de Fly.
+
+**Y un apuntador que la tabla de arriba no cazó**, porque no está en ningún
+fichero del repositorio: la **variable de Actions `BACKEND_URL`** seguía apuntando
+a la URL vieja de Fly. La usan `ci-averiado.yml`,
+`revision-aviso.yml` y `pr-listo.yml`, así que **todo el canal de averías y el
+aviso de la revisión nocturna llevaban desde la mudanza hablándole a la máquina
+equivocada**. Corregida el 2026-09-07. La moraleja para la próxima mudanza: los
+apuntadores no viven solo en ficheros — hay variables y secrets en GitHub, en
+Vercel y en claude.ai que ningún `grep` encuentra.
 
 ### Cómo se despliega a partir de ahora
 

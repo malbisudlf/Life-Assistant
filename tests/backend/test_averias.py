@@ -122,6 +122,8 @@ class TestElArregloEstaListo:
 
         aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
         assert aviso["regla"] == main.REGLA_DESPLIEGUE and "122" in aviso["texto"]
+        # Cabe entero: el corte a 200 se comía justo el paso que falta.
+        assert len(aviso["texto"]) <= main.RECORDATORIO_MAX_TEXTO
         # Y los botones de ESE aviso son los del despliegue, no los de la revisión.
         acciones = main._acciones_aviso(rid, main.REGLA_DESPLIEGUE)
         assert [a["title"] for a in acciones] == ["Desplegar", "Ahora no"]
@@ -160,29 +162,39 @@ class TestElArregloEstaListo:
         # preguntas. Recitar el título del fallo del CI antes de la pregunta solo mete
         # veinte segundos de altavoz por delante de la única decisión que hay que tomar.
         assert "CI ha fallado" not in llamadas[0][0]
-        assert "despliegue" in llamadas[0][0]
+        assert "main" in llamadas[0][0]
 
 
 class TestElPermisoDeDespliegue:
     def _listo(self, mock_requests, rid, pr=122):
         mock_requests.add("PATCH", "revision_hallazgos",
-                          FakeResponse([{"id": rid, "pr_numero": pr, "estado": "desplegando"}]))
+                          FakeResponse([{"id": rid, "pr_numero": pr, "estado": "mergeando"}]))
 
-    def test_desplegar_mergea_y_lanza_el_deploy(self, client, mock_requests, correos):
+    def test_desplegar_mergea_y_no_finge_haber_desplegado(self, client, mock_requests, correos):
+        """Mergea, dice que falta reconstruir, y NO dispara ningún workflow.
+
+        Hasta el 2026-09-07 este botón disparaba `deploy-backend.yml`, que desplegaba a
+        Fly. Tras la mudanza al Green eso era un despliegue a una máquina sin tráfico: el
+        botón contestaba «desplegado» sin haber tocado producción.
+        """
         rid = main._uuid_averia("ci", "9911")
         self._listo(mock_requests, rid)
         mock_requests.add("PUT", "/merge", FakeResponse({}, 200))
-        mock_requests.add("POST", "dispatches", FakeResponse({}, 204))
 
         r = client.post(f"/despliegue/{rid}/accion", json={"accion": "desplegar"},
                         headers=CABECERA)
         assert r.status_code == 200 and r.json()["hecho"] is True
+        # Lo que hace que todos los transportes digan el paso que falta.
+        assert r.json()["falta_reconstruir"] is True
 
         merge = mock_requests.called("PUT", "/merge")[0][2]["json"]
         # Squash con mensaje explícito: dejar que GitHub lo autogenere le hace añadir un
         # `Co-authored-by` por su cuenta, que es justo lo que CLAUDE.md prohíbe.
         assert merge["merge_method"] == "squash" and merge["commit_message"]
-        assert mock_requests.called("POST", "dispatches")
+        # El add-on lo reconstruye una persona: no hay nada que GitHub pueda disparar.
+        assert not mock_requests.called("POST", "dispatches")
+        cierre = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
+        assert cierre["estado"] == "mergeado"
 
     def test_ahora_no_no_toca_produccion(self, client, mock_requests):
         rid = main._uuid_averia("ci", "9911")
@@ -214,24 +226,25 @@ class TestElPermisoDeDespliegue:
         vuelta = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
         assert vuelta["estado"] == "listo"
 
-    def test_si_el_deploy_no_arranca_no_se_dice_que_no_se_mergeo(self, client, mock_requests, correos):
-        """El merge no se puede deshacer: decir 'no se ha desplegado' escondería que
-        `main` ya lleva el cambio."""
-        rid = main._uuid_averia("ci", "9911")
-        self._listo(mock_requests, rid)
-        mock_requests.add("PUT", "/merge", FakeResponse({}, 200))
-        mock_requests.add("POST", "dispatches", FakeResponse({}, 403))
+    def test_el_texto_dice_el_paso_que_falta(self, client, mock_requests, correos):
+        """El aviso tiene que nombrar la reconstrucción del add-on.
 
-        r = client.post(f"/despliegue/{rid}/accion", json={"accion": "desplegar"},
-                        headers=CABECERA)
-        assert r.status_code == 502
-        vuelta = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
-        assert vuelta["estado"] == "desplegado"
-        assert any("a mano" in c[1] for c in correos)
+        Es lo único que separa este botón de uno que miente: `main` con el arreglo dentro
+        no es producción hasta que alguien reconstruye el add-on en Home Assistant.
+        """
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("GET", "revision_hallazgos",
+                          FakeResponse([{"id": rid, "origen": "ci", "detalle": "algo"}]))
+        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+
+        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert "reconstruye" in aviso["texto"] and "add-on" in aviso["texto"]
 
     def test_sin_credencial_lo_dice_en_vez_de_fallar_en_silencio(self, monkeypatch):
         monkeypatch.setattr(main, "DEPLOY_GITHUB_TOKEN", "")
-        resultado = main._desplegar(122)
+        resultado = main._mergear_arreglo(122)
         assert resultado["ok"] is False and "DEPLOY_GITHUB_TOKEN" in resultado["motivo"]
 
     def test_sin_auth_no_se_despliega(self, client):
@@ -386,3 +399,47 @@ class TestElPermisoCaduca:
         r = main._j_desplegar()
         assert r["ok"] is False
         assert not mock_requests.called("PUT", "pulls")
+
+
+class TestElAvisoDeLosProgramados:
+    """`POST /programado/roto`: que un cron que se rompe deje de ser invisible.
+
+    El agujero que cierra: la copia de seguridad semanal de Supabase **no se ejecutó
+    nunca** (le faltaban los secrets) y nadie se enteró en meses, porque el canal de
+    averías solo mira el CI y un workflow programado no tiene quien lo mire.
+    """
+
+    def test_avisa_sin_lanzar_ningun_arreglo(self, client, mock_requests):
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        r = client.post("/programado/roto",
+                        json={"workflow": "Copia de seguridad de Supabase",
+                              "url": "https://github.com/u/r/actions/runs/1",
+                              "detalle": "Ha fallado sobre abc1234."},
+                        headers=REVISION)
+        assert r.status_code == 200 and r.json()["avisado"] is True
+
+        aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert aviso["regla"] == main.REGLA_PROGRAMADO
+        assert "Copia de seguridad" in aviso["texto"]
+        # Un cron roto casi nunca es código, y una sesión no puede tocar los secrets del
+        # repositorio: aquí se avisa a una persona y ya.
+        assert not mock_requests.called("POST", FIRE_URL)
+
+    def test_no_repite_el_mismo_workflow(self, client, mock_requests):
+        """La huella es el workflow, no el run: fallar cada semana por lo mismo es UN
+        problema, no uno nuevo cada lunes."""
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        client.post("/programado/roto", json={"workflow": "Copia de seguridad de Supabase"},
+                    headers=REVISION)
+        apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert apuntado["huella"] == "Copia de seguridad de Supabase"
+
+    def test_solo_enlaces_https(self, client, mock_requests):
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        client.post("/programado/roto",
+                    json={"workflow": "X", "url": "javascript:alert(1)"}, headers=REVISION)
+        aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert "javascript" not in aviso["texto"]
+
+    def test_sin_token_no_avisa(self, client):
+        assert client.post("/programado/roto", json={"workflow": "X"}).status_code == 403

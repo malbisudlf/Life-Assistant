@@ -110,6 +110,15 @@ class ErrorCopia(Exception):
     """Algo ha ido mal y la copia no vale. Siempre acaba en salida distinta de 0."""
 
 
+class TablaAusente(ErrorCopia):
+    """La tabla no existe en esta instalación (404 de PostgREST).
+
+    Hereda de ErrorCopia para que quien no la trate expresamente siga tumbando la copia:
+    lo que no se puede es que una tabla ausente pase inadvertida. `construir_copia` sí la
+    trata, y solo la perdona cuando la tabla no es obligatoria.
+    """
+
+
 def _cabeceras(clave: str) -> dict:
     return {
         "apikey": clave,
@@ -152,6 +161,16 @@ def descargar_tabla(tabla, orden, columnas, url, clave):
             raise ErrorCopia(
                 f"{tabla}: la petición a Supabase falló ({type(e).__name__})") from e
 
+        if r.status_code == 404:
+            # La tabla no existe. Casi siempre significa una migración del repositorio
+            # que nadie llegó a pegar en el editor SQL de Supabase, y eso NO puede
+            # costar la copia de las demás: el 2026-09-07 `salud_ajustes` (migración
+            # 20260824, sin aplicar) tumbaba el volcado entero, así que las 1.281 filas
+            # de `health_metrics` llevaban desde siempre sin respaldo por una tabla de
+            # ajustes con cero filas. Se devuelve el aviso y `construir_copia` decide:
+            # si la tabla era obligatoria, ahí sí muere la copia.
+            raise TablaAusente(tabla)
+
         if r.status_code >= 300:
             # Nunca el cuerpo de la respuesta: puede traer filas dentro.
             raise ErrorCopia(f"{tabla}: Supabase respondió {r.status_code}")
@@ -183,15 +202,31 @@ def construir_copia(url, clave, tablas=TABLAS):
     """Vuelca todas las tablas a un diccionario listo para serializar."""
     datos = {}
     recuentos = {}
-    for tabla, orden, _obligatoria, columnas in tablas:
-        filas = descargar_tabla(tabla, orden, columnas, url, clave)
+    ausentes = []
+    for tabla, orden, obligatoria, columnas in tablas:
+        try:
+            filas = descargar_tabla(tabla, orden, columnas, url, clave)
+        except TablaAusente:
+            # Obligatoria y ausente es una copia que no vale: la instalación no es la que
+            # este script cree estar copiando.
+            if obligatoria:
+                raise ErrorCopia(f"{tabla}: la tabla no existe y es obligatoria")
+            ausentes.append(tabla)
+            print(f"  {tabla}: NO EXISTE en Supabase (¿migración sin aplicar?)")
+            continue
         datos[tabla] = filas
         recuentos[tabla] = len(filas)
         print(f"  {tabla}: {len(filas)} filas")
+    # Las ausentes van DENTRO del volcado y no solo en el log: quien restaure dentro de
+    # seis meses tiene que poder distinguir "esta tabla estaba vacía" de "esta tabla no
+    # existía", que son dos historias distintas y solo una es un problema.
+    if ausentes:
+        print(f"AVISO: {len(ausentes)} tabla(s) sin crear en Supabase: {', '.join(ausentes)}")
     return {
         "version":     VERSION_FORMATO,
         "generado_en": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "recuentos":   recuentos,
+        "ausentes":    ausentes,
         "tablas":      datos,
     }
 

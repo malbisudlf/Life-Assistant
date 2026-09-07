@@ -30,8 +30,13 @@ import { vigilarInterrupcion } from "../lib/vozMicro";
 
 // Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
 const API = import.meta.env.VITE_API_URL || "https://api.lifeassistantbackend.bid";
-const HA_URL = (import.meta.env.VITE_HA_URL || "http://192.168.1.200:8123") +
+// Sin valor por defecto a propósito: aquí había una IP de la red doméstica escrita a
+// mano, en un repositorio público y contra la norma de CLAUDE.md. Sin `VITE_HA_URL` el
+// enlace a Home Assistant simplemente no se ofrece (ver `haDisponible`), que es mejor
+// que ofrecer uno que solo funciona en una casa concreta.
+const HA_URL = (import.meta.env.VITE_HA_URL || "") +
                (import.meta.env.VITE_HA_DASHBOARD_PATH || "/lovelace/tablet");
+const HA_DISPONIBLE = Boolean(import.meta.env.VITE_HA_URL);
 // Marcador en el título del evento que lo convierte en "entrega" para el widget de entregas
 const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
 // Identificador del agente PC, el mismo que manda el heartbeat desde agent/agent.py
@@ -6241,7 +6246,9 @@ export default function Dashboard() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ display: "flex", gap: 3 }}>
               <span style={s.appTabActive}>LA</span>
-              <span style={s.appTabInactive} onClick={() => { window.top.location.href = HA_URL; }}>HA</span>
+              {HA_DISPONIBLE && (
+                <span style={s.appTabInactive} onClick={() => { window.top.location.href = HA_URL; }}>HA</span>
+              )}
             </div>
             <span>
               <span style={s.statusDot} />

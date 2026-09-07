@@ -12,7 +12,7 @@ herramienta funciona — eso ya lo cubren `tests/backend` y el E2E.
 |---|---|
 | `evals/casos.json` | Los casos: petición en lenguaje natural → herramienta(s) aceptable(s). Y el umbral por defecto |
 | `evals/correr.py` | El runner. Importa `backend/main.py` para sacar el esquema real |
-| `.github/workflows/evals-jarvis.yml` | A mano (`workflow_dispatch`) y semanal (lunes). **No corre en cada push**: cuesta dinero |
+| `.github/workflows/evals-jarvis.yml` | **Solo a mano** (`workflow_dispatch`). Ni en cada push ni por cron: cuesta dinero |
 | `evals/resultados.json` | La salida de la última tirada. Ignorado por git — el histórico vive en los artefactos del workflow |
 
 ### Por qué existe
@@ -95,8 +95,22 @@ medida, y el catálogo crece más deprisa que los casos.
 Medido en la primera tirada real (63 casos × 2 modelos = 126 llamadas, 53 herramientas
 en el esquema): **~295.000 tokens de entrada y ~1.200 de salida por modelo**, unos 4.700
 tokens de entrada por llamada. A precios de septiembre de 2026 eso son unos **0,12 $ la
-tirada completa** (0,045 $ con `gpt-4o-mini` y 0,078 $ con `gpt-5-mini`). Con la tirada
-semanal, **menos de 7 $ al año**.
+tirada completa** (0,045 $ con `gpt-4o-mini` y 0,078 $ con `gpt-5-mini`). Una tirada
+semanal habrían sido menos de 7 $ al año.
+
+**Ese cron semanal se quitó el 2026-09-07, y la razón no es el precio.** Nunca llegó a
+medir nada: `OPENAI_API_KEY` no estaba dado de alta como secret, así que cada lunes el run
+moría en 17 segundos diciéndolo, en un log que nadie abría. Entre poner la clave y quitar
+el cron se eligió quitarlo: un gasto recurrente que nadie mira es la forma exacta que
+tenía la factura de Fly, y estas evals son una medida de **tendencia** que solo dice algo
+cuando cambia el catálogo de herramientas. Se lanzan entonces:
+
+```bash
+gh workflow run "Evals de Jarvis" --ref main
+```
+
+Si algún día vuelve el cron, con él tiene que volver `OPENAI_API_KEY` **y** alguien que
+mire el resultado.
 
 El esquema es casi todo el coste, y no se puede recortar sin dejar de medir lo que se
 quiere medir. Es la misma conclusión de `docs/JARVIS.md`: **el esquema no es una palanca

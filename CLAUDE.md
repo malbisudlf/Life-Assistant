@@ -93,6 +93,15 @@ mañana llega al móvil una notificación con dos botones: «Arreglarlo» —que
 sesión que lo arregla, abre PR y mergea si el CI pasa— y «No hacer nada». Todo en
 `docs/REVISION_NOCTURNA.md`.
 
+**Los workflows que corren solos avisan cuando se rompen** (`programado-roto.yml` →
+`POST /programado/roto` → aviso al móvil). Hace falta porque el canal de averías solo
+mira el CI: la copia de seguridad semanal de Supabase estuvo **meses fallando en cada
+ejecución sin que nadie se enterara** (le faltaban los secrets), mientras
+`docs/COPIA_SEGURIDAD.md` describía un respaldo que no existía. Ese aviso no lanza
+ninguna sesión de arreglo, a diferencia de `ci-averiado.yml`: un cron roto casi siempre
+es un secret, una cuota o una migración sin aplicar, y nada de eso lo puede tocar un
+agente.
+
 ```bash
 npm run test:e2e          # Playwright: navegador real contra el build + backend real
 ```
@@ -259,9 +268,14 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
      solo gasto por IP abusiva. Al añadir un endpoint costoso, usa este.
    - `_client_ip()` (compartida por los dos) **solo usa fuentes que el cliente no
      controla**: `Fly-Client-IP` (y solo si `FLY_APP_NAME` confirma que estamos en
-     Fly) o el socket. Nunca fiarse de `X-Forwarded-For` por defecto: coger su
-     primera entrada dejaba el límite a merced de quien rotara la cabecera.
-     `TRUST_FORWARDED_FOR=1` es el opt-in para proxies propios.
+     Fly), `CF-Connecting-IP` (y solo con `TRUST_CLOUDFLARE=1`) o el socket. Nunca
+     fiarse de `X-Forwarded-For` por defecto: coger su primera entrada dejaba el
+     límite a merced de quien rotara la cabecera. `TRUST_FORWARDED_FOR=1` es el opt-in
+     para proxies propios. **`TRUST_CLOUDFLARE=1` hace falta desde la mudanza al
+     Green**: todo lo que entra por el Cloudflare Tunnel llega con la IP del túnel, así
+     que sin él el límite por IP de `/ideas/audio` es un cubo único para todo internet.
+     Va tras un interruptor y no encendido por defecto porque esa cabecera solo es de
+     fiar si nadie puede alcanzar el puerto local sin pasar por el túnel.
 4. **Comparaciones de credenciales siempre con `hmac.compare_digest`**, nunca `==`.
 5. **Errores de Supabase**: usa `_supabase_error(r)` — loguea el detalle real en el
    servidor y devuelve un 502 genérico. Nunca reenvíes `r.text` de Supabase al cliente.
@@ -324,7 +338,11 @@ aparato), no cuesta nada y no sale a internet. La moraleja no era sobre Fly: **u
 de infraestructura escrito aquí y nunca vuelto a comprobar acaba sustituyendo a la
 realidad.**
 
-**Migraciones de Supabase**: se aplican a mano desde el editor SQL. Las que hay:
+**Migraciones de Supabase**: se aplican a mano desde el editor SQL, y **eso significa
+que se olvidan**: el 2026-09-07 se descubrió que `20260824_salud_ajustes` llevaba desde
+agosto sin aplicar, así que `PATCH /health/ajustes` respondía 502 y la copia de seguridad
+entera moría al llegar a esa tabla. Al añadir una migración, aplícala el mismo día.
+Las que hay:
 `20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
 `20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
 `20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
@@ -385,12 +403,9 @@ realidad.**
   Home Assistant, que clona este repositorio. Nunca en automático al hacer push, y
   **una sesión de Claude no despliega nunca** — ni la que arregla una avería (su skill
   se lo prohíbe explícitamente) ni ninguna otra.
-  - **⚠️ El camino de las averías quedó a medias con la mudanza al Green.**
-    `docs/AVERIAS.md` describe que el permiso desde el móvil o por teléfono dispara el
-    workflow `Deploy backend (Fly.io)` (`.github/workflows/deploy-backend.yml`). Ese
-    workflow **sigue existiendo y sigue desplegando a Fly**, que ya no atiende tráfico:
-    aprobar un despliegue por ahí hoy no cambia nada en producción y no avisa de ello.
-    Antes de apagar Fly hay que decidir qué hace ese botón — reconstruir el add-on no
-    se puede lanzar desde GitHub, porque el `Protection mode` del add-on de SSH bloquea
-    `docker` y no hay API del Supervisor expuesta a internet. Mientras no se resuelva,
-    **el permiso de despliegue del móvil es un botón que no hace nada.**
+  - **El permiso del móvil mergea, no despliega** (resuelto el 2026-09-07). Disparaba
+    `deploy-backend.yml` → Fly, que ya no atiende tráfico: aprobar un despliegue no
+    cambiaba nada en producción y aun así contestaba «desplegando». Hoy el botón mergea
+    el PR y el aviso dice en voz alta el paso que falta —reconstruir el add-on—, que es
+    el único que no se puede automatizar desde GitHub. `deploy-backend.yml` y
+    `backend/fly.toml` ya no existen. Ver `docs/AVERIAS.md`, «El último paso lo das tú».
