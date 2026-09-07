@@ -8825,6 +8825,24 @@ HUECO_ENTRENO_MIN  = int(os.getenv("HUECO_ENTRENO_MIN", "90"))
 # regla no corre: adivinar cuál de las entidades del catálogo es el PC por su nombre es
 # la clase de suposición que acaba apagando otra cosa.
 PC_ENTIDAD         = os.getenv("PC_ENTIDAD", "")
+# Qué entidades cuentan para el aviso de "te has ido y te dejaste algo encendido".
+#
+# Lista blanca de entity_ids separados por coma. Sin ella, el aviso miraba TODO el
+# dominio `switch`, y un catálogo real de una casa con Alexas trae 166 switches de los
+# que casi ninguno es un aparato: "No molestar", "Repetir", "Barajar", "Anuncios",
+# "Auto-off enabled", "LED"… son AJUSTES, y un ajuste en `on` no es nada que apagar al
+# salir de casa. El aviso avisaba de ellos y ahí se perdía lo único que importaba.
+#
+# Va como lista blanca y no como lista negra de patrones porque lo que se puede enumerar
+# es lo tuyo (cinco cosas), no todo lo que una integración inventa: cada Alexa nueva de
+# la casa traería ajustes que la lista negra no conoce, y el ruido volvería solo.
+#
+# Vacía, el aviso cae a `light` y `fan` — nunca `switch`. Es el comportamiento razonable
+# para quien despliegue el kit sin configurar nada (ver `docs/DESPLIEGUE.md`): pierde los
+# enchufes, pero no avisa de basura.
+SALIR_CASA_ENTIDADES = tuple(
+    e.strip() for e in os.getenv("SALIR_CASA_ENTIDADES", "").split(",") if e.strip()
+)
 _reglas_dia: dict = {}
 
 
@@ -9144,8 +9162,12 @@ def _regla_hueco_entreno(obtener_salud) -> int:
     ))
 
 
-def _encendidos(dominios: tuple) -> list:
-    """Entidades del catálogo de HA que están encendidas, de esos dominios.
+def _encendidos(dominios: tuple, solo: tuple = ()) -> list:
+    """Entidades del catálogo de HA que están encendidas.
+
+    Con `solo`, únicamente esas entidades (lista blanca de entity_ids) y se ignoran los
+    dominios: es lo que separa tus aparatos de los 166 switches de ajustes que trae una
+    casa con Alexas. Sin ella, cualquiera de esos dominios.
 
     El catálogo lo empuja HA cada hora, así que puede ir con retraso: por eso esto sirve
     para AVISAR y nunca para apagar nada por su cuenta.
@@ -9158,8 +9180,13 @@ def _encendidos(dominios: tuple) -> list:
     encendidas = []
     for e in _casa_entidades():
         eid = str(e.get("id") or "")
-        if eid.split(".")[0] in dominios and str(e.get("estado") or "").lower() == "on":
-            encendidas.append({"id": eid, "nombre": e.get("nombre") or eid})
+        if str(e.get("estado") or "").lower() != "on":
+            continue
+        if solo and eid not in solo:
+            continue
+        if not solo and eid.split(".")[0] not in dominios:
+            continue
+        encendidas.append({"id": eid, "nombre": e.get("nombre") or eid})
     return encendidas
 
 
@@ -9169,8 +9196,13 @@ def _regla_al_salir_de_casa() -> int:
     Se dispara al CAMBIAR la presencia a fuera, no en el tick: es el único momento en
     que este aviso sirve de algo. No apaga nada — el catálogo puede ir con una hora de
     retraso y apagar a ciegas por un dato viejo es peor que preguntar.
+
+    Qué entidades cuentan lo decide `SALIR_CASA_ENTIDADES`; el porqué está en su
+    comentario. Aquí solo importa que `switch` NO entra por dominio: es el dominio donde
+    las integraciones cuelgan sus ajustes, y un ajuste encendido no es un aparato que
+    apagar.
     """
-    luces = _encendidos(("light", "switch"))
+    luces = _encendidos(("light", "fan"), SALIR_CASA_ENTIDADES)
     puestos = 0
     if luces:
         nombres = [l["nombre"] for l in luces]
@@ -9184,7 +9216,10 @@ def _regla_al_salir_de_casa() -> int:
             entidades=[l["id"] for l in luces if l["id"] != PC_ENTIDAD],
             # El tamaño del catálogo va dentro a propósito: distingue "no había nada más
             # encendido" de "el catálogo llegó a medias", que desde el aviso se ven igual.
+            # Con qué criterio se miró va dentro: si un día el aviso no menciona algo
+            # que estaba encendido, la respuesta está aquí y no en el catálogo.
             motivo={"encendidas": nombres, "cuantas": len(luces),
+                    "lista_blanca": list(SALIR_CASA_ENTIDADES),
                     "entidades_en_catalogo": len(_casa_entidades())},
         ))
     if PC_ENTIDAD and any(str(e.get("id")) == PC_ENTIDAD

@@ -370,6 +370,15 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     por su cuenta**: el catálogo lo empuja HA cada hora y apagar con un dato viejo es
     peor que preguntar. El PC solo si `PC_ENTIDAD` está declarada: adivinar cuál es por
     el nombre acaba apagando otra cosa.
+    **Qué cuenta como "encendido" lo decide `SALIR_CASA_ENTIDADES`**, una lista blanca de
+    entity_ids. Antes miraba los dominios `light` y `switch` enteros, y ahí estaba el
+    fallo: un catálogo real de una casa con Alexas trae 166 switches, y casi ninguno es un
+    aparato — son AJUSTES ("No molestar", "Repetir", "Barajar", "Anuncios", "Auto-off
+    enabled", "LED"), varios de ellos en `on` por definición. El aviso los listaba y ahí
+    se perdía lo único que importaba. Es lista blanca y no lista negra de patrones porque
+    lo enumerable es lo tuyo (cinco cosas), no lo que inventa cada integración nueva: con
+    lista negra, la siguiente Alexa de la casa devolvería el ruido sola. Vacía, cae a
+    `light` y `fan` — **nunca `switch`**, que es donde vive esa basura.
     Su notificación lleva un botón más, **«Apagar»** (`POST /avisos/{id}/apagar`), porque
     un aviso que te obliga a abrir la app para resolverlo no ha terminado el trabajo. Tres
     cosas de ese botón:

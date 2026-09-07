@@ -240,6 +240,8 @@ class TestAlSalirDeCasa(_Reglas):
             {"id": "light.salon", "nombre": "Salón", "estado": "on"},
             {"id": "switch.lampara", "nombre": "Lámpara", "estado": "on"},
         ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES",
+                            ("light.salon", "switch.lampara"))
         main._regla_al_salir_de_casa()
         apuntado = self._apuntados(mock_requests)[0]
         assert apuntado["entidades"] == ["light.salon", "switch.lampara"]
@@ -252,11 +254,46 @@ class TestAlSalirDeCasa(_Reglas):
             {"id": "switch.pc", "nombre": "PC", "estado": "on"},
             {"id": "light.salon", "nombre": "Salón", "estado": "on"},
         ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("light.salon", "switch.pc"))
         monkeypatch.setattr(main, "PC_ENTIDAD", "switch.pc")
         main._regla_al_salir_de_casa()
         apuntado = self._apuntados(mock_requests)[0]
         assert "PC" in apuntado["texto"]
         assert apuntado["entidades"] == ["light.salon"]
+
+    def test_los_ajustes_de_las_alexas_no_son_cosas_encendidas(self, monkeypatch):
+        """El motivo de la lista blanca. Una casa con Alexas trae más de cien switches
+        que son AJUSTES —"No molestar", "Repetir", "Anuncios", "LED"— y muchos viven en
+        `on` por definición. Avisar de ellos tapaba lo único que había que apagar."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "switch.echo_no_molestar", "nombre": "Echo No molestar", "estado": "on"},
+            {"id": "switch.cocina_repetir",    "nombre": "Cocina Repetir",    "estado": "on"},
+            {"id": "switch.speaker_led",       "nombre": "speaker LED",       "estado": "on"},
+            {"id": "switch.speaker",           "nombre": "speaker",           "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("switch.speaker",))
+        assert main._regla_al_salir_de_casa() == 1
+
+    def test_sin_lista_blanca_nunca_mira_switches(self, monkeypatch, mock_requests):
+        """Comportamiento por defecto, para quien despliegue el kit sin configurar nada:
+        pierde los enchufes, pero no avisa de basura."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "switch.cocina_repetir", "nombre": "Cocina Repetir", "estado": "on"},
+            {"id": "light.salon",           "nombre": "Salón",          "estado": "on"},
+            {"id": "fan.techo",             "nombre": "Ventilador",     "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ())
+        assert main._regla_al_salir_de_casa() == 1
+        assert self._apuntados(mock_requests)[0]["entidades"] == ["light.salon", "fan.techo"]
+
+    def test_lo_que_esta_fuera_de_la_lista_no_se_cuela_por_su_dominio(self, monkeypatch):
+        """Con lista blanca manda ella, no los dominios: si `light.jardin` no está, es
+        que no la quieres en el aviso aunque sea una luz."""
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.jardin", "nombre": "Jardín", "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("light.salon",))
+        assert main._regla_al_salir_de_casa() == 0
 
     def test_con_todo_apagado_se_calla(self, monkeypatch):
         monkeypatch.setattr(main, "_casa_entidades",
@@ -268,6 +305,7 @@ class TestAlSalirDeCasa(_Reglas):
         que acaba apagando otra cosa."""
         monkeypatch.setattr(main, "_casa_entidades",
                             lambda: [{"id": "switch.pc", "nombre": "PC", "estado": "on"}])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("switch.pc",))
         monkeypatch.setattr(main, "PC_ENTIDAD", "")
         assert main._regla_al_salir_de_casa() == 1      # solo el aviso de encendidos
         monkeypatch.setattr(main, "PC_ENTIDAD", "switch.pc")
