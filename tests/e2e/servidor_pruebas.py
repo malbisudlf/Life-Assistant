@@ -201,6 +201,13 @@ class _RouterSimulado:
         ("/rest/v1/pc_agents", lambda: _Respuesta([])),
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),
+        # Una alarma de respaldo puesta para mañana, para que el widget se pinte con
+        # algo de verdad. `cuando` viaja en UTC, como lo devuelve Supabase.
+        ("/rest/v1/alarmas", lambda: _Respuesta([{
+            "id": "22222222-2222-4222-8222-222222222222",
+            "cuando": f"{_dia(1)}T06:30:00+00:00", "etiqueta": "Entrenar",
+            "estado": "armada", "intentos": 0,
+        }])),
         # Presencia vigente: el panel de estado la pide y /weather la usa como
         # ubicación cuando el navegador no da permiso de geolocalización, que es
         # justo lo que pasa en un Chromium sin cabeza.

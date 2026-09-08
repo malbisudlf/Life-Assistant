@@ -18,6 +18,7 @@ import {
   elegirVozEspanola, textoHablable, esFinDeLlamada,
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
+  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando,
   repartoPatrimonio,
 } from "../../src/lib/helpers";
 
@@ -2094,5 +2095,45 @@ describe("confirmar hablando", () => {
       expect(esConfirmacionHablada(dicho)).toBe(false);
       expect(esNegacionHablada(dicho)).toBe(false);
     }
+  });
+});
+
+describe("alarmas de respaldo", () => {
+  // El backend manda `cuando` ya en hora local ("YYYY-MM-DD HH:MM"): estos tests fijan
+  // el "hoy" a mano para no depender del reloj de quien corra la suite.
+  const HOY = new Date(2026, 8, 9, 22, 0);   // miércoles 9 de septiembre de 2026
+
+  test("hoy y mañana se dicen con palabras", () => {
+    expect(alarmaEnPalabras("2026-09-09 23:30", HOY)).toBe("hoy a las 23:30");
+    expect(alarmaEnPalabras("2026-09-10 08:30", HOY)).toBe("mañana a las 8:30");
+  });
+
+  test("una alarma de madrugada sigue siendo 'mañana' aunque falte hora y media", () => {
+    // Se compara por día del calendario, no por horas de diferencia: a las 23:00, las
+    // 00:30 son mañana aunque queden noventa minutos.
+    expect(alarmaEnPalabras("2026-09-10 00:30", HOY)).toBe("mañana a las 0:30");
+  });
+
+  test("más allá de mañana lleva el día de la semana", () => {
+    expect(alarmaEnPalabras("2026-09-12 07:00", HOY)).toBe("el sáb 12 a las 7:00");
+  });
+
+  test("una fecha con otra forma no revienta, devuelve vacío", () => {
+    expect(alarmaEnPalabras("mañana", HOY)).toBe("");
+    expect(alarmaEnPalabras(null, HOY)).toBe("");
+  });
+
+  test("el estado se lee en una frase", () => {
+    expect(alarmaEstadoTexto({ estado: "armada" })).toBe("puesta");
+    expect(alarmaEstadoTexto({ estado: "avisada" })).toBe("esperando que confirmes");
+    expect(alarmaEstadoTexto({ estado: "escalada", intentos: 3 })).toBe("insistiendo (3)");
+  });
+
+  test("sonando distingue lo que ya avisó de lo que solo está puesto", () => {
+    expect(alarmaSonando([{ estado: "armada" }])).toBeNull();
+    expect(alarmaSonando([])).toBeNull();
+    expect(alarmaSonando(null)).toBeNull();
+    // Una que está insistiendo pesa más que una que solo está puesta, esté donde esté.
+    expect(alarmaSonando([{ estado: "armada" }, { id: "x", estado: "escalada" }]).id).toBe("x");
   });
 });

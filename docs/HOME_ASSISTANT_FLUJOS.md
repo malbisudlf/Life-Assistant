@@ -121,3 +121,13 @@ GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un
 dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
 vivo que mire la hora. Sondear cada 5 min es barato a propósito — antes de
 `BRIEF_HORA_TOPE` el endpoint no toca Supabase ni construye nada.
+
+**Flujo de las alarmas de respaldo**: un sensor REST propio sondea `GET /ha/alarma-tick`
+cada **60 s** — el tick del resumen es de 5 minutos y una alarma que suena cuatro minutos
+tarde no es una alarma. Cuando el backend contesta que toca escalar, la automatización
+`la_alarma_escalar` hace el ritual entero (quitar el "no molestar", subir el volumen,
+anunciar por Alexa, poner la canción, encender las luces). El ritual vive **aquí y no en
+la cola de órdenes del backend** porque una de las luces solo obedece hablándole a Alexa,
+y `alexa_devices.send_text_command` no es un dominio de esa cola ni apunta a una entidad.
+El botón «Estoy despierto» de la notificación vuelve por el molde de siempre. Todo en
+`docs/ALARMAS.md`.
