@@ -329,6 +329,16 @@ desplegar es pulsar **Reconstruir** en la página del add-on, porque su `Dockerf
 clona este repositorio en cada construcción. No hay workflow ni comando remoto: el
 `Protection mode` del add-on de SSH bloquea `docker`, y con razón.
 
+**Comprueba siempre que el despliegue ha entrado: `GET /` devuelve `version`, el SHA
+del commit clonado al construir la imagen.** Si no coincide con el `main` de GitHub, la
+reconstrucción no ha traído el código. Hizo falta porque durante un tiempo *no lo
+traía*: el `RUN git clone` del `Dockerfile` es una instrucción invariable y Docker
+reutilizaba su capa cacheada, así que el add-on servía el código del día en que se
+construyó la imagen por primera vez. Reconstruir terminaba bien, sin un solo aviso, y
+producción seguía igual. Ahora un `ADD` de la API de GitHub —cuyo contenido cambia con
+cada commit— invalida esa capa antes del clone. *Un despliegue que no puede
+comprobarse no es un despliegue, es una esperanza.*
+
 **Ya no escala a cero, y ya no importa.** Cuando estaba en Fly, este fichero afirmaba
 que dormía sin tráfico y era **falso** desde el 13/05/2026: Home Assistant sondeaba seis
 endpoints REST cada 15-60 s (~18.700 peticiones al día) y una máquina que recibe algo

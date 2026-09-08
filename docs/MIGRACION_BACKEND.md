@@ -313,3 +313,21 @@ prompt de la rutina del briefing.
 - **El sondeo, que ahora es local.** Si un día vuelve a apuntar a la URL pública
   por error, el tráfico sale a internet y vuelve, y todo seguirá funcionando —
   peor y sin avisar. Al tocar los sensores, mira que la URL sea la IP local.
+
+## Reconstruir y comprobar que ha servido
+
+`Reconstruir` en la página del add-on clona `main` y levanta la imagen de nuevo. Es el
+único paso del despliegue del backend, y **no da ninguna señal de haber traído código
+nuevo**: termina igual tanto si lo ha traído como si no.
+
+Por eso, después de reconstruir:
+
+```bash
+curl -s https://api.lifeassistantbackend.bid/
+# {"status":"Life Assistant API running","version":"<sha del commit clonado>"}
+```
+
+Ese `version` sale de `/app/VERSION`, que se escribe al construir con el `rev-parse` del
+clon. Si no coincide con el `main` de GitHub, el add-on está corriendo código viejo.
+Durante meses fue así sin que se notara: ver «Reconstruir no reconstruía» en
+`docs/BUGS_HISTORICOS.md`.

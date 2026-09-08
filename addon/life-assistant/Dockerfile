@@ -16,7 +16,25 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Esta linea es la que hace que "Reconstruir" reconstruya de verdad.
+#
+# El RUN de abajo no cambia nunca, asi que Docker reutilizaba su capa cacheada y NO
+# volvia a clonar: el add-on seguia sirviendo el codigo del dia en que se construyo la
+# imagen por primera vez, y la reconstruccion era un no-op SILENCIOSO — termina bien,
+# sin avisos, y el backend arranca igual de viejo. Se descubrio el 2026-09-08, tras
+# mergear dos arreglos a main, reconstruir, y comprobar que produccion los ignoraba.
+#
+# `ADD` con una URL se descarga siempre y compara el contenido: como este JSON lleva
+# el SHA del ultimo commit de la rama, la capa se invalida cuando —y solo cuando— hay
+# codigo nuevo que traer. Si GitHub no responde, la construccion falla, que es
+# preferible a desplegar lo de antes creyendo que se ha desplegado lo de ahora.
+ADD https://api.github.com/repos/malbisudlf/Life-Assistant/commits/main /tmp/ultimo_commit.json
+
+# Del clon se guarda el SHA en /app/VERSION: `GET /` lo devuelve, y es la unica forma
+# de saber que codigo esta corriendo ahi dentro sin entrar en el Green.
 RUN git clone --depth 1 --branch "${RAMA}" "${REPO}" /tmp/repo \
+ && git -C /tmp/repo rev-parse HEAD > /app/VERSION \
  && cp -r /tmp/repo/backend/. /app/ \
  && rm -rf /tmp/repo \
  && pip install --no-cache-dir -r requirements.txt
