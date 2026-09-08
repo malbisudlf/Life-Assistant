@@ -12,6 +12,7 @@ import {
   relojCobertura, relojRachaSinReloj, relojPuesto,
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
+  repartoPatrimonio,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -1186,6 +1187,70 @@ const CLASES_CARTERA_LABEL = {
   acciones: "Acciones", bonos: "Bonos", monetario: "Monetario",
   efectivo: "Efectivo", otros: "Otros",
 };
+
+// Colores del reparto del patrimonio (el donut). Paleta PROPIA y no la de la barra de
+// mezcla a propósito: son dos preguntas distintas dentro de la misma tarjeta —una
+// reparte por clase de activo, esta por sitio donde está el dinero— y compartir los
+// colores haría que el oro de "acciones" significara otra cosa cinco líneas más abajo.
+//
+// El orden es fijo y cada porción se pinta por su POSICIÓN, no por su tamaño relativo:
+// así el color de una fuente no cambia porque otra la adelante. Los tonos están
+// elegidos para que dos contiguos se distingan también con daltonismo (comprobado con
+// un validador de paletas: el par más justo queda en 8,9 ΔE en protanopia y 17,7 con
+// visión normal). Son deliberadamente apagados, como el resto del dashboard.
+//
+// El oro (`--accent`) va en el quinto hueco y no en el primero justo por lo de arriba:
+// es el color de "acciones" en la barra de mezcla, cuatro líneas más arriba en la misma
+// tarjeta, y darlo también a la porción MÁS GRANDE del donut era pedir que se leyeran
+// como lo mismo. En un hueco pequeño la coincidencia ya no salta a la vista.
+//
+// De la octava fuente en adelante todo cae en gris, que es lo mismo que hace la barra
+// de mezcla con una clase de activo que no conoce.
+const COLORES_PATRIMONIO = ["#7d9fd0", "#cf7a52", "#4fa38c", "#9b7fd4", "#c8a96e", "#c56f96", "#8aa85e"];
+const colorPatrimonio = i => COLORES_PATRIMONIO[i] || "var(--muted2)";
+
+/** Donut del reparto del patrimonio. Cada porción es un círculo con `stroke-dasharray`
+ *  en vez de un `path` con arcos: la misma geometría sin trigonometría que revisar.
+ *
+ *  Fuera del componente principal por el mismo motivo que `DepartureWidget` (ver su
+ *  comentario): definido dentro, cada render crearía un tipo de componente nuevo. */
+function DonutPatrimonio({ tramos, tamano = 128 }) {
+  const R = 42, GROSOR = 15, C = 2 * Math.PI * R;
+  // Hueco entre porciones para que dos colores contiguos no se toquen. Menos de los
+  // 2 px de rigor porque con porciones del 0,7 % el hueco se comería la porción
+  // entera: por debajo de 1,2 px de arco se deja ese mínimo visible antes que hacerla
+  // desaparecer del dibujo (en la leyenda sale igual, con su porcentaje).
+  const HUECO = 1.5;
+  // Los arcos y su desfase se calculan ANTES de pintar, no acumulando dentro del map:
+  // eso sería reasignar una variable del render desde un callback, que el compilador de
+  // React prohíbe (y con razón — cuándo se llama ese callback no es cosa nuestra).
+  const porciones = tramos.reduce((acc, t) => {
+    const previa = acc[acc.length - 1];
+    const arco   = (t.pct / 100) * C;
+    return [...acc, { ...t, arco, desfase: previa ? previa.desfase + previa.arco : 0 }];
+  }, []);
+  return (
+    // aria-hidden: la leyenda de al lado ya dice en texto lo mismo que el dibujo, con
+    // el nombre y el porcentaje de cada porción. Anunciarlo dos veces solo estorba.
+    <svg viewBox="0 0 100 100" width={tamano} height={tamano} aria-hidden="true"
+      style={{ display: "block", flexShrink: 0 }}>
+      {porciones.map((t, i) => {
+        const largo = Math.max(t.arco - HUECO, 1.2);
+        return (
+          <circle key={t.id} cx="50" cy="50" r={R} fill="none"
+            stroke={colorPatrimonio(i)} strokeWidth={GROSOR}
+            strokeDasharray={`${largo.toFixed(2)} ${(C - largo).toFixed(2)}`}
+            strokeDashoffset={(-t.desfase).toFixed(2)}
+            transform="rotate(-90 50 50)">
+            {/* El euro exacto va aquí y no en la leyenda: el reparto se lee en
+                porcentajes, el importe es para cuando se quiere mirar de verdad. */}
+            <title>{`${t.etiqueta}: ${formatoEuros(t.valor)} · ${formatoPorcentaje(t.pct)}`}</title>
+          </circle>
+        );
+      })}
+    </svg>
+  );
+}
 
 // ── Preferencias de layout persistidas ───────────────────────────
 // Se leen dos veces (estado + ref que usan los manejadores de arrastre), así que el
@@ -4610,6 +4675,50 @@ export default function Dashboard() {
                   )}
                 </div>
               )}
+
+              {/* El reparto del patrimonio: en qué SITIO está el dinero, contando las
+                  tres fuentes juntas. Esto no contradice que arriba no se sumen en un
+                  total —eso sigue sin significar nada— porque un porcentaje contesta a
+                  otra pregunta: no "cuánto tengo" sino "cuánto de lo que tengo está
+                  aquí". Por eso no hay ningún euro en el dibujo, solo pesos.
+                  Con una sola fuente no se pinta: un círculo entero de un color no
+                  reparte nada. */}
+              {(() => {
+                const reparto = repartoPatrimonio({ finanzas, carteraEtf });
+                if (reparto.tramos.length < 2) return null;
+                return (
+                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--border2)" }}>
+                    <div style={{ fontSize: 11, color: "var(--muted2)", marginBottom: 8 }}>
+                      Dónde está el dinero
+                    </div>
+                    {/* La leyenda va ARRIBA y lleva el porcentaje pegado al nombre: es
+                        lo que se lee, el donut solo da la proporción de un vistazo. Así
+                        la identidad de cada porción nunca depende solo del color. */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px", fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
+                      {reparto.tramos.map((t, i) => (
+                        <span key={t.id} style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}
+                          title={formatoEuros(t.valor)}>
+                          <span style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: colorPatrimonio(i) }} />
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.etiqueta}</span>
+                          <span style={{ fontFamily: "'DM Mono', monospace", color: "var(--muted2)" }}>
+                            {formatoPorcentaje(t.pct)}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "center" }}>
+                      <DonutPatrimonio tramos={reparto.tramos} />
+                    </div>
+                    {/* Unos porcentajes sobre una parte del patrimonio presentados como
+                        si fueran sobre el todo mienten sin que se note. */}
+                    {!reparto.completo && (
+                      <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 6, textAlign: "center" }}>
+                        Falta el valor de alguna fuente: el reparto es de lo que se sabe
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>

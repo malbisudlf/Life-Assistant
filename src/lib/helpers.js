@@ -2024,3 +2024,85 @@ export function variacionCartera(serie) {
     pct:   anterior.valor ? (delta / anterior.valor) * 100 : null,
   };
 }
+
+// ── Finanzas: reparto del patrimonio ─────────────────────────────
+// Indexa, Revolut y la cartera manual de ETFs siguen SIN sumarse en un total a la
+// vista: "cuánto tengo" mezclando inversión con plusvalía, saldo de cuenta corriente y
+// una cartera llevada a mano es un número que no responde a ninguna pregunta. Pero
+// "DÓNDE está el dinero" sí es una pregunta legítima y distinta, y es la única que
+// contesta este reparto: devuelve pesos relativos, y el widget pinta porcentajes.
+//
+// Lo que no se sabe NO cuenta como cero, igual que en el resto del módulo: si a un ETF
+// le falta el precio (Yahoo falló) o Indexa no respondió, el reparto sale marcado como
+// incompleto para que el widget lo diga. Unos porcentajes calculados sobre una parte
+// del patrimonio y presentados como si fueran sobre el todo mienten sin que se note.
+
+/** `{finanzas, carteraEtf}` (las respuestas tal cual de `/finanzas/resumen` y
+ *  `/finanzas/etfs`) → `{ tramos: [{id, etiqueta, valor, pct}], total, completo }`.
+ *
+ *  De mayor a menor, no en un orden fijo como la barra de mezcla por clase de activo:
+ *  ahí las clases son siempre las mismas cinco y conviene poder comparar la barra de
+ *  hoy con la de la semana pasada, mientras que aquí las fuentes entran y salen (un ETF
+ *  nuevo, una cuenta que se cierra) y no hay orden canónico que preservar. */
+export function repartoPatrimonio({ finanzas, carteraEtf } = {}) {
+  const numero = v => typeof v === "number" && Number.isFinite(v);
+  const tramos = [];
+  let completo = true;
+
+  // Indexa entra como UNA porción aunque haya varias cuentas: esto dice en qué sitios
+  // está el dinero, y el desglose por cuenta ya está en las filas de justo encima.
+  if (finanzas?.error) {
+    completo = false;
+  } else if (finanzas?.configurado) {
+    const valor = finanzas?.total?.valor;
+    if (numero(valor)) {
+      if (valor > 0) tramos.push({ id: "indexa", etiqueta: "Indexa Capital", valor });
+    } else {
+      completo = false;
+    }
+  }
+  // `configurado: false` (sin token) no es un hueco: es una fuente que no existe. Solo
+  // cuenta como incompleto lo que sí debería tener valor y no lo tiene.
+
+  const revolut = finanzas?.revolut;
+  if (revolut?.configurado) {
+    const cuentas = revolut.cuentas || [];
+    if (cuentas.length > 1) {
+      cuentas.forEach((c, i) => {
+        if (numero(c?.saldo)) {
+          if (c.saldo > 0) tramos.push({ id: `revolut-${i}`, etiqueta: c.nombre || "Revolut", valor: c.saldo });
+        } else {
+          completo = false;
+        }
+      });
+    } else if (numero(revolut.saldo)) {
+      if (revolut.saldo > 0) tramos.push({ id: "revolut", etiqueta: "Revolut", valor: revolut.saldo });
+    } else {
+      completo = false;
+    }
+  }
+
+  if (carteraEtf?.error) {
+    completo = false;
+  } else {
+    for (const e of carteraEtf?.etfs || []) {
+      if (numero(e?.valor_actual)) {
+        if (e.valor_actual > 0) tramos.push({ id: `etf-${e.ticker}`, etiqueta: e.nombre || e.ticker, valor: e.valor_actual });
+      } else if (numero(e?.participaciones) && e.participaciones > 0) {
+        // Hay participaciones pero Yahoo no dio precio: el ETF existe y no se sabe
+        // cuánto vale. Un ETF dado de alta y sin comprar todavía no es un hueco.
+        completo = false;
+      }
+    }
+  }
+
+  const total = tramos.reduce((acc, t) => acc + t.valor, 0);
+  if (!total) return { tramos: [], total: 0, completo };
+  return {
+    tramos: tramos
+      .sort((a, b) => b.valor - a.valor)
+      .map(t => ({ ...t, pct: (t.valor / total) * 100 })),
+    total,
+    completo,
+  };
+}
