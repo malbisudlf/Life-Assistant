@@ -8252,7 +8252,7 @@ ALARMA_ESPERA_MIN   = int(os.getenv("ALARMA_ESPERA_MIN", "2"))
 # Tope de seguridad. Sin él, una alarma se quedaría sonando en una casa vacía si te has
 # ido sin el móvil: en algún momento hay que aceptar que nadie va a contestar.
 ALARMA_MAX_MIN      = int(os.getenv("ALARMA_MAX_MIN", "30"))
-ALARMA_VOLUMEN      = float(os.getenv("ALARMA_VOLUMEN", "0.7"))
+ALARMA_VOLUMEN      = float(os.getenv("ALARMA_VOLUMEN", "0.35"))
 # Las entidades del cuarto van por variable y vacías por defecto: son nombres de una casa
 # concreta y este repositorio es público. Sin ellas el Echo no se prepara —la escalada
 # sigue saliendo, pero puede pillar el altavoz en silencio—, que es el lado seguro del

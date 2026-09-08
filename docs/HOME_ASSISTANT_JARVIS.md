@@ -487,7 +487,7 @@ action:
     target: { entity_id: switch.TU_ALTAVOZ_no_molestar }   # ← SUSTITÚYELO
   - service: media_player.volume_set
     target: { entity_id: media_player.TU_ALTAVOZ }         # ← SUSTITÚYELO
-    data: { volume_level: 0.7 }
+    data: { volume_level: 0.35 }
   - service: notify.alexa_media_TU_ALTAVOZ                 # ← SUSTITÚYELO
     data:
       message: "{{ state_attr('sensor.life_assistant_alarma', 'texto') | default('Despierta', true) }}. Despierta."
