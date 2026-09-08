@@ -20,6 +20,17 @@
     cuando —y solo cuando— hay commit nuevo. Y el SHA clonado se guarda en
     `/app/VERSION` y sale por `GET /`, porque *hasta entonces no existía ninguna forma
     de preguntarle al backend qué código estaba ejecutando*.
+  - **Y arreglarlo en el repositorio no arregló nada**, que fue la segunda mitad del
+    problema y la que costó de ver. Los tres ficheros del add-on
+    (`Dockerfile`, `config.yaml`, `run.sh`) viven en `/addons/life-assistant/` del
+    Green **porque alguien los copió a mano por Samba**: no salen de git — de git sale
+    solo el contenido de `backend/`, que es lo que clona el `RUN`. Así que el arreglo
+    del `Dockerfile` estaba en `main` y el Green seguía reconstruyendo con su copia del
+    día de la mudanza. Hubo que subirlo por SSH (`sudo cp`, porque `/addons` es de root
+    y el add-on de SSH **no tiene subsistema SFTP**: se escribe con `cat > destino` por
+    el stdin del comando). *Al tocar `addon/`, la pregunta no es si el commit está en
+    `main`, es si el fichero está en el aparato.* Se comprueba con `md5sum` contra el
+    repo.
 
 - **Todas las noches decían haberse acostado a las 00:00, y el dashboard llamaba
   "anoche" al sueño de anteayer.** Dos fallos distintos que se tapaban el uno al otro
