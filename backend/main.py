@@ -3656,6 +3656,28 @@ METRICAS_SIN_MEDIDA_EN_CERO = {
 _CLAVES_SUENO = ("asleep", "totalSleep", "deep", "rem", "core", "light")
 
 
+def _hora_inicio_sueno(point: dict, date_raw: str) -> str | None:
+    """Hora de pared a la que se empezó a dormir esa noche, como "HH:MM".
+
+    NO sale del `date` del punto. Health Auto Export resume el sueño por días y le pone
+    a la muestra la MEDIANOCHE del día al que la asigna, así que leer ahí la hora daba
+    "00:00" en absolutamente todas las noches — con el reloj anterior y con la banda
+    Zepp. Y "00:00" no es un valor neutro: `sleepBreakdown` lo castiga con -5 puntos por
+    acostarse pasada la medianoche, la línea del día dibuja la noche empezando a las
+    doce en punto y la hora habitual de dormir que usa Jarvis (mediana de `sleep_start`)
+    salía clavada a las 00:00 pasara lo que pasara.
+
+    La hora real sí viene en el propio punto (`sleepStart`, y `inBedStart` si no), ya en
+    hora local con su desfase — que es justo lo que quiere quien la lee. El `date` queda
+    como último recurso para fuentes que no manden ninguna de las dos.
+    """
+    for clave in ("sleepStart", "inBedStart"):
+        m = re.search(r"\d{2}:\d{2}", str(point.get(clave) or ""))
+        if m:
+            return m.group(0)
+    return date_raw[11:16] if len(date_raw) >= 16 else None
+
+
 def _cero_sin_medida(name: str, value, extra: dict | None = None) -> bool:
     """True si esta muestra es un 0 que significa "no se midió", no "el valor fue 0".
 
@@ -4023,8 +4045,10 @@ async def health_ingest(request: Request, token: str = ""):
 
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
-            if name == "sleep_analysis" and len(date_raw) >= 16:
-                extra["sleep_start"] = date_raw[11:16]  # "HH:MM"
+            if name == "sleep_analysis":
+                inicio = _hora_inicio_sueno(point, date_raw)
+                if inicio:
+                    extra["sleep_start"] = inicio
 
             key = (metric_date, name)
             if key not in grouped_metrics:

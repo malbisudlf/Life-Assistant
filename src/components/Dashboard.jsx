@@ -5495,22 +5495,40 @@ export default function Dashboard() {
         const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
         const lss = latest?.extra?.sleep_start ?? null;
 
-        // Baselines de recuperación (últimos 30 días, excluyendo hoy)
+        // La fila de sueño lleva la fecha del día en que uno se DESPIERTA, así que la
+        // noche de esta madrugada es la de hoy. Cuando falta (el reloj aún no ha
+        // sincronizado), la última fila es de una noche anterior y hay que decirlo: el
+        // widget la llamaba "anoche" igual, y enseñaba el sueño de anteayer como si
+        // fuera el de esta noche sin ninguna pista de que no lo era.
         const sleepTodayStr  = new Date().toLocaleDateString("sv");
+        const nochesAtras    = latestDisplay
+          ? Math.round((new Date(sleepTodayStr + "T12:00:00") - new Date(latestDisplay.date + "T12:00:00")) / 86400000)
+          : 0;
+        const etiquetaNoche  = nochesAtras <= 0 ? "anoche"
+                             : nochesAtras === 1 ? "hace 2 noches"
+                             : `hace ${nochesAtras + 1} noches`;
+
+        // Baselines de recuperación (últimos 30 días, excluyendo la noche puntuada)
+        const refFecha       = latest?.date || sleepTodayStr;
         const hrvAllData     = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
         const rhrAllData     = findMetric(healthData, "resting_heart_rate");
         const respAllData    = findMetric(healthData, "respiratory_rate");
         // Las medias de referencia no cruzan el cambio de dispositivo: comparar la
         // respiración de hoy contra una media hecha a medias con el reloj anterior
         // convierte la diferencia entre dos sensores en una penalización de sueño.
-        const baseline30     = arr => { const v = arr.filter(d => d.date !== sleepTodayStr && d.value != null && (!corteDispositivo || String(d.date) >= corteDispositivo)).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
+        const baseline30     = arr => { const v = arr.filter(d => d.date !== refFecha && d.value != null && (!corteDispositivo || String(d.date) >= corteDispositivo)).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
         const hrvBase        = baseline30(hrvAllData);
         const rhrBase        = baseline30(rhrAllData);
         const respBase       = baseline30(respAllData);
         const metricValForDate = (arr, date) => { const d = arr.find(x => x.date === date); return d?.value != null ? Number(d.value) : null; };
-        const todayHrv       = metricValForDate(hrvAllData, sleepTodayStr) ?? (hrvAllData.length ? Number(hrvAllData[hrvAllData.length-1].value) : null);
-        const todayRhr       = metricValForDate(rhrAllData, sleepTodayStr) ?? (rhrAllData.length ? Number(rhrAllData[rhrAllData.length-1].value) : null);
-        const todayResp      = metricValForDate(respAllData, sleepTodayStr) ?? (respAllData.length ? Number(respAllData[respAllData.length-1].value) : null);
+        // El respaldo "último valor conocido" solo vale para la noche de esta madrugada:
+        // con una noche vieja acabaría midiendo su descanso contra la recuperación de
+        // otro día.
+        const metricNoche    = arr => metricValForDate(arr, refFecha)
+          ?? (refFecha === sleepTodayStr && arr.length ? Number(arr[arr.length-1].value) : null);
+        const todayHrv       = metricNoche(hrvAllData);
+        const todayRhr       = metricNoche(rhrAllData);
+        const todayResp      = metricNoche(respAllData);
         const recoveryMod    = (hrvBase || rhrBase || respBase) ? calcRecoveryMod(todayHrv, todayRhr, todayResp, hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0) : 0;
         const recovModByDate = date => calcRecoveryMod(
           metricValForDate(hrvAllData, date), metricValForDate(rhrAllData, date), metricValForDate(respAllData, date),
@@ -5608,7 +5626,7 @@ export default function Dashboard() {
                         {hoursToHM(lvd)}
                       </span>
                       <span style={{ fontSize: 13, color: "var(--muted)" }}>
-                        {latestExcluded ? "anoche (anulada)" : "anoche"}
+                        {latestExcluded ? `${etiquetaNoche} (anulada)` : etiquetaNoche}
                       </span>
                       {avg7 != null && (
                         <span style={{ marginLeft: "auto", fontSize: 13, color: "var(--muted)", fontFamily: "'DM Mono', monospace" }}>
@@ -5616,6 +5634,11 @@ export default function Dashboard() {
                         </span>
                       )}
                     </div>
+                    {nochesAtras > 0 && (
+                      <div style={{ fontSize: 11, color: "var(--accent)", marginTop: 4 }}>
+                        El sueño de esta noche aún no ha llegado del reloj
+                      </div>
+                    )}
                     <button
                       onClick={() => excludeSleepNight(latestDisplay.date)}
                       disabled={sleepExcluding === latestDisplay.date}

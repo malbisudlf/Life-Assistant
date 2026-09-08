@@ -89,7 +89,9 @@
   módulo compartida por las dos rutas de ingesta) solo se sobreescriben si el valor
   nuevo es MAYOR (llegan snapshots parciales a lo largo del día). Energía en kJ se
   convierte a kcal (÷ 4.184, `ENERGY_METRICS`). `sleep_analysis` guarda `sleep_start`
-  ("HH:MM") en `extra` y respeta el flag `excluded` (noches anuladas por el usuario).
+  ("HH:MM") en `extra` —vía `_hora_inicio_sueno()`, que la saca de `sleepStart` /
+  `inBedStart` del punto y **nunca de su `date`**, que Health Auto Export pone a
+  medianoche— y respeta el flag `excluded` (noches anuladas por el usuario).
   Escritura en **dos viajes por lote**, no uno por métrica: `_existentes_por_clave()`
   trae de golpe lo ya guardado para las fechas/nombres del lote y `_guardar_metricas()`
   hace un único upsert (`resolution=merge-duplicates`, aprovechando el

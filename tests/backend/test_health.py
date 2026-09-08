@@ -107,6 +107,27 @@ class TestHealthIngest:
         assert fila["value"] == 7.8
         assert fila["extra"]["sleep_start"] == "23:45"
 
+    def test_sleep_hora_de_inicio_sale_de_sleepstart_no_del_date(self, client, mock_requests):
+        """Health Auto Export resume la noche y le pone de fecha la MEDIANOCHE del día
+        al que la asigna. Leer la hora de ahí daba "00:00" en todas las noches, y esa
+        hora no es inocua: penaliza el score y fija la hora habitual de dormir."""
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "sleep_analysis", "units": "hr",
+             "data": [{"date": "2026-09-07 00:00:00 +0200", "totalSleep": 6.9,
+                       "sleepStart": "2026-09-07 00:48:00 +0200",
+                       "inBedStart": "2026-09-07 00:22:00 +0200"}]}
+        ]}})
+        assert r.json()["upserted"] == 1
+        assert self._filas(mock_requests)[0]["extra"]["sleep_start"] == "00:48"
+
+    def test_sleep_hora_de_inicio_cae_a_inbedstart(self, client, mock_requests):
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "sleep_analysis", "units": "hr",
+             "data": [{"date": "2026-09-07 00:00:00", "totalSleep": 6.9,
+                       "inBedStart": "2026-09-06 23:22:00 +0200"}]}
+        ]}})
+        assert self._filas(mock_requests)[0]["extra"]["sleep_start"] == "23:22"
+
     def test_un_lote_grande_son_dos_viajes_no_uno_por_metrica(self, client, mock_requests):
         """M4: antes eran GET+POST(+PATCH) por métrica — decenas de viajes secuenciales
         a Supabase por cada sincronización del Watch. Ahora: una lectura y un upsert."""
