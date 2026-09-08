@@ -157,6 +157,14 @@ Las decisiones que no son obvias:
 - **La identidad nunca depende solo del color**: la leyenda lleva el nombre y el porcentaje
   de cada porción, que es lo que se lee de verdad. Hace falta porque las porciones del
   0,7 % son un hilo de un píxel en el anillo, y ahí el color no se aprecia.
+- **El tooltip es propio, no el `<title>` del SVG.** El nativo tardaba un segundo en
+  aparecer, no se puede dar estilo y en móvil no existe. El de ahora sale al señalar una
+  porción con el nombre, el porcentaje y el importe, y va **centrado sobre el agujero del
+  donut** en vez de pegado al puntero: en un anillo de 128 px, un tooltip que persigue al
+  ratón tiembla más de lo que informa, y anclado a la caja no hay coordenadas que
+  calcular ni desbordes de la tarjeta que corregir. La porción señalada engorda 3 px y
+  las demás se apagan, porque con una porción del 0,7 % el engorde solo no se ve. Responde
+  también a `pointerdown`, que es lo único que hay en una pantalla táctil.
 - **Cada porción se dibuja como un círculo con `stroke-dasharray`**, no como un `path` con
   arcos: la misma geometría sin trigonometría que revisar. Los desfases se calculan antes
   de pintar y no acumulando dentro del `map` — eso sería reasignar una variable del render

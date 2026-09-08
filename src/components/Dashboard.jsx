@@ -1215,6 +1215,9 @@ const colorPatrimonio = i => COLORES_PATRIMONIO[i] || "var(--muted2)";
  *  Fuera del componente principal por el mismo motivo que `DepartureWidget` (ver su
  *  comentario): definido dentro, cada render crearía un tipo de componente nuevo. */
 function DonutPatrimonio({ tramos, tamano = 128 }) {
+  // Qué porción tiene el puntero encima (su id), o `null` si ninguna. Es lo único que
+  // hace falta guardar: el tooltip no sigue al ratón, se queda centrado sobre el donut.
+  const [senalada, setSenalada] = useState(null);
   const R = 42, GROSOR = 15, C = 2 * Math.PI * R;
   // Hueco entre porciones para que dos colores contiguos no se toquen. Menos de los
   // 2 px de rigor porque con porciones del 0,7 % el hueco se comería la porción
@@ -1229,26 +1232,65 @@ function DonutPatrimonio({ tramos, tamano = 128 }) {
     const arco   = (t.pct / 100) * C;
     return [...acc, { ...t, arco, desfase: previa ? previa.desfase + previa.arco : 0 }];
   }, []);
+  const activa = porciones.find(t => t.id === senalada) || null;
   return (
-    // aria-hidden: la leyenda de al lado ya dice en texto lo mismo que el dibujo, con
-    // el nombre y el porcentaje de cada porción. Anunciarlo dos veces solo estorba.
-    <svg viewBox="0 0 100 100" width={tamano} height={tamano} aria-hidden="true"
-      style={{ display: "block", flexShrink: 0 }}>
-      {porciones.map((t, i) => {
-        const largo = Math.max(t.arco - HUECO, 1.2);
-        return (
-          <circle key={t.id} cx="50" cy="50" r={R} fill="none"
-            stroke={colorPatrimonio(i)} strokeWidth={GROSOR}
-            strokeDasharray={`${largo.toFixed(2)} ${(C - largo).toFixed(2)}`}
-            strokeDashoffset={(-t.desfase).toFixed(2)}
-            transform="rotate(-90 50 50)">
-            {/* El euro exacto va aquí y no en la leyenda: el reparto se lee en
-                porcentajes, el importe es para cuando se quiere mirar de verdad. */}
-            <title>{`${t.etiqueta}: ${formatoEuros(t.valor)} · ${formatoPorcentaje(t.pct)}`}</title>
-          </circle>
-        );
-      })}
-    </svg>
+    // `position: relative` porque el tooltip se coloca contra esta caja, no contra la
+    // página: así no hay que calcular coordenadas del puntero ni corregir desbordes, y
+    // el tooltip no puede salirse de la tarjeta por un lado.
+    <div style={{ position: "relative", lineHeight: 0 }}
+      onPointerLeave={() => setSenalada(null)}>
+      {/* aria-hidden: la leyenda de al lado ya dice en texto lo mismo que el dibujo, con
+          el nombre y el porcentaje de cada porción. Anunciarlo dos veces solo estorba, y
+          el tooltip no añade ningún dato que no esté ya ahí salvo el importe. */}
+      <svg viewBox="0 0 100 100" width={tamano} height={tamano} aria-hidden="true"
+        data-donut="patrimonio" style={{ display: "block", flexShrink: 0 }}>
+        {porciones.map((t, i) => {
+          const largo = Math.max(t.arco - HUECO, 1.2);
+          const viva  = t.id === senalada;
+          return (
+            // `onPointerDown` además de `onPointerEnter` por el móvil: sin ratón no hay
+            // hover que valga, y el donut es justo donde están las porciones de un hilo
+            // de ancho que no se pueden leer sin señalarlas.
+            <circle key={t.id} cx="50" cy="50" r={R} fill="none"
+              stroke={colorPatrimonio(i)}
+              strokeWidth={viva ? GROSOR + 3 : GROSOR}
+              strokeDasharray={`${largo.toFixed(2)} ${(C - largo).toFixed(2)}`}
+              strokeDashoffset={(-t.desfase).toFixed(2)}
+              transform="rotate(-90 50 50)"
+              onPointerEnter={() => setSenalada(t.id)}
+              onPointerDown={() => setSenalada(t.id)}
+              // Las demás se apagan en vez de quedarse igual: con porciones de un 0,7 %
+              // el engorde de 3 px no se ve, y el contraste con el resto sí.
+              style={{ opacity: senalada && !viva ? 0.3 : 1, cursor: "default",
+                transition: "opacity .12s ease, stroke-width .12s ease" }} />
+          );
+        })}
+      </svg>
+      {/* El tooltip va CENTRADO sobre el agujero del donut y no pegado al puntero: en un
+          anillo de 128 px, uno que persiga al ratón tiembla más de lo que informa. El
+          euro exacto viene aquí —ya no hay <title> nativo, que tardaba un segundo en
+          salir y no se puede dar estilo— debajo del porcentaje, que es lo que se lee. */}
+      {activa && (
+        <div data-donut-tooltip="" style={{
+          position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+          // `max-content` porque el contenedor mide lo que el donut (128 px) y sin esto
+          // el tooltip hereda ese ancho y parte "12.500 €" en dos líneas. Sobresalir por
+          // los lados del anillo es lo que se quiere: la tarjeta es mucho más ancha.
+          pointerEvents: "none", width: "max-content", maxWidth: 200,
+          textAlign: "center", lineHeight: 1.35,
+          padding: "6px 9px", background: "var(--surface)", border: "0.5px solid var(--border2)",
+          borderRadius: 6, boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
+        }}>
+          <div style={{ fontSize: 11, color: "var(--text)" }}>{activa.etiqueta}</div>
+          <div style={{ fontSize: 12, fontFamily: "'DM Mono', monospace", color: "var(--text)" }}>
+            {formatoPorcentaje(activa.pct)}
+          </div>
+          <div style={{ fontSize: 10, fontFamily: "'DM Mono', monospace", color: "var(--muted2)" }}>
+            {formatoEuros(activa.valor)}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
