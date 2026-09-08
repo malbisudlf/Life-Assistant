@@ -1676,9 +1676,24 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     return {"events": events}
 
 
+def _version_desplegada() -> str:
+    """SHA del commit que se clonó al construir el add-on, o "desconocida".
+
+    Sin esto no había forma de saber qué código corre en el Green: el backend no tiene
+    interfaz, reconstruir el add-on no cambia nada visible, y una reconstrucción que no
+    trae el código nuevo —le pasó, por la caché de capas de Docker— es indistinguible
+    de una que sí. En local el fichero no existe, y eso es correcto.
+    """
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()[:40] or "desconocida"
+    except OSError:
+        return "desconocida"
+
+
 @app.get("/")
 def root():
-    return {"status": "Life Assistant API running"}
+    return {"status": "Life Assistant API running", "version": _version_desplegada()}
 
 
 # ── MAPS ──────────────────────────────────────────────────────────────────────

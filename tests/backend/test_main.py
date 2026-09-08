@@ -430,7 +430,19 @@ class TestClothing:
 def test_root(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert r.json() == {"status": "Life Assistant API running"}
+    assert r.json()["status"] == "Life Assistant API running"
+
+
+def test_root_dice_que_codigo_corre(client, tmp_path, monkeypatch):
+    """Reconstruir el add-on no cambia nada visible, así que una reconstrucción que no
+    trajo el código nuevo se parece a una que sí. `GET /` es la única forma de saberlo
+    sin entrar en el Green; en local no hay fichero VERSION y responde "desconocida"."""
+    assert client.get("/").json()["version"] == "desconocida"
+
+    sha = "a" * 40
+    (tmp_path / "VERSION").write_text(sha + "\n", encoding="utf-8")
+    monkeypatch.setattr(main.os.path, "dirname", lambda _: str(tmp_path))
+    assert client.get("/").json()["version"] == sha
 
 
 # ── Configuración de instancia (kit self-hosted) ──────────────────────────────

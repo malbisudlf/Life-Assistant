@@ -3,6 +3,24 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **«Reconstruir» no reconstruía, y no lo decía.** Se mergean dos arreglos a `main`, se
+  pulsa *Reconstruir* en el add-on, termina sin errores… y producción sigue corriendo el
+  código de antes. La causa: el `RUN git clone` del `Dockerfile` del add-on es una
+  instrucción que no cambia nunca, así que Docker reutilizaba la capa cacheada y no
+  volvía a clonar. El add-on llevaba sirviendo el repositorio tal como estaba **el día
+  que se construyó la imagen por primera vez**.
+  - Lo que lo hizo invisible es que **el fallo no tiene síntoma**: la construcción no
+    falla, el add-on arranca, el backend responde. Solo se nota si algo que acabas de
+    arreglar sigue roto, y ahí lo natural es dudar del arreglo, no del despliegue.
+  - Se descubrió por casualidad: un cambio de ingesta que debía dejar un aviso en
+    `app_logs` no lo dejaba, y el volcado de logs es cada dos segundos, así que no había
+    otra explicación posible.
+  - Dos remedios, y hacen falta los dos. Un `ADD` de
+    `api.github.com/repos/.../commits/main` justo antes del clone invalida la capa
+    cuando —y solo cuando— hay commit nuevo. Y el SHA clonado se guarda en
+    `/app/VERSION` y sale por `GET /`, porque *hasta entonces no existía ninguna forma
+    de preguntarle al backend qué código estaba ejecutando*.
+
 - **Todas las noches decían haberse acostado a las 00:00, y el dashboard llamaba
   "anoche" al sueño de anteayer.** Dos fallos distintos que se tapaban el uno al otro
   y que salieron de la misma queja ("el sueño que veo no es el de hoy").
