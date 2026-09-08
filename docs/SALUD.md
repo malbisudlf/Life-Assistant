@@ -67,6 +67,26 @@ sí coinciden.
     Export de un Atajo de iOS, que es justo lo que hace falta para saber en qué app del
     teléfono está el fallo.
 
+### Zepp no vuelca a Salud hasta que abres la app
+
+El eslabón que falta de la cadena, y el único que no está automatizado:
+
+```
+banda Zepp → [abrir la app Zepp] → Apple Salud → Health Auto Export → POST /health/ingest
+```
+
+Diagnosticado el 2026-09-08 persiguiendo por qué el sueño de esa madrugada no salía en
+el dashboard. Lo que despista es que **HRV y frecuencia respiratoria de esa misma noche
+sí llegan** —van por otro camino— así que parece que la banda ha sincronizado del todo
+cuando la sesión de sueño todavía no existe en Salud. Health Auto Export no tiene nada
+que exportar por mucho que se le fuerce, y el sueño aparece horas después, cuando se
+abre la app de Zepp por cualquier motivo.
+
+**Automatizarlo**: en la automatización personal de iOS que ya se dispara al quitar el
+iPhone del cargador, el paso útil es *Abrir app → Zepp* (esperar unos segundos y dejar
+que Health Auto Export haga el resto). No hace falta que el Atajo llame al backend:
+quien habla con el backend es Health Auto Export.
+
 ### Cómo se comprueba que una noche no llegó
 
 `sleep_analysis` puede faltar por dos motivos que desde el dashboard se ven igual (no
