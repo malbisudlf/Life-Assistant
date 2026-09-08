@@ -252,6 +252,10 @@ saber es distinto de saber que no llegó nada.
   `relleno` (área bajo la curva) y `marcar` (un predicado que señala puntos con un punto
   gris: hoy, los días puntuados sin el reloj puesto). Se usa en el bloque de composición corporal
   para la serie de peso con el objetivo encima.
+- **`DonutPatrimonio`** es el donut del reparto del widget de finanzas: una porción por
+  sitio donde hay dinero, cada una un `<circle>` con `stroke-dasharray` en vez de un
+  `<path>` con arcos. La lógica (qué porciones hay y cuánto pesa cada una) es pura y vive
+  en `repartoPatrimonio()`; el detalle de las decisiones está en `docs/FINANZAS.md`.
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
   "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,

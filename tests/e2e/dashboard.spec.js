@@ -134,6 +134,17 @@ test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', a
   await expect(widget).toContainText('Revolut')
   await expect(widget).toContainText('80 €')
 
+  // El reparto del patrimonio: con dos fuentes (Indexa y Revolut) ya se pinta, y los
+  // pesos los calcula el frontend sobre lo que devolvió el backend — 12.500 € contra
+  // 79,70 €. Que salga el porcentaje pequeño es la parte que importa: una porción del
+  // 0,6 % tiene que seguir teniendo nombre en la leyenda aunque casi no se vea.
+  // (El nombre y el porcentaje son dos <span> pegados, sin espacio en el DOM: la
+  // separación es del layout, así que se comprueban por separado.)
+  await expect(widget).toContainText('Dónde está el dinero')
+  await expect(widget).toContainText('Indexa Capital')
+  await expect(widget).toContainText('99,4 %')
+  await expect(widget).toContainText('0,6 %')
+
   // El detalle está plegado a propósito: se despliega a mano.
   await expect(widget).not.toContainText('Vanguard Global')
   await widget.getByRole('button', { name: 'Ver posiciones' }).click()

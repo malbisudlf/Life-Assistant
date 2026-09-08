@@ -607,6 +607,39 @@ class TestEtfAportacionHora:
         assert r.status_code == 422
 
 
+class TestEtfAportacionParticipacionesExactas:
+    # Cuando el broker dice cuántas participaciones son, no hay nada que estimar: ese
+    # número gana a cualquier precio de Yahoo, y con él desaparece el margen de ~0,5-1 %
+    # que separa el feed de Revolut del de Yahoo. Importa sobre todo con el mercado
+    # cerrado: ahí la vela horaria más cercana no es el precio al que se ejecutó nada.
+
+    def test_las_participaciones_del_broker_ganan_y_no_se_pregunta_a_yahoo(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "etf_holdings", FakeResponse([ETF_HOLDINGS[0]]))
+        mock_requests.add("POST", "etf_aportaciones", FakeResponse([{
+            "id": "nuevo", "ticker": "VWCE", "fecha": "2026-08-31", "hora": "08:00",
+            "importe_eur": 250.0, "participaciones": 3.35886067, "precio_compra": 74.43,
+        }]))
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers, json={
+            "fecha": "2026-08-31", "importe_eur": 250.0, "hora": "08:00",
+            "participaciones": 3.35886067,
+        })
+        assert r.status_code == 200
+        enviado = mock_requests.called("POST", "etf_aportaciones")[0][2]["json"]
+        assert enviado["participaciones"] == pytest.approx(3.35886067)
+        # El precio de compra sale de la división, no de una cotización.
+        assert enviado["precio_compra"] == pytest.approx(74.43)
+        # Y a Yahoo no se le ha preguntado nada: el histórico no aporta aquí.
+        assert mock_requests.called("GET", "chart/VWCE.DE") == []
+        assert r.json()["fecha_precio_usada"] == "2026-08-31"
+
+    def test_cero_participaciones_lo_rechaza(self, client, auth_headers, mock_requests):
+        r = client.post("/finanzas/etfs/VWCE/aportaciones", headers=auth_headers, json={
+            "fecha": "2026-08-31", "importe_eur": 250.0, "participaciones": 0,
+        })
+        assert r.status_code == 422
+        assert mock_requests.called("POST", "etf_aportaciones") == []
+
+
 class TestEtfBorrarAportacion:
     def test_requiere_jwt(self, client):
         assert client.delete("/finanzas/etfs/VWCE/aportaciones/11111111-1111-1111-1111-111111111111").status_code in (401, 403)

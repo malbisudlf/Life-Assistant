@@ -7,7 +7,9 @@ Un widget, tres fuentes. `GET /finanzas/resumen` devuelve la cartera de Indexa e
 claves de siempre y el saldo de Revolut en `revolut`; `GET /finanzas/etfs` (endpoint
 aparte) devuelve la cartera manual de ETFs. No se suman entre sí — inversión con
 plusvalía, dinero parado en una cuenta corriente y una cartera llevada a mano son tres
-cosas distintas, y sumarlas daría un "total" que no significa nada.
+cosas distintas, y sumarlas daría un "total" que no significa nada. Lo que sí hay es un
+**reparto en porcentajes** de las tres juntas (el donut del final de la tarjeta): eso
+contesta "dónde está el dinero", que es otra pregunta — ver "El reparto del patrimonio".
 
 ### Indexa Capital
 
@@ -96,7 +98,8 @@ posiciones. Con más de una cuenta aparece una fila por cuenta.
 
 Los formateadores son puros y viven en `src/lib/helpers.js`: `formatoEuros`,
 `formatoPorcentaje`, `formatoRentabilidad` (fracción → porcentaje, en un solo sitio para que
-nadie multiplique por 100 a ojo), `mezclaCartera` y `variacionCartera`.
+nadie multiplique por 100 a ojo), `mezclaCartera`, `variacionCartera` y
+`repartoPatrimonio`.
 
 Debajo, separadas por una sola línea, Revolut (`finanzas.revolut`) y la cartera manual de
 ETFs (`carteraEtf`, estado propio cargado con `GET /finanzas/etfs`) comparten UNA lista con
@@ -109,6 +112,55 @@ cómo se presentan. Cada ETF muestra precio actual (`€/particip.`) y aportado 
 secundaria, y un botón "+ Añadir aportación" que abre un formulario inline (fecha, hora
 opcional, importe) y llama a `POST /finanzas/etfs/{ticker}/aportaciones`. El botón ↻
 refresca las tres fuentes a la vez.
+
+### El reparto del patrimonio (el donut)
+
+Al final de la tarjeta, «Dónde está el dinero»: un donut con una porción por SITIO donde
+hay dinero —Indexa, cada ETF de la cartera manual y cada cuenta de Revolut— con su
+leyenda de nombres y porcentajes. La lógica es pura y vive en `repartoPatrimonio()`
+(`src/lib/helpers.js`); el dibujo es `DonutPatrimonio`, un subcomponente de
+`Dashboard.jsx`.
+
+**Esto no contradice que las tres fuentes no se sumen**, que sigue siendo la regla de la
+cabecera de este fichero. Un total en euros mezclando inversión con plusvalía, saldo de
+cuenta corriente y una cartera llevada a mano no responde a nada; un porcentaje responde
+a otra pregunta, que sí es legítima: no «cuánto tengo» sino «cuánto de lo que tengo está
+aquí». De ahí que **en el donut no aparezca ni un euro**: solo pesos relativos (el importe
+exacto de cada porción está en su `title`, para cuando se quiera mirar de verdad).
+
+Las decisiones que no son obvias:
+
+- **Lo que no se sabe no cuenta como cero.** Si a un ETF le falta el precio (Yahoo falló),
+  si Indexa no respondió o si Revolut se cayó, esa fuente no entra y el reparto sale
+  marcado `completo: false`; el widget lo dice debajo del donut. Unos porcentajes
+  calculados sobre una parte del patrimonio y presentados como si fueran sobre el todo
+  mienten sin que se note — es la misma regla que el `—` en vez de `0 €`.
+- **Un ETF dado de alta y sin comprar todavía NO es un hueco**, aunque no tenga valor: no
+  hay nada que se desconozca ahí. Igual que una fuente sin configurar (`configurado:
+  false`) es una fuente que no existe, no un dato que falte.
+- **Indexa va como una sola porción** aunque haya varias cuentas. El donut dice en qué
+  sitios está el dinero, y el desglose por cuenta ya está en las filas de justo encima.
+- **Con una sola fuente no se pinta**: un círculo entero de un color no reparte nada.
+- **De mayor a menor**, al contrario que la barra de mezcla por clase de activo, que tiene
+  un orden fijo para poder compararse con la de la semana pasada. Aquí las fuentes entran
+  y salen (un ETF nuevo, una cuenta que se cierra) y no hay orden canónico que preservar.
+- **Paleta propia** (`COLORES_PATRIMONIO`), no la de la barra de mezcla: son dos preguntas
+  distintas en la misma tarjeta —una reparte por clase de activo, la otra por sitio— y
+  compartir los colores haría que el oro de «acciones» significara otra cosa cinco líneas
+  más abajo. El color se asigna por POSICIÓN en el reparto, así que una fuente no cambia
+  de color porque otra la adelante. Los tonos están validados para que dos contiguos se
+  distingan también con daltonismo (el par más justo queda en 8,9 ΔE en protanopia); son
+  deliberadamente apagados, como el resto del dashboard, y de la octava fuente en adelante
+  todo cae en gris. El oro (`--accent`) va en el quinto hueco a propósito: es el color de
+  «acciones» en la barra de mezcla, y dárselo también a la porción más grande del donut
+  era pedir que se leyeran como lo mismo.
+- **La identidad nunca depende solo del color**: la leyenda lleva el nombre y el porcentaje
+  de cada porción, que es lo que se lee de verdad. Hace falta porque las porciones del
+  0,7 % son un hilo de un píxel en el anillo, y ahí el color no se aprecia.
+- **Cada porción se dibuja como un círculo con `stroke-dasharray`**, no como un `path` con
+  arcos: la misma geometría sin trigonometría que revisar. Los desfases se calculan antes
+  de pintar y no acumulando dentro del `map` — eso sería reasignar una variable del render
+  desde un callback, y el compilador de React lo prohíbe (`react-hooks/immutability`).
 
 ### Jarvis
 
@@ -266,12 +318,17 @@ navegador, sin él responde `429` aunque no haya habido ningún tráfico previo.
   cierre real de ese día. No se recalculan después: lo que cambia con el tiempo es el
   valor de esas participaciones, no cuántas hay.
 
-**El ticker de Revolut no siempre es el símbolo real.** El "SECO" que enseña Revolut
+**El ticker de Revolut no siempre es el símbolo real, y el nombre del producto tampoco lo
+lleva dentro.** Dos casos ya vistos, los dos con el mismo remedio (`ticker` es el de
+Revolut, `simbolo_yahoo` el real, campos separados a propósito): El "SECO" que enseña Revolut
 para el iShares MSCI Global Semiconductors UCITS ETF es en realidad **`SEC0`** (con
 cero, no con la letra O) — se confunden con la tipografía de la app, y su
-`simbolo_yahoo` es `SEC0.DE`. El `ticker` que usa este dashboard es el de Revolut
-(para que Mikel lo reconozca); `simbolo_yahoo` es el real, y son campos separados a
-propósito.
+`simbolo_yahoo` es `SEC0.DE`.
+
+Y el **iShares Physical Gold ETC** (ISIN `IE00B4ND3602`) cotiza en Xetra como **`PPFB`**
+—no "PFB", que es como se lee de un tirón en la app— con `simbolo_yahoo` `PPFB.DE`. Es un
+ETC, no un ETF, pero entra en la misma tabla: para esta cartera es una participación con
+un precio en euros, que es todo lo que `etf_holdings` necesita saber.
 
 **`GET /finanzas/etfs`** agrupa las aportaciones por ticker y calcula, por ETF:
 `participaciones` y `aportado_eur` (siempre disponibles — son datos propios, no
@@ -320,6 +377,10 @@ de ruido de ~0,5-1 % frente al precio exacto de Revolut es el límite real, asum
 propósito — decisión tomada con Mikel tras comprobarlo en vivo, no algo pendiente de
 arreglar. El valor total y la tendencia (sube/baja) son correctos; el porcentaje
 exacto de ganancia puede variar un poco.
+
+Eso vale para el precio de HOY, que solo puede salir de Yahoo. Para el **precio de
+compra** sí hay salida y es exacta: mandar las `participaciones` que dice Revolut al
+crear la aportación (ver arriba). Ahí no se estima nada.
 
 ### Lo que no se hace y por qué
 

@@ -18,6 +18,7 @@ import {
   elegirVozEspanola, textoHablable, esFinDeLlamada,
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
+  repartoPatrimonio,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -1569,6 +1570,89 @@ describe("variacionCartera", () => {
     expect(variacionCartera([{ fecha: "2026-08-21", valor: 12400 }])).toBeNull();
     expect(variacionCartera([])).toBeNull();
     expect(variacionCartera(null)).toBeNull();
+  });
+});
+
+describe("repartoPatrimonio", () => {
+  // Las tres fuentes con datos: Indexa (una porción aunque tenga dos cuentas), las dos
+  // cuentas de Revolut por separado y los ETFs de la cartera manual.
+  const _completo = () => ({
+    finanzas: {
+      configurado: true,
+      total: { valor: 12000 },
+      cuentas: [{ numero: "A", valor: 9000 }, { numero: "B", valor: 3000 }],
+      revolut: {
+        configurado: true, saldo: 270,
+        cuentas: [{ nombre: "Cuenta de gasto", saldo: 120 }, { nombre: "Cuenta de ahorro", saldo: 150 }],
+      },
+    },
+    carteraEtf: {
+      etfs: [
+        { ticker: "VWCE", nombre: "Vanguard FTSE All-World", participaciones: 20, valor_actual: 2500 },
+        { ticker: "PPFB", nombre: "Oro",                    participaciones: 3.35886067, valor_actual: 250 },
+      ],
+    },
+  });
+
+  test("reparte las tres fuentes de mayor a menor y los pesos suman 100 %", () => {
+    const { tramos, total, completo } = repartoPatrimonio(_completo());
+    expect(tramos.map(t => t.etiqueta)).toEqual([
+      "Indexa Capital", "Vanguard FTSE All-World", "Oro", "Cuenta de ahorro", "Cuenta de gasto",
+    ]);
+    expect(total).toBe(15020);
+    expect(completo).toBe(true);
+    expect(tramos[0].pct).toBeCloseTo(79.89, 1);
+    expect(tramos.reduce((a, t) => a + t.pct, 0)).toBeCloseTo(100, 5);
+  });
+
+  test("Indexa va como UNA porción aunque tenga varias cuentas", () => {
+    const { tramos } = repartoPatrimonio(_completo());
+    expect(tramos.filter(t => t.id === "indexa")).toHaveLength(1);
+    expect(tramos.find(t => t.id === "indexa").valor).toBe(12000);
+  });
+
+  test("con una sola cuenta de Revolut la porción se llama Revolut, no el nombre del banco", () => {
+    const datos = _completo();
+    datos.finanzas.revolut = { configurado: true, saldo: 80, cuentas: [{ nombre: "Current", saldo: 80 }] };
+    const { tramos } = repartoPatrimonio(datos);
+    expect(tramos.map(t => t.etiqueta)).toContain("Revolut");
+    expect(tramos.map(t => t.etiqueta)).not.toContain("Current");
+  });
+
+  test("un ETF sin precio no vale 0 €: marca el reparto como incompleto y no entra", () => {
+    const datos = _completo();
+    datos.carteraEtf.etfs[1].valor_actual = null;
+    const { tramos, completo } = repartoPatrimonio(datos);
+    expect(completo).toBe(false);
+    expect(tramos.map(t => t.etiqueta)).not.toContain("Oro");
+    // Y los porcentajes son sobre lo que se sabe, no sobre un total inventado.
+    expect(tramos.reduce((a, t) => a + t.pct, 0)).toBeCloseTo(100, 5);
+  });
+
+  test("un ETF dado de alta y sin comprar todavía no es un hueco", () => {
+    const datos = _completo();
+    datos.carteraEtf.etfs.push({ ticker: "NUEVO", nombre: "Recién dado de alta", participaciones: 0, valor_actual: null });
+    expect(repartoPatrimonio(datos).completo).toBe(true);
+  });
+
+  test("una fuente caída marca el reparto como incompleto", () => {
+    expect(repartoPatrimonio({ finanzas: { error: true }, carteraEtf: _completo().carteraEtf }).completo).toBe(false);
+    expect(repartoPatrimonio({ finanzas: _completo().finanzas, carteraEtf: { error: true } }).completo).toBe(false);
+  });
+
+  test("sin token de Indexa no hay hueco: es una fuente que no existe", () => {
+    const { tramos, completo } = repartoPatrimonio({
+      finanzas: { configurado: false, motivo: "Falta el token" },
+      carteraEtf: _completo().carteraEtf,
+    });
+    expect(completo).toBe(true);
+    expect(tramos.map(t => t.etiqueta)).toEqual(["Vanguard FTSE All-World", "Oro"]);
+  });
+
+  test("sin nada que repartir no hay tramos", () => {
+    expect(repartoPatrimonio({}).tramos).toEqual([]);
+    expect(repartoPatrimonio().tramos).toEqual([]);
+    expect(repartoPatrimonio({ finanzas: { configurado: true, total: { valor: 0 } } }).tramos).toEqual([]);
   });
 });
 
