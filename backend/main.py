@@ -3443,13 +3443,6 @@ class EtfAportacionIn(BaseModel):
     # Opcional: con la hora exacta se pide el precio horario de Yahoo Finance (más
     # preciso que el cierre del día) en vez de caer directo al cierre diario.
     hora:        str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    # Opcional, y cuando se sabe gana a todo lo demás: las participaciones EXACTAS que
-    # dice el broker. Con ellas no hay nada que estimar —el precio de compra sale de la
-    # división, no de Yahoo— y desaparece de golpe el margen de ruido de ~0,5-1 % que
-    # tiene el precio de Yahoo frente al feed propio de Revolut. Hace falta sobre todo
-    # para compras hechas con el mercado cerrado: ahí la vela horaria más cercana es la
-    # apertura del día siguiente, que no es el precio al que se ejecutó nada.
-    participaciones: float | None = Field(default=None, gt=0, le=1_000_000)
 
 
 def _ticker_path():
@@ -3567,26 +3560,18 @@ def crear_etf_aportacion(
         logger.error("Yahoo Finance: %s no tiene simbolo_yahoo en Supabase", ticker)
         raise HTTPException(status_code=502, detail="Ese ETF no tiene símbolo de Yahoo Finance configurado")
 
-    if body.participaciones is not None:
-        # El broker ya dijo cuántas participaciones son: no se le pregunta a Yahoo un
-        # precio que solo serviría para volver a deducir un número que ya se sabe.
-        participaciones = round(body.participaciones, 8)
-        precio          = round(body.importe_eur / participaciones, 4)
-        fecha_precio    = body.fecha
-    else:
-        try:
-            precio, fecha_precio = _yahoo_precio_historico(simbolo, body.fecha, body.hora)
-        except _YahooFallo as e:
-            logger.error("Yahoo Finance: no se pudo calcular el precio histórico de %s en %s (%s)", ticker, body.fecha, e)
-            raise HTTPException(status_code=502, detail="No se pudo consultar el precio histórico del ETF")
-        participaciones = round(body.importe_eur / precio, 8)
+    try:
+        precio, fecha_precio = _yahoo_precio_historico(simbolo, body.fecha, body.hora)
+    except _YahooFallo as e:
+        logger.error("Yahoo Finance: no se pudo calcular el precio histórico de %s en %s (%s)", ticker, body.fecha, e)
+        raise HTTPException(status_code=502, detail="No se pudo consultar el precio histórico del ETF")
 
     payload = {
         "ticker":          ticker,
         "fecha":           body.fecha.isoformat(),
         "hora":            body.hora,
         "importe_eur":     body.importe_eur,
-        "participaciones": participaciones,
+        "participaciones": round(body.importe_eur / precio, 8),
         "precio_compra":   precio,
     }
     r2 = http.post(

@@ -3568,14 +3568,7 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/finanzas/etfs/${ticker}/aportaciones`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({
-          fecha:       form.fecha,
-          importe_eur: parseFloat(form.importe),
-          hora:        form.hora || null,
-          // `null` y no 0: el backend distingue "no me lo has dicho, deduce el precio de
-          // Yahoo" de un número, y un 0 lo rechazaría con un 422.
-          participaciones: form.participaciones ? parseFloat(form.participaciones) : null,
-        }),
+        body: JSON.stringify({ fecha: form.fecha, importe_eur: parseFloat(form.importe), hora: form.hora || null }),
       });
       if (!r.ok) throw new Error("aportacion");
       setEtfAportForm(f => ({ ...f, [ticker]: { abierto: false, fecha: "", importe: "", hora: "", guardando: false } }));
@@ -4660,16 +4653,6 @@ export default function Dashboard() {
                             <input type="number" min="0" step="0.01" placeholder="Importe €" value={form.importe || ""}
                               onChange={ev => setEtfAportForm(f => ({ ...f, [e.ticker]: { ...f[e.ticker], importe: ev.target.value } }))}
                               style={{ width: 90, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
-                            {/* Si Revolut dice cuántas participaciones compraste, se
-                                copian aquí y se acabó la estimación: el backend deja de
-                                preguntarle el precio a Yahoo y lo deduce de la división.
-                                Es la única forma de que la cartera cuadre al céntimo con
-                                la app, y la única que vale para una compra hecha con el
-                                mercado cerrado. */}
-                            <input type="number" min="0" step="0.00000001" placeholder="Particip." value={form.participaciones || ""}
-                              title="Las participaciones exactas que dice Revolut (opcional). Con ellas no se estima el precio: sale de dividir el importe."
-                              onChange={ev => setEtfAportForm(f => ({ ...f, [e.ticker]: { ...f[e.ticker], participaciones: ev.target.value } }))}
-                              style={{ width: 96, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
                             <button onClick={() => submitEtfAportacion(e.ticker)} disabled={form.guardando || !form.fecha || !form.importe}
                               style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
                             <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: false } }))}

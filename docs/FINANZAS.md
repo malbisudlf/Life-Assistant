@@ -350,6 +350,15 @@ hecha a media sesión, y sin `hora` esto se notó en producción como una gananc
 mostrada por encima de la real. En los dos casos, `participaciones = importe_eur /
 precio` antes de guardar.
 
+**No hay forma de meter las participaciones a mano, y es a propósito.** La hora que
+enseña Revolut puede caer fuera de la sesión (una compra "a las 08:00" con Xetra
+abriendo a las 09:00), y ahí se usa la vela más cercana, que es la de la apertura. Se
+comprobó con la compra real del ETC de oro: 250 € el 31/08 a las 08:00 dieron 74,28 €
+por Yahoo frente a los 74,43 € reales de Revolut — 0,20 %, dentro del margen que este
+fichero ya da por asumido más abajo. Un campo para copiar el número exacto del broker
+convierte cada aportación en trabajo manual para ahorrar dos décimas, que es justo lo
+contrario de por qué esta cartera le pide el precio a una API.
+
 **`DELETE /finanzas/etfs/{ticker}/aportaciones/{id}`** borra una aportación mal
 metida (fecha, importe u hora equivocados). No hay `PATCH`: todos los campos de una
 aportación dependen entre sí (cambiar la fecha invalida el precio ya calculado), así
@@ -377,10 +386,6 @@ de ruido de ~0,5-1 % frente al precio exacto de Revolut es el límite real, asum
 propósito — decisión tomada con Mikel tras comprobarlo en vivo, no algo pendiente de
 arreglar. El valor total y la tendencia (sube/baja) son correctos; el porcentaje
 exacto de ganancia puede variar un poco.
-
-Eso vale para el precio de HOY, que solo puede salir de Yahoo. Para el **precio de
-compra** sí hay salida y es exacta: mandar las `participaciones` que dice Revolut al
-crear la aportación (ver arriba). Ahí no se estima nada.
 
 ### Lo que no se hace y por qué
 

@@ -68,7 +68,7 @@
 | `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie. `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
 | `GET /finanzas/etfs` | JWT | Cartera manual de ETFs: participaciones, aportado, precio actual y ganancia por ETF (vía Yahoo Finance). `?refrescar=true` salta la caché de precios (ver `docs/FINANZAS.md`) |
 | `POST /finanzas/etfs` | JWT | Da de alta un ETF nuevo a trackear `{ticker, nombre, simbolo_twelvedata, bolsa_twelvedata}`. Sin botón en el frontend, se usa por curl |
-| `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?, participaciones?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha — salvo que vengan dadas, y entonces el precio de compra sale de la división |
+| `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha |
 | `DELETE /finanzas/etfs/{ticker}/aportaciones/{id}` | JWT | Borra una aportación mal metida (no hay PATCH: para corregirla se borra y se vuelve a crear) |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
