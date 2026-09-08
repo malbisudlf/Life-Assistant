@@ -356,3 +356,50 @@ class TestSalidaSinDatos:
         ruta = copia.nombre_por_defecto("copias",
                                         datetime(2026, 9, 3, tzinfo=timezone.utc))
         assert ruta.endswith("copia-supabase-2026-09-03.json.gpg")
+
+
+class TestTablaQueNoExiste:
+    """El 404 de PostgREST: una migración del repositorio que nadie pegó en Supabase.
+
+    Es exactamente lo que tuvo la copia entera sin funcionar hasta el 2026-09-07:
+    `salud_ajustes` (migración 20260824, sin aplicar) devolvía 404 y se llevaba por
+    delante el volcado de `health_metrics`, que es lo único de aquí que no se puede
+    reconstruir desde ninguna otra parte.
+    """
+
+    def test_una_opcional_que_no_existe_no_tumba_la_copia(self, monkeypatch):
+        falso = SupabaseFalso({"health_metrics": [[_fila(0)], []]},
+                              totales={"health_metrics": 1})
+        original = falso.get
+
+        def get(url, headers=None, timeout=None):
+            if "/salud_ajustes" in url:
+                return RespuestaFalsa([], status_code=404)
+            return original(url, headers=headers, timeout=timeout)
+
+        monkeypatch.setattr(copia.http, "get", get)
+        vuelta = copia.construir_copia(URL, CLAVE, tablas=(
+            _tabla("health_metrics", obligatoria=True, orden="metric_date"),
+            _tabla("salud_ajustes"),
+        ))
+        assert vuelta["recuentos"]["health_metrics"] == 1
+        # Ausente ≠ vacía: quien restaure dentro de seis meses tiene que poder
+        # distinguirlas, y solo una de las dos es un problema.
+        assert vuelta["ausentes"] == ["salud_ajustes"]
+        assert "salud_ajustes" not in vuelta["tablas"]
+
+    def test_una_obligatoria_que_no_existe_si_la_tumba(self, monkeypatch):
+        monkeypatch.setattr(copia.http, "get",
+                            lambda *a, **k: RespuestaFalsa([], status_code=404))
+        with pytest.raises(copia.ErrorCopia, match="obligatoria"):
+            copia.construir_copia(URL, CLAVE, tablas=(
+                _tabla("health_metrics", obligatoria=True, orden="metric_date"),
+            ))
+
+    def test_el_404_sigue_siendo_un_error_para_quien_no_lo_trate(self, monkeypatch):
+        """`TablaAusente` hereda de `ErrorCopia` a propósito: lo que no puede pasar es
+        que una tabla que no existe pase inadvertida."""
+        monkeypatch.setattr(copia.http, "get",
+                            lambda *a, **k: RespuestaFalsa([], status_code=404))
+        with pytest.raises(copia.ErrorCopia):
+            copia.descargar_tabla("salud_ajustes", "id", None, URL, CLAVE)

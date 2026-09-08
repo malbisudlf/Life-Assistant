@@ -127,7 +127,7 @@ def mock_requests(monkeypatch):
     monkeypatch.setattr(main.http, "post", router.post)
     monkeypatch.setattr(main.http, "patch", router.patch)
     monkeypatch.setattr(main.http, "delete", router.delete)
-    # PUT lo usa el merge del PR al desplegar (`_desplegar`), y solo eso.
+    # PUT lo usa el merge del PR del arreglo (`_mergear_arreglo`), y solo eso.
     monkeypatch.setattr(main.http, "put", router.put)
     return router
 

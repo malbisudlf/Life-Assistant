@@ -3,6 +3,28 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Todas las noches decían haberse acostado a las 00:00, y el dashboard llamaba
+  "anoche" al sueño de anteayer.** Dos fallos distintos que se tapaban el uno al otro
+  y que salieron de la misma queja ("el sueño que veo no es el de hoy").
+  - `sleep_start` salía de `date_raw[11:16]`, la hora del `date` de la muestra. Pero
+    Health Auto Export **resume el sueño por días** y le pone a la muestra la medianoche
+    del día al que la asigna, así que la hora era `00:00` en las 64 filas guardadas,
+    con el Apple Watch y con la banda Zepp por igual. Y `00:00` no es un valor neutro:
+    `sleepBreakdown` resta 5 puntos por acostarse pasada la medianoche (o sea, un
+    impuesto fijo sobre todas las noches), la línea del día dibujaba el sueño empezando
+    a las doce en punto, `bedtimeHrvInsight` comparaba "temprano" contra "tarde" con un
+    solo valor, y la hora habitual de dormir de Jarvis —mediana de `sleep_start`, la que
+    decide cuándo avisar de irse a la cama— era 00:00 pasara lo que pasara. La hora real
+    venía en el mismo punto (`sleepStart`, `inBedStart`) desde el principio.
+    *Un campo derivado que sale siempre igual no es una constante: es un campo roto.*
+  - El widget pintaba `sleepAllData[último]` con la etiqueta fija "anoche". Cuando el
+    reloj no había sincronizado todavía (pasa a diario: la fila del sueño llega horas
+    después que HRV y respiración del mismo día), la última fila era de la noche
+    anterior y se enseñaba como la de esta madrugada, sin ninguna pista. El score
+    encima mezclaba: puntuaba esa noche vieja con la recuperación de HOY. Ahora la
+    etiqueta cuenta las noches de desfase, avisa de que el dato de esta noche no ha
+    llegado, y las métricas de recuperación se leen de la fecha de la noche puntuada.
+
 - **Un aviso pedido a mano llegaba doce horas tarde, y dos veces.** El síntoma era
   siempre el mismo: un recordatorio de la tarde apareciendo en el móvil a la mañana
   siguiente. Lo que lo hacía difícil es que **el sistema no guardaba en ningún sitio con

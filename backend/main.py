@@ -822,11 +822,20 @@ LOGIN_WINDOW_SECONDS = int(os.getenv("LOGIN_WINDOW_SECONDS", "300"))
 # (300s, 600s, 1.200s…) hasta este tope. Sin el doblado, cinco intentos cada cinco
 # minutos son 1.440 al día contra la contraseña, indefinidamente y sin coste.
 LOGIN_BLOQUEO_MAX_SECONDS = int(os.getenv("LOGIN_BLOQUEO_MAX_SECONDS", "3600"))
-# Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera
-# (en Fly no hace falta: ya manda Fly-Client-IP). Ver _client_ip.
+# Solo actívalo si despliegas detrás de un proxy inverso propio que añada la cabecera.
+# Ver _client_ip.
 TRUST_FORWARDED_FOR  = os.getenv("TRUST_FORWARDED_FOR", "").lower() in ("1", "true", "yes")
-# Lo define el runtime de Fly. Sirve para saber si Fly-Client-IP es de fiar.
+# Lo define el runtime de Fly. Sirve para saber si Fly-Client-IP es de fiar. Hoy no está
+# puesto en ningún sitio (el backend vive en el Green), pero se queda: el kit de
+# `docs/DESPLIEGUE.md` sí se puede desplegar en Fly, y quitarlo dejaría a esa instalación
+# con el límite por IP roto sin que nada lo dijera.
 EN_FLY               = bool(os.getenv("FLY_APP_NAME"))
+# Igual que la anterior, para el Cloudflare Tunnel que expone el Green: `CF-Connecting-IP`
+# la escribe el borde de Cloudflare y NO se puede falsificar desde fuera... siempre que la
+# petición entre de verdad por el túnel. Por eso va tras un interruptor explícito y no
+# encendida por defecto: si alguien alcanzara el puerto 8080 en local, esa cabecera la
+# pondría él. En el Green ese puerto solo lo ven HA y el propio cloudflared.
+TRUST_CLOUDFLARE     = os.getenv("TRUST_CLOUDFLARE", "").lower() in ("1", "true", "yes")
 
 
 def _client_ip(request: Request) -> str:
@@ -839,7 +848,14 @@ def _client_ip(request: Request) -> str:
       1. `Fly-Client-IP` — la pone el proxy de Fly, y solo se cree si de verdad estamos
          corriendo en Fly (FLY_APP_NAME lo define su runtime). Fuera de Fly no hay nadie
          que la sobrescriba, así que la mandaría el propio cliente: se ignora.
-      2. El socket real de la conexión.
+      2. `CF-Connecting-IP` — la pone el borde de Cloudflare, y solo se cree con
+         TRUST_CLOUDFLARE=1. Hace falta desde la mudanza al Green: **todo lo que entra
+         por el Cloudflare Tunnel llega al backend con la IP del propio túnel**, así que
+         sin esto el socket vale lo mismo para todo internet y el límite por IP de
+         `/ideas/audio` se convierte en un cubo único compartido — el primero que abuse
+         deja a los demás (o sea, al usuario) sin cupo. No se enciende sola por lo que
+         dice el comentario de TRUST_CLOUDFLARE.
+      3. El socket real de la conexión.
 
     Si alguien despliega detrás de otro proxy inverso propio, puede activar
     TRUST_FORWARDED_FOR=1 y entonces se usa la ÚLTIMA entrada de X-Forwarded-For (la que
@@ -850,6 +866,10 @@ def _client_ip(request: Request) -> str:
         fly = request.headers.get("fly-client-ip")
         if fly:
             return fly.strip()
+    if TRUST_CLOUDFLARE:
+        cf = request.headers.get("cf-connecting-ip")
+        if cf:
+            return cf.strip()
     if TRUST_FORWARDED_FOR:
         fwd = request.headers.get("x-forwarded-for", "")
         partes = [p.strip() for p in fwd.split(",") if p.strip()]
@@ -3636,6 +3656,28 @@ METRICAS_SIN_MEDIDA_EN_CERO = {
 _CLAVES_SUENO = ("asleep", "totalSleep", "deep", "rem", "core", "light")
 
 
+def _hora_inicio_sueno(point: dict, date_raw: str) -> str | None:
+    """Hora de pared a la que se empezó a dormir esa noche, como "HH:MM".
+
+    NO sale del `date` del punto. Health Auto Export resume el sueño por días y le pone
+    a la muestra la MEDIANOCHE del día al que la asigna, así que leer ahí la hora daba
+    "00:00" en absolutamente todas las noches — con el reloj anterior y con la banda
+    Zepp. Y "00:00" no es un valor neutro: `sleepBreakdown` lo castiga con -5 puntos por
+    acostarse pasada la medianoche, la línea del día dibuja la noche empezando a las
+    doce en punto y la hora habitual de dormir que usa Jarvis (mediana de `sleep_start`)
+    salía clavada a las 00:00 pasara lo que pasara.
+
+    La hora real sí viene en el propio punto (`sleepStart`, y `inBedStart` si no), ya en
+    hora local con su desfase — que es justo lo que quiere quien la lee. El `date` queda
+    como último recurso para fuentes que no manden ninguna de las dos.
+    """
+    for clave in ("sleepStart", "inBedStart"):
+        m = re.search(r"\d{2}:\d{2}", str(point.get(clave) or ""))
+        if m:
+            return m.group(0)
+    return date_raw[11:16] if len(date_raw) >= 16 else None
+
+
 def _cero_sin_medida(name: str, value, extra: dict | None = None) -> bool:
     """True si esta muestra es un 0 que significa "no se midió", no "el valor fue 0".
 
@@ -3838,11 +3880,13 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
     )
 
     filas = []
+    descartadas = []
     for (metric_date, name), data in agrupadas.items():
         value = data["value"]
         # Un 0 que en realidad es "no se midió" no se guarda: pisaría la medida buena
         # del día en el upsert (ver METRICAS_SIN_MEDIDA_EN_CERO).
         if _cero_sin_medida(name, value, data.get("extra")):
+            descartadas.append(f"{name}@{metric_date}")
             continue
         if name in CUMULATIVE_METRICS and value is not None:
             previo = (existentes.get((metric_date, name)) or {}).get("value")
@@ -3862,6 +3906,15 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
         if fuente:
             fila["fuente"] = fuente
         filas.append(fila)
+
+    # El descarte era mudo, y eso deja sin distinguir las dos explicaciones de que una
+    # noche no aparezca en el dashboard: que el reloj no la haya mandado, o que la haya
+    # mandado a cero y el backend la haya tirado aquí. Desde fuera son idénticas —falta
+    # la fila— y se arreglan en sitios distintos (el teléfono o este fichero). Va en
+    # WARNING porque un lote que trae la métrica y la pierde no es rutina.
+    if descartadas:
+        logger.warning("Ingesta de salud: %d métrica(s) descartada(s) por llegar a cero "
+                       "sin medida: %s", len(descartadas), ", ".join(sorted(descartadas)))
 
     if not filas:
         return 0
@@ -4003,8 +4056,10 @@ async def health_ingest(request: Request, token: str = ""):
 
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
-            if name == "sleep_analysis" and len(date_raw) >= 16:
-                extra["sleep_start"] = date_raw[11:16]  # "HH:MM"
+            if name == "sleep_analysis":
+                inicio = _hora_inicio_sueno(point, date_raw)
+                if inicio:
+                    extra["sleep_start"] = inicio
 
             key = (metric_date, name)
             if key not in grouped_metrics:
@@ -7816,6 +7871,11 @@ REGLA_AL_SALIR      = "al_salir"
 # desplegar— y porque son las dos únicas que pueden tocar producción: tenerlas
 # distinguibles es lo que permite silenciar una sin callar la otra.
 REGLA_DESPLIEGUE    = "despliegue"
+# La de «un workflow que corre solo se ha roto» (`POST /programado/roto`). Aparte de
+# REGLA_DESPLIEGUE porque no pregunta nada ni toca producción: solo cuenta algo que si no
+# no vería nadie. Y con regla propia y no sin ella para que se pueda silenciar sola si
+# algún día se vuelve ruido, como cualquier otra.
+REGLA_PROGRAMADO    = "programado"
 # Las de «avísame»: una sesión de Claude Code deja dicho qué te pidió y qué hizo
 # (`docs/AVISAME.md`). Son DOS y no una porque lo único que separa a un «ya está hecho»
 # de un «no puedo seguir sin ti» es si el trabajo se queda parado hasta que contestes, y
@@ -10796,13 +10856,17 @@ AVERIA_CI       = _flag("AVERIA_CI", "0")
 # limitarse a avisar. Con una sola no se tolera un fallo transitorio del CI; sin tope, un
 # arreglo que no arregla lanza una sesión por cada push.
 AVERIA_MAX_INTENTOS = int(os.getenv("AVERIA_MAX_INTENTOS", "2"))
-# El PAT que mergea el PR y dispara el deploy. Es la credencial más peligrosa del
-# backend: con ella se toca producción. Sin configurar, el botón de desplegar lo DICE en
-# vez de fallar en silencio, y todo lo demás (detectar, arreglar, avisar) sigue igual.
+# El PAT que mergea el PR del arreglo. Es la credencial más peligrosa del backend: con
+# ella se escribe en `main`. Sin configurar, el botón lo DICE en vez de fallar en
+# silencio, y todo lo demás (detectar, arreglar, avisar) sigue igual.
 DEPLOY_GITHUB_TOKEN = os.getenv("DEPLOY_GITHUB_TOKEN", "")
-# El workflow que despliega, por nombre de fichero. Fijo y no configurable desde fuera:
-# es un nombre que se interpola en la URL de la API de GitHub.
-DEPLOY_WORKFLOW     = "deploy-backend.yml"
+# NO hay workflow de despliegue, y no es un olvido. Con el backend en el Green, desplegar
+# es pulsar *Reconstruir* en el add-on `local_life-assistant` desde la interfaz de HA: el
+# `Protection mode` del add-on de SSH bloquea `docker` y el Supervisor no está expuesto a
+# internet, así que no hay nada que GitHub pueda disparar. Hasta el 2026-09-07 este botón
+# seguía llamando a `deploy-backend.yml`, que desplegaba a Fly —una máquina que ya no
+# atendía tráfico—: aprobar un despliegue no cambiaba nada en producción y encima lo daba
+# por hecho. El botón mergea, y el aviso dice en voz alta el paso que falta.
 # Cuánto vale un permiso de despliegue sin contestar. Nació sin caducidad y eso resultó
 # ser un fallo con dos caras, las dos vistas al probar «avísame» el 2026-09-04: un permiso
 # que nadie contestó **secuestraba la pantalla de llamada para siempre** —se anuncia antes
@@ -10937,6 +11001,60 @@ def averia(request: Request, body: AveriaIn, token: str = ""):
     return {"ok": True, "lanzado": True, "sesion": resultado["sesion"]}
 
 
+class ProgramadoRotoIn(BaseModel):
+    workflow: str = ""
+    url:      str = ""
+    detalle:  str = ""
+
+
+@app.post("/programado/roto")
+def programado_roto(request: Request, body: ProgramadoRotoIn, token: str = ""):
+    """Un workflow que corre solo ha fallado. Avisa, y NO lanza ningún arreglo.
+
+    Existe por un agujero que costó caro descubrir: el 2026-09-07 se vio que la copia de
+    seguridad semanal de Supabase **no se había ejecutado nunca**. Le faltaban los
+    secrets (`COPIA_PASSPHRASE`, `SUPABASE_URL`, `SUPABASE_KEY`), así que cada lunes moría
+    en diez segundos diciéndolo en un log que nadie abre. `docs/COPIA_SEGURIDAD.md`
+    describía un respaldo que no existía, y el histórico del Apple Watch —lo único que no
+    se puede reconstruir desde ninguna parte— llevaba meses sin copia.
+
+    Lo que lo dejó invisible es que el canal de averías solo mira el CI: un workflow
+    programado podía fallar indefinidamente sin que nadie se enterara.
+
+    Avisa y solo avisa, a diferencia de `/averia`. Un cron roto casi nunca es un fallo de
+    código —es un secret que falta, una cuota agotada, una tabla sin migrar— y lanzarle
+    una sesión de Claude Code encima solo añade una sesión que tampoco puede arreglarlo:
+    no tiene acceso a los secrets del repositorio. Aquí quien tiene que enterarse es una
+    persona.
+    """
+    if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    workflow = str(body.workflow or "").strip()[:80] or "un workflow programado"
+    detalle  = str(body.detalle or "").strip()[:200]
+    # Solo https y solo por si acaso: este texto acaba en una notificación con enlace.
+    url      = str(body.url or "").strip()[:300]
+    if not url.startswith("https://"):
+        url = ""
+
+    texto = f"«{workflow}» ha fallado."
+    if detalle:
+        texto += f" {detalle}"
+    texto += ("\n\nCorre solo, así que esto no lo va a ver nadie más. No lanzo ningún "
+              "arreglo: casi siempre es un secret o una cuota, no código.")
+    if url:
+        texto += f"\n\n{url}"
+
+    # La huella es el workflow, no el run: un cron roto que falla cada semana por lo mismo
+    # es UN problema, no uno nuevo cada lunes. `_ya_dicho` lo deja pasar otra vez cuando
+    # la memoria de la regla caduca, que es lo que hace que no se olvide del todo.
+    apuntado = _apuntar_aviso(REGLA_PROGRAMADO, texto, prioridad=PRIO_ALTA,
+                              cuando=_cuando_avisar(_ahora_local()),
+                              huella=workflow)
+    logger.warning("Workflow programado roto: %s (%s)", workflow, detalle or "sin detalle")
+    return {"ok": True, "avisado": apuntado}
+
+
 class PrListoIn(BaseModel):
     pr: int
     titulo: str = ""
@@ -10999,10 +11117,14 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
         raise HTTPException(status_code=502, detail="No se pudo marcar la avería")
 
     que   = str(fila.get("detalle") or fila.get("issue_titulo") or "algo")
-    texto = (f"He detectado un fallo ({que}) y ya lo he corregido. El PR #{numero} está "
-             f"abierto con el CI en verde.\n\n¿Lo despliego? Responde con los botones "
-             f"del aviso, o dime «despliega el arreglo» — si esto te ha llegado por "
-             f"correo, no hay botones.")
+    # Cabe en RECORDATORIO_MAX_TEXTO (200) contando el motivo, y por eso el motivo se
+    # recorta aquí en vez de dejar que el corte se coma el final: lo último es lo que dice
+    # el paso que no puedo dar yo, y un aviso que se corta antes de eso vuelve a ser el
+    # botón que promete un despliegue que nadie va a hacer. Lo de «si llegó por correo no
+    # hay botones» se cayó por espacio: la herramienta de Jarvis sigue ahí para ese caso.
+    texto = (f"He arreglado un fallo ({que[:50]}). El PR #{numero} está con el CI en "
+             f"verde.\n\n¿Lo subo a main? Después reconstruye el add-on en Home "
+             f"Assistant: eso no lo puedo hacer yo.")
     apuntado = _apuntar_aviso(REGLA_DESPLIEGUE, texto, prioridad=PRIO_ALTA,
                               cuando=_cuando_avisar(_ahora_local()), id=rid)
     # Y además suena el teléfono, SI está encendido. Hoy nace apagado y el canal de voz
@@ -11013,8 +11135,14 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     return {"ok": True, "avisado": apuntado, "pr": numero}
 
 
-def _desplegar(pr: int) -> dict:
-    """Mergea el PR y lanza el deploy. El único sitio del backend que toca producción.
+def _mergear_arreglo(pr: int) -> dict:
+    """Mergea el PR del arreglo. El único sitio del backend que escribe en `main`.
+
+    **No despliega, y el nombre lo dice a propósito.** Con el backend en el Green, el
+    último paso —reconstruir el add-on— lo da una persona desde la interfaz de HA, así
+    que lo que hace este botón es dejar el arreglo en `main` listo para esa reconstrucción.
+    Se llamaba `_desplegar` y disparaba `deploy-backend.yml` (Fly); tras la mudanza eso
+    era un botón que decía «desplegado» sin haber tocado producción.
 
     Squash con `commit_message` explícito a propósito: dejar que GitHub lo autogenere
     hace que añada él solo un `Co-authored-by` por cada autor distinto de quien mergea,
@@ -11041,24 +11169,7 @@ def _desplegar(pr: int) -> dict:
         logger.exception("Despliegue: no se pudo mergear el PR #%s", pr)
         return {"ok": False, "motivo": f"no se pudo mergear el PR ({e})"}
 
-    try:
-        r = http.post(f"{base}/actions/workflows/{DEPLOY_WORKFLOW}/dispatches",
-                      headers=cabeceras, json={"ref": "main"})
-        if r.status_code >= 300:
-            detalle = (r.text or "")[:200].replace("\n", " ").strip()
-            logger.error("Despliegue: el disparo de %s devolvió %s — %s",
-                         DEPLOY_WORKFLOW, r.status_code, detalle or "(sin cuerpo)")
-            # El merge YA está hecho: esto no se puede deshacer, y decir "no se ha
-            # desplegado" a secas escondería que `main` ya lleva el cambio.
-            return {"ok": False, "mergeado": True,
-                    "motivo": f"el PR se mergeó pero el deploy no arrancó ({r.status_code}); "
-                              f"lánzalo a mano desde Actions"}
-    except requests.RequestException as e:
-        logger.exception("Despliegue: no se pudo disparar %s", DEPLOY_WORKFLOW)
-        return {"ok": False, "mergeado": True,
-                "motivo": f"el PR se mergeó pero el deploy no arrancó ({e}); "
-                          f"lánzalo a mano desde Actions"}
-    logger.info("Despliegue: PR #%s mergeado y deploy lanzado", pr)
+    logger.info("Despliegue: PR #%s mergeado; falta reconstruir el add-on a mano", pr)
     return {"ok": True, "mergeado": True}
 
 
@@ -11072,7 +11183,7 @@ def _despliegue_decidir(rid: str, accion: str) -> dict:
     """
     if not re.match(_UUID_PATTERN, rid):
         raise HTTPException(status_code=422, detail="Id de despliegue inválido")
-    nuevo = "desplegando" if accion == "desplegar" else "descartado"
+    nuevo = "mergeando" if accion == "desplegar" else "descartado"
     ahora = datetime.now(timezone.utc).isoformat()
     try:
         r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.listo",
@@ -11098,16 +11209,16 @@ def _despliegue_decidir(rid: str, accion: str) -> dict:
     if pr <= 0:
         return {"ok": False, "hecho": False, "motivo": "esa avería no tiene PR apuntado"}
 
-    resultado = _desplegar(pr)
+    resultado = _mergear_arreglo(pr)
     if not resultado["ok"]:
         # Se vuelve a "listo" solo si el merge NO llegó a hacerse: si ya está mergeado,
-        # volver atrás ofrecería desplegar un PR que ya no existe.
-        estado = "desplegado" if resultado.get("mergeado") else "listo"
+        # volver atrás ofrecería mergear un PR que ya no existe.
+        estado = "mergeado" if resultado.get("mergeado") else "listo"
         try:
             http.patch(f"{REVISION_URL}?id=eq.{rid}",
                        headers={**supabase_headers(), "Prefer": "return=minimal"},
                        json={"estado": estado,
-                             "decidido_at": ahora if estado == "desplegado" else None})
+                             "decidido_at": ahora if estado == "mergeado" else None})
         except Exception as e:
             logger.error("Despliegue: no se pudo liberar la decisión de %s (%s)", rid, e)
         return {"ok": False, "hecho": False, "pr": pr, "motivo": resultado["motivo"]}
@@ -11115,10 +11226,14 @@ def _despliegue_decidir(rid: str, accion: str) -> dict:
     try:
         http.patch(f"{REVISION_URL}?id=eq.{rid}",
                    headers={**supabase_headers(), "Prefer": "return=minimal"},
-                   json={"estado": "desplegado"})
+                   json={"estado": "mergeado"})
     except Exception as e:
         logger.warning("Despliegue: no se pudo cerrar la fila de %s (%s)", rid, e)
-    return {"ok": True, "hecho": True, "accion": "desplegar", "pr": pr}
+    # `falta_reconstruir` no es decorativo: es lo que hace que todos los transportes
+    # (botón, voz, correo) digan el paso que queda en vez de dar el arreglo por
+    # desplegado. El backend no puede darlo él — ver el comentario de DEPLOY_GITHUB_TOKEN.
+    return {"ok": True, "hecho": True, "accion": "desplegar", "pr": pr,
+            "falta_reconstruir": True}
 
 
 def _apertura_despliegue() -> str:
@@ -11137,8 +11252,11 @@ def _apertura_despliegue() -> str:
     móvil y en `GET /despliegue/pendiente`, y si lo preguntas Jarvis lo cuenta: la
     diferencia es que ahora lo pides tú en vez de que te lo recite él.
     """
+    # Dice «subir a main» y no «desplegar» porque es literalmente lo que pasa al decir que
+    # sí: el add-on lo reconstruyes tú. Que la pregunta hablada prometiera un despliegue
+    # que nadie iba a hacer es el fallo que se arregló el 2026-09-07.
     return ("He detectado un fallo y ya lo he corregido. El CI está en verde. "
-            "¿Quieres que lo despliegue?")
+            "¿Quieres que lo suba a main?")
 
 
 def _despliegue_pendiente() -> dict:
@@ -11250,10 +11368,11 @@ def _j_desplegar() -> dict:
         return {"ok": False, "motivo": "No hay ningún arreglo esperando permiso"}
     resultado = _despliegue_decidir(str(fila.get("id")), "desplegar")
     if not resultado.get("ok"):
-        return {"ok": False, "motivo": f"No se pudo desplegar: {resultado.get('motivo')}"}
+        return {"ok": False, "motivo": f"No se pudo subir a main: {resultado.get('motivo')}"}
     return {"ok": True, "pr": resultado.get("pr"),
             "dile_al_usuario_literalmente":
-                f"Desplegando el PR #{resultado.get('pr')}."}
+                f"El PR #{resultado.get('pr')} ya está en main. Falta que reconstruyas "
+                f"el add-on en Home Assistant para que llegue a producción."}
 
 
 # ── AVÍSAME: que una sesión de Claude Code te avise y puedas contestarle ─────
@@ -13930,9 +14049,10 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   True,
         "requiere_despliegue": True,
         "fn":          _j_desplegar,
-        "descripcion": "Propone desplegar el arreglo que está esperando permiso: mergea "
-                       "el PR y lanza el deploy del backend. NO lo despliega: lo aprueba "
-                       "el usuario. Es la misma decisión que el botón «Desplegar» del "
+        "descripcion": "Propone subir a main el arreglo que está esperando permiso: "
+                       "mergea el PR. NO lo despliega —el add-on lo reconstruye el "
+                       "usuario a mano en Home Assistant— y no lo mergea por su cuenta: "
+                       "lo aprueba el usuario. Es la misma decisión que el botón del "
                        "aviso, para cuando ese aviso llegó por correo y no traía botones. "
                        "Solo sirve si hay un arreglo con el CI en verde esperando.",
         "parametros":  {},
@@ -15549,7 +15669,8 @@ def _turno_telefonico(dicho: str, historial: list, rid: str) -> str:
         if decision is True:
             resultado = _despliegue_decidir(rid, "desplegar")
             if resultado.get("ok") and resultado.get("hecho"):
-                return f"Hecho. El PR {resultado.get('pr')} está mergeado y desplegando."
+                return (f"Hecho. El PR {resultado.get('pr')} ya está en main. Para que "
+                        f"llegue a producción tendrás que reconstruir el add-on.")
             return (f"No he podido: {resultado.get('motivo', 'no lo sé')}. "
                     f"Te lo dejo en el móvil.")
         if decision is False:

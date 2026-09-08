@@ -98,7 +98,7 @@ En **Settings → Secrets and variables → Actions** del repositorio:
 
 | Nombre | Tipo | Qué es |
 |---|---|---|
-| `SUPABASE_URL` | secret | La misma que tiene el backend en Fly |
+| `SUPABASE_URL` | secret | La misma que tiene el backend |
 | `SUPABASE_KEY` | secret | La **service key**: es la única que salta la RLS y ve las tablas |
 | `COPIA_PASSPHRASE` | secret | La frase de cifrado. **Guárdala fuera de GitHub** (gestor de contraseñas): sin ella las copias no se abren y no hay forma de recuperarlas |
 | `BACKUP_REPO` | variable | *Opcional.* `usuario/repo` del repositorio **privado** del segundo destino |
@@ -107,6 +107,38 @@ En **Settings → Secrets and variables → Actions** del repositorio:
 `backend/.env.example` no cambia: el backend no participa en esto. `SUPABASE_URL` y
 `SUPABASE_KEY` ya están documentadas ahí porque el backend las usa; `COPIA_PASSPHRASE`
 es solo del workflow y del script, y por eso vive aquí y no allí.
+
+> **⚠️ Esta tabla describía durante meses algo que no estaba hecho.** Los tres secrets
+> obligatorios **no estaban dados de alta**, así que el cron de los lunes moría en diez
+> segundos (`ERROR: falta la variable de entorno COPIA_PASSPHRASE`) desde el primer día.
+> Este documento describía un respaldo que no existía, y las 1.281 filas de
+> `health_metrics` —lo único irreemplazable del proyecto— nunca tuvieron copia. Se
+> arregló el **2026-09-07**: los tres secrets están puestos y la copia verificada a mano.
+> Es el mismo fallo que el de la factura de Fly, y con la misma moraleja: **un dato de
+> infraestructura escrito aquí y nunca comprobado acaba sustituyendo a la realidad.**
+>
+> Ahora falla ruidosamente: `.github/workflows/programado-roto.yml` avisa al móvil
+> (`POST /programado/roto`) si este workflow —o cualquier otro que corra solo— se rompe.
+> El canal de averías no lo cubría: solo mira el CI.
+
+**Dónde está la passphrase de esta instalación**: en `~/.life-assistant/`, junto a la
+copia de los secretos de producción, fuera del repositorio. Es la única copia. Sin ella
+los `.gpg` de Actions son ruido: no hay reintento, ni recuperación, ni forma de pedírsela
+a nadie.
+
+### Una tabla que no existe no tumba la copia
+
+Si una tabla **no obligatoria** devuelve 404 (no existe en Supabase), se anota en
+`ausentes` dentro del propio volcado y la copia continúa. Si la obligatoria
+(`health_metrics`) no está, la copia muere: la instalación no es la que este script cree
+estar copiando.
+
+No era así, y ese detalle costó el respaldo entero. El 2026-09-07, ya con los secrets
+puestos, la copia seguía fallando por `salud_ajustes`: su migración (`20260824`) nunca se
+había aplicado en Supabase. Una tabla de ajustes con cero filas se llevaba por delante el
+volcado del histórico del Watch. Ausente y vacía se distinguen dentro del fichero a
+propósito: al restaurar dentro de seis meses son dos historias distintas y solo una es un
+problema.
 
 ### Cómo se restaura
 
