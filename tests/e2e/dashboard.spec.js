@@ -145,6 +145,17 @@ test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', a
   await expect(widget).toContainText('99,4 %')
   await expect(widget).toContainText('0,6 %')
 
+  // Y al señalar una porción sale su tooltip, con el nombre, el porcentaje y el importe.
+  // El hover va por coordenadas sobre el SVG y no sobre el <circle>: Playwright apunta al
+  // centro del elemento, y el centro de un círculo de donut es el agujero, donde no hay
+  // trazo que reciba el puntero. (64, 64) es el centro de los 128 px, así que x = 118 cae
+  // en el anillo de la derecha — dentro de la porción de Indexa, que ocupa casi todo.
+  const donut = widget.locator('[data-donut="patrimonio"]')
+  await expect(widget.locator('[data-donut-tooltip]')).toHaveCount(0)
+  await donut.hover({ position: { x: 118, y: 64 } })
+  await expect(widget.locator('[data-donut-tooltip]')).toContainText('Indexa Capital')
+  await expect(widget.locator('[data-donut-tooltip]')).toContainText('12.500 €')
+
   // El detalle está plegado a propósito: se despliega a mano.
   await expect(widget).not.toContainText('Vanguard Global')
   await widget.getByRole('button', { name: 'Ver posiciones' }).click()
