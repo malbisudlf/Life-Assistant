@@ -64,6 +64,9 @@ armada ──(llega la hora)──► avisada ──(2 min sin confirmar)──�
   silenciado, huella). La has pedido tú y con hora exacta, y la regla del proyecto es que
   lo que pides tú no se gobierna. Un despertador que no suena porque hoy ya se habían
   gastado los tres avisos sería exactamente el fallo que esto viene a cubrir.
+- **El volumen es 0,35 y no más**, probado despertándose de verdad: el Echo del cuarto
+  está a un metro de la cama y al 70 % no despierta, sobresalta. Lo que hace levantarse es
+  que suene *algo*, no que suene fuerte.
 - **El altavoz se prepara al AVISAR, no al escalar.** Quitar el "no molestar" y subir el
   volumen se encolan en el primer toque, dos minutos antes de que haga falta. El motivo es
   que las órdenes de la casa y los avisos del móvil son **dos colas distintas**, con
@@ -130,7 +133,7 @@ queden noventa minutos), `alarmaEstadoTexto` y `alarmaSonando`.
 |---|---|---|
 | `ALARMA_ESPERA_MIN` | `2` | Minutos sin confirmar antes de escalar, y entre insistencias |
 | `ALARMA_MAX_MIN` | `30` | Tope: pasado esto se rinde |
-| `ALARMA_VOLUMEN` | `0.7` | A cuánto se pone el altavoz antes de hablar |
+| `ALARMA_VOLUMEN` | `0.35` | A cuánto se pone el altavoz antes de hablar |
 | `ALARMA_ALTAVOZ` | — | El `media_player` del cuarto. Vacío: no se prepara el altavoz |
 | `ALARMA_NO_MOLESTAR` | — | El `switch` de "no molestar" de ese altavoz |
 
