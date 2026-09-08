@@ -55,6 +55,28 @@ sí coinciden.
   añadiendo cualquier campo al cuerpo, aunque el endpoint no lo lea, o cambiando el
   cuerpo a tipo File. Le pasó al Atajo de `/despertar` el 2026-08-05.
 
+  **Y volvió a pasar, esta vez sin que nadie mirara durante tres semanas.** Desde el
+  2026-08-17 hay un Atajo (`BackgroundShortcutRunner` en el User-Agent) llamando a
+  `POST /health/ingest` con **0 bytes**, decenas de veces al día — más de mil intentos
+  contados, todos 400, ninguna fila escrita jamás. Se descubrió persiguiendo otra cosa
+  (que no salía el sueño del día). Dos lecciones:
+  - **Un 400 repetido no avisa a nadie.** Queda en `app_logs` como WARNING y ahí se
+    queda; el canal de averías mira el CI y los crons, no las integraciones del móvil.
+    Si una integración deja de entregar, hoy solo se nota por el hueco en los datos.
+  - **Para saber quién llama, mira el User-Agent en `app_logs`**: distingue Health Auto
+    Export de un Atajo de iOS, que es justo lo que hace falta para saber en qué app del
+    teléfono está el fallo.
+
+### Cómo se comprueba que una noche no llegó
+
+`sleep_analysis` puede faltar por dos motivos que desde el dashboard se ven igual (no
+hay fila): que el reloj no la haya mandado, o que la mandara a cero y la ingesta la
+tirara por `_cero_sin_medida` para no pisar la medida buena. Desde 09/2026 el descarte
+se registra en `app_logs` ("métrica(s) descartada(s) por llegar a cero sin medida"), así
+que la ausencia de ese aviso significa que el dato no llegó — y entonces el problema
+está en el teléfono, no aquí. Las peticiones con 200 no se loguean, así que el contenido
+de un lote correcto no queda registrado en ningún sitio.
+
 #### Pendientes del Shortcut
 
 **1. Sueño con fases** — sustituir el paso actual de `sleep_analysis` por un bucle:

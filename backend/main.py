@@ -3880,11 +3880,13 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
     )
 
     filas = []
+    descartadas = []
     for (metric_date, name), data in agrupadas.items():
         value = data["value"]
         # Un 0 que en realidad es "no se midió" no se guarda: pisaría la medida buena
         # del día en el upsert (ver METRICAS_SIN_MEDIDA_EN_CERO).
         if _cero_sin_medida(name, value, data.get("extra")):
+            descartadas.append(f"{name}@{metric_date}")
             continue
         if name in CUMULATIVE_METRICS and value is not None:
             previo = (existentes.get((metric_date, name)) or {}).get("value")
@@ -3904,6 +3906,15 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
         if fuente:
             fila["fuente"] = fuente
         filas.append(fila)
+
+    # El descarte era mudo, y eso deja sin distinguir las dos explicaciones de que una
+    # noche no aparezca en el dashboard: que el reloj no la haya mandado, o que la haya
+    # mandado a cero y el backend la haya tirado aquí. Desde fuera son idénticas —falta
+    # la fila— y se arreglan en sitios distintos (el teléfono o este fichero). Va en
+    # WARNING porque un lote que trae la métrica y la pierde no es rutina.
+    if descartadas:
+        logger.warning("Ingesta de salud: %d métrica(s) descartada(s) por llegar a cero "
+                       "sin medida: %s", len(descartadas), ", ".join(sorted(descartadas)))
 
     if not filas:
         return 0
