@@ -8217,6 +8217,441 @@ def _j_cancelar_recordatorio(recordatorio_id: str) -> dict:
     return {"ok": True, "id": recordatorio_id}
 
 
+# ── ALARMAS DE RESPALDO ───────────────────────────────────────────────────────
+# El despertador lo sigues poniendo donde quieras (el iPhone, normalmente). Esto es la
+# RED que hay debajo: a la hora que apuntes llega un aviso al móvil con un botón, y si
+# no lo pulsas se da por hecho que sigues dormido y se escala a la casa —el Echo del
+# cuarto habla, pone música y se encienden las luces—, insistiendo cada
+# ALARMA_ESPERA_MIN hasta que confirmes o hasta que se rinda.
+#
+# Tres decisiones que no son obvias:
+#
+#   - **El reloj es propio y no el tick del resumen diario.** Aquel pasa cada 5 minutos,
+#     y una alarma que puede sonar cuatro minutos tarde no es una alarma. El sensor REST
+#     de HA que llama a `/ha/alarma-tick` va a 60 s, que es la resolución mínima de algo
+#     que se mide en minutos. Para que ese minuto no cueste 1.440 consultas al día,
+#     `_alarma_siguiente` recuerda cuándo hay algo que hacer y hasta entonces el tick no
+#     toca Supabase — la misma economía que se le exige al brief-tick.
+#
+#   - **La casa no se toca desde aquí.** El ritual (volumen, voz, canción, luces) vive en
+#     una automatización de HA. Uno de sus pasos —la luz "led mesa", que solo obedece
+#     hablándole a Alexa— va por `alexa_devices.send_text_command`, que no es un dominio
+#     de la cola de órdenes ni apunta a una entidad, así que nunca cabría ahí. El backend
+#     decide CUÁNDO; Home Assistant sabe CÓMO.
+#
+#   - **Una alarma no pasa por el gobierno de avisos** (`_apuntar_aviso`, presupuesto,
+#     silenciado). La has pedido tú y con hora exacta: la regla del proyecto es que lo
+#     que pides tú no se gobierna. Un despertador que no suena porque hoy ya se habían
+#     gastado los tres avisos del día sería exactamente el fallo que esto viene a cubrir.
+
+ALARMAS_URL         = f"{SUPABASE_URL}/rest/v1/alarmas"
+ALARMAS_MAX         = 20
+ALARMA_ETIQUETA_MAX = 80
+# Cuánto se espera a que confirmes antes de escalar, y cada cuánto se insiste después.
+ALARMA_ESPERA_MIN   = int(os.getenv("ALARMA_ESPERA_MIN", "2"))
+# Tope de seguridad. Sin él, una alarma se quedaría sonando en una casa vacía si te has
+# ido sin el móvil: en algún momento hay que aceptar que nadie va a contestar.
+ALARMA_MAX_MIN      = int(os.getenv("ALARMA_MAX_MIN", "30"))
+ALARMA_VOLUMEN      = float(os.getenv("ALARMA_VOLUMEN", "0.7"))
+# Las entidades del cuarto van por variable y vacías por defecto: son nombres de una casa
+# concreta y este repositorio es público. Sin ellas el Echo no se prepara —la escalada
+# sigue saliendo, pero puede pillar el altavoz en silencio—, que es el lado seguro del
+# error: se oye poco, en vez de sonar donde no toca.
+ALARMA_ALTAVOZ      = os.getenv("ALARMA_ALTAVOZ", "")
+ALARMA_NO_MOLESTAR  = os.getenv("ALARMA_NO_MOLESTAR", "")
+# Los estados en los que una alarma todavía tiene algo pendiente que hacer.
+ALARMA_VIVOS        = ("armada", "avisada", "escalada")
+
+# Epoch de lo próximo que hay que mirar; `None` significa "no se sabe" y fuerza una
+# consulta. Es una caché, no la verdad: la verdad está en Supabase, y perderla en un
+# reinicio del add-on solo cuesta una consulta de más.
+_alarma_siguiente: float | None = None
+_alarma_lock = threading.Lock()
+
+
+def _alarma_marcar_pendiente(cuando: Optional[datetime] = None) -> None:
+    """Adelanta el despertador del tick. Sin `cuando`, lo pone a mirar ya.
+
+    Se llama al crear una alarma (que puede ser antes de lo que hubiera apuntado) y
+    después de cada tick que sí consultó. Solo ADELANTA: retrasarlo desde aquí podría
+    saltarse una alarma que otro camino acababa de apuntar.
+    """
+    global _alarma_siguiente
+    momento = cuando.timestamp() if cuando else time.time()
+    with _alarma_lock:
+        if _alarma_siguiente is None or momento < _alarma_siguiente:
+            _alarma_siguiente = momento
+
+
+def _alarma_hay_que_mirar() -> bool:
+    with _alarma_lock:
+        return _alarma_siguiente is None or time.time() >= _alarma_siguiente
+
+
+def _alarma_cuando(fila: dict, campo: str = "cuando") -> Optional[datetime]:
+    """La hora de un campo de la fila, en UTC. `None` si Supabase devolvió algo raro."""
+    crudo = fila.get(campo)
+    if not crudo:
+        return None
+    try:
+        momento = datetime.fromisoformat(str(crudo).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return momento if momento.tzinfo else momento.replace(tzinfo=timezone.utc)
+
+
+def _alarma_texto(fila: dict) -> str:
+    etiqueta = str(fila.get("etiqueta") or "").strip()
+    return etiqueta or "Es la hora"
+
+
+def _alarma_preparar_altavoz() -> None:
+    """Deja el Echo listo ANTES de que haya que hablar: sin "no molestar" y con volumen.
+
+    Se hace al avisar y no al escalar porque las órdenes de la casa y los avisos del
+    móvil son dos colas distintas, con sondeos de 15 y 30 segundos: mandarlo todo junto
+    en el mismo instante no garantiza que el volumen esté puesto cuando el altavoz
+    hable. Preparándolo dos minutos antes, cuando toque sonar ya está listo.
+    """
+    try:
+        if ALARMA_NO_MOLESTAR:
+            _j_casa_ordenar("switch.turn_off", ALARMA_NO_MOLESTAR)
+        if ALARMA_ALTAVOZ:
+            _j_casa_ordenar("media_player.volume_set", ALARMA_ALTAVOZ,
+                            {"volume_level": ALARMA_VOLUMEN})
+    except Exception as e:
+        # Preparar el altavoz es una mejora del aviso, no el aviso: que falle no puede
+        # impedir que la alarma suene.
+        logger.warning("Alarma: no se pudo preparar el altavoz (%s)", e)
+
+
+def _alarma_parar_musica() -> None:
+    try:
+        if ALARMA_ALTAVOZ:
+            _j_casa_ordenar("media_player.media_stop", ALARMA_ALTAVOZ)
+    except Exception as e:
+        logger.warning("Alarma: no se pudo parar la música (%s)", e)
+
+
+def _alarma_en_casa() -> bool:
+    """¿Se puede despertar a la casa? Solo dice que NO cuando consta que estás fuera.
+
+    Un dato de presencia caducado no cuenta como "no estás": esto es un respaldo que
+    existe para cuando lo demás falla, y callarse por no saber sería justo el fallo que
+    viene a cubrir. Lo que sí se respeta es la certeza contraria — si HA dice que estás
+    fuera, la casa no se toca, que ahí duerme más gente.
+    """
+    p = presencia_vigente()
+    return not (p and p.get("en_casa") is False)
+
+
+def _alarma_reservar(fila: dict, estado_previo: str, cambios: dict) -> bool:
+    """Avanza una alarma de estado con un PATCH CONDICIONAL, que es la pregunta atómica.
+
+    El `&estado=eq.X` es lo que impide que dos ticks solapados avisen dos veces: si no
+    vuelve fila, otro se lo llevó. Un GET previo y luego un PATCH dejaría la ventana
+    abierta, que es la misma trampa documentada en el despachador de recordatorios.
+    """
+    rid = str(fila.get("id") or "")
+    if not re.match(_UUID_PATTERN, rid):
+        logger.error("Alarma: id con forma rara, se salta")
+        return False
+    r = http.patch(
+        f"{ALARMAS_URL}?id=eq.{rid}&estado=eq.{estado_previo}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=cambios,
+    )
+    return r.status_code < 300 and bool(r.json())
+
+
+def _correr_alarmas() -> dict:
+    """El motor del despertador. Lo llama `/ha/alarma-tick` cada minuto.
+
+    Devuelve lo que la casa tiene que hacer AHORA, que es lo único que Home Assistant
+    necesita saber: `escalar` (el número de intento, 0 si no toca) y con qué texto.
+    """
+    ahora    = datetime.now(timezone.utc)
+    escalada = {"escalar": 0, "id": "", "texto": ""}
+
+    r = http.get(
+        f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
+        f"&select=id,cuando,etiqueta,estado,intentos,avisado_at,escalado_at&order=cuando.asc&limit={ALARMAS_MAX}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.error("Alarmas: no se pudieron leer (%s)", r.status_code)
+        # No se reprograma: sin saber qué hay, el siguiente tick tiene que volver a mirar.
+        return escalada
+
+    filas     = r.json() or []
+    siguiente = None
+    for fila in filas:
+        estado = str(fila.get("estado") or "")
+        cuando = _alarma_cuando(fila)
+        if cuando is None:
+            continue
+
+        if estado == "armada":
+            if cuando > ahora:
+                siguiente = cuando if siguiente is None or cuando < siguiente else siguiente
+                continue
+            if not _alarma_reservar(fila, "armada", {"estado": "avisada",
+                                                     "avisado_at": ahora.isoformat()}):
+                continue
+            _alarma_avisar(fila, ahora)
+            siguiente = ahora + timedelta(minutes=ALARMA_ESPERA_MIN)
+            continue
+
+        # Ya avisada: o se rinde, o toca insistir, o todavía se le da margen.
+        avisado = _alarma_cuando(fila, "avisado_at") or cuando
+        if (ahora - avisado).total_seconds() >= ALARMA_MAX_MIN * 60:
+            _alarma_rendirse(fila, estado, ahora)
+            continue
+
+        espera = _alarma_cuando(fila, "escalado_at") or avisado
+        proxima = espera + timedelta(minutes=ALARMA_ESPERA_MIN)
+        if proxima > ahora:
+            siguiente = proxima if siguiente is None or proxima < siguiente else siguiente
+            continue
+
+        intento = int(fila.get("intentos") or 0) + 1
+        if not _alarma_reservar(fila, estado, {"estado": "escalada", "intentos": intento,
+                                               "escalado_at": ahora.isoformat()}):
+            continue
+        # El aviso al móvil se repite siempre; la casa solo si estás en ella.
+        _alarma_insistir(fila, intento)
+        if _alarma_en_casa():
+            escalada = {"escalar": intento, "id": str(fila.get("id") or ""),
+                        "texto": _alarma_texto(fila)}
+        else:
+            logger.info("Alarma %s: intento %s sin tocar la casa (no estás)", fila.get("id"), intento)
+        siguiente = ahora + timedelta(minutes=ALARMA_ESPERA_MIN)
+
+    global _alarma_siguiente
+    with _alarma_lock:
+        # Si no queda nada vivo, se mira dentro de un rato por si alguien apunta una
+        # alarma sin pasar por este proceso (otra sesión, un curl). No es un caso real
+        # hoy, pero un reloj que se apaga del todo no se vuelve a encender solo.
+        _alarma_siguiente = (siguiente or ahora + timedelta(minutes=15)).timestamp()
+    return escalada
+
+
+def _alarma_avisar(fila: dict, ahora: datetime) -> None:
+    """El primer toque: la notificación con el botón «Estoy despierto»."""
+    rid = str(fila.get("id") or "")
+    _alarma_preparar_altavoz()
+    try:
+        _notificar(
+            f"⏰ {_alarma_texto(fila)}",
+            f"{_alarma_texto(fila)}.\n\nSi no confirmas, en {ALARMA_ESPERA_MIN} minutos "
+            f"te despierta Alexa.\n\n— Jarvis",
+            aviso_id=rid,
+            acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
+            # Un despertador que no suena con el móvil en silencio no despierta. Es la
+            # segunda cosa del proyecto que se permite esto, y por el mismo criterio que
+            # la primera: sin respuesta, se queda bloqueado.
+            critico=True,
+        )
+    except Exception as e:
+        # No se libera la reserva, al revés que en los recordatorios: allí el aviso se
+        # pierde si no sale, y aquí vuelve solo dentro de ALARMA_ESPERA_MIN con la
+        # escalada, que es más ruidosa. Reintentar el aviso llegaría después.
+        logger.error("Alarma %s: no se pudo avisar (%s); la escalada sigue en pie", rid, e)
+
+
+def _alarma_insistir(fila: dict, intento: int) -> None:
+    rid = str(fila.get("id") or "")
+    try:
+        _notificar(
+            f"⏰ {_alarma_texto(fila)} (aviso {intento})",
+            f"Sigues sin confirmar. {_alarma_texto(fila)}.\n\n— Jarvis",
+            aviso_id=rid,
+            acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
+            critico=True,
+        )
+    except Exception as e:
+        logger.error("Alarma %s: fallo al insistir (%s)", rid, e)
+
+
+def _alarma_rendirse(fila: dict, estado: str, ahora: datetime) -> None:
+    """Se acabó: ni confirmaste ni hay nada más que hacer.
+
+    Se avisa de que se rinde en vez de callarse sin más: una alarma que deja de sonar
+    sola y no lo cuenta es indistinguible de una que nunca se armó, y eso es justo lo
+    que hace que dejes de fiarte del respaldo.
+    """
+    rid = str(fila.get("id") or "")
+    if not _alarma_reservar(fila, estado, {"estado": "rendida"}):
+        return
+    _alarma_parar_musica()
+    try:
+        _notificar("⏰ Dejo de insistir",
+                   f"Llevo {ALARMA_MAX_MIN} minutos con «{_alarma_texto(fila)}» y no has "
+                   f"confirmado. Lo dejo.\n\n— Jarvis", aviso_id=rid, acciones=[])
+    except Exception as e:
+        logger.warning("Alarma %s: no se pudo avisar de la rendición (%s)", rid, e)
+
+
+# ── Alarmas: las herramientas de Jarvis y el alta ────────────────────────────
+
+def _alarma_crear(fecha: str, hora: str, etiqueta: str = "") -> dict:
+    """Alta de una alarma. La comparten Jarvis y el dashboard: una sola validación."""
+    fecha    = str(fecha or "").strip()
+    hora     = str(hora or "").strip()
+    etiqueta = str(etiqueta or "").strip()[:ALARMA_ETIQUETA_MAX]
+    if not _DATE_RE.match(fecha) or not _HORA_RE.match(hora):
+        return {"ok": False, "motivo": "Necesito fecha (YYYY-MM-DD) y hora (HH:MM)"}
+    try:
+        cuando = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+    except ValueError:
+        return {"ok": False, "motivo": "Esa fecha u hora no existen"}
+    if cuando < datetime.now(LOCAL_TZ):
+        return {"ok": False, "motivo": "Esa hora ya ha pasado"}
+
+    cuenta = http.get(f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
+                      f"&select=id&limit={ALARMAS_MAX + 1}", headers=supabase_headers())
+    if cuenta.status_code < 300 and len(cuenta.json()) >= ALARMAS_MAX:
+        return {"ok": False, "motivo": f"Ya hay {ALARMAS_MAX} alarmas puestas"}
+
+    r = http.post(
+        ALARMAS_URL,
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"cuando": cuando.astimezone(timezone.utc).isoformat(),
+              "etiqueta": etiqueta or None},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    # El tick puede estar durmiendo hasta dentro de horas: hay que decirle que ahora hay
+    # algo antes. Sin esto, una alarma puesta para dentro de dos minutos no sonaría.
+    _alarma_marcar_pendiente(cuando)
+    return {"ok": True, "id": (r.json() or [{}])[0].get("id"),
+            "cuando": f"{fecha} {hora}", "etiqueta": etiqueta}
+
+
+def _alarma_listar() -> list:
+    r = http.get(
+        f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
+        f"&select=id,cuando,etiqueta,estado,intentos&order=cuando.asc&limit={ALARMAS_MAX}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    fuera = []
+    for fila in r.json() or []:
+        cuando = _alarma_cuando(fila)
+        if cuando is None:
+            continue
+        fuera.append({"id": fila.get("id"),
+                      "cuando": cuando.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M"),
+                      "etiqueta": fila.get("etiqueta") or "",
+                      "estado": fila.get("estado"),
+                      "intentos": int(fila.get("intentos") or 0)})
+    return fuera
+
+
+def _alarma_cancelar(alarma_id: str) -> dict:
+    alarma_id = str(alarma_id or "").strip()
+    if not re.match(_UUID_PATTERN, alarma_id):
+        return {"ok": False, "motivo": "Ese id no tiene forma de UUID; sácalo de mis_alarmas"}
+    # Cancelar es cambiar de estado, no borrar: una alarma que sonó y se escaló es parte
+    # de por qué la casa hizo ruido a las 8:32, y eso no se tira.
+    r = http.patch(f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.({','.join(ALARMA_VIVOS)})",
+                   headers={**supabase_headers(), "Prefer": "return=representation"},
+                   json={"estado": "cancelada"})
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    if not r.json():
+        return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba activa"}
+    _alarma_parar_musica()
+    return {"ok": True, "hecho": True, "id": alarma_id}
+
+
+def _j_poner_alarma(fecha: str, hora: str, etiqueta: str = "") -> dict:
+    return _alarma_crear(fecha, hora, etiqueta)
+
+
+def _j_mis_alarmas() -> dict:
+    return {"alarmas": _alarma_listar()}
+
+
+def _j_cancelar_alarma(alarma_id: str) -> dict:
+    return _alarma_cancelar(alarma_id)
+
+
+# ── Alarmas: los endpoints ───────────────────────────────────────────────────
+
+@app.get("/ha/alarma-tick")
+def ha_alarma_tick(request: Request, token: str = ""):
+    """El reloj de las alarmas. Lo sondea un sensor REST de HA cada 60 segundos.
+
+    Es un GET con efectos, igual que `/ha/avisos-pending` y `/ha/ordenes-pending`: en
+    este proyecto el sondeo de HA ES el reloj, y un sensor REST solo sabe hacer GET.
+
+    Devuelve el número de intento a escalar (0 = no toca), que es lo que HA usa como
+    estado del sensor: cambia en cada escalada, así que la automatización se dispara
+    aunque dos escaladas seguidas dejaran el mismo texto.
+    """
+    if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not _alarma_hay_que_mirar():
+        # El caso normal: 1.400 veces al día no hay nada que hacer y no se consulta nada.
+        return {"escalar": 0, "id": "", "texto": ""}
+    try:
+        return _correr_alarmas()
+    except Exception:
+        # Ni una excepción puede dejar el reloj sin contestar: HA marcaría el sensor como
+        # no disponible y la automatización dejaría de dispararse en silencio.
+        logger.exception("Alarmas: el tick ha fallado")
+        return {"escalar": 0, "id": "", "texto": ""}
+
+
+@app.post("/alarmas/{alarma_id}/despierto")
+def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str = ""):
+    """«Estoy despierto». Lo llama el botón de la notificación (HA) o el dashboard."""
+    _auth_boton(request, token)
+    r = http.patch(
+        f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.(avisada,escalada)",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"estado": "confirmada", "confirmado_at": datetime.now(timezone.utc).isoformat()},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    if not r.json():
+        # Pulsar dos veces no es un error, ni lo es confirmar una alarma ya rendida.
+        return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba sonando"}
+    _alarma_parar_musica()
+    _acusar_recibo("☀️ Buenos días", "Alarma confirmada. Dejo de insistir.")
+    return {"ok": True, "hecho": True}
+
+
+@app.get("/alarmas")
+def get_alarmas(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    return {"alarmas": _alarma_listar(), "espera_min": ALARMA_ESPERA_MIN,
+            "max_min": ALARMA_MAX_MIN}
+
+
+class AlarmaIn(BaseModel):
+    fecha:    str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    hora:     str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    etiqueta: str = Field(default="", max_length=ALARMA_ETIQUETA_MAX)
+
+
+@app.post("/alarmas")
+def crear_alarma(body: AlarmaIn,
+                 credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    resultado = _alarma_crear(body.fecha, body.hora, body.etiqueta)
+    if not resultado.get("ok"):
+        raise HTTPException(status_code=422, detail=resultado.get("motivo", "No se pudo"))
+    return resultado
+
+
+@app.delete("/alarmas/{alarma_id}")
+def borrar_alarma(alarma_id: str = _uuid_path(),
+                  credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    return _alarma_cancelar(alarma_id)
+
+
+
 # ── Aviso de "ponte el reloj" ────────────────────────────────────────────────
 # Lo único que sabe el sistema y no servía de nada saber: que hoy el reloj está en un
 # cajón. El diagnóstico llegaba al día siguiente, cuando la noche ya no se puede medir
@@ -13999,6 +14434,38 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios": ["recordatorio_id"],
     },
 
+    # ── Alarmas de respaldo ──────────────────────────────────────────────────
+    "poner_alarma": {
+        "confirmar":   False,
+        "fn":          _j_poner_alarma,
+        "descripcion": "Apunta una alarma de RESPALDO para una fecha y hora. No sustituye "
+                       "al despertador del móvil: es la red que hay debajo. A esa hora le "
+                       "llega un aviso con un botón «Estoy despierto», y si no lo pulsa se "
+                       "escala a la casa (el altavoz del cuarto habla, pone música y se "
+                       "encienden las luces), insistiendo hasta que confirme. Úsala cuando "
+                       "diga que ha puesto una alarma o a qué hora se levanta.",
+        "parametros":  {
+            "fecha":    {"type": "string", "description": "YYYY-MM-DD. Resuelve tú 'mañana'."},
+            "hora":     {"type": "string", "description": "HH:MM en 24h."},
+            "etiqueta": {"type": "string", "description": "Para qué se levanta, en dos palabras. Opcional."},
+        },
+        "obligatorios": ["fecha", "hora"],
+    },
+    "mis_alarmas": {
+        "confirmar":   False,
+        "fn":          _j_mis_alarmas,
+        "descripcion": "Las alarmas de respaldo puestas, con su id y su estado.",
+        "parametros":  {},
+    },
+    "cancelar_alarma": {
+        "confirmar":   False,
+        "fn":          _j_cancelar_alarma,
+        "descripcion": "Quita una alarma de respaldo. El id sale de mis_alarmas. Sirve "
+                       "también para callarla mientras está sonando.",
+        "parametros":  {"alarma_id": {"type": "string", "description": "UUID de la alarma."}},
+        "obligatorios": ["alarma_id"],
+    },
+
     # ── Acciones a confirmar ─────────────────────────────────────────────────
     "crear_evento": {
         "confirmar":   True,
@@ -15261,6 +15728,8 @@ _JARVIS_RELLENOS = {
     "recordar":           "Lo guardo en la memoria.",
     "recordarme":         "Te lo apunto.",
     "mis_recordatorios":  "Miro qué tienes apuntado.",
+    "poner_alarma":       "Te pongo la alarma.",
+    "mis_alarmas":        "Miro qué alarmas tienes.",
     "estado_pc":          "Miro cómo está el ordenador.",
     "encender_pc":        "Enciendo el ordenador.",
     "casa_dispositivos":  "Miro la casa.",

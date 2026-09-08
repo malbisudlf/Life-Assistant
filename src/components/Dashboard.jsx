@@ -13,6 +13,7 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
+  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -1031,6 +1032,7 @@ const DEFAULT_COLUMNS = {
   finanzas:          "right",
   ideas:             "right",
   clothing:          "right",
+  alarmas:           "left",
   health_wellness:   "left",
   health_sleep:      "right",
   health_heart:      "right",
@@ -1052,6 +1054,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
   { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
+  { id: "alarmas",           label: "Alarmas",           visible: true,  column: "left"  },
   { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
   { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
   { id: "health_heart",      label: "Freq. cardíaca",    visible: false, column: "right" },
@@ -1639,6 +1642,13 @@ export default function Dashboard() {
 
   // Cartera manual de ETFs (Revolut, precio real vía Yahoo Finance).
   const [carteraEtf, setCarteraEtf]                 = useState(null);
+  // Alarmas de respaldo. `null` mientras no se sabe: un widget que enseña "no tienes
+  // ninguna" antes de haber preguntado le está diciendo a alguien que no va a sonar.
+  const [alarmas, setAlarmas]                       = useState(null);
+  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", guardando: false });
+  // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
+  // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
+  const [alarmaEspera, setAlarmaEspera]             = useState(2);
   const [carteraEtfCargando, setCarteraEtfCargando] = useState(false);
   // Formulario de "+ Añadir aportación", uno por ticker: { [ticker]: { abierto, fecha, importe, guardando } }
   const [etfAportForm, setEtfAportForm] = useState({});
@@ -1859,6 +1869,15 @@ export default function Dashboard() {
 
   // Cargar la cartera manual de ETFs
   useEffect(() => { if (token) loadCarteraEtf(); }, [token]);
+  useEffect(() => { if (token) loadAlarmas(); }, [token]);
+  // Mientras haya alguna alarma viva, el widget se refresca cada minuto: si no, una
+  // alarma que empieza a insistir no se vería moverse en una pantalla ya abierta, que
+  // es exactamente cuando la estás mirando. Sin nada vivo no hay temporizador.
+  useEffect(() => {
+    if (!token || !alarmas?.length) return;
+    const t = setInterval(loadAlarmas, 60000);
+    return () => clearInterval(t);
+  }, [token, alarmas?.length]);
 
   // Cargar datos de salud
   useEffect(() => {
@@ -3602,6 +3621,55 @@ export default function Dashboard() {
     setCarteraEtfCargando(false);
   }
 
+  // ── Alarmas de respaldo ────────────────────────────────────────────────────
+  // El widget se recarga solo cada minuto mientras hay algo vivo: sin eso, una alarma
+  // que empieza a insistir no se vería moverse en una pantalla ya abierta, que es
+  // justo cuando quieres mirarla.
+  async function loadAlarmas() {
+    try {
+      const r = await apiFetch(`${API}/alarmas`, { headers: authHeaders() });
+      if (!r.ok) throw new Error("alarmas");
+      const datos = await r.json();
+      setAlarmas(datos.alarmas || []);
+      if (datos.espera_min) setAlarmaEspera(datos.espera_min);
+    } catch {
+      setAlarmas(previo => previo || []);
+    }
+  }
+
+  async function crearAlarma() {
+    if (alarmaForm.guardando || !alarmaForm.fecha || !alarmaForm.hora) return;
+    setAlarmaForm(f => ({ ...f, guardando: true }));
+    try {
+      const r = await apiFetch(`${API}/alarmas`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify({ fecha: alarmaForm.fecha, hora: alarmaForm.hora,
+                               etiqueta: alarmaForm.etiqueta }),
+      });
+      if (!r.ok) throw new Error("alarma");
+      setAlarmaForm({ fecha: "", hora: "", etiqueta: "", guardando: false });
+      await loadAlarmas();
+    } catch {
+      setAlarmaForm(f => ({ ...f, guardando: false }));
+    }
+  }
+
+  async function borrarAlarma(id) {
+    try {
+      await apiFetch(`${API}/alarmas/${id}`, { method: "DELETE", headers: authHeaders() });
+    } catch { /* si falla, la recarga de abajo lo deja como esté de verdad */ }
+    await loadAlarmas();
+  }
+
+  // El mismo botón que trae la notificación del móvil, para cuando la tienes delante.
+  async function confirmarDespierto(id) {
+    try {
+      await apiFetch(`${API}/alarmas/${id}/despierto`, { method: "POST", headers: authHeaders() });
+    } catch { /* idem */ }
+    await loadAlarmas();
+  }
+
   async function submitEtfAportacion(ticker) {
     const form = etfAportForm[ticker];
     if (!form || form.guardando) return;
@@ -4885,6 +4953,76 @@ export default function Dashboard() {
           </div>
         </div>
       );
+      case "alarmas": {
+        const sonando = alarmaSonando(alarmas);
+        return (
+          <div style={cardStyle} data-card={id} key="alarmas">
+            <div style={s.sectionLabel}>Alarmas</div>
+
+            {/* Cuando una alarma está sonando, lo único que quieres de esta pantalla es
+                callarla: el botón se come el widget y la lista se queda debajo. */}
+            {sonando && (
+              <div style={{ marginTop: 6, padding: 12, borderRadius: 8, background: "var(--surface)",
+                border: "0.5px solid var(--accent)" }}>
+                <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+                  {sonando.etiqueta || "Es la hora"} — {alarmaEstadoTexto(sonando)}
+                </div>
+                <button onClick={() => confirmarDespierto(sonando.id)}
+                  style={{ width: "100%", padding: "10px 12px", background: "var(--accent)", border: "none",
+                    borderRadius: 6, color: "#0e0f11", fontSize: 14, fontWeight: 600, cursor: "pointer",
+                    fontFamily: "'DM Sans', sans-serif" }}>
+                  Estoy despierto
+                </button>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+              {alarmas === null && (
+                <div style={{ color: "var(--muted2)", fontSize: 13 }}>Cargando…</div>
+              )}
+              {alarmas?.length === 0 && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Ninguna puesta.</div>
+              )}
+              {alarmas?.map(a => (
+                <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: "var(--text)", overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {alarmaEnPalabras(a.cuando)}{a.etiqueta ? ` · ${a.etiqueta}` : ""}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted2)" }}>{alarmaEstadoTexto(a)}</div>
+                  </div>
+                  <span style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
+                    onClick={() => borrarAlarma(a.id)}>✕</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12, paddingTop: 10,
+              borderTop: "0.5px solid var(--border2)" }}>
+              <input type="date" value={alarmaForm.fecha}
+                onChange={e => setAlarmaForm(f => ({ ...f, fecha: e.target.value }))}
+                style={{ ...INPUT_STYLE, flex: "1 1 130px", minWidth: 0 }} />
+              <input type="time" value={alarmaForm.hora}
+                onChange={e => setAlarmaForm(f => ({ ...f, hora: e.target.value }))}
+                style={{ ...INPUT_STYLE, flex: "0 1 100px", minWidth: 0 }} />
+              <input type="text" placeholder="Para qué (opcional)" value={alarmaForm.etiqueta}
+                onChange={e => setAlarmaForm(f => ({ ...f, etiqueta: e.target.value }))}
+                style={{ ...INPUT_STYLE, flex: "1 1 120px", minWidth: 0 }} />
+              <button onClick={crearAlarma}
+                disabled={alarmaForm.guardando || !alarmaForm.fecha || !alarmaForm.hora}
+                style={{ ...s.newIdeaBtn, marginTop: 0, padding: "0 16px", flexShrink: 0 }}>
+                Poner
+              </button>
+            </div>
+            {/* Lo que hace distinta a esta alarma de la del móvil, dicho donde se pone. */}
+            <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 8 }}>
+              Es un respaldo: si no confirmas, a los {alarmaEspera} minutos te despierta la casa.
+            </div>
+          </div>
+        );
+      }
+
       case "clothing": {
         const totals       = clothingTotals(clothing);
         const totalEntries = Object.entries(totals);

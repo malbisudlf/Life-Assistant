@@ -2106,3 +2106,45 @@ export function repartoPatrimonio({ finanzas, carteraEtf } = {}) {
     completo,
   };
 }
+
+// ── Alarmas de respaldo ──────────────────────────────────────────────────────
+// El backend devuelve `cuando` ya en hora local, como "YYYY-MM-DD HH:MM": no hay que
+// volver a convertir nada aquí (y hacerlo sería el bug de zona horaria de siempre, en
+// una pantalla donde equivocarse por una hora es equivocarse del todo).
+
+/** Cómo se lee una alarma: "mañana a las 8:30", "hoy a las 8:30", "el vie 12 a las 8:30".
+ *  `hoy` se pasa para poder probarlo sin depender del reloj de la máquina. */
+export function alarmaEnPalabras(cuando, hoy = new Date()) {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(String(cuando || ""));
+  if (!m) return "";
+  const [, a, mes, d, hh, mm] = m;
+  // Comparar por día del calendario, no por diferencia de horas: entre las 23:00 de hoy
+  // y las 00:30 de mañana hay hora y media, y son días distintos.
+  const dia    = new Date(Number(a), Number(mes) - 1, Number(d));
+  const cero   = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+  const dias   = Math.round((dia - cero) / 86400000);
+  const laHora = `${Number(hh)}:${mm}`;
+  if (dias === 0) return `hoy a las ${laHora}`;
+  if (dias === 1) return `mañana a las ${laHora}`;
+  const nombre = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][dia.getDay()];
+  return `el ${nombre} ${Number(d)} a las ${laHora}`;
+}
+
+/** Qué está haciendo una alarma ahora mismo, en una palabra. */
+export function alarmaEstadoTexto(alarma) {
+  const intentos = Number(alarma?.intentos) || 0;
+  switch (alarma?.estado) {
+    case "armada":   return "puesta";
+    // Ya sonó y sigue esperando respuesta: es lo que más importa distinguir de "puesta",
+    // porque significa que la casa está a punto de despertarse.
+    case "avisada":  return "esperando que confirmes";
+    case "escalada": return `insistiendo (${intentos})`;
+    default:         return alarma?.estado || "";
+  }
+}
+
+/** ¿Hay alguna alarma sonando ahora mismo? Es lo que decide si el widget enseña el
+ *  botón grande de «Estoy despierto» en vez de la lista de siempre. */
+export function alarmaSonando(alarmas) {
+  return (alarmas || []).find(a => a?.estado === "avisada" || a?.estado === "escalada") || null;
+}
