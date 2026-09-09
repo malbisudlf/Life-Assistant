@@ -24,6 +24,37 @@ Lo que ya existía dentro del panel ⚙ (backend, agente, presencia, avisos, reg
 gasto) se muda aquí y crece. En ⚙ queda una sola línea de resumen con enlace: lo que se
 mira deprisa desde el móvil sigue estando a un toque, y el detalle no se duplica.
 
+## Dónde retomar
+
+**Estado al 2026-09-09.** La fase 1 está escrita, verificada y en el PR
+[#164](https://github.com/malbisudlf/Life-Assistant/pull/164), rama `claude/zona-dev`.
+**Sin probar contra el backend real**: se comprobó con lint, los 368 tests de frontend,
+los 1.371 de backend y el build, pero nadie ha abierto todavía la zona dev en el navegador.
+
+Lo primero, y sin esto la pestaña Ideas no funciona:
+
+1. **Aplicar `supabase/migrations/20260909_ideas_dev.sql`** a mano en el editor SQL de
+   Supabase. Mientras no esté, `GET /dev/ideas` responde 502 y la pestaña lo dice en
+   pantalla nombrando la migración.
+2. **Reconstruir el add-on** del Home Assistant Green cuando el PR esté en `main`: los
+   endpoints nuevos (`/dev/ideas`, los filtros de `/logs`) viven en el backend, que no se
+   despliega solo. Comprobar con `GET /` que el `version` coincide.
+3. Abrir el 🛠 y mirar si el semáforo dice la verdad, que es lo único que estos tests no
+   pueden comprobar.
+
+Después, la **fase 2** (despliegue, crons, base de datos y migraciones, configuración),
+que es la que responde «¿qué está roto?» y la que habría pillado sola los dos fallos que
+la motivan: la copia de seguridad muerta durante meses y la migración un mes sin aplicar.
+Al añadir una pestaña: un fichero en `src/components/dev/`, su entrada en `PESTANAS` de
+`ZonaDev.jsx` con `fase: 1` para encenderla, y la lógica que se pueda probar sin pantalla
+a `src/lib/dev.js`, que es donde están los tests.
+
+Lo que quedó decidido y no hace falta volver a discutir: dónde vive (vista propia, no
+modal), qué pasa con ⚙ (una línea y un enlace), la forma de una idea (la de
+`docs/IDEAS.md`, pero guardando con solo el título), el refresco (automático solo en lo
+que es gratis) y qué puede tocar la zona dev (vaciar el registro, forzar envíos,
+reintentar jobs; nunca desplegar).
+
 ## Decisiones de forma
 
 | Decisión | Por qué |
