@@ -7570,14 +7570,29 @@ def get_gasto(dias: int = 30,
 
 # ── REGISTRO: CONSULTA DESDE EL DASHBOARD ─────────────────────────────────────
 
+_FUENTE_LOG_RE = re.compile(r'^[A-Za-z0-9_.\- ]{1,64}$')
+
+
 @app.get("/logs")
 def get_logs(
     nivel: str = "",
+    fuente: str = "",
+    buscar: str = "",
     dias: int = 7,
     limite: int = 100,
+    fuentes: bool = True,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    """Últimas entradas de app_logs, para el panel de estado del sistema."""
+    """Últimas entradas de app_logs, para el panel de estado del sistema y la zona dev.
+
+    `fuente` y `buscar` existen para la zona dev: con un registro de siete días, mirar
+    "qué falló en la ingesta de salud" a ojo entre cien líneas de todo lo demás no es
+    mirar, es tener suerte.
+
+    `fuentes=false` lo apaga todo menos el registro. Esta función la reutilizan por dentro
+    el vigilante del sistema y dos herramientas de Jarvis, y a ellos la lista de fuentes
+    no les sirve para nada: sería una consulta más a Supabase en cada tick, para nadie.
+    """
     if limite < 1 or limite > 500:
         raise HTTPException(status_code=400, detail="limite debe estar entre 1 y 500")
     if dias < 1 or dias > 90:
@@ -7588,6 +7603,21 @@ def get_logs(
         if nivel.upper() not in NIVELES_LOG:
             raise HTTPException(status_code=400, detail="nivel inválido")
         filtro = f"&level=eq.{nivel.upper()}"
+    # Mismo motivo que `nivel`: esto acaba dentro de una URL de Supabase. La fuente sale
+    # de una lista cerrada (la que devuelve este mismo endpoint), así que un patrón
+    # estrecho no rechaza nada real.
+    if fuente:
+        if not _FUENTE_LOG_RE.match(fuente):
+            raise HTTPException(status_code=400, detail="fuente inválida")
+        filtro += f"&source=eq.{quote(fuente, safe='')}"
+    # La búsqueda sí es texto libre del usuario. Se codifica entera y además se le quitan
+    # los caracteres con los que PostgREST separa argumentos —`,` `.` `(` `)` `*`— porque
+    # dentro de un `ilike.*…*` no viajan como texto: cambian la consulta.
+    if buscar:
+        limpio = re.sub(r'[,.*()"\\]', ' ', buscar).strip()[:80]
+        if not limpio:
+            raise HTTPException(status_code=400, detail="búsqueda vacía")
+        filtro += f"&message=ilike.{quote(f'*{limpio}*', safe='')}"
     # Volcado inmediato: sin esto, lo que acaba de fallar todavía está en la cola en
     # memoria y el panel lo enseñaría hasta LOG_FLUSH_SECONDS más tarde — justo cuando
     # abres el panel PORQUE algo acaba de fallar.
@@ -7606,7 +7636,30 @@ def get_logs(
     return {
         "entradas": entradas,
         "errores": sum(1 for e in entradas if e.get("level") in ("ERROR", "CRITICAL")),
+        # Las fuentes que HAY, no las que se ven: sacarlas de `entradas` haría que el
+        # desplegable del filtro se quedara sin la opción justo después de filtrar por
+        # ella. Consulta aparte y sin los filtros aplicados, por eso.
+        "fuentes": _fuentes_de_log(desde) if fuentes else [],
     }
+
+
+def _fuentes_de_log(desde: str) -> list[str]:
+    """Qué módulos han escrito en el registro en la ventana pedida.
+
+    Supabase no expone `distinct` por REST, así que se piden solo las columnas `source`
+    de las últimas mil filas y se deduplica aquí: una columna de texto corta, sin
+    contexto ni mensajes, es un viaje barato al lado de lo que ahorra en la pantalla.
+    """
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/app_logs"
+        f"?created_at=gte.{quote(desde, safe='')}"
+        "&select=source&order=created_at.desc&limit=1000",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        # El filtro es una comodidad: si esta consulta falla, el registro se enseña igual.
+        return []
+    return sorted({str(f.get("source") or "") for f in (r.json() or []) if f.get("source")})
 
 
 @app.delete("/logs")
@@ -7614,6 +7667,115 @@ def borrar_logs(credentials: HTTPAuthorizationCredentials = Depends(verify_token
     """Vacía el registro. Para dejarlo limpio y ver si un problema se reproduce."""
     r = http.delete(
         f"{SUPABASE_URL}/rest/v1/app_logs?id=not.is.null",
+        headers={**supabase_headers(), "Prefer": "return=minimal"},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
+
+
+# ── ZONA DEV: LA CHECKLIST DE IDEAS ───────────────────────────────────────────
+# La lista de trabajo del proyecto (docs/ZONA_DEV.md). Tabla propia y no `ideas`: aquélla
+# es la bandeja de las notas por voz y ésta una lista de tareas; no se parecen en nada más
+# que en el nombre.
+
+IDEAS_DEV_URL = f"{SUPABASE_URL}/rest/v1/ideas_dev"
+
+ESTADOS_IDEA = ("pendiente", "en_curso", "hecha", "descartada")
+
+
+class IdeaDevIn(BaseModel):
+    """Alta de una idea. Solo el título es obligatorio, y a propósito: la idea que hay
+    que rellenar entera para poder guardarla es la que se acaba no guardando."""
+    titulo:    str                        = Field(min_length=1, max_length=200)
+    porque:    Optional[str]              = Field(default=None, max_length=2000)
+    por_donde: Optional[str]              = Field(default=None, max_length=2000)
+    esfuerzo:  Optional[int]              = Field(default=None, ge=1, le=3)
+    area:      Optional[str]              = Field(default=None, max_length=40)
+    estado:    Literal[ESTADOS_IDEA]      = "pendiente"
+
+
+class IdeaDevUpdate(BaseModel):
+    """Edición parcial: solo se escriben los campos que vengan puestos (`model_fields_set`),
+    de modo que marcar una idea como hecha no borre el porqué que se escribió el mes pasado."""
+    titulo:    Optional[str]              = Field(default=None, min_length=1, max_length=200)
+    porque:    Optional[str]              = Field(default=None, max_length=2000)
+    por_donde: Optional[str]              = Field(default=None, max_length=2000)
+    esfuerzo:  Optional[int]              = Field(default=None, ge=1, le=3)
+    area:      Optional[str]              = Field(default=None, max_length=40)
+    estado:    Optional[Literal[ESTADOS_IDEA]] = None
+
+
+@app.get("/dev/ideas")
+def get_ideas_dev(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Todas las ideas, las pendientes primero.
+
+    Sin paginar: son decenas de filas y se miran todas juntas. El día que dejen de caber
+    en una pantalla, el problema no será la paginación sino que nadie las está cerrando.
+    """
+    r = http.get(
+        f"{IDEAS_DEV_URL}?select=*&order=creada.desc",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ideas": r.json() or []}
+
+
+@app.post("/dev/ideas")
+def crear_idea_dev(
+    body: IdeaDevIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    fila = body.model_dump()
+    fila["titulo"] = fila["titulo"].strip()
+    if not fila["titulo"]:
+        raise HTTPException(status_code=400, detail="El título está vacío")
+    r = http.post(
+        IDEAS_DEV_URL,
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=[fila],
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    creada = (r.json() or [{}])[0]
+    return {"ok": True, "idea": creada}
+
+
+@app.patch("/dev/ideas/{idea_id}")
+def actualizar_idea_dev(
+    body: IdeaDevUpdate,
+    idea_id: str = _uuid_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    cambios = {k: v for k, v in body.model_dump().items() if k in body.model_fields_set}
+    if not cambios:
+        raise HTTPException(status_code=400, detail="Nada que actualizar")
+    if "titulo" in cambios:
+        cambios["titulo"] = (cambios["titulo"] or "").strip()
+        if not cambios["titulo"]:
+            raise HTTPException(status_code=400, detail="El título está vacío")
+    cambios["actualizada"] = datetime.now(timezone.utc).isoformat()
+    r = http.patch(
+        f"{IDEAS_DEV_URL}?id=eq.{idea_id}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=cambios,
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    filas = r.json() or []
+    if not filas:
+        raise HTTPException(status_code=404, detail="Esa idea no existe")
+    return {"ok": True, "idea": filas[0]}
+
+
+@app.delete("/dev/ideas/{idea_id}")
+def borrar_idea_dev(
+    idea_id: str = _uuid_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    r = http.delete(
+        f"{IDEAS_DEV_URL}?id=eq.{idea_id}",
         headers={**supabase_headers(), "Prefer": "return=minimal"},
     )
     if r.status_code >= 300:
@@ -8615,7 +8777,7 @@ def _averias_del_registro() -> list:
     """
     try:
         entradas = (get_logs(nivel="ERROR", dias=VIGILANTE_VENTANA_DIAS, limite=200,
-                             credentials=None) or {}).get("entradas") or []
+                             fuentes=False, credentials=None) or {}).get("entradas") or []
     except Exception as e:
         # Si no se puede preguntar, no se sabe: callar. Avisar aquí convertiría un
         # Supabase lento en "el sistema está roto", que es mentira.
@@ -12377,7 +12539,7 @@ def _j_errores(dias: int = 3, limite: int = 10) -> dict:
     el resto de herramientas dicen si algo RESPONDE, esta dice si algo ha FALLADO."""
     dias   = max(1, min(int(dias or 3), 30))
     limite = max(1, min(int(limite or 10), 30))
-    datos  = get_logs(nivel="", dias=dias, limite=limite, credentials=None)
+    datos  = get_logs(nivel="", dias=dias, limite=limite, fuentes=False, credentials=None)
     return {
         "errores": datos.get("errores"),
         "entradas": [{
@@ -13450,7 +13612,7 @@ def _j_diagnostico(dias: int = 3) -> dict:
     salida: dict = {"ventana_dias": dias}
 
     try:
-        registro = get_logs(dias=dias, limite=200, credentials=None)
+        registro = get_logs(dias=dias, limite=200, fuentes=False, credentials=None)
         entradas = registro.get("entradas") or []
         resumen: dict = {}
         for e in entradas:

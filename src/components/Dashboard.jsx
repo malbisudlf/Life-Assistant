@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
-  urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy, formatLogTime,
+  urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
   mediaReciente, refHrv,
@@ -28,9 +28,10 @@ import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
+import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
+import { resumenEstado } from "../lib/dev";
+import ZonaDev from "./dev/ZonaDev";
 
-// Configuración de instancia (kit self-hosted): se personaliza con variables VITE_* en Vercel/.env
-const API = import.meta.env.VITE_API_URL || "https://api.lifeassistantbackend.bid";
 // Sin valor por defecto a propósito: aquí había una IP de la red doméstica escrita a
 // mano, en un repositorio público y contra la norma de CLAUDE.md. Sin `VITE_HA_URL` el
 // enlace a Home Assistant simplemente no se ofrece (ver `haDisponible`), que es mejor
@@ -58,29 +59,6 @@ const HEALTH_DIAS_PATRONES = 365;
 // Muestra mínima por grupo en la ventana larga. Muy por encima del 3 que usan las
 // conclusiones del día a día, justamente porque aquí sí hay datos de sobra.
 const HEALTH_MIN_MUESTRA_PATRONES = 10;
-
-// Cabeceras de una llamada autenticada. El token se lee en el momento y no se captura
-// en un closure: si la sesión se renueva a mitad de una pantalla, la siguiente llamada
-// ya usa el nuevo. Único sitio que toca el esquema de autenticación.
-function authHeaders(extra = {}) {
-  const token = localStorage.getItem("la_token") || "";
-  return { "Authorization": `Bearer ${token}`, ...extra };
-}
-
-// Atajo para las llamadas que mandan JSON, que son casi todas las de escritura.
-function jsonHeaders() {
-  return authHeaders({ "Content-Type": "application/json" });
-}
-
-async function apiFetch(url, options = {}) {
-  const res = await fetch(url, options);
-  if (res.status === 401 && localStorage.getItem("la_token")) {
-    localStorage.removeItem("la_token");
-    window.location.reload();
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  return res;
-}
 
 // /auth/login ahora exige el JWT del dashboard (ver backend/main.py): un <a href>
 // directo al backend no manda cabeceras, así que se pide con fetch autenticado y se
@@ -688,104 +666,8 @@ const LINEA_DIAS_ATRAS = 29;   // lo que cubre /health/metrics?days=30
 const LINEA_ALTO_FILA  = 20;
 const LINEA_ANCHO_MIN  = 640;  // en móvil el eje se desplaza en horizontal, no se aplasta
 
-// Los avisos que salieron hoy, y con qué números se dispararon.
-//
-// La señal de utilidad (el botón «me sirvió / no me sirvió») dice QUÉ reglas se ignoran;
-// esto dice POR QUÉ fallan, que es lo único que permite arreglarlas en vez de
-// silenciarlas. Los números se piden solo al abrir uno: son una consulta más y casi
-// nunca se miran.
-function AvisosDeHoy({ avisos }) {
-  const [abierto, setAbierto] = useState("");
-  const [porque, setPorque]   = useState({});   // id → { cargando } | { motivo } | { error }
-
-  async function verPorque(id) {
-    if (abierto === id) { setAbierto(""); return; }
-    setAbierto(id);
-    if (porque[id]) return;                      // ya pedido: no se vuelve a pagar el viaje
-    setPorque(p => ({ ...p, [id]: { cargando: true } }));
-    try {
-      const r = await apiFetch(`${API}/avisos/${id}/porque`, { headers: authHeaders() });
-      if (!r.ok) throw new Error("no");
-      const d = await r.json();
-      setPorque(p => ({ ...p, [id]: { motivo: d.motivo?.datos || null } }));
-    } catch {
-      // "No se pudo preguntar" no es "no hay motivo": son cosas distintas y se dicen
-      // distinto, que es la regla de todo el proyecto.
-      setPorque(p => ({ ...p, [id]: { error: true } }));
-    }
-  }
-
-  if (!avisos.length) return null;
-  return (
-    <div style={{ marginTop: 4 }}>
-      <div style={{ fontSize: 11, color: "var(--muted2)", marginBottom: 4 }}>
-        {avisos.length} {avisos.length === 1 ? "aviso hoy" : "avisos hoy"}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {avisos.map(a => {
-          const estado = porque[a.id];
-          return (
-            <div key={a.id} style={{ borderLeft: "2px solid var(--border2)", paddingLeft: 8 }}>
-              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)" }}>
-                {formatLogTime(a.enviado_at)} · {a.regla || "tuyo"}
-                {a.util === true ? " · te sirvió" : a.util === false ? " · no te sirvió" : ""}
-              </div>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>{a.texto}</div>
-              <button onClick={() => verPorque(a.id)} style={{
-                background: "transparent", border: "none", padding: 0, cursor: "pointer",
-                color: "var(--accent)", fontSize: 10, fontFamily: "'DM Sans', sans-serif",
-              }}>{abierto === a.id ? "Ocultar" : "¿Por qué?"}</button>
-              {abierto === a.id && (
-                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)", whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 2 }}>
-                  {estado?.cargando ? "…"
-                    : estado?.error ? "No se ha podido consultar"
-                    : estado?.motivo ? JSON.stringify(estado.motivo, null, 1)
-                    : "Este aviso no guardó con qué se disparó"}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// El gasto del modelo repartido por boca. El total ya sale en la fila de arriba; esto es
-// la pregunta que no se podía responder: por dónde se va el dinero. El modo llamada es
-// el candidato obvio — paga salida por token Y segundos de voz.
-function DesgloseGasto({ gasto }) {
-  const [abierto, setAbierto] = useState(false);
-  const bocas = Object.entries(gasto.por_boca || {})
-    .sort((a, b) => b[1].euros - a[1].euros);
-  return (
-    <div style={{ marginTop: 4 }}>
-      <button onClick={() => setAbierto(v => !v)} style={{
-        background: "transparent", border: "none", padding: 0, cursor: "pointer",
-        color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
-      }}>{abierto ? "Ocultar coste" : "Ver coste por boca"}</button>
-      {abierto && (
-        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
-          {bocas.map(([boca, d]) => (
-            <div key={boca} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-              <span style={{ fontSize: 11, color: "var(--text)", minWidth: 80 }}>{boca}</span>
-              <span style={{ fontSize: 10, color: "var(--muted2)", flex: 1, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>
-                {d.euros.toFixed(3)} €{d.euros_incompleto ? "+" : ""} · {d.llamadas} · {(d.entrada / 1000).toFixed(1)}k ent / {(d.salida / 1000).toFixed(1)}k sal
-                {d.segundos_audio ? ` · ${Math.round(d.segundos_audio)} s audio` : ""}
-              </span>
-            </div>
-          ))}
-          {!!gasto.sin_tarifa?.length && (
-            <div style={{ fontSize: 10, color: "var(--muted2)" }}>
-              Sin tarifa configurada: {gasto.sin_tarifa.join(", ")} — sus tokens cuentan,
-              sus euros no. Se pone en MODELO_TARIFAS.
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+// AvisosDeHoy y DesgloseGasto se mudaron a src/components/dev/Estado.jsx con el resto
+// del panel de estado del sistema (ver docs/ZONA_DEV.md).
 
 function LineaCarril({ carril, ahora }) {
   const estado = textoEstadoCarril(carril);
@@ -1609,8 +1491,10 @@ export default function Dashboard() {
   const [showSettings, setShowSettings]   = useState(false);
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
-  const [logsAbiertos, setLogsAbiertos]   = useState(false);  // registro del backend, plegado por defecto
-  const [avisoPrueba, setAvisoPrueba]     = useState("");     // resultado de "Probar aviso"
+  // La zona de desarrollo (docs/ZONA_DEV.md). Es una vista aparte, no un modal: cuando
+  // está abierta el dashboard no se pinta, pero su estado sigue vivo — por eso puede
+  // pasarle las filas del semáforo que solo el dashboard conoce, sin volver a pedirlas.
+  const [zonaDev, setZonaDev]             = useState(false);
   // Interruptor del resumen diario. Vive en el backend (Supabase) y no en localStorage:
   // quien manda el correo es el backend, que no ve el localStorage, y un flag en memoria
   // suya se borraría en el próximo cold start de Fly.
@@ -3537,34 +3421,7 @@ export default function Dashboard() {
     setDispositivoGuardando(false);
   }
 
-  // Manda un aviso de prueba por el canal que toque. Lo que se comprueba no es el
-  // backend —eso ya lo dice la fila de estado— sino la cadena entera: que HA lo recoja
-  // y que el móvil lo enseñe.
-  async function probarAviso() {
-    setAvisoPrueba("…");
-    try {
-      const r = await apiFetch(`${API}/avisos/probar`, { method: "POST", headers: authHeaders() });
-      const d = await r.json();
-      // "Enviado" sería mentira en el caso del móvil: lo único que sabe el backend es
-      // que lo ha encolado y que HA está pasando a recoger. Si la automatización de HA
-      // falla —el `notify` mal escrito, por ejemplo— el aviso se pierde ahí y aquí no
-      // se puede saber. Decirlo es la diferencia entre buscar el fallo en el sitio
-      // correcto y darlo por enviado, que es el error de siempre de este proyecto.
-      setAvisoPrueba(d.canal === "movil"
-        ? "encolado — HA lo recoge en ≤30 s. Si no suena nada, el fallo está en su "
-          + "automatización o en el nombre del notify"
-        : "enviado por correo (nadie recoge los avisos del móvil)");
-    } catch {
-      setAvisoPrueba("no se pudo enviar");
-    }
-  }
-
-  async function vaciarRegistro() {
-    try {
-      await apiFetch(`${API}/logs`, { method: "DELETE", headers: authHeaders() });
-      setSysStatus(s => (s ? { ...s, registro: { entradas: [], errores: 0 } } : s));
-    } catch { /* mejor esfuerzo: ignorar */ }
-  }
+  // «Probar aviso» y «vaciar el registro» se mudaron a la zona dev (docs/ZONA_DEV.md).
 
   // La cartera de Indexa. El backend la guarda en memoria unas horas (Indexa valora una
   // vez al día), así que la carga normal no sale a la red; `refrescar` es lo que la
@@ -6240,7 +6097,70 @@ export default function Dashboard() {
     );
   }
 
+  // Las filas del semáforo que dependen de lo que el dashboard ya tiene cargado. Las
+  // demás (backend, agente, presencia, avisos, registro, gasto) se las pide la zona dev
+  // por su cuenta; éstas se le pasan porque volver a pedirlas sería repetir media carga
+  // del dashboard para pintar cuatro líneas.
+  const filasEstadoDelDashboard = useMemo(() => {
+    const filas = [];
+
+    filas.push({
+      nombre: "Outlook",
+      tono: authNeeded ? "red" : allEvents.length ? "green" : "accent",
+      detalle: authNeeded ? "sesión caducada — vuelve a conectar"
+        : `${allEvents.length} eventos cargados`,
+    });
+
+    const minutos = healthLastSync ? Math.floor((Date.now() - new Date(healthLastSync)) / 60000) : null;
+    filas.push({
+      nombre: "Salud (Watch)",
+      tono: minutos == null ? "muted" : minutos < 120 ? "green" : minutos < 1440 ? "accent" : "red",
+      detalle: minutos == null ? "sin datos aún"
+        : minutos < 2 ? "sincronizado ahora mismo"
+        : minutos < 60 ? `última sync hace ${minutos} min`
+        : minutos < 1440 ? `última sync hace ${Math.floor(minutos / 60)} h`
+        : `última sync hace ${Math.floor(minutos / 1440)} días`,
+    });
+
+    // La fila de arriba responde "¿llegan datos?", que es la pregunta del sistema. Ésta
+    // responde "¿se pudieron medir?", que es la del usuario: sin ella, un mes de HRV
+    // plano por tener el reloj en un cajón parece una avería.
+    if (healthReloj) {
+      const cob      = relojCobertura(healthReloj, { dias: 7 });
+      const racha    = relojRachaSinReloj(healthReloj);
+      const medibles = cob.dias - cob.sinDatos;
+      filas.push({
+        nombre: "Uso del reloj",
+        tono: !medibles ? "muted" : racha >= 2 ? "red" : cob.noche < medibles ? "accent" : "green",
+        detalle: !medibles ? "sin datos de los que deducirlo"
+          : racha >= 2 ? `${racha} días seguidos sin ponértelo`
+          : `${cob.noche}/${medibles} noches y ${cob.dia}/${medibles} días esta semana`
+            + (cob.sinDatos ? ` · ${cob.sinDatos} día(s) sin datos` : ""),
+      });
+    }
+
+    filas.push({
+      nombre: "Entrenamiento",
+      tono: training?.client ? "green" : "muted",
+      detalle: training?.client
+        ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
+        : "sin cliente configurado",
+    });
+
+    return filas;
+  }, [authNeeded, allEvents.length, healthLastSync, healthReloj, training]);
+
   if (!token) return <LoginScreen />;
+
+  if (zonaDev) {
+    return (
+      <ZonaDev
+        onSalir={() => setZonaDev(false)}
+        agentId={AGENT_ID}
+        filasExtra={filasEstadoDelDashboard}
+      />
+    );
+  }
 
   return (
     <>
@@ -6275,6 +6195,13 @@ export default function Dashboard() {
               <strong style={s.greetingStrong}>Mikel</strong>
             </div>
             <div className="header-controls" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* La zona dev, en una esquinita y sin llamar la atención: se entra a
+                  diario mientras se desarrolla y nunca durante el uso normal. */}
+              <button onClick={() => setZonaDev(true)} title="Zona de desarrollo" style={{
+                background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
+                borderRadius: 7, color: "var(--muted2)", fontSize: 13, cursor: "pointer",
+                padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
+              }}>🛠</button>
               <button onClick={() => {
                 setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
                 setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
@@ -7287,8 +7214,11 @@ export default function Dashboard() {
             </div>
 
             {/* ── Estado del sistema ── */}
+            {/* El panel entero se mudó a la zona dev (docs/ZONA_DEV.md). Aquí queda el
+                semáforo de una línea, que es lo que se mira deprisa desde el móvil: si
+                dice que algo va mal, el detalle está a un toque. */}
             <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Estado del sistema</div>
                 <button onClick={cargarEstadoSistema} disabled={sysLoading} style={{
                   background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6,
@@ -7297,223 +7227,16 @@ export default function Dashboard() {
                 }}>{sysLoading ? "Comprobando…" : "Actualizar"}</button>
               </div>
               {(() => {
-                // tono: green | accent | red | muted. El texto dice siempre qué pasa,
-                // para no depender solo del color.
-                const filas = [];
-
-                const b = sysStatus?.backend;
-                filas.push({
-                  nombre: "Backend",
-                  tono: !sysStatus ? "muted" : b?.ok ? (b.ms > 3000 ? "accent" : "green") : "red",
-                  detalle: !sysStatus ? "sin comprobar"
-                    : !b?.ok ? "no responde"
-                    : b.ms > 3000 ? `despierto tras ${(b.ms / 1000).toFixed(1)}s (arranque en frío)`
-                    : `despierto · ${b.ms} ms`,
-                });
-
-                filas.push({
-                  nombre: "Outlook",
-                  tono: authNeeded ? "red" : allEvents.length ? "green" : "accent",
-                  detalle: authNeeded ? "sesión caducada — vuelve a conectar"
-                    : `${allEvents.length} eventos cargados`,
-                });
-
-                const minutos = healthLastSync ? Math.floor((Date.now() - new Date(healthLastSync)) / 60000) : null;
-                filas.push({
-                  nombre: "Salud (Watch)",
-                  tono: minutos == null ? "muted" : minutos < 120 ? "green" : minutos < 1440 ? "accent" : "red",
-                  detalle: minutos == null ? "sin datos aún"
-                    : minutos < 2 ? "sincronizado ahora mismo"
-                    : minutos < 60 ? `última sync hace ${minutos} min`
-                    : minutos < 1440 ? `última sync hace ${Math.floor(minutos / 60)} h`
-                    : `última sync hace ${Math.floor(minutos / 1440)} días`,
-                });
-
-                // La fila de arriba responde "¿llegan datos?", que es la pregunta del
-                // sistema. Esta responde "¿se pudieron medir?", que es la del usuario:
-                // sin ella, un mes de HRV plano por tener el reloj en un cajón parece
-                // una avería, que es justo como se leyó en su día.
-                if (healthReloj) {
-                  const cob   = relojCobertura(healthReloj, { dias: 7 });
-                  const racha = relojRachaSinReloj(healthReloj);
-                  const medibles = cob.dias - cob.sinDatos;
-                  filas.push({
-                    nombre: "Uso del reloj",
-                    tono: !medibles ? "muted" : racha >= 2 ? "red" : cob.noche < medibles ? "accent" : "green",
-                    detalle: !medibles ? "sin datos de los que deducirlo"
-                      : racha >= 2 ? `${racha} días seguidos sin ponértelo`
-                      : `${cob.noche}/${medibles} noches y ${cob.dia}/${medibles} días esta semana`
-                        + (cob.sinDatos ? ` · ${cob.sinDatos} día(s) sin datos` : ""),
-                  });
-                }
-
-                const ag = sysStatus?.agente;
-                filas.push({
-                  nombre: "Agente PC",
-                  tono: !sysStatus ? "muted" : !ag ? "muted" : ag.offline === false ? "green" : "muted",
-                  detalle: !sysStatus ? "sin comprobar"
-                    : !ag ? "sin respuesta"
-                    : ag.exists === false ? "nunca se ha registrado"
-                    : ag.offline === false ? `online${ag.hostname ? ` · ${ag.hostname}` : ""}`
-                    : `apagado (visto hace ${Math.floor((ag.silence_seconds ?? 0) / 60)} min)`,
-                });
-
-                // Presencia (la empuja HA desde el device_tracker del móvil). Un dato
-                // caducado se muestra igual pero en gris y diciendo de cuándo es: no
-                // saber dónde estás y creer que sigues donde estabas hace seis horas
-                // son cosas distintas, y esta fila tiene que dejar claro cuál es.
-                const pre = sysStatus?.presencia;
-                filas.push({
-                  nombre: "Presencia",
-                  tono: !sysStatus ? "muted" : !pre?.conocida ? "muted" : pre.vigente ? "green" : "accent",
-                  detalle: !sysStatus ? "sin comprobar"
-                    // Sin respuesta ≠ sin datos: el backend puede no tener todavía el
-                    // endpoint (se despliega a mano, el frontend no) y decir "HA no ha
-                    // reportado nunca" mandaría a revisar HA, que no es el problema.
-                    : !pre ? "sin respuesta del backend"
-                    : !pre.conocida ? "HA no ha reportado nunca"
-                    : `${pre.en_casa ? "en casa" : pre.zona || "fuera"} · ${
-                        pre.hace_minutos == null ? "sin fecha"
-                        : pre.hace_minutos < 2 ? "ahora mismo"
-                        : pre.hace_minutos < 60 ? `hace ${pre.hace_minutos} min`
-                        : `hace ${Math.floor(pre.hace_minutos / 60)} h`
-                      }${pre.vigente ? "" : " (caducado)"}`,
-                });
-
-                filas.push({
-                  nombre: "Entrenamiento",
-                  tono: training?.client ? "green" : "muted",
-                  detalle: training?.client
-                    ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
-                    : "sin cliente configurado",
-                });
-
-                // El resumen diario. Apagado a propósito y roto se parecen mucho desde
-                // fuera —en los dos casos el correo no llega—, así que esta fila tiene
-                // que decir cuál de los dos es, y si el de hoy ya salió.
-                filas.push({
-                  nombre: "Resumen diario",
-                  tono: !briefCfg ? "muted" : !briefCfg.activo ? "muted" : briefCfg.pausado ? "accent" : "green",
-                  detalle: !briefCfg ? "sin comprobar"
-                    : !briefCfg.activo ? "desactivado"
-                    : briefCfg.pausado ? `pausado hasta el ${isoToDdMmYyyy(briefCfg.pausado_hasta)}`
-                    : briefCfg.enviado_hoy === true ? "activo · el de hoy ya ha salido"
-                    : briefCfg.enviado_hoy === false ? "activo · hoy aún no ha salido"
-                    : "activo",
-                });
-
-                // Por dónde salen los avisos. Que el correo funcione y que el aviso
-                // llegue A TIEMPO no son la misma pregunta: un "ponte el reloj" de las
-                // 21:30 leído al abrir el buzón mañana ya no sirve de nada. Y el canal
-                // del móvil se cae en silencio (basta con que HA deje de sondear), así
-                // que tiene que verse desde aquí.
-                const av = sysStatus?.avisos;
-                filas.push({
-                  nombre: "Avisos",
-                  tono: !av ? "muted" : !av.activo ? "muted" : av.canal === "movil" ? "green" : "accent",
-                  detalle: !av ? "sin comprobar"
-                    : !av.activo ? "al correo (móvil desactivado)"
-                    : av.canal === "movil"
-                      ? `al móvil · HA sondeó hace ${av.sondeo_hace_segundos ?? 0} s`
-                      : av.sondeo_hace_segundos == null
-                        ? "al correo · HA no los recoge todavía"
-                        : `al correo · HA lleva ${Math.floor(av.sondeo_hace_segundos / 60)} min sin recogerlos`,
-                });
-
-                // El registro del backend (app_logs). Las demás filas dicen si algo
-                // RESPONDE; esta dice si algo ha FALLADO — que es distinto, y es lo que
-                // faltaba: el 409 de la ingesta de salud se registró durante días en el
-                // stdout de una máquina que escala a cero y nadie llegó a verlo.
-                const reg = sysStatus?.registro;
-                filas.push({
-                  nombre: "Registro",
-                  tono: !reg ? "muted" : reg.errores ? "red" : reg.entradas.length ? "accent" : "green",
-                  detalle: !reg ? "sin comprobar"
-                    : reg.errores ? `${reg.errores} ${reg.errores === 1 ? "error" : "errores"} en 7 días`
-                    : reg.entradas.length ? `${reg.entradas.length} avisos en 7 días`
-                    : "sin incidencias en 7 días",
-                });
-
-                // Lo que cuesta hablar con Jarvis, medido y no estimado. La cifra de
-                // euros se marca como incompleta si algún modelo no tiene tarifa puesta:
-                // un total que no incluye todo el gasto y no lo dice engaña más que no
-                // darlo. Y el % cacheado va al lado porque es LA palanca de coste: si se
-                // hunde, algo que cambia a menudo se ha colado delante del prompt.
-                const gas = sysStatus?.gasto;
-                filas.push({
-                  nombre: "Coste del modelo",
-                  tono: !gas ? "muted" : gas.total.euros_incompleto ? "accent" : "green",
-                  detalle: !gas ? "sin comprobar"
-                    : gas.total.llamadas === 0 ? "sin gasto en 30 días"
-                    : `${gas.total.euros.toFixed(2)} € en 30 días · ${gas.total.llamadas} llamadas`
-                      + (gas.cacheado_pct != null ? ` · ${gas.cacheado_pct}% cacheado` : "")
-                      + (gas.total.euros_incompleto ? " · falta tarifa de algún modelo" : ""),
-                });
-
+                const resumen = resumenEstado(sysStatus, filasEstadoDelDashboard);
                 const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
                 return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {filas.map(f => (
-                      <div key={f.nombre} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                        <span style={{ width: 7, height: 7, borderRadius: "50%", background: color[f.tono], flexShrink: 0, alignSelf: "center" }} />
-                        <span style={{ fontSize: 12, color: "var(--text)", minWidth: 96 }}>{f.nombre}</span>
-                        <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{f.detalle}</span>
-                      </div>
-                    ))}
-                    {/* Instalar el YAML de HA y no saber si funciona hasta que toque un
-                        aviso de verdad es la forma más rápida de darlo por puesto sin
-                        estarlo: esto recorre la cadena entera. */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
-                      <button onClick={probarAviso} disabled={avisoPrueba === "…"} style={{
-                        background: "transparent", border: "none", padding: 0,
-                        cursor: avisoPrueba === "…" ? "default" : "pointer",
-                        color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
-                      }}>Probar aviso</button>
-                      {!!avisoPrueba && (
-                        <span style={{ fontSize: 11, color: "var(--muted)" }}>{avisoPrueba}</span>
-                      )}
-                    </div>
-                    {/* Los avisos que SALIERON hoy, y por qué. Antes de esto un aviso
-                        enviado desaparecía: lo único que quedaba era la notificación del
-                        móvil, que se borra. Sin poder volver sobre uno, la señal de
-                        utilidad dice QUÉ reglas se ignoran pero nunca POR QUÉ fallan. */}
-                    <AvisosDeHoy avisos={sysStatus?.enviados || []} />
-                    {!!gas?.total?.llamadas && <DesgloseGasto gasto={gas} />}
-                    {!!reg?.entradas.length && (
-                      <div style={{ marginTop: 4 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          <button onClick={() => setLogsAbiertos(v => !v)} style={{
-                            background: "transparent", border: "none", padding: 0, cursor: "pointer",
-                            color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
-                          }}>{logsAbiertos ? "Ocultar registro" : "Ver registro"}</button>
-                          {logsAbiertos && (
-                            <button onClick={vaciarRegistro} style={{
-                              background: "transparent", border: "none", padding: 0, cursor: "pointer",
-                              color: "var(--muted2)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
-                            }}>Vaciar</button>
-                          )}
-                        </div>
-                        {logsAbiertos && (
-                          <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-                            {reg.entradas.map((e, i) => (
-                              <div key={`${e.created_at}-${i}`} style={{
-                                borderLeft: `2px solid ${e.level === "ERROR" || e.level === "CRITICAL" ? "#d4645a" : "var(--accent)"}`,
-                                paddingLeft: 8,
-                              }}>
-                                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "var(--muted2)" }}>
-                                  {formatLogTime(e.created_at)} · {e.level}
-                                  {e.context?.peticion ? ` · ${e.context.peticion}` : ""}
-                                </div>
-                                {/* pre-wrap: los logger.exception() traen traza de varias líneas */}
-                                <div style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                                  {e.message}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: color[resumen.tono], flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, color: "var(--muted)", flex: 1 }}>{resumen.texto}</span>
+                    <button onClick={() => { setShowSettings(false); setZonaDev(true); }} style={{
+                      background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                      color: "var(--accent)", fontSize: 11, fontFamily: "'DM Sans', sans-serif",
+                    }}>Zona dev →</button>
                   </div>
                 );
               })()}

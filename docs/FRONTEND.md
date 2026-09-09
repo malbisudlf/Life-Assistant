@@ -15,6 +15,10 @@ No hay router ni gestor de estado: es un componente con `useState`/`useEffect`.
 Login por contraseña (input con `inputMode="numeric"` → teclado numérico en móvil) →
 JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las llamadas.
 
+- **Dónde vive**: `src/lib/api.js`. Estaba dentro de `Dashboard.jsx` y se sacó cuando la
+  zona dev (`docs/ZONA_DEV.md`) necesitó lo mismo: duplicarlo habría dejado DOS sitios
+  que saben cómo se autentica el cliente, y el día que cambie el esquema uno se queda
+  atrás sin avisar.
 - **`apiFetch()`**: wrapper de `fetch` que, ante un 401 con sesión activa, borra
   `la_token` y recarga. Úsalo para toda llamada autenticada al backend.
   **Solo recarga si había token**: muchos `useEffect` de carga inicial se ejecutan al
@@ -389,6 +393,25 @@ mantén el prefijo y el `try/catch` al parsear.
   dentro o la regla `no-empty` fallará.
 - El lint debe quedar a **cero errores y cero warnings**. Se limpió por completo en
   julio de 2026; no dejes que se vuelva a degradar.
+
+## El panel ⚙ y la zona dev
+
+El panel de ajustes tenía dentro el estado del sistema entero (backend, agente,
+presencia, avisos, registro, gasto). Eso vive ahora en la zona de desarrollo
+(`src/components/dev/`, ver `docs/ZONA_DEV.md`) y en ⚙ queda **una sola línea**: lo peor
+que haya, o «todo responde», con un enlace que abre la zona dev.
+
+Lo que hay que saber al tocarlo:
+
+- La zona dev se enciende con un `useState` del propio `Dashboard` y se pinta **en lugar**
+  del dashboard, no encima: es una vista, no un modal. El estado del dashboard sigue vivo
+  mientras tanto, y por eso puede pasarle por props las filas del semáforo que solo él
+  conoce (`filasEstadoDelDashboard`: Outlook, el Watch, el uso del reloj, entrenamiento).
+  Las demás se las pide la zona dev por su cuenta con `leerEstadoSistema()`.
+- **El resumen y las filas son la misma función** (`filasDeEstado`/`resumenEstado`, en
+  `src/lib/dev.js`, con tests). Si añades una señal nueva, sale en los dos sitios sin
+  tocar nada más — que es justo lo que evita que el semáforo del móvil y el de la zona
+  dev digan cosas distintas.
 
 ## El widget «El día» (`dia_linea`)
 
