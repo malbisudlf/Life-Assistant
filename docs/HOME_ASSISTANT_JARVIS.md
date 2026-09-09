@@ -392,7 +392,7 @@ puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló 
 no tener botón. Y **el PC no entra**, aunque el aviso lo nombre: cortarle la corriente a
 un enchufe no es apagarlo. Para eso está su propio aviso.
 
-Las cinco automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
+Las seis automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
 
 **No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
 silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no
@@ -443,3 +443,104 @@ nada: si ese tick funciona, los avisos salen (por el móvil si el punto 4 está 
 si no por correo). Si HA está apagado, no salen — es el mismo
 compromiso que el resumen diario, y por eso el reloj vive en la casa y no en Fly, que
 escala a cero.
+
+## Alarmas de respaldo
+
+Tres piezas. El detalle de por qué está montado así —y por qué el ritual vive aquí y no en
+el backend— está en `docs/ALARMAS.md`.
+
+**El reloj.** Un sensor REST a 60 s: el tick del resumen diario pasa cada 5 minutos y una
+alarma que suena cuatro minutos tarde no es una alarma.
+
+```yaml
+rest:
+  - resource: "https://TU-BACKEND/ha/alarma-tick"
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+    scan_interval: 60
+    sensor:
+      - name: "Life Assistant Alarma"
+        # El estado es el NÚMERO de intento, no un true/false: cambia en cada escalada,
+        # así que dos escaladas seguidas se ven como dos cambios y no como uno.
+        value_template: "{{ value_json.escalar | int(0) }}"
+        json_attributes:
+          - id
+          - texto
+```
+
+**El ritual.** Todo en orden y en una sola secuencia, que es lo que garantiza que el
+volumen esté puesto antes de hablar. Sustituye el altavoz, las luces y el `device_id` por
+los tuyos.
+
+```yaml
+alias: Life Assistant - Alarma, despertar
+mode: single
+trigger:
+  # Sin `to`/`from`, igual que las órdenes y los avisos.
+  - platform: state
+    entity_id: sensor.life_assistant_alarma
+condition:
+  - condition: template
+    value_template: "{{ trigger.to_state.state | int(0) > 0 }}"
+action:
+  - service: switch.turn_off
+    target: { entity_id: switch.TU_ALTAVOZ_no_molestar }   # ← SUSTITÚYELO
+  - service: media_player.volume_set
+    target: { entity_id: media_player.TU_ALTAVOZ }         # ← SUSTITÚYELO
+    data: { volume_level: 0.35 }
+  - service: notify.alexa_media_TU_ALTAVOZ                 # ← SUSTITÚYELO
+    data:
+      message: "{{ state_attr('sensor.life_assistant_alarma', 'texto') | default('Despierta', true) }}. Despierta."
+      data:
+        type: announce
+  # La canción va como COMANDO DE VOZ y no como `media_content_id` de una lista: así
+  # funciona con lo que tengas vinculado (Amazon Music, Spotify) sin depender de que un
+  # identificador de playlist siga existiendo dentro de seis meses.
+  - service: media_player.play_media
+    target: { entity_id: media_player.TU_ALTAVOZ }         # ← SUSTITÚYELO
+    data:
+      media_content_type: custom
+      media_content_id: "pon la canción Weltita de Bad Bunny"
+  - service: light.turn_on
+    target: { entity_id: [light.tira_led, light.luces_mesa] }   # ← SUSTITÚYELAS
+    data: { brightness_pct: 100 }
+  # La tercera luz solo obedece hablándole a Alexa, así que se enciende como comando de
+  # texto. Este paso es la razón por la que el ritual es YAML y no una lista de órdenes
+  # del backend: `alexa_devices` no es un dominio de la cola y va por device_id.
+  - service: alexa_devices.send_text_command
+    data:
+      device_id: TU_DEVICE_ID                              # ← SUSTITÚYELO
+      text_command: "Enciende led mesa"
+```
+
+**El botón.** Mismo molde que los otros cinco.
+
+```yaml
+alias: Life Assistant - Alarma, estoy despierto
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_DESPIERTO_') }}"
+action:
+  - service: rest_command.la_alarma_despierto
+    data:
+      alarma: "{{ trigger.event.data.action.split('_')[-1] }}"
+```
+
+```yaml
+rest_command:
+  la_alarma_despierto:
+    url: "https://TU-BACKEND/alarmas/{{ alarma }}/despierto"
+    method: POST
+    headers:
+      X-Auth-Token: !secret ha_poll_token
+      Content-Type: application/json
+    payload: '{}'
+```
+
+**Hace falta el permiso de notificaciones críticas** de la app companion en el iPhone, el
+mismo que ya pide el aviso de despliegue. Sin él la notificación llega igual, pero
+callada, que para una alarma es como no llegar.

@@ -173,6 +173,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | Fichero | Cuándo leerlo |
 |---|---|
 | `docs/BACKEND_PATRONES.md` | **Antes de tocar `backend/main.py`.** El núcleo: cliente HTTP saliente, ideas, zonas horarias, tokens de Graph, cola de jobs, ingesta de salud, flags del PC, presencia, clima, consultas en paralelo y registro persistente |
+| `docs/ALARMAS.md` | Las alarmas de respaldo: si no confirmas que estás despierto, la casa te despierta. La máquina de estados, por qué el reloj es propio y por qué el ritual vive en Home Assistant |
 | `docs/BRIEF.md` | El resumen diario por correo y el informe semanal: qué va dentro, cuándo sale, la idempotencia y el interruptor |
 | `docs/JARVIS.md` | Jarvis (herramientas, confirmación, memoria, MCP, web, la casa) y todo lo proactivo: recordatorios, avisos al móvil, reglas, vigilancias, correo entrante y los vigilantes |
 | `docs/JARVIS_VOZ.md` | **En curso — léelo entero antes de tocar la voz.** Jarvis ya habla con ElevenLabs, avisa antes de usar cada herramienta y empieza a hablar mientras escribe; falta todo el micrófono (interrumpirle). Empieza por su sección «Dónde retomar». Plan para darle a Jarvis la voz de ElevenLabs con interrupciones y respuesta hablada mientras genera: decisiones, qué se toca, fases, coste y qué queda por resolver |
@@ -369,7 +370,7 @@ Las que hay:
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
 `20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`,
 `20260903_avisos_motivo`, `20260903_gasto_modelo`, `20260904_sesion_avisos`,
-`20260909_ideas_dev`.
+`20260909_alarmas`, `20260909_ideas_dev`.
 
 ## Convenciones
 

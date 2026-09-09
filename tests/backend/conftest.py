@@ -190,6 +190,10 @@ def _limpiar_estado():
     main._eb_jwt_cache = None
     # Y con los precios de la cartera manual de ETFs (Yahoo Finance).
     main._etf_precios_cache = None
+    # El despertador del tick de alarmas. `None` = "no sé cuándo toca", que es lo que
+    # obliga al siguiente tick a consultar; sin resetearlo, un test que deje una alarma
+    # lejana haría que el siguiente ni mirase.
+    main._alarma_siguiente = None
 
 
 @pytest.fixture(autouse=True)

@@ -260,6 +260,11 @@ saber es distinto de saber que no llegó nada.
   sitio donde hay dinero, cada una un `<circle>` con `stroke-dasharray` en vez de un
   `<path>` con arcos. La lógica (qué porciones hay y cuánto pesa cada una) es pura y vive
   en `repartoPatrimonio()`; el detalle de las decisiones está en `docs/FINANZAS.md`.
+- **`alarmas`** es el widget de las alarmas de respaldo: poner hora, ver las puestas con
+  su estado y quitarlas. Mientras una suena, el botón «Estoy despierto» se come el widget
+  —es lo único que quieres de esa pantalla en ese momento— y se recarga solo cada minuto
+  mientras haya algo vivo. La lógica pura (`alarmaEnPalabras`, `alarmaEstadoTexto`,
+  `alarmaSonando`) está en `helpers.js`; el resto, en `docs/ALARMAS.md`.
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
   "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,

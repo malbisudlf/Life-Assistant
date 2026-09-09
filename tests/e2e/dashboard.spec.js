@@ -163,3 +163,26 @@ test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', a
 
   expect(page.erroresDeNavegador).toEqual([])
 })
+
+test('el widget de alarmas pinta la alarma de respaldo y deja quitarla', async ({ page }) => {
+  await entrar(page)
+
+  const widget = page.locator('[data-card="alarmas"]')
+  await expect(widget).toBeVisible({ timeout: 15_000 })
+
+  // La hora viaja en UTC desde Supabase y el backend la pasa a local; el frontend solo
+  // la escribe en palabras. Que salga "mañana a las 8:30" y no "hoy" ni un 6:30 prueba
+  // los dos saltos a la vez, que es donde vive el bug de zona horaria de siempre.
+  await expect(widget).toContainText('mañana a las 8:30')
+  await expect(widget).toContainText('Entrenar')
+  await expect(widget).toContainText('puesta')
+
+  // Lo que distingue esta alarma de la del móvil, dicho donde se pone.
+  await expect(widget).toContainText('te despierta la casa')
+
+  // Ninguna está sonando, así que el botón grande no debe aparecer: si saliera, estaría
+  // ofreciendo callar algo que no suena.
+  await expect(widget.getByRole('button', { name: 'Estoy despierto' })).toHaveCount(0)
+
+  expect(page.erroresDeNavegador).toEqual([])
+})
