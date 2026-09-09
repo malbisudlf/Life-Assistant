@@ -8467,6 +8467,102 @@ def _alarma_texto(fila: dict) -> str:
     return etiqueta or "Es la hora"
 
 
+_ALARMA_DIAS_NOMBRE = ["lunes", "martes", "miércoles", "jueves", "viernes",
+                       "sábado", "domingo"]
+
+
+def _alarma_dias(valor) -> list:
+    """Los días en que se repite una alarma, como enteros ISO (1 = lunes, 7 = domingo).
+
+    Acepta lo que venga: la cadena "1,3,5" que guarda Supabase o la lista que manda el
+    dashboard. Lo que no sea un día se tira en silencio — un día inventado no puede
+    hacer sonar nada, así que no hay error que dar.
+    """
+    if not valor:
+        return []
+    trozos = valor.split(",") if isinstance(valor, str) else list(valor)
+    fuera  = set()
+    for trozo in trozos:
+        try:
+            dia = int(str(trozo).strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= dia <= 7:
+            fuera.add(dia)
+    return sorted(fuera)
+
+
+def _alarma_repeticion_texto(dias) -> str:
+    """"todos los lunes", "los lunes, miércoles y viernes", "todos los días"."""
+    dias = _alarma_dias(dias)
+    if not dias:
+        return ""
+    if len(dias) == 7:
+        return "todos los días"
+    nombres = [_ALARMA_DIAS_NOMBRE[d - 1] for d in dias]
+    if len(nombres) == 1:
+        return f"todos los {nombres[0]}"
+    return "los " + ", ".join(nombres[:-1]) + f" y {nombres[-1]}"
+
+
+def _alarma_proxima(cuando: datetime, dias, ahora: datetime) -> Optional[datetime]:
+    """La siguiente vez que toca: la misma hora, en uno de los días apuntados.
+
+    Se calcula sobre hora local NAIVE y se le vuelve a poner la zona al final. Sumar
+    días a un datetime con zona arrastra el desfase viejo, y la semana en que cambia la
+    hora la alarma sonaría sesenta minutos antes o después — en un despertador eso no
+    es un detalle de redondeo.
+
+    Se parte de la última hora prevista o de ahora, lo que sea más tarde: si el backend
+    ha estado dos semanas apagado, la alarma vuelve el próximo lunes, no el de hace dos
+    semanas (que vencería nada más rearmarse, una vez por semana perdida).
+    """
+    dias = _alarma_dias(dias)
+    if not dias:
+        return None
+    base    = cuando.astimezone(LOCAL_TZ).replace(tzinfo=None, second=0, microsecond=0)
+    limite  = ahora.astimezone(LOCAL_TZ).replace(tzinfo=None)
+    partida = max(base, limite)
+    # Desde el día siguiente: una alarma semanal no puede sonar dos veces el mismo día.
+    for salto in range(1, 9):
+        candidata = (partida + timedelta(days=salto)).replace(hour=base.hour,
+                                                              minute=base.minute)
+        if candidata.isoweekday() in dias and candidata > limite:
+            return candidata.replace(tzinfo=LOCAL_TZ)
+    return None
+
+
+def _alarma_reprogramar(fila: dict, estado_previo: str, ahora: datetime) -> Optional[datetime]:
+    """Rearma para la próxima vez una alarma que se repite. Devuelve cuándo, o `None`.
+
+    Es la MISMA fila, no una nueva: una alarma semanal es una alarma cuyo estado vuelve
+    al principio cuando termina. Y se rearma con el mismo PATCH condicional que todo lo
+    demás de aquí, así que si otro camino la movió entretanto (la cancelaste mientras
+    sonaba), este no la resucita.
+    """
+    dias = _alarma_dias(fila.get("repetir"))
+    if not dias:
+        return None
+    cuando = _alarma_cuando(fila)
+    if cuando is None:
+        return None
+    proxima = _alarma_proxima(cuando, dias, ahora)
+    if proxima is None:
+        return None
+    if not _alarma_reservar(fila, estado_previo, {
+            "estado":        "armada",
+            "cuando":        proxima.astimezone(timezone.utc).isoformat(),
+            "intentos":      0,
+            "avisado_at":    None,
+            "escalado_at":   None,
+            "confirmado_at": None}):
+        return None
+    # El reloj puede estar durmiendo hasta dentro de horas: sin esto, la alarma rearmada
+    # no sonaría hasta que otra cosa despertara al tick.
+    _alarma_marcar_pendiente(proxima)
+    return proxima
+
+
 def _alarma_preparar_altavoz() -> None:
     """Deja el Echo listo ANTES de que haya que hablar: sin "no molestar" y con volumen.
 
@@ -8537,7 +8633,8 @@ def _correr_alarmas() -> dict:
 
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
-        f"&select=id,cuando,etiqueta,estado,intentos,avisado_at,escalado_at&order=cuando.asc&limit={ALARMAS_MAX}",
+        f"&select=id,cuando,etiqueta,estado,intentos,repetir,avisado_at,escalado_at"
+        f"&order=cuando.asc&limit={ALARMAS_MAX}",
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
@@ -8646,28 +8743,53 @@ def _alarma_rendirse(fila: dict, estado: str, ahora: datetime) -> None:
     if not _alarma_reservar(fila, estado, {"estado": "rendida"}):
         return
     _alarma_parar_musica()
+    # Que hoy no confirmaras no dice nada del lunes que viene: si se repite, se rearma
+    # desde "rendida" con el mismo PATCH condicional de siempre.
+    proxima = _alarma_reprogramar({**fila, "estado": "rendida"}, "rendida", ahora)
+    vuelvo  = (f" Vuelvo el {_ALARMA_DIAS_NOMBRE[proxima.isoweekday() - 1]} a las "
+               f"{proxima.strftime('%H:%M')}.") if proxima else ""
     try:
         _notificar("⏰ Dejo de insistir",
                    f"Llevo {ALARMA_MAX_MIN} minutos con «{_alarma_texto(fila)}» y no has "
-                   f"confirmado. Lo dejo.\n\n— Jarvis", aviso_id=rid, acciones=[])
+                   f"confirmado. Lo dejo.{vuelvo}\n\n— Jarvis", aviso_id=rid, acciones=[])
     except Exception as e:
         logger.warning("Alarma %s: no se pudo avisar de la rendición (%s)", rid, e)
 
 
 # ── Alarmas: las herramientas de Jarvis y el alta ────────────────────────────
 
-def _alarma_crear(fecha: str, hora: str, etiqueta: str = "") -> dict:
-    """Alta de una alarma. La comparten Jarvis y el dashboard: una sola validación."""
+def _alarma_crear(fecha: str, hora: str, etiqueta: str = "", repetir=None) -> dict:
+    """Alta de una alarma. La comparten Jarvis y el dashboard: una sola validación.
+
+    Con `repetir` (días ISO: 1 = lunes) la fecha sobra: la primera vez es el próximo día
+    de los apuntados. Se admite igualmente una fecha explícita, pero manda la lista de
+    días — si no coinciden, se adelanta al primero que toque, porque una alarma «todos
+    los lunes» que la primera vez suena un martes es un error silencioso.
+    """
     fecha    = str(fecha or "").strip()
     hora     = str(hora or "").strip()
     etiqueta = str(etiqueta or "").strip()[:ALARMA_ETIQUETA_MAX]
-    if not _DATE_RE.match(fecha) or not _HORA_RE.match(hora):
+    dias     = _alarma_dias(repetir)
+    ahora    = datetime.now(LOCAL_TZ)
+    if not _HORA_RE.match(hora):
+        return {"ok": False, "motivo": "Necesito una hora (HH:MM)"}
+    if not fecha and not dias:
+        return {"ok": False, "motivo": "Necesito fecha (YYYY-MM-DD) o días de la semana"}
+    if fecha and not _DATE_RE.match(fecha):
         return {"ok": False, "motivo": "Necesito fecha (YYYY-MM-DD) y hora (HH:MM)"}
     try:
-        cuando = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+        cuando = (datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+                  if fecha else
+                  ahora.replace(hour=int(hora[:2]), minute=int(hora[3:]),
+                                second=0, microsecond=0))
     except ValueError:
         return {"ok": False, "motivo": "Esa fecha u hora no existen"}
-    if cuando < datetime.now(LOCAL_TZ):
+    if dias:
+        if cuando <= ahora or cuando.isoweekday() not in dias:
+            cuando = _alarma_proxima(cuando, dias, ahora)
+        if cuando is None:
+            return {"ok": False, "motivo": "Esos días de la semana no valen"}
+    elif cuando < ahora:
         return {"ok": False, "motivo": "Esa hora ya ha pasado"}
 
     cuenta = http.get(f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
@@ -8678,8 +8800,9 @@ def _alarma_crear(fecha: str, hora: str, etiqueta: str = "") -> dict:
     r = http.post(
         ALARMAS_URL,
         headers={**supabase_headers(), "Prefer": "return=representation"},
-        json={"cuando": cuando.astimezone(timezone.utc).isoformat(),
-              "etiqueta": etiqueta or None},
+        json={"cuando":   cuando.astimezone(timezone.utc).isoformat(),
+              "etiqueta": etiqueta or None,
+              "repetir":  ",".join(str(d) for d in dias) or None},
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
@@ -8687,13 +8810,15 @@ def _alarma_crear(fecha: str, hora: str, etiqueta: str = "") -> dict:
     # algo antes. Sin esto, una alarma puesta para dentro de dos minutos no sonaría.
     _alarma_marcar_pendiente(cuando)
     return {"ok": True, "id": (r.json() or [{}])[0].get("id"),
-            "cuando": f"{fecha} {hora}", "etiqueta": etiqueta}
+            "cuando": cuando.strftime("%Y-%m-%d %H:%M"), "etiqueta": etiqueta,
+            "repetir": dias, "repeticion": _alarma_repeticion_texto(dias)}
 
 
 def _alarma_listar() -> list:
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
-        f"&select=id,cuando,etiqueta,estado,intentos&order=cuando.asc&limit={ALARMAS_MAX}",
+        f"&select=id,cuando,etiqueta,estado,intentos,repetir"
+        f"&order=cuando.asc&limit={ALARMAS_MAX}",
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
@@ -8707,7 +8832,8 @@ def _alarma_listar() -> list:
                       "cuando": cuando.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M"),
                       "etiqueta": fila.get("etiqueta") or "",
                       "estado": fila.get("estado"),
-                      "intentos": int(fila.get("intentos") or 0)})
+                      "intentos": int(fila.get("intentos") or 0),
+                      "repetir": _alarma_dias(fila.get("repetir"))})
     return fuera
 
 
@@ -8728,8 +8854,8 @@ def _alarma_cancelar(alarma_id: str) -> dict:
     return {"ok": True, "hecho": True, "id": alarma_id}
 
 
-def _j_poner_alarma(fecha: str, hora: str, etiqueta: str = "") -> dict:
-    return _alarma_crear(fecha, hora, etiqueta)
+def _j_poner_alarma(fecha: str = "", hora: str = "", etiqueta: str = "", repetir=None) -> dict:
+    return _alarma_crear(fecha, hora, etiqueta, repetir)
 
 
 def _j_mis_alarmas() -> dict:
@@ -8771,10 +8897,11 @@ def ha_alarma_tick(request: Request, token: str = ""):
 def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str = ""):
     """«Estoy despierto». Lo llama el botón de la notificación (HA) o el dashboard."""
     _auth_boton(request, token)
+    ahora = datetime.now(timezone.utc)
     r = http.patch(
         f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.(avisada,escalada)",
         headers={**supabase_headers(), "Prefer": "return=representation"},
-        json={"estado": "confirmada", "confirmado_at": datetime.now(timezone.utc).isoformat()},
+        json={"estado": "confirmada", "confirmado_at": ahora.isoformat()},
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
@@ -8782,6 +8909,10 @@ def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str
         # Pulsar dos veces no es un error, ni lo es confirmar una alarma ya rendida.
         return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba sonando"}
     _alarma_parar_musica()
+    # Se rearma con la fila que devuelve el PATCH, no con una lectura aparte: ahí viene
+    # ya el estado nuevo y los días, y es la única versión de la fila que consta que
+    # ganó la carrera.
+    _alarma_reprogramar(r.json()[0], "confirmada", ahora)
     _acusar_recibo("☀️ Buenos días", "Alarma confirmada. Dejo de insistir.")
     return {"ok": True, "hecho": True}
 
@@ -8793,15 +8924,18 @@ def get_alarmas(credentials: HTTPAuthorizationCredentials = Depends(verify_token
 
 
 class AlarmaIn(BaseModel):
-    fecha:    str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # La fecha es opcional desde que hay repetición: "todos los lunes" no tiene fecha de
+    # inicio que elegir, la primera vez es el próximo lunes.
+    fecha:    str = Field(default="", pattern=r"^(\d{4}-\d{2}-\d{2})?$")
     hora:     str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     etiqueta: str = Field(default="", max_length=ALARMA_ETIQUETA_MAX)
+    repetir:  list[int] = Field(default_factory=list, max_length=7)
 
 
 @app.post("/alarmas")
 def crear_alarma(body: AlarmaIn,
                  credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    resultado = _alarma_crear(body.fecha, body.hora, body.etiqueta)
+    resultado = _alarma_crear(body.fecha, body.hora, body.etiqueta, body.repetir)
     if not resultado.get("ok"):
         raise HTTPException(status_code=422, detail=resultado.get("motivo", "No se pudo"))
     return resultado
@@ -14605,13 +14739,19 @@ _JARVIS_HERRAMIENTAS = {
                        "llega un aviso con un botón «Estoy despierto», y si no lo pulsa se "
                        "escala a la casa (el altavoz del cuarto habla, pone música y se "
                        "encienden las luces), insistiendo hasta que confirme. Úsala cuando "
-                       "diga que ha puesto una alarma o a qué hora se levanta.",
+                       "diga que ha puesto una alarma o a qué hora se levanta. Con "
+                       "'repetir' se pone semanal ('todos los lunes', 'entre semana').",
         "parametros":  {
-            "fecha":    {"type": "string", "description": "YYYY-MM-DD. Resuelve tú 'mañana'."},
             "hora":     {"type": "string", "description": "HH:MM en 24h."},
+            "fecha":    {"type": "string", "description": "YYYY-MM-DD. Resuelve tú 'mañana'. "
+                                                          "Sobra si mandas 'repetir'."},
             "etiqueta": {"type": "string", "description": "Para qué se levanta, en dos palabras. Opcional."},
+            "repetir":  {"type": "array", "items": {"type": "integer"},
+                         "description": "Días de la semana en que se repite, 1 = lunes … 7 = "
+                                        "domingo. Para 'todos los lunes' manda [1]; para "
+                                        "'entre semana', [1,2,3,4,5]. Vacío = suena una sola vez."},
         },
-        "obligatorios": ["fecha", "hora"],
+        "obligatorios": ["hora"],
     },
     "mis_alarmas": {
         "confirmar":   False,

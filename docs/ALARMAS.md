@@ -25,6 +25,9 @@ armada ──(llega la hora)──► avisada ──(2 min sin confirmar)──�
    └──► cancelada                          rendida ◄────(30 min sin confirmar)
 ```
 
+Y si la alarma se repite, `confirmada` y `rendida` no son el final: vuelve sola a
+`armada` con la fecha de la próxima vez (ver «Las que se repiten»).
+
 - **`armada`**: puesta y esperando su hora.
 - **`avisada`**: sonó el aviso al móvil, con el botón. Aquí es donde se **prepara el
   altavoz** (ver abajo).
@@ -36,6 +39,39 @@ armada ──(llega la hora)──► avisada ──(2 min sin confirmar)──�
   y eso es lo que hace que dejes de fiarte del respaldo.
 - **`cancelada`**: la quitaste. Cancelar **cambia el estado, no borra la fila** — una
   alarma que sonó y escaló es parte de por qué la casa hizo ruido a las 8:32.
+
+### Las que se repiten («todos los lunes»)
+
+Una alarma semanal es **una sola fila** con la columna `repetir` (texto: los días ISO
+separados por comas, `"1,3,5"`, donde 1 es lunes). Vacío = suena una vez, que es lo que
+había antes. Cuando la alarma termina —la confirmes (`confirmada`) o se rinda
+(`rendida`)— se **rearma sola**: `_alarma_reprogramar` la vuelve a poner en `armada` con
+la fecha de la próxima vez y los contadores a cero.
+
+Las tres decisiones que la sostienen:
+
+- **Una fila que vuelve al principio, no una fila por ocurrencia.** Generar las próximas
+  N semanas obligaría a decidir cuántas y a limpiarlas después, para no ganar nada: solo
+  se puede estar sonando una vez. Y el precio está aceptado: el historial de una alarma
+  semanal es el de la última vez, no el de todos los lunes del año.
+- **El rearme usa el mismo PATCH condicional que todo lo demás** (`_alarma_reservar` con
+  el estado previo). Si mientras tanto la cancelaste, el PATCH no se lleva la fila y la
+  alarma **no resucita**. Sin esa condición, cancelar una alarma que estaba sonando la
+  habría vuelto a armar dos líneas después.
+- **La próxima vez se calcula desde ahora, no desde su hora original**
+  (`_alarma_proxima`). Si el backend estuvo dos semanas apagado, la alarma vuelve el
+  próximo lunes. Rearmada en el pasado no llegaría tarde: vencería en el acto y se
+  rearmaría otra vez, una vez por semana perdida. Y el cálculo se hace sobre hora local
+  **naive**, volviendo a poner la zona al final: sumar días a un datetime con zona
+  arrastra el desfase viejo y la semana del cambio de hora sonaría sesenta minutos antes
+  o después.
+
+Al rendirse, el aviso dice cuándo vuelve. Una alarma que se rearma sin contarlo se da por
+perdida, que es el mismo motivo por el que se avisa de la rendición.
+
+Lo que sigue **sin** hacerse es armar el respaldo de una alarma recurrente y que suene un
+festivo: eso lo decides tú al marcar los días. Marcar el domingo y olvidarlo es un
+despertador que suena el domingo, no un fallo.
 
 ### Las decisiones que no son obvias
 
@@ -102,7 +138,7 @@ El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
 | `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento, 0 = no toca), `id` y `texto` |
 | `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
-| `POST /alarmas` | JWT | Poner una: `{fecha, hora, etiqueta?}` |
+| `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
 | `DELETE /alarmas/{id}` | JWT | Cancelarla (no la borra) |
 
 `escalar` es lo que HA usa como **estado** del sensor y no un simple `true`: cambia en
@@ -111,7 +147,8 @@ el mismo texto. Es el mismo cuidado que ya llevan los triggers de órdenes y avi
 
 ### Jarvis
 
-Tres herramientas, ninguna pide confirmación: `poner_alarma`, `mis_alarmas` y
+Tres herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
+semanales: «todos los lunes» es `[1]`, «entre semana» es `[1,2,3,4,5]`), `mis_alarmas` y
 `cancelar_alarma`. Poner una no toca nada del mundo real, y cancelarla es justo lo que
 quieres poder hacer deprisa cuando está sonando.
 
@@ -123,9 +160,24 @@ widget: es lo único que quieres de esa pantalla en ese momento. Se recarga solo
 minuto mientras haya algo vivo (sin nada vivo no hay temporizador), porque una alarma que
 empieza a insistir tiene que verse moverse en una pantalla ya abierta.
 
-La lógica pura vive en `src/lib/helpers.js`: `alarmaEnPalabras` (que compara **por día de
-calendario y no por horas de diferencia** — a las 23:00, las 00:30 son mañana aunque
-queden noventa minutos), `alarmaEstadoTexto` y `alarmaSonando`.
+Debajo del formulario hay siete círculos (L M X J V S D). Marcar uno convierte la alarma
+en semanal y **esconde el selector de fecha**, que ya no se manda. Se pintan siempre,
+también sin marcar: detrás de un interruptor, la mitad de las veces se pondría una alarma
+suelta sin saber que se podía repetir.
+
+La lógica pura vive en `src/lib/helpers.js`: `alarmaCuandoTexto` (que para una semanal
+dice «todos los lunes a las 07:00» — de una alarma que se repite, qué lunes concreto es
+la próxima vez no dice nada), `alarmaEnPalabras` (que compara **por día de calendario y
+no por horas de diferencia** — a las 23:00, las 00:30 son mañana aunque queden noventa
+minutos), `alarmaRepeticionTexto`, `alarmaEstadoTexto` y `alarmaSonando`.
+
+**La hora va siempre en 24h**, y eso hay que pedirlo en dos sitios: `<html lang="es">` en
+`index.html` (estaba en `en`, y por eso el `<input type="time">` pintaba AM/PM en una app
+entera en español) y `lang="es-ES"` en el propio input. Chrome mira el `lang` del elemento
+para los campos de fecha y hora; **Firefox no** — ese usa el idioma del navegador y no hay
+nada que hacer sin escribir un selector propio. Y en el texto, la hora lleva sus dos
+dígitos (`08:05`, no `8:05`): «las 8:30» a secas se lee como «las ocho y media» sin saber
+de cuál de las dos, y esa duda en un despertador se paga durmiendo doce horas de más.
 
 ### Variables
 
@@ -143,9 +195,9 @@ en silencio: se oye poco, que es mejor que sonar donde no toca.
 
 ### Lo que no se hace y por qué
 
-- **Alarmas recurrentes** («todos los martes»). Se apunta una a una. Una alarma repetida
-  que se te olvida quitar acaba sonando un domingo, y el coste de que suene cuando no toca
-  es mucho mayor aquí que en cualquier otro aviso del sistema.
+- **Repetir por fecha** («cada día 1», «cada dos semanas»). La repetición es solo por día
+  de la semana, que es como se levanta uno. Lo demás son casos de calendario, y para eso
+  ya está el calendario.
 - **Leer `sensor.mikel_proxima_alarma_2`** (la alarma del Echo) para armar el respaldo
   solo. Se puede y quizá se haga, pero obligaría a poner siempre la alarma hablándole a
   Alexa, que es justo lo que no se hace hoy.

@@ -17,13 +17,15 @@ HOY = datetime.now(main.LOCAL_TZ)
 
 
 def _fila(minutos_desde_ahora=-1, estado="armada", intentos=0, etiqueta="Entrenar",
-          avisado_hace_min=None, escalado_hace_min=None, rid="11111111-1111-1111-1111-111111111111"):
+          avisado_hace_min=None, escalado_hace_min=None, repetir=None,
+          rid="11111111-1111-1111-1111-111111111111"):
     """Una fila de `alarmas` tal y como la devuelve Supabase."""
     ahora  = datetime.now(timezone.utc)
     fila = {
         "id": rid,
         "cuando": (ahora + timedelta(minutes=minutos_desde_ahora)).isoformat(),
         "etiqueta": etiqueta, "estado": estado, "intentos": intentos,
+        "repetir": repetir,
         "avisado_at": None, "escalado_at": None,
     }
     if avisado_hace_min is not None:
@@ -295,6 +297,122 @@ class TestEndpointsDelDashboard:
         assert mock_requests.called("DELETE", "/rest/v1/alarmas") == []
         enviado = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][2]["json"]
         assert enviado == {"estado": "cancelada"}
+
+
+class TestRepeticionSemanal:
+    """Alarmas que vuelven: "todos los lunes a las 7:00".
+
+    Lo que hay que proteger es que la próxima vez caiga SIEMPRE en el futuro y en un día
+    marcado. Una alarma semanal que se rearma en el pasado no es una alarma que llega
+    tarde: vence en el acto y se rearma otra vez, una por semana perdida.
+    """
+
+    def test_los_dias_se_leen_vengan_como_vengan(self):
+        # De Supabase vienen como texto y del dashboard como lista de números.
+        assert main._alarma_dias("1,3,5") == [1, 3, 5]
+        assert main._alarma_dias([5, 1, 1]) == [1, 5]
+        assert main._alarma_dias("0,8,lunes,2") == [2]
+        assert main._alarma_dias(None) == []
+
+    def test_la_proxima_es_el_siguiente_dia_marcado(self):
+        # Miércoles 9 de septiembre de 2026, repite los lunes.
+        cuando = datetime(2026, 9, 9, 8, 0, tzinfo=main.LOCAL_TZ)
+        proxima = main._alarma_proxima(cuando, [1], cuando + timedelta(minutes=5))
+        assert proxima.strftime("%Y-%m-%d %H:%M") == "2026-09-14 08:00"
+
+    def test_no_puede_sonar_dos_veces_el_mismo_dia(self):
+        lunes = datetime(2026, 9, 14, 8, 0, tzinfo=main.LOCAL_TZ)
+        proxima = main._alarma_proxima(lunes, [1], lunes + timedelta(minutes=1))
+        assert proxima.strftime("%Y-%m-%d") == "2026-09-21"
+
+    def test_tras_dos_semanas_apagado_vuelve_al_proximo_lunes(self):
+        # Si se rearmara desde su hora original, la fecha nueva seguiría en el pasado y
+        # la alarma vencería al instante, catorce veces seguidas.
+        vieja = datetime(2026, 8, 26, 8, 0, tzinfo=main.LOCAL_TZ)
+        ahora = datetime(2026, 9, 9, 12, 0, tzinfo=main.LOCAL_TZ)
+        proxima = main._alarma_proxima(vieja, [1], ahora)
+        assert proxima > ahora
+        assert proxima.strftime("%Y-%m-%d %H:%M") == "2026-09-14 08:00"
+
+    def test_sin_dias_no_hay_proxima(self):
+        assert main._alarma_proxima(datetime.now(main.LOCAL_TZ), [], datetime.now(main.LOCAL_TZ)) is None
+
+    def test_sin_fecha_arranca_el_proximo_dia_que_toque(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
+        mock_requests.add("POST", "/rest/v1/alarmas", FakeResponse([{"id": "abc"}]))
+        r = main._alarma_crear("", "07:00", "Entrenar", [1, 4])
+        assert r["ok"] is True
+        cuando = datetime.strptime(r["cuando"], "%Y-%m-%d %H:%M")
+        assert cuando.isoweekday() in (1, 4)
+        assert cuando > datetime.now()
+        enviado = mock_requests.called("POST", "/rest/v1/alarmas")[0][2]["json"]
+        assert enviado["repetir"] == "1,4"
+
+    def test_los_dias_mandan_sobre_la_fecha(self, mock_requests):
+        # Una alarma «todos los lunes» que la primera vez suena un martes es justo el
+        # tipo de error que no se ve hasta que ya te ha despertado el día que no era.
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
+        mock_requests.add("POST", "/rest/v1/alarmas", FakeResponse([{"id": "abc"}]))
+        pasado = (HOY - timedelta(days=30)).strftime("%Y-%m-%d")
+        r = main._alarma_crear(pasado, "07:00", "", [1])
+        assert r["ok"] is True
+        assert datetime.strptime(r["cuando"], "%Y-%m-%d %H:%M").isoweekday() == 1
+
+    def test_sin_fecha_ni_dias_no_se_puede(self, mock_requests):
+        assert main._alarma_crear("", "07:00")["ok"] is False
+        assert mock_requests.called("POST", "/rest/v1/alarmas") == []
+
+    def test_al_confirmar_se_rearma_para_la_semana_que_viene(self, client, mock_requests):
+        fila = _fila(minutos_desde_ahora=-2, estado="confirmada", repetir="1")
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([fila]))
+        r = client.post(TestBotonDespierto.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.json()["hecho"] is True
+        llamadas = mock_requests.called("PATCH", "/rest/v1/alarmas")
+        assert len(llamadas) == 2
+        # Se rearma desde "confirmada" con el mismo PATCH condicional: si otro camino la
+        # movió entretanto, este no la resucita.
+        assert "estado=eq.confirmada" in llamadas[1][1]
+        rearme = llamadas[1][2]["json"]
+        assert rearme["estado"] == "armada"
+        assert rearme["intentos"] == 0
+        assert rearme["avisado_at"] is None
+        assert rearme["cuando"] > datetime.now(timezone.utc).isoformat()
+
+    def test_confirmar_una_de_una_sola_vez_no_rearma_nada(self, client, mock_requests):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([_fila(estado="confirmada")]))
+        client.post(TestBotonDespierto.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert len(mock_requests.called("PATCH", "/rest/v1/alarmas")) == 1
+
+    def test_rendirse_no_rompe_la_repeticion(self, mock_requests, canal_movil):
+        # Que hoy no confirmaras no dice nada del lunes que viene.
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-40, estado="escalada", intentos=15, repetir="1,2,3,4,5",
+                   avisado_hace_min=main.ALARMA_MAX_MIN + 1, escalado_hace_min=2)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        cuerpos = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert cuerpos[0] == {"estado": "rendida"}
+        assert cuerpos[1]["estado"] == "armada"
+        # Y se dice en el aviso: una alarma que se rearma sin contarlo se da por perdida.
+        assert "Vuelvo el" in canal_movil[0]["texto"]
+
+    def test_listar_devuelve_los_dias(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=60, repetir="1,4")]))
+        assert main._alarma_listar()[0]["repetir"] == [1, 4]
+
+    def test_el_dashboard_puede_poner_una_semanal(self, client, mock_requests, auth_headers):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
+        mock_requests.add("POST", "/rest/v1/alarmas", FakeResponse([{"id": "abc"}]))
+        r = client.post("/alarmas", headers=auth_headers,
+                        json={"hora": "07:00", "etiqueta": "Entrenar", "repetir": [1]})
+        assert r.status_code == 200
+        assert r.json()["repeticion"] == "todos los lunes"
+
+    def test_un_dia_que_no_existe_se_rechaza_en_el_borde(self, client, auth_headers):
+        r = client.post("/alarmas", headers=auth_headers,
+                        json={"hora": "07:00", "repetir": [1, 2, 3, 4, 5, 6, 7, 8]})
+        assert r.status_code == 422
 
 
 class TestHerramientasDeJarvis:

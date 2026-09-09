@@ -2112,7 +2112,16 @@ export function repartoPatrimonio({ finanzas, carteraEtf } = {}) {
 // volver a convertir nada aquí (y hacerlo sería el bug de zona horaria de siempre, en
 // una pantalla donde equivocarse por una hora es equivocarse del todo).
 
-/** Cómo se lee una alarma: "mañana a las 8:30", "hoy a las 8:30", "el vie 12 a las 8:30".
+/** Los días de la semana en orden ISO: el 1 es el lunes, igual que en el backend
+ *  (`isoweekday`) y que en la fila de `alarmas`. Nada de empezar en domingo aquí: la
+ *  única traducción a la numeración de JavaScript (`getDay()`) vive en `lineaTiempo`. */
+export const DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes",
+                            "sábado", "domingo"];
+
+/** Cómo se lee una alarma: "mañana a las 08:30", "hoy a las 08:30", "el vie 12 a las 07:00".
+ *  La hora va SIEMPRE en 24h y con dos dígitos: "8:30" a secas se lee como "las ocho y
+ *  media" sin saber de cuál de las dos, y este es el widget donde equivocarse de mitad
+ *  del día es equivocarse del todo.
  *  `hoy` se pasa para poder probarlo sin depender del reloj de la máquina. */
 export function alarmaEnPalabras(cuando, hoy = new Date()) {
   const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(String(cuando || ""));
@@ -2123,11 +2132,32 @@ export function alarmaEnPalabras(cuando, hoy = new Date()) {
   const dia    = new Date(Number(a), Number(mes) - 1, Number(d));
   const cero   = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
   const dias   = Math.round((dia - cero) / 86400000);
-  const laHora = `${Number(hh)}:${mm}`;
+  const laHora = `${hh}:${mm}`;
   if (dias === 0) return `hoy a las ${laHora}`;
   if (dias === 1) return `mañana a las ${laHora}`;
   const nombre = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][dia.getDay()];
   return `el ${nombre} ${Number(d)} a las ${laHora}`;
+}
+
+/** Los días de una alarma que se repite, en palabras: "todos los lunes", "los lunes,
+ *  miércoles y viernes", "todos los días". Vacío si no se repite. */
+export function alarmaRepeticionTexto(repetir) {
+  const dias = (repetir || []).map(Number).filter(d => d >= 1 && d <= 7);
+  if (!dias.length) return "";
+  if (dias.length === 7) return "todos los días";
+  const nombres = dias.map(d => DIAS_SEMANA[d - 1]);
+  if (nombres.length === 1) return `todos los ${nombres[0]}`;
+  return `los ${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}`;
+}
+
+/** Cuándo suena una alarma, se repita o no. Para una semanal la fecha exacta de la
+ *  próxima vez sobra —lo que quieres saber es que suena todos los lunes—, y lo que hay
+ *  que dejar claro es la hora. */
+export function alarmaCuandoTexto(alarma, hoy = new Date()) {
+  const repeticion = alarmaRepeticionTexto(alarma?.repetir);
+  if (!repeticion) return alarmaEnPalabras(alarma?.cuando, hoy);
+  const m = /(\d{2}):(\d{2})$/.exec(String(alarma?.cuando || ""));
+  return m ? `${repeticion} a las ${m[1]}:${m[2]}` : repeticion;
 }
 
 /** Qué está haciendo una alarma ahora mismo, en una palabra. */
