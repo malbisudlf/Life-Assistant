@@ -189,6 +189,69 @@ class TestEndpointDeConsulta:
         """`nivel` se interpola en la URL de Supabase: lista blanca, no lo que llegue."""
         assert client.get("/logs?nivel=todo;drop", headers=auth_headers).status_code == 400
 
+    def test_filtra_por_fuente(self, client, auth_headers, mock_requests):
+        client.get("/logs?fuente=life-assistant", headers=auth_headers)
+        assert "source=eq.life-assistant" in mock_requests.called("GET", "/rest/v1/app_logs")[0][1]
+
+    @pytest.mark.parametrize("fuente", ["a,b", "eq.x)", "*", "x" * 65])
+    def test_una_fuente_rara_se_rechaza(self, client, auth_headers, fuente):
+        """También acaba dentro de la URL de Supabase, y ahí `,` `.` `(` `)` no son texto:
+        separan argumentos."""
+        assert client.get(f"/logs?fuente={fuente}", headers=auth_headers).status_code == 400
+
+    def test_busca_texto_en_el_mensaje(self, client, auth_headers, mock_requests):
+        client.get("/logs?buscar=whisper", headers=auth_headers)
+        url = mock_requests.called("GET", "/rest/v1/app_logs")[0][1]
+        assert "message=ilike." in url and "whisper" in url
+
+    def test_la_busqueda_no_puede_cambiar_la_consulta(self, client, auth_headers, mock_requests):
+        """Es texto libre: los caracteres con los que PostgREST separa argumentos se
+        quitan antes de construir la URL, no se confía en la codificación."""
+        client.get("/logs?buscar=a,b.c(d)", headers=auth_headers)
+        url = mock_requests.called("GET", "/rest/v1/app_logs")[0][1]
+        assert "ilike" in url
+        for prohibido in ("%2C", "%28", "%29"):
+            assert prohibido not in url.split("message=ilike.")[1]
+
+    def test_una_busqueda_que_se_queda_vacia_se_rechaza(self, client, auth_headers):
+        assert client.get("/logs?buscar=...", headers=auth_headers).status_code == 400
+
+    def test_devuelve_las_fuentes_que_hay(self, client, auth_headers, mock_requests):
+        """Las fuentes salen de una consulta SIN los filtros: si salieran de las entradas
+        ya filtradas, el desplegable perdería la opción justo al usarla."""
+        mock_requests.add("GET", "/rest/v1/app_logs", FakeResponse([
+            {"created_at": "2026-09-09T09:00:00Z", "level": "ERROR",
+             "source": "salud", "message": "x", "context": {}},
+            {"created_at": "2026-09-09T08:00:00Z", "level": "ERROR",
+             "source": "jarvis", "message": "y", "context": {}},
+        ]))
+        cuerpo = client.get("/logs?fuente=salud", headers=auth_headers).json()
+        assert cuerpo["fuentes"] == ["jarvis", "salud"]
+
+    def test_quien_usa_el_endpoint_por_dentro_no_paga_esa_consulta(self, mock_requests):
+        """`get_logs` la reutilizan el vigilante del sistema y dos herramientas de Jarvis.
+        A ellos la lista de fuentes no les sirve, y pedirla sería un viaje más a Supabase
+        en cada tick, para nadie."""
+        main.get_logs(dias=7, limite=10, fuentes=False, credentials=None)
+        assert len(mock_requests.called("GET", "/rest/v1/app_logs")) == 1
+
+    def test_sin_fuentes_el_registro_se_enseña_igual(self, client, auth_headers, mock_requests):
+        """El filtro es una comodidad: que falle su consulta no puede dejar sin registro
+        a quien ha abierto el panel porque algo se ha roto."""
+        llamadas = {"n": 0}
+
+        def responder(url, **kwargs):
+            llamadas["n"] += 1
+            if "select=source" in url:
+                return FakeResponse(None, 500, "boom")
+            return FakeResponse([{"created_at": "2026-09-09T09:00:00Z", "level": "ERROR",
+                                  "source": "salud", "message": "x", "context": {}}])
+
+        mock_requests.add("GET", "/rest/v1/app_logs", responder)
+        cuerpo = client.get("/logs", headers=auth_headers).json()
+        assert len(cuerpo["entradas"]) == 1
+        assert cuerpo["fuentes"] == []
+
     @pytest.mark.parametrize("query", ["limite=0", "limite=501", "dias=0", "dias=91"])
     def test_limites_fuera_de_rango(self, client, auth_headers, query):
         assert client.get(f"/logs?{query}", headers=auth_headers).status_code == 400

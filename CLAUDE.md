@@ -138,6 +138,9 @@ Ficheros clave:
 | Fichero | Qué es |
 |---|---|
 | `src/components/Dashboard.jsx` | TODA la UI (~4.800 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Única excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
+| `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
+| `src/lib/dev.js` | La lógica de la zona dev: estilos, lectura del estado del sistema y el resumen de una línea que enseña el panel ⚙ |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
@@ -176,6 +179,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/JARVIS_VOZ.md` | **En curso — léelo entero antes de tocar la voz.** Jarvis ya habla con ElevenLabs, avisa antes de usar cada herramienta y empieza a hablar mientras escribe; falta todo el micrófono (interrumpirle). Empieza por su sección «Dónde retomar». Plan para darle a Jarvis la voz de ElevenLabs con interrupciones y respuesta hablada mientras genera: decisiones, qué se toca, fases, coste y qué queda por resolver |
 | `docs/JARVIS_real_time_voice_stack.md` | El diseño conceptual de la voz en tiempo real, sin atarlo a este repositorio. Lo aterrizado está en `docs/JARVIS_VOZ.md` |
 | `docs/BACKEND_REFERENCIA.md` | Referencia de endpoints (ruta → auth → qué hace) y catálogo de variables de entorno |
+| `docs/ZONA_DEV.md` | La zona de desarrollo: la vista aparte (botón 🛠) donde se mira si algo está roto y se apunta lo que hay que hacer. Sus pestañas por fases, la regla de que nada que cueste dinero se refresca solo, y por qué su código vive en ficheros propios |
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
@@ -366,7 +370,7 @@ Las que hay:
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
 `20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`,
 `20260903_avisos_motivo`, `20260903_gasto_modelo`, `20260904_sesion_avisos`,
-`20260909_alarmas`.
+`20260909_alarmas`, `20260909_ideas_dev`.
 
 ## Convenciones
 
@@ -402,6 +406,10 @@ Las que hay:
 
 - No crees componentes en ficheros nuevos "por organizar": el proyecto es una sola
   persona y un solo fichero de UI a propósito. Extrae solo lógica pura a `src/lib/`.
+  - **La excepción, y la única, es `src/components/dev/`** (la zona de desarrollo). La
+    regla existe para que un widget no acabe en un fichero suelto; aquello no es un
+    widget sino una aplicación aparte de varios miles de líneas que ninguna sesión que
+    venga a tocar el dashboard necesita cargar. Ver `docs/ZONA_DEV.md`.
 - No toques `agent/agent.py` esperando poder probarlo: requiere un PC Windows real.
 - No conviertas los endpoints de servicio (HA/salud) a JWT: los clientes son
   integraciones ya desplegadas (HA, iOS Shortcuts) que solo saben mandar un token fijo.
