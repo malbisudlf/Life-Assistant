@@ -8758,39 +8758,52 @@ def _alarma_rendirse(fila: dict, estado: str, ahora: datetime) -> None:
 
 # ── Alarmas: las herramientas de Jarvis y el alta ────────────────────────────
 
-def _alarma_crear(fecha: str, hora: str, etiqueta: str = "", repetir=None) -> dict:
-    """Alta de una alarma. La comparten Jarvis y el dashboard: una sola validación.
+def _alarma_momento(fecha: str, hora: str, repetir=None) -> tuple:
+    """Cuándo suena una alarma descrita como fecha+hora o como días+hora.
+
+    Devuelve `(cuando, dias, motivo)`: si `motivo` no es None, lo demás no vale. La
+    comparten el alta y la edición a propósito — dos validaciones de lo mismo acaban
+    divergiendo, y aquí divergir significa que editar una alarma acepta algo que ponerla
+    rechazaba (o al revés).
 
     Con `repetir` (días ISO: 1 = lunes) la fecha sobra: la primera vez es el próximo día
-    de los apuntados. Se admite igualmente una fecha explícita, pero manda la lista de
-    días — si no coinciden, se adelanta al primero que toque, porque una alarma «todos
-    los lunes» que la primera vez suena un martes es un error silencioso.
+    de los apuntados. Se admite igualmente una fecha explícita, pero **mandan los días**
+    — si no coinciden, se adelanta al primero que toque, porque una alarma «todos los
+    lunes» que la primera vez suena un martes es un error silencioso.
     """
-    fecha    = str(fecha or "").strip()
-    hora     = str(hora or "").strip()
-    etiqueta = str(etiqueta or "").strip()[:ALARMA_ETIQUETA_MAX]
-    dias     = _alarma_dias(repetir)
-    ahora    = datetime.now(LOCAL_TZ)
+    fecha = str(fecha or "").strip()
+    hora  = str(hora or "").strip()
+    dias  = _alarma_dias(repetir)
+    ahora = datetime.now(LOCAL_TZ)
     if not _HORA_RE.match(hora):
-        return {"ok": False, "motivo": "Necesito una hora (HH:MM)"}
+        return None, dias, "Necesito una hora (HH:MM)"
     if not fecha and not dias:
-        return {"ok": False, "motivo": "Necesito fecha (YYYY-MM-DD) o días de la semana"}
+        return None, dias, "Necesito fecha (YYYY-MM-DD) o días de la semana"
     if fecha and not _DATE_RE.match(fecha):
-        return {"ok": False, "motivo": "Necesito fecha (YYYY-MM-DD) y hora (HH:MM)"}
+        return None, dias, "Necesito fecha (YYYY-MM-DD) y hora (HH:MM)"
     try:
         cuando = (datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
                   if fecha else
                   ahora.replace(hour=int(hora[:2]), minute=int(hora[3:]),
                                 second=0, microsecond=0))
     except ValueError:
-        return {"ok": False, "motivo": "Esa fecha u hora no existen"}
+        return None, dias, "Esa fecha u hora no existen"
     if dias:
         if cuando <= ahora or cuando.isoweekday() not in dias:
             cuando = _alarma_proxima(cuando, dias, ahora)
         if cuando is None:
-            return {"ok": False, "motivo": "Esos días de la semana no valen"}
+            return None, dias, "Esos días de la semana no valen"
     elif cuando < ahora:
-        return {"ok": False, "motivo": "Esa hora ya ha pasado"}
+        return None, dias, "Esa hora ya ha pasado"
+    return cuando, dias, None
+
+
+def _alarma_crear(fecha: str, hora: str, etiqueta: str = "", repetir=None) -> dict:
+    """Alta de una alarma. La comparten Jarvis y el dashboard: una sola validación."""
+    etiqueta = str(etiqueta or "").strip()[:ALARMA_ETIQUETA_MAX]
+    cuando, dias, motivo = _alarma_momento(fecha, hora, repetir)
+    if motivo:
+        return {"ok": False, "motivo": motivo}
 
     cuenta = http.get(f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
                       f"&select=id&limit={ALARMAS_MAX + 1}", headers=supabase_headers())
@@ -8810,6 +8823,55 @@ def _alarma_crear(fecha: str, hora: str, etiqueta: str = "", repetir=None) -> di
     # algo antes. Sin esto, una alarma puesta para dentro de dos minutos no sonaría.
     _alarma_marcar_pendiente(cuando)
     return {"ok": True, "id": (r.json() or [{}])[0].get("id"),
+            "cuando": cuando.strftime("%Y-%m-%d %H:%M"), "etiqueta": etiqueta,
+            "repetir": dias, "repeticion": _alarma_repeticion_texto(dias)}
+
+
+def _alarma_editar(alarma_id: str, fecha: str, hora: str, etiqueta: str = "",
+                   repetir=None) -> dict:
+    """Cambiar una alarma ya puesta: la hora, el día (o los días) y la etiqueta.
+
+    Editar **rearma**: la fila vuelve a `armada` con los contadores a cero. Eso es lo
+    que hace que editar una que está sonando la calle, y es la única lectura razonable
+    de "cámbiala a las 8:30" cuando son las 8:02 y el altavoz está hablando.
+
+    Solo se puede editar lo que está vivo. Una alarma confirmada, rendida o cancelada es
+    historia: cambiarla reescribiría por qué la casa hizo ruido a las 8:32.
+    """
+    alarma_id = str(alarma_id or "").strip()
+    if not re.match(_UUID_PATTERN, alarma_id):
+        return {"ok": False, "motivo": "Ese id no tiene forma de UUID"}
+    etiqueta = str(etiqueta or "").strip()[:ALARMA_ETIQUETA_MAX]
+    cuando, dias, motivo = _alarma_momento(fecha, hora, repetir)
+    if motivo:
+        return {"ok": False, "motivo": motivo}
+
+    cambios = {"cuando":        cuando.astimezone(timezone.utc).isoformat(),
+               "etiqueta":      etiqueta or None,
+               "repetir":       ",".join(str(d) for d in dias) or None,
+               "estado":        "armada",
+               "intentos":      0,
+               "avisado_at":    None,
+               "escalado_at":   None,
+               "confirmado_at": None}
+
+    def _patch(filtro_estado):
+        r = http.patch(f"{ALARMAS_URL}?id=eq.{alarma_id}&{filtro_estado}",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json=cambios)
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return r.json() or []
+
+    # Dos intentos en vez de uno con `in.(...)`, y solo para saber si estaba sonando: la
+    # música se para SOLO si lo estaba. Un media_stop en cada edición callaría lo que
+    # estuvieras escuchando por cambiar la hora de mañana.
+    if not _patch("estado=eq.armada"):
+        if not _patch("estado=in.(avisada,escalada)"):
+            return {"ok": False, "hecho": False, "motivo": "esa alarma ya no estaba activa"}
+        _alarma_parar_musica()
+    _alarma_marcar_pendiente(cuando)
+    return {"ok": True, "hecho": True, "id": alarma_id,
             "cuando": cuando.strftime("%Y-%m-%d %H:%M"), "etiqueta": etiqueta,
             "repetir": dias, "repeticion": _alarma_repeticion_texto(dias)}
 
@@ -8936,6 +8998,15 @@ class AlarmaIn(BaseModel):
 def crear_alarma(body: AlarmaIn,
                  credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     resultado = _alarma_crear(body.fecha, body.hora, body.etiqueta, body.repetir)
+    if not resultado.get("ok"):
+        raise HTTPException(status_code=422, detail=resultado.get("motivo", "No se pudo"))
+    return resultado
+
+
+@app.patch("/alarmas/{alarma_id}")
+def editar_alarma(body: AlarmaIn, alarma_id: str = _uuid_path(),
+                  credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    resultado = _alarma_editar(alarma_id, body.fecha, body.hora, body.etiqueta, body.repetir)
     if not resultado.get("ok"):
         raise HTTPException(status_code=422, detail=resultado.get("motivo", "No se pudo"))
     return resultado

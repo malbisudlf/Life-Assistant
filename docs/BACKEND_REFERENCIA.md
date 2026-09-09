@@ -74,6 +74,7 @@
 | `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma y para la música. Lo llama el botón de la notificación o el dashboard |
 | `GET /alarmas` | JWT | Las alarmas de respaldo activas, en hora local |
 | `POST /alarmas` | JWT | Pone una: `{fecha?, hora, etiqueta?, repetir?}`. `repetir` son los días ISO en que se repite (1 = lunes) y hace opcional la fecha |
+| `PATCH /alarmas/{id}` | JWT | Edita una alarma viva (mismo cuerpo que el POST): la rearma con la hora o los días nuevos y los contadores a cero |
 | `DELETE /alarmas/{id}` | JWT | La cancela (cambia el estado, no borra la fila) |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |

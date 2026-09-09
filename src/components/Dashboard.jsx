@@ -1530,8 +1530,10 @@ export default function Dashboard() {
   // ninguna" antes de haber preguntado le está diciendo a alguien que no va a sonar.
   const [alarmas, setAlarmas]                       = useState(null);
   // `repetir`: días ISO (1 = lunes) en los que se repite. Vacío = una sola vez, y
-  // entonces sí hace falta la fecha.
-  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], guardando: false });
+  // entonces sí hace falta la fecha. `editando`: el id de la alarma que se está
+  // cambiando — el mismo formulario sirve para poner y para editar, que es lo que evita
+  // tener dos sitios donde escribir una hora y que uno de los dos valide distinto.
+  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false });
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
   const [alarmaEspera, setAlarmaEspera]             = useState(2);
@@ -3502,12 +3504,31 @@ export default function Dashboard() {
     return !f.guardando && !!f.hora && (!!f.fecha || f.repetir.length > 0);
   }
 
-  async function crearAlarma() {
+  const ALARMA_FORM_VACIO = { fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false };
+
+  // Cargar una alarma en el formulario es toda la edición que hace falta: se cambia
+  // arriba y el botón pasa a decir «Guardar».
+  function editarAlarma(a) {
+    const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(a.cuando || "");
+    setAlarmaForm({
+      ...ALARMA_FORM_VACIO,
+      // De una semanal la fecha no se rescata: la vuelve a calcular el backend a partir
+      // de los días, que es de donde salía.
+      fecha:    a.repetir?.length ? "" : (m ? m[1] : ""),
+      hora:     m ? m[2] : "",
+      etiqueta: a.etiqueta || "",
+      repetir:  a.repetir || [],
+      editando: a.id,
+    });
+  }
+
+  async function guardarAlarma() {
     if (!alarmaListaParaPonerse(alarmaForm)) return;
+    const editando = alarmaForm.editando;
     setAlarmaForm(f => ({ ...f, guardando: true }));
     try {
-      const r = await apiFetch(`${API}/alarmas`, {
-        method: "POST",
+      const r = await apiFetch(`${API}/alarmas${editando ? `/${editando}` : ""}`, {
+        method: editando ? "PATCH" : "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({ fecha: alarmaForm.repetir.length ? "" : alarmaForm.fecha,
                                hora: alarmaForm.hora,
@@ -3515,7 +3536,7 @@ export default function Dashboard() {
                                repetir: alarmaForm.repetir }),
       });
       if (!r.ok) throw new Error("alarma");
-      setAlarmaForm({ fecha: "", hora: "", etiqueta: "", repetir: [], guardando: false });
+      setAlarmaForm(ALARMA_FORM_VACIO);
       await loadAlarmas();
     } catch {
       setAlarmaForm(f => ({ ...f, guardando: false }));
@@ -3526,6 +3547,9 @@ export default function Dashboard() {
     try {
       await apiFetch(`${API}/alarmas/${id}`, { method: "DELETE", headers: authHeaders() });
     } catch { /* si falla, la recarga de abajo lo deja como esté de verdad */ }
+    // Si la que se quita es la que se estaba editando, el formulario se vacía: guardar
+    // después habría intentado editar una alarma que ya no está.
+    setAlarmaForm(f => (f.editando === id ? ALARMA_FORM_VACIO : f));
     await loadAlarmas();
   }
 
@@ -4852,14 +4876,21 @@ export default function Dashboard() {
               )}
               {alarmas?.map(a => (
                 <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, color: "var(--text)", overflow: "hidden",
-                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {/* Toda la fila abre la edición: el lápiz es la pista, no el único
+                      sitio donde se puede pinchar. */}
+                  <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => editarAlarma(a)}>
+                    <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: alarmaForm.editando === a.id ? "var(--accent)" : "var(--text)" }}>
                       {alarmaCuandoTexto(a)}{a.etiqueta ? ` · ${a.etiqueta}` : ""}
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--muted2)" }}>{alarmaEstadoTexto(a)}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted2)" }}>
+                      {alarmaForm.editando === a.id ? "editándola abajo" : alarmaEstadoTexto(a)}
+                    </div>
                   </div>
-                  <span style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
+                  <span title="Editar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 2px", flexShrink: 0 }}
+                    onClick={() => editarAlarma(a)}>✎</span>
+                  <span title="Quitar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
                     onClick={() => borrarAlarma(a.id)}>✕</span>
                 </div>
               ))}
@@ -4871,22 +4902,37 @@ export default function Dashboard() {
                   backend), así que desaparece en vez de quedarse pidiendo un dato que
                   ya no se manda. */}
               {alarmaForm.repetir.length === 0 && (
-                <input type="date" lang="es-ES" value={alarmaForm.fecha}
-                  onChange={e => setAlarmaForm(f => ({ ...f, fecha: e.target.value }))}
-                  style={{ ...INPUT_STYLE, flex: "1 1 130px", minWidth: 0 }} />
+                <div style={{ flex: "1 1 120px", minWidth: 0 }}>
+                  <DateInput value={alarmaForm.fecha}
+                    onChange={v => setAlarmaForm(f => ({ ...f, fecha: v }))} />
+                </div>
               )}
-              {/* `lang` en el input, además del `lang="es"` del documento: es lo único
-                  que hace que Chrome pinte la hora en 24h y no con AM/PM. */}
-              <input type="time" lang="es-ES" value={alarmaForm.hora}
-                onChange={e => setAlarmaForm(f => ({ ...f, hora: e.target.value }))}
-                style={{ ...INPUT_STYLE, flex: "0 1 100px", minWidth: 0 }} />
+              {/* Los campos propios del proyecto, no `<input type="date|time">`: el del
+                  navegador pinta AM/PM y mm/dd/aaaa en cuanto el navegador va en inglés,
+                  y el `lang` de la página no siempre le convence (Firefox lo ignora del
+                  todo). Aquí la hora es 24h porque la escribimos nosotros. */}
+              <div style={{ flex: "0 1 92px", minWidth: 0, display: "flex" }}>
+                <TimeInput value={alarmaForm.hora}
+                  onChange={v => setAlarmaForm(f => ({ ...f, hora: v }))} />
+              </div>
               <input type="text" placeholder="Para qué (opcional)" value={alarmaForm.etiqueta}
                 onChange={e => setAlarmaForm(f => ({ ...f, etiqueta: e.target.value }))}
                 style={{ ...INPUT_STYLE, flex: "1 1 120px", minWidth: 0 }} />
-              <button onClick={crearAlarma} disabled={!alarmaListaParaPonerse(alarmaForm)}
-                style={{ ...s.newIdeaBtn, marginTop: 0, padding: "0 16px", flexShrink: 0 }}>
-                Poner
+            </div>
+
+            {/* El botón en su propia línea: con los tres campos arriba, en la misma se
+                partía a un renglón suelto en cuanto la columna se estrechaba. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+              <button onClick={guardarAlarma} disabled={!alarmaListaParaPonerse(alarmaForm)}
+                style={{ ...s.newIdeaBtn, marginTop: 0, flex: 1 }}>
+                {alarmaForm.editando ? "Guardar" : "Poner"}
               </button>
+              {alarmaForm.editando && (
+                <span onClick={() => setAlarmaForm(ALARMA_FORM_VACIO)}
+                  style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", flexShrink: 0 }}>
+                  Cancelar
+                </span>
+              )}
             </div>
 
             {/* Marcar un día convierte la alarma en semanal. Se pintan siempre, también
@@ -4916,7 +4962,9 @@ export default function Dashboard() {
             </div>
             {/* Lo que hace distinta a esta alarma de la del móvil, dicho donde se pone. */}
             <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 8 }}>
-              Es un respaldo: si no confirmas, a los {alarmaEspera} minutos te despierta la casa.
+              {alarmaForm.editando
+                ? "Al guardar se vuelve a armar desde cero (si estaba sonando, se calla)."
+                : `Es un respaldo: si no confirmas, a los ${alarmaEspera} minutos te despierta la casa.`}
             </div>
           </div>
         );
