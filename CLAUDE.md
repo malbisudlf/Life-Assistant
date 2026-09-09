@@ -370,7 +370,7 @@ Las que hay:
 `20260820_reglas_usuario`, `20260820_revision_hallazgos`,
 `20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`,
 `20260903_avisos_motivo`, `20260903_gasto_modelo`, `20260904_sesion_avisos`,
-`20260909_alarmas`, `20260909_ideas_dev`.
+`20260909_alarmas`, `20260909_alarmas_repeticion`, `20260909_ideas_dev`.
 
 ## Convenciones
 

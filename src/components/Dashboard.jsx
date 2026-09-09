@@ -13,7 +13,7 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
-  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando,
+  alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto, DIAS_SEMANA,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -1529,7 +1529,9 @@ export default function Dashboard() {
   // Alarmas de respaldo. `null` mientras no se sabe: un widget que enseña "no tienes
   // ninguna" antes de haber preguntado le está diciendo a alguien que no va a sonar.
   const [alarmas, setAlarmas]                       = useState(null);
-  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", guardando: false });
+  // `repetir`: días ISO (1 = lunes) en los que se repite. Vacío = una sola vez, y
+  // entonces sí hace falta la fecha.
+  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], guardando: false });
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
   const [alarmaEspera, setAlarmaEspera]             = useState(2);
@@ -3494,18 +3496,26 @@ export default function Dashboard() {
     }
   }
 
+  // Con días marcados la fecha sobra: la primera vez la calcula el backend (el próximo
+  // día que toque), que es el único que sabe en qué zona horaria vive la alarma.
+  function alarmaListaParaPonerse(f) {
+    return !f.guardando && !!f.hora && (!!f.fecha || f.repetir.length > 0);
+  }
+
   async function crearAlarma() {
-    if (alarmaForm.guardando || !alarmaForm.fecha || !alarmaForm.hora) return;
+    if (!alarmaListaParaPonerse(alarmaForm)) return;
     setAlarmaForm(f => ({ ...f, guardando: true }));
     try {
       const r = await apiFetch(`${API}/alarmas`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({ fecha: alarmaForm.fecha, hora: alarmaForm.hora,
-                               etiqueta: alarmaForm.etiqueta }),
+        body: JSON.stringify({ fecha: alarmaForm.repetir.length ? "" : alarmaForm.fecha,
+                               hora: alarmaForm.hora,
+                               etiqueta: alarmaForm.etiqueta,
+                               repetir: alarmaForm.repetir }),
       });
       if (!r.ok) throw new Error("alarma");
-      setAlarmaForm({ fecha: "", hora: "", etiqueta: "", guardando: false });
+      setAlarmaForm({ fecha: "", hora: "", etiqueta: "", repetir: [], guardando: false });
       await loadAlarmas();
     } catch {
       setAlarmaForm(f => ({ ...f, guardando: false }));
@@ -4845,7 +4855,7 @@ export default function Dashboard() {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, color: "var(--text)", overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {alarmaEnPalabras(a.cuando)}{a.etiqueta ? ` · ${a.etiqueta}` : ""}
+                      {alarmaCuandoTexto(a)}{a.etiqueta ? ` · ${a.etiqueta}` : ""}
                     </div>
                     <div style={{ fontSize: 11, color: "var(--muted2)" }}>{alarmaEstadoTexto(a)}</div>
                   </div>
@@ -4857,20 +4867,52 @@ export default function Dashboard() {
 
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12, paddingTop: 10,
               borderTop: "0.5px solid var(--border2)" }}>
-              <input type="date" value={alarmaForm.fecha}
-                onChange={e => setAlarmaForm(f => ({ ...f, fecha: e.target.value }))}
-                style={{ ...INPUT_STYLE, flex: "1 1 130px", minWidth: 0 }} />
-              <input type="time" value={alarmaForm.hora}
+              {/* Con días marcados la fecha no pinta nada (la primera vez la calcula el
+                  backend), así que desaparece en vez de quedarse pidiendo un dato que
+                  ya no se manda. */}
+              {alarmaForm.repetir.length === 0 && (
+                <input type="date" lang="es-ES" value={alarmaForm.fecha}
+                  onChange={e => setAlarmaForm(f => ({ ...f, fecha: e.target.value }))}
+                  style={{ ...INPUT_STYLE, flex: "1 1 130px", minWidth: 0 }} />
+              )}
+              {/* `lang` en el input, además del `lang="es"` del documento: es lo único
+                  que hace que Chrome pinte la hora en 24h y no con AM/PM. */}
+              <input type="time" lang="es-ES" value={alarmaForm.hora}
                 onChange={e => setAlarmaForm(f => ({ ...f, hora: e.target.value }))}
                 style={{ ...INPUT_STYLE, flex: "0 1 100px", minWidth: 0 }} />
               <input type="text" placeholder="Para qué (opcional)" value={alarmaForm.etiqueta}
                 onChange={e => setAlarmaForm(f => ({ ...f, etiqueta: e.target.value }))}
                 style={{ ...INPUT_STYLE, flex: "1 1 120px", minWidth: 0 }} />
-              <button onClick={crearAlarma}
-                disabled={alarmaForm.guardando || !alarmaForm.fecha || !alarmaForm.hora}
+              <button onClick={crearAlarma} disabled={!alarmaListaParaPonerse(alarmaForm)}
                 style={{ ...s.newIdeaBtn, marginTop: 0, padding: "0 16px", flexShrink: 0 }}>
                 Poner
               </button>
+            </div>
+
+            {/* Marcar un día convierte la alarma en semanal. Se pintan siempre, también
+                sin marcar: si la repetición se escondiera detrás de un interruptor, la
+                mitad de las veces se pondría una alarma suelta sin saber que se podía. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", marginTop: 8 }}>
+              {["L", "M", "X", "J", "V", "S", "D"].map((letra, i) => {
+                const dia    = i + 1;
+                const puesto = alarmaForm.repetir.includes(dia);
+                return (
+                  <span key={dia} title={DIAS_SEMANA[i]}
+                    onClick={() => setAlarmaForm(f => ({ ...f,
+                      repetir: puesto ? f.repetir.filter(d => d !== dia)
+                                      : [...f.repetir, dia].sort((a, b) => a - b) }))}
+                    style={{ width: 24, height: 24, lineHeight: "24px", textAlign: "center",
+                      borderRadius: "50%", fontSize: 11, cursor: "pointer", userSelect: "none",
+                      background: puesto ? "var(--accent)" : "var(--surface)",
+                      color: puesto ? "#0e0f11" : "var(--muted2)",
+                      border: `0.5px solid ${puesto ? "var(--accent)" : "var(--border2)"}` }}>
+                    {letra}
+                  </span>
+                );
+              })}
+              <span style={{ fontSize: 11, color: "var(--muted2)", marginLeft: 4 }}>
+                {alarmaRepeticionTexto(alarmaForm.repetir) || "una sola vez"}
+              </span>
             </div>
             {/* Lo que hace distinta a esta alarma de la del móvil, dicho donde se pone. */}
             <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 8 }}>

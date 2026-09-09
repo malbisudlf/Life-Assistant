@@ -18,7 +18,8 @@ import {
   elegirVozEspanola, textoHablable, esFinDeLlamada,
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
-  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando,
+  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
+  alarmaCuandoTexto,
   repartoPatrimonio,
 } from "../../src/lib/helpers";
 
@@ -2105,22 +2106,46 @@ describe("alarmas de respaldo", () => {
 
   test("hoy y mañana se dicen con palabras", () => {
     expect(alarmaEnPalabras("2026-09-09 23:30", HOY)).toBe("hoy a las 23:30");
-    expect(alarmaEnPalabras("2026-09-10 08:30", HOY)).toBe("mañana a las 8:30");
+    expect(alarmaEnPalabras("2026-09-10 08:30", HOY)).toBe("mañana a las 08:30");
   });
 
   test("una alarma de madrugada sigue siendo 'mañana' aunque falte hora y media", () => {
     // Se compara por día del calendario, no por horas de diferencia: a las 23:00, las
     // 00:30 son mañana aunque queden noventa minutos.
-    expect(alarmaEnPalabras("2026-09-10 00:30", HOY)).toBe("mañana a las 0:30");
+    expect(alarmaEnPalabras("2026-09-10 00:30", HOY)).toBe("mañana a las 00:30");
   });
 
   test("más allá de mañana lleva el día de la semana", () => {
-    expect(alarmaEnPalabras("2026-09-12 07:00", HOY)).toBe("el sáb 12 a las 7:00");
+    expect(alarmaEnPalabras("2026-09-12 07:00", HOY)).toBe("el sáb 12 a las 07:00");
   });
 
   test("una fecha con otra forma no revienta, devuelve vacío", () => {
     expect(alarmaEnPalabras("mañana", HOY)).toBe("");
     expect(alarmaEnPalabras(null, HOY)).toBe("");
+  });
+
+  test("la hora siempre va en 24h y con dos dígitos", () => {
+    // "8:30" a secas se lee como "las ocho y media" sin saber de cuál de las dos, y esa
+    // duda en un despertador se paga durmiendo doce horas de más.
+    expect(alarmaEnPalabras("2026-09-09 08:05", HOY)).toBe("hoy a las 08:05");
+    expect(alarmaEnPalabras("2026-09-09 20:05", HOY)).toBe("hoy a las 20:05");
+  });
+
+  test("los días de una alarma semanal se dicen en palabras", () => {
+    expect(alarmaRepeticionTexto([1])).toBe("todos los lunes");
+    expect(alarmaRepeticionTexto([1, 3, 5])).toBe("los lunes, miércoles y viernes");
+    expect(alarmaRepeticionTexto([1, 2, 3, 4, 5, 6, 7])).toBe("todos los días");
+    expect(alarmaRepeticionTexto([])).toBe("");
+    expect(alarmaRepeticionTexto(null)).toBe("");
+  });
+
+  test("una alarma que se repite se lee por sus días, no por su fecha", () => {
+    // De una semanal lo que quieres saber es que suena todos los lunes; qué lunes en
+    // concreto es la próxima vez no dice nada.
+    expect(alarmaCuandoTexto({ cuando: "2026-09-14 07:00", repetir: [1] }, HOY))
+      .toBe("todos los lunes a las 07:00");
+    expect(alarmaCuandoTexto({ cuando: "2026-09-10 08:30", repetir: [] }, HOY))
+      .toBe("mañana a las 08:30");
   });
 
   test("el estado se lee en una frase", () => {

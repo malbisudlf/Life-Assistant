@@ -1,0 +1,13 @@
+-- Alarmas que se repiten por día de la semana ("todos los lunes a las 8:00").
+--
+-- Se guarda como TEXTO con los días separados por comas ("1,3,5", ISO: 1 = lunes,
+-- 7 = domingo) y no como array de Postgres ni como tabla aparte: el backend nunca
+-- filtra por día en SQL —lee las alarmas vivas y decide en Python—, así que un array
+-- solo añadiría un tipo más que traducir en el cliente REST. Vacío o nulo = alarma de
+-- una sola vez, que es lo que había hasta ahora.
+--
+-- No hay filas "hijas": una alarma que se repite es UNA fila que, al terminar (la
+-- confirmes o se rinda), se rearma sola con la fecha de la siguiente vez. Generar una
+-- fila por ocurrencia habría obligado a decidir cuántas semanas por delante se generan
+-- y a limpiarlas después, para no ganar nada: solo se puede estar sonando una vez.
+alter table public.alarmas add column if not exists repetir text;

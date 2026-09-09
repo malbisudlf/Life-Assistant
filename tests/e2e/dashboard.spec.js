@@ -173,7 +173,7 @@ test('el widget de alarmas pinta la alarma de respaldo y deja quitarla', async (
   // La hora viaja en UTC desde Supabase y el backend la pasa a local; el frontend solo
   // la escribe en palabras. Que salga "mañana a las 8:30" y no "hoy" ni un 6:30 prueba
   // los dos saltos a la vez, que es donde vive el bug de zona horaria de siempre.
-  await expect(widget).toContainText('mañana a las 8:30')
+  await expect(widget).toContainText('mañana a las 08:30')
   await expect(widget).toContainText('Entrenar')
   await expect(widget).toContainText('puesta')
 
