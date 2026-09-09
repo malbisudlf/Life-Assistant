@@ -415,6 +415,99 @@ class TestRepeticionSemanal:
         assert r.status_code == 422
 
 
+class TestEditarUnaAlarma:
+    """Cambiar una alarma ya puesta: hora, días y etiqueta.
+
+    Editar **rearma**: la fila vuelve a `armada` con los contadores a cero. Y solo se
+    puede editar lo que está vivo — una confirmada o rendida es historia, y cambiarla
+    reescribiría por qué la casa hizo ruido a las 8:32.
+    """
+    RID = "11111111-1111-1111-1111-111111111111"
+
+    def test_cambia_la_hora_y_la_deja_armada(self, client, mock_requests, auth_headers):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        r = client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                         json={"fecha": manana, "hora": "09:15", "etiqueta": "Clase"})
+        assert r.status_code == 200
+        assert r.json()["cuando"] == f"{manana} 09:15"
+        enviado = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][2]["json"]
+        assert enviado["estado"] == "armada"
+        assert enviado["intentos"] == 0
+        assert enviado["avisado_at"] is None
+
+    def test_convertir_una_suelta_en_semanal(self, client, mock_requests, auth_headers):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        r = client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                         json={"hora": "07:00", "repetir": [1, 3]})
+        assert r.status_code == 200
+        assert r.json()["repeticion"] == "los lunes y miércoles"
+        assert mock_requests.called("PATCH", "/rest/v1/alarmas")[0][2]["json"]["repetir"] == "1,3"
+
+    def test_editarla_adelanta_el_reloj_del_tick(self, client, mock_requests, auth_headers):
+        # Misma trampa que al ponerla: sin esto, adelantar una alarma a dentro de dos
+        # minutos no la haría sonar, porque el tick sigue durmiendo hasta la hora vieja.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._alarma_siguiente = main.time.time() + 86400
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                     json={"fecha": manana, "hora": "09:15"})
+        assert main._alarma_siguiente < main.time.time() + 86400
+
+    def test_editar_una_que_no_sonaba_no_para_la_musica(self, client, mock_requests,
+                                                        auth_headers, monkeypatch):
+        # Un media_stop en cada edición callaría lo que estuvieras escuchando por cambiar
+        # la hora de mañana.
+        monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                     json={"fecha": manana, "hora": "09:15"})
+        assert main._ha_ordenes == []
+
+    def test_editar_una_que_estaba_sonando_la_calla(self, client, mock_requests,
+                                                    auth_headers, monkeypatch):
+        monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")
+        # El primer PATCH (condición `estado=eq.armada`) no se lleva nada: estaba sonando.
+        def por_estado(url, **kwargs):
+            return FakeResponse([] if "estado=eq.armada" in url else [{"id": TestEditarUnaAlarma.RID}])
+        mock_requests.add("PATCH", "/rest/v1/alarmas", por_estado)
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        r = client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                         json={"fecha": manana, "hora": "09:15"})
+        assert r.status_code == 200
+        assert ("media_player.media_stop", "media_player.cuarto") in [
+            (o["servicio"], o["entidad"]) for o in main._ha_ordenes]
+
+    def test_una_que_ya_no_esta_viva_no_se_edita(self, client, mock_requests, auth_headers):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_perdida)
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        r = client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                         json={"fecha": manana, "hora": "09:15"})
+        assert r.status_code == 422
+
+    def test_valida_igual_que_el_alta(self, client, mock_requests, auth_headers):
+        # Una sola validación para poner y para editar: si divergieran, editar acabaría
+        # aceptando horas que ponerlas rechaza.
+        ayer = (HOY - timedelta(days=1)).strftime("%Y-%m-%d")
+        assert client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                            json={"fecha": ayer, "hora": "09:15"}).status_code == 422
+        assert client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
+                            json={"hora": "09:15"}).status_code == 422
+        assert mock_requests.called("PATCH", "/rest/v1/alarmas") == []
+
+    def test_pide_jwt(self, client):
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        r = client.patch(f"/alarmas/{self.RID}", json={"fecha": manana, "hora": "09:15"})
+        assert r.status_code in (401, 403)
+
+    def test_el_id_tiene_que_ser_un_uuid(self, client, auth_headers):
+        manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
+        r = client.patch("/alarmas/pepe", headers=auth_headers,
+                         json={"fecha": manana, "hora": "09:15"})
+        assert r.status_code == 422
+
+
 class TestHerramientasDeJarvis:
     def test_estan_registradas(self):
         for nombre in ("poner_alarma", "mis_alarmas", "cancelar_alarma"):

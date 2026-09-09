@@ -139,6 +139,7 @@ El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
 | `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
+| `PATCH /alarmas/{id}` | JWT | Editarla (mismo cuerpo que el POST). La deja `armada` con los contadores a cero |
 | `DELETE /alarmas/{id}` | JWT | Cancelarla (no la borra) |
 
 `escalar` es lo que HA usa como **estado** del sensor y no un simple `true`: cambia en
@@ -171,13 +172,29 @@ la próxima vez no dice nada), `alarmaEnPalabras` (que compara **por día de cal
 no por horas de diferencia** — a las 23:00, las 00:30 son mañana aunque queden noventa
 minutos), `alarmaRepeticionTexto`, `alarmaEstadoTexto` y `alarmaSonando`.
 
-**La hora va siempre en 24h**, y eso hay que pedirlo en dos sitios: `<html lang="es">` en
-`index.html` (estaba en `en`, y por eso el `<input type="time">` pintaba AM/PM en una app
-entera en español) y `lang="es-ES"` en el propio input. Chrome mira el `lang` del elemento
-para los campos de fecha y hora; **Firefox no** — ese usa el idioma del navegador y no hay
-nada que hacer sin escribir un selector propio. Y en el texto, la hora lleva sus dos
-dígitos (`08:05`, no `8:05`): «las 8:30» a secas se lee como «las ocho y media» sin saber
-de cuál de las dos, y esa duda en un despertador se paga durmiendo doce horas de más.
+**La hora va siempre en 24h**, y para eso el widget **no usa `<input type="time">`**: usa
+`TimeInput` y `DateInput`, los campos propios que ya tenía el formulario de eventos. El
+input del navegador pinta AM/PM (y `mm/dd/aaaa`) en cuanto el navegador va en inglés, y
+desde la página no hay forma de obligarle: Chrome hace caso al `lang` del documento y del
+elemento, **Firefox lo ignora del todo**. El `lang="es"` de `index.html` sigue puesto —
+estaba en `en` en una app entera en español, y arregla los demás campos de fecha del
+dashboard—, pero aquí la hora la escribimos nosotros y no se le pregunta a nadie.
+
+En el texto, la hora lleva sus dos dígitos (`08:05`, no `8:05`): «las 8:30» a secas se lee
+como «las ocho y media» sin saber de cuál de las dos, y esa duda en un despertador se paga
+durmiendo doce horas de más.
+
+**Editar una alarma puesta** es pinchar su fila (o el ✎): se carga en el mismo formulario
+y el botón pasa a decir «Guardar». Un solo formulario para poner y para editar, y una sola
+validación detrás (`_alarma_momento`), porque dos caminos que validan una hora acaban
+divergiendo y entonces editar acepta lo que poner rechazaba.
+
+Guardar **rearma**: la fila vuelve a `armada` con los contadores a cero, así que editar
+una que está sonando la calla. La música se para **solo si estaba sonando** — por eso el
+PATCH se intenta primero con `estado=eq.armada` y solo si no se lleva la fila se reintenta
+con los estados vivos: un `media_stop` en cada edición callaría lo que estuvieras
+escuchando por cambiar la hora de mañana. Y solo se edita lo vivo: una alarma confirmada o
+rendida es historia, y cambiarla reescribiría por qué la casa hizo ruido a las 8:32.
 
 ### Variables
 
