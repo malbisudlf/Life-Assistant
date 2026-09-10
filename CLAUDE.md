@@ -226,9 +226,12 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
      del dashboard copiado a mano en su `.env`: cuando expiró, `/jobs/pending` empezó a
      responder 401 y el agente se cerraba en cada arranque diciendo que no había jobs.
      Orden de extracción (`_extract_service_token`): header `X-Auth-Token` →
-     `Authorization: Bearer` → query string (la query solo existe por compatibilidad
-     con integraciones ya desplegadas — HA y el Shortcut de iOS; migrarlas a cabecera
-     cuando se pueda, para dejar de exponer el token en los logs de URLs).
+     `Authorization: Bearer` → query string. **Home Assistant ya no usa la query**
+     (migrado el 2026-09-10, al rotar `HA_POLL_TOKEN`): sus sensores REST y sus
+     `rest_command` mandan el token en cabecera. Queda **solo el Shortcut de iOS**, y
+     hasta que se migre no se puede quitar ese camino. Se migró porque por la query el
+     token acaba escrito en los logs de URLs del backend — que es de donde salió la
+     rotación: bastó leer el log del add-on para verlo en claro.
    - *OAuth de Microsoft* (`/auth/login` → `/auth/callback`): `/auth/login` exige
      `Depends(verify_token)` y genera un `state` firmado con `SECRET_KEY`
      (`_create_oauth_state()`, 10 min de vida). `/auth/callback` no puede exigir JWT —
@@ -428,7 +431,11 @@ moraleja de este fichero entero.
 - No conviertas los endpoints de servicio (HA/salud) a JWT: los clientes son
   integraciones ya desplegadas (HA, iOS Shortcuts) que solo saben mandar un token fijo.
 - No borres el soporte de token por query string en `_extract_service_token` sin
-  migrar antes esas integraciones.
+  migrar antes esas integraciones. **HA ya está migrado**; falta el Shortcut de iOS.
+- No pongas un token de servicio en la URL de una integración nueva: en cabecera
+  (`X-Auth-Token`) desde el primer día. Por la query queda escrito en el registro de
+  peticiones, y el registro se mira — el middleware guarda la ruta sin query justo por
+  esto, pero el log de uvicorn del add-on sí la escribe entera.
 - No subas `.env`, tokens ni el directorio `.venv` (ya están en `.gitignore`).
 - No metas datos personales (IPs, direcciones, rutas de usuario, tokens) en ficheros
   versionados — este incluido. Van a `HOMEASSISTANT.md` o a un `.env`.

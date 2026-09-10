@@ -91,6 +91,15 @@ avisos. El `rest_command` manda el token en la cabecera `X-Auth-Token`, no en la
 string (el soporte de query solo existe por compatibilidad con integraciones ya
 desplegadas y expone el token en los logs de URLs).
 
+**Y desde el 2026-09-10 eso vale para TODO lo que HA le manda al backend.** Hasta ese
+día, seis sondeos —`events/soon`, `wol-pending`, `agent-relaunch-pending`,
+`pc-power-pending` y el `rest_command` `la_wol_check`— seguían llevando el token en la
+query, tres de ellos escondidos en `packages/life_assistant_pc.yaml` y no en
+`configuration.yaml`. Se descubrió leyendo el log del add-on para otra cosa: el token
+estaba ahí en claro, línea tras línea. Se rotó `HA_POLL_TOKEN` (en `secrets.yaml` y en
+el fichero de entorno del backend, que son los dos sitios donde vive) y se pasaron todos
+a cabecera. **Si añades un sondeo nuevo, en cabecera desde el primer día.**
+
 **Flujo de los avisos al móvil**: HA sondea `GET /ha/avisos-pending` cada 30 s y manda lo
 que salga con `notify.mobile_app_*`. Mismo patrón que el WOL (órdenes en memoria, leerlas
 las consume), y el nombre del dispositivo vive **solo** en el YAML de HA. El YAML completo
