@@ -4,11 +4,17 @@
 // dos pantallas sirven o se ignoran: un cron que corrió BIEN pero hace tres semanas está
 // tan roto como uno que falla, y un backend que no se ha podido comparar con main no está
 // al día — está sin saber.
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi, afterEach } from "vitest";
 
 import { estadoDespliegue, estadoWorkflow, estadoSondeo, textoCada, shaCorto,
          MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, estadoGrupo,
-         estadoGraph } from "../../src/lib/dev";
+         estadoGraph, esperarAlBackend } from "../../src/lib/dev";
+
+// `esperarAlBackend` sondea con fetch a pelo (durante el arranque no hay nada más que
+// responda), así que se sustituye; devolverlo a su sitio evita que el siguiente fichero
+// de tests herede el doble.
+const fetchOriginal = globalThis.fetch;
+afterEach(() => { globalThis.fetch = fetchOriginal; });
 
 const AHORA = new Date("2026-09-10T12:00:00Z").getTime();
 const haceHoras = h => new Date(AHORA - h * 3600_000).toISOString();
@@ -208,5 +214,26 @@ describe("estadoGrupo y estadoGraph", () => {
 
   test("no haber podido consultar no es estar desconectado", () => {
     expect(estadoGraph({ conectado: null, motivo: "no se ha podido consultar" }).tono).toBe("accent");
+  });
+});
+
+describe("esperarAlBackend", () => {
+  test("no da por bueno un backend que responde con el sha de antes", async () => {
+    // Es la distinción que costó días descubrir: el Supervisor tarda en parar el add-on,
+    // así que justo después de lanzar la reconstrucción sigue contestando el proceso
+    // viejo. Y una reconstrucción que no trae el código termina «bien» igual.
+    const respuestas = ["viejo", "viejo", "nuevo"];
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true, json: async () => ({ version: respuestas.shift() }),
+    }));
+    const fin = await esperarAlBackend({ antes: "viejo", cada: 0, dormir: async () => {} });
+    expect(fin).toEqual({ ok: true, version: "nuevo" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  test("si no vuelve, lo dice en vez de esperar para siempre", async () => {
+    globalThis.fetch = vi.fn(async () => { throw new Error("sin red"); });
+    const fin = await esperarAlBackend({ antes: "viejo", intentos: 3, cada: 0, dormir: async () => {} });
+    expect(fin.ok).toBe(false);
   });
 });
