@@ -123,8 +123,9 @@ class TestPrimerAviso:
         assert len(canal_movil) == 1
         aviso = canal_movil[0]
         assert "Entrenar" in aviso["texto"]
-        # Un despertador que no suena con el móvil en silencio no despierta.
-        assert aviso["critico"] is True
+        # Aviso normal: el crítico (que se salta el silencio del móvil) se quitó a
+        # propósito; quien despierta si el móvil está callado es la escalada.
+        assert aviso["critico"] is False
         assert aviso["acciones"] == [
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
              "title": "Estoy despierto"}]

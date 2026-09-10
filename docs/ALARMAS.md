@@ -90,12 +90,14 @@ despertador que suena el domingo, no un fallo.
   PATCH. La condición *es* la pregunta atómica: con dos ticks solapados, un GET previo
   dejaría avisar dos veces. Misma trampa y misma solución que en el despachador de
   recordatorios.
-- **El aviso va `critico=True`.** Un despertador que no suena con el móvil en silencio no
-  despierta. Es la segunda cosa del proyecto que se permite esto, y por el mismo criterio
-  que la primera (el permiso de despliegue): sin respuesta, se queda bloqueado. **Requiere
-  el permiso de "notificaciones críticas" de la app en el iPhone** — el mismo que ya pedía
-  `docs/AVERIAS.md`. Sin él la notificación llega igual, pero callada, que para una alarma
-  es como no llegar.
+- **El aviso va `critico=False`: es una notificación normal.** Lo fue `critico=True` al
+  principio, con el razonamiento de que un despertador que no suena con el móvil en
+  silencio no despierta; en la práctica saltarse el silencio del móvil resultó excesivo
+  para lo que es una red de debajo. Si el móvil está callado y no confirmas, quien
+  despierta es la escalada por el altavoz — que es exactamente para lo que está. Así que
+  el permiso de "notificaciones críticas" del iPhone ya **no** hace falta para las alarmas
+  (sigue haciendo falta para el permiso de despliegue, ver `docs/AVERIAS.md`), y la
+  escalada deja de ser el plan B para pasar a ser el que de verdad te levanta.
 - **Una alarma no pasa por el gobierno de avisos** (`_apuntar_aviso`, presupuesto diario,
   silenciado, huella). La has pedido tú y con hora exacta, y la regla del proyecto es que
   lo que pides tú no se gobierna. Un despertador que no suena porque hoy ya se habían
