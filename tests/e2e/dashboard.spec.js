@@ -197,8 +197,16 @@ test('la zona dev dice qué código corre y qué corre solo', async ({ page }) =
   // pestaña tiene que hacer bien — y que NO ofrece desplegar, porque no puede.
   await page.getByRole('button', { name: 'Despliegue' }).click()
   await expect(page.getByText('1 commit por desplegar', { exact: false })).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByText('Reconstruir', { exact: false })).toBeVisible()
-  await expect(page.getByRole('button', { name: /desplegar|reconstruir/i })).toHaveCount(0)
+
+  // El botón existe desde que el add-on puede reconstruirse solo, pero NO reconstruye sin
+  // preguntar: es la única cosa de la zona dev que no es repetible sin consecuencias.
+  // Cancelando el diálogo no puede pasar nada, y eso es justo lo que se comprueba —
+  // si algún día alguien quita el confirm, este test se entera antes que producción.
+  let preguntado = ''
+  page.once('dialog', d => { preguntado = d.message(); d.dismiss() })
+  await page.getByRole('button', { name: 'Reconstruir' }).click()
+  expect(preguntado).toContain('Reconstruir el add-on')
+  await expect(page.getByText('lanzando', { exact: false })).toHaveCount(0)
 
   // Crons: los tres programados con su último run, y los sondeos, que aquí no ha hecho
   // nadie porque el backend acaba de arrancar — y eso se dice, no se pinta como avería.
