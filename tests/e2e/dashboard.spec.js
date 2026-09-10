@@ -186,3 +186,26 @@ test('el widget de alarmas pinta la alarma de respaldo y deja quitarla', async (
 
   expect(page.erroresDeNavegador).toEqual([])
 })
+
+test('la zona dev dice qué código corre y qué corre solo', async ({ page }) => {
+  await entrar(page)
+
+  await page.getByRole('button', { name: '🛠' }).first().click()
+
+  // Despliegue: el sha del backend (aquí, el VERSION simulado) contra el main de GitHub.
+  // Lo que se comprueba es que la comparación llega pintada, que es lo único que esta
+  // pestaña tiene que hacer bien — y que NO ofrece desplegar, porque no puede.
+  await page.getByRole('button', { name: 'Despliegue' }).click()
+  await expect(page.getByText('1 commit por desplegar', { exact: false })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Reconstruir', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: /desplegar|reconstruir/i })).toHaveCount(0)
+
+  // Crons: los tres programados con su último run, y los sondeos, que aquí no ha hecho
+  // nadie porque el backend acaba de arrancar — y eso se dice, no se pinta como avería.
+  await page.getByRole('button', { name: 'Crons' }).click()
+  await expect(page.getByText('Copia de Supabase')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Revisión nocturna del código')).toBeVisible()
+  await expect(page.getByText('/ha/avisos-pending')).toBeVisible()
+
+  expect(page.erroresDeNavegador).toEqual([])
+})

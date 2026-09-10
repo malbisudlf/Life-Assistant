@@ -785,6 +785,50 @@ if (LOG_PERSIST or GASTO_PERSIST) and SUPABASE_URL:
     activar_registro_persistente()
 
 
+# ── Quién sigue sondeando ─────────────────────────────────────────────────────
+# Media arquitectura de este proyecto es alguien preguntando cada pocos segundos: HA
+# recoge avisos, órdenes, WOL y el tick del resumen; el agente PC pide jobs; la pantalla
+# de la llamada pregunta si hay que descolgar. Cuando uno de esos sondeos para, no falla
+# nada: simplemente deja de pasar algo, en silencio, y eso es lo peor que sabe hacer este
+# sistema (el canal del móvil ya se cayó así). La pestaña Crons de la zona dev lo mira.
+#
+# En memoria y no en Supabase a propósito: es una escritura cada 15 segundos, siete días
+# a la semana, y guardarla costaría más que lo que vale. Se pierde al reiniciar, y por eso
+# `/dev/crons` da también desde cuándo lleva el proceso vivo: "no ha sondeado" y "no ha
+# sondeado desde que arranqué hace 40 segundos" son cosas distintas.
+_ARRANQUE_PROCESO: float = time.time()
+_sondeos: dict[str, float] = {}
+
+# Las rutas que sondea una máquina, con el nombre que se le enseña a una persona. Lo que
+# no esté aquí no se marca: el resto de la API la llama el dashboard, y que el dashboard
+# no haya entrado hoy no es una avería.
+SONDEOS_VIGILADOS = {
+    "/ha/avisos-pending":         "Avisos al móvil (HA)",
+    "/ha/ordenes-pending":        "Órdenes para la casa (HA)",
+    "/ha/brief-tick":             "Reloj del resumen (HA)",
+    "/ha/alarma-tick":            "Reloj de las alarmas (HA)",
+    "/ha/wol-pending":            "Encender el PC (HA)",
+    "/ha/agent-relaunch-pending": "Relanzar el agente (HA)",
+    "/ha/pc-power-pending":       "Apagar/suspender el PC (HA)",
+    "/ha/events/soon":            "Próximo evento (HA)",
+    "/jobs/pending":              "Cola de jobs (agente PC)",
+    # Ésta no la sondea una máquina sino la pantalla de la llamada, que solo está abierta
+    # cuando el dashboard lo está. Se vigila igual porque su silencio significa algo: que
+    # si hoy hubiera un despliegue esperando permiso, nadie lo estaría oyendo.
+    "/llamada/pendiente":         "Pantalla de llamada (navegador)",
+}
+
+
+def _marcar_sondeo(ruta: str, status: int) -> None:
+    """Apunta que alguien ha sondeado esta ruta y le han contestado.
+
+    El 403 se queda fuera adrede: un sondeo con el token mal es exactamente el fallo que
+    hay que ver, y contarlo como "sigue sondeando" lo escondería.
+    """
+    if status < 400 and ruta in SONDEOS_VIGILADOS:
+        _sondeos[ruta] = time.time()
+
+
 @app.middleware("http")
 async def registrar_peticiones(request: Request, call_next):
     """Deja constancia de lo que falla o va lento, sin depender de que cada endpoint se
@@ -807,6 +851,9 @@ async def registrar_peticiones(request: Request, call_next):
             logger.warning("%s → %d (%.0f ms)", ruta, respuesta.status_code, ms)
         elif ms > LOG_SLOW_MS:
             logger.warning("%s tardó %.0f ms", ruta, ms)
+        # Aquí y no en cada endpoint: los sondeos son diez rutas y la marca se olvidaría
+        # justo en la que se caiga. Ver `_marcar_sondeo`.
+        _marcar_sondeo(request.url.path, respuesta.status_code)
         return respuesta
     except Exception:
         logger.exception("%s: excepción no controlada", ruta)
@@ -7781,6 +7828,236 @@ def borrar_idea_dev(
     if r.status_code >= 300:
         raise _supabase_error(r)
     return {"ok": True}
+
+
+# ── ZONA DEV: DESPLIEGUE Y PROGRAMADOS ────────────────────────────────────────
+# Las dos preguntas que no se podían contestar sin abrir cinco sitios: "¿entró la
+# reconstrucción?" y "¿sigue corriendo lo que corre solo?". Ver docs/ZONA_DEV.md.
+#
+# Las dos van contra la API de GitHub, que no cuesta dinero pero sí cuota: 60 peticiones
+# por hora sin credencial y 5.000 con ella. Se usa `DEPLOY_GITHUB_TOKEN` si está —es la
+# que ya tiene el backend para mergear el arreglo del CI— y si no se va sin autenticar,
+# que para un repositorio público basta mientras no se refresque a lo loco.
+
+GITHUB_API = "https://api.github.com"
+
+# Lo que se espera que corra solo, con cada cuántas horas. La lista NO se puede sacar de
+# la API de GitHub (un workflow no publica su cron) ni del disco (el Dockerfile del add-on
+# solo copia `backend/` al contenedor), así que va a mano — y hay un test que la compara
+# con los ficheros de `.github/workflows/` que llevan `schedule:`, para que no se
+# desincronice en silencio, que es exactamente el fallo del que nace esta pestaña.
+PROGRAMADOS = {
+    "copia-supabase.yml":    ("Copia de Supabase",                 7 * 24),
+    "resumen-diario.yml":    ("Resumen diario (red de seguridad)", 24),
+    "revision-nocturna.yml": ("Revisión nocturna del código",      24),
+}
+
+# Cuánto margen se le da a un cron antes de darlo por parado. GitHub retrasa los crons
+# 10-15 minutos cuando la cola va cargada, y la revisión nocturna encima no corre las
+# noches sin commits: con menos margen esto estaría en rojo la mitad de las semanas y
+# dejaría de mirarse, que es la única forma real de que no sirva para nada.
+PROGRAMADO_MARGEN = 2.0
+
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _github(ruta: str, params: Optional[dict] = None):
+    """Una llamada a la API de GitHub. Devuelve (json, motivo_del_fallo)."""
+    if "/" not in JARVIS_REPO:
+        return None, "falta JARVIS_REPO"
+    cabeceras = {"Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"}
+    if DEPLOY_GITHUB_TOKEN:
+        cabeceras["Authorization"] = f"Bearer {DEPLOY_GITHUB_TOKEN}"
+    try:
+        r = http.get(f"{GITHUB_API}/repos/{JARVIS_REPO}{ruta}", headers=cabeceras,
+                     params=params or {})
+    except requests.RequestException as e:
+        logger.warning("Zona dev: GitHub no responde en %s (%s)", ruta, type(e).__name__)
+        return None, "GitHub no responde"
+    if r.status_code == 404:
+        return None, "no existe"
+    if r.status_code >= 300:
+        # El detalle al registro y no al cliente, como con Supabase: el cuerpo de un 403
+        # de GitHub trae la cuota y la hora de reseteo, que no pintan nada en pantalla.
+        logger.warning("Zona dev: GitHub devolvió %s en %s", r.status_code, ruta)
+        if r.status_code in (401, 403):
+            return None, "sin cuota o sin permiso en la API de GitHub"
+        return None, f"GitHub devolvió {r.status_code}"
+    try:
+        return r.json(), None
+    except ValueError:
+        return None, "GitHub devolvió algo que no es JSON"
+
+
+def _commit_resumido(c: dict) -> dict:
+    """Un commit de la API de GitHub reducido a lo que cabe en una tabla."""
+    datos = c.get("commit") or {}
+    mensaje = (datos.get("message") or "").split("\n")[0]
+    return {
+        "sha":     (c.get("sha") or "")[:40],
+        "mensaje": mensaje[:120],
+        "fecha":   ((datos.get("author") or {}).get("date")
+                    or (datos.get("committer") or {}).get("date")),
+    }
+
+
+@app.get("/dev/despliegue")
+def dev_despliegue(
+    frontend: str = "",
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Qué código corre en cada sitio y cuánto se ha quedado atrás.
+
+    El SHA del backend lo da el propio proceso (`/app/VERSION`, escrito al clonar). El
+    del frontend NO lo puede saber el backend —son dos despliegues independientes y el de
+    Vercel ni siquiera pasa por aquí—, así que lo manda el navegador, que lo lleva
+    horneado en su build. Se valida como sha antes de meterlo en una URL de GitHub.
+
+    Esta pestaña dice si entró la reconstrucción; **no la lanza**. El add-on se
+    reconstruye a mano desde Home Assistant, a propósito (CLAUDE.md).
+    """
+    green    = _version_desplegada()
+    frontend = (frontend or "").strip().lower()
+    if frontend and not _SHA_RE.match(frontend):
+        raise HTTPException(status_code=422, detail="El sha del frontend no tiene forma de sha")
+
+    ultimo, motivo = _github("/commits/main")
+    if not ultimo:
+        return {"repo": JARVIS_REPO, "green": green, "main": None,
+                "backend": None, "frontend": None,
+                "github": {"ok": False, "motivo": motivo,
+                           "con_credencial": bool(DEPLOY_GITHUB_TOKEN)}}
+
+    main_sha = (ultimo.get("sha") or "")[:40]
+
+    def comparar(sha: str):
+        """Cuántos commits le faltan a `sha` para ser `main`, y cuáles."""
+        if not sha or sha == "desconocida":
+            return {"sha": sha or None, "conocido": False, "motivo": "no lo dice"}
+        if sha == main_sha:
+            return {"sha": sha, "conocido": True, "al_dia": True, "detras": 0, "commits": []}
+        datos, fallo = _github(f"/compare/{sha}...{main_sha}")
+        if not datos:
+            # El caso que ya pasó: `main` se reescribió (el `git filter-repo`, la rotación
+            # del AGENT_TOKEN) y el commit que corre ahí dentro ya no está en la historia.
+            # No es un fallo de red y no se arregla comparando: hay que decirlo.
+            return {"sha": sha, "conocido": False,
+                    "motivo": "ese commit ya no está en la historia de main"
+                              if fallo == "no existe" else fallo}
+        detras = int(datos.get("ahead_by") or 0)
+        return {
+            "sha": sha, "conocido": True, "al_dia": detras == 0, "detras": detras,
+            # Del más nuevo al más viejo, que es como se lee: lo primero que se quiere ver
+            # es qué es lo último que falta por desplegar.
+            "commits": [_commit_resumido(c) for c in reversed(datos.get("commits") or [])][:10],
+        }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tarea_backend   = pool.submit(comparar, green)
+        tarea_frontend  = pool.submit(comparar, frontend) if frontend else None
+        estado_backend  = tarea_backend.result()
+        estado_frontend = tarea_frontend.result() if tarea_frontend else None
+
+    return {
+        "repo":     JARVIS_REPO,
+        "green":    green,
+        "main":     _commit_resumido(ultimo),
+        "backend":  estado_backend,
+        "frontend": estado_frontend,
+        # `con_credencial` no es informativo: la pantalla decide con él si se puede
+        # refrescar sola. Sin token son 60 peticiones/hora para todo el navegador, y una
+        # pestaña abierta toda la tarde las gasta en veinte minutos.
+        "github":   {"ok": True, "motivo": None,
+                     "con_credencial": bool(DEPLOY_GITHUB_TOKEN)},
+    }
+
+
+def _ultimo_run(fichero: str):
+    """La última ejecución de un workflow, por el nombre de su fichero."""
+    datos, motivo = _github(f"/actions/workflows/{quote(fichero, safe='')}/runs",
+                            {"per_page": 1})
+    if not datos:
+        return None, motivo
+    runs = datos.get("workflow_runs") or []
+    return (runs[0] if runs else None), None
+
+
+def _run_resumido(run: dict) -> dict:
+    return {
+        "estado":    run.get("status"),        # queued | in_progress | completed
+        "resultado": run.get("conclusion"),    # success | failure | cancelled | null
+        "cuando":    run.get("updated_at") or run.get("created_at"),
+        "url":       run.get("html_url"),
+    }
+
+
+@app.get("/dev/crons")
+def dev_crons(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Todo lo que corre solo: workflows programados, envíos del backend, vigilantes y
+    quién sigue sondeando.
+
+    Existe por la copia de seguridad de Supabase, que estuvo **meses fallando en cada
+    ejecución** sin que nadie se enterara porque le faltaban los secrets. Aquello ya tiene
+    su aviso (`programado-roto.yml`), pero un aviso solo salta cuando algo falla: no
+    cuando algo deja de correr. Esto enseña las dos cosas en la misma tabla.
+    """
+    def workflows():
+        # Cada programado va en su propia llamada y no en el listado general de runs: 100
+        # runs de CI en una semana movida tapan el cron semanal, que es justo el que hay
+        # que ver.
+        with ThreadPoolExecutor(max_workers=len(PROGRAMADOS)) as pool:
+            resultados = list(pool.map(_ultimo_run, PROGRAMADOS.keys()))
+        return [
+            {"fichero": fichero, "nombre": nombre, "cada_horas": cada_horas,
+             "run": _run_resumido(run) if run else None, "motivo": motivo}
+            for (fichero, (nombre, cada_horas)), (run, motivo)
+            in zip(PROGRAMADOS.items(), resultados)
+        ]
+
+    def tabla(url, params):
+        try:
+            r = http.get(url, headers=supabase_headers(), params=params)
+            if r.status_code >= 300:
+                # Sin `_supabase_error`: aquí un 502 dejaría la pestaña entera en blanco
+                # por una tabla. Lo que falle se queda en null, que se pinta como "no lo
+                # sé" y no como "no hay".
+                logger.warning("Zona dev (crons): %s devolvió %s", url, r.status_code)
+                return None
+            return r.json()
+        except Exception as e:
+            logger.warning("Zona dev (crons): %s falló (%s)", url, type(e).__name__)
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        t_wf  = pool.submit(workflows)
+        t_bri = pool.submit(tabla, BRIEF_ENVIOS_URL,
+                            {"select": "*", "order": "fecha.desc", "limit": 3})
+        t_inf = pool.submit(tabla, INFORME_ENVIOS_URL,
+                            {"select": "*", "order": "fecha.desc", "limit": 3})
+        t_vig = pool.submit(tabla, VIGILANTE_ESTADO_URL,
+                            {"select": "*", "order": "ultima_vez.desc", "limit": 20})
+        wf, brief, informe, vigilantes = (t_wf.result(), t_bri.result(),
+                                          t_inf.result(), t_vig.result())
+
+    ahora = time.time()
+    sondeos = [
+        {"ruta": ruta, "nombre": nombre,
+         "hace_segundos": int(ahora - _sondeos[ruta]) if ruta in _sondeos else None}
+        for ruta, nombre in SONDEOS_VIGILADOS.items()
+    ]
+
+    return {
+        "github":     {"con_credencial": bool(DEPLOY_GITHUB_TOKEN)},
+        "workflows":  wf,
+        "brief":      brief,
+        "informe":    informe,
+        "vigilantes": vigilantes,
+        "sondeos":    sondeos,
+        # Sin esto, un backend recién reconstruido enseñaría diez sondeos en "nunca" y
+        # parecería que se ha caído medio sistema.
+        "proceso_desde_hace": int(ahora - _ARRANQUE_PROCESO),
+    }
 
 
 # ── CASA: ÓRDENES PARA HOME ASSISTANT ─────────────────────────────────────────

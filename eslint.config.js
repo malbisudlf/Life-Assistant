@@ -22,7 +22,10 @@ export default defineConfig([
     // La config de Playwright y los tests E2E corren en Node, no en el navegador:
     // usan `process` para distinguir CI. El código de dentro de page.evaluate() sí es
     // de navegador, así que aquí hacen falta los dos conjuntos de globales.
-    files: ['playwright.config.js', 'tests/e2e/**/*.js'],
+    // `vite.config.js` entra por lo mismo: lee `process.env.VERCEL_GIT_COMMIT_SHA` para
+    // hornear en el bundle de qué commit se construyó (la pestaña Despliegue de la zona
+    // dev), y eso pasa en Node, durante el build, no en el navegador.
+    files: ['playwright.config.js', 'vite.config.js', 'tests/e2e/**/*.js'],
     languageOptions: {
       globals: { ...globals.browser, ...globals.node },
     },
