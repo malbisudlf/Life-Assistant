@@ -218,22 +218,46 @@ describe("estadoGrupo y estadoGraph", () => {
 });
 
 describe("esperarAlBackend", () => {
-  test("no da por bueno un backend que responde con el sha de antes", async () => {
-    // Es la distinción que costó días descubrir: el Supervisor tarda en parar el add-on,
-    // así que justo después de lanzar la reconstrucción sigue contestando el proceso
-    // viejo. Y una reconstrucción que no trae el código termina «bien» igual.
-    const respuestas = ["viejo", "viejo", "nuevo"];
-    globalThis.fetch = vi.fn(async () => ({
-      ok: true, json: async () => ({ version: respuestas.shift() }),
-    }));
-    const fin = await esperarAlBackend({ antes: "viejo", cada: 0, dormir: async () => {} });
-    expect(fin).toEqual({ ok: true, version: "nuevo" });
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  // Cada respuesta del guion es un sondeo: `null` significa "no responde", que es lo que
+  // pasa mientras el add-on está reconstruyendo.
+  function guion(respuestas) {
+    globalThis.fetch = vi.fn(async () => {
+      const v = respuestas.shift();
+      if (v == null) throw new Error("sin red");
+      return { ok: true, json: async () => ({ version: v }) };
+    });
+  }
+  const esperar = extra => esperarAlBackend({ antes: "viejo", cada: 0, dormir: async () => {}, ...extra });
+
+  test("el sha nuevo se da por bueno en cuanto aparece", async () => {
+    guion(["viejo", null, "nuevo"]);
+    const fin = await esperar();
+    expect(fin).toMatchObject({ ok: true, version: "nuevo", cambio: true });
   });
 
-  test("si no vuelve, lo dice en vez de esperar para siempre", async () => {
-    globalThis.fetch = vi.fn(async () => { throw new Error("sin red"); });
-    const fin = await esperarAlBackend({ antes: "viejo", intentos: 3, cada: 0, dormir: async () => {} });
+  test("volver con el MISMO sha también es haber vuelto", async () => {
+    // El caso que se pintaba como fallo: reconstruir estando ya al día devuelve el mismo
+    // commit, y esperar un cambio dejaba «no ha vuelto a tiempo» tras tres minutos de una
+    // reconstrucción perfecta.
+    guion(["viejo", null, null, "viejo"]);
+    const fin = await esperar();
+    expect(fin).toMatchObject({ ok: true, version: "viejo", cambio: false, cayo: true });
+  });
+
+  test("mientras no se haya caído, seguir respondiendo lo mismo no es haber vuelto", async () => {
+    // El Supervisor tarda en parar el add-on: justo después de lanzarla sigue contestando
+    // el proceso viejo, y darlo por terminado ahí sería mentir.
+    guion(["viejo", "viejo", "viejo"]);
+    const fin = await esperar({ intentos: 3 });
     expect(fin.ok).toBe(false);
+  });
+
+  test("si nunca se cae, se distingue de si se cayó y no volvió", async () => {
+    // Son dos averías distintas: una es que la reconstrucción no arrancó (permisos del
+    // add-on), la otra que arrancó y algo se rompió. Llevan a mirar sitios distintos.
+    guion(["viejo", "viejo", "viejo"]);
+    expect((await esperar({ intentos: 3 })).cayo).toBe(false);
+    guion([null, null, null]);
+    expect((await esperar({ intentos: 3 })).cayo).toBe(true);
   });
 });
