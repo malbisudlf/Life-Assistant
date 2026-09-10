@@ -31,6 +31,35 @@ def _set(*names):
     return all(os.getenv(n) for n in names)
 
 
+# Qué hace falta para cada cosa, por funcionalidad. Vive a nivel de módulo y no dentro de
+# `main()` porque la pestaña Config de la zona de desarrollo lee de aquí (`GET /dev/config`
+# en main.py): con dos listas, la de la consola y la de la pantalla, una de las dos se
+# quedaría atrás en cuanto alguien añadiera una variable — y las dos existen para decir
+# justo lo que falta.
+GRUPOS = [
+    ("Base de datos (ideas, salud, entrenamiento, jobs)", ["SUPABASE_URL", "SUPABASE_KEY"]),
+    ("Calendario Outlook", ["CLIENT_ID", "TENANT_ID", "CLIENT_SECRET", "REDIRECT_URI"]),
+    ("Hora de salida con tráfico", ["GOOGLE_MAPS_API_KEY", "HOME_ADDRESS"]),
+    ("Ideas por voz y Jarvis (Whisper + GPT)", ["OPENAI_API_KEY"]),
+    ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
+    ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
+    ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
+    ("Agente PC (cola de jobs)", ["AGENT_TOKEN"]),
+    ("Finanzas (cartera de Indexa Capital)", ["INDEXA_TOKEN"]),
+    ("Revisión nocturna accionable (aviso con botones)",
+     ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
+    ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
+    ("Despliegue con permiso (arreglo automático del CI roto)",
+     ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "DEPLOY_GITHUB_TOKEN", "JARVIS_REPO"]),
+    ("Avísame (una sesión te avisa y le contestas hablando)",
+     ["SESION_TOKEN", "SESION_FIRE_URL", "SESION_FIRE_TOKEN"]),
+    ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
+    ("El teléfono (Jarvis te llama)",
+     ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",
+      "BACKEND_URL", "ELEVENLABS_API_KEY", "OPENAI_API_KEY"]),
+]
+
+
 def probar_voz() -> int:
     """Comprueba que ELEVENLABS_VOICE_ID se puede usar con esta clave. Devuelve errores.
 
@@ -91,29 +120,7 @@ def main() -> int:
         print(f"{KO} TIMEZONE inválida: {tz!r} (usa un nombre IANA, p.ej. Europe/Madrid)")
         errores += 1
 
-    grupos = [
-        ("Base de datos (ideas, salud, entrenamiento, jobs)", ["SUPABASE_URL", "SUPABASE_KEY"]),
-        ("Calendario Outlook", ["CLIENT_ID", "TENANT_ID", "CLIENT_SECRET", "REDIRECT_URI"]),
-        ("Hora de salida con tráfico", ["GOOGLE_MAPS_API_KEY", "HOME_ADDRESS"]),
-        ("Ideas por voz y Jarvis (Whisper + GPT)", ["OPENAI_API_KEY"]),
-        ("Poll de Home Assistant (WOL, eventos)", ["HA_POLL_TOKEN"]),
-        ("Ingesta de salud (Apple Watch)", ["HEALTH_INGEST_TOKEN"]),
-        ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
-        ("Agente PC (cola de jobs)", ["AGENT_TOKEN"]),
-        ("Finanzas (cartera de Indexa Capital)", ["INDEXA_TOKEN"]),
-        ("Revisión nocturna accionable (aviso con botones)",
-         ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
-        ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
-        ("Despliegue con permiso (arreglo automático del CI roto)",
-         ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "DEPLOY_GITHUB_TOKEN", "JARVIS_REPO"]),
-        ("Avísame (una sesión te avisa y le contestas hablando)",
-         ["SESION_TOKEN", "SESION_FIRE_URL", "SESION_FIRE_TOKEN"]),
-        ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
-        ("El teléfono (Jarvis te llama)",
-         ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",
-          "BACKEND_URL", "ELEVENLABS_API_KEY", "OPENAI_API_KEY"]),
-    ]
-    for nombre, vars_ in grupos:
+    for nombre, vars_ in GRUPOS:
         faltan = [v for v in vars_ if not os.getenv(v)]
         if not faltan:
             print(f"{OK} {nombre}")

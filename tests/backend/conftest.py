@@ -68,8 +68,11 @@ import main
 
 
 class FakeResponse:
-    def __init__(self, json_data=None, status_code=200, text="", content=b""):
+    def __init__(self, json_data=None, status_code=200, text="", content=b"", headers=None):
         self._json = json_data if json_data is not None else []
+        # Las cabeceras solo importan en un sitio: el `Content-Range` con el que Supabase
+        # devuelve cuántas filas tiene una tabla (la pestaña Base de datos de la zona dev).
+        self.headers = headers or {}
         self.status_code = status_code
         self.text = text or ""
         self.encoding = "utf-8"

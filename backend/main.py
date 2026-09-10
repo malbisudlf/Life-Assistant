@@ -8060,6 +8060,237 @@ def dev_crons(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
     }
 
 
+# ── ZONA DEV: BASE DE DATOS Y CONFIGURACIÓN ───────────────────────────────────
+# Las otras dos preguntas de "¿qué está roto?": qué hay en la base de datos y qué le falta
+# al backend para que todo funcione. Ver docs/ZONA_DEV.md.
+
+# Cada tabla del proyecto con la migración que la crea. El nombre de la migración no es
+# decorativo: cuando una tabla no existe, lo que hace falta saber no es "no existe" sino
+# QUÉ hay que pegar en el editor SQL de Supabase para que exista.
+#
+# Va a mano, como `PROGRAMADOS`, y por lo mismo: el contenedor del add-on solo lleva
+# `backend/`, así que aquí dentro no hay ningún `.sql` que leer. Y como `PROGRAMADOS`,
+# **hay un test que la compara con los `create table` de supabase/migrations/**: una tabla
+# nueva sin entrada aquí rompe el CI en vez de quedarse invisible.
+TABLAS_CONOCIDAS = {
+    "health_metrics":        "20260707_esquema_base",
+    "ideas":                 "20260707_esquema_base",
+    "training_clients":      "20260707_esquema_base",
+    "training_sessions":     "20260707_esquema_base",
+    "training_payments":     "20260707_esquema_base",
+    "jobs":                  "20260508_jobs_queue",
+    "pc_agents":             "20260508_jobs_queue",
+    "job_events":            "20260511_job_events",
+    "job_results":           "20260511_job_results",
+    "oauth_tokens":          "20260607_oauth_tokens",
+    "clothing":              "20260724_clothing",
+    "login_attempts":        "20260730_login_attempts",
+    "app_logs":              "20260802_app_logs",
+    "brief_envios":          "20260804_brief_envios",
+    "presence":              "20260804_presence",
+    "jarvis_memoria":        "20260807_jarvis_memoria",
+    "ha_entidades":          "20260808_ha_entidades",
+    "jarvis_mcp_servidores": "20260808_jarvis_mcp_servidores",
+    "jarvis_recordatorios":  "20260808_jarvis_recordatorios",
+    "brief_ajustes":         "20260813_brief_ajustes",
+    "informe_envios":        "20260816_informe_envios",
+    "vigilante_estado":      "20260817_vigilante_estado",
+    "avisos_reglas":         "20260818_avisos_gobierno",
+    "vigilancias":           "20260819_vigilancias",
+    "reglas_usuario":        "20260820_reglas_usuario",
+    "revision_hallazgos":    "20260820_revision_hallazgos",
+    "etf_holdings":          "20260824_etf_cartera",
+    "etf_aportaciones":      "20260824_etf_cartera",
+    "salud_ajustes":         "20260824_salud_ajustes",
+    "avisos_motivos":        "20260903_avisos_motivo",
+    "jarvis_gasto":          "20260903_gasto_modelo",
+    "sesion_avisos":         "20260904_sesion_avisos",
+    "alarmas":               "20260909_alarmas",
+    "ideas_dev":             "20260909_ideas_dev",
+    "migraciones_aplicadas": "20260910_migraciones_aplicadas",
+}
+
+MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
+
+# Dónde vive el registro de lo aplicado, para poder nombrarlo en pantalla cuando falte.
+MIGRACION_DEL_REGISTRO = "20260910_migraciones_aplicadas"
+
+
+def _total_de_content_range(cabecera: str):
+    """El total de filas que Supabase manda en `Content-Range: 0-24/1234`.
+
+    Devuelve None si no se puede saber, que es distinto de cero. Supabase responde `*/*`
+    cuando no ha contado, y un cero inventado ahí diría "esta tabla está vacía" de una que
+    puede tener diez mil filas.
+    """
+    if not cabecera or "/" not in cabecera:
+        return None
+    total = cabecera.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def _contar_tabla(tabla: str) -> dict:
+    """Cuántas filas tiene una tabla, o por qué no se sabe.
+
+    `limit=0` + `count=exact`: no se traen filas, solo la cuenta. Traerlas para contarlas
+    sería descargar `health_metrics` entera cada vez que se abre la pestaña.
+    """
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/{tabla}",
+                     headers={**supabase_headers(), "Prefer": "count=exact"},
+                     params={"select": "*", "limit": 0})
+    except requests.RequestException:
+        return {"existe": None, "filas": None, "motivo": "Supabase no responde"}
+    if r.status_code == 404:
+        # La tabla no está: la migración no se ha aplicado. Es el caso que da sentido a
+        # toda la pestaña, así que se distingue de cualquier otro error.
+        return {"existe": False, "filas": None, "motivo": "no existe"}
+    if r.status_code >= 300:
+        logger.warning("Zona dev (bd): %s devolvió %s", tabla, r.status_code)
+        return {"existe": None, "filas": None, "motivo": f"Supabase devolvió {r.status_code}"}
+    total = _total_de_content_range(getattr(r, "headers", {}).get("Content-Range"))
+    return {"existe": True, "filas": total, "motivo": None if total is not None else "no lo dice"}
+
+
+def _migraciones_del_repo():
+    """Los nombres de `supabase/migrations/` según GitHub. Devuelve (lista, motivo).
+
+    Del repositorio y no de una constante a propósito: es una lista que crece cada semana,
+    y una copia a mano de algo que crece cada semana se queda atrás — que es la forma
+    exacta que tiene este proyecto de romperse.
+    """
+    datos, motivo = _github("/contents/supabase/migrations")
+    if not isinstance(datos, list):
+        return None, motivo or "GitHub no devolvió la lista"
+    return sorted(f["name"][:-4] for f in datos
+                  if isinstance(f, dict) and str(f.get("name", "")).endswith(".sql")), None
+
+
+@app.get("/dev/bd")
+def dev_bd(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Qué hay en la base de datos y qué migraciones faltan por aplicar.
+
+    Las migraciones se pegan a mano en el editor SQL de Supabase, y por eso se olvidan:
+    `20260824_salud_ajustes` estuvo un mes sin aplicar, con `PATCH /health/ajustes`
+    respondiendo 502 y la copia de seguridad muriendo entera al llegar a esa tabla. Esto
+    lo enseña el mismo día, cruzando lo que hay en el repositorio con lo que declara la
+    tabla `migraciones_aplicadas`.
+    """
+    def aplicadas():
+        try:
+            r = http.get(MIGRACIONES_URL, headers=supabase_headers(),
+                         params={"select": "nombre,aplicada", "order": "nombre.asc"})
+        except requests.RequestException:
+            return None, "Supabase no responde"
+        if r.status_code == 404:
+            return None, f"falta aplicar la migración {MIGRACION_DEL_REGISTRO}"
+        if r.status_code >= 300:
+            logger.warning("Zona dev (bd): migraciones_aplicadas devolvió %s", r.status_code)
+            return None, f"Supabase devolvió {r.status_code}"
+        try:
+            return r.json() or [], None
+        except ValueError:
+            return None, "Supabase devolvió algo que no es JSON"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        tarea_repo   = pool.submit(_migraciones_del_repo)
+        tarea_tabla  = pool.submit(aplicadas)
+        conteos      = list(pool.map(_contar_tabla, TABLAS_CONOCIDAS))
+        del_repo, motivo_repo   = tarea_repo.result()
+        filas, motivo_aplicadas = tarea_tabla.result()
+
+    tablas = [{"tabla": t, "migracion": TABLAS_CONOCIDAS[t], **c}
+              for t, c in zip(TABLAS_CONOCIDAS, conteos)]
+
+    puestas = {f["nombre"]: f.get("aplicada") for f in (filas or [])}
+    migraciones = None
+    if del_repo is not None and filas is not None:
+        migraciones = [{"nombre": n, "aplicada": puestas.get(n), "puesta": n in puestas}
+                       for n in del_repo]
+        # Lo que está en la tabla y no en el repositorio: una migración renombrada o
+        # borrada. No es grave, pero enseñarlo evita el "¿y esto de dónde sale?" de dentro
+        # de tres meses.
+        migraciones += [{"nombre": n, "aplicada": a, "puesta": True, "huerfana": True}
+                        for n, a in puestas.items() if n not in del_repo]
+
+    return {
+        "tablas":      tablas,
+        "migraciones": migraciones,
+        "motivo":      motivo_aplicadas or motivo_repo,
+        "registro":    MIGRACION_DEL_REGISTRO,
+    }
+
+
+def _estado_de_graph():
+    """Si la sesión de Microsoft sigue viva. Es la única credencial que caduca sola.
+
+    Todo lo demás son claves que valen hasta que se rotan; ésta es un OAuth con refresh
+    token, y cuando ese refresh muere el calendario deja de cargar sin que nada más se
+    entere. Nunca se devuelve un token: solo si está y hasta cuándo.
+    """
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/oauth_tokens", headers=supabase_headers(),
+                     params={"select": "provider,expires_at,updated_at,refresh_token",
+                             "provider": "eq.microsoft"})
+        if r.status_code >= 300:
+            return {"conectado": None, "motivo": f"Supabase devolvió {r.status_code}"}
+        filas = r.json() or []
+    except Exception:
+        return {"conectado": None, "motivo": "no se ha podido consultar"}
+    if not filas:
+        return {"conectado": False, "motivo": "nunca se ha conectado Outlook"}
+    fila = filas[0]
+    return {
+        "conectado":    True,
+        "con_refresco": bool(fila.get("refresh_token")),
+        "expira_en":    int((fila.get("expires_at") or 0) - time.time()),
+        "renovado":     fila.get("updated_at"),
+    }
+
+
+@app.get("/dev/config")
+def dev_config(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Qué tiene configurado este backend y qué le falta. **Nunca un valor.**
+
+    Lo mismo que dice `backend/check_config.py` por consola, leído de la MISMA lista
+    (`GRUPOS`), porque dos listas que dicen lo que falta acaban diciendo cosas distintas.
+    El import va aquí dentro y no arriba a propósito: ese módulo hace `load_dotenv()` y le
+    cambia el encoding a stdout al importarse, y eso no tiene por qué pasarle a un backend
+    en marcha solo porque exista el fichero.
+
+    Devolver el valor de una variable sería convertir esta pantalla en un volcado de
+    secretos protegido por un JWT de 30 días. Se devuelve si está puesta y ya.
+    """
+    try:
+        from check_config import GRUPOS
+    except Exception as e:
+        logger.warning("Zona dev (config): no se ha podido leer check_config (%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail="No se ha podido leer la lista de configuración")
+
+    grupos = []
+    for nombre, variables in GRUPOS:
+        faltan = [v for v in variables if not os.getenv(v)]
+        grupos.append({"nombre": nombre, "variables": list(variables),
+                       "faltan": faltan, "completo": not faltan})
+
+    tz_ok = True
+    try:
+        ZoneInfo(TIMEZONE)
+    except Exception:
+        tz_ok = False
+
+    return {
+        "grupos":   grupos,
+        "version":  _version_desplegada(),
+        "zona":     {"nombre": TIMEZONE, "valida": tz_ok},
+        "graph":    _estado_de_graph(),
+        # Dos que no están en ningún grupo porque sin ellas el backend ni arranca: si esto
+        # contesta, están puestas. Se dicen igualmente para que la pantalla no dé la
+        # sensación de haberse olvidado de lo más importante.
+        "nucleo":   ["SECRET_KEY", "DASHBOARD_PASSWORD"],
+    }
+
+
 # ── CASA: ÓRDENES PARA HOME ASSISTANT ─────────────────────────────────────────
 # Encender una luz desde aquí choca con el mismo muro de siempre: el backend NO puede
 # llamar a Home Assistant, que vive en la LAN y no está expuesto. Así que se usan los dos

@@ -11,6 +11,8 @@ import Estado from "./Estado";
 import Logs from "./Logs";
 import Despliegue from "./Despliegue";
 import Crons from "./Crons";
+import BaseDeDatos from "./BaseDeDatos";
+import Config from "./Config";
 
 // Las pestañas que existen y las que existirán. Las de fases posteriores se enseñan
 // apagadas en vez de esconderse: el plan a la vista es lo que evita que la zona dev se
@@ -21,8 +23,8 @@ const PESTANAS = [
   { id: "logs",   etiqueta: "Logs",       fase: 1 },
   { id: "deploy", etiqueta: "Despliegue", fase: 1 },
   { id: "crons",  etiqueta: "Crons",      fase: 1 },
-  { id: "bd",     etiqueta: "Base de datos", fase: 2 },
-  { id: "config", etiqueta: "Config",     fase: 2 },
+  { id: "bd",     etiqueta: "Base de datos", fase: 1 },
+  { id: "config", etiqueta: "Config",     fase: 1 },
   { id: "linea",  etiqueta: "Línea de tiempo", fase: 3 },
   { id: "jobs",   etiqueta: "Agente y jobs", fase: 3 },
   { id: "datos",  etiqueta: "Salud de datos", fase: 3 },
@@ -113,6 +115,8 @@ export default function ZonaDev({ onSalir, agentId, filasExtra }) {
         {tab === "logs"   && <Logs />}
         {tab === "deploy" && <Despliegue />}
         {tab === "crons"  && <Crons />}
+        {tab === "bd"     && <BaseDeDatos />}
+        {tab === "config" && <Config />}
       </main>
     </div>
   );

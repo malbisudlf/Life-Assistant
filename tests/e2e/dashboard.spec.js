@@ -209,3 +209,28 @@ test('la zona dev dice qué código corre y qué corre solo', async ({ page }) =
 
   expect(page.erroresDeNavegador).toEqual([])
 })
+
+test('la zona dev enseña las migraciones que faltan y qué le falta al backend', async ({ page }) => {
+  await entrar(page)
+
+  await page.getByRole('button', { name: '🛠' }).first().click()
+
+  // Base de datos: el servidor de pruebas declara aplicadas todas las migraciones del
+  // repositorio menos la última, así que tiene que salir esa y solo esa, con su nombre —
+  // que es lo que hay que pegar en el editor SQL de Supabase.
+  await page.getByRole('button', { name: 'Base de datos' }).click()
+  await expect(page.getByText('1 sin aplicar', { exact: false })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('health_metrics')).toBeVisible()
+
+  // Config: lo que falta, nunca lo que hay. Que no se escape un valor es la mitad del
+  // sentido de esta pestaña, y va detrás de un JWT de treinta días.
+  await page.getByRole('button', { name: 'Config' }).click()
+  await expect(page.getByText('Calendario Outlook')).toBeVisible({ timeout: 15_000 })
+  const texto = await page.locator('main').innerText()
+  expect(texto).toContain('falta')
+  expect(texto).not.toContain('supa-e2e-key')
+  expect(texto).not.toContain('e2e-secret-key')
+  expect(texto).not.toContain('refresco-e2e')
+
+  expect(page.erroresDeNavegador).toEqual([])
+})

@@ -75,6 +75,12 @@ def _iso(delta_horas: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=delta_horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _migraciones_del_repo():
+    """Los nombres de supabase/migrations/ leídos del disco, ordenados."""
+    raiz = os.path.join(os.path.dirname(__file__), "..", "..", "supabase", "migrations")
+    return sorted(f[:-4] for f in os.listdir(raiz) if f.endswith(".sql"))
+
+
 def _cartera_indexa():
     """Cartera de Indexa con la forma real de la API (`instrument_accounts` → `positions`)."""
     return {
@@ -113,11 +119,15 @@ def _rendimiento_indexa():
 
 
 class _Respuesta:
-    def __init__(self, json_data=None, status_code=200):
+    def __init__(self, json_data=None, status_code=200, headers=None):
         self._json = json_data if json_data is not None else []
         self.status_code = status_code
         self.text = ""
         self.encoding = "utf-8"
+        # `Content-Range` por defecto porque la pestaña Base de datos cuenta filas con él:
+        # sin cabecera, las treinta y tantas tablas saldrían como "existe, sin cuenta", que
+        # es un caso válido pero no el que hay que mirar.
+        self.headers = headers or {"Content-Range": "0-0/7"}
 
     def json(self):
         return self._json
@@ -217,6 +227,14 @@ class _RouterSimulado:
         ("/rest/v1/informe_envios", lambda: _Respuesta(
             [{"fecha": _dia(-2), "enviado_at": _iso(-48)}])),
         ("/rest/v1/vigilante_estado", lambda: _Respuesta([])),
+        # Todas las migraciones del repositorio menos la última, para que la pestaña Base
+        # de datos enseñe el caso que importa: una sin aplicar, con su nombre.
+        ("/rest/v1/migraciones_aplicadas", lambda: _Respuesta(
+            [{"nombre": n, "aplicada": f"{_dia(-30)}T10:00:00Z"} for n in _migraciones_del_repo()[:-1]])),
+        ("/rest/v1/oauth_tokens", lambda: _Respuesta([{
+            "provider": "microsoft", "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=42)).timestamp(),
+            "updated_at": _iso(-1), "refresh_token": "refresco-e2e",
+        }])),
         ("/rest/v1/pc_agents", lambda: _Respuesta([])),
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),
@@ -248,6 +266,11 @@ class _RouterSimulado:
                 "message": "zona dev: despliegue y crons",
                 "author": {"date": _iso(-2)}}}],
         })),
+        # El directorio de migraciones tal y como lo devuelve la API de GitHub, pero leído
+        # del repositorio de verdad: una lista inventada aquí se quedaría atrás en cuanto
+        # alguien añadiera una migración, que es el fallo que la pestaña viene a evitar.
+        ("/contents/supabase/migrations", lambda: _Respuesta(
+            [{"name": f"{n}.sql"} for n in _migraciones_del_repo()])),
         ("/commits/main", lambda: _Respuesta({
             "sha": "a" * 40,
             "commit": {"message": "alarmas: el aviso al movil deja de ser critico (#167)",

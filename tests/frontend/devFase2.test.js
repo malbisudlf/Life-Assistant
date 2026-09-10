@@ -7,7 +7,8 @@
 import { describe, test, expect } from "vitest";
 
 import { estadoDespliegue, estadoWorkflow, estadoSondeo, textoCada, shaCorto,
-         MARGEN_PROGRAMADO } from "../../src/lib/dev";
+         MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, estadoGrupo,
+         estadoGraph } from "../../src/lib/dev";
 
 const AHORA = new Date("2026-09-10T12:00:00Z").getTime();
 const haceHoras = h => new Date(AHORA - h * 3600_000).toISOString();
@@ -132,5 +133,80 @@ describe("textoCada y shaCorto", () => {
   test("lo que no es un sha se deja como está", () => {
     expect(shaCorto("desconocida")).toBe("desconocida");
     expect(shaCorto("")).toBe("—");
+  });
+});
+
+describe("estadoTabla", () => {
+  test("una tabla que no existe nombra la migración que falta", () => {
+    const e = estadoTabla({ tabla: "salud_ajustes", existe: false, migracion: "20260824_salud_ajustes" });
+    expect(e.tono).toBe("red");
+    expect(e.texto).toContain("20260824_salud_ajustes");
+  });
+
+  test("cero filas no es rojo: hay tablas que solo se llenan cuando pasa algo", () => {
+    expect(estadoTabla({ existe: true, filas: 0 }).tono).toBe("muted");
+  });
+
+  test("sin cuenta de filas no se dice que esté vacía", () => {
+    const e = estadoTabla({ existe: true, filas: null });
+    expect(e.texto).not.toContain("0");
+    expect(e.tono).toBe("accent");
+  });
+
+  test("no haber podido consultar no es no existir", () => {
+    const e = estadoTabla({ existe: null, motivo: "Supabase no responde" });
+    expect(e.tono).toBe("accent");
+    expect(e.texto).toBe("Supabase no responde");
+  });
+});
+
+describe("resumenMigraciones", () => {
+  test("todas aplicadas, en verde", () => {
+    const e = resumenMigraciones({ migraciones: [{ nombre: "a", puesta: true }] });
+    expect(e.tono).toBe("green");
+  });
+
+  test("las que faltan se nombran, que es lo que hay que pegar en Supabase", () => {
+    const e = resumenMigraciones({ migraciones: [
+      { nombre: "20260824_salud_ajustes", puesta: false },
+      { nombre: "20260909_ideas_dev", puesta: true },
+    ] });
+    expect(e.tono).toBe("red");
+    expect(e.texto).toContain("20260824_salud_ajustes");
+    expect(e.texto).not.toContain("ideas_dev");
+  });
+
+  test("no haber podido comprobarlo no es que estén todas", () => {
+    const e = resumenMigraciones({ migraciones: null, motivo: "falta aplicar la migración X" });
+    expect(e.tono).not.toBe("green");
+    expect(e.texto).toContain("falta aplicar");
+  });
+});
+
+describe("estadoGrupo y estadoGraph", () => {
+  test("sin configurar no es un error: media aplicación es opcional", () => {
+    const e = estadoGrupo({ completo: false, faltan: ["SMTP_HOST"] });
+    expect(e.tono).toBe("muted");
+    expect(e.texto).toContain("SMTP_HOST");
+  });
+
+  test("una sesión de Microsoft sin refresh token sí es rojo", () => {
+    // Morirá cuando expire el acceso y habrá que volver a pasar por el login a mano.
+    expect(estadoGraph({ conectado: true, con_refresco: false }).tono).toBe("red");
+  });
+
+  test("conectada y con refresco, en verde y con lo que le queda al acceso", () => {
+    const e = estadoGraph({ conectado: true, con_refresco: true, expira_en: 1800 });
+    expect(e.tono).toBe("green");
+    expect(e.texto).toContain("30 min");
+  });
+
+  test("un acceso expirado no es una sesión rota: se renueva sola al usarla", () => {
+    const e = estadoGraph({ conectado: true, con_refresco: true, expira_en: -10 });
+    expect(e.tono).toBe("accent");
+  });
+
+  test("no haber podido consultar no es estar desconectado", () => {
+    expect(estadoGraph({ conectado: null, motivo: "no se ha podido consultar" }).tono).toBe("accent");
   });
 });

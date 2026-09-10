@@ -202,6 +202,8 @@ está duplicado en los dos lados y **tienen que coincidir**.
 | `GET /dev/ideas` · `POST` · `PATCH /dev/ideas/{id}` · `DELETE` | JWT | La checklist de la zona dev (`ideas_dev`). Ver `docs/ZONA_DEV.md` |
 | `GET /dev/despliegue?frontend=` | JWT | Qué código corre en cada sitio: el sha del add-on (`/app/VERSION`), el último commit de `main` y cuántos commits le faltan a cada uno. `frontend` es el sha que el bundle lleva horneado; se valida como sha antes de ir a la URL de GitHub. **No despliega nada** |
 | `GET /dev/crons` | JWT | Todo lo que corre solo: el último run de cada workflow programado, los últimos envíos del resumen y del informe, las averías abiertas del vigilante y cuándo sondeó por última vez cada máquina |
+| `GET /dev/bd` | JWT | Filas por tabla (cuenta exacta, sin traerlas) y qué migraciones están aplicadas: cruza `supabase/migrations/` según GitHub con la tabla `migraciones_aplicadas` |
+| `GET /dev/config` | JWT | Qué funcionalidades tienen su configuración completa y cuáles no, con la misma lista que `check_config.py`, más la sesión de Microsoft. **Nunca devuelve el valor de una variable** |
 
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`.
