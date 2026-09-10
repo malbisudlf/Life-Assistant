@@ -8291,6 +8291,104 @@ def dev_config(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     }
 
 
+# ── ZONA DEV: RECONSTRUIR EL ADD-ON ───────────────────────────────────────────
+# El backend se reconstruye a sí mismo. Es el único sitio del proyecto donde el código
+# que corre en producción decide sustituirse por otro, así que conviene saber por qué
+# existe y qué lo sujeta.
+#
+# Hasta aquí, desplegar era ir a la interfaz de Home Assistant y pulsar «Reconstruir». Eso
+# convertía cada arreglo en dos pasos con una persona en medio, y el segundo se olvidaba:
+# la reconstrucción se posponía, producción se quedaba atrás y el aviso del móvil llegaba
+# a decir «desplegado» cuando lo único hecho era el merge (docs/AVERIAS.md).
+#
+# Lo que lo hace posible: dentro de un add-on, el Supervisor da un `SUPERVISOR_TOKEN` con
+# el que se puede llamar a su API — incluida la reconstrucción del propio add-on. No pasa
+# por `docker`, que es lo que bloquea el Protection mode, así que no hay que bajarlo.
+# Hace falta que `addon/life-assistant/config.yaml` declare `hassio_api: true` y
+# `hassio_role: manager`; **y ese fichero se copia a mano por Samba**, no sale de git.
+#
+# Lo que lo sujeta:
+#   - JWT de usuario. Nunca un token de servicio: nada que arranque solo despliega.
+#   - Un tiempo mínimo entre reconstrucciones, para que un doble clic no encadene dos.
+#   - Se registra quién y cuándo, y se vuelca ANTES de lanzarla — el proceso está a punto
+#     de morir y lo que quede en la cola del registro se pierde con él.
+SUPERVISOR_URL   = os.getenv("SUPERVISOR_URL", "http://supervisor")
+SUPERVISOR_TOKEN = os.getenv("SUPERVISOR_TOKEN", "")
+
+# Cuánto hay que esperar entre dos reconstrucciones. En memoria, y eso basta para lo que
+# protege: encadenar dos seguidas por un doble clic o por un cliente que reintenta. Contra
+# un bucle largo no puede hacer nada —cada reconstrucción mata este proceso y con él la
+# variable—, y por eso el límite de verdad es que esto pida un JWT de usuario.
+RECONSTRUIR_ESPERA = int(os.getenv("RECONSTRUIR_ESPERA", "180"))
+_ultima_reconstruccion: float = 0.0
+
+
+def _reconstruir_addon() -> None:
+    """Le pide al Supervisor que reconstruya este add-on. Va en un hilo a propósito.
+
+    La reconstrucción termina matando este proceso, así que si se llamara en línea la
+    respuesta al navegador no saldría nunca y el usuario vería un error de red justo
+    cuando todo ha ido bien. Se contesta primero y se lanza después.
+    """
+    time.sleep(1.0)
+    try:
+        r = http.post(f"{SUPERVISOR_URL}/addons/self/rebuild",
+                      headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
+                      timeout=600)
+        if r.status_code >= 300:
+            # Si se llega aquí, el proceso sigue vivo: la reconstrucción no ha empezado.
+            # El 403 es el caso probable y tiene un arreglo concreto que hay que nombrar.
+            detalle = (r.text or "")[:200].replace("\n", " ")
+            logger.error("Reconstrucción: el Supervisor devolvió %s — %s. Si es un 403, "
+                         "al add-on le faltan hassio_api/hassio_role en config.yaml, que "
+                         "se copia a mano por Samba.", r.status_code, detalle)
+            _registro.volcar()
+    except requests.RequestException as e:
+        logger.error("Reconstrucción: no se ha podido hablar con el Supervisor (%s)",
+                     type(e).__name__)
+        _registro.volcar()
+
+
+@app.post("/dev/reconstruir")
+def dev_reconstruir(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Reconstruye el add-on: clona `main` y sustituye lo que está corriendo.
+
+    **Esto es un despliegue de producción.** No lo dispara nada automático: pide un JWT de
+    usuario, y quien lo llama (la pestaña Despliegue de la zona dev) pregunta antes.
+
+    Contesta 202 y se va: lo que viene después es este mismo proceso muriendo. Quien
+    llama se entera de que ha terminado sondeando `GET /` hasta que el `version` cambie,
+    que es además la única comprobación que vale — un despliegue que no se comprueba no es
+    un despliegue (CLAUDE.md).
+    """
+    global _ultima_reconstruccion
+
+    if not SUPERVISOR_TOKEN:
+        # Fuera del add-on (en local, en el kit de terceros) esto no existe, y decirlo es
+        # mejor que un 500 raro: aquí el despliegue es otra cosa.
+        raise HTTPException(status_code=503, detail=(
+            "Este backend no corre como add-on de Home Assistant (no hay SUPERVISOR_TOKEN), "
+            "así que no puede reconstruirse a sí mismo"))
+
+    espera = RECONSTRUIR_ESPERA - (time.time() - _ultima_reconstruccion)
+    if _ultima_reconstruccion and espera > 0:
+        raise HTTPException(status_code=429, detail=f"Espera {int(espera)}s: se acaba de lanzar una",
+                            headers={"Retry-After": str(int(espera))})
+
+    version = _version_desplegada()
+    _ultima_reconstruccion = time.time()
+    # A stdout Y a Supabase, y volcado a mano: en cuanto arranque el hilo, este proceso
+    # tiene los minutos contados y el volcado periódico no llegaría a tiempo.
+    logger.warning("Reconstrucción del add-on lanzada a mano desde la zona dev "
+                   "(sirviendo %s)", version[:7])
+    _registro.volcar()
+
+    threading.Thread(target=_reconstruir_addon, daemon=True, name="reconstruir").start()
+    return {"ok": True, "lanzada": True, "version_antes": version,
+            "nota": "El backend se para mientras reconstruye (1-2 min). Cuando GET / "
+                    "vuelva a responder, su version dirá qué código ha quedado."}
+
+
 # ── CASA: ÓRDENES PARA HOME ASSISTANT ─────────────────────────────────────────
 # Encender una luz desde aquí choca con el mismo muro de siempre: el backend NO puede
 # llamar a Home Assistant, que vive en la LAN y no está expuesto. Así que se usan los dos

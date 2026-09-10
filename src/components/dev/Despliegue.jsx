@@ -5,12 +5,15 @@
 // ojo. No se hacía, y por eso el add-on sirvió durante días el código de otro día sin que
 // nadie lo notara (CLAUDE.md, «Despliegue»).
 //
-// Esta pestaña NO despliega: reconstruir el add-on se hace a mano desde Home Assistant, a
-// propósito. Lo único que hace es decir la verdad sobre lo que hay corriendo.
+// Esta pestaña SÍ reconstruye, desde septiembre de 2026: el add-on se lo pide al
+// Supervisor él solo. Antes no podía, y el segundo paso —ir a la interfaz de HA y pulsar
+// Reconstruir— se posponía, así que producción se quedaba atrás mientras el aviso del
+// móvil daba el arreglo por desplegado. Lo que no hace es reconstruir sola: pregunta.
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
-         leerDespliegue, estadoDespliegue, shaCorto, COMMIT_FRONTEND } from "../../lib/dev";
+         leerDespliegue, estadoDespliegue, shaCorto, COMMIT_FRONTEND,
+         reconstruirAddon, esperarAlBackend } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 // Cinco minutos, y solo si el backend tiene credencial de GitHub. Sin ella son 60
@@ -22,6 +25,7 @@ export default function Despliegue() {
   const [error, setError]   = useState("");
   const [leyendo, setLeyendo] = useState(true);
   const [tic, setTic]       = useState(0);
+  const [obra, setObra]     = useState("");   // qué está pasando con la reconstrucción
 
   useEffect(() => {
     let vivo = true;
@@ -47,6 +51,28 @@ export default function Despliegue() {
 
   const recargar = useCallback(() => { setLeyendo(true); setTic(t => t + 1); }, []);
 
+  // Reconstruir es sustituir el código que corre en producción, así que pregunta y dice
+  // en la pregunta lo que va a pasar: el backend se para un par de minutos y con él el
+  // dashboard entero.
+  const reconstruir = useCallback(async () => {
+    if (!window.confirm(
+      "¿Reconstruir el add-on ahora?\n\n"
+      + "Clona main y sustituye lo que está corriendo. El backend se para 1-2 minutos: "
+      + "mientras tanto el dashboard no responde.")) return;
+    setObra("lanzando…");
+    try {
+      const r = await reconstruirAddon();
+      setObra("reconstruyendo… (1-2 min)");
+      const fin = await esperarAlBackend({ antes: r.version_antes });
+      setObra(fin.ok
+        ? `listo · sirviendo ${shaCorto(fin.version)}`
+        : "no ha vuelto a tiempo — míralo en Home Assistant antes de reintentar");
+      if (fin.ok) setTic(t => t + 1);
+    } catch (e) {
+      setObra(e.message || "no se ha podido lanzar");
+    }
+  }, []);
+
   const backend  = datos?.backend;
   const frontend = datos?.frontend;
 
@@ -64,8 +90,16 @@ export default function Despliegue() {
             <Boton onClick={recargar} disabled={leyendo}>
               {leyendo ? "Mirando…" : "Actualizar"}
             </Boton>
+            <Boton onClick={reconstruir} tono="peligro" disabled={!!obra && !obra.startsWith("listo")}
+                   title="Clona main y sustituye el backend que está corriendo">
+              Reconstruir
+            </Boton>
           </div>
         </div>
+
+        {!!obra && (
+          <div style={{ fontSize: 11, color: "var(--accent)", marginBottom: 10 }}>{obra}</div>
+        )}
 
         {error && <Vacio>No se pudo consultar: {error}</Vacio>}
         {!error && datos?.github?.ok === false && (
@@ -75,7 +109,7 @@ export default function Despliegue() {
         {!error && datos?.main && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <Lado nombre="Backend (add-on del Green)" lado={backend}
-                  nota="se despliega reconstruyendo el add-on a mano" />
+                  nota="se despliega con el botón Reconstruir, nunca solo" />
             <Lado nombre="Frontend (Vercel)" lado={frontend}
                   nota="se despliega solo al hacer push a main" />
             <div style={{ borderTop: "0.5px solid var(--border)", paddingTop: 10 }}>
@@ -120,10 +154,10 @@ export default function Despliegue() {
             </div>
           )}
           <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 10, lineHeight: 1.5 }}>
-            Para que entren: <strong>Reconstruir</strong> el add-on <code>local_life-assistant</code>
-            {" "}desde Home Assistant. No hay forma de lanzarlo desde aquí ni desde GitHub, y es
-            deliberado. Cuando termine, vuelve a esta pestaña: si el sha no ha cambiado, la
-            reconstrucción no ha traído el código.
+            Para que entren, el botón <strong>Reconstruir</strong> de arriba: el add-on se lo
+            pide al Supervisor él solo y clona <code>main</code>. Si responde que no puede,
+            el <code>config.yaml</code> del Green es el viejo — ese fichero se copia a mano
+            por Samba y no sale de git.
           </div>
         </div>
       )}

@@ -204,6 +204,7 @@ está duplicado en los dos lados y **tienen que coincidir**.
 | `GET /dev/crons` | JWT | Todo lo que corre solo: el último run de cada workflow programado, los últimos envíos del resumen y del informe, las averías abiertas del vigilante y cuándo sondeó por última vez cada máquina |
 | `GET /dev/bd` | JWT | Filas por tabla (cuenta exacta, sin traerlas) y qué migraciones están aplicadas: cruza `supabase/migrations/` según GitHub con la tabla `migraciones_aplicadas` |
 | `GET /dev/config` | JWT | Qué funcionalidades tienen su configuración completa y cuáles no, con la misma lista que `check_config.py`, más la sesión de Microsoft. **Nunca devuelve el valor de una variable** |
+| `POST /dev/reconstruir` | JWT | **Despliega**: le pide al Supervisor que reconstruya el add-on (clona `main`). Responde 202 y se va — el proceso muere a continuación. 503 si no corre como add-on, 429 si se acaba de lanzar otra. Nunca lo dispara un token de servicio |
 
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`.

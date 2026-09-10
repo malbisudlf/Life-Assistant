@@ -329,10 +329,25 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
 
 **Frontend**: push a `main` → Vercel despliega automáticamente.
 
-**Backend** — manual, nunca en automático. Vive como add-on del Home Assistant Green:
-desplegar es pulsar **Reconstruir** en la página del add-on, porque su `Dockerfile`
-clona este repositorio en cada construcción. No hay workflow ni comando remoto: el
-`Protection mode` del add-on de SSH bloquea `docker`, y con razón.
+**Backend** — nunca en automático, pero ya no hace falta que lo pulse una persona.
+Vive como add-on del Home Assistant Green y su `Dockerfile` clona este repositorio en cada
+construcción, así que desplegar es reconstruir el add-on. Tres formas, todas equivalentes:
+
+- **`POST /dev/reconstruir`** (JWT de usuario), que es lo que hay detrás del botón
+  *Reconstruir* de la pestaña Despliegue de la zona dev. El add-on se lo pide al
+  Supervisor él mismo (`/addons/self/rebuild`) con su `SUPERVISOR_TOKEN`.
+- **Por SSH al Green**, que es lo que puede hacer una sesión que corra en la red de casa:
+  `export SUPERVISOR_TOKEN=$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)` y
+  `ha addons rebuild local_life-assistant`. Tarda ~1:15 más el arranque.
+- A mano, desde la interfaz de Home Assistant, como siempre.
+
+Ninguna pasa por `docker`, que es lo que bloquea el `Protection mode` del add-on de SSH.
+Lo que este fichero decía —"no hay comando remoto"— era cierto para `docker` y falso para
+la API del Supervisor.
+
+**El permiso vive en `addon/life-assistant/config.yaml` (`hassio_api: true` y
+`hassio_role: manager`), y ese fichero se copia a mano por Samba: no sale de git.** Si
+`/dev/reconstruir` responde 403, es que en el Green sigue la versión vieja.
 
 **Comprueba siempre que el despliegue ha entrado: `GET /` devuelve `version`, el SHA
 del commit clonado al construir la imagen.** Si no coincide con el `main` de GitHub, la
@@ -417,11 +432,16 @@ moraleja de este fichero entero.
 - No subas `.env`, tokens ni el directorio `.venv` (ya están en `.gitignore`).
 - No metas datos personales (IPs, direcciones, rutas de usuario, tokens) en ficheros
   versionados — este incluido. Van a `HOMEASSISTANT.md` o a un `.env`.
-- No hagas deploy del backend salvo que se pida: afecta a producción real. El deploy
-  es **pulsar *Reconstruir* en el add-on `local_life-assistant`** desde la interfaz de
-  Home Assistant, que clona este repositorio. Nunca en automático al hacer push, y
-  **una sesión de Claude no despliega nunca** — ni la que arregla una avería (su skill
-  se lo prohíbe explícitamente) ni ninguna otra.
+- **Una sesión de Claude SÍ despliega, pero solo al final de su propio trabajo y con el
+  CI en verde** (decidido el 2026-09-10; antes lo tenía prohibido). Es decir: mergeas lo
+  tuyo, esperas a que el CI pase, reconstruyes y **compruebas con `GET /` que el `version`
+  es el commit que acabas de mergear**. Lo que sigue prohibido:
+  - Desplegar código que no acabas de mergear tú, o con el CI en rojo o sin terminar.
+  - Desplegar en automático al hacer push: nadie mirando cuando entra en producción.
+  - Desplegar desde la sesión que arregla una avería sin permiso — ese camino tiene su
+    propia puerta (el botón del móvil), y su skill se lo sigue prohibiendo.
+  - Reconstruir "por probar". Cada reconstrucción para el backend 1-2 minutos, y con él
+    el dashboard, las alarmas y todo lo que Home Assistant sondea.
   - **El permiso del móvil mergea, no despliega** (resuelto el 2026-09-07). Disparaba
     `deploy-backend.yml` → Fly, que ya no atiende tráfico: aprobar un despliegue no
     cambiaba nada en producción y aun así contestaba «desplegando». Hoy el botón mergea

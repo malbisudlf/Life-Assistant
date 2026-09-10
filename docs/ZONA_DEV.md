@@ -85,8 +85,15 @@ son reversibles o repetibles: vaciar el registro (`DELETE /logs`), forzar el res
 diario o el informe semanal (`POST /brief/send`, `POST /informe/send`), reintentar un job
 del PC (`POST /jobs/{id}/retry`) y despertarlo (`POST /wake-pc`).
 
-**No despliega.** El despliegue del backend sigue siendo pulsar *Reconstruir* en el add-on
-del Home Assistant Green, a mano. La pestaña de despliegue dice si entró; no lo lanza.
+**Y desde el 2026-09-10, reconstruye.** El botón *Reconstruir* de la pestaña Despliegue
+llama a `POST /dev/reconstruir`, y el add-on se lo pide al Supervisor él mismo. Es la
+única cosa de aquí que no es reversible ni repetible sin consecuencias, así que es la
+única que pregunta antes con un `confirm`, dice en la pregunta lo que va a pasar (el
+backend se para 1-2 minutos) y luego **espera a que vuelva y enseña con qué sha lo ha
+hecho** — que responder y traer el código nuevo no son lo mismo.
+
+Lo que sigue sin poder hacer: reconstruir sola. No hay refresco, ni reintento, ni nada
+automático que lo dispare; hace falta una persona y un JWT de usuario.
 
 ## Las pestañas
 
@@ -134,6 +141,8 @@ Por fases. Cada fase es un PR.
 | «Sin configurar» no se pinta en rojo | Media aplicación es opcional a propósito, y el kit de `docs/DESPLIEGUE.md` se instala a trozos. Rojo sería mentir: lo que hace falta es que se vea QUÉ parte no va a funcionar. Rojo se reserva para lo que está roto de verdad — una tabla que no existe, una zona horaria inválida, una sesión de Microsoft sin refresh token. |
 | Config no devuelve valores, solo si están | Esa pantalla vive detrás de un JWT de treinta días. Devolver valores la convertiría en un volcado de secretos con una puerta de treinta días, y hay un test que lo comprueba contra las claves del entorno de pruebas. |
 | La lista de «qué falta» es la de `check_config.py` | `GRUPOS` salió de dentro de `main()` a nivel de módulo para que la lean los dos. Con dos listas, la de la consola y la de la pantalla, una se queda atrás en cuanto alguien añade una variable — y las dos existen justo para decir qué falta. |
+| El backend se reconstruye a sí mismo, en vez de pulsarlo una persona | El segundo paso —ir a la interfaz de HA— se posponía, y producción se quedaba atrás mientras el aviso del móvil daba el arreglo por desplegado. El `SUPERVISOR_TOKEN` que el Supervisor le da a cada add-on permite `/addons/self/rebuild` sin tocar `docker`, que es lo que bloquea el Protection mode. El precio: `hassio_api`/`hassio_role: manager` en un `config.yaml` que se copia a mano por Samba. |
+| Reconstruir responde 202 y se va | La reconstrucción mata este proceso, así que la respuesta no saldría nunca si se esperara a que terminara. Se contesta primero, se lanza en un hilo, y quien llama sondea `GET /` hasta que el sha cambie. |
 | El agente PC y la llamada no se pintan en rojo por callar | El PC está apagado la mayor parte del día. Llamar avería a eso es llamar avería a la noche, y una pantalla que grita cuando todo está bien deja de mirarse. |
 
 ### Fase 3 — qué pasó

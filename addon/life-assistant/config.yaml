@@ -35,6 +35,21 @@ ports:
 ports_description:
   8080/tcp: API del backend (HA Core la llama por aquí, en local)
 
+# Permiso para hablar con el Supervisor, y SOLO para una cosa: que el backend pueda
+# reconstruirse a si mismo (POST /dev/reconstruir -> /addons/self/rebuild). Hasta aqui,
+# desplegar era que una persona fuera a la interfaz de HA y pulsara "Reconstruir", y ese
+# segundo paso se posponia: producción se quedaba atras mientras el aviso del movil daba
+# el arreglo por desplegado.
+#
+# `manager` es el rol minimo que permite reconstruir un add-on; con `default` el
+# Supervisor contesta 403. No hace falta bajar el Protection mode: eso guarda el acceso al
+# socket de Docker, que este camino no usa.
+#
+# OJO: este fichero NO sale de git. Vive en /addons/life-assistant del Green y se copia a
+# mano por Samba. Si el endpoint responde 403, es que ahi sigue la version vieja.
+hassio_api: true
+hassio_role: manager
+
 # Acceso de solo lectura a /config: ahí vive el fichero con las variables de
 # entorno (ver `fichero_env`). No pide más permisos que ese a propósito — este
 # add-on no tiene por qué tocar la configuración de la casa.

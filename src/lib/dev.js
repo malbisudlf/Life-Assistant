@@ -439,3 +439,37 @@ export async function leerConfig() {
   if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
   return r.json();
 }
+
+// ── FASE 2: RECONSTRUIR ───────────────────────────────────────────────────────
+
+// Lanza la reconstrucción del add-on. Es un despliegue de producción: quien llame a esto
+// tiene que haber preguntado antes.
+export async function reconstruirAddon() {
+  const r = await apiFetch(`${API}/dev/reconstruir`, { method: "POST", headers: authHeaders() });
+  const cuerpo = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(cuerpo.detail || `el backend respondió ${r.status}`);
+  return cuerpo;
+}
+
+// Espera a que el backend vuelva y dice con qué sha lo ha hecho.
+//
+// Sondear `GET /` es la única comprobación que vale: la reconstrucción puede terminar
+// «bien» y no haber traído el código (le pasó, por la caché de capas de Docker), y desde
+// fuera las dos cosas son idénticas. Sin credenciales a propósito — durante el arranque
+// no hay nada más que responda, y esto tiene que funcionar igual.
+export async function esperarAlBackend({ antes, intentos = 40, cada = 5000, dormir } = {}) {
+  const pausa = dormir || (ms => new Promise(r => setTimeout(r, ms)));
+  for (let i = 0; i < intentos; i++) {
+    await pausa(cada);
+    try {
+      const r = await fetch(`${API}/`);
+      if (r.ok) {
+        const version = (await r.json())?.version;
+        // Que responda no basta: hasta que el sha cambie, lo que contesta es el proceso
+        // viejo (el Supervisor tarda en pararlo) o uno nuevo con el código de siempre.
+        if (version && version !== antes) return { ok: true, version };
+      }
+    } catch { /* aún parado: es lo esperado a mitad de reconstrucción */ }
+  }
+  return { ok: false, version: null };
+}
