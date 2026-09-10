@@ -26,40 +26,36 @@ mira deprisa desde el móvil sigue estando a un toque, y el detalle no se duplic
 
 ## Dónde retomar
 
-**Estado al 2026-09-10.** La fase 1 está en `main` (PR
-[#164](https://github.com/malbisudlf/Life-Assistant/pull/164)). De la fase 2 están hechas
-**Despliegue y Crons**; quedan **Base de datos y Configuración**, que van en un PR aparte.
+**Estado al 2026-09-10.** Las fases 1 y 2 están hechas: Ideas, Estado, Logs, Despliegue,
+Crons, Base de datos y Config. Lo siguiente es la **fase 3** («qué pasó»), empezando por
+la línea de tiempo.
 
-Nada de esto se ha abierto todavía en un navegador contra el backend real. Lo que falta
-para que funcione de verdad, en orden:
+Lo único que hay que hacer a mano al mergear esto:
 
-1. **Aplicar `supabase/migrations/20260909_ideas_dev.sql`** a mano en el editor SQL de
-   Supabase. Mientras no esté, `GET /dev/ideas` responde 502 y la pestaña lo dice en
-   pantalla nombrando la migración.
-2. **Reconstruir el add-on** del Home Assistant Green cuando esto esté en `main`: los
-   endpoints (`/dev/ideas`, `/dev/despliegue`, `/dev/crons`, los filtros de `/logs`) viven
-   en el backend, que no se despliega solo. Comprobar con `GET /` que el `version`
-   coincide — o, mejor, mirarlo en la propia pestaña Despliegue, que es para lo que está.
-3. Abrir el 🛠 y mirar si el semáforo dice la verdad, que es lo único que estos tests no
-   pueden comprobar.
+1. **Aplicar `supabase/migrations/20260910_migraciones_aplicadas.sql`.** Es la que crea el
+   registro; mientras no esté, la pestaña Base de datos lo dice nombrándola y no puede
+   saber qué falta. Declara aplicadas las 35 anteriores.
+2. **Reconstruir el add-on**: `/dev/bd` y `/dev/config` son backend.
 
-Para la **pestaña Base de datos** hay una decisión ya tomada y sin ejecutar: las
-migraciones aplicadas se sabrán por una **tabla de registro** (`migraciones_aplicadas`),
-no sondeando el esquema. Eso significa una migración nueva que la cree e inserte las que
-ya están puestas, y una convención a partir de ahí: **cada `.sql` nuevo termina
-insertando su propio nombre**. Se eligió frente a sondear tabla por tabla porque el
-sondeo hay que mantenerlo a mano —un mapa migración → tabla— y una migración sin entrada
-en ese mapa pasa desapercibida, que es justo el fallo que la pestaña viene a evitar.
+**La convención que estrena esa migración: toda migración nueva termina insertando su
+nombre en `migraciones_aplicadas`.** Dos líneas al final del `.sql`:
 
-Lo que quedó decidido y no hace falta volver a discutir: dónde vive (vista propia, no
-modal), qué pasa con ⚙ (una línea y un enlace), la forma de una idea (la de
-`docs/IDEAS.md`, pero guardando con solo el título), el refresco (automático solo en lo
-que es gratis) y qué puede tocar la zona dev (vaciar el registro, forzar envíos,
-reintentar jobs; nunca desplegar).
+```sql
+insert into public.migraciones_aplicadas (nombre) values ('20261015_lo_que_sea')
+  on conflict (nombre) do nothing;
+```
+
+Sin esa línea, la migración se aplica pero la zona dev sigue diciendo que falta.
 
 Al añadir una pestaña: un fichero en `src/components/dev/`, su entrada en `PESTANAS` de
 `ZonaDev.jsx` con `fase: 1` para encenderla, y la lógica que se pueda probar sin pantalla
 a `src/lib/dev.js`, que es donde están los tests.
+
+Lo que quedó decidido y no hace falta volver a discutir: dónde vive (vista propia, no
+modal), qué pasa con ⚙ (una línea y un enlace), la forma de una idea (la de
+`docs/IDEAS.md`, pero guardando con solo el título), el refresco (automático solo en lo
+que es gratis, y en la fase 2 solo si hay credencial de GitHub) y qué puede tocar la zona
+dev (vaciar el registro, forzar envíos, reintentar jobs; nunca desplegar).
 
 ## Decisiones de forma
 
@@ -117,13 +113,14 @@ Por fases. Cada fase es un PR.
    puede existir.
 5. **Crons** (hecha) — el último run de cada workflow programado, los envíos del resumen
    y del informe, las averías abiertas del vigilante y **quién sigue sondeando**.
-6. **Base de datos** — filas por tabla y qué migraciones están aplicadas (ver «Dónde
-   retomar» para cómo se va a saber).
-7. **Configuración** — qué variables tiene puestas el backend y cuáles le faltan: lo que
-   `backend/check_config.py` sabe, pero sin consola, y qué credenciales caducan. Nunca el
-   valor: solo si está y si sirve.
+6. **Base de datos** (hecha) — filas por tabla y, sobre todo, **qué migraciones están
+   aplicadas y cuáles no**. Lo aplicado sale de la tabla `migraciones_aplicadas` y lo
+   esperado del propio repositorio: ninguna de las dos listas se mantiene a mano.
+7. **Configuración** (hecha) — qué variables tiene puestas el backend y cuáles le faltan:
+   lo que `backend/check_config.py` sabe, pero sin consola, más la sesión de Microsoft,
+   que es la única credencial que caduca sola. **Nunca el valor**: solo si está puesta.
 
-### Lo que se decidió al escribir Despliegue y Crons
+### Lo que se decidió al escribir la fase 2
 
 | Decisión | Por qué |
 |---|---|
@@ -133,6 +130,10 @@ Por fases. Cada fase es un PR.
 | Un cron que corrió BIEN pero hace demasiado también es rojo | La copia de Supabase falló meses seguidos; lo contrario —que deje de dispararse— no produce un solo run rojo al que agarrarse. Se compara con `cada_horas` por el doble de margen (`PROGRAMADO_MARGEN`), que absorbe los 10-15 min de retraso de GitHub y las noches sin commits de la revisión nocturna. |
 | Los sondeos se cuentan en memoria | Es una escritura cada 15 segundos, siete días a la semana: guardarla costaría más de lo que vale. Se pierden al reiniciar, y por eso `/dev/crons` da también cuánto lleva el proceso en pie — «no ha sondeado» y «no ha sondeado desde que arranqué hace 40 segundos» son cosas distintas. |
 | La marca del sondeo la pone el middleware | Son diez rutas y se olvidaría justo en la que se caiga. Un 403 **no** cuenta como sondeo: HA llamando con el token mal es exactamente el fallo que hay que ver. |
+| Las migraciones aplicadas se registran, no se adivinan | `migraciones_aplicadas` (una fila por migración) frente a sondear el esquema tabla por tabla. Sondear hay que mantenerlo a mano —un mapa de migración a tabla o columna— y una migración sin entrada en ese mapa pasaría desapercibida, que es el fallo que la pestaña viene a evitar. **La convención nueva: toda migración termina insertando su nombre**, y hay un test que comprueba que la del registro se declara a sí misma. |
+| «Sin configurar» no se pinta en rojo | Media aplicación es opcional a propósito, y el kit de `docs/DESPLIEGUE.md` se instala a trozos. Rojo sería mentir: lo que hace falta es que se vea QUÉ parte no va a funcionar. Rojo se reserva para lo que está roto de verdad — una tabla que no existe, una zona horaria inválida, una sesión de Microsoft sin refresh token. |
+| Config no devuelve valores, solo si están | Esa pantalla vive detrás de un JWT de treinta días. Devolver valores la convertiría en un volcado de secretos con una puerta de treinta días, y hay un test que lo comprueba contra las claves del entorno de pruebas. |
+| La lista de «qué falta» es la de `check_config.py` | `GRUPOS` salió de dentro de `main()` a nivel de módulo para que la lean los dos. Con dos listas, la de la consola y la de la pantalla, una se queda atrás en cuanto alguien añade una variable — y las dos existen justo para decir qué falta. |
 | El agente PC y la llamada no se pintan en rojo por callar | El PC está apagado la mayor parte del día. Llamar avería a eso es llamar avería a la noche, y una pantalla que grita cuando todo está bien deja de mirarse. |
 
 ### Fase 3 — qué pasó

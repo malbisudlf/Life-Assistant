@@ -371,3 +371,71 @@ export async function leerDespliegue() {
   if (!sha) datos.frontend = { sha: "dev", conocido: false, motivo: "en local" };
   return datos;
 }
+
+// ── FASE 2: BASE DE DATOS ─────────────────────────────────────────────────────
+
+// El semáforo de una tabla. Cero filas y "no lo sé" no se pintan igual: una tabla vacía
+// puede ser correcta (nadie ha guardado nada todavía), pero una que no responde no dice
+// nada de sus datos.
+export function estadoTabla(t) {
+  if (!t)              return { tono: "muted", texto: "sin comprobar" };
+  if (t.existe === false) return { tono: "red", texto: `no existe · falta ${t.migracion}` };
+  if (t.existe == null)   return { tono: "accent", texto: t.motivo || "no se ha podido consultar" };
+  if (t.filas == null)    return { tono: "accent", texto: "existe, sin cuenta de filas" };
+  return { tono: t.filas ? "green" : "muted", texto: `${t.filas.toLocaleString("es-ES")} filas` };
+}
+
+// Lo que resume la pestaña en una línea: cuántas migraciones faltan por aplicar. Es LA
+// pregunta, y la respuesta tiene que caber antes de mirar la tabla entera.
+export function resumenMigraciones(bd) {
+  if (!bd) return { tono: "muted", texto: "sin comprobar" };
+  if (!bd.migraciones) {
+    return { tono: "accent", texto: bd.motivo || "no se ha podido comprobar" };
+  }
+  const faltan = bd.migraciones.filter(m => !m.puesta);
+  if (!faltan.length) return { tono: "green", texto: "todas aplicadas" };
+  return {
+    tono: "red",
+    texto: `${faltan.length} sin aplicar: ${faltan.map(m => m.nombre).join(", ")}`,
+  };
+}
+
+export async function leerBd() {
+  const r = await apiFetch(`${API}/dev/bd`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
+// ── FASE 2: CONFIGURACIÓN ─────────────────────────────────────────────────────
+
+// Un grupo de variables. "Sin configurar" NO es un error: la mitad de este proyecto es
+// opcional y hay instalaciones (el kit de docs/DESPLIEGUE.md) que no quieren la mitad de
+// las cosas. Rojo sería mentir; lo que hace falta es que se vea qué falta.
+export function estadoGrupo(g) {
+  if (!g)         return { tono: "muted", texto: "sin comprobar" };
+  if (g.completo) return { tono: "green", texto: "configurado" };
+  return { tono: "muted", texto: `falta ${g.faltan.join(", ")}` };
+}
+
+// La sesión de Microsoft es la única credencial que caduca sola, y cuando su refresh
+// muere el calendario deja de cargar sin que nada más se entere.
+export function estadoGraph(graph) {
+  if (!graph)                return { tono: "muted", texto: "sin comprobar" };
+  if (graph.conectado == null) return { tono: "accent", texto: graph.motivo || "no se ha podido consultar" };
+  if (!graph.conectado)      return { tono: "accent", texto: graph.motivo || "sin conectar" };
+  if (!graph.con_refresco) {
+    // Sin refresh token, la sesión muere cuando expire el access y hay que volver a pasar
+    // por el login de Microsoft a mano.
+    return { tono: "red", texto: "conectado, pero SIN refresh token: morirá y habrá que reconectar" };
+  }
+  const seg = graph.expira_en;
+  if (seg == null) return { tono: "green", texto: "conectado" };
+  if (seg <= 0)    return { tono: "accent", texto: "conectado · el acceso ha expirado (se renueva al usarlo)" };
+  return { tono: "green", texto: `conectado · el acceso vale ${Math.round(seg / 60)} min más` };
+}
+
+export async function leerConfig() {
+  const r = await apiFetch(`${API}/dev/config`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}

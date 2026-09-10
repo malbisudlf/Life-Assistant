@@ -357,20 +357,19 @@ realidad.**
 que se olvidan**: el 2026-09-07 se descubrió que `20260824_salud_ajustes` llevaba desde
 agosto sin aplicar, así que `PATCH /health/ajustes` respondía 502 y la copia de seguridad
 entera moría al llegar a esa tabla. Al añadir una migración, aplícala el mismo día.
-Las que hay:
-`20260508_jobs_queue`, `20260511_job_events`, `20260511_job_results`,
-`20260607_oauth_tokens`, `20260707_esquema_base`, `20260724_clothing`,
-`20260729_rls_jobs`, `20260730_login_attempts`, `20260802_app_logs`,
-`20260804_presence`, `20260804_brief_envios`, `20260807_jarvis_memoria`,
-`20260808_jarvis_mcp_servidores`, `20260808_ha_entidades`,
-`20260808_jarvis_recordatorios`, `20260813_brief_ajustes`,
-`20260816_brief_instantanea`, `20260816_informe_envios`,
-`20260816_health_fuente`, `20260817_vigilante_estado`,
-`20260818_avisos_gobierno`, `20260819_vigilancias`,
-`20260820_reglas_usuario`, `20260820_revision_hallazgos`,
-`20260824_salud_ajustes`, `20260830_avisos_entidades`, `20260831_averias`,
-`20260903_avisos_motivo`, `20260903_gasto_modelo`, `20260904_sesion_avisos`,
-`20260909_alarmas`, `20260909_alarmas_repeticion`, `20260909_ideas_dev`.
+
+**Toda migración termina insertando su nombre en `migraciones_aplicadas`:**
+
+```sql
+insert into public.migraciones_aplicadas (nombre) values ('20261015_lo_que_sea')
+  on conflict (nombre) do nothing;
+```
+
+Esa tabla es lo que hace que **la pestaña Base de datos de la zona dev diga cuáles faltan
+por aplicar** (cruza el directorio del repositorio con lo que declara la tabla). Aquí ya no
+se lleva la lista a mano: la que había se quedó atrás —decía 33 cuando eran 35— y una lista
+escrita aquí y nunca vuelta a comprobar acaba sustituyendo a la realidad, que es la
+moraleja de este fichero entero.
 
 ## Convenciones
 
