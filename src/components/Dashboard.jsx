@@ -1213,6 +1213,7 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
 // Campo de fecha en formato DD/MM/AAAA fijo — independiente del locale del sistema/navegador
 function DateInput({ value, onChange }) {
   const [text, setText] = useState(() => isoToDdMmYyyy(value));
+  const nativoRef = useRef(null);
   // Resincronizar el texto cuando cambia la prop, sin efecto (evita un render en cascada)
   const [prevValue, setPrevValue] = useState(value);
   if (value !== prevValue) {
@@ -1237,19 +1238,50 @@ function DateInput({ value, onChange }) {
     setText(isoToDdMmYyyy(value));
   }
 
+  // El botón del calendario abre el selector nativo del navegador sin ceder el formato
+  // del campo: lo que se ve y se escribe sigue siendo DD/MM/AAAA. `showPicker()` solo
+  // se puede llamar sobre un `<input type="date">` de verdad, así que hay uno detrás,
+  // invisible y sin recibir clics — el que los recibe es el botón.
+  function abrirCalendario() {
+    const el = nativoRef.current;
+    if (!el) return;
+    try { el.showPicker(); }
+    catch { el.focus(); el.click(); }   // navegadores sin showPicker
+  }
+
   return (
-    <input
-      type="text" inputMode="numeric" placeholder="DD/MM/AAAA" className="la-time-input"
-      value={text}
-      onChange={e => setText(e.target.value)}
-      onBlur={e => commit(e.target.value)}
-      onKeyDown={e => { if (e.key === "Enter") { commit(e.target.value); e.currentTarget.blur(); } }}
-      style={{
-        width: "100%", padding: "9px 12px", background: "var(--surface2)",
-        border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)",
-        fontSize: 14, fontFamily: "'DM Mono', monospace",
-      }}
-    />
+    <div style={{ position: "relative", width: "100%" }}>
+      <input
+        type="text" inputMode="numeric" placeholder="DD/MM/AAAA" className="la-time-input"
+        value={text}
+        onChange={e => setText(e.target.value)}
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") { commit(e.target.value); e.currentTarget.blur(); } }}
+        style={{
+          width: "100%", padding: "9px 32px 9px 12px", background: "var(--surface2)",
+          border: "0.5px solid var(--border2)", borderRadius: 8, color: "var(--text)",
+          fontSize: 14, fontFamily: "'DM Mono', monospace",
+        }}
+      />
+      <input
+        ref={nativoRef} type="date" tabIndex={-1} aria-hidden="true"
+        value={value || ""}
+        onChange={e => { if (e.target.value) onChange(e.target.value); }}
+        style={{
+          position: "absolute", top: 0, right: 0, width: 28, height: "100%",
+          opacity: 0, pointerEvents: "none", border: "none", padding: 0,
+        }}
+      />
+      <button type="button" onClick={abrirCalendario} title="Elegir en el calendario"
+        style={{
+          position: "absolute", top: 0, right: 0, height: "100%", width: 30,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: "transparent", border: "none", padding: 0, cursor: "pointer",
+          color: "var(--muted)", fontSize: 13, lineHeight: 1,
+        }}>
+        📅
+      </button>
+    </div>
   );
 }
 
