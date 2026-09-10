@@ -8706,10 +8706,11 @@ def _alarma_avisar(fila: dict, ahora: datetime) -> None:
             f"te despierta Alexa.\n\n— Jarvis",
             aviso_id=rid,
             acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
-            # Un despertador que no suena con el móvil en silencio no despierta. Es la
-            # segunda cosa del proyecto que se permite esto, y por el mismo criterio que
-            # la primera: sin respuesta, se queda bloqueado.
-            critico=True,
+            # Aviso normal, no crítico: el crítico se salta el silencio del móvil y eso
+            # resultó ser demasiado para un respaldo. Si el móvil está callado y no
+            # confirmas, quien despierta es la escalada por el altavoz, que es justo
+            # para lo que está.
+            critico=False,
         )
     except Exception as e:
         # No se libera la reserva, al revés que en los recordatorios: allí el aviso se
@@ -8726,7 +8727,7 @@ def _alarma_insistir(fila: dict, intento: int) -> None:
             f"Sigues sin confirmar. {_alarma_texto(fila)}.\n\n— Jarvis",
             aviso_id=rid,
             acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
-            critico=True,
+            critico=False,
         )
     except Exception as e:
         logger.error("Alarma %s: fallo al insistir (%s)", rid, e)
