@@ -241,3 +241,133 @@ export function resumenEstado(sys, extra = []) {
   if (!sys) return { tono: "muted", texto: "sin comprobar" };
   return { tono: "green", texto: "todo responde" };
 }
+
+// ── FASE 2: DESPLIEGUE ────────────────────────────────────────────────────────
+
+// De qué commit se construyó este bundle. Lo hornea vite.config.js con lo que Vercel pone
+// en el entorno del build; en local es "dev" y no se puede comparar con nada.
+export const COMMIT_FRONTEND = import.meta.env.VITE_COMMIT_SHA || "dev";
+
+// Un sha para leerlo de un vistazo. Siete caracteres es lo que enseña git y lo que se
+// puede comparar a ojo con la pestaña de GitHub abierta al lado.
+export function shaCorto(sha) {
+  if (!sha || sha === "desconocida" || sha === "dev") return sha || "—";
+  return String(sha).slice(0, 7);
+}
+
+// El semáforo de un lado del despliegue (backend o frontend) a partir de lo que devuelve
+// `GET /dev/despliegue`. Lo que no se sabe se dice; nunca se da por al día.
+export function estadoDespliegue(lado) {
+  if (!lado)             return { tono: "muted", texto: "sin comprobar" };
+  if (lado.sha === "dev") return { tono: "muted", texto: "en local, sin sha que comparar" };
+  if (!lado.conocido) {
+    return { tono: "accent", texto: lado.motivo || "no se ha podido comparar con main" };
+  }
+  if (lado.al_dia) return { tono: "green", texto: `al día con main (${shaCorto(lado.sha)})` };
+  const n = lado.detras;
+  return {
+    tono: "red",
+    texto: `${n} commit${n === 1 ? "" : "s"} por desplegar (sirve ${shaCorto(lado.sha)})`,
+  };
+}
+
+// ── FASE 2: PROGRAMADOS ───────────────────────────────────────────────────────
+
+// El mismo margen que usa el backend (PROGRAMADO_MARGEN). GitHub retrasa los crons cuando
+// tiene cola, y la revisión nocturna no corre las noches sin commits: con menos margen
+// esto estaría en rojo media semana y dejaría de mirarse.
+export const MARGEN_PROGRAMADO = 2;
+
+export function textoCada(horas) {
+  if (!horas) return "";
+  if (horas % 168 === 0) return horas === 168 ? "semana" : `${horas / 168} semanas`;
+  if (horas % 24 === 0)  return horas === 24 ? "día" : `${horas / 24} días`;
+  return `${horas} h`;
+}
+
+// Qué significa el último run de un workflow. Son dos preguntas y no una: si la última
+// vez FALLÓ y si ha corrido CUANDO tocaba. La copia de seguridad de Supabase estuvo meses
+// contestando "sí" a la segunda y "no" a la primera, y por mirar solo una no lo vio nadie.
+export function estadoWorkflow(wf, ahora = Date.now()) {
+  if (!wf) return { tono: "muted", texto: "sin comprobar" };
+  if (!wf.run) {
+    return { tono: "muted", texto: wf.motivo || "no ha corrido nunca" };
+  }
+  const { estado, resultado, cuando } = wf.run;
+  const hace  = cuando ? (ahora - new Date(cuando).getTime()) / 3600000 : null;
+  const desde = desdeHace(cuando) || "sin fecha";
+
+  if (estado && estado !== "completed") return { tono: "accent", texto: `corriendo (${desde})` };
+  if (resultado === "failure" || resultado === "timed_out") {
+    return { tono: "red", texto: `falló ${desde}` };
+  }
+  if (resultado && resultado !== "success") {
+    // "cancelled", "skipped", "startup_failure": ni bien ni mal, pero no es un éxito y
+    // no puede pintarse en verde.
+    return { tono: "accent", texto: `${resultado} ${desde}` };
+  }
+  // Corrió bien, pero ¿hace cuánto? Un cron que dejó de dispararse no falla: calla.
+  if (wf.cada_horas && hace != null && hace > wf.cada_horas * MARGEN_PROGRAMADO) {
+    return { tono: "red", texto: `bien, pero la última fue ${desde} (toca cada ${textoCada(wf.cada_horas)})` };
+  }
+  return { tono: "green", texto: `bien ${desde}` };
+}
+
+// El semáforo de un sondeo. `margen` es cuánto se le tolera sin dar señales: los sondeos
+// de HA pasan cada 15-60 s, así que cinco minutos son varios perdidos seguidos; el del
+// agente PC no, porque el PC está apagado la mayor parte del día y eso es lo normal.
+export function estadoSondeo(sondeo, procesoDesdeHace = null) {
+  if (!sondeo) return { tono: "muted", texto: "sin comprobar" };
+  const seg = sondeo.hace_segundos;
+  if (seg == null) {
+    // Un backend recién arrancado no ha visto sondear a nadie todavía, y eso no es que
+    // nadie sondee. Decirlo evita diez filas en rojo tras cada reconstrucción.
+    if (procesoDesdeHace != null && procesoDesdeHace < 600) {
+      return { tono: "muted",
+               texto: `sin datos aún (el backend lleva ${enPieDesde(procesoDesdeHace)} en pie)` };
+    }
+    return { tono: "accent", texto: "no ha sondeado desde que arrancó el backend" };
+  }
+  const texto = seg < 60 ? `hace ${seg}s`
+    : seg < 3600 ? `hace ${Math.round(seg / 60)} min`
+    : `hace ${Math.round(seg / 3600)} h`;
+  if (sondeo.opcional) return { tono: seg > 86400 ? "muted" : "green", texto };
+  return { tono: seg > 600 ? "red" : seg > 300 ? "accent" : "green", texto };
+}
+
+// Los sondeos que solo pasan cuando algo está encendido: el PC no está siempre puesto, y
+// pintar en rojo que su agente lleva horas sin pedir jobs sería llamar avería a la noche.
+export const SONDEOS_OPCIONALES = ["/jobs/pending", "/llamada/pendiente"];
+
+// Cuánto lleva el backend en pie, en las mismas palabras en los dos sitios donde se dice.
+// Con dos redondeos distintos, la misma pantalla llegó a decir "1 min" arriba y "0 min"
+// abajo — y una pantalla que se contradice a sí misma no se cree en lo demás.
+export function enPieDesde(segundos) {
+  if (segundos == null) return "un rato";
+  const min = Math.round(segundos / 60);
+  return min < 1 ? "menos de un minuto" : `${min} min`;
+}
+
+// Junta lo que hace falta para la pestaña de programados: una llamada por bloque, en
+// paralelo, y todo contra el propio backend (es decir, gratis: se puede refrescar solo).
+export async function leerCrons() {
+  const r = await apiFetch(`${API}/dev/crons`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  const datos = await r.json();
+  return {
+    ...datos,
+    sondeos: (datos.sondeos || []).map(s => ({ ...s, opcional: SONDEOS_OPCIONALES.includes(s.ruta) })),
+  };
+}
+
+export async function leerDespliegue() {
+  const sha = COMMIT_FRONTEND === "dev" ? "" : COMMIT_FRONTEND;
+  const r = await apiFetch(`${API}/dev/despliegue${sha ? `?frontend=${encodeURIComponent(sha)}` : ""}`,
+                           { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  const datos = await r.json();
+  // El backend no puede saber que estamos en local: lo sabe el bundle, y de aquí sale el
+  // "en local, sin sha que comparar" en vez de un hueco sin explicación.
+  if (!sha) datos.frontend = { sha: "dev", conocido: false, motivo: "en local" };
+  return datos;
+}

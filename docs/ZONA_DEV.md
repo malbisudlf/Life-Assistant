@@ -26,34 +26,40 @@ mira deprisa desde el móvil sigue estando a un toque, y el detalle no se duplic
 
 ## Dónde retomar
 
-**Estado al 2026-09-09.** La fase 1 está escrita, verificada y en el PR
-[#164](https://github.com/malbisudlf/Life-Assistant/pull/164), rama `claude/zona-dev`.
-**Sin probar contra el backend real**: se comprobó con lint, los 368 tests de frontend,
-los 1.371 de backend y el build, pero nadie ha abierto todavía la zona dev en el navegador.
+**Estado al 2026-09-10.** La fase 1 está en `main` (PR
+[#164](https://github.com/malbisudlf/Life-Assistant/pull/164)). De la fase 2 están hechas
+**Despliegue y Crons**; quedan **Base de datos y Configuración**, que van en un PR aparte.
 
-Lo primero, y sin esto la pestaña Ideas no funciona:
+Nada de esto se ha abierto todavía en un navegador contra el backend real. Lo que falta
+para que funcione de verdad, en orden:
 
 1. **Aplicar `supabase/migrations/20260909_ideas_dev.sql`** a mano en el editor SQL de
    Supabase. Mientras no esté, `GET /dev/ideas` responde 502 y la pestaña lo dice en
    pantalla nombrando la migración.
-2. **Reconstruir el add-on** del Home Assistant Green cuando el PR esté en `main`: los
-   endpoints nuevos (`/dev/ideas`, los filtros de `/logs`) viven en el backend, que no se
-   despliega solo. Comprobar con `GET /` que el `version` coincide.
+2. **Reconstruir el add-on** del Home Assistant Green cuando esto esté en `main`: los
+   endpoints (`/dev/ideas`, `/dev/despliegue`, `/dev/crons`, los filtros de `/logs`) viven
+   en el backend, que no se despliega solo. Comprobar con `GET /` que el `version`
+   coincide — o, mejor, mirarlo en la propia pestaña Despliegue, que es para lo que está.
 3. Abrir el 🛠 y mirar si el semáforo dice la verdad, que es lo único que estos tests no
    pueden comprobar.
 
-Después, la **fase 2** (despliegue, crons, base de datos y migraciones, configuración),
-que es la que responde «¿qué está roto?» y la que habría pillado sola los dos fallos que
-la motivan: la copia de seguridad muerta durante meses y la migración un mes sin aplicar.
-Al añadir una pestaña: un fichero en `src/components/dev/`, su entrada en `PESTANAS` de
-`ZonaDev.jsx` con `fase: 1` para encenderla, y la lógica que se pueda probar sin pantalla
-a `src/lib/dev.js`, que es donde están los tests.
+Para la **pestaña Base de datos** hay una decisión ya tomada y sin ejecutar: las
+migraciones aplicadas se sabrán por una **tabla de registro** (`migraciones_aplicadas`),
+no sondeando el esquema. Eso significa una migración nueva que la cree e inserte las que
+ya están puestas, y una convención a partir de ahí: **cada `.sql` nuevo termina
+insertando su propio nombre**. Se eligió frente a sondear tabla por tabla porque el
+sondeo hay que mantenerlo a mano —un mapa migración → tabla— y una migración sin entrada
+en ese mapa pasa desapercibida, que es justo el fallo que la pestaña viene a evitar.
 
 Lo que quedó decidido y no hace falta volver a discutir: dónde vive (vista propia, no
 modal), qué pasa con ⚙ (una línea y un enlace), la forma de una idea (la de
 `docs/IDEAS.md`, pero guardando con solo el título), el refresco (automático solo en lo
 que es gratis) y qué puede tocar la zona dev (vaciar el registro, forzar envíos,
 reintentar jobs; nunca desplegar).
+
+Al añadir una pestaña: un fichero en `src/components/dev/`, su entrada en `PESTANAS` de
+`ZonaDev.jsx` con `fase: 1` para encenderla, y la lógica que se pueda probar sin pantalla
+a `src/lib/dev.js`, que es donde están los tests.
 
 ## Decisiones de forma
 
@@ -104,15 +110,30 @@ Por fases. Cada fase es un PR.
 
 ### Fase 2 — qué está roto
 
-4. **Despliegue** — SHA del Green (`GET /`) contra el `main` de GitHub contra lo que sirve
-   Vercel. Responde de un vistazo "¿entró la reconstrucción?", que ya mordió una vez.
-5. **Crons** — cuándo corrió por última vez cada cosa automática y si fue bien: copia de
-   Supabase, revisión nocturna, resumen, informe, vigilantes.
-6. **Base de datos** — filas por tabla y, sobre todo, **qué migraciones de
-   `supabase/migrations/` están aplicadas y cuáles no**.
-7. **Configuración** — qué variables tiene puestas el backend y cuáles le faltan (lo que
-   `backend/check_config.py` sabe, pero por consola), y qué credenciales caducan. Nunca el
+4. **Despliegue** (hecha) — el sha del Green contra el `main` de GitHub contra el que
+   sirve Vercel, con la lista de commits que le faltan al backend. Responde de un vistazo
+   "¿entró la reconstrucción?", que ya mordió una vez. **No reconstruye**: eso se pulsa a
+   mano en Home Assistant, y la pestaña lo recuerda en vez de ofrecer un botón que no
+   puede existir.
+5. **Crons** (hecha) — el último run de cada workflow programado, los envíos del resumen
+   y del informe, las averías abiertas del vigilante y **quién sigue sondeando**.
+6. **Base de datos** — filas por tabla y qué migraciones están aplicadas (ver «Dónde
+   retomar» para cómo se va a saber).
+7. **Configuración** — qué variables tiene puestas el backend y cuáles le faltan: lo que
+   `backend/check_config.py` sabe, pero sin consola, y qué credenciales caducan. Nunca el
    valor: solo si está y si sirve.
+
+### Lo que se decidió al escribir Despliegue y Crons
+
+| Decisión | Por qué |
+|---|---|
+| El sha del frontend lo aporta el navegador | El despliegue de Vercel no pasa por el backend, así que nadie más lo sabe. `vite.config.js` hornea `VERCEL_GIT_COMMIT_SHA` en el bundle como una `VITE_*` más; en local vale `dev` y la pestaña lo dice en vez de comparar contra nada. El backend lo valida como sha antes de meterlo en una URL de GitHub. |
+| El refresco automático depende de `DEPLOY_GITHUB_TOKEN` | La regla del dinero no aplica —la API de GitHub es gratis— pero la cuota sí: 60 peticiones/hora sin credencial, que una pestaña abierta se gasta sola. Con token son 5.000 y se refresca; sin él, solo a botón, y la pantalla dice por qué. |
+| La lista de programados va a mano en `backend/main.py` | Un workflow no publica su cron por la API, y el contenedor del add-on solo lleva `backend/`. Va en la constante `PROGRAMADOS`, y **un test la compara con los `.yml` que llevan `schedule:`**: si se añade un cron y no se apunta aquí, falla el CI. Sin ese test, la lista se quedaría atrás exactamente igual que se quedó atrás la copia de seguridad. |
+| Un cron que corrió BIEN pero hace demasiado también es rojo | La copia de Supabase falló meses seguidos; lo contrario —que deje de dispararse— no produce un solo run rojo al que agarrarse. Se compara con `cada_horas` por el doble de margen (`PROGRAMADO_MARGEN`), que absorbe los 10-15 min de retraso de GitHub y las noches sin commits de la revisión nocturna. |
+| Los sondeos se cuentan en memoria | Es una escritura cada 15 segundos, siete días a la semana: guardarla costaría más de lo que vale. Se pierden al reiniciar, y por eso `/dev/crons` da también cuánto lleva el proceso en pie — «no ha sondeado» y «no ha sondeado desde que arranqué hace 40 segundos» son cosas distintas. |
+| La marca del sondeo la pone el middleware | Son diez rutas y se olvidaría justo en la que se caiga. Un 403 **no** cuenta como sondeo: HA llamando con el token mal es exactamente el fallo que hay que ver. |
+| El agente PC y la llamada no se pintan en rojo por callar | El PC está apagado la mayor parte del día. Llamar avería a eso es llamar avería a la noche, y una pantalla que grita cuando todo está bien deja de mirarse. |
 
 ### Fase 3 — qué pasó
 

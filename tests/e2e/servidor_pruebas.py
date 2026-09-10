@@ -46,6 +46,12 @@ os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY", "no-es-una-clave-real")
 os.environ.setdefault("JARVIS_VOZ_ELEVENLABS", "1")
 os.environ.setdefault("ELEVENLABS_API_KEY", "eleven-e2e-key")
 os.environ.setdefault("ELEVENLABS_VOICE_ID", "voz-e2e")
+# La zona de desarrollo pregunta a GitHub por el último commit de `main` y por los runs de
+# los workflows programados. Con el repositorio y una credencial de mentira se ejerce el
+# camino de verdad (la llamada la responde el router de abajo); sin ellos, las pestañas
+# Despliegue y Crons enseñarían "falta JARVIS_REPO" y no probarían nada.
+os.environ.setdefault("JARVIS_REPO", "malbisudlf/Life-Assistant")
+os.environ.setdefault("DEPLOY_GITHUB_TOKEN", "gh-e2e-token")
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el
@@ -198,6 +204,19 @@ class _RouterSimulado:
               "full_text": "Contenido de la idea", "tag": "e2e",
               "created_at": f"{_dia(0)}T09:00:00Z"}])),
         ("/rest/v1/clothing", lambda: _Respuesta([])),
+        # Antes que `/rest/v1/ideas`, que es prefijo suyo: si no, la checklist de la zona
+        # dev recibiría las notas por voz, que son otra tabla y otra cosa.
+        ("/rest/v1/ideas_dev", lambda: _Respuesta([{
+            "id": "33333333-3333-4333-8333-333333333333",
+            "titulo": "Idea de la zona dev", "porque": "para el E2E",
+            "por_donde": None, "esfuerzo": 1, "area": "frontend", "estado": "pendiente",
+            "creada": f"{_dia(0)}T09:00:00Z", "actualizada": f"{_dia(0)}T09:00:00Z",
+        }])),
+        ("/rest/v1/brief_envios", lambda: _Respuesta(
+            [{"fecha": _dia(0), "enviado_at": _iso(-3), "fuente": "despertar"}])),
+        ("/rest/v1/informe_envios", lambda: _Respuesta(
+            [{"fecha": _dia(-2), "enviado_at": _iso(-48)}])),
+        ("/rest/v1/vigilante_estado", lambda: _Respuesta([])),
         ("/rest/v1/pc_agents", lambda: _Respuesta([])),
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),
@@ -220,6 +239,24 @@ class _RouterSimulado:
         # "/me/calendars", así que si la lista de calendarios fuera primero se comería
         # también esa llamada y /calendar/classes recibiría calendarios donde espera
         # eventos (o al revés) y acabaría en un 500.
+        # GitHub, para las pestañas Despliegue y Crons de la zona dev. El `compare`
+        # devuelve un commit de diferencia a propósito: es el caso que hay que ver bien
+        # pintado, no el de "todo al día".
+        ("/compare/", lambda: _Respuesta({
+            "ahead_by": 1,
+            "commits": [{"sha": "b" * 40, "commit": {
+                "message": "zona dev: despliegue y crons",
+                "author": {"date": _iso(-2)}}}],
+        })),
+        ("/commits/main", lambda: _Respuesta({
+            "sha": "a" * 40,
+            "commit": {"message": "alarmas: el aviso al movil deja de ser critico (#167)",
+                       "author": {"date": _iso(-1)}},
+        })),
+        ("/actions/workflows/", lambda: _Respuesta({"workflow_runs": [{
+            "status": "completed", "conclusion": "success", "updated_at": _iso(-6),
+            "html_url": "https://github.com/malbisudlf/Life-Assistant/actions/runs/1",
+        }]})),
         ("/calendarView", lambda: _Respuesta(_EVENTOS_GRAPH)),
         ("/me/calendars", lambda: _Respuesta(_CALENDARIOS_GRAPH)),
         ("graph.microsoft.com", lambda: _Respuesta(_EVENTOS_GRAPH)),
@@ -316,6 +353,10 @@ def _preparar():
         "access_token": "session-e2e",
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=180)).timestamp(),
     }
+    # El sha "desplegado". En el contenedor lo escribe el clon (`/app/VERSION`) y aquí no
+    # existe, así que sin esto la pestaña Despliegue del E2E diría "no lo dice" y no
+    # probaría la comparación, que es lo único que esa pantalla tiene que hacer bien.
+    main._version_desplegada = lambda: "b" * 40
     # Jarvis: lo único que se sustituye es el modelo. Las herramientas, el bucle y la
     # frontera de confirmación son las de producción.
     main.get_openai_client = lambda: _ModeloSimulado()

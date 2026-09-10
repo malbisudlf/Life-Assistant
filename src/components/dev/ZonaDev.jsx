@@ -9,6 +9,8 @@ import { useState, useEffect } from "react";
 import Ideas from "./Ideas";
 import Estado from "./Estado";
 import Logs from "./Logs";
+import Despliegue from "./Despliegue";
+import Crons from "./Crons";
 
 // Las pestañas que existen y las que existirán. Las de fases posteriores se enseñan
 // apagadas en vez de esconderse: el plan a la vista es lo que evita que la zona dev se
@@ -17,8 +19,8 @@ const PESTANAS = [
   { id: "ideas",  etiqueta: "Ideas",      fase: 1 },
   { id: "estado", etiqueta: "Estado",     fase: 1 },
   { id: "logs",   etiqueta: "Logs",       fase: 1 },
-  { id: "deploy", etiqueta: "Despliegue", fase: 2 },
-  { id: "crons",  etiqueta: "Crons",      fase: 2 },
+  { id: "deploy", etiqueta: "Despliegue", fase: 1 },
+  { id: "crons",  etiqueta: "Crons",      fase: 1 },
   { id: "bd",     etiqueta: "Base de datos", fase: 2 },
   { id: "config", etiqueta: "Config",     fase: 2 },
   { id: "linea",  etiqueta: "Línea de tiempo", fase: 3 },
@@ -109,6 +111,8 @@ export default function ZonaDev({ onSalir, agentId, filasExtra }) {
         {tab === "ideas"  && <Ideas />}
         {tab === "estado" && <Estado agentId={agentId} filasExtra={filasExtra} />}
         {tab === "logs"   && <Logs />}
+        {tab === "deploy" && <Despliegue />}
+        {tab === "crons"  && <Crons />}
       </main>
     </div>
   );
