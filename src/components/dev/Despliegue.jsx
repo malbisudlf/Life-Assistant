@@ -64,9 +64,15 @@ export default function Despliegue() {
       const r = await reconstruirAddon();
       setObra("reconstruyendo… (1-2 min)");
       const fin = await esperarAlBackend({ antes: r.version_antes });
-      setObra(fin.ok
-        ? `listo · sirviendo ${shaCorto(fin.version)}`
-        : "no ha vuelto a tiempo — míralo en Home Assistant antes de reintentar");
+      // Tres finales distintos, y ninguno se puede decir con las palabras de otro. El de
+      // en medio —volvió con el mismo sha— es el normal cuando ya estabas al día, y
+      // durante un rato se enseñó como si hubiera fallado.
+      setObra(
+        fin.ok && fin.cambio  ? `listo · ahora sirve ${shaCorto(fin.version)}`
+        : fin.ok              ? `listo · sigue sirviendo ${shaCorto(fin.version)} (ya estaba al día)`
+        : fin.cayo            ? "se paró pero no ha vuelto en 3 min — míralo en Home Assistant"
+        : "el backend no ha llegado a pararse: la reconstrucción no ha arrancado. "
+          + "Suele ser que al add-on le faltan permisos (hassio_role) — mira la pestaña Logs");
       if (fin.ok) setTic(t => t + 1);
     } catch (e) {
       setObra(e.message || "no se ha podido lanzar");

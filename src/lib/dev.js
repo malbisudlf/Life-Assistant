@@ -453,23 +453,33 @@ export async function reconstruirAddon() {
 
 // Espera a que el backend vuelva y dice con qué sha lo ha hecho.
 //
-// Sondear `GET /` es la única comprobación que vale: la reconstrucción puede terminar
-// «bien» y no haber traído el código (le pasó, por la caché de capas de Docker), y desde
-// fuera las dos cosas son idénticas. Sin credenciales a propósito — durante el arranque
-// no hay nada más que responda, y esto tiene que funcionar igual.
+// Lo que se busca NO es que el sha cambie, aunque fuera lo primero que se escribió: si ya
+// estabas al día —el caso normal cuando se reconstruye para recuperar un despliegue
+// dudoso— vuelve con el mismo sha, y esperar un cambio dejaba «no ha vuelto a tiempo»
+// después de tres minutos de una reconstrucción perfecta.
+//
+// Lo que se busca es la CAÍDA y la vuelta: reconstruir para el add-on, así que si el
+// backend no llega a dejar de responder es que la reconstrucción nunca arrancó — y eso
+// tiene un culpable concreto (el Supervisor la ha rechazado, casi siempre por permisos)
+// que conviene decir en vez de disfrazarlo de tiempo agotado.
+//
+// Sondear `GET /` sin credenciales es a propósito: durante el arranque no hay nada más
+// que responda.
 export async function esperarAlBackend({ antes, intentos = 40, cada = 5000, dormir } = {}) {
   const pausa = dormir || (ms => new Promise(r => setTimeout(r, ms)));
+  let cayo = false;
   for (let i = 0; i < intentos; i++) {
     await pausa(cada);
+    let version = null;
     try {
       const r = await fetch(`${API}/`);
-      if (r.ok) {
-        const version = (await r.json())?.version;
-        // Que responda no basta: hasta que el sha cambie, lo que contesta es el proceso
-        // viejo (el Supervisor tarda en pararlo) o uno nuevo con el código de siempre.
-        if (version && version !== antes) return { ok: true, version };
-      }
-    } catch { /* aún parado: es lo esperado a mitad de reconstrucción */ }
+      if (r.ok) version = (await r.json())?.version || null;
+    } catch { /* parado: es lo que se espera a mitad de reconstrucción */ }
+
+    if (!version) { cayo = true; continue; }
+    // Con sha nuevo no hace falta haber visto la caída: el código ya es otro.
+    if (version !== antes) return { ok: true, version, cambio: true, cayo };
+    if (cayo) return { ok: true, version, cambio: false, cayo };
   }
-  return { ok: false, version: null };
+  return { ok: false, version: null, cambio: false, cayo };
 }
