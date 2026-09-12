@@ -358,9 +358,20 @@ reconstrucción no ha traído el código. Hizo falta porque durante un tiempo *n
 traía*: el `RUN git clone` del `Dockerfile` es una instrucción invariable y Docker
 reutilizaba su capa cacheada, así que el add-on servía el código del día en que se
 construyó la imagen por primera vez. Reconstruir terminaba bien, sin un solo aviso, y
-producción seguía igual. Ahora un `ADD` de la API de GitHub —cuyo contenido cambia con
-cada commit— invalida esa capa antes del clone. *Un despliegue que no puede
+producción seguía igual. Ahora un `ADD` del feed de commits de GitHub —cuyo contenido
+cambia con cada commit— invalida esa capa antes del clone. *Un despliegue que no puede
 comprobarse no es un despliegue, es una esperanza.*
+
+**Ese `ADD` va al feed de `github.com`, NO a `api.github.com`, y no da igual.** La API sin
+credencial da **60 peticiones por hora y por IP**, compartidas con todo lo que salga de
+casa — incluidas las pestañas Despliegue, Crons y Base de datos de la zona dev, que
+preguntan por `main`. El 2026-09-12 la cuota se agotó, el `ADD` devolvió 403 y la
+construcción murió ahí; el Supervisor **ya había borrado la imagen anterior**, así que
+producción se quedó **caída** hasta reconstruir con el feed. Dos cosas que aprender de
+ahí: una reconstrucción fallida no deja el backend como estaba, lo deja **sin backend**
+(no hay rollback: hay que arreglar la construcción), y `ha addons rebuild` puede terminar
+bien dejando el add-on **parado** — comprueba el estado y arráncalo con
+`ha addons start local_life-assistant` si hace falta.
 
 **Ya no escala a cero, y ya no importa.** Cuando estaba en Fly, este fichero afirmaba
 que dormía sin tráfico y era **falso** desde el 13/05/2026: Home Assistant sondeaba seis
