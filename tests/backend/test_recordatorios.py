@@ -512,14 +512,22 @@ class TestVigilanteDelSistema:
         assert main._vigilar_sistema() == {}
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
-    def test_el_aviso_es_uno_al_dia(self, mock_requests):
-        """Mismo uuid5 del día contra la clave primaria que el resto de avisos."""
+    def test_el_aviso_es_uno_al_dia_por_averia(self, mock_requests):
+        """Mismo uuid5 contra la clave primaria que el resto de avisos.
+
+        Lleva el día **y la huella de las averías**: con solo el día, una avería nueva
+        por la tarde chocaba contra el aviso de la mañana y no salía — justo lo contrario
+        de lo que promete el comentario de la huella ("una avería NUEVA vuelve a hablar
+        el mismo día").
+        """
         self._errores(mock_requests, 4)
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
         main._vigilar_sistema()
         apuntado = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        huella = apuntado["huella"]
+        assert huella.startswith("errores:POST /health/ingest:")
         assert apuntado["id"] == str(uuid.uuid5(
-            uuid.NAMESPACE_URL, f"life-assistant:vigilante:{self.HOY}"))
+            uuid.NAMESPACE_URL, f"life-assistant:vigilante:{self.HOY}:{huella}"))
 
     def test_solo_mira_una_vez_por_hora(self, mock_requests):
         self._errores(mock_requests, 0)

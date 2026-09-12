@@ -36,7 +36,7 @@
 | `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
 | `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón «Apagar» del aviso de salir de casa: encola el apagado de las entidades que llevaba ese aviso |
 | `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
-| `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta |
+| `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta. Sirve a los **tres** orígenes de `revision_hallazgos` (`issue`, `ci`, `vigilante`); el del vigilante manda una instrucción propia con los errores concretos y la orden de NO mergear |
 | `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
 | `POST /revision/pr-listo` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI ha puesto en verde el PR del arreglo: deja el aviso con botones y llama por teléfono |
 | `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` mergea el PR y lanza el deploy, `nada` lo descarta. **La única ruta que toca producción** |
