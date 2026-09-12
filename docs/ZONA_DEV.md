@@ -26,16 +26,20 @@ mira deprisa desde el móvil sigue estando a un toque, y el detalle no se duplic
 
 ## Dónde retomar
 
-**Estado al 2026-09-10.** Las fases 1 y 2 están hechas: Ideas, Estado, Logs, Despliegue,
-Crons, Base de datos y Config. Lo siguiente es la **fase 3** («qué pasó»), empezando por
-la línea de tiempo.
+**Estado al 2026-09-12.** Las fases 1, 2 y 3 están hechas: Ideas, Estado, Logs,
+Despliegue, Crons, Base de datos, Config, Línea de tiempo, Agente y jobs, Salud de datos y
+Avisos. Lo siguiente es la **fase 4** («el resto»), empezando por el gasto.
 
 Lo único que hay que hacer a mano al mergear esto:
 
 1. **Aplicar `supabase/migrations/20260910_migraciones_aplicadas.sql`.** Es la que crea el
    registro; mientras no esté, la pestaña Base de datos lo dice nombrándola y no puede
    saber qué falta. Declara aplicadas las 35 anteriores.
-2. **Reconstruir el add-on**: `/dev/bd` y `/dev/config` son backend.
+2. **Reconstruir el add-on**: `/dev/bd`, `/dev/config` y los tres endpoints de la fase 3
+   (`/dev/linea`, `/dev/jobs`, `/dev/avisos`) son backend.
+
+La fase 3 **no añade ninguna migración**: todo lo que enseña ya estaba escrito en tablas
+que existen. Lo que no había era forma de cruzarlas.
 
 **La convención que estrena esa migración: toda migración nueva termina insertando su
 nombre en `migraciones_aplicadas`.** Dos líneas al final del `.sql`:
@@ -83,7 +87,9 @@ en una pestaña del navegador toda la tarde.
 La zona dev no es solo de lectura, pero solo hace cosas que ya existen como endpoint y que
 son reversibles o repetibles: vaciar el registro (`DELETE /logs`), forzar el resumen
 diario o el informe semanal (`POST /brief/send`, `POST /informe/send`), reintentar un job
-del PC (`POST /jobs/{id}/retry`) y despertarlo (`POST /wake-pc`).
+del PC (`POST /jobs/{id}/retry`), despertarlo (`POST /wake-pc`) y devolverle la voz a una
+regla que se ha silenciado sola (`POST /avisos/reglas/{regla}/reactivar`) — que es
+reversible por partida doble: si vuelve a acumular votos negativos, se callará otra vez.
 
 **Y desde el 2026-09-10, reconstruye.** El botón *Reconstruir* de la pestaña Despliegue
 llama a `POST /dev/reconstruir`, y el add-on se lo pide al Supervisor él mismo. Es la
@@ -147,13 +153,37 @@ Por fases. Cada fase es un PR.
 
 ### Fase 3 — qué pasó
 
-8. **Línea de tiempo** — todo lo de hoy en un solo hilo cronológico: ingestas, avisos,
-   jobs, correos, errores. Hoy vive en cinco tablas y no hay forma de ver la secuencia.
-9. **Agente y jobs** — heartbeat, cola, eventos de cada job, reintentar.
-10. **Salud de los datos** — sobre `GET /health/diagnostico`: si llegan datos, de qué
-    fuente, qué se descartó y por qué.
-11. **Avisos y reglas** — qué salió, por qué (`GET /avisos/{id}/porque`), qué está apagado
-    y qué reglas siguen vivas.
+8. **Línea de tiempo** (hecha) — todo lo de un día en un solo hilo cronológico: registro,
+   avisos, cola del PC y sus etapas, ingestas del reloj y correos. Se puede retroceder día
+   a día y apagar carriles. Vivía en seis tablas y no había forma de ver la secuencia, que
+   es lo único que hace falta para entender una avería.
+9. **Agente y jobs** (hecha) — quién está vivo y cuánto lleva callado, la cola con las
+   etapas de cada job desplegables, las últimas entregas resueltas, y los dos botones que
+   ya existían: despertar el PC y reintentar un job fallido.
+10. **Salud de los datos** (hecha) — sobre `GET /health/diagnostico`, que ya contestaba
+    esto desde agosto pero solo desde una consola: qué fuente ha dejado de escribir, y por
+    métrica cuándo llegó el último dato y cuántos huecos tiene.
+11. **Avisos y reglas** (hecha) — qué salió, por qué (`GET /avisos/{id}/porque`, que se
+    pide solo al abrir un aviso), la estadística de votos de cada regla, cuáles se han
+    silenciado solas —con el botón de devolverles la voz—, las reglas que propuso Jarvis y
+    las páginas que vigila.
+
+### Lo que se decidió al escribir la fase 3
+
+| Decisión | Por qué |
+|---|---|
+| La línea del día va en hora LOCAL, no UTC | Lo que pasó a las 00:30 de esta noche es de hoy, aunque en UTC (y en verano) sea de ayer. Con la ventana en UTC, media noche de eventos aparecía en el día que no era. Mismo criterio y misma forma que `/avisos/enviados`. |
+| Lo que no se puede leer se DICE (`sin_leer`) | Es el único error que estas pantallas no se pueden permitir: un día tranquilo y tres tablas caídas traen los dos cero eventos. Por eso nada de aquí usa `_supabase_error` —un 502 dejaría la pantalla en blanco por una tabla— y por eso una tabla que no responde sale como `null` y nunca como lista vacía. |
+| Una ingesta de salud es UN evento, no cien | Un envío del Watch escribe entre veinte y cien filas en el mismo segundo: sin agrupar por (fuente, minuto), un solo envío tapa el día entero. Y lo que se quiere saber no es qué métricas llegaron, sino que llegó algo, de quién y a qué hora. |
+| El intervalo va como `and=(...)` y no como dos parámetros | En un diccionario de query params la misma clave no cabe dos veces: `created_at=gte.X` y `created_at=lt.Y` se pisaban y la consulta se traía desde la fecha hasta hoy, sin error ninguno. |
+| Se recorta por el principio, no por el final | El tope existe para el día en que algo entra en bucle y escribe mil filas — que es justo el día en que esta pantalla hace falta. Lo último que pasó es lo que se está mirando. |
+| El refresco automático solo mirando HOY | Un día pasado no cambia. Refrescarlo es gastar peticiones para volver a pintar exactamente lo mismo. |
+| Las etapas de los jobs van en UNA consulta | Treinta jobs en la tabla serían treinta idas y vueltas para pintarla. Van con `job_id=in.(...)` y ya repartidas por job en la respuesta. |
+| El botón de reintentar solo sale donde el endpoint lo acepta | `POST /jobs/{id}/retry` exige `status=failed` **y** `claimed_by`: ofrecerlo en un `pending` sería ofrecer un 409. Y donde no sale se dice por qué — quedarse sin intentos y no haber sido cogido nunca son dos problemas distintos. |
+| Una regla silenciada se pinta en ROJO | No ha fallado nada, y precisamente por eso: significa que el sistema dejó de avisarte de algo y no te lo dijo. Sale en la lista **aunque lleve semanas sin mandar nada** —que es lo normal, porque está callada—, cruzando los avisos enviados con `avisos_reglas`. |
+| Los votos se cuentan aquí, no en `avisos_reglas` | Esa tabla guarda los "no útil" SEGUIDOS, que es lo que dispara el silencio, y no cuántos avisos ha mandado la regla. Son dos cuentas distintas y hacían falta las dos. |
+| El "por qué" de un aviso se pide al abrirlo | Son doscientos avisos en la ventana: pedirlo con la lista serían doscientas consultas para leer una. |
+| La fase 3 no añade ni una tabla | Todo lo que enseña ya estaba escrito. El problema nunca fue que faltaran datos: era que estaban en seis sitios que nadie cruza a mano. |
 
 ### Fase 4 — el resto
 
