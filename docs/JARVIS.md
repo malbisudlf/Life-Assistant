@@ -585,6 +585,31 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   es "está roto") y un fallo de `vigilante_estado` **no calla el aviso**: sale sin cifras
   y sin issue. Si la migración no se aplica, lo único degradado es el vigilante.
 
+  **El aviso es una PREGUNTA con dos botones, no una noticia** (desde el 2026-09-12). Los
+  mismos que la revisión nocturna —«Arreglarlo» / «No hacer nada»— y a propósito: la
+  pregunta es la misma, la contesta el mismo endpoint (`POST /revision/{id}/accion`) y
+  reusar los ids `LA_ARREGLAR_` / `LA_NADA_` significa que esto **no necesitó ni una línea
+  nueva de YAML en Home Assistant**. La decisión se apunta en `revision_hallazgos` con
+  `origen='vigilante'` —la misma tabla que ya guarda las otras dos clases de decisión de
+  este proyecto, así que tampoco hizo falta migración— y **la sesión que lanza ese botón
+  abre PR y NO mergea**, igual que el camino de las averías (`docs/AVERIAS.md`): arreglar
+  solo, sí; desplegar solo, no. Si no hay rutina de arreglo configurada, o si la decisión
+  no se puede escribir, el aviso sale **sin botones** (regla `vigilante_solo`) en vez de
+  con uno que al pulsarlo no encontraría su fila — pulsar algo y que no pase nada es la
+  avería clásica de este canal.
+
+  **Y la avería se identifica por QUÉ errores son, no solo por de dónde salen.** La clave
+  era `errores:<origen>`, el origen siempre es `life-assistant`, y como el issue solo se
+  abre mientras `issue_url` sea nulo, **el primer issue valía para siempre**: el
+  2026-09-12 el vigilante llevaba 317 detecciones desde el 21 de agosto apuntando a un
+  issue del 3 de septiembre que hablaba de otros errores y que, encima, decía «8 errores
+  en life-assistant» **sin listar ni uno**. Ahora la clave lleva una huella de las formas
+  de error que la componen (`_firma_error`, que sustituye las cifras por `#` para que el
+  mismo fallo con otro tiempo de respuesta no cuente como otro), así que un conjunto
+  nuevo es una avería nueva: issue nuevo, y aviso el mismo día. Y tanto el aviso como el
+  issue **los nombran** (`VIGILANTE_MAX_DETALLES`): «8 errores» no se puede arreglar
+  porque no dice cuáles, ni por una persona ni por la sesión que lance el botón.
+
 
 - **Jarvis se diagnostica** (`diagnostico`): fallos de `app_logs` agrupados por origen,
   estado del resumen diario, cuántos días lleva cada métrica sin dato, **quién escribió

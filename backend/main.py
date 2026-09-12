@@ -1878,6 +1878,11 @@ def get_weather(
         timeout=10,
     )
     if r.status_code >= 300:
+        # El detalle al registro y un genérico al cliente, como con Supabase y con Graph.
+        # Sin esto, el 502 llegaba al registro como «GET /weather → 502» desde el
+        # middleware y no había forma de saber cuál de los dos 502 de esta función era:
+        # uno se arregla mirando a Open-Meteo y el otro tocando este código.
+        logger.error("Clima: Open-Meteo devolvió %s", r.status_code)
         raise HTTPException(status_code=502, detail="No se pudo obtener el clima")
     try:
         data    = r.json()
@@ -1910,7 +1915,9 @@ def get_weather(
             "precip":     current.get("precipitation"),
             "daily":      dias,
         }
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError) as e:
+        logger.error("Clima: Open-Meteo respondió 200 con algo que no encaja (%s: %s)",
+                     type(e).__name__, e)
         raise HTTPException(status_code=502, detail="Respuesta de clima inválida")
 
 
@@ -9091,6 +9098,18 @@ REGLA_DESPLIEGUE    = "despliegue"
 # no vería nadie. Y con regla propia y no sin ella para que se pueda silenciar sola si
 # algún día se vuelve ruido, como cualquier otra.
 REGLA_PROGRAMADO    = "programado"
+# La del vigilante del sistema («N errores en las últimas 24 h»). Existía como texto
+# suelto hasta el 2026-09-12, y esa era exactamente la razón de que su aviso llegara al
+# móvil sin nada que pulsar: `_acciones_aviso` decide los botones por la regla, y una
+# regla que no reconoce se lleva los de por defecto (útil / no útil). Con nombre propio,
+# el aviso pregunta lo que hay que preguntar de una avería: si la arreglo o no.
+REGLA_VIGILANTE     = "vigilante"
+# La misma noticia cuando NO hay nada que decidir: solo reparaciones, o no se ha podido
+# apuntar la decisión en Supabase. Hacen falta dos reglas y no una porque los botones se
+# eligen por la regla y nada más: con una sola, un aviso cuya decisión no llegó a
+# escribirse saldría con un botón que al pulsarlo no encuentra su fila — y pulsar algo y
+# que no pase nada es la avería clásica de este canal, peor que no tener botón.
+REGLA_VIGILANTE_SOLO = "vigilante_solo"
 # Las de «avísame»: una sesión de Claude Code deja dicho qué te pidió y qué hizo
 # (`docs/AVISAME.md`). Son DOS y no una porque lo único que separa a un «ya está hecho»
 # de un «no puedo seguir sin ti» es si el trabajo se queda parado hasta que contestes, y
@@ -10340,6 +10359,13 @@ VIGILANTE_CADA        = float(os.getenv("VIGILANTE_CADA_MIN", "60"))
 # suelto es la vida; lo que se repite es lo que está roto.
 VIGILANTE_MIN_ERRORES = int(os.getenv("VIGILANTE_MIN_ERRORES", "3"))
 VIGILANTE_VENTANA_DIAS = int(os.getenv("VIGILANTE_VENTANA_DIAS", "1"))
+# Cuántas formas distintas de error se nombran en el aviso y en el issue. Nombrarlas es
+# lo que hace que el aviso sirva para algo —«8 errores en life-assistant» no se puede
+# arreglar—, pero una notificación del móvil con veinte líneas no se lee.
+VIGILANTE_MAX_DETALLES = int(os.getenv("VIGILANTE_MAX_DETALLES", "5"))
+# Tope de lo que se guarda como `detalle` de la decisión. Es lo que leerá la sesión que
+# arregle, así que cabe más que en una notificación, pero no un registro entero.
+VIGILANTE_DETALLE_MAX  = 800
 # Abrir issue en el repo para lo que necesite un cambio de código. Es la única forma de
 # "arreglarse a sí mismo" que cubre las averías reales de este proyecto: casi ninguna se
 # podía arreglar desde el backend, todas necesitaban tocar código.
@@ -10448,11 +10474,29 @@ def _vigilante_guardar_issue(clave: str, url: str) -> None:
         logger.warning("Vigilante: no se pudo guardar la URL del issue de '%s' (%s)", clave, e)
 
 
+def _firma_error(mensaje: str) -> str:
+    """La primera línea de un error, sin sus cifras, para poder contar repeticiones.
+
+    Sin quitar los números, «GET /weather → 502 (395 ms)» y el mismo fallo con 410 ms
+    serían dos errores distintos: la huella cambiaría en cada aparición y el vigilante
+    abriría un issue por hora. Con ellos fuera, lo que queda es la FORMA del fallo.
+    """
+    return re.sub(r"\d+", "#", str(mensaje or "").split("\n")[0])[:120]
+
+
 def _averias_del_registro() -> list:
-    """Errores que se repiten en `app_logs`, agrupados por origen.
+    """Errores que se repiten en `app_logs`, agrupados por origen y por forma del fallo.
 
     Solo ERROR: los WARNING son la vida normal de este sistema (un 400 de un cliente, un
     429) y ya tienen quien los mire donde importa. Lo que se repite es lo que está roto.
+
+    **La clave lleva la huella de QUÉ errores son, no solo de dónde salen.** Con
+    `errores:<origen>` a secas —que es como estuvo hasta el 2026-09-12— el primer issue
+    que se abría valía para siempre: `vigilante_estado` guardaba su URL, y como solo se
+    abre uno mientras esa URL no sea nula, el vigilante llevaba 317 detecciones apuntando
+    a un issue del 3 de septiembre que hablaba de OTROS errores y no listaba ninguno. Con
+    la huella dentro, un conjunto de errores nuevo es una avería nueva: issue nuevo, y
+    aviso el mismo día (que es lo que la huella del despachador ya prometía).
     """
     try:
         entradas = (get_logs(nivel="ERROR", dias=VIGILANTE_VENTANA_DIAS, limite=200,
@@ -10466,18 +10510,43 @@ def _averias_del_registro() -> list:
     por_origen: dict = {}
     for e in entradas:
         origen = str(e.get("source") or "?")
-        fila = por_origen.setdefault(origen, {"veces": 0, "ultima": ""})
+        fila   = por_origen.setdefault(origen, {"veces": 0, "firmas": {}})
         fila["veces"] += 1
-        if (e.get("created_at") or "") > fila["ultima"]:
-            fila["ultima"] = e.get("created_at") or ""
+        firma = _firma_error(e.get("message"))
+        dato  = fila["firmas"].setdefault(firma, {"mensaje": firma, "veces": 0, "ultima": ""})
+        dato["veces"] += 1
+        if (e.get("created_at") or "") > dato["ultima"]:
+            dato["ultima"] = e.get("created_at") or ""
 
-    return [{
-        "clave":     f"errores:{origen}",
-        "texto":     (f"{datos['veces']} errores en {origen} en las últimas "
-                      f"{VIGILANTE_VENTANA_DIAS * 24} h."),
-        "issue":     True,
-    } for origen, datos in sorted(por_origen.items(), key=lambda kv: -kv[1]["veces"])
-        if datos["veces"] >= VIGILANTE_MIN_ERRORES]
+    averias = []
+    for origen, datos in sorted(por_origen.items(), key=lambda kv: -kv[1]["veces"]):
+        if datos["veces"] < VIGILANTE_MIN_ERRORES:
+            continue
+        # uuid5 y no hashlib: es sha1 igualmente y `uuid` ya está importado.
+        huella = uuid.uuid5(uuid.NAMESPACE_URL,
+                            "|".join(sorted(datos["firmas"]))).hex[:8]
+        averias.append({
+            "clave":    f"errores:{origen}:{huella}",
+            "texto":    (f"{datos['veces']} errores en {origen} en las últimas "
+                         f"{VIGILANTE_VENTANA_DIAS * 24} h."),
+            "detalles": sorted(datos["firmas"].values(),
+                               key=lambda d: -d["veces"])[:VIGILANTE_MAX_DETALLES],
+            "issue":    True,
+        })
+    return averias
+
+
+def _lista_de_errores(averias: list) -> str:
+    """Los errores concretos, en líneas. Es lo que faltaba en el issue y en el aviso.
+
+    «8 errores en life-assistant» no se puede arreglar: no dice cuáles. Esto es lo que
+    convierte el aviso en algo accionable y lo que lee la sesión que lo arregla.
+    """
+    lineas = []
+    for a in averias:
+        for d in a.get("detalles") or []:
+            lineas.append(f"· {d['veces']}× {d['mensaje']}")
+    return "\n".join(lineas)
 
 
 def _reparar_rutina(hoy: str) -> tuple[list, list]:
@@ -10503,6 +10572,49 @@ def _reparar_rutina(hoy: str) -> tuple[list, list]:
              "issue": False}], []
 
 
+def _vigilante_apuntar_decision(rid: str, averias: list, lista: str, issues: list) -> bool:
+    """Deja la avería apuntada para que el botón del móvil tenga a qué agarrarse.
+
+    Va a `revision_hallazgos` con `origen='vigilante'` y NO a una tabla propia, que es lo
+    que permite que esto no traiga migración: esa tabla ya guarda las tres clases de
+    decisión de este proyecto (la revisión nocturna, el CI roto y ahora esto), ya tiene
+    `origen` y `detalle`, y ya tiene el endpoint que consume la decisión una sola vez.
+
+    La decisión vive en Supabase por la razón de siempre: entre el aviso y el botón pasan
+    horas, y un mapa en memoria se evapora en cualquier reconstrucción del add-on.
+
+    Devuelve si se pudo apuntar. Si no se puede, el aviso sale SIN botones en vez de con
+    botones muertos — pulsar algo y que no pase nada es la avería clásica de este canal.
+    """
+    if not ARREGLO_FIRE_URL or not ARREGLO_FIRE_TOKEN:
+        # Sin rutina de arreglo el botón solo sabría disculparse. Mejor no ofrecerlo.
+        return False
+    titulo = averias[0]["texto"][:120]
+    fila = {
+        "id": rid, "issue_numero": 0, "origen": "vigilante", "estado": "pendiente",
+        "issue_titulo": titulo,
+        # El issue, si el vigilante llegó a abrirlo. Puede no haberlo: sin MCP de GitHub
+        # el aviso sale igual, y la sesión de arreglo tiene el detalle de abajo.
+        "issue_url": issues[0] if issues else "",
+        # Lo que se va a arreglar, en texto. Es lo que leerá la sesión: sin esto tendría
+        # que adivinar qué errores eran, y el issue puede no existir.
+        "detalle": (f"{titulo}\n{lista}")[:VIGILANTE_DETALLE_MAX],
+    }
+    try:
+        r = http.post(REVISION_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json=fila)
+        # El 409 no es un fallo: ya estaba apuntada (mismo día, mismas averías). El aviso
+        # de arriba se deduplica por su lado, así que aquí basta con no romper.
+        if r.status_code == 409:
+            return True
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return True
+    except Exception as e:   # noqa: BLE001 — sin decisión, aviso sin botones y a seguir
+        logger.warning("Vigilante: no se pudo apuntar la decisión de %s (%s)", rid, e)
+        return False
+
+
 def _vigilar_sistema() -> dict:
     """Mira si algo se está rompiendo, repara lo que sabe reparar y lo cuenta."""
     global _ultima_vigilancia_sistema
@@ -10518,7 +10630,8 @@ def _vigilar_sistema() -> dict:
     if not averias and not reparadas:
         return {}
 
-    partes = []
+    partes: list = []
+    issues: list = []
     for r in reparadas:
         estado = _vigilante_estado(f"reparado:{r['clave']}")
         veces  = estado.get("veces") or 0
@@ -10537,26 +10650,51 @@ def _vigilar_sistema() -> dict:
         # El issue solo la primera vez: uno por día del mismo fallo convierte el repo en
         # el mismo ruido del que este vigilante viene a salvarte.
         if a.get("issue") and estado and not estado.get("issue_url"):
+            lista = _lista_de_errores([a])
             url = _vigilante_abrir_issue(
                 f"[vigilante] {a['texto'][:80]}",
                 f"Detectado por el vigilante del sistema el {hoy}.\n\n{a['texto']}\n\n"
-                "Abierto automáticamente: el fallo se repite y no se puede reparar desde "
-                "el backend, así que necesita un cambio de código.",
+                # Los errores CONCRETOS. Sin esto el issue decía "8 errores en
+                # life-assistant" y nada más: no se podía arreglar porque no decía cuáles,
+                # y una sesión de arreglo mandada ahí no tendría por dónde empezar.
+                + (f"Qué se repite (las cifras van como `#`, "
+                   f"para que el mismo fallo cuente como uno):\n\n```\n{lista}\n```\n\n"
+                   if lista else "")
+                + "Abierto automáticamente: el fallo se repite y no se puede reparar desde "
+                  "el backend, así que necesita un cambio de código.",
             )
             if url:
                 _vigilante_guardar_issue(a["clave"], url)
                 detalle += f" He abierto un issue: {url}"
+                issues.append(url)
         partes.append(detalle)
 
-    texto = " ".join(partes)
+    lista = _lista_de_errores(averias)
+    if lista:
+        partes.append("\n" + lista)
+
     logger.warning("Vigilante: %d avería(s), %d reparada(s)", len(averias), len(reparadas))
     # La huella son las averías concretas: mientras sean las mismas no hace falta
     # repetirlo cada día, pero una avería NUEVA vuelve a hablar el mismo día.
     huella = ",".join(sorted(a["clave"] for a in averias)) or "solo_reparaciones"
-    if not _apuntar_aviso("vigilante", texto, prioridad=PRIO_NORMAL,
-                          id=str(uuid.uuid5(uuid.NAMESPACE_URL,
-                                            f"life-assistant:vigilante:{hoy}")),
-                          huella=huella):
+    # El id del aviso lleva la huella, no solo el día: si por la tarde aparece una avería
+    # distinta, el uuid de "hoy" chocaría contra el de la mañana y el aviso nuevo no
+    # saldría — que es justo lo contrario de lo que promete el párrafo de arriba.
+    rid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:vigilante:{hoy}:{huella}"))
+
+    # Y aquí la diferencia con todo lo anterior: si hay avería de verdad (no solo
+    # reparaciones) el aviso deja de ser una noticia y pasa a ser una PREGUNTA con dos
+    # botones, exactamente igual que el de la revisión nocturna. Sin la fila apuntada no
+    # se ponen los botones: un botón que al pulsarlo no encuentra su decisión es peor que
+    # no tenerlo.
+    regla = REGLA_VIGILANTE if (averias and _vigilante_apuntar_decision(
+        rid, averias, lista, issues)) else REGLA_VIGILANTE_SOLO
+    texto = " ".join(partes)
+    if regla == REGLA_VIGILANTE:
+        texto += ("\n\n¿Los arreglo? Responde con los botones del aviso, o dime «arregla "
+                  "lo del vigilante» — si esto te ha llegado por correo, no hay botones.")
+
+    if not _apuntar_aviso(regla, texto, prioridad=PRIO_NORMAL, id=rid, huella=huella):
         return {"vigilante_averias": len(averias)}
     return {"vigilante_averias": len(averias), "vigilante_reparadas": len(reparadas),
             "aviso_vigilante": True}
@@ -11758,7 +11896,11 @@ def _acciones_aviso(rid: str, regla: str) -> list:
     """
     if not rid:
         return []
-    if regla == REGLA_REVISION:
+    # Los mismos botones para los dos, y a propósito: la pregunta es la misma («¿lo
+    # arreglo?») y la contesta el mismo endpoint. Reusar los ids `LA_ARREGLAR_` /
+    # `LA_NADA_` significa además que el vigilante NO necesita ni una línea nueva de YAML
+    # en Home Assistant — la automatización que ya existe casa por ese prefijo.
+    if regla in (REGLA_REVISION, REGLA_VIGILANTE):
         return [{"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"},
                 {"action": f"LA_NADA_{rid}",     "title": "No hacer nada"}]
     if regla == REGLA_DESPLIEGUE:
@@ -12571,12 +12713,34 @@ def _revision_decidir(rid: str, accion: str) -> dict:
 
     fila   = filas[0]
     numero = int(fila.get("issue_numero") or 0)
+    origen = str(fila.get("origen") or "issue")
+    titulo = str(fila.get("issue_titulo") or "")
+    url    = str(fila.get("issue_url") or "")
     if accion == "nada":
-        logger.info("Revisión: issue #%s descartado a mano", numero)
-        return {"ok": True, "hecho": True, "accion": "nada", "issue": numero}
+        logger.info("Revisión (%s): %s descartado a mano", origen,
+                    f"issue #{numero}" if numero else titulo or "aviso")
+        return {"ok": True, "hecho": True, "accion": "nada", "issue": numero,
+                "origen": origen}
 
-    resultado = _disparar_arreglo(numero, str(fila.get("issue_titulo") or ""),
-                                  str(fila.get("issue_url") or ""))
+    # El vigilante no tiene issue de la revisión nocturna que leer, y sobre todo NO
+    # quiere que se mergee: igual que el camino de las averías, aquí el PR se queda
+    # esperando tu permiso. La diferencia viaja en la instrucción y no en un flag de la
+    # rutina, que es lo que permite que haya UNA sola rutina de arreglo para los tres
+    # caminos.
+    instruccion = ""
+    if origen == "vigilante":
+        instruccion = (
+            f"El vigilante del sistema de {JARVIS_REPO} ha visto estos errores "
+            f"repetirse en el registro (`app_logs`):\n\n{fila.get('detalle') or titulo}\n\n"
+            f"Las cifras van sustituidas por `#` porque los errores se agrupan por su "
+            f"forma. Investiga de dónde salen (mira el registro con `GET /logs`, o la "
+            f"pestaña Logs de la zona dev) y arréglalos. "
+            + (f"Hay un issue con el detalle: {url}. " if url else
+               "No hay issue que leer: lo de arriba es todo lo que se sabe. ")
+            + f"Abre un PR con el arreglo y DÉJALO ABIERTO — no lo mergees, aunque el CI "
+              f"pase. El permiso para desplegarlo lo da Mikel después.")
+
+    resultado = _disparar_arreglo(numero, titulo, url, instruccion=instruccion)
     if not resultado["ok"]:
         # La decisión se libera: si se quedara en "arreglando", el botón ya no volvería y
         # el arreglo no se habría lanzado. Mismo criterio que liberar la reserva cuando
@@ -12596,7 +12760,7 @@ def _revision_decidir(rid: str, accion: str) -> dict:
     except Exception as e:
         logger.warning("Revisión: no se pudo guardar la sesión de %s (%s)", rid, e)
     return {"ok": True, "hecho": True, "accion": "arreglar", "issue": numero,
-            "sesion": resultado["sesion"]}
+            "origen": origen, "sesion": resultado["sesion"]}
 
 
 def _acusar_recibo(titulo: str, texto: str) -> None:
@@ -12635,9 +12799,15 @@ def revision_accion(request: Request, body: RevisionAccionRequest,
         # Pulsar un botón y que no pase nada visible es la avería de siempre de este
         # canal: se contesta por el mismo sitio por el que llegó la pregunta.
         sesion = resultado.get("sesion") or ""
-        _acusar_recibo("🔧 Arreglando la revisión",
-                       f"Voy a por los hallazgos del issue #{resultado.get('issue')}. "
-                       f"Cuando termine habrá un PR."
+        # El acuse dice de QUÉ arreglo habla: el vigilante no tiene issue que citar, y un
+        # «los hallazgos del issue #0» es de las cosas que hacen desconfiar de un canal.
+        del_vigilante = resultado.get("origen") == "vigilante"
+        que = ("los errores que vio el vigilante" if del_vigilante
+               else f"los hallazgos del issue #{resultado.get('issue')}")
+        _acusar_recibo("🔧 Arreglando",
+                       f"Voy a por {que}. Cuando termine habrá un PR"
+                       + (", y lo dejo abierto: el permiso para desplegarlo lo das tú."
+                          if del_vigilante else ".")
                        + (f"\n\n{sesion}" if sesion else ""))
     elif not resultado.get("ok"):
         _acusar_recibo("🔧 No he podido lanzar el arreglo",
