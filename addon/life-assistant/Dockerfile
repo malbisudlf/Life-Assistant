@@ -25,11 +25,19 @@ WORKDIR /app
 # sin avisos, y el backend arranca igual de viejo. Se descubrio el 2026-09-08, tras
 # mergear dos arreglos a main, reconstruir, y comprobar que produccion los ignoraba.
 #
-# `ADD` con una URL se descarga siempre y compara el contenido: como este JSON lleva
-# el SHA del ultimo commit de la rama, la capa se invalida cuando —y solo cuando— hay
-# codigo nuevo que traer. Si GitHub no responde, la construccion falla, que es
-# preferible a desplegar lo de antes creyendo que se ha desplegado lo de ahora.
-ADD https://api.github.com/repos/malbisudlf/Life-Assistant/commits/main /tmp/ultimo_commit.json
+# `ADD` con una URL se descarga siempre y compara el contenido: como esto lleva el SHA
+# del ultimo commit de la rama, la capa se invalida cuando —y solo cuando— hay codigo
+# nuevo que traer. Si GitHub no responde, la construccion falla, que es preferible a
+# desplegar lo de antes creyendo que se ha desplegado lo de ahora.
+#
+# Va al FEED de github.com y NO a api.github.com, y eso no es un detalle: la API sin
+# credencial da 60 peticiones por HORA y por IP, compartidas con todo lo que salga de
+# casa —incluidas las pestanas Despliegue, Crons y Base de datos de la zona dev, que
+# preguntan por `main` cada minuto—. El 2026-09-12 esa cuota se agoto, el `ADD` devolvio
+# 403, la construccion murio ahi y el Supervisor ya habia borrado la imagen anterior:
+# produccion se quedo CAIDA hasta que la cuota se renovo. El feed lo sirve github.com,
+# no tiene ese limite, y su contenido cambia exactamente igual con cada commit.
+ADD https://github.com/malbisudlf/Life-Assistant/commits/main.atom /tmp/ultimo_commit.xml
 
 # Del clon se guarda el SHA en /app/VERSION: `GET /` lo devuelve, y es la unica forma
 # de saber que codigo esta corriendo ahi dentro sin entrar en el Green.
