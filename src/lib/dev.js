@@ -4,7 +4,7 @@
 // Vive aquí y no junto a los componentes por la regla de siempre (CLAUDE.md): un fichero
 // .jsx no puede exportar más que componentes o se rompe el refresco en caliente, y
 // además el resumen lo necesita también el panel ⚙ del dashboard.
-import { API, authHeaders, apiFetch } from "./api";
+import { API, authHeaders, jsonHeaders, apiFetch } from "./api";
 import { isoToDdMmYyyy } from "./helpers";
 
 export const MONO = "'DM Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -482,4 +482,177 @@ export async function esperarAlBackend({ antes, intentos = 40, cada = 5000, dorm
     if (cayo) return { ok: true, version, cambio: false, cayo };
   }
   return { ok: false, version: null, cambio: false, cayo };
+}
+
+// ── FASE 3: LA LÍNEA DEL DÍA ──────────────────────────────────────────────────
+
+// Los carriles de la línea. El orden es el de la leyenda, no el de los datos: cuando algo
+// va mal, lo primero que se mira es el registro.
+export const CARRILES = [
+  { id: "registro", etiqueta: "Registro" },
+  { id: "avisos",   etiqueta: "Avisos" },
+  { id: "jobs",     etiqueta: "Cola del PC" },
+  { id: "salud",    etiqueta: "Salud" },
+  { id: "correo",   etiqueta: "Correos" },
+];
+
+// Hoy, en AAAA-MM-DD y en local. A mano y no con `toISOString()`, que devuelve UTC: a las
+// 00:30 de la noche eso daría el día de ayer, que es exactamente el desfase que la ventana
+// del backend existe para no cometer.
+export function diaLocal(fecha = new Date()) {
+  const dd = (n) => String(n).padStart(2, "0");
+  return `${fecha.getFullYear()}-${dd(fecha.getMonth() + 1)}-${dd(fecha.getDate())}`;
+}
+
+// Mover el día que se está mirando. Se construye a mediodía para que un cambio de hora no
+// se coma ni repita un día.
+export function diaDesplazado(dia, dias) {
+  const [a, m, d] = String(dia).split("-").map(Number);
+  const f = new Date(a, (m || 1) - 1, d || 1, 12);
+  f.setDate(f.getDate() + dias);
+  return diaLocal(f);
+}
+
+export async function leerLinea(dia) {
+  const r = await apiFetch(`${API}/dev/linea?dia=${encodeURIComponent(dia)}`,
+                           { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
+// Lo que resume la línea en una frase. Lo que no se ha podido leer va ANTES que el
+// recuento: un día tranquilo y un día con tres tablas caídas traen los dos cero eventos, y
+// esa es la confusión que esta pantalla no puede permitirse.
+export function resumenLinea(datos) {
+  if (!datos) return { tono: "muted", texto: "sin comprobar" };
+  if (datos.sin_leer?.length) {
+    return { tono: "accent", texto: `no se ha podido leer: ${datos.sin_leer.join(", ")}` };
+  }
+  const rojos = (datos.eventos || []).filter(e => e.tono === "red").length;
+  if (rojos) return { tono: "red", texto: `${rojos} en rojo de ${datos.total} eventos` };
+  if (!datos.total) return { tono: "muted", texto: "no pasó nada ese día" };
+  return { tono: "green", texto: `${datos.total} eventos, ninguno en rojo` };
+}
+
+// ── FASE 3: AGENTE Y JOBS ─────────────────────────────────────────────────────
+
+export async function leerJobs(limite = 30) {
+  const r = await apiFetch(`${API}/dev/jobs?limite=${limite}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
+// El semáforo de un agente. Callar NO es rojo: el PC está apagado la mayor parte del día,
+// y una pantalla que grita cuando todo está bien deja de mirarse (docs/ZONA_DEV.md).
+export function estadoAgente(agente, timeout = 60) {
+  if (!agente) return { tono: "muted", texto: "sin comprobar" };
+  const seg = agente.silencio_segundos;
+  if (seg == null) return { tono: "muted", texto: "su última señal tiene fecha ilegible" };
+  if (seg <= timeout) return { tono: "green", texto: `${agente.status} · visto hace ${seg}s` };
+  return { tono: "muted", texto: `apagado · visto ${desdeHace(agente.last_seen_at)}` };
+}
+
+// El semáforo de un job y si se puede reintentar. Reintentar solo vale para los fallidos
+// que ya tienen dueño: el endpoint exige `claimed_by`, así que ofrecer el botón en un
+// `pending` sería ofrecer un 409.
+export function estadoJob(job, maxIntentos = 3) {
+  if (!job) return { tono: "muted", texto: "sin comprobar", reintentable: false, motivo: null };
+  const tono = { done: "green", failed: "red", running: "accent",
+                 claimed: "accent", pending: "muted" }[job.status] || "muted";
+  const agotado = (job.attempt ?? 0) >= maxIntentos;
+  return {
+    tono,
+    texto: job.status + (job.attempt ? ` · intento ${job.attempt}/${maxIntentos}` : ""),
+    reintentable: job.status === "failed" && !!job.claimed_by && !agotado,
+    // Se dice POR QUÉ no se puede en vez de esconder el botón sin explicación: quedarse
+    // sin intentos y no haber sido cogido nunca son dos problemas distintos.
+    motivo: job.status !== "failed" ? null
+      : !job.claimed_by ? "nadie llegó a cogerlo: no hay a quién devolvérselo"
+      : agotado ? `agotó los ${maxIntentos} intentos`
+      : null,
+  };
+}
+
+export async function reintentarJob(id, worker) {
+  const r = await apiFetch(`${API}/jobs/${id}/retry`, {
+    method:  "POST",
+    headers: jsonHeaders(),
+    body:    JSON.stringify({ worker_id: worker }),
+  });
+  const cuerpo = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(cuerpo.detail || `el backend respondió ${r.status}`);
+  return cuerpo;
+}
+
+// ── FASE 3: SALUD DE LOS DATOS ────────────────────────────────────────────────
+
+export async function leerDiagnostico(dias = 30) {
+  const r = await apiFetch(`${API}/health/diagnostico?dias=${dias}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
+// El semáforo de una métrica. Lo que importa no es cuántos datos hay sino desde cuándo no
+// llega ninguno: el Watch estuvo días sin sincronizar con la tabla llena de filas viejas, y
+// desde fuera aquello se veía igual de bien que ahora.
+export function estadoMetrica(m) {
+  if (!m)                   return { tono: "muted", texto: "sin comprobar" };
+  if (m.dias_atras == null) return { tono: "muted", texto: "nunca ha llegado un dato" };
+  const cuando = m.dias_atras === 0 ? "hoy"
+    : m.dias_atras === 1 ? "ayer"
+    : `hace ${m.dias_atras} días`;
+  const huecos = m.huecos ? ` · ${m.huecos} ${m.huecos === 1 ? "hueco" : "huecos"}` : "";
+  // Un día de retraso es lo normal: el sueño de esta noche llega por la mañana.
+  if (m.dias_atras <= 1) return { tono: "green",  texto: cuando + huecos };
+  if (m.dias_atras <= 3) return { tono: "accent", texto: cuando + huecos };
+  return { tono: "red", texto: cuando + huecos };
+}
+
+// Quién ha dejado de escribir. Es la pregunta de verdad cuando algo falla —no "¿falta el
+// sueño?" sino "¿quién ha dejado de mandar?"— y las dos fuentes escriben en la misma
+// tabla, así que sin la columna `fuente` no había forma de distinguirlas.
+export function estadoFuente(ultima) {
+  if (!ultima) return { tono: "muted", texto: "sin escrituras" };
+  const horas = (Date.now() - new Date(ultima).getTime()) / 3600000;
+  if (Number.isNaN(horas)) return { tono: "muted", texto: "fecha ilegible" };
+  const texto = desdeHace(ultima);
+  // 26 horas y no 24: el envío diario no cae siempre a la misma hora, y un margen justo
+  // pondría en ámbar media semana.
+  if (horas <= 26) return { tono: "green",  texto };
+  if (horas <= 72) return { tono: "accent", texto };
+  return { tono: "red", texto };
+}
+
+// ── FASE 3: AVISOS Y REGLAS ───────────────────────────────────────────────────
+
+export async function leerAvisosDev(dias = 7) {
+  const r = await apiFetch(`${API}/dev/avisos?dias=${dias}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
+// El semáforo de una regla. Silenciada es ROJO aunque no haya fallado nada: significa que
+// el sistema dejó de avisarte de algo y no te lo dijo, que es el fallo más caro que puede
+// cometer una regla.
+export function estadoRegla(r) {
+  if (!r) return { tono: "muted", texto: "sin comprobar" };
+  if (r.silenciada) {
+    return { tono: "red",
+             texto: `silenciada${r.silenciada_desde ? ` ${desdeHace(r.silenciada_desde)}` : ""}` };
+  }
+  if (!r.enviados) return { tono: "muted", texto: "no ha mandado nada en la ventana" };
+  if (!r.utiles && !r.no_utiles) {
+    return { tono: "muted", texto: `${r.enviados} ${r.enviados === 1 ? "aviso" : "avisos"}, ninguno votado` };
+  }
+  return {
+    tono:  r.no_utiles > r.utiles ? "accent" : "green",
+    texto: `${r.utiles} útiles / ${r.no_utiles} no · ${r.sin_votar} sin votar`,
+  };
+}
+
+export async function reactivarRegla(regla) {
+  const r = await apiFetch(`${API}/avisos/reglas/${encodeURIComponent(regla)}/reactivar`,
+                           { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
 }

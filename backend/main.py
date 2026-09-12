@@ -8389,6 +8389,438 @@ def dev_reconstruir(credentials: HTTPAuthorizationCredentials = Depends(verify_t
                     "vuelva a responder, su version dirá qué código ha quedado."}
 
 
+# ── ZONA DEV: QUÉ PASÓ (FASE 3) ───────────────────────────────────────────────
+# Las pestañas anteriores contestan "¿qué está roto AHORA?". Éstas contestan la otra mitad
+# de la pregunta, que es la que costaba horas: "¿y qué pasó?". Hoy esa respuesta vive
+# repartida en seis tablas que no se pueden cruzar sin abrir Supabase, y el orden en que
+# ocurrieron las cosas —lo único que hace falta para entender una avería— no lo tiene
+# nadie: el aviso que salió, el job que se quedó a medias y el error del registro son tres
+# filas en tres sitios que nunca se han visto juntas.
+#
+# Regla de la sección, la misma que la del resto de la zona dev: **lo que falle se queda
+# en None y se dice**. Nunca `_supabase_error` aquí — un 502 dejaría la pantalla entera en
+# blanco por una tabla, que es lo contrario de para lo que existe. Y todo pega contra
+# Supabase: gratis, o sea que se puede refrescar solo (docs/ZONA_DEV.md).
+
+# Cuántos eventos caben en un día antes de recortar. Un día normal trae veinte o treinta;
+# el tope está para el día en que algo entra en bucle y escribe mil filas — que es
+# precisamente el día en que esta pantalla hace falta y no puede tardar medio minuto.
+LINEA_MAX = 400
+
+# Cuánto se le pide a cada tabla. Por separado y no un tope global: si el registro tiene
+# 300 errores, no puede dejar sin sitio a los seis avisos del día.
+LINEA_POR_CARRIL = 200
+
+# Qué color tiene un job según cómo acabó. `pending` no es verde ni rojo: un job que lleva
+# ahí desde esta mañana no ha fallado, pero es exactamente lo que hay que ver.
+_TONO_JOB = {"done": "green", "failed": "red", "running": "accent",
+             "claimed": "accent", "pending": "muted"}
+
+
+def _dev_leer(que: str, url: str, params: dict):
+    """Una consulta de las de mirar. Devuelve None si no se pudo, y nunca lanza."""
+    try:
+        r = http.get(url, headers=supabase_headers(), params=params)
+        if r.status_code >= 300:
+            logger.warning("Zona dev (%s): %s devolvió %s", que, url, r.status_code)
+            return None
+        return r.json()
+    except Exception as e:   # noqa: BLE001 — red caída, JSON raro, lo que sea: se dice
+        logger.warning("Zona dev (%s): %s falló (%s)", que, url, type(e).__name__)
+        return None
+
+
+def _ventana_dia(dia: str):
+    """El día que se pide, en local, traducido a la ventana UTC que guardan las tablas.
+
+    En local y no en UTC porque es en lo que piensa quien pregunta: lo que pasó a las
+    00:30 de esta noche es de hoy, aunque en UTC (y en verano) sea de ayer. Mismo criterio
+    que `/avisos/enviados` y por el mismo motivo — con la ventana en UTC, media noche de
+    eventos aparecía en el día que no era.
+    """
+    if dia:
+        if not _DATE_RE.match(dia):
+            raise HTTPException(status_code=400, detail="dia debe ser AAAA-MM-DD")
+        try:
+            fecha = datetime.strptime(dia, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="dia no es una fecha real")
+    else:
+        fecha = _ahora_local().date()
+    desde = datetime(fecha.year, fecha.month, fecha.day, tzinfo=LOCAL_TZ)
+    hasta = desde + timedelta(days=1)
+    return (fecha, desde.astimezone(timezone.utc).isoformat(),
+            hasta.astimezone(timezone.utc).isoformat())
+
+
+def _entre(columna: str, desde: str, hasta: str) -> str:
+    """Un intervalo para PostgREST.
+
+    Va como `and=(...)` y no como dos parámetros: en un diccionario de query params la
+    misma clave no cabe dos veces, así que `created_at=gte.X` y `created_at=lt.Y` se
+    pisarían y la consulta se traería desde la fecha hasta hoy.
+    """
+    return f"({columna}.gte.{desde},{columna}.lt.{hasta})"
+
+
+def _eventos_ingesta(filas: list) -> list:
+    """Las escrituras de salud, agrupadas por envío.
+
+    Una ingesta del Watch escribe entre veinte y cien filas en el mismo segundo. Sin
+    agrupar, un solo envío tapa el día entero — y lo que se quiere saber no es qué
+    métricas llegaron, sino que llegó ALGO, de quién y a qué hora.
+    """
+    grupos: dict = {}
+    for f in filas:
+        creado = f.get("created_at") or ""
+        # Al minuto: las filas de un mismo envío no comparten milisegundo, pero sí minuto.
+        clave = (f.get("fuente") or "sin fuente", creado[:16])
+        g = grupos.setdefault(clave, {"cuando": creado, "metricas": set(), "dias": set()})
+        if creado and creado < g["cuando"]:
+            g["cuando"] = creado
+        g["metricas"].add(f.get("metric_name"))
+        g["dias"].add(f.get("metric_date"))
+
+    eventos = []
+    for (fuente, _), g in grupos.items():
+        dias = sorted(d for d in g["dias"] if d)
+        if len(dias) == 1:
+            cuales = f" · día {dias[0]}"
+        elif dias:
+            cuales = f" · {len(dias)} días ({dias[0]}…{dias[-1]})"
+        else:
+            cuales = ""
+        eventos.append({
+            "cuando":  g["cuando"],
+            "carril":  "salud",
+            "tono":    "green",
+            "titulo":  f"Ingesta de salud · {fuente}",
+            "detalle": f"{len(g['metricas'])} métricas{cuales}",
+            "extra":   None,
+            "ref":     None,
+        })
+    return eventos
+
+
+@app.get("/dev/linea")
+def dev_linea(dia: str = "", credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Todo lo que pasó en un día, en un solo hilo y por orden.
+
+    Seis fuentes en paralelo, cada una en su carril: el registro, los avisos que salieron,
+    la cola del PC y sus etapas, las ingestas del reloj y los correos. Lo que las une no es
+    un formato común —no lo tienen— sino la única columna que todas comparten: la hora.
+
+    Es la pestaña que contesta "¿y qué pasó justo antes de que se rompiera?", que hasta
+    ahora solo se podía responder abriendo Supabase y ordenando seis tablas a mano.
+    """
+    fecha, desde, hasta = _ventana_dia(dia)
+
+    def registro():
+        return _dev_leer("línea", f"{SUPABASE_URL}/rest/v1/app_logs", {
+            "and":    _entre("created_at", desde, hasta),
+            "select": "id,created_at,level,source,message,context",
+            "order":  "created_at.asc", "limit": LINEA_POR_CARRIL,
+        })
+
+    def avisos():
+        return _dev_leer("línea", RECORDATORIOS_URL, {
+            "enviado": "is.true",
+            "and":     _entre("enviado_at", desde, hasta),
+            "select":  "id,texto,regla,prioridad,enviado_at,util",
+            "order":   "enviado_at.asc", "limit": LINEA_POR_CARRIL,
+        })
+
+    def trabajos():
+        return _dev_leer("línea", f"{SUPABASE_URL}/rest/v1/jobs", {
+            "and":    _entre("created_at", desde, hasta),
+            "select": "id,status,dedupe_key,payload,attempt,created_at",
+            "order":  "created_at.asc", "limit": LINEA_POR_CARRIL,
+        })
+
+    def etapas():
+        return _dev_leer("línea", f"{SUPABASE_URL}/rest/v1/job_events", {
+            "and":    _entre("created_at", desde, hasta),
+            "select": "job_id,stage,message,created_at",
+            "order":  "created_at.asc", "limit": LINEA_POR_CARRIL,
+        })
+
+    def salud():
+        # El tope es alto a propósito: son las filas más numerosas del día con diferencia
+        # y se agrupan después, así que recortarlas aquí se comería envíos enteros.
+        return _dev_leer("línea", f"{SUPABASE_URL}/rest/v1/health_metrics", {
+            "and":    _entre("created_at", desde, hasta),
+            "select": "metric_date,metric_name,fuente,created_at",
+            "order":  "created_at.asc", "limit": 5000,
+        })
+
+    def correos():
+        return (_dev_leer("línea", BRIEF_ENVIOS_URL,
+                          {"fecha": f"eq.{fecha.isoformat()}", "select": "*"}),
+                _dev_leer("línea", INFORME_ENVIOS_URL,
+                          {"fecha": f"eq.{fecha.isoformat()}", "select": "*"}))
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        tareas = [pool.submit(f) for f in
+                  (registro, avisos, trabajos, etapas, salud, correos)]
+        logs, avs, jobs, jevs, metricas, (brief, informe) = [t.result() for t in tareas]
+
+    # Qué no se ha podido leer. Sin esta lista, una tabla caída y un día tranquilo se ven
+    # exactamente igual en la pantalla, que es el único error que aquí no se puede cometer.
+    sin_leer = [nombre for nombre, datos in (
+        ("registro", logs), ("avisos", avs), ("jobs", jobs), ("etapas de jobs", jevs),
+        ("salud", metricas), ("resumen diario", brief), ("informe semanal", informe),
+    ) if datos is None]
+
+    eventos: list = []
+
+    for f in logs or []:
+        contexto = f.get("context") if isinstance(f.get("context"), dict) else {}
+        nivel    = str(f.get("level") or "").upper()
+        eventos.append({
+            "cuando":  f.get("created_at"),
+            "carril":  "registro",
+            "tono":    "red" if nivel in ("ERROR", "CRITICAL") else "accent",
+            "titulo":  f"{nivel or 'LOG'} · {f.get('source') or 'backend'}",
+            # La primera línea, que es la que sitúa: el mensaje puede ser un traceback
+            # entero. El completo sigue estando en la pestaña Logs.
+            "detalle": str(f.get("message") or "").split("\n")[0][:200],
+            "extra":   contexto.get("peticion") or None,
+            "ref":     f.get("id"),
+        })
+
+    for a in avs or []:
+        eventos.append({
+            "cuando":  a.get("enviado_at"),
+            "carril":  "avisos",
+            "tono":    "red" if a.get("util") is False else "green",
+            "titulo":  f"Aviso · {a.get('regla') or 'sin regla'}",
+            "detalle": str(a.get("texto") or "")[:200],
+            "extra":   None if a.get("util") is None else ("útil" if a.get("util") else "no útil"),
+            "ref":     a.get("id"),
+        })
+
+    for j in jobs or []:
+        payload = j.get("payload") if isinstance(j.get("payload"), dict) else {}
+        eventos.append({
+            "cuando":  j.get("created_at"),
+            "carril":  "jobs",
+            "tono":    _TONO_JOB.get(j.get("status"), "muted"),
+            "titulo":  f"Job {payload.get('accion') or 'entrega'} · {j.get('status')}",
+            "detalle": str(j.get("dedupe_key") or "")[:200],
+            "extra":   f"intento {j['attempt']}" if j.get("attempt") else None,
+            "ref":     j.get("id"),
+        })
+
+    for e in jevs or []:
+        etapa = str(e.get("stage") or "")
+        eventos.append({
+            "cuando":  e.get("created_at"),
+            "carril":  "jobs",
+            "tono":    "red" if etapa in ("error", "failed") else "muted",
+            "titulo":  f"↳ {etapa or 'etapa'}",
+            "detalle": str(e.get("message") or "")[:200],
+            "extra":   None,
+            "ref":     e.get("job_id"),
+        })
+
+    eventos += _eventos_ingesta(metricas or [])
+
+    for fila in brief or []:
+        eventos.append({
+            "cuando":  fila.get("enviado_at"), "carril": "correo", "tono": "green",
+            "titulo":  "Resumen diario enviado",
+            "detalle": f"lo disparó: {fila.get('fuente') or 'desconocida'}",
+            "extra":   None, "ref": None,
+        })
+    for fila in informe or []:
+        eventos.append({
+            "cuando":  fila.get("enviado_at"), "carril": "correo", "tono": "green",
+            "titulo":  "Informe semanal enviado", "detalle": "", "extra": None, "ref": None,
+        })
+
+    # Sin hora no hay sitio en una línea de tiempo: una fila así no se coloca, se cuenta.
+    sin_hora = sum(1 for e in eventos if not e.get("cuando"))
+    eventos  = sorted((e for e in eventos if e.get("cuando")), key=lambda e: e["cuando"])
+    total    = len(eventos)
+
+    return {
+        "dia":       fecha.isoformat(),
+        # Se recorta por el principio: lo último que pasó es lo que se está mirando.
+        "eventos":   eventos[-LINEA_MAX:],
+        "total":     total,
+        "recortado": total > LINEA_MAX,
+        "sin_hora":  sin_hora,
+        "sin_leer":  sin_leer,
+    }
+
+
+@app.get("/dev/jobs")
+def dev_jobs(limite: int = 30,
+             credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """La cola del PC entera: quién está vivo, qué hay pendiente y cómo acabó cada cosa.
+
+    Hasta aquí, del agente solo se veía una fila en el panel ⚙ («online» o «apagado») y de
+    la cola no se veía nada: para saber por qué una entrega no había salido había que
+    abrir Supabase y mirar `jobs`, `job_events` y `job_results` por separado, que es justo
+    lo que hace que no se mire.
+
+    Las etapas vienen ya repartidas por `job_id` en la misma respuesta: son la mitad del
+    "¿en qué paso se quedó?" y pedirlas job a job serían treinta idas y vueltas para
+    pintar una tabla.
+    """
+    if limite < 1 or limite > 100:
+        raise HTTPException(status_code=400, detail="limite debe estar entre 1 y 100")
+
+    def agentes():
+        return _dev_leer("jobs", f"{SUPABASE_URL}/rest/v1/pc_agents", {
+            "select": "agent_id,status,last_seen_at,hostname,version",
+            "order":  "last_seen_at.desc", "limit": 10,
+        })
+
+    def cola():
+        return _dev_leer("jobs", f"{SUPABASE_URL}/rest/v1/jobs", {
+            "select": "id,status,claimed_by,claimed_at,attempt,dedupe_key,payload,created_at",
+            "order":  "created_at.desc", "limit": limite,
+        })
+
+    def resultados():
+        return _dev_leer("jobs", f"{SUPABASE_URL}/rest/v1/job_results", {
+            "select": "id,job_id,titulo,created_at", "order": "created_at.desc", "limit": 10,
+        })
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        t_ag, t_co, t_re = pool.submit(agentes), pool.submit(cola), pool.submit(resultados)
+        ags, trabajos, results = t_ag.result(), t_co.result(), t_re.result()
+
+    etapas: dict = {}
+    ids = ",".join(j["id"] for j in trabajos or [] if j.get("id"))
+    if ids:
+        for f in _dev_leer("jobs", f"{SUPABASE_URL}/rest/v1/job_events", {
+            "job_id": f"in.({ids})", "select": "job_id,stage,message,created_at",
+            "order":  "created_at.asc", "limit": 500,
+        }) or []:
+            etapas.setdefault(f.get("job_id"), []).append(f)
+
+    ahora = datetime.now(timezone.utc)
+
+    def silencio(iso):
+        try:
+            visto = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        except Exception:   # noqa: BLE001 — una fecha rara no puede valer como "vivo"
+            return None
+        return int((ahora - visto).total_seconds())
+
+    return {
+        # El mismo umbral que aplica `/agents/{id}`: con dos, la misma pantalla diría
+        # "online" arriba y "apagado" abajo.
+        "timeout_segundos": 60,
+        "agentes": None if ags is None else
+                   [{**a, "silencio_segundos": silencio(a.get("last_seen_at"))} for a in ags],
+        "jobs":    None if trabajos is None else
+                   [{**j, "etapas": etapas.get(j.get("id"), [])} for j in trabajos],
+        "resultados":   results,
+        "max_intentos": MAX_JOB_ATTEMPTS,
+    }
+
+
+@app.get("/dev/avisos")
+def dev_avisos(dias: int = 7,
+               credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Qué avisos salieron, qué reglas siguen vivas y cuáles se han callado.
+
+    El gobierno de los avisos ya existe —una regla votada "no útil" varias veces se
+    silencia sola— pero **se gobernaba a ciegas**: `/avisos/estado` dice cuántas hay
+    calladas y nada más, y para saber si una regla acierta había que acordarse de unos
+    avisos que se borran del móvil al leerlos. Aquí está entero: lo que salió, qué se votó
+    de cada regla, las reglas que Jarvis propuso y las páginas que vigila.
+    """
+    if dias < 1 or dias > 60:
+        raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 60")
+    desde = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+
+    def enviados():
+        return _dev_leer("avisos", RECORDATORIOS_URL, {
+            "enviado": "is.true", "enviado_at": f"gte.{desde}",
+            "select":  "id,texto,regla,prioridad,enviado_at,util",
+            "order":   "enviado_at.desc", "limit": 200,
+        })
+
+    def gobierno():
+        return _dev_leer("avisos", AVISOS_REGLAS_URL,
+                         {"select": "*", "order": "regla.asc", "limit": 100})
+
+    def de_usuario():
+        return _dev_leer("avisos", REGLAS_USUARIO_URL, {
+            "select": "clave,plantilla,parametros,activa,creada,ultima_vez",
+            "order":  "creada.desc", "limit": 50,
+        })
+
+    def vigilancias():
+        return _dev_leer("avisos", VIGILANCIAS_URL, {
+            "select": "clave,url,buscar,creada,ultima_vez,avisos",
+            "order":  "creada.desc", "limit": 50,
+        })
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        tareas = [pool.submit(f) for f in (enviados, gobierno, de_usuario, vigilancias)]
+        salidos, estado_reglas, reglas_usuario, vigiladas = [t.result() for t in tareas]
+
+    return {
+        "dias":        dias,
+        "activo":      AVISOS_MOVIL,
+        "canal":       "movil" if _movil_vivo() else "correo",
+        "presupuesto": {"gastado": _contar_enviados_hoy(), "tope": AVISOS_MAX_DIA},
+        "enviados":    salidos,
+        "reglas":      _reglas_con_estadistica(salidos, estado_reglas),
+        "de_usuario":  reglas_usuario,
+        "vigilancias": vigiladas,
+    }
+
+
+def _reglas_con_estadistica(salidos, estado_reglas):
+    """Cruza lo que salió con lo que el gobierno de avisos sabe de cada regla.
+
+    Son dos cuentas distintas y por eso hay que juntarlas: la tabla `avisos_reglas` guarda
+    los "no útil" SEGUIDOS (que es lo que dispara el silencio) y no cuántos avisos ha
+    mandado la regla, que hay que contar de los enviados.
+    """
+    if salidos is None and estado_reglas is None:
+        return None
+
+    por_regla: dict = {}
+    for a in salidos or []:
+        clave = a.get("regla") or "sin regla"
+        r = por_regla.setdefault(clave, {"regla": clave, "enviados": 0, "utiles": 0,
+                                         "no_utiles": 0, "sin_votar": 0, "ultimo": None})
+        r["enviados"] += 1
+        if a.get("util") is True:
+            r["utiles"] += 1
+        elif a.get("util") is False:
+            r["no_utiles"] += 1
+        else:
+            r["sin_votar"] += 1
+        if (a.get("enviado_at") or "") > (r["ultimo"] or ""):
+            r["ultimo"] = a.get("enviado_at")
+
+    estado = {str(e.get("regla")): e for e in estado_reglas or []}
+    for clave, fila in por_regla.items():
+        e = estado.get(clave) or {}
+        fila["silenciada"]         = bool(e.get("silenciada"))
+        fila["silenciada_desde"]   = e.get("silenciada_desde")
+        fila["no_utiles_seguidos"] = e.get("no_utiles")
+
+    # Una regla silenciada puede no haber mandado nada en la ventana — de hecho es lo
+    # normal, porque está callada. Es EL caso que hay que ver, así que entra igual.
+    for clave, e in estado.items():
+        if clave not in por_regla and e.get("silenciada"):
+            por_regla[clave] = {"regla": clave, "enviados": 0, "utiles": 0, "no_utiles": 0,
+                                "sin_votar": 0, "ultimo": None, "silenciada": True,
+                                "silenciada_desde": e.get("silenciada_desde"),
+                                "no_utiles_seguidos": e.get("no_utiles")}
+
+    return sorted(por_regla.values(), key=lambda r: (-r["enviados"], r["regla"]))
+
+
 # ── CASA: ÓRDENES PARA HOME ASSISTANT ─────────────────────────────────────────
 # Encender una luz desde aquí choca con el mismo muro de siempre: el backend NO puede
 # llamar a Home Assistant, que vive en la LAN y no está expuesto. Así que se usan los dos

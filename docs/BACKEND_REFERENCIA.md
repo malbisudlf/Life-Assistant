@@ -204,6 +204,9 @@ está duplicado en los dos lados y **tienen que coincidir**.
 | `GET /dev/crons` | JWT | Todo lo que corre solo: el último run de cada workflow programado, los últimos envíos del resumen y del informe, las averías abiertas del vigilante y cuándo sondeó por última vez cada máquina |
 | `GET /dev/bd` | JWT | Filas por tabla (cuenta exacta, sin traerlas) y qué migraciones están aplicadas: cruza `supabase/migrations/` según GitHub con la tabla `migraciones_aplicadas` |
 | `GET /dev/config` | JWT | Qué funcionalidades tienen su configuración completa y cuáles no, con la misma lista que `check_config.py`, más la sesión de Microsoft. **Nunca devuelve el valor de una variable** |
+| `GET /dev/linea?dia=` | JWT | Todo lo que pasó ese día en un solo hilo y por orden: registro, avisos enviados, cola del PC y sus etapas, ingestas de salud y correos. La ventana va en hora LOCAL. Lo que no se pueda leer sale en `sin_leer` en vez de parecer un día tranquilo |
+| `GET /dev/jobs?limite=` | JWT | La cola del agente PC entera: agentes con cuánto llevan callados, los últimos jobs con sus etapas ya repartidas por `job_id` y las últimas entregas resueltas. Una tabla que no responde sale como `null`, nunca como lista vacía |
+| `GET /dev/avisos?dias=` | JWT | Qué avisos salieron, la estadística de votos por regla cruzada con el gobierno de avisos (una regla silenciada sale aunque lleve semanas callada), las reglas que propuso Jarvis y las páginas vigiladas |
 | `POST /dev/reconstruir` | JWT | **Despliega**: le pide al Supervisor que reconstruya el add-on (clona `main`). Responde 202 y se va — el proceso muere a continuación. 503 si no corre como add-on, 429 si se acaba de lanzar otra. Nunca lo dispara un token de servicio |
 
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
