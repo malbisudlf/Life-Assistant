@@ -19,7 +19,7 @@ import {
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
-  alarmaCuandoTexto,
+  alarmaCuandoTexto, alarmaDespertarDeUrl,
   repartoPatrimonio,
 } from "../../src/lib/helpers";
 
@@ -2160,5 +2160,17 @@ describe("alarmas de respaldo", () => {
     expect(alarmaSonando(null)).toBeNull();
     // Una que está insistiendo pesa más que una que solo está puesta, esté donde esté.
     expect(alarmaSonando([{ estado: "armada" }, { id: "x", estado: "escalada" }]).id).toBe("x");
+  });
+
+  test("el segundo camino del boton lee el id de la url, y solo si es un UUID", () => {
+    const id = "11111111-1111-1111-1111-111111111111";
+    expect(alarmaDespertarDeUrl(`?despierto=${id}`)).toBe(id);
+    expect(alarmaDespertarDeUrl(`?otra=1&despierto=${id}`)).toBe(id);
+    expect(alarmaDespertarDeUrl("")).toBe("");
+    expect(alarmaDespertarDeUrl("?llamada=1")).toBe("");
+    // El id se mete tal cual en una URL del backend y la barra de direcciones la
+    // escribe cualquiera: lo que no tiene forma de UUID no confirma nada.
+    expect(alarmaDespertarDeUrl("?despierto=../../algo")).toBe("");
+    expect(alarmaDespertarDeUrl("?despierto=")).toBe("");
   });
 });

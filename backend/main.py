@@ -9752,6 +9752,31 @@ def _correr_alarmas() -> dict:
     return escalada
 
 
+def _alarma_acciones(rid: str) -> list:
+    """El botón «Estoy despierto», con DOS caminos de vuelta y no uno.
+
+    El camino de siempre es el `action`: el móvil manda `mobile_app_notification_action`
+    a Home Assistant, que llama a `POST /alarmas/{id}/despierto`. Tiene cuatro saltos y
+    el primero es el más frágil de todos — si la app companion no alcanza a HA en ese
+    instante (sin red al desbloquear, HA inalcanzable desde fuera, la app dormida en
+    segundo plano), **el evento se pierde sin un solo error en ninguna parte**: ni tú te
+    enteras ni el backend tampoco, así que para él sigues dormido y Alexa sigue
+    insistiendo. Pasó el 2026-09-14 y se tardó en verlo justo porque no falla nada
+    visible: el YAML, el token y el endpoint estaban bien.
+
+    El `uri` es el segundo camino, y no depende de Home Assistant: abre el dashboard con
+    `?despierto=<id>` y el propio dashboard confirma con el JWT que ya lleva guardado.
+    Los dos caminos acaban en el mismo endpoint y confirmar dos veces no es un error
+    (el PATCH condicional se lleva la fila una sola vez), así que no hace falta elegir.
+
+    Sin `FRONTEND_URL` el botón se queda como estaba: un camino, el de HA.
+    """
+    accion = {"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}
+    if FRONTEND_URL:
+        accion["uri"] = f"{FRONTEND_URL}/?despierto={rid}"
+    return [accion]
+
+
 def _alarma_avisar(fila: dict, ahora: datetime) -> None:
     """El primer toque: la notificación con el botón «Estoy despierto»."""
     rid = str(fila.get("id") or "")
@@ -9762,7 +9787,7 @@ def _alarma_avisar(fila: dict, ahora: datetime) -> None:
             f"{_alarma_texto(fila)}.\n\nSi no confirmas, en {ALARMA_ESPERA_MIN} minutos "
             f"te despierta Alexa.\n\n— Jarvis",
             aviso_id=rid,
-            acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
+            acciones=_alarma_acciones(rid),
             # Aviso normal, no crítico: el crítico se salta el silencio del móvil y eso
             # resultó ser demasiado para un respaldo. Si el móvil está callado y no
             # confirmas, quien despierta es la escalada por el altavoz, que es justo
@@ -9783,7 +9808,7 @@ def _alarma_insistir(fila: dict, intento: int) -> None:
             f"⏰ {_alarma_texto(fila)} (aviso {intento})",
             f"Sigues sin confirmar. {_alarma_texto(fila)}.\n\n— Jarvis",
             aviso_id=rid,
-            acciones=[{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}],
+            acciones=_alarma_acciones(rid),
             critico=False,
         )
     except Exception as e:

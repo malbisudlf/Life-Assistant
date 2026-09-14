@@ -90,6 +90,20 @@ despertador que suena el domingo, no un fallo.
   PATCH. La condición *es* la pregunta atómica: con dos ticks solapados, un GET previo
   dejaría avisar dos veces. Misma trampa y misma solución que en el despachador de
   recordatorios.
+- **El botón tiene DOS caminos de vuelta, y no por gusto.** El de siempre es el `action`:
+  el móvil manda `mobile_app_notification_action`, Home Assistant lo recoge y llama a
+  `POST /alarmas/{id}/despierto`. Cuatro saltos, y el primero es el más frágil — si la
+  app companion no alcanza a HA justo al pulsar (sin red al desbloquear, HA inalcanzable
+  desde fuera, la app dormida), **el evento se pierde sin un solo error en ninguna
+  parte**. El 2026-09-14 pasó exactamente eso: se pulsó «Estoy despierto», no pasó nada,
+  y hubo que entrar al dashboard a confirmar mientras Alexa insistía. Costó verlo porque
+  no falla nada visible: el YAML, la plantilla del UUID, el token y el endpoint estaban
+  bien, y lanzando el evento a mano en HA el camino entero respondía 200. La única
+  huella era `last_triggered` de la automatización, tres días atrás. Por eso el botón
+  lleva además `uri` (`_alarma_acciones`): abre el dashboard con `?despierto=<id>` y
+  **el dashboard confirma solo**, sin pasar por Home Assistant. Los dos caminos acaban
+  en el mismo endpoint y confirmar dos veces no es un error, así que no hay que elegir.
+  Sin `FRONTEND_URL` el botón se queda con un solo camino, el de HA.
 - **El aviso va `critico=False`: es una notificación normal.** Lo fue `critico=True` al
   principio, con el razonamiento de que un despertador que no suena con el móvil en
   silencio no despierta; en la práctica saltarse el silencio del móvil resultó excesivo

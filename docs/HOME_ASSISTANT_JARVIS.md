@@ -513,7 +513,10 @@ action:
       text_command: "Enciende led mesa"
 ```
 
-**El botón.** Mismo molde que los otros cinco.
+**El botón.** Mismo molde que los otros cinco. Este YAML no cambia por llevar el botón un
+`uri` al dashboard: el `uri` es el **segundo** camino (lo abre el móvil por su cuenta,
+sin pasar por aquí) y existe porque este de abajo se pierde en silencio cuando la app no
+alcanza a Home Assistant al pulsar. Ver `docs/ALARMAS.md`.
 
 ```yaml
 alias: Life Assistant - Alarma, estoy despierto

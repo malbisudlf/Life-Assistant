@@ -130,6 +130,27 @@ class TestPrimerAviso:
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
              "title": "Estoy despierto"}]
 
+    def test_el_boton_trae_el_segundo_camino_si_hay_dashboard(self, mock_requests,
+                                                              canal_movil, monkeypatch):
+        # El `uri` abre el dashboard, que confirma por su cuenta. Existe porque el camino
+        # del `action` (móvil → HA → backend) se pierde SIN ERROR si la app no alcanza a
+        # HA al pulsar, y entonces el botón no hace nada mientras la casa sigue
+        # insistiendo. Pasó el 2026-09-14.
+        monkeypatch.setattr(main, "FRONTEND_URL", "https://dashboard.example")
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([_fila(minutos_desde_ahora=-1)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        assert canal_movil[0]["acciones"] == [
+            {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
+             "title": "Estoy despierto",
+             "uri": "https://dashboard.example/?despierto=11111111-1111-1111-1111-111111111111"}]
+
+    def test_sin_dashboard_el_boton_se_queda_como_estaba(self, monkeypatch):
+        # Sin FRONTEND_URL no se inventa una URL: el botón sigue teniendo su camino de
+        # siempre, el de Home Assistant.
+        monkeypatch.setattr(main, "FRONTEND_URL", "")
+        assert "uri" not in main._alarma_acciones("11111111-1111-1111-1111-111111111111")[0]
+
     def test_todavia_no_es_la_hora_y_no_avisa(self, mock_requests, canal_movil):
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([_fila(minutos_desde_ahora=30)]))
         main._correr_alarmas()
