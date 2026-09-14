@@ -1,0 +1,448 @@
+"""El turno de noche: lo que se resuelve mientras Mikel duerme.
+
+Lo que se comprueba aquí es, sobre todo, lo que NO hace. Esto corre a las tres de la
+mañana sin nadie mirando, lee el buzón y llama a modelos de pago: las garantías que lo
+hacen aceptable son que no envía nada, que no abre el cuerpo de lo que no toca y que no
+puede correr dos veces la misma noche. Cada una tiene su test.
+"""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+import main
+
+
+def _fake_imap(monkeypatch, *, cabeceras=None, cuerpos=None, append_ok=True):
+    """Un buzón de mentira. Devuelve el registro de lo que se le pidió.
+
+    Sustituye `_abrir_buzon` y no `imaplib`: lo que interesa comprobar es qué se le pide
+    al buzón (de qué uid se baja el cuerpo, con qué flag se sube el borrador), no cómo se
+    habla IMAP.
+    """
+    registro = {"cuerpos_pedidos": [], "appends": []}
+    cuerpos = cuerpos or {}
+
+    class _Buzon:
+        def __init__(self, carpeta):
+            self.carpeta = carpeta
+
+        def uid(self, orden, *args):
+            if orden == "search":
+                return "OK", [b" ".join(c["uid"].encode() for c in (cabeceras or []))]
+            uid = args[0]
+            registro["cuerpos_pedidos"].append(uid)
+            return "OK", [(b"1", cuerpos.get(uid, b""))]
+
+        def append(self, carpeta, flags, fecha, mensaje):
+            registro["appends"].append({"carpeta": carpeta, "flags": flags,
+                                        "mensaje": mensaje.decode("utf-8", "replace")})
+            return ("OK" if append_ok else "NO"), [b""]
+
+    monkeypatch.setattr(main, "_abrir_buzon",
+                        lambda carpeta="", readonly=True: _Buzon(carpeta))
+    monkeypatch.setattr(main, "_cerrar_buzon", lambda buzon: None)
+    if cabeceras is not None:
+        monkeypatch.setattr(main, "_cabeceras_recientes", lambda: list(cabeceras))
+    return registro
+
+
+def _fake_modelo(monkeypatch, categorias, borrador="Te contesto mañana."):
+    """El clasificador y el redactor, con guion. Devuelve lo que se les mandó."""
+    recibido = []
+
+    class _Cliente:
+        chat = completions = property(lambda self: self)
+
+        def create(self, **kw):
+            recibido.append(kw)
+            if kw.get("response_format"):
+                cuerpo = json.dumps({"correos": [{"i": i, "categoria": c}
+                                                 for i, c in enumerate(categorias)]})
+            else:
+                cuerpo = borrador
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=cuerpo))])
+
+    monkeypatch.setattr(main, "get_openai_client", lambda: _Cliente())
+    return recibido
+
+
+class _Noche:
+    @pytest.fixture(autouse=True)
+    def _encendido(self, monkeypatch):
+        monkeypatch.setattr(main, "NOCHE_TURNO", True)
+        monkeypatch.setattr(main, "NOCHE_CORREO", True)
+        monkeypatch.setattr(main, "IMAP_HOST", "imap.ejemplo.com")
+        monkeypatch.setattr(main, "IMAP_USER", "yo@ejemplo.com")
+        monkeypatch.setattr(main, "IMAP_PASSWORD", "x")
+
+
+class TestElBuzonDeNoche(_Noche):
+    """Clasificar y dejar redactado lo que pide respuesta."""
+
+    def test_solo_se_abre_el_cuerpo_de_lo_que_pide_respuesta(self, monkeypatch, mock_requests):
+        """La garantía que sostiene todo lo demás.
+
+        La clasificación sigue viendo solo asunto y remitente, como la regla de día; el
+        cuerpo se baja DESPUÉS y únicamente de los que salieron «responder». Si esto se
+        rompe, el turno de noche estaría mandando newsletters enteras a un modelo.
+        """
+        cabeceras = [
+            {"asunto": "¿Quedamos el jueves?", "de": "ana@ejemplo.com", "uid": "10",
+             "message_id": "<a@x>"},
+            {"asunto": "Tu resumen semanal", "de": "news@marca.com", "uid": "11",
+             "message_id": "<b@x>"},
+        ]
+        registro = _fake_imap(monkeypatch, cabeceras=cabeceras,
+                              cuerpos={"10": b"Hola, te escribo para quedar."})
+        _fake_modelo(monkeypatch, ["responder", "ruido"])
+
+        items = main._noche_correos()
+
+        assert registro["cuerpos_pedidos"] == ["10"]
+        assert [i["datos"]["categoria"] for i in items] == ["responder", "ruido"]
+
+    def test_al_clasificador_no_le_llega_ningun_cuerpo(self, monkeypatch, mock_requests):
+        cabeceras = [{"asunto": "Cita el jueves", "de": "clinica", "uid": "10",
+                      "message_id": "<a@x>"}]
+        _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"SECRETO MEDICO"})
+        recibido = _fake_modelo(monkeypatch, ["informativo"])
+
+        main._noche_correos()
+
+        assert "SECRETO MEDICO" not in json.dumps(recibido[0]["messages"])
+
+    def test_el_borrador_sube_a_borradores_marcado_como_borrador(self, monkeypatch,
+                                                                 mock_requests):
+        """El flag `\\Draft` es lo que separa dejar un borrador de meterte un correo en la
+        bandeja de entrada."""
+        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "uid": "10",
+                      "message_id": "<a@x>"}]
+        registro = _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
+        _fake_modelo(monkeypatch, ["responder"], borrador="El jueves me va bien.")
+
+        items = main._noche_correos()
+
+        assert len(registro["appends"]) == 1
+        subido = registro["appends"][0]
+        assert subido["flags"] == "\\Draft"
+        assert subido["carpeta"] == main.IMAP_BORRADORES
+        assert "El jueves me va bien." in subido["mensaje"]
+        assert items[0]["datos"]["borrador"] is True
+
+    def test_el_borrador_cuelga_del_correo_original(self, monkeypatch, mock_requests):
+        """Sin `In-Reply-To` el borrador aparece como un mensaje suelto a alguien que no
+        recuerdas, en vez de bajo el hilo al que contesta."""
+        cabeceras = [{"asunto": "Quedamos el jueves", "de": "ana@ejemplo.com", "uid": "10",
+                      "message_id": "<hilo-42@ejemplo.com>"}]
+        registro = _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
+        _fake_modelo(monkeypatch, ["responder"])
+
+        main._noche_correos()
+
+        mensaje = registro["appends"][0]["mensaje"]
+        assert "In-Reply-To: <hilo-42@ejemplo.com>" in mensaje
+        assert "Subject: Re: Quedamos el jueves" in mensaje
+
+    def test_no_se_envia_nada_por_smtp(self, monkeypatch, mock_requests):
+        """La frontera entera del turno de noche cabe en este test: prepara, no manda."""
+        enviados = []
+        monkeypatch.setattr(main, "enviar_correo",
+                            lambda *a, **k: enviados.append(a) or {"ok": True})
+        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "uid": "10",
+                      "message_id": "<a@x>"}]
+        _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
+        _fake_modelo(monkeypatch, ["responder"])
+
+        main._noche_correos()
+
+        assert enviados == []
+
+    def test_si_falla_la_clasificacion_no_se_abre_nada(self, monkeypatch, mock_requests):
+        """Un fallo del modelo no puede acabar abriendo treinta correos: el defecto es
+        «ruido», que es el que no toca nada."""
+        cabeceras = [{"asunto": "lo que sea", "de": "x", "uid": "10", "message_id": ""}]
+        registro = _fake_imap(monkeypatch, cabeceras=cabeceras)
+
+        def _revienta():
+            raise RuntimeError("la API no contesta")
+        monkeypatch.setattr(main, "get_openai_client", _revienta)
+
+        items = main._noche_correos()
+
+        assert registro["cuerpos_pedidos"] == []
+        assert registro["appends"] == []
+        assert items[0]["datos"]["categoria"] == "ruido"
+
+    def test_el_tope_de_borradores_se_respeta(self, monkeypatch, mock_requests):
+        """Cada borrador es una llamada de pago; el tope es lo que impide que una noche
+        rara cueste lo que un mes."""
+        cabeceras = [{"asunto": f"correo {i}", "de": "x", "uid": str(i),
+                      "message_id": f"<{i}@x>"} for i in range(5)]
+        registro = _fake_imap(monkeypatch, cabeceras=cabeceras,
+                              cuerpos={str(i): b"hola" for i in range(5)})
+        _fake_modelo(monkeypatch, ["responder"] * 5)
+        monkeypatch.setattr(main, "NOCHE_BORRADORES_MAX", 2)
+
+        main._noche_correos()
+
+        assert len(registro["appends"]) == 2
+
+    def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
+        monkeypatch.setattr(main, "NOCHE_CORREO", False)
+        llamadas = []
+        monkeypatch.setattr(main, "_cabeceras_recientes", lambda: llamadas.append(1) or [])
+        assert main._noche_correos() == []
+        assert llamadas == []
+
+    def test_un_buzon_caido_no_tumba_la_noche(self, monkeypatch):
+        def _revienta():
+            raise OSError("no se pudo conectar")
+        monkeypatch.setattr(main, "_cabeceras_recientes", _revienta)
+        assert main._noche_correos() == []
+
+
+class TestElTurno(_Noche):
+    """El carril: cuándo corre, cuántas veces y qué deja escrito."""
+
+    def _sin_correo(self, monkeypatch):
+        monkeypatch.setattr(main, "_noche_correos", lambda: [
+            {"area": "correo", "titulo": "¿Quedamos?", "detalle": "El jueves.",
+             "datos": {"de": "ana", "categoria": "responder", "borrador": True}}])
+
+    def test_el_turno_de_una_noche_se_hace_una_sola_vez(self, monkeypatch, mock_requests):
+        """El tick llega cada cinco minutos: sin la reserva atómica, una noche redactaría
+        los mismos borradores doce veces."""
+        self._sin_correo(monkeypatch)
+        estado = {"abierto": False}
+
+        def _post(url, **kwargs):
+            if "noche_partes" in url:
+                if estado["abierto"]:
+                    return main_fake_409()
+                estado["abierto"] = True
+            return _FakeOk()
+        mock_requests.add("POST", "noche_partes", _post)
+        mock_requests.add("POST", "noche_items", _FakeOk())
+
+        primero = main.correr_turno_de_noche()
+        segundo = main.correr_turno_de_noche()
+
+        assert primero["hecho"] is True
+        assert segundo["hecho"] is False
+
+    def test_apagado_no_corre(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "NOCHE_TURNO", False)
+        llamadas = []
+        monkeypatch.setattr(main, "_noche_correos", lambda: llamadas.append(1) or [])
+        assert main.correr_turno_de_noche()["hecho"] is False
+        assert llamadas == []
+
+    def test_fuera_de_la_ventana_no_corre(self, monkeypatch, mock_requests):
+        """El tope existe para que un backend que arranca a mediodía no llame «turno de
+        noche» a lo que hace a las doce, gastando el día del parte."""
+        from datetime import datetime
+
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 12, 0, tzinfo=main.LOCAL_TZ))
+        llamadas = []
+        monkeypatch.setattr(main, "correr_turno_de_noche",
+                            lambda *a, **k: llamadas.append(1) or {"hecho": True})
+        assert main._turno_de_noche_si_toca() == {}
+        assert llamadas == []
+
+    def test_dentro_de_la_ventana_corre(self, monkeypatch, mock_requests):
+        from datetime import datetime
+
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 3, 5, tzinfo=main.LOCAL_TZ))
+        llamadas = []
+        monkeypatch.setattr(main, "correr_turno_de_noche",
+                            lambda *a, **k: llamadas.append(1) or {"hecho": True})
+        assert main._turno_de_noche_si_toca() == {"noche": 1}
+        assert len(llamadas) == 1
+
+    def test_el_aviso_del_parte_se_deja_para_la_manana(self, monkeypatch, mock_requests):
+        """Despertarte a las tres para contarte el buzón sería la mejor forma de que
+        apagases esto."""
+        from datetime import datetime
+
+        self._sin_correo(monkeypatch)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 3, 5, tzinfo=main.LOCAL_TZ))
+        apuntados = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: apuntados.append((regla, kw)) or True)
+
+        main.correr_turno_de_noche()
+
+        regla, kw = apuntados[0]
+        assert regla == main.REGLA_NOCHE
+        assert (kw["cuando"].hour, kw["cuando"].minute) == main.HORA_DIFERIDOS
+
+    def test_el_buzon_caido_no_se_lleva_por_delante_el_parte(self, monkeypatch, mock_requests):
+        def _revienta():
+            raise RuntimeError("IMAP caído")
+        monkeypatch.setattr(main, "_noche_correos", _revienta)
+        assert main.correr_turno_de_noche()["hecho"] is True
+
+    def test_una_frase_sin_nada_no_miente(self):
+        assert "nada" in main._frase_parte({}).lower()
+
+    def test_la_frase_cuenta_los_borradores(self):
+        frase = main._frase_parte({"correos": 12, "responder": 3, "borradores": 3})
+        assert "12 correos" in frase and "3" in frase
+
+
+class TestDecidirEnElParte:
+    """Aprobar y descartar. «Aprobado» no envía nada: quiere decir «visto»."""
+
+    def test_decidir_dos_veces_solo_cuenta_una(self, client, auth_headers, mock_requests):
+        """Dos pestañas abiertas, o el botón pulsado dos veces, no son dos decisiones."""
+        idp = "11111111-2222-3333-4444-555555555555"
+        respuestas = [_FakeOk([{"id": idp}]), _FakeOk([])]
+        mock_requests.add("PATCH", "noche_items", lambda url, **kw: respuestas.pop(0))
+
+        primera = client.post(f"/noche/items/{idp}/decidir", headers=auth_headers,
+                              json={"accion": "aprobado"})
+        segunda = client.post(f"/noche/items/{idp}/decidir", headers=auth_headers,
+                              json={"accion": "aprobado"})
+
+        assert primera.json()["cambiado"] is True
+        assert segunda.json()["cambiado"] is False
+
+    def test_el_patch_va_condicionado_a_seguir_pendiente(self, client, auth_headers,
+                                                         mock_requests):
+        idp = "11111111-2222-3333-4444-555555555555"
+        mock_requests.add("PATCH", "noche_items", _FakeOk([{"id": idp}]))
+        client.post(f"/noche/items/{idp}/decidir", headers=auth_headers,
+                    json={"accion": "descartado"})
+        assert "estado=eq.pendiente" in mock_requests.called("PATCH", "noche_items")[0][1]
+
+    def test_un_id_que_no_es_uuid_no_llega_a_supabase(self, client, auth_headers,
+                                                      mock_requests):
+        r = client.post("/noche/items/../../etc/decidir", headers=auth_headers,
+                        json={"accion": "aprobado"})
+        assert r.status_code in (404, 422)
+        assert mock_requests.called("PATCH", "noche_items") == []
+
+    def test_una_accion_inventada_se_rechaza(self, client, auth_headers, mock_requests):
+        idp = "11111111-2222-3333-4444-555555555555"
+        r = client.post(f"/noche/items/{idp}/decidir", headers=auth_headers,
+                        json={"accion": "enviar"})
+        assert r.status_code == 422
+        assert mock_requests.called("PATCH", "noche_items") == []
+
+    def test_el_parte_necesita_sesion(self, client):
+        assert client.get("/noche/parte").status_code in (401, 403)
+
+
+class TestElAtajoDelCodigo:
+    """Arreglar de noche sin esperar a las 08:30, sin duplicar el camino que ya existe."""
+
+    @pytest.fixture(autouse=True)
+    def _token(self, monkeypatch):
+        monkeypatch.setattr(main, "REVISION_TOKEN", "revision-token")
+
+    def _hallazgo(self, mock_requests):
+        mock_requests.add("POST", "revision_hallazgos", _FakeOk(status_code=201))
+        mock_requests.add("PATCH", "revision_hallazgos", _FakeOk([{"issue_numero": 7}]))
+
+    def test_apagado_sigue_preguntando_como_siempre(self, client, monkeypatch,
+                                                    mock_requests):
+        from datetime import datetime
+
+        self._hallazgo(mock_requests)
+        monkeypatch.setattr(main, "NOCHE_ARREGLA", False)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 3, 40, tzinfo=main.LOCAL_TZ))
+        lanzados = []
+        monkeypatch.setattr(main, "_disparar_arreglo",
+                            lambda *a, **k: lanzados.append(k) or {"ok": True, "sesion": ""})
+
+        r = client.post("/revision/hallazgos", headers={"X-Auth-Token": main.REVISION_TOKEN},
+                        json={"numero": 7, "titulo": "algo"})
+
+        assert r.json()["avisado"] is True
+        assert lanzados == []
+
+    def test_encendido_de_noche_arregla_sin_preguntar_y_no_mergea(self, client, monkeypatch,
+                                                                  mock_requests):
+        """La instrucción es la única diferencia con el camino de siempre, y dice lo que
+        no se puede dejar a criterio de nadie: que el PR se queda abierto."""
+        from datetime import datetime
+
+        self._hallazgo(mock_requests)
+        monkeypatch.setattr(main, "NOCHE_ARREGLA", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 3, 40, tzinfo=main.LOCAL_TZ))
+        lanzados = []
+        monkeypatch.setattr(main, "_disparar_arreglo",
+                            lambda *a, **k: lanzados.append(k) or
+                            {"ok": True, "sesion": "https://claude.ai/x"})
+        apuntados = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda *a, **k: apuntados.append(a) or True)
+
+        r = client.post("/revision/hallazgos", headers={"X-Auth-Token": main.REVISION_TOKEN},
+                        json={"numero": 7, "titulo": "algo"})
+
+        assert r.json()["arreglando"] is True
+        assert apuntados == []
+        assert "no lo mergees" in lanzados[0]["instruccion"].lower()
+
+    def test_de_dia_no_ataja_nada(self, client, monkeypatch, mock_requests):
+        """La condición no es la hora del reloj sino «este aviso iba a esperar de todas
+        formas»: a las once de la mañana el aviso sale ya, así que no hay nada que
+        adelantar."""
+        from datetime import datetime
+
+        self._hallazgo(mock_requests)
+        monkeypatch.setattr(main, "NOCHE_ARREGLA", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 11, 0, tzinfo=main.LOCAL_TZ))
+        lanzados = []
+        monkeypatch.setattr(main, "_disparar_arreglo",
+                            lambda *a, **k: lanzados.append(k) or {"ok": True, "sesion": ""})
+
+        client.post("/revision/hallazgos", headers={"X-Auth-Token": main.REVISION_TOKEN},
+                    json={"numero": 7, "titulo": "algo"})
+
+        assert lanzados == []
+
+    def test_si_no_se_puede_lanzar_se_cae_al_aviso_de_siempre(self, client, monkeypatch,
+                                                              mock_requests):
+        """Mejor preguntarte a las 8:30 que quedarse callado con el hallazgo dentro."""
+        from datetime import datetime
+
+        self._hallazgo(mock_requests)
+        monkeypatch.setattr(main, "NOCHE_ARREGLA", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 14, 3, 40, tzinfo=main.LOCAL_TZ))
+        monkeypatch.setattr(main, "_disparar_arreglo",
+                            lambda *a, **k: {"ok": False, "sesion": "", "motivo": "token"})
+
+        r = client.post("/revision/hallazgos", headers={"X-Auth-Token": main.REVISION_TOKEN},
+                        json={"numero": 7, "titulo": "algo"})
+
+        assert r.json()["avisado"] is True
+
+
+class _FakeOk:
+    """Respuesta de Supabase buena, con el cuerpo que se le diga."""
+
+    def __init__(self, cuerpo=None, status_code=200):
+        self._json = cuerpo if cuerpo is not None else []
+        self.status_code = status_code
+        self.text = ""
+        self.headers = {}
+        self.content = b""
+        self.encoding = "utf-8"
+
+    def json(self):
+        return self._json
+
+
+def main_fake_409():
+    return _FakeOk(status_code=409)
