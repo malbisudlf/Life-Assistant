@@ -42,7 +42,7 @@
 | `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` mergea el PR y lanza el deploy, `nada` lo descarta. **La única ruta que toca producción** |
 | `POST /sesion/aviso` | servicio (`SESION_TOKEN`) | Una sesión de Claude Code deja «esto me pediste, esto he hecho»: guarda el contexto y encola el aviso con sus botones |
 | `POST /sesion/{aviso_id}/accion` | servicio o JWT | La respuesta al botón «Vale»: cierra el aviso sin disparar nada |
-| `GET /llamada/pendiente` | JWT | Qué anunciar al descolgar: primero el despliegue esperando permiso, si no el aviso de sesión más reciente. Solo lee |
+| `GET /llamada/pendiente` | JWT | Qué anunciar al descolgar: primero el despliegue esperando permiso, si no el aviso de sesión más reciente, y si no la revisión sin decidir. Con `?aviso=<uuid>` anuncia ESA decisión. Solo lee |
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |

@@ -121,6 +121,24 @@ export function llamadaEntranteDeUrl(busqueda) {
   }
 }
 
+/** El id del aviso concreto por el que suena esta llamada, o `""`.
+ *
+ *  El botón «Hablarlo» de una decisión de revisión abre `?llamada=1&aviso=<id>`. Sin el
+ *  id, el backend anunciaría lo que gane su orden de prioridades, que puede no ser la
+ *  decisión que tenías en la mano al pulsar — la misma razón por la que el permiso de
+ *  despliegue se guarda contra un PR concreto y no contra «el más reciente».
+ *
+ *  Se exige forma de UUID: viaja a una query del backend y un parámetro de la barra de
+ *  direcciones lo escribe cualquiera. */
+export function avisoDeLlamadaDeUrl(busqueda) {
+  try {
+    const id = new URLSearchParams(busqueda || "").get("aviso") || "";
+    return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id) ? id : "";
+  } catch {
+    return "";   // una query rota descuelga igual, con lo que haya pendiente
+  }
+}
+
 /** La primera frase al descolgar.
  *
  *  La escribe el backend (`_apertura_despliegue` o `_apertura_sesion`, según por qué

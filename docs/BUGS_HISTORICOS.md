@@ -586,3 +586,20 @@
     (`_alarma_acciones`), que confirma sin pasar por Home Assistant. La regla general:
     cuando algo tiene que llegar sí o sí, dale un segundo camino que no comparta
     infraestructura con el primero, y que los dos acaben en el mismo endpoint idempotente.
+
+- **El mismo día y el mismo fallo en «Arreglarlo»: el aviso del vigilante llegaba y
+  pulsarlo no lanzaba ninguna sesión.** El 2026-09-14, horas después de lo anterior, llegó
+  el aviso de «N errores en las últimas 24 h» con sus dos botones; al pulsar «Arreglarlo»
+  no pasó nada. En `revision_hallazgos`, las **cinco** decisiones de ese día seguían en
+  `pendiente` con `decidido_at` a null: el `POST /revision/{id}/accion` no llegó a hacerse
+  ni una vez. El endpoint estaba bien (probado a mano con el `ha_poll_token` del Green:
+  200), el YAML estaba bien y la automatización estaba bien.
+  - Misma causa y mismo tramo mudo que el botón de la alarma. Lo que enseña este segundo
+    caso es que **arreglar un botón no arregla el canal**: el fallo nunca fue de las
+    alarmas, era de *todos* los botones que vuelven por Home Assistant, y el arreglo se
+    aplicó solo donde se había notado. Al añadir un botón nuevo, la pregunta no es si el
+    YAML casa con el prefijo, es por dónde vuelve — y si vuelve por un solo sitio, ya
+    está roto.
+  - De paso se vio lo otro: con dos botones, «arreglar» o «no hacer nada» es una decisión
+    **a ciegas**, porque en una notificación cabe cuántos errores hay pero no cuáles. De
+    ahí el tercer botón, «Hablarlo», y que Jarvis lea el issue entero al descolgar.

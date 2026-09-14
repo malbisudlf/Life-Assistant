@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse,
-  llamadaEntranteDeUrl, aperturaDeLlamada, detectorDeHabla, rmsDeMuestras,
+  llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, aperturaDeLlamada, detectorDeHabla, rmsDeMuestras,
   pcm16DesdeFloat32, base64DeBytes, pareceEco,
 } from "../../src/lib/voz.js";
 
@@ -215,6 +215,23 @@ describe("llamadaEntranteDeUrl", () => {
     expect(llamadaEntranteDeUrl("?llamada=0")).toBe(false);
     expect(llamadaEntranteDeUrl("?llamada=si")).toBe(false);
     expect(llamadaEntranteDeUrl(undefined)).toBe(false);
+  });
+});
+
+describe("avisoDeLlamadaDeUrl", () => {
+  const id = "fa27dab6-f054-5982-bd86-994e5e8b151b";
+
+  it("lee el aviso concreto por el que suena", () => {
+    // El boton «Hablarlo» de una revision trae su id: entre pulsarlo y descolgar pueden
+    // haber entrado otras decisiones, y la que quieres oir es aquella.
+    expect(avisoDeLlamadaDeUrl(`?llamada=1&aviso=${id}`)).toBe(id);
+  });
+
+  it("sin aviso se descuelga con lo que haya", () => {
+    expect(avisoDeLlamadaDeUrl("?llamada=1")).toBe("");
+    expect(avisoDeLlamadaDeUrl("")).toBe("");
+    // Viaja a una query del backend, asi que lo que no tiene forma de UUID no viaja.
+    expect(avisoDeLlamadaDeUrl("?aviso=../../algo")).toBe("");
   });
 });
 

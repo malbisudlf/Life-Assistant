@@ -19,7 +19,7 @@ import {
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
-  alarmaCuandoTexto, alarmaDespertarDeUrl,
+  alarmaCuandoTexto, alarmaDespertarDeUrl, revisionDeUrl,
   repartoPatrimonio,
 } from "../../src/lib/helpers";
 
@@ -2172,5 +2172,27 @@ describe("alarmas de respaldo", () => {
     // escribe cualquiera: lo que no tiene forma de UUID no confirma nada.
     expect(alarmaDespertarDeUrl("?despierto=../../algo")).toBe("");
     expect(alarmaDespertarDeUrl("?despierto=")).toBe("");
+  });
+});
+
+describe("la decision de revision que llega por la url", () => {
+  const id = "fa27dab6-f054-5982-bd86-994e5e8b151b";
+
+  test("lee el id y la accion del boton «Arreglarlo»", () => {
+    expect(revisionDeUrl(`?revision=${id}&accion=arreglar`)).toEqual({ id, accion: "arreglar" });
+    expect(revisionDeUrl(`?accion=nada&revision=${id}`)).toEqual({ id, accion: "nada" });
+  });
+
+  test("sin los dos parametros no decide nada", () => {
+    expect(revisionDeUrl("")).toBeNull();
+    expect(revisionDeUrl(`?revision=${id}`)).toBeNull();
+    expect(revisionDeUrl("?accion=arreglar")).toBeNull();
+    expect(revisionDeUrl("?llamada=1")).toBeNull();
+  });
+
+  test("los dos valores viajan a una url del backend, asi que se validan", () => {
+    expect(revisionDeUrl("?revision=../../algo&accion=arreglar")).toBeNull();
+    // Una accion que el backend no acepta solo serviria para gastar un 422.
+    expect(revisionDeUrl(`?revision=${id}&accion=desplegar`)).toBeNull();
   });
 });
