@@ -138,5 +138,7 @@ tarde no es una alarma. Cuando el backend contesta que toca escalar, la automati
 anunciar por Alexa, poner la canción, encender las luces). El ritual vive **aquí y no en
 la cola de órdenes del backend** porque una de las luces solo obedece hablándole a Alexa,
 y `alexa_devices.send_text_command` no es un dominio de esa cola ni apunta a una entidad.
-El botón «Estoy despierto» de la notificación vuelve por el molde de siempre. Todo en
-`docs/ALARMAS.md`.
+El botón «Estoy despierto» de la notificación vuelve por el molde de siempre, **y además
+por fuera de Home Assistant**: lleva un `uri` que abre el dashboard con `?despierto=<id>`
+para que confirme él si el evento del móvil no llega a HA — que se pierde en silencio y
+ya dejó una alarma sonando (`docs/BUGS_HISTORICOS.md`). Todo en `docs/ALARMAS.md`.

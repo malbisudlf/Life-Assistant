@@ -2178,3 +2178,23 @@ export function alarmaEstadoTexto(alarma) {
 export function alarmaSonando(alarmas) {
   return (alarmas || []).find(a => a?.estado === "avisada" || a?.estado === "escalada") || null;
 }
+
+/** El id de la alarma que hay que confirmar por haber abierto el dashboard desde la
+ *  notificación, o `""` si esta carga no viene de ahí.
+ *
+ *  El botón «Estoy despierto» del móvil trae `uri` además de su `action` (ver
+ *  `_alarma_acciones` en el backend): el `action` va por Home Assistant y el `uri` abre
+ *  esto. Son dos caminos para el mismo botón porque el de HA se pierde en silencio
+ *  cuando la app no alcanza a HA al pulsarlo, y una alarma que no se puede callar desde
+ *  su propia notificación deja de ser un respaldo.
+ *
+ *  Se exige forma de UUID: el id se mete tal cual en una URL del backend, y un
+ *  parámetro de la barra de direcciones lo escribe cualquiera. */
+export function alarmaDespertarDeUrl(busqueda) {
+  try {
+    const id = new URLSearchParams(busqueda || "").get("despierto") || "";
+    return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id) ? id : "";
+  } catch {
+    return "";   // una query rota no confirma nada
+  }
+}

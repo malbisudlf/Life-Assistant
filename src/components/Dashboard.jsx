@@ -13,7 +13,8 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
-  alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto, DIAS_SEMANA,
+  alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
+  alarmaDespertarDeUrl, DIAS_SEMANA,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -3592,6 +3593,26 @@ export default function Dashboard() {
     } catch { /* idem */ }
     await loadAlarmas();
   }
+
+  // ── «Estoy despierto» desde la notificación ───────────────────────────────
+  // El botón del móvil abre además el dashboard con `?despierto=<id>`, y eso lo confirma
+  // aquí. Es el SEGUNDO camino del mismo botón, no un adorno: el primero (el evento a
+  // Home Assistant) se pierde en silencio si la app no alcanza a HA al pulsarlo, y
+  // entonces pulsar «Estoy despierto» no hace nada mientras Alexa te sigue insistiendo.
+  // Pasó el 2026-09-14 y hubo que confirmar entrando al dashboard a mano, que es justo
+  // lo que esto ahorra. Confirmar dos veces no duele: el backend deja la fila una vez.
+  useEffect(() => {
+    const id = alarmaDespertarDeUrl(window.location.search);
+    if (!token || !id) return;
+    // El parámetro se quita ya: recargar más tarde no debe volver a confirmar una alarma
+    // que quizá esté sonando otra vez (las semanales vuelven solas).
+    try {
+      const limpia = new URL(window.location.href);
+      limpia.searchParams.delete("despierto");
+      window.history.replaceState({}, "", limpia);
+    } catch { /* mejor esfuerzo: no vale dejar de confirmar por no poder limpiar la barra */ }
+    confirmarDespierto(id);
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function submitEtfAportacion(ticker) {
     const form = etfAportForm[ticker];

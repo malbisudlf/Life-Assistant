@@ -564,3 +564,25 @@
   Y la segunda, sobre herramientas ajenas: **antes de dejar que un modelo llame a algo,
   mira qué hace la herramienta con lo que NO le pasas.** Aquí lo que no se pasaba se
   borraba.
+
+- **«Estoy despierto» no despertaba a nadie: el botón de la alarma se pulsaba y no pasaba
+  nada.** El 2026-09-14 sonó la alarma de respaldo, se pulsó el botón de la notificación
+  y la casa siguió insistiendo; hubo que entrar al dashboard a confirmar a mano. En el
+  backend no había ni un error: el aviso salió a las 06:00, la escalada se ejecutó a las
+  06:03 y el único `POST /alarmas/{id}/despierto` del día llegó desde el túnel de
+  Cloudflare —el dashboard— dos horas después.
+  - La causa es el tramo que **nadie registra**: iPhone → Home Assistant. La app
+    companion no llegó a entregar el evento `mobile_app_notification_action`, y ese fallo
+    no deja huella en ninguna parte. Ni el móvil avisa ni el backend se entera: para él
+    seguías dormido, que es exactamente lo que hace que la alarma siga sonando.
+  - Todo lo demás estaba bien, y comprobarlo fue lo que señaló al culpable: lanzando el
+    evento a mano en HA (`POST /api/events/mobile_app_notification_action`) la
+    automatización se disparó y el backend contestó 200 al primer intento. La única
+    huella del fallo era `last_triggered` de `automation.life_assistant_alarma_estoy_despierto`:
+    tres días atrás, cuando el botón se había pulsado por última vez con éxito.
+  - Moraleja: **un botón cuya confirmación viaja por un solo camino de cuatro saltos no
+    es un botón, es una apuesta** — y menos aún si el salto más frágil es el único que no
+    escribe en ningún log. Hoy el botón lleva también `uri` al dashboard
+    (`_alarma_acciones`), que confirma sin pasar por Home Assistant. La regla general:
+    cuando algo tiene que llegar sí o sí, dale un segundo camino que no comparta
+    infraestructura con el primero, y que los dos acaben en el mismo endpoint idempotente.
