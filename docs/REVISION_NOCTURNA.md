@@ -4,10 +4,12 @@ Si durante el día han entrado commits en `main`, de madrugada se lanza una sesi
 Claude Code que los revisa y abre un issue con lo que haya encontrado. Por la mañana o
 hay issue o no lo hay; una noche sin hallazgos no deja ruido.
 
-Y si hay issue, **a las 08:30 llega al móvil una notificación con dos botones**:
+Y si hay issue, **a las 08:30 llega al móvil una notificación con tres botones**:
 «Arreglarlo» —que lanza otra sesión en la nube, esta sí de escritura, que arregla los
-hallazgos, abre un PR y lo mergea si el CI pasa— y «No hacer nada», que no hace nada. La
-segunda mitad está en "El informe accionable", abajo.
+hallazgos, abre un PR y lo mergea si el CI pasa—, «No hacer nada», que no hace nada, y
+«Hablarlo», que abre la pantalla de llamada del dashboard para que Jarvis te cuente qué
+dice el issue antes de que decidas. La segunda mitad está en "El informe accionable",
+abajo.
 
 **Hay un camino hermano, y va al revés**: cuando el CI se rompe en `main`, el backend
 lanza el arreglo **sin preguntar** y la pregunta llega cuando el PR ya está en verde
@@ -148,10 +150,12 @@ el informe en una pregunta con dos botones en el móvil, y la respuesta en traba
 03:37  revision-nocturna.yml → routine que revisa → issue en GitHub
 03:40  revision-aviso.yml (evento issues) → POST /revision/hallazgos
        backend: apunta la decisión en `revision_hallazgos` + encola el aviso
-08:30  el despachador lo entrega: notificación con «Arreglarlo» / «No hacer nada»
+08:30  el despachador lo entrega: «Arreglarlo» / «No hacer nada» / «Hablarlo»
    ↓
-   «Arreglarlo» → HA → POST /revision/{id}/accion → routine que arregla → PR → merge
+   «Arreglarlo» → HA ─────────────┐
+                 y el dashboard ──┴→ POST /revision/{id}/accion → routine → PR → merge
    «No hacer nada» → la fila queda `descartado` y no pasa nada más
+   «Hablarlo» → dashboard con ?llamada=1&aviso=<id> → Jarvis cuenta el issue y decides
 ```
 
 Cinco decisiones, y ninguna es nueva en este proyecto:
@@ -236,6 +240,42 @@ esa garantía justo en la sesión que corre sin nadie delante.
 
 Sin nada de esto configurado, el issue de la noche se sigue abriendo exactamente como
 antes: lo que no hay es aviso ni botón.
+
+### «Arreglarlo» vuelve por DOS caminos, y no es por gusto
+
+El botón manda su `action` a Home Assistant, que llama al backend — y ese primer salto,
+móvil → HA, **se pierde en silencio** si la app no alcanza a HA en ese instante. No falla
+nada visible: ni el móvil avisa, ni HA registra un intento, ni el backend recibe una
+petición que rechazar. Pulsas y no pasa nada. El 2026-09-14 se comió cinco decisiones
+seguidas del vigilante antes de que nadie se diera cuenta (`docs/BUGS_HISTORICOS.md`).
+
+Por eso el botón lleva además `uri`: abre el dashboard con `?revision=<id>&accion=arreglar`
+y **es el propio dashboard quien decide**, con el JWT que ya lleva guardado y sin pasar
+por Home Assistant. Los dos caminos acaban en el mismo endpoint, cuyo PATCH condicional
+consume la decisión una sola vez, así que llegar por los dos no es un problema: el
+segundo se encuentra la fila ya decidida y lo dice.
+
+Y el dashboard **acusa en pantalla** lo que ha pasado. Es la otra mitad del arreglo: un
+botón que dispara algo invisible es indistinguible de uno roto, que es justo lo que había.
+
+### «Hablarlo»: decidir sabiendo qué se ha roto
+
+Con dos botones la decisión es a ciegas. En una notificación cabe «5 errores en las
+últimas 24 h» y no cabe *cuáles*, así que «¿lo arreglo?» se contestaba sin la información
+que hace falta para contestarla. «Hablarlo» abre la pantalla de llamada con el id de ESA
+decisión (`?llamada=1&aviso=<id>`, la frontera 2 de `docs/AVERIAS.md`: entre pulsar y
+descolgar pueden haber entrado otras), y al descolgar Jarvis ya tiene delante el **issue
+entero de GitHub**, no su título — lo trae `_revision_cuerpo` y lo arma
+`_revision_contexto`. Si le dices que sí, usa `arreglar_revision`, que es el mismo camino
+del botón.
+
+La apertura hablada no recita el título, por la misma razón que la del despliegue: el
+título está escrito para leerse en GitHub, y hablando hay que esperarlo entero antes de
+poder decir nada. El detalle lo cuenta si lo preguntas, que es de lo que va este canal.
+
+Fuera de la llamada, en el chat de siempre, lo mismo lo da la herramienta
+`contar_revision`: cuenta qué dice el issue pendiente y **no pide confirmación**, porque
+solo lee. El freno está en `arreglar_revision`, que es la que actúa.
 
 ### Si el aviso llega por correo
 

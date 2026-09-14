@@ -14,7 +14,7 @@ import {
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
-  alarmaDespertarDeUrl, DIAS_SEMANA,
+  alarmaDespertarDeUrl, revisionDeUrl, DIAS_SEMANA,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -25,7 +25,7 @@ import {
   posicionAhora,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_AUSENTE, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
@@ -1445,6 +1445,8 @@ export default function Dashboard() {
   // sonando o si ya has descolgado — la pantalla NO se va al contestar: una llamada que
   // te devuelve a un panel de widgets a mitad de frase no es una llamada.
   const [llamadaEntrante, setLlamadaEntrante] = useState(null);
+  // Lo que se contestó al botón «Arreglarlo» de la notificación, para poder enseñarlo.
+  const [revisionAcuse, setRevisionAcuse] = useState("");
   // Si ya se puede descolgar. La máquina de Fly escala a cero, así que el permiso de voz
   // puede tardar 10-15 s en llegar mientras despierta; descolgar antes dejaba la llamada
   // ENTERA con la voz del navegador, porque `iniciarLlamada` mira el permiso una vez y
@@ -3188,11 +3190,14 @@ export default function Dashboard() {
   useEffect(() => {
     if (!token || !llamadaEntranteDeUrl(window.location.search)) return;
     let vivo = true;
-    // Se quita el parámetro ya: si te quedas en el dashboard y recargas más tarde, no
+    // El id se lee ANTES de limpiar la barra, que es lo que se hace justo debajo.
+    const cual = avisoDeLlamadaDeUrl(window.location.search);
+    // Se quitan los parámetros ya: si te quedas en el dashboard y recargas más tarde, no
     // debe volver a sonar una llamada que ya contestaste.
     try {
       const limpia = new URL(window.location.href);
       limpia.searchParams.delete("llamada");
+      limpia.searchParams.delete("aviso");
       window.history.replaceState({}, "", limpia);
     } catch { /* mejor esfuerzo: no vale tirar la llamada por no poder limpiar la barra */ }
     (async () => {
@@ -3202,7 +3207,11 @@ export default function Dashboard() {
         // qué suena. Un permiso de despliegue, un aviso que dejó una sesión de Claude
         // Code, o lo que venga después — quien ordena qué se anuncia primero es el
         // backend, que es el único que los conoce todos.
-        const r = await apiFetch(`${API}/llamada/pendiente`, { headers: authHeaders() });
+        // Con `aviso` se anuncia ESA decisión y no la que gane ese orden: el botón
+        // «Hablarlo» de una revisión trae el id de la que tenías en la mano, y entre
+        // pulsarlo y descolgar pueden haber entrado otras.
+        const r = await apiFetch(`${API}/llamada/pendiente${cual ? `?aviso=${cual}` : ""}`,
+                                 { headers: authHeaders() });
         if (r.ok) pendiente = (await r.json())?.pendiente || null;
       } catch { /* sin red se descuelga igual, con la frase de respaldo */ }
       if (vivo) {
@@ -3613,6 +3622,51 @@ export default function Dashboard() {
     } catch { /* mejor esfuerzo: no vale dejar de confirmar por no poder limpiar la barra */ }
     confirmarDespierto(id);
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── «Arreglarlo» desde la notificación ────────────────────────────────────
+  // Segundo camino del botón, igual que el de la alarma y por el mismo fallo: el evento
+  // del móvil a Home Assistant se pierde en silencio y entonces pulsar «Arreglarlo» no
+  // lanza ninguna sesión, sin que nada lo diga en ninguna parte. Aquí se decide con el
+  // JWT del dashboard, sin pasar por HA.
+  //
+  // Y se ACUSA en pantalla, que es la otra mitad: un botón que dispara algo invisible es
+  // indistinguible de uno roto, que es justo lo que había. El backend además manda su
+  // aviso al móvil, pero eso llega después y por otro sitio.
+  useEffect(() => {
+    const decision = revisionDeUrl(window.location.search);
+    if (!token || !decision) return;
+    // El parámetro se quita ya: recargar más tarde no debe volver a decidir nada.
+    try {
+      const limpia = new URL(window.location.href);
+      limpia.searchParams.delete("revision");
+      limpia.searchParams.delete("accion");
+      window.history.replaceState({}, "", limpia);
+    } catch { /* mejor esfuerzo: no vale dejar de decidir por no poder limpiar la barra */ }
+    decidirRevision(decision.id, decision.accion);
+  }, [token]);
+
+  async function decidirRevision(id, accion) {
+    setRevisionAcuse("Lanzando el arreglo…");
+    try {
+      const r = await apiFetch(`${API}/revision/${id}/accion`, {
+        method: "POST", headers: jsonHeaders(), body: JSON.stringify({ accion }),
+      });
+      const datos = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setRevisionAcuse(`No se ha podido lanzar el arreglo: ${datos?.detail || r.status}`);
+      } else if (accion === "nada") {
+        setRevisionAcuse("Descartado, no hago nada.");
+      } else if (!datos?.hecho) {
+        // Ni error ni arreglo: esa decisión ya estaba tomada. Decirlo importa, porque es
+        // lo que pasa al pulsar el botón dos veces o al llegar por los dos caminos.
+        setRevisionAcuse(datos?.motivo || "Esa revisión ya estaba decidida.");
+      } else {
+        setRevisionAcuse("Voy a por ello. Habrá un PR cuando termine.");
+      }
+    } catch {
+      setRevisionAcuse("No se ha podido lanzar el arreglo: sin conexión con el backend.");
+    }
+  }
 
   async function submitEtfAportacion(ticker) {
     const form = etfAportForm[ticker];
@@ -6459,6 +6513,29 @@ export default function Dashboard() {
           onRechazar={() => setLlamadaEntrante(null)}
           onColgar={() => { colgarLlamada(); setLlamadaEntrante(null); }}
         />
+      )}
+
+      {/* La respuesta al botón «Arreglarlo» de la notificación. No se va sola: lo que
+          dice es el resultado de una decisión que acabas de tomar, y desvanecerse a los
+          tres segundos es exactamente cómo se pierde el «no he podido lanzarlo». */}
+      {revisionAcuse && (
+        <div style={{
+          position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 90, maxWidth: "min(92vw, 460px)",
+          background: "var(--surface2)", color: "var(--text)",
+          border: "0.5px solid var(--border2)", borderRadius: 10,
+          padding: "10px 14px", fontSize: 14, lineHeight: 1.45,
+          boxShadow: "0 6px 20px rgba(0,0,0,.25)",
+          display: "flex", gap: 12, alignItems: "center",
+        }}>
+          {/* En mayúscula porque algunos de estos textos son el `motivo` del backend,
+              escrito para ir dentro de una frase («no se pudo lanzar: …»). */}
+          <span style={{ flex: 1 }}>🔧 {revisionAcuse.charAt(0).toUpperCase() + revisionAcuse.slice(1)}</span>
+          <button onClick={() => setRevisionAcuse("")} title="Cerrar" style={{
+            background: "none", border: "none", color: "var(--muted)",
+            fontSize: 18, cursor: "pointer", lineHeight: 1,
+          }}>×</button>
+        </div>
       )}
 
       {/* ── DASHBOARD PRINCIPAL ── */}

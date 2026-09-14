@@ -512,9 +512,12 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
 
 - **La revisión nocturna, accionable** (`POST /revision/hallazgos`,
   `POST /revision/{id}/accion`, tabla `revision_hallazgos`, herramienta
-  `arreglar_revision`): el issue que deja la revisión de madrugada llega al móvil por la
-  mañana con dos botones —«Arreglarlo» y «No hacer nada»—, y el primero lanza otra sesión
-  en la nube que lo arregla, abre PR y mergea si el CI pasa. Los botones los decide el
+  `arreglar_revision`, `contar_revision`): el issue que deja la revisión de madrugada
+  llega al móvil por la mañana con tres botones —«Arreglarlo», «No hacer nada» y
+  «Hablarlo»—, y el primero lanza otra sesión en la nube que lo arregla, abre PR y mergea
+  si el CI pasa. «Hablarlo» descuelga una llamada con Jarvis, que llega con el **issue
+  entero** leído (`contar_revision` hace lo mismo por escrito, y no confirma nada porque
+  solo lee). Los botones los decide el
   backend (`_acciones_aviso`) y viajan **dentro del aviso**: HA solo sabe a qué móvil van.
   La decisión vive en Supabase porque entre el aviso y el toque pasan horas y Fly escala a
   cero, y se consume con un **PATCH condicional** para que dos toques no lancen dos
@@ -585,11 +588,15 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   es "está roto") y un fallo de `vigilante_estado` **no calla el aviso**: sale sin cifras
   y sin issue. Si la migración no se aplica, lo único degradado es el vigilante.
 
-  **El aviso es una PREGUNTA con dos botones, no una noticia** (desde el 2026-09-12). Los
-  mismos que la revisión nocturna —«Arreglarlo» / «No hacer nada»— y a propósito: la
-  pregunta es la misma, la contesta el mismo endpoint (`POST /revision/{id}/accion`) y
-  reusar los ids `LA_ARREGLAR_` / `LA_NADA_` significa que esto **no necesitó ni una línea
-  nueva de YAML en Home Assistant**. La decisión se apunta en `revision_hallazgos` con
+  **El aviso es una PREGUNTA con tres botones, no una noticia** (desde el 2026-09-12; el
+  tercero, desde el 2026-09-14). Los mismos que la revisión nocturna —«Arreglarlo» / «No
+  hacer nada» / «Hablarlo»— y a propósito: la pregunta es la misma, la contesta el mismo
+  endpoint (`POST /revision/{id}/accion`) y reusar los ids `LA_ARREGLAR_` / `LA_NADA_`
+  significa que esto **no necesitó ni una línea nueva de YAML en Home Assistant**.
+  «Arreglarlo» lleva además un `uri` al dashboard, que decide sin pasar por HA: el evento
+  del móvil a Home Assistant se pierde en silencio y se comió cinco decisiones seguidas el
+  2026-09-14. «Hablarlo» abre la pantalla de llamada con el id de ESA decisión, y ahí
+  Jarvis tiene el issue entero delante. Los dos, explicados en `docs/REVISION_NOCTURNA.md`. La decisión se apunta en `revision_hallazgos` con
   `origen='vigilante'` —la misma tabla que ya guarda las otras dos clases de decisión de
   este proyecto, así que tampoco hizo falta migración— y **la sesión que lanza ese botón
   abre PR y NO mergea**, igual que el camino de las averías (`docs/AVERIAS.md`): arreglar

@@ -2198,3 +2198,27 @@ export function alarmaDespertarDeUrl(busqueda) {
     return "";   // una query rota no confirma nada
   }
 }
+
+/** La decisión de revisión que hay que consumir por haber abierto el dashboard desde la
+ *  notificación: `{ id, accion }`, o `null` si esta carga no viene de ahí.
+ *
+ *  Es el segundo camino del botón «Arreglarlo», por lo mismo que en `alarmaDespertarDeUrl`
+ *  y con peor final: cuando el evento del móvil a Home Assistant se perdió —2026-09-14,
+ *  cinco avisos seguidos— pulsar «Arreglarlo» no lanzó ninguna sesión, y como el aviso
+ *  tampoco fallaba en ninguna parte, la única señal de que algo iba mal era que no pasaba
+ *  nada. Este camino no pasa por Home Assistant: confirma con el JWT que el dashboard ya
+ *  lleva guardado.
+ *
+ *  La acción se valida contra la lista que acepta el backend, y el id contra la forma de
+ *  un UUID: los dos viajan a una URL del backend y los escribe quien quiera. */
+export function revisionDeUrl(busqueda) {
+  try {
+    const p  = new URLSearchParams(busqueda || "");
+    const id = p.get("revision") || "";
+    const ac = p.get("accion") || "";
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) return null;
+    return ["arreglar", "nada"].includes(ac) ? { id, accion: ac } : null;
+  } catch {
+    return null;   // una query rota no decide nada
+  }
+}
