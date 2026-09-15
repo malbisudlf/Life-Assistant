@@ -357,3 +357,90 @@ class TestRespaldoDeActions:
         assert r.status_code == 200
         assert r.json()["enviado"] is True
         assert len(_SMTPFalso.enviados) == 1
+
+
+class TestBotonDeLaAlarma:
+    """Confirmar la alarma es la señal de despertar más exacta que hay —hay un dedo
+    humano detrás— y hasta septiembre de 2026 era la única que no traía el correo: las
+    alarmas se añadieron después de todo esto y nadie las enchufó a la puerta única.
+    """
+
+    RUTA = "/alarmas/11111111-1111-1111-1111-111111111111/despierto"
+    CABECERA = {"X-Auth-Token": "ha-poll-token"}
+
+    def _alarma_confirmable(self, mock_requests):
+        """El PATCH condicional se lleva la fila: la alarma estaba sonando de verdad."""
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse(
+            [{"id": "11111111-1111-1111-1111-111111111111", "repetir": None,
+              "cuando": datetime.now(main.LOCAL_TZ).isoformat()}]))
+
+    def test_confirmar_la_alarma_manda_el_correo(self, client, mock_requests, graph_token,
+                                                 monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 8, 30)
+
+        r = client.post(self.RUTA, headers=self.CABECERA)
+        assert r.status_code == 200
+        assert r.json()["hecho"] is True
+        assert len(_SMTPFalso.enviados) == 1
+        # Y consta como señal de despertar, no como reloj: es lo que distingue en la zona
+        # dev un correo que salió al despertarte de uno que salió del respaldo.
+        reservado = mock_requests.called("POST", "/rest/v1/brief_envios")[0][2]["json"][0]
+        assert reservado["fuente"] == "alarma"
+        assert reservado["despertar_at"]
+
+    def test_una_alarma_de_madrugada_no_trae_el_correo(self, client, mock_requests,
+                                                       graph_token, monkeypatch):
+        """Misma ventana que las demás señales: una alarma de las 04:00 para un vuelo es
+        estar despierto, pero el correo de ese día se compondría sin la noche
+        sincronizada. Para eso está la hora tope."""
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 4, 30)
+
+        r = client.post(self.RUTA, headers=self.CABECERA)
+        assert r.json()["hecho"] is True, "la alarma se quita igual"
+        assert _SMTPFalso.enviados == []
+        assert mock_requests.called("POST", "/rest/v1/brief_envios") == []
+
+    def test_pulsarlo_cuando_ya_no_sonaba_no_manda_nada(self, client, mock_requests,
+                                                        graph_token, monkeypatch):
+        """Pulsar dos veces, o confirmar una alarma ya rendida: no hay despertar nuevo
+        que anunciar y el correo no se toca."""
+        preparar(mock_requests, monkeypatch)
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([]))
+        reloj(monkeypatch, 8, 30)
+
+        r = client.post(self.RUTA, headers=self.CABECERA)
+        assert r.json()["hecho"] is False
+        assert _SMTPFalso.enviados == []
+
+    def test_el_correo_no_puede_tumbar_la_alarma(self, client, mock_requests, graph_token,
+                                                 monkeypatch, caplog):
+        """Lo que importa de ese botón es que la alarma deje de sonar. Si el correo
+        revienta, se registra y el botón sigue contestando que sí."""
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 8, 30)
+        monkeypatch.setattr(main, "construir_brief",
+                            lambda: (_ for _ in ()).throw(RuntimeError("Graph caído")))
+
+        with caplog.at_level("ERROR"):
+            r = client.post(self.RUTA, headers=self.CABECERA)
+        assert r.status_code == 200
+        assert r.json()["hecho"] is True
+        assert "Graph caído" in caplog.text
+
+    def test_el_interruptor_tambien_la_apaga(self, client, mock_requests, graph_token,
+                                             monkeypatch):
+        """Pasa por `enviar_brief_si_toca`, que es la única puerta: con el resumen
+        apagado, confirmar la alarma no manda nada."""
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 8, 30)
+        main._brief_ajustes_cache = {"activo": False, "pausado_hasta": None}
+
+        client.post(self.RUTA, headers=self.CABECERA)
+        assert _SMTPFalso.enviados == []
+        assert mock_requests.called("POST", "/rest/v1/brief_envios") == []

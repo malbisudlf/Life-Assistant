@@ -85,21 +85,39 @@ backend está en `docs/BACKEND_PATRONES.md`.
 - **Cuándo sale el correo: al despertarse, no a una hora fija.** Lo disparaba el cron de
   `.github/workflows/resumen-diario.yml`, y Actions se retrasa 10-15 min cuando su cola
   va cargada — un disparador que no sabe decirte a qué hora va a disparar no vale para
-  algo que tiene que pasar "al despertarte". Ahora hay tres fuentes y **`enviar_brief_si_toca()`
+  algo que tiene que pasar "al despertarte". Ahora hay cuatro fuentes y **`enviar_brief_si_toca()`
   es la única puerta**: cada fuente sabe CUÁNDO llamar, y quien decide SI se manda es ella.
   - `POST /despertar` (`BRIEF_TOKEN`) — el Atajo del iPhone al desenchufar el cargador.
-    Es la única señal exacta: instantánea y sin deducir nada.
+    Señal exacta: instantánea y sin deducir nada.
+  - `POST /alarmas/{id}/despierto` (`_avisar_alarma_confirmada`) — el botón «Estoy
+    despierto» de la alarma. La señal **más** exacta de las cuatro, porque hay un dedo
+    humano detrás en vez de una deducción sobre la batería. Va como tarea de fondo
+    (`BackgroundTasks`) y no dentro de la petición: componer el correo son varios
+    segundos y el `rest_command` de HA que llama ahí no lleva `timeout`, o sea 10 s —
+    pasado ese tope HA daría por fallida una automatización que funcionó. El botón tiene
+    que contestar ya; se pulsa medio dormido. Como las demás señales, respeta la ventana:
+    una alarma de las 05:00 para un vuelo es estar despierto, pero el correo de ese día
+    saldría sin la noche sincronizada.
   - La llegada del sueño del Watch en la ingesta (`_avisar_sueno_recibido`) — **es una
     deducción, no un aviso**. El reloj sabe cuándo te despiertas, pero el backend no se
     entera hasta que el iPhone sincroniza, y ese sync puede traer una noche a medias
     mientras sigues durmiendo. Por eso solo cuentan las noches de hoy y ayer (el Atajo
     reenvía los últimos días en cada sync) y se puede apagar con `BRIEF_DISPARA_SUENO=0`.
     Un fallo del correo **nunca** tumba la ingesta: guardar los datos del Watch importa
-    más, y el correo tiene otras dos fuentes.
+    más, y el correo tiene otras tres fuentes.
   - `POST /ha/brief-tick` (`HA_POLL_TOKEN`) — el reloj de respaldo. HA lo sondea cada
     pocos minutos y solo hace algo pasada `BRIEF_HORA_TOPE` (10:00). El reloj lo pone HA
     y no un hilo del backend porque **Fly escala a cero**: sin nadie que llame, aquí no
     hay proceso vivo que pueda mirar la hora.
+
+  **Cómo se ve si las señales siguen llegando**: los relojes de respaldo mandan el correo
+  igual, así que una señal muerta no da ningún error — el correo sigue saliendo, solo que
+  a las 10:00, y eso no se nota en ninguna pantalla. Lo dice la pestaña **Crons** de la
+  zona dev (`¿Salió al despertarte?`, `estadoFuentesBrief`): los últimos 14 envíos con su
+  hora y su fuente. Lo que distingue una señal de un reloj ahí es `brief_envios.despertar_at`
+  y no una lista de nombres —solo lo escribe quien avisó de un despertar de verdad—, así
+  que un disparador nuevo entra en la cuenta sin tocar nada. Una mañana suelta del reloj no
+  es una avería (el móvil descargado, un desenchufe antes de la ventana); tres seguidas sí.
 
   Dos invariantes que no se pueden relajar:
   - **La idempotencia es la tabla `brief_envios`, no una comprobación previa.** Se
@@ -269,8 +287,13 @@ backend está en `docs/BACKEND_PATRONES.md`.
     (`_brief_ajustes_cache`), como el token de Graph y la presencia; resetéala en
     `conftest.py` como el resto de estado de módulo.
   - **La comprobación va DENTRO de `enviar_brief_si_toca()` y solo ahí**, que es la única
-    puerta del envío automático: puesta ahí apaga de una vez las tres fuentes, y una
-    cuarta que se añada mañana no se puede olvidar de mirarla. Y va **antes de reservar**:
+    puerta del envío automático: puesta ahí apaga de una vez las cuatro fuentes, y una
+    quinta que se añada mañana no se puede olvidar de mirarla. **Lo que la puerta única
+    NO garantiza es que una fuente nueva llegue a llamarla**, y eso costó descubrirlo: el
+    botón de la alarma existió semanas sin mandar el correo, así que la mañana en que la
+    alarma te despertaba y el Atajo del móvil no entregaba, el resumen esperaba a las
+    10:00. La puerta asegura que quien entra respeta el interruptor, no que nadie se
+    quede fuera. Y va **antes de reservar**:
     reservar el día de un correo que no va a salir lo deja marcado como enviado, y al
     quitar la pausa no saldría hasta el día siguiente.
   - **No tapa el envío pedido a mano** (`?forzar=1`, `enviar_resumen` de Jarvis): ahí hay

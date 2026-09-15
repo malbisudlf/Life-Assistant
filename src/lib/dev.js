@@ -69,6 +69,17 @@ export function horaCorta(iso) {
 }
 
 // "hace 3 min". Sirve para todo lo que aquí se pregunta como "¿cuándo fue la última vez?".
+// Solo la hora y el minuto. El historial de envíos del resumen lleva la fecha en su propia
+// columna, así que repetirla en cada hora —y arrastrar los segundos— solo estorba: lo que
+// se compara de un día a otro es "a qué hora salió".
+export function horaMinuto(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const dd = (n) => String(n).padStart(2, "0");
+  return `${dd(d.getHours())}:${dd(d.getMinutes())}`;
+}
+
 export function desdeHace(iso) {
   if (!iso) return null;
   const t = new Date(iso).getTime();
@@ -338,6 +349,50 @@ export function estadoSondeo(sondeo, procesoDesdeHace = null) {
 // Los sondeos que solo pasan cuando algo está encendido: el PC no está siempre puesto, y
 // pintar en rojo que su agente lleva horas sin pedir jobs sería llamar avería a la noche.
 export const SONDEOS_OPCIONALES = ["/jobs/pending", "/llamada/pendiente"];
+
+// De qué FUENTE salió cada resumen diario. La pregunta que contesta no es "¿ha salido?"
+// —eso ya lo dice la fila del último envío— sino "¿salió al despertarme?", que es otra
+// cosa: el correo tiene cuatro disparadores y dos de ellos son relojes de respaldo, así
+// que puede llegar todos los días y llegar mal todos los días. Un Atajo del iPhone que
+// deja de entregar no da ningún error en ninguna pantalla; el correo sigue saliendo, solo
+// que a las 10:00. Ya pasó dos veces (ver docs/SALUD.md) y las dos se descubrió de casualidad.
+//
+// Lo que separa una cosa de la otra es `despertar_at` y NO una lista de nombres de fuente:
+// esa columna solo la escribe quien avisó de un despertar de verdad, así que un disparador
+// nuevo entra en la cuenta sin que haya que acordarse de añadirlo aquí.
+export function estadoFuentesBrief(filas) {
+  if (!filas) return { tono: "muted", texto: "sin comprobar", dias: [] };
+  const dias = filas.map(f => ({
+    fecha:    f.fecha,
+    fuente:   f.fuente || "?",
+    hora:     horaMinuto(f.enviado_at),
+    porSenal: !!f.despertar_at,
+  }));
+  if (!dias.length) return { tono: "muted", texto: "no consta ningún envío", dias };
+
+  const respaldo = dias.filter(d => !d.porSenal).length;
+  // La racha se cuenta desde el último envío hacia atrás, y es ella la que decide el color:
+  // una mañana suelta del reloj no es una avería (el móvil descargado, un desenchufe antes
+  // de la ventana, un día sin alarma), y pintarla en rojo enseñaría a no mirar el rojo.
+  // Tres seguidas ya no son la mañana, son el camino.
+  let racha = 0;
+  while (racha < dias.length && !dias[racha].porSenal) racha += 1;
+  const cuantas = `${respaldo} de ${dias.length}`;
+
+  if (racha >= 3) {
+    return { tono: "red", dias,
+             texto: `los ${racha} últimos salieron del reloj de respaldo (${cuantas}): ` +
+                    `la señal de despertar no está llegando` };
+  }
+  if (racha > 0) {
+    return { tono: "accent", dias,
+             texto: `el último salió del reloj de respaldo, no al despertarte (${cuantas})` };
+  }
+  return { tono: "green", dias,
+           texto: respaldo
+             ? `el último salió al despertarte (${cuantas} salieron del reloj)`
+             : "todos salieron al despertarte" };
+}
 
 // Cuánto lleva el backend en pie, en las mismas palabras en los dos sitios donde se dice.
 // Con dos redondeos distintos, la misma pantalla llegó a decir "1 min" arriba y "0 min"

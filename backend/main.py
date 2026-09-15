@@ -1,5 +1,5 @@
-﻿from fastapi import (FastAPI, Depends, HTTPException, Request, status, UploadFile,
-                     File, Path, WebSocket, WebSocketDisconnect)
+﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request, status,
+                     UploadFile, File, Path, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -6931,7 +6931,7 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
 # nadie que llame no hay proceso vivo que pueda mirar el reloj.
 #
 # Ojo con la intuición de "el reloj sabe cuándo me despierto": el Watch lo sabe, pero
-# el backend no se entera hasta que el iPhone sincroniza. De ahí que haya dos fuentes
+# el backend no se entera hasta que el iPhone sincroniza. De ahí que haya varias fuentes
 # y gane la que llegue antes.
 
 BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
@@ -6943,9 +6943,13 @@ BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
 # `brief_ajustes`).
 #
 # La comprobación vive en `enviar_brief_si_toca()` y solo ahí, porque esa función es la
-# única puerta del envío automático: puesta ahí, apaga de una vez las tres fuentes (el
-# Atajo del móvil, la llegada del sueño del Watch y el reloj de HA) y ninguna futura se
-# puede olvidar de mirarla.
+# única puerta del envío automático: puesta ahí, apaga de una vez las cuatro fuentes (el
+# Atajo del móvil, el botón «Estoy despierto» de la alarma, la llegada del sueño del Watch
+# y el reloj de HA) y ninguna futura se puede olvidar de mirarla.
+#
+# Lo que esto NO garantiza —y costó una mañana descubrirlo— es que una fuente nueva llegue
+# a llamar a esta puerta: el botón de la alarma tardó semanas en hacerlo. La puerta única
+# asegura que quien entra respeta el interruptor, no que nadie se quede fuera.
 #
 # Lo que NO tapa a propósito es el envío pedido a mano —`/brief/send?forzar=1` y la
 # herramienta `enviar_resumen` de Jarvis—: ahí hay una persona pidiéndolo en ese
@@ -7232,8 +7236,9 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     """Manda el resumen del día si aún no ha salido. Idempotente por día.
 
     Única puerta de entrada al envío automático: la usan la señal de despertar del
-    móvil, la llegada del sueño del Watch y el reloj de respaldo de HA. Cada uno sabe
-    CUÁNDO llamar; el que decide SI se manda es este.
+    móvil, el botón «Estoy despierto» de la alarma, la llegada del sueño del Watch y el
+    reloj de respaldo de HA. Cada uno sabe CUÁNDO llamar; el que decide SI se manda es
+    este.
     """
     ahora = _ahora_local()
     fecha = ahora.date().isoformat()
@@ -7292,6 +7297,33 @@ def _avisar_sueno_recibido(fechas_sueno: set) -> None:
         enviar_brief_si_toca("sueno", despertar=ahora)
     except Exception:
         logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del Watch")
+
+
+def _avisar_alarma_confirmada() -> None:
+    """Has pulsado «Estoy despierto»: la señal de despertar más exacta que hay.
+
+    Más exacta incluso que el desenchufe del cargador, porque ahí hay un dedo humano
+    confirmando que está en pie y no una deducción sobre la batería. Faltaba: las
+    alarmas llegaron después de todo esto y nadie las conectó, así que la mañana en que
+    la alarma te despertaba y el Atajo del móvil no entregaba se quedaba esperando al
+    reloj de BRIEF_HORA_TOPE. Que la única puerta mire el interruptor garantiza que una
+    fuente nueva no se salte el apagado, no que alguien se acuerde de enchufarla.
+
+    Pasa por la misma ventana que las demás señales: confirmar una alarma de las 05:00
+    para un vuelo es estar despierto de verdad, pero el correo de ese día se compondría
+    sin la noche sincronizada, y para eso ya está la hora tope.
+
+    Nunca puede tumbar la confirmación de la alarma —lo que importa es que deje de
+    sonar—, igual que no puede tumbar la ingesta del Watch. Y va como tarea de fondo
+    (ver `alarma_despierto`), así que aquí no queda nadie esperando.
+    """
+    ahora = _ahora_local()
+    if not _senal_de_despertar_valida(ahora):
+        return
+    try:
+        enviar_brief_si_toca("alarma", despertar=ahora)
+    except Exception:
+        logger.exception("Resumen diario: fallo al enviarlo tras confirmar la alarma")
 
 
 @app.post("/despertar")
@@ -8038,8 +8070,14 @@ def dev_crons(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         t_wf  = pool.submit(workflows)
+        # Catorce días y columnas contadas, no `*`: lo que hay que ver aquí es de qué
+        # FUENTE salió cada resumen, y eso solo se lee en racha — un día del reloj de
+        # respaldo es una mañana rara, dos semanas seguidas es una integración muerta.
+        # Sin la lista de columnas cada fila arrastraría además su `datos`, que es la
+        # instantánea entera del brief y no se pinta en ninguna parte.
         t_bri = pool.submit(tabla, BRIEF_ENVIOS_URL,
-                            {"select": "*", "order": "fecha.desc", "limit": 3})
+                            {"select": "fecha,fuente,enviado_at,despertar_at",
+                             "order": "fecha.desc", "limit": 14})
         t_inf = pool.submit(tabla, INFORME_ENVIOS_URL,
                             {"select": "*", "order": "fecha.desc", "limit": 3})
         t_vig = pool.submit(tabla, VIGILANTE_ESTADO_URL,
@@ -10035,8 +10073,13 @@ def ha_alarma_tick(request: Request, token: str = ""):
 
 
 @app.post("/alarmas/{alarma_id}/despierto")
-def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str = ""):
-    """«Estoy despierto». Lo llama el botón de la notificación (HA) o el dashboard."""
+def alarma_despierto(request: Request, tareas: BackgroundTasks,
+                     alarma_id: str = _uuid_path(), token: str = ""):
+    """«Estoy despierto». Lo llama el botón de la notificación (HA) o el dashboard.
+
+    Confirmar la alarma es además una señal de despertar, así que de aquí sale también
+    el resumen diario (`_avisar_alarma_confirmada`).
+    """
     _auth_boton(request, token)
     ahora = datetime.now(timezone.utc)
     r = http.patch(
@@ -10062,6 +10105,12 @@ def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str
     # no deja huella en ningún log.
     _acusar_recibo("⏰ Alarma quitada", "Confirmado que estás despierto. Dejo de insistir.",
                    efimero=True)
+    # El resumen va DESPUÉS de contestar y no dentro de la petición: componerlo son
+    # varios segundos (Graph, clima, feeds y el SMTP) y el `rest_command` de HA que llama
+    # aquí no lleva `timeout`, o sea 10 s. Pasado ese tope HA daría por fallida una
+    # automatización que funcionó, y el botón tiene que contestar ya: se pulsa medio
+    # dormido y su acuse es lo único que dice que entró.
+    tareas.add_task(_avisar_alarma_confirmada)
     return {"ok": True, "hecho": True}
 
 
