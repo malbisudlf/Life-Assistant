@@ -380,6 +380,26 @@ class TestAvisosAlMovil:
         assert correos == [("⏰ pastilla", "tomar la pastilla")]
         assert main._avisos_movil == []
 
+    def test_un_acuse_efimero_es_movil_o_nada(self, client, correos):
+        """El acuse de un botón no mejora por convertirse en correo: llega cuando ya no
+        dice nada y hace dudar de si la acción se hizo. Móvil o nada."""
+        self._sondear(client)
+        monkeypatch_vivo = main._ultimo_sondeo_avisos
+        assert main._notificar("⏰ Alarma quitada", "hecho", efimero=True) == "movil"
+        main._avisos_movil.clear()
+        main._ultimo_sondeo_avisos = monkeypatch_vivo - main.AVISO_MOVIL_VIVO - 1
+        assert main._notificar("⏰ Alarma quitada", "hecho", efimero=True) == "ninguno"
+        assert correos == []
+        assert main._avisos_movil == []
+
+    def test_un_acuse_efimero_sin_recoger_se_tira_en_vez_de_rescatarse(self, client, correos):
+        self._sondear(client)
+        main._notificar("⏰ Alarma quitada", "hecho", efimero=True)
+        main._avisos_movil[0]["puesto"] -= main.AVISO_MOVIL_RESCATE + 1
+        assert main._rescatar_avisos() == {}
+        assert correos == []
+        assert main._avisos_movil == []
+
     def test_un_aviso_reciente_no_se_rescata_todavia(self, client, correos):
         self._sondear(client)
         main._notificar("⏰ pastilla", "tomar la pastilla")
