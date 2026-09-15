@@ -130,26 +130,16 @@ class TestPrimerAviso:
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
              "title": "Estoy despierto"}]
 
-    def test_el_boton_trae_el_segundo_camino_si_hay_dashboard(self, mock_requests,
-                                                              canal_movil, monkeypatch):
-        # El `uri` abre el dashboard, que confirma por su cuenta. Existe porque el camino
-        # del `action` (móvil → HA → backend) se pierde SIN ERROR si la app no alcanza a
-        # HA al pulsar, y entonces el botón no hace nada mientras la casa sigue
-        # insistiendo. Pasó el 2026-09-14.
+    def test_el_boton_no_abre_nada_aunque_haya_dashboard(self, monkeypatch):
+        # Quitar una alarma pasa ENTERO de fondo: el botón no lleva `uri`, ni siquiera
+        # con FRONTEND_URL puesto. Lo llevó un día (2026-09-14) para cubrir el evento
+        # perdido de HA y el remedio fue peor: abría el navegador cada vez que se pulsaba
+        # a las seis de la mañana.
         monkeypatch.setattr(main, "FRONTEND_URL", "https://dashboard.example")
-        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([_fila(minutos_desde_ahora=-1)]))
-        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
-        main._correr_alarmas()
-        assert canal_movil[0]["acciones"] == [
+        acciones = main._alarma_acciones("11111111-1111-1111-1111-111111111111")
+        assert acciones == [
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
-             "title": "Estoy despierto",
-             "uri": "https://dashboard.example/?despierto=11111111-1111-1111-1111-111111111111"}]
-
-    def test_sin_dashboard_el_boton_se_queda_como_estaba(self, monkeypatch):
-        # Sin FRONTEND_URL no se inventa una URL: el botón sigue teniendo su camino de
-        # siempre, el de Home Assistant.
-        monkeypatch.setattr(main, "FRONTEND_URL", "")
-        assert "uri" not in main._alarma_acciones("11111111-1111-1111-1111-111111111111")[0]
+             "title": "Estoy despierto"}]
 
     def test_todavia_no_es_la_hora_y_no_avisa(self, mock_requests, canal_movil):
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([_fila(minutos_desde_ahora=30)]))
@@ -257,6 +247,34 @@ class TestSeRinde:
 
 class TestBotonDespierto:
     RUTA = "/alarmas/11111111-1111-1111-1111-111111111111/despierto"
+
+    def test_confirmar_avisa_de_vuelta_al_movil(self, client, mock_requests, canal_movil):
+        # Es lo único que dice que el botón ha entrado: el salto móvil → HA no deja
+        # huella en ningún log y se pierde en silencio (2026-09-14). Sin esta
+        # notificación de vuelta, pulsar y que no pase nada se parece demasiado a pulsar
+        # y que sí pase.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        client.post(self.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert [a["titulo"] for a in canal_movil] == ["⏰ Alarma quitada"]
+
+    def test_el_acuse_no_se_va_por_correo_si_no_hay_movil(self, client, mock_requests,
+                                                          monkeypatch):
+        # Efímero: móvil o nada. «Alarma quitada» leído en el buzón a mediodía no informa
+        # de nada y encima hace dudar de si se quitó.
+        monkeypatch.setattr(main, "AVISOS_MOVIL", False)
+        enviados = []
+        monkeypatch.setattr(main, "enviar_correo",
+                            lambda asunto, cuerpo: enviados.append((asunto, cuerpo)))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        assert client.post(self.RUTA, headers={"X-Auth-Token": "ha-poll-token"}).status_code == 200
+        assert enviados == []
+
+    def test_pulsarlo_dos_veces_no_acusa_dos_veces(self, client, mock_requests, canal_movil):
+        # La fila ya no estaba sonando: no hay nada que acusar, y un segundo «alarma
+        # quitada» haría pensar que se ha vuelto a quitar algo.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_perdida)
+        client.post(self.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert canal_movil == []
 
     def test_confirma_y_para_la_musica(self, client, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")

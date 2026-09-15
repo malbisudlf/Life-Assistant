@@ -14,7 +14,7 @@ import {
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
-  alarmaDespertarDeUrl, revisionDeUrl, DIAS_SEMANA,
+  revisionDeUrl, DIAS_SEMANA,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -3603,31 +3603,18 @@ export default function Dashboard() {
     await loadAlarmas();
   }
 
-  // ── «Estoy despierto» desde la notificación ───────────────────────────────
-  // El botón del móvil abre además el dashboard con `?despierto=<id>`, y eso lo confirma
-  // aquí. Es el SEGUNDO camino del mismo botón, no un adorno: el primero (el evento a
-  // Home Assistant) se pierde en silencio si la app no alcanza a HA al pulsarlo, y
-  // entonces pulsar «Estoy despierto» no hace nada mientras Alexa te sigue insistiendo.
-  // Pasó el 2026-09-14 y hubo que confirmar entrando al dashboard a mano, que es justo
-  // lo que esto ahorra. Confirmar dos veces no duele: el backend deja la fila una vez.
-  useEffect(() => {
-    const id = alarmaDespertarDeUrl(window.location.search);
-    if (!token || !id) return;
-    // El parámetro se quita ya: recargar más tarde no debe volver a confirmar una alarma
-    // que quizá esté sonando otra vez (las semanales vuelven solas).
-    try {
-      const limpia = new URL(window.location.href);
-      limpia.searchParams.delete("despierto");
-      window.history.replaceState({}, "", limpia);
-    } catch { /* mejor esfuerzo: no vale dejar de confirmar por no poder limpiar la barra */ }
-    confirmarDespierto(id);
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  // El botón «Estoy despierto» de la notificación NO abre esto (llevó un `uri` al
+  // dashboard un solo día, ver `_alarma_acciones` en el backend): quitar una alarma pasa
+  // entero de fondo, y lo que dice que ha entrado es la notificación de vuelta. Desde
+  // aquí se confirma pulsando el botón del widget, que es otra cosa: aquí ya estás
+  // mirando la pantalla.
 
   // ── «Arreglarlo» desde la notificación ────────────────────────────────────
-  // Segundo camino del botón, igual que el de la alarma y por el mismo fallo: el evento
-  // del móvil a Home Assistant se pierde en silencio y entonces pulsar «Arreglarlo» no
-  // lanza ninguna sesión, sin que nada lo diga en ninguna parte. Aquí se decide con el
-  // JWT del dashboard, sin pasar por HA.
+  // Segundo camino del botón: el evento del móvil a Home Assistant se pierde en silencio
+  // y entonces pulsar «Arreglarlo» no lanza ninguna sesión, sin que nada lo diga en
+  // ninguna parte. Aquí se decide con el JWT del dashboard, sin pasar por HA. Que aquí
+  // se abra el dashboard es parte de lo que se ha pedido —quieres ver qué se ha roto—,
+  // al revés que en la alarma, donde abrir algo era el problema.
   //
   // Y se ACUSA en pantalla, que es la otra mitad: un botón que dispara algo invisible es
   // indistinguible de uno roto, que es justo lo que había. El backend además manda su

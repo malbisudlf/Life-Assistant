@@ -2179,35 +2179,17 @@ export function alarmaSonando(alarmas) {
   return (alarmas || []).find(a => a?.estado === "avisada" || a?.estado === "escalada") || null;
 }
 
-/** El id de la alarma que hay que confirmar por haber abierto el dashboard desde la
- *  notificación, o `""` si esta carga no viene de ahí.
- *
- *  El botón «Estoy despierto» del móvil trae `uri` además de su `action` (ver
- *  `_alarma_acciones` en el backend): el `action` va por Home Assistant y el `uri` abre
- *  esto. Son dos caminos para el mismo botón porque el de HA se pierde en silencio
- *  cuando la app no alcanza a HA al pulsarlo, y una alarma que no se puede callar desde
- *  su propia notificación deja de ser un respaldo.
- *
- *  Se exige forma de UUID: el id se mete tal cual en una URL del backend, y un
- *  parámetro de la barra de direcciones lo escribe cualquiera. */
-export function alarmaDespertarDeUrl(busqueda) {
-  try {
-    const id = new URLSearchParams(busqueda || "").get("despierto") || "";
-    return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id) ? id : "";
-  } catch {
-    return "";   // una query rota no confirma nada
-  }
-}
-
 /** La decisión de revisión que hay que consumir por haber abierto el dashboard desde la
  *  notificación: `{ id, accion }`, o `null` si esta carga no viene de ahí.
  *
- *  Es el segundo camino del botón «Arreglarlo», por lo mismo que en `alarmaDespertarDeUrl`
- *  y con peor final: cuando el evento del móvil a Home Assistant se perdió —2026-09-14,
- *  cinco avisos seguidos— pulsar «Arreglarlo» no lanzó ninguna sesión, y como el aviso
- *  tampoco fallaba en ninguna parte, la única señal de que algo iba mal era que no pasaba
- *  nada. Este camino no pasa por Home Assistant: confirma con el JWT que el dashboard ya
- *  lleva guardado.
+ *  Es el segundo camino del botón «Arreglarlo»: cuando el evento del móvil a Home
+ *  Assistant se perdió —2026-09-14, cinco avisos seguidos— pulsar «Arreglarlo» no lanzó
+ *  ninguna sesión, y como el aviso tampoco fallaba en ninguna parte, la única señal de
+ *  que algo iba mal era que no pasaba nada. Este camino no pasa por Home Assistant:
+ *  confirma con el JWT que el dashboard ya lleva guardado.
+ *
+ *  Aquí abrir el dashboard vale y en la alarma no: «¿lo arreglo?» se contesta mirando lo
+ *  que se ha roto, y «estoy despierto» se pulsa a oscuras para que algo deje de sonar.
  *
  *  La acción se valida contra la lista que acepta el backend, y el id contra la forma de
  *  un UUID: los dos viajan a una URL del backend y los escribe quien quiera. */
