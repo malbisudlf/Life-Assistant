@@ -9753,28 +9753,24 @@ def _correr_alarmas() -> dict:
 
 
 def _alarma_acciones(rid: str) -> list:
-    """El botón «Estoy despierto», con DOS caminos de vuelta y no uno.
+    """El botón «Estoy despierto»: un `action` a secas, y NADA de `uri`.
 
-    El camino de siempre es el `action`: el móvil manda `mobile_app_notification_action`
-    a Home Assistant, que llama a `POST /alarmas/{id}/despierto`. Tiene cuatro saltos y
-    el primero es el más frágil de todos — si la app companion no alcanza a HA en ese
-    instante (sin red al desbloquear, HA inalcanzable desde fuera, la app dormida en
-    segundo plano), **el evento se pierde sin un solo error en ninguna parte**: ni tú te
-    enteras ni el backend tampoco, así que para él sigues dormido y Alexa sigue
-    insistiendo. Pasó el 2026-09-14 y se tardó en verlo justo porque no falla nada
-    visible: el YAML, el token y el endpoint estaban bien.
+    El camino es el de siempre: el móvil manda `mobile_app_notification_action`, Home
+    Assistant lo recoge y llama a `POST /alarmas/{id}/despierto`. Cuatro saltos, pero
+    todos **de fondo**: quitar la alarma es apagar algo que ya está sonando, y para eso
+    lo que se pide es que no pase nada más — ni una pantalla, ni un navegador, ni
+    desbloquear el móvil a las seis de la mañana.
 
-    El `uri` es el segundo camino, y no depende de Home Assistant: abre el dashboard con
-    `?despierto=<id>` y el propio dashboard confirma con el JWT que ya lleva guardado.
-    Los dos caminos acaban en el mismo endpoint y confirmar dos veces no es un error
-    (el PATCH condicional se lleva la fila una sola vez), así que no hace falta elegir.
-
-    Sin `FRONTEND_URL` el botón se queda como estaba: un camino, el de HA.
+    Aquí hubo un `uri` al dashboard (2026-09-14 → 2026-09-15) por un fallo real: el
+    evento del móvil a HA se pierde sin un solo error en ninguna parte y la alarma se
+    quedó sonando. Duró un día: **el arreglo era peor que el fallo**, porque abría el
+    dashboard en el navegador cada vez que se pulsaba el botón. Lo que queda de aquello
+    es el acuse de recibo que manda `POST /alarmas/{id}/despierto` («⏰ Alarma quitada»):
+    ese aviso es el segundo camino de verdad, porque no arregla el salto frágil sino que
+    lo hace **visible** — si pulsas y no llega, ya sabes que no ha entrado, que es
+    exactamente lo que faltaba aquel día. Ver `docs/BUGS_HISTORICOS.md`.
     """
-    accion = {"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}
-    if FRONTEND_URL:
-        accion["uri"] = f"{FRONTEND_URL}/?despierto={rid}"
-    return [accion]
+    return [{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}]
 
 
 def _alarma_avisar(fila: dict, ahora: datetime) -> None:
@@ -10058,7 +10054,14 @@ def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str
     # ya el estado nuevo y los días, y es la única versión de la fila que consta que
     # ganó la carrera.
     _alarma_reprogramar(r.json()[0], "confirmada", ahora)
-    _acusar_recibo("☀️ Buenos días", "Alarma confirmada. Dejo de insistir.")
+    # El acuse va EFÍMERO: notificación al móvil o nada. Es la respuesta a un botón que
+    # se pulsa medio dormido, y su trabajo es decir «entró» en el sitio donde estaba el
+    # botón; el mismo texto por correo no dice nada —cuando se lee, la alarma lleva
+    # horas callada— y encima hace dudar de si la alarma se quitó o no. Ver
+    # `_alarma_acciones`: este aviso es lo que hace visible el único salto del botón que
+    # no deja huella en ningún log.
+    _acusar_recibo("⏰ Alarma quitada", "Confirmado que estás despierto. Dejo de insistir.",
+                   efimero=True)
     return {"ok": True, "hecho": True}
 
 
@@ -11926,14 +11929,20 @@ def _acciones_aviso(rid: str, regla: str) -> list:
     # `LA_NADA_` significa además que el vigilante NO necesita ni una línea nueva de YAML
     # en Home Assistant — la automatización que ya existe casa por ese prefijo.
     if regla in (REGLA_REVISION, REGLA_VIGILANTE):
-        # «Arreglarlo» lleva `uri` además de su `action`, por lo mismo que el botón de las
-        # alarmas (ver `_alarma_acciones`): el evento del móvil a Home Assistant se pierde
-        # en silencio si la app no alcanza a HA al pulsarlo, y entonces pulsar «Arreglarlo»
-        # no hace NADA — ni se lanza el arreglo ni te enteras de que no se ha lanzado.
+        # «Arreglarlo» lleva `uri` además de su `action`: el evento del móvil a Home
+        # Assistant se pierde en silencio si la app no alcanza a HA al pulsarlo, y
+        # entonces pulsar «Arreglarlo» no hace NADA — ni se lanza el arreglo ni te
+        # enteras de que no se ha lanzado.
         # Pasó el 2026-09-14 con el aviso del vigilante: cinco decisiones seguidas se
         # quedaron en `pendiente`, sin un error en el log de HA, sin una petición en el del
         # backend y sin nada que mirar. El `uri` abre el dashboard, que confirma con el JWT
         # que ya lleva guardado y no pasa por Home Assistant en ningún momento.
+        #
+        # Aquí abrir el dashboard SÍ vale y en la alarma no (ver `_alarma_acciones`, que
+        # llevó un `uri` un solo día): «¿lo arreglo?» se contesta mirando, despierto y con
+        # tiempo, y la pantalla que se abre cuenta qué se ha roto. «Estoy despierto» es lo
+        # contrario — se pulsa a oscuras para que algo DEJE de sonar, y ahí una web que se
+        # abre es el aviso convertido en trabajo.
         arreglar = {"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"}
         botones  = [arreglar, {"action": f"LA_NADA_{rid}", "title": "No hacer nada"}]
         if FRONTEND_URL:
@@ -11979,7 +11988,8 @@ def _acciones_aviso(rid: str, regla: str) -> list:
 
 
 def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = "",
-               acciones: Optional[list] = None, critico: bool = False) -> str:
+               acciones: Optional[list] = None, critico: bool = False,
+               efimero: bool = False) -> str:
     """Única puerta de salida de un aviso. Devuelve el canal por el que salió.
 
     Al móvil si hay quien lo recoja, y si no por correo. Un fallo del correo se propaga a
@@ -11997,14 +12007,26 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
     hasta que contestes, que hoy es exactamente una cosa, el permiso de despliegue. Si
     algún día suena por algo que podía esperar, dejarás de mirarlo — y con él se irá el
     aviso que sí importaba.
+
+    `efimero` es lo contrario del rescate: este aviso va al móvil o no va. Es para los
+    ACUSES DE RECIBO —«ha entrado lo que acabas de pulsar»—, que solo valen al lado del
+    botón y en el momento: el mismo texto leído en el buzón media hora después no informa
+    de nada y encima hace dudar de si la acción se hizo. Nada que tenga algo que contar
+    por sí solo puede ir efímero; para eso está el correo, que es el canal que llega.
     """
     if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
         _avisos_movil.append({
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
             "voz": bool(voz), "id": aviso_id, "critico": bool(critico),
+            "efimero": bool(efimero),
             "acciones": acciones if acciones is not None else _acciones_aviso(aviso_id, ""),
         })
         return "movil"
+    if efimero:
+        # Sin móvil que lo recoja, un acuse no se convierte en correo: se pierde a
+        # propósito. Queda en el log, que es donde se mira por qué no llegó.
+        logger.warning("Avisos: acuse descartado, el móvil no está vivo (%s)", titulo)
+        return "ninguno"
     enviar_correo(titulo, texto)
     return "correo"
 
@@ -12127,6 +12149,13 @@ def _rescatar_avisos() -> dict:
     caducados = [a for a in _avisos_movil if ahora - a["puesto"] > AVISO_MOVIL_RESCATE]
     rescatados = 0
     for aviso in caducados:
+        if aviso.get("efimero"):
+            # Un acuse de recibo caducado no se rescata: llegaría por correo diez minutos
+            # tarde diciendo «hecho» de algo que ya no recuerdas haber pulsado. Se tira,
+            # que es lo que pidió quien lo mandó efímero.
+            _avisos_movil.remove(aviso)
+            logger.info("Avisos: acuse descartado sin recoger (%s)", aviso["titulo"])
+            continue
         try:
             enviar_correo(aviso["titulo"], aviso["texto"])
         except Exception as e:
@@ -12806,15 +12835,21 @@ def _revision_decidir(rid: str, accion: str) -> dict:
             "origen": origen, "sesion": resultado["sesion"]}
 
 
-def _acusar_recibo(titulo: str, texto: str) -> None:
+def _acusar_recibo(titulo: str, texto: str, *, efimero: bool = False) -> None:
     """Contesta al botón por el canal por el que llegó la pregunta, sin poder romper.
 
     El acuse es lo de menos de esta petición: si el SMTP está caído, el arreglo YA se ha
     lanzado y devolver un 500 haría que Home Assistant lo diera por fallido. Mismo
     criterio que el disparo de la rutina tras el resumen.
+
+    `efimero` pide además que si no hay móvil, no haya acuse: no todo acuse mejora por
+    convertirse en correo (ver `_notificar`). Lo usan los botones cuya respuesta solo
+    vale en el momento, como el de la alarma; los que acaban en un trabajo largo —el
+    arreglo, el despliegue— siguen yendo por correo si hace falta, porque ahí el acuse
+    cuenta algo que pasó y sigue valiendo al leerlo.
     """
     try:
-        _notificar(titulo, texto)
+        _notificar(titulo, texto, efimero=efimero)
     except Exception as e:
         logger.warning("Revisión: no se pudo acusar recibo del botón (%s)", e)
 

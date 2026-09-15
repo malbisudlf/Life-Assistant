@@ -582,10 +582,24 @@
     tres días atrás, cuando el botón se había pulsado por última vez con éxito.
   - Moraleja: **un botón cuya confirmación viaja por un solo camino de cuatro saltos no
     es un botón, es una apuesta** — y menos aún si el salto más frágil es el único que no
-    escribe en ningún log. Hoy el botón lleva también `uri` al dashboard
-    (`_alarma_acciones`), que confirma sin pasar por Home Assistant. La regla general:
-    cuando algo tiene que llegar sí o sí, dale un segundo camino que no comparta
-    infraestructura con el primero, y que los dos acaben en el mismo endpoint idempotente.
+    escribe en ningún log.
+  - **Y el arreglo duró un día, por pasarse de listo** (2026-09-15). El segundo camino fue
+    un `uri` en el propio botón: pulsarlo abría el dashboard con `?despierto=<id>` y el
+    dashboard confirmaba sin pasar por Home Assistant. Redundante de verdad, y aun así
+    peor que el fallo — porque el que falla es el caso raro y la web se abría **todas** las
+    mañanas, para apagar un despertador, medio dormido. De paso, el acuse de recibo
+    («alarma confirmada») acababa a menudo en el buzón en vez de en el móvil: se manda por
+    `_notificar`, que se cae al correo cuando HA no está sondeando — justo la situación en
+    la que hacía falta el segundo camino. Un correo de «hecho» leído horas después no
+    confirma nada.
+  - Moraleja de la moraleja, que es la que vale: **la redundancia no puede cobrarse en el
+    camino feliz.** Si el arreglo de un fallo que pasa una vez al mes añade un paso a las
+    treinta veces que la cosa funciona, el arreglo es el fallo nuevo. Lo que quedó en su
+    sitio: el botón vuelve a ser un `action` a secas y el backend contesta con otra
+    notificación efímera («⏰ Alarma quitada»), que no arregla el salto frágil pero lo hace
+    **visible** — que era lo único que faltaba aquel día. Y un acuse de recibo va al móvil
+    o no va: por correo no es un acuse, es un recordatorio de algo que ya no se puede
+    contestar.
 
 - **El mismo día y el mismo fallo en «Arreglarlo»: el aviso del vigilante llegaba y
   pulsarlo no lanzaba ninguna sesión.** El 2026-09-14, horas después de lo anterior, llegó

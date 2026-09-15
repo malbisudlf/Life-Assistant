@@ -33,7 +33,7 @@ Y si la alarma se repite, `confirmada` y `rendida` no son el final: vuelve sola 
   altavoz** (ver abajo).
 - **`escalada`**: se despertó a la casa. `intentos` cuenta cuántas veces.
 - **`confirmada`**: pulsaste el botón (o lo hiciste desde el dashboard, o se lo dijiste a
-  Jarvis). Se para la música.
+  Jarvis). Se para la música y llega la notificación de vuelta que dice que ha entrado.
 - **`rendida`**: pasaron `ALARMA_MAX_MIN` sin respuesta. **Se avisa de que se rinde**: una
   alarma que deja de sonar sola y no lo cuenta es indistinguible de una que nunca se armó,
   y eso es lo que hace que dejes de fiarte del respaldo.
@@ -90,20 +90,27 @@ despertador que suena el domingo, no un fallo.
   PATCH. La condición *es* la pregunta atómica: con dos ticks solapados, un GET previo
   dejaría avisar dos veces. Misma trampa y misma solución que en el despachador de
   recordatorios.
-- **El botón tiene DOS caminos de vuelta, y no por gusto.** El de siempre es el `action`:
-  el móvil manda `mobile_app_notification_action`, Home Assistant lo recoge y llama a
-  `POST /alarmas/{id}/despierto`. Cuatro saltos, y el primero es el más frágil — si la
-  app companion no alcanza a HA justo al pulsar (sin red al desbloquear, HA inalcanzable
-  desde fuera, la app dormida), **el evento se pierde sin un solo error en ninguna
-  parte**. El 2026-09-14 pasó exactamente eso: se pulsó «Estoy despierto», no pasó nada,
-  y hubo que entrar al dashboard a confirmar mientras Alexa insistía. Costó verlo porque
-  no falla nada visible: el YAML, la plantilla del UUID, el token y el endpoint estaban
-  bien, y lanzando el evento a mano en HA el camino entero respondía 200. La única
-  huella era `last_triggered` de la automatización, tres días atrás. Por eso el botón
-  lleva además `uri` (`_alarma_acciones`): abre el dashboard con `?despierto=<id>` y
-  **el dashboard confirma solo**, sin pasar por Home Assistant. Los dos caminos acaban
-  en el mismo endpoint y confirmar dos veces no es un error, así que no hay que elegir.
-  Sin `FRONTEND_URL` el botón se queda con un solo camino, el de HA.
+- **Quitar la alarma pasa ENTERO de fondo, y el botón no abre nada.** Pulsas «Estoy
+  despierto» en la notificación, el móvil manda `mobile_app_notification_action`, Home
+  Assistant lo recoge y llama a `POST /alarmas/{id}/despierto`. No hay pantalla, ni
+  navegador, ni app que se abra: son las seis de la mañana y lo único que has pedido es
+  que aquello deje de sonar. Un botón que además te planta una web delante convierte un
+  gesto de medio segundo en un trámite despierto.
+- **Y de vuelta llega otra notificación, «⏰ Alarma quitada».** No es cortesía: el salto
+  móvil → Home Assistant es el único del camino que **no escribe en ningún log**, y si se
+  pierde —pasa, ver abajo— pulsar el botón no hace nada y nada lo dice. El acuse es lo que
+  convierte ese silencio en una señal: si has pulsado y en unos segundos no llega, no ha
+  entrado, y te quedan el widget y Jarvis. Va **efímero** (`_notificar(..., efimero=True)`):
+  al móvil o a ningún sitio. Por correo no vale — se lee a mediodía, cuando ya no dice
+  nada y encima hace dudar de si la alarma se quitó o se rindió sola.
+- **El botón llevó un `uri` al dashboard justo un día** (2026-09-14 → 2026-09-15), como
+  segundo camino para cubrir ese evento perdido: abría el dashboard con `?despierto=<id>`
+  y confirmaba desde ahí, sin pasar por HA. Funcionaba, y aun así fue peor que el fallo
+  que arreglaba, porque el precio lo pagaban **todas** las veces que el botón sí funciona:
+  una web abriéndose en la cara cada mañana para apagar un despertador. La moraleja no es
+  que un segundo camino sobre, es **dónde puede ir**: la redundancia no puede cobrarse en
+  el camino feliz de un gesto que se hace medio dormido. El acuse de recibo cubre lo
+  mismo sin cobrar nada — no arregla el salto frágil, lo hace visible.
 - **El aviso va `critico=False`: es una notificación normal.** Lo fue `critico=True` al
   principio, con el razonamiento de que un despertador que no suena con el móvil en
   silencio no despierta; en la práctica saltarse el silencio del móvil resultó excesivo
@@ -152,7 +159,7 @@ El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
 | Ruta | Auth | Qué hace |
 |---|---|---|
 | `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento, 0 = no toca), `id` y `texto` |
-| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard |
+| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
 | `PATCH /alarmas/{id}` | JWT | Editarla (mismo cuerpo que el POST). La deja `armada` con los contadores a cero |

@@ -3,9 +3,11 @@
 El 2026-09-14 el aviso del vigilante llegó bien, con sus dos botones, y pulsar
 «Arreglarlo» no lanzó absolutamente nada: cinco decisiones seguidas se quedaron en
 `pendiente` en Supabase, sin un error en el log de Home Assistant, sin una petición en el
-del backend y sin nada que mirar. Es el mismo fallo que se arregló dos días antes en el
-botón «Estoy despierto» (ver `_alarma_acciones`): el evento `mobile_app_notification_action`
-que la app del móvil manda a HA se pierde en silencio si no lo alcanza en ese instante.
+del backend y sin nada que mirar. Es el mismo salto que se pierde en el botón «Estoy
+despierto» (ver `_alarma_acciones`): el evento `mobile_app_notification_action` que la app
+del móvil manda a HA se pierde en silencio si no lo alcanza en ese instante. Allí se cubre
+avisando de vuelta y aquí con un segundo camino, porque «¿lo arreglo?» se contesta
+despierto y mirando la pantalla — y una alarma se quita a oscuras.
 
 Aquí se fija lo que hace que eso deje de doler:
 
