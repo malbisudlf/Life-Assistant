@@ -302,6 +302,23 @@ RUTINA_BETA       = os.getenv("RUTINA_BETA", "experimental-cc-routine-2026-04-01
 # newsletters que a esa hora todavía no han llegado.
 BRIEF_RUTINA_DESDE = os.getenv("BRIEF_RUTINA_DESDE", "08:00")
 
+# ── El turno de noche ─────────────────────────────────────────────────────────
+# Lo que se resuelve mientras duermes para que por la mañana solo haya que aprobarlo.
+# Los cuatro interruptores NACEN APAGADOS, al revés que casi todo el resto: esto lee el
+# buzón, llama a modelos de pago y lanza sesiones de Claude Code sin que haya nadie
+# mirando, y ninguna de las tres cosas debe empezar a pasar sola por actualizar el
+# backend. Se encienden a mano cuando se ha visto una noche en seco.
+NOCHE_TURNO  = _flag("NOCHE_TURNO",  "0")   # el turno entero
+NOCHE_CORREO = _flag("NOCHE_CORREO", "0")   # la parte del buzón
+NOCHE_ARREGLA = _flag("NOCHE_ARREGLA", "0")  # arreglar el código sin esperar a las 08:30
+# A qué hora corre. De madrugada y no al irse a dormir: a las tres ya han llegado los
+# correos del día y el CI de lo último que se mergeó hace rato que terminó.
+NOCHE_HORA_TURNO = os.getenv("NOCHE_HORA", "03:00")
+# Topes de la noche. Cada borrador es una llamada de pago, así que el freno es DOBLE:
+# cuántos correos se miran y, dentro de esos, cuántos se llegan a redactar.
+NOCHE_CORREO_MAX     = int(os.getenv("NOCHE_CORREO_MAX", "15"))
+NOCHE_BORRADORES_MAX = int(os.getenv("NOCHE_BORRADORES_MAX", "10"))
+
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
 # RECOGEN (titular, fuente, hora, enlace, extracto y qué término toca hoy); quién elige
@@ -7044,6 +7061,7 @@ HORA_TOPE            = _hora_config(BRIEF_HORA_TOPE, (10, 0))
 HORA_RUTINA          = _hora_config(BRIEF_RUTINA_DESDE, (8, 0))
 HORA_AVISO_RELOJ     = _hora_config(RELOJ_AVISO_HORA, (21, 30))
 HORA_INFORME         = _hora_config(INFORME_HORA, (10, 0))
+HORA_NOCHE           = _hora_config(NOCHE_HORA_TURNO, (3, 0))
 
 
 # Último fallo del disparo, para que el vigilante pueda reintentarlo. En memoria a
@@ -7356,7 +7374,10 @@ def ha_brief_tick(request: Request, token: str = ""):
     # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
     # Home Assistant.
     previos = {**_avisar_reloj_seguro(), **_vigilar_ingesta_seguro(),
-               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro()}
+               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
+               # El turno de noche va aquí y no en un reloj propio: este tick es el único
+               # que corre a las tres de la mañana. Su guarda de hora está dentro.
+               **_turno_noche_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -8115,6 +8136,8 @@ TABLAS_CONOCIDAS = {
     "alarmas":               "20260909_alarmas",
     "ideas_dev":             "20260909_ideas_dev",
     "migraciones_aplicadas": "20260910_migraciones_aplicadas",
+    "noche_partes":          "20260914_turno_noche",
+    "noche_items":           "20260914_turno_noche",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -9118,6 +9141,9 @@ REGLA_VIGILANTE_SOLO = "vigilante_solo"
 # ahí y no dentro del texto. De paso, se puede silenciar una sin callar la otra.
 REGLA_SESION           = "sesion"
 REGLA_SESION_BLOQUEADA = "sesion_bloqueada"
+# El parte del turno de noche. No se valora con «útil / no útil» como los demás: lo que
+# se hace con él es abrirlo y aprobar lo que hay dentro, así que sus botones son otros.
+REGLA_NOCHE            = "noche"
 # La URL pública del dashboard. Solo sirve para una cosa: el botón «Hablarlo» del aviso
 # de despliegue, que abre la pantalla de llamada. Vacía, el aviso sigue teniendo sus dos
 # botones de siempre y lo único que se pierde es poder contestar hablando.
@@ -11589,6 +11615,13 @@ IMAP_HOST      = os.getenv("IMAP_HOST", "")
 IMAP_USER      = os.getenv("IMAP_USER", "") or SMTP_USER
 IMAP_PASSWORD  = os.getenv("IMAP_PASSWORD", "") or SMTP_PASSWORD
 IMAP_CARPETA   = os.getenv("IMAP_CARPETA", "INBOX")
+# Dónde se dejan los borradores que redacta el turno de noche. El nombre de la carpeta
+# no es estándar: en Outlook es "Drafts", en Gmail "[Gmail]/Borradores" o el nombre en el
+# idioma de la cuenta. Si está mal, el APPEND falla y el borrador se pierde sin ruido.
+IMAP_BORRADORES = os.getenv("IMAP_BORRADORES", "Drafts")
+# Cuánto cuerpo se lee de un correo que sí pide respuesta. Un correo normal cabe de
+# sobra; lo que esto corta son los hilos de cincuenta respuestas citadas.
+CORREO_MAX_CUERPO = int(os.getenv("CORREO_MAX_CUERPO", "4000"))
 CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
 CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
 CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
@@ -11603,26 +11636,61 @@ _CORREO_SISTEMA = (
 )
 
 
-def _cabeceras_recientes() -> list:
-    """Asunto, remitente y fecha de los correos sin leer de las últimas horas.
+def _abrir_buzon(carpeta: str = "", readonly: bool = True):
+    """Conexión IMAP ya autenticada y con una carpeta seleccionada.
 
-    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+    Existe porque el turno de noche abre el buzón dos veces (cabeceras primero, cuerpos
+    después de clasificar) y una tercera para dejar los borradores: entre medias hay
+    llamadas a modelos que tardan segundos, y tener la conexión abierta todo ese rato es
+    pedirle al servidor que la corte por inactividad.
     """
     import imaplib
-    from email.header import decode_header, make_header
 
-    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
     buzon = imaplib.IMAP4_SSL(IMAP_HOST, timeout=HTTP_TIMEOUT)
     try:
         buzon.login(IMAP_USER, IMAP_PASSWORD)
-        buzon.select(IMAP_CARPETA, readonly=True)
-        ok, datos = buzon.search(None, f'(UNSEEN SINCE {desde})')
+        buzon.select(carpeta or IMAP_CARPETA, readonly=readonly)
+    except Exception:
+        try:
+            buzon.logout()
+        except Exception:
+            pass
+        raise
+    return buzon
+
+
+def _cerrar_buzon(buzon) -> None:
+    """Cerrar el buzón nunca puede ser lo que rompa la noche."""
+    try:
+        buzon.logout()
+    except Exception:
+        pass
+
+
+def _cabeceras_recientes() -> list:
+    """Asunto, remitente y Message-ID de los correos sin leer de las últimas horas.
+
+    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+
+    Va por UID y no por número de secuencia porque el turno de noche vuelve a abrir el
+    buzón más tarde para bajar el cuerpo de unos pocos: el número de secuencia cambia si
+    entretanto llega o se borra un correo, y bajaríamos el cuerpo de OTRO mensaje.
+    """
+    from email.header import decode_header, make_header
+
+    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
+    buzon = _abrir_buzon()
+    try:
+        ok, datos = buzon.uid("search", None, f'(UNSEEN SINCE {desde})')
         if ok != "OK":
             return []
-        ids = (datos[0] or b"").split()[-CORREO_MAX:]
+        uids = (datos[0] or b"").split()[-CORREO_MAX:]
         salida = []
-        for i in ids:
-            ok, partes = buzon.fetch(i, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+        for u in uids:
+            uid = u.decode() if isinstance(u, bytes) else str(u)
+            ok, partes = buzon.uid(
+                "fetch", uid,
+                "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])")
             if ok != "OK" or not partes or not isinstance(partes[0], tuple):
                 continue
             crudo = partes[0][1].decode("utf-8", "replace")
@@ -11636,13 +11704,11 @@ def _cabeceras_recientes() -> list:
                 asunto = str(make_header(decode_header(asunto)))
             except Exception:
                 pass
-            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80]})
+            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80],
+                           "uid": uid, "message_id": campos.get("message-id", "")[:200]})
         return salida
     finally:
-        try:
-            buzon.logout()
-        except Exception:
-            pass
+        _cerrar_buzon(buzon)
 
 
 def _revisar_correo() -> int:
@@ -11670,7 +11736,12 @@ def _revisar_correo() -> int:
         completa = cliente.chat.completions.create(
             model=JARVIS_MODEL,
             messages=[{"role": "system", "content": f"{_CORREO_SISTEMA} Hoy es {hoy}."},
-                      {"role": "user", "content": json.dumps(cabeceras, ensure_ascii=False)}],
+                      # Al modelo van asunto y remitente, nada más: el uid y el
+                      # Message-ID son fontanería para el turno de noche y aquí solo
+                      # serían tokens de pago que además despistan.
+                      {"role": "user", "content": json.dumps(
+                          [{"asunto": c.get("asunto", ""), "de": c.get("de", "")}
+                           for c in cabeceras], ensure_ascii=False)}],
             response_format={"type": "json_object"},
             **_parametros_modelo(JARVIS_MODEL, 500),
         )
@@ -11694,6 +11765,507 @@ def _revisar_correo() -> int:
                           prioridad=PRIO_NORMAL, huella=f"correo:{texto[:60]}"):
             puestos += 1
     return puestos
+
+
+# ── El buzón de noche: clasificar y dejar el borrador escrito ─────────────────
+# Aquí se relaja, a propósito y solo aquí, la regla de la sección de arriba: «el CUERPO
+# no se lee ni se manda a ningún modelo». No hay forma de redactar la respuesta a un
+# correo sin haberlo leído. Lo que se conserva es el espíritu de la regla, acotándola:
+#
+#   - La clasificación sigue viendo SOLO asunto y remitente, como siempre. El cuerpo se
+#     baja DESPUÉS y únicamente de los que esa clasificación marca como «responder»: de
+#     una newsletter o de un aviso del banco no se abre nada.
+#   - El cuerpo no se guarda en ningún sitio. Se lee, se usa para redactar y se olvida:
+#     en Supabase queda el asunto, el remitente y el borrador, que es lo que tú vas a ver.
+#   - Sigue el PEEK: los correos siguen sin leer en el buzón por la mañana.
+#   - **No hay camino de envío.** El borrador se sube con APPEND a la carpeta de
+#     borradores y ahí se queda; mandarlo es un acto tuyo, en tu cliente de correo. En
+#     todo este camino no se llama a `enviar_correo()` ni a `smtplib` ni una vez.
+
+_NOCHE_CLASIFICA = (
+    "Te paso una lista de correos con su ASUNTO y su REMITENTE, numerados por su "
+    "posición. Clasifica cada uno en una de estas tres categorías:\n"
+    '- "responder": escrito por una persona y espera una respuesta tuya.\n'
+    '- "informativo": te interesa saberlo, pero no hay que contestar (un cobro, una '
+    "confirmación, una nota publicada).\n"
+    '- "ruido": newsletters, promociones, notificaciones automáticas de redes.\n'
+    'Devuelve SOLO un JSON {"correos": [{"i": 0, "categoria": "responder"}]} con una '
+    "entrada por correo. Ante la duda entre responder e informativo, elige informativo: "
+    "redactar de más cuesta dinero y molesta más que quedarse corto."
+)
+
+_NOCHE_REDACTA = (
+    "Eres el asistente de Mikel y redactas EN SU NOMBRE el borrador de respuesta a un "
+    "correo. Escribe en español, en su tono: directo, cordial y breve, sin fórmulas de "
+    "oficina. Solo el cuerpo del mensaje, sin asunto y sin firma. NO te inventes datos, "
+    "fechas, precios ni compromisos: si para contestar hace falta algo que no está en el "
+    "correo, dilo en el propio borrador entre corchetes, por ejemplo [confirmar la hora]. "
+    "Este texto no se va a enviar solo: Mikel lo va a leer y retocar antes de mandarlo."
+)
+
+
+def _noche_clasificar(cabeceras: list) -> list:
+    """Categoría de cada correo, en el mismo orden que entró. Nunca lanza.
+
+    Si la clasificación falla, se devuelve todo como "ruido" en vez de tirar de un
+    defecto optimista: un fallo del modelo no puede acabar abriendo el cuerpo de treinta
+    correos ni redactando treinta borradores.
+    """
+    porteria = ["ruido"] * len(cabeceras)
+    if not cabeceras:
+        return porteria
+    try:
+        cliente = get_openai_client()
+        completa = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": _NOCHE_CLASIFICA},
+                      {"role": "user", "content": json.dumps(
+                          [{"i": i, "asunto": c.get("asunto", ""), "de": c.get("de", "")}
+                           for i, c in enumerate(cabeceras)], ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+            **_parametros_modelo(JARVIS_MODEL, 600),
+        )
+        _apuntar_gasto("noche_correo", JARVIS_MODEL, getattr(completa, "usage", None))
+        datos = json.loads(completa.choices[0].message.content or "{}") or {}
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo clasificar el buzón (%s)", e)
+        return porteria
+
+    for fila in (datos.get("correos") or []):
+        try:
+            i = int((fila or {}).get("i"))
+        except (TypeError, ValueError):
+            continue
+        categoria = str((fila or {}).get("categoria") or "").strip().lower()
+        if 0 <= i < len(porteria) and categoria in ("responder", "informativo", "ruido"):
+            porteria[i] = categoria
+    return porteria
+
+
+def _texto_del_correo(crudo: bytes) -> str:
+    """El cuerpo en texto plano de un correo, acotado.
+
+    Se prefiere `text/plain` y se cae al HTML desnudo solo si no lo hay: lo que se le
+    pasa al modelo tiene que ser lo que dice el correo, no su maquetación.
+    """
+    import email
+
+    try:
+        mensaje = email.message_from_bytes(crudo)
+    except Exception:
+        return ""
+    parte = None
+    for preferencia in (("plain",), ("html",)):
+        try:
+            parte = mensaje.get_body(preferencelist=preferencia)
+        except Exception:
+            parte = None
+        if parte is not None:
+            break
+    if parte is None:
+        return ""
+    try:
+        texto = parte.get_content()
+    except Exception:
+        return ""
+    if (parte.get_content_type() or "") == "text/html":
+        texto = _html_a_texto(texto)
+    return re.sub(r"\n{3,}", "\n\n", (texto or "").strip())[:CORREO_MAX_CUERPO]
+
+
+def _cuerpos_de(uids: list) -> dict:
+    """uid → cuerpo, para los pocos correos que sí piden respuesta.
+
+    Una conexión nueva y otra vez con PEEK: la clasificación ha tardado lo suyo y el
+    buzón de antes ya puede estar cerrado por inactividad.
+    """
+    if not uids:
+        return {}
+    try:
+        buzon = _abrir_buzon()
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo reabrir el buzón (%s)", type(e).__name__)
+        return {}
+    try:
+        salida = {}
+        for uid in uids:
+            try:
+                ok, partes = buzon.uid("fetch", uid, "(BODY.PEEK[])")
+            except Exception as e:
+                logger.warning("Turno de noche: no se pudo leer un correo (%s)",
+                               type(e).__name__)
+                continue
+            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
+                continue
+            salida[uid] = _texto_del_correo(partes[0][1] or b"")
+        return salida
+    finally:
+        _cerrar_buzon(buzon)
+
+
+def _redactar_respuesta(correo: dict, cuerpo: str) -> str:
+    """El borrador de respuesta a un correo. Cadena vacía si no se pudo."""
+    peticion = (f"De: {correo.get('de', '')}\n"
+                f"Asunto: {correo.get('asunto', '')}\n\n{cuerpo}")
+    try:
+        cliente = get_openai_client()
+        completa = cliente.chat.completions.create(
+            model=JARVIS_MODEL_ACCION,
+            messages=[{"role": "system", "content": _NOCHE_REDACTA},
+                      {"role": "user", "content": peticion}],
+            **_parametros_modelo(JARVIS_MODEL_ACCION, 700),
+        )
+        _apuntar_gasto("noche_correo", JARVIS_MODEL_ACCION, getattr(completa, "usage", None))
+        return (completa.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo redactar una respuesta (%s)", e)
+        return ""
+
+
+def _guardar_borrador(correo: dict, texto: str) -> bool:
+    r"""Deja el borrador en la carpeta de borradores del buzón. Nunca envía nada.
+
+    `In-Reply-To` y `References` son lo que hace que el borrador aparezca COLGANDO del
+    correo original en el cliente de correo, y no como un mensaje suelto a alguien de
+    quien ya no recuerdas nada. El flag `\Draft` es lo que lo marca como borrador y no
+    como un correo recibido más.
+    """
+    if not texto:
+        return False
+    mensaje = EmailMessage()
+    mensaje["To"] = correo.get("de", "")
+    asunto = correo.get("asunto", "") or "(sin asunto)"
+    mensaje["Subject"] = asunto if asunto.lower().startswith("re:") else f"Re: {asunto}"
+    if BRIEF_FROM or SMTP_USER:
+        mensaje["From"] = BRIEF_FROM or SMTP_USER
+    mid = correo.get("message_id") or ""
+    if mid:
+        mensaje["In-Reply-To"] = mid
+        mensaje["References"] = mid
+    mensaje.set_content(texto)
+
+    buzon = None
+    try:
+        # La carpeta de borradores se SELECCIONA antes de nada para que un nombre mal
+        # escrito (no es estándar: "Drafts", "[Gmail]/Borradores"…) falle aquí y se
+        # registre, en vez de en un APPEND que algunos servidores aceptan creando una
+        # carpeta nueva donde no va a mirar nadie.
+        buzon = _abrir_buzon(IMAP_BORRADORES, readonly=True)
+        ok, _ = buzon.append(IMAP_BORRADORES, "\\Draft", None, mensaje.as_bytes())
+        return ok == "OK"
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo dejar el borrador en '%s' (%s)",
+                       IMAP_BORRADORES, type(e).__name__)
+        return False
+    finally:
+        if buzon is not None:
+            _cerrar_buzon(buzon)
+
+
+def _noche_correos() -> list:
+    """Mira el buzón, clasifica y deja redactado lo que pide respuesta.
+
+    Devuelve los items del parte. No apunta avisos ni escribe en Supabase: de eso se
+    encarga el turno, que es quien sabe de qué noche son.
+    """
+    if not (NOCHE_CORREO and IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+        return []
+    try:
+        cabeceras = _cabeceras_recientes()[:NOCHE_CORREO_MAX]
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo leer el buzón (%s)", type(e).__name__)
+        return []
+    if not cabeceras:
+        return []
+
+    categorias  = _noche_clasificar(cabeceras)
+    a_responder = [c for c, cat in zip(cabeceras, categorias)
+                   if cat == "responder"][:NOCHE_BORRADORES_MAX]
+    uids_a_leer = {c.get("uid") for c in a_responder if c.get("uid")}
+    cuerpos     = _cuerpos_de(sorted(uids_a_leer))
+
+    items = []
+    for correo, categoria in zip(cabeceras, categorias):
+        borrador, subido = "", False
+        if correo in a_responder:
+            borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("uid", ""), ""))
+            subido   = _guardar_borrador(correo, borrador)
+        items.append({
+            "area":    "correo",
+            "titulo":  correo.get("asunto", "") or "(sin asunto)",
+            "detalle": borrador,
+            "datos":   {"de": correo.get("de", ""), "categoria": categoria,
+                        "borrador": subido},
+        })
+    return items
+
+
+# ── EL TURNO DE NOCHE ────────────────────────────────────────────────────────
+# Lo que se resuelve mientras duermes, para que por la mañana solo haya que aprobarlo.
+#
+# Dos decisiones que conviene no deshacer sin leer `docs/TURNO_NOCHE.md`:
+#
+#   1. **No hay reloj propio.** El turno se cuelga del tick que Home Assistant ya llama
+#      cada cinco minutos, como todo lo demás que tiene hora en este backend. Un
+#      scheduler dentro del proceso sería un hilo más que mantener y un sitio más donde
+#      mirar cuando algo no pasa.
+#   2. **Todo queda en borrador.** El turno no manda correo, no mergea, no borra y no
+#      toca la casa. Prepara y anota; la decisión es tuya por la mañana. Esa es la razón
+#      de que se pueda dejar corriendo sin vigilancia, y la primera línea que se cruce
+#      convierte esto en otra cosa.
+NOCHE_PARTES_URL = f"{SUPABASE_URL}/rest/v1/noche_partes"
+NOCHE_ITEMS_URL  = f"{SUPABASE_URL}/rest/v1/noche_items"
+NOCHE_AREAS      = ("correo", "codigo", "agenda", "recado")
+
+
+def _reservar_parte(fecha: str) -> bool:
+    """Abre el parte de una noche. False si ya estaba abierto.
+
+    Mismo truco que la reserva del resumen diario: INSERT contra la clave primaria, y el
+    409 ES la respuesta. Es lo que impide que dos ticks separados por cinco minutos
+    redacten los mismos borradores dos veces — preguntar primero y escribir después
+    dejaría justo esa ventana abierta.
+    """
+    try:
+        r = http.post(NOCHE_PARTES_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"fecha": fecha})
+        if r.status_code == 409:
+            return False
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return True
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo abrir el parte del %s", fecha)
+        return False
+
+
+def _anotar_en_el_parte(fecha: str, items: list) -> int:
+    """Escribe items en el parte de una noche, abriéndolo si hiciera falta.
+
+    Lo de abrirlo aquí no es por comodidad: el atajo que arregla el código se dispara
+    cuando la revisión nocturna abre su issue, que es más tarde que el turno y puede
+    caer un día en que el turno no corrió (apagado, o el buzón sin configurar). Sin esto,
+    ese item se estrellaría contra la clave foránea y se perdería sin ruido.
+    """
+    if not items:
+        return 0
+    _reservar_parte(fecha)
+    filas = [{"fecha": fecha, "area": i.get("area", ""), "titulo": (i.get("titulo") or "")[:200],
+              "detalle": (i.get("detalle") or "")[:4000], "enlace": (i.get("enlace") or "")[:500],
+              "datos": i.get("datos") or {}}
+             for i in items if i.get("area") in NOCHE_AREAS]
+    if not filas:
+        return 0
+    try:
+        r = http.post(NOCHE_ITEMS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"}, json=filas)
+        if r.status_code >= 300:
+            logger.error("Turno de noche: no se pudieron guardar %s items (%s)",
+                         len(filas), r.status_code)
+            return 0
+        return len(filas)
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudieron guardar los items del %s", fecha)
+        return 0
+
+
+def _resumen_parte(items: list) -> dict:
+    """Las cuentas del parte, para poder contarlo sin traerse todo lo de dentro."""
+    correos = [i for i in items if i.get("area") == "correo"]
+    return {
+        "correos":     len(correos),
+        "responder":   sum(1 for i in correos
+                           if (i.get("datos") or {}).get("categoria") == "responder"),
+        "borradores":  sum(1 for i in correos if (i.get("datos") or {}).get("borrador")),
+        "codigo":      sum(1 for i in items if i.get("area") == "codigo"),
+        "agenda":      sum(1 for i in items if i.get("area") == "agenda"),
+        "recados":     sum(1 for i in items if i.get("area") == "recado"),
+    }
+
+
+def _frase_parte(resumen: dict) -> str:
+    """El parte en una frase. La misma la lee el aviso y la dice Jarvis al descolgar."""
+    trozos = []
+    correos = int(resumen.get("correos") or 0)
+    if correos:
+        frase = f"{correos} correo{'s' if correos != 1 else ''}"
+        borradores = int(resumen.get("borradores") or 0)
+        if borradores:
+            frase += (f", {borradores} con la respuesta ya redactada esperando en "
+                      f"Borradores")
+        trozos.append(frase)
+    if resumen.get("codigo"):
+        trozos.append("el código de ayer arreglado y el PR esperando")
+    for clave, singular, plural in (("agenda", "cosa de la agenda", "cosas de la agenda"),
+                                    ("recados", "recado", "recados")):
+        n = int(resumen.get(clave) or 0)
+        if n:
+            trozos.append(f"{n} {singular if n == 1 else plural}")
+    if not trozos:
+        return "No hubo nada que hacer esta noche."
+    return "Esta noche: " + "; ".join(trozos) + "."
+
+
+def correr_turno_de_noche(forzar: bool = False) -> dict:
+    """Hace el turno de esta noche si aún no se ha hecho. Idempotente por día.
+
+    Única puerta: la usan el tick de Home Assistant y el endpoint de pruebas. Cada tarea
+    va en su propio try/except porque el buzón caído no puede llevarse por delante lo que
+    sí se podía mirar.
+    """
+    fecha = _ahora_local().date().isoformat()
+    if not (NOCHE_TURNO or forzar):
+        return {"hecho": False, "motivo": "el turno de noche está apagado"}
+    if not _reservar_parte(fecha) and not forzar:
+        return {"hecho": False, "motivo": "el turno de esta noche ya se hizo"}
+
+    items = []
+    try:
+        items += _noche_correos()
+    except Exception:
+        logger.exception("Turno de noche: la parte del buzón falló entera")
+
+    resumen = _resumen_parte(items)
+    _anotar_en_el_parte(fecha, items)
+    try:
+        r = http.patch(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"resumen": resumen})
+        if r.status_code >= 300:
+            logger.warning("Turno de noche: no se pudo guardar el resumen (%s)", r.status_code)
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo guardar el resumen del %s", fecha)
+
+    # El aviso se apunta DIFERIDO: el turno corre a las tres de la mañana y despertarte
+    # para decirte que has dormido bien sería el mejor modo de que apagaras esto.
+    _apuntar_aviso(REGLA_NOCHE, _frase_parte(resumen), prioridad=PRIO_NORMAL,
+                   cuando=_cuando_avisar(_ahora_local()), huella=f"noche:{fecha}")
+    logger.info("Turno de noche del %s: %s", fecha, resumen)
+    return {"hecho": True, "fecha": fecha, "resumen": resumen}
+
+
+def _turno_de_noche_si_toca() -> dict:
+    """La guarda de hora. Antes de NOCHE_HORA no hay nada que hacer.
+
+    El tope de las seis de la mañana no es decorativo: sin él, un backend que arranca a
+    mediodía (una reconstrucción del add-on, por ejemplo) se pondría a redactar
+    borradores a las doce, llamaría a eso «el turno de noche» y gastaría el día entero
+    del parte en una noche que ya no existe.
+    """
+    if not NOCHE_TURNO:
+        return {}
+    hm = (_ahora_local().hour, _ahora_local().minute)
+    if not (HORA_NOCHE <= hm < (6, 0)):
+        return {}
+    salida = correr_turno_de_noche()
+    return {"noche": 1} if salida.get("hecho") else {}
+
+
+def _turno_noche_seguro() -> dict:
+    """El turno no puede tumbar el tick: dentro hay red, IMAP y dos modelos."""
+    try:
+        return _turno_de_noche_si_toca()
+    except Exception:
+        logger.exception("Turno de noche: falló entero")
+        return {}
+
+
+def _parte_de(fecha: str) -> dict:
+    """El parte de un día con sus items, en el orden en que se apuntaron."""
+    try:
+        r = http.get(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}&select=fecha,creado_at,resumen",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        partes = r.json() or []
+        if not partes:
+            return {}
+        r = http.get(f"{NOCHE_ITEMS_URL}?fecha=eq.{fecha}&order=creado_at.asc"
+                     "&select=id,area,titulo,detalle,enlace,estado,datos",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        parte = partes[0]
+        parte["items"] = r.json() or []
+        parte["frase"] = _frase_parte(parte.get("resumen") or {})
+        return parte
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo leer el parte del %s", fecha)
+        raise HTTPException(status_code=502, detail="No se pudo leer el parte de la noche")
+
+
+def _ultimo_parte() -> dict:
+    """El parte más reciente. Es lo que se enseña por la mañana sin pedir fecha."""
+    try:
+        r = http.get(f"{NOCHE_PARTES_URL}?order=fecha.desc&limit=1&select=fecha",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo buscar el último parte")
+        raise HTTPException(status_code=502, detail="No se pudo leer el parte de la noche")
+    return _parte_de(filas[0]["fecha"]) if filas else {}
+
+
+@app.get("/noche/parte")
+def noche_parte(fecha: str = "", _: dict = Depends(verify_token)):
+    """El parte de la noche. Sin fecha, el último que haya."""
+    if fecha and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", fecha):
+        raise HTTPException(status_code=422, detail="Fecha inválida")
+    return _parte_de(fecha) if fecha else _ultimo_parte()
+
+
+class NocheDecision(BaseModel):
+    accion: Literal["aprobado", "descartado"]
+
+
+@app.post("/noche/items/{item_id}/decidir")
+def noche_decidir(item_id: str, body: NocheDecision, _: dict = Depends(verify_token)):
+    """Aprueba o descarta una cosa del parte.
+
+    «Aprobado» aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
+    desde tu cliente, que es donde está el borrador. El PATCH va condicionado a que siga
+    pendiente para que decidir dos veces —dos pestañas abiertas, el botón pulsado dos
+    veces— no cuente como dos decisiones.
+    """
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", item_id):
+        raise HTTPException(status_code=422, detail="Id inválido")
+    try:
+        r = http.patch(f"{NOCHE_ITEMS_URL}?id=eq.{item_id}&estado=eq.pendiente",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": body.accion})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        cambiadas = r.json() or []
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo decidir el item %s", item_id)
+        raise HTTPException(status_code=502, detail="No se pudo guardar la decisión")
+    if not cambiadas:
+        return {"ok": True, "cambiado": False, "motivo": "ya estaba decidido"}
+    return {"ok": True, "cambiado": True, "estado": body.accion}
+
+
+@app.post("/noche/correr")
+def noche_correr(request: Request, forzar: int = 0, token: str = ""):
+    """Corre el turno a mano, para no tener que esperar a las tres de la mañana.
+
+    Token de servicio y no JWT por lo mismo que el resumen diario: es una puerta de
+    máquina, y `?forzar=1` salta la hora y la idempotencia para poder probarlo dos veces
+    seguidas.
+    """
+    if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return correr_turno_de_noche(forzar=bool(forzar))
 
 
 # ── Vigilar páginas ──────────────────────────────────────────────────────────
@@ -11978,6 +12550,17 @@ def _acciones_aviso(rid: str, regla: str) -> list:
             botones.append({"action": "URI", "title": "Hablarlo",
                             "uri": f"{FRONTEND_URL}/?llamada=1"})
         botones.append({"action": f"LA_VALE_{rid}", "title": "Vale"})
+        return botones
+    if regla == REGLA_NOCHE:
+        # Ningún botón decide nada aquí: el parte se mira entero o se escucha entero, y
+        # lo que se aprueba son las cosas de dentro, una a una. Los dos abren el
+        # dashboard; el segundo, además, descuelga.
+        botones = []
+        if FRONTEND_URL:
+            botones.append({"action": "URI", "title": "Verlo",
+                            "uri": f"{FRONTEND_URL}/?noche=1"})
+            botones.append({"action": "URI", "title": "Que me lo cuente",
+                            "uri": f"{FRONTEND_URL}/?llamada=1&noche=1"})
         return botones
     if regla == REGLA_AL_SALIR:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
@@ -12691,15 +13274,88 @@ def revision_hallazgos(request: Request, body: RevisionHallazgos, token: str = "
         logger.error("Revisión: no se pudo apuntar el issue #%s (%s)", numero, e)
         raise HTTPException(status_code=502, detail="No se pudo apuntar la revisión")
 
+    # El atajo del turno de noche. La condición no es "es de madrugada" sino "este aviso
+    # se iba a quedar esperando a mañana de todas formas": si hay horas hasta que lo
+    # veas, no tiene sentido gastarlas preguntando. La sesión arregla y DEJA EL PR
+    # ABIERTO; por la mañana te encuentras el aviso de despliegue que ya existe
+    # (`pr-listo.yml` → POST /revision/pr-listo) con el CI en verde y decides entonces.
+    # Es el mismo trato que las averías: actuar y preguntar después, en vez de preguntar
+    # y actuar. Nace apagado (`NOCHE_ARREGLA`).
+    ahora = _ahora_local()
+    if NOCHE_ARREGLA and _cuando_avisar(ahora) > ahora:
+        arreglo = _arreglar_de_noche(rid, numero, titulo, url)
+        if arreglo.get("ok"):
+            return {"ok": True, "avisado": False, "arreglando": True, "issue": numero,
+                    "sesion": arreglo.get("sesion", "")}
+        # Si no se pudo lanzar, se cae al camino de siempre: mejor preguntarte a las 8:30
+        # que quedarse callado. `_arreglar_de_noche` ya ha devuelto la fila a `pendiente`.
+        logger.warning("Turno de noche: no se pudo arreglar el issue #%s solo (%s)",
+                       numero, arreglo.get("motivo", ""))
+
     texto = (f"La revisión de anoche ha dejado hallazgos: «{titulo or f'issue #{numero}'}»."
              + (f" {url}" if url else "")
              + "\n\n¿Los arreglo? Responde con los botones del aviso, o dime «arregla "
                "la revisión» — si esto te ha llegado por correo, no hay botones.")
     apuntado = _apuntar_aviso(REGLA_REVISION, texto, prioridad=PRIO_NORMAL,
-                              cuando=_cuando_avisar(_ahora_local()), id=rid)
+                              cuando=_cuando_avisar(ahora), id=rid)
     logger.info("Revisión: issue #%s apuntado (aviso %s)", numero,
                 "puesto" if apuntado else "no puesto")
     return {"ok": True, "avisado": apuntado, "issue": numero}
+
+
+def _arreglar_de_noche(rid: str, numero: int, titulo: str, url: str) -> dict:
+    """Lanza el arreglo sin preguntar y lo anota en el parte de la noche.
+
+    Reusa entero el camino que ya existe —la misma tabla, el mismo estado `arreglando`,
+    la misma rutina de arreglo— y solo cambia quién aprieta el botón. Lo único propio es
+    la instrucción, que dice explícitamente que NO se mergee: la regla de que ninguna
+    sesión despliega no se toca porque nadie esté mirando, se toca menos.
+    """
+    instruccion = (
+        f"Arregla los hallazgos de la revisión nocturna del issue #{numero} "
+        f"({titulo or 'sin título'}) del repositorio {JARVIS_REPO}: {url}\n\n"
+        f"Esto lo ha lanzado el turno de noche mientras Mikel duerme, así que NO hay "
+        f"nadie a quien preguntar. Abre un PR con el arreglo y DÉJALO ABIERTO — no lo "
+        f"mergees, aunque el CI pase. El permiso lo da Mikel por la mañana, viendo el PR "
+        f"ya en verde.")
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.pendiente",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": "arreglando", "decidido_at": ahora})
+        if r.status_code >= 300 or not (r.json() or []):
+            return {"ok": False, "motivo": "el hallazgo ya no estaba pendiente"}
+    except Exception as e:
+        return {"ok": False, "motivo": f"no se pudo marcar como arreglando ({e})"}
+
+    resultado = _disparar_arreglo(numero, titulo, url, instruccion=instruccion)
+    if not resultado["ok"]:
+        # Se devuelve a `pendiente`: si se quedara en `arreglando` no habría ni sesión ni
+        # botón, y el hallazgo desaparecería sin que nadie lo hubiera visto.
+        try:
+            http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"estado": "pendiente", "decidido_at": None})
+        except Exception as e:
+            logger.error("Turno de noche: no se pudo liberar el hallazgo %s (%s)", rid, e)
+        return {"ok": False, "motivo": resultado["motivo"]}
+
+    try:
+        http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"sesion_url": resultado["sesion"]})
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo guardar la sesión de %s (%s)", rid, e)
+
+    _anotar_en_el_parte(_ahora_local().date().isoformat(), [{
+        "area":    "codigo",
+        "titulo":  titulo or f"Issue #{numero}",
+        "detalle": "Arreglado mientras dormías. El PR está abierto esperando tu permiso.",
+        "enlace":  url,
+        "datos":   {"issue": numero, "sesion": resultado["sesion"]},
+    }])
+    logger.info("Turno de noche: issue #%s lanzado a arreglar sin preguntar", numero)
+    return {"ok": True, "sesion": resultado["sesion"]}
 
 
 def _disparar_arreglo(numero: int, titulo: str, url: str, instruccion: str = "") -> dict:
@@ -13797,8 +14453,23 @@ def _apertura_sesion(fila: dict) -> str:
     return f"{titulo}. ¿Lo vemos?" if titulo else "Te dejé un aviso. ¿Lo vemos?"
 
 
+def _apertura_noche(parte: dict) -> str:
+    """Lo primero que dice Jarvis cuando descuelgas por el parte de la noche.
+
+    Se escribe aquí y no en el navegador por lo mismo que las otras dos aperturas: la
+    dicen el teléfono y la pantalla, y dos copias de la misma frase acaban siendo dos
+    frases distintas.
+    """
+    frase = _frase_parte(parte.get("resumen") or {})
+    pendientes = sum(1 for i in (parte.get("items") or [])
+                     if (i.get("estado") or "") == "pendiente")
+    if pendientes:
+        frase += " Dime por dónde quieres empezar y te lo cuento."
+    return frase
+
+
 @app.get("/llamada/pendiente")
-def llamada_pendiente(aviso: str = "",
+def llamada_pendiente(aviso: str = "", noche: int = 0,
                       credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Qué anunciar al descolgar. La única puerta que mira la pantalla de llamada.
 
@@ -13820,6 +14491,18 @@ def llamada_pendiente(aviso: str = "",
         fila = _revision_pendiente(aviso)
         if fila:
             return {"pendiente": _llamada_revision(fila)}
+
+    # El parte de la noche solo sale si se ha pedido —lo trae el botón «Que me lo
+    # cuente»—, y nunca como último recurso: no es una decisión esperando respuesta sino
+    # un informe, y ponerlo en la cola de abajo haría que descolgar por cualquier otra
+    # cosa empezara contándote el buzón de anoche.
+    if noche:
+        parte = _ultimo_parte()
+        if parte:
+            return {"pendiente": {"tipo":     "noche",
+                                  "fecha":    parte.get("fecha"),
+                                  "motivo":   _frase_parte(parte.get("resumen") or {}),
+                                  "apertura": _apertura_noche(parte)}}
 
     fila = _despliegue_pendiente()
     if fila:
@@ -14577,6 +15260,33 @@ def _j_enviar_resumen() -> dict:
 
 def _j_estado_resumen_diario() -> dict:
     return _brief_ajustes_estado()
+
+
+def _j_turno_de_noche(fecha=None) -> dict:
+    """El parte de la noche, para contarlo hablando o por escrito.
+
+    Devuelve los items recortados: el borrador entero de once correos no cabe en un turno
+    de Jarvis, y lo que se pregunta a esta hora es QUÉ hay, no el texto exacto — eso se
+    lee en el dashboard o directamente en Borradores.
+    """
+    if fecha and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(fecha)):
+        return {"error": "La fecha tiene que ser YYYY-MM-DD"}
+    parte = _parte_de(str(fecha)) if fecha else _ultimo_parte()
+    if not parte:
+        return {"hay_parte": False, "frase": "Todavía no hay ningún parte de la noche."}
+    return {
+        "hay_parte": True,
+        "fecha":     parte.get("fecha"),
+        "frase":     parte.get("frase") or "",
+        "resumen":   parte.get("resumen") or {},
+        "items":     [{"area": i.get("area"), "titulo": i.get("titulo"),
+                       "estado": i.get("estado"),
+                       "de": (i.get("datos") or {}).get("de", ""),
+                       "categoria": (i.get("datos") or {}).get("categoria", ""),
+                       "borrador": bool((i.get("datos") or {}).get("borrador")),
+                       "detalle": (i.get("detalle") or "")[:300]}
+                      for i in (parte.get("items") or [])[:25]],
+    }
 
 
 def _j_configurar_resumen_diario(activo=None, pausar_hasta=None) -> dict:
@@ -16115,6 +16825,17 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion": "Manda ahora al correo del usuario el resumen con los datos del "
                        "día (agenda, salud, entrenamiento), sin esperar al de la mañana.",
         "parametros":  {},
+    },
+    "turno_de_noche": {
+        # Solo lee. Aprobar o descartar lo que hay dentro NO se hace desde aquí: son
+        # muchas decisiones pequeñas y se toman viéndolas, no de oído.
+        "confirmar":   False,
+        "fn":          _j_turno_de_noche,
+        "descripcion": "El parte de lo que se resolvió anoche: qué entró en el buzón, "
+                       "qué respuestas quedaron redactadas en Borradores y qué se "
+                       "arregló del código. Úsalo si pregunta qué pasó mientras dormía.",
+        "parametros":  {"fecha": {"type": "string",
+                                  "description": "YYYY-MM-DD. Sin ella, el último parte."}},
     },
     "estado_resumen_diario": {
         "confirmar":   False,

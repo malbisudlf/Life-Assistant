@@ -15,6 +15,7 @@ import {
   repartoPatrimonio,
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   revisionDeUrl, DIAS_SEMANA,
+  agruparParteNoche, fraseParteNoche,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -25,7 +26,7 @@ import {
   posicionAhora,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_AUSENTE, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
@@ -923,6 +924,7 @@ const DEFAULT_COLUMNS = {
   health_activity:   "right",
   health_workouts:   "right",
   health_hub:        "left",
+  noche:             "left",
 };
 
 const ALL_DEFAULT_WIDGETS = [
@@ -945,6 +947,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "health_activity",   label: "Actividad",         visible: false, column: "right" },
   { id: "health_workouts",   label: "Entrenamientos AW", visible: false, column: "right" },
   { id: "health_hub",        label: "Salud",             visible: true,  column: "left"  },
+  { id: "noche",             label: "Anoche",            visible: true,  column: "left"  },
 ];
 
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
@@ -1564,6 +1567,9 @@ export default function Dashboard() {
   // Alarmas de respaldo. `null` mientras no se sabe: un widget que enseña "no tienes
   // ninguna" antes de haber preguntado le está diciendo a alguien que no va a sonar.
   const [alarmas, setAlarmas]                       = useState(null);
+  // El parte del turno de noche. `null` mientras no se sabe y `{}` cuando no hay
+  // ninguno: son cosas distintas y el widget dice una u otra, no la misma.
+  const [parteNoche, setParteNoche]                 = useState(null);
   // `repetir`: días ISO (1 = lunes) en los que se repite. Vacío = una sola vez, y
   // entonces sí hace falta la fecha. `editando`: el id de la alarma que se está
   // cambiando — el mismo formulario sirve para poner y para editar, que es lo que evita
@@ -1793,6 +1799,9 @@ export default function Dashboard() {
   // Cargar la cartera manual de ETFs
   useEffect(() => { if (token) loadCarteraEtf(); }, [token]);
   useEffect(() => { if (token) loadAlarmas(); }, [token]);
+  // El parte se carga una vez y no se refresca solo: lo escribe un proceso que
+  // corre a las tres de la mañana, así que no cambia mientras lo miras.
+  useEffect(() => { if (token) loadParteNoche(); }, [token]);
   // Mientras haya alguna alarma viva, el widget se refresca cada minuto: si no, una
   // alarma que empieza a insistir no se vería moverse en una pantalla ya abierta, que
   // es exactamente cuando la estás mirando. Sin nada vivo no hay temporizador.
@@ -3192,12 +3201,14 @@ export default function Dashboard() {
     let vivo = true;
     // El id se lee ANTES de limpiar la barra, que es lo que se hace justo debajo.
     const cual = avisoDeLlamadaDeUrl(window.location.search);
+    const porLaNoche = nocheDeLlamadaDeUrl(window.location.search);
     // Se quitan los parámetros ya: si te quedas en el dashboard y recargas más tarde, no
     // debe volver a sonar una llamada que ya contestaste.
     try {
       const limpia = new URL(window.location.href);
       limpia.searchParams.delete("llamada");
       limpia.searchParams.delete("aviso");
+      limpia.searchParams.delete("noche");
       window.history.replaceState({}, "", limpia);
     } catch { /* mejor esfuerzo: no vale tirar la llamada por no poder limpiar la barra */ }
     (async () => {
@@ -3210,7 +3221,8 @@ export default function Dashboard() {
         // Con `aviso` se anuncia ESA decisión y no la que gane ese orden: el botón
         // «Hablarlo» de una revisión trae el id de la que tenías en la mano, y entre
         // pulsarlo y descolgar pueden haber entrado otras.
-        const r = await apiFetch(`${API}/llamada/pendiente${cual ? `?aviso=${cual}` : ""}`,
+        const consulta = cual ? `?aviso=${cual}` : porLaNoche ? "?noche=1" : "";
+        const r = await apiFetch(`${API}/llamada/pendiente${consulta}`,
                                  { headers: authHeaders() });
         if (r.ok) pendiente = (await r.json())?.pendiente || null;
       } catch { /* sin red se descuelga igual, con la frase de respaldo */ }
@@ -3522,6 +3534,33 @@ export default function Dashboard() {
       setCarteraEtf(previo => previo || { error: true });
     }
     setCarteraEtfCargando(false);
+  }
+
+  // ── El parte del turno de noche ────────────────────────────────────────────
+  async function loadParteNoche() {
+    try {
+      const r = await apiFetch(`${API}/noche/parte`, { headers: authHeaders() });
+      if (!r.ok) throw new Error("noche");
+      setParteNoche(await r.json() || {});
+    } catch {
+      setParteNoche(previo => previo || {});
+    }
+  }
+
+  // Aprobar aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
+  // desde Borradores, que es donde está el borrador. La lista se actualiza en local sin
+  // recargar el parte entero: la decisión ya la ha confirmado el backend.
+  async function decidirItemNoche(id, accion) {
+    try {
+      const r = await apiFetch(`${API}/noche/items/${id}/decidir`, {
+        method: "POST", headers: jsonHeaders(), body: JSON.stringify({ accion }),
+      });
+      if (!r.ok) return;
+      setParteNoche(previo => previo && ({
+        ...previo,
+        items: (previo.items || []).map(i => (i.id === id ? { ...i, estado: accion } : i)),
+      }));
+    } catch { /* mejor esfuerzo: el parte sigue ahí y se puede reintentar */ }
   }
 
   // ── Alarmas de respaldo ────────────────────────────────────────────────────
@@ -4938,6 +4977,77 @@ export default function Dashboard() {
           </div>
         </div>
       );
+      case "noche": {
+        // Lo que se enseña es lo que HAY, no lo que se hizo: por eso lo primero son los
+        // borradores esperando y no un registro de actividad. Un parte que solo dice
+        // «he trabajado» no sirve para nada a las ocho y media de la mañana.
+        const parte = agruparParteNoche(parteNoche);
+        return (
+          <div style={cardStyle} data-card={id} key="noche">
+            <div style={s.sectionLabel}>Anoche</div>
+            {parteNoche === null ? (
+              <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>Cargando…</div>
+            ) : !parte.total ? (
+              <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+                {parteNoche?.fecha ? "No hubo nada que hacer esta noche." : "Todavía no hay ningún parte."}
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+                  {fraseParteNoche(parteNoche)}
+                </div>
+                {parte.grupos.map(grupo => (
+                  <div key={grupo.id} style={{ marginTop: 12 }}>
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase",
+                      letterSpacing: 0.5, marginBottom: 6 }}>
+                      {grupo.label}
+                    </div>
+                    {grupo.items.map(item => (
+                      <div key={item.id} style={{ padding: "8px 0",
+                        borderTop: "0.5px solid var(--border)",
+                        opacity: item.estado === "pendiente" ? 1 : 0.5 }}>
+                        <div style={{ fontSize: 13, color: "var(--text)" }}>{item.titulo}</div>
+                        {item.datos?.de && (
+                          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+                            {item.datos.de}
+                          </div>
+                        )}
+                        {item.datos?.borrador && (
+                          <div style={{ fontSize: 11, color: "var(--accent)", marginTop: 4 }}>
+                            ✎ Respuesta redactada, esperándote en Borradores
+                          </div>
+                        )}
+                        {item.enlace && (
+                          <a href={item.enlace} target="_blank" rel="noreferrer"
+                            style={{ fontSize: 11, color: "var(--accent)" }}>
+                            Abrirlo
+                          </a>
+                        )}
+                        {item.estado === "pendiente" ? (
+                          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                            <button style={s.botonNoche}
+                              onClick={() => decidirItemNoche(item.id, "aprobado")}>
+                              Visto
+                            </button>
+                            <button style={s.botonNoche}
+                              onClick={() => decidirItemNoche(item.id, "descartado")}>
+                              Descartar
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                            {item.estado === "aprobado" ? "Visto" : "Descartado"}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        );
+      }
       case "alarmas": {
         const sonando = alarmaSonando(alarmas);
         return (
@@ -7765,6 +7875,14 @@ const s = {
   ideaTag: { fontSize: 12, color: "var(--muted)", background: "var(--surface)", padding: "2px 8px", borderRadius: 4, letterSpacing: "0.05em", flexShrink: 0 },
   ideaChevron: { fontSize: 12, color: "var(--muted2)", transition: "transform 0.3s", flexShrink: 0 },
   ideaFull: { fontSize: 14, color: "var(--muted)", marginTop: 8, lineHeight: 1.6 },
+  // Los dos botones de cada cosa del parte de la noche. No es `newIdeaBtn`: ése nace a
+  // ancho completo porque es el de «Grabar idea», que se come el widget entero, y aquí
+  // hay DOS por cada cosa de una lista — a ancho completo el parte se convertía en una
+  // columna de botones gigantes con los asuntos perdidos entre medias.
+  botonNoche: { marginTop: 0, padding: "4px 12px", background: "transparent",
+    border: "0.5px dashed rgba(255,255,255,0.12)", borderRadius: 8, color: "#5a5850",
+    fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+    transition: "all 0.2s" },
   newIdeaBtn: { width: "100%", marginTop: 10, padding: 8, background: "transparent", border: "0.5px dashed rgba(255,255,255,0.12)", borderRadius: 8, color: "#5a5850", fontSize: 14, cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "all 0.2s" },
   footer: { display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 12, borderTop: "0.5px solid var(--border)", fontSize: 13, color: "var(--muted2)" },
   statusDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--green)", marginRight: 6, animation: "pulse 2s infinite", verticalAlign: "middle" },

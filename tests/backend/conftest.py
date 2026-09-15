@@ -51,6 +51,13 @@ os.environ.setdefault("INGESTA_VIGILAR", "0")
 # encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
 # en una suite que no toca la red. Sus tests la encienden a mano.
 os.environ.setdefault("BRIEF_ECONOMIA", "0")
+# Y con el turno de noche, por lo mismo: cuelga del mismo tick y, pasada su hora, leería
+# el buzón y llamaría a dos modelos en cualquier test que fije el reloj de madrugada. Sus
+# variables nacen apagadas en main.py; aquí se fijan explícitamente para que un
+# backend/.env local con el turno encendido no cambie lo que hace la suite.
+os.environ.setdefault("NOCHE_TURNO", "0")
+os.environ.setdefault("NOCHE_CORREO", "0")
+os.environ.setdefault("NOCHE_ARREGLA", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada
