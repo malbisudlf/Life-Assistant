@@ -96,6 +96,16 @@ despertador que suena el domingo, no un fallo.
   navegador, ni app que se abra: son las seis de la mañana y lo único que has pedido es
   que aquello deje de sonar. Un botón que además te planta una web delante convierte un
   gesto de medio segundo en un trámite despierto.
+- **Confirmar la alarma es además la señal de despertar del resumen diario.** Es la más
+  exacta que tiene el sistema —hay un dedo humano detrás, no una deducción sobre la
+  batería del móvil— y sin embargo fue la última en enchufarse: las alarmas se añadieron
+  después de todo el mecanismo del correo y nadie las conectó, así que la mañana en que la
+  alarma te despertaba y el Atajo del iPhone no entregaba, el resumen se quedaba esperando
+  al reloj de las 10:00. Va como tarea de fondo (`_avisar_alarma_confirmada`), porque
+  componer el correo son varios segundos y el `rest_command` que llama aquí no lleva
+  `timeout`: dentro de la petición, HA daría por fallida una automatización que funcionó.
+  Lo que importa de este botón es que la alarma deje de sonar, así que un fallo del correo
+  se registra y no se le acerca. Ver `docs/BRIEF.md`.
 - **Y de vuelta llega otra notificación, «⏰ Alarma quitada».** No es cortesía: el salto
   móvil → Home Assistant es el único del camino que **no escribe en ningún log**, y si se
   pierde —pasa, ver abajo— pulsar el botón no hace nada y nada lo dice. El acuse es lo que
@@ -159,7 +169,7 @@ El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
 | Ruta | Auth | Qué hace |
 |---|---|---|
 | `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento, 0 = no toca), `id` y `texto` |
-| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» |
+| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» y manda el resumen diario |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
 | `PATCH /alarmas/{id}` | JWT | Editarla (mismo cuerpo que el POST). La deja `armada` con los contadores a cero |

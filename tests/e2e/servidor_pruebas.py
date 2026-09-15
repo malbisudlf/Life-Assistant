@@ -222,8 +222,17 @@ class _RouterSimulado:
             "por_donde": None, "esfuerzo": 1, "area": "frontend", "estado": "pendiente",
             "creada": f"{_dia(0)}T09:00:00Z", "actualizada": f"{_dia(0)}T09:00:00Z",
         }])),
-        ("/rest/v1/brief_envios", lambda: _Respuesta(
-            [{"fecha": _dia(0), "enviado_at": _iso(-3), "fuente": "despertar"}])),
+        # Dos filas, y la señal con su `despertar_at`: la pestaña Crons enseña de qué
+        # FUENTE salió cada resumen, y es esa columna —no el nombre— la que distingue un
+        # correo que salió al despertarte de uno que salvó el reloj de respaldo. Con una
+        # sola fila, o sin esa columna, el E2E enseñaría justo el caso equivocado (el
+        # backend real nunca escribe `fuente: despertar` sin hora de despertar).
+        ("/rest/v1/brief_envios", lambda: _Respuesta([
+            {"fecha": _dia(0), "enviado_at": _iso(-3), "fuente": "despertar",
+             "despertar_at": _iso(-3)},
+            {"fecha": _dia(-1), "enviado_at": _iso(-27), "fuente": "tope",
+             "despertar_at": None},
+        ])),
         ("/rest/v1/informe_envios", lambda: _Respuesta(
             [{"fecha": _dia(-2), "enviado_at": _iso(-48)}])),
         ("/rest/v1/vigilante_estado", lambda: _Respuesta([])),

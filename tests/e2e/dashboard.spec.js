@@ -215,6 +215,11 @@ test('la zona dev dice qué código corre y qué corre solo', async ({ page }) =
   await expect(page.getByText('Revisión nocturna del código')).toBeVisible()
   await expect(page.getByText('/ha/avisos-pending')).toBeVisible()
 
+  // Y de qué fuente salió cada resumen, que es lo único que distingue un correo que
+  // llegó al despertarte de uno que llegó igual pero a las 10:00 porque la señal murió.
+  await expect(page.getByText('¿Salió al despertarte?')).toBeVisible()
+  await expect(page.getByText('el último salió al despertarte', { exact: false })).toBeVisible()
+
   expect(page.erroresDeNavegador).toEqual([])
 })
 

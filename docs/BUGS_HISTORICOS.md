@@ -617,3 +617,25 @@
   - De paso se vio lo otro: con dos botones, «arreglar» o «no hacer nada» es una decisión
     **a ciegas**, porque en una notificación cabe cuántos errores hay pero no cuáles. De
     ahí el tercer botón, «Hablarlo», y que Jarvis lea el issue entero al descolgar.
+
+- **El resumen diario llegaba a las 10:00 aunque te despertaras a las 8:30, y nada estaba
+  «roto».** El 2026-09-15. La hora de despertar estaba dentro de la ventana (05:30–11:30),
+  así que el correo tenía que haber salido al momento; salió del reloj de respaldo de HA,
+  o sea que **ninguna de las señales exactas llegó**. Dos cosas distintas detrás:
+  - **El botón «Estoy despierto» de la alarma no disparaba el resumen.** Es la señal de
+    despertar más exacta que tiene el sistema —un dedo humano— y era la única que no
+    llamaba a `enviar_brief_si_toca`. Las alarmas se añadieron después de todo el
+    mecanismo del correo y nadie las conectó. La moraleja no es la del despiste: es que
+    **una puerta única garantiza que quien entra cumpla las reglas, no que nadie se quede
+    fuera.** `docs/BRIEF.md` decía, con razón, que poner el interruptor dentro de
+    `enviar_brief_si_toca` hacía que «una cuarta fuente que se añada mañana no se pueda
+    olvidar de mirarla» — y la cuarta fuente se añadió sin mirar nada, porque nunca llamó.
+  - **Y no se podía saber.** Los relojes de respaldo mandan el correo igual, así que una
+    señal muerta no produce ningún error en ninguna pantalla: lo único que cambia es la
+    hora a la que llega. `brief_envios` guardaba la `fuente` y el `despertar_at` de cada
+    envío desde agosto, la zona dev leía tres filas y pintaba una, y nadie podía ver una
+    racha. Un Atajo del iPhone muerto (ya pasó dos veces, ver `docs/SALUD.md`) se nota
+    exactamente igual que una mañana en que el móvil se quedó sin batería. **Cuando hay un
+    respaldo que tapa el fallo, el dato que hay que enseñar no es si la cosa pasó, es por
+    qué camino.** De ahí el panel `¿Salió al despertarte?`, con los 14 últimos envíos y su
+    fuente, y el semáforo por racha: una vez es una mañana, tres son el camino.
