@@ -11,37 +11,35 @@ from types import SimpleNamespace
 import pytest
 
 import main
+from conftest import FakeResponse
 
 
-def _fake_imap(monkeypatch, *, cabeceras=None, cuerpos=None, append_ok=True):
-    """Un buzón de mentira. Devuelve el registro de lo que se le pidió.
+def _fake_buzon(monkeypatch, mock_requests, *, cabeceras=None, cuerpos=None,
+                crear_ok=True):
+    """Un buzón de mentira, hablando Graph. Devuelve el registro de lo que se le pidió.
 
-    Sustituye `_abrir_buzon` y no `imaplib`: lo que interesa comprobar es qué se le pide
-    al buzón (de qué uid se baja el cuerpo, con qué flag se sube el borrador), no cómo se
-    habla IMAP.
+    Se simulan las RESPUESTAS de Graph y no las funciones del buzón: lo que interesa
+    comprobar es qué se le pide a Outlook —de qué mensaje se baja el cuerpo, sobre cuál
+    se crea la respuesta— y eso solo se ve en la URL.
     """
-    registro = {"cuerpos_pedidos": [], "appends": []}
+    registro = {"cuerpos_pedidos": [], "borradores": []}
     cuerpos = cuerpos or {}
 
-    class _Buzon:
-        def __init__(self, carpeta):
-            self.carpeta = carpeta
+    def _cuerpo(url, **kwargs):
+        ident = url.split("/me/messages/")[1].split("?")[0]
+        registro["cuerpos_pedidos"].append(ident)
+        return FakeResponse({"uniqueBody": {"contentType": "text",
+                                            "content": cuerpos.get(ident, "")}}, 200)
 
-        def uid(self, orden, *args):
-            if orden == "search":
-                return "OK", [b" ".join(c["uid"].encode() for c in (cabeceras or []))]
-            uid = args[0]
-            registro["cuerpos_pedidos"].append(uid)
-            return "OK", [(b"1", cuerpos.get(uid, b""))]
+    def _crear(url, **kwargs):
+        ident = url.split("/me/messages/")[1].split("/createReply")[0]
+        registro["borradores"].append({"id": ident,
+                                       "comment": (kwargs.get("json") or {}).get("comment", "")})
+        return FakeResponse({"id": "borrador-1"}, 201 if crear_ok else 403)
 
-        def append(self, carpeta, flags, fecha, mensaje):
-            registro["appends"].append({"carpeta": carpeta, "flags": flags,
-                                        "mensaje": mensaje.decode("utf-8", "replace")})
-            return ("OK" if append_ok else "NO"), [b""]
-
-    monkeypatch.setattr(main, "_abrir_buzon",
-                        lambda carpeta="", readonly=True: _Buzon(carpeta))
-    monkeypatch.setattr(main, "_cerrar_buzon", lambda buzon: None)
+    monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+    mock_requests.add("POST", "/createReply", _crear)
+    mock_requests.add("GET", "/me/messages/", _cuerpo)
     if cabeceras is not None:
         monkeypatch.setattr(main, "_cabeceras_recientes", lambda: list(cabeceras))
     return registro
@@ -73,9 +71,7 @@ class _Noche:
     def _encendido(self, monkeypatch):
         monkeypatch.setattr(main, "NOCHE_TURNO", True)
         monkeypatch.setattr(main, "NOCHE_CORREO", True)
-        monkeypatch.setattr(main, "IMAP_HOST", "imap.ejemplo.com")
-        monkeypatch.setattr(main, "IMAP_USER", "yo@ejemplo.com")
-        monkeypatch.setattr(main, "IMAP_PASSWORD", "x")
+        monkeypatch.setattr(main, "CORREO_LEER", True)
 
 
 class TestElBuzonDeNoche(_Noche):
@@ -89,13 +85,13 @@ class TestElBuzonDeNoche(_Noche):
         rompe, el turno de noche estaría mandando newsletters enteras a un modelo.
         """
         cabeceras = [
-            {"asunto": "¿Quedamos el jueves?", "de": "ana@ejemplo.com", "uid": "10",
+            {"asunto": "¿Quedamos el jueves?", "de": "ana@ejemplo.com", "id": "10",
              "message_id": "<a@x>"},
             {"asunto": "Tu resumen semanal", "de": "news@marca.com", "uid": "11",
              "message_id": "<b@x>"},
         ]
-        registro = _fake_imap(monkeypatch, cabeceras=cabeceras,
-                              cuerpos={"10": b"Hola, te escribo para quedar."})
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras,
+                               cuerpos={"10": "Hola, te escribo para quedar."})
         _fake_modelo(monkeypatch, ["responder", "ruido"])
 
         items = main._noche_correos()
@@ -104,55 +100,62 @@ class TestElBuzonDeNoche(_Noche):
         assert [i["datos"]["categoria"] for i in items] == ["responder", "ruido"]
 
     def test_al_clasificador_no_le_llega_ningun_cuerpo(self, monkeypatch, mock_requests):
-        cabeceras = [{"asunto": "Cita el jueves", "de": "clinica", "uid": "10",
+        cabeceras = [{"asunto": "Cita el jueves", "de": "clinica", "id": "10",
                       "message_id": "<a@x>"}]
-        _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"SECRETO MEDICO"})
+        _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras, cuerpos={"10": "SECRETO MEDICO"})
         recibido = _fake_modelo(monkeypatch, ["informativo"])
 
         main._noche_correos()
 
         assert "SECRETO MEDICO" not in json.dumps(recibido[0]["messages"])
 
-    def test_el_borrador_sube_a_borradores_marcado_como_borrador(self, monkeypatch,
-                                                                 mock_requests):
-        """El flag `\\Draft` es lo que separa dejar un borrador de meterte un correo en la
-        bandeja de entrada."""
-        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "uid": "10",
+    def test_el_borrador_queda_en_borradores_y_no_en_la_bandeja(self, monkeypatch,
+                                                                mock_requests):
+        """`createReply` es lo que separa dejar un borrador de meterte un correo en la
+        bandeja de entrada: crea el mensaje ya marcado como borrador, en Borradores, y
+        sin mandarlo. En todo el turno no se llama a `/send` ni a `/sendMail`."""
+        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "id": "10",
                       "message_id": "<a@x>"}]
-        registro = _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras,
+                               cuerpos={"10": "hola"})
         _fake_modelo(monkeypatch, ["responder"], borrador="El jueves me va bien.")
 
         items = main._noche_correos()
 
-        assert len(registro["appends"]) == 1
-        subido = registro["appends"][0]
-        assert subido["flags"] == "\\Draft"
-        assert subido["carpeta"] == main.IMAP_BORRADORES
-        assert "El jueves me va bien." in subido["mensaje"]
+        assert len(registro["borradores"]) == 1
+        assert registro["borradores"][0]["comment"] == "El jueves me va bien."
         assert items[0]["datos"]["borrador"] is True
+        assert mock_requests.called("POST", "/send") == []
+        assert mock_requests.called("POST", "sendMail") == []
 
     def test_el_borrador_cuelga_del_correo_original(self, monkeypatch, mock_requests):
-        """Sin `In-Reply-To` el borrador aparece como un mensaje suelto a alguien que no
-        recuerdas, en vez de bajo el hilo al que contesta."""
-        cabeceras = [{"asunto": "Quedamos el jueves", "de": "ana@ejemplo.com", "uid": "10",
-                      "message_id": "<hilo-42@ejemplo.com>"}]
-        registro = _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
-        _fake_modelo(monkeypatch, ["responder"])
+        """Un borrador suelto es un mensaje a alguien de quien ya no recuerdas nada.
+
+        Con IMAP esto se conseguía montando `In-Reply-To` y `References` a mano; con
+        Graph lo da la propia ruta: `createReply` va SOBRE el id del correo original, y
+        el hilo, el destinatario y el "Re:" los pone Outlook. Lo que hay que comprobar,
+        entonces, es que se llama sobre el mensaje correcto y no sobre otro.
+        """
+        cabeceras = [{"asunto": "Quedamos el jueves", "de": "ana@ejemplo.com", "id": "42",
+                      "message_id": "<hilo-42@ejemplo.com>"},
+                     {"asunto": "Otra cosa", "de": "otro@ejemplo.com", "id": "43",
+                      "message_id": "<otro@ejemplo.com>"}]
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras,
+                               cuerpos={"42": "hola"})
+        _fake_modelo(monkeypatch, ["responder", "ruido"])
 
         main._noche_correos()
 
-        mensaje = registro["appends"][0]["mensaje"]
-        assert "In-Reply-To: <hilo-42@ejemplo.com>" in mensaje
-        assert "Subject: Re: Quedamos el jueves" in mensaje
+        assert [b["id"] for b in registro["borradores"]] == ["42"]
 
     def test_no_se_envia_nada_por_smtp(self, monkeypatch, mock_requests):
         """La frontera entera del turno de noche cabe en este test: prepara, no manda."""
         enviados = []
         monkeypatch.setattr(main, "enviar_correo",
                             lambda *a, **k: enviados.append(a) or {"ok": True})
-        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "uid": "10",
+        cabeceras = [{"asunto": "¿Quedamos?", "de": "ana@ejemplo.com", "id": "10",
                       "message_id": "<a@x>"}]
-        _fake_imap(monkeypatch, cabeceras=cabeceras, cuerpos={"10": b"hola"})
+        _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras, cuerpos={"10": "hola"})
         _fake_modelo(monkeypatch, ["responder"])
 
         main._noche_correos()
@@ -162,8 +165,8 @@ class TestElBuzonDeNoche(_Noche):
     def test_si_falla_la_clasificacion_no_se_abre_nada(self, monkeypatch, mock_requests):
         """Un fallo del modelo no puede acabar abriendo treinta correos: el defecto es
         «ruido», que es el que no toca nada."""
-        cabeceras = [{"asunto": "lo que sea", "de": "x", "uid": "10", "message_id": ""}]
-        registro = _fake_imap(monkeypatch, cabeceras=cabeceras)
+        cabeceras = [{"asunto": "lo que sea", "de": "x", "id": "10", "message_id": ""}]
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras)
 
         def _revienta():
             raise RuntimeError("la API no contesta")
@@ -172,22 +175,22 @@ class TestElBuzonDeNoche(_Noche):
         items = main._noche_correos()
 
         assert registro["cuerpos_pedidos"] == []
-        assert registro["appends"] == []
+        assert registro["borradores"] == []
         assert items[0]["datos"]["categoria"] == "ruido"
 
     def test_el_tope_de_borradores_se_respeta(self, monkeypatch, mock_requests):
         """Cada borrador es una llamada de pago; el tope es lo que impide que una noche
         rara cueste lo que un mes."""
-        cabeceras = [{"asunto": f"correo {i}", "de": "x", "uid": str(i),
+        cabeceras = [{"asunto": f"correo {i}", "de": "x", "id": str(i),
                       "message_id": f"<{i}@x>"} for i in range(5)]
-        registro = _fake_imap(monkeypatch, cabeceras=cabeceras,
-                              cuerpos={str(i): b"hola" for i in range(5)})
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras,
+                               cuerpos={str(i): "hola" for i in range(5)})
         _fake_modelo(monkeypatch, ["responder"] * 5)
         monkeypatch.setattr(main, "NOCHE_BORRADORES_MAX", 2)
 
         main._noche_correos()
 
-        assert len(registro["appends"]) == 2
+        assert len(registro["borradores"]) == 2
 
     def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
@@ -196,7 +199,9 @@ class TestElBuzonDeNoche(_Noche):
         assert main._noche_correos() == []
         assert llamadas == []
 
-    def test_un_buzon_caido_no_tumba_la_noche(self, monkeypatch):
+    def test_un_buzon_caido_no_tumba_la_noche(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+
         def _revienta():
             raise OSError("no se pudo conectar")
         monkeypatch.setattr(main, "_cabeceras_recientes", _revienta)
@@ -283,7 +288,7 @@ class TestElTurno(_Noche):
 
     def test_el_buzon_caido_no_se_lleva_por_delante_el_parte(self, monkeypatch, mock_requests):
         def _revienta():
-            raise RuntimeError("IMAP caído")
+            raise RuntimeError("el buzón no contesta")
         monkeypatch.setattr(main, "_noche_correos", _revienta)
         assert main.correr_turno_de_noche()["hecho"] is True
 
