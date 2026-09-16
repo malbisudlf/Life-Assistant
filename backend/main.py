@@ -3710,10 +3710,20 @@ def borrar_etf_aportacion(
 # `dietary_energy` (lo que se come) es acumulativa por la misma razón que las demás:
 # se va sumando comida a comida a lo largo del día, así que un sync de mediodía no
 # puede pisar el total de la noche.
+#
+# `basal_energy_burned` es el nombre REAL con el que Health Auto Export manda la energía
+# basal —comprobado el 2026-09-16 contra los datos de producción: 30 días de
+# `basal_energy_burned` y ni uno de `basal_energy`—. El nombre se guarda tal cual llega,
+# sin normalizar, así que faltar aquí no dejaba la métrica a medias: la dejaba MAL. Sin
+# estar en esta lista, cada sync parcial del día pisaba el total en el upsert y quedaba
+# guardado el valor de la última sincronización, no el del día; y sin estar en la de
+# abajo, no se convertía de kJ a kcal. Una métrica ausente se nota; una métrica presente
+# y equivocada, no.
 CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy",
-                      "dietary_energy"}
+                      "basal_energy_burned", "active_energy_burned", "dietary_energy"}
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
-ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy", "dietary_energy"}
+ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy", "dietary_energy",
+                  "basal_energy_burned", "active_energy_burned"}
 
 # Formas en las que puede llegar escrito "kilojulios". La comparación tiene que ser
 # LAXA: se hacía con `unit == "kJ"`, un igual exacto contra una cadena que decide el
@@ -3758,12 +3768,21 @@ def _normalizar_energia(name: str, value, unit):
 # Espejo de la columna `cero_es_dato` de _BRIEF_METRICAS (la de abajo va por clave de
 # salida y esta por nombre en la tabla; hay un test que comprueba que no se
 # desincronizan). Si añades una métrica a una, mírate la otra.
+# El oxígeno en sangre llega con nombres distintos según quién lo escriba en Salud
+# (Health Auto Export usa `blood_oxygen_saturation`), y quien lo mide aquí no es un Apple
+# Watch sino la pulsera, que lo registra de noche. Se aceptan las cuatro formas por lo
+# mismo que `apple_exercise_time`/`exercise_time` conviven desde siempre: el nombre lo
+# decide el exportador, no nosotros, y acertar a la primera no depende de este código.
+OXIGENO_NOMBRES = ("blood_oxygen_saturation", "blood_oxygen", "oxygen_saturation", "spo2")
+
 METRICAS_SIN_MEDIDA_EN_CERO = {
     "heart_rate", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "walking_heart_rate_average", "cardio_recovery",
     "respiratory_rate", "vo2_max", "cardioFitness",
     "weight_body_mass", "weight", "body_fat_percentage", "lean_body_mass",
     "sleep_analysis", "sleep",
+    # Una saturación de 0 % es un sensor que no midió, no una noche sin oxígeno.
+    *OXIGENO_NOMBRES,
 }
 # Claves de `extra` en las que puede venir la medida del sueño cuando `value` llega a 0:
 # ahí la noche sí está medida y la fila tiene que guardarse (ver `_horas_sueno`).
@@ -5045,6 +5064,7 @@ _BRIEF_METRICAS = (
     ("fc_caminando",    ("walking_heart_rate_average",),                    "bpm",       False, "FC caminando"),
     ("recuperacion_fc", ("cardio_recovery",),                               "bpm",       False, "Recuperación cardio"),
     ("respiracion",     ("respiratory_rate",),                              "rpm",       False, "Frec. respiratoria"),
+    ("oxigeno",         OXIGENO_NOMBRES,                                    "%",         False, "Oxígeno en sangre"),
     ("vo2max",          ("vo2_max", "cardioFitness"),                       "ml/kg/min", False, "VO2 máx"),
     ("pasos",           ("step_count", "steps"),                            "pasos",     True,  "Pasos"),
     ("distancia",       ("walking_running_distance",),                      "km",        True,  "Distancia"),
@@ -5053,7 +5073,8 @@ _BRIEF_METRICAS = (
     ("de_pie",          ("apple_stand_hour",),                              "h",         True,  "Horas de pie"),
     ("esfuerzo",        ("physical_effort",),                               "",          True,  "Esfuerzo físico"),
     ("energia_activa",  ("active_energy",),                                 "kcal",      True,  "Energía activa"),
-    ("energia_basal",   ("resting_energy", "basal_energy"),                 "kcal",      True,  "Energía basal"),
+    ("energia_basal",   ("resting_energy", "basal_energy",
+                         "basal_energy_burned"),                            "kcal",      True,  "Energía basal"),
     ("energia_ingerida", ("dietary_energy",),                               "kcal",      True,  "Energía ingerida"),
     ("luz_natural",     ("time_in_daylight",),                              "min",       True,  "Luz natural"),
     ("peso",            ("weight_body_mass", "weight"),                     "kg",        False, "Peso"),
@@ -5081,6 +5102,9 @@ _RELOJ_DIA = {
 _RELOJ_NOCHE = {
     "sleep_analysis", "sleep", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "respiratory_rate",
+    # El oxígeno en sangre se mide dormido y con la pulsera puesta: prueba lo mismo que
+    # la frecuencia respiratoria.
+    *OXIGENO_NOMBRES,
 }
 # El teléfono cuenta esto SOLO, sin reloj de por medio. No dice nada del Watch: dice
 # que ese día la sincronización SÍ llegó, y es lo único que separa "el reloj estaba en

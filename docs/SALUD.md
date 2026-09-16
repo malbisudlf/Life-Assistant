@@ -32,7 +32,24 @@ Métricas del bulk export: `active_energy`, `apple_exercise_time`, `apple_stand_
 
 **Nombres reales en Supabase** (el que usa Health Auto Export puede diferir del lógico):
 el peso es `weight_body_mass` (NO `weight`); `body_fat_percentage` y `lean_body_mass`
-sí coinciden.
+sí coinciden. **La energía basal llega como `basal_energy_burned`**, no como
+`basal_energy`, y eso costó un mes de datos malos: el nombre se guarda tal cual llega,
+sin normalizar, así que la métrica quedó fuera de `CUMULATIVE_METRICS` y de
+`ENERGY_METRICS` —ni se acumulaba ni se convertía de kJ— sin que nada fallara. **Una
+métrica ausente se nota; una presente y equivocada, no.** Al añadir una métrica nueva,
+mira `GET /health/diagnostico`, que lista los nombres tal y como están guardados.
+
+**El oxígeno en sangre** (`blood_oxygen_saturation`, y tres alias más en
+`OXIGENO_NOMBRES`) se da de alta como métrica nocturna: cuenta como prueba de pulsera
+puesta de noche, igual que la frecuencia respiratoria, y sale en el resumen diario y en
+el semanal. **No entra en la puntuación de sueño**: meterlo ahí cambiaría cómo se
+califican las noches y eso pide umbrales que no tenemos.
+
+**El aparato principal ya no es el Apple Watch**, sino una pulsera Amazfit Helio Strap
+que escribe en Salud a través de Zepp (el iPhone queda de secundario). Consecuencia
+práctica: `apple_stand_hour` y `apple_exercise_time` **sólo las genera un Apple Watch** y
+dejan de llegar, y con ellas los `workouts` que venían de ahí. Lo que sostiene el estado
+«puesto de día» en ausencia de esas dos es `heart_rate`, que la pulsera sí manda.
 
 ### iOS Shortcut "Run Custom Automation"
 
@@ -136,7 +153,8 @@ UNIQUE(metric_date, metric_name)
 - **Extracción de valor acumulativo**: se toma el `max()` de todos los campos no-None
   (`qty`, `sum`, `value`) del punto JSON. Health Auto Export v2 usa `qty` para el total
   diario; `sum` puede llegar como 0 y no debe usarse como valor principal.
-- **Unidades de energía**: `active_energy`, `resting_energy` y `basal_energy` se
+- **Unidades de energía**: `active_energy`, `resting_energy`, `basal_energy` y
+  `basal_energy_burned` se
   guardan **siempre en kcal**. Apple puede exportarlas en kilojulios, así que las dos
   rutas de ingesta pasan por `_normalizar_energia()`, que reconoce la unidad de forma
   laxa (`kJ`, `kj`, `kilojoules`, `kilojulios`…) porque el exportador no garantiza cómo
