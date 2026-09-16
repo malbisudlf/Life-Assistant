@@ -364,6 +364,23 @@ class TestElContextoDeLaLlamada:
                             lambda: (_ for _ in ()).throw(RuntimeError("Supabase caído")))
         assert "Jarvis" in main._jarvis_sistema(voz=True)
 
+    def test_si_supabase_se_cae_se_dice_que_no_se_sabe(self, mock_requests, monkeypatch):
+        """Que la llamada siga no basta: el silencio se lee como «no hay nada».
+
+        Con las tres consultas caídas, el contexto se quedaba sin una sola línea sobre lo
+        pendiente y el modelo contestaba tan tranquilo que no había nada que hacer. Es lo
+        que le pasó a Mikel el 2026-09-16, con un issue de la revisión abierto delante.
+        """
+        def _cae():
+            raise RuntimeError("Supabase caído")
+        for fn in ("_despliegue_pendiente", "_sesion_pendiente", "_revision_pendiente"):
+            monkeypatch.setattr(main, fn, _cae)
+
+        sistema = main._jarvis_sistema(voz=True)
+
+        assert "NO SE HA PODIDO COMPROBAR" in sistema
+        assert "NUNCA que no hay nada" in sistema
+
     def test_sin_nada_pendiente_no_se_inventa_contexto(self, mock_requests):
         mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
         assert "ESPERANDO TU PERMISO" not in main._jarvis_sistema(voz=True)
