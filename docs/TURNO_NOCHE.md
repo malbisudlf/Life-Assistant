@@ -69,11 +69,11 @@ espíritu de la regla, acotándola:
 
 | Paso | Qué ve | Qué hace |
 |---|---|---|
-| `_cabeceras_recientes()` | asunto, remitente, `Message-ID` | busca los sin leer de las últimas `CORREO_HORAS` |
+| `_cabeceras_recientes()` | asunto, remitente, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
 | `_noche_clasificar()` | **solo asunto y remitente** | `responder` / `informativo` / `ruido` |
-| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `BODY.PEEK[]`, acotado a `CORREO_MAX_CUERPO` |
+| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
 | `_redactar_respuesta()` | ese cuerpo | el borrador, con el modelo grande |
-| `_guardar_borrador()` | — | `APPEND` a `IMAP_BORRADORES` con el flag `\Draft` |
+| `_guardar_borrador()` | — | `POST /me/messages/{id}/createReply` |
 
 Y lo que **no** pasa:
 
@@ -82,21 +82,52 @@ Y lo que **no** pasa:
   nada. Un fallo del modelo no puede acabar abriendo treinta correos.
 - El cuerpo no se guarda en ningún sitio. Se lee, se usa y se olvida: en Supabase quedan el
   asunto, el remitente y el borrador, que es lo que tú vas a ver.
-- Sigue el `PEEK`: por la mañana los correos siguen sin leer, exactamente donde estaban.
+- Los correos siguen sin leer por la mañana, exactamente donde estaban: leer un mensaje
+  por Graph no cambia `isRead` —eso solo lo hace un `PATCH` que aquí no existe—, igual que
+  el `BODY.PEEK` del IMAP de antes. Hay un test que comprueba que no sale ni un PATCH.
 - **No hay camino de envío.** En todo el turno no se llama a `enviar_correo()` ni a
   `smtplib` ni una vez, y hay un test que lo comprueba. Mandar el borrador es un acto tuyo,
   en tu cliente de correo.
 
-El acceso al buzón va **por UID** (`buzon.uid("fetch", …)`) y no por número de secuencia,
-porque el turno abre el buzón tres veces — cabeceras, cuerpos y borradores — con llamadas
-a modelos de segundos entre medias. El número de secuencia cambia si entretanto llega o se
-borra un correo, y bajaríamos el cuerpo de **otro** mensaje.
+### Por qué Graph y no IMAP
 
-**`IMAP_BORRADORES` no tiene un valor que funcione en todas partes.** En Outlook es
-`Drafts`; en Gmail, `[Gmail]/Borradores` o el nombre en el idioma de la cuenta. Por eso la
-carpeta se `SELECT`ea antes del `APPEND`: si el nombre está mal, falla ahí y se registra,
-en vez de en un `APPEND` que algunos servidores aceptan creando una carpeta nueva donde no
-va a mirar nadie.
+El buzón es el de Outlook, y el IMAP de Outlook está cerrado: su servidor anuncia
+`LOGINDISABLED` y `AUTH=XOAUTH2`, o sea que desde que Microsoft retiró la autenticación
+básica **la contraseña no vale**, tampoco una de aplicación. Se puede comprobar en diez
+segundos y sin credenciales:
+
+```python
+import imaplib; print(imaplib.IMAP4_SSL("outlook.office365.com", 993).capabilities)
+```
+
+Quedaban dos caminos: reaprovechar el token de Graph para autenticarse por IMAP con
+XOAUTH2, o hablar Graph a secas. Se eligió Graph porque el backend **ya** lo habla para el
+calendario, con la renovación de tokens resuelta y probada, y porque el resultado es menos
+código y no más: `createReply` deja el borrador colgando del hilo sin construir un MIME a
+mano, y desaparece el problema de la carpeta de borradores, cuyo nombre no es estándar en
+ningún sitio (`Drafts`, `[Gmail]/Borradores`, el nombre en el idioma de la cuenta) y cuyo
+fallo dejaba el borrador en una carpeta nueva donde no iba a mirar nadie.
+
+**El cuerpo se lee acotado.** `uniqueBody` ya deja fuera los adjuntos —viajan por
+`/attachments` y aquí no se piden nunca—, que era la mitad del problema que tenía el
+`BODY.PEEK[]` de IMAP, donde cuerpo y adjunto venían juntos. Lo que queda por acotar es un
+cuerpo HTML desmesurado, y Graph no permite cortarlo en el servidor como hacía el fetch
+parcial (`<0.N>`): se lee a trozos con `stream=True` y se **abandona el correo** si pasa de
+`CORREO_MAX_DESCARGA`. Se devuelve nada y no un trozo a propósito: medio JSON no se puede
+parsear, y un correo respondido a medias es peor que no respondido.
+
+Tampoco hace falta el rodeo del UID: el `id` de Graph identifica al mensaje y no a su
+posición, así que el turno puede volver a por el cuerpo de unos pocos minutos después sin
+riesgo de bajarse otro correo.
+
+**El permiso hay que volver a darlo una vez.** El consentimiento de Outlook que ya está
+guardado es anterior al buzón y no incluye `Mail.ReadWrite`: al encender el correo hay que
+pulsar «Conectar Outlook» en el dashboard otra vez. Y pedir un permiso no consentido en
+una *renovación* no devuelve un token capado, devuelve un error — que sin red de seguridad
+dejaría sin calendario, sin avisos y sin resumen diario, con «Sesión de Outlook caducada»
+como único síntoma. Por eso `get_valid_token()` reintenta con los permisos de siempre si
+la renovación ampliada falla: lo que se queda sin funcionar es el buzón, que además lo
+dice en el registro con lo que hay que hacer.
 
 ## El código: un atajo, no un camino nuevo
 
@@ -175,6 +206,8 @@ producción**:
 - **Recados.** Una herramienta `dejar_para_la_noche(texto)` y una rutina nueva «Turno de
   noche» que los ejecute con su skill, siguiendo el patrón de `_lanzar_rutina_de_sesion`.
 
-Y un requisito de configuración que hoy **no está cumplido**: `IMAP_HOST` no está puesto,
-así que el correo entrante lleva apagado desde que se escribió. Sin él, `NOCHE_CORREO=1` no
-hace nada.
+Y un requisito de configuración: `CORREO_LEER=1` y, **una sola vez**, volver a conectar
+Outlook desde el dashboard para consentir `Mail.ReadWrite`. Sin eso, `NOCHE_CORREO=1` no
+hace nada y el registro lo dice en cada intento. El correo entrante (`_revisar_correo`, la
+regla proactiva que existía desde antes) lleva apagado desde que se escribió por lo mismo:
+nunca hubo buzón configurado.

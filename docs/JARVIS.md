@@ -442,14 +442,17 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - La URL pasa por `url_web_permitida()` (SSRF) y el rechazo **no dice por qué**, como en
     `leer_pagina`.
 
-- **El correo entrante** (`_revisar_correo`, IMAP con la librería estándar): saca del buzón
-  lo **accionable con fecha** y lo deja como aviso. **No es resumir el correo** — eso ya lo
-  hace la rutina del briefing y hacerlo dos veces sería peor que no hacerlo. Es la
-  capacidad más delicada en privacidad del proyecto, así que las restricciones van por
-  delante y no como añadido: **apagada** sin `IMAP_HOST`; **solo cabeceras** (asunto,
-  remitente, fecha) — el cuerpo no se lee ni viaja a ningún modelo, y lo que no se lee no
-  se puede filtrar; **`BODY.PEEK`**, que no marca nada como leído (un asistente que te
-  descoloca el buzón deja de usarse en una semana); y **no se guarda nada** en Supabase.
+- **El correo entrante** (`_revisar_correo`, el Outlook del usuario por Microsoft Graph):
+  saca del buzón lo **accionable con fecha** y lo deja como aviso. **No es resumir el
+  correo** — eso ya lo hace la rutina del briefing y hacerlo dos veces sería peor que no
+  hacerlo. Es la capacidad más delicada en privacidad del proyecto, así que las
+  restricciones van por delante y no como añadido: **apagada** sin `CORREO_LEER=1`; **solo
+  cabeceras** (asunto, remitente, fecha) — el cuerpo no se lee ni viaja a ningún modelo, y
+  lo que no se lee no se puede filtrar; **no se marca nada como leído**, porque leer por
+  Graph no toca `isRead` y aquí no hay ningún `PATCH` (un asistente que te descoloca el
+  buzón deja de usarse en una semana); y **no se guarda nada** en Supabase. Va por Graph y
+  no por IMAP porque el IMAP de Outlook anuncia `LOGINDISABLED`: la contraseña no vale
+  desde que Microsoft retiró la autenticación básica (`docs/TURNO_NOCHE.md`).
   Lo extraído se **propone como aviso**, nunca se crea en el calendario: lo que sale de un
   asunto interpretado por un modelo no tiene la fiabilidad para tocar la agenda sola, misma
   frontera que `sugerencia_evento()`.

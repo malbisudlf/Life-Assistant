@@ -68,6 +68,8 @@ os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
+import json as json_lib
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -88,6 +90,20 @@ class FakeResponse:
 
     def json(self):
         return self._json
+
+    def iter_content(self, chunk_size=1):
+        """El cuerpo a trozos, como `requests` con `stream=True`.
+
+        Lo usa la descarga acotada del buzón (`_descarga_acotada`), que corta un correo
+        desmesurado sin traerlo entero a memoria. Se sirve del JSON ya serializado para
+        que un test pueda montar un cuerpo gigante sin escribir bytes a mano.
+        """
+        crudo = self.content or json_lib.dumps(self._json).encode("utf-8")
+        for i in range(0, len(crudo), max(chunk_size, 1)):
+            yield crudo[i:i + max(chunk_size, 1)]
+
+    def close(self):
+        pass
 
 
 class MockRouter:

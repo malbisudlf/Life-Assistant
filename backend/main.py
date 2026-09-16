@@ -1293,8 +1293,24 @@ def _verify_oauth_state(state: str) -> bool:
     return claims.get("purpose") == "oauth_state"
 
 
-SCOPES = ["Calendars.ReadWrite", "User.Read"]
+# Lo que se le pide a Microsoft. Va partido en dos porque el buzón llegó después que el
+# calendario y hay un consentimiento ya dado ahí fuera que no incluye el correo: pedir un
+# permiso no consentido en una RENOVACIÓN no da un token capado, da un error — y sin token
+# no hay calendario tampoco. Mientras el correo esté apagado no se pide nada nuevo, y si
+# está encendido pero aún no has vuelto a conectar Outlook, `get_valid_token()` reintenta
+# con los de siempre (ver ahí) para que lo que se caiga sea el buzón y no la agenda.
+SCOPES_BASE   = ["Calendars.ReadWrite", "User.Read"]
+SCOPES_CORREO = ["Mail.ReadWrite"]
 OAUTH_PROVIDER = "microsoft_graph"
+
+
+def _scopes() -> list:
+    """Los permisos a pedir: los de siempre, más el correo solo si está encendido.
+
+    Es una función y no una constante porque `CORREO_LEER` se define en la sección del
+    correo, mucho más abajo, y porque los tests encienden el buzón con monkeypatch.
+    """
+    return SCOPES_BASE + (SCOPES_CORREO if (CORREO_LEER or NOCHE_CORREO) else [])
 
 # Cliente MSAL compartido. Se construía de cero en /auth/login, /auth/callback y en
 # cada renovación de token, y cada construcción descubre la autoridad
@@ -1466,7 +1482,19 @@ def get_valid_token() -> str | None:
     refresh_token = data.get("refresh_token")
     if not refresh_token:
         return None
-    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
+    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=_scopes())
+    if "access_token" not in result and _scopes() != SCOPES_BASE:
+        # El consentimiento guardado es anterior al buzón y no incluye `Mail.ReadWrite`.
+        # Microsoft no devuelve un token capado, devuelve un error: sin este reintento,
+        # encender el correo dejaría también sin calendario, sin avisos y sin resumen
+        # diario, y el único síntoma sería "Sesión de Outlook caducada". El buzón se
+        # quedará en 403 —eso sí se ve y se arregla reconectando— pero lo que ya
+        # funcionaba sigue funcionando.
+        logger.warning(
+            "Graph: el consentimiento actual no cubre el correo (%s). El buzón no "
+            "funcionará hasta volver a conectar Outlook desde el dashboard.",
+            result.get("error", "?"))
+        result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES_BASE)
     if "access_token" in result:
         _store_result(result)
         return result["access_token"]
@@ -1502,7 +1530,7 @@ def login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     # consentimiento de Microsoft con SU cuenta y acabar pisando la conexión de
     # Outlook del usuario.
     auth_url = _msal_app().get_authorization_request_url(
-        SCOPES,
+        _scopes(),
         redirect_uri=REDIRECT_URI,
         state=_create_oauth_state(),
     )
@@ -1520,7 +1548,7 @@ def callback(code: str, state: str = ""):
         )
     result = _msal_app().acquire_token_by_authorization_code(
         code,
-        scopes=SCOPES,
+        scopes=_scopes(),
         redirect_uri=REDIRECT_URI,
     )
     if "access_token" in result:
@@ -11603,31 +11631,41 @@ def _correr_reglas_usuario() -> int:
 #
 # Es la capacidad más delicada del proyecto en cuanto a privacidad, así que va con las
 # restricciones puestas por delante y no como añadido:
-#   - **Apagada mientras no se configure.** Sin `IMAP_HOST` no se conecta a nada.
+#   - **Apagada mientras no se encienda.** `CORREO_LEER` nace a `0`, como los tres
+#     interruptores del turno de noche y por el mismo motivo: leer el buzón no debe
+#     empezar a pasar solo porque alguien actualice el backend.
 #   - **Solo cabeceras**: asunto, remitente y fecha. El CUERPO no se lee ni se manda a
 #     ningún modelo. Con el asunto se distingue de sobra "tu pedido llega mañana" de una
 #     newsletter, y lo que no se lee no se puede filtrar.
-#   - **No se marca como leído** (`BODY.PEEK`): un asistente que te descoloca el buzón
-#     deja de usarse a la semana.
+#   - **No se marca como leído**: leer un mensaje por Graph no cambia `isRead` —eso solo
+#     pasa con un PATCH explícito que aquí no existe—, igual que el `BODY.PEEK` del IMAP
+#     de antes. Un asistente que te descoloca el buzón deja de usarse a la semana.
 #   - **No se guarda nada.** Ni el asunto ni el remitente van a Supabase; lo único que
 #     persiste es el aviso que tú vas a leer.
-IMAP_HOST      = os.getenv("IMAP_HOST", "")
-IMAP_USER      = os.getenv("IMAP_USER", "") or SMTP_USER
-IMAP_PASSWORD  = os.getenv("IMAP_PASSWORD", "") or SMTP_PASSWORD
-IMAP_CARPETA   = os.getenv("IMAP_CARPETA", "INBOX")
-# Dónde se dejan los borradores que redacta el turno de noche. El nombre de la carpeta
-# no es estándar: en Outlook es "Drafts", en Gmail "[Gmail]/Borradores" o el nombre en el
-# idioma de la cuenta. Si está mal, el APPEND falla y el borrador se pierde sin ruido.
-IMAP_BORRADORES = os.getenv("IMAP_BORRADORES", "Drafts")
+#
+# **Va por Microsoft Graph y no por IMAP**, y no es una preferencia: el IMAP de Outlook
+# anuncia `LOGINDISABLED` y `AUTH=XOAUTH2`, o sea que la contraseña —incluida la de
+# aplicación— está muerta desde que Microsoft retiró la autenticación básica. Quedaba
+# reaprovechar el token de Graph para XOAUTH2 o hablar Graph a secas; se eligió lo
+# segundo porque el backend YA habla Graph para el calendario, con su renovación de
+# tokens resuelta, y porque `createReply` deja el borrador colgando del hilo sin que
+# aquí haya que construir un MIME ni acertar con el nombre de la carpeta de borradores,
+# que no es estándar en ningún sitio.
+CORREO_LEER = _flag("CORREO_LEER", "0")
 # Cuánto cuerpo se lee de un correo que sí pide respuesta. Un correo normal cabe de
 # sobra; lo que esto corta son los hilos de cincuenta respuestas citadas.
 CORREO_MAX_CUERPO = int(os.getenv("CORREO_MAX_CUERPO", "4000"))
-# Tope en BYTES de lo que se descarga del servidor IMAP antes de recortar a
-# CORREO_MAX_CUERPO caracteres. Sin esto, un correo con adjuntos grandes se trae ENTERO a
-# memoria (BODY.PEEK[] no distingue cuerpo de adjunto) antes de poder recortarlo: con
-# varios correos así la misma noche es presión de memoria real en un backend que hoy
-# corre como add-on del Green, sin margen de una VM dedicada. El fetch parcial de IMAP
-# (`<0.N>`, RFC 3501 6.4.5) corta la descarga en el servidor, no aquí.
+# Tope en BYTES de lo que se descarga por correo antes de recortar a CORREO_MAX_CUERPO
+# caracteres. Sin esto, un correo enorme se trae ENTERO a memoria antes de poder
+# recortarlo, y con varios la misma noche eso es presión de memoria real en un backend
+# que corre como add-on del Green, sin margen de una VM dedicada.
+#
+# Con Graph la mitad del problema desaparece sola: `$select=uniqueBody` trae el cuerpo
+# **sin los adjuntos** —que viajan por `/attachments` y aquí no se piden nunca—, mientras
+# que el `BODY.PEEK[]` de IMAP no distinguía cuerpo de adjunto. Lo que queda por acotar
+# es un cuerpo HTML desmesurado, y eso no se puede cortar en el servidor como hacía el
+# fetch parcial de IMAP: se lee a trozos y se abandona el correo si se pasa (ver
+# `_descarga_acotada`). Un correo que no cabe no se responde; la noche sigue.
 CORREO_MAX_DESCARGA = int(os.getenv("CORREO_MAX_DESCARGA", "200000"))
 CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
 CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
@@ -11643,85 +11681,110 @@ _CORREO_SISTEMA = (
 )
 
 
-def _abrir_buzon(carpeta: str = "", readonly: bool = True):
-    """Conexión IMAP ya autenticada y con una carpeta seleccionada.
+def _buzon_cabeceras(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
 
-    Existe porque el turno de noche abre el buzón dos veces (cabeceras primero, cuerpos
-    después de clasificar) y una tercera para dejar los borradores: entre medias hay
-    llamadas a modelos que tardan segundos, y tener la conexión abierta todo ese rato es
-    pedirle al servidor que la corte por inactividad.
+
+def _buzon_listo() -> str:
+    """El token de Graph si el buzón se puede usar, o cadena vacía.
+
+    Un solo sitio donde preguntarlo: lo llaman la regla del correo entrante y el turno
+    de noche, y los dos tienen que quedarse quietos —sin ruido y sin excepción— cuando
+    Outlook no está conectado.
     """
-    import imaplib
+    if not CORREO_LEER:
+        return ""
+    return get_valid_token() or ""
 
-    buzon = imaplib.IMAP4_SSL(IMAP_HOST, timeout=HTTP_TIMEOUT)
+
+def _buzon_fallo(r, contexto: str) -> bool:
+    """True si la respuesta de Graph no sirve. Deja dicho en el registro qué pasó.
+
+    El 403 tiene mensaje propio porque tiene arreglo propio y no evidente: el
+    consentimiento de Outlook es anterior al buzón y hay que volver a darlo una vez.
+    """
+    if r.status_code < 300:
+        return False
+    if r.status_code == 403:
+        logger.warning(
+            "Buzón: Outlook no ha dado permiso de correo (403). Vuelve a conectar "
+            "Outlook desde el dashboard para consentir Mail.ReadWrite.")
+    else:
+        logger.warning("Buzón %s: Graph respondió %s", contexto, r.status_code)
+    return True
+
+
+def _descarga_acotada(r, tope: int = 0) -> bytes | None:
+    """El cuerpo de una respuesta leído a trozos, o None si pasa del tope.
+
+    `stream=True` deja la descarga sin empezar hasta que se lee, así que aquí se para en
+    cuanto se sabe que no cabe, en vez de recortar algo que ya está entero en memoria —que
+    era justo lo que había que evitar. Devolver None y no un trozo es deliberado: medio
+    JSON no se puede parsear, y un correo a medias redactado es peor que no redactado.
+    """
+    tope = tope or CORREO_MAX_DESCARGA
+    trozos, leido = [], 0
     try:
-        buzon.login(IMAP_USER, IMAP_PASSWORD)
-        buzon.select(carpeta or IMAP_CARPETA, readonly=readonly)
-    except Exception:
+        for trozo in r.iter_content(chunk_size=16384):
+            if not trozo:
+                continue
+            leido += len(trozo)
+            if leido > tope:
+                return None
+            trozos.append(trozo)
+    except Exception as e:
+        logger.warning("Buzón: se cortó la descarga de un correo (%s)", type(e).__name__)
+        return None
+    finally:
         try:
-            buzon.logout()
+            r.close()
         except Exception:
             pass
-        raise
-    return buzon
-
-
-def _cerrar_buzon(buzon) -> None:
-    """Cerrar el buzón nunca puede ser lo que rompa la noche."""
-    try:
-        buzon.logout()
-    except Exception:
-        pass
+    return b"".join(trozos)
 
 
 def _cabeceras_recientes() -> list:
-    """Asunto, remitente y Message-ID de los correos sin leer de las últimas horas.
+    """Asunto, remitente y id de los correos sin leer de las últimas horas.
 
-    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+    Solo cabeceras: el `$select` pide exactamente los campos que se usan y el cuerpo no
+    viene en la respuesta. Leer por Graph tampoco marca nada como leído.
 
-    Va por UID y no por número de secuencia porque el turno de noche vuelve a abrir el
-    buzón más tarde para bajar el cuerpo de unos pocos: el número de secuencia cambia si
-    entretanto llega o se borra un correo, y bajaríamos el cuerpo de OTRO mensaje.
+    El `id` que devuelve Graph es estable para el mensaje —no un número de posición—,
+    así que el turno de noche puede volver a por el cuerpo de unos pocos minutos después
+    sin riesgo de bajarse OTRO correo, que era justo el motivo de ir por UID en IMAP.
     """
-    from email.header import decode_header, make_header
-
-    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
-    buzon = _abrir_buzon()
-    try:
-        ok, datos = buzon.uid("search", None, f'(UNSEEN SINCE {desde})')
-        if ok != "OK":
-            return []
-        uids = (datos[0] or b"").split()[-CORREO_MAX:]
-        salida = []
-        for u in uids:
-            uid = u.decode() if isinstance(u, bytes) else str(u)
-            ok, partes = buzon.uid(
-                "fetch", uid,
-                "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])")
-            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
-                continue
-            crudo = partes[0][1].decode("utf-8", "replace")
-            campos = {}
-            for linea in crudo.splitlines():
-                clave, _, valor = linea.partition(":")
-                if valor:
-                    campos[clave.strip().lower()] = valor.strip()
-            asunto = campos.get("subject", "")
-            try:
-                asunto = str(make_header(decode_header(asunto)))
-            except Exception:
-                pass
-            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80],
-                           "uid": uid, "message_id": campos.get("message-id", "")[:200]})
-        return salida
-    finally:
-        _cerrar_buzon(buzon)
+    token = _buzon_listo()
+    if not token:
+        return []
+    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    r = http.get(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        f"?$filter=isRead eq false and receivedDateTime ge {desde}"
+        f"&$select=id,subject,from,internetMessageId,receivedDateTime"
+        f"&$orderby=receivedDateTime desc&$top={CORREO_MAX}",
+        headers=_buzon_cabeceras(token),
+    )
+    if _buzon_fallo(r, "cabeceras"):
+        return []
+    salida = []
+    for m in (r.json() or {}).get("value", []) or []:
+        remitente = (((m.get("from") or {}).get("emailAddress")) or {})
+        nombre = remitente.get("name") or ""
+        correo = remitente.get("address") or ""
+        salida.append({
+            "asunto":     (m.get("subject") or "")[:150],
+            "de":         (f"{nombre} <{correo}>" if nombre else correo)[:80],
+            "id":         m.get("id") or "",
+            "message_id": (m.get("internetMessageId") or "")[:200],
+        })
+    return salida
 
 
 def _revisar_correo() -> int:
     """Saca del buzón lo accionable con fecha y lo deja como aviso."""
     global _ultima_revision_correo
-    if not (IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+    if not _buzon_listo():
         return 0
     if time.time() - _ultima_revision_correo < CORREO_CADA_MIN * 60:
         return 0
@@ -11849,66 +11912,56 @@ def _noche_clasificar(cabeceras: list) -> list:
     return porteria
 
 
-def _texto_del_correo(crudo: bytes) -> str:
-    """El cuerpo en texto plano de un correo, acotado.
+def _cuerpos_de(ids: list) -> dict:
+    """id → cuerpo, para los pocos correos que sí piden respuesta.
 
-    Se prefiere `text/plain` y se cae al HTML desnudo solo si no lo hay: lo que se le
-    pasa al modelo tiene que ser lo que dice el correo, no su maquetación.
+    Se pide `uniqueBody` y no `body`: es la parte NUEVA del mensaje, sin el hilo citado
+    debajo. Antes eso había que recortarlo a ciegas por caracteres, y en una cadena
+    larga el recorte se comía la pregunta y dejaba las citas.
+
+    La cabecera `Prefer: outlook.body-content-type="text"` hace que Graph devuelva texto
+    plano ya convertido: lo que se le pasa al modelo es lo que dice el correo, no su
+    maquetación.
     """
-    import email
-
-    try:
-        mensaje = email.message_from_bytes(crudo)
-    except Exception:
-        return ""
-    parte = None
-    for preferencia in (("plain",), ("html",)):
+    if not ids:
+        return {}
+    token = _buzon_listo()
+    if not token:
+        return {}
+    cabeceras = dict(_buzon_cabeceras(token))
+    cabeceras["Prefer"] = 'outlook.body-content-type="text"'
+    salida = {}
+    for ident in ids:
         try:
-            parte = mensaje.get_body(preferencelist=preferencia)
-        except Exception:
-            parte = None
-        if parte is not None:
-            break
-    if parte is None:
-        return ""
-    try:
-        texto = parte.get_content()
-    except Exception:
-        return ""
-    if (parte.get_content_type() or "") == "text/html":
-        texto = _html_a_texto(texto)
-    return re.sub(r"\n{3,}", "\n\n", (texto or "").strip())[:CORREO_MAX_CUERPO]
-
-
-def _cuerpos_de(uids: list) -> dict:
-    """uid → cuerpo, para los pocos correos que sí piden respuesta.
-
-    Una conexión nueva y otra vez con PEEK: la clasificación ha tardado lo suyo y el
-    buzón de antes ya puede estar cerrado por inactividad.
-    """
-    if not uids:
-        return {}
-    try:
-        buzon = _abrir_buzon()
-    except Exception as e:
-        logger.warning("Turno de noche: no se pudo reabrir el buzón (%s)", type(e).__name__)
-        return {}
-    try:
-        salida = {}
-        for uid in uids:
-            try:
-                ok, partes = buzon.uid(
-                    "fetch", uid, f"(BODY.PEEK[]<0.{CORREO_MAX_DESCARGA}>)")
-            except Exception as e:
-                logger.warning("Turno de noche: no se pudo leer un correo (%s)",
-                               type(e).__name__)
-                continue
-            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
-                continue
-            salida[uid] = _texto_del_correo(partes[0][1] or b"")
-        return salida
-    finally:
-        _cerrar_buzon(buzon)
+            r = http.get(
+                f"https://graph.microsoft.com/v1.0/me/messages/{quote(str(ident), safe='')}"
+                "?$select=uniqueBody",
+                headers=cabeceras,
+                stream=True,
+            )
+        except Exception as e:
+            logger.warning("Turno de noche: no se pudo leer un correo (%s)",
+                           type(e).__name__)
+            continue
+        if _buzon_fallo(r, "cuerpo"):
+            continue
+        crudo = _descarga_acotada(r)
+        if crudo is None:
+            # Más grande que el tope: se salta entero en vez de quedarse con un JSON a
+            # medias. Un correo que no cabe no se responde; el resto de la noche sigue.
+            logger.warning("Turno de noche: un correo pasa de %s bytes, no se abre",
+                           CORREO_MAX_DESCARGA)
+            continue
+        try:
+            contenido = ((json.loads(crudo) or {}).get("uniqueBody") or {})
+        except ValueError:
+            logger.warning("Turno de noche: respuesta no-JSON al pedir un cuerpo")
+            continue
+        texto = contenido.get("content") or ""
+        if (contenido.get("contentType") or "") == "html":
+            texto = _html_a_texto(texto)
+        salida[ident] = re.sub(r"\n{3,}", "\n\n", texto.strip())[:CORREO_MAX_CUERPO]
+    return salida
 
 
 def _redactar_respuesta(correo: dict, cuerpo: str) -> str:
@@ -11931,43 +11984,37 @@ def _redactar_respuesta(correo: dict, cuerpo: str) -> str:
 
 
 def _guardar_borrador(correo: dict, texto: str) -> bool:
-    r"""Deja el borrador en la carpeta de borradores del buzón. Nunca envía nada.
+    """Deja el borrador de respuesta en Borradores. Nunca envía nada.
 
-    `In-Reply-To` y `References` son lo que hace que el borrador aparezca COLGANDO del
-    correo original en el cliente de correo, y no como un mensaje suelto a alguien de
-    quien ya no recuerdas nada. El flag `\Draft` es lo que lo marca como borrador y no
-    como un correo recibido más.
+    `createReply` crea el borrador COLGANDO del correo original: Graph se encarga del
+    destinatario, del "Re:", del hilo y de la carpeta. Eso es lo que sustituye al MIME
+    montado a mano y al `APPEND` de IMAP, donde había que acertar con el nombre de la
+    carpeta de borradores —"Drafts", "[Gmail]/Borradores", el nombre en tu idioma— y un
+    fallo dejaba el borrador en una carpeta nueva donde no iba a mirar nadie.
+
+    Es el único sitio de todo el turno que ESCRIBE en el buzón, y escribe un borrador:
+    no hay ninguna llamada a `send` ni a `sendMail` en este camino, y hay un test que lo
+    comprueba.
     """
     if not texto:
         return False
-    mensaje = EmailMessage()
-    mensaje["To"] = correo.get("de", "")
-    asunto = correo.get("asunto", "") or "(sin asunto)"
-    mensaje["Subject"] = asunto if asunto.lower().startswith("re:") else f"Re: {asunto}"
-    if BRIEF_FROM or SMTP_USER:
-        mensaje["From"] = BRIEF_FROM or SMTP_USER
-    mid = correo.get("message_id") or ""
-    if mid:
-        mensaje["In-Reply-To"] = mid
-        mensaje["References"] = mid
-    mensaje.set_content(texto)
-
-    buzon = None
-    try:
-        # La carpeta de borradores se SELECCIONA antes de nada para que un nombre mal
-        # escrito (no es estándar: "Drafts", "[Gmail]/Borradores"…) falle aquí y se
-        # registre, en vez de en un APPEND que algunos servidores aceptan creando una
-        # carpeta nueva donde no va a mirar nadie.
-        buzon = _abrir_buzon(IMAP_BORRADORES, readonly=True)
-        ok, _ = buzon.append(IMAP_BORRADORES, "\\Draft", None, mensaje.as_bytes())
-        return ok == "OK"
-    except Exception as e:
-        logger.warning("Turno de noche: no se pudo dejar el borrador en '%s' (%s)",
-                       IMAP_BORRADORES, type(e).__name__)
+    token = _buzon_listo()
+    if not token:
         return False
-    finally:
-        if buzon is not None:
-            _cerrar_buzon(buzon)
+    ident = correo.get("id") or ""
+    if not ident:
+        return False
+    try:
+        r = http.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{quote(str(ident), safe='')}/createReply",
+            headers={**_buzon_cabeceras(token), "Content-Type": "application/json"},
+            json={"comment": texto},
+        )
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo dejar el borrador (%s)",
+                       type(e).__name__)
+        return False
+    return not _buzon_fallo(r, "borrador")
 
 
 def _noche_correos() -> list:
@@ -11976,7 +12023,7 @@ def _noche_correos() -> list:
     Devuelve los items del parte. No apunta avisos ni escribe en Supabase: de eso se
     encarga el turno, que es quien sabe de qué noche son.
     """
-    if not (NOCHE_CORREO and IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+    if not (NOCHE_CORREO and _buzon_listo()):
         return []
     try:
         cabeceras = _cabeceras_recientes()[:NOCHE_CORREO_MAX]
@@ -11989,14 +12036,14 @@ def _noche_correos() -> list:
     categorias  = _noche_clasificar(cabeceras)
     a_responder = [c for c, cat in zip(cabeceras, categorias)
                    if cat == "responder"][:NOCHE_BORRADORES_MAX]
-    uids_a_leer = {c.get("uid") for c in a_responder if c.get("uid")}
-    cuerpos     = _cuerpos_de(sorted(uids_a_leer))
+    ids_a_leer  = {c.get("id") for c in a_responder if c.get("id")}
+    cuerpos     = _cuerpos_de(sorted(ids_a_leer))
 
     items = []
     for correo, categoria in zip(cabeceras, categorias):
         borrador, subido = "", False
         if correo in a_responder:
-            borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("uid", ""), ""))
+            borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("id", ""), ""))
             subido   = _guardar_borrador(correo, borrador)
         items.append({
             "area":    "correo",
@@ -12173,7 +12220,7 @@ def _turno_de_noche_si_toca() -> dict:
 
 
 def _turno_noche_seguro() -> dict:
-    """El turno no puede tumbar el tick: dentro hay red, IMAP y dos modelos."""
+    """El turno no puede tumbar el tick: dentro hay red, el buzón y dos modelos."""
     try:
         return _turno_de_noche_si_toca()
     except Exception:
