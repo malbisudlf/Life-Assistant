@@ -21,6 +21,32 @@
     `/app/VERSION` y sale por `GET /`, porque *hasta entonces no existía ninguna forma
     de preguntarle al backend qué código estaba ejecutando*.
 
+- **El briefing decía todas las mañanas que no habías llevado el reloj, y el reloj lo
+  habías llevado.** Se notó por acumulación (2026-09-16): no era un día raro, era
+  *todos* los días. Dos fallos encadenados, y el primero es el que no se veía venir.
+  - **El correo lo disparaba una noche vieja.** `_avisar_sueno_recibido` aceptaba como
+    señal de despertar que llegara sueño *de hoy o de ayer*, con el razonamiento de que
+    el Atajo reenvía los últimos días en cada sync. Pero la noche se fecha **por el día
+    en que te despiertas**, así que la de ayer no es nunca la de esta noche: lo único
+    que esa tolerancia podía disparar era el reenvío de un dato que ya estaba guardado.
+    Y eso es exactamente lo que hacía cada mañana. El 16/09 el reenvío mandó el correo a
+    las 08:33:25 y el sueño de verdad llegó a las 08:38:37 — cinco minutos tarde, todos
+    los días.
+  - **Y cuando salía sin el sueño, afirmaba lo que no podía saber.** El reloj vuelca la
+    noche a Salud **al abrir su app**, no al despertarte (entre cinco minutos y ocho
+    horas después, según el día). Sin métricas nocturnas y con pasos del móvil,
+    `_estado_reloj` devolvía `sin_reloj` y el correo escribía «Anoche: sin reloj». La
+    rutina que redacta el briefing lo leía y lo repetía, con toda la razón.
+  - Lo segundo es el error de siempre de este proyecto **por el otro lado**. La regla
+    `sin_datos` existe justo para no confundir «no llegó nada» con «no pasó nada»… y
+    estaba escrita solo para los días pasados. Para el día en curso faltaba, y ahí es
+    donde más falta hacía. Hoy `anoche` vale `"si"` o `"pendiente"` y **nunca** `"no"`.
+  - Moraleja doble. Una: **un dato que llega por su cuenta no llega cuando tú crees**,
+    y si la lógica depende de que haya llegado, hay que preguntárselo a la base de datos
+    en vez de deducirlo de que algo se ha movido. Dos: **una tolerancia que se añade
+    "por si acaso" también es un camino de ejecución**, y esa en concreto solo podía
+    dispararse en el caso equivocado — no ampliaba la ventana, la desplazaba.
+
 - **Todas las noches decían haberse acostado a las 00:00, y el dashboard llamaba
   "anoche" al sueño de anteayer.** Dos fallos distintos que se tapaban el uno al otro
   y que salieron de la misma queja ("el sueño que veo no es el de hoy").

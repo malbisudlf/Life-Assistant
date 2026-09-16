@@ -121,6 +121,21 @@ export function llamadaEntranteDeUrl(busqueda) {
   }
 }
 
+/** ¿Esta llamada es para que cuente el parte de la noche?
+ *
+ *  Lo trae el botón «Que me lo cuente» del aviso de la mañana, que abre
+ *  `?llamada=1&noche=1`. Hace falta un parámetro y no vale con descolgar sin más porque
+ *  el parte NO entra en el orden de prioridades del backend: es un informe, no una
+ *  decisión esperando respuesta, y descolgar por un permiso de despliegue no debe
+ *  empezar contándote el buzón de anoche. */
+export function nocheDeLlamadaDeUrl(busqueda) {
+  try {
+    return new URLSearchParams(busqueda || "").get("noche") === "1";
+  } catch {
+    return false;   // una query rota descuelga con lo que haya
+  }
+}
+
 /** El id del aviso concreto por el que suena esta llamada, o `""`.
  *
  *  El botón «Hablarlo» de una decisión de revisión abre `?llamada=1&aviso=<id>`. Sin el

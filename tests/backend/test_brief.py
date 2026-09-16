@@ -414,6 +414,18 @@ class TestUsoDelReloj:
         assert set(r["marcas"][:-3]) == {"."}, "días con datos del móvil y sin reloj"
         assert r["dias_desde"] == 0 and r["racha_sin_reloj"] == 0
 
+    def test_el_oxigeno_en_sangre_prueba_que_la_pulsera_estuvo_puesta_de_noche(
+            self, client, auth_headers, graph_token, mock_requests):
+        """El aparato principal ya no es un Apple Watch sino una pulsera, y lo que ésta
+        mide de noche incluye la saturación de oxígeno. Prueba lo mismo que la frecuencia
+        respiratoria: que se durmió con ella puesta."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("step_count", 8000, 0),
+            self._fila("blood_oxygen_saturation", 96, 0, unidad="%"),
+        ])["reloj"]
+        assert r["marcas"].endswith("N"), r["marcas"]
+        assert r["noches_puesto"] == 1
+
     def test_un_dia_sin_datos_de_nada_no_es_un_dia_sin_reloj(
             self, client, auth_headers, graph_token, mock_requests):
         """Si no llegó NADA, no se sabe si hubo reloj o falló la sincronización. Darlo
@@ -434,7 +446,7 @@ class TestUsoDelReloj:
             *[self._fila("step_count", 8000, i) for i in range(4)],
         ])["reloj"]
         assert r["racha_sin_reloj"] == 2, "ayer y anteayer; hoy queda fuera"
-        assert r["hoy"] == "sin_reloj" and r["anoche"] is False
+        assert r["hoy"] == "sin_reloj" and r["anoche"] == "pendiente"
 
     def test_quitarselo_para_dormir_marca_el_dia_pero_no_la_noche(
             self, client, auth_headers, graph_token, mock_requests):
@@ -443,7 +455,7 @@ class TestUsoDelReloj:
             self._fila("apple_stand_hour", 11, 0, unidad="h"),
         ])["reloj"]
         assert r["dias_puesto"] == 1 and r["noches_puesto"] == 0
-        assert r["marcas"].endswith("D") and r["anoche"] is False
+        assert r["marcas"].endswith("D") and r["anoche"] == "pendiente"
 
     def test_los_ceros_del_atajo_no_dan_el_dia_por_llevado(
             self, client, auth_headers, graph_token, mock_requests):
@@ -464,7 +476,7 @@ class TestUsoDelReloj:
             self._fila("sleep_analysis", 7.2, 1, {"sleep_start": "23:40"}, "h"),
             self._fila("sleep_analysis", 2.1, 0, {"excluded": True}, "h"),
         ])
-        assert s["reloj"]["noches_puesto"] == 1 and s["reloj"]["anoche"] is False
+        assert s["reloj"]["noches_puesto"] == 1 and s["reloj"]["anoche"] == "pendiente"
         assert s["sueno"]["n_7d"] == 1 and s["sueno"]["posibles_7d"] == 1
 
     def test_el_sueno_con_las_fases_en_extra_si_cuenta(
@@ -473,7 +485,7 @@ class TestUsoDelReloj:
         r = self._pide(client, auth_headers, mock_requests, [
             self._fila("sleep_analysis", 0, 0, {"deep": 1.2, "rem": 1.5, "core": 4.0}, "h"),
         ])["reloj"]
-        assert r["noches_puesto"] == 1 and r["anoche"] is True
+        assert r["noches_puesto"] == 1 and r["anoche"] == "si"
 
 
 class TestMediasContraElReloj:
@@ -841,7 +853,7 @@ class TestRenderTexto:
                 "desde": "2026-08-12", "hasta": "2026-08-16", "dias_ventana": 5,
                 "marcas": "..DAA", "dias_puesto": 3, "noches_puesto": 2,
                 "dias_puesto_7d": 3, "noches_puesto_7d": 2, "sin_datos": 0,
-                "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                "hoy": "ambos", "anoche": "si", "ultimo": "2026-08-16",
                 "dias_desde": 0, "racha_sin_reloj": 0,
             }},
         })
@@ -866,7 +878,7 @@ class TestRenderTexto:
                 "reloj": {"desde": "2026-07-18", "hasta": "2026-08-16", "dias_ventana": 30,
                           "marcas": "." * 27 + "AAA", "dias_puesto": 3, "noches_puesto": 3,
                           "dias_puesto_7d": 3, "noches_puesto_7d": 3, "sin_datos": 0,
-                          "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                          "hoy": "ambos", "anoche": "si", "ultimo": "2026-08-16",
                           "dias_desde": 0, "racha_sin_reloj": 0},
             },
         })
@@ -882,7 +894,7 @@ class TestRenderTexto:
                 "desde": "2026-08-12", "hasta": "2026-08-16", "dias_ventana": 5,
                 "marcas": "--..A", "dias_puesto": 1, "noches_puesto": 1,
                 "dias_puesto_7d": 1, "noches_puesto_7d": 1, "sin_datos": 2,
-                "hoy": "ambos", "anoche": True, "ultimo": "2026-08-16",
+                "hoy": "ambos", "anoche": "si", "ultimo": "2026-08-16",
                 "dias_desde": 0, "racha_sin_reloj": 2,
             }},
         })

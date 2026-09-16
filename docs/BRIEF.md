@@ -72,6 +72,19 @@ backend está en `docs/BACKEND_PATRONES.md`.
     grasa vienen de la báscula. El día de HOY cuenta en las ventanas —para que cuadren
     con las medias, que también lo incluyen— pero no en la racha sin reloj: el correo sale
     por la mañana y la jornada está a medias.
+    - **«Anoche» tiene TRES estados, y uno de ellos no se puede dar el mismo día.**
+      `anoche` era un booleano (`hoy in con_noche`) y el correo escribía «Anoche: sin
+      reloj» en cuanto faltaba la noche. Era falso casi todas las mañanas: el reloj no
+      vuelca la noche a Salud al despertarte, sino **al abrir su app**, y eso pasaba
+      entre cinco minutos y ocho horas después del correo. Hoy vale `"si"` o
+      `"pendiente"`, nunca `"no"` — el mismo día no hay forma de distinguir «no lo
+      llevaste» de «todavía no ha llegado», que es exactamente la regla de `sin_datos`
+      para los días pasados, solo que faltaba por el otro lado. Y el correo lo dice con
+      todas las letras («NO significa que no llevara el reloj»), porque quien lo lee es
+      un modelo y sin esa frase lo traduce él solo. Que de verdad no lo llevaras lo
+      dicen al día siguiente el último rastro y la racha —las dos cuentan desde ayer— y
+      esa misma noche el aviso de `_avisar_reloj_si_toca`, que es el único momento en
+      que sirve de algo.
   - **Si `value` es `null`, el valor se busca en `extra`** (`_valor_metrica()`). Hay
     filas viejas guardadas así por el bug del `Avg`: son histórico real y descartarlas
     es tirar semanas de dato que sí se recibió y sigue en la tabla.
@@ -95,16 +108,46 @@ backend está en `docs/BACKEND_PATRONES.md`.
     (`BackgroundTasks`) y no dentro de la petición: componer el correo son varios
     segundos y el `rest_command` de HA que llama ahí no lleva `timeout`, o sea 10 s —
     pasado ese tope HA daría por fallida una automatización que funcionó. El botón tiene
-    que contestar ya; se pulsa medio dormido. Como las demás señales, respeta la ventana:
-    una alarma de las 05:00 para un vuelo es estar despierto, pero el correo de ese día
-    saldría sin la noche sincronizada.
+    que contestar ya; se pulsa medio dormido. Como las demás señales, respeta la ventana
+    (una alarma de las 05:00 para un vuelo es estar despierto, pero el correo de ese día
+    no serviría) y la espera al sueño de abajo — y esta última le importa más que a
+    ninguna, porque es también la señal más **temprana**: se pulsa con la alarma sonando,
+    cuando el reloj todavía no ha volcado la noche.
   - La llegada del sueño del Watch en la ingesta (`_avisar_sueno_recibido`) — **es una
     deducción, no un aviso**. El reloj sabe cuándo te despiertas, pero el backend no se
     entera hasta que el iPhone sincroniza, y ese sync puede traer una noche a medias
-    mientras sigues durmiendo. Por eso solo cuentan las noches de hoy y ayer (el Atajo
-    reenvía los últimos días en cada sync) y se puede apagar con `BRIEF_DISPARA_SUENO=0`.
-    Un fallo del correo **nunca** tumba la ingesta: guardar los datos del Watch importa
-    más, y el correo tiene otras tres fuentes.
+    mientras sigues durmiendo. Se puede apagar con `BRIEF_DISPARA_SUENO=0`. Un fallo del
+    correo **nunca** tumba la ingesta: guardar los datos del Watch importa más, y el
+    correo tiene otras tres fuentes.
+    - **Cuenta la noche de HOY, y solo si trae medida.** Aceptar también la de ayer
+      parecía prudente —el Atajo reenvía los últimos días en cada sync— y era justo lo
+      contrario: la noche se fecha por el día en que te despiertas, así que la de ayer
+      **nunca** es la de esta noche y lo único que podía disparar era el reenvío de un
+      dato que ya estaba. Y disparaba a diario: el correo salía con la noche de ayer
+      recién reescrita y la de hoy todavía sin sincronizar, o sea con la sección RELOJ
+      diciendo «anoche sin reloj». El 16/09/2026 el reenvío mandó el correo a las 08:33
+      y el sueño de verdad llegó a las 08:38. Una fila de 0 horas tampoco cuenta: es lo
+      que escribe el Atajo las noches que no encuentra muestras (`_hay_medida`).
+  - **La señal de despertar ya no manda el correo: lo reserva** (`_esperar_al_sueno`,
+    `BRIEF_ESPERA_SUENO`), y eso vale para las dos —el cargador y el botón de la alarma—.
+    Cuando desenchufas el cargador estás despierto, pero la noche puede no haber sincronizado, y mandar el correo entonces es mandarlo diciendo que no
+    llevabas el reloj. Si falta, se apunta la espera en memoria y gana el primero de los
+    tres: que llegue el sueño (lo normal), que venza `BRIEF_ESPERA_SUENO_MIN` (45 min) o
+    que den las `BRIEF_HORA_TOPE`. Cuatro cosas:
+    - **La espera no reserva el día.** Reservarlo dejaría marcado como enviado un día
+      cuyo correo aún no ha salido, y al llegar el sueño ya no saldría nunca. Misma
+      trampa que la del interruptor, que por eso se mira antes de reservar.
+    - **Al vencer, el correo sale sin el sueño Y te avisa al móvil** (regla
+      `reloj_sync`). El aviso no es un parte de avería: es lo único que puede hacer que
+      el dato de esta noche llegue a existir, porque hasta que no abras la app no hay
+      nada que sincronizar. Antes de avisar se vuelve a mirar si ha llegado: regañarte
+      por no sincronizar algo ya sincronizado es como se deja de leer un aviso.
+    - **La espera es propiedad de la SEÑAL**, igual que la ventana horaria: la hora tope
+      y los respaldos disparan justo cuando ya no tiene sentido esperar, y pasarlos por
+      aquí los dejaría sin mandar nada nunca.
+    - **Vive en memoria a propósito.** Quien sabe si el dato ha llegado es Supabase;
+      perder la nota en un reinicio cuesta que el correo salga por la hora tope, que es
+      exactamente la red de seguridad que este sistema ya tenía.
   - `POST /ha/brief-tick` (`HA_POLL_TOKEN`) — el reloj de respaldo. HA lo sondea cada
     pocos minutos y solo hace algo pasada `BRIEF_HORA_TOPE` (10:00). El reloj lo pone HA
     y no un hilo del backend porque **Fly escala a cero**: sin nadie que llame, aquí no

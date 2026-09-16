@@ -425,10 +425,10 @@ class TestCorreoEntrante(_Reglas):
     """
 
     @pytest.fixture(autouse=True)
-    def _imap(self, monkeypatch):
-        monkeypatch.setattr(main, "IMAP_HOST", "imap.ejemplo.com")
-        monkeypatch.setattr(main, "IMAP_USER", "yo@ejemplo.com")
-        monkeypatch.setattr(main, "IMAP_PASSWORD", "x")
+    def _buzon(self, monkeypatch):
+        # El buzón va por Graph: encendido y con Outlook conectado.
+        monkeypatch.setattr(main, "CORREO_LEER", True)
+        monkeypatch.setattr(main, "get_valid_token", lambda: "token-de-prueba")
         main._ultima_revision_correo = 0.0
 
     def _modelo(self, monkeypatch, acciones):
@@ -448,8 +448,8 @@ class TestCorreoEntrante(_Reglas):
         monkeypatch.setattr(main, "get_openai_client", lambda: cliente)
         return _Cliente
 
-    def test_sin_configurar_no_se_conecta_a_nada(self, monkeypatch):
-        monkeypatch.setattr(main, "IMAP_HOST", "")
+    def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
+        monkeypatch.setattr(main, "CORREO_LEER", False)
         llamadas = []
         monkeypatch.setattr(main, "_cabeceras_recientes", lambda: llamadas.append(1) or [])
         assert main._revisar_correo() == 0

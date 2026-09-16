@@ -10,7 +10,8 @@
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, desdeHace,
-         leerConfig, estadoGrupo, estadoGraph, shaCorto } from "../../lib/dev";
+         leerConfig, estadoGrupo, estadoGraph, shaCorto,
+         reconectarOutlook } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 export default function Config() {
@@ -18,6 +19,11 @@ export default function Config() {
   const [error, setError]     = useState("");
   const [leyendo, setLeyendo] = useState(true);
   const [tic, setTic]         = useState(0);
+  // La reconexión de Outlook: "", "abriendo", la URL (si hubo que ofrecerla a mano) o el
+  // error. Se queda en pantalla a propósito — el consentimiento pasa en otra ventana y
+  // aquí no hay forma de enterarse de cómo acabó.
+  const [enlace, setEnlace]   = useState("");
+  const [fallo, setFallo]     = useState("");
 
   useEffect(() => {
     let vivo = true;
@@ -60,7 +66,29 @@ export default function Config() {
                   detalle={shaCorto(cfg.version)} />
             <Fila nombre="Zona horaria" tono={cfg.zona?.valida ? "green" : "red"}
                   detalle={cfg.zona?.valida ? cfg.zona.nombre : `${cfg.zona?.nombre} no es una zona IANA válida`} />
-            <Fila nombre="Sesión de Microsoft" tono={graph.tono} detalle={graph.texto} />
+            <Fila nombre="Sesión de Microsoft" tono={graph.tono} detalle={graph.texto}
+                  extra={<Boton onClick={async () => {
+                    setFallo(""); setEnlace("abriendo");
+                    try {
+                      setEnlace(await reconectarOutlook());
+                    } catch (e) {
+                      setEnlace(""); setFallo(e.message || "no se pudo pedir la dirección");
+                    }
+                  }}>Reconectar</Boton>} />
+            {enlace && enlace !== "abriendo" && (
+              <div style={{ fontSize: 10, color: "var(--muted2)", lineHeight: 1.5, paddingLeft: 15 }}>
+                Se ha abierto la pantalla de Microsoft en otra ventana. Si no la ves, tu
+                navegador la ha bloqueado:{" "}
+                <a href={enlace} target="_blank" rel="noopener noreferrer"
+                   style={{ color: "var(--accent)" }}>ábrela desde aquí</a>. El enlace vale
+                10 minutos.
+              </div>
+            )}
+            {fallo && (
+              <div style={{ fontSize: 10, color: "var(--muted2)", paddingLeft: 15 }}>
+                No se pudo empezar: {fallo}
+              </div>
+            )}
             <Fila nombre="Núcleo" tono="green"
                   detalle={`${(cfg.nucleo || []).join(" y ")} — puestas (si no, el backend no arrancaría)`} />
             <Fila nombre="Funcionalidades" tono={incompletos.length ? "muted" : "green"}
@@ -111,13 +139,14 @@ export default function Config() {
   );
 }
 
-function Fila({ nombre, tono, detalle }) {
+function Fila({ nombre, tono, detalle, extra = null }) {
   return (
-    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
       <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, alignSelf: "center",
                      background: COLOR_TONO[tono] }} />
       <span style={{ fontSize: 12, color: "var(--text)", minWidth: 170 }}>{nombre}</span>
       <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, textAlign: "right" }}>{detalle}</span>
+      {extra}
     </div>
   );
 }

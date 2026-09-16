@@ -489,6 +489,29 @@ export function estadoGraph(graph) {
   return { tono: "green", texto: `conectado · el acceso vale ${Math.round(seg / 60)} min más` };
 }
 
+/** Pide la URL del consentimiento de Microsoft y la abre. Devuelve la URL, o "".
+ *
+ *  Existe porque hasta ahora **solo se podía reconectar Outlook cuando ya estaba roto**:
+ *  el único botón vive en el widget del día y se pinta detrás de `authNeeded`, o sea
+ *  cuando el calendario ya devuelve error de sesión. Eso deja sin salida el caso real de
+ *  añadir un permiso nuevo —pasó al darle a Jarvis acceso al buzón: el consentimiento
+ *  viejo no cubría `Mail.ReadWrite` y todo lo demás seguía funcionando—, que hubo que
+ *  resolver generando la URL a mano desde una sesión de Claude Code.
+ *
+ *  Se devuelve la URL además de abrirla para que la pantalla pueda ofrecer el enlace si
+ *  el navegador bloquea la ventana emergente: `window.open` tras un `await` es
+ *  exactamente lo que los bloqueadores cazan, y quedarse sin decir nada sería el mismo
+ *  silencio que esta pantalla existe para romper.
+ */
+export async function reconectarOutlook() {
+  const r = await apiFetch(`${API}/auth/login`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  const url = (await r.json())?.auth_url || "";
+  if (!url) throw new Error("el backend no ha devuelto la dirección de Microsoft");
+  window.open(url, "_blank", "noopener,noreferrer");
+  return url;
+}
+
 export async function leerConfig() {
   const r = await apiFetch(`${API}/dev/config`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`el backend respondió ${r.status}`);

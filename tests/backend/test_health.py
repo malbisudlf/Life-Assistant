@@ -88,6 +88,46 @@ class TestHealthIngest:
         assert r.json()["upserted"] == 1
         assert self._filas(mock_requests)[0]["value"] == 5000
 
+    def test_la_energia_basal_llega_con_el_nombre_del_exportador(self, client, mock_requests):
+        """`basal_energy_burned` es como la manda Health Auto Export de verdad.
+
+        Comprobado el 2026-09-16 contra producción: 30 días de `basal_energy_burned` y
+        ni uno de `basal_energy`, que era el nombre que esperaba el código. Como los
+        nombres se guardan tal cual llegan, quedarse fuera de las dos listas no dejaba
+        la métrica a medias, la dejaba MAL: sin convertir de kJ y pisada en cada sync
+        parcial del día. Una métrica ausente se nota; una presente y equivocada, no.
+        """
+        assert "basal_energy_burned" in main.CUMULATIVE_METRICS
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "basal_energy_burned", "units": "kJ",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 4184}]}
+        ]}})
+        assert r.json()["upserted"] == 1
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 1000.0 and fila["unit"] == "kcal"
+
+    def test_la_basal_parcial_del_dia_no_pisa_el_total(self, client, mock_requests):
+        """Lo que hacía el fallo de arriba: a mediodía llevas la mitad de la basal del
+        día, y ese snapshot se quedaba guardado como el total."""
+        self._existentes(mock_requests, [
+            {"metric_date": "2026-07-05", "metric_name": "basal_energy_burned", "value": 1600}
+        ])
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "basal_energy_burned", "units": "kcal",
+             "data": [{"date": "2026-07-05 12:00:00", "qty": 800}]}
+        ]}})
+        assert r.json()["upserted"] == 0
+        assert self._filas(mock_requests) == []
+
+    def test_el_oxigeno_en_sangre_a_cero_no_se_guarda(self, client, mock_requests):
+        """Una saturación de 0 % es un sensor que no midió, no una noche sin oxígeno. Y
+        guardarla pisaría en el upsert la medida buena de esa misma noche."""
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "blood_oxygen_saturation", "units": "%",
+             "data": [{"date": "2026-07-05 03:00:00", "qty": 0}]}
+        ]}})
+        assert self._filas(mock_requests) == []
+
     def test_energia_kj_se_convierte_a_kcal(self, client, mock_requests):
         r = client.post(self.URL, json={"data": {"metrics": [
             {"name": "active_energy", "units": "kJ", "data": [{"date": "2026-07-05 08:00:00", "qty": 4184}]}

@@ -2,11 +2,13 @@
 
 Antes salía a hora fija desde un cron de GitHub Actions, que se retrasa cuando su cola
 va cargada. Ahora sale al despertarse — y como hay VARIAS fuentes que pueden avisar de
-eso a la vez (el móvil al desenchufarse, la llegada del sueño del Watch, el reloj de
-respaldo de HA y el propio workflow), lo que más se prueba aquí es que dos disparadores
-simultáneos no manden dos correos.
+eso a la vez (el móvil al desenchufarse, el botón «Estoy despierto» de la alarma, la
+llegada del sueño del Watch, el reloj de respaldo de HA y el propio workflow), lo que más
+se prueba aquí es que dos disparadores simultáneos no manden dos correos.
 """
 from datetime import datetime
+
+import pytest
 
 import main
 from conftest import FakeResponse
@@ -51,6 +53,30 @@ def preparar(mock_requests, monkeypatch, ya_enviado=False):
     montar_fuentes(mock_requests)
     configurar_smtp(monkeypatch)
     return tabla_envios(mock_requests, ya_enviado)
+
+
+def sueno_de_hoy(mock_requests, hay):
+    """Qué contesta la consulta de `_hay_sueno_de`: si la noche de hoy ha sincronizado.
+
+    Se registra ANTES que `montar_fuentes` a propósito. El router resuelve por fragmento
+    y gana el primero registrado, y el mock general de `health_metrics` devuelve las
+    filas de TODOS los días ignorando el filtro: sin esta ruta más específica, la
+    consulta vería el sueño de cualquier día y el test pasaría siempre, también con el
+    código mal.
+    """
+    hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+    filas = [{"metric_date": hoy, "metric_name": "sleep_analysis",
+              "value": 7.2, "unit": "h", "extra": {}}] if hay else []
+    mock_requests.add("GET", "metric_name=in.(sleep_analysis,sleep)", FakeResponse(filas))
+
+
+@pytest.fixture(autouse=True)
+def _sin_espera_pendiente():
+    """La espera al sueño vive en una global del módulo: sin limpiarla, el despertar
+    apuntado por un test decide el resultado del siguiente."""
+    main._olvidar_despertar()
+    yield
+    main._olvidar_despertar()
 
 
 class TestAuthDespertar:
@@ -359,6 +385,198 @@ class TestRespaldoDeActions:
         assert len(_SMTPFalso.enviados) == 1
 
 
+class TestEsperaAlSueno:
+    """Te despiertas antes de que el reloj haya sincronizado la noche.
+
+    Es el fallo que tenía el correo todos los días: la señal del cargador llega al
+    desenchufar el móvil, pero el sueño no está en Salud hasta que se abre la app del
+    reloj — entre cinco minutos y esa misma tarde, según el día. El correo salía
+    mientras tanto y la sección RELOJ escribía "anoche sin reloj", que es lo que la
+    rutina que redacta el briefing leía y repetía cada mañana.
+    """
+
+    def test_sin_el_sueno_de_esta_noche_el_correo_espera(
+            self, client, mock_requests, graph_token, monkeypatch):
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+
+        r = client.post("/despertar?token=brief-token&fuente=cargador")
+        assert r.json()["enviado"] is False and r.json()["esperando_sueno"] is True
+        assert _SMTPFalso.enviados == []
+        # Y sobre todo: NO puede reservar el día. Si lo reservara, el envío de verdad
+        # —cuando llegue el sueño— se encontraría el día marcado y no saldría nunca.
+        assert mock_requests.called("POST", "/rest/v1/brief_envios") == []
+
+    def test_con_el_sueno_ya_sincronizado_sale_al_momento(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Los días que abres la app antes de desenchufar no hay nada que esperar."""
+        sueno_de_hoy(mock_requests, True)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+
+        assert client.post("/despertar?token=brief-token").json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_al_llegar_el_sueno_sale_con_la_hora_del_despertar(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """El correo sale tarde, pero te despertaste a las 07:15: es esa hora la que
+        decide después cuándo se lanza la rutina que lo redacta."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+
+        reloj(monkeypatch, 7, 32)
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        client.post("/health/ingest/simple?token=health-token",
+                    json={"metric": "sleep_analysis", "date": hoy, "value": 7.8,
+                          "unit": "hr", "extra": {}})
+
+        assert len(_SMTPFalso.enviados) == 1
+        fila = mock_requests.called("POST", "/rest/v1/brief_envios")[0][2]["json"][0]
+        assert fila["fuente"] == "sueno"
+        esperado = _a_las(7, 15).astimezone(main.timezone.utc).isoformat()
+        assert fila["despertar_at"][:16] == esperado[:16]
+
+    def test_la_noche_de_ayer_reenviada_no_manda_nada(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """ESTE era el fallo. El Atajo reenvía los últimos días en cada sync, y como la
+        noche se fecha por el día en que te despiertas, la de ayer no es nunca la de
+        esta noche: aceptarla hacía que el correo saliera con el dato de hoy sin llegar.
+        """
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 8, 33)
+        ayer = (datetime.now(main.LOCAL_TZ).date() - main.timedelta(days=1)).isoformat()
+
+        client.post("/health/ingest/simple?token=health-token",
+                    json={"metric": "sleep_analysis", "date": ayer, "value": 7.7,
+                          "unit": "hr", "extra": {}})
+        assert _SMTPFalso.enviados == []
+
+    def test_una_noche_de_cero_horas_no_cierra_la_espera(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """El Atajo escribe 0 las noches que no encuentra muestras. Una fila no es una
+        medida: darla por noche cerrada devolvería el problema por la otra puerta."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 40)
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+
+        client.post("/health/ingest/simple?token=health-token",
+                    json={"metric": "sleep_analysis", "date": hoy, "value": 0,
+                          "unit": "hr", "extra": {}})
+        assert _SMTPFalso.enviados == []
+
+    def test_al_vencer_la_espera_sale_sin_el_sueno_y_te_avisa(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Esperar no puede ser esperar indefinidamente. Y el aviso al móvil no es un
+        parte de avería: es lo único que puede hacer que el dato de esta noche exista,
+        porque hasta que no abras la app no hay nada que sincronizar."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        avisos = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: avisos.append((regla, texto)) or True)
+        reloj(monkeypatch, 7, 15)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+
+        reloj(monkeypatch, 8, 5)        # 50 min > BRIEF_ESPERA_SUENO_MIN (45)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+
+        assert r.json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+        fila = mock_requests.called("POST", "/rest/v1/brief_envios")[0][2]["json"][0]
+        assert fila["fuente"] == "espera_agotada", (
+            "en brief_envios es lo unico que despues distingue un correo completo de "
+            "uno al que le faltaba la noche")
+        assert [t for regla, t in avisos if regla == "reloj_sync"], "tiene que avisar al movil"
+
+    def test_antes_de_vencer_el_tick_no_toca_nada(
+            self, client, mock_requests, graph_token, monkeypatch):
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+
+        reloj(monkeypatch, 7, 50)       # 35 min: aún dentro de la espera
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert r.json()["enviado"] is False
+        assert _SMTPFalso.enviados == []
+
+    def test_si_el_sueno_llego_por_otro_camino_no_te_regana(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Regañarte por no sincronizar algo que ya está sincronizado es exactamente
+        como se deja de leer un aviso."""
+        sueno_de_hoy(mock_requests, True)
+        preparar(mock_requests, monkeypatch)
+        avisos = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: avisos.append(regla) or True)
+        reloj(monkeypatch, 7, 15)
+        main._apuntar_despertar(_a_las(7, 15), "cargador")
+
+        reloj(monkeypatch, 8, 5)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+
+        assert r.json()["enviado"] is True
+        assert "reloj_sync" not in avisos
+
+    def test_la_hora_tope_manda_aunque_falte_el_sueno(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """La espera es propiedad de la SEÑAL de despertar. El respaldo dispara justo
+        cuando ya no tiene sentido esperar más, y no puede quedarse mudo por ella."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 10, 0)
+
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_pasada_la_hora_tope_la_senal_ya_no_espera(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Entre la hora tope y el techo de la ventana el correo todavía puede salir por
+        la señal, y a esas alturas esperar solo serviría para no mandarlo."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 11, 0)
+
+        assert client.post("/despertar?token=brief-token").json()["enviado"] is True
+
+    def test_se_puede_apagar(self, client, mock_requests, graph_token, monkeypatch):
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        monkeypatch.setattr(main, "BRIEF_ESPERA_SUENO", False)
+        reloj(monkeypatch, 7, 15)
+
+        assert client.post("/despertar?token=brief-token").json()["enviado"] is True
+
+    def test_un_supabase_caido_no_retiene_el_correo(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """"No he podido mirar si ha llegado" no es "no ha llegado". Tratarlo como un no
+        dejaría el correo esperando por una avería que no tiene que ver con él."""
+        mock_requests.add("GET", "metric_name=in.(sleep_analysis,sleep)",
+                          FakeResponse(None, 500, "boom"))
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+
+        assert client.post("/despertar?token=brief-token").json()["enviado"] is True
+
+    def test_dos_desenchufes_seguidos_conservan_la_primera_hora(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Vuelves a enchufar el móvil y lo quitas otra vez: te despertaste a la
+        primera, no a la última."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+        reloj(monkeypatch, 7, 40)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+
+        assert main._despertar_esperado(_a_las(7, 40)) == _a_las(7, 15)
+
+
 class TestBotonDeLaAlarma:
     """Confirmar la alarma es la señal de despertar más exacta que hay —hay un dedo
     humano detrás— y hasta septiembre de 2026 era la única que no traía el correo: las
@@ -376,6 +594,7 @@ class TestBotonDeLaAlarma:
 
     def test_confirmar_la_alarma_manda_el_correo(self, client, mock_requests, graph_token,
                                                  monkeypatch):
+        sueno_de_hoy(mock_requests, True)
         preparar(mock_requests, monkeypatch)
         self._alarma_confirmable(mock_requests)
         reloj(monkeypatch, 8, 30)
@@ -395,6 +614,7 @@ class TestBotonDeLaAlarma:
         """Misma ventana que las demás señales: una alarma de las 04:00 para un vuelo es
         estar despierto, pero el correo de ese día se compondría sin la noche
         sincronizada. Para eso está la hora tope."""
+        sueno_de_hoy(mock_requests, True)
         preparar(mock_requests, monkeypatch)
         self._alarma_confirmable(mock_requests)
         reloj(monkeypatch, 4, 30)
@@ -408,6 +628,7 @@ class TestBotonDeLaAlarma:
                                                         graph_token, monkeypatch):
         """Pulsar dos veces, o confirmar una alarma ya rendida: no hay despertar nuevo
         que anunciar y el correo no se toca."""
+        sueno_de_hoy(mock_requests, True)
         preparar(mock_requests, monkeypatch)
         mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([]))
         reloj(monkeypatch, 8, 30)
@@ -420,6 +641,7 @@ class TestBotonDeLaAlarma:
                                                  monkeypatch, caplog):
         """Lo que importa de ese botón es que la alarma deje de sonar. Si el correo
         revienta, se registra y el botón sigue contestando que sí."""
+        sueno_de_hoy(mock_requests, True)
         preparar(mock_requests, monkeypatch)
         self._alarma_confirmable(mock_requests)
         reloj(monkeypatch, 8, 30)
@@ -436,6 +658,7 @@ class TestBotonDeLaAlarma:
                                              monkeypatch):
         """Pasa por `enviar_brief_si_toca`, que es la única puerta: con el resumen
         apagado, confirmar la alarma no manda nada."""
+        sueno_de_hoy(mock_requests, True)
         preparar(mock_requests, monkeypatch)
         self._alarma_confirmable(mock_requests)
         reloj(monkeypatch, 8, 30)
@@ -444,3 +667,40 @@ class TestBotonDeLaAlarma:
         client.post(self.RUTA, headers=self.CABECERA)
         assert _SMTPFalso.enviados == []
         assert mock_requests.called("POST", "/rest/v1/brief_envios") == []
+
+
+    def test_sin_el_sueno_de_esta_noche_tambien_espera(self, client, mock_requests,
+                                                       graph_token, monkeypatch):
+        """El botón es la señal más TEMPRANA que hay: se pulsa con la alarma sonando, o
+        sea antes que ninguna otra, y ahí la noche casi nunca ha sincronizado. Sin pasar
+        por la espera sería la que más veces mandaría el correo diciendo que no llevabas
+        el reloj."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 7, 15)
+
+        r = client.post(self.RUTA, headers=self.CABECERA)
+        assert r.json()["hecho"] is True, "la alarma se quita igual"
+        assert _SMTPFalso.enviados == []
+        assert mock_requests.called("POST", "/rest/v1/brief_envios") == []
+        # Y queda apuntado que te despertaste a esa hora, para cuando llegue el sueño.
+        assert main._despertar_esperado(_a_las(7, 15)) == _a_las(7, 15)
+
+    def test_al_llegar_el_sueno_sale_con_la_hora_de_la_alarma(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """El caso completo: te despierta la alarma a las 7:15, el reloj sincroniza a las
+        7:40 y el correo sale entonces — pero constando que te despertaste a las 7:15."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        self._alarma_confirmable(mock_requests)
+        reloj(monkeypatch, 7, 15)
+        client.post(self.RUTA, headers=self.CABECERA)
+
+        reloj(monkeypatch, 7, 40)
+        main._avisar_sueno_recibido({datetime.now(main.LOCAL_TZ).date().isoformat()})
+
+        assert len(_SMTPFalso.enviados) == 1
+        reservado = mock_requests.called("POST", "/rest/v1/brief_envios")[0][2]["json"][0]
+        assert reservado["despertar_at"].startswith(
+            _a_las(7, 15).astimezone(main.timezone.utc).isoformat()[:16])

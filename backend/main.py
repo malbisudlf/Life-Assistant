@@ -287,6 +287,15 @@ INFORME_SEMANAS = int(os.getenv("INFORME_SEMANAS", "13"))
 # Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
 # _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
 BRIEF_DISPARA_SUENO   = _flag("BRIEF_DISPARA_SUENO")
+# Si la señal de despertar espera al sueño de esa misma noche antes de mandar el correo.
+# Existe porque las dos cosas NO pasan a la vez: al desenchufar el cargador el reloj
+# todavía no ha volcado la noche a Salud —hace falta abrir su app— y el correo salía sin
+# ella. Ver `_esperar_al_sueno`.
+BRIEF_ESPERA_SUENO     = _flag("BRIEF_ESPERA_SUENO")
+# Cuánto se espera como mucho. Pasado esto el correo sale sin el sueño y además te llega
+# un aviso al móvil: es lo único que puede hacer que el dato llegue a tiempo de servir
+# para algo. El tope real sigue siendo BRIEF_HORA_TOPE, que manda sobre este.
+BRIEF_ESPERA_SUENO_MIN = int(os.getenv("BRIEF_ESPERA_SUENO_MIN", "45"))
 # Disparo de la rutina de Claude Code que lee este correo y redacta el briefing.
 # Su trigger de API: la URL y el token se generan en claude.ai/code/routines (el token
 # se enseña UNA vez). Si faltan, no se dispara nada y la rutina se queda solo con su
@@ -301,6 +310,23 @@ RUTINA_BETA       = os.getenv("RUTINA_BETA", "experimental-cc-routine-2026-04-01
 # propia rutina: despertarse a las 6 no debe traer el briefing a las 6, porque recoge
 # newsletters que a esa hora todavía no han llegado.
 BRIEF_RUTINA_DESDE = os.getenv("BRIEF_RUTINA_DESDE", "08:00")
+
+# ── El turno de noche ─────────────────────────────────────────────────────────
+# Lo que se resuelve mientras duermes para que por la mañana solo haya que aprobarlo.
+# Los cuatro interruptores NACEN APAGADOS, al revés que casi todo el resto: esto lee el
+# buzón, llama a modelos de pago y lanza sesiones de Claude Code sin que haya nadie
+# mirando, y ninguna de las tres cosas debe empezar a pasar sola por actualizar el
+# backend. Se encienden a mano cuando se ha visto una noche en seco.
+NOCHE_TURNO  = _flag("NOCHE_TURNO",  "0")   # el turno entero
+NOCHE_CORREO = _flag("NOCHE_CORREO", "0")   # la parte del buzón
+NOCHE_ARREGLA = _flag("NOCHE_ARREGLA", "0")  # arreglar el código sin esperar a las 08:30
+# A qué hora corre. De madrugada y no al irse a dormir: a las tres ya han llegado los
+# correos del día y el CI de lo último que se mergeó hace rato que terminó.
+NOCHE_HORA_TURNO = os.getenv("NOCHE_HORA", "03:00")
+# Topes de la noche. Cada borrador es una llamada de pago, así que el freno es DOBLE:
+# cuántos correos se miran y, dentro de esos, cuántos se llegan a redactar.
+NOCHE_CORREO_MAX     = int(os.getenv("NOCHE_CORREO_MAX", "15"))
+NOCHE_BORRADORES_MAX = int(os.getenv("NOCHE_BORRADORES_MAX", "10"))
 
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
@@ -1276,8 +1302,24 @@ def _verify_oauth_state(state: str) -> bool:
     return claims.get("purpose") == "oauth_state"
 
 
-SCOPES = ["Calendars.ReadWrite", "User.Read"]
+# Lo que se le pide a Microsoft. Va partido en dos porque el buzón llegó después que el
+# calendario y hay un consentimiento ya dado ahí fuera que no incluye el correo: pedir un
+# permiso no consentido en una RENOVACIÓN no da un token capado, da un error — y sin token
+# no hay calendario tampoco. Mientras el correo esté apagado no se pide nada nuevo, y si
+# está encendido pero aún no has vuelto a conectar Outlook, `get_valid_token()` reintenta
+# con los de siempre (ver ahí) para que lo que se caiga sea el buzón y no la agenda.
+SCOPES_BASE   = ["Calendars.ReadWrite", "User.Read"]
+SCOPES_CORREO = ["Mail.ReadWrite"]
 OAUTH_PROVIDER = "microsoft_graph"
+
+
+def _scopes() -> list:
+    """Los permisos a pedir: los de siempre, más el correo solo si está encendido.
+
+    Es una función y no una constante porque `CORREO_LEER` se define en la sección del
+    correo, mucho más abajo, y porque los tests encienden el buzón con monkeypatch.
+    """
+    return SCOPES_BASE + (SCOPES_CORREO if (CORREO_LEER or NOCHE_CORREO) else [])
 
 # Cliente MSAL compartido. Se construía de cero en /auth/login, /auth/callback y en
 # cada renovación de token, y cada construcción descubre la autoridad
@@ -1449,7 +1491,19 @@ def get_valid_token() -> str | None:
     refresh_token = data.get("refresh_token")
     if not refresh_token:
         return None
-    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES)
+    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=_scopes())
+    if "access_token" not in result and _scopes() != SCOPES_BASE:
+        # El consentimiento guardado es anterior al buzón y no incluye `Mail.ReadWrite`.
+        # Microsoft no devuelve un token capado, devuelve un error: sin este reintento,
+        # encender el correo dejaría también sin calendario, sin avisos y sin resumen
+        # diario, y el único síntoma sería "Sesión de Outlook caducada". El buzón se
+        # quedará en 403 —eso sí se ve y se arregla reconectando— pero lo que ya
+        # funcionaba sigue funcionando.
+        logger.warning(
+            "Graph: el consentimiento actual no cubre el correo (%s). El buzón no "
+            "funcionará hasta volver a conectar Outlook desde el dashboard.",
+            result.get("error", "?"))
+        result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES_BASE)
     if "access_token" in result:
         _store_result(result)
         return result["access_token"]
@@ -1485,7 +1539,7 @@ def login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     # consentimiento de Microsoft con SU cuenta y acabar pisando la conexión de
     # Outlook del usuario.
     auth_url = _msal_app().get_authorization_request_url(
-        SCOPES,
+        _scopes(),
         redirect_uri=REDIRECT_URI,
         state=_create_oauth_state(),
     )
@@ -1503,7 +1557,7 @@ def callback(code: str, state: str = ""):
         )
     result = _msal_app().acquire_token_by_authorization_code(
         code,
-        scopes=SCOPES,
+        scopes=_scopes(),
         redirect_uri=REDIRECT_URI,
     )
     if "access_token" in result:
@@ -3665,10 +3719,20 @@ def borrar_etf_aportacion(
 # `dietary_energy` (lo que se come) es acumulativa por la misma razón que las demás:
 # se va sumando comida a comida a lo largo del día, así que un sync de mediodía no
 # puede pisar el total de la noche.
+#
+# `basal_energy_burned` es el nombre REAL con el que Health Auto Export manda la energía
+# basal —comprobado el 2026-09-16 contra los datos de producción: 30 días de
+# `basal_energy_burned` y ni uno de `basal_energy`—. El nombre se guarda tal cual llega,
+# sin normalizar, así que faltar aquí no dejaba la métrica a medias: la dejaba MAL. Sin
+# estar en esta lista, cada sync parcial del día pisaba el total en el upsert y quedaba
+# guardado el valor de la última sincronización, no el del día; y sin estar en la de
+# abajo, no se convertía de kJ a kcal. Una métrica ausente se nota; una métrica presente
+# y equivocada, no.
 CUMULATIVE_METRICS = {"step_count", "active_energy", "basal_energy", "resting_energy",
-                      "dietary_energy"}
+                      "basal_energy_burned", "active_energy_burned", "dietary_energy"}
 # Energía que Apple puede mandar en kJ y guardamos siempre en kcal.
-ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy", "dietary_energy"}
+ENERGY_METRICS = {"active_energy", "basal_energy", "resting_energy", "dietary_energy",
+                  "basal_energy_burned", "active_energy_burned"}
 
 # Formas en las que puede llegar escrito "kilojulios". La comparación tiene que ser
 # LAXA: se hacía con `unit == "kJ"`, un igual exacto contra una cadena que decide el
@@ -3713,12 +3777,21 @@ def _normalizar_energia(name: str, value, unit):
 # Espejo de la columna `cero_es_dato` de _BRIEF_METRICAS (la de abajo va por clave de
 # salida y esta por nombre en la tabla; hay un test que comprueba que no se
 # desincronizan). Si añades una métrica a una, mírate la otra.
+# El oxígeno en sangre llega con nombres distintos según quién lo escriba en Salud
+# (Health Auto Export usa `blood_oxygen_saturation`), y quien lo mide aquí no es un Apple
+# Watch sino la pulsera, que lo registra de noche. Se aceptan las cuatro formas por lo
+# mismo que `apple_exercise_time`/`exercise_time` conviven desde siempre: el nombre lo
+# decide el exportador, no nosotros, y acertar a la primera no depende de este código.
+OXIGENO_NOMBRES = ("blood_oxygen_saturation", "blood_oxygen", "oxygen_saturation", "spo2")
+
 METRICAS_SIN_MEDIDA_EN_CERO = {
     "heart_rate", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "walking_heart_rate_average", "cardio_recovery",
     "respiratory_rate", "vo2_max", "cardioFitness",
     "weight_body_mass", "weight", "body_fat_percentage", "lean_body_mass",
     "sleep_analysis", "sleep",
+    # Una saturación de 0 % es un sensor que no midió, no una noche sin oxígeno.
+    *OXIGENO_NOMBRES,
 }
 # Claves de `extra` en las que puede venir la medida del sueño cuando `value` llega a 0:
 # ahí la noche sí está medida y la fila tiene que guardarse (ver `_horas_sueno`).
@@ -4149,9 +4222,13 @@ async def health_ingest(request: Request, token: str = ""):
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
     upserted += _guardar_metricas(grouped_metrics, FUENTE_AUTO_EXPORT)
 
-    # Si en el lote venía el sueño de esta noche, el Watch ya la ha cerrado: eso es lo
-    # más parecido a "ya está despierto" que sabe el backend por su cuenta.
-    _avisar_sueno_recibido({f for f, n in grouped_metrics if n == "sleep_analysis"})
+    # Si en el lote venía el sueño de esta noche, el reloj ya la ha cerrado: eso es lo
+    # más parecido a "ya está despierto" que sabe el backend por su cuenta. Van solo las
+    # noches CON medida: una de 0 horas es un hueco, no una noche cerrada.
+    _avisar_sueno_recibido({
+        f for (f, n), d in grouped_metrics.items()
+        if n == "sleep_analysis" and _horas_sueno(d) > 0
+    })
 
     # Una sincronización de la que no se reconoce NADA no es un éxito: el cuerpo no
     # traía lo que este endpoint sabe leer (otro envoltorio, un `{}` porque el Shortcut
@@ -4357,8 +4434,12 @@ async def health_ingest_simple(request: Request, token: str = ""):
         upserted += len(filas)
 
     # Igual que en /health/ingest: el sueño de esta noche recién llegado es la señal de
-    # que el Watch ya ha cerrado la noche.
-    _avisar_sueno_recibido({d for d, s in validas if s.metric == "sleep_analysis"})
+    # que el reloj ya ha cerrado la noche. Sale de `filas` y no de `validas`: lo que se
+    # descartó por ser un 0 sin medida no ha cerrado ninguna noche.
+    _avisar_sueno_recibido({
+        f["metric_date"] for f in filas
+        if f["metric_name"] == "sleep_analysis" and _horas_sueno(f) > 0
+    })
 
     # Un Atajo que manda huecos no falla nunca y deja de aportar datos en silencio —
     # es como se perdió un mes de métricas nocturnas sin un solo error en el registro.
@@ -5000,6 +5081,7 @@ _BRIEF_METRICAS = (
     ("fc_caminando",    ("walking_heart_rate_average",),                    "bpm",       False, "FC caminando"),
     ("recuperacion_fc", ("cardio_recovery",),                               "bpm",       False, "Recuperación cardio"),
     ("respiracion",     ("respiratory_rate",),                              "rpm",       False, "Frec. respiratoria"),
+    ("oxigeno",         OXIGENO_NOMBRES,                                    "%",         False, "Oxígeno en sangre"),
     ("vo2max",          ("vo2_max", "cardioFitness"),                       "ml/kg/min", False, "VO2 máx"),
     ("pasos",           ("step_count", "steps"),                            "pasos",     True,  "Pasos"),
     ("distancia",       ("walking_running_distance",),                      "km",        True,  "Distancia"),
@@ -5008,7 +5090,8 @@ _BRIEF_METRICAS = (
     ("de_pie",          ("apple_stand_hour",),                              "h",         True,  "Horas de pie"),
     ("esfuerzo",        ("physical_effort",),                               "",          True,  "Esfuerzo físico"),
     ("energia_activa",  ("active_energy",),                                 "kcal",      True,  "Energía activa"),
-    ("energia_basal",   ("resting_energy", "basal_energy"),                 "kcal",      True,  "Energía basal"),
+    ("energia_basal",   ("resting_energy", "basal_energy",
+                         "basal_energy_burned"),                            "kcal",      True,  "Energía basal"),
     ("energia_ingerida", ("dietary_energy",),                               "kcal",      True,  "Energía ingerida"),
     ("luz_natural",     ("time_in_daylight",),                              "min",       True,  "Luz natural"),
     ("peso",            ("weight_body_mass", "weight"),                     "kg",        False, "Peso"),
@@ -5036,6 +5119,9 @@ _RELOJ_DIA = {
 _RELOJ_NOCHE = {
     "sleep_analysis", "sleep", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "respiratory_rate",
+    # El oxígeno en sangre se mide dormido y con la pulsera puesta: prueba lo mismo que
+    # la frecuencia respiratoria.
+    *OXIGENO_NOMBRES,
 }
 # El teléfono cuenta esto SOLO, sin reloj de por medio. No dice nada del Watch: dice
 # que ese día la sincronización SÍ llegó, y es lo único que separa "el reloj estaba en
@@ -5255,7 +5341,18 @@ def _uso_del_reloj(por_nombre: dict, dias_ventana: list, hoy) -> tuple:
         "noches_puesto_7d": sum(1 for f in dias_ventana if f >= desde_7 and f in con_noche),
         "sin_datos":        sum(1 for e in estados if e == "sin_datos"),
         "hoy":              estados[-1],
-        "anoche":           hoy_iso in con_noche,
+        # "Anoche" es lo único de esta sección que se decide sobre el día EN CURSO, y por
+        # eso no puede ser un sí/no: el reloj vuelca la noche a Salud cuando se abre su
+        # app, no cuando te despiertas, así que hasta entonces "no hay noche" es
+        # indistinguible de "no lo llevaste puesto". Decía lo segundo, y la rutina que
+        # redacta el briefing lo escribía tal cual TODAS las mañanas: el correo sale a
+        # los pocos minutos de despertarte y el dato tardaba desde cinco minutos hasta
+        # esa misma tarde. Es la misma regla que `sin_datos` para los días pasados —"no
+        # he podido preguntar" no es un "no"— solo que aquí faltaba por el otro lado.
+        # Si de verdad no lo llevaste, mañana lo dicen el último rastro y la racha, que
+        # ya cuentan hacia atrás desde ayer, y esta misma noche lo dice el aviso de
+        # `_avisar_reloj_si_toca`, que es el único momento en que sirve de algo.
+        "anoche":           "si" if hoy_iso in con_noche else "pendiente",
         "ultimo":           puestos[-1] if puestos else None,
         "racha_sin_reloj":  racha,
     }
@@ -6471,10 +6568,22 @@ def render_brief_texto(d: dict) -> str:
                 f"   {'Sin reloj':<20} {racha} día(s) seguidos antes de hoy"
                 " (días con datos del móvil pero ninguno del reloj)"
             )
-        L.append(
-            f"   {'Anoche':<20} {'con reloj' if r.get('anoche') else 'sin reloj'}"
-            f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
-        )
+        if r.get("anoche") == "si":
+            L.append(
+                f"   {'Anoche':<20} con reloj"
+                f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
+            )
+        else:
+            # Explícito y en voz alta porque quien lee esto es un modelo que redacta el
+            # briefing: sin la segunda frase, "no ha llegado" se cuenta como "no lo
+            # llevó", que es el error que esta línea existe para no volver a cometer.
+            L.append(f"   {'Anoche':<20} el sueño todavía no ha llegado")
+            L.append(
+                "                        NO significa que no llevara el reloj: el dato se"
+                " sincroniza al abrir la app y puede tardar horas."
+                " No digas nada sobre si lo llevó puesto anoche."
+            )
+            L.append(f"   {'Hoy hasta ahora':<20} {_ESTADO_RELOJ.get(r.get('hoy'), '?')}")
         if r.get("sin_datos"):
             L.append(
                 f"   {'Ojo':<20} {r['sin_datos']} día(s) sin datos de NINGUNA fuente:"
@@ -7048,6 +7157,7 @@ HORA_TOPE            = _hora_config(BRIEF_HORA_TOPE, (10, 0))
 HORA_RUTINA          = _hora_config(BRIEF_RUTINA_DESDE, (8, 0))
 HORA_AVISO_RELOJ     = _hora_config(RELOJ_AVISO_HORA, (21, 30))
 HORA_INFORME         = _hora_config(INFORME_HORA, (10, 0))
+HORA_NOCHE           = _hora_config(NOCHE_HORA_TURNO, (3, 0))
 
 
 # Último fallo del disparo, para que el vigilante pueda reintentarlo. En memoria a
@@ -7273,30 +7383,196 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     return {"enviado": True, "fecha": datos["fecha"], "fuente": fuente}
 
 
+# ── La espera al sueño ────────────────────────────────────────────────────────
+# El correo sale al despertarte, pero el sueño de esa misma noche NO está cuando te
+# despiertas: el reloj lo vuelca a Salud cuando se abre su app, y eso puede ser cinco
+# minutos después o esa misma tarde. Mientras tanto el backend no puede distinguir "no
+# llevaste el reloj" de "todavía no ha llegado", y la sección RELOJ escribía lo primero
+# —que es lo que la rutina que redacta el briefing traduce, con toda la razón, a "anoche
+# no llevaste el reloj"—. Era falso casi todos los días.
+#
+# Por eso la señal de despertar ya no manda el correo: lo RESERVA. Si la noche aún no
+# ha llegado se apunta la espera y gana el primero de estos tres, por este orden:
+#   - llega el sueño (`_avisar_sueno_recibido`), que es el caso normal;
+#   - vence BRIEF_ESPERA_SUENO_MIN (`_vencer_espera_sueno`), y entonces sale sin él y
+#     con un aviso al móvil;
+#   - da BRIEF_HORA_TOPE, la red que ya existía.
+#
+# La espera vive en memoria a propósito: quien sabe si el dato ha llegado es Supabase, y
+# perder la nota en un reinicio cuesta que el correo salga por la hora tope, que es
+# exactamente la red de seguridad que este sistema ya tenía.
+_despertar_pendiente: dict | None = None
+_despertar_lock = threading.Lock()
+
+
+def _hay_sueno_de(fecha: str) -> bool:
+    """Si la noche de esa fecha ya está guardada CON medida.
+
+    Una fila no es una medida (`_hay_medida`): el Atajo escribe ceros las noches en que
+    su "Find Health Samples" no encuentra nada, y darlas por sincronizadas devolvería el
+    problema entero por la otra puerta.
+    """
+    try:
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{fecha}"
+            "&metric_name=in.(sleep_analysis,sleep)&select=metric_name,value,extra",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return any(_hay_medida(f) for f in r.json())
+    except Exception as e:
+        # No poder preguntarlo no puede retener el correo: se sigue como si hubiera
+        # llegado, que es el comportamiento de toda la vida. Es la misma regla que el
+        # interruptor del resumen — "no he podido mirar" nunca se trata como un "no".
+        logger.warning("Resumen diario: no se pudo mirar si ha llegado el sueño (%s)", e)
+        return True
+
+
+def _esperar_al_sueno(ahora: datetime) -> bool:
+    """¿Hay que retener el resumen a la espera del sueño de esta noche?
+
+    Es propiedad de la SEÑAL DE DESPERTAR y de nadie más, igual que la ventana horaria:
+    la hora tope y los respaldos disparan justo cuando ya no tiene sentido esperar más,
+    y pasarlos por aquí los dejaría sin mandar nada nunca.
+    """
+    if not BRIEF_ESPERA_SUENO:
+        return False
+    if (ahora.hour, ahora.minute) >= HORA_TOPE:
+        return False
+    return not _hay_sueno_de(ahora.date().isoformat())
+
+
+def _apuntar_despertar(ahora: datetime, fuente: str) -> None:
+    """Deja constancia de que te despertaste a esta hora aunque el correo no salga aún.
+
+    Solo la PRIMERA señal del día cuenta: el Atajo puede dispararse dos veces (vuelves a
+    enchufar el móvil y lo quitas otra vez) y la hora que vale es la del despertar, no la
+    del último desenchufe.
+    """
+    global _despertar_pendiente
+    with _despertar_lock:
+        dia = ahora.date().isoformat()
+        if _despertar_pendiente and _despertar_pendiente["dia"] == dia:
+            return
+        _despertar_pendiente = {"dia": dia, "desde": ahora, "fuente": fuente}
+    logger.info("Resumen diario: despertar apuntado (%s), esperando al sueño de esta noche", fuente)
+
+
+def _despertar_esperado(ahora: datetime) -> Optional[datetime]:
+    """La hora de la señal de despertar que está esperando, si es de hoy."""
+    with _despertar_lock:
+        p = _despertar_pendiente
+        return p["desde"] if p and p["dia"] == ahora.date().isoformat() else None
+
+
+def _olvidar_despertar() -> None:
+    global _despertar_pendiente
+    with _despertar_lock:
+        _despertar_pendiente = None
+
+
+def _vencer_espera_sueno() -> dict:
+    """Se acabó la espera: el correo sale sin el sueño y te avisa al móvil.
+
+    El aviso no es decoración ni un informe de avería: es lo ÚNICO que puede hacer que
+    el dato de esta noche exista, porque hasta que no abras la app del reloj no hay nada
+    que sincronizar y a partir de cierta hora el sueño ya no le sirve de nada a nadie.
+
+    Corre en el tick de HA, que es el único reloj del sistema. No puede tumbarlo (ver
+    `_vencer_espera_sueno_seguro`), y el aviso se apunta ANTES de intentar el correo:
+    si el SMTP falla, el aviso ya está puesto y el correo tiene su propia red.
+    """
+    ahora = _ahora_local()
+    desde = _despertar_esperado(ahora)
+    if desde is None:
+        return {}
+    if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN):
+        return {}
+    _olvidar_despertar()        # vencida: pase lo que pase con el correo, no se reintenta
+
+    salida = {}
+    # Se vuelve a mirar antes de avisar. Lo normal es que lo haya cerrado
+    # `_avisar_sueno_recibido` al llegar el dato, pero eso depende de que la ingesta pase
+    # por ahí: si el sueño entró por cualquier otro camino, regañarte por no sincronizar
+    # algo que ya está sincronizado es como se deja de leer un aviso.
+    if _hay_sueno_de(ahora.date().isoformat()):
+        try:
+            return dict(enviar_brief_si_toca("sueno", despertar=desde))
+        except Exception:
+            logger.exception("Resumen diario: fallo al enviarlo al vencer la espera")
+            return {}
+
+    minutos = int((ahora - desde).total_seconds() // 60)
+    if _apuntar_aviso(
+        "reloj_sync",
+        f"Llevas {minutos} min despierto y el sueño de anoche todavía no ha llegado. "
+        "Abre la app del reloj para que sincronice: el resumen de hoy sale sin él.",
+        prioridad=PRIO_ALTA,
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:sueno-sin-sincronizar:{ahora.date()}")),
+        huella=f"sin_sincronizar:{ahora.date().isoformat()}",
+    ):
+        salida["aviso_sueno_sin_sincronizar"] = True
+
+    try:
+        # La fuente dice POR QUÉ salió así: en `brief_envios` es lo único que después
+        # distingue un correo completo de uno al que le faltaba la noche.
+        salida.update(enviar_brief_si_toca("espera_agotada", despertar=desde))
+    except Exception:
+        logger.exception("Resumen diario: fallo al enviarlo tras agotarse la espera del sueño")
+    return salida
+
+
+def _vencer_espera_sueno_seguro() -> dict:
+    """Como el resto de los `_seguro` del tick: lo que se protege no es esto, es el
+    despacho de recordatorios que viene detrás."""
+    try:
+        return _vencer_espera_sueno()
+    except Exception:
+        logger.exception("Resumen diario: fallo inesperado venciendo la espera del sueño")
+        return {}
+
+
 def _avisar_sueno_recibido(fechas_sueno: set) -> None:
-    """Acaba de llegar el sueño de esta noche: si el Watch ya la ha cerrado y
+    """Acaba de llegar el sueño de esta noche: si el reloj ya la ha cerrado y
     sincronizado, lo probable es que estés despierto.
 
-    Es una deducción, no un aviso, y por eso lleva dos frenos: solo cuentan las noches
-    de hoy y ayer (el Atajo reenvía los últimos días en cada sync, y un backfill de la
-    semana pasada no significa nada), y el envío vuelve a comprobar la ventana horaria.
-    Aun así puede adelantarse si el iPhone sincroniza una noche a medias mientras
-    duermes: se puede desactivar con BRIEF_DISPARA_SUENO=0 y quedarse solo con la
-    señal del móvil, que sí es exacta.
+    Es una deducción, no un aviso, y por eso lleva dos frenos: solo cuenta la noche de
+    HOY, y el envío vuelve a comprobar la ventana horaria. Se puede desactivar con
+    BRIEF_DISPARA_SUENO=0 y quedarse solo con la señal del móvil, que sí es exacta.
 
-    Nunca puede tumbar la ingesta: guardar los datos del Watch importa más que el
-    correo, y el correo tiene otras dos fuentes que lo disparan.
+    **Solo hoy, y antes valía también ayer.** Aceptar la noche de ayer parecía prudente
+    —el Atajo reenvía los últimos días en cada sync— y era justo lo contrario: como la
+    noche se fecha por el día en que te despiertas, la de ayer NUNCA es la de esta
+    noche, así que lo único que podía disparar era un reenvío de un dato que ya estaba.
+    Y disparaba: el correo salía con la noche de ayer recién reescrita y la de hoy
+    todavía sin sincronizar, o sea con la sección RELOJ diciendo "anoche sin reloj"
+    todos los días. El 16/09/2026 el reenvío mandó el correo a las 08:33 y el sueño de
+    verdad llegó a las 08:38, cinco minutos tarde.
+
+    Quien llama debe pasar solo las fechas cuyo sueño trae MEDIDA: una fila de 0 horas
+    es lo que escribe el Atajo las noches que no encuentra muestras, y contarla como
+    noche cerrada devolvería el mismo problema por la otra puerta.
+
+    Nunca puede tumbar la ingesta: guardar los datos del reloj importa más que el
+    correo, y el correo tiene otras tres fuentes que lo disparan.
     """
     if not BRIEF_DISPARA_SUENO or not fechas_sueno:
         return
     ahora = _ahora_local()
-    recientes = {ahora.date().isoformat(), (ahora.date() - timedelta(days=1)).isoformat()}
-    if not (set(fechas_sueno) & recientes) or not _senal_de_despertar_valida(ahora):
+    if ahora.date().isoformat() not in set(fechas_sueno) or not _senal_de_despertar_valida(ahora):
         return
     try:
-        enviar_brief_si_toca("sueno", despertar=ahora)
+        # Si ya había una señal de despertar esperando a este dato, el despertar fue
+        # ENTONCES y no ahora: es la hora que decide cuándo se lanza la rutina.
+        enviar_brief_si_toca("sueno", despertar=_despertar_esperado(ahora) or ahora)
     except Exception:
         logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del Watch")
+    finally:
+        # Ha llegado lo que se esperaba, salga el correo o falle: dejar la espera viva
+        # haría que al vencer te avisara al móvil de que abras la app del reloj que
+        # acabas de abrir.
+        _olvidar_despertar()
 
 
 def _avisar_alarma_confirmada() -> None:
@@ -7313,12 +7589,21 @@ def _avisar_alarma_confirmada() -> None:
     para un vuelo es estar despierto de verdad, pero el correo de ese día se compondría
     sin la noche sincronizada, y para eso ya está la hora tope.
 
+    Y es también la señal más TEMPRANA de las cuatro: se pulsa con la alarma sonando,
+    cuando el reloj no ha tenido ocasión de volcar la noche. Por eso pasa por
+    `_esperar_al_sueno` igual que el desenchufe del cargador — sin esa espera sería la
+    que más veces mandaría el correo diciendo que no llevaste el reloj, que es justo lo
+    que se arregló el 16/09/2026.
+
     Nunca puede tumbar la confirmación de la alarma —lo que importa es que deje de
     sonar—, igual que no puede tumbar la ingesta del Watch. Y va como tarea de fondo
     (ver `alarma_despierto`), así que aquí no queda nadie esperando.
     """
     ahora = _ahora_local()
     if not _senal_de_despertar_valida(ahora):
+        return
+    if _esperar_al_sueno(ahora):
+        _apuntar_despertar(ahora, "alarma")
         return
     try:
         enviar_brief_si_toca("alarma", despertar=ahora)
@@ -7350,6 +7635,16 @@ def marcar_despertar(request: Request, token: str = "", fuente: str = ""):
                 "motivo": f"fuera de la ventana de despertar "
                           f"({HORA_DESPERTAR_DESDE[0]:02d}:{HORA_DESPERTAR_DESDE[1]:02d}"
                           f"–{HORA_DESPERTAR_HASTA[0]:02d}:{HORA_DESPERTAR_HASTA[1]:02d})"}
+
+    # Estás despierto, pero el sueño de esta noche puede no haber sincronizado todavía
+    # (el reloj lo vuelca cuando se abre su app). Mandar el correo ahora sería mandarlo
+    # diciendo que no llevaste el reloj. Se apunta la espera y manda quien llegue antes:
+    # el sueño, el vencimiento o la hora tope.
+    if _esperar_al_sueno(ahora):
+        _apuntar_despertar(ahora, etiqueta)
+        return {"ok": True, "enviado": False, "esperando_sueno": True,
+                "motivo": f"el sueño de esta noche aún no ha llegado; se espera hasta "
+                          f"{BRIEF_ESPERA_SUENO_MIN} min"}
     try:
         resultado = enviar_brief_si_toca(etiqueta, despertar=ahora)
     except HTTPException:
@@ -7387,8 +7682,12 @@ def ha_brief_tick(request: Request, token: str = ""):
     # así que una excepción suelta aquí dejaba sin entregar TODOS los recordatorios
     # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
     # Home Assistant.
-    previos = {**_avisar_reloj_seguro(), **_vigilar_ingesta_seguro(),
-               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro()}
+    previos = {**_avisar_reloj_seguro(), **_vencer_espera_sueno_seguro(),
+               **_vigilar_ingesta_seguro(),
+               **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
+               # El turno de noche va aquí y no en un reloj propio: este tick es el único
+               # que corre a las tres de la mañana. Su guarda de hora está dentro.
+               **_turno_noche_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -7397,6 +7696,9 @@ def ha_brief_tick(request: Request, token: str = ""):
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
 
+    # A la hora tope se manda con lo que haya, así que la espera deja de tener sentido:
+    # si no se borrase, el vencimiento intentaría después mandar un correo ya enviado.
+    _olvidar_despertar()
     try:
         resultado = enviar_brief_si_toca("tope")
     except HTTPException:
@@ -8153,6 +8455,8 @@ TABLAS_CONOCIDAS = {
     "alarmas":               "20260909_alarmas",
     "ideas_dev":             "20260909_ideas_dev",
     "migraciones_aplicadas": "20260910_migraciones_aplicadas",
+    "noche_partes":          "20260914_turno_noche",
+    "noche_items":           "20260914_turno_noche",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -9156,6 +9460,9 @@ REGLA_VIGILANTE_SOLO = "vigilante_solo"
 # ahí y no dentro del texto. De paso, se puede silenciar una sin callar la otra.
 REGLA_SESION           = "sesion"
 REGLA_SESION_BLOQUEADA = "sesion_bloqueada"
+# El parte del turno de noche. No se valora con «útil / no útil» como los demás: lo que
+# se hace con él es abrirlo y aprobar lo que hay dentro, así que sus botones son otros.
+REGLA_NOCHE            = "noche"
 # La URL pública del dashboard. Solo sirve para una cosa: el botón «Hablarlo» del aviso
 # de despliegue, que abre la pantalla de llamada. Vacía, el aviso sigue teniendo sus dos
 # botones de siempre y lo único que se pierde es poder contestar hablando.
@@ -11626,18 +11933,42 @@ def _correr_reglas_usuario() -> int:
 #
 # Es la capacidad más delicada del proyecto en cuanto a privacidad, así que va con las
 # restricciones puestas por delante y no como añadido:
-#   - **Apagada mientras no se configure.** Sin `IMAP_HOST` no se conecta a nada.
+#   - **Apagada mientras no se encienda.** `CORREO_LEER` nace a `0`, como los tres
+#     interruptores del turno de noche y por el mismo motivo: leer el buzón no debe
+#     empezar a pasar solo porque alguien actualice el backend.
 #   - **Solo cabeceras**: asunto, remitente y fecha. El CUERPO no se lee ni se manda a
 #     ningún modelo. Con el asunto se distingue de sobra "tu pedido llega mañana" de una
 #     newsletter, y lo que no se lee no se puede filtrar.
-#   - **No se marca como leído** (`BODY.PEEK`): un asistente que te descoloca el buzón
-#     deja de usarse a la semana.
+#   - **No se marca como leído**: leer un mensaje por Graph no cambia `isRead` —eso solo
+#     pasa con un PATCH explícito que aquí no existe—, igual que el `BODY.PEEK` del IMAP
+#     de antes. Un asistente que te descoloca el buzón deja de usarse a la semana.
 #   - **No se guarda nada.** Ni el asunto ni el remitente van a Supabase; lo único que
 #     persiste es el aviso que tú vas a leer.
-IMAP_HOST      = os.getenv("IMAP_HOST", "")
-IMAP_USER      = os.getenv("IMAP_USER", "") or SMTP_USER
-IMAP_PASSWORD  = os.getenv("IMAP_PASSWORD", "") or SMTP_PASSWORD
-IMAP_CARPETA   = os.getenv("IMAP_CARPETA", "INBOX")
+#
+# **Va por Microsoft Graph y no por IMAP**, y no es una preferencia: el IMAP de Outlook
+# anuncia `LOGINDISABLED` y `AUTH=XOAUTH2`, o sea que la contraseña —incluida la de
+# aplicación— está muerta desde que Microsoft retiró la autenticación básica. Quedaba
+# reaprovechar el token de Graph para XOAUTH2 o hablar Graph a secas; se eligió lo
+# segundo porque el backend YA habla Graph para el calendario, con su renovación de
+# tokens resuelta, y porque `createReply` deja el borrador colgando del hilo sin que
+# aquí haya que construir un MIME ni acertar con el nombre de la carpeta de borradores,
+# que no es estándar en ningún sitio.
+CORREO_LEER = _flag("CORREO_LEER", "0")
+# Cuánto cuerpo se lee de un correo que sí pide respuesta. Un correo normal cabe de
+# sobra; lo que esto corta son los hilos de cincuenta respuestas citadas.
+CORREO_MAX_CUERPO = int(os.getenv("CORREO_MAX_CUERPO", "4000"))
+# Tope en BYTES de lo que se descarga por correo antes de recortar a CORREO_MAX_CUERPO
+# caracteres. Sin esto, un correo enorme se trae ENTERO a memoria antes de poder
+# recortarlo, y con varios la misma noche eso es presión de memoria real en un backend
+# que corre como add-on del Green, sin margen de una VM dedicada.
+#
+# Con Graph la mitad del problema desaparece sola: `$select=uniqueBody` trae el cuerpo
+# **sin los adjuntos** —que viajan por `/attachments` y aquí no se piden nunca—, mientras
+# que el `BODY.PEEK[]` de IMAP no distinguía cuerpo de adjunto. Lo que queda por acotar
+# es un cuerpo HTML desmesurado, y eso no se puede cortar en el servidor como hacía el
+# fetch parcial de IMAP: se lee a trozos y se abandona el correo si se pasa (ver
+# `_descarga_acotada`). Un correo que no cabe no se responde; la noche sigue.
+CORREO_MAX_DESCARGA = int(os.getenv("CORREO_MAX_DESCARGA", "200000"))
 CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
 CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
 CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
@@ -11652,52 +11983,110 @@ _CORREO_SISTEMA = (
 )
 
 
-def _cabeceras_recientes() -> list:
-    """Asunto, remitente y fecha de los correos sin leer de las últimas horas.
+def _buzon_cabeceras(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
 
-    Solo cabeceras y con PEEK: ni se lee el cuerpo ni se toca el estado del buzón.
+
+def _buzon_listo() -> str:
+    """El token de Graph si el buzón se puede usar, o cadena vacía.
+
+    Un solo sitio donde preguntarlo: lo llaman la regla del correo entrante y el turno
+    de noche, y los dos tienen que quedarse quietos —sin ruido y sin excepción— cuando
+    Outlook no está conectado.
     """
-    import imaplib
-    from email.header import decode_header, make_header
+    if not CORREO_LEER:
+        return ""
+    return get_valid_token() or ""
 
-    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime("%d-%b-%Y")
-    buzon = imaplib.IMAP4_SSL(IMAP_HOST, timeout=HTTP_TIMEOUT)
+
+def _buzon_fallo(r, contexto: str) -> bool:
+    """True si la respuesta de Graph no sirve. Deja dicho en el registro qué pasó.
+
+    El 403 tiene mensaje propio porque tiene arreglo propio y no evidente: el
+    consentimiento de Outlook es anterior al buzón y hay que volver a darlo una vez.
+    """
+    if r.status_code < 300:
+        return False
+    if r.status_code == 403:
+        logger.warning(
+            "Buzón: Outlook no ha dado permiso de correo (403). Vuelve a conectar "
+            "Outlook desde el dashboard para consentir Mail.ReadWrite.")
+    else:
+        logger.warning("Buzón %s: Graph respondió %s", contexto, r.status_code)
+    return True
+
+
+def _descarga_acotada(r, tope: int = 0) -> bytes | None:
+    """El cuerpo de una respuesta leído a trozos, o None si pasa del tope.
+
+    `stream=True` deja la descarga sin empezar hasta que se lee, así que aquí se para en
+    cuanto se sabe que no cabe, en vez de recortar algo que ya está entero en memoria —que
+    era justo lo que había que evitar. Devolver None y no un trozo es deliberado: medio
+    JSON no se puede parsear, y un correo a medias redactado es peor que no redactado.
+    """
+    tope = tope or CORREO_MAX_DESCARGA
+    trozos, leido = [], 0
     try:
-        buzon.login(IMAP_USER, IMAP_PASSWORD)
-        buzon.select(IMAP_CARPETA, readonly=True)
-        ok, datos = buzon.search(None, f'(UNSEEN SINCE {desde})')
-        if ok != "OK":
-            return []
-        ids = (datos[0] or b"").split()[-CORREO_MAX:]
-        salida = []
-        for i in ids:
-            ok, partes = buzon.fetch(i, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
-            if ok != "OK" or not partes or not isinstance(partes[0], tuple):
+        for trozo in r.iter_content(chunk_size=16384):
+            if not trozo:
                 continue
-            crudo = partes[0][1].decode("utf-8", "replace")
-            campos = {}
-            for linea in crudo.splitlines():
-                clave, _, valor = linea.partition(":")
-                if valor:
-                    campos[clave.strip().lower()] = valor.strip()
-            asunto = campos.get("subject", "")
-            try:
-                asunto = str(make_header(decode_header(asunto)))
-            except Exception:
-                pass
-            salida.append({"asunto": asunto[:150], "de": campos.get("from", "")[:80]})
-        return salida
+            leido += len(trozo)
+            if leido > tope:
+                return None
+            trozos.append(trozo)
+    except Exception as e:
+        logger.warning("Buzón: se cortó la descarga de un correo (%s)", type(e).__name__)
+        return None
     finally:
         try:
-            buzon.logout()
+            r.close()
         except Exception:
             pass
+    return b"".join(trozos)
+
+
+def _cabeceras_recientes() -> list:
+    """Asunto, remitente y id de los correos sin leer de las últimas horas.
+
+    Solo cabeceras: el `$select` pide exactamente los campos que se usan y el cuerpo no
+    viene en la respuesta. Leer por Graph tampoco marca nada como leído.
+
+    El `id` que devuelve Graph es estable para el mensaje —no un número de posición—,
+    así que el turno de noche puede volver a por el cuerpo de unos pocos minutos después
+    sin riesgo de bajarse OTRO correo, que era justo el motivo de ir por UID en IMAP.
+    """
+    token = _buzon_listo()
+    if not token:
+        return []
+    desde = (datetime.now(timezone.utc) - timedelta(hours=CORREO_HORAS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    r = http.get(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        f"?$filter=isRead eq false and receivedDateTime ge {desde}"
+        f"&$select=id,subject,from,internetMessageId,receivedDateTime"
+        f"&$orderby=receivedDateTime desc&$top={CORREO_MAX}",
+        headers=_buzon_cabeceras(token),
+    )
+    if _buzon_fallo(r, "cabeceras"):
+        return []
+    salida = []
+    for m in (r.json() or {}).get("value", []) or []:
+        remitente = (((m.get("from") or {}).get("emailAddress")) or {})
+        nombre = remitente.get("name") or ""
+        correo = remitente.get("address") or ""
+        salida.append({
+            "asunto":     (m.get("subject") or "")[:150],
+            "de":         (f"{nombre} <{correo}>" if nombre else correo)[:80],
+            "id":         m.get("id") or "",
+            "message_id": (m.get("internetMessageId") or "")[:200],
+        })
+    return salida
 
 
 def _revisar_correo() -> int:
     """Saca del buzón lo accionable con fecha y lo deja como aviso."""
     global _ultima_revision_correo
-    if not (IMAP_HOST and IMAP_USER and IMAP_PASSWORD):
+    if not _buzon_listo():
         return 0
     if time.time() - _ultima_revision_correo < CORREO_CADA_MIN * 60:
         return 0
@@ -11719,7 +12108,12 @@ def _revisar_correo() -> int:
         completa = cliente.chat.completions.create(
             model=JARVIS_MODEL,
             messages=[{"role": "system", "content": f"{_CORREO_SISTEMA} Hoy es {hoy}."},
-                      {"role": "user", "content": json.dumps(cabeceras, ensure_ascii=False)}],
+                      # Al modelo van asunto y remitente, nada más: el uid y el
+                      # Message-ID son fontanería para el turno de noche y aquí solo
+                      # serían tokens de pago que además despistan.
+                      {"role": "user", "content": json.dumps(
+                          [{"asunto": c.get("asunto", ""), "de": c.get("de", "")}
+                           for c in cabeceras], ensure_ascii=False)}],
             response_format={"type": "json_object"},
             **_parametros_modelo(JARVIS_MODEL, 500),
         )
@@ -11743,6 +12137,491 @@ def _revisar_correo() -> int:
                           prioridad=PRIO_NORMAL, huella=f"correo:{texto[:60]}"):
             puestos += 1
     return puestos
+
+
+# ── El buzón de noche: clasificar y dejar el borrador escrito ─────────────────
+# Aquí se relaja, a propósito y solo aquí, la regla de la sección de arriba: «el CUERPO
+# no se lee ni se manda a ningún modelo». No hay forma de redactar la respuesta a un
+# correo sin haberlo leído. Lo que se conserva es el espíritu de la regla, acotándola:
+#
+#   - La clasificación sigue viendo SOLO asunto y remitente, como siempre. El cuerpo se
+#     baja DESPUÉS y únicamente de los que esa clasificación marca como «responder»: de
+#     una newsletter o de un aviso del banco no se abre nada.
+#   - El cuerpo no se guarda en ningún sitio. Se lee, se usa para redactar y se olvida:
+#     en Supabase queda el asunto, el remitente y el borrador, que es lo que tú vas a ver.
+#   - Sigue el PEEK: los correos siguen sin leer en el buzón por la mañana.
+#   - **No hay camino de envío.** El borrador se sube con APPEND a la carpeta de
+#     borradores y ahí se queda; mandarlo es un acto tuyo, en tu cliente de correo. En
+#     todo este camino no se llama a `enviar_correo()` ni a `smtplib` ni una vez.
+
+_NOCHE_CLASIFICA = (
+    "Te paso una lista de correos con su ASUNTO y su REMITENTE, numerados por su "
+    "posición. Clasifica cada uno en una de estas tres categorías:\n"
+    '- "responder": escrito por una persona y espera una respuesta tuya.\n'
+    '- "informativo": te interesa saberlo, pero no hay que contestar (un cobro, una '
+    "confirmación, una nota publicada).\n"
+    '- "ruido": newsletters, promociones, notificaciones automáticas de redes.\n'
+    'Devuelve SOLO un JSON {"correos": [{"i": 0, "categoria": "responder"}]} con una '
+    "entrada por correo. Ante la duda entre responder e informativo, elige informativo: "
+    "redactar de más cuesta dinero y molesta más que quedarse corto."
+)
+
+_NOCHE_REDACTA = (
+    "Eres el asistente de Mikel y redactas EN SU NOMBRE el borrador de respuesta a un "
+    "correo. Escribe en español, en su tono: directo, cordial y breve, sin fórmulas de "
+    "oficina. Solo el cuerpo del mensaje, sin asunto y sin firma. NO te inventes datos, "
+    "fechas, precios ni compromisos: si para contestar hace falta algo que no está en el "
+    "correo, dilo en el propio borrador entre corchetes, por ejemplo [confirmar la hora]. "
+    "Este texto no se va a enviar solo: Mikel lo va a leer y retocar antes de mandarlo."
+)
+
+
+def _noche_clasificar(cabeceras: list) -> list:
+    """Categoría de cada correo, en el mismo orden que entró. Nunca lanza.
+
+    Si la clasificación falla, se devuelve todo como "ruido" en vez de tirar de un
+    defecto optimista: un fallo del modelo no puede acabar abriendo el cuerpo de treinta
+    correos ni redactando treinta borradores.
+    """
+    porteria = ["ruido"] * len(cabeceras)
+    if not cabeceras:
+        return porteria
+    try:
+        cliente = get_openai_client()
+        completa = cliente.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[{"role": "system", "content": _NOCHE_CLASIFICA},
+                      {"role": "user", "content": json.dumps(
+                          [{"i": i, "asunto": c.get("asunto", ""), "de": c.get("de", "")}
+                           for i, c in enumerate(cabeceras)], ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+            **_parametros_modelo(JARVIS_MODEL, 600),
+        )
+        _apuntar_gasto("noche_correo", JARVIS_MODEL, getattr(completa, "usage", None))
+        datos = json.loads(completa.choices[0].message.content or "{}") or {}
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo clasificar el buzón (%s)", e)
+        return porteria
+
+    for fila in (datos.get("correos") or []):
+        try:
+            i = int((fila or {}).get("i"))
+        except (TypeError, ValueError):
+            continue
+        categoria = str((fila or {}).get("categoria") or "").strip().lower()
+        if 0 <= i < len(porteria) and categoria in ("responder", "informativo", "ruido"):
+            porteria[i] = categoria
+    return porteria
+
+
+def _cuerpos_de(ids: list) -> dict:
+    """id → cuerpo, para los pocos correos que sí piden respuesta.
+
+    Se pide `uniqueBody` y no `body`: es la parte NUEVA del mensaje, sin el hilo citado
+    debajo. Antes eso había que recortarlo a ciegas por caracteres, y en una cadena
+    larga el recorte se comía la pregunta y dejaba las citas.
+
+    La cabecera `Prefer: outlook.body-content-type="text"` hace que Graph devuelva texto
+    plano ya convertido: lo que se le pasa al modelo es lo que dice el correo, no su
+    maquetación.
+    """
+    if not ids:
+        return {}
+    token = _buzon_listo()
+    if not token:
+        return {}
+    cabeceras = dict(_buzon_cabeceras(token))
+    cabeceras["Prefer"] = 'outlook.body-content-type="text"'
+    salida = {}
+    for ident in ids:
+        try:
+            r = http.get(
+                f"https://graph.microsoft.com/v1.0/me/messages/{quote(str(ident), safe='')}"
+                "?$select=uniqueBody",
+                headers=cabeceras,
+                stream=True,
+            )
+        except Exception as e:
+            logger.warning("Turno de noche: no se pudo leer un correo (%s)",
+                           type(e).__name__)
+            continue
+        if _buzon_fallo(r, "cuerpo"):
+            continue
+        crudo = _descarga_acotada(r)
+        if crudo is None:
+            # Más grande que el tope: se salta entero en vez de quedarse con un JSON a
+            # medias. Un correo que no cabe no se responde; el resto de la noche sigue.
+            logger.warning("Turno de noche: un correo pasa de %s bytes, no se abre",
+                           CORREO_MAX_DESCARGA)
+            continue
+        try:
+            contenido = ((json.loads(crudo) or {}).get("uniqueBody") or {})
+        except ValueError:
+            logger.warning("Turno de noche: respuesta no-JSON al pedir un cuerpo")
+            continue
+        texto = contenido.get("content") or ""
+        if (contenido.get("contentType") or "") == "html":
+            texto = _html_a_texto(texto)
+        salida[ident] = re.sub(r"\n{3,}", "\n\n", texto.strip())[:CORREO_MAX_CUERPO]
+    return salida
+
+
+def _redactar_respuesta(correo: dict, cuerpo: str) -> str:
+    """El borrador de respuesta a un correo. Cadena vacía si no se pudo."""
+    peticion = (f"De: {correo.get('de', '')}\n"
+                f"Asunto: {correo.get('asunto', '')}\n\n{cuerpo}")
+    try:
+        cliente = get_openai_client()
+        completa = cliente.chat.completions.create(
+            model=JARVIS_MODEL_ACCION,
+            messages=[{"role": "system", "content": _NOCHE_REDACTA},
+                      {"role": "user", "content": peticion}],
+            **_parametros_modelo(JARVIS_MODEL_ACCION, 700),
+        )
+        _apuntar_gasto("noche_correo", JARVIS_MODEL_ACCION, getattr(completa, "usage", None))
+        return (completa.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo redactar una respuesta (%s)", e)
+        return ""
+
+
+def _guardar_borrador(correo: dict, texto: str) -> bool:
+    """Deja el borrador de respuesta en Borradores. Nunca envía nada.
+
+    `createReply` crea el borrador COLGANDO del correo original: Graph se encarga del
+    destinatario, del "Re:", del hilo y de la carpeta. Eso es lo que sustituye al MIME
+    montado a mano y al `APPEND` de IMAP, donde había que acertar con el nombre de la
+    carpeta de borradores —"Drafts", "[Gmail]/Borradores", el nombre en tu idioma— y un
+    fallo dejaba el borrador en una carpeta nueva donde no iba a mirar nadie.
+
+    Es el único sitio de todo el turno que ESCRIBE en el buzón, y escribe un borrador:
+    no hay ninguna llamada a `send` ni a `sendMail` en este camino, y hay un test que lo
+    comprueba.
+    """
+    if not texto:
+        return False
+    token = _buzon_listo()
+    if not token:
+        return False
+    ident = correo.get("id") or ""
+    if not ident:
+        return False
+    try:
+        r = http.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{quote(str(ident), safe='')}/createReply",
+            headers={**_buzon_cabeceras(token), "Content-Type": "application/json"},
+            json={"comment": texto},
+        )
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo dejar el borrador (%s)",
+                       type(e).__name__)
+        return False
+    return not _buzon_fallo(r, "borrador")
+
+
+def _noche_correos() -> list:
+    """Mira el buzón, clasifica y deja redactado lo que pide respuesta.
+
+    Devuelve los items del parte. No apunta avisos ni escribe en Supabase: de eso se
+    encarga el turno, que es quien sabe de qué noche son.
+    """
+    if not (NOCHE_CORREO and _buzon_listo()):
+        return []
+    try:
+        cabeceras = _cabeceras_recientes()[:NOCHE_CORREO_MAX]
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo leer el buzón (%s)", type(e).__name__)
+        return []
+    if not cabeceras:
+        return []
+
+    categorias  = _noche_clasificar(cabeceras)
+    a_responder = [c for c, cat in zip(cabeceras, categorias)
+                   if cat == "responder"][:NOCHE_BORRADORES_MAX]
+    ids_a_leer  = {c.get("id") for c in a_responder if c.get("id")}
+    cuerpos     = _cuerpos_de(sorted(ids_a_leer))
+
+    items = []
+    for correo, categoria in zip(cabeceras, categorias):
+        borrador, subido = "", False
+        if correo in a_responder:
+            borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("id", ""), ""))
+            subido   = _guardar_borrador(correo, borrador)
+        items.append({
+            "area":    "correo",
+            "titulo":  correo.get("asunto", "") or "(sin asunto)",
+            "detalle": borrador,
+            "datos":   {"de": correo.get("de", ""), "categoria": categoria,
+                        "borrador": subido},
+        })
+    return items
+
+
+# ── EL TURNO DE NOCHE ────────────────────────────────────────────────────────
+# Lo que se resuelve mientras duermes, para que por la mañana solo haya que aprobarlo.
+#
+# Dos decisiones que conviene no deshacer sin leer `docs/TURNO_NOCHE.md`:
+#
+#   1. **No hay reloj propio.** El turno se cuelga del tick que Home Assistant ya llama
+#      cada cinco minutos, como todo lo demás que tiene hora en este backend. Un
+#      scheduler dentro del proceso sería un hilo más que mantener y un sitio más donde
+#      mirar cuando algo no pasa.
+#   2. **Todo queda en borrador.** El turno no manda correo, no mergea, no borra y no
+#      toca la casa. Prepara y anota; la decisión es tuya por la mañana. Esa es la razón
+#      de que se pueda dejar corriendo sin vigilancia, y la primera línea que se cruce
+#      convierte esto en otra cosa.
+NOCHE_PARTES_URL = f"{SUPABASE_URL}/rest/v1/noche_partes"
+NOCHE_ITEMS_URL  = f"{SUPABASE_URL}/rest/v1/noche_items"
+NOCHE_AREAS      = ("correo", "codigo", "agenda", "recado")
+
+
+def _reservar_parte(fecha: str) -> bool:
+    """Abre el parte de una noche. False si ya estaba abierto.
+
+    Mismo truco que la reserva del resumen diario: INSERT contra la clave primaria, y el
+    409 ES la respuesta. Es lo que impide que dos ticks separados por cinco minutos
+    redacten los mismos borradores dos veces — preguntar primero y escribir después
+    dejaría justo esa ventana abierta.
+    """
+    try:
+        r = http.post(NOCHE_PARTES_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"fecha": fecha})
+        if r.status_code == 409:
+            return False
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return True
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo abrir el parte del %s", fecha)
+        return False
+
+
+def _anotar_en_el_parte(fecha: str, items: list) -> int:
+    """Escribe items en el parte de una noche, abriéndolo si hiciera falta.
+
+    Lo de abrirlo aquí no es por comodidad: el atajo que arregla el código se dispara
+    cuando la revisión nocturna abre su issue, que es más tarde que el turno y puede
+    caer un día en que el turno no corrió (apagado, o el buzón sin configurar). Sin esto,
+    ese item se estrellaría contra la clave foránea y se perdería sin ruido.
+    """
+    if not items:
+        return 0
+    _reservar_parte(fecha)
+    filas = [{"fecha": fecha, "area": i.get("area", ""), "titulo": (i.get("titulo") or "")[:200],
+              "detalle": (i.get("detalle") or "")[:4000], "enlace": (i.get("enlace") or "")[:500],
+              "datos": i.get("datos") or {}}
+             for i in items if i.get("area") in NOCHE_AREAS]
+    if not filas:
+        return 0
+    try:
+        r = http.post(NOCHE_ITEMS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"}, json=filas)
+        if r.status_code >= 300:
+            logger.error("Turno de noche: no se pudieron guardar %s items (%s)",
+                         len(filas), r.status_code)
+            return 0
+        return len(filas)
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudieron guardar los items del %s", fecha)
+        return 0
+
+
+def _resumen_parte(items: list) -> dict:
+    """Las cuentas del parte, para poder contarlo sin traerse todo lo de dentro."""
+    correos = [i for i in items if i.get("area") == "correo"]
+    return {
+        "correos":     len(correos),
+        "responder":   sum(1 for i in correos
+                           if (i.get("datos") or {}).get("categoria") == "responder"),
+        "borradores":  sum(1 for i in correos if (i.get("datos") or {}).get("borrador")),
+        "codigo":      sum(1 for i in items if i.get("area") == "codigo"),
+        "agenda":      sum(1 for i in items if i.get("area") == "agenda"),
+        "recados":     sum(1 for i in items if i.get("area") == "recado"),
+    }
+
+
+def _frase_parte(resumen: dict) -> str:
+    """El parte en una frase. La misma la lee el aviso y la dice Jarvis al descolgar."""
+    trozos = []
+    correos = int(resumen.get("correos") or 0)
+    if correos:
+        frase = f"{correos} correo{'s' if correos != 1 else ''}"
+        borradores = int(resumen.get("borradores") or 0)
+        if borradores:
+            frase += (f", {borradores} con la respuesta ya redactada esperando en "
+                      f"Borradores")
+        trozos.append(frase)
+    if resumen.get("codigo"):
+        trozos.append("el código de ayer arreglado y el PR esperando")
+    for clave, singular, plural in (("agenda", "cosa de la agenda", "cosas de la agenda"),
+                                    ("recados", "recado", "recados")):
+        n = int(resumen.get(clave) or 0)
+        if n:
+            trozos.append(f"{n} {singular if n == 1 else plural}")
+    if not trozos:
+        return "No hubo nada que hacer esta noche."
+    return "Esta noche: " + "; ".join(trozos) + "."
+
+
+def correr_turno_de_noche(forzar: bool = False) -> dict:
+    """Hace el turno de esta noche si aún no se ha hecho. Idempotente por día.
+
+    Única puerta: la usan el tick de Home Assistant y el endpoint de pruebas. Cada tarea
+    va en su propio try/except porque el buzón caído no puede llevarse por delante lo que
+    sí se podía mirar.
+    """
+    fecha = _ahora_local().date().isoformat()
+    if not (NOCHE_TURNO or forzar):
+        return {"hecho": False, "motivo": "el turno de noche está apagado"}
+    if not _reservar_parte(fecha) and not forzar:
+        return {"hecho": False, "motivo": "el turno de esta noche ya se hizo"}
+
+    items = []
+    try:
+        items += _noche_correos()
+    except Exception:
+        logger.exception("Turno de noche: la parte del buzón falló entera")
+
+    resumen = _resumen_parte(items)
+    _anotar_en_el_parte(fecha, items)
+    try:
+        r = http.patch(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"resumen": resumen})
+        if r.status_code >= 300:
+            logger.warning("Turno de noche: no se pudo guardar el resumen (%s)", r.status_code)
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo guardar el resumen del %s", fecha)
+
+    # El aviso se apunta DIFERIDO: el turno corre a las tres de la mañana y despertarte
+    # para decirte que has dormido bien sería el mejor modo de que apagaras esto.
+    _apuntar_aviso(REGLA_NOCHE, _frase_parte(resumen), prioridad=PRIO_NORMAL,
+                   cuando=_cuando_avisar(_ahora_local()), huella=f"noche:{fecha}")
+    logger.info("Turno de noche del %s: %s", fecha, resumen)
+    return {"hecho": True, "fecha": fecha, "resumen": resumen}
+
+
+def _turno_de_noche_si_toca() -> dict:
+    """La guarda de hora. Antes de NOCHE_HORA no hay nada que hacer.
+
+    El tope de las seis de la mañana no es decorativo: sin él, un backend que arranca a
+    mediodía (una reconstrucción del add-on, por ejemplo) se pondría a redactar
+    borradores a las doce, llamaría a eso «el turno de noche» y gastaría el día entero
+    del parte en una noche que ya no existe.
+    """
+    if not NOCHE_TURNO:
+        return {}
+    hm = (_ahora_local().hour, _ahora_local().minute)
+    if not (HORA_NOCHE <= hm < (6, 0)):
+        return {}
+    salida = correr_turno_de_noche()
+    return {"noche": 1} if salida.get("hecho") else {}
+
+
+def _turno_noche_seguro() -> dict:
+    """El turno no puede tumbar el tick: dentro hay red, el buzón y dos modelos."""
+    try:
+        return _turno_de_noche_si_toca()
+    except Exception:
+        logger.exception("Turno de noche: falló entero")
+        return {}
+
+
+def _parte_de(fecha: str) -> dict:
+    """El parte de un día con sus items, en el orden en que se apuntaron."""
+    try:
+        r = http.get(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}&select=fecha,creado_at,resumen",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        partes = r.json() or []
+        if not partes:
+            return {}
+        r = http.get(f"{NOCHE_ITEMS_URL}?fecha=eq.{fecha}&order=creado_at.asc"
+                     "&select=id,area,titulo,detalle,enlace,estado,datos",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        parte = partes[0]
+        parte["items"] = r.json() or []
+        parte["frase"] = _frase_parte(parte.get("resumen") or {})
+        return parte
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo leer el parte del %s", fecha)
+        raise HTTPException(status_code=502, detail="No se pudo leer el parte de la noche")
+
+
+def _ultimo_parte() -> dict:
+    """El parte más reciente. Es lo que se enseña por la mañana sin pedir fecha."""
+    try:
+        r = http.get(f"{NOCHE_PARTES_URL}?order=fecha.desc&limit=1&select=fecha",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo buscar el último parte")
+        raise HTTPException(status_code=502, detail="No se pudo leer el parte de la noche")
+    return _parte_de(filas[0]["fecha"]) if filas else {}
+
+
+@app.get("/noche/parte")
+def noche_parte(fecha: str = "", _: dict = Depends(verify_token)):
+    """El parte de la noche. Sin fecha, el último que haya."""
+    if fecha and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", fecha):
+        raise HTTPException(status_code=422, detail="Fecha inválida")
+    return _parte_de(fecha) if fecha else _ultimo_parte()
+
+
+class NocheDecision(BaseModel):
+    accion: Literal["aprobado", "descartado"]
+
+
+@app.post("/noche/items/{item_id}/decidir")
+def noche_decidir(body: NocheDecision, item_id: str = _uuid_path(),
+                   _: dict = Depends(verify_token)):
+    """Aprueba o descarta una cosa del parte.
+
+    «Aprobado» aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
+    desde tu cliente, que es donde está el borrador. El PATCH va condicionado a que siga
+    pendiente para que decidir dos veces —dos pestañas abiertas, el botón pulsado dos
+    veces— no cuente como dos decisiones.
+    """
+    try:
+        r = http.patch(f"{NOCHE_ITEMS_URL}?id=eq.{item_id}&estado=eq.pendiente",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": body.accion})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        cambiadas = r.json() or []
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Turno de noche: no se pudo decidir el item %s", item_id)
+        raise HTTPException(status_code=502, detail="No se pudo guardar la decisión")
+    if not cambiadas:
+        return {"ok": True, "cambiado": False, "motivo": "ya estaba decidido"}
+    return {"ok": True, "cambiado": True, "estado": body.accion}
+
+
+@app.post("/noche/correr")
+def noche_correr(request: Request, forzar: int = 0, token: str = ""):
+    """Corre el turno a mano, para no tener que esperar a las tres de la mañana.
+
+    Token de servicio y no JWT por lo mismo que el resumen diario: es una puerta de
+    máquina, y `?forzar=1` salta la hora y la idempotencia para poder probarlo dos veces
+    seguidas.
+    """
+    if not _token_ok(_extract_service_token(request, token), BRIEF_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return correr_turno_de_noche(forzar=bool(forzar))
 
 
 # ── Vigilar páginas ──────────────────────────────────────────────────────────
@@ -12027,6 +12906,17 @@ def _acciones_aviso(rid: str, regla: str) -> list:
             botones.append({"action": "URI", "title": "Hablarlo",
                             "uri": f"{FRONTEND_URL}/?llamada=1"})
         botones.append({"action": f"LA_VALE_{rid}", "title": "Vale"})
+        return botones
+    if regla == REGLA_NOCHE:
+        # Ningún botón decide nada aquí: el parte se mira entero o se escucha entero, y
+        # lo que se aprueba son las cosas de dentro, una a una. Los dos abren el
+        # dashboard; el segundo, además, descuelga.
+        botones = []
+        if FRONTEND_URL:
+            botones.append({"action": "URI", "title": "Verlo",
+                            "uri": f"{FRONTEND_URL}/?noche=1"})
+            botones.append({"action": "URI", "title": "Que me lo cuente",
+                            "uri": f"{FRONTEND_URL}/?llamada=1&noche=1"})
         return botones
     if regla == REGLA_AL_SALIR:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
@@ -12740,15 +13630,88 @@ def revision_hallazgos(request: Request, body: RevisionHallazgos, token: str = "
         logger.error("Revisión: no se pudo apuntar el issue #%s (%s)", numero, e)
         raise HTTPException(status_code=502, detail="No se pudo apuntar la revisión")
 
+    # El atajo del turno de noche. La condición no es "es de madrugada" sino "este aviso
+    # se iba a quedar esperando a mañana de todas formas": si hay horas hasta que lo
+    # veas, no tiene sentido gastarlas preguntando. La sesión arregla y DEJA EL PR
+    # ABIERTO; por la mañana te encuentras el aviso de despliegue que ya existe
+    # (`pr-listo.yml` → POST /revision/pr-listo) con el CI en verde y decides entonces.
+    # Es el mismo trato que las averías: actuar y preguntar después, en vez de preguntar
+    # y actuar. Nace apagado (`NOCHE_ARREGLA`).
+    ahora = _ahora_local()
+    if NOCHE_ARREGLA and _cuando_avisar(ahora) > ahora:
+        arreglo = _arreglar_de_noche(rid, numero, titulo, url)
+        if arreglo.get("ok"):
+            return {"ok": True, "avisado": False, "arreglando": True, "issue": numero,
+                    "sesion": arreglo.get("sesion", "")}
+        # Si no se pudo lanzar, se cae al camino de siempre: mejor preguntarte a las 8:30
+        # que quedarse callado. `_arreglar_de_noche` ya ha devuelto la fila a `pendiente`.
+        logger.warning("Turno de noche: no se pudo arreglar el issue #%s solo (%s)",
+                       numero, arreglo.get("motivo", ""))
+
     texto = (f"La revisión de anoche ha dejado hallazgos: «{titulo or f'issue #{numero}'}»."
              + (f" {url}" if url else "")
              + "\n\n¿Los arreglo? Responde con los botones del aviso, o dime «arregla "
                "la revisión» — si esto te ha llegado por correo, no hay botones.")
     apuntado = _apuntar_aviso(REGLA_REVISION, texto, prioridad=PRIO_NORMAL,
-                              cuando=_cuando_avisar(_ahora_local()), id=rid)
+                              cuando=_cuando_avisar(ahora), id=rid)
     logger.info("Revisión: issue #%s apuntado (aviso %s)", numero,
                 "puesto" if apuntado else "no puesto")
     return {"ok": True, "avisado": apuntado, "issue": numero}
+
+
+def _arreglar_de_noche(rid: str, numero: int, titulo: str, url: str) -> dict:
+    """Lanza el arreglo sin preguntar y lo anota en el parte de la noche.
+
+    Reusa entero el camino que ya existe —la misma tabla, el mismo estado `arreglando`,
+    la misma rutina de arreglo— y solo cambia quién aprieta el botón. Lo único propio es
+    la instrucción, que dice explícitamente que NO se mergee: la regla de que ninguna
+    sesión despliega no se toca porque nadie esté mirando, se toca menos.
+    """
+    instruccion = (
+        f"Arregla los hallazgos de la revisión nocturna del issue #{numero} "
+        f"({titulo or 'sin título'}) del repositorio {JARVIS_REPO}: {url}\n\n"
+        f"Esto lo ha lanzado el turno de noche mientras Mikel duerme, así que NO hay "
+        f"nadie a quien preguntar. Abre un PR con el arreglo y DÉJALO ABIERTO — no lo "
+        f"mergees, aunque el CI pase. El permiso lo da Mikel por la mañana, viendo el PR "
+        f"ya en verde.")
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.pendiente",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": "arreglando", "decidido_at": ahora})
+        if r.status_code >= 300 or not (r.json() or []):
+            return {"ok": False, "motivo": "el hallazgo ya no estaba pendiente"}
+    except Exception as e:
+        return {"ok": False, "motivo": f"no se pudo marcar como arreglando ({e})"}
+
+    resultado = _disparar_arreglo(numero, titulo, url, instruccion=instruccion)
+    if not resultado["ok"]:
+        # Se devuelve a `pendiente`: si se quedara en `arreglando` no habría ni sesión ni
+        # botón, y el hallazgo desaparecería sin que nadie lo hubiera visto.
+        try:
+            http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"estado": "pendiente", "decidido_at": None})
+        except Exception as e:
+            logger.error("Turno de noche: no se pudo liberar el hallazgo %s (%s)", rid, e)
+        return {"ok": False, "motivo": resultado["motivo"]}
+
+    try:
+        http.patch(f"{REVISION_URL}?id=eq.{rid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"sesion_url": resultado["sesion"]})
+    except Exception as e:
+        logger.warning("Turno de noche: no se pudo guardar la sesión de %s (%s)", rid, e)
+
+    _anotar_en_el_parte(_ahora_local().date().isoformat(), [{
+        "area":    "codigo",
+        "titulo":  titulo or f"Issue #{numero}",
+        "detalle": "Arreglado mientras dormías. El PR está abierto esperando tu permiso.",
+        "enlace":  url,
+        "datos":   {"issue": numero, "sesion": resultado["sesion"]},
+    }])
+    logger.info("Turno de noche: issue #%s lanzado a arreglar sin preguntar", numero)
+    return {"ok": True, "sesion": resultado["sesion"]}
 
 
 def _disparar_arreglo(numero: int, titulo: str, url: str, instruccion: str = "") -> dict:
@@ -13064,13 +14027,14 @@ def _revision_pendiente(rid: str = "") -> dict:
     return filas[0] if filas else {}
 
 
-def _revision_pendiente_seguro() -> dict:
-    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`."""
+def _revision_pendiente_seguro() -> dict | None:
+    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`,
+    incluido el `None` de «no he podido mirarlo» frente al `{}` de «no hay nada»."""
     try:
         return _revision_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto de la revisión pendiente (%s)", e)
-        return {}
+        return None
 
 
 def _j_contar_revision() -> dict:
@@ -13574,7 +14538,16 @@ def _despliegue_pendiente() -> dict:
     return filas[0] if filas else {}
 
 
-def _despliegue_pendiente_seguro() -> dict:
+# Lo que se le dice a Jarvis cuando no se ha podido mirar si hay algo esperando. Va en
+# una constante porque lo usan los tres niveles del contexto hablado, y tres copias de
+# una frase acaban siendo tres frases distintas.
+_NO_SE_HA_PODIDO_COMPROBAR = (
+    "\nNO SE HA PODIDO COMPROBAR si hay algo esperando respuesta: la base de datos no "
+    "contesta. Si te pregunta qué hay pendiente, dile justo eso —que ahora mismo no "
+    "puedes saberlo—, y NUNCA que no hay nada.\n")
+
+
+def _despliegue_pendiente_seguro() -> dict | None:
     """Lo mismo, pero sin poder tumbar a quien pregunta.
 
     `_despliegue_pendiente` levanta un 502 cuando Supabase no contesta, y en un endpoint
@@ -13582,12 +14555,19 @@ def _despliegue_pendiente_seguro() -> dict:
     `_jarvis_sistema` lo consulta de refilón para adornar el contexto de una llamada, y
     ahí ese 502 se llevaría por delante la conversación entera por un dato accesorio.
     Mismo criterio que `_vigilar_sistema_seguro` y compañía.
+
+    **`None` es «no he podido mirarlo» y `{}` es «no hay nada»**, y la diferencia importa
+    más que el ahorro de devolver siempre un dict: tragarse el fallo y contestar «no hay
+    nada pendiente» convierte una avería de Supabase en una respuesta tranquilizadora y
+    falsa. Es la moraleja que `docs/BUGS_HISTORICOS.md` repite —*«no pude» no es «no hay
+    nada que hacer»*— y le pasó a Mikel el 2026-09-16: Jarvis le dijo que no había nada
+    pendiente con un issue abierto delante.
     """
     try:
         return _despliegue_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto del despliegue pendiente (%s)", e)
-        return {}
+        return None
 
 
 @app.get("/despliegue/pendiente")
@@ -13815,13 +14795,14 @@ def _sesion_pendiente() -> dict:
     return filas[0] if filas else {}
 
 
-def _sesion_pendiente_seguro() -> dict:
-    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`."""
+def _sesion_pendiente_seguro() -> dict | None:
+    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`,
+    incluido el `None` de «no he podido mirarlo» frente al `{}` de «no hay nada»."""
     try:
         return _sesion_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto del aviso de sesión (%s)", e)
-        return {}
+        return None
 
 
 def _apertura_sesion(fila: dict) -> str:
@@ -13846,8 +14827,23 @@ def _apertura_sesion(fila: dict) -> str:
     return f"{titulo}. ¿Lo vemos?" if titulo else "Te dejé un aviso. ¿Lo vemos?"
 
 
+def _apertura_noche(parte: dict) -> str:
+    """Lo primero que dice Jarvis cuando descuelgas por el parte de la noche.
+
+    Se escribe aquí y no en el navegador por lo mismo que las otras dos aperturas: la
+    dicen el teléfono y la pantalla, y dos copias de la misma frase acaban siendo dos
+    frases distintas.
+    """
+    frase = _frase_parte(parte.get("resumen") or {})
+    pendientes = sum(1 for i in (parte.get("items") or [])
+                     if (i.get("estado") or "") == "pendiente")
+    if pendientes:
+        frase += " Dime por dónde quieres empezar y te lo cuento."
+    return frase
+
+
 @app.get("/llamada/pendiente")
-def llamada_pendiente(aviso: str = "",
+def llamada_pendiente(aviso: str = "", noche: int = 0,
                       credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Qué anunciar al descolgar. La única puerta que mira la pantalla de llamada.
 
@@ -13869,6 +14865,18 @@ def llamada_pendiente(aviso: str = "",
         fila = _revision_pendiente(aviso)
         if fila:
             return {"pendiente": _llamada_revision(fila)}
+
+    # El parte de la noche solo sale si se ha pedido —lo trae el botón «Que me lo
+    # cuente»—, y nunca como último recurso: no es una decisión esperando respuesta sino
+    # un informe, y ponerlo en la cola de abajo haría que descolgar por cualquier otra
+    # cosa empezara contándote el buzón de anoche.
+    if noche:
+        parte = _ultimo_parte()
+        if parte:
+            return {"pendiente": {"tipo":     "noche",
+                                  "fecha":    parte.get("fecha"),
+                                  "motivo":   _frase_parte(parte.get("resumen") or {}),
+                                  "apertura": _apertura_noche(parte)}}
 
     fila = _despliegue_pendiente()
     if fila:
@@ -14089,6 +15097,13 @@ def _j_responder_a_la_sesion(respuesta: str = "") -> dict:
         return {"ok": False, "motivo": "No me has dicho qué contestarle"}
 
     fila = _sesion_pendiente_seguro()
+    if fila is None:
+        # No es lo mismo que no haya aviso: es que no se ha podido mirar. Decir «no hay
+        # ninguno» aquí sería inventarse una respuesta tranquilizadora sobre un trabajo
+        # que puede estar parado esperando.
+        return {"ok": False, "motivo": "No he podido comprobar si hay algún aviso "
+                                       "esperando: la base de datos no responde. "
+                                       "Inténtalo en un momento."}
     if not fila:
         viejo = _sesion_caducada_reciente()
         if viejo:
@@ -14626,6 +15641,33 @@ def _j_enviar_resumen() -> dict:
 
 def _j_estado_resumen_diario() -> dict:
     return _brief_ajustes_estado()
+
+
+def _j_turno_de_noche(fecha=None) -> dict:
+    """El parte de la noche, para contarlo hablando o por escrito.
+
+    Devuelve los items recortados: el borrador entero de once correos no cabe en un turno
+    de Jarvis, y lo que se pregunta a esta hora es QUÉ hay, no el texto exacto — eso se
+    lee en el dashboard o directamente en Borradores.
+    """
+    if fecha and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(fecha)):
+        return {"error": "La fecha tiene que ser YYYY-MM-DD"}
+    parte = _parte_de(str(fecha)) if fecha else _ultimo_parte()
+    if not parte:
+        return {"hay_parte": False, "frase": "Todavía no hay ningún parte de la noche."}
+    return {
+        "hay_parte": True,
+        "fecha":     parte.get("fecha"),
+        "frase":     parte.get("frase") or "",
+        "resumen":   parte.get("resumen") or {},
+        "items":     [{"area": i.get("area"), "titulo": i.get("titulo"),
+                       "estado": i.get("estado"),
+                       "de": (i.get("datos") or {}).get("de", ""),
+                       "categoria": (i.get("datos") or {}).get("categoria", ""),
+                       "borrador": bool((i.get("datos") or {}).get("borrador")),
+                       "detalle": (i.get("detalle") or "")[:300]}
+                      for i in (parte.get("items") or [])[:25]],
+    }
 
 
 def _j_configurar_resumen_diario(activo=None, pausar_hasta=None) -> dict:
@@ -16165,6 +17207,17 @@ _JARVIS_HERRAMIENTAS = {
                        "día (agenda, salud, entrenamiento), sin esperar al de la mañana.",
         "parametros":  {},
     },
+    "turno_de_noche": {
+        # Solo lee. Aprobar o descartar lo que hay dentro NO se hace desde aquí: son
+        # muchas decisiones pequeñas y se toman viéndolas, no de oído.
+        "confirmar":   False,
+        "fn":          _j_turno_de_noche,
+        "descripcion": "El parte de lo que se resolvió anoche: qué entró en el buzón, "
+                       "qué respuestas quedaron redactadas en Borradores y qué se "
+                       "arregló del código. Úsalo si pregunta qué pasó mientras dormía.",
+        "parametros":  {"fecha": {"type": "string",
+                                  "description": "YYYY-MM-DD. Sin ella, el último parte."}},
+    },
     "estado_resumen_diario": {
         "confirmar":   False,
         "fn":          _j_estado_resumen_diario,
@@ -16641,7 +17694,13 @@ def _jarvis_sistema(voz: bool = False) -> str:
         # formulario. Por escrito no se hace: ahí los segundos no se notan y el chat casi
         # nunca va de esto, así que solo pagaría la consulta sin cobrar el beneficio.
         pendiente = _despliegue_pendiente_seguro()
-        if pendiente:
+        if pendiente is None:
+            # Los tres consultores de abajo comparten la misma base de datos: si el
+            # primero no ha podido mirar, los otros dos tampoco van a poder, y lo que
+            # NO puede pasar es que el modelo lo interprete como que no hay nada. Se le
+            # dice explícitamente, porque el silencio aquí se lee como «todo en orden».
+            partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+        elif pendiente:
             motivo = str(pendiente.get("detalle") or pendiente.get("issue_titulo") or "")
             partes.append(
                 "\nHAY UN DESPLIEGUE ESPERANDO TU PERMISO y es lo que ha motivado esta "
@@ -16667,7 +17726,9 @@ def _jarvis_sistema(voz: bool = False) -> str:
             # escribe algo nuestro — hoy. La delimitación es lo que hace que esa
             # diferencia no importe.
             aviso = _sesion_pendiente_seguro()
-            if aviso:
+            if aviso is None:
+                partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+            elif aviso:
                 partes.append(
                     "\nUNA SESIÓN DE CLAUDE CODE TE HA DEJADO UN AVISO y es lo que ha "
                     "motivado esta llamada. Los datos ya están mirados y van entre "
@@ -16697,7 +17758,9 @@ def _jarvis_sistema(voz: bool = False) -> str:
                 # del issue lo escribió otro modelo (la revisión nocturna) y está
                 # entrando en el prompt de uno que tiene herramientas.
                 revision = _revision_pendiente_seguro()
-                if revision:
+                if revision is None:
+                    partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+                elif revision:
                     ctx = _revision_contexto(revision)
                     partes.append(
                         "\nHAY UNA DECISIÓN SIN CONTESTAR y es lo que ha motivado esta "

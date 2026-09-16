@@ -339,6 +339,23 @@ class TestLaVuelta:
         assert r["ok"] is False and "ningún aviso" in r["motivo"]
         assert not mock_requests.called("POST", "fire-sesion")
 
+    def test_si_no_se_puede_mirar_no_se_dice_que_no_hay_nada(self, mock_requests):
+        """«No pude» no es «no hay nada que hacer».
+
+        Con Supabase caído, la consulta del aviso lanza un 502 que `_sesion_pendiente_seguro`
+        atrapa. Devolver `{}` ahí hacía que la respuesta fuese «no hay ningún aviso
+        esperando»: una respuesta tranquilizadora y falsa sobre un trabajo que puede estar
+        parado esperándote. Le pasó a Mikel el 2026-09-16 con un issue abierto delante.
+        """
+        mock_requests.add("GET", "sesion_avisos", FakeResponse({}, 503))
+
+        r = main._j_responder_a_la_sesion("mergéalo")
+
+        assert r["ok"] is False
+        assert "no responde" in r["motivo"]
+        assert "ningún aviso" not in r["motivo"]
+        assert not mock_requests.called("POST", "fire-sesion")
+
     def test_un_aviso_caducado_se_dice_en_vez_de_revivirse(self, mock_requests):
         """Contestar tres días después no puede revivir un trabajo cuyo repositorio ya no
         se parece: la sesión nueva partiría de una foto falsa. Y hay que poder oír la

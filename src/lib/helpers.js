@@ -2145,7 +2145,13 @@ export function alarmaRepeticionTexto(repetir) {
   const dias = (repetir || []).map(Number).filter(d => d >= 1 && d <= 7);
   if (!dias.length) return "";
   if (dias.length === 7) return "todos los días";
-  const nombres = dias.map(d => DIAS_SEMANA[d - 1]);
+  // En plural: "todos los lunes" pero "todos los sábados". De lunes a viernes el plural
+  // es invariable porque ya acaban en -s; sábado y domingo no, y sin esto salía "todos
+  // los sábado".
+  const nombres = dias.map(d => {
+    const dia = DIAS_SEMANA[d - 1];
+    return dia.endsWith("s") ? dia : `${dia}s`;
+  });
   if (nombres.length === 1) return `todos los ${nombres[0]}`;
   return `los ${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}`;
 }
@@ -2203,4 +2209,52 @@ export function revisionDeUrl(busqueda) {
   } catch {
     return null;   // una query rota no decide nada
   }
+}
+
+// ── El parte del turno de noche ───────────────────────────────────────────────
+
+/** Los nombres de cada área del parte, en el orden en que se enseñan. El orden no es
+ *  alfabético: primero lo que pide una decisión tuya (correos redactados, un PR
+ *  esperando permiso) y después lo que solo hay que saber. */
+export const AREAS_NOCHE = [
+  { id: "correo", label: "Correo" },
+  { id: "codigo", label: "Código" },
+  { id: "agenda", label: "Agenda" },
+  { id: "recado", label: "Recados" },
+];
+
+/** El parte agrupado por área y ya contado, listo para pintar.
+ *
+ *  Se separa de la pantalla porque es lo único de todo esto que se puede probar sin un
+ *  navegador, y porque la misma cuenta la necesitan el widget y la frase de una línea.
+ *  Un parte que no ha llegado (`null`) y uno vacío se distinguen: el primero es "aún no
+ *  se sabe" y el segundo "no hubo nada", y decir "no hubo nada" mientras carga sería
+ *  mentir durante medio segundo. */
+export function agruparParteNoche(parte) {
+  const items = Array.isArray(parte?.items) ? parte.items : [];
+  const grupos = AREAS_NOCHE
+    .map(a => ({ ...a, items: items.filter(i => i?.area === a.id) }))
+    .filter(g => g.items.length > 0);
+  return {
+    fecha:      parte?.fecha || "",
+    grupos,
+    total:      items.length,
+    pendientes: items.filter(i => (i?.estado || "pendiente") === "pendiente").length,
+    borradores: items.filter(i => i?.datos?.borrador).length,
+  };
+}
+
+/** El parte en una línea, para la cabecera del widget.
+ *
+ *  Deliberadamente NO reproduce la frase que escribe el backend (`_frase_parte`): ésa se
+ *  DICE al descolgar y por eso va en prosa; ésta se LEE de un vistazo sobre un widget
+ *  estrecho y va en cuentas. Si el backend manda la suya, se prefiere la del backend. */
+export function fraseParteNoche(parte) {
+  if (!parte) return "";
+  if (parte.frase) return parte.frase;
+  const { total, borradores } = agruparParteNoche(parte);
+  if (!total) return "No hubo nada que hacer esta noche.";
+  const trozos = [`${total} cosa${total === 1 ? "" : "s"}`];
+  if (borradores) trozos.push(`${borradores} con la respuesta ya escrita`);
+  return trozos.join(", ") + ".";
 }

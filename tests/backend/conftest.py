@@ -51,6 +51,13 @@ os.environ.setdefault("INGESTA_VIGILAR", "0")
 # encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
 # en una suite que no toca la red. Sus tests la encienden a mano.
 os.environ.setdefault("BRIEF_ECONOMIA", "0")
+# Y con el turno de noche, por lo mismo: cuelga del mismo tick y, pasada su hora, leería
+# el buzón y llamaría a dos modelos en cualquier test que fije el reloj de madrugada. Sus
+# variables nacen apagadas en main.py; aquí se fijan explícitamente para que un
+# backend/.env local con el turno encendido no cambie lo que hace la suite.
+os.environ.setdefault("NOCHE_TURNO", "0")
+os.environ.setdefault("NOCHE_CORREO", "0")
+os.environ.setdefault("NOCHE_ARREGLA", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada
@@ -60,6 +67,8 @@ os.environ.setdefault("BRIEF_ECONOMIA", "0")
 os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
+
+import json as json_lib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +90,20 @@ class FakeResponse:
 
     def json(self):
         return self._json
+
+    def iter_content(self, chunk_size=1):
+        """El cuerpo a trozos, como `requests` con `stream=True`.
+
+        Lo usa la descarga acotada del buzón (`_descarga_acotada`), que corta un correo
+        desmesurado sin traerlo entero a memoria. Se sirve del JSON ya serializado para
+        que un test pueda montar un cuerpo gigante sin escribir bytes a mano.
+        """
+        crudo = self.content or json_lib.dumps(self._json).encode("utf-8")
+        for i in range(0, len(crudo), max(chunk_size, 1)):
+            yield crudo[i:i + max(chunk_size, 1)]
+
+    def close(self):
+        pass
 
 
 class MockRouter:
