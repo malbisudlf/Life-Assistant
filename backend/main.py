@@ -287,6 +287,15 @@ INFORME_SEMANAS = int(os.getenv("INFORME_SEMANAS", "13"))
 # Si la llegada del sueño del Watch cuenta como señal de despertar. Ver
 # _avisar_sueno_recibido: es una deducción, no un aviso, y se puede apagar.
 BRIEF_DISPARA_SUENO   = _flag("BRIEF_DISPARA_SUENO")
+# Si la señal de despertar espera al sueño de esa misma noche antes de mandar el correo.
+# Existe porque las dos cosas NO pasan a la vez: al desenchufar el cargador el reloj
+# todavía no ha volcado la noche a Salud —hace falta abrir su app— y el correo salía sin
+# ella. Ver `_esperar_al_sueno`.
+BRIEF_ESPERA_SUENO     = _flag("BRIEF_ESPERA_SUENO")
+# Cuánto se espera como mucho. Pasado esto el correo sale sin el sueño y además te llega
+# un aviso al móvil: es lo único que puede hacer que el dato llegue a tiempo de servir
+# para algo. El tope real sigue siendo BRIEF_HORA_TOPE, que manda sobre este.
+BRIEF_ESPERA_SUENO_MIN = int(os.getenv("BRIEF_ESPERA_SUENO_MIN", "45"))
 # Disparo de la rutina de Claude Code que lee este correo y redacta el briefing.
 # Su trigger de API: la URL y el token se generan en claude.ai/code/routines (el token
 # se enseña UNA vez). Si faltan, no se dispara nada y la rutina se queda solo con su
@@ -4213,9 +4222,13 @@ async def health_ingest(request: Request, token: str = ""):
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
     upserted += _guardar_metricas(grouped_metrics, FUENTE_AUTO_EXPORT)
 
-    # Si en el lote venía el sueño de esta noche, el Watch ya la ha cerrado: eso es lo
-    # más parecido a "ya está despierto" que sabe el backend por su cuenta.
-    _avisar_sueno_recibido({f for f, n in grouped_metrics if n == "sleep_analysis"})
+    # Si en el lote venía el sueño de esta noche, el reloj ya la ha cerrado: eso es lo
+    # más parecido a "ya está despierto" que sabe el backend por su cuenta. Van solo las
+    # noches CON medida: una de 0 horas es un hueco, no una noche cerrada.
+    _avisar_sueno_recibido({
+        f for (f, n), d in grouped_metrics.items()
+        if n == "sleep_analysis" and _horas_sueno(d) > 0
+    })
 
     # Una sincronización de la que no se reconoce NADA no es un éxito: el cuerpo no
     # traía lo que este endpoint sabe leer (otro envoltorio, un `{}` porque el Shortcut
@@ -4421,8 +4434,12 @@ async def health_ingest_simple(request: Request, token: str = ""):
         upserted += len(filas)
 
     # Igual que en /health/ingest: el sueño de esta noche recién llegado es la señal de
-    # que el Watch ya ha cerrado la noche.
-    _avisar_sueno_recibido({d for d, s in validas if s.metric == "sleep_analysis"})
+    # que el reloj ya ha cerrado la noche. Sale de `filas` y no de `validas`: lo que se
+    # descartó por ser un 0 sin medida no ha cerrado ninguna noche.
+    _avisar_sueno_recibido({
+        f["metric_date"] for f in filas
+        if f["metric_name"] == "sleep_analysis" and _horas_sueno(f) > 0
+    })
 
     # Un Atajo que manda huecos no falla nunca y deja de aportar datos en silencio —
     # es como se perdió un mes de métricas nocturnas sin un solo error en el registro.
@@ -5324,7 +5341,18 @@ def _uso_del_reloj(por_nombre: dict, dias_ventana: list, hoy) -> tuple:
         "noches_puesto_7d": sum(1 for f in dias_ventana if f >= desde_7 and f in con_noche),
         "sin_datos":        sum(1 for e in estados if e == "sin_datos"),
         "hoy":              estados[-1],
-        "anoche":           hoy_iso in con_noche,
+        # "Anoche" es lo único de esta sección que se decide sobre el día EN CURSO, y por
+        # eso no puede ser un sí/no: el reloj vuelca la noche a Salud cuando se abre su
+        # app, no cuando te despiertas, así que hasta entonces "no hay noche" es
+        # indistinguible de "no lo llevaste puesto". Decía lo segundo, y la rutina que
+        # redacta el briefing lo escribía tal cual TODAS las mañanas: el correo sale a
+        # los pocos minutos de despertarte y el dato tardaba desde cinco minutos hasta
+        # esa misma tarde. Es la misma regla que `sin_datos` para los días pasados —"no
+        # he podido preguntar" no es un "no"— solo que aquí faltaba por el otro lado.
+        # Si de verdad no lo llevaste, mañana lo dicen el último rastro y la racha, que
+        # ya cuentan hacia atrás desde ayer, y esta misma noche lo dice el aviso de
+        # `_avisar_reloj_si_toca`, que es el único momento en que sirve de algo.
+        "anoche":           "si" if hoy_iso in con_noche else "pendiente",
         "ultimo":           puestos[-1] if puestos else None,
         "racha_sin_reloj":  racha,
     }
@@ -6540,10 +6568,22 @@ def render_brief_texto(d: dict) -> str:
                 f"   {'Sin reloj':<20} {racha} día(s) seguidos antes de hoy"
                 " (días con datos del móvil pero ninguno del reloj)"
             )
-        L.append(
-            f"   {'Anoche':<20} {'con reloj' if r.get('anoche') else 'sin reloj'}"
-            f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
-        )
+        if r.get("anoche") == "si":
+            L.append(
+                f"   {'Anoche':<20} con reloj"
+                f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
+            )
+        else:
+            # Explícito y en voz alta porque quien lee esto es un modelo que redacta el
+            # briefing: sin la segunda frase, "no ha llegado" se cuenta como "no lo
+            # llevó", que es el error que esta línea existe para no volver a cometer.
+            L.append(f"   {'Anoche':<20} el sueño todavía no ha llegado")
+            L.append(
+                "                        NO significa que no llevara el reloj: el dato se"
+                " sincroniza al abrir la app y puede tardar horas."
+                " No digas nada sobre si lo llevó puesto anoche."
+            )
+            L.append(f"   {'Hoy hasta ahora':<20} {_ESTADO_RELOJ.get(r.get('hoy'), '?')}")
         if r.get("sin_datos"):
             L.append(
                 f"   {'Ojo':<20} {r['sin_datos']} día(s) sin datos de NINGUNA fuente:"
@@ -7338,30 +7378,196 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     return {"enviado": True, "fecha": datos["fecha"], "fuente": fuente}
 
 
+# ── La espera al sueño ────────────────────────────────────────────────────────
+# El correo sale al despertarte, pero el sueño de esa misma noche NO está cuando te
+# despiertas: el reloj lo vuelca a Salud cuando se abre su app, y eso puede ser cinco
+# minutos después o esa misma tarde. Mientras tanto el backend no puede distinguir "no
+# llevaste el reloj" de "todavía no ha llegado", y la sección RELOJ escribía lo primero
+# —que es lo que la rutina que redacta el briefing traduce, con toda la razón, a "anoche
+# no llevaste el reloj"—. Era falso casi todos los días.
+#
+# Por eso la señal de despertar ya no manda el correo: lo RESERVA. Si la noche aún no
+# ha llegado se apunta la espera y gana el primero de estos tres, por este orden:
+#   - llega el sueño (`_avisar_sueno_recibido`), que es el caso normal;
+#   - vence BRIEF_ESPERA_SUENO_MIN (`_vencer_espera_sueno`), y entonces sale sin él y
+#     con un aviso al móvil;
+#   - da BRIEF_HORA_TOPE, la red que ya existía.
+#
+# La espera vive en memoria a propósito: quien sabe si el dato ha llegado es Supabase, y
+# perder la nota en un reinicio cuesta que el correo salga por la hora tope, que es
+# exactamente la red de seguridad que este sistema ya tenía.
+_despertar_pendiente: dict | None = None
+_despertar_lock = threading.Lock()
+
+
+def _hay_sueno_de(fecha: str) -> bool:
+    """Si la noche de esa fecha ya está guardada CON medida.
+
+    Una fila no es una medida (`_hay_medida`): el Atajo escribe ceros las noches en que
+    su "Find Health Samples" no encuentra nada, y darlas por sincronizadas devolvería el
+    problema entero por la otra puerta.
+    """
+    try:
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{fecha}"
+            "&metric_name=in.(sleep_analysis,sleep)&select=metric_name,value,extra",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        return any(_hay_medida(f) for f in r.json())
+    except Exception as e:
+        # No poder preguntarlo no puede retener el correo: se sigue como si hubiera
+        # llegado, que es el comportamiento de toda la vida. Es la misma regla que el
+        # interruptor del resumen — "no he podido mirar" nunca se trata como un "no".
+        logger.warning("Resumen diario: no se pudo mirar si ha llegado el sueño (%s)", e)
+        return True
+
+
+def _esperar_al_sueno(ahora: datetime) -> bool:
+    """¿Hay que retener el resumen a la espera del sueño de esta noche?
+
+    Es propiedad de la SEÑAL DE DESPERTAR y de nadie más, igual que la ventana horaria:
+    la hora tope y los respaldos disparan justo cuando ya no tiene sentido esperar más,
+    y pasarlos por aquí los dejaría sin mandar nada nunca.
+    """
+    if not BRIEF_ESPERA_SUENO:
+        return False
+    if (ahora.hour, ahora.minute) >= HORA_TOPE:
+        return False
+    return not _hay_sueno_de(ahora.date().isoformat())
+
+
+def _apuntar_despertar(ahora: datetime, fuente: str) -> None:
+    """Deja constancia de que te despertaste a esta hora aunque el correo no salga aún.
+
+    Solo la PRIMERA señal del día cuenta: el Atajo puede dispararse dos veces (vuelves a
+    enchufar el móvil y lo quitas otra vez) y la hora que vale es la del despertar, no la
+    del último desenchufe.
+    """
+    global _despertar_pendiente
+    with _despertar_lock:
+        dia = ahora.date().isoformat()
+        if _despertar_pendiente and _despertar_pendiente["dia"] == dia:
+            return
+        _despertar_pendiente = {"dia": dia, "desde": ahora, "fuente": fuente}
+    logger.info("Resumen diario: despertar apuntado (%s), esperando al sueño de esta noche", fuente)
+
+
+def _despertar_esperado(ahora: datetime) -> Optional[datetime]:
+    """La hora de la señal de despertar que está esperando, si es de hoy."""
+    with _despertar_lock:
+        p = _despertar_pendiente
+        return p["desde"] if p and p["dia"] == ahora.date().isoformat() else None
+
+
+def _olvidar_despertar() -> None:
+    global _despertar_pendiente
+    with _despertar_lock:
+        _despertar_pendiente = None
+
+
+def _vencer_espera_sueno() -> dict:
+    """Se acabó la espera: el correo sale sin el sueño y te avisa al móvil.
+
+    El aviso no es decoración ni un informe de avería: es lo ÚNICO que puede hacer que
+    el dato de esta noche exista, porque hasta que no abras la app del reloj no hay nada
+    que sincronizar y a partir de cierta hora el sueño ya no le sirve de nada a nadie.
+
+    Corre en el tick de HA, que es el único reloj del sistema. No puede tumbarlo (ver
+    `_vencer_espera_sueno_seguro`), y el aviso se apunta ANTES de intentar el correo:
+    si el SMTP falla, el aviso ya está puesto y el correo tiene su propia red.
+    """
+    ahora = _ahora_local()
+    desde = _despertar_esperado(ahora)
+    if desde is None:
+        return {}
+    if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN):
+        return {}
+    _olvidar_despertar()        # vencida: pase lo que pase con el correo, no se reintenta
+
+    salida = {}
+    # Se vuelve a mirar antes de avisar. Lo normal es que lo haya cerrado
+    # `_avisar_sueno_recibido` al llegar el dato, pero eso depende de que la ingesta pase
+    # por ahí: si el sueño entró por cualquier otro camino, regañarte por no sincronizar
+    # algo que ya está sincronizado es como se deja de leer un aviso.
+    if _hay_sueno_de(ahora.date().isoformat()):
+        try:
+            return dict(enviar_brief_si_toca("sueno", despertar=desde))
+        except Exception:
+            logger.exception("Resumen diario: fallo al enviarlo al vencer la espera")
+            return {}
+
+    minutos = int((ahora - desde).total_seconds() // 60)
+    if _apuntar_aviso(
+        "reloj_sync",
+        f"Llevas {minutos} min despierto y el sueño de anoche todavía no ha llegado. "
+        "Abre la app del reloj para que sincronice: el resumen de hoy sale sin él.",
+        prioridad=PRIO_ALTA,
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:sueno-sin-sincronizar:{ahora.date()}")),
+        huella=f"sin_sincronizar:{ahora.date().isoformat()}",
+    ):
+        salida["aviso_sueno_sin_sincronizar"] = True
+
+    try:
+        # La fuente dice POR QUÉ salió así: en `brief_envios` es lo único que después
+        # distingue un correo completo de uno al que le faltaba la noche.
+        salida.update(enviar_brief_si_toca("espera_agotada", despertar=desde))
+    except Exception:
+        logger.exception("Resumen diario: fallo al enviarlo tras agotarse la espera del sueño")
+    return salida
+
+
+def _vencer_espera_sueno_seguro() -> dict:
+    """Como el resto de los `_seguro` del tick: lo que se protege no es esto, es el
+    despacho de recordatorios que viene detrás."""
+    try:
+        return _vencer_espera_sueno()
+    except Exception:
+        logger.exception("Resumen diario: fallo inesperado venciendo la espera del sueño")
+        return {}
+
+
 def _avisar_sueno_recibido(fechas_sueno: set) -> None:
-    """Acaba de llegar el sueño de esta noche: si el Watch ya la ha cerrado y
+    """Acaba de llegar el sueño de esta noche: si el reloj ya la ha cerrado y
     sincronizado, lo probable es que estés despierto.
 
-    Es una deducción, no un aviso, y por eso lleva dos frenos: solo cuentan las noches
-    de hoy y ayer (el Atajo reenvía los últimos días en cada sync, y un backfill de la
-    semana pasada no significa nada), y el envío vuelve a comprobar la ventana horaria.
-    Aun así puede adelantarse si el iPhone sincroniza una noche a medias mientras
-    duermes: se puede desactivar con BRIEF_DISPARA_SUENO=0 y quedarse solo con la
-    señal del móvil, que sí es exacta.
+    Es una deducción, no un aviso, y por eso lleva dos frenos: solo cuenta la noche de
+    HOY, y el envío vuelve a comprobar la ventana horaria. Se puede desactivar con
+    BRIEF_DISPARA_SUENO=0 y quedarse solo con la señal del móvil, que sí es exacta.
 
-    Nunca puede tumbar la ingesta: guardar los datos del Watch importa más que el
+    **Solo hoy, y antes valía también ayer.** Aceptar la noche de ayer parecía prudente
+    —el Atajo reenvía los últimos días en cada sync— y era justo lo contrario: como la
+    noche se fecha por el día en que te despiertas, la de ayer NUNCA es la de esta
+    noche, así que lo único que podía disparar era un reenvío de un dato que ya estaba.
+    Y disparaba: el correo salía con la noche de ayer recién reescrita y la de hoy
+    todavía sin sincronizar, o sea con la sección RELOJ diciendo "anoche sin reloj"
+    todos los días. El 16/09/2026 el reenvío mandó el correo a las 08:33 y el sueño de
+    verdad llegó a las 08:38, cinco minutos tarde.
+
+    Quien llama debe pasar solo las fechas cuyo sueño trae MEDIDA: una fila de 0 horas
+    es lo que escribe el Atajo las noches que no encuentra muestras, y contarla como
+    noche cerrada devolvería el mismo problema por la otra puerta.
+
+    Nunca puede tumbar la ingesta: guardar los datos del reloj importa más que el
     correo, y el correo tiene otras dos fuentes que lo disparan.
     """
     if not BRIEF_DISPARA_SUENO or not fechas_sueno:
         return
     ahora = _ahora_local()
-    recientes = {ahora.date().isoformat(), (ahora.date() - timedelta(days=1)).isoformat()}
-    if not (set(fechas_sueno) & recientes) or not _senal_de_despertar_valida(ahora):
+    if ahora.date().isoformat() not in set(fechas_sueno) or not _senal_de_despertar_valida(ahora):
         return
     try:
-        enviar_brief_si_toca("sueno", despertar=ahora)
+        # Si ya había una señal de despertar esperando a este dato, el despertar fue
+        # ENTONCES y no ahora: es la hora que decide cuándo se lanza la rutina.
+        enviar_brief_si_toca("sueno", despertar=_despertar_esperado(ahora) or ahora)
     except Exception:
         logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del Watch")
+    finally:
+        # Ha llegado lo que se esperaba, salga el correo o falle: dejar la espera viva
+        # haría que al vencer te avisara al móvil de que abras la app del reloj que
+        # acabas de abrir.
+        _olvidar_despertar()
 
 
 @app.post("/despertar")
@@ -7388,6 +7594,16 @@ def marcar_despertar(request: Request, token: str = "", fuente: str = ""):
                 "motivo": f"fuera de la ventana de despertar "
                           f"({HORA_DESPERTAR_DESDE[0]:02d}:{HORA_DESPERTAR_DESDE[1]:02d}"
                           f"–{HORA_DESPERTAR_HASTA[0]:02d}:{HORA_DESPERTAR_HASTA[1]:02d})"}
+
+    # Estás despierto, pero el sueño de esta noche puede no haber sincronizado todavía
+    # (el reloj lo vuelca cuando se abre su app). Mandar el correo ahora sería mandarlo
+    # diciendo que no llevaste el reloj. Se apunta la espera y manda quien llegue antes:
+    # el sueño, el vencimiento o la hora tope.
+    if _esperar_al_sueno(ahora):
+        _apuntar_despertar(ahora, etiqueta)
+        return {"ok": True, "enviado": False, "esperando_sueno": True,
+                "motivo": f"el sueño de esta noche aún no ha llegado; se espera hasta "
+                          f"{BRIEF_ESPERA_SUENO_MIN} min"}
     try:
         resultado = enviar_brief_si_toca(etiqueta, despertar=ahora)
     except HTTPException:
@@ -7425,7 +7641,8 @@ def ha_brief_tick(request: Request, token: str = ""):
     # así que una excepción suelta aquí dejaba sin entregar TODOS los recordatorios
     # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
     # Home Assistant.
-    previos = {**_avisar_reloj_seguro(), **_vigilar_ingesta_seguro(),
+    previos = {**_avisar_reloj_seguro(), **_vencer_espera_sueno_seguro(),
+               **_vigilar_ingesta_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
@@ -7438,6 +7655,9 @@ def ha_brief_tick(request: Request, token: str = ""):
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
 
+    # A la hora tope se manda con lo que haya, así que la espera deja de tener sentido:
+    # si no se borrase, el vencimiento intentaría después mandar un correo ya enviado.
+    _olvidar_despertar()
     try:
         resultado = enviar_brief_si_toca("tope")
     except HTTPException:
