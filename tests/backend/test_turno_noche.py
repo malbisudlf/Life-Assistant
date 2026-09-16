@@ -20,7 +20,7 @@ def _fake_imap(monkeypatch, *, cabeceras=None, cuerpos=None, append_ok=True):
     al buzón (de qué uid se baja el cuerpo, con qué flag se sube el borrador), no cómo se
     habla IMAP.
     """
-    registro = {"cuerpos_pedidos": [], "appends": []}
+    registro = {"cuerpos_pedidos": [], "fetch_specs": [], "appends": []}
     cuerpos = cuerpos or {}
 
     class _Buzon:
@@ -32,6 +32,8 @@ def _fake_imap(monkeypatch, *, cabeceras=None, cuerpos=None, append_ok=True):
                 return "OK", [b" ".join(c["uid"].encode() for c in (cabeceras or []))]
             uid = args[0]
             registro["cuerpos_pedidos"].append(uid)
+            if len(args) > 1:
+                registro["fetch_specs"].append(args[1])
             return "OK", [(b"1", cuerpos.get(uid, b""))]
 
         def append(self, carpeta, flags, fecha, mensaje):
@@ -189,6 +191,15 @@ class TestElBuzonDeNoche(_Noche):
 
         assert len(registro["appends"]) == 2
 
+    def test_el_cuerpo_se_pide_con_tope_de_descarga(self, monkeypatch, mock_requests):
+        """El fetch del cuerpo va con rango parcial IMAP (`<0.N>`): sin esto, un correo con
+        adjuntos grandes se trae ENTERO a memoria antes de recortarlo a CORREO_MAX_CUERPO."""
+        registro = _fake_imap(monkeypatch, cuerpos={"10": b"Hola"})
+
+        main._cuerpos_de(["10"])
+
+        assert registro["fetch_specs"] == [f"(BODY.PEEK[]<0.{main.CORREO_MAX_DESCARGA}>)"]
+
     def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
         llamadas = []
@@ -325,6 +336,15 @@ class TestDecidirEnElParte:
         r = client.post("/noche/items/../../etc/decidir", headers=auth_headers,
                         json={"accion": "aprobado"})
         assert r.status_code in (404, 422)
+        assert mock_requests.called("PATCH", "noche_items") == []
+
+    def test_36_caracteres_hex_guion_sin_forma_de_uuid_se_rechaza(self, client, auth_headers,
+                                                                   mock_requests):
+        """La validación usa _uuid_path() (forma 8-4-4-4-12), no "36 caracteres hex/guion en
+        cualquier posición": esto pasaba el regex inline que tenía el endpoint antes."""
+        r = client.post(f"/noche/items/{'-' * 36}/decidir", headers=auth_headers,
+                        json={"accion": "aprobado"})
+        assert r.status_code == 422
         assert mock_requests.called("PATCH", "noche_items") == []
 
     def test_una_accion_inventada_se_rechaza(self, client, auth_headers, mock_requests):
