@@ -192,6 +192,18 @@ class TestElBuzonDeNoche(_Noche):
 
         assert len(registro["borradores"]) == 2
 
+    def test_un_correo_desmesurado_no_se_trae_a_memoria(self, monkeypatch, mock_requests):
+        """Antes esto lo resolvía el fetch parcial de IMAP (`<0.N>`), que cortaba en el
+        servidor. Graph no deja cortar el cuerpo, así que se lee a trozos y se abandona
+        el correo en cuanto se pasa del tope: lo que no puede pasar es traerse un correo
+        de megas a un backend que vive dentro del Green."""
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+        monkeypatch.setattr(main, "CORREO_MAX_DESCARGA", 500)
+        mock_requests.add("GET", "/me/messages/", FakeResponse(
+            {"uniqueBody": {"contentType": "text", "content": "x" * 5000}}, 200))
+
+        assert main._cuerpos_de(["10"]) == {}
+
     def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
         llamadas = []
@@ -330,6 +342,15 @@ class TestDecidirEnElParte:
         r = client.post("/noche/items/../../etc/decidir", headers=auth_headers,
                         json={"accion": "aprobado"})
         assert r.status_code in (404, 422)
+        assert mock_requests.called("PATCH", "noche_items") == []
+
+    def test_36_caracteres_hex_guion_sin_forma_de_uuid_se_rechaza(self, client, auth_headers,
+                                                                   mock_requests):
+        """La validación usa _uuid_path() (forma 8-4-4-4-12), no "36 caracteres hex/guion en
+        cualquier posición": esto pasaba el regex inline que tenía el endpoint antes."""
+        r = client.post(f"/noche/items/{'-' * 36}/decidir", headers=auth_headers,
+                        json={"accion": "aprobado"})
+        assert r.status_code == 422
         assert mock_requests.called("PATCH", "noche_items") == []
 
     def test_una_accion_inventada_se_rechaza(self, client, auth_headers, mock_requests):

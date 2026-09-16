@@ -71,7 +71,7 @@ espíritu de la regla, acotándola:
 |---|---|---|
 | `_cabeceras_recientes()` | asunto, remitente, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
 | `_noche_clasificar()` | **solo asunto y remitente** | `responder` / `informativo` / `ruido` |
-| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `uniqueBody` en texto, acotado a `CORREO_MAX_CUERPO` |
+| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
 | `_redactar_respuesta()` | ese cuerpo | el borrador, con el modelo grande |
 | `_guardar_borrador()` | — | `POST /me/messages/{id}/createReply` |
 
@@ -107,6 +107,14 @@ código y no más: `createReply` deja el borrador colgando del hilo sin construi
 mano, y desaparece el problema de la carpeta de borradores, cuyo nombre no es estándar en
 ningún sitio (`Drafts`, `[Gmail]/Borradores`, el nombre en el idioma de la cuenta) y cuyo
 fallo dejaba el borrador en una carpeta nueva donde no iba a mirar nadie.
+
+**El cuerpo se lee acotado.** `uniqueBody` ya deja fuera los adjuntos —viajan por
+`/attachments` y aquí no se piden nunca—, que era la mitad del problema que tenía el
+`BODY.PEEK[]` de IMAP, donde cuerpo y adjunto venían juntos. Lo que queda por acotar es un
+cuerpo HTML desmesurado, y Graph no permite cortarlo en el servidor como hacía el fetch
+parcial (`<0.N>`): se lee a trozos con `stream=True` y se **abandona el correo** si pasa de
+`CORREO_MAX_DESCARGA`. Se devuelve nada y no un trozo a propósito: medio JSON no se puede
+parsear, y un correo respondido a medias es peor que no respondido.
 
 Tampoco hace falta el rodeo del UID: el `id` de Graph identifica al mensaje y no a su
 posición, así que el turno puede volver a por el cuerpo de unos pocos minutos después sin

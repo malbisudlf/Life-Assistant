@@ -11655,6 +11655,18 @@ CORREO_LEER = _flag("CORREO_LEER", "0")
 # Cuánto cuerpo se lee de un correo que sí pide respuesta. Un correo normal cabe de
 # sobra; lo que esto corta son los hilos de cincuenta respuestas citadas.
 CORREO_MAX_CUERPO = int(os.getenv("CORREO_MAX_CUERPO", "4000"))
+# Tope en BYTES de lo que se descarga por correo antes de recortar a CORREO_MAX_CUERPO
+# caracteres. Sin esto, un correo enorme se trae ENTERO a memoria antes de poder
+# recortarlo, y con varios la misma noche eso es presión de memoria real en un backend
+# que corre como add-on del Green, sin margen de una VM dedicada.
+#
+# Con Graph la mitad del problema desaparece sola: `$select=uniqueBody` trae el cuerpo
+# **sin los adjuntos** —que viajan por `/attachments` y aquí no se piden nunca—, mientras
+# que el `BODY.PEEK[]` de IMAP no distinguía cuerpo de adjunto. Lo que queda por acotar
+# es un cuerpo HTML desmesurado, y eso no se puede cortar en el servidor como hacía el
+# fetch parcial de IMAP: se lee a trozos y se abandona el correo si se pasa (ver
+# `_descarga_acotada`). Un correo que no cabe no se responde; la noche sigue.
+CORREO_MAX_DESCARGA = int(os.getenv("CORREO_MAX_DESCARGA", "200000"))
 CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
 CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
 CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
@@ -11700,6 +11712,35 @@ def _buzon_fallo(r, contexto: str) -> bool:
     else:
         logger.warning("Buzón %s: Graph respondió %s", contexto, r.status_code)
     return True
+
+
+def _descarga_acotada(r, tope: int = 0) -> bytes | None:
+    """El cuerpo de una respuesta leído a trozos, o None si pasa del tope.
+
+    `stream=True` deja la descarga sin empezar hasta que se lee, así que aquí se para en
+    cuanto se sabe que no cabe, en vez de recortar algo que ya está entero en memoria —que
+    era justo lo que había que evitar. Devolver None y no un trozo es deliberado: medio
+    JSON no se puede parsear, y un correo a medias redactado es peor que no redactado.
+    """
+    tope = tope or CORREO_MAX_DESCARGA
+    trozos, leido = [], 0
+    try:
+        for trozo in r.iter_content(chunk_size=16384):
+            if not trozo:
+                continue
+            leido += len(trozo)
+            if leido > tope:
+                return None
+            trozos.append(trozo)
+    except Exception as e:
+        logger.warning("Buzón: se cortó la descarga de un correo (%s)", type(e).__name__)
+        return None
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+    return b"".join(trozos)
 
 
 def _cabeceras_recientes() -> list:
@@ -11896,6 +11937,7 @@ def _cuerpos_de(ids: list) -> dict:
                 f"https://graph.microsoft.com/v1.0/me/messages/{quote(str(ident), safe='')}"
                 "?$select=uniqueBody",
                 headers=cabeceras,
+                stream=True,
             )
         except Exception as e:
             logger.warning("Turno de noche: no se pudo leer un correo (%s)",
@@ -11903,7 +11945,18 @@ def _cuerpos_de(ids: list) -> dict:
             continue
         if _buzon_fallo(r, "cuerpo"):
             continue
-        contenido = ((r.json() or {}).get("uniqueBody") or {})
+        crudo = _descarga_acotada(r)
+        if crudo is None:
+            # Más grande que el tope: se salta entero en vez de quedarse con un JSON a
+            # medias. Un correo que no cabe no se responde; el resto de la noche sigue.
+            logger.warning("Turno de noche: un correo pasa de %s bytes, no se abre",
+                           CORREO_MAX_DESCARGA)
+            continue
+        try:
+            contenido = ((json.loads(crudo) or {}).get("uniqueBody") or {})
+        except ValueError:
+            logger.warning("Turno de noche: respuesta no-JSON al pedir un cuerpo")
+            continue
         texto = contenido.get("content") or ""
         if (contenido.get("contentType") or "") == "html":
             texto = _html_a_texto(texto)
@@ -12230,7 +12283,8 @@ class NocheDecision(BaseModel):
 
 
 @app.post("/noche/items/{item_id}/decidir")
-def noche_decidir(item_id: str, body: NocheDecision, _: dict = Depends(verify_token)):
+def noche_decidir(body: NocheDecision, item_id: str = _uuid_path(),
+                   _: dict = Depends(verify_token)):
     """Aprueba o descarta una cosa del parte.
 
     «Aprobado» aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
@@ -12238,8 +12292,6 @@ def noche_decidir(item_id: str, body: NocheDecision, _: dict = Depends(verify_to
     pendiente para que decidir dos veces —dos pestañas abiertas, el botón pulsado dos
     veces— no cuente como dos decisiones.
     """
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", item_id):
-        raise HTTPException(status_code=422, detail="Id inválido")
     try:
         r = http.patch(f"{NOCHE_ITEMS_URL}?id=eq.{item_id}&estado=eq.pendiente",
                        headers={**supabase_headers(), "Prefer": "return=representation"},
