@@ -2145,7 +2145,13 @@ export function alarmaRepeticionTexto(repetir) {
   const dias = (repetir || []).map(Number).filter(d => d >= 1 && d <= 7);
   if (!dias.length) return "";
   if (dias.length === 7) return "todos los días";
-  const nombres = dias.map(d => DIAS_SEMANA[d - 1]);
+  // En plural: "todos los lunes" pero "todos los sábados". De lunes a viernes el plural
+  // es invariable porque ya acaban en -s; sábado y domingo no, y sin esto salía "todos
+  // los sábado".
+  const nombres = dias.map(d => {
+    const dia = DIAS_SEMANA[d - 1];
+    return dia.endsWith("s") ? dia : `${dia}s`;
+  });
   if (nombres.length === 1) return `todos los ${nombres[0]}`;
   return `los ${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}`;
 }

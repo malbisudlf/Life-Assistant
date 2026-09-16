@@ -2137,6 +2137,12 @@ describe("alarmas de respaldo", () => {
     expect(alarmaRepeticionTexto([1, 2, 3, 4, 5, 6, 7])).toBe("todos los días");
     expect(alarmaRepeticionTexto([])).toBe("");
     expect(alarmaRepeticionTexto(null)).toBe("");
+    // Sábado y domingo son los únicos que cambian en plural: el resto ya acaba en -s y
+    // por eso el fallo no se veía con los días de diario, que son los que se probaban.
+    expect(alarmaRepeticionTexto([6])).toBe("todos los sábados");
+    expect(alarmaRepeticionTexto([7])).toBe("todos los domingos");
+    expect(alarmaRepeticionTexto([6, 7])).toBe("los sábados y domingos");
+    expect(alarmaRepeticionTexto([5, 6])).toBe("los viernes y sábados");
   });
 
   test("una alarma que se repite se lee por sus días, no por su fecha", () => {

@@ -6,7 +6,8 @@
 // pintados igual, porque llevan a mirar sitios distintos.
 import { describe, test, expect, vi, afterEach } from "vitest";
 
-import { filasDeEstado, resumenEstado, desdeHace, horaCorta } from "../../src/lib/dev";
+import { filasDeEstado, resumenEstado, desdeHace, horaCorta,
+         reconectarOutlook } from "../../src/lib/dev";
 
 function fila(sys, nombre) {
   return filasDeEstado(sys).find(f => f.nombre === nombre);
@@ -130,5 +131,46 @@ describe("desdeHace y horaCorta", () => {
     expect(horaCorta("2026-09-09T09:30:00")).toBe("09:30:00");
     expect(horaCorta("2026-09-07T09:30:00")).toBe("07/09 09:30:00");
     expect(horaCorta(null)).toBe("");
+  });
+});
+
+
+describe("reconectar Outlook", () => {
+  // Hasta que existió este botón solo se podía reconectar cuando la sesión YA estaba
+  // rota: el único sitio donde se ofrecía era el widget del día, detrás de `authNeeded`.
+  // El caso que lo hacía falta es el contrario — todo funcionando y un permiso nuevo que
+  // pedir, como pasó al darle a Jarvis acceso al buzón de Outlook.
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function montar(respuesta, { abre = true } = {}) {
+    const abierto = [];
+    vi.stubGlobal("fetch", vi.fn(async () => respuesta));
+    vi.stubGlobal("open", vi.fn((url) => { abierto.push(url); return abre ? {} : null; }));
+    return abierto;
+  }
+
+  test("abre la pantalla de Microsoft y devuelve la dirección para poder ofrecerla", async () => {
+    // Se devuelve además de abrirse porque `window.open` después de un `await` es
+    // justo lo que cazan los bloqueadores de ventanas emergentes, y la pantalla tiene
+    // que poder enseñar el enlace en vez de quedarse muda.
+    const abierto = montar({ ok: true, json: async () => ({ auth_url: "https://login.microsoftonline.com/x" }) });
+
+    const url = await reconectarOutlook();
+
+    expect(url).toBe("https://login.microsoftonline.com/x");
+    expect(abierto).toEqual(["https://login.microsoftonline.com/x"]);
+  });
+
+  test("un backend que falla se cuenta, no se traga", async () => {
+    montar({ ok: false, status: 502, json: async () => ({}) });
+    await expect(reconectarOutlook()).rejects.toThrow("502");
+  });
+
+  test("una respuesta sin dirección tampoco se da por buena", async () => {
+    // Pasa de verdad: /auth/login contesta 200 con un JSON de error cuando MSAL no puede
+    // construir la URL. Sin esto se abriría una ventana en blanco y pareceria que fue.
+    const abierto = montar({ ok: true, json: async () => ({ error: "algo" }) });
+    await expect(reconectarOutlook()).rejects.toThrow("Microsoft");
+    expect(abierto).toEqual([]);
   });
 });

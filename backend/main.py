@@ -13725,13 +13725,14 @@ def _revision_pendiente(rid: str = "") -> dict:
     return filas[0] if filas else {}
 
 
-def _revision_pendiente_seguro() -> dict:
-    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`."""
+def _revision_pendiente_seguro() -> dict | None:
+    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`,
+    incluido el `None` de «no he podido mirarlo» frente al `{}` de «no hay nada»."""
     try:
         return _revision_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto de la revisión pendiente (%s)", e)
-        return {}
+        return None
 
 
 def _j_contar_revision() -> dict:
@@ -14235,7 +14236,16 @@ def _despliegue_pendiente() -> dict:
     return filas[0] if filas else {}
 
 
-def _despliegue_pendiente_seguro() -> dict:
+# Lo que se le dice a Jarvis cuando no se ha podido mirar si hay algo esperando. Va en
+# una constante porque lo usan los tres niveles del contexto hablado, y tres copias de
+# una frase acaban siendo tres frases distintas.
+_NO_SE_HA_PODIDO_COMPROBAR = (
+    "\nNO SE HA PODIDO COMPROBAR si hay algo esperando respuesta: la base de datos no "
+    "contesta. Si te pregunta qué hay pendiente, dile justo eso —que ahora mismo no "
+    "puedes saberlo—, y NUNCA que no hay nada.\n")
+
+
+def _despliegue_pendiente_seguro() -> dict | None:
     """Lo mismo, pero sin poder tumbar a quien pregunta.
 
     `_despliegue_pendiente` levanta un 502 cuando Supabase no contesta, y en un endpoint
@@ -14243,12 +14253,19 @@ def _despliegue_pendiente_seguro() -> dict:
     `_jarvis_sistema` lo consulta de refilón para adornar el contexto de una llamada, y
     ahí ese 502 se llevaría por delante la conversación entera por un dato accesorio.
     Mismo criterio que `_vigilar_sistema_seguro` y compañía.
+
+    **`None` es «no he podido mirarlo» y `{}` es «no hay nada»**, y la diferencia importa
+    más que el ahorro de devolver siempre un dict: tragarse el fallo y contestar «no hay
+    nada pendiente» convierte una avería de Supabase en una respuesta tranquilizadora y
+    falsa. Es la moraleja que `docs/BUGS_HISTORICOS.md` repite —*«no pude» no es «no hay
+    nada que hacer»*— y le pasó a Mikel el 2026-09-16: Jarvis le dijo que no había nada
+    pendiente con un issue abierto delante.
     """
     try:
         return _despliegue_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto del despliegue pendiente (%s)", e)
-        return {}
+        return None
 
 
 @app.get("/despliegue/pendiente")
@@ -14476,13 +14493,14 @@ def _sesion_pendiente() -> dict:
     return filas[0] if filas else {}
 
 
-def _sesion_pendiente_seguro() -> dict:
-    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`."""
+def _sesion_pendiente_seguro() -> dict | None:
+    """Lo mismo, sin poder tumbar a quien pregunta. Igual que `_despliegue_pendiente_seguro`,
+    incluido el `None` de «no he podido mirarlo» frente al `{}` de «no hay nada»."""
     try:
         return _sesion_pendiente()
     except Exception as e:   # noqa: BLE001 — es contexto de adorno, no la respuesta
         logger.warning("Jarvis por voz: sin contexto del aviso de sesión (%s)", e)
-        return {}
+        return None
 
 
 def _apertura_sesion(fila: dict) -> str:
@@ -14777,6 +14795,13 @@ def _j_responder_a_la_sesion(respuesta: str = "") -> dict:
         return {"ok": False, "motivo": "No me has dicho qué contestarle"}
 
     fila = _sesion_pendiente_seguro()
+    if fila is None:
+        # No es lo mismo que no haya aviso: es que no se ha podido mirar. Decir «no hay
+        # ninguno» aquí sería inventarse una respuesta tranquilizadora sobre un trabajo
+        # que puede estar parado esperando.
+        return {"ok": False, "motivo": "No he podido comprobar si hay algún aviso "
+                                       "esperando: la base de datos no responde. "
+                                       "Inténtalo en un momento."}
     if not fila:
         viejo = _sesion_caducada_reciente()
         if viejo:
@@ -17367,7 +17392,13 @@ def _jarvis_sistema(voz: bool = False) -> str:
         # formulario. Por escrito no se hace: ahí los segundos no se notan y el chat casi
         # nunca va de esto, así que solo pagaría la consulta sin cobrar el beneficio.
         pendiente = _despliegue_pendiente_seguro()
-        if pendiente:
+        if pendiente is None:
+            # Los tres consultores de abajo comparten la misma base de datos: si el
+            # primero no ha podido mirar, los otros dos tampoco van a poder, y lo que
+            # NO puede pasar es que el modelo lo interprete como que no hay nada. Se le
+            # dice explícitamente, porque el silencio aquí se lee como «todo en orden».
+            partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+        elif pendiente:
             motivo = str(pendiente.get("detalle") or pendiente.get("issue_titulo") or "")
             partes.append(
                 "\nHAY UN DESPLIEGUE ESPERANDO TU PERMISO y es lo que ha motivado esta "
@@ -17393,7 +17424,9 @@ def _jarvis_sistema(voz: bool = False) -> str:
             # escribe algo nuestro — hoy. La delimitación es lo que hace que esa
             # diferencia no importe.
             aviso = _sesion_pendiente_seguro()
-            if aviso:
+            if aviso is None:
+                partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+            elif aviso:
                 partes.append(
                     "\nUNA SESIÓN DE CLAUDE CODE TE HA DEJADO UN AVISO y es lo que ha "
                     "motivado esta llamada. Los datos ya están mirados y van entre "
@@ -17423,7 +17456,9 @@ def _jarvis_sistema(voz: bool = False) -> str:
                 # del issue lo escribió otro modelo (la revisión nocturna) y está
                 # entrando en el prompt de uno que tiene herramientas.
                 revision = _revision_pendiente_seguro()
-                if revision:
+                if revision is None:
+                    partes.append(_NO_SE_HA_PODIDO_COMPROBAR)
+                elif revision:
                     ctx = _revision_contexto(revision)
                     partes.append(
                         "\nHAY UNA DECISIÓN SIN CONTESTAR y es lo que ha motivado esta "

@@ -101,8 +101,8 @@ proceso al que entrar. Por eso apagar Fly es el último paso y no el primero.
 lee con `source`, así que un valor con espacios sin comillas hace que bash intente
 ejecutar la segunda palabra como un comando. La primera versión solo entrecomilló
 `ENABLE_BANKING_PRIVATE_KEY` (multilínea) y el add-on murió en el arranque con
-`line 87: Astigar: command not found` — la segunda palabra de `HOME_ADDRESS`. Se
-generan así:
+`line 87: <segunda palabra>: command not found` — la segunda palabra de `HOME_ADDRESS`,
+que es una dirección con espacios. Se generan así:
 
 ```python
 def citar(v):
