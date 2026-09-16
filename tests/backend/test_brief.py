@@ -414,6 +414,18 @@ class TestUsoDelReloj:
         assert set(r["marcas"][:-3]) == {"."}, "días con datos del móvil y sin reloj"
         assert r["dias_desde"] == 0 and r["racha_sin_reloj"] == 0
 
+    def test_el_oxigeno_en_sangre_prueba_que_la_pulsera_estuvo_puesta_de_noche(
+            self, client, auth_headers, graph_token, mock_requests):
+        """El aparato principal ya no es un Apple Watch sino una pulsera, y lo que ésta
+        mide de noche incluye la saturación de oxígeno. Prueba lo mismo que la frecuencia
+        respiratoria: que se durmió con ella puesta."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("step_count", 8000, 0),
+            self._fila("blood_oxygen_saturation", 96, 0, unidad="%"),
+        ])["reloj"]
+        assert r["marcas"].endswith("N"), r["marcas"]
+        assert r["noches_puesto"] == 1
+
     def test_un_dia_sin_datos_de_nada_no_es_un_dia_sin_reloj(
             self, client, auth_headers, graph_token, mock_requests):
         """Si no llegó NADA, no se sabe si hubo reloj o falló la sincronización. Darlo
