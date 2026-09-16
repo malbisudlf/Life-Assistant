@@ -121,15 +121,6 @@ export function llamadaEntranteDeUrl(busqueda) {
   }
 }
 
-/** El id del aviso concreto por el que suena esta llamada, o `""`.
- *
- *  El botón «Hablarlo» de una decisión de revisión abre `?llamada=1&aviso=<id>`. Sin el
- *  id, el backend anunciaría lo que gane su orden de prioridades, que puede no ser la
- *  decisión que tenías en la mano al pulsar — la misma razón por la que el permiso de
- *  despliegue se guarda contra un PR concreto y no contra «el más reciente».
- *
- *  Se exige forma de UUID: viaja a una query del backend y un parámetro de la barra de
- *  direcciones lo escribe cualquiera. */
 /** ¿Esta llamada es para que cuente el parte de la noche?
  *
  *  Lo trae el botón «Que me lo cuente» del aviso de la mañana, que abre
@@ -145,6 +136,15 @@ export function nocheDeLlamadaDeUrl(busqueda) {
   }
 }
 
+/** El id del aviso concreto por el que suena esta llamada, o `""`.
+ *
+ *  El botón «Hablarlo» de una decisión de revisión abre `?llamada=1&aviso=<id>`. Sin el
+ *  id, el backend anunciaría lo que gane su orden de prioridades, que puede no ser la
+ *  decisión que tenías en la mano al pulsar — la misma razón por la que el permiso de
+ *  despliegue se guarda contra un PR concreto y no contra «el más reciente».
+ *
+ *  Se exige forma de UUID: viaja a una query del backend y un parámetro de la barra de
+ *  direcciones lo escribe cualquiera. */
 export function avisoDeLlamadaDeUrl(busqueda) {
   try {
     const id = new URLSearchParams(busqueda || "").get("aviso") || "";

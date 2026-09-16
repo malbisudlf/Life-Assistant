@@ -11622,6 +11622,13 @@ IMAP_BORRADORES = os.getenv("IMAP_BORRADORES", "Drafts")
 # Cuánto cuerpo se lee de un correo que sí pide respuesta. Un correo normal cabe de
 # sobra; lo que esto corta son los hilos de cincuenta respuestas citadas.
 CORREO_MAX_CUERPO = int(os.getenv("CORREO_MAX_CUERPO", "4000"))
+# Tope en BYTES de lo que se descarga del servidor IMAP antes de recortar a
+# CORREO_MAX_CUERPO caracteres. Sin esto, un correo con adjuntos grandes se trae ENTERO a
+# memoria (BODY.PEEK[] no distingue cuerpo de adjunto) antes de poder recortarlo: con
+# varios correos así la misma noche es presión de memoria real en un backend que hoy
+# corre como add-on del Green, sin margen de una VM dedicada. El fetch parcial de IMAP
+# (`<0.N>`, RFC 3501 6.4.5) corta la descarga en el servidor, no aquí.
+CORREO_MAX_DESCARGA = int(os.getenv("CORREO_MAX_DESCARGA", "200000"))
 CORREO_CADA_MIN = float(os.getenv("CORREO_CADA_MIN", "180"))
 CORREO_MAX      = int(os.getenv("CORREO_MAX", "20"))
 CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
@@ -11890,7 +11897,8 @@ def _cuerpos_de(uids: list) -> dict:
         salida = {}
         for uid in uids:
             try:
-                ok, partes = buzon.uid("fetch", uid, "(BODY.PEEK[])")
+                ok, partes = buzon.uid(
+                    "fetch", uid, f"(BODY.PEEK[]<0.{CORREO_MAX_DESCARGA}>)")
             except Exception as e:
                 logger.warning("Turno de noche: no se pudo leer un correo (%s)",
                                type(e).__name__)
@@ -12228,7 +12236,8 @@ class NocheDecision(BaseModel):
 
 
 @app.post("/noche/items/{item_id}/decidir")
-def noche_decidir(item_id: str, body: NocheDecision, _: dict = Depends(verify_token)):
+def noche_decidir(body: NocheDecision, item_id: str = _uuid_path(),
+                   _: dict = Depends(verify_token)):
     """Aprueba o descarta una cosa del parte.
 
     «Aprobado» aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
@@ -12236,8 +12245,6 @@ def noche_decidir(item_id: str, body: NocheDecision, _: dict = Depends(verify_to
     pendiente para que decidir dos veces —dos pestañas abiertas, el botón pulsado dos
     veces— no cuente como dos decisiones.
     """
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", item_id):
-        raise HTTPException(status_code=422, detail="Id inválido")
     try:
         r = http.patch(f"{NOCHE_ITEMS_URL}?id=eq.{item_id}&estado=eq.pendiente",
                        headers={**supabase_headers(), "Prefer": "return=representation"},
