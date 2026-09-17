@@ -101,13 +101,21 @@ backend está en `docs/BACKEND_PATRONES.md`.
   algo que tiene que pasar "al despertarte". Ahora hay tres fuentes y **`enviar_brief_si_toca()`
   es la única puerta**: cada fuente sabe CUÁNDO llamar, y quien decide SI se manda es ella.
   - `POST /despertar` (`BRIEF_TOKEN`) — el Atajo del iPhone al desenchufar el cargador.
-    Es la única señal exacta: instantánea y sin deducir nada.
-  - La llegada del sueño del Watch en la ingesta (`_avisar_sueno_recibido`) — **es una
-    deducción, no un aviso**. El reloj sabe cuándo te despiertas, pero el backend no se
-    entera hasta que el iPhone sincroniza, y ese sync puede traer una noche a medias
-    mientras sigues durmiendo. Se puede apagar con `BRIEF_DISPARA_SUENO=0`. Un fallo del
-    correo **nunca** tumba la ingesta: guardar los datos del Watch importa más, y el
-    correo tiene otras dos fuentes.
+    Es una señal exacta: instantánea y sin deducir nada. De paso calla la alarma de
+    respaldo si estaba sonando (`docs/ALARMAS.md`).
+    Y no es la única: **confirmar la alarma de respaldo** (el botón, el dashboard) y
+    **decirle a Jarvis «estoy despierto»** son la misma señal, por `_senal_despertar`.
+    Las tres son cosas que haces tú, despierto; nada se deduce.
+  - La llegada del sueño del reloj en la ingesta (`_avisar_sueno_recibido`) — **ya no
+    es una señal: solo cierra una espera** abierta por una señal de verdad. Lo fue,
+    como deducción de "si la noche ha sincronizado es que estás despierto", y la
+    deducción fallaba por el lado malo: la pulsera vuelca una noche a medias si te
+    despiertas un rato a las seis, la app la sincroniza de fondo, y el correo salía a
+    las siete mientras seguías durmiendo — o sea, **antes de que pudieras sincronizar la
+    noche entera**, que era la queja. Sin señal de despertar, el sueño no manda nada y el
+    correo espera a la hora tope. Con `BRIEF_DISPARA_SUENO=0` ni siquiera cierra la
+    espera. Un fallo del correo **nunca** tumba la ingesta: guardar los datos del reloj
+    importa más, y el correo tiene la hora tope detrás.
     - **Cuenta la noche de HOY, y solo si trae medida.** Aceptar también la de ayer
       parecía prudente —el Atajo reenvía los últimos días en cada sync— y era justo lo
       contrario: la noche se fecha por el día en que te despiertas, así que la de ayer
@@ -117,23 +125,38 @@ backend está en `docs/BACKEND_PATRONES.md`.
       diciendo «anoche sin reloj». El 16/09/2026 el reenvío mandó el correo a las 08:33
       y el sueño de verdad llegó a las 08:38. Una fila de 0 horas tampoco cuenta: es lo
       que escribe el Atajo las noches que no encuentra muestras (`_hay_medida`).
-  - **La señal de despertar ya no manda el correo: lo reserva** (`_esperar_al_sueno`,
+  - **La señal de despertar no manda el correo: lo reserva** (`_esperar_al_sueno`,
     `BRIEF_ESPERA_SUENO`). Cuando desenchufas el cargador estás despierto, pero la noche
     puede no haber sincronizado, y mandar el correo entonces es mandarlo diciendo que no
-    llevabas el reloj. Si falta, se apunta la espera en memoria y gana el primero de los
-    tres: que llegue el sueño (lo normal), que venza `BRIEF_ESPERA_SUENO_MIN` (45 min) o
-    que den las `BRIEF_HORA_TOPE`. Cuatro cosas:
+    llevabas el reloj. Si falta, se apunta la espera en memoria y el correo sale con lo
+    primero que pase: que llegue el sueño (lo normal) o que den las `BRIEF_HORA_TOPE`.
+    Cinco cosas:
     - **La espera no reserva el día.** Reservarlo dejaría marcado como enviado un día
       cuyo correo aún no ha salido, y al llegar el sueño ya no saldría nunca. Misma
       trampa que la del interruptor, que por eso se mira antes de reservar.
-    - **Al vencer, el correo sale sin el sueño Y te avisa al móvil** (regla
-      `reloj_sync`). El aviso no es un parte de avería: es lo único que puede hacer que
-      el dato de esta noche llegue a existir, porque hasta que no abras la app no hay
-      nada que sincronizar. Antes de avisar se vuelve a mirar si ha llegado: regañarte
-      por no sincronizar algo ya sincronizado es como se deja de leer un aviso.
+    - **A los `BRIEF_ESPERA_SUENO_MIN` (45) te avisa al móvil, una vez, y sigue
+      esperando** (regla `reloj_sync`, en `_vigilar_espera_sueno`). El aviso no es un
+      parte de avería: es lo único que puede hacer que el dato de esta noche llegue a
+      existir, porque hasta que no abras la app no hay nada que sincronizar. **La
+      primera versión mandaba el correo al vencer**, y salía igual de cojo que antes
+      solo que más tarde: la sincronización depende de abrir una app, y eso pasa cuando
+      pasa. Un correo a las diez con la noche dentro vale más que uno a las ocho menos
+      cuarto sin ella, porque la noche es justo lo que se lee de ese correo; y la hora
+      tope ya era el sitio donde este sistema aceptaba salir con lo que hubiera.
+    - **El tick mira en cada vuelta si el sueño ya está**, no solo al avisar: si entró
+      por un camino que no pasa por la ingesta, esperar a las diez con el dato guardado
+      —o regañarte por no sincronizar algo ya sincronizado— es como se deja de leer un
+      aviso. Ahí «no he podido mirar» cuenta como «todavía no» (`_hay_sueno_de(...,
+      si_falla=False)`): mandar el correo por un parpadeo de Supabase lo dejaría sin la
+      noche, y esperar cinco minutos no cuesta nada. Y es también el reintento: si el
+      SMTP falla justo al llegar el sueño, la espera sigue viva y el tick lo vuelve a
+      intentar.
     - **La espera es propiedad de la SEÑAL**, igual que la ventana horaria: la hora tope
       y los respaldos disparan justo cuando ya no tiene sentido esperar, y pasarlos por
-      aquí los dejaría sin mandar nada nunca.
+      aquí los dejaría sin mandar nada nunca. A la hora tope el correo sale con fuente
+      `espera_agotada` y la hora a la que te levantaste: en `brief_envios` es lo único
+      que después distingue un correo al que le faltaba la noche de una mañana en la
+      que nadie dio señal.
     - **Vive en memoria a propósito.** Quien sabe si el dato ha llegado es Supabase;
       perder la nota en un reinicio cuesta que el correo salga por la hora tope, que es
       exactamente la red de seguridad que este sistema ya tenía.
