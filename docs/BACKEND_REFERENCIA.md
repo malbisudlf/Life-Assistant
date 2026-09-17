@@ -46,6 +46,8 @@
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
+| `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas y un booleano, nunca un lugar |
+| `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
 | `POST /relaunch-agent` | JWT | Marca `_agent_relaunch_pending` |

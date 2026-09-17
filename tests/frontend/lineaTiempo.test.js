@@ -7,6 +7,7 @@ import {
   aFechaLocal, formatoHora, porcentajeDelDia, recortarAlDia, tramoDelDia,
   horasDelEje, posicionAhora, repartirEnFilas,
   normalizarEventos, normalizarSueno, normalizarEntrenos, normalizarPresencia, normalizarAvisos,
+  normalizarTramosPresencia, normalizarCasa, textoAccionCasa,
   construirLineaTiempo, textoEstadoCarril, etiquetaDia,
 } from "../../src/lib/lineaTiempo";
 
@@ -462,8 +463,15 @@ describe("construirLineaTiempo: el día completo", () => {
       sueno:     { estado: FUENTE_OK, datos: [{ date: DIA, value: 7.5, extra: { sleep_start: "23:40" } }] },
       entrenos:  { estado: FUENTE_OK, datos: { workouts: [], sesiones: [{ id: "s", date: DIA, duration_hours: 1 }] } },
       presencia: { estado: FUENTE_OK, datos: { filas: [{ date: DIA, value: 15, extra: { fuera: 9 } }] } },
+      presenciaTramos: { estado: FUENTE_OK, datos: [
+        { desde: "2026-06-15T00:00:00", hasta: "2026-06-15T09:00:00", en_casa: true },
+        { desde: "2026-06-15T09:00:00", hasta: "2026-06-15T18:00:00", en_casa: false },
+      ] },
       avisos:    { estado: FUENTE_ERROR },
-      casa:      { estado: FUENTE_AUSENTE, nota: "sin histórico" },
+      casa:      { estado: FUENTE_OK, datos: [
+        { momento: "2026-06-15T07:30:00", servicio: "light.turn_on", entidad: "light.luces_mesa",
+          origen: "alarma" },
+      ] },
     },
   });
 
@@ -477,7 +485,7 @@ describe("construirLineaTiempo: el día completo", () => {
     expect(linea.largoMin).toBe(MINUTOS_DIA);
     expect(linea.ahora.izquierdaPct).toBe(75);
     expect(linea.horas.map(h => h.hora)).toEqual([0, 3, 6, 9, 12, 15, 18, 21]);
-    expect(linea.conocidos).toBe(4);
+    expect(linea.conocidos).toBe(5);
   });
 
   test("un día que no es hoy no lleva línea de ahora", () => {
@@ -512,5 +520,71 @@ describe("etiquetaDia", () => {
 
   test("una fecha inválida no rompe la cabecera", () => {
     expect(etiquetaDia("x", DIA)).toBe("");
+  });
+});
+
+describe("normalizarTramosPresencia", () => {
+  const DIA2 = "2026-06-15";
+
+  test("cada tramo se coloca en el eje y dice si era casa o calle", () => {
+    const items = normalizarTramosPresencia([
+      { desde: "2026-06-15T00:00:00", hasta: "2026-06-15T06:00:00", en_casa: true },
+      { desde: "2026-06-15T06:00:00", hasta: "2026-06-15T12:00:00", en_casa: false },
+    ], DIA2);
+    expect(items.map(i => i.etiqueta)).toEqual(["En casa", "Fuera"]);
+    // Estar fuera es el hueco del carril, no un acontecimiento: va atenuado.
+    expect(items.map(i => i.tono)).toEqual(["normal", "atenuado"]);
+    expect(items[0].izquierdaPct).toBe(0);
+    expect(items[1].izquierdaPct).toBe(25);
+  });
+
+  test("un tramo que cruza la medianoche se recorta y se marca", () => {
+    const items = normalizarTramosPresencia([
+      { desde: "2026-06-14T22:00:00", hasta: "2026-06-15T07:00:00", en_casa: true },
+    ], DIA2);
+    expect(items[0].cortadoAntes).toBe(true);
+    expect(items[0].izquierdaPct).toBe(0);
+  });
+
+  test("lo que no trae horas no se cuela como tramo inventado", () => {
+    expect(normalizarTramosPresencia([{ en_casa: true }], DIA2)).toEqual([]);
+    expect(normalizarTramosPresencia(null, DIA2)).toEqual([]);
+  });
+});
+
+describe("normalizarCasa", () => {
+  const DIA2 = "2026-06-15";
+
+  test("cada orden es un instante en el eje, no un tramo", () => {
+    const items = normalizarCasa([
+      { momento: "2026-06-15T06:00:00", servicio: "light.turn_on",
+        entidad: "light.luces_mesa", origen: "alarma" },
+    ], DIA2);
+    expect(items).toHaveLength(1);
+    expect(items[0].izquierdaPct).toBe(25);
+    // Una orden no dura: darle duración sería inventarse cuánto estuvo encendida.
+    expect(items[0].inicio.getTime()).toBe(items[0].fin.getTime());
+    expect(items[0].detalle).toBe("alarma");
+  });
+
+  test("una orden sin hora no se coloca en el eje", () => {
+    const items = normalizarCasa([{ servicio: "light.turn_on", entidad: "light.x" }], DIA2);
+    expect(items[0].sinHora).toBe(true);
+  });
+});
+
+describe("textoAccionCasa", () => {
+  test("traduce el servicio y deja la entidad legible", () => {
+    expect(textoAccionCasa({ servicio: "light.turn_on", entidad: "light.luces_mesa" }))
+      .toBe("Encender luces mesa");
+    expect(textoAccionCasa({ servicio: "media_player.media_stop", entidad: "media_player.mikel" }))
+      .toBe("Parar mikel");
+  });
+
+  test("un servicio que no conoce se enseña crudo en vez de esconderse", () => {
+    // Misma regla que los motivos del parte de la noche: algo nuevo tiene que verse
+    // raro, no volverse invisible.
+    expect(textoAccionCasa({ servicio: "vacuum.start", entidad: "vacuum.roomba" }))
+      .toBe("vacuum.start roomba");
   });
 });

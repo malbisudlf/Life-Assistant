@@ -324,3 +324,66 @@ class TestCacheEnMemoria:
         client.post("/ha/presencia?token=ha-poll-token", json={"zona": "gimnasio"})
         d = client.get("/presencia", headers=auth_headers).json()
         assert d["zona"] == "gimnasio" and d["en_casa"] is False
+
+
+class TestTramosConHora:
+    """Los tramos que dibuja la línea del día: horas y un booleano, nunca un lugar.
+
+    Esto revierte en parte la decisión de `docs/IDEAS.md` («un histórico de presencia:
+    es el dato más sensible del proyecto»), y el límite de esa reversión es lo que hay
+    que proteger con tests: se guarda el CUÁNDO, no el DÓNDE.
+    """
+
+    def test_los_bordes_salen_del_mismo_troceo_que_las_horas(self):
+        inicio = datetime(2026, 8, 4, 23, 0, tzinfo=main.LOCAL_TZ)
+        trozos = main._trozos_por_dia(inicio, inicio + timedelta(hours=3))
+        assert [d for d, _, _ in trozos] == ["2026-08-04", "2026-08-05"]
+        assert trozos[0][2] == trozos[1][1]          # el corte es el mismo instante
+        assert trozos[1][2] - trozos[0][1] == timedelta(hours=3)
+
+    def test_lo_que_se_guarda_no_lleva_ningun_lugar(self, mock_requests):
+        """La fila que se escribe no puede tener zona, coordenadas ni nombre de sitio."""
+        enviado = {}
+
+        def _post(url, **kwargs):
+            enviado["filas"] = kwargs.get("json")
+            return FakeResponse({}, 201)
+
+        mock_requests.add("POST", "/presencia_tramos", _post)
+        inicio = datetime(2026, 8, 4, 10, 0, tzinfo=main.LOCAL_TZ)
+        main._guardar_tramos_presencia(
+            [("2026-08-04", inicio, inicio + timedelta(hours=1))], True)
+
+        assert set(enviado["filas"][0]) == {"dia", "desde", "hasta", "en_casa"}
+        assert enviado["filas"][0]["en_casa"] is True
+
+    def test_un_fallo_guardando_no_tumba_el_aviso_de_presencia(self, mock_requests):
+        """El efecto principal del aviso es saber dónde estás AHORA. Los tramos son un
+        extra para un widget: que Supabase los rechace no puede propagarse."""
+        mock_requests.add("POST", "/presencia_tramos", FakeResponse({}, 500))
+        inicio = datetime(2026, 8, 4, 10, 0, tzinfo=main.LOCAL_TZ)
+        main._guardar_tramos_presencia(
+            [("2026-08-04", inicio, inicio + timedelta(hours=1))], False)   # no lanza
+
+
+class TestUnirTramos:
+    """HA empuja cada quince minutos: una tarde en casa son treinta y dos filas iguales."""
+
+    def test_los_consecutivos_iguales_se_unen(self):
+        filas = [{"desde": "T1", "hasta": "T2", "en_casa": True},
+                 {"desde": "T2", "hasta": "T3", "en_casa": True},
+                 {"desde": "T3", "hasta": "T4", "en_casa": False}]
+        assert main._unir_tramos(filas) == [
+            {"desde": "T1", "hasta": "T3", "en_casa": True},
+            {"desde": "T3", "hasta": "T4", "en_casa": False},
+        ]
+
+    def test_un_hueco_no_parte_el_tramo(self):
+        """Si nadie informó durante una hora, el hueco es «no se sabe», no «no estabas».
+        Partir el tramo ahí dibujaría una ausencia que nadie ha comprobado."""
+        filas = [{"desde": "T1", "hasta": "T2", "en_casa": True},
+                 {"desde": "T9", "hasta": "T10", "en_casa": True}]
+        assert main._unir_tramos(filas) == [{"desde": "T1", "hasta": "T10", "en_casa": True}]
+
+    def test_sin_filas_no_hay_tramos(self):
+        assert main._unir_tramos([]) == []
