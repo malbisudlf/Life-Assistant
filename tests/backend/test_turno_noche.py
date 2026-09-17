@@ -94,7 +94,7 @@ class TestElBuzonDeNoche(_Noche):
                                cuerpos={"10": "Hola, te escribo para quedar."})
         _fake_modelo(monkeypatch, ["responder", "ruido"])
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert registro["cuerpos_pedidos"] == ["10"]
         assert [i["datos"]["categoria"] for i in items] == ["responder", "ruido"]
@@ -120,7 +120,7 @@ class TestElBuzonDeNoche(_Noche):
                                cuerpos={"10": "hola"})
         _fake_modelo(monkeypatch, ["responder"], borrador="El jueves me va bien.")
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert len(registro["borradores"]) == 1
         assert registro["borradores"][0]["comment"] == "El jueves me va bien."
@@ -172,7 +172,7 @@ class TestElBuzonDeNoche(_Noche):
             raise RuntimeError("la API no contesta")
         monkeypatch.setattr(main, "get_openai_client", _revienta)
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert registro["cuerpos_pedidos"] == []
         assert registro["borradores"] == []
@@ -208,7 +208,7 @@ class TestElBuzonDeNoche(_Noche):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
         llamadas = []
         monkeypatch.setattr(main, "_cabeceras_recientes", lambda: llamadas.append(1) or [])
-        assert main._noche_correos() == []
+        assert main._noche_correos() == ([], {"estado": "apagado"})
         assert llamadas == []
 
     def test_un_buzon_caido_no_tumba_la_noche(self, monkeypatch, mock_requests):
@@ -217,16 +217,92 @@ class TestElBuzonDeNoche(_Noche):
         def _revienta():
             raise OSError("no se pudo conectar")
         monkeypatch.setattr(main, "_cabeceras_recientes", _revienta)
-        assert main._noche_correos() == []
+        items, nota = main._noche_correos()
+        assert items == []
+        assert nota["estado"] == "fallo"
+
+
+class TestLoQueSeMiro(_Noche):
+    """La nota de lo mirado: qué distingue una noche tranquila de un turno averiado.
+
+    Las cuatro razones por las que el buzón puede dar cero correos tienen que llegar a la
+    mañana distinguidas. Si no, «no hubo nada que hacer» acaba leyéndose como «no tengo
+    correo» —o como «esto está roto»— y las dos lecturas son peores que el silencio.
+    """
+
+    def test_un_buzon_tranquilo_dice_que_se_miro(self, monkeypatch, mock_requests):
+        _fake_buzon(monkeypatch, mock_requests, cabeceras=[])
+
+        items, nota = main._noche_correos()
+
+        assert items == []
+        assert nota["estado"] == "ok"
+        assert nota["mirados"] == 0
+        assert nota["horas"] == main.CORREO_HORAS
+
+    def test_sin_outlook_no_se_confunde_con_un_buzon_vacio(self, monkeypatch):
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "")
+
+        assert main._noche_correos() == ([], {"estado": "sin_outlook"})
+
+    def test_graph_en_error_no_cuenta_como_cero_correos(self, monkeypatch, mock_requests):
+        """El 403 de «Outlook no ha dado permiso de correo» daba lista vacía, igual que
+        un buzón limpio. Ahora revienta, y quien llama lo apunta como fallo."""
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+        mock_requests.add("GET", "/mailFolders/inbox/messages", FakeResponse({}, 403))
+
+        with pytest.raises(main.BuzonCaido):
+            main._cabeceras_recientes()
+
+        items, nota = main._noche_correos()
+        assert items == []
+        assert nota["estado"] == "fallo"
+
+    def test_el_parte_guarda_lo_mirado_junto_a_las_cuentas(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "_noche_correos",
+                            lambda: ([], {"estado": "ok", "mirados": 0, "horas": 24,
+                                          "carpeta": "Bandeja de entrada"}))
+
+        salida = main.correr_turno_de_noche()
+
+        assert salida["resumen"]["correos"] == 0
+        assert salida["resumen"]["revisado"]["correo"]["mirados"] == 0
+
+    def test_el_area_que_revienta_entera_tambien_deja_nota(self, monkeypatch, mock_requests):
+        def _revienta():
+            raise RuntimeError("el buzón no contesta")
+        monkeypatch.setattr(main, "_noche_correos", _revienta)
+
+        salida = main.correr_turno_de_noche()
+
+        assert salida["resumen"]["revisado"]["correo"] == {"estado": "fallo"}
+
+    @pytest.mark.parametrize("revisado, esperado", [
+        ({"correo": {"estado": "ok", "mirados": 0, "horas": 24,
+                     "carpeta": "Bandeja de entrada"}}, "Bandeja de entrada"),
+        ({"correo": {"estado": "apagado"}},     "apagada"),
+        ({"correo": {"estado": "sin_outlook"}}, "Outlook"),
+        ({"correo": {"estado": "fallo"}},       "No pude"),
+    ])
+    def test_la_frase_de_una_noche_en_blanco_dice_por_que(self, revisado, esperado):
+        frase = main._frase_parte({"revisado": revisado})
+        assert esperado in frase
+        assert "No hubo nada que hacer" not in frase
+
+    def test_sin_nota_se_sigue_diciendo_lo_de_siempre(self):
+        """Los partes de antes de esto no tienen `revisado`, y tienen que seguir
+        leyéndose: un cambio de forma no puede dejar mudo el histórico."""
+        assert main._frase_parte({"correos": 0}) == "No hubo nada que hacer esta noche."
 
 
 class TestElTurno(_Noche):
     """El carril: cuándo corre, cuántas veces y qué deja escrito."""
 
     def _sin_correo(self, monkeypatch):
-        monkeypatch.setattr(main, "_noche_correos", lambda: [
+        monkeypatch.setattr(main, "_noche_correos", lambda: ([
             {"area": "correo", "titulo": "¿Quedamos?", "detalle": "El jueves.",
-             "datos": {"de": "ana", "categoria": "responder", "borrador": True}}])
+             "datos": {"de": "ana", "categoria": "responder", "borrador": True}}],
+            {"estado": "ok", "mirados": 1, "horas": 24, "carpeta": "Bandeja de entrada"}))
 
     def test_el_turno_de_una_noche_se_hace_una_sola_vez(self, monkeypatch, mock_requests):
         """El tick llega cada cinco minutos: sin la reserva atómica, una noche redactaría
@@ -252,7 +328,7 @@ class TestElTurno(_Noche):
     def test_apagado_no_corre(self, monkeypatch, mock_requests):
         monkeypatch.setattr(main, "NOCHE_TURNO", False)
         llamadas = []
-        monkeypatch.setattr(main, "_noche_correos", lambda: llamadas.append(1) or [])
+        monkeypatch.setattr(main, "_noche_correos", lambda: (llamadas.append(1) or [], {"estado": "ok", "mirados": 0}))
         assert main.correr_turno_de_noche()["hecho"] is False
         assert llamadas == []
 

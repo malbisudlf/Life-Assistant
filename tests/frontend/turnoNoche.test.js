@@ -61,6 +61,15 @@ describe("fraseParteNoche", () => {
     expect(fraseParteNoche({ items: [] })).toContain("nada");
     expect(fraseParteNoche(null)).toBe("");
   });
+
+  test("una noche en blanco enseña lo que el backend dice que miro", () => {
+    // El caso que motivó esto: sin la frase del backend, una noche sin correos se lee
+    // igual que un turno averiado, y lo que se acaba creyendo es que no escribe nadie.
+    expect(fraseParteNoche({
+      fecha: "2026-09-17", items: [],
+      frase: "Miré Bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.",
+    })).toContain("Bandeja de entrada");
+  });
 });
 
 describe("nocheDeLlamadaDeUrl", () => {

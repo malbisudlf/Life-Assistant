@@ -178,6 +178,36 @@ diario) ni añade una notificación nueva a las que hay.
 La frase de una línea la escribe el backend (`_frase_parte`) porque la **dice** Jarvis al
 descolgar y la **lee** el widget: dos copias acaban siendo dos frases distintas.
 
+### Una noche en blanco tiene que decir qué se miró
+
+El parte del 2026-09-17 salió con todo a cero y con razón —la Bandeja de entrada no tenía
+ni un correo sin leer a las tres de la mañana— y aun así fue un fallo, porque lo que
+llegó al móvil fue «No hubo nada que hacer esta noche» y eso **no se distingue de un turno
+averiado**. Peor todavía: se parece mucho a «no tienes correo», que es falso cuando tus
+reglas de Outlook sacan el correo de la bandeja antes de que el turno pase por allí
+(aquella noche había 96 sin leer en `Newsletters`, una carpeta que el turno no mira).
+
+Un área que no encuentra nada devuelve, junto a sus items, una **nota de lo que miró**, y
+esa nota se guarda dentro de `noche_partes.resumen`, en `revisado` (es una columna `jsonb`,
+así que no hace falta migración). Para el buzón hay cuatro estados, y el sentido de todo
+esto es que los cuatro se cuenten distinto:
+
+| `revisado.correo.estado` | Qué dice el parte |
+|---|---|
+| `ok` (con `mirados`, `horas`, `carpeta`) | «Miré Bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.» |
+| `apagado` | «No miré el buzón: la parte del correo está apagada.» |
+| `sin_outlook` | «No miré el buzón: Outlook no está conectado.» |
+| `fallo` | «No pude mirar el buzón: no contestó.» |
+
+Para que `fallo` sea distinguible hizo falta tocar una pieza de más abajo:
+`_cabeceras_recientes()` devolvía lista vacía tanto con un buzón limpio como con un 403 de
+Graph. Ahora lanza `BuzonCaido`, **y esa es la regla general**: una función que lee algo de
+fuera no puede contestar «no hay nada» cuando lo que pasa es «no lo sé». Un área que
+revienta entera también deja su nota, que es justo el caso que antes llegaba mudo.
+
+El widget «Anoche» enseña además **la hora a la que corrió** (`creado_at`), que es la
+prueba de vida del turno y lo único que sigue estando cuando no hay nada que enseñar.
+
 ## Tablas
 
 `supabase/migrations/20260914_turno_noche.sql`. **Aplicarla el mismo día que se mergea**
@@ -185,7 +215,7 @@ descolgar y la **lee** el widget: dos copias acaban siendo dos frases distintas.
 
 | Tabla | Para qué |
 |---|---|
-| `noche_partes` | una fila por noche; `fecha` es la PK y eso es lo que da la idempotencia. `resumen` guarda las cuentas |
+| `noche_partes` | una fila por noche; `fecha` es la PK y eso es lo que da la idempotencia. `resumen` guarda las cuentas **y `revisado`**, la nota de lo que se llegó a mirar |
 | `noche_items` | lo que se hizo. `area` ∈ correo / codigo / agenda / recado; `estado` pendiente → aprobado \| descartado |
 
 `_anotar_en_el_parte()` abre el parte si no existe: el atajo del código se dispara cuando
