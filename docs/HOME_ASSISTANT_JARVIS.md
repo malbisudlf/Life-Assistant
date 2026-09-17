@@ -492,9 +492,16 @@ condition:
   - condition: template
     value_template: "{{ trigger.to_state.state | int(0) > 0 }}"
 action:
-  # Las luces PRIMERO: no dependen de Alexa y son lo que de verdad despierta.
+  # Las luces PRIMERO: no dependen de Alexa y son lo que de verdad despierta. Y una
+  # luz POR PASO, no las dos en el mismo `entity_id`: si una está `unavailable` —a la
+  # tira led le pasa— el paso entero puede fallar y llevarse la otra por delante, que
+  # es el mismo error que arreglan los `continue_on_error`, un nivel más abajo.
   - service: light.turn_on
-    target: { entity_id: [light.tira_led, light.luces_mesa] }   # ← SUSTITÚYELAS
+    target: { entity_id: light.luces_mesa }   # ← SUSTITÚYELA
+    data: { brightness_pct: 100 }
+    continue_on_error: true
+  - service: light.turn_on
+    target: { entity_id: light.tira_led }     # ← SUSTITÚYELA
     data: { brightness_pct: 100 }
     continue_on_error: true
   - service: switch.turn_off
@@ -541,6 +548,17 @@ action:
    presencia que HA empuja al backend dice que no estás. Suele ser un `person` en
    `not_home` por un GPS desviado de madrugada; mira `GET /presencia` y la zona. Queda
    además a WARNING en `app_logs`.
+
+   **Y una presencia reciente no quiere decir una presencia cierta.** El backend
+   caduca la presencia por su `updated_at` (`PRESENCE_TTL_MINUTES`) y se calla cuando
+   no sabe, que es lo correcto; pero la automatización `Life Assistant - Presencia`
+   reenvía el estado del `device_tracker` **cada 15 minutos aunque el tracker lleve un
+   día sin reportar**, así que el dato llega siempre fresco y el TTL no llega a
+   dispararse nunca. Eso fue lo que pasó el 2026-09-17: el iPhone dejó de mandar
+   ubicación el día anterior a las 09:24, se quedó clavado en `not_home` a 26 km de
+   casa, y la alarma de las 08:30 escaló sin tocar la casa mientras Mikel dormía en
+   ella. Antes de culpar al ritual, mira el `last_reported` del `device_tracker`, no
+   solo su estado.
 3. La **traza de la automatización** (Ajustes → Automatizaciones → «Life Assistant -
    Alarma, despertar» → Trazas). Si el `last_triggered` es de hoy, HA se disparó y el
    fallo está en un paso concreto del ritual: la traza dice cuál. Si no se disparó

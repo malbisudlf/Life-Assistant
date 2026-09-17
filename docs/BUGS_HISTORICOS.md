@@ -670,3 +670,26 @@
   - De paso se vio lo otro: con dos botones, «arreglar» o «no hacer nada» es una decisión
     **a ciegas**, porque en una notificación cabe cuántos errores hay pero no cuáles. De
     ahí el tercer botón, «Hablarlo», y que Jarvis lea el issue entero al descolgar.
+
+- **La alarma no encendió ni una luz, y el ritual de Home Assistant estaba perfecto.** El
+  2026-09-17 la alarma de las 08:30 no encendió las luces, no puso música y no habló. El
+  ritual de HA era el sospechoso natural —se acababa de reescribir para que las luces
+  fueran primero y ningún paso de Alexa se llevara el resto— pero la automatización **ni
+  siquiera se disparó**: `sensor.life_assistant_alarma` estuvo a `0` toda la mañana. El
+  backend sí había escalado; lo que no hizo fue decírselo a la casa, porque
+  `_alarma_en_casa()` leyó la presencia y decía `not_home`.
+  - Y la presencia decía `not_home` porque el `device_tracker` del iPhone llevaba **desde
+    el día anterior a las 09:24 sin reportar**, clavado en unas coordenadas a 26 km de
+    casa. El backend tiene una defensa justo para esto —`presencia_vigente()` caduca el
+    dato a los `PRESENCE_TTL_MINUTES`— y no sirvió de nada: la automatización
+    `Life Assistant - Presencia` reenvía el estado del tracker **cada 15 minutos**, así
+    que el `updated_at` se renovaba solo y el dato caducado se presentaba siempre recién
+    hecho.
+  - Moraleja: **una marca de tiempo solo caduca lo que la pone, no lo que la cuenta.** Un
+    TTL sobre la hora en que un dato se *copió* no dice nada de la hora en que se
+    *midió*; si el copiador corre en bucle, el TTL no se dispara nunca. Cuando un dato
+    pasa por dos manos, la que hay que vigilar es la primera.
+  - Corolario para depurar: antes de acusar al último tramo (aquí, el ritual de HA),
+    comprueba que el tramo llegó a pedirse. `last_triggered` de la automatización y el
+    historial del sensor lo dicen en diez segundos, y ahorran reescribir algo que
+    funcionaba.
