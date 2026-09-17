@@ -24,7 +24,7 @@ import {
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
   posicionAhora,
-  FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_AUSENTE, FUENTE_PARCIAL,
+  FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
 import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
@@ -1469,6 +1469,8 @@ export default function Dashboard() {
   // dato: sin él, un carril vacío por un fallo de red se pintaría igual que una
   // jornada tranquila, que es justo la confusión que este widget no puede permitirse.
   const [lineaAvisos, setLineaAvisos] = useState({ estado: FUENTE_CARGANDO, datos: null });
+  const [lineaTramos, setLineaTramos] = useState({ estado: FUENTE_CARGANDO, datos: null });
+  const [lineaCasa, setLineaCasa]     = useState({ estado: FUENTE_CARGANDO, datos: null });
   const [lineaPresenciaAhora, setLineaPresenciaAhora] = useState(null);
   const [showCreateEvent, setShowCreateEvent] = useState(false);
   const [calendarsList, setCalendarsList]     = useState([]);
@@ -1864,6 +1866,16 @@ export default function Dashboard() {
       .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then(d => { if (vivo) setLineaAvisos({ estado: FUENTE_OK, datos: d.avisos || [] }); })
       .catch(() => { if (vivo) setLineaAvisos({ estado: FUENTE_ERROR, datos: null }); });
+    // Los tramos de presencia y las acciones de la casa: las dos fuentes con hora de
+    // esos dos carriles. Piden por día, igual que los avisos.
+    apiFetch(`${API}/presencia/tramos?dia=${lineaDia}`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(d => { if (vivo) setLineaTramos({ estado: FUENTE_OK, datos: d.tramos || [] }); })
+      .catch(() => { if (vivo) setLineaTramos({ estado: FUENTE_ERROR, datos: null }); });
+    apiFetch(`${API}/casa/acciones?dia=${lineaDia}`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(d => { if (vivo) setLineaCasa({ estado: FUENTE_OK, datos: d.acciones || [] }); })
+      .catch(() => { if (vivo) setLineaCasa({ estado: FUENTE_ERROR, datos: null }); });
     // La presencia de AHORA, solo como matiz del carril del día en curso: la serie
     // diaria (time_at_home) ya viene dentro de /health/metrics.
     apiFetch(`${API}/presencia`, { headers: authHeaders() })
@@ -4336,23 +4348,28 @@ export default function Dashboard() {
                   },
                   nota: training ? "sesiones: solo las 10 últimas"
                                  : "sin las sesiones de entrenamiento personal" },
+      // El total del día (time_at_home) va de resumen debajo del carril; los tramos con
+      // hora, que son lo que se dibuja, llegan aparte en `presenciaTramos`.
       presencia: healthLoading ? { estado: FUENTE_CARGANDO }
                : !healthData   ? { estado: FUENTE_ERROR }
                : { estado: FUENTE_OK,
                    datos: { filas: findMetric(healthData, "time_at_home") },
                    nota: lineaDia === hoyLinea && lineaPresenciaAhora?.conocida
-                     ? `solo el total del día · ahora ${lineaPresenciaAhora.en_casa ? "en casa" : "fuera"}`
-                     : "solo el total del día, sin tramos" },
+                     ? `ahora ${lineaPresenciaAhora.en_casa ? "en casa" : "fuera"}`
+                     : "" },
+      presenciaTramos: lineaTramos,
       // lineaAvisos viene de /avisos/enviados: trae la hora real de cada aviso del día
       // pedido, así que el carril coloca un punto por aviso igual que el resto.
       avisos: lineaAvisos,
-      // El catálogo que empuja Home Assistant (POST /ha/entidades) es una foto del
-      // AHORA, sin marcas de tiempo, así que no puede alimentar el eje de ningún día.
-      // Mientras no haya histórico de acciones, el carril dice que no lo sabe.
-      casa: { estado: FUENTE_AUSENTE, nota: "el backend no guarda cuándo actuó la casa" },
+      // `/casa/acciones`: lo que se le PIDIÓ a la casa, con su hora. No es lo mismo que
+      // lo que la casa hizo —eso solo lo sabe Home Assistant— y por eso el carril habla
+      // de órdenes. Antes esto era `FUENTE_AUSENTE` escrito a mano: la cola de órdenes
+      // vive en memoria y se vacía en cuanto HA se la lleva, así que no quedaba rastro.
+      casa: lineaCasa,
     },
   }), [lineaDia, hoyLinea, authNeeded, loading, allEvents, classEvents,
-       healthLoading, healthData, training, lineaAvisos, lineaPresenciaAhora]);
+       healthLoading, healthData, training, lineaAvisos, lineaTramos, lineaCasa,
+       lineaPresenciaAhora]);
 
   // La línea del "ahora" se recalcula con el tic del reloj, pero aparte: meterla en el
   // memo de arriba rehaced todo el día dos veces por minuto para mover un píxel.

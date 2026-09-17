@@ -418,10 +418,33 @@ export function normalizarAvisos(avisos, diaISO) {
   return salida;
 }
 
-// Presencia: la serie diaria `time_at_home` (horas en casa en `value`, horas fuera en
-// `extra.fuera`). NO hay tramos horarios y no los va a haber: guardar un histórico de
-// presencia está descartado a propósito en docs/IDEAS.md por ser el dato más sensible
-// del proyecto. Así que este carril da un RESUMEN del día, y lo dice.
+// Presencia, los TRAMOS: `/presencia/tramos` da [{desde, hasta, en_casa}] de un día, ya
+// unidos por el backend. Solo hay horas y un booleano — ni zonas ni coordenadas: lo que
+// `docs/IDEAS.md` descartó era guardar DÓNDE estabas, y esto guarda solo cuándo estabas
+// en casa. Los de "fuera" van atenuados: el carril es "presencia", y estar fuera es el
+// hueco, no un acontecimiento.
+export function normalizarTramosPresencia(tramos, diaISO) {
+  const salida = [];
+  (tramos || []).forEach((t, i) => {
+    if (!t) return;
+    const inicio = aFechaLocal(t.desde);
+    const fin    = aFechaLocal(t.hasta);
+    if (!inicio || !fin) return;
+    const item = conTramo({
+      id: `presencia-${i}`,
+      carril: "presencia",
+      etiqueta: t.en_casa ? "En casa" : "Fuera",
+      tono: t.en_casa ? "normal" : "atenuado",
+    }, inicio, fin, diaISO);
+    if (item) salida.push(item);
+  });
+  return salida;
+}
+
+// Presencia, el TOTAL del día: la serie `time_at_home` (horas en casa en `value`, horas
+// fuera en `extra.fuera`). Se conserva junto a los tramos porque responde otra pregunta
+// —cuánto— y porque viene de más atrás: los tramos solo existen desde que se empezaron a
+// guardar, y un día viejo seguirá teniendo su total cuando ya no tenga dibujo.
 export function normalizarPresencia(filas, diaISO) {
   for (const fila of filas || []) {
     if (String(fila?.date || "").slice(0, 10) !== diaISO) continue;
@@ -436,6 +459,44 @@ export function normalizarPresencia(filas, diaISO) {
     };
   }
   return null;
+}
+
+// La casa: `/casa/acciones` da [{momento, servicio, entidad, origen}] de un día. Cada
+// orden es un INSTANTE (inicio == fin), como los avisos: encender una luz no dura, y
+// darle duración sería inventarse cuánto estuvo encendida —que es un dato que no hay,
+// porque lo que se guarda es lo que se PIDIÓ, no lo que la casa hizo después.
+export function normalizarCasa(acciones, diaISO) {
+  const salida = [];
+  (acciones || []).forEach((a, i) => {
+    if (!a) return;
+    const momento = aFechaLocal(a.momento);
+    const base = {
+      id: `casa-${i}`,
+      carril: "casa",
+      etiqueta: textoAccionCasa(a),
+      detalle: a.origen || "",
+    };
+    if (!momento) { salida.push(sinTramo(base)); return; }
+    const item = conTramo(base, momento, momento, diaISO);
+    if (item) salida.push(item);
+  });
+  return salida;
+}
+
+// "light.turn_on" + "light.luces_mesa" → "Encender luces mesa". El servicio se traduce
+// solo cuando se sabe; lo que no, se enseña crudo en vez de esconderse, que es la misma
+// regla que sigue el parte de la noche con sus motivos.
+const ACCIONES_CASA = {
+  turn_on: "Encender", turn_off: "Apagar", toggle: "Cambiar",
+  volume_set: "Poner volumen a", play_media: "Poner", media_stop: "Parar",
+  media_pause: "Pausar", media_play: "Reanudar",
+};
+export function textoAccionCasa(accion) {
+  const servicio = String(accion?.servicio || "");
+  const entidad  = String(accion?.entidad || "");
+  const nombre   = (entidad.split(".")[1] || entidad).replace(/_/g, " ");
+  const verbo    = ACCIONES_CASA[servicio.split(".")[1] || ""];
+  return verbo ? `${verbo} ${nombre}`.trim() : `${servicio} ${nombre}`.trim();
 }
 
 // ── Construcción del día completo ────────────────────────────────────────────
@@ -499,13 +560,25 @@ export function construirLineaTiempo({ dia, hoy = null, ahora = null, fuentes = 
   // el carril se construye igual que eventos/sueño/entrenos, con items de verdad.
   const avisos = f.avisos?.estado === FUENTE_OK ? normalizarAvisos(f.avisos.datos, diaISO) : [];
 
+  // Los tramos vienen de `/presencia/tramos` y el total del día de `time_at_home`: dos
+  // fuentes para un carril. Se piden aparte porque responden cosas distintas —cuándo y
+  // cuánto— y porque los tramos solo existen desde que se empezaron a guardar: un día
+  // anterior a eso conserva su total, que es más de lo que tenía antes.
+  const tramosPresencia = f.presenciaTramos?.estado === FUENTE_OK
+    ? normalizarTramosPresencia(f.presenciaTramos.datos, diaISO) : [];
+  const casa = f.casa?.estado === FUENTE_OK ? normalizarCasa(f.casa.datos, diaISO) : [];
+
   const carriles = [
     construirCarril("eventos",   f.eventos,   eventos),
     construirCarril("sueno",     f.sueno,     sueno),
     construirCarril("entrenos",  f.entrenos,  entrenos),
-    construirCarril("presencia", f.presencia, [], { resumen: presencia }),
+    // La fuente del carril es la de los TRAMOS, que es lo que se dibuja; el total va de
+    // resumen debajo. Si los tramos fallan, el carril dice que no lo sabe aunque el
+    // total esté ahí: un carril vacío con un texto debajo es justo la confusión que este
+    // widget existe para no crear.
+    construirCarril("presencia", f.presenciaTramos, tramosPresencia, { resumen: presencia }),
     construirCarril("avisos",    f.avisos,    avisos),
-    construirCarril("casa",      f.casa,      []),
+    construirCarril("casa",      f.casa,      casa),
   ];
 
   return {

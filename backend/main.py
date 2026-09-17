@@ -4877,13 +4877,20 @@ def coords_presencia() -> tuple[float, float] | None:
     return float(p["lat"]), float(p["lon"])
 
 
-def _tramos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, float]]:
-    """Trocea [inicio, fin) por día LOCAL → [(YYYY-MM-DD, horas), ...].
+def _trozos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, datetime, datetime]]:
+    """Trocea [inicio, fin) por día LOCAL → [(YYYY-MM-DD, desde, hasta), ...].
 
     Sin trocear, el tramo que cruza la medianoche se imputaría entero al día en que
     empezó — y ese tramo es justo el de la noche, el que más pesa en cualquier cruce
-    con el sueño."""
-    tramos: list[tuple[str, float]] = []
+    con el sueño.
+
+    Devuelve los BORDES y no solo las horas porque de aquí salen dos cosas: el total
+    diario, al que le basta la duración, y los tramos que dibuja la línea del día, que
+    necesitan saber cuándo empieza y cuándo acaba cada trozo. Una sola función para las
+    dos: el corte de medianoche es delicado —la semana del cambio de hora— y tenerlo
+    escrito dos veces es tenerlo mal en una de ellas.
+    """
+    trozos: list[tuple[str, datetime, datetime]] = []
     cursor = inicio.astimezone(LOCAL_TZ)
     final  = fin.astimezone(LOCAL_TZ)
     while cursor < final:
@@ -4891,11 +4898,92 @@ def _tramos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, float]]:
         # la hora a cero para que un cambio de hora no deje el corte en las 23:00.
         siguiente = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         corte = min(siguiente, final)
-        horas = (corte - cursor).total_seconds() / 3600
-        if horas > 0:
-            tramos.append((cursor.date().isoformat(), horas))
+        if corte > cursor:
+            trozos.append((cursor.date().isoformat(), cursor, corte))
         cursor = corte
-    return tramos
+    return trozos
+
+
+def _tramos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, float]]:
+    """Lo mismo, en horas: [(YYYY-MM-DD, horas), ...]."""
+    return [(dia, (hasta - desde).total_seconds() / 3600)
+            for dia, desde, hasta in _trozos_por_dia(inicio, fin)]
+
+
+PRESENCIA_TRAMOS_URL  = f"{SUPABASE_URL}/rest/v1/presencia_tramos"
+# Cuánto se guarda. La línea del día llega a 29 días atrás; el margen es para no perder
+# el borde por un desfase de zona horaria. De este dato en concreto no hace falta un
+# histórico de años: ver la cabecera de la migración.
+PRESENCIA_TRAMOS_DIAS = int(os.getenv("PRESENCIA_TRAMOS_DIAS", "35"))
+# El día en que se purgó por última vez. La purga de `app_logs` se hace "una vez por
+# proceso", que valía cuando Fly arrancaba en frío a diario; desde la mudanza al Green el
+# backend puede pasarse semanas sin reiniciar y esa purga no llegaría a correr nunca. Aquí
+# el disparador es el CALENDARIO, no el arranque, y como HA empuja presencia cada quince
+# minutos hay garantía de que pasa todos los días.
+_presencia_purga_dia = ""
+_presencia_purga_lock = threading.Lock()
+
+
+def _purgar_tramos_presencia() -> None:
+    """Borra los tramos más viejos que `PRESENCIA_TRAMOS_DIAS`. Una vez al día."""
+    global _presencia_purga_dia
+    hoy = _ahora_local().date().isoformat()
+    with _presencia_purga_lock:
+        if _presencia_purga_dia == hoy:
+            return
+        _presencia_purga_dia = hoy
+    corte = (_ahora_local().date() - timedelta(days=PRESENCIA_TRAMOS_DIAS)).isoformat()
+    try:
+        r = http.delete(f"{PRESENCIA_TRAMOS_URL}?dia=lt.{corte}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        if r.status_code >= 300:
+            logger.warning("Presencia: no se pudieron purgar los tramos viejos (%s)", r.status_code)
+    except requests.RequestException:
+        logger.warning("Presencia: falló la purga de tramos viejos")
+
+
+def _unir_tramos(filas: list) -> list:
+    """Une los tramos consecutivos que dicen lo mismo. Espera las filas ya ordenadas.
+
+    HA empuja presencia cada quince minutos, así que una tarde en casa se guarda como
+    treinta y dos filas idénticas y pegadas. Unirlas es lo que convierte eso en «de 14:00
+    a 22:00, en casa», que es lo que se quiere leer. Se unen aunque quede un hueco entre
+    una y la siguiente: el hueco es el rato en que nadie informó, y partir el tramo ahí
+    dibujaría un «no estabas» que nadie ha comprobado.
+    """
+    unidos: list = []
+    for f in filas:
+        en_casa = bool(f.get("en_casa"))
+        if unidos and unidos[-1]["en_casa"] == en_casa:
+            unidos[-1]["hasta"] = f.get("hasta")
+            continue
+        unidos.append({"desde": f.get("desde"), "hasta": f.get("hasta"), "en_casa": en_casa})
+    return unidos
+
+
+def _guardar_tramos_presencia(trozos: list, en_casa: bool) -> None:
+    """Escribe los tramos con hora. Nunca lanza: es un extra del aviso de presencia.
+
+    Lo que se guarda es CUÁNDO, no dónde: un booleano y dos horas. Ni zona, ni
+    coordenadas, ni el nombre del sitio — eso sigue viviendo solo en la fila `actual` de
+    `presence`, que se pisa a sí misma y no deja rastro.
+    """
+    filas = [{"dia": dia, "desde": desde.isoformat(), "hasta": hasta.isoformat(),
+              "en_casa": bool(en_casa)}
+             for dia, desde, hasta in trozos]
+    if not filas:
+        return
+    try:
+        r = http.post(PRESENCIA_TRAMOS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"}, json=filas)
+        if r.status_code >= 300:
+            logger.warning("Presencia: no se pudieron guardar %s tramos (%s)",
+                           len(filas), r.status_code)
+            return
+    except requests.RequestException:
+        logger.warning("Presencia: falló el guardado de tramos")
+        return
+    _purgar_tramos_presencia()
 
 
 def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
@@ -4910,9 +4998,14 @@ def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
     if horas_hueco <= 0 or horas_hueco > PRESENCE_MAX_GAP_HOURS:
         return
 
-    tramos = _tramos_por_dia(desde, hasta)
-    if not tramos:
+    trozos = _trozos_por_dia(desde, hasta)
+    if not trozos:
         return
+    # Los tramos con hora, para la línea del día. Van antes del total porque son el dato
+    # y el total es el derivado, y aparte porque cada uno falla por su cuenta: sin tramos
+    # el carril se queda sin dibujo pero la serie diaria sigue alimentando los cruces.
+    _guardar_tramos_presencia(trozos, en_casa)
+    tramos = [(dia, (h - d).total_seconds() / 3600) for dia, d, h in trozos]
     existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
 
     agrupadas = {}
@@ -5035,6 +5128,34 @@ def get_presencia(credentials: HTTPAuthorizationCredentials = Depends(verify_tok
         "ttl_minutos":  PRESENCE_TTL_MINUTES,
         "tiene_coords": p.get("lat") is not None and p.get("lon") is not None,
     }
+
+
+@app.get("/presencia/tramos")
+def get_presencia_tramos(dia: str = "",
+                         credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Los tramos de un día: cuándo estuviste en casa y cuándo fuera.
+
+    Devuelve horas y un booleano, nunca un lugar — la tabla tampoco los guarda. Los
+    tramos llegan ya unidos: HA empuja cada quince minutos, así que una tarde entera en
+    casa son treinta y dos filas seguidas diciendo lo mismo, y dibujarlas de una en una
+    sería un carril a rayas que no significa nada.
+    """
+    dia = dia or _ahora_local().date().isoformat()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", dia):
+        raise HTTPException(status_code=400, detail="dia debe ser YYYY-MM-DD")
+    try:
+        r = http.get(f"{PRESENCIA_TRAMOS_URL}?dia=eq.{dia}"
+                     "&select=desde,hasta,en_casa&order=desde.asc&limit=2000",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Presencia: no se pudieron leer los tramos del %s", dia)
+        raise HTTPException(status_code=502, detail="No se pudieron leer los tramos de presencia")
+    return {"dia": dia, "tramos": _unir_tramos(filas)}
 
 
 # ── RESUMEN DIARIO POR CORREO ─────────────────────────────────────────────────
@@ -8482,6 +8603,8 @@ TABLAS_CONOCIDAS = {
     "migraciones_aplicadas": "20260910_migraciones_aplicadas",
     "noche_partes":          "20260914_turno_noche",
     "noche_items":           "20260914_turno_noche",
+    "presencia_tramos":      "20260917_linea_del_dia",
+    "casa_acciones":         "20260917_linea_del_dia",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -9366,6 +9489,73 @@ def _casa_datos_limpios(datos) -> dict:
     return fuera
 
 
+CASA_ACCIONES_URL  = f"{SUPABASE_URL}/rest/v1/casa_acciones"
+CASA_ACCIONES_DIAS = int(os.getenv("CASA_ACCIONES_DIAS", "35"))
+_casa_purga_dia  = ""
+_casa_purga_lock = threading.Lock()
+
+
+def _apuntar_accion_casa(servicio: str, entidad: str) -> None:
+    """Deja constancia de una orden a la casa. Nunca lanza: es un registro, no la orden.
+
+    La cola (`_ha_ordenes`) se VACÍA en cuanto Home Assistant la sirve, que está bien para
+    lo suyo pero deja el carril «Casa» de la línea del día sin nada que dibujar: media
+    hora después de encender una luz no hay forma de saber que se encendió. Esto es lo
+    único que lo recuerda.
+
+    El origen sale de `_boca_actual`, la contextvar que ya dice por dónde entró lo que se
+    está haciendo (chat, voz, teléfono, un atajo, el sistema). Añadirlo como parámetro de
+    esta función lo metería en el esquema de la herramienta de Jarvis, y de dónde viene
+    una orden no es algo que deba poder decir el modelo.
+    """
+    ahora = _ahora_local()
+    fila = {"dia": ahora.date().isoformat(), "momento": ahora.isoformat(),
+            "servicio": servicio, "entidad": entidad, "origen": _boca_actual.get("") or None}
+    try:
+        r = http.post(CASA_ACCIONES_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"}, json=fila)
+        if r.status_code >= 300:
+            logger.warning("Casa: no se pudo apuntar la acción (%s)", r.status_code)
+            return
+    except requests.RequestException:
+        logger.warning("Casa: falló el apunte de la acción")
+        return
+
+    global _casa_purga_dia
+    hoy = ahora.date().isoformat()
+    with _casa_purga_lock:
+        if _casa_purga_dia == hoy:
+            return
+        _casa_purga_dia = hoy
+    corte = (ahora.date() - timedelta(days=CASA_ACCIONES_DIAS)).isoformat()
+    try:
+        http.delete(f"{CASA_ACCIONES_URL}?dia=lt.{corte}",
+                    headers={**supabase_headers(), "Prefer": "return=minimal"})
+    except requests.RequestException:
+        logger.warning("Casa: falló la purga de acciones viejas")
+
+
+@app.get("/casa/acciones")
+def get_casa_acciones(dia: str = "",
+                      credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Lo que se le mandó a la casa un día, con su hora. Solo para mirar."""
+    dia = dia or _ahora_local().date().isoformat()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", dia):
+        raise HTTPException(status_code=400, detail="dia debe ser YYYY-MM-DD")
+    try:
+        r = http.get(f"{CASA_ACCIONES_URL}?dia=eq.{dia}"
+                     "&select=momento,servicio,entidad,origen&order=momento.asc&limit=500",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return {"dia": dia, "acciones": r.json() or []}
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("Casa: no se pudieron leer las acciones del %s", dia)
+        raise HTTPException(status_code=502, detail="No se pudieron leer las acciones de la casa")
+
+
 def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> dict:
     servicio = str(servicio or "").strip().lower()
     entidad  = str(entidad or "").strip().lower()
@@ -9392,6 +9582,7 @@ def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> d
         "servicio": servicio, "entidad": entidad,
         "datos": _casa_datos_limpios(datos), "pedida": time.time(),
     })
+    _apuntar_accion_casa(servicio, entidad)
     return {"ok": True, "servicio": servicio, "entidad": entidad,
             "nota": "Encolada. Home Assistant la ejecuta en su próximo sondeo (segundos)."}
 

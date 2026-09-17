@@ -448,10 +448,36 @@ tocarlo:
   cualquier otro caso, borde discontinuo y «no lo sé». La cabecera dice cuántos carriles
   de seis tienen datos, porque un día con dos carriles conocidos no es un día tranquilo.
 - **Lo que hoy no se puede pintar, y por qué**: `/calendar/events` solo consulta **desde
-  hoy**, así que al retroceder el carril de eventos es `parcial`; la presencia da horas al
-  día pero no tramos (el histórico de presencia está descartado a propósito); y de la casa
-  no hay histórico ninguno — `/ha/entidades` es POST-only y su contenido es una foto del
-  ahora sin marcas de tiempo. Los avisos SÍ tienen horas desde `GET /avisos/enviados`.
+  hoy**, así que al retroceder el carril de eventos es `parcial`. Los demás ya tienen
+  horas: los avisos desde `GET /avisos/enviados`, la presencia desde
+  `GET /presencia/tramos` y la casa desde `GET /casa/acciones`.
+
+### Presencia y casa: los dos carriles que estaban siempre vacíos
+
+Nacieron sin poder dibujar nada y se arreglaron el 2026-09-17, cada uno por un motivo
+distinto que conviene no volver a crear:
+
+- **Presencia.** Solo existía el total diario (`time_at_home`), así que el carril se
+  quedaba en blanco con una línea de texto debajo — que es exactamente la confusión que
+  este widget existe para no crear. Ahora hay tramos con hora
+  (`presencia_tramos`, `GET /presencia/tramos`) y se dibujan: en casa en color, fuera
+  atenuado, porque estar fuera es el hueco y no un acontecimiento. **Lo que se guarda es
+  el CUÁNDO, nunca el DÓNDE**: un booleano y dos horas, sin zona ni coordenadas. Eso
+  acota la reversión de lo que `docs/IDEAS.md` había descartado. El total diario se
+  mantiene como resumen debajo: responde otra pregunta (cuánto) y cubre los días
+  anteriores a que los tramos existieran.
+- **Casa.** No tenía fuente de ninguna clase: la cola de órdenes vive **en memoria y se
+  vacía en cuanto Home Assistant se la lleva**, así que media hora después de encender
+  una luz no quedaba rastro de que se hubiera encendido. Ahora cada orden se apunta en
+  `casa_acciones` al encolarla, y el carril las pinta como instantes —no como tramos: lo
+  que consta es lo que se **pidió**, no cuánto estuvo encendida la luz, que es un dato que
+  el backend no tiene—. El estado del carril era un `FUENTE_AUSENTE` escrito a mano en el
+  componente: si un carril vuelve a nacer así, la pregunta es qué fuente le falta, no qué
+  texto poner.
+
+La lección común: **un carril que nunca puede dibujar nada no se lee como «no hay datos»,
+se lee como «esto está roto»** — y las dos veces la causa era que el dato se tiraba antes
+de llegar a ninguna parte, no que fuera imposible de obtener.
 
 ## Panel ⚙: coste y por qué
 

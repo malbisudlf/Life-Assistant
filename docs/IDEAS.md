@@ -364,8 +364,13 @@ Escrito aquí para no volver a proponerlo dentro de seis meses sin acordarse del
 
 - **Guardar el historial de conversaciones de Jarvis en el backend.** Vive en
   `localStorage` por decisión, no por pereza: menos estado que mantener y nada que purgar.
-- **Un histórico de presencia.** Es el dato más sensible del proyecto y nada de lo que hay
-  encima lo necesita: la serie diaria de horas en casa da todo lo que se usa, sin lugares.
+- **Un histórico de presencia CON LUGARES.** Es el dato más sensible del proyecto y nada
+  de lo que hay encima lo necesita. Lo que sí se guarda desde el 2026-09-17 son tramos de
+  `en casa` / `fuera` con sus horas (`presencia_tramos`), porque el carril de la línea del
+  día no podía dibujarse sin ellos y se leía como estropeado. La frontera es esa: el
+  CUÁNDO se guarda —35 días y se purga—, el DÓNDE no. Ni zona, ni coordenadas, ni nombre
+  de sitio: eso sigue viviendo solo en la fila `actual` de `presence`, que se pisa a sí
+  misma y no deja rastro.
 - **Interpretar los datos dentro del correo.** Quien lo lee ya es un modelo, y las
   conclusiones viven en `helpers.js` como única fuente de verdad. Portarlas a Python las
   duplicaría en dos lenguajes.

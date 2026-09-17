@@ -126,3 +126,54 @@ class TestFronteraDeLaCasa:
         """Un servicio desconocido no puede colarse por la vía directa."""
         assert main._casa_pide_confirmar({}) is True
         assert main._casa_pide_confirmar({"servicio": "loquesea.hacer"}) is True
+
+
+class TestElRastroDeLaCasa:
+    """Lo que se le pidió a la casa, con su hora.
+
+    La cola (`_ha_ordenes`) se vacía en cuanto HA la sirve, y eso dejaba el carril «Casa»
+    de la línea del día sin absolutamente nada que dibujar: media hora después de
+    encender una luz no había forma de saber que se encendió.
+    """
+
+    def test_encolar_una_orden_deja_constancia(self, mock_requests):
+        apuntado = {}
+
+        def _post(url, **kwargs):
+            apuntado["fila"] = kwargs.get("json")
+            return FakeResponse({}, 201)
+
+        _con_catalogo(mock_requests, [{"id": "light.salon"}])
+        mock_requests.add("POST", "/casa_acciones", _post)
+
+        main._j_casa_ordenar("light.turn_on", "light.salon")
+
+        assert apuntado["fila"]["servicio"] == "light.turn_on"
+        assert apuntado["fila"]["entidad"] == "light.salon"
+
+    def test_una_orden_rechazada_no_deja_rastro(self, mock_requests):
+        """El apunte va DESPUÉS de las validaciones: lo que no se encoló no pasó."""
+        llamadas = []
+        _con_catalogo(mock_requests, [{"id": "light.salon"}])
+        mock_requests.add("POST", "/casa_acciones",
+                          lambda url, **kw: llamadas.append(1) or FakeResponse({}, 201))
+
+        assert main._j_casa_ordenar("shell_command.turn_on", "light.salon")["ok"] is False
+        assert main._j_casa_ordenar("light.turn_on", "light.inventada")["ok"] is False
+        assert llamadas == []
+
+    def test_si_no_se_puede_apuntar_la_orden_sale_igual(self, mock_requests):
+        """El registro es para mirar; la orden es para que pase algo. Si Supabase está
+        caído, lo que no puede fallar es lo segundo."""
+        _con_catalogo(mock_requests, [{"id": "light.salon"}])
+        mock_requests.add("POST", "/casa_acciones", FakeResponse({}, 500))
+
+        assert main._j_casa_ordenar("light.turn_on", "light.salon")["ok"] is True
+
+    def test_leer_las_acciones_pide_jwt_y_valida_el_dia(self, client, auth_headers):
+        assert client.get("/casa/acciones").status_code == 401
+        assert client.get("/casa/acciones?dia=ayer", headers=auth_headers).status_code == 400
+
+    def test_los_tramos_de_presencia_piden_jwt_y_validan_el_dia(self, client, auth_headers):
+        assert client.get("/presencia/tramos").status_code == 401
+        assert client.get("/presencia/tramos?dia=2026-13", headers=auth_headers).status_code == 400
