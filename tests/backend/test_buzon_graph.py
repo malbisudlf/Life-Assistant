@@ -6,6 +6,8 @@ Microsoft retiró la autenticación básica. Lo que se comprueba aquí es lo que
 sustitución: que sin permiso no se toca el buzón, que pedir el permiso nuevo no puede
 llevarse por delante el calendario, y que leer sigue sin descolocar nada.
 """
+import pytest
+
 import main
 from conftest import FakeResponse
 
@@ -92,7 +94,10 @@ class TestLeerElBuzon:
         mock_requests.add("GET", "/mailFolders/inbox/messages", FakeResponse({}, 403))
 
         with caplog.at_level("WARNING"):
-            assert main._cabeceras_recientes() == []
+            # Y no devuelve lista vacía: un buzón que no contesta tiene que distinguirse
+            # de uno tranquilo, o el parte de la mañana los cuenta igual.
+            with pytest.raises(main.BuzonCaido):
+                main._cabeceras_recientes()
 
         assert "conectar Outlook" in caplog.text
 

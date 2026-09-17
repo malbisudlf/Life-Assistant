@@ -4988,8 +4988,11 @@ export default function Dashboard() {
             {parteNoche === null ? (
               <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>Cargando…</div>
             ) : !parte.total ? (
+              // Una noche en blanco tiene que decir QUÉ se miró, no solo que no había
+              // nada: si no, "no hubo nada que hacer" y "esto está roto" se leen igual,
+              // y lo que se acaba creyendo es que no te escribe nadie.
               <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
-                {parteNoche?.fecha ? "No hubo nada que hacer esta noche." : "Todavía no hay ningún parte."}
+                {parteNoche?.fecha ? fraseParteNoche(parteNoche) : "Todavía no hay ningún parte."}
               </div>
             ) : (
               <>
@@ -5044,6 +5047,13 @@ export default function Dashboard() {
                   </div>
                 ))}
               </>
+            )}
+            {parteNoche?.creado_at && (
+              // La hora a la que corrió es la prueba de vida del turno, y la única que
+              // sigue estando cuando no hay nada más que enseñar.
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 10 }}>
+                Corrió a las {formatTime(parteNoche.creado_at)}
+              </div>
             )}
           </div>
         );

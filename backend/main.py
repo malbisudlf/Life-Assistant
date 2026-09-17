@@ -12179,6 +12179,16 @@ def _descarga_acotada(r, tope: int = 0) -> bytes | None:
     return b"".join(trozos)
 
 
+class BuzonCaido(RuntimeError):
+    """Graph no contestó a lo que se le pidió del buzón.
+
+    Es una excepción y no una lista vacía porque **un buzón caído y un buzón tranquilo
+    se parecen demasiado**: los dos dan cero correos, y contarlos igual es lo que hacía
+    que el parte de la mañana dijera «no hubo nada que hacer» una noche en la que no se
+    llegó a mirar nada. Quien lea el buzón tiene que poder distinguirlo.
+    """
+
+
 def _cabeceras_recientes() -> list:
     """Asunto, remitente y id de los correos sin leer de las últimas horas.
 
@@ -12202,7 +12212,7 @@ def _cabeceras_recientes() -> list:
         headers=_buzon_cabeceras(token),
     )
     if _buzon_fallo(r, "cabeceras"):
-        return []
+        raise BuzonCaido(str(r.status_code))
     salida = []
     for m in (r.json() or {}).get("value", []) or []:
         remitente = (((m.get("from") or {}).get("emailAddress")) or {})
@@ -12453,21 +12463,34 @@ def _guardar_borrador(correo: dict, texto: str) -> bool:
     return not _buzon_fallo(r, "borrador")
 
 
-def _noche_correos() -> list:
+def _noche_correos() -> tuple[list, dict]:
     """Mira el buzón, clasifica y deja redactado lo que pide respuesta.
 
-    Devuelve los items del parte. No apunta avisos ni escribe en Supabase: de eso se
-    encarga el turno, que es quien sabe de qué noche son.
+    Devuelve los items del parte **y la nota de lo que se miró**. No apunta avisos ni
+    escribe en Supabase: de eso se encarga el turno, que es quien sabe de qué noche son.
+
+    La nota pesa tanto como los items. Sin ella, las cuatro razones por las que esto
+    puede devolver cero correos —está apagado, Outlook no está conectado, el buzón no
+    contestó, o de verdad no había nada— llegan a la mañana convertidas en el mismo
+    silencio, y un parte en blanco no se distingue de un turno averiado. El que lo lee a
+    las ocho y media no puede tener que entrar en los registros para saber cuál de las
+    cuatro fue.
     """
-    if not (NOCHE_CORREO and _buzon_listo()):
-        return []
+    if not NOCHE_CORREO:
+        return [], {"estado": "apagado"}
+    if not _buzon_listo():
+        return [], {"estado": "sin_outlook"}
     try:
         cabeceras = _cabeceras_recientes()[:NOCHE_CORREO_MAX]
     except Exception as e:
         logger.warning("Turno de noche: no se pudo leer el buzón (%s)", type(e).__name__)
-        return []
+        return [], {"estado": "fallo", "detalle": type(e).__name__}
+    # Lo que se miró se apunta ANTES de clasificar: que el modelo falle luego no cambia
+    # cuántos correos había delante, y esa cifra es la que contesta «¿llegaste a mirar?».
+    mirado = {"estado": "ok", "mirados": len(cabeceras), "horas": CORREO_HORAS,
+              "carpeta": "Bandeja de entrada"}
     if not cabeceras:
-        return []
+        return [], mirado
 
     categorias  = _noche_clasificar(cabeceras)
     a_responder = [c for c, cat in zip(cabeceras, categorias)
@@ -12488,7 +12511,7 @@ def _noche_correos() -> list:
             "datos":   {"de": correo.get("de", ""), "categoria": categoria,
                         "borrador": subido},
         })
-    return items
+    return items, mirado
 
 
 # ── EL TURNO DE NOCHE ────────────────────────────────────────────────────────
@@ -12563,10 +12586,17 @@ def _anotar_en_el_parte(fecha: str, items: list) -> int:
         return 0
 
 
-def _resumen_parte(items: list) -> dict:
-    """Las cuentas del parte, para poder contarlo sin traerse todo lo de dentro."""
+def _resumen_parte(items: list, revisado: dict | None = None) -> dict:
+    """Las cuentas del parte, para poder contarlo sin traerse todo lo de dentro.
+
+    `revisado` es la otra mitad: lo que se MIRÓ, por área. Va en el mismo sitio que las
+    cuentas porque se lee a la vez que ellas —«cero correos» solo significa algo al lado
+    de «miré la bandeja de entrada»— y porque `resumen` es una columna `jsonb`, así que
+    no hace falta migración para guardarlo.
+    """
     correos = [i for i in items if i.get("area") == "correo"]
     return {
+        "revisado":    revisado or {},
         "correos":     len(correos),
         "responder":   sum(1 for i in correos
                            if (i.get("datos") or {}).get("categoria") == "responder"),
@@ -12575,6 +12605,34 @@ def _resumen_parte(items: list) -> dict:
         "agenda":      sum(1 for i in items if i.get("area") == "agenda"),
         "recados":     sum(1 for i in items if i.get("area") == "recado"),
     }
+
+
+def _frase_revisado(revisado: dict) -> str:
+    """Lo que se miró, para las noches en que no había nada que hacer.
+
+    Es la frase que evita la peor lectura posible del parte: que «no hubo nada que
+    hacer» se entienda como «esto no funciona» —o, peor, que se entienda como «no tengo
+    correo» cuando lo que pasa es que el buzón lleva días sin mirarse—. Dice la carpeta
+    y la ventana a propósito: el turno mira la Bandeja de entrada y solo lo sin leer de
+    las últimas horas, y quien tiene reglas que sacan el correo de ahí necesita saberlo
+    para no esperar de esto algo que no hace.
+    """
+    correo = (revisado or {}).get("correo") or {}
+    estado = correo.get("estado")
+    if estado == "apagado":
+        return "No miré el buzón: la parte del correo está apagada."
+    if estado == "sin_outlook":
+        return "No miré el buzón: Outlook no está conectado."
+    if estado == "fallo":
+        return "No pude mirar el buzón: no contestó."
+    if estado != "ok":
+        return ""
+    carpeta = str(correo.get("carpeta") or "la bandeja de entrada")
+    horas   = int(correo.get("horas") or 0)
+    ventana = f" de las últimas {horas} h" if horas else ""
+    if int(correo.get("mirados") or 0):
+        return f"Miré {carpeta}{ventana} y no había nada que preparar."
+    return f"Miré {carpeta} y no había ningún correo sin leer{ventana}."
 
 
 def _frase_parte(resumen: dict) -> str:
@@ -12596,7 +12654,7 @@ def _frase_parte(resumen: dict) -> str:
         if n:
             trozos.append(f"{n} {singular if n == 1 else plural}")
     if not trozos:
-        return "No hubo nada que hacer esta noche."
+        return _frase_revisado(resumen.get("revisado")) or "No hubo nada que hacer esta noche."
     return "Esta noche: " + "; ".join(trozos) + "."
 
 
@@ -12613,13 +12671,17 @@ def correr_turno_de_noche(forzar: bool = False) -> dict:
     if not _reservar_parte(fecha) and not forzar:
         return {"hecho": False, "motivo": "el turno de esta noche ya se hizo"}
 
-    items = []
+    items, revisado = [], {}
     try:
-        items += _noche_correos()
+        correos, revisado["correo"] = _noche_correos()
+        items += correos
     except Exception:
         logger.exception("Turno de noche: la parte del buzón falló entera")
+        # Que la nota sobreviva al fallo es justo el caso que más falta hace contar: un
+        # área que revienta entera es lo que antes llegaba a la mañana como un silencio.
+        revisado["correo"] = {"estado": "fallo"}
 
-    resumen = _resumen_parte(items)
+    resumen = _resumen_parte(items, revisado)
     _anotar_en_el_parte(fecha, items)
     try:
         r = http.patch(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}",
