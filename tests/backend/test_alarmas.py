@@ -43,6 +43,17 @@ def canal_movil(monkeypatch):
     return main._avisos_movil
 
 
+@pytest.fixture(autouse=True)
+def senal_despertar(monkeypatch):
+    """Confirmar una alarma es también la señal de despertar del resumen diario. Aquí
+    se sustituye por un registro: lo que hace esa señal depende de la hora real y de
+    medio módulo de resumen, y eso se prueba en test_despertar."""
+    llamadas = []
+    monkeypatch.setattr(main, "_senal_despertar_segura",
+                        lambda etiqueta: llamadas.append(etiqueta) or {"ok": True, "enviado": False})
+    return llamadas
+
+
 def _reserva_ok(url, **kwargs):
     """El PATCH condicional que SÍ se lleva la fila (devuelve una)."""
     return FakeResponse([{"id": "11111111-1111-1111-1111-111111111111"}])
@@ -197,6 +208,24 @@ class TestEscalada:
         assert salida["escalar"] == 0
         assert len(canal_movil) == 1
 
+    def test_fuera_de_casa_la_insistencia_dice_por_que(self, mock_requests, canal_movil,
+                                                       monkeypatch, caplog):
+        # Desde la cama, «aviso 3» sin música es una alarma rota, no una decisión: el
+        # aviso al móvil dice que la casa no suena y por qué, y queda a WARNING, que es
+        # lo que se persiste en app_logs, para poder explicarlo al día siguiente.
+        monkeypatch.setattr(main, "presencia_vigente", lambda: {
+            "en_casa": False, "zona": "trabajo",
+            "updated_at": (datetime.now(timezone.utc) - timedelta(minutes=7)).isoformat()})
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-3, estado="avisada", avisado_hace_min=3)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        with caplog.at_level("WARNING"):
+            main._correr_alarmas()
+        assert "No despierto la casa" in canal_movil[0]["texto"]
+        assert "trabajo" in canal_movil[0]["texto"]
+        assert any("sin tocar la casa" in r.getMessage() and r.levelname == "WARNING"
+                   for r in caplog.records)
+
     def test_sin_saber_donde_estas_escala_igual(self, mock_requests, canal_movil, monkeypatch):
         # Un dato caducado no es un "no estás". Este respaldo existe para cuando lo demás
         # falla: callarse por no saber sería justo el fallo que viene a cubrir.
@@ -205,6 +234,75 @@ class TestEscalada:
             [_fila(minutos_desde_ahora=-3, estado="avisada", avisado_hace_min=3)]))
         mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
         assert main._correr_alarmas()["escalar"] == 1
+
+    def test_en_casa_no_dice_nada_de_la_casa(self, mock_requests, canal_movil):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-3, estado="avisada", avisado_hace_min=3)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        assert "No despierto la casa" not in canal_movil[0]["texto"]
+
+
+class TestLaEscaladaEsUnEstado:
+    """El sensor de HA es un sondeo. Si la escalada solo viajara en la respuesta del tick
+    que la hizo, un sondeo perdido (timeout, HA reiniciándose ese minuto) dejaría a la
+    casa sin enterarse: el siguiente tick ya devolvía 0. Así que mientras la alarma
+    suene, el tick repite la última escalada."""
+
+    CABECERA = {"X-Auth-Token": "ha-poll-token"}
+
+    def _escalar(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-3, estado="avisada", avisado_hace_min=3)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        assert main._correr_alarmas()["escalar"] == 1
+
+    def test_los_ticks_siguientes_repiten_la_escalada_sin_consultar(self, client, mock_requests,
+                                                                     canal_movil):
+        self._escalar(mock_requests)
+        consultas = len(mock_requests.called("GET", "/rest/v1/alarmas"))
+        # El tick de un minuto después: no toca mirar nada, pero la casa sigue en ello.
+        r = client.get("/ha/alarma-tick", headers=self.CABECERA)
+        assert r.json() == {"escalar": 1, "id": "11111111-1111-1111-1111-111111111111",
+                            "texto": "Entrenar"}
+        assert len(mock_requests.called("GET", "/rest/v1/alarmas")) == consultas
+
+    def test_confirmarla_la_apaga(self, client, mock_requests, canal_movil):
+        self._escalar(mock_requests)
+        client.post(TestBotonDespierto.RUTA, headers=self.CABECERA)
+        assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
+
+    def test_cancelarla_la_apaga(self, client, mock_requests, canal_movil, auth_headers):
+        self._escalar(mock_requests)
+        client.delete("/alarmas/11111111-1111-1111-1111-111111111111", headers=auth_headers)
+        assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
+
+    def test_una_consulta_que_ya_no_la_ve_viva_la_apaga(self, client, mock_requests, canal_movil):
+        # Cancelada desde otro proceso (un curl, otra sesión): la casa no sigue en ello.
+        self._escalar(mock_requests)
+        mock_requests.routes.clear()
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
+        assert main._correr_alarmas()["escalar"] == 0
+        assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
+
+    def test_una_consulta_que_no_toca_escalar_la_mantiene(self, mock_requests, canal_movil):
+        # Escalada hace un minuto: este tick no insiste todavía, pero la casa sigue.
+        self._escalar(mock_requests)
+        mock_requests.routes.clear()
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-4, estado="escalada", intentos=1,
+                   avisado_hace_min=4, escalado_hace_min=1)]))
+        assert main._correr_alarmas()["escalar"] == 1
+
+    def test_si_te_vas_de_casa_deja_de_sonar(self, mock_requests, canal_movil, monkeypatch):
+        self._escalar(mock_requests)
+        monkeypatch.setattr(main, "presencia_vigente", lambda: {"en_casa": False, "zona": "calle"})
+        mock_requests.routes.clear()
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-6, estado="escalada", intentos=1,
+                   avisado_hace_min=6, escalado_hace_min=3)]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        assert main._correr_alarmas()["escalar"] == 0
 
     def test_insiste_contando_desde_la_ultima_escalada(self, mock_requests):
         # Ya escalada hace 3 minutos: toca otra vez, y el intento sube.
@@ -295,12 +393,70 @@ class TestBotonDespierto:
         mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
         assert client.post(self.RUTA, headers=auth_headers).status_code == 200
 
+    def test_confirmar_es_la_senal_de_despertar_del_resumen(self, client, mock_requests,
+                                                            senal_despertar):
+        # Has pulsado un botón: no hay señal más exacta de que estás despierto. Sin esto,
+        # el correo se quedaría esperando a la hora tope las mañanas en que el móvil no
+        # estaba en el cargador.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        client.post(self.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert senal_despertar == ["alarma"]
+
+    def test_si_no_sonaba_no_es_senal_de_nada(self, client, mock_requests, senal_despertar):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_perdida)
+        client.post(self.RUTA, headers={"X-Auth-Token": "ha-poll-token"})
+        assert senal_despertar == []
+
     def test_sin_credencial_no(self, client):
         assert client.post(self.RUTA).status_code == 403
 
     def test_el_id_tiene_que_ser_un_uuid(self, client):
         r = client.post("/alarmas/no-es-uuid/despierto", headers={"X-Auth-Token": "ha-poll-token"})
         assert r.status_code == 422
+
+
+class TestEstoyDespiertoSinId:
+    """«Estoy despierto» dicho a Jarvis o al desenchufar el cargador: no se tiene el id
+    a mano, y a esa hora lo que se quiere es que aquello se calle, no elegir cuál."""
+
+    def test_jarvis_calla_lo_que_suene_sin_pedir_id(self, mock_requests, monkeypatch,
+                                                    senal_despertar):
+        monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        r = main._j_estoy_despierto()
+        assert r["hecho"] is True and r["cuantas"] == 1
+        url = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
+        assert "estado=in.(avisada,escalada)" in url and "id=eq." not in url
+        assert ("media_player.media_stop", "media_player.cuarto") in [
+            (o["servicio"], o["entidad"]) for o in main._ha_ordenes]
+        # Y es la señal de despertar del resumen, como el cargador.
+        assert senal_despertar == ["jarvis"]
+
+    def test_jarvis_no_acusa_al_movil(self, mock_requests, canal_movil):
+        # La respuesta de Jarvis ya es el acuse: otro «alarma quitada» en el móvil sobra.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._j_estoy_despierto()
+        assert canal_movil == []
+
+    def test_sin_nada_sonando_lo_dice_y_sigue_siendo_senal(self, mock_requests, senal_despertar):
+        # Decir que estás despierto sin alarma puesta vale igual para el resumen.
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_perdida)
+        r = main._j_estoy_despierto()
+        assert r["hecho"] is False and "sonando" in r["motivo"]
+        assert senal_despertar == ["jarvis"]
+
+    def test_rearma_las_que_se_repiten(self, mock_requests):
+        fila = _fila(minutos_desde_ahora=-2, estado="confirmada", repetir="1")
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([fila]))
+        main._j_estoy_despierto()
+        llamadas = mock_requests.called("PATCH", "/rest/v1/alarmas")
+        assert len(llamadas) == 2 and "estado=eq.confirmada" in llamadas[1][1]
+        assert llamadas[1][2]["json"]["estado"] == "armada"
+
+    def test_un_supabase_caido_no_rompe_a_quien_lo_llama(self, mock_requests):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse(None, 500, "boom"))
+        r = main._alarma_confirmar_sonando_segura("cargador")
+        assert r["ok"] is False and r["hecho"] is False
 
 
 class TestEndpointsDelDashboard:
@@ -550,15 +706,20 @@ class TestEditarUnaAlarma:
 
 class TestHerramientasDeJarvis:
     def test_estan_registradas(self):
-        for nombre in ("poner_alarma", "mis_alarmas", "cancelar_alarma"):
+        for nombre in ("poner_alarma", "mis_alarmas", "cancelar_alarma", "estoy_despierto"):
             assert nombre in main._JARVIS_HERRAMIENTAS
             # Ninguna pide confirmación: poner una alarma no toca nada del mundo real, y
-            # cancelarla es lo que quieres poder hacer deprisa cuando está sonando.
+            # callarla es lo que quieres poder hacer deprisa cuando está sonando.
             assert main._JARVIS_HERRAMIENTAS[nombre]["confirmar"] is False
 
     def test_salen_en_el_esquema_que_ve_el_modelo(self):
         nombres = {f["function"]["name"] for f in main._jarvis_esquema()}
-        assert {"poner_alarma", "mis_alarmas", "cancelar_alarma"} <= nombres
+        assert {"poner_alarma", "mis_alarmas", "cancelar_alarma", "estoy_despierto"} <= nombres
+
+    def test_estoy_despierto_no_pide_parametros(self):
+        # A las siete de la mañana y por voz no hay id que dar: se llama a secas.
+        assert main._JARVIS_HERRAMIENTAS["estoy_despierto"]["parametros"] == {}
+        assert main._relleno_herramienta("estoy_despierto") != main._JARVIS_RELLENO_GENERICO
 
     def test_cancelar_con_un_id_que_no_es_uuid(self):
         assert main._j_cancelar_alarma("pepe")["ok"] is False

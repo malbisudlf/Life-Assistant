@@ -21,6 +21,33 @@
     `/app/VERSION` y sale por `GET /`, porque *hasta entonces no existía ninguna forma
     de preguntarle al backend qué código estaba ejecutando*.
 
+- **El correo de datos seguía saliendo antes de sincronizar la noche, después de
+  arreglarlo.** El 2026-09-17, un día después del arreglo de abajo, la queja era la
+  misma. Dos causas que el arreglo anterior había dejado en pie, y las dos venían de
+  tratar como señal algo que no lo era:
+  - **La llegada del sueño de hoy disparaba el correo por sí sola**, como deducción de
+    "si la noche ha sincronizado es que estás despierto". Pero la pulsera vuelca una
+    noche a medias si te despiertas un rato a las seis, la app la sincroniza de fondo,
+    y el correo salía mientras seguías durmiendo. Ahora el sueño **solo cierra una
+    espera** que abrió una señal de verdad: el cargador, la alarma de respaldo o
+    decírselo a Jarvis. Sin señal, el correo espera a la hora tope.
+  - **La espera vencía a los 45 minutos y el correo salía sin la noche**, o sea igual de
+    cojo que antes, solo que más tarde. Ahora a los 45 minutos solo te avisa de que
+    abras la app, y sigue esperando hasta que llegue o hasta la hora tope.
+  - Moraleja: **una espera que se rinde antes que la red de seguridad no es una
+    espera, es la misma prisa con retraso.** Si el sistema ya tenía una hora a la que
+    aceptaba salir con lo que hubiera, la espera tiene que llegar hasta ahí.
+
+- **Jarvis no hacía nada al decirle «estoy despierto» con la alarma sonando.** La única
+  herramienta que la callaba era `cancelar_alarma`, que necesita el id (dos vueltas de
+  herramienta, `mis_alarmas` antes) y que a una semanal la mata. Por voz y a las siete
+  de la mañana el modelo o no llamaba a nada o se quedaba sin la alarma del lunes que
+  viene. Ahora hay `estoy_despierto`, sin parámetros: calla lo que suene y cuenta como
+  señal de despertar. Y `POST /despertar` (el cargador) hace lo mismo de paso, que es el
+  segundo camino del botón que no cuesta nada en el camino feliz. Moraleja: **una
+  herramienta que pide un dato que el usuario no tiene a esa hora es una herramienta que
+  no existe.**
+
 - **El briefing decía todas las mañanas que no habías llevado el reloj, y el reloj lo
   habías llevado.** Se notó por acumulación (2026-09-16): no era un día raro, era
   *todos* los días. Dos fallos encadenados, y el primero es el que no se veía venir.
