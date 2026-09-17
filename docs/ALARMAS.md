@@ -32,8 +32,12 @@ Y si la alarma se repite, `confirmada` y `rendida` no son el final: vuelve sola 
 - **`avisada`**: sonó el aviso al móvil, con el botón. Aquí es donde se **prepara el
   altavoz** (ver abajo).
 - **`escalada`**: se despertó a la casa. `intentos` cuenta cuántas veces.
-- **`confirmada`**: pulsaste el botón (o lo hiciste desde el dashboard, o se lo dijiste a
-  Jarvis). Se para la música y llega la notificación de vuelta que dice que ha entrado.
+- **`confirmada`**: dijiste que estás despierto, por cualquiera de los **cuatro caminos**:
+  el botón de la notificación, el dashboard, Jarvis («estoy despierto», herramienta
+  `estoy_despierto`, sin id) o **desenchufar el cargador** (el Atajo de `POST /despertar`
+  calla lo que esté sonando). Se para la música y, si vino por el botón o el dashboard,
+  llega la notificación de vuelta que dice que ha entrado. Y confirmar es además **la
+  señal de despertar del resumen diario**, la misma que el cargador (`docs/BRIEF.md`).
 - **`rendida`**: pasaron `ALARMA_MAX_MIN` sin respuesta. **Se avisa de que se rinde**: una
   alarma que deja de sonar sola y no lo cuenta es indistinguible de una que nunca se armó,
   y eso es lo que hace que dejes de fiarte del respaldo.
@@ -86,6 +90,19 @@ despertador que suena el domingo, no un fallo.
 - **`GET` con efectos, a propósito.** Un sensor REST de HA solo sabe hacer GET, y en este
   proyecto el sondeo de HA *es* el reloj. Mismo patrón que `/ha/avisos-pending` y
   `/ha/ordenes-pending`, que además vacían su cola al leerla.
+- **`escalar` es un ESTADO, no un aviso** (`_alarma_sonando`). Mientras la alarma siga
+  escalada, el tick repite el número de intento en pie en **cada** sondeo —también en los
+  que no consultan Supabase— y solo vuelve a 0 al confirmar, cancelar, editar o rendirse.
+  La primera versión lo devolvía solo en la respuesta del tick que escalaba, y eso es un
+  aviso viajando por un canal de sondeo: bastaba que HA se perdiera ese sondeo (un
+  timeout, un reinicio en ese minuto) para que la casa no se enterase nunca, porque el
+  siguiente ya devolvía 0. Con el estado, un sondeo perdido cuesta un minuto. Vive en
+  memoria: perderlo en un reinicio del add-on cuesta que la siguiente escalada lo reponga.
+- **Si la casa no va a sonar, el móvil dice por qué.** Cuando la presencia dice que
+  estás fuera, la insistencia lleva «No despierto la casa: Home Assistant dice que estás
+  fuera (zona X, hace N min)», y queda a WARNING en `app_logs`. Desde la cama, «aviso 3»
+  sin música es una alarma rota; con la frase es una decisión que se puede corregir
+  (casi siempre un `person` en `not_home` por un GPS desviado de madrugada).
 - **La reserva es un PATCH condicional** (`&estado=eq.armada`), no un GET seguido de un
   PATCH. La condición *es* la pregunta atómica: con dos ticks solapados, un GET previo
   dejaría avisar dos veces. Misma trampa y misma solución que en el despachador de
@@ -96,16 +113,6 @@ despertador que suena el domingo, no un fallo.
   navegador, ni app que se abra: son las seis de la mañana y lo único que has pedido es
   que aquello deje de sonar. Un botón que además te planta una web delante convierte un
   gesto de medio segundo en un trámite despierto.
-- **Confirmar la alarma es además la señal de despertar del resumen diario.** Es la más
-  exacta que tiene el sistema —hay un dedo humano detrás, no una deducción sobre la
-  batería del móvil— y sin embargo fue la última en enchufarse: las alarmas se añadieron
-  después de todo el mecanismo del correo y nadie las conectó, así que la mañana en que la
-  alarma te despertaba y el Atajo del iPhone no entregaba, el resumen se quedaba esperando
-  al reloj de las 10:00. Va como tarea de fondo (`_avisar_alarma_confirmada`), porque
-  componer el correo son varios segundos y el `rest_command` que llama aquí no lleva
-  `timeout`: dentro de la petición, HA daría por fallida una automatización que funcionó.
-  Lo que importa de este botón es que la alarma deje de sonar, así que un fallo del correo
-  se registra y no se le acerca. Ver `docs/BRIEF.md`.
 - **Y de vuelta llega otra notificación, «⏰ Alarma quitada».** No es cortesía: el salto
   móvil → Home Assistant es el único del camino que **no escribe en ningún log**, y si se
   pierde —pasa, ver abajo— pulsar el botón no hace nada y nada lo dice. El acuse es lo que
@@ -121,6 +128,15 @@ despertador que suena el domingo, no un fallo.
   que un segundo camino sobre, es **dónde puede ir**: la redundancia no puede cobrarse en
   el camino feliz de un gesto que se hace medio dormido. El acuse de recibo cubre lo
   mismo sin cobrar nada — no arregla el salto frágil, lo hace visible.
+- **Los segundos caminos que sí valen son los que ya haces.** Desenchufar el cargador es
+  algo que pasa todas las mañanas sin que nadie lo pida, y es la prueba de que estás
+  despierto: por eso `POST /despertar` calla la alarma que esté sonando. No cuesta nada
+  cuando el botón funciona (no hay nada que callar) y para la alarma cuando su evento se
+  pierde. Y decírselo a Jarvis es lo mismo desde el reloj: la herramienta
+  `estoy_despierto` **no pide id** —a las siete de la mañana y por voz no se tiene—,
+  calla lo que suene y ya. Antes solo había `cancelar_alarma`, que necesita el id (dos
+  vueltas de herramienta) y, para una semanal, la mata: decir «estoy despierto» acababa
+  en nada o en quedarse sin alarma el lunes que viene.
 - **El aviso va `critico=False`: es una notificación normal.** Lo fue `critico=True` al
   principio, con el razonamiento de que un despertador que no suena con el móvil en
   silencio no despierta; en la práctica saltarse el silencio del móvil resultó excesivo
@@ -152,8 +168,8 @@ despertador que suena el domingo, no un fallo.
 ### El ritual vive en Home Assistant, no en el backend
 
 El backend decide **cuándo**; HA sabe **cómo**. La automatización `la_alarma_escalar` hace
-la secuencia entera: quitar el "no molestar", subir el volumen, anunciar por
-`notify.alexa_media_*`, lanzar la canción y encender las luces.
+la secuencia entera: encender las luces, quitar el "no molestar", subir el volumen,
+anunciar por `notify.alexa_media_*` y lanzar la canción.
 
 **No es una preferencia de estilo, es una necesidad**: una de las luces del cuarto («led
 mesa») solo obedece hablándole a Alexa, así que se enciende con
@@ -162,14 +178,23 @@ backend, porque `alexa_devices` no es un dominio de `_CASA_DOMINIOS` y además a
 `device_id`, no a una entidad. Lo que sí cabe (volumen, "no molestar", parar la música) va
 por la cola de siempre.
 
-El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
+**Las luces van primero y cada paso lleva `continue_on_error`.** Una automatización de HA
+se para en el primer paso que falla, y los que fallan son los de Alexa (la integración
+pierde la sesión con Amazon y el "no molestar" queda `unavailable`). Con el "no molestar"
+el primero, un fallo de Alexa se llevaba las luces por delante, que no tienen nada que
+ver con Alexa — y eso, desde la cama, es «no se encendió nada».
+
+El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`, con una sección «Cuando no
+suena, dónde mirar» que dice qué huella deja cada pieza (el estado del widget, el texto de
+la insistencia, la traza de la automatización).
 
 ### Los endpoints
 
 | Ruta | Auth | Qué hace |
 |---|---|---|
-| `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento, 0 = no toca), `id` y `texto` |
-| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» y manda el resumen diario |
+| `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento en pie, 0 = no suena nada; se repite en cada tick mientras suene), `id` y `texto` |
+| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» y cuenta como señal de despertar del resumen |
+| `POST /despertar` | servicio (`BRIEF_TOKEN`) | El Atajo del cargador. Es del resumen diario, pero de paso calla la alarma que esté sonando (sin id: todas las que suenen) |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
 | `PATCH /alarmas/{id}` | JWT | Editarla (mismo cuerpo que el POST). La deja `armada` con los contadores a cero |
@@ -181,10 +206,15 @@ el mismo texto. Es el mismo cuidado que ya llevan los triggers de órdenes y avi
 
 ### Jarvis
 
-Tres herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
-semanales: «todos los lunes» es `[1]`, «entre semana» es `[1,2,3,4,5]`), `mis_alarmas` y
-`cancelar_alarma`. Poner una no toca nada del mundo real, y cancelarla es justo lo que
-quieres poder hacer deprisa cuando está sonando.
+Cuatro herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
+semanales: «todos los lunes» es `[1]`, «entre semana» es `[1,2,3,4,5]`), `mis_alarmas`,
+`cancelar_alarma` (para una que **aún no ha sonado**; a una semanal la deja de repetir) y
+`estoy_despierto` (**sin parámetros**: calla la que esté sonando y cuenta como señal de
+despertar del resumen). Poner una no toca nada del mundo real, y callarla es justo lo que
+quieres poder hacer deprisa cuando está sonando. Las dos últimas están separadas a
+propósito: «estoy despierto» y «quita la alarma de mañana» son gestos distintos, y con
+una sola herramienta el modelo callaba una que sonaba matando su repetición, o no hacía
+nada por no tener el id. Sus casos están en `evals/casos.json`.
 
 ### El widget
 

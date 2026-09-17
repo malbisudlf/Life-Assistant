@@ -69,11 +69,45 @@ espíritu de la regla, acotándola:
 
 | Paso | Qué ve | Qué hace |
 |---|---|---|
-| `_cabeceras_recientes()` | asunto, remitente, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
+| `_cabeceras_recientes()` | asunto, remitente, destinatarios, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
 | `_noche_clasificar()` | **solo asunto y remitente** | `responder` / `informativo` / `ruido` |
-| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
+| `_motivo_no_responder()` | remitente y destinatarios, **sin modelo** | frena el borrador de lo automático, lo apartado y lo que va en copia |
+| `_cuerpos_de()` | el cuerpo, **solo de los `responder` que pasaron la puerta** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
 | `_redactar_respuesta()` | ese cuerpo | el borrador, con el modelo grande |
 | `_guardar_borrador()` | — | `POST /me/messages/{id}/createReply` |
+
+### A quién no se le contesta
+
+El clasificador acierta casi siempre, pero «casi siempre» aplicado a **escribir en tu
+nombre** no basta: un aviso del banco que salga «responder» acaba en un borrador que no
+debería existir, y cada borrador es una llamada de pago. Por eso, entre la clasificación
+y el redactor hay una puerta —`_motivo_no_responder()`— que vive **fuera del modelo**.
+La regla que la justifica: *lo que se puede decidir con un dato exacto no se le pregunta
+a un modelo.*
+
+| Motivo | Cómo se decide |
+|---|---|
+| `automatico` | el trozo anterior a la arroba es `noreply`, `no-responder`, `notificaciones`, `alertas`, `avisos`, `mailer`, `postmaster`, `bounce`, `newsletter`, `soporte`, `info`… |
+| `remitente_apartado` | la dirección o su dominio está en `NOCHE_NO_RESPONDER` (configurable: el banco, la gestora) |
+| `en_copia` | tu dirección **no** está en `toRecipients` y **sí** en `ccRecipients` |
+
+Tres detalles que no son obvios:
+
+- **El patrón mira el trozo de antes de la arroba, con separadores.** Un `search` a secas
+  por «alert» o por «info» apartaría a `alerta.roja@`… y también a `javier.infante@` y a
+  `arnoldo@`, que llevan «info» y «no» dentro y contestan perfectamente.
+- **Ante la duda, no se redacta.** Los dos errores no pesan igual: no redactar sale en el
+  parte, con su motivo, y se ve en un segundo; redactar de más cuesta dinero y deja en
+  Borradores una respuesta a nadie.
+- **Sin destinatarios no se calla nada.** Un correo a una lista de distribución llega con
+  `toRecipients` vacío, y no saber a quién iba no es prueba de que no iba a ti. Lo mismo
+  si no se pudo averiguar la dirección del propio buzón (`_buzon_yo()`, una llamada a
+  `/me` por proceso): sin ella la regla del «voy en copia» simplemente no se aplica.
+
+El motivo se guarda en `datos.no_responder` del item, así que el parte enseña **por qué**
+un correo se quedó sin borrador en vez de que parezca un olvido. Y solo se apunta en los
+que el clasificador mandó a «responder»: en uno que ya era ruido, el motivo no explica
+nada y confunde.
 
 Y lo que **no** pasa:
 
@@ -178,6 +212,36 @@ diario) ni añade una notificación nueva a las que hay.
 La frase de una línea la escribe el backend (`_frase_parte`) porque la **dice** Jarvis al
 descolgar y la **lee** el widget: dos copias acaban siendo dos frases distintas.
 
+### Una noche en blanco tiene que decir qué se miró
+
+El parte del 2026-09-17 salió con todo a cero y con razón —la Bandeja de entrada no tenía
+ni un correo sin leer a las tres de la mañana— y aun así fue un fallo, porque lo que
+llegó al móvil fue «No hubo nada que hacer esta noche» y eso **no se distingue de un turno
+averiado**. Peor todavía: se parece mucho a «no tienes correo», que es falso cuando tus
+reglas de Outlook sacan el correo de la bandeja antes de que el turno pase por allí
+(aquella noche había 96 sin leer en `Newsletters`, una carpeta que el turno no mira).
+
+Un área que no encuentra nada devuelve, junto a sus items, una **nota de lo que miró**, y
+esa nota se guarda dentro de `noche_partes.resumen`, en `revisado` (es una columna `jsonb`,
+así que no hace falta migración). Para el buzón hay cuatro estados, y el sentido de todo
+esto es que los cuatro se cuenten distinto:
+
+| `revisado.correo.estado` | Qué dice el parte |
+|---|---|
+| `ok` (con `mirados`, `horas`, `carpeta`) | «Miré la bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.» |
+| `apagado` | «No miré el buzón: la parte del correo está apagada.» |
+| `sin_outlook` | «No miré el buzón: Outlook no está conectado.» |
+| `fallo` | «No pude mirar el buzón: no contestó.» |
+
+Para que `fallo` sea distinguible hizo falta tocar una pieza de más abajo:
+`_cabeceras_recientes()` devolvía lista vacía tanto con un buzón limpio como con un 403 de
+Graph. Ahora lanza `BuzonCaido`, **y esa es la regla general**: una función que lee algo de
+fuera no puede contestar «no hay nada» cuando lo que pasa es «no lo sé». Un área que
+revienta entera también deja su nota, que es justo el caso que antes llegaba mudo.
+
+El widget «Anoche» enseña además **la hora a la que corrió** (`creado_at`), que es la
+prueba de vida del turno y lo único que sigue estando cuando no hay nada que enseñar.
+
 ## Tablas
 
 `supabase/migrations/20260914_turno_noche.sql`. **Aplicarla el mismo día que se mergea**
@@ -185,7 +249,7 @@ descolgar y la **lee** el widget: dos copias acaban siendo dos frases distintas.
 
 | Tabla | Para qué |
 |---|---|
-| `noche_partes` | una fila por noche; `fecha` es la PK y eso es lo que da la idempotencia. `resumen` guarda las cuentas |
+| `noche_partes` | una fila por noche; `fecha` es la PK y eso es lo que da la idempotencia. `resumen` guarda las cuentas **y `revisado`**, la nota de lo que se llegó a mirar |
 | `noche_items` | lo que se hizo. `area` ∈ correo / codigo / agenda / recado; `estado` pendiente → aprobado \| descartado |
 
 `_anotar_en_el_parte()` abre el parte si no existe: el atajo del código se dispara cuando

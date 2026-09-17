@@ -70,8 +70,8 @@
 | `POST /finanzas/etfs` | JWT | Da de alta un ETF nuevo a trackear `{ticker, nombre, simbolo_twelvedata, bolsa_twelvedata}`. Sin botón en el frontend, se usa por curl |
 | `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha |
 | `DELETE /finanzas/etfs/{ticker}/aportaciones/{id}` | JWT | Borra una aportación mal metida (no hay PATCH: para corregirla se borra y se vuelve a crear) |
-| `GET /ha/alarma-tick` | servicio | El reloj de las alarmas de respaldo (sensor REST de HA a 60 s). Devuelve el nº de intento a escalar, 0 si no toca (ver `docs/ALARMAS.md`) |
-| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma y para la música. Lo llama el botón de la notificación o el dashboard |
+| `GET /ha/alarma-tick` | servicio | El reloj de las alarmas de respaldo (sensor REST de HA a 60 s). Devuelve el nº de intento en pie —un ESTADO: se repite en cada tick mientras la alarma siga escalada—, 0 si no suena nada (ver `docs/ALARMAS.md`) |
+| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma, para la música y cuenta como señal de despertar del resumen diario. Lo llama el botón de la notificación o el dashboard |
 | `GET /alarmas` | JWT | Las alarmas de respaldo activas, en hora local |
 | `POST /alarmas` | JWT | Pone una: `{fecha?, hora, etiqueta?, repetir?}`. `repetir` son los días ISO en que se repite (1 = lunes) y hace opcional la fecha |
 | `PATCH /alarmas/{id}` | JWT | Edita una alarma viva (mismo cuerpo que el POST): la rearma con la hora o los días nuevos y los contadores a cero |
@@ -88,7 +88,7 @@
 | `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
 | `GET /informe` | JWT | Datos del informe semanal (medias por semana) sin mandar nada |
 | `POST /informe/send` | `BRIEF_TOKEN` | Manda el informe semanal. `?forzar=1` se salta el día y la hora, **no** la reserva |
-| `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone). Manda el resumen si no ha salido |
+| `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone al desenchufar el cargador). Calla la alarma de respaldo si estaba sonando y manda el resumen si no ha salido (o lo deja esperando al sueño de esta noche, ver `docs/BRIEF.md`) |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
 | `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |

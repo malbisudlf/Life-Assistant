@@ -133,12 +133,16 @@ vivo que mire la hora. Sondear cada 5 min es barato a propósito — antes de
 
 **Flujo de las alarmas de respaldo**: un sensor REST propio sondea `GET /ha/alarma-tick`
 cada **60 s** — el tick del resumen es de 5 minutos y una alarma que suena cuatro minutos
-tarde no es una alarma. Cuando el backend contesta que toca escalar, la automatización
-`la_alarma_escalar` hace el ritual entero (quitar el "no molestar", subir el volumen,
-anunciar por Alexa, poner la canción, encender las luces). El ritual vive **aquí y no en
-la cola de órdenes del backend** porque una de las luces solo obedece hablándole a Alexa,
-y `alexa_devices.send_text_command` no es un dominio de esa cola ni apunta a una entidad.
-El botón «Estoy despierto» de la notificación vuelve por el molde de siempre y **de
-fondo**: nada se abre en el móvil al pulsarlo. Lo que sí llega es otra notificación —«⏰
-Alarma quitada»— porque ese camino se pierde en silencio cuando la app no alcanza a HA, y
-ya dejó una alarma sonando (`docs/BUGS_HISTORICOS.md`). Todo en `docs/ALARMAS.md`.
+tarde no es una alarma. Mientras una alarma está escalada el backend contesta el número
+de intento en pie **en cada tick**, no solo en el que escaló: es un estado, y así un
+sondeo perdido no deja a la casa sin enterarse. Cada cambio de ese número dispara la
+automatización `la_alarma_escalar`, que hace el ritual entero (encender las luces, quitar
+el "no molestar", subir el volumen, anunciar por Alexa, poner la canción). El ritual vive
+**aquí y no en la cola de órdenes del backend** porque una de las luces solo obedece
+hablándole a Alexa, y `alexa_devices.send_text_command` no es un dominio de esa cola ni
+apunta a una entidad. El botón «Estoy despierto» de la notificación vuelve por el molde de
+siempre y **de fondo**: nada se abre en el móvil al pulsarlo. Lo que sí llega es otra
+notificación —«⏰ Alarma quitada»— porque ese camino se pierde en silencio cuando la app
+no alcanza a HA, y ya dejó una alarma sonando (`docs/BUGS_HISTORICOS.md`). Los otros dos
+caminos para callarla no pasan por HA: el Atajo del cargador (`POST /despertar`) y
+decírselo a Jarvis. Todo en `docs/ALARMAS.md`.

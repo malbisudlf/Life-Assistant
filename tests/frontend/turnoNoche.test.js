@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { agruparParteNoche, fraseParteNoche, AREAS_NOCHE } from "../../src/lib/helpers";
+import { agruparParteNoche, fraseParteNoche, motivoNoResponder, AREAS_NOCHE } from "../../src/lib/helpers";
 import { nocheDeLlamadaDeUrl } from "../../src/lib/voz";
 
 const parte = {
@@ -61,6 +61,15 @@ describe("fraseParteNoche", () => {
     expect(fraseParteNoche({ items: [] })).toContain("nada");
     expect(fraseParteNoche(null)).toBe("");
   });
+
+  test("una noche en blanco enseña lo que el backend dice que miro", () => {
+    // El caso que motivó esto: sin la frase del backend, una noche sin correos se lee
+    // igual que un turno averiado, y lo que se acaba creyendo es que no escribe nadie.
+    expect(fraseParteNoche({
+      fecha: "2026-09-17", items: [],
+      frase: "Miré la bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.",
+    })).toContain("bandeja de entrada");
+  });
 });
 
 describe("nocheDeLlamadaDeUrl", () => {
@@ -69,5 +78,19 @@ describe("nocheDeLlamadaDeUrl", () => {
     expect(nocheDeLlamadaDeUrl("?llamada=1")).toBe(false);
     expect(nocheDeLlamadaDeUrl("?noche=0")).toBe(false);
     expect(nocheDeLlamadaDeUrl("")).toBe(false);
+  });
+});
+
+describe("motivoNoResponder", () => {
+  test("traduce los motivos que conoce", () => {
+    expect(motivoNoResponder("en_copia")).toContain("en copia");
+    expect(motivoNoResponder("automatico")).toContain("automático");
+  });
+
+  test("sin motivo no dice nada, y uno nuevo se ve en vez de desaparecer", () => {
+    // Un motivo que el backend empiece a mandar y aquí no esté tiene que CHIRRIAR: si se
+    // tradujera a cadena vacía, el correo parecería olvidado y nadie se enteraría.
+    expect(motivoNoResponder("")).toBe("");
+    expect(motivoNoResponder("lo_que_sea")).toContain("lo_que_sea");
   });
 });

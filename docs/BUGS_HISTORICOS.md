@@ -21,6 +21,33 @@
     `/app/VERSION` y sale por `GET /`, porque *hasta entonces no existía ninguna forma
     de preguntarle al backend qué código estaba ejecutando*.
 
+- **El correo de datos seguía saliendo antes de sincronizar la noche, después de
+  arreglarlo.** El 2026-09-17, un día después del arreglo de abajo, la queja era la
+  misma. Dos causas que el arreglo anterior había dejado en pie, y las dos venían de
+  tratar como señal algo que no lo era:
+  - **La llegada del sueño de hoy disparaba el correo por sí sola**, como deducción de
+    "si la noche ha sincronizado es que estás despierto". Pero la pulsera vuelca una
+    noche a medias si te despiertas un rato a las seis, la app la sincroniza de fondo,
+    y el correo salía mientras seguías durmiendo. Ahora el sueño **solo cierra una
+    espera** que abrió una señal de verdad: el cargador, la alarma de respaldo o
+    decírselo a Jarvis. Sin señal, el correo espera a la hora tope.
+  - **La espera vencía a los 45 minutos y el correo salía sin la noche**, o sea igual de
+    cojo que antes, solo que más tarde. Ahora a los 45 minutos solo te avisa de que
+    abras la app, y sigue esperando hasta que llegue o hasta la hora tope.
+  - Moraleja: **una espera que se rinde antes que la red de seguridad no es una
+    espera, es la misma prisa con retraso.** Si el sistema ya tenía una hora a la que
+    aceptaba salir con lo que hubiera, la espera tiene que llegar hasta ahí.
+
+- **Jarvis no hacía nada al decirle «estoy despierto» con la alarma sonando.** La única
+  herramienta que la callaba era `cancelar_alarma`, que necesita el id (dos vueltas de
+  herramienta, `mis_alarmas` antes) y que a una semanal la mata. Por voz y a las siete
+  de la mañana el modelo o no llamaba a nada o se quedaba sin la alarma del lunes que
+  viene. Ahora hay `estoy_despierto`, sin parámetros: calla lo que suene y cuenta como
+  señal de despertar. Y `POST /despertar` (el cargador) hace lo mismo de paso, que es el
+  segundo camino del botón que no cuesta nada en el camino feliz. Moraleja: **una
+  herramienta que pide un dato que el usuario no tiene a esa hora es una herramienta que
+  no existe.**
+
 - **El briefing decía todas las mañanas que no habías llevado el reloj, y el reloj lo
   habías llevado.** Se notó por acumulación (2026-09-16): no era un día raro, era
   *todos* los días. Dos fallos encadenados, y el primero es el que no se veía venir.
@@ -644,24 +671,50 @@
     **a ciegas**, porque en una notificación cabe cuántos errores hay pero no cuáles. De
     ahí el tercer botón, «Hablarlo», y que Jarvis lea el issue entero al descolgar.
 
+- **La alarma no encendió ni una luz, y el ritual de Home Assistant estaba perfecto.** El
+  2026-09-17 la alarma de las 08:30 no encendió las luces, no puso música y no habló. El
+  ritual de HA era el sospechoso natural —se acababa de reescribir para que las luces
+  fueran primero y ningún paso de Alexa se llevara el resto— pero la automatización **ni
+  siquiera se disparó**: `sensor.life_assistant_alarma` estuvo a `0` toda la mañana. El
+  backend sí había escalado; lo que no hizo fue decírselo a la casa, porque
+  `_alarma_en_casa()` leyó la presencia y decía `not_home`.
+  - Y la presencia decía `not_home` porque el `device_tracker` del iPhone llevaba **desde
+    el día anterior a las 09:24 sin reportar**, clavado en unas coordenadas a 26 km de
+    casa. El backend tiene una defensa justo para esto —`presencia_vigente()` caduca el
+    dato a los `PRESENCE_TTL_MINUTES`— y no sirvió de nada: la automatización
+    `Life Assistant - Presencia` reenvía el estado del tracker **cada 15 minutos**, así
+    que el `updated_at` se renovaba solo y el dato caducado se presentaba siempre recién
+    hecho.
+  - Moraleja: **una marca de tiempo solo caduca lo que la pone, no lo que la cuenta.** Un
+    TTL sobre la hora en que un dato se *copió* no dice nada de la hora en que se
+    *midió*; si el copiador corre en bucle, el TTL no se dispara nunca. Cuando un dato
+    pasa por dos manos, la que hay que vigilar es la primera.
+  - Corolario para depurar: antes de acusar al último tramo (aquí, el ritual de HA),
+    comprueba que el tramo llegó a pedirse. `last_triggered` de la automatización y el
+    historial del sensor lo dicen en diez segundos, y ahorran reescribir algo que
+    funcionaba.
+
 - **El resumen diario llegaba a las 10:00 aunque te despertaras a las 8:30, y nada estaba
   «roto».** El 2026-09-15. La hora de despertar estaba dentro de la ventana (05:30–11:30),
   así que el correo tenía que haber salido al momento; salió del reloj de respaldo de HA,
-  o sea que **ninguna de las señales exactas llegó**. Dos cosas distintas detrás:
-  - **El botón «Estoy despierto» de la alarma no disparaba el resumen.** Es la señal de
-    despertar más exacta que tiene el sistema —un dedo humano— y era la única que no
-    llamaba a `enviar_brief_si_toca`. Las alarmas se añadieron después de todo el
-    mecanismo del correo y nadie las conectó. La moraleja no es la del despiste: es que
-    **una puerta única garantiza que quien entra cumpla las reglas, no que nadie se quede
-    fuera.** `docs/BRIEF.md` decía, con razón, que poner el interruptor dentro de
-    `enviar_brief_si_toca` hacía que «una cuarta fuente que se añada mañana no se pueda
-    olvidar de mirarla» — y la cuarta fuente se añadió sin mirar nada, porque nunca llamó.
-  - **Y no se podía saber.** Los relojes de respaldo mandan el correo igual, así que una
-    señal muerta no produce ningún error en ninguna pantalla: lo único que cambia es la
-    hora a la que llega. `brief_envios` guardaba la `fuente` y el `despertar_at` de cada
-    envío desde agosto, la zona dev leía tres filas y pintaba una, y nadie podía ver una
-    racha. Un Atajo del iPhone muerto (ya pasó dos veces, ver `docs/SALUD.md`) se nota
-    exactamente igual que una mañana en que el móvil se quedó sin batería. **Cuando hay un
-    respaldo que tapa el fallo, el dato que hay que enseñar no es si la cosa pasó, es por
-    qué camino.** De ahí el panel `¿Salió al despertarte?`, con los 14 últimos envíos y su
-    fuente, y el semáforo por racha: una vez es una mañana, tres son el camino.
+  o sea que **ninguna señal de despertar llegó**. Dos cosas distintas detrás:
+  - **El botón «Estoy despierto» de la alarma no disparaba el resumen.** Era la señal más
+    exacta que tenía el sistema —un dedo humano— y la única que no llamaba a
+    `enviar_brief_si_toca`: las alarmas se añadieron después de todo el mecanismo del
+    correo y nadie las conectó. La moraleja no es la del despiste: **una puerta única
+    garantiza que quien entra cumpla las reglas, no que nadie se quede fuera.**
+    `docs/BRIEF.md` decía, con razón, que poner el interruptor dentro de la puerta hacía
+    que «una fuente que se añada mañana no se pueda olvidar de mirarla» — y la fuente
+    nueva se añadió sin mirar nada, porque nunca llamó. Lo arregló #197, y de paso bien:
+    en vez de enchufar esa fuente, hizo *una* señal de despertar (`_senal_despertar`) que
+    comparten el cargador, el botón y Jarvis. Una fuente que no existe no se puede olvidar.
+  - **Y no se podía saber, que es la mitad que quedaba.** Los relojes de respaldo mandan el
+    correo igual, así que una señal muerta no produce ningún error en ninguna pantalla: lo
+    único que cambia es la hora a la que llega. `brief_envios` guardaba la `fuente` y el
+    `despertar_at` de cada envío desde agosto, la zona dev leía tres filas y pintaba una, y
+    nadie podía ver una racha. Un Atajo del iPhone muerto (ya pasó dos veces, ver
+    `docs/SALUD.md`) se nota exactamente igual que una mañana en que el móvil se quedó sin
+    batería. **Cuando hay un respaldo que tapa el fallo, el dato que hay que enseñar no es
+    si la cosa pasó, es por qué camino.** De ahí el panel `¿Salió al despertarte?`, con los
+    14 últimos envíos y su fuente, y el semáforo por racha: una vez es una mañana, tres son
+    el camino.

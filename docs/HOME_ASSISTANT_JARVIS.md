@@ -461,16 +461,25 @@ rest:
     sensor:
       - name: "Life Assistant Alarma"
         # El estado es el NÚMERO de intento, no un true/false: cambia en cada escalada,
-        # así que dos escaladas seguidas se ven como dos cambios y no como uno.
+        # así que dos escaladas seguidas se ven como dos cambios y no como uno. Y es un
+        # ESTADO: mientras la alarma suene, el backend lo repite en cada sondeo («1»
+        # dos minutos, luego «2»…) y solo vuelve a «0» al confirmar. Un sondeo perdido
+        # no se lleva la escalada por delante.
         value_template: "{{ value_json.escalar | int(0) }}"
         json_attributes:
           - id
           - texto
 ```
 
-**El ritual.** Todo en orden y en una sola secuencia, que es lo que garantiza que el
-volumen esté puesto antes de hablar. Sustituye el altavoz, las luces y el `device_id` por
-los tuyos.
+**El ritual.** Todo en una sola secuencia, en este orden y con `continue_on_error` en
+cada paso. Las dos cosas vienen de una mañana en que «ni se encendieron las luces ni sonó
+la música ni nada» (2026-09-17): una automatización de HA **se para en el primer paso que
+falla**, y los pasos de Alexa son los que fallan (la integración pierde la sesión con
+Amazon cada cierto tiempo, y entonces el interruptor de "no molestar" está
+`unavailable`). Con el "no molestar" el primero y sin `continue_on_error`, un fallo de
+Alexa se lleva también las luces, que no tienen nada que ver con Alexa. Ahora las luces
+van primero —son lo que más despierta y lo que menos falla— y cada paso cae por su
+cuenta. Sustituye el altavoz, las luces y el `device_id` por los tuyos.
 
 ```yaml
 alias: Life Assistant - Alarma, despertar
@@ -483,16 +492,31 @@ condition:
   - condition: template
     value_template: "{{ trigger.to_state.state | int(0) > 0 }}"
 action:
+  # Las luces PRIMERO: no dependen de Alexa y son lo que de verdad despierta. Y una
+  # luz POR PASO, no las dos en el mismo `entity_id`: si una está `unavailable` —a la
+  # tira led le pasa— el paso entero puede fallar y llevarse la otra por delante, que
+  # es el mismo error que arreglan los `continue_on_error`, un nivel más abajo.
+  - service: light.turn_on
+    target: { entity_id: light.luces_mesa }   # ← SUSTITÚYELA
+    data: { brightness_pct: 100 }
+    continue_on_error: true
+  - service: light.turn_on
+    target: { entity_id: light.tira_led }     # ← SUSTITÚYELA
+    data: { brightness_pct: 100 }
+    continue_on_error: true
   - service: switch.turn_off
     target: { entity_id: switch.TU_ALTAVOZ_no_molestar }   # ← SUSTITÚYELO
+    continue_on_error: true
   - service: media_player.volume_set
     target: { entity_id: media_player.TU_ALTAVOZ }         # ← SUSTITÚYELO
     data: { volume_level: 0.35 }
+    continue_on_error: true
   - service: notify.alexa_media_TU_ALTAVOZ                 # ← SUSTITÚYELO
     data:
       message: "{{ state_attr('sensor.life_assistant_alarma', 'texto') | default('Despierta', true) }}. Despierta."
       data:
         type: announce
+    continue_on_error: true
   # La canción va como COMANDO DE VOZ y no como `media_content_id` de una lista: así
   # funciona con lo que tengas vinculado (Amazon Music, Spotify) sin depender de que un
   # identificador de playlist siga existiendo dentro de seis meses.
@@ -501,9 +525,7 @@ action:
     data:
       media_content_type: custom
       media_content_id: "pon la canción Weltita de Bad Bunny"
-  - service: light.turn_on
-    target: { entity_id: [light.tira_led, light.luces_mesa] }   # ← SUSTITÚYELAS
-    data: { brightness_pct: 100 }
+    continue_on_error: true
   # La tercera luz solo obedece hablándole a Alexa, así que se enciende como comando de
   # texto. Este paso es la razón por la que el ritual es YAML y no una lista de órdenes
   # del backend: `alexa_devices` no es un dominio de la cola y va por device_id.
@@ -511,13 +533,44 @@ action:
     data:
       device_id: TU_DEVICE_ID                              # ← SUSTITÚYELO
       text_command: "Enciende led mesa"
+    continue_on_error: true
 ```
+
+**Cuando no suena, dónde mirar.** Hay tres piezas y cada una deja su huella:
+
+1. El **widget de alarmas del dashboard** (o `mis_alarmas` de Jarvis). Si la alarma está
+   en `escalada` con N intentos, el backend ha hecho su parte: decidió escalar y lo ha
+   contestado al sensor. Si sigue en `avisada` pasados los dos minutos, el fallo está en
+   el sondeo (el sensor REST no llama o el token no vale: mira el historial de
+   `sensor.life_assistant_alarma`, que tiene que ir cambiando de número).
+2. La **notificación de insistencia** («aviso 2», «aviso 3»). Si dice «No despierto la
+   casa: Home Assistant dice que estás fuera», la casa no suena a propósito, porque la
+   presencia que HA empuja al backend dice que no estás. Suele ser un `person` en
+   `not_home` por un GPS desviado de madrugada; mira `GET /presencia` y la zona. Queda
+   además a WARNING en `app_logs`.
+
+   **Y una presencia reciente no quiere decir una presencia cierta.** El backend
+   caduca la presencia por su `updated_at` (`PRESENCE_TTL_MINUTES`) y se calla cuando
+   no sabe, que es lo correcto; pero la automatización `Life Assistant - Presencia`
+   reenvía el estado del `device_tracker` **cada 15 minutos aunque el tracker lleve un
+   día sin reportar**, así que el dato llega siempre fresco y el TTL no llega a
+   dispararse nunca. Eso fue lo que pasó el 2026-09-17: el iPhone dejó de mandar
+   ubicación el día anterior a las 09:24, se quedó clavado en `not_home` a 26 km de
+   casa, y la alarma de las 08:30 escaló sin tocar la casa mientras Mikel dormía en
+   ella. Antes de culpar al ritual, mira el `last_reported` del `device_tracker`, no
+   solo su estado.
+3. La **traza de la automatización** (Ajustes → Automatizaciones → «Life Assistant -
+   Alarma, despertar» → Trazas). Si el `last_triggered` es de hoy, HA se disparó y el
+   fallo está en un paso concreto del ritual: la traza dice cuál. Si no se disparó
+   aunque el sensor cambió, la condición o el trigger están mal copiados.
 
 **El botón.** Mismo molde que los otros cinco, y sin `uri`: pulsarlo no abre nada en el
 móvil, que es la mitad del sentido de este botón. Este salto —la app companion entregando
 el evento a HA— es el único del camino que no deja huella en ningún log, así que el
 backend contesta con otra notificación («⏰ Alarma quitada») para que se note cuando se
-pierde. Ver `docs/ALARMAS.md`.
+pierde. Y hay dos caminos más que **no pasan por HA**: desenchufar el cargador (el Atajo
+de `POST /despertar` calla lo que esté sonando) y decirle a Jarvis «estoy despierto». Ver
+`docs/ALARMAS.md`.
 
 ```yaml
 alias: Life Assistant - Alarma, estoy despierto
@@ -545,6 +598,7 @@ rest_command:
     payload: '{}'
 ```
 
-**Hace falta el permiso de notificaciones críticas** de la app companion en el iPhone, el
-mismo que ya pide el aviso de despliegue. Sin él la notificación llega igual, pero
-callada, que para una alarma es como no llegar.
+El aviso de la alarma va como notificación **normal**, no crítica (ver `docs/ALARMAS.md`):
+si el móvil está en silencio y no confirmas, quien te despierta es la escalada por el
+altavoz. El permiso de notificaciones críticas sigue haciendo falta solo para el permiso
+de despliegue.

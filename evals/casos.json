@@ -45,6 +45,13 @@
     { "id": "vigilar-pagina", "grupo": "pares", "peticion": "Vigila https://example.com/notas y avísame cuando aparezca la palabra 'publicadas'.", "espera": ["vigilar_pagina"], "confundible": "leer_pagina", "nota": "leer una vez vs vigilar en el tiempo." },
     { "id": "dejar-de-vigilar", "grupo": "pares", "peticion": "Deja de vigilar la página de las notas.", "espera": ["dejar_de_vigilar", "mis_vigilancias"] },
 
+    { "id": "alarma-poner", "grupo": "pares", "peticion": "Mañana me levanto a las siete y media, ponme la alarma de respaldo.", "espera": ["poner_alarma"], "confundible": "recordarme", "nota": "Una hora de levantarse es una alarma, no un recordatorio." },
+    { "id": "alarma-semanal", "grupo": "pares", "peticion": "Ponme la alarma entre semana a las siete.", "espera": ["poner_alarma"], "confundible": "proponer_regla" },
+    { "id": "alarmas-listar", "grupo": "pares", "peticion": "¿Qué alarmas de respaldo tengo puestas?", "espera": ["mis_alarmas"], "confundible": "mis_recordatorios" },
+    { "id": "alarma-cancelar", "grupo": "pares", "peticion": "Quita la alarma de mañana, no tengo que madrugar.", "espera": ["cancelar_alarma", "mis_alarmas"], "confundible": "estoy_despierto", "nota": "Una alarma que aún no ha sonado se cancela; una que suena se calla con estoy_despierto." },
+    { "id": "alarma-despierto", "grupo": "pares", "peticion": "Ya estoy despierto, que se calle.", "espera": ["estoy_despierto"], "confundible": "cancelar_alarma", "nota": "Sin id y sin preguntar: a las siete de la mañana lo que se quiere es que aquello se calle." },
+    { "id": "alarma-levantado", "grupo": "pares", "peticion": "Buenos días, ya me he levantado.", "espera": ["estoy_despierto"], "confundible": "agenda", "nota": "Decir que está despierto es la señal, aunque no mencione ninguna alarma." },
+
     { "id": "recordar-hecho", "grupo": "pares", "peticion": "Que te quede claro para siempre: la hora de entrenamiento personal la cobro a 16 euros.", "espera": ["recordar"], "confundible": "guardar_idea", "nota": "memoria (hecho duradero) vs idea (nota del usuario)." },
     { "id": "guardar-idea", "grupo": "pares", "peticion": "Apúntame esta idea: un carril horizontal con todo el día sobre el mismo eje.", "espera": ["guardar_idea"], "confundible": "recordar" },
     { "id": "olvidar", "grupo": "pares", "peticion": "Lo que guardaste sobre mi horario de gimnasio ya no vale, bórralo de tu memoria.", "espera": ["olvidar"], "confundible": "borrar_idea" },

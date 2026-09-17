@@ -94,7 +94,7 @@ class TestElBuzonDeNoche(_Noche):
                                cuerpos={"10": "Hola, te escribo para quedar."})
         _fake_modelo(monkeypatch, ["responder", "ruido"])
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert registro["cuerpos_pedidos"] == ["10"]
         assert [i["datos"]["categoria"] for i in items] == ["responder", "ruido"]
@@ -120,7 +120,7 @@ class TestElBuzonDeNoche(_Noche):
                                cuerpos={"10": "hola"})
         _fake_modelo(monkeypatch, ["responder"], borrador="El jueves me va bien.")
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert len(registro["borradores"]) == 1
         assert registro["borradores"][0]["comment"] == "El jueves me va bien."
@@ -172,7 +172,7 @@ class TestElBuzonDeNoche(_Noche):
             raise RuntimeError("la API no contesta")
         monkeypatch.setattr(main, "get_openai_client", _revienta)
 
-        items = main._noche_correos()
+        items, _ = main._noche_correos()
 
         assert registro["cuerpos_pedidos"] == []
         assert registro["borradores"] == []
@@ -208,7 +208,7 @@ class TestElBuzonDeNoche(_Noche):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
         llamadas = []
         monkeypatch.setattr(main, "_cabeceras_recientes", lambda: llamadas.append(1) or [])
-        assert main._noche_correos() == []
+        assert main._noche_correos() == ([], {"estado": "apagado"})
         assert llamadas == []
 
     def test_un_buzon_caido_no_tumba_la_noche(self, monkeypatch, mock_requests):
@@ -217,16 +217,202 @@ class TestElBuzonDeNoche(_Noche):
         def _revienta():
             raise OSError("no se pudo conectar")
         monkeypatch.setattr(main, "_cabeceras_recientes", _revienta)
-        assert main._noche_correos() == []
+        items, nota = main._noche_correos()
+        assert items == []
+        assert nota["estado"] == "fallo"
+
+
+class TestAQuienNoSeLeContesta(_Noche):
+    """La puerta de antes del borrador, que vive FUERA del modelo.
+
+    El clasificador ve asunto y remitente y acierta casi siempre, pero «casi siempre»
+    aplicado a escribir en tu nombre no basta: lo que se puede decidir con un dato exacto
+    —quién manda el correo, a quién va dirigido— no se le pregunta a un modelo.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _soy_mikel(self, monkeypatch):
+        monkeypatch.setattr(main, "_buzon_yo", lambda _t: "mikel@ejemplo.com")
+        monkeypatch.setattr(main, "NOCHE_NO_RESPONDER", [])
+
+    @pytest.mark.parametrize("remitente", [
+        "noreply@revolut.com", "no-reply@indexacapital.com", "donotreply@x.com",
+        "notificaciones@banco.es", "alertas@x.com", "mailer-daemon@x.com",
+        "newsletter@marca.com",
+    ])
+    def test_un_remitente_automatico_nunca_lleva_borrador(self, remitente):
+        correo = {"remitente": remitente, "para": ["mikel@ejemplo.com"], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == "automatico"
+
+    @pytest.mark.parametrize("remitente", [
+        "ana@ejemplo.com", "arnoldo@ejemplo.com", "javier.infante@ejemplo.com",
+        "soportino@ejemplo.com", "informes.ana@ejemplo.com",
+    ])
+    def test_una_persona_con_un_nombre_desafortunado_si_lo_lleva(self, remitente):
+        """El patrón mira el trozo de antes de la arroba CON separadores: un `search` a
+        secas por "alert", "info" o "soporte" se llevaría por delante a media agenda.
+        `arnoldo` lleva un "no" dentro y `javier.infante` un "info", y los dos contestan."""
+        correo = {"remitente": remitente, "para": ["mikel@ejemplo.com"], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == ""
+
+    def test_ante_la_duda_no_se_redacta(self):
+        """`alerta.roja@` podría ser una persona con un alias raro o un buzón de avisos, y
+        el patrón lo da por automático. Es deliberado: el error de no redactar sale en el
+        parte, con su motivo y en un segundo se ve; el de redactar de más cuesta dinero y
+        deja en Borradores una respuesta a nadie. Los dos errores no pesan lo mismo."""
+        correo = {"remitente": "alerta.roja@ejemplo.com",
+                  "para": ["mikel@ejemplo.com"], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == "automatico"
+
+    def test_ir_en_copia_no_lleva_borrador(self):
+        correo = {"remitente": "ana@ejemplo.com", "para": ["otro@ejemplo.com"],
+                  "cc": ["mikel@ejemplo.com"]}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == "en_copia"
+
+    def test_ir_en_el_para_junto_a_otros_si_lo_lleva(self):
+        """Un correo a tres personas TE lo han escrito: ir acompañado no es ir en copia."""
+        correo = {"remitente": "ana@ejemplo.com",
+                  "para": ["mikel@ejemplo.com", "otro@ejemplo.com"], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == ""
+
+    def test_sin_destinatarios_no_se_calla_nada(self):
+        """Una lista de distribución llega con `toRecipients` vacío. No saber a quién iba
+        no es prueba de que no iba a ti, y callar un correo por no saber es el error que
+        no se puede cometer aquí."""
+        correo = {"remitente": "ana@ejemplo.com", "para": [], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == ""
+
+    def test_sin_saber_tu_direccion_la_regla_no_se_aplica(self):
+        correo = {"remitente": "ana@ejemplo.com", "para": ["otro@ejemplo.com"],
+                  "cc": ["mikel@ejemplo.com"]}
+        assert main._motivo_no_responder(correo, "") == ""
+
+    def test_la_lista_de_apartados_es_configurable(self, monkeypatch):
+        monkeypatch.setattr(main, "NOCHE_NO_RESPONDER", ["indexacapital.com"])
+        correo = {"remitente": "ana.gestora@indexacapital.com",
+                  "para": ["mikel@ejemplo.com"], "cc": []}
+        assert main._motivo_no_responder(correo, "mikel@ejemplo.com") == "remitente_apartado"
+
+    def test_el_frenado_no_se_lee_ni_se_redacta_pero_si_se_apunta(self, monkeypatch,
+                                                                  mock_requests):
+        """El de arriba se frena entero: ni se baja su cuerpo ni se llama al redactor. Y
+        aun así sale en el parte, con el motivo, para que no parezca un olvido."""
+        cabeceras = [
+            {"asunto": "Tu extracto", "de": "Banco <noreply@banco.com>",
+             "remitente": "noreply@banco.com", "para": ["mikel@ejemplo.com"], "cc": [],
+             "id": "10", "message_id": "<a@x>"},
+            {"asunto": "¿Quedamos?", "de": "Ana <ana@ejemplo.com>",
+             "remitente": "ana@ejemplo.com", "para": ["mikel@ejemplo.com"], "cc": [],
+             "id": "11", "message_id": "<b@x>"},
+        ]
+        registro = _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras,
+                               cuerpos={"10": "extracto", "11": "hola"})
+        _fake_modelo(monkeypatch, ["responder", "responder"])
+
+        items, _ = main._noche_correos()
+
+        assert registro["cuerpos_pedidos"] == ["11"]
+        assert [b["id"] for b in registro["borradores"]] == ["11"]
+        assert items[0]["datos"]["no_responder"] == "automatico"
+        assert items[0]["datos"]["borrador"] is False
+        assert items[1]["datos"]["no_responder"] == ""
+        assert items[1]["datos"]["borrador"] is True
+
+    def test_el_motivo_no_se_apunta_en_lo_que_ya_era_ruido(self, monkeypatch, mock_requests):
+        """En un correo que el clasificador mandó a «ruido», el motivo no explica nada:
+        nadie iba a contestarlo de todas formas, y enseñarlo solo confunde."""
+        cabeceras = [{"asunto": "Oferta", "de": "Tienda <newsletter@tienda.com>",
+                      "remitente": "newsletter@tienda.com", "para": [], "cc": [],
+                      "id": "10", "message_id": "<a@x>"}]
+        _fake_buzon(monkeypatch, mock_requests, cabeceras=cabeceras)
+        _fake_modelo(monkeypatch, ["ruido"])
+
+        items, _ = main._noche_correos()
+
+        assert items[0]["datos"]["no_responder"] == ""
+
+
+class TestLoQueSeMiro(_Noche):
+    """La nota de lo mirado: qué distingue una noche tranquila de un turno averiado.
+
+    Las cuatro razones por las que el buzón puede dar cero correos tienen que llegar a la
+    mañana distinguidas. Si no, «no hubo nada que hacer» acaba leyéndose como «no tengo
+    correo» —o como «esto está roto»— y las dos lecturas son peores que el silencio.
+    """
+
+    def test_un_buzon_tranquilo_dice_que_se_miro(self, monkeypatch, mock_requests):
+        _fake_buzon(monkeypatch, mock_requests, cabeceras=[])
+
+        items, nota = main._noche_correos()
+
+        assert items == []
+        assert nota["estado"] == "ok"
+        assert nota["mirados"] == 0
+        assert nota["horas"] == main.CORREO_HORAS
+
+    def test_sin_outlook_no_se_confunde_con_un_buzon_vacio(self, monkeypatch):
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "")
+
+        assert main._noche_correos() == ([], {"estado": "sin_outlook"})
+
+    def test_graph_en_error_no_cuenta_como_cero_correos(self, monkeypatch, mock_requests):
+        """El 403 de «Outlook no ha dado permiso de correo» daba lista vacía, igual que
+        un buzón limpio. Ahora revienta, y quien llama lo apunta como fallo."""
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+        mock_requests.add("GET", "/mailFolders/inbox/messages", FakeResponse({}, 403))
+
+        with pytest.raises(main.BuzonCaido):
+            main._cabeceras_recientes()
+
+        items, nota = main._noche_correos()
+        assert items == []
+        assert nota["estado"] == "fallo"
+
+    def test_el_parte_guarda_lo_mirado_junto_a_las_cuentas(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "_noche_correos",
+                            lambda: ([], {"estado": "ok", "mirados": 0, "horas": 24,
+                                          "carpeta": "bandeja de entrada"}))
+
+        salida = main.correr_turno_de_noche()
+
+        assert salida["resumen"]["correos"] == 0
+        assert salida["resumen"]["revisado"]["correo"]["mirados"] == 0
+
+    def test_el_area_que_revienta_entera_tambien_deja_nota(self, monkeypatch, mock_requests):
+        def _revienta():
+            raise RuntimeError("el buzón no contesta")
+        monkeypatch.setattr(main, "_noche_correos", _revienta)
+
+        salida = main.correr_turno_de_noche()
+
+        assert salida["resumen"]["revisado"]["correo"] == {"estado": "fallo"}
+
+    @pytest.mark.parametrize("revisado, esperado", [
+        ({"correo": {"estado": "ok", "mirados": 0, "horas": 24,
+                     "carpeta": "bandeja de entrada"}}, "la bandeja de entrada"),
+        ({"correo": {"estado": "apagado"}},     "apagada"),
+        ({"correo": {"estado": "sin_outlook"}}, "Outlook"),
+        ({"correo": {"estado": "fallo"}},       "No pude"),
+    ])
+    def test_la_frase_de_una_noche_en_blanco_dice_por_que(self, revisado, esperado):
+        frase = main._frase_parte({"revisado": revisado})
+        assert esperado in frase
+        assert "No hubo nada que hacer" not in frase
+
+    def test_sin_nota_se_sigue_diciendo_lo_de_siempre(self):
+        """Los partes de antes de esto no tienen `revisado`, y tienen que seguir
+        leyéndose: un cambio de forma no puede dejar mudo el histórico."""
+        assert main._frase_parte({"correos": 0}) == "No hubo nada que hacer esta noche."
 
 
 class TestElTurno(_Noche):
     """El carril: cuándo corre, cuántas veces y qué deja escrito."""
 
     def _sin_correo(self, monkeypatch):
-        monkeypatch.setattr(main, "_noche_correos", lambda: [
+        monkeypatch.setattr(main, "_noche_correos", lambda: ([
             {"area": "correo", "titulo": "¿Quedamos?", "detalle": "El jueves.",
-             "datos": {"de": "ana", "categoria": "responder", "borrador": True}}])
+             "datos": {"de": "ana", "categoria": "responder", "borrador": True}}],
+            {"estado": "ok", "mirados": 1, "horas": 24, "carpeta": "bandeja de entrada"}))
 
     def test_el_turno_de_una_noche_se_hace_una_sola_vez(self, monkeypatch, mock_requests):
         """El tick llega cada cinco minutos: sin la reserva atómica, una noche redactaría
@@ -252,7 +438,7 @@ class TestElTurno(_Noche):
     def test_apagado_no_corre(self, monkeypatch, mock_requests):
         monkeypatch.setattr(main, "NOCHE_TURNO", False)
         llamadas = []
-        monkeypatch.setattr(main, "_noche_correos", lambda: llamadas.append(1) or [])
+        monkeypatch.setattr(main, "_noche_correos", lambda: (llamadas.append(1) or [], {"estado": "ok", "mirados": 0}))
         assert main.correr_turno_de_noche()["hecho"] is False
         assert llamadas == []
 
