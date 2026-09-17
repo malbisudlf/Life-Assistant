@@ -69,11 +69,45 @@ espíritu de la regla, acotándola:
 
 | Paso | Qué ve | Qué hace |
 |---|---|---|
-| `_cabeceras_recientes()` | asunto, remitente, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
+| `_cabeceras_recientes()` | asunto, remitente, destinatarios, `internetMessageId` | los no leídos de las últimas `CORREO_HORAS`, con `$select` |
 | `_noche_clasificar()` | **solo asunto y remitente** | `responder` / `informativo` / `ruido` |
-| `_cuerpos_de()` | el cuerpo, **solo de los `responder`** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
+| `_motivo_no_responder()` | remitente y destinatarios, **sin modelo** | frena el borrador de lo automático, lo apartado y lo que va en copia |
+| `_cuerpos_de()` | el cuerpo, **solo de los `responder` que pasaron la puerta** | `uniqueBody` en texto, leído a trozos hasta `CORREO_MAX_DESCARGA` y recortado a `CORREO_MAX_CUERPO` |
 | `_redactar_respuesta()` | ese cuerpo | el borrador, con el modelo grande |
 | `_guardar_borrador()` | — | `POST /me/messages/{id}/createReply` |
+
+### A quién no se le contesta
+
+El clasificador acierta casi siempre, pero «casi siempre» aplicado a **escribir en tu
+nombre** no basta: un aviso del banco que salga «responder» acaba en un borrador que no
+debería existir, y cada borrador es una llamada de pago. Por eso, entre la clasificación
+y el redactor hay una puerta —`_motivo_no_responder()`— que vive **fuera del modelo**.
+La regla que la justifica: *lo que se puede decidir con un dato exacto no se le pregunta
+a un modelo.*
+
+| Motivo | Cómo se decide |
+|---|---|
+| `automatico` | el trozo anterior a la arroba es `noreply`, `no-responder`, `notificaciones`, `alertas`, `avisos`, `mailer`, `postmaster`, `bounce`, `newsletter`, `soporte`, `info`… |
+| `remitente_apartado` | la dirección o su dominio está en `NOCHE_NO_RESPONDER` (configurable: el banco, la gestora) |
+| `en_copia` | tu dirección **no** está en `toRecipients` y **sí** en `ccRecipients` |
+
+Tres detalles que no son obvios:
+
+- **El patrón mira el trozo de antes de la arroba, con separadores.** Un `search` a secas
+  por «alert» o por «info» apartaría a `alerta.roja@`… y también a `javier.infante@` y a
+  `arnoldo@`, que llevan «info» y «no» dentro y contestan perfectamente.
+- **Ante la duda, no se redacta.** Los dos errores no pesan igual: no redactar sale en el
+  parte, con su motivo, y se ve en un segundo; redactar de más cuesta dinero y deja en
+  Borradores una respuesta a nadie.
+- **Sin destinatarios no se calla nada.** Un correo a una lista de distribución llega con
+  `toRecipients` vacío, y no saber a quién iba no es prueba de que no iba a ti. Lo mismo
+  si no se pudo averiguar la dirección del propio buzón (`_buzon_yo()`, una llamada a
+  `/me` por proceso): sin ella la regla del «voy en copia» simplemente no se aplica.
+
+El motivo se guarda en `datos.no_responder` del item, así que el parte enseña **por qué**
+un correo se quedó sin borrador en vez de que parezca un olvido. Y solo se apunta en los
+que el clasificador mandó a «responder»: en uno que ya era ruido, el motivo no explica
+nada y confunde.
 
 Y lo que **no** pasa:
 

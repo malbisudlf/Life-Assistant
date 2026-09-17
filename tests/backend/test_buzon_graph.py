@@ -71,10 +71,36 @@ class TestLeerElBuzon:
 
         url = mock_requests.called("GET", "/mailFolders/inbox/messages")[0][1]
         assert "isRead eq false" in url
-        assert "$select=id,subject,from,internetMessageId" in url
+        assert "$select=id,subject,from," in url
+        assert "$select" in url and "body" not in url   # el cuerpo no viaja aquí
         assert mock_requests.called("PATCH", "/me/messages") == []
         assert cabeceras == [{"asunto": "¿Quedamos?", "de": "Ana <ana@ejemplo.com>",
+                              "remitente": "ana@ejemplo.com", "para": [], "cc": [],
                               "id": "AAA", "message_id": "<a@x>"}]
+
+    def test_se_piden_los_destinatarios_para_saber_si_vas_en_copia(self, monkeypatch,
+                                                                   mock_requests):
+        """`toRecipients`/`ccRecipients` son cabeceras, no cuerpo: entran en el mismo
+        `$select` y no cuestan una llamada aparte. Sin ellos no hay forma de distinguir
+        un correo escrito A TI de uno en el que vas de copia."""
+        monkeypatch.setattr(main, "CORREO_LEER", True)
+        monkeypatch.setattr(main, "get_valid_token", lambda: "t")
+        mock_requests.add("GET", "/mailFolders/inbox/messages", FakeResponse({"value": [
+            {"id": "AAA", "subject": "Reunión", "internetMessageId": "<a@x>",
+             "from": {"emailAddress": {"name": "Ana", "address": "ANA@Ejemplo.com"}},
+             "toRecipients": [{"emailAddress": {"address": "Otro@Ejemplo.com"}}],
+             "ccRecipients": [{"emailAddress": {"address": "Mikel@Ejemplo.com"}}]},
+        ]}, 200))
+
+        cabeceras = main._cabeceras_recientes()
+
+        url = mock_requests.called("GET", "/mailFolders/inbox/messages")[0][1]
+        assert "toRecipients" in url and "ccRecipients" in url
+        # Todo en minúscula: las direcciones se comparan, y Graph las devuelve como las
+        # escribió quien mandó el correo.
+        assert cabeceras[0]["remitente"] == "ana@ejemplo.com"
+        assert cabeceras[0]["para"] == ["otro@ejemplo.com"]
+        assert cabeceras[0]["cc"] == ["mikel@ejemplo.com"]
 
     def test_sin_outlook_conectado_no_se_toca_el_buzon(self, monkeypatch, mock_requests):
         """Si Outlook no está conectado, `get_valid_token()` devuelve None y aquí no se

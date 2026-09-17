@@ -12189,6 +12189,105 @@ class BuzonCaido(RuntimeError):
     """
 
 
+def _direcciones(destinatarios) -> list:
+    """Las direcciones de una lista de destinatarios de Graph, en minúscula."""
+    fuera = []
+    for d in (destinatarios or []):
+        direccion = (((d or {}).get("emailAddress")) or {}).get("address") or ""
+        if direccion:
+            fuera.append(direccion.lower()[:200])
+    return fuera[:50]
+
+
+# Remitentes que no son una persona esperando contestación. Se mira el TROZO ANTERIOR a
+# la arroba, con separadores, para que `noreply@x.com` y `alertas.indexa@x.com` entren y
+# `arnoldo@x.com` no —un `re.search` a secas por "no" o por "alert" pillaría medio buzón.
+_REMITENTE_AUTOMATICO = re.compile(
+    r"(?:^|[._+-])(?:no-?reply|no-?responder|do-?not-?reply|donotreply|notifica\w*|"
+    r"notifications?|alerta?s?|avisos?|mailer|mailer-daemon|postmaster|bounces?|"
+    r"newsletter|noticias|automated|automatico|soporte|support|info|hello|contacto)"
+    r"(?:[._+-]|$)")
+
+# Direcciones o dominios a los que nunca se le redacta respuesta, aunque el clasificador
+# diga que sí. Va por configuración y no en el código porque es una lista de la casa de
+# cada uno: aquí serían el banco y la gestora, que escriben mucho y no esperan nada.
+NOCHE_NO_RESPONDER = [t.strip().lower()
+                      for t in os.getenv("NOCHE_NO_RESPONDER", "").split(",") if t.strip()]
+
+# La dirección del propio buzón, que hace falta para saber si un correo te lo escriben a
+# ti o vas en copia. Se pregunta una vez por proceso: no cambia, y es una llamada de más
+# en un camino que corre de madrugada.
+_buzon_yo_cache: str | None = None
+_buzon_yo_lock = threading.Lock()
+
+
+def _buzon_yo(token: str) -> str:
+    """La dirección del buzón que se está leyendo. Cadena vacía si no se pudo saber.
+
+    Se pregunta a Graph y no se saca de `BRIEF_TO` a propósito: aquella es a dónde se
+    manda el resumen —puede ser otra cuenta— y aquí lo que se necesita es a quién
+    pertenece ESTE buzón. Y no saberlo no bloquea nada: sin dirección, la regla del "voy
+    en copia" simplemente no se aplica, que es el lado seguro (se redacta de más, no de
+    menos, y de eso ya avisa el parte).
+    """
+    global _buzon_yo_cache
+    with _buzon_yo_lock:
+        if _buzon_yo_cache is not None:
+            return _buzon_yo_cache
+    direccion = ""
+    try:
+        r = http.get("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
+                     headers=_buzon_cabeceras(token))
+        if r.status_code < 300:
+            datos = r.json() or {}
+            direccion = str(datos.get("mail") or datos.get("userPrincipalName") or "").lower()
+    except Exception as e:
+        logger.warning("Buzón: no se pudo saber de quién es el buzón (%s)", type(e).__name__)
+    with _buzon_yo_lock:
+        _buzon_yo_cache = direccion
+    return direccion
+
+
+def _motivo_no_responder(correo: dict, yo: str) -> str:
+    """Por qué a este correo NO se le redacta respuesta. Cadena vacía = sí se le redacta.
+
+    Es una puerta **fuera del modelo**, y esa es la decisión que importa. El clasificador
+    ve solo asunto y remitente y acierta casi siempre, pero «casi siempre» aplicado a
+    escribir en tu nombre no basta: un aviso del banco clasificado como «responder» acaba
+    en un borrador que no debería existir, y cada uno cuesta dinero. Lo que se puede
+    decidir con un dato exacto —quién lo manda, a quién va dirigido— no se le pregunta a
+    un modelo.
+
+    El motivo se guarda en el parte, así que por la mañana se ve POR QUÉ un correo se
+    quedó sin borrador en vez de parecer que se olvidó.
+    """
+    remitente = str(correo.get("remitente") or "").lower()
+    if remitente:
+        local = remitente.split("@")[0]
+        if _REMITENTE_AUTOMATICO.search(local):
+            return "automatico"
+        if any(t in remitente for t in NOCHE_NO_RESPONDER):
+            return "remitente_apartado"
+    # Solo cuenta como "voy en copia" si consta que va dirigido a otro: una lista de
+    # destinatarios vacía (correo a una lista de distribución, campos ocultos) no es
+    # prueba de nada y no puede callar un correo que sí te escribieron.
+    para = [d for d in (correo.get("para") or []) if d]
+    if yo and para and yo not in para and yo in (correo.get("cc") or []):
+        return "en_copia"
+    return ""
+
+
+# El motivo dicho en prosa, que es como lo cuenta Jarvis al descolgar. El widget tiene
+# su propia tabla con etiquetas cortas, por lo mismo que la frase del parte: esto se DICE
+# y aquello se LEE de un vistazo en una tarjeta estrecha. Lo que se guarda en Supabase es
+# la clave, que es el hecho; cómo se cuenta es de cada quien lo enseña.
+_MOTIVOS_NO_RESPONDER = {
+    "automatico":         "lo manda un remitente automático, que no espera respuesta",
+    "remitente_apartado": "ese remitente está apartado de las respuestas",
+    "en_copia":           "vas en copia y el correo no va dirigido a ti",
+}
+
+
 def _cabeceras_recientes() -> list:
     """Asunto, remitente y id de los correos sin leer de las últimas horas.
 
@@ -12207,7 +12306,7 @@ def _cabeceras_recientes() -> list:
     r = http.get(
         "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
         f"?$filter=isRead eq false and receivedDateTime ge {desde}"
-        f"&$select=id,subject,from,internetMessageId,receivedDateTime"
+        f"&$select=id,subject,from,toRecipients,ccRecipients,internetMessageId,receivedDateTime"
         f"&$orderby=receivedDateTime desc&$top={CORREO_MAX}",
         headers=_buzon_cabeceras(token),
     )
@@ -12221,6 +12320,14 @@ def _cabeceras_recientes() -> list:
         salida.append({
             "asunto":     (m.get("subject") or "")[:150],
             "de":         (f"{nombre} <{correo}>" if nombre else correo)[:80],
+            # La dirección suelta, aparte del "Nombre <dirección>" que ve el modelo: las
+            # reglas de quién NO se responde miran la dirección, y sacarla del texto a
+            # base de partir por "<" es la clase de cosa que falla con un nombre raro.
+            "remitente":  correo.lower()[:200],
+            # Destinatarios: NO van al modelo (ni hacen falta ni son suyos), se usan para
+            # saber si el correo te lo escriben a ti o vas de copia.
+            "para":       _direcciones(m.get("toRecipients")),
+            "cc":         _direcciones(m.get("ccRecipients")),
             "id":         m.get("id") or "",
             "message_id": (m.get("internetMessageId") or "")[:200],
         })
@@ -12301,9 +12408,11 @@ def _revisar_correo() -> int:
 _NOCHE_CLASIFICA = (
     "Te paso una lista de correos con su ASUNTO y su REMITENTE, numerados por su "
     "posición. Clasifica cada uno en una de estas tres categorías:\n"
-    '- "responder": escrito por una persona y espera una respuesta tuya.\n'
+    '- "responder": escrito por una PERSONA, a ti, y espera una respuesta tuya.\n'
     '- "informativo": te interesa saberlo, pero no hay que contestar (un cobro, una '
-    "confirmación, una nota publicada).\n"
+    "confirmación, una nota publicada). Aquí entra TODO lo que manda un servicio o una "
+    "empresa sobre tu cuenta —el banco, la gestora de inversión, una suscripción, una "
+    "entrega—, por mucho que venga firmado con un nombre de persona.\n"
     '- "ruido": newsletters, promociones, notificaciones automáticas de redes.\n'
     'Devuelve SOLO un JSON {"correos": [{"i": 0, "categoria": "responder"}]} con una '
     "entrada por correo. Ante la duda entre responder e informativo, elige informativo: "
@@ -12495,14 +12604,20 @@ def _noche_correos() -> tuple[list, dict]:
     if not cabeceras:
         return [], mirado
 
-    categorias  = _noche_clasificar(cabeceras)
-    a_responder = [c for c, cat in zip(cabeceras, categorias)
-                   if cat == "responder"][:NOCHE_BORRADORES_MAX]
+    categorias = _noche_clasificar(cabeceras)
+    yo         = _buzon_yo(_buzon_listo())
+    # El motivo se calcula para TODOS y no solo para los que iban a llevar borrador: así
+    # el parte puede decir por qué uno se quedó sin él, en vez de callarse y parecer que
+    # se olvidó. La puerta va después del clasificador porque es más barata que él, no
+    # antes: clasificar cuesta una llamada para toda la tanda, y saltársela no ahorra nada.
+    motivos     = [_motivo_no_responder(c, yo) for c in cabeceras]
+    a_responder = [c for c, cat, motivo in zip(cabeceras, categorias, motivos)
+                   if cat == "responder" and not motivo][:NOCHE_BORRADORES_MAX]
     ids_a_leer  = {c.get("id") for c in a_responder if c.get("id")}
     cuerpos     = _cuerpos_de(sorted(ids_a_leer))
 
     items = []
-    for correo, categoria in zip(cabeceras, categorias):
+    for correo, categoria, motivo in zip(cabeceras, categorias, motivos):
         borrador, subido = "", False
         if correo in a_responder:
             borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("id", ""), ""))
@@ -12511,8 +12626,11 @@ def _noche_correos() -> tuple[list, dict]:
             "area":    "correo",
             "titulo":  correo.get("asunto", "") or "(sin asunto)",
             "detalle": borrador,
+            # `no_responder` solo se apunta cuando hubo algo que frenar: en un correo que
+            # el clasificador ya mandó a «ruido» el motivo no explica nada, confunde.
             "datos":   {"de": correo.get("de", ""), "categoria": categoria,
-                        "borrador": subido},
+                        "borrador": subido,
+                        "no_responder": motivo if categoria == "responder" else ""},
         })
     return items, mirado
 
@@ -15864,6 +15982,10 @@ def _j_turno_de_noche(fecha=None) -> dict:
                        "de": (i.get("datos") or {}).get("de", ""),
                        "categoria": (i.get("datos") or {}).get("categoria", ""),
                        "borrador": bool((i.get("datos") or {}).get("borrador")),
+                       # Por qué uno que pedía respuesta no la lleva: si Jarvis no lo
+                       # sabe, al preguntárselo contesta que se olvidó de ese correo.
+                       "sin_borrador_porque": _MOTIVOS_NO_RESPONDER.get(
+                           (i.get("datos") or {}).get("no_responder") or "", ""),
                        "detalle": (i.get("detalle") or "")[:300]}
                       for i in (parte.get("items") or [])[:25]],
     }

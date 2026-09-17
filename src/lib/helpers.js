@@ -2223,6 +2223,23 @@ export const AREAS_NOCHE = [
   { id: "recado", label: "Recados" },
 ];
 
+/** Por qué un correo del parte se quedó sin borrador, en una etiqueta corta.
+ *
+ *  El backend guarda el motivo en clave (`en_copia`, `automatico`…) y no la frase: lo que
+ *  se escribe en Supabase es el hecho, y cómo se cuenta es cosa de quien lo enseña. Estas
+ *  son las de LEER, en una tarjeta estrecha; el backend tiene las suyas en prosa, que son
+ *  las que DICE Jarvis. Un motivo que no esté en la tabla se enseña tal cual en vez de
+ *  desaparecer: uno nuevo tiene que verse raro, no volverse invisible. */
+const MOTIVOS_NO_RESPONDER = {
+  automatico:         "Sin borrador · remitente automático",
+  remitente_apartado: "Sin borrador · remitente apartado",
+  en_copia:           "Sin borrador · vas en copia",
+};
+export function motivoNoResponder(clave) {
+  if (!clave) return "";
+  return MOTIVOS_NO_RESPONDER[clave] || `Sin borrador (${clave})`;
+}
+
 /** El parte agrupado por área y ya contado, listo para pintar.
  *
  *  Se separa de la pantalla porque es lo único de todo esto que se puede probar sin un
