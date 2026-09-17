@@ -12488,7 +12488,10 @@ def _noche_correos() -> tuple[list, dict]:
     # Lo que se miró se apunta ANTES de clasificar: que el modelo falle luego no cambia
     # cuántos correos había delante, y esa cifra es la que contesta «¿llegaste a mirar?».
     mirado = {"estado": "ok", "mirados": len(cabeceras), "horas": CORREO_HORAS,
-              "carpeta": "Bandeja de entrada"}
+              # En minúscula porque la frase le antepone el artículo: «Miré la bandeja
+              # de entrada». Guardar aquí el nombre con mayúscula obligaba a escribir
+              # «Miré Bandeja de entrada», que no es castellano.
+              "carpeta": "bandeja de entrada"}
     if not cabeceras:
         return [], mirado
 
@@ -12627,12 +12630,12 @@ def _frase_revisado(revisado: dict) -> str:
         return "No pude mirar el buzón: no contestó."
     if estado != "ok":
         return ""
-    carpeta = str(correo.get("carpeta") or "la bandeja de entrada")
+    carpeta = str(correo.get("carpeta") or "bandeja de entrada")
     horas   = int(correo.get("horas") or 0)
     ventana = f" de las últimas {horas} h" if horas else ""
     if int(correo.get("mirados") or 0):
-        return f"Miré {carpeta}{ventana} y no había nada que preparar."
-    return f"Miré {carpeta} y no había ningún correo sin leer{ventana}."
+        return f"Miré la {carpeta}{ventana} y no había nada que preparar."
+    return f"Miré la {carpeta} y no había ningún correo sin leer{ventana}."
 
 
 def _frase_parte(resumen: dict) -> str:

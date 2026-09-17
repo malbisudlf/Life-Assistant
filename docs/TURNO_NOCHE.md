@@ -194,7 +194,7 @@ esto es que los cuatro se cuenten distinto:
 
 | `revisado.correo.estado` | Qué dice el parte |
 |---|---|
-| `ok` (con `mirados`, `horas`, `carpeta`) | «Miré Bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.» |
+| `ok` (con `mirados`, `horas`, `carpeta`) | «Miré la bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.» |
 | `apagado` | «No miré el buzón: la parte del correo está apagada.» |
 | `sin_outlook` | «No miré el buzón: Outlook no está conectado.» |
 | `fallo` | «No pude mirar el buzón: no contestó.» |
