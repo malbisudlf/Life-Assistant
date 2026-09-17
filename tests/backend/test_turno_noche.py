@@ -261,7 +261,7 @@ class TestLoQueSeMiro(_Noche):
     def test_el_parte_guarda_lo_mirado_junto_a_las_cuentas(self, monkeypatch, mock_requests):
         monkeypatch.setattr(main, "_noche_correos",
                             lambda: ([], {"estado": "ok", "mirados": 0, "horas": 24,
-                                          "carpeta": "Bandeja de entrada"}))
+                                          "carpeta": "bandeja de entrada"}))
 
         salida = main.correr_turno_de_noche()
 
@@ -279,7 +279,7 @@ class TestLoQueSeMiro(_Noche):
 
     @pytest.mark.parametrize("revisado, esperado", [
         ({"correo": {"estado": "ok", "mirados": 0, "horas": 24,
-                     "carpeta": "Bandeja de entrada"}}, "Bandeja de entrada"),
+                     "carpeta": "bandeja de entrada"}}, "la bandeja de entrada"),
         ({"correo": {"estado": "apagado"}},     "apagada"),
         ({"correo": {"estado": "sin_outlook"}}, "Outlook"),
         ({"correo": {"estado": "fallo"}},       "No pude"),
@@ -302,7 +302,7 @@ class TestElTurno(_Noche):
         monkeypatch.setattr(main, "_noche_correos", lambda: ([
             {"area": "correo", "titulo": "¿Quedamos?", "detalle": "El jueves.",
              "datos": {"de": "ana", "categoria": "responder", "borrador": True}}],
-            {"estado": "ok", "mirados": 1, "horas": 24, "carpeta": "Bandeja de entrada"}))
+            {"estado": "ok", "mirados": 1, "horas": 24, "carpeta": "bandeja de entrada"}))
 
     def test_el_turno_de_una_noche_se_hace_una_sola_vez(self, monkeypatch, mock_requests):
         """El tick llega cada cinco minutos: sin la reserva atómica, una noche redactaría

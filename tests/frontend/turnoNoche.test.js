@@ -67,8 +67,8 @@ describe("fraseParteNoche", () => {
     // igual que un turno averiado, y lo que se acaba creyendo es que no escribe nadie.
     expect(fraseParteNoche({
       fecha: "2026-09-17", items: [],
-      frase: "Miré Bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.",
-    })).toContain("Bandeja de entrada");
+      frase: "Miré la bandeja de entrada y no había ningún correo sin leer de las últimas 24 h.",
+    })).toContain("bandeja de entrada");
   });
 });
 
