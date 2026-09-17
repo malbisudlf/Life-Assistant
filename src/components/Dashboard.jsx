@@ -15,7 +15,7 @@ import {
   repartoPatrimonio,
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   revisionDeUrl, DIAS_SEMANA,
-  agruparParteNoche, fraseParteNoche,
+  agruparParteNoche, fraseParteNoche, motivoNoResponder,
   hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -5018,6 +5018,13 @@ export default function Dashboard() {
                         {item.datos?.borrador && (
                           <div style={{ fontSize: 11, color: "var(--accent)", marginTop: 4 }}>
                             ✎ Respuesta redactada, esperándote en Borradores
+                          </div>
+                        )}
+                        {!item.datos?.borrador && item.datos?.no_responder && (
+                          // Por qué este NO lleva borrador. Sin esto, un correo que la
+                          // puerta frenó a propósito se lee igual que uno olvidado.
+                          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                            {motivoNoResponder(item.datos.no_responder)}
                           </div>
                         )}
                         {item.enlace && (
