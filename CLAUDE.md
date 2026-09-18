@@ -37,7 +37,17 @@ El repositorio es **público en GitHub**. Antes de cualquier commit o push:
   público permitiría forjar JWT válidos si la variable no estuviera configurada en
   producción.
 - **Antes de hacer push**: revisar si el diff contiene algún dato personal.
-- **`git filter-repo` ya se ejecutó** (2026-05-15) — el historial está limpio desde ahí.
+- **`git filter-repo` ya se ejecutó** (2026-05-15) — el historial está limpio **hasta
+  ahí**, y eso no es lo mismo que limpio. Lo que entró después no lo cubre: el commit
+  `1239a4b` (2026-09-06) citaba un fragmento de `HOME_ADDRESS` al documentar un fallo de
+  arranque, y aunque el fichero actual ya lleva un placeholder desde `d0eb3a4`, **el dato
+  sigue siendo público en ese commit** (`git log -S`, la vista de commit, el blame, un
+  clon completo). Quitarlo pide otra pasada de `git filter-repo` sobre `main` y un
+  force-push que invalida todos los clones, así que lo decide y lo hace Mikel; una sesión
+  no reescribe el historial. Ver el issue #196.
+  *Corregir el fichero no borra el historial: lo primero se ve en el diff y lo segundo
+  hay que ir a buscarlo, que es justo por lo que este apunte decía «limpio» durante
+  cuatro meses.*
 - **Commits**: no añadir línea `Co-Authored-By` — los commits van solo en nombre del
   usuario (ver "Convenciones").
 - **`CLAUDE.md` se versiona** (desde julio de 2026). Las notas privadas van en ficheros

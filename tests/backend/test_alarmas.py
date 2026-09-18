@@ -458,6 +458,27 @@ class TestEstoyDespiertoSinId:
         r = main._alarma_confirmar_sonando_segura("cargador")
         assert r["ok"] is False and r["hecho"] is False
 
+    def test_un_supabase_caido_no_se_lleva_por_delante_la_senal_de_despertar(
+            self, mock_requests, senal_despertar):
+        """La mitad que NO se puede perder es el resumen, no la alarma.
+
+        `_j_estoy_despierto` hacía las dos cosas y la primera iba sin `_segura`: un 5xx
+        puntual del PATCH se propagaba antes de llegar a la señal, y `_jarvis_despachar`
+        lo tapaba con un «La herramienta falló» sin dejar rastro de que el resumen se
+        había quedado sin mandar."""
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse(None, 500, "boom"))
+        r = main._j_estoy_despierto()
+        assert r["ok"] is False and "no se pudo mirar" in r["motivo"]
+        assert senal_despertar == ["jarvis"]
+
+    def test_al_fallar_la_alarma_tampoco_acusa_al_movil(self, mock_requests, canal_movil):
+        """La variante `_segura` tiene que seguir respetando el `acusar=False` de Jarvis:
+        si se le pasara el valor por defecto, un fallo de Supabase acabaría mandando al
+        móvil el «alarma quitada» que este camino no quiere."""
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse(None, 500, "boom"))
+        main._j_estoy_despierto()
+        assert canal_movil == []
+
 
 class TestEndpointsDelDashboard:
     def test_listar_pide_jwt(self, client):
