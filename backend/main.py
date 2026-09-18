@@ -7161,7 +7161,7 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
 # nadie que llame no hay proceso vivo que pueda mirar el reloj.
 #
 # Ojo con la intuición de "el reloj sabe cuándo me despierto": el Watch lo sabe, pero
-# el backend no se entera hasta que el iPhone sincroniza. De ahí que haya dos fuentes
+# el backend no se entera hasta que el iPhone sincroniza. De ahí que haya varias fuentes
 # y gane la que llegue antes.
 
 BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
@@ -7173,9 +7173,9 @@ BRIEF_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/brief_envios"
 # `brief_ajustes`).
 #
 # La comprobación vive en `enviar_brief_si_toca()` y solo ahí, porque esa función es la
-# única puerta del envío automático: puesta ahí, apaga de una vez las tres fuentes (el
-# Atajo del móvil, la llegada del sueño del Watch y el reloj de HA) y ninguna futura se
-# puede olvidar de mirarla.
+# única puerta del envío automático: puesta ahí, las apaga todas de una vez (el Atajo del
+# móvil, el botón «Estoy despierto», Jarvis, la llegada del sueño del Watch y el reloj de
+# HA) y ninguna futura se puede olvidar de mirarla.
 #
 # Lo que NO tapa a propósito es el envío pedido a mano —`/brief/send?forzar=1` y la
 # herramienta `enviar_resumen` de Jarvis—: ahí hay una persona pidiéndolo en ese
@@ -7463,8 +7463,9 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     """Manda el resumen del día si aún no ha salido. Idempotente por día.
 
     Única puerta de entrada al envío automático: la usan la señal de despertar del
-    móvil, la llegada del sueño del Watch y el reloj de respaldo de HA. Cada uno sabe
-    CUÁNDO llamar; el que decide SI se manda es este.
+    móvil, el botón «Estoy despierto» de la alarma, la llegada del sueño del Watch y el
+    reloj de respaldo de HA. Cada uno sabe CUÁNDO llamar; el que decide SI se manda es
+    este.
     """
     ahora = _ahora_local()
     fecha = ahora.date().isoformat()
@@ -8524,8 +8525,14 @@ def dev_crons(credentials: HTTPAuthorizationCredentials = Depends(verify_token))
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         t_wf  = pool.submit(workflows)
+        # Catorce días y columnas contadas, no `*`: lo que hay que ver aquí es de qué
+        # FUENTE salió cada resumen, y eso solo se lee en racha — un día del reloj de
+        # respaldo es una mañana rara, dos semanas seguidas es una integración muerta.
+        # Sin la lista de columnas cada fila arrastraría además su `datos`, que es la
+        # instantánea entera del brief y no se pinta en ninguna parte.
         t_bri = pool.submit(tabla, BRIEF_ENVIOS_URL,
-                            {"select": "*", "order": "fecha.desc", "limit": 3})
+                            {"select": "fecha,fuente,enviado_at,despertar_at",
+                             "order": "fecha.desc", "limit": 14})
         t_inf = pool.submit(tabla, INFORME_ENVIOS_URL,
                             {"select": "*", "order": "fecha.desc", "limit": 3})
         t_vig = pool.submit(tabla, VIGILANTE_ESTADO_URL,

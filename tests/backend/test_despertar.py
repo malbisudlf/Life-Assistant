@@ -2,9 +2,9 @@
 
 Antes salía a hora fija desde un cron de GitHub Actions, que se retrasa cuando su cola
 va cargada. Ahora sale al despertarse — y como hay VARIAS fuentes que pueden avisar de
-eso a la vez (el móvil al desenchufarse, la llegada del sueño del Watch, el reloj de
-respaldo de HA y el propio workflow), lo que más se prueba aquí es que dos disparadores
-simultáneos no manden dos correos.
+eso a la vez (el móvil al desenchufarse, el botón «Estoy despierto» de la alarma, la
+llegada del sueño del Watch, el reloj de respaldo de HA y el propio workflow), lo que más
+se prueba aquí es que dos disparadores simultáneos no manden dos correos.
 """
 from datetime import datetime
 

@@ -6,9 +6,9 @@
 // al día — está sin saber.
 import { describe, test, expect, vi, afterEach } from "vitest";
 
-import { estadoDespliegue, estadoWorkflow, estadoSondeo, textoCada, shaCorto,
-         MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, estadoGrupo,
-         estadoGraph, esperarAlBackend } from "../../src/lib/dev";
+import { estadoDespliegue, estadoWorkflow, estadoSondeo, estadoFuentesBrief, horaMinuto,
+         textoCada, shaCorto, MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones,
+         estadoGrupo, estadoGraph, esperarAlBackend } from "../../src/lib/dev";
 
 // `esperarAlBackend` sondea con fetch a pelo (durante el arranque no hay nada más que
 // responda), así que se sustituye; devolverlo a su sitio evita que el siguiente fichero
@@ -121,6 +121,74 @@ describe("estadoSondeo", () => {
     // El PC está apagado la mayor parte del día: llamar avería a eso es llamar avería a
     // la noche.
     expect(estadoSondeo({ hace_segundos: 4000, opcional: true }).tono).toBe("green");
+  });
+});
+
+describe("estadoFuentesBrief", () => {
+  // Una fila con `despertar_at` salió de una señal de despertar; sin ella, de un reloj.
+  const senal   = (fecha, fuente = "cargador") =>
+    ({ fecha, fuente, enviado_at: `${fecha}T07:20:00`, despertar_at: `${fecha}T07:20:00` });
+  const reloj   = (fecha) =>
+    ({ fecha, fuente: "tope", enviado_at: `${fecha}T10:00:00`, despertar_at: null });
+
+  test("sin datos no dice que esté bien", () => {
+    expect(estadoFuentesBrief(null).tono).toBe("muted");
+    expect(estadoFuentesBrief([]).tono).toBe("muted");
+  });
+
+  test("todos al despertarse: verde", () => {
+    const e = estadoFuentesBrief([senal("2026-09-15"), senal("2026-09-14")]);
+    expect(e.tono).toBe("green");
+    expect(e.texto).toBe("todos salieron al despertarte");
+  });
+
+  test("una mañana suelta del reloj no es una avería", () => {
+    // Pintar en rojo un día del móvil descargado enseña a no mirar el rojo.
+    const e = estadoFuentesBrief([reloj("2026-09-15"), senal("2026-09-14"), senal("2026-09-13")]);
+    expect(e.tono).toBe("accent");
+    expect(e.texto).toMatch(/1 de 3/);
+  });
+
+  test("tres seguidas del reloj ya son el camino, no la mañana", () => {
+    // El caso de verdad: el Atajo del iPhone dejó de entregar y el correo sigue llegando
+    // todos los días a las 10:00, que es la forma que tiene esto de romperse sin avisar.
+    const e = estadoFuentesBrief([reloj("2026-09-15"), reloj("2026-09-14"),
+                                  reloj("2026-09-13"), senal("2026-09-12")]);
+    expect(e.tono).toBe("red");
+    expect(e.texto).toMatch(/los 3 últimos/);
+    expect(e.texto).toMatch(/no está llegando/);
+  });
+
+  test("lo viejo no manda: la racha se cuenta desde el último envío", () => {
+    const e = estadoFuentesBrief([senal("2026-09-15"), reloj("2026-09-14"),
+                                  reloj("2026-09-13"), reloj("2026-09-12")]);
+    expect(e.tono).toBe("green");
+    expect(e.texto).toMatch(/3 de 4/);
+  });
+
+  test("la fuente nueva cuenta sola, sin lista de nombres que mantener", () => {
+    // Por eso lo que se mira es `despertar_at` y no cómo se llama el disparador: el botón
+    // de la alarma se añadió sin tocar esta función.
+    const e = estadoFuentesBrief([senal("2026-09-15", "alarma")]);
+    expect(e.tono).toBe("green");
+    expect(e.dias[0].porSenal).toBe(true);
+    expect(e.dias[0].fuente).toBe("alarma");
+  });
+
+  test("cada día sale con su hora, que es lo que se compara de un día a otro", () => {
+    const e = estadoFuentesBrief([reloj("2026-09-15")]);
+    expect(e.dias[0].hora).toBe("10:00");
+  });
+});
+
+describe("horaMinuto", () => {
+  test("sin segundos ni fecha", () => {
+    expect(horaMinuto("2026-09-09T09:30:12")).toBe("09:30");
+  });
+
+  test("lo que no es una fecha no pinta nada", () => {
+    expect(horaMinuto(null)).toBe("");
+    expect(horaMinuto("ayer")).toBe("");
   });
 });
 

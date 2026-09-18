@@ -231,11 +231,11 @@ grupos pertenece.
 
 ### 6.3 La idempotencia es un INSERT, no una comprobación previa
 
-El resumen diario tiene **tres disparadores** distintos (el Atajo del iPhone al desenchufar
-el cargador, la llegada de los datos de sueño del Watch, y el tick de HA pasada la hora
-tope). Los tres pasan por la misma puerta, y esa puerta **reserva el día insertando una
-fila antes de mandar el correo**: el 409 contra la clave primaria es lo que hace la
-pregunta atómica.
+El resumen diario tiene **varios disparadores** distintos (el Atajo del iPhone al
+desenchufar el cargador, el botón «Estoy despierto» de la alarma, decírselo a Jarvis, la
+llegada de los datos de sueño del Watch, y el tick de HA pasada la hora tope). Todos pasan
+por la misma puerta, y esa puerta **reserva el día insertando una fila antes de mandar el
+correo**: el 409 contra la clave primaria es lo que hace la pregunta atómica.
 
 Con un `GET` previo, dos disparadores que coincidan en el mismo minuto leen los dos «no
 enviado» y mandan dos correos. Y si el envío falla, la reserva se libera — porque si no, un

@@ -693,3 +693,28 @@
     comprueba que el tramo llegó a pedirse. `last_triggered` de la automatización y el
     historial del sensor lo dicen en diez segundos, y ahorran reescribir algo que
     funcionaba.
+
+- **El resumen diario llegaba a las 10:00 aunque te despertaras a las 8:30, y nada estaba
+  «roto».** El 2026-09-15. La hora de despertar estaba dentro de la ventana (05:30–11:30),
+  así que el correo tenía que haber salido al momento; salió del reloj de respaldo de HA,
+  o sea que **ninguna señal de despertar llegó**. Dos cosas distintas detrás:
+  - **El botón «Estoy despierto» de la alarma no disparaba el resumen.** Era la señal más
+    exacta que tenía el sistema —un dedo humano— y la única que no llamaba a
+    `enviar_brief_si_toca`: las alarmas se añadieron después de todo el mecanismo del
+    correo y nadie las conectó. La moraleja no es la del despiste: **una puerta única
+    garantiza que quien entra cumpla las reglas, no que nadie se quede fuera.**
+    `docs/BRIEF.md` decía, con razón, que poner el interruptor dentro de la puerta hacía
+    que «una fuente que se añada mañana no se pueda olvidar de mirarla» — y la fuente
+    nueva se añadió sin mirar nada, porque nunca llamó. Lo arregló #197, y de paso bien:
+    en vez de enchufar esa fuente, hizo *una* señal de despertar (`_senal_despertar`) que
+    comparten el cargador, el botón y Jarvis. Una fuente que no existe no se puede olvidar.
+  - **Y no se podía saber, que es la mitad que quedaba.** Los relojes de respaldo mandan el
+    correo igual, así que una señal muerta no produce ningún error en ninguna pantalla: lo
+    único que cambia es la hora a la que llega. `brief_envios` guardaba la `fuente` y el
+    `despertar_at` de cada envío desde agosto, la zona dev leía tres filas y pintaba una, y
+    nadie podía ver una racha. Un Atajo del iPhone muerto (ya pasó dos veces, ver
+    `docs/SALUD.md`) se nota exactamente igual que una mañana en que el móvil se quedó sin
+    batería. **Cuando hay un respaldo que tapa el fallo, el dato que hay que enseñar no es
+    si la cosa pasó, es por qué camino.** De ahí el panel `¿Salió al despertarte?`, con los
+    14 últimos envíos y su fuente, y el semáforo por racha: una vez es una mañana, tres son
+    el camino.

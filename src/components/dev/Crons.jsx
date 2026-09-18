@@ -9,7 +9,8 @@
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
-         leerCrons, estadoWorkflow, estadoSondeo, textoCada, enPieDesde } from "../../lib/dev";
+         leerCrons, estadoWorkflow, estadoSondeo, estadoFuentesBrief, textoCada,
+         enPieDesde } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 // Un minuto. Todo esto es gratis (backend propio y Supabase) salvo los workflows, que
@@ -49,6 +50,7 @@ export default function Crons() {
 
   const brief   = datos?.brief?.[0];
   const informe = datos?.informe?.[0];
+  const fuentes = estadoFuentesBrief(datos?.brief);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -109,6 +111,32 @@ export default function Crons() {
           Estas dos filas salen de la tabla, no del workflow: el correo lo dispara la señal
           de despertar y GitHub es solo la red de seguridad. Si aquí sale hoy y arriba el
           workflow no ha corrido, todo está bien.
+        </div>
+      </div>
+
+      <div style={panelStyle}>
+        <div style={tituloStyle}>¿Salió al despertarte?</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                         alignSelf: "center", background: COLOR_TONO[fuentes.tono] }} />
+          <span style={{ fontSize: 12, color: "var(--text)" }}>{fuentes.texto}</span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {fuentes.dias.map(d => (
+            <div key={d.fecha} style={{ display: "flex", gap: 10, fontFamily: MONO, fontSize: 10 }}>
+              <span style={{ color: "var(--muted2)", minWidth: 78 }}>{d.fecha}</span>
+              <span style={{ color: "var(--muted2)", minWidth: 40 }}>{d.hora || "—"}</span>
+              <span style={{ color: d.porSenal ? "var(--muted)" : COLOR_TONO.accent }}>
+                {d.fuente}
+              </span>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 8 }}>
+          Los relojes de respaldo (<span style={{ fontFamily: MONO }}>tope</span> a las 10:00
+          y <span style={{ fontFamily: MONO }}>respaldo</span>, el workflow) mandan el correo
+          igual, así que un Atajo del móvil muerto no se nota en ninguna otra pantalla: lo
+          único que cambia es la hora. Una racha aquí es el síntoma.
         </div>
       </div>
 
