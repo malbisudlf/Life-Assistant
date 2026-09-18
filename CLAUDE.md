@@ -17,8 +17,14 @@ comentarios, commits, strings de UI y mensajes de error de la API.
   Assistant Green de casa**, como add-on (`addon/life-assistant/`), y sale a internet
   por Cloudflare Tunnel sin abrir puertos del router. Desplegar = *Reconstruir* el
   add-on desde la interfaz de HA, que clona este repositorio. Ver
-  `docs/MIGRACION_BACKEND.md`. **Fly.io queda en pie pero ya sin tráfico**, pendiente
-  de apagar
+  `docs/MIGRACION_BACKEND.md`. **Fly.io sigue en pie Y CON TRÁFICO**: aquí ponía «ya sin
+  tráfico» y era falso. El 18/09/2026 se descubrió que el resumen diario lo seguía
+  mandando él —con código de doce días antes— porque el Atajo del iPhone que avisa de
+  que te has despertado nunca se repuntó al Green. Como escribe en el mismo Supabase,
+  reserva el día en `brief_envios` antes que el Green y el correo bueno no llega a
+  salir. **Hasta que se apague hay DOS backends contra la misma base de datos**, y el
+  viejo no recibe ningún arreglo. Los apuntadores que faltan, en
+  `docs/MIGRACION_BACKEND.md` (paso 6)
 - **Base de datos**: Supabase (PostgreSQL vía REST), solo accesible desde el backend con la service key
 
 ## ⚠️ Repo público — reglas de seguridad
