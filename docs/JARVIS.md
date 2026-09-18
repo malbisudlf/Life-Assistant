@@ -555,8 +555,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   pregunta sin que se lo pidan**, que es lo que convirtió las tres averías grandes en
   semanas de silencio. Tres reglas:
   - **El listón va en CÓDIGO.** Las reglas deciden SI hay avería (hoy: ≥
-    `VIGILANTE_MIN_ERRORES` errores del mismo origen en la ventana, y el disparo de la
-    rutina fallado); el modelo, si acaso, redacta. Misma frontera que
+    `VIGILANTE_MIN_ERRORES` errores de código del mismo origen en la ventana, ≥
+    `VIGILANTE_MIN_ERRORES_RED` si son de red, y el disparo de la rutina fallado); el
+    modelo, si acaso, redacta. Misma frontera que
     `_motivos_proactivos`: dejarle decidir a él qué es un problema acaba en un aviso
     diario porque sí.
   - **Reparar en silencio TAPA la avería.** Lo reparado se dice, y se dice **cuántas
@@ -619,6 +620,49 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   nuevo es una avería nueva: issue nuevo, y aviso el mismo día. Y tanto el aviso como el
   issue **los nombran** (`VIGILANTE_MAX_DETALLES`): «8 errores» no se puede arreglar
   porque no dice cuáles, ni por una persona ni por la sesión que lance el botón.
+
+  **Pero la huella del conjunto, sola, abría un issue por día de la misma avería.** Al
+  vaciar los issues abiertos el 2026-09-16 había **siete** del vigilante y ninguno se
+  arreglaba tocando código. #179 y #180 son la misma caída de DNS del Green en dos días
+  (200 y 196 errores, casi las mismas cinco líneas) y #182 su cola: una caída que dura
+  tres días no repite el conjunto exacto de formas —pierde una un día, gana otra al
+  siguiente—, así que cada día era una avería nueva. La memoria es ahora de **dos
+  niveles**: la clave de la avería sigue llevando la huella del conjunto (eso es lo que
+  hace que un conjunto nuevo hable el mismo día, y no se toca) y además cada FORMA de
+  error tiene la suya (`_vigilante_clave_firma` → `firma:<origen>:<hash>`, mismo
+  `vigilante_estado`). Antes de abrir un issue se mira si alguna de esas formas ya tiene
+  el suyo (`_vigilante_issue_de_firmas`): si lo tiene, **se reaprovecha** y el aviso dice
+  «ya hay un issue abierto por esto» en vez de abrir otro. Se reaprovecha en vez de
+  comentar en él a propósito — esto corre cada hora, y un comentario por hora es otra
+  forma del mismo ruido. No poder mirarlo **no calla nada**: se abre el issue igual, que
+  es lo que pasaba antes; callar una avería por no poder deduplicarla sería cambiar un
+  ruido molesto por un silencio peligroso.
+
+  **Y un fallo de red no es «un cambio de código».** Los siete issues terminaban con «no
+  se puede reparar desde el backend, así que necesita un cambio de código» y en los siete
+  era falso: timeouts, DNS y `Gateway Timeout` de Supabase. *Esa frase* es la que los
+  hacía parecer accionables y la que los dejó abiertos semanas. Ahora cada forma de error
+  se clasifica (`_error_de_red`, sobre el mensaje **crudo**: `_firma_error` ya ha
+  sustituido las cifras por `#` y se ha quedado con la primera línea, mientras que el
+  nombre de la excepción vive al final del traceback), y una avería es de red cuando
+  **todas** sus formas lo son. Lo que cambia para esas:
+  - **Otro umbral** (`VIGILANTE_MIN_ERRORES_RED`, 25 frente a 3): un puñado de timeouts
+    sueltos es la vida normal de internet. #183 y #184 fueron cuatro y cinco `Gateway
+    Timeout` sueltos y abrieron issue.
+  - **Ni issue ni botón «Arreglarlo».** Lo segundo es lo que más importa: ese botón lanza
+    una sesión de Claude Code contra el repositorio, y con `NOCHE_ARREGLA` encendido eso
+    es mandarla a cambiar código que no está roto. El aviso al móvil **sale igual** —para
+    eso se ha detectado—, diciendo que es de red y que no hay código que cambiar.
+  - **Se cuentan aparte de las de código**, aunque compartan origen: juntas, doscientos
+    timeouts arrastraban por encima del umbral a los tres errores de código que iban en
+    medio y encima copaban los `VIGILANTE_MAX_DETALLES` del aviso y el `detalle` que lee
+    la sesión de arreglo.
+
+  La clasificación es deliberadamente **tímida**: lo que no se reconoce cuenta como
+  código. Un falso negativo abre un issue de más —lo que ya pasaba—; un falso positivo se
+  callaría una avería real. Y los códigos de estado se exigen en contexto (`devolvió 504`,
+  `→ 502`, `(504)`) y no sueltos, porque un `504` a secas casa con el «line 504» de
+  cualquier traceback.
 
 
 - **Jarvis se diagnostica** (`diagnostico`): fallos de `app_logs` agrupados por origen,

@@ -64,7 +64,7 @@ class TestVigilanteAccionable:
     def test_dos_conjuntos_de_errores_distintos_son_averias_distintas(self, mock_requests):
         """Es EL fallo que esto viene a arreglar: con la clave `errores:<origen>` a
         secas, el issue del 3 de septiembre valía para los errores de hoy."""
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         una = self._aviso(mock_requests)["huella"]
 
@@ -78,20 +78,20 @@ class TestVigilanteAccionable:
         assert una != otra
 
     def test_los_mismos_errores_dan_la_misma_huella(self, mock_requests):
-        self._errores(mock_requests, [("Supabase devolvió 504 (200 ms)", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400 (200 ms)", 4)])
         main._vigilar_sistema()
         una = self._aviso(mock_requests)["huella"]
 
         main._ultima_vigilancia_sistema = 0.0
         mock_requests.calls.clear()
         mock_requests.routes.clear()
-        self._errores(mock_requests, [("Supabase devolvió 504 (900 ms)", 7)])
+        self._errores(mock_requests, [("Supabase devolvió 400 (900 ms)", 7)])
         main._vigilar_sistema()
         assert self._aviso(mock_requests)["huella"] == una
 
     # ── Nombrar los errores ──────────────────────────────────────────────────
     def test_el_aviso_dice_cuales_son_los_errores(self, mock_requests):
-        self._errores(mock_requests, [("Supabase devolvió 504", 3),
+        self._errores(mock_requests, [("Supabase devolvió 400", 3),
                                       ("Open-Meteo devolvió 500", 2)])
         main._vigilar_sistema()
         texto = self._aviso(mock_requests)["texto"]
@@ -105,14 +105,14 @@ class TestVigilanteAccionable:
         cuerpos = []
         monkeypatch.setattr(main, "_vigilante_abrir_issue",
                             lambda titulo, cuerpo: cuerpos.append(cuerpo) or "https://x/1")
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         assert cuerpos and "4× Supabase devolvió #" in cuerpos[0]
 
     # ── El botón y su decisión ───────────────────────────────────────────────
     def test_apunta_la_decision_con_el_mismo_id_que_el_aviso(self, mock_requests):
         """El botón solo trae su propio id: si la fila no es esa, no encuentra nada."""
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         aviso = self._aviso(mock_requests)
         fila  = mock_requests.called("POST", "/rest/v1/revision_hallazgos")[0][2]["json"]
@@ -132,7 +132,7 @@ class TestVigilanteAccionable:
     def test_sin_rutina_de_arreglo_no_hay_boton_ni_fila(self, mock_requests, monkeypatch):
         """Un botón que solo sabría disculparse no se ofrece."""
         monkeypatch.setattr(main, "ARREGLO_FIRE_URL", "")
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         assert self._aviso(mock_requests)["regla"] == main.REGLA_VIGILANTE_SOLO
         assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
@@ -140,7 +140,7 @@ class TestVigilanteAccionable:
     def test_si_no_se_puede_apuntar_la_decision_el_aviso_sale_sin_botones(
             self, mock_requests):
         """Perder el aviso sería peor; dejar un botón muerto también."""
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         mock_requests.add("POST", "/rest/v1/revision_hallazgos", FakeResponse(None, 500))
         main._vigilar_sistema()
         aviso = self._aviso(mock_requests)
@@ -151,12 +151,12 @@ class TestVigilanteAccionable:
 
     def test_la_regla_sin_botones_no_pregunta_nada(self, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "ARREGLO_FIRE_URL", "")
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         assert "¿Los arreglo?" not in self._aviso(mock_requests)["texto"]
 
     def test_con_botones_el_aviso_pregunta(self, mock_requests):
-        self._errores(mock_requests, [("Supabase devolvió 504", 4)])
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
         main._vigilar_sistema()
         assert "¿Los arreglo?" in self._aviso(mock_requests)["texto"]
 

@@ -10656,11 +10656,11 @@ def _alarma_confirmar_sonando(origen: str, acusar: bool = True) -> dict:
             "etiquetas": [_alarma_texto(f) for f in filas]}
 
 
-def _alarma_confirmar_sonando_segura(origen: str) -> dict:
+def _alarma_confirmar_sonando_segura(origen: str, acusar: bool = True) -> dict:
     """Lo mismo para quien no puede permitirse que falle (la señal de despertar del
-    cargador, que tiene un resumen que mandar): se registra y se sigue."""
+    cargador o de Jarvis, que tienen un resumen que mandar): se registra y se sigue."""
     try:
-        return _alarma_confirmar_sonando(origen)
+        return _alarma_confirmar_sonando(origen, acusar=acusar)
     except Exception as e:
         logger.warning("Alarma: no se pudo confirmar desde %s (%s)", origen, e)
         return {"ok": False, "hecho": False, "motivo": "no se pudo mirar si sonaba"}
@@ -10684,8 +10684,14 @@ def _j_estoy_despierto() -> dict:
     como señal de despertar para el resumen diario, igual que desenchufar el cargador.
 
     Sin acuse al móvil: la respuesta de Jarvis ya es el acuse.
+
+    Las dos mitades van en su variante `_segura` por la misma razón que en
+    `POST /despertar`: si el PATCH de la alarma revienta (un 5xx puntual de Supabase),
+    la excepción se llevaría por delante la señal de despertar —que es la mitad que NO
+    se puede perder, porque de ella cuelga el resumen diario— y `_jarvis_despachar` la
+    taparía con un «La herramienta falló» sin dejar rastro de lo que se quedó sin hacer.
     """
-    alarma  = _alarma_confirmar_sonando("jarvis", acusar=False)
+    alarma  = _alarma_confirmar_sonando_segura("jarvis", acusar=False)
     resumen = _senal_despertar_segura("jarvis")
     return {**alarma, "resumen": resumen}
 
@@ -11067,6 +11073,12 @@ VIGILANTE_CADA        = float(os.getenv("VIGILANTE_CADA_MIN", "60"))
 # Cuántas veces tiene que repetirse un error en la ventana para considerarlo avería. Uno
 # suelto es la vida; lo que se repite es lo que está roto.
 VIGILANTE_MIN_ERRORES = int(os.getenv("VIGILANTE_MIN_ERRORES", "3"))
+# Y cuántas si son fallos de RED o de un tercero. El listón está mucho más alto a
+# propósito: un puñado de timeouts sueltos es la vida normal de internet, no una avería,
+# y con el listón de arriba cinco `Gateway Timeout` de Supabase abrían un issue (#183,
+# #184). Lo que sí merece contarse es una caída de verdad — la del DNS del Green fueron
+# doscientos en un día.
+VIGILANTE_MIN_ERRORES_RED = int(os.getenv("VIGILANTE_MIN_ERRORES_RED", "25"))
 VIGILANTE_VENTANA_DIAS = int(os.getenv("VIGILANTE_VENTANA_DIAS", "1"))
 # Cuántas formas distintas de error se nombran en el aviso y en el issue. Nombrarlas es
 # lo que hace que el aviso sirva para algo —«8 errores en life-assistant» no se puede
@@ -11183,6 +11195,115 @@ def _vigilante_guardar_issue(clave: str, url: str) -> None:
         logger.warning("Vigilante: no se pudo guardar la URL del issue de '%s' (%s)", clave, e)
 
 
+# Formas de error que NO son un fallo de este código: la conexión de casa se cae, un DNS
+# deja de resolver, un tercero devuelve 502. Distinguirlas importa por dos cosas que se
+# vieron el 2026-09-16 al vaciar los issues abiertos: siete issues del vigilante, ninguno
+# arreglable tocando código, todos terminando con «necesita un cambio de código» — una
+# frase que el vigilante no sabía y que es la que los hacía parecer accionables; y que con
+# `NOCHE_ARREGLA` encendido eso puede acabar lanzando sesiones de arreglo contra una caída
+# de red, que no tienen nada que arreglar.
+#
+# Se mira sobre el mensaje CRUDO y no sobre la firma: `_firma_error` sustituye las cifras
+# por `#` (ahí ya no queda un 504 que reconocer) y se queda con la primera línea, mientras
+# que el nombre de la excepción vive al final del traceback que guarda `logger.exception`.
+#
+# Los códigos de estado se exigen EN CONTEXTO (`devolvió 504`, `→ 502`, `(504)`) y no
+# sueltos: un `\b504\b` a secas casa con el «line 504» de cualquier traceback.
+_ERROR_DE_RED = re.compile(
+    # La conexión: `ConnectionError`, `ConnectionResetError`, `ConnectionRefusedError`…
+    r"connection\s?(?:error|refused|reset|aborted|timeout)"
+    r"|brokenpipeerror|remotedisconnected|protocolerror|incompleteread"
+    r"|chunkedencodingerror|readtimeout|connecttimeout|max retries exceeded|timed out"
+    # El DNS
+    r"|temporary failure in name resolution|name or service not known"
+    r"|nodename nor servname|gaierror|getaddrinfo"
+    # El TLS
+    r"|sslerror|ssleoferror|handshake"
+    # Y el tercero que contesta, pero mal
+    r"|bad gateway|gateway time-?out|service unavailable"
+    r"|devolvi[oó] 50[234]|\u2192 50[234]|\(50[234]\)"
+    r"|(?:status|code|c[oó]digo|http)\W{0,3}50[234]\b",
+    re.I)
+
+
+def _error_de_red(mensaje: str) -> bool:
+    """Si este error es de red o de un tercero, y no de nuestro código.
+
+    Clasifica de menos a más grave a propósito: lo que no se reconoce cuenta como código,
+    que es el comportamiento de siempre. Un falso negativo abre un issue de más —lo que ya
+    pasaba—; un falso positivo se callaría una avería real, que es mucho peor.
+    """
+    return bool(_ERROR_DE_RED.search(str(mensaje or "")))
+
+
+def _vigilante_origen(origen: str) -> str:
+    """El origen, limpio, para poder meterlo en una clave que se interpola en una URL.
+
+    Hace falta solo aquí, porque las claves de forma se consultan con `in.(...)`: ahí una
+    coma o un paréntesis dentro del valor rompen el filtro, y `quote()` no vale porque
+    PostgREST parsea el filtro DESPUÉS de que se decodifique la query. La clave de la
+    avería va con `eq.` y `quote()`, así que se queda con el origen tal cual — saneárselo
+    dejaría huérfanas las filas de `vigilante_estado` que ya están escritas.
+    """
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", str(origen or "?"))[:40]
+
+
+def _vigilante_clave_firma(origen: str, firma: str) -> str:
+    """La clave de memoria de UNA forma de error, que es lo que deduplica los issues.
+
+    La clave de la avería lleva la huella del CONJUNTO de formas, y eso hay que
+    conservarlo: es lo que hace que un conjunto nuevo sea una avería nueva, y sin ello el
+    primer issue valía para siempre (317 detecciones apuntando al del 3 de septiembre).
+    Pero una caída que dura tres días no repite el conjunto exacto —pierde una forma un
+    día, gana otra al siguiente— así que el conjunto como ÚNICA memoria abría un issue por
+    día del mismo fallo: #179 y #180 son la misma caída de DNS contada dos veces, y #182
+    su cola. Con una clave por forma, el issue ya abierto se reconoce aunque el conjunto
+    se haya movido.
+    """
+    return f"firma:{_vigilante_origen(origen)}:{uuid.uuid5(uuid.NAMESPACE_URL, firma).hex[:12]}"
+
+
+def _vigilante_issue_de_firmas(claves: list) -> str:
+    """El issue que alguna de estas formas de error ya tiene abierto, o "" si ninguna.
+
+    No poder mirarlo no calla nada: se sigue y, como mucho, se abre un issue de más — que
+    es exactamente lo que pasaba antes de que esto existiera.
+    """
+    if not claves:
+        return ""
+    try:
+        r = http.get(f"{VIGILANTE_ESTADO_URL}?clave=in.({','.join(sorted(set(claves)))})"
+                     "&select=clave,issue_url", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        for fila in r.json() or []:
+            if fila.get("issue_url"):
+                return str(fila["issue_url"])
+    except Exception as e:
+        logger.warning("Vigilante: no se pudo mirar si ya había issue abierto (%s)", e)
+    return ""
+
+
+def _vigilante_marcar_firmas(claves: list, url: str) -> None:
+    """Apunta el issue en cada forma de error que lo motivó, para reconocerlo mañana."""
+    if not claves or not url:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    try:
+        # Upsert: las formas nuevas se crean y las que ya estaban conservan su
+        # `primera_vez` y su `veces`, que son de `_vigilante_estado` y no se tocan aquí.
+        r = http.post(VIGILANTE_ESTADO_URL,
+                      headers={**supabase_headers(),
+                               "Prefer": "resolution=merge-duplicates,return=minimal"},
+                      json=[{"clave": c, "ultima_vez": ahora, "issue_url": url}
+                            for c in sorted(set(claves))])
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        # Solo cuesta que mañana se abra un issue de más: se registra y se sigue.
+        logger.warning("Vigilante: no se pudieron marcar las formas de '%s' (%s)", url, e)
+
+
 def _firma_error(mensaje: str) -> str:
     """La primera línea de un error, sin sus cifras, para poder contar repeticiones.
 
@@ -11219,29 +11340,54 @@ def _averias_del_registro() -> list:
     por_origen: dict = {}
     for e in entradas:
         origen = str(e.get("source") or "?")
-        fila   = por_origen.setdefault(origen, {"veces": 0, "firmas": {}})
-        fila["veces"] += 1
-        firma = _firma_error(e.get("message"))
-        dato  = fila["firmas"].setdefault(firma, {"mensaje": firma, "veces": 0, "ultima": ""})
+        firmas = por_origen.setdefault(origen, {})
+        firma  = _firma_error(e.get("message"))
+        dato   = firmas.setdefault(firma, {"mensaje": firma, "veces": 0, "red": 0, "ultima": ""})
         dato["veces"] += 1
+        if _error_de_red(e.get("message")):
+            dato["red"] += 1
         if (e.get("created_at") or "") > dato["ultima"]:
             dato["ultima"] = e.get("created_at") or ""
 
     averias = []
-    for origen, datos in sorted(por_origen.items(), key=lambda kv: -kv[1]["veces"]):
-        if datos["veces"] < VIGILANTE_MIN_ERRORES:
-            continue
-        # uuid5 y no hashlib: es sha1 igualmente y `uuid` ya está importado.
-        huella = uuid.uuid5(uuid.NAMESPACE_URL,
-                            "|".join(sorted(datos["firmas"]))).hex[:8]
-        averias.append({
-            "clave":    f"errores:{origen}:{huella}",
-            "texto":    (f"{datos['veces']} errores en {origen} en las últimas "
-                         f"{VIGILANTE_VENTANA_DIAS * 24} h."),
-            "detalles": sorted(datos["firmas"].values(),
-                               key=lambda d: -d["veces"])[:VIGILANTE_MAX_DETALLES],
-            "issue":    True,
-        })
+    for origen, firmas in por_origen.items():
+        # Una forma de error cuenta como de red cuando TODAS sus apariciones lo parecen:
+        # si una sola no lo es, hay algo más que la conexión y se trata como código.
+        grupos: dict = {"codigo": [], "red": []}
+        for d in firmas.values():
+            grupos["red" if d["red"] and d["red"] == d["veces"] else "codigo"].append(d)
+
+        for clase, datos in grupos.items():
+            if not datos:
+                continue
+            es_red = clase == "red"
+            veces  = sum(d["veces"] for d in datos)
+            # Cada clase con su listón, y contada aparte: si no, doscientos timeouts en el
+            # mismo origen arrastraban por encima del umbral a los tres errores de código
+            # que iban en medio, y encima copaban los detalles que se nombran.
+            if veces < (VIGILANTE_MIN_ERRORES_RED if es_red else VIGILANTE_MIN_ERRORES):
+                continue
+            # uuid5 y no hashlib: es sha1 igualmente y `uuid` ya está importado.
+            huella = uuid.uuid5(uuid.NAMESPACE_URL,
+                                "|".join(sorted(d["mensaje"] for d in datos))).hex[:8]
+            horas  = VIGILANTE_VENTANA_DIAS * 24
+            averias.append({
+                "clave":    f"{'red' if es_red else 'errores'}:{origen}:{huella}",
+                "origen":   origen,
+                "veces":    veces,
+                # Corto a propósito: el aviso entero se recorta a
+                # RECORDATORIO_MAX_TEXTO (200), y lo que se coma esta frase se lo quita a
+                # la lista de errores concretos, que es lo único accionable del aviso.
+                "texto":    (f"{veces} errores en {origen} en las últimas {horas} h"
+                             + (", de red o de terceros: no es código." if es_red else ".")),
+                "detalles": sorted(datos, key=lambda d: -d["veces"])[:VIGILANTE_MAX_DETALLES],
+                # Un issue es una petición de cambio de código. Por una caída de DNS o un
+                # 504 de un tercero no hay nada que cambiar, y siete de esos abiertos a la
+                # vez es lo que enseña a no mirar los issues del vigilante.
+                "issue":    not es_red,
+                "red":      es_red,
+            })
+    averias.sort(key=lambda a: -a["veces"])
     return averias
 
 
@@ -11359,23 +11505,44 @@ def _vigilar_sistema() -> dict:
         # El issue solo la primera vez: uno por día del mismo fallo convierte el repo en
         # el mismo ruido del que este vigilante viene a salvarte.
         if a.get("issue") and estado and not estado.get("issue_url"):
-            lista = _lista_de_errores([a])
-            url = _vigilante_abrir_issue(
-                f"[vigilante] {a['texto'][:80]}",
-                f"Detectado por el vigilante del sistema el {hoy}.\n\n{a['texto']}\n\n"
-                # Los errores CONCRETOS. Sin esto el issue decía "8 errores en
-                # life-assistant" y nada más: no se podía arreglar porque no decía cuáles,
-                # y una sesión de arreglo mandada ahí no tendría por dónde empezar.
-                + (f"Qué se repite (las cifras van como `#`, "
-                   f"para que el mismo fallo cuente como uno):\n\n```\n{lista}\n```\n\n"
-                   if lista else "")
-                + "Abierto automáticamente: el fallo se repite y no se puede reparar desde "
-                  "el backend, así que necesita un cambio de código.",
-            )
+            claves_firma = [_vigilante_clave_firma(a["origen"], d["mensaje"])
+                            for d in a["detalles"]]
+            # Antes de abrir uno, mirar si alguna de estas formas de error ya tiene el
+            # suyo: una avería que dura días va cambiando de conjunto y la huella del
+            # conjunto, sola, no la reconocía. Se reaprovecha el issue en vez de comentar
+            # en él a propósito — esto corre cada hora, y un comentario por hora es otra
+            # forma de lo mismo. Quien lea el aviso ya tiene el enlace y las cifras.
+            url = _vigilante_issue_de_firmas(claves_firma)
             if url:
                 _vigilante_guardar_issue(a["clave"], url)
-                detalle += f" He abierto un issue: {url}"
+                detalle += f" Ya hay un issue abierto por esto: {url}"
                 issues.append(url)
+            else:
+                lista = _lista_de_errores([a])
+                url = _vigilante_abrir_issue(
+                    f"[vigilante] {a['texto'][:80]}",
+                    f"Detectado por el vigilante del sistema el {hoy}.\n\n{a['texto']}\n\n"
+                    # Los errores CONCRETOS. Sin esto el issue decía "8 errores en
+                    # life-assistant" y nada más: no se podía arreglar porque no decía
+                    # cuáles, y una sesión de arreglo mandada ahí no tendría por dónde
+                    # empezar.
+                    + (f"Qué se repite (las cifras van como `#`, "
+                       f"para que el mismo fallo cuente como uno):\n\n```\n{lista}\n```\n\n"
+                       if lista else "")
+                    # Lo que esta frase puede afirmar es lo que el vigilante sabe: que
+                    # ninguna de estas formas es de red ni de un tercero. Decir «necesita
+                    # un cambio de código» de lo que era una caída de DNS es lo que dejó
+                    # siete issues abiertos que nadie podía cerrar arreglando nada.
+                    + "Abierto automáticamente porque el fallo se repite y ninguna de esas "
+                      "formas es de red ni de un servicio de terceros (esas se avisan al "
+                      "móvil sin abrir issue), así que apunta a un cambio de código. Si al "
+                      "mirarlo resulta que no lo era, ciérralo.",
+                )
+                if url:
+                    _vigilante_guardar_issue(a["clave"], url)
+                    _vigilante_marcar_firmas(claves_firma, url)
+                    detalle += f" He abierto un issue: {url}"
+                    issues.append(url)
         partes.append(detalle)
 
     lista = _lista_de_errores(averias)
@@ -11396,8 +11563,14 @@ def _vigilar_sistema() -> dict:
     # botones, exactamente igual que el de la revisión nocturna. Sin la fila apuntada no
     # se ponen los botones: un botón que al pulsarlo no encuentra su decisión es peor que
     # no tenerlo.
-    regla = REGLA_VIGILANTE if (averias and _vigilante_apuntar_decision(
-        rid, averias, lista, issues)) else REGLA_VIGILANTE_SOLO
+    #
+    # Las averías de red no ofrecen botón, y es la mitad que más importa de todo esto:
+    # «Arreglarlo» lanza una sesión de Claude Code contra el repositorio, y mandarla a
+    # arreglar una caída de DNS es mandarla a cambiar código que no está roto. Se avisa,
+    # que para eso se ha detectado, pero sin ofrecer un arreglo que no existe.
+    averias_codigo = [a for a in averias if not a.get("red")]
+    regla = REGLA_VIGILANTE if (averias_codigo and _vigilante_apuntar_decision(
+        rid, averias_codigo, _lista_de_errores(averias_codigo), issues)) else REGLA_VIGILANTE_SOLO
     texto = " ".join(partes)
     if regla == REGLA_VIGILANTE:
         texto += ("\n\n¿Los arreglo? Responde con los botones del aviso, o dime «arregla "
