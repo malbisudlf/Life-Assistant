@@ -30,7 +30,8 @@ tiempo y el pegamento. Ahí gana de calle.
 | Panel | `http://<caja>:5678` — **solo LAN**, el router no reenvía el puerto. La IP está en `HOMEASSISTANT.md` |
 | Imagen | `docker.n8n.io/n8nio/n8n:2.39.8`, versión fija |
 | Datos | volumen `n8n_n8n_data` (flujos, credenciales, ejecuciones) |
-| En el repo | `docker/n8n/compose.yml` y `.env.example` |
+| En el repo | El `compose.yml` y su `.env.example`, en `docker/n8n/` |
+| Los flujos | **En el repositorio HomeLab**, en `caja/n8n/flujos/` — no aquí |
 
 Es un proyecto compose **aparte** de `~/stack` a propósito: así un `docker compose` en el
 stack —que lleva el backend y el túnel— no puede pararlo por error ni contarlo como
@@ -41,6 +42,13 @@ huérfano. El precio es acordarse de que existe; para eso está este fichero y l
 los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, cópialo allí.
 
 ## Los flujos
+
+> **Los `.json` de los flujos viven en el repositorio HomeLab** (`caja/n8n/flujos/`),
+> desde el 2026-09-20. Estuvieron un día en éste y se movieron por la misma regla que
+> todo lo demás de infraestructura de `caja`: la fuente de verdad de la máquina es
+> HomeLab. Aquí se queda lo que explica **qué hacen y por qué**, que es lo que le
+> interesa a una sesión que venga a tocar el backend.
+
 
 | Flujo | Qué hace | Estado |
 |---|---|---|
