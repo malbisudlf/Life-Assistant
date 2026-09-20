@@ -162,6 +162,7 @@ Ficheros clave:
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
 | `scripts/verificar_backend.py` | Smoke test de un backend recién desplegado (arranque, CORS, login, auth de servicio) contra cualquier URL. Lo que no puede probar lo marca SALTADA, nunca OK |
 | `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, para correrlo dentro del Green. Se copia a `/addons` por Samba; el `Dockerfile` clona este repositorio, así que desplegar es reconstruir el add-on |
+| `telefono/PARCHES.md` | **Antes de tocar o actualizar claude-phone.** Los seis parches que necesita el repositorio original para funcionar aquí (credenciales SIP, modelo retirado, puertos, idioma, detector de voz, dominio del saliente). Viven solo en `caja` y **no están versionados**: un `claude-phone update` se los lleva |
 | `telefono/RUNBOOK.md` | Lo que Jarvis sabe y puede hacer cuando te llama por una avería: qué mirar, qué tocar con tu confirmación y qué no tocar nunca. **Se copia a mano** a `~/telefono-jarvis/CLAUDE.md` en `caja`, que es el directorio de trabajo del `claude-api-server` |
 | `docker/n8n/` | n8n empaquetado: su `compose.yml`, sus variables y los flujos exportados. Corre en `caja` y **se copia a mano**, igual que el add-on: el repositorio es la copia buena, no el despliegue |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
