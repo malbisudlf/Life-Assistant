@@ -1,0 +1,61 @@
+# n8n — automatización visual self-hosted.
+#
+# Instalado a mano el 2026-09-18; traído a este repo el 2026-09-20, que es
+# cuando dejó de ser un capricho suelto y pasó a ser algo que hay que poder
+# reconstruir. En la máquina vive en /home/malbisudlf/docker/n8n/.
+#
+# Es un proyecto compose APARTE de `~/stack` a propósito: así un
+# `docker compose` en el stack —que lleva el backend y el túnel— no puede
+# tocarlo, ni contarlo como huérfano, ni pararlo por error. El precio es que
+# hay que acordarse de que existe, y para eso está este fichero.
+services:
+  n8n:
+    # Versión FIJA, como todo lo de esta máquina. `latest` en un servicio que
+    # guarda flujos y credenciales es cómo se pierde un flujo en una
+    # actualización que nadie pidió y que nadie vio pasar.
+    image: docker.n8n.io/n8nio/n8n:2.39.8
+    container_name: n8n
+    restart: unless-stopped
+
+    # N8N_ENCRYPTION_KEY. Es la clave con la que n8n cifra las credenciales que
+    # guardes dentro (Supabase, HA, correo, OpenAI). n8n la autogenera y la deja
+    # SOLO dentro del volumen, en `.n8n/config`: si pierdes el volumen, un
+    # volcado de la base de datos no te sirve de nada porque no se puede
+    # descifrar. Fijarla aquí la saca de ahí y la hace copiable. Ver .env.example.
+    env_file: .env
+
+    environment:
+      - TZ=Europe/Madrid
+      - GENERIC_TIMEZONE=Europe/Madrid
+      # El panel se sirve por HTTP plano dentro de la LAN, sin TLS delante. Con
+      # la cookie marcada `secure` el navegador no la manda y no se puede entrar.
+      - N8N_SECURE_COOKIE=false
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    ports:
+      # Solo LAN: el router no reenvía ningún puerto (invariante 5), así que el
+      # límite real es la red de casa, no este bind.
+      #
+      # NO se ata a una IP concreta a propósito. `caja` se reinicia los domingos
+      # a las 03:30 y a mano tras cada corte de luz, y un bind a una interfaz que
+      # todavía no ha subido deja el contenedor sin arrancar — en una máquina a
+      # la que hay que ir físicamente a encender, eso es la peor forma de fallar.
+      - "5678:5678"
+
+    # El techo de `caja` son 15 W sostenidos, no la temperatura, así que todo lo
+    # ajeno al homelab lleva límites y prioridad baja.
+    #
+    # 1g y NO los 512m que proponía PLANES.md: medido el 2026-09-20, n8n ocupa
+    # ~446 MiB **en reposo**. Con 512m, el primer flujo que haga algo de verdad
+    # se lo lleva por delante con un OOM.
+    cpus: 1.0
+    mem_limit: 1g
+    cpu_shares: 256
+
+volumes:
+  # Se llama así para que el nombre real siga siendo `n8n_n8n_data`, que es el
+  # que ya existe: cambiarlo aquí crearía un volumen nuevo y vacío, y los flujos
+  # y el usuario se quedarían en el viejo sin que nada diera error.
+  n8n_data:

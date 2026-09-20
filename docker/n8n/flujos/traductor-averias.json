@@ -1,0 +1,433 @@
+[
+  {
+    "id": "TraductorAverias",
+    "name": "Traductor de averías",
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 15
+              }
+            ]
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000001",
+        "name": "Cada 15 minutos",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -460,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "url": "https://api.github.com/repos/malbisudlf/Life-Assistant/actions/runs",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "status",
+                "value": "failure"
+              },
+              {
+                "name": "per_page",
+                "value": "10"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "options": {
+            "timeout": 20000
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/vnd.github+json"
+              },
+              {
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28"
+              }
+            ]
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000002",
+        "name": "Runs fallidos",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -240,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "k0DdCWneApJjIB3q",
+            "name": "GitHub token"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "// Se queda con los runs fallidos que todavia no se han diagnosticado.\n//\n// El CI NO entra: tiene su propio camino (`ci-averiado.yml`), que ademas lanza un\n// agente que lo arregla. Aqui solo llegan los programados, que casi nunca fallan por\n// codigo -un secret que falta, una cuota agotada, una migracion sin aplicar- y para\n// los que el aviso actual solo sabe decir «ha fallado».\nconst estado = $getWorkflowStaticData('global');\nestado.vistos = estado.vistos || [];\n\n// Solo lo de las ultimas 24 horas. Sin esto, la primera vuelta encuentra los fallos\n// ANTIGUOS que siguen en la lista de GitHub -averias ya resueltas hace meses- y va\n// abriendo un issue viejo cada 15 minutos hasta vaciarlos. Descubierto probandolo:\n// el primero que salio fue una copia de Supabase de hace semanas.\nconst limite = Date.now() - 24 * 60 * 60 * 1000;\n\nconst runs = ($input.first().json.workflow_runs || [])\n  .filter(r => r.name !== 'CI')\n  .filter(r => new Date(r.created_at).getTime() > limite)\n  .filter(r => !estado.vistos.includes(r.id));\n\n// Tope de uno por vuelta. Si se rompen tres cosas a la vez no queremos tres llamadas\n// al modelo y tres issues en el mismo minuto: el resto se cogen en las vueltas\n// siguientes, cada 15 minutos.\nconst run = runs[0];\nif (!run) return [];\n\n// Ojo: aqui NO se marca como visto. Se marca al final, en «Redactar el issue». Si se\n// marcase aqui y el diagnostico fallase a mitad, la averia se perderia para siempre.\nreturn [{ json: {\n  run_id: run.id,\n  workflow: run.name,\n  url: run.html_url,\n  sha: (run.head_sha || '').slice(0, 7),\n  fecha: run.created_at,\n} }];"
+        },
+        "id": "c1000000-0000-4000-8000-000000000003",
+        "name": "¿Alguno sin diagnosticar?",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -20,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "url": "=https://api.github.com/repos/malbisudlf/Life-Assistant/actions/runs/{{ $json.run_id }}/jobs",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "options": {
+            "timeout": 20000
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/vnd.github+json"
+              },
+              {
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28"
+              }
+            ]
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000004",
+        "name": "Jobs del run",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          200,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "k0DdCWneApJjIB3q",
+            "name": "GitHub token"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "// El job que fallo, que es del que interesa el registro. Un run puede tener varios.\nconst jobs = $input.first().json.jobs || [];\nconst malo = jobs.find(j => j.conclusion === 'failure') || jobs[0];\nconst run  = $('¿Alguno sin diagnosticar?').first().json;\n\n// Los pasos con su resultado sirven de respaldo: si el registro no se puede\n// descargar, esto solo ya dice bastante.\nconst pasos = (malo?.steps || [])\n  .map(p => (p.conclusion === 'failure' ? 'X ' : '. ') + p.name)\n  .join(String.fromCharCode(10));\n\nreturn [{ json: { ...run, job_id: malo?.id, job: malo?.name, pasos } }];"
+        },
+        "id": "c1000000-0000-4000-8000-000000000005",
+        "name": "Job que ha fallado",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          420,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "url": "=https://api.github.com/repos/malbisudlf/Life-Assistant/actions/jobs/{{ $json.job_id }}/logs",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "options": {
+            "timeout": 30000,
+            "redirect": {
+              "redirect": {
+                "followRedirects": false
+              }
+            },
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true,
+                "responseFormat": "text"
+              }
+            }
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/vnd.github+json"
+              },
+              {
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28"
+              }
+            ]
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000006",
+        "name": "Dónde está el registro",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          640,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "k0DdCWneApJjIB3q",
+            "name": "GitHub token"
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "={{ $json.headers?.location || $json.headers?.Location || '' }}",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "responseFormat": "text"
+              }
+            }
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000011",
+        "name": "Descargar el registro",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          750,
+          0
+        ],
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// El registro de Actions viene con marca de tiempo por linea y codigos de color ANSI,\n// y empieza con 30 lineas de preambulo del runner que no dicen nada. Lo que importa\n// esta al final, asi que se recortan las ultimas 80 lineas ya limpias.\n//\n// Esto no es cosmetica: es lo que hace que quepa en una peticion barata y que el\n// modelo no se distraiga con la version del runner.\nconst j = $input.first().json;\nconst texto = typeof j.data === 'string' ? j.data : (typeof j.body === 'string' ? j.body : '');\n\nconst limpio = texto\n  .split(String.fromCharCode(10))\n  .map(l => l.replace(/^\\S+\\t\\S+\\t/, ''))\n  .map(l => l.replace(/^\\uFEFF/, ''))\n  .map(l => l.replace(/^\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z\\s?/, ''))\n  .map(l => l.replace(/\\u001b\\[[0-9;]*m/g, ''))\n  .filter(l => l.trim())\n  .slice(-80)\n  .join(String.fromCharCode(10));\n\nconst meta = $('Job que ha fallado').first().json;\nconst log = limpio || meta.pasos || '(sin registro)';\n\n// El prompt se arma aqui, no en la expresion del nodo HTTP: alli sus comillas y sus\n// saltos de linea rompen el parser de expresiones de n8n.\nconst nl = String.fromCharCode(10);\nconst prompt = [\n  'Eres quien diagnostica averias de un proyecto personal. Te doy el final del registro de un workflow de GitHub Actions que ha fallado.',\n  '',\n  'Responde SOLO con este JSON:',\n  '{\"causa\": \"<una sola frase, en espanol, diciendo QUE ha fallado y POR QUE>\", \"tipo\": \"<secret|cuota|migracion|codigo|red|otro>\", \"lo_arregla_un_agente\": <true|false>}',\n  '',\n  'Reglas:',\n  '- Si el fallo viene de que un servicio externo respondio mal (502, 503, timeout, DNS), el tipo es «red» y la causa debe decir que el problema NO esta en el workflow sino en ese servicio.',\n  '- «lo_arregla_un_agente» solo es true si el arreglo esta en el codigo del repositorio. Un secret que falta, una cuota agotada o una migracion sin aplicar son false: eso lo tiene que tocar una persona.',\n  '- Si no puedes saberlo, dilo en la causa. No inventes.',\n  '',\n  'Workflow: ' + meta.workflow,\n  'Registro:',\n  log,\n].join(nl);\n\nreturn [{ json: { ...meta, log, prompt } }];"
+        },
+        "id": "c1000000-0000-4000-8000-000000000007",
+        "name": "Limpiar el registro",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          860,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "googlePalmApi",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: $json.prompt }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0 } }) }}",
+          "options": {
+            "timeout": 60000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000008",
+        "name": "Diagnóstico (Gemini)",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1080,
+          0
+        ],
+        "credentials": {
+          "googlePalmApi": {
+            "id": "k2sT8zFZttxooH9N",
+            "name": "Google Gemini(PaLM) Api account"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 5,
+        "waitBetweenTries": 20000
+      },
+      {
+        "parameters": {
+          "jsCode": "// El texto del modelo viene envuelto en la respuesta de Gemini y, pese al\n// responseMimeType, puede traer un bloque de codigo alrededor. Se limpia antes.\nconst cand = $input.first().json?.candidates?.[0];\nlet crudo = (cand?.content?.parts?.[0]?.text || '').trim();\ncrudo = crudo.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();\n\nconst fallo = $input.first().json?.error?.message || '';\n\nlet d;\ntry { d = JSON.parse(crudo); }\ncatch (e) {\n  // El plan gratuito de Gemini se satura a ratos y devuelve UNAVAILABLE. Eso no puede\n  // costarnos el aviso: sin diagnostico el issue sigue valiendo, porque lleva el\n  // registro dentro. Al reves no: un diagnostico sin registro no se puede comprobar.\n  d = { causa: fallo\n          ? 'No se pudo diagnosticar automaticamente (' + fallo.slice(0, 120) + '). El registro esta abajo.'\n          : (crudo.slice(0, 400) || 'El modelo no devolvio nada legible. El registro esta abajo.'),\n        tipo: 'otro', lo_arregla_un_agente: false };\n}\n\nconst meta = $('Limpiar el registro').first().json;\nconst etiquetas = { secret: 'Falta un secret', cuota: 'Cuota agotada',\n                    migracion: 'Migracion sin aplicar', codigo: 'Fallo de codigo',\n                    red: 'Servicio externo caido', otro: 'Sin clasificar' };\nconst etiqueta = etiquetas[d.tipo] || 'Sin clasificar';\nconst nl = String.fromCharCode(10);\n\nconst cuerpo = [\n  '**' + d.causa + '**',\n  '',\n  '- **Tipo**: ' + etiqueta,\n  '- **Lo puede arreglar un agente**: ' + (d.lo_arregla_un_agente ? 'si' : 'no, esto lo tienes que tocar tu'),\n  '- **Run**: ' + meta.url,\n  '- **Sobre**: `' + meta.sha + '`',\n  '',\n  '<details><summary>Final del registro</summary>',\n  '',\n  '```',\n  meta.log,\n  '```',\n  '',\n  '</details>',\n  '',\n  '_Diagnostico automatico de n8n con Gemini. Puede equivocarse: el registro de arriba es la fuente._',\n].join(nl);\n\n// Se marca como visto ahora, no antes: hemos llegado hasta aqui con algo que contar.\nconst estado = $getWorkflowStaticData('global');\nestado.vistos = [...(estado.vistos || []), meta.run_id].slice(-50);\n\nreturn [{ json: { titulo: 'Averia: ' + meta.workflow + ' (' + meta.sha + ')', cuerpo } }];"
+        },
+        "id": "c1000000-0000-4000-8000-000000000009",
+        "name": "Redactar el issue",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1300,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.github.com/repos/malbisudlf/Life-Assistant/issues",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ title: $json.titulo, body: $json.cuerpo }) }}",
+          "options": {
+            "timeout": 20000
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Accept",
+                "value": "application/vnd.github+json"
+              },
+              {
+                "name": "X-GitHub-Api-Version",
+                "value": "2022-11-28"
+              }
+            ]
+          }
+        },
+        "id": "c1000000-0000-4000-8000-000000000010",
+        "name": "Abrir el issue",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1520,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "k0DdCWneApJjIB3q",
+            "name": "GitHub token"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Cada 15 minutos": {
+        "main": [
+          [
+            {
+              "node": "Runs fallidos",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Runs fallidos": {
+        "main": [
+          [
+            {
+              "node": "¿Alguno sin diagnosticar?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "¿Alguno sin diagnosticar?": {
+        "main": [
+          [
+            {
+              "node": "Jobs del run",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Jobs del run": {
+        "main": [
+          [
+            {
+              "node": "Job que ha fallado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Job que ha fallado": {
+        "main": [
+          [
+            {
+              "node": "Dónde está el registro",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Dónde está el registro": {
+        "main": [
+          [
+            {
+              "node": "Descargar el registro",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Descargar el registro": {
+        "main": [
+          [
+            {
+              "node": "Limpiar el registro",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Limpiar el registro": {
+        "main": [
+          [
+            {
+              "node": "Diagnóstico (Gemini)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Diagnóstico (Gemini)": {
+        "main": [
+          [
+            {
+              "node": "Redactar el issue",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Redactar el issue": {
+        "main": [
+          [
+            {
+              "node": "Abrir el issue",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "active": false
+  }
+]
