@@ -26,7 +26,7 @@ import {
   posicionAhora,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
@@ -1448,6 +1448,9 @@ export default function Dashboard() {
   // sonando o si ya has descolgado — la pantalla NO se va al contestar: una llamada que
   // te devuelve a un panel de widgets a mitad de frase no es una llamada.
   const [llamadaEntrante, setLlamadaEntrante] = useState(null);
+  // Por qué suena esta llamada, para poder decírselo al backend en cada turno. En una ref
+  // y no en estado porque no se pinta: solo viaja en el cuerpo de `/jarvis`.
+  const motivoLlamadaRef = useRef({ aviso: "", tipo: "" });
   // Lo que se contestó al botón «Arreglarlo» de la notificación, para poder enseñarlo.
   const [revisionAcuse, setRevisionAcuse] = useState("");
   // Si ya se puede descolgar. La máquina de Fly escala a cero, así que el permiso de voz
@@ -2346,10 +2349,13 @@ export default function Dashboard() {
     setJarvisPendiente(null);
     setJarvisPensando(true);
     try {
+      // El motivo va solo en llamada: es lo único que lo trae, y por escrito el backend
+      // ni siquiera mira el contexto de lo pendiente.
+      const motivo = voz ? motivoLlamadaRef.current : { aviso: "", tipo: "" };
       const r = await apiFetch(`${API}/jarvis`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({ mensaje, historial, voz }),
+        body: JSON.stringify({ mensaje, historial, voz, ...motivo }),
       });
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
@@ -2857,7 +2863,10 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/jarvis/voz`, {
         method:  "POST",
         headers: jsonHeaders(),
-        body:    JSON.stringify({ mensaje: dicho, historial, voz: true }),
+        // El motivo de la llamada acompaña a cada turno, no solo al primero: el prompt
+        // se arma de cero en cada uno, así que olvidarlo aquí es olvidarlo siempre.
+        body:    JSON.stringify({ mensaje: dicho, historial, voz: true,
+                                  ...motivoLlamadaRef.current }),
         signal:  aborto?.signal,
       });
       if (!r.ok) throw await motivoJarvis(r);
@@ -3213,13 +3222,20 @@ export default function Dashboard() {
     let vivo = true;
     // El id se lee ANTES de limpiar la barra, que es lo que se hace justo debajo.
     const cual = avisoDeLlamadaDeUrl(window.location.search);
+    const clase = tipoDeLlamadaDeUrl(window.location.search);
     const porLaNoche = nocheDeLlamadaDeUrl(window.location.search);
+    // Y se guardan, porque no valen solo para descolgar: acompañan a CADA turno de la
+    // conversación. El prompt de Jarvis mira lo mismo que esta pantalla, y sin el id
+    // vuelve a resolver «lo más reciente» — que es cómo acababa descolgando para hablarte
+    // de un despliegue cuando habías pulsado «Hablarlo» sobre un issue.
+    motivoLlamadaRef.current = { aviso: cual, tipo: clase };
     // Se quitan los parámetros ya: si te quedas en el dashboard y recargas más tarde, no
     // debe volver a sonar una llamada que ya contestaste.
     try {
       const limpia = new URL(window.location.href);
       limpia.searchParams.delete("llamada");
       limpia.searchParams.delete("aviso");
+      limpia.searchParams.delete("tipo");
       limpia.searchParams.delete("noche");
       window.history.replaceState({}, "", limpia);
     } catch { /* mejor esfuerzo: no vale tirar la llamada por no poder limpiar la barra */ }
@@ -3233,7 +3249,9 @@ export default function Dashboard() {
         // Con `aviso` se anuncia ESA decisión y no la que gane ese orden: el botón
         // «Hablarlo» de una revisión trae el id de la que tenías en la mano, y entre
         // pulsarlo y descolgar pueden haber entrado otras.
-        const consulta = cual ? `?aviso=${cual}` : porLaNoche ? "?noche=1" : "";
+        const consulta = cual
+          ? `?aviso=${cual}${clase ? `&tipo=${clase}` : ""}`
+          : porLaNoche ? "?noche=1" : "";
         const r = await apiFetch(`${API}/llamada/pendiente${consulta}`,
                                  { headers: authHeaders() });
         if (r.ok) pendiente = (await r.json())?.pendiente || null;

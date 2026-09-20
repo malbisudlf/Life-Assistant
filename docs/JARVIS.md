@@ -548,6 +548,27 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   y **solo lo bloqueado atraviesa el silencio del móvil**, por la misma regla que decide
   quién puede llamarte por teléfono. El flujo entero en `docs/AVISAME.md`.
 
+- **Por qué suena la llamada, y por qué eso no se adivina.** Los tres avisos de arriba
+  comparten la pantalla de llamada, y Jarvis descuelga con lo que espera ya mirado y
+  metido en el prompt: es una optimización de latencia (1,7 s contra 9,7 s si tiene que
+  pedir una herramienta), no de capacidad. Cuál de los tres cuenta lo decide, por este
+  orden, `_jarvis_contexto_llamada`:
+  1. **El motivo que traiga el botón.** «Hablarlo» abre `?llamada=1&aviso=<id>&tipo=<cuál>`,
+     el dashboard lo arrastra en el cuerpo de **cada** turno —el prompt se arma de cero en
+     cada uno— y eso manda sobre todo lo demás. `tipo` no es redundante: los permisos de
+     despliegue y las decisiones de revisión son la misma tabla con distinto `estado`.
+  2. **Y si no, el orden de siempre**: despliegue, aviso de sesión, decisión sin contestar.
+     Primero el que tiene trabajo verificado PARADO esperando permiso.
+
+  Ese orden **solo decide cuando no se sabe por qué se ha descolgado**. Que decidiera
+  siempre es lo que hacía que Jarvis te contestara que no había ningún issue con el issue
+  delante; está contado en `docs/BUGS_HISTORICOS.md`, y costó dos intentos.
+
+  **Por escrito no se consulta nada de esto.** El chat casi nunca va de lo que hay
+  pendiente y ahí los segundos no se notan, así que pagar la consulta en cada turno solo
+  sería pagarla. Si le escribes a Jarvis «¿qué issue?» en vez de descolgar, no lo sabe y
+  tiene que ir a buscarlo con `contar_revision` — no está roto, está sin pagar.
+
 - **Vigilante del sistema** (`_vigilar_sistema()`, mismo tick de HA, tabla
   `vigilante_estado`): el de la ingesta mira UNA cosa —que sigan entrando datos de
   salud—; este mira si el sistema se rompe por cualquier otro sitio. `app_logs` y

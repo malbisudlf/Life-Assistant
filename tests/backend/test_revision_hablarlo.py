@@ -43,7 +43,7 @@ class TestLosDosCaminosDelBoton:
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_REVISION)
         assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada", "Hablarlo"]
         assert acciones[-1]["action"] == "URI"       # nombre reservado de la app de HA
-        assert acciones[-1]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}"
+        assert acciones[-1]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}&tipo=revision"
 
     def test_el_vigilante_y_la_revision_siguen_compartiendo_botones(self):
         """Reusar los prefijos es lo que hace que esto no necesite YAML nuevo en HA."""
