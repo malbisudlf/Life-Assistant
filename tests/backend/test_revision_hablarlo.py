@@ -39,23 +39,24 @@ class TestLosDosCaminosDelBoton:
         assert arreglar["uri"] == f"{FRONT}/?revision={UN_UUID}&accion=arreglar"
 
     def test_y_trae_el_boton_de_hablarlo_con_su_id(self):
-        """Con el id: entre pulsarlo y descolgar pueden haber entrado otras decisiones."""
+        """«Hablarlo» hace sonar el teléfono (Jarvis-Claude), no abre el dashboard."""
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_REVISION)
         assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada", "Hablarlo"]
-        assert acciones[-1]["action"] == "URI"       # nombre reservado de la app de HA
-        assert acciones[-1]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}&tipo=revision"
+        assert acciones[-1]["action"] == f"LA_HABLAR_REV_{UN_UUID}"
+        assert "uri" not in acciones[-1]
 
     def test_el_vigilante_y_la_revision_siguen_compartiendo_botones(self):
         """Reusar los prefijos es lo que hace que esto no necesite YAML nuevo en HA."""
         assert (main._acciones_aviso(UN_UUID, main.REGLA_VIGILANTE)
                 == main._acciones_aviso(UN_UUID, main.REGLA_REVISION))
 
-    def test_sin_frontend_el_boton_se_queda_como_estaba(self, monkeypatch):
-        """Un `uri` a ninguna parte abriría el navegador para nada. Queda el camino de HA."""
+    def test_sin_frontend_el_boton_de_hablarlo_sigue_apareciendo(self, monkeypatch):
+        """«Hablarlo» ya no abre el dashboard: no depende de que haya `FRONTEND_URL`."""
         monkeypatch.setattr(main, "FRONTEND_URL", "")
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_REVISION)
-        assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada"]
+        assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada", "Hablarlo"]
         assert "uri" not in acciones[0]
+        assert acciones[-1]["action"] == f"LA_HABLAR_REV_{UN_UUID}"
 
 
 class TestElNumeroDelIssue:

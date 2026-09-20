@@ -114,21 +114,20 @@ class TestLosBotonesDelAviso:
         # «Hablarlo» primero: aquí no hay dos opciones que elegir de un toque, la
         # respuesta es lo que tengas que decir.
         assert titulos == ["Hablarlo", "Vale"]
-        # Con el id del aviso, que es lo que hace que al descolgar te cuente ÉSTE y no
-        # el permiso de despliegue que hubiera suelto (`docs/BUGS_HISTORICOS.md`).
-        assert botones[0]["uri"] == (
-            f"https://dashboard.test/?llamada=1&aviso={UN_UUID}&tipo=sesion")
+        # Hace sonar el teléfono (Jarvis-Claude), no abre el dashboard: no lleva `uri`.
+        assert botones[0]["action"] == f"LA_HABLAR_SES_{UN_UUID}"
+        assert "uri" not in botones[0]
         assert botones[1]["action"] == f"LA_VALE_{UN_UUID}"
 
     def test_bloqueado_lleva_los_mismos(self):
         assert (main._acciones_aviso(UN_UUID, main.REGLA_SESION_BLOQUEADA)
                 == main._acciones_aviso(UN_UUID, main.REGLA_SESION))
 
-    def test_sin_frontend_sigue_habiendo_boton(self, monkeypatch):
-        """Sin `FRONTEND_URL` se pierde poder hablarlo, no el aviso entero."""
+    def test_sin_frontend_siguen_los_dos_botones(self, monkeypatch):
+        """«Hablarlo» ya no depende de `FRONTEND_URL`: hace sonar el teléfono, no abre el dashboard."""
         monkeypatch.setattr(main, "FRONTEND_URL", "")
         botones = main._acciones_aviso(UN_UUID, main.REGLA_SESION)
-        assert [b["title"] for b in botones] == ["Vale"]
+        assert [b["title"] for b in botones] == ["Hablarlo", "Vale"]
 
 
 class TestElBotonVale:

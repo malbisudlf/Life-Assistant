@@ -293,8 +293,9 @@ class TestLosBotonesDeLaNotificacion:
     def test_la_revision_trae_los_suyos(self):
         rid = main._uuid_revision(83)
         acciones = main._acciones_aviso(rid, main.REGLA_REVISION)
-        assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada"]
+        assert [a["title"] for a in acciones] == ["Arreglarlo", "No hacer nada", "Hablarlo"]
         assert acciones[0]["action"] == f"LA_ARREGLAR_{rid}"
+        assert acciones[-1]["action"] == f"LA_HABLAR_REV_{rid}"
 
     def test_el_resto_sigue_con_la_valoracion(self):
         rid = "11111111-2222-3333-4444-555555555555"

@@ -1,5 +1,5 @@
-﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request, status,
-                     UploadFile, File, Path, WebSocket, WebSocketDisconnect)
+﻿from fastapi import (FastAPI, BackgroundTasks, Body, Depends, HTTPException, Request,
+                     status, UploadFile, File, Path, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -19,6 +19,7 @@ import re
 import math
 import time
 import hmac
+import secrets
 import atexit
 import logging
 import smtplib
@@ -13638,14 +13639,13 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         botones  = [arreglar, {"action": f"LA_NADA_{rid}", "title": "No hacer nada"}]
         if FRONTEND_URL:
             arreglar["uri"] = f"{FRONTEND_URL}/?revision={rid}&accion=arreglar"
-            # Y un tercero, «Hablarlo», que en el despliegue existe por no poder mirar la
-            # pantalla y aquí por algo distinto: «¿lo arreglo?» es una pregunta que muchas
-            # veces no se puede contestar sin saber QUÉ se ha roto, y eso en una
-            # notificación no cabe. Abre la pantalla de llamada CON ESTE id, para que
-            # Jarvis cuente el issue entero —no su título— antes de que decidas.
-            botones.append({"action": "URI", "title": "Hablarlo",
-                            "uri": f"{FRONTEND_URL}/?llamada=1"
-                                   f"&aviso={rid}&tipo=revision"})
+        # Y un tercero, «Hablarlo»: «¿lo arreglo?» es una pregunta que muchas veces no se
+        # puede contestar sin saber QUÉ se ha roto, y eso en una notificación no cabe.
+        # Hace sonar el teléfono por la centralita (`_llamar`, vía
+        # `POST /revision/{id}/accion` con `accion: "hablar"`) y contesta Jarvis-Claude,
+        # con el issue entero delante — no depende de `FRONTEND_URL` porque ya no abre el
+        # dashboard.
+        botones.append({"action": f"LA_HABLAR_REV_{rid}", "title": "Hablarlo"})
         return botones
     if regla == REGLA_DESPLIEGUE:
         botones = [{"action": f"LA_DESPLEGAR_{rid}", "title": "Desplegar"},
@@ -13666,11 +13666,9 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         # tengas que decir, y eso solo cabe hablando. «Vale» es la salida para cuando lo
         # lees y no hay nada que contestar; sin él, el aviso se quedaría pendiente para
         # siempre y volvería a anunciarse al descolgar por cualquier otra cosa.
-        botones = []
-        if FRONTEND_URL:
-            botones.append({"action": "URI", "title": "Hablarlo",
-                            "uri": f"{FRONTEND_URL}/?llamada=1"
-                                   f"&aviso={rid}&tipo=sesion"})
+        # «Hablarlo» hace sonar el teléfono (centralita, Jarvis-Claude) con el aviso
+        # entero delante — ya no abre el dashboard, así que no depende de `FRONTEND_URL`.
+        botones = [{"action": f"LA_HABLAR_SES_{rid}", "title": "Hablarlo"}]
         botones.append({"action": f"LA_VALE_{rid}", "title": "Vale"})
         return botones
     if regla == REGLA_NOCHE:
@@ -13858,6 +13856,12 @@ def _llamar_twilio(texto: str, *, rid: str = "") -> bool:
 TELEFONO_URL         = os.getenv("TELEFONO_URL", "")
 TELEFONO_EXTENSION   = os.getenv("TELEFONO_EXTENSION", "")
 TELEFONO_DISPOSITIVO = os.getenv("TELEFONO_DISPOSITIVO", "Jarvis")
+
+# Token de servicio del servidor MCP que Jarvis-Claude (la sesión de `caja`) consume por
+# teléfono. Viaja a las dos puntas: aquí y en la configuración MCP de Claude Code en
+# `caja`. Sin él configurado, `/mcp/telefono` no deja pasar nada (fail-closed, como todo
+# token de servicio del proyecto).
+JARVIS_MCP_TELEFONO_TOKEN = os.getenv("JARVIS_MCP_TELEFONO_TOKEN", "")
 
 
 def _telefono_configurado() -> bool:
@@ -14698,10 +14702,22 @@ class RevisionAccionRequest(BaseModel):
     accion: str
 
 
+def _revision_hablar(rid: str) -> dict:
+    """«Hablarlo»: hace sonar el teléfono con el issue entero delante. No es una
+    decisión —no toca `estado`, no es un PATCH condicional— así que se puede pulsar
+    varias veces sin que importe el orden con «Arreglarlo»/«No hacer nada»."""
+    fila = _revision_pendiente_seguro(rid)
+    if not fila:
+        raise HTTPException(status_code=404, detail="No hay esa revisión pendiente")
+    contexto = _jarvis_contexto_llamada(aviso=rid, tipo="revision")
+    ok = _llamar(_apertura_revision(fila), rid=rid, contexto=contexto)
+    return {"ok": ok, "accion": "hablar"}
+
+
 @app.post("/revision/{aviso_id}/accion")
 def revision_accion(request: Request, body: RevisionAccionRequest,
                     aviso_id: str = _uuid_path(), token: str = ""):
-    """La respuesta a los botones del aviso: «Arreglarlo» o «No hacer nada».
+    """La respuesta a los botones del aviso: «Arreglarlo», «No hacer nada» o «Hablarlo».
 
     Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT),
     igual que la valoración de avisos.
@@ -14709,8 +14725,11 @@ def revision_accion(request: Request, body: RevisionAccionRequest,
     _auth_boton(request, token)
 
     accion = str(body.accion or "").strip().lower()
-    if accion not in ("arreglar", "nada"):
-        raise HTTPException(status_code=422, detail="La acción es 'arreglar' o 'nada'")
+    if accion not in ("arreglar", "nada", "hablar"):
+        raise HTTPException(status_code=422,
+                            detail="La acción es 'arreglar', 'nada' o 'hablar'")
+    if accion == "hablar":
+        return _revision_hablar(aviso_id)
 
     resultado = _revision_decidir(aviso_id, accion)
     if resultado.get("ok") and resultado.get("accion") == "arreglar":
@@ -15923,22 +15942,34 @@ class SesionAccionRequest(BaseModel):
     accion: str
 
 
+def _sesion_hablar(rid: str) -> dict:
+    """«Hablarlo»: hace sonar el teléfono con el aviso de la sesión delante. No toca
+    `estado` — es repetible, como `_revision_hablar`."""
+    fila = _sesion_pendiente_seguro(rid)
+    if not fila:
+        raise HTTPException(status_code=404, detail="No hay ese aviso de sesión pendiente")
+    contexto = _jarvis_contexto_llamada(aviso=rid, tipo="sesion")
+    ok = _llamar(_apertura_sesion(fila), rid=rid, contexto=contexto)
+    return {"ok": ok, "accion": "hablar"}
+
+
 @app.post("/sesion/{aviso_id}/accion")
 def sesion_accion(request: Request, body: SesionAccionRequest,
                   aviso_id: str = _uuid_path(), token: str = ""):
-    """La respuesta al botón «Vale» del aviso: lo he leído y no hay nada que contestar.
+    """La respuesta a los botones del aviso: «Vale» (lo he leído) o «Hablarlo».
 
-    Cierra el aviso sin disparar nada. Existe para que un aviso leído deje de estar
-    pendiente: si no, seguiría siendo lo que Jarvis anuncia al descolgar por cualquier
-    otra cosa, y el canal se volvería un contestador que repite el mismo mensaje.
-
-    PATCH condicional como todas las transiciones del proyecto: dos toques seguidos del
-    mismo botón no son dos cierres, son uno y una respuesta que lo dice.
+    «Vale» cierra el aviso sin disparar nada. Existe para que un aviso leído deje de
+    estar pendiente: si no, seguiría siendo lo que Jarvis anuncia al descolgar por
+    cualquier otra cosa, y el canal se volvería un contestador que repite el mismo
+    mensaje. PATCH condicional como todas las transiciones del proyecto: dos toques
+    seguidos del mismo botón no son dos cierres, son uno y una respuesta que lo dice.
     """
     _auth_boton(request, token)
     accion = str(body.accion or "").strip().lower()
-    if accion != "vale":
-        raise HTTPException(status_code=422, detail="La acción es 'vale'")
+    if accion not in ("vale", "hablar"):
+        raise HTTPException(status_code=422, detail="La acción es 'vale' o 'hablar'")
+    if accion == "hablar":
+        return _sesion_hablar(aviso_id)
     try:
         r = http.patch(f"{SESION_AVISOS_URL}?id=eq.{aviso_id}&estado=eq.pendiente",
                        headers={**supabase_headers(), "Prefer": "return=representation"},
@@ -18602,6 +18633,143 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
         # el fallo como resultado y puede decirlo en vez de quedarse mudo.
         logger.error("Jarvis: la herramienta %s reventó: %s", nombre, e, exc_info=True)
         return {"error": "La herramienta falló"}
+
+
+# ── Servidor MCP para Jarvis-Claude (el teléfono) ─────────────────────────────
+#
+# Aquí el backend es SERVIDOR MCP, al revés que en el bloque `_mcp_*` de arriba (donde
+# Jarvis es cliente de servidores externos como GitHub). Lo consume la sesión de Claude
+# Code que corre en `caja`, invocada por `claude-api-server` cuando «Hablarlo» hace
+# sonar el teléfono (ver `_llamar`). Expone una lista blanca CERRADA de herramientas ya
+# definidas en `_JARVIS_HERRAMIENTAS`: ni una línea de lógica de negocio nueva, solo el
+# envoltorio de protocolo (JSON-RPC 2.0 sobre Streamable HTTP) y el filtro de qué se deja
+# pasar. La confirmación hablada la decide `_jarvis_confirma` exactamente igual que en el
+# chat de GPT: si algo la exige, este servidor la RECHAZA con un error — no se ejecuta
+# solo por venir de una llamada de teléfono.
+#
+# Cerrada y explícita a propósito (mismo criterio que `SALIR_CASA_ENTIDADES` o
+# `_MCP_PREFIJOS_DE_LECTURA`): lo enumerable es lo tuyo, no lo que se derive de un flag
+# que puede cambiar de significado mañana. Quedan fuera aunque tengan `confirmar: False`
+# hoy: `desplegar` (toca producción), `mcp_*` (evitaría que esta sesión escalara a otros
+# servidores MCP ya conectados, p.ej. GitHub con PAT), `encargar_a_una_sesion` /
+# `responder_a_la_sesion` / `arreglar_revision` (disparan sesiones de Claude Code con
+# permiso de escritura sobre el repo — este canal es para consultar, no para lanzar el
+# arreglo desde la llamada), `cobrar_entrenamiento`, `encargar_al_pc`, `crear_evento` /
+# `editar_evento` / `borrar_evento` (tocan el calendario, invariante de docs/JARVIS.md),
+# y el resto de administrativas.
+_MCP_SERVIDOR_SOLO_LECTURA = {
+    "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
+    "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
+    "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
+    "mis_vigilancias", "errores", "jobs", "contar_revision",
+}
+_MCP_SERVIDOR_ACCIONES = {
+    "recordarme", "cancelar_recordatorio", "poner_alarma", "cancelar_alarma",
+    "estoy_despierto", "guardar_idea", "borrar_idea",
+    "anadir_sesion_entrenamiento", "encender_pc", "apagar_pc", "suspender_pc",
+    "casa_ordenar",
+}
+_MCP_SERVIDOR_HERRAMIENTAS = _MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
+
+assert _MCP_SERVIDOR_HERRAMIENTAS <= set(_JARVIS_HERRAMIENTAS), (
+    "La lista blanca del MCP del teléfono apunta a una herramienta que ya no existe "
+    "en _JARVIS_HERRAMIENTAS — un rename la habría dejado huérfana en silencio.")
+
+_MCP_PROTOCOLO_SERVIDOR = "2025-06-18"
+# Sesiones emitidas por este servidor: sin estado de conversación que guardar (cada
+# `tools/call` ya se autentica por token en cada request), solo para poder devolver un
+# 404 de «sesión caducada» si el cliente manda un id que no reconocemos — el mismo
+# contrato que ya asume `_mcp_rpc` del lado cliente.
+_mcp_servidor_sesiones: set = set()
+
+
+def _mcp_servidor_tools_list() -> list:
+    """El catálogo que ve Jarvis-Claude: solo lo que está en la lista blanca."""
+    return [{
+        "name": nombre,
+        "description": h["descripcion"],
+        "inputSchema": {
+            "type": "object",
+            "properties": {p: {"type": info.get("type", "string"),
+                                "description": info.get("description", "")}
+                           for p, info in h["parametros"].items()},
+            "required": h.get("obligatorios", []),
+        },
+        "annotations": {"readOnlyHint": nombre in _MCP_SERVIDOR_SOLO_LECTURA},
+    } for nombre, h in _JARVIS_HERRAMIENTAS.items() if nombre in _MCP_SERVIDOR_HERRAMIENTAS]
+
+
+def _mcp_servidor_auth(request: Request) -> None:
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+
+@app.post("/mcp/telefono")
+def mcp_telefono(request: Request, body: dict = Body(...)):
+    """Servidor MCP (Streamable HTTP, JSON-RPC 2.0) para la sesión de Claude Code del
+    teléfono. Un único endpoint POST: no hace falta streaming servidor→cliente, así que
+    se responde siempre JSON directo (nunca SSE)."""
+    _mcp_servidor_auth(request)
+
+    metodo = body.get("method")
+    rpc_id = body.get("id")
+
+    if metodo == "initialize":
+        sesion = secrets.token_hex(16)
+        _mcp_servidor_sesiones.add(sesion)
+        return Response(
+            content=json.dumps({
+                "jsonrpc": "2.0", "id": rpc_id,
+                "result": {
+                    "protocolVersion": _MCP_PROTOCOLO_SERVIDOR,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "life-assistant-jarvis-telefono",
+                                   "version": "1.0"},
+                },
+            }),
+            media_type="application/json",
+            headers={"Mcp-Session-Id": sesion})
+
+    if metodo == "notifications/initialized":
+        return Response(status_code=204)
+
+    # `tools/list` y `tools/call` exigen una sesión ya negociada. Un 404 aquí es lo que
+    # el lado cliente de este mismo proyecto ya interpreta como «sesión caducada, vuelve
+    # a inicializar» (`_mcp_rpc`) — mismo contrato, invertido.
+    sesion_id = request.headers.get("mcp-session-id", "")
+    if sesion_id not in _mcp_servidor_sesiones:
+        raise HTTPException(status_code=404, detail="Sesión MCP desconocida o caducada")
+
+    if metodo == "tools/list":
+        return {"jsonrpc": "2.0", "id": rpc_id,
+                "result": {"tools": _mcp_servidor_tools_list()}}
+
+    if metodo == "tools/call":
+        params      = body.get("params") or {}
+        nombre      = str(params.get("name") or "")
+        argumentos  = params.get("arguments") or {}
+        if nombre not in _MCP_SERVIDOR_HERRAMIENTAS:
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32601,
+                              "message": "Herramienta no disponible por teléfono"}}
+        herramienta = _JARVIS_HERRAMIENTAS[nombre]
+        if _jarvis_confirma(herramienta, argumentos):
+            # El mismo gate que ya usa el chat de GPT: si una llamada concreta a
+            # `casa_ordenar` (una cerradura, no una luz) lo exige, se rechaza aquí
+            # aunque se haya pedido y confirmado por voz. No hay botón de confirmar al
+            # otro lado de un teléfono.
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32602,
+                              "message": "Esta acción necesita una confirmación que no "
+                                         "se puede dar por teléfono. Dile a Mikel que "
+                                         "la haga él, o dile que no puedes hacerla así."}}
+        resultado = _jarvis_despachar(nombre, argumentos)
+        return {"jsonrpc": "2.0", "id": rpc_id,
+                "result": {"content": [{"type": "text",
+                                         "text": json.dumps(resultado, ensure_ascii=False)}]}}
+
+    return {"jsonrpc": "2.0", "id": rpc_id,
+            "error": {"code": -32601, "message": f"Método desconocido: {metodo}"}}
 
 
 def _jarvis_ahora() -> str:

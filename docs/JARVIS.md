@@ -31,6 +31,12 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - **Una herramienta que revienta no tumba la conversación**: el fallo vuelve al modelo
     como resultado, que puede decirlo. Un `except` que devolviera `None` repetiría el bug
     del agente PC — "no pude preguntar" no es "no hay nada".
+  - **Una herramienta con `confirmar` verdadero (fijo o dinámico) nunca se ejecuta desde
+    el servidor MCP del teléfono** (`POST /mcp/telefono`, `docs/LLAMADAS.md`): se rechaza
+    con un error, igual que en el chat se queda `pendiente` — solo que aquí no hay botón
+    de confirmar al otro lado de una llamada, así que no hay ejecución posible en ningún
+    caso. El gate es literalmente `_jarvis_confirma()`, sin excepción ni atajo por venir
+    de una sesión de Claude Code con `--dangerously-skip-permissions`.
   **Dos modelos, y la diferencia entre ellos es la que separa hablar de actuar.** El
   pequeño (`JARVIS_MODEL`) acierta bien decidiendo SI hace falta una herramienta y falla
   eligiendo CUÁL en cuanto hay muchas parecidas — está medido contra el MCP de GitHub:
@@ -518,9 +524,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   `arreglar_revision`, `contar_revision`): el issue que deja la revisión de madrugada
   llega al móvil por la mañana con tres botones —«Arreglarlo», «No hacer nada» y
   «Hablarlo»—, y el primero lanza otra sesión en la nube que lo arregla, abre PR y mergea
-  si el CI pasa. «Hablarlo» descuelga una llamada con Jarvis, que llega con el **issue
-  entero** leído (`contar_revision` hace lo mismo por escrito, y no confirma nada porque
-  solo lee). Los botones los decide el
+  si el CI pasa. **«Hablarlo» hace sonar el teléfono por la centralita** (`accion:
+  "hablar"`, que no toca `estado` y se puede pulsar varias veces) y contesta
+  **Jarvis-Claude**, con el **issue entero** ya armado por `_jarvis_contexto_llamada`
+  (`contar_revision` hace lo mismo por escrito, y no confirma nada porque solo lee). Antes
+  de la centralita este botón abría el dashboard con Jarvis-GPT; ese camino sigue vivo
+  como vía manual (`?llamada=1&aviso=<id>&tipo=revision`) pero ya no es el botón por
+  defecto — ver `docs/LLAMADAS.md`. Los botones los decide el
   backend (`_acciones_aviso`) y viajan **dentro del aviso**: HA solo sabe a qué móvil van.
   La decisión vive en Supabase porque entre el aviso y el toque pasan horas y Fly escala a
   cero, y se consume con un **PATCH condicional** para que dos toques no lancen dos
@@ -541,9 +551,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   `sesion_avisos`, `GET /llamada/pendiente`, herramienta `responder_a_la_sesion`): el
   mismo canal que el de arriba, pero hablando de otra cosa. Una sesión que ha estado
   trabajando en el repositorio deja «esto me pediste, esto he hecho, esto ha quedado a
-  medias»; al descolgar Jarvis **ya lo sabe** (va en el prompt de la llamada, delimitado
-  como dato) y lo que contestes hablando dispara una sesión NUEVA que sigue el trabajo.
-  Dos cosas que no son detalles: **solo avisa si lo pediste o si la sesión se quedó
+  medias»; su botón **«Hablarlo» hace sonar el teléfono por la centralita**
+  (`LA_HABLAR_SES_<id>` → `POST /sesion/{id}/accion` `{"accion":"hablar"}`) y contesta
+  **Jarvis-Claude**, que ya lo sabe (el contexto viaja armado por
+  `_jarvis_contexto_llamada`, delimitado como dato) y lo que contestes hablando dispara
+  una sesión NUEVA que sigue el trabajo (vía la herramienta `responder_a_la_sesion`, que
+  sigue estando solo en Jarvis-GPT/dashboard, no en el MCP del teléfono). Dos cosas que no
+  son detalles: **solo avisa si lo pediste o si la sesión se quedó
   bloqueada** —nunca por terminar algo sin más, que es lo que llenaría el canal de ruido—
   y **solo lo bloqueado atraviesa el silencio del móvil**, por la misma regla que decide
   quién puede llamarte por teléfono. El flujo entero en `docs/AVISAME.md`.
@@ -620,8 +634,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   significa que esto **no necesitó ni una línea nueva de YAML en Home Assistant**.
   «Arreglarlo» lleva además un `uri` al dashboard, que decide sin pasar por HA: el evento
   del móvil a Home Assistant se pierde en silencio y se comió cinco decisiones seguidas el
-  2026-09-14. «Hablarlo» abre la pantalla de llamada con el id de ESA decisión, y ahí
-  Jarvis tiene el issue entero delante. Los dos, explicados en `docs/REVISION_NOCTURNA.md`. La decisión se apunta en `revision_hallazgos` con
+  2026-09-14. «Hablarlo» hace sonar el teléfono por la centralita (`LA_HABLAR_REV_<id>`,
+  `accion: "hablar"`) con el issue entero delante, y contesta Jarvis-Claude, no el
+  dashboard. Los dos, explicados en `docs/REVISION_NOCTURNA.md`. La decisión se apunta en `revision_hallazgos` con
   `origen='vigilante'` —la misma tabla que ya guarda las otras dos clases de decisión de
   este proyecto, así que tampoco hizo falta migración— y **la sesión que lanza ese botón
   abre PR y NO mergea**, igual que el camino de las averías (`docs/AVERIAS.md`): arreglar
