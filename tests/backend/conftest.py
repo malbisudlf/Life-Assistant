@@ -163,6 +163,9 @@ def _limpiar_estado():
     # falta limpiarlos aquí, cada test que los necesite mockea su propia respuesta.
     with main._rate_lock:
         main._rate_buckets.clear()
+    # Los contadores de sondeos fallidos: si se quedaran de un test a otro, una avería
+    # de un test contaría como tercer sondeo del siguiente.
+    main._vigilancia.clear()
     main._wol_pending = False
     main._agent_relaunch_pending = False
     main._pc_power_action = None

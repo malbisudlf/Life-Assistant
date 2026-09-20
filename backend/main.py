@@ -9733,6 +9733,11 @@ REGLA_DESPLIEGUE    = "despliegue"
 # no vería nadie. Y con regla propia y no sin ella para que se pueda silenciar sola si
 # algún día se vuelve ruido, como cualquier otra.
 REGLA_PROGRAMADO    = "programado"
+# La de «algo lleva un rato caído» (`POST /vigilancia/estado`). Regla propia, y no la de
+# los programados, porque la pregunta es otra: aquélla cuenta que un cron falló y ya está;
+# ésta puede acabar haciendo sonar el teléfono. Tenerlas separadas es lo que permite
+# silenciar el ruido de una sin perder la otra.
+REGLA_VIGILANCIA    = "vigilancia"
 # La del vigilante del sistema («N errores en las últimas 24 h»). Existía como texto
 # suelto hasta el 2026-09-12, y esa era exactamente la razón de que su aviso llegara al
 # móvil sin nada que pulsar: `_acciones_aviso` decide los botones por la regla, y una
@@ -13803,8 +13808,8 @@ def _leer_contexto_llamada(ctx: str) -> dict:
     return {"texto": str(datos.get("texto") or ""), "rid": str(datos.get("rid") or "")}
 
 
-def _llamar(texto: str, *, rid: str = "") -> bool:
-    """Hace sonar el teléfono. True si la llamada llegó a lanzarse.
+def _llamar_twilio(texto: str, *, rid: str = "") -> bool:
+    """El teléfono por Twilio: cuesta dinero por llamada y hoy está apagado (`LLAMADAS=0`).
 
     No propaga el fallo: quien llama a esto ya ha dejado el aviso por los canales de
     siempre, y que el teléfono no suene no puede tumbar el aviso que sí salió. Se
@@ -13836,6 +13841,68 @@ def _llamar(texto: str, *, rid: str = "") -> bool:
         return False
     logger.info("Llamada lanzada (%s)", rid or "sin decisión asociada")
     return True
+
+
+# ── EL TELÉFONO POR 3CX ──────────────────────────────────────────────────────────────
+#
+# El canal de Twilio de arriba nunca llegó a encenderse: cobra por llamada y por número,
+# y eso era justo lo que no cabía en el presupuesto (`docs/LLAMADAS.md`). Desde el
+# 2026-09-20 hay un camino que no cuesta nada: una centralita 3CX gratuita, su SBC y
+# claude-phone corriendo en `caja`, la misma máquina que el backend. Llamar de la 11411
+# (Jarvis) a la 11410 (el móvil) es tráfico interno de la centralita: cero euros.
+#
+# Y lo que cambia de verdad no es el precio: al otro lado ya no hay un texto grabado
+# sino Claude Code corriendo EN la máquina, así que la llamada puede mirar el estado y
+# actuar. Por eso `contexto` viaja aparte del texto que se dice en voz alta: lo primero
+# es para el modelo, lo segundo para el oído.
+TELEFONO_URL         = os.getenv("TELEFONO_URL", "")
+TELEFONO_EXTENSION   = os.getenv("TELEFONO_EXTENSION", "")
+TELEFONO_DISPOSITIVO = os.getenv("TELEFONO_DISPOSITIVO", "Jarvis")
+
+
+def _telefono_configurado() -> bool:
+    return bool(TELEFONO_URL and TELEFONO_EXTENSION)
+
+
+def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
+    """Hace sonar el móvil por la centralita. True si la llamada llegó a lanzarse.
+
+    `contexto` es lo que Jarvis SABE al descolgar y no dice en voz alta: qué está caído,
+    desde cuándo y qué puede hacer al respecto. Sin él la llamada es un locutor, y lo que
+    se pedía era alguien con quien se pueda resolver el problema hablando.
+    """
+    if not _telefono_configurado():
+        return False
+    cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
+              "mode": "conversation", "message": texto[:1000]}
+    if contexto:
+        cuerpo["context"] = contexto[:4000]
+    try:
+        r = http.post(f"{TELEFONO_URL.rstrip('/')}/api/outbound-call", json=cuerpo)
+        if r.status_code >= 300:
+            # El cuerpo dice qué falló (extensión desconocida, SIP sin registrar, 503 del
+            # PBX) y son arreglos distintos. Ninguno lleva credenciales dentro.
+            logger.error("Llamada: la centralita devolvió %s — %s", r.status_code,
+                         (r.text or "")[:200].replace("\n", " ").strip() or "(sin cuerpo)")
+            return False
+    except requests.RequestException as e:
+        logger.exception("Llamada: no se pudo conectar con la centralita (%s)", e)
+        return False
+    logger.info("Llamada lanzada por la centralita (%s)", rid or "sin decisión asociada")
+    return True
+
+
+def _llamar(texto: str, *, rid: str = "", contexto: str = "") -> bool:
+    """Única puerta de salida del teléfono. True si alguna vía llegó a lanzar la llamada.
+
+    Primero la centralita, que es gratis y sabe hacer más; Twilio detrás, que sigue
+    escrito y apagado. No propaga el fallo: quien llama a esto ya ha dejado el aviso por
+    los canales de siempre, y que el teléfono no suene no puede tumbar el aviso que sí
+    salió. Es un canal de refuerzo, no el único.
+    """
+    if _llamar_telefono(texto, rid=rid, contexto=contexto):
+        return True
+    return _llamar_twilio(texto, rid=rid)
 
 
 def _rescatar_avisos() -> dict:
@@ -15091,6 +15158,142 @@ def programado_roto(request: Request, body: ProgramadoRotoIn, token: str = ""):
                               huella=workflow)
     logger.warning("Workflow programado roto: %s (%s)", workflow, detalle or "sin detalle")
     return {"ok": True, "avisado": apuntado}
+
+
+# ── VIGILANCIA: QUÉ MERECE UNA LLAMADA ───────────────────────────────────
+#
+# Quien mira si algo está vivo son los vigilantes de n8n y los sondeos de Home Assistant.
+# Quien decide QUÉ HACER con eso es este endpoint, y está aquí y no en un lienzo de n8n
+# por la frontera de `docs/N8N.md`: n8n observa y avisa, no decide. Lo que se decide aquí
+# sale en el diff de un PR y lo cubren los tests.
+#
+# Las tres reglas, y las tres existen para que el teléfono siga significando algo:
+#
+# 1. **Un parpadeo no es una avería.** Hace falta que el sujeto falle
+#    `VIGILANCIA_FALLOS_LLAMADA` sondeos SEGUIDOS. Con sondeos cada 5 minutos eso son
+#    ~15 minutos caído, tiempo de sobra para que un corte de red se arregle solo.
+# 2. **Se llama una vez por avería, no una vez por sondeo.** Sonar cada cinco minutos
+#    mientras algo sigue roto no añade información y garantiza que dejes de cogerlo.
+# 3. **De noche no suena**, salvo que sea de lo que tiene que despertarte. El aviso al
+#    móvil sí sale igual; lo que espera a la mañana es la llamada. No hace falta ningún
+#    reloj para eso: como los sondeos siguen entrando, el primero que llega pasada
+#    `VIGILANCIA_NOCHE_HASTA` encuentra la avería todavía viva y llama entonces.
+#
+# Lo que NO hace, a propósito: arreglar nada. Esto avisa y llama. Quien arregla es la
+# persona que descuelga, con Jarvis al otro lado — que sí puede actuar, pero porque se lo
+# pide alguien hablando, no porque lo decida un cron.
+VIGILANCIA_FALLOS_LLAMADA = int(os.getenv("VIGILANCIA_FALLOS_LLAMADA", "3"))
+VIGILANCIA_NOCHE_DESDE    = int(os.getenv("VIGILANCIA_NOCHE_DESDE", "0"))
+VIGILANCIA_NOCHE_HASTA    = int(os.getenv("VIGILANCIA_NOCHE_HASTA", "7"))
+
+# Estado en memoria a propósito: es un contador de sondeos consecutivos, y si el backend
+# se reinicia debe volver a cero — lo que hubiera antes del reinicio ya no dice nada de lo
+# que pasa ahora. Con la trampa de siempre: esto solo es correcto mientras haya UN backend
+# vivo (ver `docs/BUGS_HISTORICOS.md`, los dos backends del 14/09).
+_vigilancia: dict = {}
+
+
+def _es_de_noche(ahora: datetime) -> bool:
+    """True dentro de la franja en la que el teléfono no suena. Cruza la medianoche."""
+    if VIGILANCIA_NOCHE_DESDE == VIGILANCIA_NOCHE_HASTA:
+        return False
+    if VIGILANCIA_NOCHE_DESDE < VIGILANCIA_NOCHE_HASTA:
+        return VIGILANCIA_NOCHE_DESDE <= ahora.hour < VIGILANCIA_NOCHE_HASTA
+    return ahora.hour >= VIGILANCIA_NOCHE_DESDE or ahora.hour < VIGILANCIA_NOCHE_HASTA
+
+
+def _contexto_averia(sujeto: str, detalle: str, fallos: int, desde: float) -> str:
+    """Lo que Jarvis SABE al descolgar, que no es lo que dice en voz alta."""
+    minutos = max(1, int((time.time() - desde) / 60))
+    partes = [f"Llamas tú porque «{sujeto}» lleva {minutos} minutos sin responder "
+              f"({fallos} sondeos seguidos fallidos)."]
+    if detalle:
+        partes.append(f"Lo que reportó el vigilante: {detalle}")
+    partes.append("Estás al teléfono con Mikel. Antes de proponer nada, compruébalo tú "
+                  "mismo: el runbook de tu directorio de trabajo dice qué mirar y qué "
+                  "puedes tocar. Di primero qué has encontrado, en una frase, y luego qué "
+                  "harías. No actúes sin que te lo confirme hablando.")
+    return "\n\n".join(partes)
+
+
+class VigilanciaIn(BaseModel):
+    sujeto:  str
+    vivo:    bool
+    detalle: str = ""
+    critico: bool = False
+
+
+@app.post("/vigilancia/estado")
+def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
+    """Un vigilante cuenta si algo sigue en pie. Decide si eso merece un aviso o una llamada.
+
+    Se llama en CADA sondeo, esté el sujeto vivo o muerto, y no solo cuando falla: la
+    recuperación es tan informativa como la caída —sin el «ya vuelve a estar» te quedas
+    mirando el móvil sin saber si aquello se arregló— y es además lo que pone el contador
+    a cero. Un vigilante que solo avisara de lo malo dejaría la avería marcada para
+    siempre y no volvería a llamar por ella nunca.
+
+    `critico` es la única excepción al silencio nocturno, y su sitio es el que lo pide:
+    hoy, las alarmas de respaldo (`docs/ALARMAS.md`), que son precisamente lo que tiene
+    que despertarte. Cualquier otra cosa que algún día lo pida se justifica antes en
+    `docs/LLAMADAS.md`.
+    """
+    if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    sujeto = re.sub(r"[^a-zA-Z0-9 _-]", "", str(body.sujeto or "")).strip()[:40]
+    if not sujeto:
+        raise HTTPException(status_code=400, detail="Falta el sujeto de la vigilancia")
+    detalle = str(body.detalle or "").strip()[:300]
+    estado  = _vigilancia.get(sujeto)
+
+    if body.vivo:
+        if estado and estado["avisado"]:
+            minutos = max(1, int((time.time() - estado["desde"]) / 60))
+            _notificar(f"{sujeto} ha vuelto",
+                       f"«{sujeto}» responde otra vez. Estuvo caído unos {minutos} minutos.")
+            logger.info("Vigilancia: %s recuperado tras %d min", sujeto, minutos)
+        _vigilancia.pop(sujeto, None)
+        return {"ok": True, "estado": "vivo"}
+
+    if not estado:
+        estado = {"fallos": 0, "desde": time.time(), "avisado": False, "llamado": False}
+        _vigilancia[sujeto] = estado
+    estado["fallos"] += 1
+
+    # Por debajo del umbral no se dice nada (regla 1): un sondeo fallido suelto es ruido
+    # de red, y avisar de cada uno es la forma más rápida de que dejes de mirar los avisos.
+    if estado["fallos"] < VIGILANCIA_FALLOS_LLAMADA:
+        return {"ok": True, "estado": "caido", "fallos": estado["fallos"], "avisado": False}
+
+    texto = f"«{sujeto}» lleva {estado['fallos']} sondeos sin responder."
+    if detalle:
+        texto += f" {detalle}"
+
+    if not estado["avisado"]:
+        _notificar(f"{sujeto} no responde", texto)
+        estado["avisado"] = True
+
+    if estado["llamado"]:
+        return {"ok": True, "estado": "caido", "fallos": estado["fallos"],
+                "avisado": True, "llamado": True}
+    if _es_de_noche(_ahora_local()) and not body.critico:
+        # El aviso ya salió; la llamada espera. No hay que programar nada: el siguiente
+        # sondeo de después de las siete entra por aquí otra vez y entonces sí llama.
+        logger.info("Vigilancia: %s caído, llamada aplazada por la franja nocturna", sujeto)
+        return {"ok": True, "estado": "caido", "fallos": estado["fallos"],
+                "avisado": True, "llamado": False, "aplazada": True}
+
+    dicho = (f"Mikel, soy Jarvis. {sujeto} lleva un rato sin responder. "
+             f"Estoy mirando qué pasa; dime y lo vemos.")
+    llamado = _llamar(dicho, rid=f"vigilancia:{sujeto}",
+                      contexto=_contexto_averia(sujeto, detalle, estado["fallos"],
+                                                estado["desde"]))
+    estado["llamado"] = llamado
+    logger.warning("Vigilancia: %s caído (%d sondeos), llamada %s", sujeto,
+                   estado["fallos"], "lanzada" if llamado else "no disponible")
+    return {"ok": True, "estado": "caido", "fallos": estado["fallos"],
+            "avisado": True, "llamado": llamado}
 
 
 class PrListoIn(BaseModel):
