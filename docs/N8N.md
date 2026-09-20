@@ -52,19 +52,29 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 
 | Flujo | Qué hace | Estado |
 |---|---|---|
-| **Vigilante del Green** | Cada 5 min pregunta a Home Assistant. Si no contesta, `POST /programado/roto` → aviso al móvil | Activo desde el 2026-09-20 |
+| **Vigilante del Green** | Cada 5 min pregunta a Home Assistant y cuenta lo que ve a `POST /vigilancia/estado` | Activo desde el 2026-09-20, 19:23 |
 | **Traductor de averías** | Cada 15 min busca runs fallidos de GitHub Actions (menos el CI), se baja el registro, se lo da a Gemini y abre un issue con el diagnóstico | Activo desde el 2026-09-20 |
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
-| **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | **Importado y SIN ACTIVAR** (2026-09-20) |
-| **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | **Importado y SIN ACTIVAR** (2026-09-20) |
+| **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Activo desde el 2026-09-20, 19:23 |
+| **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Activo desde el 2026-09-20, 19:23 |
 
-> **Los tres vigilantes están importados en n8n pero NINGUNO activo** (comprobado el
-> 2026-09-20 a las 18:55: cero peticiones a `/vigilancia/estado` en seis minutos, y
-> `n8n list:workflow --active=true` solo lista los dos viejos). La tubería sí está
-> probada de punta a punta con ejecuciones a mano. **Mientras sigan apagados, el
-> teléfono solo suena si alguien llama al endpoint a mano**, y el del Green viejo
-> tampoco está activo, así que la casa no la vigila nadie. Es literalmente la trampa
-> de más abajo: un flujo inactivo no avisa de que está inactivo.
+> **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
+> ninguno lo estaba: la tabla de aquí arriba llevaba una tarde diciendo que el del Green
+> corría cuando no corría, que es la trampa de más abajo aplicada a su propia
+> documentación. Comprobado ya funcionando a las 19:25: los tres ejecutan con éxito,
+> llegan dos `POST /vigilancia/estado` por vuelta (Green y web) y el del backend termina
+> en tres nodos sin llamar, que es lo correcto con el backend vivo.
+
+> **`n8n update:workflow --active=true` no basta.** Avisa él mismo («Changes will not
+> take effect if n8n is running») y no miente: la fila de la base de datos queda activa,
+> `list:workflow --active=true` los lista, y los disparadores **no están registrados**.
+> Hace falta `docker restart n8n`, y la prueba de que ha entrado son las líneas
+> `Activated workflow "<nombre>"` del arranque, no lo que diga el listado.
+
+> **Hay dos «Vigilante del Green» en n8n.** El viejo (`xignTTiDief1EA6T`, manda a
+> `/programado/roto`) sigue **inactivo y sin borrar**; el que corre es
+> `y0DPIpDI7fVDEblR`, el de `/vigilancia/estado`. Por el nombre no se distinguen: por el
+> id sí.
 
 El del Green cambió el 2026-09-20: ya no manda a `/programado/roto` sino a
 `/vigilancia/estado`, y manda **en cada sondeo**, no solo cuando falla. El sondeo bueno
