@@ -47,13 +47,22 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Vigilante del Green** | Cada 5 min pregunta a Home Assistant. Si no contesta, `POST /programado/roto` → aviso al móvil | Activo desde el 2026-09-20 |
 | **Traductor de averías** | Cada 15 min busca runs fallidos de GitHub Actions (menos el CI), se baja el registro, se lo da a Gemini y abre un issue con el diagnóstico | Activo desde el 2026-09-20 |
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
-| **Vigilante de la web** | Cada 5 min sondea la web de Vercel y la API. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Sin importar |
+| **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Sin importar |
 | **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Sin importar |
 
 El del Green cambió el 2026-09-20: ya no manda a `/programado/roto` sino a
 `/vigilancia/estado`, y manda **en cada sondeo**, no solo cuando falla. El sondeo bueno
 no sobra: es lo que pone el contador a cero y lo que permite decir «ya ha vuelto». Un
 vigilante que solo hablara de lo malo dejaría la avería marcada para siempre.
+
+**Por qué son tres flujos y no uno.** Cada uno tiene disparador, credencial y lógica
+propias: el del Green habla por el nodo de Home Assistant y distingue el Green caído de un
+token caducado; el de la web hace un `GET` y poco más; el del backend es el único que
+decide. Y hay una razón de fondo para no juntar los dos últimos: **la API no se puede
+vigilar contra sí misma**. Estuvo un rato así —una sonda a la API dentro del vigilante de
+la web— y era decorativa: mientras la API vive, el informe llega y no hace falta; cuando
+cae, el informe cae con ella. El único aviso que importaba era justo el que no podía
+salir.
 
 ### La excepción: el vigilante del backend SÍ decide
 
