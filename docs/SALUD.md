@@ -60,6 +60,22 @@ mismo que el oxígeno. Dos detalles propios:
   línea base, y a una desviación se le aplicaría el factor pero no el desplazamiento de
   32: convertirla mal es peor que no tocarla.
 
+**Pero de momento no llega ninguna muestra, y no es cosa del backend**: la pulsera mide la
+temperatura y **Zepp no la escribe en la app de Salud** (comprobado el 2026-09-20), así
+que Health Auto Export no tiene nada que exportar. La ingesta recibe sus lotes con 200 y
+sin un solo descarte en el registro; en `health_metrics` no hay ni una fila. Antes de
+buscar el fallo aquí, mira si la muestra existe en Salud: si no está en el teléfono, no
+hay nada roto en este lado.
+
+La única vía conocida para ese dato es la API móvil privada de Zepp/Huami (hay un
+envoltorio de un fichero en `m4ary/zepp-health-cli`), y tiene dos pegas que condicionan
+cualquier diseño: lo que expone es `skinTempCalibrated`, una **desviación respecto a la
+línea base en centésimas de °C** —no una temperatura absoluta, así que no entraría por
+`TEMPERATURA_ABSOLUTAS`—, y su token **caduca a los ~30 días** y solo se obtiene
+capturando el tráfico de la app con un proxy HTTPS. Si algún día se monta ese recolector,
+tiene que avisar al caerse (`programado-roto`): un token que expira en silencio es
+exactamente la avería que este proyecto ya ha tenido dos veces.
+
 **El aparato principal ya no es el Apple Watch**, sino una pulsera Amazfit Helio Strap
 que escribe en Salud a través de Zepp (el iPhone queda de secundario). Consecuencia
 práctica: `apple_stand_hour` y `apple_exercise_time` **sólo las genera un Apple Watch** y
