@@ -36,6 +36,38 @@ backend, el túnel, la base de datos y n8n. Lo que puede y no puede hacer está 
 máquina, porque `claude-api-server` lo invoca con `--dangerously-skip-permissions`. Hoy lo
 único que lo protege es que ese puerto no sale de la LAN. Ver «Seguridad», abajo.
 
+### Qué motivo suena por dónde
+
+Desde que existe la centralita, no todos los «Hablarlo» suenan por el mismo sitio:
+
+| Motivo | Quién contesta | Botón/disparo |
+|---|---|---|
+| Permiso de despliegue | Jarvis-GPT, dashboard | «Hablarlo» abre `PantallaLlamada` (`?llamada=1&tipo=despliegue`) |
+| Avería de infraestructura (vigilancia) | Jarvis-Claude, centralita | Automática, `_llamar()` desde `/vigilancia/estado` |
+| Hallazgo de revisión nocturna / vigilante | Jarvis-Claude, centralita | Botón «Hablarlo» → `POST /revision/{id}/accion` `{"accion":"hablar"}` |
+| Aviso de una sesión de Claude Code | Jarvis-Claude, centralita | Botón «Hablarlo» → `POST /sesion/{id}/accion` `{"accion":"hablar"}` |
+
+Los dos últimos son nuevos: antes «Hablarlo» abría el dashboard con GPT igual que el
+despliegue. La razón del cambio es que esos dos motivos son justo los que Claude Code
+puede investigar de verdad (un issue del propio repo, el estado de una sesión anterior),
+mientras que el permiso de despliegue sigue siendo una pregunta de sí/no que no necesita
+tocar la máquina. El deep-link al dashboard para `revision`/`sesion` sigue existiendo por
+debajo (`_MOTIVOS_LLAMADA`, `GET /llamada/pendiente`) como vía manual si la centralita
+está caída — solo se retiró el botón que la ofrecía por defecto.
+
+Los dos nuevos `_llamar()` reusan `_jarvis_contexto_llamada()` tal cual para armar el
+`contexto` (el issue entero, o el resumen de la sesión) — es la misma función que ya usaba
+la pantalla del navegador, ahora también aprovechada por la centralita.
+
+**Para que Jarvis-Claude tenga las herramientas MCP hace falta un paso manual en `caja`**,
+fuera de este repositorio (como el resto de la config de esa máquina): dar de alta
+`https://<host-público-del-backend>/mcp/telefono` como servidor MCP remoto en la
+configuración de Claude Code de `~/telefono-jarvis/` (fichero de proyecto de
+`claude-api-server`), con `Authorization: Bearer <JARVIS_MCP_TELEFONO_TOKEN>` en las
+cabeceras — el mismo token que lleva `backend/.env`. Sin esa alta, la llamada suena igual
+(el `context` no depende de ello) pero Jarvis-Claude no tiene ninguna herramienta, solo
+la máquina.
+
 **Y una cosa que este canal no puede hacer, por construcción:** la centralita vive en
 `caja`, la misma máquina que vigila. Puede contarte que el Green está caído, que la web
 falla o que el backend murió con la máquina viva. De lo que no puede avisarte nunca es de
@@ -373,6 +405,19 @@ El texto que se dice por teléfono sale de `detalle`, que lo escribe un workflow
 modelo con herramientas: habrá que envolverlo como DATO, igual que el enunciado de Alud
 en `build_cowork_instruction`.
 
+- **`POST /mcp/telefono`** es el servidor MCP (Streamable HTTP, JSON-RPC 2.0) que
+  Jarvis-Claude consume desde `caja` para tener las mismas herramientas de consulta que
+  Jarvis-GPT, más un puñado de acciones de bajo riesgo (`telefono/RUNBOOK.md` tiene la
+  lista exacta). Protegido con `JARVIS_MCP_TELEFONO_TOKEN` (`Authorization: Bearer`,
+  fail-closed como todo token de servicio). La lista blanca de herramientas es cerrada
+  (`_MCP_SERVIDOR_HERRAMIENTAS` en `backend/main.py`) y deja fuera a propósito todo lo que
+  toca producción, el repositorio o el calendario (`desplegar`, `mcp_*`,
+  `encargar_a_una_sesion`, `responder_a_la_sesion`, `arreglar_revision`, `crear_evento`,
+  `cobrar_entrenamiento`...). La confirmación hablada reusa `_jarvis_confirma()` tal cual:
+  si una herramienta la exige con los argumentos que se han pedido (por ejemplo
+  `casa_ordenar` sobre una cerradura), el servidor la RECHAZA con un error — no hay botón
+  de confirmar al otro lado de una llamada, así que no se ejecuta solo por venir de ahí.
+
 ## Coste
 
 - **Twilio, sin comprar número**: el presupuesto de este canal es **menos de un euro al
@@ -424,6 +469,14 @@ curl -X POST "$BACKEND_URL/revision/pr-listo" -H "X-Auth-Token: $REVISION_TOKEN"
 Para probar el aviso sin gastar una llamada, apaga `LLAMADAS`.
 
 ## Lo que le falta
+
+- **El routing de `revision`/`sesion` hacia la centralita no se ha probado en producción.**
+  El código está cubierto por tests (`tests/backend/test_revision_hablar.py`,
+  `test_sesion_hablar.py`, `test_mcp_telefono.py`), pero la primera vez que suene de
+  verdad por un hallazgo de la revisión nocturna o un aviso de sesión es la prueba que
+  falta — igual que pasó con el canal de averías antes de confirmarse. Y el servidor MCP
+  (`/mcp/telefono`) solo se ha probado con `curl` a mano: falta que Claude Code en `caja`
+  lo conecte de verdad y llame a una herramienta en caliente.
 
 - **Interrumpirle (barge-in).** Mientras Jarvis piensa o habla, el audio que entra se
   tira. Es exactamente lo que también le falta al modo llamada del navegador

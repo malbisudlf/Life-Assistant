@@ -55,20 +55,26 @@ class TestTodosLosBotonesDicenDeQueVienen:
         assert acciones[-1]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}&tipo=despliegue"
 
     def test_el_del_aviso_de_sesion_tambien(self):
+        """Ya no abre el dashboard: hace sonar el teléfono, con el id en el propio `action`."""
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_SESION)
         assert acciones[0]["title"] == "Hablarlo"
-        assert acciones[0]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}&tipo=sesion"
+        assert acciones[0]["action"] == f"LA_HABLAR_SES_{UN_UUID}"
+        assert "uri" not in acciones[0]
 
     def test_y_el_de_la_revision_dice_de_que_tabla_es(self):
-        """Éste ya llevaba el id; lo que le faltaba era decir cuál de los dos estados."""
+        """El prefijo `_REV_`/`_SES_` es lo que dice de qué tabla es, no el `tipo` de una `uri`."""
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_REVISION)
-        assert acciones[-1]["uri"] == f"{FRONT}/?llamada=1&aviso={UN_UUID}&tipo=revision"
+        assert acciones[-1]["action"] == f"LA_HABLAR_REV_{UN_UUID}"
 
-    def test_sin_frontend_no_hay_boton_que_estropear(self, monkeypatch):
+    def test_sin_frontend_solo_el_despliegue_pierde_hablarlo(self, monkeypatch):
+        """Sesión y revisión hacen sonar el teléfono: no dependen del dashboard. El
+        despliegue sigue siendo el único que abre uno, así que es el único que lo pierde."""
         monkeypatch.setattr(main, "FRONTEND_URL", "")
-        for regla in (main.REGLA_DESPLIEGUE, main.REGLA_SESION, main.REGLA_REVISION):
+        acciones = main._acciones_aviso(UN_UUID, main.REGLA_DESPLIEGUE)
+        assert all(a["title"] != "Hablarlo" for a in acciones)
+        for regla in (main.REGLA_SESION, main.REGLA_REVISION):
             acciones = main._acciones_aviso(UN_UUID, regla)
-            assert all(a["title"] != "Hablarlo" for a in acciones)
+            assert any(a["title"] == "Hablarlo" for a in acciones)
 
 
 class TestLaPantallaAnunciaElMotivoExacto:

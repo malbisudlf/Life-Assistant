@@ -279,6 +279,14 @@ rest_command:
 sesión). Si pulsas y no llega nada, el problema está en este `rest_command` o en el
 `notify` de arriba, no en el backend: él contesta siempre por el mismo canal.
 
+Y **«Hablarlo»** del mismo aviso (revisión nocturna o vigilante): desde que existe la
+centralita, este botón ya no abre el dashboard —eso era un `action: "URI"` y no
+necesitaba automatización—, ahora hace sonar el teléfono con Jarvis-Claude al otro lado
+(`docs/LLAMADAS.md`). A diferencia del resto de botones de este fichero, **este no lleva
+su propia automatización de HA**: el enrutado (de qué tabla es, a qué endpoint del
+backend llamar) se hace en n8n. HA solo reenvía el evento en crudo — ver «Hablarlo: el
+reenvío a n8n», más abajo, y el flujo en `docs/N8N.md`.
+
 Y la del botón **«Apagar»** del aviso de salir de casa, que es la tercera pregunta
 distinta: no se valora el aviso ni se decide nada de código, se apaga lo que te dejaste
 encendido (el backend encola las órdenes y las recoge el sondeo de `ordenes-pending` que
@@ -382,9 +390,55 @@ rest_command:
     payload: '{"accion": "vale"}'
 ```
 
-El otro botón de ese aviso, **«Hablarlo»**, no necesita automatización ninguna: es un
-`action: "URI"` que abre el dashboard con `?llamada=1&aviso=<id>&tipo=<cuál>`, y de ahí
-en adelante todo pasa en el navegador. Por eso ese sí funciona aunque no instales nada de esto.
+El otro botón de ese aviso, **«Hablarlo»**, hace sonar el teléfono igual que el de la
+revisión nocturna — antes era un `action: "URI"` sin automatización, ahora pasa por el
+mismo reenvío a n8n de la sección siguiente.
+
+### Hablarlo: el reenvío a n8n
+
+`LA_HABLAR_REV_<id>` (revisión/vigilante) y `LA_HABLAR_SES_<id>` (aviso de sesión) son
+los dos únicos botones de este fichero cuya lógica **no vive en una automatización de
+HA**: el enrutado (de qué tabla es el id, a qué endpoint del backend llamar) está en un
+flujo de n8n — decisión de Mikel, para no seguir acumulando YAML por cada botón nuevo.
+El flujo entero, con capturas de cómo está montado, en `docs/N8N.md`.
+
+Lo único que sigue en HA es el reenvío en crudo del evento, porque **eso no se puede
+evitar**: el botón lo pulsa la app del móvil, que solo sabe hablar con Home Assistant, así
+que HA es el único que puede ver ese evento y pasárselo a n8n. Una sola automatización
+genérica para los dos botones:
+
+```yaml
+alias: Life Assistant - Hablarlo, reenviar a n8n
+mode: queued
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+condition:
+  - condition: template
+    value_template: "{{ trigger.event.data.action is match('LA_HABLAR_') }}"
+action:
+  - service: rest_command.la_hablar_a_n8n
+    data:
+      accion: "{{ trigger.event.data.action }}"
+```
+
+```yaml
+rest_command:
+  la_hablar_a_n8n:
+    url: "http://TU-CAJA:5678/webhook/hablarlo"   # IP de LAN de `caja`, nunca localhost
+    method: POST
+    content_type: "application/json"
+    payload: '{"accion": "{{ accion }}"}'
+```
+
+**Sin credencial**: el webhook de n8n solo es alcanzable dentro de la LAN (mismo criterio
+que su panel, `docs/N8N.md`), así que no lleva token — igual que el vigilante del backend
+llama a la centralita sin pasar por credenciales del backend.
+
+**Si no instalas esta automatización** el botón «Hablarlo» de revisión/vigilante y de
+sesión deja de hacer nada visible — a diferencia de antes, ya no tiene un `uri` de
+respaldo que abra el dashboard. El permiso de despliegue no se toca: su «Hablarlo» sigue
+siendo `action: "URI"` sin automatización.
 
 **Apaga lo que decía el aviso, no lo que hay encendido al pulsar.** Las entidades viajan
 guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora
@@ -392,7 +446,7 @@ puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló 
 no tener botón. Y **el PC no entra**, aunque el aviso lo nombre: cortarle la corriente a
 un enchufe no es apagarlo. Para eso está su propio aviso.
 
-Las seis automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
+Todas estas automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
 
 **No contestar no cuenta como "no útil"**: el backend solo apunta lo que llega. El
 silencio no vota, ni a favor ni en contra — es la misma regla de siempre, "no lo sé" no

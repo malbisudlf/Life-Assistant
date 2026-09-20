@@ -57,6 +57,7 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
 | **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Activo desde el 2026-09-20, 19:23 |
 | **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Activo desde el 2026-09-20, 19:23 |
+| **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Pendiente de montar |
 
 > **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
 > ninguno lo estaba: la tabla de aquí arriba llevaba una tarde diciendo que el del Green
@@ -117,6 +118,35 @@ Con dos detalles que no son casuales:
 - **El token va en cabecera** (`httpHeaderAuth`), nunca en la query. Es la misma regla
   que `CLAUDE.md` impone a las integraciones: por la query el token acaba escrito en el
   registro de peticiones.
+
+### El primer flujo por webhook: «Hablarlo»
+
+Todos los flujos de arriba disparan por `Schedule trigger`. Este es el primero por
+`Webhook`, porque lo que lo dispara no es un reloj sino que Mikel pulse un botón en el
+móvil — y ese evento (`mobile_app_notification_action`) solo existe dentro de Home
+Assistant, así que **no hay forma de evitar que HA sea quien lo entregue**: la única
+automatización que queda en HA para esto es un reenvío en crudo del `action` a este
+webhook (`docs/HOME_ASSISTANT_JARVIS.md`, sección «Hablarlo: el reenvío a n8n»). Todo lo
+demás —de qué tabla es el id, a qué endpoint llamar— vive aquí, no en YAML.
+
+Forma del flujo:
+
+```
+Webhook (/hablarlo) → Code (parsea prefijo y id) → IF (revisión / sesión) → HTTP Request
+```
+
+- El `Code` separa `LA_HABLAR_REV_<id>` de `LA_HABLAR_SES_<id>`: el prefijo dice la tabla,
+  el resto del string es el id.
+- El `HTTP Request` llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con
+  `{"accion": "hablar"}` y el token de servicio en cabecera (`X-Auth-Token`, el mismo que
+  usan las automatizaciones de HA para los demás botones — `_auth_boton` en el backend
+  acepta cualquiera de los dos).
+- No decide nada que no decidiera ya HA con un `rest_command`: es pegamento, no un
+  segundo cerebro. La decisión de qué se dice por teléfono la sigue tomando el backend
+  (`_llamar`, `_jarvis_contexto_llamada`) — n8n solo hace de enrutador.
+
+El webhook de n8n no sale de la LAN (mismo criterio que su panel), así que no lleva
+credencial propia — el token va en la llamada de n8n al backend, no en la de HA a n8n.
 
 ## La IA de los flujos: Gemini en el plan gratuito
 
