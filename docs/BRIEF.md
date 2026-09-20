@@ -102,9 +102,15 @@ backend está en `docs/BACKEND_PATRONES.md`.
   es la única puerta**: cada fuente sabe CUÁNDO llamar, y quien decide SI se manda es ella.
   - `POST /despertar` (`BRIEF_TOKEN`) — el Atajo del iPhone al desenchufar el cargador.
     Es una señal exacta: instantánea y sin deducir nada. De paso calla la alarma de
-    respaldo si estaba sonando (`docs/ALARMAS.md`).
+    respaldo si estaba sonando (`docs/ALARMAS.md`), eso sí, sin ningún retraso.
+    El resumen en sí, en cambio, espera `DESPERTAR_RETRASO_SEGUNDOS` (5 min por defecto,
+    `DESPERTAR_RETRASO_MIN`) antes de mirar siquiera si el sueño ya está — probado que un
+    delay dentro del propio Atajo de iOS no era fiable, así que el margen se da aquí, en
+    segundo plano (`BackgroundTasks`), sin bloquear la respuesta al Atajo. A 0 se
+    desactiva y se mira al instante, como antes de que existiera.
     Y no es la única: **confirmar la alarma de respaldo** (el botón, el dashboard) y
-    **decirle a Jarvis «estoy despierto»** son la misma señal, por `_senal_despertar`.
+    **decirle a Jarvis «estoy despierto»** son la misma señal, por `_senal_despertar`,
+    pero SIN este retraso — ya llevas un rato despierto para poder decirlo.
     Las tres son cosas que haces tú, despierto; nada se deduce.
   - La llegada del sueño del reloj en la ingesta (`_avisar_sueno_recibido`) — **ya no
     es una señal: solo cierra una espera** abierta por una señal de verdad. Lo fue,

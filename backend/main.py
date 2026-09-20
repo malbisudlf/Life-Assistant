@@ -1,5 +1,5 @@
-﻿from fastapi import (FastAPI, Depends, HTTPException, Request, status, UploadFile,
-                     File, Path, WebSocket, WebSocketDisconnect)
+﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request, status,
+                     UploadFile, File, Path, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -296,6 +296,11 @@ BRIEF_ESPERA_SUENO     = _flag("BRIEF_ESPERA_SUENO")
 # un aviso al móvil: es lo único que puede hacer que el dato llegue a tiempo de servir
 # para algo. El tope real sigue siendo BRIEF_HORA_TOPE, que manda sobre este.
 BRIEF_ESPERA_SUENO_MIN = int(os.getenv("BRIEF_ESPERA_SUENO_MIN", "45"))
+# El Atajo dispara al desenchufar el cargador, antes de que el reloj haya tenido tiempo
+# de sincronizar de fondo (a veces basta con no tocar el móvil un rato). Un retraso corto
+# ANTES de mirar si el sueño ya está le da ese margen sin depender de un delay en el
+# propio Atajo, que en la práctica no es fiable. 0 lo desactiva.
+DESPERTAR_RETRASO_SEGUNDOS = int(os.getenv("DESPERTAR_RETRASO_MIN", "5")) * 60
 # Disparo de la rutina de Claude Code que lee este correo y redacta el briefing.
 # Su trigger de API: la URL y el token se generan en claude.ai/code/routines (el token
 # se enseña UNA vez). Si faltan, no se dispara nada y la rutina se queda solo con su
@@ -7775,8 +7780,19 @@ def _senal_despertar_segura(etiqueta: str) -> dict:
         return {"ok": False, "enviado": False, "motivo": "no se pudo mandar el resumen"}
 
 
+def _despertar_tras_retraso(etiqueta: str, segundos: int) -> None:
+    """Deja pasar el margen antes de mirar si el sueño ya está — ver `DESPERTAR_RETRASO_SEGUNDOS`.
+
+    Corre en segundo plano, después de contestar al Atajo: bloquear la respuesta esos
+    minutos no aporta nada y solo hace parecer que el Atajo se ha quedado colgado.
+    """
+    time.sleep(segundos)
+    _senal_despertar_segura(etiqueta)
+
+
 @app.post("/despertar")
-def marcar_despertar(request: Request, token: str = "", fuente: str = ""):
+def marcar_despertar(request: Request, background_tasks: BackgroundTasks,
+                      token: str = "", fuente: str = ""):
     """Alguien avisa de que ya estás despierto — el Atajo del iPhone al desenchufar el
     cargador, o una automatización de HA. Si el resumen de hoy no ha salido aún, sale
     ahora (o se queda esperando al sueño de esta noche, ver `_senal_despertar`).
@@ -7796,10 +7812,20 @@ def marcar_despertar(request: Request, token: str = "", fuente: str = ""):
     # La etiqueta acaba en una fila de Supabase: se limpia en vez de confiar en ella.
     etiqueta = re.sub(r"[^a-zA-Z0-9_-]", "", fuente)[:40] or "despertar"
 
-    # La alarma va ANTES de la ventana horaria y sin poder romper lo demás: una alarma
-    # sonando a cualquier hora se calla si dices que estás despierto, y un fallo
-    # callándola no puede dejar el resumen sin mandar.
+    # La alarma va ANTES de la ventana horaria, del retraso y sin poder romper lo demás:
+    # una alarma sonando a cualquier hora se calla si dices que estás despierto, ya
+    # mismo, y un fallo callándola no puede dejar el resumen sin mandar.
     alarma = _alarma_confirmar_sonando_segura(etiqueta)
+
+    # El retraso es del resumen, no de la alarma: se aplica aquí y no dentro de
+    # `_senal_despertar`, que lo comparten fuentes (Jarvis, la alarma confirmada) donde
+    # esperar no tiene sentido porque ya llevas un rato despierto.
+    if DESPERTAR_RETRASO_SEGUNDOS > 0:
+        background_tasks.add_task(_despertar_tras_retraso, etiqueta, DESPERTAR_RETRASO_SEGUNDOS)
+        return {"ok": True, "enviado": False,
+                "motivo": f"esperando {DESPERTAR_RETRASO_SEGUNDOS // 60} min antes de mirar "
+                          f"si el sueño de esta noche ya ha sincronizado",
+                "alarma": alarma}
     return {**_senal_despertar(etiqueta), "alarma": alarma}
 
 

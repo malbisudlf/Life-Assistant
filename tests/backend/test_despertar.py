@@ -52,6 +52,9 @@ def tabla_envios(mock_requests, ya_enviado=False):
 def preparar(mock_requests, monkeypatch, ya_enviado=False):
     montar_fuentes(mock_requests)
     configurar_smtp(monkeypatch)
+    # Sin esto, cada POST a /despertar dormiría DESPERTAR_RETRASO_SEGUNDOS de verdad: el
+    # retraso se prueba aparte, en su propia clase, con el tiempo controlado a mano.
+    monkeypatch.setattr(main, "DESPERTAR_RETRASO_SEGUNDOS", 0)
     return tabla_envios(mock_requests, ya_enviado)
 
 
@@ -449,6 +452,50 @@ class TestRespaldoDeActions:
 
         r = client.post("/brief/send?token=brief-token&forzar=1")
         assert r.status_code == 200
+        assert r.json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+
+
+class TestRetrasoDelDespertar:
+    """El Atajo dispara al desenchufar el cargador, antes de que el reloj haya tenido
+    tiempo de sincronizar de fondo. DESPERTAR_RETRASO_SEGUNDOS le da ese margen sin
+    depender de un delay dentro del propio Atajo, que en la práctica no era fiable."""
+
+    def test_con_retraso_la_respuesta_no_espera_y_no_manda_todavia(
+            self, client, mock_requests, graph_token, monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        monkeypatch.setattr(main, "DESPERTAR_RETRASO_SEGUNDOS", 300)
+        dormido = []
+        monkeypatch.setattr(main.time, "sleep", lambda s: dormido.append(s))
+        reloj(monkeypatch, 7, 15)
+
+        r = client.post("/despertar?token=brief-token&fuente=cargador")
+        assert r.status_code == 200
+        assert r.json()["enviado"] is False
+        assert dormido == [300], "el retraso tiene que aplicarse, y solo una vez"
+        # Y como es tarea de fondo, ya se ha ejecutado dentro del propio POST (TestClient
+        # corre las background tasks antes de devolver la respuesta): el correo sale.
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_la_alarma_se_calla_sin_esperar_al_retraso(
+            self, client, mock_requests, graph_token, monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        monkeypatch.setattr(main, "DESPERTAR_RETRASO_SEGUNDOS", 300)
+        monkeypatch.setattr(main.time, "sleep", lambda s: None)
+        mock_requests.add("PATCH", "/rest/v1/alarmas",
+                          FakeResponse([{"id": "11111111-1111-1111-1111-111111111111"}]))
+        reloj(monkeypatch, 7, 15)
+
+        r = client.post("/despertar?token=brief-token&fuente=cargador")
+        assert r.json()["alarma"]["hecho"] is True
+
+    def test_desactivado_no_espera_nada(
+            self, client, mock_requests, graph_token, monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        monkeypatch.setattr(main, "DESPERTAR_RETRASO_SEGUNDOS", 0)
+        reloj(monkeypatch, 7, 15)
+
+        r = client.post("/despertar?token=brief-token&fuente=cargador")
         assert r.json()["enviado"] is True
         assert len(_SMTPFalso.enviados) == 1
 
