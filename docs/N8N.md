@@ -55,8 +55,16 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Vigilante del Green** | Cada 5 min pregunta a Home Assistant. Si no contesta, `POST /programado/roto` → aviso al móvil | Activo desde el 2026-09-20 |
 | **Traductor de averías** | Cada 15 min busca runs fallidos de GitHub Actions (menos el CI), se baja el registro, se lo da a Gemini y abre un issue con el diagnóstico | Activo desde el 2026-09-20 |
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
-| **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Sin importar |
-| **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Sin importar |
+| **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | **Importado y SIN ACTIVAR** (2026-09-20) |
+| **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | **Importado y SIN ACTIVAR** (2026-09-20) |
+
+> **Los tres vigilantes están importados en n8n pero NINGUNO activo** (comprobado el
+> 2026-09-20 a las 18:55: cero peticiones a `/vigilancia/estado` en seis minutos, y
+> `n8n list:workflow --active=true` solo lista los dos viejos). La tubería sí está
+> probada de punta a punta con ejecuciones a mano. **Mientras sigan apagados, el
+> teléfono solo suena si alguien llama al endpoint a mano**, y el del Green viejo
+> tampoco está activo, así que la casa no la vigila nadie. Es literalmente la trampa
+> de más abajo: un flujo inactivo no avisa de que está inactivo.
 
 El del Green cambió el 2026-09-20: ya no manda a `/programado/roto` sino a
 `/vigilancia/estado`, y manda **en cada sondeo**, no solo cuando falla. El sondeo bueno
@@ -151,6 +159,31 @@ aplicar sin que nadie lo diga.
   teléfono suene por cualquier cosa.
 
 ## Trampas conocidas
+
+- **La interfaz importa UN objeto de flujo; la línea de comandos, una lista.** Los
+  `.json` que salen de `n8n export:workflow` son `[ { ... } ]`, y el *Import from File*
+  del navegador los rechaza. Si un flujo «no se deja importar», mira eso antes que nada:
+  se arregla quedarse con el objeto de dentro y quitarle los campos internos de la base
+  de datos (`id`, `versionId`, `shared`, `meta`) y los `id` de cada nodo, que si chocan
+  con los de un flujo existente tumban la importación.
+
+- **n8n también corre en un contenedor, así que `127.0.0.1` es el propio n8n.** Cualquier
+  nodo que llame a algo de la máquina —el backend, la centralita del teléfono— lleva la
+  IP de LAN de `caja`, nunca `localhost`. Es el mismo fallo que se comía las llamadas del
+  backend (ver `backend/.env.example`), y en n8n es peor porque el nodo falla en una
+  ejecución que nadie mira.
+
+- **Importar no es sustituir.** Importar una versión nueva de un flujo que ya existe crea
+  un **segundo flujo con el mismo nombre**, no lo reemplaza. Hay que desactivar y borrar
+  el viejo a mano; si no, dentro de un mes nadie sabe cuál de los dos es el que corre. Se
+  distinguen por dentro: el Vigilante del Green viejo tiene 5 nodos y un `IF`, y termina
+  en `/programado/roto`; el nuevo tiene 4, no tiene `IF` y termina en
+  `/vigilancia/estado`.
+
+- **Las credenciales no viajan en el `.json`.** Un flujo recién importado tiene los nodos
+  con la credencial en blanco, y activarlo así no da un error visible: da una ejecución
+  fallida cada cinco minutos, en silencio.
+
 
 - **Un flujo inactivo no avisa de que está inactivo.** El Vigilante del Green nació
   `active: false` y estuvo así dos días. Es el mismo fallo que la copia de seguridad de
