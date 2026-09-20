@@ -162,6 +162,7 @@ Ficheros clave:
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
 | `scripts/verificar_backend.py` | Smoke test de un backend recién desplegado (arranque, CORS, login, auth de servicio) contra cualquier URL. Lo que no puede probar lo marca SALTADA, nunca OK |
 | `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, para correrlo dentro del Green. Se copia a `/addons` por Samba; el `Dockerfile` clona este repositorio, así que desplegar es reconstruir el add-on |
+| `docker/n8n/` | n8n empaquetado: su `compose.yml`, sus variables y los flujos exportados. Corre en `caja` y **se copia a mano**, igual que el add-on: el repositorio es la copia buena, no el despliegue |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
@@ -196,6 +197,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
 | `docs/FINANZAS.md` | Módulo de finanzas: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no hay tabla) |
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
+| `docs/N8N.md` | n8n, la automatización visual que corre en `caja`: la frontera con el backend (observa y avisa, no decide), los flujos que hay y sus trampas |
 | `docs/AGENTE_PC.md` | `agent/agent.py`: ciclo de vida, por qué no hay PowerShell en el camino crítico, streaming y Alud |
 | `docs/TESTS.md` | Antes de escribir tests: cómo está montado cada suite y sus trampas conocidas |
 | `docs/EVALS.md` | Las evals de Jarvis: cuánto acierta eligiendo herramienta, contra la API real. Qué mide, cómo se corre, qué cuesta y por qué NO vive en `tests/backend` |

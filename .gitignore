@@ -91,3 +91,4 @@ skills-lock.json
 # Evals de Jarvis: la salida de cada tirada (evals/correr.py). Es un resultado, no
 # código, y cambia en cada ejecución; el histórico vive en los artefactos del workflow.
 evals/resultados.json
+docker/n8n/.env
