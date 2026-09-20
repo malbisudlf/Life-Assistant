@@ -327,6 +327,15 @@ class TestMasMetricas:
         assert s["de_pie"]["ultimo"] == 12 and s["pisos"]["ultimo"] == 9
         assert s["esfuerzo"]["ultimo"] == 4.2
 
+    def test_la_temperatura_corporal_llega_al_resumen(self, client, auth_headers, graph_token, mock_requests):
+        """Métrica nueva desde la pulsera Amazfit: si no está en `_BRIEF_METRICAS`, se
+        guarda en Supabase y el correo (y Jarvis con él) no la ve nunca."""
+        s = self._pide(client, auth_headers, mock_requests, [
+            self._una("body_temperature", 36.4, "degC"),
+        ])
+        assert s["temperatura"]["ultimo"] == 36.4
+        assert s["temperatura"]["unidad"] == "degC"
+
     def test_la_unidad_de_la_fila_manda_sobre_la_declarada(self, client, auth_headers, graph_token, mock_requests):
         """La ingesta convierte kJ a kcal y no toda métrica llega en la unidad esperada."""
         s = self._pide(client, auth_headers, mock_requests,
@@ -422,6 +431,17 @@ class TestUsoDelReloj:
         r = self._pide(client, auth_headers, mock_requests, [
             self._fila("step_count", 8000, 0),
             self._fila("blood_oxygen_saturation", 96, 0, unidad="%"),
+        ])["reloj"]
+        assert r["marcas"].endswith("N"), r["marcas"]
+        assert r["noches_puesto"] == 1
+
+    def test_la_temperatura_corporal_prueba_que_la_pulsera_estuvo_puesta_de_noche(
+            self, client, auth_headers, graph_token, mock_requests):
+        """La pulsera toma la temperatura mientras duermes: su presencia dice lo mismo
+        que la del oxígeno o la de la frecuencia respiratoria."""
+        r = self._pide(client, auth_headers, mock_requests, [
+            self._fila("step_count", 8000, 0),
+            self._fila("body_temperature", 36.4, 0, unidad="degC"),
         ])["reloj"]
         assert r["marcas"].endswith("N"), r["marcas"]
         assert r["noches_puesto"] == 1

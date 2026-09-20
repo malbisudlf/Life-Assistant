@@ -28,7 +28,7 @@ Métricas del bulk export: `active_energy`, `apple_exercise_time`, `apple_stand_
 `respiratory_rate`, `sleep_analysis`, `step_count`, `vo2_max`,
 `walking_running_distance`, `walking_heart_rate_average`, `cardio_recovery`,
 `time_in_daylight`, `weight_body_mass`, `body_fat_percentage`, `lean_body_mass`,
-`resting_energy`, `physical_effort`.
+`resting_energy`, `physical_effort`, `blood_oxygen_saturation`, `body_temperature`.
 
 **Nombres reales en Supabase** (el que usa Health Auto Export puede diferir del lógico):
 el peso es `weight_body_mass` (NO `weight`); `body_fat_percentage` y `lean_body_mass`
@@ -44,6 +44,21 @@ mira `GET /health/diagnostico`, que lista los nombres tal y como están guardado
 puesta de noche, igual que la frecuencia respiratoria, y sale en el resumen diario y en
 el semanal. **No entra en la puntuación de sueño**: meterlo ahí cambiaría cómo se
 califican las noches y eso pide umbrales que no tenemos.
+
+**La temperatura corporal** (`body_temperature`, con dos alias más en
+`TEMPERATURA_NOMBRES`) entra por el mismo camino y con las mismas consecuencias: la mide
+la pulsera mientras duermes, cuenta como prueba de pulsera puesta de noche y sale en el
+resumen diario y en el semanal. **Tampoco entra en la puntuación de sueño**, por lo
+mismo que el oxígeno. Dos detalles propios:
+
+- **Se convierte de Fahrenheit a °C** (`_normalizar_temperatura`), porque la unidad la
+  decide el iPhone y no este código. Sin eso, 97,5 °F se guardan como 97,5 °C y el
+  resumen no chilla: solo promedia una fiebre imposible. Es la misma lección de los
+  kilojulios.
+- **Solo se convierten las medidas absolutas** (`TEMPERATURA_ABSOLUTAS`). La de muñeca
+  del Apple Watch (`apple_sleeping_wrist_temperature`) es una *desviación* respecto a la
+  línea base, y a una desviación se le aplicaría el factor pero no el desplazamiento de
+  32: convertirla mal es peor que no tocarla.
 
 **El aparato principal ya no es el Apple Watch**, sino una pulsera Amazfit Helio Strap
 que escribe en Salud a través de Zepp (el iPhone queda de secundario). Consecuencia

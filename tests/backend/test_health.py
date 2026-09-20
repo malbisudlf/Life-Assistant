@@ -119,6 +119,48 @@ class TestHealthIngest:
         assert r.json()["upserted"] == 0
         assert self._filas(mock_requests) == []
 
+    def test_la_temperatura_corporal_se_guarda_tal_cual_llega(self, client, mock_requests):
+        """La pulsera Amazfit mide temperatura de noche y Zepp la escribe en Salud. La
+        ingesta no filtra por nombre, así que llega sola: lo que hay que comprobar es
+        que no se pierde por el camino ni cambia de unidad sin motivo."""
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "body_temperature", "units": "degC",
+             "data": [{"date": "2026-07-05 03:00:00", "qty": 36.4}]}
+        ]}})
+        assert r.json()["upserted"] == 1
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 36.4 and fila["unit"] == "degC"
+
+    def test_la_temperatura_en_fahrenheit_se_convierte(self, client, mock_requests):
+        """Misma trampa que los kilojulios: la unidad la decide el iPhone, y 97,5 °F
+        guardados como °C no rompen nada visible — se leen como una hipotermia y entran
+        así en las medias del resumen."""
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "body_temperature", "units": "degF",
+             "data": [{"date": "2026-07-05 03:00:00", "qty": 97.52}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 36.4 and fila["unit"] == "degC"
+
+    def test_la_desviacion_de_muneca_no_se_convierte(self, client, mock_requests):
+        """La temperatura de muñeca del Watch es una DESVIACIÓN (±0,3), no una medida
+        absoluta: restarle 32 la convertiría en un disparate de -17."""
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "apple_sleeping_wrist_temperature", "units": "degF",
+             "data": [{"date": "2026-07-05 03:00:00", "qty": 0.4}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 0.4 and fila["unit"] == "degF"
+
+    def test_la_temperatura_a_cero_no_se_guarda(self, client, mock_requests):
+        """0 °C no es la temperatura de nadie: es la pulsera sin medir. Y guardarla
+        pisaría en el upsert la medida buena de esa misma noche."""
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "body_temperature", "units": "degC",
+             "data": [{"date": "2026-07-05 03:00:00", "qty": 0}]}
+        ]}})
+        assert self._filas(mock_requests) == []
+
     def test_el_oxigeno_en_sangre_a_cero_no_se_guarda(self, client, mock_requests):
         """Una saturación de 0 % es un sensor que no midió, no una noche sin oxígeno. Y
         guardarla pisaría en el upsert la medida buena de esa misma noche."""
