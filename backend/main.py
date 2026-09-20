@@ -3789,6 +3789,52 @@ def _normalizar_energia(name: str, value, unit):
 # decide el exportador, no nosotros, y acertar a la primera no depende de este código.
 OXIGENO_NOMBRES = ("blood_oxygen_saturation", "blood_oxygen", "oxygen_saturation", "spo2")
 
+# La temperatura corporal la mide la pulsera Amazfit mientras duermes y la escribe en
+# Salud por Zepp. Mismo criterio que el oxígeno con los alias: el nombre lo decide el
+# exportador. `body_temperature` es el de Health Auto Export para la muestra absoluta;
+# los otros dos cubren lo que escribe un Apple Watch (desviación de la temperatura de
+# muñeca durante el sueño) y la temperatura basal, por si alguna vez llegan.
+TEMPERATURA_NOMBRES = ("body_temperature", "apple_sleeping_wrist_temperature",
+                       "basal_body_temperature")
+# De las tres, solo estas dos son una temperatura ABSOLUTA. La de muñeca del Watch es
+# una DESVIACIÓN respecto a la línea base (±0,3), y eso importa para convertir de
+# Fahrenheit: a una desviación se le aplica el factor pero NO el desplazamiento de 32,
+# así que en vez de arriesgar una conversión mal aplicada no se le toca nada.
+TEMPERATURA_ABSOLUTAS = ("body_temperature", "basal_body_temperature")
+
+
+# Formas en las que puede llegar escrito "grados Fahrenheit". Comparación LAXA por lo
+# mismo que en los kilojulios: la escribe el exportador según los ajustes del iPhone, y
+# 97 °F guardados como °C no rompen nada visible — se leen como una hipotermia y así
+# entran en las medias del resumen.
+_UNIDADES_F = {"degf", "f", "ºf", "°f", "fahrenheit", "gradosfahrenheit"}
+
+
+def _es_fahrenheit(unit) -> bool:
+    """True si `unit` nombra grados Fahrenheit, se escriba como se escriba."""
+    if not unit:
+        return False
+    return re.sub(r"[\s._-]", "", str(unit)).lower() in _UNIDADES_F
+
+
+def _normalizar_temperatura(name: str, value, unit):
+    """Devuelve (valor, unidad) con la temperatura corporal siempre en °C.
+
+    Solo para las medidas ABSOLUTAS (ver `TEMPERATURA_ABSOLUTAS`): la desviación de la
+    temperatura de muñeca no admite el desplazamiento de 32 y convertirla sería peor
+    que dejarla como llega.
+    """
+    if name not in TEMPERATURA_ABSOLUTAS or value is None or not _es_fahrenheit(unit):
+        return value, unit
+    return round((float(value) - 32) / 1.8, 2), "degC"
+
+
+def _normalizar_unidades(name: str, value, unit):
+    """Las dos normalizaciones de unidad que se aplican en las DOS rutas de ingesta."""
+    value, unit = _normalizar_energia(name, value, unit)
+    return _normalizar_temperatura(name, value, unit)
+
+
 METRICAS_SIN_MEDIDA_EN_CERO = {
     "heart_rate", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "walking_heart_rate_average", "cardio_recovery",
@@ -3797,6 +3843,8 @@ METRICAS_SIN_MEDIDA_EN_CERO = {
     "sleep_analysis", "sleep",
     # Una saturación de 0 % es un sensor que no midió, no una noche sin oxígeno.
     *OXIGENO_NOMBRES,
+    # Y 0 °C tampoco es la temperatura de nadie: es la pulsera sin medir.
+    *TEMPERATURA_NOMBRES,
 }
 # Claves de `extra` en las que puede venir la medida del sueño cuando `value` llega a 0:
 # ahí la noche sí está medida y la fila tiene que guardarse (ver `_horas_sueno`).
@@ -4199,7 +4247,7 @@ async def health_ingest(request: Request, token: str = ""):
             # misma métrica y el resto del lote se guardaba en kJ crudo etiquetado como
             # kcal. Con un solo día por lote no se notaba; con el export de 30 días que
             # recomienda docs/SALUD.md, 29 de 30 filas entraban infladas x4,184.
-            value, unidad_punto = _normalizar_energia(name, value, unit)
+            value, unidad_punto = _normalizar_unidades(name, value, unit)
 
             extra = {k: v for k, v in point.items() if k != "date"}
             # Para sleep_analysis, preservar la hora de inicio del sueño
@@ -4361,7 +4409,7 @@ async def health_ingest_simple(request: Request, token: str = ""):
             # ruta no convertía nada, así que un iPhone que exporte en kJ metía el
             # número crudo. Va aquí, al construir la muestra, para que la comparación
             # de acumulativas de más abajo compare kcal con kcal.
-            valor, unidad = _normalizar_energia(item["metric"], float(v), item.get("unit"))
+            valor, unidad = _normalizar_unidades(item["metric"], float(v), item.get("unit"))
             samples.append(SimpleHealthSample(
                 metric=item["metric"],
                 date=item["date"],
@@ -5208,6 +5256,7 @@ _BRIEF_METRICAS = (
     ("recuperacion_fc", ("cardio_recovery",),                               "bpm",       False, "Recuperación cardio"),
     ("respiracion",     ("respiratory_rate",),                              "rpm",       False, "Frec. respiratoria"),
     ("oxigeno",         OXIGENO_NOMBRES,                                    "%",         False, "Oxígeno en sangre"),
+    ("temperatura",     TEMPERATURA_NOMBRES,                                "°C",        False, "Temperatura corporal"),
     ("vo2max",          ("vo2_max", "cardioFitness"),                       "ml/kg/min", False, "VO2 máx"),
     ("pasos",           ("step_count", "steps"),                            "pasos",     True,  "Pasos"),
     ("distancia",       ("walking_running_distance",),                      "km",        True,  "Distancia"),
@@ -5246,8 +5295,10 @@ _RELOJ_NOCHE = {
     "sleep_analysis", "sleep", "heart_rate_variability", "heartRateVariability",
     "resting_heart_rate", "respiratory_rate",
     # El oxígeno en sangre se mide dormido y con la pulsera puesta: prueba lo mismo que
-    # la frecuencia respiratoria.
+    # la frecuencia respiratoria. La temperatura corporal, igual: la pulsera la toma
+    # durante la noche.
     *OXIGENO_NOMBRES,
+    *TEMPERATURA_NOMBRES,
 }
 # El teléfono cuenta esto SOLO, sin reloj de por medio. No dice nada del Watch: dice
 # que ese día la sincronización SÍ llegó, y es lo único que separa "el reloj estaba en
