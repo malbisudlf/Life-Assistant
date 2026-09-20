@@ -154,6 +154,24 @@ export function avisoDeLlamadaDeUrl(busqueda) {
   }
 }
 
+/** De qué es el id que trae esta llamada: `"despliegue"`, `"sesion"`, `"revision"` o `""`.
+ *
+ *  Un UUID a secas no dice de qué tabla sale —los permisos de despliegue y las decisiones
+ *  de revisión son la misma con distinto estado, y los avisos de sesión otra— así que el
+ *  botón «Hablarlo» manda también el tipo. Se valida contra una lista cerrada porque
+ *  viaja al backend y la barra de direcciones la escribe cualquiera.
+ *
+ *  Vacío NO es un error: las notificaciones enviadas antes de que esto existiera traen
+ *  solo el id, y el backend las sigue entendiendo como lo que entonces significaban. */
+export function tipoDeLlamadaDeUrl(busqueda) {
+  try {
+    const t = new URLSearchParams(busqueda || "").get("tipo") || "";
+    return ["despliegue", "sesion", "revision"].includes(t) ? t : "";
+  } catch {
+    return "";   // una query rota descuelga igual, con lo que haya
+  }
+}
+
 /** La primera frase al descolgar.
  *
  *  La escribe el backend (`_apertura_despliegue` o `_apertura_sesion`, según por qué

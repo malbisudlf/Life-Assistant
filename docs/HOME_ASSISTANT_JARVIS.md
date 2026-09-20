@@ -383,8 +383,8 @@ rest_command:
 ```
 
 El otro botón de ese aviso, **«Hablarlo»**, no necesita automatización ninguna: es un
-`action: "URI"` que abre el dashboard con `?llamada=1`, y de ahí en adelante todo pasa en
-el navegador. Por eso ese sí funciona aunque no instales nada de esto.
+`action: "URI"` que abre el dashboard con `?llamada=1&aviso=<id>&tipo=<cuál>`, y de ahí
+en adelante todo pasa en el navegador. Por eso ese sí funciona aunque no instales nada de esto.
 
 **Apaga lo que decía el aviso, no lo que hay encendido al pulsar.** Las entidades viajan
 guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora

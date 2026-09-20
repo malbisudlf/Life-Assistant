@@ -114,7 +114,10 @@ class TestLosBotonesDelAviso:
         # «Hablarlo» primero: aquí no hay dos opciones que elegir de un toque, la
         # respuesta es lo que tengas que decir.
         assert titulos == ["Hablarlo", "Vale"]
-        assert botones[0]["uri"] == "https://dashboard.test/?llamada=1"
+        # Con el id del aviso, que es lo que hace que al descolgar te cuente ÉSTE y no
+        # el permiso de despliegue que hubiera suelto (`docs/BUGS_HISTORICOS.md`).
+        assert botones[0]["uri"] == (
+            f"https://dashboard.test/?llamada=1&aviso={UN_UUID}&tipo=sesion")
         assert botones[1]["action"] == f"LA_VALE_{UN_UUID}"
 
     def test_bloqueado_lleva_los_mismos(self):

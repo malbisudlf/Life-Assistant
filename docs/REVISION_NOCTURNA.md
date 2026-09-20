@@ -155,7 +155,7 @@ el informe en una pregunta con dos botones en el móvil, y la respuesta en traba
    «Arreglarlo» → HA ─────────────┐
                  y el dashboard ──┴→ POST /revision/{id}/accion → routine → PR → merge
    «No hacer nada» → la fila queda `descartado` y no pasa nada más
-   «Hablarlo» → dashboard con ?llamada=1&aviso=<id> → Jarvis cuenta el issue y decides
+   «Hablarlo» → dashboard con ?llamada=1&aviso=<id>&tipo=revision → Jarvis cuenta el issue
 ```
 
 Cinco decisiones, y ninguna es nueva en este proyecto:

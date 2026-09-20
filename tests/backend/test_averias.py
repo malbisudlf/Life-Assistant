@@ -297,7 +297,10 @@ class TestElBotonDeHablarlo:
         # "URI" es el nombre reservado de la app de HA, no un id nuestro: si esto cambia,
         # el botón deja de abrir nada y no lo dice.
         assert acciones[-1]["action"] == "URI"
-        assert acciones[-1]["uri"] == "https://panel.ejemplo/?llamada=1"
+        # Con el id del permiso: sin él, el prompt de Jarvis volvía a resolver «el más
+        # reciente» y podía descolgar hablando de otra cosa.
+        assert acciones[-1]["uri"] == (
+            f"https://panel.ejemplo/?llamada=1&aviso={rid}&tipo=despliegue")
 
     def test_sin_dashboard_el_aviso_sigue_sirviendo(self, monkeypatch):
         """Lo que se pierde es hablarlo, no decidir: los dos botones siguen ahí."""

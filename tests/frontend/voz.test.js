@@ -8,7 +8,8 @@
 import { describe, it, expect } from "vitest";
 import {
   trocearParaVoz, textoParaVoz, segundosPendientes, partirEventosSse,
-  llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, aperturaDeLlamada, detectorDeHabla, rmsDeMuestras,
+  llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, aperturaDeLlamada,
+  detectorDeHabla, rmsDeMuestras,
   pcm16DesdeFloat32, base64DeBytes, pareceEco,
 } from "../../src/lib/voz.js";
 
@@ -232,6 +233,27 @@ describe("avisoDeLlamadaDeUrl", () => {
     expect(avisoDeLlamadaDeUrl("")).toBe("");
     // Viaja a una query del backend, asi que lo que no tiene forma de UUID no viaja.
     expect(avisoDeLlamadaDeUrl("?aviso=../../algo")).toBe("");
+  });
+});
+
+describe("tipoDeLlamadaDeUrl", () => {
+  it("dice de que es el id, porque un UUID a secas no lo dice", () => {
+    // Los permisos de despliegue y las decisiones de revision son la misma tabla con
+    // distinto estado, y los avisos de sesion son otra.
+    expect(tipoDeLlamadaDeUrl("?llamada=1&tipo=despliegue")).toBe("despliegue");
+    expect(tipoDeLlamadaDeUrl("?llamada=1&tipo=sesion")).toBe("sesion");
+    expect(tipoDeLlamadaDeUrl("?llamada=1&tipo=revision")).toBe("revision");
+  });
+
+  it("sin tipo no es un error: las notificaciones viejas solo traen el id", () => {
+    expect(tipoDeLlamadaDeUrl("?llamada=1")).toBe("");
+    expect(tipoDeLlamadaDeUrl("")).toBe("");
+    expect(tipoDeLlamadaDeUrl(undefined)).toBe("");
+  });
+
+  it("lista cerrada: viaja al backend y la barra la escribe cualquiera", () => {
+    expect(tipoDeLlamadaDeUrl("?tipo=otra_tabla")).toBe("");
+    expect(tipoDeLlamadaDeUrl("?tipo=../../algo")).toBe("");
   });
 });
 

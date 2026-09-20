@@ -34,7 +34,7 @@ Sesión de Claude Code: termina lo que le pediste, o se queda BLOQUEADA
 Backend: lo guarda en `sesion_avisos` y apunta el aviso
       │  notificación al móvil: «Hablarlo» · «Vale»
       ▼
-Pulsas «Hablarlo» → dashboard/?llamada=1 → PantallaLlamada
+Pulsas «Hablarlo» → dashboard/?llamada=1&aviso=<id>&tipo=sesion → PantallaLlamada
       │  GET /llamada/pendiente → la apertura + el contexto
       ▼
 Descuelgas. Jarvis YA sabe qué pediste y qué se hizo (no va a buscarlo)

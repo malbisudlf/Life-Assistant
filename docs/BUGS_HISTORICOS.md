@@ -693,3 +693,33 @@
     comprueba que el tramo llegó a pedirse. `last_triggered` de la automatización y el
     historial del sensor lo dicen en diez segundos, y ahorran reescribir algo que
     funcionaba.
+
+- **«Hablarlo» descolgaba hablando de otra cosa, y la caducidad solo tapó la mitad.**
+  Segunda parte de *«El permiso de despliegue que no caducaba nunca»*, más arriba. Aquel
+  día se arregló poniéndole `DESPLIEGUE_TTL_HORAS` al permiso, y con eso el síntoma dejó
+  de verse — porque la fila culpable ya estaba caducada. Dentro de esas 48 h seguía
+  pasando exactamente igual: pulsabas «Hablarlo» sobre un issue de la revisión, descolgabas
+  y Jarvis contestaba que no había ningún issue. Eran **tres agujeros en el mismo camino**,
+  y ninguno se veía desde el otro:
+  - **De los cuatro botones «Hablarlo», solo el de la revisión llevaba el id.** Los del
+    despliegue y el aviso de sesión abrían `?llamada=1` a secas, así que el id se quedaba
+    en la notificación y el backend no tenía más remedio que resolver «lo más reciente».
+  - **El id que sí viajaba se paraba en la pantalla.** El dashboard se lo daba a
+    `GET /llamada/pendiente` —que por eso anunciaba bien al descolgar— y **no** al cuerpo
+    de `/jarvis`. El prompt lo resolvía otra vez por su cuenta.
+  - **Y el contexto de la revisión vivía en el último `else` de una cadena `if/elif/else`**
+    ordenada por prioridad. Con un permiso de despliegue vivo, ese `else` no se alcanzaba
+    nunca. Jarvis decía que no había ningún issue y tenía razón: con lo que le habían dado,
+    no lo había.
+  Hoy el motivo viaja como `aviso` + `tipo` desde el botón hasta el prompt, en cada turno,
+  y manda sobre el orden; el orden solo decide cuando no se sabe por qué se ha descolgado.
+  Hizo falta `tipo` porque un UUID a secas es ambiguo: los permisos y las decisiones son la
+  misma tabla con distinto `estado`, y los avisos de sesión son otra — que es justo por lo
+  que los otros dos botones nunca llegaron a llevar id.
+  - Moraleja, y ya es la segunda vez que este fichero la escribe: **arreglar un botón no
+    arregla el canal.** El `&aviso=` se añadió donde se había notado el problema y los
+    otros dos se quedaron atrás, igual que pasó con los botones que vuelven por HA.
+  - Y la de fondo: **una caducidad que hace desaparecer el síntoma no es un arreglo, es un
+    temporizador.** Si lo que falla es un orden de prioridades, acortar la vida de lo que
+    va primero solo cambia cada cuánto duele. Cuando un arreglo consiste en que algo deje
+    de existir antes, pregúntate qué pasa mientras todavía existe.
