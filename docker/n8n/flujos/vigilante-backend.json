@@ -1,0 +1,126 @@
+[
+  {
+    "name": "Vigilante del backend",
+    "description": "Cada 5 minutos mira si el backend responde. Si lleva tres sondeos caido, llama al movil POR LA CENTRALITA, saltandose el backend. Es el unico flujo de n8n que decide, y solo porque quien decidiria es justo lo que esta caido.",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 5
+              }
+            ]
+          }
+        },
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          0
+        ],
+        "id": "196c1f76-d43d-4778-b321-a959dad1bd69",
+        "name": "Cada 5 minutos"
+      },
+      {
+        "parameters": {
+          "url": "http://IP-DE-CAJA:8080/",
+          "options": {
+            "timeout": 10000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "fullResponse": true
+              }
+            }
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          0
+        ],
+        "id": "0eee75d4-8212-4e27-809f-5395247d1081",
+        "name": "Sonda de la API",
+        "alwaysOutputData": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// El unico flujo de n8n que decide algo, y esta es la razon:\n//\n// Todos los demas vigilantes le cuentan lo que ven a POST /vigilancia/estado, que aplica\n// las reglas (tres sondeos seguidos, una llamada por averia, silencio de noche). Este no\n// puede: el sujeto que vigila ES ese backend. Cuando esta caido, quien decide esta\n// caido, asi que o decide este flujo o no se entera nadie.\n//\n// Por eso repite aqui las mismas tres reglas en pequeno, y por eso el contador vive en\n// staticData: si viviera en memoria, cada ejecucion empezaria de cero y llamaria al\n// primer parpadeo.\n\nconst UMBRAL = 3;\nconst s = $getWorkflowStaticData('global');\nconst j = $input.first().json;\nconst codigo = j.statusCode ?? 0;\nconst vivo = codigo >= 200 && codigo < 400;\n\nif (vivo) {\n  const estaba = s.fallos >= UMBRAL;\n  s.fallos = 0; s.llamado = false;\n  // Si nunca se llego a llamar, no hay nada que desdecir: silencio.\n  return estaba ? [{ json: { llamar: false, volvio: true } }] : [];\n}\n\ns.fallos = (s.fallos || 0) + 1;\nif (s.fallos < UMBRAL || s.llamado) return [];\n\n// Franja nocturna, la misma que aplica el backend. Aqui escrita a mano porque el backend\n// que la aplicaria es justo el que no contesta.\nconst hora = Number(new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', hour12: false }));\nif (hora >= 0 && hora < 7) return [];\n\ns.llamado = true;\nconst minutos = s.fallos * 5;\nreturn [{ json: {\n  llamar: true,\n  message: 'Mikel, soy Jarvis. El backend lleva unos ' + minutos + ' minutos sin responder. Estoy mirando que pasa; dime y lo vemos.',\n  context: 'Llamas tu porque el backend de Life Assistant no responde desde hace unos ' + minutos +\n    ' minutos (' + s.fallos + ' sondeos seguidos fallidos). Codigo del ultimo intento: ' + (codigo || 'sin respuesta') +\n    '. Ojo: este aviso NO viene del backend, viene del vigilante de n8n, precisamente porque el backend esta caido. ' +\n    'Compruebalo tu mismo con el runbook de tu directorio de trabajo antes de proponer nada. ' +\n    'Di primero que has encontrado, en una frase, y luego que harias. No actues sin que Mikel te lo confirme hablando.',\n} }];\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          0
+        ],
+        "id": "484ac477-94e9-4f65-a9e6-0908660f5688",
+        "name": "Decidir"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://127.0.0.1:3010/api/outbound-call",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ to: '11410', device: 'Jarvis', mode: 'conversation', message: $json.message, context: $json.context }) }}",
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "id": "a8482168-005c-467d-aa13-33728a53d1ae",
+        "name": "Llamar por la centralita",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          660,
+          0
+        ],
+        "notes": "Por la IP de la LAN y NO por api.lifeassistantbackend.bid: el backend corre en esta misma maquina, y pasar por el tunel haria que una caida de Cloudflare dejara mudo al vigilante."
+      }
+    ],
+    "connections": {
+      "Cada 5 minutos": {
+        "main": [
+          [
+            {
+              "node": "Sonda de la API",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sonda de la API": {
+        "main": [
+          [
+            {
+              "node": "Decidir",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Decidir": {
+        "main": [
+          [
+            {
+              "node": "Llamar por la centralita",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "pinData": {}
+  }
+]

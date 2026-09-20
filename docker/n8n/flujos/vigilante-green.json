@@ -1,1 +1,177 @@
-[{"updatedAt":"2026-09-20T15:10:01.000Z","createdAt":"2026-09-18T17:32:30.623Z","id":"xignTTiDief1EA6T","name":"Vigilante del Green","description":null,"active":true,"isArchived":false,"nodes":[{"parameters":{"rule":{"interval":[{"field":"minutes"}]}},"id":"02607eb6-32e0-449c-8faa-be622c1964a7","name":"Cada 5 minutos","type":"n8n-nodes-base.scheduleTrigger","typeVersion":1.2,"position":[-928,608]},{"parameters":{},"id":"f1777a9c-1d1e-47af-9994-789f6bcc6bad","name":"HA: get the config","type":"n8n-nodes-base.homeAssistant","typeVersion":1,"position":[-720,608],"credentials":{"homeAssistantApi":{"id":"2AuTdWraRmPaE1su","name":"Home Assistant account"}},"onError":"continueRegularOutput","notes":"onError=continueRegularOutput a proposito: un fallo TIENE que seguir el flujo, porque el fallo es la noticia. Si el nodo abortara, el vigilante callaria justo cuando hay algo que contar."},{"parameters":{"jsCode":"// Convierte la respuesta de HA (o su ausencia) en un 1 o un 0.\n//\n// Este nodo existe porque HA NO PUEDE decir que esta caido: para contestar `up: 0`\n// tendria que estar vivo. Cuando el Green cae no llega un cero, no llega NADA, y ese\n// silencio es justo la senal. Aqui es donde se convierte en un campo.\n//\n// Sale SIEMPRE un item, para que el IF de detras sea legible y para que la ejecucion\n// deje rastro tambien cuando todo va bien.\n\nconst j    = $input.first().json;\nconst hoy  = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });\n\nlet ok = 1, estado = 'ok', detalle = '';\n\nif (j.error) {\n  const txt = String(j.error.message ?? j.error);\n\n  // 401 y \"no contesta\" NO son el mismo problema, aunque los dos rompan el sondeo.\n  // Un token revocado con el Green perfectamente vivo daria un \"HA caido\" falso, y a\n  // las 3 de la manana la diferencia entre ir a mirar la casa y renovar una credencial\n  // por la manana es toda la diferencia.\n  if (/401|unauthor/i.test(txt)) {\n    ok = 0; estado = 'token';\n    detalle = 'El token de Home Assistant ya no vale (401). El Green puede estar perfectamente: lo que hay que renovar es la credencial de n8n.';\n  } else {\n    ok = 0; estado = 'caido';\n    detalle = ('El Green no contesta: ' + txt).slice(0, 200);\n  }\n\n} else if (j.state && j.state !== 'RUNNING') {\n  // El `j.state &&` no sobra: si una version de HA dejara de devolver ese campo, sin el\n  // la condicion seria cierta SIEMPRE y esto avisaria cada 5 minutos para siempre.\n  // Ante la duda, callar: para \"no contesta\" ya esta la rama de arriba.\n  ok = 0; estado = 'arrancando';\n  detalle = 'Home Assistant contesta pero su estado es \"' + j.state + '\", no RUNNING.';\n}\n\nreturn [{ json: {\n  ok,\n  estado,\n  detalle,\n  version: j.version ?? null,\n  // La fecha va DENTRO del nombre porque el backend deduplica por `huella=workflow`\n  // durante AVISOS_REPETIR_DIAS (5). Sin ella, una caida el lunes taparia la del\n  // jueves. Con ella: como mucho un aviso al dia, y nunca cinco dias de silencio.\n  workflow: 'vigilante-green (' + hoy + ')',\n} }];"},"id":"43a42a98-0dad-4080-80b5-ed8ea6a552e2","name":"¿Vivo?","type":"n8n-nodes-base.code","typeVersion":2,"position":[-496,608]},{"parameters":{"conditions":{"options":{"caseSensitive":true,"leftValue":"","typeValidation":"strict","version":2},"conditions":[{"id":"c1000000-0000-4000-8000-000000000001","leftValue":"={{ $json.ok }}","rightValue":0,"operator":{"type":"number","operation":"equals"}}],"combinator":"and"},"options":{}},"id":"8aa90c47-7761-47fc-bf95-38eff3b412a8","name":"IF ok = 0","type":"n8n-nodes-base.if","typeVersion":2.2,"position":[-272,608],"notes":"La rama false no lleva a ningun sitio a proposito. Un vigilante que habla cuando todo va bien se acaba silenciando, y con el se silencia el aviso que si importaba."},{"parameters":{"method":"POST","url":"http://IP-DE-CAJA:8080/programado/roto","authentication":"genericCredentialType","genericAuthType":"httpHeaderAuth","sendBody":true,"specifyBody":"json","jsonBody":"={{ JSON.stringify({ workflow: $json.workflow, detalle: $json.detalle }) }}","options":{"timeout":10000}},"id":"c2ffb5f2-7066-4efc-bb9a-b81b96be1832","name":"Avisar al movil","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[80,400],"credentials":{"httpHeaderAuth":{"id":"5iTITIjIf8yUB5rn","name":"Header Auth account"}},"notes":"Por la IP de la LAN y NO por api.lifeassistantbackend.bid: el backend corre en esta misma maquina, y pasar por el tunel haria que una caida de Cloudflare dejara mudo al vigilante."}],"connections":{"Cada 5 minutos":{"main":[[{"node":"HA: get the config","type":"main","index":0}]]},"HA: get the config":{"main":[[{"node":"¿Vivo?","type":"main","index":0}]]},"¿Vivo?":{"main":[[{"node":"IF ok = 0","type":"main","index":0}]]},"IF ok = 0":{"main":[[{"node":"Avisar al movil","type":"main","index":0}],[]]}},"settings":{"executionOrder":"v1","binaryMode":"separate"},"staticData":{"node:Cada 5 minutos":{"recurrenceRules":[null],"recurrenceRuleSignatures":[null]}},"meta":{"templateCredsSetupCompleted":true},"nodeGroups":[],"pinData":{},"versionId":"4687ceca-ce45-4d5a-8bec-9fd66bc93c4b","activeVersionId":"4687ceca-ce45-4d5a-8bec-9fd66bc93c4b","versionCounter":56,"triggerCount":1,"sourceWorkflowId":null,"tags":[],"shared":[{"updatedAt":"2026-09-18T17:32:30.627Z","createdAt":"2026-09-18T17:32:30.627Z","role":"workflow:owner","workflowId":"xignTTiDief1EA6T","projectId":"nrHqsjuHMtlartDy","project":{"updatedAt":"2026-09-18T17:24:55.769Z","createdAt":"2026-09-18T17:24:26.818Z","id":"nrHqsjuHMtlartDy","name":"Mikel Albisu De la Fuente <malbisudlf@gmail.com>","type":"personal","icon":null,"description":null,"customTelemetryTags":[],"creatorId":"b64ef924-251d-4614-9b50-b50819f069bb"}}],"versionMetadata":{"name":null,"description":null}}]
+[
+  {
+    "updatedAt": "2026-09-20T15:10:01.000Z",
+    "createdAt": "2026-09-18T17:32:30.623Z",
+    "id": "xignTTiDief1EA6T",
+    "name": "Vigilante del Green",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes"
+              }
+            ]
+          }
+        },
+        "id": "02607eb6-32e0-449c-8faa-be622c1964a7",
+        "name": "Cada 5 minutos",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -928,
+          608
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "f1777a9c-1d1e-47af-9994-789f6bcc6bad",
+        "name": "HA: get the config",
+        "type": "n8n-nodes-base.homeAssistant",
+        "typeVersion": 1,
+        "position": [
+          -720,
+          608
+        ],
+        "credentials": {
+          "homeAssistantApi": {
+            "id": "2AuTdWraRmPaE1su",
+            "name": "Home Assistant account"
+          }
+        },
+        "onError": "continueRegularOutput",
+        "notes": "onError=continueRegularOutput a proposito: un fallo TIENE que seguir el flujo, porque el fallo es la noticia. Si el nodo abortara, el vigilante callaria justo cuando hay algo que contar."
+      },
+      {
+        "parameters": {
+          "jsCode": "// Convierte la respuesta de HA (o su ausencia) en un 1 o un 0.\n//\n// Este nodo existe porque HA NO PUEDE decir que esta caido: para contestar `up: 0`\n// tendria que estar vivo. Cuando el Green cae no llega un cero, no llega NADA, y ese\n// silencio es justo la senal. Aqui es donde se convierte en un campo.\n//\n// Sale SIEMPRE un item, para que el IF de detras sea legible y para que la ejecucion\n// deje rastro tambien cuando todo va bien.\n\nconst j    = $input.first().json;\nconst hoy  = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });\n\nlet ok = 1, estado = 'ok', detalle = '';\n\nif (j.error) {\n  const txt = String(j.error.message ?? j.error);\n\n  // 401 y \"no contesta\" NO son el mismo problema, aunque los dos rompan el sondeo.\n  // Un token revocado con el Green perfectamente vivo daria un \"HA caido\" falso, y a\n  // las 3 de la manana la diferencia entre ir a mirar la casa y renovar una credencial\n  // por la manana es toda la diferencia.\n  if (/401|unauthor/i.test(txt)) {\n    ok = 0; estado = 'token';\n    detalle = 'El token de Home Assistant ya no vale (401). El Green puede estar perfectamente: lo que hay que renovar es la credencial de n8n.';\n  } else {\n    ok = 0; estado = 'caido';\n    detalle = ('El Green no contesta: ' + txt).slice(0, 200);\n  }\n\n} else if (j.state && j.state !== 'RUNNING') {\n  // El `j.state &&` no sobra: si una version de HA dejara de devolver ese campo, sin el\n  // la condicion seria cierta SIEMPRE y esto avisaria cada 5 minutos para siempre.\n  // Ante la duda, callar: para \"no contesta\" ya esta la rama de arriba.\n  ok = 0; estado = 'arrancando';\n  detalle = 'Home Assistant contesta pero su estado es \"' + j.state + '\", no RUNNING.';\n}\n\nreturn [{ json: {\n  ok,\n  estado,\n  detalle,\n  version: j.version ?? null,\n  // La fecha va DENTRO del nombre porque el backend deduplica por `huella=workflow`\n  // durante AVISOS_REPETIR_DIAS (5). Sin ella, una caida el lunes taparia la del\n  // jueves. Con ella: como mucho un aviso al dia, y nunca cinco dias de silencio.\n  // El sujeto separa dos averias que NO son la misma: el Green caido y un token\n  // caducado con el Green vivo. El backend cuenta sondeos por sujeto, asi que\n  // mezclarlos haria que renovar el token contara como que la casa ha vuelto.\n  sujeto: estado === 'token' ? 'token de Home Assistant' : 'Home Assistant',\n  workflow: 'vigilante-green (' + hoy + ')',\n} }];"
+        },
+        "id": "43a42a98-0dad-4080-80b5-ed8ea6a552e2",
+        "name": "¿Vivo?",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -496,
+          608
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://IP-DE-CAJA:8080/vigilancia/estado",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ sujeto: $json.sujeto, vivo: $json.ok === 1, detalle: $json.detalle }) }}",
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "id": "c2ffb5f2-7066-4efc-bb9a-b81b96be1832",
+        "name": "Contarselo al backend",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          80,
+          400
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "5iTITIjIf8yUB5rn",
+            "name": "Header Auth account"
+          }
+        },
+        "notes": "Por la IP de la LAN y NO por api.lifeassistantbackend.bid: el backend corre en esta misma maquina, y pasar por el tunel haria que una caida de Cloudflare dejara mudo al vigilante."
+      }
+    ],
+    "connections": {
+      "Cada 5 minutos": {
+        "main": [
+          [
+            {
+              "node": "HA: get the config",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "HA: get the config": {
+        "main": [
+          [
+            {
+              "node": "¿Vivo?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "¿Vivo?": {
+        "main": [
+          [
+            {
+              "node": "Contarselo al backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate"
+    },
+    "staticData": {
+      "node:Cada 5 minutos": {
+        "recurrenceRules": [
+          null
+        ],
+        "recurrenceRuleSignatures": [
+          null
+        ]
+      }
+    },
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "4687ceca-ce45-4d5a-8bec-9fd66bc93c4b",
+    "activeVersionId": "4687ceca-ce45-4d5a-8bec-9fd66bc93c4b",
+    "versionCounter": 56,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [],
+    "shared": [
+      {
+        "updatedAt": "2026-09-18T17:32:30.627Z",
+        "createdAt": "2026-09-18T17:32:30.627Z",
+        "role": "workflow:owner",
+        "workflowId": "xignTTiDief1EA6T",
+        "projectId": "nrHqsjuHMtlartDy",
+        "project": {
+          "updatedAt": "2026-09-18T17:24:55.769Z",
+          "createdAt": "2026-09-18T17:24:26.818Z",
+          "id": "nrHqsjuHMtlartDy",
+          "name": "Mikel Albisu De la Fuente <malbisudlf@gmail.com>",
+          "type": "personal",
+          "icon": null,
+          "description": null,
+          "customTelemetryTags": [],
+          "creatorId": "b64ef924-251d-4614-9b50-b50819f069bb"
+        }
+      }
+    ],
+    "versionMetadata": {
+      "name": null,
+      "description": null
+    }
+  }
+]

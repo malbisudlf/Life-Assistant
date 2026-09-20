@@ -10,34 +10,89 @@ libres. Este fichero es el canal: qué se evaluó, qué se descartó y por qué,
 montado, qué costó descubrir y qué le falta. **Quién llama y cuándo** vive en
 `docs/AVERIAS.md`, que es el flujo que hoy lo usa.
 
-## Estado: el teléfono está escrito y APAGADO. El canal vivo es la pantalla de llamada
+## Estado: el teléfono SUENA, y no por Twilio
 
-En agosto de 2026 se intentó encender el puente de Twilio y **no se llegó a hacer ni una
-llamada**. No por un fallo del código —está escrito, probado y sigue aquí— sino porque el
-canal choca con tres cosas de fuera que no se pueden arreglar programando. Están todas en
-«Lo que cerró el teléfono», abajo. Lo que hay hoy en su lugar:
+Desde el **2026-09-20** el teléfono está vivo, y por un camino que no es el que este
+fichero describía. Twilio sigue escrito y apagado (`LLAMADAS=0`); lo que llama hoy es una
+**centralita 3CX gratuita** con [claude-phone](https://github.com/theNetworkChuck/claude-phone)
+corriendo en `caja`.
 
-> **La llama el usuario, pero se comporta como una llamada.** El aviso del móvil trae un
-> tercer botón, «Hablarlo», que abre el dashboard en una **pantalla de llamada entrante**
-> a pantalla completa. Descuelgas con el botón verde y a partir de ahí es el modo llamada
-> de siempre: escucha seguida, turnos por silencio, manos libres por el Bluetooth del
-> coche y colgar hablando. Coste: **cero**.
+Lo que cambia respecto a todo lo que hay debajo en este fichero:
 
-El cambio de dirección no es una rebaja disimulada, es lo que hace que quepa en el
-presupuesto: **que te avisen es gratis, que te llamen es lo caro**. Y el toque que hacía
-falta de todas formas —iOS no desbloquea el audio fuera de un gesto del usuario— es justo
-el que se convierte en el botón de descolgar.
+| | Twilio (agosto, nunca encendido) | La centralita (hoy) |
+|---|---|---|
+| Coste | céntimos por minuto + cuota del número | **cero**: es tráfico interno de la centralita |
+| A quién llama | a un teléfono de verdad | a tu extensión en la app de 3CX |
+| Quién habla | Jarvis por el puente de voz del backend | **Claude Code corriendo en `caja`** |
+| Qué puede hacer | usar las herramientas de Jarvis | mirar la máquina y actuar sobre ella |
 
-**El código de Twilio no se tira.** `LLAMADAS=0` lo deja apagado y el día que compense
-pagar el número se enciende con la variable. Todo lo que sigue en este fichero describe
-ese camino y sigue siendo cierto.
+Ese tercer punto es el que cambia la naturaleza del canal. Antes la llamada informaba y
+preguntaba; ahora al otro lado hay una sesión con acceso real a la máquina que hospeda el
+backend, el túnel, la base de datos y n8n. Lo que puede y no puede hacer está escrito en
+`telefono/RUNBOOK.md`, que es literalmente el `CLAUDE.md` de su directorio de trabajo.
+
+**El precio de eso es que el canal ya no es solo un canal**: quien alcance
+`http://caja:3010` en la LAN puede hacer que Claude Code ejecute lo que quiera en esa
+máquina, porque `claude-api-server` lo invoca con `--dangerously-skip-permissions`. Hoy lo
+único que lo protege es que ese puerto no sale de la LAN. Ver «Seguridad», abajo.
+
+**Y una cosa que este canal no puede hacer, por construcción:** la centralita vive en
+`caja`, la misma máquina que vigila. Puede contarte que el Green está caído, que la web
+falla o que el backend murió con la máquina viva. De lo que no puede avisarte nunca es de
+que `caja` esté apagada — el teléfono está dentro de lo que vigila. Es el mismo agujero
+que ya tenían Grafana y Prometheus, y sigue abierto.
+
+### Quién decide que suene
+
+```
+Vigilantes de n8n / sondeos de HA
+        │  (en CADA sondeo, vivo o muerto)
+        ▼
+POST /vigilancia/estado   ◀── aquí están las reglas, en main.py y con tests
+        │
+        ├─ menos de 3 sondeos fallidos ──▶ silencio
+        ├─ 3 seguidos ──▶ aviso al móvil
+        └─ 3 seguidos + no es de noche ──▶ _llamar() ──▶ claude-phone ──▶ 3CX ──▶ tu móvil
+```
+
+Las tres reglas, y por qué existen las tres:
+
+1. **Un parpadeo no es una avería.** Tres sondeos seguidos, que con un cron de 5 minutos
+   son ~15 minutos caído. Un corte de red de 30 segundos no llama.
+2. **Una llamada por avería, no una por sondeo.** Sonar cada cinco minutos mientras algo
+   sigue roto no añade información y garantiza que dejes de cogerlo.
+3. **De noche (00:00–07:00) no suena**, salvo lo marcado `critico`, que hoy son las
+   alarmas de respaldo — lo único que tiene que despertarte. El aviso al móvil sí sale
+   igual; lo que espera es la llamada. **No hace falta ningún reloj para eso**: como los
+   sondeos siguen entrando, el primero de después de las siete encuentra la avería todavía
+   viva y llama entonces.
+
+Y la recuperación se cuenta igual que la caída: el vigilante habla en **cada** sondeo,
+también cuando todo va bien. Ese sondeo bueno no sobra — es lo que pone el contador a
+cero y lo que permite decir «ya ha vuelto». Un vigilante que solo hablara de lo malo
+dejaría la avería marcada para siempre y no volvería a llamar por ella nunca.
+
+**La excepción: el backend caído.** Ese sondeo no puede pasar por `/vigilancia/estado`,
+porque el sujeto vigilado es quien decidiría. Lo lleva un flujo de n8n que **sí decide**
+y llama a la centralita directamente, repitiendo esas tres reglas en pequeño. Es la única
+grieta consciente en la frontera de `docs/N8N.md`, y está explicada allí.
+
+### La pantalla de llamada sigue viva
+
+Lo de abajo sobre la pantalla de llamada del dashboard (el botón «Hablarlo» del aviso de
+despliegue) **no se sustituye**: es otro canal, lo lanza el usuario y no gasta nada. La
+centralita es el canal que empieza la máquina; la pantalla, el que empiezas tú.
 
 ## La regla que sostiene todo esto
 
-> **Solo llama lo que se queda parado hasta que contestes.** No lo urgente, no lo
-> importante: lo BLOQUEADO. Hoy eso es exactamente una cosa, el permiso de despliegue.
+> **Solo llama lo que no se resuelve sin ti.** No lo urgente, no lo importante: lo que
+> se queda parado. Hoy son dos cosas, y ninguna más: el permiso de despliegue y una
+> avería que lleva un cuarto de hora sin arreglarse sola.
 
-Es el canal más caro que hay aquí: cuesta dinero por llamada y te interrumpe de verdad.
+Ya no es el canal más caro en euros —por la centralita no cuesta nada—, pero sigue
+siendo el más caro en lo que de verdad escasea: te interrumpe de verdad. Que se haya
+vuelto gratis es exactamente el momento en el que hay que apretar más esta regla, no
+relajarla: lo único que la mantenía estrecha antes era la factura.
 Si algún día llama una segunda cosa, tiene que estar justificada en este fichero. El día
 que el teléfono suene por algo que podía haber esperado, dejarás de cogerlo — y con él se
 irá también el aviso que sí importaba. Es el mismo fallo que el presupuesto de avisos

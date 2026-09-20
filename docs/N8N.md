@@ -47,6 +47,25 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Vigilante del Green** | Cada 5 min pregunta a Home Assistant. Si no contesta, `POST /programado/roto` → aviso al móvil | Activo desde el 2026-09-20 |
 | **Traductor de averías** | Cada 15 min busca runs fallidos de GitHub Actions (menos el CI), se baja el registro, se lo da a Gemini y abre un issue con el diagnóstico | Activo desde el 2026-09-20 |
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
+| **Vigilante de la web** | Cada 5 min sondea la web de Vercel y la API. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Sin importar |
+| **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Sin importar |
+
+El del Green cambió el 2026-09-20: ya no manda a `/programado/roto` sino a
+`/vigilancia/estado`, y manda **en cada sondeo**, no solo cuando falla. El sondeo bueno
+no sobra: es lo que pone el contador a cero y lo que permite decir «ya ha vuelto». Un
+vigilante que solo hablara de lo malo dejaría la avería marcada para siempre.
+
+### La excepción: el vigilante del backend SÍ decide
+
+Es el único flujo que se salta la frontera de arriba, y la razón es que no hay otra:
+**el sujeto que vigila es quien decidiría**. Cuando el backend está caído, `/vigilancia/estado`
+está caído con él, así que o decide el flujo o no se entera nadie. Por eso repite en
+pequeño las mismas tres reglas (tres sondeos, una llamada por avería, silencio nocturno)
+y por eso su contador vive en `staticData` y no en memoria: en memoria empezaría de cero
+en cada ejecución y llamaría al primer parpadeo.
+
+Que esas reglas estén escritas dos veces es deuda consciente, no un descuido. Si algún
+día cambian en `main.py`, hay que cambiarlas aquí también — y nada lo comprueba.
 
 El patrón que fija ese flujo, y que conviene repetir:
 

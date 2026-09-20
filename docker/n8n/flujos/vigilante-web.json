@@ -1,0 +1,222 @@
+[
+  {
+    "name": "Vigilante de la web",
+    "description": "Cada 5 minutos mira si responden la web de Vercel y la API. Lo que encuentra se lo cuenta a POST /vigilancia/estado, que es quien decide si eso merece un aviso o una llamada. Aqui no hay ninguna decision, a proposito: ver docs/N8N.md.",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 5
+              }
+            ]
+          }
+        },
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          0
+        ],
+        "id": "292fb5fa-79d8-41c4-b27c-eced0464e64b",
+        "name": "Cada 5 minutos"
+      },
+      {
+        "parameters": {
+          "url": "https://life-assistant-smoky.vercel.app/",
+          "options": {
+            "timeout": 10000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "fullResponse": true
+              }
+            }
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          -120
+        ],
+        "id": "2770f830-2233-466e-9cbc-0ad0a9876679",
+        "name": "Sonda de la web",
+        "alwaysOutputData": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "url": "http://IP-DE-CAJA:8080/",
+          "options": {
+            "timeout": 10000,
+            "response": {
+              "response": {
+                "neverError": true,
+                "fullResponse": true
+              }
+            }
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          220,
+          120
+        ],
+        "id": "be295422-c463-47a4-bcc4-e6a7768253db",
+        "name": "Sonda de la API",
+        "alwaysOutputData": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Un item no recuerda de que nodo vino, y detras las dos sondas se juntan en uno solo:\n// sin esta etiqueta, el nodo siguiente no sabria cual de los dos sujetos esta mirando.\nreturn $input.all().map(i => ({ json: { ...i.json, __sujeto: 'la web' } }));\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          -120
+        ],
+        "id": "ba762ca7-8bd2-424c-9e27-df2f9daed8a5",
+        "name": "Etiqueta web"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Un item no recuerda de que nodo vino, y detras las dos sondas se juntan en uno solo:\n// sin esta etiqueta, el nodo siguiente no sabria cual de los dos sujetos esta mirando.\nreturn $input.all().map(i => ({ json: { ...i.json, __sujeto: 'la API' } }));\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          120
+        ],
+        "id": "8ab3298e-47b7-45ca-a702-c4912a4dd512",
+        "name": "Etiqueta API"
+      },
+      {
+        "parameters": {
+          "jsCode": "// La web de Vercel y la API, en un solo item cada una.\n//\n// Un 200 no basta para decir que la web esta bien, pero un 5xx o un timeout SI bastan\n// para decir que esta mal, y eso es todo lo que este vigilante pretende saber. Lo\n// sutil (que cargue, que el login funcione) es trabajo del E2E, no de un cron.\n\nconst items = [];\nfor (const entrada of $input.all()) {\n  const j = entrada.json;\n  const codigo = j.statusCode ?? 0;\n  const vivo = codigo >= 200 && codigo < 400;\n  items.push({ json: {\n    sujeto: j.__sujeto,\n    vivo,\n    detalle: vivo ? '' : ('Respondio ' + (codigo || 'nada: ' + String(j.error ?? 'sin respuesta'))).slice(0, 200),\n  } });\n}\nreturn items;\n"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          660,
+          0
+        ],
+        "id": "7fb2e7bc-46fa-47a4-ac86-19895657b279",
+        "name": "Vivo?"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://IP-DE-CAJA:8080/vigilancia/estado",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ sujeto: $json.sujeto, vivo: $json.vivo, detalle: $json.detalle }) }}",
+          "options": {
+            "timeout": 10000
+          },
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth"
+        },
+        "id": "9f20db2b-6695-4de4-bc98-9ada6ec7c408",
+        "name": "Contarselo al backend",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          880,
+          0
+        ],
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "5iTITIjIf8yUB5rn",
+            "name": "Header Auth account"
+          }
+        },
+        "notes": "Por la IP de la LAN y NO por api.lifeassistantbackend.bid: el backend corre en esta misma maquina, y pasar por el tunel haria que una caida de Cloudflare dejara mudo al vigilante."
+      }
+    ],
+    "connections": {
+      "Cada 5 minutos": {
+        "main": [
+          [
+            {
+              "node": "Sonda de la web",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Sonda de la API",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sonda de la web": {
+        "main": [
+          [
+            {
+              "node": "Etiqueta web",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Sonda de la API": {
+        "main": [
+          [
+            {
+              "node": "Etiqueta API",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Etiqueta web": {
+        "main": [
+          [
+            {
+              "node": "Vivo?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Etiqueta API": {
+        "main": [
+          [
+            {
+              "node": "Vivo?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Vivo?": {
+        "main": [
+          [
+            {
+              "node": "Contarselo al backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "pinData": {}
+  }
+]
