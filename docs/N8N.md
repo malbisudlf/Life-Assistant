@@ -45,6 +45,8 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | Flujo | Qué hace | Estado |
 |---|---|---|
 | **Vigilante del Green** | Cada 5 min pregunta a Home Assistant. Si no contesta, `POST /programado/roto` → aviso al móvil | Activo desde el 2026-09-20 |
+| **Traductor de averías** | Cada 15 min busca runs fallidos de GitHub Actions (menos el CI), se baja el registro, se lo da a Gemini y abre un issue con el diagnóstico | Activo desde el 2026-09-20 |
+| **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
 
 El patrón que fija ese flujo, y que conviene repetir:
 
@@ -61,6 +63,56 @@ Con dos detalles que no son casuales:
 - **El token va en cabecera** (`httpHeaderAuth`), nunca en la query. Es la misma regla
   que `CLAUDE.md` impone a las integraciones: por la query el token acaba escrito en el
   registro de peticiones.
+
+## La IA de los flujos: Gemini en el plan gratuito
+
+Los dos flujos que piensan usan **Gemini** por la API, con la credencial
+`Google Gemini(PaLM) Api` de n8n. La regla de reparto es la que decide qué va a dónde:
+
+> **Lo gratis hace el pegamento; la cuota de Claude Max se reserva para lo que de verdad
+> piensa.** Clasificar, resumir, diagnosticar y cazar erratas es Gemini. Las revisiones
+> de fondo y los arreglos siguen siendo la revisión nocturna con Claude Code.
+
+**Por qué el plan gratuito vale aquí y no valdría en otro sitio**: el tier gratuito de
+Google usa lo que le mandas para entrenar, **salvo en el EEE**, donde se aplican los
+términos de los servicios de pago. Estando en España sale gratis sin ese peaje. Es la
+razón por la que se eligió Gemini y no Mistral, cuyo tier generoso **exige** aceptar el
+entrenamiento con tus datos.
+
+**No actives la facturación en ese proyecto de Google Cloud.** En cuanto hay una cuenta
+de facturación asociada, el proyecto pasa a tier de pago y los límites gratuitos dejan de
+aplicar sin que nadie lo diga.
+
+### Trampas de Gemini, descubiertas montando esto
+
+- **Los modelos se retiran para cuentas nuevas sin avisar.** `gemini-2.5-flash` devuelve
+  un 404 con el texto «is no longer available to new users. Please update your code to use
+  models/gemini-3.6-flash». O sea que el 404 no significa que te hayas equivocado de
+  nombre. Hoy se usa **`gemini-3.6-flash`**, fijado a propósito: un alias como
+  `gemini-flash-latest` cambia de modelo debajo sin que cambie nada aquí.
+
+- **El plan gratuito se satura a ratos**, y devuelve `UNAVAILABLE` con «This model is
+  currently experiencing high demand». No es tu cuota: es la de todos. Pasó tres veces en
+  una tarde. De ahí que los nodos lleven **5 reintentos cada 20 s**, y sobre todo que
+  ningún flujo dependa de que el modelo conteste:
+  - En **averías**, el issue se abre igual aunque Gemini falle, porque lleva el registro
+    dentro. Un diagnóstico sin registro no se puede comprobar; un registro sin
+    diagnóstico sigue sirviendo.
+  - En **PRs** no se marca el PR como revisado si el modelo no contestó: vuelve a
+    intentarlo a la vuelta siguiente. Ahí no hay prisa.
+
+- **Probar qué modelos responden es barato**: un flujo con un nodo HTTP por modelo y
+  `neverError`, y se ve de un vistazo cuál está saturado. De ocho probados, siete
+  contestaron.
+
+### Las dos reglas que gobiernan estos flujos
+
+- **La IA propone, el sistema dispone.** Ninguno de los dos actúa: uno abre un issue y el
+  otro deja un comentario. Las dos cosas son proponer, y las dos se borran en un clic.
+- **Silencio cuando no hay nada que decir.** La primera pasada de PRs **no comenta** si no
+  encuentra nada. Un bot que escribe «todo bien» en cada PR es un bot que se acaba
+  ignorando, y con él se va el aviso que sí importaba. Es la misma regla que impide que el
+  teléfono suene por cualquier cosa.
 
 ## Trampas conocidas
 
@@ -88,6 +140,29 @@ Con dos detalles que no son casuales:
 - **n8n no puede vigilar a `caja`.** Vive dentro. Lo mismo que Grafana y Prometheus, y
   por eso el 2026-09-19 `caja` estuvo apagada toda la noche sin que nadie se enterara.
   Ese vigilante tiene que correr en el Green, como automatización de HA.
+
+- **GitHub no sirve el registro de un job: redirige.** `/actions/jobs/{id}/logs` responde
+  302 a una URL firmada de Azure, y n8n —al contrario que curl— **reenvía la cabecera
+  `Authorization` al cambiar de dominio**, que es justo lo que Azure rechaza con un 401.
+  Hay que pedirlo en dos pasos: primero sin seguir el redirect para leer la `Location`, y
+  luego esa URL **sin credencial ninguna**.
+
+- **Un flujo que mira «lo que ha fallado» encuentra primero lo que falló hace meses.**
+  `?status=failure` devuelve los últimos fallos, no los recientes. Sin un filtro por fecha,
+  la primera vuelta empieza a abrir un issue de una avería vieja cada 15 minutos hasta
+  vaciar la lista. El primero que salió al probarlo fue una copia de Supabase de semanas
+  atrás. De ahí el corte a 24 horas.
+
+- **No marques algo como «ya visto» antes de haber hecho el trabajo.** La primera versión
+  del traductor apuntaba el run nada más cogerlo, así que si Gemini fallaba a mitad esa
+  avería se perdía **para siempre**: la vuelta siguiente ya no la veía. Se marca al final.
+
+- **La CLI de n8n no tiene `delete:workflow`** (en la 2.39.8). Para borrar un flujo, la
+  interfaz — o `sqlite3` sobre el volumen con el contenedor parado y copia previa.
+
+- **`n8n execute` necesita un disparador manual.** Un flujo que solo tiene
+  `scheduleTrigger` falla con «Missing node to start execution», así que para probarlo por
+  CLI hay que añadirle un `manualTrigger` temporal.
 
 ## Añadir un flujo
 
