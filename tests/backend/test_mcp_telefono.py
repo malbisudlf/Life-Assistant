@@ -40,6 +40,26 @@ class TestAuth:
                         headers={"Authorization": "Bearer malo"})
         assert r.status_code == 401
 
+    def test_sin_token_un_cuerpo_enorme_no_se_llega_a_cargar(self, client):
+        """Invariante 8 de CLAUDE.md: la auth va antes de tocar el cuerpo.
+
+        Un desconocido sin token manda un cuerpo mayor que `MAX_TELEFONO_BYTES` — si el
+        backend lo cargara en memoria antes de comprobar el token (como pasaba con
+        `body: dict = Body(...)`), esto daría 413, no 401.
+        """
+        enorme = b"1" * (main.MAX_TELEFONO_BYTES + 1)
+        r = client.post("/mcp/telefono", content=enorme,
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 401
+
+    def test_con_token_un_cuerpo_enorme_da_413(self, client):
+        """Con token válido, el cuerpo SÍ se acota (mismo invariante, ya del lado de
+        alguien autenticado)."""
+        enorme = b'{"a": "' + b"1" * main.MAX_TELEFONO_BYTES + b'"}'
+        r = client.post("/mcp/telefono", content=enorme,
+                        headers={**TOKEN, "Content-Type": "application/json"})
+        assert r.status_code == 413
+
 
 class TestHandshake:
     def test_initialize_devuelve_session_id_en_cabecera(self, client):

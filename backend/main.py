@@ -1,4 +1,4 @@
-﻿from fastapi import (FastAPI, BackgroundTasks, Body, Depends, HTTPException, Request,
+﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request,
                      status, UploadFile, File, Path, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
@@ -15235,6 +15235,36 @@ def _contexto_averia(sujeto: str, detalle: str, fallos: int, desde: float) -> st
     return "\n\n".join(partes)
 
 
+def _vigilancia_notificar(titulo: str, texto: str) -> None:
+    """Avisa de la vigilancia CON botones, no en el limbo en el que salía antes.
+
+    `_notificar` solo pone botones si le llega un `aviso_id`, y sin fila en
+    `jarvis_recordatorios` que votar no hay id que darle — el mismo motivo por el que
+    `POST /avisos/probar` inserta la suya antes de avisar. Aquí se hace igual: una fila
+    YA marcada como enviada, con `regla=REGLA_VIGILANCIA`, para que "útil/no útil"
+    tenga qué votar y la regla se pueda silenciar sola si deja de servir — que es
+    justo lo que prometía el comentario de `REGLA_VIGILANCIA` y no hacía nada.
+    """
+    aviso_id = str(uuid.uuid4())
+    try:
+        r = http.post(RECORDATORIOS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"id": aviso_id, "texto": texto,
+                            "regla": REGLA_VIGILANCIA, "prioridad": PRIO_NORMAL,
+                            "cuando": datetime.now(timezone.utc).isoformat(),
+                            "enviado": True,
+                            "enviado_at": datetime.now(timezone.utc).isoformat()})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        # Que no se pueda apuntar no impide avisar: sale sin botones, como antes de
+        # este arreglo, y se dice por qué.
+        logger.warning("Vigilancia: sin fila que votar (%s)", e)
+        aviso_id = ""
+    _notificar(titulo, texto, aviso_id=aviso_id,
+               acciones=_acciones_aviso(aviso_id, REGLA_VIGILANCIA))
+
+
 class VigilanciaIn(BaseModel):
     sujeto:  str
     vivo:    bool
@@ -15269,8 +15299,9 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
     if body.vivo:
         if estado and estado["avisado"]:
             minutos = max(1, int((time.time() - estado["desde"]) / 60))
-            _notificar(f"{sujeto} ha vuelto",
-                       f"«{sujeto}» responde otra vez. Estuvo caído unos {minutos} minutos.")
+            _vigilancia_notificar(
+                f"{sujeto} ha vuelto",
+                f"«{sujeto}» responde otra vez. Estuvo caído unos {minutos} minutos.")
             logger.info("Vigilancia: %s recuperado tras %d min", sujeto, minutos)
         _vigilancia.pop(sujeto, None)
         return {"ok": True, "estado": "vivo"}
@@ -15290,7 +15321,7 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
         texto += f" {detalle}"
 
     if not estado["avisado"]:
-        _notificar(f"{sujeto} no responde", texto)
+        _vigilancia_notificar(f"{sujeto} no responde", texto)
         estado["avisado"] = True
 
     if estado["llamado"]:
@@ -18705,11 +18736,26 @@ def _mcp_servidor_auth(request: Request) -> None:
 
 
 @app.post("/mcp/telefono")
-def mcp_telefono(request: Request, body: dict = Body(...)):
+async def mcp_telefono(request: Request):
     """Servidor MCP (Streamable HTTP, JSON-RPC 2.0) para la sesión de Claude Code del
     teléfono. Un único endpoint POST: no hace falta streaming servidor→cliente, así que
-    se responde siempre JSON directo (nunca SSE)."""
+    se responde siempre JSON directo (nunca SSE).
+
+    La auth va ANTES de tocar el cuerpo (invariante 8 de `CLAUDE.md`): con
+    `body: dict = Body(...)`, FastAPI cargaba el JSON en memoria antes de que
+    `_mcp_servidor_auth` se ejecutara, así que un desconocido sin token podía mandar un
+    cuerpo arbitrariamente grande sin que nada lo acotara. Mismo caso que
+    `/telefono/voz` (ver su comentario), pero con el orden invertido: aquí lo que faltaba
+    no era una firma antes de leer, sino leer acotado antes de nada."""
     _mcp_servidor_auth(request)
+
+    raw = await _leer_cuerpo_limitado(request, MAX_TELEFONO_BYTES)
+    try:
+        body = json.loads(raw.decode("utf-8", errors="replace")) if raw.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
 
     metodo = body.get("method")
     rpc_id = body.get("id")

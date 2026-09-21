@@ -31,7 +31,7 @@ def avisos(monkeypatch):
     """Captura los avisos al móvil sin pasar por la cola ni por el correo."""
     recogidos = []
     monkeypatch.setattr(main, "_notificar",
-                        lambda titulo, texto, **kw: recogidos.append((titulo, texto)) or "movil")
+                        lambda titulo, texto, **kw: recogidos.append((titulo, texto, kw)) or "movil")
     return recogidos
 
 
@@ -54,6 +54,20 @@ class TestCuandoSuena:
         r = _cae(client, 3)
         assert r.json()["avisado"] is True and r.json()["llamado"] is True
         assert len(avisos) == 1 and "home-assistant" in avisos[0][0]
+
+    def test_el_aviso_lleva_botones(self, client, mock_requests, avisos):
+        """`REGLA_VIGILANCIA` prometía poder silenciarse sola como cualquier otra regla,
+        pero los avisos salían sin `aviso_id` — así que `_acciones_aviso` cortaba en seco
+        y no había ni el útil/no útil de por defecto."""
+        _cae(client, 3)
+        kw = avisos[0][2]
+        assert kw["aviso_id"]
+        assert mock_requests.called("POST", "jarvis_recordatorios")
+        fila = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert fila["regla"] == main.REGLA_VIGILANCIA
+        assert fila["id"] == kw["aviso_id"]
+        acciones = {a["title"] for a in kw["acciones"]}
+        assert acciones == {"Útil", "No"}
         llamadas = mock_requests.called("POST", CENTRALITA)
         assert len(llamadas) == 1
         assert llamadas[0][2]["json"]["to"] == "11410"
