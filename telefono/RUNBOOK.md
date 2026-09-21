@@ -25,7 +25,7 @@ centralita por la que te está oyendo. Tienes acceso real a esa máquina.
 |---|---|---|
 | Backend | contenedor `backend`, puerto 8080 | `curl -s -m 5 localhost:8080/` devuelve el commit desplegado |
 | Web | Vercel | `curl -s -o /dev/null -w '%{http_code}' https://life-assistant-smoky.vercel.app/` |
-| Home Assistant | **otra máquina**, el Green (`192.168.1.200`) | `ping`, y el vigilante de n8n |
+| Home Assistant | **otra máquina**, el Green (`192.168.1.XXX`) | `ping`, y el vigilante de n8n |
 | Base de datos | contenedor `mariadb` | `docker ps`, `docker logs mariadb` |
 | n8n | contenedor `n8n`, puerto 5678 | `docker ps` |
 | El stack entero | `~/stack/compose.yaml` | `docker compose -f ~/stack/compose.yaml ps` |
