@@ -152,10 +152,20 @@ rest:
     scan_interval: 30
     sensor:
       - name: "Life Assistant Avisos"
-        value_template: "{{ value_json.avisos | length }}"
+        value_template: >
+          {{ (value_json.avisos | default([], true) | length)
+             + (value_json.borrar | default([], true) | length) }}
         json_attributes:
           - avisos
+          - borrar
 ```
+
+**El estado suma los avisos y los borrados a propósito.** `borrar` son los `tag` de
+notificaciones que hay que RETIRAR del móvil porque su pregunta ya está contestada, y
+viajan por esta misma cola. Si el estado contara solo los avisos, una lectura que trajera
+un borrado y ningún aviso dejaría el sensor en `0`, la condición de la automatización
+(`> 0`) no pasaría y ese borrado se perdería — y como leer vacía la cola, se perdería para
+siempre.
 
 **Leerlo VACÍA la cola**, igual que las órdenes y el WOL: solo puede consumirlo este
 sensor. Y ese sondeo es además lo que declara vivo el canal — si HA deja de sondear más
@@ -191,6 +201,11 @@ action:
               # no sirve se calle sola; el aviso de la revisión nocturna trae los suyos
               # («Arreglarlo» / «No hacer nada»), que no se valoran, se responden.
               actions: "{{ repeat.item.acciones | default([], true) }}"
+              # El `tag` hace que una notificación del mismo aviso REEMPLACE a la
+              # anterior en vez de apilarse, y es lo que permite retirarla después. Lo
+              # pone el backend y nunca viene vacío: un tag vacío uniría todos los
+              # avisos sin id en una sola notificación que se va pisando a sí misma.
+              tag: "{{ repeat.item.tag }}"
               # Y si el aviso viene marcado como crítico, que suene AUNQUE el móvil esté
               # en silencio o en modo concentración. Quién lo marca lo decide el backend
               # y hoy es una sola cosa —el permiso de despliegue—, por la misma regla que
@@ -210,7 +225,27 @@ action:
                 message: "{{ repeat.item.texto }}"
                 data:
                   type: announce
+  # Y las notificaciones que ya no preguntan nada, fuera del móvil. Va en la MISMA
+  # automatización y después del bloque de arriba para que un borrado no pueda adelantar
+  # al aviso que borra.
+  - repeat:
+      for_each: "{{ state_attr('sensor.life_assistant_avisos', 'borrar') | default([], true) }}"
+      sequence:
+        - service: notify.mobile_app_TU_MOVIL   # ← SUSTITÚYELO, el mismo de arriba
+          data:
+            message: clear_notification
+            data:
+              tag: "{{ repeat.item }}"
 ```
+
+**Por qué hace falta retirarlas.** Una notificación con botones sobrevive a la decisión
+que preguntaba: si contestas «Arreglarlo» por teléfono o desde el dashboard, la del móvil
+se queda ahí preguntando algo ya respondido. Pulsarla otra vez no rompe nada —las
+transiciones son PATCH condicionales— pero un botón que no hace nada enseña a desconfiar
+del canal, y éste es el canal por el que llegan las averías.
+
+**Si no instalas este último `repeat`**, todo lo demás sigue funcionando: los borrados se
+recogen y se tiran, que es exactamente lo que pasaba antes.
 
 Y la automatización que recoge la respuesta a los botones:
 
@@ -401,6 +436,15 @@ los dos únicos botones de este fichero cuya lógica **no vive en una automatiza
 HA**: el enrutado (de qué tabla es el id, a qué endpoint del backend llamar) está en un
 flujo de n8n — decisión de Mikel, para no seguir acumulando YAML por cada botón nuevo.
 El flujo entero, con capturas de cómo está montado, en `docs/N8N.md`.
+
+**Instalado y probado de punta a punta el 2026-09-22** (`id: la_hablar_n8n` en
+`automations.yaml`, `la_hablar_a_n8n` en `configuration.yaml`). La comprobación no fue
+pulsar el botón: se dispara el evento a mano contra la API de HA
+(`POST /api/events/mobile_app_notification_action` con
+`{"action": "LA_HABLAR_REV_<uuid inventado>"}`) y se mira que el backend conteste
+**404 «No hay esa revisión pendiente»**. Ese 404 es la señal de éxito: significa que el
+evento recorrió HA, n8n y la autenticación del backend, y solo falló al buscar un id que
+nunca existió. Un 403 ahí es la credencial de n8n, no el YAML.
 
 Lo único que sigue en HA es el reenvío en crudo del evento, porque **eso no se puede
 evitar**: el botón lo pulsa la app del móvil, que solo sabe hablar con Home Assistant, así

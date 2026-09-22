@@ -352,6 +352,10 @@ class TestAvisosAlMovil:
         assert main._notificar("⏰ pastilla", "tomar la pastilla") == "movil"
         assert correos == [], "no se manda por los dos canales a la vez"
         avisos = self._sondear(client)
+        # El tag se compara aparte porque sin id es aleatorio a propósito: uno vacío
+        # metería todos los avisos sin id en una sola notificación que se pisa a sí misma.
+        tag = avisos[0].pop("tag", None)
+        assert tag and tag.startswith("la-"), "un aviso sin id lleva tag propio"
         # Sin id no hay botones que pintar: la notificación sale limpia en vez de con
         # una acción que no lleva a ninguna parte.
         assert avisos == [{"titulo": "⏰ pastilla", "texto": "tomar la pastilla",
