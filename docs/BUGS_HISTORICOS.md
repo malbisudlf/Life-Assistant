@@ -3,6 +3,38 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
+  2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había
+  hecho todo lo que se le pidió. Te despiertas, abres Zepp, sincronizas varias veces; a
+  los 45 minutos llega el aviso de que la noche no ha llegado; sincronizas otra vez y la
+  noche aparece **en la app**; y aun así el correo que llega trae los datos de ayer.
+  - **El agujero estaba detrás de la hora tope, no delante.** A las 10:00 el tick manda
+    el resumen con lo que haya, que es la red de seguridad de siempre y está bien. Lo
+    que nadie había mirado es lo que pasa DESPUÉS: la reserva de `brief_envios` queda
+    puesta, así que cuando la noche entra a las 10:20 el envío que dispara la ingesta se
+    encuentra el 409, contesta «el resumen de hoy ya se envió» y se retira **en
+    silencio**. El correo del día se queda con la noche de ayer para siempre, y con él
+    el briefing, que la rutina redacta a partir de ese correo. La noche de hoy no se
+    mandaba nunca, ningún registro decía que faltara, y desde fuera parecía el mismo
+    fallo de las otras dos veces.
+  - **Y el aviso de los 45 minutos pedía lo que ya se había hecho.** Miraba el final de
+    una cadena de cuatro tramos (pulsera → Zepp → app Salud → exportador → backend) y de
+    ahí deducía el consejo para el primero. Abrir la app cinco veces no acerca el dato
+    si lo que está parado es el exportador del móvil, y no hace falta si el exportador
+    ya ha escrito desde que te levantaste sin traer la noche. Las dos cosas se
+    distinguen con un dato que ya estaba guardado: la hora de la última escritura de la
+    ingesta contra la hora de tu señal de despertar.
+  - Arreglo: `_alcanzar_la_noche` manda la noche tardía en un correo corto aparte (no
+    reenvía el resumen ni relanza la rutina: el briefing del día ya está escrito), y
+    `_donde_esta_el_atasco` pone en el aviso la etapa concreta. Ver `docs/BRIEF.md`.
+  - Moraleja doble. Una: **una red de seguridad que además cierra la puerta no es una
+    red, es un plazo.** Si el sistema acepta salir con lo que haya, tiene que seguir
+    aceptando lo que llegue después — si no, la tolerancia que se añadió para no
+    quedarse sin correo es lo que te deja sin el dato. Dos: **un aviso que nombra el
+    síntoma en vez de la causa envejece hasta ser ruido**, y este proyecto ya lo tenía
+    escrito en el propio código («regañarte por no sincronizar algo ya sincronizado es
+    como se deja de leer un aviso») aplicado solo al caso en que el dato ya estaba.
+
 - **«Reconstruir» no reconstruía, y no lo decía.** Se mergean dos arreglos a `main`, se
   pulsa *Reconstruir* en el add-on, termina sin errores… y producción sigue corriendo el
   código de antes. La causa: el `RUN git clone` del `Dockerfile` del add-on es una

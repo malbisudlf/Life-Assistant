@@ -125,6 +125,14 @@ que la ausencia de ese aviso significa que el dato no llegó — y entonces el p
 está en el teléfono, no aquí. Las peticiones con 200 no se loguean, así que el contenido
 de un lote correcto no queda registrado en ningún sitio.
 
+**Y una noche que tarda no es una noche que falta.** La cadena tiene cuatro tramos
+—pulsera → Zepp → app Salud → exportador → backend— y sincronizar en Zepp solo mueve el
+primero: hasta que Health Auto Export no exporta, para el backend la noche no existe,
+por muchas veces que le des. Quién tiene el dato parado lo dice el aviso de las mañanas
+sin sueño (`_donde_esta_el_atasco`, `docs/BRIEF.md`), comparando la última escritura de
+la ingesta con la hora a la que te levantaste, y lo mismo se puede mirar a mano en
+`GET /health/diagnostico` → `fuentes.<fuente>.ultima_escritura`.
+
 #### Pendientes del Shortcut
 
 **1. Sueño con fases** — sustituir el paso actual de `sleep_analysis` por un bucle:

@@ -297,6 +297,12 @@ BRIEF_ESPERA_SUENO     = _flag("BRIEF_ESPERA_SUENO")
 # un aviso al móvil: es lo único que puede hacer que el dato llegue a tiempo de servir
 # para algo. El tope real sigue siendo BRIEF_HORA_TOPE, que manda sobre este.
 BRIEF_ESPERA_SUENO_MIN = int(os.getenv("BRIEF_ESPERA_SUENO_MIN", "45"))
+# Si la noche que llega DESPUÉS de que el resumen haya salido sin ella se manda aparte,
+# en un correo corto. La hora tope hace que el resumen salga con lo que haya; sin esto,
+# además hacía que la noche de hoy no se mandara NUNCA — `brief_envios` ya tiene la fila
+# del día, así que el envío que dispara la ingesta se encuentra el 409 y se retira. Ver
+# `_alcanzar_la_noche`.
+BRIEF_ALCANCE_SUENO    = _flag("BRIEF_ALCANCE_SUENO")
 # El Atajo dispara al desenchufar el cargador, antes de que el reloj haya tenido tiempo
 # de sincronizar de fondo (a veces basta con no tocar el móvil un rato). Un retraso corto
 # ANTES de mirar si el sueño ya está le da ese margen sin depender de un delay en el
@@ -7551,6 +7557,13 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
         raise
 
     logger.info("Resumen diario enviado a %s (%s), disparado por: %s", BRIEF_TO, datos["fecha"], fuente)
+    # Si ha salido sin la noche de esta madrugada, queda apuntada: la reserva del día ya
+    # está puesta, así que lo que llegue después no puede mandar nada por su cuenta y sin
+    # esto la noche de hoy no se manda NUNCA (ver `_alcanzar_la_noche`).
+    if BRIEF_ALCANCE_SUENO and not _trae_la_noche(datos, fecha):
+        _apuntar_noche_por_alcanzar(fecha)
+    else:
+        _olvidar_alcance()
     _guardar_instantanea(fecha, datos)
     _lanzar_rutina(datos["fecha"], ahora)
     return {"enviado": True, "fecha": datos["fecha"], "fuente": fuente}
@@ -7608,17 +7621,27 @@ def _hay_sueno_de(fecha: str, si_falla: bool = True) -> bool:
     esperar al siguiente tick no cuesta nada porque la hora tope sigue detrás.
     """
     try:
-        r = http.get(
-            f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{fecha}"
-            "&metric_name=in.(sleep_analysis,sleep)&select=metric_name,value,extra",
-            headers=supabase_headers(),
-        )
-        if r.status_code >= 300:
-            raise RuntimeError(f"Supabase devolvió {r.status_code}")
-        return any(_hay_medida(f) for f in r.json())
+        return any(_hay_medida(f) for f in _noches_guardadas(fecha))
     except Exception as e:
         logger.warning("Resumen diario: no se pudo mirar si ha llegado el sueño (%s)", e)
         return si_falla
+
+
+def _noches_guardadas(fecha: str) -> list:
+    """Las filas de sueño guardadas para esa fecha. Levanta si no se puede preguntar.
+
+    Quien quiera tratar "no he podido mirar" como una respuesta que lo diga por su
+    cuenta (`_hay_sueno_de`): aquí no se puede decidir por los dos, porque el correo de
+    alcance y la espera contestan cosas contrarias a esa misma duda.
+    """
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{fecha}"
+        "&metric_name=in.(sleep_analysis,sleep)&select=metric_name,value,extra",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    return r.json()
 
 
 def _esperar_al_sueno(ahora: datetime) -> bool:
@@ -7675,6 +7698,66 @@ def _espera_marcar_avisada() -> bool:
         return True
 
 
+def _ultima_exportacion() -> tuple[datetime, str] | None:
+    """Cuándo escribió por última vez la ingesta de salud, y qué cliente lo hizo.
+
+    Es la mitad que le faltaba al aviso de la noche sin sincronizar. Sin esto solo se
+    sabía que la noche no está, que es el final de una cadena de cuatro etapas (pulsera
+    → Zepp → app Salud → exportador → backend) y no dice en cuál se atascó.
+    """
+    try:
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/health_metrics"
+            "?select=created_at,fuente&order=created_at.desc&limit=1",
+            headers=supabase_headers(),
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+        if not filas:
+            return None
+        cuando = datetime.fromisoformat(str(filas[0].get("created_at") or "").replace("Z", "+00:00"))
+        # `timestamptz` siempre trae desfase, pero una fecha sin él haría estallar la
+        # comparación de abajo y el aviso se perdería entero por un formato.
+        if cuando.tzinfo is None:
+            cuando = cuando.replace(tzinfo=timezone.utc)
+        return cuando, str(filas[0].get("fuente") or "")
+    except Exception as e:
+        # No poder preguntar no es un diagnóstico: el aviso sale con el texto de
+        # siempre, que sigue siendo verdad.
+        logger.warning("Resumen diario: no se pudo mirar la última exportación (%s)", e)
+        return None
+
+
+def _donde_esta_el_atasco(desde: datetime, ahora: datetime) -> str:
+    """Qué etapa de la cadena tiene el dato parado, en una frase para el móvil.
+
+    Existe porque el aviso pedía abrir la app del reloj, y eso es útil exactamente la
+    mitad de las veces: si el teléfono ya ha exportado después de que te levantaras y la
+    noche no venía dentro, abrir la app otra vez no arregla nada — el dato todavía no ha
+    salido de la pulsera. Y al revés: con la noche ya en Salud pero el exportador parado,
+    puedes sincronizar Zepp toda la mañana sin que llegue nada. Pedirte lo que ya has
+    hecho es exactamente como se deja de leer un aviso.
+
+    El razonamiento es de una sola pieza: si hay escritura POSTERIOR a tu despertar, el
+    camino teléfono → backend funciona y lo que falta es de antes; si no la hay, lo que
+    está callado es el camino.
+    """
+    ultima = _ultima_exportacion()
+    if ultima is None:
+        return "Abre la app del reloj para que sincronice."
+    cuando, fuente = ultima
+    if cuando > desde.astimezone(timezone.utc):
+        minutos = max(0, int((ahora.astimezone(timezone.utc) - cuando).total_seconds() // 60))
+        return (f"El móvil exportó hace {minutos} min sin ella: el atasco es la "
+                "pulsera. Abre Zepp y deja que acabe.")
+    horas = (ahora.astimezone(timezone.utc) - cuando).total_seconds() / 3600
+    cuanto = f"{round(horas)} h" if horas >= 1 else f"{int(horas * 60)} min"
+    de = f" ({fuente})" if fuente else ""
+    return (f"El móvil no exporta desde hace {cuanto}{de}: el atasco es el "
+            "exportador, no la pulsera.")
+
+
 def _vigilar_espera_sueno() -> dict:
     """Mientras hay una espera abierta: si el sueño ya está, el correo sale; si no, a
     los BRIEF_ESPERA_SUENO_MIN se te pide que abras la app. Y se sigue esperando.
@@ -7713,11 +7796,14 @@ def _vigilar_espera_sueno() -> dict:
     if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN) or not _espera_marcar_avisada():
         return {}
     minutos = int((ahora - desde).total_seconds() // 60)
+    # El texto se arma con el diagnóstico dentro y no con una coletilla añadida porque
+    # los avisos se recortan a RECORDATORIO_MAX_TEXTO (200) y lo primero que se perdería
+    # sería justo lo que hay que hacer. Por eso el consejo va antes que el plazo.
     if _apuntar_aviso(
         "reloj_sync",
-        f"Llevas {minutos} min despierto y el sueño de anoche todavía no ha llegado. "
-        "Abre la app del reloj para que sincronice: el resumen de hoy sale en cuanto "
-        f"llegue, y si no, a las {HORA_TOPE[0]:02d}:{HORA_TOPE[1]:02d} sin él.",
+        f"Llevas {minutos} min despierto y la noche no ha llegado. "
+        f"{_donde_esta_el_atasco(desde, ahora)} "
+        f"A las {HORA_TOPE[0]:02d}:{HORA_TOPE[1]:02d} el resumen sale sin ella.",
         prioridad=PRIO_ALTA,
         id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:sueno-sin-sincronizar:{ahora.date()}")),
         huella=f"sin_sincronizar:{ahora.date().isoformat()}",
@@ -7736,9 +7822,130 @@ def _vigilar_espera_sueno_seguro() -> dict:
         return {}
 
 
+# ── El correo de alcance: la noche que llegó tarde ───────────────────────────
+# A la hora tope el resumen sale con lo que haya, que es la red de seguridad de siempre.
+# Lo que no se veía es que además cerraba el día: `brief_envios` queda con la fila de
+# hoy, así que cuando la noche llega a las 10:20 el envío que dispara la ingesta se
+# encuentra el 409 de la reserva y se retira en silencio. El correo del día se quedaba
+# con la noche de AYER para siempre, y con él el briefing que la rutina redacta a partir
+# de ese correo. O sea que la hora tope no era "salgo con lo que haya": era "renuncio a
+# la noche de hoy".
+#
+# La noche que llega tarde se manda aparte, en un correo corto y solo con ella. No se
+# reenvía el resumen entero ni se relanza la rutina: el resumen del día ya salió, y
+# duplicarlo costaría dos briefings cada mañana en que la pulsera tarde en volcar.
+#
+# Vive en memoria por lo mismo que la espera: perder la nota en un reinicio cuesta un
+# correo de alcance, no un dato — la noche ya está guardada en Supabase.
+_noche_por_alcanzar: dict | None = None
+_alcance_lock = threading.Lock()
+
+
+def _trae_la_noche(datos: dict, fecha: str) -> bool:
+    """Si el resumen que acaba de salir llevaba dentro la noche de esa madrugada.
+
+    Se mira la FECHA del último sueño, no que haya sueño: la tabla casi siempre trae la
+    noche de ayer, y darla por buena es exactamente el correo del que salió todo esto.
+    """
+    return ((datos.get("salud") or {}).get("sueno") or {}).get("fecha") == fecha
+
+
+def _apuntar_noche_por_alcanzar(fecha: str) -> None:
+    """El resumen de ese día salió sin su noche: si llega, hay que mandarla aparte."""
+    global _noche_por_alcanzar
+    with _alcance_lock:
+        _noche_por_alcanzar = {"dia": fecha}
+    logger.info("Resumen diario: el correo del %s salió sin la noche; queda por alcanzar", fecha)
+
+
+def _hay_alcance_pendiente(fecha: str) -> bool:
+    """Si a ese día le falta la noche por mandar. Mirar no consume nada.
+
+    Se mira antes de preguntarle nada a Supabase: la mañana normal la noche llega a
+    tiempo y ahí no hay que gastar un viaje de red en comprobar algo que no aplica.
+    """
+    with _alcance_lock:
+        return bool(_noche_por_alcanzar) and _noche_por_alcanzar["dia"] == fecha
+
+
+def _reclamar_alcance(fecha: str) -> bool:
+    """True una sola vez, para el día que quedó pendiente. Reclamar lo consume.
+
+    Se reclama justo ANTES de mandar el correo, con el dato ya leído: la ingesta puede
+    entrar dos veces seguidas (Health Auto Export reintenta) y dos correos por la misma
+    noche son peor que ninguno. Reclamarlo antes de leer costaría el alcance del día
+    entero por un parpadeo de Supabase, que es un precio que no hay por qué pagar.
+    """
+    global _noche_por_alcanzar
+    with _alcance_lock:
+        if not _noche_por_alcanzar or _noche_por_alcanzar["dia"] != fecha:
+            return False
+        _noche_por_alcanzar = None
+    return True
+
+
+def _olvidar_alcance() -> None:
+    global _noche_por_alcanzar
+    with _alcance_lock:
+        _noche_por_alcanzar = None
+
+
+def _alcanzar_la_noche(fecha: str, ahora: datetime) -> bool:
+    """Manda por correo la noche que llegó después del resumen. True si salió.
+
+    Solo la noche: horas, hora de acostarse y fases. Quien lee el correo de datos es la
+    rutina que redacta el briefing, y ese briefing ya está escrito a estas horas — esto
+    es para la persona, que es quien se quedó sin saber cómo durmió.
+    """
+    if not _hay_alcance_pendiente(fecha):
+        return False
+    filas = [f for f in _noches_guardadas(fecha) if _hay_medida(f)]
+    if not filas or not _reclamar_alcance(fecha):
+        return False
+    # Misma preferencia de nombre que `_filas_por_alias`: las dos fuentes no lo llaman
+    # igual y la primera de la tupla manda.
+    orden = {"sleep_analysis": 0, "sleep": 1}
+    fila  = min(filas, key=lambda f: orden.get(f.get("metric_name"), 9))
+    extra = fila.get("extra") or {}
+
+    L = [f"La noche del {fecha} llegó a las {ahora.strftime('%H:%M')}, después de que"
+         " saliera el resumen de hoy.",
+         "Ese resumen iba sin ella, así que estos datos no están en el briefing de esta"
+         " mañana.",
+         ""]
+    L.append(f"   {'Sueño':<16} {_horas_sueno(fila):.2f} h")
+    if extra.get("sleep_start"):
+        L.append(f"   {'Se acostó':<16} {extra['sleep_start']}")
+    fases = _fases_sueno(extra)
+    for etiqueta, clave in (("Profundo", "profundo"), ("REM", "rem"),
+                            ("Ligero", "ligero"), ("Despierto", "despierto")):
+        if fases.get(clave):
+            L.append(f"   {etiqueta:<16} {fases[clave]:.2f} h")
+    L += ["",
+          "Va aparte a propósito: el resumen del día ya salió, y reenviarlo entero",
+          "duplicaría el briefing que redacta la rutina."]
+
+    enviar_correo(f"Life Assistant — la noche del {fecha}, que llegó tarde", "\n".join(L))
+    logger.info("Resumen diario: mandada aparte la noche del %s, que llegó tarde", fecha)
+    return True
+
+
+def _alcanzar_la_noche_seguro(fecha: str) -> bool:
+    """Nada de esto puede tumbar la ingesta: guardar los datos del reloj importa más que
+    el correo, que es la misma regla que ya tenía `_avisar_sueno_recibido`."""
+    if not BRIEF_ALCANCE_SUENO:
+        return False
+    try:
+        return _alcanzar_la_noche(fecha, _ahora_local())
+    except Exception:
+        logger.exception("Resumen diario: fallo mandando la noche que llegó tarde")
+        return False
+
+
 def _avisar_sueno_recibido(fechas_sueno: set) -> None:
     """Acaba de llegar el sueño de esta noche: si había una señal de despertar
-    esperándolo, el correo sale ahora.
+    esperándolo, el correo sale ahora; y si el correo ya salió sin ella, la noche se
+    manda aparte (`_alcanzar_la_noche`).
 
     **Solo cierra una espera; por sí solo no manda nada.** Lo mandaba, como deducción
     de "si la noche ha sincronizado es que estás despierto", y la deducción fallaba por
@@ -7762,10 +7969,21 @@ def _avisar_sueno_recibido(fechas_sueno: set) -> None:
     Nunca puede tumbar la ingesta: guardar los datos del reloj importa más que el
     correo, y el correo tiene la hora tope detrás.
     """
-    if not BRIEF_DISPARA_SUENO or not fechas_sueno:
+    if not fechas_sueno:
         return
     ahora = _ahora_local()
-    if ahora.date().isoformat() not in set(fechas_sueno):
+    hoy   = ahora.date().isoformat()
+    if hoy not in set(fechas_sueno):
+        return
+
+    # Primero: si el resumen de hoy YA salió sin esta noche, se manda aparte. Va fuera
+    # de BRIEF_DISPARA_SUENO porque no es lo mismo — aquel decide si el sueño cierra una
+    # espera, y aquí no queda ninguna que cerrar: el correo salió hace rato y la reserva
+    # del día está puesta. Las dos ramas se excluyen por eso mismo, así que se vuelve.
+    if _alcanzar_la_noche_seguro(hoy):
+        return
+
+    if not BRIEF_DISPARA_SUENO:
         return
     # Sin señal de despertar no hay nada que cerrar: lo probable es que sigas durmiendo.
     desde = _despertar_esperado(ahora)
