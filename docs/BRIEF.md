@@ -166,10 +166,43 @@ backend está en `docs/BACKEND_PATRONES.md`.
     - **Vive en memoria a propósito.** Quien sabe si el dato ha llegado es Supabase;
       perder la nota en un reinicio cuesta que el correo salga por la hora tope, que es
       exactamente la red de seguridad que este sistema ya tenía.
+    - **El aviso dice EN QUÉ ETAPA está parado el dato** (`_donde_esta_el_atasco`), no
+      solo que falta. La cadena tiene cuatro tramos —pulsera → Zepp → app Salud →
+      exportador → backend— y el aviso solo miraba el último, así que pedía abrir la app
+      del reloj también los días en que eso ya se había hecho cinco veces. Lo que separa
+      un caso del otro ya estaba guardado: si la ingesta ha escrito DESPUÉS de tu señal
+      de despertar y la noche no venía dentro, el camino teléfono → backend funciona y lo
+      que falta es de antes (la pulsera); si no ha escrito nada desde antes de
+      levantarte, lo que está callado es el camino (el exportador), y ahí puedes
+      sincronizar Zepp toda la mañana sin que llegue nada. No poder preguntarlo no es un
+      diagnóstico: entonces sale el texto de siempre. El consejo va ANTES del plazo
+      porque los avisos se recortan a `RECORDATORIO_MAX_TEXTO` (200) y lo que se perdería
+      es justo lo que hay que hacer — hay un test que mide el largo de los tres textos.
   - `POST /ha/brief-tick` (`HA_POLL_TOKEN`) — el reloj de respaldo. HA lo sondea cada
     pocos minutos y solo hace algo pasada `BRIEF_HORA_TOPE` (10:00). El reloj lo pone HA
     y no un hilo del backend porque **Fly escala a cero**: sin nadie que llame, aquí no
     hay proceso vivo que pueda mirar la hora.
+  - **La noche que llega después del correo se manda aparte** (`_alcanzar_la_noche`,
+    interruptor `BRIEF_ALCANCE_SUENO`). La hora tope hacía dos cosas y solo una estaba
+    pensada: el correo sale con lo que haya (bien) y el día queda **cerrado** (no).
+    `brief_envios` ya tiene la fila, así que cuando la noche entra a las 10:20 el
+    envío que dispara la ingesta se encuentra el 409 de la reserva y se retira en
+    silencio — el correo del día se quedaba con la noche de AYER para siempre, y con él
+    el briefing que la rutina redacta a partir de él. Cuatro reglas:
+    - **Solo la noche, en un correo corto** (horas, hora de acostarse y fases). El
+      resumen entero no se reenvía y **la rutina no se relanza**: el briefing del día ya
+      está escrito, y duplicarlo costaría dos briefings cada mañana en que la pulsera
+      tarde en volcar. Quien lee este correo es la persona, no el modelo.
+    - **Se apunta al enviar, no al fallar.** Si el resumen sale sin la noche de esa
+      madrugada queda anotado que falta por alcanzar. `_trae_la_noche` compara la FECHA
+      del último sueño con la de hoy, no mira que haya sueño: la tabla casi siempre trae
+      el de ayer, y darlo por bueno es exactamente el correo del que salió todo esto.
+    - **Reclamarlo lo consume** (`_reclamar_alcance`), antes de mandar y no después:
+      la ingesta puede entrar dos veces seguidas y dos correos por la misma noche son
+      peor que ninguno. Si el envío falla, ese día se queda sin alcance — es un extra, no
+      el resumen, y como todo lo que cuelga de la ingesta no puede tumbarla.
+    - **Vive en memoria**, como la espera: perder la nota en un reinicio cuesta un
+      correo, no un dato. La noche ya está guardada en Supabase.
 
   Dos invariantes que no se pueden relajar:
   - **La idempotencia es la tabla `brief_envios`, no una comprobación previa.** Se
