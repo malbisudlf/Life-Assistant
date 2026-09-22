@@ -57,7 +57,7 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
 | **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Activo desde el 2026-09-20, 19:23 |
 | **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Activo desde el 2026-09-20, 19:23 |
-| **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Pendiente de montar |
+| **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Activo desde el 2026-09-22 |
 
 > **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
 > ninguno lo estaba: la tabla de aquí arriba llevaba una tarde diciendo que el del Green
@@ -148,6 +148,21 @@ Webhook (/hablarlo) → Code (parsea prefijo y id) → IF (revisión / sesión) 
 El webhook de n8n no sale de la LAN (mismo criterio que su panel), así que no lleva
 credencial propia — el token va en la llamada de n8n al backend, no en la de HA a n8n.
 
+**El token de esos dos nodos NO es el de los vigilantes.** Es la trampa que se llevó el
+primer intento: la credencial `Header Auth account` que ya existía en n8n lleva
+`REVISION_TOKEN`, que es lo que pide `POST /vigilancia/estado`, y `_auth_boton` —que es
+quien guarda estos dos endpoints— solo acepta `HA_POLL_TOKEN` o un JWT de usuario. El
+flujo quedó montado, activo y **contestando 403 en silencio**, que es exactamente la
+avería que este fichero ya describe para las credenciales en blanco. Por eso hay una
+credencial aparte, `Backend - botones (HA_POLL_TOKEN)`: dos tokens de servicio distintos
+no son intercambiables aunque los dos entren por `X-Auth-Token`.
+
+*Que el 403 solo se vea en `docker logs n8n` y no en ninguna parte del panel es lo que
+hace que esto valga la pena escribirlo: el flujo se veía verde.*
+
+El id del flujo es `HablarloTelefono`, y el fichero que lo define vive en el repositorio
+HomeLab (`caja/n8n/flujos/hablarlo.json`), que es la fuente de verdad de esa máquina.
+
 ## La IA de los flujos: Gemini en el plan gratuito
 
 Los dos flujos que piensan usan **Gemini** por la API, con la credencial
@@ -212,6 +227,13 @@ aplicar sin que nadie lo diga.
   IP de LAN de `caja`, nunca `localhost`. Es el mismo fallo que se comía las llamadas del
   backend (ver `backend/.env.example`), y en n8n es peor porque el nodo falla en una
   ejecución que nadie mira.
+
+- **La CLI pide justo lo contrario que la interfaz, y además un `id`.** `import:workflow`
+  exige una **lista** y que el objeto traiga `id`, o muere con
+  `SQLITE_CONSTRAINT: NOT NULL constraint failed: workflow_entity.id`. O sea: el mismo
+  fichero no sirve para las dos vías. Y **importar sobre un flujo activo lo desactiva**
+  («Deactivating workflow…» en su propia salida), así que tras cada importación hay que
+  volver a activarlo y reiniciar — dos pasos, no uno.
 
 - **Importar no es sustituir.** Importar una versión nueva de un flujo que ya existe crea
   un **segundo flujo con el mismo nombre**, no lo reemplaza. Hay que desactivar y borrar

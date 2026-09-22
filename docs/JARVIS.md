@@ -536,6 +536,24 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   cero, y se consume con un **PATCH condicional** para que dos toques no lancen dos
   agentes. El flujo entero, con las dos routines y el YAML, en `docs/REVISION_NOCTURNA.md`.
 
+  **Y pulsar «Hablarlo» ya no deja el aviso sin dónde contestarse.** La app del móvil
+  descarta la notificación en cuanto pulsas cualquier botón, y éste es el único que no
+  decide nada: el aviso seguía pendiente en la tabla y mudo en el móvil, así que si no
+  cogías la llamada —o la cogías y no decidías— no te quedaba dónde responder y el aviso
+  solo reaparecía al descolgar por otra cosa. Ahora `_reponer_tras_hablar` programa una
+  reposición a los `HABLAR_REPONER_SEG` (360 s: el tope de una llamada más un minuto) y,
+  **solo si el aviso sigue pendiente**, lo devuelve al móvil con sus botones. Se espera en
+  vez de reponer en el acto porque el acto es justo cuando está sonando el teléfono, y
+  porque esa espera es lo que permite no reponer nada cuando sí decidiste hablando. El
+  reloj es un temporizador y no el fin de la llamada porque **la centralita no le cuenta
+  al backend que has colgado**; el día que lo haga, este temporizador es lo que sobra.
+
+  El camino inverso lo cierra `_retirar_del_movil`: cuando el aviso SÍ se resuelve —por
+  teléfono, por el dashboard o por el botón— su `tag` se encola en `borrar` y HA retira la
+  notificación del móvil (`clear_notification`). Sin eso quedaba un botón preguntando algo
+  ya contestado, que no rompe nada pero enseña a desconfiar del canal por el que llegan
+  las averías.
+
 - **El arreglo que pide permiso para desplegarse** (`POST /averia`,
   `POST /revision/pr-listo`, `POST /despliegue/{id}/accion`, herramienta `desplegar`): el
   camino inverso al de arriba. Cuando el CI se rompe en `main` no se pregunta nada — se

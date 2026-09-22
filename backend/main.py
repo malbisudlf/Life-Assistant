@@ -13811,6 +13811,18 @@ _avisos_movil: list = []
 # el primer aviso siguiente se va por correo, que es el lado seguro del error.
 _ultimo_sondeo_avisos: float = 0.0
 
+# Los `tag` de las notificaciones que hay que RETIRAR del móvil. La app de Home Assistant
+# sabe hacerlo (`message: clear_notification` con el tag), pero solo si se lo pedimos, y
+# el único que sabe que un aviso ya está contestado es el backend.
+#
+# Hace falta porque una notificación con botones sobrevive a la decisión que preguntaba:
+# si contestas «Arreglarlo» por teléfono, o desde el dashboard, la del móvil se queda ahí
+# preguntando algo ya respondido. Pulsarla otra vez no rompe nada —las transiciones son
+# PATCH condicionales— pero un botón que no hace nada enseña a desconfiar del canal, que
+# es justo lo que este proyecto no se puede permitir en el sitio por el que avisa de las
+# averías.
+_avisos_borrar: list = []
+
 
 def _movil_vivo() -> bool:
     """¿Hay alguien recogiendo los avisos? Es lo único que decide el canal."""
@@ -13940,6 +13952,12 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
             "voz": bool(voz), "id": aviso_id, "critico": bool(critico),
             "efimero": bool(efimero),
+            # El `tag` es lo que permite que una notificación REEMPLACE a otra en vez de
+            # apilarse, y lo que hace falta para poder retirarla después. Es el id del
+            # aviso cuando lo hay, porque así dos notificaciones del mismo aviso son la
+            # misma cosa para el móvil; y uno propio cuando no, porque un tag vacío los
+            # uniría TODOS en una sola notificación que se va pisando a sí misma.
+            "tag": aviso_id or f"la-{uuid.uuid4().hex[:12]}",
             "acciones": acciones if acciones is not None else _acciones_aviso(aviso_id, ""),
         })
         return "movil"
@@ -13950,6 +13968,96 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
         return "ninguno"
     enviar_correo(titulo, texto)
     return "correo"
+
+
+def _retirar_del_movil(tag: str) -> None:
+    """Pide que se quite del móvil la notificación de este aviso. Nunca puede romper.
+
+    Se llama desde los caminos que RESUELVEN un aviso, que son caminos que ya han hecho
+    lo importante: si el borrado fallara, lo último que debe hacer es devolver un error y
+    que Home Assistant dé por fallida una decisión que sí se tomó. Mismo criterio que
+    `_acusar_recibo`.
+    """
+    if not tag or not _movil_vivo():
+        return
+    try:
+        if tag not in _avisos_borrar:
+            _avisos_borrar.append(tag)
+    except Exception as e:  # pragma: no cover - una lista en memoria no falla
+        logger.warning("Avisos: no se pudo encolar el borrado de %s (%s)", tag, e)
+
+
+# Cuánto se espera antes de reponer el aviso que «Hablarlo» se llevó por delante: lo que
+# dura como mucho una llamada (`LLAMADA_MAX_SEG`, 300) más un minuto. Si hubo
+# conversación, para entonces ya terminó y la decisión está tomada.
+#
+# Va escrito a pelo y no como `LLAMADA_MAX_SEG + 60` porque esa constante se define más
+# abajo, en la sección del teléfono, y este bloque pertenece al canal de avisos. Si algún
+# día se cambia el tope de la llamada, este número lo sigue.
+HABLAR_REPONER_SEG = int(os.getenv("HABLAR_REPONER_SEG", "360"))
+
+# Los avisos que ya tienen una reposición en camino. Pulsar «Hablarlo» tres veces no
+# programa tres reposiciones: el tag las haría converger en una sola notificación de
+# todas formas, pero tres hilos dormidos para el mismo aviso son tres oportunidades de
+# equivocarse.
+_reposiciones_en_curso: set = set()
+
+
+def _reponer_tras_hablar(tipo: str, rid: str) -> None:
+    """Devuelve al móvil el aviso que «Hablarlo» hizo desaparecer, si sigue pendiente.
+
+    El problema que resuelve: la app de Home Assistant descarta la notificación en cuanto
+    pulsas CUALQUIER botón, y «Hablarlo» es el único de los tres que no decide nada —no
+    toca `estado`, es repetible a propósito. Así que el aviso se quedaba vivo en la tabla
+    y mudo en el móvil: si no cogías la llamada, o la cogías y no decidías, ya no tenías
+    dónde contestar y el aviso solo reaparecía al descolgar por otra cosa.
+
+    Se repone TARDE y no en el acto porque el acto es justo cuando está sonando el
+    teléfono, y porque esperar es lo que permite no reponer nada cuando sí decidiste
+    hablando: la comprobación de «¿sigue pendiente?» es la que distingue los dos casos, y
+    sale de la misma función que usa el propio botón.
+
+    No sabemos cuándo cuelgas —la centralita no se lo cuenta al backend—, así que el reloj
+    es el tope de duración de una llamada. Si algún día la centralita avisa al colgar,
+    este temporizador es lo que sobra.
+    """
+    clave = f"{tipo}:{rid}"
+    if clave in _reposiciones_en_curso:
+        return
+    _reposiciones_en_curso.add(clave)
+
+    def _trabajo() -> None:
+        try:
+            if tipo == "revision":
+                fila = _revision_pendiente_seguro(rid)
+                regla = REGLA_REVISION
+                titulo = "Sigue pendiente: los hallazgos de la revisión"
+                texto = ("Hablamos de esto y quedó sin decidir. ¿Arreglo los hallazgos? "
+                         "Responde con los botones.")
+            else:
+                fila = _sesion_pendiente_seguro(rid)
+                regla = REGLA_SESION
+                titulo = "Sigue pendiente: el aviso de la sesión"
+                texto = ("Hablamos de esto y quedó sin cerrar. Si no hay nada que "
+                         "contestar, dale a «Vale».")
+            # Que ya no esté pendiente es el caso BUENO: decidiste, por teléfono o por
+            # donde fuera. Reponer aquí sería volver a preguntar algo ya contestado.
+            if not fila:
+                return
+            _notificar(titulo, texto, aviso_id=rid,
+                       acciones=_acciones_aviso(rid, regla))
+            logger.info("Hablarlo: repuesto el aviso %s (%s), seguía pendiente", rid, tipo)
+        except Exception as e:
+            # Un aviso que no se repone es el estado de antes de esto, no una avería
+            # nueva: se queda en el log y no se propaga a nadie.
+            logger.warning("Hablarlo: no se pudo reponer el aviso %s (%s)", rid, e)
+        finally:
+            _reposiciones_en_curso.discard(clave)
+
+    hilo = threading.Timer(HABLAR_REPONER_SEG, _trabajo)
+    hilo.daemon = True
+    hilo.name = f"reponer-{tipo}"
+    hilo.start()
 
 
 # ── El teléfono: cuando el aviso no puede esperar a que mires el móvil ────────
@@ -14181,16 +14289,24 @@ def ha_avisos_pending(request: Request, token: str = ""):
     _ultimo_sondeo_avisos = time.time()
     pendientes = list(_avisos_movil)
     _avisos_movil.clear()
+    borrar = list(_avisos_borrar)
+    _avisos_borrar.clear()
     # `voz`, `id` y `acciones` los decide el backend pero los EJECUTA el YAML de HA: con
     # voz, además de la notificación, que lo diga el altavoz; con id y acciones, que la
     # notificación traiga sus botones. Una instalación que no los mire sigue funcionando
     # igual — con la salvedad de que un YAML viejo pinta siempre útil / no útil, así que
     # los avisos con botones propios (la revisión nocturna) piden actualizarlo.
+    # `borrar` son los tags de notificaciones que ya no tienen sentido en el móvil porque
+    # su pregunta está contestada. Va por la MISMA cola y el mismo sondeo que los avisos,
+    # no por un endpoint aparte, para que no puedan desordenarse entre sí: un borrado que
+    # adelantara al aviso que borra dejaría el aviso puesto para siempre.
     return {"avisos": [{"titulo": a["titulo"], "texto": a["texto"],
                         "voz": a.get("voz", False), "id": a.get("id", ""),
                         "critico": a.get("critico", False),
+                        "tag": a.get("tag", ""),
                         "acciones": a.get("acciones") or []}
-                       for a in pendientes]}
+                       for a in pendientes],
+            "borrar": borrar}
 
 
 @app.get("/avisos/estado")
@@ -14929,6 +15045,9 @@ def _revision_hablar(rid: str) -> dict:
         raise HTTPException(status_code=404, detail="No hay esa revisión pendiente")
     contexto = _jarvis_contexto_llamada(aviso=rid, tipo="revision")
     ok = _llamar(_apertura_revision(fila), rid=rid, contexto=contexto)
+    # Pulsar este botón borra la notificación del móvil (lo hace la app, no nosotros) y
+    # no decide nada, así que sin esto el aviso se queda vivo y sin dónde contestarlo.
+    _reponer_tras_hablar("revision", rid)
     return {"ok": ok, "accion": "hablar"}
 
 
@@ -14950,6 +15069,11 @@ def revision_accion(request: Request, body: RevisionAccionRequest,
         return _revision_hablar(aviso_id)
 
     resultado = _revision_decidir(aviso_id, accion)
+    # Decidido: la notificación del móvil ya no pregunta nada. Se retira aunque la
+    # decisión venga del dashboard o del teléfono, que son los casos en los que la del
+    # móvil sigue puesta.
+    if resultado.get("ok"):
+        _retirar_del_movil(aviso_id)
     if resultado.get("ok") and resultado.get("accion") == "arreglar":
         # Pulsar un botón y que no pase nada visible es la avería de siempre de este
         # canal: se contesta por el mismo sitio por el que llegó la pregunta.
@@ -16199,6 +16323,9 @@ def _sesion_hablar(rid: str) -> dict:
         raise HTTPException(status_code=404, detail="No hay ese aviso de sesión pendiente")
     contexto = _jarvis_contexto_llamada(aviso=rid, tipo="sesion")
     ok = _llamar(_apertura_sesion(fila), rid=rid, contexto=contexto)
+    # Mismo motivo que en `_revision_hablar`: el botón se lleva la notificación por
+    # delante y no cierra nada.
+    _reponer_tras_hablar("sesion", rid)
     return {"ok": ok, "accion": "hablar"}
 
 
@@ -16234,6 +16361,9 @@ def sesion_accion(request: Request, body: SesionAccionRequest,
         raise HTTPException(status_code=502, detail="No se pudo cerrar el aviso")
     if not filas:
         return {"ok": True, "hecho": False, "motivo": "ese aviso ya estaba cerrado"}
+    # Cerrado: lo mismo que en la revisión, se retira la notificación del móvil para que
+    # no quede un «Vale» que ya no cierra nada.
+    _retirar_del_movil(aviso_id)
     return {"ok": True, "hecho": True}
 
 
