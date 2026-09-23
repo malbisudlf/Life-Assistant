@@ -4680,6 +4680,11 @@ def get_health_metrics(
             "unit": row["unit"],
             "extra": row.get("extra", {}),
         })
+        # `last_sync` pregunta si llega algo DEL MÓVIL. Las horas en casa las escribe Home
+        # Assistant cada medianoche, con móvil o sin él, y contarlas dejó el panel diciendo
+        # "sync hace 22 min" dos días seguidos sin una sola fila del iPhone.
+        if row.get("fuente") == FUENTE_PRESENCIA or name == PRESENCE_METRIC:
+            continue
         if row["metric_date"] == today_str:
             has_today = True
         ca = row.get("created_at")
