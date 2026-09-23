@@ -133,6 +133,18 @@ sin sueño (`_donde_esta_el_atasco`, `docs/BRIEF.md`), comparando la última esc
 la ingesta con la hora a la que te levantaste, y lo mismo se puede mirar a mano en
 `GET /health/diagnostico` → `fuentes.<fuente>.ultima_escritura`.
 
+**El «sync hace X min» del panel no cuenta las horas en casa** (`time_at_home`, que
+escribe Home Assistant cada medianoche). Las contaba, y del 21 al 23/09/2026 el panel
+dijo «sync hace 22 min» con el iPhone dos días sin mandar una sola fila: la presencia de
+hoy bastaba para dar el sync por reciente. `last_sync` responde a «¿llega algo del
+móvil?», y solo lo que escribe el móvil puede contestarlo.
+
+**Y el Atajo que llama a `/health/ingest` con el *Bulk Export* de Health Auto Export no
+es quien entrega los datos**: lleva desde agosto mandando 0 bytes (400 en `app_logs`,
+decenas al día), aunque en el iPhone termine en verde porque «Obtener contenido de URL»
+no falla con un 4xx. Lo que entrega es la automatización REST de dentro de la app. Si
+deja de llegar el sueño, mira primero esa automatización, no el Atajo.
+
 **Si la ingesta responde 200 y la noche sigue sin salir, mira la lectura.** El
 2026-09-23 la fila estaba en `health_metrics` y el dashboard no la enseñaba porque
 Supabase devuelve como mucho 1.000 filas por petición y `/health/metrics` las pedía en

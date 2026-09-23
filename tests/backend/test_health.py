@@ -1,7 +1,7 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1236,6 +1236,27 @@ class TestSaludAjustes:
         r = client.get("/health/metrics", headers=auth_headers)
         assert r.status_code == 200
         assert r.json()["ajustes"]["cambio_dispositivo"] is None
+
+
+class TestUltimoSync:
+    """`last_sync` dice si llega algo del MÓVIL. Las horas en casa las escribe Home
+    Assistant cada medianoche, y contarlas dejó el panel en "sync hace 22 min" con el
+    iPhone dos días sin mandar una sola fila."""
+
+    def test_las_horas_en_casa_no_cuentan_como_sync(self, client, mock_requests, auth_headers):
+        hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.", FakeResponse([
+            {"metric_date": "2026-09-01", "metric_name": "sleep_analysis", "value": 7,
+             "unit": "hr", "extra": {}, "fuente": "auto_export",
+             "created_at": "2026-09-01T05:00:00+00:00"},
+            {"metric_date": hoy, "metric_name": "time_at_home", "value": 9.5,
+             "unit": "hr", "extra": {}, "fuente": "home_assistant",
+             "created_at": f"{hoy}T00:00:01+00:00"},
+        ]))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.json()["last_sync"] == "2026-09-01T05:00:00+00:00"
+        # La métrica se sigue devolviendo: solo deja de contar como señal de sync.
+        assert r.json()["metrics"]["time_at_home"][0]["value"] == 9.5
 
 
 class TestLecturaPaginada:
