@@ -91,8 +91,15 @@ del PC (`POST /jobs/{id}/retry`), despertarlo (`POST /wake-pc`) y devolverle la 
 regla que se ha silenciado sola (`POST /avisos/reglas/{regla}/reactivar`) — que es
 reversible por partida doble: si vuelve a acumular votos negativos, se callará otra vez.
 
-**Y desde el 2026-09-10, reconstruye.** El botón *Reconstruir* de la pestaña Despliegue
-llama a `POST /dev/reconstruir`, y el add-on se lo pide al Supervisor él mismo. Es la
+**Y desde el 2026-09-10, despliega.** El botón *Desplegar* de la pestaña Despliegue
+llama a `POST /dev/reconstruir`. En `caja` (desde el 2026-09-23) el backend deja un
+fichero `pedido` en un directorio montado (`DESPLIEGUE_DIR`), y una unidad `systemd`
+`.path` de la máquina lo recoge y ejecuta `desplegar.sh`; su salida queda en
+`~/stack/despliegue/ultimo.log`. Entre el 20 y el 23 de septiembre el botón estuvo roto
+—seguía llamando al Supervisor del Green, que en `caja` no existe— y desplegar pedía
+entrar por SSH. No se le da al contenedor el socket de Docker a propósito: sería root en
+la máquina entera a cambio de un botón, y el pedido solo sabe decir «despliega `main`».
+Como add-on del Green se lo pedía al Supervisor él mismo, y ese camino sigue ahí. Es la
 única cosa de aquí que no es reversible ni repetible sin consecuencias, así que es la
 única que pregunta antes con un `confirm`, dice en la pregunta lo que va a pasar (el
 backend se para 1-2 minutos) y luego **espera a que vuelva y enseña con qué sha lo ha

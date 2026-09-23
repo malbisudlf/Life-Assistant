@@ -1,20 +1,34 @@
 // ¿Entró la reconstrucción?
 //
-// Son tres despliegues independientes que nadie sincroniza —el add-on del Green, Vercel y
-// el `main` de GitHub— y hasta ahora compararlos era abrir tres pestañas y mirar shas a
-// ojo. No se hacía, y por eso el add-on sirvió durante días el código de otro día sin que
-// nadie lo notara (CLAUDE.md, «Despliegue»).
+// Son tres despliegues independientes que nadie sincroniza —el backend en `caja`, Vercel
+// y el `main` de GitHub— y hasta ahora compararlos era abrir tres pestañas y mirar shas a
+// ojo. No se hacía, y por eso el backend sirvió durante días el código de otro día sin
+// que nadie lo notara (CLAUDE.md, «Despliegue»).
 //
-// Esta pestaña SÍ reconstruye, desde septiembre de 2026: el add-on se lo pide al
-// Supervisor él solo. Antes no podía, y el segundo paso —ir a la interfaz de HA y pulsar
-// Reconstruir— se posponía, así que producción se quedaba atrás mientras el aviso del
-// móvil daba el arreglo por desplegado. Lo que no hace es reconstruir sola: pregunta.
+// Esta pestaña SÍ despliega. En `caja` el backend deja un pedido que recoge una unidad de
+// systemd y ejecuta `desplegar.sh`; en el add-on del Green se lo pedía al Supervisor. Sin
+// esto, el segundo paso —entrar por SSH y lanzarlo— se posponía, y producción se quedaba
+// atrás mientras el aviso del móvil daba el arreglo por desplegado. Lo que no hace es
+// desplegar sola: pregunta.
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
          leerDespliegue, estadoDespliegue, shaCorto, COMMIT_FRONTEND,
          reconstruirAddon, esperarAlBackend } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
+
+// Dónde mirar cuando no vuelve, según con qué se ha desplegado. `quieto` es el caso en que
+// el backend ni se ha parado: el despliegue no llegó a tocar el contenedor.
+const DONDE_MIRAR = {
+  caja: {
+    caido:  "míralo en caja: docker compose ps y ~/stack/despliegue/ultimo.log",
+    quieto: "Mira ~/stack/despliegue/ultimo.log en caja (¿está activa desplegar.path?)",
+  },
+  supervisor: {
+    caido:  "míralo en Home Assistant",
+    quieto: "Suele ser que al add-on le faltan permisos (hassio_role) — mira la pestaña Logs",
+  },
+};
 
 // Cinco minutos, y solo si el backend tiene credencial de GitHub. Sin ella son 60
 // peticiones/hora para toda la red de casa y una pestaña abierta las gasta sola.
@@ -56,8 +70,8 @@ export default function Despliegue() {
   // dashboard entero.
   const reconstruir = useCallback(async () => {
     if (!window.confirm(
-      "¿Reconstruir el add-on ahora?\n\n"
-      + "Clona main y sustituye lo que está corriendo. El backend se para 1-2 minutos: "
+      "¿Desplegar el backend ahora?\n\n"
+      + "Trae main y sustituye lo que está corriendo. El backend se para 1-2 minutos: "
       + "mientras tanto el dashboard no responde.")) return;
     setObra("lanzando…");
     try {
@@ -70,9 +84,9 @@ export default function Despliegue() {
       setObra(
         fin.ok && fin.cambio  ? `listo · ahora sirve ${shaCorto(fin.version)}`
         : fin.ok              ? `listo · sigue sirviendo ${shaCorto(fin.version)} (ya estaba al día)`
-        : fin.cayo            ? "se paró pero no ha vuelto en 3 min — míralo en Home Assistant"
-        : "el backend no ha llegado a pararse: la reconstrucción no ha arrancado. "
-          + "Suele ser que al add-on le faltan permisos (hassio_role) — mira la pestaña Logs");
+        : fin.cayo            ? `se paró pero no ha vuelto en 3 min — ${DONDE_MIRAR[r.motor]?.caido || "míralo en la máquina"}`
+        : "el backend no ha llegado a pararse: el despliegue no ha arrancado o ha fallado. "
+          + (DONDE_MIRAR[r.motor]?.quieto || "Mira la pestaña Logs"));
       if (fin.ok) setTic(t => t + 1);
     } catch (e) {
       setObra(e.message || "no se ha podido lanzar");
@@ -97,8 +111,8 @@ export default function Despliegue() {
               {leyendo ? "Mirando…" : "Actualizar"}
             </Boton>
             <Boton onClick={reconstruir} tono="peligro" disabled={!!obra && !obra.startsWith("listo")}
-                   title="Clona main y sustituye el backend que está corriendo">
-              Reconstruir
+                   title="Trae main y sustituye el backend que está corriendo">
+              Desplegar
             </Boton>
           </div>
         </div>
@@ -114,8 +128,8 @@ export default function Despliegue() {
 
         {!error && datos?.main && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <Lado nombre="Backend (add-on del Green)" lado={backend}
-                  nota="se despliega con el botón Reconstruir, nunca solo" />
+            <Lado nombre="Backend (caja)" lado={backend}
+                  nota="se despliega con el botón Desplegar, nunca solo" />
             <Lado nombre="Frontend (Vercel)" lado={frontend}
                   nota="se despliega solo al hacer push a main" />
             <div style={{ borderTop: "0.5px solid var(--border)", paddingTop: 10 }}>
@@ -160,10 +174,10 @@ export default function Despliegue() {
             </div>
           )}
           <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 10, lineHeight: 1.5 }}>
-            Para que entren, el botón <strong>Reconstruir</strong> de arriba: el add-on se lo
-            pide al Supervisor él solo y clona <code>main</code>. Si responde que no puede,
-            el <code>config.yaml</code> del Green es el viejo — ese fichero se copia a mano
-            por Samba y no sale de git.
+            Para que entren, el botón <strong>Desplegar</strong> de arriba: el backend deja un
+            pedido que en <code>caja</code> recoge <code>desplegar.path</code>, y eso ejecuta
+            <code>desplegar.sh</code> (trae <code>main</code>, reconstruye y espera al
+            healthcheck). Lo que haya dicho queda en <code>~/stack/despliegue/ultimo.log</code>.
           </div>
         </div>
       )}

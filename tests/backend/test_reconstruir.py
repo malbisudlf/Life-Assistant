@@ -18,6 +18,7 @@ import main
 def sin_esperas(monkeypatch):
     """El endpoint lanza un hilo que duerme un segundo antes de llamar al Supervisor."""
     monkeypatch.setattr(main, "_ultima_reconstruccion", 0.0)
+    monkeypatch.setattr(main, "DESPLIEGUE_DIR", "")
     monkeypatch.setattr(main.time, "sleep", lambda _s: None)
 
 
@@ -43,11 +44,11 @@ class TestPermisos:
         assert r.status_code == 401
 
     def test_fuera_del_addon_lo_dice_en_vez_de_reventar(self, client, auth_headers, monkeypatch):
-        """En local y en el kit de terceros no hay Supervisor, y ahí desplegar es otra cosa."""
+        """En local y en el kit de terceros no hay con qué desplegar, y ahí es otra cosa."""
         monkeypatch.setattr(main, "SUPERVISOR_TOKEN", "")
         r = client.post("/dev/reconstruir", headers=auth_headers)
         assert r.status_code == 503
-        assert "add-on" in r.json()["detail"]
+        assert "DESPLIEGUE_DIR" in r.json()["detail"]
 
 
 class TestLanzarla:
@@ -89,7 +90,7 @@ class TestLanzarla:
         volcados = []
         monkeypatch.setattr(main._registro, "volcar", lambda: volcados.append(1))
         client.post("/dev/reconstruir", headers=auth_headers)
-        assert any("Reconstrucción" in r.getMessage() and r.levelname == "WARNING"
+        assert any("Despliegue lanzado" in r.getMessage() and r.levelname == "WARNING"
                    for r in caplog.records)
         assert volcados
 
@@ -101,3 +102,50 @@ class TestLanzarla:
         client.post("/dev/reconstruir", headers=auth_headers)
         _esperar_al_hilo()
         assert any("hassio_role" in r.getMessage() for r in caplog.records)
+
+
+class TestEnCaja:
+    """En `caja` el backend no se reconstruye: deja un pedido que atiende `desplegar.path`."""
+
+    @pytest.fixture
+    def en_caja(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main, "DESPLIEGUE_DIR", str(tmp_path))
+        monkeypatch.setattr(main, "SUPERVISOR_TOKEN", "")
+        return tmp_path
+
+    def test_deja_el_pedido(self, client, auth_headers, en_caja):
+        r = client.post("/dev/reconstruir", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["motor"] == "caja"
+        assert (en_caja / "pedido").exists()
+        # Sin temporales a medias: la unidad .path solo debe ver el fichero entero.
+        assert not (en_caja / "pedido.tmp").exists()
+
+    def test_no_llama_al_supervisor(self, client, auth_headers, mock_requests, en_caja,
+                                    monkeypatch):
+        """Aunque hubiera token, en caja manda el pedido: es lo que atiende producción."""
+        monkeypatch.setattr(main, "SUPERVISOR_TOKEN", "supervisor-token-de-pruebas")
+        client.post("/dev/reconstruir", headers=auth_headers)
+        _esperar_al_hilo()
+        assert not mock_requests.called("POST", "/addons/self/rebuild")
+        assert (en_caja / "pedido").exists()
+
+    def test_sin_el_volumen_montado_lo_dice(self, client, auth_headers, monkeypatch, tmp_path):
+        """Un directorio que no existe es el volumen olvidado en compose.yaml: 503 que lo
+        nombre, y sin gastar la espera — no se ha lanzado nada."""
+        monkeypatch.setattr(main, "DESPLIEGUE_DIR", str(tmp_path / "no-montado"))
+        r = client.post("/dev/reconstruir", headers=auth_headers)
+        assert r.status_code == 503
+        assert "DESPLIEGUE_DIR" in r.json()["detail"]
+        assert main._ultima_reconstruccion == 0.0
+
+    def test_dos_seguidas_no_encadenan_dos(self, client, auth_headers, en_caja):
+        assert client.post("/dev/reconstruir", headers=auth_headers).status_code == 200
+        (en_caja / "pedido").unlink()   # lo que haría la unidad al recogerlo
+        assert client.post("/dev/reconstruir", headers=auth_headers).status_code == 429
+        assert not (en_caja / "pedido").exists()
+
+    def test_requiere_jwt(self, client, en_caja):
+        assert client.post("/dev/reconstruir",
+                           headers={"X-Auth-Token": "ha-poll-token"}).status_code == 401
+        assert not (en_caja / "pedido").exists()

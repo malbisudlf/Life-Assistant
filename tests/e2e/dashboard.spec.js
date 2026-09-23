@@ -198,14 +198,14 @@ test('la zona dev dice qué código corre y qué corre solo', async ({ page }) =
   await page.getByRole('button', { name: 'Despliegue' }).click()
   await expect(page.getByText('1 commit por desplegar', { exact: false })).toBeVisible({ timeout: 15_000 })
 
-  // El botón existe desde que el add-on puede reconstruirse solo, pero NO reconstruye sin
+  // El botón existe desde que el backend puede desplegarse solo, pero NO despliega sin
   // preguntar: es la única cosa de la zona dev que no es repetible sin consecuencias.
   // Cancelando el diálogo no puede pasar nada, y eso es justo lo que se comprueba —
   // si algún día alguien quita el confirm, este test se entera antes que producción.
   let preguntado = ''
   page.once('dialog', d => { preguntado = d.message(); d.dismiss() })
-  await page.getByRole('button', { name: 'Reconstruir' }).click()
-  expect(preguntado).toContain('Reconstruir el add-on')
+  await page.getByRole('button', { name: 'Desplegar', exact: true }).click()
+  expect(preguntado).toContain('Desplegar el backend')
   await expect(page.getByText('lanzando', { exact: false })).toHaveCount(0)
 
   // Crons: los tres programados con su último run, y los sondeos, que aquí no ha hecho
