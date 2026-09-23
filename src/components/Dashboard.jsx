@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import {
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
@@ -33,7 +33,44 @@ import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { resumenEstado } from "../lib/dev";
-import ZonaDev from "./dev/ZonaDev";
+
+// La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
+// descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
+// falla, lo normal es un despliegue con la pestaña abierta —el chunk viejo ya no existe
+// en Vercel—, así que se recarga UNA vez para traer el índice nuevo. La marca evita el
+// bucle cuando lo que pasa es que no hay red, y entonces se dice en vez de romper la app.
+const RECARGA_ZONA_DEV = "la_zonadev_recarga";
+const ZonaDev = lazy(() =>
+  import("./dev/ZonaDev").then(
+    (m) => {
+      try { sessionStorage.removeItem(RECARGA_ZONA_DEV); } catch { /* sin storage */ }
+      return m;
+    },
+    () => {
+      let yaRecargada = true;
+      try {
+        yaRecargada = sessionStorage.getItem(RECARGA_ZONA_DEV) === "1";
+        sessionStorage.setItem(RECARGA_ZONA_DEV, "1");
+      } catch { /* sin storage: mejor el aviso que un bucle de recargas */ }
+      if (!yaRecargada) {
+        window.location.reload();
+        return new Promise(() => {});
+      }
+      return { default: ZonaDevSinCargar };
+    },
+  ),
+);
+
+function ZonaDevSinCargar({ onSalir }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", color: "var(--muted, #94a3b8)", padding: 24, textAlign: "center" }}>
+      <div>
+        <p>No se ha podido descargar la zona dev. ¿Hay conexión?</p>
+        <button onClick={onSalir} style={{ marginTop: 12 }}>Volver al dashboard</button>
+      </div>
+    </div>
+  );
+}
 
 // Sin valor por defecto a propósito: aquí había una IP de la red doméstica escrita a
 // mano, en un repositorio público y contra la norma de CLAUDE.md. Sin `VITE_HA_URL` el
@@ -6638,11 +6675,17 @@ export default function Dashboard() {
 
   if (zonaDev) {
     return (
-      <ZonaDev
-        onSalir={() => setZonaDev(false)}
-        agentId={AGENT_ID}
-        filasExtra={filasEstadoDelDashboard}
-      />
+      <Suspense fallback={
+        <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", color: "var(--muted, #94a3b8)" }}>
+          Cargando la zona dev…
+        </div>
+      }>
+        <ZonaDev
+          onSalir={() => setZonaDev(false)}
+          agentId={AGENT_ID}
+          filasExtra={filasEstadoDelDashboard}
+        />
+      </Suspense>
     );
   }
 
