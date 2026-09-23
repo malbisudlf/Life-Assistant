@@ -221,6 +221,36 @@ class TestHealthIngest:
         ]}})
         assert self._filas(mock_requests)[0]["extra"]["sleep_start"] == "23:22"
 
+    def test_sueno_sin_resumir_se_junta_por_noche(self, client, mock_requests):
+        """Con Summarize Data apagado el sueño llega por tramos, sin `date`, y se saltaba
+        en silencio: el resto del lote entraba con 200 y la noche no aparecía nunca."""
+        tramo = lambda ini, fin, fase, h: {"startDate": ini, "endDate": fin, "value": fase,
+                                           "qty": h, "source": "Zepp"}
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "sleep_analysis", "units": "hr", "data": [
+                tramo("2026-09-22 23:40:00 +0200", "2026-09-23 00:10:00 +0200", "In Bed", 0.5),
+                tramo("2026-09-23 00:10:00 +0200", "2026-09-23 03:10:00 +0200", "Core", 3.0),
+                tramo("2026-09-23 03:10:00 +0200", "2026-09-23 04:40:00 +0200", "Deep", 1.5),
+                tramo("2026-09-23 04:40:00 +0200", "2026-09-23 06:40:00 +0200", "REM", 2.0),
+                tramo("2026-09-23 06:40:00 +0200", "2026-09-23 06:50:00 +0200", "Awake", 1 / 6),
+            ]},
+        ]}})
+        assert r.status_code == 200
+        filas = self._filas(mock_requests)
+        assert len(filas) == 1
+        fila = filas[0]
+        assert fila["metric_date"] == "2026-09-23"
+        assert fila["value"] == 6.5
+        assert fila["extra"]["deep"] == 1.5 and fila["extra"]["rem"] == 2.0
+        assert fila["extra"]["sleep_start"] == "00:10"
+
+    def test_punto_sin_fecha_deja_rastro_en_el_log(self, client, mock_requests, caplog):
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "heart_rate", "units": "count/min", "data": [{"Avg": 60}]},
+        ]}})
+        assert r.status_code == 200
+        assert "sin fecha legible" in caplog.text and "heart_rate" in caplog.text
+
     def test_un_lote_grande_son_dos_viajes_no_uno_por_metrica(self, client, mock_requests):
         """M4: antes eran GET+POST(+PATCH) por métrica — decenas de viajes secuenciales
         a Supabase por cada sincronización del Watch. Ahora: una lectura y un upsert."""
