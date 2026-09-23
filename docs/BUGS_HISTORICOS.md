@@ -755,3 +755,23 @@
     temporizador.** Si lo que falla es un orden de prioridades, acortar la vida de lo que
     va primero solo cambia cada cuánto duele. Cuando un arreglo consiste en que algo deje
     de existir antes, pregúntate qué pasa mientras todavía existe.
+
+- **El sueño se guardaba y el dashboard no lo enseñaba: Supabase corta a 1.000 filas.**
+  Durante tres días (desde el 2026-09-20) la noche llegaba, la ingesta respondía 200 y la
+  fila estaba en `health_metrics`, pero el widget seguía con la noche de hace tres días,
+  por mucho que se sincronizara y se lanzara el Atajo. `/health/metrics` pedía
+  `limit=5000` en orden **ascendente**, y PostgREST no sube de su `db-max-rows` (1.000 en
+  Supabase) por mucho `limit` que se le pida: lo ignora sin avisar. Mientras los 30 días
+  cabían en 1.000 filas no pasaba nada; al darse de alta métricas nuevas (energía basal,
+  oxígeno, temperatura, horas en casa) se pasó el tope, y lo que se quedaba fuera era
+  justo **lo más nuevo**. Lo mismo le pasaba al resumen diario, al informe semanal, a
+  `/health/diagnostico`, al aviso de reloj y a la lectura previa de la ingesta (esta
+  última, con un export de 30 días, dejaba de proteger los totales de las acumulativas).
+  Hoy todas pasan por `_leer_todas()`, que pagina con `count=exact` y un orden que no
+  empata (`metric_date,metric_name`).
+  - Moraleja: **un `limit` alto en una URL de Supabase no es una garantía, es un deseo.**
+    La copia de seguridad ya paginaba por esto mismo (`scripts/copia_supabase.py`) y nadie
+    lo trasladó al backend. Cualquier lectura que pueda pasar de 1.000 filas va por
+    `_leer_todas()`.
+  - Y la de siempre con los datos que faltan: **si falta lo más reciente y la ingesta dice
+    200, mira la lectura antes que el teléfono.**

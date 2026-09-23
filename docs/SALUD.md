@@ -133,6 +133,12 @@ sin sueño (`_donde_esta_el_atasco`, `docs/BRIEF.md`), comparando la última esc
 la ingesta con la hora a la que te levantaste, y lo mismo se puede mirar a mano en
 `GET /health/diagnostico` → `fuentes.<fuente>.ultima_escritura`.
 
+**Si la ingesta responde 200 y la noche sigue sin salir, mira la lectura.** El
+2026-09-23 la fila estaba en `health_metrics` y el dashboard no la enseñaba porque
+Supabase devuelve como mucho 1.000 filas por petición y `/health/metrics` las pedía en
+orden ascendente: lo que se caía era lo más nuevo. Toda lectura de `health_metrics` que
+pueda pasar de ese tope va por `_leer_todas()` (ver `docs/BUGS_HISTORICOS.md`).
+
 #### Pendientes del Shortcut
 
 **1. Sueño con fases** — sustituir el paso actual de `sleep_analysis` por un bucle:
