@@ -1186,6 +1186,55 @@ def _supabase_error(r) -> HTTPException:
     return HTTPException(status_code=502, detail="Error en el almacenamiento de datos")
 
 
+# PostgREST corta cada respuesta a `db-max-rows` (1.000 en Supabase) y el `limit` que se
+# le pida por encima de eso NO lo sube: lo ignora sin avisar. `/health/metrics` pedía
+# `limit=5000` en orden ascendente, así que el día que los 30 días de `health_metrics`
+# pasaron de 1.000 filas lo que se quedó fuera fueron los días MÁS NUEVOS: la noche de hoy
+# llegaba, se guardaba, y el dashboard seguía enseñando la de hace tres días. La copia de
+# seguridad ya paginaba por esto mismo (`scripts/copia_supabase.py`); las lecturas del
+# backend no.
+SUPABASE_PAGINA   = 1000
+# Tope para que un `Content-Range` absurdo no deje el bucle pidiendo páginas sin fin.
+SUPABASE_MAX_FILAS = 100_000
+
+
+def _leer_todas(url: str):
+    """Trae TODAS las filas de una consulta de Supabase, paginando. Devuelve (r, filas).
+
+    `url` no lleva `limit` ni `offset`, y sí un `order` que no empate (sin él, dos páginas
+    seguidas pueden repetir o saltarse filas). Si una página falla, `filas` es None y `r`
+    es esa respuesta, para que quien llama decida como con un `http.get` normal.
+
+    El final se saca del `Content-Range` (se pide `count=exact`) y no de "han venido menos
+    filas de las que pedí": el servidor puede devolver menos que la página. Solo si no
+    viene el total se usa ese criterio, que es lo que pasa con los mocks de los tests.
+    """
+    sep   = "&" if "?" in url else "?"
+    filas: list = []
+    total = None
+    while True:
+        r = http.get(f"{url}{sep}limit={SUPABASE_PAGINA}&offset={len(filas)}",
+                     headers={**supabase_headers(), "Prefer": "count=exact"})
+        if r.status_code >= 300:
+            return r, None
+        lote = r.json()
+        if not isinstance(lote, list) or not lote:
+            break
+        filas.extend(lote)
+        visto = _total_de_content_range((getattr(r, "headers", None) or {}).get("Content-Range"))
+        if visto is not None:
+            total = visto
+        if total is not None:
+            if len(filas) >= total:
+                break
+        elif len(lote) < SUPABASE_PAGINA:
+            break
+        if len(filas) >= SUPABASE_MAX_FILAS:
+            logger.error("Lectura paginada: más de %d filas, se corta ahí", SUPABASE_MAX_FILAS)
+            break
+    return r, filas
+
+
 class LoginRequest(BaseModel):
     password: str = Field(max_length=200)
 
@@ -4047,16 +4096,18 @@ def _existentes_por_clave(fechas: set, nombres: set) -> dict:
         return {}
     f = ",".join(sorted(fechas))
     n = ",".join(sorted(nombres))
-    r = http.get(
+    # Paginado: un export de 30 días de Health Auto Export pasa de largo las 1.000 filas
+    # que corta Supabase, y lo que no se leía aquí se daba por no guardado — con lo que
+    # la regla de las acumulativas dejaba de proteger el total de esos días.
+    r, filas = _leer_todas(
         f"{SUPABASE_URL}/rest/v1/health_metrics"
         f"?metric_date=in.({quote(f, safe=',')})&metric_name=in.({quote(n, safe=',')})"
-        f"&select=metric_date,metric_name,value,extra&limit=10000",
-        headers=supabase_headers(),
+        f"&select=metric_date,metric_name,value,extra&order=metric_date.asc,metric_name.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         logger.error("Ingesta de salud: no se pudo leer lo existente (%s)", r.status_code)
         return {}
-    return {(row["metric_date"], row["metric_name"]): row for row in r.json()}
+    return {(row["metric_date"], row["metric_name"]): row for row in filas}
 
 
 # Quién escribió cada fila. Las dos fuentes usan la MISMA tabla y hasta ahora no
@@ -4606,15 +4657,15 @@ def get_health_metrics(
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days debe estar entre 1 y 365")
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    r = http.get(
+    # Paginado (ver `_leer_todas`): con `limit=5000` Supabase devolvía igualmente 1.000
+    # filas, las más ANTIGUAS, y el sueño de las últimas noches no salía en el dashboard.
+    r, filas = _leer_todas(
         f"{SUPABASE_URL}/rest/v1/health_metrics"
-        f"?metric_date=gte.{since}&order=metric_date.asc&limit=5000",
-        headers=supabase_headers(),
+        f"?metric_date=gte.{since}&order=metric_date.asc,metric_name.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         raise _supabase_error(r)
 
-    filas = r.json()
     grouped: dict = {}
     last_sync: str | None = None
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -4731,15 +4782,13 @@ def get_health_diagnostico(
         raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 365")
     hoy   = datetime.now(LOCAL_TZ).date()
     desde = (hoy - timedelta(days=dias - 1)).isoformat()
-    r = http.get(
+    r, filas = _leer_todas(
         f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
         "&select=metric_date,metric_name,value,extra,fuente,created_at"
-        "&order=metric_date.asc&limit=20000",
-        headers=supabase_headers(),
+        "&order=metric_date.asc,metric_name.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         raise _supabase_error(r)
-    filas = r.json()
 
     por_nombre: dict = {}
     for fila in filas:
@@ -5658,12 +5707,11 @@ def _brief_salud() -> dict:
     el correo.
     """
     desde = (datetime.now(LOCAL_TZ) - timedelta(days=BRIEF_DIAS_SALUD)).strftime("%Y-%m-%d")
-    r = http.get(
+    r, filas = _leer_todas(
         f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
-        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc&limit=5000",
-        headers=supabase_headers(),
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc,metric_name.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         logger.error("Resumen diario: no se pudieron leer las métricas de salud (%s)", r.status_code)
         return {}
 
@@ -5675,7 +5723,7 @@ def _brief_salud() -> dict:
     # días (la query filtra por gte) y se lleva por delante el "último valor" de su
     # métrica. Hay una así en la tabla, un heart_rate fechado en diciembre.
     por_nombre: dict = {}
-    for fila in r.json():
+    for fila in filas:
         d = _dia(fila.get("metric_date"))
         if d is None or d > hoy:
             continue
@@ -6928,17 +6976,16 @@ def _informe_salud(semanas: int, hoy) -> dict:
     esa caída se lee como un empeoramiento.
     """
     desde = (hoy - timedelta(weeks=semanas)).isoformat()
-    r = http.get(
+    r, filas = _leer_todas(
         f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
-        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc&limit=20000",
-        headers=supabase_headers(),
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc,metric_name.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         logger.error("Informe semanal: no se pudieron leer las métricas (%s)", r.status_code)
         return {}
 
     por_nombre: dict = {}
-    for fila in r.json():
+    for fila in filas:
         d = _dia(fila.get("metric_date"))
         if d is None or d > hoy:
             continue
@@ -11235,14 +11282,13 @@ def _avisar_reloj_si_toca() -> dict:
 
     try:
         desde = (ahora.date() - timedelta(days=RELOJ_AVISO_VENTANA - 1)).isoformat()
-        r = http.get(
+        r, filas = _leer_todas(
             f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
-            "&select=metric_date,metric_name,value,extra&limit=2000",
-            headers=supabase_headers(),
+            "&select=metric_date,metric_name,value,extra&order=metric_date.asc,metric_name.asc",
         )
-        if r.status_code >= 300:
+        if filas is None:
             raise RuntimeError(f"Supabase devolvió {r.status_code}")
-        con_dia, con_noche, con_movil = _dias_de_reloj(r.json())
+        con_dia, con_noche, con_movil = _dias_de_reloj(filas)
     except Exception as e:
         logger.error("Aviso de reloj: no se pudo leer el uso del reloj (%s)", e)
         return {}

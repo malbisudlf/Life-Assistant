@@ -1236,3 +1236,68 @@ class TestSaludAjustes:
         r = client.get("/health/metrics", headers=auth_headers)
         assert r.status_code == 200
         assert r.json()["ajustes"]["cambio_dispositivo"] is None
+
+
+class TestLecturaPaginada:
+    """PostgREST corta cada respuesta a 1.000 filas aunque se le pida `limit=5000`, y lo
+    que quedaba fuera en `/health/metrics` (orden ascendente) eran los días más nuevos:
+    el sueño de hoy se guardaba y el dashboard seguía enseñando el de hace tres días."""
+
+    TOPE = 1000
+
+    def _supabase_con_tope(self, filas):
+        """Imita a Supabase: nunca más de TOPE filas por respuesta, y el total en
+        `Content-Range` porque se pide `count=exact`."""
+        def _get(url, **kwargs):
+            offset = int(url.split("offset=")[1].split("&")[0]) if "offset=" in url else 0
+            lote = filas[offset:offset + self.TOPE]
+            fin = offset + len(lote) - 1
+            return FakeResponse(lote, headers={"Content-Range": f"{offset}-{fin}/{len(filas)}"})
+        return _get
+
+    @staticmethod
+    def _filas_antiguas(n):
+        return [{"metric_date": "2026-09-01", "metric_name": f"m{i:04d}",
+                 "value": 1, "unit": "", "extra": {}} for i in range(n)]
+
+    def test_el_sueno_mas_reciente_no_se_queda_fuera(self, client, mock_requests, auth_headers):
+        noche = {"metric_date": "2026-09-23", "metric_name": "sleep_analysis",
+                 "value": 7.5, "unit": "hr", "extra": {"sleep_start": "23:40"}}
+        mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.",
+                          self._supabase_con_tope(self._filas_antiguas(1100) + [noche]))
+
+        r = client.get("/health/metrics?days=30", headers=auth_headers)
+
+        assert r.status_code == 200
+        assert r.json()["metrics"]["sleep_analysis"][0]["date"] == "2026-09-23"
+        # Dos páginas, y ninguna fila repetida entre ellas.
+        assert len(mock_requests.called("GET", "metric_date=gte.")) == 2
+        assert sum(len(v) for v in r.json()["metrics"].values()) == 1101
+
+    def test_el_orden_no_empata_para_poder_paginar(self, client, mock_requests, auth_headers):
+        """Sin un orden total, dos páginas seguidas pueden repetir o saltarse filas."""
+        client.get("/health/metrics?days=30", headers=auth_headers)
+        url = mock_requests.called("GET", "metric_date=gte.")[0][1]
+        assert "order=metric_date.asc,metric_name.asc" in url
+        assert "limit=1000&offset=0" in url
+
+    def test_si_falla_una_pagina_es_un_502(self, client, mock_requests, auth_headers):
+        mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.",
+                          FakeResponse(None, 500, "boom"))
+        assert client.get("/health/metrics", headers=auth_headers).status_code == 502
+
+    def test_la_ingesta_ve_todo_lo_ya_guardado(self, mock_requests):
+        """Un export de 30 días pasa de 1.000 filas: lo que no se leía se daba por no
+        guardado y la regla de las acumulativas dejaba de proteger esos totales."""
+        filas = self._filas_antiguas(1500)
+        mock_requests.add("GET", "metric_date=in.", self._supabase_con_tope(filas))
+        existentes = main._existentes_por_clave({"2026-09-01"}, {"m0000"})
+        assert len(existentes) == 1500
+
+    def test_sin_content_range_para_cuando_la_pagina_viene_corta(self, mock_requests):
+        """Los mocks y cualquier servidor que no cuente: se para al ver una página
+        incompleta, en vez de pedir páginas para siempre."""
+        mock_requests.add("GET", "health_metrics", FakeResponse(self._filas_antiguas(3)))
+        r, filas = main._leer_todas(f"{main.SUPABASE_URL}/rest/v1/health_metrics?order=id")
+        assert len(filas) == 3
+        assert len(mock_requests.called("GET", "health_metrics")) == 1

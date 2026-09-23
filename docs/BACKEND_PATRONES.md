@@ -207,6 +207,11 @@
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
   carga del dashboard, con el arranque en frío de Fly por delante. Si una depende del
   resultado de otra, en serie.
+- **Supabase nunca devuelve más de 1.000 filas por petición**, pida el `limit` que pida:
+  PostgREST lo recorta a su `db-max-rows` sin avisar. Toda lectura que pueda pasar de ahí
+  va por `_leer_todas(url)` —sin `limit` en la URL y con un `order` que no empate—, que
+  pagina hasta el total de `Content-Range`. Con un `limit=5000` en orden ascendente,
+  `/health/metrics` perdía los días más nuevos (ver `docs/BUGS_HISTORICOS.md`).
 - **Registro persistente (`app_logs`)**: `logger.error()`/`warning()` van a stdout Y a
   Supabase, porque el stdout se lo lleva la máquina de Fly al escalar a cero — que es
   justo por lo que el 409 de la ingesta de salud estuvo días registrándose sin que nadie
