@@ -244,6 +244,29 @@ class TestHealthIngest:
         assert fila["extra"]["deep"] == 1.5 and fila["extra"]["rem"] == 2.0
         assert fila["extra"]["sleep_start"] == "00:10"
 
+    def test_tramos_que_traen_date_tambien_se_juntan(self, client, mock_requests):
+        """"Export a Single Health Metric" manda los tramos CON `date` (su hora de
+        inicio). Pasaban sin juntar y el primero de cada día quedaba como la noche: un
+        "En cama" de 9 h el día 22 y un tramo de 9 minutos el 23."""
+        def tramo(ini, fin, fase, h):
+            return {"startDate": ini, "endDate": fin, "date": ini, "start": ini, "end": fin,
+                    "value": fase, "qty": h, "source": "Zepp"}
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "sleep_analysis", "units": "hr", "data": [
+                tramo("2026-09-22 23:27:00 +0200", "2026-09-23 08:35:59 +0200", "In Bed", 9.15),
+                tramo("2026-09-22 23:30:00 +0200", "2026-09-22 23:42:59 +0200", "Core", 0.25),
+                tramo("2026-09-22 23:54:00 +0200", "2026-09-23 00:06:59 +0200", "Deep", 0.25),
+                tramo("2026-09-23 00:07:00 +0200", "2026-09-23 04:07:00 +0200", "Core", 4.0),
+                tramo("2026-09-23 04:07:00 +0200", "2026-09-23 06:07:00 +0200", "REM", 2.0),
+            ]},
+        ]}})
+        assert r.status_code == 200
+        filas = self._filas(mock_requests)
+        assert [f["metric_date"] for f in filas] == ["2026-09-23"]
+        assert filas[0]["value"] == 6.5
+        assert filas[0]["extra"]["sleep_start"] == "23:30"
+        assert filas[0]["extra"]["inBed"] == 9.15
+
     def test_punto_sin_fecha_deja_rastro_en_el_log(self, client, mock_requests, caplog):
         r = client.post(self.URL, json={"data": {"metrics": [
             {"name": "heart_rate", "units": "count/min", "data": [{"Avg": 60}]},

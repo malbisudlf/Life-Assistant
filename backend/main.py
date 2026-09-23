@@ -3946,11 +3946,15 @@ def _resumir_sueno_por_tramos(puntos: list) -> list:
     —fases, `totalSleep`, `sleepStart`/`sleepEnd`— y la noche se asigna al día en que
     se despierta, que es lo que hace el resumen de Health Auto Export.
 
-    Los puntos que ya traen `date` pasan tal cual.
+    Los puntos ya resumidos (sin fase en `value`) pasan tal cual.
     """
     resumidos, noches = [], {}
     for p in puntos:
-        if p.get("date") or not (p.get("startDate") and p.get("endDate")):
+        # Un tramo se reconoce por la FASE en `value` (texto) y sus dos extremos, no por
+        # la falta de `date`: "Export a Single Health Metric" manda los tramos CON `date`
+        # (la hora de inicio de cada uno), y dejarlos pasar guardaba el primero del día
+        # —un "En cama" de 9 h, o un tramo de 9 minutos— como si fuera la noche entera.
+        if not (isinstance(p.get("value"), str) and p.get("startDate") and p.get("endDate")):
             resumidos.append(p)
             continue
         inicio, fin = str(p["startDate"]), str(p["endDate"])
@@ -3958,12 +3962,16 @@ def _resumir_sueno_por_tramos(puntos: list) -> list:
         if len(fin) < 10 or fase is None:
             continue
         try:
+            t_ini = datetime.strptime(inicio[:19], "%Y-%m-%d %H:%M:%S")
             horas = float(p["qty"]) if p.get("qty") is not None else (
-                (datetime.strptime(fin[:19], "%Y-%m-%d %H:%M:%S")
-                 - datetime.strptime(inicio[:19], "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600)
+                (datetime.strptime(fin[:19], "%Y-%m-%d %H:%M:%S") - t_ini).total_seconds() / 3600)
         except (TypeError, ValueError):
             continue
-        n = noches.setdefault(fin[:10], {"date": f"{fin[:10]} 00:00:00 {fin[20:]}".strip(),
+        # La noche es del día en que te despiertas, pero los tramos de antes de las doce
+        # TERMINAN la víspera: agrupar por la fecha de fin partía la noche en dos. Lo que
+        # empieza a partir del mediodía cuenta para el día siguiente.
+        dia = (t_ini + timedelta(hours=12)).strftime("%Y-%m-%d")
+        n = noches.setdefault(dia, {"date": f"{dia} 00:00:00 {fin[20:]}".strip(),
                                          "core": 0.0, "deep": 0.0, "rem": 0.0, "awake": 0.0,
                                          "inBed": 0.0, "asleep": 0.0})
         n[fase] += horas
