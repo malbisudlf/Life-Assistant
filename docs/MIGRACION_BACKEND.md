@@ -331,3 +331,28 @@ Ese `version` sale de `/app/VERSION`, que se escribe al construir con el `rev-pa
 clon. Si no coincide con el `main` de GitHub, el add-on está corriendo código viejo.
 Durante meses fue así sin que se notara: ver «Reconstruir no reconstruía» en
 `docs/BUGS_HISTORICOS.md`.
+
+### Los ficheros del add-on NO salen de git
+
+`Dockerfile`, `config.yaml` y `run.sh` están en `/addons/life-assistant/` del Green
+porque se copiaron a mano por Samba. De git sale solo el contenido de `backend/`, que
+es lo que clona el `RUN git clone`. **Cambiar `addon/` en el repositorio y mergear a
+`main` no cambia nada en el Green**: hay que volver a poner el fichero en el aparato.
+
+Comprobar si alguno se ha quedado atrás:
+
+```bash
+md5sum /addons/life-assistant/{Dockerfile,config.yaml,run.sh}   # en el Green
+```
+
+y comparar con los del repo. Para subir uno por SSH — `/addons` es de root, y el
+add-on de SSH no tiene subsistema SFTP, así que ni `scp` ni `sftp` valen:
+
+```bash
+cat > /tmp/Dockerfile.nuevo        # el contenido va por el stdin del comando
+sudo cp /addons/life-assistant/Dockerfile /addons/life-assistant/Dockerfile.bak-<fecha>
+sudo cp /tmp/Dockerfile.nuevo /addons/life-assistant/Dockerfile
+```
+
+Después, *Reconstruir*. Si has tocado el `Dockerfile`, esa reconstrucción tarda varios
+minutos: la caché queda invalidada y vuelve a instalar las dependencias enteras.
