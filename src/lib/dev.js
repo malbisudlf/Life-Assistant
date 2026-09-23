@@ -673,6 +673,15 @@ export function estadoRegla(r) {
   };
 }
 
+// Que una regla, además de avisar al móvil, te llame por teléfono (`docs/LLAMADAS.md`).
+export async function cambiarLlamadaRegla(regla, llamar) {
+  const r = await apiFetch(`${API}/avisos/reglas/${encodeURIComponent(regla)}/llamar`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ llamar }),
+  });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  return r.json();
+}
+
 export async function reactivarRegla(regla) {
   const r = await apiFetch(`${API}/avisos/reglas/${encodeURIComponent(regla)}/reactivar`,
                            { method: "POST", headers: authHeaders() });

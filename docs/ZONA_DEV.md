@@ -90,6 +90,8 @@ diario o el informe semanal (`POST /brief/send`, `POST /informe/send`), reintent
 del PC (`POST /jobs/{id}/retry`), despertarlo (`POST /wake-pc`) y devolverle la voz a una
 regla que se ha silenciado sola (`POST /avisos/reglas/{regla}/reactivar`) — que es
 reversible por partida doble: si vuelve a acumular votos negativos, se callará otra vez.
+Y, desde el 2026-09-23, encender o apagar que una regla cotidiana además te llame por
+teléfono (`POST /avisos/reglas/{regla}/llamar`, ver `docs/LLAMADAS.md`).
 
 **Y desde el 2026-09-10, despliega.** El botón *Desplegar* de la pestaña Despliegue
 llama a `POST /dev/reconstruir`. En `caja` (desde el 2026-09-23) el backend deja un
@@ -174,7 +176,8 @@ Por fases. Cada fase es un PR.
 11. **Avisos y reglas** (hecha) — qué salió, por qué (`GET /avisos/{id}/porque`, que se
     pide solo al abrir un aviso), la estadística de votos de cada regla, cuáles se han
     silenciado solas —con el botón de devolverles la voz—, las reglas que propuso Jarvis y
-    las páginas que vigila.
+    las páginas que vigila. Y el panel «Además del aviso, llámame»: qué reglas del día a
+    día hacen sonar el teléfono y cuántas llamadas van hoy contra su tope.
 
 ### Lo que se decidió al escribir la fase 3
 

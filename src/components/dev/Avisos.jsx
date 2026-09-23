@@ -12,7 +12,8 @@ import { useState, useEffect, useCallback } from "react";
 
 import { API, authHeaders, apiFetch } from "../../lib/api";
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
-         leerAvisosDev, estadoRegla, reactivarRegla } from "../../lib/dev";
+         leerAvisosDev, estadoRegla, reactivarRegla,
+         cambiarLlamadaRegla } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const VENTANAS = [1, 7, 30];
@@ -25,6 +26,7 @@ export default function Avisos() {
   const [abierto, setAbierto] = useState(null);
   const [porque, setPorque]   = useState({});   // id -> motivo o "nada"
   const [tic, setTic]         = useState(0);
+  const [cambiando, setCambiando] = useState("");
 
   useEffect(() => {
     let vivo = true;
@@ -65,7 +67,20 @@ export default function Avisos() {
     } catch { /* la pantalla se recarga sola en el siguiente intento */ }
   }
 
+  async function cambiarLlamada(regla, llamar) {
+    setCambiando(regla);
+    try {
+      await cambiarLlamadaRegla(regla, llamar);
+      recargar();
+    } catch (e) {
+      setError(e.message || "no se pudo cambiar");
+    } finally {
+      setCambiando("");
+    }
+  }
+
   const reglas    = datos?.reglas;
+  const llamadas  = datos?.llamadas;
   const enviados  = datos?.enviados;
   const gastado   = datos?.presupuesto?.gastado ?? 0;
   const tope      = datos?.presupuesto?.tope ?? 0;
@@ -124,6 +139,45 @@ export default function Avisos() {
           })}
         </div>
       </div>
+
+      {llamadas && (
+        <div style={panelStyle}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+            <span style={{ ...tituloStyle, marginBottom: 0 }}>Además del aviso, llámame</span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>
+              {llamadas.telefono
+                ? `${llamadas.hoy ?? "?"}/${llamadas.tope} llamadas hoy`
+                : "teléfono sin configurar: no llamará ninguna"}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {llamadas.reglas.map(r => (
+              <div key={r.regla} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                               background: COLOR_TONO[r.llamar ? "green" : "muted"] }} />
+                <span style={{ fontFamily: MONO, fontSize: 12, color: "var(--text)", minWidth: 130 }}>
+                  {r.regla}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--muted)", flex: 1, minWidth: 0 }}>
+                  {r.nombre}
+                </span>
+                <Boton onClick={() => cambiarLlamada(r.regla, !r.llamar)}
+                       disabled={cambiando === r.regla}
+                       tono={r.llamar ? "acento" : "normal"}
+                       title={r.llamar ? "Deja de llamar por esta regla (el aviso sigue saliendo)"
+                                       : "Que esta regla también te llame"}>
+                  {r.llamar ? "Llama" : "Solo aviso"}
+                </Boton>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--muted2)", marginTop: 8 }}>
+            La llamada va siempre detrás del aviso, nunca en su lugar. No suena de noche ni
+            pasada la hora de silencio, y las averías no gastan este tope.
+          </div>
+        </div>
+      )}
 
       <div style={{ ...panelStyle, padding: 0 }}>
         <div style={{ ...tituloStyle, padding: "14px 16px 8px" }}>Lo que salió</div>

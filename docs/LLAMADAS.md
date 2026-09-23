@@ -120,6 +120,8 @@ centralita es el canal que empieza la máquina; la pantalla, el que empiezas tú
 > **Solo llama lo que no se resuelve sin ti.** No lo urgente, no lo importante: lo que
 > se queda parado. Hoy son dos cosas, y ninguna más: el permiso de despliegue y una
 > avería que lleva un cuarto de hora sin arreglarse sola.
+>
+> **Con una excepción que pediste tú (2026-09-23): las llamadas cotidianas**, abajo.
 
 Ya no es el canal más caro en euros —por la centralita no cuesta nada—, pero sigue
 siendo el más caro en lo que de verdad escasea: te interrumpe de verdad. Que se haya
@@ -133,6 +135,36 @@ previene en el canal de al lado, con la factura más alta.
 Y la frontera de siempre: **la llamada informa y pregunta, pero no decide**. Lo que se
 hable por teléfono acaba en `_despliegue_decidir` como cualquier botón, con su PATCH
 condicional. Quien llama no se salta la puerta, la usa.
+
+### Las llamadas cotidianas (desde el 2026-09-23)
+
+Tras la primera llamada de prueba, Mikel pidió que el teléfono sonara también por cosas
+del día a día: *«oye, que sepas que llevas un día sin mandar nada al LA»*. Es justo lo
+que la regla de arriba excluye, y se hizo igualmente porque la decisión es suya — pero
+con los frenos que sostienen esa regla, para que lo cotidiano no gaste el teléfono:
+
+- **Va detrás del aviso, nunca en su lugar.** Primero sale la notificación de siempre y,
+  si la regla lo pide, además suena. Si la llamada falla, lo que había que decir ya ha
+  llegado (`_llamada_cotidiana_segura`, que no puede liberar el aviso ya entregado).
+- **Tú eliges qué reglas**, una a una, en la pestaña Avisos de la zona dev (columna
+  `avisos_reglas.llamar`). Solo pueden las del catálogo `REGLAS_LLAMABLES` (ingesta,
+  reloj, salir, no_llegas, madrugón, malestar, hueco para entrenar, al salir de casa, PC
+  encendido). Nacieron encendidas las siete que se eligieron; `al_salir` y
+  `pc_encendido`, apagadas.
+- **Tope diario** (`LLAMADAS_COTIDIANAS_DIA`, 2 por defecto), contado en
+  `avisos_llamadas`. Las averías no lo gastan. Sin poder contar, no se llama.
+- **Nunca de noche ni pasada `AVISOS_HORA_SILENCIO`** (22:00). No se aplaza: una llamada
+  de las 23:00 dicha a las 07:00 ya habla de otra cosa, y el aviso ya salió.
+- **Una llamada por aviso**: la reserva en `avisos_llamadas` va por el id del aviso, y el
+  409 contra la clave es la respuesta a «¿ya se llamó?».
+- **Solo por la centralita**, nunca Twilio: lo cotidiano no justifica pagar por minuto.
+- El `contexto` le dice a Jarvis-Claude que **no es una avería** y que no toque nada en
+  la máquina: sin eso, quien descuelga con acceso de shell se pondría a buscar qué
+  arreglar.
+
+Si en unas semanas dejas de coger estas llamadas, la solución no es bajar el tope: es
+apagar las reglas que no aportan, porque el coste de verdad es que dejes de coger
+también la de la avería.
 
 ## Lo que se evaluó (agosto de 2026)
 
