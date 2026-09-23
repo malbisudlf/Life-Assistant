@@ -352,8 +352,10 @@ Vive como add-on del Home Assistant Green y su `Dockerfile` clona este repositor
 construcción, así que desplegar es reconstruir el add-on. Tres formas, todas equivalentes:
 
 - **`POST /dev/reconstruir`** (JWT de usuario), que es lo que hay detrás del botón
-  *Reconstruir* de la pestaña Despliegue de la zona dev. El add-on se lo pide al
-  Supervisor él mismo (`/addons/self/rebuild`) con su `SUPERVISOR_TOKEN`.
+  *Desplegar* de la pestaña Despliegue de la zona dev. **En `caja`** (donde vive desde el
+  2026-09-20) deja un pedido en `DESPLIEGUE_DIR` que `desplegar.path` (systemd, en el
+  repositorio HomeLab) convierte en `desplegar.sh`. Como add-on del Green se lo pedía al
+  Supervisor (`/addons/self/rebuild`) con su `SUPERVISOR_TOKEN`. Ver `docs/ZONA_DEV.md`.
 - **Por SSH al Green**, que es lo que puede hacer una sesión que corra en la red de casa:
   `export SUPERVISOR_TOKEN=$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)` y
   `ha addons rebuild local_life-assistant`. Tarda ~1:15 más el arranque.

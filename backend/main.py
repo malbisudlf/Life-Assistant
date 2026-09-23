@@ -9084,36 +9084,74 @@ def dev_config(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     }
 
 
-# ── ZONA DEV: RECONSTRUIR EL ADD-ON ───────────────────────────────────────────
-# El backend se reconstruye a sí mismo. Es el único sitio del proyecto donde el código
-# que corre en producción decide sustituirse por otro, así que conviene saber por qué
-# existe y qué lo sujeta.
+# ── ZONA DEV: DESPLEGAR ───────────────────────────────────────────────────────
+# El backend se despliega a sí mismo. Es el único sitio del proyecto donde el código que
+# corre en producción decide sustituirse por otro, así que conviene saber por qué existe
+# y qué lo sujeta.
 #
-# Hasta aquí, desplegar era ir a la interfaz de Home Assistant y pulsar «Reconstruir». Eso
-# convertía cada arreglo en dos pasos con una persona en medio, y el segundo se olvidaba:
-# la reconstrucción se posponía, producción se quedaba atrás y el aviso del móvil llegaba
-# a decir «desplegado» cuando lo único hecho era el merge (docs/AVERIAS.md).
+# Hasta aquí, desplegar era entrar en la máquina y lanzarlo a mano. Eso convertía cada
+# arreglo en dos pasos con una persona en medio, y el segundo se olvidaba: producción se
+# quedaba atrás y el aviso del móvil llegaba a decir «desplegado» cuando lo único hecho
+# era el merge (docs/AVERIAS.md).
 #
-# Lo que lo hace posible: dentro de un add-on, el Supervisor da un `SUPERVISOR_TOKEN` con
-# el que se puede llamar a su API — incluida la reconstrucción del propio add-on. No pasa
-# por `docker`, que es lo que bloquea el Protection mode, así que no hay que bajarlo.
-# Hace falta que `addon/life-assistant/config.yaml` declare `hassio_api: true` y
-# `hassio_role: manager`; **y ese fichero se copia a mano por Samba**, no sale de git.
+# Hay dos motores, según dónde corra el backend:
 #
-# Lo que lo sujeta:
+#   - **`caja`** (producción desde el 2026-09-20). El backend es un contenedor de Docker
+#     Compose y no puede reconstruirse a sí mismo sin el socket de Docker —que sería root
+#     en la máquina entera a cambio de un botón—. Lo que hace es dejar un PEDIDO: un
+#     fichero en `DESPLIEGUE_DIR`, un directorio montado desde `caja`. Allí una unidad
+#     `systemd` `.path` lo ve, lo borra y ejecuta `desplegar.sh` (git pull, VERSION,
+#     reconstruir, esperar al healthcheck). El contenedor solo puede pedir «despliega
+#     main»: el contenido del fichero no lo lee nadie, así que no hay nada que inyectar.
+#     Las unidades viven en el repositorio HomeLab (`caja/desplegar.path`).
+#   - **Add-on del Green** (el camino de vuelta, parado hasta la fase 5 del HomeLab). El
+#     Supervisor da un `SUPERVISOR_TOKEN` con el que se le pide `/addons/self/rebuild`.
+#     Hace falta `hassio_api: true` y `hassio_role: manager` en el `config.yaml` del
+#     add-on, que se copia a mano por Samba.
+#
+# Lo que lo sujeta, sea cual sea el motor:
 #   - JWT de usuario. Nunca un token de servicio: nada que arranque solo despliega.
-#   - Un tiempo mínimo entre reconstrucciones, para que un doble clic no encadene dos.
-#   - Se registra quién y cuándo, y se vuelca ANTES de lanzarla — el proceso está a punto
+#   - Un tiempo mínimo entre despliegues, para que un doble clic no encadene dos.
+#   - Se registra quién y cuándo, y se vuelca ANTES de lanzarlo — el proceso está a punto
 #     de morir y lo que quede en la cola del registro se pierde con él.
+DESPLIEGUE_DIR   = os.getenv("DESPLIEGUE_DIR", "")
 SUPERVISOR_URL   = os.getenv("SUPERVISOR_URL", "http://supervisor")
 SUPERVISOR_TOKEN = os.getenv("SUPERVISOR_TOKEN", "")
 
-# Cuánto hay que esperar entre dos reconstrucciones. En memoria, y eso basta para lo que
-# protege: encadenar dos seguidas por un doble clic o por un cliente que reintenta. Contra
-# un bucle largo no puede hacer nada —cada reconstrucción mata este proceso y con él la
+# Cuánto hay que esperar entre dos despliegues. En memoria, y eso basta para lo que
+# protege: encadenar dos seguidos por un doble clic o por un cliente que reintenta. Contra
+# un bucle largo no puede hacer nada —cada despliegue mata este proceso y con él la
 # variable—, y por eso el límite de verdad es que esto pida un JWT de usuario.
 RECONSTRUIR_ESPERA = int(os.getenv("RECONSTRUIR_ESPERA", "180"))
 _ultima_reconstruccion: float = 0.0
+
+
+def _motor_despliegue() -> str:
+    """Con qué se despliega este backend: "caja", "supervisor" o "" si con nada.
+
+    `caja` va primero porque es lo que atiende producción: si algún día los dos estuvieran
+    configurados, el pedido es lo que de verdad cambia el código que sirve el dominio.
+    """
+    if DESPLIEGUE_DIR:
+        return "caja"
+    if SUPERVISOR_TOKEN:
+        return "supervisor"
+    return ""
+
+
+def _pedir_despliegue(version: str) -> None:
+    """Deja el pedido para `desplegar.path`. En línea, no en un hilo: escribir un fichero
+    no mata el proceso, y así un fallo (el directorio sin montar) llega al navegador como
+    error en vez de perderse en el registro.
+
+    Se escribe a un temporal y se renombra, para que la unidad nunca vea un fichero a
+    medias. El contenido es solo para quien mire a mano: `desplegar.sh` no lo lee.
+    """
+    destino  = os.path.join(DESPLIEGUE_DIR, "pedido")
+    temporal = destino + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} desde {version}\n")
+    os.replace(temporal, destino)
 
 
 def _reconstruir_addon() -> None:
@@ -9144,41 +9182,56 @@ def _reconstruir_addon() -> None:
 
 @app.post("/dev/reconstruir")
 def dev_reconstruir(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Reconstruye el add-on: clona `main` y sustituye lo que está corriendo.
+    """Despliega `main` y sustituye lo que está corriendo.
 
     **Esto es un despliegue de producción.** No lo dispara nada automático: pide un JWT de
     usuario, y quien lo llama (la pestaña Despliegue de la zona dev) pregunta antes.
 
-    Contesta 202 y se va: lo que viene después es este mismo proceso muriendo. Quien
-    llama se entera de que ha terminado sondeando `GET /` hasta que el `version` cambie,
-    que es además la única comprobación que vale — un despliegue que no se comprueba no es
-    un despliegue (CLAUDE.md).
+    Contesta y se va: lo que viene después es este mismo proceso muriendo. Quien llama se
+    entera de que ha terminado sondeando `GET /` hasta que el `version` cambie, que es
+    además la única comprobación que vale — un despliegue que no se comprueba no es un
+    despliegue (CLAUDE.md). `motor` le dice dónde mirar si no vuelve.
     """
     global _ultima_reconstruccion
 
-    if not SUPERVISOR_TOKEN:
-        # Fuera del add-on (en local, en el kit de terceros) esto no existe, y decirlo es
-        # mejor que un 500 raro: aquí el despliegue es otra cosa.
+    motor = _motor_despliegue()
+    if not motor:
+        # En local y en el kit de terceros no hay con qué, y decirlo es mejor que un 500
+        # raro: aquí el despliegue es otra cosa.
         raise HTTPException(status_code=503, detail=(
-            "Este backend no corre como add-on de Home Assistant (no hay SUPERVISOR_TOKEN), "
-            "así que no puede reconstruirse a sí mismo"))
+            "Este backend no sabe desplegarse a sí mismo: no tiene DESPLIEGUE_DIR (caja) "
+            "ni SUPERVISOR_TOKEN (add-on de Home Assistant)"))
 
     espera = RECONSTRUIR_ESPERA - (time.time() - _ultima_reconstruccion)
     if _ultima_reconstruccion and espera > 0:
-        raise HTTPException(status_code=429, detail=f"Espera {int(espera)}s: se acaba de lanzar una",
+        raise HTTPException(status_code=429, detail=f"Espera {int(espera)}s: se acaba de lanzar uno",
                             headers={"Retry-After": str(int(espera))})
 
     version = _version_desplegada()
+
+    if motor == "caja":
+        try:
+            _pedir_despliegue(version)
+        except OSError as e:
+            # Casi siempre es el volumen sin montar en compose.yaml, o montado de solo
+            # lectura. Nada ha empezado: el proceso sigue vivo y puede decirlo.
+            logger.error("Despliegue: no se ha podido dejar el pedido en %s (%s)",
+                         DESPLIEGUE_DIR, type(e).__name__)
+            raise HTTPException(status_code=503, detail=(
+                "No se ha podido dejar el pedido de despliegue: ¿está montado "
+                "DESPLIEGUE_DIR en compose.yaml?"))
+
     _ultima_reconstruccion = time.time()
-    # A stdout Y a Supabase, y volcado a mano: en cuanto arranque el hilo, este proceso
-    # tiene los minutos contados y el volcado periódico no llegaría a tiempo.
-    logger.warning("Reconstrucción del add-on lanzada a mano desde la zona dev "
-                   "(sirviendo %s)", version[:7])
+    # A stdout Y a Supabase, y volcado a mano: en cuanto arranque, este proceso tiene los
+    # minutos contados y el volcado periódico no llegaría a tiempo.
+    logger.warning("Despliegue lanzado a mano desde la zona dev (motor %s, sirviendo %s)",
+                   motor, version[:7])
     _registro.volcar()
 
-    threading.Thread(target=_reconstruir_addon, daemon=True, name="reconstruir").start()
-    return {"ok": True, "lanzada": True, "version_antes": version,
-            "nota": "El backend se para mientras reconstruye (1-2 min). Cuando GET / "
+    if motor == "supervisor":
+        threading.Thread(target=_reconstruir_addon, daemon=True, name="reconstruir").start()
+    return {"ok": True, "lanzada": True, "motor": motor, "version_antes": version,
+            "nota": "El backend se para mientras se reconstruye (1-2 min). Cuando GET / "
                     "vuelva a responder, su version dirá qué código ha quedado."}
 
 

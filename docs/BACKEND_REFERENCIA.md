@@ -209,7 +209,7 @@ está duplicado en los dos lados y **tienen que coincidir**.
 | `GET /dev/linea?dia=` | JWT | Todo lo que pasó ese día en un solo hilo y por orden: registro, avisos enviados, cola del PC y sus etapas, ingestas de salud y correos. La ventana va en hora LOCAL. Lo que no se pueda leer sale en `sin_leer` en vez de parecer un día tranquilo |
 | `GET /dev/jobs?limite=` | JWT | La cola del agente PC entera: agentes con cuánto llevan callados, los últimos jobs con sus etapas ya repartidas por `job_id` y las últimas entregas resueltas. Una tabla que no responde sale como `null`, nunca como lista vacía |
 | `GET /dev/avisos?dias=` | JWT | Qué avisos salieron, la estadística de votos por regla cruzada con el gobierno de avisos (una regla silenciada sale aunque lleve semanas callada), las reglas que propuso Jarvis y las páginas vigiladas |
-| `POST /dev/reconstruir` | JWT | **Despliega**: le pide al Supervisor que reconstruya el add-on (clona `main`). Responde 202 y se va — el proceso muere a continuación. 503 si no corre como add-on, 429 si se acaba de lanzar otra. Nunca lo dispara un token de servicio |
+| `POST /dev/reconstruir` | JWT | **Despliega**. En `caja` deja un pedido en `DESPLIEGUE_DIR` que `desplegar.path` (systemd) convierte en `desplegar.sh`; como add-on, le pide al Supervisor que se reconstruya. Devuelve `motor` y `version_antes` y se va — el proceso muere a continuación. 503 si no tiene con qué (o el directorio no está montado), 429 si se acaba de lanzar otro. Nunca lo dispara un token de servicio |
 
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`.
