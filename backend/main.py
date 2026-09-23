@@ -6566,6 +6566,14 @@ def construir_brief() -> dict:
         "fecha":         hoy.isoformat(),
         "dia_semana":    DIAS_SEMANA[hoy.weekday()],
         "zona":          TIMEZONE,
+        # QUÉ MÁQUINA ha escrito este correo. Parece un dato de adorno y es lo único que
+        # distingue un backend del otro desde fuera: el 18/09/2026 el resumen lo seguía
+        # mandando el backend viejo de Fly, con código anterior al arreglo de la espera
+        # al sueño, mientras el Green servía `main` al día. Desde fuera los dos correos
+        # son idénticos salvo por el texto que cambió ese arreglo, así que averiguarlo
+        # costó comparar cadenas del código contra el correo y leer las cabeceras SMTP
+        # para sacar la IP del remitente. Con esta línea se ve de un vistazo.
+        "version":       _version_desplegada(),
         "agenda":        agenda,
         "clases":        clases_hoy,
         "entregas":      entregas,
@@ -6717,6 +6725,13 @@ def render_brief_texto(d: dict) -> str:
         f"Datos de Life Assistant — {d['dia_semana']} {d['fecha']} ({d['zona']})",
         "",
         "Son datos crudos, sin interpretar, para el resumen diario.",
+        # Diagnóstico, no contenido: se dice para que un correo escrito por la máquina
+        # equivocada se note al abrirlo. Se le pide al modelo que no lo mencione porque
+        # en el briefing no pinta nada — igual que el aviso de la sección RELOJ, la
+        # instrucción viaja en el dato porque el prompt de la rutina vive fuera de este
+        # repositorio y no se actualiza al desplegar.
+        f"Lo ha escrito el backend {d.get('version') or 'desconocida'} "
+        f"(diagnóstico: no lo menciones en el briefing).",
         "",
     ]
 

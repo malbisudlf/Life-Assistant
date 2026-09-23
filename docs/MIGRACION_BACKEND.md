@@ -14,6 +14,31 @@ fuera, las cuatro comprobaciones en verde.
 
 Lo que falta: **los apuntadores** (paso 6) y apagar Fly (paso 7).
 
+**Al día 2026-09-18: siguen faltando, y ya se sabe cuál y lo que cuesta.** Doce días
+después, el resumen diario lo seguía mandando **Fly**. Se vio así: el correo de datos de
+esa mañana traía la línea `Anoche sin reloj`, que es del código anterior al 16/09,
+mientras `GET /` del Green devolvía el `main` del día; y las cabeceras SMTP del correo
+daban una IP de un centro de datos de EE. UU. y un contenedor en `172.19.x.x`, no la red
+`hassio` (`172.30.32.0/23`) ni una línea doméstica. El apuntador culpable es **el Atajo
+del iPhone del cargador** (`POST /despertar`), que a las 06:02 despertó a Fly.
+
+Dos consecuencias que no se habían previsto al dejar Fly encendido «por si acaso»:
+
+- **Los dos backends comparten Supabase, así que compiten.** Fly reserva el día en
+  `brief_envios` antes que el Green, y el Green —que sí tiene los arreglos— se encuentra
+  cada mañana con que el correo «ya se envió». El de la red de seguridad de Actions lo
+  deja por escrito: `{"ok":true,"enviado":false,"motivo":"el resumen de hoy ya se envió"}`.
+  Un apuntador olvidado no deja media función rota: deja la función entera corriendo en
+  la máquina vieja, en silencio y con pinta de estar bien.
+- **Los arreglos no llegan a producción aunque el CI esté verde y el add-on al día.**
+  Aquí se perdieron los de #194, #195 y #197 durante días, y el síntoma que se veía era
+  otro: el briefing afirmando todas las mañanas que no habías llevado el reloj.
+
+Por eso **el correo lleva desde entonces el SHA de quien lo escribe** en la primera
+línea (`construir_brief`/`render_brief_texto`): desde fuera, los dos backends producen
+correos idénticos salvo en el texto que cambió el último arreglo, y averiguarlo costó
+una sesión entera comparando cadenas de código y leyendo cabeceras SMTP.
+
 ### Por qué nos vamos de Fly
 
 En septiembre de 2026 llegó el primer cobro visible de Fly, 6 €, y al mirarlo
@@ -249,11 +274,11 @@ justo por lo que se olvidan.
 | **`agent/.env`** | `LA_API_BASE` — **ignorado por git**; el `.env.example` es solo la plantilla y cambiarlo no cambia nada en tu PC |
 | **`backend/.env`** | por coherencia — **ignorado por git** |
 | **`PROJECT_STATE.md`** | notas — **ignorado por git** |
-| iPhone | el Atajo de iOS y Health Auto Export |
+| iPhone | el Atajo de iOS y Health Auto Export. **Confirmado sin cambiar el 2026-09-18**: el Atajo del cargador seguía despertando a Fly, que es quien mandaba el resumen. Son tres sitios distintos y hay que mirarlos uno a uno: el Atajo del cargador (`/despertar`), el de salud (`/health/ingest/simple`) y la URL REST de Health Auto Export (`/health/ingest`) |
 | claude.ai | las rutinas que llaman al backend |
-| GitHub | `revision-aviso.yml` y los workflows que apunten al backend, **y la variable de Actions `BACKEND_URL`**, que no está en ningún fichero y por eso se olvidó |
+| GitHub | `revision-aviso.yml` y los workflows que apunten al backend, **y la variable de Actions `BACKEND_URL`**, que no está en ningún fichero y por eso se olvidó. **Hecho**; comprobado el 2026-09-18 en el log del último `resumen-diario.yml`, que imprime el valor en su bloque `env:` por no ser un secret |
 | Azure | **`REDIRECT_URI` está registrado en el App Registration**: añade el nuevo antes de probar el login de Microsoft, o el OAuth falla con un error de redirect que no dice nada útil |
-| Código | `src/components/Dashboard.jsx:31` y `agent/agent.py:43`, que llevan la URL de Fly por defecto |
+| Código | **Hecho.** Los valores por defecto ya apuntan al Green: `src/lib/api.js:7` (la constante se mudó ahí desde `Dashboard.jsx`) y `agent/agent.py:43`. `agent/.env.example` se quedó atrás hasta el 2026-09-18 |
 | Docs | `CLAUDE.md`, `docs/DESPLIEGUE.md`, `docs/SALUD.md`, `docs/AVISAME.md`, `agent/README.md`, `agent/PUESTA_A_PUNTO.md`, `backend/corregir_energia_kj.py` |
 
 **7. Apagar Fly, y no antes.** Deja pasar unos días y mira `fly logs`: si no

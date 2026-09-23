@@ -174,6 +174,16 @@ class TestConstruirBrief:
         assert d["salud"]["ultimo_entreno"]["dias"] == 2
         assert d["entrenamiento"]["importe_pendiente"] == 30.0
 
+    def test_lleva_el_sha_del_backend_que_lo_compone(
+        self, client, auth_headers, graph_token, mock_requests, monkeypatch,
+    ):
+        """También en el JSON, no solo en el texto: el adjunto es la copia que se
+        guarda, y sirve de poco para auditar si no dice qué código la escribió."""
+        monkeypatch.setattr(main, "_version_desplegada", lambda: "abc1234")
+        montar_fuentes(mock_requests)
+        d = client.get("/brief", headers=auth_headers).json()
+        assert d["version"] == "abc1234"
+
     def test_entregas_por_marcador_ordenadas(self, client, auth_headers, graph_token, mock_requests):
         montar_fuentes(mock_requests, eventos=[
             _evento(f"{main.ENTREGAS_MARKER} Práctica 3", _en_dias(3)),
@@ -780,6 +790,32 @@ class TestRenderTexto:
         assert "6.2 h" in texto and "7d: 7.1" in texto
         assert "150.0 €" in texto
         assert "jueves 2026-07-30" in texto
+
+    def test_dice_que_maquina_lo_ha_escrito(self):
+        """El correo tiene que decir de qué backend sale.
+
+        Dos backends contra el mismo Supabase escriben correos idénticos salvo por el
+        último arreglo que uno tenga y el otro no, así que sin esta línea no hay forma
+        de saber cuál lo mandó: el 18/09/2026 lo seguía escribiendo el de Fly y se tardó
+        una sesión entera en demostrarlo (`docs/MIGRACION_BACKEND.md`).
+        """
+        texto = main.render_brief_texto({
+            "fecha": "2026-09-18", "dia_semana": "viernes", "zona": "Europe/Madrid",
+            "version": "8a374fe36d33bf553280228ae20b16b755a9f4bd",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+        })
+        assert "backend 8a374fe36d33bf553280228ae20b16b755a9f4bd" in texto
+        assert "no lo menciones en el briefing" in texto
+
+    def test_sin_version_no_revienta_y_lo_dice(self):
+        """En local no hay fichero VERSION, y eso es correcto: se dice, no se calla."""
+        texto = main.render_brief_texto({
+            "fecha": "2026-09-18", "dia_semana": "viernes", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+        })
+        assert "backend desconocida" in texto
 
     def test_la_salud_lleva_el_n_y_la_edad_del_dato(self):
         """Sin el n y sin la antigüedad, tres cifras iguales se leen como estabilidad."""
