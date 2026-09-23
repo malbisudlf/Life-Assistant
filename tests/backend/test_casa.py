@@ -115,12 +115,29 @@ class TestOrdenesDeLaCasa:
 
 class TestFronteraDeLaCasa:
     def test_una_luz_es_como_pulsar_el_interruptor(self):
-        assert main._casa_pide_confirmar({"servicio": "light.turn_on"}) is False
-        assert main._casa_pide_confirmar({"servicio": "switch.turn_off"}) is False
+        assert main._casa_pide_confirmar(
+            {"servicio": "light.turn_on", "entidad": "light.salon"}) is False
+        assert main._casa_pide_confirmar(
+            {"servicio": "switch.turn_off", "entidad": "switch.enchufe"}) is False
+        assert main._casa_pide_confirmar(
+            {"servicio": "homeassistant.toggle", "entidad": "light.salon"}) is False
 
     def test_cerraduras_persianas_y_alarmas_las_confirma_el_usuario(self):
-        for servicio in ("lock.unlock", "cover.open_cover", "alarm_control_panel.alarm_disarm"):
-            assert main._casa_pide_confirmar({"servicio": servicio}) is True
+        for servicio, entidad in (("lock.unlock", "lock.puerta"),
+                                  ("cover.open_cover", "cover.garaje"),
+                                  ("alarm_control_panel.alarm_disarm",
+                                   "alarm_control_panel.casa")):
+            assert main._casa_pide_confirmar(
+                {"servicio": servicio, "entidad": entidad}) is True
+
+    def test_el_servicio_generico_no_abre_el_garaje_sin_boton(self):
+        """`homeassistant.toggle` lo traduce HA al dominio de la entidad: sobre una
+        persiana o una cerradura es abrirla, y eso lo aprueba una persona."""
+        for entidad in ("cover.garaje", "lock.puerta", "alarm_control_panel.casa"):
+            for servicio in ("homeassistant.toggle", "homeassistant.turn_on",
+                             "homeassistant.turn_off"):
+                assert main._casa_pide_confirmar(
+                    {"servicio": servicio, "entidad": entidad}) is True
 
     def test_ante_la_duda_se_confirma(self):
         """Un servicio desconocido no puede colarse por la vía directa."""
