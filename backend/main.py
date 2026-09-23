@@ -3929,6 +3929,57 @@ def _hora_inicio_sueno(point: dict, date_raw: str) -> str | None:
     return date_raw[11:16] if len(date_raw) >= 16 else None
 
 
+# Fase del tramo (el `value` del tramo en Health Auto Export) → clave del resumen, la
+# misma que usa el sueño resumido. "Asleep" es el sueño sin fase de relojes que no
+# distinguen fases.
+_FASES_TRAMO = {"core": "core", "deep": "deep", "rem": "rem", "awake": "awake",
+                "in bed": "inBed", "inbed": "inBed", "asleep": "asleep"}
+
+
+def _resumir_sueno_por_tramos(puntos: list) -> list:
+    """Junta en un punto por noche el sueño que llega SIN resumir.
+
+    Con Summarize Data apagado, Health Auto Export manda cada fase como un tramo
+    (`startDate`, `endDate`, `value` = fase, `qty` = horas) y sin `date`. La ingesta
+    saltaba los puntos sin `date`, así que la noche se perdía entera mientras el resto
+    del lote entraba y respondía 200. Aquí se construye lo mismo que manda el resumen
+    —fases, `totalSleep`, `sleepStart`/`sleepEnd`— y la noche se asigna al día en que
+    se despierta, que es lo que hace el resumen de Health Auto Export.
+
+    Los puntos que ya traen `date` pasan tal cual.
+    """
+    resumidos, noches = [], {}
+    for p in puntos:
+        if p.get("date") or not (p.get("startDate") and p.get("endDate")):
+            resumidos.append(p)
+            continue
+        inicio, fin = str(p["startDate"]), str(p["endDate"])
+        fase = _FASES_TRAMO.get(str(p.get("value", "")).strip().lower())
+        if len(fin) < 10 or fase is None:
+            continue
+        try:
+            horas = float(p["qty"]) if p.get("qty") is not None else (
+                (datetime.strptime(fin[:19], "%Y-%m-%d %H:%M:%S")
+                 - datetime.strptime(inicio[:19], "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600)
+        except (TypeError, ValueError):
+            continue
+        n = noches.setdefault(fin[:10], {"date": f"{fin[:10]} 00:00:00 {fin[20:]}".strip(),
+                                         "core": 0.0, "deep": 0.0, "rem": 0.0, "awake": 0.0,
+                                         "inBed": 0.0, "asleep": 0.0})
+        n[fase] += horas
+        if p.get("source"):
+            n["source"] = p["source"]
+        clave_ini, clave_fin = ("inBedStart", "inBedEnd") if fase in ("inBed", "awake") else ("sleepStart", "sleepEnd")
+        if clave_ini not in n or inicio < n[clave_ini]:
+            n[clave_ini] = inicio
+        if clave_fin not in n or fin > n[clave_fin]:
+            n[clave_fin] = fin
+    for n in noches.values():
+        n["totalSleep"] = n["core"] + n["deep"] + n["rem"] + n["asleep"]
+        resumidos.append(n)
+    return resumidos
+
+
 def _cero_sin_medida(name: str, value, extra: dict | None = None) -> bool:
     """True si esta muestra es un 0 que significa "no se midió", no "el valor fue 0".
 
@@ -4266,13 +4317,22 @@ async def health_ingest(request: Request, token: str = ""):
 
     # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
     grouped_metrics: dict = {}
+    sin_fecha: dict = {}
     for metric in metrics:
         name = metric.get("name", "")
         unit = metric.get("units", "")
-        for point in metric.get("data", []):
+        puntos = metric.get("data", [])
+        if name == "sleep_analysis":
+            puntos = _resumir_sueno_por_tramos(puntos)
+        for point in puntos:
             date_raw = str(point.get("date", ""))
             metric_date = date_raw[:10] if len(date_raw) >= 10 else None
             if not metric_date:
+                # El sueño SIN resumir (Summarize Data apagado en Health Auto Export)
+                # llega por tramos con `startDate`/`endDate` y sin `date`. Se saltaba
+                # en silencio: el resto de métricas entraba, el lote respondía 200 y
+                # la noche no aparecía nunca, sin una línea en el registro.
+                sin_fecha.setdefault(name, sorted(point.keys())[:8])
                 continue
 
             if name in CUMULATIVE_METRICS:
@@ -4332,6 +4392,10 @@ async def health_ingest(request: Request, token: str = ""):
     # orden de 60–90 viajes secuenciales a Supabase. Ahora es un GET que trae de golpe
     # lo ya guardado de esas fechas y un upsert en bloque con el resto.
     upserted += _guardar_metricas(grouped_metrics, FUENTE_AUTO_EXPORT)
+
+    if sin_fecha:
+        logger.warning("Ingesta de salud: puntos sin fecha legible, descartados. Métrica → "
+                       "claves del punto: %s", sin_fecha)
 
     # Si en el lote venía el sueño de esta noche, el reloj ya la ha cerrado: eso es lo
     # más parecido a "ya está despierto" que sabe el backend por su cuenta. Van solo las
