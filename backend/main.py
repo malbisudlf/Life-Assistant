@@ -9025,6 +9025,7 @@ TABLAS_CONOCIDAS = {
     "noche_items":           "20260914_turno_noche",
     "presencia_tramos":      "20260917_linea_del_dia",
     "casa_acciones":         "20260917_linea_del_dia",
+    "avisos_llamadas":       "20260923_llamadas_cotidianas",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -9744,6 +9745,23 @@ def dev_avisos(dias: int = 7,
         "reglas":      _reglas_con_estadistica(salidos, estado_reglas),
         "de_usuario":  reglas_usuario,
         "vigilancias": vigiladas,
+        "llamadas":    _llamadas_para_panel(estado_reglas),
+    }
+
+
+def _llamadas_para_panel(estado_reglas) -> dict:
+    """Qué reglas llaman, cuántas llamadas van hoy y si el teléfono está siquiera puesto.
+
+    Se sirven TODAS las del catálogo, hayan mandado algo o no: el interruptor tiene que
+    estar ahí antes de que la regla dispare, no después.
+    """
+    llama = {str(e.get("regla")): bool(e.get("llamar")) for e in estado_reglas or []}
+    return {
+        "telefono": _telefono_configurado(),
+        "tope":     LLAMADAS_COTIDIANAS_DIA,
+        "hoy":      _llamadas_cotidianas_hoy(),
+        "reglas":   [{"regla": k, "nombre": v, "llamar": llama.get(k, False)}
+                     for k, v in REGLAS_LLAMABLES.items()],
     }
 
 
@@ -14411,6 +14429,128 @@ def _llamar(texto: str, *, rid: str = "", contexto: str = "") -> bool:
     return _llamar_twilio(texto, rid=rid)
 
 
+# ── LLAMADAS COTIDIANAS ──────────────────────────────────────────────────────────────
+#
+# Hasta el 2026-09-23 el teléfono solo sonaba por lo que se queda parado sin ti (una
+# avería, un permiso). Mikel pidió que también llamara por cosas del día a día —«oye, que
+# llevas un día sin mandar nada»—, y la regla de `docs/LLAMADAS.md` se amplió con dos
+# frenos para que eso no convierta el teléfono en ruido:
+#   - **Un tope diario** (`LLAMADAS_COTIDIANAS_DIA`) que las averías no gastan.
+#   - **Nunca de noche ni pasada la hora de silencio**: de lo cotidiano nada justifica
+#     despertarte. El aviso al móvil sale igual; lo que no sale es la llamada, y no se
+#     aplaza — una llamada de las 23:00 repetida a las 07:00 ya habla de otra cosa.
+#
+# Qué reglas llaman lo decides tú, regla a regla, desde la pestaña Avisos de la zona dev
+# (columna `avisos_reglas.llamar`). Solo las de este catálogo pueden: son las que
+# cuentan algo de tu día. Las de código (revisión, vigilante, despliegue) ya tienen su
+# propio camino al teléfono o no lo necesitan.
+#
+# La llamada va SIEMPRE detrás del aviso, nunca en su lugar: si el teléfono no suena, lo
+# que había que decir ya ha llegado por el canal de siempre.
+LLAMADAS_COTIDIANAS_DIA = int(os.getenv("LLAMADAS_COTIDIANAS_DIA", "2"))
+AVISOS_LLAMADAS_URL     = f"{SUPABASE_URL}/rest/v1/avisos_llamadas"
+REGLAS_LLAMABLES = {
+    "ingesta":       "Llevas un día sin mandar datos de salud",
+    "reloj":         "El reloj lleva noches sin medir el sueño",
+    "salir":         "Sal ya para llegar a tu cita",
+    "no_llegas":     "Mañana no te da tiempo entre dos citas",
+    "madrugon":      "Mañana empiezas temprano",
+    "malestar":      "Tus señales de recuperación apuntan a que algo va mal",
+    "hueco_entreno": "Llevas días sin entrenar y mañana tienes hueco",
+    "al_salir":      "Te has ido con cosas encendidas",
+    "pc_encendido":  "Te has ido con el PC encendido",
+}
+
+
+def _regla_llama(regla: str) -> bool:
+    """Si has pedido que esta regla, además de avisar, llame.
+
+    Ante la duda NO se llama, al revés que `_regla_silenciada`: el aviso ya ha salido, así
+    que una llamada perdida no cuesta nada, y una que no pediste cuesta que dejes de coger
+    el teléfono.
+    """
+    try:
+        r = http.get(f"{AVISOS_REGLAS_URL}?regla=eq.{quote(regla, safe='')}&select=llamar",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return False
+        filas = r.json()
+        return bool(filas and filas[0].get("llamar"))
+    except Exception as e:
+        logger.warning("Llamadas: no se pudo leer si '%s' llama (%s)", regla, e)
+        return False
+
+
+def _hora_de_llamar(ahora: datetime) -> bool:
+    """Fuera de la franja nocturna del teléfono y antes de la hora de silencio."""
+    if _es_de_noche(ahora):
+        return False
+    return HORA_SILENCIO == (0, 0) or (ahora.hour, ahora.minute) < HORA_SILENCIO
+
+
+def _llamadas_cotidianas_hoy() -> Optional[int]:
+    """Cuántas llamadas cotidianas han salido hoy. None si no se puede saber.
+
+    Sin poder contar no se llama: el tope es lo único que impide que un día con cinco
+    reglas disparadas sean cinco llamadas.
+    """
+    desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        r = http.get(f"{AVISOS_LLAMADAS_URL}?creado=gte."
+                     f"{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
+                     "&select=aviso_id", headers=supabase_headers())
+        if r.status_code >= 300:
+            return None
+        return len(r.json())
+    except Exception as e:
+        logger.warning("Llamadas: no se pudo contar las de hoy (%s)", e)
+        return None
+
+
+def _llamada_cotidiana(rid: str, regla: str, texto: str) -> bool:
+    """Llama por un aviso que acaba de salir, si su regla lo pide. True si sonó."""
+    if regla not in REGLAS_LLAMABLES or not _telefono_configurado():
+        return False
+    if not _hora_de_llamar(_ahora_local()) or not _regla_llama(regla):
+        return False
+    hechas = _llamadas_cotidianas_hoy()
+    if hechas is None:
+        return False
+    if hechas >= LLAMADAS_COTIDIANAS_DIA:
+        logger.info("Llamadas: '%s' no llama, ya van %d hoy (tope %d)",
+                    regla, hechas, LLAMADAS_COTIDIANAS_DIA)
+        return False
+    # La reserva va antes de marcar y por el id del aviso: el 409 es lo que impide que
+    # un mismo aviso llame dos veces si dos ticks se cruzan.
+    r = http.post(AVISOS_LLAMADAS_URL,
+                  headers={**supabase_headers(), "Prefer": "return=minimal"},
+                  json={"aviso_id": rid, "regla": regla})
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        logger.warning("Llamadas: no se pudo apuntar la de '%s' (%s)", regla, r.status_code)
+        return False
+    dicho = f"Mikel, soy Jarvis. {texto}"[:600]
+    contexto = (
+        "Llamada COTIDIANA, no una avería: Mikel pidió que le llamaras por avisos del día "
+        f"a día. La regla «{regla}» ({REGLAS_LLAMABLES[regla]}) acaba de mandarle este "
+        f"aviso al móvil:\n\n{texto}\n\n"
+        "Cuéntaselo en una o dos frases y contesta lo que pregunte, con las herramientas "
+        "del MCP si hace falta mirar algo. No hay nada que arreglar en la máquina: no "
+        "toques servicios, contenedores ni ficheros.")
+    # Solo la centralita, nunca Twilio: lo cotidiano no justifica pagar por minuto.
+    return _llamar_telefono(dicho, rid=f"aviso:{regla}", contexto=contexto)
+
+
+def _llamada_cotidiana_segura(rid: str, regla: str, texto: str) -> bool:
+    """Nada de esto puede deshacer el aviso que ya salió: un fallo se registra y ya."""
+    try:
+        return _llamada_cotidiana(rid, regla, texto)
+    except Exception:
+        logger.exception("Llamadas: fallo inesperado llamando por '%s'", regla)
+        return False
+
+
 def _rescatar_avisos() -> dict:
     """Lo que el móvil no recogió a tiempo se manda por correo.
 
@@ -14854,6 +14994,32 @@ def reactivar_regla(regla: str = Path(..., pattern=r"^[a-z0-9_]{1,40}$"),
         logger.error("Avisos: no se pudo reactivar '%s' (%s)", regla, e)
         raise HTTPException(status_code=502, detail="No se pudo reactivar la regla")
     return {"ok": True, "regla": regla}
+
+
+class LlamarIn(BaseModel):
+    llamar: bool
+
+
+@app.post("/avisos/reglas/{regla}/llamar")
+def regla_llamar(body: LlamarIn,
+                 regla: str = Path(..., pattern=r"^[a-z0-9_]{1,40}$"),
+                 credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Enciende o apaga que una regla, además de avisar, te llame."""
+    if regla not in REGLAS_LLAMABLES:
+        raise HTTPException(status_code=404, detail="Esa regla no puede llamar")
+    try:
+        r = http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json={"regla": regla, "llamar": bool(body.llamar)})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Llamadas: no se pudo cambiar '%s' (%s)", regla, e)
+        raise HTTPException(status_code=502, detail="No se pudo cambiar la regla")
+    return {"ok": True, "regla": regla, "llamar": bool(body.llamar)}
 
 
 def _reglas_silenciadas() -> list:
@@ -16857,7 +17023,7 @@ def _despachar_recordatorios() -> dict:
         return {"recordatorios": 0}
 
     presupuesto = max(0, AVISOS_MAX_DIA - _contar_enviados_hoy()) if vencidos else 0
-    enviados = pospuestos = caducados = 0
+    enviados = pospuestos = caducados = llamadas = 0
     for fila in vencidos:
         rid = str(fila.get("id") or "")
         if not re.match(_UUID_PATTERN, rid):
@@ -16915,6 +17081,10 @@ def _despachar_recordatorios() -> dict:
                 _apuntar_envio_regla(regla)
             logger.info("Recordatorio enviado por %s: %s", canal, texto[:80])
             _registrar_retraso(retraso, regla, texto)
+            # Después del aviso y sin poder lanzar: si esto fallara dentro del try, el
+            # `except` de abajo liberaría un aviso que ya se ha entregado.
+            if regla and _llamada_cotidiana_segura(rid, regla, texto):
+                llamadas += 1
         except Exception as e:
             # Un fallo transitorio de SMTP no puede consumir el recordatorio: se libera y
             # el siguiente tick lo reintenta. Igual que _liberar_envio en el brief.
@@ -16927,6 +17097,8 @@ def _despachar_recordatorios() -> dict:
         salida["avisos_pospuestos"] = pospuestos
     if caducados:
         salida["avisos_caducados"] = caducados
+    if llamadas:
+        salida["avisos_llamados"] = llamadas
     return salida
 
 
