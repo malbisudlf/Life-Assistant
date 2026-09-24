@@ -227,10 +227,12 @@ class TestElPermisoDeDespliegue:
         assert vuelta["estado"] == "listo"
 
     def test_el_texto_dice_el_paso_que_falta(self, client, mock_requests, correos):
-        """El aviso tiene que nombrar la reconstrucción del add-on.
+        """El aviso tiene que nombrar el paso que falta: desplegar.
 
         Es lo único que separa este botón de uno que miente: `main` con el arreglo dentro
-        no es producción hasta que alguien reconstruye el add-on en Home Assistant.
+        no es producción hasta que alguien despliega. Y NO puede decir «reconstruye el
+        add-on en Home Assistant»: desde la mudanza a `caja` eso arrancaba un segundo
+        backend contra el mismo Supabase.
         """
         rid = main._uuid_averia("ci", "9911")
         mock_requests.add("GET", "revision_hallazgos",
@@ -240,7 +242,22 @@ class TestElPermisoDeDespliegue:
 
         client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
         aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
-        assert "reconstruye" in aviso["texto"] and "add-on" in aviso["texto"]
+        assert main.PASO_QUE_FALTA in aviso["texto"]
+        assert "add-on" not in aviso["texto"]
+        assert len(aviso["texto"]) <= main.RECORDATORIO_MAX_TEXTO
+
+    def test_el_boton_no_dice_que_esta_desplegando(self, monkeypatch):
+        """El acuse decía «el deploy en marcha» cuando lo único hecho era mergear."""
+        acuses = []
+        monkeypatch.setattr(main, "_acusar_recibo", lambda t, x, **k: acuses.append((t, x)))
+        monkeypatch.setattr(main, "_auth_boton", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_despliegue_decidir", lambda rid, accion: {
+            "ok": True, "hecho": True, "accion": "desplegar", "pr": 7, "falta_reconstruir": True})
+        main.despliegue_accion(None, main.DespliegueAccionRequest(accion="desplegar"),
+                               aviso_id="11111111-2222-3333-4444-555555555555")
+        titulo, texto = acuses[0]
+        assert "Desplegando" not in titulo and "en marcha" not in texto
+        assert main.PASO_QUE_FALTA in texto
 
     def test_sin_credencial_lo_dice_en_vez_de_fallar_en_silencio(self, monkeypatch):
         monkeypatch.setattr(main, "DEPLOY_GITHUB_TOKEN", "")
