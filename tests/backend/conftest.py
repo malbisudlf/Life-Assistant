@@ -206,6 +206,7 @@ def _limpiar_estado():
     # reintentara un disparo que no le corresponde.
     main._ultima_vigilancia_sistema = 0.0
     main._ultima_vigilancia_gemelos = 0.0
+    main._ultima_vigilancia_espacio = 0.0
     main._ultimo_latido = 0.0
     main._latido_fallo_dicho = False
     main._token_por_query_visto.clear()

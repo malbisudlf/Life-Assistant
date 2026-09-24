@@ -400,6 +400,22 @@ export function resumenMigraciones(bd) {
   };
 }
 
+// Cuánto ocupa la base contra el tope del plan gratuito. Ámbar desde el umbral del aviso
+// del backend (el móvil ya habrá sonado) y rojo desde el 95 %: llena, fallan todas las
+// escrituras a la vez. Sin dato no es «vacía»: es que falta la migración o no respondió.
+export function resumenEspacio(espacio) {
+  if (!espacio || espacio.pct == null) {
+    return { tono: "muted", texto: "espacio sin medir (falta aplicar 20260924_espacio_bd)" };
+  }
+  const { mb, limite_mb: limite, pct, aviso_pct: aviso = 80 } = espacio;
+  const tono = pct >= 95 ? "red" : pct >= aviso ? "accent" : "green";
+  const gordas = (espacio.tablas || []).slice(0, 3).map(t => `${t.tabla} ${t.mb} MB`).join(" · ");
+  return {
+    tono,
+    texto: `${mb} MB de ${limite} (${pct} %)` + (gordas ? ` — lo que más ocupa: ${gordas}` : ""),
+  };
+}
+
 export async function leerBd() {
   const r = await apiFetch(`${API}/dev/bd`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`el backend respondió ${r.status}`);

@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta,
-         leerBd, estadoTabla, resumenMigraciones } from "../../lib/dev";
+         leerBd, estadoTabla, resumenMigraciones, resumenEspacio } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 export default function BaseDeDatos() {
@@ -40,6 +40,7 @@ export default function BaseDeDatos() {
   const recargar = useCallback(() => { setLeyendo(true); setTic(t => t + 1); }, []);
 
   const resumen  = resumenMigraciones(bd);
+  const espacio  = resumenEspacio(bd?.espacio);
   const pendientes = (bd?.migraciones || []).filter(m => !m.puesta);
   // Alfabéticas y no en el orden del backend (que va por migración): aquí se viene a
   // buscar una tabla concreta entre treinta y pico, y para eso el orden útil es el del
@@ -98,6 +99,14 @@ export default function BaseDeDatos() {
           <span>Tablas</span>
           <span>{tablas.length ? `${tablas.length} conocidas` : ""}</span>
         </div>
+
+        {bd && (
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                           alignSelf: "center", background: COLOR_TONO[espacio.tono] }} />
+            <span style={{ fontSize: 12, color: "var(--text)" }}>{espacio.texto}</span>
+          </div>
+        )}
 
         {!!faltando.length && (
           <div style={{ fontSize: 11, color: "#c9736b", marginBottom: 10 }}>
