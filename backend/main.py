@@ -1817,7 +1817,9 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
     if not cal:
         return {"error": "Calendario 'Clases' no encontrado", "available": [c["name"] for c in calendars]}
-    cal_id = cal["id"]
+    # Escapado como todo id de Graph (invariante 6): los ids de calendario son base64 y
+    # traen `/`, `+` y `=`, que sin escapar cambian la ruta o la query.
+    cal_id = quote(str(cal["id"]), safe="")
     # Inicio del día en hora local del usuario para no perder clases de hoy
     today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -3426,6 +3428,7 @@ def _revolut_datos() -> dict:
     # están en /accounts/{uid}/details, no aquí — la documentación pública muestra
     # objetos con esos campos ya incluidos, pero la API real no los da en este paso.
     cuentas, saldo_total, moneda = [], 0.0, "EUR"
+    sin_sumar: set = set()
     for uid in r.json().get("accounts", []):
         rd = http.get(f"{ENABLE_BANKING_API_URL}/accounts/{uid}/details", headers=_eb_headers())
         nombre = rd.json().get("name") if rd.status_code < 300 else None
@@ -3447,11 +3450,21 @@ def _revolut_datos() -> dict:
             saldo = float(monto.get("amount", 0))
         except (TypeError, ValueError):
             saldo = 0.0
-        moneda = monto.get("currency") or moneda
-        saldo_total += saldo
-        cuentas.append({"nombre": nombre, "moneda": monto.get("currency") or moneda, "saldo": round(saldo, 2)})
+        moneda_cuenta = monto.get("currency") or moneda
+        cuentas.append({"nombre": nombre, "moneda": moneda_cuenta, "saldo": round(saldo, 2)})
+        # Solo se suma lo que está en la moneda del total. Antes se sumaba todo y el total
+        # se quedaba con la divisa de la ÚLTIMA cuenta: un bolsillo en USD o THB entraba en
+        # el ahorro como si fueran euros. Lo de otras monedas se ve cuenta a cuenta.
+        if moneda_cuenta == moneda:
+            saldo_total += saldo
+        else:
+            sin_sumar.add(moneda_cuenta)
 
-    return {"configurado": True, "saldo": round(saldo_total, 2), "moneda": moneda, "cuentas": cuentas}
+    salida = {"configurado": True, "saldo": round(saldo_total, 2), "moneda": moneda,
+              "cuentas": cuentas}
+    if sin_sumar:
+        salida["sin_sumar"] = sorted(sin_sumar)
+    return salida
 
 
 _revolut_cache = None            # (momento_epoch, payload)
@@ -17446,9 +17459,12 @@ def _j_finanzas() -> dict:
             "mayores":            [{"nombre": p["nombre"], "valor": p["valor"]}
                                    for p in (c.get("posiciones") or [])[:5]],
         } for c in datos.get("cuentas") or []],
-        # Las rentabilidades vienen en fracción (0.0523 = 5,23 %); dicho aquí para que no
-        # se lea un 0,05 como "cinco céntimos" ni como "un 0,05 %".
-        "unidades": "Euros. Las rentabilidades son fracciones: 0.0523 = 5,23 %.",
+        # Las rentabilidades de Indexa vienen en fracción (0.0523 = 5,23 %), pero
+        # `plusvalia_pct` la calcula este backend y va YA en porcentaje. Decir «todo son
+        # fracciones» hacía que Jarvis leyera una plusvalía del 5,23 % como un 523 %.
+        "unidades": ("Euros, también `distribucion`. `rentabilidad_anual` va en fracción "
+                     "(0.0523 = 5,23 %). `plusvalia_pct` va ya en porcentaje "
+                     "(5.23 = 5,23 %): no lo multipliques por 100."),
     }
 
 
