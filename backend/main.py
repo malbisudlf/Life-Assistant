@@ -14536,6 +14536,21 @@ def _telefono_configurado() -> bool:
     return bool(TELEFONO_URL and TELEFONO_EXTENSION)
 
 
+TELEFONO_CONTEXTO_MAX = 4000
+
+
+def _recortar_por_el_medio(texto: str, tope: int) -> str:
+    """Recorta quitando del MEDIO. Los contextos del teléfono llevan el dato delimitado en
+    medio y, detrás, la marca de cierre y las instrucciones: cortando por el final, un
+    issue nocturno largo (4.000 caracteres él solo) se llevaba las dos, y el modelo
+    recibía un bloque abierto sin decirle qué hacer con él."""
+    if len(texto) <= tope:
+        return texto
+    marca  = "\n[… recortado …]\n"
+    cabeza = (tope - len(marca)) // 2
+    return texto[:cabeza] + marca + texto[len(texto) - (tope - len(marca) - cabeza):]
+
+
 def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
     """Hace sonar el móvil por la centralita. True si la llamada llegó a lanzarse.
 
@@ -14548,7 +14563,7 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
     cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
               "mode": "conversation", "message": texto[:1000]}
     if contexto:
-        cuerpo["context"] = contexto[:4000]
+        cuerpo["context"] = _recortar_por_el_medio(contexto, TELEFONO_CONTEXTO_MAX)
     try:
         r = http.post(f"{TELEFONO_URL.rstrip('/')}/api/outbound-call", json=cuerpo)
         if r.status_code >= 300:
@@ -15749,9 +15764,17 @@ def _revision_pendiente(rid: str = "") -> dict:
     """
     if rid and not re.match(_UUID_PATTERN, rid):
         raise HTTPException(status_code=422, detail="Id de revisión inválido")
+    # La caducidad solo va en «la más reciente», que es lo que se anuncia solo en cada
+    # turno. Con `rid` hay una persona que ha pulsado «Hablarlo» en ESE aviso: se atiende
+    # aunque sea viejo.
+    if rid:
+        filtro = f"&id=eq.{rid}"
+    else:
+        desde  = (datetime.now(timezone.utc) - timedelta(hours=REVISION_TTL_HORAS)).isoformat()
+        filtro = f"&creado=gte.{quote(desde, safe='')}"
     try:
         r = http.get(f"{REVISION_URL}?estado=eq.pendiente"
-                     + (f"&id=eq.{rid}" if rid else "") +
+                     + filtro +
                      "&select=id,issue_numero,issue_titulo,issue_url,origen,detalle"
                      "&order=creado.desc&limit=1", headers=supabase_headers())
         if r.status_code >= 300:
@@ -15869,6 +15892,10 @@ PASO_QUE_FALTA = "despliega desde la zona dev (botón Desplegar)"
 # el CI que puso ese PR en verde ya no dice gran cosa de un `main` que ha seguido
 # andando.
 DESPLIEGUE_TTL_HORAS = int(os.getenv("DESPLIEGUE_TTL_HORAS", "48"))
+# Lo mismo para una revisión sin contestar, que no caducaba: una decisión del vigilante
+# de hace semanas entraba en CADA turno hablado —Siri incluido— como «el motivo de esta
+# llamada», con el issue entero y un GET a GitHub por turno.
+REVISION_TTL_HORAS = int(os.getenv("REVISION_TTL_HORAS", "48"))
 
 
 def _uuid_averia(origen: str, referencia: str) -> str:

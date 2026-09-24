@@ -189,3 +189,18 @@ class TestInterruptor:
         por_regla = {x["regla"]: x["llamar"] for x in llamadas["reglas"]}
         assert por_regla["ingesta"] is True and por_regla["salir"] is False
         assert llamadas["tope"] == main.LLAMADAS_COTIDIANAS_DIA
+
+
+class TestElContextoNoPierdeElFinal:
+    def test_un_contexto_largo_conserva_el_cierre_y_las_instrucciones(self):
+        """Cortando por el final, un issue largo se llevaba la marca de cierre del bloque
+        y lo que había que hacer con él."""
+        contexto = ("Preámbulo.\n<<<REVISION_PENDIENTE\n" + "x" * 6000
+                    + "\nREVISION_PENDIENTE\n- Cuéntalo hablado.")
+        recortado = main._recortar_por_el_medio(contexto, main.TELEFONO_CONTEXTO_MAX)
+        assert len(recortado) == main.TELEFONO_CONTEXTO_MAX
+        assert recortado.startswith("Preámbulo.\n<<<REVISION_PENDIENTE")
+        assert recortado.endswith("\nREVISION_PENDIENTE\n- Cuéntalo hablado.")
+
+    def test_lo_corto_no_se_toca(self):
+        assert main._recortar_por_el_medio("hola", 4000) == "hola"
