@@ -867,6 +867,91 @@ def _marcar_sondeo(ruta: str, status: int) -> None:
         _sondeos[ruta] = time.time()
 
 
+# ── Gemelos: dos backends contra el mismo Supabase ───────────────────────────────
+# Es la avería silenciosa que más veces ha vuelto, y siempre igual: un segundo proceso
+# del backend vivo contra la misma base de datos. Fly despierto por un Atajo que nadie
+# repuntó, que reservaba el correo del día antes que el bueno (#203); el backend
+# duplicado en el Debian; el add-on del Green resucitado por un `boot: auto`. Con dos, lo
+# que vive en memoria —WOL, órdenes de la casa, avisos al móvil— lo escribe uno y lo lee
+# el otro, y NADA falla: simplemente deja de pasar. Las tres veces se supo días después.
+#
+# Por eso cada proceso deja un latido en `backend_latidos` (cada LATIDO_CADA segundos
+# como mucho, y solo si está atendiendo tráfico) y el tick de HA mira si alguien más ha
+# latido DESPUÉS de que este proceso arrancara. Lo de antes no cuenta: es el proceso al
+# que sustituimos en el último despliegue, no un gemelo.
+LATIDO             = _flag("LATIDO")
+LATIDO_CADA        = int(os.getenv("LATIDO_CADA_SEG", "300"))
+GEMELO_VENTANA_MIN = int(os.getenv("GEMELO_VENTANA_MIN", "20"))
+LATIDOS_URL        = f"{SUPABASE_URL}/rest/v1/backend_latidos"
+# Identifica a ESTE proceso, no a la máquina: dos contenedores del mismo host son dos
+# gemelos igual, y un reinicio es otro proceso.
+INSTANCIA          = secrets.token_hex(4)
+_ultimo_latido     = 0.0
+_latido_lock       = threading.Lock()
+
+
+def _donde_corro() -> str:
+    """Una pista de qué máquina es, para que el aviso diga cuál apagar."""
+    if os.getenv("FLY_APP_NAME"):
+        return f"Fly ({os.getenv('FLY_APP_NAME')})"
+    if os.getenv("SUPERVISOR_TOKEN"):
+        return "add-on de Home Assistant"
+    return f"host {socket.gethostname()[:40]}"
+
+
+def _latir() -> None:
+    """Apunta que este proceso está vivo. Nunca lanza: es un testigo, no un servicio."""
+    try:
+        r = http.post(
+            f"{LATIDOS_URL}?on_conflict=instancia",
+            headers={**supabase_headers(),
+                     "Prefer": "return=minimal,resolution=merge-duplicates"},
+            json={"instancia": INSTANCIA, "version": _version_desplegada(),
+                  "donde": _donde_corro(),
+                  "arrancado": datetime.fromtimestamp(_ARRANQUE_PROCESO, timezone.utc).isoformat(),
+                  "visto": datetime.now(timezone.utc).isoformat()})
+        if r.status_code >= 300:
+            # Lo normal si falta la migración: se dice una vez por latido, a WARNING.
+            logger.warning("Latido: Supabase devolvió %s (¿falta 20260924_backend_latidos?)",
+                           r.status_code)
+    except Exception as e:
+        logger.warning("Latido: no se pudo apuntar (%s)", type(e).__name__)
+
+
+def _latido_si_toca() -> None:
+    """Lo llama el middleware en cada petición; late como mucho cada LATIDO_CADA."""
+    global _ultimo_latido
+    if not LATIDO or not SUPABASE_URL:
+        return
+    ahora = time.time()
+    with _latido_lock:
+        if ahora - _ultimo_latido < LATIDO_CADA:
+            return
+        _ultimo_latido = ahora
+    # En un hilo: la petición que lo dispara no puede esperar a Supabase.
+    threading.Thread(target=_latir, daemon=True, name="latido").start()
+
+
+def _gemelos() -> Optional[list]:
+    """Otros procesos que han latido después de que ESTE arrancara. None = no se sabe.
+
+    El margen de dos minutos cubre el solape de un despliegue: el proceso viejo puede
+    atender una última petición mientras el nuevo arranca, y eso no es un gemelo.
+    """
+    desde = max(datetime.fromtimestamp(_ARRANQUE_PROCESO + 120, timezone.utc),
+                datetime.now(timezone.utc) - timedelta(minutes=GEMELO_VENTANA_MIN))
+    try:
+        r = http.get(f"{LATIDOS_URL}?visto=gte.{quote(desde.isoformat(), safe='')}"
+                     f"&instancia=neq.{INSTANCIA}"
+                     "&select=instancia,version,donde,arrancado,visto&order=visto.desc",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return None
+        return r.json() or []
+    except Exception:
+        return None
+
+
 @app.middleware("http")
 async def registrar_peticiones(request: Request, call_next):
     """Deja constancia de lo que falla o va lento, sin depender de que cada endpoint se
@@ -892,6 +977,7 @@ async def registrar_peticiones(request: Request, call_next):
         # Aquí y no en cada endpoint: los sondeos son diez rutas y la marca se olvidaría
         # justo en la que se caiga. Ver `_marcar_sondeo`.
         _marcar_sondeo(request.url.path, respuesta.status_code)
+        _latido_si_toca()
         return respuesta
     except Exception:
         logger.exception("%s: excepción no controlada", ruta)
@@ -1874,7 +1960,11 @@ def _version_desplegada() -> str:
 
 @app.get("/")
 def root():
-    return {"status": "Life Assistant API running", "version": _version_desplegada()}
+    # `instancia` distingue dos procesos que sirven el mismo commit, que es justo el caso
+    # en que `version` no dice nada (ver «Gemelos»).
+    return {"status": "Life Assistant API running", "version": _version_desplegada(),
+            "instancia": INSTANCIA,
+            "arrancado": datetime.fromtimestamp(_ARRANQUE_PROCESO, timezone.utc).isoformat()}
 
 
 # ── MAPS ──────────────────────────────────────────────────────────────────────
@@ -8355,7 +8445,7 @@ def ha_brief_tick(request: Request, token: str = ""):
     # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
     # Home Assistant.
     previos = {**_avisar_reloj_seguro(), **_vigilar_espera_sueno_seguro(),
-               **_vigilar_ingesta_seguro(),
+               **_vigilar_ingesta_seguro(), **_vigilar_gemelos_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
@@ -9130,6 +9220,7 @@ TABLAS_CONOCIDAS = {
     "presencia_tramos":      "20260917_linea_del_dia",
     "casa_acciones":         "20260917_linea_del_dia",
     "avisos_llamadas":       "20260923_llamadas_cotidianas",
+    "backend_latidos":       "20260924_backend_latidos",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -11680,6 +11771,54 @@ def _vigilar_ingesta_seguro() -> dict:
         return _vigilar_ingesta()
     except Exception:
         logger.exception("Vigilante de ingesta: fallo inesperado en el tick")
+        return {}
+
+
+# El aviso de «hay otro backend vivo» (ver «Gemelos» junto al middleware). Regla propia
+# para que se pueda silenciar como cualquier otra, y urgente porque salta el presupuesto:
+# mientras dure, las alarmas, el WOL y los avisos se reparten a ciegas entre los dos.
+REGLA_GEMELO          = "gemelo"
+_ultima_vigilancia_gemelos = 0.0
+
+
+def _vigilar_gemelos() -> dict:
+    """Avisa, una vez por gemelo, si otro proceso late contra este mismo Supabase."""
+    global _ultima_vigilancia_gemelos
+    if not LATIDO or time.time() - _ultima_vigilancia_gemelos < 3600:
+        return {}
+    _ultima_vigilancia_gemelos = time.time()
+    gemelos = _gemelos()
+    if not gemelos:
+        return {}
+    avisados = 0
+    for g in gemelos:
+        try:
+            visto = datetime.fromisoformat(str(g.get("visto") or "").replace("Z", "+00:00"))
+            hace  = max(0, round((datetime.now(timezone.utc) - visto).total_seconds() / 60))
+        except ValueError:
+            hace = None
+        cuando  = f"latió hace {hace} min" if hace is not None else "latió hace poco"
+        version = str(g.get("version") or "?")[:7]
+        # WARNING y no ERROR: también queda en `app_logs`, pero el vigilante del sistema no
+        # lo cuenta como avería de código — a la tercera hora abriría un issue y ofrecería
+        # lanzar una sesión a «arreglarlo», y un gemelo se arregla apagando una máquina.
+        logger.warning("Gemelo: otro backend vivo contra este Supabase — %s, versión %s, %s",
+                       g.get("donde"), version, cuando)
+        texto = (f"Hay otro backend vivo contra tu Supabase: {str(g.get('donde') or '?')[:40]}, "
+                 f"versión {version}, {cuando}. Con dos, la casa, el WOL y los avisos se "
+                 f"reparten a ciegas: apaga el que sobra.")
+        if _apuntar_aviso(REGLA_GEMELO, texto, prioridad=PRIO_URGENTE,
+                          id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                            f"life-assistant:gemelo:{g.get('instancia')}"))):
+            avisados += 1
+    return {"gemelos": len(gemelos), **({"aviso_gemelo": avisados} if avisados else {})}
+
+
+def _vigilar_gemelos_seguro() -> dict:
+    try:
+        return _vigilar_gemelos()
+    except Exception:
+        logger.exception("Gemelos: fallo inesperado en el tick")
         return {}
 
 

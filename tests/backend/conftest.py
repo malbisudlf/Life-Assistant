@@ -47,6 +47,10 @@ os.environ.setdefault("JARVIS_PROACTIVO", "0")
 # última escritura de health_metrics, así que sumaría un GET a los asertos de "cuántas
 # llamadas se hicieron" de cualquier test del tick. Sus tests lo encienden a mano.
 os.environ.setdefault("INGESTA_VIGILAR", "0")
+# El latido contra `backend_latidos` lo dispara el middleware en CUALQUIER petición, y en
+# un hilo: encendido, cada test del cliente sumaría un POST a destiempo a sus asertos de
+# llamadas. Sus tests lo encienden a mano.
+os.environ.setdefault("LATIDO", "0")
 # Y con la economía del resumen: sus titulares salen de feeds por HTTP, así que
 # encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
 # en una suite que no toca la red. Sus tests la encienden a mano.
@@ -201,6 +205,8 @@ def _limpiar_estado():
     # rutina: sin resetearlo, un test que lo deje apuntado haría que el siguiente
     # reintentara un disparo que no le corresponde.
     main._ultima_vigilancia_sistema = 0.0
+    main._ultima_vigilancia_gemelos = 0.0
+    main._ultimo_latido = 0.0
     main._ultima_regla_salud = 0.0
     main._ultima_vigilancia_web = 0.0
     main._ultima_revision_correo = 0.0

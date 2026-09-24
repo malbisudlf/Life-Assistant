@@ -77,8 +77,8 @@ TIMEOUT = 60
 #     pasando otra vez por /auth/login.
 #   · `jobs`, `job_events`, `job_results`, `pc_agents`, `app_logs`, `login_attempts`,
 #     `presence`, `brief_envios`, `informe_envios`, `vigilante_estado`,
-#     `revision_hallazgos`, `averias` — estado operativo y registro. Se regeneran solos
-#     y perderlos no cuesta nada.
+#     `revision_hallazgos`, `averias`, `backend_latidos` — estado operativo y registro.
+#     Se regeneran solos y perderlos no cuesta nada.
 TABLAS = (
     # (nombre,                orden,                     obligatoria, columnas)
     ("health_metrics",        "metric_date,metric_name", True,        None),
