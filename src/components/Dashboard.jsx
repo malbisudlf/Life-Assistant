@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import {
-  isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
+  isToday, isFuture, isPast, isActive, isoHoy, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
   mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
@@ -33,7 +33,44 @@ import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { resumenEstado } from "../lib/dev";
-import ZonaDev from "./dev/ZonaDev";
+
+// La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
+// descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
+// falla, lo normal es un despliegue con la pestaña abierta —el chunk viejo ya no existe
+// en Vercel—, así que se recarga UNA vez para traer el índice nuevo. La marca evita el
+// bucle cuando lo que pasa es que no hay red, y entonces se dice en vez de romper la app.
+const RECARGA_ZONA_DEV = "la_zonadev_recarga";
+const ZonaDev = lazy(() =>
+  import("./dev/ZonaDev").then(
+    (m) => {
+      try { sessionStorage.removeItem(RECARGA_ZONA_DEV); } catch { /* sin storage */ }
+      return m;
+    },
+    () => {
+      let yaRecargada = true;
+      try {
+        yaRecargada = sessionStorage.getItem(RECARGA_ZONA_DEV) === "1";
+        sessionStorage.setItem(RECARGA_ZONA_DEV, "1");
+      } catch { /* sin storage: mejor el aviso que un bucle de recargas */ }
+      if (!yaRecargada) {
+        window.location.reload();
+        return new Promise(() => {});
+      }
+      return { default: ZonaDevSinCargar };
+    },
+  ),
+);
+
+function ZonaDevSinCargar({ onSalir }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", color: "var(--muted, #94a3b8)", padding: 24, textAlign: "center" }}>
+      <div>
+        <p>No se ha podido descargar la zona dev. ¿Hay conexión?</p>
+        <button onClick={onSalir} style={{ marginTop: 12 }}>Volver al dashboard</button>
+      </div>
+    </div>
+  );
+}
 
 // Sin valor por defecto a propósito: aquí había una IP de la red doméstica escrita a
 // mano, en un repositorio público y contra la norma de CLAUDE.md. Sin `VITE_HA_URL` el
@@ -1531,7 +1568,7 @@ export default function Dashboard() {
   const [bodyGoalWeight, setBodyGoalWeight] = useState(() => leerBodyGoals().targetWeight ?? 67);
   const [bodyGoalFat, setBodyGoalFat]       = useState(() => leerBodyGoals().targetBodyFat ?? "");
   const [showSessionForm, setShowSessionForm] = useState(false);
-  const [sessionDate, setSessionDate]     = useState(() => new Date().toISOString().slice(0, 10));
+  const [sessionDate, setSessionDate]     = useState(() => isoHoy());
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
@@ -2150,7 +2187,7 @@ export default function Dashboard() {
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement("a");
       a.href     = url;
-      a.download = `life-assistant-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `life-assistant-backup-${isoHoy()}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -3787,7 +3824,7 @@ export default function Dashboard() {
   async function submitPayment() {
     if (trainingLoading) return;
     setTrainingLoading(true);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = isoHoy();
     try {
       await apiFetch(`${API}/training/payments`, {
         method: "POST",
@@ -4577,7 +4614,7 @@ export default function Dashboard() {
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => { setSessionDate(new Date().toISOString().slice(0, 10)); setShowSessionForm(true); }}
+                    <button onClick={() => { setSessionDate(isoHoy()); setShowSessionForm(true); }}
                       style={{ flex: 1, padding: "7px 0", background: "rgba(200,169,110,0.12)", border: "0.5px solid rgba(200,169,110,0.3)", borderRadius: 6, color: "var(--accent)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>+ Sesión</button>
                     {sess > 0 && (
                       <button onClick={submitPayment} disabled={trainingLoading}
@@ -4831,7 +4868,7 @@ export default function Dashboard() {
                             )}
                           </div>
                         ) : (
-                          <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: true, fecha: new Date().toISOString().slice(0, 10), importe: "" } }))}
+                          <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: true, fecha: isoHoy(), importe: "" } }))}
                             style={{ marginTop: 4, padding: "4px 0", background: "none", border: "none", font: "inherit", fontSize: 11, color: "var(--accent)", cursor: "pointer" }}>
                             + Añadir aportación
                           </button>
@@ -6638,11 +6675,17 @@ export default function Dashboard() {
 
   if (zonaDev) {
     return (
-      <ZonaDev
-        onSalir={() => setZonaDev(false)}
-        agentId={AGENT_ID}
-        filasExtra={filasEstadoDelDashboard}
-      />
+      <Suspense fallback={
+        <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", color: "var(--muted, #94a3b8)" }}>
+          Cargando la zona dev…
+        </div>
+      }>
+        <ZonaDev
+          onSalir={() => setZonaDev(false)}
+          agentId={AGENT_ID}
+          filasExtra={filasEstadoDelDashboard}
+        />
+      </Suspense>
     );
   }
 
@@ -7611,7 +7654,7 @@ export default function Dashboard() {
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Fecha del cambio</div>
-                    <input type="date" value={dispositivoFecha} max={new Date().toISOString().slice(0, 10)}
+                    <input type="date" value={dispositivoFecha} max={isoHoy()}
                       onChange={e => setDispositivoFecha(e.target.value)}
                       style={{ width: "100%", padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
                   </div>

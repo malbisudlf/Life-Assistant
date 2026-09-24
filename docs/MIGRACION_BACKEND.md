@@ -3,6 +3,21 @@
 
 ## Mudanza del backend: de Fly.io al Home Assistant Green
 
+> **Estado al 2026-09-24: este documento cuenta la mudanza ANTERIOR.** Desde el
+> 2026-09-20 el backend corre en `caja` (el ThinkPad con Debian), no en el Green; la
+> fuente de verdad de esa máquina es el repositorio HomeLab. El Green conserva su
+> add-on **parado y en `boot: manual`** como camino de vuelta, y Fly está suspendida.
+> Desplegar hoy es `desplegar.sh` en `caja` o el botón *Desplegar* de la zona dev —
+> **no** «reconstruir el add-on»: eso arrancaría un segundo backend contra el mismo
+> Supabase.
+>
+> Ese segundo backend es la avería silenciosa que más ha vuelto (Fly despierto por un
+> Atajo sin repuntar, #203; el backend duplicado en el Debian; el add-on resucitado por
+> un `boot: auto`). Desde el 2026-09-24 cada proceso deja un latido en
+> `backend_latidos` y el tick de HA avisa al móvil si otro late contra el mismo
+> Supabase (ver «Gemelos» en `backend/main.py`). `GET /` devuelve además `instancia`,
+> que distingue dos procesos que sirven el mismo commit.
+
 **Estado (2026-09-06): el backend YA CORRE en el Green.** El add-on está
 instalado, arrancado y verificado con `scripts/verificar_backend.py` contra la IP
 local: responde, CORS, login y auth de servicio, las cuatro en verde. **Fly sigue

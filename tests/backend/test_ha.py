@@ -169,3 +169,15 @@ class TestHaEventsSoonGraphCaido:
         r = client.get("/ha/events/soon?token=ha-poll-token")
         assert r.status_code == 200
         assert r.json() == {"event": None}
+
+
+def test_events_soon_sin_poder_renovar_el_token_no_da_500(client, monkeypatch):
+    """Renovar el token de Graph también es red: HA no sabe leer un 500, espera el
+    {"event": None} de siempre."""
+    import requests
+
+    def _sin_red():
+        raise requests.ConnectionError("login.microsoftonline.com")
+    monkeypatch.setattr(main, "get_valid_token", _sin_red)
+    r = client.get("/ha/events/soon", headers={"X-Auth-Token": "ha-poll-token"})
+    assert r.status_code == 200 and r.json() == {"event": None}

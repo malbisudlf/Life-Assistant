@@ -290,6 +290,12 @@ function _isoHoy(ahora = new Date()) {
   return `${ahora.getFullYear()}-${p(ahora.getMonth() + 1)}-${p(ahora.getDate())}`;
 }
 
+// La misma, para el resto de la app. Estaba privada y el dashboard seguía haciendo
+// `new Date().toISOString().slice(0, 10)` en once sitios: entre las 00:00 y las 02:00
+// una sesión de entrenamiento se apuntaba con la fecha de ayer y el selector de fecha no
+// dejaba elegir hoy.
+export const isoHoy = _isoHoy;
+
 function _sumarDias(iso, n) {
   const d = new Date(`${iso}T12:00:00Z`);
   if (isNaN(d.getTime())) return null;
@@ -847,7 +853,7 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   // ── Entrenamientos (últimos 7 días) ──
   const work = findMetric(healthData, "workouts", "workout");
   if (work.length) {
-    const cutoff = new Date(now.getTime() - 7 * 86400000).toISOString().slice(0, 10);
+    const cutoff = _isoHoy(new Date(now.getTime() - 7 * 86400000));
     const count = work.filter(d => d.date >= cutoff).reduce((s, d) => s + (d.extra?.workouts?.length || 0), 0);
     push("Entrenamiento", count >= 4 ? "good" : count >= 2 ? "info" : "warn",
       `${count} entrenamiento${count !== 1 ? "s" : ""} en los últimos 7 días${count >= 4 ? " — buen ritmo" : count === 0 ? " — toca moverse" : ""}.`);
@@ -1296,7 +1302,7 @@ export function metricasMuertas(healthData, {
   hoy = null, dias = METRICA_MUERTA_DIAS, corte = null,
   diasTrasCambio = METRICA_MUERTA_DIAS_TRAS_CAMBIO,
 } = {}) {
-  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const hasta = hoy || _isoHoy();
   const desdeLargo = _sumarDias(hasta, -(dias - 1));
   if (desdeLargo == null) return new Set();
   const corteStr   = corte ? String(corte) : null;
@@ -1342,7 +1348,7 @@ export function fechaCambioSugerida(healthData, {
   hoy = null, minMetricas = CAMBIO_MIN_METRICAS, minDias = CAMBIO_MIN_DIAS,
   ventana = CAMBIO_VENTANA_DIAS,
 } = {}) {
-  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const hasta = hoy || _isoHoy();
   const limite = _sumarDias(hasta, -minDias);
   if (limite == null) return null;
 
@@ -1573,7 +1579,7 @@ export function mantenimientoEstimado(healthData, {
   dias = 28, hoy = null,
   minDiasIngesta = 10, minPesadas = 5, minRecorridoDias = 14,
 } = {}) {
-  const hasta = hoy || new Date().toISOString().slice(0, 10);
+  const hasta = hoy || _isoHoy();
   const desde = _sumarDias(hasta, -(dias - 1));
   const enVentana = serie => (serie || [])
     .filter(d => d && d.date != null && d.value != null)

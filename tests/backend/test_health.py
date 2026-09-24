@@ -791,7 +791,10 @@ class TestLoteVacioNoEsUnFallo:
     def test_un_lote_vacio_no_se_registra_como_aviso(self, client, mock_requests, caplog):
         """Va a INFO justamente para que no se persista en app_logs (WARNING+)."""
         with caplog.at_level(logging.INFO, logger="main"):
-            client.post("/health/ingest?token=health-token", json={"data": {}})
+            # Por cabecera: por la query el token deja su propio WARNING (a propósito,
+            # para saber quién falta por migrar), y aquí se mira otra cosa.
+            client.post("/health/ingest", json={"data": {}},
+                        headers={"X-Auth-Token": "health-token"})
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("lote vacío" in r.message for r in caplog.records)
 
@@ -1375,3 +1378,69 @@ class TestLecturaPaginada:
         r, filas = main._leer_todas(f"{main.SUPABASE_URL}/rest/v1/health_metrics?order=id")
         assert len(filas) == 3
         assert len(mock_requests.called("GET", "health_metrics")) == 1
+
+
+class TestLoQueUnSyncNoPuedeBorrar:
+    """Lo guardado que una sincronización posterior pisaba sin querer."""
+
+    URL        = "/health/ingest?token=health-token"
+    URL_SIMPLE = "/health/ingest/simple?token=health-token"
+
+    @staticmethod
+    def _upsert(mock_requests):
+        for _, _, kw in mock_requests.called("POST", "health_metrics"):
+            if isinstance(kw["json"], list):
+                return kw["json"]
+        return []
+
+    def test_la_noche_anulada_sigue_anulada_tras_el_sync_del_atajo(self, client, mock_requests):
+        """El Atajo del sueño entra por /health/ingest y reenvía los últimos días en
+        cada sync: sin conservar la marca, la noche anulada volvía a puntuar."""
+        mock_requests.add("GET", "metric_date=in.", FakeResponse([
+            {"metric_date": "2026-09-07", "metric_name": "sleep_analysis",
+             "value": 3.1, "extra": {"excluded": True}}]))
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "sleep_analysis", "units": "hr",
+             "data": [{"date": "2026-09-07 00:00:00 +0200", "totalSleep": 6.9,
+                       "sleepStart": "2026-09-07 00:48:00 +0200"}]}]}})
+        assert r.status_code == 200
+        fila = self._upsert(mock_requests)[0]
+        assert fila["metric_date"] == "2026-09-07"
+        assert fila["extra"]["excluded"] is True
+        assert fila["extra"]["sleep_start"] == "00:48"   # y lo nuevo también entra
+
+    def test_sin_poder_leer_lo_guardado_no_se_escribe_encima(self, client, mock_requests):
+        """Leer {} ante un fallo era dar por vacío lo que no se pudo leer: el total
+        acumulado del día quedaba a merced del snapshot parcial que llegara."""
+        mock_requests.add("GET", "metric_date=in.", FakeResponse({}, 503, "caído"))
+        r = client.post(self.URL, json={"data": {"metrics": [
+            {"name": "step_count", "units": "count",
+             "data": [{"date": "2026-09-07 10:00:00", "qty": 1200}]}]}})
+        assert r.status_code == 502
+        assert "caído" not in r.text
+        assert self._upsert(mock_requests) == []
+
+    def test_dos_muestras_del_mismo_dia_no_tumban_el_lote(self, client, mock_requests):
+        """Postgres rechaza un upsert con dos filas de la misma clave: se perdía todo."""
+        r = client.post(self.URL_SIMPLE, json=[
+            {"metric": "heart_rate_variability", "date": "2026-09-07", "value": 41},
+            {"metric": "heart_rate_variability", "date": "2026-09-07", "value": 47},
+            {"metric": "step_count", "date": "2026-09-07", "value": 9000},
+            {"metric": "step_count", "date": "2026-09-07", "value": 4000},
+            {"metric": "resting_heart_rate", "date": "2026-09-07", "value": 55},
+        ])
+        assert r.status_code == 200
+        filas = self._upsert(mock_requests)
+        claves = [(f["metric_date"], f["metric_name"]) for f in filas]
+        assert len(claves) == len(set(claves)) == 3
+        por_nombre = {f["metric_name"]: f["value"] for f in filas}
+        assert por_nombre["heart_rate_variability"] == 47   # la última
+        assert por_nombre["step_count"] == 9000             # la mayor: es acumulativa
+
+    def test_la_presencia_no_reescribe_el_dia_si_no_puede_leerlo(self, mock_requests):
+        """Con 14 h en casa guardadas, un 503 en la lectura dejaba el día en 0,25 h."""
+        mock_requests.add("GET", "metric_date=in.", FakeResponse({}, 503))
+        hasta = datetime(2026, 9, 7, 12, 15, tzinfo=main.LOCAL_TZ)
+        main._acumular_presencia(hasta - timedelta(minutes=15), hasta, True)
+        assert not [c for c in mock_requests.called("POST", "health_metrics")
+                    if isinstance(c[2]["json"], list)]

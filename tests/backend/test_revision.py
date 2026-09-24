@@ -310,3 +310,20 @@ class TestLosBotonesDeLaNotificacion:
         main._notificar("t", "t", aviso_id=rid, acciones=main._acciones_aviso(rid, main.REGLA_REVISION))
         avisos = client.get("/ha/avisos-pending", headers=CABECERA).json()["avisos"]
         assert avisos[0]["acciones"][0]["action"] == f"LA_ARREGLAR_{rid}"
+
+
+class TestLaRevisionPendienteCaduca:
+    """Sin caducidad, una decisión de hace semanas entraba en cada turno hablado como
+    «el motivo de esta llamada», con el issue entero y un GET a GitHub por turno."""
+
+    def test_la_mas_reciente_solo_si_es_de_estos_dias(self, mock_requests):
+        main._revision_pendiente()
+        url = mock_requests.called("GET", "revision_hallazgos")[0][1]
+        assert "creado=gte." in url
+
+    def test_con_id_se_atiende_aunque_sea_vieja(self, mock_requests):
+        """Hay una persona que ha pulsado «Hablarlo» en ESE aviso."""
+        rid = "11111111-2222-3333-4444-555555555555"
+        main._revision_pendiente(rid)
+        url = mock_requests.called("GET", "revision_hallazgos")[0][1]
+        assert f"id=eq.{rid}" in url and "creado=gte." not in url

@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
+  isoHoy,
   isToday, isFuture, isPast, isActive, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, isoToDdMmYyyy, formatLogTime,
   hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
@@ -2188,5 +2189,17 @@ describe("la decision de revision que llega por la url", () => {
     expect(revisionDeUrl("?revision=../../algo&accion=arreglar")).toBeNull();
     // Una accion que el backend no acepta solo serviria para gastar un 422.
     expect(revisionDeUrl(`?revision=${id}&accion=desplegar`)).toBeNull();
+  });
+});
+
+describe("isoHoy", () => {
+  test("de madrugada sigue siendo hoy, no el día UTC de ayer", () => {
+    // 00:30 del 24/09 en hora local: `toISOString()` daba el 23 en Europe/Madrid.
+    expect(isoHoy(new Date(2026, 8, 24, 0, 30))).toBe("2026-09-24");
+    expect(isoHoy(new Date(2026, 8, 24, 23, 59))).toBe("2026-09-24");
+  });
+
+  test("rellena con ceros", () => {
+    expect(isoHoy(new Date(2026, 0, 5, 12, 0))).toBe("2026-01-05");
   });
 });

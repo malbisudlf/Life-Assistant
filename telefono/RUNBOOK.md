@@ -70,7 +70,7 @@ Esta es la lista de comandos, y es cerrada:
 
 Y esta es la lista de herramientas MCP de acción, también cerrada — todas de bajo riesgo
 y reversibles: `recordarme`, `cancelar_recordatorio`, `poner_alarma`, `cancelar_alarma`,
-`estoy_despierto`, `guardar_idea`, `borrar_idea`, `anadir_sesion_entrenamiento`,
+`estoy_despierto`, `guardar_idea`, `anadir_sesion_entrenamiento`,
 `encender_pc`, `apagar_pc`, `suspender_pc`, `casa_ordenar`. Con una salvedad: si
 `casa_ordenar` pide una cerradura, una persiana o una alarma, el propio servidor la
 rechazará aunque Mikel diga que sí en voz alta — esas siempre se confirman desde el

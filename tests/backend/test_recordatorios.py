@@ -257,6 +257,21 @@ class TestVigilanteDeIngesta:
         assert main._vigilar_ingesta() == {}
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
+    def test_las_horas_en_casa_no_cuentan_como_ingesta(self, mock_requests):
+        """Home Assistant crea una fila de `time_at_home` cada medianoche, con móvil o
+        sin él: contándola, la última escritura nunca pasaba de un día y el vigilante no
+        podía avisar jamás. Se pregunta solo por lo que manda el móvil."""
+        self._ultima_escritura(mock_requests, 3)
+        main._vigilar_ingesta()
+        url = mock_requests.called("GET", "/rest/v1/health_metrics")[0][1]
+        assert f"metric_name=neq.{main.PRESENCE_METRIC}" in url
+
+    def test_el_atasco_tampoco_culpa_a_home_assistant(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([]))
+        main._ultima_exportacion()
+        url = mock_requests.called("GET", "/rest/v1/health_metrics")[0][1]
+        assert f"metric_name=neq.{main.PRESENCE_METRIC}" in url
+
     def test_un_dia_de_silencio_se_registra(self, mock_requests, caplog):
         """Por logger.error a propósito: así sale en app_logs, en el panel de ajustes y en
         el diagnóstico de Jarvis sin ningún camino nuevo."""

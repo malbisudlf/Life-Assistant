@@ -392,3 +392,23 @@ class TestEnableBankingCallbackStateReutilizaLaMismaGuardia:
         token_dashboard = main.create_token()
         r = client.get("/auth/enablebanking/callback", params={"code": "abc", "state": token_dashboard})
         assert r.status_code == 403
+
+
+class TestSuperficieQueNoHaceFalta:
+    def test_la_documentacion_interactiva_no_se_sirve(self, client):
+        """`/docs`, `/redoc` y `/openapi.json` no los usa nadie y en producción solo
+        servían para sondear la API. En local se encienden con API_DOCS=1."""
+        for ruta in ("/docs", "/redoc", "/openapi.json"):
+            assert client.get(ruta).status_code == 404
+
+    def test_el_token_por_query_deja_rastro_una_vez_por_ruta(self, client, mock_requests, caplog):
+        """Es la lista de lo que falta migrar a cabecera antes de poder quitar ese camino."""
+        with caplog.at_level("WARNING"):
+            client.get("/ha/events/soon?token=ha-poll-token")
+            client.get("/ha/events/soon?token=ha-poll-token")
+        assert caplog.text.count("Token de servicio por query string en /ha/events/soon") == 1
+
+    def test_por_cabecera_no_deja_rastro(self, client, mock_requests, caplog):
+        with caplog.at_level("WARNING"):
+            client.get("/ha/events/soon", headers={"X-Auth-Token": "ha-poll-token"})
+        assert "por query string" not in caplog.text

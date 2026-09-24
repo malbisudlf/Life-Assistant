@@ -242,6 +242,27 @@ class TestRevolutSaldo:
         revolut = client.get("/finanzas/resumen", headers=auth_headers).json()["revolut"]
         assert revolut["saldo"] == 80.0
         assert len(revolut["cuentas"]) == 2
+        assert "sin_sumar" not in revolut
+
+    def test_otra_moneda_no_se_suma_como_si_fueran_euros(self, client, auth_headers,
+                                                          mock_requests, enable_banking):
+        """Un bolsillo en THB se sumaba al total y el total se quedaba con la divisa de
+        la última cuenta."""
+        mock_requests.add("GET", "provider=eq.enablebanking_revolut", _sesion_guardada(expires_at=99999999999.0))
+        mock_requests.add("GET", "api.enablebanking.com/sessions/session-abc", FakeResponse({
+            "accounts": ["uid-1", "uid-2"],
+        }))
+        mock_requests.add("GET", "/details", FakeResponse({"name": "Cuenta"}))
+
+        def _balances(url, **kwargs):
+            moneda, monto = ("EUR", "50.00") if "uid-1" in url else ("THB", "3000.00")
+            return FakeResponse({"balances": [{"balance_type": "ITAV",
+                                                "balance_amount": {"currency": moneda, "amount": monto}}]})
+        mock_requests.add("GET", "/balances", _balances)
+        revolut = client.get("/finanzas/resumen", headers=auth_headers).json()["revolut"]
+        assert revolut["saldo"] == 50.0 and revolut["moneda"] == "EUR"
+        assert revolut["sin_sumar"] == ["THB"]
+        assert {c["moneda"] for c in revolut["cuentas"]} == {"EUR", "THB"}
 
     def test_fallo_al_consultar_la_sesion_no_es_un_502(self, client, auth_headers, mock_requests, enable_banking):
         # A diferencia de Indexa, un fallo aquí no corta el widget entero (que sigue
