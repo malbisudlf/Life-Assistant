@@ -13,12 +13,14 @@ salud del Apple Watch, entrenamientos personales, ideas por voz, hogar inteligen
 comentarios, commits, strings de UI y mensajes de error de la API.
 
 - **Producción frontend**: https://life-assistant-smoky.vercel.app (Vercel, deploy automático al hacer push a `main`)
-- **Producción backend**: https://api.lifeassistantbackend.bid — corre **en el Home
-  Assistant Green de casa**, como add-on (`addon/life-assistant/`), y sale a internet
-  por Cloudflare Tunnel sin abrir puertos del router. Desplegar = *Reconstruir* el
-  add-on desde la interfaz de HA, que clona este repositorio. Ver
-  `docs/MIGRACION_BACKEND.md`. **Fly.io queda en pie pero ya sin tráfico**, pendiente
-  de apagar
+- **Producción backend**: https://api.lifeassistantbackend.bid — corre **en `caja`**
+  (el ThinkPad con Debian, desde el 2026-09-20) con Docker Compose, y sale a internet
+  por su propio Cloudflare Tunnel. Desplegar = `desplegar.sh` en `caja` o el botón
+  *Desplegar* de la zona dev (ver "Despliegue"). La fuente de verdad de esa máquina es
+  el repositorio HomeLab. El add-on del Green (`addon/life-assistant/`) sigue
+  instalado **parado y en `boot: manual`** como camino de vuelta, y **Fly está
+  suspendida**. Arrancar cualquiera de los dos es tener dos backends contra el mismo
+  Supabase: ver `docs/MIGRACION_BACKEND.md` y «Gemelos» en `backend/main.py`
 - **Base de datos**: Supabase (PostgreSQL vía REST), solo accesible desde el backend con la service key
 
 ## ⚠️ Repo público — reglas de seguridad
@@ -125,7 +127,7 @@ El E2E no entra en la verificación obligatoria de arriba porque tarda bastante 
 Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI + Uvicorn, add-on del HA Green, UN SOLO FICHERO ~3.000 líneas)
+backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~21.000 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
@@ -147,13 +149,14 @@ Ficheros clave:
 
 | Fichero | Qué es |
 |---|---|
-| `src/components/Dashboard.jsx` | TODA la UI (~4.800 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/Dashboard.jsx` | TODA la UI (~8.000 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Única excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
 | `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
 | `src/lib/dev.js` | La lógica de la zona dev: estilos, lectura del estado del sistema y el resumen de una línea que enseña el panel ⚙ |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
+| `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |
 | `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
@@ -161,7 +164,7 @@ Ficheros clave:
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
 | `scripts/verificar_backend.py` | Smoke test de un backend recién desplegado (arranque, CORS, login, auth de servicio) contra cualquier URL. Lo que no puede probar lo marca SALTADA, nunca OK |
-| `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, para correrlo dentro del Green. Se copia a `/addons` por Samba; el `Dockerfile` clona este repositorio, así que desplegar es reconstruir el add-on |
+| `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, de cuando corría en el Green (hasta el 2026-09-20). Allí sigue instalado, **parado y en `boot: manual`**, como camino de vuelta: arrancarlo es tener dos backends contra el mismo Supabase |
 | `telefono/PARCHES.md` | **Antes de tocar o actualizar claude-phone.** Los seis parches que necesita el repositorio original para funcionar aquí (credenciales SIP, modelo retirado, puertos, idioma, detector de voz, dominio del saliente). Viven solo en `caja` y **no están versionados**: un `claude-phone update` se los lleva |
 | `telefono/RUNBOOK.md` | Lo que Jarvis sabe y puede hacer cuando te llama por una avería: qué mirar, qué tocar con tu confirmación y qué no tocar nunca. **Se copia a mano** a `~/telefono-jarvis/CLAUDE.md` en `caja`, que es el directorio de trabajo del `claude-api-server` |
 | `docker/n8n/` | n8n empaquetado: su `compose.yml` y sus variables. Corre en `caja` y **se copia a mano**, igual que el add-on. **Los flujos ya no están aquí**: viven en el repositorio HomeLab (`caja/n8n/flujos/`), que es la fuente de verdad de esa máquina |
@@ -348,26 +351,22 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
 **Frontend**: push a `main` → Vercel despliega automáticamente.
 
 **Backend** — nunca en automático, pero ya no hace falta que lo pulse una persona.
-Vive como add-on del Home Assistant Green y su `Dockerfile` clona este repositorio en cada
-construcción, así que desplegar es reconstruir el add-on. Tres formas, todas equivalentes:
+Vive en `caja` desde el 2026-09-20, y desplegar es `desplegar.sh` (en el repositorio
+HomeLab): `git pull --ff-only`, escribe el SHA en `VERSION`, reconstruye y espera al
+healthcheck antes de decir nada. Dos formas, equivalentes:
 
 - **`POST /dev/reconstruir`** (JWT de usuario), que es lo que hay detrás del botón
-  *Desplegar* de la pestaña Despliegue de la zona dev. **En `caja`** (donde vive desde el
-  2026-09-20) deja un pedido en `DESPLIEGUE_DIR` que `desplegar.path` (systemd, en el
-  repositorio HomeLab) convierte en `desplegar.sh`. Como add-on del Green se lo pedía al
-  Supervisor (`/addons/self/rebuild`) con su `SUPERVISOR_TOKEN`. Ver `docs/ZONA_DEV.md`.
-- **Por SSH al Green**, que es lo que puede hacer una sesión que corra en la red de casa:
-  `export SUPERVISOR_TOKEN=$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)` y
-  `ha addons rebuild local_life-assistant`. Tarda ~1:15 más el arranque.
-- A mano, desde la interfaz de Home Assistant, como siempre.
+  *Desplegar* de la pestaña Despliegue de la zona dev. Deja un pedido en
+  `DESPLIEGUE_DIR` que `desplegar.path` (systemd, en HomeLab) convierte en
+  `desplegar.sh`. Ver `docs/ZONA_DEV.md`.
+- **Por SSH a `caja`** (acceso en las notas privadas): `cd ~/stack && ./desplegar.sh`.
 
-Ninguna pasa por `docker`, que es lo que bloquea el `Protection mode` del add-on de SSH.
-Lo que este fichero decía —"no hay comando remoto"— era cierto para `docker` y falso para
-la API del Supervisor.
-
-**El permiso vive en `addon/life-assistant/config.yaml` (`hassio_api: true` y
-`hassio_role: manager`), y ese fichero se copia a mano por Samba: no sale de git.** Si
-`/dev/reconstruir` responde 403, es que en el Green sigue la versión vieja.
+**Lo que ya NO despliega, y hace daño**: `ha addons rebuild local_life-assistant` y
+reconstruir el add-on desde la interfaz de Home Assistant. Eran las formas buenas
+cuando el backend vivía en el Green; hoy arrancan el add-on parado de allí, o sea **un
+segundo backend contra el mismo Supabase** (ver «Gemelos» en `backend/main.py`). Lo que
+sigue de esta sección sobre el `Dockerfile` del add-on es historia del Green, y se
+conserva por las lecciones.
 
 **Comprueba siempre que el despliegue ha entrado: `GET /` devuelve `version`, el SHA
 del commit clonado al construir la imagen.** Si no coincide con el `main` de GitHub, la
@@ -469,17 +468,17 @@ moraleja de este fichero entero.
   versionados — este incluido. Van a `HOMEASSISTANT.md` o a un `.env`.
 - **Una sesión de Claude SÍ despliega, pero solo al final de su propio trabajo y con el
   CI en verde** (decidido el 2026-09-10; antes lo tenía prohibido). Es decir: mergeas lo
-  tuyo, esperas a que el CI pase, reconstruyes y **compruebas con `GET /` que el `version`
+  tuyo, esperas a que el CI pase, despliegas y **compruebas con `GET /` que el `version`
   es el commit que acabas de mergear**. Lo que sigue prohibido:
   - Desplegar código que no acabas de mergear tú, o con el CI en rojo o sin terminar.
   - Desplegar en automático al hacer push: nadie mirando cuando entra en producción.
   - Desplegar desde la sesión que arregla una avería sin permiso — ese camino tiene su
     propia puerta (el botón del móvil), y su skill se lo sigue prohibiendo.
-  - Reconstruir "por probar". Cada reconstrucción para el backend 1-2 minutos, y con él
+  - Desplegar "por probar". Cada despliegue para el backend 1-2 minutos, y con él
     el dashboard, las alarmas y todo lo que Home Assistant sondea.
   - **El permiso del móvil mergea, no despliega** (resuelto el 2026-09-07). Disparaba
     `deploy-backend.yml` → Fly, que ya no atiende tráfico: aprobar un despliegue no
     cambiaba nada en producción y aun así contestaba «desplegando». Hoy el botón mergea
-    el PR y el aviso dice en voz alta el paso que falta —reconstruir el add-on—, que es
+    el PR y el aviso dice en voz alta el paso que falta —desplegar (`PASO_QUE_FALTA`)—, que es
     el único que no se puede automatizar desde GitHub. `deploy-backend.yml` y
     `backend/fly.toml` ya no existen. Ver `docs/AVERIAS.md`, «El último paso lo das tú».
