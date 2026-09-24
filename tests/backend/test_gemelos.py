@@ -41,9 +41,15 @@ class TestElLatido:
         assert "on_conflict=instancia" in url
         assert "merge-duplicates" in kw["headers"]["Prefer"]
 
-    def test_sin_la_migracion_no_rompe_nada(self, mock_requests, latido):
+    def test_sin_la_migracion_no_rompe_nada_ni_llena_el_registro(self, mock_requests, latido,
+                                                                 caplog):
+        """Sin la tabla fallaría cada cinco minutos: se dice una vez, no 288 al día."""
         mock_requests.add("POST", "backend_latidos", FakeResponse({}, 404))
-        main._latir()          # no lanza
+        with caplog.at_level("WARNING"):
+            main._latir()
+            main._latir()
+            main._latir()
+        assert caplog.text.count("Latido:") == 1
 
     def test_late_como_mucho_una_vez_por_intervalo(self, monkeypatch, latido):
         hilos = []

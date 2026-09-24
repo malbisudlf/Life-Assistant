@@ -888,6 +888,7 @@ LATIDOS_URL        = f"{SUPABASE_URL}/rest/v1/backend_latidos"
 INSTANCIA          = secrets.token_hex(4)
 _ultimo_latido     = 0.0
 _latido_lock       = threading.Lock()
+_latido_fallo_dicho = False
 
 
 def _donde_corro() -> str:
@@ -900,7 +901,12 @@ def _donde_corro() -> str:
 
 
 def _latir() -> None:
-    """Apunta que este proceso está vivo. Nunca lanza: es un testigo, no un servicio."""
+    """Apunta que este proceso está vivo. Nunca lanza: es un testigo, no un servicio.
+
+    El fallo se dice UNA vez por proceso: sin la migración aplicada fallaría cada cinco
+    minutos, y un WARNING por latido son 288 filas de ruido al día en `app_logs`.
+    """
+    global _latido_fallo_dicho
     try:
         r = http.post(
             f"{LATIDOS_URL}?on_conflict=instancia",
@@ -910,12 +916,15 @@ def _latir() -> None:
                   "donde": _donde_corro(),
                   "arrancado": datetime.fromtimestamp(_ARRANQUE_PROCESO, timezone.utc).isoformat(),
                   "visto": datetime.now(timezone.utc).isoformat()})
-        if r.status_code >= 300:
-            # Lo normal si falta la migración: se dice una vez por latido, a WARNING.
-            logger.warning("Latido: Supabase devolvió %s (¿falta 20260924_backend_latidos?)",
-                           r.status_code)
+        if r.status_code >= 300 and not _latido_fallo_dicho:
+            _latido_fallo_dicho = True
+            logger.warning("Latido: Supabase devolvió %s (¿falta 20260924_backend_latidos?). "
+                           "No se repite hasta el próximo arranque", r.status_code)
     except Exception as e:
-        logger.warning("Latido: no se pudo apuntar (%s)", type(e).__name__)
+        if not _latido_fallo_dicho:
+            _latido_fallo_dicho = True
+            logger.warning("Latido: no se pudo apuntar (%s). No se repite hasta el próximo "
+                           "arranque", type(e).__name__)
 
 
 def _latido_si_toca() -> None:
