@@ -7,7 +7,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 
 import { estadoDespliegue, estadoWorkflow, estadoSondeo, textoCada, shaCorto,
-         MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, estadoGrupo,
+         MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, resumenEspacio, estadoGrupo,
          estadoGraph, esperarAlBackend } from "../../src/lib/dev";
 
 // `esperarAlBackend` sondea con fetch a pelo (durante el arranque no hay nada más que
@@ -259,5 +259,26 @@ describe("esperarAlBackend", () => {
     expect((await esperar({ intentos: 3 })).cayo).toBe(false);
     guion([null, null, null]);
     expect((await esperar({ intentos: 3 })).cayo).toBe(true);
+  });
+});
+
+describe("resumenEspacio", () => {
+  const esp = (pct, mb = 250) => ({ mb, limite_mb: 500, pct, aviso_pct: 80,
+    tablas: [{ tabla: "app_logs", mb: 190 }, { tabla: "health_metrics", mb: 40 }] });
+
+  test("sin dato no es vacía: dice qué falta", () => {
+    expect(resumenEspacio(null)).toEqual({ tono: "muted",
+      texto: "espacio sin medir (falta aplicar 20260924_espacio_bd)" });
+  });
+
+  test("por tramos: verde, ámbar desde el aviso, rojo casi lleno", () => {
+    expect(resumenEspacio(esp(50)).tono).toBe("green");
+    expect(resumenEspacio(esp(84)).tono).toBe("accent");
+    expect(resumenEspacio(esp(96)).tono).toBe("red");
+  });
+
+  test("dice lo que más ocupa, que es lo que hay que purgar", () => {
+    expect(resumenEspacio(esp(50)).texto)
+      .toBe("250 MB de 500 (50 %) — lo que más ocupa: app_logs 190 MB · health_metrics 40 MB");
   });
 });

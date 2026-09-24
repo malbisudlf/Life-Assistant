@@ -8475,6 +8475,7 @@ def ha_brief_tick(request: Request, token: str = ""):
     # Home Assistant.
     previos = {**_avisar_reloj_seguro(), **_vigilar_espera_sueno_seguro(),
                **_vigilar_ingesta_seguro(), **_vigilar_gemelos_seguro(),
+               **_vigilar_espacio_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
@@ -9337,9 +9338,11 @@ def dev_bd(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     with ThreadPoolExecutor(max_workers=8) as pool:
         tarea_repo   = pool.submit(_migraciones_del_repo)
         tarea_tabla  = pool.submit(aplicadas)
+        tarea_esp    = pool.submit(_espacio_bd)
         conteos      = list(pool.map(_contar_tabla, TABLAS_CONOCIDAS))
         del_repo, motivo_repo   = tarea_repo.result()
         filas, motivo_aplicadas = tarea_tabla.result()
+        espacio      = _resumen_espacio(tarea_esp.result())
 
     tablas = [{"tabla": t, "migracion": TABLAS_CONOCIDAS[t], **c}
               for t, c in zip(TABLAS_CONOCIDAS, conteos)]
@@ -9360,6 +9363,8 @@ def dev_bd(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
         "migraciones": migraciones,
         "motivo":      motivo_aplicadas or motivo_repo,
         "registro":    MIGRACION_DEL_REGISTRO,
+        # None = no se sabe (lo normal hasta aplicar 20260924_espacio_bd).
+        "espacio":     espacio,
     }
 
 
@@ -11848,6 +11853,83 @@ def _vigilar_gemelos_seguro() -> dict:
         return _vigilar_gemelos()
     except Exception:
         logger.exception("Gemelos: fallo inesperado en el tick")
+        return {}
+
+
+# ── Espacio de Supabase ───────────────────────────────────────────────────────────
+# El plan gratuito da 500 MB y hay tablas que crecen solas (`app_logs`, `health_metrics`,
+# `backend_latidos`, `jarvis_gasto`). Lleno, fallan TODAS las escrituras a la vez, y el
+# registro —lo que diría qué pasa— es lo primero que se queda sin sitio. Así que se avisa
+# antes, con lo que más ocupa, que es lo que hay que purgar.
+#
+# Aquí y no en n8n aunque sea un vigilante: medirlo pide la service key, y repartir la
+# credencial más peligrosa del proyecto para leer un número no compensa (docs/N8N.md,
+# «todo lo que pueda estar en main.py, en main.py»).
+ESPACIO_BD_LIMITE_MB = int(os.getenv("ESPACIO_BD_LIMITE_MB", "500"))
+ESPACIO_BD_AVISO_PCT = int(os.getenv("ESPACIO_BD_AVISO_PCT", "80"))
+REGLA_ESPACIO        = "espacio"
+_ultima_vigilancia_espacio = 0.0
+
+
+def _espacio_bd() -> Optional[dict]:
+    """{"total": bytes, "tablas": [{"tabla", "bytes"}]} o None si no se puede saber."""
+    try:
+        r = http.post(f"{SUPABASE_URL}/rest/v1/rpc/espacio_bd",
+                      headers=supabase_headers(), json={})
+        if r.status_code >= 300:
+            return None
+        datos = r.json()
+        return datos if isinstance(datos, dict) and "total" in datos else None
+    except Exception:
+        return None
+
+
+def _resumen_espacio(espacio: Optional[dict]) -> Optional[dict]:
+    """Lo que se enseña y lo que decide el aviso: MB, porcentaje y lo que más ocupa."""
+    if not espacio:
+        return None
+    try:
+        total = int(espacio.get("total") or 0)
+    except (TypeError, ValueError):
+        return None
+    limite = ESPACIO_BD_LIMITE_MB * 1024 * 1024
+    tablas = [{"tabla": str(t.get("tabla") or "?"),
+               "mb": round(int(t.get("bytes") or 0) / 1048576, 1)}
+              for t in (espacio.get("tablas") or []) if isinstance(t, dict)]
+    return {"mb": round(total / 1048576, 1), "limite_mb": ESPACIO_BD_LIMITE_MB,
+            "pct": round(total * 100 / limite, 1) if limite else None,
+            "aviso_pct": ESPACIO_BD_AVISO_PCT, "tablas": tablas}
+
+
+def _vigilar_espacio() -> dict:
+    """Una vez cada seis horas: si la base pasa del umbral, un aviso con lo que purgar."""
+    global _ultima_vigilancia_espacio
+    if not SUPABASE_URL or time.time() - _ultima_vigilancia_espacio < 6 * 3600:
+        return {}
+    _ultima_vigilancia_espacio = time.time()
+    resumen = _resumen_espacio(_espacio_bd())
+    if not resumen or resumen["pct"] is None or resumen["pct"] < ESPACIO_BD_AVISO_PCT:
+        return {}
+    gordas = ", ".join(f"{t['tabla']} ({t['mb']:g} MB)" for t in resumen["tablas"][:3])
+    texto = (f"La base de datos va por {resumen['mb']:g} MB de {ESPACIO_BD_LIMITE_MB} "
+             f"({resumen['pct']:g} %). Lo que más ocupa: {gordas}. Llena, fallan todas "
+             f"las escrituras a la vez.")[:RECORDATORIO_MAX_TEXTO]
+    logger.warning("Espacio: Supabase al %s %% (%s MB)", resumen["pct"], resumen["mb"])
+    # Un aviso por día como mucho, y la huella por tramos de 5 puntos: un 81 % que sigue
+    # en 81 no se repite, uno que sube a 86 sí vuelve a hablar.
+    hoy = _ahora_local().date().isoformat()
+    apuntado = _apuntar_aviso(REGLA_ESPACIO, texto, prioridad=PRIO_ALTA,
+                              id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                                f"life-assistant:espacio:{hoy}")),
+                              huella=f"{int(resumen['pct'] // 5) * 5}%")
+    return {"espacio_pct": resumen["pct"], **({"aviso_espacio": True} if apuntado else {})}
+
+
+def _vigilar_espacio_seguro() -> dict:
+    try:
+        return _vigilar_espacio()
+    except Exception:
+        logger.exception("Espacio: fallo inesperado en el tick")
         return {}
 
 
@@ -16206,6 +16288,9 @@ class ProgramadoRotoIn(BaseModel):
     workflow: str = ""
     url:      str = ""
     detalle:  str = ""
+    # No es un fallo sino algo que un vigilante programado ha visto venir (el dominio que
+    # caduca): mismo canal, pero sin decir «ha fallado» ni «no lanzo ningún arreglo».
+    aviso:    bool = False
 
 
 @app.post("/programado/roto")
@@ -16238,11 +16323,14 @@ def programado_roto(request: Request, body: ProgramadoRotoIn, token: str = ""):
     if not url.startswith("https://"):
         url = ""
 
-    texto = f"«{workflow}» ha fallado."
-    if detalle:
-        texto += f" {detalle}"
-    texto += ("\n\nCorre solo, así que esto no lo va a ver nadie más. No lanzo ningún "
-              "arreglo: casi siempre es un secret o una cuota, no código.")
+    if body.aviso:
+        texto = f"«{workflow}»: {detalle or 'algo que mirar'}"
+    else:
+        texto = f"«{workflow}» ha fallado."
+        if detalle:
+            texto += f" {detalle}"
+        texto += ("\n\nCorre solo, así que esto no lo va a ver nadie más. No lanzo ningún "
+                  "arreglo: casi siempre es un secret o una cuota, no código.")
     if url:
         texto += f"\n\n{url}"
 

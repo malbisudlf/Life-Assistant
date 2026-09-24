@@ -21,6 +21,11 @@ diff de un PR y no la revisa el CI. Todo lo que pueda estar en `main.py`, en `ma
 Lo que sí le toca a n8n: los ~500 nodos de servicios externos, los disparadores por
 tiempo y el pegamento. Ahí gana de calle.
 
+**Lo que NO es un flujo aunque lo parezca: el espacio de Supabase.** Medirlo pide la
+service key, y dársela a n8n para leer un número es repartir la credencial más peligrosa
+del proyecto. Vive en el backend (`_vigilar_espacio`, en el tick de HA), con el mismo
+resultado: un aviso al móvil pasado el 80 %.
+
 ## Dónde vive
 
 | | |
@@ -57,6 +62,7 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Primera pasada de PRs** | Cada 10 min coge un PR abierto sin revisar, se lo da a Gemini y comenta solo si encuentra algo | Activo desde el 2026-09-20 |
 | **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Activo desde el 2026-09-20, 19:23 |
 | **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Activo desde el 2026-09-20, 19:23 |
+| **Caducidad del dominio** | Cada día a las 9 pregunta a RDAP cuándo caduca `lifeassistantbackend.bid`. Calla si faltan más de 30 días; si no, avisa por `POST /programado/roto` con `aviso: true`. Si RDAP no contesta, lo dice solo los lunes | Activo desde el 2026-09-24 |
 | **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Activo desde el 2026-09-22 |
 
 > **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
