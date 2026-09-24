@@ -10904,6 +10904,12 @@ def _correr_alarmas() -> dict:
             if cuando > ahora:
                 siguiente = cuando if siguiente is None or cuando < siguiente else siguiente
                 continue
+            # Vencida hace más de lo que nunca se insiste: a su hora no había backend o no
+            # había tick (una reconstrucción fallida deja el backend sin imagen). Sonar
+            # ahora sería despertar a la casa a las 14:00 por la alarma de las 07:00.
+            if (ahora - cuando).total_seconds() >= ALARMA_MAX_MIN * 60:
+                _alarma_no_pudo_sonar(fila, ahora)
+                continue
             if not _alarma_reservar(fila, "armada", {"estado": "avisada",
                                                      "avisado_at": ahora.isoformat()}):
                 continue
@@ -11041,6 +11047,29 @@ def _alarma_rendirse(fila: dict, estado: str, ahora: datetime) -> None:
                    f"confirmado. Lo dejo.{vuelvo}\n\n— Jarvis", aviso_id=rid, acciones=[])
     except Exception as e:
         logger.warning("Alarma %s: no se pudo avisar de la rendición (%s)", rid, e)
+
+
+def _alarma_no_pudo_sonar(fila: dict, ahora: datetime) -> None:
+    """Una alarma que el sistema no pudo tocar a su hora: no suena tarde, lo cuenta.
+
+    Mismo criterio que `_alarma_rendirse`: callarse sin más la haría indistinguible de
+    una que nunca se armó. Y se rearma si se repite, que hoy no dice nada del lunes.
+    """
+    rid = str(fila.get("id") or "")
+    if not _alarma_reservar(fila, "armada", {"estado": "rendida"}):
+        return
+    proxima = _alarma_reprogramar({**fila, "estado": "rendida"}, "rendida", ahora)
+    vuelvo  = (f" Vuelvo el {_ALARMA_DIAS_NOMBRE[proxima.isoweekday() - 1]} a las "
+               f"{proxima.strftime('%H:%M')}.") if proxima else ""
+    hora    = _alarma_cuando(fila).astimezone(LOCAL_TZ).strftime("%H:%M")
+    logger.warning("Alarma %s: no sonó a las %s, el sistema no estaba en marcha", rid, hora)
+    try:
+        _notificar("⏰ Tu alarma no pudo sonar",
+                   f"«{_alarma_texto(fila)}» era a las {hora} y a esa hora el sistema no "
+                   f"estaba en marcha. No la hago sonar tarde.{vuelvo}\n\n— Jarvis",
+                   aviso_id=rid, acciones=[])
+    except Exception as e:
+        logger.warning("Alarma %s: no se pudo avisar de que no sonó (%s)", rid, e)
 
 
 # ── Alarmas: las herramientas de Jarvis y el alta ────────────────────────────
@@ -11192,12 +11221,19 @@ def _alarma_cancelar(alarma_id: str) -> dict:
         return {"ok": False, "motivo": "Ese id no tiene forma de UUID; sácalo de mis_alarmas"}
     # Cancelar es cambiar de estado, no borrar: una alarma que sonó y se escaló es parte
     # de por qué la casa hizo ruido a las 8:32, y eso no se tira.
-    r = http.patch(f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.({','.join(ALARMA_VIVOS)})",
-                   headers={**supabase_headers(), "Prefer": "return=representation"},
-                   json={"estado": "cancelada"})
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    if not r.json():
+    def _patch(filtro_estado: str) -> bool:
+        r = http.patch(f"{ALARMAS_URL}?id=eq.{alarma_id}&{filtro_estado}",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"estado": "cancelada"})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return bool(r.json())
+
+    # Dos intentos, como en la edición: la música se para SOLO si estaba sonando. Quitar
+    # la alarma de mañana con el Echo puesto mandaba un media_stop y cortaba la música.
+    if _patch("estado=eq.armada"):
+        return {"ok": True, "hecho": True, "id": alarma_id}
+    if not _patch("estado=in.(avisada,escalada)"):
         return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba activa"}
     _alarma_callar()
     return {"ok": True, "hecho": True, "id": alarma_id}

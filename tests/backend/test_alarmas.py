@@ -97,10 +97,14 @@ class TestPonerAlarma:
         # durmiendo hasta la hora que apuntó la última consulta.
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
         mock_requests.add("POST", "/rest/v1/alarmas", FakeResponse([{"id": "abc"}]))
-        main._alarma_siguiente = main.time.time() + 86400
+        # El reloj dormido va a una semana, no a un día: «mañana a las 08:30» queda a más
+        # de 24 h si el test corre de madrugada, y el test fallaba entre las 00:00 y las
+        # 08:30 sin que nada estuviera roto.
+        dormido = main.time.time() + 7 * 86400
+        main._alarma_siguiente = dormido
         manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
         main._j_poner_alarma(manana, "08:30")
-        assert main._alarma_siguiente < main.time.time() + 86400
+        assert main._alarma_siguiente < dormido
 
 
 class TestTickBarato:
@@ -274,6 +278,8 @@ class TestLaEscaladaEsUnEstado:
 
     def test_cancelarla_la_apaga(self, client, mock_requests, canal_movil, auth_headers):
         self._escalar(mock_requests)
+        # Estaba sonando: el PATCH de «todavía armada» no se lleva nada.
+        mock_requests.routes.insert(0, ("PATCH", "estado=eq.armada", FakeResponse([])))
         client.delete("/alarmas/11111111-1111-1111-1111-111111111111", headers=auth_headers)
         assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
 
@@ -744,3 +750,44 @@ class TestHerramientasDeJarvis:
 
     def test_cancelar_con_un_id_que_no_es_uuid(self):
         assert main._j_cancelar_alarma("pepe")["ok"] is False
+
+
+
+class TestLoQueNoTieneQueSonar:
+    """Dos formas de hacer ruido cuando ya no toca."""
+
+    def test_una_alarma_vencida_hace_horas_no_despierta_a_la_casa(self, mock_requests, canal_movil):
+        """Backend o HA caídos de 06:00 a 14:00: la alarma de las 07:00 escalaba a las
+        14:02 con luces, Alexa y música."""
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-7 * 60, estado="armada")]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        assert main._correr_alarmas()["escalar"] == 0
+        cambios = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert {"estado": "rendida"} in cambios
+        assert not any(c.get("estado") == "avisada" for c in cambios)
+        assert any("no pudo sonar" in a["titulo"] for a in main._avisos_movil)
+
+    def test_una_alarma_de_hace_un_momento_suena_igual(self, mock_requests, canal_movil):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
+            [_fila(minutos_desde_ahora=-2, estado="armada")]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        cambios = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert any(c.get("estado") == "avisada" for c in cambios)
+
+    def test_cancelar_la_de_manana_no_corta_la_musica(self, mock_requests, monkeypatch):
+        calladas = []
+        monkeypatch.setattr(main, "_alarma_callar", lambda: calladas.append(1))
+        mock_requests.add("PATCH", "estado=eq.armada", _reserva_ok)
+        r = main._alarma_cancelar("11111111-1111-1111-1111-111111111111")
+        assert r["hecho"] is True
+        assert calladas == []
+
+    def test_cancelar_la_que_suena_si_la_calla(self, mock_requests, monkeypatch):
+        calladas = []
+        monkeypatch.setattr(main, "_alarma_callar", lambda: calladas.append(1))
+        mock_requests.add("PATCH", "estado=eq.armada", _reserva_perdida)
+        mock_requests.add("PATCH", "estado=in.(avisada,escalada)", _reserva_ok)
+        assert main._alarma_cancelar("11111111-1111-1111-1111-111111111111")["hecho"] is True
+        assert calladas == [1]

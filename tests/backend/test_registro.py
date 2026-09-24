@@ -116,10 +116,13 @@ class TestMiddleware:
         mensajes = [f["message"] for f in _filas_escritas(mock_requests)]
         assert any("POST /brief/send" in m and "502" in m for m in mensajes)
 
-    def test_una_excepcion_no_controlada_se_registra_con_traza(self, client, registro_activo, mock_requests, monkeypatch):
-        monkeypatch.setattr(main, "get_valid_token", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    def test_una_excepcion_no_controlada_se_registra_con_traza(self, client, auth_headers, registro_activo, mock_requests, monkeypatch):
+        # Antes era /ha/events/soon con el token de Graph reventando, pero ese endpoint
+        # ya no deja escapar nada (HA no sabe leer un 500). Vale cualquier ruta que no
+        # capture: lo que se prueba es el middleware.
+        monkeypatch.setattr(main, "_leer_todas", lambda url: (_ for _ in ()).throw(RuntimeError("boom")))
         with pytest.raises(RuntimeError):
-            client.get("/ha/events/soon", headers={"X-Auth-Token": "ha-poll-token"})
+            client.get("/export", headers=auth_headers)
         registro_activo.volcar()
 
         mensajes = [f["message"] for f in _filas_escritas(mock_requests)]
