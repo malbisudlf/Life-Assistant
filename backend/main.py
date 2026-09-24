@@ -2204,13 +2204,15 @@ def create_idea_from_text(
 
 # (tabla Supabase, clave de salida en el JSON). El orden es el que tiene sentido
 # leer en el backup, no el de creación.
+# El segundo criterio de cada orden es el desempate que pide `_leer_todas`: con dos
+# filas del mismo día, una página y la siguiente podían repetir una y saltarse otra.
 _EXPORT_TABLES = (
-    ("ideas",             "ideas",             "order=created_at.desc"),
-    ("training_clients",  "training_clients",  "order=created_at.asc"),
-    ("training_sessions", "training_sessions", "order=date.desc"),
-    ("training_payments", "training_payments", "order=date.desc"),
-    ("health_metrics",    "health_metrics",    "order=metric_date.desc"),
-    ("clothing",          "clothing",          "order=created_at.desc"),
+    ("ideas",             "ideas",             "order=created_at.desc,id.asc"),
+    ("training_clients",  "training_clients",  "order=created_at.asc,id.asc"),
+    ("training_sessions", "training_sessions", "order=date.desc,id.asc"),
+    ("training_payments", "training_payments", "order=date.desc,id.asc"),
+    ("health_metrics",    "health_metrics",    "order=metric_date.desc,metric_name.asc"),
+    ("clothing",          "clothing",          "order=created_at.desc,id.asc"),
 )
 
 
@@ -2220,21 +2222,20 @@ def export_data(credentials: HTTPAuthorizationCredentials = Depends(verify_token
     export: dict = {"exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
     def _tabla(table: str, order: str):
-        # limit alto para traer el histórico completo de cada tabla en una llamada.
-        return http.get(
-            f"{SUPABASE_URL}/rest/v1/{table}?{order}&limit=100000",
-            headers=supabase_headers(),
-        )
+        # Paginado: el `limit=100000` que había lo ignoraba Supabase, que corta a 1.000
+        # filas sin avisar, y la copia de `health_metrics` traía solo los ~25 días más
+        # recientes. Es el fallo de #223, que se arregló en `/health/metrics` y no aquí.
+        return _leer_todas(f"{SUPABASE_URL}/rest/v1/{table}?{order}")
 
     # Las seis tablas son independientes entre sí: en serie el backup costaba la suma
     # de las seis latencias (y aquí cada fila puede traer el histórico entero).
     with ThreadPoolExecutor(max_workers=len(_EXPORT_TABLES)) as pool:
         respuestas = list(pool.map(lambda t: _tabla(t[1], t[2]), _EXPORT_TABLES))
 
-    for (key, _table, _order), r in zip(_EXPORT_TABLES, respuestas):
-        if r.status_code >= 300:
+    for (key, _table, _order), (r, filas) in zip(_EXPORT_TABLES, respuestas):
+        if filas is None:
             raise _supabase_error(r)
-        export[key] = r.json()
+        export[key] = filas
     return export
 
 
@@ -4164,8 +4165,12 @@ def _existentes_por_clave(fechas: set, nombres: set) -> dict:
         f"&select=metric_date,metric_name,value,extra&order=metric_date.asc,metric_name.asc",
     )
     if filas is None:
+        # Sin saber qué hay guardado no se puede escribir encima. Devolver {} era dar por
+        # vacío lo que no se pudo leer: la regla de las acumulativas dejaba de proteger el
+        # total, la marca de noche anulada se perdía y la presencia reescribía las horas
+        # del día con el último tramo. Mejor un 502 y que el cliente reintente.
         logger.error("Ingesta de salud: no se pudo leer lo existente (%s)", r.status_code)
-        return {}
+        raise _supabase_error(r)
     return {(row["metric_date"], row["metric_name"]): row for row in filas}
 
 
@@ -4206,12 +4211,20 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
             # llegan snapshots parciales a lo largo del día y no deben pisar el total.
             if previo is not None and float(previo) > 0 and float(previo) >= value:
                 continue
+        extra = data["extra"]
+        # La marca de noche anulada la pone el usuario, no el reloj. El Atajo reenvía los
+        # últimos días en cada sync y el upsert reemplaza `extra` entero, así que sin esto
+        # la noche anulada volvía a puntuar al siguiente sync (la ruta simple ya la
+        # conservaba; esta no).
+        previo_extra = (existentes.get((metric_date, name)) or {}).get("extra") or {}
+        if name == "sleep_analysis" and previo_extra.get("excluded"):
+            extra = {**(extra or {}), "excluded": True}
         fila = {
             "metric_date": metric_date,
             "metric_name": name,
             "value": value,
             "unit": data["unit"],
-            "extra": data["extra"],
+            "extra": extra,
         }
         # Solo si se sabe: en el upsert, escribir `fuente: None` borraría la del último
         # que sí la dejó, y un hueco vale más que una atribución equivocada.
@@ -4563,6 +4576,22 @@ async def health_ingest_simple(request: Request, token: str = ""):
             skipped.append(f"{s.metric}: fecha inválida")
             continue
         validas.append((metric_date, s))
+
+    # Dos muestras de la misma métrica y día en un envío (dos lecturas de HRV) acababan
+    # como dos filas con la misma clave en UN upsert, y Postgres rechaza el lote entero
+    # («ON CONFLICT DO UPDATE command cannot affect row a second time»): 502 y el Atajo
+    # perdía todo. Se queda una: la mayor en las acumulativas, que son totales parciales
+    # del día, y la última en el resto. /health/ingest ya agrupa por clave.
+    unicas: dict = {}
+    for metric_date, s in validas:
+        clave  = (metric_date, s.metric)
+        previa = unicas.get(clave)
+        if (previa is not None and s.metric in CUMULATIVE_METRICS
+                and previa.value is not None and s.value is not None
+                and previa.value >= s.value):
+            continue
+        unicas[clave] = s
+    validas = [(fecha, s) for (fecha, _), s in unicas.items()]
 
     existentes = _existentes_por_clave(
         {d for d, _ in validas}, {m.metric for _, m in validas},
@@ -5192,7 +5221,12 @@ def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
     # el carril se queda sin dibujo pero la serie diaria sigue alimentando los cruces.
     _guardar_tramos_presencia(trozos, en_casa)
     tramos = [(dia, (h - d).total_seconds() / 3600) for dia, d, h in trozos]
-    existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
+    try:
+        existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
+    except HTTPException:
+        # Sin lo acumulado no se suma: sobre un {} el día se reescribía con este tramo
+        # solo (0,25 h encima de 14). Se pierde este tramo del total, no el día entero.
+        return
 
     agrupadas = {}
     for fecha, horas in tramos:
@@ -7830,9 +7864,14 @@ def _ultima_exportacion() -> tuple[datetime, str] | None:
     → Zepp → app Salud → exportador → backend) y no dice en cuál se atascó.
     """
     try:
+        # Sin las horas en casa: las escribe Home Assistant cada medianoche, con móvil o
+        # sin él, y el atasco salía nombrando a «home_assistant» como exportador parado.
+        # Por nombre y no por `fuente`: `neq` en PostgREST descarta también los null, y
+        # las filas anteriores a esa columna no la tienen.
         r = http.get(
             f"{SUPABASE_URL}/rest/v1/health_metrics"
-            "?select=created_at,fuente&order=created_at.desc&limit=1",
+            f"?select=created_at,fuente&metric_name=neq.{PRESENCE_METRIC}"
+            "&order=created_at.desc&limit=1",
             headers=supabase_headers(),
         )
         if r.status_code >= 300:
@@ -8474,15 +8513,15 @@ def get_gasto(dias: int = 30,
     # el panel justo después de usarlo.
     _volcar_gasto()
     desde = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
-    r = http.get(
+    # Paginado: el `limit=20000` lo ignoraba Supabase (corta a 1.000), así que con un
+    # mes de voz el total salía de las últimas mil llamadas sin decirlo.
+    r, filas = _leer_todas(
         f"{GASTO_URL}?creado=gte.{quote(desde, safe='')}"
         "&select=creado,boca,modelo,tokens_entrada,tokens_cacheados,tokens_salida,segundos_audio"
-        "&order=creado.desc&limit=20000",
-        headers=supabase_headers(),
+        "&order=creado.desc,id.asc",
     )
-    if r.status_code >= 300:
+    if filas is None:
         raise _supabase_error(r)
-    filas = r.json() or []
 
     def _vacio():
         return {"llamadas": 0, "entrada": 0, "cacheados": 0, "salida": 0,
@@ -11480,9 +11519,13 @@ def _vigilar_ingesta() -> dict:
     _ultima_vigilancia = time.time()
 
     try:
+        # Sin las horas en casa, igual que `last_sync` desde #225: Home Assistant crea una
+        # fila de `time_at_home` cada medianoche, así que la última escritura nunca pasaba
+        # de ~24 h y el umbral de 48 no se alcanzaba jamás con el móvil callado días.
         r = http.get(
             f"{SUPABASE_URL}/rest/v1/health_metrics"
-            "?select=created_at&order=created_at.desc&limit=1",
+            f"?select=created_at&metric_name=neq.{PRESENCE_METRIC}"
+            "&order=created_at.desc&limit=1",
             headers=supabase_headers(),
         )
         if r.status_code >= 300:

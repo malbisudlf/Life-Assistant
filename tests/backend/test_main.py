@@ -326,6 +326,22 @@ class TestExport:
         assert data["clothing"] == [{"id": "r1"}]
         assert "exported_at" in data
 
+    def test_la_copia_trae_mas_de_las_mil_filas_que_corta_supabase(
+            self, client, auth_headers, mock_requests):
+        """El `limit=100000` lo ignoraba Supabase: la copia de `health_metrics` traía los
+        ~25 días más recientes y el resto del histórico faltaba sin aviso."""
+        filas = [{"metric_date": "2026-09-01", "metric_name": f"m{i:04d}"} for i in range(2345)]
+
+        def _con_tope(url, **kwargs):
+            offset = int(url.split("offset=")[1].split("&")[0]) if "offset=" in url else 0
+            lote = filas[offset:offset + 1000]
+            return FakeResponse(lote, headers={
+                "Content-Range": f"{offset}-{offset + len(lote) - 1}/{len(filas)}"})
+        mock_requests.add("GET", "/rest/v1/health_metrics", _con_tope)
+        r = client.get("/export", headers=auth_headers)
+        assert r.status_code == 200
+        assert len(r.json()["health_metrics"]) == 2345
+
     def test_no_exporta_tokens_oauth(self, client, auth_headers, mock_requests):
         # Nunca debe consultarse la tabla de secretos oauth_tokens
         r = client.get("/export", headers=auth_headers)
