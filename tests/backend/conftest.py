@@ -208,6 +208,7 @@ def _limpiar_estado():
     main._ultima_vigilancia_gemelos = 0.0
     main._ultimo_latido = 0.0
     main._latido_fallo_dicho = False
+    main._token_por_query_visto.clear()
     main._ultima_regla_salud = 0.0
     main._ultima_vigilancia_web = 0.0
     main._ultima_revision_correo = 0.0

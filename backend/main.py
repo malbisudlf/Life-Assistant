@@ -83,7 +83,14 @@ def normalize_graph_dt(dt_obj: dict) -> str:
 
 load_dotenv()
 
-app = FastAPI()
+# `/docs`, `/redoc` y `/openapi.json` apagados salvo que se pidan: nada del proyecto los
+# usa y en producción solo servían para que cualquiera sondeara la API entera de un
+# vistazo. El código es público igual, así que no es un secreto que se esconda, pero sí
+# superficie que no hace falta dejar abierta. En local: API_DOCS=1.
+_API_DOCS = os.getenv("API_DOCS", "0").strip().lower() in ("1", "true", "yes", "on", "si", "sí")
+app = FastAPI(docs_url="/docs" if _API_DOCS else None,
+              redoc_url="/redoc" if _API_DOCS else None,
+              openapi_url="/openapi.json" if _API_DOCS else None)
 
 # Orígenes permitidos, separados por comas. En tu instancia, añade tu dominio de Vercel.
 CORS_ORIGINS = [
@@ -1262,7 +1269,20 @@ def _extract_service_token(request: Request, token_qs: str = "") -> str:
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
+    if token_qs:
+        # El camino de la query se mantiene por el Atajo de iOS, pero ya no se sabía quién
+        # más lo usaba. Se dice una vez por ruta y proceso: es la lista de lo que falta
+        # migrar a cabecera antes de poder quitarlo.
+        ruta = getattr(getattr(request, "url", None), "path", "?")
+        if ruta not in _token_por_query_visto:
+            _token_por_query_visto.add(ruta)
+            logger.warning("Token de servicio por query string en %s: migra ese cliente a la "
+                           "cabecera X-Auth-Token", ruta)
     return token_qs
+
+
+# Rutas que han recibido el token por la query desde que arrancó el proceso.
+_token_por_query_visto: set = set()
 
 
 def _token_ok(provided: str, expected: str) -> bool:

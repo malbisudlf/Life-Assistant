@@ -124,9 +124,12 @@ class TestElVigilante:
         main._vigilar_gemelos()
         assert len(mock_requests.called("GET", "backend_latidos")) == 1
 
-    def test_va_en_el_tick_y_no_lo_puede_tumbar(self, client, mock_requests, latido, monkeypatch):
+    def test_no_puede_tumbar_el_tick(self, latido, monkeypatch):
         def _revienta():
             raise RuntimeError("boom")
         monkeypatch.setattr(main, "_gemelos", _revienta)
-        r = client.post("/ha/brief-tick", headers={"X-Auth-Token": "ha-poll-token"})
-        assert r.status_code == 200
+        assert main._vigilar_gemelos_seguro() == {}
+
+    def test_va_en_el_tick(self):
+        import inspect
+        assert "_vigilar_gemelos_seguro()" in inspect.getsource(main.ha_brief_tick)

@@ -791,7 +791,10 @@ class TestLoteVacioNoEsUnFallo:
     def test_un_lote_vacio_no_se_registra_como_aviso(self, client, mock_requests, caplog):
         """Va a INFO justamente para que no se persista en app_logs (WARNING+)."""
         with caplog.at_level(logging.INFO, logger="main"):
-            client.post("/health/ingest?token=health-token", json={"data": {}})
+            # Por cabecera: por la query el token deja su propio WARNING (a propósito,
+            # para saber quién falta por migrar), y aquí se mira otra cosa.
+            client.post("/health/ingest", json={"data": {}},
+                        headers={"X-Auth-Token": "health-token"})
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("lote vacío" in r.message for r in caplog.records)
 
