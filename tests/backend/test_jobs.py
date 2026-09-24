@@ -241,6 +241,16 @@ class TestRetry:
         assert patched["attempt"] == 1
         assert patched["claimed_by"] is None
 
+    def test_retry_vuelve_a_la_cola_de_verdad(self, client, auth_headers, mock_requests):
+        """`/jobs/pending` solo sirve lo creado en la última hora: sin mover
+        `created_at`, un reintento de un job viejo se quedaba pendiente para siempre."""
+        mock_requests.add("GET", "status=eq.failed", FakeResponse([{"id": JOB_ID, "attempt": 0}]))
+        mock_requests.add("PATCH", "status=eq.failed", FakeResponse([{"id": JOB_ID}]))
+        client.post(f"/jobs/{JOB_ID}/retry", headers=auth_headers, json={"worker_id": "w1"})
+        patched = mock_requests.called("PATCH", "status=eq.failed")[0][2]["json"]
+        creado = datetime.fromisoformat(patched["created_at"])
+        assert abs((datetime.now(timezone.utc) - creado).total_seconds()) < 60
+
     def test_retry_respeta_maximo(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "status=eq.failed", FakeResponse([{"id": JOB_ID, "attempt": 3}]))
         r = client.post(f"/jobs/{JOB_ID}/retry", headers=auth_headers, json={"worker_id": "w1"})

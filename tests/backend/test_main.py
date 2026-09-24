@@ -139,6 +139,18 @@ class TestAuthPassword:
         r = client.post("/auth/password", json={"password": "1234"})
         assert r.status_code == 200
 
+    def test_supabase_sin_red_tampoco_bloquea_el_login(self, client, mock_requests):
+        """El caso de la caída del DNS: no hay respuesta con error, hay una excepción,
+        y el login daba 500 con la contraseña buena."""
+        import requests
+
+        def _sin_red(*a, **k):
+            raise requests.ConnectionError("NameResolutionError")
+        for metodo in ("GET", "POST", "DELETE"):
+            mock_requests.add(metodo, "/rest/v1/login_attempts", _sin_red)
+        assert client.post("/auth/password", json={"password": "1234"}).status_code == 200
+        assert client.post("/auth/password", json={"password": "mala"}).status_code == 401
+
     def test_password_con_tilde_devuelve_401_no_500(self, client, login_attempts_mock):
         """compare_digest sobre str lanza TypeError con no-ASCII → antes era un 500."""
         r = client.post("/auth/password", json={"password": "contraseña"})

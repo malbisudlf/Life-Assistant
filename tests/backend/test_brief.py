@@ -154,6 +154,27 @@ class TestAuth:
 
 
 class TestConstruirBrief:
+    def test_un_outlook_que_no_contesta_no_tumba_el_resumen(
+            self, client, auth_headers, mock_requests, monkeypatch):
+        """El {"error"} de sin sesión ya se toleraba; la excepción de red no, y como se
+        reintenta en cada tick, una caída larga de Graph dejaba el día sin correo."""
+        import requests
+        montar_fuentes(mock_requests)
+
+        def _graph_colgado():
+            raise requests.Timeout("graph.microsoft.com")
+        monkeypatch.setattr(main, "get_valid_token", _graph_colgado)
+        d = main.construir_brief()
+        assert d["agenda"] == [] and d["clases"] == []
+        assert d["calendario_caido"] is True
+        assert d["clima"]["max"] == 31          # el resto del correo sigue ahí
+        texto = main.render_brief_texto(d)
+        assert "No lo cuentes como un día libre" in texto
+
+    def test_con_outlook_bien_no_hay_marca(self, client, auth_headers, graph_token, mock_requests):
+        montar_fuentes(mock_requests)
+        assert "calendario_caido" not in main.construir_brief()
+
     def test_agenda_solo_de_hoy(self, client, auth_headers, graph_token, mock_requests):
         montar_fuentes(mock_requests)
         d = client.get("/brief", headers=auth_headers).json()

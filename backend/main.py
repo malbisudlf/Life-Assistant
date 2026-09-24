@@ -991,10 +991,17 @@ def _check_login_rate():
     # habrían desaparecido del recuento.
     horizonte = max(LOGIN_WINDOW_SECONDS, LOGIN_BLOQUEO_MAX_SECONDS)
     since = (datetime.now(timezone.utc) - timedelta(seconds=horizonte)).isoformat()
-    r = http.get(
-        f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.{quote(since)}&select=created_at&order=created_at.asc",
-        headers=supabase_headers(),
-    )
+    # El fail-open cubría la respuesta con error, pero no la que no llega: con el DNS
+    # caído (13/09) la excepción subía y el login daba 500 con la contraseña buena, justo
+    # cuando más falta hace entrar a mirar qué falla.
+    try:
+        r = http.get(
+            f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.{quote(since)}&select=created_at&order=created_at.asc",
+            headers=supabase_headers(),
+        )
+    except requests.RequestException as e:
+        logger.error("Rate limit de login: Supabase no responde (%s)", e)
+        return
     if r.status_code >= 300:
         logger.error("Rate limit de login: no se pudo consultar Supabase (%s)", r.status_code)
         return
@@ -1017,20 +1024,30 @@ def _check_login_rate():
 
 def _register_login_failure(ip: str):
     logger.warning("Login fallido desde %s", ip)
-    r = http.post(
-        f"{SUPABASE_URL}/rest/v1/login_attempts",
-        headers={**supabase_headers(), "Prefer": "return=minimal"},
-        json={},
-    )
+    try:
+        r = http.post(
+            f"{SUPABASE_URL}/rest/v1/login_attempts",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            json={},
+        )
+    except requests.RequestException as e:
+        logger.error("No se pudo registrar el intento fallido de login (%s)", e)
+        return
     if r.status_code >= 300:
         logger.error("No se pudo registrar el intento fallido de login (%s)", r.status_code)
 
 
 def _reset_login_attempts():
-    r = http.delete(
-        f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.1970-01-01T00:00:00Z",
-        headers=supabase_headers(),
-    )
+    # Se llama DESPUÉS de acertar la contraseña: que falle no puede convertir un login
+    # correcto en un 500.
+    try:
+        r = http.delete(
+            f"{SUPABASE_URL}/rest/v1/login_attempts?created_at=gt.1970-01-01T00:00:00Z",
+            headers=supabase_headers(),
+        )
+    except requests.RequestException as e:
+        logger.error("No se pudo limpiar login_attempts (%s)", e)
+        return
     if r.status_code >= 300:
         logger.error("No se pudo limpiar login_attempts (%s)", r.status_code)
 
@@ -2316,7 +2333,14 @@ def ha_events_soon(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    graph_token = get_valid_token()
+    # También envuelto: renovar el token es otra llamada de red (MSAL, y la lectura de
+    # `oauth_tokens` en Supabase), y fuera del try un fallo ahí daba el 500 que el
+    # comentario de abajo dice evitar.
+    try:
+        graph_token = get_valid_token()
+    except Exception as e:
+        logger.error("ha/events/soon: no se pudo obtener el token de Graph (%s)", type(e).__name__)
+        return {"event": None}
     if not graph_token:
         return {"event": None}
 
@@ -2654,7 +2678,12 @@ def retry_job(
     patch_r = http.patch(
         f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.failed&claimed_by=eq.{worker}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
-        json={"status": "pending", "attempt": attempt, "claimed_by": None, "claimed_at": None},
+        # `created_at` vuelve a ahora: `/jobs/pending` solo sirve los pendientes creados
+        # en la última hora, así que un job de las 10:00 reintentado a las 12:00 respondía
+        # 200 y se quedaba pendiente para siempre sin que el agente lo viera. Reintentar a
+        # mano es volver a pedirlo, y un job pedido ahora es de ahora.
+        json={"status": "pending", "attempt": attempt, "claimed_by": None, "claimed_at": None,
+              "created_at": datetime.now(timezone.utc).isoformat()},
     )
     if patch_r.status_code >= 300:
         raise _supabase_error(patch_r)
@@ -6530,6 +6559,22 @@ def _sin_error(resultado, clave: str) -> list:
     return resultado.get(clave) or []
 
 
+def _calendario_del_pool(futuro, clave: str) -> tuple[list, bool]:
+    """Los eventos de un endpoint de calendario lanzado en el pool, y si respondió.
+
+    `_sin_error` cubre el {"error"} que devuelven sin sesión, pero no la excepción: un
+    Graph que no contesta (timeout, la renovación de MSAL) subía por el `.result()` y
+    tumbaba el resumen entero. Y como se reintenta en cada tick, con Outlook caído una
+    mañana no salía en todo el día — ni siquiera a la hora tope.
+    """
+    try:
+        resultado = futuro.result()
+    except Exception as e:
+        logger.warning("Resumen diario: el calendario no respondió (%s)", e)
+        return [], False
+    return _sin_error(resultado, clave), isinstance(resultado, dict) and "error" not in resultado
+
+
 def construir_brief() -> dict:
     """Reúne todo lo que va en el correo. Las cuatro fuentes son independientes, así
     que se piden en paralelo: esto corre con el arranque en frío de Fly por delante."""
@@ -6550,8 +6595,8 @@ def construir_brief() -> dict:
         # diff de siempre y el descarte de titulares ya contados. Pedirla después sería
         # un viaje a Supabase en serie por delante del arranque en frío de Fly.
         f_previa  = pool.submit(_instantanea_previa, hoy.isoformat())
-        eventos = _sin_error(f_eventos.result(), "events")
-        clases  = _sin_error(f_clases.result(), "events")
+        eventos, eventos_ok = _calendario_del_pool(f_eventos, "events")
+        clases,  clases_ok  = _calendario_del_pool(f_clases, "events")
         clima, salud, entrenamiento = f_clima.result(), f_salud.result(), f_entren.result()
         presencia = f_presen.result()
         previa    = f_previa.result()
@@ -6612,6 +6657,10 @@ def construir_brief() -> dict:
         # aparte de los titulares para que un feed caído no se lo lleve por delante.
         "termino_economico": _termino_del_dia(hoy) if BRIEF_ECONOMIA else {},
     }
+    # Una agenda vacía porque Outlook no contestó se leía igual que un día libre: quien
+    # redacta el briefing tiene que poder distinguirlas.
+    if not (eventos_ok and clases_ok):
+        datos["calendario_caido"] = True
     cambios = _cambios_desde(previa, datos)
     if cambios:
         datos["cambios"] = cambios
@@ -6795,6 +6844,9 @@ def render_brief_texto(d: dict) -> str:
         L.append("")
 
     L.append("## AGENDA DE HOY")
+    if d.get("calendario_caido"):
+        L.append("(El calendario de Outlook no ha respondido: la agenda puede estar "
+                 "incompleta. No lo cuentes como un día libre.)")
     L += _lineas_eventos(d["agenda"])
     L.append("")
     L.append("## CLASES DE HOY")
