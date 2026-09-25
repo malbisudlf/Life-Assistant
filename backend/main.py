@@ -14814,19 +14814,9 @@ def _recortar_por_el_medio(texto: str, tope: int) -> str:
     return texto[:cabeza] + marca + texto[len(texto) - (tope - len(marca) - cabeza):]
 
 
-def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
-    """Hace sonar el móvil por la centralita. True si la llamada llegó a lanzarse.
-
-    `contexto` es lo que Jarvis SABE al descolgar y no dice en voz alta: qué está caído,
-    desde cuándo y qué puede hacer al respecto. Sin él la llamada es un locutor, y lo que
-    se pedía era alguien con quien se pueda resolver el problema hablando.
-    """
-    if not _telefono_configurado():
-        return False
-    cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
-              "mode": "conversation", "message": texto[:1000]}
-    if contexto:
-        cuerpo["context"] = _recortar_por_el_medio(contexto, TELEFONO_CONTEXTO_MAX)
+def _lanzar_llamada(cuerpo: dict) -> Optional[str]:
+    """Pide UNA llamada a la centralita. None si no llegó a lanzarse; si se lanzó, el
+    `callId` con el que claude-phone deja preguntar cómo acabó ("" si no lo devolvió)."""
     try:
         r = http.post(f"{TELEFONO_URL.rstrip('/')}/api/outbound-call", json=cuerpo)
         if r.status_code >= 300:
@@ -14834,12 +14824,160 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
             # PBX) y son arreglos distintos. Ninguno lleva credenciales dentro.
             logger.error("Llamada: la centralita devolvió %s — %s", r.status_code,
                          (r.text or "")[:200].replace("\n", " ").strip() or "(sin cuerpo)")
-            return False
+            return None
     except requests.RequestException as e:
         logger.exception("Llamada: no se pudo conectar con la centralita (%s)", e)
+        return None
+    try:
+        datos = r.json()
+    except ValueError:
+        datos = None
+    return str(datos.get("callId") or "") if isinstance(datos, dict) else ""
+
+
+def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
+    """Hace sonar el móvil por la centralita. True si la llamada llegó a lanzarse.
+
+    `contexto` es lo que Jarvis SABE al descolgar y no dice en voz alta: qué está caído,
+    desde cuándo y qué puede hacer al respecto. Sin él la llamada es un locutor, y lo que
+    se pedía era alguien con quien se pueda resolver el problema hablando.
+
+    Devolver True es «ha empezado a sonar», no «lo has cogido»: si no lo coges, lo que
+    sigue (otra llamada y después el buzón) lo lleva `_insistir`, en segundo plano.
+    """
+    if not _telefono_configurado():
+        return False
+    cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
+              "mode": "conversation", "message": texto[:1000],
+              "timeoutSeconds": TELEFONO_TIMBRE_SEG}
+    if contexto:
+        cuerpo["context"] = _recortar_por_el_medio(contexto, TELEFONO_CONTEXTO_MAX)
+    call_id = _lanzar_llamada(cuerpo)
+    if call_id is None:
         return False
     logger.info("Llamada lanzada por la centralita (%s)", rid or "sin decisión asociada")
+    if call_id:
+        _insistir_en_segundo_plano(call_id, cuerpo, rid)
     return True
+
+
+# ── Si no lo coges ───────────────────────────────────────────────────────────────────
+#
+# El 2026-09-25 Jarvis llamó, no se cogió, y al devolverle la llamada su extensión
+# estaba OCUPADA. Lo que pasa por debajo: claude-phone acepta `timeoutSeconds` pero no lo
+# usa, así que la llamada sonaba hasta que el 3CX la desviaba a TU buzón; el buzón
+# «descuelga», y Jarvis se ponía a conversar con él —hasta 20 turnos de «¿sigues ahí?»—
+# con su línea cogida todo ese rato. Y para el backend eso era una llamada contestada.
+#
+# Lo que Mikel pidió: si no lo coge, que llame otra vez; y si tampoco, que deje el
+# mensaje en el buzón. Para eso hacen falta las dos puntas:
+#   - claude-phone tiene que COLGAR él a los `timeoutSeconds` (parche 7 de
+#     `telefono/PARCHES.md`), antes de que el 3CX desvíe al buzón. Solo entonces la
+#     llamada acaba en FAILED/no_answer y aquí se puede saber que no la cogiste.
+#   - Aquí se pregunta cómo acabó (`GET /api/call/{id}`) y se decide lo siguiente.
+# Sin el parche, todo esto no hace nada: la llamada consta como contestada (por el
+# buzón) y no se insiste, que es exactamente lo de antes.
+#
+# El buzón se consigue dejando sonar la última llamada MÁS que el desvío del 3CX, en modo
+# `announce` (dice el mensaje y cuelga, sin conversación) y esperando unos segundos a que
+# termine el saludo del buzón antes de hablar (`delaySeconds`, también del parche 7).
+TELEFONO_TIMBRE_SEG       = int(os.getenv("TELEFONO_TIMBRE_SEG", "25"))
+TELEFONO_INTENTOS         = int(os.getenv("TELEFONO_INTENTOS", "2"))
+TELEFONO_REINTENTO_SEG    = int(os.getenv("TELEFONO_REINTENTO_SEG", "60"))
+TELEFONO_BUZON            = _flag("TELEFONO_BUZON", "1")
+TELEFONO_BUZON_TIMBRE_SEG = int(os.getenv("TELEFONO_BUZON_TIMBRE_SEG", "90"))
+TELEFONO_BUZON_ESPERA_SEG = int(os.getenv("TELEFONO_BUZON_ESPERA_SEG", "8"))
+TELEFONO_SONDEO_SEG       = 5
+# Lo que claude-phone da por «no lo ha cogido». Un rechazo (603), una extensión que no
+# existe o un SIP sin registrar son otra cosa: insistir no los arregla, y colgarle a
+# alguien que ha rechazado la llamada para volver a llamarle es justo lo que no se hace.
+_TELEFONO_NO_COGIDA = ("no_answer", "busy")
+
+
+def _dormir(segundos: float) -> None:
+    """`time.sleep` con nombre propio para que los tests no esperen de verdad."""
+    time.sleep(segundos)
+
+
+def _como_acabo(call_id: str) -> str:
+    """'cogida', 'no_cogida' u 'otra'. Espera a que la llamada deje de sonar.
+
+    claude-phone guarda la sesión un minuto después de terminar, así que con un sondeo
+    cada pocos segundos no se pierde el final. Ante la duda, 'otra': insistir sobre una
+    llamada que no se sabe cómo acabó es arriesgarse a llamarte dos veces seguidas por
+    algo que ya has oído.
+    """
+    url   = f"{TELEFONO_URL.rstrip('/')}/api/call/{quote(call_id, safe='')}"
+    tope  = time.monotonic() + TELEFONO_TIMBRE_SEG + 60
+    while time.monotonic() < tope:
+        _dormir(TELEFONO_SONDEO_SEG)
+        try:
+            r = http.get(url)
+        except requests.RequestException:
+            continue
+        if r.status_code == 404:
+            return "otra"
+        if r.status_code >= 300:
+            continue
+        try:
+            info = (r.json() or {}).get("data") or {}
+        except (ValueError, AttributeError):
+            return "otra"
+        estado = info.get("state")
+        if estado in ("PLAYING", "CONVERSING", "COMPLETED"):
+            return "cogida"
+        if estado == "FAILED":
+            return "no_cogida" if info.get("reason") in _TELEFONO_NO_COGIDA else "otra"
+    return "otra"
+
+
+def _texto_buzon(texto: str) -> str:
+    """El mensaje para el buzón: lo mismo que ibas a oír, diciendo que ya te ha llamado."""
+    cuerpo = texto.strip()
+    if cuerpo.startswith("Mikel, soy Jarvis."):
+        cuerpo = cuerpo[len("Mikel, soy Jarvis."):].strip()
+    veces = "una vez" if TELEFONO_INTENTOS == 1 else f"{TELEFONO_INTENTOS} veces"
+    return (f"Mikel, soy Jarvis. Te he llamado {veces} y no lo has cogido, así que te lo "
+            f"dejo aquí. {cuerpo} Llámame cuando puedas.")[:1000]
+
+
+def _insistir(call_id: str, cuerpo: dict, rid: str) -> None:
+    """Lo que viene después de una llamada que no cogiste: otra, y después el buzón."""
+    for intento in range(2, TELEFONO_INTENTOS + 1):
+        resultado = _como_acabo(call_id)
+        if resultado != "no_cogida":
+            return
+        logger.info("Llamada: no cogida (%s), vuelvo a llamar en %ds (intento %d de %d)",
+                    rid or "sin decisión asociada", TELEFONO_REINTENTO_SEG,
+                    intento, TELEFONO_INTENTOS)
+        _dormir(TELEFONO_REINTENTO_SEG)
+        call_id = _lanzar_llamada(cuerpo)
+        if not call_id:
+            return
+    if _como_acabo(call_id) != "no_cogida" or not TELEFONO_BUZON:
+        return
+    logger.info("Llamada: no cogida %d veces (%s), dejo el mensaje en el buzón",
+                TELEFONO_INTENTOS, rid or "sin decisión asociada")
+    _dormir(TELEFONO_REINTENTO_SEG)
+    # Sin `context` a propósito: en modo announce no hay modelo al otro lado, solo el
+    # texto leído en voz alta. Y sin conversación: al otro lado hay un buzón.
+    _lanzar_llamada({"to": cuerpo["to"], "device": cuerpo["device"], "mode": "announce",
+                     "message": _texto_buzon(cuerpo["message"]),
+                     "timeoutSeconds": TELEFONO_BUZON_TIMBRE_SEG,
+                     "delaySeconds": TELEFONO_BUZON_ESPERA_SEG})
+
+
+def _insistir_en_segundo_plano(call_id: str, cuerpo: dict, rid: str) -> None:
+    """En un hilo: esto dura minutos, y quien llamó a `_llamar` no puede esperarlos."""
+    def _trabajo() -> None:
+        try:
+            _insistir(call_id, cuerpo, rid)
+        except Exception:
+            # Un reintento que falla es el estado de antes de esto: el aviso al móvil ya
+            # salió y la primera llamada ya sonó. Se registra y ya.
+            logger.exception("Llamada: fallo insistiendo (%s)", rid or "sin decisión asociada")
+
+    threading.Thread(target=_trabajo, daemon=True, name="insistir-llamada").start()
 
 
 def _llamar(texto: str, *, rid: str = "", contexto: str = "") -> bool:

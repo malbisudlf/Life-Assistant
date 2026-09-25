@@ -166,6 +166,57 @@ Si en unas semanas dejas de coger estas llamadas, la solución no es bajar el to
 apagar las reglas que no aportan, porque el coste de verdad es que dejes de coger
 también la de la avería.
 
+### Si no lo coges (desde el 2026-09-25)
+
+Ese día Jarvis llamó, no se cogió, y al devolverle la llamada **su extensión daba
+comunicando**. La causa, en claude-phone: acepta `timeoutSeconds` pero no lo usa, así
+que la llamada sonaba hasta que el 3CX la desviaba a tu buzón; el buzón «descuelga», y
+Jarvis se ponía a conversar con él —hasta 20 turnos de «¿sigues ahí?», ~12 minutos—
+con la línea cogida. Para el backend, además, eso era una llamada contestada.
+
+Mikel pidió entonces lo que hace un humano: **si no lo coges, vuelve a llamar; y si
+tampoco, deja el mensaje en el buzón.** Queda así:
+
+```
+llamada 1 (conversación, suena TELEFONO_TIMBRE_SEG = 25 s y cuelga)
+   │ no cogida (no_answer o comunicando)
+   ▼  espera TELEFONO_REINTENTO_SEG = 60 s
+llamada 2 (igual que la 1)            ← TELEFONO_INTENTOS = 2 en total
+   │ no cogida
+   ▼  espera 60 s
+llamada 3 al buzón: modo announce, suena 90 s (TELEFONO_BUZON_TIMBRE_SEG) para que el
+3CX la desvíe, espera 8 s (TELEFONO_BUZON_ESPERA_SEG) al saludo del buzón, dice el
+mensaje —«te he llamado 2 veces y no lo has cogido…» + lo que te iba a decir— y cuelga
+```
+
+Lo lleva `_insistir` (`backend/main.py`), en un hilo aparte, preguntándole a claude-phone
+cómo acabó cada llamada (`GET /api/call/{id}`). Vale para **todo** lo que llama por la
+centralita: averías, «Hablarlo» y cotidianas. Las reglas de este fichero siguen
+contando la serie como **una** llamada: una por avería, una por aviso, y el tope diario
+de las cotidianas no se gasta en reintentos.
+
+**Cuándo NO insiste**, a propósito:
+
+- **La has cogido** (aunque sea a la segunda): se acabó.
+- **La has rechazado** (`declined`, el 603): colgarle a quien ha rechazado para volver a
+  llamarle es lo que hace que se deje de coger el teléfono.
+- **Falla la centralita** (SIP sin registrar, 503…): insistir no lo arregla.
+- **No se sabe cómo acabó** (404, o el sondeo no ve el final): ante la duda, no.
+  Es también lo que pasa sin los parches de abajo, así que sin ellos todo se queda
+  exactamente como antes.
+
+**Tres cosas fuera de este repositorio que tienen que estar, o nada de esto funciona:**
+
+1. **Los parches 7 y 8 de claude-phone** (`telefono/PARCHES.md`): colgar a los
+   `timeoutSeconds`, que `GET /api/call/{id}` encuentre la llamada (hoy da 404 siempre
+   por un fallo del original) y diga el motivo, `delaySeconds`, y colgar tras dos turnos
+   sin oír a nadie — este último es lo que evita que la línea de Jarvis se quede
+   comunicando aunque algo más falle.
+2. **El desvío a buzón de tu extensión en el 3CX entre 25 y 90 s** (en torno a 40). Si
+   salta antes de que Jarvis cuelgue, el buzón coge la primera y cuenta como contestada.
+3. **El flujo de n8n del backend caído** llama a la centralita por su cuenta y no pasa por
+   aquí: no insiste. Si se quiere lo mismo ahí, va en el flujo (repositorio HomeLab).
+
 ## Lo que se evaluó (agosto de 2026)
 
 La pregunta de partida era si esto se podía hacer gratis. **Se puede, pero solo en un
