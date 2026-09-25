@@ -174,6 +174,11 @@ que la llamada sonaba hasta que el 3CX la desviaba a tu buzón; el buzón «desc
 Jarvis se ponía a conversar con él —hasta 20 turnos de «¿sigues ahí?», ~12 minutos—
 con la línea cogida. Para el backend, además, eso era una llamada contestada.
 
+Lo que queda grabado en el buzón lo confirma: **la hora que dice el propio 3CX y después
+silencio**, salpicado de «no te he oído». El mensaje de Jarvis no está: lo dijo nada más
+descolgar, encima del saludo del buzón, antes de que empezara a grabar. De ahí el
+`delaySeconds` de la llamada del buzón.
+
 Mikel pidió entonces lo que hace un humano: **si no lo coges, vuelve a llamar; y si
 tampoco, deja el mensaje en el buzón.** Queda así:
 
