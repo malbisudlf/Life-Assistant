@@ -13,6 +13,8 @@ import {
   formatMoney, clothingTotals, CLOTHING_CURRENCIES,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   repartoPatrimonio,
+  RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
+  tramosRelleno, escalaGrafica,
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   revisionDeUrl, DIAS_SEMANA,
   agruparParteNoche, fraseParteNoche, motivoNoResponder,
@@ -1239,6 +1241,209 @@ function DonutPatrimonio({ tramos, tamano = 128 }) {
           <div style={{ fontSize: 10, fontFamily: "'DM Mono', monospace", color: "var(--muted2)" }}>
             {formatoEuros(activa.valor)}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ROJO_FINANZAS = "#d4645a";
+const colorSigno    = v => (v >= 0 ? "var(--green)" : ROJO_FINANZAS);
+
+/** La serie de Indexa como dos líneas: lo que vale la cartera y lo que has puesto
+ *  (aportado NETO), con el hueco relleno en verde o rojo. Debajo, de dónde salió el
+ *  cambio del rango (lo puesto y lo que hizo el mercado) y los hitos de la plusvalía.
+ *
+ *  Fuera del componente principal por lo mismo que `DonutPatrimonio`: tiene estado
+ *  propio (el rango y el punto señalado) y definido dentro lo perdería en cada render. */
+function GraficaAportado({ serie, serieLarga, maximo }) {
+  const W = 300, H = 110;
+  const disponibles = useMemo(() => rangosDisponibles(serie, serieLarga), [serie, serieLarga]);
+  // El rango se recuerda en el navegador por comodidad; si localStorage lanza (modo
+  // privado, almacenamiento bloqueado) simplemente no se recuerda.
+  const [elegido, setElegido] = useState(() => {
+    try { return localStorage.getItem("la_finanzas_rango"); } catch { return null; }
+  });
+  // Uno guardado que ya no está disponible (la serie cambió, o viene de otra cuenta)
+  // cae al de por defecto sin tocar lo guardado: si vuelve a estar, se vuelve a usar.
+  const rango = disponibles.includes(elegido) ? elegido
+    : disponibles.includes("1a") ? "1a" : (disponibles[0] || "3m");
+  const [senalado, setSenalado] = useState(null);
+  const elegir = id => {
+    setElegido(id);
+    setSenalado(null);
+    try { localStorage.setItem("la_finanzas_rango", id); } catch { /* mejor esfuerzo: solo es una comodidad */ }
+  };
+
+  // Todo lo derivado va en un memo: el dashboard se re-renderiza con el tic del reloj y
+  // esto recorre cientos de puntos. Los acumulados se calculan aquí dentro, no
+  // reasignando variables del render desde un `map` (react-hooks/immutability).
+  const g = useMemo(() => {
+    const puntos = recortarSerie({ serie, serieLarga }, rango)
+      .map(p => ({ ...p, t: Date.parse(p.fecha) }));
+    const esc = escalaGrafica(puntos, W, H, 4);
+    const xy  = (t, v) => `${esc.x(t).toFixed(2)},${esc.y(v).toFixed(2)}`;
+    const conAportado = puntos.filter(p => p.aportado != null);
+    // La línea de aportado se parte en cada día sin dato: unir los dos lados sería
+    // dibujar un aportado que nadie ha dicho.
+    const lineasAportado = [];
+    let tramo = [];
+    for (const p of puntos) {
+      if (p.aportado == null) {
+        if (tramo.length > 1) lineasAportado.push(tramo.join(" "));
+        tramo = [];
+      } else {
+        tramo.push(xy(p.t, p.aportado));
+      }
+    }
+    if (tramo.length > 1) lineasAportado.push(tramo.join(" "));
+    const ultimoConAportado = conAportado[conAportado.length - 1];
+    return {
+      puntos,
+      esc,
+      xs:            puntos.map(p => esc.x(p.t)),
+      lineaValor:    puntos.map(p => xy(p.t, p.valor)).join(" "),
+      lineasAportado,
+      poligonos:     tramosRelleno(puntos).map(tr => ({
+        positivo: tr.positivo,
+        puntos:   [...tr.puntos.map(p => xy(p.t, p.valor)),
+                   ...[...tr.puntos].reverse().map(p => xy(p.t, p.aportado))].join(" "),
+      })),
+      hayAportado:   conAportado.length > 0,
+      colorValor:    ultimoConAportado
+        ? colorSigno(ultimoConAportado.valor - ultimoConAportado.aportado) : "var(--accent)",
+      reparto:       repartoRango(puntos),
+      caida:         mayorCaida(puntos),
+      // El máximo es el de siempre, no el del rango: se compara con la serie entera.
+      distancia:     distanciaMaximo(maximo, recortarSerie({ serie, serieLarga }, "todo")),
+    };
+  }, [serie, serieLarga, rango, maximo]);
+
+  const senalar = e => {
+    if (!g.xs.length) return;
+    const caja = e.currentTarget.getBoundingClientRect();
+    if (!caja.width) return;
+    const x = ((e.clientX - caja.left) / caja.width) * W;
+    const cerca = g.xs.reduce((mejor, xi, i) => (Math.abs(xi - x) < Math.abs(g.xs[mejor] - x) ? i : mejor), 0);
+    setSenalado(cerca);
+  };
+  const punto   = senalado != null ? g.puntos[senalado] : null;
+  const def     = RANGOS_CARTERA.find(r => r.id === rango);
+  const esTodo  = rango === "todo";
+  const mono    = { fontFamily: "'DM Mono', monospace" };
+  const etiquetaEje = { position: "absolute", left: 0, fontSize: 10, color: "var(--muted2)", ...mono,
+                        pointerEvents: "none", lineHeight: 1 };
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 11, marginBottom: 4, flexWrap: "wrap" }}>
+        <span style={{ color: "var(--text)" }}>— Valor</span>
+        {g.hayAportado ? (
+          <span style={{ color: "var(--muted)" }}
+            title="Lo que has metido menos lo que has sacado: descuenta retiradas y traspasos de salida">
+            - - Aportado neto
+          </span>
+        ) : (
+          <span style={{ color: "var(--muted2)" }}>Sin datos de aportaciones</span>
+        )}
+        {disponibles.length > 1 && (
+          <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+            {RANGOS_CARTERA.filter(r => disponibles.includes(r.id)).map(r => (
+              <button key={r.id} onClick={() => elegir(r.id)} aria-pressed={r.id === rango}
+                style={{
+                  padding: "2px 8px", borderRadius: 5, fontSize: 11, letterSpacing: 0,
+                  border: `0.5px solid ${r.id === rango ? "var(--accent)" : "var(--border2)"}`,
+                  background: "transparent", cursor: "pointer",
+                  color: r.id === rango ? "var(--accent)" : "var(--muted)",
+                }}>{r.etiqueta}</button>
+            ))}
+          </span>
+        )}
+      </div>
+
+      {/* pan-y: en el móvil, arrastrar en vertical sigue siendo hacer scroll de la página;
+          solo el gesto horizontal recorre la gráfica. */}
+      <div style={{ position: "relative", height: H, touchAction: "pan-y" }}
+        onPointerMove={senalar} onPointerDown={senalar}
+        onPointerLeave={() => setSenalado(null)} onPointerCancel={() => setSenalado(null)}>
+        {/* aria-hidden: las líneas de debajo dicen en texto lo mismo que el dibujo. */}
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none"
+          data-grafica="aportado" aria-hidden="true" style={{ display: "block" }}>
+          {g.poligonos.map((pg, i) => (
+            <polygon key={i} points={pg.puntos} opacity="0.18"
+              fill={pg.positivo ? "var(--green)" : ROJO_FINANZAS} />
+          ))}
+          {g.lineasAportado.map((l, i) => (
+            <polyline key={i} points={l} fill="none" stroke="var(--muted)" strokeWidth="1"
+              strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+          ))}
+          <polyline points={g.lineaValor} fill="none" stroke={g.colorValor} strokeWidth="1.5"
+            strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        </svg>
+        {/* Las cifras del eje en HTML y no en <text>: con preserveAspectRatio="none" el
+            texto del SVG se estiraría con la tarjeta. */}
+        <span style={{ ...etiquetaEje, top: 0 }}>{formatoEuros(g.esc.max)}</span>
+        <span style={{ ...etiquetaEje, bottom: 0 }}>{formatoEuros(g.esc.min)}</span>
+        {punto && (
+          <>
+            <div style={{ position: "absolute", top: 0, bottom: 0, width: 0, pointerEvents: "none",
+              left: `${(g.xs[senalado] / W) * 100}%`, borderLeft: "0.5px solid var(--border2)" }} />
+            {/* Anclado arriba, en el lado contrario al punto, y no pegado al puntero: por
+                lo mismo que el del donut, uno que persigue al dedo tiembla y lo tapa. */}
+            <div data-grafica-tooltip="" style={{
+              position: "absolute", top: 0, pointerEvents: "none", zIndex: 1,
+              ...(g.xs[senalado] > W / 2 ? { left: 0 } : { right: 0 }),
+              width: "max-content", maxWidth: 200, lineHeight: 1.45, fontSize: 11,
+              padding: "6px 9px", background: "var(--surface)", border: "0.5px solid var(--border2)",
+              borderRadius: 6, boxShadow: "0 2px 10px rgba(0,0,0,0.35)", color: "var(--text)",
+            }}>
+              <div style={{ color: "var(--muted)" }}>{formatShortDate(punto.fecha)}</div>
+              <div>Valor <span style={mono}>{formatoEuros(punto.valor)}</span></div>
+              <div>Aportado <span style={mono}>{punto.aportado != null ? formatoEuros(punto.aportado) : "—"}</span></div>
+              {punto.aportado != null && (
+                <div>Mercado <span style={{ ...mono, color: colorSigno(punto.valor - punto.aportado) }}>
+                  {formatoEuros(punto.valor - punto.aportado, { signo: true })}
+                </span></div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {g.reparto && (
+        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>
+          {esTodo ? "Desde el inicio" : `En ${def?.etiqueta}`}: {formatoEuros(g.reparto.cambio, { signo: true })}
+          {" · "}{formatoEuros(g.reparto.aportado, { signo: true })} puestos
+          {" · "}<span style={{ color: colorSigno(g.reparto.mercado) }}>
+            {formatoEuros(g.reparto.mercado, { signo: true })}
+          </span> el mercado
+        </div>
+      )}
+
+      {(g.distancia || g.caida) && (
+        <div style={{ display: "flex", flexWrap: "wrap", columnGap: 4, fontSize: 11, color: "var(--muted2)",
+          marginTop: 2, lineHeight: 1.5 }}>
+          {/* El separador va pegado al final de la primera frase y no suelto: en una
+              columna estrecha, un « · » suelto acababa solo en su propia línea. */}
+          {g.distancia && (
+            <span>
+              {g.distancia.esHoy ? "Plusvalía en máximo histórico"
+                : `A ${formatoEuros(g.distancia.euros)} del máximo de plusvalía (${formatShortDate(g.distancia.fecha)})`}
+              {g.caida ? " ·" : ""}
+            </span>
+          )}
+          {g.caida && (
+            // En «Todo» los puntos antiguos son semanales y la caída sale por lo bajo: el
+            // valle de un miércoles no está en la serie. Se dice en vez de callarlo.
+            <span>
+              Mayor caída{esTodo ? " (semanal)" : ""} del rango:{" "}
+              {g.caida.pct != null ? formatoPorcentaje(g.caida.pct, { decimales: 1 }) : formatoEuros(g.caida.euros)}
+              {" "}({formatShortDate(g.caida.desde)} → {formatShortDate(g.caida.hasta)}),{" "}
+              {g.caida.recuperadaEn != null
+                ? `recuperada en ${g.caida.recuperadaEn} ${g.caida.recuperadaEn === 1 ? "día" : "días"}`
+                : "sin recuperar aún"}
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -4837,10 +5042,8 @@ export default function Dashboard() {
                 </div>
 
                 {serie?.length > 1 && (
-                  <div style={{ marginBottom: 10 }}>
-                    <Sparkline data={serie.map(p => ({ value: p.valor }))}
-                      color={positiva ? "var(--green)" : "#d4645a"} height={38} relleno />
-                  </div>
+                  <GraficaAportado serie={serie} serieLarga={finanzas.serie_larga}
+                    maximo={finanzas.maximo_plusvalia} />
                 )}
 
                 {tramos.length > 0 && (

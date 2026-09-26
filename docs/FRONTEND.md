@@ -122,8 +122,9 @@ Qué hace cada uno:
    título, buscados en **ambos** calendarios (`allEvents` + `classEvents`). Incluye los
    de hoy y los futuros.
 5. **Finanzas (`finanzas`)** — la cartera de Indexa Capital: valor total, plusvalía en
-   euros y en porcentaje, cuánto se movió desde el último día con dato, sparkline de la
-   serie, barra de mezcla por clase de activo y el detalle de posiciones plegado. El ↻
+   euros y en porcentaje, cuánto se movió desde el último día con dato, la gráfica del
+   valor frente a lo aportado (`GraficaAportado`, con rango, tooltip, reparto del cambio y
+   hitos), barra de mezcla por clase de activo y el detalle de posiciones plegado. El ↻
    salta la caché del backend. Un dato que Indexa no dio sale como `—`, nunca como 0 €
    (ver `docs/FINANZAS.md`).
 6. **Entrenamiento (`training`)** — sesiones desde el último cobro, euros pendientes,
@@ -295,6 +296,11 @@ saber es distinto de saber que no llegó nada.
   sitio donde hay dinero, cada una un `<circle>` con `stroke-dasharray` en vez de un
   `<path>` con arcos. La lógica (qué porciones hay y cuánto pesa cada una) es pura y vive
   en `repartoPatrimonio()`; el detalle de las decisiones está en `docs/FINANZAS.md`.
+- **`GraficaAportado`** es la gráfica de la cartera de Indexa en el mismo widget: valor y
+  aportado neto con el hueco relleno, eje X por tiempo, selector de rango y tooltip anclado
+  arriba. No usa `Sparkline` (que siguen usando salud y bienestar): necesita dos líneas,
+  cortes donde falta el dato y un eje que no sea el índice. La lógica es pura
+  (`recortarSerie`, `tramosRelleno`, `escalaGrafica`…); el detalle, en `docs/FINANZAS.md`.
 - **`alarmas`** es el widget de las alarmas de respaldo: poner hora, ver las puestas con
   su estado y quitarlas. Mientras una suena, el botón «Estoy despierto» se come el widget
   —es lo único que quieres de esa pantalla en ese momento— y se recarga solo cada minuto
@@ -408,7 +414,8 @@ Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_s
 `la_notifications`, `la_simple_mode`, `la_body_goals`, `la_training_days`,
 `la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
 guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_ideas_agrupar`
-(«Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`). Si añades una,
+(«Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`), `la_finanzas_rango` (el rango
+elegido en la gráfica de finanzas). Si añades una,
 mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)

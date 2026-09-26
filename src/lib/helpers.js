@@ -2031,6 +2031,178 @@ export function variacionCartera(serie) {
   };
 }
 
+// ── Finanzas: lo que pusiste frente a lo que puso el mercado ─────
+// La gráfica de la cartera de Indexa con dos líneas: el valor y el aportado NETO
+// (descuenta retiradas y traspasos de salida). Todo lo que mide subidas y caídas lo
+// hace sobre la plusvalía (valor − aportado), nunca sobre el valor: con el valor, cada
+// aportación sería una subida y cada retirada una caída, y ninguna de las dos la ha
+// hecho el mercado. Y `aportado: null` es "no se sabe" (falló /performance), nunca 0:
+// pintarlo como cero dibujaría una plusvalía igual a toda la cartera.
+
+const DIA_MS = 86400000;
+
+/** Los rangos del selector. `dias` son naturales y cuentan desde el último punto. */
+export const RANGOS_CARTERA = [
+  { id: "3m",   etiqueta: "3M",   dias: 92 },
+  { id: "1a",   etiqueta: "1A",   dias: 366 },
+  { id: "todo", etiqueta: "Todo", dias: null },
+];
+
+const _numeroFinito = v => typeof v === "number" && Number.isFinite(v);
+
+/** Los puntos utilizables de una serie (valor numérico y fecha que se entiende), con su
+ *  instante en `t` para no volver a parsear la fecha en cada cálculo. En orden. */
+function _puntosCartera(serie) {
+  return (serie || [])
+    .map(p => (p && _numeroFinito(p.valor) ? { ...p, t: Date.parse(p.fecha) } : null))
+    .filter(p => p && Number.isFinite(p.t))
+    .sort((a, b) => a.t - b.t);
+}
+
+// Lo que sale de recortarSerie tiene la forma de la serie del backend, sin el `t` interno.
+const _sinT = p => { const q = { ...p }; delete q.t; return q; };
+
+/** Los ids de los rangos que tiene sentido ofrecer: los que tienen al menos dos puntos
+ *  y enseñan algo que otro rango no enseña ya. 1A con menos de 92 días sería 3M otra
+ *  vez, y «Todo» solo aporta si la serie semanal empieza antes que la diaria. */
+export function rangosDisponibles(serie, serieLarga) {
+  const diaria = _puntosCartera(serie);
+  const larga  = _puntosCartera(serieLarga);
+  const fuera  = [];
+  if (diaria.length >= 2) {
+    fuera.push("3m");
+    if (diaria[diaria.length - 1].t - diaria[0].t > 92 * DIA_MS) fuera.push("1a");
+  }
+  if (larga.length >= 2 && (!diaria.length || larga[0].t < diaria[0].t)) fuera.push("todo");
+  return fuera;
+}
+
+/** Los puntos de un rango. 3M y 1A recortan la serie diaria contando desde la fecha del
+ *  ÚLTIMO punto y no desde hoy: Indexa valora con un par de días de retraso y contar
+ *  desde hoy le quitaría esos días al rango. «Todo» es la semanal hasta donde empieza la
+ *  diaria y la diaria desde ahí, sin fechas repetidas. */
+export function recortarSerie({ serie, serieLarga } = {}, rango) {
+  const diaria = _puntosCartera(serie);
+  const def    = RANGOS_CARTERA.find(r => r.id === rango);
+  if (!def) return diaria.map(_sinT);
+  if (def.dias == null) {
+    const larga = _puntosCartera(serieLarga);
+    if (!diaria.length) return larga.map(_sinT);
+    const inicio = diaria[0].t;
+    return [...larga.filter(p => p.t < inicio), ...diaria].map(_sinT);
+  }
+  if (!diaria.length) return [];
+  const corte = diaria[diaria.length - 1].t - def.dias * DIA_MS;
+  return diaria.filter(p => p.t >= corte).map(_sinT);
+}
+
+const _conAportado = puntos => _puntosCartera(puntos).filter(p => _numeroFinito(p.aportado));
+
+/** Cuánto cambió la cartera en el rango y de dónde salió: lo puesto y lo que hizo el
+ *  mercado (`mercado = cambio − aportado`). Mide entre el primer y el último punto con
+ *  aportado conocido, porque sin él no hay forma de separar una cosa de la otra. */
+export function repartoRango(puntos) {
+  const pts = _conAportado(puntos);
+  if (pts.length < 2) return null;
+  const [ini, fin] = [pts[0], pts[pts.length - 1]];
+  const cambio   = fin.valor - ini.valor;
+  const aportado = fin.aportado - ini.aportado;
+  return { desde: ini.fecha, hasta: fin.fecha, cambio, aportado, mercado: cambio - aportado };
+}
+
+// Plusvalía redondeada al céntimo: restar dos importes en coma flotante deja restos del
+// orden de 1e-12, y una "caída" de una billonésima de euro no es una caída.
+const _plusvalia = p => Math.round((p.valor - p.aportado) * 100) / 100;
+
+/** La mayor caída de la plusvalía en los puntos: del pico al valle posterior más bajo.
+ *  `recuperadaEn` son los días NATURALES del valle a la primera fecha en que la
+ *  plusvalía vuelve a la del pico, o null si no ha vuelto dentro de los puntos. Una
+ *  aportación en plena caída no la tapa y una retirada no la crea: ninguna de las dos
+ *  mueve la plusvalía. */
+export function mayorCaida(puntos) {
+  const pts = _conAportado(puntos).map(p => ({ ...p, p: _plusvalia(p) }));
+  if (pts.length < 2) return null;
+  let pico = 0, mejor = null;
+  pts.forEach((pt, i) => {
+    if (pt.p >= pts[pico].p) { pico = i; return; }
+    const euros = pt.p - pts[pico].p;
+    if (!mejor || euros < mejor.euros) mejor = { pico, valle: i, euros };
+  });
+  if (!mejor || mejor.euros === 0) return null;
+  const picoPt  = pts[mejor.pico], vallePt = pts[mejor.valle];
+  const vuelta  = pts.slice(mejor.valle + 1).find(pt => pt.p >= picoPt.p);
+  return {
+    desde:        picoPt.fecha,
+    hasta:        vallePt.fecha,
+    euros:        mejor.euros,
+    pct:          picoPt.valor ? (mejor.euros / picoPt.valor) * 100 : null,
+    recuperadaEn: vuelta ? Math.round((vuelta.t - vallePt.t) / DIA_MS) : null,
+  };
+}
+
+/** Lo lejos que está la plusvalía de hoy (el último punto con aportado) de su máximo
+ *  histórico, que calcula el backend sobre la serie diaria entera. `euros` ≤ 0. */
+export function distanciaMaximo(maximo, puntos) {
+  if (!maximo || !_numeroFinito(maximo.plusvalia)) return null;
+  const pts = _conAportado(puntos);
+  if (!pts.length) return null;
+  const ultimo = pts[pts.length - 1];
+  const actual = _plusvalia(ultimo);
+  const esHoy  = ultimo.fecha === maximo.fecha || actual >= maximo.plusvalia;
+  return { fecha: maximo.fecha, euros: esHoy ? 0 : actual - maximo.plusvalia, esHoy };
+}
+
+/** Los polígonos del relleno entre las dos líneas: verde donde el valor va por encima
+ *  de lo aportado y rojo donde va por debajo. En cada cruce se mete el punto de corte
+ *  interpolado en los DOS tramos, para que los polígonos se toquen justo ahí y no quede
+ *  ni un hueco ni un solape. Un día sin aportado corta el tramo: ese hueco no se rellena,
+ *  porque rellenarlo sería inventarse cuánto había puesto. */
+export function tramosRelleno(puntos) {
+  const tramos = [];
+  let actual = null;
+  for (const p of _puntosCartera(puntos)) {
+    if (!_numeroFinito(p.aportado)) { actual = null; continue; }
+    const q = { t: p.t, valor: p.valor, aportado: p.aportado };
+    const positivo = q.valor >= q.aportado;
+    if (actual && actual.positivo !== positivo) {
+      const prev = actual.puntos[actual.puntos.length - 1];
+      const d0 = prev.valor - prev.aportado, d1 = q.valor - q.aportado;
+      const f  = d0 / (d0 - d1);
+      const v  = prev.valor + f * (q.valor - prev.valor);
+      // En el cruce valor y aportado son el mismo número; se pone el mismo en los dos
+      // en vez de interpolar cada uno y fiarse de que la coma flotante coincida.
+      const cruce = { t: prev.t + f * (q.t - prev.t), valor: v, aportado: v };
+      actual.puntos.push(cruce);
+      actual = { positivo, puntos: [cruce] };
+      tramos.push(actual);
+    } else if (!actual) {
+      actual = { positivo, puntos: [] };
+      tramos.push(actual);
+    }
+    actual.puntos.push(q);
+  }
+  // Un tramo de un solo punto (un día con aportado entre dos huecos) no encierra área.
+  return tramos.filter(tr => tr.puntos.length >= 2);
+}
+
+/** Las escalas de la gráfica. X va por TIEMPO y no por índice: en «Todo» se juntan
+ *  puntos semanales y diarios, y por índice la parte diaria ocuparía cinco veces lo que
+ *  le toca. Y va entre el mínimo y el máximo de las dos líneas con un 6 % de aire, sin
+ *  arrancar en 0: lo que se mira es el hueco entre ellas, no su altura. */
+export function escalaGrafica(puntos, ancho, alto, margen = 0) {
+  const pts = _puntosCartera(puntos);
+  const valores = pts.flatMap(p => (_numeroFinito(p.aportado) ? [p.valor, p.aportado] : [p.valor]));
+  const t0 = pts.length ? pts[0].t : 0;
+  const t1 = pts.length ? pts[pts.length - 1].t : 0;
+  const min = valores.length ? Math.min(...valores) : 0;
+  const max = valores.length ? Math.max(...valores) : 0;
+  const aire = (max - min) * 0.06 || Math.abs(max) * 0.01 || 1;
+  const lo = min - aire, hi = max + aire;
+  const x = t => (t1 === t0 ? ancho / 2 : margen + ((t - t0) / (t1 - t0)) * (ancho - 2 * margen));
+  const y = v => alto - margen - ((v - lo) / (hi - lo)) * (alto - 2 * margen);
+  return { x, y, min, max };
+}
+
 // ── Finanzas: reparto del patrimonio ─────────────────────────────
 // Indexa, Revolut y la cartera manual de ETFs siguen SIN sumarse en un total a la
 // vista: "cuánto tengo" mezclando inversión con plusvalía, saldo de cuenta corriente y

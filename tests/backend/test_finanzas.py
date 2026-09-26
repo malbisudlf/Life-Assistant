@@ -355,6 +355,179 @@ class TestFinanzasJarvis:
         monkeypatch.setattr(main, "INDEXA_TOKEN", "")
         assert main._j_finanzas()["dile_al_usuario_literalmente"]
 
+    def test_la_serie_larga_tampoco_viaja_al_modelo(self, indexa):
+        datos = main._j_finanzas()
+        assert "serie_larga" not in datos
+        assert "serie_larga" not in datos["cuentas"][0]
+
+
+# ── La serie larga y el máximo de plusvalía ───────────────────────────────────
+# Lo que alimenta la gráfica de «lo que pusiste frente a lo que puso el mercado»: la
+# serie semanal para el rango «Todo» y el máximo, que se mide en el backend porque es
+# el único sitio donde está la serie diaria entera.
+
+def _dias(desde, n):
+    inicio = datetime.date.fromisoformat(desde)
+    return [(inicio + datetime.timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def _rendimiento(valores, aportados=None):
+    """Un /performance con series a medida: {fecha: valor} y {fecha: aportado}."""
+    ret = {"investment": 11000.0, "pl": 1500.0, "time_return": 0.1, "total_amount": 12500.0,
+           "total_amounts": dict(valores)}
+    if aportados is not None:
+        ret["net_amounts"] = dict(aportados)
+    return {"return": ret}
+
+
+def _con_rendimiento(monkeypatch, mock_requests, rendimiento, estado=200):
+    monkeypatch.setattr(main, "INDEXA_TOKEN", "indexa-test-token")
+    monkeypatch.setattr(main, "INDEXA_CUENTAS", [])
+    mock_requests.add("GET", "/users/me", FakeResponse(
+        {"accounts": [{"account_number": "ABC12345", "type": "mutual", "status": "active"}]}))
+    mock_requests.add("GET", "/accounts/ABC12345/portfolio", FakeResponse(PORTFOLIO))
+    mock_requests.add("GET", "/accounts/ABC12345/performance", FakeResponse(rendimiento, estado))
+    return mock_requests
+
+
+class TestSerieSemanal:
+    def test_se_queda_con_el_ultimo_dia_con_dato_de_cada_semana(self):
+        # Semana 28: del lunes 6 al domingo 12 de julio. Semana 29: solo hasta el miércoles
+        # 15 (la semana en curso): su último dato es ese miércoles, no un viernes.
+        serie = [{"fecha": f, "valor": float(i), "aportado": 100.0}
+                 for i, f in enumerate(_dias("2026-07-06", 10))]
+        semanal = main._serie_semanal(serie)
+        assert [p["fecha"] for p in semanal] == ["2026-07-12", "2026-07-15"]
+        assert semanal[-1] == {"fecha": "2026-07-15", "valor": 9.0, "aportado": 100.0}
+
+    def test_la_semana_termina_en_viernes_si_no_hay_fin_de_semana(self):
+        serie = [{"fecha": f, "valor": 1.0, "aportado": None}
+                 for f in ["2026-07-06", "2026-07-08", "2026-07-10", "2026-07-13", "2026-07-15"]]
+        semanal = main._serie_semanal(serie)
+        assert [p["fecha"] for p in semanal] == ["2026-07-10", "2026-07-15"]
+
+    def test_conserva_el_aportado_desconocido(self):
+        semanal = main._serie_semanal([{"fecha": "2026-07-10", "valor": 5.0, "aportado": None}])
+        assert semanal == [{"fecha": "2026-07-10", "valor": 5.0, "aportado": None}]
+
+    def test_vacia_y_fechas_malformadas(self):
+        assert main._serie_semanal([]) == []
+        assert main._serie_semanal(None) == []
+        raras = [{"fecha": "ayer", "valor": 1.0, "aportado": None},
+                 {"fecha": None, "valor": 1.0, "aportado": None},
+                 {"fecha": "2026-07-10", "valor": 2.0, "aportado": None}]
+        assert [p["fecha"] for p in main._serie_semanal(raras)] == ["2026-07-10"]
+
+
+class TestMaximoPlusvalia:
+    def test_con_empate_gana_el_mas_reciente(self):
+        serie = [{"fecha": "2026-07-01", "valor": 110.0, "aportado": 100.0},
+                 {"fecha": "2026-07-02", "valor": 120.0, "aportado": 110.0},
+                 {"fecha": "2026-07-03", "valor": 105.0, "aportado": 100.0}]
+        assert main._maximo_plusvalia(serie) == {"fecha": "2026-07-02", "plusvalia": 10.0}
+
+    def test_se_mide_sobre_la_plusvalia_no_sobre_el_valor(self):
+        # El 2 vale más porque se aportaron 5.000 €, no porque se ganara nada.
+        serie = [{"fecha": "2026-07-01", "valor": 1200.0, "aportado": 1000.0},
+                 {"fecha": "2026-07-02", "valor": 6100.0, "aportado": 6000.0}]
+        assert main._maximo_plusvalia(serie) == {"fecha": "2026-07-01", "plusvalia": 200.0}
+
+    def test_sin_aportado_no_hay_maximo(self):
+        assert main._maximo_plusvalia([{"fecha": "2026-07-01", "valor": 1.0, "aportado": None}]) is None
+        assert main._maximo_plusvalia([]) is None
+
+
+class TestFinanzasSerieLarga:
+    def test_sale_en_el_payload_y_acaba_donde_la_diaria(self, client, auth_headers, indexa):
+        datos = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert datos["serie_larga"][-1] == datos["serie"][-1]
+        # Del 19 al 21 de agosto es una sola semana ISO: un punto, el del viernes.
+        assert datos["serie_larga"] == [{"fecha": "2026-08-21", "valor": 12500.0, "aportado": 11000.0}]
+        assert datos["maximo_plusvalia"] == {"fecha": "2026-08-21", "plusvalia": 1500.0}
+
+    def test_la_diaria_se_recorta_y_la_semanal_va_entera(self, client, auth_headers, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "INDEXA_SERIE_DIAS", 5)
+        fechas = _dias("2026-07-01", 30)          # miércoles 1 → jueves 30 de julio
+        _con_rendimiento(monkeypatch, mock_requests, _rendimiento(
+            {f: 10000.0 + i for i, f in enumerate(fechas)},
+            {f: 9000.0 for f in fechas}))
+        datos = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert [p["fecha"] for p in datos["serie"]] == fechas[-5:]
+        larga = datos["serie_larga"]
+        # Empieza en la semana del primer día (el domingo 5 cierra la semana 27) y llega
+        # hasta el último, aunque la diaria solo traiga cinco días.
+        assert larga[0]["fecha"] == "2026-07-05"
+        assert larga[-1] == datos["serie"][-1]
+        assert [p["fecha"] for p in larga] == ["2026-07-05", "2026-07-12", "2026-07-19",
+                                               "2026-07-26", "2026-07-30"]
+        # Y lo mismo en la de la cuenta.
+        assert datos["cuentas"][0]["serie_larga"] == larga
+        assert len(datos["cuentas"][0]["serie"]) == 5
+
+    def test_el_maximo_se_mide_en_diario(self, client, auth_headers, mock_requests, monkeypatch):
+        # Pico el miércoles 8 de julio: la semanal se queda con el domingo 12 y lo perdería.
+        fechas  = _dias("2026-07-06", 14)
+        valores = {f: 10000.0 for f in fechas}
+        valores["2026-07-08"] = 10900.0
+        _con_rendimiento(monkeypatch, mock_requests, _rendimiento(valores, {f: 9500.0 for f in fechas}))
+        datos = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert "2026-07-08" not in [p["fecha"] for p in datos["serie_larga"]]
+        assert datos["maximo_plusvalia"] == {"fecha": "2026-07-08", "plusvalia": 1400.0}
+
+    def test_sin_aportaciones_no_hay_maximo(self, client, auth_headers, mock_requests, monkeypatch):
+        fechas = _dias("2026-07-06", 7)
+        _con_rendimiento(monkeypatch, mock_requests, _rendimiento({f: 100.0 for f in fechas}))
+        datos = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert datos["maximo_plusvalia"] is None
+        # La serie sigue saliendo: el aportado va a None, nunca a cero.
+        assert datos["serie_larga"] == [{"fecha": "2026-07-12", "valor": 100.0, "aportado": None}]
+
+    def test_sin_rendimiento_no_hay_maximo_ni_serie(self, client, auth_headers, mock_requests, monkeypatch):
+        _con_rendimiento(monkeypatch, mock_requests, {}, 503)
+        datos = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert datos["maximo_plusvalia"] is None
+        assert datos["serie_larga"] == []
+
+    def test_la_serie_completa_no_sale_ni_se_cachea(self, client, auth_headers, indexa):
+        fresca = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert fresca["de_cache"] is False
+        assert all("_serie_completa" not in c for c in fresca["cuentas"])
+        cacheada = client.get("/finanzas/resumen", headers=auth_headers).json()
+        assert cacheada["de_cache"] is True
+        assert all("_serie_completa" not in c for c in cacheada["cuentas"])
+        assert all("_serie_completa" not in c for c in main._finanzas_cache[1]["cuentas"])
+
+
+class TestFinanzasSerieLargaVariasCuentas:
+    def test_solo_semanas_con_dias_comunes_y_sin_salto(self, client, auth_headers, mock_requests, monkeypatch):
+        # La primera cuenta va del 1 al 30 de julio; la segunda, del jueves 16 al martes 28.
+        # La suma en diario deja fuera los días en que solo existía una. Si se sumaran las
+        # semanales de cada cuenta, la última semana cerraría el 30 en una y el 28 en la
+        # otra, y la intersección la tiraría entera.
+        monkeypatch.setattr(main, "INDEXA_TOKEN", "indexa-test-token")
+        monkeypatch.setattr(main, "INDEXA_CUENTAS", [])
+        mock_requests.add("GET", "/users/me", FakeResponse({"accounts": [
+            {"account_number": "ABC12345", "type": "mutual",  "status": "active"},
+            {"account_number": "PLN54321", "type": "pension", "status": "active"},
+        ]}))
+        a = _dias("2026-07-01", 30)
+        b = _dias("2026-07-16", 14)[:-1]       # termina el martes 28: un día antes que la otra
+        mock_requests.add("GET", "/accounts/ABC12345/portfolio", FakeResponse(PORTFOLIO))
+        mock_requests.add("GET", "/accounts/ABC12345/performance", FakeResponse(
+            _rendimiento({f: 10000.0 for f in a}, {f: 9000.0 for f in a})))
+        mock_requests.add("GET", "/accounts/PLN54321/portfolio", FakeResponse(PORTFOLIO))
+        mock_requests.add("GET", "/accounts/PLN54321/performance", FakeResponse(
+            _rendimiento({f: 2000.0 for f in b}, {f: 1800.0 for f in b})))
+        larga = client.get("/finanzas/resumen", headers=auth_headers).json()["serie_larga"]
+        comunes = set(a) & set(b)
+        assert all(p["fecha"] in comunes for p in larga)
+        assert larga[0]["fecha"] == "2026-07-19"
+        # Todas las semanas suman las dos cuentas: ni un punto con una sola.
+        assert {p["valor"] for p in larga} == {12000.0}
+        assert {p["aportado"] for p in larga} == {10800.0}
+        # La última semana cierra en el último día común (el 28), no en el 30 de una sola.
+        assert larga[-1]["fecha"] == "2026-07-28"
+
 
 # ── Cartera manual de ETFs (Yahoo Finance) ────────────────────────────────────
 # Ni Indexa ni Revolut pueden decir esto: aquí el "aportado" y las "participaciones" son

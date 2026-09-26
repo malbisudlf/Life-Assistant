@@ -129,6 +129,18 @@ test('el widget de finanzas pinta la cartera de Indexa y el saldo de Revolut', a
   await expect(widget).toContainText('+1500 €')
   await expect(widget).toContainText('Acciones')
 
+  // La gráfica del valor frente a lo aportado. La serie simulada mete 500 € a mitad, así
+  // que el reparto del rango tiene las dos partes: lo puesto y lo del mercado.
+  const grafica = widget.locator('[data-grafica="aportado"]')
+  await expect(grafica).toBeVisible()
+  await expect(widget).toContainText('Aportado neto')
+  await expect(widget).toContainText('+500 € puestos')
+  await expect(widget.locator('[data-grafica-tooltip]')).toHaveCount(0)
+  await grafica.hover()
+  await expect(widget.locator('[data-grafica-tooltip]')).toContainText('Valor')
+  await page.mouse.move(0, 0)
+  await expect(widget.locator('[data-grafica-tooltip]')).toHaveCount(0)
+
   // El saldo de Revolut vive en el mismo widget, aparte de la cartera — como una fila
   // más de la lista unificada, sin su propia caja ni título.
   await expect(widget).toContainText('Revolut')

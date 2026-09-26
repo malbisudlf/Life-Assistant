@@ -76,7 +76,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /training/sessions` · `DELETE /training/sessions/{session_id}` | JWT | Añadir/borrar sesión `{date, duration_hours}` |
 | `PATCH /training/client` | JWT | Precio/hora y sesiones por cobro |
 | `POST /training/payments` | JWT | Marca cobro de hoy (calcula el importe automáticamente) |
-| `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie. `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
+| `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla, serie diaria (`serie`), serie semanal entera (`serie_larga`) y máximo de plusvalía (`maximo_plusvalia`). `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
 | `GET /auth/enablebanking/login` | JWT | Devuelve la `auth_url` del consentimiento de Revolut en Enable Banking, con el mismo `state` firmado que el OAuth de Microsoft. 503 si no está configurado |
 | `GET /auth/enablebanking/callback` | `state` | Lo llama Enable Banking por redirect: verifica el `state`, canjea el `code` y guarda la sesión (ver `docs/FINANZAS.md`) |
 | `GET /finanzas/etfs` | JWT | Cartera manual de ETFs: participaciones, aportado, precio actual y ganancia por ETF (vía Yahoo Finance). `?refrescar=true` salta la caché de precios (ver `docs/FINANZAS.md`) |

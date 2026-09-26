@@ -22,6 +22,8 @@ import {
   alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   alarmaCuandoTexto, revisionDeUrl,
   repartoPatrimonio,
+  RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
+  tramosRelleno, escalaGrafica,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -1573,6 +1575,218 @@ describe("variacionCartera", () => {
     expect(variacionCartera([{ fecha: "2026-08-21", valor: 12400 }])).toBeNull();
     expect(variacionCartera([])).toBeNull();
     expect(variacionCartera(null)).toBeNull();
+  });
+});
+
+describe("finanzas — lo que pusiste frente a lo que puso el mercado", () => {
+  // Una serie diaria de `n` días desde `inicio`, con `f(i)` dando {valor, aportado}.
+  const diaria = (inicio, n, f = () => ({ valor: 100, aportado: 90 })) => {
+    const t0 = Date.parse(inicio);
+    return Array.from({ length: n }, (_, i) => ({
+      fecha: new Date(t0 + i * 86400000).toISOString().slice(0, 10), ...f(i),
+    }));
+  };
+  const p = (fecha, valor, aportado) => ({ fecha, valor, aportado });
+
+  describe("recortarSerie", () => {
+    test("3M y 1A cuentan desde la fecha del último punto, no desde hoy", () => {
+      // La serie acaba en enero: contando desde hoy, 3M saldría vacío.
+      const serie = diaria("2024-12-01", 406);          // hasta el 10 de enero de 2026
+      expect(serie[serie.length - 1].fecha).toBe("2026-01-10");
+      const tres = recortarSerie({ serie }, "3m");
+      expect(tres[0].fecha).toBe("2025-10-10");         // 92 días antes del último
+      expect(tres[tres.length - 1].fecha).toBe("2026-01-10");
+      const anio = recortarSerie({ serie }, "1a");
+      expect(anio[0].fecha).toBe("2025-01-09");         // 366 días antes
+      expect(anio).toHaveLength(367);
+      // Sale con la forma del backend, sin campos internos.
+      expect(Object.keys(tres[0]).sort()).toEqual(["aportado", "fecha", "valor"]);
+    });
+
+    test("«Todo» empalma la semanal con la diaria sin fechas repetidas y en orden", () => {
+      const serie = diaria("2026-07-01", 20);
+      const serieLarga = [
+        p("2026-06-14", 80, 80), p("2026-06-21", 85, 80), p("2026-06-28", 90, 85),
+        // Las semanas que ya cubre la diaria, incluida la última, que es su último punto.
+        p("2026-07-05", 100, 90), p("2026-07-12", 100, 90), p("2026-07-20", 100, 90),
+      ];
+      const todo = recortarSerie({ serie, serieLarga }, "todo");
+      const fechas = todo.map(x => x.fecha);
+      expect(fechas.slice(0, 4)).toEqual(["2026-06-14", "2026-06-21", "2026-06-28", "2026-07-01"]);
+      expect(fechas[fechas.length - 1]).toBe("2026-07-20");
+      expect(new Set(fechas).size).toBe(fechas.length);
+      expect([...fechas].sort()).toEqual(fechas);
+      expect(todo).toHaveLength(3 + 20);
+    });
+
+    test("un rango que no existe devuelve la diaria, y sin datos no revienta", () => {
+      const serie = diaria("2026-07-01", 5);
+      expect(recortarSerie({ serie }, "5a")).toHaveLength(5);
+      expect(recortarSerie({}, "3m")).toEqual([]);
+      expect(recortarSerie(undefined, "todo")).toEqual([]);
+      expect(RANGOS_CARTERA.map(r => r.id)).toEqual(["3m", "1a", "todo"]);
+    });
+  });
+
+  describe("rangosDisponibles", () => {
+    test("40 días son solo 3M: 1A enseñaría lo mismo", () => {
+      expect(rangosDisponibles(diaria("2026-07-01", 40), [])).toEqual(["3m"]);
+    });
+
+    test("«Todo» solo si la semanal empieza antes que la diaria", () => {
+      const serie = diaria("2026-07-01", 40);
+      expect(rangosDisponibles(serie, [p("2026-05-03", 1, 1), p("2026-08-09", 1, 1)])).toEqual(["3m", "todo"]);
+      expect(rangosDisponibles(serie, [p("2026-07-05", 1, 1), p("2026-08-09", 1, 1)])).toEqual(["3m"]);
+      expect(rangosDisponibles(serie, null)).toEqual(["3m"]);
+    });
+
+    test("1A con más de 92 días de diaria; nada con menos de dos puntos", () => {
+      expect(rangosDisponibles(diaria("2026-01-01", 120), null)).toEqual(["3m", "1a"]);
+      expect(rangosDisponibles(diaria("2026-01-01", 1), null)).toEqual([]);
+      expect(rangosDisponibles(null, null)).toEqual([]);
+    });
+  });
+
+  describe("repartoRango", () => {
+    test("una subida con aportación: el mercado es el cambio menos lo puesto", () => {
+      const r = repartoRango([p("2026-01-02", 10000, 9000), p("2026-06-30", 10812, 9500)]);
+      expect(r).toEqual({ desde: "2026-01-02", hasta: "2026-06-30", cambio: 812, aportado: 500, mercado: 312 });
+    });
+
+    test("una bajada sin aportar es toda del mercado", () => {
+      const r = repartoRango([p("2026-01-02", 10000, 9000), p("2026-06-30", 9500, 9000)]);
+      expect(r.cambio).toBe(-500);
+      expect(r.aportado).toBe(0);
+      expect(r.mercado).toBe(-500);
+    });
+
+    test("sin dos puntos con aportado no hay reparto", () => {
+      expect(repartoRango([p("2026-01-02", 10000, 9000)])).toBeNull();
+      expect(repartoRango([p("2026-01-02", 10000, null), p("2026-01-03", 10100, null)])).toBeNull();
+      expect(repartoRango(null)).toBeNull();
+    });
+
+    test("los extremos sin aportado se saltan hasta el primero y el último con dato", () => {
+      const r = repartoRango([
+        p("2026-01-01", 1, null), p("2026-01-02", 10000, 9000),
+        p("2026-01-03", 10300, 9100), p("2026-01-04", 99999, null),
+      ]);
+      expect(r).toEqual({ desde: "2026-01-02", hasta: "2026-01-03", cambio: 300, aportado: 100, mercado: 200 });
+    });
+  });
+
+  describe("mayorCaida", () => {
+    test("una caída recuperada: días NATURALES, con el fin de semana dentro", () => {
+      const c = mayorCaida([
+        p("2026-07-06", 10500, 10000),   // lunes, plusvalía 500
+        p("2026-07-08", 11000, 10000),   // miércoles, pico: 1000
+        p("2026-07-10", 10800, 10000),   // viernes, valle: 800
+        p("2026-07-13", 11000, 10000),   // lunes: vuelve al pico
+      ]);
+      expect(c.desde).toBe("2026-07-08");
+      expect(c.hasta).toBe("2026-07-10");
+      expect(c.euros).toBe(-200);
+      expect(c.pct).toBeCloseTo(-200 / 11000 * 100, 6);
+      expect(c.recuperadaEn).toBe(3);                  // del viernes al lunes
+    });
+
+    test("una caída sin recuperar", () => {
+      const c = mayorCaida([p("2026-07-06", 11000, 10000), p("2026-07-07", 10600, 10000), p("2026-07-08", 10900, 10000)]);
+      expect(c.euros).toBe(-400);
+      expect(c.recuperadaEn).toBeNull();
+    });
+
+    test("una aportación grande en plena caída no la tapa", () => {
+      // El valor SUBE 4.500 € porque se metieron 5.000: la plusvalía baja 500.
+      const c = mayorCaida([p("2026-07-06", 10000, 9000), p("2026-07-07", 14500, 14000)]);
+      expect(c.euros).toBe(-500);
+    });
+
+    test("una retirada no crea una caída", () => {
+      expect(mayorCaida([p("2026-07-06", 10000, 9000), p("2026-07-07", 8000, 7000)])).toBeNull();
+    });
+
+    test("un punto, o una serie que solo sube, no tienen caída", () => {
+      expect(mayorCaida([p("2026-07-06", 10000, 9000)])).toBeNull();
+      expect(mayorCaida(diaria("2026-07-01", 10, i => ({ valor: 100 + i, aportado: 90 })))).toBeNull();
+      expect(mayorCaida(null)).toBeNull();
+    });
+  });
+
+  describe("distanciaMaximo", () => {
+    const puntos = [p("2026-03-12", 11340, 10000), p("2026-04-01", 11000, 10000)];
+
+    test("en máximo cuando el último punto es el máximo", () => {
+      const d = distanciaMaximo({ fecha: "2026-04-01", plusvalia: 1000 }, puntos);
+      expect(d).toEqual({ fecha: "2026-04-01", euros: 0, esHoy: true });
+    });
+
+    test("a cuánto se está del máximo, en negativo", () => {
+      const d = distanciaMaximo({ fecha: "2026-03-12", plusvalia: 1340 }, puntos);
+      expect(d).toEqual({ fecha: "2026-03-12", euros: -340, esHoy: false });
+    });
+
+    test("sin máximo, o sin aportado, no hay distancia", () => {
+      expect(distanciaMaximo(null, puntos)).toBeNull();
+      expect(distanciaMaximo({ fecha: "2026-03-12", plusvalia: 1340 }, [p("2026-04-01", 1, null)])).toBeNull();
+    });
+  });
+
+  describe("tramosRelleno", () => {
+    test("todo por encima: un solo tramo verde", () => {
+      const tr = tramosRelleno([p("2026-07-01", 110, 100), p("2026-07-02", 120, 100), p("2026-07-03", 115, 100)]);
+      expect(tr).toHaveLength(1);
+      expect(tr[0].positivo).toBe(true);
+      expect(tr[0].puntos).toHaveLength(3);
+      expect(tr[0].puntos[0]).toEqual({ t: Date.parse("2026-07-01"), valor: 110, aportado: 100 });
+    });
+
+    test("un cruce: dos tramos que comparten el punto interpolado", () => {
+      const tr = tramosRelleno([p("2026-07-01", 110, 100), p("2026-07-03", 90, 100)]);
+      expect(tr.map(x => x.positivo)).toEqual([true, false]);
+      const cruce = tr[0].puntos[tr[0].puntos.length - 1];
+      expect(tr[1].puntos[0]).toEqual(cruce);
+      expect(cruce.t).toBe(Date.parse("2026-07-02"));  // a mitad: 110→90 corta 100 en medio
+      expect(cruce.valor).toBe(cruce.aportado);
+      expect(cruce.valor).toBeCloseTo(100, 9);
+    });
+
+    test("un día sin aportado parte los tramos", () => {
+      const tr = tramosRelleno([
+        p("2026-07-01", 110, 100), p("2026-07-02", 111, 100), p("2026-07-03", 112, null),
+        p("2026-07-04", 113, 100), p("2026-07-05", 114, 100),
+      ]);
+      expect(tr).toHaveLength(2);
+      expect(tr[0].puntos.map(x => x.valor)).toEqual([110, 111]);
+      expect(tr[1].puntos.map(x => x.valor)).toEqual([113, 114]);
+    });
+
+    test("sin ningún aportado no hay relleno", () => {
+      expect(tramosRelleno([p("2026-07-01", 110, null), p("2026-07-02", 111, null)])).toEqual([]);
+      expect(tramosRelleno(null)).toEqual([]);
+    });
+  });
+
+  describe("escalaGrafica", () => {
+    test("X va por tiempo: 7 días y 1 día no quedan equiespaciados", () => {
+      const puntos = [p("2026-07-01", 100, 90), p("2026-07-08", 110, 95), p("2026-07-09", 105, 95)];
+      const { x } = escalaGrafica(puntos, 300, 110, 0);
+      const [x0, x1, x2] = puntos.map(q => x(Date.parse(q.fecha)));
+      expect(x0).toBe(0);
+      expect(x2).toBe(300);
+      expect(x1 - x0).toBeCloseTo(7 * (x2 - x1), 6);
+    });
+
+    test("Y entre el mínimo y el máximo de las dos líneas con aire, sin arrancar en 0", () => {
+      const puntos = [p("2026-07-01", 10000, 9000), p("2026-07-02", 10500, null)];
+      const { y, min, max } = escalaGrafica(puntos, 300, 110, 0);
+      expect(min).toBe(9000);
+      expect(max).toBe(10500);
+      // Ni el mínimo toca el suelo ni el máximo el techo: hay un 6 % de margen.
+      expect(y(9000)).toBeLessThan(110);
+      expect(y(10500)).toBeGreaterThan(0);
+      expect(y(9000) - y(10500)).toBeCloseTo(110 / 1.12, 6);
+    });
   });
 });
 

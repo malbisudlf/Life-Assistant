@@ -103,11 +103,14 @@ def _cartera_indexa():
 
 
 def _rendimiento_indexa():
-    """Serie de 40 días subiendo poco a poco, para que la sparkline tenga qué dibujar."""
+    """Serie de 40 días subiendo poco a poco, para que la gráfica tenga qué dibujar. A
+    mitad se aportan 500 € (el valor sube con ellos, como en la realidad), para que el
+    reparto del rango tenga las dos partes: lo puesto y lo que hizo el mercado."""
     totales, netos = {}, {}
     for i in range(40, 0, -1):
-        totales[_dia(-i)] = round(11800 + (40 - i) * 17.5, 2)
-        netos[_dia(-i)]   = 11000.0
+        antes = i > 20
+        totales[_dia(-i)] = round(11800 + (40 - i) * 17.5 - (500 if antes else 0), 2)
+        netos[_dia(-i)]   = 10500.0 if antes else 11000.0
     return {
         "return": {
             "total_amount": 12500.0, "investment": 11000.0, "pl": 1500.0,

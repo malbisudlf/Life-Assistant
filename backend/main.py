@@ -3191,8 +3191,12 @@ def _indexa_posiciones(cartera: dict) -> list[dict]:
     return fuera
 
 
-def _indexa_serie(mapa, aportado=None) -> list[dict]:
-    """Serie diaria {fecha: valor} de Indexa → lista ordenada y recortada."""
+def _indexa_serie_completa(mapa, aportado=None) -> list[dict]:
+    """Serie diaria {fecha: valor} de Indexa → lista ordenada, entera.
+
+    Entera desde que se abrió la cuenta: de aquí salen la serie semanal y el máximo de
+    plusvalía, que tienen que ver todo el histórico aunque al cliente solo viaje el final.
+    """
     if not isinstance(mapa, dict):
         return []
     aportado = aportado if isinstance(aportado, dict) else {}
@@ -3203,7 +3207,51 @@ def _indexa_serie(mapa, aportado=None) -> list[dict]:
             continue
         serie.append({"fecha": fecha, "valor": round(valor, 2),
                       "aportado": _indexa_num(aportado.get(fecha))})
-    return serie[-INDEXA_SERIE_DIAS:]
+    return serie
+
+
+def _indexa_serie(mapa, aportado=None) -> list[dict]:
+    """Serie diaria {fecha: valor} de Indexa → lista ordenada y recortada."""
+    return _indexa_serie_completa(mapa, aportado)[-INDEXA_SERIE_DIAS:]
+
+
+def _serie_semanal(serie: list[dict]) -> list[dict]:
+    """Una serie diaria reducida al ÚLTIMO punto con dato de cada semana ISO.
+
+    Es lo que viaja para el rango «Todo»: años de puntos diarios pesan en cada respuesta
+    y en una gráfica de 300 px no se distinguen. Se coge el último día con dato y no el
+    viernes, porque Indexa no valora los festivos y una semana puede acabar en miércoles;
+    y la semana en curso, aunque esté a medias, termina en el último punto de la serie,
+    que es donde el frontend la empalma con la diaria.
+    """
+    por_semana = {}
+    for p in serie or []:
+        try:
+            semana = date.fromisoformat(str(p.get("fecha"))).isocalendar()[:2]
+        except (TypeError, ValueError, AttributeError):
+            continue
+        guardado = por_semana.get(semana)
+        if guardado is None or p["fecha"] >= guardado["fecha"]:
+            por_semana[semana] = p
+    return [dict(por_semana[k]) for k in sorted(por_semana)]
+
+
+def _maximo_plusvalia(serie: list[dict]) -> dict | None:
+    """El día de mayor plusvalía (valor − aportado neto) de la serie, o None.
+
+    Sobre la plusvalía y no sobre el valor: con el valor, cada aportación sería un
+    «máximo histórico» que no ha ganado nadie. Se calcula aquí, sobre la serie DIARIA
+    entera, porque la semanal que viaja al cliente pierde los picos de mitad de semana.
+    Con empate gana el más reciente. Sin ningún día con aportado no hay máximo que decir.
+    """
+    mejor = None
+    for p in serie or []:
+        if p.get("aportado") is None or p.get("valor") is None:
+            continue
+        plus = p["valor"] - p["aportado"]
+        if mejor is None or plus >= mejor[1]:
+            mejor = (p["fecha"], plus)
+    return {"fecha": mejor[0], "plusvalia": round(mejor[1], 2)} if mejor else None
 
 
 def _finanzas_cuenta(numero: str, tipo) -> dict:
@@ -3262,7 +3310,8 @@ def _finanzas_cuenta(numero: str, tipo) -> dict:
     if efectivo:
         distribucion["efectivo"] = round(distribucion.get("efectivo", 0.0) + efectivo, 2)
 
-    fechas = sorted(p["fecha"] for p in posiciones if p["fecha"])
+    fechas   = sorted(p["fecha"] for p in posiciones if p["fecha"])
+    completa = _indexa_serie_completa(ret.get("total_amounts"), ret.get("net_amounts"))
     return {
         "numero":             numero,
         "tipo":               tipo or None,
@@ -3285,7 +3334,11 @@ def _finanzas_cuenta(numero: str, tipo) -> dict:
         "fecha_valores":       fechas[-1] if fechas else None,
         "distribucion":        distribucion,
         "posiciones":          sorted(posiciones, key=lambda p: p["valor"] or 0, reverse=True),
-        "serie":               _indexa_serie(ret.get("total_amounts"), ret.get("net_amounts")),
+        "serie":               completa[-INDEXA_SERIE_DIAS:],
+        "serie_larga":         _serie_semanal(completa),
+        # Solo para sumar el total en diario: _finanzas_datos la quita antes de devolver y
+        # de cachear. La serie diaria entera no tiene por qué viajar ni quedarse en memoria.
+        "_serie_completa":     completa,
     }
 
 
@@ -3312,15 +3365,18 @@ def _finanzas_total(cuentas: list[dict]) -> dict:
     }
 
 
-def _finanzas_serie_total(cuentas: list[dict]) -> list[dict]:
+def _finanzas_serie_total(cuentas: list[dict], clave: str = "serie", recortar: bool = True) -> list[dict]:
     """Serie diaria sumada de todas las cuentas.
 
     Solo se suman los días en los que TODAS tienen valor. Con dos cuentas abiertas en
     fechas distintas, incluir los días en que solo existía una dibujaría un salto hacia
     arriba el día que empieza la segunda: la línea diría "ganaste 20.000 € en un día"
     cuando lo que pasó es que empezó a contar otra cuenta.
+
+    `clave` dice qué serie de cada cuenta se suma: la recortada ("serie") o la entera
+    ("_serie_completa", con `recortar=False`), de la que salen la semanal y el máximo.
     """
-    series = [c["serie"] for c in cuentas if c["serie"]]
+    series = [c.get(clave) for c in cuentas if c.get(clave)]
     if not series:
         return []
     por_fecha = [{p["fecha"]: p for p in serie} for serie in series]
@@ -3334,7 +3390,7 @@ def _finanzas_serie_total(cuentas: list[dict]) -> list[dict]:
             "valor":    round(sum(p["valor"] for p in puntos), 2),
             "aportado": round(sum(aportes), 2) if all(a is not None for a in aportes) else None,
         })
-    return fuera[-INDEXA_SERIE_DIAS:]
+    return fuera[-INDEXA_SERIE_DIAS:] if recortar else fuera
 
 
 def _finanzas_datos() -> dict:
@@ -3364,13 +3420,24 @@ def _finanzas_datos() -> dict:
             futuros = [pool.submit(_finanzas_cuenta, n, t) for n, t in elegidas]
             cuentas = [f.result() for f in futuros]
 
+    # El total se suma en DIARIO y se reduce a semanas después. Sumar las semanales de
+    # cada cuenta fallaría en cuanto el último día con dato de una semana no fuera el
+    # mismo en todas: la intersección de fechas dejaría esa semana fuera.
+    total_completa = _finanzas_serie_total(cuentas, "_serie_completa", recortar=False)
+    # Antes de armar lo que se cachea: la serie diaria entera no sale al cliente ni se
+    # queda en _finanzas_cache.
+    for c in cuentas:
+        c.pop("_serie_completa", None)
+
     return {
-        "configurado": True,
-        "actualizado": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "cuentas":     cuentas,
-        "total":       _finanzas_total(cuentas),
-        "serie":       _finanzas_serie_total(cuentas),
-        "omitidas":    omitidas,
+        "configurado":      True,
+        "actualizado":      datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cuentas":          cuentas,
+        "total":            _finanzas_total(cuentas),
+        "serie":            _finanzas_serie_total(cuentas),
+        "serie_larga":      _serie_semanal(total_completa),
+        "maximo_plusvalia": _maximo_plusvalia(total_completa),
+        "omitidas":         omitidas,
     }
 
 

@@ -37,6 +37,11 @@ fresca (1 + 2 por cuenta):
 Las dos de cada cuenta van en paralelo (`ThreadPoolExecutor`), y las cuentas también entre
 sí: es una pantalla que se abre con el arranque en frío de Fly por delante.
 
+La gráfica de lo aportado frente al valor no pide nada nuevo: la serie semanal
+(`serie_larga`) y el máximo de plusvalía (`maximo_plusvalia`) salen de las mismas
+`total_amounts` / `net_amounts` de `/performance`, que ya llegaban enteras desde el día en
+que se abrió la cuenta.
+
 ### Las decisiones que no son obvias
 
 - **Si `/performance` falla, la cuenta sale igual.** Sin esa llamada se sigue sabiendo lo
@@ -59,6 +64,30 @@ sí: es una pantalla que se abre con el arranque en frío de Fly por delante.
   en fechas distintas, incluir los días en que solo existía una dibuja un salto vertical el
   día que empieza la segunda: la línea diría "ganaste 20.000 € en un día" cuando lo que pasó
   es que empezó a contar otra cuenta.
+- **La serie larga es semanal, y el total se reduce a semanas DESPUÉS de sumar en diario.**
+  `serie` sigue siendo la diaria recortada a `INDEXA_SERIE_DIAS`; `serie_larga` es la
+  historia entera con un punto por semana ISO, el último día con dato de cada una (no el
+  viernes: Indexa no valora festivos y una semana puede acabar en miércoles), y su último
+  punto es siempre el último de la diaria, aunque la semana vaya a medias. Para el total
+  se suman las series diarias completas de todas las cuentas (con la misma regla de solo
+  los días comunes) y la suma se reduce a semanas; sumar las semanales de cada cuenta
+  fallaría en cuanto el último día con dato de una semana no fuera el mismo en todas. La
+  serie diaria completa (`_serie_completa`) es interna: se quita de cada cuenta antes de
+  armar lo que se devuelve y se cachea.
+- **El máximo y la caída se miden sobre la plusvalía** (valor − aportado neto), nunca sobre
+  el valor. Sobre el valor, cada aportación sería un «máximo histórico» y cada retirada una
+  «caída», y ninguna de las dos la ha hecho el mercado. Por lo mismo, una aportación grande
+  en plena caída no la tapa.
+- **El máximo de plusvalía se calcula en el backend sobre la serie diaria completa**
+  (`maximo_plusvalia`, `{fecha, plusvalia}` o `null` si ningún día tiene aportado). La
+  semanal que viaja al cliente pierde los picos de mitad de semana, y el máximo es de toda
+  la historia, no del rango. Con empate gana el día más reciente. La mayor caída sí se
+  calcula en el frontend sobre los puntos del rango, y en «Todo» lo dice («semanal»): con
+  un punto por semana el valle de un miércoles no está y la caída sale por lo bajo.
+- **«Aportado» es aportado NETO** (`net_amounts`): lo metido menos lo sacado, retiradas y
+  traspasos de salida incluidos. Si falta (falló `/performance`, o esa cuenta no lo da),
+  va a `null` y la línea discontinua se corta ahí: pintarlo como 0 dibujaría una plusvalía
+  igual a toda la cartera.
 - **El efectivo va en su propia clase**, separado de los fondos monetarios: uno es una
   decisión de la cartera y el otro es dinero esperando a invertirse.
 - **Se recorren todas las `instrument_accounts`**, no solo la primera (que es lo que hacen
@@ -93,13 +122,53 @@ presencia descartado en `docs/IDEAS.md`.
 `case "finanzas"` en `Dashboard.jsx`, columna derecha. Valor total, plusvalía en euros y en
 porcentaje, cuánto se movió desde el último día **con dato** (no desde "ayer": Indexa no
 valora fines de semana, y restar contra una fecha que no existe daría siempre 0 los lunes),
-sparkline de la serie, barra de mezcla por clase de activo y, plegado, el detalle de
-posiciones. Con más de una cuenta aparece una fila por cuenta.
+la gráfica de lo que pusiste frente a lo que puso el mercado (abajo), barra de mezcla por
+clase de activo y, plegado, el detalle de posiciones. Con más de una cuenta aparece una
+fila por cuenta.
+
+**La gráfica** (`GraficaAportado`, subcomponente de `Dashboard.jsx` junto al donut) tiene
+dos líneas: el valor de la cartera, en verde o rojo según la plusvalía del último punto, y
+el aportado neto, discontinua en gris. El hueco entre ellas va relleno en verde donde el
+valor está por encima y en rojo donde está por debajo, y los dos polígonos se tocan
+exactamente en cada cruce (`tramosRelleno` mete el punto de corte interpolado en los dos).
+De arriba abajo:
+
+- **Leyenda y rango.** Botones 3M · 1A · Todo, solo los que enseñan algo
+  (`rangosDisponibles`): 3M con dos puntos o más, 1A si la diaria cubre más de 92 días (si
+  no, sería 3M otra vez) y Todo si la semanal empieza antes que la diaria. Con uno solo no
+  hay selector. 3M y 1A cuentan desde la fecha del último punto, no desde hoy (Indexa
+  valora con retraso); Todo es la semanal hasta donde empieza la diaria y la diaria desde
+  ahí (`recortarSerie`). El rango elegido se recuerda en `localStorage`
+  (`la_finanzas_rango`), que es solo una comodidad del navegador: si lanza, se usa el de
+  por defecto (1A, o 3M si no hay 1A).
+- **El eje X va por TIEMPO**, no por índice (`escalaGrafica`): en Todo se juntan puntos
+  semanales y diarios, y por índice el último año ocuparía cinco veces lo que le toca. El
+  eje Y va entre el mínimo y el máximo de las dos líneas con un 6 % de aire y no arranca en
+  0: lo que se mira es el hueco entre ellas. Las dos cifras del eje van en HTML y no en
+  `<text>`, que con `preserveAspectRatio="none"` se estiraría.
+- **El tooltip** sale al señalar (ratón o dedo): fecha, valor, aportado y «mercado» (la
+  plusvalía de ese día). Va anclado ARRIBA de la gráfica, en el lado contrario al punto, y
+  no persigue al puntero, por lo mismo que el del donut. La gráfica lleva
+  `touch-action: pan-y` para que en el móvil el scroll vertical siga funcionando.
+- **El reparto del rango** (`repartoRango`): «En 1A: +812 € · +500 € puestos · +312 € el
+  mercado», con `mercado = cambio − aportado` entre el primer y el último punto con
+  aportado. Solo describe; no valora.
+- **Los hitos**: la distancia al máximo de plusvalía (`distanciaMaximo`, contra el máximo de
+  siempre y no el del rango) y la mayor caída del rango (`mayorCaida`), con los días
+  naturales que tardó en recuperarse o «sin recuperar aún».
+
+Si todos los aportados son `null`, solo se dibuja el valor, sin relleno, reparto ni hitos,
+y la leyenda dice «Sin datos de aportaciones». Un `null` suelto corta la línea discontinua
+y el relleno en ese hueco. Los cálculos van en un `useMemo` (el dashboard se re-renderiza
+con el reloj) y la gráfica solo existe dentro de la rama configurada: cargando, error y sin
+configurar son los de siempre.
 
 Los formateadores son puros y viven en `src/lib/helpers.js`: `formatoEuros`,
 `formatoPorcentaje`, `formatoRentabilidad` (fracción → porcentaje, en un solo sitio para que
 nadie multiplique por 100 a ojo), `mezclaCartera`, `variacionCartera` y
-`repartoPatrimonio`.
+`repartoPatrimonio`. Los de la gráfica, también ahí: `RANGOS_CARTERA`, `rangosDisponibles`,
+`recortarSerie`, `repartoRango`, `mayorCaida`, `distanciaMaximo`, `tramosRelleno` y
+`escalaGrafica`.
 
 Debajo, separadas por una sola línea, Revolut (`finanzas.revolut`) y la cartera manual de
 ETFs (`carteraEtf`, estado propio cargado con `GET /finanzas/etfs`) comparten UNA lista con
@@ -187,7 +256,7 @@ dentro (`dile_al_usuario_literalmente`), y aparece también en `mis_capacidades`
 | `INDEXA_API_URL` | `https://api.indexacapital.com` | Solo para pruebas |
 | `INDEXA_CUENTAS` | (todas) | Filtro de números de cuenta separados por comas. **No** sustituye a `/users/me`: el estado y el tipo salen de ahí, y una lista escrita a mano no sabría que una cuenta se canceló |
 | `INDEXA_TTL_MINUTOS` | `180` | Vida de la copia en memoria |
-| `INDEXA_SERIE_DIAS` | `365` | Días de serie que se devuelven al frontend (la completa es desde que abriste la cuenta y viaja entera en cada respuesta) |
+| `INDEXA_SERIE_DIAS` | `365` | Días de serie DIARIA (`serie`) que se devuelven al frontend. La semanal (`serie_larga`) va entera, desde que abriste la cuenta, y el máximo de plusvalía se calcula sobre la diaria completa, que Indexa manda entera en cada respuesta |
 | `ENABLE_BANKING_APPLICATION_ID` | — | El `application_id` de la app registrada en su Control Panel |
 | `ENABLE_BANKING_PRIVATE_KEY_PATH` | — | Ruta al `.pem` descargado UNA VEZ al registrar la app (no se puede volver a descargar). Vale en local; **en producción no** (ver abajo) |
 | `ENABLE_BANKING_PRIVATE_KEY` | — | La misma clave pegada dentro de la variable. **Es la de producción** y gana a la ruta si están las dos |
@@ -230,8 +299,9 @@ fichero el que tiene que enterarse primero. Cubren la agregación, el reparto po
 camino sin rendimiento, la caché, el 502 que no reenvía el cuerpo de Indexa y que el token
 viaja en cabecera y no en la URL.
 
-El E2E (`tests/e2e/servidor_pruebas.py`) trae una cartera simulada con 40 días de serie, así
-que el widget se pinta con números de verdad en un navegador real.
+El E2E (`tests/e2e/servidor_pruebas.py`) trae una cartera simulada con 40 días de serie y
+una aportación de 500 € a mitad, así que el widget se pinta con números de verdad en un
+navegador real y el reparto del rango tiene sus dos partes.
 
 ### Revolut (vía Enable Banking)
 
@@ -401,6 +471,14 @@ exacto de ganancia puede variar un poco.
   botón que mueve dinero de verdad no pinta en una pantalla que existe para mirar.
 - **Guardar el histórico en Supabase.** Ya está explicado arriba: lo da Indexa entero en cada
   respuesta.
+- **La curva de la cartera manual de ETFs** (y de Revolut). La gráfica de lo aportado frente
+  al valor es solo de Indexa. Para los ETFs haría falta el cierre histórico de cada uno en
+  cada día, que solo da Yahoo Finance —no oficial, ver arriba— y una fuente que puede caerse
+  sin aviso no puede tumbar la de Indexa, que funciona. Queda para una segunda fase, y
+  cuando se haga irá aparte y degradando sola.
+- **Llevar la serie larga a Jarvis.** La herramienta `finanzas` sigue recortada a totales,
+  mezcla y posiciones mayores: una serie de años por semanas es mucho token para lo que
+  se le pregunta.
 - **Meterlo en el resumen diario por correo.** Se puede y quizá se haga, pero un número que
   cambia una vez al día y que no exige hacer nada no es lo mismo que la agenda o el sueño:
   antes de sumarlo al correo hay que decidir qué se supone que haces al leerlo. Mientras
