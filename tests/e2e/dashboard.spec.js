@@ -190,7 +190,7 @@ test('el widget de alarmas pinta la alarma de respaldo y deja quitarla', async (
 test('la zona dev dice qué código corre y qué corre solo', async ({ page }) => {
   await entrar(page)
 
-  await page.getByRole('button', { name: '🛠' }).first().click()
+  await page.getByRole('button', { name: 'Zona de desarrollo' }).first().click()
 
   // Despliegue: el sha del backend (aquí, el VERSION simulado) contra el main de GitHub.
   // Lo que se comprueba es que la comparación llega pintada, que es lo único que esta
@@ -221,7 +221,7 @@ test('la zona dev dice qué código corre y qué corre solo', async ({ page }) =
 test('la zona dev enseña las migraciones que faltan y qué le falta al backend', async ({ page }) => {
   await entrar(page)
 
-  await page.getByRole('button', { name: '🛠' }).first().click()
+  await page.getByRole('button', { name: 'Zona de desarrollo' }).first().click()
 
   // Base de datos: el servidor de pruebas declara aplicadas todas las migraciones del
   // repositorio menos la última, así que tiene que salir esa y solo esa, con su nombre —

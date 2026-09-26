@@ -33,6 +33,7 @@ import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { resumenEstado } from "../lib/dev";
+import { comoBoton } from "../lib/teclado";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -302,7 +303,7 @@ function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickin
           <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, "walking"); }} style={{
             ...btnBase, background: "rgba(100,180,130,0.12)", borderColor: "rgba(100,180,130,0.3)", color: "var(--green)",
           }}>🚶 Andando</button>
-          <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} style={{
+          <button onClick={e => { e.stopPropagation(); setDeparturePickingId(null); }} aria-label="Cancelar" style={{
             ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "4px 6px",
           }}>✕</button>
         </div>
@@ -316,7 +317,7 @@ function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickin
           <span style={{ color: "var(--muted)", marginLeft: 8 }}>
             {info.duration_text} · {info.distance_text}
           </span>
-          <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} style={{
+          <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} aria-label="Recalcular la hora de salida" style={{
             ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
           }}>↺</button>
         </div>
@@ -540,6 +541,7 @@ function PantallaLlamada({ estado, motivo, fase, parcial, lista, onContestar, on
       <div style={{ display: "flex", gap: 56, marginTop: enCurso ? 30 : 40 }}>
         <div style={{ textAlign: "center" }}>
           <button onClick={enCurso ? onColgar : onRechazar} title={enCurso ? "Colgar" : "Ahora no"}
+                  aria-label={enCurso ? "Colgar" : "Ahora no"}
                   style={{ ...boton, background: "var(--red, #d9534f)", transform: "rotate(135deg)" }}>✆</button>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>
             {enCurso ? "Colgar" : "Ahora no"}
@@ -549,7 +551,7 @@ function PantallaLlamada({ estado, motivo, fase, parcial, lista, onContestar, on
           <div style={{ textAlign: "center" }}>
             {/* Deshabilitado hasta que llega el permiso de voz: descolgar antes deja la
                 llamada entera con la voz del navegador. Ver `VOZ_ESPERA_MAX_MS`. */}
-            <button onClick={onContestar} disabled={!lista} title="Contestar" style={{
+            <button onClick={onContestar} disabled={!lista} title="Contestar" aria-label="Contestar" style={{
               ...boton, background: "var(--green, #4caf50)",
               opacity: lista ? 1 : 0.4, cursor: lista ? "pointer" : "default",
             }}>✆</button>
@@ -647,6 +649,7 @@ function JarvisChat({
             value={borrador}
             onChange={e => setBorrador(e.target.value)}
             placeholder={escuchando ? "Escuchando…" : "Habla con Jarvis"}
+            aria-label="Mensaje para Jarvis"
             disabled={pensando}
             style={{
               flex: 1, padding: "9px 12px", borderRadius: 8, fontSize: 14,
@@ -655,14 +658,14 @@ function JarvisChat({
             }}
           />
           {VOZ_NAVEGADOR && VOZ_SINTESIS && (
-            <button type="button" onClick={onLlamar} title="Hablar como en una llamada" style={{
+            <button type="button" onClick={onLlamar} title="Hablar como en una llamada" aria-label="Hablar como en una llamada" style={{
               padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
               border: "0.5px solid var(--border)", background: "transparent",
               color: "var(--green)", flexShrink: 0,
             }}>📞</button>
           )}
           {VOZ_NAVEGADOR && (
-            <button type="button" onClick={onDictar} title="Dictar" style={{
+            <button type="button" onClick={onDictar} title="Dictar" aria-label="Dictar" aria-pressed={escuchando} style={{
               padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
               border: "0.5px solid var(--border)", background: escuchando ? "var(--accent)" : "transparent",
               color: escuchando ? "var(--bg)" : "var(--muted)", flexShrink: 0,
@@ -670,13 +673,14 @@ function JarvisChat({
           )}
           {VOZ_SINTESIS && (
             <button type="button" onClick={onHabla}
-              title={habla ? "Silenciar a Jarvis" : "Que Jarvis conteste en voz alta"} style={{
+              title={habla ? "Silenciar a Jarvis" : "Que Jarvis conteste en voz alta"}
+              aria-label="Que Jarvis conteste en voz alta" aria-pressed={habla} style={{
                 padding: "0 12px", borderRadius: 8, fontSize: 15, cursor: "pointer",
                 border: "0.5px solid var(--border)", background: habla ? "var(--accent)" : "transparent",
                 color: habla ? "var(--bg)" : "var(--muted)", flexShrink: 0,
               }}>{habla ? "🔊" : "🔇"}</button>
           )}
-          <button type="submit" disabled={!puedeEnviar} style={{
+          <button type="submit" disabled={!puedeEnviar} aria-label="Enviar" style={{
             padding: "0 14px", borderRadius: 8, fontSize: 14, flexShrink: 0,
             border: "none", background: "var(--accent)", color: "var(--bg)",
             cursor: puedeEnviar ? "pointer" : "default", opacity: puedeEnviar ? 1 : 0.4,
@@ -872,6 +876,10 @@ const GLOBAL_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   input, button, textarea, select { outline: none !important; box-shadow: none !important; -webkit-appearance: none; }
+  /* La línea de arriba quita también el anillo del foco que llega con el tabulador, y
+     sin él no hay forma de saber qué botón se va a pulsar. :focus-visible solo salta con
+     el teclado, así que con el ratón o el dedo todo se ve igual que antes. */
+  button:focus-visible, [role="button"]:focus-visible { outline: 1px solid var(--accent) !important; outline-offset: 2px; }
   :root {
     --bg: #0e0f11; --surface: #161719; --surface2: #1e1f22;
     --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
@@ -1314,6 +1322,7 @@ function DateInput({ value, onChange }) {
         }}
       />
       <button type="button" onClick={abrirCalendario} title="Elegir en el calendario"
+        aria-label="Elegir en el calendario"
         style={{
           position: "absolute", top: 0, right: 0, height: "100%", width: 30,
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -1734,9 +1743,7 @@ export default function Dashboard() {
   }, [loading]);
 
   function openCreateEvent() {
-    const n = new Date();
-    const today = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-    setEventForm({ subject: "", date: today, startTime: "09:00", endTime: "09:30", location: "", calendarId: "", alud_url: "" });
+    setEventForm({ subject: "", date: isoHoy(), startTime: "09:00", endTime: "09:30", location: "", calendarId: "", alud_url: "" });
     setEditingEventId(null);
     setEventCreateError(null);
     setShowCreateEvent(true);
@@ -1752,10 +1759,9 @@ export default function Dashboard() {
     const pad = n => String(n).padStart(2, "0");
     const sd = new Date(ev.start);
     const ed = new Date(ev.end);
-    const date = `${sd.getFullYear()}-${pad(sd.getMonth() + 1)}-${pad(sd.getDate())}`;
     setEventForm({
       subject: ev.title || "",
-      date,
+      date: isoHoy(sd),
       startTime: `${pad(sd.getHours())}:${pad(sd.getMinutes())}`,
       endTime: `${pad(ed.getHours())}:${pad(ed.getMinutes())}`,
       location: ev.location || "",
@@ -4200,9 +4206,7 @@ export default function Dashboard() {
   const relojHoy = useMemo(() => {
     const mapa = healthReloj?.dias;
     if (!mapa) return null;
-    const p = n => String(n).padStart(2, "0");
-    const iso = `${hoyConclusiones.getFullYear()}-${p(hoyConclusiones.getMonth() + 1)}-${p(hoyConclusiones.getDate())}`;
-    const estado = mapa[iso] || "sin_datos";
+    const estado = mapa[isoHoy(hoyConclusiones)] || "sin_datos";
     return { estado, puesto: relojPuesto(estado) };
   }, [healthReloj, hoyConclusiones]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
@@ -4511,7 +4515,7 @@ export default function Dashboard() {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={s.eventDetailTime}>{displayActive.time}</div>
-                    <span onClick={() => openEditEvent(displayActive)} title="Editar evento" style={{
+                    <span {...comoBoton(() => openEditEvent(displayActive), { etiqueta: "Editar evento" })} title="Editar evento" style={{
                       cursor: "pointer", fontSize: 12, color: "var(--muted)", padding: "2px 4px",
                     }}>✎</span>
                   </div>
@@ -4525,7 +4529,7 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="upcoming">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={s.sectionLabel}>Próximos eventos</div>
-            <span onClick={openCreateEvent} title="Crear evento en Outlook" style={{
+            <span {...comoBoton(openCreateEvent)} title="Crear evento en Outlook" style={{
               cursor: "pointer", fontSize: 14, color: "var(--accent)", lineHeight: 1,
               padding: "2px 8px", borderRadius: 6, border: "0.5px solid rgba(200,169,110,0.3)",
               background: "rgba(200,169,110,0.1)", marginBottom: 12,
@@ -4543,7 +4547,7 @@ export default function Dashboard() {
                   {ev.loc && <div style={s.eventRowLoc}>{ev.loc}</div>}
                   <DepartureWidget ev={ev} {...propsSalida} />
                 </div>
-                <span onClick={() => openEditEvent(ev)} title="Editar evento" style={{
+                <span {...comoBoton(() => openEditEvent(ev), { etiqueta: `Editar ${ev.title}` })} title="Editar evento" style={{
                   cursor: "pointer", fontSize: 12, color: "var(--muted)", padding: "2px 4px", flexShrink: 0,
                 }}>✎</span>
               </div>
@@ -4609,8 +4613,8 @@ export default function Dashboard() {
                       style={{ padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }}>
                       {["0.5","1","1.5","2","2.5","3"].map(h => <option key={h} value={h}>{h}h</option>)}
                     </select>
-                    <button onClick={submitSession} disabled={trainingLoading} style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
-                    <button onClick={() => setShowSessionForm(false)} style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
+                    <button onClick={submitSession} disabled={trainingLoading} aria-label="Guardar sesión" style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
+                    <button onClick={() => setShowSessionForm(false)} aria-label="Cancelar" style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 6 }}>
@@ -4635,6 +4639,7 @@ export default function Dashboard() {
               <button onClick={() => { loadFinanzas({ refrescar: true }); loadCarteraEtf({ refrescar: true }); }}
                 disabled={finanzasCargando || carteraEtfCargando}
                 title="Volver a preguntar a Indexa, Revolut y los precios de los ETFs (el dato normal es de hace unas horas)"
+                aria-label="Actualizar finanzas"
                 style={{
                   padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
                   letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
@@ -4860,9 +4865,9 @@ export default function Dashboard() {
                               onChange={ev => setEtfAportForm(f => ({ ...f, [e.ticker]: { ...f[e.ticker], importe: ev.target.value } }))}
                               style={{ width: 90, padding: "6px 8px", background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontFamily: "'DM Sans', sans-serif" }} />
                             <button onClick={() => submitEtfAportacion(e.ticker)} disabled={form.guardando || !form.fecha || !form.importe}
-                              style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
+                              aria-label="Guardar aportación" style={{ padding: "6px 12px", background: "var(--accent)", border: "none", borderRadius: 6, color: "#0e0f11", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✓</button>
                             <button onClick={() => setEtfAportForm(f => ({ ...f, [e.ticker]: { abierto: false } }))}
-                              style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
+                              aria-label="Cancelar" style={{ padding: "6px 10px", background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>✕</button>
                             {form.error && (
                               <div style={{ width: "100%", fontSize: 11, color: "#d4645a" }}>No se pudo guardar la aportación.</div>
                             )}
@@ -5182,9 +5187,9 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <span title="Editar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 2px", flexShrink: 0 }}
-                    onClick={() => editarAlarma(a)}>✎</span>
+                    {...comoBoton(() => editarAlarma(a), { etiqueta: "Editar alarma" })}>✎</span>
                   <span title="Quitar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
-                    onClick={() => borrarAlarma(a.id)}>✕</span>
+                    {...comoBoton(() => borrarAlarma(a.id), { etiqueta: "Quitar alarma" })}>✕</span>
                 </div>
               ))}
             </div>
@@ -5221,7 +5226,7 @@ export default function Dashboard() {
                 {alarmaForm.editando ? "Guardar" : "Poner"}
               </button>
               {alarmaForm.editando && (
-                <span onClick={() => setAlarmaForm(ALARMA_FORM_VACIO)}
+                <span {...comoBoton(() => setAlarmaForm(ALARMA_FORM_VACIO))}
                   style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", flexShrink: 0 }}>
                   Cancelar
                 </span>
@@ -5237,9 +5242,10 @@ export default function Dashboard() {
                 const puesto = alarmaForm.repetir.includes(dia);
                 return (
                   <span key={dia} title={DIAS_SEMANA[i]}
-                    onClick={() => setAlarmaForm(f => ({ ...f,
+                    {...comoBoton(() => setAlarmaForm(f => ({ ...f,
                       repetir: puesto ? f.repetir.filter(d => d !== dia)
-                                      : [...f.repetir, dia].sort((a, b) => a - b) }))}
+                                      : [...f.repetir, dia].sort((a, b) => a - b) })),
+                      { etiqueta: DIAS_SEMANA[i], pulsado: puesto })}
                     style={{ width: 24, height: 24, lineHeight: "24px", textAlign: "center",
                       borderRadius: "50%", fontSize: 11, cursor: "pointer", userSelect: "none",
                       background: puesto ? "var(--accent)" : "var(--surface)",
@@ -6747,7 +6753,7 @@ export default function Dashboard() {
             <div className="header-controls" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {/* La zona dev, en una esquinita y sin llamar la atención: se entra a
                   diario mientras se desarrolla y nunca durante el uso normal. */}
-              <button onClick={() => setZonaDev(true)} title="Zona de desarrollo" style={{
+              <button onClick={() => setZonaDev(true)} title="Zona de desarrollo" aria-label="Zona de desarrollo" style={{
                 background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
                 borderRadius: 7, color: "var(--muted2)", fontSize: 13, cursor: "pointer",
                 padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
@@ -6761,7 +6767,7 @@ export default function Dashboard() {
                 background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
                 borderRadius: 7, color: "var(--muted)", fontSize: 14, cursor: "pointer",
                 padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
-              }} title="Ajustes de widgets">⚙</button>
+              }} title="Ajustes de widgets" aria-label="Ajustes">⚙</button>
             </div>
           </div>
         </div>
@@ -7347,7 +7353,7 @@ export default function Dashboard() {
                     <div style={{ fontSize: 12, color: dot[overall.tone] }}>{overall.label}</div>
                   </div>
                 </div>
-                <button onClick={() => setHealthModalOpen(false)} style={{
+                <button onClick={() => setHealthModalOpen(false)} aria-label="Cerrar" style={{
                   background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 8,
                   color: "var(--muted)", fontSize: 18, lineHeight: 1, cursor: "pointer", padding: "4px 10px",
                 }}>×</button>
@@ -7451,7 +7457,7 @@ export default function Dashboard() {
                 {[["full", "Completo"], ["simple", "Simple"]].map(([mode, label]) => {
                   const active = mode === "simple" ? simpleMode : !simpleMode;
                   return (
-                    <button key={mode} onClick={() => { if (active) return; toggleSimpleMode(); }} style={{
+                    <button key={mode} onClick={() => { if (active) return; toggleSimpleMode(); }} aria-pressed={active} style={{
                       flex: 1, padding: "6px 0",
                       background: active ? "rgba(200,169,110,0.15)" : "var(--surface2)",
                       border: `0.5px solid ${active ? "var(--accent)" : "var(--border2)"}`,
@@ -7477,7 +7483,7 @@ export default function Dashboard() {
                 <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Columnas</div>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[2, 3].map(n => (
-                    <button key={n} onClick={() => changeNumColumns(n)} style={{
+                    <button key={n} onClick={() => changeNumColumns(n)} aria-label={`${n} columnas`} aria-pressed={numColumns === n} style={{
                       flex: 1, padding: "6px 0",
                       background: numColumns === n ? "rgba(200,169,110,0.15)" : "var(--surface2)",
                       border: `0.5px solid ${numColumns === n ? "var(--accent)" : "var(--border2)"}`,
@@ -7504,7 +7510,10 @@ export default function Dashboard() {
                   padding: "8px 10px", borderRadius: 8,
                   background: "rgba(255,255,255,0.03)", border: "0.5px solid rgba(255,255,255,0.06)",
                 }}>
-                  <button onClick={() => toggleWidget(w.id)} style={{
+                  {/* Pinta una casilla, así que se anuncia como tal: sin esto era un botón
+                      sin nombre ni estado, imposible de distinguir de los otros veinte. */}
+                  <button onClick={() => toggleWidget(w.id)} role="checkbox" aria-checked={w.visible}
+                    aria-label={`Mostrar ${w.label}`} style={{
                     width: 16, height: 16, borderRadius: 4,
                     border: `0.5px solid ${w.visible ? "var(--accent)" : "rgba(255,255,255,0.2)"}`,
                     background: w.visible ? "var(--accent)" : "transparent",
@@ -7512,12 +7521,12 @@ export default function Dashboard() {
                   }} />
                   <span style={{ flex: 1, fontSize: 13, color: w.visible ? "var(--text)" : "var(--muted)", fontFamily: "'DM Sans', sans-serif" }}>{w.label}</span>
                   <div style={{ display: "flex", gap: 0 }}>
-                    <button onClick={() => moveWidget(w.id, -1)} disabled={i === 0} style={{
+                    <button onClick={() => moveWidget(w.id, -1)} disabled={i === 0} aria-label={`Subir ${w.label}`} style={{
                       background: "transparent", border: "none",
                       color: i === 0 ? "rgba(255,255,255,0.15)" : "var(--muted)",
                       cursor: i === 0 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
                     }}>↑</button>
-                    <button onClick={() => moveWidget(w.id, 1)} disabled={i === arr.length - 1} style={{
+                    <button onClick={() => moveWidget(w.id, 1)} disabled={i === arr.length - 1} aria-label={`Bajar ${w.label}`} style={{
                       background: "transparent", border: "none",
                       color: i === arr.length - 1 ? "rgba(255,255,255,0.15)" : "var(--muted)",
                       cursor: i === arr.length - 1 ? "default" : "pointer", fontSize: 13, padding: "2px 6px",
@@ -7536,7 +7545,7 @@ export default function Dashboard() {
                   {[["L",1],["M",2],["X",3],["J",4],["V",5],["S",6],["D",0]].map(([label, d]) => {
                     const active = trainingDays.includes(d);
                     return (
-                      <button key={d} onClick={() => {
+                      <button key={d} aria-label={DAYS_ES[d]} aria-pressed={active} onClick={() => {
                         const next = active ? trainingDays.filter(x => x !== d) : [...trainingDays, d];
                         setTrainingDays(next);
                         localStorage.setItem("la_training_days", JSON.stringify(next));
@@ -7585,7 +7594,7 @@ export default function Dashboard() {
                     <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--text)" }}>{formatShortDate(s.date)}</span>
                     <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{s.duration_hours}h</span>
                   </div>
-                  <button onClick={() => deleteTrainingSession(s.id)} style={{
+                  <button onClick={() => deleteTrainingSession(s.id)} aria-label={`Borrar la sesión del ${formatShortDate(s.date)}`} style={{
                     background: "transparent", border: "none", color: "var(--muted2)", fontSize: 12,
                     cursor: "pointer", padding: "2px 6px", lineHeight: 1,
                   }}>✕</button>
@@ -7859,10 +7868,10 @@ export default function Dashboard() {
                   🎓 Clases de hoy
                 </div>
                 <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                  {todayClasses.length} clases
+                  {todayClasses.length} {todayClasses.length === 1 ? "clase" : "clases"}
                 </div>
               </div>
-              <button onClick={() => setClassesOpen(false)} style={{
+              <button onClick={() => setClassesOpen(false)} aria-label="Cerrar" style={{
                 background: "none", border: "none", color: "var(--muted)",
                 fontSize: 20, cursor: "pointer", padding: "4px 8px", borderRadius: 6, lineHeight: 1,
               }}

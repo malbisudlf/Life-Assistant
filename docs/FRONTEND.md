@@ -399,6 +399,23 @@ mantén el prefijo y el `try/catch` al parsear.
 - El lint debe quedar a **cero errores y cero warnings**. Se limpió por completo en
   julio de 2026; no dejes que se vuelva a degradar.
 
+### Accesibilidad: teclado y nombres
+
+- **Todo botón que solo enseña un icono lleva `aria-label`** (✕, ↑, →, ⚙…). El `title`
+  no basta: el nombre accesible de un botón sale de su contenido, y el `title` solo se
+  usa si está vacío, así que un lector de pantalla decía «flecha arriba» veinte veces en
+  el panel ⚙. `tests/frontend/accesibilidad.test.jsx` monta el dashboard con sesión y
+  falla si aparece un botón cuyo nombre sea solo símbolos. Si el botón es un
+  interruptor, `aria-pressed`; si pinta una casilla, `role="checkbox"` + `aria-checked`.
+- **Un `<span>` o `<div>` clicable se hace pulsable con `comoBoton()`** (`src/lib/teclado.js`):
+  le da `role="button"`, `tabIndex` y Enter/Espacio, sin tocar su aspecto. Cambiarlo por
+  un `<button>` movería el estilo (fondo, borde y fuente propios del navegador).
+- **El foco del teclado se ve**: `GLOBAL_CSS` quita el `outline` a todos los controles
+  (con `!important`), y una regla `:focus-visible` lo devuelve solo a botones y a
+  `[role="button"]`. `:focus-visible` no salta con el ratón ni con el dedo, así que eso se
+  ve igual que antes. Los E2E buscan los botones por su nombre accesible
+  (`getByRole('button', { name })`): si cambias un `aria-label`, búscalo también allí.
+
 ## El panel ⚙ y la zona dev
 
 El panel de ajustes tenía dentro el estado del sistema entero (backend, agente,
