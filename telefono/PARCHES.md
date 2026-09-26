@@ -2,7 +2,7 @@
 
 [claude-phone](https://github.com/theNetworkChuck/claude-phone) se instaló en `caja` el
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
-Estos son los diez cambios que hubo que hacerle, con el síntoma que resuelve cada uno.
+Estos son los once cambios que hubo que hacerle, con el síntoma que resuelve cada uno.
 
 > **Viven en `/home/malbisudlf/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -11,7 +11,7 @@ Estos son los diez cambios que hubo que hacerle, con el síntoma que resuelve ca
 > Este fichero existe para poder rehacerlos. Si algún día hay que tocar mucho más, lo que
 > toca es un *fork*, no seguir parcheando a mano.
 
-## Los diez
+## Los once
 
 | # | Fichero | Qué se cambió | Sin el parche |
 |---|---|---|---|
@@ -25,6 +25,7 @@ Estos son los diez cambios que hubo que hacerle, con el síntoma que resuelve ca
 | 8 | `voice-app/lib/conversation-loop.js` | Cuelga tras dos turnos seguidos sin oír a nadie | Una llamada sin nadie al otro lado repetía «¿sigues ahí?» **hasta 20 veces** (~12 minutos) con la extensión de Jarvis ocupada: devolverle la llamada daba comunicando |
 | 9 | `voice-app/lib/claude-bridge.js` | Los tres mensajes que se dicen cuando Claude falla, al español, y uno propio para la sesión caducada | Con la sesión OAuth de Claude Code caducada, Jarvis descolgaba y a todo contestaba **«I encountered an unexpected error»**: en inglés y sin decir qué pasaba |
 | 10 | `voice-app/lib/audio-fork.js` | Dentro de una frase, compara con **tu nivel de voz**, no solo con el ruido; turno máximo de 25 s (`VAD_MAX_UTTERANCE_MS`) (detalle abajo) | En un sitio ruidoso el ruido picaba por encima del suelo del parche 5, reiniciaba la cuenta de silencio y **Jarvis no dejaba de escucharte** aunque hubieras terminado, hasta el tope de 60 s |
+| 11 | `claude-api-server/{server,bitacora}.js` y `voice-app/lib/outbound-session.js` | Memoria entre llamadas: una bitácora de las llamadas recientes que Claude recibe al empezar cada sesión (detalle abajo) | Cada llamada era una sesión nueva: si Jarvis te llamaba, no lo cogías y le devolvías la llamada, **no sabía para qué te había llamado** |
 
 ### Los parches 7 y 8, en detalle
 
@@ -171,6 +172,38 @@ Funciona porque tu voz, pegada al micro, suena bastante más fuerte que lo de al
 Si el ruido es tan fuerte como tu voz no hay umbral que lo separe: para eso está el tope
 del turno, que baja de 60 a 25 s (`maxUtteranceMs`, o `VAD_MAX_UTTERANCE_MS`). Y siempre
 queda la almohadilla (`#`), que cierra el turno al momento.
+
+### El parche 11, en detalle
+
+`bitacora.js` **sí está versionado**: es `telefono/bitacora.js` de este repositorio, y se
+copia a mano a `~/.claude-phone-cli/claude-api-server/`. Guarda en
+`~/telefono-jarvis/llamadas-recientes.json` (72 h, 40 llamadas como mucho) cada llamada:
+las de Jarvis cogidas o no, lo que dejó en el buzón, las que le haces tú y lo que se
+habló. Con el servicio reiniciado sigue ahí, que es el caso que importa: la llamada que
+más hay que recordar es la anterior.
+
+En `server.js`, tres enganches:
+
+```js
+const bitacora = require('./bitacora');
+// en /ask, entre VOICE_CONTEXT y el prompt: solo al abrir sesión
+if (callId && !sessions.has(callId)) fullPrompt += bitacora.contexto(callId);
+fullPrompt += prompt;
+const esAvisoSaliente = bitacora.apuntarConsulta(callId, prompt);
+// ... tras la respuesta:
+if (callId && !esAvisoSaliente) bitacora.apuntarTurno(callId, prompt, response);
+// y una ruta nueva:
+app.post('/bitacora', (req, res) => { bitacora.apuntarSaliente(req.body); res.json({ success: true }); });
+```
+
+Y en `outbound-session.js`, al llegar a `COMPLETED` o `FAILED`, un `fetch` sin esperar a
+`${CLAUDE_API_URL}/bitacora` con `this.getInfo()`, que ahora incluye `message`. Hace
+falta porque las llamadas no cogidas y las del buzón **no pasan por `/ask`**: sin ese
+aviso, Jarvis no sabría que te llamó.
+
+Jarvis recibe las últimas 12 y solo las saca si le preguntas. Probado el 2026-09-26: tres
+llamadas de prueba, se le devolvió la llamada y contó las tres. Para que olvide (p. ej.,
+tras unas pruebas): `echo "[]" > ~/telefono-jarvis/llamadas-recientes.json`.
 
 ## Lo que además NO está en el repositorio original
 
