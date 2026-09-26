@@ -37,6 +37,10 @@ import { comoBoton } from "../lib/teclado";
 // `resumenEstado`: un import estático metía el módulo entero —casi todo lógica de la zona
 // dev— en el chunk principal, y lo pagaba cada carga del dashboard. Se pide al abrir ⚙
 // (ver `cargarResumenEstado`) y comparte chunk con la zona dev.
+import {
+  IDEAS_VISIBLES, filtrarIdeas, coincideEnTitulo, etiquetasConCuenta, tramosCoincidencia,
+  agruparParecidas, parecidaA, haceCuanto, fechaLarga, fechaCorta,
+} from "../lib/ideas";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -892,6 +896,7 @@ const GLOBAL_CSS = `
      sin él no hay forma de saber qué botón se va a pulsar. :focus-visible solo salta con
      el teclado, así que con el ratón o el dedo todo se ve igual que antes. */
   button:focus-visible, [role="button"]:focus-visible { outline: 1px solid var(--accent) !important; outline-offset: 2px; }
+  input[type="search"]::-webkit-search-cancel-button { display: none; }
   :root {
     --bg: #0e0f11; --surface: #161719; --surface2: #1e1f22;
     --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
@@ -1426,7 +1431,23 @@ export default function Dashboard() {
   });
   const [exporting, setExporting] = useState(false);
   const [activeEvent, setActiveEvent] = useState(null);
+  // Por id y no por índice: con un filtro activo, el índice en la lista filtrada no es
+  // el de la lista entera y se abría la tarjeta de otra idea.
   const [openIdea, setOpenIdea]       = useState(null);
+  const [miembroAbierto, setMiembroAbierto] = useState(null);   // id de una fila de grupo desplegada
+  const [busquedaIdeas, setBusquedaIdeas]   = useState("");
+  const [etiquetaIdeas, setEtiquetaIdeas]   = useState(null);
+  const [verTodasIdeas, setVerTodasIdeas]   = useState(false);
+  const [grupoAbierto, setGrupoAbierto]     = useState(null);   // id de la cabeza del grupo
+  const [borrandoIdea, setBorrandoIdea]     = useState(null);   // id pendiente del segundo toque
+  const [yaLoDijiste, setYaLoDijiste]       = useState(null);   // { nueva, anterior }
+  // Empieza en "cargando" y no en null: así el efecto de carga no tiene que ponerlo a
+  // mano (setState síncrono en un efecto, ver docs/FRONTEND.md).
+  const [ideasEstado, setIdeasEstado]       = useState("cargando");   // "cargando" | "ok" | "error"
+  // Preferencia de este navegador, como `la_training_days`: no viaja al backend.
+  const [agruparIdeas, setAgruparIdeas]     = useState(() => {
+    try { return localStorage.getItem("la_ideas_agrupar") === "1"; } catch { return false; }
+  });
   const [allEvents, setAllEvents]     = useState([]);
   const [loading, setLoading]         = useState(true);
   const [slowBoot, setSlowBoot]       = useState(false);
@@ -1945,14 +1966,70 @@ export default function Dashboard() {
     return () => { vivo = false; };
   }, [token, lineaVisible, lineaDia]);
 
-  // Cargar ideas
+  // Cargar ideas. Un fallo NO deja la lista vacía sin más: antes se tragaba el error y
+  // el widget decía «Sin ideas todavía», que es mentira cuando lo que pasa es que el
+  // backend no ha contestado. Un !ok o un cuerpo que no es lista cuentan como fallo.
+  function pedirIdeas() {
+    return apiFetch(`${API}/ideas`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(data => {
+        if (!Array.isArray(data)) throw new Error("respuesta sin lista");
+        setIdeas(data);
+        setIdeasEstado("ok");
+      })
+      .catch(() => setIdeasEstado("error"));
+  }
+  function cargarIdeas() {
+    setIdeasEstado("cargando");
+    pedirIdeas();
+  }
+  useEffect(() => { if (token) pedirIdeas(); }, [token]);
+
+  // La lista tal y como está AHORA, para los manejadores asíncronos de captura: el
+  // `onstop` del grabador nace al empezar a grabar y leería `ideas` de entonces. Se
+  // escribe en un efecto, no en el render (regla de refs de react-hooks v7).
+  const ideasRef = useRef(ideas);
+  useEffect(() => { ideasRef.current = ideas; }, [ideas]);
+
+  // Comparar todos los pares es O(n²): solo se hace con el interruptor encendido y una
+  // vez por cambio de la lista, no en cada render.
+  const gruposIdeas    = useMemo(() => (agruparIdeas ? agruparParecidas(ideas) : null), [ideas, agruparIdeas]);
+  const etiquetasIdeas = useMemo(() => etiquetasConCuenta(ideas), [ideas]);
+
+  // El «¿Borrar?» se retira solo a los 4 s o al tocar en cualquier otro sitio: un ✕
+  // armado que se queda esperando es una trampa para el siguiente toque.
   useEffect(() => {
-    if (!token) return;
-    apiFetch(`${API}/ideas`, { headers: authHeaders() })
-      .then(r => r.json())
-      .then(data => Array.isArray(data) && setIdeas(data))
-      .catch(() => {});
-  }, [token]);
+    if (!borrandoIdea) return;
+    const t = setTimeout(() => setBorrandoIdea(null), 4000);
+    const fuera = () => setBorrandoIdea(null);
+    document.addEventListener("click", fuera);
+    return () => { clearTimeout(t); document.removeEventListener("click", fuera); };
+  }, [borrandoIdea]);
+
+  function cambiarAgruparIdeas(valor) {
+    setAgruparIdeas(valor);
+    try { localStorage.setItem("la_ideas_agrupar", valor ? "1" : "0"); } catch { /* mejor esfuerzo: la preferencia vive solo en esta sesión */ }
+  }
+
+  // Tras capturar una idea: ¿ya estaba dicha? Se mira contra la lista de ANTES de
+  // añadirla. Solo avisa: nunca borra ni fusiona nada por su cuenta.
+  function avisarSiYaLoDijiste(nueva) {
+    const anterior = parecidaA(nueva, ideasRef.current);
+    setYaLoDijiste(anterior ? { nueva, anterior } : null);
+  }
+
+  // «Ver» del aviso: enseña el grupo de la idea nueva, desplegado y sin filtros que lo
+  // puedan esconder ni recorte que lo deje por debajo del «Ver más».
+  function verYaLoDijiste() {
+    if (!yaLoDijiste) return;
+    const grupo = agruparParecidas(ideas).find(g => g.miembros.some(m => m.id === yaLoDijiste.nueva.id));
+    cambiarAgruparIdeas(true);
+    setGrupoAbierto(grupo ? grupo.cabeza.id : null);
+    setBusquedaIdeas("");
+    setEtiquetaIdeas(null);
+    setVerTodasIdeas(true);
+    setYaLoDijiste(null);
+  }
 
   // Cargar conteo de ropa
   useEffect(() => {
@@ -2108,6 +2185,7 @@ export default function Dashboard() {
         const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: authHeaders(), body: fd });
         const data = await res.json();
         if (data.ok) {
+          avisarSiYaLoDijiste(data.idea);
           setIdeas(prev => [data.idea, ...prev]);
           recogerSugerencia(data);
         }
@@ -2183,6 +2261,7 @@ export default function Dashboard() {
       });
       const data = await res.json();
       if (data.ok) {
+        avisarSiYaLoDijiste(data.idea);
         setIdeas(prev => [data.idea, ...prev]);
         recogerSugerencia(data);
         setShowTextIdea(false);
@@ -2389,6 +2468,8 @@ export default function Dashboard() {
   async function deleteIdea(id) {
     await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: authHeaders() });
     setIdeas(prev => prev.filter(i => i.id !== id));
+    // El aviso «Ya lo dijiste» habla de estas dos ideas: sin una de ellas ya no dice nada.
+    setYaLoDijiste(y => (y && (y.nueva.id === id || y.anterior.id === id) ? null : y));
   }
 
   // ── Jarvis ───────────────────────────────────────────────────────────────
@@ -5020,11 +5101,165 @@ export default function Dashboard() {
         </div>
       );
 
-      case "ideas": return (
+      case "ideas": {
+        const consultaIdeas  = busquedaIdeas.trim();
+        const hayFiltroIdeas = consultaIdeas !== "" || etiquetaIdeas != null;
+        const ideasError     = ideasEstado === "error";
+        const filtradas      = filtrarIdeas(ideas, { consulta: consultaIdeas, etiqueta: etiquetaIdeas });
+        // Agrupado, el filtro va DESPUÉS de agrupar: un grupo sale si alguno de sus
+        // miembros pasa, para que buscar una palabra de la redacción vieja siga llevando
+        // al grupo. Sin agrupar, cada idea es su propio grupo de uno.
+        const pasanFiltro = new Set(filtradas.map(i => i.id));
+        const entradas = gruposIdeas
+          ? gruposIdeas.filter(g => g.miembros.some(m => pasanFiltro.has(m.id)))
+          : filtradas.map(idea => ({ cabeza: idea, miembros: [idea], primera: idea.created_at }));
+        const visibles = verTodasIdeas ? entradas : entradas.slice(0, IDEAS_VISIBLES);
+        // Con menos de 5 ideas buscar no aporta nada; pero si hay una búsqueda o una
+        // etiqueta puesta, se sigue enseñando para poder quitarla.
+        const verBusqueda  = !ideasError && (ideas.length >= 5 || busquedaIdeas !== "");
+        const verChips     = !ideasError && (etiquetasIdeas.length >= 2 || etiquetaIdeas != null);
+        const verFilaChips = verChips || (!ideasError && ideas.length >= 2);
+        const avisoRepetida = yaLoDijiste && ideas.some(i => i.id === yaLoDijiste.nueva.id) ? yaLoDijiste : null;
+        const quitarFiltros = () => { setBusquedaIdeas(""); setEtiquetaIdeas(null); setVerTodasIdeas(false); };
+        const enlace = { background: "none", border: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer", padding: 0, textDecoration: "underline", fontFamily: "'DM Sans', sans-serif" };
+
+        const resaltar = texto => tramosCoincidencia(texto, consultaIdeas).map((t, k) => (t.marca
+          ? <mark key={k} style={{ background: "rgba(200,169,110,0.25)", color: "inherit", borderRadius: 2, padding: 0 }}>{t.texto}</mark>
+          : <React.Fragment key={k}>{t.texto}</React.Fragment>));
+
+        // Dos toques: el primero arma («¿Borrar?»), el segundo borra. Con los grupos
+        // desplegados hay varias ✕ muy juntas y antes borraba al primer toque.
+        const botonBorrar = ideaId => (borrandoIdea === ideaId ? (
+          <span {...comoBoton(e => { e.stopPropagation(); setBorrandoIdea(null); deleteIdea(ideaId); })}
+            style={{ fontSize: 11, color: "#d4645a", cursor: "pointer", padding: "4px 6px", margin: "-4px 0", whiteSpace: "nowrap" }}>¿Borrar?</span>
+        ) : (
+          <span {...comoBoton(e => { e.stopPropagation(); setBorrandoIdea(ideaId); }, { etiqueta: "Borrar idea" })}
+            style={{ fontSize: 10, color: "var(--muted2)", cursor: "pointer", padding: "4px 6px", margin: "-4px 0" }}>✕</span>
+        ));
+
+        const tarjetaIdea = ({ cabeza: idea, miembros, primera }) => {
+          // Si lo buscado no está en el título, la tarjeta sale abierta con el texto
+          // resaltado: si no, aparece una idea que no se sabe por qué está ahí. Tocarla
+          // la cierra igual que abre las demás.
+          const soloEnTexto = consultaIdeas !== "" && !coincideEnTitulo(idea, consultaIdeas);
+          const abierta     = soloEnTexto ? openIdea !== idea.id : openIdea === idea.id;
+          const enGrupo     = miembros.length > 1;
+          const desplegado  = enGrupo && grupoAbierto === idea.id;
+          const cuando      = primera ? haceCuanto(primera, now) : "";
+          return (
+            <div key={idea.id} style={s.ideaCard}
+              onClick={e => { if (!e.target.closest?.("[data-grupo]")) setOpenIdea(openIdea === idea.id ? null : idea.id); }}>
+              <div style={s.ideaKey}>
+                <span style={{ flex: 1 }}>{resaltar(idea.key)}</span>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                  <span style={s.ideaTag}>{idea.tag}</span>
+                  {botonBorrar(idea.id)}
+                  <span style={{ ...s.ideaChevron, transform: abierta ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
+                </div>
+              </div>
+              {/* La marca va en su propia línea y no junto a la etiqueta: en el ancho del
+                  móvil, «×2 · la primera, hace 4 meses» se comía el título. */}
+              {enGrupo && (
+                <button data-grupo onClick={() => setGrupoAbierto(desplegado ? null : idea.id)} style={{
+                  marginTop: 6, padding: "2px 8px", borderRadius: 4, fontSize: 11, cursor: "pointer",
+                  background: "rgba(200,169,110,0.1)", border: "0.5px solid rgba(200,169,110,0.3)",
+                  color: "var(--accent)", fontFamily: "'DM Sans', sans-serif",
+                }}>
+                  ×{miembros.length}{cuando ? ` · la primera, ${cuando}` : ""} {desplegado ? "▾" : "▸"}
+                </button>
+              )}
+              {abierta && <div style={s.ideaFull}>{soloEnTexto ? resaltar(idea.full_text) : idea.full_text}</div>}
+              {desplegado && (
+                <div data-grupo style={{ marginTop: 8, paddingTop: 6, borderTop: "0.5px solid var(--border)", display: "flex", flexDirection: "column" }}>
+                  {miembros.map(m => (
+                    <div key={m.id}>
+                      <div onClick={() => setMiembroAbierto(miembroAbierto === m.id ? null : m.id)}
+                        style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", cursor: "pointer", fontSize: 13 }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", flexShrink: 0, minWidth: 44 }}>
+                          {fechaCorta(m.created_at, now)}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0, color: "var(--text)" }}>{resaltar(m.key)}</span>
+                        {botonBorrar(m.id)}
+                      </div>
+                      {miembroAbierto === m.id && (
+                        <div style={{ ...s.ideaFull, fontSize: 13, marginTop: 0, marginBottom: 6 }}>{resaltar(m.full_text)}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        };
+
+        return (
         <div style={cardStyle} data-card={id} key="ideas">
           <div style={s.sectionLabel}>Ideas</div>
+          {verBusqueda && (
+            <div style={{ position: "relative", marginBottom: 8 }}>
+              <input type="search" value={busquedaIdeas} placeholder="Buscar en tus ideas…" aria-label="Buscar en tus ideas"
+                onChange={e => { setBusquedaIdeas(e.target.value); setVerTodasIdeas(false); }}
+                style={{ ...INPUT_STYLE, border: "0.5px solid var(--border)", paddingRight: 34 }} />
+              {busquedaIdeas && (
+                <button aria-label="Vaciar la búsqueda" onClick={() => { setBusquedaIdeas(""); setVerTodasIdeas(false); }} style={{
+                  position: "absolute", right: 2, top: "50%", transform: "translateY(-50%)",
+                  background: "none", border: "none", color: "var(--muted2)", fontSize: 12,
+                  cursor: "pointer", padding: "6px 10px",
+                }}>✕</button>
+              )}
+            </div>
+          )}
+          {verFilaChips && (
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              {verChips && (<div style={{ display: "flex", flexWrap: "nowrap", overflowX: "auto", gap: 6, flex: "1 1 160px", minWidth: 0, paddingBottom: 2 }}>
+                {etiquetasIdeas.map(({ etiqueta, cuenta }) => {
+                  const activa = etiquetaIdeas === etiqueta;
+                  return (
+                    <button key={etiqueta} aria-pressed={activa}
+                      onClick={() => { setEtiquetaIdeas(activa ? null : etiqueta); setVerTodasIdeas(false); }}
+                      style={{
+                        ...s.ideaTag, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'DM Sans', sans-serif",
+                        background: activa ? "rgba(200,169,110,0.12)" : "var(--surface2)",
+                        border: `0.5px solid ${activa ? "var(--accent)" : "var(--border)"}`,
+                        color: activa ? "var(--accent)" : "var(--muted)",
+                      }}>
+                      {etiqueta}<span style={{ color: activa ? "var(--accent)" : "var(--muted2)", marginLeft: 5 }}>{cuenta}</span>
+                    </button>
+                  );
+                })}
+              </div>)}
+              <button aria-pressed={agruparIdeas} onClick={() => cambiarAgruparIdeas(!agruparIdeas)}
+                title="Junta bajo una marca las ideas que dicen casi lo mismo. Solo cambia cómo se ven: no borra ni fusiona nada."
+                style={{
+                  marginLeft: "auto", flexShrink: 0, padding: "2px 8px", borderRadius: 4, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
+                  fontFamily: "'DM Sans', sans-serif",
+                  background: agruparIdeas ? "rgba(200,169,110,0.12)" : "transparent",
+                  border: `0.5px solid ${agruparIdeas ? "var(--accent)" : "var(--border2)"}`,
+                  color: agruparIdeas ? "var(--accent)" : "var(--muted)",
+                }}>{agruparIdeas ? "✓ " : ""}Agrupar parecidas</button>
+            </div>
+          )}
+          {hayFiltroIdeas && !ideasError && filtradas.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>
+              {filtradas.length} de {ideas.length} ideas
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-            {ideas.length === 0 && !processing && (
+            {ideasEstado === "cargando" && ideas.length === 0 && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando ideas…</div>
+            )}
+            {/* Un fallo no es una lista vacía: decir «Sin ideas todavía» aquí sería mentir. */}
+            {ideasError && (
+              <div style={{ color: "var(--muted)", fontSize: 13, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span>No he podido cargar las ideas.</span>
+                <button onClick={cargarIdeas} style={{
+                  padding: "4px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                  background: "rgba(139,180,212,0.15)", border: "0.5px solid var(--accent2)",
+                  color: "var(--accent2)", fontFamily: "'DM Sans', sans-serif",
+                }}>Reintentar</button>
+              </div>
+            )}
+            {ideasEstado === "ok" && ideas.length === 0 && !processing && (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin ideas todavía. ¡Graba una!</div>
             )}
             {processing && (
@@ -5032,21 +5267,43 @@ export default function Dashboard() {
                 Procesando audio...
               </div>
             )}
-            {ideas.map((idea, i) => (
-              <div key={idea.id || i} style={s.ideaCard} onClick={() => setOpenIdea(openIdea === i ? null : i)}>
-                <div style={s.ideaKey}>
-                  <span style={{ flex: 1 }}>{idea.key}</span>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                    <span style={s.ideaTag}>{idea.tag}</span>
-                    <span style={{ fontSize: 10, color: "var(--muted2)", cursor: "pointer", padding: "0 4px" }}
-                      onClick={e => { e.stopPropagation(); deleteIdea(idea.id); }}>✕</span>
-                    <span style={{ ...s.ideaChevron, transform: openIdea === i ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
-                  </div>
-                </div>
-                {openIdea === i && <div style={s.ideaFull}>{idea.full_text}</div>}
+            {hayFiltroIdeas && ideas.length > 0 && filtradas.length === 0 && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                Nada coincide{consultaIdeas ? ` con «${consultaIdeas}»` : ""}{etiquetaIdeas ? ` en ${etiquetaIdeas}` : ""}.{" "}
+                <button onClick={quitarFiltros} style={enlace}>Quitar filtros</button>
               </div>
-            ))}
+            )}
+            {visibles.map(tarjetaIdea)}
+            {entradas.length > IDEAS_VISIBLES && (
+              <button onClick={() => setVerTodasIdeas(v => !v)} style={{ ...enlace, alignSelf: "flex-start", padding: "2px 0" }}>
+                {verTodasIdeas ? "Ver menos" : `Ver ${entradas.length - visibles.length} más`}
+              </button>
+            )}
           </div>
+          {/* Lo que se acaba de capturar se parece a algo ya guardado. Solo se avisa:
+              juntar o borrar lo decide quien lo lee. */}
+          {avisoRepetida && (
+            <div style={{
+              marginTop: 10, padding: "10px 12px", borderRadius: 8,
+              background: "rgba(200,169,110,0.08)", border: "0.5px solid rgba(200,169,110,0.3)",
+            }}>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>
+                Ya lo dijiste{fechaLarga(avisoRepetida.anterior.created_at, now) ? ` el ${fechaLarga(avisoRepetida.anterior.created_at, now)}` : ""}:
+              </div>
+              <div style={{ fontSize: 14, color: "var(--text)", marginBottom: 8 }}>«{avisoRepetida.anterior.key}»</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={verYaLoDijiste} style={{
+                  padding: "5px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                  background: "rgba(200,169,110,0.15)", border: "0.5px solid var(--accent)",
+                  color: "var(--accent)", fontFamily: "'DM Sans', sans-serif",
+                }}>Ver</button>
+                <button onClick={() => setYaLoDijiste(null)} style={{
+                  background: "none", border: "none", color: "var(--muted)", fontSize: 12,
+                  cursor: "pointer", padding: "5px 4px", fontFamily: "'DM Sans', sans-serif",
+                }}>Vale</button>
+              </div>
+            </div>
+          )}
           {/* La nota traía una cita: se ofrece pasarla al calendario de un toque */}
           {eventoSugerido && (
             <div style={{
@@ -5097,7 +5354,8 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-      );
+        );
+      }
       case "noche": {
         // Lo que se enseña es lo que HAY, no lo que se hizo: por eso lo primero son los
         // borradores esperando y no un registro de actividad. Un parte que solo dice

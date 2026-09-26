@@ -160,6 +160,7 @@ Ficheros clave:
 | `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
+| `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |

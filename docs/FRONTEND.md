@@ -131,6 +131,41 @@ Qué hace cada uno:
 7. **Ideas (`ideas`)** — grabación de audio (Whisper) **o** texto escrito ("✎ Escribir
    idea") → extracción con GPT-4o-mini → Supabase. Si la nota señala una cita, ofrece un
    chip para crear el evento (nunca lo crea solo).
+
+   Para que no sea una lista sin fondo, todo en el cliente con lo que ya devuelve
+   `GET /ideas` —sin endpoint, columna ni llamada de pago—. La lógica pura vive en
+   `src/lib/ideas.js` (tests en `tests/frontend/ideas.test.js` y el widget montado en
+   `ideasWidget.test.jsx`):
+   - **Buscador** (a partir de 5 ideas): sin tildes ni mayúsculas, busca en título y
+     texto, y exige todas las palabras. La «ñ» NO se pliega a «n» («año» no es «ano»).
+     Resalta lo encontrado conservando el original (`tramosCoincidencia` normaliza
+     carácter a carácter: NFD sobre la cadena entera cambia la longitud y los índices
+     dejan de cuadrar). Si el acierto está solo en el texto, la tarjeta sale desplegada:
+     si no, aparece una idea cuyo título no explica por qué está ahí.
+   - **Chips de etiqueta** con su cuenta (a partir de 2 etiquetas). El `tag` lo pone GPT
+     y no es constante con las mayúsculas: «Trabajo» y «trabajo» son el mismo chip. Con
+     filtro activo se ve «X de Y ideas», y sin resultados «Nada coincide…» con «Quitar
+     filtros».
+   - **Agrupar parecidas** (interruptor, `la_ideas_agrupar`): Jaccard léxico sobre
+     `key` + `full_text`, quitando palabras vacías y el relleno típico de los resúmenes de
+     GPT (sin eso, dos ideas cualesquiera se parecen), con un mínimo de
+     `MIN_PALABRAS_COMUNES` en común y `UMBRAL_PARECIDAS` (provisional, se afina con las
+     ideas reales). Es transitivo (union-find): A~B y B~C son un grupo. **Solo cambia cómo
+     se ve**: nunca borra ni fusiona, y apagado la lista es exactamente la de `GET /ideas`.
+     No son embeddings a propósito: costarían dinero por idea y pedirían una columna nueva.
+   - **«Ya lo dijiste»**: al capturar (voz o texto) algo que se parece a una idea ya
+     guardada, una franja encima del chip de cita lo dice con la fecha de la anterior.
+     «Ver» abre su grupo; «Vale» la cierra. Se compara contra la lista de ANTES de añadir
+     la nueva, leída de `ideasRef` (el `onstop` del grabador vive desde que empezó a grabar
+     y leería un `ideas` viejo).
+   - Se ven **10** (`IDEAS_VISIBLES`) y un «Ver N más»; cambiar búsqueda o etiqueta vuelve
+     al recorte. `openIdea` guarda el **id**, no el índice: con un filtro, el índice
+     abría otra tarjeta.
+   - **Borrado en dos toques**: el ✕ pasa a «¿Borrar?» y el segundo toque borra; se
+     cancela a los 4 s o tocando fuera. Con los grupos desplegados hay varias ✕ juntas.
+   - **Estados**: «Cargando ideas…», y si `GET /ideas` falla, «No he podido cargar las
+     ideas.» con «Reintentar» — nunca «Sin ideas todavía», que es lo que decía antes
+     cuando el backend no contestaba.
 8. **Conteo ropa (`clothing`)** — **TEMPORAL**, ver abajo.
 9. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
    apagar/suspender. Barra de progreso con polling cada 2s y badge de estado
@@ -372,7 +407,8 @@ modal.
 Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_splits`,
 `la_notifications`, `la_simple_mode`, `la_body_goals`, `la_training_days`,
 `la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
-guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta). Si añades una,
+guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_ideas_agrupar`
+(«Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`). Si añades una,
 mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
