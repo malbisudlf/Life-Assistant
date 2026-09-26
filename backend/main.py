@@ -9217,8 +9217,8 @@ def dev_despliegue(
     Vercel ni siquiera pasa por aquí—, así que lo manda el navegador, que lo lleva
     horneado en su build. Se valida como sha antes de meterlo en una URL de GitHub.
 
-    Esta pestaña dice si entró la reconstrucción; **no la lanza**. El add-on se
-    reconstruye a mano desde Home Assistant, a propósito (CLAUDE.md).
+    Este endpoint dice si entró el despliegue; **no lo lanza**. Lanzarlo es
+    `POST /dev/reconstruir`, el botón *Desplegar* de la misma pestaña (CLAUDE.md).
     """
     green    = _version_desplegada()
     frontend = (frontend or "").strip().lower()

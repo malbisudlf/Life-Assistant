@@ -393,8 +393,9 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   nadie: si el arreglo deja de lanzarse, mira ahí ANTES que el código.
 - **«Arreglarlo» mergea, y mergear despliega el frontend** (Vercel va detrás de `main`).
   El backend no: su deploy sigue siendo manual y la skill del arreglo tiene prohibido
-  tocarlo. Si un hallazgo era del backend, después del merge hay que hacer `fly deploy` a
-  mano.
+  tocarlo. Si un hallazgo era del backend, después del merge hay que desplegarlo a mano:
+  el botón *Desplegar* de la zona dev o `desplegar.sh` en `caja` (ver «Despliegue» en
+  `CLAUDE.md`). Fly está suspendida: un `fly deploy` ya no llega a producción.
 - **El token del disparo se puede revocar sin avisar.** Si el botón «Arreglarlo»
   contesta que el token ya no vale, no hay nada que arreglar en el código: genera uno
   nuevo en el trigger de API de la routine que arregla en

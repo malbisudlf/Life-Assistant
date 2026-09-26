@@ -3,7 +3,7 @@
 
 ## Tests: cómo funcionan y sus trampas
 
-### Backend (`tests/backend`, 912 tests)
+### Backend (`tests/backend`)
 
 `conftest.py` define las variables de entorno **antes** de importar `main` (si no,
 el import revienta por los secretos obligatorios) y monkeypatchea `requests` con un
@@ -31,7 +31,12 @@ no aquí es lo que está APAGADO por defecto en producción (`REVISION_TOKEN`,
 `ARREGLO_FIRE_URL`…): así el resto de la suite comprueba de paso que sin configurar no
 se enciende solo.
 
-### Frontend (`tests/frontend`, 169 tests)
+`test_documentacion.py` no prueba el backend sino lo que se dice de él: que toda ruta
+esté en `docs/BACKEND_REFERENCIA.md`, que el índice de `CLAUDE.md` y `docs/` coincidan
+y que toda variable que lee `main.py` esté en `backend/.env.example`. Si falla tras
+añadir algo, lo que falta es la línea de documentación, no un arreglo en el test.
+
+### Frontend (`tests/frontend`)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).
 Trampas conocidas de jsdom:

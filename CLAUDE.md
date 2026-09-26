@@ -127,7 +127,7 @@ El E2E no entra en la verificación obligatoria de arriba porque tarda bastante 
 Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~21.000 líneas)
+backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~22.000 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
@@ -193,14 +193,14 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BRIEF.md` | El resumen diario por correo y el informe semanal: qué va dentro, cuándo sale, la idempotencia y el interruptor |
 | `docs/JARVIS.md` | Jarvis (herramientas, confirmación, memoria, MCP, web, la casa) y todo lo proactivo: recordatorios, avisos al móvil, reglas, vigilancias, correo entrante y los vigilantes |
 | `docs/TURNO_NOCHE.md` | **Antes de tocar el turno de noche.** Lo que se resuelve mientras duermes: el buzón clasificado y las respuestas ya redactadas en Borradores, el atajo que arregla el código sin esperar a preguntarte, y el parte de la mañana. Sus dos reglas —todo queda en borrador, y nace apagado— son lo que permite dejarlo corriendo sin nadie mirando |
-| `docs/JARVIS_VOZ.md` | **En curso — léelo entero antes de tocar la voz.** Jarvis ya habla con ElevenLabs, avisa antes de usar cada herramienta y empieza a hablar mientras escribe; falta todo el micrófono (interrumpirle). Empieza por su sección «Dónde retomar». Plan para darle a Jarvis la voz de ElevenLabs con interrupciones y respuesta hablada mientras genera: decisiones, qué se toca, fases, coste y qué queda por resolver |
+| `docs/JARVIS_VOZ.md` | **Léelo entero antes de tocar la voz.** El plan está hecho: habla Azure, escucha Scribe v2 de ElevenLabs con el micro abierto toda la llamada, avisa antes de usar cada herramienta, empieza a hablar mientras escribe y se le puede cortar a media frase. Lo que falta no es código: probar el corte por altavoz en el iPhone. Empieza por su sección «Dónde retomar». Decisiones, qué se toca, fases, coste y qué queda por resolver |
 | `docs/JARVIS_real_time_voice_stack.md` | El diseño conceptual de la voz en tiempo real, sin atarlo a este repositorio. Lo aterrizado está en `docs/JARVIS_VOZ.md` |
 | `docs/BACKEND_REFERENCIA.md` | Referencia de endpoints (ruta → auth → qué hace) y catálogo de variables de entorno |
 | `docs/ZONA_DEV.md` | La zona de desarrollo: la vista aparte (botón 🛠) donde se mira si algo está roto y se apunta lo que hay que hacer. Sus pestañas por fases, la regla de que nada que cueste dinero se refresca solo, y por qué su código vive en ficheros propios |
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
-| `docs/FINANZAS.md` | Módulo de finanzas: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no hay tabla) |
+| `docs/FINANZAS.md` | Módulo de finanzas, un widget con tres fuentes: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no tiene tabla), el saldo de Revolut por Enable Banking y la cartera manual de ETFs (Yahoo Finance, con sus dos tablas) |
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/N8N.md` | n8n, la automatización visual que corre en `caja`: la frontera con el backend (observa y avisa, no decide), los flujos que hay y sus trampas |
 | `docs/AGENTE_PC.md` | `agent/agent.py`: ciclo de vida, por qué no hay PowerShell en el camino crítico, streaming y Alud |
@@ -210,10 +210,10 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
-| `docs/MIGRACION_BACKEND.md` | **Mudanza del backend de Fly al propio Home Assistant Green**: por qué (el backend nunca escaló a cero), por qué al Green y no a Koyeb/Render/Oracle/Cloud Run, dónde están los 54 secretos que Fly no deja leer, y los pasos que quedan por dar a mano |
+| `docs/MIGRACION_BACKEND.md` | **Mudanza del backend de Fly al propio Home Assistant Green**, que ya es historia: desde el 2026-09-20 el backend vive en `caja`, y el aviso del principio del fichero dice qué sigue valiendo. Por qué se dejó Fly (el backend nunca escaló a cero), por qué al Green y no a Koyeb/Render/Oracle/Cloud Run, y dónde estaban los 54 secretos que Fly no deja leer |
 | `docs/REVISION_NOCTURNA.md` | La revisión nocturna del código: la routine de Claude Code, la skill con el checklist y el workflow que la dispara |
 | `docs/AVERIAS.md` | El camino inverso a la revisión nocturna: el CI se rompe, se arregla solo sin preguntar, y la pregunta («¿lo despliego?») llega al móvil y **por teléfono** cuando el PR ya está en verde. El canal de la llamada, aparte, en `docs/LLAMADAS.md` |
-| `docs/AVISAME.md` | Que una sesión de Claude Code te avise al móvil al terminar (o al quedarse bloqueada) y puedas contestarle hablando, por el mismo canal que el permiso de despliegue. **Escrito entero, sin probar de punta a punta**: falta aplicar la migración, poner las variables y crear la rutina que retoma el trabajo |
+| `docs/AVISAME.md` | Que una sesión de Claude Code te avise al móvil al terminar (o al quedarse bloqueada) y puedas contestarle hablando, por el mismo canal que el permiso de despliegue. **Montado y a medias de probar**: la migración está aplicada, las variables puestas y la rutina que retoma el trabajo creada; el aviso llega al móvil, pero contestarle hablando no se ha hecho nunca de punta a punta |
 | `docs/LLAMADAS.md` | El teléfono: que Jarvis te llame y puedas contestarle hablando. **Vivo desde el 2026-09-20** por una centralita 3CX y claude-phone, con Claude Code al otro lado: quién decide que suene, las tres reglas que lo mantienen creíble, por qué Twilio sigue escrito y apagado, y de qué NO puede avisarte (de que `caja` se apague, porque el teléfono vive dentro) |
 | `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
 | `docs/REVISION_BACKEND.md` | Revisión antigua de `backend/main.py` fichero a fichero. Histórico: mira antes si el hallazgo sigue vivo |

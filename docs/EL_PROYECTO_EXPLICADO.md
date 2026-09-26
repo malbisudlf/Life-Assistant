@@ -49,8 +49,8 @@ quien sepa algo, lo empuja.
                                         │ JWT + REST
                                         ▼
         ┌──────────────────────────────────────────────────────────┐
-        │   backend/main.py — FastAPI en Fly.io (escala a CERO)     │
-        │   un solo fichero, ~10.700 líneas, 73 endpoints           │
+        │   backend/main.py — FastAPI en `caja` (Docker, Debian)    │
+        │   un solo fichero, ~22.000 líneas, 125 endpoints          │
         └───┬───────┬───────┬────────┬────────┬────────┬───────────┘
             │       │       │        │        │        │
             ▼       ▼       ▼        ▼        ▼        ▼
@@ -90,9 +90,9 @@ capricho: es la única forma que hay de cruzar la frontera de la red local.
 
 ### Frontend — `src/components/Dashboard.jsx`
 React 19 sobre Vite, en Vercel, **deploy automático al hacer push a `main`**. Sin router,
-sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~5.600
+sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~8.000
 líneas con `useState`/`useEffect`, y la lógica pura extraída a `src/lib/helpers.js`
-(~1.560 líneas, testeada aparte).
+(~2.300 líneas, testeada aparte) y a otros ficheros de `src/lib/` cuando es un tema propio.
 
 Es una decisión, no una deuda: el proyecto es de una persona y un solo fichero de UI se
 navega con `grep` de los banners. Lo que sí está prohibido es meter lógica ahí — todo lo
@@ -103,15 +103,19 @@ widgets configurables (visibles, columna, orden, tamaño) persistidos en `localS
 un **modo simple** para el móvil que reutiliza los mismos widgets con otra distribución.
 
 ### Backend — `backend/main.py`
-FastAPI en Fly.io (región `cdg`), **un solo fichero de ~10.700 líneas** con 73 endpoints,
-organizado por banners `# ── NOMBRE ──`. Escala a cero cuando no hay tráfico: de ahí el
-arranque en frío de 10–15 s (y de ahí la mitad de las decisiones de diseño del proyecto).
+FastAPI, **un solo fichero de ~22.000 líneas** con 125 endpoints, organizado por banners
+`# ── NOMBRE ──`. Corre con Docker Compose en `caja`, un portátil con Debian en casa, y sale
+a internet por un Cloudflare Tunnel. Nació en Fly.io, donde se suponía que escalaba a cero
+y nunca lo hizo (Home Assistant lo sondeaba cada pocos segundos), aunque la mitad de las
+decisiones de diseño del proyecto se tomaron pensando en esos arranques en frío. La mudanza
+está contada en `docs/MIGRACION_BACKEND.md`.
 
-Deploy **manual** a propósito (`fly deploy`): afecta a producción real.
+Deploy **manual** a propósito (el botón *Desplegar* de la zona dev, o `desplegar.sh` en la
+propia máquina): afecta a producción real.
 
 ### Base de datos — Supabase
-PostgreSQL por REST, accesible **solo desde el backend** con la service key. 24 migraciones
-aplicadas a mano desde el editor SQL — no hay tooling de migraciones. Toda tabla nueva
+PostgreSQL por REST, accesible **solo desde el backend** con la service key. 41
+migraciones aplicadas a mano desde el editor SQL — no hay tooling de migraciones. Toda tabla nueva
 lleva `enable row level security` sin políticas: la anon key de Supabase es pública por
 diseño, así que sin RLS cualquiera con la URL entraría al REST desde internet.
 
@@ -204,6 +208,11 @@ vas.
 
 El backend se duerme cuando nadie lo llama. Eso significa que **no hay ningún proceso vivo
 dentro del backend capaz de mirar la hora**. Un `while True: sleep(60)` no existe aquí.
+
+> La premisa resultó ser falsa: en Fly la máquina nunca llegó a dormirse, porque Home
+> Assistant la sondeaba cada pocos segundos, y hoy el backend corre en `caja`, que no se
+> duerme. El reloj sigue siendo el tick de Home Assistant; lo que ya no es verdad es el
+> motivo con el que se eligió.
 
 Así que el reloj es externo: Home Assistant tiene un `time_pattern` cada 5 minutos que
 llama a `POST /ha/brief-tick`. Ese tick es lo que despacha los recordatorios, evalúa las
@@ -533,13 +542,13 @@ El mismo fallo, dos veces, en dos sitios que no se parecen en nada.
 
 | | |
 |---|---|
-| Backend | ~10.700 líneas, **1 fichero**, 73 endpoints |
-| Frontend | ~5.600 líneas de UI + ~1.560 de lógica pura |
-| Agente PC | ~1.000 líneas |
-| Herramientas del asistente | **51** |
-| Tablas en Supabase | 24 migraciones |
-| Tests | ~885 de backend, ~160 de frontend, más E2E con navegador real |
-| Documentación | 16 ficheros en `docs/` + el índice |
+| Backend | ~22.000 líneas, **1 fichero**, 125 endpoints |
+| Frontend | ~8.000 líneas de UI + ~2.300 de lógica pura en `helpers.js` (más la voz, la línea del día y la zona dev, aparte) |
+| Agente PC | ~1.200 líneas |
+| Herramientas del asistente | **62** |
+| Tablas en Supabase | 41 migraciones |
+| Tests | ~1.900 de backend, ~480 de frontend, más E2E con navegador real |
+| Documentación | 33 ficheros en `docs/` + el índice |
 | Servicios externos | Microsoft Graph, Google Maps, Open-Meteo, OpenAI, Supabase, Home Assistant |
 
 **Cómo se desarrolla.** Cuatro comprobaciones obligatorias antes de cada commit (lint sin un

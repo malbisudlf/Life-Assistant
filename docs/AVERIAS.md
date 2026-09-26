@@ -13,7 +13,7 @@ camino inverso, y es el que de verdad quita trabajo:
         ↓  pr-listo.yml  →  POST /revision/pr-listo
    Te avisa: «he detectado un fallo, ya lo he corregido, ¿lo despliego?»
         ↓  dices que sí — con el botón del móvil, o descolgando en «Hablarlo» y contestando
-   Se mergea el PR y se dispara el deploy del backend.
+   Se mergea el PR. El despliegue del backend lo das tú (ver «El último paso lo das tú»).
 ```
 
 La diferencia con preguntar antes no es de comodidad, es de **calidad de la decisión**.
@@ -57,7 +57,7 @@ Ninguna de estas se relaja. Son lo que separa esto de un sistema que despliega s
 | La routine que arregla | claude.ai — **la misma** que la de la revisión nocturna | Arregla y abre PR. La instrucción le dice que NO mergee |
 | `.claude/skills/arreglar-revision/SKILL.md` | Aquí | Su paso 0 distingue los dos caminos: con issue se mergea, con avería no |
 | `.github/workflows/pr-listo.yml` | Aquí | Ve el CI verde sobre una rama `arreglo/…` con PR y llama a `POST /revision/pr-listo` |
-| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono si `LLAMADAS=1`) |
+| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono: por la centralita si está configurada, por Twilio si `LLAMADAS=1`) |
 | `GET /despliegue/pendiente` | `backend/main.py` | Qué anunciar al descolgar la pantalla de llamada. Solo lee |
 | `PantallaLlamada` | `src/components/Dashboard.jsx` | La pantalla de llamada entrante que abre el botón «Hablarlo» |
 | `POST /despliegue/{id}/accion` | `backend/main.py` | La respuesta al botón: mergea el PR. **No despliega** — ver «El último paso lo das tú» |
@@ -83,10 +83,17 @@ camino que ya no existe y no hay nada que migrar.
 
 ## El último paso lo das tú
 
-**El botón mergea. No despliega, y no puede.** Con el backend en el Green, desplegar es
-pulsar *Reconstruir* en el add-on `local_life-assistant` desde la interfaz de Home
-Assistant. No hay nada que GitHub pueda disparar para conseguirlo: el `Protection mode`
-del add-on de SSH bloquea `docker` y la API del Supervisor no está expuesta a internet.
+**El botón mergea. No despliega.** Desde el 2026-09-20 el backend vive en `caja`, y
+desplegar es el botón *Desplegar* de la pestaña Despliegue de la zona dev
+(`POST /dev/reconstruir`) o `desplegar.sh` por SSH (ver «Despliegue» en `CLAUDE.md`). Es
+lo que dice `PASO_QUE_FALTA` en el aviso, en el acuse del botón y en la respuesta de
+Jarvis. **Reconstruir el add-on del Green ya no despliega**: arrancaría un segundo backend
+contra el mismo Supabase.
+
+Con el backend en el Green (hasta el 2026-09-20), el último paso era pulsar
+*Reconstruir* en el add-on desde la interfaz de Home Assistant, y no había nada que
+GitHub pudiera disparar: el `Protection mode` del add-on de SSH bloquea `docker` y la API
+del Supervisor no está expuesta a internet.
 
 Hasta el 2026-09-07 esto no era así **de la peor manera posible**: el botón seguía
 disparando `deploy-backend.yml`, que desplegaba a Fly, una máquina que desde la mudanza ya
@@ -95,28 +102,31 @@ aviso contestaba «desplegando» igualmente. Un botón que miente es peor que no
 porque además te hace creer que el arreglo ya está puesto.
 
 Ahora el aviso, la respuesta hablada y la herramienta de Jarvis dicen los dos pasos: el
-que doy yo (subirlo a `main`) y el que das tú (reconstruir el add-on). `deploy-backend.yml`
+que doy yo (subirlo a `main`) y el que das tú (`PASO_QUE_FALTA`). `deploy-backend.yml`
 y `backend/fly.toml` se retiraron en el mismo cambio.
 
-**Si algún día se quiere automatizar de verdad**: el add-on puede reconstruirse a sí mismo
-llamando a la API del Supervisor (`POST /addons/local_life-assistant/rebuild`) si se le dan
-`hassio_api: true` y `hassio_role: manager` en `config.yaml`. Se descartó a propósito: si la
-construcción falla, el add-on se queda parado y te quedas sin backend **y sin nadie que te
-avise**, que es justo el escenario que este canal existe para evitar.
+**Que el backend se despliegue a sí mismo se descartó primero y se hizo después**, pero
+solo con una persona pulsando: `POST /dev/reconstruir` (JWT de usuario, nunca un token de
+servicio) deja el pedido a `desplegar.sh` en `caja`, o, si corre como add-on, le pide al
+Supervisor `/addons/self/rebuild` (con `hassio_api: true` y `hassio_role: manager` en
+`config.yaml`). El motivo del descarte sigue en pie para lo automático: si la construcción
+falla sin nadie mirando, te quedas sin backend **y sin nadie que te avise**, que es justo
+el escenario que este canal existe para evitar.
 
 ## Contestar hablando
 
 Cuando hay un PR esperando permiso, el aviso al móvil trae un tercer botón, **«Hablarlo»**,
 que abre el dashboard en una pantalla de llamada entrante: descuelgas con el botón verde y
-hablas con el Jarvis de siempre, que te cuenta qué se ha roto y despliega si le dices que
-sí. Es el canal para cuando no puedes leer ni acertar a dos botones pequeños — en el coche.
+hablas con el Jarvis de siempre, que te cuenta qué se ha roto y lo sube a `main` si le
+dices que sí. Es el canal para cuando no puedes leer ni acertar a dos botones pequeños — en el coche.
 
-**El teléfono de verdad (Twilio) está escrito pero apagado** (`LLAMADAS=0`). No se llegó a
-hacer ni una llamada: la cuenta de prueba de Twilio no deja verificar un número español ni
-por llamada ni por SMS, el regulador español prohíbe usar móviles con prefijo 71Y como
-Caller ID, y comprar número se sale del presupuesto. Todo el detalle, más las alternativas
-gratuitas que se descartaron (Telegram, WhatsApp, SIP) y por qué ninguna sirve, en
-`docs/LLAMADAS.md`. El código sigue ahí y se enciende con la variable.
+**El teléfono de verdad suena desde el 2026-09-20, y no por Twilio**: por una centralita
+3CX gratuita con claude-phone en `caja` (`TELEFONO_URL` y `TELEFONO_EXTENSION`), que es
+lo primero que prueba `_llamar()`. **Twilio sigue escrito pero apagado** (`LLAMADAS=0`) y
+no llegó a hacer ni una llamada: la cuenta de prueba no deja verificar un número español
+ni por llamada ni por SMS, el regulador español prohíbe usar móviles con prefijo 71Y como
+Caller ID, y comprar número se sale del presupuesto. Todo el detalle, en
+`docs/LLAMADAS.md`.
 
 Aquí solo importa quién pregunta y cuándo: `POST /revision/pr-listo` es el único sitio del
 backend que abre este canal. Dos cosas de `docs/LLAMADAS.md` que conviene saber sin abrirlo:
@@ -178,10 +188,11 @@ septiembre de 2026, así que el camino entero llegaba hasta el aviso y ahí se p
    HA). Sin él la notificación llega igual, pero **callada** — y con el móvil en silencio
    en el coche, callada es no llegar, que es justo lo que este canal viene a evitar.
 
-### 5. El teléfono (opcional, hoy apagado)
+### 5. El teléfono por Twilio (opcional, hoy apagado)
 
-Lo de abajo describe el canal de Twilio, que **está escrito pero no llegó a funcionar**:
-las cuentas de prueba no dejan verificar un número español ni por llamada ni por SMS, y el
+El que suena hoy es la centralita, y se monta en `caja`: ver `docs/LLAMADAS.md` y
+`telefono/PARCHES.md`. Lo de abajo describe el canal de Twilio, que **está escrito pero no
+llegó a funcionar**: las cuentas de prueba no dejan verificar un número español ni por llamada ni por SMS, y el
 regulador español prohíbe los prefijos 71Y como Caller ID. Ver `docs/LLAMADAS.md` antes de
 intentarlo otra vez. Si aun así lo enciendes, en [twilio.com](https://www.twilio.com) crea
 la cuenta, apunta el Account SID y el Auth Token y consigue un `From` válido. En el backend:
@@ -256,6 +267,8 @@ curl -X POST "$BACKEND_URL/revision/pr-listo" -H "X-Auth-Token: $REVISION_TOKEN"
 ```
 
 El segundo hace sonar el teléfono, así que es la forma de probar la llamada sin romper el
-CI. Para probar solo el aviso sin gastar una llamada, apaga `LLAMADAS`.
+CI. Para probar solo el aviso sin llamada, apagar `LLAMADAS` **no basta**: solo apaga
+Twilio. La centralita llama siempre que `TELEFONO_URL` y `TELEFONO_EXTENSION` estén
+puestas.
 
 <!-- Canal probado el 2026-09-03: aviso, botones y pantalla de llamada. -->

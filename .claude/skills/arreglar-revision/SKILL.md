@@ -123,10 +123,10 @@ Después:
 
 ## Reglas duras
 
-- **Nunca despliegues el backend.** El deploy es manual (`fly deploy` desde `backend/`, o
-  el workflow `Deploy backend (Fly.io)`) y es una decisión de Mikel. Que exista un camino
-  por el que ese workflow se dispara solo (`docs/AVERIAS.md`) no cambia nada para ti: ahí
-  quien lo dispara es Mikel dando el permiso, no la sesión que arregló.
+- **Nunca despliegues el backend.** El deploy es manual (el botón *Desplegar* de la zona
+  dev o `desplegar.sh` en `caja`; ver «Despliegue» en `CLAUDE.md`) y es una decisión de
+  Mikel. Que el permiso del móvil exista (`docs/AVERIAS.md`) no cambia nada para ti: ese
+  botón solo mergea, y quien lo pulsa es Mikel, no la sesión que arregló.
 - **Si te lanzaron por una avería, no mergees NUNCA**, ni aunque el CI esté verde, ni
   aunque el arreglo sea trivial. Ver el paso 0.
 - **Nunca relajes una invariante de seguridad de `CLAUDE.md`** para hacer callar a un

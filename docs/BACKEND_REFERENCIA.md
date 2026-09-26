@@ -6,9 +6,12 @@
 `backend/main.py` es un FastAPI monolítico. Auth: **JWT** = `Depends(verify_token)`,
 **agente** = `verify_agente` (AGENT_TOKEN o JWT), **servicio** = token dedicado.
 
+Un endpoint nuevo va a esta tabla el mismo día: `tests/backend/test_documentacion.py`
+falla si alguna ruta de `main.py` no aparece en este fichero.
+
 | Ruta | Auth | Descripción |
 |---|---|---|
-| `GET /` | — | Estado del backend (salud del servicio, sesión de Graph) |
+| `GET /` | — | `status`, `version` (el SHA desplegado: lo que se mira para saber si un despliegue ha entrado), `instancia` y `arrancado` (distinguen dos procesos que sirven el mismo commit, ver «Gemelos»). No dice nada de Graph |
 | `POST /auth/password` | — | Contraseña → JWT. Rate limiting global (`429` + `Retry-After`) |
 | `GET /auth/login` | JWT | Devuelve la `auth_url` del flujo OAuth de Microsoft Graph, con `state` firmado |
 | `GET /auth/callback` | `state` | Callback OAuth de Microsoft (lo llama Microsoft, verifica el `state`) |
@@ -33,6 +36,7 @@
 | `GET /ha/avisos-pending` | servicio | HA sondea y los manda a la app del móvil. Devuelve y **vacía** la cola; sondearlo es lo que declara vivo el canal |
 | `GET /avisos/estado` | JWT | Por dónde salen los avisos (móvil o correo) y cuánto hace que HA los recogió |
 | `POST /avisos/probar` | JWT | Manda un aviso de prueba por el canal que toque |
+| `POST /avisos/reglas/{regla}/reactivar` | JWT | Devuelve la voz a una regla que se silenció sola por acumular votos de «no útil» (pone su contador a cero) |
 | `POST /avisos/reglas/{regla}/llamar` | JWT | `{"llamar": bool}`: que esa regla, además de avisar, llame por teléfono. Solo las de `REGLAS_LLAMABLES`; el resto, 404 |
 | `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
 | `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón «Apagar» del aviso de salir de casa: encola el apagado de las entidades que llevaba ese aviso |
@@ -40,12 +44,16 @@
 | `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta. Sirve a los **tres** orígenes de `revision_hallazgos` (`issue`, `ci`, `vigilante`); el del vigilante manda una instrucción propia con los errores concretos y la orden de NO mergear |
 | `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
 | `POST /revision/pr-listo` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI ha puesto en verde el PR del arreglo: deja el aviso con botones y llama por teléfono |
-| `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` mergea el PR y lanza el deploy, `nada` lo descarta. **La única ruta que toca producción** |
+| `GET /despliegue/pendiente` | JWT | Qué despliegue espera permiso, para que la pantalla de llamada sepa qué anunciar al descolgar. Solo lee |
+| `POST /despliegue/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `desplegar` **mergea** el PR, `nada` lo descarta. No despliega: el acuse dice el paso que falta (`PASO_QUE_FALTA`, el botón *Desplegar* de la zona dev). Es la única ruta que escribe en `main` |
+| `POST /programado/roto` | servicio (`REVISION_TOKEN`) | Un workflow programado ha fallado (`programado-roto.yml`): avisa al móvil y **no** lanza ningún arreglo. Con `aviso: true` es un vigilante que ve venir algo, no un fallo |
+| `POST /vigilancia/estado` | servicio (`REVISION_TOKEN`) | Los vigilantes (n8n, HA) cuentan en CADA sondeo si algo sigue en pie; aquí se decide si toca aviso o llamada (ver `docs/LLAMADAS.md`) |
 | `POST /sesion/aviso` | servicio (`SESION_TOKEN`) | Una sesión de Claude Code deja «esto me pediste, esto he hecho»: guarda el contexto y encola el aviso con sus botones |
 | `POST /sesion/{aviso_id}/accion` | servicio o JWT | La respuesta al botón «Vale»: cierra el aviso sin disparar nada |
 | `GET /llamada/pendiente` | JWT | Qué anunciar al descolgar: primero el despliegue esperando permiso, si no el aviso de sesión más reciente, y si no la revisión sin decidir. Con `?aviso=<uuid>` anuncia ESA decisión. Solo lee |
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
+| `POST /mcp/telefono` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Servidor MCP (JSON-RPC 2.0) con las herramientas que usa la sesión de Claude Code que contesta el teléfono por la centralita. Auth antes de leer el cuerpo, acotado a `MAX_TELEFONO_BYTES` |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas y un booleano, nunca un lugar |
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
@@ -58,7 +66,7 @@
 | `POST /jobs` | JWT | Crea job en cola (valida `alud_url`, `dedupe_key` único) |
 | `GET /jobs/pending` | agente | Lo que sondea `agent.py`. **El corte temporal va como `Z`, nunca `+00:00`** |
 | `GET /jobs/by-id/{job_id}` | JWT | Job por ID |
-| `POST /jobs/{job_id}/claim` · `/start` · `/finish` | agente | Transiciones de estado (PATCH condicional, atómicas) |
+| `POST /jobs/{job_id}/claim` · `/jobs/{job_id}/start` · `/jobs/{job_id}/finish` | agente | Transiciones de estado (PATCH condicional, atómicas) |
 | `POST /jobs/{job_id}/events` | agente | Evento de progreso (stages) |
 | `GET /jobs/{job_id}/events` | JWT | Eventos de un job (lo consume la barra de progreso) |
 | `POST /jobs/{job_id}/retry` | JWT | Reintenta un job fallido (máx. `MAX_JOB_ATTEMPTS`) |
@@ -69,6 +77,8 @@
 | `PATCH /training/client` | JWT | Precio/hora y sesiones por cobro |
 | `POST /training/payments` | JWT | Marca cobro de hoy (calcula el importe automáticamente) |
 | `GET /finanzas/resumen` | JWT | Cartera de Indexa Capital: valor, aportado, plusvalía, mezcla y serie. `?refrescar=true` salta la caché. Sin `INDEXA_TOKEN` devuelve `configurado: false`, no un error (ver `docs/FINANZAS.md`) |
+| `GET /auth/enablebanking/login` | JWT | Devuelve la `auth_url` del consentimiento de Revolut en Enable Banking, con el mismo `state` firmado que el OAuth de Microsoft. 503 si no está configurado |
+| `GET /auth/enablebanking/callback` | `state` | Lo llama Enable Banking por redirect: verifica el `state`, canjea el `code` y guarda la sesión (ver `docs/FINANZAS.md`) |
 | `GET /finanzas/etfs` | JWT | Cartera manual de ETFs: participaciones, aportado, precio actual y ganancia por ETF (vía Yahoo Finance). `?refrescar=true` salta la caché de precios (ver `docs/FINANZAS.md`) |
 | `POST /finanzas/etfs` | JWT | Da de alta un ETF nuevo a trackear `{ticker, nombre, simbolo_twelvedata, bolsa_twelvedata}`. Sin botón en el frontend, se usa por curl |
 | `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha |
@@ -93,6 +103,9 @@
 | `POST /informe/send` | `BRIEF_TOKEN` | Manda el informe semanal. `?forzar=1` se salta el día y la hora, **no** la reserva |
 | `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone al desenchufar el cargador). Calla la alarma de respaldo si estaba sonando y manda el resumen si no ha salido (o lo deja esperando al sueño de esta noche, ver `docs/BRIEF.md`) |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
+| `GET /noche/parte` | JWT | El parte del turno de noche (`?fecha=`; sin ella, el último que haya). Ver `docs/TURNO_NOCHE.md` |
+| `POST /noche/items/{item_id}/decidir` | JWT | `{"accion": "aprobado" \| "descartado"}` sobre una cosa del parte. «Aprobado» no envía nada: el borrador lo mandas tú |
+| `POST /noche/correr` | `BRIEF_TOKEN` | Corre el turno a mano. `?forzar=1` se salta la hora y la idempotencia |
 | `GET /logs` · `DELETE /logs` | JWT | Registro persistente para el panel de ajustes |
 | `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |
 | `POST /jarvis/voz` | JWT | El mismo turno que `/jarvis`, retransmitido por SSE: un evento `herramienta` (con la frase que decir en voz alta) antes de usar cada una, eventos `texto` con la respuesta según se escribe, y un `fin` con el resultado más `por_decir` (lo que aún no ha salido por el altavoz). Se consume con `fetch`+reader, no con `EventSource` |
@@ -121,7 +134,12 @@ sin ella el backend arranca y `/ideas/*` responde 503).
 **Finanzas** (todas opcionales; sin `INDEXA_TOKEN` el widget dice que no está conectado):
 `INDEXA_TOKEN`, `INDEXA_API_URL`, `INDEXA_CUENTAS`, `INDEXA_TTL_MINUTOS`,
 `INDEXA_SERIE_DIAS`. La cartera manual de ETFs no necesita ninguna clave (usa Yahoo
-Finance, sin autenticación): `YAHOO_FINANCE_API_URL`, `ETF_PRECIO_TTL_MINUTOS`.
+Finance, sin autenticación): `YAHOO_FINANCE_API_URL`, `ETF_PRECIO_TTL_MINUTOS`. El saldo
+de Revolut, por Enable Banking: `ENABLE_BANKING_APPLICATION_ID`,
+`ENABLE_BANKING_PRIVATE_KEY` (gana a `ENABLE_BANKING_PRIVATE_KEY_PATH`: la clave por
+fichero no sobrevive a un despliegue), `ENABLE_BANKING_REDIRECT_URL`,
+`ENABLE_BANKING_API_URL`, `ENABLE_BANKING_ASPSP_NAME`/`_COUNTRY`,
+`ENABLE_BANKING_VALID_DIAS`, `ENABLE_BANKING_TTL_MINUTOS` (ver `docs/FINANZAS.md`).
 
 **Tokens de servicio** (valores aleatorios distintos entre sí): `HA_POLL_TOKEN`,
 `HEALTH_INGEST_TOKEN`, `BRIEF_TOKEN`, `AGENT_TOKEN`.
@@ -175,13 +193,19 @@ arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
 `SESION_TOKEN`, `SESION_FIRE_URL`, `SESION_FIRE_TOKEN`, `SESION_AVISO_TTL_HORAS`
 («avísame»: que una sesión de Claude Code te avise al móvil y puedas contestarle
 hablando — ver `docs/AVISAME.md`),
+`TELEFONO_URL`, `TELEFONO_EXTENSION`, `TELEFONO_DISPOSITIVO`,
+`JARVIS_MCP_TELEFONO_TOKEN`, `MAX_TELEFONO_BYTES` (el teléfono que suena hoy, por la
+centralita 3CX y claude-phone en `caja`: sin las dos primeras no llama por ahí —
+ver `docs/LLAMADAS.md`),
 `LLAMADAS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMERO`,
 `TWILIO_MI_NUMERO`, `BACKEND_URL`, `LLAMADA_TTL`, `LLAMADA_MAX_SEG`,
-`VOZ_SILENCIO_MS`, `VOZ_UMBRAL_RMS`, `VOZ_MIN_HABLA_MS` (el teléfono: sin ellas no
-suena nada y el resto de canales siguen igual — ver `docs/AVERIAS.md`),
+`VOZ_SILENCIO_MS`, `VOZ_UMBRAL_RMS`, `VOZ_MIN_HABLA_MS` (el teléfono por Twilio,
+escrito y apagado: `LLAMADAS=0` apaga solo este camino, no la centralita),
 `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
-`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`, y las de registro
+`AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`,
+`TRUST_CLOUDFLARE` (hace falta detrás del Cloudflare Tunnel: ver la invariante 3 de
+`CLAUDE.md`), y las de registro
 (`LOG_PERSIST`, `LOG_PERSIST_LEVEL`, `LOG_QUEUE_MAX`, `LOG_FLUSH_SECONDS`,
 `LOG_RETENTION_DAYS`, `LOG_SLOW_MS`).
 
@@ -190,7 +214,9 @@ suena nada y el resto de canales siguen igual — ver `docs/AVERIAS.md`),
 está duplicado en los dos lados y **tienen que coincidir**.
 
 **Agente** (`agent/.env`): `AGENT_TOKEN` (mismo valor que en el backend), `LA_API_BASE`,
-`LA_TOKEN` (solo respaldo — caduca), `EDGE_PROFILE_DIR`, `ALUD_ACCOUNT`,
+`LA_TOKEN` (solo respaldo — caduca), `ALUD_ACCOUNT`,
+`COWORK_NEW_X`/`COWORK_NEW_Y`/`COWORK_TOGGLE_X`/`COWORK_TOGGLE_Y` (los dos clics hasta
+Cowork, en fracción de pantalla),
 `ALUD_ALLOWED_HOSTS`, `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` (con las `SUNSHINE_*` como respaldo),
 `VPN_TIPO`/`TAILSCALE_EXE`/`TAILSCALE_SERVICIO`/`VPN_TIMEOUT`,
 `PANTALLAS_STREAMING`/`PANTALLAS_RESTAURAR`/`DISPLAYSWITCH_EXE`, `ARRANQUE_ESPERA_RED`.
@@ -205,7 +231,7 @@ está duplicado en los dos lados y **tienen que coincidir**.
 | `GET /avisos/{id}/porque` | JWT | Los valores crudos con los que se disparó ese aviso. `motivo: null` con 200 si no se guardó |
 | `GET /gasto?dias=` | JWT | Lo que ha costado el modelo, agregado por boca y por modelo, con el % cacheado y los modelos sin tarifa |
 | `GET /dev/ideas` · `POST` · `PATCH /dev/ideas/{id}` · `DELETE` | JWT | La checklist de la zona dev (`ideas_dev`). Ver `docs/ZONA_DEV.md` |
-| `GET /dev/despliegue?frontend=` | JWT | Qué código corre en cada sitio: el sha del add-on (`/app/VERSION`), el último commit de `main` y cuántos commits le faltan a cada uno. `frontend` es el sha que el bundle lleva horneado; se valida como sha antes de ir a la URL de GitHub. **No despliega nada** |
+| `GET /dev/despliegue?frontend=` | JWT | Qué código corre en cada sitio: el sha del backend (el fichero `VERSION` junto a `main.py`, que escribe `desplegar.sh`; la clave de la respuesta aún se llama `green`), el último commit de `main` y cuántos commits le faltan a cada uno. `frontend` es el sha que el bundle lleva horneado; se valida como sha antes de ir a la URL de GitHub. **No despliega nada** |
 | `GET /dev/crons` | JWT | Todo lo que corre solo: el último run de cada workflow programado, los últimos envíos del resumen y del informe, las averías abiertas del vigilante y cuándo sondeó por última vez cada máquina |
 | `GET /dev/bd` | JWT | Filas por tabla (cuenta exacta, sin traerlas) y qué migraciones están aplicadas: cruza `supabase/migrations/` según GitHub con la tabla `migraciones_aplicadas` |
 | `GET /dev/config` | JWT | Qué funcionalidades tienen su configuración completa y cuáles no, con la misma lista que `check_config.py`, más la sesión de Microsoft. **Nunca devuelve el valor de una variable** |
