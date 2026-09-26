@@ -243,7 +243,10 @@ las marcas que trae dentro:
 
 Antes de tocar nada lee CLAUDE.md entero y el fichero de docs/ del área que
 vayas a tocar. Pasa la verificación obligatoria antes de commitear. Trabaja en
-una rama arreglo/... y abre un PR contra main; no mergees.
+una rama que se llame arreglo/<algo-descriptivo> (nunca claude/..., aunque el
+entorno te proponga ese nombre) y abre un PR contra main; no mergees. Ni los
+commits ni el PR pueden decir qué herramienta hizo el trabajo: sin
+Co-Authored-By y sin la línea «Generated with Claude Code».
 
 Cuando termines, avísale con la skill `avisame`: cuenta qué has hecho, qué queda
 y deja el enlace del PR. Te lo ha pedido hablando y no tiene otra forma de
