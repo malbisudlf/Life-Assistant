@@ -70,7 +70,13 @@ export default defineConfig({
       // --host 127.0.0.1 explícito: por defecto `vite preview` escucha en `localhost`,
       // que en los runners de CI puede resolver a ::1 mientras Playwright sondea la
       // 127.0.0.1 — y entonces el servidor está vivo pero nadie lo encuentra.
-      command: `VITE_API_URL=${URL_API} npm run build && npm run preview -- --host 127.0.0.1 --port ${PUERTO_WEB} --strictPort`,
+      //
+      // La variable va en `env` y no delante del comando (`VITE_API_URL=... npm run
+      // build`): esa sintaxis es de sh, y en Windows el comando lo ejecuta cmd.exe, que
+      // no la entiende y el E2E no llegaba ni a construir. Playwright la suma al entorno
+      // heredado, no lo sustituye.
+      command: `npm run build && npm run preview -- --host 127.0.0.1 --port ${PUERTO_WEB} --strictPort`,
+      env: { VITE_API_URL: URL_API },
       url: `http://127.0.0.1:${PUERTO_WEB}`,
       reuseExistingServer: !process.env.CI,
       // Holgado a propósito: aquí dentro entra un build de producción completo, y un

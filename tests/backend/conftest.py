@@ -73,9 +73,21 @@ os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 import json as json_lib
+import warnings
 
 import pytest
-from fastapi.testclient import TestClient
+
+# Starlette avisa al importar su TestClient de que prefiere `httpx2` a `httpx`. No es
+# nuestro: `httpx` va fijado en backend/requirements.txt porque lo usa `openai`, y pasar a
+# `httpx2` es una dependencia nueva que no se mete por un aviso. Filtrado por el texto
+# exacto y no por categoría, para que cualquier otro aviso de Starlette siga saliendo:
+# un resumen de avisos que siempre trae el mismo ruido acaba sin leerse, y entonces no se
+# ve el que sí importa.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Using `httpx` with `starlette\.testclient` is deprecated",
+)
+from fastapi.testclient import TestClient  # noqa: E402
 
 import main
 

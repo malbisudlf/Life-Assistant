@@ -136,7 +136,14 @@ def comprobar_login(base):
         return saltada("login", "rate limit activo; reintenta en unos minutos")
     if status != 200:
         return mal("login", f"HTTP {status}: {texto[:120]}")
-    if not json.loads(texto).get("token"):
+    # Un 200 que no es JSON (la página de un proxy, un HTML de error servido con 200)
+    # es un fallo que contar, no una excepción: reventar aquí se llevaba por delante el
+    # resumen final y la comprobación del token de servicio que venía detrás.
+    try:
+        respuesta = json.loads(texto)
+    except ValueError:
+        return mal("login", "200 pero la respuesta no es JSON")
+    if not isinstance(respuesta, dict) or not respuesta.get("token"):
         return mal("login", "200 pero sin token en la respuesta")
     ok("login", "contraseña aceptada y JWT emitido")
 

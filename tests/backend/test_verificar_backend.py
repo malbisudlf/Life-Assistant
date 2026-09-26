@@ -111,6 +111,18 @@ def test_login_falla_si_el_200_no_trae_token(monkeypatch):
     assert verificar.fallos == ["login"]
 
 
+@pytest.mark.parametrize("cuerpo", ["<html>Bad gateway</html>", "[]"])
+def test_login_con_un_200_que_no_es_el_json_esperado_falla_sin_reventar(monkeypatch, cuerpo):
+    """Un proxy que sirve su propia página con 200 no puede tumbar el script: se
+    perdería el resumen y las comprobaciones que vienen detrás."""
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "secreta")
+    _responder(monkeypatch, {
+        ("POST", "/auth/password"): (200, {}, cuerpo),
+    })
+    verificar.comprobar_login(BASE)
+    assert verificar.fallos == ["login"]
+
+
 def test_login_con_rate_limit_no_cuenta_como_fallo(monkeypatch):
     """El límite es global y por intentos fallidos: toparse con él mientras se
     verifica no dice nada del despliegue."""

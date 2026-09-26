@@ -34,7 +34,9 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Lint (cero errores y cero warnings)
-        run: npm run lint -- --max-warnings 0
+        # `--max-warnings 0` va dentro del script de package.json, no aquí: así el
+        # `npm run lint` de la verificación local también falla con un solo warning.
+        run: npm run lint
       - name: Tests
         run: npm test
       - name: Build de producción
@@ -73,10 +75,28 @@ jobs:
         # El E2E levanta el backend de verdad (con los servicios externos simulados),
         # así que necesita sus dependencias igual que el job de pytest.
         run: pip install -r backend/requirements.txt
+      - name: Versión de Playwright
+        id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Caché de Chromium
+        # El navegador pesa más de cien megas y se bajaba entero en cada push. La clave
+        # es la versión exacta de Playwright: cada versión exige su propio Chromium, así
+        # que al actualizarla la caché se invalida sola y se descarga el que toca.
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - name: Instalar Chromium
         # Solo Chromium: los otros navegadores triplican el tiempo de instalación y
         # aquí no aportan — lo que se prueba es que la app arranca y pinta.
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+      - name: Dependencias del sistema de Chromium
+        # La caché guarda el navegador, no las librerías del sistema que necesita: esas
+        # viven fuera de ~/.cache y el runner nace limpio en cada ejecución.
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
       - name: Tests end-to-end
         # playwright.config.js arranca y espera al backend simulado y al preview del
         # build de producción, y los apaga al terminar.

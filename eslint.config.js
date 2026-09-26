@@ -5,7 +5,11 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // `.claude/worktrees/` son copias enteras del repositorio (una por sesión en paralelo)
+  // dentro del checkout principal: sin esto, `npm run lint` desde la raíz las recorre
+  // todas, tarda varias veces más y avisa de errores que no son del árbol que se revisa.
+  // `test-results/` y `playwright-report/` son la salida del E2E, no código.
+  globalIgnores(['dist', '.claude/worktrees/', 'test-results/', 'playwright-report/']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

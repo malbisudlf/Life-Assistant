@@ -84,4 +84,16 @@ excepción o error de consola, no solo si falta un texto.
   excepción sin capturar se salta el middleware que pone las cabeceras).
 - `PLAYWRIGHT_CHROMIUM_PATH` apunta a un Chromium ya instalado en entornos que traen
   el suyo y no coincide con la versión de Playwright. En CI no se usa: se descarga el
-  que toca.
+  que toca, y se guarda en caché por versión de Playwright.
+- **En Windows también corre.** Los comandos de `webServer` los ejecuta cmd.exe, así que
+  nada de `VAR=valor comando` (sintaxis de sh): las variables van en su `env`. Para
+  probarlo sin descargar Chromium vale el Edge del sistema con
+  `PLAYWRIGHT_CHROMIUM_PATH`, y `E2E_PUERTO_API`/`E2E_PUERTO_WEB` si el 8000 está
+  ocupado. El `python` del `PATH` tiene que tener las dependencias del backend.
+
+### Avisos en la salida
+
+El resumen de avisos de pytest tiene que salir vacío. El único que se filtra, en
+`conftest.py` y por su texto exacto, es el de Starlette pidiendo `httpx2` en vez de
+`httpx`: cambiarlo es una dependencia nueva, no un arreglo. Cualquier otro aviso que
+aparezca es nuevo y hay que mirarlo.
