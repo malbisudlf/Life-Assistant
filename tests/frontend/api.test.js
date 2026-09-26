@@ -97,12 +97,32 @@ describe("apiFetch", () => {
     // Sin esta guarda, los useEffect de carga inicial que llaman a la API antes de
     // que haya token disparaban un bucle infinito de recargas en el login (ver
     // docs/BUGS_HISTORICOS.md, "Bucle infinito de recargas en el login móvil").
+    // Se espía también el borrado: mirar solo que el token siga en null no distingue
+    // nada (sin sesión ya lo estaba), y lo que delata la versión rota es que llega a
+    // entrar en la rama de cerrar sesión.
     const reload = mockReload();
+    const borrar = vi.spyOn(Storage.prototype, "removeItem");
     globalThis.fetch = vi.fn().mockResolvedValue({ status: 401, ok: false, json: async () => ({}) });
 
-    await apiFetch("https://backend/x");
+    const res = await apiFetch("https://backend/x");
 
+    expect(res.status).toBe(401);
     expect(reload).not.toHaveBeenCalled();
+    expect(borrar).not.toHaveBeenCalled();
+  });
+
+  test("el token se lee en el momento de la llamada, no en un closure", async () => {
+    // Si la sesión se renueva a mitad de una pantalla, la siguiente llamada tiene que
+    // usar el token nuevo sin que nadie reconstruya nada.
+    globalThis.fetch = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({}) });
+    localStorage.setItem("la_token", "viejo");
+    await apiFetch("https://backend/x", { headers: authHeaders() });
+    localStorage.setItem("la_token", "nuevo");
+    await apiFetch("https://backend/x", { headers: authHeaders() });
+
+    const [[, opts1], [, opts2]] = globalThis.fetch.mock.calls;
+    expect(opts1.headers.Authorization).toBe("Bearer viejo");
+    expect(opts2.headers.Authorization).toBe("Bearer nuevo");
   });
 
   test("otros errores (404, 500) no tocan la sesión", async () => {

@@ -141,6 +141,7 @@ describe("enPieDesde", () => {
   test("a partir de ahí, minutos redondeados", () => {
     expect(enPieDesde(60)).toBe("1 min");
     expect(enPieDesde(89)).toBe("1 min");   // 1,48 min → redondea a 1, no a 2
+    expect(enPieDesde(90)).toBe("2 min");   // 1,5 min justo → Math.round sube
     expect(enPieDesde(91)).toBe("2 min");   // 1,52 min → redondea a 2
     expect(enPieDesde(7200)).toBe("120 min");
   });
