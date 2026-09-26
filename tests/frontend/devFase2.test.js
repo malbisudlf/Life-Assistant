@@ -8,7 +8,7 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 
 import { estadoDespliegue, estadoWorkflow, estadoSondeo, textoCada, shaCorto,
          MARGEN_PROGRAMADO, estadoTabla, resumenMigraciones, resumenEspacio, estadoGrupo,
-         estadoGraph, esperarAlBackend } from "../../src/lib/dev";
+         estadoGraph, esperarAlBackend, enPieDesde } from "../../src/lib/dev";
 
 // `esperarAlBackend` sondea con fetch a pelo (durante el arranque no hay nada más que
 // responda), así que se sustituye; devolverlo a su sitio evita que el siguiente fichero
@@ -121,6 +121,28 @@ describe("estadoSondeo", () => {
     // El PC está apagado la mayor parte del día: llamar avería a eso es llamar avería a
     // la noche.
     expect(estadoSondeo({ hace_segundos: 4000, opcional: true }).tono).toBe("green");
+  });
+});
+
+describe("enPieDesde", () => {
+  // El comentario del propio fichero lo avisa: con dos redondeos distintos la misma
+  // pantalla llegó a decir "1 min" arriba y "0 min" abajo. Solo hay una función que
+  // hace el redondeo (Math.round, no Math.floor) para que los dos sitios coincidan.
+  test("sin segundos todavía, dice que lleva un rato (no cero ni null)", () => {
+    expect(enPieDesde(null)).toBe("un rato");
+    expect(enPieDesde(undefined)).toBe("un rato");
+  });
+
+  test("menos de un minuto se dice con palabras, no como 0 min", () => {
+    expect(enPieDesde(0)).toBe("menos de un minuto");
+    expect(enPieDesde(20)).toBe("menos de un minuto");
+  });
+
+  test("a partir de ahí, minutos redondeados", () => {
+    expect(enPieDesde(60)).toBe("1 min");
+    expect(enPieDesde(89)).toBe("1 min");   // 1,48 min → redondea a 1, no a 2
+    expect(enPieDesde(91)).toBe("2 min");   // 1,52 min → redondea a 2
+    expect(enPieDesde(7200)).toBe("120 min");
   });
 });
 
