@@ -725,3 +725,292 @@ export async function reactivarRegla(regla) {
   if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
   return r.json();
 }
+
+// ── EL PARTE ──────────────────────────────────────────────────────────────────
+
+// Las pestañas que existen y las que existirán. Las de fases posteriores se enseñan
+// apagadas en vez de esconderse: el plan a la vista es lo que evita que la zona dev se
+// quede a medias y nadie se acuerde de qué faltaba.
+//
+// Vive aquí y no en ZonaDev.jsx porque el parte necesita el nombre legible de cada una
+// («No se ha podido comprobar: Base de datos»), y un .jsx solo puede exportar componentes.
+// El orden de esta lista es también el orden en que el parte enseña sus puntos.
+export const PESTANAS = [
+  { id: "ideas",  etiqueta: "Ideas",      fase: 1 },
+  { id: "estado", etiqueta: "Estado",     fase: 1 },
+  { id: "logs",   etiqueta: "Logs",       fase: 1 },
+  { id: "deploy", etiqueta: "Despliegue", fase: 1 },
+  { id: "crons",  etiqueta: "Crons",      fase: 1 },
+  { id: "bd",     etiqueta: "Base de datos", fase: 1 },
+  { id: "config", etiqueta: "Config",     fase: 1 },
+  { id: "linea",  etiqueta: "Línea de tiempo", fase: 1 },
+  { id: "jobs",   etiqueta: "Agente y jobs", fase: 1 },
+  { id: "datos",  etiqueta: "Salud de datos", fase: 1 },
+  { id: "avisos", etiqueta: "Avisos",     fase: 1 },
+  { id: "gasto",  etiqueta: "Gasto",      fase: 4 },
+];
+
+// Qué lee el parte, para qué pestaña y cada cuánto. La cadencia NO es la misma para todo,
+// y cada una tiene su porqué (docs/ZONA_DEV.md, «El parte»):
+//   - "auto":   backend propio y Supabase, baratas; se releen solas cada minuto.
+//   - "abrir":  solo al abrir la zona dev y con el botón. `/dev/bd` son ~35 consultas de
+//               cuenta contra la cuota del plan gratuito de Supabase, y `/dev/config` solo
+//               cambia al reconstruir: releerlas cada minuto sería gastar para nada.
+//   - "github": gastan cuota de la API de GitHub (60/hora sin credencial, para toda la
+//               casa). Solo a botón, salvo que el backend diga que tiene credencial.
+export const LECTURAS_PARTE = {
+  sistema:    { pestana: "estado", cadencia: "auto",   leer: ({ agentId }) => leerEstadoSistema(agentId) },
+  jobs:       { pestana: "jobs",   cadencia: "auto",   leer: () => leerJobs(30) },
+  avisos:     { pestana: "avisos", cadencia: "auto",   leer: () => leerAvisosDev(7) },
+  datos:      { pestana: "datos",  cadencia: "auto",   leer: () => leerDiagnostico(30) },
+  bd:         { pestana: "bd",     cadencia: "abrir",  leer: () => leerBd() },
+  config:     { pestana: "config", cadencia: "abrir",  leer: () => leerConfig() },
+  crons:      { pestana: "crons",  cadencia: "github", leer: () => leerCrons() },
+  despliegue: { pestana: "deploy", cadencia: "github", leer: () => leerDespliegue() },
+};
+
+const clavesDe = (...cadencias) =>
+  Object.keys(LECTURAS_PARTE).filter(k => cadencias.includes(LECTURAS_PARTE[k].cadencia));
+
+// Lo que pide cada momento: el intervalo, el abrir (y «comprobar todo») y «+ GitHub».
+export const LECTURAS_AUTO   = clavesDe("auto");
+export const LECTURAS_ABRIR  = clavesDe("auto", "abrir");
+export const LECTURAS_GITHUB = clavesDe("github");
+
+// Lanza las lecturas pedidas, cada una por su cuenta: que `/dev/jobs` responda 500 no
+// puede dejar sin parte a las demás. Lo que no está en `incluir` no se toca — de eso
+// depende que el refresco de cada minuto no gaste cuota de GitHub ni de Supabase.
+export async function leerParte({ agentId, incluir = [] } = {}) {
+  const claves = incluir.filter(k => LECTURAS_PARTE[k]);
+  const resultados = await Promise.allSettled(
+    // El `then` y no la llamada directa: una lectura que lanzara antes de su primer await
+    // se escaparía del allSettled y tumbaría el parte entero.
+    claves.map(k => Promise.resolve().then(() => LECTURAS_PARTE[k].leer({ agentId }))),
+  );
+  const cuando = Date.now();
+  const lecturas = {};
+  resultados.forEach((r, i) => {
+    lecturas[claves[i]] = r.status === "fulfilled"
+      ? { ok: true, datos: r.value, cuando }
+      : { ok: false, error: r.reason?.message || "no se pudo consultar", cuando };
+  });
+  return lecturas;
+}
+
+const ORDEN_PESTANA = Object.fromEntries(PESTANAS.map((p, i) => [p.id, i]));
+const etiquetaDe    = (id) => PESTANAS.find(p => p.id === id)?.etiqueta || id;
+const esProblema    = (tono) => tono === "red" || tono === "accent";
+
+// "a, b, c…": los nombres de un grupo, sin que un grupo de veinte ocupe la franja entera.
+function algunos(nombres, max = 3) {
+  return nombres.slice(0, max).join(", ") + (nombres.length > max ? "…" : "");
+}
+
+function plural(n, uno, varios) {
+  return `${n} ${n === 1 ? uno : varios}`;
+}
+
+// El parte: lo peor de todas las pestañas en una lista. **No decide ningún tono**: llama a
+// las mismas funciones que pintan cada pestaña, de modo que si una cambia su criterio el
+// parte cambia con ella y las dos pantallas no pueden contradecirse. Lo único que añade es
+// agrupar lo que se repite (métricas, tablas, jobs) para que el parte no grite.
+export function parteDelSistema(lecturas, { filasExtra = [], ahora = Date.now() } = {}) {
+  const lec          = lecturas || {};
+  const items        = [];
+  const noLeidas     = [];
+  const sinComprobar = [];
+  const meter = (pestana, tono, titulo, detalle = titulo) => {
+    if (esProblema(tono)) items.push({ pestana, tono, titulo, detalle });
+  };
+
+  // Las filas que el dashboard ya conoce (Outlook, el Watch…) valen se haya leído lo demás
+  // o no: son datos suyos, no de esta lectura.
+  for (const f of filasExtra) meter("estado", f.tono, `${f.nombre}: ${f.detalle}`);
+
+  for (const [clave, def] of Object.entries(LECTURAS_PARTE)) {
+    const l = lec[clave];
+    if (!l)    { sinComprobar.push(def.pestana); continue; }
+    if (!l.ok) { noLeidas.push(def.pestana); continue; }
+    const d = l.datos || {};
+
+    if (clave === "sistema") {
+      // El Agente PC no se toca: filasDeEstado ya lo deja en verde o gris, nunca en rojo,
+      // porque que el PC esté apagado es lo normal.
+      for (const f of filasDeEstado(d)) {
+        meter(f.nombre === "Registro" ? "logs" : "estado", f.tono, `${f.nombre}: ${f.detalle}`);
+      }
+    }
+
+    if (clave === "bd") {
+      const mig = resumenMigraciones(d);
+      if (mig.tono !== "green") meter("bd", mig.tono, `Migraciones: ${mig.texto}`);
+      const faltan = (d.tablas || []).filter(t => estadoTabla(t).tono === "red");
+      if (faltan.length) {
+        meter("bd", "red",
+              faltan.length === 1 ? "1 tabla no existe" : `${faltan.length} tablas no existen`,
+              faltan.map(t => `${t.tabla} (falta ${t.migracion})`).join(", "));
+      }
+      const esp = resumenEspacio(d.espacio);
+      meter("bd", esp.tono, `Supabase al ${d.espacio?.pct} % de su espacio`, esp.texto);
+    }
+
+    if (clave === "config") {
+      const g = estadoGraph(d.graph);
+      meter("config", g.tono, `Sesión de Microsoft: ${g.texto}`);
+      // Mismo criterio que la fila de Config.jsx. Los grupos «sin configurar» no entran:
+      // media aplicación es opcional a propósito y eso no es una avería.
+      if (d.zona?.valida === false) {
+        meter("config", "red", `Zona horaria no válida: ${d.zona.nombre}`);
+      }
+    }
+
+    if (clave === "jobs") {
+      // Solo la última semana: un job que falló hace un mes ya se miró (o ya no importa),
+      // y contarlo dejaría la insignia en rojo para siempre.
+      const semana   = 7 * 86400000;
+      const fallidos = (d.jobs || []).filter(j => {
+        const t = new Date(j.created_at).getTime();
+        return estadoJob(j, d.max_intentos).tono === "red"
+          && !Number.isNaN(t) && ahora - t <= semana;
+      });
+      if (fallidos.length) {
+        meter("jobs", "red",
+              fallidos.length === 1 ? "1 job fallido en 7 días" : `${fallidos.length} jobs fallidos en 7 días`,
+              fallidos.map(j => `${j.payload?.accion || "entrega"} · ${j.dedupe_key || j.id}`).join(", "));
+      }
+    }
+
+    if (clave === "datos") {
+      const metricas = Object.entries(d.metricas || {});
+      const conTono  = (tono) => metricas.filter(([, m]) => estadoMetrica(m).tono === tono).map(([n]) => n);
+      const rojas    = conTono("red");
+      const ambar    = conTono("accent");
+      if (rojas.length) {
+        meter("datos", "red",
+              `${plural(rojas.length, "métrica", "métricas")} sin datos desde hace más de 3 días (${algunos(rojas)})`,
+              rojas.join(", "));
+      }
+      if (ambar.length) {
+        meter("datos", "accent",
+              `${plural(ambar.length, "métrica", "métricas")} con 2-3 días de retraso (${algunos(ambar)})`,
+              ambar.join(", "));
+      }
+      for (const [nombre, f] of Object.entries(d.fuentes || {})) {
+        const e = estadoFuente(f?.ultima_escritura);
+        meter("datos", e.tono, `${nombre}: última escritura ${e.texto}`);
+      }
+    }
+
+    if (clave === "avisos") {
+      const reglas = d.reglas || [];
+      for (const r of reglas) {
+        const e = estadoRegla(r);
+        if (e.tono === "red") meter("avisos", "red", `Regla ${r.regla} ${e.texto}`);
+      }
+      const dudosas = reglas.filter(r => estadoRegla(r).tono === "accent").map(r => r.regla);
+      if (dudosas.length) {
+        meter("avisos", "accent",
+              `${plural(dudosas.length, "regla", "reglas")} con más «no útil» que útiles`,
+              dudosas.join(", "));
+      }
+    }
+
+    if (clave === "crons") {
+      for (const wf of d.workflows || []) {
+        const e = estadoWorkflow(wf, ahora);
+        meter("crons", e.tono, `${wf.nombre}: ${e.texto}`);
+      }
+      // Los opcionales (el PC, la llamada) ya salen en gris o verde: no se filtran aquí,
+      // porque filtrarlos sería decidir un tono por fuera de estadoSondeo.
+      for (const s of d.sondeos || []) {
+        const e = estadoSondeo(s, d.proceso_desde_hace);
+        meter("crons", e.tono, `Sondeo ${s.nombre}: ${e.texto}`);
+      }
+    }
+
+    if (clave === "despliegue") {
+      const b = estadoDespliegue(d.backend);
+      meter("deploy", b.tono, `Backend desplegado: ${b.texto}`);
+      const f = estadoDespliegue(d.frontend);
+      meter("deploy", f.tono, `Frontend desplegado: ${f.texto}`);
+    }
+  }
+
+  // Rojo antes que ámbar y, dentro de cada tono, en el orden del menú. `sort` es estable,
+  // así que lo que sale de la misma pestaña conserva el orden en que se ha escrito arriba.
+  items.sort((a, b) => (a.tono === b.tono ? 0 : a.tono === "red" ? -1 : 1)
+                       || ORDEN_PESTANA[a.pestana] - ORDEN_PESTANA[b.pestana]);
+
+  // Verde exige haber leído el sistema y que el backend responda. Sin eso, «no hay nada
+  // que mirar» sería decir que todo va bien sin saberlo — y «no lo sé» se pinta en gris.
+  const sistemaBien = lec.sistema?.ok && lec.sistema.datos?.backend?.ok;
+  const hayLectura  = Object.keys(LECTURAS_PARTE).some(k => lec[k]);
+  const tono = items.some(i => i.tono === "red") ? "red"
+    : items.length ? "accent"
+    : noLeidas.length || !hayLectura || !sistemaBien ? "muted"
+    : "green";
+
+  return { tono, items, sinComprobar, noLeidas };
+}
+
+// La insignia de cada botón del menú. Una pestaña sin nada que mirar no aparece: sin
+// insignia es la señal de que está bien, y un «0» en cada botón sería ruido.
+export function insigniasPorPestana(parte) {
+  const insignias = {};
+  for (const it of parte?.items || []) {
+    const ya = insignias[it.pestana];
+    insignias[it.pestana] = {
+      tono: ya?.tono === "red" || it.tono === "red" ? "red" : "accent",
+      n:    (ya?.n || 0) + 1,
+    };
+  }
+  // «No lo sé» es un «?» en gris, nunca un hueco: sin insignia querría decir «bien».
+  for (const p of parte?.noLeidas || []) {
+    if (!insignias[p]) insignias[p] = { tono: "muted", n: null };
+  }
+  return insignias;
+}
+
+// Lo que dice un lector de pantalla del botón: la insignia sola es un número suelto.
+export function etiquetaConInsignia(etiqueta, insignia) {
+  if (!insignia) return etiqueta;
+  if (insignia.n == null) return `${etiqueta}: no se ha podido comprobar`;
+  return `${etiqueta}: ${insignia.n} en ${insignia.tono === "red" ? "rojo" : "ámbar"}`;
+}
+
+// "Crons y Despliegue", "Base de datos, Config y Crons".
+function listaDeNombres(ids) {
+  const n = [...new Set(ids)].map(etiquetaDe);
+  return n.length <= 1 ? n.join("") : `${n.slice(0, -1).join(", ")} y ${n[n.length - 1]}`;
+}
+
+// La frase del parte en trozos, para que la pantalla pueda hacer de cada punto un botón
+// sin repetir allí la lógica de qué se dice. `textoDelParte` es la misma frase, entera.
+export function trozosDelParte(parte, max = 4) {
+  const items = parte?.items || [];
+  const notas = [];
+  let cabecera;
+  if (items.length) {
+    cabecera = `${plural(items.length, "cosa", "cosas")} que mirar`;
+    // Lo que no se ha podido leer se dice también cuando hay otras cosas: sin esto, un
+    // parte con un ámbar y dos pestañas caídas parecería un parte con un ámbar.
+    if (parte.noLeidas?.length) notas.push(`sin leer: ${listaDeNombres(parte.noLeidas)}`);
+  } else if (parte?.tono === "green") {
+    cabecera = "Todo en orden en lo comprobado";
+  } else if (parte?.noLeidas?.length) {
+    cabecera = `No se ha podido comprobar: ${[...new Set(parte.noLeidas)].map(etiquetaDe).join(", ")}`;
+  } else {
+    cabecera = "Sin comprobar todavía";
+  }
+  if (parte?.sinComprobar?.length) {
+    notas.push(`${listaDeNombres(parte.sinComprobar)} sin comprobar (a botón)`);
+  }
+  return { cabecera, items: items.slice(0, max), resto: Math.max(0, items.length - max), notas };
+}
+
+export function textoDelParte(parte, max = 4) {
+  const t      = trozosDelParte(parte, max);
+  const puntos = t.items.map(i => i.titulo);
+  if (t.resto) puntos.push(`+${t.resto} más`);
+  return [t.cabecera + (puntos.length ? ` — ${puntos.join(" · ")}` : ""), ...t.notas].join(" · ");
+}

@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
 
 // Camino crítico de la aplicación en un navegador real: login → dashboard → datos
@@ -283,9 +284,12 @@ test('la zona dev enseña las migraciones que faltan y qué le falta al backend'
   // Base de datos: el servidor de pruebas declara aplicadas todas las migraciones del
   // repositorio menos la última, así que tiene que salir esa y solo esa, con su nombre —
   // que es lo que hay que pegar en el editor SQL de Supabase.
+  // Dentro de <main>: el parte de arriba repite lo mismo en su franja, que se ve desde
+  // todas las pestañas, y sin acotar el texto sale dos veces.
   await page.getByRole('button', { name: 'Base de datos' }).click()
-  await expect(page.getByText('1 sin aplicar', { exact: false })).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByText('health_metrics')).toBeVisible()
+  const pestana = page.locator('main')
+  await expect(pestana.getByText('1 sin aplicar', { exact: false })).toBeVisible({ timeout: 15_000 })
+  await expect(pestana.getByText('health_metrics')).toBeVisible()
 
   // Config: lo que falta, nunca lo que hay. Que no se escape un valor es la mitad del
   // sentido de esta pestaña, y va detrás de un JWT de treinta días.
@@ -296,6 +300,33 @@ test('la zona dev enseña las migraciones que faltan y qué le falta al backend'
   expect(texto).not.toContain('supa-e2e-key')
   expect(texto).not.toContain('e2e-secret-key')
   expect(texto).not.toContain('refresco-e2e')
+
+  expect(page.erroresDeNavegador).toEqual([])
+})
+
+test('el parte de la zona dev junta lo que falla y lleva a su pestaña', async ({ page }) => {
+  await entrar(page)
+
+  // Se abre en otra pestaña a propósito: el clic en el parte tiene que CAMBIAR de pestaña.
+  await page.getByRole('button', { name: '🛠' }).first().click()
+  await page.getByRole('button', { name: 'Ideas', exact: true }).click()
+
+  // La migración que falta (la misma que en el test anterior) sale arriba con su nombre,
+  // fuera de <main>: es lo que se ve sin abrir ninguna pestaña.
+  // El servidor de pruebas deja sin aplicar la última del directorio, por orden de nombre.
+  const ultima = readdirSync(new URL('../../supabase/migrations/', import.meta.url))
+    .filter(f => f.endsWith('.sql')).map(f => f.slice(0, -4)).sort().at(-1)
+  const punto = page.getByRole('button', { name: /sin aplicar/ })
+  await expect(punto).toBeVisible({ timeout: 15_000 })
+  await expect(punto).toContainText(ultima)
+
+  // GitHub no se ha pedido: se dice que está sin comprobar, no se pinta como en orden.
+  await expect(page.getByText('sin comprobar (a botón)', { exact: false })).toBeVisible()
+
+  // La insignia de Base de datos cuenta ese punto, y el clic lleva a la pestaña.
+  await expect(page.getByRole('button', { name: /^Base de datos: 1 en rojo/ })).toBeVisible()
+  await punto.click()
+  await expect(page.locator('main').getByText('1 sin aplicar', { exact: false })).toBeVisible({ timeout: 15_000 })
 
   expect(page.erroresDeNavegador).toEqual([])
 })

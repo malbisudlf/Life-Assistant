@@ -30,6 +30,9 @@ mira deprisa desde el móvil sigue estando a un toque, y el detalle no se duplic
 Despliegue, Crons, Base de datos, Config, Línea de tiempo, Agente y jobs, Salud de datos y
 Avisos. Lo siguiente es la **fase 4** («el resto»), empezando por el gasto.
 
+**El parte** (la franja de arriba y las insignias del menú, ver «El parte») está hecho y es
+solo frontend: no pide nada al desplegar.
+
 Lo único que hay que hacer a mano al mergear esto:
 
 1. **Aplicar `supabase/migrations/20260910_migraciones_aplicadas.sql`.** Es la que crea el
@@ -52,8 +55,11 @@ insert into public.migraciones_aplicadas (nombre) values ('20261015_lo_que_sea')
 Sin esa línea, la migración se aplica pero la zona dev sigue diciendo que falta.
 
 Al añadir una pestaña: un fichero en `src/components/dev/`, su entrada en `PESTANAS` de
-`ZonaDev.jsx` con `fase: 1` para encenderla, y la lógica que se pueda probar sin pantalla
-a `src/lib/dev.js`, que es donde están los tests.
+`src/lib/dev.js` con `fase: 1` para encenderla (vive ahí y no en `ZonaDev.jsx` desde el
+parte, que necesita sus nombres, y un `.jsx` solo puede exportar componentes), y la lógica
+que se pueda probar sin pantalla a `src/lib/dev.js`, que es donde están los tests. Si la
+pestaña tiene algo que pueda ir mal, dale también su lectura en `LECTURAS_PARTE` y su
+bloque en `parteDelSistema` para que salga en el parte.
 
 Lo que quedó decidido y no hace falta volver a discutir: dónde vive (vista propia, no
 modal), qué pasa con ⚙ (una línea y un enlace), la forma de una idea (la de
@@ -70,6 +76,9 @@ dev (vaciar el registro, forzar envíos, reintentar jobs; nunca desplegar).
 | Pensada para escritorio | Es donde se desarrolla. En móvil se ve, pero no se optimiza: para el móvil ya está el resumen de ⚙. |
 | Misma paleta, más densidad | Las variables CSS del dashboard (`--bg`, `--accent`…), pero monoespaciada en los datos, tablas finas y mucha información por pantalla. Se tiene que notar que es otra zona. |
 | Ficheros propios en `src/components/dev/` | **Excepción explícita a la regla de "toda la UI en `Dashboard.jsx`"**, anotada también en CLAUDE.md. La regla existe para que un widget no se convierta en un fichero suelto; esto no es un widget: son miles de líneas que ninguna sesión que vaya a tocar el dashboard necesita cargar. Una pestaña por fichero. |
+| El parte no decide tonos: llama a las funciones de cada pestaña | `parteDelSistema` usa `filasDeEstado`, `resumenMigraciones`, `estadoGraph`, `estadoJob`, `estadoMetrica`, `estadoRegla`, `estadoWorkflow`, `estadoSondeo`… las mismas que pintan cada pestaña. Si una pestaña cambia su criterio, el parte cambia con ella; con un criterio propio, la franja y la pestaña acabarían diciendo cosas distintas. Por eso un «sin configurar», el PC apagado o un sondeo opcional callado no salen: sus pestañas no los pintan en rojo ni en ámbar. |
+| No leído es gris, nunca verde | Una lectura que falla deja su pestaña con un «?» en gris y la franja dice «No se ha podido comprobar: …». Y el verde exige además haber leído el sistema con el backend respondiendo. «No hay nada que mirar» y «no he podido mirar» son cosas distintas, y confundirlas es el error de siempre de este proyecto. |
+| Lo que se repite se agrupa en un item | Cinco métricas atrasadas, tres tablas que no existen o cuatro jobs fallidos son UN punto cada uno («5 métricas sin datos…», con como mucho tres nombres). Un parte con veinte puntos grita, y lo que grita deja de leerse. Los jobs, además, solo de los últimos 7 días: uno de hace un mes dejaría la insignia en rojo para siempre. |
 
 ## La regla del dinero
 
@@ -88,6 +97,45 @@ no con un `setInterval` suelto: mientras el navegador no la enseña no pide nada
 volver a verse refresca en el acto si ya tocaba. Antes una zona dev olvidada en segundo
 plano seguía pidiendo el registro cada cinco segundos y gastando cuota de GitHub en
 Despliegue y Crons para pintar pantallas que nadie miraba.
+
+## El parte
+
+Una franja fija entre la cabecera y el menú con **una frase**: lo peor de todas las
+pestañas, primero lo rojo y luego lo ámbar («3 cosas que mirar — Migraciones: 1 sin
+aplicar: … · Regla lluvia silenciada · …», y «+N más» a partir del quinto). Cada punto es
+un enlace que abre su pestaña, con el detalle en el `title`. Y cada botón del menú lleva
+una insignia con cuántos puntos tiene y el peor tono, o un «?» gris si su lectura falló.
+Sin insignia es que no hay nada que mirar.
+
+Existe porque para saber si algo iba mal había que abrir once pestañas una a una, y eso,
+como todo lo que cuesta cinco clics, no se hacía. Es solo frontend: junta lo que las
+pestañas ya piden a sus endpoints, con la lógica en `src/lib/dev.js` (`LECTURAS_PARTE`,
+`leerParte`, `parteDelSistema`, `insigniasPorPestana`, `textoDelParte`) y sus tests en
+`tests/frontend/devParte.test.js`. No toca la línea de resumen del panel ⚙
+(`resumenEstado`), que sigue mirando solo el sistema.
+
+**No todo se lee con la misma cadencia**, y cada una tiene su porqué:
+
+| Lectura | Endpoint | Cuándo | Por qué |
+|---|---|---|---|
+| `sistema` | `/` y las de `leerEstadoSistema` | al abrir y cada 60 s | Backend propio y Supabase: gratis. |
+| `jobs` | `/dev/jobs` | al abrir y cada 60 s | Ídem. |
+| `avisos` | `/dev/avisos` | al abrir y cada 60 s | Ídem. |
+| `datos` | `/health/diagnostico` | al abrir y cada 60 s | Ídem. |
+| `bd` | `/dev/bd` | al abrir y con «comprobar todo» | Son ~35 consultas de cuenta contra la cuota del plan gratuito de Supabase; la pestaña Base de datos tampoco se refresca sola. |
+| `config` | `/dev/config` | al abrir y con «comprobar todo» | Solo cambia al reconstruir. |
+| `crons`, `despliegue` | `/dev/crons`, `/dev/despliegue` | solo con «+ GitHub»; cada 5 min si la respuesta trae `github.con_credencial` | Gastan cuota de la API de GitHub: 60 por hora sin `DEPLOY_GITHUB_TOKEN`, para toda la casa. Hasta pulsar, la franja dice «Crons y Despliegue sin comprobar (a botón)». Con credencial, la misma cadencia que la pestaña Despliegue, nunca la del minuto. |
+
+Todo el refresco se **pausa con la pestaña del navegador oculta** (`refrescarMientrasSeVea`), y al
+volver a ella se relee al momento si lo último tiene más de un minuto. La lectura de cada
+fuente va por su cuenta (`Promise.allSettled`): que `/dev/jobs` responda 500 deja esa
+pestaña en gris y el resto del parte intacto. Lo que se leyó al abrir sigue contando
+aunque el intervalo no lo repita, y por eso «comprobado hace…» cuenta desde la lectura más
+vieja de las que se enseñan, no desde la última.
+
+El refresco de cada minuto no enciende el «comprobando…»: la franja parpadeando cada
+sesenta segundos sería ruido. Solo lo hacen la carga inicial y los dos botones, que además
+se apagan mientras leen.
 
 ## Qué puede tocar
 
