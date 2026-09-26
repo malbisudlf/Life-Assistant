@@ -30,4 +30,13 @@ export default defineConfig([
       globals: { ...globals.browser, ...globals.node },
     },
   },
+  {
+    // Código de claude-phone que vive aquí para no perderse y corre en Node, en
+    // `caja` (ver telefono/PARCHES.md). CommonJS, como el resto de claude-phone.
+    files: ['telefono/**/*.js'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: globals.node,
+    },
+  },
 ])
