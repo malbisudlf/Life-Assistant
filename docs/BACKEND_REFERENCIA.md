@@ -171,7 +171,12 @@ fichero no sobrevive a un despliegue), `ENABLE_BANKING_REDIRECT_URL`,
 `VIGILANCIA_CADA_MIN`, `CORREO_LEER`,
 `CORREO_CADA_MIN`, `CORREO_HORAS`, `CORREO_MAX`, `REGLAS_USUARIO_MAX`,
 `RELOJ_AVISO_ANTES_MIN`, `AVISOS_HORA_SILENCIO`, `AVISO_RETRASO_AVISA_MIN`,
-`AVISO_RETRASO_AVERIA_MIN`.
+`AVISO_RETRASO_AVERIA_MIN`,
+`HUECOS_DIA_DESDE` (`08:00`, a qué hora empieza el día al buscar huecos),
+`HUECOS_FIN_POR_DEFECTO` (`22:00`, el fin del día mientras no se pueda aprender de la
+hora de dormir), `HUECOS_MARGEN_MIN` (`10`, margen alrededor de cada evento al proponer
+huecos; no se aplica al comprobar choques). Las tres son de `huecos_libres` y
+`reservar_bloques` — ver «Organizar el día» en `docs/JARVIS.md`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,

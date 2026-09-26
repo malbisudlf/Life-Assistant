@@ -2144,6 +2144,28 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       if (!cambios.length) return null;
       return `Cambiar el evento ${nombreDe(contexto.eventos, a.evento_id, "title")}: ${cambios.join(", ")}`;
     }
+    case "reservar_bloques": {
+      // Una línea por bloque, sacada de los argumentos: se aprueban varios eventos con un
+      // solo botón y cada uno tiene que verse. Lo que no tenga forma válida se dice aquí,
+      // para que el botón no aparente aprobar algo que el backend va a rechazar.
+      const bloques = Array.isArray(a.bloques) ? a.bloques : [];
+      if (!bloques.length) return null;
+      const n = bloques.length;
+      const hora = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const lineas = [`Reservar ${n} bloque${n === 1 ? "" : "s"} en el calendario:`];
+      for (const b of bloques) {
+        const titulo = String(b?.titulo || "").trim();
+        const fecha  = _fechaLegible(String(b?.fecha || "").trim());
+        const ini    = String(b?.hora_inicio || "").trim();
+        const fin    = String(b?.hora_fin || "").trim();
+        const valido = titulo && fecha && hora.test(ini) && hora.test(fin) && fin > ini;
+        lineas.push(valido
+          ? `• "${titulo}" el ${fecha} de ${ini} a ${fin}`
+          : `• "${titulo || "(sin título)"}" (fecha u hora no válidas: no se reservará)`);
+      }
+      if (n > 6) lineas.push("(son más de 6: no se reservará ninguno)");
+      return lineas.join("\n");
+    }
     case "borrar_evento":
       if (!a.evento_id) return null;
       return `Borrar del calendario el evento ${nombreDe(contexto.eventos, a.evento_id, "title")}`;

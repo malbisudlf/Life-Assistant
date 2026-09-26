@@ -984,7 +984,7 @@ function JarvisChat({
           marginBottom: 10, padding: "10px 12px", borderRadius: 8,
           background: "var(--surface2)", border: "0.5px solid var(--accent2)",
         }}>
-          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 8 }}>{etiqueta}</div>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 8, whiteSpace: "pre-line" }}>{etiqueta}</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={onConfirmar} disabled={confirmando} style={{
               flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 13, cursor: "pointer",
@@ -3127,13 +3127,16 @@ export default function Dashboard() {
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
       const bien = Boolean(d?.ok);
+      // Como en confirmarEnLlamada: lo que trae su frase la dice tal cual. Reservar varios
+      // bloques puede salir a medias, y un «Hecho.» taparía los que no entraron.
+      const dicho = d?.resultado?.dile_al_usuario_literalmente || "Hecho.";
       setJarvisMensajes(prev => [...prev, {
         rol:   bien ? "assistant" : "aviso",
-        texto: bien ? "Hecho." : `No se pudo: ${d?.resultado?.motivo || "error del servidor"}`,
+        texto: bien ? dicho : `No se pudo: ${d?.resultado?.motivo || "error del servidor"}`,
       }]);
       if (bien) {
         setJarvisPendiente(null);
-        if (jarvisHabla) hablarJarvis("Hecho.");
+        if (jarvisHabla) hablarJarvis(dicho);
         loadEvents();   // el evento nuevo tiene que aparecer ya en el resto del dashboard
       }
     } catch (e) {

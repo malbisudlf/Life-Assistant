@@ -76,7 +76,11 @@ Qué hace cada uno:
    un evento, una nota), la etiqueta lo **traduce al nombre real** con lo que el
    dashboard ya tiene cargado (`contexto`): un id de Graph es ilegible, y el nombre no
    puede venir del modelo, que es justo de quien hay que desconfiar ahí. Si el id no está
-   en lo cargado, se dice — no se calla.
+   en lo cargado, se dice — no se calla. Una etiqueta puede ocupar varias líneas
+   (`reservar_bloques`, una por bloque), por eso el recuadro va con `white-space:
+   pre-line`. Al confirmar, el chat (y la voz) dicen `dile_al_usuario_literalmente` si la
+   herramienta lo trae, con «Hecho.» de respaldo: una reserva a medias tiene que decir
+   qué no entró.
 
    **Modo llamada (📞)**: hablar seguido, sin pulsar enviar. Escucha en continuo →
    detecta el fin de frase → manda → contesta en voz → vuelve a escuchar, hasta que

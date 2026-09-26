@@ -61,6 +61,9 @@
     { "id": "evento-editar", "grupo": "calendario", "peticion": "Mueve la reunión de mañana por la mañana a las doce.", "espera": ["editar_evento", "agenda"], "confundible": "crear_evento" },
     { "id": "evento-borrar", "grupo": "calendario", "peticion": "Quita del calendario la clase del viernes, que se ha caído.", "espera": ["borrar_evento", "agenda"], "confundible": "editar_evento" },
     { "id": "agenda-vs-crear", "grupo": "calendario", "peticion": "¿Tengo algo el jueves a las cinco?", "espera": ["agenda"], "confundible": "crear_evento", "nota": "consultar vs crear con la misma frase de fecha." },
+    { "id": "huecos-dos-horas", "grupo": "pares", "peticion": "¿Cuándo tengo un hueco de dos horas mañana?", "espera": ["huecos_libres"], "confundible": "agenda" },
+    { "id": "organizar-dia", "grupo": "pares", "peticion": "Organízame mañana: quiero dos horas de TFG e ir al gimnasio", "espera": ["huecos_libres"], "confundible": "crear_evento", "nota": "Primero mirar huecos; reservar va después y se confirma." },
+    { "id": "reservar-bloques", "grupo": "pares", "peticion": "Bloquéame mañana de 9 a 11 para el TFG y de 18 a 19 para el gimnasio", "espera": ["reservar_bloques"], "confundible": "crear_evento" },
 
     { "id": "sesion-anadir", "grupo": "pares", "peticion": "Apunta que hoy le he dado una sesión de hora y media a Ane.", "espera": ["anadir_sesion_entrenamiento"], "confundible": "crear_evento" },
     { "id": "cobro-marcar", "grupo": "pares", "peticion": "Marca como cobradas las sesiones que tengo pendientes.", "espera": ["cobrar_entrenamiento"], "confundible": "entrenamiento" },

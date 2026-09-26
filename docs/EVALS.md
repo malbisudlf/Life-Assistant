@@ -19,7 +19,7 @@ herramienta funciona — eso ya lo cubren `tests/backend` y el E2E.
 
 Está medido y escrito en `docs/JARVIS.md` que **el modelo pequeño falla eligiendo entre
 herramientas parecidas** —pidiéndole leer issues escogía `add_issue_comment`— y que ese
-fallo **crece con el catálogo**, que ya va por 53 herramientas y sigue creciendo. Hasta
+fallo **crece con el catálogo**, que ya va por 64 herramientas y sigue creciendo. Hasta
 ahora esa regresión solo se detectaba hablándole y notando que hacía algo raro, o sea:
 tarde y por casualidad.
 

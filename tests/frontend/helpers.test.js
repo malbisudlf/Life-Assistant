@@ -1328,6 +1328,55 @@ describe("jarvisEtiquetaAccion", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "crear_evento", argumentos: { fecha: "2026-09-01" } })).toBeNull();
   });
 
+  const bloque = (titulo, hora_inicio, hora_fin, fecha = "2026-09-28") =>
+    ({ titulo, fecha, hora_inicio, hora_fin });
+
+  test("reservar bloques: una línea por bloque, con fecha y horas de los argumentos", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "reservar_bloques",
+      argumentos: { bloques: [bloque("TFG", "09:00", "11:00"), bloque("Gimnasio", "18:00", "19:00")] },
+    })).toBe(
+      "Reservar 2 bloques en el calendario:\n"
+      + '• "TFG" el 28/09/2026 de 09:00 a 11:00\n'
+      + '• "Gimnasio" el 28/09/2026 de 18:00 a 19:00',
+    );
+  });
+
+  test("reservar bloques: uno solo va en singular", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "reservar_bloques", argumentos: { bloques: [bloque("TFG", "09:00", "11:00")] },
+    })).toMatch(/^Reservar 1 bloque en el calendario:\n/);
+  });
+
+  test("reservar bloques: el que no tiene forma válida dice que no se reservará", () => {
+    const out = jarvisEtiquetaAccion({
+      herramienta: "reservar_bloques",
+      argumentos: { bloques: [
+        bloque("TFG", "09:00", "11:00"),
+        bloque("Compra", "por la tarde", "19:00"),
+        bloque("", "10:00", "11:00"),
+      ] },
+    });
+    const lineas = out.split("\n");
+    expect(lineas).toHaveLength(4);
+    expect(lineas[2]).toBe('• "Compra" (fecha u hora no válidas: no se reservará)');
+    expect(lineas[3]).toBe('• "(sin título)" (fecha u hora no válidas: no se reservará)');
+  });
+
+  test("reservar bloques: sin bloques no hay botón", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "reservar_bloques", argumentos: { bloques: [] } })).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "reservar_bloques", argumentos: {} })).toBeNull();
+    expect(jarvisEtiquetaAccion({ herramienta: "reservar_bloques", argumentos: { bloques: "TFG" } })).toBeNull();
+  });
+
+  test("reservar bloques: con más de 6 avisa de que no se reservará ninguno", () => {
+    const bloques = Array.from({ length: 7 }, (_, i) =>
+      bloque(`B${i}`, `${String(8 + i).padStart(2, "0")}:00`, `${String(8 + i).padStart(2, "0")}:30`));
+    const lineas = jarvisEtiquetaAccion({ herramienta: "reservar_bloques", argumentos: { bloques } }).split("\n");
+    expect(lineas[0]).toBe("Reservar 7 bloques en el calendario:");
+    expect(lineas.at(-1)).toBe("(son más de 6: no se reservará ninguno)");
+  });
+
   test("devuelve null si no hay acción pendiente", () => {
     expect(jarvisEtiquetaAccion(null)).toBeNull();
     expect(jarvisEtiquetaAccion({ herramienta: "apagar_pc", argumentos: {} })).toBeNull();

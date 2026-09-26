@@ -794,6 +794,65 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - Idempotencia con el mismo `uuid5` de la fecha contra la clave primaria de
     `jarvis_recordatorios`, y apagado (`JARVIS_PROACTIVO=0`) no cuesta ni una consulta.
 
+## Organizar el día: `huecos_libres` y `reservar_bloques`
+
+«Organízame mañana: dos horas de TFG e ir al gimnasio» son dos pasos, y cada uno es una
+herramienta con su lado de la frontera de confirmación:
+
+- **`huecos_libres`** (consulta, `confirmar: False`, también en el MCP del teléfono como
+  solo lectura): los tramos libres de UN día, Outlook y clases juntos, con sus minutos.
+  Cada evento se ensancha `HUECOS_MARGEN_MIN` por los dos lados (salir de clase a las
+  11:00 y tener «libre desde las 11:00» no es un plan), los solapados y los que se tocan
+  se funden, y lo que viene de la noche anterior ocupa las primeras horas del día. Los
+  eventos de todo el día **no bloquean**: salen aparte, en `todo_el_dia`, para que el
+  modelo los mencione. Solo mira de hoy a dentro de `HUECOS_DIAS_MAX` (14) días, porque
+  `get_events` no trae más de 30.
+- **`reservar_bloques`** (acción, `confirmar: True`): varios bloques (máximo
+  `RESERVAR_BLOQUES_MAX`, 6) en Outlook con un solo botón. La etiqueta del botón
+  (`jarvisEtiquetaAccion`) pinta una línea por bloque sacada de los argumentos, y marca
+  como «no se reservará» lo que no tenga forma válida. No está en el MCP del teléfono en
+  ninguna de sus dos listas: es confirmable y allí se rechazaría siempre.
+
+Lo que no se puede relajar, y por qué:
+
+- **Es UNA herramienta con una lista, no varios `crear_evento`.** El dashboard solo
+  admite un pendiente por turno: el bucle corta en cuanto el modelo propone algo, así
+  que tres `crear_evento` seguidos acababan en uno solo propuesto y los otros dos
+  perdidos sin que nadie lo dijera. El prompt de sistema lo pide expresamente (huecos
+  primero y UNA propuesta).
+- **Al confirmar se vuelve a leer el calendario.** Entre que Jarvis propone y pulsas
+  pueden pasar horas, y en ese rato puede entrar una reunión. Cada bloque se compara con
+  lo que hay AHORA (solape estricto y **sin** margen: acabar a las 10:00 y empezar a las
+  10:00 no es chocar, y el margen es para proponer, no para rechazar lo que tú has
+  pedido). Esa misma lectura evita los duplicados: un bloque idéntico a un evento que ya
+  existe (mismo título sin mirar mayúsculas y mismas horas) sale como «Ya estaba
+  reservado», así que confirmar dos veces no crea dos.
+- **No poder leer el calendario nunca es un día libre.** `_j_ocupados` no usa
+  `_sin_error`: si Outlook falla o revienta, `huecos_libres` devuelve `ok: false` con la
+  frase literal («…No te digo que tengas el día libre porque no lo he podido
+  comprobar.») y **sin** clave `huecos`, y `reservar_bloques` no crea nada. La única
+  excepción es que el calendario de clases no exista (`available` en el error): es
+  configuración ausente y se sigue, pero con un aviso explícito de que los huecos no
+  tienen en cuenta las clases.
+- **No hay rollback.** Los bloques se crean en serie y en orden, reutilizando
+  `_j_crear_evento`; si Graph falla en uno, los demás siguen. La respuesta dice
+  cuáles entraron y cuáles no con su motivo (`_frase_reserva`, pensada para decirse en
+  voz alta), y `ok` es verdadero si entró al menos uno. Deshacer a medias sería peor:
+  un borrado que también puede fallar deja un estado que ya nadie sabe describir.
+- **Los límites del día dicen de dónde salen** (`limites` en la respuesta). El inicio es
+  `HUECOS_DIA_DESDE` (hoy, desde ahora redondeado al cuarto siguiente) y el fin, una
+  hora antes de tu hora habitual de dormirte (`_hora_habitual_dormir()`, la misma
+  mediana que usa la regla del madrugón), recortado a la medianoche; sin cinco noches
+  medidas, `HUECOS_FIN_POR_DEFECTO`. Si pides horas concretas, mandan las tuyas y no se
+  consulta el sueño.
+
+**Deuda:** `_regla_hueco_entreno` (el aviso proactivo de «mañana tienes libre de…») tiene
+su propio cálculo de huecos: no mira el calendario de clases, no aplica margen, no ve
+lo que viene de la noche anterior y, como `_eventos_con_fecha` devuelve `[]` cuando
+Outlook falla, **un Outlook caído le parece un día entero libre**. Debería pasar a
+`_huecos` + `_j_ocupados` en otra tanda; no se tocó aquí para no mezclar un cambio de
+comportamiento de un aviso con una función nueva.
+
 ## Por qué te dije eso: la instantánea de cada aviso
 
 La señal de utilidad (`avisos_reglas`, el botón «me sirvió / no me sirvió») dice **qué**

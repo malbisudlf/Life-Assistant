@@ -18492,6 +18492,441 @@ def _j_borrar_evento(evento_id: str) -> dict:
     return {"ok": True, "id": evento_id}
 
 
+# ── Organizar el día: huecos_libres + reservar_bloques ───────────────────────
+# «Organízame mañana» son dos pasos y dos herramientas: mirar dónde hay sitio (consulta,
+# la hace el modelo solo) y reservar varios bloques de una vez (acción, la aprueba el
+# usuario con UN botón). Ver docs/JARVIS.md, «Organizar el día».
+#
+# Dónde empieza el día cuando no se pide otra cosa. Es un valor de agenda, no personal:
+# el fin sí se aprende (una hora antes de la que sueles dormirte).
+HUECOS_DIA_DESDE = os.getenv("HUECOS_DIA_DESDE", "08:00")
+if not _HORA_RE.match(HUECOS_DIA_DESDE):
+    logger.warning("HUECOS_DIA_DESDE=%r no es HH:MM; se usa 08:00", HUECOS_DIA_DESDE)
+    HUECOS_DIA_DESDE = "08:00"
+# El fin del día cuando todavía no hay cinco noches medidas de las que aprender la hora
+# de dormir (`_hora_habitual_dormir()` devuelve None).
+HUECOS_FIN_POR_DEFECTO = os.getenv("HUECOS_FIN_POR_DEFECTO", "22:00")
+if not _HORA_RE.match(HUECOS_FIN_POR_DEFECTO):
+    logger.warning("HUECOS_FIN_POR_DEFECTO=%r no es HH:MM; se usa 22:00", HUECOS_FIN_POR_DEFECTO)
+    HUECOS_FIN_POR_DEFECTO = "22:00"
+# Margen alrededor de cada evento al PROPONER huecos: salir de clase a las 11:00 y tener
+# «libre desde las 11:00» no es un plan. Al comprobar choques al reservar NO se aplica:
+# ahí manda el solape real, o se rechazaría un bloque que el propio usuario ha pedido.
+HUECOS_MARGEN_MIN = int(os.getenv("HUECOS_MARGEN_MIN", "10"))
+# Constantes y no variables: `get_events` solo mira 30 días por delante, y seis bloques
+# ya son un día entero organizado; más es una semana, y eso no se aprueba de un vistazo.
+HUECOS_DIAS_MAX      = 14
+RESERVAR_BLOQUES_MAX = 6
+RESERVAR_BLOQUE_MAX_H = 8
+
+
+def _huecos(ocupados, inicio: datetime, fin: datetime,
+            minimo_min: int, margen_min: int) -> list:
+    """Los tramos libres de [inicio, fin] que duran al menos `minimo_min`, en orden.
+
+    `ocupados` son pares (ini, fin) en hora local, en cualquier orden, solapados,
+    anidados o saliéndose de los límites. Cada uno se ensancha `margen_min` por los dos
+    lados antes de fusionarlos. No redondea: eso es cosa de quien llama.
+    """
+    if inicio >= fin:
+        return []
+    margen = timedelta(minutes=max(0, int(margen_min or 0)))
+    tramos = []
+    for a, b in ocupados:
+        a, b = max(a - margen, inicio), min(b + margen, fin)
+        if a < b:
+            tramos.append((a, b))
+    tramos.sort()
+    fundidos = []
+    for a, b in tramos:
+        # `<=` y no `<`: dos tramos que se tocan dejan un hueco de cero minutos entre
+        # medias, que no es un hueco.
+        if fundidos and a <= fundidos[-1][1]:
+            fundidos[-1] = (fundidos[-1][0], max(fundidos[-1][1], b))
+        else:
+            fundidos.append((a, b))
+    libres, cursor = [], inicio
+    for a, b in fundidos:
+        if a > cursor:
+            libres.append((cursor, a))
+        cursor = max(cursor, b)
+    if cursor < fin:
+        libres.append((cursor, fin))
+    minimo = timedelta(minutes=max(0, int(minimo_min or 0)))
+    return [(a, b) for a, b in libres if b - a >= minimo]
+
+
+def _limites_dia(dia: date, ahora: datetime, desde: str | None, hasta: str | None,
+                 habitual: tuple | None) -> dict:
+    """Entre qué horas se buscan huecos ese día, y de dónde sale cada límite.
+
+    El origen viaja en la respuesta para que el modelo pueda decir «hasta las 23:15, una
+    hora antes de la que sueles dormirte» en vez de presentar un corte como si fuera un
+    dato del calendario.
+    """
+    base = datetime(dia.year, dia.month, dia.day, tzinfo=LOCAL_TZ)
+    manana = base + timedelta(days=1)
+
+    def _a_las(hhmm: str) -> datetime:
+        h, m = hhmm.split(":")
+        return base.replace(hour=int(h), minute=int(m))
+
+    if desde:
+        inicio, origen_inicio = _a_las(desde), "pedido"
+    else:
+        inicio, origen_inicio = _a_las(HUECOS_DIA_DESDE), "fijo"
+    if dia == ahora.date():
+        # Al alza al siguiente cuarto: a las 10:07 no se propone empezar a las 10:07.
+        segundos = ahora.minute * 60 + ahora.second + ahora.microsecond / 1_000_000
+        redondeo = (ahora.replace(minute=0, second=0, microsecond=0)
+                    + timedelta(seconds=math.ceil(segundos / 900) * 900))
+        if redondeo > inicio:
+            inicio, origen_inicio = redondeo, "ahora"
+
+    salida = {}
+    if hasta:
+        fin, origen_fin = _a_las(hasta), "pedido"
+    elif habitual:
+        h, m = habitual
+        # Una hora de madrugada es la noche de ESTE día, no la de la mañana anterior: la
+        # misma convención que `_hora_habitual_dormir()` usa para su mediana.
+        dormir = base + timedelta(days=1 if h < 12 else 0, hours=h, minutes=m)
+        fin, origen_fin = min(dormir - timedelta(minutes=60), manana), "aprendido"
+        salida["hora_habitual_dormir"] = f"{h:02d}:{m:02d}"
+    else:
+        fin, origen_fin = _a_las(HUECOS_FIN_POR_DEFECTO), "fijo"
+    salida.update({"inicio": inicio, "fin": fin,
+                   "origen_inicio": origen_inicio, "origen_fin": origen_fin})
+    return salida
+
+
+def _solapa(a_ini: datetime, a_fin: datetime, b_ini: datetime, b_fin: datetime) -> bool:
+    """Solape estricto: acabar a las 10:00 y empezar a las 10:00 no es chocar."""
+    return a_ini < b_fin and b_ini < a_fin
+
+
+def _j_ocupados(dias: set) -> dict:
+    """Lo que ocupa esos días en Outlook y en el calendario de clases.
+
+    **No poder leer el calendario nunca es un día libre**: aquí no hay `_sin_error`. Un
+    fallo de Outlook devuelve `ok: False` y quien llama lo tiene que decir; convertirlo en
+    una lista vacía haría que Jarvis ofreciera como libre justo la mañana del examen.
+    La única excepción es que el calendario de clases no exista (error con `available`):
+    eso es configuración ausente, no un fallo, y se sigue avisando de que falta.
+    """
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_ev = pool.submit(get_events, credentials=None)
+        f_cl = pool.submit(get_class_events, credentials=None)
+        # La excepción de cada `.result()` se captura aquí: un timeout de Graph no puede
+        # subir y tumbar la conversación entera (ver `_calendario_del_pool`).
+        try:
+            eventos = f_ev.result()
+        except Exception as e:
+            logger.warning("Huecos: Outlook no respondió (%s)", _causa(e))
+            eventos = None
+        try:
+            clases = f_cl.result()
+        except Exception as e:
+            logger.warning("Huecos: el calendario de clases no respondió (%s)", _causa(e))
+            clases = None
+
+    if not isinstance(eventos, dict) or "error" in eventos:
+        return {"ok": False, "error": "No he podido leer tu calendario de Outlook"}
+    avisos = []
+    if isinstance(clases, dict) and "error" in clases and "available" in clases:
+        avisos.append(f"No encuentro el calendario de clases («{CLASSES_CALENDAR}»): "
+                      "estos huecos no tienen en cuenta las clases.")
+        clases = {"events": []}
+    elif not isinstance(clases, dict) or "error" in clases:
+        return {"ok": False, "error": "No he podido leer tu calendario de clases"}
+
+    ventanas = [(datetime(d.year, d.month, d.day, tzinfo=LOCAL_TZ),
+                 datetime(d.year, d.month, d.day, tzinfo=LOCAL_TZ) + timedelta(days=1))
+                for d in dias]
+    ocupados, todo_el_dia = [], []
+    for ev in [*(eventos.get("events") or []), *(clases.get("events") or [])]:
+        try:
+            ini = _j_local(ev.get("start") or "")
+            fin = _j_local(ev.get("end") or "")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        titulo = ev.get("title") or "(sin título)"
+        if ev.get("isAllDay"):
+            # El día de un evento de todo el día se saca sumando doce horas al inicio:
+            # Graph puede dar la medianoche en UTC o en la zona del calendario, y
+            # pasada a hora local cae a las 02:00 del mismo día o a las 00:00. Cualquiera
+            # de las dos, más doce horas, sigue en el día correcto.
+            primero = (ini + timedelta(hours=12)).date()
+            n_dias  = max(1, round((fin - ini).total_seconds() / 86400))
+            for k in range(n_dias):
+                if primero + timedelta(days=k) in dias:
+                    todo_el_dia.append({"titulo": titulo,
+                                        "dia": (primero + timedelta(days=k)).isoformat()})
+            continue
+        # Entra si corta alguno de los días pedidos, no si EMPIEZA en él: la fiesta que
+        # viene de la noche anterior ocupa las primeras horas de hoy.
+        if any(_solapa(ini, fin, a, b) for a, b in ventanas):
+            ocupados.append({"titulo": titulo, "ini": ini, "fin": fin})
+    ocupados.sort(key=lambda o: o["ini"])
+    return {"ok": True, "ocupados": ocupados, "todo_el_dia": todo_el_dia, "avisos": avisos}
+
+
+def _hhmm_del_dia(instante: datetime, base: datetime) -> str:
+    """HH:MM de un instante dentro del día `base`; la medianoche del final es «24:00».
+
+    Sin esto, un tramo que llega hasta el final del día saldría «de 23:30 a 00:00», que
+    se lee como media hora hacia atrás.
+    """
+    if instante >= base + timedelta(days=1):
+        return "24:00"
+    return instante.strftime("%H:%M")
+
+
+def _j_huecos_libres(dia: str = "", duracion_min: int = 30, desde: str = "",
+                     hasta: str = "") -> dict:
+    """Los tramos libres de un día, entre la hora de empezar y la de acostarse."""
+    ahora = _ahora_local()
+    hoy   = ahora.date()
+    dia   = str(dia or "").strip()
+    if not dia:
+        fecha = hoy
+    else:
+        if not _DATE_RE.match(dia):
+            return {"ok": False, "motivo": "La fecha no tiene formato YYYY-MM-DD"}
+        try:
+            fecha = datetime.strptime(dia, "%Y-%m-%d").date()
+        except ValueError:
+            return {"ok": False, "motivo": "Esa fecha no existe"}
+    if fecha < hoy:
+        return {"ok": False, "motivo": "Ese día ya ha pasado"}
+    if fecha > hoy + timedelta(days=HUECOS_DIAS_MAX):
+        return {"ok": False, "motivo": f"Solo miro hasta dentro de {HUECOS_DIAS_MAX} días"}
+
+    try:
+        duracion_min = int(duracion_min)
+    except (TypeError, ValueError):
+        duracion_min = 30
+    duracion_min = max(15, min(duracion_min, 480))
+
+    desde = str(desde or "").strip()
+    hasta = str(hasta or "").strip()
+    if desde and not _HORA_RE.match(desde):
+        return {"ok": False, "motivo": "La hora de inicio no tiene formato HH:MM (24h)"}
+    if hasta and not _HORA_RE.match(hasta):
+        return {"ok": False, "motivo": "La hora de fin no tiene formato HH:MM (24h)"}
+    if desde and hasta and desde >= hasta:
+        return {"ok": False, "motivo": "La hora de fin tiene que ser posterior a la de inicio"}
+
+    leido = _j_ocupados({fecha})
+    if not leido.get("ok"):
+        error = leido.get("error") or "No he podido leer tu calendario"
+        return {"ok": False, "error": error,
+                "dile_al_usuario_literalmente":
+                    f"{error}. No te digo que tengas el día libre porque no lo he podido "
+                    "comprobar."}
+
+    # La hora de dormir cuesta una consulta a Supabase: solo si hace falta.
+    habitual = None if hasta else _hora_habitual_dormir()
+    limites  = _limites_dia(fecha, ahora, desde or None, hasta or None, habitual)
+    base     = datetime(fecha.year, fecha.month, fecha.day, tzinfo=LOCAL_TZ)
+    huecos   = _huecos([(o["ini"], o["fin"]) for o in leido["ocupados"]],
+                       limites["inicio"], limites["fin"], duracion_min, HUECOS_MARGEN_MIN)
+
+    txt_desde = _hhmm_del_dia(limites["inicio"], base)
+    txt_hasta = _hhmm_del_dia(limites["fin"], base)
+    salida = {
+        "ok":           True,
+        "dia":          fecha.isoformat(),
+        # La tabla del módulo y no `strftime("%A")`, que depende del locale del proceso.
+        "dia_semana":   DIAS_SEMANA[fecha.weekday()],
+        "desde":        txt_desde,
+        "hasta":        txt_hasta,
+        "limites":      {"inicio": limites["origen_inicio"], "fin": limites["origen_fin"],
+                         "hora_habitual_dormir": limites.get("hora_habitual_dormir")},
+        "margen_min":   HUECOS_MARGEN_MIN,
+        "duracion_min": duracion_min,
+        # Topes: esto viaja dentro del prompt y cada elemento se paga por token.
+        "huecos": [{"desde": _hhmm_del_dia(a, base), "hasta": _hhmm_del_dia(b, base),
+                    "minutos": int((b - a).total_seconds() // 60)} for a, b in huecos[:12]],
+        "ocupado": [{"titulo": o["titulo"],
+                     "desde":  _hhmm_del_dia(max(o["ini"], base), base),
+                     "hasta":  _hhmm_del_dia(min(o["fin"], base + timedelta(days=1)), base)}
+                    for o in leido["ocupados"]][:20],
+        "todo_el_dia": [t["titulo"] for t in leido["todo_el_dia"]],
+        "avisos":      leido["avisos"],
+    }
+    if not huecos:
+        salida["sin_huecos"] = (f"No tienes ningún hueco de {duracion_min} min entre "
+                                f"{txt_desde} y {txt_hasta}.")
+    return salida
+
+
+def _validar_bloque(bloque, ahora: datetime) -> tuple:
+    """(bloque normalizado, None) o (lo que se pudo leer, motivo del rechazo)."""
+    b      = bloque if isinstance(bloque, dict) else {}
+    titulo = str(b.get("titulo") or "").strip()[:200]
+    fecha  = str(b.get("fecha") or "").strip()
+    hi     = str(b.get("hora_inicio") or "").strip()
+    hf     = str(b.get("hora_fin") or "").strip()
+    leido  = {"titulo": titulo or "(sin título)", "fecha": fecha, "hora_inicio": hi,
+              "hora_fin": hf}
+    if not titulo:
+        return leido, "Falta el título"
+    if not _DATE_RE.match(fecha):
+        return leido, "La fecha no tiene formato YYYY-MM-DD"
+    try:
+        dia = datetime.strptime(fecha, "%Y-%m-%d").date()
+    except ValueError:
+        return leido, "Esa fecha no existe"
+    hoy = ahora.date()
+    if dia < hoy:
+        return leido, "Ese día ya ha pasado"
+    if dia > hoy + timedelta(days=HUECOS_DIAS_MAX):
+        return leido, f"Solo reservo hasta dentro de {HUECOS_DIAS_MAX} días"
+    if not (hi and hf):
+        return leido, "Faltan la hora de inicio y la de fin"
+    if not (_HORA_RE.match(hi) and _HORA_RE.match(hf)):
+        return leido, "La hora no tiene formato HH:MM (24h)"
+    base = datetime(dia.year, dia.month, dia.day, tzinfo=LOCAL_TZ)
+    ini  = base.replace(hour=int(hi[:2]), minute=int(hi[3:]))
+    fin  = base.replace(hour=int(hf[:2]), minute=int(hf[3:]))
+    if fin <= ini:
+        return leido, "La hora de fin tiene que ser posterior a la de inicio"
+    if fin - ini > timedelta(hours=RESERVAR_BLOQUE_MAX_H):
+        return leido, f"Un bloque no puede durar más de {RESERVAR_BLOQUE_MAX_H} horas"
+    if dia == hoy and ini <= ahora:
+        return leido, "Esa hora ya ha pasado"
+    return {**leido, "ini": ini, "fin": fin}, None
+
+
+# Motivos que ya empiezan por verbo y se pueden pegar detrás del título tal cual.
+_MOTIVOS_CON_VERBO = ("Choca con", "Ya estaba", "Se pisa con")
+
+
+def _frase_reserva(creados: list, rechazados: list) -> str:
+    """Lo que se le dice al usuario tras reservar, pensado para decirse en voz alta.
+
+    Sin listas ni markdown: sale en el chat y por el altavoz. Y siempre dice qué NO se
+    ha reservado y por qué, porque no hay rollback: un «hecho» a secas con la mitad
+    rechazada le haría ir al gimnasio a una hora que choca con una reunión.
+    """
+    def _hora(hhmm: str) -> str:
+        h, _, m = str(hhmm).partition(":")
+        return f"{int(h)}:{m}" if h.isdigit() else str(hhmm)
+
+    def _y(partes: list) -> str:
+        return partes[0] if len(partes) == 1 else ", ".join(partes[:-1]) + " y " + partes[-1]
+
+    def _minuscula(texto: str) -> str:
+        return texto[:1].lower() + texto[1:]
+
+    if creados and not rechazados:
+        return "Reservado: " + _y([
+            f"«{c['titulo']}» de {_hora(c['hora_inicio'])} a {_hora(c['hora_fin'])}"
+            for c in creados]) + "."
+    if creados:
+        total = len(creados) + len(rechazados)
+        frase = (f"He reservado {len(creados)} de {total}: "
+                 + _y([f"«{c['titulo']}»" for c in creados]) + ".")
+        for r in rechazados:
+            frase += f" «{r['titulo']}» no: {_minuscula(r['motivo'])}."
+        return frase
+    if not rechazados:
+        return "No he reservado nada."
+    partes = []
+    for r in rechazados:
+        motivo = r["motivo"]
+        if motivo.startswith(_MOTIVOS_CON_VERBO):
+            partes.append(f"«{r['titulo']}» {_minuscula(motivo)}")
+        else:
+            partes.append(f"«{r['titulo']}»: {_minuscula(motivo)}")
+    return "No he reservado nada: " + "; ".join(partes) + "."
+
+
+def _j_reservar_bloques(bloques=None) -> dict:
+    """Reserva varios bloques en Outlook de una vez. Solo se llega aquí desde
+    /jarvis/ejecutar, o sea con el botón ya pulsado.
+
+    Vuelve a leer el calendario AL EJECUTAR, no se fía de lo que vio `huecos_libres`:
+    entre proponer y pulsar pueden pasar horas, y en ese rato puede entrar una reunión.
+    Y esa misma lectura es la que evita duplicados si se confirma dos veces.
+    """
+    if not isinstance(bloques, list) or not bloques:
+        return {"ok": False, "motivo": "No hay bloques que reservar"}
+    if len(bloques) > RESERVAR_BLOQUES_MAX:
+        # Nada, ni los seis primeros: el usuario aprobó la lista entera, no un recorte.
+        return {"ok": False,
+                "motivo": f"Como mucho reservo {RESERVAR_BLOQUES_MAX} bloques de una vez"}
+
+    ahora = _ahora_local()
+    validos, rechazados = [], []
+
+    def _rechazar(i: int, b: dict, motivo: str) -> None:
+        rechazados.append({"i": i, "titulo": b["titulo"], "fecha": b["fecha"],
+                           "hora_inicio": b["hora_inicio"], "motivo": motivo})
+
+    for i, bruto in enumerate(bloques):
+        b, motivo = _validar_bloque(bruto, ahora)
+        if not motivo:
+            otro = next((v for v in validos if _solapa(b["ini"], b["fin"], v["ini"], v["fin"])),
+                        None)
+            if otro:
+                motivo = f"Se pisa con «{otro['titulo']}»"
+        if motivo:
+            _rechazar(i, b, motivo)
+        else:
+            validos.append({**b, "i": i})
+
+    creados = []
+    if validos:
+        leido = _j_ocupados({v["ini"].date() for v in validos})
+        if not leido.get("ok"):
+            motivo = ("No he podido mirar el calendario para comprobar choques, así que no "
+                      "he reservado nada.")
+            for v in validos:
+                _rechazar(v["i"], v, "No he podido comprobar el calendario")
+            rechazados.sort(key=lambda r: r["i"])
+            return {"ok": False, "motivo": motivo, "dile_al_usuario_literalmente": motivo,
+                    "creados": [], "rechazados": [{k: r[k] for k in r if k != "i"}
+                                                  for r in rechazados]}
+        for v in validos:
+            chocan = [o for o in leido["ocupados"]
+                      if _solapa(v["ini"], v["fin"], o["ini"], o["fin"])]
+            igual = next((o for o in chocan
+                          if o["titulo"].strip().lower() == v["titulo"].strip().lower()
+                          and o["ini"] == v["ini"] and o["fin"] == v["fin"]), None)
+            if igual:
+                _rechazar(v["i"], v, "Ya estaba reservado")
+                continue
+            if chocan:
+                o = chocan[0]
+                _rechazar(v["i"], v, f"Choca con «{o['titulo']}» "
+                                     f"({o['ini'].strftime('%H:%M')}–{o['fin'].strftime('%H:%M')})")
+                continue
+            # En serie y en el orden de la lista: `_j_crear_evento` ya valida y habla con
+            # Graph, y sin rollback lo que importa es poder decir cuáles entraron.
+            try:
+                r = _j_crear_evento(v["titulo"], v["fecha"], v["hora_inicio"], v["hora_fin"])
+            except Exception as e:
+                logger.error("Reservar bloques: crear «%s» reventó (%s)", v["titulo"], _causa(e))
+                r = {"ok": False, "motivo": "No se pudo crear el evento"}
+            if r.get("ok"):
+                creados.append({"titulo": v["titulo"], "fecha": v["fecha"],
+                                "hora_inicio": v["hora_inicio"], "hora_fin": v["hora_fin"],
+                                "id": r.get("id")})
+            else:
+                _rechazar(v["i"], v, r.get("motivo") or "No se pudo crear el evento")
+
+    rechazados.sort(key=lambda r: r["i"])
+    rechazados = [{k: r[k] for k in r if k != "i"} for r in rechazados]
+    frase  = _frase_reserva(creados, rechazados)
+    salida = {"ok": bool(creados), "creados": creados, "rechazados": rechazados,
+              "dile_al_usuario_literalmente": frase}
+    if not creados:
+        salida["motivo"] = frase
+    return salida
+
+
 def _j_enviar_resumen() -> dict:
     """Manda ahora el correo con los datos del día, sin esperar al disparador.
 
@@ -19782,6 +20217,21 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion": "Eventos del calendario (Outlook y clases) en los próximos N días, hoy incluido.",
         "parametros":  {"dias": {"type": "integer", "description": "Días a mirar desde hoy. 1 = solo hoy."}},
     },
+    "huecos_libres": {
+        "confirmar":   False,
+        "fn":          _j_huecos_libres,
+        "descripcion": "Tramos LIBRES de un día concreto (Outlook y clases), con su duración, "
+                       "entre la hora a la que empiezas y una hora antes de la que sueles "
+                       "dormirte. Úsalo para '¿cuándo tengo hueco?' o antes de proponer un "
+                       "plan del día; para saber QUÉ tienes, usa `agenda`.",
+        "parametros":  {
+            "dia":          {"type": "string",  "description": "YYYY-MM-DD; vacío = hoy."},
+            "duracion_min": {"type": "integer", "description": "Hueco mínimo en minutos, por defecto 30."},
+            "desde":        {"type": "string",  "description": "HH:MM (24h) desde la que buscar, si la pide."},
+            "hasta":        {"type": "string",  "description": "HH:MM (24h) hasta la que buscar, si la pide."},
+        },
+        "obligatorios": [],
+    },
     "clima": {
         "confirmar":   False,
         "fn":          _brief_clima,
@@ -20269,6 +20719,34 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["titulo", "fecha"],
     },
+    "reservar_bloques": {
+        # UNA herramienta con una lista y no varios `crear_evento` seguidos: el dashboard
+        # solo admite un pendiente por turno, así que el segundo pisaría al primero.
+        "confirmar":   True,
+        "fn":          _j_reservar_bloques,
+        "descripcion": "Propone reservar VARIOS bloques de tiempo en Outlook de una vez "
+                       "(máximo 6), para organizar un día. NO los crea: el usuario los "
+                       "aprueba con un solo botón. Mira antes `huecos_libres` y propón "
+                       "bloques que quepan en ellos. Para un único evento con lugar, usa "
+                       "`crear_evento`.",
+        "parametros":  {
+            "bloques": {
+                "type": "array", "maxItems": RESERVAR_BLOQUES_MAX,
+                "description": "Bloques a reservar.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "titulo":      {"type": "string"},
+                        "fecha":       {"type": "string", "description": "YYYY-MM-DD"},
+                        "hora_inicio": {"type": "string", "description": "HH:MM 24h"},
+                        "hora_fin":    {"type": "string", "description": "HH:MM 24h"},
+                    },
+                    "required": ["titulo", "fecha", "hora_inicio", "hora_fin"],
+                },
+            },
+        },
+        "obligatorios": ["bloques"],
+    },
     "editar_evento": {
         "confirmar":   True,
         "fn":          _j_editar_evento,
@@ -20476,13 +20954,14 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
 # `responder_a_la_sesion` / `arreglar_revision` (disparan sesiones de Claude Code con
 # permiso de escritura sobre el repo — este canal es para consultar, no para lanzar el
 # arreglo desde la llamada), `cobrar_entrenamiento`, `encargar_al_pc`, `crear_evento` /
-# `editar_evento` / `borrar_evento` (tocan el calendario, invariante de docs/JARVIS.md),
+# `editar_evento` / `borrar_evento` / `reservar_bloques` (tocan el calendario, invariante
+# de docs/JARVIS.md),
 # y el resto de administrativas.
 _MCP_SERVIDOR_SOLO_LECTURA = {
     "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
     "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
-    "mis_vigilancias", "errores", "jobs", "contar_revision",
+    "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
 }
 # `borrar_idea` estuvo aquí y no podía usarse nunca: es `confirmar: True` (no hay
 # papelera), así que este servidor la rechazaba siempre. Anunciarla en `tools/list` solo
@@ -20853,6 +21332,8 @@ def _jarvis_sistema(voz: bool = False, aviso: str = "", tipo: str = "") -> str:
         "- Cuando lo que diga sea la respuesta a un aviso que te dejó una sesión, usa "
         "`responder_a_la_sesion`, que retoma AQUEL trabajo con su contexto en vez de "
         "empezar otro de cero.\n"
+        "- Para organizar un día: `huecos_libres` primero y luego UNA sola propuesta con "
+        "`reservar_bloques`; no encadenes varios `crear_evento`.\n"
     ]
 
     if voz:
@@ -21772,6 +22253,7 @@ def voz_token(
 # arreglar. Van sin puntos suspensivos porque el TTS los alarga de forma rara.
 _JARVIS_RELLENOS = {
     "agenda":             "Déjame mirar el calendario.",
+    "huecos_libres":      "Miro dónde tienes hueco.",
     "crear_evento":       "Voy con el calendario.",
     "editar_evento":      "Voy con el calendario.",
     "borrar_evento":      "Voy con el calendario.",
