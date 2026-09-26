@@ -174,6 +174,9 @@ def _limpiar_estado():
     main._agent_relaunch_pending = False
     main._pc_power_action = None
     main._token_cache = None
+    # El id del calendario de clases: cada test monta el suyo, y con la copia del
+    # anterior no se pediría la lista de calendarios que el test ha simulado.
+    main._clases_cal_cache = None
     main._presencia_cache = None
     # El interruptor del resumen diario: sin limpiarlo, un test que lo apague dejaría el
     # correo apagado para todos los que vinieran detrás.

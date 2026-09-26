@@ -252,6 +252,51 @@ class TestClasses:
         assert r.status_code == 200
         assert r.json() == {"events": []}
 
+    def _listados(self, mock_requests):
+        # La URL de calendarView contiene "/me/calendars": se cuentan solo las del listado.
+        return [c for c in mock_requests.calls if c[0] == "GET" and c[1].endswith("/me/calendars")]
+
+    def test_el_id_del_calendario_se_recuerda(self, client, auth_headers, graph_token, mock_requests):
+        """Pedir la lista entera de calendarios en cada carga era un viaje a Graph en serie
+        por delante del que trae las clases, solo para reencontrar el mismo id."""
+        mock_requests.add("GET", "/calendars/cal-clases/calendarView", FakeResponse({"value": []}))
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-clases", "name": "Clases"}]
+        }))
+        assert client.get("/calendar/classes", headers=auth_headers).json() == {"events": []}
+        assert client.get("/calendar/classes", headers=auth_headers).json() == {"events": []}
+        assert len(self._listados(mock_requests)) == 1
+        assert len(mock_requests.called("GET", "/calendars/cal-clases/calendarView")) == 2
+
+    def test_un_calendario_recordado_que_ya_no_existe_se_vuelve_a_buscar(
+            self, client, auth_headers, graph_token, mock_requests):
+        """Borrado u otra cuenta conectada: el 404 del id viejo no puede llegar al
+        dashboard como error cuando buscarlo otra vez lo resuelve."""
+        main._clases_cal_cache = (main.time.time(), "clases", "cal-viejo")
+        mock_requests.add("GET", "/calendars/cal-viejo/calendarView", FakeResponse(None, 404, "no existe"))
+        mock_requests.add("GET", "/calendars/cal-nuevo/calendarView", FakeResponse({
+            "value": [{"id": "cl1", "subject": "Redes",
+                       "start": {"dateTime": "2026-07-07T08:00:00Z", "timeZone": "UTC"},
+                       "end": {"dateTime": "2026-07-07T10:00:00Z", "timeZone": "UTC"},
+                       "location": {"displayName": ""}, "isAllDay": False}]
+        }))
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-nuevo", "name": "Clases"}]
+        }))
+        cuerpo = client.get("/calendar/classes", headers=auth_headers).json()
+        assert cuerpo["events"][0]["title"] == "Redes"
+        assert main._clases_cal_cache[2] == "cal-nuevo"
+
+    def test_la_copia_caduca_y_el_nombre_se_relee(self, client, auth_headers, graph_token, mock_requests):
+        """Un calendario renombrado deja de ser el de clases: la copia no puede taparlo
+        más de CLASES_CAL_TTL."""
+        main._clases_cal_cache = (main.time.time() - main.CLASES_CAL_TTL - 1, "clases", "cal-clases")
+        mock_requests.add("GET", "/me/calendars", FakeResponse({
+            "value": [{"id": "cal-clases", "name": "Otro nombre"}]
+        }))
+        cuerpo = client.get("/calendar/classes", headers=auth_headers).json()
+        assert "error" in cuerpo and cuerpo["available"] == ["Otro nombre"]
+
     def test_list_calendars(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "/me/calendars", FakeResponse({
             "value": [{"id": "c1", "name": "Calendario", "otros": "campos"}]
@@ -290,6 +335,35 @@ class TestCacheDelTokenDeGraph:
         })
         # Sale el nuevo sin releer Supabase: la escritura ya dejó la copia al día.
         assert main.get_valid_token() == "tok-nuevo"
+
+    def test_dos_hilos_con_el_token_caducado_renuevan_una_sola_vez(self, mock_requests, monkeypatch):
+        """El dashboard pide agenda y clases a la vez: con el token caducado, cada una
+        renovaba por su cuenta con MSAL y escribía en `oauth_tokens` lo mismo."""
+        import threading
+        import time
+        from datetime import datetime, timezone
+        mock_requests.add("GET", "oauth_tokens", FakeResponse([{
+            "access_token": "tok-viejo", "refresh_token": "refresh",
+            "expires_at": datetime.now(timezone.utc).timestamp() - 10,
+        }]))
+        renovaciones = []
+
+        class _Msal:
+            def acquire_token_by_refresh_token(self, refresh, scopes):
+                renovaciones.append(refresh)
+                time.sleep(0.05)   # lo bastante para que el otro hilo llegue a esperar
+                return {"access_token": "tok-nuevo", "expires_in": 3600}
+
+        monkeypatch.setattr(main, "_msal_app", lambda: _Msal())
+        salida = []
+        hilos = [threading.Thread(target=lambda: salida.append(main.get_valid_token()))
+                 for _ in range(2)]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join()
+        assert salida == ["tok-nuevo", "tok-nuevo"]
+        assert len(renovaciones) == 1
 
     def test_token_caducado_sin_refresh_no_se_sirve_de_la_copia(self, mock_requests):
         from datetime import datetime, timezone

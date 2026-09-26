@@ -325,6 +325,33 @@ class TestElConjunto(_Reglas):
         monkeypatch.setattr(main, "REGLAS_PROACTIVAS", False)
         assert main._correr_reglas() == {}
 
+    def test_una_pasada_lee_el_calendario_una_sola_vez(self, monkeypatch):
+        """`sal_ya`, cada regla tuya de «antes de un evento» y las de la noche piden los
+        mismos 30 días a Graph con segundos de diferencia: dentro de una pasada, uno."""
+        pedidas = []
+        monkeypatch.setattr(main, "get_events",
+                            lambda credentials=None: pedidas.append(1) or {"events": []})
+        monkeypatch.setattr(main, "_REGLAS", tuple(
+            (f"r{i}", lambda: len(main._eventos_con_fecha()) * 0) for i in range(3)))
+        main._correr_reglas()
+        assert len(pedidas) == 1
+        # Y la copia muere con la pasada: una llamada suelta vuelve a ir a la fuente.
+        main._eventos_con_fecha()
+        assert len(pedidas) == 2
+
+    def test_la_salud_de_una_pasada_la_comparten_tus_reglas(self, monkeypatch):
+        """Las reglas del sistema ya la leyeron: una regla tuya de métrica en la misma
+        pasada no vuelve a traer 30 días de la tabla entera."""
+        pedidas = []
+        monkeypatch.setattr(main, "_brief_salud", lambda: pedidas.append(1) or {})
+        p = {"metrica": "hrv", "direccion": "debajo", "valor": 40}
+        monkeypatch.setattr(main, "_REGLAS", (
+            ("sistema", lambda obtener_salud: len(obtener_salud()) * 0),
+            ("tuya",    lambda: int(bool(main._plantilla_metrica(p, self.AHORA)))),
+        ))
+        main._correr_reglas()
+        assert len(pedidas) == 1
+
 
 class TestVigilarPaginas(_Reglas):
     """La capacidad proactiva genérica: en vez de una regla en el código por cada cosa

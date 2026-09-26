@@ -1672,6 +1672,14 @@ def load_token_data() -> dict | None:
         return data
     return None
 
+# Una sola renovación a la vez. El dashboard pide la agenda y las clases a la vez, y el
+# resumen diario y la agenda de Jarvis las lanzan en paralelo: con el token caducado,
+# cada hilo hacía SU renovación con MSAL y su lectura + escritura en `oauth_tokens`, para
+# acabar todos con un token equivalente. Con el cerrojo, el primero renueva y los demás
+# se encuentran la copia en memoria ya al día.
+_token_renovar_lock = threading.Lock()
+
+
 def get_valid_token() -> str | None:
     data = load_token_data()
     if not data:
@@ -1679,6 +1687,19 @@ def get_valid_token() -> str | None:
     # Si el access_token aún no ha expirado, lo devolvemos
     expires_at = data.get("expires_at", 0)
     if datetime.now(timezone.utc).timestamp() < expires_at - 60:
+        return data["access_token"]
+    with _token_renovar_lock:
+        return _renovar_token()
+
+
+def _renovar_token() -> str | None:
+    """La renovación de `get_valid_token`, con el cerrojo ya cogido."""
+    # Se vuelve a mirar dentro: quien esperaba el cerrojo puede encontrarse el token ya
+    # renovado por el hilo que lo tenía.
+    data = load_token_data()
+    if not data:
+        return None
+    if datetime.now(timezone.utc).timestamp() < data.get("expires_at", 0) - 60:
         return data["access_token"]
     # Si hay refresh_token, renovamos
     refresh_token = data.get("refresh_token")
@@ -1740,6 +1761,7 @@ def login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
 
 @app.get("/auth/callback")
 def callback(code: str, state: str = ""):
+    global _clases_cal_cache
     # El callback lo llama Microsoft por redirect: no puede llevar el JWT del
     # dashboard. La prueba de que este código viene de un login que SÍ empezó con
     # sesión iniciada es el `state` que /auth/login generó y firmó.
@@ -1755,6 +1777,9 @@ def callback(code: str, state: str = ""):
     )
     if "access_token" in result:
         _store_result(result)
+        # Puede ser otra cuenta de Outlook: el calendario de clases recordado es de la
+        # anterior (ver `_clases_cal_cache`).
+        _clases_cal_cache = None
         return {"status": "ok", "message": "Autenticado correctamente"}
     return {"error": result.get("error_description")}
 
@@ -1917,36 +1942,76 @@ def delete_event(
     return {"status": "ok"}
 
 
+# Id del calendario de clases, recordado entre peticiones: (momento, nombre buscado, id).
+# Cada carga del dashboard, cada resumen diario y cada agenda de Jarvis pedían primero la
+# lista ENTERA de calendarios a Graph solo para volver a encontrar el mismo id, y ese
+# viaje iba en serie por delante del que trae las clases. El id de un calendario no
+# cambia; lo que puede pasar es que lo borres, que lo renombres o que conectes otra cuenta
+# de Outlook. Lo primero y lo último dan un 404 con el id guardado, y entonces se vuelve a
+# buscar en el acto; el nombre se relee como mucho cada CLASES_CAL_TTL segundos, y la
+# conexión de una cuenta nueva (`/auth/callback`) tira la copia.
+CLASES_CAL_TTL = 3600
+_clases_cal_cache: tuple | None = None
+
+
+def _id_calendario_clases(headers: dict) -> tuple:
+    """(id sin escapar, None, venía de la copia) o (None, respuesta de error, False)."""
+    global _clases_cal_cache
+    guardado = _clases_cal_cache
+    if (guardado and guardado[1] == CLASSES_CALENDAR.lower()
+            and time.time() - guardado[0] < CLASES_CAL_TTL):
+        return guardado[2], None, True
+    r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
+    fallo = _graph_fallo(r, "me/calendars (clases)")
+    if fallo:
+        return None, fallo, False
+    calendars = r.json().get("value", [])
+    cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
+    if not cal:
+        return None, {"error": "Calendario 'Clases' no encontrado",
+                      "available": [c["name"] for c in calendars]}, False
+    _clases_cal_cache = (time.time(), CLASSES_CALENDAR.lower(), str(cal["id"]))
+    return str(cal["id"]), None, False
+
+
 @app.get("/calendar/classes")
 def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    global _clases_cal_cache
     token = get_valid_token()
     if not token:
         return {"error": "No autenticado"}
     headers = {"Authorization": f"Bearer {token}"}
-    # Buscar el calendario llamado 'Clases'
-    r = http.get("https://graph.microsoft.com/v1.0/me/calendars", headers=headers)
-    fallo = _graph_fallo(r, "me/calendars (clases)")
+    # Buscar el calendario llamado 'Clases' (o recordar cuál era, ver `_clases_cal_cache`)
+    cal_crudo, fallo, de_copia = _id_calendario_clases(headers)
     if fallo:
         return fallo
-    calendars = r.json().get("value", [])
-    cal = next((c for c in calendars if c["name"].lower() == CLASSES_CALENDAR.lower()), None)
-    if not cal:
-        return {"error": "Calendario 'Clases' no encontrado", "available": [c["name"] for c in calendars]}
-    # Escapado como todo id de Graph (invariante 6): los ids de calendario son base64 y
-    # traen `/`, `+` y `=`, que sin escapar cambian la ruta o la query.
-    cal_id = quote(str(cal["id"]), safe="")
     # Inicio del día en hora local del usuario para no perder clases de hoy
     today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (today_start + timedelta(days=60)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    r2 = http.get(
-        f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
-        f"?startDateTime={start}&endDateTime={end}&$top=200"
-        # `body`/`bodyPreview` en el $select: sin ellos Graph no manda el cuerpo, y la
-        # alud_url de las entregas —que se crean en ESTE calendario— no existía.
-        f"&$select=subject,start,end,location,isAllDay,body,bodyPreview&$orderby=start/dateTime",
-        headers=headers
-    )
+
+    def _vista(cal_crudo: str):
+        # Escapado como todo id de Graph (invariante 6): los ids de calendario son base64
+        # y traen `/`, `+` y `=`, que sin escapar cambian la ruta o la query.
+        cal_id = quote(cal_crudo, safe="")
+        return http.get(
+            f"https://graph.microsoft.com/v1.0/me/calendars/{cal_id}/calendarView"
+            f"?startDateTime={start}&endDateTime={end}&$top=200"
+            # `body`/`bodyPreview` en el $select: sin ellos Graph no manda el cuerpo, y la
+            # alud_url de las entregas —que se crean en ESTE calendario— no existía.
+            f"&$select=subject,start,end,location,isAllDay,body,bodyPreview&$orderby=start/dateTime",
+            headers=headers
+        )
+
+    r2 = _vista(cal_crudo)
+    if de_copia and r2.status_code == 404:
+        # El id recordado ya no existe (calendario borrado, u otra cuenta): se busca de
+        # nuevo ahora mismo, que es lo que habría pasado sin la copia.
+        _clases_cal_cache = None
+        cal_crudo, fallo, _ = _id_calendario_clases(headers)
+        if fallo:
+            return fallo
+        r2 = _vista(cal_crudo)
     r2.encoding = "utf-8"
     fallo = _graph_fallo(r2, "calendarView (clases)")
     if fallo:
@@ -3747,16 +3812,34 @@ def _etf_precios_actuales(holdings: list[dict], refrescar: bool) -> dict:
             guardado = _etf_precios_cache
         if guardado and time.time() - guardado[0] < ETF_PRECIO_TTL_MINUTOS * 60:
             return guardado[1]
-    precios = {}
+    pedir = []
     for h in holdings:
         simbolo = h.get("simbolo_yahoo")
         if not simbolo:
             logger.warning("Yahoo Finance: %s no tiene simbolo_yahoo en Supabase", h.get("ticker"))
             continue
+        pedir.append((h["ticker"], simbolo))
+
+    def _precio(ticker: str, simbolo: str):
         try:
-            precios[h["ticker"]] = _yahoo_precio_actual(simbolo)
+            return _yahoo_precio_actual(simbolo)
         except _YahooFallo as e:
-            logger.warning("Yahoo Finance: sin precio actual de %s (%s)", h["ticker"], e)
+            logger.warning("Yahoo Finance: sin precio actual de %s (%s)", ticker, e)
+            return None
+
+    # Un precio por ETF y cada uno es un viaje a Yahoo de medio segundo: en serie, la
+    # cartera tardaba tanto como la suma de todos. Van a la vez, y el diccionario se
+    # rellena en el orden de `holdings`, como antes. Cada tarea lleva su copia del
+    # contexto para que el aviso de un ETF sin precio siga diciendo en qué petición pasó.
+    precios = {}
+    if pedir:
+        with ThreadPoolExecutor(max_workers=min(4, len(pedir))) as pool:
+            futuros = [(ticker, pool.submit(contextvars.copy_context().run, _precio, ticker, simbolo))
+                       for ticker, simbolo in pedir]
+            for ticker, futuro in futuros:
+                precio = futuro.result()
+                if precio is not None:
+                    precios[ticker] = precio
     with _etf_precios_lock:
         _etf_precios_cache = (time.time(), precios)
     return precios
@@ -3790,15 +3873,21 @@ def get_cartera_etf(
     """Cartera manual de ETFs: participaciones y aportado siempre se conocen (son datos
     propios); precio actual, valor y ganancia son `None` si Yahoo Finance falló para
     ese ETF — nunca un 0 €, que sería una afirmación sobre el dinero."""
-    r = http.get(f"{SUPABASE_URL}/rest/v1/etf_holdings?select=*&order=ticker.asc", headers=supabase_headers())
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    holdings = r.json()
+    # Las dos tablas no dependen entre sí, así que las aportaciones se piden a la vez que
+    # los ETFs. Su respuesta se recoge DESPUÉS de mirar la primera, en el mismo orden de
+    # siempre: si fallan las dos, el error que sale es el mismo que antes.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        f_apor = pool.submit(http.get, f"{SUPABASE_URL}/rest/v1/etf_aportaciones?select=*&order=fecha.asc",
+                             headers=supabase_headers())
+        r = http.get(f"{SUPABASE_URL}/rest/v1/etf_holdings?select=*&order=ticker.asc", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        holdings = r.json()
 
-    r2 = http.get(f"{SUPABASE_URL}/rest/v1/etf_aportaciones?select=*&order=fecha.asc", headers=supabase_headers())
-    if r2.status_code >= 300:
-        raise _supabase_error(r2)
-    aportaciones = r2.json()
+        r2 = f_apor.result()
+        if r2.status_code >= 300:
+            raise _supabase_error(r2)
+        aportaciones = r2.json()
 
     precios = _etf_precios_actuales(holdings, refrescar)
 
@@ -4918,12 +5007,19 @@ def get_health_metrics(
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days debe estar entre 1 y 365")
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    # Paginado (ver `_leer_todas`): con `limit=5000` Supabase devolvía igualmente 1.000
-    # filas, las más ANTIGUAS, y el sueño de las últimas noches no salía en el dashboard.
-    r, filas = _leer_todas(
-        f"{SUPABASE_URL}/rest/v1/health_metrics"
-        f"?metric_date=gte.{since}&order=metric_date.asc,metric_name.asc",
-    )
+    # Los ajustes se piden A LA VEZ que las métricas: no dependen de ellas, y esto se
+    # ejecuta en cada carga del dashboard. En serie eran un viaje a Supabase más por
+    # delante de la respuesta. Su resultado se recoge al final, donde se leía antes: así
+    # un fallo de las métricas sigue saliendo como el 502 de siempre. Con la copia del
+    # contexto, su aviso de "no se pudieron leer" sigue diciendo en qué petición pasó.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        f_ajustes = pool.submit(contextvars.copy_context().run, _leer_salud_ajustes)
+        # Paginado (ver `_leer_todas`): con `limit=5000` Supabase devolvía igualmente
+        # 1.000 filas, las más ANTIGUAS, y el sueño de las últimas noches no salía.
+        r, filas = _leer_todas(
+            f"{SUPABASE_URL}/rest/v1/health_metrics"
+            f"?metric_date=gte.{since}&order=metric_date.asc,metric_name.asc",
+        )
     if filas is None:
         raise _supabase_error(r)
 
@@ -4978,7 +5074,7 @@ def get_health_metrics(
     # pidiendo esto y necesita el corte para calcular las líneas base. En un endpoint
     # aparte serían dos viajes para pintar un solo panel.
     return {"metrics": grouped, "last_sync": last_sync, "reloj": reloj,
-            "ajustes": _leer_salud_ajustes()}
+            "ajustes": f_ajustes.result()}
 
 
 @app.patch("/health/ajustes")
@@ -12762,13 +12858,36 @@ def _toca_una_vez(clave: str, hora: tuple) -> bool:
     return True
 
 
+# Lo que las reglas leen UNA vez por pasada del tick (ver `_correr_reglas`). El calendario
+# lo piden `sal_ya` en cada tick, cada regla tuya de «antes de un evento» y, pasada la hora
+# de la noche, tres reglas más: cada una era un viaje a Graph trayendo los mismos 30 días,
+# segundos después del anterior. Fuera de una pasada vale None y cada lectura va a la
+# fuente, como siempre. Es una contextvar y no un global porque el tick puede cruzarse con
+# una llamada suelta a una regla, y ésa no tiene por qué ver la copia de otra.
+_pasada_reglas: contextvars.ContextVar = contextvars.ContextVar("pasada_reglas", default=None)
+
+
+def _una_vez_por_pasada(clave: str, leer):
+    """`leer()`, o lo que ya devolvió en esta misma pasada de reglas.
+
+    Si `leer` lanza no se guarda nada: la siguiente regla lo vuelve a intentar, igual que
+    antes de que hubiera copia.
+    """
+    copia = _pasada_reglas.get()
+    if copia is None:
+        return leer()
+    if clave not in copia:
+        copia[clave] = leer()
+    return copia[clave]
+
+
 def _eventos_con_fecha(dias: int = 2) -> list:
     """Los eventos de los próximos días con sus fechas ya parseadas a hora local.
 
     Los de todo el día quedan fuera: no tienen hora a la que salir ni hueco que medir.
     """
     try:
-        datos = get_events(credentials=None)
+        datos = _una_vez_por_pasada("eventos", lambda: get_events(credentials=None))
     except Exception as e:
         logger.warning("Reglas: no se pudieron leer los eventos (%s)", e)
         return []
@@ -13142,25 +13261,31 @@ def _correr_reglas() -> dict:
     puestos = 0
     # La salud la piden dos reglas y es la consulta más cara del tick (trae la tabla de
     # 30 días): se lee como mucho una vez por pasada, y solo si alguna llega a pedirla.
+    # La misma copia es la de `_una_vez_por_pasada`, así que las reglas tuyas de una
+    # métrica y el calendario de todas tampoco se vuelven a pedir dentro de la pasada.
     cache: dict = {}
 
     def _salud() -> dict:
-        if "v" not in cache:
+        if "salud" not in cache:
             try:
-                cache["v"] = _brief_salud()
+                cache["salud"] = _brief_salud()
             except Exception as e:
                 logger.warning("Reglas: no se pudo leer la salud (%s)", type(e).__name__)
-                cache["v"] = {}
-        return cache["v"]
+                cache["salud"] = {}
+        return cache["salud"]
 
-    for nombre, fn in _REGLAS:
-        try:
-            # Se pasa la FUNCIÓN, no el dato: así una regla que se sale por su guarda de
-            # hora (casi todas, casi siempre) no paga la consulta. Pasando el valor, el
-            # tick de cada 5 minutos traía 30 días de métricas para nada.
-            puestos += fn(_salud) if fn.__code__.co_argcount else fn()
-        except Exception:
-            logger.exception("Regla '%s': fallo inesperado", nombre)
+    marca = _pasada_reglas.set(cache)
+    try:
+        for nombre, fn in _REGLAS:
+            try:
+                # Se pasa la FUNCIÓN, no el dato: así una regla que se sale por su guarda
+                # de hora (casi todas, casi siempre) no paga la consulta. Pasando el
+                # valor, el tick de cada 5 minutos traía 30 días de métricas para nada.
+                puestos += fn(_salud) if fn.__code__.co_argcount else fn()
+            except Exception:
+                logger.exception("Regla '%s': fallo inesperado", nombre)
+    finally:
+        _pasada_reglas.reset(marca)
     return {"reglas_avisos": puestos} if puestos else {}
 
 
@@ -13240,7 +13365,9 @@ def _plantilla_metrica(p: dict, ahora: datetime) -> Optional[str]:
         umbral = float(p.get("valor"))
     except (TypeError, ValueError):
         return None
-    m = (_brief_salud() or {}).get(clave) or {}
+    # Dentro del tick, la misma lectura que ya hicieron las reglas del sistema (o la de
+    # otra regla tuya de métrica): son 30 días de la tabla entera por cada una.
+    m = (_una_vez_por_pasada("salud", _brief_salud) or {}).get(clave) or {}
     ultimo = m.get("ultimo")
     # Un dato viejo no dispara nada: la métrica de hace una semana no dice nada de hoy.
     # `dias_atras` se compara contra None y no con `or`: 0 es el dato de HOY, el más

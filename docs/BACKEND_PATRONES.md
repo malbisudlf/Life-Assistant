@@ -59,6 +59,13 @@
   otro por minuto. La copia se rellena al leer, se actualiza en `save_token_data()` y
   se tira si el refresh falla. Si tocas la escritura del token, mantén esa invalidación
   (y resetéala en `reset_state` de los tests, como el resto de estado de módulo).
+  La renovación va **tras un cerrojo** (`_token_renovar_lock`, y dentro se vuelve a
+  mirar la copia): agenda y clases se piden a la vez, y con el token caducado cada hilo
+  renovaba por su cuenta con MSAL y escribía lo mismo en `oauth_tokens`.
+  El **id del calendario de clases** también se recuerda (`_clases_cal_cache`, una hora
+  como mucho): antes cada `/calendar/classes` pedía la lista entera de calendarios solo
+  para reencontrarlo. Un 404 con el id recordado lo vuelve a buscar en el acto, y
+  `/auth/callback` tira la copia (puede ser otra cuenta).
   **`SCOPES_BASE` incluye `Calendars.ReadWrite`** (necesario para crear/editar eventos): si
   cambias los scopes hay que **reautenticar** pasando otra vez por `/auth/login` →
   `/auth/callback`, porque el refresh token guardado está ligado al consentimiento
@@ -206,7 +213,14 @@
   (`/training/summary` pide el último pago y las sesiones a la vez con
   `ThreadPoolExecutor`), lánzalas en paralelo en vez de en serie — se ejecuta en cada
   carga del dashboard, con el arranque en frío de Fly por delante. Si una depende del
-  resultado de otra, en serie.
+  resultado de otra, en serie. Dos detalles para que el paralelo no cambie nada más que
+  el tiempo: los resultados se **recogen en el orden de antes** (así, si fallan dos, sale
+  el mismo error que en serie), y lo que pueda registrar algo se lanza con
+  `contextvars.copy_context().run`, porque un hilo del pool no hereda la ruta de la
+  petición y el aviso llegaría a `app_logs` sin decir de dónde viene.
+  El tick de las reglas tiene su propia versión de esto: dentro de una pasada de
+  `_correr_reglas`, el calendario y la salud se leen **una vez** (`_una_vez_por_pasada`)
+  aunque los pidan varias reglas.
 - **Supabase nunca devuelve más de 1.000 filas por petición**, pida el `limit` que pida:
   PostgREST lo recorta a su `db-max-rows` sin avisar. Toda lectura que pueda pasar de ahí
   va por `_leer_todas(url)` —sin `limit` en la URL y con un `order` que no empate—, que
