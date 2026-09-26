@@ -14529,24 +14529,17 @@ def _acciones_aviso(rid: str, regla: str) -> list:
     # `LA_NADA_` significa además que el vigilante NO necesita ni una línea nueva de YAML
     # en Home Assistant — la automatización que ya existe casa por ese prefijo.
     if regla in (REGLA_REVISION, REGLA_VIGILANTE):
-        # «Arreglarlo» lleva `uri` además de su `action`: el evento del móvil a Home
-        # Assistant se pierde en silencio si la app no alcanza a HA al pulsarlo, y
-        # entonces pulsar «Arreglarlo» no hace NADA — ni se lanza el arreglo ni te
-        # enteras de que no se ha lanzado.
-        # Pasó el 2026-09-14 con el aviso del vigilante: cinco decisiones seguidas se
-        # quedaron en `pendiente`, sin un error en el log de HA, sin una petición en el del
-        # backend y sin nada que mirar. El `uri` abre el dashboard, que confirma con el JWT
-        # que ya lleva guardado y no pasa por Home Assistant en ningún momento.
-        #
-        # Aquí abrir el dashboard SÍ vale y en la alarma no (ver `_alarma_acciones`, que
-        # llevó un `uri` un solo día): «¿lo arreglo?» se contesta mirando, despierto y con
-        # tiempo, y la pantalla que se abre cuenta qué se ha roto. «Estoy despierto» es lo
-        # contrario — se pulsa a oscuras para que algo DEJE de sonar, y ahí una web que se
-        # abre es el aviso convertido en trabajo.
+        # «Arreglarlo» NO lleva `uri`, y lo llevó del 2026-09-14 al 2026-09-26. El evento
+        # del móvil a Home Assistant se pierde en silencio si la app no alcanza a HA al
+        # pulsarlo (cinco decisiones del vigilante seguidas, aquel día), y el `uri`
+        # abría el dashboard para confirmar por un segundo camino. Se quitó porque cada
+        # «Arreglarlo» te abría la web, y lo que se quiere es pulsar y seguir.
+        # Lo que evita que vuelva a perderse sin que te enteres es el acuse: al recibir
+        # la decisión el backend manda «🔧 Arreglando» (o «No he podido lanzar el
+        # arreglo»). Si pulsas y no llega nada, no ha llegado: se repite, o se le pide a
+        # Jarvis («arregla la revisión»), o se decide desde el dashboard.
         arreglar = {"action": f"LA_ARREGLAR_{rid}", "title": "Arreglarlo"}
         botones  = [arreglar, {"action": f"LA_NADA_{rid}", "title": "No hacer nada"}]
-        if FRONTEND_URL:
-            arreglar["uri"] = f"{FRONTEND_URL}/?revision={rid}&accion=arreglar"
         # Y un tercero, «Hablarlo»: «¿lo arreglo?» es una pregunta que muchas veces no se
         # puede contestar sin saber QUÉ se ha roto, y eso en una notificación no cabe.
         # Hace sonar el teléfono por la centralita (`_llamar`, vía

@@ -152,8 +152,8 @@ el informe en una pregunta con dos botones en el móvil, y la respuesta en traba
        backend: apunta la decisión en `revision_hallazgos` + encola el aviso
 08:30  el despachador lo entrega: «Arreglarlo» / «No hacer nada» / «Hablarlo»
    ↓
-   «Arreglarlo» → HA ─────────────┐
-                 y el dashboard ──┴→ POST /revision/{id}/accion → routine → PR → merge
+   «Arreglarlo» → HA → POST /revision/{id}/accion → routine → PR → merge
+                                  └→ acuse al móvil: «🔧 Arreglando» o «No he podido»
    «No hacer nada» → la fila queda `descartado` y no pasa nada más
    «Hablarlo» → dashboard con ?llamada=1&aviso=<id>&tipo=revision → Jarvis cuenta el issue
 ```
@@ -241,7 +241,7 @@ esa garantía justo en la sesión que corre sin nadie delante.
 Sin nada de esto configurado, el issue de la noche se sigue abriendo exactamente como
 antes: lo que no hay es aviso ni botón.
 
-### «Arreglarlo» vuelve por DOS caminos, y no es por gusto
+### «Arreglarlo»: pulsar y seguir, y el acuse como prueba
 
 El botón manda su `action` a Home Assistant, que llama al backend — y ese primer salto,
 móvil → HA, **se pierde en silencio** si la app no alcanza a HA en ese instante. No falla
@@ -249,14 +249,19 @@ nada visible: ni el móvil avisa, ni HA registra un intento, ni el backend recib
 petición que rechazar. Pulsas y no pasa nada. El 2026-09-14 se comió cinco decisiones
 seguidas del vigilante antes de que nadie se diera cuenta (`docs/BUGS_HISTORICOS.md`).
 
-Por eso el botón lleva además `uri`: abre el dashboard con `?revision=<id>&accion=arreglar`
-y **es el propio dashboard quien decide**, con el JWT que ya lleva guardado y sin pasar
-por Home Assistant. Los dos caminos acaban en el mismo endpoint, cuyo PATCH condicional
-consume la decisión una sola vez, así que llegar por los dos no es un problema: el
-segundo se encuentra la fila ya decidida y lo dice.
+Por eso, del 2026-09-14 al 2026-09-26, el botón llevó además `uri`: abría el dashboard
+con `?revision=<id>&accion=arreglar` y **era el propio dashboard quien decidía**, con el
+JWT que ya lleva guardado y sin pasar por Home Assistant.
 
-Y el dashboard **acusa en pantalla** lo que ha pasado. Es la otra mitad del arreglo: un
-botón que dispara algo invisible es indistinguible de uno roto, que es justo lo que había.
+Se quitó porque cada «Arreglarlo» abría la web, y un botón de «sí, arréglalo» es para
+pulsar y seguir. Lo que lo hace aceptable es **el acuse**: al recibir la decisión, el
+backend contesta al móvil «🔧 Arreglando» (con el enlace a la sesión) o «🔧 No he podido
+lanzar el arreglo» con el motivo. Un botón que dispara algo invisible es indistinguible de
+uno roto; uno que contesta, no. **Si pulsas y en un minuto no llega nada, la decisión no
+ha llegado**: se repite el botón, se le dice a Jarvis «arregla la revisión», o se decide
+desde el dashboard (`?revision=<id>&accion=arreglar` sigue funcionando, solo que ya no lo
+abre el botón). El PATCH condicional consume la decisión una sola vez, así que repetir
+no lanza dos arreglos.
 
 ### «Hablarlo»: decidir sabiendo qué se ha roto
 

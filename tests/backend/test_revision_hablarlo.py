@@ -31,12 +31,12 @@ class TestLosDosCaminosDelBoton:
     def _con_frontend(self, monkeypatch):
         monkeypatch.setattr(main, "FRONTEND_URL", FRONT)
 
-    def test_arreglarlo_lleva_ademas_un_uri_que_no_pasa_por_ha(self):
-        """El camino de HA se pierde en silencio; éste confirma con el JWT del dashboard."""
+    def test_arreglarlo_no_abre_la_web(self):
+        """Pulsar y seguir: la confirmación llega como acuse al móvil, no abriendo el dashboard."""
         acciones = main._acciones_aviso(UN_UUID, main.REGLA_VIGILANTE)
         arreglar = acciones[0]
         assert arreglar["action"] == f"LA_ARREGLAR_{UN_UUID}"
-        assert arreglar["uri"] == f"{FRONT}/?revision={UN_UUID}&accion=arreglar"
+        assert "uri" not in arreglar
 
     def test_y_trae_el_boton_de_hablarlo_con_su_id(self):
         """«Hablarlo» hace sonar el teléfono (Jarvis-Claude), no abre el dashboard."""

@@ -650,9 +650,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   hacer nada» / «Hablarlo»— y a propósito: la pregunta es la misma, la contesta el mismo
   endpoint (`POST /revision/{id}/accion`) y reusar los ids `LA_ARREGLAR_` / `LA_NADA_`
   significa que esto **no necesitó ni una línea nueva de YAML en Home Assistant**.
-  «Arreglarlo» lleva además un `uri` al dashboard, que decide sin pasar por HA: el evento
-  del móvil a Home Assistant se pierde en silencio y se comió cinco decisiones seguidas el
-  2026-09-14. «Hablarlo» hace sonar el teléfono por la centralita (`LA_HABLAR_REV_<id>`,
+  «Arreglarlo» ya no abre el dashboard (lo hizo del 2026-09-14 al 2026-09-26, tras
+  perderse cinco decisiones seguidas en el salto móvil → HA): lo que avisa de que se ha
+  perdido es que no llegue el acuse «🔧 Arreglando». «Hablarlo» hace sonar el teléfono por la centralita (`LA_HABLAR_REV_<id>`,
   `accion: "hablar"`) con el issue entero delante, y contesta Jarvis-Claude, no el
   dashboard. Los dos, explicados en `docs/REVISION_NOCTURNA.md`. La decisión se apunta en `revision_hallazgos` con
   `origen='vigilante'` —la misma tabla que ya guarda las otras dos clases de decisión de
