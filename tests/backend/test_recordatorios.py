@@ -63,6 +63,44 @@ class TestApuntarRecordatorio:
         assert main._j_cancelar_recordatorio("el del dentista")["ok"] is False
         assert not mock_requests.called("DELETE", "jarvis_recordatorios")
 
+    def test_cancelar_borra_con_un_id_valido(self, mock_requests):
+        rid = str(uuid.uuid4())
+        mock_requests.add("DELETE", "jarvis_recordatorios", FakeResponse([], 204))
+        assert main._j_cancelar_recordatorio(rid) == {"ok": True, "id": rid}
+
+    def test_cancelar_si_falla_supabase_no_finge_que_borro(self, mock_requests):
+        rid = str(uuid.uuid4())
+        mock_requests.add("DELETE", "jarvis_recordatorios", FakeResponse({}, 500))
+        with pytest.raises(main.HTTPException):
+            main._j_cancelar_recordatorio(rid)
+
+
+class TestMisRecordatorios:
+    """La herramienta que lista lo pendiente: pasar de UTC (la tabla) a hora local (en
+    lo que piensa quien pregunta) sin que un valor mal formado tumbe el resto."""
+
+    def test_lista_en_hora_local_y_no_en_utc(self, mock_requests):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([
+            {"id": "r-1", "cuando": "2026-08-17T07:00:00+00:00", "texto": "llamar al dentista"},
+        ]))
+        r = main._j_mis_recordatorios()
+        assert r["recordatorios"][0]["texto"] == "llamar al dentista"
+        # Verano en Madrid: las 07:00 UTC de la tabla son las 09:00 locales.
+        assert r["recordatorios"][0]["cuando"].endswith("09:00")
+
+    def test_uno_mal_formado_no_se_lleva_por_delante_a_los_demas(self, mock_requests):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([
+            {"id": "r-roto", "cuando": "esto-no-es-una-fecha", "texto": "raro"},
+            {"id": "r-2", "cuando": "2026-08-17T07:00:00+00:00", "texto": "bueno"},
+        ]))
+        r = main._j_mis_recordatorios()
+        assert [x["id"] for x in r["recordatorios"]] == ["r-2"]
+
+    def test_si_falla_supabase_no_hay_lista_que_dar(self, mock_requests):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse({}, 500))
+        with pytest.raises(main.HTTPException):
+            main._j_mis_recordatorios()
+
 
 class TestDespacho:
     def _vencido(self, mock_requests, texto="llamar al dentista"):

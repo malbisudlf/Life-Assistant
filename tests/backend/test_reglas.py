@@ -442,6 +442,40 @@ class TestVigilarPaginas(_Reglas):
         self._pagina(monkeypatch, "x")
         assert "error" in main._j_vigilar_pagina("https://ejemplo.com/y", "c")
 
+    def test_mis_vigilancias_lista_lo_guardado(self, mock_requests):
+        mock_requests.add("GET", "vigilancias", FakeResponse([
+            {"clave": "precio", "url": "https://ejemplo.com/x", "buscar": None,
+             "ultima_vez": "2026-08-17T10:00:00Z", "avisos": 2},
+        ]))
+        r = main._j_mis_vigilancias()
+        assert r["vigilancias"][0]["clave"] == "precio"
+        assert r["vigilancias"][0]["avisos"] == 2
+
+    def test_mis_vigilancias_si_falla_supabase_no_revienta(self, mock_requests):
+        """Una herramienta que revienta se lleva por delante la conversación entera:
+        aquí el fallo vuelve como `error`, no como excepción."""
+        mock_requests.add("GET", "vigilancias", FakeResponse({}, 500))
+        r = main._j_mis_vigilancias()
+        assert "error" in r
+
+    def test_dejar_de_vigilar_exige_nombre(self, mock_requests):
+        assert main._j_dejar_de_vigilar("")["error"]
+        assert not mock_requests.called("DELETE", "vigilancias")
+
+    def test_dejar_de_vigilar_borra_por_su_clave(self, mock_requests):
+        mock_requests.add("DELETE", "vigilancias", FakeResponse([], 204))
+        r = main._j_dejar_de_vigilar("Precio del vuelo")
+        assert r["ok"] is True
+        borrado = mock_requests.called("DELETE", "vigilancias")[0][1]
+        # La clave se normaliza igual que al darla de alta (minúsculas, sin acentos ni
+        # espacios): si no coincidiera con la guardada, el borrado no encontraría nada.
+        assert "precio_del_vuelo" in borrado
+
+    def test_dejar_de_vigilar_si_falla_supabase_no_revienta(self, mock_requests):
+        mock_requests.add("DELETE", "vigilancias", FakeResponse({}, 500))
+        r = main._j_dejar_de_vigilar("precio")
+        assert "error" in r
+
 
 class TestCorreoEntrante(_Reglas):
     """Lo accionable con fecha que llega al buzón. No es "resumir el correo" —eso ya lo
