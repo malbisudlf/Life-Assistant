@@ -513,6 +513,101 @@ class TestTraining:
         posted = mock_requests.called("POST", "training_payments")[0][2]["json"]
         assert posted["amount"] == 40.0
 
+    def test_add_session_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("POST", "training_sessions", FakeResponse(None, 500, "secreto interno"))
+        r = client.post("/training/sessions", headers=auth_headers,
+                        json={"date": "2026-07-05", "duration_hours": 1})
+        assert r.status_code == 502
+        assert "secreto" not in r.text
+
+
+class TestActualizarClienteEntrenamiento:
+    """`PATCH /training/client` — cambiar el precio por hora o cada cuántas sesiones se
+    cobra. No hay botón para crear el cliente: se da de alta a mano en Supabase, así que
+    aquí solo se ajustan los dos valores que antes estaban hardcodeados (docs/ENTRENAMIENTO.md)."""
+
+    CLIENT = {"id": "c1", "price_per_hour": 16, "sessions_per_payment": 4}
+
+    def test_requiere_jwt(self, client):
+        assert client.patch("/training/client", json={"price_per_hour": 18}).status_code in (401, 403)
+
+    def test_sin_cliente_400(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([]))
+        r = client.patch("/training/client", headers=auth_headers, json={"price_per_hour": 18})
+        assert r.status_code == 400
+
+    def test_cuerpo_vacio_400(self, client, auth_headers, mock_requests):
+        # Ningún campo enviado: nada que actualizar, y no vale la pena llamar a Supabase.
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        r = client.patch("/training/client", headers=auth_headers, json={})
+        assert r.status_code == 400
+        assert not mock_requests.called("PATCH", "training_clients")
+
+    def test_actualiza_solo_el_precio(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        actualizado = {**self.CLIENT, "price_per_hour": 18}
+        mock_requests.add("PATCH", "training_clients", FakeResponse([actualizado], 200))
+        r = client.patch("/training/client", headers=auth_headers, json={"price_per_hour": 18})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "client": actualizado}
+        enviado = mock_requests.called("PATCH", "training_clients")[0][2]["json"]
+        # sessions_per_payment no se manda: solo lo que llegó en el cuerpo.
+        assert enviado == {"price_per_hour": 18}
+
+    def test_actualiza_solo_las_sesiones_por_cobro(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("PATCH", "training_clients", FakeResponse([self.CLIENT], 200))
+        client.patch("/training/client", headers=auth_headers, json={"sessions_per_payment": 8})
+        enviado = mock_requests.called("PATCH", "training_clients")[0][2]["json"]
+        assert enviado == {"sessions_per_payment": 8}
+
+    def test_precio_fuera_de_rango_422(self, client, auth_headers):
+        r = client.patch("/training/client", headers=auth_headers, json={"price_per_hour": 0})
+        assert r.status_code == 422
+        r2 = client.patch("/training/client", headers=auth_headers, json={"price_per_hour": 1001})
+        assert r2.status_code == 422
+
+    def test_sesiones_por_cobro_fuera_de_rango_422(self, client, auth_headers):
+        r = client.patch("/training/client", headers=auth_headers, json={"sessions_per_payment": 0})
+        assert r.status_code == 422
+        r2 = client.patch("/training/client", headers=auth_headers, json={"sessions_per_payment": 101})
+        assert r2.status_code == 422
+
+    def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("PATCH", "training_clients", FakeResponse(None, 500, "secreto interno"))
+        r = client.patch("/training/client", headers=auth_headers, json={"price_per_hour": 18})
+        assert r.status_code == 502
+        assert "secreto" not in r.text
+
+
+class TestBorrarSesionEntrenamiento:
+    """`DELETE /training/sessions/{session_id}` — corregir una sesión mal apuntada."""
+
+    ID = "123e4567-e89b-12d3-a456-426614174000"
+
+    def test_requiere_jwt(self, client):
+        assert client.delete(f"/training/sessions/{self.ID}").status_code in (401, 403)
+
+    def test_id_invalido_422(self, client, auth_headers):
+        r = client.delete("/training/sessions/no-es-un-uuid", headers=auth_headers)
+        assert r.status_code == 422
+
+    def test_borra_la_sesion(self, client, auth_headers, mock_requests):
+        mock_requests.add("DELETE", "training_sessions", FakeResponse([], 204))
+        r = client.delete(f"/training/sessions/{self.ID}", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+    def test_un_fallo_de_supabase_se_dice_con_ok_false(self, client, auth_headers, mock_requests):
+        # A diferencia del resto de endpoints, éste no traduce el fallo a un 502: se
+        # limita a decir `ok: false` con la petición en 200 (comportamiento actual).
+        mock_requests.add("DELETE", "training_sessions", FakeResponse(None, 500, "boom"))
+        r = client.delete(f"/training/sessions/{self.ID}", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"ok": False}
+
 
 class TestMetricasAcumulativasCompartidas:
     """Las dos rutas de ingesta deben tratar igual las métricas acumulativas.

@@ -102,6 +102,39 @@ class TestPendingJob:
         assert "secreto" not in r.text
 
 
+class TestJobById:
+    """`GET /jobs/by-id/{job_id}` es del dashboard (JWT normal), no del agente: lo usa
+    la zona dev para mostrar el estado de un job concreto sin listar toda la cola."""
+
+    def test_requiere_jwt(self, client):
+        assert client.get(f"/jobs/by-id/{JOB_ID}").status_code in (401, 403)
+
+    def test_id_invalido_da_422(self, client, auth_headers):
+        r = client.get("/jobs/by-id/no-es-un-uuid", headers=auth_headers)
+        assert r.status_code == 422
+
+    def test_devuelve_el_job(self, client, auth_headers, mock_requests):
+        job = {"id": JOB_ID, "status": "running", "claimed_by": "w1",
+               "claimed_at": "2026-07-05T10:00:00Z", "attempt": 0,
+               "created_at": "2026-07-05T09:00:00Z"}
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([job]))
+        r = client.get(f"/jobs/by-id/{JOB_ID}", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "job": job}
+
+    def test_job_inexistente_devuelve_null_no_404(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse([]))
+        r = client.get(f"/jobs/by-id/{JOB_ID}", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "job": None}
+
+    def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/jobs", FakeResponse(None, 500, "secreto interno"))
+        r = client.get(f"/jobs/by-id/{JOB_ID}", headers=auth_headers)
+        assert r.status_code == 502
+        assert "secreto" not in r.text
+
+
 class TestAuthAgente:
     """El agente PC se autentica con AGENT_TOKEN, un token de servicio que no caduca.
 
@@ -321,3 +354,32 @@ class TestAgents:
         assert data["offline"] is True
         assert data["status"] == "offline"
         assert data["silence_seconds"] >= 299
+
+    def test_last_seen_at_ilegible_no_revienta_y_cuenta_como_offline(
+            self, client, auth_headers, mock_requests):
+        """Un `last_seen_at` que no se puede parsear no puede tumbar el endpoint: se
+        trata como silencio larguísimo (9999s), que es justo lo que hace falta para
+        que salga offline sin adivinar una fecha que no está."""
+        mock_requests.add("GET", "/rest/v1/pc_agents", FakeResponse([
+            {"agent_id": "pc-mikel", "status": "online", "last_seen_at": "no-es-una-fecha",
+             "hostname": "PC", "version": "1.1.0"}
+        ]))
+        r = client.get("/agents/pc-mikel", headers=auth_headers)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["offline"] is True
+        assert data["status"] == "offline"
+        assert data["silence_seconds"] >= 9999
+
+    def test_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/pc_agents", FakeResponse(None, 500, "secreto interno"))
+        r = client.get("/agents/pc-mikel", headers=auth_headers)
+        assert r.status_code == 502
+        assert "secreto" not in r.text
+
+    def test_heartbeat_error_supabase_da_502_sin_detalles(self, client, auth_headers, mock_requests):
+        mock_requests.add("POST", "/rest/v1/pc_agents", FakeResponse(None, 500, "secreto interno"))
+        r = client.post("/agents/heartbeat", headers=auth_headers,
+                        json={"agent_id": "pc-mikel", "status": "online"})
+        assert r.status_code == 502
+        assert "secreto" not in r.text

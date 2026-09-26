@@ -8,6 +8,7 @@ forma cambiara, es este fichero el que tiene que enterarse primero.
 import datetime
 
 import pytest
+import requests
 from conftest import FakeResponse
 
 import main
@@ -312,6 +313,40 @@ class TestFinanzasErrores:
         mock_requests.add("GET", "/accounts/ABC12345/portfolio", FakeResponse({}, 500))
         mock_requests.add("GET", "/accounts/ABC12345/performance", FakeResponse(PERFORMANCE))
         assert client.get("/finanzas/resumen", headers=auth_headers).status_code == 502
+
+    def test_fallo_de_red_en_la_cartera_da_502_no_500(self, client, auth_headers, mock_requests, monkeypatch):
+        # `_indexa_get` envuelve la llamada en try/except: sin eso, un DNS caído o una
+        # conexión cortada (no una respuesta CON error) sube como excepción sin capturar
+        # y el cliente ve un 500 en vez del 502 de siempre.
+        monkeypatch.setattr(main, "INDEXA_TOKEN", "indexa-test-token")
+        monkeypatch.setattr(main, "INDEXA_CUENTAS", [])
+        mock_requests.add("GET", "/users/me", FakeResponse(USERS_ME))
+
+        def _sin_respuesta(url, **kwargs):
+            raise requests.ConnectionError("conexión cortada")
+
+        mock_requests.add("GET", "/accounts/ABC12345/portfolio", _sin_respuesta)
+        mock_requests.add("GET", "/accounts/ABC12345/performance", FakeResponse(PERFORMANCE))
+        r = client.get("/finanzas/resumen", headers=auth_headers)
+        assert r.status_code == 502
+        assert "conexión cortada" not in r.text
+
+    def test_fallo_de_red_en_el_rendimiento_no_tumba_la_cartera(
+            self, client, auth_headers, mock_requests, monkeypatch):
+        # Mismo criterio que un 503 de /performance (TestFinanzasSinRendimiento), pero
+        # aquí el fallo es de red, no una respuesta con código de error.
+        monkeypatch.setattr(main, "INDEXA_TOKEN", "indexa-test-token")
+        monkeypatch.setattr(main, "INDEXA_CUENTAS", [])
+        mock_requests.add("GET", "/users/me", FakeResponse(USERS_ME))
+        mock_requests.add("GET", "/accounts/ABC12345/portfolio", FakeResponse(PORTFOLIO))
+
+        def _sin_respuesta(url, **kwargs):
+            raise requests.ConnectionError("conexión cortada")
+
+        mock_requests.add("GET", "/accounts/ABC12345/performance", _sin_respuesta)
+        cuenta = client.get("/finanzas/resumen", headers=auth_headers).json()["cuentas"][0]
+        assert cuenta["valor"] == 12500.0
+        assert cuenta["rendimiento"] is False
 
     def test_una_respuesta_con_otra_forma_no_revienta(self, client, auth_headers, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "INDEXA_TOKEN", "indexa-test-token")
