@@ -82,6 +82,13 @@ Es la misma regla que gobierna el modo llamada (el micro del navegador es gratis
 se usa; Whisper se paga y por eso no) y no es negociable en una zona que uno deja abierta
 en una pestaña del navegador toda la tarde.
 
+Y por lo mismo, **lo gratis tampoco se refresca con la pestaña oculta**. Todas las pestañas
+con refresco automático lo montan con `refrescarMientrasSeVea()` (en `src/lib/dev.js`), y
+no con un `setInterval` suelto: mientras el navegador no la enseña no pide nada, y al
+volver a verse refresca en el acto si ya tocaba. Antes una zona dev olvidada en segundo
+plano seguía pidiendo el registro cada cinco segundos y gastando cuota de GitHub en
+Despliegue y Crons para pintar pantallas que nadie miraba.
+
 ## Qué puede tocar
 
 La zona dev no es solo de lectura, pero solo hace cosas que ya existen como endpoint y que

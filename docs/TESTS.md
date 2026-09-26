@@ -45,6 +45,12 @@ Trampas conocidas de jsdom:
   fallo** — asegura el comportamiento comprobando `localStorage` en su lugar.
 - El test de login renderiza el `Dashboard` completo: cualquier error de runtime en
   el camino de montaje del componente hará fallar esos tests. Es intencionado.
+- **El `Dashboard` con sesión también se puede montar** (`rendimiento.test.jsx`): basta
+  con `la_token` en `localStorage` y un `fetch` que conteste `/calendar/events` y dé 404
+  a todo lo demás — cada widget sabe pintarse sin sus datos. Hace falta un stub de
+  `Element.prototype.scrollIntoView`, que jsdom no tiene y el chat de Jarvis llama al
+  cambiar la conversación. Si falseas temporizadores, falsea solo `setInterval`: el
+  reloj del dashboard y las esperas de los tests van con `setTimeout`.
 
 ### E2E (`tests/e2e`, Playwright)
 

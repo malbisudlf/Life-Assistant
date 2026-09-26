@@ -8,6 +8,7 @@ import { API, authHeaders, apiFetch } from "../../lib/api";
 import { formatLogTime } from "../../lib/helpers";
 import { MONO, COLOR_TONO, panelStyle, tituloStyle, desdeHace,
          leerEstadoSistema, filasDeEstado } from "../../lib/dev";
+import { refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton } from "./ui";
 
 const REFRESCO_MS = 30_000;
@@ -33,10 +34,7 @@ export default function Estado({ agentId, filasExtra = [] }) {
 
   // Refresco automático: todo lo que se pide aquí es gratis (backend propio y Supabase).
   // Lo que cuesta dinero no se refresca solo nunca — docs/ZONA_DEV.md.
-  useEffect(() => {
-    const id = setInterval(() => setTic(t => t + 1), REFRESCO_MS);
-    return () => clearInterval(id);
-  }, []);
+  useEffect(() => refrescarMientrasSeVea(() => setTic(t => t + 1), REFRESCO_MS), []);
 
   // Instalar el YAML de HA y no saber si funciona hasta que toque un aviso de verdad es la
   // forma más rápida de darlo por puesto sin estarlo: esto recorre la cadena entera.

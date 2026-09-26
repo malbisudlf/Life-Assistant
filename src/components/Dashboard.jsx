@@ -32,8 +32,11 @@ import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
-import { resumenEstado } from "../lib/dev";
 import { comoBoton } from "../lib/teclado";
+// `src/lib/dev.js` NO se importa aquí de forma estática, aunque el panel ⚙ use su
+// `resumenEstado`: un import estático metía el módulo entero —casi todo lógica de la zona
+// dev— en el chunk principal, y lo pagaba cada carga del dashboard. Se pide al abrir ⚙
+// (ver `cargarResumenEstado`) y comparte chunk con la zona dev.
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -425,7 +428,11 @@ async function motivoJarvis(r) {
   return e;
 }
 
-function JarvisMensaje({ m }) {
+// Memorizado: el borrador de Jarvis vive en `Dashboard`, así que cada tecla —y cada
+// transcripción parcial de una llamada— repinta el dashboard entero, y con él hasta
+// cuarenta mensajes del historial que no han cambiado. Cada `m` es el mismo objeto
+// mientras no se toque la conversación, que es justo lo que `memo` necesita.
+const JarvisMensaje = React.memo(function JarvisMensaje({ m }) {
   const esUsuario = m.rol === "user";
   const esAviso   = m.rol === "aviso";
   if (esAviso) {
@@ -454,7 +461,7 @@ function JarvisMensaje({ m }) {
       </div>
     </div>
   );
-}
+});
 
 // Reaperturas seguidas del micrófono sin oír nada antes de colgar. Chrome cierra la
 // sesión cada pocos segundos de silencio, así que esto son del orden de un minuto callado.
@@ -816,7 +823,12 @@ function LineaCarril({ carril, ahora }) {
   );
 }
 
-function LineaDelDia({ dia, datos, onDia, cardStyle }) {
+// Memorizado: es el widget con más nodos del dashboard (seis carriles con sus tramos) y
+// solo cambia cuando cambian sus datos o el minuto. Para que `memo` sirva, `Dashboard`
+// le pasa `datos` y `cardStyle` con la misma identidad entre renders (ver `datosLinea`
+// y `estilosTarjeta`); con objetos nuevos en cada render volvería a pintarse con cada
+// tecla que se escribe a Jarvis.
+const LineaDelDia = React.memo(function LineaDelDia({ dia, datos, onDia, cardStyle }) {
   const puedeAtras  = dia > desplazarDia(datos.hoy, -LINEA_DIAS_ATRAS);
   const puedeAlante = dia < datos.hoy;
   const botonNav = habilitado => ({
@@ -869,7 +881,7 @@ function LineaDelDia({ dia, datos, onDia, cardStyle }) {
       </div>
     </div>
   );
-}
+});
 
 // ── ESTILOS GLOBALES ─────────────────────────────────────────────
 const GLOBAL_CSS = `
@@ -1583,6 +1595,8 @@ export default function Dashboard() {
   const [showSettings, setShowSettings]   = useState(false);
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
+  // `resumenEstado` de src/lib/dev.js, que llega al abrir ⚙ (ver el import de arriba).
+  const [resumenEstado, setResumenEstado] = useState(null);
   // La zona de desarrollo (docs/ZONA_DEV.md). Es una vista aparte, no un modal: cuando
   // está abierta el dashboard no se pinta, pero su estado sigue vivo — por eso puede
   // pasarle las filas del semáforo que solo el dashboard conoce, sin volver a pedirlas.
@@ -3157,7 +3171,12 @@ export default function Dashboard() {
       if (!e || Date.now() - (e.pedidoEn || 0) > VOZ_TOKEN_RENUEVA_MS) pedirPermisoEscucha();
     };
     renovar();
-    const reloj = setInterval(renovar, VOZ_TOKEN_RENUEVA_MS);
+    // Con la pestaña oculta el tic no pide nada: son dos tokens cada diez minutos para
+    // una pestaña que nadie mira —toda la noche, si se queda abierta— y `alVolver`
+    // renueva lo caducado en cuanto vuelve a verse, que es cuando se va a llamar.
+    const reloj = setInterval(() => {
+      if (document.visibilityState !== "hidden") renovar();
+    }, VOZ_TOKEN_RENUEVA_MS);
     const alVolver = () => { if (document.visibilityState === "visible") renovar(); };
     document.addEventListener("visibilitychange", alVolver);
     return () => {
@@ -3479,6 +3498,20 @@ export default function Dashboard() {
   // Las señales de si algo va mal ya existían, pero repartidas: si el backend
   // responde, si la sesión de Outlook sigue viva, cuándo sincronizó el Watch, si el
   // agente contesta. Juntarlas evita tener que abrir logs para saber qué se ha caído.
+
+  // La línea de resumen de ⚙ necesita `resumenEstado`, que vive con la lógica de la zona
+  // dev y va en su chunk: se descarga la primera vez que se abre ⚙, en paralelo con las
+  // consultas de `cargarEstadoSistema`, que tardan más. Si la descarga falla (un
+  // despliegue con la pestaña abierta, sin red), la línea lo dice en vez de quedarse
+  // esperando.
+  function cargarResumenEstado() {
+    if (resumenEstado) return;
+    import("../lib/dev").then(
+      m  => setResumenEstado(() => m.resumenEstado),
+      () => setResumenEstado(() => () => ({ tono: "muted", texto: "no se ha podido cargar el resumen" })),
+    );
+  }
+
   // Se refresca al abrir ajustes y con el botón, nunca en bucle.
   async function cargarEstadoSistema() {
     if (sysLoading) return;
@@ -4436,10 +4469,21 @@ export default function Dashboard() {
     () => (lineaDatos.esHoy ? posicionAhora(lineaDatos.dia, now) : null),
     [lineaDatos, now],
   );
+  // Lo que recibe `LineaDelDia`, con la misma identidad mientras no cambie nada: es lo
+  // que deja a su `memo` saltarse los renders que no le tocan.
+  const datosLinea = useMemo(() => ({ ...lineaDatos, ahora: lineaAhora }), [lineaDatos, lineaAhora]);
+
+  // Las dos formas posibles de la tarjeta, creadas una vez. Antes salía un objeto nuevo
+  // por widget y por render, y eso bastaba para que ningún widget memorizado pudiera
+  // saltarse un render: sus props cambiaban siempre aunque dijeran lo mismo.
+  const estilosTarjeta = useMemo(() => ({
+    libre: { ...s.card },
+    fija:  { ...s.card, height: "100%", overflowY: "auto" },
+  }), []);
 
   function renderWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
-    const cardStyle = { ...s.card, ...(fixedH ? { height: "100%", overflowY: "auto" } : {}) };
+    const cardStyle = fixedH ? estilosTarjeta.fija : estilosTarjeta.libre;
 
     switch (id) {
       case "dia_linea": return (
@@ -4447,7 +4491,7 @@ export default function Dashboard() {
           key="dia_linea"
           dia={lineaDia}
           onDia={setLineaDia}
-          datos={{ ...lineaDatos, ahora: lineaAhora }}
+          datos={datosLinea}
           cardStyle={cardStyle}
         />
       );
@@ -6762,6 +6806,7 @@ export default function Dashboard() {
                 setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
                 setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));
                 setShowSettings(true);
+                cargarResumenEstado();
                 cargarEstadoSistema();
               }} style={{
                 background: "transparent", border: "0.5px solid rgba(255,255,255,0.12)",
@@ -7786,7 +7831,9 @@ export default function Dashboard() {
                 }}>{sysLoading ? "Comprobando…" : "Actualizar"}</button>
               </div>
               {(() => {
-                const resumen = resumenEstado(sysStatus, filasEstadoDelDashboard);
+                const resumen = resumenEstado
+                  ? resumenEstado(sysStatus, filasEstadoDelDashboard)
+                  : { tono: "muted", texto: "comprobando…" };
                 const color = { green: "var(--green)", accent: "var(--accent)", red: "#d4645a", muted: "var(--muted2)" };
                 return (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

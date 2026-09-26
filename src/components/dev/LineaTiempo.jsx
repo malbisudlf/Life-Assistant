@@ -11,6 +11,7 @@ import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, COLOR_TONO, horaCorta,
          CARRILES, diaLocal, diaDesplazado, leerLinea, resumenLinea } from "../../lib/dev";
+import { refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const REFRESCO_MS = 20_000;
@@ -41,8 +42,7 @@ export default function LineaTiempo() {
   const esHoy = dia === diaLocal();
   useEffect(() => {
     if (!esHoy) return undefined;
-    const id = setInterval(() => setTic(t => t + 1), REFRESCO_MS);
-    return () => clearInterval(id);
+    return refrescarMientrasSeVea(() => setTic(t => t + 1), REFRESCO_MS);
   }, [esHoy]);
 
   const mover = useCallback((dias) => {

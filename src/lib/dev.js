@@ -80,6 +80,26 @@ export function desdeHace(iso) {
   return `hace ${Math.round(seg / 86400)} d`;
 }
 
+// El refresco automático de las pestañas, pero solo mientras la pestaña del navegador se
+// ve. La zona dev se deja abierta toda la tarde (docs/ZONA_DEV.md), y oculta seguía
+// pidiendo cada pocos segundos —el registro, cada cinco— datos que nadie iba a mirar, y
+// gastando cuota de GitHub en Despliegue y Crons. Al volver a verse refresca en el acto
+// si ya tocaba, para no enseñar datos viejos hasta el siguiente tic (y ese tic se salta
+// si llega justo detrás, que serían dos peticiones seguidas para lo mismo). Devuelve la
+// función que lo para, para usarla tal cual como limpieza de un `useEffect`.
+export function refrescarMientrasSeVea(alTocar, ms, doc = globalThis.document) {
+  let ultimo = Date.now();
+  const tocar = () => { ultimo = Date.now(); alTocar(); };
+  const oculta = () => doc?.visibilityState === "hidden";
+  const id = setInterval(() => { if (!oculta() && Date.now() - ultimo >= ms / 2) tocar(); }, ms);
+  const alVolver = () => { if (!oculta() && Date.now() - ultimo >= ms) tocar(); };
+  doc?.addEventListener?.("visibilitychange", alVolver);
+  return () => {
+    clearInterval(id);
+    doc?.removeEventListener?.("visibilitychange", alVolver);
+  };
+}
+
 // Junta lo que hace falta para el semáforo. Las llamadas van en paralelo: en serie serían
 // siete idas y vueltas seguidas, y la primera ya mide lo que tarda en responder el backend.
 //

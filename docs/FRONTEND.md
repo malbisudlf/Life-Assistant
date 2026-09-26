@@ -393,6 +393,15 @@ mantén el prefijo y el `try/catch` al parsear.
   desmontaba y remontaba todo su subárbol en vez de actualizarlo — con el reloj
   cambiando cada 30s, dos veces por minuto. Los componentes van a nivel de módulo
   (junto a `Sparkline`, `SleepStageTooltip`) y reciben lo que necesitan por props.
+- **Cualquier cambio de estado repinta el dashboard entero**, y hay estados que cambian
+  mucho: cada tecla del borrador de Jarvis y cada transcripción parcial de una llamada.
+  Por eso `JarvisMensaje` y `LineaDelDia` (lo más pesado que no depende de lo que se
+  escribe) van en `React.memo`. **Un `memo` solo sirve si sus props mantienen la
+  identidad**: `datosLinea` va en un `useMemo` y `cardStyle` sale de `estilosTarjeta`,
+  que se crea una vez. Si le pasas a un componente memorizado un objeto o una función
+  creados en el render (`datos={{ ... }}`, `onX={() => ...}`), el `memo` deja de hacer
+  nada sin avisar. Medido en jsdom con 40 mensajes en el historial, el render por tecla
+  bajó de ~28 ms a ~20 ms.
 - Los `catch { /* mejor esfuerzo: ignorar */ }` son deliberados (notificaciones,
   parseo de localStorage, llamadas fire-and-forget). Si añades uno, pon el comentario
   dentro o la regla `no-empty` fallará.
@@ -434,6 +443,12 @@ Lo que hay que saber al tocarlo:
   `src/lib/dev.js`, con tests). Si añades una señal nueva, sale en los dos sitios sin
   tocar nada más — que es justo lo que evita que el semáforo del móvil y el de la zona
   dev digan cosas distintas.
+- **`src/lib/dev.js` no se importa de forma estática en `Dashboard.jsx`.** Con un import
+  estático, Rollup mete el módulo entero —casi todo lógica de la zona dev— en el chunk
+  principal, aunque el dashboard solo use `resumenEstado`: eran ~14 kB (4 kB con gzip)
+  en cada carga. `resumenEstado` se pide con `import()` al abrir ⚙
+  (`cargarResumenEstado`), y el módulo comparte chunk con la zona dev. Hay un test que
+  lo vigila (`tests/frontend/rendimiento.test.jsx`).
 
 ## El widget «El día» (`dia_linea`)
 

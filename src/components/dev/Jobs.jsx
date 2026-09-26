@@ -12,6 +12,7 @@ import { useState, useEffect, useCallback } from "react";
 import { API, authHeaders, apiFetch } from "../../lib/api";
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
          leerJobs, estadoAgente, estadoJob, reintentarJob } from "../../lib/dev";
+import { refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const REFRESCO_MS = 15_000;
@@ -41,10 +42,7 @@ export default function Jobs() {
 
   // Va contra Supabase: gratis, así que puede refrescarse solo. Cada 15 s porque lo que se
   // mira aquí —un job avanzando de etapa— dura segundos.
-  useEffect(() => {
-    const id = setInterval(() => setTic(t => t + 1), REFRESCO_MS);
-    return () => clearInterval(id);
-  }, []);
+  useEffect(() => refrescarMientrasSeVea(() => setTic(t => t + 1), REFRESCO_MS), []);
 
   const recargar = useCallback(() => { setLeyendo(true); setTic(t => t + 1); }, []);
 

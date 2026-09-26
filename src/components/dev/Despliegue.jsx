@@ -15,6 +15,7 @@ import { useState, useEffect, useCallback } from "react";
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
          leerDespliegue, estadoDespliegue, shaCorto, COMMIT_FRONTEND,
          reconstruirAddon, esperarAlBackend } from "../../lib/dev";
+import { refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 // Dónde mirar cuando no vuelve, según con qué se ha desplegado. `quieto` es el caso en que
@@ -59,8 +60,7 @@ export default function Despliegue() {
   const autorefresco = datos?.github?.con_credencial;
   useEffect(() => {
     if (!autorefresco) return undefined;
-    const id = setInterval(() => setTic(t => t + 1), REFRESCO_MS);
-    return () => clearInterval(id);
+    return refrescarMientrasSeVea(() => setTic(t => t + 1), REFRESCO_MS);
   }, [autorefresco]);
 
   const recargar = useCallback(() => { setLeyendo(true); setTic(t => t + 1); }, []);

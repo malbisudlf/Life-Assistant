@@ -9,6 +9,7 @@ import { useState, useEffect } from "react";
 
 import { API, authHeaders, apiFetch } from "../../lib/api";
 import { MONO, inputStyle, panelStyle, tituloStyle, horaCorta } from "../../lib/dev";
+import { refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const NIVELES = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
@@ -68,8 +69,7 @@ export default function Logs() {
   // el registro se seguiría pidiendo para siempre en segundo plano.
   useEffect(() => {
     if (!envivo) return undefined;
-    const id = setInterval(() => setTic(t => t + 1), REFRESCO_MS);
-    return () => clearInterval(id);
+    return refrescarMientrasSeVea(() => setTic(t => t + 1), REFRESCO_MS);
   }, [envivo]);
 
   async function vaciar() {
