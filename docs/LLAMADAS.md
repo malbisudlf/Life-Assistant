@@ -183,7 +183,7 @@ Mikel pidió entonces lo que hace un humano: **si no lo coges, vuelve a llamar; 
 tampoco, deja el mensaje en el buzón.** Queda así:
 
 ```
-llamada 1 (conversación, suena TELEFONO_TIMBRE_SEG = 25 s y cuelga)
+llamada 1 (conversación, suena TELEFONO_TIMBRE_SEG —14 s en caja— y cuelga)
    │ no cogida (no_answer o comunicando)
    ▼  espera TELEFONO_REINTENTO_SEG = 60 s
 llamada 2 (igual que la 1)            ← TELEFONO_INTENTOS = 2 en total
@@ -217,8 +217,11 @@ de las cotidianas no se gasta en reintentos.
    por un fallo del original) y diga el motivo, `delaySeconds`, y colgar tras dos turnos
    sin oír a nadie — este último es lo que evita que la línea de Jarvis se quede
    comunicando aunque algo más falle.
-2. **El desvío a buzón de tu extensión en el 3CX entre 25 y 90 s** (en torno a 40). Si
-   salta antes de que Jarvis cuelgue, el buzón coge la primera y cuenta como contestada.
+2. **El desvío a buzón de tu extensión en el 3CX entre `TELEFONO_TIMBRE_SEG` y 90 s**
+   (está a 40). Si salta antes de que Jarvis cuelgue, el buzón coge la primera y cuenta
+   como contestada. Llegó a pasar a los 17 s con el desvío a 40, y por eso en `caja` el
+   timbre es de 14 s y no los 25 por defecto (`telefono/PARCHES.md`, «Lo que hay que
+   saber del 3CX»).
 3. **El flujo de n8n del backend caído** llama a la centralita por su cuenta y no pasa por
    aquí: no insiste. Si se quiere lo mismo ahí, va en el flujo (repositorio HomeLab).
 
