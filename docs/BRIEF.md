@@ -92,9 +92,33 @@ backend está en `docs/BACKEND_PATRONES.md`.
   `credentials=None` (ninguna usa ese parámetro; lo resuelve FastAPI solo por HTTP) para
   heredar su normalización y manejo de errores en vez de duplicar consultas, y las lanza
   en paralelo. Cada sección cae por su cuenta: un fallo de Graph deja la agenda vacía
-  pero el resto del correo sigue siendo útil. Envío por `smtplib` (librería estándar, sin
-  dependencias nuevas). Todos los disparadores usan tokens de servicio: un JWT de
-  usuario caducaría a los 30 días y el correo dejaría de llegar sin avisar.
+  pero el resto del correo sigue siendo útil. **Hasta el 2026-09-26 eso solo era verdad
+  para el calendario**: una excepción en clima, salud, entrenamiento, presencia o
+  economía subía por el `.result()` del pool y tumbaba el correo entero, y como se
+  reintenta en cada tick, ese día no salió en ninguno (#233). Ahora pasan por
+  `_seccion_del_pool` y tres reglas:
+  - **La sección se queda vacía y se apunta en `secciones_caidas`**, y el texto lo dice
+    en su sitio («Avería del backend… Dilo así en el briefing. NO significa que no haya
+    datos»). Vacía por avería no es lo mismo que sin datos, y quien lee el correo es un
+    modelo: con «(sin datos)» en la salud escribiría que el reloj no mandó nada. Mismo
+    criterio que `calendario_caido`. Lo de pedirle que lo cuente no es adorno: una
+    sección rota deja UN error al día (el correo sale y el tick deja de reintentar), por
+    debajo del listón del vigilante, así que el briefing es la vía por la que la avería
+    llega cada mañana en vez de quedarse callada semanas.
+  - **La red NO cuenta como avería**: un `requests.RequestException` se deja subir y el
+    correo entero se reintenta en el siguiente tick, como antes. Gastar el correo del día
+    sin salud por un parpadeo de Supabase sería peor que esperar cinco minutos.
+  - **El registro dice qué sección y qué tipo de error**, en la primera línea. Los
+    registros de fallo del envío también (`_causa`): el vigilante agrupa por esa línea y
+    el aviso y el issue solo enseñan esa, así que «fallo al enviarlo por hora tope» a
+    secas no distinguía un SMTP que rechaza la contraseña de una sección rota. **Solo el
+    tipo, nunca el mensaje**: esa línea acaba en un issue de un repositorio público y el
+    mensaje de una excepción puede traer un correo o un host. El mensaje entero sigue en
+    el traceback, en `app_logs`.
+
+  Envío por `smtplib` (librería estándar, sin dependencias nuevas). Todos los
+  disparadores usan tokens de servicio: un JWT de usuario caducaría a los 30 días y el
+  correo dejaría de llegar sin avisar.
 - **Cuándo sale el correo: al despertarse, no a una hora fija.** Lo disparaba el cron de
   `.github/workflows/resumen-diario.yml`, y Actions se retrasa 10-15 min cuando su cola
   va cargada — un disparador que no sabe decirte a qué hora va a disparar no vale para

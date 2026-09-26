@@ -391,15 +391,27 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   tocarlo. Si un hallazgo era del backend, después del merge hay que hacer `fly deploy` a
   mano.
 - **El token del disparo se puede revocar sin avisar.** Si el botón «Arreglarlo»
-  contesta que el token ya no vale (caducado o revocado), no hay nada que arreglar en el
-  código: regenera el trigger de API de la routine que arregla en
+  contesta que el token ya no vale, no hay nada que arreglar en el código: genera uno
+  nuevo en el trigger de API de la routine que arregla en
   [claude.ai/code/routines](https://claude.ai/code/routines) (lápiz → *Select a trigger*
-  → **API** → *Generate token*) y ponlo en el backend con
-  `fly secrets set ARREGLO_FIRE_TOKEN=sk-ant-oat01-...`. La decisión no se pierde: el
-  disparo fallido la deja en `pendiente`, así que el botón —o «arregla la revisión» por
-  Jarvis— vuelve a servir en cuanto el token valga. Si se revocaron todos los tokens de
-  la cuenta, mira también `RUTINA_FIRE_TOKEN` (el del briefing, en Fly) y el secret
-  `ROUTINE_TOKEN` de Actions, que es el que dispara la revisión de la noche.
+  → **API** → *Regenerate*) y ponlo como `ARREGLO_FIRE_TOKEN` en el fichero de entorno
+  del backend en `caja` (lo gestiona el repositorio HomeLab); después vuelve a arrancar el
+  backend para que lo lea. La decisión no se pierde: el disparo fallido la deja en
+  `pendiente`, así que el botón —o «arregla la revisión» por Jarvis— vuelve a servir en
+  cuanto el token valga.
+  - **Pasó dos veces, y la segunda cayeron dos a la vez.** El 2026-09-26 dejaron de valer
+    el mismo día el de la revisión nocturna (`ROUTINE_TOKEN`, que había funcionado el día
+    anterior) y el del arreglo, con las dos routines activas y sus ejecuciones
+    programadas funcionando. La documentación no dice que caduquen: el 401 del `/fire`
+    es «no hay token, o no casa con esta rutina», y generar uno nuevo revoca el anterior.
+    Cuando caiga uno, **mira los cuatro**: `ROUTINE_TOKEN` (secret de Actions),
+    `ARREGLO_FIRE_TOKEN`, `RUTINA_FIRE_TOKEN` (el del briefing) y `SESION_FIRE_TOKEN` (el
+    de retomar un aviso), los tres últimos en el entorno del backend. El `GET` de más
+    abajo lo dice sin lanzar nada: 401 es que está revocado.
+  - **Un 403 no es el token.** Es que la CUENTA no tiene acceso al endpoint (el plan, o
+    las rutinas apagadas), y regenerar no arregla nada. El aviso los distingue
+    (`_motivo_disparo`), y el workflow de la noche imprime la respuesta de la API cuando
+    el disparo falla: antes solo quedaba «returned error: 401» y el porqué se perdía.
 - **Antes de dar por revocado el token, comprueba el NOMBRE del secret.** Fly acepta
   cualquier nombre en `fly secrets set` sin avisar de que nadie lo lee, así que una
   errata deja el token bueno guardado en un secret fantasma y el backend siguiendo con
@@ -419,7 +431,7 @@ git tag -f ultima-revision-nocturna <sha> && git push -f origin refs/tags/ultima
   bueno. Lo único que descarta un GET es que la credencial esté revocada del todo
   (`401 authentication_error`). Para saber si el token es EL de esa rutina hay que
   disparar de verdad, o leer el motivo que el backend ya traduce en el aviso del móvil:
-  «caducado o revocado» y «pertenece a OTRA rutina» son mensajes distintos a propósito
-  (`_motivo_disparo`).
+  «ya no vale (revocado o regenerado)», «pertenece a OTRA rutina» y «la cuenta no tiene
+  acceso» son mensajes distintos a propósito (`_motivo_disparo`).
 - **El agente que arregla no mergea en rojo.** Si el CI falla tras dos intentos deja el
   PR abierto con una explicación, que es un resultado — el silencio no lo sería.

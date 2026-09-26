@@ -175,6 +175,69 @@ class TestConstruirBrief:
         montar_fuentes(mock_requests)
         assert "calendario_caido" not in main.construir_brief()
 
+    # ── El resto de secciones, que no caían por su cuenta (#233) ─────────────
+    @staticmethod
+    def _revienta(*_a, **_k):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    @pytest.mark.parametrize("seccion, funcion", [
+        ("clima", "_brief_clima"), ("salud", "_brief_salud"),
+        ("entrenamiento", "_brief_entrenamiento"), ("presencia", "_brief_presencia"),
+        ("economia", "_brief_economia"),
+    ])
+    def test_una_seccion_que_revienta_no_tumba_el_resumen(
+            self, graph_token, mock_requests, monkeypatch, seccion, funcion):
+        """Solo el calendario caía por su cuenta: una excepción en cualquier otra sección
+        subía por el `.result()` y tumbaba el correo entero, y como se reintenta en cada
+        tick, el 2026-09-26 no salió en todo el día."""
+        montar_fuentes(mock_requests)
+        monkeypatch.setattr(main, funcion, self._revienta)
+
+        d = main.construir_brief()
+        assert d["secciones_caidas"] == [seccion]
+        assert [e["titulo"] for e in d["agenda"]] == ["Redes"]   # el resto sigue ahí
+        assert d["salud" if seccion != "salud" else "clima"]
+        assert "Avería del backend" in main.render_brief_texto(d)
+
+    def test_sin_averias_no_hay_marca(self, graph_token, mock_requests):
+        montar_fuentes(mock_requests)
+        assert "secciones_caidas" not in main.construir_brief()
+
+    def test_la_salud_caida_no_se_lee_como_sin_datos(self, graph_token, mock_requests,
+                                                     monkeypatch):
+        """Quien lee el correo es un modelo: con «(sin datos)» escribiría que el reloj no
+        mandó nada, que es lo contrario de lo que ha pasado."""
+        montar_fuentes(mock_requests)
+        monkeypatch.setattr(main, "_brief_salud", self._revienta)
+        salud = main.render_brief_texto(main.construir_brief()).split("## SALUD")[1]
+        salud = salud.split("\n## ")[0]
+        assert "(sin datos)" not in salud
+        assert "NO significa que no haya datos" in salud
+
+    def test_el_registro_nombra_la_seccion_y_el_tipo(self, graph_token, mock_requests,
+                                                     monkeypatch, caplog):
+        """El vigilante, el aviso y el issue solo ven la primera línea del registro: tiene
+        que decir QUÉ falló, no solo que algo falló."""
+        montar_fuentes(mock_requests)
+        monkeypatch.setattr(main, "_brief_salud", self._revienta)
+        with caplog.at_level("ERROR"):
+            main.construir_brief()
+        primeras = [main._firma_error(r.getMessage()) for r in caplog.records]
+        assert "Resumen diario: la sección salud falló y sale vacía (AttributeError)" in primeras
+
+    def test_un_corte_de_red_se_sigue_reintentando_entero(self, graph_token, mock_requests,
+                                                          monkeypatch):
+        """La red no es una avería de código: el correo entero se reintenta en el
+        siguiente tick, como siempre, en vez de gastar el del día sin la sección."""
+        import requests
+        montar_fuentes(mock_requests)
+
+        def _sin_red():
+            raise requests.ConnectionError("supabase.test")
+        monkeypatch.setattr(main, "_brief_presencia", _sin_red)
+        with pytest.raises(requests.ConnectionError):
+            main.construir_brief()
+
     def test_agenda_solo_de_hoy(self, client, auth_headers, graph_token, mock_requests):
         montar_fuentes(mock_requests)
         d = client.get("/brief", headers=auth_headers).json()

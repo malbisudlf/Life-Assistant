@@ -6707,6 +6707,47 @@ def _calendario_del_pool(futuro, clave: str) -> tuple[list, bool]:
     return _sin_error(resultado, clave), isinstance(resultado, dict) and "error" not in resultado
 
 
+def _causa(e: BaseException) -> str:
+    """El TIPO de una excepción, para la primera línea de un registro de error.
+
+    El vigilante agrupa por esa primera línea y el aviso y el issue solo enseñan esa: con
+    «fallo al enviarlo por hora tope» a secas, el issue #233 no distinguía un SMTP que
+    rechaza la contraseña de una sección rota, y el traceback que sí lo decía solo estaba
+    en `app_logs`, que no ven ni el aviso ni la sesión que lo arregla. Solo el tipo y no
+    el mensaje, porque esa línea acaba en un issue de un repositorio PÚBLICO y el mensaje
+    puede traer un correo o un host; el mensaje entero sigue en el traceback."""
+    return type(e).__name__
+
+
+def _seccion_del_pool(futuro, nombre: str, caidas: list) -> dict:
+    """El resultado de una sección del resumen lanzada en el pool, o {} si reventó.
+
+    Lo mismo que `_calendario_del_pool` para el resto de secciones, que no lo tenían:
+    una excepción en una sola (un dato con una forma inesperada, un fallo de código)
+    subía por el `.result()` y tumbaba el correo ENTERO, y como se reintenta en cada
+    tick, el 2026-09-26 no salió en todo el día (#233). Ahora la sección se queda vacía,
+    se apunta en `caidas` —vacía por avería no es lo mismo que sin datos, y el correo lo
+    tiene que decir— y el resto sale.
+
+    La red es la excepción a propósito: un corte (de Supabase, casi siempre) se deja
+    subir y el correo entero se reintenta en el siguiente tick, como antes, en vez de
+    gastar el del día sin la sección por un parpadeo de cinco minutos.
+
+    Una sección rota deja UN error al día —el correo sale y el tick ya no reintenta—,
+    por debajo del listón del vigilante. Por eso el texto le pide a quien redacta el
+    briefing que lo cuente: es la vía por la que la avería llega cada mañana.
+    """
+    try:
+        return futuro.result() or {}
+    except requests.RequestException:
+        raise
+    except Exception as e:
+        logger.exception("Resumen diario: la sección %s falló y sale vacía (%s)",
+                         nombre, _causa(e))
+        caidas.append(nombre)
+        return {}
+
+
 def construir_brief() -> dict:
     """Reúne todo lo que va en el correo. Las cuatro fuentes son independientes, así
     que se piden en paralelo: esto corre con el arranque en frío de Fly por delante."""
@@ -6729,10 +6770,16 @@ def construir_brief() -> dict:
         f_previa  = pool.submit(_instantanea_previa, hoy.isoformat())
         eventos, eventos_ok = _calendario_del_pool(f_eventos, "events")
         clases,  clases_ok  = _calendario_del_pool(f_clases, "events")
-        clima, salud, entrenamiento = f_clima.result(), f_salud.result(), f_entren.result()
-        presencia = f_presen.result()
-        previa    = f_previa.result()
-        economia  = _titulares_nuevos(f_econom.result(), previa)
+        # Cada sección cae por su cuenta (ver `_seccion_del_pool`). La instantánea no
+        # pasa por ahí porque `_instantanea_previa` ya captura sus propios fallos.
+        caidas: list = []
+        clima         = _seccion_del_pool(f_clima,  "clima",         caidas)
+        salud         = _seccion_del_pool(f_salud,  "salud",         caidas)
+        entrenamiento = _seccion_del_pool(f_entren, "entrenamiento", caidas)
+        presencia     = _seccion_del_pool(f_presen, "presencia",     caidas)
+        previa        = f_previa.result()
+        economia      = _titulares_nuevos(_seccion_del_pool(f_econom, "economia", caidas),
+                                          previa)
 
     def _es_hoy(ev):
         d = _dias_hasta(ev.get("start", ""))
@@ -6793,6 +6840,10 @@ def construir_brief() -> dict:
     # redacta el briefing tiene que poder distinguirlas.
     if not (eventos_ok and clases_ok):
         datos["calendario_caido"] = True
+    # Lo mismo con el resto: una salud vacía por avería se leería como «el reloj no
+    # mandó nada», y eso es justo lo que la rutina escribiría.
+    if caidas:
+        datos["secciones_caidas"] = caidas
     cambios = _cambios_desde(previa, datos)
     if cambios:
         datos["cambios"] = cambios
@@ -6935,6 +6986,14 @@ def render_brief_texto(d: dict) -> str:
         "",
     ]
 
+    # Una sección vacía por avería (`_seccion_del_pool`) no es una sección sin datos, y
+    # quien lee esto es un modelo: con «(sin datos)» en la salud escribiría que el reloj
+    # no mandó nada. Mismo criterio que `calendario_caido`.
+    caidas = set(d.get("secciones_caidas") or [])
+    averia = ("  (Avería del backend: esta sección no se ha podido construir hoy. Dilo así "
+              "en el briefing. NO significa que no haya datos: no saques ninguna "
+              "conclusión de que falte.)")
+
     def _lineas_eventos(items):
         if not items:
             return ["  (nada)"]
@@ -7006,7 +7065,7 @@ def render_brief_texto(d: dict) -> str:
             f"viento {c.get('viento')} km/h, prob. lluvia {c.get('lluvia_prob')}%"
         )
     else:
-        L.append("  (no disponible)")
+        L.append(averia if "clima" in caidas else "  (no disponible)")
     L.append("")
 
     # Las dos únicas secciones que no salen de un sensor. Los titulares van en crudo,
@@ -7043,6 +7102,8 @@ def render_brief_texto(d: dict) -> str:
         if not e.get("titulares"):
             L.append("  (ningún titular nuevo en la ventana)")
         L.append("")
+    elif "economia" in caidas:
+        L += ["## ECONOMÍA — TITULARES", averia, ""]
 
     g = d.get("termino_economico") or {}
     if g:
@@ -7061,7 +7122,7 @@ def render_brief_texto(d: dict) -> str:
         visto  = f"hace {p['hace_minutos']} min" if p.get("hace_minutos") is not None else "sin fecha"
         L.append(f"  Ahora {estado} — dato de {visto}{'' if p.get('vigente') else ' (CADUCADO, puede haber cambiado)'}")
     else:
-        L.append("  (sin datos de presencia)")
+        L.append(averia if "presencia" in caidas else "  (sin datos de presencia)")
     if p.get("horas_casa_hoy") is not None:
         L.append(f"  Hoy  {p['horas_casa_hoy']} h en casa · {p.get('horas_fuera_hoy', 0)} h fuera")
     if p.get("horas_casa_ayer") is not None:
@@ -7177,7 +7238,7 @@ def render_brief_texto(d: dict) -> str:
             cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
             L.append(f"  {'Último entreno':<20} {cuando} ({ue['fecha']})")
     else:
-        L.append("  (sin datos)")
+        L.append(averia if "salud" in caidas else "  (sin datos)")
     L.append("")
 
     # Dónde mirar. No interpreta nada: dice qué días se salen de la propia costumbre de
@@ -7237,7 +7298,7 @@ def render_brief_texto(d: dict) -> str:
             f"última sesión {t.get('ultima_sesion') or '—'}"
         )
     else:
-        L.append("  (sin cliente configurado)")
+        L.append(averia if "entrenamiento" in caidas else "  (sin cliente configurado)")
 
     return "\n".join(L) + "\n"
 
@@ -7695,8 +7756,8 @@ def _motivo_disparo(status: int, detalle: str) -> str:
     El cuerpo crudo de la API acaba en una notificación del móvil, y
     `{"type":"error","error":{"type":"authentication_error",...}}` no le dice a nadie
     que lo que toca es regenerar el token del trigger en claude.ai y volver a ponerlo
-    con `fly secrets set`. Solo se traducen los casos con arreglos DISTINTOS; lo demás
-    se deja crudo, que sigue siendo más de lo que dice un número a secas.
+    en el entorno del backend. Solo se traducen los casos con arreglos DISTINTOS; lo
+    demás se deja crudo, que sigue siendo más de lo que dice un número a secas.
 
     El caso de la credencial no es hipotético: pasó el 2026-08-24 y el aviso de que el
     botón no había lanzado nada llegó con el JSON de Anthropic dentro.
@@ -7707,14 +7768,23 @@ def _motivo_disparo(status: int, detalle: str) -> str:
     igual, el aviso del móvil decía «caducado o revocado» por segunda vez y mandaba a
     regenerar un token que no tenía nada de malo. Los tokens de trigger son POR RUTINA,
     así que el arreglo es distinto y el mensaje también tiene que serlo.
+
+    Y el 403 tampoco es el 401. Según la referencia de la API, el 401 es que el token no
+    casa con la rutina (revocado, regenerado o de otra) y el 403 que la CUENTA no tiene
+    acceso al endpoint (el plan, o las rutinas apagadas): ahí regenerar el token no
+    arregla nada, y el aviso mandaba a hacerlo igual.
     """
     if "not authorized for this routine" in detalle:
         return ("el token del disparo es válido pero pertenece a OTRA rutina: cada trigger "
                 "tiene el suyo. Genera el de la rutina que arregla en claude.ai/code/routines "
                 "y ponlo en ARREGLO_FIRE_TOKEN")
-    if status in (401, 403) or "authentication_error" in detalle or "permission_error" in detalle:
-        return ("el token del disparo ya no vale (caducado o revocado): regenéralo en "
-                "claude.ai/code/routines y vuelve a ponerlo en el backend")
+    if status == 403 or "permission_error" in detalle:
+        return ("la cuenta no tiene acceso al disparo de rutinas (403): no es el token, "
+                "regenerarlo no arregla nada. Mira el plan y que las rutinas sigan activas "
+                "en claude.ai")
+    if status == 401 or "authentication_error" in detalle:
+        return ("el token del disparo ya no vale (revocado o regenerado): genera uno nuevo "
+                "en claude.ai/code/routines y ponlo en el backend")
     if status == 404:
         return "la rutina o su trigger ya no existen: revísalos en claude.ai/code/routines"
     if "routine_paused" in detalle:
@@ -8284,8 +8354,9 @@ def _alcanzar_la_noche_seguro(fecha: str) -> bool:
         return False
     try:
         return _alcanzar_la_noche(fecha, _ahora_local())
-    except Exception:
-        logger.exception("Resumen diario: fallo mandando la noche que llegó tarde")
+    except Exception as e:
+        logger.exception("Resumen diario: fallo mandando la noche que llegó tarde (%s)",
+                         _causa(e))
         return False
 
 
@@ -8340,11 +8411,12 @@ def _avisar_sueno_recibido(fechas_sueno: set) -> None:
         # El despertar fue cuando llegó la señal, no ahora: es la hora que queda en
         # `brief_envios` como hora a la que te levantaste.
         enviar_brief_si_toca("sueno", despertar=desde)
-    except Exception:
+    except Exception as e:
         # La espera se queda viva a propósito: el tick ve el sueño ya guardado y lo
         # reintenta en cinco minutos, sin avisarte de que abras la app que acabas de
         # abrir (mira si ha llegado antes de avisar).
-        logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del reloj")
+        logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del reloj "
+                         "(%s)", _causa(e))
         return
     _olvidar_despertar()
 
@@ -8382,7 +8454,7 @@ def _senal_despertar(etiqueta: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Despertar: fallo al construir o enviar el resumen")
+        logger.exception("Despertar: fallo al construir o enviar el resumen (%s)", _causa(e))
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     return {"ok": True, **resultado}
 
@@ -8500,7 +8572,7 @@ def ha_brief_tick(request: Request, token: str = ""):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Resumen diario: fallo al enviarlo por hora tope")
+        logger.exception("Resumen diario: fallo al enviarlo por hora tope (%s)", _causa(e))
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     return {"ok": True, **avisos, **resultado}
 
@@ -8631,7 +8703,8 @@ def send_brief(request: Request, token: str = "", forzar: int = 0):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo")
+        logger.exception("Resumen diario: fallo inesperado al construir o enviar el correo (%s)",
+                         _causa(e))
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
     return {"ok": True, "enviado_a": BRIEF_TO, **resultado}
 

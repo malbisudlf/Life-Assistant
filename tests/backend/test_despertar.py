@@ -243,6 +243,67 @@ class TestHoraTope:
         assert _SMTPFalso.enviados == []
 
 
+class TestFalloConNombre:
+    """El 2026-09-26 el resumen no salió en todo el día y el issue del vigilante (#233)
+    solo decía «fallo al enviarlo por hora tope», diez veces: ni qué sección, ni si era
+    el SMTP. El vigilante, el aviso y el issue solo ven la primera línea del registro."""
+
+    @staticmethod
+    def _smtp_rechaza(*_a, **_k):
+        import smtplib
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    def test_una_seccion_rota_no_deja_el_dia_sin_correo(self, client, mock_requests,
+                                                         graph_token, monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 10, 0)
+
+        def _revienta():
+            raise AttributeError("'str' object has no attribute 'get'")
+        monkeypatch.setattr(main, "_brief_salud", _revienta)
+
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert r.json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+        assert "Avería del backend" in _SMTPFalso.enviados[0].get_body().get_content()
+
+    @pytest.mark.parametrize("hora, ruta, mensaje", [
+        (10, "/ha/brief-tick?token=ha-poll-token", "Resumen diario: fallo al enviarlo por hora tope"),
+        (7, "/despertar?token=brief-token", "Despertar: fallo al construir o enviar el resumen"),
+        (7, "/brief/send?token=brief-token",
+         "Resumen diario: fallo inesperado al construir o enviar el correo"),
+    ])
+    def test_el_fallo_del_envio_dice_su_tipo(self, client, mock_requests, graph_token,
+                                             monkeypatch, caplog, hora, ruta, mensaje):
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, hora, 15)
+        monkeypatch.setattr(main, "enviar_correo", self._smtp_rechaza)
+
+        with caplog.at_level("ERROR"):
+            r = client.post(ruta)
+        assert r.status_code == 502
+        primeras = [main._firma_error(x.getMessage()) for x in caplog.records]
+        assert f"{mensaje} (SMTPAuthenticationError)" in primeras
+
+    def test_la_primera_linea_no_lleva_el_mensaje(self, client, mock_requests, graph_token,
+                                                  monkeypatch, caplog):
+        """Esa línea acaba en un issue de un repositorio PÚBLICO, y el mensaje de una
+        excepción puede traer un correo o un host: solo viaja el tipo."""
+        import smtplib
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 10, 0)
+
+        def _rechaza_destinatario(*_a, **_k):
+            raise smtplib.SMTPRecipientsRefused({"yo@test": (550, b"5.1.1 no existe")})
+        monkeypatch.setattr(main, "enviar_correo", _rechaza_destinatario)
+
+        with caplog.at_level("ERROR"):
+            client.post("/ha/brief-tick?token=ha-poll-token")
+        primeras = [main._firma_error(x.getMessage()) for x in caplog.records]
+        assert any("(SMTPRecipientsRefused)" in p for p in primeras)
+        assert not any("yo@test" in p for p in primeras)
+
+
 class TestSuenoComoSenal:
     """La llegada del sueño del reloj NO es una señal de despertar: solo cierra una
     espera que abrió una señal de verdad. Deducir "ha sincronizado, luego está
