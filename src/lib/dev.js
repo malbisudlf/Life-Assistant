@@ -273,9 +273,10 @@ export function estadoDespliegue(lado) {
 
 // ── FASE 2: PROGRAMADOS ───────────────────────────────────────────────────────
 
-// El mismo margen que usa el backend (PROGRAMADO_MARGEN). GitHub retrasa los crons cuando
-// tiene cola, y la revisión nocturna no corre las noches sin commits: con menos margen
-// esto estaría en rojo media semana y dejaría de mirarse.
+// Cuánto margen se le da a un cron antes de darlo por parado. Vive solo aquí: el backend
+// sirve `cada_horas` y no aplica margen ninguno. GitHub retrasa los crons cuando tiene
+// cola, y la revisión nocturna no corre las noches sin commits: con menos margen esto
+// estaría en rojo media semana y dejaría de mirarse.
 export const MARGEN_PROGRAMADO = 2;
 
 export function textoCada(horas) {

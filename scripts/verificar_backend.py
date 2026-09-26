@@ -149,7 +149,7 @@ def comprobar_token_servicio(base):
         return saltada("token de servicio", "HA_POLL_TOKEN no está en el entorno")
 
     # Con la cabecera correcta: 200.
-    status, _, texto = _peticion(
+    status, _, _ = _peticion(
         base + "/ha/wol-pending", cabeceras={"X-Auth-Token": token}
     )
     if status != 200:

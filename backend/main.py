@@ -25,7 +25,7 @@ import logging
 import smtplib
 import threading
 import contextvars
-from collections import deque
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
@@ -4465,7 +4465,6 @@ async def health_ingest(request: Request, token: str = ""):
 
     # ── Workouts: agrupar por fecha y guardar como una fila por día ──
     if workouts:
-        from collections import defaultdict
         by_date: dict = defaultdict(list)
         for w in workouts:
             date_raw = str(w.get("start", w.get("date", "")))
@@ -4901,8 +4900,8 @@ def _leer_salud_ajustes() -> dict:
         if r.status_code >= 300:
             return vacio
         filas = r.json()
-    except requests.RequestException:
-        logger.warning("Ajustes de salud: no se pudieron leer")
+    except requests.RequestException as e:
+        logger.warning("Ajustes de salud: no se pudieron leer (%s)", type(e).__name__)
         return vacio
     if not filas:
         return vacio
@@ -5314,8 +5313,8 @@ def _purgar_tramos_presencia() -> None:
                         headers={**supabase_headers(), "Prefer": "return=minimal"})
         if r.status_code >= 300:
             logger.warning("Presencia: no se pudieron purgar los tramos viejos (%s)", r.status_code)
-    except requests.RequestException:
-        logger.warning("Presencia: falló la purga de tramos viejos")
+    except requests.RequestException as e:
+        logger.warning("Presencia: falló la purga de tramos viejos (%s)", type(e).__name__)
 
 
 def _unir_tramos(filas: list) -> list:
@@ -5356,8 +5355,8 @@ def _guardar_tramos_presencia(trozos: list, en_casa: bool) -> None:
             logger.warning("Presencia: no se pudieron guardar %s tramos (%s)",
                            len(filas), r.status_code)
             return
-    except requests.RequestException:
-        logger.warning("Presencia: falló el guardado de tramos")
+    except requests.RequestException as e:
+        logger.warning("Presencia: falló el guardado de tramos (%s)", type(e).__name__)
         return
     _purgar_tramos_presencia()
 
@@ -8607,8 +8606,9 @@ def _brief_ajustes_estado() -> dict:
                      headers=supabase_headers())
         if r.status_code < 300:
             enviado_hoy = bool(r.json())
-    except requests.RequestException:
-        logger.warning("Resumen diario: no se pudo comprobar si el de hoy ya salió")
+    except requests.RequestException as e:
+        logger.warning("Resumen diario: no se pudo comprobar si el de hoy ya salió (%s)",
+                       type(e).__name__)
 
     return {**estado, "fecha": hoy, "enviado_hoy": enviado_hoy}
 
@@ -9061,12 +9061,9 @@ PROGRAMADOS = {
     "resumen-diario.yml":    ("Resumen diario (red de seguridad)", 24),
     "revision-nocturna.yml": ("Revisión nocturna del código",      24),
 }
-
-# Cuánto margen se le da a un cron antes de darlo por parado. GitHub retrasa los crons
-# 10-15 minutos cuando la cola va cargada, y la revisión nocturna encima no corre las
-# noches sin commits: con menos margen esto estaría en rojo la mitad de las semanas y
-# dejaría de mirarse, que es la única forma real de que no sirva para nada.
-PROGRAMADO_MARGEN = 2.0
+# El margen antes de dar un cron por parado no vive aquí sino en el frontend
+# (`MARGEN_PROGRAMADO`, `src/lib/dev.js`): es quien decide el color de la fila, y el
+# backend solo sirve `cada_horas`.
 
 _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
@@ -10318,8 +10315,8 @@ def _apuntar_accion_casa(servicio: str, entidad: str) -> None:
         if r.status_code >= 300:
             logger.warning("Casa: no se pudo apuntar la acción (%s)", r.status_code)
             return
-    except requests.RequestException:
-        logger.warning("Casa: falló el apunte de la acción")
+    except requests.RequestException as e:
+        logger.warning("Casa: falló el apunte de la acción (%s)", type(e).__name__)
         return
 
     global _casa_purga_dia
@@ -10330,10 +10327,14 @@ def _apuntar_accion_casa(servicio: str, entidad: str) -> None:
         _casa_purga_dia = hoy
     corte = (ahora.date() - timedelta(days=CASA_ACCIONES_DIAS)).isoformat()
     try:
-        http.delete(f"{CASA_ACCIONES_URL}?dia=lt.{corte}",
-                    headers={**supabase_headers(), "Prefer": "return=minimal"})
-    except requests.RequestException:
-        logger.warning("Casa: falló la purga de acciones viejas")
+        r = http.delete(f"{CASA_ACCIONES_URL}?dia=lt.{corte}",
+                        headers={**supabase_headers(), "Prefer": "return=minimal"})
+        # Mismo criterio que la purga de tramos de presencia: un 4xx/5xx de Supabase no
+        # lanza, y sin mirarlo la tabla crecería sin que ningún registro lo contara.
+        if r.status_code >= 300:
+            logger.warning("Casa: no se pudieron purgar las acciones viejas (%s)", r.status_code)
+    except requests.RequestException as e:
+        logger.warning("Casa: falló la purga de acciones viejas (%s)", type(e).__name__)
 
 
 @app.get("/casa/acciones")
@@ -11054,10 +11055,6 @@ def _alarma_fuera_de_casa() -> Optional[str]:
     edad = _edad_presencia(p)
     hace = f", hace {int(edad)} min" if edad is not None else ""
     return f"Home Assistant dice que estás fuera (zona «{p.get('zona') or '?'}»{hace})"
-
-
-def _alarma_en_casa() -> bool:
-    return _alarma_fuera_de_casa() is None
 
 
 def _alarma_reservar(fila: dict, estado_previo: str, cambios: dict) -> bool:
@@ -12120,7 +12117,7 @@ def _vigilante_abrir_issue(titulo: str, cuerpo: str) -> str:
     if not VIGILANTE_ISSUES or "/" not in JARVIS_REPO:
         return ""
     owner, _, repo = JARVIS_REPO.partition("/")
-    for servidor, cfg in _mcp_config().items():
+    for servidor in _mcp_config():
         # El vigilante corre sin usuario delante: no hay nadie que apruebe la escritura de
         # un `mcp_usar` normal (ver `_mcp_pide_confirmar`). Durante meses eso se resolvió
         # exigiendo `confiar: true`, y el resultado fue que esta función NUNCA se ejecutó:
@@ -13151,8 +13148,8 @@ def _correr_reglas() -> dict:
         if "v" not in cache:
             try:
                 cache["v"] = _brief_salud()
-            except Exception:
-                logger.warning("Reglas: no se pudo leer la salud")
+            except Exception as e:
+                logger.warning("Reglas: no se pudo leer la salud (%s)", type(e).__name__)
                 cache["v"] = {}
         return cache["v"]
 
@@ -18811,10 +18808,6 @@ def _mcp_config() -> dict:
     return {**_mcp_guardados(), **_mcp_del_env()}
 
 
-def _mcp_confiado(servidor) -> bool:
-    return bool(_mcp_config().get(str(servidor or ""), {}).get("confiar"))
-
-
 def _mcp_pide_confirmar(servidor, herramienta) -> bool:
     """Si esta llamada concreta necesita el visto bueno del usuario.
 
@@ -21140,11 +21133,6 @@ JARVIS_VOZ_MAX_MINUTOS = int(os.getenv("JARVIS_VOZ_MAX_MINUTOS", "20"))
 VOZ_TOKEN_MAX_REQUESTS   = int(os.getenv("VOZ_TOKEN_MAX_REQUESTS", "60"))
 VOZ_TOKEN_WINDOW_SECONDS = int(os.getenv("VOZ_TOKEN_WINDOW_SECONDS", "300"))
 
-# Los dos únicos tipos que necesita el modo llamada: uno para el WebSocket de síntesis y
-# otro para el de transcripción en directo. Se valida como Literal y no se interpola un
-# valor libre en la URL de salida.
-VOZ_TIPOS = ("tts_websocket", "realtime_scribe")
-
 # ── Azure Speech: la voz que sí habla español ────────────────────────────────
 # ElevenLabs sigue arriba y sigue funcionando, pero su problema no se arreglaba con
 # ajustes: en el plan gratuito las voces españolas están en la Voice Library, que está
@@ -21260,6 +21248,9 @@ def voz_decir(
 
 
 class VozTokenIn(BaseModel):
+    # Los dos únicos tipos que necesita el modo llamada: uno para el WebSocket de síntesis
+    # y otro para el de transcripción en directo. Se valida como Literal y no se interpola
+    # un valor libre en la URL de salida.
     tipo: Literal["tts_websocket", "realtime_scribe"]
 
 

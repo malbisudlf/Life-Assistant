@@ -59,7 +59,7 @@
   otro por minuto. La copia se rellena al leer, se actualiza en `save_token_data()` y
   se tira si el refresh falla. Si tocas la escritura del token, mantén esa invalidación
   (y resetéala en `reset_state` de los tests, como el resto de estado de módulo).
-  **`SCOPES` incluye `Calendars.ReadWrite`** (necesario para crear/editar eventos): si
+  **`SCOPES_BASE` incluye `Calendars.ReadWrite`** (necesario para crear/editar eventos): si
   cambias los scopes hay que **reautenticar** pasando otra vez por `/auth/login` →
   `/auth/callback`, porque el refresh token guardado está ligado al consentimiento
   anterior.
