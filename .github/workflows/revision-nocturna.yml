@@ -99,14 +99,24 @@ jobs:
           CUERPO=$(jq -n --arg t "$TEXTO" '{text: $t}')
 
           # --retry porque un 5xx puntual no debe costar la revisión de la noche.
-          RESPUESTA=$(curl --fail-with-body -sS -X POST "$ROUTINE_FIRE_URL" \
+          #
+          # Si falla, la respuesta de la API se imprime. Con `set -e` a secas el paso
+          # moría dentro de la asignación y el registro solo decía «returned error:
+          # 401»: el cuerpo, que es lo que dice POR QUÉ (token revocado, cuenta sin
+          # acceso, rutina pausada), se perdía en la variable, y el diagnóstico del
+          # 2026-09-26 (#232) tuvo que adivinarlo. No lleva secretos: es el error de la API.
+          if ! RESPUESTA=$(curl --fail-with-body -sS -X POST "$ROUTINE_FIRE_URL" \
             -H "Authorization: Bearer $ROUTINE_TOKEN" \
             -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
             -H "anthropic-version: 2023-06-01" \
             -H "Content-Type: application/json" \
             --max-time 60 \
             --retry 3 --retry-delay 10 \
-            -d "$CUERPO")
+            -d "$CUERPO"); then
+            echo "El disparo de la routine falló. Respuesta de la API: ${RESPUESTA:-(vacía)}" >&2
+            echo "Un 401 es el token (ROUTINE_TOKEN revocado o regenerado); un 403, la cuenta." >&2
+            exit 1
+          fi
 
           SESION=$(echo "$RESPUESTA" | jq -r '.claude_code_session_url // empty')
           echo "Revisión lanzada: ${SESION:-(sin URL en la respuesta)}"

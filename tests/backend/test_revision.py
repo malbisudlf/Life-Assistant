@@ -112,6 +112,23 @@ class TestElMotivoDelDisparo:
         motivo = main._motivo_disparo(401, '{"type":"authentication_error"}')
         assert "token" in motivo and "claude.ai/code/routines" in motivo
 
+    def test_el_401_de_un_token_que_ya_no_vale(self):
+        """Lo que contesta la API a un token revocado (así respondió el 2026-09-26)."""
+        motivo = main._motivo_disparo(
+            401, '{"type":"error","error":{"type":"authentication_error",'
+                 '"message":"OAuth access token is invalid."},"request_id":null}')
+        assert "ya no vale" in motivo and "claude.ai/code/routines" in motivo
+
+    def test_un_403_no_manda_a_regenerar_el_token(self):
+        """Según la referencia del `/fire`, el 403 es que la CUENTA no tiene acceso al
+        endpoint (el plan, las rutinas apagadas): regenerar el token no lo arregla, y el
+        aviso mandaba a hacerlo igual que con un 401."""
+        motivo = main._motivo_disparo(
+            403, '{"type":"error","error":{"type":"permission_error",'
+                 '"message":"The account does not have access to this endpoint."}}')
+        assert "no es el token" in motivo
+        assert "genera uno nuevo" not in motivo
+
     def test_el_token_de_otra_rutina_no_se_confunde_con_uno_caducado(self):
         """Los dos son 401 y los arreglos son opuestos: regenerar vs. coger el token bueno.
 

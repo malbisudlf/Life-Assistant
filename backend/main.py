@@ -7756,8 +7756,8 @@ def _motivo_disparo(status: int, detalle: str) -> str:
     El cuerpo crudo de la API acaba en una notificación del móvil, y
     `{"type":"error","error":{"type":"authentication_error",...}}` no le dice a nadie
     que lo que toca es regenerar el token del trigger en claude.ai y volver a ponerlo
-    con `fly secrets set`. Solo se traducen los casos con arreglos DISTINTOS; lo demás
-    se deja crudo, que sigue siendo más de lo que dice un número a secas.
+    en el entorno del backend. Solo se traducen los casos con arreglos DISTINTOS; lo
+    demás se deja crudo, que sigue siendo más de lo que dice un número a secas.
 
     El caso de la credencial no es hipotético: pasó el 2026-08-24 y el aviso de que el
     botón no había lanzado nada llegó con el JSON de Anthropic dentro.
@@ -7768,14 +7768,23 @@ def _motivo_disparo(status: int, detalle: str) -> str:
     igual, el aviso del móvil decía «caducado o revocado» por segunda vez y mandaba a
     regenerar un token que no tenía nada de malo. Los tokens de trigger son POR RUTINA,
     así que el arreglo es distinto y el mensaje también tiene que serlo.
+
+    Y el 403 tampoco es el 401. Según la referencia de la API, el 401 es que el token no
+    casa con la rutina (revocado, regenerado o de otra) y el 403 que la CUENTA no tiene
+    acceso al endpoint (el plan, o las rutinas apagadas): ahí regenerar el token no
+    arregla nada, y el aviso mandaba a hacerlo igual.
     """
     if "not authorized for this routine" in detalle:
         return ("el token del disparo es válido pero pertenece a OTRA rutina: cada trigger "
                 "tiene el suyo. Genera el de la rutina que arregla en claude.ai/code/routines "
                 "y ponlo en ARREGLO_FIRE_TOKEN")
-    if status in (401, 403) or "authentication_error" in detalle or "permission_error" in detalle:
-        return ("el token del disparo ya no vale (caducado o revocado): regenéralo en "
-                "claude.ai/code/routines y vuelve a ponerlo en el backend")
+    if status == 403 or "permission_error" in detalle:
+        return ("la cuenta no tiene acceso al disparo de rutinas (403): no es el token, "
+                "regenerarlo no arregla nada. Mira el plan y que las rutinas sigan activas "
+                "en claude.ai")
+    if status == 401 or "authentication_error" in detalle:
+        return ("el token del disparo ya no vale (revocado o regenerado): genera uno nuevo "
+                "en claude.ai/code/routines y ponlo en el backend")
     if status == 404:
         return "la rutina o su trigger ya no existen: revísalos en claude.ai/code/routines"
     if "routine_paused" in detalle:
