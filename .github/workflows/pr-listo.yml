@@ -28,12 +28,12 @@ permissions:
 jobs:
   avisar:
     name: Avisar al backend
-    # Verde, y sobre una rama de trabajo de las que abren los agentes (`claude/...`, la
+    # Verde, y sobre una rama de trabajo de las que abren los agentes (`arreglo/...`, la
     # convención de CLAUDE.md). Sin este segundo filtro, cada CI verde de cualquier rama
     # despertaría a Fly para que contestara que no hay nada que hacer.
     if: >
       github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'claude/')
+      startsWith(github.event.workflow_run.head_branch, 'arreglo/')
     runs-on: ubuntu-latest
     steps:
       - name: Buscar el PR de la rama

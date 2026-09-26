@@ -202,7 +202,7 @@ Por fases. Cada fase es un PR.
     Jarvis), más ElevenLabs (voz y Scribe) y el consumo contra los límites del plan
     gratuito de Supabase, Vercel y Cloudflare. Las suscripciones fijas quedan fuera: no
     hay API que las dé y una cifra escrita a mano envejece mal.
-13. **CI, PRs y revisión nocturna** — último run, PRs de ramas `claude/*`, hallazgos sin
+13. **CI, PRs y revisión nocturna** — último run, PRs de ramas `arreglo/*`, hallazgos sin
     atender.
 14. **Rendimiento** — cuánto tarda cada servicio del que esto depende y cuántas veces ha
     fallado. Requiere que el backend empiece a medirlo: hoy no se guarda.

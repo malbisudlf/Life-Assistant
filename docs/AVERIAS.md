@@ -56,7 +56,7 @@ Ninguna de estas se relaja. Son lo que separa esto de un sistema que despliega s
 | `POST /averia` | `backend/main.py`, sección «Averías que se arreglan solas» | Apunta la avería y dispara la sesión de arreglo. No avisa |
 | La routine que arregla | claude.ai — **la misma** que la de la revisión nocturna | Arregla y abre PR. La instrucción le dice que NO mergee |
 | `.claude/skills/arreglar-revision/SKILL.md` | Aquí | Su paso 0 distingue los dos caminos: con issue se mergea, con avería no |
-| `.github/workflows/pr-listo.yml` | Aquí | Ve el CI verde sobre una rama `claude/…` con PR y llama a `POST /revision/pr-listo` |
+| `.github/workflows/pr-listo.yml` | Aquí | Ve el CI verde sobre una rama `arreglo/…` con PR y llama a `POST /revision/pr-listo` |
 | `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono si `LLAMADAS=1`) |
 | `GET /despliegue/pendiente` | `backend/main.py` | Qué anunciar al descolgar la pantalla de llamada. Solo lee |
 | `PantallaLlamada` | `src/components/Dashboard.jsx` | La pantalla de llamada entrante que abre el botón «Hablarlo» |

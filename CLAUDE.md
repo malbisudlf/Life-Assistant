@@ -440,7 +440,11 @@ moraleja de este fichero entero.
   - **Cómo evitarlo al mergear**: pasar siempre un `commit_message` explícito (aunque
     sea breve) al hacer squash merge por la API/herramienta de GitHub, en vez de dejar
     que lo autogenere — así no tira de los autores de los commits originales.
-- **Ramas de trabajo**: `claude/...`; PR contra `main`.
+- **Ramas**: el trabajo de una sesión va **directo a `main`**, sin rama. Solo llevan rama
+  los arreglos automáticos (revisión nocturna, averías, encargos hablados), que necesitan
+  el CI en verde antes de mergear: `arreglo/...`, y se borra sola al mergear. **Nunca
+  `claude/...`**, ni ningún otro nombre, mensaje, título o cuerpo de PR que diga qué
+  herramienta hizo el trabajo: todo va en nombre de Mikel, igual que la norma de autoría.
 - **Estilo de código**: el existente. Comentarios que explican *por qué* (restricciones,
   decisiones), no *qué*. Alineación vertical de asignaciones donde ya la haya.
 - **No añadas dependencias** sin necesidad clara; el proyecto es deliberadamente simple

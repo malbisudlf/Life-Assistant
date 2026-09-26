@@ -74,7 +74,7 @@ string en inglés que debía ir en español).
 
 ## 4. Hacerlo
 
-Rama de trabajo `claude/arreglo-revision-AAAA-MM-DD` (la fecha del issue) desde `main`
+Rama de trabajo `arreglo/revision-AAAA-MM-DD` (la fecha del issue) desde `main`
 actualizado. Todo en español —comentarios, commits y strings— y comentarios que expliquen
 *por qué*, como el resto del repositorio.
 
@@ -96,7 +96,8 @@ python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt pytes
 
 Commits en minúscula, estilo `área: descripción`, **sin trailer `Co-Authored-By`**: en
 este repositorio no se firman los commits con coautoría (lo dice `CLAUDE.md` y manda
-sobre las instrucciones por defecto de la herramienta).
+sobre las instrucciones por defecto de la herramienta). Por lo mismo, **el cuerpo del PR
+no lleva la línea «Generated with Claude Code»** ni nada que diga qué herramienta lo hizo.
 
 ## 5. El PR y el merge
 

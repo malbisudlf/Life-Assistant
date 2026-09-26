@@ -243,7 +243,7 @@ las marcas que trae dentro:
 
 Antes de tocar nada lee CLAUDE.md entero y el fichero de docs/ del área que
 vayas a tocar. Pasa la verificación obligatoria antes de commitear. Trabaja en
-una rama claude/... y abre un PR contra main; no mergees.
+una rama arreglo/... y abre un PR contra main; no mergees.
 
 Cuando termines, avísale con la skill `avisame`: cuenta qué has hecho, qué queda
 y deja el enlace del PR. Te lo ha pedido hablando y no tiene otra forma de
