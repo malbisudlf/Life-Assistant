@@ -179,6 +179,31 @@ describe("parteDelSistema: cada fuente", () => {
     expect(deDatos[0].titulo).not.toContain("sueno");
   });
 
+  test("con cambio de aparato, lo que lleva más de 7 días callado no entra en el parte", () => {
+    // Lo que pasó al cambiar del Watch a la pulsera: siete métricas que ya no existen
+    // dejaban el parte en rojo para siempre.
+    const metricas = {
+      apple_stand_hour:    { dias_atras: 34, huecos: 0, dias_con_dato: 2, fuentes: [] },
+      apple_exercise_time: { dias_atras: 20, huecos: 0, dias_con_dato: 5, fuentes: [] },
+      resting_heart_rate:  { dias_atras: 5,  huecos: 0, dias_con_dato: 25, fuentes: [] },
+    };
+    const ajustes = { cambio_dispositivo: "2026-08-24", dispositivo: "Amazfit Helio Strap" };
+    const p = parte(lecturasBien({ datos: ok({ ...datosBien(), metricas, ajustes }) }));
+    const deDatos = p.items.filter(i => i.pestana === "datos");
+    // La de 5 días sí: el aparato nuevo la mide y ha dejado de llegar.
+    expect(deDatos).toEqual([expect.objectContaining({
+      tono: "red", titulo: "1 métrica sin datos desde hace más de 3 días (resting_heart_rate)" })]);
+  });
+
+  test("sin cambio de aparato, esas mismas métricas siguen en rojo", () => {
+    const metricas = {
+      apple_stand_hour: { dias_atras: 34, huecos: 0, dias_con_dato: 2, fuentes: [] },
+    };
+    const p = parte(lecturasBien({ datos: ok({ ...datosBien(), metricas,
+                                              ajustes: { cambio_dispositivo: null, dispositivo: null } }) }));
+    expect(p.items.filter(i => i.pestana === "datos")).toEqual([expect.objectContaining({ tono: "red" })]);
+  });
+
   test("una regla silenciada es un item rojo con su nombre", () => {
     const reglas = [{ regla: "lluvia", enviados: 0, utiles: 0, no_utiles: 3, sin_votar: 0, silenciada: true }];
     const p = parte(lecturasBien({ avisos: ok({ ...avisosBien(), reglas }) }));

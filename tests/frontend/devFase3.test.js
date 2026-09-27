@@ -148,6 +148,38 @@ describe("estadoMetrica", () => {
     expect(estadoMetrica({ dias_atras: 0, huecos: 1 }).texto).toBe("hoy · 1 hueco");
     expect(estadoMetrica({ dias_atras: 0, huecos: 4 }).texto).toBe("hoy · 4 huecos");
   });
+
+  describe("con un cambio de aparato apuntado", () => {
+    const CAMBIO = { cambio_dispositivo: "2026-08-24", dispositivo: "Amazfit Helio Strap" };
+
+    test("más de una semana callada es que el aparato nuevo no la mide: gris", () => {
+      const e = estadoMetrica({ dias_atras: 20, huecos: 12 }, CAMBIO);
+      expect(e.tono).toBe("muted");
+      expect(e.retirada).toBe(true);
+      expect(e.texto).toBe("hace 20 días · ya no la mide tu aparato (desde el cambio a Amazfit Helio Strap)");
+    });
+
+    test("entre 3 y 7 días sigue en rojo: eso sí es una avería", () => {
+      expect(estadoMetrica({ dias_atras: 5, huecos: 0 }, CAMBIO).tono).toBe("red");
+      expect(estadoMetrica({ dias_atras: 7, huecos: 0 }, CAMBIO).tono).toBe("red");
+      expect(estadoMetrica({ dias_atras: 8, huecos: 0 }, CAMBIO).tono).toBe("muted");
+    });
+
+    test("lo que llega al día no cambia", () => {
+      expect(estadoMetrica({ dias_atras: 0, huecos: 0 }, CAMBIO).tono).toBe("green");
+    });
+
+    test("sin nombre de aparato, dice la fecha del cambio", () => {
+      const e = estadoMetrica({ dias_atras: 30 }, { cambio_dispositivo: "2026-08-24", dispositivo: null });
+      expect(e.texto).toContain("desde el cambio de aparato del 24/08/2026");
+    });
+  });
+
+  test("sin cambio apuntado, una semana callada sigue siendo roja", () => {
+    expect(estadoMetrica({ dias_atras: 20, huecos: 0 }).tono).toBe("red");
+    expect(estadoMetrica({ dias_atras: 20, huecos: 0 },
+                         { cambio_dispositivo: null, dispositivo: null }).tono).toBe("red");
+  });
 });
 
 describe("estadoFuente", () => {

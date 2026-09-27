@@ -1295,6 +1295,50 @@ class TestDiagnosticoDeDatos:
         assert client.get("/health/diagnostico?dias=0", headers=auth_headers).status_code == 400
         assert client.get("/health/diagnostico?dias=900", headers=auth_headers).status_code == 400
 
+    def test_trae_el_cambio_de_aparato(self, client, mock_requests, auth_headers):
+        """La zona dev decide con esto si una métrica callada es avería o es que el
+        aparato nuevo no la mide; tiene que venir en la misma respuesta, sin otra
+        llamada desde el frontend."""
+        self._tabla(mock_requests, [])
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(
+            [{"cambio_dispositivo": "2026-08-24", "dispositivo": "Amazfit Helio Strap"}]))
+        cuerpo = client.get("/health/diagnostico", headers=auth_headers).json()
+        assert cuerpo["ajustes"] == {"cambio_dispositivo": "2026-08-24",
+                                     "dispositivo": "Amazfit Helio Strap"}
+
+    def test_sin_fila_de_ajustes_no_hay_cambio(self, client, mock_requests, auth_headers):
+        self._tabla(mock_requests, [])
+        mock_requests.add("GET", "salud_ajustes", FakeResponse([]))
+        cuerpo = client.get("/health/diagnostico", headers=auth_headers).json()
+        assert cuerpo["ajustes"]["cambio_dispositivo"] is None
+
+    @pytest.mark.parametrize("respuesta", [
+        FakeResponse(None, 500, "boom"),
+        "red",
+        "json",
+    ])
+    def test_si_los_ajustes_fallan_el_diagnostico_sale_sin_cambio(
+            self, client, mock_requests, auth_headers, respuesta):
+        """Fail-open: sin poder leer el cambio, todo en rojo como antes. Callarse una
+        avería real por un ajuste ilegible sería peor que un rojo de más."""
+        hoy = main.datetime.now(main.LOCAL_TZ).date().isoformat()
+        self._tabla(mock_requests, [self._fila("step_count", hoy)])
+
+        def _sin_red(url, **kw):
+            raise main.requests.ConnectionError("sin red")
+
+        def _no_es_json(url, **kw):
+            r = FakeResponse(None, 200)
+            r.json = lambda: (_ for _ in ()).throw(ValueError("no es JSON"))
+            return r
+
+        ruta = {"red": _sin_red, "json": _no_es_json}.get(respuesta, respuesta)
+        mock_requests.add("GET", "salud_ajustes", ruta)
+        r = client.get("/health/diagnostico", headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["ajustes"]["cambio_dispositivo"] is None
+        assert "step_count" in r.json()["metricas"]
+
     def test_un_fallo_de_supabase_no_filtra_su_texto(self, client, mock_requests, auth_headers):
         self._tabla(mock_requests, [])
         mock_requests.routes.insert(0, ("GET", "/rest/v1/health_metrics",

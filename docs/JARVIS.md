@@ -797,7 +797,11 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
 - **Jarvis se diagnostica** (`diagnostico`): fallos de `app_logs` agrupados por origen,
   estado del resumen diario, cuántos días lleva cada métrica sin dato, **quién escribió
   por última vez** (de `/health/diagnostico`, ventana corta: es una lectura de tabla) y
-  qué integraciones están configuradas. Es la pregunta más frecuente que se le hace a un asistente que falla
+  qué integraciones están configuradas. Con un cambio de aparato apuntado, las métricas
+  que llevan más de `METRICA_RETIRADA_DIAS` (7) días sin dato van marcadas
+  `ya_no_la_mide_tu_aparato`, con una `nota` que lo explica: sin la marca, a «¿por qué no
+  llegan mis horas de pie?» contestaba con una ingesta parada, cuando es que la pulsera no
+  las mide. Misma regla que la zona dev (`docs/SALUD.md`, «Lo que vigila la frescura»). Es la pregunta más frecuente que se le hace a un asistente que falla
   de vez en cuando —no "qué tiempo hace", sino "¿por qué no me llegó el correo?"— y toda
   la información existía sin forma de preguntarla hablando. **No devuelve cuerpos de error
   ni contextos**: nivel, origen, recuento y fecha. El detalle se queda en el servidor (la

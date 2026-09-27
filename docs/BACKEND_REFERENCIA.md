@@ -97,7 +97,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) + `ajustes` (el corte por cambio de dispositivo) |
 | `PATCH /health/ajustes` | JWT | Fija o borra la fecha del cambio de dispositivo de salud (`cambio_dispositivo`, `dispositivo`). Rechaza fechas futuras: un corte por delante de hoy dejaría las líneas base sin ninguna referencia |
 | `GET /health/latest` | JWT | Último valor de cada métrica |
-| `GET /health/diagnostico` | JWT | Por métrica: último día con MEDIDA, huecos intercalados, qué fuente la escribe y filas de relleno; más la última escritura de cada cliente. `?dias=` (1-365) |
+| `GET /health/diagnostico` | JWT | Por métrica: último día con MEDIDA, huecos intercalados, qué fuente la escribe y filas de relleno; más la última escritura de cada cliente y `ajustes` (el cambio de dispositivo, misma forma que en `/health/metrics`; sin fila o sin Supabase, con los dos campos a `null`), con el que la zona dev da por no medida lo que lleva más de 7 días callado. `?dias=` (1-365) |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |

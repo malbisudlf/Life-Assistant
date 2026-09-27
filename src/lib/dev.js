@@ -643,20 +643,47 @@ export async function leerDiagnostico(dias = 30) {
   return r.json();
 }
 
+// Días callada a partir de los cuales una métrica se da por «ya no la mide tu aparato»,
+// SOLO si hay un cambio de aparato apuntado (`salud_ajustes`, panel ⚙). Siete y no tres:
+// entre tres y siete días lo normal es que sea una avería de verdad —una métrica que el
+// aparato nuevo sí mide y ha dejado de llegar hace poco— y tiene que seguir en rojo. Una
+// semana entera sin un solo dato ya no la explica un envío que se retrasa ni un fin de
+// semana sin la pulsera: la explica que ese sensor no existe. Misma cifra que
+// `METRICA_RETIRADA_DIAS` del backend (el diagnóstico de Jarvis); si cambia una, la otra.
+export const DIAS_METRICA_RETIRADA = 7;
+
 // El semáforo de una métrica. Lo que importa no es cuántos datos hay sino desde cuándo no
 // llega ninguno: el Watch estuvo días sin sincronizar con la tabla llena de filas viejas, y
 // desde fuera aquello se veía igual de bien que ahora.
-export function estadoMetrica(m) {
+//
+// `ajustes` es el `ajustes` de `/health/diagnostico` ({cambio_dispositivo, dispositivo}).
+// Sin él —o sin fecha de cambio— todo sigue como antes: rojo pasados tres días, porque
+// sin un cambio de aparato apuntado una métrica callada es una avería. Con él, lo que
+// lleva más de una semana sin llegar pasa a gris: al cambiar del Watch a la pulsera siete
+// métricas dejaron de existir y el parte las gritaba en rojo para siempre.
+export function estadoMetrica(m, ajustes = null) {
   if (!m)                   return { tono: "muted", texto: "sin comprobar" };
   if (m.dias_atras == null) return { tono: "muted", texto: "nunca ha llegado un dato" };
   const cuando = m.dias_atras === 0 ? "hoy"
     : m.dias_atras === 1 ? "ayer"
     : `hace ${m.dias_atras} días`;
+  if (ajustes?.cambio_dispositivo && m.dias_atras > DIAS_METRICA_RETIRADA) {
+    return { tono: "muted", retirada: true,
+             texto: `${cuando} · ya no la mide tu aparato (${desdeElCambio(ajustes)})` };
+  }
   const huecos = m.huecos ? ` · ${m.huecos} ${m.huecos === 1 ? "hueco" : "huecos"}` : "";
   // Un día de retraso es lo normal: el sueño de esta noche llega por la mañana.
   if (m.dias_atras <= 1) return { tono: "green",  texto: cuando + huecos };
   if (m.dias_atras <= 3) return { tono: "accent", texto: cuando + huecos };
   return { tono: "red", texto: cuando + huecos };
+}
+
+// «desde el cambio a Amazfit Helio Strap», o la fecha si no se apuntó el nombre: el nombre
+// es opcional en el panel ⚙ y la fecha no.
+export function desdeElCambio(ajustes) {
+  if (ajustes?.dispositivo) return `desde el cambio a ${ajustes.dispositivo}`;
+  const [a, m, d] = String(ajustes?.cambio_dispositivo || "").split("-");
+  return d ? `desde el cambio de aparato del ${d}/${m}/${a}` : "desde el cambio de aparato";
 }
 
 // Quién ha dejado de escribir. Es la pregunta de verdad cuando algo falla —no "¿falta el
@@ -872,8 +899,11 @@ export function parteDelSistema(lecturas, { filasExtra = [], ahora = Date.now() 
     }
 
     if (clave === "datos") {
+      // Con los ajustes, igual que la pestaña: las que ya no mide el aparato salen en gris
+      // y el parte no las cuenta (gris no es problema), en vez de un rojo perpetuo.
       const metricas = Object.entries(d.metricas || {});
-      const conTono  = (tono) => metricas.filter(([, m]) => estadoMetrica(m).tono === tono).map(([n]) => n);
+      const conTono  = (tono) => metricas
+        .filter(([, m]) => estadoMetrica(m, d.ajustes).tono === tono).map(([n]) => n);
       const rojas    = conTono("red");
       const ambar    = conTono("accent");
       if (rojas.length) {

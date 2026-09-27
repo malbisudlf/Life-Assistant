@@ -5504,13 +5504,32 @@ def _leer_salud_ajustes() -> dict:
         if r.status_code >= 300:
             return vacio
         filas = r.json()
-    except requests.RequestException as e:
+    # ValueError también: un cuerpo que no es JSON (un proxy devolviendo HTML) no es
+    # motivo para tumbar el diagnóstico de datos, que lee esto en cada refresco del parte.
+    except (requests.RequestException, ValueError) as e:
         logger.warning("Ajustes de salud: no se pudieron leer (%s)", type(e).__name__)
         return vacio
-    if not filas:
+    if not filas or not isinstance(filas, list) or not isinstance(filas[0], dict):
         return vacio
     return {"cambio_dispositivo": filas[0].get("cambio_dispositivo"),
             "dispositivo":        filas[0].get("dispositivo")}
+
+
+# Días callada a partir de los cuales una métrica se da por «ya no la mide tu aparato»,
+# y SOLO si hay un cambio de aparato apuntado. Al pasar del Watch a la pulsera, siete
+# métricas (minutos de ejercicio, horas de pie, energía basal…) dejaron de existir y todo
+# lo que vigila la frescura las daba por avería para siempre. Siete días y no los tres del
+# rojo: entre tres y siete lo probable es que sea una avería de verdad —una métrica que
+# el aparato nuevo sí mide y ha dejado de llegar hace poco— y una semana entera sin un
+# dato ya no la explica un envío con retraso. Sin cambio apuntado no hay excusa: callada
+# es avería. Misma cifra que `DIAS_METRICA_RETIRADA` en src/lib/dev.js (la zona dev).
+METRICA_RETIRADA_DIAS = 7
+
+
+def _ya_no_la_mide(dias_atras, ajustes: dict | None) -> bool:
+    """¿Esta métrica lleva callada lo bastante para achacarlo al cambio de aparato?"""
+    return (bool((ajustes or {}).get("cambio_dispositivo"))
+            and isinstance(dias_atras, int) and dias_atras > METRICA_RETIRADA_DIAS)
 
 
 @app.get("/health/metrics")
@@ -5659,13 +5678,26 @@ def get_health_diagnostico(
         raise HTTPException(status_code=400, detail="dias debe estar entre 1 y 365")
     hoy   = datetime.now(LOCAL_TZ).date()
     desde = (hoy - timedelta(days=dias - 1)).isoformat()
-    r, filas = _leer_todas(
-        f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
-        "&select=metric_date,metric_name,value,extra,fuente,created_at"
-        "&order=metric_date.asc,metric_name.asc",
-    )
+    # Los ajustes (el cambio de aparato) a la vez que la tabla, como en /health/metrics:
+    # esto lo relee el parte de la zona dev cada minuto y en serie sería un viaje más por
+    # delante. Fail-open: sin fila o sin Supabase, como si no hubiera cambio, que es
+    # justo el comportamiento de antes.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        f_ajustes = pool.submit(contextvars.copy_context().run, _leer_salud_ajustes)
+        r, filas = _leer_todas(
+            f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=gte.{desde}"
+            "&select=metric_date,metric_name,value,extra,fuente,created_at"
+            "&order=metric_date.asc,metric_name.asc",
+        )
     if filas is None:
         raise _supabase_error(r)
+    try:
+        ajustes = f_ajustes.result()
+    except Exception:
+        # `_leer_salud_ajustes` ya se traga la red y el JSON roto; esto es por lo que no
+        # se haya previsto. Un ajuste ilegible no puede dejar la pestaña sin diagnóstico.
+        logger.exception("Diagnóstico de datos: fallo inesperado leyendo los ajustes de salud")
+        ajustes = {"cambio_dispositivo": None, "dispositivo": None}
 
     por_nombre: dict = {}
     for fila in filas:
@@ -5710,6 +5742,10 @@ def get_health_diagnostico(
         "fuentes":      {f: {"ultima_escritura": c} for f, c in sorted(por_fuente.items())},
         # Las filas viejas no tienen fuente y no se les puede inventar una.
         "sin_fuente":   sum(1 for f in filas if not f.get("fuente")),
+        # El cambio de aparato, con la misma forma que en /health/metrics. Va crudo y no
+        # como una marca por métrica: el semáforo lo decide `estadoMetrica` en el frontend,
+        # que es quien sabe pintarlo, y el parte llama a esa misma función.
+        "ajustes":      ajustes,
     }
 
 
@@ -21545,12 +21581,28 @@ def _j_diagnostico(dias: int = 3) -> dict:
     # en un cajón", que son problemas distintos con arreglos distintos.
     try:
         salud = _brief_salud()
-        salida["salud"] = {
-            "metricas": {clave: {"dias_atras": m.get("dias_atras"), "fecha": m.get("fecha")}
-                         for clave, m in salud.items()
-                         if isinstance(m, dict) and m.get("dias_atras") is not None},
-            "reloj": salud.get("reloj"),
-        }
+        # Con el cambio de aparato apuntado, lo que lleva más de una semana callado se
+        # marca: sin la marca, a «¿por qué no llegan mis horas de pie?» contestaba que la
+        # ingesta llevaba semanas parada, cuando lo que pasa es que la pulsera no las mide.
+        # Misma regla que el semáforo de la zona dev (`METRICA_RETIRADA_DIAS`).
+        ajustes = _leer_salud_ajustes()
+        metricas: dict = {}
+        for clave, m in salud.items():
+            if not isinstance(m, dict) or m.get("dias_atras") is None:
+                continue
+            metricas[clave] = {"dias_atras": m.get("dias_atras"), "fecha": m.get("fecha")}
+            if _ya_no_la_mide(m.get("dias_atras"), ajustes):
+                metricas[clave]["ya_no_la_mide_tu_aparato"] = True
+        salida["salud"] = {"metricas": metricas, "reloj": salud.get("reloj")}
+        if ajustes.get("cambio_dispositivo"):
+            salida["salud"]["cambio_de_aparato"] = {
+                "fecha":       ajustes["cambio_dispositivo"],
+                "dispositivo": ajustes.get("dispositivo"),
+                "nota": (f"Las métricas marcadas ya_no_la_mide_tu_aparato llevan más de "
+                         f"{METRICA_RETIRADA_DIAS} días sin dato desde un cambio de aparato: "
+                         "lo normal es que el aparato nuevo no las mida, no una avería de "
+                         "la ingesta. Las que llevan menos días sí pueden ser una avería."),
+            }
     except Exception as e:
         salida["salud"] = {"error": f"no se pudo comprobar: {e}"}
 

@@ -249,7 +249,9 @@ UNIQUE(metric_date, metric_name)
 
 La tabla `salud_ajustes` (una sola fila, `id = 'actual'`) guarda `cambio_dispositivo`:
 la fecha a partir de la cual los datos son del aparato actual. Se fija desde el panel ⚙
-(`PATCH /health/ajustes`) y viaja al frontend dentro de `GET /health/metrics`.
+(`PATCH /health/ajustes`) y viaja al frontend dentro de `GET /health/metrics` (para las
+líneas base) y de `GET /health/diagnostico` (para la zona dev, ver «Lo que vigila la
+frescura» más abajo).
 
 **Por qué hace falta.** Las puntuaciones no comparan valores absolutos: comparan cada
 día contra la propia historia del usuario — la HRV contra la ventana D-14..D-8, la
@@ -321,6 +323,51 @@ dos semanas solo sirve para que el desglose pase ese tiempo reclamando datos que
 sabemos que no van a llegar. La ventana corta **se gana**: las esporádicas —VO₂max,
 % grasa, recuperación cardíaca— pueden pasarse cinco días sin dar señal con el aparato
 viejo puesto, así que para ellas cinco días no prueban nada y se quedan con los catorce.
+
+### Lo que vigila la frescura: siete días con cambio apuntado
+
+La otra cara de lo mismo, pero en lo que **avisa de averías**: la pestaña Salud de datos
+de la zona dev, su línea en el parte y la herramienta `diagnostico` de Jarvis. Al pasar
+del Apple Watch a la Amazfit Helio Strap (Watch hasta el 10/08, Zepp desde el 24/08) siete
+métricas dejaron de existir —`apple_exercise_time`, `apple_stand_hour`,
+`basal_energy_burned`, `dietary_energy`, `walking_running_distance`,
+`blood_oxygen_saturation`, `weight_body_mass`— y el parte las daba en rojo, «sin datos
+desde hace más de 3 días», **para siempre**. Una alarma que no se puede apagar enseña a
+no mirarla, y la siguiente avería de verdad habría salido en la misma franja roja.
+
+La regla (`estadoMetrica` en `src/lib/dev.js`, `_ya_no_la_mide` en el backend):
+
+| Situación | Más de 3 días sin dato | Más de 7 días sin dato |
+|---|---|---|
+| Sin cambio de aparato apuntado | rojo | rojo |
+| Con cambio apuntado en `salud_ajustes` | rojo | **gris**, «ya no la mide tu aparato (desde el cambio a …)», y fuera del parte |
+
+- **Sin cambio apuntado no hay excusa**: una métrica callada es una avería, como siempre.
+  La fecha del cambio es lo que hace creíble la explicación, igual que en la ventana corta
+  de `metricasMuertas`.
+- **De cuatro a siete días sigue en rojo aun con cambio** (hasta tres es ámbar, como
+  siempre). Una métrica que el aparato nuevo sí mide y deja de llegar hace poco es una avería de verdad (el Atajo parado, un
+  permiso de Salud retirado a Zepp), y es justo la que tiene que seguir gritando.
+- **Por qué siete.** Una semana entera sin un solo dato ya no la explica un envío con
+  retraso ni un fin de semana sin la pulsera; la explica que ese sensor no existe. Menos
+  (los cinco de `metricasMuertas`) aquí es peligroso: esto no pinta un desglose, decide si
+  una avería llega al parte, y lo que se equivoca por abajo se calla una avería real.
+- **No mira cuándo fue el cambio ni si la métrica llegaba antes.** Es a propósito más
+  simple que `metricasMuertas`: con el cambio apuntado, cualquier métrica que el aparato
+  nuevo sí mida y lleve más de una semana callada también pasa a gris. Es el precio de
+  la regla, y por eso el gris no esconde nada —la fila sigue en la pestaña, al final, con
+  sus días— y el rojo de 4 a 7 días sigue avisando antes de llegar ahí.
+- **La lectura del cambio es tolerante.** `/health/diagnostico` lee `salud_ajustes` en
+  paralelo y, sin fila o con Supabase fallando, sale como si no hubiera cambio: vuelve el
+  rojo, que es el error bueno.
+
+**Lo que NO sigue esta regla, y por qué**: el vigilante de la ingesta
+(`_vigilar_ingesta`) no mira métricas sueltas, solo si ha entrado **algún** dato, así que
+un sensor que ya no existe no lo despierta. El resumen diario tampoco avisa de métricas
+calladas: enseña la fecha del último dato de cada una (`[fecha, hace N días]`), que es
+verdad con o sin cambio, y una métrica que lleva 30 días sin dato deja de salir sola.
+Si algún día el correo empieza a leer esas fechas como averías, la regla se le pasa igual
+que a Jarvis: `_ya_no_la_mide` y `_leer_salud_ajustes` ya están escritas.
 
 ### La HRV se puntúa promediada, no día a día
 

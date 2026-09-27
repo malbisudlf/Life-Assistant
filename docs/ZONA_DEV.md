@@ -229,7 +229,13 @@ Por fases. Cada fase es un PR.
    ya existían: despertar el PC y reintentar un job fallido.
 10. **Salud de los datos** (hecha) — sobre `GET /health/diagnostico`, que ya contestaba
     esto desde agosto pero solo desde una consola: qué fuente ha dejado de escribir, y por
-    métrica cuándo llegó el último dato y cuántos huecos tiene.
+    métrica cuándo llegó el último dato y cuántos huecos tiene. **Con un cambio de aparato
+    apuntado** (`salud_ajustes`, que viaja en la misma respuesta como `ajustes`), lo que
+    lleva **más de 7 días** sin llegar pasa a gris —«ya no la mide tu aparato (desde el
+    cambio a …)»—, se ordena al final y **no cuenta en el parte**; de 4 a 7 días sigue en
+    rojo, y sin cambio apuntado todo sigue en rojo pasados 3 días. Nació al cambiar del
+    Watch a la pulsera: siete métricas que ya no existen dejaban el parte en rojo para
+    siempre. El porqué de los siete días, en `docs/SALUD.md` («Lo que vigila la frescura»).
 11. **Avisos y reglas** (hecha) — qué salió, por qué (`GET /avisos/{id}/porque`, que se
     pide solo al abrir un aviso), la estadística de votos de cada regla, cuáles se han
     silenciado solas —con el botón de devolverles la voz—, las reglas que propuso Jarvis y

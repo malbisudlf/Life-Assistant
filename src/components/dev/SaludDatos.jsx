@@ -10,7 +10,8 @@
 import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO,
-         leerDiagnostico, estadoMetrica, estadoFuente } from "../../lib/dev";
+         leerDiagnostico, estadoMetrica, estadoFuente, desdeElCambio,
+         DIAS_METRICA_RETIRADA } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const VENTANAS = [7, 30, 90];
@@ -41,10 +42,15 @@ export default function SaludDatos() {
 
   const fuentes  = Object.entries(datos?.fuentes || {});
   const metricas = Object.entries(datos?.metricas || {});
+  const ajustes  = datos?.ajustes || null;
+  const estados  = Object.fromEntries(metricas.map(([n, m]) => [n, estadoMetrica(m, ajustes)]));
   // Lo que peor está, arriba: en cincuenta métricas, las tres que llevan una semana sin
-  // llegar no se encuentran leyendo por orden alfabético.
-  const ordenadas = [...metricas].sort(
-    ([, a], [, b]) => (b.dias_atras ?? 9999) - (a.dias_atras ?? 9999),
+  // llegar no se encuentran leyendo por orden alfabético. Las que ya no mide el aparato,
+  // al fondo: son las que más días llevan calladas y, ordenando solo por días, taparían
+  // justo las que sí son una avería.
+  const ordenadas = [...metricas].sort(([na, a], [nb, b]) =>
+    (estados[na].retirada ? 1 : 0) - (estados[nb].retirada ? 1 : 0)
+    || (b.dias_atras ?? 9999) - (a.dias_atras ?? 9999),
   );
 
   return (
@@ -97,11 +103,18 @@ export default function SaludDatos() {
         <div style={{ ...tituloStyle, padding: "14px 16px 8px" }}>
           Por métrica ({metricas.length})
         </div>
+        {ajustes?.cambio_dispositivo && (
+          <div style={{ fontSize: 10, color: "var(--muted2)", padding: "0 16px 8px" }}>
+            Cambio de aparato apuntado ({desdeElCambio(ajustes)}): lo que lleva más
+            de {DIAS_METRICA_RETIRADA} días sin llegar se da por no medido y va en gris, al
+            final. Entre 3 y {DIAS_METRICA_RETIRADA} días sigue en rojo: eso sí es una avería.
+          </div>
+        )}
         {!metricas.length && !leyendo && !error && (
           <Vacio>No hay ni una fila en esta ventana. Eso no es un hueco: es que no llega nada.</Vacio>
         )}
         {ordenadas.map(([nombre, m]) => {
-          const semaforo = estadoMetrica(m);
+          const semaforo = estados[nombre];
           return (
             <div key={nombre} style={{
               display: "flex", gap: 10, alignItems: "baseline", padding: "5px 14px",

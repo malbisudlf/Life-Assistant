@@ -1089,6 +1089,36 @@ class TestDiagnostico:
         d = main._j_diagnostico()
         assert d["salud"]["metricas"]["fc_reposo"]["dias_atras"] == 3
 
+    @staticmethod
+    def _metricas_de_hace(mock_requests, **dias_por_nombre):
+        from datetime import datetime, timedelta
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        mock_requests.add("GET", "/rest/v1/health_metrics", FakeResponse([
+            {"metric_date": (hoy - timedelta(days=n)).isoformat(), "metric_name": nombre,
+             "value": 5, "unit": "", "extra": {}}
+            for nombre, n in dias_por_nombre.items()
+        ]))
+
+    def test_con_cambio_de_aparato_lo_callado_una_semana_no_es_avería(self, mock_requests):
+        """Al pasar del Watch a la pulsera las horas de pie dejaron de existir; sin la
+        marca, Jarvis diagnosticaba una ingesta parada semanas. Lo de 3-7 días sigue sin
+        marca: con el aparato nuevo, eso sí puede ser una avería."""
+        self._metricas_de_hace(mock_requests, apple_stand_hour=20, resting_heart_rate=5)
+        mock_requests.add("GET", "salud_ajustes", FakeResponse(
+            [{"cambio_dispositivo": "2026-08-24", "dispositivo": "Amazfit Helio Strap"}]))
+        salud = main._j_diagnostico()["salud"]
+        assert salud["metricas"]["de_pie"]["ya_no_la_mide_tu_aparato"] is True
+        assert "ya_no_la_mide_tu_aparato" not in salud["metricas"]["fc_reposo"]
+        assert salud["cambio_de_aparato"]["dispositivo"] == "Amazfit Helio Strap"
+
+    def test_sin_cambio_de_aparato_no_se_marca_nada(self, mock_requests):
+        """Sin cambio apuntado no hay excusa: una métrica callada es una avería."""
+        self._metricas_de_hace(mock_requests, apple_stand_hour=20)
+        mock_requests.add("GET", "salud_ajustes", FakeResponse([]))
+        salud = main._j_diagnostico()["salud"]
+        assert "ya_no_la_mide_tu_aparato" not in salud["metricas"]["de_pie"]
+        assert "cambio_de_aparato" not in salud
+
     def test_dice_quien_escribio_por_ultima_vez(self, mock_requests):
         """"No hay datos de sueño" puede ser el reloj en un cajón o el Atajo parado, y
         son averías distintas con arreglos distintos."""
