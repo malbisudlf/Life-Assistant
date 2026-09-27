@@ -175,6 +175,15 @@ class TestConfig:
         cuerpo = client.get("/dev/config", headers=auth_headers).json()
         assert cuerpo["graph"]["conectado"] is False
 
+    def test_busca_la_sesión_con_el_nombre_con_el_que_se_guarda(self, client, auth_headers, mock_requests):
+        """Buscaba "microsoft" y la fila se guarda como OAUTH_PROVIDER ("microsoft_graph"):
+        con Outlook funcionando, el parte decía «nunca se ha conectado Outlook». El mock de
+        arriba acepta cualquier consulta, así que hay que mirar el filtro que se manda."""
+        mock_requests.add("GET", "/rest/v1/oauth_tokens", FakeResponse([]))
+        client.get("/dev/config", headers=auth_headers)
+        consulta = mock_requests.called("GET", "/rest/v1/oauth_tokens")[-1][2]
+        assert consulta["params"]["provider"] == f"eq.{main.OAUTH_PROVIDER}"
+
     def test_con_outlook_conectado_no_devuelve_el_token(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "/rest/v1/oauth_tokens", FakeResponse([{
             "provider": "microsoft", "expires_at": 4102444800.0,

@@ -10102,9 +10102,12 @@ def _estado_de_graph():
     entere. Nunca se devuelve un token: solo si está y hasta cuándo.
     """
     try:
+        # El mismo proveedor con el que se guarda (save_token_data): con un "microsoft"
+        # escrito a mano, la zona dev decía «nunca se ha conectado Outlook» con Outlook
+        # funcionando, porque la fila se llama "microsoft_graph".
         r = http.get(f"{SUPABASE_URL}/rest/v1/oauth_tokens", headers=supabase_headers(),
                      params={"select": "provider,expires_at,updated_at,refresh_token",
-                             "provider": "eq.microsoft"})
+                             "provider": f"eq.{OAUTH_PROVIDER}"})
         if r.status_code >= 300:
             return {"conectado": None, "motivo": f"Supabase devolvió {r.status_code}"}
         filas = r.json() or []
