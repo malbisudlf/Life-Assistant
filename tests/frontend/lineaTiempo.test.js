@@ -571,6 +571,14 @@ describe("normalizarCasa", () => {
     const items = normalizarCasa([{ servicio: "light.turn_on", entidad: "light.x" }], DIA2);
     expect(items[0].sinHora).toBe(true);
   });
+
+  test("una orden del widget Casa dice que salió del dashboard", () => {
+    const items = normalizarCasa([
+      { momento: "2026-06-15T09:00:00", servicio: "light.turn_off",
+        entidad: "light.salon", origen: "dashboard" },
+    ], DIA2);
+    expect(items[0].detalle).toBe("desde el dashboard");
+  });
 });
 
 describe("textoAccionCasa", () => {

@@ -5734,6 +5734,12 @@ def get_presencia(credentials: HTTPAuthorizationCredentials = Depends(verify_tok
     """Lo que pinta la fila de presencia del panel de estado. Devuelve el dato aunque
     esté caducado, marcándolo: "hace 6 h en casa" y "no se sabe" son cosas distintas y
     el panel tiene que poder decir cuál de las dos es."""
+    return _presencia_panel()
+
+
+def _presencia_panel() -> dict:
+    """El cuerpo de `GET /presencia`, aparte para que el widget de la casa lo lleve en su
+    propia respuesta sin una segunda petición y sin repetir la forma."""
     p = _leer_presencia()
     if not p:
         return {"conocida": False}
@@ -10385,20 +10391,29 @@ HA_ENTIDADES_ID  = "actual"
 
 # Órdenes pendientes de que HA las recoja. Mismo criterio que _wol_pending.
 _ha_ordenes: list = []
+# Lo que pasó con las últimas órdenes, para el acuse del widget de la casa: la cola se
+# VACÍA al servirla, así que sin esto no hay forma de decir «HA la recogió» ni «se perdió».
+# En memoria como la cola, y por lo mismo: un reinicio solo cuesta el acuse de las órdenes
+# de ese momento, no las órdenes.
+_ha_ordenes_hist: deque = deque(maxlen=50)
 # Copia del catálogo (mismo criterio que _presencia_cache): lo consulta cada turno que
 # hable de la casa. None = todavía no leído.
 _ha_entidades_cache = None
+# Cuándo lo mandó HA (ISO, como lo guarda Supabase). Es lo que dice cómo de viejo es el
+# «encendida» que enseña el widget: el catálogo llega cada hora, y un estado de hace 50
+# minutos no puede pintarse como si fuera el de ahora.
+_ha_entidades_actualizado: str | None = None
 
 
 def _casa_entidades() -> list:
-    global _ha_entidades_cache
+    global _ha_entidades_cache, _ha_entidades_actualizado
     if _ha_entidades_cache is not None:
         return _ha_entidades_cache
     if not (SUPABASE_URL and SUPABASE_KEY):
         return []
     try:
         r = http.get(
-            f"{HA_ENTIDADES_URL}?id=eq.{HA_ENTIDADES_ID}&select=entidades",
+            f"{HA_ENTIDADES_URL}?id=eq.{HA_ENTIDADES_ID}&select=entidades,actualizado",
             headers=supabase_headers(),
         )
         if r.status_code >= 300:
@@ -10409,8 +10424,36 @@ def _casa_entidades() -> list:
         logger.warning("Casa: no se pudo leer el catálogo de dispositivos (%s)", e)
         return []
     lista = (filas[0].get("entidades") if filas else []) or []
+    _ha_entidades_actualizado = filas[0].get("actualizado") if filas else None
     _ha_entidades_cache = lista if isinstance(lista, list) else []
     return _ha_entidades_cache
+
+
+def _casa_actualizado_ts() -> float | None:
+    """`_ha_entidades_actualizado` como epoch, o None si no hay fecha o no se entiende."""
+    try:
+        visto = datetime.fromisoformat(str(_ha_entidades_actualizado or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if visto.tzinfo is None:
+        visto = visto.replace(tzinfo=timezone.utc)
+    return visto.timestamp()
+
+
+def _casa_edad_catalogo_min() -> int | None:
+    """Minutos desde que HA mandó el catálogo. None si no se sabe: «no sé cómo de viejo
+    es» no puede salir como «recién llegado»."""
+    ts = _casa_actualizado_ts()
+    if ts is None:
+        return None
+    return max(0, int((time.time() - ts) // 60))
+
+
+def _casa_iso(ts: float | None) -> str | None:
+    """Epoch → ISO UTC con `Z`, como toda fecha que sale de la API."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class CasaEntidad(BaseModel):
@@ -10427,7 +10470,7 @@ class CasaEntidadesIn(BaseModel):
 def ha_entidades(body: CasaEntidadesIn, request: Request, token: str = ""):
     """HA empuja qué hay en casa. Segundo punto (con la presencia) donde HA habla en vez
     de escuchar, y por el mismo motivo: es el único que tiene el dato."""
-    global _ha_entidades_cache
+    global _ha_entidades_cache, _ha_entidades_actualizado
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -10437,18 +10480,20 @@ def ha_entidades(body: CasaEntidadesIn, request: Request, token: str = ""):
         "estado": e.estado.strip()[:40],
     } for e in body.entidades if _CASA_ENTIDAD_RE.match(e.id)]
 
+    actualizado = datetime.now(timezone.utc).isoformat()
     r = http.post(
         f"{HA_ENTIDADES_URL}?on_conflict=id",
         headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
         json={
             "id": HA_ENTIDADES_ID,
             "entidades": limpias,
-            "actualizado": datetime.now(timezone.utc).isoformat(),
+            "actualizado": actualizado,
         },
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
     _ha_entidades_cache = limpias
+    _ha_entidades_actualizado = actualizado
     return {"ok": True, "guardadas": len(limpias), "descartadas": len(body.entidades) - len(limpias)}
 
 
@@ -10468,6 +10513,17 @@ def ha_ordenes_pending(request: Request, token: str = ""):
     if len(vigentes) < len(pendientes):
         logger.warning("Casa: %d órdenes caducadas sin ejecutar (HA no las recogió a tiempo)",
                        len(pendientes) - len(vigentes))
+    # El acuse: servirla es lo único que el backend sabe de que HA se la llevó. Que la
+    # ejecutara lo dirá el catálogo cuando llegue (ver _estado_orden_casa).
+    servidas = {o.get("id") for o in vigentes}
+    tiradas  = {o.get("id") for o in pendientes} - servidas
+    for h in _ha_ordenes_hist:
+        if h["id"] in servidas:
+            h["recogida"] = ahora
+        elif h["id"] in tiradas:
+            h["caducada"] = True
+    # El `id` NO viaja: es del acuse del dashboard, y la automatización de HA ejecuta lo
+    # que reciba tal cual.
     return {"ordenes": [{
         "servicio": o["servicio"], "entidad": o["entidad"], "datos": o["datos"],
     } for o in vigentes]}
@@ -10618,14 +10674,195 @@ def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> d
     if len(_ha_ordenes) >= CASA_MAX_ORDENES:
         # Se tira la más vieja: si la cola se llena es que HA no está recogiendo, y en ese
         # caso lo que acabas de pedir importa más que lo de hace diez minutos.
-        _ha_ordenes.pop(0)
+        tirada = _ha_ordenes.pop(0)
+        # Y se dice: la orden se ha perdido, y una ficha que siguiera en «pedido…» mentiría.
+        for h in _ha_ordenes_hist:
+            if h["id"] == tirada.get("id"):
+                h["caducada"] = True
+    orden_id = uuid.uuid4().hex[:12]
+    pedida   = time.time()
     _ha_ordenes.append({
-        "servicio": servicio, "entidad": entidad,
-        "datos": _casa_datos_limpios(datos), "pedida": time.time(),
+        "id": orden_id, "servicio": servicio, "entidad": entidad,
+        "datos": _casa_datos_limpios(datos), "pedida": pedida,
     })
+    _ha_ordenes_hist.append({"id": orden_id, "servicio": servicio, "entidad": entidad,
+                             "pedida": pedida, "recogida": None, "caducada": False})
     _apuntar_accion_casa(servicio, entidad)
-    return {"ok": True, "servicio": servicio, "entidad": entidad,
+    return {"ok": True, "id": orden_id, "servicio": servicio, "entidad": entidad,
             "nota": "Encolada. Home Assistant la ejecuta en su próximo sondeo (segundos)."}
+
+
+# El widget «Casa» del dashboard. Segundo productor de órdenes, detrás de Jarvis, y por la MISMA puerta (_j_casa_ordenar):
+# es la única que valida contra la lista blanca y contra el catálogo. Lo que cambia es que
+# aquí el cliente no manda servicios, manda una ACCIÓN de una lista cerrada, y el servicio
+# lo fija esta tabla. Un toque en el dashboard no tiene por qué poder pedir cualquier cosa
+# que Jarvis sí puede pedir con sus parámetros.
+
+# Lo que el widget pinta. Quedan fuera climate, vacuum, humidifier y alarm_control_panel:
+# necesitan parámetros o códigos que un toque no da.
+_CASA_WIDGET_DOMINIOS = {"light", "switch", "fan", "input_boolean", "scene", "script",
+                         "media_player", "cover", "lock"}
+
+# (dominio, acción) → servicio. Nunca `toggle`: se manda lo contrario de lo que se VE, y si
+# el catálogo iba por detrás, toggle haría justo lo contrario de lo que pediste.
+_CASA_ACCIONES_WIDGET = {
+    **{(d, "encender"): f"{d}.turn_on" for d in ("light", "switch", "fan", "input_boolean")},
+    **{(d, "apagar"): f"{d}.turn_off" for d in ("light", "switch", "fan", "input_boolean")},
+    ("scene", "activar"):             "scene.turn_on",
+    ("script", "activar"):            "script.turn_on",
+    ("media_player", "play_pause"):   "media_player.media_play_pause",
+    ("cover", "abrir"):               "cover.open_cover",
+    ("cover", "cerrar"):              "cover.close_cover",
+    ("lock", "bloquear"):             "lock.lock",
+    ("lock", "desbloquear"):          "lock.unlock",
+}
+
+# Estado del catálogo que confirma cada servicio. Lo que no está aquí (escenas, scripts,
+# play/pause) no tiene un estado que lo demuestre y se queda en «recogida».
+_CASA_ESTADO_ESPERADO = {
+    "turn_on":     {"on"},
+    "turn_off":    {"off"},
+    "lock":        {"locked"},
+    "unlock":      {"unlocked"},
+    "open_cover":  {"open", "opening"},
+    "close_cover": {"closed", "closing"},
+}
+CASA_ORDENES_VENTANA = 15 * 60
+
+
+def _estado_orden_casa(orden: dict, entidad: dict | None, actualizado_ts: float | None,
+                       ahora: float) -> str:
+    """En qué punto está una orden: en_cola, recogida, confirmada o caducada.
+
+    «Confirmada» exige que el catálogo haya llegado DESPUÉS de que HA la recogiera: uno
+    anterior dice cómo estaba la casa antes de la orden, y que coincida sería casualidad.
+    """
+    if orden.get("caducada"):
+        return "caducada"
+    recogida = orden.get("recogida")
+    if recogida is None:
+        if ahora - float(orden.get("pedida") or 0) > CASA_ORDEN_TTL:
+            return "caducada"
+        return "en_cola"
+    dominio, _, accion = str(orden.get("servicio") or "").partition(".")
+    esperados = set() if dominio in ("scene", "script") else _CASA_ESTADO_ESPERADO.get(accion, set())
+    if (esperados and entidad and actualizado_ts is not None and actualizado_ts > recogida
+            and str(entidad.get("estado") or "").lower() in esperados):
+        return "confirmada"
+    return "recogida"
+
+
+def _casa_sugeridas(lista: list) -> list:
+    """Los favoritos por defecto. Primero lo que ya se declaró como «lo mío» para el aviso
+    de salir de casa; si no hay, luces y ventiladores. Nunca `switch` por dominio: son los
+    ajustes de las Alexa (el porqué, junto a SALIR_CASA_ENTIDADES)."""
+    ids = [str(e.get("id") or "") for e in lista]
+    presentes = set(ids)
+    sugeridas = [e for e in SALIR_CASA_ENTIDADES
+                 if e in presentes and e != PC_ENTIDAD
+                 and e.split(".")[0] in _CASA_WIDGET_DOMINIOS
+                 and e.split(".")[0] not in ("scene", "script")]
+    if sugeridas:
+        return sugeridas
+    return [i for i in ids if i.split(".")[0] in ("light", "fan") and i != PC_ENTIDAD][:8]
+
+
+@app.get("/casa/estado")
+def get_casa_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Todo lo que pinta el widget «Casa» en una sola petición: catálogo con su edad,
+    favoritos sugeridos, cómo van las órdenes recientes y la presencia.
+
+    Sin catálogo es un estado vacío (200), no un error: HA todavía no lo ha mandado.
+    No llama a nada de pago, y solo lee Supabase si la copia del catálogo está vacía.
+    """
+    lista    = _casa_entidades()
+    ahora    = time.time()
+    act_ts   = _casa_actualizado_ts()
+    por_id   = {str(e.get("id") or ""): e for e in lista}
+    entidades = []
+    for e in lista:
+        eid = str(e.get("id") or "")
+        dominio = eid.split(".")[0]
+        if dominio not in _CASA_WIDGET_DOMINIOS:
+            continue
+        entidades.append({
+            "id": eid, "nombre": e.get("nombre") or eid, "estado": e.get("estado") or "",
+            "dominio": dominio,
+            # Cortarle la corriente al switch del PC es tirar del cable: se suspende por su
+            # propio camino, igual que razona _regla_al_salir_de_casa.
+            "solo_lectura": bool(PC_ENTIDAD) and eid == PC_ENTIDAD,
+        })
+    ordenes = [{
+        "id": o["id"], "servicio": o["servicio"], "entidad": o["entidad"],
+        "pedida": _casa_iso(o["pedida"]),
+        "estado": _estado_orden_casa(o, por_id.get(o["entidad"]), act_ts, ahora),
+    } for o in list(_ha_ordenes_hist) if ahora - o["pedida"] <= CASA_ORDENES_VENTANA]
+    try:
+        presencia = _presencia_panel()
+    except Exception:
+        # La presencia es la línea de arriba; sin ella el mando de la casa sigue sirviendo.
+        logger.warning("Casa: no se pudo leer la presencia para el widget")
+        presencia = {"conocida": False}
+    return {
+        "catalogo": {
+            "conocido":    bool(lista),
+            "actualizado": _casa_iso(act_ts),
+            "edad_min":    _casa_edad_catalogo_min(),
+            "total":       len(lista),
+        },
+        "entidades": entidades if lista else [],
+        "sugeridas": _casa_sugeridas(lista) if lista else [],
+        "ordenes":   ordenes,
+        "presencia": presencia,
+    }
+
+
+class CasaOrdenIn(BaseModel):
+    entidad:    str = Field(max_length=120)
+    accion:     Literal["encender", "apagar", "activar", "play_pause",
+                        "abrir", "cerrar", "bloquear", "desbloquear"]
+    confirmado: bool = False
+
+
+@app.post("/casa/orden")
+def post_casa_orden(body: CasaOrdenIn,
+                    credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Un toque en el widget «Casa». Encola por la misma puerta que Jarvis y apunta
+    `dashboard` como origen."""
+    entidad = body.entidad.strip().lower()
+    if not _CASA_ENTIDAD_RE.match(entidad):
+        raise HTTPException(status_code=400, detail="Esa entidad no tiene forma de dispositivo")
+    if PC_ENTIDAD and entidad == PC_ENTIDAD.strip().lower():
+        raise HTTPException(status_code=400, detail="El PC no se apaga desde aquí: se suspende")
+    servicio = _CASA_ACCIONES_WIDGET.get((entidad.split(".")[0], body.accion))
+    if not servicio:
+        raise HTTPException(status_code=400, detail="Esa acción no vale para ese dispositivo")
+    lista = _casa_entidades()
+    # Antes que la confirmación: pedir que confirmes abrir un garaje que ya no existe es
+    # hacerte pulsar dos veces para acabar en el mismo error.
+    if lista and entidad not in {str(e.get("id") or "") for e in lista}:
+        raise HTTPException(status_code=404,
+                            detail="Ese dispositivo ya no está en el catálogo de la casa")
+    if _casa_pide_confirmar({"servicio": servicio, "entidad": entidad}) and not body.confirmado:
+        nombre = next((e.get("nombre") for e in lista if str(e.get("id")) == entidad), None) or entidad
+        raise HTTPException(status_code=409, detail=f"Hay que confirmar: {body.accion} {nombre}")
+
+    marca = _boca_actual.set("dashboard")
+    try:
+        r = _j_casa_ordenar(servicio, entidad)
+    finally:
+        _boca_actual.reset(marca)
+    if not r.get("ok"):
+        motivo = str(r.get("motivo") or "")
+        # El motivo de _j_casa_ordenar le habla a Jarvis (menciona su herramienta): aquí
+        # se traduce a algo que diga algo a quien toca la pantalla.
+        if motivo.startswith("No hay ningún"):
+            raise HTTPException(status_code=404,
+                                detail="Ese dispositivo ya no está en el catálogo de la casa")
+        raise HTTPException(status_code=400, detail="No se pudo mandar esa orden a la casa")
+    pedida = next((h["pedida"] for h in _ha_ordenes_hist if h["id"] == r["id"]), time.time())
+    return {"ok": True, "orden": {"id": r["id"], "servicio": servicio, "entidad": entidad,
+                                  "pedida": _casa_iso(pedida), "estado": "en_cola"}}
 
 
 # ── RECORDATORIOS ─────────────────────────────────────────────────────────────

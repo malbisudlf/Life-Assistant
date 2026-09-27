@@ -465,6 +465,10 @@ export function normalizarPresencia(filas, diaISO) {
 // orden es un INSTANTE (inicio == fin), como los avisos: encender una luz no dura, y
 // darle duración sería inventarse cuánto estuvo encendida —que es un dato que no hay,
 // porque lo que se guarda es lo que se PIDIÓ, no lo que la casa hizo después.
+// De dónde salió la orden, en palabras. Solo los orígenes que no se entienden solos; el
+// resto se enseña tal cual (chat, voz, alarma…).
+const ORIGENES_CASA = { dashboard: "desde el dashboard" };
+
 export function normalizarCasa(acciones, diaISO) {
   const salida = [];
   (acciones || []).forEach((a, i) => {
@@ -474,7 +478,7 @@ export function normalizarCasa(acciones, diaISO) {
       id: `casa-${i}`,
       carril: "casa",
       etiqueta: textoAccionCasa(a),
-      detalle: a.origen || "",
+      detalle: ORIGENES_CASA[a.origen] || a.origen || "",
     };
     if (!momento) { salida.push(sinTramo(base)); return; }
     const item = conTramo(base, momento, momento, diaISO);

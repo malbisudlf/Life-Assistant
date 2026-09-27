@@ -123,6 +123,27 @@ action:
 Si añades un dominio a la lista de arriba, añádelo también a `_CASA_DOMINIOS` en
 `backend/main.py` o el backend rechazará las órdenes que lo usen.
 
+### Mejora opcional: que el dashboard confirme en segundos (PENDIENTE, sin hacer)
+
+**Sin este paso todo funciona.** El widget «Casa» del dashboard dice «HA la recogió» en
+cuanto esta automatización vacía la cola, pero para pasar a *confirmada* necesita un
+catálogo posterior que diga el estado esperado — y el catálogo llega cada hora. Si se
+añade un último paso a la automatización **«Life Assistant - Ejecutar ordenes de la
+casa»** de la sección 1, el catálogo se manda justo después de ejecutar las órdenes y la
+ficha se confirma sola en el siguiente refresco (5 s):
+
+```yaml
+action:
+  - repeat:
+      # … lo de siempre …
+  # Al final, fuera del repeat: el catálogo con los estados ya cambiados.
+  - service: rest_command.jarvis_entidades
+```
+
+Va **fuera** del `repeat` para mandarlo una vez por tanda y no una vez por orden. Coste:
+un POST a `/ha/entidades` por cada tanda de órdenes, que ya se hace cada hora de todos
+modos.
+
 ## 3. Comprobar que va
 
 ```bash

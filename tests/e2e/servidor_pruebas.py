@@ -256,6 +256,17 @@ class _RouterSimulado:
             "precision_m": 20.0, "fuente": "e2e",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }])),
+        # El catálogo de la casa, para que el widget «Casa» tenga fichas que tocar: una
+        # luz encendida y otra apagada, una escena y una persiana (la que pide confirmar).
+        ("/rest/v1/ha_entidades", lambda: _Respuesta([{
+            "entidades": [
+                {"id": "light.salon", "nombre": "Luz del salón", "estado": "on"},
+                {"id": "light.cocina", "nombre": "Luz de la cocina", "estado": "off"},
+                {"id": "scene.noche", "nombre": "Noche", "estado": "unknown"},
+                {"id": "cover.garaje", "nombre": "Garaje", "estado": "closed"},
+            ],
+            "actualizado": _iso(0),
+        }])),
         # El orden importa: la URL de calendarView del calendario de clases contiene
         # "/me/calendars", así que si la lista de calendarios fuera primero se comería
         # también esa llamada y /calendar/classes recibiría calendarios donde espera

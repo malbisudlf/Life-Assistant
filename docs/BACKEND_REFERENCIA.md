@@ -57,6 +57,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas y un booleano, nunca un lugar |
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
+| `GET /casa/estado` | JWT | Todo el widget «Casa» en una petición: catálogo con su edad (`edad_min`), entidades de los dominios que se pueden tocar (el PC con `solo_lectura`), favoritos sugeridos, las órdenes de los últimos 15 min con su acuse (`en_cola` / `recogida` / `confirmada` / `caducada`) y la presencia con la forma de `GET /presencia`. Sin catálogo, 200 con `conocido: false` |
+| `POST /casa/orden` | JWT | `{entidad, accion, confirmado}`: un toque en el widget. La acción es de una lista cerrada y el servicio lo fija el backend; encola por `_j_casa_ordenar` con origen `dashboard`. **400** si la acción no vale para el dominio o es el PC, **404** si la entidad ya no está en el catálogo, **409** si es una persiana o una cerradura sin `confirmado` (no encola nada) |
 | `POST /wake-pc` | JWT | Marca `_wol_pending` |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
 | `POST /relaunch-agent` | JWT | Marca `_agent_relaunch_pending` |

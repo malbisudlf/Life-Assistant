@@ -318,6 +318,36 @@ saber es distinto de saber que no llegó nada.
   —es lo único que quieres de esa pantalla en ese momento— y se recarga solo cada minuto
   mientras haya algo vivo. La lógica pura (`alarmaEnPalabras`, `alarmaEstadoTexto`,
   `alarmaSonando`) está en `helpers.js`; el resto, en `docs/ALARMAS.md`.
+- **`casa`** es el mando de la casa: una línea de estado (presencia y edad del catálogo),
+  una fila con las escenas y scripts (ocho como mucho) y una rejilla de fichas de los
+  favoritos que se tocan para encender, apagar, abrir o bloquear. Pide
+  `GET /casa/estado` (una sola petición: catálogo, sugeridos, órdenes recientes y
+  presencia) y manda `POST /casa/orden`. La lógica pura está en `src/lib/casa.js`, con
+  tests. Lo que conviene saber antes de tocarlo:
+  - **Se manda lo contrario de lo que se VE, nunca `toggle`.** El catálogo de HA llega cada
+    hora, así que el «encendida» de la ficha puede tener cincuenta minutos; si la luz ya
+    estaba apagada, un toggle la encendería justo cuando querías apagarla. Con
+    `turn_on`/`turn_off` el peor caso es pedir lo que ya estaba. El cliente tampoco manda
+    servicios: manda una acción (`encender`, `abrir`…) y el backend fija el servicio.
+  - **La ficha dice cómo va su orden**: «pedido…» al instante (el pedido optimista se
+    marca antes del fetch), «HA la recogió» cuando HA vacía la cola, nada cuando el
+    catálogo confirma el estado, y «no se ejecutó» —volviendo al estado del catálogo— si
+    caduca. Mientras hay algo en cola, o recogido hace menos de dos minutos, el widget
+    pregunta cada 5 s; si no, cada minuto y solo con la pestaña a la vista. Oculto no
+    pregunta nada.
+  - **Persianas y cerraduras se confirman dentro del widget** («¿Abrir Garaje?»), no con
+    `window.confirm`. Un 409 del backend abre la misma confirmación: si el backend exige
+    algo que el cliente no había previsto, se pregunta igual.
+  - **El PC es de solo lectura** (`PC_ENTIDAD`): cortarle la corriente al switch es tirar
+    del cable. Se pinta, atenuado, y no se toca; se suspende por su propio camino.
+  - **Los favoritos van en `la_casa_favoritos`** (array de ids), siempre en try/catch. Son
+    una comodidad de quien mira, no estado compartido. Sin nada guardado —o si ya no
+    existe ninguno— se usan los sugeridos del backend (`SALIR_CASA_ENTIDADES`, o luces y
+    ventiladores; nunca `switch` por dominio). «Volver a los sugeridos» borra la clave.
+  - Estados: «Cargando…»; «No se pudo leer la casa.» con «Reintentar» (un refresco que
+    falla no borra lo que ya se veía); sin catálogo, que HA todavía no lo ha mandado; y con
+    catálogo pero sin favoritos, «Elige qué quieres tener a mano». La edad del catálogo
+    pasa a color de aviso con «puede no ser el real» a partir de hora y media.
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
   "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,
@@ -489,8 +519,8 @@ guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_ideas_agr
 elegido en la gráfica de finanzas), `la_anio_modo` (el modo del mapa «Tu año»:
 `bienestar`/`sueno`/`pasos`), `la_salida_modo` (coche o andando para la hora de salida:
 `{porEvento: {clave: modo}, ultimo}`, podado a 50 eventos con `recordarModo`; sin ella, o
-si localStorage lanza, se calcula en coche). Si añades una, mantén el prefijo y el
-`try/catch` al parsear.
+si localStorage lanza, se calcula en coche), `la_casa_favoritos` (las fichas del widget
+«Casa»). Si añades una, mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
 

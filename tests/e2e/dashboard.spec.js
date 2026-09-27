@@ -206,6 +206,36 @@ test('el widget de alarmas pinta la alarma de respaldo y deja quitarla', async (
   expect(page.erroresDeNavegador).toEqual([])
 })
 
+test('el widget de la casa manda lo contrario de lo que se ve y confirma el garaje', async ({ page }) => {
+  await entrar(page)
+
+  const widget = page.locator('[data-card="casa"]')
+  await expect(widget).toBeVisible({ timeout: 15_000 })
+  await expect(widget).toContainText('En casa')
+  await expect(widget).toContainText('estado de la casa de')
+
+  // La cocina se ve apagada: el toque tiene que pedir ENCENDER, nunca un toggle, y la
+  // ficha dice «pedido…» sin esperar a Home Assistant.
+  const orden = page.waitForRequest(r => r.url().endsWith('/casa/orden') && r.method() === 'POST')
+  await widget.getByRole('button', { name: /Luz de la cocina/ }).click()
+  expect((await orden).postDataJSON()).toMatchObject({ entidad: 'light.cocina', accion: 'encender' })
+  await expect(widget).toContainText('pedido…')
+
+  // El garaje no es favorito sugerido: se añade desde «Editar».
+  await widget.getByRole('button', { name: 'Editar' }).click()
+  await widget.getByRole('checkbox', { name: /Garaje/ }).click()
+  await widget.getByRole('button', { name: 'Hecho' }).click()
+
+  // Una persiana no sale sin confirmar, y la confirmación va dentro del widget.
+  await widget.getByRole('button', { name: /Garaje/ }).click()
+  await expect(widget).toContainText('¿Abrir Garaje?')
+  const abrir = page.waitForRequest(r => r.url().endsWith('/casa/orden') && r.method() === 'POST')
+  await widget.getByRole('button', { name: 'Sí, abrir' }).click()
+  expect((await abrir).postDataJSON()).toMatchObject({ entidad: 'cover.garaje', accion: 'abrir', confirmado: true })
+
+  expect(page.erroresDeNavegador).toEqual([])
+})
+
 test('la zona dev dice qué código corre y qué corre solo', async ({ page }) => {
   await entrar(page)
 

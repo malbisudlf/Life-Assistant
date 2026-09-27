@@ -159,6 +159,7 @@ Ficheros clave:
 | `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |
 | `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
+| `src/lib/casa.js` | Lógica pura del widget «Casa»: qué manda un toque (lo contrario de lo que se ve, nunca toggle), qué enseña la ficha mientras la orden viaja y qué favoritos se pintan |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
 | `src/lib/agenda.js` | Lógica pura de «Lo siguiente»: el próximo compromiso (y lo que está en curso), la cuenta atrás, la fase de la hora de salida y la memoria del modo coche/andando |

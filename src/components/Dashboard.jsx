@@ -52,6 +52,12 @@ import {
   IDEAS_VISIBLES, filtrarIdeas, coincideEnTitulo, etiquetasConCuenta, tramosCoincidencia,
   agruparParecidas, parecidaA, haceCuanto, fechaLarga, fechaCorta,
 } from "../lib/ideas";
+import {
+  accionAlTocar, iconoDominio, textoEstado, estadoActivo, estadoFicha, ordenVigentePorEntidad,
+  ordenEfectiva, hayOrdenesSinResolver, textoEdad, catalogoViejo, textoPresencia,
+  favoritosEfectivos, filtrarCatalogo, escenasYScripts, ACCIONES_POR_DOMINIO, dominioDe,
+  etiquetaAccion, CASA_MAX_FAVORITOS,
+} from "../lib/casa";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -1531,6 +1537,7 @@ const DEFAULT_COLUMNS = {
   upcoming:          "left",
   entregas:          "right",
   acciones_pc:       "right",
+  casa:              "right",
   training:          "right",
   finanzas:          "right",
   ideas:             "right",
@@ -1559,6 +1566,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
   { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
+  { id: "casa",              label: "Casa",              visible: true,  column: "right" },
   { id: "alarmas",           label: "Alarmas",           visible: true,  column: "left"  },
   { id: "health_wellness",   label: "Bienestar semanal", visible: true,  column: "left"  },
   { id: "health_sleep",      label: "Sueño",             visible: true,  column: "right" },
@@ -1581,6 +1589,23 @@ function loadWidgetConfig(storageKey) {
     if (saved) return fusionarConfigWidgets(JSON.parse(saved), ALL_DEFAULT_WIDGETS, DEFAULT_COLUMNS);
   } catch { /* mejor esfuerzo: ignorar */ }
   return ALL_DEFAULT_WIDGETS.map(w => ({ ...w }));
+}
+
+// Los favoritos del widget «Casa»: una comodidad de quien mira, no estado compartido, así
+// que van en localStorage. Si no se puede leer o escribir (modo privado, almacenamiento
+// bloqueado), el widget sigue con los sugeridos por el backend.
+const CLAVE_CASA_FAVORITOS = "la_casa_favoritos";
+function leerFavoritosCasa() {
+  try {
+    const crudo = JSON.parse(localStorage.getItem(CLAVE_CASA_FAVORITOS) || "null");
+    return Array.isArray(crudo) ? crudo.filter(x => typeof x === "string") : null;
+  } catch { return null; }
+}
+function guardarFavoritosCasa(ids) {
+  try {
+    if (ids == null) localStorage.removeItem(CLAVE_CASA_FAVORITOS);
+    else localStorage.setItem(CLAVE_CASA_FAVORITOS, JSON.stringify(ids));
+  } catch { /* mejor esfuerzo: se quedan solo en esta pestaña */ }
 }
 
 // ── Constantes de presentación ────────────────────────────────────
@@ -2425,6 +2450,17 @@ export default function Dashboard() {
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
   const [alarmaEspera, setAlarmaEspera]             = useState(2);
+  // El mando de la casa. `casaPedidos`: lo que se acaba de tocar y todavía no ha vuelto en
+  // /casa/estado, por entidad ({ id, servicio, momento }); es lo que hace que la ficha
+  // diga «pedido…» al instante. `casaAvisos`: el error de una ficha o el acuse de una
+  // escena, que se borra solo a los pocos segundos.
+  const [casa, setCasa]                             = useState({ estado: FUENTE_CARGANDO, datos: null });
+  const [casaPedidos, setCasaPedidos]               = useState({});
+  const [casaEditando, setCasaEditando]             = useState(false);
+  const [casaBusca, setCasaBusca]                   = useState("");
+  const [casaConfirmar, setCasaConfirmar]           = useState(null);
+  const [casaAvisos, setCasaAvisos]                 = useState({});
+  const [casaFavoritos, setCasaFavoritos]           = useState(leerFavoritosCasa);
   const [carteraEtfCargando, setCarteraEtfCargando] = useState(false);
   // Formulario de "+ Añadir aportación", uno por ticker: { [ticker]: { abierto, fecha, importe, guardando } }
   const [etfAportForm, setEtfAportForm] = useState({});
@@ -2764,6 +2800,28 @@ export default function Dashboard() {
       .catch(() => { /* mejor esfuerzo: el carril se pinta igual, sin el matiz */ });
     return () => { vivo = false; };
   }, [token, lineaVisible, lineaDia]);
+
+  // El mando de la casa, con el mismo criterio que «El día»: si está oculto, no pregunta.
+  const casaVisible = useMemo(
+    () => (simpleMode ? simpleWidgetConfig : widgetConfig)
+      .some(w => w.id === "casa" && w.visible !== false),
+    [simpleMode, simpleWidgetConfig, widgetConfig],
+  );
+  useEffect(() => { if (token && casaVisible) loadCasa(); }, [token, casaVisible]);
+  // Cada minuto con la pestaña a la vista, y cada 5 s solo mientras alguna orden siga sin
+  // resolver: es lo que hace que la ficha pase de «pedido…» a «HA la recogió» sin tocar
+  // nada. /casa/estado no llama a nada de pago, pero aun así no se pregunta a ciegas.
+  const casaRapido = hayOrdenesSinResolver(casa.datos?.ordenes, now.getTime());
+  useEffect(() => {
+    if (!token || !casaVisible) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") loadCasa();
+    }, casaRapido ? 5000 : 60000);
+    // Al volver a la pestaña, lo de ahora: el último dato puede ser de hace una hora.
+    const alVolver = () => { if (document.visibilityState === "visible") loadCasa(); };
+    document.addEventListener("visibilitychange", alVolver);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", alVolver); };
+  }, [token, casaVisible, casaRapido]);
 
   // Cargar ideas. Un fallo NO deja la lista vacía sin más: antes se tragaba el error y
   // el widget decía «Sin ideas todavía», que es mentira cuando lo que pasa es que el
@@ -4646,6 +4704,90 @@ export default function Dashboard() {
     await loadAlarmas();
   }
 
+  // ── Casa: el mando ─────────────────────────────────────────────────────────
+  // Un refresco que falla no borra lo que ya se estaba viendo: el error solo se pinta si
+  // no hay nada que enseñar. Lo de antes, con su edad, dice más que «no se pudo leer».
+  async function loadCasa() {
+    try {
+      const r = await apiFetch(`${API}/casa/estado`, { headers: authHeaders() });
+      if (!r.ok) throw new Error("casa");
+      const datos = await r.json();
+      setCasa({ estado: FUENTE_OK, datos });
+    } catch {
+      setCasa(previo => (previo.datos ? previo : { estado: FUENTE_ERROR, datos: null }));
+    }
+  }
+
+  // Lo de debajo de una ficha (un error, el «✓ enviada» de una escena) dura unos segundos:
+  // es un acuse, no un estado.
+  function avisoCasa(entidad, texto, tipo = "error", ms = 6000) {
+    setCasaAvisos(a => ({ ...a, [entidad]: { texto, tipo } }));
+    setTimeout(() => setCasaAvisos(a => {
+      if (a[entidad]?.texto !== texto) return a;
+      const resto = { ...a };
+      delete resto[entidad];
+      return resto;
+    }), ms);
+  }
+
+  function quitarPedidoCasa(entidad, momento) {
+    setCasaPedidos(p => {
+      if (p[entidad]?.momento !== momento) return p;
+      const resto = { ...p };
+      delete resto[entidad];
+      return resto;
+    });
+  }
+
+  async function ordenarCasa(entidad, accion, confirmado = false) {
+    const servicio = ACCIONES_POR_DOMINIO[entidad.split(".")[0]]?.[accion] || "";
+    const momento  = Date.now();
+    // Antes del fetch: la ficha tiene que decir «pedido…» al instante, no cuando conteste
+    // el backend.
+    setCasaPedidos(p => ({ ...p, [entidad]: { id: null, entidad, servicio, momento } }));
+    try {
+      const r = await apiFetch(`${API}/casa/orden`, {
+        method: "POST", headers: jsonHeaders(),
+        body: JSON.stringify({ entidad, accion, confirmado }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setCasaPedidos(p => (p[entidad]?.momento === momento
+          ? { ...p, [entidad]: { ...p[entidad], id: d.orden?.id ?? null } } : p));
+        if (accion === "activar") avisoCasa(entidad, "✓ enviada", "ok", 4000);
+        loadCasa();
+        return;
+      }
+      quitarPedidoCasa(entidad, momento);
+      // El backend pide confirmar algo que aquí no se había previsto: se pregunta igual.
+      if (r.status === 409) {
+        setCasaConfirmar({ entidad, accion, etiqueta: etiquetaAccion(accion) });
+        return;
+      }
+      avisoCasa(entidad, typeof d.detail === "string" ? d.detail : "No se pudo mandar la orden");
+    } catch {
+      quitarPedidoCasa(entidad, momento);
+      avisoCasa(entidad, "No se pudo mandar la orden");
+    }
+  }
+
+  function tocarFichaCasa(entidad, estadoVisto) {
+    // Un segundo toque mientras el primero viaja mandaría la misma orden dos veces.
+    if (casaPedidos[entidad.id] && casaPedidos[entidad.id].id === null) return;
+    const a = accionAlTocar(entidad, estadoVisto);
+    if (!a) return;
+    if (a.confirmar) { setCasaConfirmar({ entidad: entidad.id, accion: a.accion, etiqueta: a.etiqueta }); return; }
+    ordenarCasa(entidad.id, a.accion);
+  }
+
+  function alternarFavoritoCasa(id, actuales) {
+    const nuevos = actuales.includes(id)
+      ? actuales.filter(x => x !== id)
+      : [...actuales, id].slice(0, CASA_MAX_FAVORITOS);
+    setCasaFavoritos(nuevos);
+    guardarFavoritosCasa(nuevos);
+  }
+
   // El botón «Estoy despierto» de la notificación NO abre esto (llevó un `uri` al
   // dashboard un solo día, ver `_alarma_acciones` en el backend): quitar una alarma pasa
   // entero de fondo, y lo que dice que ha entrado es la notificación de vuelta. Desde
@@ -6428,6 +6570,218 @@ export default function Dashboard() {
                 ? "Al guardar se vuelve a armar desde cero (si estaba sonando, se calla)."
                 : `Es un respaldo: si no confirmas, a los ${alarmaEspera} minutos te despierta la casa.`}
             </div>
+          </div>
+        );
+      }
+
+      case "casa": {
+        const d          = casa.datos;
+        const conocido   = !!d?.catalogo?.conocido;
+        const entidades  = d?.entidades || [];
+        const porId      = Object.fromEntries(entidades.map(e => [e.id, e]));
+        const ahoraMs    = now.getTime();
+        const ordenes    = ordenVigentePorEntidad(d?.ordenes);
+        const favoritos  = favoritosEfectivos(casaFavoritos, d?.sugeridas, entidades);
+        const escenas    = escenasYScripts(entidades);
+        const edad       = d?.catalogo?.edad_min;
+        const viejo      = catalogoViejo(edad);
+        const confirmar  = casaConfirmar && porId[casaConfirmar.entidad] ? casaConfirmar : null;
+        const botonCabecera = {
+          padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
+          letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
+          color: "var(--muted)", cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+        };
+        // En edición, sin buscar nada: primero lo que ya está puesto, para poder quitarlo.
+        const listaEdicion = casaBusca.trim()
+          ? filtrarCatalogo(entidades, casaBusca)
+          : [...favoritos.map(id => porId[id]).filter(Boolean),
+             ...filtrarCatalogo(entidades.filter(e => !favoritos.includes(e.id)), "", 50)];
+        return (
+          <div style={cardStyle} data-card={id} key="casa">
+            <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span>Casa</span>
+              {conocido && (
+                <button onClick={() => { setCasaEditando(e => !e); setCasaBusca(""); }} style={botonCabecera}>
+                  {casaEditando ? "Hecho" : "Editar"}
+                </button>
+              )}
+            </div>
+
+            {casa.estado === FUENTE_CARGANDO && (
+              <div style={{ color: "var(--muted2)", fontSize: 13 }}>Cargando…</div>
+            )}
+            {casa.estado === FUENTE_ERROR && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--muted)" }}>
+                <span>No se pudo leer la casa.</span>
+                {/* Nombre propio: con Ideas también caída habría dos «Reintentar» iguales
+                    y un lector de pantalla no sabría cuál es cuál. */}
+                <button onClick={() => { setCasa({ estado: FUENTE_CARGANDO, datos: null }); loadCasa(); }}
+                  aria-label="Reintentar leer la casa"
+                  style={botonCabecera}>Reintentar</button>
+              </div>
+            )}
+
+            {d && (
+              <>
+                {/* Dónde estás y de cuándo es lo que se ve: el catálogo llega cada hora, y un
+                    «encendida» de hace dos no es un dato de ahora. */}
+                <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 }}>
+                  {textoPresencia(d.presencia)}
+                  {conocido && (
+                    <span style={{ color: viejo ? "var(--accent)" : "var(--muted2)" }}>
+                      {` · estado de la casa de ${textoEdad(edad)}`}{viejo ? ", puede no ser el real" : ""}
+                    </span>
+                  )}
+                </div>
+
+                {!conocido && (
+                  <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+                    Home Assistant todavía no ha mandado el catálogo de la casa. Llega al arrancar HA y cada hora.
+                  </div>
+                )}
+
+                {/* La confirmación va dentro del widget y no en un window.confirm: en la PWA
+                    el diálogo del sistema tapa la pantalla entera por una persiana. */}
+                {confirmar && (
+                  <div style={{ padding: 12, borderRadius: 8, background: "var(--surface2)",
+                    border: "0.5px solid var(--accent)", marginBottom: 10 }}>
+                    <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+                      ¿{confirmar.etiqueta} {porId[confirmar.entidad].nombre}?
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      <button onClick={() => { const c = confirmar; setCasaConfirmar(null); ordenarCasa(c.entidad, c.accion, true); }}
+                        style={{ flex: "1 1 90px", minWidth: 0, padding: "8px 10px", background: "var(--accent)", border: "none",
+                          borderRadius: 6, color: "#0e0f11", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                          fontFamily: "'DM Sans', sans-serif" }}>
+                        Sí, {confirmar.etiqueta.toLowerCase()}
+                      </button>
+                      <button onClick={() => setCasaConfirmar(null)}
+                        style={{ flex: "1 1 90px", minWidth: 0, padding: "8px 10px", background: "transparent",
+                          border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--muted)",
+                          fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {conocido && !casaEditando && escenas.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                    {escenas.map(e => {
+                      const enviando = casaPedidos[e.id]?.id === null;
+                      const aviso    = casaAvisos[e.id];
+                      return (
+                        <button key={e.id} disabled={enviando} title={e.nombre}
+                          onClick={() => ordenarCasa(e.id, "activar")}
+                          style={{ flex: "1 1 120px", minWidth: 0, padding: "8px 10px", borderRadius: 8,
+                            background: "var(--surface2)", fontFamily: "'DM Sans', sans-serif", fontSize: 12,
+                            border: `0.5px solid ${aviso?.tipo === "ok" ? "var(--green)" : "var(--border2)"}`,
+                            color: aviso ? (aviso.tipo === "ok" ? "var(--green)" : "#d4645a") : "var(--text)",
+                            cursor: enviando ? "default" : "pointer",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {enviando ? "…" : aviso ? aviso.texto : `${iconoDominio(dominioDe(e))} ${e.nombre}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {conocido && !casaEditando && favoritos.length === 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "var(--muted)" }}>
+                    <span>Elige qué quieres tener a mano</span>
+                    <button onClick={() => setCasaEditando(true)} style={botonCabecera}>Editar</button>
+                  </div>
+                )}
+
+                {conocido && !casaEditando && favoritos.length > 0 && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 8 }}>
+                    {favoritos.map(fid => {
+                      const e = porId[fid];
+                      const dominio = dominioDe(e);
+                      const orden = ordenEfectiva(ordenes[fid], casaPedidos[fid], ahoraMs);
+                      const { estadoVisto, fase, texto } = estadoFicha(e, orden, ahoraMs);
+                      const accion  = accionAlTocar(e, estadoVisto);
+                      const activo  = estadoActivo(estadoVisto);
+                      const apagado = !accion;
+                      const aviso   = casaAvisos[fid];
+                      return (
+                        <button key={fid} onClick={() => tocarFichaCasa(e, estadoVisto)}
+                          disabled={apagado} title={accion ? `${accion.etiqueta} ${e.nombre}` : e.nombre}
+                          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3,
+                            minWidth: 0, padding: "10px 10px 8px", borderRadius: 8, textAlign: "left",
+                            fontFamily: "'DM Sans', sans-serif", color: "var(--text)",
+                            background: activo ? "rgba(200,169,110,0.12)" : "var(--surface2)",
+                            border: `0.5px solid ${activo ? "var(--accent)" : "var(--border2)"}`,
+                            opacity: apagado ? 0.45 : 1, cursor: apagado ? "default" : "pointer" }}>
+                          <span style={{ fontSize: 18, lineHeight: 1, filter: activo ? "none" : "grayscale(0.6)" }}>
+                            {iconoDominio(dominio)}
+                          </span>
+                          <span style={{ fontSize: 13, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {e.nombre}
+                          </span>
+                          <span style={{ fontSize: 11, color: activo ? "var(--accent)" : "var(--muted2)" }}>
+                            {textoEstado(dominio, estadoVisto) || " "}
+                          </span>
+                          {(aviso || texto) && (
+                            <span style={{ fontSize: 10.5, lineHeight: 1.3, width: "100%",
+                              color: aviso?.tipo === "error" || fase === "caducada" ? "#d4645a"
+                                : aviso?.tipo === "ok" ? "var(--green)" : "var(--muted)" }}>
+                              {aviso ? aviso.texto : texto}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {conocido && casaEditando && (
+                  <div>
+                    <input type="text" placeholder="Buscar dispositivo…" value={casaBusca}
+                      onChange={ev => setCasaBusca(ev.target.value)}
+                      style={{ ...INPUT_STYLE, width: "100%", marginBottom: 8 }} />
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 280, overflowY: "auto" }}>
+                      {listaEdicion.length === 0 && (
+                        <div style={{ color: "var(--muted)", fontSize: 13, padding: "6px 0" }}>Nada coincide.</div>
+                      )}
+                      {listaEdicion.map(e => {
+                        const puesto = favoritos.includes(e.id);
+                        return (
+                          // Casilla propia y no un <input type="checkbox">: el reset global
+                          // (`-webkit-appearance: none`) la deja invisible en Safari.
+                          <button key={e.id} role="checkbox" aria-checked={puesto}
+                            onClick={() => alternarFavoritoCasa(e.id, favoritos)}
+                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 2px",
+                              fontSize: 13, cursor: "pointer", minWidth: 0, width: "100%", textAlign: "left",
+                              background: "transparent", border: "none", color: "var(--text)",
+                              fontFamily: "'DM Sans', sans-serif" }}>
+                            <span style={{ width: 16, height: 16, lineHeight: "16px", flexShrink: 0, borderRadius: 4,
+                              textAlign: "center", fontSize: 11, color: "#0e0f11",
+                              background: puesto ? "var(--accent)" : "transparent",
+                              border: `0.5px solid ${puesto ? "var(--accent)" : "var(--border2)"}` }}>
+                              {puesto ? "✓" : ""}
+                            </span>
+                            <span style={{ flexShrink: 0 }}>{iconoDominio(dominioDe(e))}</span>
+                            {/* El nombre puede partirse: aquí es lo único que hay que leer, y
+                                en una columna estrecha cortado con «…» no se distingue una luz
+                                de otra. */}
+                            <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", lineHeight: 1.3,
+                              color: puesto ? "var(--text)" : "var(--muted)" }}>
+                              {e.nombre}
+                              {e.solo_lectura && <span style={{ fontSize: 11, color: "var(--muted2)" }}> · solo mirar</span>}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button onClick={() => { setCasaFavoritos(null); guardarFavoritosCasa(null); }}
+                      style={{ ...s.newIdeaBtn, marginTop: 10, fontSize: 12 }}>
+                      Volver a los sugeridos
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         );
       }

@@ -269,6 +269,14 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     caducar la presencia.
   Con catálogo cargado, una entidad que no está en él se rechaza: es una invención del
   modelo. El YAML de HA está en `docs/HOME_ASSISTANT_JARVIS.md`.
+  **El dashboard encola por la MISMA puerta.** El widget «Casa» (`POST /casa/orden`) no
+  tiene cola propia: llama a `_j_casa_ordenar` con `_boca_actual` a `dashboard`, que es el
+  origen que queda apuntado en `casa_acciones`. Lo único que cambia es la entrada: el
+  widget manda una acción de una lista cerrada y el servicio lo fija el backend
+  (`_CASA_ACCIONES_WIDGET`), así que un toque no puede pedir nada que no sea encender,
+  apagar, abrir, bloquear o activar. Cada orden, venga de quien venga, lleva un `id` y deja
+  su acuse en `_ha_ordenes_hist`: por eso el widget también enseña «HA la recogió» en una
+  luz que encendió Jarvis.
 
 - **Recordatorios** (`recordarme`, `mis_recordatorios`, `cancelar_recordatorio`, tabla
   `jarvis_recordatorios`): lo único que hace que Jarvis hable sin que le hablen. Las tres

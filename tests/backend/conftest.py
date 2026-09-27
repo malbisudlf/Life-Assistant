@@ -189,9 +189,11 @@ def _limpiar_estado():
     # siguiente. Las sesiones MCP van con ellas, como en _mcp_invalidar().
     main._mcp_guardados_cache = None
     main._ha_entidades_cache = None
+    main._ha_entidades_actualizado = None
     main._mcp_sesiones.clear()
     main._mcp_lectura.clear()
     main._ha_ordenes.clear()
+    main._ha_ordenes_hist.clear()
     # El middleware registra todo 4xx/5xx, así que la cola arrastraría entradas de un
     # test al siguiente. `_purgado` también se resetea: es "una purga por proceso".
     with main._registro._lock:

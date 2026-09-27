@@ -179,6 +179,20 @@
   no solo los cambios de zona: sin él el TTL no puede distinguir "sigues en casa" de
   "HA se cayó". `GET /presencia` (JWT) sí devuelve lo caducado, marcado, para el panel
   de estado.
+- **Casa: el acuse de las órdenes** (`_ha_ordenes_hist`): la cola `_ha_ordenes` se vacía
+  al servirla, así que por sí sola no puede decir si una orden se la llevó HA, si se perdió
+  o si caducó esperando. Cada orden que entra por `_j_casa_ordenar` lleva un `id` y deja
+  además una entrada en ese historial (un `deque` de 50, en memoria): `ha_ordenes_pending`
+  le pone la hora de `recogida` a las que sirve y marca `caducada` las que tira por TTL, y
+  `_j_casa_ordenar` marca `caducada` la que tira por desbordar la cola. El `id` **no viaja
+  a HA**: `GET /ha/ordenes-pending` sigue sirviendo servicio, entidad y datos, nada más.
+  `_estado_orden_casa()` junta eso con el catálogo: «confirmada» solo si el catálogo llegó
+  DESPUÉS de la recogida (`_ha_entidades_actualizado`) y dice el estado esperado. **Un
+  reinicio borra el historial** y es aceptable por lo mismo que la cola: solo se pierde el
+  acuse de las órdenes de ese momento, no las órdenes ni ningún estado. La fecha del
+  catálogo se guarda junto a su copia en memoria (`_casa_entidades` pide
+  `select=entidades,actualizado`, y `POST /ha/entidades` guarda la que acaba de escribir);
+  si no se puede leer, la edad es `None` y el widget dice «sin dato», nunca «ahora mismo».
 - **Serie diaria de presencia**: cada aviso acumula el tramo transcurrido en la métrica
   `time_at_home` de `health_metrics` (`value` = horas en casa, `extra.fuera` = horas
   fuera). Va ahí y no a una tabla propia para que entre sola en `/health/metrics` y con

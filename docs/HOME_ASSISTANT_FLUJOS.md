@@ -118,6 +118,15 @@ WOL), y **empuja** su catálogo de dispositivos a `POST /ha/entidades` al arranc
 hora (estado: mismo patrón que la presencia). Leer las órdenes las CONSUME, así que solo
 puede haber un consumidor. El YAML completo está en `docs/HOME_ASSISTANT_JARVIS.md`.
 
+Hay **dos productores** de órdenes y un solo consumidor: Jarvis (y lo que cuelga de él:
+alarmas, el botón «Apagar» del aviso de salir de casa) y el widget «Casa» del dashboard
+(`POST /casa/orden`). Los dos entran por `_j_casa_ordenar`, y HA no distingue unas de
+otras. Lo que sí sale de aquí es el **acuse**: el backend no puede preguntarle a HA si
+ejecutó algo, pero sabe cuándo HA le vació la cola, y eso es «HA la recogió» en la ficha.
+La confirmación de verdad llega con el siguiente catálogo: si es posterior a la recogida y
+dice el estado esperado, la orden sale como confirmada. Con el catálogo cada hora eso puede
+tardar; el paso opcional de `docs/HOME_ASSISTANT_JARVIS.md` lo deja en segundos.
+
 **Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
 `time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. Ese mismo tick es el
 que despacha los recordatorios de Jarvis: si funciona, los avisos salen solos — y **si esa
