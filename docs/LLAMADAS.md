@@ -170,12 +170,16 @@ Assistant cuando el móvil deja de cargar, que no depende del túnel.
 | Cotidianas | No suena, y no se aplaza (como antes) | — |
 | «Hablarlo» (revisión, sesión) | Suena (`aunque_duermas`): lo has pedido tú, así que estás despierto | — |
 | Reintentos y buzón de una serie | Heredan el permiso de su primera llamada | — |
-| n8n, backend caído | **Sigue con su franja fija**: con el backend caído no hay a quién preguntar | — |
+| n8n, backend caído | Con el backend caído no hay señal que leer, así que aplica la regla **sin señal**: no suena antes de `LLAMADAS_SIN_SENAL_DESDE` (10:00), aunque esté caído desde la madrugada | El primer sondeo desde las 10:00 que siga viéndolo caído (el flujo no marca `llamado` mientras espera) |
 
-El último es **el único camino que todavía puede llamar a las 07:00**: el flujo
-«Vigilante del backend» vive en el repositorio HomeLab y no sabe si estás despierto.
-Alinearlo con la hora de respaldo (no llamar antes de las 10:00 salvo que se lo diga
-algo) lo decide Mikel allí.
+El último se alineó el mismo 2026-09-27: el flujo «Vigilante del backend» (repositorio
+HomeLab, `caja/n8n/flujos/`) tenía la franja fija 00–07 y era el único camino que todavía
+podía llamar a las 07:00. No puede saber si estás despierto —la señal la guarda el backend,
+que es justo el que no contesta—, así que aplica la regla del backend sin señal:
+`SIN_SENAL_DESDE = 10` en su nodo «Decidir», escrito a mano. **Si cambias
+`LLAMADAS_SIN_SENAL_DESDE` en `backend.env`, cambia también esa constante**: nada lo
+comprueba. Mejora posible: que el flujo mire en Home Assistant si el móvil ha dejado de
+cargar, la misma señal del Atajo del cargador, sin pasar por el backend.
 
 **Riesgos aceptados:** una siesta (desde la señal de la mañana cuentas como despierto
 hasta la noche), una noche en vela (manda el suelo de las 07:00, no la señal) y un día

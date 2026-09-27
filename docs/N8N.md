@@ -102,9 +102,12 @@ salir.
 Es el único flujo que se salta la frontera de arriba, y la razón es que no hay otra:
 **el sujeto que vigila es quien decidiría**. Cuando el backend está caído, `/vigilancia/estado`
 está caído con él, así que o decide el flujo o no se entera nadie. Por eso repite en
-pequeño las mismas tres reglas (tres sondeos, una llamada por avería, silencio nocturno)
-y por eso su contador vive en `staticData` y no en memoria: en memoria empezaría de cero
-en cada ejecución y llamaría al primer parpadeo.
+pequeño las mismas tres reglas (tres sondeos, una llamada por avería, y la hora a la que
+puede sonar) y por eso su contador vive en `staticData` y no en memoria: en memoria
+empezaría de cero en cada ejecución y llamaría al primer parpadeo. La hora, desde el
+2026-09-27, es la del backend **sin señal de despertar** (`LLAMADAS_SIN_SENAL_DESDE`, las
+10:00; ver `docs/LLAMADAS.md`), porque la señal la guarda el backend caído: antes era la
+franja fija 00–07, y a las 07:00 llamaba con Mikel dormido.
 
 Que esas reglas estén escritas dos veces es deuda consciente, no un descuido. Si algún
 día cambian en `main.py`, hay que cambiarlas aquí también — y nada lo comprueba.
