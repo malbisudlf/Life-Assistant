@@ -140,7 +140,9 @@ except ValueError:
 #
 # El cambio va ANTES de arrancar Apollo a propósito: el host elige qué salida captura
 # al arrancar, y reconfigurar los monitores por debajo le deja el stream mirando a una
-# pantalla que ya no existe.
+# pantalla que ya no existe. Por lo mismo, si Apollo YA estaba abierto cuando llega el
+# job, tras cambiar las pantallas se reinicia (`reiniciar_apollo()`): el orden solo
+# protege al Apollo que arranca después, no al que ya estaba capturando.
 #
 # PANTALLAS_STREAMING (al abrir el streaming) y PANTALLAS_RESTAURAR (el modo al que se
 # vuelve, para el atajo `--pantallas` que dispara Home Assistant antes de apagar o
@@ -684,6 +686,7 @@ _ESTADOS_SC = {
 _RE_ESTADO_SC = re.compile(r"STATE\s*:\s*(\d+)")
 _SC_NO_EXISTE      = 1060   # ERROR_SERVICE_DOES_NOT_EXIST
 _SC_YA_ARRANCADO   = 1056   # ERROR_SERVICE_ALREADY_RUNNING
+_SC_NO_ACTIVO      = 1062   # ERROR_SERVICE_NOT_ACTIVE (ya estaba parado)
 _SC_ACCESO_DENEGADO = 5     # ERROR_ACCESS_DENIED
 
 
@@ -703,15 +706,27 @@ def estado_servicio(nombre: str) -> str:
     coste, y si algún día no funcionara el agente se comporta como antes en vez de
     quedarse sin saber el estado.
     """
-    rc, salida, _ = _nativo(["sc.exe", "query", nombre])
+    rc, salida, err = _nativo(["sc.exe", "query", nombre])
     if rc == _SC_NO_EXISTE:
         return ""
     if rc == 0:
         m = _RE_ESTADO_SC.search(salida)
         if m:
             return _ESTADOS_SC.get(int(m.group(1)), "")
-    log.warning(f"sc query '{nombre}' no concluyente (rc={rc}) — probando con PowerShell")
+    # Con la salida cruda: el 2026-09-26 este aviso salió con Tailscale y solo decía el
+    # rc, así que no hubo forma de saber si `sc` no contestó, contestó otra cosa o
+    # contestó algo que el patrón no sabe leer. Recortada, porque va al log de cada job.
+    log.warning(f"sc query '{nombre}' no concluyente (rc={rc}, salida: "
+                f"«{_recortar_salida(salida, err)}») — probando con PowerShell")
     return _estado_servicio_powershell(nombre)
+
+
+def _recortar_salida(*partes, limite: int = 300) -> str:
+    """La salida de una herramienta en una sola línea y con tope, para el log."""
+    texto = " | ".join(" ".join(p.split()) for p in partes if p and p.strip())
+    if not texto:
+        return "(vacía)"
+    return texto if len(texto) <= limite else texto[:limite] + "…"
 
 
 def arrancar_servicio(nombre: str) -> bool:
@@ -755,6 +770,48 @@ def arrancar_servicio(nombre: str) -> bool:
     for _ in range(10):
         if estado_servicio(nombre) == "Running":
             log.info(f"Servicio '{nombre}' arrancado.")
+            return True
+        time.sleep(1)
+    return False
+
+
+def parar_servicio(nombre: str, espera: int = 20) -> bool:
+    """Para un servicio de Windows. True si quedó parado. NUNCA lanza.
+
+    El espejo de `arrancar_servicio`, con los mismos criterios: `sc.exe` primero (sin el
+    arranque de PowerShell en frío, ver `_nativo`), PowerShell solo si `sc` contesta algo
+    que no sabemos leer, y un ACCESS_DENIED corta en seco porque sin privilegios
+    Stop-Service tampoco podría.
+
+    Los intentos se cuentan en vez de medirse con el reloj a propósito: así un test que
+    anula `time.sleep` no se queda girando hasta agotar la espera de verdad.
+    """
+    estado = estado_servicio(nombre)
+    if not estado:
+        log.warning(f"El servicio '{nombre}' no existe.")
+        return False
+    if estado == "Stopped":
+        return True
+
+    log.info(f"Servicio '{nombre}' en estado {estado} — parándolo...")
+    rc, salida, err = _nativo(["sc.exe", "stop", nombre])
+    if rc == _SC_ACCESO_DENEGADO:
+        log.warning(f"No se pudo parar el servicio '{nombre}': "
+                    "faltan privilegios (¿la tarea corre elevada?)")
+        return False
+    if rc not in (0, _SC_NO_ACTIVO):
+        log.warning(f"sc stop '{nombre}' devolvió rc={rc} "
+                    f"(«{_recortar_salida(salida, err)}») — probando con PowerShell")
+        rc_ps, _, err_ps = _powershell(f"Stop-Service -Name '{nombre}' -Force")
+        if rc_ps != 0:
+            log.warning(f"No se pudo parar el servicio '{nombre}': {(err_ps or err)[:200]}")
+            return False
+
+    # `sc stop` vuelve en cuanto el SCM acepta la orden (STOP_PENDING), no cuando el
+    # servicio ha terminado de pararse.
+    for _ in range(max(1, espera)):
+        if estado_servicio(nombre) == "Stopped":
+            log.info(f"Servicio '{nombre}' parado.")
             return True
         time.sleep(1)
     return False
@@ -1025,6 +1082,57 @@ def arrancar_apollo():
     )
 
 
+def _esperar_apollo_parado(intentos: int) -> bool:
+    """True en cuanto no quede ningún proceso del host. Cuenta intentos, no segundos."""
+    for _ in range(max(1, intentos)):
+        if not apollo_vivo():
+            return True
+        time.sleep(1)
+    return not apollo_vivo()
+
+
+def reiniciar_apollo():
+    """Para Apollo y lo vuelve a arrancar. Lanza si no lo consigue.
+
+    Hace falta cuando Apollo ya estaba abierto y se acaban de cambiar las pantallas: el
+    host elige la salida que captura al arrancar, y un cambio de topología por debajo le
+    deja el stream mirando a una salida que ya no existe. Pasó el 2026-09-26: «Pantallas
+    en modo clone» → «El host de streaming ya estaba corriendo» → `streaming_ready`, y
+    el stream no servía.
+
+    Primero el servicio, que es quien lo gobierna cuando lo arrancó el agente. Si aun
+    así queda un proceso vivo, es que se lanzó fuera del servicio (a mano, o por el exe
+    en una instalación sin él): ese se cierra con `taskkill`, que es tan nativo como
+    `sc` y `tasklist`. Lo que no se hace nunca es dar por reiniciado algo que no se ha
+    visto parar y volver: eso es exactamente el «listo» falso que se está arreglando.
+    """
+    servicio = servicio_streaming()
+    if servicio and estado_servicio(servicio) == "Running":
+        log.info(f"Reiniciando Apollo (servicio '{servicio}') para que capture las pantallas nuevas...")
+        if not parar_servicio(servicio):
+            raise RuntimeError(
+                f"Apollo ya estaba abierto y no se pudo parar su servicio '{servicio}' "
+                "para que capture las pantallas nuevas: el stream seguiría mirando la "
+                "configuración anterior. Revisa que la tarea del agente corra con "
+                "privilegios elevados"
+            )
+
+    if not _esperar_apollo_parado(10):
+        log.info("Queda un proceso de Apollo fuera de su servicio — cerrándolo...")
+        for nombre in _PROCESOS_STREAMING:
+            _nativo(["taskkill.exe", "/F", "/IM", nombre])
+        if not _esperar_apollo_parado(APOLLO_TIMEOUT):
+            raise RuntimeError(
+                "Apollo ya estaba abierto y no se pudo cerrar para reiniciarlo: el "
+                "stream seguiría mirando la configuración de pantallas anterior"
+            )
+
+    try:
+        arrancar_apollo()
+    except RuntimeError as e:
+        raise RuntimeError(f"Apollo se paró para capturar las pantallas nuevas y no volvió: {e}") from e
+
+
 def cambiar_modo_pantallas(modo: str) -> bool:
     """Pone Windows en ese modo de pantallas. Devuelve si se pudo. NUNCA lanza.
 
@@ -1065,10 +1173,18 @@ def accion_abrir_streaming(job_id: str, payload: dict):
     # reiniciarlo. Además así el modal enseña la IP antes de decir "listo".
     ip_vpn = conectar_vpn(job_id)
 
+    # Se mira ANTES de tocar las pantallas: si Apollo ya estaba abierto (se quedó de la
+    # vez anterior, o lo abrió alguien a mano), eligió su salida con la topología vieja
+    # y el cambio de abajo se la quita. Mirarlo después no distinguiría ese caso del de
+    # un Apollo recién arrancado sobre las pantallas buenas.
+    apollo_previo = apollo_vivo()
+
     # Y las pantallas antes que Apollo: lo que quede en un monitor que no se ve por
     # Artemis es inalcanzable desde fuera de casa.
+    pantallas_cambiadas = False
     if PANTALLAS_STREAMING != "ninguna":
         if cambiar_modo_pantallas(PANTALLAS_STREAMING):
+            pantallas_cambiadas = True
             report_stage(job_id, "pantallas_ok",
                          f"Pantallas en modo '{PANTALLAS_STREAMING}'")
         else:
@@ -1076,12 +1192,22 @@ def accion_abrir_streaming(job_id: str, payload: dict):
                          "No se pudo cambiar el modo de pantallas — puede que algo "
                          "quede en un monitor que no ves")
 
-    report_stage(job_id, "streaming_starting", "Arrancando Apollo")
-    arrancar_apollo()
+    if apollo_previo and pantallas_cambiadas:
+        # Antes aquí se daba por listo sin más: `arrancar_apollo` lo veía vivo y
+        # volvía, y el job decía `streaming_ready` con el stream capturando una salida
+        # que ya no existía. Si el reinicio falla, lanza y el job cae a `failed`.
+        report_stage(job_id, "streaming_starting",
+                     "Apollo ya estaba abierto: reiniciándolo para que capture las pantallas nuevas")
+        reiniciar_apollo()
+        listo = "Apollo reiniciado y listo"
+    else:
+        report_stage(job_id, "streaming_starting", "Arrancando Apollo")
+        arrancar_apollo()
+        listo = "Apollo listo"
     report_stage(
         job_id, "streaming_ready",
-        f"Apollo listo — conéctate con Artemis a {ip_vpn}" if ip_vpn
-        else "Apollo listo — conéctate con Artemis",
+        f"{listo} — conéctate con Artemis a {ip_vpn}" if ip_vpn
+        else f"{listo} — conéctate con Artemis",
     )
 
 

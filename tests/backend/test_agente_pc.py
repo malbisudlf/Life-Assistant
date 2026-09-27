@@ -222,3 +222,154 @@ class TestCicloDelJob:
         ciclo.procesar()
         assert ciclo.cierres() == ["failed"]
         assert ciclo.etapas[-1] == ("job_done", "failed: Edge no abrió")
+
+
+# ── abrir_streaming con Apollo ya abierto ───────────────────────────────────────
+
+class _WindowsSimulado:
+    """Lo justo de Windows para `sc.exe`, `tasklist.exe` y `taskkill.exe`.
+
+    Se simula `_nativo` y no las funciones de más arriba (`apollo_vivo`,
+    `estado_servicio`…) para que lo que se pruebe sea el camino de verdad: cómo se leen
+    los códigos de `sc`, cuándo se espera y en qué orden se para y se arranca.
+    """
+
+    def __init__(self, servicio_corriendo, proceso_vivo):
+        self.servicio_corriendo = servicio_corriendo
+        self.proceso_vivo       = proceso_vivo
+        self.parar_rc           = 0      # lo que devuelve `sc stop`
+        self.arranca_proceso    = True   # si `sc start` levanta de verdad sunshine.exe
+        self.llamadas           = []
+
+    def nativo(self, args, timeout=15):
+        exe, *resto = args
+        self.llamadas.append(" ".join([exe, *resto[:2]]))
+        if exe == "sc.exe":
+            orden, nombre = resto
+            if nombre != "ApolloService":
+                return 1060, "", ""
+            if orden == "query":
+                return 0, f"SERVICE_NAME: {nombre}\n STATE : {4 if self.servicio_corriendo else 1}", ""
+            if orden == "stop":
+                if self.parar_rc:
+                    return self.parar_rc, "", "Acceso denegado."
+                self.servicio_corriendo = self.proceso_vivo = False
+                return 0, "", ""
+            if orden == "start":
+                self.servicio_corriendo = True
+                self.proceso_vivo = self.arranca_proceso
+                return 0, "", ""
+        if exe == "tasklist.exe":
+            vivo = self.proceso_vivo and "sunshine.exe" in resto[1]
+            return 0, '"sunshine.exe","4242","Console","1","80.000 K"' if vivo else "INFO: nada", ""
+        if exe == "taskkill.exe":
+            self.proceso_vivo = False
+            return 0, "", ""
+        raise AssertionError(f"llamada no simulada: {args}")
+
+    def ordenes(self):
+        """Solo lo que cambia algo: las pantallas, parar, arrancar y matar."""
+        return [c for c in self.llamadas
+                if c.startswith(("pantallas", "sc.exe stop", "sc.exe start", "taskkill"))]
+
+
+@pytest.fixture
+def streaming(ciclo, monkeypatch):
+    agente = ciclo.agente
+
+    def construir(servicio_corriendo=True, proceso_vivo=True, pantallas_ok=True):
+        win = _WindowsSimulado(servicio_corriendo, proceso_vivo)
+        monkeypatch.setattr(agente, "_nativo", win.nativo)
+
+        def powershell(comando, timeout=40):
+            raise AssertionError(f"PowerShell en el camino crítico: {comando}")
+        monkeypatch.setattr(agente, "_powershell", powershell)
+        monkeypatch.setattr(agente, "APOLLO_SERVICIO", "ApolloService")
+        monkeypatch.setattr(agente, "APOLLO_TIMEOUT", 3)
+        monkeypatch.setattr(agente, "PANTALLAS_STREAMING", "clone")
+        monkeypatch.setattr(agente, "conectar_vpn", lambda _id: "<ip-tailnet>")
+
+        def pantallas(modo):
+            win.llamadas.append(f"pantallas {modo}")
+            return pantallas_ok
+        monkeypatch.setattr(agente, "cambiar_modo_pantallas", pantallas)
+        monkeypatch.setitem(agente.ACCIONES, "prueba", agente.accion_abrir_streaming)
+        return win
+
+    return construir
+
+
+class TestStreamingConApolloYaAbierto:
+    def test_si_ya_estaba_abierto_se_reinicia_despues_de_cambiar_las_pantallas(self, ciclo, streaming):
+        """Lo del 2026-09-26: Apollo abierto, pantallas a clone por debajo y
+        `streaming_ready` con el stream mirando una salida que ya no existía."""
+        win = streaming(servicio_corriendo=True, proceso_vivo=True)
+        ciclo.procesar()
+        assert win.ordenes() == ["pantallas clone", "sc.exe stop ApolloService",
+                                 "sc.exe start ApolloService"]
+        assert win.proceso_vivo
+        assert ciclo.cierres() == ["done"]
+        etapas = dict(ciclo.etapas)
+        assert "reiniciándolo" in etapas["streaming_starting"]
+        assert etapas["streaming_ready"].startswith("Apollo reiniciado y listo")
+
+    def test_si_no_estaba_abierto_solo_se_arranca(self, ciclo, streaming):
+        win = streaming(servicio_corriendo=False, proceso_vivo=False)
+        ciclo.procesar()
+        assert win.ordenes() == ["pantallas clone", "sc.exe start ApolloService"]
+        assert ciclo.cierres() == ["done"]
+        assert dict(ciclo.etapas)["streaming_ready"].startswith("Apollo listo")
+
+    def test_si_las_pantallas_no_cambiaron_no_se_reinicia(self, ciclo, streaming):
+        """Sin cambio de topología, el Apollo que ya estaba sigue capturando lo bueno."""
+        win = streaming(servicio_corriendo=True, proceso_vivo=True, pantallas_ok=False)
+        ciclo.procesar()
+        assert win.ordenes() == ["pantallas clone"]
+        assert ciclo.cierres() == ["done"]
+
+    def test_un_apollo_abierto_fuera_del_servicio_se_cierra_y_se_arranca_por_el(self, ciclo, streaming):
+        win = streaming(servicio_corriendo=False, proceso_vivo=True)
+        ciclo.procesar()
+        assert win.ordenes()[:2] == ["pantallas clone", "taskkill.exe /F /IM"]
+        assert win.ordenes()[-1] == "sc.exe start ApolloService"
+        assert ciclo.cierres() == ["done"]
+
+    def test_si_no_se_puede_parar_el_job_falla_con_motivo(self, ciclo, streaming):
+        win = streaming(servicio_corriendo=True, proceso_vivo=True)
+        win.parar_rc = 5   # ACCESS_DENIED: sin privilegios no hay reinicio posible
+        ciclo.procesar()
+        assert ciclo.cierres() == ["failed"]
+        assert "streaming_ready" not in dict(ciclo.etapas)
+        etapa, mensaje = ciclo.etapas[-1]
+        assert etapa == "job_done"
+        assert "no se pudo parar su servicio 'ApolloService'" in mensaje
+
+    def test_si_se_para_y_no_vuelve_el_job_falla_con_motivo(self, ciclo, streaming, monkeypatch):
+        win = streaming(servicio_corriendo=True, proceso_vivo=True)
+        win.arranca_proceso = False
+        # arrancar_apollo espera con el reloj de verdad: sin tiempo, falla a la primera.
+        monkeypatch.setattr(ciclo.agente, "APOLLO_TIMEOUT", 0)
+        ciclo.procesar()
+        assert ciclo.cierres() == ["failed"]
+        assert "streaming_ready" not in dict(ciclo.etapas)
+        assert "no volvió" in ciclo.etapas[-1][1]
+
+
+class TestScQueryNoConcluyente:
+    def test_el_aviso_lleva_la_salida_cruda_recortada(self, agente, monkeypatch, caplog):
+        cruda = "respuesta rara de sc\n   con varias líneas " + "x" * 1000
+        monkeypatch.setattr(agente, "_nativo", lambda args, timeout=15: (0, cruda, "aviso"))
+        monkeypatch.setattr(agente, "_powershell", lambda *_a, **_k: (0, "Running", ""))
+        with caplog.at_level(logging.WARNING):
+            assert agente.estado_servicio("Tailscale") == "Running"
+        aviso = next(r.getMessage() for r in caplog.records if "no concluyente" in r.getMessage())
+        assert "respuesta rara de sc con varias líneas" in aviso
+        assert "\n" not in aviso
+        assert "x" * 1000 not in aviso and "…" in aviso
+
+    def test_sin_salida_lo_dice(self, agente, monkeypatch, caplog):
+        monkeypatch.setattr(agente, "_nativo", lambda args, timeout=15: (-1, "", ""))
+        monkeypatch.setattr(agente, "_powershell", lambda *_a, **_k: (0, "", ""))
+        with caplog.at_level(logging.WARNING):
+            agente.estado_servicio("Tailscale")
+        assert any("rc=-1, salida: «(vacía)»" in r.getMessage() for r in caplog.records)

@@ -5,7 +5,8 @@
 
 Agente Windows **efímero**: arranca con Windows (vía WOL), drena la cola de jobs y se
 cierra. Se registra en el backend con heartbeat. **Solo funciona en un PC Windows real**
-(Edge, pyautogui, Claude Desktop): no tiene tests ni puede tenerlos en CI.
+(Edge, pyautogui, Claude Desktop): casi todo se prueba a mano, y en CI solo su lógica
+pura (`tests/backend/test_agente_pc.py`, con `pyautogui` y lo de Windows simulados).
 
 ### Quién lo lanza
 
@@ -95,9 +96,12 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   Artemis no llega. Mismo criterio que con Apollo: el servicio de Tailscale va en
   arranque MANUAL para que el PC no tenga la VPN encendida en el día a día, y lo arranca
   el agente (`arrancar_servicio()`, que necesita que la tarea del Programador corra con
-  privilegios elevados). El estado del servicio se consulta con `Get-Service`, no con
-  `sc query`: este último traduce el estado y en un Windows en español devuelve
-  "EN EJECUCIÓN". La IP de la tailnet viaja al modal en el mensaje del stage `vpn_ready`,
+  privilegios elevados). El estado del servicio se consulta con `sc query` leyendo el
+  código numérico (ver «Nada de PowerShell en el camino crítico»), con `Get-Service`
+  solo de red de seguridad. Cuando `sc query` no es concluyente, el aviso del log lleva
+  su **salida cruda**, recortada a una línea: el 2026-09-26 saltó con Tailscale diciendo
+  solo el `rc`, y no hubo forma de saber qué había contestado. La IP de la tailnet
+  viaja al modal en el mensaje del stage `vpn_ready`,
   de donde la saca `hostStreaming()` (helpers) — no se guarda en ningún sitio. Un fallo de
   VPN **no tumba el job**: se reporta `vpn_error` y se abre Apollo igual, que en la LAN
   sigue sirviendo.
@@ -119,6 +123,31 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   El modo se valida contra `_MODOS_PANTALLA` aunque no pase por ningún shell — con un
   valor inventado, DisplaySwitch abre su interfaz y se queda esperando a que alguien
   elija, con el PC vacío.
+- **Si Apollo ya estaba abierto, se reinicia después de cambiar las pantallas**
+  (`reiniciar_apollo()`). El orden «pantallas y luego Apollo» solo protege al Apollo que
+  arranca después; uno que ya estuviera corriendo (de la vez anterior, o abierto a mano)
+  eligió su salida con la topología vieja, y el cambio se la quita por debajo. Antes
+  `arrancar_apollo()` lo veía vivo, decía «El host de streaming ya estaba corriendo» y el
+  job reportaba `streaming_ready` con un stream que no servía — pasó el 2026-09-26 a las
+  20:40. Ahora `accion_abrir_streaming` mira `apollo_vivo()` **antes** de tocar las
+  pantallas (después no distinguiría un Apollo viejo de uno recién arrancado) y, si lo
+  estaba y DisplaySwitch aplicó el cambio, lo para y lo vuelve a arrancar:
+  - Se para por su servicio (`parar_servicio()`, el espejo de `arrancar_servicio()`:
+    `sc stop`, PowerShell solo como red de seguridad, `ACCESS_DENIED` corta en seco).
+    Si aun así queda un proceso, es que se lanzó fuera del servicio y se cierra con
+    `taskkill`, igual de nativo. Después arranca por el camino de siempre, que espera a
+    ver el proceso vivo.
+  - Se reporta en el stage `streaming_starting` («Apollo ya estaba abierto:
+    reiniciándolo…») y en el `streaming_ready` («Apollo reiniciado y listo»), sin stage
+    nuevo que el dashboard no sepa pintar.
+  - **Si el reinicio falla, el job falla** con el motivo en `job_done` (no se pudo
+    parar, no se pudo cerrar, o se paró y no volvió). Un «listo» falso es justo lo que
+    se arregla; mejor un `failed` que diga por qué.
+  - Si Apollo no estaba abierto, o las pantallas no cambiaron (`pantallas_error`,
+    `PANTALLAS_STREAMING=ninguna`), nada cambia: no hay topología nueva que capturar.
+  - Las esperas de parada cuentan intentos, no segundos de reloj: así los tests
+    (`tests/backend/test_agente_pc.py`, con `sc`/`tasklist`/`taskkill` simulados y
+    PowerShell prohibido) no se quedan girando con `time.sleep` anulado.
 - **Deshacerlo es cosa de quien suspende o apaga** (`caja`, o HA de respaldo), no del
   agente: cuando cierras el stream el agente hace rato que terminó. El atajo
   `agent.py --pantallas [modo]` (`PANTALLAS_RESTAURAR`, `extend` por defecto) existe para
