@@ -1577,7 +1577,7 @@ const GLOBAL_CSS = `
   @media (max-width: 640px) {
     .clock { font-size: 42px !important; letter-spacing: -1px !important; }
     .dashboard-root { padding: 12px !important; gap: 12px !important; }
-    .header-momento { flex-direction: column; align-items: stretch; gap: 8px; }
+    .header-momento { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
     .momento-texto { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
     .momento-saludo { font-size: 13px; }
     .momento-frase { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
