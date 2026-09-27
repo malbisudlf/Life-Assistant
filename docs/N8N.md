@@ -259,6 +259,22 @@ aplicar sin que nadie lo diga.
   peor que no tenerlo, porque ocupa el sitio del que sí correría. **Al crear un flujo,
   actívalo y comprueba que ha corrido de verdad.**
 
+- **El nodo que avisa también puede fallar, y ese es el peor sitio para que falle.**
+  Las sondas (`neverError` + `onError: continueRegularOutput`) tratan «está caído» como
+  un dato, nunca como un error de ejecución — eso ya estaba bien. Pero el ÚLTIMO nodo de
+  cada vigilante, el que llama a `/vigilancia/estado` (o a la centralita, en el del
+  backend), no tenía esa protección, y confirmado el 2026-09-25 en `docker logs n8n`:
+  `ECONNREFUSED`/`EHOSTUNREACH` a `<IP-de-caja>:8080` mientras el backend se estaba
+  reconstruyendo, y `EAI_AGAIN api.github.com` por un DNS que falló un instante. Los dos
+  son transitorios, y los dos dejaban la ejecución en rojo sin que ese aviso llegara a
+  ningún sitio — exactamente el síntoma de «n8n ha fallado y no me he enterado». Todos
+  los nodos que avisan (`Contarselo al backend` en los tres vigilantes y en caducidad del
+  dominio, `Llamar por la centralita` en el del backend, y las llamadas a
+  `api.github.com` del traductor de averías y de la primera pasada de PRs) llevan ahora
+  `retryOnFail` con 3 intentos y 10 s de espera. Al añadir un nodo nuevo que avise de
+  algo, dale el mismo trato: una sonda puede fallar limpio, un aviso no puede fallar
+  nunca sin más.
+
 - **`n8n execute` desde la CLI no funciona con el contenedor arriba.** Da
   `Task Broker's port 5679 is already in use`. Se esquiva con
   `docker exec -e N8N_RUNNERS_BROKER_PORT=5699 n8n n8n <comando>`.
