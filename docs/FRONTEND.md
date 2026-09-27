@@ -25,6 +25,12 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
   montar aunque no haya `la_token` y reciben un 401; cuando `apiFetch` recargaba siempre,
   eso era un bucle infinito de recargas (pantalla de login parpadeando, sin poder pulsar
   nada — visible sobre todo en móvil).
+- **`apiFetch()` no lanza con un 4xx ni con un 5xx**: devuelve la respuesta y ya. Un
+  `try/catch` alrededor no se entera de que el backend ha dicho que no: mira `r.ok` (y en
+  los borrados que responden 200 con `{ok: false}`, `borradoConfirmado()`). Qué frase
+  merece cada fallo está en `src/lib/respuestas.js` (`textoErrorApi`, `mensajeErrorLogin`,
+  `leerCalendario`). Un fallo al cargar un widget se pinta como fallo, con su «Reintentar»,
+  nunca como lista vacía (ver `docs/BUGS_HISTORICOS.md`).
 - **`authHeaders()` / `jsonHeaders()`**: única forma de construir las cabeceras de
   una llamada autenticada (la segunda añade `Content-Type: application/json`). No
   vuelvas a escribir `localStorage.getItem("la_token")` suelto en un handler — por

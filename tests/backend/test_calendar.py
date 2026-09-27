@@ -74,6 +74,24 @@ class TestGetEvents:
         assert "events" not in cuerpo and "error" in cuerpo
         assert "boom" not in str(cuerpo)
 
+    def test_solo_la_sesion_pide_reconectar(self, client, auth_headers, graph_token, mock_requests):
+        """El dashboard ofrece «Conectar Outlook» solo con `reconectar`. Antes pintaba el
+        botón ante cualquier error, así que una caída de Graph mandaba a rehacer el
+        consentimiento de Microsoft por algo que se pasa solo."""
+        mock_requests.add("GET", "graph.microsoft.com", FakeResponse({"error": "x"}, 401, "caducado"))
+        assert client.get("/calendar/events", headers=auth_headers).json()["reconectar"] is True
+
+    def test_graph_caido_no_pide_reconectar(self, client, auth_headers, graph_token, mock_requests):
+        for estado in (429, 503):
+            mock_requests.routes.clear()   # gana la primera ruta que coincide
+            mock_requests.add("GET", "graph.microsoft.com", FakeResponse(None, estado, "ocupado"))
+            cuerpo = client.get("/calendar/events", headers=auth_headers).json()
+            assert "error" in cuerpo and not cuerpo.get("reconectar")
+
+    def test_sin_sesion_graph_pide_reconectar(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(main, "get_valid_token", lambda: None)
+        assert client.get("/calendar/events", headers=auth_headers).json()["reconectar"] is True
+
     def test_clases_con_graph_caido_devuelve_error(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "/me/calendars", FakeResponse(None, 503, "no disponible"))
         cuerpo = client.get("/calendar/classes", headers=auth_headers).json()

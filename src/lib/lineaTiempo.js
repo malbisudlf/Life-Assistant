@@ -614,3 +614,14 @@ export function etiquetaDia(diaISO, hoyISO = null) {
   if (diaISO === desplazarDia(hoy, -1)) return "ayer";
   return `${DIAS_LARGO[d.getDay()]}, ${d.getDate()} de ${MESES_LARGO[d.getMonth()]}`;
 }
+
+/** Qué día enseña el widget cuando «hoy» cambia con la página abierta (la medianoche).
+ *
+ *  Si estabas mirando hoy, pasas al hoy nuevo: sin esto, con el dashboard abierto de un
+ *  día para otro, el widget amanecía titulado «ayer», sin línea de «ahora», con el
+ *  calendario en parcial aunque estuviera cargado y sin pedir nunca los avisos, la
+ *  presencia ni la casa del día nuevo. Si habías ido a otro día a propósito, te quedas
+ *  en él: moverte de ahí sería quitarte lo que estabas leyendo. */
+export function diaTrasCambioDeHoy(diaMirado, hoyAnterior, hoyNuevo) {
+  return diaMirado === hoyAnterior ? hoyNuevo : diaMirado;
+}

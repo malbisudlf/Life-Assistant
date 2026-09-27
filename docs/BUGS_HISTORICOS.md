@@ -83,6 +83,39 @@
     `is_global`. Moraleja: **«solo lo público» se comprueba preguntando si es público**,
     no enumerando lo que no lo es. El DNS rebinding de ese mismo filtro sigue abierto
     (`docs/REVISION_2026_08.md` §2.1); el comentario ya no dice lo contrario.
+- **El dashboard pintaba cada fallo del backend como otra cosa.** Una revisión de
+  septiembre de 2026 encontró el mismo vicio en una decena de sitios de `Dashboard.jsx`:
+  se miraba solo el camino bueno y cualquier otra respuesta se daba por buena o por
+  vacía. Una caída de Graph (o el backend desplegándose) salía como «Conectar Outlook»,
+  y además pegado hasta recargar, porque `authNeeded` solo se ponía a `true`; un 502 de
+  `/alarmas` como «Ninguna puesta» con una alarma a las 7:00; uno de `/noche/parte` como
+  «Todavía no hay ningún parte»; el 429 del login (global, lo agota cualquiera) como
+  «Contraseña incorrecta»; el `{detail}` de un 502 de `/export` se **descargaba** con
+  nombre de copia de seguridad; y las escrituras de entrenamiento e ideas cerraban el
+  formulario o quitaban la fila aunque el backend dijera que no.
+  - La raíz es de `apiFetch`: **solo trata el 401, no lanza con un 4xx ni con un 5xx.**
+    Un `try/catch` alrededor no se entera de nada: hay que mirar `r.ok`. Y hay borrados
+    (`DELETE /ideas`, `DELETE /training/sessions`) que responden 200 con `{ok: false}`,
+    así que ni `r.ok` basta: `borradoConfirmado()`. Las frases viven en
+    `src/lib/respuestas.js`.
+  - En el calendario, lo que distingue sesión caducada de caída es el backend: marca con
+    `reconectar: true` solo lo que se arregla reconectando (`_graph_fallo` con 401/403 y
+    la falta de token).
+  - Moraleja: **«no lo sé» y «no hay nada» son estados distintos y cada widget necesita
+    los dos.** El comentario de `alarmas` ya lo decía («`null` mientras no se sabe») y el
+    `catch` de debajo lo contradecía con un `previo || []`. Un estado de error va aparte
+    (`alarmasError`, `{ error: true }`), nunca reciclando el valor que significa vacío. Y
+    lo que se pone a `true` en un fallo se vuelve a poner a `false` en el acierto.
+- **Tres estados que se quedaban desfasados con la página abierta**, de la misma
+  revisión: el detalle del widget «Hoy» guardaba una COPIA del evento pulsado (tras
+  editarlo seguía con la hora vieja, y el ✎ la volvía a escribir), la idea desplegada
+  se guardaba por posición (las nuevas entran arriba y se desplegaba otra), y «El día»
+  se quedaba en el día en que se abrió la página y amanecía titulado «ayer». Y en la
+  llamada, cortar a Jarvis después del evento `fin` metía su respuesta DOS veces en el
+  historial (`historialTrasCorte`).
+  - Moraleja: **guarda el id, no el objeto ni el índice**, y deriva lo demás en cada
+    render. Lo que se fija al montar («hoy») tiene que seguir al reloj, igual que ya lo
+    hacían los derivados de salud con `diaActual`.
 
 - **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
   2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había

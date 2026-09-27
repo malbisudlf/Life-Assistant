@@ -304,3 +304,31 @@ export function pareceEco(texto, dicho, { minPalabras = 3, proporcion = 0.8 } = 
   const coinciden = oidas.filter(p => suyas.has(p)).length;
   return coinciden / oidas.length >= proporcion;
 }
+
+// Lo que se añade al texto de Jarvis en el historial cuando le cortas.
+export const MARCA_CORTE = "(te pusiste a hablar y me cortaste aquí)";
+export const MARCA_CORTE_TRAS_FIN = "(te pusiste a hablar mientras lo decía y me cortaste: puede que no oyeras el final)";
+
+/** El historial de la llamada después de cortarle a Jarvis.
+ *
+ *  Antes del evento `fin` la respuesta aún no está en el historial, y lo dicho se guarda
+ *  como mensaje propio con la marca del corte: es lo único que va a quedar de ese turno.
+ *  Después de `fin` la respuesta ENTERA ya entró, y como lo dicho se apunta al encolar
+ *  cada trozo y no al terminar de sonar, `dicho` es también la respuesta entera aunque
+ *  solo sonara la primera frase. Añadir otro mensaje ahí dejaba la respuesta DOS veces en
+ *  el historial, la segunda diciendo que el corte fue al final. Tras `fin` se anota el
+ *  corte en el mensaje que ya está, conservando sus herramientas. */
+export function historialTrasCorte(mensajes, dicho, turnoCerrado) {
+  const lista = mensajes || [];
+  const texto = (dicho || "").trim();
+  if (turnoCerrado) {
+    for (let i = lista.length - 1; i >= 0; i--) {
+      if (lista[i]?.rol !== "assistant") continue;
+      const copia = lista.slice();
+      copia[i] = { ...lista[i], texto: `${lista[i].texto} ${MARCA_CORTE_TRAS_FIN}` };
+      return copia;
+    }
+  }
+  if (!texto) return lista;
+  return [...lista, { rol: "assistant", texto: `${texto} ${MARCA_CORTE}` }];
+}

@@ -1391,8 +1391,12 @@ def _graph_fallo(r, contexto: str) -> dict | None:
             return {"error": "Respuesta inesperada de Outlook"}
         return None
     logger.error("Graph %s %s: %s", contexto, r.status_code, (r.text or "")[:500])
+    # `reconectar` es lo que el dashboard mira para ofrecer «Conectar Outlook»: solo
+    # la sesión se arregla reconectando. Un 5xx o un 429 se pasan solos, y tratarlos
+    # igual mandaba a rehacer el consentimiento de Microsoft por una caída de Graph.
     if r.status_code in (401, 403):
-        return {"error": "Sesión de Outlook caducada. Vuelve a conectar en /auth/login"}
+        return {"error": "Sesión de Outlook caducada. Vuelve a conectar en /auth/login",
+                "reconectar": True}
     return {"error": "No se pudo consultar el calendario de Outlook"}
 
 
@@ -1891,7 +1895,7 @@ def callback(code: str, state: str = ""):
 def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     token = get_valid_token()
     if not token:
-        return {"error": "No autenticado. Ve a /auth/login primero"}
+        return {"error": "No autenticado. Ve a /auth/login primero", "reconectar": True}
     
     headers = {"Authorization": f"Bearer {token}"}
     start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import {
   isToday, isFuture, isPast, isActive, isoHoy, daysUntil, formatTime, formatUpcomingTime,
+  eventoDelDetalle,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
   hoursToHM, sleepHours, findMetric,
   mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
@@ -34,14 +35,15 @@ import {
 } from "../lib/agenda";
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
-  posicionAhora,
+  posicionAhora, diaTrasCambioDeHoy,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco, historialTrasCorte } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
+import { textoErrorApi, mensajeErrorLogin, leerCalendario, borradoConfirmado } from "../lib/respuestas";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { comoBoton } from "../lib/teclado";
 // `src/lib/dev.js` NO se importa aquí de forma estática, aunque el panel ⚙ use su
@@ -168,7 +170,9 @@ function LoginScreen() {
         localStorage.setItem("la_token", data.token);
         window.location.reload();
       } else {
-        setError("Contraseña incorrecta");
+        // Un 429 NO es contraseña mala: el límite es global y un tercero puede haberlo
+        // agotado. Decir «incorrecta» ahí te pone a probar variantes contra un bloqueo.
+        setError(mensajeErrorLogin(res.status, data, res.headers?.get?.("Retry-After")));
       }
     } catch {
       setError("Error de conexión");
@@ -2269,7 +2273,8 @@ export default function Dashboard() {
     try { return localStorage.getItem("la_notifications") === "true" && Notification.permission === "granted"; } catch { return false; }
   });
   const [exporting, setExporting] = useState(false);
-  const [activeEvent, setActiveEvent] = useState(null);
+  const [exportError, setExportError] = useState("");
+  const [activeEventId, setActiveEventId] = useState(null);   // el id, no una copia: ver eventoDelDetalle
   // Por id y no por índice: con un filtro activo, el índice en la lista filtrada no es
   // el de la lista entera y se abría la tarjeta de otra idea.
   const [openIdea, setOpenIdea]       = useState(null);
@@ -2287,10 +2292,14 @@ export default function Dashboard() {
   const [agruparIdeas, setAgruparIdeas]     = useState(() => {
     try { return localStorage.getItem("la_ideas_agrupar") === "1"; } catch { return false; }
   });
+  const [borrarIdeaError, setBorrarIdeaError] = useState("");   // un borrado que el backend no confirmó
   const [allEvents, setAllEvents]     = useState([]);
   const [loading, setLoading]         = useState(true);
   const [slowBoot, setSlowBoot]       = useState(false);
   const [authNeeded, setAuthNeeded]   = useState(false);
+  // Un fallo del calendario que NO es de sesión (Graph caído, backend desplegándose):
+  // se dice con su texto en vez de ofrecer «Conectar Outlook», que no lo arregla.
+  const [calendarError, setCalendarError] = useState("");
   const [ideas, setIdeas]             = useState([]);
   const [recording, setRecording]     = useState(false);
   const [processing, setProcessing]   = useState(false);
@@ -2361,6 +2370,9 @@ export default function Dashboard() {
   // que estuviera sonando, así que sin esto el callback de una respuesta ya descartada
   // reabriría el micro justo cuando empieza a sonar la siguiente.
   const vozTurnoRef = useRef(0);
+  // El número del último turno cuyo evento `fin` ya llegó. Cortarle antes o después de
+  // `fin` no deja el historial igual: ver `historialTrasCorte`.
+  const finDeTurnoRef = useRef(0);
   // La llamada entrante: lo que se ve al abrir el dashboard desde el aviso del móvil.
   // `null` es "no hay llamada". Con objeto se pinta la pantalla, y `estado` dice si está
   // sonando o si ya has descolgado — la pantalla NO se va al contestar: una llamada que
@@ -2460,6 +2472,7 @@ export default function Dashboard() {
   const [sessionDate, setSessionDate]     = useState(() => isoHoy());
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
+  const [trainingError, setTrainingError]     = useState("");   // la última escritura que no entró
   const [showSettings, setShowSettings]   = useState(false);
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
@@ -2503,6 +2516,9 @@ export default function Dashboard() {
   // Alarmas de respaldo. `null` mientras no se sabe: un widget que enseña "no tienes
   // ninguna" antes de haber preguntado le está diciendo a alguien que no va a sonar.
   const [alarmas, setAlarmas]                       = useState(null);
+  // Que la última consulta de /alarmas falló. Aparte de `alarmas` a propósito: tratar el
+  // fallo como lista vacía pintaba «Ninguna puesta» con una alarma a las 7:00.
+  const [alarmasError, setAlarmasError]             = useState(false);
   // El parte del turno de noche. `null` mientras no se sabe y `{}` cuando no hay
   // ninguno: son cosas distintas y el widget dice una u otra, no la misma.
   const [parteNoche, setParteNoche]                 = useState(null);
@@ -2510,7 +2526,7 @@ export default function Dashboard() {
   // entonces sí hace falta la fecha. `editando`: el id de la alarma que se está
   // cambiando — el mismo formulario sirve para poner y para editar, que es lo que evita
   // tener dos sitios donde escribir una hora y que uno de los dos valide distinto.
-  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false });
+  const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false, error: "" });
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
   const [alarmaEspera, setAlarmaEspera]             = useState(2);
@@ -2620,11 +2636,21 @@ export default function Dashboard() {
     return apiFetch(`${API}/calendar/events`, { headers: authHeaders() })
       .then(r => r.json())
       .then(data => {
-        if (data.error) { setAuthNeeded(true); setLoading(false); return; }
-        setAllEvents(data.events || []);
+        // Las dos marcas se reescriben en CADA carga, también en la buena: antes solo se
+        // ponían a true, y un fallo pasajero dejaba «Conectar Outlook» pegado hasta
+        // recargar la página aunque las cargas siguientes trajeran los eventos.
+        const cal = leerCalendario(data);
+        setAuthNeeded(cal.reconectar);
+        setCalendarError(cal.error);
+        if (cal.eventos) setAllEvents(cal.eventos);
         setLoading(false);
       })
-      .catch(() => { setAuthNeeded(true); setLoading(false); });
+      .catch(() => {
+        // Sin respuesta legible (backend caído o desplegándose, página de error del
+        // túnel) no se sabe nada de la sesión de Outlook, así que no se toca.
+        setCalendarError("No se ha podido cargar el calendario");
+        setLoading(false);
+      });
   }
   useEffect(() => { if (token) loadEvents(); }, [token]);
 
@@ -2752,11 +2778,13 @@ export default function Dashboard() {
   // Mientras haya alguna alarma viva, el widget se refresca cada minuto: si no, una
   // alarma que empieza a insistir no se vería moverse en una pantalla ya abierta, que
   // es exactamente cuando la estás mirando. Sin nada vivo no hay temporizador.
+  // Con la última consulta fallida también: si no, un fallo en la primera carga no se
+  // corregía nunca solo.
   useEffect(() => {
-    if (!token || !alarmas?.length) return;
+    if (!token || (!alarmas?.length && !alarmasError)) return;
     const t = setInterval(loadAlarmas, 60000);
     return () => clearInterval(t);
-  }, [token, alarmas?.length]);
+  }, [token, alarmas?.length, alarmasError]);
 
   // Cargar datos de salud
   useEffect(() => {
@@ -3200,9 +3228,17 @@ export default function Dashboard() {
   async function exportData() {
     if (exporting) return;
     setExporting(true);
+    setExportError("");
     try {
       const res = await apiFetch(`${API}/export`, { headers: authHeaders() });
       const data = await res.json();
+      // Un 502 de /export trae JSON válido (`{detail}`): sin esta comprobación se
+      // descargaba con nombre de copia de seguridad y creías tener una que no existía.
+      if (!res.ok) {
+        setExportError(`No se ha hecho la copia: ${textoErrorApi(res.status, data)}`);
+        setExporting(false);
+        return;
+      }
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement("a");
@@ -3212,7 +3248,9 @@ export default function Dashboard() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch { /* mejor esfuerzo: si falla la descarga, no bloquear la UI */ }
+    } catch {
+      setExportError("No se ha hecho la copia: sin respuesta legible del backend");
+    }
     setExporting(false);
   }
 
@@ -3401,11 +3439,24 @@ export default function Dashboard() {
     }
   }
 
+  // Solo se quita de la lista lo que el backend dice haber borrado: DELETE /ideas
+  // responde 200 con `{ok: false}` si falla Supabase, y quitarla igual hacía que la idea
+  // desapareciera de la pantalla y volviera a salir al recargar.
   async function deleteIdea(id) {
-    await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: authHeaders() });
-    setIdeas(prev => prev.filter(i => i.id !== id));
-    // El aviso «Ya lo dijiste» habla de estas dos ideas: sin una de ellas ya no dice nada.
-    setYaLoDijiste(y => (y && (y.nueva.id === id || y.anterior.id === id) ? null : y));
+    setBorrarIdeaError("");
+    try {
+      const r = await apiFetch(`${API}/ideas/${id}`, { method: "DELETE", headers: authHeaders() });
+      const cuerpo = await r.json().catch(() => ({}));
+      if (!borradoConfirmado(r.status, cuerpo)) {
+        setBorrarIdeaError(r.ok ? "No se ha podido borrar la idea" : textoErrorApi(r.status, cuerpo));
+        return;
+      }
+      setIdeas(prev => prev.filter(i => i.id !== id));
+      // El aviso «Ya lo dijiste» habla de estas dos ideas: sin una de ellas ya no dice nada.
+      setYaLoDijiste(y => (y && (y.nueva.id === id || y.anterior.id === id) ? null : y));
+    } catch {
+      setBorrarIdeaError("Sin conexión con el backend: la idea sigue ahí");
+    }
   }
 
   // ── Jarvis ───────────────────────────────────────────────────────────────
@@ -3629,6 +3680,7 @@ export default function Dashboard() {
    *  para que ningún callback en vuelo reabra el micro por su cuenta. */
   function interrumpirAJarvis() {
     if (!llamadaRef.current || !hablandoRef.current) return;
+    const turnoCerrado = finDeTurnoRef.current === vozTurnoRef.current;
     vozTurnoRef.current++;            // todo lo que estuviera en el aire queda descartado
     try { vozDePago?.callar(); } catch { /* mejor esfuerzo */ }
     try { VOZ_SINTESIS?.cancel(); } catch { /* mejor esfuerzo */ }
@@ -3636,9 +3688,7 @@ export default function Dashboard() {
     abortoTurnoRef.current = null;
     const dicho = dichoEnVozRef.current.trim();
     dichoEnVozRef.current = "";
-    if (dicho) {
-      setJarvisMensajes(prev => [...prev, { rol: "assistant", texto: `${dicho} (te pusiste a hablar y me cortaste aquí)` }]);
-    }
+    if (dicho) setJarvisMensajes(prev => historialTrasCorte(prev, dicho, turnoCerrado));
     setJarvisPensando(false);
     dejarDeHablar();
     // La vigilancia del corte en falso: si de aquí a un rato no se ha oído una palabra,
@@ -3993,6 +4043,7 @@ export default function Dashboard() {
           setJarvisMensajes(prev => [...prev, { rol: "aviso", texto: datos.detalle || jarvisMotivoError(0) }]);
         }
         if (tipo === "fin") {
+          finDeTurnoRef.current = miTurno;
           setJarvisMensajes(prev => [...prev, {
             rol:          "assistant",
             texto:        datos.respuesta || "(sin respuesta)",
@@ -4669,7 +4720,9 @@ export default function Dashboard() {
       if (!r.ok) throw new Error("noche");
       setParteNoche(await r.json() || {});
     } catch {
-      setParteNoche(previo => previo || {});
+      // `{}` es «no hay ninguno»; un fallo es otra cosa. Con `{}` aquí el widget decía
+      // «Todavía no hay ningún parte» con los borradores de anoche esperando.
+      setParteNoche(previo => previo || { error: true });
     }
   }
 
@@ -4699,9 +4752,12 @@ export default function Dashboard() {
       if (!r.ok) throw new Error("alarmas");
       const datos = await r.json();
       setAlarmas(datos.alarmas || []);
+      setAlarmasError(false);
       if (datos.espera_min) setAlarmaEspera(datos.espera_min);
     } catch {
-      setAlarmas(previo => previo || []);
+      // Lo que ya se sabía se queda; lo que no, sigue sin saberse. Un fallo NO es una
+      // lista vacía.
+      setAlarmasError(true);
     }
   }
 
@@ -4711,7 +4767,7 @@ export default function Dashboard() {
     return !f.guardando && !!f.hora && (!!f.fecha || f.repetir.length > 0);
   }
 
-  const ALARMA_FORM_VACIO = { fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false };
+  const ALARMA_FORM_VACIO = { fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false, error: "" };
 
   // Cargar una alarma en el formulario es toda la edición que hace falta: se cambia
   // arriba y el botón pasa a decir «Guardar».
@@ -4732,7 +4788,7 @@ export default function Dashboard() {
   async function guardarAlarma() {
     if (!alarmaListaParaPonerse(alarmaForm)) return;
     const editando = alarmaForm.editando;
-    setAlarmaForm(f => ({ ...f, guardando: true }));
+    setAlarmaForm(f => ({ ...f, guardando: true, error: "" }));
     try {
       const r = await apiFetch(`${API}/alarmas${editando ? `/${editando}` : ""}`, {
         method: editando ? "PATCH" : "POST",
@@ -4742,11 +4798,16 @@ export default function Dashboard() {
                                etiqueta: alarmaForm.etiqueta,
                                repetir: alarmaForm.repetir }),
       });
-      if (!r.ok) throw new Error("alarma");
+      if (!r.ok) {
+        // Sin esto el botón solo se volvía a habilitar y la alarma parecía puesta.
+        const error = textoErrorApi(r.status, await r.json().catch(() => ({})));
+        setAlarmaForm(f => ({ ...f, guardando: false, error }));
+        return;
+      }
       setAlarmaForm(ALARMA_FORM_VACIO);
       await loadAlarmas();
     } catch {
-      setAlarmaForm(f => ({ ...f, guardando: false }));
+      setAlarmaForm(f => ({ ...f, guardando: false, error: "Sin conexión con el backend: la alarma no se ha puesto" }));
     }
   }
 
@@ -4930,37 +4991,56 @@ export default function Dashboard() {
     } catch { /* mejor esfuerzo: ignorar */ }
   }
 
+  // Las escrituras de entrenamiento pasan todas por aquí para que un rechazo se VEA.
+  // Antes no se miraba la respuesta: un 422 (fecha vacía) o un 502 cerraban el
+  // formulario como si la sesión hubiera entrado, y la sesión dada se perdía sin aviso.
+  // El «mejor esfuerzo: ignorar» vale para leer el resumen, no para escribir un dato.
+  // Devuelve si entró.
+  async function escribirEntrenamiento(url, opciones, { esBorrado = false } = {}) {
+    setTrainingError("");
+    try {
+      const r = await apiFetch(url, opciones);
+      const cuerpo = await r.json().catch(() => ({}));
+      // DELETE /training/sessions responde 200 con `{ok: false}` si falla Supabase.
+      if (esBorrado ? borradoConfirmado(r.status, cuerpo) : r.ok) return true;
+      setTrainingError(r.ok ? "No se ha podido borrar la sesión" : textoErrorApi(r.status, cuerpo));
+    } catch {
+      setTrainingError("Sin conexión con el backend: no se ha guardado");
+    }
+    return false;
+  }
+
   async function submitSession() {
     if (trainingLoading) return;
     setTrainingLoading(true);
-    try {
-      await apiFetch(`${API}/training/sessions`, {
-        method: "POST",
-        headers: jsonHeaders(),
-        body: JSON.stringify({ date: sessionDate, duration_hours: parseFloat(sessionHours) }),
-      });
+    const entro = await escribirEntrenamiento(`${API}/training/sessions`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ date: sessionDate, duration_hours: parseFloat(sessionHours) }),
+    });
+    // Si no entró, el formulario se queda abierto con lo escrito para corregirlo.
+    if (entro) {
       setShowSessionForm(false);
       await loadTraining();
-    } catch { /* mejor esfuerzo: ignorar */ }
+    }
     setTrainingLoading(false);
   }
 
   async function deleteTrainingSession(sessionId) {
-    await apiFetch(`${API}/training/sessions/${sessionId}`, { method: "DELETE", headers: authHeaders() });
+    await escribirEntrenamiento(`${API}/training/sessions/${sessionId}`,
+                                { method: "DELETE", headers: authHeaders() }, { esBorrado: true });
     await loadTraining();
   }
 
   async function updateTrainingClient(patch) {
     if (trainingSettingsSaving) return;
     setTrainingSettingsSaving(true);
-    try {
-      await apiFetch(`${API}/training/client`, {
-        method: "PATCH",
-        headers: jsonHeaders(),
-        body: JSON.stringify(patch),
-      });
-      await loadTraining();
-    } catch { /* mejor esfuerzo: ignorar */ }
+    const entro = await escribirEntrenamiento(`${API}/training/client`, {
+      method: "PATCH",
+      headers: jsonHeaders(),
+      body: JSON.stringify(patch),
+    });
+    if (entro) await loadTraining();
     setTrainingSettingsSaving(false);
   }
 
@@ -4968,14 +5048,12 @@ export default function Dashboard() {
     if (trainingLoading) return;
     setTrainingLoading(true);
     const today = isoHoy();
-    try {
-      await apiFetch(`${API}/training/payments`, {
-        method: "POST",
-        headers: jsonHeaders(),
-        body: JSON.stringify({ date: today }),
-      });
-      await loadTraining();
-    } catch { /* mejor esfuerzo: ignorar */ }
+    const entro = await escribirEntrenamiento(`${API}/training/payments`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ date: today }),
+    });
+    if (entro) await loadTraining();
     setTrainingLoading(false);
   }
 
@@ -5293,7 +5371,7 @@ export default function Dashboard() {
     .map(e => ({ title: e.title.replace(ENTREGAS_MARKER, "").trim(), subject: e.title, days: daysUntil(e.start), alud_url: e.alud_url || null }))
     .sort((a, b) => a.days - b.days);
 
-  const displayActive = activeEvent || todayEvents.find(e => e.active) || todayEvents[0];
+  const displayActive = eventoDelDetalle(todayEvents, activeEventId);
   const todayClasses  = classEvents.filter(e => isToday(e.start));
 
   // Timeline combinado: eventos normales + nodo de clases, ordenado por hora
@@ -5602,6 +5680,14 @@ export default function Dashboard() {
   // "no pasó nada" de "no lo sé", y sin esa distinción una coincidencia que no está
   // se lee igual que una que nadie ha podido comprobar.
   const hoyLinea = useMemo(() => fechaLocalISO(hoyConclusiones), [hoyConclusiones]);
+  // `lineaDia` se fija al montar y solo lo mueven los botones: al pasar la medianoche con
+  // la página abierta hay que llevarlo al día nuevo si estabas mirando hoy. Ajuste
+  // durante el render, como DateInput (nada de setState dentro de un efecto).
+  const [hoyLineaPrevio, setHoyLineaPrevio] = useState(hoyLinea);
+  if (hoyLinea !== hoyLineaPrevio) {
+    setHoyLineaPrevio(hoyLinea);
+    setLineaDia(dia => diaTrasCambioDeHoy(dia, hoyLineaPrevio, hoyLinea));
+  }
   const lineaDatos = useMemo(() => construirLineaTiempo({
     dia: lineaDia,
     hoy: hoyLinea,
@@ -5610,6 +5696,7 @@ export default function Dashboard() {
       // que de un día pasado el calendario no sabe nada: decir "sin eventos" ahí sería
       // afirmar algo que nadie ha comprobado.
       eventos: authNeeded ? { estado: FUENTE_ERROR, nota: "Outlook sin conectar" }
+             : calendarError ? { estado: FUENTE_ERROR, nota: calendarError }
              : loading    ? { estado: FUENTE_CARGANDO }
              : lineaDia < hoyLinea
                ? { estado: FUENTE_PARCIAL, nota: "el calendario solo se consulta desde hoy" }
@@ -5645,7 +5732,7 @@ export default function Dashboard() {
       // vive en memoria y se vacía en cuanto HA se la lleva, así que no quedaba rastro.
       casa: lineaCasa,
     },
-  }), [lineaDia, hoyLinea, authNeeded, loading, allEvents, classEvents,
+  }), [lineaDia, hoyLinea, authNeeded, calendarError, loading, allEvents, classEvents,
        healthLoading, healthData, training, lineaAvisos, lineaTramos, lineaCasa,
        lineaPresenciaAhora]);
 
@@ -5714,6 +5801,19 @@ export default function Dashboard() {
                 → Conectar Outlook
               </button>
             </div>
+          ) : calendarError ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
+              {calendarError}.{" "}
+              <button
+                onClick={loadEvents}
+                style={{
+                  background: "none", border: "none", padding: 0, font: "inherit",
+                  color: "var(--accent)", cursor: "pointer",
+                }}
+              >
+                Reintentar
+              </button>
+            </div>
           ) : todayEvents.length === 0 && todayClasses.length === 0 ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
           ) : (
@@ -5722,7 +5822,7 @@ export default function Dashboard() {
                 <div style={s.timeline} className="timeline-inner">
                   {timelineNodes.map((node, i) => (
                     <div key={i} style={s.timelineItem} onClick={() => {
-                      if (node.type === "event") setActiveEvent(node.ev);
+                      if (node.type === "event") setActiveEventId(node.ev.id);
                       else setClassesOpen(true);
                     }}>
                       {i < timelineNodes.length - 1 && <div style={s.connectorLine} />}
@@ -5871,6 +5971,9 @@ export default function Dashboard() {
                         style={{ flex: 1, padding: "7px 0", background: "rgba(106,170,130,0.12)", border: "0.5px solid rgba(106,170,130,0.3)", borderRadius: 6, color: "var(--green)", fontSize: 12, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>Cobrado ({amount_owed}€)</button>
                     )}
                   </div>
+                )}
+                {trainingError && (
+                  <div style={{ fontSize: 12, color: "#d4645a", marginTop: 8 }}>{trainingError}</div>
                 )}
               </>
             );
@@ -6386,6 +6489,9 @@ export default function Dashboard() {
                 Procesando audio...
               </div>
             )}
+            {borrarIdeaError && (
+              <div style={{ fontSize: 12, color: "#d4645a" }}>{borrarIdeaError}</div>
+            )}
             {hayFiltroIdeas && ideas.length > 0 && filtradas.length === 0 && (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>
                 Nada coincide{consultaIdeas ? ` con «${consultaIdeas}»` : ""}{etiquetaIdeas ? ` en ${etiquetaIdeas}` : ""}.{" "}
@@ -6485,6 +6591,13 @@ export default function Dashboard() {
             <div style={s.sectionLabel}>Anoche</div>
             {parteNoche === null ? (
               <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>Cargando…</div>
+            ) : parteNoche.error ? (
+              <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+                No se ha podido consultar el parte.{" "}
+                <span onClick={loadParteNoche} style={{ color: "var(--accent)", cursor: "pointer" }}>
+                  Reintentar
+                </span>
+              </div>
             ) : !parte.total ? (
               // Una noche en blanco tiene que decir QUÉ se miró, no solo que no había
               // nada: si no, "no hubo nada que hacer" y "esto está roto" se leen igual,
@@ -6587,8 +6700,17 @@ export default function Dashboard() {
             )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
-              {alarmas === null && (
+              {alarmas === null && !alarmasError && (
                 <div style={{ color: "var(--muted2)", fontSize: 13 }}>Cargando…</div>
+              )}
+              {alarmasError && (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                  {alarmas === null ? "No se han podido consultar las alarmas."
+                                    : "No se han podido actualizar: esto es lo último que se sabe."}{" "}
+                  <span onClick={loadAlarmas} style={{ color: "var(--accent)", cursor: "pointer" }}>
+                    Reintentar
+                  </span>
+                </div>
               )}
               {alarmas?.length === 0 && (
                 <div style={{ color: "var(--muted)", fontSize: 13 }}>Ninguna puesta.</div>
@@ -6653,6 +6775,9 @@ export default function Dashboard() {
                 </span>
               )}
             </div>
+            {alarmaForm.error && (
+              <div style={{ fontSize: 12, color: "#d4645a", marginTop: 6 }}>{alarmaForm.error}</div>
+            )}
 
             {/* Marcar un día convierte la alarma en semanal. Se pintan siempre, también
                 sin marcar: si la repetición se escondiera detrás de un interruptor, la
@@ -8210,8 +8335,9 @@ export default function Dashboard() {
 
     filas.push({
       nombre: "Outlook",
-      tono: authNeeded ? "red" : allEvents.length ? "green" : "accent",
+      tono: authNeeded ? "red" : calendarError ? "accent" : allEvents.length ? "green" : "accent",
       detalle: authNeeded ? "sesión caducada — vuelve a conectar"
+        : calendarError ? calendarError
         : `${allEvents.length} eventos cargados`,
     });
 
@@ -8252,7 +8378,7 @@ export default function Dashboard() {
     });
 
     return filas;
-  }, [authNeeded, allEvents.length, healthLastSync, healthReloj, training]);
+  }, [authNeeded, calendarError, allEvents.length, healthLastSync, healthReloj, training]);
 
   if (!token) return <LoginScreen />;
 
@@ -8486,7 +8612,8 @@ export default function Dashboard() {
             </div>
             <span>
               <span style={s.statusDot} />
-              {loading ? "Cargando..." : authNeeded ? "Outlook no conectado" : `${allEvents.length} eventos cargados`}
+              {loading ? "Cargando..." : authNeeded ? "Outlook no conectado"
+                : calendarError ? "Calendario sin cargar" : `${allEvents.length} eventos cargados`}
             </span>
           </div>
           <span>Life Assistant v0.1</span>
@@ -9176,6 +9303,9 @@ export default function Dashboard() {
                   </button>
                 </div>
               </div>
+              {trainingError && (
+                <div style={{ fontSize: 12, color: "#d4645a", marginBottom: 10 }}>{trainingError}</div>
+              )}
 
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Sesiones recientes</div>
               {(!training?.all_recent_sessions || training.all_recent_sessions.length === 0) ? (
@@ -9409,6 +9539,9 @@ export default function Dashboard() {
                 </button>
                 <span style={{ fontSize: 11, color: "var(--muted)" }}>Descarga un JSON con todos tus datos</span>
               </div>
+              {exportError && (
+                <div style={{ fontSize: 12, color: "#d4645a", marginTop: 8 }}>{exportError}</div>
+              )}
             </div>
 
             {/* ── Logout ── */}

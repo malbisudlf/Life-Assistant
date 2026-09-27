@@ -13,6 +13,17 @@ export function isActive(startStr, endStr) {
   const now = new Date();
   return new Date(startStr) <= now && new Date(endStr) >= now;
 }
+/** El evento que enseña el detalle del widget «Hoy»: el que se pulsó, si sigue estando
+ *  entre los de hoy; si no, el que está en curso, y si tampoco, el primero.
+ *
+ *  Se busca por id en los eventos de ESTE render, nunca se guarda una copia: la copia se
+ *  quedaba con la hora vieja tras editar el evento, y el ✎ volvía a rellenar el
+ *  formulario con ella, así que guardar sin mirar deshacía la edición. */
+export function eventoDelDetalle(eventosDeHoy, idElegido) {
+  const lista = eventosDeHoy || [];
+  return (idElegido != null && lista.find(e => e.id === idElegido))
+    || lista.find(e => e.active) || lista[0];
+}
 export function daysUntil(dateStr) {
   return Math.ceil((new Date(dateStr) - new Date()) / (1000 * 60 * 60 * 24));
 }
