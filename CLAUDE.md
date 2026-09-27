@@ -226,6 +226,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/REVISION_2026_08.md` | Revisión general de agosto de 2026: hallazgos de corrección, seguridad y deuda con su sitio exacto, más una tanda de ideas nuevas |
 | `docs/REVISION_BACKEND.md` | Revisión antigua de `backend/main.py` fichero a fichero. Histórico: mira antes si el hallazgo sigue vivo |
 | `docs/REVISION_PROYECTO.md` | Lo mismo para el resto del repositorio (agente, tests, config). Histórico, igual que el anterior |
+| `docs/PLAN_2026_10.md` | **El plan de trabajo de octubre de 2026**: bloques por semana, uno por sesión, que se marcan al terminar. Si vienes a «seguir con el plan», empieza aquí: coge el primero sin marcar y sigue sus reglas |
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 | `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
 | `docs/EL_PROYECTO_EXPLICADO.md` | Explicación del proyecto entero para alguien de fuera: qué es, qué hace y por qué está construido así. No es guía de trabajo |
