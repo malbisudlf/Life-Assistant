@@ -380,8 +380,9 @@ saber es distinto de saber que no llegó nada.
 ### Panel ⚙ de ajustes
 
 Botón en el header, dentro del contenedor `.header-controls`, que **sí es visible en
-móvil** (cuando el ⚙ estaba dentro de `.header-greeting`, que se oculta a ≤640px, en
-móvil no había forma de abrir los ajustes). `Escape` lo cierra; tiene `maxHeight: 90vh`
+móvil** (cuando el ⚙ estaba dentro de `.header-greeting`, que se ocultaba a ≤640px, en
+móvil no había forma de abrir los ajustes; ese bloque ya no existe, el saludo vive en el
+momento del día). `Escape` lo cierra; tiene `maxHeight: 90vh`
 + scroll interno para funcionar bien con zoom.
 
 - **Modo de vista** — [Completo] [Simple].
@@ -440,6 +441,79 @@ en ⚙ → "Modo de vista" → [Simple] y se guarda en `la_simple_mode` (`"1"`/`
 - **Panel de Clases** — sidebar lateral con el horario completo de la semana.
 - **Toggle HA/LA** — alterna entre el dashboard y Home Assistant (`VITE_HA_URL` +
   `VITE_HA_DASHBOARD_PATH`).
+
+### El momento del día (cabecera)
+
+Debajo del reloj, una fila que contesta a «¿qué me toca ahora?»: el saludo, una frase y
+hasta tres chips que llevan a su widget. Sustituye al «Buenos días / Mikel» que había a
+la derecha (y que en móvil se ocultaba). Lo decide **código, no un modelo**:
+`momentoDelDia()` en `src/lib/momento.js`, con tests en `tests/frontend/momento.test.js`.
+El componente `MomentoDelDia` (a nivel de módulo, como `DepartureWidget`) solo pinta.
+
+- **Nada de llamadas nuevas.** Sale de lo que el dashboard ya tiene cargado (eventos,
+  clases, alarmas, parte de noche, salud, reloj, clima y `departureMap`). Se recalcula
+  en un `useMemo` que depende de `now`, así que se refresca con el tic del minuto que ya
+  existía, sin intervalo propio.
+- **`ahora` va siempre por parámetro.** Por eso `momento.js` no usa
+  `isActive`/`isFuture`/`isToday`, que leen el reloj real: con ellos no se podrían probar
+  los bordes de franja ni el cruce de medianoche.
+
+| Franja | Horas | Qué se dice cuando no hay nada en curso ni pendiente hoy |
+|---|---|---|
+| mañana | 06:00–12:59 | «No te queda nada más hoy.» / «Hoy no tienes nada en la agenda.» |
+| tarde | 13:00–19:59 | Lo mismo, más un chip con el primer evento de mañana |
+| noche | 20:00–05:59 | «Mañana empiezas a las 08:00 con …» (de 00:00 a 05:59, «Hoy empiezas…»), o «… no tienes nada en la agenda.» |
+
+El saludo conserva los cortes de siempre (días < 13, tardes < 20, noches). La «jornada
+objetivo» de la noche es mañana hasta medianoche y hoy de madrugada.
+
+**Prioridad de la frase** (gana la primera que aplica):
+
+1. **Alarma sonando** (`avisada`/`escalada`): «La alarma está sonando…», en rojo y con un
+   único chip «⏰ Estoy despierto». Tapa todo lo demás, chips incluidos.
+2. **Agenda cargando**: sin frase, solo el saludo.
+3. **`authNeeded`**: «Outlook sin conectar: no sé qué tienes hoy.» y chip a `timeline`,
+   donde está el botón de conectar.
+4. **Evento en curso**: «Ahora: X hasta las HH:MM.» y chip «Luego …» si hay otro hoy.
+5. **Siguiente de hoy** (salvo de madrugada): «X en 25 min» o «X a las 17:00», con
+   « · sal a las HH:MM» si la hora de salida ya está calculada.
+6. **Noche** y 7. **Mañana/tarde sin nada pendiente**: la tabla de arriba.
+
+Cuentan como «algo a lo que vas» los eventos de Outlook y las clases, **sin** los de todo
+el día ni los que llevan el marcador de entregas (son plazos, ya tienen su widget).
+
+**Chips secundarios**, detrás del de la frase y nunca más de tres en total: parte de la
+noche con pendientes (`noche`), el sueño de anoche por la mañana (`health_sleep`), lluvia
+≥ 50 % en la jornada objetivo (`weather`) y, de noche, la alarma armada más temprana
+(`alarmas`). No se avisa de «no tienes alarma»: es el estado de casi todos los días.
+
+Reglas que no se deben romper:
+
+- **Nunca afirma sobre una fuente sin cargar.** «No lo sé» y «no hay nada» se dicen
+  distinto: mientras carga la agenda no hay frase, `alarmas === null` no da chip,
+  `parteNoche` `null` o `{}` tampoco, y la salud cargando o `sin_datos` no da chip de
+  sueño (`sin_reloj` sí: es un hecho). **`authNeeded` también lo pone un error de red en
+  `loadEvents`**, así que se trata como «no sé tu agenda», nunca como «día libre».
+- **No hay puntuación de sueño aquí.** El chip dice las horas (`sleepHours`) y nada más:
+  la puntuación del widget lleva los modificadores de recuperación, y una copia en la
+  cabecera acabaría enseñando un número distinto del de abajo.
+- **`departureMap` es de solo lectura.** La hora de salida sale si ya la calculaste en el
+  widget; la cabecera jamás llama a `fetchDeparture` ni a `/maps/departure`, que es
+  Google Maps de pago y se recalcularía cada minuto.
+- **Los chips saltan a `[data-card="…"]`**, no a `#widget-wrap-*`, que solo existe en el
+  modo completo. En modo simple un chip de salud cambia antes la pestaña
+  (`setSimpleHealthTab`) y salta en el frame siguiente. El card destella 1,2 s
+  (`.momento-destello`); con `prefers-reduced-motion` el scroll es instantáneo y el
+  destello es un borde fijo. `destinoDeWidget()` decide si el widget se está pintando: si
+  no (oculto en ⚙, o durante el skeleton), el chip es un `<span>`, no un botón que no hace
+  nada.
+- **`document.title` dice lo siguiente**: «HH:MM · X — Life Assistant», «Ahora · X — …»,
+  «⏰ Alarma — …» o «Life Assistant», y vuelve a este último al desmontar. Así la pestaña
+  en segundo plano sirve de recordatorio.
+- **Una excepción no tumba el dashboard**: `momentoDelDia` va envuelto en `try` y, si algo
+  revienta, devuelve solo el saludo.
+- En móvil la frase va en **una** línea con elipsis (el texto completo queda en `title`) y
+  los chips se desplazan en horizontal dentro de su fila, sin scroll de página.
 
 ### Derivación de datos de salud
 

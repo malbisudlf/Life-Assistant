@@ -58,6 +58,7 @@ import {
   favoritosEfectivos, filtrarCatalogo, escenasYScripts, ACCIONES_POR_DOMINIO, dominioDe,
   etiquetaAccion, CASA_MAX_FAVORITOS,
 } from "../lib/casa";
+import { momentoDelDia, destinoDeWidget } from "../lib/momento";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -896,6 +897,48 @@ function SiguienteCompromiso({ ahora, compromiso, estadoAgenda, clasesFallo, ori
   );
 }
 
+// ── EL MOMENTO DEL DÍA (cabecera) ────────────────────────────────
+// Tonto a propósito: qué decir lo decide `momentoDelDia` (src/lib/momento.js), que es
+// lo que se puede probar. Aquí solo se pinta, y cada chip trae ya si su widget se ve
+// (`visible`) y cómo se llama (`etiqueta`): un chip hacia un widget oculto es un
+// <span>, no un botón que no hace nada al pulsarlo.
+function MomentoDelDia({ momento, onIr }) {
+  const alerta = momento.tono === "alerta";
+  return (
+    <div data-testid="momento" className="header-momento" role="status" aria-live="polite">
+      <div className="momento-texto">
+        <span className="momento-saludo">{momento.saludo}, Mikel</span>
+        {momento.frase && (
+          <span className="momento-frase" title={momento.frase}
+                style={{ color: alerta ? "#d4645a" : "var(--text)" }}>
+            {momento.frase}
+          </span>
+        )}
+      </div>
+      {momento.chips.length > 0 && (
+        <div className="momento-chips">
+          {momento.chips.map(c => {
+            const rojo  = c.tono === "alerta";
+            const style = {
+              background: rojo ? "rgba(212,100,90,0.12)" : "var(--surface2)",
+              border: `0.5px solid ${rojo ? "rgba(212,100,90,0.5)" : "var(--border2)"}`,
+              color: rojo ? "#d4645a" : c.visible ? "var(--text)" : "var(--muted)",
+            };
+            return c.visible ? (
+              <button key={c.id} type="button" className="momento-chip" style={{ ...style, cursor: "pointer" }}
+                      aria-label={`Ir a ${c.etiqueta}`} onClick={() => onIr(c.widget)}>
+                {c.texto}
+              </button>
+            ) : (
+              <span key={c.id} className="momento-chip" style={style}>{c.texto}</span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── JARVIS ───────────────────────────────────────────────────────
 // El componente es tonto a propósito: pinta mensajes y avisa hacia arriba. Toda la
 // decisión (qué herramienta, qué se ejecuta, qué se propone) vive en el backend, para
@@ -1509,10 +1552,31 @@ const GLOBAL_CSS = `
      El foco se marca porque la región es desplazable con el teclado. */
   .la-linea-scroll { scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
   .la-linea-scroll:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  /* El momento del día, bajo el reloj. En escritorio todo en una línea que se parte si
+     no cabe; en móvil (abajo) la frase no se parte nunca y los chips se desplazan. */
+  .header-momento { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; font-family: 'DM Sans', sans-serif; }
+  .momento-texto { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; font-size: 15px; line-height: 1.4; }
+  .momento-saludo { color: var(--muted); white-space: nowrap; }
+  .momento-frase { min-width: 0; }
+  .momento-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .momento-chip { flex-shrink: 0; padding: 6px 12px; border-radius: 999px; font-size: 12px; line-height: 1.3; font-family: 'DM Sans', sans-serif; white-space: nowrap; }
+  button.momento-chip:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+  button.momento-chip:focus-visible { outline: 1px solid var(--accent) !important; outline-offset: 2px; }
+  @keyframes momentoDestello { 0% { box-shadow: 0 0 0 2px var(--accent); } 100% { box-shadow: 0 0 0 2px transparent; } }
+  .momento-destello { animation: momentoDestello 1.2s ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .momento-destello { animation: none; outline: 1px solid var(--accent); }
+  }
   @media (max-width: 640px) {
     .clock { font-size: 42px !important; letter-spacing: -1px !important; }
     .dashboard-root { padding: 12px !important; gap: 12px !important; }
-    .header-greeting { display: none !important; }
+    .header-momento { flex-direction: column; align-items: stretch; gap: 8px; }
+    .momento-texto { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+    .momento-saludo { font-size: 13px; }
+    .momento-frase { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .momento-chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .momento-chips::-webkit-scrollbar { display: none; }
+    .momento-chip { min-height: 32px; display: inline-flex; align-items: center; }
     .timeline-inner { min-width: 280px !important; }
     .widget-wrap { width: 100% !important; }
     .col-left, .col-right { flex: 1 1 0 !important; min-width: 0 !important; }
@@ -5248,8 +5312,60 @@ export default function Dashboard() {
   const hh      = String(now.getHours()).padStart(2, "0");
   const mm      = String(now.getMinutes()).padStart(2, "0");
   const dateStr = `${DAYS_ES[now.getDay()]}, ${now.getDate()} de ${MONTHS_ES[now.getMonth()]} de ${now.getFullYear()}`;
-  const hour    = now.getHours();
-  const greeting = hour < 13 ? "Buenos días" : hour < 20 ? "Buenas tardes" : "Buenas noches";
+
+  // El momento del día (cabecera). Todo sale de lo ya cargado: ni una llamada nueva, y
+  // `departureMap` solo se LEE (la hora de salida es Google Maps de pago y va a demanda).
+  // `now` en las dependencias es lo que la refresca con el tic del minuto, sin intervalo
+  // propio.
+  const momento = useMemo(() => momentoDelDia({
+    ahora: now, eventos: allEvents, clases: classEvents, marcadorEntregas: ENTREGAS_MARKER,
+    cargandoAgenda: loading, sinAgenda: authNeeded, alarmas, parteNoche,
+    healthData, healthCargando: healthLoading, reloj: healthReloj, clima: weather, salidas: departureMap,
+  }), [now, allEvents, classEvents, loading, authNeeded, alarmas, parteNoche, healthData, healthLoading,
+       healthReloj, weather, departureMap]);
+  // Cada chip sabe si su widget se está pintando: durante la carga inicial no hay
+  // ninguno (está el skeleton), y un widget oculto en ⚙ no es destino.
+  const momentoVista = useMemo(() => ({
+    ...momento,
+    chips: momento.chips.map(c => ({
+      ...c,
+      visible:  !loading && destinoDeWidget(c.widget, { simpleMode, widgetConfig, simpleWidgetConfig, pestanasSalud: HEALTH_TAB_LABELS }).visible,
+      etiqueta: ALL_DEFAULT_WIDGETS.find(w => w.id === c.widget)?.label || c.widget,
+    })),
+  }), [momento, loading, simpleMode, widgetConfig, simpleWidgetConfig]);
+  useEffect(() => {
+    document.title = momento.titulo;
+    return () => { document.title = "Life Assistant"; };
+  }, [momento.titulo]);
+
+  // Salto desde un chip al card de su widget. Se busca por `data-card`, que existe en
+  // los dos modos (`#widget-wrap-*` solo en el completo). En modo simple la salud va en
+  // pestañas: primero se cambia la pestaña y el salto espera al siguiente frame, cuando
+  // el card ya está pintado.
+  const destelloRef = useRef(null);
+  useEffect(() => () => clearTimeout(destelloRef.current?.t), []);
+  function irAWidget(id) {
+    const destino = destinoDeWidget(id, { simpleMode, widgetConfig, simpleWidgetConfig, pestanasSalud: HEALTH_TAB_LABELS });
+    if (!destino.visible) return;
+    if (destino.pestanaSalud) setSimpleHealthTab(destino.pestanaSalud);
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`[data-card="${id}"]`);
+      if (!card) return;
+      let reducir = false;
+      try { reducir = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { /* sin matchMedia: con animación */ }
+      card.scrollIntoView({ behavior: reducir ? "auto" : "smooth", block: "start" });
+      // Un segundo toque antes de que acabe el destello lo reinicia en vez de dejar la
+      // clase puesta en un card y el temporizador apuntando a otro.
+      if (destelloRef.current) {
+        clearTimeout(destelloRef.current.t);
+        destelloRef.current.el.classList.remove("momento-destello");
+        void card.offsetWidth;
+      }
+      card.classList.add("momento-destello");
+      const t = setTimeout(() => { card.classList.remove("momento-destello"); destelloRef.current = null; }, 1200);
+      destelloRef.current = { el: card, t };
+    });
+  }
 
   const isAgentOnline = agentState?.status === "online" && !agentState?.offline;
 
@@ -8200,17 +8316,14 @@ export default function Dashboard() {
       {/* ── DASHBOARD PRINCIPAL ── */}
       <div style={s.dashboard} className="dashboard-root">
 
-        {/* HEADER */}
+        {/* HEADER: reloj, fecha y controles; debajo, el momento del día */}
+        <div style={s.headerBloque}>
         <div style={s.header}>
           <div>
             <div style={s.clock} className="clock">{hh}:{mm}</div>
             <div style={s.date}>{dateStr}</div>
           </div>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
-            <div style={s.greeting} className="header-greeting">
-              {greeting}
-              <strong style={s.greetingStrong}>Mikel</strong>
-            </div>
             <div className="header-controls" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {/* La zona dev, en una esquinita y sin llamar la atención: se entra a
                   diario mientras se desarrolla y nunca durante el uso normal. */}
@@ -8232,6 +8345,8 @@ export default function Dashboard() {
               }} title="Ajustes de widgets" aria-label="Ajustes">⚙</button>
             </div>
           </div>
+        </div>
+        <MomentoDelDia momento={momentoVista} onIr={irAWidget} />
         </div>
 
         {/* CONTENIDO: skeleton mientras carga · modo simplificado · grid completo */}
@@ -9418,11 +9533,10 @@ export default function Dashboard() {
 // ── ESTILOS ───────────────────────────────────────────────────────
 const s = {
   dashboard: { display: "flex", flexDirection: "column", minHeight: "100vh", padding: 20, gap: 16, background: "var(--bg)" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", paddingBottom: 16, borderBottom: "0.5px solid var(--border)" },
+  headerBloque: { display: "flex", flexDirection: "column", gap: 12, paddingBottom: 16, borderBottom: "0.5px solid var(--border)", minWidth: 0 },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end" },
   clock: { fontFamily: "'DM Mono', monospace", fontSize: 56, fontWeight: 400, letterSpacing: -2, color: "var(--text)", lineHeight: 1 },
   date: { fontSize: 15, color: "var(--muted)", marginTop: 4, letterSpacing: "0.05em", textTransform: "uppercase" },
-  greeting: { fontSize: 15, color: "var(--muted)", textAlign: "right", fontFamily: "'DM Sans', sans-serif" },
-  greetingStrong: { display: "block", fontSize: 19, color: "var(--accent)", fontWeight: 500, marginTop: 2 },
   card: { background: "var(--surface)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 20px", boxSizing: "border-box", width: "100%" },
   sectionLabel: { fontSize: 12, fontWeight: 500, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted2)", marginBottom: 12 },
   timelineWrapper: { overflowX: "auto", paddingBottom: 4 },

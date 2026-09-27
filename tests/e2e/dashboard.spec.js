@@ -54,6 +54,11 @@ test('login y carga del dashboard con datos del backend', async ({ page }) => {
   await expect(siguiente).toContainText('Sal a las', { timeout: 15_000 })
   await expect(siguiente).not.toContainText('undefined')
 
+  // La cabecera dice qué toca. El evento simulado empieza dentro de dos horas: según la
+  // hora a la que corra esto sale como «… a las HH:MM» o «Mañana empiezas… con …», pero
+  // su título sale siempre.
+  await expect(page.getByTestId('momento')).toContainText('Evento de prueba E2E')
+
   expect(page.erroresDeNavegador).toEqual([])
 })
 
@@ -85,6 +90,9 @@ test('el dashboard se pinta también en móvil', async ({ page }) => {
   await entrar(page)
 
   await expect(page.locator('[data-card]').first()).toBeVisible()
+  // La cabecera con el momento del día también se ve en móvil (y no desborda: lo mira
+  // la comprobación de abajo).
+  await expect(page.getByTestId('momento')).toBeVisible()
   // Nada debe desbordar a lo ancho: el scroll horizontal en móvil es un bug visible.
   const desborda = await page.evaluate(
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
