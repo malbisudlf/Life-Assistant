@@ -48,6 +48,9 @@ class TestQueEsDeRedYQueEsDeCodigo:
         "socket.gaierror: [Errno -3] Temporary failure in name resolution",
         "ssl.SSLError: handshake operation timed out",
         DNS_CAIDO,
+        # El servidor de correo que corta o no deja entrar (#244): pasa solo.
+        "Resumen diario: fallo al enviarlo por hora tope (SMTPServerDisconnected)",
+        "Resumen diario: fallo al enviarlo por hora tope (SMTPConnectError 421)",
     ])
     def test_lo_que_es_de_red(self, mensaje):
         assert main._error_de_red(mensaje) is True
@@ -175,6 +178,34 @@ class TestAveriasDeRed:
         texto = self._aviso(mock_requests)["texto"]
         assert "de red o de terceros" in texto
         assert "Fallo hablando con Supabase" in texto, "la lista de errores no ha cabido"
+
+    # ── Una credencial rechazada (#244) ──────────────────────────────────────
+    CREDENCIAL = ("Resumen diario: fallo al enviarlo por hora tope (SMTPAuthenticationError 535)\n"
+                  "Traceback (most recent call last):\n"
+                  '  File "main.py", line 8298, in enviar_correo\n'
+                  "smtplib.SMTPAuthenticationError: (535, b'5.7.8 Username and Password "
+                  "not accepted.')")
+
+    def test_una_credencial_rechazada_no_es_red_ni_codigo(self):
+        assert main._error_de_servicio(self.CREDENCIAL) is True
+        assert main._error_de_servicio(DNS_CAIDO) is False
+        assert main._error_de_servicio("KeyError: 'sueno'") is False
+
+    def test_una_credencial_rechazada_avisa_sin_issue_ni_boton(self, mock_requests,
+                                                               issues_abiertos):
+        """#244 lo abrió el vigilante como «cambio de código», y ninguna sesión arregla
+        una contraseña de aplicación revocada. Pero tampoco es un timeout suelto: no pasa
+        sola, así que se avisa con el listón de los errores de código y no con el de red
+        (con 25, y ahora que el correo deja de insistir, no se enteraría nadie)."""
+        self._errores(mock_requests, [(self.CREDENCIAL, 4)])
+        r = main._vigilar_sistema()
+        assert r["aviso_vigilante"] is True
+        assert issues_abiertos == []
+        aviso = self._aviso(mock_requests)
+        assert aviso["regla"] == main.REGLA_VIGILANTE_SOLO
+        assert "credencial" in aviso["texto"] and "no es código" in aviso["texto"]
+        assert "SMTPAuthenticationError" in aviso["texto"]
+        assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
 
     # ── Que el código siga como estaba ───────────────────────────────────────
     def test_un_error_de_codigo_repetido_sigue_abriendo_su_issue(self, mock_requests,

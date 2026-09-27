@@ -3,6 +3,28 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Gmail rechazó la contraseña y el correo de la mañana lo intentó cada cinco minutos
+  todo el día (#244, 2026-09-27).** A la hora tope, `ha_brief_tick` montaba el correo
+  entero —Graph, Supabase, clima, titulares— para fallar en el `login` con un 535, y
+  volvía a empezar en el tick siguiente: nueve `SMTPAuthenticationError` en un día. El
+  vigilante lo abrió como issue de «cambio de código», porque no sabía que un rechazo de
+  credencial no lo arregla ninguna sesión. Y detrás había dos fallos más que no se veían
+  porque el SMTP nunca había estado caído mucho rato: la hora tope **olvidaba la espera
+  antes de intentar el envío** (si fallaba, el siguiente tick lo mandaba como «tope», sin
+  hora de despertar), y la señal de despertar con la noche ya sincronizada **no dejaba
+  nada que reintentar**: un fallo en ese minuto esperaba a las diez.
+  - Arreglo: `_fallo_de_correo` distingue credencial, conexión y rechazo; tras un rechazo
+    de credencial lo automático deja de intentarlo (`_correo_espera`, 30 min que se doblan
+    hasta 4 h) y lo pedido a mano no espera. `_causa` añade el código SMTP. El vigilante
+    trata los cortes SMTP como red y la credencial rechazada como una clase propia: aviso
+    con el listón de código, sin issue ni botón. La espera se olvida solo cuando el envío
+    fue definitivo, y la señal directa deja una apuntada si falla. Ver «Cuando el envío
+    falla» en `docs/BRIEF.md`.
+  - Moralejas: **reintentar solo lo que puede salir distinto**: un corte de conexión sí,
+    una contraseña revocada no, y confundirlos es martillear la puerta que luego se cierra
+    también a la buena. Y **no borres el estado antes de saber si la acción salió**:
+    «olvidar y luego intentar» es correcto justo hasta el primer fallo.
+
 - **Jarvis llamó a las 07:00 con Mikel dormido, y el buzón contó como cogida
   (2026-09-27).** La web estuvo caída de 03:30 a 11:33 (reinicio semanal de `caja`: túnel
   parado y contenedores sin DNS). El vigilante aplazó la llamada por la franja nocturna y

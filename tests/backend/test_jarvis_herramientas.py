@@ -239,7 +239,11 @@ class TestEnviarResumenHerramienta:
         monkeypatch.setattr(main, "construir_brief", lambda: {"fecha": "2026-08-17"})
         monkeypatch.setattr(main, "render_brief_texto", lambda d: "cuerpo del día")
         monkeypatch.setattr(main, "enviar_correo",
-                            lambda asunto, cuerpo: enviados.append((asunto, cuerpo)))
+                            lambda asunto, cuerpo, adjunto=None:
+                            enviados.append((asunto, cuerpo, adjunto)))
         r = main._j_enviar_resumen()
         assert r["ok"] is True and r["fecha"] == "2026-08-17"
-        assert enviados == [("Life Assistant — datos del 2026-08-17", "cuerpo del día")]
+        assert [e[:2] for e in enviados] == [("Life Assistant — datos del 2026-08-17",
+                                              "cuerpo del día")]
+        # El mismo correo que sale cada mañana, con su JSON adjunto (#244).
+        assert enviados[0][2][0] == "brief-2026-08-17.json"

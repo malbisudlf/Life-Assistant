@@ -283,7 +283,8 @@ class TestFalloConNombre:
             r = client.post(ruta)
         assert r.status_code == 502
         primeras = [main._firma_error(x.getMessage()) for x in caplog.records]
-        assert f"{mensaje} (SMTPAuthenticationError)" in primeras
+        # El código SMTP va detrás del tipo (#244); la firma lo convierte en `#`.
+        assert f"{mensaje} (SMTPAuthenticationError #)" in primeras
 
     def test_la_primera_linea_no_lleva_el_mensaje(self, client, mock_requests, graph_token,
                                                   monkeypatch, caplog):
@@ -496,6 +497,273 @@ class TestDisparoDeLaRutina:
         assert "unsupported beta header" in registrado
         assert main.RUTINA_BETA in registrado, "hay que poder ver con qué beta se llamó"
         assert "sk-ant-oat01-secreto" not in registrado, "el token no se registra"
+
+
+class _SMTPQueFalla(_SMTPFalso):
+    """El servidor de verdad hasta el login, que falla como diga el test.
+
+    Se usa el `enviar_correo` real y no uno sustituido porque lo que se prueba vive
+    dentro: es ahí donde un 535 deja apuntada la espera y un envío bueno la levanta.
+    """
+    fallo = None
+    intentos = 0
+
+    def login(self, user, password):
+        type(self).intentos += 1
+        if type(self).fallo is not None:
+            raise type(self).fallo
+        super().login(user, password)
+
+
+def smtp_que_falla(monkeypatch, fallo):
+    """Cambia el SMTP de mentira por uno que falla en el login. `fallo=None` lo arregla."""
+    _SMTPQueFalla.fallo = fallo
+    _SMTPQueFalla.intentos = 0
+    monkeypatch.setattr(main.smtplib, "SMTP", _SMTPQueFalla)
+    return _SMTPQueFalla
+
+
+def _credencial_rechazada():
+    import smtplib
+    return smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+
+def _servidor_cortado():
+    import smtplib
+    return smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+
+class TestFalloDelCorreo:
+    """#244: Gmail rechazaba la contraseña de aplicación (535) y el tick de la hora tope
+    montaba el correo entero —Graph, Supabase, clima, titulares— para fallar en el login,
+    cada cinco minutos, el día entero. Ninguna sesión arregla una contraseña: lo que
+    toca es decirlo con el código y dejar de insistir. Y un corte de conexión es otra
+    cosa, que pasa sola y sí merece el reintento del tick siguiente.
+
+    Son los cuatro caminos por los que sale el correo solo: la hora tope, la señal de
+    despertar con la noche ya sincronizada, la llegada del sueño y el tick que vigila la
+    espera. Los cuatro tienen que sobrevivir a un fallo del SMTP sin perder nada.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _sin_espera_del_correo(self):
+        main._levantar_espera_correo()
+        yield
+        main._levantar_espera_correo()
+
+    # ── Qué clase de fallo es ─────────────────────────────────────────────────
+    def test_distingue_credencial_de_conexion(self):
+        import smtplib
+        assert main._fallo_de_correo(_credencial_rechazada()) == "credencial"
+        assert main._fallo_de_correo(_servidor_cortado()) == "conexion"
+        assert main._fallo_de_correo(smtplib.SMTPConnectError(421, b"ocupado")) == "conexion"
+        assert main._fallo_de_correo(TimeoutError("timed out")) == "conexion"
+        assert main._fallo_de_correo(ConnectionRefusedError()) == "conexion"
+        assert main._fallo_de_correo(
+            smtplib.SMTPRecipientsRefused({"yo@test": (550, b"no existe")})) == "rechazo"
+        assert main._fallo_de_correo(ValueError("otra cosa")) is None
+
+    def test_el_registro_dice_el_codigo_que_devolvio_el_servidor(
+            self, client, mock_requests, graph_token, monkeypatch, caplog):
+        """Un 535 es la contraseña; un 534 pide contraseña de aplicación; un 454 es que
+        Gmail se ha cansado de intentos. Sin el código, las tres son el mismo tipo."""
+        preparar(mock_requests, monkeypatch)
+        smtp_que_falla(monkeypatch, _credencial_rechazada())
+        reloj(monkeypatch, 10, 0)
+
+        with caplog.at_level("ERROR"):
+            assert client.post("/ha/brief-tick?token=ha-poll-token").status_code == 502
+        primeras = [x.getMessage().split("\n")[0] for x in caplog.records]
+        assert "Resumen diario: fallo al enviarlo por hora tope (SMTPAuthenticationError 535)" \
+            in primeras
+
+    # ── 1. La hora tope ───────────────────────────────────────────────────────
+    def test_tras_un_535_la_hora_tope_deja_de_insistir(
+            self, client, mock_requests, graph_token, monkeypatch):
+        estado = preparar(mock_requests, monkeypatch)
+        smtp = smtp_que_falla(monkeypatch, _credencial_rechazada())
+        reloj(monkeypatch, 10, 0)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").status_code == 502
+        assert smtp.intentos == 1
+        assert estado["reservado"] is False, "la reserva se libera, como siempre"
+        reservas = len(mock_requests.called("POST", "/rest/v1/brief_envios"))
+
+        # Cinco minutos después: ni se monta el correo ni se llama a la puerta de Gmail.
+        reloj(monkeypatch, 10, 5)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert r.status_code == 200
+        assert r.json()["enviado"] is False
+        assert "credencial" in r.json()["motivo"]
+        assert smtp.intentos == 1
+        assert len(mock_requests.called("POST", "/rest/v1/brief_envios")) == reservas
+
+        # Pasada la espera se vuelve a intentar, y cada fallo seguido la alarga.
+        reloj(monkeypatch, 10, 31)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").status_code == 502
+        assert smtp.intentos == 2
+        reloj(monkeypatch, 11, 0)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is False
+        assert smtp.intentos == 2
+
+        # Arreglada la contraseña, sale en cuanto vence la espera.
+        smtp.fallo = None
+        reloj(monkeypatch, 11, 35)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is True
+        assert len(_SMTPFalso.enviados) == 1
+
+    def test_un_corte_de_conexion_se_reintenta_en_el_tick_siguiente(
+            self, client, mock_requests, graph_token, monkeypatch):
+        preparar(mock_requests, monkeypatch)
+        smtp = smtp_que_falla(monkeypatch, _servidor_cortado())
+        reloj(monkeypatch, 10, 0)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").status_code == 502
+
+        smtp.fallo = None
+        reloj(monkeypatch, 10, 5)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is True
+        assert smtp.intentos == 2
+
+    def test_si_la_hora_tope_falla_no_olvida_a_que_hora_te_levantaste(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """La espera se olvidaba ANTES de intentar el envío: si fallaba, el tick
+        siguiente lo mandaba como «tope», sin hora de despertar, y en `brief_envios` ya
+        no había forma de saber que esa mañana sí hubo señal."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        reloj(monkeypatch, 7, 15)
+        client.post("/despertar?token=brief-token&fuente=cargador")
+
+        smtp = smtp_que_falla(monkeypatch, _servidor_cortado())
+        reloj(monkeypatch, 10, 0)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").status_code == 502
+        assert main._despertar_esperado(_a_las(10, 0)) == _a_las(7, 15)
+
+        smtp.fallo = None
+        reloj(monkeypatch, 10, 5)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is True
+        fila = mock_requests.called("POST", "/rest/v1/brief_envios")[-1][2]["json"][0]
+        assert fila["fuente"] == "espera_agotada"
+        assert fila["despertar_at"][:16] == \
+            _a_las(7, 15).astimezone(main.timezone.utc).isoformat()[:16]
+        assert main._despertar_esperado(_a_las(10, 5)) is None
+
+    # ── 2. La señal de despertar con la noche ya sincronizada ─────────────────
+    def test_si_la_senal_directa_falla_el_tick_la_reintenta(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Con la noche ya en Salud la señal manda el correo en el acto. Si ese envío
+        fallaba, nadie lo volvía a intentar hasta las diez: no quedaba espera apuntada
+        que el tick pudiera ver."""
+        sueno_de_hoy(mock_requests, True)
+        preparar(mock_requests, monkeypatch)
+        smtp = smtp_que_falla(monkeypatch, _servidor_cortado())
+        reloj(monkeypatch, 7, 15)
+        assert client.post("/despertar?token=brief-token&fuente=cargador").status_code == 502
+
+        smtp.fallo = None
+        reloj(monkeypatch, 7, 20)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert r.json()["enviado"] is True
+        fila = mock_requests.called("POST", "/rest/v1/brief_envios")[-1][2]["json"][0]
+        assert fila["despertar_at"][:16] == \
+            _a_las(7, 15).astimezone(main.timezone.utc).isoformat()[:16]
+
+    # ── 3 y 4. El tick que vigila la espera, y la llegada del sueño ───────────
+    def test_durante_la_espera_del_correo_la_espera_al_sueno_sigue_viva(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """El tick y la ingesta olvidaban la espera en cuanto el envío VOLVÍA, saliera o
+        no. Con el correo esperando a que venza el 535, eso perdía la hora a la que te
+        levantaste y dejaba el resto del día a la hora tope."""
+        sueno_de_hoy(mock_requests, True)
+        preparar(mock_requests, monkeypatch)
+        smtp = smtp_que_falla(monkeypatch, _credencial_rechazada())
+        reloj(monkeypatch, 7, 15)
+        assert client.post("/despertar?token=brief-token&fuente=cargador").status_code == 502
+        assert smtp.intentos == 1
+
+        # El tick ve la noche guardada, pero el correo está esperando: no lo intenta.
+        reloj(monkeypatch, 7, 20)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is False
+        assert smtp.intentos == 1
+        assert main._despertar_esperado(_a_las(7, 20)) == _a_las(7, 15)
+
+        # Y la ingesta del sueño, lo mismo.
+        hoy = datetime.now(main.LOCAL_TZ).date().isoformat()
+        client.post("/health/ingest/simple?token=health-token",
+                    json={"metric": "sleep_analysis", "date": hoy, "value": 7.8,
+                          "unit": "hr", "extra": {}})
+        assert smtp.intentos == 1
+        assert main._despertar_esperado(_a_las(7, 20)) == _a_las(7, 15)
+
+        # Vencida la espera, el tick lo manda con la hora buena.
+        smtp.fallo = None
+        reloj(monkeypatch, 7, 50)
+        assert client.post("/ha/brief-tick?token=ha-poll-token").json()["enviado"] is True
+        fila = mock_requests.called("POST", "/rest/v1/brief_envios")[-1][2]["json"][0]
+        assert fila["despertar_at"][:16] == \
+            _a_las(7, 15).astimezone(main.timezone.utc).isoformat()[:16]
+
+    # ── Lo que se pide a mano ─────────────────────────────────────────────────
+    def test_el_envio_forzado_no_espera_y_un_envio_bueno_levanta_la_espera(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """Pedirlo a mano es cómo se prueba la contraseña nueva: esperar ahí sería
+        contestar «no» a quien acaba de arreglarlo."""
+        preparar(mock_requests, monkeypatch)
+        smtp = smtp_que_falla(monkeypatch, _credencial_rechazada())
+        reloj(monkeypatch, 10, 0)
+        client.post("/ha/brief-tick?token=ha-poll-token")
+        assert main._espera_correo() is not None
+
+        smtp.fallo = None
+        reloj(monkeypatch, 10, 2)
+        assert client.post("/brief/send?token=brief-token&forzar=1").json()["enviado"] is True
+        assert smtp.intentos == 2
+        assert main._espera_correo() is None
+
+    def test_el_envio_forzado_lleva_el_adjunto(self, client, mock_requests, graph_token,
+                                               monkeypatch):
+        """El forzado es cómo se prueba el correo, y se probaba uno distinto del que sale
+        cada mañana: sin el JSON adjunto."""
+        preparar(mock_requests, monkeypatch, ya_enviado=True)
+        reloj(monkeypatch, 7, 15)
+        client.post("/brief/send?token=brief-token&forzar=1")
+        adjuntos = list(_SMTPFalso.enviados[0].iter_attachments())
+        assert len(adjuntos) == 1 and adjuntos[0].get_filename().startswith("brief-")
+
+    # ── Los otros dos que mandan correo solos ─────────────────────────────────
+    def test_el_informe_y_el_rescate_esperan_y_no_escriben_el_mensaje(
+            self, client, mock_requests, monkeypatch, caplog):
+        """Su registro llevaba `str(e)`: el mensaje de un rechazo SMTP puede traer una
+        dirección, y esa línea acaba en un issue público."""
+        import smtplib
+        configurar_smtp(monkeypatch)
+        monkeypatch.setattr(main, "INFORME_SEMANAL", True)
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 16, 12, 0, tzinfo=main.LOCAL_TZ))
+        mock_requests.add("POST", "/rest/v1/informe_envios", FakeResponse([], 201))
+        mock_requests.add("DELETE", "/rest/v1/informe_envios", FakeResponse([], 204))
+        monkeypatch.setattr(main, "construir_informe_semanal", lambda d: {"fecha": str(d)})
+        monkeypatch.setattr(main, "render_informe_texto", lambda d: "informe")
+
+        def _rechaza(*_a, **_k):
+            raise smtplib.SMTPRecipientsRefused({"yo@test": (550, b"5.1.1 no existe")})
+        monkeypatch.setattr(main, "enviar_correo", _rechaza)
+        main._avisos_movil.append({"titulo": "t", "texto": "x", "puesto": 0.0})
+
+        with caplog.at_level("ERROR"):
+            main._enviar_informe_si_toca()
+            main._rescatar_avisos()
+        lineas = [x.getMessage() for x in caplog.records]
+        assert any("Informe semanal" in x and "SMTPRecipientsRefused" in x for x in lineas)
+        assert any("Avisos" in x and "SMTPRecipientsRefused" in x for x in lineas)
+        assert not any("yo@test" in x for x in lineas)
+
+        # Con el correo esperando tras un 535, ni reservan el domingo ni tocan la cola.
+        main._apuntar_espera_correo(535)
+        reservas = len(mock_requests.called("POST", "/rest/v1/informe_envios"))
+        assert main._enviar_informe_si_toca() == {}
+        assert main._rescatar_avisos() == {}
+        assert len(mock_requests.called("POST", "/rest/v1/informe_envios")) == reservas
+        assert len(main._avisos_movil) == 1
 
 
 class TestRespaldoDeActions:

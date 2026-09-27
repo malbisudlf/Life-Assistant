@@ -317,6 +317,10 @@ SMTP_HOST     = os.getenv("SMTP_HOST", "")
 SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+# Cuánto deja de intentarlo lo automático cuando el servidor rechaza la credencial
+# (`_apuntar_espera_correo`): se dobla con cada rechazo seguido, hasta el techo.
+CORREO_ESPERA_CREDENCIAL_MIN     = int(os.getenv("CORREO_ESPERA_CREDENCIAL_MIN", "30"))
+CORREO_ESPERA_CREDENCIAL_MAX_MIN = int(os.getenv("CORREO_ESPERA_CREDENCIAL_MAX_MIN", "240"))
 # Marcador que convierte un evento en "entrega". Debe coincidir con
 # VITE_ENTREGAS_MARKER del frontend: el backend no ve las variables VITE_*.
 ENTREGAS_MARKER     = os.getenv("ENTREGAS_MARKER", "📚")
@@ -7405,8 +7409,13 @@ def _causa(e: BaseException) -> str:
     rechaza la contraseña de una sección rota, y el traceback que sí lo decía solo estaba
     en `app_logs`, que no ven ni el aviso ni la sesión que lo arregla. Solo el tipo y no
     el mensaje, porque esa línea acaba en un issue de un repositorio PÚBLICO y el mensaje
-    puede traer un correo o un host; el mensaje entero sigue en el traceback."""
-    return type(e).__name__
+    puede traer un correo o un host; el mensaje entero sigue en el traceback.
+
+    Con el código SMTP detrás cuando lo hay (#244): un 535 es la contraseña, un 534 pide
+    contraseña de aplicación y un 454 es Gmail harto de intentos, y las tres son el mismo
+    `SMTPAuthenticationError`. El código es un número y no dice nada de nadie."""
+    codigo = getattr(e, "smtp_code", None)
+    return f"{type(e).__name__} {codigo}" if isinstance(codigo, int) else type(e).__name__
 
 
 def _seccion_del_pool(futuro, nombre: str, caidas: list) -> dict:
@@ -8220,6 +8229,10 @@ def _enviar_informe_si_toca(forzar: bool = False) -> dict:
             return {}
         if (ahora.hour, ahora.minute) < HORA_INFORME:
             return {}
+        # Tras un rechazo de la credencial ni se reserva el domingo: el login iba a fallar
+        # igual, y el tick lo reintenta cuando venza la espera (#244).
+        if _espera_correo():
+            return {}
     fecha = ahora.date().isoformat()
 
     r = http.post(
@@ -8242,7 +8255,10 @@ def _enviar_informe_si_toca(forzar: bool = False) -> dict:
                      json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
         )
     except Exception as e:
-        logger.error("Informe semanal: fallo al enviarlo (%s); se libera la reserva", e)
+        # El tipo y no el mensaje, como en el resumen (`_causa`): el de un rechazo SMTP
+        # puede traer una dirección y esta línea acaba en un issue público.
+        logger.error("Informe semanal: fallo al enviarlo (%s); se libera la reserva",
+                     _causa(e))
         try:
             http.delete(f"{INFORME_ENVIOS_URL}?fecha=eq.{fecha}",
                         headers={**supabase_headers(), "Prefer": "return=minimal"})
@@ -8263,6 +8279,86 @@ def _informe_semanal_seguro() -> dict:
         return {}
 
 
+# ── Cuando el servidor de correo dice que no ──────────────────────────────────
+# El 2026-09-27 Gmail rechazó la contraseña de aplicación (535) y el tick de la hora tope
+# montó el correo entero —Graph, Supabase, clima, titulares— para fallar en el login,
+# cada cinco minutos y el día entero (#244). Un fallo de envío no es siempre lo mismo:
+#   - «credencial»: el servidor no deja entrar. No se arregla sola ni tocando código, y
+#     llamar a la puerta cada cinco minutos con la contraseña mala es justo lo que hace
+#     que Gmail conteste luego 454 («demasiados intentos») también a la buena. Tras un
+#     rechazo, lo AUTOMÁTICO deja de intentarlo un rato que se dobla con cada rechazo
+#     seguido (`CORREO_ESPERA_CREDENCIAL_MIN` → `_MAX_MIN`).
+#   - «conexion»: no se pudo hablar con el servidor o cortó a medias. Pasa sola, y el
+#     reintento de cinco minutos del tick es lo que toca.
+#   - «rechazo»: habló pero no aceptó el mensaje (destinatario, remitente, datos).
+#
+# La espera vive en memoria a propósito: cambiar la contraseña en el `backend.env` de
+# `caja` obliga a recrear el contenedor, así que arreglarla ya la borra. Y no la mira
+# quien pide el correo a mano (`?forzar=1`, Jarvis): así es como se prueba la contraseña
+# nueva, y esperar ahí sería decirle «no» a quien acaba de arreglarla. Un envío bueno,
+# venga de donde venga, la levanta.
+_correo_espera: dict | None = None      # {"hasta", "codigo", "veces"}
+_correo_espera_lock = threading.Lock()
+
+
+def _fallo_de_correo(e: BaseException) -> str | None:
+    """«credencial», «conexion», «rechazo» o «smtp» si el fallo es del envío; si no, None.
+
+    El orden importa: en Python 3 `SMTPException` hereda de `OSError`, así que mirar
+    primero lo genérico de red se tragaría el rechazo de la contraseña.
+    """
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        return "credencial"
+    if isinstance(e, (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError)):
+        return "conexion"
+    if isinstance(e, (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+                      smtplib.SMTPDataError)):
+        return "rechazo"
+    if isinstance(e, smtplib.SMTPException):
+        return "smtp"
+    if isinstance(e, OSError):          # timeouts, conexión rechazada, DNS, TLS
+        return "conexion"
+    return None
+
+
+def _espera_correo() -> dict | None:
+    """La espera tras un rechazo de credencial, si sigue en pie; si no, None."""
+    with _correo_espera_lock:
+        e = _correo_espera
+        if e and _ahora_local() < e["hasta"]:
+            return dict(e)
+    return None
+
+
+def _apuntar_espera_correo(codigo) -> None:
+    """El servidor ha rechazado la credencial: lo automático no vuelve hasta dentro de un
+    rato, el doble que la vez anterior si la anterior tampoco entró."""
+    global _correo_espera
+    ahora = _ahora_local()
+    with _correo_espera_lock:
+        veces   = min(((_correo_espera or {}).get("veces") or 0) + 1, 16)
+        minutos = min(CORREO_ESPERA_CREDENCIAL_MIN * 2 ** (veces - 1),
+                      CORREO_ESPERA_CREDENCIAL_MAX_MIN)
+        hasta   = ahora + timedelta(minutes=minutos)
+        _correo_espera = {"hasta": hasta, "codigo": codigo, "veces": veces}
+    logger.warning("Correo: el servidor SMTP rechaza la credencial (%s). Lo automático no "
+                   "vuelve a intentarlo hasta las %02d:%02d: revisa SMTP_PASSWORD",
+                   codigo if codigo is not None else "sin código", hasta.hour, hasta.minute)
+
+
+def _levantar_espera_correo() -> None:
+    global _correo_espera
+    with _correo_espera_lock:
+        _correo_espera = None
+
+
+def _motivo_espera_correo(espera: dict) -> str:
+    codigo = espera.get("codigo")
+    return (f"el servidor de correo rechazó la credencial"
+            f"{f' (SMTP {codigo})' if codigo is not None else ''}; no se reintenta solo "
+            f"hasta las {espera['hasta'].hour:02d}:{espera['hasta'].minute:02d}")
+
+
 def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     """Envía por SMTP con la librería estándar: no hace falta ninguna dependencia
     nueva ni una cuenta en un servicio de envío. Con Gmail, usa una contraseña de
@@ -8272,6 +8368,10 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     texto lo tiene que poder leer un modelo Y una persona, y esa doble función le pone
     un techo —lo que solo le sirve a la máquina se queda fuera para no ensuciar la
     lectura—. Con el adjunto no hay que elegir.
+
+    No mira la espera tras un rechazo de credencial: la miran los envíos automáticos
+    antes de montar nada (el correo entero cuesta más que el login). Aquí solo se apunta
+    si el servidor la rechaza, y se levanta si deja entrar.
     """
     faltan = [n for n, v in (
         ("SMTP_HOST", SMTP_HOST), ("SMTP_USER", SMTP_USER),
@@ -8293,15 +8393,37 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     # 465 abre TLS desde el principio (SMTPS); 587 empieza en claro y sube con
     # STARTTLS. Gmail acepta los dos. Con timeout: sin él, un SMTP que no responde
     # retiene el hilo igual que una llamada HTTP colgada.
-    if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
-            smtp.login(SMTP_USER, SMTP_PASSWORD)
-            smtp.send_message(msg)
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
-            smtp.starttls()
-            smtp.login(SMTP_USER, SMTP_PASSWORD)
-            smtp.send_message(msg)
+    try:
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
+                smtp.login(SMTP_USER, SMTP_PASSWORD)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=HTTP_TIMEOUT) as smtp:
+                smtp.starttls()
+                smtp.login(SMTP_USER, SMTP_PASSWORD)
+                smtp.send_message(msg)
+    except Exception as e:
+        if _fallo_de_correo(e) == "credencial":
+            _apuntar_espera_correo(getattr(e, "smtp_code", None))
+        raise
+    _levantar_espera_correo()
+
+
+def _mandar_brief(datos: dict) -> None:
+    """El correo del resumen tal y como sale cada mañana: el texto y el JSON adjunto.
+
+    Lo usan los tres caminos que lo mandan —el automático, `?forzar=1` y Jarvis—. El
+    forzado es como se prueba el correo, y se estaba probando uno distinto del de cada
+    mañana: sin el adjunto. El texto lo tiene que poder leer una persona y eso le pone un
+    techo a lo que cabe; el adjunto lleva lo mismo para quien lo procese.
+    """
+    enviar_correo(
+        f"Life Assistant — datos del {datos['fecha']}",
+        render_brief_texto(datos),
+        adjunto=(f"brief-{datos['fecha']}.json",
+                 json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
+    )
 
 
 # ── DESPERTAR: CUÁNDO SALE EL RESUMEN ─────────────────────────────────────────
@@ -8756,19 +8878,21 @@ def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> d
     if estado["motivo"]:
         return {"enviado": False, "motivo": estado["motivo"]}
 
+    # Tras un rechazo de la credencial, ni se reserva ni se monta el correo: montarlo
+    # cuesta Graph, Supabase, clima y titulares, y el login iba a fallar igual (#244).
+    # `reintento` es lo que dice a quien llama que esto NO es definitivo: la espera al
+    # sueño se tiene que quedar viva, o se pierde la hora a la que te levantaste.
+    espera = _espera_correo()
+    if espera:
+        return {"enviado": False, "motivo": _motivo_espera_correo(espera),
+                "reintento": f"{espera['hasta'].hour:02d}:{espera['hasta'].minute:02d}"}
+
     if not _reservar_envio(fecha, fuente, despertar):
         return {"enviado": False, "motivo": "el resumen de hoy ya se envió"}
 
     try:
         datos = construir_brief()
-        # El JSON va adjunto además del texto: el texto lo tiene que poder leer una
-        # persona, y eso le pone un techo a lo que cabe dentro. Así no hay que elegir.
-        enviar_correo(
-            f"Life Assistant — datos del {datos['fecha']}",
-            render_brief_texto(datos),
-            adjunto=(f"brief-{datos['fecha']}.json",
-                     json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
-        )
+        _mandar_brief(datos)
     except Exception:
         _liberar_envio(fecha)
         raise
@@ -9002,17 +9126,29 @@ def _vigilar_espera_sueno() -> dict:
     desde = _despertar_esperado(ahora)
     if desde is None:
         return {}
+    # Desde la hora tope manda ella, con lo que haya. Si la espera sigue viva a estas
+    # horas es porque el envío de la hora tope falló y se conserva para no perder a qué
+    # hora te levantaste (`ha_brief_tick`); vigilarla aquí haría dos intentos por tick, y
+    # el aviso de «a las diez sale sin ella» ya no tiene nada que avisar.
+    if (ahora.hour, ahora.minute) >= HORA_TOPE:
+        return {}
 
-    if BRIEF_DISPARA_SUENO and _hay_sueno_de(ahora.date().isoformat(), si_falla=False):
-        # La espera se olvida DESPUÉS de intentarlo: si el envío falla (SMTP caído), el
-        # siguiente tick lo reintenta en cinco minutos en vez de dejarlo para la hora
-        # tope. Y sin avisarte de que abras la app: el sueño ya está.
+    # Sin espera al sueño configurada, una espera solo existe porque el envío directo de
+    # la señal falló (`_senal_despertar`): se reintenta sin mirar el sueño.
+    if not BRIEF_ESPERA_SUENO or (
+            BRIEF_DISPARA_SUENO and _hay_sueno_de(ahora.date().isoformat(), si_falla=False)):
+        # La espera se olvida DESPUÉS de intentarlo, y solo si el intento fue definitivo:
+        # si el envío falla (SMTP caído) o está esperando tras un rechazo de la
+        # credencial, el siguiente tick lo reintenta en vez de dejarlo para la hora tope.
+        # Y sin avisarte de que abras la app: el sueño ya está.
         try:
             salida = dict(enviar_brief_si_toca("sueno", despertar=desde))
-        except Exception:
-            logger.exception("Resumen diario: fallo al enviarlo al ver que el sueño ya estaba")
+        except Exception as e:
+            logger.exception("Resumen diario: fallo al enviarlo al ver que el sueño ya estaba "
+                             "(%s)", _causa(e))
             return {}
-        _olvidar_despertar()
+        if not salida.get("reintento"):
+            _olvidar_despertar()
         return salida
 
     if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN):
@@ -9220,7 +9356,7 @@ def _avisar_sueno_recibido(fechas_sueno: set) -> None:
     try:
         # El despertar fue cuando llegó la señal, no ahora: es la hora que queda en
         # `brief_envios` como hora a la que te levantaste.
-        enviar_brief_si_toca("sueno", despertar=desde)
+        resultado = enviar_brief_si_toca("sueno", despertar=desde)
     except Exception as e:
         # La espera se queda viva a propósito: el tick ve el sueño ya guardado y lo
         # reintenta en cinco minutos, sin avisarte de que abras la app que acabas de
@@ -9228,7 +9364,9 @@ def _avisar_sueno_recibido(fechas_sueno: set) -> None:
         logger.exception("Resumen diario: fallo al enviarlo tras recibir el sueño del reloj "
                          "(%s)", _causa(e))
         return
-    _olvidar_despertar()
+    # Lo mismo si el correo está esperando tras un rechazo de la credencial: no ha salido.
+    if not resultado.get("reintento"):
+        _olvidar_despertar()
 
 
 def _senal_despertar(etiqueta: str) -> dict:
@@ -9265,13 +9403,20 @@ def _senal_despertar(etiqueta: str) -> dict:
         return {"ok": True, "enviado": False, "esperando_sueno": True,
                 "motivo": f"el sueño de esta noche aún no ha llegado; se espera hasta que "
                           f"llegue o hasta las {HORA_TOPE[0]:02d}:{HORA_TOPE[1]:02d}"}
+    # Si este envío no sale, se deja apuntada la espera: es lo que el tick sabe
+    # reintentar (`_vigilar_espera_sueno` ve la noche ya guardada y lo manda), con la hora
+    # de esta señal. Sin ella, un SMTP caído en este minuto no se volvía a intentar hasta
+    # la hora tope, y el correo salía entonces como si nadie hubiera dado señal.
     try:
         resultado = enviar_brief_si_toca(etiqueta, despertar=ahora)
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Despertar: fallo al construir o enviar el resumen (%s)", _causa(e))
+        _apuntar_despertar(ahora, etiqueta)
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
+    if resultado.get("reintento"):
+        _apuntar_despertar(ahora, etiqueta)
     return {"ok": True, **resultado}
 
 
@@ -9383,13 +9528,16 @@ def ha_brief_tick(request: Request, token: str = ""):
     if (ahora.hour, ahora.minute) < HORA_TOPE:
         return {"enviado": False, "motivo": "aún no es la hora tope", **avisos}
 
-    # A la hora tope se manda con lo que haya, así que la espera deja de tener sentido:
-    # si no se borrase, el tick intentaría después mandar un correo ya enviado. Lo que sí
-    # se conserva de ella es la hora a la que te levantaste, y la fuente dice POR QUÉ
-    # sale así: en `brief_envios`, «espera_agotada» es lo único que después distingue un
-    # correo al que le faltaba la noche de una mañana en la que nadie dio señal.
+    # A la hora tope se manda con lo que haya. De la espera se conserva la hora a la que
+    # te levantaste, y la fuente dice POR QUÉ sale así: en `brief_envios`,
+    # «espera_agotada» es lo único que después distingue un correo al que le faltaba la
+    # noche de una mañana en la que nadie dio señal.
+    #
+    # La espera se olvida DESPUÉS, y solo si el envío fue definitivo. Se olvidaba antes
+    # de intentarlo, y si el SMTP fallaba el tick siguiente lo mandaba como «tope», sin
+    # hora de despertar. Mientras siga viva no hace nada más: `_vigilar_espera_sueno` no
+    # actúa pasada la hora tope.
     desde = _despertar_esperado(ahora)
-    _olvidar_despertar()
     try:
         resultado = enviar_brief_si_toca("espera_agotada" if desde else "tope", despertar=desde)
     except HTTPException:
@@ -9397,6 +9545,8 @@ def ha_brief_tick(request: Request, token: str = ""):
     except Exception as e:
         logger.exception("Resumen diario: fallo al enviarlo por hora tope (%s)", _causa(e))
         raise HTTPException(status_code=502, detail=f"No se pudo enviar el resumen: {e}")
+    if not resultado.get("reintento"):
+        _olvidar_despertar()
     return {"ok": True, **avisos, **resultado}
 
 
@@ -9519,8 +9669,10 @@ def send_brief(request: Request, token: str = "", forzar: int = 0):
     # navegador: el mensaje de la excepción es diagnóstico útil, no un dato sensible.
     try:
         if forzar:
+            # Sin mirar la espera tras un rechazo de la credencial: esto es como se prueba
+            # la contraseña nueva (ver `_correo_espera`).
             datos = construir_brief()
-            enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+            _mandar_brief(datos)
             logger.info("Resumen diario enviado a %s (%s), forzado a mano", BRIEF_TO, datos["fecha"])
             return {"ok": True, "enviado": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
         resultado = enviar_brief_si_toca("respaldo")
@@ -13850,6 +14002,8 @@ _ERROR_DE_RED = re.compile(
     r"connection\s?(?:error|refused|reset|aborted|timeout)"
     r"|brokenpipeerror|remotedisconnected|protocolerror|incompleteread"
     r"|chunkedencodingerror|readtimeout|connecttimeout|max retries exceeded|timed out"
+    # El servidor de correo que corta a medias o no acepta la conexión (#244)
+    r"|smtpserverdisconnected|smtpconnecterror"
     # El DNS
     r"|temporary failure in name resolution|name or service not known"
     r"|nodename nor servname|gaierror|getaddrinfo"
@@ -13870,6 +14024,20 @@ def _error_de_red(mensaje: str) -> bool:
     pasaba—; un falso positivo se callaría una avería real, que es mucho peor.
     """
     return bool(_ERROR_DE_RED.search(str(mensaje or "")))
+
+
+# Y una tercera clase, la de un servicio que rechaza NUESTRA credencial: tampoco es
+# código —#244 lo abrió el vigilante como issue, y ninguna sesión arregla una contraseña
+# de aplicación revocada—, pero tampoco es la red, porque no pasa sola. Por eso no va con
+# `_ERROR_DE_RED`: ahí el listón es de 25, y con el correo dejando de insistir tras el
+# primer rechazo (`_correo_espera`) no llegaría nunca y nadie se enteraría. Se avisa con
+# el listón de los errores de código, sin issue y sin botón de arreglo.
+_ERROR_DE_SERVICIO = re.compile(r"smtpauthenticationerror", re.I)
+
+
+def _error_de_servicio(mensaje: str) -> bool:
+    """Si este error es un servicio de terceros rechazando la credencial."""
+    return bool(_ERROR_DE_SERVICIO.search(str(mensaje or "")))
 
 
 def _vigilante_origen(origen: str) -> str:
@@ -13978,20 +14146,28 @@ def _averias_del_registro() -> list:
         origen = str(e.get("source") or "?")
         firmas = por_origen.setdefault(origen, {})
         firma  = _firma_error(e.get("message"))
-        dato   = firmas.setdefault(firma, {"mensaje": firma, "veces": 0, "red": 0, "ultima": ""})
+        dato   = firmas.setdefault(firma, {"mensaje": firma, "veces": 0, "red": 0,
+                                           "servicio": 0, "ultima": ""})
         dato["veces"] += 1
-        if _error_de_red(e.get("message")):
+        if _error_de_servicio(e.get("message")):
+            dato["servicio"] += 1
+        elif _error_de_red(e.get("message")):
             dato["red"] += 1
         if (e.get("created_at") or "") > dato["ultima"]:
             dato["ultima"] = e.get("created_at") or ""
 
     averias = []
     for origen, firmas in por_origen.items():
-        # Una forma de error cuenta como de red cuando TODAS sus apariciones lo parecen:
-        # si una sola no lo es, hay algo más que la conexión y se trata como código.
-        grupos: dict = {"codigo": [], "red": []}
+        # Una forma de error cuenta como de red (o de credencial) cuando TODAS sus
+        # apariciones lo parecen: si una sola no lo es, hay algo más y se trata como código.
+        grupos: dict = {"codigo": [], "red": [], "servicio": []}
         for d in firmas.values():
-            grupos["red" if d["red"] and d["red"] == d["veces"] else "codigo"].append(d)
+            if d["servicio"] == d["veces"]:
+                grupos["servicio"].append(d)
+            elif d["red"] == d["veces"]:
+                grupos["red"].append(d)
+            else:
+                grupos["codigo"].append(d)
 
         for clase, datos in grupos.items():
             if not datos:
@@ -14000,7 +14176,8 @@ def _averias_del_registro() -> list:
             veces  = sum(d["veces"] for d in datos)
             # Cada clase con su listón, y contada aparte: si no, doscientos timeouts en el
             # mismo origen arrastraban por encima del umbral a los tres errores de código
-            # que iban en medio, y encima copaban los detalles que se nombran.
+            # que iban en medio, y encima copaban los detalles que se nombran. La
+            # credencial rechazada va con el de código: no pasa sola.
             if veces < (VIGILANTE_MIN_ERRORES_RED if es_red else VIGILANTE_MIN_ERRORES):
                 continue
             # uuid5 y no hashlib: es sha1 igualmente y `uuid` ya está importado.
@@ -14008,19 +14185,22 @@ def _averias_del_registro() -> list:
                                 "|".join(sorted(d["mensaje"] for d in datos))).hex[:8]
             horas  = VIGILANTE_VENTANA_DIAS * 24
             averias.append({
-                "clave":    f"{'red' if es_red else 'errores'}:{origen}:{huella}",
+                "clave":    f"{'errores' if clase == 'codigo' else clase}:{origen}:{huella}",
                 "origen":   origen,
                 "veces":    veces,
                 # Corto a propósito: el aviso entero se recorta a
                 # RECORDATORIO_MAX_TEXTO (200), y lo que se coma esta frase se lo quita a
                 # la lista de errores concretos, que es lo único accionable del aviso.
                 "texto":    (f"{veces} errores en {origen} en las últimas {horas} h"
-                             + (", de red o de terceros: no es código." if es_red else ".")),
+                             + {"red":      ", de red o de terceros: no es código.",
+                                "servicio": ": rechazan la credencial, no es código.",
+                                "codigo":   "."}[clase]),
                 "detalles": sorted(datos, key=lambda d: -d["veces"])[:VIGILANTE_MAX_DETALLES],
-                # Un issue es una petición de cambio de código. Por una caída de DNS o un
-                # 504 de un tercero no hay nada que cambiar, y siete de esos abiertos a la
-                # vez es lo que enseña a no mirar los issues del vigilante.
-                "issue":    not es_red,
+                # Un issue es una petición de cambio de código. Por una caída de DNS, un
+                # 504 de un tercero o una contraseña revocada no hay nada que cambiar, y
+                # siete de esos abiertos a la vez es lo que enseña a no mirar los issues
+                # del vigilante.
+                "issue":    clase == "codigo",
                 "red":      es_red,
             })
     averias.sort(key=lambda a: -a["veces"])
@@ -17390,6 +17570,9 @@ def _rescatar_avisos() -> dict:
     ahora     = time.time()
     caducados = [a for a in _avisos_movil if ahora - a["puesto"] > AVISO_MOVIL_RESCATE]
     rescatados = 0
+    # Tras un rechazo de la credencial se quedan en la cola sin intentarlo: sería un
+    # login fallido y un error por aviso en cada tick (#244).
+    esperando = _espera_correo() is not None
     for aviso in caducados:
         if aviso.get("efimero"):
             # Un acuse de recibo caducado no se rescata: llegaría por correo diez minutos
@@ -17398,12 +17581,16 @@ def _rescatar_avisos() -> dict:
             _avisos_movil.remove(aviso)
             logger.info("Avisos: acuse descartado sin recoger (%s)", aviso["titulo"])
             continue
+        if esperando:
+            continue
         try:
             enviar_correo(aviso["titulo"], aviso["texto"])
         except Exception as e:
             # Se queda en la cola: el siguiente tick lo reintenta. Perderlo aquí sería
-            # exactamente lo que este rescate viene a evitar.
-            logger.error("Avisos: no se pudo rescatar por correo (%s)", e)
+            # exactamente lo que este rescate viene a evitar. El tipo y no el mensaje
+            # (`_causa`): el de un rechazo SMTP puede traer una dirección.
+            logger.error("Avisos: no se pudo rescatar por correo (%s)", _causa(e))
+            esperando = _espera_correo() is not None   # un 535 no se repite con el resto
             continue
         _avisos_movil.remove(aviso)
         rescatados += 1
@@ -20970,7 +21157,7 @@ def _j_enviar_resumen() -> dict:
     a mano es porque lo quieres ahora, aunque el de la mañana ya haya salido.
     """
     datos = construir_brief()
-    enviar_correo(f"Life Assistant — datos del {datos['fecha']}", render_brief_texto(datos))
+    _mandar_brief(datos)
     logger.info("Resumen diario enviado a %s (%s), pedido a Jarvis", BRIEF_TO, datos["fecha"])
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
 

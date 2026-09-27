@@ -807,6 +807,14 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     medio y encima copaban los `VIGILANTE_MAX_DETALLES` del aviso y el `detalle` que lee
     la sesión de arreglo.
 
+  **Una credencial rechazada es una tercera clase** (`_error_de_servicio`, hoy
+  `SMTPAuthenticationError`). Tampoco es código —#244 lo abrió el vigilante como issue, y
+  ninguna sesión arregla una contraseña de aplicación revocada—, pero tampoco es la red,
+  porque no pasa sola. Va **sin issue ni botón**, como la red, pero **con el listón de
+  código** (3): con el de red (25), y ahora que el correo deja de insistir tras el primer
+  rechazo (`docs/BRIEF.md`, «Cuando el envío falla»), no llegaría nunca. Los cortes del
+  servidor SMTP (`SMTPServerDisconnected`, `SMTPConnectError`) sí son red.
+
   La clasificación es deliberadamente **tímida**: lo que no se reconoce cuenta como
   código. Un falso negativo abre un issue de más —lo que ya pasaba—; un falso positivo se
   callaría una avería real. Y los códigos de estado se exigen en contexto (`devolvió 504`,

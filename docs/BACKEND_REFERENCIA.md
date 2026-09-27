@@ -162,6 +162,8 @@ por el catálogo y la cola de `GET /ha/ordenes-pending`. El token solo viaja en 
 
 **Resumen diario**: `BRIEF_TO`, `BRIEF_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
 `SMTP_PASSWORD` (con Gmail y 2FA: una contraseña de aplicación), `ENTREGAS_MARKER`.
+Opcionales: `CORREO_ESPERA_CREDENCIAL_MIN`/`CORREO_ESPERA_CREDENCIAL_MAX_MIN` (cuánto deja
+de intentarlo lo automático tras un rechazo de la credencial; ver `docs/BRIEF.md`).
 
 **Personalización**: `TIMEZONE`, `HOME_ADDRESS`, `CLASSES_CALENDAR`, `CORS_ORIGINS`,
 `WEATHER_LAT`/`WEATHER_LON`, `ALUD_ALLOWED_HOSTS`.

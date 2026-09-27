@@ -119,6 +119,41 @@ backend está en `docs/BACKEND_PATRONES.md`.
   Envío por `smtplib` (librería estándar, sin dependencias nuevas). Todos los
   disparadores usan tokens de servicio: un JWT de usuario caducaría a los 30 días y el
   correo dejaría de llegar sin avisar.
+- **Cuando el envío falla** (`_fallo_de_correo`, `_correo_espera`). El 2026-09-27 Gmail
+  rechazó la contraseña de aplicación y el tick de la hora tope montó el correo entero
+  para fallar en el login cada cinco minutos, el día entero (#244). Un fallo de envío no
+  es siempre lo mismo, y cada clase pide otra cosa:
+  - **Credencial** (`SMTPAuthenticationError`): no se arregla sola ni tocando código.
+    Tras un rechazo, **lo automático deja de intentarlo** 30 min, el doble con cada
+    rechazo seguido hasta 4 h (`CORREO_ESPERA_CREDENCIAL_MIN`/`_MAX_MIN`). Mientras dura,
+    `enviar_brief_si_toca` ni reserva ni monta el correo y contesta con `reintento`; el
+    informe semanal no reserva el domingo y el rescate de avisos deja la cola como está.
+    Insistir con la contraseña mala es justo lo que hace que Gmail conteste luego 454
+    («demasiados intentos») también a la buena. **Lo pedido a mano no espera**
+    (`?forzar=1`, Jarvis): así se prueba la contraseña nueva. Un envío bueno, venga de
+    donde venga, levanta la espera, y vive en memoria porque cambiar el `backend.env`
+    obliga a recrear el contenedor, o sea que arreglarla ya la borra.
+  - **Conexión** (corte, timeout, DNS, TLS): pasa sola, y el reintento de cinco minutos
+    del tick es lo que toca.
+  - **El código SMTP va en el registro** (`_causa`: `SMTPAuthenticationError 535`). Un
+    535 es la contraseña, un 534 pide contraseña de aplicación y un 454 es Gmail harto
+    de intentos: el mismo tipo, tres arreglos distintos. Solo el número, nunca el mensaje.
+  - **Ningún fallo pierde la hora a la que te levantaste.** Quien cierra una espera al
+    sueño (la hora tope, el tick que la vigila, la ingesta) solo la olvida si el envío
+    fue definitivo: salió, ya había salido o el resumen está pausado. La hora tope la
+    olvidaba ANTES de intentarlo, y si fallaba el tick siguiente lo mandaba como «tope»
+    sin `despertar_at`. Pasada la hora tope, `_vigilar_espera_sueno` no hace nada: manda
+    la hora tope, y vigilarla también haría dos intentos por tick.
+  - **La señal directa deja algo que reintentar.** Con la noche ya sincronizada, la señal
+    de despertar manda el correo en el acto; si ese envío falla (o está esperando tras un
+    rechazo), `_senal_despertar` apunta la espera y el tick lo reintenta con la hora de
+    la señal. Antes esperaba a la hora tope.
+  - **El envío forzado es el mismo correo** (`_mandar_brief`): `?forzar=1` y
+    `enviar_resumen` de Jarvis llevan el JSON adjunto, como el de cada mañana. Se estaba
+    probando un correo distinto del que sale.
+  - **El vigilante no lo llama «cambio de código»**: los cortes SMTP cuentan como red y la
+    credencial rechazada es una clase propia, con aviso pero sin issue ni botón de arreglo
+    (ver «Y un fallo de red no es un cambio de código» en `docs/JARVIS.md`).
 - **Cuándo sale el correo: al despertarse, no a una hora fija.** Lo disparaba el cron de
   `.github/workflows/resumen-diario.yml`, y Actions se retrasa 10-15 min cuando su cola
   va cargada — un disparador que no sabe decirte a qué hora va a disparar no vale para
