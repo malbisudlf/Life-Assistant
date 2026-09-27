@@ -66,7 +66,7 @@ class TestWakeOnLan:
         r = client.get("/ha/wol-pending?token=ha-poll-token")
         assert r.json() == {"pending": False}
         # El dashboard marca WOL
-        assert client.post("/wake-pc", headers=auth_headers).json() == {"ok": True}
+        assert client.post("/wake-pc", headers=auth_headers).json() == {"ok": True, "motor": "ha"}
         # El primer poll lo recoge y lo limpia
         assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": True}
         assert client.get("/ha/wol-pending?token=ha-poll-token").json() == {"pending": False}
@@ -83,7 +83,7 @@ class TestRelaunchAgent:
         # Sin relanzado marcado, el poll devuelve false
         assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
         # El dashboard marca relanzado
-        assert client.post("/relaunch-agent", headers=auth_headers).json() == {"ok": True}
+        assert client.post("/relaunch-agent", headers=auth_headers).json() == {"ok": True, "motor": "ha"}
         # El primer poll lo recoge y lo limpia
         assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": True}
         assert client.get("/ha/agent-relaunch-pending?token=ha-poll-token").json() == {"pending": False}
@@ -109,7 +109,7 @@ class TestPcPower:
         # Sin acción marcada, el poll devuelve null
         assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": None}
         # El dashboard pide apagar
-        assert client.post("/shutdown-pc", headers=auth_headers).json() == {"ok": True}
+        assert client.post("/shutdown-pc", headers=auth_headers).json() == {"ok": True, "motor": "ha"}
         # El primer poll la recoge y la limpia
         assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": "shutdown"}
         assert client.get("/ha/pc-power-pending?token=ha-poll-token").json() == {"action": None}

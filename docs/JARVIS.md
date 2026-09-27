@@ -37,6 +37,14 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     de confirmar al otro lado de una llamada, así que no hay ejecución posible en ningún
     caso. El gate es literalmente `_jarvis_confirma()`, sin excepción ni atajo por venir
     de una sesión de Claude Code con `--dangerously-skip-permissions`.
+  **Lo que deja trabajo para el PC despierta al agente, y siempre DESPUÉS del job**
+  (`_despertar_agente()`: WOL + relanzado, por `caja` o por los flags de HA). Lo usan
+  `lanzar_streaming`, `encargar_al_pc` y `reintentar_job`. Hasta septiembre de 2026 las
+  dos primeras solo creaban el job: el agente es efímero, así que con el PC encendido nadie
+  lo recogía hasta el siguiente arranque — y Jarvis contestaba que el streaming estaba en
+  marcha. El orden importa desde que manda `caja`, que actúa en el acto: un agente que
+  arranca antes de que exista el job mira la cola vacía y se cierra. Es lo mismo que hace
+  el botón del dashboard (`abrirStreaming`).
   **Dos modelos, y la diferencia entre ellos es la que separa hablar de actuar.** El
   pequeño (`JARVIS_MODEL`) acierta bien decidiendo SI hace falta una herramienta y falla
   eligiendo CUÁL en cuanto hay muchas parecidas — está medido contra el MCP de GitHub:
@@ -420,7 +428,8 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
       `LA_APAGAR_`, así que la automatización y el `rest_command` de HA que ya existían
       sirven sin tocar el YAML: es `POST /avisos/{id}/apagar` quien mira la regla del aviso
       y, en `pc_encendido`, encola la suspensión por el mismo camino que
-      `POST /suspend-pc` (`_pc_power_action` → `/ha/pc-power-pending` → SSH desde HA).
+      `POST /suspend-pc` (`_pedir_al_pc`: el pedido para `caja`, o de respaldo
+      `_pc_power_action` → `/ha/pc-power-pending` → SSH desde HA).
       Cuenta como «útil», igual que apagar. Se excluye `PC_ENTIDAD` de la lista.
     - **Pulsarlo cuenta como «útil»**, y pasa por `_j_casa_ordenar` como cualquier otra
       orden de la casa: la lista viene de una fila de Supabase, que es escribible con la

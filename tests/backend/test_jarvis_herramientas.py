@@ -90,8 +90,18 @@ class TestReintentarJobHerramienta:
 
         monkeypatch.setattr(main, "retry_job", _retry_job)
         r = main._j_reintentar_job(JOB_ID)
-        assert r == {"ok": True, "intento": 2}
+        assert r["ok"] is True and r["intento"] == 2
         assert llamado == {"job_id": JOB_ID, "worker_id": "w1"}
+
+    def test_reintentar_despierta_al_agente(self, monkeypatch, mock_requests):
+        """Un job reintentado vuelve a `pending`: sin despertar al agente, con el PC
+        encendido nadie lo recogía hasta el siguiente arranque."""
+        mock_requests.add("GET", "/rest/v1/jobs",
+                          FakeResponse([{"status": "failed", "claimed_by": "w1"}]))
+        monkeypatch.setattr(main, "retry_job",
+                            lambda job_id, body, credentials=None: {"job": {"attempt": 2}})
+        main._j_reintentar_job(JOB_ID)
+        assert main._wol_pending is True and main._agent_relaunch_pending is True
 
 
 class TestAnularNocheHerramienta:

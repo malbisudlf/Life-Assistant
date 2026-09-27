@@ -1671,6 +1671,10 @@ def _uuid_path():
     hacía que todos heredaran el último nombre registrado y devolvieran 422."""
     return Path(..., pattern=_UUID_PATTERN)
 
+# Las órdenes al PC tienen dos motores. El de siempre son estos tres flags en memoria,
+# que Home Assistant (el Green) sondea y ejecuta por SSH. Desde la fase 4 del HomeLab lo
+# normal es `caja` (ver `_pedir_al_pc`), y estos flags quedan como respaldo: solo se
+# ponen si no hay `PC_DIR` o si escribir el pedido falla.
 _wol_pending = False
 # El agente PC es efímero (arranca con Windows, drena la cola y se cierra). Si el PC
 # YA está encendido, el WOL no relanza nada: este flag pide a HA que arranque el
@@ -1680,6 +1684,23 @@ _agent_relaunch_pending = False
 # PC está encendido): HA lo ejecuta directo por SSH. Guarda la acción pendiente
 # ("shutdown" | "suspend" | None) y HA la lee y la limpia.
 _pc_power_action = None
+
+# El directorio que `caja` monta en el contenedor para las órdenes al PC (`/pc`). Vacío =
+# el camino de vuelta: todo por los flags de arriba, como antes de la mudanza.
+PC_DIR = os.getenv("PC_DIR", "")
+# Las únicas órdenes que existen, en el orden en que `pc.sh` las atiende. El nombre del
+# fichero ES la orden entera, así que esta tupla es la lista blanca: nada que venga del
+# cliente llega nunca al nombre.
+PC_ACCIONES = ("wol", "relanzar", "suspender", "apagar")
+# Lo que se lee de `estado.json`. Lo escribe `pc.sh` y cabe en unas decenas de bytes: un
+# tope de pocos KB basta para que un fichero roto o ajeno no se cargue entero en memoria.
+PC_ESTADO_MAX_BYTES = 4096
+_pc_pedido_lock = threading.Lock()
+# Si el último pedido NO llegó a `caja` (se cayó al flag de HA). Lo lee `/pc/estado`: sin
+# él, con el volumen roto la pantalla decía «caja: trabajando en el pedido…» de algo que
+# caja no había recibido nunca. Cada escritura lo pone o lo quita, así que habla siempre
+# de la última orden y no de un fallo antiguo ya arreglado.
+_pc_ultimo_pedido_fallido = False
 
 def _clean_class_title(subject: str) -> str:
     s = re.sub(r"^\d+\s*-\s*", "", subject)
@@ -2805,12 +2826,181 @@ def _safe_worker(worker_id: str) -> str:
         raise HTTPException(status_code=400, detail="worker_id inválido")
     return worker_id
 
+# ── PC: ÓRDENES (caja, con el Green de respaldo) ─────────────────────────────
+#
+# Hasta la fase 4 del HomeLab el PC lo gobernaba el Green: sondeaba los flags de arriba y
+# hacía SSH al PC por su nombre mDNS. El 2026-09-25 se reinstaló Windows, el PC cambió de
+# nombre y el relanzado, el apagado y la suspensión empezaron a fallar sin que nadie se
+# enterase (docs/BUGS_HISTORICOS.md). Además los flags viven en memoria: un reinicio del
+# backend se los lleva.
+#
+# Ahora lo hace `caja`, que está en la misma LAN que el PC y donde corre este backend. El
+# contenedor no puede hacer SSH ni mandar un paquete mágico a la LAN, así que deja un
+# PEDIDO —el mismo molde que el despliegue (`DESPLIEGUE_DIR`)—: un fichero en
+# `PC_DIR/pedidos/<accion>`, que `pc.path` (systemd, repositorio HomeLab) convierte en
+# `pc.sh`. El nombre del fichero es la orden entera y `pc.sh` no lee el contenido: no
+# hay nada que inyectar. Dos pedidos iguales antes de que se atiendan son uno.
+#
+# Nunca los dos motores a la vez: si el pedido se escribe, el flag NO se pone, porque el
+# Green y caja harían lo mismo dos veces (dos apagados, dos agentes). Solo si escribir
+# falla se cae al flag, para que el Green siga siendo el respaldo mientras exista.
+
+def _pc_dir_listo() -> bool:
+    """Si ahora mismo se puede dejar un pedido en `PC_DIR`: el volumen montado (`pedidos/`
+    existe) y con escritura (el temporal va en `PC_DIR` y el renombrado, en `pedidos/`).
+    Un volumen montado de solo lectura existe y se lista igual de bien, así que mirar
+    solo que el directorio está NO basta.
+
+    Es el criterio con el que escribe `_escribir_pedido_pc` y con el que `/pc/estado` dice
+    qué motor hay: si cada uno usara el suyo, la pantalla podía decir «caja» justo cuando
+    el pedido se había ido al flag de HA.
+    """
+    if not PC_DIR:
+        return False
+    pedidos = os.path.join(PC_DIR, "pedidos")
+    return (os.path.isdir(pedidos)
+            and os.access(PC_DIR, os.W_OK) and os.access(pedidos, os.W_OK))
+
+
+def _escribir_pedido_pc(accion: str) -> bool:
+    """Deja el pedido de `accion` para `caja`. Devuelve si lo ha conseguido.
+
+    Atómico: se escribe a `PC_DIR/.<accion>.tmp` y se renombra dentro de `pedidos/`. El
+    temporal va FUERA de `pedidos/` a propósito: la unidad se dispara en cuanto ese
+    directorio deja de estar vacío, y un `.tmp` dentro la despertaría con un fichero que
+    no es ninguna orden. Los dos están en el mismo sistema de ficheros (el volumen), que
+    es lo que hace atómico el `os.replace`.
+
+    `pedidos/` no se crea aquí: si falta es que el volumen no está montado, y crearlo
+    dejaría el pedido dentro del contenedor, donde nadie lo va a ver, con un «hecho» que
+    no ha hecho nada. Falla, y quien llama cae al flag.
+    """
+    if accion not in PC_ACCIONES:
+        # Un error de programación, no de configuración: que se vea.
+        raise ValueError(f"orden al PC desconocida: {accion!r}")
+    pedidos  = os.path.join(PC_DIR, "pedidos")
+    temporal = os.path.join(PC_DIR, f".{accion}.tmp")
+    # El temporal tiene nombre fijo por orden, y los endpoints corren en el pool de hilos:
+    # sin el cerrojo, dos pedidos iguales a la vez (el botón y Jarvis) se pisaban el
+    # temporal y el segundo `os.replace` fallaba, cayendo al flag de HA justo con caja ya
+    # avisada — los dos motores a la vez.
+    global _pc_ultimo_pedido_fallido
+    with _pc_pedido_lock:
+        try:
+            if not _pc_dir_listo():
+                raise FileNotFoundError(pedidos)
+            with open(temporal, "w", encoding="utf-8") as f:
+                f.write(datetime.now(timezone.utc).isoformat() + "\n")
+            os.replace(temporal, os.path.join(pedidos, accion))
+            _pc_ultimo_pedido_fallido = False
+            return True
+        except OSError as e:
+            _pc_ultimo_pedido_fallido = True
+            logger.error("PC: no se ha podido dejar el pedido '%s' en PC_DIR (%s); se usa "
+                         "el flag de Home Assistant. ¿Está montado el volumen en "
+                         "compose.yaml, y con escritura?", accion, type(e).__name__)
+            try:
+                os.remove(temporal)
+            except OSError:
+                pass
+            return False
+
+
+def _pedir_al_pc(accion: str) -> str:
+    """Pide `accion` al PC por el motor que toque. Devuelve cuál lo atenderá: "caja" o "ha".
+
+    Todo lo que manda algo al PC pasa por aquí —los cuatro botones, Jarvis y el aviso que
+    suspende—, para que la regla de «nunca los dos motores» viva en un solo sitio.
+    """
+    global _wol_pending, _agent_relaunch_pending, _pc_power_action
+    if PC_DIR and _escribir_pedido_pc(accion):
+        return "caja"
+    if accion == "wol":
+        _wol_pending = True
+    elif accion == "relanzar":
+        _agent_relaunch_pending = True
+    elif accion == "apagar":
+        _pc_power_action = "shutdown"
+    elif accion == "suspender":
+        _pc_power_action = "suspend"
+    else:
+        raise ValueError(f"orden al PC desconocida: {accion!r}")
+    return "ha"
+
+
+def _leer_estado_pc() -> dict | None:
+    """Lo último que ha hecho `caja` con el PC (`estado.json`), o None si no se sabe.
+
+    Tolerante a propósito: el fichero no existe hasta la primera orden, y `pc.sh` es un
+    script de shell que otro repositorio puede cambiar. Nada de lo que haya ahí puede
+    tumbar el endpoint; lo que no se entiende es «no lo sé». Solo se devuelven los campos
+    del contrato, recortados: es un fichero de otra máquina y va derecho al navegador.
+    """
+    try:
+        with open(os.path.join(PC_DIR, "estado.json"), "rb") as f:
+            crudo = f.read(PC_ESTADO_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(crudo) > PC_ESTADO_MAX_BYTES:
+        logger.warning("PC: estado.json pasa de %d bytes; no se lee", PC_ESTADO_MAX_BYTES)
+        return None
+    try:
+        datos = json.loads(crudo.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        logger.warning("PC: estado.json no es JSON válido")
+        return None
+    if not isinstance(datos, dict):
+        return None
+
+    def _texto(clave: str, tope: int) -> str | None:
+        valor = datos.get(clave)
+        return str(valor)[:tope] if isinstance(valor, (str, int, float)) and valor != "" else None
+
+    return {
+        "accion":  _texto("accion", 32),
+        "ok":      datos.get("ok") is True,
+        "detalle": _texto("detalle", 300),
+        "cuando":  _texto("cuando", 40),
+        "destino": _texto("destino", 100),
+    }
+
+
+def _pedidos_pendientes_pc() -> list[str]:
+    """Las órdenes que siguen en `pedidos/` sin atender, en el orden en que irán."""
+    try:
+        presentes = set(os.listdir(os.path.join(PC_DIR, "pedidos")))
+    except OSError:
+        return []
+    return [a for a in PC_ACCIONES if a in presentes]
+
+
+@app.get("/pc/estado")
+def pc_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Qué ha hecho `caja` con el PC: la última orden, cómo acabó y lo que falta.
+
+    Es lo que enseña el modal del streaming mientras espera al agente: sin esto, «el PC no
+    llega» y «el agente no arranca» se veían igual, un «encendiendo…» para siempre. Con el
+    motor de HA no hay nada que leer (el Green no cuenta lo que hace), y se dice así.
+    Lectura local y barata: se puede sondear cada pocos segundos.
+
+    `motor` sale del mismo criterio que la escritura, no de que `PC_DIR` esté puesto. Con
+    el volumen sin montar o de solo lectura el pedido se cae al flag de HA, y decir «caja»
+    ahí hacía que el modal pintara «caja: trabajando en el pedido…» durante cinco minutos
+    de algo que caja no había recibido nunca: el «lo he pedido» pintado como «se está
+    haciendo» que este endpoint existe para evitar. Ese caso es `"caja_sin_montar"`: hay
+    `PC_DIR`, pero la última orden no le llegó (o la próxima no le llegaría).
+    """
+    if not PC_DIR:
+        return {"motor": "ha", "ultimo": None, "pendientes": []}
+    if _pc_ultimo_pedido_fallido or not _pc_dir_listo():
+        return {"motor": "caja_sin_montar", "ultimo": None, "pendientes": []}
+    return {"motor": "caja", "ultimo": _leer_estado_pc(), "pendientes": _pedidos_pendientes_pc()}
+
+
 @app.post("/wake-pc")
 def wake_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Marca WOL pendiente — HA lo recoge en su próximo poll y envía el magic packet."""
-    global _wol_pending
-    _wol_pending = True
-    return {"ok": True}
+    """Pide encender el PC (paquete mágico). Lo manda caja en el acto, o HA en su poll."""
+    return {"ok": True, "motor": _pedir_al_pc("wol")}
 
 @app.get("/ha/wol-pending")
 def ha_wol_pending(request: Request, token: str = ""):
@@ -2824,11 +3014,9 @@ def ha_wol_pending(request: Request, token: str = ""):
 
 @app.post("/relaunch-agent")
 def relaunch_agent(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Marca relanzado del agente pendiente — para cuando el PC ya está encendido y
-    el agente efímero ya terminó. HA lo recoge en su poll y arranca el agente por SSH."""
-    global _agent_relaunch_pending
-    _agent_relaunch_pending = True
-    return {"ok": True}
+    """Pide relanzar el agente — para cuando el PC ya está encendido y el agente efímero
+    ya terminó. caja (o HA, de respaldo) lo arranca por SSH con `schtasks`."""
+    return {"ok": True, "motor": _pedir_al_pc("relanzar")}
 
 @app.get("/ha/agent-relaunch-pending")
 def ha_agent_relaunch_pending(request: Request, token: str = ""):
@@ -2842,17 +3030,13 @@ def ha_agent_relaunch_pending(request: Request, token: str = ""):
 
 @app.post("/shutdown-pc")
 def shutdown_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Marca apagado del PC pendiente — HA lo ejecuta por SSH en su próximo poll."""
-    global _pc_power_action
-    _pc_power_action = "shutdown"
-    return {"ok": True}
+    """Pide apagar el PC. caja (o HA, de respaldo) lo ejecuta por SSH."""
+    return {"ok": True, "motor": _pedir_al_pc("apagar")}
 
 @app.post("/suspend-pc")
 def suspend_pc(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Marca suspensión del PC pendiente — HA lo ejecuta por SSH en su próximo poll."""
-    global _pc_power_action
-    _pc_power_action = "suspend"
-    return {"ok": True}
+    """Pide suspender el PC. caja (o HA, de respaldo) lo ejecuta por SSH."""
+    return {"ok": True, "motor": _pedir_al_pc("suspender")}
 
 @app.get("/ha/pc-power-pending")
 def ha_pc_power_pending(request: Request, token: str = ""):
@@ -16564,10 +16748,9 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
     **Y el «Suspender» del aviso del PC.** Llega por el mismo botón (`LA_APAGAR_`) para
     no tocar el YAML de HA, y aquí se decide qué significa según la regla del aviso: en
     `pc_encendido` no hay entidades que apagar, se encola la suspensión por el mismo
-    camino que `POST /suspend-pc` (`_pc_power_action`, que HA recoge en
-    `/ha/pc-power-pending` y ejecuta por SSH).
+    camino que `POST /suspend-pc` (`_pedir_al_pc`: el pedido para caja, o el flag que HA
+    recoge en `/ha/pc-power-pending` si no hay caja).
     """
-    global _pc_power_action
     _auth_boton(request, token)
 
     try:
@@ -16586,7 +16769,7 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
         raise HTTPException(status_code=404, detail="Ese aviso no existe")
     regla = str(filas[0].get("regla") or "")
     if regla == REGLA_PC_ENCENDIDO:
-        _pc_power_action = "suspend"
+        _pedir_al_pc("suspender")
         # Mismo razonamiento que el apagado de abajo: actuar sobre el aviso es la
         # valoración más fuerte que existe, y sin contarla la regla podía silenciarse sola.
         try:
@@ -19075,6 +19258,24 @@ def _j_guardar_idea(texto: str) -> dict:
     return {"ok": True, "titulo": idea.get("key")}
 
 
+def _despertar_agente() -> str:
+    """Enciende el PC y arranca el agente, para que alguien recoja el job recién creado.
+
+    El agente es efímero: si el PC ya estaba encendido, el de su arranque terminó hace
+    rato, y un job encolado sin esto se quedaba en `pending` hasta el siguiente reinicio.
+    Es lo mismo que hace el botón del dashboard, y en el mismo orden: SIEMPRE después de
+    crear el job. Con caja la orden se ejecuta en el acto, y un agente que arranca antes
+    de que exista el job mira la cola vacía y se cierra.
+    """
+    _pedir_al_pc("wol")
+    return _pedir_al_pc("relanzar")
+
+
+def _nota_arranque(motor: str) -> str:
+    return ("caja enciende el PC si hace falta y arranca el agente ya." if motor == "caja"
+            else "Home Assistant enciende el PC y arranca el agente en su próximo sondeo.")
+
+
 def _j_lanzar_streaming() -> dict:
     creado = create_job(
         body=JobCreateRequest(
@@ -19083,7 +19284,9 @@ def _j_lanzar_streaming() -> dict:
         ),
         credentials=None,
     )
-    return {"ok": True, "job_id": (creado.get("job") or {}).get("id")}
+    motor = _despertar_agente()
+    return {"ok": True, "job_id": (creado.get("job") or {}).get("id"),
+            "nota": _nota_arranque(motor)}
 
 
 def _j_encargar_al_pc(instruccion: str) -> dict:
@@ -19106,9 +19309,14 @@ def _j_encargar_al_pc(instruccion: str) -> dict:
         ),
         credentials=None,
     )
+    # Mismo fallo que tenía el streaming: con el PC encendido nadie recogía el encargo
+    # hasta el siguiente arranque. Ya está confirmado por una persona, así que encender el
+    # PC para hacerlo es justo lo que se ha pedido.
+    _despertar_agente()
     return {"ok": True, "job_id": (creado.get("job") or {}).get("id"),
             "dile_al_usuario_literalmente":
-                "Se lo he dejado encargado al PC. Si está apagado, lo hará al encenderse."}
+                "Se lo he dejado encargado al PC; lo enciendo y arranco el agente para "
+                "que se ponga con ello."}
 
 
 def _j_anadir_sesion(fecha: str, horas: float = 1.0) -> dict:
@@ -19793,12 +20001,17 @@ def _j_reintentar_job(job_id: str) -> dict:
     if not _SAFE_ID_RE.match(worker):
         return {"ok": False, "motivo": "Ese job no llegó a reclamarlo ningún agente"}
     hecho = retry_job(job_id=job_id, body=JobRetryRequest(worker_id=worker), credentials=None)
-    return {"ok": True, "intento": (hecho.get("job") or {}).get("attempt")}
+    # Reintentar es volver a dejarlo en `pending`: sin despertar al agente, se quedaba ahí
+    # igual que el streaming recién creado.
+    motor = _despertar_agente()
+    return {"ok": True, "intento": (hecho.get("job") or {}).get("attempt"),
+            "nota": _nota_arranque(motor)}
 
 
 def _j_relanzar_agente() -> dict:
-    relaunch_agent(credentials=None)
-    return {"ok": True, "nota": "Home Assistant lo relanzará por SSH en su próximo sondeo."}
+    motor = relaunch_agent(credentials=None)["motor"]
+    return {"ok": True, "nota": ("caja lo relanzará por SSH ahora mismo." if motor == "caja"
+                                 else "Home Assistant lo relanzará por SSH en su próximo sondeo.")}
 
 
 def _j_anular_noche(fecha: str) -> dict:
@@ -21220,7 +21433,8 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   False,
         "fn":          _j_lanzar_streaming,
         "descripcion": "Encola el job que levanta la VPN y abre Apollo en el PC para jugar en remoto. "
-                       "Requiere que el PC esté encendido.",
+                       "Enciende el PC si está apagado y arranca el agente: no hace falta "
+                       "llamar antes a encender_pc.",
         "parametros":  {},
     },
     "encargar_al_pc": {
@@ -21230,7 +21444,7 @@ _JARVIS_HERRAMIENTAS = {
         "fn":          _j_encargar_al_pc,
         "descripcion": "Deja un encargo escrito para que lo haga el PC con Claude Desktop "
                        "(buscar algo y dejarlo preparado, redactar, ordenar ficheros…). "
-                       "Se ejecuta cuando el PC está encendido y el agente en marcha. "
+                       "Enciende el PC si hace falta y arranca el agente para hacerlo. "
                        "No sirve para acciones inmediatas del propio dashboard.",
         "parametros":  {"instruccion": {
             "type": "string",

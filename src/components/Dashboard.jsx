@@ -20,6 +20,7 @@ import {
   revisionDeUrl, DIAS_SEMANA,
   agruparParteNoche, fraseParteNoche, motivoNoResponder,
   hostStreaming, rescateNotaDeVoz,
+  cierreDeJob, textoEstadoCaja, agenteSinArrancar, AGENTE_ARRANQUE_MAX_MS,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
   esConfirmacionHablada, esNegacionHablada,
@@ -41,7 +42,7 @@ import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
-import { textoErrorApi, mensajeErrorLogin, leerCalendario, borradoConfirmado } from "../lib/respuestas";
+import { textoErrorApi, detalleDeError, mensajeErrorLogin, leerCalendario, borradoConfirmado } from "../lib/respuestas";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { comoBoton } from "../lib/teclado";
 // `src/lib/dev.js` NO se importa aquí de forma estática, aunque el panel ⚙ use su
@@ -118,6 +119,9 @@ const JOB_POLL_FONDO_MS  = 15_000;   // modal cerrado: solo hace falta para avis
 // poll_pending_job en agent/agent.py), así que pasado ese punto no lo va a recoger
 // nadie y seguir preguntando no aporta nada.
 const JOB_POLL_MAX_MS    = 60 * 60 * 1000;
+// Cada cuánto mira el modal del streaming lo que ha hecho `caja` con el PC. Es una lectura
+// de un fichero local del backend, sin Supabase ni nada de pago: puede ir a este ritmo.
+const PC_ESTADO_POLL_MS  = 4_000;
 
 // Ventana del panel de patrones. Es el máximo que acepta /health/metrics: los cruces
 // entre series ganan mucho con meses de respaldo — con 30 días un grupo de 3 noches
@@ -2422,7 +2426,15 @@ export default function Dashboard() {
   const [wolStatus, setWolStatus]     = useState(null);   // 'loading' | 'ok' | 'error'
   const [pcModal, setPcModal]         = useState(false);  // panel "Streaming PC"
   const [pcStatus, setPcStatus]       = useState(null);   // 'loading' | 'ok' | 'error'
+  const [pcError, setPcError]         = useState("");     // por qué no se pudo encolar
+  const [pcAvisos, setPcAvisos]       = useState([]);     // encender/relanzar que el backend rechazó
+  const [pcEstado, setPcEstado]       = useState(null);   // GET /pc/estado: lo que ha hecho caja
+  const [pcMotores, setPcMotores]     = useState([]);     // quién recibió encender/relanzar: "caja" | "ha"
+  const [pcDesde, setPcDesde]         = useState(0);      // cuándo se pidió el streaming (ms)
+  const [pcReloj, setPcReloj]         = useState(0);      // la hora del último sondeo, para no leer Date.now() al pintar
   const [pcPower, setPcPower]         = useState(null);   // feedback apagar/suspender
+  const [pcPowerMotor, setPcPowerMotor] = useState(null); // quién la ejecuta: "caja" | "ha"
+  const [wolError, setWolError]       = useState("");     // por qué no se pudo encolar la entrega
   const [confirmShutdown, setConfirmShutdown] = useState(false); // confirmación de apagar
   const [weather, setWeather]         = useState(null);
   const [weatherExpanded, setWeatherExpanded] = useState(false);
@@ -2575,6 +2587,11 @@ export default function Dashboard() {
   const notificadosRef   = useRef(new Set());
   // Cuándo empezó a seguirse el job actual, para el techo de una hora.
   const jobInicioRef     = useRef({ id: null, t: 0 });
+  // Sondeos que llevan viendo el job fallado sin el motivo todavía (ver cierreDeJob).
+  const jobSinMotivoRef  = useRef(0);
+  // Un doble toque en «Abrir streaming» creaba dos jobs: el segundo toque llega antes de
+  // que el modal tape el botón.
+  const streamingEnCursoRef = useRef(false);
   const resizeDragRef    = useRef(null);
   const dragStateRef     = useRef(null);
 
@@ -3307,30 +3324,12 @@ export default function Dashboard() {
     // desconocida" desde el PC, minutos después y sin decir qué faltaba.
     if (!wolModal?.alud_url) { setWolStatus("sin_url"); return; }
     setWolStatus("loading");
+    setWolError("");
+    setPcAvisos([]);
     try {
-
-      // 1. WOL: pone flag en el backend → HA lo recoge en su poll y envía el magic packet
-      try {
-        await apiFetch(`${API}/wake-pc`, {
-          method: "POST",
-          headers: authHeaders(),
-        });
-      } catch {
-        // best-effort, no bloquea el flujo
-      }
-
-      // 2. Relanzar agente (best-effort): mismo motivo que en abrirStreaming. El agente
-      // es EFÍMERO — si el PC ya estaba encendido, el de su último arranque ya terminó y
-      // el WOL no despierta a nadie. Sin esto, encolar el job con el PC encendido no
-      // hacía absolutamente nada hasta el siguiente reinicio.
-      try {
-        await apiFetch(`${API}/relaunch-agent`, {
-          method: "POST",
-          headers: authHeaders(),
-        });
-      } catch { /* mejor esfuerzo: el job es lo crítico */ }
-
-      // 3. Crear job en Supabase via backend — esto sí es crítico.
+      // 1. El job PRIMERO — es lo crítico, y el orden importa: `caja` enciende el PC y
+      // arranca el agente en el acto, y un agente que arranca antes de que exista el job
+      // mira la cola vacía y se cierra.
       // La acción va EXPLÍCITA: el agente solo deduce "resolver_alud" a partir de
       // `alud_url` por compatibilidad con jobs antiguos, y si esa URL falta el payload
       // se queda sin nada que despachar.
@@ -3346,68 +3345,108 @@ export default function Dashboard() {
           },
         }),
       });
-      if (!jobRes.ok) { setWolStatus("error"); return; }
-      const jobData = await jobRes.json();
+      const jobData = await jobRes.json().catch(() => null);
+      if (!jobRes.ok) {
+        setWolError(detalleDeError(jobData) || `El backend respondió ${jobRes.status}`);
+        setWolStatus("error");
+        return;
+      }
       setActiveJobId(jobData?.job?.id || null);
       setJobEvents([]);
       setJobTerminal(null);
       setJobStatus("pending");
 
+      // 2. Después, encender el PC y relanzar el agente. El agente es EFÍMERO: si el PC
+      // ya estaba encendido, el de su último arranque terminó y el WOL no despierta a
+      // nadie. Sin el relanzado, encolar con el PC encendido no hacía nada.
+      setPcAvisos((await despertarAgente()).avisos);
       setWolStatus("ok");
     } catch {
+      setWolError("No hay conexión con el backend");
       setWolStatus("error");
     }
   }
 
+  // Pide encender el PC y relanzar el agente, y devuelve lo que el backend haya
+  // rechazado. `apiFetch` no lanza con un 4xx/5xx: tragarse la respuesta, como se hacía,
+  // dejaba el modal esperando a un agente al que nadie había llamado. No es fatal —el job
+  // ya existe y el PC puede estar encendido con el agente vivo—, así que se avisa sin
+  // cortar el flujo.
+  // Devuelve también el `motor` de cada respuesta: es lo único que dice si ESTE pedido
+  // llegó a caja o se cayó al flag de HA, y el modal lo cruza con `/pc/estado`.
+  async function despertarAgente() {
+    const avisos = [];
+    const motores = [];
+    for (const [ruta, que] of [["wake-pc", "encender el PC"], ["relaunch-agent", "arrancar el agente"]]) {
+      try {
+        const r = await apiFetch(`${API}/${ruta}`, { method: "POST", headers: authHeaders() });
+        const cuerpo = await r.json().catch(() => null);
+        if (!r.ok) {
+          avisos.push(`No se ha podido pedir ${que}: ${detalleDeError(cuerpo) || `el backend respondió ${r.status}`}`);
+        } else if (typeof cuerpo?.motor === "string") {
+          motores.push(cuerpo.motor);
+        }
+      } catch {
+        avisos.push(`No se ha podido pedir ${que}: sin conexión con el backend`);
+      }
+    }
+    return { avisos, motores };
+  }
+
   // ── Streaming PC ─────────────────────────────────────────────────────────
-  // El agente es efímero: enciende el PC con WOL y encola el job. Al arrancar
-  // Windows, el agente ve el job de streaming y lanza Apollo (que queda
+  // El agente es efímero: se encola el job y se enciende el PC (o se relanza el agente,
+  // si ya estaba encendido). El agente ve el job de streaming y lanza Apollo (que queda
   // corriendo), luego se cierra. Conectas con Artemis desde el móvil.
   async function abrirStreaming() {
+    if (streamingEnCursoRef.current) return;
+    streamingEnCursoRef.current = true;
+    const desde = Date.now();
     setPcModal(true);
     setPcStatus("loading");
+    setPcError("");
+    setPcAvisos([]);
+    setPcMotores([]);
+    setPcEstado(null);
+    setPcDesde(desde);
+    setPcReloj(desde);
     setActiveJobId(null);
     setJobEvents([]);
     setJobTerminal(null);
     setJobStatus("pending");
     try {
-      // 1. WOL (best-effort): enciende el PC si está apagado.
-      try {
-        await apiFetch(`${API}/wake-pc`, {
-          method: "POST",
-          headers: authHeaders(),
-        });
-      } catch { /* mejor esfuerzo: el job es lo crítico */ }
-
-      // 2. Relanzar agente (best-effort): si el PC ya estaba encendido, el agente
-      // efímero ya terminó; HA lo arranca por SSH al ver este flag.
-      try {
-        await apiFetch(`${API}/relaunch-agent`, {
-          method: "POST",
-          headers: authHeaders(),
-        });
-      } catch { /* mejor esfuerzo */ }
-
-      // 3. Job de abrir Apollo (crítico): el agente lo despacha al arrancar.
+      // 1. El job PRIMERO: con `caja` el agente arranca en el acto, y si lo hiciera antes
+      // de que exista el job vería la cola vacía y se cerraría. Antes iba al revés.
       const jobRes = await apiFetch(`${API}/jobs`, {
         method: "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({
-          dedupe_key: `abrir_streaming-${Date.now()}`,
+          dedupe_key: `abrir_streaming-${desde}`,
           payload: { accion: "abrir_streaming" },
         }),
       });
-      if (!jobRes.ok) { setPcStatus("error"); return; }
-      const jobData = await jobRes.json();
+      const jobData = await jobRes.json().catch(() => null);
+      if (!jobRes.ok) {
+        setPcError(detalleDeError(jobData) || `El backend respondió ${jobRes.status}`);
+        setPcStatus("error");
+        return;
+      }
       setActiveJobId(jobData?.job?.id || null);
+
+      // 2. Después, encender el PC y arrancar el agente.
+      const { avisos, motores } = await despertarAgente();
+      setPcAvisos(avisos);
+      setPcMotores(motores);
       setPcStatus("ok");
     } catch {
+      setPcError("No hay conexión con el backend");
       setPcStatus("error");
+    } finally {
+      streamingEnCursoRef.current = false;
     }
   }
 
-  // Apagar/suspender: no pasa por el agente (efímero); marca el flag y HA lo
-  // ejecuta por SSH. accion: "shutdown" | "suspend".
+  // Apagar/suspender: no pasa por el agente (efímero). Lo ejecuta por SSH `caja` (o Home
+  // Assistant, de respaldo); la respuesta dice cuál. accion: "shutdown" | "suspend".
   async function pcPowerAction(accion) {
     setConfirmShutdown(false);
     setPcPower(accion === "shutdown" ? "shutting" : "suspending");
@@ -3416,6 +3455,8 @@ export default function Dashboard() {
         method: "POST",
         headers: authHeaders(),
       });
+      const datos = await r.json().catch(() => null);
+      setPcPowerMotor(datos?.motor || null);
       setPcPower(r.ok ? (accion === "shutdown" ? "shutdown_sent" : "suspend_sent") : "error");
     } catch {
       setPcPower("error");
@@ -5311,6 +5352,7 @@ export default function Dashboard() {
     // El cronómetro se reinicia por job, no al abrir o cerrar el modal.
     if (jobInicioRef.current.id !== activeJobId) {
       jobInicioRef.current = { id: activeJobId, t: Date.now() };
+      jobSinMotivoRef.current = 0;
     }
     let mounted = true;
     const id = setInterval(async () => {
@@ -5326,21 +5368,50 @@ export default function Dashboard() {
         const evData = await evRes.json();
         const jobData = await jobRes.json();
         if (!mounted) return;
-        setJobEvents(evData?.events || []);
+        const eventos = evData?.events || [];
+        setJobEvents(eventos);
         const st = jobData?.job?.status;
         if (st) setJobStatus(st);
-        if (st === "done" || st === "failed") {
-          setJobTerminal({ status: st, reason: jobData?.job?.error_reason || "" });
-        }
+        // El motivo de un fallo llega en la etapa job_done, que el agente reporta DESPUÉS
+        // de cerrar el job: se espera un par de sondeos a que aparezca (cierreDeJob).
+        const cierre = cierreDeJob(st, eventos, jobSinMotivoRef.current);
+        if (cierre) setJobTerminal(cierre);
+        else if (st === "done" || st === "failed") jobSinMotivoRef.current += 1;
       } catch { /* mejor esfuerzo: ignorar */ }
     }, jobModalAbierto ? JOB_POLL_ACTIVO_MS : JOB_POLL_FONDO_MS);
     return () => { mounted = false; clearInterval(id); };
   }, [activeJobId, token, jobTerminal, jobModalAbierto]);
 
+  // Lo que ha hecho `caja` con el PC, mientras el modal del streaming espera al agente.
+  // Sin esto, un PC al que no se llega y un agente que no arranca se veían igual: un
+  // «encendiendo…» para siempre. Se para al cerrar el modal o al terminar el job. Anota
+  // además la hora de cada sondeo (`pcReloj`), que es con lo que el modal decide si el
+  // agente ya debería haber arrancado sin leer el reloj mientras pinta.
+  useEffect(() => {
+    if (!pcModal || pcStatus !== "ok" || jobTerminal || !token) return;
+    let vivo = true;
+    const mirar = async () => {
+      try {
+        const r = await apiFetch(`${API}/pc/estado`, { headers: authHeaders() });
+        const datos = r.ok ? await r.json() : null;
+        if (!vivo) return;
+        if (datos) setPcEstado(datos);
+      } catch { /* mejor esfuerzo: la línea de caja es informativa */ }
+      if (vivo) setPcReloj(Date.now());
+    };
+    const primero = setTimeout(mirar, 0);
+    const id = setInterval(mirar, PC_ESTADO_POLL_MS);
+    return () => { vivo = false; clearTimeout(primero); clearInterval(id); };
+  }, [pcModal, pcStatus, jobTerminal, token]);
+
   const maxStage = jobEvents.reduce((max, ev) => Math.max(max, STAGE_INDEX.get(ev.stage) ?? -1), -1);
   const progressPct = maxStage < 0 ? 0 : Math.round(((maxStage + 1) / STAGES.length) * 100);
   // IP de la VPN para meterla en Artemis cuando no estás en casa.
   const ipArtemis = hostStreaming(jobEvents);
+  // Lo que ha hecho `caja` y si el agente ya debería haber dado señales, para el modal.
+  const lineaCaja = pcModal && pcStatus === "ok" && !jobTerminal ? textoEstadoCaja(pcEstado, pcDesde, pcMotores) : null;
+  const agenteNoArranca = pcModal && !jobTerminal
+    && agenteSinArrancar({ desde: pcDesde, ahora: pcReloj, status: jobStatus, eventos: jobEvents });
 
   // Derivados
   const todayEvents = allEvents
@@ -7140,7 +7211,7 @@ export default function Dashboard() {
           >
             🎮 Abrir streaming
           </button>
-          {/* Apagar / suspender: los ejecuta HA por SSH (el agente es efímero) */}
+          {/* Apagar / suspender: los ejecuta caja (o HA, de respaldo) por SSH; el agente es efímero */}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button
               style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0, fontSize: 12 }}
@@ -7167,8 +7238,8 @@ export default function Dashboard() {
             }}>
               {pcPower === "suspending" ? "Enviando suspensión..."
                 : pcPower === "shutting" ? "Enviando apagado..."
-                : pcPower === "suspend_sent" ? "Suspensión enviada — HA la ejecutará"
-                : pcPower === "shutdown_sent" ? "Apagado enviado — HA lo ejecutará"
+                : pcPower === "suspend_sent" ? `Suspensión enviada — la ejecutará ${pcPowerMotor === "caja" ? "caja" : "Home Assistant"}`
+                : pcPower === "shutdown_sent" ? `Apagado enviado — lo ejecutará ${pcPowerMotor === "caja" ? "caja" : "Home Assistant"}`
                 : "No se pudo enviar la orden"}
             </div>
           )}
@@ -8769,19 +8840,22 @@ export default function Dashboard() {
                     ))
                   }
                 </div>
-                {jobTerminal?.status === "failed" && jobTerminal.reason && (
+                {jobTerminal?.status === "failed" && (
                   <div style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>
-                    {jobTerminal.reason}
+                    {jobTerminal.reason || "El agente no ha dicho por qué."}
                   </div>
                 )}
+                {pcAvisos.map((aviso, i) => (
+                  <div key={i} style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>{aviso}</div>
+                ))}
               </div>
             )}
 
             {wolStatus === "error" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>❌</div>
-                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>Error al conectar con Home Assistant</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>¿Estás conectado a la red local o VPN?</div>
+                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>No se ha podido encolar la entrega</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>{wolError || "El backend no ha dicho por qué."}</div>
                 <button onClick={() => { setWolModal(null); setWolStatus(null); }} style={{
                   padding: "8px 20px", background: "transparent",
                   border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,
@@ -8814,17 +8888,23 @@ export default function Dashboard() {
             {pcStatus === "loading" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12, animation: "pulse 1s infinite" }}>⚡</div>
-                <div style={{ fontSize: 13, color: "var(--muted)" }}>Encendiendo el PC...</div>
+                <div style={{ fontSize: 13, color: "var(--muted)" }}>Encolando el streaming...</div>
               </div>
             )}
 
             {pcStatus === "ok" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>
-                  {jobTerminal?.status === "done" ? "🎮" : jobTerminal?.status === "failed" ? "❌" : "⚡"}
+                  {jobTerminal?.status === "done" ? "🎮" : jobTerminal?.status === "failed" || agenteNoArranca ? "❌" : "⚡"}
                 </div>
-                <div style={{ fontSize: 14, color: "var(--green)", fontWeight: 500, marginBottom: 12 }}>
-                  {jobTerminal?.status === "done" ? "Apollo listo — abre Artemis" : "Abriendo streaming"}
+                <div style={{
+                  fontSize: 14, fontWeight: 500, marginBottom: 12,
+                  color: jobTerminal?.status === "failed" || agenteNoArranca ? "#d4645a" : "var(--green)",
+                }}>
+                  {jobTerminal?.status === "done" ? "Apollo listo — abre Artemis"
+                    : jobTerminal?.status === "failed" ? "No se ha podido abrir el streaming"
+                    : agenteNoArranca ? "El agente no ha arrancado"
+                    : "Abriendo streaming"}
                 </div>
                 <div style={{
                   display: "inline-block", fontSize: 10, padding: "2px 10px", borderRadius: 99,
@@ -8846,7 +8926,13 @@ export default function Dashboard() {
                 )}
                 <div style={{ textAlign: "left", fontSize: 11, color: "var(--muted)", maxHeight: 140, overflowY: "auto" }}>
                   {jobEvents.length === 0
-                    ? <span style={{ color: "var(--muted2)", animation: "pulse 1.5s infinite", display: "inline-block" }}>El PC se está encendiendo... el agente arrancará con Windows.</span>
+                    ? (agenteNoArranca
+                      ? <span style={{ color: "#d4645a" }}>
+                          En {Math.round(AGENTE_ARRANQUE_MAX_MS / 60_000)} minutos nadie ha recogido el
+                          job: o el PC no ha llegado a encenderse, o no se ha podido lanzar el agente.
+                          El job sigue en cola y se hará en cuanto el agente arranque.
+                        </span>
+                      : <span style={{ color: "var(--muted2)", animation: "pulse 1.5s infinite", display: "inline-block" }}>Esperando a que el agente arranque en el PC...</span>)
                     : jobEvents.map((ev, i) => (
                       <div key={i} style={{ marginBottom: 5, display: "flex", gap: 6, alignItems: "baseline" }}>
                         <span style={{ color: "var(--accent)", flexShrink: 0 }}>·</span>
@@ -8858,11 +8944,19 @@ export default function Dashboard() {
                     ))
                   }
                 </div>
-                {jobTerminal?.status === "failed" && jobTerminal.reason && (
-                  <div style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>
-                    {jobTerminal.reason}
+                {lineaCaja && (
+                  <div style={{ marginTop: 8, fontSize: 11, textAlign: "left", color: lineaCaja.ok ? "var(--muted)" : "#d4645a" }}>
+                    {lineaCaja.texto}
                   </div>
                 )}
+                {jobTerminal?.status === "failed" && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>
+                    {jobTerminal.reason || "El agente no ha dicho por qué."}
+                  </div>
+                )}
+                {pcAvisos.map((aviso, i) => (
+                  <div key={i} style={{ marginTop: 8, fontSize: 11, color: "#d4645a", textAlign: "left" }}>{aviso}</div>
+                ))}
 
                 <button onClick={() => { setPcModal(false); setPcStatus(null); }} style={{
                   width: "100%", marginTop: 12, padding: "10px 0", background: "transparent",
@@ -8876,8 +8970,8 @@ export default function Dashboard() {
             {pcStatus === "error" && (
               <div style={{ textAlign: "center", padding: "16px 0" }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>❌</div>
-                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>No se pudo completar la acción</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>¿Estás conectado a la red local o VPN?</div>
+                <div style={{ fontSize: 14, color: "#d4645a", fontWeight: 500 }}>No se ha podido encolar el streaming</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 16 }}>{pcError || "El backend no ha dicho por qué."}</div>
                 <button onClick={() => { setPcModal(false); setPcStatus(null); }} style={{
                   padding: "8px 20px", background: "transparent",
                   border: "0.5px solid rgba(255,255,255,0.12)", borderRadius: 8,

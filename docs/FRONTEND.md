@@ -195,7 +195,20 @@ Qué hace cada uno:
 8. **Conteo ropa (`clothing`)** — **TEMPORAL**, ver abajo.
 9. **Streaming PC (`acciones_pc`)** — encender el PC (WOL), lanzar el job de streaming,
    apagar/suspender. Barra de progreso con polling cada 2s y badge de estado
-   (pending/claimed/running) con los stages en nombres legibles.
+   (pending/claimed/running) con los stages en nombres legibles. `abrirStreaming()` crea
+   el job **primero** y pide el WOL y el relanzado **después** (con `caja` el agente
+   arranca en el acto y, si lo hiciera antes que el job, vería la cola vacía), mira el
+   `r.ok` de cada llamada y enseña el `detail` del backend si algo falla; una referencia
+   impide que un doble toque cree dos jobs. Mientras espera, sondea `GET /pc/estado` cada
+   4 s y pinta una línea con lo que ha hecho `caja` («caja: agente lanzado», «caja no
+   llega al PC: …»). Esa línea cruza el estado con el `motor` que devolvieron
+   `/wake-pc` y `/relaunch-agent` (`despertarAgente()` los guarda): si el estado dice
+   `caja_sin_montar`, o alguna respuesta dijo `"ha"` con el estado diciendo `caja`, el
+   pedido no llegó a `caja` y se dice en rojo, no «trabajando en el pedido…». Pasados `AGENTE_ARRANQUE_MAX_MS` sin que el agente reclame el job,
+   lo dice en vez de seguir «encendiendo». El motivo de un fallo sale del mensaje de la
+   etapa `job_done` (`cierreDeJob`/`motivoFalloJob`, helpers): el job no guarda ningún
+   `error_reason`. La lógica de esas líneas está en `src/lib/helpers.js`, con sus tests en
+   `tests/frontend/streamingPc.test.js`.
 10. **Bienestar (`health_wellness`)** — toggle "Semana | Hoy". Puntuación 0–100 +
     insights + recomendación + hora de la última sync. Al final, el mini-apartado
     **Composición corporal**: peso (`weight_body_mass`), % grasa y masa magra en la misma

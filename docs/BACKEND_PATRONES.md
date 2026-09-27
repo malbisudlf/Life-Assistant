@@ -153,10 +153,23 @@
   envío no guardó nada. El 400 de `/health/ingest/simple` no registraba nada de esto, solo
   el `→ 400` del middleware, que es exactamente lo que hizo durar semanas el del
   envoltorio.
-- **Flags de control del PC (poll de HA, mismo patrón que WOL)**: son flags globales
-  en memoria que el dashboard marca y HA limpia al sondearlos. Se resetean en cold
-  start de Fly (aceptable). No los conviertas en estado persistente sin pensar en el
-  poll de HA.
+- **Órdenes al PC: pedidos para `caja`, flags de HA de respaldo** (`_pedir_al_pc`). Con
+  `PC_DIR`, cada orden (`wol`, `relanzar`, `suspender`, `apagar`, lista blanca
+  `PC_ACCIONES`) es un fichero en `PC_DIR/pedidos/` que `caja` ejecuta en el acto; se
+  escribe a `PC_DIR/.<orden>.tmp` y se renombra, con el temporal FUERA de `pedidos/`
+  porque la unidad se dispara en cuanto ese directorio no está vacío. `pedidos/` no se
+  crea desde aquí: si falta, el volumen no está montado y el pedido se quedaría dentro del
+  contenedor. **Nunca los dos motores**: si el pedido se escribe, el flag no se pone; si
+  falla, se registra y se cae al flag. Lo que ha hecho `caja` se lee en `GET /pc/estado`
+  (tope de 4 KB, tolerante a un `estado.json` roto). Su `motor` sale del **mismo
+  criterio que la escritura** (`_pc_dir_listo()`: `pedidos/` existe y se puede escribir)
+  más si la última orden llegó (`_pc_ultimo_pedido_fallido`), no de que `PC_DIR` esté
+  puesto: con el volumen roto dice `"caja_sin_montar"`. Si dijera «caja», el modal
+  pintaría «trabajando en el pedido» de una orden que se fue al flag de HA. Todo lo que manda algo al PC pasa por
+  esa función: los cuatro botones, las herramientas de Jarvis y el aviso que suspende.
+  Sin `PC_DIR`, lo de siempre — flags globales en memoria que el dashboard marca y HA
+  limpia al sondearlos. Un reinicio del backend se los lleva (aceptable para un respaldo).
+  No los conviertas en estado persistente sin pensar en el poll de HA.
   - `_wol_pending` → `/wake-pc` marca, `/ha/wol-pending` recoge (magic packet).
   - `_agent_relaunch_pending` → `/relaunch-agent` marca, `/ha/agent-relaunch-pending`
     recoge. Para relanzar el agente efímero por SSH cuando el PC ya está encendido.

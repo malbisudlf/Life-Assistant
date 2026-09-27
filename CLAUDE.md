@@ -136,10 +136,12 @@ backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
     │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
     │                    oauth_tokens, login_attempts, app_logs, presence, brief_envios
-    └── Home Assistant ── HA sondea al backend (WOL/eventos, flags de relanzado y
-                          apagado/suspensión del PC que ejecuta por SSH, y el reloj de
-                          respaldo del resumen diario) y EMPUJA la presencia
-                          (POST /ha/presencia, único sentido inverso)
+    ├── caja (PC_DIR) ── pedidos al PC (WOL, relanzar el agente, suspender, apagar) que
+    │                     `pc.sh` ejecuta en la LAN (paquete mágico o SSH); lo que hizo,
+    │                     en GET /pc/estado
+    └── Home Assistant ── HA sondea al backend (eventos, los flags del PC solo de respaldo
+                          si no hay caja, y el reloj de respaldo del resumen diario) y
+                          EMPUJA la presencia (POST /ha/presencia, único sentido inverso)
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Apollo)

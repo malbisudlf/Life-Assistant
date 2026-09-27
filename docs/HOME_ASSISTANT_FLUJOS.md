@@ -21,15 +21,32 @@ versiona en un repo público.
 - Tras cambiar `configuration.yaml` → reiniciar HA. Tras cambiar `automations.yaml` →
   basta con recargar las automatizaciones.
 
-**Flujo WOL** (funcionando): frontend → `POST /wake-pc` (Fly) → flag `_wol_pending` en
+**El PC ya no lo gobierna Home Assistant, sino `caja`** (fase 4 del HomeLab). Encender,
+relanzar el agente, suspender y apagar los hace `caja`, que está en la misma LAN que el
+PC: el backend deja un pedido en `PC_DIR/pedidos/<orden>` y `pc.path` (systemd) lo
+convierte en `pc.sh`, que manda el paquete mágico o entra por SSH al PC y escribe cómo le
+ha ido en `estado.json` (lo enseña `GET /pc/estado`). Las unidades, el script y su
+configuración viven en el repositorio HomeLab. Se hizo porque este camino se rompió en
+silencio al renombrar el PC (`docs/BUGS_HISTORICOS.md`) y porque los flags viven en
+memoria del backend.
+
+**Lo que sigue aquí es el respaldo.** Los flags y los sondeos de HA no se han quitado: si el
+backend no tiene `PC_DIR`, o no puede escribir el pedido, pone el flag de siempre y el
+Green lo ejecuta como antes. Nunca los dos a la vez — con `caja` el flag no se pone, y los
+sondeos de HA devuelven siempre «nada pendiente». Mientras el Green conserve el
+`shell_command` apuntando al nombre viejo del PC, el respaldo encenderá (el WOL no depende
+del nombre) pero no relanzará, suspenderá ni apagará.
+
+**Flujo WOL** (respaldo): frontend → `POST /wake-pc` → flag `_wol_pending` en
 memoria → HA sondea `GET /ha/wol-pending` cada 30s vía
 `sensor.life_assistant_wol_pending` → la automatización `la_wol_poll` detecta el cambio a
 `true` → pulsa `button.pc_mikel`.
 
-**Flujo del relanzado del agente**: el agente es efímero y al PC lo despierta el WOL,
-pero con el PC ya encendido no arranca nadie. Para eso está `POST /relaunch-agent` →
-flag `_agent_relaunch_pending` → `GET /ha/agent-relaunch-pending`, que el dashboard llama
-al abrir el streaming y (desde 2026-09-03) también al encolar una entrega.
+**Flujo del relanzado del agente** (respaldo): el agente es efímero y al PC lo despierta
+el WOL, pero con el PC ya encendido no arranca nadie. Para eso está
+`POST /relaunch-agent` → flag `_agent_relaunch_pending` → `GET /ha/agent-relaunch-pending`,
+que el dashboard llama al abrir el streaming y al encolar una entrega, siempre **después**
+de crear el job.
 
 **La mitad de HA vive en `/config/packages/life_assistant_pc.yaml`**, no en
 `configuration.yaml` — por eso no aparece buscando en los sitios de siempre y es fácil

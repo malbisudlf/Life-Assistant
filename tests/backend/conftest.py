@@ -69,6 +69,10 @@ os.environ.setdefault("NOCHE_ARREGLA", "0")
 # hablarían del enrutado en vez de de lo que prueban. El reparto tiene sus propios tests,
 # que lo encienden a mano (TestJarvisModelos).
 os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
+# Las órdenes al PC por `caja`: sin fijarlo aquí, un backend/.env local con PC_DIR haría
+# que los tests de los flags de HA escribieran pedidos en un directorio real. Los tests de
+# caja lo apuntan a un tmp_path con monkeypatch (test_pc_caja.py).
+os.environ.setdefault("PC_DIR", "")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -185,6 +189,7 @@ def _limpiar_estado():
     main._wol_pending = False
     main._agent_relaunch_pending = False
     main._pc_power_action = None
+    main._pc_ultimo_pedido_fallido = False
     main._token_cache = None
     # El id del calendario de clases: cada test monta el suyo, y con la copia del
     # anterior no se pediría la lista de calendarios que el test ha simulado.

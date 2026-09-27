@@ -637,6 +637,26 @@
   segunda conclusión precipitada del mismo día: sus sensores parecían congelados porque
   `last_reported` llevaba un día sin moverse, cuando ese campo solo avanza si el valor
   **cambia** (ver `docs/HOME_ASSISTANT_FLUJOS.md`).
+- **Se renombró el PC y el relanzado, el apagado y la suspensión murieron sin avisar.**
+  El 2026-09-25 se reinstaló Windows y el PC estrenó nombre. El Green seguía haciendo SSH
+  al nombre mDNS de antes: nada resolvía, el `shell_command` fallaba dentro de HA y el
+  dashboard seguía diciendo «enviado», porque lo único que hacía el backend era poner un
+  flag en memoria. **Es la segunda vez que el SSH al PC muere en silencio por el
+  destino**: la primera fue la IP fija que el DHCP reasignó, y por eso se pasó al nombre.
+  Se arregló moviendo el mando a `caja` (fase 4 del HomeLab): el backend deja un pedido
+  en `PC_DIR`, `pc.sh` prueba varios destinos por orden (`PC_HOSTS`) y **escribe cómo le
+  ha ido** en `estado.json`, que el modal del streaming enseña (`GET /pc/estado`). Con el
+  arreglo salieron otros dos del mismo camino: `abrirStreaming()` y la herramienta de
+  Jarvis despertaban al agente ANTES de crear el job (con `caja` actuando en el acto, el
+  agente podía mirar la cola vacía y cerrarse), y la de Jarvis ni siquiera lo despertaba.
+  Moraleja: **una orden que sale de una máquina y se ejecuta en otra tiene que volver con
+  su resultado**. Mientras «lo he pedido» y «se ha hecho» se pinten igual, cualquier cambio
+  en el destino —una IP, un nombre, una clave— se descubre semanas después y a mano.
+  Y el propio arreglo estuvo a punto de repetirlo: `GET /pc/estado` decía `motor: "caja"`
+  solo porque `PC_DIR` estaba puesto, así que con el volumen sin montar (o de solo
+  lectura) el pedido se caía al flag de HA y la pantalla pintaba «caja: trabajando en el
+  pedido…» cinco minutos. Quien cuenta el estado tiene que usar el mismo criterio que
+  quien hace la escritura, no uno más barato.
 - **Con Edge ya abierto, `--remote-debugging-port` no abre ningún puerto.** El agente
   lanzaba Edge con ese flag y un puerto aleatorio, dormía cuatro segundos y se conectaba
   por CDP. Funcionaba — mientras el PC viniera de un WOL, porque entonces no había ningún

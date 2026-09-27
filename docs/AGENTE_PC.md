@@ -7,6 +7,30 @@ Agente Windows **efímero**: arranca con Windows (vía WOL), drena la cola de jo
 cierra. Se registra en el backend con heartbeat. **Solo funciona en un PC Windows real**
 (Edge, pyautogui, Claude Desktop): no tiene tests ni puede tenerlos en CI.
 
+### Quién lo lanza
+
+Dos caminos, y los dos acaban en la misma tarea del Programador (`LifeAssistantAgent`):
+
+- **Al encender Windows**, la tarea arranca sola. Es lo que pasa tras un WOL.
+- **Con el PC ya encendido**, alguien tiene que ejecutarla: `schtasks /run /tn
+  LifeAssistantAgent` por SSH. Desde la fase 4 del HomeLab lo hace **`caja`** (`pc.sh`,
+  a partir del pedido `relanzar` que deja el backend en `PC_DIR`), reintentando mientras el
+  PC no conteste para cubrir el que se está despertando por el WOL. El Green lo hacía
+  antes y sigue de **respaldo**, solo si el backend no tiene `PC_DIR` o no puede escribir
+  el pedido (ver `docs/HOME_ASSISTANT_FLUJOS.md`). Lo que ha pasado se ve en el modal del
+  streaming, que sondea `GET /pc/estado`: «caja: agente lanzado» o «caja no llega al PC: …».
+  Y si el pedido no ha llegado a `caja` (volumen sin montar o de solo lectura), «caja no
+  ha recibido la orden», en rojo: nunca «trabajando en el pedido» de algo que no tiene.
+
+Por SSH se entra en la sesión 0, sin escritorio, y por eso todo lo gráfico va por una
+tarea del Programador y no directo: el agente, y también `LifeAssistantPantallas` antes de
+suspender o apagar.
+
+**Quien encola un job pide el relanzado DESPUÉS de crearlo**, nunca antes: `caja` actúa en
+el acto, y un agente que arranca antes de que exista el job ve la cola vacía y se cierra.
+Así lo hacen el botón del streaming, el de las entregas y las herramientas de Jarvis
+(`_despertar_agente()`).
+
 ### Ciclo de vida
 
 - Se autentica con `AGENT_TOKEN` (`LA_TOKEN`, el JWT, solo como respaldo y avisando por
@@ -95,9 +119,10 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   El modo se valida contra `_MODOS_PANTALLA` aunque no pase por ningún shell — con un
   valor inventado, DisplaySwitch abre su interfaz y se queda esperando a que alguien
   elija, con el PC vacío.
-- **Deshacerlo es cosa de Home Assistant**, no del agente: cuando cierras el stream el
-  agente hace rato que terminó. El atajo `agent.py --pantallas [modo]`
-  (`PANTALLAS_RESTAURAR`, `extend` por defecto) existe para que HA lo dispare antes de
+- **Deshacerlo es cosa de quien suspende o apaga** (`caja`, o HA de respaldo), no del
+  agente: cuando cierras el stream el agente hace rato que terminó. El atajo
+  `agent.py --pantallas [modo]` (`PANTALLAS_RESTAURAR`, `extend` por defecto) existe para
+  que se dispare antes de
   apagar o suspender el PC, y tiene que ir por una tarea del Programador
   (`schtasks /run /tn LifeAssistantPantallas`), **no** por el SSH directo: lo que entra
   por SSH corre en la sesión 0, sin escritorio que reconfigurar, y ahí DisplaySwitch no

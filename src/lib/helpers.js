@@ -2044,6 +2044,106 @@ export function hostStreaming(eventos) {
   return null;
 }
 
+// Por qué ha fallado un job del PC. El motivo viaja en el mensaje de la etapa `job_done`
+// ("failed: …"), que es lo único que el agente reporta: el job no tiene ningún campo de
+// error, y el modal leía un `error_reason` que no ha existido nunca — así que un fallo
+// salía siempre sin explicar. "" si no hay motivo (o el job no ha fallado).
+export function motivoFalloJob(eventos) {
+  for (let i = (eventos?.length || 0) - 1; i >= 0; i--) {
+    const ev = eventos[i];
+    if (ev?.stage !== "job_done") continue;
+    const msg = String(ev.message || "").trim();
+    if (!/^failed\b/i.test(msg)) return "";
+    return msg.replace(/^failed:?\s*/i, "").trim();
+  }
+  return "";
+}
+
+// Sondeos que se espera al motivo después de ver el job fallado.
+export const JOB_GRACIA_MOTIVO = 2;
+
+// Si el job ha terminado, con qué y por qué: `{status, reason}` o null si hay que seguir
+// mirando. El agente cierra el job ANTES de reportar la etapa `job_done`, así que el
+// sondeo que ve "failed" puede no traer todavía el motivo; y con el job terminado se deja
+// de sondear, de modo que darlo por cerrado en ese momento dejaba el fallo sin explicar
+// para siempre. Se esperan `JOB_GRACIA_MOTIVO` sondeos más antes de cerrarlo sin él.
+export function cierreDeJob(status, eventos, sondeosSinMotivo = 0) {
+  if (status !== "done" && status !== "failed") return null;
+  const cerrado = (eventos || []).some(ev => ev?.stage === "job_done");
+  if (status === "failed" && !cerrado && sondeosSinMotivo < JOB_GRACIA_MOTIVO) return null;
+  return { status, reason: status === "failed" ? motivoFalloJob(eventos) : "" };
+}
+
+// Lo que `caja` ya ha hecho, por orden. En `pc.sh` las órdenes se llaman así (el nombre
+// del fichero del pedido).
+const CAJA_HECHO = {
+  wol:       "encendido enviado",
+  relanzar:  "agente lanzado",
+  suspender: "PC suspendido",
+  apagar:    "PC apagándose",
+};
+// Margen para comparar la hora de `caja` con la del navegador: son relojes distintos.
+export const CAJA_MARGEN_MS = 30_000;
+
+// La línea que enseña el modal del streaming con lo que ha hecho quien gobierna el PC
+// (`GET /pc/estado`). `desde` es cuándo se pidió (ms): un resultado anterior es de otra
+// orden y no dice nada de esta. `{ok, texto}` o null si no hay nada que decir.
+//
+// Existe porque «el PC no llega» y «el agente no arranca» se veían igual —un «encendiendo…»
+// sin fin—, y el primero es justo el fallo que duró semanas sin que nadie lo viera.
+//
+// `motoresPedido` son los `motor` con que respondieron `/wake-pc` y `/relaunch-agent` al
+// pedirlo. Si alguno dice "ha" es que ESE pedido no llegó a caja, aunque ahora el estado
+// diga "caja" (el volumen ha vuelto, o el fallo no se ve en el directorio): sin cruzarlos,
+// la pantalla decía «caja: trabajando en el pedido…» de algo que caja no había recibido.
+export const CAJA_SIN_PEDIDO =
+  "caja no ha recibido la orden: el backend no ha podido dejarle el pedido (¿está montado " +
+  "/pc, y con escritura?). Ha ido a Home Assistant, de respaldo";
+
+export function textoEstadoCaja(estado, desde, motoresPedido = []) {
+  if (!estado) return null;
+  const pedidoPorHa = Array.isArray(motoresPedido) && motoresPedido.includes("ha");
+  if (estado.motor === "caja_sin_montar" || (estado.motor === "caja" && pedidoPorHa)) {
+    return { ok: false, texto: CAJA_SIN_PEDIDO };
+  }
+  if (estado.motor !== "caja") {
+    return { ok: true, texto: "Home Assistant lo recogerá en su próximo sondeo" };
+  }
+  const u = estado.ultimo;
+  const t = Date.parse(u?.cuando || "");
+  const reciente = Boolean(u) && Number.isFinite(t) && (!desde || t >= desde - CAJA_MARGEN_MS);
+  const pendientes = Array.isArray(estado.pendientes) ? estado.pendientes : [];
+  if (reciente) {
+    const detalle = u.detalle ? `: ${u.detalle}` : "";
+    if (!u.ok) {
+      return {
+        ok: false,
+        texto: u.accion === "wol" ? `caja no ha podido enviar el encendido${detalle}`
+                                  : `caja no llega al PC${detalle}`,
+      };
+    }
+    const cola = pendientes.length ? ` · en cola: ${pendientes.join(", ")}` : "";
+    return { ok: true, texto: `caja: ${CAJA_HECHO[u.accion] || u.accion || "hecho"}${cola}` };
+  }
+  if (pendientes.length) return { ok: true, texto: `caja: en cola (${pendientes.join(", ")})` };
+  // Ni pendiente ni resultado: `pc.sh` borra el pedido ANTES de ejecutarlo, así que está
+  // en ello (el relanzado espera hasta que el PC conteste por SSH).
+  return { ok: true, texto: "caja: trabajando en el pedido…" };
+}
+
+// Cuánto se espera a que el agente reclame el job antes de decir que no ha arrancado:
+// un PC apagado tarda en encender, y `caja` insiste por SSH un par de minutos más.
+export const AGENTE_ARRANQUE_MAX_MS = 5 * 60_000;
+
+// Si el agente debería haber reclamado ya el job y no lo ha hecho. Sin esto el modal
+// seguía con «el PC se está encendiendo…» para siempre, aunque el PC no fuera a llegar.
+export function agenteSinArrancar({ desde, ahora, status, eventos } = {}) {
+  if (!desde || !ahora) return false;
+  if (status && status !== "pending") return false;
+  if ((eventos || []).length) return false;
+  return ahora - desde > AGENTE_ARRANQUE_MAX_MS;
+}
+
 export function findMetric(metrics, ...names) {
   if (!metrics) return [];
   for (const name of names) {

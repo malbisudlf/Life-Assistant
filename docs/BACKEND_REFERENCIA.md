@@ -39,7 +39,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /avisos/reglas/{regla}/reactivar` | JWT | Devuelve la voz a una regla que se silenció sola por acumular votos de «no útil» (pone su contador a cero) |
 | `POST /avisos/reglas/{regla}/llamar` | JWT | `{"llamar": bool}`: que esa regla, además de avisar, llame por teléfono. Solo las de `REGLAS_LLAMABLES`; el resto, 404 |
 | `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
-| `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón `LA_APAGAR_` del móvil, que hace lo que toque según la regla del aviso. En `al_salir` («Apagar»): encola el apagado de las entidades que llevaba ese aviso. En `pc_encendido` («Suspender»): encola la suspensión del PC (`_pc_power_action`, como `POST /suspend-pc`) y responde `{ok, suspendido: true}`. Las dos cuentan como «útil». Otra regla → 422; aviso inexistente → 404 |
+| `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón `LA_APAGAR_` del móvil, que hace lo que toque según la regla del aviso. En `al_salir` («Apagar»): encola el apagado de las entidades que llevaba ese aviso. En `pc_encendido` («Suspender»): encola la suspensión del PC (`_pedir_al_pc`, como `POST /suspend-pc`) y responde `{ok, suspendido: true}`. Las dos cuentan como «útil». Otra regla → 422; aviso inexistente → 404 |
 | `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
 | `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta. Sirve a los **tres** orígenes de `revision_hallazgos` (`issue`, `ci`, `vigilante`); el del vigilante manda una instrucción propia con los errores concretos y la orden de NO mergear |
 | `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
@@ -59,12 +59,13 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
 | `GET /casa/estado` | JWT | Todo el widget «Casa» en una petición: catálogo con su edad (`edad_min`), entidades de los dominios que se pueden tocar (el PC con `solo_lectura`), favoritos sugeridos, las órdenes de los últimos 15 min con su acuse (`en_cola` / `recogida` / `confirmada` / `caducada`) y la presencia con la forma de `GET /presencia`. Sin catálogo, 200 con `conocido: false` |
 | `POST /casa/orden` | JWT | `{entidad, accion, confirmado}`: un toque en el widget. La acción es de una lista cerrada y el servicio lo fija el backend; encola por `_j_casa_ordenar` con origen `dashboard`. **400** si la acción no vale para el dominio o es el PC, **404** si la entidad ya no está en el catálogo, **409** si es una persiana o una cerradura sin `confirmado` (no encola nada) |
-| `POST /wake-pc` | JWT | Marca `_wol_pending` |
-| `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL |
-| `POST /relaunch-agent` | JWT | Marca `_agent_relaunch_pending` |
-| `GET /ha/agent-relaunch-pending` | servicio | HA lo recoge y relanza el agente por SSH |
-| `POST /shutdown-pc` · `POST /suspend-pc` | JWT | Marcan `_pc_power_action` |
-| `GET /ha/pc-power-pending` | servicio | HA lo recoge y apaga/suspende el PC por SSH |
+| `POST /wake-pc` | JWT | Pide encender el PC. Con `PC_DIR`, deja el pedido `wol` para `caja`; sin él (o si no se puede escribir), marca `_wol_pending` para HA. Devuelve `{ok, motor: "caja"\|"ha"}`. Nunca los dos motores a la vez |
+| `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL (solo se marca sin `caja`) |
+| `POST /relaunch-agent` | JWT | Pide relanzar el agente: pedido `relanzar` para `caja` o `_agent_relaunch_pending` para HA, igual que el anterior |
+| `GET /ha/agent-relaunch-pending` | servicio | HA lo recoge y relanza el agente por SSH (respaldo) |
+| `POST /shutdown-pc` · `POST /suspend-pc` | JWT | Pedidos `apagar` / `suspender` para `caja`, o `_pc_power_action` para HA, igual que los anteriores |
+| `GET /ha/pc-power-pending` | servicio | HA lo recoge y apaga/suspende el PC por SSH (respaldo) |
+| `GET /pc/estado` | JWT | Lo que ha hecho `caja` con el PC: `{motor, ultimo, pendientes}`. `ultimo` es su `estado.json` (`accion`, `ok`, `detalle`, `cuando`, `destino`), leído con tope de 4 KB y `null` si falta o está roto — nunca un 500. `pendientes`, los pedidos aún sin atender. Con `motor: "ha"` no hay nada que leer. `motor: "caja_sin_montar"` es que hay `PC_DIR` pero el pedido no le llega (volumen sin montar o de solo lectura, o la última escritura falló y se cayó al flag de HA): mismo criterio que la escritura, no basta con que `PC_DIR` esté puesto. Lectura local: el modal del streaming lo sondea cada pocos segundos |
 | `POST /jobs` | JWT | Crea job en cola (valida `alud_url`, `dedupe_key` único) |
 | `GET /jobs/pending` | agente | Lo que sondea `agent.py`. **El corte temporal va como `Z`, nunca `+00:00`** |
 | `GET /jobs/by-id/{job_id}` | JWT | Job por ID |
@@ -145,6 +146,9 @@ fichero no sobrevive a un despliegue), `ENABLE_BANKING_REDIRECT_URL`,
 
 **Tokens de servicio** (valores aleatorios distintos entre sí): `HA_POLL_TOKEN`,
 `HEALTH_INGEST_TOKEN`, `BRIEF_TOKEN`, `AGENT_TOKEN`.
+
+**El PC por `caja`**: `PC_DIR` (el directorio de pedidos montado en el contenedor; vacío =
+las órdenes al PC van por los flags que sondea Home Assistant, como antes).
 
 **Resumen diario**: `BRIEF_TO`, `BRIEF_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
 `SMTP_PASSWORD` (con Gmail y 2FA: una contraseña de aplicación), `ENTREGAS_MARKER`.
