@@ -11,7 +11,7 @@ import { useState, useEffect, useCallback } from "react";
 
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
          leerJobs, estadoAgente, estadoJob, reintentarJob, despertarPc,
-         refrescarMientrasSeVea } from "../../lib/dev";
+         relanzarAgente, quienLoHace, refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const REFRESCO_MS = 15_000;
@@ -48,8 +48,8 @@ export default function Jobs() {
   async function despertar() {
     setAviso("");
     try {
-      await despertarPc();
-      setAviso("Encolado el magic packet: lo manda Home Assistant en su próximo sondeo.");
+      const motor = await despertarPc();
+      setAviso(`Pedido el encendido del PC: ${quienLoHace(motor)}.`);
     } catch (e) {
       setAviso(`No se pudo pedir el encendido: ${e.message}`);
     }
@@ -59,11 +59,20 @@ export default function Jobs() {
     setAviso("");
     try {
       await reintentarJob(job.id, job.claimed_by);
-      setAviso(`Job ${job.id.slice(0, 8)} devuelto a la cola.`);
-      recargar();
     } catch (e) {
       setAviso(`No se pudo reintentar: ${e.message}`);
+      return;
     }
+    // Devolverlo a la cola no basta: con el PC encendido nadie lo recogería. Se pide el
+    // relanzado después, con el job ya en pending, para que el agente lo encuentre.
+    let detalle;
+    try {
+      detalle = `relanzar el agente: ${quienLoHace(await relanzarAgente())}`;
+    } catch (e) {
+      detalle = `pero no se pudo pedir el relanzado del agente (${e.message})`;
+    }
+    setAviso(`Job ${job.id.slice(0, 8)} devuelto a la cola; ${detalle}.`);
+    recargar();
   }
 
   const agentes = datos?.agentes;

@@ -80,8 +80,9 @@ Dos detalles que no se pueden relajar:
   mira también, por si un build futuro lo cambia.)
 - **Cada camino nuevo conserva el de siempre como red de seguridad**: si `sc query` no
   da una respuesta interpretable o `sc start` falla con algo que no sabemos leer, se
-  cae a PowerShell antes de darse por vencido. El agente no tiene tests ni puede
-  tenerlos, y un fallo suyo ocurre a las 6 de la mañana sin nadie delante: el objetivo
+  cae a PowerShell antes de darse por vencido. Del agente solo se prueba en CI la lógica
+  pura (`tests/backend/test_agente_pc.py`, con Windows simulado), y un fallo suyo ocurre a
+  las 6 de la mañana sin nadie delante: el objetivo
   es que en el peor caso se comporte como antes, no que se quede sin saber el estado.
   `ACCESS_DENIED` (rc 5) es la excepción y corta directamente — sin privilegios
   PowerShell tampoco arrancaría el servicio, así que reintentar solo cuesta tiempo.
@@ -161,7 +162,8 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   orden. Es lo que permite que el mismo agente sirva antes y después de migrar el PC —
   y por lo mismo `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` siguen aceptando las
   `SUNSHINE_*` de siempre como respaldo. No quites ese respaldo sin repasar el `.env`
-  del PC: el agente no tiene tests y un fallo suyo se descubre a las 6 de la mañana.
+  del PC: los tests simulan Windows, no lo sustituyen, y un fallo suyo se descubre a las 6
+  de la mañana.
 
 ### Acción `resolver_alud` — notas de Edge y Claude Desktop
 

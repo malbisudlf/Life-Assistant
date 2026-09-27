@@ -7,7 +7,8 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 
 import { filasDeEstado, resumenEstado, desdeHace, horaCorta,
-         reconectarOutlook, leerEstadoSistema, LIMITE_REGISTRO } from "../../src/lib/dev";
+         reconectarOutlook, leerEstadoSistema, LIMITE_REGISTRO,
+         despertarPc, relanzarAgente, quienLoHace } from "../../src/lib/dev";
 
 function fila(sys, nombre) {
   return filasDeEstado(sys).find(f => f.nombre === nombre);
@@ -201,5 +202,29 @@ describe("reconectar Outlook", () => {
     const abierto = montar({ ok: true, json: async () => ({ error: "algo" }) });
     await expect(reconectarOutlook()).rejects.toThrow("Microsoft");
     expect(abierto).toEqual([]);
+  });
+});
+
+describe("órdenes al PC desde la zona dev", () => {
+  // Con caja (fase 4) la orden sale en el acto; con Home Assistant, el respaldo, espera a
+  // su sondeo. La pestaña decía siempre lo segundo, aunque ya lo hiciera caja.
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  test("dice quién lo hace según el motor que devuelve el backend", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, motor: "caja" }) })));
+    expect(await despertarPc()).toBe("caja");
+    expect(await relanzarAgente()).toBe("caja");
+    expect(quienLoHace("caja")).toMatch(/caja/);
+    expect(quienLoHace("ha")).toMatch(/Home Assistant/);
+  });
+
+  test("un backend viejo sin motor se lee como Home Assistant, que es lo que hacía", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })));
+    expect(await despertarPc()).toBe("ha");
+  });
+
+  test("un fallo del backend se cuenta, no se traga", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+    await expect(relanzarAgente()).rejects.toThrow("503");
   });
 });

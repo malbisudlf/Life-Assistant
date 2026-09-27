@@ -57,16 +57,27 @@ describe("Jobs", () => {
     render(<Jobs />);
     await userEvent.click(screen.getByRole("button", { name: "Despertar el PC" }));
     await waitFor(() => expect(screen.getByText(/No se pudo pedir el encendido/)).toBeInTheDocument());
-    expect(screen.queryByText(/Encolado/)).toBeNull();
+    expect(screen.queryByText(/Pedido el encendido/)).toBeNull();
   });
 
-  test("con un 200 sí lo da por encolado", async () => {
+  test("con un 200 sí lo da por pedido, y dice que lo hará Home Assistant", async () => {
+    // Un backend sin `motor` en la respuesta es el de antes de caja: el respaldo.
     vi.stubGlobal("fetch", backendFalso({
       "/dev/jobs": [200, { agentes: [], jobs: [] }],
       "/wake-pc":  [200, { ok: true }],
     }));
     render(<Jobs />);
     await userEvent.click(screen.getByRole("button", { name: "Despertar el PC" }));
-    await screen.findByText(/Encolado el magic packet/);
+    await screen.findByText(/Pedido el encendido del PC: lo hará Home Assistant/);
+  });
+
+  test("con caja dice que sale ya, no que espera al sondeo de Home Assistant", async () => {
+    vi.stubGlobal("fetch", backendFalso({
+      "/dev/jobs": [200, { agentes: [], jobs: [] }],
+      "/wake-pc":  [200, { ok: true, motor: "caja" }],
+    }));
+    render(<Jobs />);
+    await userEvent.click(screen.getByRole("button", { name: "Despertar el PC" }));
+    await screen.findByText(/Pedido el encendido del PC: lo ejecuta caja ahora/);
   });
 });

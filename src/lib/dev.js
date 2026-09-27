@@ -607,10 +607,32 @@ export async function reintentarJob(id, worker) {
 
 // Pide encender el PC. `apiFetch` no lanza con un 4xx/5xx, así que sin mirar `r.ok` la
 // pestaña decía «encolado» con cualquier respuesta, aunque el backend no hubiera marcado
-// nada y Home Assistant no fuera a mandar ningún paquete.
+// nada y Home Assistant no fuera a mandar ningún paquete. Devuelve quién lo hará
+// (`motor`: "caja" o "ha"), que es lo que cambia el texto del aviso.
 export async function despertarPc() {
-  const r = await apiFetch(`${API}/wake-pc`, { method: "POST", headers: authHeaders() });
+  return pedirAlPc("/wake-pc");
+}
+
+// Pide relanzar el agente del PC. Hace falta después de devolver un job a la cola: con el
+// PC encendido el agente efímero ya terminó, y un job en pending sin nadie que lo pida se
+// queda ahí hasta caducar (el mismo fallo que se arregló en la herramienta de Jarvis).
+export async function relanzarAgente() {
+  return pedirAlPc("/relaunch-agent");
+}
+
+async function pedirAlPc(ruta) {
+  const r = await apiFetch(`${API}${ruta}`, { method: "POST", headers: authHeaders() });
   if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
+  const cuerpo = await r.json().catch(() => ({}));
+  return cuerpo.motor || "ha";
+}
+
+// Quién ejecuta una orden al PC, dicho para la zona dev. Con caja la orden sale en el
+// acto; con Home Assistant (el respaldo) espera a su próximo sondeo, de hasta 30 s.
+export function quienLoHace(motor) {
+  return motor === "caja"
+    ? "lo ejecuta caja ahora"
+    : "lo hará Home Assistant en su próximo sondeo";
 }
 
 // ── FASE 3: SALUD DE LOS DATOS ────────────────────────────────────────────────

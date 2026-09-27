@@ -142,7 +142,9 @@ se apagan mientras leen.
 La zona dev no es solo de lectura, pero solo hace cosas que ya existen como endpoint y que
 son reversibles o repetibles: vaciar el registro (`DELETE /logs`), forzar el resumen
 diario o el informe semanal (`POST /brief/send`, `POST /informe/send`), reintentar un job
-del PC (`POST /jobs/{id}/retry`), despertarlo (`POST /wake-pc`) y devolverle la voz a una
+del PC (`POST /jobs/{id}/retry` y, justo después, `POST /relaunch-agent`: un job devuelto a
+la cola con el PC encendido no lo recogería nadie), despertarlo (`POST /wake-pc`; la pestaña
+dice si lo ejecuta caja o el Home Assistant de respaldo) y devolverle la voz a una
 regla que se ha silenciado sola (`POST /avisos/reglas/{regla}/reactivar`) — que es
 reversible por partida doble: si vuelve a acumular votos negativos, se callará otra vez.
 Y, desde el 2026-09-23, encender o apagar que una regla cotidiana además te llame por
