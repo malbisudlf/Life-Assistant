@@ -749,7 +749,10 @@ tocarlo:
   cualquier otro caso, borde discontinuo y «no lo sé». La cabecera dice cuántos carriles
   de seis tienen datos, porque un día con dos carriles conocidos no es un día tranquilo.
 - **Lo que hoy no se puede pintar, y por qué**: `/calendar/events` solo consulta **desde
-  hoy**, así que al retroceder el carril de eventos es `parcial`. Los demás ya tienen
+  ahora** (no desde la medianoche, a diferencia de `/calendar/classes`), así que al
+  retroceder el carril de eventos es `parcial`, y el de HOY va como `ok` con
+  `parcial: true`: dibuja lo que hay, pero si no hay nada no dice «Nada este día» —las
+  reuniones de la mañana que ya terminaron no han llegado—, dice «no lo sé». Los demás ya tienen
   horas: los avisos desde `GET /avisos/enviados`, la presencia desde
   `GET /presencia/tramos` y la casa desde `GET /casa/acciones`.
 

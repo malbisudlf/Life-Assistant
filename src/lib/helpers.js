@@ -87,8 +87,11 @@ export function formatLogTime(iso, ahora = new Date()) {
 // ── Salud ────────────────────────────────────────────────────────
 export function hoursToHM(h) {
   if (h == null || isNaN(h)) return "—";
-  const hrs  = Math.floor(h);
-  const mins = Math.round((h - hrs) * 60);
+  // A minutos ANTES de separar horas: truncar primero y redondear después dejaba
+  // «7h 60m» en los últimos 30 s de cada hora, y las medias de sueño caen ahí a menudo.
+  const total = Math.round(h * 60);
+  const hrs   = Math.floor(total / 60);
+  const mins  = total % 60;
   if (mins === 0) return `${hrs}h`;
   return `${hrs}h ${mins}m`;
 }
@@ -848,9 +851,12 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
     // La referencia se busca por FECHA (la última pesada de hace 7 días o más), no
     // contando ocho registros hacia atrás: uno no se pesa a diario, así que ese octavo
     // registro podía ser de hace un mes y la frase seguía diciendo "hace ~1 semana".
+    // La semana se cuenta desde la ÚLTIMA pesada, no desde hoy: anclado a hoy, quien no
+    // se había pesado esta semana tenía la última pesada ya antes del corte, se comparaba
+    // consigo misma y salía «estable» con kilos de diferencia.
     const ultimo = weight[weight.length - 1];
-    const corte  = _sumarDias(hoy, -7);
-    const previo = [...weight].reverse().find(d => String(d.date) <= corte) || weight[0];
+    const corte  = _sumarDias(String(ultimo.date).slice(0, 10), -7);
+    const previo = weight.slice(0, -1).reverse().find(d => String(d.date) <= corte) || weight[0];
     const cur = ultimo.value;
     const d   = cur - previo.value;
     const dias = _diasEntre(previo.date, ultimo.date);
@@ -864,8 +870,8 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   // ── Entrenamientos (últimos 7 días) ──
   const work = findMetric(healthData, "workouts", "workout");
   if (work.length) {
-    const cutoff = _isoHoy(new Date(now.getTime() - 7 * 86400000));
-    const count = work.filter(d => d.date >= cutoff).reduce((s, d) => s + (d.extra?.workouts?.length || 0), 0);
+    // Por `ventana`, como todo lo demás: el corte en hoy−7 inclusive eran OCHO días.
+    const count = ventana(work).reduce((s, d) => s + (d.extra?.workouts?.length || 0), 0);
     push("Entrenamiento", count >= 4 ? "good" : count >= 2 ? "info" : "warn",
       `${count} entrenamiento${count !== 1 ? "s" : ""} en los últimos 7 días${count >= 4 ? " — buen ritmo" : count === 0 ? " — toca moverse" : ""}.`);
   }

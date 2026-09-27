@@ -9,10 +9,9 @@
 // cosas son repetibles y las dos ya existían como endpoint (docs/ZONA_DEV.md).
 import { useState, useEffect, useCallback } from "react";
 
-import { API, authHeaders, apiFetch } from "../../lib/api";
 import { MONO, panelStyle, tituloStyle, COLOR_TONO, horaCorta, desdeHace,
-         leerJobs, estadoAgente, estadoJob, reintentarJob } from "../../lib/dev";
-import { refrescarMientrasSeVea } from "../../lib/dev";
+         leerJobs, estadoAgente, estadoJob, reintentarJob, despertarPc,
+         refrescarMientrasSeVea } from "../../lib/dev";
 import { Boton, Vacio } from "./ui";
 
 const REFRESCO_MS = 15_000;
@@ -49,10 +48,10 @@ export default function Jobs() {
   async function despertar() {
     setAviso("");
     try {
-      await apiFetch(`${API}/wake-pc`, { method: "POST", headers: authHeaders() });
+      await despertarPc();
       setAviso("Encolado el magic packet: lo manda Home Assistant en su próximo sondeo.");
-    } catch {
-      setAviso("No se pudo pedir el encendido.");
+    } catch (e) {
+      setAviso(`No se pudo pedir el encendido: ${e.message}`);
     }
   }
 

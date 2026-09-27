@@ -123,6 +123,14 @@ describe("helpers de salud", () => {
     expect(hoursToHM(NaN)).toBe("—");
   });
 
+  test("hoursToHM lleva el acarreo: nunca «60m»", () => {
+    // Truncar las horas antes de redondear los minutos dejaba «7h 60m» en los últimos
+    // 30 s de cada hora, y las medias de sueño caen ahí de vez en cuando.
+    expect(hoursToHM(7.995)).toBe("8h");
+    expect(hoursToHM(6.999)).toBe("7h");
+    expect(hoursToHM(7.99)).toBe("7h 59m");
+  });
+
   test("sleepScore: null si no hay sueño suficiente", () => {
     expect(sleepScore(null)).toBeNull();
     expect(sleepScore(0)).toBeNull();
@@ -381,6 +389,32 @@ describe("motor de conclusiones de salud", () => {
     const c = healthConclusions({ workouts: work }, now);
     const w = c.find(x => x.domain === "Entrenamiento");
     expect(w.text).toMatch(/^2 entrenamientos/);
+  });
+
+  test("«últimos 7 días» son 7 contando hoy, no 8", () => {
+    // El corte en hoy−7 inclusive metía un octavo día, y con él el objetivo semanal de
+    // cuatro entrenos se daba por cumplido con dos que eran de la semana anterior.
+    const now = new Date("2026-09-27T12:00:00");
+    const work = [
+      { date: "2026-09-20", extra: { workouts: [{}, {}] } }, // hoy−7: fuera
+      { date: "2026-09-21", extra: { workouts: [{}] } },     // hoy−6: dentro
+      { date: "2026-09-25", extra: { workouts: [{}] } },
+    ];
+    const w = healthConclusions({ workouts: work }, now).find(x => x.domain === "Entrenamiento");
+    expect(w.text).toMatch(/^2 entrenamientos/);
+    expect(w.tone).toBe("info");
+  });
+
+  test("el peso se compara con una pesada de una semana ANTES de la última, no de hoy", () => {
+    // Sin pesarse esta semana, la última pesada ya quedaba antes del corte contado desde
+    // hoy y se comparaba consigo misma: «estable» con 2,4 kg de diferencia.
+    const now = new Date("2026-09-27T12:00:00");
+    const weight_body_mass = [
+      { date: "2026-09-05", value: 70 },
+      { date: "2026-09-15", value: 72.4 },
+    ];
+    const p = healthConclusions({ weight_body_mass }, now).find(x => x.domain === "Composición");
+    expect(p.text).toBe("Peso 72.4 kg (+2.4 kg vs hace 10 días).");
   });
 
   test("las conclusiones se ordenan por prioridad (bad antes que good)", () => {

@@ -143,6 +143,59 @@ describe("abrirVozAzure", () => {
     expect(fuentes.length).toBeGreaterThan(0);
   });
 
+  it("callar con la petición en vuelo no mata la voz ni rescata lo cortado", async () => {
+    // El barge-in de verdad casi siempre pilla la frase todavía pidiéndose: el turno
+    // empieza a contar como «Jarvis hablando» antes de que llegue el audio. El abort hace
+    // rechazar la petición, y ese rechazo se tomaba por una caída de Azure: la frase
+    // cortada salía por la voz del navegador y el resto de la llamada con ella.
+    const pendientes = [];
+    const pedidos = [];
+    const rescates = [];
+    const voz = abrirVozAzure({
+      pedirAudio: (t) => {
+        pedidos.push(t);
+        return new Promise((ok, mal) => pendientes.push({ ok, mal }));
+      },
+      alFallar: (sinDecir) => rescates.push(...sinDecir.map(([t]) => t)),
+    });
+    voz.decir("Déjame mirar el calendario.", () => {});
+    await respirar();
+    voz.callar();
+    const abortado = new Error("abortado");
+    abortado.name = "AbortError";
+    pendientes[0].mal(abortado);
+    await respirar();
+    expect(rescates).toEqual([]);
+
+    // Y lo siguiente sigue yendo por Azure, no por el navegador.
+    voz.decir("Dos.", () => {});
+    await respirar();
+    expect(pedidos).toEqual(["Déjame mirar el calendario.", "Dos."]);
+    pendientes[1].ok(new ArrayBuffer(8));
+    await respirar();
+    expect(fuentes).toHaveLength(1);
+    expect(rescates).toEqual([]);
+  });
+
+  it("callar con la decodificación pendiente no deja sonar la frase cortada", async () => {
+    // La petición ya había vuelto y el MP3 se estaba decodificando: sin un número de
+    // turno, al terminar la decodificación la frase sonaba DESPUÉS de cortarle.
+    const decodificando = [];
+    vi.stubGlobal("AudioContext", class extends AudioContextFalso {
+      decodeAudioData() { return new Promise((ok) => decodificando.push(ok)); }
+    });
+    let rescatado = null;
+    const voz = abrirVozAzure({ pedirAudio: audioOk, alFallar: (s) => { rescatado = s; } });
+    voz.decir("Uno.", () => {});
+    await respirar();
+    expect(decodificando).toHaveLength(1);
+    voz.callar();
+    decodificando[0]({ duration: 1 });
+    await respirar();
+    expect(fuentes).toHaveLength(0);
+    expect(rescatado).toBe(null);
+  });
+
   it("un texto que se queda en nada avisa igual", () => {
     // `alFinal` se llama SIEMPRE, suene o no: el modo llamada encadena la escucha con él.
     const voz = abrirVozAzure({ pedirAudio: audioOk });

@@ -196,6 +196,87 @@ describe("el troceado tal y como lo usa el modo llamada", () => {
     expect(dichos.join(" ")).toBe("Me he quedado sin respuesta. Vuelve a pedírmelo.");
   });
 
+  it("no parte URLs, horas ni decimales: si no, la limpieza de después no los reconoce", () => {
+    // Se trocea el texto CRUDO y cada trozo pasa luego por `textoParaVoz`. Cortando en el
+    // «:» de «https:» o en el punto de «elpais.com», lo que llegaba a la limpieza ya no
+    // parecía una URL y la voz la leía entera; «10:» y «30» sonaban como dos frases.
+    const casos = [
+      ["Lo he encontrado en la web de El País: https://elpais.com/economia/2026-09-27/subida.html y dice que sube.",
+       "Lo he encontrado en la web de El País: y dice que sube."],
+      ["Según la fuente [El País](https://elpais.com/economia/subida.html) los precios suben.",
+       "Según la fuente El País los precios suben."],
+    ];
+    for (const [texto, dicho] of casos) {
+      const trozos = decirSegunLlega(comoLlegaDelModelo(texto, 4));
+      expect(trozos.map(textoParaVoz).join(" ")).toBe(dicho);
+    }
+    const hora = decirSegunLlega(comoLlegaDelModelo(
+      "Mañana tienes la reunión de equipo a las 10:30 en la sala grande del segundo piso, no llegues tarde.", 4));
+    expect(hora.some(t => t.includes("10:30"))).toBe(true);
+    const grados = decirSegunLlega(comoLlegaDelModelo(
+      "Ahora mismo en casa hace 23.5 grados y fuera un poco menos, así que no hace falta abrigo.", 4));
+    expect(grados.some(t => t.includes("23.5 grados"))).toBe(true);
+  });
+
+  it("un punto al final del buffer espera a ver qué viene detrás", () => {
+    // Puede ser el final de una frase o el de «elpais.» a medio llegar: hasta el próximo
+    // delta no se sabe. Con `fin` ya no viene nada más y sale tal cual.
+    expect(trocearParaVoz("Mañana tienes dos clases por la mañana.").trozos).toEqual([]);
+    expect(trocearParaVoz("Mañana tienes dos clases por la mañana.", { fin: true }).trozos)
+      .toEqual(["Mañana tienes dos clases por la mañana."]);
+  });
+
+  it("lo escrito antes de una herramienta suena antes del relleno y sin pegarse a la respuesta", () => {
+    // Lo mismo que hace el modo llamada con los eventos de `/jarvis/voz`: el modelo
+    // escribe una frase, pide una herramienta (relleno) y, cuando esta acaba, empieza
+    // otra vuelta SIN espacio delante. Antes, el punto del final esperaba a un espacio
+    // que no llegaba: la primera frase sonaba después del relleno y como
+    // «calendario.Tienes».
+    const eventos = [
+      ...["Déjame", " mirar", " el", " calendario", "."].map(delta => ["texto", { delta }]),
+      ["herramienta", { decir: "Miro el calendario…" }],
+      ...["Tienes", " dos", " reuniones", " mañana", "."].map(delta => ["texto", { delta }]),
+      ["fin", { por_decir: "" }],
+    ];
+    const dichos = [];
+    let buffer = "";
+    for (const [tipo, datos] of eventos) {
+      if (tipo === "herramienta") {
+        dichos.push(...trocearParaVoz(buffer, { fin: true }).trozos);
+        buffer = "";
+        dichos.push(`[relleno] ${datos.decir}`);
+      }
+      if (tipo === "texto") {
+        buffer += datos.delta;
+        const { trozos, resto } = trocearParaVoz(buffer);
+        buffer = resto;
+        dichos.push(...trozos);
+      }
+      if (tipo === "fin") dichos.push(...trocearParaVoz(buffer + datos.por_decir, { fin: true }).trozos);
+    }
+    expect(dichos).toEqual([
+      "Déjame mirar el calendario.",
+      "[relleno] Miro el calendario…",
+      "Tienes dos reuniones mañana.",
+    ]);
+  });
+
+  it("una frase nueva que llega sin espacio delante corta igual", () => {
+    // Sin evento de herramienta de por medio (las que piden confirmación no lo emiten),
+    // la vuelta siguiente también empieza pegada. Una mayúscula o «¿»/«¡» tras un punto
+    // es otra frase; una minúscula o un dígito, no (dominios, «23.5»).
+    const dichos = decirSegunLlega(comoLlegaDelModelo(
+      "Déjame mirar el calendario.Tienes dos reuniones mañana.¿Quieres que te las lea?", 5));
+    expect(dichos).toEqual([
+      "Déjame mirar el calendario.",
+      "Tienes dos reuniones mañana.",
+      "¿Quieres que te las lea?",
+    ]);
+    expect(dichos.some(t => /\.[A-ZÁÉÍÓÚÑ¿¡]/.test(t))).toBe(false);
+    expect(trocearParaVoz("Lo he visto en la web elpais.com y dice que sube.", { fin: true }).trozos)
+      .toEqual(["Lo he visto en la web elpais.com y dice que sube."]);
+  });
+
   it("no dice nada cuando ya se dijo todo mientras se escribía", () => {
     // `por_decir` vacío es el caso NORMAL: repetir la respuesta al cerrar la haría sonar
     // dos veces seguidas.

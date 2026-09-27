@@ -41,6 +41,10 @@ export default function Despliegue() {
   const [leyendo, setLeyendo] = useState(true);
   const [tic, setTic]       = useState(0);
   const [obra, setObra]     = useState("");   // qué está pasando con la reconstrucción
+  // Aparte de `obra`, que es solo el mensaje: el botón se bloqueaba mientras `obra` no
+  // empezara por «listo», así que tras cualquier fallo (el 503 de DESPLIEGUE_DIR, un 429,
+  // la red) se quedaba desactivado justo cuando tocaba reintentar.
+  const [desplegando, setDesplegando] = useState(false);
 
   useEffect(() => {
     let vivo = true;
@@ -74,6 +78,7 @@ export default function Despliegue() {
       + "Trae main y sustituye lo que está corriendo. El backend se para 1-2 minutos: "
       + "mientras tanto el dashboard no responde.")) return;
     setObra("lanzando…");
+    setDesplegando(true);
     try {
       const r = await reconstruirAddon();
       setObra("reconstruyendo… (1-2 min)");
@@ -90,6 +95,8 @@ export default function Despliegue() {
       if (fin.ok) setTic(t => t + 1);
     } catch (e) {
       setObra(e.message || "no se ha podido lanzar");
+    } finally {
+      setDesplegando(false);
     }
   }, []);
 
@@ -110,7 +117,7 @@ export default function Despliegue() {
             <Boton onClick={recargar} disabled={leyendo}>
               {leyendo ? "Mirando…" : "Actualizar"}
             </Boton>
-            <Boton onClick={reconstruir} tono="peligro" disabled={!!obra && !obra.startsWith("listo")}
+            <Boton onClick={reconstruir} tono="peligro" disabled={desplegando}
                    title="Trae main y sustituye el backend que está corriendo">
               Desplegar
             </Boton>

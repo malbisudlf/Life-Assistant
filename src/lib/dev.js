@@ -6,6 +6,12 @@
 // además el resumen lo necesita también el panel ⚙ del dashboard.
 import { API, authHeaders, jsonHeaders, apiFetch } from "./api";
 import { isoToDdMmYyyy } from "./helpers";
+import { juntarRegistro, RUTA_REGISTRO, RUTA_ERRORES_SEMANA } from "./registro";
+
+// Se reexportan porque la zona dev y sus tests los buscan aquí; viven en `registro.js`
+// para que el panel ⚙ del dashboard pueda usarlos sin arrastrar este módulo entero al
+// chunk principal.
+export { juntarRegistro, LIMITE_REGISTRO, RUTA_REGISTRO, RUTA_ERRORES_SEMANA } from "./registro";
 
 export const MONO = "'DM Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -124,7 +130,8 @@ export async function leerEstadoSistema(agentId) {
 
   const rutas = {
     agente:    `/agents/${agentId}`,
-    registro:  "/logs?dias=7&limite=50",
+    registro:  RUTA_REGISTRO,
+    erroresSemana: RUTA_ERRORES_SEMANA,
     presencia: "/presencia",
     brief:     "/brief/ajustes",
     avisos:    "/avisos/estado",
@@ -143,6 +150,8 @@ export async function leerEstadoSistema(agentId) {
     try { if (r?.ok) datos[claves[i]] = await r.json(); } catch { /* mejor esfuerzo */ }
   }));
   datos.enviados = datos.enviados?.avisos || [];
+  datos.registro = juntarRegistro(datos.registro, datos.erroresSemana);
+  delete datos.erroresSemana;
   return datos;
 }
 
@@ -229,7 +238,7 @@ export function filasDeEstado(sys) {
     tono: !reg ? "muted" : reg.errores ? "red" : reg.entradas.length ? "accent" : "green",
     detalle: !reg ? "sin comprobar"
       : reg.errores ? `${reg.errores} ${reg.errores === 1 ? "error" : "errores"} en 7 días`
-      : reg.entradas.length ? `${reg.entradas.length} avisos en 7 días`
+      : reg.entradas.length ? `${reg.entradas.length}${reg.recortado ? "+" : ""} avisos en 7 días`
       : "sin incidencias en 7 días",
   });
 
@@ -642,6 +651,14 @@ export async function reintentarJob(id, worker) {
   const cuerpo = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(cuerpo.detail || `el backend respondió ${r.status}`);
   return cuerpo;
+}
+
+// Pide encender el PC. `apiFetch` no lanza con un 4xx/5xx, así que sin mirar `r.ok` la
+// pestaña decía «encolado» con cualquier respuesta, aunque el backend no hubiera marcado
+// nada y Home Assistant no fuera a mandar ningún paquete.
+export async function despertarPc() {
+  const r = await apiFetch(`${API}/wake-pc`, { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error(`el backend respondió ${r.status}`);
 }
 
 // ── FASE 3: SALUD DE LOS DATOS ────────────────────────────────────────────────

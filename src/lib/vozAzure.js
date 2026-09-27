@@ -45,6 +45,11 @@ export function abrirVozAzure({ pedirAudio, alFallar }) {
   // una espera a que termine la anterior para ni siquiera empezar a pedirse.
   let adelantado  = null;
   let abortos     = new Set();
+  // Cada `callar` abre una generación nueva. Lo que estuviera a medio camino (pidiendo o
+  // decodificando) es de la anterior y, al volver de su `await`, tiene que irse sin tocar
+  // nada: ni sonar, ni rendirse, ni poner `sonando` a false encima de un turno que ya es
+  // de otro. Con `cerrado || muerto` no bastaba, porque callar no es ninguna de las dos.
+  let generacion  = 0;
 
   function pedir(texto) {
     const control = new AbortController();
@@ -73,6 +78,8 @@ export function abrirVozAzure({ pedirAudio, alFallar }) {
     const turno = cola.shift();
     if (!turno) return;
     const [texto, alFinal] = turno;
+    const mia      = generacion;
+    const caducado = () => mia !== generacion || cerrado || muerto;
     sonando = true;
 
     let audio;
@@ -85,26 +92,29 @@ export function abrirVozAzure({ pedirAudio, alFallar }) {
     } catch {
       // Cortar a Jarvis aborta las peticiones en vuelo, y eso NO es un fallo de la voz:
       // es lo que se pedía. Sin esta comprobación, hablarle encima la mataba y el resto
-      // de la llamada salía por el altavoz del navegador.
+      // de la llamada salía por el altavoz del navegador, empezando justo por la frase
+      // que acababas de cortar.
+      if (caducado()) return;
       adelantado = null;
       sonando = false;
-      if (cerrado || muerto) return;
       rendirse([texto, alFinal]);
       return;
     }
+    if (caducado()) return;
     adelantado = null;
-    if (cerrado || muerto) return;
 
     let buffer;
     try {
       buffer = await ctx.decodeAudioData(audio.slice(0));
     } catch {
       // Un MP3 que no decodifica es un turno mudo, y mudo es el fallo que no se ve.
+      if (caducado()) return;
       sonando = false;
       rendirse([texto, alFinal]);
       return;
     }
-    if (cerrado || muerto) return;
+    // Cortado mientras se decodificaba: esta frase ya no suena.
+    if (caducado()) return;
 
     // iOS suspende el AudioContext en cuanto puede; reanudarlo aquí cubre que lo haya
     // hecho a media llamada, no solo al abrirla.
@@ -159,6 +169,7 @@ export function abrirVozAzure({ pedirAudio, alFallar }) {
      *  barge-in. Lo cancelado no vuelve: si te has puesto a hablar encima, lo que Jarvis
      *  tenía preparado ya no viene a cuento. */
     callar() {
+      generacion++;
       for (const c of abortos) { try { c.abort(); } catch { /* ya estaba */ } }
       abortos = new Set();
       for (const f of fuentes) { try { f.onended = null; f.stop(); } catch { /* ya paró */ } }

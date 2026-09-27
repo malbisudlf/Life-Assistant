@@ -7,7 +7,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 
 import { filasDeEstado, resumenEstado, desdeHace, horaCorta,
-         reconectarOutlook } from "../../src/lib/dev";
+         reconectarOutlook, leerEstadoSistema, LIMITE_REGISTRO } from "../../src/lib/dev";
 
 function fila(sys, nombre) {
   return filasDeEstado(sys).find(f => f.nombre === nombre);
@@ -80,6 +80,35 @@ describe("filasDeEstado", () => {
                    "Coste del modelo");
     expect(f.tono).toBe("accent");
     expect(f.detalle).toContain("falta tarifa");
+  });
+});
+
+describe("el registro de la semana", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  test("un ERROR tapado por cincuenta avisos más recientes sigue saliendo en rojo", async () => {
+    // `/logs` cuenta `errores` sobre las filas que devuelve, que son las 50 últimas y no
+    // la semana: con 50 WARNING encima, el ERROR del martes desaparecía del semáforo.
+    const avisos = Array.from({ length: LIMITE_REGISTRO }, () => ({ level: "WARNING" }));
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = String(url);
+      const json = (cuerpo) => ({ ok: true, status: 200, json: async () => cuerpo });
+      if (u.includes("/logs") && u.includes("nivel=ERROR")) return json({ entradas: [{ level: "ERROR" }], errores: 1 });
+      if (u.includes("/logs")) return json({ entradas: avisos, errores: 0 });
+      if (u.endsWith("/")) return json({ version: "abc1234" });
+      return { ok: false, status: 404, json: async () => ({}) };   // el resto: «no lo sé»
+    }));
+    const sys = await leerEstadoSistema("pc");
+    const f = fila(sys, "Registro");
+    expect(f.tono).toBe("red");
+    expect(f.detalle).toBe("1 error en 7 días");
+    expect(resumenEstado(sys).tono).toBe("red");
+  });
+
+  test("si la muestra llega al límite, el recuento no se da por el de la semana", () => {
+    const entradas = Array.from({ length: LIMITE_REGISTRO }, () => ({}));
+    const f = fila({ ...SANO, registro: { entradas, errores: 0, recortado: true } }, "Registro");
+    expect(f.detalle).toBe(`${LIMITE_REGISTRO}+ avisos en 7 días`);
   });
 });
 

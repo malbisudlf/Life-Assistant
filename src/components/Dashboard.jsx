@@ -61,6 +61,7 @@ import {
   etiquetaAccion, CASA_MAX_FAVORITOS,
 } from "../lib/casa";
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
+import { juntarRegistro, RUTA_REGISTRO, RUTA_ERRORES_SEMANA } from "../lib/registro";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -4041,7 +4042,16 @@ export default function Dashboard() {
         // Lo que se dice mientras trabaja. No espera a nada ni encadena la escucha: es
         // relleno, no la respuesta. Encolado, para que no corte lo que Jarvis ya iba
         // diciendo antes de ponerse a mirar nada.
-        if (tipo === "herramienta" && datos.decir) hablarJarvis(datos.decir, null, { encolar: true });
+        //
+        // Antes del relleno se suelta lo que el modelo escribió antes de pedir la
+        // herramienta («Déjame mirar el calendario.»): esa vuelta ya terminó, y el punto
+        // del final se quedaba en el buffer esperando un espacio que solo llega cuando
+        // la herramienta acaba. Sonaba después del relleno y pegado a la respuesta.
+        if (tipo === "herramienta") {
+          decirTrozos(trocearParaVoz(porTrocear, { fin: true }).trozos);
+          porTrocear = "";
+          if (datos.decir) hablarJarvis(datos.decir, null, { encolar: true });
+        }
         if (tipo === "texto") {
           porTrocear += datos.delta || "";
           const { trozos, resto } = trocearParaVoz(porTrocear);
@@ -4614,14 +4624,17 @@ export default function Dashboard() {
     let gasto = null;
     let enviados = [];
     if (backend.ok) {
-      const [rAgente, rLogs, rPresencia, rBrief, rAvisos, rGasto, rEnviados] = await Promise.all([
+      const [rAgente, rLogs, rPresencia, rBrief, rAvisos, rGasto, rEnviados, rErrores] = await Promise.all([
         apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/logs?dias=7&limite=50`, { headers: authHeaders() }).catch(() => null),
+        apiFetch(`${API}${RUTA_REGISTRO}`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/brief/ajustes`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/avisos/estado`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/gasto?dias=30`, { headers: authHeaders() }).catch(() => null),
         apiFetch(`${API}/avisos/enviados`, { headers: authHeaders() }).catch(() => null),
+        // Los errores de la semana, aparte: los de arriba son solo las 50 últimas filas
+        // (ver `juntarRegistro` en lib/dev.js).
+        apiFetch(`${API}${RUTA_ERRORES_SEMANA}`, { headers: authHeaders() }).catch(() => null),
       ]);
       try {
         if (rAgente?.ok) agente = await rAgente.json();
@@ -4629,6 +4642,9 @@ export default function Dashboard() {
       try {
         if (rLogs?.ok) registro = await rLogs.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
+      try {
+        registro = juntarRegistro(registro, rErrores?.ok ? await rErrores.json() : null);
+      } catch { /* mejor esfuerzo: se queda la cuenta de la muestra */ }
       try {
         if (rPresencia?.ok) presencia = await rPresencia.json();
       } catch { /* mejor esfuerzo: se muestra como desconocido */ }
@@ -5701,15 +5717,19 @@ export default function Dashboard() {
     dia: lineaDia,
     hoy: hoyLinea,
     fuentes: {
-      // /calendar/events y /calendar/classes se piden DESDE hoy (ver el backend), así
-      // que de un día pasado el calendario no sabe nada: decir "sin eventos" ahí sería
-      // afirmar algo que nadie ha comprobado.
+      // /calendar/classes se pide desde la medianoche de hoy, pero /calendar/events desde
+      // AHORA (ver el backend): de un día pasado el calendario no sabe nada, y de hoy le
+      // faltan las reuniones que ya terminaron. Decir "sin eventos" en cualquiera de los
+      // dos casos sería afirmar algo que nadie ha comprobado.
       eventos: authNeeded ? { estado: FUENTE_ERROR, nota: "Outlook sin conectar" }
              : calendarError ? { estado: FUENTE_ERROR, nota: calendarError }
              : loading    ? { estado: FUENTE_CARGANDO }
              : lineaDia < hoyLinea
                ? { estado: FUENTE_PARCIAL, nota: "el calendario solo se consulta desde hoy" }
-               : { estado: FUENTE_OK, datos: [...allEvents, ...classEvents] },
+               : lineaDia === hoyLinea
+                 ? { estado: FUENTE_OK, parcial: true, datos: [...allEvents, ...classEvents],
+                     nota: "Outlook solo desde ahora: lo ya terminado hoy no sale" }
+                 : { estado: FUENTE_OK, datos: [...allEvents, ...classEvents] },
       sueno: healthLoading ? { estado: FUENTE_CARGANDO }
            : !healthData   ? { estado: FUENTE_ERROR }
            : { estado: FUENTE_OK, datos: findMetric(healthData, "sleep_analysis") },

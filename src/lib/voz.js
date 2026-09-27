@@ -36,8 +36,8 @@ export function trocearParaVoz(texto, { min = 40, minFrase = 25, max = 140, fin 
     // Y una frase TERMINADA vale con menos texto que una coma: "Mañana tienes dos clases
     // por la mañana." se dice entera y bien aunque no llegue al mínimo largo, mientras
     // que cortar por una coma tan pronto deja un jirón que suena a tartamudeo.
-    let corte = primerIndiceDe(ventana, CORTES_FUERTES, minFrase);
-    if (corte < 0 && resto.length >= min) corte = primerIndiceDe(ventana, CORTES_FLOJOS, min);
+    let corte = primerIndiceDe(resto, CORTES_FUERTES, minFrase, max, SIGUE_OTRA_FRASE);
+    if (corte < 0 && resto.length >= min) corte = primerIndiceDe(resto, CORTES_FLOJOS, min, max);
     // Ni un punto ni una coma en toda la ventana: alguien está dictando una parrafada.
     // Se corta en el último espacio antes del máximo — a mitad de palabra, nunca.
     if (corte < 0 && resto.length > max) corte = ventana.lastIndexOf(" ");
@@ -55,9 +55,25 @@ export function trocearParaVoz(texto, { min = 40, minFrase = 25, max = 140, fin 
   return { trozos, resto };
 }
 
-function primerIndiceDe(texto, caracteres, desde) {
-  for (let i = Math.max(0, desde - 1); i < texto.length; i++) {
-    if (caracteres.includes(texto[i])) return i;
+// Un signo solo es corte si detrás viene un espacio. Sin esa condición se partía por
+// dentro de «https://», de «elpais.com», de «10:30» o de «23.5», y el trozo llegaba a
+// `textoParaVoz` ya roto: la URL dejaba de parecer una URL y se leía entera. Si el signo
+// es lo último del buffer todavía no se sabe qué le sigue, así que se espera al próximo
+// delta (con `fin`, lo que quede sale igual). El salto de línea es corte por sí mismo.
+//
+// Un signo FUERTE corta además si lo sigue una mayúscula o «¿»/«¡»: es una frase nueva
+// que llegó sin espacio delante, que es como empieza la vuelta del modelo después de
+// usar una herramienta («…el calendario.» y, segundos después, «Tienes…»). Sin esto el
+// punto esperaba a un espacio que no iba a llegar y las dos frases sonaban pegadas. Las
+// URLs, las horas y los decimales siguen enteros: ahí detrás va minúscula o dígito.
+const SIGUE_ESPACIO    = /\s/;
+const SIGUE_OTRA_FRASE = /[\sA-ZÁÉÍÓÚÜÑ¿¡]/;
+
+function primerIndiceDe(texto, caracteres, desde, hasta, sigue = SIGUE_ESPACIO) {
+  const tope = Math.min(texto.length, hasta);
+  for (let i = Math.max(0, desde - 1); i < tope; i++) {
+    if (!caracteres.includes(texto[i])) continue;
+    if (texto[i] === "\n" || sigue.test(texto[i + 1] || "")) return i;
   }
   return -1;
 }

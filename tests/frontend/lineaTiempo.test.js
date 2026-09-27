@@ -237,6 +237,11 @@ describe("normalizarSueno: la noche a caballo entre dos días", () => {
     expect(r[0].hastaMin).toBe(6 * 60 + 30);
   });
 
+  test("las duraciones al borde de la hora llevan el acarreo: 8 h, no 7 h 60 min", () => {
+    const r = normalizarSueno([{ date: DIA, value: 7.996 }], DIA);
+    expect(r[0].detalle).toBe("8 h dormidas");
+  });
+
   test("sin hora de acostarse se sabe que durmió, no cuándo", () => {
     const r = normalizarSueno([{ date: DIA, value: 7 }], DIA);
     expect(r).toHaveLength(1);
@@ -390,6 +395,23 @@ describe("construirLineaTiempo: fuente ausente contra fuente vacía", () => {
     expect(c.estado).toBe(CARRIL_CON_DATOS);
     expect(c.items).toHaveLength(1);
     expect(textoEstadoCarril(c)).toBe("");
+  });
+
+  test("una fuente que solo cubre parte del día no afirma que no pasó nada", () => {
+    // Los eventos de hoy: /calendar/events empieza AHORA, así que la reunión de las 10
+    // no llega si abres el dashboard a las 15. Vacío ahí no es «nada», es «no lo sé».
+    const vacio = soloEventos({ estado: FUENTE_OK, parcial: true, datos: [], nota: "solo desde ahora" });
+    expect(vacio.estado).toBe(FUENTE_PARCIAL);
+    expect(vacio.conocido).toBe(false);
+    expect(textoEstadoCarril(vacio)).not.toBe("Nada este día");
+    expect(vacio.nota).toBe("solo desde ahora");
+    // Lo que sí trae se dibuja igual.
+    const conAlgo = soloEventos({
+      estado: FUENTE_OK, parcial: true,
+      datos: [{ id: "1", title: "Cita", start: "2026-06-15T17:00:00", end: "2026-06-15T18:00:00" }],
+    });
+    expect(conAlgo.estado).toBe(CARRIL_CON_DATOS);
+    expect(conAlgo.items).toHaveLength(1);
   });
 
   test("una fuente que falló, que carga o que no existe NUNCA se pinta vacía", () => {

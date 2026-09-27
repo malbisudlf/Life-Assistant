@@ -933,3 +933,33 @@
   - Moraleja: **un simulador que acepta cualquier petición no prueba la petición.** Con
     APIs de terceros que ponen reglas a la forma de la consulta, el test tiene que mirar
     la URL, no solo lo que se hace con la respuesta.
+
+- **Cortar a Jarvis mataba la voz de Azure y la frase cortada salía por el navegador.**
+  `callar()` abortaba la petición en vuelo a `/voz/decir`, y el `catch` de `siguiente()`
+  solo se callaba el rechazo si la voz estaba `cerrado || muerto`. Callar no es ninguna de
+  las dos, así que el abort de un barge-in se tomaba por una caída de Azure: `rendirse`
+  devolvía la frase a `caerAlNavegador`, que la decía con `speechSynthesis` justo después
+  de cortarle, y el resto de la llamada seguía con esa voz. El comentario del `catch`
+  aseguraba que ese caso estaba cubierto; la condición de debajo no lo cubría. Y con la
+  decodificación a medias, la frase cortada sonaba igual después del corte. El test solo
+  llamaba a `callar()` con el audio ya sonando, que es justo el caso que no fallaba.
+  Hoy cada `callar()` abre una generación nueva, y lo que vuelve de un `await` con una
+  generación vieja se va sin tocar nada.
+  - Moraleja: **después de cada `await`, pregúntate si el mundo que había antes sigue
+    existiendo.** Un par de banderas de estado (`cerrado`, `muerto`) no dicen si alguien
+    ha cortado entre medias; un número de turno sí.
+
+- **El troceado de la voz partía las URLs antes de que nadie pudiera quitarlas.** El
+  modo llamada trocea el texto crudo y `textoParaVoz` limpia cada trozo después. Como
+  `.` y `:` eran corte sin mirar lo que venía detrás, «https://elpais.com/…» llegaba a la
+  limpieza como «https:» y «//elpais.com/…», que ya no parecía una URL: se leía entera.
+  Igual con «10:30» o «23.5 grados», dichos como dos frases. Hoy un signo solo corta si
+  lo sigue un espacio, y si es lo último del buffer se espera al siguiente delta.
+  Esa espera tuvo su propio fallo: cuando el modelo escribe una frase antes de pedir una
+  herramienta («Déjame mirar el calendario.»), el punto queda al final y el siguiente
+  texto no llega hasta que la herramienta acaba, y encima sin espacio delante («Tienes…»).
+  La frase sonaba detrás del relleno y pegada a la respuesta. Por eso el evento
+  `herramienta` vacía el buffer antes del relleno, y un signo fuerte corta también si lo
+  sigue una mayúscula o «¿»/«¡» (dominios, horas y decimales llevan minúscula o dígito).
+  - Moraleja: **una red de seguridad que va detrás de un paso que rompe su entrada no es
+    una red.** Cuando una limpieza reconoce patrones, lo que corre antes no puede partirlos.

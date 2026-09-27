@@ -339,9 +339,12 @@ function horasDeSueno(fila) {
        + (Number(e.light) || 0) + (Number(e.core) || 0);
 }
 
+// Se redondea a minutos ANTES de separar horas: truncar primero y redondear después
+// dejaba «7 h 60 min» en los últimos 30 s de cada hora (7,996 h).
 function textoHoras(h) {
-  const hrs = Math.floor(h);
-  const min = Math.round((h - hrs) * 60);
+  const total = Math.round(h * 60);
+  const hrs   = Math.floor(total / 60);
+  const min   = total % 60;
   return min === 0 ? `${hrs} h` : `${hrs} h ${min} min`;
 }
 
@@ -512,7 +515,11 @@ function carrilBase(id) {
 function estadoDe(fuente, items, resumen) {
   const estado = fuente?.estado || FUENTE_AUSENTE;
   if (estado !== FUENTE_OK) return estado;
-  return (items.length > 0 || resumen) ? CARRIL_CON_DATOS : CARRIL_VACIO;
+  if (items.length > 0 || resumen) return CARRIL_CON_DATOS;
+  // `parcial` en una fuente `ok`: lo que trae es bueno, pero no cubre el día entero (los
+  // eventos de Outlook se piden desde AHORA, no desde medianoche). Lo que dibuja se
+  // dibuja; lo que no puede es afirmar «Nada este día» sobre horas que nadie ha mirado.
+  return fuente.parcial ? FUENTE_PARCIAL : CARRIL_VACIO;
 }
 
 function construirCarril(id, fuente, items, extra = {}) {
