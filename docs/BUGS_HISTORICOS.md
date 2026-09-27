@@ -59,6 +59,31 @@
     respeta.** Si un valor tiene una regla de escritura, todos los que lo escriben pasan
     por ella, también el que lo recalcula entero.
 
+- **Tres defensas de seguridad que solo lo eran en serie, o en parte (2026-09-27).**
+  - **El tope de cuerpo se había arreglado en un endpoint y el fallo vivía en todos.**
+    Con `body: <Modelo>`, FastAPI lee y parsea el JSON entero antes de resolver las
+    dependencias y de entrar en la función, así que ni `Depends(verify_token)` ni el
+    `_token_ok(...)` de la primera línea llegaban a tiempo: sin token, 30 MB se cargaban
+    en memoria y la respuesta era un 422. `/mcp/telefono` ya se había corregido por lo
+    mismo —su docstring lo cuenta— y los 47 endpoints con modelo se quedaron
+    igual. Hoy lo acota `_TopeDeCuerpo` para todas las rutas, antes de leer nada.
+    Moraleja, la de «arreglar un botón no arregla el canal» en otra capa: **cuando un
+    fallo sale de cómo funciona el framework, no está en el endpoint donde se notó.**
+  - **El límite de login contaba, comparaba y apuntaba en tres viajes a Supabase sin
+    nada que los serializara.** Una ráfaga de 40 peticiones leía el recuento antes de
+    que se escribiera el primer fallo y las 40 llegaban a comparar la contraseña, con un
+    límite de 5. Hoy `_login_lock` deja un login a la vez, y el que llega con otro en
+    curso se lleva un 429 al momento: esperando en la cola, una ráfaga habría dejado
+    bloqueados los hilos del pool y con ellos el resto del backend. Moraleja: **un
+    límite que lee, decide y después escribe no limita nada bajo concurrencia**; los
+    tests en serie no lo ven nunca.
+  - **El filtro anti-SSRF preguntaba en negativo y se dejaba un rango.** `_ip_publica`
+    rechazaba privada, loopback, link-local, reservada, multicast y sin especificar, y
+    100.64.0.0/10 (CGNAT, la tailnet de Tailscale) no es ninguna de ellas. Hoy se exige
+    `is_global`. Moraleja: **«solo lo público» se comprueba preguntando si es público**,
+    no enumerando lo que no lo es. El DNS rebinding de ese mismo filtro sigue abierto
+    (`docs/REVISION_2026_08.md` §2.1); el comentario ya no dice lo contrario.
+
 - **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
   2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había
   hecho todo lo que se le pidió. Te despiertas, abres Zepp, sincronizas varias veces; a

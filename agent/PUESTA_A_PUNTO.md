@@ -352,10 +352,10 @@ compone el resumen diario — por eso el backend no llama a ningún LLM.
 - [ ] `fly secrets set`:
       ```bash
       fly secrets set \
-        BRIEF_TO=malbisudlf@gmail.com \
+        BRIEF_TO=tu@gmail.com \
         SMTP_HOST=smtp.gmail.com \
         SMTP_PORT=587 \
-        SMTP_USER=malbisudlf@gmail.com \
+        SMTP_USER=tu@gmail.com \
         SMTP_PASSWORD="tu-contraseña-de-aplicacion" \
         BRIEF_TOKEN=el-token-del-paso-anterior \
         ENTREGAS_MARKER="📚"

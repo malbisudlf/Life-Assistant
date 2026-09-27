@@ -210,6 +210,7 @@ ver `docs/LLAMADAS.md`),
 escrito y apagado: `LLAMADAS=0` apaga solo este camino, no la centralita),
 `MAX_JOB_ATTEMPTS`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_WINDOW_SECONDS`,
 `LOGIN_BLOQUEO_MAX_SECONDS`, `HTTP_TIMEOUT`, `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`,
+`MAX_BODY_BYTES`,
 `AUDIO_MAX_REQUESTS`, `AUDIO_WINDOW_SECONDS`, `TRUST_FORWARDED_FOR`,
 `TRUST_CLOUDFLARE` (hace falta detrás del Cloudflare Tunnel: ver la invariante 3 de
 `CLAUDE.md`), y las de registro

@@ -330,7 +330,11 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
    tope — cargan en memoria lo que mande el cliente y la VM de Fly tiene 1 GB. Usa
    `_leer_cuerpo_limitado(request, limite)` (mira `Content-Length` y además cuenta el
    stream, porque con `Transfer-Encoding: chunked` no hay cabecera que mirar).
-   Límites: `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`.
+   Límites: `MAX_AUDIO_BYTES`, `MAX_INGEST_BYTES`. **Y un `body: <Modelo>` tampoco está
+   acotado por sí solo**: FastAPI lee y parsea ese cuerpo antes de resolver las
+   dependencias, o sea antes de mirar el token. Lo acota para todas las rutas el
+   middleware `_TopeDeCuerpo` (`MAX_BODY_BYTES`, 256 KB); una ruta que necesite más va
+   con su excepción en `_tope_de_cuerpo()`.
 9. **Lo que el agente ejecuta y no se puede validar contra una lista blanca va
    FIRMADO.** El encargo en lenguaje natural (`accion: "encargo"`) rompe la premisa del
    punto 7 —hasta él, todo lo que el PC ejecutaba venía de una URL de

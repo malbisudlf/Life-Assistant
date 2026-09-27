@@ -100,6 +100,61 @@ CORS_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
+
+class _TopeDeCuerpo:
+    """Corta con 413 todo cuerpo que pase de su tope ANTES de que FastAPI lo lea
+    (invariante 8 de `CLAUDE.md`). El tope de cada ruta lo decide `_tope_de_cuerpo()`.
+
+    Con `body: <Modelo>`, FastAPI carga y parsea el JSON entero antes de resolver las
+    dependencias y de entrar en la función: ni `Depends(verify_token)` ni el
+    `_token_ok(...)` de la primera línea llegaban a tiempo, así que un desconocido sin
+    token metía 30 MB en memoria y se llevaba un 422. `/mcp/telefono` ya se había
+    arreglado a mano, y solo él; aquí va una vez para todos los endpoints, para no
+    depender de acordarse ruta a ruta.
+
+    ASGI puro, no `@app.middleware("http")`: hay que envolver `receive` para contar el
+    stream, porque una petición `chunked` no trae `Content-Length` que mirar (mismo
+    criterio que `_leer_cuerpo_limitado`). Se registra ANTES que CORS para quedar por
+    dentro de él y del registro de peticiones: así el 413 lleva las cabeceras de CORS (el
+    navegador lo ve como 413 y no como un fallo de red) y queda apuntado como cualquier 4xx.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # Resuelto en cada petición y no al registrar: el tope sale de constantes que se
+        # definen más abajo (y que los tests cambian con monkeypatch).
+        limite  = _tope_de_cuerpo(scope.get("path", ""))
+        detalle = f"Cuerpo demasiado grande (máximo {limite} bytes)"
+        declarado = dict(scope.get("headers") or []).get(b"content-length", b"")
+        if declarado.isdigit() and int(declarado) > limite:
+            await Response(content=json.dumps({"detail": detalle}), status_code=413,
+                           media_type="application/json")(scope, receive, send)
+            return
+        leidos = 0
+
+        async def receive_contado():
+            nonlocal leidos
+            mensaje = await receive()
+            if mensaje["type"] == "http.request":
+                leidos += len(mensaje.get("body", b""))
+                if leidos > limite:
+                    # HTTPException y no otra cosa: FastAPI reconvierte en 400 cualquier
+                    # otra excepción que salga de leer el cuerpo, y esta la deja pasar
+                    # tal cual hasta su manejador, que responde el 413.
+                    raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                                        detail=detalle)
+            return mensaje
+
+        await self.app(scope, receive_contado, send)
+
+
+app.add_middleware(_TopeDeCuerpo)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -411,6 +466,10 @@ MAX_INGEST_BYTES   = int(os.getenv("MAX_INGEST_BYTES",   str(4 * 1024 * 1024)))
 # firma se comprueba DESPUÉS de leer el cuerpo, así que hasta entonces cualquiera que
 # adivine la URL puede mandarlo.
 MAX_TELEFONO_BYTES = int(os.getenv("MAX_TELEFONO_BYTES", str(64 * 1024)))
+# Tope de cualquier otro cuerpo (`_TopeDeCuerpo`). El JSON más grande que manda hoy un
+# cliente legítimo fuera de las excepciones de `_tope_de_cuerpo()` es un turno de Jarvis
+# con su historial, por debajo de 100 KB: 256 KB dejan margen sin abrirle la puerta a nadie.
+MAX_BODY_BYTES     = int(os.getenv("MAX_BODY_BYTES",     str(256 * 1024)))
 # La transcripción cuesta dinero en cada llamada: limitar el gasto de una sesión
 # comprometida, no solo el consumo de memoria.
 AUDIO_MAX_REQUESTS   = int(os.getenv("AUDIO_MAX_REQUESTS", "10"))
@@ -1184,6 +1243,31 @@ def _check_rate(recurso: str, ip: str, maximo: int, ventana: int):
         _rate_buckets[clave] = recientes
 
 
+def _tope_de_cuerpo(ruta: str) -> int:
+    """Cuántos bytes de cuerpo admite `ruta` antes de leerlo (ver `_TopeDeCuerpo`).
+
+    Las excepciones son las rutas que reciben cuerpos grandes a propósito, y cada una
+    con su propio tope ya existente. Una ruta nueva que necesite más de
+    `MAX_BODY_BYTES` se añade aquí: si no, sus peticiones grandes darán 413.
+    Una excepción solo SUBE el tope, nunca lo baja: la ruta que quiera menos lo aplica
+    ella con `_leer_cuerpo_limitado` después de comprobar el token, como la ingesta,
+    `/telefono/voz` y `/mcp/telefono`. Así su orden de siempre (403 antes que 413) no
+    depende de cómo se configuren los dos topes.
+    """
+    excepciones = {
+        "/health/ingest":        MAX_INGEST_BYTES,
+        "/health/ingest/simple": MAX_INGEST_BYTES,
+        # El multipart envuelve el audio con sus cabeceras y separadores: el margen es
+        # para que un audio justo en el tope siga llegando al 413 con mensaje propio.
+        "/ideas/audio":          MAX_AUDIO_BYTES + 64 * 1024,
+        # La foto de la prenda viaja como data URL dentro del JSON.
+        "/clothing":             _CLOTHING_PHOTO_MAX + 64 * 1024,
+        # Hasta CASA_MAX_ENTIDADES entidades de tres textos cortos cada una.
+        "/ha/entidades":         1024 * 1024,
+    }
+    return max(excepciones.get(ruta, 0), MAX_BODY_BYTES)
+
+
 async def _leer_cuerpo_limitado(request: Request, limite: int) -> bytes:
     """Lee el cuerpo abortando en cuanto se pasa del límite.
 
@@ -1735,16 +1819,36 @@ def _store_result(result: dict):
         "expires_at": expires_at,
     })
 
+# Un login a la vez. Contar los fallos (GET), comparar y apuntar el fallo (POST) son tres
+# pasos contra Supabase: sin serializarlos, todas las peticiones de una ráfaga leían el
+# recuento antes de que se escribiera el primer fallo, y el límite de 5 intentos pasaba a
+# ser tantos como hilos del pool (~40) por ráfaga. Basta un lock de proceso porque hay un
+# solo proceso contra `login_attempts` (dos backends a la vez ya son el problema de
+# «Gemelos»). No se espera a que se libere: el que llega con otro login en curso se
+# lleva un 429 al momento. Esperando, una ráfaga dejaría los 40 hilos del pool bloqueados
+# en la cola del lock y con ellos el resto de endpoints síncronos del backend.
+_login_lock = threading.Lock()
+
+
 @app.post("/auth/password")
 def login_password(body: LoginRequest, request: Request):
-    _check_login_rate()
-    # Comparar bytes: compare_digest sobre str exige ASCII puro y lanza TypeError con
-    # cualquier tilde, lo que devolvía un 500 (y además se saltaba el registro del intento).
-    if not hmac.compare_digest(body.password.encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8")):
-        _register_login_failure(_client_ip(request))
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
-    _reset_login_attempts()
-    return {"token": create_token()}
+    if not _login_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Hay otro intento de login en curso. Reintenta en 1s",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        _check_login_rate()
+        # Comparar bytes: compare_digest sobre str exige ASCII puro y lanza TypeError con
+        # cualquier tilde, lo que devolvía un 500 (y además se saltaba el registro del intento).
+        if not hmac.compare_digest(body.password.encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8")):
+            _register_login_failure(_client_ip(request))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
+        _reset_login_attempts()
+        return {"token": create_token()}
+    finally:
+        _login_lock.release()
 
 @app.get("/auth/login")
 def login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
@@ -19548,6 +19652,11 @@ def _j_borrar_idea(idea_id: str) -> dict:
 #    la instancia y `http://127.0.0.1/` es él mismo. Por eso se resuelve el host y se
 #    exige que TODAS sus IPs sean públicas — y se repite en cada salto de redirección,
 #    porque si no, un 302 a loopback se salta la comprobación entera.
+#    Es un MITIGANTE, no una garantía: `http.get` vuelve a resolver el nombre por su
+#    cuenta, y un dominio con TTL 0 puede contestar una IP pública a la comprobación y
+#    una de la LAN a la petición (DNS rebinding, `docs/REVISION_2026_08.md` §2.1). Desde
+#    que el backend vive en `caja`, detrás están Home Assistant, n8n y el router. Cerrarlo
+#    de verdad pide conectar contra la IP ya validada (Host y SNI a mano); sigue pendiente.
 # 2. Inyección de prompt. Lo que devuelve la web es texto que escribe un desconocido, y
 #    este modelo tiene herramientas que encienden el PC y crean eventos. Va envuelto y
 #    etiquetado como DATO NO FIABLE, igual que el enunciado de Alud en
@@ -19574,8 +19683,12 @@ def _ip_publica(host: str) -> bool:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             return False
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
+        # `not is_global` es lo que cierra el hueco: 100.64.0.0/10 (CGNAT, el rango de la
+        # tailnet de Tailscale, con 100.100.100.100 de resolvedor) no es `is_private` ni
+        # ninguna de las otras, y con solo ellas pasaba el filtro. «Pública» se pregunta
+        # en positivo; una lista de lo que no lo es siempre se deja un rango fuera.
+        if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             return False
     return True
 
