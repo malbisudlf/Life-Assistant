@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'   # misma versión que la imagen de Fly
+          python-version: '3.11'   # misma versión que backend/Dockerfile (python:3.11-slim)
           cache: pip
       - name: Instalar dependencias del backend
         # El runner importa `backend/main.py` tal cual para sacar de ahí el esquema de

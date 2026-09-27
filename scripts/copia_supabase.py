@@ -79,6 +79,13 @@ TIMEOUT = 60
 #     `presence`, `brief_envios`, `informe_envios`, `vigilante_estado`,
 #     `revision_hallazgos`, `averias`, `backend_latidos` — estado operativo y registro.
 #     Se regeneran solos y perderlos no cuesta nada.
+#   · `avisos_llamadas`, `avisos_motivos`, `casa_acciones`, `jarvis_gasto`,
+#     `noche_partes`, `noche_items`, `sesion_avisos`, `migraciones_aplicadas` — lo
+#     mismo: tope diario, diagnóstico, registro, gasto, el turno de cada noche y avisos
+#     efímeros. `migraciones_aplicadas` se rellena sola al volver a aplicar migraciones.
+#   · `presencia_tramos` — registro que se purga a los 35 días, y el dato más sensible
+#     del proyecto: dónde has estado y a qué hora.
+# La lista con nombre está en `SIN_COPIA`, abajo.
 TABLAS = (
     # (nombre,                orden,                     obligatoria, columnas)
     ("health_metrics",        "metric_date,metric_name", True,        None),
@@ -104,7 +111,25 @@ TABLAS = (
     # La checklist de la zona dev: título, porqué y por dónde, escritos a mano. El porqué
     # es justo lo que no se reconstruye meses después (su migración lo dice).
     ("ideas_dev",             "creada,id",               False,       None),
+    # Las alarmas de respaldo. Una que se repite («entre semana a las 7:00») es UNA fila
+    # que se rearma sola, escrita a mano como un recordatorio: sin copia, una restauración
+    # las borraba sin avisar.
+    ("alarmas",               "cuando,id",               False,       None),
 )
+
+# Las tablas que no se copian, con nombre (el porqué, en el comentario de arriba). La
+# copia no las usa: están para que un test cruce `TABLAS` + `SIN_COPIA` con los `create
+# table` de las migraciones. Lo que no estaba en ninguna de las dos no se copiaba ni
+# salía como ausente, porque nunca se preguntaba por ella; así se quedó fuera `alarmas`.
+SIN_COPIA = frozenset({
+    "oauth_tokens",
+    "jobs", "job_events", "job_results", "pc_agents", "app_logs", "login_attempts",
+    "presence", "brief_envios", "informe_envios", "vigilante_estado",
+    "revision_hallazgos", "averias", "backend_latidos",
+    "avisos_llamadas", "avisos_motivos", "casa_acciones", "jarvis_gasto",
+    "noche_partes", "noche_items", "sesion_avisos", "migraciones_aplicadas",
+    "presencia_tramos",
+})
 
 VERSION_FORMATO = 1
 

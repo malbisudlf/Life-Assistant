@@ -345,37 +345,42 @@ compone el resumen diario — por eso el backend no llama a ningún LLM.
 - [ ] Si la copias con espacios (`abcd efgh ijkl mnop`), va entre comillas en el
       comando del paso siguiente.
 
-## 2. Configurar el correo en Fly
+## 2. Configurar el correo en el backend
 
-- [ ] Desde `backend/`, generar el token del disparador: `openssl rand -hex 24`
-      (apuntarlo, hace falta otra vez en el paso 4).
-- [ ] `fly secrets set`:
+El backend vive en `caja` desde el 2026-09-20 y Fly está suspendida: un
+`fly secrets set` hoy escribe en una app que no atiende tráfico, y el correo no sale.
+
+- [ ] Generar el token del disparador: `openssl rand -hex 24` (apuntarlo, hace falta
+      otra vez en el paso 4).
+- [ ] Añadir al fichero de entorno del backend en `caja` (lo gestiona el repositorio
+      HomeLab, que es la fuente de verdad de esa máquina):
       ```bash
-      fly secrets set \
-        BRIEF_TO=tu@gmail.com \
-        SMTP_HOST=smtp.gmail.com \
-        SMTP_PORT=587 \
-        SMTP_USER=tu@gmail.com \
-        SMTP_PASSWORD="tu-contraseña-de-aplicacion" \
-        BRIEF_TOKEN=el-token-del-paso-anterior \
-        ENTREGAS_MARKER="📚"
+      BRIEF_TO=tu@gmail.com
+      SMTP_HOST=smtp.gmail.com
+      SMTP_PORT=587
+      SMTP_USER=tu@gmail.com
+      SMTP_PASSWORD="tu-contraseña-de-aplicacion"
+      BRIEF_TOKEN=el-token-del-paso-anterior
+      ENTREGAS_MARKER="📚"
       ```
 - [ ] `ENTREGAS_MARKER` debe coincidir con `VITE_ENTREGAS_MARKER` de Vercel (por
       defecto los dos son 📚, así que si nunca tocaste el de Vercel ya cuadra).
 
 ## 3. Desplegar el backend
 
-- [ ] `cd backend && fly deploy`.
+- [ ] `desplegar.sh` en `caja`, o el botón *Desplegar* de la pestaña Despliegue de la
+      zona dev (ver CLAUDE.md, «Despliegue»). Sin desplegar, el proceso sigue con el
+      entorno de antes y no ve las variables nuevas.
 - [ ] Comprobar: `curl https://api.lifeassistantbackend.bid/` responde
-      `{"status": "Life Assistant API running"}`.
+      `"status": "Life Assistant API running"` y su `version` es el commit de `main`.
 
 ## 4. Disparador en GitHub
 
 En el repo, Settings → Secrets and variables → Actions:
 
 - [ ] Pestaña **Variables**: `BACKEND_URL` = `https://api.lifeassistantbackend.bid`.
-- [ ] Pestaña **Secrets**: `BRIEF_TOKEN` = el mismo valor exacto que en Fly (si no
-      coinciden, el envío falla con 403).
+- [ ] Pestaña **Secrets**: `BRIEF_TOKEN` = el mismo valor exacto que en el
+      backend (si no coinciden, el envío falla con 403).
 
 ## 5. Ajustar la hora del envío
 
@@ -401,7 +406,8 @@ entiende zonas horarias):
 
 ## Si algo falla
 
-- **403** en el workflow → los `BRIEF_TOKEN` de Fly y de GitHub no coinciden.
+- **403** en el workflow → los `BRIEF_TOKEN` del backend (en `caja`) y de GitHub no
+  coinciden.
 - **503** → falta alguna variable de SMTP (el mensaje de error dice cuál).
 - **404** → el backend no tiene el deploy nuevo (paso 3).
 - **Error de login SMTP** → estás usando la contraseña normal de Gmail, no la de

@@ -995,3 +995,26 @@
     Si un endpoint es `async` solo por leer el cuerpo, lo demás va a un hilo; y al
     arreglar un patrón en un sitio, búscalo en el resto. Cada cliente saliente necesita
     además su propio tope, no el que traiga la librería.
+
+- **La alarma del E2E salía «hoy» de madrugada, y en invierno habría salido a las 07:30.**
+  El simulador la ponía en «`_dia(1)` a las 06:30 UTC»: mañana contado en UTC y una hora
+  que solo son las 08:30 en Madrid con horario de verano. El backend la pasa a
+  `Europe/Madrid` y el widget compara el día con el reloj del navegador, que va en la zona
+  de la máquina. En CI (UTC) siempre salía «mañana»; en local, entre las 00:00 y las 02:00,
+  el mañana UTC ya era hoy y el test fallaba. Y desde el 25 de octubre habría fallado
+  siempre, CI incluido. Hoy el simulador calcula «mañana a las 08:30» en la zona del
+  usuario (`_manana_a_las`) y `playwright.config.js` fija la misma zona para el navegador
+  (`timezoneId`) y para el backend de pruebas (`TIMEZONE`). Hacían falta las dos cosas:
+  arreglar solo el simulador mudaba el fallo a CI.
+  - Moraleja: **un dato de prueba con fecha se escribe en el reloj de quien lo lee.** Si el
+    test habla de «mañana a las 8:30», el fixture tiene que decir eso mismo en esa zona, no
+    su traducción a UTC del día que se escribió.
+
+- **Las alarmas no entraban en la copia de seguridad, y nadie lo había decidido.** La
+  copia solo pregunta por lo que está en `TABLAS`, así que una tabla nueva que no se
+  añadía ahí ni se copiaba ni salía como ausente en el volcado: el hueco no se veía por
+  ninguna parte. Así se quedó fuera `alarmas`, cuyas semanales se escriben a mano como un
+  recordatorio. Hoy las tablas que no se copian están en `SIN_COPIA`, y un test cruza las
+  dos listas con los `create table` de las migraciones.
+  - Moraleja: **una lista blanca sin su lista negra no distingue «decidido» de
+    «olvidado».** Escribe las dos y haz que un test compruebe que entre ambas está todo.

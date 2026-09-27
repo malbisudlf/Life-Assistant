@@ -17,6 +17,10 @@ import { defineConfig, devices } from '@playwright/test'
 const PUERTO_API  = Number(process.env.E2E_PUERTO_API) || 8000
 const PUERTO_WEB  = Number(process.env.E2E_PUERTO_WEB) || 4173
 const URL_API     = `http://127.0.0.1:${PUERTO_API}`
+// La zona del usuario, la misma para el navegador y para el backend de pruebas. Sin
+// fijarla, Chromium usa la de la máquina (UTC en CI, Madrid en local) y el backend la
+// suya, y la alarma de «mañana» salía «hoy» de madrugada. Ver servidor_pruebas.py.
+const ZONA_E2E    = 'Europe/Madrid'
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -30,6 +34,7 @@ export default defineConfig({
 
   use: {
     baseURL: `http://127.0.0.1:${PUERTO_WEB}`,
+    timezoneId: ZONA_E2E,
     // Solo se guardan al fallar: en verde no interesan y engordan el artefacto.
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -57,6 +62,7 @@ export default defineConfig({
   webServer: [
     {
       command: `python tests/e2e/servidor_pruebas.py ${PUERTO_API}`,
+      env: { TIMEZONE: ZONA_E2E },
       url: `${URL_API}/`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,

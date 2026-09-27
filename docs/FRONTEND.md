@@ -36,7 +36,8 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
   una llamada autenticada (la segunda añade `Content-Type: application/json`). No
   vuelvas a escribir `localStorage.getItem("la_token")` suelto en un handler — por
   eso había 28 lecturas repetidas del mismo valor.
-- **URL del backend**: `VITE_API_URL` o el default de Fly. En local, apunta
+- **URL del backend**: `VITE_API_URL` o el default de `src/lib/api.js`, que es el
+  dominio del backend en `caja` (tras el Cloudflare Tunnel). En local, apunta
   `VITE_API_URL` a `http://localhost:8000` (recuerda que el CORS del backend solo
   permite `localhost:5173` y el dominio de Vercel).
 
@@ -51,8 +52,10 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
   rasterizando `icon.svg`: regenéralos si cambia el icono.
 - **Skeletons**: mientras llega la primera carga se muestra `renderBootSkeleton()`
   (cards con shimmer, clase `.la-skel`); si tarda más de 4s aparece el aviso
-  "Despertando el servidor…" (`slowBoot`), porque Fly escala a cero y el arranque en
-  frío tarda 10–15s.
+  "Despertando el servidor…" (`slowBoot`). Nació para el arranque en frío de Fly, que
+  ya no existe: el backend vive en `caja` desde el 2026-09-20 y no se duerme. Hoy lo que
+  lo dispara es un despliegue en curso (`desplegar.sh` para el backend 1-2 minutos) o
+  la red y el túnel lentos. No afines el umbral pensando en un arranque en frío.
 
 ### Widgets
 

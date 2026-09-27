@@ -33,6 +33,9 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
 - `salud_ajustes`, `brief_ajustes` — ajustes que se escribieron a mano una vez.
 - `etf_holdings`, `etf_aportaciones` — la cartera introducida a mano.
 - `ideas_dev` — la checklist de la zona dev: el porqué de cada idea no sale de ningún otro sitio.
+- `alarmas` — las alarmas de respaldo. Una que se repite es una sola fila que se rearma
+  sola, escrita a mano como un recordatorio. Estuvo fuera hasta septiembre de 2026 sin
+  que nadie lo decidiera: una restauración las habría borrado sin avisar.
 
 **Lo que NO se copia, y por qué:**
 
@@ -44,12 +47,20 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
   sola (sale de `gh auth token`).
 - **`jobs`, `job_events`, `job_results`, `pc_agents`, `app_logs`, `login_attempts`,
   `presence`, `brief_envios`, `informe_envios`, `vigilante_estado`,
-  `revision_hallazgos`, `averias`** — estado operativo y registro. Se regeneran solos y
-  perderlos no cuesta nada. `presence` además es una sola fila sin histórico, a
-  propósito (ver `docs/BACKEND_PATRONES.md`).
+  `revision_hallazgos`, `averias`, `backend_latidos`, `avisos_llamadas`,
+  `avisos_motivos`, `casa_acciones`, `jarvis_gasto`, `noche_partes`, `noche_items`,
+  `sesion_avisos`, `migraciones_aplicadas`** — estado operativo y registro. Se regeneran
+  solos y perderlos no cuesta nada. `presence` además es una sola fila sin histórico, a
+  propósito (ver `docs/BACKEND_PATRONES.md`), y `migraciones_aplicadas` se rellena sola
+  al volver a aplicar las migraciones.
+- **`presencia_tramos`** — registro que se purga a los 35 días, y el dato más sensible
+  del proyecto: dónde has estado y a qué hora. No gana nada viajando en un volcado.
 
-Si añades una tabla nueva que guarde algo que el usuario escribió a mano, **añádela a
-`TABLAS`**: lo que no está en esa tupla no se copia.
+Si añades una tabla nueva, **decide dónde va**: en `TABLAS` si guarda algo que el usuario
+escribió a mano, o en `SIN_COPIA` si no. Lo que no está en `TABLAS` no se copia, y
+tampoco sale como ausente en el volcado: nunca se pregunta por ella. Por eso
+`tests/backend/test_arreglos_docs_e2e.py` cruza las dos listas con los `create table`
+de `supabase/migrations/` y falla si una tabla no está en ninguna.
 
 ### Dónde acaba, y por qué está cifrado
 
@@ -219,6 +230,9 @@ Notas de la restauración, aprendidas del esquema:
   el upsert las devuelve a su sitio. Si hay que dejar la tabla exactamente como estaba,
   hay que vaciarla antes, y eso conviene pensarlo dos veces.
 - Los `created_at` van dentro del JSON, así que las filas vuelven con su fecha original.
+- **`alarmas` vuelve con la hora que tenía el día de la copia.** Una `armada` que ya
+  venció no suena tarde: el tick la da por no sonada, te lo avisa y, si se repite, la
+  rearma para la próxima vez (`docs/ALARMAS.md`). Espera un aviso por cada una.
 
 ### Verificación: por qué el script se niega a hacer copias vacías
 

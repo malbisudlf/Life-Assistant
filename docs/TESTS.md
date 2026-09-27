@@ -82,6 +82,12 @@ excepción o error de consola, no solo si falta un texto.
   revés hacía que `/calendar/classes` recibiera calendarios donde espera eventos y
   acabara en un 500 (que además el navegador reporta como error de CORS, porque una
   excepción sin capturar se salta el middleware que pone las cabeceras).
+- **Navegador y backend cuentan los días en la misma zona** (`ZONA_E2E` en
+  `playwright.config.js`: `timezoneId` para el navegador y `TIMEZONE` para el
+  simulador). Sin eso Chromium usa la zona de la máquina, y un «mañana» sale «hoy» según
+  la hora a la que corra. Un dato con fecha que el test lee en palabras se construye en
+  hora local (`_manana_a_las`), no como una hora UTC fija, que cambia con el horario de
+  invierno.
 - `PLAYWRIGHT_CHROMIUM_PATH` apunta a un Chromium ya instalado en entornos que traen
   el suyo y no coincide con la versión de Playwright. En CI no se usa: se descarga el
   que toca, y se guarda en caché por versión de Playwright.

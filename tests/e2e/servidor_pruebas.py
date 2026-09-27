@@ -28,6 +28,10 @@ os.environ.setdefault("HOME_ADDRESS", "Calle Falsa 123, Bilbao")
 # El hilo del registro persistente escribiría en el Supabase simulado sin aportar nada
 # al test, y ensucia la salida.
 os.environ.setdefault("LOG_PERSIST", "0")
+# La zona del usuario, explícita: el navegador del E2E cuenta los días con la misma
+# (`timezoneId` en playwright.config.js, que además la pasa aquí). Si backend y
+# navegador usan relojes distintos, «mañana» y «hoy» dependen de la hora a la que corra.
+os.environ.setdefault("TIMEZONE", "Europe/Madrid")
 # La cartera de Indexa: con el token puesto, el widget de finanzas pide de verdad y el
 # router de abajo responde. Sin él saldría "Sin conectar", que no prueba nada.
 os.environ.setdefault("INDEXA_TOKEN", "indexa-e2e-token")
@@ -69,6 +73,20 @@ import main  # noqa: E402
 
 def _dia(delta: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=delta)).strftime("%Y-%m-%d")
+
+
+def _manana_a_las(hora: int, minuto: int, zona, ahora=None) -> str:
+    """Mañana a esa hora EN LA ZONA DEL USUARIO, en UTC como lo devuelve Supabase.
+
+    No vale `_dia(1)` con una hora UTC fija: «mañana» en UTC es «hoy» en Madrid entre
+    las 00:00 y las 02:00, y 06:30 UTC solo son las 08:30 en horario de verano. El test
+    que lo lee pedía «mañana a las 08:30», así que fallaba de madrugada en local y
+    habría fallado siempre, también en CI, desde el primer día de horario de invierno.
+    """
+    ahora  = ahora or datetime.now(timezone.utc)
+    manana = ahora.astimezone(zona).date() + timedelta(days=1)
+    local  = datetime(manana.year, manana.month, manana.day, hora, minuto, tzinfo=zona)
+    return local.astimezone(timezone.utc).isoformat()
 
 
 def _iso(delta_horas: int) -> str:
@@ -242,10 +260,11 @@ class _RouterSimulado:
         ("/rest/v1/jobs", lambda: _Respuesta([])),
         ("/rest/v1/app_logs", lambda: _Respuesta([])),
         # Una alarma de respaldo puesta para mañana, para que el widget se pinte con
-        # algo de verdad. `cuando` viaja en UTC, como lo devuelve Supabase.
+        # algo de verdad. `cuando` viaja en UTC, como lo devuelve Supabase, pero se
+        # calcula desde la hora LOCAL del usuario (ver `_manana_a_las`).
         ("/rest/v1/alarmas", lambda: _Respuesta([{
             "id": "22222222-2222-4222-8222-222222222222",
-            "cuando": f"{_dia(1)}T06:30:00+00:00", "etiqueta": "Entrenar",
+            "cuando": _manana_a_las(8, 30, main.LOCAL_TZ), "etiqueta": "Entrenar",
             "estado": "armada", "intentos": 0,
         }])),
         # Presencia vigente: el panel de estado la pide y /weather la usa como
