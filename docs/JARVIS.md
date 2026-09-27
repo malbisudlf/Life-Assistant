@@ -378,7 +378,10 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - **«Mañana empiezas pronto»** (`_regla_madrugon`): cruza el primer evento de mañana con
     tu hora habitual de dormirte (`_hora_habitual_dormir`, **mediana** de `sleep_start` —
     una noche en vela desplaza la media y no dice nada del hábito; y una hora de madrugada
-    cuenta como "más tarde", no como dieciocho horas antes). Sin base, no habla.
+    cuenta como "más tarde", no como dieciocho horas antes). Sin base, no habla. La hora
+    habitual se ancla a la **noche anterior al evento**, no al día de la hora recomendada:
+    con un evento a las 08:30 la recomendada es las 00:00, y anclar ahí un hábito de las
+    23:00 lo ponía casi 24 h tarde y avisaba a quien ya se duerme antes de tiempo.
   - **Firma de malestar** (`_regla_malestar`): las tres señales a la vez. Es el espejo en
     Python de `_firmaMalestar` de `helpers.js` — se acepta la duplicación a propósito
     porque las conclusiones no se portan al backend, y allí solo se ve abriendo el
@@ -448,6 +451,10 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - **Las plantillas que leen salud se evalúan una vez por hora**, no en cada tick: traen
     30 días de métricas. Y una plantilla que ya no exista en el código se ignora en vez de
     reventar.
+  - **La huella es por día, salvo en `antes_de_evento`, que es por evento**: esa
+    plantilla devuelve un par (texto, identidad) por cada evento en la ventana. Con la
+    huella `clave:día` de las demás, la segunda clase del mismo día daba con la de la
+    primera en `_ya_dicho` y se callaba.
 
 - **La hora del aviso del reloj se aprende** (`_hora_aviso_reloj`): `RELOJ_AVISO_HORA` era
   una constante elegida a ojo, y este aviso tiene una condición dura —o llega antes de que
@@ -490,6 +497,11 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   Lo extraído se **propone como aviso**, nunca se crea en el calendario: lo que sale de un
   asunto interpretado por un modelo no tiene la fiabilidad para tocar la agenda sola, misma
   frontera que `sugerencia_evento()`.
+  **La huella es el correo, no la frase**: cada asunto va con un número `n` y el modelo
+  dice de cuál sale cada acción, y la huella es un hash del `internetMessageId` (o del id
+  de Graph) más la fecha. Un no leído vuelve a entrar en cada revisión durante
+  `CORREO_HORAS`, y con la frase del modelo de huella bastaba que la redactara distinto
+  para avisar dos veces de lo mismo. Si el modelo no dice el `n`, se vuelve a la frase.
 
 - **Gobierno de los avisos** (`_apuntar_aviso`, el despacho de recordatorios, tabla
   `avisos_reglas` + columnas nuevas en `jarvis_recordatorios`): un asistente proactivo

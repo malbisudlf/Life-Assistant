@@ -108,6 +108,31 @@ class TestPonerAlarma:
 
 
 class TestTickBarato:
+    def test_una_alarma_puesta_mientras_corre_el_tick_no_se_pierde(self, mock_requests):
+        """El alta confirma en Supabase después de que el tick haya leído, y adelanta el
+        reloj. El tick terminaba asignándolo con lo que leyó —otra alarma para mañana—
+        y la nueva no sonaba hasta entonces."""
+        en_cinco = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+        def _get(url, **kw):
+            main._alarma_marcar_pendiente(en_cinco)      # el alta, a mitad del GET
+            return FakeResponse([_fila(minutos_desde_ahora=17 * 60)])
+
+        mock_requests.add("GET", "/rest/v1/alarmas", _get)
+        main._correr_alarmas()
+        assert main._alarma_siguiente <= en_cinco.timestamp()
+
+    def test_lo_apuntado_antes_del_tick_lo_decide_su_lectura(self, mock_requests):
+        """Un apunte anterior al tick ya está en lo que lee (o se canceló): arrastrarlo
+        haría consultar por una alarma que ya no existe."""
+        ahora = main.time.time()
+        main._alarma_apuntes.append((ahora + 300, ahora - 60))
+        mock_requests.add("GET", "/rest/v1/alarmas",
+                          FakeResponse([_fila(minutos_desde_ahora=17 * 60)]))
+        main._correr_alarmas()
+        assert main._alarma_apuntes == []
+        assert main._alarma_siguiente > ahora + 16 * 3600
+
     def test_sin_nada_pendiente_no_consulta_supabase(self, client, mock_requests):
         # El tick pasa 1.440 veces al día. Si cada una costara una consulta, el reloj
         # sería más caro que todo lo demás junto.
@@ -618,6 +643,20 @@ class TestRepeticionSemanal:
         assert cuerpos[1]["estado"] == "armada"
         # Y se dice en el aviso: una alarma que se rearma sin contarlo se da por perdida.
         assert "Vuelvo el" in canal_movil[0]["texto"]
+
+    def test_el_rearme_al_rendirse_no_lo_pisa_el_propio_tick(self, mock_requests, canal_movil):
+        """El rearme apunta su próxima vez, pero el tick recalculaba el reloj solo con
+        las filas que leyó: con otra alarma para dentro de cinco días, la diaria de
+        mañana no se consultaba hasta entonces y acababa en «no pudo sonar»."""
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([
+            _fila(minutos_desde_ahora=-40, estado="escalada", intentos=15,
+                  repetir="1,2,3,4,5,6,7", avisado_hace_min=main.ALARMA_MAX_MIN + 1,
+                  escalado_hace_min=2),
+            _fila(minutos_desde_ahora=5 * 24 * 60,
+                  rid="22222222-2222-2222-2222-222222222222")]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        assert main._alarma_siguiente < main.time.time() + 86400
 
     def test_listar_devuelve_los_dias(self, mock_requests):
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(

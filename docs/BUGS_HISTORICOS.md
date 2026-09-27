@@ -35,6 +35,30 @@
     lee ese estado.** «Reusa entero el camino que ya existe» era verdad para quien
     escribía, no para quien leía.
 
+- **Dos huellas que no eran la situación: una demasiado ancha y otra demasiado fina.**
+  La regla del proyecto ya estaba escrita («la huella es la SITUACIÓN, no el texto») y
+  dos avisos se la saltaban en direcciones opuestas. Las reglas tuyas usaban `clave:día`
+  para todas las plantillas, y en `antes_de_evento` eso juntaba en una sola situación la
+  clase de las 10:00 y la de las 16:00: la segunda se callaba. El correo entrante usaba
+  la frase que redacta el modelo, así que el mismo correo sin leer, redactado distinto en
+  la siguiente revisión, era otra situación y se avisaba otra vez. Hoy la primera va por
+  evento y la segunda por el `internetMessageId` del correo.
+  - Moraleja: **antes de escribir una huella, pregúntate qué cuenta como «lo mismo»**.
+    Si puede pasar dos veces el mismo día, el día no la identifica; y si la escribe un
+    modelo, no identifica nada.
+
+- **El tick de alarmas pisaba el reloj que le acababan de adelantar.**
+  `_alarma_marcar_pendiente` solo adelanta, justo para no saltarse lo que otro camino
+  acaba de apuntar, pero el tick terminaba asignando `_alarma_siguiente` con las filas
+  que había leído al empezar. Una alarma creada mientras corría el GET —o el rearme de
+  una semanal que el propio tick acababa de rendir— se perdía del reloj; con otra alarma
+  para dentro de días, no se volvía a consultar hasta entonces y la nueva acababa en «no
+  pudo sonar». Ahora los apuntes quedan en `_alarma_apuntes` hasta que los ve la lectura
+  de un tick posterior.
+  - Moraleja: **una garantía de «solo adelanta» vale lo que el escritor que no la
+    respeta.** Si un valor tiene una regla de escritura, todos los que lo escriben pasan
+    por ella, también el que lo recalcula entero.
+
 - **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
   2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había
   hecho todo lo que se le pidió. Te despiertas, abres Zepp, sincronizas varias veces; a

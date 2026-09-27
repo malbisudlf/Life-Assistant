@@ -315,6 +315,42 @@ class TestHuecoParaEntrenar(_Reglas):
         assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 5}}) == 0
 
 
+class TestMadrugon(_Reglas):
+    """Con 7,5 h de sueño y 60 min de preparación, un evento entre las 08:30 y las 08:59
+    deja la hora recomendada PASADA la medianoche: es donde se rompía la cuenta."""
+    AHORA = datetime(2026, 8, 17, 22, 0, tzinfo=main.LOCAL_TZ)
+
+    def _caso(self, monkeypatch, hora_evento, habitual):
+        monkeypatch.setattr(main, "SUENO_OBJETIVO_H", 7.5)
+        monkeypatch.setattr(main, "PREP_MANANA_MIN", 60)
+        monkeypatch.setattr(main, "_hora_habitual_dormir", lambda: habitual)
+        manana = self.AHORA + timedelta(days=1)
+        self._eventos(monkeypatch, [self._evento(manana.replace(hour=hora_evento[0],
+                                                                minute=hora_evento[1]))])
+        return main._regla_madrugon()
+
+    def test_quien_ya_duerme_antes_de_medianoche_no_recibe_aviso(self, monkeypatch,
+                                                                 mock_requests):
+        """Evento a las 08:30 → dormido a las 00:00. Quien se duerme a las 23:00 ya va
+        una hora por delante; anclar su hábito al día de la recomendada lo ponía a las
+        23:00 del día siguiente y salía el aviso."""
+        assert self._caso(monkeypatch, (8, 30), (23, 0)) == 0
+        assert self._apuntados(mock_requests) == []
+
+    def test_quien_duerme_tarde_si_recibe_aviso(self, monkeypatch, mock_requests):
+        assert self._caso(monkeypatch, (8, 30), (1, 0)) == 1
+        assert "a las 00:00" in self._apuntados(mock_requests)[0]["texto"]
+
+    def test_la_recomendada_antes_de_medianoche_sigue_igual(self, monkeypatch,
+                                                            mock_requests):
+        assert self._caso(monkeypatch, (7, 0), (0, 30)) == 1
+        assert "a las 22:30" in self._apuntados(mock_requests)[0]["texto"]
+
+    def test_un_habito_temprano_no_avisa_con_recomendada_antes_de_medianoche(
+            self, monkeypatch, mock_requests):
+        assert self._caso(monkeypatch, (7, 0), (23, 0)) == 0
+
+
 class TestAlSalirDeCasa(_Reglas):
     def test_avisa_de_lo_que_queda_encendido(self, monkeypatch, mock_requests):
         monkeypatch.setattr(main, "_casa_entidades", lambda: [
@@ -654,6 +690,38 @@ class TestCorreoEntrante(_Reglas):
         enviado = json.dumps(cliente.recibido[-1]["messages"])
         assert "Cita el jueves" in enviado and "cuerpo" not in enviado
 
+    def test_el_mismo_correo_redactado_distinto_no_avisa_dos_veces(
+            self, monkeypatch, mock_requests):
+        """Un no leído vuelve a entrar en cada revisión, y el modelo lo redacta distinto
+        en cuanto cambia el lote. Con la frase de huella eran dos avisos por lo mismo."""
+        dichas = []
+
+        def _get(url, **kw):
+            return FakeResponse([{"id": "x"}] if any(
+                main.quote(h, safe="") in url for h in dichas) else [])
+
+        def _post(url, **kw):
+            dichas.append(kw["json"]["huella"])
+            return FakeResponse([], 201)
+
+        mock_requests.routes[:0] = [("GET", "jarvis_recordatorios", _get),
+                                    ("POST", "jarvis_recordatorios", _post)]
+        pedido = {"asunto": "Tu pedido llega el martes", "de": "tienda",
+                  "id": "AAMk-pedido", "message_id": "<pedido@tienda>"}
+        monkeypatch.setattr(main, "_cabeceras_recientes", lambda: [pedido])
+        self._modelo(monkeypatch, [{"texto": "Recoger el pedido que llega el martes",
+                                    "fecha": "2026-08-18", "n": 0}])
+        assert main._revisar_correo() == 1
+
+        main._ultima_revision_correo = 0.0
+        monkeypatch.setattr(main, "_cabeceras_recientes",
+                            lambda: [{"asunto": "Otro", "de": "x", "id": "AAMk-otro"}, pedido])
+        self._modelo(monkeypatch, [{"texto": "Tu pedido llega el martes 18",
+                                    "fecha": "2026-08-18", "n": 1}])
+        assert main._revisar_correo() == 0
+        assert len(dichas) == 1
+        assert "pedido" not in dichas[0], "la huella no guarda nada del correo en claro"
+
     def test_un_buzon_caido_no_tumba_el_tick(self, monkeypatch):
         def _revienta():
             raise OSError("no se pudo conectar")
@@ -708,9 +776,41 @@ class TestReglasQueProponeJarvis(_Reglas):
         self._eventos(monkeypatch, [self._evento(ahora + timedelta(minutes=30),
                                                  titulo="Examen de mates")])
         p = {"palabra": "examen", "minutos": 60, "texto": "Lleva la calculadora"}
-        assert "calculadora" in main._plantilla_antes_de_evento(p, ahora)
+        [(texto, _)] = main._plantilla_antes_de_evento(p, ahora)
+        assert "calculadora" in texto
         p2 = {"palabra": "dentista", "minutos": 60, "texto": "x"}
-        assert main._plantilla_antes_de_evento(p2, ahora) is None
+        assert main._plantilla_antes_de_evento(p2, ahora) == []
+
+    def test_antes_de_evento_avisa_de_cada_evento_del_dia(self, monkeypatch, mock_requests):
+        """La huella era `clave:día` para todas las plantillas: la clase de las 16:00
+        daba con la de las 10:00 en la memoria de lo ya dicho y se callaba."""
+        dichas = []
+
+        def _get(url, **kw):
+            return FakeResponse([{"id": "x"}] if any(
+                main.quote(h, safe="") in url for h in dichas) else [])
+
+        def _post(url, **kw):
+            dichas.append(kw["json"]["huella"])
+            return FakeResponse([], 201)
+
+        # Delante de las del fixture: el router se queda con la primera que coincide.
+        mock_requests.routes[:0] = [("GET", "jarvis_recordatorios", _get),
+                                    ("POST", "jarvis_recordatorios", _post)]
+        mock_requests.add("GET", "reglas_usuario", FakeResponse([
+            {"clave": "clase", "plantilla": "antes_de_evento",
+             "parametros": {"palabra": "clase", "minutos": 60, "texto": "Coge el portátil"}}]))
+        dia = self.AHORA.replace(hour=0)
+        self._eventos(monkeypatch, [
+            self._evento(dia.replace(hour=10), titulo="Clase de mates", id="ev-manana"),
+            self._evento(dia.replace(hour=16), titulo="Clase de física", id="ev-tarde")])
+
+        monkeypatch.setattr(main, "_ahora_local", lambda: dia.replace(hour=9, minute=5))
+        assert main._correr_reglas_usuario() == 1
+        assert main._correr_reglas_usuario() == 0, "el mismo evento no se repite"
+        monkeypatch.setattr(main, "_ahora_local", lambda: dia.replace(hour=15, minute=5))
+        assert main._correr_reglas_usuario() == 1
+        assert len(set(dichas)) == 2
 
     def test_la_metrica_tiene_que_existir(self, monkeypatch):
         monkeypatch.setattr(main, "_brief_salud", lambda: {})

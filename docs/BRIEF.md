@@ -173,6 +173,10 @@ backend está en `docs/BACKEND_PATRONES.md`.
       pasa. Un correo a las diez con la noche dentro vale más que uno a las ocho menos
       cuarto sin ella, porque la noche es justo lo que se lee de ese correo; y la hora
       tope ya era el sitio donde este sistema aceptaba salir con lo que hubiera.
+      **Con el resumen pausado o apagado no hay espera ni aviso**: se mira el interruptor
+      antes de abrirla y otra vez antes de avisar (por si lo pausas con ella abierta). Sin
+      eso, cada mañana de vacaciones llegaba «a las 10:00 el resumen sale sin ella» de un
+      resumen que no iba a salir, gastando uno de los avisos del día.
     - **El tick mira en cada vuelta si el sueño ya está**, no solo al avisar: si entró
       por un camino que no pasa por la ingesta, esperar a las diez con el dato guardado
       —o regañarte por no sincronizar algo ya sincronizado— es como se deja de leer un

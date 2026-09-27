@@ -689,6 +689,49 @@ class TestEsperaAlSueno:
         assert fila["fuente"] == "sueno"
         assert fila["despertar_at"][:16] == _a_las(7, 15).astimezone(main.timezone.utc).isoformat()[:16]
 
+    def _pausar(self):
+        hasta = (datetime.now(main.LOCAL_TZ).date() + main.timedelta(days=3)).isoformat()
+        main._cachear_brief_ajustes({"activo": True, "pausado_hasta": hasta})
+
+    def test_con_el_resumen_pausado_no_se_espera_ni_se_avisa(
+            self, client, mock_requests, graph_token, monkeypatch):
+        """El aviso dice «a las 10:00 el resumen sale sin ella», y con la pausa puesta
+        no sale nada: era un aviso falso cada mañana de vacaciones, y gastaba uno de
+        los avisos del día."""
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        self._pausar()
+        avisos = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: avisos.append(regla) or True)
+        reloj(monkeypatch, 7, 15)
+        r = client.post("/despertar?token=brief-token&fuente=cargador")
+        assert r.json()["enviado"] is False
+        assert "esperando_sueno" not in r.json()
+        assert "pausado" in r.json()["motivo"]
+
+        reloj(monkeypatch, 8, 5)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert "aviso_sueno_sin_sincronizar" not in r.json()
+        assert "reloj_sync" not in avisos
+
+    def test_pausado_con_la_espera_ya_abierta_tampoco_avisa(
+            self, client, mock_requests, graph_token, monkeypatch):
+        sueno_de_hoy(mock_requests, False)
+        preparar(mock_requests, monkeypatch)
+        avisos = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: avisos.append(regla) or True)
+        reloj(monkeypatch, 7, 15)
+        assert client.post("/despertar?token=brief-token&fuente=cargador").json()[
+            "esperando_sueno"] is True
+        self._pausar()
+
+        reloj(monkeypatch, 8, 5)
+        r = client.post("/ha/brief-tick?token=ha-poll-token")
+        assert "aviso_sueno_sin_sincronizar" not in r.json()
+        assert "reloj_sync" not in avisos
+
     def test_antes_de_vencer_el_tick_no_toca_nada(
             self, client, mock_requests, graph_token, monkeypatch):
         sueno_de_hoy(mock_requests, False)

@@ -8454,7 +8454,12 @@ def _vigilar_espera_sueno() -> dict:
         _olvidar_despertar()
         return salida
 
-    if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN) or not _espera_marcar_avisada():
+    if (ahora - desde) < timedelta(minutes=BRIEF_ESPERA_SUENO_MIN):
+        return {}
+    # Pausado o apagado DESPUÉS de abrir la espera: el aviso prometería un correo que no
+    # va a salir y gastaría uno de los avisos del día. Antes de marcarla avisada, para que
+    # si se reactiva a media mañana el aviso todavía pueda salir.
+    if _estado_brief(ahora.date().isoformat())["motivo"] or not _espera_marcar_avisada():
         return {}
     minutos = int((ahora - desde).total_seconds() // 60)
     # El texto se arma con el diagnóstico dentro y no con una coletilla añadida porque
@@ -8687,8 +8692,11 @@ def _senal_despertar(etiqueta: str) -> dict:
     # Estás despierto, pero el sueño de esta noche puede no haber sincronizado todavía
     # (la pulsera lo vuelca cuando se abre su app). Mandar el correo ahora sería mandarlo
     # diciendo que no llevaste el reloj. Se apunta la espera y manda quien llegue antes:
-    # el sueño o la hora tope.
-    if _esperar_al_sueno(ahora):
+    # el sueño o la hora tope. Con el resumen pausado o apagado no hay correo que
+    # retener: sin mirarlo, la espera acababa en un aviso de «a las 10:00 el resumen sale
+    # sin ella» cada mañana de vacaciones. Se sigue hasta `enviar_brief_si_toca`, que
+    # devuelve el motivo sin reservar el día.
+    if not _estado_brief(ahora.date().isoformat())["motivo"] and _esperar_al_sueno(ahora):
         _apuntar_despertar(ahora, etiqueta)
         return {"ok": True, "enviado": False, "esperando_sueno": True,
                 "motivo": f"el sueño de esta noche aún no ha llegado; se espera hasta que "
@@ -11335,6 +11343,13 @@ ALARMA_VIVOS        = ("armada", "avisada", "escalada")
 # reinicio del add-on solo cuesta una consulta de más.
 _alarma_siguiente: float | None = None
 _alarma_lock = threading.Lock()
+# Lo que otros caminos apuntan (un alta, una edición, el rearme de una alarma que se
+# repite), como pares (cuándo toca, cuándo se apuntó). El tick recalcula
+# `_alarma_siguiente` con las filas que leyó AL EMPEZAR, así que sin esto pisaba lo que
+# se apuntara mientras corría y la alarma nueva no sonaba hasta la siguiente consulta —
+# a veces al día siguiente, ya como «no pudo sonar». Un apunte se olvida cuando lo ve
+# el GET de un tick que empezó después de hacerse.
+_alarma_apuntes: list = []
 # Lo que la casa tiene que estar haciendo AHORA: la última escalada, mientras la alarma
 # siga sonando. Es lo que devuelve el tick entre consulta y consulta, y existe porque el
 # sensor de HA es un SONDEO: si la escalada solo viajara en la respuesta del tick que la
@@ -11355,6 +11370,7 @@ def _alarma_marcar_pendiente(cuando: Optional[datetime] = None) -> None:
     global _alarma_siguiente
     momento = cuando.timestamp() if cuando else time.time()
     with _alarma_lock:
+        _alarma_apuntes.append((momento, time.time()))
         if _alarma_siguiente is None or momento < _alarma_siguiente:
             _alarma_siguiente = momento
 
@@ -11569,6 +11585,7 @@ def _correr_alarmas() -> dict:
     ahora    = datetime.now(timezone.utc)
     escalada = {"escalar": 0, "id": "", "texto": ""}
     callar   = False
+    inicio   = time.time()          # lo apuntado antes de esto, el GET ya lo ve
 
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
@@ -11642,7 +11659,11 @@ def _correr_alarmas() -> dict:
         # Si no queda nada vivo, se mira dentro de un rato por si alguien apunta una
         # alarma sin pasar por este proceso (otra sesión, un curl). No es un caso real
         # hoy, pero un reloj que se apaga del todo no se vuelve a encender solo.
-        _alarma_siguiente = (siguiente or ahora + timedelta(minutes=15)).timestamp()
+        # Y lo apuntado mientras este tick corría —incluido el rearme que él mismo acaba
+        # de hacer al rendirse— no está en `filas`: se respeta en vez de pisarlo.
+        _alarma_apuntes[:] = [(m, en) for m, en in _alarma_apuntes if en >= inicio]
+        _alarma_siguiente = min([(siguiente or ahora + timedelta(minutes=15)).timestamp()]
+                                + [m for m, _ in _alarma_apuntes])
         if escalada["escalar"]:
             _alarma_sonando = dict(escalada)
         elif callar or (_alarma_sonando and _alarma_sonando["id"] not in ids_vivas):
@@ -13516,9 +13537,14 @@ def _regla_madrugon() -> int:
     recomendada = primero["ini"] - timedelta(minutes=PREP_MANANA_MIN,
                                              hours=SUENO_OBJETIVO_H)
     # Solo si hay que adelantarse de verdad. Media hora es ruido.
-    hab_dt = recomendada.replace(hour=habitual[0], minute=habitual[1])
+    # La hora habitual se ancla a la NOCHE ANTERIOR al evento, no al día de
+    # `recomendada`: con un evento a las 08:30 la recomendada cae a las 00:00 del día
+    # del evento, y anclar ahí un hábito de las 23:00 lo ponía casi 24 h tarde y
+    # disparaba el aviso a quien ya se duerme antes de lo recomendado.
+    hab_dt = (primero["ini"] - timedelta(days=1)).replace(
+        hour=habitual[0], minute=habitual[1], second=0, microsecond=0)
     if habitual[0] < 12:
-        hab_dt += timedelta(days=1) if recomendada.hour >= 12 else timedelta(0)
+        hab_dt += timedelta(days=1)
     if recomendada >= hab_dt - timedelta(minutes=30):
         return 0
     return int(_apuntar_aviso(
@@ -13790,19 +13816,29 @@ def _plantilla_dia_semana(p: dict, ahora: datetime) -> Optional[str]:
     return str(p.get("texto") or "")[:150]
 
 
-def _plantilla_antes_de_evento(p: dict, ahora: datetime) -> Optional[str]:
-    """«Antes de los eventos que digan <palabra>, avísame de <texto>»."""
+def _plantilla_antes_de_evento(p: dict, ahora: datetime) -> list:
+    """«Antes de los eventos que digan <palabra>, avísame de <texto>».
+
+    Devuelve un par (texto, identidad) por CADA evento dentro de la ventana, no solo el
+    primero: la identidad es lo que hace que dos clases el mismo día sean dos avisos. Va
+    resumida en un hash porque los ids de Graph comparten un prefijo larguísimo (el del
+    buzón) y recortarlos por delante los haría iguales entre sí.
+    """
     palabra = str(p.get("palabra") or "").strip().lower()
     if not palabra:
-        return None
+        return []
     minutos = max(5, min(int(p.get("minutos") or 60), 24 * 60))
+    salida = []
     for ev in _eventos_con_fecha(dias=1):
         if palabra not in (ev.get("title") or "").lower():
             continue
         falta = (ev["ini"] - ahora).total_seconds() / 60
         if 0 < falta <= minutos:
-            return f"{str(p.get('texto') or 'Recuerda')[:120]} (para «{ev.get('title')}»)"
-    return None
+            identidad = hashlib.sha256(
+                f"{ev.get('id') or ''}|{ev['ini'].isoformat()}".encode("utf-8")).hexdigest()[:16]
+            salida.append((f"{str(p.get('texto') or 'Recuerda')[:120]} "
+                           f"(para «{ev.get('title')}»)", identidad))
+    return salida
 
 
 def _plantilla_metrica(p: dict, ahora: datetime) -> Optional[str]:
@@ -13951,18 +13987,22 @@ def _correr_reglas_usuario() -> int:
             # si se quita del código una que había reglas usando.
             continue
         try:
-            texto = plantilla["fn"](regla.get("parametros") or {}, ahora)
+            salida = plantilla["fn"](regla.get("parametros") or {}, ahora)
         except Exception:
             logger.exception("Regla de usuario '%s': fallo evaluándola", regla.get("clave"))
             continue
-        if not texto:
-            continue
         # La huella lleva el día: una regla tuya puede repetirse mañana, pero no cada
-        # cinco minutos.
-        if _apuntar_aviso(f"{REGLA_TUYA_PREFIJO}{regla.get('clave')}", texto,
-                          prioridad=PRIO_NORMAL,
-                          huella=f"{regla.get('clave')}:{ahora.date().isoformat()}"):
-            puestos += 1
+        # cinco minutos. Salvo la que dispara una vez POR EVENTO, que devuelve pares
+        # (texto, identidad): con la huella por día, la segunda clase del mismo día
+        # daba con la de la primera y se callaba.
+        avisos = salida if isinstance(salida, list) else [(salida, ahora.date().isoformat())]
+        for texto, identidad in avisos:
+            if not texto:
+                continue
+            if _apuntar_aviso(f"{REGLA_TUYA_PREFIJO}{regla.get('clave')}", texto,
+                              prioridad=PRIO_NORMAL,
+                              huella=f"{regla.get('clave')}:{identidad}"):
+                puestos += 1
     return puestos
 
 
@@ -14016,10 +14056,11 @@ CORREO_HORAS    = int(os.getenv("CORREO_HORAS", "24"))
 _ultima_revision_correo = 0.0
 
 _CORREO_SISTEMA = (
-    "Te paso ASUNTOS de correos recientes. Devuelve SOLO un JSON "
-    '{"acciones": [{"texto": "...", "fecha": "YYYY-MM-DD"}]} con lo que exija hacer algo '
+    "Te paso ASUNTOS de correos recientes, cada uno con su número `n`. Devuelve SOLO un JSON "
+    '{"acciones": [{"texto": "...", "fecha": "YYYY-MM-DD", "n": 0}]} con lo que exija hacer algo '
     "en una fecha concreta de los próximos días: una entrega, una cita, un pago, un "
-    "paquete. NADA de newsletters, promociones ni notificaciones sociales. Si no hay "
+    "paquete. `n` es el número del correo del que sale cada acción. "
+    "NADA de newsletters, promociones ni notificaciones sociales. Si no hay "
     'nada accionable devuelve {"acciones": []}. El texto, en español y en una frase.'
 )
 
@@ -14269,9 +14310,10 @@ def _revisar_correo() -> int:
                       # Al modelo van asunto y remitente, nada más: el uid y el
                       # Message-ID son fontanería para el turno de noche y aquí solo
                       # serían tokens de pago que además despistan.
+                      # El `n` sí va: es lo único que ata cada acción a SU correo.
                       {"role": "user", "content": json.dumps(
-                          [{"asunto": c.get("asunto", ""), "de": c.get("de", "")}
-                           for c in cabeceras], ensure_ascii=False)}],
+                          [{"n": i, "asunto": c.get("asunto", ""), "de": c.get("de", "")}
+                           for i, c in enumerate(cabeceras)], ensure_ascii=False)}],
             response_format={"type": "json_object"},
             **_parametros_modelo(JARVIS_MODEL, 500),
         )
@@ -14291,8 +14333,21 @@ def _revisar_correo() -> int:
         # El aviso se PROPONE para esa fecha, no se crea nada en el calendario: lo que
         # sale de un asunto de correo interpretado por un modelo no tiene la fiabilidad
         # que hace falta para tocar la agenda sola. Misma frontera que sugerencia_evento.
+        # La huella es el CORREO, no la frase: un no leído vuelve a entrar en cada
+        # revisión durante CORREO_HORAS, y el modelo lo redacta distinto en cuanto cambia
+        # el lote, así que con la frase de huella el mismo correo avisaba varias veces.
+        # Resumido en un hash para no guardar identificadores del buzón en claro. Si el
+        # modelo no dice de qué correo sale, se queda la frase: peor, pero no se calla.
+        n = (a or {}).get("n")
+        origen = cabeceras[n] if isinstance(n, int) and 0 <= n < len(cabeceras) else None
+        clave_correo = (origen or {}).get("message_id") or (origen or {}).get("id")
+        if clave_correo:
+            resumen = hashlib.sha256(f"{clave_correo}|{fecha}".encode("utf-8")).hexdigest()
+            huella = f"correo:{resumen[:32]}"
+        else:
+            huella = f"correo:{texto[:60]}"
         if _apuntar_aviso("correo", f"Del buzón: {texto} ({fecha}).",
-                          prioridad=PRIO_NORMAL, huella=f"correo:{texto[:60]}"):
+                          prioridad=PRIO_NORMAL, huella=huella):
             puestos += 1
     return puestos
 

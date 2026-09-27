@@ -256,6 +256,7 @@ def _limpiar_estado():
     # obliga al siguiente tick a consultar; sin resetearlo, un test que deje una alarma
     # lejana haría que el siguiente ni mirase.
     main._alarma_siguiente = None
+    main._alarma_apuntes.clear()
     # La última escalada en pie (lo que el tick repite mientras suena) y la espera al
     # sueño del resumen: las dos viven en memoria y las dos deciden lo que contesta el
     # siguiente tick, así que un test que las deje puestas cambia el resultado de otro.

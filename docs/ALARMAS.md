@@ -86,7 +86,12 @@ despertador que suena el domingo, no un fallo.
 - **Y aun así el tick es barato.** `_alarma_siguiente` recuerda en memoria cuándo hay algo
   que hacer; hasta entonces el endpoint no toca Supabase. Las ~1.400 veces al día en que
   no hay nada puesto no cuestan una consulta. Es la misma economía que se le exige al
-  brief-tick, y hay un test que la protege.
+  brief-tick, y hay un test que la protege. **Ese reloj solo se adelanta desde fuera, y
+  el tick no puede pisarlo**: lo recalcula con las filas que leyó al empezar, así que lo
+  que se apunte mientras corre (un alta, una edición, el rearme de una semanal que él
+  mismo acaba de rendir) queda en `_alarma_apuntes` y entra en la cuenta final. Antes lo
+  sobrescribía, y con otra alarma para dentro de días la nueva no se consultaba hasta
+  entonces y acababa en «no pudo sonar».
 - **`GET` con efectos, a propósito.** Un sensor REST de HA solo sabe hacer GET, y en este
   proyecto el sondeo de HA *es* el reloj. Mismo patrón que `/ha/avisos-pending` y
   `/ha/ordenes-pending`, que además vacían su cola al leerla.
