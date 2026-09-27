@@ -344,23 +344,52 @@ saber es distinto de saber que no llegó nada.
   —es lo único que quieres de esa pantalla en ese momento— y se recarga solo cada minuto
   mientras haya algo vivo. La lógica pura (`alarmaEnPalabras`, `alarmaEstadoTexto`,
   `alarmaSonando`) está en `helpers.js`; el resto, en `docs/ALARMAS.md`.
-- **`casa`** es el mando de la casa: una línea de estado (presencia y edad del catálogo),
+- **`casa`** es el mando de la casa: una línea de estado (presencia y de dónde sale lo que se ve),
   una fila con las escenas y scripts (ocho como mucho) y una rejilla de fichas de los
   favoritos que se tocan para encender, apagar, abrir o bloquear. Pide
   `GET /casa/estado` (una sola petición: catálogo, sugeridos, órdenes recientes y
   presencia) y manda `POST /casa/orden`. La lógica pura está en `src/lib/casa.js`, con
   tests. Lo que conviene saber antes de tocarlo:
-  - **Se manda lo contrario de lo que se VE, nunca `toggle`.** El catálogo de HA llega cada
-    hora, así que el «encendida» de la ficha puede tener cincuenta minutos; si la luz ya
-    estaba apagada, un toggle la encendería justo cuando querías apagarla. Con
-    `turn_on`/`turn_off` el peor caso es pedir lo que ya estaba. El cliente tampoco manda
-    servicios: manda una acción (`encender`, `abrir`…) y el backend fija el servicio.
+  - **De dónde sale lo que se ve** (`fuente` de `/casa/estado`). Con Home Assistant en
+    directo (`HA_URL`/`HA_TOKEN` en el backend, ver `docs/HOME_ASSISTANT_FLUJOS.md`) el
+    estado es el de HA de hace unos segundos y la línea dice «estado de la casa en
+    directo». Si no hay directo, sale del catálogo, que llega cada hora: la línea dice su
+    edad y pasa a color de aviso con «puede no ser el real» a partir de hora y media. Si
+    hay directo y HA no contesta, lo dice siempre («Home Assistant no contesta: estado de
+    la casa de hace…»), aunque el catálogo sea reciente. Todo eso, en `textoFuenteCasa`.
+  - **Se manda lo contrario de lo que se VE, nunca `toggle`.** Aunque haya directo, el dato
+    puede ser del catálogo (HA no contesta), y el «encendida» de la ficha tener cincuenta
+    minutos; si la luz ya estaba apagada, un toggle la encendería justo cuando querías
+    apagarla. Con `turn_on`/`turn_off` el peor caso es pedir lo que ya estaba. El cliente
+    tampoco manda servicios: manda una acción (`encender`, `abrir`…) y el backend fija el
+    servicio.
   - **La ficha dice cómo va su orden**: «pedido…» al instante (el pedido optimista se
-    marca antes del fetch), «HA la recogió» cuando HA vacía la cola, nada cuando el
-    catálogo confirma el estado, y «no se ejecutó» —volviendo al estado del catálogo— si
-    caduca. Mientras hay algo en cola, o recogido hace menos de dos minutos, el widget
-    pregunta cada 5 s; si no, cada minuto y solo con la pestaña a la vista. Oculto no
-    pregunta nada.
+    marca antes del fetch). Con directo, la respuesta de `POST /casa/orden` ya trae la
+    orden `hecha`. Durante `HECHA_GRACIA_MS` manda **lo pedido**, diga lo que diga la
+    lectura: la de justo después de la orden puede ser todavía la de antes (integraciones
+    que tardan en reflejar el cambio), y darle prioridad devolvía la ficha a «apagada» con
+    el ventilador encendido. `estado_entidad` solo cuenta cuando no hay nada pedido que
+    esperar (escenas, play/pausa). Después manda lo que traiga el refresco, que es lo que se
+    entera si alguien lo apaga a mano; y la gracia se mide con la hora de la **última
+    lectura** (`casa.leidoMs`), no con el reloj del minuto, para que la cierre una lectura
+    posterior. Por la cola: «HA la recogió» cuando HA la vacía, nada cuando el estado confirma
+    la orden, y «no se ejecutó» —volviendo al estado de antes— si caduca. Los otros dos
+    finales del directo, en rojo y en color de aviso (`tonoFase`):
+    - **«HA la rechazó»** (`rechazada`, un 502 de `POST /casa/orden` con su `detail` bajo la
+      ficha unos segundos, y luego la marca): HA dijo que no, no se ha hecho ni va a
+      hacerse. La ficha enseña lo que hay.
+    - **«sin confirmar: mira en unos segundos»** (`sin_confirmar`): HA la recibió y no
+      contestó. **Sin optimismo** —lo pedido podría ser mentira— y sin reintentar: la ficha
+      enseña la lectura, que el backend ha forzado a ser nueva, y si esa lectura dice lo
+      pedido el backend la pasa a `confirmada` y la marca se va sola. En una escena, el
+      acuse dice «HA no la confirmó» en vez de «✓ enviada» (`acuseActivar`).
+  - **Cuándo pregunta** (`intervaloRefrescoCasa`): cada 5 s mientras hay algo en cola o
+    recogido o sin confirmar hace menos de dos minutos, y también mientras una orden hecha en directo esté
+    en su gracia o acabe de salir de ella (`hayHechaReciente`); cada 10 s con directo configurado (la pregunta no
+    sale de la LAN de casa y es lo que hace que el mando no mienta; también si HA no
+    contesta, para que el aviso se quite solo cuando vuelva); y cada minuto si solo hay
+    catálogo, que no cambia más que cada hora. Siempre **solo con la pestaña a la vista y
+    el widget puesto**: oculto no pregunta nada.
   - **Persianas y cerraduras se confirman dentro del widget** («¿Abrir Garaje?»), no con
     `window.confirm`. Un 409 del backend abre la misma confirmación: si el backend exige
     algo que el cliente no había previsto, se pregunta igual.
@@ -372,8 +401,7 @@ saber es distinto de saber que no llegó nada.
     ventiladores; nunca `switch` por dominio). «Volver a los sugeridos» borra la clave.
   - Estados: «Cargando…»; «No se pudo leer la casa.» con «Reintentar» (un refresco que
     falla no borra lo que ya se veía); sin catálogo, que HA todavía no lo ha mandado; y con
-    catálogo pero sin favoritos, «Elige qué quieres tener a mano». La edad del catálogo
-    pasa a color de aviso con «puede no ser el real» a partir de hora y media.
+    catálogo pero sin favoritos, «Elige qué quieres tener a mano».
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
   "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,

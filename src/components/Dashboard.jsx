@@ -55,9 +55,9 @@ import {
 } from "../lib/ideas";
 import {
   accionAlTocar, iconoDominio, textoEstado, estadoActivo, estadoFicha, ordenVigentePorEntidad,
-  ordenEfectiva, hayOrdenesSinResolver, textoEdad, catalogoViejo, textoPresencia,
+  ordenEfectiva, intervaloRefrescoCasa, textoFuenteCasa, textoPresencia,
   favoritosEfectivos, filtrarCatalogo, escenasYScripts, ACCIONES_POR_DOMINIO, dominioDe,
-  etiquetaAccion, CASA_MAX_FAVORITOS,
+  etiquetaAccion, tonoFase, acuseActivar, CASA_MAX_FAVORITOS,
 } from "../lib/casa";
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
 import { leerEstadoSistema } from "../lib/estadoSistema";
@@ -2917,20 +2917,25 @@ export default function Dashboard() {
     [simpleMode, simpleWidgetConfig, widgetConfig],
   );
   useEffect(() => { if (token && casaVisible) loadCasa(); }, [token, casaVisible]);
-  // Cada minuto con la pestaña a la vista, y cada 5 s solo mientras alguna orden siga sin
-  // resolver: es lo que hace que la ficha pase de «pedido…» a «HA la recogió» sin tocar
-  // nada. /casa/estado no llama a nada de pago, pero aun así no se pregunta a ciegas.
-  const casaRapido = hayOrdenesSinResolver(casa.datos?.ordenes, now.getTime());
+  // Solo con el widget puesto y la pestaña a la vista, y a un ritmo que depende de lo que
+  // haya (`intervaloRefrescoCasa`): cada 5 s mientras alguna orden siga sin resolver —es
+  // lo que hace que la ficha pase de «pedido…» a «HA la recogió» sin tocar nada—, cada
+  // 10 s con Home Assistant en directo, y cada minuto si el dato es del catálogo, que no
+  // cambia más que cada hora. /casa/estado no llama a nada de pago, pero aun así no se
+  // pregunta a ciegas. Tras una orden hecha en directo, también cada 5 s hasta que una
+  // lectura posterior a la gracia diga cómo quedó (`hayHechaReciente`).
+  const casaAhoraMs   = Math.max(now.getTime(), casa.leidoMs || 0);
+  const casaIntervalo = intervaloRefrescoCasa(casa.datos, casaAhoraMs);
   useEffect(() => {
     if (!token || !casaVisible) return;
     const t = setInterval(() => {
       if (document.visibilityState === "visible") loadCasa();
-    }, casaRapido ? 5000 : 60000);
+    }, casaIntervalo);
     // Al volver a la pestaña, lo de ahora: el último dato puede ser de hace una hora.
     const alVolver = () => { if (document.visibilityState === "visible") loadCasa(); };
     document.addEventListener("visibilitychange", alVolver);
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", alVolver); };
-  }, [token, casaVisible, casaRapido]);
+  }, [token, casaVisible, casaIntervalo]);
 
   // Cargar ideas. Un fallo NO deja la lista vacía sin más: antes se tragaba el error y
   // el widget decía «Sin ideas todavía», que es mentira cuando lo que pasa es que el
@@ -4851,12 +4856,16 @@ export default function Dashboard() {
   // ── Casa: el mando ─────────────────────────────────────────────────────────
   // Un refresco que falla no borra lo que ya se estaba viendo: el error solo se pinta si
   // no hay nada que enseñar. Lo de antes, con su edad, dice más que «no se pudo leer».
+  // `leidoMs` es cuándo llegó la lectura: es el «ahora» con el que la ficha mide la gracia
+  // de una orden recién hecha, para que la cierre una lectura POSTERIOR y no el reloj del
+  // minuto (`now`), que puede ir casi un minuto por detrás y alargaba o acortaba la gracia
+  // según cayera.
   async function loadCasa() {
     try {
       const r = await apiFetch(`${API}/casa/estado`, { headers: authHeaders() });
       if (!r.ok) throw new Error("casa");
       const datos = await r.json();
-      setCasa({ estado: FUENTE_OK, datos });
+      setCasa({ estado: FUENTE_OK, datos, leidoMs: Date.now() });
     } catch {
       setCasa(previo => (previo.datos ? previo : { estado: FUENTE_ERROR, datos: null }));
     }
@@ -4896,9 +4905,17 @@ export default function Dashboard() {
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok) {
+        // Con HA en directo la respuesta ya dice en qué quedó (`hecha`) y, si HA lo dijo al
+        // contestar, cómo está el aparato. Durante la gracia manda lo pedido (estadoFicha):
+        // el loadCasa de justo aquí puede traer todavía el estado de antes.
         setCasaPedidos(p => (p[entidad]?.momento === momento
-          ? { ...p, [entidad]: { ...p[entidad], id: d.orden?.id ?? null } } : p));
-        if (accion === "activar") avisoCasa(entidad, "✓ enviada", "ok", 4000);
+          ? { ...p, [entidad]: { ...p[entidad], id: d.orden?.id ?? null,
+                                 estado: d.orden?.estado || "en_cola",
+                                 estadoEntidad: d.estado_entidad || null } } : p));
+        if (accion === "activar") {
+          const acuse = acuseActivar(d.orden?.estado);
+          avisoCasa(entidad, acuse.texto, acuse.tipo, acuse.tipo === "ok" ? 4000 : 8000);
+        }
         loadCasa();
         return;
       }
@@ -4909,6 +4926,9 @@ export default function Dashboard() {
         return;
       }
       avisoCasa(entidad, typeof d.detail === "string" ? d.detail : "No se pudo mandar la orden");
+      // Si HA la rechazó, el backend la tiene en el historial como `rechazada`: el
+      // refresco es lo que deja la marca en la ficha cuando el aviso se va.
+      loadCasa();
     } catch {
       quitarPedidoCasa(entidad, momento);
       avisoCasa(entidad, "No se pudo mandar la orden");
@@ -6896,12 +6916,11 @@ export default function Dashboard() {
         const conocido   = !!d?.catalogo?.conocido;
         const entidades  = d?.entidades || [];
         const porId      = Object.fromEntries(entidades.map(e => [e.id, e]));
-        const ahoraMs    = now.getTime();
+        const ahoraMs    = casaAhoraMs;
         const ordenes    = ordenVigentePorEntidad(d?.ordenes);
         const favoritos  = favoritosEfectivos(casaFavoritos, d?.sugeridas, entidades);
         const escenas    = escenasYScripts(entidades);
-        const edad       = d?.catalogo?.edad_min;
-        const viejo      = catalogoViejo(edad);
+        const fuente     = textoFuenteCasa(d);
         const confirmar  = casaConfirmar && porId[casaConfirmar.entidad] ? casaConfirmar : null;
         const botonCabecera = {
           padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
@@ -6940,13 +6959,14 @@ export default function Dashboard() {
 
             {d && (
               <>
-                {/* Dónde estás y de cuándo es lo que se ve: el catálogo llega cada hora, y un
-                    «encendida» de hace dos no es un dato de ahora. */}
+                {/* Dónde estás y de dónde sale lo que se ve: en directo de Home Assistant o
+                    del catálogo, que llega cada hora, y un «encendida» de hace dos no es un
+                    dato de ahora. Si HA debería contestar y no lo hace, se dice. */}
                 <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 }}>
                   {textoPresencia(d.presencia)}
-                  {conocido && (
-                    <span style={{ color: viejo ? "var(--accent)" : "var(--muted2)" }}>
-                      {` · estado de la casa de ${textoEdad(edad)}`}{viejo ? ", puede no ser el real" : ""}
+                  {fuente.texto && (
+                    <span style={{ color: fuente.aviso ? "var(--accent)" : "var(--muted2)" }}>
+                      {` · ${fuente.texto}`}
                     </span>
                   )}
                 </div>
@@ -6993,7 +7013,8 @@ export default function Dashboard() {
                           style={{ flex: "1 1 120px", minWidth: 0, padding: "8px 10px", borderRadius: 8,
                             background: "var(--surface2)", fontFamily: "'DM Sans', sans-serif", fontSize: 12,
                             border: `0.5px solid ${aviso?.tipo === "ok" ? "var(--green)" : "var(--border2)"}`,
-                            color: aviso ? (aviso.tipo === "ok" ? "var(--green)" : "#d4645a") : "var(--text)",
+                            color: aviso ? (aviso.tipo === "ok" ? "var(--green)"
+                              : aviso.tipo === "aviso" ? "var(--accent)" : "#d4645a") : "var(--text)",
                             cursor: enviando ? "default" : "pointer",
                             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {enviando ? "…" : aviso ? aviso.texto : `${iconoDominio(dominioDe(e))} ${e.nombre}`}
@@ -7041,8 +7062,10 @@ export default function Dashboard() {
                           </span>
                           {(aviso || texto) && (
                             <span style={{ fontSize: 10.5, lineHeight: 1.3, width: "100%",
-                              color: aviso?.tipo === "error" || fase === "caducada" ? "#d4645a"
-                                : aviso?.tipo === "ok" ? "var(--green)" : "var(--muted)" }}>
+                              color: aviso?.tipo === "error" || (!aviso && tonoFase(fase) === "error") ? "#d4645a"
+                                : aviso?.tipo === "ok" ? "var(--green)"
+                                : aviso?.tipo === "aviso" || (!aviso && tonoFase(fase) === "aviso") ? "var(--accent)"
+                                : "var(--muted)" }}>
                               {aviso ? aviso.texto : texto}
                             </span>
                           )}

@@ -3,7 +3,9 @@ import {
   accionAlTocar, iconoDominio, estadoFicha, ordenVigentePorEntidad, ordenEfectiva,
   hayOrdenesSinResolver, textoEdad, catalogoViejo, textoPresencia, favoritosEfectivos,
   filtrarCatalogo, escenasYScripts, estadoEsperado, textoEstado, ACCIONES_POR_DOMINIO,
-  VENTANA_ORDENES_MS,
+  VENTANA_ORDENES_MS, HECHA_GRACIA_MS, intervaloRefrescoCasa, textoFuenteCasa,
+  REFRESCO_ORDENES_MS, REFRESCO_VIVO_MS, REFRESCO_CATALOGO_MS, RECOGIDA_RECIENTE_MS,
+  tonoFase, acuseActivar,
 } from "../../src/lib/casa";
 
 const luz = (estado, extra = {}) => ({ id: "light.salon", nombre: "Salón", estado, dominio: "light", solo_lectura: false, ...extra });
@@ -212,5 +214,138 @@ describe("filtrarCatalogo y escenasYScripts", () => {
     const muchas = Array.from({ length: 12 }, (_, i) => ({ id: `scene.s${i}`, nombre: `S${i}` }));
     expect(escenasYScripts(muchas)).toHaveLength(8);
     expect(escenasYScripts(null)).toEqual([]);
+  });
+});
+
+describe("Home Assistant en directo", () => {
+  const orden = (extra = {}) => ({ id: "k", entidad: "fan.techo", servicio: "fan.turn_on",
+    estado: "hecha", momento: AHORA - 2000, ...extra });
+  const ventilador = estado => ({ id: "fan.techo", nombre: "Ventilador", estado, dominio: "fan" });
+
+  test("una orden hecha enseña lo pedido durante la gracia, sin marca", () => {
+    expect(estadoFicha(ventilador("off"), orden({ estadoEntidad: "on" }), AHORA)).toEqual(
+      { estadoVisto: "on", fase: null, texto: "" });
+    // El caso que lo trajo: encender el ventilador, y la lectura de justo después todavía
+    // dice «off» porque la integración tarda en reflejarlo. Ni esa lectura ni la del
+    // refresco inmediato pueden devolver la ficha a «apagada».
+    expect(estadoFicha(ventilador("off"), orden({ estadoEntidad: "off" }), AHORA).estadoVisto).toBe("on");
+  });
+
+  test("lo que HA dijo que quedó cuenta cuando no hay nada pedido que esperar", () => {
+    const altavoz = { id: "media_player.salon", estado: "paused", dominio: "media_player" };
+    const playPausa = orden({ entidad: "media_player.salon", servicio: "media_player.media_play_pause",
+                              estadoEntidad: "playing" });
+    expect(estadoFicha(altavoz, playPausa, AHORA).estadoVisto).toBe("playing");
+    expect(estadoFicha(altavoz, { ...playPausa, estadoEntidad: null }, AHORA).estadoVisto).toBe("paused");
+  });
+
+  test("la gracia la cierra una lectura posterior, y hasta entonces se pregunta a menudo", () => {
+    const hecha = [{ estado: "hecha", pedida: new Date(AHORA - 2000).toISOString() }];
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: hecha }, AHORA)).toBe(REFRESCO_ORDENES_MS);
+    // Justo pasada la gracia, todavía una lectura más al ritmo rápido.
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: hecha },
+                                 AHORA - 2000 + HECHA_GRACIA_MS + 1000)).toBe(REFRESCO_ORDENES_MS);
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: hecha },
+                                 AHORA - 2000 + HECHA_GRACIA_MS + REFRESCO_ORDENES_MS)).toBe(REFRESCO_VIVO_MS);
+  });
+
+  test("sin lectura, lo pedido unos segundos y luego lo que diga el refresco", () => {
+    expect(estadoFicha(ventilador("off"), orden(), AHORA).estadoVisto).toBe("on");
+    const pasada = orden({ estadoEntidad: "on", momento: AHORA - HECHA_GRACIA_MS - 1000 });
+    // Alguien lo apagó a mano después: manda el dato de ahora, no la lectura de entonces.
+    expect(estadoFicha(ventilador("off"), pasada, AHORA).estadoVisto).toBe("off");
+  });
+
+  test("la respuesta de la orden cuenta antes del refresco y sobrevive a él", () => {
+    const local = { id: "k", servicio: "fan.turn_on", momento: AHORA - 1000,
+                    estado: "hecha", estadoEntidad: "on" };
+    expect(ordenEfectiva(null, local, AHORA)).toMatchObject({ estado: "hecha", estadoEntidad: "on" });
+    const suya = { id: "k", estado: "hecha", pedida: new Date(AHORA - 1000).toISOString() };
+    expect(ordenEfectiva(suya, local, AHORA)).toMatchObject({ estado: "hecha", estadoEntidad: "on" });
+    // Mientras viaja, sin estado todavía, sigue siendo «pedido…».
+    expect(ordenEfectiva(null, { ...local, id: null, estado: undefined }, AHORA).estado).toBe("en_cola");
+  });
+
+  test("una orden hecha no deja el widget preguntando cada 5 s", () => {
+    expect(hayOrdenesSinResolver([{ estado: "hecha", pedida: new Date(AHORA).toISOString() }], AHORA)).toBe(false);
+    const vieja = [{ estado: "hecha", pedida: new Date(AHORA - 60 * 1000).toISOString() }];
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: vieja }, AHORA)).toBe(REFRESCO_VIVO_MS);
+  });
+
+  test("el ritmo del refresco depende de lo que haya", () => {
+    const pendiente = [{ estado: "en_cola", pedida: new Date(AHORA).toISOString() }];
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: pendiente }, AHORA)).toBe(REFRESCO_ORDENES_MS);
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ha_directo: true }, AHORA)).toBe(REFRESCO_VIVO_MS);
+    // HA configurado pero sin contestar: se sigue preguntando a menudo para notar que vuelve.
+    expect(intervaloRefrescoCasa({ fuente: "catalogo", ha_directo: true }, AHORA)).toBe(REFRESCO_VIVO_MS);
+    expect(intervaloRefrescoCasa({ fuente: "catalogo", ha_directo: false }, AHORA)).toBe(REFRESCO_CATALOGO_MS);
+    expect(intervaloRefrescoCasa(null, AHORA)).toBe(REFRESCO_CATALOGO_MS);
+  });
+
+  test("el aviso de dato viejo solo cuando el dato es del catálogo", () => {
+    const catalogo = edad_min => ({ conocido: true, edad_min });
+    expect(textoFuenteCasa({ fuente: "vivo", ha_directo: true, catalogo: catalogo(300) }))
+      .toEqual({ texto: "estado de la casa en directo", aviso: false });
+    expect(textoFuenteCasa({ fuente: "catalogo", ha_directo: false, catalogo: catalogo(30) }))
+      .toEqual({ texto: "estado de la casa de hace 30 min", aviso: false });
+    expect(textoFuenteCasa({ fuente: "catalogo", ha_directo: false, catalogo: catalogo(120) }))
+      .toEqual({ texto: "estado de la casa de hace 2 h, puede no ser el real", aviso: true });
+    // Debería contestar y no lo hace: se dice siempre, aunque el catálogo sea reciente.
+    const caido = textoFuenteCasa({ fuente: "catalogo", ha_directo: true, catalogo: catalogo(5) });
+    expect(caido.aviso).toBe(true);
+    expect(caido.texto).toMatch(/^Home Assistant no contesta/);
+    expect(textoFuenteCasa({ catalogo: { conocido: false } })).toEqual({ texto: "", aviso: false });
+    // Un backend de antes, sin `fuente`: lo de siempre.
+    expect(textoFuenteCasa({ catalogo: catalogo(10) }).texto).toBe("estado de la casa de hace 10 min");
+  });
+});
+
+describe("Rechazada y sin confirmar", () => {
+  const orden = (estado, extra = {}) => ({ id: "k", entidad: "fan.techo", servicio: "fan.turn_on",
+    estado, momento: AHORA - 2000, ...extra });
+  const ventilador = estado => ({ id: "fan.techo", nombre: "Ventilador", estado, dominio: "fan" });
+
+  test("una rechazada enseña lo que hay y lo dice, sin fingir que se hizo", () => {
+    expect(estadoFicha(ventilador("off"), orden("rechazada"), AHORA)).toEqual(
+      { estadoVisto: "off", fase: "rechazada", texto: "HA la rechazó" });
+    expect(tonoFase("rechazada")).toBe("error");
+  });
+
+  test("una sin confirmar no enseña lo pedido: enseña la lectura y avisa", () => {
+    const r = estadoFicha(ventilador("off"), orden("sin_confirmar", { estadoEntidad: "on" }), AHORA);
+    expect(r.estadoVisto).toBe("off");
+    expect(r.fase).toBe("sin_confirmar");
+    expect(r.texto).toMatch(/sin confirmar/);
+    expect(tonoFase("sin_confirmar")).toBe("aviso");
+    // Si una lectura posterior dice lo pedido, el backend la da por confirmada: sin marca.
+    expect(estadoFicha(ventilador("on"), orden("confirmada"), AHORA))
+      .toEqual({ estadoVisto: "on", fase: null, texto: "" });
+  });
+
+  test("el tono de las demás marcas", () => {
+    expect(tonoFase("caducada")).toBe("error");
+    expect(tonoFase("en_cola")).toBeNull();
+    expect(tonoFase(null)).toBeNull();
+  });
+
+  test("una sin confirmar hace preguntar a menudo un rato; una rechazada, no", () => {
+    const sin = [{ estado: "sin_confirmar", pedida: new Date(AHORA - 2000).toISOString() }];
+    expect(hayOrdenesSinResolver(sin, AHORA)).toBe(true);
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: sin }, AHORA)).toBe(REFRESCO_ORDENES_MS);
+    expect(hayOrdenesSinResolver(sin, AHORA - 2000 + RECOGIDA_RECIENTE_MS + 1)).toBe(false);
+    const rechazada = [{ estado: "rechazada", pedida: new Date(AHORA - 2000).toISOString() }];
+    expect(hayOrdenesSinResolver(rechazada, AHORA)).toBe(false);
+    expect(intervaloRefrescoCasa({ fuente: "vivo", ordenes: rechazada }, AHORA)).toBe(REFRESCO_VIVO_MS);
+  });
+
+  test("la respuesta sin confirmar cuenta antes del refresco", () => {
+    const local = { id: "k", servicio: "fan.turn_on", momento: AHORA - 1000, estado: "sin_confirmar" };
+    expect(ordenEfectiva(null, local, AHORA).estado).toBe("sin_confirmar");
+  });
+
+  test("el acuse de una escena no dice «enviada» si HA no la confirmó", () => {
+    expect(acuseActivar("hecha")).toEqual({ texto: "✓ enviada", tipo: "ok" });
+    expect(acuseActivar("en_cola")).toEqual({ texto: "✓ enviada", tipo: "ok" });
+    expect(acuseActivar("sin_confirmar")).toEqual({ texto: "HA no la confirmó", tipo: "aviso" });
   });
 });

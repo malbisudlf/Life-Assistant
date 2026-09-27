@@ -5,7 +5,14 @@ Ninguna lleva datos personales: la URL del backend y el token van en `secrets.ya
 
 ## Por qué así y no llamando a HA directamente
 
-El backend vive en Fly y HA en tu LAN, sin exponer. El backend **no puede llamar a HA**
+**Esto se escribió cuando el backend vivía en Fly.** Desde el 2026-09-20 vive en `caja`,
+en la misma LAN que el Green, y ya **puede** llamar a HA: la sección 3 bis, «En directo», le
+da un token y a partir de ahí el estado se lee de HA en el acto y las órdenes se le mandan
+sin esperar al sondeo. Lo de esta sección **sigue haciendo falta**: el catálogo dice qué
+entidades hay y cómo se llaman, y la cola es el respaldo cuando HA no acepta la conexión
+(nunca cuando la rechaza o no la confirma: ver `docs/HOME_ASSISTANT_FLUJOS.md`).
+
+El backend vivía en Fly y HA en tu LAN, sin exponer. El backend **no podía llamar a HA**
 —es el mismo muro que obligó a que el Wake-on-LAN pasara por aquí—, así que se usan los
 dos patrones que ya funcionan en el proyecto, cada uno para lo suyo:
 
@@ -125,6 +132,10 @@ Si añades un dominio a la lista de arriba, añádelo también a `_CASA_DOMINIOS
 
 ### Mejora opcional: que el dashboard confirme en segundos (PENDIENTE, sin hacer)
 
+**Con la sección 3 bis («En directo») funcionando, esto sobra**: el estado ya se lee de HA en
+el acto y las órdenes directas salen como hechas sin esperar a ningún catálogo. Solo
+serviría para las órdenes que acaban en la cola porque HA no aceptaba conexiones.
+
 **Sin este paso todo funciona.** El widget «Casa» del dashboard dice «HA la recogió» en
 cuanto esta automatización vacía la cola, pero para pasar a *confirmada* necesita un
 catálogo posterior que diga el estado esperado — y el catálogo llega cada hora. Si se
@@ -155,6 +166,81 @@ curl -X POST https://TU-BACKEND/ha/entidades \
 
 Y en el dashboard: «Jarvis, ¿qué luces tengo?». Si contesta que Home Assistant no ha
 mandado el catálogo, el `rest_command` no está llegando.
+
+## 3 bis. En directo: que el backend le pregunte a HA (opcional, recomendado)
+
+Con el catálogo y la cola, el widget «Casa» puede decir «apagado» de un ventilador que
+lleva cuarenta minutos encendido (el catálogo llega cada hora), y una orden tarda lo que
+tarde el sondeo de 15 s. Desde que el backend vive en `caja`, en la misma LAN que el Green,
+puede llamar a la API REST de HA: leer el estado en el acto y mandar las órdenes al momento.
+
+**1. Un usuario de HA solo para esto, sin administrador.** Ajustes → Personas → pestaña
+Usuarios → Añadir usuario (hace falta el modo avanzado en tu perfil para ver la pestaña).
+Nombre, p. ej. `life-assistant`; **«Administrador» apagado**; «Solo puede iniciar sesión
+desde la red local» encendido. Por qué sin admin: el token de un administrador sirve para
+cambiar la configuración entera de HA —integraciones, usuarios, add-ons—, y este token
+vive en un `.env` de otra máquina. Uno sin admin no puede tocar nada de eso. Sí puede
+llamar a servicios, y por eso el backend sigue filtrando cada orden con su lista blanca de
+dominios (`_CASA_DOMINIOS`) y pidiendo confirmación para cerraduras y persianas: el token
+no es la barrera, lo es el backend.
+
+**2. Su token.** Entra en HA **con ese usuario** (una ventana privada vale), ve a su
+Perfil → pestaña Seguridad → «Tokens de acceso de larga duración» → Crear token. Cópialo en
+ese momento: HA no lo vuelve a enseñar. Si se pierde, se borra y se crea otro.
+
+**3. En el `.env` del backend en `caja`** (la ruta, en las notas privadas):
+
+```bash
+HA_URL=http://<IP-del-Green>:8123     # la de la LAN; sin barra final
+HA_TOKEN=<el token del paso 2>
+```
+
+Y desplegar para que el contenedor lo lea. **El token es un secreto**: solo en ese `.env`
+y en `HOMEASSISTANT.md`, nunca en el repositorio. El backend lo manda solo en la cabecera
+`Authorization` y no lo escribe en ningún registro ni respuesta.
+
+**Por `http://` el token viaja en claro por la LAN.** HA en el Green escucha sin TLS, así
+que cualquiera que pueda leer el tráfico de la red de casa entre `caja` y el Green ve la
+cabecera `Authorization` entera. Está asumido, y es justo la otra razón del paso 1: el
+token es de un usuario **sin administrador**, así que quien lo capture puede encender y
+apagar cosas, pero no cambiar integraciones, usuarios ni add-ons. Si algún día ese token
+fuera de admin, o la LAN dejara de ser de fiar (invitados en la misma red sin aislar),
+`HA_URL` tendría que ir por `https://`.
+
+**Si HA rechaza el token al LEER el estado (401 o 403), el directo se apaga 10 minutos**
+(`HA_TOKEN_VETO_S`). Solo al leer: un token válido siempre puede leer, así que ahí un
+401/403 es un token revocado; en una orden puede ser que el usuario sin administrador no
+pueda con ese servicio, y apagar el directo mandaría esa orden repetida al Green y a sus
+privilegios. Seguir preguntando cada
+pocos segundos con un token revocado no arregla nada, y con `ip_ban_enabled` en el `http:`
+de HA acabaría baneada la IP de `caja` entera —n8n y todo lo que sale de ella—, no solo el
+backend. Mientras dura, todo va como sin directo: el estado sale del catálogo y las órdenes
+a la cola. El registro lo dice **una vez**,
+como error y sin el token («HA_TOKEN rechazado: revisa el token»), y no lo repite hasta que
+HA vuelva a aceptarlo. Pasados los 10 minutos se vuelve a probar solo.
+
+**4. Comprobarlo.** El widget «Casa» tiene que decir «estado de la casa en directo». Si
+dice «Home Assistant no contesta», la URL está mal (un `ConnectTimeout` o
+`ConnectionError` en el registro del backend); si dice que el estado es del catálogo y el
+registro trae «HA_TOKEN rechazado», es el token (ver arriba: 10 minutos sin directo).
+Si el estado se ve y las órdenes salen como «HA la rechazó», el usuario no puede con ese
+servicio (401/403) o los datos no valen (400): **no se reintentan por la cola**, porque el
+Green lo haría con sus privilegios y eso anularía el usuario sin admin.
+Desde `caja`, a mano:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $HA_TOKEN" "$HA_URL/api/"
+# 200 = bien; 401 = token
+```
+
+**Qué cambia en HA: nada.** El catálogo (sección 2) sigue haciendo falta —dice QUÉ
+entidades hay y cómo se llaman; sin él el backend no sabe qué preguntar ni puede rechazar
+una entidad inventada—, la presencia sigue llegando igual, y la automatización de las
+órdenes (sección 1) se queda: con el directo funcionando casi siempre recoge una cola
+vacía, y cuando HA no acepta la conexión es la que la ejecuta. Una orden que HA recibió
+**nunca se encola** —ni la que hizo, ni la que rechazó, ni la que dejó sin contestar—, así
+que ni se hace dos veces ni la ejecuta el Green, con sus privilegios, después de que HA se
+la negara al usuario sin admin.
 
 ## 4. Avisos al móvil
 
@@ -345,8 +431,9 @@ reenvío a n8n», más abajo, y el flujo en `docs/N8N.md`.
 
 Y la del botón **«Apagar»** del aviso de salir de casa, que es la tercera pregunta
 distinta: no se valora el aviso ni se decide nada de código, se apaga lo que te dejaste
-encendido (el backend encola las órdenes y las recoge el sondeo de `ordenes-pending` que
-ya tienes puesto, así que no hace falta nada más).
+encendido (el backend se las manda a HA en directo si tiene `HA_TOKEN`, y si no, o si
+HA no acepta la conexión, las encola y las recoge el sondeo de `ordenes-pending` que ya
+tienes puesto, así que no hace falta nada más).
 
 **`LA_APAGAR_` también es el «Suspender» del aviso «Te has ido con el PC encendido»**, y
 no hay que tocar el YAML: la misma automatización y el mismo `rest_command` llaman a

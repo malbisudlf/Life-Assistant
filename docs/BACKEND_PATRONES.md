@@ -209,6 +209,87 @@
   catálogo se guarda junto a su copia en memoria (`_casa_entidades` pide
   `select=entidades,actualizado`, y `POST /ha/entidades` guarda la que acaba de escribir);
   si no se puede leer, la edad es `None` y el widget dice «sin dato», nunca «ahora mismo».
+- **Casa en directo** (`HA_URL` + `HA_TOKEN`, sección «En directo» de `main.py`): el
+  backend le pregunta a HA y le manda las órdenes por su API REST. Reglas:
+  - **La cola solo recibe lo que HA SEGURO que no vio** (`_ha_llamar_servicio`, sección «Qué
+    pasa con una orden directa» de `main.py`). Una sola regla, sin listas de lo que «se
+    puede repetir»:
+
+    | HA contesta… | Resultado | ¿Se encola? |
+    |---|---|---|
+    | 2xx | `hecha` | No |
+    | 4xx (401/403: el usuario sin admin no puede; 400/404: no vale) | `rechazada`: `ok: false` con un motivo genérico, sin el cuerpo de HA | **Nunca** |
+    | Nada, y es seguro que no llegó: `ConnectTimeout`, conexión rechazada, el nombre de `HA_URL` no resuelve | `en_cola` | Sí: el Green es el respaldo |
+    | Nada, y pudo llegar: `ReadTimeout`, conexión cortada después de mandar (`RemoteDisconnected`, reset, «Connection aborted»), 5xx, cualquier cosa sin clasificar | `sin_confirmar`: se olvida la caché para que el refresco siguiente diga qué pasó | **Nunca**, sea el dominio que sea |
+
+    Los dos caminos por los que una orden se hacía dos veces venían de encolar lo que HA ya
+    tenía: su API no contesta hasta que el servicio termina y no lo cancela si el cliente
+    se va, así que tras un timeout de lectura el Green repetía el script con `delay`, la
+    pista siguiente o el desbloqueo lento; y lo que HA RECHAZABA se lo daba la cola al
+    Green, que lo ejecuta con sus privilegios de administrador —justo lo que el usuario
+    sin admin del token estaba para impedir—. Hubo listas blancas y negras de «lo
+    repetible» (`_CASA_REPETIBLES`) y cada una tapaba casos sueltos. «No llegó» lo decide
+    `_ha_no_llego()`, que recorre la excepción de fuera adentro (args, `reason` del
+    `MaxRetryError` de urllib3, `__cause__`, `__context__`) y se queda con lo primero que
+    reconoce: un `NewConnectionError` (que incluye el fallo de DNS) es «no salió»; un
+    `ProtocolError`/`RemoteDisconnected`, «salió». Lo que no reconoce cuenta como que pudo
+    salir: ante la duda, no se repite. Una `sin_confirmar` pasa a `confirmada` si una
+    lectura POSTERIOR dice lo pedido (`_estado_orden_casa`, el mismo criterio que la cola).
+  - **Una orden hecha anula lo que esperaba en la cola sobre lo mismo, y nada más**
+    (`_casa_anular_pendientes()`): solo en el camino directo, solo cuando queda `hecha`,
+    solo la misma entidad y solo la misma familia de estado (`_casa_familia()`:
+    encender/apagar/alternar; bloquear/desbloquear/abrir; abrir/cerrar/parar/posición de
+    persiana o garaje, contando `homeassistant.turn_on` sobre un `cover`; play/pausa/stop;
+    armar en cualquier modo/desarmar/disparar la alarma) **o el mismo servicio**
+    (`_casa_se_pisan()`: un `climate.set_temperature` 25 encolado cae ante un 21 hecho, igual
+    que `volume_set` o `set_percentage`). Las anuladas quedan `caducada`. La anulación, el
+    encolado y el sondeo del Green (`GET /ha/ordenes-pending`) comparten
+    `_ha_ordenes_lock`, así que una orden o se anula o se sirve, nunca las dos. Queda una
+    ventana que el cerrojo no cierra: se anula DESPUÉS de que HA conteste (hasta 8 s), y
+    si el Green sondea en esos segundos se lleva lo encolado. Con dos motores la cola puede adelantar a lo directo: un
+    encender que se encoló porque HA no aceptaba conexiones seguía ahí cuando el apagar
+    salía directo, y el Green lo ejecutaba después. Una de otra familia no se toca (el
+    `set_hvac_mode` sigue haciendo falta aunque luego se apague el termostato), ni una
+    rechazada o sin confirmar anula nada. **Sin directo no se anula nunca**: hay un solo
+    motor y el Green ejecuta en orden, como siempre.
+  - **`homeassistant.*`, solo `turn_on`, `turn_off` y `toggle`** (`_CASA_HOMEASSISTANT`), por
+    los dos caminos: `restart`, `stop` o `reload_*` administran HA, y por la cola los haría
+    el Green con sus privilegios. Se rechaza antes de llamar a HA o de encolar. Lo mismo
+    cualquier servicio que empiece por `reload` en cualquier dominio (`script.reload`,
+    `scene.reload`, `input_boolean.reload`…): recargar la configuración es administrar HA.
+  - **Un 401/403 al LEER el estado apaga el directo `HA_TOKEN_VETO_S` (10 min)**
+    (`_ha_vetar_token`): con un token revocado, seguir preguntando haría que HA, con
+    `ip_ban_enabled`, banease la IP de `caja` entera. En una ORDEN, un 401/403 es solo
+    `rechazada`: puede ser que el usuario sin administrador no pueda con ese servicio, y
+    apagar el directo mandaría la orden repetida a la cola del Green. Mientras dura el
+    veto, `_ha_directo()` es falso (catálogo y cola, como sin HA). El error se registra una vez, sin el token, hasta que HA vuelva a aceptarlo. Y una
+    orden hecha marca a HA como vivo (`_ha_marcar_vivo`), para que una lectura lenta de
+    otro hilo no deje el widget diciendo «HA no contesta».
+  - **Tras una orden, la caché se olvida; no se parchea con una relectura.** Leer el estado
+    justo después de que HA conteste al servicio devolvía el de antes en las integraciones
+    que lo reflejan un momento más tarde (nube, y a veces ESPHome o MQTT por carrera), y
+    esa lectura se quedaba en la caché y en la respuesta como si fuera la nueva: la ficha
+    del ventilador recién encendido volvía a «apagada». El estado que devuelve la orden
+    sale de la respuesta de `POST /api/services` (los estados que cambiaron DURANTE la
+    llamada, `_ha_estado_cambiado`), y si la entidad no está ahí es `None`, no un «off».
+  - **Timeouts cortos, y un HA caído no se espera en cada petición**: el estado va con
+    `(2, 3)` s y una caché de 3 s (`_ha_vivo`, bajo `_ha_vivo_lock`). Pregunta un hilo cada
+    vez (`en_curso`) y **sin tener el cerrojo durante la petición**: con él cogido, un HA
+    lento dejaba a todos los clientes parados hasta cinco segundos aunque tuvieran una
+    lectura de hace un momento. Mientras uno pregunta, los demás sirven esa lectura si es
+    de los últimos `_HA_VIVO_PUENTE_S`; si no hay ninguna válida (la primera, o justo tras
+    una orden) esperan como mucho `_HA_ESPERA_LECTURA_S` y, si no llega, catálogo. Cada orden
+    que HA pudo haber hecho (`hecha` o `sin_confirmar`) invalida la caché ENTERA —una
+    escena cambia otras entidades— y sube `gen`, para que una lectura que ya iba en camino
+    no se guarde como la de después. Un fallo marca HA como caído
+    `HA_VIVO_FALLO_S` segundos y se sirve el catálogo. Se registra el paso a caído, no cada
+    intento. Es estado de módulo: `conftest.py` lo vacía entre tests.
+  - **El token solo en la cabecera `Authorization`**, y de los errores solo se registra el
+    tipo de excepción o el código HTTP: el texto de una excepción de `requests` lleva la
+    URL y el cuerpo de HA no tiene nada que hacer en `app_logs` ni en una respuesta.
+  - **El catálogo sigue mandando en QUÉ hay**; HA en vivo solo dice CÓMO está
+    (`_casa_entidades_al_dia`). Una entidad del catálogo que HA ya no conoce sale
+    `unavailable`, no con el estado viejo del catálogo.
 - **Serie diaria de presencia**: cada aviso acumula el tramo transcurrido en la métrica
   `time_at_home` de `health_metrics` (`value` = horas en casa, `extra.fuera` = horas
   fuera). Va ahí y no a una tabla propia para que entre sola en `/health/metrics` y con

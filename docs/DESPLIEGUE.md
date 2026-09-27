@@ -321,8 +321,10 @@ Backend (`backend/.env.example` documenta cada una): `SECRET_KEY`*,
 `TAVILY_API_KEY`, `BRAVE_API_KEY`, `JARVIS_MAX_RECUERDOS`, `JARVIS_RECUERDO_MAX`,
 `JARVIS_MCP_SERVERS`, `JARVIS_MCP_MAX_TEXTO`, `JARVIS_MODEL_ACCION`,
 `JARVIS_MAX_TOKENS_VOZ`, `JARVIS_RESERVA_RAZONAMIENTO`, `JARVIS_REPO`,
-`CASA_ORDEN_TTL`, `INDEXA_TOKEN`, `INDEXA_API_URL`, `INDEXA_CUENTAS`,
-`INDEXA_TTL_MINUTOS`, `INDEXA_SERIE_DIAS`.
+`CASA_ORDEN_TTL`, `HA_URL`, `HA_TOKEN` (solo si el backend corre en la misma red que
+Home Assistant: estado de la casa en directo y órdenes al momento; el token, de un usuario
+de HA sin administrador — ver `docs/HOME_ASSISTANT_JARVIS.md`), `INDEXA_TOKEN`,
+`INDEXA_API_URL`, `INDEXA_CUENTAS`, `INDEXA_TTL_MINUTOS`, `INDEXA_SERIE_DIAS`.
 (* = obligatoria para arrancar.)
 
 **Memoria de Jarvis**: ejecuta la migración `20260807_jarvis_memoria.sql` para que

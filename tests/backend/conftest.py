@@ -73,6 +73,14 @@ os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
 # que los tests de los flags de HA escribieran pedidos en un directorio real. Los tests de
 # caja lo apuntan a un tmp_path con monkeypatch (test_pc_caja.py).
 os.environ.setdefault("PC_DIR", "")
+# Lo mismo con Home Assistant en directo: un backend/.env local con HA_URL y HA_TOKEN haría
+# que los tests de la casa llamaran a un HA de verdad en vez de encolar. Los tests del
+# directo los fijan con monkeypatch (test_casa.py, TestCasaEnDirecto).
+# FORZADAS a vacío, no `setdefault`: si están exportadas en la shell o en el CI, un
+# `setdefault` las respetaría y la suite hablaría con un HA de verdad con el token real.
+# Vacías y ya puestas, `load_dotenv()` tampoco las pisa con las del `.env`.
+os.environ["HA_URL"]   = ""
+os.environ["HA_TOKEN"] = ""
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
@@ -211,6 +219,13 @@ def _limpiar_estado():
     main._mcp_lectura.clear()
     main._ha_ordenes.clear()
     main._ha_ordenes_hist.clear()
+    # Lo último que se leyó de HA en directo, y si se le dio por caído: sin vaciarlo, un
+    # test serviría sus estados (o su HA caído) al siguiente sin pasar por su mock. Y
+    # `en_curso`: uno que se quedara «preguntando» haría esperar a todos los de detrás.
+    # Y el veto por token rechazado: sin vaciarlo, el test que lo provoca dejaría a los
+    # siguientes diez minutos sin directo.
+    main._ha_vivo.update(estados=None, ts=0.0, fallo_ts=0.0, caido=False, en_curso=False,
+                         veto_hasta=0.0, veto_avisado=False)
     # El middleware registra todo 4xx/5xx, así que la cola arrastraría entradas de un
     # test al siguiente. `_purgado` también se resetea: es "una purga por proceso".
     with main._registro._lock:

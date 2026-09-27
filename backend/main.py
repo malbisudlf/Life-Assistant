@@ -30,6 +30,13 @@ from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlsplit, urljoin, parse_qs, parse_qsl
+from http.client import RemoteDisconnected as _RemoteDisconnected
+# urllib3 viene con requests (no es una dependencia más): hace falta para saber si una
+# orden a Home Assistant llegó a salir (`_ha_no_llego`).
+from urllib3.exceptions import (
+    NewConnectionError as _U3NewConnectionError, ConnectTimeoutError as _U3ConnectTimeoutError,
+    ProtocolError as _U3ProtocolError, ReadTimeoutError as _U3ReadTimeoutError,
+)
 from types import SimpleNamespace
 import html as html_mod
 import ipaddress
@@ -10947,15 +10954,23 @@ def _reglas_con_estadistica(salidos, estado_reglas):
 
 
 # ── CASA: ÓRDENES PARA HOME ASSISTANT ─────────────────────────────────────────
-# Encender una luz desde aquí choca con el mismo muro de siempre: el backend NO puede
-# llamar a Home Assistant, que vive en la LAN y no está expuesto. Así que se usan los dos
-# patrones que ya funcionan en el proyecto, cada uno para lo que sirve:
+# Mientras el backend vivió en Fly, encender una luz desde aquí chocaba con un muro: el
+# backend NO podía llamar a Home Assistant, que vive en la LAN y no está expuesto. Así que
+# se usaron los dos patrones que ya funcionaban en el proyecto, cada uno para lo que sirve:
 #
 #   - Las ÓRDENES van en una cola EN MEMORIA que HA recoge al sondear, igual que el WOL.
 #     Perder una en un cold start de Fly solo cuesta volver a pedirla.
 #   - El CATÁLOGO de dispositivos lo EMPUJA HA a Supabase, igual que la presencia: aquí
 #     el que sabe es HA, y sin la lista Jarvis solo podría encender cosas cuyo nombre se
 #     hubiera inventado.
+#
+# Desde que el backend vive en `caja`, en la misma LAN que el Green, el muro ya no está:
+# con HA_URL y HA_TOKEN el backend PREGUNTA a HA cómo está cada cosa y le MANDA las
+# órdenes en el acto (ver «En directo», más abajo). Lo de arriba no se quita: el catálogo
+# sigue diciendo qué entidades hay y cómo se llaman, y la cola es el respaldo cuando no
+# hay token o cuando es SEGURO que HA no vio la orden (no se pudo ni conectar). Nunca los
+# dos motores con la misma orden: la que HA recibió —la haya hecho, rechazado o dejado sin
+# contestar— no se encola, igual que un pedido a `caja` no pone el flag.
 #
 # Y una orden vieja no se ejecuta (CASA_ORDEN_TTL): si HA estuvo caído dos horas, al
 # volver no puede ponerse a encender luces que pediste al mediodía. Es la misma regla que
@@ -10972,6 +10987,10 @@ _CASA_DOMINIOS = {
 # equivocarse cuesta un segundo. Abrir una cerradura, el garaje o desarmar la alarma no
 # está en la misma categoría, así que se proponen y los aprueba el usuario.
 _CASA_DIRECTOS = _CASA_DOMINIOS - {"lock", "cover", "alarm_control_panel"}
+# Del dominio `homeassistant`, solo lo genérico de encender y apagar. El resto
+# (`restart`, `stop`, `reload_*`, `update_entity`...) es administrar HA, no la casa, y por
+# la cola lo ejecutaría el Green con sus privilegios de administrador.
+_CASA_HOMEASSISTANT = {"turn_on", "turn_off", "toggle"}
 
 _CASA_SERVICIO_RE = re.compile(r"^[a-z_]{1,32}\.[a-z0-9_]{1,48}$")
 _CASA_ENTIDAD_RE  = re.compile(r"^[a-z_]{1,32}\.[a-z0-9_]{1,64}$")
@@ -11049,6 +11068,433 @@ def _casa_iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ── En directo ───────────────────────────────────────────────────────────────
+# El catálogo llega cada hora, así que el widget llegó a decir «apagado» de un ventilador
+# que llevaba cuarenta minutos encendido; y una orden esperaba al sondeo de HA (15 s) y su
+# confirmación al catálogo siguiente. Con el backend en la LAN del Green, la API REST de HA
+# está a un salto: el estado se le pregunta a HA y la orden se le manda directamente.
+#
+# HA_TOKEN es un token de larga duración de un usuario de HA SIN permisos de
+# administrador: con uno de admin, quien lo leyera podría tocar la configuración entera
+# de HA. Es un secreto como SECRET_KEY: va solo en la cabecera Authorization y no sale en
+# ningún registro ni en ninguna respuesta. Sin las dos variables todo sigue como antes
+# (catálogo + cola): es el camino de vuelta.
+HA_URL   = os.getenv("HA_URL", "").strip().rstrip("/")
+HA_TOKEN = os.getenv("HA_TOKEN", "").strip()
+# Lo que se tarda en preguntar. Corto a propósito: el widget se refresca solo, y si HA no
+# contesta en tres segundos es mejor enseñar el catálogo (diciendo que lo es) que dejar
+# la petición colgada. La orden espera más: HA no responde hasta que el servicio termina.
+_HA_TIMEOUT_ESTADOS  = (2, 3)
+_HA_TIMEOUT_SERVICIO = (2, 8)
+# Varios clientes abiertos (el móvil, el PC, Jarvis a la vez) no multiplican las
+# peticiones a HA: lo leído vale unos segundos. Y un HA caído no se vuelve a esperar en
+# cada refresco: se da por caído un rato y se sirve el catálogo.
+HA_VIVO_CACHE_S = 3.0
+HA_VIVO_FALLO_S = 15.0
+# Lo que un hilo espera a que otro termine de preguntar a HA cuando no tiene nada que
+# servir mientras tanto (la primera lectura, o justo después de una orden). Pasado esto
+# se sirve el catálogo: mejor un dato viejo que dice que lo es que un refresco colgado.
+_HA_ESPERA_LECTURA_S = 2.0
+# Lo viejo que puede ser lo que se sirve mientras otro hilo pregunta. Más allá ya no es
+# «lo de hace un momento» y se espera a la lectura nueva.
+_HA_VIVO_PUENTE_S = 30.0
+# Lo que se deja de hablar con HA en directo cuando rechaza el TOKEN (401/403 en
+# /api/states o en una orden). Seguir preguntando cada pocos segundos con un token revocado
+# no arregla nada y puede costar mucho más: con `ip_ban_enabled` en su `http:`, HA banea
+# la IP que acumula fallos de autenticación, y esa IP es la de `caja` entera —n8n y todo
+# lo que sale de ella—, no solo la del backend. Durante este rato todo va como sin HA en
+# directo (catálogo y cola), y el registro lo dice UNA vez, sin el token.
+HA_TOKEN_VETO_S = 600.0
+_HA_CODIGOS_TOKEN = (401, 403)
+
+# ── Qué pasa con una orden directa ──
+# Una sola regla, sin listas de lo que «se puede repetir»: la cola solo recoge lo que HA
+# SEGURO que no vio. Cualquier otra cosa se queda donde está, porque los dos caminos por
+# los que una orden llegaba dos veces venían de encolar lo que HA ya tenía:
+#
+#   - HA la recibió y no contestó a tiempo (su API no contesta hasta que el servicio
+#     termina, y no lo cancela si el cliente se va): el Green la repetía. Un script con un
+#     `delay`, la pista siguiente, un desbloqueo lento de Z-Wave, el pulso del garaje...
+#     hechos dos veces. Las listas blancas para decidir qué era repetible fueron tapando
+#     casos sueltos y ninguna los tapaba todos.
+#   - HA la RECHAZÓ (401/403: el usuario del token no es administrador y no puede; 400: los
+#     datos no valen): la cola se la daba al Green, que la ejecuta con SUS privilegios. Eso
+#     anulaba justo la protección de haber creado un usuario sin administrador.
+#
+# Así que:
+#   - 2xx          → `hecha`. No se encola.
+#   - 4xx          → `rechazada`. Ni se hace ni se encola, y se dice. NO apaga el directo:
+#                    un 401/403 en una orden es también lo que contesta HA cuando el usuario
+#                    sin administrador no puede usar ese servicio, y apagar el directo
+#                    mandaría esa misma orden repetida a la cola, al Green y a sus
+#                    privilegios. El token revocado se detecta al LEER (_ha_pedir_estados).
+#   - no llegó     → a la cola. Solo cuando es SEGURO que la petición no salió: no se pudo
+#                    abrir la conexión (timeout de conexión, conexión rechazada, el nombre
+#                    de HA_URL no resuelve). HA no la vio, y el Green es el respaldo.
+#   - lo demás     → `sin_confirmar`: timeout de lectura, la conexión cortada después de
+#                    mandar, un 5xx o cualquier cosa sin clasificar. Puede haberse hecho,
+#                    así que NO se repite, sea el dominio que sea; se olvida la caché para
+#                    que el siguiente refresco diga qué pasó de verdad.
+_HA_HECHA, _HA_RECHAZADA, _HA_SIN_CONFIRMAR, _HA_NO_LLEGO = (
+    "hecha", "rechazada", "sin_confirmar", "no_llego")
+
+
+def _ha_no_llego(exc: BaseException) -> bool:
+    """Si es SEGURO que la petición a HA no llegó a salir: la conexión no se abrió.
+
+    `requests` envuelve lo que pasa por debajo, así que no basta con el tipo de fuera: un
+    `ConnectionError` lo mismo es «no pude conectar» (un `MaxRetryError` de urllib3 cuyo
+    `reason` es un `NewConnectionError`, que incluye el fallo de DNS) que «conecté, mandé
+    y me colgaron» (un `ProtocolError('Connection aborted.', RemoteDisconnected(...))`).
+    Se recorre la cadena (args, `reason`, `__cause__`, `__context__`) de fuera adentro y
+    decide lo PRIMERO que se reconozca: dentro de un `NewConnectionError` puede venir un
+    `ConnectionResetError`, y ahí el reset fue al conectar, no después de mandar. Lo que no
+    se reconozca cuenta como «puede que llegara»: ante la duda, no se repite."""
+    pendientes, vistos = [exc], set()
+    while pendientes:
+        e = pendientes.pop(0)
+        if e is None or id(e) in vistos or len(vistos) > 20:
+            continue
+        vistos.add(id(e))
+        # Lo que dice «llegó» va primero: ReadTimeout es hijo de Timeout, no de
+        # ConnectTimeout, pero un ProtocolError puede traer dentro cualquier cosa.
+        if isinstance(e, (requests.exceptions.ReadTimeout, _U3ReadTimeoutError,
+                          _U3ProtocolError, _RemoteDisconnected,
+                          ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return False
+        if isinstance(e, (requests.exceptions.ConnectTimeout, _U3NewConnectionError,
+                          _U3ConnectTimeoutError, ConnectionRefusedError, socket.gaierror)):
+            return True
+        if isinstance(e, BaseException):
+            pendientes.extend(a for a in e.args if isinstance(a, BaseException))
+            pendientes.extend([getattr(e, "reason", None), e.__cause__, e.__context__])
+    return False
+
+
+def _casa_familia(servicio: str, entidad: str) -> str | None:
+    """A qué «estado» de la entidad afecta un servicio: dos órdenes de la misma familia se
+    pisan (encender y apagar), y dos de familias distintas no (el modo del termostato y
+    apagarlo). None si no es de ninguna conocida: entonces no anula nada.
+
+    Se mira también el dominio de la ENTIDAD: `homeassistant.turn_on` sobre `cover.garaje`
+    lo abre, así que es de la familia de la persiana y no de la de encender."""
+    accion  = servicio.partition(".")[2]
+    dominio = entidad.partition(".")[0]
+    if dominio == "cover" and accion in {"turn_on", "turn_off", "toggle", "open_cover",
+                                         "close_cover", "stop_cover", "set_cover_position"}:
+        return "persiana"
+    if dominio == "lock" and accion in {"turn_on", "turn_off", "toggle",
+                                        "lock", "unlock", "open"}:
+        return "cerrojo"
+    if accion in {"turn_on", "turn_off", "toggle"}:
+        return "encendido"
+    if accion in {"media_play", "media_pause", "media_stop", "media_play_pause"}:
+        return "reproduccion"
+    # Armar en un modo, en otro, desarmar o disparar: un desarmar encolado que el Green
+    # recogiera después de un «armar ausente» hecho dejaría la casa desarmada.
+    if accion.startswith("alarm_arm_") or accion in {"alarm_disarm", "alarm_trigger"}:
+        return "alarma"
+    return None
+
+
+def _casa_fija_valor(servicio: str) -> bool:
+    """Si el servicio deja el aparato en un valor (y repetirlo con otro valor lo sustituye)
+    en vez de sumar un paso: `set_*`, `select_*`, `volume_set`, `volume_mute`. Lo que se
+    acumula (`volume_up`, `button.press`, `script.turn_on`) no se pisa consigo mismo: dos
+    «sube el volumen» son dos pasos, y anular uno lo perdería."""
+    accion = servicio.split(".", 1)[-1]
+    return accion.startswith(("set_", "select_")) or accion in ("volume_set", "volume_mute")
+
+
+def _casa_se_pisan(servicio_a: str, servicio_b: str, entidad: str) -> bool:
+    """Si dos órdenes sobre la misma `entidad` se pisan: son de la misma familia, o son el
+    MISMO servicio y fija un valor (`climate.set_temperature`, `media_player.volume_set`,
+    `fan.set_percentage`…): un 25 encolado que el Green recogiera después de un 21 hecho
+    dejaría el 25, y el último que se pidió era el 21. Lo que se acumula, no (ver
+    `_casa_fija_valor`)."""
+    if servicio_a == servicio_b:
+        return _casa_fija_valor(servicio_a)
+    familia = _casa_familia(servicio_a, entidad)
+    return familia is not None and familia == _casa_familia(servicio_b, entidad)
+
+
+# Quien lee o toca la cola (`_ha_ordenes`) lo hace con esto cogido: el sondeo del Green
+# (`GET /ha/ordenes-pending`), el encolado de `_j_casa_ordenar` y la anulación. Sin él, el
+# Green podía llevarse una orden que se estaba anulando: salía en su respuesta y a la vez
+# quedaba `caducada` en el historial. Con él, una orden o se anula o se sirve, nunca las dos.
+#
+# La ventana que queda no la cierra ningún cerrojo: la anulación va DESPUÉS de que HA
+# conteste a la orden directa (solo se anula con la orden hecha), y esa llamada tarda hasta
+# 8 s (`_HA_TIMEOUT_SERVICIO`). Si el Green sondea en esos segundos, se lleva lo encolado y
+# lo ejecuta, quizá después de lo directo. Anular antes de llamar la cerraría, pero dejaría
+# sin hacer lo encolado cuando la directa acaba rechazada o sin confirmar; el sondeo es
+# cada 15 s y la cola casi siempre está vacía con el directo funcionando, así que se acepta.
+_ha_ordenes_lock = threading.Lock()
+
+
+def _casa_anular_pendientes(servicio: str, entidad: str) -> None:
+    """Retira de la cola lo que esperaba sobre `entidad` y la orden directa que acaba de
+    HACERSE deja sin sentido: las de la misma familia (`_casa_familia`) y las del mismo
+    servicio (`_casa_se_pisan`).
+
+    Solo se llama desde el camino directo, y solo con la orden hecha. Con dos motores la
+    cola puede adelantar a lo directo: un encender que se encoló porque HA no aceptaba
+    conexiones seguía ahí cuando llegaba un apagar directo, y el Green lo ejecutaba en el
+    siguiente sondeo, DESPUÉS. Sin HA en directo hay un solo motor, el Green las ejecuta en
+    orden y no hay nada que anular (es el comportamiento de siempre). Y una orden de otra
+    familia no se toca: el modo del termostato sigue haciendo falta aunque luego se apague.
+    En el historial quedan como caducadas: no se van a ejecutar, y la ficha no puede seguir
+    diciendo «en cola»."""
+    with _ha_ordenes_lock:
+        anuladas = {o.get("id") for o in _ha_ordenes
+                    if o.get("entidad") == entidad
+                    and _casa_se_pisan(servicio, str(o.get("servicio") or ""), entidad)}
+        if not anuladas:
+            return
+        _ha_ordenes[:] = [o for o in _ha_ordenes if o.get("id") not in anuladas]
+        for h in _ha_ordenes_hist:
+            if h["id"] in anuladas:
+                h["caducada"] = True
+    logger.info("Casa: %d órdenes pendientes sobre %s anuladas por otra más nueva",
+                len(anuladas), entidad)
+
+
+# `en_curso`: alguien está preguntando a HA ahora mismo. `gen` cambia con cada orden
+# directa: una lectura que empezó ANTES de la orden no puede guardarse como la de después.
+# `veto_hasta`: hasta cuándo no se habla con HA porque rechazó el token (HA_TOKEN_VETO_S);
+# `veto_avisado`: ya se registró ese rechazo, y no se repite hasta que HA vuelva a aceptarlo.
+_ha_vivo = {"estados": None, "ts": 0.0, "fallo_ts": 0.0, "caido": False,
+            "en_curso": False, "gen": 0, "veto_hasta": 0.0, "veto_avisado": False}
+_ha_vivo_lock = threading.Condition()
+
+
+def _ha_directo() -> bool:
+    """Si el backend puede hablar con HA en directo. Una URL sin esquema no cuenta: con
+    ella `requests` fallaría en cada petición, y el respaldo ya sabe hacer ese trabajo. Y
+    con el token rechazado hace poco tampoco (`_ha_vetar_token`): todo va como sin directo."""
+    return (bool(HA_TOKEN) and HA_URL.startswith(("http://", "https://"))
+            and time.time() >= _ha_vivo["veto_hasta"])
+
+
+def _ha_cabeceras() -> dict:
+    return {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
+
+
+def _ha_marcar_caido(motivo: str) -> None:
+    """Se registra el paso a caído, no cada intento: con el widget abierto serían cuatro
+    avisos por minuto en app_logs diciendo lo mismo. Llamar con el cerrojo cogido."""
+    _ha_vivo["fallo_ts"] = time.time()
+    if not _ha_vivo["caido"]:
+        _ha_vivo["caido"] = True
+        logger.warning("Casa: Home Assistant no contesta en directo (%s); se usa el "
+                       "catálogo y la cola", motivo)
+
+
+def _ha_marcar_vivo() -> None:
+    """HA acaba de contestar bien: ni está caído ni rechaza el token. Llamar con el
+    cerrojo cogido."""
+    if _ha_vivo["caido"]:
+        logger.info("Casa: Home Assistant vuelve a contestar en directo")
+    _ha_vivo.update(fallo_ts=0.0, caido=False, veto_avisado=False)
+
+
+def _ha_vetar_token(codigo: int) -> None:
+    """HA ha rechazado el token (401/403): se deja de hablar con él HA_TOKEN_VETO_S. El
+    error se registra una sola vez hasta que HA lo vuelva a aceptar —con el widget abierto
+    serían seis por minuto—, y sin el token: basta con saber que hay que ir a mirarlo."""
+    with _ha_vivo_lock:
+        _ha_vivo["veto_hasta"] = time.time() + HA_TOKEN_VETO_S
+        if _ha_vivo["veto_avisado"]:
+            return
+        _ha_vivo["veto_avisado"] = True
+    logger.error("Casa: HA_TOKEN rechazado: revisa el token (Home Assistant contestó HTTP "
+                 "%d). No se le pregunta en directo durante %d min, para que no banee la IP "
+                 "de caja; mientras, catálogo y cola", codigo, int(HA_TOKEN_VETO_S // 60))
+
+
+def _ha_pedir_estados() -> tuple[dict | None, str]:
+    """GET /api/states, sin cerrojo. Devuelve ({entity_id: estado}, "") o (None, motivo)."""
+    try:
+        r = http.get(f"{HA_URL}/api/states", headers=_ha_cabeceras(),
+                     timeout=_HA_TIMEOUT_ESTADOS)
+    except Exception as e:
+        # Solo el tipo: el texto de la excepción lleva la URL de la LAN, y si es de la
+        # cabecera (un token que no cabe en latin-1 da un UnicodeEncodeError), el token.
+        # Cualquier excepción y no solo las de `requests`: esto no puede dar un 500 en
+        # /casa/estado, tiene que caer al catálogo como cualquier otro fallo.
+        return None, type(e).__name__
+    if r.status_code in _HA_CODIGOS_TOKEN:
+        _ha_vetar_token(r.status_code)
+    if r.status_code != 200:
+        # Nunca el cuerpo: es de HA y no tiene nada que hacer en un registro.
+        return None, f"HTTP {r.status_code}"
+    try:
+        filas = r.json()
+    except ValueError:
+        filas = None
+    if not isinstance(filas, list):
+        return None, "respuesta sin lista de estados"
+    estados = {}
+    for f in filas:
+        eid = str(f.get("entity_id") or "") if isinstance(f, dict) else ""
+        if _CASA_ENTIDAD_RE.match(eid):
+            estados[eid] = str(f.get("state") or "")[:40]
+    return estados, ""
+
+
+def _ha_estados_vivos() -> tuple[dict | None, float | None]:
+    """{entity_id: estado} de HA ahora mismo, y cuándo se leyó. (None, None) si no hay
+    HA en directo o no contesta: quien llama cae al catálogo y lo dice.
+
+    Pregunta UN hilo cada vez, y sin tener el cerrojo durante la petición: con él cogido,
+    un HA lento dejaba a todos los demás (el widget del móvil, el del PC, Jarvis) parados
+    hasta cinco segundos aunque tuvieran una lectura de hace un momento que servir.
+    Mientras uno pregunta, los demás sirven esa lectura si es reciente; si no la hay (la
+    primera vez, o justo después de una orden) esperan un poco a la nueva, y si no llega,
+    catálogo."""
+    if not _ha_directo():
+        return None, None
+    limite = time.time() + _HA_ESPERA_LECTURA_S
+    with _ha_vivo_lock:
+        while True:
+            ahora = time.time()
+            valida = _ha_vivo["estados"] is not None and _ha_vivo["ts"] > 0
+            if valida and ahora - _ha_vivo["ts"] < HA_VIVO_CACHE_S:
+                return _ha_vivo["estados"], _ha_vivo["ts"]
+            if _ha_vivo["caido"] and ahora - _ha_vivo["fallo_ts"] < HA_VIVO_FALLO_S:
+                return None, None
+            if not _ha_vivo["en_curso"]:
+                break
+            # Otro hilo ya está preguntando: no se le pregunta dos veces lo mismo a HA.
+            if valida and ahora - _ha_vivo["ts"] < _HA_VIVO_PUENTE_S:
+                return _ha_vivo["estados"], _ha_vivo["ts"]
+            if ahora >= limite or not _ha_vivo_lock.wait(timeout=limite - ahora):
+                return None, None
+        _ha_vivo["en_curso"] = True
+        gen = _ha_vivo["gen"]
+    estados, motivo = None, "error inesperado"
+    leido = time.time()
+    try:
+        estados, motivo = _ha_pedir_estados()
+    finally:
+        with _ha_vivo_lock:
+            _ha_vivo["en_curso"] = False
+            if estados is None:
+                # Un token rechazado ya lo ha dicho `_ha_vetar_token`: no es que HA no
+                # conteste, y el aviso de caído solo despistaría.
+                if time.time() >= _ha_vivo["veto_hasta"]:
+                    _ha_marcar_caido(motivo)
+            else:
+                _ha_marcar_vivo()
+                # Si entre medias se mandó una orden, esta lectura puede ser la de antes:
+                # se le da a quien la pidió, pero no se guarda como la buena.
+                if gen == _ha_vivo["gen"]:
+                    _ha_vivo.update(estados=estados, ts=leido)
+            _ha_vivo_lock.notify_all()
+    if estados is None:
+        return None, None
+    return estados, leido
+
+
+def _ha_estado_cambiado(r, entidad: str) -> str | None:
+    """El estado de `entidad` según la respuesta de POST /api/services: HA devuelve ahí la
+    lista de estados que cambiaron MIENTRAS se ejecutaba el servicio. Si la entidad no está,
+    None, y no «el estado de ahora»: hay integraciones (las de la nube, y a veces ESPHome o
+    MQTT por carrera) que reflejan el cambio un momento después, y leer el estado en ese
+    instante devolvía el de antes. Con eso la ficha recién encendida volvía a «apagada».
+    Un None no miente; un «off» leído demasiado pronto, sí."""
+    try:
+        cambios = r.json()
+    except ValueError:
+        return None
+    if not isinstance(cambios, list):
+        return None
+    for c in cambios:
+        if isinstance(c, dict) and c.get("entity_id") == entidad:
+            return str(c.get("state") or "")[:40] or None
+    return None
+
+
+def _ha_olvidar_estados() -> None:
+    """Tras una orden, lo leído antes ya no vale, y no solo lo de esa entidad: una escena o
+    un script cambian otras. El siguiente refresco pregunta a HA. Se invalida en vez de
+    parchear la caché con una lectura hecha justo después, que podía ser todavía la de
+    antes y se quedaba ahí sirviéndose como si fuera la nueva. `gen` hace lo mismo con una
+    lectura que ya estaba en camino cuando llegó la orden."""
+    with _ha_vivo_lock:
+        _ha_vivo["ts"] = 0.0
+        _ha_vivo["gen"] += 1
+
+
+def _ha_llamar_servicio(servicio: str, entidad: str, datos: dict) -> tuple[str, str | None, str]:
+    """Manda la orden a HA en directo. Devuelve (resultado, estado, detalle): el resultado
+    es uno de los cuatro de arriba (`_HA_HECHA`…), `estado` es cómo quedó la entidad si HA
+    lo dice al contestar (`_ha_estado_cambiado`, solo con `hecha`) y `detalle` es el
+    código o el tipo de error, para el registro y el motivo: nunca el cuerpo de HA.
+
+    `servicio` y `entidad` llegan ya validados por `_j_casa_ordenar`, y aun así van con
+    `quote`: es lo único que se interpola en la URL de HA.
+    """
+    dominio, _, accion = servicio.partition(".")
+    url = f"{HA_URL}/api/services/{quote(dominio, safe='')}/{quote(accion, safe='')}"
+    # La entidad va la ÚLTIMA: `datos` ya viene sin claves de objetivo, pero si alguna se
+    # colara, la que manda es la que se validó contra el catálogo.
+    cuerpo = {**(datos or {}), "entity_id": entidad}
+    try:
+        r = http.post(url, headers=_ha_cabeceras(), json=cuerpo, timeout=_HA_TIMEOUT_SERVICIO)
+    except Exception as e:
+        # Solo el tipo: el texto de la excepción lleva la URL de la LAN.
+        detalle = type(e).__name__
+        if _ha_no_llego(e):
+            with _ha_vivo_lock:
+                _ha_marcar_caido(detalle)
+            return _HA_NO_LLEGO, None, detalle
+        logger.warning("Casa: HA no ha confirmado %s sobre %s (%s); no se repite",
+                       servicio, entidad, detalle)
+        _ha_olvidar_estados()
+        return _HA_SIN_CONFIRMAR, None, detalle
+    detalle = f"HTTP {r.status_code}"
+    if 200 <= r.status_code < 300:
+        _ha_olvidar_estados()
+        # HA acaba de hacer la orden: está vivo aunque la lectura lenta de otro hilo lo
+        # diera por caído hace un momento, y el widget no puede decir «HA no contesta».
+        with _ha_vivo_lock:
+            _ha_marcar_vivo()
+        return _HA_HECHA, _ha_estado_cambiado(r, entidad), detalle
+    if 400 <= r.status_code < 500:
+        logger.warning("Casa: HA rechazó %s sobre %s (%s); ni se hace ni se encola",
+                       servicio, entidad, detalle)
+        # Sin veto aquí, aunque sea un 401/403: en una orden puede significar que el usuario
+        # sin administrador no puede con ESTE servicio, no que el token esté revocado. Si
+        # apagara el directo, repetir la orden la mandaría a la cola y el Green la haría con
+        # sus privilegios. El token revocado lo detecta la lectura del estado, que un token
+        # válido siempre puede hacer.
+        return _HA_RECHAZADA, None, detalle
+    # Un 5xx (o cualquier otro código) no dice si el servicio llegó a correr: HA pudo
+    # fallar a mitad, con la mitad hecha.
+    logger.warning("Casa: HA no ha confirmado %s sobre %s (%s); no se repite",
+                   servicio, entidad, detalle)
+    _ha_olvidar_estados()
+    return _HA_SIN_CONFIRMAR, None, detalle
+
+
+def _casa_entidades_al_dia() -> tuple[list, str, float | None]:
+    """El catálogo con el estado más fresco que se pueda: el de HA ahora mismo si
+    contesta, el del catálogo si no. Devuelve (lista, fuente, cuándo es el dato).
+
+    El catálogo dice QUÉ hay y cómo se llama; HA en vivo dice CÓMO está. Una entidad del
+    catálogo que HA ya no conoce sale `unavailable`, que es como la llama HA: mezclar ahí
+    el estado viejo del catálogo sería volver a enseñar un dato de hace una hora como si
+    fuera de ahora, que es justo lo que esto viene a quitar."""
+    lista = _casa_entidades()
+    if lista:
+        vivos, ts = _ha_estados_vivos()
+        if vivos is not None:
+            return ([{**e, "estado": vivos.get(str(e.get("id") or ""), "unavailable")}
+                     for e in lista], "vivo", ts)
+    return lista, "catalogo", _casa_actualizado_ts()
+
+
 class CasaEntidad(BaseModel):
     id:     str = Field(max_length=120)
     nombre: str = Field("", max_length=120)
@@ -11099,22 +11545,25 @@ def ha_ordenes_pending(request: Request, token: str = ""):
     """
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
-    ahora     = time.time()
-    pendientes = list(_ha_ordenes)
-    _ha_ordenes.clear()
-    vigentes  = [o for o in pendientes if ahora - o["pedida"] <= CASA_ORDEN_TTL]
+    # Vaciar la cola y apuntar el acuse van juntos bajo `_ha_ordenes_lock`: una orden que
+    # se estaba anulando o se la lleva el Green o queda caducada, no las dos cosas.
+    with _ha_ordenes_lock:
+        ahora      = time.time()
+        pendientes = list(_ha_ordenes)
+        _ha_ordenes.clear()
+        vigentes   = [o for o in pendientes if ahora - o["pedida"] <= CASA_ORDEN_TTL]
+        # El acuse: servirla es lo único que el backend sabe de que HA se la llevó. Que la
+        # ejecutara lo dirá el catálogo cuando llegue (ver _estado_orden_casa).
+        servidas = {o.get("id") for o in vigentes}
+        tiradas  = {o.get("id") for o in pendientes} - servidas
+        for h in _ha_ordenes_hist:
+            if h["id"] in servidas:
+                h["recogida"] = ahora
+            elif h["id"] in tiradas:
+                h["caducada"] = True
     if len(vigentes) < len(pendientes):
         logger.warning("Casa: %d órdenes caducadas sin ejecutar (HA no las recogió a tiempo)",
                        len(pendientes) - len(vigentes))
-    # El acuse: servirla es lo único que el backend sabe de que HA se la llevó. Que la
-    # ejecutara lo dirá el catálogo cuando llegue (ver _estado_orden_casa).
-    servidas = {o.get("id") for o in vigentes}
-    tiradas  = {o.get("id") for o in pendientes} - servidas
-    for h in _ha_ordenes_hist:
-        if h["id"] in servidas:
-            h["recogida"] = ahora
-        elif h["id"] in tiradas:
-            h["caducada"] = True
     # El `id` NO viaja: es del acuse del dashboard, y la automatización de HA ejecuta lo
     # que reciba tal cual.
     return {"ordenes": [{
@@ -11137,8 +11586,11 @@ def _casa_pide_confirmar(argumentos: dict) -> bool:
 
 def _j_casa_dispositivos(buscar: str = "") -> dict:
     """Qué hay en casa, filtrable. Una casa entera son decenas de entidades y todas
-    juntas se pagan por token en cada turno, igual que pasaba con el MCP de GitHub."""
-    lista = _casa_entidades()
+    juntas se pagan por token en cada turno, igual que pasaba con el MCP de GitHub.
+
+    Los estados son los de HA ahora mismo si contesta en directo: «¿está encendido el
+    ventilador?» con el catálogo de hace una hora es una respuesta inventada."""
+    lista, fuente, _ = _casa_entidades_al_dia()
     if not lista:
         return {"dispositivos": [], "nota": (
             "Home Assistant todavía no ha mandado el catálogo de la casa. Hasta que lo "
@@ -11156,7 +11608,11 @@ def _j_casa_dispositivos(buscar: str = "") -> dict:
             "nota": f"Nada coincide con {buscar!r}. Los que hay: "
                     + ", ".join(str(e.get("id") or "") for e in lista[:80]),
         }
-    return {"dispositivos": elegidas[:40], "hay_mas": len(elegidas) > 40}
+    return {"dispositivos": elegidas[:40], "hay_mas": len(elegidas) > 40,
+            # Para que el modelo no dé por seguro un «encendido» que puede ser de hace
+            # una hora.
+            "estados": ("de Home Assistant, ahora mismo" if fuente == "vivo" else
+                        "del catálogo, que HA manda cada hora: pueden ir por detrás")}
 
 
 _CASA_CLAVES_OBJETIVO = frozenset({"entity_id", "area_id", "device_id", "label_id", "floor_id"})
@@ -11255,11 +11711,76 @@ def get_casa_acciones(dia: str = "",
         raise HTTPException(status_code=502, detail="No se pudieron leer las acciones de la casa")
 
 
+def _copia_historial_casa() -> list:
+    """El historial de órdenes copiado bajo el cerrojo: recorrer el deque mientras otro hilo
+    le añade algo lanza «deque mutated during iteration»."""
+    with _ha_ordenes_lock:
+        return list(_ha_ordenes_hist)
+
+
+def _casa_orden_directa(servicio: str, entidad: str, resultado: str,
+                       estado: str | None, detalle: str) -> dict:
+    """Lo que se apunta y se contesta de una orden que HA recibió en directo.
+
+    `estado` es en qué quedó la ORDEN (`hecha`, `rechazada` o `sin_confirmar`), el mismo
+    nombre que en el acuse del widget; `estado_entidad`, cómo quedó el aparato si HA lo
+    dijo. `directa` dice que no pasó por la cola, y es lo mismo en el historial."""
+    orden_id = uuid.uuid4().hex[:12]
+    ahora    = time.time()
+    if resultado == _HA_HECHA:
+        # Lo que esperaba en la cola sobre esto mismo es más viejo: si el Green lo
+        # recogiera ahora, desharía lo que HA acaba de hacer.
+        _casa_anular_pendientes(servicio, entidad)
+    # Al historial como cualquier otra, para que el widget la enseñe. `recogida` es ahora:
+    # HA la tiene (o la ha rechazado) desde este momento, y es lo que permite dar por
+    # confirmada una `sin_confirmar` cuando una lectura POSTERIOR diga lo pedido.
+    # Bajo el cerrojo: el sondeo del Green recorre el historial con él cogido, y un append
+    # a la vez hacía que CPython lanzara «deque mutated during iteration», el sondeo diera
+    # 500 y se perdieran las órdenes que ya había sacado de la cola.
+    with _ha_ordenes_lock:
+        _ha_ordenes_hist.append({"id": orden_id, "servicio": servicio, "entidad": entidad,
+                                 "pedida": ahora, "recogida": ahora, "caducada": False,
+                                 "directa": True, "resultado": resultado})
+    base = {"id": orden_id, "servicio": servicio, "entidad": entidad, "directa": True,
+            "estado": resultado}
+    if resultado == _HA_RECHAZADA:
+        # Sin el cuerpo de HA: el código basta para saber por dónde mirar.
+        return {**base, "ok": False, "motivo": (
+            f"Home Assistant ha rechazado la orden ({detalle}): el usuario con el que habla "
+            "el backend no puede hacer eso, o los datos no valen. No se ha hecho ni se ha "
+            "dejado en cola."
+        )}
+    _apuntar_accion_casa(servicio, entidad)
+    if resultado == _HA_HECHA:
+        return {**base, "ok": True, "estado_entidad": estado,
+                "nota": "Hecho: Home Assistant la ha ejecutado."}
+    return {**base, "ok": True, "estado_entidad": None, "nota": (
+        "Home Assistant no ha confirmado la orden; mira el estado en unos segundos. Puede "
+        "haberse hecho, así que no la repitas sin mirar antes (casa_dispositivos)."
+    )}
+
+
 def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> dict:
     servicio = str(servicio or "").strip().lower()
     entidad  = str(entidad or "").strip().lower()
     if not _CASA_SERVICIO_RE.match(servicio):
         return {"ok": False, "motivo": "El servicio tiene que ser tipo 'light.turn_on'"}
+    if (servicio.split(".")[0] == "homeassistant"
+            and servicio.split(".")[1] not in _CASA_HOMEASSISTANT):
+        return {"ok": False, "motivo": (
+            "De 'homeassistant' solo puedo mandar turn_on, turn_off y toggle: el resto "
+            "administra Home Assistant, no la casa."
+        )}
+    if servicio.split(".")[1].startswith("reload"):
+        # `script.reload`, `scene.reload`, `input_boolean.reload`… releen la configuración
+        # de HA (YAML incluido) y no tocan ningún aparato. Es administrar HA como
+        # `homeassistant.reload_all`, y por la cola lo haría el Green con sus privilegios:
+        # cerrado por los dos caminos, antes de llamar a HA o de encolar. Va antes que la
+        # lista blanca para que el motivo diga lo que es, sea el dominio que sea.
+        return {"ok": False, "motivo": (
+            "No puedo mandar servicios de recarga ('reload'): recargan la configuración de "
+            "Home Assistant, no tocan la casa."
+        )}
     if servicio.split(".")[0] not in _CASA_DOMINIOS:
         return {"ok": False, "motivo": (
             f"No puedo mandar servicios de '{servicio.split('.')[0]}'. Solo: "
@@ -11267,28 +11788,49 @@ def _j_casa_ordenar(servicio: str, entidad: str, datos: dict | None = None) -> d
         )}
     if not _CASA_ENTIDAD_RE.match(entidad):
         return {"ok": False, "motivo": "La entidad tiene que ser tipo 'light.salon'"}
+    dominio_servicio, dominio_entidad = servicio.split(".")[0], entidad.split(".")[0]
+    if dominio_servicio not in (dominio_entidad, "homeassistant"):
+        # `light.turn_on` sobre un `switch` no hace nada en HA —o hace otra cosa, según la
+        # integración—, y la frontera de `_casa_pide_confirmar` razona con los dos
+        # dominios como si fueran el mismo. El único servicio que cruza dominios a
+        # propósito es el genérico de `homeassistant`.
+        return {"ok": False, "motivo": (
+            f"'{servicio}' no es un servicio de '{entidad}'. Usa uno de "
+            f"'{dominio_entidad}' o de 'homeassistant'."
+        )}
     conocidas = {str(e.get("id") or "") for e in _casa_entidades()}
     if conocidas and entidad not in conocidas:
         # Con catálogo, una entidad que no está en él es una invención del modelo. Sin
         # catálogo se deja pasar: HA dirá que no existe y no se pierde nada.
         return {"ok": False, "motivo": f"No hay ningún '{entidad}' en casa. Mira casa_dispositivos."}
 
-    if len(_ha_ordenes) >= CASA_MAX_ORDENES:
-        # Se tira la más vieja: si la cola se llena es que HA no está recogiendo, y en ese
-        # caso lo que acabas de pedir importa más que lo de hace diez minutos.
-        tirada = _ha_ordenes.pop(0)
-        # Y se dice: la orden se ha perdido, y una ficha que siguiera en «pedido…» mentiría.
-        for h in _ha_ordenes_hist:
-            if h["id"] == tirada.get("id"):
-                h["caducada"] = True
+    datos_limpios = _casa_datos_limpios(datos)
+    if _ha_directo():
+        # Primero en directo. La cola solo recibe lo que HA SEGURO que no vio (ver «Qué pasa
+        # con una orden directa»): cualquier otra cosa encolada podría hacerse dos veces, o
+        # hacerla el Green con sus privilegios después de que HA la rechazara.
+        resultado, estado, detalle = _ha_llamar_servicio(servicio, entidad, datos_limpios)
+        if resultado != _HA_NO_LLEGO:
+            return _casa_orden_directa(servicio, entidad, resultado, estado, detalle)
+
     orden_id = uuid.uuid4().hex[:12]
-    pedida   = time.time()
-    _ha_ordenes.append({
-        "id": orden_id, "servicio": servicio, "entidad": entidad,
-        "datos": _casa_datos_limpios(datos), "pedida": pedida,
-    })
-    _ha_ordenes_hist.append({"id": orden_id, "servicio": servicio, "entidad": entidad,
-                             "pedida": pedida, "recogida": None, "caducada": False})
+    with _ha_ordenes_lock:
+        if len(_ha_ordenes) >= CASA_MAX_ORDENES:
+            # Se tira la más vieja: si la cola se llena es que HA no está recogiendo, y en
+            # ese caso lo que acabas de pedir importa más que lo de hace diez minutos.
+            tirada = _ha_ordenes.pop(0)
+            # Y se dice: la orden se ha perdido, y una ficha que siguiera en «pedido…»
+            # mentiría.
+            for h in _ha_ordenes_hist:
+                if h["id"] == tirada.get("id"):
+                    h["caducada"] = True
+        pedida = time.time()
+        _ha_ordenes.append({
+            "id": orden_id, "servicio": servicio, "entidad": entidad,
+            "datos": datos_limpios, "pedida": pedida,
+        })
+        _ha_ordenes_hist.append({"id": orden_id, "servicio": servicio, "entidad": entidad,
+                                 "pedida": pedida, "recogida": None, "caducada": False})
     _apuntar_accion_casa(servicio, entidad)
     return {"ok": True, "id": orden_id, "servicio": servicio, "entidad": entidad,
             "nota": "Encolada. Home Assistant la ejecuta en su próximo sondeo (segundos)."}
@@ -11334,11 +11876,18 @@ CASA_ORDENES_VENTANA = 15 * 60
 
 def _estado_orden_casa(orden: dict, entidad: dict | None, actualizado_ts: float | None,
                        ahora: float) -> str:
-    """En qué punto está una orden: en_cola, recogida, confirmada o caducada.
+    """En qué punto está una orden. Por la cola: en_cola, recogida, confirmada o caducada.
+    En directo: hecha, rechazada o sin_confirmar (ver «Qué pasa con una orden directa»).
 
-    «Confirmada» exige que el catálogo haya llegado DESPUÉS de que HA la recogiera: uno
-    anterior dice cómo estaba la casa antes de la orden, y que coincida sería casualidad.
+    «Confirmada» exige que el estado (del catálogo o de HA en vivo) se haya leído DESPUÉS
+    de que HA la recogiera: uno anterior dice cómo estaba la casa antes de la orden, y que
+    coincida sería casualidad. Vale también para una `sin_confirmar`: HA no contestó, pero
+    si una lectura posterior dice lo pedido, es que se hizo.
     """
+    directa = bool(orden.get("directa"))
+    resultado = str(orden.get("resultado") or _HA_HECHA) if directa else ""
+    if directa and resultado != _HA_SIN_CONFIRMAR:
+        return resultado
     if orden.get("caducada"):
         return "caducada"
     recogida = orden.get("recogida")
@@ -11351,7 +11900,7 @@ def _estado_orden_casa(orden: dict, entidad: dict | None, actualizado_ts: float 
     if (esperados and entidad and actualizado_ts is not None and actualizado_ts > recogida
             and str(entidad.get("estado") or "").lower() in esperados):
         return "confirmada"
-    return "recogida"
+    return _HA_SIN_CONFIRMAR if directa else "recogida"
 
 
 def _casa_sugeridas(lista: list) -> list:
@@ -11374,12 +11923,16 @@ def get_casa_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_t
     """Todo lo que pinta el widget «Casa» en una sola petición: catálogo con su edad,
     favoritos sugeridos, cómo van las órdenes recientes y la presencia.
 
+    Con HA en directo, el estado de cada ficha es el de HA ahora mismo (`fuente: vivo`);
+    si HA no contesta, el del catálogo (`fuente: catalogo`), y `edad_s` dice de cuándo es
+    el dato en los dos casos. Así el widget solo avisa de «puede no ser el real» cuando
+    de verdad puede no serlo.
+
     Sin catálogo es un estado vacío (200), no un error: HA todavía no lo ha mandado.
     No llama a nada de pago, y solo lee Supabase si la copia del catálogo está vacía.
     """
-    lista    = _casa_entidades()
+    lista, fuente, act_ts = _casa_entidades_al_dia()
     ahora    = time.time()
-    act_ts   = _casa_actualizado_ts()
     por_id   = {str(e.get("id") or ""): e for e in lista}
     entidades = []
     for e in lista:
@@ -11398,7 +11951,7 @@ def get_casa_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_t
         "id": o["id"], "servicio": o["servicio"], "entidad": o["entidad"],
         "pedida": _casa_iso(o["pedida"]),
         "estado": _estado_orden_casa(o, por_id.get(o["entidad"]), act_ts, ahora),
-    } for o in list(_ha_ordenes_hist) if ahora - o["pedida"] <= CASA_ORDENES_VENTANA]
+    } for o in _copia_historial_casa() if ahora - o["pedida"] <= CASA_ORDENES_VENTANA]
     try:
         presencia = _presencia_panel()
     except Exception:
@@ -11412,6 +11965,11 @@ def get_casa_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_t
             "edad_min":    _casa_edad_catalogo_min(),
             "total":       len(lista),
         },
+        # De dónde sale el estado de las fichas y cuántos segundos tiene. `ha_directo`
+        # separa «HA no contesta» (configurado y aun así catálogo) de «no hay directo».
+        "fuente":     fuente,
+        "edad_s":     None if act_ts is None else max(0, int(ahora - act_ts)),
+        "ha_directo": _ha_directo(),
         "entidades": entidades if lista else [],
         "sugeridas": _casa_sugeridas(lista) if lista else [],
         "ordenes":   ordenes,
@@ -11429,8 +11987,8 @@ class CasaOrdenIn(BaseModel):
 @app.post("/casa/orden")
 def post_casa_orden(body: CasaOrdenIn,
                     credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Un toque en el widget «Casa». Encola por la misma puerta que Jarvis y apunta
-    `dashboard` como origen."""
+    """Un toque en el widget «Casa». Pasa por la misma puerta que Jarvis —en directo si
+    HA contesta, a la cola si no— y apunta `dashboard` como origen."""
     entidad = body.entidad.strip().lower()
     if not _CASA_ENTIDAD_RE.match(entidad):
         raise HTTPException(status_code=400, detail="Esa entidad no tiene forma de dispositivo")
@@ -11458,13 +12016,28 @@ def post_casa_orden(body: CasaOrdenIn,
         motivo = str(r.get("motivo") or "")
         # El motivo de _j_casa_ordenar le habla a Jarvis (menciona su herramienta): aquí
         # se traduce a algo que diga algo a quien toca la pantalla.
+        if r.get("estado") == _HA_RECHAZADA:
+            # 502 y no 401/403: el que no puede es el usuario de HA del backend, no quien
+            # toca la pantalla, y un 401 aquí le cerraría la sesión del dashboard.
+            raise HTTPException(status_code=502,
+                                detail="Home Assistant ha rechazado la orden; no se ha hecho")
         if motivo.startswith("No hay ningún"):
             raise HTTPException(status_code=404,
                                 detail="Ese dispositivo ya no está en el catálogo de la casa")
         raise HTTPException(status_code=400, detail="No se pudo mandar esa orden a la casa")
-    pedida = next((h["pedida"] for h in _ha_ordenes_hist if h["id"] == r["id"]), time.time())
-    return {"ok": True, "orden": {"id": r["id"], "servicio": servicio, "entidad": entidad,
-                                  "pedida": _casa_iso(pedida), "estado": "en_cola"}}
+    hist   = next((h for h in _copia_historial_casa() if h["id"] == r["id"]), None)
+    pedida = hist["pedida"] if hist else time.time()
+    estado = _estado_orden_casa(hist, None, None, time.time()) if hist else "en_cola"
+    # `directa` sale del historial, que es lo mismo que luego enseña /casa/estado: que no
+    # pasó por la cola. `estado_entidad`: cómo ha quedado el aparato según la respuesta de
+    # HA a la orden hecha (los estados que cambiaron durante la llamada). None si fue a la
+    # cola, si HA no confirmó o si no lo dijo, que en las integraciones lentas es lo
+    # normal: entonces la ficha enseña lo pedido hasta que un refresco posterior diga otra
+    # cosa.
+    return {"ok": True, "directa": bool(hist and hist.get("directa")),
+            "estado_entidad": r.get("estado_entidad"),
+            "orden": {"id": r["id"], "servicio": servicio, "entidad": entidad,
+                      "pedida": _casa_iso(pedida), "estado": estado}}
 
 
 # ── RECORDATORIOS ─────────────────────────────────────────────────────────────
@@ -14257,7 +14830,9 @@ def _encendidos(dominios: tuple, solo: tuple = ()) -> list:
     casa con Alexas. Sin ella, cualquiera de esos dominios.
 
     El catálogo lo empuja HA cada hora, así que puede ir con retraso: por eso esto sirve
-    para AVISAR y nunca para apagar nada por su cuenta.
+    para AVISAR y nunca para apagar nada por su cuenta. Con HA en directo el estado es el
+    de ahora mismo, pero la regla no cambia: preguntar sigue costando un toque y apagar
+    por error algo que alguien está usando en casa cuesta bastante más.
 
     Devuelve id y nombre. El nombre es lo que se lee en el aviso; el id es lo que hace
     falta para apagarlo si contestas que sí al botón, y tiene que quedar guardado con el
@@ -14265,7 +14840,7 @@ def _encendidos(dominios: tuple, solo: tuple = ()) -> list:
     no lo que decía el aviso.
     """
     encendidas = []
-    for e in _casa_entidades():
+    for e in _casa_entidades_al_dia()[0]:
         eid = str(e.get("id") or "")
         if str(e.get("estado") or "").lower() != "on":
             continue
@@ -22103,7 +22678,9 @@ _JARVIS_HERRAMIENTAS = {
         "fn":          _j_casa_ordenar,
         "descripcion": "Ejecuta algo en casa vía Home Assistant: 'light.turn_on', "
                        "'switch.turn_off', 'climate.set_temperature'... Las cerraduras, "
-                       "persianas y alarmas las tiene que confirmar el usuario.",
+                       "persianas y alarmas las tiene que confirmar el usuario. Si "
+                       "contesta estado 'sin_confirmar', NO la repitas: puede haberse "
+                       "hecho; mira antes con casa_dispositivos.",
         "parametros":  {
             "servicio": {"type": "string", "description": "Servicio de HA, p. ej. 'light.turn_on'."},
             "entidad":  {"type": "string", "description": "Id exacto de casa_dispositivos, p. ej. 'light.salon'."},

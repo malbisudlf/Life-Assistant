@@ -261,8 +261,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   + un MCP de GitHub conectado), que es crecer por el camino revisable.
 
 - **La casa** (`casa_dispositivos`, `casa_ordenar`, `GET /ha/ordenes-pending`,
-  `POST /ha/entidades`): el backend sigue sin poder llamar a HA, así que se usan los dos
-  patrones que ya existen, cada uno para lo que sirve. Las **órdenes** van en una cola en
+  `POST /ha/entidades`): mientras vivió en Fly, el backend no podía llamar a HA, así que se
+  usan los dos patrones que ya existen, cada uno para lo que sirve (hoy, además, el directo
+  de más abajo). Las **órdenes** van en una cola en
   memoria que HA recoge al sondear (son ÓRDENES, como el WOL: perderlas en un cold start
   solo cuesta volver a pedirlas) y el **catálogo de dispositivos** lo empuja HA a Supabase
   (es ESTADO, como la presencia: el que lo sabe es HA). Tres reglas:
@@ -276,7 +277,26 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     volver no puede ponerse a encender lo que pediste al mediodía — la misma regla que hace
     caducar la presencia.
   Con catálogo cargado, una entidad que no está en él se rechaza: es una invención del
-  modelo. El YAML de HA está en `docs/HOME_ASSISTANT_JARVIS.md`.
+  modelo. Y el servicio tiene que ser del dominio de la entidad (o el genérico
+  `homeassistant.*`): `light.turn_on` sobre un `switch` no enciende nada y descuadra la
+  frontera de confirmación, que razona con los dos dominios. El YAML de HA está en
+  `docs/HOME_ASSISTANT_JARVIS.md`.
+  **En directo, desde que el backend vive en `caja`**: con `HA_URL` y `HA_TOKEN`,
+  `_j_casa_ordenar` —después de todas esas validaciones, y la confirmación ya dada— le manda
+  la orden a HA por su API (`_ha_llamar_servicio`). La respuesta lleva `estado` con lo que
+  pasó: `hecha` (con `estado_entidad` si HA dice al contestar cómo quedó, que es lo que
+  Jarvis puede contar —«ya está encendido»—; si no, `null` y no un «apagado» leído
+  demasiado pronto), `rechazada` (`ok: false`: HA dijo que no, ni se hizo ni se encoló) o
+  `sin_confirmar` (HA la recibió y no contestó: puede haberse hecho, y la nota y la
+  descripción de la herramienta le dicen al modelo que **no la repita** sin mirar antes).
+  Solo si HA no aceptó ni la conexión va a la cola, sin `estado`, como siempre. Lo que HA
+  recibió no se encola nunca: el Green lo repetiría, o lo ejecutaría con sus privilegios
+  después de que HA lo rechazara. De `homeassistant.*` solo pasan `turn_on`, `turn_off` y
+  `toggle`. La tabla completa, en `docs/HOME_ASSISTANT_FLUJOS.md`. `casa_dispositivos` lee los
+  estados de HA en el acto (`_casa_entidades_al_dia`) y dice de dónde salen (`estados`), para
+  que el modelo no dé por seguro un «encendido» del catálogo de hace una hora. Todo lo que
+  ordena a la casa (alarmas, el «Apagar» del aviso de salir) pasa por la misma puerta y gana
+  lo mismo sin tocarlo. El detalle, en `docs/HOME_ASSISTANT_FLUJOS.md`.
   **El dashboard encola por la MISMA puerta.** El widget «Casa» (`POST /casa/orden`) no
   tiene cola propia: llama a `_j_casa_ordenar` con `_boca_actual` a `dashboard`, que es el
   origen que queda apuntado en `casa_acciones`. Lo único que cambia es la entrada: el

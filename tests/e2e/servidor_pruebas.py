@@ -56,6 +56,12 @@ os.environ.setdefault("ELEVENLABS_VOICE_ID", "voz-e2e")
 # Despliegue y Crons enseñarían "falta JARVIS_REPO" y no probarían nada.
 os.environ.setdefault("JARVIS_REPO", "malbisudlf/Life-Assistant")
 os.environ.setdefault("DEPLOY_GITHUB_TOKEN", "gh-e2e-token")
+# Home Assistant en directo, apagado: el widget «Casa» del E2E prueba el camino del
+# catálogo y la cola. Sin fijarlo, un backend/.env local con HA_URL haría que el backend
+# de pruebas le preguntara a un HA de verdad. FORZADAS a vacío, no `setdefault`: exportadas
+# en la shell o en el CI, el E2E le mandaría órdenes a la casa de verdad con el token real.
+os.environ["HA_URL"]   = ""
+os.environ["HA_TOKEN"] = ""
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el

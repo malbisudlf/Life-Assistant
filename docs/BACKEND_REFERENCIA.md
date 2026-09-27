@@ -57,8 +57,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
 | `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas y un booleano, nunca un lugar |
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
-| `GET /casa/estado` | JWT | Todo el widget «Casa» en una petición: catálogo con su edad (`edad_min`), entidades de los dominios que se pueden tocar (el PC con `solo_lectura`), favoritos sugeridos, las órdenes de los últimos 15 min con su acuse (`en_cola` / `recogida` / `confirmada` / `caducada`) y la presencia con la forma de `GET /presencia`. Sin catálogo, 200 con `conocido: false` |
-| `POST /casa/orden` | JWT | `{entidad, accion, confirmado}`: un toque en el widget. La acción es de una lista cerrada y el servicio lo fija el backend; encola por `_j_casa_ordenar` con origen `dashboard`. **400** si la acción no vale para el dominio o es el PC, **404** si la entidad ya no está en el catálogo, **409** si es una persiana o una cerradura sin `confirmado` (no encola nada) |
+| `GET /casa/estado` | JWT | Todo el widget «Casa» en una petición: catálogo con su edad (`edad_min`), entidades de los dominios que se pueden tocar (el PC con `solo_lectura`), favoritos sugeridos, las órdenes de los últimos 15 min con su acuse (por la cola: `en_cola` / `recogida` / `confirmada` / `caducada`; en directo: `hecha` / `rechazada` / `sin_confirmar`, y esta última pasa a `confirmada` si una lectura posterior dice lo pedido) y la presencia con la forma de `GET /presencia`. El estado de cada entidad es el de HA en vivo si hay `HA_URL`/`HA_TOKEN` y contesta (`fuente: "vivo"`), o el del catálogo (`fuente: "catalogo"`); `edad_s` dice cuántos segundos tiene ese dato y `ha_directo` si el directo está configurado (configurado y `catalogo` = HA no contesta). Sin catálogo, 200 con `conocido: false` |
+| `POST /casa/orden` | JWT | `{entidad, accion, confirmado}`: un toque en el widget. La acción es de una lista cerrada y el servicio lo fija el backend; pasa por `_j_casa_ordenar` con origen `dashboard`: con HA en directo va a `POST /api/services/...`: si HA contesta 2xx, `directa: true`, `orden.estado: "hecha"` y `estado_entidad` (el estado de la entidad si HA lo incluye entre lo que cambió durante la llamada; si no, `null`, nunca una lectura de justo después, que puede ser la de antes); si HA la recibió y no contestó (timeout de lectura, conexión cortada, 5xx), 200 con `orden.estado: "sin_confirmar"`; si HA no aceptó ni la conexión, se encola para el Green (`directa: false`, `en_cola`). `directa` es lo mismo que guarda el historial: no pasó por la cola. Lo que HA recibió no se encola nunca. **400** si la acción no vale para el dominio o es el PC, **404** si la entidad ya no está en el catálogo, **409** si es una persiana o una cerradura sin `confirmado` (no manda ni encola nada), **502** si HA la rechazó (4xx de HA; nunca un 401, que cerraría la sesión del dashboard): no se ha hecho ni se ha encolado |
 | `POST /wake-pc` | JWT | Pide encender el PC. Con `PC_DIR`, deja el pedido `wol` para `caja`; sin él (o si no se puede escribir), marca `_wol_pending` para HA. Devuelve `{ok, motor: "caja"\|"ha"}`. Nunca los dos motores a la vez |
 | `GET /ha/wol-pending` | servicio | HA sondea cada 30s: devuelve y limpia el flag WOL (solo se marca sin `caja`) |
 | `POST /relaunch-agent` | JWT | Pide relanzar el agente: pedido `relanzar` para `caja` o `_agent_relaunch_pending` para HA, igual que el anterior |
@@ -149,6 +149,16 @@ fichero no sobrevive a un despliegue), `ENABLE_BANKING_REDIRECT_URL`,
 
 **El PC por `caja`**: `PC_DIR` (el directorio de pedidos montado en el contenedor; vacío =
 las órdenes al PC van por los flags que sondea Home Assistant, como antes).
+
+**La casa en directo**: `HA_URL` (la API REST de Home Assistant en la LAN, con esquema,
+p. ej. `http://<IP-de-HA>:8123`) y `HA_TOKEN` (**secreto**: token de larga duración de un
+usuario de HA **sin permisos de administrador**, que no puede tocar la configuración de
+HA). Con las dos, `GET /casa/estado` y `casa_dispositivos` leen el estado de HA en el acto
+(`GET /api/states`, timeout de 3 s y 3 s de caché) y las órdenes van directas a
+`POST /api/services/<dominio>/<servicio>`; sin ellas, o con HA sin contestar, todo sigue
+por el catálogo y la cola de `GET /ha/ordenes-pending`. El token solo viaja en la cabecera
+`Authorization` y no sale en respuestas ni registros. Cómo crear el usuario, en
+`docs/HOME_ASSISTANT_JARVIS.md`.
 
 **Resumen diario**: `BRIEF_TO`, `BRIEF_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
 `SMTP_PASSWORD` (con Gmail y 2FA: una contraseña de aplicación), `ENTREGAS_MARKER`.

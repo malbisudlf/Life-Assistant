@@ -138,11 +138,52 @@ puede haber un consumidor. El YAML completo está en `docs/HOME_ASSISTANT_JARVIS
 Hay **dos productores** de órdenes y un solo consumidor: Jarvis (y lo que cuelga de él:
 alarmas, el botón «Apagar» del aviso de salir de casa) y el widget «Casa» del dashboard
 (`POST /casa/orden`). Los dos entran por `_j_casa_ordenar`, y HA no distingue unas de
-otras. Lo que sí sale de aquí es el **acuse**: el backend no puede preguntarle a HA si
+otras. Lo que sí sale de aquí es el **acuse**: por la cola, el backend no sabe si HA
 ejecutó algo, pero sabe cuándo HA le vació la cola, y eso es «HA la recogió» en la ficha.
-La confirmación de verdad llega con el siguiente catálogo: si es posterior a la recogida y
-dice el estado esperado, la orden sale como confirmada. Con el catálogo cada hora eso puede
-tardar; el paso opcional de `docs/HOME_ASSISTANT_JARVIS.md` lo deja en segundos.
+La confirmación de verdad llega con el siguiente estado leído: si es posterior a la
+recogida y dice el estado esperado, la orden sale como confirmada.
+
+**En directo** (desde que el backend vive en `caja`, en la misma LAN que el Green): con
+`HA_URL` y `HA_TOKEN` el backend **llama a la API REST de HA**, el sentido que durante años
+no existió. Dos cosas:
+
+- **El estado**: `GET /casa/estado` (y `casa_dispositivos` de Jarvis, y el aviso de salir
+  de casa) le preguntan a HA cómo está cada entidad del catálogo (`GET /api/states`, una
+  sola petición, 3 s de timeout y 3 s de caché para que varios clientes no la multipliquen).
+  Si HA no contesta, se sirve el catálogo y la respuesta lo dice (`fuente: "catalogo"`).
+- **Las órdenes**: `_j_casa_ordenar` manda el servicio a `POST /api/services/<dominio>/<servicio>`
+  con la misma lista blanca, la misma validación y la misma confirmación de siempre
+  (cerraduras, garaje y alarma se confirman por los dos caminos). Lo que pase después
+  depende solo de lo que conteste HA:
+
+  | HA… | La orden queda | ¿A la cola del Green? |
+  |---|---|---|
+  | contesta 2xx | **hecha**: la caché de estados se olvida entera y el estado que se devuelve es el que HA dice que cambió durante la llamada (o ninguno: una lectura de justo después puede ser la de antes) | No |
+  | contesta 4xx (401/403: el usuario sin admin no puede; 400: datos que no valen) | **rechazada**: no se ha hecho, se dice, y el widget la pinta así | **Nunca** |
+  | no aceptó la conexión (timeout de conexión, conexión rechazada, DNS) | **en cola**: HA no la vio | Sí, es el respaldo |
+  | la recibió y no contestó (timeout de lectura, conexión cortada tras mandar, 5xx, cualquier otra cosa) | **sin confirmar**: puede haberse hecho; el refresco siguiente dice qué pasó | **Nunca** |
+
+  La cola solo recibe lo que HA SEGURO que no vio. Encolar lo demás era que el Green
+  repitiera lo que HA ya estaba haciendo (su API no contesta hasta que el servicio termina,
+  y no lo cancela si el cliente se va: un script largo, el pulso del garaje) o que
+  ejecutara, con sus privilegios de administrador, lo que HA acababa de negarle al usuario
+  sin admin. Y de `homeassistant.*` solo pasan `turn_on`, `turn_off` y `toggle`, por los dos
+  caminos: `restart` o `reload_*` administran HA, no la casa.
+
+  Una orden **hecha** retira de la cola lo que esperaba sobre la misma entidad y la misma
+  familia (encender/apagar, bloquear/desbloquear, abrir/cerrar/parar, play/pausa,
+  armar/desarmar la alarma), o que sea el mismo servicio (la temperatura, el volumen): si el
+  Green lo recogiera después, desharía lo que HA acaba de hacer. Los servicios de recarga
+  (`*.reload`) no pasan por ningún camino, y un 401/403 al leer el estado apaga el directo 10 minutos
+  (ver `docs/HOME_ASSISTANT_JARVIS.md`, sección 3 bis). Sin directo no se retira
+  nada: hay un solo motor y el Green ejecuta en orden, como siempre.
+
+**Lo que sigue haciendo el Green, con o sin directo**: empujar la presencia
+(`POST /ha/presencia`) y el catálogo (`POST /ha/entidades`) —el catálogo dice QUÉ entidades
+hay y cómo se llaman, y sin él el backend no sabe qué preguntarle a HA ni puede rechazar una
+entidad que Jarvis se haya inventado—, y sondear la cola de órdenes, que con el directo
+funcionando casi siempre sale vacía. No se quita nada: es el camino de vuelta, y el mismo
+criterio que las órdenes al PC por `caja` (nunca los dos motores a la vez).
 
 **Reloj de respaldo del resumen diario**: automatización `la_brief_tick`, un
 `time_pattern` cada 5 min → `rest_command` a `POST /ha/brief-tick`. Ese mismo tick es el

@@ -139,9 +139,11 @@ backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
     ├── caja (PC_DIR) ── pedidos al PC (WOL, relanzar el agente, suspender, apagar) que
     │                     `pc.sh` ejecuta en la LAN (paquete mágico o SSH); lo que hizo,
     │                     en GET /pc/estado
-    └── Home Assistant ── HA sondea al backend (eventos, los flags del PC solo de respaldo
-                          si no hay caja, y el reloj de respaldo del resumen diario) y
-                          EMPUJA la presencia (POST /ha/presencia, único sentido inverso)
+    └── Home Assistant ── el backend LE PREGUNTA en la LAN (con HA_URL/HA_TOKEN: estado de
+                          la casa en vivo y órdenes directas por su API REST); HA sondea al
+                          backend (la cola de órdenes de respaldo, eventos, los flags del PC
+                          solo si no hay caja, el reloj de respaldo del resumen diario) y
+                          EMPUJA la presencia y el catálogo de dispositivos
 
 Apple Watch → Health Auto Export / iOS Shortcuts → POST /health/ingest[/simple]
 agent/agent.py → agente Windows efímero + despachador (Playwright + pyautogui + Apollo)
@@ -161,7 +163,7 @@ Ficheros clave:
 | `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |
 | `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
-| `src/lib/casa.js` | Lógica pura del widget «Casa»: qué manda un toque (lo contrario de lo que se ve, nunca toggle), qué enseña la ficha mientras la orden viaja y qué favoritos se pintan |
+| `src/lib/casa.js` | Lógica pura del widget «Casa»: qué manda un toque (lo contrario de lo que se ve, nunca toggle), qué enseña la ficha mientras la orden viaja, qué favoritos se pintan, si el estado es de HA en directo o del catálogo y cada cuánto se pregunta |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
 | `src/lib/agenda.js` | Lógica pura de «Lo siguiente»: el próximo compromiso (y lo que está en curso), la cuenta atrás, la fase de la hora de salida y la memoria del modo coche/andando |
