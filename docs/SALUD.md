@@ -260,7 +260,8 @@ diferencia entre dos fabricantes y leyéndola como fisiología. **El histórico 
 ni se toca**: sigue entero en las gráficas, solo deja de servir como referencia.
 
 Respetan el corte `baselinePersonal`, `refHrv` (vía `wellnessHistory({ corte })` y el
-widget), `mediaReciente` y el `baseline30` de Dashboard.jsx. Si el corte deja la muestra
+widget), `mediaReciente` y `refRecuperacion` (la referencia de la nota de sueño, vía
+`sleepHistory({ corte })`; sustituyó al `baseline30` que calculaba el widget). Si el corte deja la muestra
 por debajo del mínimo, `baselinePersonal` devuelve `null` y quien llama cae al umbral
 fijo — que es lo correcto mientras el aparato nuevo no tenga historia propia.
 
@@ -408,6 +409,16 @@ tiempo despierto 10, más una penalización por hora de acostarse (02:00–05:59
 resto 52 (dormir poco no puede dar nota alta por muy buenas que sean las fases).
 `respiratory_rate` penaliza indirectamente vía `calcRecoveryMod` (hasta −5 pts si la
 frecuencia sube >5% sobre la baseline de 30 días).
+
+La referencia de esa penalización (HRV, FC en reposo y respiración) es **la de la propia
+noche**: la media de D-30..D-1 (`refRecuperacion`, dentro de `sleepHistory`), no la de todo
+lo cargado. Así una noche puntúa siempre como habría puntuado la mañana siguiente, y no
+cambia al llegar datos nuevos ni al abrir el histórico de un año en vez del de 30 días.
+
+**El mapa «Tu año»** (modal de salud, `docs/FRONTEND.md`) pinta rayados los días puntuados
+sin el reloj puesto —menos sensores, no peor día— en vez de con el color de su nota, y los
+días anteriores al cambio de dispositivo se pintan igual, sin esconderlos: el corte solo
+cambia las referencias y el mapa lo marca con una línea «aparato nuevo».
 
 **Objetivo del usuario**: 4 entrenamientos de gimnasio por semana (registrados en Hevy →
 Apple Health).

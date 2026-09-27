@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "rea
 import {
   isToday, isFuture, isPast, isActive, isoHoy, daysUntil, formatTime, formatUpcomingTime,
   urgencyColor, formatShortDate, DAYS_ES, MONTHS_ES, isoToDdMmYyyy,
-  hoursToHM, sleepScore, sleepBreakdown, sleepHours, calcRecoveryMod, findMetric,
+  hoursToHM, sleepHours, findMetric,
   mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
   mediaReciente, refHrv,
   weatherFromCode, weekdayShort,
@@ -22,6 +22,10 @@ import {
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
   esConfirmacionHablada, esNegacionHablada,
+} from "../lib/helpers";
+import {
+  tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS, sleepHistory, desgloseNoche,
+  rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes, rachaSueno, rachaPasos,
 } from "../lib/helpers";
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
@@ -282,6 +286,370 @@ function Sparkline({ data, color = "var(--accent)", height = 40, objetivo = null
         <circle key={i} cx={px(i)} cy={py(Number(d.value))} r="2" fill={colorMarca} opacity="0.85" />
       ) : null)}
     </svg>
+  );
+}
+
+// ── TU AÑO (mapa de calor del modal de salud) ────────────────────
+// Lógica pura en helpers (rejillaCalendario, estadoCelda, rachas); aquí solo se pinta.
+const ANIO_MODOS     = [["bienestar", "Bienestar"], ["sueno", "Sueño"], ["pasos", "Pasos"]];
+const ANIO_CORTES    = { bienestar: TRAMOS_BIENESTAR, sueno: TRAMOS_SUENO, pasos: TRAMOS_PASOS };
+const ANIO_ETIQUETAS = {
+  bienestar: ["Día excelente", "Buen día", "Día regular", "Día flojo"],
+  sueno:     ["Excelente", "Bueno", "Regular", "Mejorable"],
+  pasos:     ["10.000 o más", "8.000 o más", "6.000 o más", "menos de 6.000"],
+};
+const ANIO_CLAVE_MODO = "la_anio_modo";
+// Geometría en unidades del viewBox: celda de 10 con 2 de separación, margen a la
+// izquierda para «L X V» y arriba para los meses y la marca del cambio de aparato.
+const ANIO_CELDA = 10, ANIO_PASO = 12, ANIO_X0 = 16, ANIO_Y0 = 20;
+// Los colores salen de STAGE_TIPS al pintar, no aquí: STAGE_TIPS se declara más abajo en
+// el fichero y leerlo al cargar el módulo reventaría (zona muerta de `const`).
+const ANIO_FASES = [["deep", "Profundo"], ["rem", "REM"], ["core", "Core"], ["awake", "Despierto"]];
+
+// Separador de miles fijo: `toLocaleString("es")` deja 6000 sin punto y 10.000 con él.
+const milesAnio = n => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+
+function leerModoAnio() {
+  try {
+    const m = localStorage.getItem(ANIO_CLAVE_MODO);
+    return ANIO_CORTES[m] ? m : "bienestar";
+  } catch { return "bienestar"; }
+}
+
+function textoRachaAnio(r, neutras) {
+  if (!r) return "";
+  const rango = !r.maximaDesde ? ""
+    : r.maximaDesde === r.maximaHasta ? ` (${fechaDiaMes(r.maximaDesde)})`
+    : ` (${fechaDiaMes(r.maximaDesde)} – ${fechaDiaMes(r.maximaHasta)})`;
+  if (r.actual > 0) {
+    return `racha actual ${r.actual} · la más larga ${r.maxima}${rango}`
+      + (r.neutrasActual > 0 ? ` · ${r.neutrasActual} ${neutras}, no cuentan` : "");
+  }
+  return r.maxima > 0 ? `sin racha ahora · la más larga ${r.maxima}${rango}` : "sin racha ahora · aún ninguna en el año";
+}
+
+function textoRelojAnio(reloj, fecha) {
+  const est = reloj?.dias?.[fecha];
+  if (relojPuesto(est)) return "reloj puesto";
+  if (est === "sin_reloj") return "sin reloj: solo el móvil";
+  return "sin datos de uso del reloj";
+}
+
+function FilaDesgloseAnio({ label, detail, pts, max, gris = false, indent = false }) {
+  const color = gris ? "var(--muted2)"
+    : pts < 0 ? "#d4645a" : pts === max && max > 0 ? "var(--green)" : pts > 0 ? "var(--accent)" : "var(--muted)";
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, paddingLeft: indent ? 12 : 0, opacity: gris ? 0.7 : 1 }}>
+      <span style={{ color: gris || indent ? "var(--muted2)" : "var(--muted)", fontSize: indent ? 11 : 12, minWidth: 0 }}>{label}</span>
+      <span style={{ display: "flex", gap: 8, flexShrink: 0, alignItems: "baseline" }}>
+        {detail && <span style={{ color: gris ? "var(--muted2)" : "var(--text)", fontSize: 11 }}>{detail}</span>}
+        <span style={{ fontFamily: "'DM Mono', monospace", minWidth: 34, textAlign: "right", fontSize: indent ? 11 : 12, color }}>
+          {gris ? "" : pts > 0 && max > 0 ? `${pts}/${max}` : pts || ""}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+function AnioEnCuadritos({ rejilla, historico, pasos, reloj, corte, rachas }) {
+  const [modo, setModo] = useState(leerModoAnio);
+  const [sel, setSel]   = useState(null);
+  // Un id por instancia: el patrón de rayas se referencia por url(#id) y dos mapas en la
+  // página (o un remontaje) no pueden pisarse el suyo.
+  const idRayas = "anio-rayas-" + React.useId().replace(/[^a-zA-Z0-9_-]/g, "");
+
+  const mapas = useMemo(() => ({
+    bienestar: new Map((historico?.bienestar || []).map(p => [p.date, p])),
+    sueno:     new Map((historico?.sueno || []).map(n => [n.date, n])),
+    pasos:     new Map((pasos || []).filter(d => d && Number(d.value) > 0).map(d => [d.date, Number(d.value)])),
+  }), [historico, pasos]);
+
+  const columnas = useMemo(() => rejilla?.semanas || [], [rejilla]);
+  const celdas = useMemo(
+    () => columnas.flat().filter(c => !c.futuro).map(c => ({ ...c, ...estadoCelda(modo, c.fecha, { ...mapas, reloj }) })),
+    [columnas, modo, mapas, reloj],
+  );
+  const porFecha  = useMemo(() => new Map(celdas.map(c => [c.fecha, c])), [celdas]);
+  const conValor  = celdas.filter(c => c.estado !== "vacio").length;
+
+  const cambiarModo = m => {
+    setModo(m);
+    try { localStorage.setItem(ANIO_CLAVE_MODO, m); } catch { /* sin storage: el modo dura lo que la sesión */ }
+  };
+
+  const W = ANIO_X0 + columnas.length * ANIO_PASO + 6;
+  const H = ANIO_Y0 + 7 * ANIO_PASO;
+  const xDe = col  => ANIO_X0 + col * ANIO_PASO;
+  const yDe = fila => ANIO_Y0 + fila * ANIO_PASO;
+
+  // UN solo manejador para todo el mapa, que elige la celda más cercana al toque. En un
+  // móvil la celda mide unos 5-6 px: exigir acertar dentro de un <rect> haría el mapa
+  // inusable con el dedo, y partirlo en trozos para agrandarla rompería el año de un
+  // vistazo, que es lo único que este mapa tiene que dar.
+  const alTocar = e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    if (!r.width || !r.height || !columnas.length) return;
+    const x = (e.clientX - r.left) * (W / r.width);
+    const y = (e.clientY - r.top) * (H / r.height);
+    const col  = Math.min(columnas.length - 1, Math.max(0, Math.round((x - ANIO_X0 - ANIO_CELDA / 2) / ANIO_PASO)));
+    const fila = Math.min(6, Math.max(0, Math.round((y - ANIO_Y0 - ANIO_CELDA / 2) / ANIO_PASO)));
+    const celda = columnas[col]?.[fila];
+    if (!celda || celda.futuro) return;
+    setSel(s => (s === celda.fecha ? null : celda.fecha));
+  };
+
+  const corteISO  = corte ? String(corte).slice(0, 10) : null;
+  const celdaCorte = corteISO ? porFecha.get(corteISO) : null;
+
+  const tituloCelda = c => {
+    const f = fechaLargaCorta(c.fecha);
+    if (c.estado === "vacio")    return `${f} · sin datos`;
+    if (c.estado === "anulada")  return `${f} · noche anulada`;
+    if (modo === "pasos")        return `${f} · ${milesAnio(c.valor)} pasos${c.estado === "sin_reloj" ? " (solo el móvil)" : ""}`;
+    if (c.valor == null)         return `${f} · sin reloj`;
+    return `${f} · ${c.valor}${modo === "sueno" ? " pts" : ""}${c.estado === "sin_reloj" ? " (sin reloj)" : ""}`;
+  };
+
+  const cortes = ANIO_CORTES[modo];
+  const fmtCorte = n => (modo === "pasos" ? milesAnio(n) : String(n));
+  const umbrales = [`<${fmtCorte(cortes[2])}`, fmtCorte(cortes[2]), fmtCorte(cortes[1]), `${fmtCorte(cortes[0])}+`];
+
+  // Navegación del desglose: días del mapa en orden, sin salir del rango ni ir al futuro.
+  const idxSel = sel ? celdas.findIndex(c => c.fecha === sel) : -1;
+  const celdaSel = idxSel >= 0 ? celdas[idxSel] : null;
+  const muestra = (fill, extra = null) => (
+    <svg width="10" height="10" viewBox="0 0 10 10" style={{ display: "inline-block", verticalAlign: "-1px" }} aria-hidden="true">
+      <rect x="0.5" y="0.5" width="9" height="9" rx="2" style={fill} />
+      {extra}
+    </svg>
+  );
+
+  const lineaRacha = { fontSize: 13, color: "var(--text)", lineHeight: 1.5 };
+  const botonNav = activo => ({
+    background: "transparent", border: "0.5px solid var(--border2)", borderRadius: 6,
+    color: activo ? "var(--muted)" : "var(--border2)", fontSize: 13, lineHeight: 1,
+    padding: "3px 9px", cursor: activo ? "pointer" : "default", fontFamily: "'DM Mono', monospace",
+  });
+
+  const desglose = () => {
+    if (!celdaSel) return null;
+    const fecha = celdaSel.fecha;
+    const vacioTexto = reloj?.dias?.[fecha] && reloj.dias[fecha] !== "sin_datos"
+      ? (modo === "sueno" ? "Esa noche no hay sueño que puntuar." : modo === "pasos" ? "Ese día no hay pasos registrados." : "Ese día no hay nada que puntuar.")
+      : "Ese día no llegó nada del reloj ni del móvil";
+    let cuerpo;
+    if (modo === "bienestar") {
+      const p = mapas.bienestar.get(fecha);
+      if (!p || !p.desglose) cuerpo = <div style={{ color: "var(--muted)" }}>{vacioTexto}</div>;
+      else {
+        const total = scoreFromBreakdown(p.desglose).score;
+        const t = tramo(total, TRAMOS_BIENESTAR);
+        cuerpo = (
+          <>
+            {p.desglose.map((b, i) => (
+              <FilaDesgloseAnio key={i} label={b.label} detail={b.sinDatos ? "sin datos" : b.detail}
+                pts={b.pts} max={b.max} gris={b.sinDatos} />
+            ))}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--muted)" }}>Total{t != null ? ` · ${ANIO_ETIQUETAS.bienestar[t]}` : ""}</span>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontWeight: 600, color: t != null ? COLOR_TRAMO[t] : "var(--muted)" }}>{total ?? "—"}</span>
+            </div>
+            {p.sinReloj && (
+              <div style={{ color: "var(--muted2)", fontSize: 11, marginTop: 4 }}>
+                Puntuado sin el reloj puesto: menos sensores, no peor día.
+              </div>
+            )}
+          </>
+        );
+      }
+    } else if (modo === "sueno") {
+      const n = mapas.sueno.get(fecha);
+      if (n && n.anulada) {
+        cuerpo = <div style={{ color: "var(--muted)" }}>Noche anulada: no puntúa ni cuenta para la racha.</div>;
+      } else if (!n || n.score == null) {
+        cuerpo = <div style={{ color: "var(--muted)" }}>{celdaSel.estado === "sin_reloj" ? "Esa noche no se llevó el reloj: no hay sueño que puntuar." : vacioTexto}</div>;
+      } else {
+        const fases = ANIO_FASES
+          .map(([k, label]) => [label, k === "awake" ? "var(--muted2)" : STAGE_TIPS[k].color, Number(n.fases[k]) || 0])
+          .filter(f => f[2] > 0);
+        // Si el reloj no dio todas las fases (sin core, p. ej.), lo que falta hasta las
+        // horas dormidas se deja en gris: repartir la barra entre las que hay haría
+        // parecer que el profundo y el REM ocuparon la noche entera.
+        const sumaFases = fases.reduce((s, f) => s + f[2], 0);
+        const anchoBarra = Math.max(sumaFases, (Number(n.horas) || 0) + (Number(n.fases.awake) || 0));
+        const t = tramo(n.score, TRAMOS_SUENO);
+        cuerpo = (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--muted2)", fontSize: 11, fontFamily: "'DM Mono', monospace" }}>
+              <span>{n.sleepStart ? `se acostó ${String(n.sleepStart).slice(0, 5)}` : ""}</span>
+              <span style={{ color: "var(--text)" }}>{hoursToHM(n.horas)}</span>
+              <span>{n.sleepEnd ? `se levantó ${n.sleepEnd}` : ""}</span>
+            </div>
+            {sumaFases > 0 && (
+              <>
+                <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", margin: "4px 0 4px", background: "var(--border2)" }}>
+                  {fases.map(([label, color, h]) => (
+                    <div key={label} title={`${label}: ${hoursToHM(h)}`} style={{ width: `${(h / anchoBarra) * 100}%`, background: color }} />
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>
+                  {fases.map(([label, color, h]) => (
+                    <span key={label}><span style={{ color }}>●</span> {label} {hoursToHM(h)}</span>
+                  ))}
+                </div>
+              </>
+            )}
+            {desgloseNoche(n).map((b, i) => (
+              <FilaDesgloseAnio key={i} label={b.label} detail={b.detail} pts={b.pts} max={b.max} indent={b.indent} />
+            ))}
+            <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 3, paddingTop: 5, display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--muted)" }}>Total{t != null ? ` · ${ANIO_ETIQUETAS.sueno[t]}` : ""}</span>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontWeight: 600, color: COLOR_TRAMO[t] }}>{n.score}</span>
+            </div>
+          </>
+        );
+      }
+    } else {
+      const v = mapas.pasos.get(fecha);
+      if (!v) cuerpo = <div style={{ color: "var(--muted)" }}>{vacioTexto}</div>;
+      else {
+        const filaPasos = mapas.bienestar.get(fecha)?.desglose?.find(b => b.label === "🚶 Pasos");
+        const t = tramo(v, TRAMOS_PASOS);
+        cuerpo = (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 18, color: COLOR_TRAMO[t] }}>{milesAnio(v)} pasos</span>
+              <span style={{ color: "var(--muted2)", fontSize: 11 }}>{ANIO_ETIQUETAS.pasos[t]}</span>
+            </div>
+            {filaPasos && !filaPasos.sinDatos && (
+              <div style={{ color: "var(--muted)", fontSize: 12 }}>{filaPasos.pts}/{filaPasos.max} pts en el bienestar de ese día</div>
+            )}
+            {celdaSel.estado === "sin_reloj" && (
+              <div style={{ color: "var(--muted2)", fontSize: 11 }}>Contados solo con el móvil: el reloj no estaba puesto, así que seguramente fueron más.</div>
+            )}
+          </>
+        );
+      }
+    }
+    return (
+      <div style={{ marginTop: 10, background: "var(--surface2)", border: "0.5px solid var(--border)", borderRadius: 8, padding: "10px 12px", fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+          <button type="button" aria-label="Día anterior" disabled={idxSel <= 0} style={botonNav(idxSel > 0)}
+            onClick={() => idxSel > 0 && setSel(celdas[idxSel - 1].fecha)}>‹</button>
+          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "var(--text)" }}>{fechaLargaCorta(fecha)}</span>
+          <button type="button" aria-label="Día siguiente" disabled={idxSel >= celdas.length - 1} style={botonNav(idxSel < celdas.length - 1)}
+            onClick={() => idxSel < celdas.length - 1 && setSel(celdas[idxSel + 1].fecha)}>›</button>
+          <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted2)" }}>{textoRelojAnio(reloj, fecha)}</span>
+        </div>
+        {cuerpo}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      {rachas && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 12 }}>
+          <div style={lineaRacha}>😴 Noches de 7 h o más: <span style={{ color: "var(--muted)" }}>{textoRachaAnio(rachas.sueno, "sin reloj, anuladas o sin datos")}</span></div>
+          <div style={lineaRacha}>🚶 Días de 8.000 pasos o más: <span style={{ color: "var(--muted)" }}>{textoRachaAnio(rachas.pasos, "sin reloj o sin datos")}</span></div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {ANIO_MODOS.map(([m, label]) => {
+          const activo = m === modo;
+          return (
+            <button key={m} type="button" onClick={() => { if (!activo) cambiarModo(m); }} style={{
+              flex: 1, padding: "6px 0",
+              background: activo ? "rgba(200,169,110,0.15)" : "var(--surface2)",
+              border: `0.5px solid ${activo ? "var(--accent)" : "var(--border2)"}`,
+              borderRadius: 6, color: activo ? "var(--accent)" : "var(--muted)",
+              fontSize: 12, fontWeight: activo ? 600 : 400,
+              cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+            }}>{label}</button>
+          );
+        })}
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" onClick={alTocar} role="img"
+        aria-label={`Mapa del año: ${ANIO_MODOS.find(([m]) => m === modo)[1].toLowerCase()} por día`}
+        style={{ display: "block", cursor: "pointer", fontFamily: "'DM Mono', monospace", touchAction: "manipulation" }}>
+        <defs>
+          <pattern id={idRayas} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="3" height="3" style={{ fill: "var(--surface2)" }} />
+            <line x1="0" y1="0" x2="0" y2="3" style={{ stroke: "var(--muted2)", strokeWidth: 1.2 }} />
+          </pattern>
+        </defs>
+        {(rejilla?.meses || []).map(m => (
+          <text key={`${m.col}-${m.etiqueta}`} x={xDe(m.col)} y={15} fontSize="9" style={{ fill: "var(--muted2)" }}>{m.etiqueta}</text>
+        ))}
+        {[[0, "L"], [2, "X"], [4, "V"]].map(([fila, letra]) => (
+          <text key={letra} x={ANIO_X0 - 4} y={yDe(fila) + 8} fontSize="8" textAnchor="end" style={{ fill: "var(--muted2)" }}>{letra}</text>
+        ))}
+        {celdas.map(c => {
+          const x = xDe(c.col), y = yDe(c.fila);
+          const titulo = <title>{tituloCelda(c)}</title>;
+          if (c.estado === "medido") return (
+            <rect key={c.fecha} x={x} y={y} width={ANIO_CELDA} height={ANIO_CELDA} rx="2"
+              style={{ fill: COLOR_TRAMO[c.tramo], fillOpacity: OPACIDAD_TRAMO_MAPA[c.tramo] }}>{titulo}</rect>
+          );
+          if (c.estado === "sin_reloj") return (
+            <rect key={c.fecha} x={x} y={y} width={ANIO_CELDA} height={ANIO_CELDA} rx="2" style={{ fill: `url(#${idRayas})` }}>{titulo}</rect>
+          );
+          if (c.estado === "anulada") return (
+            <g key={c.fecha}>
+              <rect x={x} y={y} width={ANIO_CELDA} height={ANIO_CELDA} rx="2" style={{ fill: "var(--surface2)" }}>{titulo}</rect>
+              <line x1={x + 2.5} y1={y + 2.5} x2={x + ANIO_CELDA - 2.5} y2={y + ANIO_CELDA - 2.5} style={{ stroke: "var(--muted2)", strokeWidth: 1.2 }} />
+              <line x1={x + ANIO_CELDA - 2.5} y1={y + 2.5} x2={x + 2.5} y2={y + ANIO_CELDA - 2.5} style={{ stroke: "var(--muted2)", strokeWidth: 1.2 }} />
+            </g>
+          );
+          // Vacío: solo el borde. Con --border (7% de blanco) no se veía a 5 px de celda.
+          return (
+            <rect key={c.fecha} x={x + 0.5} y={y + 0.5} width={ANIO_CELDA - 1} height={ANIO_CELDA - 1} rx="2"
+              style={{ fill: "none", stroke: "var(--border2)", strokeWidth: 0.8 }}>{titulo}</rect>
+          );
+        })}
+        {celdaCorte && (() => {
+          const x = xDe(celdaCorte.col) - 1;
+          const alFinal = celdaCorte.col > columnas.length - 10;
+          return (
+            <g>
+              <line x1={x} y1={9} x2={x} y2={H - 1} style={{ stroke: "var(--accent)", strokeWidth: 1 }} />
+              <text x={alFinal ? x - 2 : x + 2} y={7} fontSize="7" textAnchor={alFinal ? "end" : "start"} style={{ fill: "var(--accent)" }}>aparato nuevo</text>
+            </g>
+          );
+        })()}
+        {celdaSel && (
+          <rect x={xDe(celdaSel.col) - 0.75} y={yDe(celdaSel.fila) - 0.75} width={ANIO_CELDA + 1.5} height={ANIO_CELDA + 1.5} rx="2.5"
+            style={{ fill: "none", stroke: "var(--text)", strokeWidth: 1.5, pointerEvents: "none" }} />
+        )}
+      </svg>
+
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 10px", fontSize: 11, color: "var(--muted2)", marginTop: 8, lineHeight: 1.5 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          menos
+          {[3, 2, 1, 0].map(t => <span key={t}>{muestra({ fill: COLOR_TRAMO[t], fillOpacity: OPACIDAD_TRAMO_MAPA[t] })}</span>)}
+          más
+        </span>
+        <span style={{ fontFamily: "'DM Mono', monospace" }}>{umbrales.join(" · ")}</span>
+        <span>{muestra({ fill: `url(#${idRayas})` })} sin reloj: menos sensores, no peor día</span>
+        <span>{muestra({ fill: "var(--surface2)" }, (
+          <>
+            <line x1="2.5" y1="2.5" x2="7.5" y2="7.5" style={{ stroke: "var(--muted2)", strokeWidth: 1.2 }} />
+            <line x1="7.5" y1="2.5" x2="2.5" y2="7.5" style={{ stroke: "var(--muted2)", strokeWidth: 1.2 }} />
+          </>
+        ))} noche anulada</span>
+        <span>{muestra({ fill: "none", stroke: "var(--border2)", strokeWidth: 0.8 })} sin datos</span>
+      </div>
+
+      {conValor < 7 && (
+        <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5, marginTop: 10 }}>
+          Aún hay pocos días para ver el año: el mapa se va llenando con cada sincronización.
+        </div>
+      )}
+
+      {desglose()}
+    </div>
   );
 }
 
@@ -1107,6 +1475,13 @@ const STAGE_TIPS = {
   awake:{ label: "Tiempo despierto", color: "var(--muted)", tip: "Microdespertares durante la noche. Normal: 10–30 min. Más de 45 min puede indicar apnea, estrés o mala higiene del sueño." },
 };
 
+// Color de cada tramo de `tramo()` (0 = mejor … 3 = peor). Los cortes viven en helpers
+// (TRAMOS_*); aquí solo el color, para que ningún widget vuelva a llevar su copia de
+// 85/70/55. Los dos primeros coinciden hoy (--green es #6aaa82): en los widgets
+// siempre ha sido así, y el mapa del año los separa con la opacidad (OPACIDAD_TRAMO_MAPA).
+const COLOR_TRAMO = ["var(--green)", "#6aaa82", "var(--accent)", "#d4645a"];
+const OPACIDAD_TRAMO_MAPA = [1, 0.5, 0.9, 0.9];
+
 const WORKOUT_ICONS = { Running:"🏃", Walking:"🚶", Cycling:"🚴", Swimming:"🏊", "Strength Training":"🏋️", HIIT:"⚡", Yoga:"🧘", Basketball:"🏀", Soccer:"⚽", Tennis:"🎾", Hiking:"🥾" };
 
 // Widgets de salud que en modo simple se colapsan en un bloque con pestañas.
@@ -1836,6 +2211,9 @@ export default function Dashboard() {
   // Histórico largo, solo para el panel de patrones del modal (ver efecto de carga).
   const [healthLargo, setHealthLargo]         = useState(null);
   const [healthLargoFallo, setHealthLargoFallo] = useState(false);
+  // El `reloj` de esa misma respuesta: el mapa del año lo necesita para no pintar como
+  // días malos los que se midieron sin el reloj. Viene gratis en la petición que ya hay.
+  const [healthLargoReloj, setHealthLargoReloj] = useState(null);
   const healthLargoPedido                     = useRef(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
@@ -2129,7 +2507,7 @@ export default function Dashboard() {
     healthLargoPedido.current = true;
     apiFetch(`${API}/health/metrics?days=${HEALTH_DIAS_PATRONES}`, { headers: authHeaders() })
       .then(r => r.json())
-      .then(data => setHealthLargo(data.metrics || {}))
+      .then(data => { setHealthLargo(data.metrics || {}); setHealthLargoReloj(data.reloj || null); })
       .catch(() => setHealthLargoFallo(true));
   }, [token, healthModalOpen]);
 
@@ -4522,12 +4900,16 @@ export default function Dashboard() {
   );
   // Estado del reloj HOY. Se usa solo como matiz de la puntuación diaria: a media
   // mañana "sin señal todavía" es de lo más normal y no es una conclusión de nada.
+  // Hoy en ISO con los componentes locales. Lo comparten el estado del reloj de hoy, la
+  // nota de sueño y el mapa del año: si cada uno sacara su "hoy" por su cuenta, entre
+  // las 00:00 y las 02:00 podrían no estar de acuerdo en qué día es.
+  const isoHoyConclusiones = useMemo(() => isoHoy(hoyConclusiones), [hoyConclusiones]);
   const relojHoy = useMemo(() => {
     const mapa = healthReloj?.dias;
     if (!mapa) return null;
-    const estado = mapa[isoHoy(hoyConclusiones)] || "sin_datos";
+    const estado = mapa[isoHoyConclusiones] || "sin_datos";
     return { estado, puesto: relojPuesto(estado) };
-  }, [healthReloj, hoyConclusiones]);
+  }, [healthReloj, isoHoyConclusiones]);
   const veredictoSalud    = useMemo(() => healthOverall(conclusionesSalud), [conclusionesSalud]);
   // Patrones sobre el histórico largo: mismas fórmulas que las conclusiones, pero
   // exigiendo mucha más muestra por grupo (ver HEALTH_MIN_MUESTRA_PATRONES).
@@ -4536,6 +4918,25 @@ export default function Dashboard() {
     [healthLargo],
   );
   const diasPatrones = useMemo(() => healthCoverageDays(healthLargo), [healthLargo]);
+  // «Tu año»: todo sale del histórico largo, así que solo se calcula con el modal abierto
+  // y no cuesta nada en la carga inicial. El corte de dispositivo solo afecta a las
+  // referencias (como en el resto del módulo): los días anteriores se pintan igual.
+  const historicoAnual = useMemo(
+    () => (healthLargo ? {
+      bienestar: wellnessHistory(healthLargo, { dias: 400, reloj: healthLargoReloj, corte: corteDispositivo, conDesglose: true }),
+      sueno:     sleepHistory(healthLargo, { dias: 400, corte: corteDispositivo, hoy: isoHoyConclusiones }),
+    } : null),
+    [healthLargo, healthLargoReloj, corteDispositivo, isoHoyConclusiones],
+  );
+  const rejillaAnual = useMemo(() => rejillaCalendario({ hoy: isoHoyConclusiones }), [isoHoyConclusiones]);
+  const pasosAnuales = useMemo(() => (healthLargo ? findMetric(healthLargo, "step_count", "steps") : []), [healthLargo]);
+  const rachasAnuales = useMemo(
+    () => (historicoAnual ? {
+      sueno: rachaSueno(historicoAnual.sueno, healthLargoReloj, { hoy: isoHoyConclusiones }),
+      pasos: rachaPasos(pasosAnuales, healthLargoReloj, { hoy: isoHoyConclusiones }),
+    } : null),
+    [historicoAnual, pasosAnuales, healthLargoReloj, isoHoyConclusiones],
+  );
 
   // Histórico de la puntuación diaria de bienestar, reconstruido de las mismas series
   // (no se guarda nada aparte). Recorre ~30 días con sus quince métricas, así que va
@@ -4543,6 +4944,13 @@ export default function Dashboard() {
   const historicoBienestar = useMemo(
     () => wellnessHistory(healthData, { reloj: healthReloj, corte: corteDispositivo }),
     [healthData, healthReloj, corteDispositivo],
+  );
+  // La nota de sueño de las últimas noches, con la referencia de recuperación anclada a
+  // cada fecha. De aquí leen la cabecera del widget y sus siete barras, así que no pueden
+  // decir cosas distintas de la misma noche.
+  const historicoSueno = useMemo(
+    () => sleepHistory(healthData, { dias: 30, corte: corteDispositivo, hoy: isoHoyConclusiones }),
+    [healthData, corteDispositivo, isoHoyConclusiones],
   );
   // Componentes que llevan dos semanas sin traer nada: no es un hueco, es que este
   // aparato no los mide. Se sacan del desglose en vez de dejarlos en gris pidiendo
@@ -6089,7 +6497,8 @@ export default function Dashboard() {
         const scoreLabel = isDaily
           ? (score >= 80 ? "Día excelente" : score >= 65 ? "Buen día" : score >= 50 ? "Día regular" : "Día flojo")
           : (score >= 80 ? "Semana excelente" : score >= 65 ? "Buena semana" : score >= 50 ? "Semana regular" : "Semana floja");
-        const scoreColor = score >= 80 ? "var(--green)" : score >= 65 ? "#6aaa82" : score >= 50 ? "var(--accent)" : "#d4645a";
+        // Sin nota cae al último tramo, igual que hacía la cadena de comparaciones.
+        const scoreColor = COLOR_TRAMO[tramo(score, TRAMOS_BIENESTAR) ?? 3];
 
         // ── potencial: componente con más margen de mejora ──
         // El verbo de "💪 Entreno" depende de la vista, el resto son fijos (POTENTIAL_VERBS).
@@ -6510,30 +6919,24 @@ export default function Dashboard() {
         );
       }
       case "health_sleep": {
-        const sleepRaw     = findMetric(healthData, "sleep_analysis", "sleep");
-        const sleepAllData = sleepRaw.map(d => ({ ...d, value: sleepHours(d) }));
-        const sleepData    = sleepAllData.filter(d => !d.extra?.excluded);
-        const ultimas7     = sleepAllData.slice(-7);
+        // Todo sale de `historicoSueno` (sleepHistory): la nota de cada noche ya viene
+        // calculada con su referencia anclada, así que la cabecera y las barras leen la
+        // MISMA nota en vez de calcular cada una la suya.
+        const sleepData    = historicoSueno.filter(n => !n.anulada);
+        const ultimas7     = historicoSueno.slice(-7);
         const last7        = sleepData.slice(-7);
-        const avg7         = last7.length ? last7.reduce((s, d) => s + (d.value || 0), 0) / last7.length : null;
+        const avg7         = last7.length ? last7.reduce((s, n) => s + (n.horas || 0), 0) / last7.length : null;
         const latest       = sleepData[sleepData.length - 1];
         const sleepColor = v => v >= 7 ? "var(--green)" : v >= 6 ? "var(--accent)" : "#d4645a";
 
         // latestDisplay: noche más reciente (para mostrar, incluso si está excluida)
-        const latestDisplay = sleepAllData[sleepAllData.length - 1];
-        const lvd  = latestDisplay?.value || 0;
-        const ldd  = latestDisplay?.extra?.deep  != null ? Number(latestDisplay.extra.deep)  : null;
-        const lrd  = latestDisplay?.extra?.rem   != null ? Number(latestDisplay.extra.rem)   : null;
-        const lcd  = latestDisplay?.extra?.core  != null ? Number(latestDisplay.extra.core)  : (latestDisplay?.extra?.light != null ? Number(latestDisplay.extra.light) : null);
-        const lawd = latestDisplay?.extra?.awake != null ? Number(latestDisplay.extra.awake) : null;
-        const latestExcluded = latestDisplay?.extra?.excluded ?? false;
-
-        // latest: noche más reciente no excluida (para score y cálculos)
-        const lv  = latest?.value || 0;
-        const ld  = latest?.extra?.deep  != null ? Number(latest.extra.deep)  : null;
-        const lr  = latest?.extra?.rem   != null ? Number(latest.extra.rem)   : null;
-        const law = latest?.extra?.awake != null ? Number(latest.extra.awake) : null;
-        const lss = latest?.extra?.sleep_start ?? null;
+        const latestDisplay = historicoSueno[historicoSueno.length - 1];
+        const lvd  = latestDisplay?.horas || 0;
+        const ldd  = latestDisplay?.fases.deep  ?? null;
+        const lrd  = latestDisplay?.fases.rem   ?? null;
+        const lcd  = latestDisplay?.fases.core  ?? null;
+        const lawd = latestDisplay?.fases.awake ?? null;
+        const latestExcluded = latestDisplay?.anulada ?? false;
 
         // La fila de sueño lleva la fecha del día en que uno se DESPIERTA, así que la
         // noche de esta madrugada es la de hoy. Cuando falta (el reloj aún no ha
@@ -6548,69 +6951,18 @@ export default function Dashboard() {
                              : nochesAtras === 1 ? "hace 2 noches"
                              : `hace ${nochesAtras + 1} noches`;
 
-        // Baselines de recuperación (últimos 30 días, excluyendo la noche puntuada)
-        const refFecha       = latest?.date || sleepTodayStr;
-        const hrvAllData     = findMetric(healthData, "heart_rate_variability", "heartRateVariability");
-        const rhrAllData     = findMetric(healthData, "resting_heart_rate");
-        const respAllData    = findMetric(healthData, "respiratory_rate");
-        // Las medias de referencia no cruzan el cambio de dispositivo: comparar la
-        // respiración de hoy contra una media hecha a medias con el reloj anterior
-        // convierte la diferencia entre dos sensores en una penalización de sueño.
-        const baseline30     = arr => { const v = arr.filter(d => d.date !== refFecha && d.value != null && (!corteDispositivo || String(d.date) >= corteDispositivo)).map(d => Number(d.value)).filter(v => v > 0); return v.length ? v.reduce((a,b) => a+b,0)/v.length : null; };
-        const hrvBase        = baseline30(hrvAllData);
-        const rhrBase        = baseline30(rhrAllData);
-        const respBase       = baseline30(respAllData);
-        const metricValForDate = (arr, date) => { const d = arr.find(x => x.date === date); return d?.value != null ? Number(d.value) : null; };
-        // El respaldo "último valor conocido" solo vale para la noche de esta madrugada:
-        // con una noche vieja acabaría midiendo su descanso contra la recuperación de
-        // otro día.
-        const metricNoche    = arr => metricValForDate(arr, refFecha)
-          ?? (refFecha === sleepTodayStr && arr.length ? Number(arr[arr.length-1].value) : null);
-        const todayHrv       = metricNoche(hrvAllData);
-        const todayRhr       = metricNoche(rhrAllData);
-        const todayResp      = metricNoche(respAllData);
-        const recoveryMod    = (hrvBase || rhrBase || respBase) ? calcRecoveryMod(todayHrv, todayRhr, todayResp, hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0) : 0;
-        const recovModByDate = date => calcRecoveryMod(
-          metricValForDate(hrvAllData, date), metricValForDate(rhrAllData, date), metricValForDate(respAllData, date),
-          hrvBase ?? 0, rhrBase ?? 0, respBase ?? 0
-        );
+        // La recuperación (HRV/FC/respiración contra su referencia D-30..D-1) ya viene
+        // dentro de cada noche. El respaldo "último valor conocido si la noche es la de
+        // hoy" lo aplica `sleepHistory` con su `hoy` (solo a esa fila), así que la última
+        // barra y el número de la cabecera salen del mismo cálculo y coinciden siempre.
+        const score = latest ? latest.score : null;
+        const tramoSueno = tramo(score, TRAMOS_SUENO);
+        const scoreLabel = tramoSueno == null ? null : ["Excelente", "Bueno", "Regular", "Mejorable"][tramoSueno];
+        const scoreColor = tramoSueno == null ? null : COLOR_TRAMO[tramoSueno];
 
-        const score = latest ? sleepScore(lv, ld, lr, law, lss, recoveryMod) : null;
-        const scoreLabel = score == null ? null : score >= 85 ? "Excelente" : score >= 70 ? "Bueno" : score >= 55 ? "Regular" : "Mejorable";
-        const scoreColor = score == null ? null : score >= 85 ? "var(--green)" : score >= 70 ? "#6aaa82" : score >= 55 ? "var(--accent)" : "#d4645a";
-
-        // Desglose del score para el tooltip. Las filas de puntuación salen del mismo
-        // helper que calcula el score (única fuente de verdad de los umbrales); aquí
-        // solo se añaden las subfilas de recuperación, que dependen de los baselines.
-        const desgloseSueno = (() => {
-          const base = latest ? sleepBreakdown(lv, ld, lr, law, lss) : null;
-          if (!base) return [];
-          const rows = [...base.filas];
-          // Recuperación fisiológica — una subfila por métrica penalizada
-          if (recoveryMod < 0) {
-            rows.push({ label: "Recuperación", detail: "", pts: recoveryMod, max: 0 });
-            if (todayHrv != null && hrvBase && hrvBase > 0) {
-              const p = (() => { const pct = (todayHrv - hrvBase) / hrvBase * 100; return pct < -25 ? -8 : pct < -15 ? -6 : pct < -5 ? -3 : 0; })();
-              if (p < 0) rows.push({ label: "HRV", detail: `${Math.round(todayHrv)} vs ${Math.round(hrvBase)} ms`, pts: p, max: 0, indent: true });
-            }
-            if (todayRhr != null && rhrBase && rhrBase > 0) {
-              const p = (() => { const pct = (todayRhr - rhrBase) / rhrBase * 100; return pct > 15 ? -7 : pct > 10 ? -5 : pct > 5 ? -3 : 0; })();
-              if (p < 0) rows.push({ label: "FC reposo", detail: `${Math.round(todayRhr)} vs ${Math.round(rhrBase)} bpm`, pts: p, max: 0, indent: true });
-            }
-            if (todayResp != null && respBase && respBase > 0) {
-              const p = (() => { const pct = (todayResp - respBase) / respBase * 100; return pct > 15 ? -5 : pct > 10 ? -3 : pct > 5 ? -2 : 0; })();
-              if (p < 0) rows.push({ label: "Freq. resp.", detail: `${todayResp.toFixed(1)} vs ${respBase.toFixed(1)} rpm`, pts: p, max: 0, indent: true });
-            }
-          }
-          // El techo por duración también tiene que verse: con una noche corta y fases
-          // buenas recortaba el total sin aparecer en ninguna fila, y el tooltip volvía
-          // a no cuadrar consigo mismo (que es justo lo que se acaba de arreglar).
-          const bruto = base.filas.reduce((s, f) => s + f.pts, 0) + recoveryMod;
-          if (score != null && bruto > score) {
-            rows.push({ label: "Techo por duración", detail: `máx ${base.cap} con ${hoursToHM(lv)}`, pts: score - bruto, max: 0 });
-          }
-          return rows;
-        })();
+        // Desglose del score para el tooltip: las mismas filas que suman la nota, más las
+        // subfilas de recuperación y el techo por duración (`desgloseNoche`).
+        const desgloseSueno = desgloseNoche(latest);
 
         return (
           <div style={cardStyle} data-card={id} key="health_sleep">
@@ -6688,7 +7040,7 @@ export default function Dashboard() {
                     </button>
                   </div>
                 )}
-                {latestDisplay?.extra && (ldd != null || lrd != null || lcd != null) && !latestExcluded && (
+                {latestDisplay && (ldd != null || lrd != null || lcd != null) && !latestExcluded && (
                   <div style={{ display: "flex", gap: 10, marginBottom: 12, fontSize: 13, flexWrap: "wrap" }}>
                     {ldd != null && (
                       <SleepStageTooltip label={STAGE_TIPS.deep.label} color={STAGE_TIPS.deep.color} tip={STAGE_TIPS.deep.tip}>
@@ -6727,15 +7079,15 @@ export default function Dashboard() {
                 {ultimas7.length > 1 && (
                   <div style={{ display: "flex", gap: 5, marginTop: 4 }}>
                     {ultimas7.map((d, i) => {
-                      const excl = d.extra?.excluded ?? false;
-                      const sc = excl ? null : sleepScore(d.value, Number(d.extra?.deep)||0, Number(d.extra?.rem)||0, Number(d.extra?.awake)||0, d.extra?.sleep_start ?? null, recovModByDate(d.date));
-                      const c  = excl ? "var(--border2)" : sc == null ? "var(--border2)" : sc >= 85 ? "var(--green)" : sc >= 70 ? "#6aaa82" : sc >= 55 ? "var(--accent)" : "#d4645a";
+                      const excl = d.anulada;
+                      const sc = d.score;
+                      const c  = excl || sc == null ? "var(--border2)" : COLOR_TRAMO[tramo(sc, TRAMOS_SUENO)];
                       const date = new Date(d.date + "T12:00:00");
                       const day  = DIAS_INICIAL[date.getDay()];
                       const isExcluding = sleepExcluding === d.date;
                       return (
                         <div key={i} style={{ flex: 1, textAlign: "center", position: "relative", cursor: "pointer" }}
-                          title={excl ? `${day}: anulada` : `${day}: ${hoursToHM(d.value)}${sc != null ? ` · ${sc}pts` : ""}`}
+                          title={excl ? `${day}: anulada` : `${day}: ${hoursToHM(d.horas)}${sc != null ? ` · ${sc}pts` : ""}`}
                           onClick={() => !isExcluding && excludeSleepNight(d.date)}
                         >
                           <div style={{ height: 3, borderRadius: 2, background: c, opacity: excl ? 0.3 : 0.8 }} />
@@ -7926,6 +8278,21 @@ export default function Dashboard() {
                           </div>
                         ))}
                       </div>
+                    )}
+                  </div>
+
+                  {/* ── Tu año: mapa de calor y rachas sobre el mismo histórico largo ── */}
+                  {/* Sin petición propia: usa la de "Patrones a largo plazo", así que
+                      comparte sus estados de carga y de fallo. */}
+                  <div style={{ borderTop: "0.5px solid var(--border)", paddingTop: 18, marginBottom: 22 }}>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Tu año</div>
+                    {!healthLargo && !healthLargoFallo ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando el año…</div>
+                    ) : healthLargoFallo ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>No se pudo cargar el histórico largo.</div>
+                    ) : (
+                      <AnioEnCuadritos rejilla={rejillaAnual} historico={historicoAnual} pasos={pasosAnuales}
+                        reloj={healthLargoReloj} corte={corteDispositivo} rachas={rachasAnuales} />
                     )}
                   </div>
 

@@ -25,6 +25,12 @@ import {
   RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
   tramosRelleno, escalaGrafica,
 } from "../../src/lib/helpers";
+import {
+  tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS,
+  refRecuperacion, SUENO_REF_DIAS, sleepHistory, desgloseNoche,
+  rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes,
+  racha, rachaSueno, rachaPasos, RACHA_HUECO_MAX,
+} from "../../src/lib/helpers";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -2415,5 +2421,368 @@ describe("isoHoy", () => {
 
   test("rellena con ceros", () => {
     expect(isoHoy(new Date(2026, 0, 5, 12, 0))).toBe("2026-01-05");
+  });
+});
+
+// ── Tu año: mapa de calor, nota de sueño anclada y rachas ────────
+const masDias = (iso, n) => {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+describe("tramo", () => {
+  test("bordes exactos de cada tramo", () => {
+    expect(tramo(85, TRAMOS_SUENO)).toBe(0);
+    expect(tramo(84, TRAMOS_SUENO)).toBe(1);
+    expect(tramo(55, TRAMOS_SUENO)).toBe(2);
+    expect(tramo(54, TRAMOS_SUENO)).toBe(3);
+    expect(tramo(80, TRAMOS_BIENESTAR)).toBe(0);
+    expect(tramo(49, TRAMOS_BIENESTAR)).toBe(3);
+  });
+
+  test("sin valor no hay tramo", () => {
+    expect(tramo(null, TRAMOS_SUENO)).toBe(null);
+    expect(tramo(undefined, TRAMOS_SUENO)).toBe(null);
+  });
+
+  test("pasos", () => {
+    expect(tramo(10000, TRAMOS_PASOS)).toBe(0);
+    expect(tramo(9999, TRAMOS_PASOS)).toBe(1);
+    expect(tramo(6000, TRAMOS_PASOS)).toBe(2);
+    expect(tramo(5999, TRAMOS_PASOS)).toBe(3);
+  });
+});
+
+describe("rejillaCalendario", () => {
+  test("la última columna es la semana de hoy y lo posterior va marcado como futuro", () => {
+    const r = rejillaCalendario({ hoy: "2026-01-01" });   // jueves
+    expect(r.semanas).toHaveLength(53);
+    const ultima = r.semanas[52];
+    expect(ultima[0].fecha).toBe("2025-12-29");
+    expect(ultima.filter(c => c.futuro).map(c => c.fecha)).toEqual(["2026-01-02", "2026-01-03", "2026-01-04"]);
+    // Todas las columnas empiezan en lunes y la fila 0 es el lunes.
+    for (const col of r.semanas) {
+      expect(new Date(`${col[0].fecha}T12:00:00Z`).getUTCDay()).toBe(1);
+      expect(col.map(c => c.fila)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    }
+  });
+
+  test("los cambios de hora no pierden ni duplican días", () => {
+    // Cubre el 26/10/2025 y el 29/03/2026.
+    const r = rejillaCalendario({ hoy: "2026-04-05" });
+    const fechas = r.semanas.flat().map(c => c.fecha);
+    expect(new Set(fechas).size).toBe(371);
+    expect(fechas).toContain("2025-10-26");
+    expect(fechas).toContain("2026-03-29");
+    for (let i = 1; i < fechas.length; i++) expect(fechas[i]).toBe(masDias(fechas[i - 1], 1));
+  });
+
+  test("rotula «ene» en la columna del 1 de enero", () => {
+    const r = rejillaCalendario({ hoy: "2026-01-01" });
+    const cols = r.meses.filter(m => m.etiqueta === "ene").map(m => m.col);
+    // El 1/1/2025 cae en la primera columna y el 1/1/2026 en la última.
+    expect(cols).toEqual([0, 52]);
+    expect(r.semanas[52].some(c => c.fecha === "2026-01-01")).toBe(true);
+  });
+
+  test("un mes cuyo día 1 aún no ha llegado no se rotula", () => {
+    const r = rejillaCalendario({ hoy: "2026-09-29" });   // martes; el 1/10 es futuro
+    expect(r.meses.some(m => m.col === 52 && m.etiqueta === "oct")).toBe(false);
+  });
+
+  test("fechas legibles", () => {
+    expect(fechaLargaCorta("2026-03-14")).toBe("sáb 14 mar 2026");
+    expect(fechaDiaMes("2026-03-04")).toBe("4 mar");
+    expect(fechaLargaCorta("no")).toBe("");
+  });
+});
+
+describe("refRecuperacion", () => {
+  const D = "2026-03-31";
+  const serie = (desde, hasta, valor) => {
+    const out = [];
+    for (let i = desde; i <= hasta; i++) out.push({ date: masDias(D, -i), value: typeof valor === "function" ? valor(i) : valor });
+    return out;
+  };
+
+  test("ventana D-30..D-1: no incluye el propio día ni lo anterior a D-30", () => {
+    const hrv = [...serie(1, SUENO_REF_DIAS, 50), { date: D, value: 999 }, { date: masDias(D, -31), value: 999 }];
+    expect(refRecuperacion({ heart_rate_variability: hrv }, D).hrv).toBe(50);
+  });
+
+  test("respeta el corte de dispositivo", () => {
+    const corte = masDias(D, -10);
+    const hrv = serie(1, 30, i => (i > 10 ? 100 : 50));
+    expect(refRecuperacion({ heart_rate_variability: hrv }, D, { corte }).hrv).toBe(50);
+    expect(refRecuperacion({ heart_rate_variability: hrv }, D).hrv).toBeGreaterThan(50);
+  });
+
+  test("los ceros no cuentan y sin datos devuelve null", () => {
+    const rhr = serie(1, 20, i => (i % 2 ? 0 : 60));
+    const r = refRecuperacion({ resting_heart_rate: rhr }, D);
+    expect(r.rhr).toBe(60);
+    expect(r.hrv).toBe(null);
+    expect(r.resp).toBe(null);
+  });
+});
+
+describe("sleepHistory", () => {
+  const INICIO = "2026-02-01";
+  const noche = (fecha, value = 7.5, extra = {}) => ({ date: fecha, value, extra: { deep: 1.2, rem: 1.7, core: 4, awake: 0.3, ...extra } });
+
+  // 40 días con HRV de 60 y la noche 35 con HRV de 40: una penalización clara.
+  const base = () => {
+    const d = { sleep_analysis: [], heart_rate_variability: [], resting_heart_rate: [] };
+    for (let i = 0; i < 40; i++) {
+      const f = masDias(INICIO, i);
+      d.sleep_analysis.push(noche(f));
+      d.heart_rate_variability.push({ date: f, value: i === 35 ? 40 : 60 });
+      d.resting_heart_rate.push({ date: f, value: 55 });
+    }
+    return d;
+  };
+  const F = masDias(INICIO, 35);
+
+  test("ANCLAJE: la nota de una noche no cambia al llegar datos posteriores", () => {
+    const antes = sleepHistory(base(), { dias: 400 }).find(n => n.date === F);
+    const d = base();
+    // 60 días más con la HRV hundida: con la media de "todo lo cargado" bajaban la
+    // referencia y la noche F dejaba de estar penalizada.
+    for (let i = 40; i < 100; i++) {
+      const f = masDias(INICIO, i);
+      d.sleep_analysis.push(noche(f, 6));
+      d.heart_rate_variability.push({ date: f, value: 20 });
+      d.resting_heart_rate.push({ date: f, value: 70 });
+    }
+    const despues = sleepHistory(d, { dias: 400 }).find(n => n.date === F);
+    expect(antes.recoveryMod).toBeLessThan(0);
+    expect(despues.score).toBe(antes.score);
+    expect(despues.recoveryMod).toBe(antes.recoveryMod);
+  });
+
+  test("una noche anulada sale marcada y sin nota", () => {
+    const d = base();
+    d.sleep_analysis[20] = noche(masDias(INICIO, 20), 8, { excluded: true });
+    const n = sleepHistory(d, { dias: 400 }).find(x => x.date === masDias(INICIO, 20));
+    expect(n.anulada).toBe(true);
+    expect(n.score).toBe(null);
+  });
+
+  test("con el corte, la HRV anterior no entra en la referencia", () => {
+    const d = base();
+    // Antes del corte el aparato viejo medía 100: sin corte, la HRV de 60 de F saldría
+    // como un desplome.
+    for (let i = 0; i < 25; i++) d.heart_rate_variability[i].value = 100;
+    d.heart_rate_variability[35].value = 60;
+    const corte = masDias(INICIO, 25);
+    const sin = sleepHistory(d, { dias: 400 }).find(n => n.date === F);
+    const con = sleepHistory(d, { dias: 400, corte }).find(n => n.date === F);
+    expect(con.recuperacion.ref.hrv).toBe(60);
+    expect(con.recoveryMod).toBe(0);
+    expect(sin.recoveryMod).toBeLessThan(0);
+  });
+
+  test("recoveryMod coincide con calcRecoveryMod a mano", () => {
+    const d = base();
+    d.respiratory_rate = [];
+    for (let i = 0; i < 40; i++) d.respiratory_rate.push({ date: masDias(INICIO, i), value: i === 35 ? 17 : 14 });
+    const n = sleepHistory(d, { dias: 400 }).find(x => x.date === F);
+    expect(n.recoveryMod).toBe(calcRecoveryMod(40, 55, 17, 60, 55, 14));
+    const e = d.sleep_analysis[35].extra;
+    expect(n.score).toBe(sleepScore(7.5, e.deep, e.rem, e.awake, null, n.recoveryMod));
+    expect(n.horas).toBe(7.5);
+    expect(n.filas.length).toBeGreaterThan(0);
+  });
+
+  test("la noche de hoy usa el último valor conocido si aún no ha llegado el suyo", () => {
+    const d = base();
+    const hoy = masDias(INICIO, 40);
+    d.sleep_analysis.push(noche(hoy));
+    const sin = sleepHistory(d, { dias: 400 }).find(n => n.date === hoy);
+    const con = sleepHistory(d, { dias: 400, hoy }).find(n => n.date === hoy);
+    expect(sin.recuperacion.hrv).toBe(null);
+    expect(con.recuperacion.hrv).toBe(60);
+    // Y solo para hoy: una noche vieja sin su HRV no la toma prestada.
+    d.heart_rate_variability.splice(30, 1);
+    const vieja = sleepHistory(d, { dias: 400, hoy }).find(n => n.date === masDias(INICIO, 30));
+    expect(vieja.recuperacion.hrv).toBe(null);
+  });
+
+  test("desgloseNoche: las filas principales suman exactamente la nota", () => {
+    const d = base();
+    d.sleep_analysis[35] = noche(F, 6.8);   // corta: entra el techo por duración
+    const n = sleepHistory(d, { dias: 400 }).find(x => x.date === F);
+    const filas = desgloseNoche(n);
+    const suma = filas.filter(f => !f.indent).reduce((s, f) => s + f.pts, 0);
+    expect(suma).toBe(n.score);
+    expect(filas.some(f => f.label === "Recuperación")).toBe(true);
+    expect(filas.find(f => f.label === "HRV").detail).toBe("40 vs 60 ms");
+    expect(desgloseNoche({ ...n, anulada: true })).toEqual([]);
+  });
+
+  test("recorta a `dias` y ordena por fecha", () => {
+    const d = base();
+    d.sleep_analysis.reverse();
+    const h = sleepHistory(d, { dias: 5 });
+    expect(h.map(n => n.date)).toEqual([35, 36, 37, 38, 39].map(i => masDias(INICIO, i)));
+    expect(sleepHistory({})).toEqual([]);
+  });
+});
+
+describe("wellnessHistory con conDesglose", () => {
+  const datos = () => {
+    const sleep_analysis = [], step_count = [], resting_heart_rate = [];
+    for (let i = 0; i < 5; i++) {
+      const f = masDias("2026-05-01", i);
+      sleep_analysis.push({ date: f, value: 7 + i * 0.2, extra: {} });
+      step_count.push({ date: f, value: 6000 + i * 1000 });
+      resting_heart_rate.push({ date: f, value: 55 });
+    }
+    return { sleep_analysis, step_count, resting_heart_rate };
+  };
+
+  test("trae el desglose y su total es el valor del punto", () => {
+    const h = wellnessHistory(datos(), { conDesglose: true });
+    expect(h.length).toBe(5);
+    for (const p of h) {
+      expect(Array.isArray(p.desglose)).toBe(true);
+      expect(scoreFromBreakdown(p.desglose).score).toBe(p.value);
+    }
+  });
+
+  test("sin la opción la forma no cambia", () => {
+    for (const p of wellnessHistory(datos())) expect(p).not.toHaveProperty("desglose");
+  });
+});
+
+describe("estadoCelda", () => {
+  const F = "2026-06-10";
+
+  test("bienestar: vacío, medido y sin reloj (con su valor, pero no como medido)", () => {
+    expect(estadoCelda("bienestar", F, { bienestar: new Map() }).estado).toBe("vacio");
+    const medido = estadoCelda("bienestar", F, { bienestar: new Map([[F, { date: F, value: 82, sinReloj: false }]]) });
+    expect(medido).toMatchObject({ estado: "medido", valor: 82, tramo: 0 });
+    const sin = estadoCelda("bienestar", F, { bienestar: new Map([[F, { date: F, value: 40, sinReloj: true }]]) });
+    expect(sin.estado).toBe("sin_reloj");
+    expect(sin.valor).toBe(40);
+  });
+
+  test("sueño: anulada, medida, sin fila con y sin reloj", () => {
+    const anulada = new Map([[F, { date: F, anulada: true, score: null }]]);
+    expect(estadoCelda("sueno", F, { sueno: anulada }).estado).toBe("anulada");
+    const buena = new Map([[F, { date: F, anulada: false, score: 72 }]]);
+    expect(estadoCelda("sueno", F, { sueno: buena })).toMatchObject({ estado: "medido", valor: 72, tramo: 1 });
+    // Sin fila y con el reloj puesto esa noche: no hay nada que decir.
+    expect(estadoCelda("sueno", F, { sueno: new Map(), reloj: { dias: { [F]: "ambos" } } }).estado).toBe("vacio");
+    // Sin fila y sin reloj de noche: la noche no se pudo medir.
+    expect(estadoCelda("sueno", F, { sueno: new Map(), reloj: { dias: { [F]: "sin_reloj" } } }).estado).toBe("sin_reloj");
+    expect(estadoCelda("sueno", F, { sueno: new Map(), reloj: { dias: { [F]: "dia" } } }).estado).toBe("sin_reloj");
+    // "sin_datos" es no saber: se queda en vacío.
+    expect(estadoCelda("sueno", F, { sueno: new Map(), reloj: { dias: { [F]: "sin_datos" } } }).estado).toBe("vacio");
+    expect(estadoCelda("sueno", F, { sueno: new Map() }).estado).toBe("vacio");
+  });
+
+  test("pasos: medidos, solo con el móvil y sin dato", () => {
+    const pasos = new Map([[F, 9000]]);
+    expect(estadoCelda("pasos", F, { pasos, reloj: { dias: { [F]: "dia" } } })).toMatchObject({ estado: "medido", valor: 9000, tramo: 1 });
+    expect(estadoCelda("pasos", F, { pasos }).estado).toBe("medido");
+    const sin = estadoCelda("pasos", F, { pasos, reloj: { dias: { [F]: "sin_reloj" } } });
+    expect(sin.estado).toBe("sin_reloj");
+    expect(sin.valor).toBe(9000);
+    expect(estadoCelda("pasos", F, { pasos: new Map([[F, 0]]) }).estado).toBe("vacio");
+    expect(estadoCelda("pasos", "2026-06-11", { pasos }).estado).toBe("vacio");
+  });
+});
+
+describe("rachaSueno", () => {
+  const INICIO = "2026-07-01";
+  // Noches consecutivas desde INICIO: cada elemento son las horas, "anulada" o null (sin fila).
+  const noches = lista => lista.map((h, i) => (h == null ? null : {
+    date: masDias(INICIO, i), horas: h === "anulada" ? 8 : h, anulada: h === "anulada", score: null,
+  })).filter(Boolean);
+  const hoyDe = lista => masDias(INICIO, lista.length - 1);
+
+  test("5 noches buenas + 1 sin reloj + 3 buenas: racha de 8 con 1 neutra", () => {
+    const lista = [8, 8, 7.5, 7, 8, 7.5, 8, 8, 7.2];
+    const reloj = { dias: {} };
+    lista.forEach((_, i) => { reloj.dias[masDias(INICIO, i)] = i === 5 ? "sin_reloj" : "ambos"; });
+    const r = rachaSueno(noches(lista), reloj, { hoy: hoyDe(lista) });
+    expect(r.actual).toBe(8);
+    expect(r.neutrasActual).toBe(1);
+  });
+
+  test("una noche anulada en medio no rompe", () => {
+    const lista = [8, 8, "anulada", 8];
+    expect(rachaSueno(noches(lista), null, { hoy: hoyDe(lista) })).toMatchObject({ actual: 3, neutrasActual: 1 });
+  });
+
+  test("una noche de 6 h rompe", () => {
+    const lista = [8, 8, 6, 8];
+    expect(rachaSueno(noches(lista), null, { hoy: hoyDe(lista) }).actual).toBe(1);
+  });
+
+  test(`más de ${RACHA_HUECO_MAX} noches seguidas sin dato cortan`, () => {
+    const lista = [8, 8, 8, null, null, null, null, null, null, null, null, 8, 8];
+    const r = rachaSueno(noches(lista), null, { hoy: hoyDe(lista) });
+    expect(r.actual).toBe(2);
+    expect(r.maxima).toBe(3);
+    // Con siete de hueco, en cambio, sigue.
+    const siete = [8, 8, 8, null, null, null, null, null, null, null, 8, 8];
+    expect(rachaSueno(noches(siete), null, { hoy: hoyDe(siete) }).actual).toBe(5);
+  });
+
+  test("la máxima y sus fechas cuando la actual es menor", () => {
+    const lista = [8, 8, 8, 8, 6, 8, 8];
+    const r = rachaSueno(noches(lista), null, { hoy: hoyDe(lista) });
+    expect(r.actual).toBe(2);
+    expect(r.maxima).toBe(4);
+    expect(r.maximaDesde).toBe(masDias(INICIO, 0));
+    expect(r.maximaHasta).toBe(masDias(INICIO, 3));
+  });
+
+  test("hoy sin noche todavía no cuenta; una noche corta hoy sí rompe", () => {
+    const lista = [8, 8, 8];
+    const hoy = masDias(INICIO, 3);
+    expect(rachaSueno(noches(lista), null, { hoy })).toMatchObject({ actual: 3, neutrasActual: 0 });
+    expect(rachaSueno(noches([...lista, 5]), null, { hoy }).actual).toBe(0);
+  });
+
+  test("sin noches no hay racha", () => {
+    expect(rachaSueno([], null, { hoy: INICIO })).toMatchObject({ actual: 0, maxima: 0, maximaDesde: null });
+  });
+});
+
+describe("rachaPasos", () => {
+  const INICIO = "2026-08-01";
+  const serie = valores => valores.map((v, i) => ({ date: masDias(INICIO, i), value: v }));
+  const relojCon = (n, sinReloj = []) => {
+    const dias = {};
+    for (let i = 0; i < n; i++) dias[masDias(INICIO, i)] = sinReloj.includes(i) ? "sin_reloj" : "dia";
+    return { dias };
+  };
+
+  test("un día sin reloj con 5.000 pasos es neutro; con 9.000, suma", () => {
+    const hoy = masDias(INICIO, 3);
+    expect(rachaPasos(serie([9000, 5000, 9000]), relojCon(3, [1]), { hoy })).toMatchObject({ actual: 2, neutrasActual: 1 });
+    expect(rachaPasos(serie([9000, 9000, 9000]), relojCon(3, [1]), { hoy }).actual).toBe(3);
+  });
+
+  test("un día con el reloj puesto por debajo de 8.000 rompe", () => {
+    expect(rachaPasos(serie([9000, 5000, 9000]), relojCon(3), { hoy: masDias(INICIO, 2) }).actual).toBe(1);
+  });
+
+  test("hoy con 3.000 no rompe la racha de ayer; con 8.500, suma", () => {
+    const hoy = masDias(INICIO, 2);
+    expect(rachaPasos(serie([9000, 9000, 3000]), relojCon(3), { hoy }).actual).toBe(2);
+    expect(rachaPasos(serie([9000, 9000, 8500]), relojCon(3), { hoy }).actual).toBe(3);
+  });
+
+  test("la regla general de racha: los neutros ni suman ni rompen", () => {
+    const dias = [
+      { fecha: "2026-01-01", valor: 1 }, { fecha: "2026-01-02", valor: 0, estado: "x" }, { fecha: "2026-01-03", valor: 1 },
+    ];
+    const r = racha(dias, { hoy: "2026-01-03", cumple: d => d.valor === 1, neutro: d => d.estado === "x" });
+    expect(r).toMatchObject({ actual: 2, neutrasActual: 1, maxima: 2 });
   });
 });

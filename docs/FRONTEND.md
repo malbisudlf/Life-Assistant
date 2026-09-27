@@ -408,6 +408,60 @@ necesita un valor derivado, añádelo al `return` del memo y a su destructuring 
 antes se llamaban dos veces por render, una por el widget compacto y otra por el
 modal.
 
+**Nota de sueño: una sola fuente, anclada a su fecha.** `sleepHistory()` (helpers) da una
+entrada por noche con su nota ya calculada, y de ahí leen la cabecera del widget de sueño,
+sus siete barras (memo `historicoSueno`) y el mapa del año. La penalización de
+recuperación compara la HRV/FC en reposo/respiración de la noche contra
+`refRecuperacion()`: la media de **D-30..D-1 de esa noche**, respetando el corte de
+dispositivo. Antes el widget la calculaba con un `baseline30` que promediaba **todo lo
+cargado**, días posteriores incluidos, así que la misma noche puntuaba distinto con 30
+días de datos que con 365, y la barra de la última noche podía no coincidir con el número
+de la cabecera (cada una tenía su cálculo; el respaldo de "último valor conocido" solo lo
+tenía la cabecera). Ese respaldo sigue, dentro de `sleepHistory({ hoy })` y solo para la
+fila de hoy. El desglose del tooltip sale de `desgloseNoche()`, que también usa el mapa.
+
+**Colores de las notas: `tramo()` + `TRAMOS_*`.** `TRAMOS_SUENO` (85/70/55),
+`TRAMOS_BIENESTAR` (80/65/50) y `TRAMOS_PASOS` (10.000/8.000/6.000) viven en helpers;
+`tramo(valor, cortes)` devuelve 0 (mejor) … 3 (peor) y `COLOR_TRAMO`, en Dashboard.jsx,
+el color de cada tramo. No vuelvas a escribir `score >= 85 ? … : …` en un widget: así
+había tres copias de los mismos cortes. Los dos primeros colores coinciden (`--green` es
+`#6aaa82`); en el mapa del año se separan con opacidad (`OPACIDAD_TRAMO_MAPA`).
+
+### Tu año (mapa del modal de salud)
+
+Sección del modal «Análisis de salud», entre «Patrones a largo plazo» y «Detalle»:
+dos rachas, un conmutador [Bienestar · Sueño · Pasos], un mapa de 53 semanas × 7 días
+(lunes arriba, la última columna es la semana de hoy, lo futuro no se dibuja) y el
+desglose del día que se toca. Componente `AnioEnCuadritos`, a nivel de módulo; la lógica
+es pura y está en helpers con tests. **No hace ninguna petición**: usa el histórico largo
+que ya pide el panel de patrones (`healthLargo`) y el `reloj` de esa misma respuesta
+(`healthLargoReloj`), así que comparte sus estados de carga y de fallo.
+
+- **La rejilla no sabe de valores** (`rejillaCalendario`): fechas por `_sumarDias`, nunca
+  `Date` local, para que los domingos de cambio de hora no dupliquen ni se coman un día.
+- **Cuatro estados de celda** (`estadoCelda`): `medido` (color de su tramo), `sin_reloj`
+  (rayado: el valor se conserva y sale en el desglose, pero un día medido con menos
+  sensores no se pinta como un día malo), `anulada` (aspa) y `vacio` (solo el borde). En
+  sueño, una noche sin fila solo es `sin_reloj` si consta que llegó algo ese día y nada de
+  noche; `sin_datos` es no saber y se queda en vacío. En pasos, sin mapa de reloj (o sin
+  entrada ese día) se da por medido: no se inventa un «solo con el móvil».
+- **El corte de dispositivo se ve y no esconde nada**: una línea «aparato nuevo» en la
+  columna del corte; los días anteriores se siguen pintando (el corte solo afecta a las
+  referencias, como en todo el módulo).
+- **Rachas que no mienten** (`racha`, `rachaSueno`, `rachaPasos`): se recorren por fecha
+  real. Un día neutro (sin reloj, noche anulada, sin datos) ni suma ni rompe, y la línea
+  dice cuántos hay dentro de la racha actual. Un día medido que no cumple la rompe. Más de
+  `RACHA_HUECO_MAX` (7) neutros seguidos también la cortan: tras una semana sin datos no se
+  puede afirmar que seguía. Un hoy que aún no cumple es neutro en pasos (la jornada está a
+  medias); en sueño no, porque la fila de hoy es una noche ya cerrada — pero un hoy sin
+  fila todavía no cuenta para nada. En pasos, un día sin reloj que llega a 8.000 suma (el
+  móvil cuenta de menos: si aun así llega, llegó) y uno que no llega es neutro.
+- **Un solo `onClick` en el `<svg>`** que elige la celda más cercana al toque, pasando
+  `clientX/clientY` a unidades del viewBox. En un móvil de 375 px la celda mide unos 5 px:
+  exigir acertar dentro de cada `<rect>` lo haría inusable con el dedo, y partir el mapa
+  para agrandarla rompería el año de un vistazo. Cada `<rect>` lleva además su `<title>`
+  como tooltip de escritorio.
+
 ### Claves de localStorage
 
 Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_splits`,
@@ -415,7 +469,8 @@ Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_s
 `la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
 guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_ideas_agrupar`
 («Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`), `la_finanzas_rango` (el rango
-elegido en la gráfica de finanzas). Si añades una,
+elegido en la gráfica de finanzas), `la_anio_modo` (el modo del mapa «Tu año»:
+`bienestar`/`sueno`/`pasos`). Si añades una,
 mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)

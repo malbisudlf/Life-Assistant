@@ -1428,7 +1428,10 @@ function _refHrv(hrvPorFecha, fecha, corte = null) {
   return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
 }
 
-export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = null } = {}) {
+// `conDesglose` añade a cada punto el desglose con el que se puntuó (el mapa del año lo
+// enseña al tocar un día). Va detrás de una opción para que la forma de siempre —la
+// que usan la sparkline y los tests— no cambie ni cargue 400 arrays que nadie mira.
+export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = null, conDesglose = false } = {}) {
   const series = {
     sleep: _porFecha(findMetric(healthData, "sleep_analysis", "sleep")
       .filter(d => !d.extra?.excluded)
@@ -1483,7 +1486,7 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = n
     // construido casi entero a base de "sin datos".
     if (sleep == null && steps == null && rhr == null && energia == null && work === 0) continue;
 
-    const { score, cobertura, sinDatos } = scoreFromBreakdown(wellnessBreakdown({
+    const desglose = wellnessBreakdown({
       isDaily: true,
       sleep, work, steps, rhr,
       exercise:     val("exercise"),
@@ -1503,7 +1506,8 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = n
       bodyFat:      ultimo.bodyFat,
       daylight:     val("daylight"),
       resp:         val("resp"),
-    }));
+    });
+    const { score, cobertura, sinDatos } = scoreFromBreakdown(desglose);
     // Cada punto lleva con qué se midió, no solo cuánto puntuó: un día sin reloj puntúa
     // sobre cuatro componentes en vez de sobre nueve, y en la sparkline eso se pinta
     // exactamente igual que un día malo. `estadoReloj` es null cuando no hay dato de
@@ -1513,9 +1517,362 @@ export function wellnessHistory(healthData, { dias = 30, reloj = null, corte = n
     if (score != null) salida.push({
       date: fecha, value: score, cobertura, sinDatos,
       estadoReloj, sinReloj: estadoReloj != null && !relojPuesto(estadoReloj),
+      ...(conDesglose ? { desglose } : {}),
     });
   }
   return salida.slice(-dias);
+}
+
+// ── Tramos de color de las puntuaciones ──────────────────────────
+// Los cortes vivían copiados inline en cada sitio que pintaba una nota (cabecera del
+// sueño, barras de las 7 noches, número de bienestar): tres copias de 85/70/55 que solo
+// coincidían porque nadie había tocado ninguna. El mapa del año los necesitaba otra vez,
+// para tres métricas, y una cuarta copia era la que acabaría desincronizándose.
+// `tramo` devuelve el índice del tramo: 0 es el mejor y `cortes.length` el peor.
+export const TRAMOS_SUENO     = [85, 70, 55];        // Excelente / Bueno / Regular / Mejorable
+export const TRAMOS_BIENESTAR = [80, 65, 50];        // Día excelente / Buen día / regular / flojo
+export const TRAMOS_PASOS     = [10000, 8000, 6000]; // los mismos saltos que puntúa wellnessBreakdown
+
+export function tramo(valor, cortes) {
+  if (valor == null || cortes == null) return null;
+  const v = Number(valor);
+  if (isNaN(v)) return null;
+  for (let i = 0; i < cortes.length; i++) if (v >= cortes[i]) return i;
+  return cortes.length;
+}
+
+// ── Nota de sueño con la referencia anclada a su fecha ───────────
+// La penalización de recuperación (`calcRecoveryMod`) compara la HRV, la FC en reposo y
+// la respiración de una noche contra su media. Esa media la calculaba el widget con
+// TODO lo que hubiera cargado, sin mirar la fecha: la misma noche puntuaba distinto con
+// 30 días de datos que con 365, y distinto hoy que dentro de un mes, porque los días
+// POSTERIORES entraban en su propia referencia. Ahora es la ventana D-30..D-1 de cada
+// noche —la misma invariante que `_refHrv` y `baselinePersonal`—, así que una noche
+// puntúa siempre como habría puntuado la mañana siguiente.
+export const SUENO_REF_DIAS = 30;
+
+const _SERIES_RECUPERACION = {
+  hrv:  ["heart_rate_variability", "heartRateVariability"],
+  rhr:  ["resting_heart_rate"],
+  resp: ["respiratory_rate"],
+};
+
+function _indicesRecuperacion(healthData) {
+  const out = {};
+  for (const [k, nombres] of Object.entries(_SERIES_RECUPERACION)) {
+    out[k] = _porFecha(findMetric(healthData, ...nombres));
+  }
+  return out;
+}
+
+// Media de los valores > 0 entre D-dias y D-1, sin cruzar el corte de dispositivo.
+function _mediaReferencia(porFecha, fecha, dias, corte) {
+  const hasta = _sumarDias(fecha, -1);
+  let   desde = _sumarDias(fecha, -dias);
+  if (hasta == null || desde == null) return null;
+  if (corte && String(corte) > desde) desde = String(corte);
+  let suma = 0, n = 0;
+  for (const [f, v] of porFecha) {
+    // Un 0 es "no se midió" (días sin reloj), igual que en el resto del módulo.
+    if (f >= desde && f <= hasta && v > 0) { suma += v; n++; }
+  }
+  return n ? suma / n : null;
+}
+
+function _refDeIndices(indices, fecha, corte, dias) {
+  const out = {};
+  for (const k of Object.keys(_SERIES_RECUPERACION)) out[k] = _mediaReferencia(indices[k], fecha, dias, corte);
+  return out;
+}
+
+export function refRecuperacion(healthData, fecha, { corte = null, dias = SUENO_REF_DIAS } = {}) {
+  return _refDeIndices(_indicesRecuperacion(healthData), fecha, corte, dias);
+}
+
+// Hora "HH:MM" de un texto de fecha y hora cualquiera ("2026-03-14 07:12:00 +0100",
+// ISO...). Health Auto Export manda `sleepEnd` tal cual en `extra`.
+function _horaDeTexto(texto) {
+  const m = /(\d{2}):(\d{2})/.exec(String(texto || ""));
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
+// Una entrada por fila de sueño, ordenada por fecha, con su nota ya calculada. Es la
+// ÚNICA fuente de la nota de sueño: la cabecera del widget, sus siete barras y el mapa
+// del año leen de aquí, así que la barra de la última noche y el número grande no pueden
+// volver a decir cosas distintas.
+//
+// `hoy` activa un respaldo que ya tenía el widget: si la noche de HOY aún no tiene su
+// HRV/FC/respiración (el reloj sincroniza esas métricas más tarde que el sueño), se usa
+// el último valor conocido. Solo para esa fila: con una noche vieja acabaría midiendo su
+// descanso contra la recuperación de otro día.
+export function sleepHistory(healthData, { dias = 30, corte = null, hoy = null } = {}) {
+  const filas = findMetric(healthData, "sleep_analysis", "sleep")
+    .filter(d => d && d.date != null)
+    .sort((a, b) => (String(a.date) < String(b.date) ? -1 : String(a.date) > String(b.date) ? 1 : 0));
+  if (!filas.length) return [];
+  const indices = _indicesRecuperacion(healthData);
+
+  const ultimoConocido = (porFecha, limite) => {
+    let mejor = null, valor = null;
+    for (const [f, v] of porFecha) if (v > 0 && f <= limite && (mejor == null || f > mejor)) { mejor = f; valor = v; }
+    return valor;
+  };
+  const num = v => (v != null && !isNaN(Number(v)) ? Number(v) : null);
+
+  const salida = filas.map(d => {
+    const date    = String(d.date);
+    const extra   = d.extra || {};
+    const anulada = !!extra.excluded;
+    const horas   = sleepHours(d);
+    const fases   = {
+      deep:  num(extra.deep),
+      rem:   num(extra.rem),
+      core:  num(extra.core ?? extra.light),
+      awake: num(extra.awake),
+    };
+    const sleepStart = extra.sleep_start ?? null;
+    const sleepEnd   = _horaDeTexto(extra.sleepEnd);
+    const base = sleepBreakdown(horas, fases.deep, fases.rem, fases.awake, sleepStart);
+
+    let recoveryMod = 0, recuperacion = null;
+    if (!anulada && base) {
+      const ref = _refDeIndices(indices, date, corte, SUENO_REF_DIAS);
+      const delDia = k => {
+        const v = indices[k].get(date);
+        if (v != null && v > 0) return v;
+        return hoy && date === String(hoy) ? ultimoConocido(indices[k], date) : null;
+      };
+      const valores = { hrv: delDia("hrv"), rhr: delDia("rhr"), resp: delDia("resp") };
+      // Sin ninguna referencia la penalización vale 0: `calcRecoveryMod` ignora cada
+      // métrica cuya base no es > 0, que es justo lo que hacía el widget.
+      recoveryMod  = calcRecoveryMod(valores.hrv, valores.rhr, valores.resp, ref.hrv ?? 0, ref.rhr ?? 0, ref.resp ?? 0);
+      recuperacion = { ...valores, ref };
+    }
+    return {
+      date, anulada, horas,
+      // Una noche anulada no puntúa, pero se devuelve: el mapa pinta su aspa y la tira
+      // de siete noches su ×.
+      score: anulada ? null : sleepScore(horas, fases.deep, fases.rem, fases.awake, sleepStart, recoveryMod),
+      fases, sleepStart, sleepEnd, recoveryMod, recuperacion,
+      filas: base ? base.filas : [],
+      cap:   base ? base.cap : null,
+    };
+  });
+  return salida.slice(-dias);
+}
+
+// Filas del desglose de una noche de `sleepHistory`, tal como las enseñan el tooltip del
+// widget y el mapa del año: las de `sleepBreakdown`, la recuperación con una subfila por
+// métrica penalizada (`indent`) y el techo por duración si recortó el total. Las filas
+// sin `indent` suman exactamente la nota: si no cuadran consigo mismas, el desglose
+// miente (fue el bug del tooltip de sueño).
+export function desgloseNoche(noche) {
+  if (!noche || noche.anulada || !noche.filas || !noche.filas.length) return [];
+  const filas = [...noche.filas];
+  const mod   = noche.recoveryMod || 0;
+  if (mod < 0) {
+    filas.push({ label: "Recuperación", detail: "", pts: mod, max: 0 });
+    const r = noche.recuperacion || {}, ref = r.ref || {};
+    const pct = (v, base) => (v - base) / base * 100;
+    if (r.hrv != null && ref.hrv > 0) {
+      const p = pct(r.hrv, ref.hrv), pts = p < -25 ? -8 : p < -15 ? -6 : p < -5 ? -3 : 0;
+      if (pts < 0) filas.push({ label: "HRV", detail: `${Math.round(r.hrv)} vs ${Math.round(ref.hrv)} ms`, pts, max: 0, indent: true });
+    }
+    if (r.rhr != null && ref.rhr > 0) {
+      const p = pct(r.rhr, ref.rhr), pts = p > 15 ? -7 : p > 10 ? -5 : p > 5 ? -3 : 0;
+      if (pts < 0) filas.push({ label: "FC reposo", detail: `${Math.round(r.rhr)} vs ${Math.round(ref.rhr)} bpm`, pts, max: 0, indent: true });
+    }
+    if (r.resp != null && ref.resp > 0) {
+      const p = pct(r.resp, ref.resp), pts = p > 15 ? -5 : p > 10 ? -3 : p > 5 ? -2 : 0;
+      if (pts < 0) filas.push({ label: "Freq. resp.", detail: `${r.resp.toFixed(1)} vs ${ref.resp.toFixed(1)} rpm`, pts, max: 0, indent: true });
+    }
+  }
+  // El techo por duración también tiene que verse: con una noche corta y fases buenas
+  // recortaba el total sin aparecer en ninguna fila.
+  const bruto = noche.filas.reduce((s, f) => s + f.pts, 0) + mod;
+  if (noche.score != null && bruto > noche.score) {
+    filas.push({ label: "Techo por duración", detail: `máx ${noche.cap} con ${hoursToHM(noche.horas)}`, pts: noche.score - bruto, max: 0 });
+  }
+  return filas;
+}
+
+// ── Rejilla del año (mapa de calor) ──────────────────────────────
+// 53 columnas de lunes a domingo; la última es la semana que contiene `hoy`. Toda la
+// aritmética va por `_sumarDias` (mediodía UTC): con `Date` local, los dos domingos de
+// cambio de hora duplicaban o se comían un día y la rejilla se descolocaba desde ahí.
+// La rejilla no sabe nada de valores: eso lo decide `estadoCelda`.
+export const MESES_CORTOS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const _DIAS_CORTOS_ES = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+
+// 0 = lunes … 6 = domingo.
+function _filaSemana(iso) {
+  return (new Date(`${iso}T12:00:00Z`).getUTCDay() + 6) % 7;
+}
+
+export function rejillaCalendario({ hoy = null, semanas = 53 } = {}) {
+  const fin = hoy ? String(hoy) : _isoHoy();
+  if (_sumarDias(fin, 0) == null || semanas < 1) return { semanas: [], meses: [] };
+  const lunesFinal = _sumarDias(fin, -_filaSemana(fin));
+  let f = _sumarDias(lunesFinal, -7 * (semanas - 1));
+  const columnas = [], meses = [];
+  for (let col = 0; col < semanas; col++) {
+    const celdas = [];
+    for (let fila = 0; fila < 7; fila++) {
+      const futuro = f > fin;
+      celdas.push({ fecha: f, col, fila, futuro });
+      // Un mes cuyo día 1 aún no ha llegado no se rotula: la columna estaría vacía.
+      if (f.endsWith("-01") && !futuro) meses.push({ col, etiqueta: MESES_CORTOS_ES[Number(f.slice(5, 7)) - 1] });
+      f = _sumarDias(f, 1);
+    }
+    columnas.push(celdas);
+  }
+  return { semanas: columnas, meses };
+}
+
+// "mar 14 mar 2026".
+export function fechaLargaCorta(iso) {
+  if (_sumarDias(String(iso || ""), 0) == null) return "";
+  const d = new Date(`${iso}T12:00:00Z`);
+  return `${_DIAS_CORTOS_ES[d.getUTCDay()]} ${d.getUTCDate()} ${MESES_CORTOS_ES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+// "14 mar".
+export function fechaDiaMes(iso) {
+  if (_sumarDias(String(iso || ""), 0) == null) return "";
+  const d = new Date(`${iso}T12:00:00Z`);
+  return `${d.getUTCDate()} ${MESES_CORTOS_ES[d.getUTCMonth()]}`;
+}
+
+// Estado de una celda del mapa en un modo: 'medido' | 'sin_reloj' | 'anulada' | 'vacio'.
+// 'sin_reloj' existe para no pintar como día malo un día que simplemente se midió con
+// menos sensores: el valor se conserva (sale en el desglose) pero la celda va rayada.
+export function estadoCelda(modo, fecha, { bienestar = null, sueno = null, pasos = null, reloj = null } = {}) {
+  const mapaReloj = reloj && reloj.dias ? reloj.dias : null;
+  const vacio = punto => ({ estado: "vacio", valor: null, tramo: null, punto: punto || null });
+
+  if (modo === "bienestar") {
+    const p = bienestar ? bienestar.get(fecha) : null;
+    if (!p) return vacio();
+    return { estado: p.sinReloj ? "sin_reloj" : "medido", valor: p.value, tramo: tramo(p.value, TRAMOS_BIENESTAR), punto: p };
+  }
+
+  if (modo === "sueno") {
+    const n = sueno ? sueno.get(fecha) : null;
+    if (n && n.anulada) return { estado: "anulada", valor: null, tramo: null, punto: n };
+    if (n && n.score != null) return { estado: "medido", valor: n.score, tramo: tramo(n.score, TRAMOS_SUENO), punto: n };
+    // Sin noche que puntuar. Solo se afirma "sin reloj" si consta que ese día llegó algo
+    // y ninguna métrica de noche: "sin_datos" es no saber, y se queda en vacío.
+    const est = mapaReloj ? mapaReloj[fecha] : null;
+    if (est != null && est !== "sin_datos" && !relojPuesto(est, "noche")) {
+      return { estado: "sin_reloj", valor: null, tramo: null, punto: n || null };
+    }
+    return vacio(n);
+  }
+
+  if (modo === "pasos") {
+    const v = pasos ? pasos.get(fecha) : null;
+    if (v == null || !(v > 0)) return vacio();
+    // Sin mapa de reloj, o sin entrada para ese día, no se sabe: se da por medido en vez
+    // de inventar un "solo con el móvil".
+    const est = mapaReloj ? mapaReloj[fecha] : null;
+    const puesto = est == null || relojPuesto(est);
+    return { estado: puesto ? "medido" : "sin_reloj", valor: v, tramo: tramo(v, TRAMOS_PASOS), punto: null };
+  }
+  return vacio();
+}
+
+// ── Rachas ───────────────────────────────────────────────────────
+// Una racha se recorre por FECHA REAL, del día más antiguo a `hoy`, y distingue tres
+// clases de día:
+//  - cumple: suma.
+//  - neutro: ni suma ni rompe. Un día sin reloj, una noche anulada o un día sin datos no
+//    dicen nada de si se cumplió; romper la racha por ellos castigaría no llevar el
+//    reloj, y sumarlos sería contar algo que no se midió.
+//  - medido y no cumple: rompe.
+// Dos matices:
+//  - Más de RACHA_HUECO_MAX neutros seguidos también la cortan: tras una semana sin datos
+//    ya no se puede afirmar que la racha seguía.
+//  - Si `hoyAbierto`, un `hoy` que aún no cumple es neutro, porque la jornada está a
+//    medias (mismo criterio que `relojRachaSinReloj`). Ni suma al hueco ni se cuenta
+//    entre las neutras de la racha: todavía no ha pasado.
+export const RACHA_HUECO_MAX   = 7;
+export const RACHA_SUENO_HORAS = 7;
+export const RACHA_PASOS       = 8000;
+
+export function racha(dias, { hoy = null, cumple, neutro, hoyAbierto = true } = {}) {
+  const fin = hoy ? String(hoy) : _isoHoy();
+  const porFecha = new Map();
+  for (const d of dias || []) if (d && d.fecha != null && String(d.fecha) <= fin) porFecha.set(String(d.fecha), d);
+  const vacia = { actual: 0, neutrasActual: 0, maxima: 0, maximaDesde: null, maximaHasta: null };
+  if (!porFecha.size) return vacia;
+  const inicio = [...porFecha.keys()].sort()[0];
+
+  let len = 0, desde = null, neutras = 0, hueco = 0;
+  const out = { ...vacia };
+  for (let f = inicio; f != null && f <= fin; f = _sumarDias(f, 1)) {
+    const d = porFecha.get(f) || { fecha: f, valor: null, estado: "vacio" };
+    const esHoy = f === fin;
+    if (cumple(d)) {
+      if (len === 0) desde = f;
+      len++; hueco = 0;
+      if (len >= out.maxima) { out.maxima = len; out.maximaDesde = desde; out.maximaHasta = f; }
+      continue;
+    }
+    // Un hoy sin nada todavía está pendiente, no es un hueco: tampoco con `hoyAbierto`
+    // apagado se cuenta entre las neutras.
+    if (esHoy && (hoyAbierto || d.estado === "vacio")) continue;
+    if (neutro(d)) {
+      if (len > 0) {
+        hueco++; neutras++;
+        if (hueco > RACHA_HUECO_MAX) { len = 0; neutras = 0; hueco = 0; }
+      }
+      continue;
+    }
+    len = 0; neutras = 0; hueco = 0;
+  }
+  out.actual = len;
+  out.neutrasActual = len > 0 ? neutras : 0;
+  return out;
+}
+
+// Noches de RACHA_SUENO_HORAS o más. La noche de hoy ya está cerrada cuando llega (la
+// fila lleva la fecha del despertar), así que aquí `hoy` NO es neutro por estar a
+// medias: una noche corta hoy rompe como cualquier otra. Si aún no ha llegado, está
+// pendiente y no cuenta para nada.
+export function rachaSueno(sleepHist, reloj, { hoy = null } = {}) {
+  const mapaReloj = reloj && reloj.dias ? reloj.dias : null;
+  const dias = (sleepHist || []).map(n => {
+    const est = mapaReloj ? mapaReloj[n.date] : null;
+    const sinReloj = est != null && est !== "sin_datos" && !relojPuesto(est, "noche");
+    return {
+      fecha: n.date, valor: n.horas,
+      estado: n.anulada ? "anulada" : !(n.horas > 0) ? "vacio" : sinReloj ? "sin_reloj" : "medido",
+    };
+  });
+  return racha(dias, {
+    hoy, hoyAbierto: false,
+    cumple: d => d.estado === "medido" && d.valor >= RACHA_SUENO_HORAS,
+    neutro: d => d.estado !== "medido",
+  });
+}
+
+// Días de RACHA_PASOS pasos o más. Un día sin reloj cuenta de menos (el móvil en el
+// bolsillo no ve todo lo que se anda): si aun así llega, suma; si no llega, no rompe,
+// porque no se sabe si fue por andar poco o por no llevar el reloj.
+export function rachaPasos(serieStepCount, reloj, { hoy = null } = {}) {
+  const mapaReloj = reloj && reloj.dias ? reloj.dias : null;
+  const dias = [];
+  for (const d of serieStepCount || []) {
+    const v = d && d.value != null ? Number(d.value) : null;
+    if (!d || d.date == null || v == null || isNaN(v) || v <= 0) continue;
+    const est = mapaReloj ? mapaReloj[d.date] : null;
+    dias.push({ fecha: String(d.date), valor: v, estado: est == null || relojPuesto(est) ? "medido" : "sin_reloj" });
+  }
+  return racha(dias, {
+    hoy,
+    cumple: d => d.valor != null && d.valor >= RACHA_PASOS,
+    neutro: d => d.estado !== "medido",
+  });
 }
 
 // ── Conteo de ropa (widget temporal) ────────────────────────────
