@@ -11,6 +11,7 @@
 // husos por su cuenta.
 
 import { aFechaLocal, tieneHora } from "./lineaTiempo.js";
+import { MESES_CORTOS_ES } from "./helpers.js";
 
 // Espejo del valor por defecto de `SALIR_VENTANA_MIN` en el backend (las reglas de
 // «sal ya»). Si un evento entra en esa ventana, el backend ya va a calcular la salida
@@ -24,7 +25,6 @@ export const UMBRAL_PRONTO_MIN  = 15;
 export const HORIZONTE_DIAS     = 7;
 
 const DIAS_SEMANA = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
-const MESES_CORTO = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
 // ── Ubicaciones ──────────────────────────────────────────────────────────────
 
@@ -43,8 +43,9 @@ export function esUbicacionOnline(lugar) {
 
 // ── Próximo compromiso ───────────────────────────────────────────────────────
 
-function normalizar(ev, tipo, ahora, limite) {
+function normalizar(ev, tipo, ahora, limite, marcadorEntregas) {
   if (!ev || ev.isAllDay) return null;
+  if (marcadorEntregas && typeof ev.title === "string" && ev.title.includes(marcadorEntregas)) return null;
   if (!tieneHora(ev.start)) return null;
   const inicio = aFechaLocal(ev.start);
   const fin    = aFechaLocal(ev.end);
@@ -69,7 +70,10 @@ function normalizar(ev, tipo, ahora, limite) {
 // lo que conviene tener delante.
 const RANGO_TIPO = { evento: 0, clase: 1 };
 
-export function proximoCompromiso(eventos = [], clases = [], ahora = new Date()) {
+// Las entregas (`marcadorEntregas` en el título) no cuentan: son plazos, no citas, y ya
+// tienen su widget. Con ellas dentro, una entrega a las 23:59 tapaba la reunión de
+// mañana y la cabecera (momento.js, que las excluía) decía otra cosa que este widget.
+export function proximoCompromiso(eventos = [], clases = [], ahora = new Date(), { marcadorEntregas = "" } = {}) {
   const vacio = { actual: null, siguiente: null, huecoMin: null };
   const t0 = aFechaLocal(ahora);
   if (!t0) return vacio;
@@ -80,7 +84,7 @@ export function proximoCompromiso(eventos = [], clases = [], ahora = new Date())
   const fuentes = [[eventos, "evento"], [clases, "clase"]];
   for (const [lista, tipo] of fuentes) {
     for (const ev of Array.isArray(lista) ? lista : []) {
-      const c = normalizar(ev, tipo, t0, limite);
+      const c = normalizar(ev, tipo, t0, limite, marcadorEntregas);
       if (!c) continue;
       // Un mismo evento puede llegar por las dos listas (el calendario de clases es
       // también un calendario de Outlook): contarlo dos veces lo pondría de «actual»
@@ -147,7 +151,7 @@ export function cuentaAtras(desde, hasta) {
   if (ms < 24 * 3600 * 1000 && dias === 0) return `en ${duracion(min)}`;
   if (dias === 1) return `mañana, ${hhmm(b)}`;
   if (dias < 7) return `${DIAS_SEMANA[b.getDay()]}, ${hhmm(b)}`;
-  return `${b.getDate()} ${MESES_CORTO[b.getMonth()]}, ${hhmm(b)}`;
+  return `${b.getDate()} ${MESES_CORTOS_ES[b.getMonth()]}, ${hhmm(b)}`;
 }
 
 export function faltaPara(desde, hasta) {

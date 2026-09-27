@@ -127,6 +127,16 @@ describe("proximoCompromiso", () => {
     expect(soloClase.siguiente.tipo).toBe("clase");
   });
 
+  test("las entregas no son lo siguiente si se pasa el marcador", () => {
+    const eventos = [
+      ev("entrega", L(2026, 6, 15, 11), L(2026, 6, 15, 11, 30), { title: "📚 Práctica 3" }),
+      ev("reunion", L(2026, 6, 16, 9), L(2026, 6, 16, 10)),
+    ];
+    expect(proximoCompromiso(eventos, [], ahora, { marcadorEntregas: "📚" }).siguiente.id).toBe("reunion");
+    // Sin marcador (quien no lo pase) se comporta como antes.
+    expect(proximoCompromiso(eventos, [], ahora).siguiente.id).toBe("entrega");
+  });
+
   test("un duplicado por id cuenta una sola vez", () => {
     const e = ev("dup", L(2026, 6, 15, 9, 30), L(2026, 6, 15, 10, 30));
     const r = proximoCompromiso([e], [{ ...e }], ahora);

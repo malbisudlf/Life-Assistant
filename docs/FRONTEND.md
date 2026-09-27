@@ -63,7 +63,10 @@ Definidos en `ALL_DEFAULT_WIDGETS`. Ids: `timeline`, `weather`, `upcoming`, `ent
 `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
 `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
 `health_workouts`, `health_hub` (Salud), `jarvis`, `siguiente` (Lo siguiente, ver su
-sección más abajo). Cada uno se renderiza en `renderWidget(id)`.
+sección más abajo), `dia_linea` (El día, también con sección propia), `finanzas`,
+`casa`, `alarmas` y `noche` (Anoche). Cada uno se renderiza en `renderWidget(id)`, y
+**todo id nuevo va también en `DEFAULT_COLUMNS`**: si falta, reaparece en la izquierda
+al reconstruir una config guardada.
 La configuración (visibilidad, columna, orden, tamaño, splits) se persiste en
 `localStorage`, con selección independiente en modo completo (`la_widget_config`) y
 simple (`la_simple_widget_config`).
@@ -491,6 +494,12 @@ objetivo» de la noche es mañana hasta medianoche y hoy de madrugada.
 
 Cuentan como «algo a lo que vas» los eventos de Outlook y las clases, **sin** los de todo
 el día ni los que llevan el marcador de entregas (son plazos, ya tienen su widget).
+**Lo que está en curso y lo siguiente no se calculan aquí**: salen de
+`proximoCompromiso()` (`agenda.js`), el mismo cálculo del widget «Lo siguiente», con el
+mismo marcador. Cada uno tenía el suyo, con un desempate de solapes distinto (la cabecera
+elegía el que empezó el último; el widget, el que acaba antes), y con los dos en pantalla
+la cabecera decía «Ahora: A» encima de un widget que decía «Ahora: B». `momento.js` solo
+calcula aparte lo que el widget no mira: el primero de la jornada objetivo y de mañana.
 
 **Chips secundarios**, detrás del de la frase y nunca más de tres en total: parte de la
 noche con pendientes (`noche`), el sueño de anoche por la mañana (`health_sleep`), lluvia
@@ -696,9 +705,12 @@ dependa del reloj.
 - **Qué pinta**: si hay algo en curso, una fila «Ahora · título · acaba en N min»; debajo,
   lo siguiente (título, horas, sitio, etiqueta «clase» si viene del calendario de clases),
   la cuenta atrás grande y, si hay algo en curso, el hueco entre los dos («te quedan 40 min
-  libres», «justo después», «se solapa con lo actual»). Los eventos de todo el día y los
-  que no tienen hora nunca son «lo siguiente». Mira 7 días (`HORIZONTE_DIAS`), lo mismo que
-  `/calendar/events`.
+  libres», «justo después», «se solapa con lo actual»). Los eventos de todo el día, los
+  que no tienen hora y las entregas (`marcadorEntregas`, el mismo `VITE_ENTREGAS_MARKER`
+  del widget Entregas) nunca son «lo siguiente»: una entrega a las 23:59 es un plazo, y
+  como «siguiente» tapaba la reunión de mañana. Con dos en curso, el que acaba antes.
+  Mira 7 días (`HORIZONTE_DIAS`), lo mismo que `/calendar/events`. **La cabecera usa este
+  mismo cálculo** (ver «El momento del día»): si cambias una regla aquí, cambia las dos.
 - **La salida**: «Sal a las HH:MM · duración · distancia · desde …» (el «desde» sale del
   campo `origen` de `/maps/departure`), con una barra fina del margen de la última hora y
   la fase: holgada en el acento, ámbar en los últimos 15 min, «sal ya» y «vas N min

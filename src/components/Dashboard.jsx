@@ -24,8 +24,6 @@ import {
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
   esConfirmacionHablada, esNegacionHablada,
   fusionarConfigWidgets,
-} from "../lib/helpers";
-import {
   tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS, sleepHistory, desgloseNoche,
   rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes, rachaSueno, rachaPasos,
 } from "../lib/helpers";
@@ -1625,7 +1623,7 @@ const DEFAULT_COLUMNS = {
 const ALL_DEFAULT_WIDGETS = [
   { id: "jarvis",            label: "Jarvis",            visible: true,  column: "left"  },
   { id: "siguiente",         label: "Lo siguiente",      visible: true,  column: "left"  },
-  { id: "timeline",         label: "Hoy",              visible: true,  column: "left"  },
+  { id: "timeline",          label: "Hoy",               visible: true,  column: "left"  },
   { id: "dia_linea",         label: "El día",            visible: true,  column: "left"  },
   { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
@@ -2835,7 +2833,7 @@ export default function Dashboard() {
   // Lo próximo con hora, recalculado con el tic del reloj: lo que está en curso deja de
   // estarlo y lo siguiente pasa a ser otra cosa sin que nadie recargue nada.
   const compromiso = useMemo(
-    () => proximoCompromiso(allEvents, classEvents, now),
+    () => proximoCompromiso(allEvents, classEvents, now, { marcadorEntregas: ENTREGAS_MARKER }),
     [allEvents, classEvents, now],
   );
   const estadoAgenda = authNeeded ? "error" : loading ? "cargando" : "ok";

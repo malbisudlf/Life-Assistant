@@ -50,7 +50,7 @@ quien sepa algo, lo empuja.
                                         ▼
         ┌──────────────────────────────────────────────────────────┐
         │   backend/main.py — FastAPI en `caja` (Docker, Debian)    │
-        │   un solo fichero, ~22.000 líneas, 125 endpoints          │
+        │   un solo fichero, ~23.500 líneas, 127 endpoints          │
         └───┬───────┬───────┬────────┬────────┬────────┬───────────┘
             │       │       │        │        │        │
             ▼       ▼       ▼        ▼        ▼        ▼
@@ -90,9 +90,9 @@ capricho: es la única forma que hay de cruzar la frontera de la red local.
 
 ### Frontend — `src/components/Dashboard.jsx`
 React 19 sobre Vite, en Vercel, **deploy automático al hacer push a `main`**. Sin router,
-sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~8.000
+sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~9.700
 líneas con `useState`/`useEffect`, y la lógica pura extraída a `src/lib/helpers.js`
-(~2.300 líneas, testeada aparte) y a otros ficheros de `src/lib/` cuando es un tema propio.
+(~2.900 líneas, testeada aparte) y a otros ficheros de `src/lib/` cuando es un tema propio.
 
 Es una decisión, no una deuda: el proyecto es de una persona y un solo fichero de UI se
 navega con `grep` de los banners. Lo que sí está prohibido es meter lógica ahí — todo lo
@@ -103,7 +103,7 @@ widgets configurables (visibles, columna, orden, tamaño) persistidos en `localS
 un **modo simple** para el móvil que reutiliza los mismos widgets con otra distribución.
 
 ### Backend — `backend/main.py`
-FastAPI, **un solo fichero de ~22.000 líneas** con 125 endpoints, organizado por banners
+FastAPI, **un solo fichero de ~23.500 líneas** con 127 endpoints, organizado por banners
 `# ── NOMBRE ──`. Corre con Docker Compose en `caja`, un portátil con Debian en casa, y sale
 a internet por un Cloudflare Tunnel. Nació en Fly.io, donde se suponía que escalaba a cero
 y nunca lo hizo (Home Assistant lo sondeaba cada pocos segundos), aunque la mitad de las
@@ -542,8 +542,8 @@ El mismo fallo, dos veces, en dos sitios que no se parecen en nada.
 
 | | |
 |---|---|
-| Backend | ~22.000 líneas, **1 fichero**, 125 endpoints |
-| Frontend | ~8.000 líneas de UI + ~2.300 de lógica pura en `helpers.js` (más la voz, la línea del día y la zona dev, aparte) |
+| Backend | ~23.500 líneas, **1 fichero**, 127 endpoints |
+| Frontend | ~9.700 líneas de UI + ~2.900 de lógica pura en `helpers.js` (más la voz, la línea del día y la zona dev, aparte) |
 | Agente PC | ~1.200 líneas |
 | Herramientas del asistente | **62** |
 | Tablas en Supabase | 41 migraciones |

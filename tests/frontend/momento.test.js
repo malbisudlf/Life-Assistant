@@ -2,6 +2,8 @@ import { describe, test, expect } from "vitest";
 import {
   franjaDelDia, saludoDeFranja, jornadaObjetivo, cuantoFalta, momentoDelDia, destinoDeWidget,
 } from "../../src/lib/momento";
+import { proximoCompromiso } from "../../src/lib/agenda";
+import { formatTime } from "../../src/lib/helpers";
 
 // El reloj va SIEMPRE inyectado y en hora local: el 28/09/2026 es lunes y queda lejos
 // de los dos cambios de hora, así que la suite da igual en la máquina en que corra.
@@ -99,6 +101,19 @@ describe("momentoDelDia: la frase", () => {
     const e = { ...ev("Clase", t(HOY, "10:40"), t(HOY, "12:00")), id: undefined };
     const m = momentoDelDia(entrada({ eventos: [e], salidas: { [e.start]: { departure_time: "10:10" } } }));
     expect(m.frase).toBe("Clase en 40 min · sal a las 10:10.");
+  });
+
+  test("con dos en curso dice el mismo que el widget «Lo siguiente»", () => {
+    const eventos = [
+      ev("Bloque", t(HOY, "09:00"), t(HOY, "13:00")),
+      ev("Llamada", t(HOY, "10:00"), t(HOY, "10:30")),
+      ev("Taller", t(HOY, "10:10"), t(HOY, "12:00")),
+    ];
+    const ahora = a(10, 15);
+    const m = momentoDelDia(entrada({ ahora, eventos }));
+    const w = proximoCompromiso(eventos, [], ahora, { marcadorEntregas: "📚" });
+    expect(m.frase).toBe(`Ahora: ${w.actual.titulo} hasta las ${formatTime(w.actual.fin)}.`);
+    expect(m.frase).toBe("Ahora: Llamada hasta las 10:30.");
   });
 
   test("los de todo el día y las entregas no son «lo siguiente»", () => {

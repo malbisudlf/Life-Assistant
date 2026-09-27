@@ -14,6 +14,7 @@
 import {
   formatTime, sleepHours, findMetric, alarmaCuandoTexto, alarmaSonando, agruparParteNoche,
 } from "./helpers.js";
+import { proximoCompromiso } from "./agenda.js";
 
 const TITULO_BASE = "Life Assistant";
 const MAX_TITULO  = 40;
@@ -166,10 +167,13 @@ function _momento({
     chips.push({ id: "outlook", texto: "Conectar Outlook", widget: "timeline", tono: "normal" });
   } else {
     const cands = _candidatos(eventos, clases, marcadorEntregas);
-    // Si se solapan varios, el que empezó el último: una reunión dentro de un bloque
-    // largo de «trabajo» dice más que el bloque.
-    const enCurso   = cands.filter(c => c.ini <= ahora && ahora < c.fin).pop() || null;
-    const siguiente = cands.find(c => c.ini > ahora && _iso(c.ini) === hoy) || null;
+    // Lo que está en curso y lo siguiente los decide `proximoCompromiso`, el mismo del
+    // widget «Lo siguiente»: con dos cálculos, cada uno con su desempate de solapes, la
+    // cabecera decía «Ahora: A» mientras el widget de debajo decía «Ahora: B».
+    const pc        = proximoCompromiso(eventos, clases, ahora, { marcadorEntregas });
+    const aCand     = c => c && { ev: c.raw, ini: c.inicio, fin: c.fin };
+    const enCurso   = aCand(pc.actual);
+    const siguiente = pc.siguiente && _iso(pc.siguiente.inicio) === hoy ? aCand(pc.siguiente) : null;
     const primeroJ  = cands.find(c => c.ini > ahora && _iso(c.ini) === jornada) || null;
     const primeroM  = cands.find(c => _iso(c.ini) === manana) || null;
     const huboHoy   = cands.some(c => _iso(c.ini) === hoy);

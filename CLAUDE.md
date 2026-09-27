@@ -127,7 +127,7 @@ El E2E no entra en la verificación obligatoria de arriba porque tarda bastante 
 Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~22.000 líneas)
+backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
     ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
@@ -149,7 +149,7 @@ Ficheros clave:
 
 | Fichero | Qué es |
 |---|---|
-| `src/components/Dashboard.jsx` | TODA la UI (~8.000 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/Dashboard.jsx` | TODA la UI (~9.700 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Única excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
 | `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
 | `src/lib/dev.js` | La lógica de la zona dev: estilos, lectura del estado del sistema y el resumen de una línea que enseña el panel ⚙ |
@@ -163,6 +163,7 @@ Ficheros clave:
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
 | `src/lib/agenda.js` | Lógica pura de «Lo siguiente»: el próximo compromiso (y lo que está en curso), la cuenta atrás, la fase de la hora de salida y la memoria del modo coche/andando |
+| `src/lib/momento.js` | Lógica pura de la cabecera «¿qué me toca ahora?»: la frase, los chips y el título de la pestaña. Lo que está en curso y lo siguiente los toma de `agenda.js`, para no decir otra cosa que el widget |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |
