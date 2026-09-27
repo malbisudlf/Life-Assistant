@@ -242,8 +242,9 @@ exactamente como antes. Lo que tiene que hacer el parche:
 
 Cómo lo lee el backend: `userTurns > 0` es cogida en cuanto se ve; `voicemail_message`
 es «recado dejado, se acaba la serie»; `voicemail` y `no_speech` sin turnos son «no
-cogida, sigue la serie»; `unplayed` y `conversation_error` sin turnos son «sin voz», que
-no insiste y deja un ERROR. El interruptor es del backend (`TELEFONO_DETECTAR_BUZON=0`):
+cogida, sigue la serie», salvo `no_speech` con `answeredBy: 'person'`, que es cogida
+(quien descuelga y no dice nada que se oiga lo ha cogido igual); `unplayed` y
+`conversation_error` sin turnos son «sin voz», que no insiste y deja un ERROR. El interruptor es del backend (`TELEFONO_DETECTAR_BUZON=0`):
 sin `detectVoicemail` en la petición, el parche solo apunta el Contact en el log.
 
 **Queda por hacer**: escribir el diff contra el clon de `caja`, probarlo con una llamada

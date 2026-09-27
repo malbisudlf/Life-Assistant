@@ -328,6 +328,24 @@ class TestContestarNoEsCoger:
         _centralita12(mock_requests, [{**NADIE_HABLA, "userTurns": 1}])
         assert main._como_acabo("c1") == "cogida"
 
+    def test_una_persona_que_descuelga_y_no_habla_es_cogida(self, mock_requests):
+        """Descolgaste tú (el Contact trae tu nombre) y no dijiste nada que el oído
+        pillara: hablaste encima del primer mensaje o fue un «sí» muy bajo. Eso es
+        haberla cogido; no_speech solo cuenta como no cogida si el Contact no dice que
+        fuera una persona. Sin esto, dos llamadas más a quien ya había cogido."""
+        lanzadas = _centralita12(mock_requests, [{**NADIE_HABLA, "answeredBy": "person"},
+                                                 COGIDA12, ANUNCIO_GRABADO])
+        _serie()
+        assert len(lanzadas) == 1
+        assert main._como_acabo("c1") == "cogida"
+
+    @pytest.mark.parametrize("quien", ["voicemail", "unknown"])
+    def test_no_speech_sin_persona_sigue_siendo_no_cogida(self, mock_requests, quien):
+        """El respaldo de no_speech queda para cuando el Contact no dice que fuera una
+        persona: el buzón (con la detección apagada) o un Contact que no se entiende."""
+        _centralita12(mock_requests, [{**NADIE_HABLA, "answeredBy": quien}])
+        assert main._como_acabo("c1") == "no_cogida"
+
     def test_colgar_tu_sin_hablar_es_cogida(self, mock_requests):
         """Cogerla y colgar sin decir nada es haberla cogido: no se vuelve a llamar."""
         _centralita12(mock_requests, [{"state": "COMPLETED", "reason": "remote_hangup",

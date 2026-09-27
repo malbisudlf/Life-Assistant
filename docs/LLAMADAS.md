@@ -258,7 +258,7 @@ tampoco, deja el mensaje en el buzón.** Queda así:
 ```
 llamada 1 (conversación, suena TELEFONO_TIMBRE_SEG —14 s en caja— y cuelga)
    │ si descuelga el buzón: deja ahí el recado y se acaba (parche 12, abajo)
-   │ no cogida (no_answer, comunicando o, con el parche 12, nadie habló)
+   │ no cogida (no_answer, comunicando o, con el parche 12, nadie habló y no era una persona)
    ▼  espera TELEFONO_REINTENTO_SEG = 60 s
 llamada 2 (igual que la 1)            ← TELEFONO_INTENTOS = 2 en total
    │ no cogida
@@ -310,8 +310,13 @@ Con el **parche 12** de claude-phone (`telefono/PARCHES.md`) contestar deja de s
   equivoca y descuelgas tú, oyes el recado en vez de que te cuelguen.
 - **Segunda línea de defensa**: una llamada en la que nadie dice nada (dos turnos en
   silencio y ningún turno de voz, `no_speech` con `userTurns = 0`) cuenta como **no
-  cogida** y la serie sigue. Si alguien habló en algún momento, es cogida, y se da por
-  cogida en cuanto se ve el primer turno, sin esperar al final.
+  cogida** y la serie sigue, **salvo que el Contact diga que descolgó una persona**
+  (`answeredBy: 'person'`): entonces la cogiste, aunque hablaras encima del primer
+  mensaje, cuando todavía no se escucha, o dijeras un «sí» tan bajo que no se oyó.
+  Volver a llamarte serían dos llamadas más a quien ya lo cogió. Así `no_speech` solo
+  decide cuando el Contact dice buzón o no se entiende. Si alguien habló en algún
+  momento, es cogida, y se da por cogida en cuanto se ve el primer turno, sin esperar al
+  final.
 - **Descolgada, pero sin voz** (`unplayed`, o `conversation_error` sin turnos): no se
   insiste y queda un ERROR. Y el parche cuelga la línea en cualquier error después de
   descolgar: nunca más un buzón grabando silencio.

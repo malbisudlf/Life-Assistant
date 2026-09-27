@@ -16330,7 +16330,8 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
 # el Contact del buzón) y, si es el buzón, deja el recado ahí mismo (`voicemailMessage`)
 # o cuelga; y cuenta los turnos en que alguien habló (`userTurns`). Con eso:
 #   - descolgó el buzón y se dejó el recado → 'buzon': la serie acaba, el recado está;
-#   - descolgaron y nadie dijo nada en toda la llamada → 'no_cogida': la serie sigue;
+#   - descolgaron y nadie dijo nada en toda la llamada → 'no_cogida': la serie sigue,
+#     salvo que el Contact diga que descolgó una persona: entonces es 'cogida';
 #   - descolgaron pero Jarvis no pudo hablar (voz o audio rotos) → 'sin_voz': no se
 #     insiste, porque una voz rota no se arregla llamando otra vez y cada reintento sería
 #     otra llamada muda, y queda un ERROR en el registro.
@@ -16390,7 +16391,13 @@ def _como_acabo_con_parche_12(info: dict) -> Optional[str]:
         if motivo == "voicemail_message":
             return "buzon"
         if motivo == "no_speech":
-            return "no_cogida"          # dos turnos sin oír a nadie
+            # Dos turnos sin oír a nadie. Si descolgó una persona (el Contact trae su
+            # nombre), la ha cogido aunque no hablara: pudo contestar mientras sonaba
+            # el primer mensaje, cuando todavía no se escucha, o con un «sí» tan bajo
+            # que el detector de voz no lo pilló. Volver a llamarla serían dos llamadas
+            # más a alguien que ya lo cogió. no_speech solo decide cuando el Contact
+            # dice buzón o no dice nada, que es para lo que está.
+            return "cogida" if info.get("answeredBy") == "person" else "no_cogida"
         if motivo == "conversation_error":
             return "sin_voz"
         if info.get("answeredBy") == "voicemail" and motivo != "announce_complete":

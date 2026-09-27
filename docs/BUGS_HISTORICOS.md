@@ -16,7 +16,8 @@
     (`_telefono_puede_sonar` en `_llamar`, con la señal de despertar del resumen guardada
     aparte en `despertares`; sin señal, desde las 10:00; la franja fija queda de suelo).
     Y con el parche 12 de claude-phone, si descuelga el buzón se deja ahí el recado, una
-    llamada en la que nadie habla cuenta como no cogida, y descolgar sin voz ni insiste
+    llamada en la que nadie habla cuenta como no cogida (salvo que descolgara una
+    persona: callarse no es no cogerla), y descolgar sin voz ni insiste
     ni se calla: queda en ERROR. Ver «Solo cuando estás despierto» y «Contestar no es
     coger» en `docs/LLAMADAS.md`.
   - Moralejas: **«no es de noche» no es «estás despierto»**: una franja horaria es una
