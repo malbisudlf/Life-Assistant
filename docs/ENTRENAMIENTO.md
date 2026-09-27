@@ -33,4 +33,6 @@ El usuario entrena a personas y cobra 16 €/hora, generalmente cada 4 sesiones.
   cobro), con `ok: true`, y ese cobro pasaba a ser el corte del pendiente; no hay
   endpoint para borrar un cobro. Por lo mismo `/training/summary` responde 502 en vez de
   enseñar «0 € pendientes», y un error al leer el cliente no se confunde con «no hay
-  cliente».
+  cliente». El dashboard respeta esa diferencia: con un 502 la tarjeta dice «No se ha
+  podido consultar el entrenamiento» con su «Reintentar» (no «Sin datos») y, si ya había
+  un resumen cargado, se queda con él (`loadTraining`).

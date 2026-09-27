@@ -665,7 +665,11 @@ Lo que hay que saber al tocarlo:
   del dashboard, no encima: es una vista, no un modal. El estado del dashboard sigue vivo
   mientras tanto, y por eso puede pasarle por props las filas del semáforo que solo él
   conoce (`filasEstadoDelDashboard`: Outlook, el Watch, el uso del reloj, entrenamiento).
-  Las demás se las pide la zona dev por su cuenta con `leerEstadoSistema()`.
+  Las demás se las pide la zona dev por su cuenta con `leerEstadoSistema()`, y la línea
+  de ⚙ con **la misma función** (`cargarEstadoSistema`). Vive en
+  `src/lib/estadoSistema.js`, aparte de `dev.js` por la regla del chunk de abajo, igual
+  que `registro.js`. Hubo una copia a mano en `Dashboard.jsx` que no guardaba `brief`, y
+  ⚙ decía «todo responde» con el resumen diario pausado.
 - **El resumen y las filas son la misma función** (`filasDeEstado`/`resumenEstado`, en
   `src/lib/dev.js`, con tests). Si añades una señal nueva, sale en los dos sitios sin
   tocar nada más — que es justo lo que evita que el semáforo del móvil y el de la zona

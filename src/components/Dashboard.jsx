@@ -61,7 +61,7 @@ import {
   etiquetaAccion, CASA_MAX_FAVORITOS,
 } from "../lib/casa";
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
-import { juntarRegistro, RUTA_REGISTRO, RUTA_ERRORES_SEMANA } from "../lib/registro";
+import { leerEstadoSistema } from "../lib/estadoSistema";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -2474,6 +2474,7 @@ export default function Dashboard() {
   const [sessionHours, setSessionHours]   = useState("1");
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [trainingError, setTrainingError]     = useState("");   // la última escritura que no entró
+  const [trainingFallo, setTrainingFallo]     = useState(false); // la última lectura del resumen no llegó
   const [showSettings, setShowSettings]   = useState(false);
   const [sysStatus, setSysStatus]         = useState(null);   // panel de estado del sistema
   const [sysLoading, setSysLoading]       = useState(false);
@@ -4602,69 +4603,23 @@ export default function Dashboard() {
     );
   }
 
-  // Se refresca al abrir ajustes y con el botón, nunca en bucle.
+  // Se refresca al abrir ajustes y con el botón, nunca en bucle. Las consultas son las
+  // mismas que las de la pestaña Estado de la zona dev, y por eso salen de la misma
+  // función: aquí había una copia a mano que no guardaba `brief`, y la línea de ⚙ decía
+  // «todo responde» con el resumen diario pausado mientras la zona dev lo pintaba en
+  // ámbar. `leerEstadoSistema` no lanza: lo que no responde se queda en null.
   async function cargarEstadoSistema() {
     if (sysLoading) return;
     setSysLoading(true);
-    const t0 = (typeof performance !== "undefined" ? performance : Date).now();
-
-    // El backend escala a cero: la primera petición tras un rato mide el arranque en frío.
-    let backend = { ok: false, ms: null };
     try {
-      const r = await fetch(`${API}/`);
-      backend = { ok: r.ok, ms: Math.round(((typeof performance !== "undefined" ? performance : Date).now()) - t0) };
-    } catch { /* sin red o backend caído: ok=false */ }
-
-    // Independientes entre sí: en serie sumarían dos idas y vueltas a Fly detrás del
-    // arranque en frío que acabamos de medir.
-    let agente = null;
-    let registro = null;
-    let presencia = null;
-    let avisos = null;
-    let gasto = null;
-    let enviados = [];
-    if (backend.ok) {
-      const [rAgente, rLogs, rPresencia, rBrief, rAvisos, rGasto, rEnviados, rErrores] = await Promise.all([
-        apiFetch(`${API}/agents/${AGENT_ID}`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}${RUTA_REGISTRO}`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/presencia`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/brief/ajustes`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/avisos/estado`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/gasto?dias=30`, { headers: authHeaders() }).catch(() => null),
-        apiFetch(`${API}/avisos/enviados`, { headers: authHeaders() }).catch(() => null),
-        // Los errores de la semana, aparte: los de arriba son solo las 50 últimas filas
-        // (ver `juntarRegistro` en lib/dev.js).
-        apiFetch(`${API}${RUTA_ERRORES_SEMANA}`, { headers: authHeaders() }).catch(() => null),
-      ]);
-      try {
-        if (rAgente?.ok) agente = await rAgente.json();
-      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
-      try {
-        if (rLogs?.ok) registro = await rLogs.json();
-      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
-      try {
-        registro = juntarRegistro(registro, rErrores?.ok ? await rErrores.json() : null);
-      } catch { /* mejor esfuerzo: se queda la cuenta de la muestra */ }
-      try {
-        if (rPresencia?.ok) presencia = await rPresencia.json();
-      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
-      try {
-        if (rBrief?.ok) setBriefCfg(await rBrief.json());
-      } catch { /* mejor esfuerzo: el interruptor se muestra como desconocido */ }
-      try {
-        if (rAvisos?.ok) avisos = await rAvisos.json();
-      } catch { /* mejor esfuerzo: se muestra como desconocido */ }
-      try {
-        if (rGasto?.ok) gasto = await rGasto.json();
-      } catch { /* mejor esfuerzo: la fila del coste se muestra como desconocida */ }
-      try {
-        if (rEnviados?.ok) enviados = (await rEnviados.json()).avisos || [];
-      } catch { /* mejor esfuerzo: sin lista de avisos, el resto del panel sigue */ }
+      const datos = await leerEstadoSistema(AGENT_ID);
+      // El interruptor del resumen diario pinta lo que diga el backend; si esta vez no
+      // ha contestado, se queda lo último que dijo.
+      if (datos.brief) setBriefCfg(datos.brief);
+      setSysStatus(datos);
+    } finally {
+      setSysLoading(false);
     }
-
-    setSysStatus({ backend, agente, registro, presencia, avisos, gasto, enviados,
-                   comprobado: Date.now() });
-    setSysLoading(false);
   }
 
   // Enciende, apaga o pausa el resumen diario. La respuesta del PATCH ya trae el estado
@@ -5008,12 +4963,20 @@ export default function Dashboard() {
     }
   }
 
+  // `/training/summary` responde 502 a propósito cuando no puede leer el cliente, el pago
+  // o las sesiones (docs/ENTRENAMIENTO.md). Guardar ese cuerpo como resumen lo convertía
+  // en «Sin datos», que es lo que se pinta cuando NO hay cliente, y además pisaba el
+  // resumen bueno que ya hubiera tras apuntar una sesión. Un fallo deja el último resumen
+  // bueno y se dice.
   async function loadTraining() {
     try {
       const r = await apiFetch(`${API}/training/summary`, { headers: authHeaders() });
-      const data = await r.json();
-      setTraining(data);
-    } catch { /* mejor esfuerzo: ignorar */ }
+      if (!r.ok) { setTrainingFallo(true); return; }
+      setTraining(await r.json());
+      setTrainingFallo(false);
+    } catch {
+      setTrainingFallo(true);
+    }
   }
 
   // Las escrituras de entrenamiento pasan todas por aquí para que un rechazo se VEA.
@@ -5958,7 +5921,22 @@ export default function Dashboard() {
       case "training": return (
         <div style={cardStyle} data-card={id} key="training">
           <div style={s.sectionLabel}>Entrenamiento</div>
-          {!training?.client ? (
+          {/* Un fallo no es «no hay cliente»: decir «Sin datos» aquí sería mentir. */}
+          {!training?.client && trainingFallo ? (
+            <div style={{ color: "var(--muted)", fontSize: 13 }}>
+              No se ha podido consultar el entrenamiento.{" "}
+              <button
+                onClick={loadTraining}
+                aria-label="Reintentar leer el entrenamiento"
+                style={{
+                  background: "none", border: "none", padding: 0, font: "inherit",
+                  color: "var(--accent)", cursor: "pointer",
+                }}
+              >
+                Reintentar
+              </button>
+            </div>
+          ) : !training?.client ? (
             <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos</div>
           ) : (() => {
             const { sessions_since_payment: sess, hours_since_payment: hrs, amount_owed, sessions_per_payment: spp, last_payment_date, last_session_date } = training;
@@ -8400,14 +8378,15 @@ export default function Dashboard() {
 
     filas.push({
       nombre: "Entrenamiento",
-      tono: training?.client ? "green" : "muted",
-      detalle: training?.client
+      tono: trainingFallo ? "accent" : training?.client ? "green" : "muted",
+      detalle: trainingFallo ? "no se ha podido consultar"
+        : training?.client
         ? `${training.sessions_since_payment}/${training.sessions_per_payment} sesiones · ${training.amount_owed}€`
         : "sin cliente configurado",
     });
 
     return filas;
-  }, [authNeeded, calendarError, allEvents.length, healthLastSync, healthReloj, training]);
+  }, [authNeeded, calendarError, allEvents.length, healthLastSync, healthReloj, training, trainingFallo]);
 
   if (!token) return <LoginScreen />;
 

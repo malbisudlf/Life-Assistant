@@ -106,6 +106,11 @@
     `catch` de debajo lo contradecía con un `previo || []`. Un estado de error va aparte
     (`alarmasError`, `{ error: true }`), nunca reciclando el valor que significa vacío. Y
     lo que se pone a `true` en un fallo se vuelve a poner a `false` en el acierto.
+  - A la lectura del entrenamiento se le escapó a esa revisión: `loadTraining` guardaba
+    el `{detail}` de un 502 como resumen, la tarjeta decía «Sin datos» (lo mismo que sin
+    cliente) y, como se relee tras cada escritura, un 502 pasajero justo después de
+    apuntar una sesión borraba un resumen bueno. **«Mejor esfuerzo: ignorar» significa
+    quedarse con lo que había**, no sobrescribirlo con el cuerpo del error.
 - **Tres estados que se quedaban desfasados con la página abierta**, de la misma
   revisión: el detalle del widget «Hoy» guardaba una COPIA del evento pulsado (tras
   editarlo seguía con la hora vieja, y el ✎ la volvía a escribir), la idea desplegada
@@ -963,3 +968,14 @@
   sigue una mayúscula o «¿»/«¡» (dominios, horas y decimales llevan minúscula o dígito).
   - Moraleja: **una red de seguridad que va detrás de un paso que rompe su entrada no es
     una red.** Cuando una limpieza reconoce patrones, lo que corre antes no puede partirlos.
+
+- **La línea de ⚙ y la zona dev leían el estado del sistema con dos listas.** Como
+  `Dashboard.jsx` no puede importar `src/lib/dev.js` de forma estática (chunk principal),
+  `cargarEstadoSistema` copiaba a mano las consultas de `leerEstadoSistema`. La copia
+  no guardaba `brief`, así que la fila «Resumen diario» salía siempre «sin comprobar» en
+  ⚙: con el correo pausado, la zona dev lo pintaba en ámbar y ⚙ decía «todo responde».
+  Hoy `leerEstadoSistema` vive en `src/lib/estadoSistema.js` (ligero, como
+  `registro.js`) y los dos lados la llaman.
+  - Moraleja: **compartir la función que decide no basta si cada lado junta sus datos
+    por su cuenta.** Cuando la regla del chunk impide importar un módulo, se saca a un
+    módulo ligero lo que hace falta, no se copia.

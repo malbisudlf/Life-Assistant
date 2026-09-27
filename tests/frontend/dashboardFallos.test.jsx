@@ -11,6 +11,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Dashboard from "../../src/components/Dashboard";
+import { API } from "../../src/lib/api";
 
 // Una respuesta simulada con lo que el código mira: status, ok, json() y cabeceras.
 function respuesta(cuerpo, status = 200, cabeceras = {}) {
@@ -166,6 +167,67 @@ describe("entrenamiento", () => {
     await user.click(screen.getByText("✓"));
     expect(await screen.findByText("Datos no válidos: Fecha inválida")).toBeInTheDocument();
     expect(screen.getByText("✓")).toBeInTheDocument();   // el formulario sigue abierto
+  });
+
+  const RESUMEN = {
+    client: { price_per_hour: 30, sessions_per_payment: 4 },
+    sessions_since_payment: 1, hours_since_payment: 1, amount_owed: 30,
+    sessions_per_payment: 4, all_recent_sessions: [],
+  };
+
+  test("un 502 del resumen no se pinta como «Sin datos»", async () => {
+    localStorage.setItem("la_token", "jwt");
+    let intentos = 0;
+    simularBackend({
+      "/training/summary": () => (++intentos === 1
+        ? respuesta({ detail: "Error en el almacenamiento de datos" }, 502)
+        : respuesta(RESUMEN)),
+    });
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const tarjeta = () => within(document.querySelector('[data-card="training"]'));
+    expect(await screen.findByText(/No se ha podido consultar el entrenamiento/)).toBeInTheDocument();
+    expect(tarjeta().queryByText("Sin datos")).toBeNull();
+    await user.click(tarjeta().getByText("Reintentar"));
+    expect(await tarjeta().findByText("+ Sesión")).toBeInTheDocument();
+  });
+
+  test("un 502 al releer tras apuntar una sesión no borra el resumen que había", async () => {
+    localStorage.setItem("la_token", "jwt");
+    let lecturas = 0;
+    simularBackend({
+      "/training/summary": () => (++lecturas === 1
+        ? respuesta(RESUMEN)
+        : respuesta({ detail: "Error en el almacenamiento de datos" }, 502)),
+      "/training/sessions": respuesta({ ok: true }),
+    });
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await user.click(await screen.findByText("+ Sesión"));
+    await user.click(screen.getByText("✓"));
+    await waitFor(() => expect(lecturas).toBe(2));
+    const tarjeta = within(document.querySelector('[data-card="training"]'));
+    expect(tarjeta.getByText("+ Sesión")).toBeInTheDocument();
+    expect(tarjeta.queryByText("Sin datos")).toBeNull();
+  });
+});
+
+describe("estado del sistema en ⚙", () => {
+  test("la línea de ⚙ ve el resumen diario pausado, igual que la zona dev", async () => {
+    localStorage.setItem("la_token", "jwt");
+    simularBackend({
+      "/brief/ajustes": respuesta({ activo: true, pausado: true, pausado_hasta: "2026-10-01" }),
+    });
+    // La raíz tiene que responder: si no, la línea dice «Backend: no responde» y no mira
+    // nada más. `simularBackend` busca por fragmento y «/» casaría con todo.
+    const simulado = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, opciones) => (String(url) === `${API}/`
+      ? respuesta({ version: "abc1234" })
+      : simulado(url, opciones)));
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await user.click(await screen.findByTitle("Ajustes de widgets"));
+    expect(await screen.findByText("Resumen diario: pausado hasta el 01/10/2026")).toBeInTheDocument();
   });
 });
 
