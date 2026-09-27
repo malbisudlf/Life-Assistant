@@ -25,13 +25,16 @@ class TestElBotonDeHablar:
         _pendiente(mock_requests)
         llamadas = []
         monkeypatch.setattr(main, "_llamar",
-                            lambda texto, rid="", contexto="":
-                                llamadas.append((texto, rid, contexto)) or True)
+                            lambda texto, rid="", contexto="", **k:
+                                llamadas.append((texto, rid, contexto, k)) or True)
         r = client.post(f"/sesion/{UN_UUID}/accion",
                         json={"accion": "hablar"}, headers=BOTON)
         assert r.status_code == 200 and r.json() == {"ok": True, "accion": "hablar"}
         assert len(llamadas) == 1
-        texto, rid, contexto = llamadas[0]
+        texto, rid, contexto, k = llamadas[0]
+        # Lo has pedido tú pulsando el botón: estás despierto, así que no espera a tu
+        # señal de despertar como el resto de llamadas.
+        assert k.get("aunque_duermas") is True
         assert rid == UN_UUID
         assert texto == main._apertura_sesion(_FILA)
         assert "AVISO_DE_LA_SESION" in contexto

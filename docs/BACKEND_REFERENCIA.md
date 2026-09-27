@@ -104,7 +104,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
 | `GET /informe` | JWT | Datos del informe semanal (medias por semana) sin mandar nada |
 | `POST /informe/send` | `BRIEF_TOKEN` | Manda el informe semanal. `?forzar=1` se salta el día y la hora, **no** la reserva |
-| `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone al desenchufar el cargador). Calla la alarma de respaldo si estaba sonando y manda el resumen si no ha salido (o lo deja esperando al sueño de esta noche, ver `docs/BRIEF.md`) |
+| `POST /despertar` | `BRIEF_TOKEN` | "Ya estoy despierto" (Atajo del iPhone al desenchufar el cargador). Abre el teléfono al momento (la primera señal del día se guarda en `despertares`, ver `docs/LLAMADAS.md`), calla la alarma de respaldo si estaba sonando y manda el resumen si no ha salido (o lo deja esperando al sueño de esta noche, ver `docs/BRIEF.md`) |
 | `POST /ha/brief-tick` | servicio | Reloj de respaldo: HA lo sondea y, pasada `BRIEF_HORA_TOPE`, manda el resumen |
 | `GET /noche/parte` | JWT | El parte del turno de noche (`?fecha=`; sin ella, el último que haya). Ver `docs/TURNO_NOCHE.md` |
 | `POST /noche/items/{item_id}/decidir` | JWT | `{"accion": "aprobado" \| "descartado"}` sobre una cosa del parte. «Aprobado» no envía nada: el borrador lo mandas tú |
@@ -169,6 +169,7 @@ las órdenes al PC van por los flags que sondea Home Assistant, como antes).
 `VIGILANTE`, `VIGILANTE_CADA_MIN`, `VIGILANTE_MIN_ERRORES`, `VIGILANTE_VENTANA_DIAS`,
 `VIGILANTE_ISSUES`, `LLAMADAS_COTIDIANAS_DIA`, `TELEFONO_TIMBRE_SEG`, `TELEFONO_INTENTOS`,
 `TELEFONO_REINTENTO_SEG`, `TELEFONO_BUZON`, `TELEFONO_BUZON_TIMBRE_SEG`, `TELEFONO_BUZON_ESPERA_SEG`,
+`TELEFONO_DETECTAR_BUZON`, `LLAMADAS_SIN_SENAL_DESDE`, `TELEFONO_DORMIR_MARGEN_MIN`,
 `AVISOS_MAX_DIA`, `AVISOS_NO_UTILES`, `AVISOS_REPETIR_DIAS`,
 `AVISOS_HORA_DIFERIDOS`, `REGLAS_PROACTIVAS`, `SALIR_VENTANA_MIN`, `SALIR_ANTES_MIN`,
 `REGLAS_HORA_NOCHE`, `REGLAS_HORA_MANANA`, `MADRUGON_HASTA`, `SUENO_OBJETIVO_H`,

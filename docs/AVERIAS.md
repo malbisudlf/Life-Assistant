@@ -57,7 +57,7 @@ Ninguna de estas se relaja. Son lo que separa esto de un sistema que despliega s
 | La routine que arregla | claude.ai — **la misma** que la de la revisión nocturna | Arregla y abre PR. La instrucción le dice que NO mergee |
 | `.claude/skills/arreglar-revision/SKILL.md` | Aquí | Su paso 0 distingue los dos caminos: con issue se mergea, con avería no |
 | `.github/workflows/pr-listo.yml` | Aquí | Ve el CI verde sobre una rama `arreglo/…` con PR y llama a `POST /revision/pr-listo` |
-| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono: por la centralita si está configurada, por Twilio si `LLAMADAS=1`) |
+| `POST /revision/pr-listo` | `backend/main.py` | Marca la avería como `listo` y deja el aviso con sus tres botones (y llama por teléfono si estás despierto: por la centralita si está configurada, por Twilio si `LLAMADAS=1`; si duermes, la llamada la retoma el tick de HA al despertarte) |
 | `GET /despliegue/pendiente` | `backend/main.py` | Qué anunciar al descolgar la pantalla de llamada. Solo lee |
 | `PantallaLlamada` | `src/components/Dashboard.jsx` | La pantalla de llamada entrante que abre el botón «Hablarlo» |
 | `POST /despliegue/{id}/accion` | `backend/main.py` | La respuesta al botón: mergea el PR. **No despliega** — ver «El último paso lo das tú» |
@@ -138,6 +138,15 @@ no llegó a hacer ni una llamada: la cuenta de prueba no deja verificar un núme
 ni por llamada ni por SMS, el regulador español prohíbe usar móviles con prefijo 71Y como
 Caller ID, y comprar número se sale del presupuesto. Todo el detalle, en
 `docs/LLAMADAS.md`.
+
+**La llamada del permiso espera a que estés despierto** (desde el 2026-09-27). Antes
+sonaba a cualquier hora: un arreglo que se ponía verde de madrugada te llamaba de
+madrugada. Ahora el aviso al móvil sale igual, pero la llamada solo si consta tu señal de
+despertar (o pasada la hora de respaldo, las 10:00); si no, queda pendiente
+(`_despliegue_por_llamar`) y la lanza el tick de Home Assistant
+(`_retomar_llamada_despliegue`) en cuanto te despiertas, si el permiso sigue esperando.
+Suena una sola vez por permiso: se reserva en `avisos_llamadas` con su id, y esa reserva
+no gasta el tope de las llamadas cotidianas.
 
 Aquí solo importa quién pregunta y cuándo: `POST /revision/pr-listo` es el único sitio del
 backend que abre este canal. Dos cosas de `docs/LLAMADAS.md` que conviene saber sin abrirlo:

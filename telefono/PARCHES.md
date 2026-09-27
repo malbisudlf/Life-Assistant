@@ -2,7 +2,8 @@
 
 [claude-phone](https://github.com/theNetworkChuck/claude-phone) se instaló en `caja` el
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
-Estos son los once cambios que hubo que hacerle, con el síntoma que resuelve cada uno.
+Estos son los doce cambios que hubo que hacerle (el 12, todavía por aplicar), con el
+síntoma que resuelve cada uno.
 
 > **Viven en `/home/malbisudlf/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -11,7 +12,7 @@ Estos son los once cambios que hubo que hacerle, con el síntoma que resuelve ca
 > Este fichero existe para poder rehacerlos. Si algún día hay que tocar mucho más, lo que
 > toca es un *fork*, no seguir parcheando a mano.
 
-## Los once
+## Los doce
 
 | # | Fichero | Qué se cambió | Sin el parche |
 |---|---|---|---|
@@ -26,6 +27,7 @@ Estos son los once cambios que hubo que hacerle, con el síntoma que resuelve ca
 | 9 | `voice-app/lib/claude-bridge.js` | Los tres mensajes que se dicen cuando Claude falla, al español, y uno propio para la sesión caducada | Con la sesión OAuth de Claude Code caducada, Jarvis descolgaba y a todo contestaba **«I encountered an unexpected error»**: en inglés y sin decir qué pasaba |
 | 10 | `voice-app/lib/audio-fork.js` | Dentro de una frase, compara con **tu nivel de voz**, no solo con el ruido; turno máximo de 25 s (`VAD_MAX_UTTERANCE_MS`) (detalle abajo) | En un sitio ruidoso el ruido picaba por encima del suelo del parche 5, reiniciaba la cuenta de silencio y **Jarvis no dejaba de escucharte** aunque hubieras terminado, hasta el tope de 60 s |
 | 11 | `claude-api-server/{server,bitacora}.js` y `voice-app/lib/outbound-session.js` | Memoria entre llamadas: una bitácora de las llamadas recientes que Claude recibe al empezar cada sesión (detalle abajo) | Cada llamada era una sesión nueva: si Jarvis te llamaba, no lo cogías y le devolvías la llamada, **no sabía para qué te había llamado** |
+| 12 | `voice-app/lib/{outbound-handler,outbound-routes,outbound-session,conversation-loop}.js` | Contestar no es coger: detecta que ha descolgado el buzón y deja ahí el recado, cuenta los turnos en que alguien habló, cuelga la línea en cualquier error después de descolgar y fija los estados finales (detalle abajo). **Por aplicar** | Si el buzón descuelga antes del timbre (el móvil rechaza la llamada en modo dormir), el backend la da por cogida: **ni segunda llamada ni recado**. Y un fallo de voz tras descolgar deja la línea abierta y el buzón grabando silencio |
 
 ### Los parches 7 y 8, en detalle
 
@@ -204,6 +206,50 @@ aviso, Jarvis no sabría que te llamó.
 Jarvis recibe las últimas 12 y solo las saca si le preguntas. Probado el 2026-09-26: tres
 llamadas de prueba, se le devolvió la llamada y contó las tres. Para que olvide (p. ej.,
 tras unas pruebas): `echo "[]" > ~/telefono-jarvis/llamadas-recientes.json`.
+
+### El parche 12, en detalle (por aplicar)
+
+Sale del 2026-09-27 (`docs/BUGS_HISTORICOS.md`): en el segundo intento de una serie **el
+buzón descolgó a los 7,5 s**, claude-phone pasó a PLAYING, el TTS falló (el contenedor
+estaba sin DNS), la sesión quedó en FAILED **sin colgar la pata SIP**, y el buzón grabó
+silencio hasta que colgó él, tres minutos después. Para el backend esa llamada estaba
+contestada. El backend ya habla el contrato de este parche (`_como_acabo` en
+`backend/main.py`, «Contestar no es coger» en `docs/LLAMADAS.md`), y sin él decide
+exactamente como antes. Lo que tiene que hacer el parche:
+
+- **`outbound-routes.js`** acepta tres campos opcionales en `POST /api/outbound-call` (el
+  validador ya ignora los desconocidos, así que un backend viejo sigue valiendo):
+  `detectVoicemail` (booleano), `voicemailMessage` (texto, 1000 como mucho) y
+  `voicemailDelaySeconds` (0-30, la espera al saludo del buzón; el backend manda 8).
+  Nunca llegan en la llamada `announce` del final, que busca justo al buzón.
+- **`outbound-handler.js`**: al contestar, mira el `Contact` del 200 OK. El 3CX no pone
+  nombre en el Contact del buzón; con la extensión de verdad, sí. Se guarda
+  `answeredBy`: `'person'`, `'voicemail'` o `'unknown'`, y `answeredAt`.
+- **`outbound-session.js`**: si `detectVoicemail` y `answeredBy === 'voicemail'`, no se
+  conversa. Con `voicemailMessage`, espera `voicemailDelaySeconds`, lo dice y cuelga →
+  `COMPLETED/'voicemail_message'`; sin él, cuelga sin decir nada → `FAILED/'voicemail'`.
+  `getInfo()` devuelve **siempre** `answeredBy` (null antes de contestar: la clave es la
+  marca de contrato que el backend mira), `userTurns` y `answeredAt`.
+- **`conversation-loop.js`**: cuenta `userTurns` (turnos en los que se oyó a alguien). El
+  corte del parche 8 por dos turnos en silencio acaba en `COMPLETED/'no_speech'`, y un
+  error de la conversación en `COMPLETED/'conversation_error'`.
+- **Colgar siempre**: cualquier error después de descolgar (TTS, audio, FreeSWITCH)
+  cuelga la pata SIP antes de marcar el final. Si no se llegó a decir el primer mensaje,
+  el final es `FAILED/'unplayed'`.
+- **Estados finales fijos**: una sesión en COMPLETED o FAILED ya no cambia (hoy puede
+  pasar de FAILED a COMPLETED al colgar). Se guarda 60 s después del final, como ahora,
+  y el backend sondea cada 5 s.
+
+Cómo lo lee el backend: `userTurns > 0` es cogida en cuanto se ve; `voicemail_message`
+es «recado dejado, se acaba la serie»; `voicemail` y `no_speech` sin turnos son «no
+cogida, sigue la serie»; `unplayed` y `conversation_error` sin turnos son «sin voz», que
+no insiste y deja un ERROR. El interruptor es del backend (`TELEFONO_DETECTAR_BUZON=0`):
+sin `detectVoicemail` en la petición, el parche solo apunta el Contact en el log.
+
+**Queda por hacer**: escribir el diff contra el clon de `caja`, probarlo con una llamada
+real rechazada desde el móvil (debe acabar en `voicemail_message` con el recado grabado)
+y versionarlo aquí. Lo aplica Mikel, o una sesión con su permiso explícito. Cuando haya
+acertado un par de veces, `TELEFONO_TIMBRE_SEG` puede volver de 14 a 25 s.
 
 ## Lo que además NO está en el repositorio original
 

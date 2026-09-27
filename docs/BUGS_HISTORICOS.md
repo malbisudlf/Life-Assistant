@@ -3,6 +3,29 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Jarvis llamó a las 07:00 con Mikel dormido, y el buzón contó como cogida
+  (2026-09-27).** La web estuvo caída de 03:30 a 11:33 (reinicio semanal de `caja`: túnel
+  parado y contenedores sin DNS). El vigilante aplazó la llamada por la franja nocturna y
+  a las 07:00:32, acabada la franja, llamó. El primer intento sonó 14 s y no se cogió; el
+  segundo lo «contestó» a los 7,5 s el buzón (el móvil, en modo dormir, la rechazó y el
+  3CX la desvió en el acto, sin llegar nunca un 603). claude-phone pasó a PLAYING, el TTS
+  falló por el DNS, la sesión quedó en FAILED **sin colgar la línea**, y el buzón grabó
+  silencio tres minutos. Para el backend la llamada estaba contestada: ni reintento ni
+  recado, y la serie se cortó sin dejar una sola línea en el registro.
+  - Arreglo: el teléfono solo suena cuando consta que estás despierto
+    (`_telefono_puede_sonar` en `_llamar`, con la señal de despertar del resumen guardada
+    aparte en `despertares`; sin señal, desde las 10:00; la franja fija queda de suelo).
+    Y con el parche 12 de claude-phone, si descuelga el buzón se deja ahí el recado, una
+    llamada en la que nadie habla cuenta como no cogida, y descolgar sin voz ni insiste
+    ni se calla: queda en ERROR. Ver «Solo cuando estás despierto» y «Contestar no es
+    coger» en `docs/LLAMADAS.md`.
+  - Moralejas: **«no es de noche» no es «estás despierto»**: una franja horaria es una
+    suposición sobre la persona, y la señal de que se ha despertado ya existía. **Descolgar
+    no es coger**: quien contesta puede ser un buzón, y lo que dice si fue una persona es
+    que alguien hable. Y **todo error después de descolgar cuelga**: una línea que se
+    queda abierta sin nadie hablando es peor que una llamada perdida, porque para quien
+    la mira desde fuera está contestada.
+
 - **Una barra invertida se saltaba el invariante 7 entero.** `alud_url_permitida` sacaba
   el host con `urlsplit(url).hostname`, que trata `\` como un carácter más del authority
   y se queda con lo que va detrás de la última `@`. Edge (parser WHATWG) trata `\` como

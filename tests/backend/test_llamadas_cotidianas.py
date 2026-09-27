@@ -76,6 +76,30 @@ class TestLlamadaCotidiana:
         assert not main._llamada_cotidiana(RID, "ingesta", "texto")
         assert telefono == []
 
+    def test_antes_de_despertarte_no_llama(self, mock_requests, telefono, monkeypatch):
+        """Acabada la franja nocturna no basta: tiene que constar que estás despierto."""
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 9, 23, 8, 0, tzinfo=main.LOCAL_TZ))
+        _regla(mock_requests)
+        _hoy(mock_requests)
+        assert not main._llamada_cotidiana(RID, "ingesta", "texto")
+        assert telefono == []
+        main._anotar_despierto(main._ahora_local(), "cargador")
+        assert main._llamada_cotidiana(RID, "ingesta", "texto")
+        assert len(telefono) == 1
+
+    def test_va_por_la_puerta_y_solo_por_la_centralita(self, mock_requests, telefono,
+                                                       monkeypatch):
+        """Lo cotidiano no justifica pagar por minuto: nunca cae a Twilio."""
+        pedidas = []
+        monkeypatch.setattr(main, "_llamar",
+                            lambda texto, **k: pedidas.append(k) or True)
+        _regla(mock_requests)
+        _hoy(mock_requests)
+        assert main._llamada_cotidiana(RID, "ingesta", "texto")
+        assert pedidas and pedidas[0]["solo_centralita"] is True
+        assert not pedidas[0].get("aunque_duermas")
+
     def test_el_tope_diario(self, mock_requests, telefono):
         _regla(mock_requests)
         _hoy(mock_requests, main.LLAMADAS_COTIDIANAS_DIA)

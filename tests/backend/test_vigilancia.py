@@ -113,20 +113,60 @@ class TestLaNoche:
         assert len(avisos) == 1
         assert not mock_requests.called("POST", CENTRALITA)
 
-    def test_por_la_manana_llama_sin_que_nadie_lo_programe(self, client, mock_requests,
-                                                           avisos, monkeypatch):
-        """No hay reloj que mantener: el primer sondeo de después de las siete encuentra
-        la avería viva y llama entonces."""
+    def _a_las(self, monkeypatch, hora, minuto=0, dia=21):
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: main.datetime(2026, 9, dia, hora, minuto,
+                                                  tzinfo=main.timezone.utc))
+
+    def test_por_la_manana_espera_a_que_te_despiertes(self, client, mock_requests,
+                                                      avisos, monkeypatch):
+        """Acabada la franja no llama sola: espera a tu señal de despertar. No hay reloj
+        que mantener: el primer sondeo después de la señal encuentra la avería viva y
+        llama entonces."""
         self._de_noche(monkeypatch)
         _cae(client, 3)
-        monkeypatch.setattr(main, "_ahora_local",
-                            lambda: main.datetime(2026, 9, 21, 7, 5,
-                                                  tzinfo=main.timezone.utc))
+        self._a_las(monkeypatch, 7, 5)
+        r = _cae(client, 1)
+        assert r.json()["llamado"] is False and r.json()["aplazada"] is True
+        assert "despierto" in r.json()["motivo"]
+        assert not mock_requests.called("POST", CENTRALITA)
+
+        self._a_las(monkeypatch, 7, 10)
+        main._anotar_despierto(main._ahora_local(), "despertar")
+        self._a_las(monkeypatch, 7, 15)
         r = _cae(client, 1)
         assert r.json()["llamado"] is True
         assert len(mock_requests.called("POST", CENTRALITA)) == 1
         # Y el aviso no se repite: ya se dio de madrugada.
         assert len(avisos) == 1
+
+    def test_sin_senal_llama_a_la_hora_de_respaldo(self, client, mock_requests, avisos,
+                                                    monkeypatch):
+        """Un día sin ninguna señal (móvil sin batería, Atajo apagado) no se queda sin
+        llamada: a la hora de respaldo se te da por despierto."""
+        self._de_noche(monkeypatch)
+        _cae(client, 3)
+        self._a_las(monkeypatch, 9, 55)
+        assert _cae(client, 1).json()["llamado"] is False
+        self._a_las(monkeypatch, 10, 0)
+        assert _cae(client, 1).json()["llamado"] is True
+
+    def test_el_27_09(self, client, mock_requests, avisos, monkeypatch):
+        """Lo que pasó: la web cayó a las 03:30, el vigilante aplazó la llamada por la
+        noche y a las 07:00:32 llamó con Mikel dormido. Volvió a las 11:33.
+
+        Con la regla nueva, sin señal de despertar (el túnel estaba caído, así que el
+        Atajo no llegaba), la llamada sale a las 10:00 y no a las 07:00."""
+        self._a_las(monkeypatch, 3, 30, dia=27)
+        _cae(client, 3, sujeto="la web")
+        for hora, minuto in ((6, 45), (6, 55), (7, 0), (7, 5), (8, 30), (9, 55)):
+            self._a_las(monkeypatch, hora, minuto, dia=27)
+            r = _cae(client, 1, sujeto="la web")
+            assert r.json()["llamado"] is False, (hora, minuto)
+        assert not mock_requests.called("POST", CENTRALITA)
+        self._a_las(monkeypatch, 10, 0, dia=27)
+        assert _cae(client, 1, sujeto="la web").json()["llamado"] is True
+        assert len(mock_requests.called("POST", CENTRALITA)) == 1
 
     def test_lo_critico_despierta(self, client, mock_requests, avisos, monkeypatch):
         """La única excepción, y su sitio: lo que tiene que despertarte."""

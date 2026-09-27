@@ -237,3 +237,217 @@ class TestEnSegundoPlano:
         monkeypatch.setattr(main.threading, "Thread", _HiloEnLinea)
         main._insistir_en_segundo_plano("c1", _cuerpo(), "r")
         assert hilos == ["insistir-llamada"]
+
+
+# ── Contestar no es coger (parche 12 de claude-phone) ────────────────────────────────
+#
+# Con el parche 12, `GET /api/call/{id}` trae `answeredBy` (siempre, aunque sea null: es
+# la marca de contrato) y `userTurns`. Los tests de arriba se quedan como están: son los
+# de un claude-phone sin el parche, que tiene que decidir exactamente igual que antes.
+
+def _centralita12(mock_requests, finales):
+    """Como `_centralita`, pero con la forma del parche 12.
+
+    `finales` es una lista, por llamada, de lo que devuelve cada sondeo: un dict de
+    `data` o una lista de dicts para los sondeos sucesivos de esa misma llamada (se
+    repite el último cuando se acaban).
+    """
+    lanzadas, vistas = [], {}
+
+    def _post(url, **kw):
+        lanzadas.append(kw["json"])
+        return FakeResponse({"success": True, "callId": f"c{len(lanzadas)}"})
+
+    def _get(url, **kw):
+        n = int(url.rsplit("/c", 1)[1])
+        pasos = finales[n - 1]
+        pasos = pasos if isinstance(pasos, list) else [pasos]
+        i = vistas.get(n, 0)
+        vistas[n] = i + 1
+        data = {"answeredBy": None, "userTurns": 0, **pasos[min(i, len(pasos) - 1)]}
+        return FakeResponse({"success": True, "data": data})
+
+    mock_requests.add("POST", CENTRALITA, _post)
+    mock_requests.add("GET", "/api/call/", _get)
+    return lanzadas
+
+
+BUZON_CON_RECADO = {"state": "COMPLETED", "reason": "voicemail_message",
+                    "answeredBy": "voicemail"}
+BUZON_SIN_RECADO = {"state": "FAILED", "reason": "voicemail", "answeredBy": "voicemail"}
+NADIE_HABLA      = {"state": "COMPLETED", "reason": "no_speech", "answeredBy": "unknown"}
+COGIDA12         = {"state": "COMPLETED", "reason": "conversation_complete",
+                    "answeredBy": "person", "userTurns": 3}
+ANUNCIO_GRABADO  = {"state": "COMPLETED", "reason": "announce_complete",
+                    "answeredBy": "voicemail"}
+
+
+def _serie(cuerpo=None):
+    cuerpo = cuerpo or _cuerpo()
+    main._lanzar_llamada(cuerpo)
+    main._insistir("c1", cuerpo, "vigilancia:la web")
+    return cuerpo
+
+
+class TestContestarNoEsCoger:
+    def test_si_descuelga_el_buzon_el_recado_se_deja_ahi_y_no_insiste(self, mock_requests):
+        """El 27/09: el buzón descolgó a los 7,5 s. Con el parche 12 el recado se deja en
+        esa misma llamada, y volver a llamar solo añadiría llamadas perdidas."""
+        lanzadas = _centralita12(mock_requests, [BUZON_CON_RECADO])
+        _serie()
+        assert len(lanzadas) == 1
+        assert main._como_acabo("c1") == "buzon"
+
+    def test_buzon_sin_recado_sigue_la_serie(self, mock_requests):
+        lanzadas = _centralita12(mock_requests, [BUZON_SIN_RECADO, COGIDA12])
+        _serie()
+        assert len(lanzadas) == 2
+        assert all(l["mode"] == "conversation" for l in lanzadas)
+
+    def test_si_nadie_habla_cuenta_como_no_cogida(self, mock_requests):
+        """Segunda línea de defensa: descolgaron (buzón o lo que sea) y en dos turnos no
+        dijo nada nadie. Dos veces así, y la tercera es el buzón."""
+        lanzadas = _centralita12(mock_requests, [NADIE_HABLA, NADIE_HABLA, ANUNCIO_GRABADO])
+        _serie()
+        assert [l["mode"] for l in lanzadas] == ["conversation", "conversation", "announce"]
+
+    def test_alguien_que_habla_es_cogida_en_cuanto_se_ve(self, mock_requests):
+        vistas = []
+
+        def _get(url, **kw):
+            vistas.append(url)
+            return FakeResponse({"data": {"state": "CONVERSING", "answeredBy": "person",
+                                          "userTurns": 1}})
+
+        mock_requests.add("GET", "/api/call/", _get)
+        assert main._como_acabo("c1") == "cogida"
+        assert len(vistas) == 1
+
+    def test_no_speech_con_un_turno_es_cogida(self, mock_requests):
+        """Si alguien habló en algún momento, lo cogió una persona."""
+        _centralita12(mock_requests, [{**NADIE_HABLA, "userTurns": 1}])
+        assert main._como_acabo("c1") == "cogida"
+
+    def test_colgar_tu_sin_hablar_es_cogida(self, mock_requests):
+        """Cogerla y colgar sin decir nada es haberla cogido: no se vuelve a llamar."""
+        _centralita12(mock_requests, [{"state": "COMPLETED", "reason": "remote_hangup",
+                                       "answeredBy": "person"}])
+        assert main._como_acabo("c1") == "cogida"
+
+    def test_descolgada_espera_al_final_aunque_pase_el_timbre(self, mock_requests,
+                                                              monkeypatch):
+        """Con el parche 12 descolgada ya no es cogida: se espera a ver cómo acaba, y eso
+        puede tardar más que el timbre + 60 s de antes (una llamada muda se cuelga a los
+        70–90 s)."""
+        reloj = [0.0]
+        monkeypatch.setattr(main, "_reloj", lambda: reloj[0])
+        monkeypatch.setattr(main, "_dormir", lambda s: reloj.__setitem__(0, reloj[0] + s))
+        monkeypatch.setattr(main, "TELEFONO_TIMBRE_SEG", 14)
+        sonando = [{"state": "DIALING"}] * 2
+        muda    = [{"state": "CONVERSING", "answeredBy": "unknown"}] * 25   # 125 s
+        _centralita12(mock_requests, [sonando + muda + [NADIE_HABLA]])
+        assert main._como_acabo("c1") == "no_cogida"
+        assert reloj[0] > main.TELEFONO_TIMBRE_SEG + 60
+
+    def test_descolgada_para_siempre_se_rinde(self, mock_requests, monkeypatch):
+        reloj = [0.0]
+        monkeypatch.setattr(main, "_reloj", lambda: reloj[0])
+        monkeypatch.setattr(main, "_dormir", lambda s: reloj.__setitem__(0, reloj[0] + s))
+        _centralita12(mock_requests, [{"state": "CONVERSING", "answeredBy": "unknown"}])
+        assert main._como_acabo("c1") == "otra"
+        assert reloj[0] <= main.TELEFONO_DESCOLGADA_MAX_SEG + main.TELEFONO_SONDEO_SEG * 2
+
+    def test_sin_voz_no_insiste_y_lo_deja_escrito(self, mock_requests, caplog):
+        """Descolgada, pero Jarvis no pudo decir nada (el 27/09, el TTS sin DNS). Una voz
+        rota no se arregla llamando otra vez: cada reintento sería otra llamada muda."""
+        lanzadas = _centralita12(mock_requests, [{"state": "FAILED", "reason": "unplayed",
+                                                  "answeredBy": "voicemail"}])
+        with caplog.at_level("ERROR"):
+            _serie()
+        assert len(lanzadas) == 1
+        errores = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errores and "no ha podido hablar" in errores[0].getMessage()
+
+    def test_un_error_de_conversacion_sin_turnos_es_sin_voz(self, mock_requests):
+        _centralita12(mock_requests, [{"state": "COMPLETED", "reason": "conversation_error",
+                                       "answeredBy": "person"}])
+        assert main._como_acabo("c1") == "sin_voz"
+
+    def test_la_serie_deja_escrito_por_que_acaba(self, mock_requests, caplog):
+        """El 27/09 la serie se cortó sin una sola línea en el registro."""
+        _centralita12(mock_requests, [BUZON_CON_RECADO])
+        with caplog.at_level("INFO"):
+            _serie()
+        assert any("contestó el buzón" in r.getMessage() for r in caplog.records)
+
+
+class TestSinElParche12:
+    def test_descolgada_es_cogida_como_siempre(self, mock_requests):
+        mock_requests.add("GET", "/api/call/",
+                          FakeResponse({"data": {"state": "PLAYING", "reason": None}}))
+        assert main._como_acabo("c1") == "cogida"
+
+    def test_un_fallo_tras_descolgar_no_insiste_pero_queda_en_error(self, mock_requests,
+                                                                     caplog):
+        """Sin el 12, el FAILED/error de una llamada descolgada decide como antes (no
+        insiste); lo único nuevo es que el registro dice qué pasó."""
+        lanzadas = []
+
+        def _post(url, **kw):
+            lanzadas.append(kw["json"])
+            return FakeResponse({"callId": f"c{len(lanzadas)}"})
+
+        mock_requests.add("POST", CENTRALITA, _post)
+        mock_requests.add("GET", "/api/call/", FakeResponse({"data": {
+            "state": "FAILED", "reason": "error", "answeredAt": "2026-09-27T05:01:47Z"}}))
+        with caplog.at_level("ERROR"):
+            _serie()
+        assert len(lanzadas) == 1
+        assert any(r.levelname == "ERROR" and "no ha podido hablar" in r.getMessage()
+                   for r in caplog.records)
+
+
+class TestLoQueSePide:
+    def _lanzada(self, mock_requests, monkeypatch, texto="Mikel, soy Jarvis. La web no va."):
+        monkeypatch.setattr(main, "_insistir_en_segundo_plano", lambda *a: None)
+        lanzadas = _centralita(mock_requests, [COGIDA])
+        assert main._llamar_telefono(texto, rid="r-1") is True
+        return lanzadas[0]
+
+    def test_pide_detectar_el_buzon_y_lleva_el_recado(self, mock_requests, monkeypatch):
+        cuerpo = self._lanzada(mock_requests, monkeypatch)
+        assert cuerpo["detectVoicemail"] is True
+        assert cuerpo["voicemailMessage"] == main._recado("Mikel, soy Jarvis. La web no va.")
+        assert cuerpo["voicemailMessage"].count("soy Jarvis") == 1
+        assert "La web no va." in cuerpo["voicemailMessage"]
+        assert cuerpo["voicemailDelaySeconds"] == main.TELEFONO_BUZON_ESPERA_SEG
+
+    def test_el_recado_no_cuenta_las_veces(self):
+        """El segundo intento relanza el mismo cuerpo: el recado vale igual en los dos."""
+        assert "veces" not in main._recado("Mikel, soy Jarvis. Algo.")
+
+    def test_con_el_buzon_apagado_no_hay_recado(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "TELEFONO_BUZON", False)
+        cuerpo = self._lanzada(mock_requests, monkeypatch)
+        assert cuerpo["detectVoicemail"] is True
+        assert "voicemailMessage" not in cuerpo and "voicemailDelaySeconds" not in cuerpo
+
+    def test_con_la_deteccion_apagada_no_se_pide_nada(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "TELEFONO_DETECTAR_BUZON", False)
+        cuerpo = self._lanzada(mock_requests, monkeypatch)
+        assert not any(k.startswith(("detect", "voicemail")) for k in cuerpo)
+
+    def test_la_llamada_del_buzon_no_detecta_el_buzon(self, mock_requests, monkeypatch):
+        """La del final busca justo al buzón: pedir que lo detecte la dejaría muda."""
+        monkeypatch.setattr(main, "_insistir_en_segundo_plano", lambda *a: None)
+        lanzadas = _centralita(mock_requests, [NO_COGIDA, NO_COGIDA, COGIDA])
+        main._llamar_telefono("Mikel, soy Jarvis. La web no va.", rid="r")
+        main._insistir("c1", lanzadas[0], "r")
+        assert len(lanzadas) == 3
+        assert lanzadas[1]["detectVoicemail"] is True
+        assert lanzadas[2]["mode"] == "announce"
+        assert "detectVoicemail" not in lanzadas[2]
+        assert "voicemailMessage" not in lanzadas[2]
+
+    def test_el_recado_cabe_en_lo_que_acepta_claude_phone(self):
+        assert len(main._recado("x" * 5000)) <= 1000

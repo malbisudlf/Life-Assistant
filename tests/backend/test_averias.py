@@ -156,6 +156,8 @@ class TestElArregloEstaListo:
 
     def test_llama_por_telefono(self, client, mock_requests, monkeypatch):
         """Un PR esperando permiso es el único caso que hoy justifica el canal caro."""
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: main.datetime(2026, 9, 21, 12, 0, tzinfo=main.LOCAL_TZ))
         llamadas = []
         monkeypatch.setattr(main, "_llamar",
                             lambda texto, rid="": llamadas.append((texto, rid)) or True)
@@ -174,6 +176,80 @@ class TestElArregloEstaListo:
         # veinte segundos de altavoz por delante de la única decisión que hay que tomar.
         assert "CI ha fallado" not in llamadas[0][0]
         assert "main" in llamadas[0][0]
+
+    def _listo_con_centralita(self, mock_requests, monkeypatch):
+        """Un PR verde que cierra una avería, con la centralita puesta y la llamada
+        capturada en vez de lanzada."""
+        monkeypatch.setattr(main, "TELEFONO_URL", "http://centralita.test:3010")
+        monkeypatch.setattr(main, "TELEFONO_EXTENSION", "100")
+        sonadas = []
+        monkeypatch.setattr(main, "_llamar_telefono",
+                            lambda texto, rid="", contexto="": sonadas.append(rid) or True)
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("GET", "revision_hallazgos",
+                          FakeResponse([{"id": rid, "detalle": "el CI ha fallado"}]))
+        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
+        return rid, sonadas
+
+    def _a_las(self, monkeypatch, hora, minuto=0):
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: main.datetime(2026, 9, 27, hora, minuto,
+                                                  tzinfo=main.LOCAL_TZ))
+
+    def test_de_madrugada_no_llama_y_suena_al_despertar(self, client, mock_requests,
+                                                         monkeypatch):
+        """Hasta el 27/09 un PR que se ponía verde a las cuatro sonaba a las cuatro. Ahora
+        el aviso sale igual, la llamada espera y la retoma el tick de HA en cuanto consta
+        que te has despertado."""
+        rid, sonadas = self._listo_con_centralita(mock_requests, monkeypatch)
+        self._a_las(monkeypatch, 4, 0)
+        r = client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        assert r.status_code == 200
+        assert sonadas == [] and main._despliegue_por_llamar is True
+        assert not mock_requests.called("POST", "avisos_llamadas")
+
+        # A las siete y cinco, sin señal: sigue esperando, y sin preguntar a nadie qué
+        # queda pendiente.
+        self._a_las(monkeypatch, 7, 5)
+        assert main._retomar_llamada_despliegue() == {}
+        assert sonadas == []
+
+        # Te despiertas: el siguiente tick llama, una sola vez.
+        self._a_las(monkeypatch, 7, 10)
+        main._anotar_despierto(main._ahora_local(), "cargador")
+        self._a_las(monkeypatch, 7, 12)
+        r = client.post("/ha/brief-tick", headers=CABECERA)
+        assert r.status_code == 200 and r.json().get("despliegue_llamado") is True
+        assert sonadas == [rid]
+        reserva = mock_requests.called("POST", "avisos_llamadas")[0][2]["json"]
+        assert reserva == {"aviso_id": rid, "regla": main.REGLA_DESPLIEGUE}
+        client.post("/ha/brief-tick", headers=CABECERA)
+        assert sonadas == [rid] and main._despliegue_por_llamar is False
+
+    def test_una_llamada_por_permiso(self, client, mock_requests, monkeypatch):
+        """La reserva en `avisos_llamadas` es lo que impide que el mismo permiso suene dos
+        veces (dos ejecuciones del workflow, o el tick después de un reinicio)."""
+        rid, sonadas = self._listo_con_centralita(mock_requests, monkeypatch)
+        self._a_las(monkeypatch, 12, 0)
+        mock_requests.add("POST", "avisos_llamadas", FakeResponse({}, 409))
+        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        assert sonadas == []
+        assert main._llamar_despliegue(rid) is False
+
+    def test_sin_poder_apuntarla_no_llama(self, mock_requests, monkeypatch):
+        rid, sonadas = self._listo_con_centralita(mock_requests, monkeypatch)
+        self._a_las(monkeypatch, 12, 0)
+        mock_requests.add("POST", "avisos_llamadas", FakeResponse({}, 500))
+        assert main._llamar_despliegue(rid) is False
+        assert sonadas == []
+
+    def test_la_reserva_del_despliegue_no_gasta_el_tope(self, mock_requests, monkeypatch):
+        """El tope diario es de las llamadas cotidianas: las averías no lo gastan."""
+        self._a_las(monkeypatch, 12, 0)
+        main._llamadas_cotidianas_hoy()
+        url = mock_requests.called("GET", "avisos_llamadas")[0][1]
+        assert "regla=in.(" in url and "ingesta" in url
+        assert main.REGLA_DESPLIEGUE not in url.split("regla=in.(", 1)[1].split(")", 1)[0]
 
 
 class TestElPermisoDeDespliegue:

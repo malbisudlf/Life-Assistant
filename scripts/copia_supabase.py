@@ -85,6 +85,8 @@ TIMEOUT = 60
 #     efímeros. `migraciones_aplicadas` se rellena sola al volver a aplicar migraciones.
 #   · `presencia_tramos` — registro que se purga a los 35 días, y el dato más sensible
 #     del proyecto: dónde has estado y a qué hora.
+#   · `despertares` — estado operativo: la primera señal de despertar de cada día, que
+#     solo le sirve al teléfono ese mismo día.
 # La lista con nombre está en `SIN_COPIA`, abajo.
 TABLAS = (
     # (nombre,                orden,                     obligatoria, columnas)
@@ -128,7 +130,7 @@ SIN_COPIA = frozenset({
     "revision_hallazgos", "averias", "backend_latidos",
     "avisos_llamadas", "avisos_motivos", "casa_acciones", "jarvis_gasto",
     "noche_partes", "noche_items", "sesion_avisos", "migraciones_aplicadas",
-    "presencia_tramos",
+    "presencia_tramos", "despertares",
 })
 
 VERSION_FORMATO = 1

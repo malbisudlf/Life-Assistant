@@ -267,6 +267,14 @@ def _limpiar_estado():
     # siguiente tick, así que un test que las deje puestas cambia el resultado de otro.
     main._alarma_sonando = None
     main._olvidar_despertar()
+    # La señal de despertar que abre el teléfono y el corte de la noche: los dos deciden
+    # si la siguiente llamada suena. `_despliegue_por_llamar` arranca en None en
+    # producción («mira una vez»); aquí en False, para que el tick de cualquier test no
+    # sume una consulta de permisos pendientes a sus asertos de llamadas.
+    main._despierto = None
+    main._despierto_mirado = None
+    main._acostarse_cache.clear()
+    main._despliegue_por_llamar = False
 
 
 @pytest.fixture(autouse=True)

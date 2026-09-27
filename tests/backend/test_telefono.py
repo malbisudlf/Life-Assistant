@@ -21,6 +21,8 @@ def _configurado(monkeypatch):
     monkeypatch.setattr(main, "TWILIO_DESDE", "+34600000000")
     monkeypatch.setattr(main, "TWILIO_HASTA", "+34600000001")
     monkeypatch.setattr(main, "BACKEND_URL", "https://backend.test")
+    # De día: la puerta de «despierto» tiene sus tests (test_telefono_despierto.py).
+    monkeypatch.setattr(main, "_telefono_puede_sonar", lambda ahora: (True, "de día"))
 
 
 class TestLlamar:

@@ -136,6 +136,11 @@ backend está en `docs/BACKEND_PATRONES.md`.
     **decirle a Jarvis «estoy despierto»** son la misma señal, por `_senal_despertar`,
     pero SIN este retraso — ya llevas un rato despierto para poder decirlo.
     Las tres son cosas que haces tú, despierto; nada se deduce.
+    **Y las tres abren además el teléfono** (desde el 2026-09-27): Jarvis solo llama
+    cuando consta que estás despierto, y esta es la señal que lo dice. Se guarda aparte
+    (`_anotar_despierto`, tabla `despertares`) y al momento, antes del retraso de arriba
+    y aunque el resumen esté pausado o ya se haya mandado, porque aquí el resumen consume
+    la señal y la olvida. Ver «Solo cuando estás despierto» en `docs/LLAMADAS.md`.
   - La llegada del sueño del reloj en la ingesta (`_avisar_sueno_recibido`) — **ya no
     es una señal: solo cierra una espera** abierta por una señal de verdad. Lo fue,
     como deducción de "si la noche ha sincronizado es que estás despierto", y la

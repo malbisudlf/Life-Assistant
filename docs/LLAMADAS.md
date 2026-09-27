@@ -84,7 +84,7 @@ POST /vigilancia/estado   ◀── aquí están las reglas, en main.py y con te
         │
         ├─ menos de 3 sondeos fallidos ──▶ silencio
         ├─ 3 seguidos ──▶ aviso al móvil
-        └─ 3 seguidos + no es de noche ──▶ _llamar() ──▶ claude-phone ──▶ 3CX ──▶ tu móvil
+        └─ 3 seguidos + estás despierto ──▶ _llamar() ──▶ claude-phone ──▶ 3CX ──▶ tu móvil
 ```
 
 Las tres reglas, y por qué existen las tres:
@@ -93,11 +93,14 @@ Las tres reglas, y por qué existen las tres:
    son ~15 minutos caído. Un corte de red de 30 segundos no llama.
 2. **Una llamada por avería, no una por sondeo.** Sonar cada cinco minutos mientras algo
    sigue roto no añade información y garantiza que dejes de cogerlo.
-3. **De noche (00:00–07:00) no suena**, salvo lo marcado `critico`, que hoy son las
-   alarmas de respaldo — lo único que tiene que despertarte. El aviso al móvil sí sale
-   igual; lo que espera es la llamada. **No hace falta ningún reloj para eso**: como los
-   sondeos siguen entrando, el primero de después de las siete encuentra la avería todavía
-   viva y llama entonces.
+3. **Solo suena si estás despierto** (desde el 2026-09-27; antes era «de 00:00 a 07:00 no
+   suena»), salvo lo marcado `critico`, que hoy son las alarmas de respaldo — lo único
+   que tiene que despertarte. El aviso al móvil sí sale igual; lo que espera es la
+   llamada. **No hace falta ningún reloj para retomarla**: como los sondeos siguen
+   entrando, el primero que llega después de tu señal de despertar (o de la hora de
+   respaldo, las 10:00) encuentra la avería todavía viva y llama entonces. Si para
+   entonces ya se arregló sola, no llama: te llega el «ha vuelto». Qué es «estar
+   despierto», en la sección siguiente.
 
 Y la recuperación se cuenta igual que la caída: el vigilante habla en **cada** sondeo,
 también cuando todo va bien. Ese sondeo bueno no sobra — es lo que pone el contador a
@@ -108,6 +111,75 @@ dejaría la avería marcada para siempre y no volvería a llamar por ella nunca.
 porque el sujeto vigilado es quien decidiría. Lo lleva un flujo de n8n que **sí decide**
 y llama a la centralita directamente, repitiendo esas tres reglas en pequeño. Es la única
 grieta consciente en la frontera de `docs/N8N.md`, y está explicada allí.
+
+### Solo cuando estás despierto (desde el 2026-09-27)
+
+Ese domingo la web estuvo caída de 03:30 a 11:33 (el reinicio semanal de `caja` dejó el
+túnel parado y los contenedores sin DNS). El vigilante aplazó la llamada por la franja
+nocturna, como debía, y a las **07:00:32** —acabada la franja— llamó. Mikel dormía: el
+móvil, en modo dormir, la despachó al buzón. La regla decía «ya no es de noche», y eso se
+estaba tomando por «estás despierto», que es otra cosa.
+
+Ahora el teléfono solo suena cuando **consta** que estás despierto. La comprobación es
+`_telefono_puede_sonar` y vive en `_llamar`, la única puerta del teléfono —igual que el
+interruptor del resumen vive en `enviar_brief_si_toca`—, así que ninguna llamada futura
+se la puede saltar. Decide en este orden:
+
+1. **La franja fija (`VIGILANCIA_NOCHE_DESDE/HASTA`, 00–07) es el suelo**: ahí no suena
+   nunca, ni con señal. Un desenchufe de madrugada y vuelta a la cama no acaba en
+   llamada, y el cambio solo puede retrasar llamadas respecto a antes, nunca adelantarlas.
+2. **Por la noche corta a tu hora habitual de dormirte menos 30 minutos**
+   (`TELEFONO_DORMIR_MARGEN_MIN`). La hora es la mediana de 30 noches
+   (`_hora_habitual_dormir`, la misma que usa el aviso del reloj) y el corte queda
+   siempre entre las 22:00 y la medianoche; sin cinco noches de base, o si cae pasada la
+   medianoche, no hay corte propio y manda la franja, como antes.
+3. **Pasada `LLAMADAS_SIN_SENAL_DESDE`** (por defecto la hora tope del resumen, las
+   10:00) suena aunque no haya señal: es la hora a la que el sistema ya da la señal por
+   fallida (móvil sin batería, Atajo apagado).
+4. Antes de esa hora, **solo con la señal de despertar de hoy**.
+
+**La señal es la misma que ya usa el resumen diario**, sin inventar otra: el Atajo del
+cargador (`POST /despertar`), la alarma de respaldo confirmada y decirle a Jarvis «estoy
+despierto». Se guarda **aparte del resumen** (`_anotar_despierto`: en memoria y en la
+tabla `despertares`, una fila por día) porque el resumen la consume: la olvida al mandar
+el correo, no la ve si está pausado, y la del cargador le llega cinco minutos tarde
+(`DESPERTAR_RETRASO_SEGUNDOS`, que es un margen del correo, no del teléfono). La tabla
+es lo que la recupera tras un reinicio; sin la migración basta la memoria, salvo justo
+después de reiniciar. Cuenta desde `BRIEF_DESPERTAR_DESDE` (05:30) y sin techo, y solo la
+primera del día.
+
+**Sus límites**: el Atajo entra por el Cloudflare Tunnel. Con el túnel caído —el 27/09,
+justamente— no llega, y el teléfono espera a la hora de respaldo. La alarma y Jarvis
+también necesitan que el backend esté vivo. Mejora pendiente: una señal local desde Home
+Assistant cuando el móvil deja de cargar, que no depende del túnel.
+
+**Lo que NO es señal, a propósito:**
+
+- **La llegada del sueño del Watch**: ya mandó el correo con Mikel dormido el 16/09 (la
+  pulsera vuelca una noche a medias si te despiertas un rato a las seis).
+- **La presencia de Home Assistant**: dice dónde estás, no si duermes.
+- **Usar el dashboard**: una pestaña abierta refresca sola, sin nadie delante.
+
+**Qué pasa con cada llamada si duermes:**
+
+| Llamada | Si duermes | Cómo se retoma |
+|---|---|---|
+| Avería (vigilancia) | Se aplaza; el aviso al móvil sale igual | Sola: el primer sondeo con el teléfono abierto llama, si la avería sigue viva |
+| Alarmas de respaldo (`critico`) | Suena igual (`aunque_duermas`) | — |
+| Permiso de despliegue (`pr-listo`) | Se aplaza; el aviso al móvil sale igual. Hasta ahora sonaba a cualquier hora | El tick de Home Assistant (`_retomar_llamada_despliegue`). Una llamada por permiso: se reserva en `avisos_llamadas`, y esa fila no gasta el tope de las cotidianas |
+| Cotidianas | No suena, y no se aplaza (como antes) | — |
+| «Hablarlo» (revisión, sesión) | Suena (`aunque_duermas`): lo has pedido tú, así que estás despierto | — |
+| Reintentos y buzón de una serie | Heredan el permiso de su primera llamada | — |
+| n8n, backend caído | **Sigue con su franja fija**: con el backend caído no hay a quién preguntar | — |
+
+El último es **el único camino que todavía puede llamar a las 07:00**: el flujo
+«Vigilante del backend» vive en el repositorio HomeLab y no sabe si estás despierto.
+Alinearlo con la hora de respaldo (no llamar antes de las 10:00 salvo que se lo diga
+algo) lo decide Mikel allí.
+
+**Riesgos aceptados:** una siesta (desde la señal de la mañana cuentas como despierto
+hasta la noche), una noche en vela (manda el suelo de las 07:00, no la señal) y un día
+sin ninguna señal (espera a la hora de respaldo).
 
 ### La pantalla de llamada sigue viva
 
@@ -153,8 +225,9 @@ con los frenos que sostienen esa regla, para que lo cotidiano no gaste el teléf
   `pc_encendido`, apagadas.
 - **Tope diario** (`LLAMADAS_COTIDIANAS_DIA`, 2 por defecto), contado en
   `avisos_llamadas`. Las averías no lo gastan. Sin poder contar, no se llama.
-- **Nunca de noche ni pasada `AVISOS_HORA_SILENCIO`** (22:00). No se aplaza: una llamada
-  de las 23:00 dicha a las 07:00 ya habla de otra cosa, y el aviso ya salió.
+- **Solo si estás despierto (sección anterior) y nunca pasada `AVISOS_HORA_SILENCIO`**
+  (22:00). No se aplaza: una llamada de las 23:00 dicha a las 07:00 ya habla de otra
+  cosa, y el aviso ya salió.
 - **Una llamada por aviso**: la reserva en `avisos_llamadas` va por el id del aviso, y el
   409 contra la clave es la respuesta a «¿ya se llamó?».
 - **Solo por la centralita**, nunca Twilio: lo cotidiano no justifica pagar por minuto.
@@ -184,7 +257,8 @@ tampoco, deja el mensaje en el buzón.** Queda así:
 
 ```
 llamada 1 (conversación, suena TELEFONO_TIMBRE_SEG —14 s en caja— y cuelga)
-   │ no cogida (no_answer o comunicando)
+   │ si descuelga el buzón: deja ahí el recado y se acaba (parche 12, abajo)
+   │ no cogida (no_answer, comunicando o, con el parche 12, nadie habló)
    ▼  espera TELEFONO_REINTENTO_SEG = 60 s
 llamada 2 (igual que la 1)            ← TELEFONO_INTENTOS = 2 en total
    │ no cogida
@@ -200,9 +274,14 @@ centralita: averías, «Hablarlo» y cotidianas. Las reglas de este fichero sigu
 contando la serie como **una** llamada: una por avería, una por aviso, y el tope diario
 de las cotidianas no se gasta en reintentos.
 
-**Cuándo NO insiste**, a propósito:
+**Cuándo NO insiste**, a propósito (y desde el 2026-09-27 deja escrito en el registro
+por qué se corta la serie: ese día se cortó sin una sola línea):
 
 - **La has cogido** (aunque sea a la segunda): se acabó.
+- **Descolgó el buzón y el recado quedó grabado** (con el parche 12, abajo).
+- **Descolgaron, pero Jarvis no pudo hablar** (voz o audio de claude-phone rotos): queda
+  un ERROR en el registro. Una voz rota no se arregla llamando otra vez, y cada reintento
+  sería otra llamada muda.
 - **La has rechazado** (`declined`, el 603): colgarle a quien ha rechazado para volver a
   llamarle es lo que hace que se deje de coger el teléfono.
 - **Falla la centralita** (SIP sin registrar, 503…): insistir no lo arregla.
@@ -210,13 +289,57 @@ de las cotidianas no se gasta en reintentos.
   Es también lo que pasa sin los parches de abajo, así que sin ellos todo se queda
   exactamente como antes.
 
+#### Contestar no es coger (desde el 2026-09-27)
+
+La serie de arriba se apoya en que, si no lo coges, claude-phone cuelga antes de que salte
+el buzón. El 27/09 eso no bastó: en el segundo intento **el buzón descolgó a los 7,5 s**,
+mucho antes del timbre y de los 40 s del desvío. Lo probable es que el móvil, en modo
+dormir, rechazara la llamada y el 3CX la desviara al buzón en el acto, sin que llegara
+nunca el 603. Para el backend esa llamada estaba contestada: no volvió a llamar ni dejó el
+mensaje. Y encima el TTS falló (el contenedor estaba sin DNS), claude-phone marcó la
+llamada como FAILED **sin colgar la línea**, y el buzón grabó silencio tres minutos.
+
+Con el **parche 12** de claude-phone (`telefono/PARCHES.md`) contestar deja de ser coger:
+
+- El backend pide `detectVoicemail` y le da el recado (`voicemailMessage`, «te he llamado y
+  no lo has cogido, así que te lo dejo aquí…» + lo que te iba a decir) y la espera al
+  saludo (`voicemailDelaySeconds`, 8 s). Si quien descuelga es el buzón (el 3CX no pone
+  nombre en el Contact del buzón), Jarvis **deja el recado en esa misma llamada** y la
+  serie acaba (`'buzon'`). Un buzón que descuelga antes del timbre significa rechazo o
+  modo dormir, y volver a llamar solo añadiría llamadas perdidas. Si la detección se
+  equivoca y descuelgas tú, oyes el recado en vez de que te cuelguen.
+- **Segunda línea de defensa**: una llamada en la que nadie dice nada (dos turnos en
+  silencio y ningún turno de voz, `no_speech` con `userTurns = 0`) cuenta como **no
+  cogida** y la serie sigue. Si alguien habló en algún momento, es cogida, y se da por
+  cogida en cuanto se ve el primer turno, sin esperar al final.
+- **Descolgada, pero sin voz** (`unplayed`, o `conversation_error` sin turnos): no se
+  insiste y queda un ERROR. Y el parche cuelga la línea en cualquier error después de
+  descolgar: nunca más un buzón grabando silencio.
+- Con el parche, una llamada descolgada sin turnos ya no es cogida al verla: se espera a
+  que acabe, como mucho 180 s desde que descuelgan (`TELEFONO_DESCOLGADA_MAX_SEG`). Con
+  el parche 8 una llamada muda se cuelga sola en 70–90 s.
+
+**Compatibilidad**: el backend sabe si habla con un claude-phone con el 12 porque `data`
+trae la clave `answeredBy` (siempre, aunque sea null). Sin ella decide **exactamente como
+antes**; lo único nuevo es el registro, que da un FAILED con `answeredAt` como «sin voz».
+Un claude-phone con el 12 y un backend viejo también decide lo mismo que antes. Se pueden
+desplegar en cualquier orden; mejor el backend primero, porque la regla de «despierto» ya
+evita la llamada de las 07:00 y no depende de claude-phone. El interruptor es uno, en el
+backend: `TELEFONO_DETECTAR_BUZON=0`.
+
+**`TELEFONO_TIMBRE_SEG` puede volver de 14 a 25 s** en `caja` cuando la detección del
+buzón haya acertado un par de veces con llamadas reales, para dar más tiempo a cogerlo.
+No antes: sin la detección funcionando, el timbre corto es lo único que impide que el
+buzón coja la primera.
+
 **Tres cosas fuera de este repositorio que tienen que estar, o nada de esto funciona:**
 
 1. **Los parches 7 y 8 de claude-phone** (`telefono/PARCHES.md`): colgar a los
    `timeoutSeconds`, que `GET /api/call/{id}` encuentre la llamada (hoy da 404 siempre
    por un fallo del original) y diga el motivo, `delaySeconds`, y colgar tras dos turnos
    sin oír a nadie — este último es lo que evita que la línea de Jarvis se quede
-   comunicando aunque algo más falle.
+   comunicando aunque algo más falle. Y el **12** para que contestar no sea coger
+   (arriba); sin él, todo lo demás funciona como hasta ahora.
 2. **El desvío a buzón de tu extensión en el 3CX entre `TELEFONO_TIMBRE_SEG` y 90 s**
    (está a 40). Si salta antes de que Jarvis cuelgue, el buzón coge la primera y cuenta
    como contestada. Llegó a pasar a los 17 s con el desvío a 40, y por eso en `caja` el

@@ -8581,6 +8581,121 @@ def _senal_de_despertar_valida(ahora: datetime) -> bool:
     return HORA_DESPERTAR_DESDE <= hm <= HORA_DESPERTAR_HASTA
 
 
+# ── Estás despierto: la señal, guardada para el teléfono ──────────────────────
+# La misma señal de despertar que usa el resumen (el Atajo del cargador, la alarma de
+# respaldo confirmada, decírselo a Jarvis) es lo que abre el teléfono por la mañana: ver
+# `_telefono_puede_sonar`. Hasta el 2026-09-27 el teléfono miraba solo el reloj —de 00 a
+# 07 no suena— y a las 07:00:32 de un domingo llamó por una avería de madrugada con Mikel
+# dormido. «No es de noche» no es «estás despierto».
+#
+# Se guarda APARTE del resumen, y no se lee de `_despertar_pendiente`, porque el resumen
+# consume la señal: la olvida al mandar el correo, no la ve si está pausado o apagado, y
+# la del cargador le llega cinco minutos tarde (`DESPERTAR_RETRASO_SEGUNDOS`), que es un
+# margen del correo y no del teléfono.
+#
+# En memoria Y en la tabla `despertares`: la memoria es lo que se consulta, la tabla es
+# lo que la recupera tras un reinicio (el 27/09 el backend se reinició a las 03:30). Sin
+# la migración aplicada basta la memoria, salvo justo tras un reinicio.
+DESPERTARES_URL = f"{SUPABASE_URL}/rest/v1/despertares"
+_despierto: dict | None = None          # {"dia", "desde", "fuente"} de la primera señal
+_despierto_mirado: str | None = None    # día ya consultado en Supabase y sin fila
+_despierto_lock = threading.Lock()
+
+
+def _anotar_despierto(ahora: datetime, fuente: str) -> None:
+    """Apunta que estás despierto desde esta hora. Nunca levanta.
+
+    Se llama `_anotar_` y no `_apuntar_` para no confundirla con `_apuntar_despertar`,
+    que es la espera del correo al sueño: otra cosa, con otra vida.
+
+    Ignora lo anterior a `HORA_DESPERTAR_DESDE`: un desenchufe de las 04:00 camino del
+    baño no abre el teléfono. No tiene techo, al revés que la señal del resumen: la
+    ventana de las 11:30 es de cuándo sirve el correo, no de cuándo estás despierto.
+    Solo cuenta la PRIMERA señal del día; las demás no cambian nada.
+    """
+    global _despierto
+    try:
+        if (ahora.hour, ahora.minute) < HORA_DESPERTAR_DESDE:
+            return
+        dia = ahora.date().isoformat()
+        with _despierto_lock:
+            if _despierto and _despierto["dia"] == dia:
+                return
+            _despierto = {"dia": dia, "desde": ahora, "fuente": fuente}
+        logger.info("Teléfono: despierto desde las %02d:%02d (%s)",
+                    ahora.hour, ahora.minute, fuente)
+        r = http.post(DESPERTARES_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"fecha": dia,
+                            "primera_senal_at": ahora.astimezone(timezone.utc).isoformat(),
+                            "fuente": str(fuente or "")[:40]})
+        if r.status_code == 409:
+            return                      # ya estaba: la primera del día la dejó otro proceso
+        if r.status_code >= 300:
+            # Un 404 es la migración sin aplicar. La memoria sigue valiendo hasta el
+            # siguiente reinicio, que es lo único que se pierde.
+            logger.warning("Teléfono: no se pudo guardar la señal de despertar "
+                           "(Supabase devolvió %s); vale la copia en memoria", r.status_code)
+    except Exception as e:
+        logger.warning("Teléfono: no se pudo guardar la señal de despertar (%s); vale la "
+                       "copia en memoria", e)
+
+
+def _despierto_hoy(ahora: datetime) -> Optional[dict]:
+    """La primera señal de despertar de hoy, o None si no consta.
+
+    Primero la memoria. Si no hay nada y hoy aún no se ha mirado, UNA consulta a
+    `despertares`, que es lo que recupera la señal tras un reinicio. Sin fila, el día
+    queda apuntado como mirado y no se vuelve a preguntar: las señales nuevas entran por
+    la memoria, así que preguntar otra vez no puede traer nada que no esté ya ahí.
+
+    «No he podido mirar» también es None, pero SIN apuntar el día: el siguiente sondeo
+    vuelve a preguntar. Ante la duda, dormido — y detrás está la hora de respaldo, así que
+    un Supabase caído retrasa la llamada, no la pierde.
+    """
+    global _despierto, _despierto_mirado
+    dia = ahora.date().isoformat()
+    with _despierto_lock:
+        if _despierto and _despierto["dia"] == dia:
+            return dict(_despierto)
+        if _despierto_mirado == dia:
+            return None
+    try:
+        r = http.get(f"{DESPERTARES_URL}?fecha=eq.{dia}&select=primera_senal_at,fuente",
+                     headers=supabase_headers())
+    except Exception as e:
+        logger.warning("Teléfono: no se pudo mirar si hoy estás despierto (%s)", e)
+        return None
+    if r.status_code == 404:
+        logger.warning("Teléfono: falta la tabla `despertares` (migración "
+                       "20260927_despertares sin aplicar); solo vale la señal en memoria")
+    elif r.status_code >= 300:
+        logger.warning("Teléfono: no se pudo mirar si hoy estás despierto (Supabase "
+                       "devolvió %s)", r.status_code)
+        return None
+    else:
+        try:
+            filas = r.json() or []
+            fila = filas[0] if filas else None
+            if fila:
+                desde = datetime.fromisoformat(
+                    str(fila.get("primera_senal_at") or "").replace("Z", "+00:00"))
+                if desde.tzinfo is None:
+                    desde = desde.replace(tzinfo=timezone.utc)
+                senal = {"dia": dia, "desde": desde.astimezone(LOCAL_TZ),
+                         "fuente": str(fila.get("fuente") or "")}
+                with _despierto_lock:
+                    if not (_despierto and _despierto["dia"] == dia):
+                        _despierto = senal
+                    return dict(_despierto)
+        except (ValueError, TypeError, AttributeError, IndexError) as e:
+            logger.warning("Teléfono: la fila de `despertares` de hoy no se entiende (%s)", e)
+            return None
+    with _despierto_lock:
+        _despierto_mirado = dia
+    return None
+
+
 def enviar_brief_si_toca(fuente: str, despertar: Optional[datetime] = None) -> dict:
     """Manda el resumen del día si aún no ha salido. Idempotente por día.
 
@@ -9083,6 +9198,9 @@ def _senal_despertar(etiqueta: str) -> dict:
     falla: quien no pueda permitírselo usa `_senal_despertar_segura`.
     """
     ahora = _ahora_local()
+    # Lo primero, antes de la ventana y del interruptor: la señal abre el teléfono aunque
+    # el resumen esté pausado o ya se haya mandado (ver `_anotar_despierto`).
+    _anotar_despierto(ahora, etiqueta)
 
     # Fuera de la ventana no cuenta: ni un desenchufe de las 04:00 camino del baño, ni
     # uno de media tarde cuando el correo del día ya no aporta nada.
@@ -9156,6 +9274,10 @@ def marcar_despertar(request: Request, background_tasks: BackgroundTasks,
     # La etiqueta acaba en una fila de Supabase: se limpia en vez de confiar en ella.
     etiqueta = re.sub(r"[^a-zA-Z0-9_-]", "", fuente)[:40] or "despertar"
 
+    # El teléfono se entera YA, antes de callar la alarma y del retraso: ese margen es del
+    # correo (esperar a que el sueño sincronice), no de si estás despierto.
+    _anotar_despierto(_ahora_local(), etiqueta)
+
     # La alarma va ANTES de la ventana horaria, del retraso y sin poder romper lo demás:
     # una alarma sonando a cualquier hora se calla si dices que estás despierto, ya
     # mismo, y un fallo callándola no puede dejar el resumen sin mandar.
@@ -9206,7 +9328,10 @@ def ha_brief_tick(request: Request, token: str = ""):
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
-               **_turno_noche_seguro()}
+               **_turno_noche_seguro(),
+               # La llamada del permiso de despliegue que se aplazó porque dormías: el
+               # tick es lo único que pasa cuando te despiertas sin que nadie más llame.
+               **_retomar_llamada_despliegue_segura()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -9977,6 +10102,7 @@ TABLAS_CONOCIDAS = {
     "casa_acciones":         "20260917_linea_del_dia",
     "avisos_llamadas":       "20260923_llamadas_cotidianas",
     "backend_latidos":       "20260924_backend_latidos",
+    "despertares":           "20260927_despertares",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -16021,6 +16147,95 @@ def _telefono_configurado() -> bool:
     return bool(TELEFONO_URL and TELEFONO_EXTENSION)
 
 
+# ── Solo cuando estás despierto ──────────────────────────────────────────────────────
+#
+# El 2026-09-27 la web estuvo caída de 03:30 a 11:33. El vigilante aplazó la llamada por
+# la franja nocturna, como debía, y a las 07:00:32 —acabada la franja— llamó. Mikel
+# dormía: el móvil la rechazó en modo dormir y contestó el buzón. La franja fija decía
+# «ya no es de noche» y eso se tomaba por «estás despierto», que es otra cosa.
+#
+# Ahora el teléfono solo suena cuando CONSTA que estás despierto, con la misma señal que
+# ya usa el resumen diario (`_anotar_despierto`): el Atajo del cargador, la alarma de
+# respaldo confirmada o decírselo a Jarvis. No se inventa otra. Sin ninguna señal, a
+# `LLAMADAS_SIN_SENAL_DESDE` (por defecto la hora tope del resumen, las 10:00) se te da
+# por despierto: es la hora a la que el sistema ya asume que la señal falló.
+#
+# Tres cosas que NO son señal, a propósito:
+#   - la llegada del sueño del Watch: ya mandó el correo con Mikel dormido el 16/09 (la
+#     pulsera vuelca una noche a medias si te despiertas un rato a las seis);
+#   - la presencia de Home Assistant: dice dónde estás, no si duermes;
+#   - usar el dashboard: una pestaña abierta refresca sola, sin nadie delante.
+#
+# La franja fija (`VIGILANCIA_NOCHE_DESDE/HASTA`, 00–07) se queda como SUELO: ni con señal
+# suena antes. Un desenchufe de madrugada y vuelta a la cama no acaba en llamada, y así
+# este cambio solo puede retrasar llamadas respecto a antes, nunca adelantarlas. Por la
+# noche corta a tu hora habitual de dormirte menos un margen, acotada entre las 22:00 y
+# la medianoche; sin datos, la medianoche, como antes.
+LLAMADAS_SIN_SENAL_DESDE   = _hora_config(os.getenv("LLAMADAS_SIN_SENAL_DESDE") or BRIEF_HORA_TOPE,
+                                          HORA_TOPE)
+TELEFONO_DORMIR_MARGEN_MIN = int(os.getenv("TELEFONO_DORMIR_MARGEN_MIN", "30"))
+# El corte de la noche nunca antes de esto: una mediana rara (turnos, un mes malo) no
+# puede dejar el teléfono mudo desde media tarde.
+_TELEFONO_DORMIR_NO_ANTES  = (22, 0)
+# El corte se calcula una vez al día: es una consulta a health_metrics y la vigilancia
+# sondea cada cinco minutos. Mismo criterio que `_reloj_hora_cache`.
+_acostarse_cache: dict = {}
+
+
+def _hora_de_acostarse(ahora: datetime) -> tuple:
+    """Desde qué hora de la noche deja de sonar el teléfono. (24, 0) es «sin corte propio».
+
+    Tu hora habitual de dormirte (`_hora_habitual_dormir`, la mediana de 30 noches) menos
+    `TELEFONO_DORMIR_MARGEN_MIN`, y nunca antes de las 22:00. Si cae pasada la medianoche,
+    o no hay cinco noches de base, no hay corte propio y manda la franja fija, como antes
+    de esto: toda la comparación es (hora, minuto) del mismo día, y un corte a las 00:10
+    sería menor que las 23:00 y dejaría el teléfono mudo desde por la mañana.
+    """
+    hoy = ahora.date().isoformat()
+    if _acostarse_cache.get("dia") == hoy:
+        return _acostarse_cache["hora"]
+    habitual = _hora_habitual_dormir()
+    if not habitual:
+        corte = (24, 0)
+    else:
+        minutos = habitual[0] * 60 + habitual[1]
+        if habitual[0] < 12:            # te duermes pasada la medianoche: cuenta como tarde
+            minutos += 24 * 60
+        minutos -= TELEFONO_DORMIR_MARGEN_MIN
+        if minutos >= 24 * 60:
+            corte = (24, 0)
+        else:
+            corte = max((minutos // 60, minutos % 60), _TELEFONO_DORMIR_NO_ANTES)
+    _acostarse_cache.update(dia=hoy, hora=corte)
+    return corte
+
+
+def _telefono_puede_sonar(ahora: datetime) -> tuple[bool, str]:
+    """Si el teléfono puede sonar ahora, y por qué. El texto va al log y a la respuesta.
+
+    El orden importa, y no solo por la lógica: las consultas caras van al final, así que
+    de día (entre la hora de respaldo y las 22:00) esto no pregunta nada a nadie.
+    """
+    hm = (ahora.hour, ahora.minute)
+    if _es_de_noche(ahora):
+        return False, "franja nocturna"
+    if hm >= _TELEFONO_DORMIR_NO_ANTES:
+        corte = _hora_de_acostarse(ahora)
+        if hm >= corte:
+            return False, f"pasada tu hora de dormir ({corte[0]:02d}:{corte[1]:02d})"
+    if hm >= LLAMADAS_SIN_SENAL_DESDE:
+        return True, (f"ya son las {hm[0]:02d}:{hm[1]:02d}: desde las "
+                      f"{LLAMADAS_SIN_SENAL_DESDE[0]:02d}:{LLAMADAS_SIN_SENAL_DESDE[1]:02d} "
+                      "suena aunque no haya señal de despertar")
+    senal = _despierto_hoy(ahora)
+    if senal:
+        desde = senal["desde"]
+        return True, (f"despierto desde las {desde.hour:02d}:{desde.minute:02d} "
+                      f"({senal.get('fuente') or 'sin fuente'})")
+    return False, ("aún no consta que estés despierto; sin señal, sonará desde las "
+                   f"{LLAMADAS_SIN_SENAL_DESDE[0]:02d}:{LLAMADAS_SIN_SENAL_DESDE[1]:02d}")
+
+
 TELEFONO_CONTEXTO_MAX = 4000
 
 
@@ -16066,6 +16281,8 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
 
     Devolver True es «ha empezado a sonar», no «lo has cogido»: si no lo coges, lo que
     sigue (otra llamada y después el buzón) lo lleva `_insistir`, en segundo plano.
+
+    No mira si estás despierto: eso es de `_llamar`, la puerta. Esto es solo el cable.
     """
     if not _telefono_configurado():
         return False
@@ -16074,6 +16291,14 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
               "timeoutSeconds": TELEFONO_TIMBRE_SEG}
     if contexto:
         cuerpo["context"] = _recortar_por_el_medio(contexto, TELEFONO_CONTEXTO_MAX)
+    if TELEFONO_DETECTAR_BUZON:
+        # Contestar no es coger (ver «Si no lo coges»): si quien descuelga es el buzón,
+        # claude-phone con el parche 12 no se pone a conversar con él y deja el recado en
+        # esa misma llamada. Un claude-phone sin el parche ignora estos campos.
+        cuerpo["detectVoicemail"] = True
+        if TELEFONO_BUZON:
+            cuerpo["voicemailMessage"]      = _recado(texto)
+            cuerpo["voicemailDelaySeconds"] = max(0, min(30, TELEFONO_BUZON_ESPERA_SEG))
     call_id = _lanzar_llamada(cuerpo)
     if call_id is None:
         return False
@@ -16097,23 +16322,43 @@ def _llamar_telefono(texto: str, *, rid: str = "", contexto: str = "") -> bool:
 #     `telefono/PARCHES.md`), antes de que el 3CX desvíe al buzón. Solo entonces la
 #     llamada acaba en FAILED/no_answer y aquí se puede saber que no la cogiste.
 #   - Aquí se pregunta cómo acabó (`GET /api/call/{id}`) y se decide lo siguiente.
-# Sin el parche, todo esto no hace nada: la llamada consta como contestada (por el
-# buzón) y no se insiste, que es exactamente lo de antes.
 #
-# El buzón se consigue dejando sonar la última llamada MÁS que el desvío del 3CX, en modo
-# `announce` (dice el mensaje y cuelga, sin conversación) y esperando unos segundos a que
-# termine el saludo del buzón antes de hablar (`delaySeconds`, también del parche 7).
+# **Contestar no es coger** (desde el 2026-09-27). Ese día el buzón descolgó a los 7,5 s,
+# mucho antes del timbre: el móvil, en modo dormir, rechazó la llamada y el 3CX la desvió
+# al buzón en el acto, sin que llegara nunca un rechazo. Colgar a tiempo no sirve contra
+# eso. Con el parche 12, claude-phone mira quién ha descolgado (el 3CX no pone nombre en
+# el Contact del buzón) y, si es el buzón, deja el recado ahí mismo (`voicemailMessage`)
+# o cuelga; y cuenta los turnos en que alguien habló (`userTurns`). Con eso:
+#   - descolgó el buzón y se dejó el recado → 'buzon': la serie acaba, el recado está;
+#   - descolgaron y nadie dijo nada en toda la llamada → 'no_cogida': la serie sigue;
+#   - descolgaron pero Jarvis no pudo hablar (voz o audio rotos) → 'sin_voz': no se
+#     insiste, porque una voz rota no se arregla llamando otra vez y cada reintento sería
+#     otra llamada muda, y queda un ERROR en el registro.
+# Sin el parche 12 (`data` sin la clave `answeredBy`) se decide exactamente como antes.
+#
+# El buzón de la última llamada (si la serie entera se queda sin coger) se consigue
+# dejando sonar MÁS que el desvío del 3CX, en modo `announce` (dice el mensaje y cuelga,
+# sin conversación) y esperando unos segundos a que termine el saludo del buzón antes de
+# hablar (`delaySeconds`, también del parche 7).
 TELEFONO_TIMBRE_SEG       = int(os.getenv("TELEFONO_TIMBRE_SEG", "25"))
 TELEFONO_INTENTOS         = int(os.getenv("TELEFONO_INTENTOS", "2"))
 TELEFONO_REINTENTO_SEG    = int(os.getenv("TELEFONO_REINTENTO_SEG", "60"))
 TELEFONO_BUZON            = _flag("TELEFONO_BUZON", "1")
 TELEFONO_BUZON_TIMBRE_SEG = int(os.getenv("TELEFONO_BUZON_TIMBRE_SEG", "90"))
 TELEFONO_BUZON_ESPERA_SEG = int(os.getenv("TELEFONO_BUZON_ESPERA_SEG", "8"))
+# El interruptor de «contestar no es coger», y el único: apagarlo aquí basta, sin tocar
+# claude-phone.
+TELEFONO_DETECTAR_BUZON   = _flag("TELEFONO_DETECTAR_BUZON", "1")
 TELEFONO_SONDEO_SEG       = 5
+# Cuánto se espera, desde que descuelgan, a que una llamada sin turnos termine. Con el
+# parche 12 una llamada descolgada ya no se da por cogida al verla: se espera al final. Con
+# el parche 8 una llamada muda se cuelga sola en 70–90 s; esto es el tope por si no.
+TELEFONO_DESCOLGADA_MAX_SEG = 180
 # Lo que claude-phone da por «no lo ha cogido». Un rechazo (603), una extensión que no
 # existe o un SIP sin registrar son otra cosa: insistir no los arregla, y colgarle a
 # alguien que ha rechazado la llamada para volver a llamarle es justo lo que no se hace.
-_TELEFONO_NO_COGIDA = ("no_answer", "busy")
+# 'voicemail' es el FAILED del parche 12: descolgó el buzón y se colgó sin recado.
+_TELEFONO_NO_COGIDA = ("no_answer", "busy", "voicemail")
 
 
 def _dormir(segundos: float) -> None:
@@ -16121,17 +16366,61 @@ def _dormir(segundos: float) -> None:
     time.sleep(segundos)
 
 
-def _como_acabo(call_id: str) -> str:
-    """'cogida', 'no_cogida' u 'otra'. Espera a que la llamada deje de sonar.
+def _reloj() -> float:
+    """`time.monotonic` con nombre propio, como `_dormir`: los tests con `_dormir` falso
+    no avanzan el tiempo, y sin esto no se podría probar cuándo se rinde un sondeo."""
+    return time.monotonic()
+
+
+def _como_acabo_con_parche_12(info: dict) -> Optional[str]:
+    """Lo que dice un claude-phone con el parche 12. None si la llamada no ha acabado.
+
+    Alguien que habla al menos una vez es una persona: 'cogida' en cuanto se ve, sin
+    esperar al final. Sin turnos, lo que cuenta es el final y su motivo.
+    """
+    estado = info.get("state")
+    motivo = str(info.get("reason") or "")
+    try:
+        turnos = int(info.get("userTurns") or 0)
+    except (TypeError, ValueError):
+        turnos = 0
+    if turnos > 0:
+        return "cogida"
+    if estado == "COMPLETED":
+        if motivo == "voicemail_message":
+            return "buzon"
+        if motivo == "no_speech":
+            return "no_cogida"          # dos turnos sin oír a nadie
+        if motivo == "conversation_error":
+            return "sin_voz"
+        if info.get("answeredBy") == "voicemail" and motivo != "announce_complete":
+            return "otra"
+        return "cogida"
+    if estado == "FAILED":
+        if motivo in _TELEFONO_NO_COGIDA:
+            return "no_cogida"
+        if motivo == "unplayed":
+            return "sin_voz"
+        return "otra"
+    return None
+
+
+def _como_acabo(call_id: str, *, timbre: Optional[int] = None) -> str:
+    """'cogida', 'no_cogida', 'buzon', 'sin_voz' u 'otra'. Espera a que deje de sonar.
 
     claude-phone guarda la sesión un minuto después de terminar, así que con un sondeo
     cada pocos segundos no se pierde el final. Ante la duda, 'otra': insistir sobre una
     llamada que no se sabe cómo acabó es arriesgarse a llamarte dos veces seguidas por
     algo que ya has oído.
+
+    Sin el parche 12 decide como siempre: descolgada es cogida. Lo único nuevo en ese
+    camino es que un FAILED que llegó a descolgarse (`answeredAt`) se nombra 'sin_voz'
+    para el registro; `_insistir` lo trata igual que 'otra', que es lo de antes.
     """
-    url   = f"{TELEFONO_URL.rstrip('/')}/api/call/{quote(call_id, safe='')}"
-    tope  = time.monotonic() + TELEFONO_TIMBRE_SEG + 60
-    while time.monotonic() < tope:
+    url  = f"{TELEFONO_URL.rstrip('/')}/api/call/{quote(call_id, safe='')}"
+    tope = _reloj() + (TELEFONO_TIMBRE_SEG if timbre is None else timbre) + 60
+    descolgada = False
+    while _reloj() < tope:
         _dormir(TELEFONO_SONDEO_SEG)
         try:
             r = http.get(url)
@@ -16146,47 +16435,124 @@ def _como_acabo(call_id: str) -> str:
         except (ValueError, AttributeError):
             return "otra"
         estado = info.get("state")
+        if "answeredBy" in info:
+            resultado = _como_acabo_con_parche_12(info)
+            if resultado:
+                return resultado
+            if not descolgada and estado in ("PLAYING", "CONVERSING"):
+                # Descolgada y sin turnos: ya no es «sonando», es «esperando a ver si
+                # alguien habla». El tope pasa a contarse desde aquí.
+                descolgada = True
+                tope = _reloj() + TELEFONO_DESCOLGADA_MAX_SEG
+            continue
         if estado in ("PLAYING", "CONVERSING", "COMPLETED"):
             return "cogida"
         if estado == "FAILED":
-            return "no_cogida" if info.get("reason") in _TELEFONO_NO_COGIDA else "otra"
+            if info.get("reason") in _TELEFONO_NO_COGIDA:
+                return "no_cogida"
+            return "sin_voz" if info.get("answeredAt") else "otra"
     return "otra"
 
 
-def _texto_buzon(texto: str) -> str:
-    """El mensaje para el buzón: lo mismo que ibas a oír, diciendo que ya te ha llamado."""
+def _sin_saludo(texto: str) -> str:
+    """El mensaje sin el «Mikel, soy Jarvis.» del principio, para no decirlo dos veces."""
     cuerpo = texto.strip()
     if cuerpo.startswith("Mikel, soy Jarvis."):
         cuerpo = cuerpo[len("Mikel, soy Jarvis."):].strip()
+    return cuerpo
+
+
+def _texto_buzon(texto: str) -> str:
+    """El mensaje de la última llamada (announce), diciendo cuántas veces ha llamado."""
     veces = "una vez" if TELEFONO_INTENTOS == 1 else f"{TELEFONO_INTENTOS} veces"
     return (f"Mikel, soy Jarvis. Te he llamado {veces} y no lo has cogido, así que te lo "
-            f"dejo aquí. {cuerpo} Llámame cuando puedas.")[:1000]
+            f"dejo aquí. {_sin_saludo(texto)} Llámame cuando puedas.")[:1000]
+
+
+def _recado(texto: str) -> str:
+    """El recado que se deja si descuelga el buzón en mitad de la serie (parche 12).
+
+    No cuenta las veces a propósito: `_insistir` relanza el MISMO cuerpo, así que este
+    texto tiene que valer igual en el primer intento que en el segundo.
+    """
+    return (f"Mikel, soy Jarvis. Te he llamado y no lo has cogido, así que te lo dejo "
+            f"aquí. {_sin_saludo(texto)} Llámame cuando puedas.")[:1000]
+
+
+def _fin_de_la_serie(resultado: str, quien: str, intento: int) -> None:
+    """Deja escrito por qué se deja de llamar. El 27/09 la serie se cortó sin una línea."""
+    if resultado == "cogida":
+        logger.info("Llamada (%s): cogida en el intento %d", quien, intento)
+    elif resultado == "buzon":
+        logger.info("Llamada (%s): en el intento %d contestó el buzón y el recado quedó "
+                    "grabado; no insisto", quien, intento)
+    elif resultado == "sin_voz":
+        logger.error("Llamada (%s): contestada en el intento %d, pero Jarvis no ha podido "
+                     "hablar (voz o audio de claude-phone). No insisto: cada reintento "
+                     "sería otra llamada muda", quien, intento)
+    else:
+        logger.info("Llamada (%s): el intento %d acabó sin saberse si la cogiste "
+                    "(rechazada, avería de la centralita o sin final visible); no insisto",
+                    quien, intento)
 
 
 def _insistir(call_id: str, cuerpo: dict, rid: str) -> None:
-    """Lo que viene después de una llamada que no cogiste: otra, y después el buzón."""
+    """Lo que viene después de una llamada que no cogiste: otra, y después el buzón.
+
+    Estos reintentos van por `_lanzar_llamada` y no por `_llamar` a propósito: la serie
+    hereda el permiso de su primera llamada, que ya pasó por la puerta de «despierto».
+    """
+    quien = rid or "sin decisión asociada"
     for intento in range(2, TELEFONO_INTENTOS + 1):
         resultado = _como_acabo(call_id)
         if resultado != "no_cogida":
+            _fin_de_la_serie(resultado, quien, intento - 1)
             return
         logger.info("Llamada: no cogida (%s), vuelvo a llamar en %ds (intento %d de %d)",
-                    rid or "sin decisión asociada", TELEFONO_REINTENTO_SEG,
-                    intento, TELEFONO_INTENTOS)
+                    quien, TELEFONO_REINTENTO_SEG, intento, TELEFONO_INTENTOS)
         _dormir(TELEFONO_REINTENTO_SEG)
         call_id = _lanzar_llamada(cuerpo)
-        if not call_id:
+        if call_id is None:
+            logger.warning("Llamada (%s): el intento %d de %d no llegó a lanzarse; dejo "
+                           "de insistir", quien, intento, TELEFONO_INTENTOS)
             return
-    if _como_acabo(call_id) != "no_cogida" or not TELEFONO_BUZON:
+        if not call_id:
+            logger.warning("Llamada (%s): el intento %d sonó, pero la centralita no dio "
+                           "su callId y no se puede saber cómo acaba", quien, intento)
+            return
+    resultado = _como_acabo(call_id)
+    if resultado != "no_cogida":
+        _fin_de_la_serie(resultado, quien, TELEFONO_INTENTOS)
+        return
+    if not TELEFONO_BUZON:
+        logger.info("Llamada (%s): no cogida %d veces y el buzón está apagado; no insisto",
+                    quien, TELEFONO_INTENTOS)
         return
     logger.info("Llamada: no cogida %d veces (%s), dejo el mensaje en el buzón",
-                TELEFONO_INTENTOS, rid or "sin decisión asociada")
+                TELEFONO_INTENTOS, quien)
     _dormir(TELEFONO_REINTENTO_SEG)
     # Sin `context` a propósito: en modo announce no hay modelo al otro lado, solo el
-    # texto leído en voz alta. Y sin conversación: al otro lado hay un buzón.
-    _lanzar_llamada({"to": cuerpo["to"], "device": cuerpo["device"], "mode": "announce",
-                     "message": _texto_buzon(cuerpo["message"]),
-                     "timeoutSeconds": TELEFONO_BUZON_TIMBRE_SEG,
-                     "delaySeconds": TELEFONO_BUZON_ESPERA_SEG})
+    # texto leído en voz alta. Y sin conversación ni `detectVoicemail`: aquí se busca
+    # justo al buzón.
+    buzon_id = _lanzar_llamada({"to": cuerpo["to"], "device": cuerpo["device"],
+                                "mode": "announce",
+                                "message": _texto_buzon(cuerpo["message"]),
+                                "timeoutSeconds": TELEFONO_BUZON_TIMBRE_SEG,
+                                "delaySeconds": TELEFONO_BUZON_ESPERA_SEG})
+    if not buzon_id:
+        if buzon_id is None:
+            logger.warning("Llamada (%s): la del buzón no llegó a lanzarse", quien)
+        return
+    # Y se mira cómo acabó, para que el registro diga si el recado se grabó: «dejo el
+    # mensaje en el buzón» no es «el mensaje está en el buzón».
+    final = _como_acabo(buzon_id, timbre=TELEFONO_BUZON_TIMBRE_SEG)
+    if final in ("cogida", "buzon"):
+        logger.info("Llamada (%s): recado dejado en el buzón", quien)
+    elif final == "no_cogida":
+        logger.warning("Llamada (%s): tampoco descolgó el buzón; el recado no se grabó", quien)
+    else:
+        logger.warning("Llamada (%s): no se sabe si el recado del buzón se grabó (%s)",
+                       quien, final)
 
 
 def _insistir_en_segundo_plano(call_id: str, cuerpo: dict, rid: str) -> None:
@@ -16202,16 +16568,34 @@ def _insistir_en_segundo_plano(call_id: str, cuerpo: dict, rid: str) -> None:
     threading.Thread(target=_trabajo, daemon=True, name="insistir-llamada").start()
 
 
-def _llamar(texto: str, *, rid: str = "", contexto: str = "") -> bool:
+def _llamar(texto: str, *, rid: str = "", contexto: str = "",
+            aunque_duermas: bool = False, solo_centralita: bool = False) -> bool:
     """Única puerta de salida del teléfono. True si alguna vía llegó a lanzar la llamada.
 
+    **Aquí, y solo aquí, se mira si estás despierto** (`_telefono_puede_sonar`), igual que
+    el interruptor del resumen vive solo en `enviar_brief_si_toca`: puesta en la puerta,
+    ninguna llamada futura se puede olvidar de mirarla. Las excepciones se piden con
+    nombre (`aunque_duermas=True`) y hoy son dos: «Hablarlo», porque lo pides tú y por
+    tanto estás despierto, y lo `critico` de la vigilancia (las alarmas), que es
+    justamente lo que tiene que despertarte.
+
     Primero la centralita, que es gratis y sabe hacer más; Twilio detrás, que sigue
-    escrito y apagado. No propaga el fallo: quien llama a esto ya ha dejado el aviso por
+    escrito y apagado (`solo_centralita=True` no cae a él: lo cotidiano no justifica
+    pagar por minuto). No propaga el fallo: quien llama a esto ya ha dejado el aviso por
     los canales de siempre, y que el teléfono no suene no puede tumbar el aviso que sí
     salió. Es un canal de refuerzo, no el único.
     """
+    if not (_telefono_configurado() or (not solo_centralita and _llamada_configurada())):
+        return False
+    if not aunque_duermas:
+        puede, motivo = _telefono_puede_sonar(_ahora_local())
+        if not puede:
+            logger.info("Llamada (%s) no sale: %s", rid or "sin decisión asociada", motivo)
+            return False
     if _llamar_telefono(texto, rid=rid, contexto=contexto):
         return True
+    if solo_centralita:
+        return False
     return _llamar_twilio(texto, rid=rid)
 
 
@@ -16222,9 +16606,10 @@ def _llamar(texto: str, *, rid: str = "", contexto: str = "") -> bool:
 # llevas un día sin mandar nada»—, y la regla de `docs/LLAMADAS.md` se amplió con dos
 # frenos para que eso no convierta el teléfono en ruido:
 #   - **Un tope diario** (`LLAMADAS_COTIDIANAS_DIA`) que las averías no gastan.
-#   - **Nunca de noche ni pasada la hora de silencio**: de lo cotidiano nada justifica
-#     despertarte. El aviso al móvil sale igual; lo que no sale es la llamada, y no se
-#     aplaza — una llamada de las 23:00 repetida a las 07:00 ya habla de otra cosa.
+#   - **Solo con el teléfono abierto (`_telefono_puede_sonar`: estás despierto) y nunca
+#     pasada la hora de silencio**: de lo cotidiano nada justifica despertarte. El aviso
+#     al móvil sale igual; lo que no sale es la llamada, y no se aplaza — una llamada de
+#     las 23:00 repetida a las 07:00 ya habla de otra cosa.
 #
 # Qué reglas llaman lo decides tú, regla a regla, desde la pestaña Avisos de la zona dev
 # (columna `avisos_reglas.llamar`). Solo las de este catálogo pueden: son las que
@@ -16268,10 +16653,14 @@ def _regla_llama(regla: str) -> bool:
 
 
 def _hora_de_llamar(ahora: datetime) -> bool:
-    """Fuera de la franja nocturna del teléfono y antes de la hora de silencio."""
-    if _es_de_noche(ahora):
+    """Antes de la hora de silencio y cuando el teléfono puede sonar (estás despierto).
+
+    La hora de silencio va primero: de lo cotidiano nada justifica sonar pasadas las
+    22:00, y mirarla antes ahorra la consulta de tu hora de dormir.
+    """
+    if HORA_SILENCIO != (0, 0) and (ahora.hour, ahora.minute) >= HORA_SILENCIO:
         return False
-    return HORA_SILENCIO == (0, 0) or (ahora.hour, ahora.minute) < HORA_SILENCIO
+    return _telefono_puede_sonar(ahora)[0]
 
 
 def _llamadas_cotidianas_hoy() -> Optional[int]:
@@ -16279,11 +16668,15 @@ def _llamadas_cotidianas_hoy() -> Optional[int]:
 
     Sin poder contar no se llama: el tope es lo único que impide que un día con cinco
     reglas disparadas sean cinco llamadas.
+
+    Solo cuenta las reglas del catálogo: la tabla guarda también la reserva del permiso
+    de despliegue (`_llamar_despliegue`), que es una avería y no gasta el tope.
     """
     desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
     try:
         r = http.get(f"{AVISOS_LLAMADAS_URL}?creado=gte."
                      f"{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
+                     f"&regla=in.({','.join(REGLAS_LLAMABLES)})"
                      "&select=aviso_id", headers=supabase_headers())
         if r.status_code >= 300:
             return None
@@ -16345,8 +16738,9 @@ def _llamada_cotidiana(rid: str, regla: str, texto: str) -> bool:
         "Cuéntaselo en una o dos frases y contesta lo que pregunte, con las herramientas "
         "del MCP si hace falta mirar algo. No hay nada que arreglar en la máquina: no "
         "toques servicios, contenedores ni ficheros.")
-    # Solo la centralita, nunca Twilio: lo cotidiano no justifica pagar por minuto.
-    if _llamar_telefono(dicho, rid=f"aviso:{regla}", contexto=contexto):
+    # Por la puerta de siempre (que vuelve a mirar si estás despierto) y solo por la
+    # centralita, nunca Twilio: lo cotidiano no justifica pagar por minuto.
+    if _llamar(dicho, rid=f"aviso:{regla}", contexto=contexto, solo_centralita=True):
         return True
     # No sonó: la reserva se devuelve. Si no, una centralita caída por la mañana gasta el
     # tope del día y las reglas de la tarde ya no llaman aunque vuelva. Este aviso no se
@@ -17258,7 +17652,8 @@ def _revision_hablar(rid: str) -> dict:
     if not fila:
         raise HTTPException(status_code=404, detail="No hay esa revisión pendiente")
     contexto = _jarvis_contexto_llamada(aviso=rid, tipo="revision")
-    ok = _llamar(_apertura_revision(fila), rid=rid, contexto=contexto)
+    # Lo has pedido tú pulsando el botón, así que estás despierto: no pasa por esa regla.
+    ok = _llamar(_apertura_revision(fila), rid=rid, contexto=contexto, aunque_duermas=True)
     # Pulsar este botón borra la notificación del móvil (lo hace la app, no nosotros) y
     # no decide nada, así que sin esto el aviso se queda vivo y sin dónde contestarlo.
     _reponer_tras_hablar("revision", rid)
@@ -17773,10 +18168,14 @@ def programado_roto(request: Request, body: ProgramadoRotoIn, token: str = ""):
 #    ~15 minutos caído, tiempo de sobra para que un corte de red se arregle solo.
 # 2. **Se llama una vez por avería, no una vez por sondeo.** Sonar cada cinco minutos
 #    mientras algo sigue roto no añade información y garantiza que dejes de cogerlo.
-# 3. **De noche no suena**, salvo que sea de lo que tiene que despertarte. El aviso al
-#    móvil sí sale igual; lo que espera a la mañana es la llamada. No hace falta ningún
-#    reloj para eso: como los sondeos siguen entrando, el primero que llega pasada
-#    `VIGILANCIA_NOCHE_HASTA` encuentra la avería todavía viva y llama entonces.
+# 3. **Solo suena si estás despierto** (`_telefono_puede_sonar`), salvo que sea de lo que
+#    tiene que despertarte. El aviso al móvil sí sale igual; lo que espera es la llamada.
+#    Hasta el 2026-09-27 esto era «de noche no suena» y la noche acababa a las 07:00 fijas:
+#    ese domingo llamó a las 07:00:32 con Mikel dormido. Ahora espera a tu señal de
+#    despertar (el cargador, la alarma, Jarvis) o, sin ella, a la hora de respaldo. No
+#    hace falta ningún reloj para retomarla: como los sondeos siguen entrando, el primero
+#    que llega con el teléfono abierto encuentra la avería todavía viva y llama entonces.
+#    Si para entonces ya se ha arreglado, no llama: sale el «ha vuelto».
 #
 # Lo que NO hace, a propósito: arreglar nada. Esto avisa y llama. Quien arregla es la
 # persona que descuelga, con Jarvis al otro lado — que sí puede actuar, pero porque se lo
@@ -17793,7 +18192,8 @@ _vigilancia: dict = {}
 
 
 def _es_de_noche(ahora: datetime) -> bool:
-    """True dentro de la franja en la que el teléfono no suena. Cruza la medianoche."""
+    """True dentro de la franja en la que el teléfono no suena NUNCA, ni con señal de
+    despertar: es el suelo de `_telefono_puede_sonar`. Cruza la medianoche."""
     if VIGILANCIA_NOCHE_DESDE == VIGILANCIA_NOCHE_HASTA:
         return False
     if VIGILANCIA_NOCHE_DESDE < VIGILANCIA_NOCHE_HASTA:
@@ -17865,10 +18265,13 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
     a cero. Un vigilante que solo avisara de lo malo dejaría la avería marcada para
     siempre y no volvería a llamar por ella nunca.
 
-    `critico` es la única excepción al silencio nocturno, y su sitio es el que lo pide:
-    hoy, las alarmas de respaldo (`docs/ALARMAS.md`), que son precisamente lo que tiene
-    que despertarte. Cualquier otra cosa que algún día lo pida se justifica antes en
-    `docs/LLAMADAS.md`.
+    La llamada solo sale si el teléfono puede sonar (`_telefono_puede_sonar`: consta que
+    estás despierto, o ya es la hora de respaldo); si no, se aplaza y la retoma sola el
+    primer sondeo que lo encuentre abierto.
+
+    `critico` es la única excepción, y su sitio es el que lo pide: hoy, las alarmas de
+    respaldo (`docs/ALARMAS.md`), que son precisamente lo que tiene que despertarte.
+    Cualquier otra cosa que algún día lo pida se justifica antes en `docs/LLAMADAS.md`.
     """
     if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -17910,18 +18313,21 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
     if estado["llamado"]:
         return {"ok": True, "estado": "caido", "fallos": estado["fallos"],
                 "avisado": True, "llamado": True}
-    if _es_de_noche(_ahora_local()) and not body.critico:
+    puede, motivo = _telefono_puede_sonar(_ahora_local())
+    if not puede and not body.critico:
         # El aviso ya salió; la llamada espera. No hay que programar nada: el siguiente
-        # sondeo de después de las siete entra por aquí otra vez y entonces sí llama.
-        logger.info("Vigilancia: %s caído, llamada aplazada por la franja nocturna", sujeto)
+        # sondeo después de tu señal de despertar (o de la hora de respaldo) entra por
+        # aquí otra vez y entonces sí llama.
+        logger.info("Vigilancia: %s caído, llamada aplazada (%s)", sujeto, motivo)
         return {"ok": True, "estado": "caido", "fallos": estado["fallos"],
-                "avisado": True, "llamado": False, "aplazada": True}
+                "avisado": True, "llamado": False, "aplazada": True, "motivo": motivo}
 
     dicho = (f"Mikel, soy Jarvis. {sujeto} lleva un rato sin responder. "
              f"Estoy mirando qué pasa; dime y lo vemos.")
     llamado = _llamar(dicho, rid=f"vigilancia:{sujeto}",
                       contexto=_contexto_averia(sujeto, detalle, estado["fallos"],
-                                                estado["desde"]))
+                                                estado["desde"]),
+                      aunque_duermas=body.critico)
     estado["llamado"] = llamado
     logger.warning("Vigilancia: %s caído (%d sondeos), llamada %s", sujeto,
                    estado["fallos"], "lanzada" if llamado else "no disponible")
@@ -17932,6 +18338,70 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
 class PrListoIn(BaseModel):
     pr: int
     titulo: str = ""
+
+
+# ── La llamada del permiso de despliegue, cuando estés despierto ──────────────────
+# Hasta el 2026-09-27 `pr-listo` llamaba a cualquier hora: un arreglo que se pone verde a
+# las cuatro de la mañana sonaba a las cuatro. Ahora espera, como la vigilancia; pero a
+# diferencia de ella nadie vuelve a entrar por `pr-listo`, así que lo retoma el tick de
+# Home Assistant (`_retomar_llamada_despliegue`).
+#
+# La marca vive en memoria y lo que sigue pendiente, en Supabase (`_despliegue_pendiente`):
+# None es «recién arrancado, no sé si quedaba alguno: mira una vez». Para que un permiso
+# suene UNA sola vez, igual que antes, cada llamada se reserva en `avisos_llamadas` con el
+# id del permiso: el 409 es «ya sonó». Esas filas no gastan el tope de las cotidianas
+# (`_llamadas_cotidianas_hoy` solo cuenta las reglas de su catálogo).
+_despliegue_por_llamar: bool | None = None
+
+
+def _llamar_despliegue(rid: str) -> bool:
+    """Reserva y lanza la llamada de ESE permiso. False si ya sonó o no se pudo.
+
+    Sin poder apuntarla no se llama: sin la reserva no hay forma de que no suene dos
+    veces. La reserva se queda aunque el teléfono no suene: una llamada por permiso.
+    """
+    if not rid:
+        return False
+    try:
+        r = http.post(AVISOS_LLAMADAS_URL,
+                      headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"aviso_id": rid, "regla": REGLA_DESPLIEGUE})
+    except Exception as e:
+        logger.warning("Despliegue: no se pudo apuntar la llamada de %s (%s)", rid, e)
+        return False
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        logger.warning("Despliegue: no se pudo apuntar la llamada de %s (Supabase devolvió "
+                       "%s)", rid, r.status_code)
+        return False
+    return _llamar(_apertura_despliegue(), rid=rid)
+
+
+def _retomar_llamada_despliegue() -> dict:
+    """Desde el tick: si quedó un permiso sin llamar porque dormías, llama ahora."""
+    global _despliegue_por_llamar
+    if _despliegue_por_llamar is False:
+        return {}
+    if not _telefono_puede_sonar(_ahora_local())[0]:
+        return {}
+    # Si Supabase no contesta levanta un 502 y la marca se queda: el siguiente tick
+    # vuelve a mirar.
+    fila = _despliegue_pendiente()
+    _despliegue_por_llamar = False
+    if not fila:
+        return {}
+    return {"despliegue_llamado": _llamar_despliegue(str(fila.get("id") or ""))}
+
+
+def _retomar_llamada_despliegue_segura() -> dict:
+    """Mismo criterio que el resto de `previos` del tick: un fallo aquí no puede dejar
+    sin despachar los recordatorios que vienen detrás."""
+    try:
+        return _retomar_llamada_despliegue()
+    except Exception as e:
+        logger.warning("Despliegue: no se pudo retomar la llamada del permiso (%s)", e)
+        return {}
 
 
 @app.post("/revision/pr-listo")
@@ -17946,6 +18416,7 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     garantiza que nunca se pida permiso para desplegar algo sin verificar. La sesión
     puede creer que ha terminado; el CI lo sabe.
     """
+    global _despliegue_por_llamar
     if not _token_ok(_extract_service_token(request, token), REVISION_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
     numero = int(body.pr)
@@ -18008,10 +18479,14 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
              f"verde.\n\n¿Lo subo a main? Luego {PASO_QUE_FALTA}.")
     apuntado = _apuntar_aviso(REGLA_DESPLIEGUE, texto, prioridad=PRIO_ALTA,
                               cuando=_cuando_avisar(_ahora_local()), id=rid)
-    # Y además suena el teléfono, SI está encendido. Hoy nace apagado y el canal de voz
-    # real es la pantalla de llamada del dashboard, que abre el propio aviso: ver
-    # `GET /despliegue/pendiente` y `docs/LLAMADAS.md` para por qué se aparcó Twilio.
-    _llamar(_apertura_despliegue(), rid=rid)
+    # Y además suena el teléfono, pero solo si estás despierto: un PR que se pone verde de
+    # madrugada sonaba de madrugada. Si no puede sonar (o no se ha podido apuntar), se
+    # deja pendiente y lo retoma el tick de Home Assistant cuando te despiertes.
+    puede, motivo = _telefono_puede_sonar(_ahora_local())
+    if not (puede and _llamar_despliegue(rid)):
+        _despliegue_por_llamar = True
+        if not puede:
+            logger.info("PR #%s: la llamada del permiso espera (%s)", numero, motivo)
     logger.info("PR #%s listo para desplegar (avería %s)", numero, fila.get("origen"))
     return {"ok": True, "avisado": apuntado, "pr": numero}
 
@@ -18573,7 +19048,8 @@ def _sesion_hablar(rid: str) -> dict:
     if not fila:
         raise HTTPException(status_code=404, detail="No hay ese aviso de sesión pendiente")
     contexto = _jarvis_contexto_llamada(aviso=rid, tipo="sesion")
-    ok = _llamar(_apertura_sesion(fila), rid=rid, contexto=contexto)
+    # Lo has pedido tú: estás despierto, como en `_revision_hablar`.
+    ok = _llamar(_apertura_sesion(fila), rid=rid, contexto=contexto, aunque_duermas=True)
     # Mismo motivo que en `_revision_hablar`: el botón se lleva la notificación por
     # delante y no cierra nada.
     _reponer_tras_hablar("sesion", rid)
