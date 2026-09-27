@@ -69,13 +69,24 @@ con el mismo id determinista y la misma transición atómica. Lo único que camb
 dónde vino y hasta dónde llega. Los estados son ahora:
 
 ```
-pendiente  → hay algo que decidir (el camino del issue nocturno)
-arreglando → hay una sesión trabajando en ello
-listo      → hay un PR con el CI en verde esperando tu permiso
-mergeando  → dijiste que sí y se está mergeando (transitorio)
-mergeado   → dijiste que sí y el arreglo está en `main`
-descartado → dijiste que no
+pendiente           → hay algo que decidir (el camino del issue nocturno)
+arreglando          → hay una sesión trabajando en ello, y dejará el PR ABIERTO
+arreglando_y_mergea → hay una sesión trabajando en ello, y lo mergea ella si el CI pasa
+listo               → hay un PR con el CI en verde esperando tu permiso
+mergeando           → dijiste que sí y se está mergeando (transitorio)
+mergeado            → dijiste que sí y el arreglo está en `main`
+descartado          → dijiste que no
 ```
+
+**`arreglando` es lo que busca `pr-listo`, así que solo pueden estar ahí los arreglos que
+esperan permiso**: las averías del CI, el vigilante y el atajo del turno de noche. La
+revisión aprobada de día con «Arreglarlo» la mergea la propia sesión, y hasta el
+2026-09-27 también pasaba por `arreglando`: `pr-listo` pedía permiso de despliegue por un
+PR que se estaba mergeando solo (y hacía sonar el teléfono), y como nada la sacaba de ese
+estado, el siguiente PR verde de cualquier `arreglo/…` —un encargo hablado— se ataba a
+ella con el título de otra cosa. Por lo mismo, `pr-listo` solo mira filas de las últimas
+24 h (`PR_LISTO_VENTANA_HORAS`, por `creado` o por `decidido_at`): una sesión que muere
+sin abrir PR deja su fila en `arreglando` para siempre.
 
 `mergeado` se llamaba `desplegado` y se renombró el 2026-09-07, cuando el botón dejó de
 fingir que desplegaba. Las filas viejas conservan el nombre antiguo: son estados de un

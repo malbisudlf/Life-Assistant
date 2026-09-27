@@ -19,7 +19,21 @@
     huella vieja, que no casa con la nueva: pueden salir dos veces, una sola vez.
   - Moraleja: **un id opaco no se recorta, se resume con un hash.** Recortar supone que
     lo que distingue un id está al principio, y en los de Graph está al final. Un hash no
-    supone nada sobre dónde está la diferencia.
+    supone nada sobre dónde está la diferencia. Y el test, con un id que tenga la forma
+    real: los de antes usaban ids cortos de mentira (`"ev1"`) y no podían verlo.
+
+- **Un estado que compartían dos caminos, y una reserva que valía para dos cosas.** El
+  2026-09-27 salieron dos fallos con la misma forma. `pr-listo` pide permiso de despliegue
+  para la fila más reciente en `arreglando`, y a ese estado llegaba también la revisión
+  aprobada de día, cuya sesión mergea sola: se pedía permiso por un PR que ya se estaba
+  mergeando, y la fila no salía nunca de ahí, así que atrapaba el siguiente PR verde de
+  cualquier `arreglo/…`. Y el turno de noche usaba el INSERT del parte como «el turno ya
+  corrió», pero el parte también lo abre el atajo del código: en invierno, si la revisión
+  llegaba antes de las tres, esa noche no se miraba el buzón. Ver `docs/AVERIAS.md` y
+  `docs/TURNO_NOCHE.md`.
+  - Moraleja: **cuando un segundo camino reusa un estado o una reserva, pregunta qué más
+    lee ese estado.** «Reusa entero el camino que ya existe» era verdad para quien
+    escribía, no para quien leía.
 
 - **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
   2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había

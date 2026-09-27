@@ -253,8 +253,17 @@ prueba de vida del turno y lo único que sigue estando cuando no hay nada que en
 | `noche_items` | lo que se hizo. `area` ∈ correo / codigo / agenda / recado; `estado` pendiente → aprobado \| descartado |
 
 `_anotar_en_el_parte()` abre el parte si no existe: el atajo del código se dispara cuando
-la revisión abre su issue, que es más tarde que el turno y puede caer un día en que el turno
-no corrió. Sin eso, ese item se estrellaría contra la clave foránea y se perdería sin ruido.
+la revisión abre su issue, que puede caer un día en que el turno no corrió. Sin eso, ese
+item se estrellaría contra la clave foránea y se perdería sin ruido.
+
+**Abrir el parte no es hacer el turno.** Se escribió dando por hecho que el atajo llega
+después del turno, y en invierno no: el cron de la revisión cae a las 02:37 y su issue
+puede entrar antes de `HORA_NOCHE`. Con el INSERT del parte como única reserva, el tick de
+las tres se encontraba el 409 y daba la noche por hecha sin mirar el buzón. Ahora el turno
+se marca en `resumen` (que el atajo nunca escribe): en el mismo INSERT si abre él, o con un
+PATCH condicional a `resumen=is.null` si el parte ya estaba. Y la frase del parte cuenta el
+código de los items guardados, no del `resumen`, que lo escribe el turno con sus correos
+y nunca llegaba a contar el arreglo.
 
 ## Lo que falta
 

@@ -129,6 +129,30 @@ class TestVigilanteAccionable:
         assert (main._acciones_aviso(rid, main.REGLA_VIGILANTE)
                 == main._acciones_aviso(rid, main.REGLA_REVISION))
 
+    def test_la_averia_ya_avisada_no_apunta_otra_decision(self, mock_requests, monkeypatch):
+        """El id de la decisión lleva el día y el aviso se calla cinco días por su
+        huella: al día siguiente se escribía una decisión `pendiente` nueva que nadie
+        había visto, Jarvis la anunciaba en cada llamada y «arregla lo del vigilante» la
+        lanzaba aunque la víspera dijeras «No hacer nada»."""
+        monkeypatch.setattr(main, "_ya_dicho",
+                            lambda regla, huella: regla == main.REGLA_VIGILANTE)
+        self._errores(mock_requests, [("Supabase devolvió 400", 4)])
+        main._vigilar_sistema()
+        assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
+        assert not mock_requests.called("POST", "jarvis_recordatorios")
+
+    def test_el_fallo_de_la_rutina_no_ofrece_arreglo_de_codigo(self, mock_requests,
+                                                               monkeypatch):
+        """Un disparo de la rutina que falla es un token, una cuota o el trigger: mandar
+        una sesión a cambiar código por eso es mandarla a arreglar lo que no está roto."""
+        monkeypatch.setattr(main, "_reparar_rutina", lambda hoy: ([{
+            "clave": "rutina", "issue": False,
+            "texto": "El disparo de la rutina del briefing sigue fallando"}], []))
+        self._errores(mock_requests, [])
+        main._vigilar_sistema()
+        assert self._aviso(mock_requests)["regla"] == main.REGLA_VIGILANTE_SOLO
+        assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
+
     def test_sin_rutina_de_arreglo_no_hay_boton_ni_fila(self, mock_requests, monkeypatch):
         """Un botón que solo sabría disculparse no se ofrece."""
         monkeypatch.setattr(main, "ARREGLO_FIRE_URL", "")

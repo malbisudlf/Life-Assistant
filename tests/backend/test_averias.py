@@ -135,6 +135,17 @@ class TestElArregloEstaListo:
         assert r.status_code == 200 and r.json()["avisado"] is False
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
+    def test_solo_se_ata_a_un_arreglo_reciente(self, client, mock_requests):
+        """Una sesión que murió sin PR deja su fila en `arreglando` para siempre: sin
+        ventana, el siguiente PR verde de cualquier `arreglo/…` pedía permiso con su
+        título. Vale la fecha de alta o la de la decisión, porque lo que esperó a tu
+        botón puede llevar un día apuntado."""
+        mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
+        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        url = mock_requests.called("GET", "revision_hallazgos")[0][1]
+        assert "estado=eq.arreglando" in url
+        assert "or=(creado.gte." in url and ",decidido_at.gte." in url
+
     def test_dos_ejecuciones_del_workflow_no_dejan_dos_avisos(self, client, mock_requests):
         """El PATCH condicional: si ya no estaba en 'arreglando', no hay nada que avisar."""
         mock_requests.add("GET", "revision_hallazgos", FakeResponse([{"id": main._uuid_averia("ci", "1")}]))

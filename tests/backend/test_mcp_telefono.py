@@ -116,6 +116,31 @@ class TestToolsCall:
         assert "error" not in cuerpo
         assert "reunión" in cuerpo["result"]["content"][0]["text"]
 
+    def test_la_herramienta_no_corre_dentro_del_bucle_de_eventos(self, client, monkeypatch):
+        """El endpoint es `async` y las herramientas hacen HTTP bloqueante: llamadas
+        dentro del bucle, una agenda lenta de Graph congelaba el backend entero (el tick
+        de HA, n8n, el dashboard) mientras duraba. Se comprueba que al ejecutarse NO
+        hay un bucle de eventos corriendo en su hilo."""
+        import asyncio
+
+        en_el_bucle = []
+
+        def _agenda(dias=1):
+            try:
+                asyncio.get_running_loop()
+                en_el_bucle.append(True)
+            except RuntimeError:
+                en_el_bucle.append(False)
+            return {"eventos": []}
+
+        monkeypatch.setitem(main._JARVIS_HERRAMIENTAS["agenda"], "fn", _agenda)
+        sesion = self._sesion(client)
+        client.post("/mcp/telefono",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "agenda", "arguments": {"dias": 1}}},
+                    headers={**TOKEN, "Mcp-Session-Id": sesion})
+        assert en_el_bucle == [False]
+
     def test_rechaza_una_que_exige_confirmacion(self, client):
         antes = len(main._ha_ordenes)
         sesion = self._sesion(client)

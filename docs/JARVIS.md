@@ -402,8 +402,8 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     lista negra, la siguiente Alexa de la casa devolvería el ruido sola. Vacía, cae a
     `light` y `fan` — **nunca `switch`**, que es donde vive esa basura.
     Su notificación lleva un botón más, **«Apagar»** (`POST /avisos/{id}/apagar`), porque
-    un aviso que te obliga a abrir la app para resolverlo no ha terminado el trabajo. Tres
-    cosas de ese botón:
+    un aviso que te obliga a abrir la app para resolverlo no ha terminado el trabajo. Lo
+    que hay que saber de ese botón, y del aviso que lo trae:
     - **Apaga lo que decía el aviso, no lo que hay ahora.** Los `entity_id` se guardan con
       el aviso (columna `entidades`, `20260830_avisos_entidades`) en el momento de
       apuntarlo. Releer el catálogo al pulsar apagaría cosas de las que el aviso no habló
@@ -422,7 +422,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     - **Pulsarlo cuenta como «útil»**, y pasa por `_j_casa_ordenar` como cualquier otra
       orden de la casa: la lista viene de una fila de Supabase, que es escribible con la
       service key, así que tiene que pasar por la lista blanca de dominios y por el
-      catálogo igual que si la hubiera pedido el modelo.
+      catálogo igual que si la hubiera pedido el modelo. Los dominios que acepta
+      (`light`, `switch`, `fan`) tienen que ir **a la par de los que mira la regla**:
+      cuando la regla cambió `switch` por `fan`, el botón se quedó atrás y ofrecía apagar
+      un ventilador que luego se negaba a tocar.
+    - **La huella lleva el día.** Cada salida es un suceso, no un estado que dura: con la
+      huella hecha solo de nombres, dejarte la misma luz el lunes y el martes era «lo
+      mismo» y `_ya_dicho` callaba el aviso cinco días.
   Las reglas que necesitan salud reciben la FUNCIÓN que la lee, no el dato: pasando el
   dato, el tick de cada 5 minutos traía 30 días de métricas aunque la regla fuera a
   salirse por su guarda de hora.
@@ -518,7 +524,8 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     `caduca` resuelve el aviso que llega tarde; esto, el que llega a tiempo a algo que ya
     no es así. Hoy solo lo necesita el «Sal ya», que se programa hasta una hora antes: con
     su huella (`salir:<hash>:<inicio>`) el despachador busca la cita en el calendario y,
-    si se ha movido o cancelado, **lo cierra sin mandarlo** (`enviado=True`, sin
+    si se ha movido o cancelado, **lo cierra sin mandarlo** (`enviado=True` y
+    `enviado_at` vacío, como un caducado, para que no cuente como enviado; sin
     notificar, sin contar un envío de la regla y sin votar; la salida del tick dice
     `avisos_retirados`). Va antes del presupuesto, para que lo que ya no vale ni se
     posponga ni gaste hueco. Los eventos se leen **una vez por pasada**, y ninguna si no

@@ -870,6 +870,15 @@ class TestGobiernoDeAvisos:
                                                    "avisos_caducados": 1}
         assert correos == []
 
+    def test_un_aviso_caducado_no_gasta_presupuesto(self, mock_requests, correos):
+        """Se marca para no volver a cogerlo, pero sin `enviado_at`: el presupuesto del
+        día y /avisos/enviados cuentan por ese rango, y un caducado con la hora de ahora
+        se comía uno de los avisos de hoy sin haber sonado."""
+        self._pendientes(mock_requests, [self._fila(caduca="2026-08-17T05:30:00+00:00")])
+        main._despachar_recordatorios()
+        marcado = mock_requests.called("PATCH", "jarvis_recordatorios")[-1][2]["json"]
+        assert marcado == {"enviado": True, "enviado_at": None}
+
     def test_se_gasta_en_lo_que_mas_corre(self, mock_requests):
         """El orden es por prioridad, no por cuándo se apuntó."""
         self._pendientes(mock_requests, [])
@@ -1000,6 +1009,21 @@ class TestGobiernoDeAvisos:
         assert r.status_code == 502
         assert main._ha_ordenes == []
 
+    def test_apaga_el_ventilador_que_nombra_el_aviso(self, client, mock_requests,
+                                                     monkeypatch):
+        """Sin lista blanca, la regla mira `light` y `fan`. El botón seguía aceptando
+        solo `light` y `switch`: el aviso ofrecía apagar un ventilador y al pulsar
+        contestaba «No he podido apagar nada»."""
+        monkeypatch.setattr(main, "_casa_entidades",
+                            lambda: [{"id": "fan.dormitorio", "estado": "on"}])
+        self._aviso_al_salir(mock_requests, {"regla": "al_salir",
+                                             "entidades": ["fan.dormitorio"]})
+        r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 200 and r.json()["apagadas"] == ["fan.dormitorio"]
+        assert [(o["servicio"], o["entidad"]) for o in main._ha_ordenes] == [
+            ("fan.turn_off", "fan.dormitorio")]
+
     def test_solo_se_apaga_el_aviso_de_salir_de_casa(self, client, mock_requests):
         self._aviso_al_salir(mock_requests, {"regla": "reloj", "entidades": ["light.salon"]})
         r = client.post("/avisos/11111111-2222-3333-4444-555555555555/apagar",
@@ -1120,7 +1144,8 @@ class TestVigencia:
         assert r == {"recordatorios": 0, "avisos_retirados": 1}
         assert self.enviados == []
         cierre = mock_requests.called("PATCH", "jarvis_recordatorios")[-1][2]["json"]
-        assert cierre["enviado"] is True and cierre["enviado_at"]
+        # Sin `enviado_at`: no ha sonado, así que no gasta presupuesto ni cuenta como enviado.
+        assert cierre == {"enviado": True, "enviado_at": None}
         # Ni envío de la regla ni voto: el aviso no ha llegado a nadie.
         assert not mock_requests.called("POST", "avisos_reglas")
         assert not mock_requests.called("PATCH", "avisos_reglas")
@@ -1352,6 +1377,20 @@ class TestReactivarRegla:
         guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
         assert guardado == {"regla": "reloj", "silenciada": False,
                             "silenciada_desde": None, "no_utiles": 0}
+
+    def test_una_regla_tuya_tambien_se_reactiva(self, client, auth_headers, mock_requests):
+        """Tres «No» silencian también `tuya:<clave>`, y el aviso de despedida manda a
+        reactivarla. El patrón de las del sistema la rechazaba con un 422 y no quedaba
+        forma de devolverle la voz sin tocar Supabase a mano."""
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        r = client.post("/avisos/reglas/tuya%3Agym-martes/reactivar", headers=auth_headers)
+        assert r.status_code == 200
+        guardado = mock_requests.called("POST", "avisos_reglas")[0][2]["json"]
+        assert guardado["regla"] == "tuya:gym-martes" and guardado["silenciada"] is False
+
+    def test_reactivar_no_abre_el_patron_a_cualquier_cosa(self, client, auth_headers):
+        assert client.post("/avisos/reglas/otra%3Acosa/reactivar",
+                           headers=auth_headers).status_code == 422
 
     def test_reactivar_exige_credencial(self, client):
         assert client.post("/avisos/reglas/reloj/reactivar").status_code == 401

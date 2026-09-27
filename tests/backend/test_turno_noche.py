@@ -435,6 +435,48 @@ class TestElTurno(_Noche):
         assert primero["hecho"] is True
         assert segundo["hecho"] is False
 
+    def test_el_atajo_del_codigo_no_le_roba_la_noche_al_buzon(self, monkeypatch,
+                                                               mock_requests):
+        """En invierno la revisión nocturna puede llegar antes de las tres, y el atajo
+        abre el parte para anotar su arreglo. Con un único INSERT como reserva, el tick de
+        las tres veía el 409 y daba el turno por hecho sin mirar el buzón."""
+        self._sin_correo(monkeypatch)
+        mock_requests.add("POST", "noche_partes", main_fake_409())   # lo abrió el atajo
+        mock_requests.add("PATCH", "resumen=is.null", _FakeOk([{"fecha": "2026-09-14"}]))
+        mock_requests.add("POST", "noche_items", _FakeOk())
+
+        salida = main.correr_turno_de_noche()
+
+        assert salida["hecho"] is True
+        assert salida["resumen"]["correos"] == 1
+        # Y la marca es condicional: dos ticks no pueden coger el mismo turno.
+        assert mock_requests.called("PATCH", "resumen=is.null")
+
+    def test_el_turno_ya_cogido_no_se_repite_aunque_el_parte_lo_abriera_otro(
+            self, monkeypatch, mock_requests):
+        llamadas = []
+        monkeypatch.setattr(main, "_noche_correos",
+                            lambda: (llamadas.append(1) or [], {"estado": "ok"}))
+        mock_requests.add("POST", "noche_partes", main_fake_409())
+        mock_requests.add("PATCH", "resumen=is.null", _FakeOk([]))
+
+        assert main.correr_turno_de_noche()["hecho"] is False
+        assert llamadas == []
+
+    def test_la_frase_del_parte_cuenta_el_codigo(self, mock_requests):
+        """El resumen lo escribe el turno con sus correos; el item del código lo añade el
+        atajo después (o antes). La frase se leía del resumen guardado y nunca decía
+        que el código de ayer estaba arreglado."""
+        mock_requests.add("GET", "noche_partes", _FakeOk([{
+            "fecha": "2026-09-14", "resumen": {"correos": 1, "codigo": 0}}]))
+        mock_requests.add("GET", "noche_items", _FakeOk([
+            {"id": "1", "area": "correo", "titulo": "¿Quedamos?"},
+            {"id": "2", "area": "codigo", "titulo": "Revisión nocturna"}]))
+
+        parte = main._parte_de("2026-09-14")
+
+        assert "código" in parte["frase"]
+
     def test_apagado_no_corre(self, monkeypatch, mock_requests):
         monkeypatch.setattr(main, "NOCHE_TURNO", False)
         llamadas = []

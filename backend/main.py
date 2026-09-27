@@ -13016,7 +13016,21 @@ def _vigilar_sistema() -> dict:
     # «Arreglarlo» lanza una sesión de Claude Code contra el repositorio, y mandarla a
     # arreglar una caída de DNS es mandarla a cambiar código que no está roto. Se avisa,
     # que para eso se ha detectado, pero sin ofrecer un arreglo que no existe.
-    averias_codigo = [a for a in averias if not a.get("red")]
+    #
+    # Tampoco la ofrece el fallo del disparo de la rutina, que es un token, una cuota o
+    # el trigger: por eso nace con `issue: False`, que es la marca de «esto no pide un
+    # cambio de código».
+    averias_codigo = [a for a in averias if a.get("issue") and not a.get("red")]
+    # Y si el aviso no va a salir, tampoco la decisión. El id lleva el día, así que la
+    # misma avería de ayer apuntaba hoy una decisión `pendiente` nueva mientras el aviso
+    # se callaba por `_ya_dicho`: una pregunta que nadie ha visto, que Jarvis anunciaba en
+    # cada llamada y que «arregla lo del vigilante» lanzaba aunque ayer dijeras «No hacer
+    # nada». Se mira aquí y no después porque la fila se escribe antes del aviso. Solo
+    # cuando la decisión se iba a apuntar (hay rutina de arreglo): sin ella el aviso va
+    # sin botones por su propia regla, y eso sigue como estaba.
+    if (averias_codigo and ARREGLO_FIRE_URL and ARREGLO_FIRE_TOKEN
+            and (_regla_silenciada(REGLA_VIGILANTE) or _ya_dicho(REGLA_VIGILANTE, huella))):
+        return {"vigilante_averias": len(averias)}
     regla = REGLA_VIGILANTE if (averias_codigo and _vigilante_apuntar_decision(
         rid, averias_codigo, _lista_de_errores(averias_codigo), issues)) else REGLA_VIGILANTE_SOLO
     texto = " ".join(partes)
@@ -13659,10 +13673,17 @@ def _regla_al_salir_de_casa() -> int:
         # El PC se nombra en el aviso pero NO se apaga con el botón: cortarle la
         # corriente a un switch no es apagar un PC, es tirar del cable. Para eso está su
         # propio aviso, que ofrece suspenderlo (botón «Suspender», por SSH desde HA).
+        # La huella lleva la fecha, igual que la del PC de abajo: cada salida es un
+        # suceso nuevo, no un estado que dura. Sin ella, dejarte el lunes y el martes la
+        # misma luz era «la misma situación» y `_ya_dicho` callaba cinco días el único
+        # aviso que trae el botón de apagar. El día, y no la hora, para que el GPS que
+        # oscila en la puerta no lo repita cada vez que cruza la valla.
+        hoy = _ahora_local().date().isoformat()
         puestos += int(_apuntar_aviso(
             REGLA_AL_SALIR,
             f"Te has ido y quedan encendidas: {', '.join(nombres[:5])}.",
-            prioridad=PRIO_ALTA, huella=f"encendido:{','.join(sorted(nombres))[:120]}",
+            prioridad=PRIO_ALTA,
+            huella=f"encendido:{hoy}:{','.join(sorted(nombres))[:120]}",
             entidades=[l["id"] for l in luces if l["id"] != PC_ENTIDAD],
             # El tamaño del catálogo va dentro a propósito: distingue "no había nada más
             # encendido" de "el catálogo llegó a medias", que desde el aviso se ven igual.
@@ -14548,18 +14569,34 @@ NOCHE_ITEMS_URL  = f"{SUPABASE_URL}/rest/v1/noche_items"
 NOCHE_AREAS      = ("correo", "codigo", "agenda", "recado")
 
 
-def _reservar_parte(fecha: str) -> bool:
-    """Abre el parte de una noche. False si ya estaba abierto.
+def _reservar_parte(fecha: str, turno: bool = False) -> bool:
+    """Abre el parte de una noche. False si ya estaba abierto (o, con `turno`, si el
+    turno de esa noche ya lo había cogido alguien).
 
     Mismo truco que la reserva del resumen diario: INSERT contra la clave primaria, y el
     409 ES la respuesta. Es lo que impide que dos ticks separados por cinco minutos
     redacten los mismos borradores dos veces — preguntar primero y escribir después
     dejaría justo esa ventana abierta.
+
+    `turno` separa «el parte existe» de «el turno ya corrió». El parte también lo abre
+    el atajo que arregla el código, y en invierno la revisión nocturna puede llegar
+    antes de las tres: con un único INSERT, el tick de las tres se encontraba el 409 y
+    daba la noche por hecha sin haber mirado el buzón. Ahora el turno se marca en
+    `resumen` (lo que el atajo nunca escribe): al abrir, en el mismo INSERT; y si el
+    parte ya estaba, con un PATCH condicional a `resumen=is.null`, que sigue siendo
+    atómico — dos ticks no pueden ganarlo los dos.
     """
     try:
         r = http.post(NOCHE_PARTES_URL,
                       headers={**supabase_headers(), "Prefer": "return=minimal"},
-                      json={"fecha": fecha})
+                      json={"fecha": fecha, **({"resumen": {"en_curso": True}} if turno else {})})
+        if r.status_code == 409 and turno:
+            r = http.patch(f"{NOCHE_PARTES_URL}?fecha=eq.{fecha}&resumen=is.null",
+                           headers={**supabase_headers(), "Prefer": "return=representation"},
+                           json={"resumen": {"en_curso": True}})
+            if r.status_code >= 300:
+                raise _supabase_error(r)
+            return bool(r.json())
         if r.status_code == 409:
             return False
         if r.status_code >= 300:
@@ -14576,9 +14613,11 @@ def _anotar_en_el_parte(fecha: str, items: list) -> int:
     """Escribe items en el parte de una noche, abriéndolo si hiciera falta.
 
     Lo de abrirlo aquí no es por comodidad: el atajo que arregla el código se dispara
-    cuando la revisión nocturna abre su issue, que es más tarde que el turno y puede
-    caer un día en que el turno no corrió (apagado, o el buzón sin configurar). Sin esto,
-    ese item se estrellaría contra la clave foránea y se perdería sin ruido.
+    cuando la revisión nocturna abre su issue, que puede caer un día en que el turno no
+    corrió (apagado, o el buzón sin configurar). Sin esto, ese item se estrellaría contra
+    la clave foránea y se perdería sin ruido. Y no siempre llega DESPUÉS del turno: en
+    invierno puede adelantarse, y por eso abrir el parte aquí no marca el turno como
+    hecho (ver `_reservar_parte`).
     """
     if not items:
         return 0
@@ -14684,7 +14723,7 @@ def correr_turno_de_noche(forzar: bool = False) -> dict:
     fecha = _ahora_local().date().isoformat()
     if not (NOCHE_TURNO or forzar):
         return {"hecho": False, "motivo": "el turno de noche está apagado"}
-    if not _reservar_parte(fecha) and not forzar:
+    if not _reservar_parte(fecha, turno=True) and not forzar:
         return {"hecho": False, "motivo": "el turno de esta noche ya se hizo"}
 
     items, revisado = [], {}
@@ -14759,7 +14798,14 @@ def _parte_de(fecha: str) -> dict:
             raise _supabase_error(r)
         parte = partes[0]
         parte["items"] = r.json() or []
-        parte["frase"] = _frase_parte(parte.get("resumen") or {})
+        # El código se cuenta de los items y no del `resumen` guardado: el resumen lo
+        # escribe el turno con SUS correos, y el item del código lo añade el atajo cuando
+        # le toca, antes o después. Contado de lo guardado, la frase nunca decía «el
+        # código de ayer arreglado».
+        resumen = dict(parte.get("resumen") or {})
+        resumen["codigo"] = sum(1 for i in parte["items"] if i.get("area") == "codigo")
+        parte["resumen"] = resumen
+        parte["frase"] = _frase_parte(resumen)
         return parte
     except HTTPException:
         raise
@@ -16157,10 +16203,14 @@ def _apagar_entidades(ids: list) -> list:
     apagadas = []
     for eid in ids:
         dominio = str(eid).split(".")[0]
-        # Solo lo que se apaga como un interruptor de la pared. El aviso solo mira
-        # `light` y `switch`, pero quien lee la fila no puede darlo por hecho.
-        if dominio not in ("light", "switch"):
-            logger.warning("Al salir: no apago '%s', no es una luz ni un enchufe", eid)
+        # Solo lo que se apaga como un interruptor de la pared. Tiene que ir a la par de
+        # lo que mira el aviso (`light` y `fan` por dominio, `switch` por lista blanca):
+        # cuando la regla cambió `switch` por `fan`, esta tupla se quedó atrás y el botón
+        # «Apagar» ofrecía apagar un ventilador que luego se negaba a tocar. Y aun así se
+        # comprueba aquí, porque quien lee la fila no puede dar por hecho qué trae.
+        if dominio not in ("light", "switch", "fan"):
+            logger.warning("Al salir: no apago '%s', no es una luz, un enchufe ni un "
+                           "ventilador", eid)
             continue
         r = _j_casa_ordenar(f"{dominio}.turn_off", str(eid))
         if r.get("ok"):
@@ -16266,9 +16316,16 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
 
 
 @app.post("/avisos/reglas/{regla}/reactivar")
-def reactivar_regla(regla: str = Path(..., pattern=r"^[a-z0-9_]{1,40}$"),
+def reactivar_regla(regla: str = Path(..., pattern=r"^(tuya:[a-z0-9_-]{1,40}|[a-z0-9_]{1,40})$"),
                     credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Devuelve la voz a una regla silenciada."""
+    """Devuelve la voz a una regla silenciada.
+
+    El patrón admite las reglas tuyas (`tuya:<clave>`, con el guion que deja pasar
+    `_clave_recuerdo`): tres «No» también las silencian, y el aviso de despedida manda
+    a reactivarlas por su nombre. Con el patrón de las del sistema contestaba 422 y la
+    única salida era editar Supabase a mano — borrar y recrear la regla no sirve,
+    porque el silencio vive en `avisos_reglas` y la clave sale igual.
+    """
     try:
         r = http.post(f"{AVISOS_REGLAS_URL}?on_conflict=regla",
                        headers={**supabase_headers(),
@@ -16360,6 +16417,15 @@ REVISION_TOKEN     = os.getenv("REVISION_TOKEN", "")
 # configurado, el botón «Arreglarlo» lo dice en vez de fallar en silencio.
 ARREGLO_FIRE_URL   = os.getenv("ARREGLO_FIRE_URL", "")
 ARREGLO_FIRE_TOKEN = os.getenv("ARREGLO_FIRE_TOKEN", "")
+# El estado de una revisión aprobada de día: hay una sesión arreglándola, pero la mergea
+# ella sola si el CI pasa. Es distinto de `arreglando` porque ese lo busca `pr-listo`
+# para pedir permiso de despliegue, y aquí no hay permiso que pedir. La columna no tiene
+# constraint de valores (20260831_averias.sql), así que no pide migración.
+ESTADO_ARREGLO_SE_MERGEA_SOLO = "arreglando_y_mergea"
+# Cuánto puede tardar un arreglo en ponerse verde desde que se lanzó. Más allá, una fila
+# que sigue en `arreglando` es una sesión que murió sin PR, y atarle el siguiente PR
+# verde de una rama `arreglo/…` sería pedir permiso con el título de otra cosa.
+PR_LISTO_VENTANA_HORAS = 24
 
 
 def _uuid_revision(numero: int) -> str:
@@ -16634,10 +16700,19 @@ def _revision_decidir(rid: str, accion: str) -> dict:
             logger.error("Revisión: no se pudo liberar la decisión de %s (%s)", rid, e)
         return {"ok": False, "hecho": False, "issue": numero, "motivo": resultado["motivo"]}
 
+    # La revisión aprobada de día (sin instrucción) la mergea la propia sesión si el CI
+    # pasa, así que NO puede quedarse en `arreglando`: ese estado es el que busca
+    # `pr-listo` para pedir permiso de despliegue, y lo pedía por un PR que ya se estaba
+    # mergeando solo. Peor aún, nada la sacaba de ahí después, y el siguiente PR verde de
+    # una rama `arreglo/…` (un encargo hablado) se ataba a ella con el título de otra
+    # cosa. El vigilante sí deja el PR abierto, y por eso se queda en `arreglando`.
+    cambios = {"sesion_url": resultado["sesion"]}
+    if not instruccion:
+        cambios["estado"] = ESTADO_ARREGLO_SE_MERGEA_SOLO
     try:
         http.patch(f"{REVISION_URL}?id=eq.{rid}",
                    headers={**supabase_headers(), "Prefer": "return=minimal"},
-                   json={"sesion_url": resultado["sesion"]})
+                   json=cambios)
     except Exception as e:
         logger.warning("Revisión: no se pudo guardar la sesión de %s (%s)", rid, e)
     return {"ok": True, "hecho": True, "accion": "arreglar", "issue": numero,
@@ -17372,8 +17447,16 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     # La avería que este PR viene a cerrar es la que sigue en "arreglando". Se busca la
     # más reciente y no una por id porque la sesión de arreglo no puede devolvernos el
     # nuestro: lo que ata las dos mitades es el orden, no una referencia.
+    # Acotado en el tiempo porque atar por orden solo vale mientras la fila es reciente:
+    # una sesión que murió sin abrir PR deja su fila en `arreglando` para siempre, y sin
+    # ventana el siguiente PR verde de cualquier `arreglo/…` pediría permiso con su
+    # título. Vale `creado` (las averías nacen ya arreglándose) o `decidido_at` (lo que
+    # esperó a tu botón, que puede llevar un día apuntado antes de que lo pulses).
+    desde = (datetime.now(timezone.utc)
+             - timedelta(hours=PR_LISTO_VENTANA_HORAS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         r = http.get(f"{REVISION_URL}?estado=eq.arreglando"
+                     f"&or=(creado.gte.{desde},decidido_at.gte.{desde})"
                      "&select=id,origen,detalle,issue_titulo&order=creado.desc&limit=1",
                      headers=supabase_headers())
         if r.status_code >= 300:
@@ -18414,9 +18497,14 @@ def _despachar_recordatorios() -> dict:
         # la hora de salir sobra, y decirlo igual enseña a no fiarse del canal.
         caduca = str(fila.get("caduca") or "")
         if caduca and caduca < ahora:
+            # `enviado` a True para que no se vuelva a coger, pero SIN `enviado_at`: todo
+            # lo que cuenta avisos que salieron (el presupuesto del día, /avisos/enviados,
+            # la línea del día, la zona dev) filtra por ese rango. Con la hora de ahora,
+            # dos avisos de anoche que caducaban a las 08:30 se comían dos de los tres
+            # avisos de hoy sin haber sonado ninguno.
             http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
                        headers={**supabase_headers(), "Prefer": "return=minimal"},
-                       json={"enviado": True, "enviado_at": ahora})
+                       json={"enviado": True, "enviado_at": None})
             logger.info("Aviso de '%s' caducado sin mandar", regla or "?")
             caducados += 1
             continue
@@ -18427,11 +18515,13 @@ def _despachar_recordatorios() -> dict:
         # contar un envío de la regla y sin votar nada, porque no ha llegado a nadie.
         if not _sigue_en_pie(fila, vigencia):
             # En su propio try: si el cierre falla, el siguiente tick lo vuelve a mirar,
-            # y los demás vencidos de esta pasada tienen que salir igual.
+            # y los demás vencidos de esta pasada tienen que salir igual. Sin `enviado_at`,
+            # por lo mismo que el caducado: con la hora de ahora gastaba un hueco del
+            # presupuesto del día y contaba como enviado sin haber sonado.
             try:
                 http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
                            headers={**supabase_headers(), "Prefer": "return=minimal"},
-                           json={"enviado": True, "enviado_at": ahora})
+                           json={"enviado": True, "enviado_at": None})
                 logger.info("Aviso de 'salir' retirado sin mandar: la cita se ha movido "
                             "o cancelado")
                 retirados += 1
@@ -21386,7 +21476,11 @@ async def mcp_telefono(request: Request):
                               "message": "Esta acción necesita una confirmación que no "
                                          "se puede dar por teléfono. Dile a Mikel que "
                                          "la haga él, o dile que no puedes hacerla así."}}
-        resultado = _jarvis_despachar(nombre, argumentos)
+        # En un hilo: este endpoint es `async` solo para poder leer el cuerpo acotado, y
+        # las herramientas hacen HTTP bloqueante (Graph, Supabase, HA, Maps; 15 s cada
+        # petición). Llamadas aquí dentro congelaban el bucle de eventos entero mientras
+        # tanto: ni el tick de HA, ni n8n, ni el dashboard.
+        resultado = await asyncio.to_thread(_jarvis_despachar, nombre, argumentos)
         return {"jsonrpc": "2.0", "id": rpc_id,
                 "result": {"content": [{"type": "text",
                                          "text": json.dumps(resultado, ensure_ascii=False)}]}}

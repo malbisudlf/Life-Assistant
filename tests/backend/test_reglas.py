@@ -109,6 +109,24 @@ class TestSalYa(_Reglas):
         assert main._regla_sal_ya() == 0
         assert llamadas == []
 
+    def test_dos_eventos_del_mismo_calendario_no_comparten_huella(self, monkeypatch,
+                                                                  mock_requests):
+        """Los ids de Graph empiezan por el buzón y la carpeta, iguales para todo el
+        calendario, y lo propio de cada evento va al final. La huella era `id[:60]`: tras
+        el primer «sal ya», cualquier otro evento con sitio se daba por avisado cinco
+        días."""
+        comun = "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAD" + "Q" * 80
+        self._eventos(monkeypatch, [
+            self._evento(self.AHORA + timedelta(hours=1), id=comun + "AAAbbb="),
+            self._evento(self.AHORA + timedelta(hours=1, minutes=30), id=comun + "AAAccc="),
+        ])
+        self._salida(monkeypatch, self.AHORA + timedelta(minutes=30))
+        mirados = []
+        monkeypatch.setattr(main, "_ya_dicho",
+                            lambda regla, huella: mirados.append(huella) or False)
+        main._regla_sal_ya()
+        assert len(set(mirados)) == 2
+
     def test_un_evento_sin_sitio_no_cuenta(self, monkeypatch):
         self._eventos(monkeypatch, [self._evento(self.AHORA + timedelta(hours=1), sitio="")])
         assert main._regla_sal_ya() == 0
@@ -174,6 +192,26 @@ class TestNoLlegas(_Reglas):
         # Caduca a medianoche: si el presupuesto lo pospone, mejor que se calle a que se
         # reprograme para la mañana en la que "ya solo sirve para dar la mala noticia".
         assert apuntado["caduca"].startswith("2026-08-17T22:00")   # 00:00 local del 18
+
+    def test_dos_noches_distintas_no_comparten_huella(self, monkeypatch, mock_requests):
+        """Mismo fallo que el del «sal ya»: con `id[:30]>id[:30]` todas las parejas del
+        calendario tenían la misma huella, y tras el primer aviso no volvía a salir
+        ninguno en cinco días."""
+        comun = "AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAD" + "Q" * 80
+        manana = self.AHORA + timedelta(days=1)
+        monkeypatch.setattr(main, "get_departure_time", lambda body, credentials=None: {
+            "departure_iso": manana.replace(hour=10, minute=40).isoformat(),
+            "departure_time": "10:40", "duration_text": "25 min", "distance_text": "8 km"})
+        huellas = []
+        for ida, idb in (("AAAbbb=", "AAAccc="), ("AAAddd=", "AAAeee=")):
+            main._reglas_dia.clear()
+            self._eventos(monkeypatch, [
+                self._evento(manana.replace(hour=10), 60, "clase", "Facultad", comun + ida),
+                self._evento(manana.replace(hour=11, minute=15), 60, "médico", "Centro",
+                             comun + idb)])
+            assert main._regla_no_llegas() == 1
+            huellas.append(self._apuntados(mock_requests)[-1]["huella"])
+        assert huellas[0] != huellas[1]
 
     def test_si_da_tiempo_se_calla(self, monkeypatch):
         manana = self.AHORA + timedelta(days=1)
@@ -356,6 +394,20 @@ class TestAlSalirDeCasa(_Reglas):
         ])
         monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("light.salon",))
         assert main._regla_al_salir_de_casa() == 0
+
+    def test_otra_salida_otro_dia_vuelve_a_avisar(self, monkeypatch, mock_requests):
+        """Cada salida es un suceso, no un estado que dura. Con la huella hecha solo de
+        nombres, dejarte la misma luz el lunes y el martes era «lo mismo» y `_ya_dicho`
+        callaba cinco días el aviso que trae el botón de apagar."""
+        monkeypatch.setattr(main, "_casa_entidades",
+                            lambda: [{"id": "light.salon", "nombre": "Salón", "estado": "on"}])
+        huellas = []
+        for dias in (0, 1):
+            monkeypatch.setattr(main, "_ahora_local",
+                                lambda d=dias: self.AHORA + timedelta(days=d))
+            main._regla_al_salir_de_casa()
+            huellas.append(self._apuntados(mock_requests)[-1]["huella"])
+        assert huellas[0] != huellas[1]
 
     def test_con_todo_apagado_se_calla(self, monkeypatch):
         monkeypatch.setattr(main, "_casa_entidades",

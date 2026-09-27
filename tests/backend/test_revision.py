@@ -177,6 +177,31 @@ class TestLosBotones:
         # visible es la avería típica de este canal.
         assert len(correos) == 1 and "Arreglando" in correos[0][0]
 
+    def test_la_revision_de_dia_no_se_queda_esperando_permiso(self, client, mock_requests,
+                                                              correos):
+        """Aprobada de día, la sesión la mergea sola. Si la fila se quedaba en
+        `arreglando`, `pr-listo` pedía permiso de despliegue por ese PR (y hacía sonar el
+        teléfono), y como nada la sacaba de ahí, el siguiente PR verde de una rama
+        `arreglo/…` se ataba a ella con el título de otra cosa."""
+        self._pendiente(mock_requests)
+        mock_requests.add("POST", FIRE_URL, FakeResponse({}))
+        client.post(f"/revision/{main._uuid_revision(83)}/accion",
+                    json={"accion": "arreglar"}, headers=CABECERA)
+        cambio = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
+        assert cambio["estado"] == main.ESTADO_ARREGLO_SE_MERGEA_SOLO
+        assert cambio["estado"] != "arreglando"
+
+    def test_el_vigilante_si_se_queda_esperando_permiso(self, client, mock_requests,
+                                                         correos):
+        """El vigilante deja el PR abierto: ese sí tiene que encontrarlo `pr-listo`."""
+        self._pendiente(mock_requests, filas=[{**_fila(), "origen": "vigilante",
+                                               "detalle": "8 errores en backend"}])
+        mock_requests.add("POST", FIRE_URL, FakeResponse({}))
+        client.post(f"/revision/{main._uuid_revision(83)}/accion",
+                    json={"accion": "arreglar"}, headers=CABECERA)
+        cambio = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
+        assert "estado" not in cambio
+
     def test_la_transicion_es_condicional(self, client, mock_requests):
         """Dos toques seguidos no pueden lanzar dos agentes: quien pregunta si sigue
         pendiente es el propio PATCH, no un GET previo."""
