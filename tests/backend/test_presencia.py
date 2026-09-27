@@ -387,3 +387,85 @@ class TestUnirTramos:
 
     def test_sin_filas_no_hay_tramos(self):
         assert main._unir_tramos([]) == []
+
+
+class TestVolverACasa:
+    """Al volver, lo que te preguntaba si apagar algo de casa ya no tiene sentido.
+
+    Se retira del móvil por el id de cada aviso (su `tag`), sin votar: no haber pulsado
+    nada antes de volver no dice que el aviso no sirviera.
+    """
+
+    IDS = ["11111111-2222-3333-4444-555555555555", "22222222-2222-3333-4444-555555555555"]
+
+    @pytest.fixture(autouse=True)
+    def _entorno(self, monkeypatch):
+        monkeypatch.setattr(main, "REGLAS_PROACTIVAS", True)
+        monkeypatch.setattr(main, "_avisos_borrar", [])
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: datetime(2026, 8, 24, 20, 0, tzinfo=main.LOCAL_TZ))
+
+    def _movil_vivo(self, monkeypatch, vivo=True):
+        monkeypatch.setattr(main, "_movil_vivo", lambda: vivo)
+
+    def _avisos_de_salida(self, mock_requests, filas=None):
+        mock_requests.add("GET", "jarvis_recordatorios",
+                          FakeResponse([{"id": i} for i in self.IDS] if filas is None
+                                       else filas))
+
+    def _volver(self, client, mock_requests, antes_en_casa=False):
+        mock_requests.add("GET", "/rest/v1/presence",
+                          _presencia_guardada(zona="casa" if antes_en_casa else "trabajo",
+                                              en_casa=antes_en_casa, hace_minutos=30))
+        return client.post("/ha/presencia", json={"zona": "casa"},
+                           headers={"X-Auth-Token": "ha-poll-token"})
+
+    def test_volver_a_casa_retira_los_avisos_de_salida(self, client, mock_requests,
+                                                        monkeypatch):
+        self._movil_vivo(monkeypatch)
+        self._avisos_de_salida(mock_requests)
+        assert self._volver(client, mock_requests).status_code == 200
+        assert main._avisos_borrar == self.IDS
+        url = mock_requests.called("GET", "jarvis_recordatorios")[0][1]
+        assert "regla=in.(al_salir,pc_encendido)" in url
+        assert "util=is.null" in url and "enviado_at=gte." in url
+        # Retirar no es votar: ni un PATCH de `util`.
+        assert not [c for c in mock_requests.called("PATCH", "jarvis_recordatorios")
+                    if "util" in (c[2].get("json") or {})]
+
+    def test_un_id_que_no_es_uuid_no_se_retira(self, client, mock_requests, monkeypatch):
+        self._movil_vivo(monkeypatch)
+        self._avisos_de_salida(mock_requests, [{"id": "no-soy-un-uuid"}, {"id": self.IDS[0]}])
+        self._volver(client, mock_requests)
+        assert main._avisos_borrar == [self.IDS[0]]
+
+    def test_sin_movil_vivo_no_consulta(self, client, mock_requests, monkeypatch):
+        self._movil_vivo(monkeypatch, False)
+        self._avisos_de_salida(mock_requests)
+        self._volver(client, mock_requests)
+        assert not mock_requests.called("GET", "jarvis_recordatorios")
+        assert main._avisos_borrar == []
+
+    def test_seguir_en_casa_no_retira_nada(self, client, mock_requests, monkeypatch):
+        self._movil_vivo(monkeypatch)
+        self._avisos_de_salida(mock_requests)
+        self._volver(client, mock_requests, antes_en_casa=True)
+        assert not mock_requests.called("GET", "jarvis_recordatorios")
+        assert main._avisos_borrar == []
+
+    def test_un_fallo_al_retirar_no_tumba_la_presencia(self, client, mock_requests,
+                                                        monkeypatch):
+        self._movil_vivo(monkeypatch)
+
+        def _revienta(url, **kwargs):
+            raise RuntimeError("Supabase caído")
+        mock_requests.add("GET", "jarvis_recordatorios", _revienta)
+        r = self._volver(client, mock_requests)
+        assert r.status_code == 200 and r.json()["en_casa"] is True
+
+    def test_un_fallo_inesperado_tampoco(self, client, mock_requests, monkeypatch):
+        def _revienta():
+            raise RuntimeError("inesperado")
+        monkeypatch.setattr(main, "_retirar_avisos_de_salida", _revienta)
+        r = self._volver(client, mock_requests)
+        assert r.status_code == 200 and r.json()["en_casa"] is True

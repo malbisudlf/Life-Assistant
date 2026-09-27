@@ -327,6 +327,11 @@ distinta: no se valora el aviso ni se decide nada de código, se apaga lo que te
 encendido (el backend encola las órdenes y las recoge el sondeo de `ordenes-pending` que
 ya tienes puesto, así que no hace falta nada más).
 
+**`LA_APAGAR_` también es el «Suspender» del aviso «Te has ido con el PC encendido»**, y
+no hay que tocar el YAML: la misma automatización y el mismo `rest_command` llaman a
+`/avisos/{id}/apagar`, y es el backend quien mira la regla del aviso y, si es la del PC,
+encola la suspensión que ya recoge tu sondeo de `/ha/pc-power-pending`.
+
 ```yaml
 alias: Life Assistant - Apagar al salir
 mode: queued
@@ -488,7 +493,7 @@ siendo `action: "URI"` sin automatización.
 guardadas con el aviso desde que se apuntó, porque el catálogo que empujas cada hora
 puede ir muy por detrás: un botón que apaga algo de lo que el aviso no habló es peor que
 no tener botón. Y **el PC no entra**, aunque el aviso lo nombre: cortarle la corriente a
-un enchufe no es apagarlo. Para eso está su propio aviso.
+un enchufe no es apagarlo. Para eso está su propio aviso, con su botón «Suspender».
 
 Todas estas automatizaciones pueden convivir sin pisarse: cada una filtra por su prefijo.
 

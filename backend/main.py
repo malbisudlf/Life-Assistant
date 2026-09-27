@@ -5650,6 +5650,14 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
         except Exception:
             logger.exception("Regla 'al salir de casa': fallo inesperado")
 
+    # Y al VOLVER, lo contrario: lo que te preguntaba si apagar algo de casa ya no tiene
+    # sentido estando en ella. Mismo criterio: no puede tumbar la presencia.
+    if REGLAS_PROACTIVAS and anterior and not anterior.get("en_casa") and en_casa:
+        try:
+            _retirar_avisos_de_salida()
+        except Exception:
+            logger.exception("Retirar avisos de salida al volver: fallo inesperado")
+
     return {"ok": True, "zona": zona, "en_casa": en_casa}
 
 
@@ -10610,6 +10618,11 @@ REGLA_REVISION      = "revision"
 # de arriba: quien la mira es el despachador, para darle a la notificación su botón de
 # apagar (`_acciones_aviso`).
 REGLA_AL_SALIR      = "al_salir"
+# La de "te has ido con el PC encendido". Aparte de REGLA_AL_SALIR porque su botón hace
+# otra cosa —suspender por SSH, no cortar un enchufe— y porque, como aquélla, se retira
+# del móvil al volver a casa (`_retirar_avisos_de_salida`): las dos tienen que poder
+# nombrarse desde el despachador y desde la presencia.
+REGLA_PC_ENCENDIDO  = "pc_encendido"
 # La del aviso de "lo he arreglado, ¿lo despliego?". Misma razón que las dos de arriba:
 # quien la mira es el despachador, para darle a la notificación sus botones. Va aparte de
 # REGLA_REVISION porque la pregunta es OTRA —aquella pregunta si arreglar, ésta si
@@ -12948,18 +12961,24 @@ def _una_vez_por_pasada(clave: str, leer):
     return copia[clave]
 
 
-def _eventos_con_fecha(dias: int = 2) -> list:
-    """Los eventos de los próximos días con sus fechas ya parseadas a hora local.
+def _eventos_con_fecha_o_none(dias: int = 2) -> Optional[list]:
+    """Los eventos de los próximos días con sus fechas ya parseadas a hora local, o
+    None si no se pudieron leer.
 
     Los de todo el día quedan fuera: no tienen hora a la que salir ni hueco que medir.
+
+    Distingue «no hay eventos» de «no se sabe» porque quien comprueba si un aviso sigue
+    en pie (`_sigue_en_pie`) necesita esa diferencia: con Graph caído, una lista vacía
+    diría que tu cita se ha cancelado y callaría el «Sal ya». A las reglas que solo
+    buscan algo que decir les da igual, y para ellas está `_eventos_con_fecha`.
     """
     try:
         datos = _una_vez_por_pasada("eventos", lambda: get_events(credentials=None))
     except Exception as e:
         logger.warning("Reglas: no se pudieron leer los eventos (%s)", e)
-        return []
+        return None
     if not isinstance(datos, dict) or datos.get("error"):
-        return []
+        return None
     limite, salida = _ahora_local() + timedelta(days=dias), []
     for ev in datos.get("events") or []:
         if ev.get("isAllDay"):
@@ -12974,6 +12993,33 @@ def _eventos_con_fecha(dias: int = 2) -> list:
             continue
         salida.append({**ev, "ini": ini, "fin": fin})
     return sorted(salida, key=lambda e: e["ini"])
+
+
+def _eventos_con_fecha(dias: int = 2) -> list:
+    """Como `_eventos_con_fecha_o_none`, pero un fallo es una lista vacía: sin eventos
+    que mirar, una regla no tiene nada que decir, que es justo lo que tiene que pasar."""
+    return _eventos_con_fecha_o_none(dias) or []
+
+
+def _id_evento_corto(ev_id: str) -> str:
+    """Un resumen fijo y corto del id de un evento de Graph, para meterlo en una huella.
+
+    Un hash y no un recorte, a propósito: los ids de Graph comparten unos 90 caracteres
+    de prefijo (buzón y carpeta) y solo cambian al final. Recortarlos hacía que todas las
+    citas tuvieran la misma huella, y `_ya_dicho` callaba el «Sal ya» de la segunda cita
+    durante cinco días porque creía que ya se había dicho.
+    """
+    return hashlib.sha1(str(ev_id).encode()).hexdigest()[:16]
+
+
+def _huella_salir(ev: dict) -> str:
+    """La huella del «Sal ya» de una cita: qué cita y a qué hora empieza.
+
+    La hora va dentro para que una cita MOVIDA vuelva a tener aviso (es otra situación,
+    no la misma repetida), y para que el despachador pueda comprobar, justo antes de
+    soltarlo, que la cita sigue donde estaba cuando se apuntó (`_sigue_en_pie`).
+    """
+    return f"salir:{_id_evento_corto(ev.get('id') or '')}:{ev['ini'].strftime('%Y%m%dT%H%M')}"
 
 
 def _hora_salida(destino: str, cuando_iso: str, origen: str = "") -> Optional[datetime]:
@@ -13014,7 +13060,7 @@ def _regla_sal_ya() -> int:
             continue
         if (ev["ini"] - ahora).total_seconds() / 60 > SALIR_VENTANA_MIN:
             continue
-        huella = f"salir:{str(ev.get('id') or '')[:60]}"
+        huella = _huella_salir(ev)
         if _ya_dicho("salir", huella):
             continue
         salida = _hora_salida(destino, str(ev.get("start") or ""))
@@ -13077,7 +13123,11 @@ def _regla_no_llegas() -> int:
             # vez de reprogramarse justo para la mañana en la que "ya solo sirve para dar
             # la mala noticia" (ver docstring).
             caduca=medianoche,
-            huella=f"{str(antes.get('id'))[:30]}>{str(despues.get('id'))[:30]}",
+            # Con hash y no recortados: los ids de Graph comparten el prefijo del buzón,
+            # y recortados, todas las parejas de ese buzón tenían la misma huella.
+            huella=f"{_id_evento_corto(antes.get('id') or '')}>"
+                   f"{_id_evento_corto(despues.get('id') or '')}"
+                   f":{manana.isoformat()}",
             motivo={"acaba": antes["fin"].isoformat(),
                     "siguiente_empieza": despues["ini"].isoformat(),
                     "hay_que_salir": salida.isoformat(),
@@ -13245,6 +13295,12 @@ def _regla_hueco_entreno(obtener_salud) -> int:
         f"Llevas {dias} días sin entrenar. Mañana tienes libre de "
         f"{hueco[0].strftime('%H:%M')} a {hueco[1].strftime('%H:%M')}.",
         prioridad=PRIO_NORMAL, huella=f"hueco:{manana.isoformat()}",
+        # Caduca a la medianoche que abre el día del hueco. Sin esto, si el presupuesto
+        # lo pospone a las 08:30 dice «Mañana tienes libre…» cuando ese mañana ya es hoy:
+        # la misma mentira que evita `caduca` en `no_llegas`. Ni el fin del hueco ni el
+        # del día bastarían, porque las 08:30 caen antes de los dos y la frase ya sería
+        # falsa.
+        caduca=base.replace(hour=0, minute=0),
         motivo={"dias_sin_entrenar": dias, "listón_dias": JARVIS_PROACTIVO_SIN_ENTRENO,
                 "hueco": [hueco[0].isoformat(), hueco[1].isoformat()],
                 "hueco_minimo_min": HUECO_ENTRENO_MIN, "eventos_manana": len(ocupado)},
@@ -13297,7 +13353,7 @@ def _regla_al_salir_de_casa() -> int:
         nombres = [l["nombre"] for l in luces]
         # El PC se nombra en el aviso pero NO se apaga con el botón: cortarle la
         # corriente a un switch no es apagar un PC, es tirar del cable. Para eso está su
-        # propio aviso, que ofrece suspenderlo por SSH.
+        # propio aviso, que ofrece suspenderlo (botón «Suspender», por SSH desde HA).
         puestos += int(_apuntar_aviso(
             REGLA_AL_SALIR,
             f"Te has ido y quedan encendidas: {', '.join(nombres[:5])}.",
@@ -13315,7 +13371,7 @@ def _regla_al_salir_de_casa() -> int:
                           and str(e.get("estado") or "").lower() == "on"
                           for e in _casa_entidades()):
         puestos += int(_apuntar_aviso(
-            "pc_encendido", "Te has ido con el PC encendido. ¿Lo suspendo?",
+            REGLA_PC_ENCENDIDO, "Te has ido con el PC encendido. ¿Lo suspendo?",
             prioridad=PRIO_NORMAL, huella=f"pc:{_ahora_local().date().isoformat()}",
         ))
     return puestos
@@ -14778,6 +14834,14 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
                 {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
                 {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
+    if regla == REGLA_PC_ENCENDIDO:
+        # El prefijo `LA_APAGAR_` se reutiliza a propósito: la automatización y el
+        # `rest_command` de HA que lo recogen ya existen, así que «Suspender» no necesita
+        # ni una línea nueva de YAML. Qué significa «apagar» para cada aviso lo decide el
+        # backend (`apagar_aviso`) mirando su regla, no el botón.
+        return [{"action": f"LA_APAGAR_{rid}", "title": "Suspender"},
+                {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
+                {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
     return [{"action": f"LA_UTIL_{rid}",   "title": "Útil"},
             {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
 
@@ -14847,6 +14911,50 @@ def _retirar_del_movil(tag: str) -> None:
             _avisos_borrar.append(tag)
     except Exception as e:  # pragma: no cover - una lista en memoria no falla
         logger.warning("Avisos: no se pudo encolar el borrado de %s (%s)", tag, e)
+
+
+def _retirar_avisos_de_salida() -> int:
+    """Al volver a casa, quita del móvil los «te has ido con esto encendido» de hoy.
+
+    Esos avisos preguntan algo que solo tiene sentido mientras estás fuera: de vuelta,
+    la luz la apagas tú con la mano, y una notificación que sigue ofreciendo apagarla
+    enseña a ignorar el canal. Devuelve cuántos se retiraron.
+
+    Se retira por el id de cada aviso, que es su `tag`, y NUNCA por regla: retirar por
+    regla se llevaría también notificaciones que no son de esta salida. Tampoco vota:
+    no haber pulsado nada antes de volver no dice que el aviso no sirviera, así que
+    contarlo como «no útil» acabaría silenciando una regla buena. Solo se miran los que
+    siguen sin valorar (`util=is.null`): los contestados ya se retiraron solos.
+
+    Nunca puede romper: lo llama la presencia, cuya escritura ya está hecha.
+    """
+    # Sin nadie recogiendo la cola no hay nada que retirar del móvil, y consultar a
+    # Supabase en cada vuelta a casa para no hacer nada sería gasto puro.
+    if not _movil_vivo():
+        return 0
+    try:
+        desde = _ahora_local().replace(hour=0, minute=0, second=0, microsecond=0)
+        r = http.get(f"{RECORDATORIOS_URL}?regla=in.({REGLA_AL_SALIR},{REGLA_PC_ENCENDIDO})"
+                     f"&enviado=is.true&util=is.null"
+                     f"&enviado_at=gte.{quote(desde.astimezone(timezone.utc).isoformat(), safe='')}"
+                     "&select=id&limit=20", headers=supabase_headers())
+        if r.status_code >= 300:
+            logger.warning("Avisos: no se pudieron leer los avisos de salida (%s)",
+                           r.status_code)
+            return 0
+        retirados = 0
+        for fila in r.json() or []:
+            rid = str(fila.get("id") or "")
+            if re.match(_UUID_PATTERN, rid):
+                _retirar_del_movil(rid)
+                retirados += 1
+        if retirados:
+            logger.info("Has vuelto a casa: %d aviso(s) de salida retirados del móvil",
+                        retirados)
+        return retirados
+    except Exception as e:
+        logger.warning("Avisos: no se pudieron retirar los avisos de salida (%s)", e)
+        return 0
 
 
 # Cuánto se espera antes de reponer el aviso que «Hablarlo» se llevó por delante: lo que
@@ -15279,7 +15387,7 @@ REGLAS_LLAMABLES = {
     "malestar":      "Tus señales de recuperación apuntan a que algo va mal",
     "hueco_entreno": "Llevas días sin entrenar y mañana tienes hueco",
     "al_salir":      "Te has ido con cosas encendidas",
-    "pc_encendido":  "Te has ido con el PC encendido",
+    REGLA_PC_ENCENDIDO: "Te has ido con el PC encendido",
 }
 
 
@@ -15775,7 +15883,14 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
 
     Lo llama la acción de la notificación de HA (token de servicio) o el dashboard (JWT),
     igual que la valoración de avisos.
+
+    **Y el «Suspender» del aviso del PC.** Llega por el mismo botón (`LA_APAGAR_`) para
+    no tocar el YAML de HA, y aquí se decide qué significa según la regla del aviso: en
+    `pc_encendido` no hay entidades que apagar, se encola la suspensión por el mismo
+    camino que `POST /suspend-pc` (`_pc_power_action`, que HA recoge en
+    `/ha/pc-power-pending` y ejecuta por SSH).
     """
+    global _pc_power_action
     _auth_boton(request, token)
 
     try:
@@ -15792,11 +15907,28 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
 
     if not filas:
         raise HTTPException(status_code=404, detail="Ese aviso no existe")
-    if str(filas[0].get("regla") or "") != REGLA_AL_SALIR:
-        # Solo ese aviso lleva este botón. Si llega otro id es que el YAML de HA lo está
-        # mandando a donde no toca, y apagar "lo que sea" del aviso equivocado es
+    regla = str(filas[0].get("regla") or "")
+    if regla == REGLA_PC_ENCENDIDO:
+        _pc_power_action = "suspend"
+        # Mismo razonamiento que el apagado de abajo: actuar sobre el aviso es la
+        # valoración más fuerte que existe, y sin contarla la regla podía silenciarse sola.
+        try:
+            http.patch(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"util": True})
+            _valorar_regla(REGLA_PC_ENCENDIDO, True)
+        except Exception as e:
+            # La suspensión ya está encolada: fallar aquí solo cuesta una estadística.
+            logger.warning("Avisos: suspensión encolada pero sin apuntar la valoración "
+                           "de %s (%s)", aviso_id, e)
+        logger.info("Al salir: suspendiendo el PC desde el aviso %s", aviso_id)
+        return {"ok": True, "suspendido": True}
+    if regla != REGLA_AL_SALIR:
+        # Solo esos dos avisos llevan este botón. Si llega otro id es que el YAML de HA lo
+        # está mandando a donde no toca, y apagar "lo que sea" del aviso equivocado es
         # justamente lo que no puede pasar.
-        raise HTTPException(status_code=422, detail="Ese aviso no es de los que se apagan")
+        raise HTTPException(status_code=422,
+                            detail="Ese aviso no es de los que se apagan ni se suspenden")
 
     entidades = filas[0].get("entidades") or []
     if not isinstance(entidades, list) or not entidades:
@@ -17878,6 +18010,65 @@ def _registrar_retraso(retraso: float, regla: str, texto: str) -> None:
                        quien, int(retraso), texto[:60])
 
 
+# La forma de la huella de «Sal ya» desde que lleva la hora de inicio (`_huella_salir`).
+# Solo las que casan con ella se pueden comprobar contra el calendario al despachar.
+_HUELLA_SALIR_RE = re.compile(r"^salir:[0-9a-f]{16}:\d{8}T\d{4}$")
+
+
+def _sigue_en_pie(fila: dict, cache: dict) -> bool:
+    """Si el aviso sigue diciendo la verdad justo antes de salir. La VIGENCIA.
+
+    `caduca` resuelve el aviso que llega tarde; esto resuelve el que llega a tiempo a
+    una cita que ya no existe o que ya no es a esa hora. Un «Sal ya» se programa con
+    hasta una hora de antelación, y en ese rato la cita se puede mover o cancelar: sin
+    esta comprobación te mandaba salir hacia algo que ya no estaba ahí.
+
+    Solo se comprueba «salir»: el resto de reglas se apuntan a la hora de decirlas o ya
+    se cubren con `caduca`. Y la regla es la de siempre, **ante la duda se habla**: una
+    huella antigua (de antes de llevar la hora), Graph caído o cualquier fallo dejan
+    salir el aviso. Callar un «Sal ya» bueno cuesta la cita; repetir uno malo, un vistazo.
+
+    Los eventos se leen UNA vez por pasada del despachador (`cache`), no una por aviso:
+    es una llamada a Graph, y dos citas seguidas son dos «Sal ya» en el mismo tick.
+    """
+    try:
+        if str(fila.get("regla") or "") != "salir":
+            return True
+        huella = str(fila.get("huella") or "")
+        if not _HUELLA_SALIR_RE.match(huella):
+            return True
+        if "eventos" not in cache:
+            cache["eventos"] = _eventos_con_fecha_o_none(dias=1)
+        eventos = cache["eventos"]
+        if eventos is None:
+            return True
+        return any(_huella_salir(ev) == huella for ev in eventos)
+    except Exception as e:
+        logger.warning("Avisos: no se pudo comprobar si el 'salir' sigue en pie (%s)", e)
+        return True
+
+
+def _voz_al_despachar(fila: dict, regla: str) -> bool:
+    """Si el aviso se oye además de leerse, decidido al SOLTARLO y no al apuntarlo.
+
+    Para el «Sal ya», estar en casa se miraba al programarlo, hasta una hora antes: si
+    entretanto habías salido, Alexa te lo decía a una casa vacía, y si habías vuelto, no
+    te lo decía. Con la presencia vigente se decide ahora; con la presencia caducada no
+    se sabe dónde estás, y se respeta lo que se decidió al apuntar.
+
+    Estar FUERA quita la voz, pero no retira el aviso: puedes estar fuera y tener que ir
+    igual, y el móvil sigue sonando. El resto de reglas llevan la voz que se apuntó.
+    """
+    if regla != "salir":
+        return bool(fila.get("voz"))
+    try:
+        p = presencia_vigente()
+        return bool(p.get("en_casa")) if p else bool(fila.get("voz"))
+    except Exception as e:
+        logger.warning("Avisos: no se pudo leer la presencia al despachar (%s)", e)
+        return bool(fila.get("voz"))
+
+
 def _despachar_recordatorios() -> dict:
     """Manda los que ya han vencido. Lo llama el tick de HA.
 
@@ -17889,7 +18080,7 @@ def _despachar_recordatorios() -> dict:
         ahora    = ahora_dt.isoformat()
         r = http.get(
             f"{RECORDATORIOS_URL}?enviado=is.false&cuando=lte.{quote(ahora, safe='')}"
-            f"&select=id,cuando,texto,regla,prioridad,caduca,voz"
+            f"&select=id,cuando,texto,regla,prioridad,caduca,voz,huella"
             # Por prioridad primero: el presupuesto se gasta en lo que más corre, no en
             # lo que se apuntó antes. Con el orden por fecha, un aviso de "sal ya" podía
             # quedarse fuera por tres avisos de la noche anterior.
@@ -17904,7 +18095,9 @@ def _despachar_recordatorios() -> dict:
         return {"recordatorios": 0}
 
     presupuesto = max(0, AVISOS_MAX_DIA - _contar_enviados_hoy()) if vencidos else 0
-    enviados = pospuestos = caducados = llamadas = 0
+    enviados = pospuestos = caducados = retirados = llamadas = 0
+    # Lo que `_sigue_en_pie` lee una vez por pasada (los eventos del calendario).
+    vigencia: dict = {}
     for fila in vencidos:
         rid = str(fila.get("id") or "")
         if not re.match(_UUID_PATTERN, rid):
@@ -17921,6 +18114,25 @@ def _despachar_recordatorios() -> dict:
                        json={"enviado": True, "enviado_at": ahora})
             logger.info("Aviso de '%s' caducado sin mandar", regla or "?")
             caducados += 1
+            continue
+
+        # A tiempo, pero sobre algo que ya no es así: la cita se ha movido o cancelado.
+        # Va ANTES del presupuesto para que un aviso que ya no vale ni se posponga ni
+        # gaste un hueco del día, y se cierra igual que un caducado: sin notificar, sin
+        # contar un envío de la regla y sin votar nada, porque no ha llegado a nadie.
+        if not _sigue_en_pie(fila, vigencia):
+            # En su propio try: si el cierre falla, el siguiente tick lo vuelve a mirar,
+            # y los demás vencidos de esta pasada tienen que salir igual.
+            try:
+                http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
+                           headers={**supabase_headers(), "Prefer": "return=minimal"},
+                           json={"enviado": True, "enviado_at": ahora})
+                logger.info("Aviso de 'salir' retirado sin mandar: la cita se ha movido "
+                            "o cancelado")
+                retirados += 1
+            except Exception as e:
+                logger.warning("Avisos: no se pudo cerrar el 'salir' retirado %s (%s)",
+                               rid, e)
             continue
 
         # El presupuesto solo gobierna los avisos de REGLA que ha decidido el SISTEMA:
@@ -17945,7 +18157,7 @@ def _despachar_recordatorios() -> dict:
         retraso = _retraso_min(fila.get("cuando"), ahora_dt)
         try:
             canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis",
-                               voz=bool(fila.get("voz")), aviso_id=rid,
+                               voz=_voz_al_despachar(fila, regla), aviso_id=rid,
                                acciones=_acciones_aviso(rid, regla),
                                # Los únicos que suenan con el móvil en silencio, y por
                                # la misma razón los dos: hay trabajo PARADO hasta que
@@ -17978,6 +18190,8 @@ def _despachar_recordatorios() -> dict:
         salida["avisos_pospuestos"] = pospuestos
     if caducados:
         salida["avisos_caducados"] = caducados
+    if retirados:
+        salida["avisos_retirados"] = retirados
     if llamadas:
         salida["avisos_llamados"] = llamadas
     return salida

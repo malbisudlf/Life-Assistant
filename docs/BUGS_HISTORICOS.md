@@ -3,6 +3,24 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **La huella de "Sal ya" recortaba el id de Graph.** `_regla_sal_ya` apuntaba cada aviso
+  con la huella `salir:<los 60 primeros caracteres del id del evento>`, y `_ya_dicho` no
+  deja repetir una huella en cinco días (`AVISOS_REPETIR_DIAS`). Los ids de Graph
+  comparten unos 90 caracteres de prefijo —el buzón y la carpeta— y solo cambian al
+  final, así que **todas las citas tenían la misma huella**: salía el «Sal ya» de la
+  primera cita y el resto se callaba durante cinco días, sin un solo error en el
+  registro. «No llegas» tenía el mismo fallo con 30 caracteres por cita, y todas las
+  parejas del mismo buzón se callaban entre sí. Se veía como «a veces avisa y a veces
+  no», que es lo que tiene un fallo que depende de cuál fue la primera cita de la semana.
+  - Arreglo: `_id_evento_corto` (SHA-1 del id, 16 hex) y `_huella_salir`, que además
+    lleva la hora de inicio: una cita movida vuelve a tener aviso, y el despachador puede
+    comprobar al soltarlo que la cita sigue en pie (`_sigue_en_pie`, ver «Vigencia» en
+    `docs/JARVIS.md`). Los «Sal ya» que ya estaban programados al desplegarlo llevan la
+    huella vieja, que no casa con la nueva: pueden salir dos veces, una sola vez.
+  - Moraleja: **un id opaco no se recorta, se resume con un hash.** Recortar supone que
+    lo que distingue un id está al principio, y en los de Graph está al final. Un hash no
+    supone nada sobre dónde está la diferencia.
+
 - **La hora tope no era «salgo con lo que haya»: era «renuncio a la noche de hoy».** El
   2026-09-22 la queja fue la de siempre por tercera vez, y esta vez el sistema había
   hecho todo lo que se le pidió. Te despiertas, abres Zepp, sincronizas varias veces; a

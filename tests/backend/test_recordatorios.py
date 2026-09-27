@@ -1059,6 +1059,197 @@ class TestGobiernoDeAvisos:
         assert avisos[0]["voz"] is True and avisos[0]["id"] == "abc"
 
 
+class TestVigencia:
+    """La cuarta pieza del gobierno: un aviso programado se comprueba contra la realidad
+    justo antes de salir, no solo al apuntarlo.
+
+    Un «Sal ya» se programa hasta una hora antes, y en ese rato la cita se puede mover o
+    cancelar. Lo que se comprueba aquí es que el que ya no es verdad no salga, y sobre
+    todo lo contrario: que ante la duda (Graph caído, huella antigua) salga igual.
+    """
+
+    AHORA = datetime(2026, 8, 17, 17, 30, tzinfo=main.LOCAL_TZ)
+    CITA  = datetime(2026, 8, 17, 18, 0, tzinfo=main.LOCAL_TZ)
+    RID   = "11111111-2222-3333-4444-555555555555"
+
+    @pytest.fixture(autouse=True)
+    def _entorno(self, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.AHORA)
+        self.lecturas = []
+        self.eventos  = []
+        self.enviados = []
+
+        def _get_events(credentials=None):
+            self.lecturas.append(1)
+            if isinstance(self.eventos, Exception):
+                raise self.eventos
+            if isinstance(self.eventos, dict):
+                return self.eventos
+            return {"events": self.eventos}
+        monkeypatch.setattr(main, "get_events", _get_events)
+
+        def _notificar(titulo, texto, **kw):
+            self.enviados.append({"texto": texto, **kw})
+            return "movil"
+        monkeypatch.setattr(main, "_notificar", _notificar)
+
+    def _evento(self, ini, id="ev1"):
+        fin = ini + timedelta(hours=1)
+        return {"id": id, "title": "médico", "location": "Centro", "isAllDay": False,
+                "start": ini.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "end":   fin.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
+
+    def _huella(self, ini=None, id="ev1"):
+        return main._huella_salir({"id": id, "ini": ini or self.CITA})
+
+    def _fila(self, n=1, regla="salir", huella=None, voz=False):
+        return {"id": f"1111111{n}-2222-3333-4444-555555555555", "texto": f"Sal ya {n}",
+                "cuando": "2026-08-17T15:20:00+00:00", "regla": regla,
+                "prioridad": main.PRIO_URGENTE, "voz": voz,
+                "huella": self._huella() if huella is None else huella}
+
+    def _pendientes(self, mock_requests, filas):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse(filas))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": "x"}]))
+
+    # ── Lo que ya no es verdad no sale ────────────────────────────────────────
+    def test_sal_ya_de_una_cita_movida_no_sale(self, mock_requests):
+        self.eventos = [self._evento(self.CITA + timedelta(hours=1))]   # ahora a las 19:00
+        self._pendientes(mock_requests, [self._fila()])
+        r = main._despachar_recordatorios()
+        assert r == {"recordatorios": 0, "avisos_retirados": 1}
+        assert self.enviados == []
+        cierre = mock_requests.called("PATCH", "jarvis_recordatorios")[-1][2]["json"]
+        assert cierre["enviado"] is True and cierre["enviado_at"]
+        # Ni envío de la regla ni voto: el aviso no ha llegado a nadie.
+        assert not mock_requests.called("POST", "avisos_reglas")
+        assert not mock_requests.called("PATCH", "avisos_reglas")
+
+    def test_sal_ya_de_una_cita_cancelada_no_sale(self, mock_requests):
+        self.eventos = [self._evento(self.CITA + timedelta(hours=2), id="otra")]
+        self._pendientes(mock_requests, [self._fila()])
+        assert main._despachar_recordatorios()["avisos_retirados"] == 1
+        assert self.enviados == []
+
+    def test_sal_ya_vigente_sale(self, mock_requests):
+        self.eventos = [self._evento(self.CITA)]
+        self._pendientes(mock_requests, [self._fila()])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert len(self.enviados) == 1
+
+    # ── Ante la duda se habla ─────────────────────────────────────────────────
+    @pytest.mark.parametrize("fallo", [RuntimeError("Graph caído"),
+                                       {"error": "sin token", "events": []}])
+    def test_si_graph_falla_el_sal_ya_sale_igual(self, mock_requests, fallo):
+        """Con Graph caído una lista vacía diría «cancelada». No se sabe, así que se habla."""
+        self.eventos = fallo
+        self._pendientes(mock_requests, [self._fila()])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert len(self.enviados) == 1
+
+    def test_huella_antigua_sale_igual(self, mock_requests):
+        """Los apuntados antes del despliegue no llevan la hora: no se pueden comprobar."""
+        self.eventos = []
+        self._pendientes(mock_requests, [self._fila(huella="salir:AAMkAGI2xxxxxxxx")])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+        assert self.lecturas == [], "una huella que no se puede comprobar no gasta Graph"
+
+    def test_una_sola_lectura_de_eventos_por_pasada(self, mock_requests):
+        self.eventos = [self._evento(self.CITA)]
+        self._pendientes(mock_requests, [self._fila(1), self._fila(2)])
+        assert main._despachar_recordatorios() == {"recordatorios": 2}
+        assert len(self.lecturas) == 1
+
+    def test_otras_reglas_no_consultan_eventos(self, mock_requests):
+        self._pendientes(mock_requests, [self._fila(regla="reloj", huella="reloj:x")])
+        main._despachar_recordatorios()
+        assert self.lecturas == []
+        assert len(self.enviados) == 1
+
+    def test_un_fallo_comprobando_no_tumba_a_los_demas(self, mock_requests, monkeypatch):
+        """La lección de `_correr_reglas_seguro`: lo nuevo no puede callar lo de siempre."""
+        def _revienta(dias=2):
+            raise RuntimeError("inesperado")
+        monkeypatch.setattr(main, "_eventos_con_fecha_o_none", _revienta)
+        self._pendientes(mock_requests, [self._fila(1), self._fila(2, regla=None)])
+        assert main._despachar_recordatorios() == {"recordatorios": 2}
+
+    # ── La voz se decide al soltarlo ──────────────────────────────────────────
+    @pytest.mark.parametrize("en_fila, presencia, esperada", [
+        (True,  {"en_casa": False}, False),   # te fuiste después de apuntarlo
+        (False, {"en_casa": True},  True),    # volviste después de apuntarlo
+        (True,  None,               True),    # presencia caducada: se respeta la fila
+        (False, None,               False),
+    ])
+    def test_la_voz_se_decide_al_despachar(self, mock_requests, monkeypatch,
+                                           en_fila, presencia, esperada):
+        """Estar fuera quita la voz, pero el aviso sale: puedes estar fuera y tener que
+        ir igual."""
+        monkeypatch.setattr(main, "presencia_vigente", lambda: presencia)
+        self.eventos = [self._evento(self.CITA)]
+        self._pendientes(mock_requests, [self._fila(voz=en_fila)])
+        main._despachar_recordatorios()
+        assert len(self.enviados) == 1
+        assert self.enviados[0]["voz"] is esperada
+
+    def test_las_demas_reglas_llevan_la_voz_que_se_apunto(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "presencia_vigente", lambda: {"en_casa": False})
+        self._pendientes(mock_requests, [self._fila(regla="reloj", huella="", voz=True)])
+        main._despachar_recordatorios()
+        assert self.enviados[0]["voz"] is True
+
+
+class TestSuspenderElPc:
+    """El aviso de «te has ido con el PC encendido» preguntaba «¿lo suspendo?» sin botón
+    para contestar que sí. Ahora lo trae, reutilizando el `LA_APAGAR_` que HA ya maneja."""
+
+    RID = "11111111-2222-3333-4444-555555555555"
+
+    def _aviso(self, mock_requests, regla):
+        mock_requests.add("GET", "jarvis_recordatorios",
+                          FakeResponse([{"regla": regla, "entidades": None}]))
+
+    def test_el_aviso_del_pc_trae_suspender(self):
+        acciones = main._acciones_aviso(self.RID, main.REGLA_PC_ENCENDIDO)
+        assert acciones[0] == {"action": f"LA_APAGAR_{self.RID}", "title": "Suspender"}
+        assert [a["title"] for a in acciones] == ["Suspender", "Útil", "No"]
+
+    def test_suspender_pone_la_accion_y_vota_util(self, client, mock_requests):
+        self._aviso(mock_requests, "pc_encendido")
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        r = client.post(f"/avisos/{self.RID}/apagar", headers=CABECERA)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "suspendido": True}
+        assert main._pc_power_action == "suspend"
+        assert mock_requests.called("PATCH", "jarvis_recordatorios")[0][2]["json"] == {"util": True}
+        assert mock_requests.called("POST", "avisos_reglas")[0][2]["json"]["utiles"] == 1
+        # Y lo recoge HA por el mismo camino que el botón del dashboard.
+        assert client.get("/ha/pc-power-pending", headers=CABECERA).json() == {
+            "action": "suspend"}
+
+    def test_si_valorar_falla_la_suspension_sigue_en_pie(self, client, mock_requests,
+                                                         monkeypatch):
+        self._aviso(mock_requests, "pc_encendido")
+
+        def _revienta(regla, util):
+            raise RuntimeError("Supabase caído")
+        monkeypatch.setattr(main, "_valorar_regla", _revienta)
+        r = client.post(f"/avisos/{self.RID}/apagar", headers=CABECERA)
+        assert r.status_code == 200 and main._pc_power_action == "suspend"
+
+    def test_apagar_con_aviso_de_otra_regla_da_422(self, client, mock_requests):
+        self._aviso(mock_requests, "salir")
+        r = client.post(f"/avisos/{self.RID}/apagar", headers=CABECERA)
+        assert r.status_code == 422
+        assert main._pc_power_action is None and main._ha_ordenes == []
+
+    def test_suspender_exige_auth(self, client, mock_requests):
+        self._aviso(mock_requests, "pc_encendido")
+        r = client.post(f"/avisos/{self.RID}/apagar")
+        assert r.status_code == 403
+        assert main._pc_power_action is None
+
+
 class TestHoraAprendida:
     """La hora del aviso del reloj sale de tus noches, no de una constante.
 

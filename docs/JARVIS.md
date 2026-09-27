@@ -358,6 +358,12 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     por eso la huella se comprueba **antes** de llamar a Maps. Con `voz` si estás en casa:
     el móvil puede estar en otra habitación y este es justo el aviso que no vale leído
     diez minutos tarde. Si la hora de salir ya pasó **no se apunta**.
+    **La huella es por cita y por hora** (`_huella_salir`: `salir:<hash del id>:<inicio>`).
+    Antes era el id de Graph recortado a 60 caracteres, y los ids de Graph comparten unos
+    90 de prefijo (buzón y carpeta): todas las citas tenían la misma huella y el «Sal ya»
+    de la segunda se callaba cinco días. La hora va dentro para que una cita movida vuelva
+    a tener aviso, y para poder comprobar al soltarlo que sigue en pie (ver **Vigencia**
+    en el gobierno de los avisos).
   - **«No llegas»** (`_regla_no_llegas`): dos citas que no se solapan —así que Outlook las
     da por buenas— pero entre las que no da tiempo a moverse. Se avisa **la noche antes**,
     que es cuando todavía se puede mover algo.
@@ -370,7 +376,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     porque las conclusiones no se portan al backend, y allí solo se ve abriendo el
     dashboard, que es justo lo que no vas a hacer el día que tu cuerpo dice que no.
   - **Hueco para entrenar** (`_regla_hueco_entreno`): la hora concreta libre de mañana.
-    Sin histórico de entrenos no se regaña, la regla de siempre.
+    Sin histórico de entrenos no se regaña, la regla de siempre. **Caduca a la medianoche
+    que abre ese día**, como «No llegas»: si el presupuesto lo pospone a las 08:30, diría
+    «Mañana tienes libre…» cuando ese mañana ya es hoy.
   - **Al salir de casa** (`_regla_al_salir_de_casa`): se dispara en `POST /ha/presencia` al
     CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **No apaga nada
     por su cuenta**: el catálogo lo empuja HA cada hora y apagar con un dato viejo es
@@ -395,8 +403,14 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
       peor que no tenerlo. La regla de "no apagar a ciegas" sigue intacta: ahora lo apagas
       tú.
     - **El PC se nombra pero no se apaga con él.** Cortarle la corriente a un `switch` no
-      es apagar un PC, es tirar del cable; para eso está su propio aviso, que ofrece
-      suspenderlo por SSH. Se excluye `PC_ENTIDAD` de la lista.
+      es apagar un PC, es tirar del cable; para eso está su propio aviso
+      (`REGLA_PC_ENCENDIDO`, «Te has ido con el PC encendido. ¿Lo suspendo?»), que trae
+      los botones **[Suspender, Útil, No]**. «Suspender» reutiliza a propósito el prefijo
+      `LA_APAGAR_`, así que la automatización y el `rest_command` de HA que ya existían
+      sirven sin tocar el YAML: es `POST /avisos/{id}/apagar` quien mira la regla del aviso
+      y, en `pc_encendido`, encola la suspensión por el mismo camino que
+      `POST /suspend-pc` (`_pc_power_action` → `/ha/pc-power-pending` → SSH desde HA).
+      Cuenta como «útil», igual que apagar. Se excluye `PC_ENTIDAD` de la lista.
     - **Pulsarlo cuenta como «útil»**, y pasa por `_j_casa_ordenar` como cualquier otra
       orden de la casa: la lista viene de una fila de Supabase, que es escribible con la
       service key, así que tiene que pasar por la lista blanca de dominios y por el
@@ -467,9 +481,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   `avisos_reglas` + columnas nuevas en `jarvis_recordatorios`): un asistente proactivo
   tiene **un solo modo de fallo, volverse ruido**, y no falla de golpe — falla porque cada
   regla parece razonable por separado hasta que un día se dejan de leer todos los avisos a
-  la vez, buenos incluidos. Tres piezas, y las tres viven en la PUERTA y no en cada regla,
-  para que una regla nueva las herede sin poder olvidarse (misma razón que el interruptor
-  del resumen dentro de `enviar_brief_si_toca`):
+  la vez, buenos incluidos. Cuatro piezas, y las cuatro viven en la PUERTA (al apuntar o
+  al despachar) y no en cada regla, para que una regla nueva las herede sin poder
+  olvidarse (misma razón que el interruptor del resumen dentro de `enviar_brief_si_toca`):
   - **Presupuesto**: los avisos compiten en vez de sumarse. `AVISOS_MAX_DIA` al día, el
     despacho ordena **por prioridad y no por fecha** (con el orden por fecha, un "sal ya"
     se quedaba fuera por tres avisos de la noche anterior) y lo que no entra **se pospone**
@@ -488,7 +502,32 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     "llevas 3 días sin entrenar" salía el jueves, el viernes y el sábado y solo el primero
     informaba. La huella es la SITUACIÓN, no el texto: en el proactivo son los motivos en
     crudo, antes de que el modelo los redacte, porque dos redacciones del mismo hecho son
-    el mismo aviso.
+    el mismo aviso. **Un id opaco no se recorta para meterlo en una huella, se resume con
+    un hash** (`_id_evento_corto`): ver «La huella de "Sal ya" recortaba el id de Graph»
+    en `docs/BUGS_HISTORICOS.md`.
+  - **Vigencia** (`_sigue_en_pie`, `_voz_al_despachar`, en el despacho): un aviso
+    PROGRAMADO se comprueba contra la realidad justo antes de salir, no solo al apuntarlo.
+    `caduca` resuelve el aviso que llega tarde; esto, el que llega a tiempo a algo que ya
+    no es así. Hoy solo lo necesita el «Sal ya», que se programa hasta una hora antes: con
+    su huella (`salir:<hash>:<inicio>`) el despachador busca la cita en el calendario y,
+    si se ha movido o cancelado, **lo cierra sin mandarlo** (`enviado=True`, sin
+    notificar, sin contar un envío de la regla y sin votar; la salida del tick dice
+    `avisos_retirados`). Va antes del presupuesto, para que lo que ya no vale ni se
+    posponga ni gaste hueco. Los eventos se leen **una vez por pasada**, y ninguna si no
+    hay ningún «Sal ya» vencido. **Ante la duda se habla**: con Graph caído, con una
+    huella antigua (sin la hora, de antes de esta pieza) o ante cualquier fallo, sale.
+    Callar un «Sal ya» bueno cuesta la cita; repetir uno malo, un vistazo.
+    La **voz** del «Sal ya» también se decide al soltarlo, con la presencia vigente: si
+    entretanto has salido, Alexa no se lo dice a una casa vacía, y si has vuelto, sí te lo
+    dice. Con la presencia caducada no se sabe dónde estás y se respeta lo que se decidió
+    al apuntar. Estar fuera **quita la voz pero no retira el aviso**: puedes estar fuera y
+    tener que ir igual.
+    Y al **volver a casa** (`_retirar_avisos_de_salida`, desde `POST /ha/presencia` al
+    pasar de fuera a en casa), las notificaciones de hoy de `al_salir` y `pc_encendido`
+    que siguen sin valorar se **retiran del móvil** por su id (su `tag`), nunca por regla,
+    y **sin votar**: no haber pulsado nada antes de volver no dice que el aviso no
+    sirviera. Sin móvil vivo no se consulta nada, y un fallo ahí no toca la respuesta de
+    la presencia.
   Y la frontera que no se relaja: **lo que pediste tú no se gobierna**. Un recordatorio sin
   `regla` (`recordarme`) no cuenta contra el tope ni se puede silenciar — la misma regla
   que hace que el interruptor del resumen no tape un envío pedido a mano.

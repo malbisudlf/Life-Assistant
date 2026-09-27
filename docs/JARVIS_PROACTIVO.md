@@ -9,6 +9,12 @@ Lo que ya está hecho (recordatorios, el proactivo de las 19:00, el aviso del re
 vigilantes de ingesta y de sistema) no se repite aquí; está en
 `docs/JARVIS.md`. Esto es lo que vendría después.
 
+**Estado (septiembre de 2026).** Buena parte de lo de abajo ya existe; cada idea hecha
+lleva la marca **HECHA** en su título, comprobada contra el código y no de memoria: la
+Parte 0 entera (más una cuarta pieza, 0.4), la Parte 1 entera (`_REGLAS` y
+`_regla_al_salir_de_casa`), 2.1, 2.2, 3.2 y 3.3, y 3.1 a medias. El detalle de cómo
+quedó cada una está en `docs/JARVIS.md`; aquí se conserva el porqué original.
+
 ---
 
 ## Parte 0: las tres piezas que faltan antes de añadir una sola regla más
@@ -23,7 +29,7 @@ ninguna compite con las demás y ninguna sabe si sirvió de algo. Con cinco regl
 tienes cinco avisos más. Las tres piezas de abajo son lo que convierte "más reglas" en
 "más listo" en vez de en "más ruido", y por eso van antes que cualquier idea de la Parte 1.
 
-### 0.1 Presupuesto de interrupciones ●●
+### 0.1 Presupuesto de interrupciones ●● — HECHA
 
 **Qué.** Que los avisos compitan entre sí en vez de sumarse. Una cola con prioridad y un
 tope diario (2, quizá 3); lo que no entra no se pierde, baja al resumen de la mañana.
@@ -38,7 +44,7 @@ la da el código, no el modelo.
 Cada aviso entra con una prioridad (entrega hoy > firma de malestar > racha sin entrenar)
 y una caducidad (un "sal ya" caducado no vale; un "llevas 3 días sin entrenar" sí).
 
-### 0.2 Señal de utilidad ●●
+### 0.2 Señal de utilidad ●● — HECHA
 
 **Qué.** Que cada aviso pueda contestarse *útil / no útil*, y que una regla cuyos últimos
 N avisos se hayan ignorado **se silencie sola y lo diga**.
@@ -57,7 +63,7 @@ confundirse con "no lo vi": si no hay respuesta, no se sabe — no cuenta como n
 un endpoint. Un `POST /avisos/{id}/util` y una columna por regla con las últimas N
 respuestas. Sin la app, un enlace en el correo hace lo mismo.
 
-### 0.3 Memoria de lo ya dicho ●
+### 0.3 Memoria de lo ya dicho ● — HECHA
 
 **Qué.** Que no repita algo que ya dijo esta semana si la situación no ha cambiado.
 
@@ -69,6 +75,24 @@ algo — los otros dos son la misma frase con un número distinto.
 **Por dónde.** `vigilante_estado` ya hace exactamente esto para las averías (clave, veces,
 primera vez). Es la misma tabla y el mismo patrón, aplicado a los avisos.
 
+### 0.4 Vigencia ● — HECHA
+
+**Qué.** Que un aviso PROGRAMADO se compruebe contra la realidad justo antes de salir, no
+solo al apuntarlo. Y que lo que ya no tiene sentido se retire del móvil.
+
+**Por qué.** Las tres piezas de arriba deciden al APUNTAR, y un aviso puede pasar una
+hora en la cola: el «Sal ya» se programa con antelación, y en ese rato la cita se mueve o
+se cancela. Mandarte salir hacia algo que ya no está ahí es la misma mentira que un aviso
+caducado, solo que llega a tiempo. Lo mismo con el «te has ido con la luz encendida» que
+sigue en el móvil cuando ya estás en casa: una pregunta que ya no hay que contestar
+enseña a no mirar el canal.
+
+**Cómo quedó.** `_sigue_en_pie` en el despacho (la huella del «Sal ya» lleva la cita y su
+hora, y si ya no casa con el calendario se cierra sin mandarlo), la voz decidida al
+soltarlo con la presencia de ese momento, y `_retirar_avisos_de_salida` al volver a
+casa. **Ante la duda se habla**: con Graph caído o una huella antigua, el aviso sale.
+Detalle en `docs/JARVIS.md`, «Gobierno de los avisos».
+
 ---
 
 ## Parte 1: ideas que solo usan lo que ya hay
@@ -76,7 +100,7 @@ primera vez). Es la misma tabla y el mismo patrón, aplicado a los avisos.
 Ninguna necesita una integración nueva. Todas son una regla en código sobre datos que el
 backend ya tiene delante.
 
-### 1.1 «Sal ya» ●
+### 1.1 «Sal ya» ● — HECHA
 
 **Qué.** Un evento con ubicación, tú en casa, y el tráfico dice que hay que salir en 10
 minutos → aviso. Con el tráfico real, no con una estimación.
@@ -90,7 +114,13 @@ preocupando por llegar tarde.
 **Cuidado.** Solo eventos con ubicación real y solo si estás fuera del sitio. Y una vez
 por evento, no cada cinco minutos.
 
-### 1.2 No llegas de una a la otra ●
+**Lo que cambió con 0.4.** «Una vez por evento» no se cumplía: la huella recortaba el id
+de Graph, que comparte el prefijo del buzón, así que todas las citas tenían la misma y
+solo avisaba de la primera en cinco días. Ahora la huella es por cita y por hora de
+inicio, una cita movida vuelve a tener aviso, el despachador comprueba que la cita sigue
+en pie antes de soltarlo, y si hay voz se decide en ese momento, no al programarlo.
+
+### 1.2 No llegas de una a la otra ● — HECHA
 
 **Qué.** Dos eventos con ubicación cuyo hueco entre medias es menor que el tiempo de
 viaje. Se avisa **la noche antes**, que es cuando todavía se puede mover algo.
@@ -99,7 +129,7 @@ viaje. Se avisa **la noche antes**, que es cuando todavía se puede mover algo.
 solapan, así que Outlook las da por buenas. El conflicto solo existe cuando metes el
 desplazamiento, que es justo el dato que ya sabes pedir a Google Maps.
 
-### 1.3 Mañana empiezas pronto ●
+### 1.3 Mañana empiezas pronto ● — HECHA
 
 **Qué.** Si el primer evento de mañana empieza antes de lo habitual, un aviso a las 22:00
 diciendo a qué hora tendrías que estar durmiendo para llegar a tus horas.
@@ -108,7 +138,7 @@ diciendo a qué hora tendrías que estar durmiendo para llegar a tus horas.
 `sleep_analysis`) y a qué hora empiezas mañana. Nadie ha juntado las dos cosas. Es un
 aviso que se puede accionar en el momento en que llega, que es la definición de aviso útil.
 
-### 1.4 La firma de malestar, por la mañana ●
+### 1.4 La firma de malestar, por la mañana ● — HECHA
 
 **Qué.** Que `_firmaMalestar` (FC en reposo arriba + HRV abajo + respiración arriba, las
 tres a la vez) salga por el canal de avisos y no solo en el dashboard.
@@ -121,7 +151,7 @@ dice que no es exactamente el día en que no vas a abrir el dashboard.
 proyecto). O se expone el mínimo por API, o se acepta calcular solo la firma en el
 backend, que son tres tendencias. Yo haría lo segundo y lo diría en el código.
 
-### 1.5 Un hueco para entrenar ●●
+### 1.5 Un hueco para entrenar ●● — HECHA
 
 **Qué.** En vez de «llevas 3 días sin entrenar», mirar la agenda de mañana y decir «mañana
 tienes libre de 18:00 a 20:00».
@@ -129,7 +159,7 @@ tienes libre de 18:00 a 20:00».
 **Por qué.** Convierte un reproche en una acción. El aviso actual te da información que ya
 tenías (sabes que no has entrenado); este te da la parte que no tenías, que es cuándo.
 
-### 1.6 Te has dejado algo encendido ●
+### 1.6 Te has dejado algo encendido ● — HECHA
 
 **Qué.** La presencia pasa a "fuera" y hay luces o enchufes encendidos → aviso.
 
@@ -138,13 +168,19 @@ y la presencia ya llega. La frontera de confirmación por dominio ya está pensa
 se puede apagar sola, una cerradura no. Es aplicar dos cosas que ya existen a un caso que
 pasa todas las semanas.
 
-### 1.7 El PC encendido y tú fuera ●
+### 1.7 El PC encendido y tú fuera ● — HECHA
 
 **Qué.** Nadie en casa, el agente sin heartbeat reciente y el PC encendido → proponer
 suspender.
 
 **Por qué.** `/suspend-pc` ya existe y lo ejecuta HA por SSH. Es dinero en la factura y no
 requiere nada nuevo.
+
+**Lo que cambió con 0.4.** El aviso preguntaba «¿Lo suspendo?» y no traía forma de decir
+que sí. Ahora lleva el botón **«Suspender»**, que reutiliza el `LA_APAGAR_` que HA ya
+maneja (sin YAML nuevo): `POST /avisos/{id}/apagar` ve que el aviso es `pc_encendido` y
+encola la suspensión por el mismo camino que `/suspend-pc`. Y si vuelves a casa sin
+contestarlo, se retira del móvil.
 
 ---
 
@@ -153,7 +189,7 @@ requiere nada nuevo.
 Aquí ya no basta con cruzar lo que hay. Todas pasan por conectar un servidor MCP, que es
 el camino que el proyecto ya eligió para crecer sin tocar código.
 
-### 2.1 Vigilar una página ●●
+### 2.1 Vigilar una página ●● — HECHA
 
 **Qué.** «Avísame cuando esta página cambie / cuando baje de X». Una tabla de vigilancias
 (url, qué buscar, última vez), el tick de HA como reloj y `leer_pagina`, que ya existe con
@@ -166,7 +202,7 @@ algo, una plaza que se libera, una nota que se publica, un horario que cambia.
 **Cuidado.** El contenido viene de fuera y va a un modelo con herramientas: sigue haciendo
 falta `_AVISO_WEB`. Y un tope de vigilancias, que cada una es una descarga por tick.
 
-### 2.2 El correo entrante ●●
+### 2.2 El correo entrante ●● — HECHA
 
 **Qué.** Leer el buzón (MCP de Gmail, o IMAP) para lo que tiene fecha: un paquete que
 llega hoy, una factura que vence, una cita confirmada que no está en el calendario.
@@ -193,7 +229,10 @@ Esto es lo que separa "muchas reglas" de "más listo", y encaja con la regla del
 —el listón va en código— si se hace de una manera concreta: **el modelo propone la regla,
 tú la apruebas, y la regla aprobada pasa a ser configuración, no criterio del modelo.**
 
-### 3.1 Horas aprendidas en vez de constantes ●●
+### 3.1 Horas aprendidas en vez de constantes ●● — HECHA A MEDIAS
+
+La del aviso del reloj ya se aprende (`_hora_aviso_reloj`, de la mediana de tus
+`sleep_start`); la del proactivo sigue siendo la constante `JARVIS_PROACTIVO_HORA`.
 
 **Qué.** Que las 19:00 del proactivo y las 21:30 del aviso del reloj salgan de tus datos:
 tu hora habitual de acostarte, de despertarte, de entrenar.
@@ -202,7 +241,7 @@ tu hora habitual de acostarte, de despertarte, de entrenar.
 y de horas de despertar; un aviso de "ponte el reloj" tiene que llegar **antes de que te
 duermas**, y esa hora la sabe él mejor que la constante.
 
-### 3.2 Que proponga sus propias reglas ●●●
+### 3.2 Que proponga sus propias reglas ●●● — HECHA
 
 **Qué.** Que al detectar un patrón repetido (siempre mueves el entreno del martes, siempre
 llegas tarde a la misma cita) proponga una regla, y que aprobarla la deje escrita en una
@@ -213,7 +252,9 @@ sin romper la frontera: la propuesta la hace el modelo, la decisión la tomas t�
 ejecución es determinista**. Mismo patrón que `mcp_conectar` — el modelo propone, el botón
 de confirmar aprueba, y lo aprobado queda escrito.
 
-### 3.3 Informe de utilidad ●
+### 3.3 Informe de utilidad ● — HECHA
+
+Cada semana y no al mes: `_informe_avisos`, sección `## AVISOS` del informe semanal.
 
 **Qué.** Una vez al mes, en el informe semanal: cuántos avisos mandó, cuáles se
 respondieron, cuáles se ignoraron, qué reglas están calladas.

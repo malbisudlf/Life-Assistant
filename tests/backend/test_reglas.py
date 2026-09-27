@@ -6,6 +6,7 @@ gasten dinero (llamadas a Maps) por adelantado, y que un aviso que llega tarde n
 mande. Un asistente proactivo se juzga por lo que se calla.
 """
 import json
+import re
 from datetime import datetime, timedelta
 
 import pytest
@@ -41,6 +42,14 @@ class _Reglas:
 
     def _apuntados(self, mock_requests):
         return [c[2]["json"] for c in mock_requests.called("POST", "jarvis_recordatorios")]
+
+    def _memoria(self, monkeypatch, mock_requests):
+        """`_ya_dicho` con memoria de verdad: lo ya insertado en este tick cuenta como
+        dicho. Con el mock de siempre (GET vacío) dos huellas iguales pasarían igual, y
+        el test de las huellas no probaría nada."""
+        monkeypatch.setattr(main, "_ya_dicho", lambda regla, huella: any(
+            a.get("regla") == regla and a.get("huella") == huella
+            for a in self._apuntados(mock_requests)))
 
 
 class TestSalYa(_Reglas):
@@ -120,6 +129,31 @@ class TestSalYa(_Reglas):
         self._eventos(monkeypatch, [self._evento(self.AHORA + timedelta(hours=1))])
         assert main._regla_sal_ya() == 0
 
+    # ── La huella por cita ────────────────────────────────────────────────────
+    BUZON = "AAMkAGI2" + "x" * 92     # 100 caracteres de prefijo común, como Graph
+
+    def test_dos_citas_del_mismo_buzon_tienen_huellas_distintas(self, monkeypatch,
+                                                                mock_requests):
+        """Los ids de Graph comparten el prefijo del buzón: recortados a 60 caracteres,
+        todas las citas tenían la misma huella y la segunda se callaba cinco días."""
+        self._memoria(monkeypatch, mock_requests)
+        self._eventos(monkeypatch, [
+            self._evento(self.AHORA + timedelta(minutes=50), id=self.BUZON + "AAA="),
+            self._evento(self.AHORA + timedelta(minutes=55), id=self.BUZON + "BBB="),
+        ])
+        self._salida(monkeypatch, self.AHORA + timedelta(minutes=30))
+        assert main._regla_sal_ya() == 2
+        huellas = [a["huella"] for a in self._apuntados(mock_requests)]
+        assert len(set(huellas)) == 2
+        assert all(re.fullmatch(r"salir:[0-9a-f]{16}:\d{8}T\d{4}", h) for h in huellas)
+
+    def test_la_huella_lleva_la_hora_de_inicio(self):
+        """Una cita movida es otra situación: tiene que volver a tener aviso."""
+        a = {"id": "ev1", "ini": datetime(2026, 8, 17, 18, 0, tzinfo=main.LOCAL_TZ)}
+        b = {"id": "ev1", "ini": datetime(2026, 8, 17, 19, 0, tzinfo=main.LOCAL_TZ)}
+        assert main._huella_salir(a) != main._huella_salir(b)
+        assert main._huella_salir(a).endswith(":20260817T1800")
+
 
 class TestNoLlegas(_Reglas):
     AHORA = datetime(2026, 8, 17, 22, 0, tzinfo=main.LOCAL_TZ)
@@ -150,6 +184,25 @@ class TestNoLlegas(_Reglas):
             "departure_iso": manana.replace(hour=13, minute=30).isoformat(),
             "departure_time": "13:30", "duration_text": "25 min", "distance_text": "8 km"})
         assert main._regla_no_llegas() == 0
+
+    def test_no_llegas_distingue_parejas_del_mismo_buzon(self, monkeypatch, mock_requests):
+        """Recortadas a 30 caracteres, todas las parejas de un mismo buzón compartían
+        huella: el segundo choque de la noche se callaba."""
+        self._memoria(monkeypatch, mock_requests)
+        manana = self.AHORA + timedelta(days=1)
+        buzon  = "AAMkAGI2" + "x" * 92
+        citas  = [self._evento(manana.replace(hour=h), 60, f"cita {h}", f"Sitio {h}",
+                               buzon + f"{h:02d}=")
+                  for h in (10, 11, 12)]
+        self._eventos(monkeypatch, citas)
+        # Siempre hay que salir a menos cuarto: antes de que acabe la cita anterior.
+        monkeypatch.setattr(main, "get_departure_time", lambda body, credentials=None: {
+            "departure_iso": (datetime.fromisoformat(body.event_time.replace("Z", "+00:00"))
+                              - timedelta(minutes=15)).isoformat()})
+        assert main._regla_no_llegas() == 2
+        huellas = [a["huella"] for a in self._apuntados(mock_requests)]
+        assert len(set(huellas)) == 2
+        assert all(h.endswith(":2026-08-18") for h in huellas)
 
     def test_solo_de_noche(self, monkeypatch):
         """Se avisa cuando todavía se puede mover algo; por la mañana solo sirve para
@@ -200,6 +253,15 @@ class TestHuecoParaEntrenar(_Reglas):
         self._eventos(monkeypatch, [self._evento(manana.replace(hour=12), 60, id="x")])
         assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 1
         assert "libre de 08:00 a 12:00" in self._apuntados(mock_requests)[0]["texto"]
+
+    def test_hueco_entreno_caduca(self, monkeypatch, mock_requests):
+        """Si el presupuesto lo pospone a las 08:30, «Mañana tienes libre…» ya sería
+        hoy. Caduca a la medianoche que abre ese día, como `no_llegas`."""
+        manana = self.AHORA + timedelta(days=1)
+        self._eventos(monkeypatch, [self._evento(manana.replace(hour=12), 60, id="x")])
+        main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}})
+        apuntado = self._apuntados(mock_requests)[0]
+        assert apuntado["caduca"].startswith("2026-08-17T22:00")   # 00:00 local del 18
 
     def test_sin_historico_no_regana(self, monkeypatch):
         """Sin entrenos registrados no se sabe si es una racha o es que el Watch nunca

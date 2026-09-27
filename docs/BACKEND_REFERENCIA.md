@@ -39,7 +39,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /avisos/reglas/{regla}/reactivar` | JWT | Devuelve la voz a una regla que se silenció sola por acumular votos de «no útil» (pone su contador a cero) |
 | `POST /avisos/reglas/{regla}/llamar` | JWT | `{"llamar": bool}`: que esa regla, además de avisar, llame por teléfono. Solo las de `REGLAS_LLAMABLES`; el resto, 404 |
 | `POST /avisos/{aviso_id}/util` | servicio o JWT | La respuesta a los botones útil / no útil de la notificación |
-| `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón «Apagar» del aviso de salir de casa: encola el apagado de las entidades que llevaba ese aviso |
+| `POST /avisos/{aviso_id}/apagar` | servicio o JWT | El botón `LA_APAGAR_` del móvil, que hace lo que toque según la regla del aviso. En `al_salir` («Apagar»): encola el apagado de las entidades que llevaba ese aviso. En `pc_encendido` («Suspender»): encola la suspensión del PC (`_pc_power_action`, como `POST /suspend-pc`) y responde `{ok, suspendido: true}`. Las dos cuentan como «útil». Otra regla → 422; aviso inexistente → 404 |
 | `POST /revision/hallazgos` | servicio (`REVISION_TOKEN`) | El workflow avisa de que la revisión nocturna abrió un issue: apunta la decisión y encola el aviso con botones |
 | `POST /revision/{aviso_id}/accion` | servicio o JWT | La respuesta a esos botones: `arreglar` lanza la sesión que lo arregla, `nada` lo descarta. Sirve a los **tres** orígenes de `revision_hallazgos` (`issue`, `ci`, `vigilante`); el del vigilante manda una instrucción propia con los errores concretos y la orden de NO mergear |
 | `POST /averia` | servicio (`REVISION_TOKEN`) | El workflow avisa de que el CI se ha roto en `main`: lanza la sesión que lo arregla, sin preguntar y sin avisar |
