@@ -2835,3 +2835,84 @@ describe("rachaPasos", () => {
     expect(r).toMatchObject({ actual: 2, neutrasActual: 1, maxima: 2 });
   });
 });
+
+// Import aparte y no en la lista de arriba: es un bloque que se añadió solo, y así no
+// hay que reordenar nada para leerlo.
+import { fusionarConfigWidgets } from "../../src/lib/helpers";
+
+describe("fusionarConfigWidgets", () => {
+  const DEFAULTS = [
+    { id: "jarvis",    label: "Jarvis",       visible: true, column: "left"  },
+    { id: "siguiente", label: "Lo siguiente", visible: true, column: "left"  },
+    { id: "timeline",  label: "Hoy",          visible: true, column: "left"  },
+    { id: "weather",   label: "Clima",        visible: true, column: "left"  },
+    { id: "training",  label: "Entrenamiento", visible: true, column: "right" },
+  ];
+  const COLUMNAS = { jarvis: "left", siguiente: "left", timeline: "left", weather: "left", training: "right" };
+  const ids = cfg => cfg.map(w => w.id);
+
+  test("sin config guardada, o vacía, salen los defaults (copiados)", () => {
+    expect(fusionarConfigWidgets(null, DEFAULTS, COLUMNAS)).toEqual(DEFAULTS);
+    const r = fusionarConfigWidgets([], DEFAULTS, COLUMNAS);
+    expect(r).toEqual(DEFAULTS);
+    expect(r[0]).not.toBe(DEFAULTS[0]);
+  });
+
+  test("el widget nuevo entra después de su predecesor, no al final", () => {
+    const guardada = [
+      { id: "jarvis", visible: true, column: "left" },
+      { id: "timeline", visible: true, column: "left" },
+      { id: "weather", visible: true, column: "left" },
+      { id: "training", visible: true, column: "right" },
+    ];
+    const r = fusionarConfigWidgets(guardada, DEFAULTS, COLUMNAS);
+    expect(ids(r)).toEqual(["jarvis", "siguiente", "timeline", "weather", "training"]);
+    expect(r[1]).toEqual({ id: "siguiente", label: "Lo siguiente", visible: true, column: "left" });
+  });
+
+  test("se respeta el orden guardado", () => {
+    const guardada = [
+      { id: "training", column: "right" },
+      { id: "weather" },
+      { id: "jarvis" },
+      { id: "timeline" },
+    ];
+    const r = fusionarConfigWidgets(guardada, DEFAULTS, COLUMNAS);
+    expect(ids(r)).toEqual(["training", "weather", "jarvis", "siguiente", "timeline"]);
+  });
+
+  test("sin predecesor en la config, al principio; dos nuevos seguidos conservan su orden", () => {
+    const r = fusionarConfigWidgets([{ id: "weather" }, { id: "training" }], DEFAULTS, COLUMNAS);
+    expect(ids(r)).toEqual(["jarvis", "siguiente", "timeline", "weather", "training"]);
+  });
+
+  test("conserva widthPct, width y height, y sanea lo demás", () => {
+    const guardada = [
+      { id: "jarvis", label: "Viejo", visible: false, widthPct: 0.5, width: 300, height: 240 },
+      { id: "timeline", widthPct: "ancho", height: null },
+      { id: "obsoleto", label: "Ya no existe" },
+    ];
+    const r = fusionarConfigWidgets(guardada, DEFAULTS, COLUMNAS);
+    expect(r[0]).toEqual({
+      id: "jarvis", label: "Jarvis", visible: false, column: "left",
+      width: 300, height: 240, widthPct: 0.5,
+    });
+    const hoy = r.find(w => w.id === "timeline");
+    expect(hoy.widthPct).toBeUndefined();
+    expect(hoy.height).toBeUndefined();
+    // Lo que ya no está en los defaults se conserva tal cual estaba guardado.
+    expect(r.find(w => w.id === "obsoleto").label).toBe("Ya no existe");
+  });
+
+  test("sin columna guardada cae en la de DEFAULT_COLUMNS, y si no, a la izquierda", () => {
+    const r = fusionarConfigWidgets([{ id: "training" }, { id: "raro" }], DEFAULTS, COLUMNAS);
+    expect(r.find(w => w.id === "training").column).toBe("right");
+    expect(r.find(w => w.id === "raro").column).toBe("left");
+  });
+
+  test("se filtra el separador __split__", () => {
+    const r = fusionarConfigWidgets([{ id: "jarvis" }, { id: "__split__" }, { id: "timeline" }], DEFAULTS, COLUMNAS);
+    expect(ids(r)).not.toContain("__split__");
+    expect(ids(r)).toEqual(["jarvis", "siguiente", "timeline", "weather", "training"]);
+  });
+});

@@ -166,6 +166,8 @@ class TestGeolocalizacionDerivada:
         })
         assert r.status_code == 200
         assert capturado["params"]["origins"] == "43.26,-2.93"
+        # El dashboard dice desde dónde se ha calculado: aquí, desde donde dice la casa.
+        assert r.json()["origen"] == "presencia"
 
     def test_departure_respeta_el_origen_del_dispositivo(self, client, auth_headers, mock_requests):
         mock_requests.add("GET", "/rest/v1/presence", _presencia_guardada(lat=43.26, lon=-2.93))
@@ -181,10 +183,11 @@ class TestGeolocalizacionDerivada:
             }]}]})
 
         mock_requests.add("GET", "maps.googleapis.com", responder)
-        client.post("/maps/departure", headers=auth_headers, json={
+        r = client.post("/maps/departure", headers=auth_headers, json={
             "destination": "X", "event_time": "2026-08-04T10:00:00Z", "origin": "1.0,2.0",
         })
         assert capturado["params"]["origins"] == "1.0,2.0"
+        assert r.json()["origen"] == "dispositivo"
 
     def test_sin_presencia_cae_a_home_address(self, client, auth_headers, mock_requests):
         capturado = {}
@@ -199,10 +202,11 @@ class TestGeolocalizacionDerivada:
             }]}]})
 
         mock_requests.add("GET", "maps.googleapis.com", responder)
-        client.post("/maps/departure", headers=auth_headers, json={
+        r = client.post("/maps/departure", headers=auth_headers, json={
             "destination": "X", "event_time": "2026-08-04T10:00:00Z",
         })
         assert capturado["params"]["origins"] == main.HOME_ADDRESS
+        assert r.json()["origen"] == "casa"
 
 
 class TestTramosPorDia:

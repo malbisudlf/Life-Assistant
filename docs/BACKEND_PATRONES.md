@@ -196,7 +196,26 @@
   El cálculo de salida (`/maps/departure`) hace lo mismo con `origin`, con fallback a
   `HOME_ADDRESS`. Por eso `origin` **no puede tener `HOME_ADDRESS` como default del
   modelo**: "no me mandaron origen" y "me mandaron justo mi casa" llegarían
-  indistinguibles y la presencia nunca entraría en juego.
+  indistinguibles y la presencia nunca entraría en juego. La respuesta dice cuál de los
+  tres se usó (`origen`: `dispositivo` / `presencia` / `casa`), porque una hora de salida
+  calculada desde casa no vale lo mismo si estás en otra parte, y el dashboard lo enseña.
+- **Caché de `/maps/departure`** (`_salida_cache`, `SALIDA_CACHE_S = 600`): Distance
+  Matrix se paga por petición, y ya no la pide solo quien pulsa un botón: el widget «Lo
+  siguiente» la pide solo al cargar, y `_regla_sal_ya`/`_regla_no_llegas` pasan por esta
+  misma función (vía `_hora_salida`) desde el tick. La clave es
+  `(destino en minúsculas y sin espacios alrededor, event_time, mode, origen normalizado)`
+  y la entrada vale 10 min, lo que tarda el tráfico en cambiar de verdad. Tres reglas:
+  - **Solo se guardan respuestas correctas.** Un 400/502 cacheado dejaría el ↺ del
+    dashboard sin poder reintentar durante diez minutos, justo cuando más falta hace.
+  - **El origen `lat,lon` se redondea a 3 decimales (~110 m)** con `_origen_normalizado`,
+    y ese redondeado es también **lo que se manda a Google**, no solo la clave: la
+    geolocalización del navegador baila unos metros entre cargas sin moverte, y sin
+    redondear cada recarga sería una petición de pago nueva para la misma ruta.
+  - **Todo bajo `_salida_lock`** (los endpoints síncronos corren en el threadpool), con
+    purga de lo caducado al insertar y un tope de 256 entradas. Se devuelve una copia, no
+    la entrada.
+  Es estado de módulo, así que `tests/backend/conftest.py` lo vacía en `_limpiar_estado`:
+  sin eso, la ruta de un test se la serviría al siguiente sin pasar por su mock.
 
 - **De quién es cada fila** (columna `health_metrics.fuente`, `FUENTE_AUTO_EXPORT` /
   `FUENTE_ATAJO` / `FUENTE_PRESENCIA`): las dos ingestas escriben en la MISMA tabla y

@@ -161,6 +161,7 @@ Ficheros clave:
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
 | `src/lib/lineaTiempo.js` | Lógica pura de la línea del día: normalizar cada fuente a tramos, resolver solapes, recortar lo que cruza la medianoche y pasar horas a porcentajes |
 | `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
+| `src/lib/agenda.js` | Lógica pura de «Lo siguiente»: el próximo compromiso (y lo que está en curso), la cuenta atrás, la fase de la hora de salida y la memoria del modo coche/andando |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |
 | `scripts/copia_supabase.py` | Vuelca y cifra las tablas que no se pueden regenerar. Lo lanza el workflow semanal |

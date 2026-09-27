@@ -271,6 +271,89 @@ class TestMapsDeparture:
         })
         assert r.status_code == 502
 
+    # ── Caché: Distance Matrix se paga por petición, y el widget «Lo siguiente» y las
+    # reglas de salida la piden solas. Dos peticiones iguales seguidas son una sola.
+
+    def _pedir(self, client, auth_headers, **cambios):
+        cuerpo = {"destination": "Universidad de Deusto, Bilbao",
+                  "event_time": "2026-07-06T10:00:00+02:00", "origin": "43.26311,-2.93511"}
+        cuerpo.update(cambios)
+        return client.post("/maps/departure", headers=auth_headers, json=cuerpo)
+
+    def test_dos_peticiones_iguales_llaman_una_vez_a_maps(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        r1 = self._pedir(client, auth_headers)
+        r2 = self._pedir(client, auth_headers)
+        assert r1.status_code == r2.status_code == 200
+        assert r1.json() == r2.json()
+        assert len(mock_requests.called("GET", "maps.googleapis.com")) == 1
+
+    def test_el_destino_no_distingue_mayusculas_ni_espacios(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        self._pedir(client, auth_headers)
+        self._pedir(client, auth_headers, destination="  universidad de deusto, BILBAO ")
+        assert len(mock_requests.called("GET", "maps.googleapis.com")) == 1
+
+    def test_otro_modo_destino_u_hora_vuelve_a_llamar(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        self._pedir(client, auth_headers)
+        cambios = [{"mode": "walking"}, {"destination": "Gimnasio"},
+                   {"event_time": "2026-07-06T11:00:00+02:00"}]
+        for n, cambio in enumerate(cambios, start=2):
+            self._pedir(client, auth_headers, **cambio)
+            assert len(mock_requests.called("GET", "maps.googleapis.com")) == n, cambio
+
+    def test_origenes_que_redondean_igual_comparten_entrada(self, client, auth_headers, mock_requests):
+        # La geolocalización del navegador baila unos metros entre cargas sin que te
+        # hayas movido: a 3 decimales (~110 m) es la misma ruta, y a Google se le manda
+        # ya redondeado.
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        self._pedir(client, auth_headers, origin="43.26311,-2.93511")
+        self._pedir(client, auth_headers, origin="43.26349,-2.93549")
+        llamadas = mock_requests.called("GET", "maps.googleapis.com")
+        assert len(llamadas) == 1
+        assert llamadas[0][2]["params"]["origins"] == "43.263,-2.935"
+
+    def test_un_origen_de_texto_no_se_toca(self):
+        assert main._origen_normalizado("  Calle Falsa 123, Bilbao ") == "Calle Falsa 123, Bilbao"
+        assert main._origen_normalizado("-43.26311, +2.93511") == "-43.263,2.935"
+
+    def test_un_fallo_no_se_cachea(self, client, auth_headers, mock_requests):
+        # Si se cacheara, el ↺ del dashboard no podría reintentar en diez minutos.
+        mock_requests.add("GET", "maps.googleapis.com", FakeResponse({
+            "rows": [{"elements": [{"status": "NOT_FOUND"}]}]
+        }))
+        assert self._pedir(client, auth_headers).status_code == 400
+        assert self._pedir(client, auth_headers).status_code == 400
+        assert len(mock_requests.called("GET", "maps.googleapis.com")) == 2
+
+    def test_pasados_diez_minutos_vuelve_a_llamar(self, client, auth_headers, mock_requests, monkeypatch):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        self._pedir(client, auth_headers)
+        real = main.time.time
+        monkeypatch.setattr(main.time, "time", lambda: real() + main.SALIDA_CACHE_S + 1)
+        self._pedir(client, auth_headers)
+        assert len(mock_requests.called("GET", "maps.googleapis.com")) == 2
+
+    def test_la_caché_no_crece_sin_límite(self, monkeypatch):
+        monkeypatch.setattr(main, "SALIDA_CACHE_MAX", 3)
+        for i in range(5):
+            main._cachear_salida((f"destino {i}",), {"i": i})
+        assert len(main._salida_cache) == 3
+        assert ("destino 0",) not in main._salida_cache
+        assert ("destino 4",) in main._salida_cache
+
+    def test_devuelve_una_copia_y_no_la_entrada(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        self._pedir(client, auth_headers)
+        clave = next(iter(main._salida_cache))
+        main._salida_cacheada(clave)["departure_time"] = "trampa"
+        assert main._salida_cacheada(clave)["departure_time"] == "09:20"
+
+    def test_el_origen_dice_de_donde_sale(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "maps.googleapis.com", self._maps_response())
+        assert self._pedir(client, auth_headers).json()["origen"] == "dispositivo"
+
 
 # ── IDEAS ─────────────────────────────────────────────────────────────────────
 

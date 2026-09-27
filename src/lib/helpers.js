@@ -2832,3 +2832,46 @@ export function fraseParteNoche(parte) {
   if (borradores) trozos.push(`${borradores} con la respuesta ya escrita`);
   return trozos.join(", ") + ".";
 }
+
+
+// ── Configuración de widgets ─────────────────────────────────────────────────
+
+// Fusiona la config de widgets guardada en localStorage con los defaults, saneando
+// cada entrada campo a campo. Vale para el modo completo y para el simple.
+//
+// Un widget nuevo que la config guardada aún no conoce entra DESPUÉS del id más
+// cercano que le precede en `defaults` y ya está en la config (guardado o recién
+// insertado, para que dos nuevos seguidos conserven su orden); si no hay ninguno, al
+// principio. Antes iba siempre al final, así que un widget pensado para estar arriba
+// —«Lo siguiente», debajo de Jarvis— aparecía al fondo de la columna para cualquiera
+// que ya tuviera una config guardada, que en la práctica es todo el mundo.
+export function fusionarConfigWidgets(guardada, defaults, columnas = {}) {
+  const copiaDefaults = () => defaults.map(w => ({ ...w }));
+  if (!Array.isArray(guardada)) return copiaDefaults();
+  const porId = new Map(defaults.map(d => [d.id, d]));
+  const fusion = guardada
+    .filter(w => w && typeof w === "object" && w.id && w.id !== "__split__")
+    .map(w => ({
+      id: w.id,
+      label: porId.get(w.id)?.label || w.label,
+      visible: w.visible !== false,
+      column: w.column || columnas[w.id] || "left",
+      width:  typeof w.width  === "number" ? w.width  : undefined,
+      height: typeof w.height === "number" ? w.height : undefined,
+      // widthPct es lo que de verdad pinta el ancho (wrapResizable). Al reconstruir
+      // la entrada campo a campo se quedaba fuera, así que los anchos ajustados se
+      // perdían en cada recarga.
+      widthPct: typeof w.widthPct === "number" ? w.widthPct : undefined,
+    }));
+  if (fusion.length === 0) return copiaDefaults();
+  defaults.forEach((def, i) => {
+    if (fusion.some(w => w.id === def.id)) return;
+    let pos = 0;
+    for (let j = i - 1; j >= 0; j--) {
+      const idx = fusion.findIndex(w => w.id === defaults[j].id);
+      if (idx >= 0) { pos = idx + 1; break; }
+    }
+    fusion.splice(pos, 0, { ...def });
+  });
+  return fusion;
+}

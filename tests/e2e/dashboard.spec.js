@@ -47,6 +47,13 @@ test('login y carga del dashboard con datos del backend', async ({ page }) => {
   // Datos que vienen del backend, no del bundle: si el contrato se rompe, esto falla.
   await expect(page.getByText('Evento de prueba E2E').first()).toBeVisible({ timeout: 15_000 })
 
+  // «Lo siguiente» pide sola la hora de salida del evento (está dentro de la ventana de
+  // 3 h y tiene sitio): sin pulsar nada, la ruta ya calculada y con su fase.
+  const siguiente = page.locator('[data-card="siguiente"]')
+  await expect(siguiente).toContainText('Evento de prueba E2E')
+  await expect(siguiente).toContainText('Sal a las', { timeout: 15_000 })
+  await expect(siguiente).not.toContainText('undefined')
+
   expect(page.erroresDeNavegador).toEqual([])
 })
 

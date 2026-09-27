@@ -2089,6 +2089,57 @@ class DepartureRequest(BaseModel):
             raise ValueError("mode debe ser 'driving' o 'walking'")
         return v
 
+# Copia en memoria de las respuestas correctas de /maps/departure. Distance Matrix se
+# paga POR PETICIÓN, y ya no la pide solo quien pulsa el botón: el widget «Lo siguiente»
+# pide sola la salida del próximo evento al cargar, y `_regla_sal_ya`/`_regla_no_llegas`
+# pasan por esta misma función desde el tick. Diez minutos es lo que el tráfico tarda en
+# cambiar de verdad; más que eso y la hora de salida empezaría a mentir. Es una constante
+# y no una variable de entorno a propósito: no hay nada que ajustar por instancia.
+SALIDA_CACHE_S   = 600
+SALIDA_CACHE_MAX = 256
+_salida_cache: dict = {}          # clave → (momento_epoch, respuesta)
+_salida_lock = threading.Lock()
+
+_RE_LATLON = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*$")
+
+
+def _origen_normalizado(origen: str) -> str:
+    """Unas coordenadas `lat,lon` redondeadas a 3 decimales (~110 m); cualquier otro
+    texto, tal cual sin espacios alrededor.
+
+    El redondeo no es solo para la clave de la caché: es también lo que se le manda a
+    Google. La geolocalización del navegador varía unos metros entre una carga y la
+    siguiente sin que te hayas movido, y sin redondear cada recarga sería una clave nueva
+    —y una petición de pago nueva— para la misma ruta. 110 m no cambian una hora de salida.
+    """
+    m = _RE_LATLON.match(origen or "")
+    if not m:
+        return (origen or "").strip()
+    return f"{round(float(m.group(1)), 3)},{round(float(m.group(2)), 3)}"
+
+
+def _salida_cacheada(clave: tuple) -> dict | None:
+    with _salida_lock:
+        guardado = _salida_cache.get(clave)
+    if guardado and time.time() - guardado[0] < SALIDA_CACHE_S:
+        return dict(guardado[1])
+    return None
+
+
+def _cachear_salida(clave: tuple, respuesta: dict):
+    # Bajo el lock: los endpoints síncronos corren en el threadpool de FastAPI, y el tick
+    # de las reglas puede estar escribiendo a la vez que una carga del dashboard.
+    ahora = time.time()
+    with _salida_lock:
+        for k in [k for k, (t, _) in _salida_cache.items() if ahora - t >= SALIDA_CACHE_S]:
+            del _salida_cache[k]
+        _salida_cache[clave] = (ahora, dict(respuesta))
+        if len(_salida_cache) > SALIDA_CACHE_MAX:
+            sobran = len(_salida_cache) - SALIDA_CACHE_MAX
+            for k in sorted(_salida_cache, key=lambda k: _salida_cache[k][0])[:sobran]:
+                del _salida_cache[k]
+
+
 @app.post("/maps/departure")
 def get_departure_time(
     body: DepartureRequest,
@@ -2101,10 +2152,22 @@ def get_departure_time(
     # navegador) → dónde dice HA que estás → HOME_ADDRESS. El segundo escalón es el que
     # arregla el caso real: en el móvil, con el navegador sin permiso de ubicación, la
     # hora de salida se calculaba desde casa aunque estuvieras en la universidad.
+    # `origen` viaja en la respuesta porque «sal a las 9:20» no significa lo mismo desde
+    # donde estás que desde casa, y el dashboard lo dice.
     origen = body.origin
+    tipo_origen = "dispositivo"
     if not origen:
         coords = coords_presencia()
-        origen = f"{coords[0]},{coords[1]}" if coords else HOME_ADDRESS
+        if coords:
+            origen, tipo_origen = f"{coords[0]},{coords[1]}", "presencia"
+        else:
+            origen, tipo_origen = HOME_ADDRESS, "casa"
+    origen = _origen_normalizado(origen)
+
+    clave = (body.destination.strip().lower(), body.event_time, body.mode, origen)
+    guardada = _salida_cacheada(clave)
+    if guardada is not None:
+        return guardada
 
     # Calcular cuánto tarda en llegar
     url = "https://maps.googleapis.com/maps/api/distancematrix/json"
@@ -2151,14 +2214,19 @@ def get_departure_time(
         # Convertir siempre a la hora local del usuario (TIMEZONE)
         departure_local = departure_dt.astimezone(LOCAL_TZ)
 
-        return {
+        respuesta = {
             "duration_text": duration_text,
             "distance_text": distance_text,
             "departure_time": departure_local.strftime("%H:%M"),
             "departure_iso": departure_local.isoformat(),
+            "origen": tipo_origen,
         }
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Error procesando respuesta de Maps")
+    # Solo lo que salió bien: un 400/502 cacheado dejaría el ↺ del dashboard sin poder
+    # reintentar durante diez minutos, justo cuando más falta hace.
+    _cachear_salida(clave, respuesta)
+    return respuesta
 
 
 # ── CLIMA ─────────────────────────────────────────────────────────────────────

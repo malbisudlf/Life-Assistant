@@ -287,6 +287,19 @@ class _RouterSimulado:
         ("/me/calendars", lambda: _Respuesta(_CALENDARIOS_GRAPH)),
         ("graph.microsoft.com", lambda: _Respuesta(_EVENTOS_GRAPH)),
         ("api.open-meteo.com", lambda: _Respuesta(_CLIMA)),
+        # Distance Matrix, con su forma real. «Lo siguiente» pide sola la salida del
+        # evento de prueba (dentro de 2 h, en «Aula 3»): sin esta ruta el backend recibía
+        # una lista vacía, respondía 500 y el navegador lo apuntaba como error de consola.
+        ("maps.googleapis.com", lambda: _Respuesta({
+            "status": "OK",
+            "origin_addresses": ["Origen E2E"], "destination_addresses": ["Aula 3"],
+            "rows": [{"elements": [{
+                "status": "OK",
+                "duration": {"value": 900, "text": "15 min"},
+                "duration_in_traffic": {"value": 960, "text": "16 min"},
+                "distance": {"value": 5200, "text": "5,2 km"},
+            }]}],
+        })),
         # El permiso de un solo uso para el WebSocket de voz. El navegador lo pide al
         # entrar; que sea un token de mentira da igual, porque en el E2E nadie llega a
         # abrir el socket (no hay micrófono ni altavoz que valgan en Chromium).

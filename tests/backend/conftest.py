@@ -178,6 +178,9 @@ def _limpiar_estado():
     # anterior no se pediría la lista de calendarios que el test ha simulado.
     main._clases_cal_cache = None
     main._presencia_cache = None
+    # La caché de /maps/departure: sin vaciarla, el primer test que calcule una ruta le
+    # serviría su respuesta al siguiente que pida la misma, sin pasar por su mock.
+    main._salida_cache.clear()
     # El interruptor del resumen diario: sin limpiarlo, un test que lo apague dejaría el
     # correo apagado para todos los que vinieran detrás.
     main._brief_ajustes_cache = None

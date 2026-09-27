@@ -52,11 +52,19 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
 Definidos en `ALL_DEFAULT_WIDGETS`. Ids: `timeline`, `weather`, `upcoming`, `entregas`,
 `training`, `ideas`, `clothing` (Conteo ropa), `acciones_pc` (Streaming PC),
 `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
-`health_workouts`, `health_hub` (Salud), `jarvis`. Cada uno se renderiza en
-`renderWidget(id)`.
+`health_workouts`, `health_hub` (Salud), `jarvis`, `siguiente` (Lo siguiente, ver su
+sección más abajo). Cada uno se renderiza en `renderWidget(id)`.
 La configuración (visibilidad, columna, orden, tamaño, splits) se persiste en
 `localStorage`, con selección independiente en modo completo (`la_widget_config`) y
 simple (`la_simple_widget_config`).
+
+**Un widget nuevo entra en su sitio, no al final** (`fusionarConfigWidgets`, en
+`helpers.js`, con tests). La config guardada no lo conoce, así que al cargarla se inserta
+**después del id más cercano que le precede en `ALL_DEFAULT_WIDGETS` y ya está en la
+config** (o al principio si no hay ninguno). Antes se añadía al final: un widget pensado
+para ir arriba acababa al fondo de la columna para cualquiera con una config guardada, que
+es todo el mundo. Así que el orden de `ALL_DEFAULT_WIDGETS` importa también para quien ya
+tiene la suya: ahí es donde aparecerá lo nuevo.
 
 Qué hace cada uno:
 
@@ -378,11 +386,16 @@ Vista alternativa pensada para registrar entrenamientos rápido desde el móvil.
 en ⚙ → "Modo de vista" → [Simple] y se guarda en `la_simple_mode` (`"1"`/`"0"`).
 
 - Reemplaza la grid de widgets por un layout propio (`renderSimple()`) que **reutiliza
-  `renderWidget(id)`** → misma estética (fuentes, colores, cards).
+  `renderWidget(id)`** → misma estética (fuentes, colores, cards). Pinta los widgets
+  visibles de `simpleWidgetConfig` en su orden.
+- **«Lo siguiente» es un widget real** (`siguiente`), el mismo del modo completo, y cae
+  arriba (justo debajo de Jarvis) también en una config simple ya guardada, por
+  `fusionarConfigWidgets`. Antes aquí se describía una "card compacta con el próximo
+  evento" que no existía.
 - **Se adapta a la orientación** vía `matchMedia("(orientation: portrait)")` (estado
   `orientation`, con listener al girar):
-  - **Vertical**: una columna — Entrenamiento (card completa) + "Lo siguiente" (card
-    compacta con el próximo evento) + Entregas (solo si hay) + bloque de salud.
+  - **Vertical**: una columna, en el orden de la config, con los de salud reunidos en
+    el bloque de pestañas.
   - **Horizontal**: dos columnas — izquierda Entrenamiento + Entregas + salud, derecha
     Hoy (timeline) + Próximos eventos.
 - **Bloque de salud con pestañas**: en vez de un scroll largo, una barra de pestañas
@@ -474,8 +487,10 @@ Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_s
 guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_ideas_agrupar`
 («Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`), `la_finanzas_rango` (el rango
 elegido en la gráfica de finanzas), `la_anio_modo` (el modo del mapa «Tu año»:
-`bienestar`/`sueno`/`pasos`). Si añades una,
-mantén el prefijo y el `try/catch` al parsear.
+`bienestar`/`sueno`/`pasos`), `la_salida_modo` (coche o andando para la hora de salida:
+`{porEvento: {clave: modo}, ultimo}`, podado a 50 eventos con `recordarModo`; sin ella, o
+si localStorage lanza, se calcula en coche). Si añades una, mantén el prefijo y el
+`try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
 
@@ -551,6 +566,48 @@ Lo que hay que saber al tocarlo:
   en cada carga. `resumenEstado` se pide con `import()` al abrir ⚙
   (`cargarResumenEstado`), y el módulo comparte chunk con la zona dev. Hay un test que
   lo vigila (`tests/frontend/rendimiento.test.jsx`).
+
+## El widget «Lo siguiente» (`siguiente`)
+
+Responde siempre a lo mismo: qué es lo próximo con hora, cuánto falta y, si hay que
+desplazarse, a qué hora salir y cuánto margen queda. Va debajo de Jarvis. La lógica pura
+está en `src/lib/agenda.js` (con tests en `tests/frontend/agenda.test.js`); el componente,
+`SiguienteCompromiso`, a nivel de módulo junto a `DepartureWidget` y sin estado propio que
+dependa del reloj.
+
+- **Qué pinta**: si hay algo en curso, una fila «Ahora · título · acaba en N min»; debajo,
+  lo siguiente (título, horas, sitio, etiqueta «clase» si viene del calendario de clases),
+  la cuenta atrás grande y, si hay algo en curso, el hueco entre los dos («te quedan 40 min
+  libres», «justo después», «se solapa con lo actual»). Los eventos de todo el día y los
+  que no tienen hora nunca son «lo siguiente». Mira 7 días (`HORIZONTE_DIAS`), lo mismo que
+  `/calendar/events`.
+- **La salida**: «Sal a las HH:MM · duración · distancia · desde …» (el «desde» sale del
+  campo `origen` de `/maps/departure`), con una barra fina del margen de la última hora y
+  la fase: holgada en el acento, ámbar en los últimos 15 min, «sal ya» y «vas N min
+  tarde» en rojo. Una ubicación de Teams, Zoom, un enlace… (`esUbicacionOnline`) dice «En
+  línea: no hay que salir» y **no pide nada a Maps**; `DepartureWidget` tampoco lo ofrece
+  para esas ubicaciones en «Hoy» y «Próximos eventos». Debajo va `DepartureWidget` en modo
+  `compacto`: el botón para calcular fuera de la ventana, el cambio de coche/andando y ↺.
+- **Cuándo pide la salida solo**: cuando el siguiente entra en la ventana de 180 min
+  (`VENTANA_SALIDA_MIN`, espejo de `SALIR_VENTANA_MIN` del backend, que calcula la misma
+  salida para el aviso de «sal ya»; con la caché del backend las dos son una sola petición
+  a Google). **Una vez por evento y modo** (`salidaIntentosRef`, un Set de `clave|modo` que
+  cuenta también lo pedido a mano), **solo si el widget está visible** en el modo activo,
+  después de resolverse la geolocalización (como el clima, para no calcular dos veces) y
+  nunca con ubicaciones online. **El tic del reloj no vuelve a pedir**: la fase avanza sola
+  con `ahora`, y la hora de salida solo cambia con ↺ o al recargar (que dentro de 10 min
+  acierta en la caché del backend). Distance Matrix se paga por petición: un efecto que
+  pidiera con cada tic serían dos llamadas de pago por minuto con la pestaña abierta.
+- **El resultado va al `departureMap` de siempre** con la clave `ev.id || ev.start`, así
+  que «Hoy» y «Próximos eventos» enseñan la misma hora sin volver a pedirla.
+- **Error ≠ vacío**: sin Outlook o con `/calendar/events` fallando, la card va con borde
+  discontinuo y dice «No sé qué viene…», nunca «Nada con hora en los próximos 7 días». Si
+  solo fallan las clases (`clasesFallo`), una nota lo dice. Un 400/502 de Maps se guarda
+  como `{error}` y se pinta «No se pudo calcular la ruta a «…»» (`textoErrorRuta`); antes
+  `fetchDeparture` guardaba el `{detail}` como si fuera una ruta y salía «Salir a las
+  undefined».
+- **El modo se recuerda** por evento y como último elegido (`la_salida_modo`); el
+  automático usa `modoPara`, y solo lo que elige el usuario se escribe.
 
 ## El widget «El día» (`dia_linea`)
 

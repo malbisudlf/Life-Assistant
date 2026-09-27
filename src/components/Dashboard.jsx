@@ -22,11 +22,16 @@ import {
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
   esConfirmacionHablada, esNegacionHablada,
+  fusionarConfigWidgets,
 } from "../lib/helpers";
 import {
   tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS, sleepHistory, desgloseNoche,
   rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes, rachaSueno, rachaPasos,
 } from "../lib/helpers";
+import {
+  proximoCompromiso, cuentaAtras, faltaPara, textoHueco, faseSalida, esUbicacionOnline,
+  recordarModo, modoPara, textoErrorRuta, VENTANA_SALIDA_MIN, HORIZONTE_DIAS,
+} from "../lib/agenda";
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
   posicionAhora,
@@ -657,14 +662,45 @@ function AnioEnCuadritos({ rejilla, historico, pasos, reloj, corte, rachas }) {
 // un TIPO de componente nuevo, así que React desmontaba y volvía a montar todo este
 // subárbol en lugar de actualizarlo — dos veces por minuto solo por el tic del reloj,
 // y cualquier estado propio que se le añadiera se habría perdido solo.
+//
+// `compacto` es para «Lo siguiente», que ya pinta la línea «Sal a las…» a su manera
+// (con la fase y la barra): con una ruta ya calculada, aquí solo quedan los botones de
+// modo y ↺. Sin él, «Hoy» y «Próximos eventos» siguen como siempre.
 function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickingId,
-                           setDeparturePickingId, setDepartureMap, fetchDeparture }) {
-  if (!ev?.loc) return null;
+                           setDeparturePickingId, setDepartureMap, fetchDeparture, compacto = false }) {
+  // Una reunión de Teams o un enlace no tienen ruta: pedirla a Google es pagar una
+  // petición para recibir un NOT_FOUND.
+  if (!ev?.loc || esUbicacionOnline(ev.loc)) return null;
   const key = ev.id || ev.start;
   const info = departureMap[key];
   const isLoading = departureLoadingId === key;
   const isPicking = departurePickingId === key;
   const btnBase = { border: "0.5px solid", borderRadius: 6, fontSize: 11, padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.04em" };
+  const recalcular = e => {
+    e.stopPropagation();
+    setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; });
+    setDeparturePickingId(key);
+  };
+  const botonRecalcular = (
+    <button onClick={recalcular} title="Volver a calcular" aria-label="Recalcular la hora de salida" style={{
+      ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
+    }}>↺</button>
+  );
+  if (compacto && info && !isLoading && !isPicking) {
+    // El modo contrario al calculado se pide directamente: es un toque, no dos.
+    const otro = info.mode === "walking" ? "driving" : "walking";
+    return (
+      <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 2 }}>
+        {!info.error && (
+          <button onClick={e => { e.stopPropagation(); fetchDeparture(ev, otro); }}
+            title={otro === "walking" ? "Calcular andando" : "Calcular en coche"} style={{
+              ...btnBase, background: "transparent", borderColor: "var(--border2)", color: "var(--muted)", padding: "2px 8px", fontSize: 10,
+            }}>{otro === "walking" ? "🚶 Andando" : "🚗 En coche"}</button>
+        )}
+        {botonRecalcular}
+      </div>
+    );
+  }
   return (
     <div style={{ marginTop: 6 }}>
       {!info && !isLoading && !isPicking && (
@@ -694,13 +730,163 @@ function DepartureWidget({ ev, departureMap, departureLoadingId, departurePickin
           <span style={{ color: "var(--muted)", marginLeft: 8 }}>
             {info.duration_text} · {info.distance_text}
           </span>
-          <button onClick={e => { e.stopPropagation(); setDepartureMap(prev => { const n = {...prev}; delete n[key]; return n; }); setDeparturePickingId(key); }} aria-label="Recalcular la hora de salida" style={{
-            ...btnBase, background: "transparent", borderColor: "transparent", color: "var(--muted)", padding: "2px 6px", marginLeft: 6, fontSize: 10,
-          }}>↺</button>
+          {botonRecalcular}
         </div>
       )}
-      {info?.error && <div style={{ fontSize: 11, color: "#d4645a" }}>{info.error}</div>}
+      {info?.error && (
+        <div style={{ fontSize: 11, color: "#d4645a" }}>
+          {textoErrorRuta(ev.loc, info.error)}
+          {botonRecalcular}
+        </div>
+      )}
     </div>
+  );
+}
+
+// ── LO SIGUIENTE ─────────────────────────────────────────────────
+// Colores de la fase de salida: el acento mientras sobra tiempo, ámbar en el último
+// cuarto de hora y el mismo rojo del error de DepartureWidget cuando ya toca o tarde.
+const COLOR_FASE_SALIDA = {
+  holgado: "var(--accent)",
+  pronto:  "#e0a040",
+  ya:      "#d4645a",
+  tarde:   "#d4645a",
+};
+// Desde dónde se calculó la ruta (campo `origen` de /maps/departure). Importa: «sal a
+// las 9:20» desde casa no sirve de nada si estás en la otra punta de la ciudad.
+const TEXTO_ORIGEN_SALIDA = {
+  dispositivo: "desde tu ubicación",
+  presencia:   "desde donde dice la casa que estás",
+  casa:        "desde casa",
+};
+
+// La memoria del modo de «Lo siguiente» (`la_salida_modo`, con la forma de
+// `recordarModo`). Si localStorage no está o lanza, sin memoria: se calcula en coche.
+function leerModoSalida() {
+  try {
+    const guardado = JSON.parse(localStorage.getItem("la_salida_modo") || "null");
+    return guardado && typeof guardado === "object" ? guardado : {};
+  } catch { return {}; /* mejor esfuerzo: sin memoria, en coche */ }
+}
+
+// A nivel de módulo por lo mismo que DepartureWidget: definido dentro de Dashboard,
+// cada tic del reloj lo desmontaría y remontaría entero. No tiene estado propio que
+// dependa del reloj: todo lo que se mueve (cuenta atrás, fase) sale de `ahora` en
+// cada render, y la hora de salida la guarda `departureMap`, que es de Dashboard.
+function SiguienteCompromiso({ ahora, compromiso, estadoAgenda, clasesFallo, origenTexto, propsSalida }) {
+  const { actual, siguiente, huecoMin } = compromiso || {};
+  const muted = { color: "var(--muted)", fontSize: 13 };
+  const notaClases = clasesFallo ? (
+    <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 10 }}>No he podido mirar las clases</div>
+  ) : null;
+
+  // Cargando y error NO pueden parecerse a «no hay nada»: decir que no tienes nada
+  // cuando en realidad no se ha podido mirar es justo lo que hace perder una cita.
+  if (estadoAgenda === "cargando") {
+    return <div style={muted}>Mirando la agenda…</div>;
+  }
+  if (estadoAgenda === "error") {
+    return (
+      <>
+        <div style={muted}>No sé qué viene: Outlook no responde o no está conectado</div>
+        {notaClases}
+      </>
+    );
+  }
+  if (!actual && !siguiente) {
+    return (
+      <>
+        <div style={muted}>{`Nada con hora en los próximos ${HORIZONTE_DIAS} días`}</div>
+        {notaClases}
+      </>
+    );
+  }
+
+  const hm = d => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const etiquetaClase = (
+    <span style={{
+      fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--accent2)",
+      border: "0.5px solid rgba(139,180,212,0.35)", borderRadius: 4, padding: "1px 5px", marginLeft: 6,
+      whiteSpace: "nowrap",
+    }}>clase</span>
+  );
+
+  let filaSalida = null;
+  if (siguiente?.lugar) {
+    if (esUbicacionOnline(siguiente.lugar)) {
+      filaSalida = <div style={{ ...muted, fontSize: 12, marginTop: 10 }}>💻 En línea: no hay que salir</div>;
+    } else {
+      const info = propsSalida.departureMap[siguiente.key];
+      const ok   = info && !info.error && info.departure_time;
+      const fase = ok ? faseSalida({ salida: info.departure_iso, empieza: siguiente.inicio, ahora }) : null;
+      const color = fase ? COLOR_FASE_SALIDA[fase.fase] : "var(--accent)";
+      filaSalida = (
+        <div style={{ marginTop: 12 }}>
+          {ok && (
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, overflowWrap: "anywhere" }}>
+              <span style={{ color: "var(--text)", fontFamily: "'DM Mono', monospace", fontSize: 13, whiteSpace: "nowrap" }}>
+                {info.mode === "walking" ? "🚶" : "🚗"} Sal a las {info.departure_time}
+              </span>
+              {[info.duration_text, info.distance_text, origenTexto].filter(Boolean).map(t => ` · ${t}`).join("")}
+            </div>
+          )}
+          {fase && fase.fase !== "en_curso" && (
+            <div style={{ marginTop: 6 }}>
+              <div style={{ height: 4, borderRadius: 2, background: "var(--surface2)", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", width: `${Math.round(fase.porcentaje * 100)}%`, background: color,
+                  borderRadius: 2, transition: "width 0.4s ease",
+                }} />
+              </div>
+              <div style={{ fontSize: 12, color, marginTop: 4, fontWeight: 500 }}>{fase.texto}</div>
+            </div>
+          )}
+          {info?.error && (
+            <div style={{ ...muted, fontSize: 12, overflowWrap: "anywhere" }}>{textoErrorRuta(siguiente.lugar, info.error)}</div>
+          )}
+          <DepartureWidget ev={{ ...siguiente.raw, loc: siguiente.lugar }} {...propsSalida} compacto />
+        </div>
+      );
+    }
+  }
+
+  return (
+    <>
+      {actual && (
+        <div style={{
+          display: "flex", alignItems: "baseline", gap: 8, fontSize: 12, color: "var(--muted)",
+          paddingBottom: siguiente ? 10 : 0, marginBottom: siguiente ? 10 : 0,
+          borderBottom: siguiente ? "0.5px solid var(--border)" : "none",
+        }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ color: "var(--green)" }}>Ahora</span> · <span style={{ color: "var(--text)" }}>{actual.titulo}</span>
+            {actual.tipo === "clase" && etiquetaClase}
+          </span>
+          <span style={{ fontFamily: "'DM Mono', monospace", flexShrink: 0 }}>{faltaPara(ahora, actual.fin)}</span>
+        </div>
+      )}
+      {siguiente && (
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 500, color: "var(--text)", lineHeight: 1.3, overflowWrap: "anywhere" }}>
+            {siguiente.titulo}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, overflowWrap: "anywhere" }}>
+            <span style={{ fontFamily: "'DM Mono', monospace" }}>{hm(siguiente.inicio)}–{hm(siguiente.fin)}</span>
+            {siguiente.lugar ? ` · ${siguiente.lugar}` : ""}
+            {siguiente.tipo === "clase" && etiquetaClase}
+          </div>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: 27, lineHeight: 1.2, color: "var(--accent)",
+            marginTop: 8, whiteSpace: "nowrap",
+          }}>{cuentaAtras(ahora, siguiente.inicio)}</div>
+          {actual && huecoMin != null && (
+            <div style={{ ...muted, fontSize: 12, marginTop: 2 }}>{textoHueco(huecoMin)}</div>
+          )}
+        </div>
+      )}
+      {filaSalida}
+      {notaClases}
+    </>
   );
 }
 
@@ -1338,6 +1524,7 @@ const COLUMN_LABELS   = { left: "izquierda", center: "centro", right: "derecha" 
 // `acciones_pc`, que nacía a la derecha y reaparecía a la izquierda).
 const DEFAULT_COLUMNS = {
   jarvis:            "left",
+  siguiente:         "left",
   timeline:          "left",
   dia_linea:         "left",
   weather:           "left",
@@ -1361,7 +1548,8 @@ const DEFAULT_COLUMNS = {
 
 const ALL_DEFAULT_WIDGETS = [
   { id: "jarvis",            label: "Jarvis",            visible: true,  column: "left"  },
-  { id: "timeline",          label: "Hoy",              visible: true,  column: "left"  },
+  { id: "siguiente",         label: "Lo siguiente",      visible: true,  column: "left"  },
+  { id: "timeline",         label: "Hoy",              visible: true,  column: "left"  },
   { id: "dia_linea",         label: "El día",            visible: true,  column: "left"  },
   { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
@@ -1383,32 +1571,14 @@ const ALL_DEFAULT_WIDGETS = [
 ];
 
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
-// (para incorporar widgets nuevos que aún no estén guardados) y saneando cada
-// entrada. Se usa tanto para el modo completo ("la_widget_config") como para el
-// simplificado ("la_simple_widget_config"), que tienen selecciones independientes.
+// (para incorporar widgets nuevos que aún no estén guardados, en su sitio y no al
+// final: ver `fusionarConfigWidgets`) y saneando cada entrada. Se usa tanto para el
+// modo completo ("la_widget_config") como para el simplificado
+// ("la_simple_widget_config"), que tienen selecciones independientes.
 function loadWidgetConfig(storageKey) {
   try {
     const saved = localStorage.getItem(storageKey);
-    if (saved) {
-      const parsed   = JSON.parse(saved).filter(w => w.id !== "__split__");
-      const savedIds = new Set(parsed.map(w => w.id));
-      const merged   = parsed.map(w => ({
-        id: w.id,
-        label: ALL_DEFAULT_WIDGETS.find(d => d.id === w.id)?.label || w.label,
-        visible: w.visible !== false,
-        column: w.column || DEFAULT_COLUMNS[w.id] || "left",
-        width:  typeof w.width  === "number" ? w.width  : undefined,
-        height: typeof w.height === "number" ? w.height : undefined,
-        // widthPct es lo que de verdad pinta el ancho (wrapResizable). Al reconstruir
-        // la entrada campo a campo se quedaba fuera, así que los anchos ajustados se
-        // perdían en cada recarga.
-        widthPct: typeof w.widthPct === "number" ? w.widthPct : undefined,
-      }));
-      for (const def of ALL_DEFAULT_WIDGETS) {
-        if (!savedIds.has(def.id)) merged.push({ ...def });
-      }
-      return merged;
-    }
+    if (saved) return fusionarConfigWidgets(JSON.parse(saved), ALL_DEFAULT_WIDGETS, DEFAULT_COLUMNS);
   } catch { /* mejor esfuerzo: ignorar */ }
   return ALL_DEFAULT_WIDGETS.map(w => ({ ...w }));
 }
@@ -2121,7 +2291,15 @@ export default function Dashboard() {
   const [departureLoadingId, setDepartureLoadingId] = useState(null);
   const [departurePickingId, setDeparturePickingId] = useState(null);
   const [classEvents, setClassEvents] = useState([]);
+  const [clasesFallo, setClasesFallo] = useState(false);
   const [classesOpen, setClassesOpen] = useState(false);
+  // Coche o andando, recordado por evento y con el último elegido de respaldo
+  // (`recordarModo`). En un ref y no en estado: no se pinta, solo decide qué se pide.
+  const [modoSalidaInicial] = useState(leerModoSalida);
+  const modoSalidaRef = useRef(modoSalidaInicial);
+  // Rutas ya pedidas solas, como `${key}|${modo}`: el efecto de «Lo siguiente» corre
+  // con cada tic del reloj y esto es lo que le impide volver a pagar la misma.
+  const salidaIntentosRef = useRef(new Set());
 
   // ── Widget «El día» ──
   // Qué jornada se está mirando, en ISO local. Arranca en hoy y se puede retroceder
@@ -2452,8 +2630,11 @@ export default function Dashboard() {
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data.events)) setClassEvents(data.events);
+        // «Lo siguiente» lo dice: sin esto, una clase que no se pudo leer se quedaría
+        // fuera sin rastro y lo siguiente sería otra cosa, afirmado con toda seguridad.
+        if (data.error) setClasesFallo(true);
       })
-      .catch(() => { /* mejor esfuerzo: sin clases si falla */ });
+      .catch(() => setClasesFallo(true));
   }, [token]);
 
   // Cargar resumen entrenamiento
@@ -2519,6 +2700,41 @@ export default function Dashboard() {
       .some(w => w.id === "dia_linea" && w.visible !== false),
     [simpleMode, simpleWidgetConfig, widgetConfig],
   );
+
+  // ── «Lo siguiente» ──
+  // Lo próximo con hora, recalculado con el tic del reloj: lo que está en curso deja de
+  // estarlo y lo siguiente pasa a ser otra cosa sin que nadie recargue nada.
+  const compromiso = useMemo(
+    () => proximoCompromiso(allEvents, classEvents, now),
+    [allEvents, classEvents, now],
+  );
+  const estadoAgenda = authNeeded ? "error" : loading ? "cargando" : "ok";
+  // Mismo patrón que `lineaVisible`: oculto en el modo activo, no pide nada.
+  const siguienteVisible = useMemo(
+    () => (simpleMode ? simpleWidgetConfig : widgetConfig)
+      .some(w => w.id === "siguiente" && w.visible !== false),
+    [simpleMode, simpleWidgetConfig, widgetConfig],
+  );
+
+  // La hora de salida del siguiente se pide SOLA, una vez, cuando entra en la ventana
+  // de las reglas de «sal ya» (VENTANA_SALIDA_MIN): la misma en que el backend la
+  // calcula para avisar, así que con su caché de 10 min las dos cosas son una sola
+  // petición a Google. El efecto corre con cada tic, pero el Set de intentos hace que
+  // el tic no vuelva a pedir: una ruta nueva solo llega con ↺ (a mano) o recargando.
+  // Espera a la geolocalización, igual que el clima, para no calcular dos veces.
+  const siguienteSalida = compromiso.siguiente;
+  useEffect(() => {
+    if (!token || !siguienteVisible || geo === null || !siguienteSalida) return;
+    const { key, lugar, inicio, raw } = siguienteSalida;
+    if (!lugar || esUbicacionOnline(lugar)) return;
+    const faltan = (inicio.getTime() - now.getTime()) / 60000;
+    if (faltan <= 0 || faltan > VENTANA_SALIDA_MIN) return;
+    if (departureMap[key] || departureLoadingId !== null || departurePickingId === key) return;
+    const modo = modoPara(modoSalidaRef.current, key);
+    if (salidaIntentosRef.current.has(`${key}|${modo}`)) return;
+    fetchDeparture({ ...raw, loc: lugar }, modo, { automatico: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- a propósito: ver arriba
+  }, [token, siguienteVisible, geo, siguienteSalida?.key, now]);
 
   useEffect(() => {
     if (!token || !lineaVisible) return;
@@ -2878,9 +3094,18 @@ export default function Dashboard() {
     setExporting(false);
   }
 
-  async function fetchDeparture(ev, mode) {
+  async function fetchDeparture(ev, mode, { automatico = false } = {}) {
     if (!ev?.loc || !ev?.start) return;
     const key = ev.id || ev.start;
+    // Cualquier petición cuenta como intento, también la del botón: si no, al cancelar
+    // el selector tras un ↺ el cálculo automático volvería a pedir en el siguiente tic.
+    salidaIntentosRef.current.add(`${key}|${mode}`);
+    if (!automatico) {
+      // Lo que elige el usuario se recuerda para ese evento y como preferencia general.
+      modoSalidaRef.current = recordarModo(modoSalidaRef.current, key, mode);
+      try { localStorage.setItem("la_salida_modo", JSON.stringify(modoSalidaRef.current)); }
+      catch { /* mejor esfuerzo: sin memoria, se sigue calculando igual */ }
+    }
     setDeparturePickingId(null);
     setDepartureLoadingId(key);
     try {
@@ -2893,8 +3118,14 @@ export default function Dashboard() {
         headers: jsonHeaders(),
         body: JSON.stringify(body),
       });
-      const data = await res.json();
-      setDepartureMap(prev => ({ ...prev, [key]: { ...data, mode } }));
+      const data = await res.json().catch(() => null);
+      // Un 400/502 trae `{detail}` y no la ruta: guardarlo como si fuera una ruta era lo
+      // que pintaba «Salir a las undefined».
+      if (!res.ok || !data?.departure_time) {
+        setDepartureMap(prev => ({ ...prev, [key]: { error: data?.detail || "No se pudo calcular la ruta" } }));
+      } else {
+        setDepartureMap(prev => ({ ...prev, [key]: { ...data, mode } }));
+      }
     } catch {
       setDepartureMap(prev => ({ ...prev, [key]: { error: "Error al calcular" } }));
     }
@@ -5183,6 +5414,22 @@ export default function Dashboard() {
     const cardStyle = fixedH ? estilosTarjeta.fija : estilosTarjeta.libre;
 
     switch (id) {
+      case "siguiente": return (
+        <div
+          style={estadoAgenda === "error" ? { ...cardStyle, border: "1px dashed var(--border2)" } : cardStyle}
+          data-card={id} key="siguiente"
+        >
+          <div style={s.sectionLabel}>Lo siguiente</div>
+          <SiguienteCompromiso
+            ahora={now}
+            compromiso={compromiso}
+            estadoAgenda={estadoAgenda}
+            clasesFallo={clasesFallo}
+            origenTexto={TEXTO_ORIGEN_SALIDA[departureMap[compromiso.siguiente?.key]?.origen] || ""}
+            propsSalida={propsSalida}
+          />
+        </div>
+      );
       case "dia_linea": return (
         <LineaDelDia
           key="dia_linea"

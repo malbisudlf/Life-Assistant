@@ -21,7 +21,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `DELETE /calendar/events/{event_id}` | JWT | Borra un evento. Un 404 de Graph cuenta como borrado: para quien borra, "no existe" y "ya no existe" son lo mismo |
 | `GET /calendar/classes` | JWT | Eventos del calendario de clases (`CLASSES_CALENDAR`) — 60 días, máx. 200 |
 | `GET /calendar/calendars` | JWT | Lista de calendarios disponibles |
-| `POST /maps/departure` | JWT | Hora de salida (Google Maps Distance Matrix). `mode: "driving"` (con tráfico) o `"walking"` |
+| `POST /maps/departure` | JWT | Hora de salida (Google Maps Distance Matrix). `mode: "driving"` (con tráfico) o `"walking"`. Responde `duration_text`, `distance_text`, `departure_time`, `departure_iso` y `origen` (`dispositivo` si vino `origin`, `presencia` si se usó la ubicación de HA, `casa` si se cayó a `HOME_ADDRESS`). Las respuestas correctas se cachean 10 min (ver `docs/BACKEND_PATRONES.md`) |
 | `GET /weather` | JWT | Clima (Open-Meteo). `?lat&lon` opcionales; si no, `WEATHER_LAT/LON` |
 | `GET /ideas` | JWT | Lista de ideas |
 | `POST /ideas/audio` | JWT | Audio → Whisper → GPT-4o-mini → Supabase. Rate limit por IP (llamada de pago) |
