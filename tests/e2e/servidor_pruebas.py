@@ -212,11 +212,6 @@ class _RouterSimulado:
             [{"id": "s1", "date": _dia(-1), "duration_hours": 1.5,
               "created_at": f"{_dia(-1)}T10:00:00Z"}])),
         ("/rest/v1/training_payments", lambda: _Respuesta([])),
-        ("/rest/v1/ideas", lambda: _Respuesta(
-            [{"id": "11111111-1111-4111-8111-111111111111", "key": "Idea de prueba",
-              "full_text": "Contenido de la idea", "tag": "e2e",
-              "created_at": f"{_dia(0)}T09:00:00Z"}])),
-        ("/rest/v1/clothing", lambda: _Respuesta([])),
         # Antes que `/rest/v1/ideas`, que es prefijo suyo: si no, la checklist de la zona
         # dev recibiría las notas por voz, que son otra tabla y otra cosa.
         ("/rest/v1/ideas_dev", lambda: _Respuesta([{
@@ -225,6 +220,11 @@ class _RouterSimulado:
             "por_donde": None, "esfuerzo": 1, "area": "frontend", "estado": "pendiente",
             "creada": f"{_dia(0)}T09:00:00Z", "actualizada": f"{_dia(0)}T09:00:00Z",
         }])),
+        ("/rest/v1/ideas", lambda: _Respuesta(
+            [{"id": "11111111-1111-4111-8111-111111111111", "key": "Idea de prueba",
+              "full_text": "Contenido de la idea", "tag": "e2e",
+              "created_at": f"{_dia(0)}T09:00:00Z"}])),
+        ("/rest/v1/clothing", lambda: _Respuesta([])),
         ("/rest/v1/brief_envios", lambda: _Respuesta(
             [{"fecha": _dia(0), "enviado_at": _iso(-3), "fuente": "despertar"}])),
         ("/rest/v1/informe_envios", lambda: _Respuesta(

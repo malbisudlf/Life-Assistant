@@ -101,6 +101,9 @@ TABLAS = (
     ("brief_ajustes",         "id",                      False,       None),
     ("etf_holdings",          "ticker",                  False,       None),
     ("etf_aportaciones",      "fecha,id",                False,       None),
+    # La checklist de la zona dev: título, porqué y por dónde, escritos a mano. El porqué
+    # es justo lo que no se reconstruye meses después (su migración lo dice).
+    ("ideas_dev",             "creada,id",               False,       None),
 )
 
 VERSION_FORMATO = 1

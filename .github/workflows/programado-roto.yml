@@ -15,10 +15,16 @@ name: Avisar de que un programado se ha roto
 # tocar una sesión de Claude Code.
 #
 # El CI no está en la lista: ya tiene su propio camino, que además sabe arreglarlo.
+#
+# Todo workflow con `schedule:` tiene que estar aquí, con su `name:` EXACTO (así empareja
+# `workflow_run`). El resumen diario se quedó fuera al crear este fichero y su red de
+# seguridad falló en rojo sin que saliera un solo aviso; hoy lo comprueba un test
+# (`tests/backend/test_arreglos_scripts_ci.py`).
 on:
   workflow_run:
     workflows:
       - Copia de seguridad de Supabase
+      - Resumen diario por correo (red de seguridad)
       - Revisión nocturna del código
       - Evals de Jarvis          # hoy solo se lanza a mano, pero si falla tampoco lo ve nadie
     types: [completed]

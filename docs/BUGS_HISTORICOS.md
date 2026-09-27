@@ -793,3 +793,19 @@
     `_leer_todas()`.
   - Y la de siempre con los datos que faltan: **si falta lo más reciente y la ingesta dice
     200, mira la lectura antes que el teléfono.**
+
+- **Los workflows que avisan al backend se fiaban de quien los disparaba.** La revisión
+  del 2026-09-27 encontró dos puertas abiertas en `.github/workflows/`, las dos por la
+  misma razón: el filtro miraba el QUÉ y no el QUIÉN.
+  - `revision-aviso.yml` solo miraba el título del issue. El repositorio es público: un
+    desconocido que abriera «Revisión nocturna — …» mandaba al móvil un aviso idéntico al
+    de verdad, con el botón «Arreglarlo» que mergea sin segunda pregunta, y con el turno
+    de noche encendido lanzaba el arreglo sin preguntar a nadie. Hoy exige que el issue
+    lo abra el dueño del repositorio, y la skill `arreglar-revision` se niega a trabajar
+    con uno que no lo sea.
+  - `ci-averiado.yml` confiaba en `branches: [main]`, que en `workflow_run` se compara con
+    la rama de ORIGEN del run: un PR desde el `main` de un fork la pasa. Hoy descarta los
+    runs de PR y los de otro repositorio.
+  - Moraleja: **en un workflow que corre con los secrets del repositorio, lo que llega en
+    el evento lo ha escrito alguien, y en un repositorio público ese alguien puede ser
+    cualquiera.** Filtra por autor o por repositorio, no por el nombre de lo que llega.

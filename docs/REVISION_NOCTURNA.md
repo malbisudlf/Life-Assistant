@@ -163,6 +163,9 @@ Cinco decisiones, y ninguna es nueva en este proyecto:
 - **El aviso lo manda Actions, no la routine que revisa.** La routine no tiene dónde
   guardar un secreto: lo que se le pase acaba en la transcripción de la sesión. El evento
   `issues` de Actions sí, y de paso cubre el issue que abras a mano con ese título.
+  **Solo si lo abre el dueño del repositorio**: el repositorio es público, y sin ese
+  filtro el issue de cualquier desconocido llegaba al móvil como una revisión de verdad,
+  con su botón «Arreglarlo» (y con el turno de noche, lanzaba el arreglo sin preguntar).
 - **El aviso espera a que estés despierto.** Se apunta a las 03:40 con `cuando` a las
   08:30 (`AVISOS_HORA_DIFERIDOS`): es un aviso que no gana nada por llegar de madrugada y
   lo pierde todo si te despierta. Lo entrega el despachador de siempre, así que hereda el

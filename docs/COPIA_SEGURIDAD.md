@@ -32,6 +32,7 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
 - `reglas_usuario`, `vigilancias`, `avisos_reglas`, `ha_entidades` — lo proactivo.
 - `salud_ajustes`, `brief_ajustes` — ajustes que se escribieron a mano una vez.
 - `etf_holdings`, `etf_aportaciones` — la cartera introducida a mano.
+- `ideas_dev` — la checklist de la zona dev: el porqué de cada idea no sale de ningún otro sitio.
 
 **Lo que NO se copia, y por qué:**
 

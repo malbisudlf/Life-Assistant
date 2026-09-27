@@ -32,7 +32,16 @@ permissions:
 jobs:
   avisar:
     name: Avisar al backend
-    if: github.event.workflow_run.conclusion == 'failure'
+    # `branches: [main]` NO basta: en `workflow_run` se compara con `head_branch`, que en
+    # un PR desde un fork es la rama del fork. Un PR abierto desde el `main` de un fork,
+    # con los tests rotos, pasaba el filtro y lanzaba un arreglo sobre un `main` en verde
+    # (y gastaba el cupo de intentos del día). Se exige que el run sea de este mismo
+    # repositorio y no de un PR. `!= 'pull_request'` y no `== 'push'`: el CI lanzado a
+    # mano sobre `main` (`workflow_dispatch`) también es una avería de verdad.
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: POST /averia

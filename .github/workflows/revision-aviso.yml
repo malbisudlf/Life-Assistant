@@ -7,7 +7,8 @@ name: Avisar de la revisión nocturna
 # Por qué el aviso lo manda Actions y no la propia rutina que revisa: la rutina no tiene
 # dónde guardar un secreto —lo que se le pase acaba en la transcripción de la sesión— y
 # el evento `issues` de Actions sí. De paso, esto cubre también el issue que abras a
-# mano con ese título, que es como se prueba el camino sin esperar a la madrugada.
+# mano con ese título, que es como se prueba el camino sin esperar a la madrugada. Solo
+# el que abras TÚ: el de cualquier otra cuenta se ignora (ver el `if` del job).
 #
 # El disparo es `opened` y `labeled`: la skill pone la etiqueta `revision-nocturna` solo
 # si ya existe en el repositorio, así que el título es el filtro que siempre está.
@@ -32,9 +33,17 @@ jobs:
     name: Avisar al backend
     # `startsWith` sobre el título, o la etiqueta si existe. Nada más entra aquí: este
     # workflow corre en CADA issue que se abra en el repositorio.
+    #
+    # Y solo si el issue lo abre el dueño del repositorio. El repositorio es público y
+    # cualquier cuenta de GitHub puede abrir un issue con ese título: sin esta condición,
+    # su texto llegaba al móvil como una revisión de verdad —botón «Arreglarlo» incluido,
+    # que mergea sin segunda pregunta— y con el turno de noche encendido lanzaba la
+    # sesión de arreglo sin preguntar a nadie. Los issues legítimos (la routine y las
+    # pruebas a mano) salen todos de la cuenta del dueño.
     if: >
-      startsWith(github.event.issue.title, 'Revisión nocturna') ||
-      contains(github.event.issue.labels.*.name, 'revision-nocturna')
+      github.event.issue.user.login == github.repository_owner &&
+      (startsWith(github.event.issue.title, 'Revisión nocturna') ||
+       contains(github.event.issue.labels.*.name, 'revision-nocturna'))
     runs-on: ubuntu-latest
     steps:
       - name: POST /revision/hallazgos

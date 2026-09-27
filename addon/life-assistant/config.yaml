@@ -18,14 +18,19 @@ description: El backend de Life Assistant (FastAPI) corriendo en el propio Green
 arch:
   - aarch64
 
-# `boot: auto` para que vuelva solo tras un corte de luz; el Green tarda más en
+# `boot: manual` porque desde el 2026-09-20 este add-on es la RESERVA: producción vive
+# en `caja`, y un add-on que arranca solo tras un corte de luz es un segundo backend
+# contra el mismo Supabase (los «Gemelos» de `backend/main.py`, que ya pasó así). El
+# Supervisor guarda el modo elegido en su interfaz, así que esto solo decide en una
+# instalación nueva, que es justo cuando se rehace la reserva. Si el Green vuelve a ser
+# producción, se pasa a automático en la interfaz del add-on: el Green tarda más en
 # arrancar que el backend, así que no hay carrera con HA Core.
 #
 # `init: false` porque el arranque lo lleva `run.sh`, que termina en `exec`: sin
 # eso uvicorn no queda de PID 1 y no recibe el SIGTERM del Supervisor, y cada
 # reinicio del add-on acabaría en SIGKILL a los 30 segundos.
 startup: application
-boot: auto
+boot: manual
 init: false
 
 # 8080 dentro; fuera se publica igual para que HA Core lo llame por la IP local
