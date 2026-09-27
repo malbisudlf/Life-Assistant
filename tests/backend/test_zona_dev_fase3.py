@@ -11,6 +11,8 @@ Lo que se fija aquí es lo que se rompería sin darse cuenta:
 - y que una regla silenciada aparezca aunque lleve semanas sin mandar nada, que es
   justamente el caso por el que existe esa tabla.
 """
+import re
+
 import pytest
 
 from conftest import FakeResponse
@@ -83,6 +85,31 @@ class TestLinea:
         assert cuerpo["eventos"][0]["detalle"] == "5 métricas · día 2026-09-11"
         # La hora del grupo es la de la PRIMERA fila: es cuando llegó el envío.
         assert cuerpo["eventos"][0]["cuando"] == "2026-09-12T07:30:00Z"
+
+    def test_la_ingesta_de_un_dia_de_mas_de_mil_filas_llega_entera(
+            self, client, auth_headers, mock_requests):
+        """Supabase corta a 1.000 filas pida el `limit` que pida. Con `limit=5000` y orden
+        ascendente, el día de un volcado de histórico lo que se perdía era la ingesta de
+        la noche, sin que la respuesta dijera que faltaba nada."""
+        volcado = [{"metric_date": f"2026-08-{1 + i % 28:02d}", "metric_name": f"m{i}",
+                    "fuente": "auto_export", "created_at": "2026-09-12T05:00:00Z"}
+                   for i in range(1500)]
+        noche = [{"metric_date": "2026-09-12", "metric_name": "pasos", "fuente": "watch",
+                  "created_at": "2026-09-12T19:00:00Z"}]
+        filas = volcado + noche
+
+        def postgrest(url, **kwargs):
+            # Lo que hace PostgREST: nunca más de 1.000 filas por respuesta.
+            m = re.search(r"[?&]offset=(\d+)", url)
+            desde = int(m.group(1)) if m else 0
+            return FakeResponse(filas[desde:desde + 1000], headers={
+                "Content-Range": f"{desde}-{min(desde + 1000, len(filas)) - 1}/{len(filas)}"})
+
+        mock_requests.add("GET", "/rest/v1/health_metrics", postgrest)
+        cuerpo = client.get("/dev/linea?dia=2026-09-12", headers=auth_headers).json()
+
+        assert _titulos(cuerpo) == ["Ingesta de salud · auto_export", "Ingesta de salud · watch"]
+        assert cuerpo["eventos"][0]["detalle"].startswith("1500 métricas · 28 días")
 
     def test_la_ventana_va_en_hora_local(self, client, auth_headers, mock_requests):
         """En UTC, los eventos de la noche caerían en el día siguiente."""

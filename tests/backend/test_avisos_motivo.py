@@ -142,6 +142,7 @@ class TestReglasQueLoRellenan:
                             lambda: self.AHORA.replace(hour=main.HORA_REGLAS_NOCHE[0],
                                                        minute=main.HORA_REGLAS_NOCHE[1]))
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": []})
+        monkeypatch.setattr(main, "get_class_events", lambda credentials=None: {"events": []})
         salud = {"ultimo_entreno": {"dias": main.JARVIS_PROACTIVO_SIN_ENTRENO + 1}}
         assert main._regla_hueco_entreno(lambda: salud) == 1
         datos = [c[2]["json"] for c in mock_requests.called("POST", "avisos_motivos")][0]["datos"]

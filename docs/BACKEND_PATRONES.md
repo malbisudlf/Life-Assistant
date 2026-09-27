@@ -7,6 +7,9 @@
   módulo), nunca por `requests.get` suelto. Impone `HTTP_TIMEOUT` por defecto y
   reutiliza conexiones. Sin timeout, una llamada colgada retiene un hilo del pool de
   FastAPI para siempre. Los tests mockean `main.http`, no `main.requests`.
+  La única salida que no va por `http` es el SDK de OpenAI, y por eso lleva su propio
+  tope (`OPENAI_TIMEOUT`, 120 s, y un solo reintento): con lo que trae el SDK de serie
+  (600 s de lectura y dos reintentos) un OpenAI colgado retenía el hilo media hora.
 - **Interruptores booleanos por entorno**: siempre con `_flag("NOMBRE")`, nunca con una
   comparación a mano. Normaliza espacios y mayúsculas y acepta `0`, `false`, `no`, `off`
   y la cadena vacía como apagado. El patrón que había antes

@@ -94,9 +94,10 @@
   nombre de copia de seguridad; y las escrituras de entrenamiento e ideas cerraban el
   formulario o quitaban la fila aunque el backend dijera que no.
   - La raíz es de `apiFetch`: **solo trata el 401, no lanza con un 4xx ni con un 5xx.**
-    Un `try/catch` alrededor no se entera de nada: hay que mirar `r.ok`. Y hay borrados
-    (`DELETE /ideas`, `DELETE /training/sessions`) que responden 200 con `{ok: false}`,
-    así que ni `r.ok` basta: `borradoConfirmado()`. Las frases viven en
+    Un `try/catch` alrededor no se entera de nada: hay que mirar `r.ok`. Y había borrados
+    (`DELETE /ideas`, `DELETE /training/sessions`) que respondían 200 con `{ok: false}`,
+    así que ni `r.ok` bastaba: `borradoConfirmado()`. Los dos pasaron después a 502 con
+    `_supabase_error`, que además deja el detalle en el registro. Las frases viven en
     `src/lib/respuestas.js`.
   - En el calendario, lo que distingue sesión caducada de caída es el backend: marca con
     `reconectar: true` solo lo que se arregla reconectando (`_graph_fallo` con 401/403 y
@@ -979,3 +980,18 @@
   - Moraleja: **compartir la función que decide no basta si cada lado junta sus datos
     por su cuenta.** Cuando la regla del chunk impide importar un módulo, se saca a un
     módulo ligero lo que hace falta, no se copia.
+
+- **Un endpoint `async` que llama a algo síncrono congela el backend entero.**
+  `/ideas/audio`, `/health/ingest` y `/health/ingest/simple` son `async def` solo para
+  leer el cuerpo acotado (`_leer_cuerpo_limitado`, `audio.read`), y después llamaban a
+  Whisper, al modelo y a Supabase —todo síncrono— dentro del bucle de eventos. Con un
+  solo worker de uvicorn, mientras Whisper transcribía o Supabase tardaba sus 15 s no se
+  atendía ninguna otra petición: ni el tick de HA, ni n8n, ni el dashboard. Ya se había
+  arreglado en `/mcp/telefono` y nadie buscó el mismo patrón en los demás. Hoy lo que
+  sigue a la lectura va en `asyncio.to_thread`. Y el SDK de OpenAI, la única salida que
+  no pasa por `http`, esperaba 600 s con dos reintentos: un OpenAI colgado dejaba el
+  chat, una nota de voz o una llamada callados media hora (`OPENAI_TIMEOUT`).
+  - Moraleja: **en un `async def`, todo lo que no lleva `await` delante bloquea a todos.**
+    Si un endpoint es `async` solo por leer el cuerpo, lo demás va a un hilo; y al
+    arreglar un patrón en un sitio, búscalo en el resto. Cada cliente saliente necesita
+    además su propio tope, no el que traiga la librería.

@@ -27,7 +27,8 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
   nada — visible sobre todo en móvil).
 - **`apiFetch()` no lanza con un 4xx ni con un 5xx**: devuelve la respuesta y ya. Un
   `try/catch` alrededor no se entera de que el backend ha dicho que no: mira `r.ok` (y en
-  los borrados que responden 200 con `{ok: false}`, `borradoConfirmado()`). Qué frase
+  los borrados, `borradoConfirmado()`, que también mira el `{ok: false}` con que
+  respondían 200 antes de pasar a 502). Qué frase
   merece cada fallo está en `src/lib/respuestas.js` (`textoErrorApi`, `mensajeErrorLogin`,
   `leerCalendario`). Un fallo al cargar un widget se pinta como fallo, con su «Reintentar»,
   nunca como lista vacía (ver `docs/BUGS_HISTORICOS.md`).

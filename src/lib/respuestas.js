@@ -74,10 +74,11 @@ export function leerCalendario(data) {
   return { eventos: Array.isArray(data.events) ? data.events : [], reconectar: false, error: "" };
 }
 
-/** Si una respuesta de borrado dice de verdad que ha borrado. Hay endpoints de borrado
- *  (`DELETE /ideas/{id}`, `DELETE /training/sessions/{id}`) que responden SIEMPRE 200
- *  con `{ok: false}` cuando falla Supabase: mirar solo `r.ok` daba por borrado lo que
- *  seguía en la base de datos y volvía a salir al recargar. */
+/** Si una respuesta de borrado dice de verdad que ha borrado. Los endpoints de borrado
+ *  (`DELETE /ideas/{id}`, `DELETE /training/sessions/{id}`) respondían 200 con
+ *  `{ok: false}` cuando fallaba Supabase: mirar solo `r.ok` daba por borrado lo que
+ *  seguía en la base de datos y volvía a salir al recargar. Hoy los dos dan 502, y
+ *  mirar también `ok` sigue cubriendo a un backend anterior. */
 export function borradoConfirmado(status, cuerpo) {
   return status >= 200 && status < 300 && cuerpo?.ok !== false;
 }

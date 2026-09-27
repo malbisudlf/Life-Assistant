@@ -914,6 +914,18 @@ class TestGobiernoDeAvisos:
         assert "He dejado de avisarte de 'reloj'" in apuntado["texto"]
         assert apuntado["regla"] == "", "el aviso del silencio no puede silenciarse a sí mismo"
 
+    def test_el_silencio_dice_un_camino_de_vuelta_que_existe(self, mock_requests):
+        """Decía «Dime "reactiva reloj"», pero Jarvis no tiene ninguna herramienta que
+        reactive reglas: la frase no llevaba a ningún sitio y la regla seguía callada.
+        Lo único que la reactiva es el botón de la pestaña Avisos de la zona dev."""
+        mock_requests.add("GET", "avisos_reglas", FakeResponse([{"no_utiles": 2}]))
+        mock_requests.add("POST", "avisos_reglas", FakeResponse([], 201))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        main._valorar_regla("reloj", False)
+        texto = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]["texto"]
+        assert "Dime" not in texto
+        assert "pestaña Avisos de la zona de desarrollo" in texto
+
     def test_una_regla_silenciada_no_apunta_nada(self, mock_requests):
         mock_requests.add("GET", "avisos_reglas", FakeResponse([{"silenciada": True}]))
         assert main._apuntar_aviso("proactivo", "algo") is False

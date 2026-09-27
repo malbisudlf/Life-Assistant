@@ -873,12 +873,11 @@ Lo que no se puede relajar, y por qué:
   medidas, `HUECOS_FIN_POR_DEFECTO`. Si pides horas concretas, mandan las tuyas y no se
   consulta el sueño.
 
-**Deuda:** `_regla_hueco_entreno` (el aviso proactivo de «mañana tienes libre de…») tiene
-su propio cálculo de huecos: no mira el calendario de clases, no aplica margen, no ve
-lo que viene de la noche anterior y, como `_eventos_con_fecha` devuelve `[]` cuando
-Outlook falla, **un Outlook caído le parece un día entero libre**. Debería pasar a
-`_huecos` + `_j_ocupados` en otra tanda; no se tocó aquí para no mezclar un cambio de
-comportamiento de un aviso con una función nueva.
+`_regla_hueco_entreno` (el aviso proactivo de «mañana tienes libre de…») usa las mismas
+dos piezas, `_j_ocupados` + `_huecos`. Tenía su propio cálculo: no miraba el calendario
+de clases, no aplicaba margen, no veía lo que venía de la noche anterior y, como
+`_eventos_con_fecha` devuelve `[]` cuando Outlook falla, **un Outlook caído le parecía un
+día entero libre**. Ahora, sin calendario, se calla.
 
 ## Por qué te dije eso: la instantánea de cada aviso
 

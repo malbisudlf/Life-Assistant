@@ -1,4 +1,5 @@
 """Tests de ingesta de salud (Apple Watch / iOS Shortcuts) y entrenamiento."""
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,44 @@ class TestHealthIngestAuth:
 
     def test_ingest_simple_sin_token(self, client):
         assert client.post("/health/ingest/simple", json=[]).status_code == 403
+
+
+class TestIngestaFueraDelBucle:
+    """Las dos ingestas son `async` solo para leer el cuerpo acotado; lo demás son viajes
+    síncronos a Supabase de hasta HTTP_TIMEOUT cada uno. Hechos dentro del bucle de
+    eventos lo congelaban entero —un solo worker: ni el tick de HA, ni n8n, ni el
+    dashboard— mientras Supabase tardara."""
+
+    @staticmethod
+    def _vigilar(mock_requests):
+        en_bucle = []
+
+        def _mirar(url, **kw):
+            try:
+                asyncio.get_running_loop()
+                en_bucle.append(True)
+            except RuntimeError:
+                en_bucle.append(False)
+            return FakeResponse([], 201)
+
+        mock_requests.add("GET", "health_metrics", _mirar)
+        mock_requests.add("POST", "health_metrics", _mirar)
+        return en_bucle
+
+    def test_auto_export(self, client, mock_requests):
+        en_bucle = self._vigilar(mock_requests)
+        r = client.post("/health/ingest?token=health-token", json={"data": {"metrics": [
+            {"name": "weight_body_mass", "units": "kg",
+             "data": [{"date": "2026-07-05 08:00:00", "qty": 68.5}]}]}})
+        assert r.status_code == 200
+        assert en_bucle and not any(en_bucle)
+
+    def test_atajo(self, client, mock_requests):
+        en_bucle = self._vigilar(mock_requests)
+        r = client.post("/health/ingest/simple?token=health-token", json=[
+            {"metric": "weight_body_mass", "date": "2026-07-05", "value": 68.5, "unit": "kg"}])
+        assert r.status_code == 200
+        assert en_bucle and not any(en_bucle)
 
 
 class TestHealthIngest:
@@ -642,13 +681,16 @@ class TestBorrarSesionEntrenamiento:
         assert r.status_code == 200
         assert r.json() == {"ok": True}
 
-    def test_un_fallo_de_supabase_se_dice_con_ok_false(self, client, auth_headers, mock_requests):
-        # A diferencia del resto de endpoints, éste no traduce el fallo a un 502: se
-        # limita a decir `ok: false` con la petición en 200 (comportamiento actual).
+    def test_un_fallo_de_supabase_es_un_502_registrado(self, client, auth_headers,
+                                                       mock_requests, caplog):
+        # Antes respondía 200 con `{ok: false}`: quien solo miraba el status lo daba por
+        # borrado, y el detalle del fallo no quedaba en ningún registro.
         mock_requests.add("DELETE", "training_sessions", FakeResponse(None, 500, "boom"))
-        r = client.delete(f"/training/sessions/{self.ID}", headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json() == {"ok": False}
+        with caplog.at_level("ERROR", logger=main.logger.name):
+            r = client.delete(f"/training/sessions/{self.ID}", headers=auth_headers)
+        assert r.status_code == 502
+        assert "boom" not in r.text
+        assert "boom" in caplog.text
 
 
 class TestMetricasAcumulativasCompartidas:

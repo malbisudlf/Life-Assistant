@@ -1,4 +1,5 @@
 """Tests de autenticación, rate limiting, helpers puros, /maps/departure e ideas."""
+import asyncio
 from datetime import datetime, timezone
 
 from jose import jwt
@@ -428,6 +429,37 @@ class TestIdeas:
         assert r.status_code == 502
         assert r.json()["detail"]["transcript"] == "llamar al fontanero"
 
+    def test_whisper_no_corre_dentro_del_bucle_de_eventos(self, client, auth_headers,
+                                                          mock_requests, monkeypatch):
+        """El endpoint es `async` para leer el audio acotado. Whisper, el modelo y
+        Supabase son síncronos: llamados dentro del bucle lo congelaban entero (con un
+        solo worker, ni el tick de HA ni el dashboard) mientras transcribía."""
+        en_bucle = []
+
+        def _mirar():
+            try:
+                asyncio.get_running_loop()
+                en_bucle.append(True)
+            except RuntimeError:
+                en_bucle.append(False)
+
+        class _Whisper:
+            audio = transcriptions = property(lambda self: self)
+
+            def create(self, **kw):
+                _mirar()
+                return type("T", (), {"text": "llamar al fontanero"})()
+
+        monkeypatch.setattr(main, "get_openai_client", lambda: _Whisper())
+        monkeypatch.setattr(main, "extract_idea_from_text",
+                            lambda t: _mirar() or {"key": "k"})
+        mock_requests.add("POST", "/rest/v1/ideas",
+                          lambda url, **kw: _mirar() or FakeResponse([{"id": "i1"}], 201))
+        r = client.post("/ideas/audio", headers=auth_headers,
+                        files={"audio": ("a.webm", b"xxxx", "audio/webm")})
+        assert r.status_code == 200
+        assert en_bucle == [False, False, False]
+
     def test_borrar_con_supabase_caido_no_dice_ok(self, client, auth_headers, mock_requests):
         """Jarvis confirmaba el borrado aunque la nota siguiera ahí."""
         mock_requests.add("DELETE", "/rest/v1/ideas", FakeResponse(None, 503, "caído"))
@@ -652,6 +684,23 @@ class TestOpenAIOpcional:
         monkeypatch.setattr(main, "OpenAI", FakeOpenAI)
         assert main.get_openai_client() is main.get_openai_client()
         assert len(creados) == 1
+
+    def test_el_cliente_lleva_tope_propio_y_no_el_del_sdk(self, monkeypatch):
+        """Sin timeout ni max_retries, el SDK espera 600 s de lectura y reintenta dos
+        veces: un OpenAI colgado dejaba el chat, las notas de voz o el teléfono callados
+        unos 30 minutos."""
+        creados = []
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                creados.append(kwargs)
+
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(main, "_openai_client", None)
+        monkeypatch.setattr(main, "OpenAI", FakeOpenAI)
+        main.get_openai_client()
+        assert creados[0]["timeout"] == main.OPENAI_TIMEOUT < 600
+        assert creados[0]["max_retries"] <= 1
 
 
 class TestSugerenciaEvento:

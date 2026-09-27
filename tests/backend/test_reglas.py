@@ -33,8 +33,11 @@ class _Reglas:
         mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([]))
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
 
-    def _eventos(self, monkeypatch, eventos):
+    def _eventos(self, monkeypatch, eventos, clases=()):
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": eventos})
+        # El calendario de clases solo lo lee quien busca huecos; sin esto iría a Graph.
+        monkeypatch.setattr(main, "get_class_events",
+                            lambda credentials=None: {"events": list(clases)})
 
     def _evento(self, ini, dur_min=60, titulo="cita", sitio="Plaza Mayor", id="ev1"):
         return {"id": id, "title": titulo, "location": sitio, "isAllDay": False,
@@ -287,10 +290,38 @@ class TestHuecoParaEntrenar(_Reglas):
 
     def test_dice_la_hora_concreta(self, monkeypatch, mock_requests):
         """Convierte el reproche en una acción: que no has entrenado ya lo sabes."""
+        monkeypatch.setattr(main, "HUECOS_MARGEN_MIN", 10)
         manana = self.AHORA + timedelta(days=1)
         self._eventos(monkeypatch, [self._evento(manana.replace(hour=12), 60, id="x")])
         assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 1
-        assert "libre de 08:00 a 12:00" in self._apuntados(mock_requests)[0]["texto"]
+        # Con el margen de `huecos_libres`: salir a las 12:00 en punto no es un plan.
+        assert "libre de 08:00 a 11:50" in self._apuntados(mock_requests)[0]["texto"]
+
+    def test_un_outlook_caido_no_es_un_dia_libre(self, monkeypatch, mock_requests):
+        """Leía el fallo como una lista vacía y avisaba de «libre de 08:00 a 22:00»."""
+        monkeypatch.setattr(main, "HUECOS_MARGEN_MIN", 10)
+        self._eventos(monkeypatch, [])
+        monkeypatch.setattr(main, "get_events", lambda credentials=None: {
+            "error": "No autenticado. Visita /auth/login", "reconectar": True})
+        assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 5}}) == 0
+        assert self._apuntados(mock_requests) == []
+
+    def test_cuenta_las_clases(self, monkeypatch, mock_requests):
+        """El calendario de clases no lo miraba: una clase de 9 a 11 era tiempo libre."""
+        monkeypatch.setattr(main, "HUECOS_MARGEN_MIN", 10)
+        manana = (self.AHORA + timedelta(days=1)).replace(hour=9)
+        self._eventos(monkeypatch, [], clases=[self._evento(manana, 120, id="clase")])
+        assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 1
+        assert "libre de 11:10 a 22:00" in self._apuntados(mock_requests)[0]["texto"]
+
+    def test_ve_lo_que_viene_de_la_noche_anterior(self, monkeypatch, mock_requests):
+        """Solo contaba lo que EMPIEZA mañana: lo que empieza hoy a las 23:00 y acaba
+        mañana a las 11:00 le dejaba la mañana libre."""
+        monkeypatch.setattr(main, "HUECOS_MARGEN_MIN", 10)
+        self._eventos(monkeypatch, [self._evento(self.AHORA.replace(hour=23), 12 * 60,
+                                                 id="noche")])
+        assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 1
+        assert "libre de 11:10 a 22:00" in self._apuntados(mock_requests)[0]["texto"]
 
     def test_hueco_entreno_caduca(self, monkeypatch, mock_requests):
         """Si el presupuesto lo pospone a las 08:30, «Mañana tienes libre…» ya sería

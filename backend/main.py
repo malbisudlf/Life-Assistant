@@ -604,6 +604,15 @@ http = _SesionConTimeout()
 # El cliente de OpenAI se crea perezosamente: construirlo al importar hacía que el
 # backend NO ARRANCARA sin OPENAI_API_KEY, aunque check_config.py y DESPLIEGUE.md
 # documentan las ideas por voz como funcionalidad opcional.
+#
+# Y con su propio tope, que el SDK no pone: por defecto espera 600 s de lectura y
+# reintenta dos veces, así que un OpenAI que acepta la conexión y no contesta retenía el
+# hilo unos 30 minutos — el chat de Jarvis, una nota de voz o una llamada de teléfono
+# callados todo ese rato sin un error. No es HTTP_TIMEOUT (15 s) porque Whisper con un
+# audio largo o un modelo de razonamiento sin streaming tardan legítimamente más; en
+# streaming cuenta entre trozos, no la respuesta entera.
+OPENAI_TIMEOUT     = float(os.getenv("OPENAI_TIMEOUT", "120"))
+OPENAI_MAX_RETRIES = 1
 _openai_client = None
 
 
@@ -615,7 +624,8 @@ def get_openai_client() -> OpenAI:
             detail="Ideas por voz no disponible: falta OPENAI_API_KEY en el servidor",
         )
     if _openai_client is None:
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT,
+                                max_retries=OPENAI_MAX_RETRIES)
     return _openai_client
 
 
@@ -2545,9 +2555,19 @@ async def create_idea_from_audio(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"Audio demasiado grande (máximo {MAX_AUDIO_BYTES // (1024 * 1024)} MB)",
         )
+    # En un hilo, como en /mcp/telefono: el endpoint es `async` solo para leer el audio
+    # acotado, y Whisper, el modelo y Supabase son síncronos. Llamados aquí dentro
+    # congelaban el bucle de eventos entero —con un solo worker, el tick de HA, n8n y el
+    # dashboard— lo que tardara la transcripción.
+    return await asyncio.to_thread(
+        _idea_desde_audio, audio.filename or "audio.webm",
+        audio.content_type or "audio/webm", audio_bytes)
+
+
+def _idea_desde_audio(nombre: str, tipo: str, audio_bytes: bytes) -> dict:
     transcript = get_openai_client().audio.transcriptions.create(
         model="whisper-1",
-        file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm"),
+        file=(nombre, audio_bytes, tipo),
         language="es",
     )
     # Whisper no cobra por tokens sino por duración, y la respuesta no la trae: se estima
@@ -3274,7 +3294,11 @@ def delete_training_session(
         f"{SUPABASE_URL}/rest/v1/training_sessions?id=eq.{session_id}",
         headers=supabase_headers(),
     )
-    return {"ok": r.status_code < 300}
+    # Mismo arreglo que DELETE /ideas: con {"ok": false} en un 200 el detalle del fallo
+    # no quedaba en ningún registro, y quien solo mirase el status lo daba por borrado.
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
 
 # ── FINANZAS (Indexa Capital) ─────────────────────────────────────────────────
 # Qué se pide por cada cuenta y qué da cada llamada:
@@ -4782,6 +4806,14 @@ async def health_ingest(request: Request, token: str = ""):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     raw = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
+    # El resto, en un hilo: el endpoint es `async` solo para leer el cuerpo acotado, y lo
+    # que sigue son viajes síncronos a Supabase de hasta HTTP_TIMEOUT cada uno. Hechos
+    # aquí dentro congelaban el bucle de eventos entero (un solo worker: ni el tick de HA,
+    # ni n8n, ni el dashboard) mientras Supabase tardara. Mismo arreglo que /mcp/telefono.
+    return await asyncio.to_thread(_health_ingest_procesar, request, raw)
+
+
+def _health_ingest_procesar(request: Request, raw: bytes):
     try:
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
@@ -4982,6 +5014,12 @@ async def health_ingest_simple(request: Request, token: str = ""):
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    raw = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
+    # En un hilo, por lo mismo que /health/ingest: lo que sigue es Supabase síncrono.
+    return await asyncio.to_thread(_health_ingest_simple_procesar, request, raw)
+
+
+def _health_ingest_simple_procesar(request: Request, raw: bytes):
     parse_errors = []
 
     # Parseo de NDJSON tolerante: una línea mal formada se descarta y se reporta en
@@ -5004,7 +5042,6 @@ async def health_ingest_simple(request: Request, token: str = ""):
     # JSON por línea) directamente en el cuerpo — este último no es un JSON de una
     # pieza y `request.json()` fallaría. Leemos el cuerpo crudo y lo interpretamos:
     # utf-8-sig descarta el BOM que iOS a veces añade.
-    raw  = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
     text = raw.decode("utf-8-sig", errors="replace").strip()
     body = None
     if text:
@@ -10108,6 +10145,21 @@ def _dev_leer(que: str, url: str, params: dict):
         return None
 
 
+def _dev_leer_todas(que: str, url: str, params: dict):
+    """Como `_dev_leer`, pero paginando con `_leer_todas`, para lo que en un día puede
+    pasar de las 1.000 filas que corta Supabase sin avisar. `params` no lleva `limit`, y
+    sí un `order` que no empate. Devuelve None si no se pudo, y nunca lanza."""
+    consulta = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items())
+    try:
+        r, filas = _leer_todas(f"{url}?{consulta}")
+        if filas is None:
+            logger.warning("Zona dev (%s): %s devolvió %s", que, url, r.status_code)
+        return filas
+    except Exception as e:   # noqa: BLE001 — mismo criterio que _dev_leer
+        logger.warning("Zona dev (%s): %s falló (%s)", que, url, type(e).__name__)
+        return None
+
+
 def _ventana_dia(dia: str):
     """El día que se pide, en local, traducido a la ventana UTC que guardan las tablas.
 
@@ -10223,12 +10275,14 @@ def dev_linea(dia: str = "", credentials: HTTPAuthorizationCredentials = Depends
         })
 
     def salud():
-        # El tope es alto a propósito: son las filas más numerosas del día con diferencia
-        # y se agrupan después, así que recortarlas aquí se comería envíos enteros.
-        return _dev_leer("línea", f"{SUPABASE_URL}/rest/v1/health_metrics", {
+        # Sin tope y paginado: son las filas más numerosas del día con diferencia y se
+        # agrupan después, así que recortarlas aquí se comería envíos enteros. Aquí ponía
+        # `limit: 5000`, que Supabase corta a 1.000 sin avisar: el día de un volcado de
+        # histórico, lo que se perdía era lo MÁS NUEVO (orden ascendente) y nada lo decía.
+        return _dev_leer_todas("línea", f"{SUPABASE_URL}/rest/v1/health_metrics", {
             "and":    _entre("created_at", desde, hasta),
             "select": "metric_date,metric_name,fuente,created_at",
-            "order":  "created_at.asc", "limit": 5000,
+            "order":  "created_at.asc,id.asc",
         })
 
     def correos():
@@ -13784,21 +13838,24 @@ def _regla_hueco_entreno(obtener_salud) -> int:
         return 0
 
     manana  = (_ahora_local() + timedelta(days=1)).date()
-    ocupado = [e for e in _eventos_con_fecha(dias=2) if e["ini"].date() == manana]
+    # Lo mismo que mira `huecos_libres`, y no un cálculo propio: tenía uno que solo veía
+    # los eventos que EMPIEZAN mañana en Outlook, sin el calendario de clases, sin margen
+    # y con un Outlook caído leído como `[]`, o sea como un día entero libre — «libre de
+    # 08:00 a 22:00» el día de las clases.
+    occ = _j_ocupados({manana})
+    if not occ["ok"]:
+        # No poder leer el calendario nunca es un día libre: sin él, se calla.
+        return 0
+    ocupado = occ["ocupados"]
     base    = _ahora_local().replace(year=manana.year, month=manana.month, day=manana.day,
                                      second=0, microsecond=0)
     inicio  = base.replace(hour=8,  minute=0)
     fin_dia = base.replace(hour=22, minute=0)
-    hueco   = None
-    cursor  = inicio
-    for ev in ocupado + [{"ini": fin_dia, "fin": fin_dia}]:
-        libre = (ev["ini"] - cursor).total_seconds() / 60
-        if libre >= HUECO_ENTRENO_MIN:
-            hueco = (cursor, ev["ini"])
-            break
-        cursor = max(cursor, ev["fin"])
-    if not hueco:
+    libres  = _huecos([(o["ini"], o["fin"]) for o in ocupado], inicio, fin_dia,
+                      HUECO_ENTRENO_MIN, HUECOS_MARGEN_MIN)
+    if not libres:
         return 0
+    hueco = libres[0]
     return int(_apuntar_aviso(
         "hueco_entreno",
         f"Llevas {dias} días sin entrenar. Mañana tienes libre de "
@@ -16420,10 +16477,13 @@ def _valorar_regla(regla: str, util: bool) -> None:
         logger.warning("Avisos: regla '%s' silenciada tras %d valoraciones negativas",
                        regla, no_utiles)
         # Sin `regla`: este aviso no lo puede silenciar el propio silenciado, y tiene que
-        # salir aunque el presupuesto del día esté gastado.
+        # salir aunque el presupuesto del día esté gastado. El camino de vuelta que nombra
+        # tiene que existir: decía «Dime "reactiva …"», y Jarvis no tiene herramienta que
+        # reactive nada — lo único que lo hace es el botón de la zona dev.
         _apuntar_aviso("", f"He dejado de avisarte de '{regla}': las últimas "
-                           f"{no_utiles} veces no te sirvió. Dime «reactiva {regla}» "
-                           f"si la quieres de vuelta.", prioridad=PRIO_BAJA)
+                           f"{no_utiles} veces no te sirvió. Si la quieres de vuelta, "
+                           f"reactívala en la pestaña Avisos de la zona de desarrollo.",
+                       prioridad=PRIO_BAJA)
 
 
 def _apagar_entidades(ids: list) -> list:
