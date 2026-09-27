@@ -308,7 +308,7 @@ test('el parte de la zona dev junta lo que falla y lleva a su pestaña', async (
   await entrar(page)
 
   // Se abre en otra pestaña a propósito: el clic en el parte tiene que CAMBIAR de pestaña.
-  await page.getByRole('button', { name: '🛠' }).first().click()
+  await page.getByRole('button', { name: 'Zona de desarrollo' }).first().click()
   await page.getByRole('button', { name: 'Ideas', exact: true }).click()
 
   // La migración que falta (la misma que en el test anterior) sale arriba con su nombre,
