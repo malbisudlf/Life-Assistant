@@ -93,12 +93,28 @@ function apuntarTurno(callId, dicho, respuesta) {
 /** Lo que manda voice-app al acabar una llamada saliente (POST /bitacora). */
 function apuntarSaliente(datos) {
   if (!datos || !datos.callId) return;
+  const motivo = datos.reason || null;
   actualizar(datos.callId, function (l) {
-    l.tipo = datos.mode === 'announce' ? 'buzon' : 'saliente';
+    // 'voicemail_message' (parche 12 de claude-phone): llamó para hablar, descolgó el
+    // buzón y le dejó el recado en esa misma llamada. Para la memoria es un mensaje en
+    // el buzón, igual que los de la llamada `announce`.
+    l.tipo = (datos.mode === 'announce' || motivo === 'voicemail_message') ? 'buzon' : 'saliente';
     if (datos.createdAt) l.inicio = datos.createdAt;
     if (datos.message) l.mensaje = recortar(datos.message, MAX_TEXTO);
-    l.contestada = !!datos.answeredAt;
-    l.resultado = datos.reason || datos.state || null;
+    // Descolgar no es coger (parche 12): el buzón también descuelga. No la cogió si
+    // contestó su buzón, si nadie dijo nada en toda la llamada o si Jarvis no llegó a
+    // hablar. Un claude-phone sin el 12 no manda answeredBy ni esos motivos, y esto se
+    // queda en lo de antes: contestada = hubo answeredAt.
+    // Si alguien habló, la cogió aunque el Contact dijera buzón: la heurística puede fallar.
+    // Y si descolgó una persona (el Contact trae su nombre), la cogió aunque no llegara a
+    // hablar: pudo contestar encima del primer mensaje, cuando aún no se escucha, o con un
+    // «sí» tan bajo que no se oyó. no_speech solo dice «no la cogió» sin esa señal.
+    l.contestoBuzon = datos.answeredBy === 'voicemail' && !datos.userTurns;
+    l.sinVoz = motivo === 'unplayed';
+    const calladaEntera = motivo === 'no_speech' && !datos.userTurns && datos.answeredBy !== 'person';
+    l.contestada = !!datos.answeredAt && !l.sinVoz &&
+      (l.tipo === 'buzon' || (!l.contestoBuzon && !calladaEntera));
+    l.resultado = motivo || datos.state || null;
   });
 }
 
@@ -119,8 +135,11 @@ function describir(l) {
       ? 'dejó este mensaje en el buzón de Mikel'
       : 'intentó dejar un mensaje en el buzón (no se grabó)') + ': «' + (l.mensaje || '') + '»';
   } else if (l.tipo === 'saliente') {
-    linea = '- ' + hora(l.inicio) + ', Jarvis llamó a Mikel ' +
-      (l.contestada ? 'y lo cogió' : 'y NO lo cogió') + '. Le llamaba para decirle: «' + (l.mensaje || '') + '»';
+    let como = l.contestada ? 'y lo cogió' : 'y NO lo cogió';
+    if (l.sinVoz) como = 'pero no pudo hablar (falló su voz; no se dijo nada)';
+    else if (!l.contestada && l.contestoBuzon) como = 'y NO lo cogió: contestó su buzón';
+    linea = '- ' + hora(l.inicio) + ', Jarvis llamó a Mikel ' + como +
+      '. Le llamaba para decirle: «' + (l.mensaje || '') + '»';
   } else {
     linea = '- ' + hora(l.inicio) + ', Mikel llamó a Jarvis.';
   }

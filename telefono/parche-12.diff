@@ -1,0 +1,686 @@
+diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+index 85e800a..a9be5ef 100644
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -115,7 +115,10 @@ function extractVoiceLine(response) {
+  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
+  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
+  * @param {number} [options.maxTurns=20] - Maximum conversation turns
+- * @returns {Promise<void>}
++ * @param {Function} [options.onUserTurn] - Se llama cada vez que el otro lado dice algo
++ *   que se entiende (parche 12): es la prueba de que hay una persona
++ * @returns {Promise<{endReason: string}>} Por qué acabó (parche 12): 'silence' (dos
++ *   turnos sin oír a nadie), 'goodbye', 'max_turns', 'hangup', 'no_audio' o 'error'
+  */
+ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+   const {
+@@ -127,8 +130,12 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     initialContext = null,
+     skipGreeting = false,
+     deviceConfig = null,
+-    maxTurns = 20
++    maxTurns = 20,
++    onUserTurn = null
+   } = options;
++  // Por qué acaba la conversación. Lo que importa distinguir es 'silence': una llamada
++  // contestada en la que nadie ha hablado es, casi siempre, el buzón (parche 12).
++  let fin = 'max_turns';
+ 
+   // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
+   const devicePrompt = deviceConfig?.prompt || null;
+@@ -176,7 +183,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     // Check if call is still active before starting audio fork
+     if (!callActive) {
+       logger.info('Call ended before audio fork could start', { callUuid });
+-      return;
++      return { endReason: 'hangup' };
+     }
+ 
+     // Start audio fork for entire call
+@@ -188,7 +195,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
+     } catch (err) {
+       logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
+-      return;
++      return { endReason: 'no_audio' };
+     }
+ 
+     await endpoint.forkAudioStart({
+@@ -205,7 +212,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       logger.warn('Audio fork session failed', { callUuid, error: err.message });
+       // Cancel the pending expectation if still there
+       audioForkServer.cancelExpectation && audioForkServer.cancelExpectation(callUuid);
+-      return;
++      return { endReason: 'no_audio' };
+     }
+ 
+     // Set up DTMF handler for # key
+@@ -288,6 +295,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         silencios++;
+         if (silencios >= 2) {
+           logger.info('Dos turnos sin oír a nadie, cuelgo', { callUuid });
++          fin = 'silence';
+           break;
+         }
+         const promptUrl = await ttsService.generateSpeech(
+@@ -328,10 +336,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         continue;
+       }
+ 
++      // Alguien ha dicho algo que se entiende: hay una persona al otro lado.
++      if (onUserTurn) {
++        try { onUserTurn(transcript); } catch (e) { /* contar no puede cortar la llamada */ }
++      }
++
+       // Handle goodbye
+       if (isGoodbye(transcript)) {
+         const byeUrl = await ttsService.generateSpeech("Hasta luego. Llámame cuando quieras.", voiceId);
+         if (callActive) await endpoint.play(byeUrl);
++        fin = 'goodbye';
+         break;
+       }
+ 
+@@ -400,9 +414,11 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       await endpoint.play(maxUrl);
+     }
+ 
+-    logger.info('Conversation loop ended normally', { callUuid, turns: turnCount });
++    if (!callActive && fin !== 'silence' && fin !== 'goodbye') fin = 'hangup';
++    logger.info('Conversation loop ended normally', { callUuid, turns: turnCount, endReason: fin });
+ 
+   } catch (error) {
++    fin = 'error';
+     logger.error('Conversation loop error', {
+       callUuid,
+       error: error.message,
+@@ -450,6 +466,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       }
+     }
+   }
++  return { endReason: fin };
+ }
+ 
+ module.exports = {
+diff --git a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
+index 8b19f5b..d50f642 100644
+--- a/voice-app/lib/outbound-handler.js
++++ b/voice-app/lib/outbound-handler.js
+@@ -13,6 +13,26 @@ const { v4: uuidv4 } = require('uuid');
+ const logger = require('./logger');
+ const ttsService = require('./tts-service');
+ 
++/**
++ * Quién ha descolgado, mirando el Contact del 200 OK (parche 12).
++ *
++ * El 3CX pone el nombre de la extensión en el Contact cuando descuelga una persona
++ * ("Nombre" <sip:ext@sbc:5060>) y no lo pone cuando descuelga el buzón
++ * (<sip:ext@sbc:5060>). Acertó en las 14 salientes contestadas del 20 al 27/09/2026
++ * (10 personas, 4 buzones). El tiempo hasta descolgar NO sirve: el buzón cogió entre
++ * 7,5 y 41,5 s y la persona entre 4,1 y 11,4 s.
++ *
++ * @param {string} contact - La cabecera Contact en bruto
++ * @returns {'person'|'voicemail'|'unknown'}
++ */
++function quienContesta(contact) {
++  if (typeof contact !== 'string' || !contact.trim()) return 'unknown';
++  const abre = contact.indexOf('<');
++  // Sin <> no hay dónde buscar el nombre: ante la duda, se sigue como siempre.
++  if (abre < 0) return 'unknown';
++  return contact.slice(0, abre).trim() ? 'person' : 'voicemail';
++}
++
+ /**
+  * Initiate an outbound call
+  *
+@@ -40,6 +60,10 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+   let endpoint = null;
+   let invite = null;
+   let agotado = false;
++  // También el diálogo: si algo falla DESPUÉS de descolgar (endpoint.modify), hay que
++  // colgar la pata SIP o se queda abierta hasta que cuelgue el otro lado (parche 12).
++  let uac = null;
++  let answeredBy = null;
+ 
+   try {
+     logger.info('Initiating outbound call', {
+@@ -129,7 +153,6 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     }, timeoutSeconds * 1000);
+ 
+     // Create the outbound call (returns dialog directly, not { uas, uac })
+-    let uac;
+     try {
+     uac = await srf.createUAC(sipUri, uacOptions, {
+       cbRequest: function(err, req) {
+@@ -171,6 +194,12 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+       isRinging
+     });
+ 
++    // Quién ha descolgado. El Contact en bruto va siempre al log: es lo que deja
++    // comprobar la heurística llamada a llamada (solo en este log, no en la API).
++    const contact = (uac.res && typeof uac.res.get === 'function') ? uac.res.get('Contact') : '';
++    answeredBy = quienContesta(contact);
++    logger.info('Quién descuelga', { callId, answeredBy, contact: contact || null });
++
+     // Modify endpoint with remote SDP to complete media connection
+     await endpoint.modify(uac.remote.sdp);
+ 
+@@ -194,7 +223,8 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+       dialog: uac,
+       endpoint,
+       isRinging,
+-      latency
++      latency,
++      answeredBy
+     };
+ 
+   } catch (error) {
+@@ -208,6 +238,13 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     });
+ 
+     if (endpoint) endpoint.destroy().catch(function() {});
++    if (uac) {
++      // Ya habían descolgado: sin esto la pata SIP seguía viva (y el buzón grabando).
++      uac.destroy().catch(function() {});
++      const fallo = new Error('unplayed');
++      fallo.answeredBy = answeredBy;
++      throw fallo;
++    }
+     if (agotado) throw new Error('no_answer');
+ 
+     // Handle specific SIP error codes
+@@ -315,5 +352,6 @@ async function hangupCall(dialog, endpoint, callId) {
+ module.exports = {
+   initiateOutboundCall: initiateOutboundCall,
+   playMessage: playMessage,
+-  hangupCall: hangupCall
++  hangupCall: hangupCall,
++  quienContesta: quienContesta
+ };
+diff --git a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
+index 8cf76b1..cd4bf88 100644
+--- a/voice-app/lib/outbound-routes.js
++++ b/voice-app/lib/outbound-routes.js
+@@ -86,6 +86,17 @@ function validateRequest(body) {
+     }
+   }
+ 
++  // Parche 12: el recado para cuando descuelga el buzón.
++  if (body.detectVoicemail !== undefined && typeof body.detectVoicemail !== 'boolean') {
++    return { valid: false, error: 'Field "detectVoicemail" must be a boolean' };
++  }
++  if (body.voicemailMessage !== undefined) {
++    if (typeof body.voicemailMessage !== 'string' || !body.voicemailMessage.trim() ||
++        body.voicemailMessage.length > 1000) {
++      return { valid: false, error: 'Field "voicemailMessage" must be a non-empty string of 1000 characters or less' };
++    }
++  }
++
+   return { valid: true };
+ }
+ 
+@@ -132,6 +143,13 @@ router.post('/outbound-call', async function(req, res) {
+     // Espera entre descolgar y hablar: para el buzón, que si no el mensaje se dice
+     // encima de su saludo y se graba a medias.
+     var delaySeconds = Math.min(Math.max(Number(req.body.delaySeconds) || 0, 0), 30);
++    // Parche 12: si descuelga el buzón (Contact sin nombre), no se conversa con él. Con
++    // recado, se espera al saludo, se deja y se cuelga; sin recado, se cuelga ya. Solo si
++    // quien llama lo pide: la llamada del buzón del backend QUIERE que coja el buzón.
++    var detectVoicemail = req.body.detectVoicemail === true;
++    var voicemailMessage = detectVoicemail && req.body.voicemailMessage ? req.body.voicemailMessage : null;
++    var voicemailDelaySeconds = req.body.voicemailDelaySeconds === undefined ? 8
++      : Math.min(Math.max(Number(req.body.voicemailDelaySeconds) || 0, 0), 30);
+     var webhookUrl = req.body.webhookUrl;
+ 
+     // Look up device configuration
+@@ -231,11 +249,30 @@ router.post('/outbound-call', async function(req, res) {
+ 
+         session.setDialog(dialog);
+         session.setEndpoint(endpoint);
++        session.answeredBy = result.answeredBy || 'unknown';
++        var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
++
++        if (detectVoicemail && session.answeredBy === 'voicemail') {
++          if (!voicemailMessage) {
++            // El FAILED antes de colgar: así ningún BYE posterior puede reescribir el final.
++            session.transition('FAILED', 'voicemail');
++            await hangupCall(dialog, endpoint, callId);
++            return;
++          }
++          // El buzón ya está al aparato: el recado se deja aquí, sin otra llamada.
++          session.message = voicemailMessage;
++          session.transition('PLAYING', 'voicemail');
++          await new Promise(function(r) { setTimeout(r, voicemailDelaySeconds * 1000); });
++          await playMessage(endpoint, voicemailMessage, { voiceId: voiceId });
++          session.transition('COMPLETED', 'voicemail_message');
++          await hangupCall(dialog, endpoint, callId);
++          return;
++        }
++
+         session.transition('PLAYING');
+         if (delaySeconds) await new Promise(function(r) { setTimeout(r, delaySeconds * 1000); });
+ 
+         // Play the initial message with device voice
+-        var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
+         await playMessage(endpoint, message, { voiceId: voiceId });
+ 
+         if (mode === 'announce') {
+@@ -251,7 +288,7 @@ router.post('/outbound-call', async function(req, res) {
+           session.transition('CONVERSING');
+ 
+           try {
+-            await runConversationLoop(endpoint, dialog, callId, {
++            var fin = await runConversationLoop(endpoint, dialog, callId, {
+               audioForkServer: audioForkServer,
+               whisperClient: whisperClient,
+               claudeBridge: claudeBridge,
+@@ -261,11 +298,18 @@ router.post('/outbound-call', async function(req, res) {
+               initialContext: message,
+               context: context,           // NEW: pass structured context
+               skipGreeting: true,
+-              maxTurns: 20
++              maxTurns: 20,
++              onUserTurn: function() { session.userTurns++; }
+             });
+ 
++            // Parche 12: el motivo dice CÓMO acabó, y el backend decide con él y con
++            // userTurns si alguien llegó a coger la llamada.
++            var motivo = 'conversation_complete';
++            var porque = fin && fin.endReason;
++            if (porque === 'silence') motivo = 'no_speech';
++            else if (porque === 'error' || porque === 'no_audio') motivo = 'conversation_error';
++            session.transition('COMPLETED', motivo);
+             await hangupCall(dialog, endpoint, callId);
+-            session.transition('COMPLETED', 'conversation_complete');
+ 
+           } catch (convError) {
+             logger.error('Conversation loop error', {
+@@ -291,7 +335,18 @@ router.post('/outbound-call', async function(req, res) {
+         else if (error.message === 'service_unavailable') reason = 'service_unavailable';
+         else if (error.message === 'declined') reason = 'declined';
+ 
++        // Parche 12: si ya habían descolgado (falló la voz, el audio...), 'unplayed' y se
++        // CUELGA. El 27/09 el TTS falló sin DNS, este catch solo marcaba FAILED y la pata
++        // siguió abierta 2 min 35 s con el buzón grabando silencio.
++        var descolgada = !!(session.dialog || session.endpoint) || error.message === 'unplayed';
++        if (descolgada) {
++          reason = 'unplayed';
++          if (!session.answeredBy && error.answeredBy) session.answeredBy = error.answeredBy;
++        }
+         session.transition('FAILED', reason);
++        if (session.dialog || session.endpoint) {
++          await hangupCall(session.dialog, session.endpoint, callId);
++        }
+       }
+     })();
+ 
+diff --git a/voice-app/lib/outbound-session.js b/voice-app/lib/outbound-session.js
+index d7f77d0..f568659 100644
+--- a/voice-app/lib/outbound-session.js
++++ b/voice-app/lib/outbound-session.js
+@@ -42,6 +42,11 @@ class OutboundSession extends EventEmitter {
+     this.conversationHistory = [];
+     this.turnCount = 0;
+ 
++    // Parche 12: quién descolgó (por el Contact del 200 OK) y cuántas veces habló
++    // alguien al otro lado. Contestar no es coger: el backend lo decide con esto.
++    this.answeredBy = null;
++    this.userTurns = 0;
++
+     // Register in active sessions
+     activeSessions.set(this.callId, this);
+ 
+@@ -65,6 +70,15 @@ class OutboundSession extends EventEmitter {
+     if (oldState === newState) {
+       return; // No change
+     }
++    // Un final es final (parche 12). Sin esto, el BYE del buzón convertía un FAILED en
++    // COMPLETED minutos después (y avisaba dos veces a la bitácora), o al revés.
++    if (oldState === 'COMPLETED' || oldState === 'FAILED') {
++      logger.info('Transición ignorada: la llamada ya había terminado', {
++        callId: this.callId, state: oldState, reason: this.reason || undefined,
++        ignored: newState + (reason ? '/' + reason : '')
++      });
++      return;
++    }
+ 
+     this.state = newState;
+     if (reason) this.reason = reason;
+@@ -110,11 +124,13 @@ class OutboundSession extends EventEmitter {
+         logger.warn('Bitácora no disponible', { callId: this.callId, error: err.message });
+       });
+ 
+-      // Keep session for 1 minute for status queries, then remove
++      // Keep session for 1 minute for status queries, then remove.
++      // `unref`: el servidor HTTP ya mantiene vivo el proceso; sin él, los tests
++      // esperarían este minuto antes de poder terminar.
+       setTimeout(() => {
+         activeSessions.delete(this.callId);
+         logger.info('Session cleaned up', { callId: this.callId });
+-      }, 60000);
++      }, 60000).unref();
+     }
+   }
+ 
+@@ -289,7 +305,11 @@ class OutboundSession extends EventEmitter {
+       endedAt: this.endedAt ? new Date(this.endedAt).toISOString() : null,
+       duration: this.getDuration(),
+       reason: this.reason || null,
+-      message: this.message
++      message: this.message,
++      // Parche 12. Van SIEMPRE, también a null: que la clave exista es lo que le dice
++      // al backend que este claude-phone ya distingue el buzón de una persona.
++      answeredBy: this.answeredBy || null,
++      userTurns: this.userTurns
+     };
+ 
+     // Include conversation stats for conversation mode
+diff --git a/voice-app/test/parche12.test.js b/voice-app/test/parche12.test.js
+new file mode 100644
+index 0000000..36fe9b4
+--- /dev/null
++++ b/voice-app/test/parche12.test.js
+@@ -0,0 +1,304 @@
++/**
++ * Parche 12: contestar no es coger, y una llamada descolgada se cuelga siempre.
++ *
++ * Se prueba sin llamar a nadie: la centralita (drachtio), FreeSWITCH, la voz
++ * (ElevenLabs), el oído (audio fork) y Whisper son dobles; lo que corre es el código
++ * de verdad de lib/. Se lanza con `node --test test/parche12.test.js` (el fichero, no
++ * el directorio: en Node 22+ `node --test test/` no lo encuentra). En caja, dentro de
++ * la imagen recién construida y sin red: ver telefono/PARCHES.md, «El parche 12».
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const crypto = require('node:crypto');
++const { EventEmitter } = require('node:events');
++
++// ── Dobles, enganchados ANTES de cargar nada de lib/ ─────────────────────────
++// El tts-service de verdad llama a ElevenLabs y deja un setInterval vivo; express y
++// uuid se sustituyen para que el test no dependa de node_modules.
++const voz = { rota: false, dichas: [] };
++const ttsFalso = {
++  generateSpeech: async function (texto) {
++    if (voz.rota) throw new Error('TTS generation failed: getaddrinfo EAI_AGAIN api.elevenlabs.io');
++    voz.dichas.push(texto);
++    return 'http://127.0.0.1/audio.mp3';
++  }
++};
++const rutas = {};
++const expressFalso = {
++  Router: function () {
++    return {
++      post: function (ruta, fn) { rutas['POST ' + ruta] = fn; },
++      get: function (ruta, fn) { rutas['GET ' + ruta] = fn; }
++    };
++  }
++};
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'express') return expressFalso;
++  if (id === 'uuid') return { v4: function () { return crypto.randomUUID(); } };
++  if (id === './tts-service') return ttsFalso;
++  return requireDeVerdad.apply(this, arguments);
++};
++// La bitácora avisa por fetch al claude-api-server: aquí no sale nada.
++globalThis.fetch = async function () { return { ok: true }; };
++// El log de claude-phone, a una lista: así se puede comprobar lo que deja escrito.
++const registro = [];
++for (const nivel of ['log', 'warn', 'error']) {
++  console[nivel] = function () { registro.push(Array.from(arguments).join(' ')); };
++}
++
++const { OutboundSession, getSession } = require('../lib/outbound-session');
++const { quienContesta } = require('../lib/outbound-handler');
++const { setupRoutes } = require('../lib/outbound-routes');
++
++// Los Contact tal como los manda el 3CX, con los datos cambiados.
++const PERSONA = '"Mikel" <sip:10000@192.0.2.10:5060>';
++const BUZON = '<sip:10000@192.0.2.10:5060>';
++
++function centralita(opciones) {
++  const hecho = { endpoints: [], dialogos: [], invites: 0 };
++  const mediaServer = {
++    createEndpoint: async function () {
++      const ep = new EventEmitter();
++      ep.local = { sdp: 'v=0' };
++      ep.uuid = 'ep-' + hecho.endpoints.length;
++      ep.destruido = false;
++      ep.modify = async function () {
++        if (opciones.falloModify) throw new Error('endpoint no longer active');
++      };
++      ep.play = async function () {};
++      ep.api = async function () {};
++      ep.forkAudioStart = async function () {};
++      ep.forkAudioStop = async function () {};
++      ep.destroy = async function () { ep.destruido = true; };
++      hecho.endpoints.push(ep);
++      return ep;
++    }
++  };
++  const srf = {
++    createUAC: async function (uri, opts, cbs) {
++      hecho.invites++;
++      cbs.cbRequest(null, { cancel: function () {} });
++      if (!opciones.contesta) {
++        const e = new Error('Temporarily Unavailable');
++        e.status = 480;
++        throw e;
++      }
++      const uac = new EventEmitter();
++      uac.res = { get: function (h) { return h === 'Contact' ? opciones.contact : ''; } };
++      uac.remote = { sdp: 'v=0' };
++      uac.colgado = false;
++      uac.destroy = async function () { uac.colgado = true; };
++      hecho.dialogos.push(uac);
++      return uac;
++    }
++  };
++  return { srf: srf, mediaServer: mediaServer, hecho: hecho };
++}
++
++/** El otro lado de la línea: lo que dice en cada turno (null = silencio). */
++function oido(frases) {
++  let i = 0;
++  const sesion = {
++    setCaptureEnabled: function () {},
++    forceFinalize: function () {},
++    waitForUtterance: async function () {
++      const f = frases[i++];
++      if (f == null) throw new Error('Timed out waiting for utterance');
++      return { audio: Buffer.from(f), reason: 'end_silence' };
++    }
++  };
++  return {
++    expectSession: async function () { return sesion; },
++    cancelExpectation: function () {},
++    emit: function () {}
++  };
++}
++
++const whisper = { transcribe: async function (audio) { return audio.toString(); } };
++const claude = {
++  query: async function () { return '🗣️ VOICE_RESPONSE: Vale.'; },
++  endSession: async function () {}
++};
++
++async function llamar(cuerpo, opciones, frases) {
++  // Cada llamada empieza limpia (sin beforeEach: los hooks de raíz de node:test han
++  // cambiado entre versiones, y la imagen de caja lleva Node 20).
++  voz.rota = !!opciones.vozRota;
++  voz.dichas.length = 0;
++  registro.length = 0;
++  const c = centralita(opciones);
++  setupRoutes({ srf: c.srf, mediaServer: c.mediaServer, audioForkServer: oido(frases || []),
++                whisperClient: whisper, claudeBridge: claude, ttsService: ttsFalso });
++  let respuesta = null;
++  let codigo = 200;
++  const res = {
++    status: function (n) { codigo = n; return res; },
++    json: function (d) { respuesta = d; return res; }
++  };
++  await rutas['POST /outbound-call']({ body: cuerpo }, res);
++  if (codigo !== 200) return { codigo: codigo, respuesta: respuesta, hecho: c.hecho };
++  // El resto corre en segundo plano, igual que en caja: se espera a que acabe.
++  const limite = Date.now() + 3000;
++  while (Date.now() < limite) {
++    const s = getSession(respuesta.callId);
++    if (s && (s.state === 'COMPLETED' || s.state === 'FAILED')) {
++      await new Promise(function (r) { setTimeout(r, 20); });   // lo que va tras el final
++      return { codigo: codigo, sesion: s, info: s.getInfo(), hecho: c.hecho };
++    }
++    await new Promise(function (r) { setTimeout(r, 5); });
++  }
++  throw new Error('la llamada no terminó');
++}
++
++const CONVERSACION = { to: '10000', message: 'Mikel, soy Jarvis. La web lleva un rato caída.',
++                       mode: 'conversation', timeoutSeconds: 14 };
++const RECADO = 'Mikel, soy Jarvis. Te he llamado y no lo has cogido, así que te lo dejo aquí.';
++
++test('quién descuelga, por el Contact del 200 OK', function () {
++  assert.strictEqual(quienContesta(PERSONA), 'person');
++  assert.strictEqual(quienContesta('Mikel <sip:10000@192.0.2.10>'), 'person');
++  assert.strictEqual(quienContesta(BUZON), 'voicemail');
++  assert.strictEqual(quienContesta('  ' + BUZON), 'voicemail');
++  // Ante la duda, 'unknown': se conversa como siempre.
++  assert.strictEqual(quienContesta('sip:10000@192.0.2.10'), 'unknown');
++  assert.strictEqual(quienContesta(''), 'unknown');
++  assert.strictEqual(quienContesta(undefined), 'unknown');
++});
++
++test('la sesión dice quién descolgó y cuántas veces habló alguien, desde el principio', function () {
++  const s = new OutboundSession(null, { to: '10000', message: 'x', mode: 'conversation' });
++  const info = s.getInfo();
++  assert.ok('answeredBy' in info, 'la clave va siempre: es la marca del parche 12');
++  assert.strictEqual(info.answeredBy, null);
++  assert.strictEqual(info.userTurns, 0);
++});
++
++test('un final es final: el BYE de después no lo reescribe', function () {
++  const s = new OutboundSession(null, { to: '10000', message: 'x', mode: 'conversation' });
++  s.transition('DIALING');
++  s.transition('FAILED', 'unplayed');
++  s.transition('COMPLETED', 'remote_hangup');
++  assert.strictEqual(s.state, 'FAILED');
++  assert.strictEqual(s.reason, 'unplayed');
++});
++
++test('27/09: descuelga el buzón, la voz falla y se CUELGA (antes quedaba abierta)', async function () {
++  const r = await llamar(CONVERSACION, { contesta: true, contact: BUZON, vozRota: true });
++  // Lo primero, lo que falló de verdad: contra el código de caja, esto es lo que rompe.
++  assert.ok(r.hecho.dialogos[0].colgado, 'la pata SIP tiene que colgarse');
++  assert.ok(r.hecho.endpoints[0].destruido);
++  assert.strictEqual(r.info.state, 'FAILED');
++  assert.strictEqual(r.info.reason, 'unplayed');
++  assert.strictEqual(r.info.answeredBy, 'voicemail');
++});
++
++test('con detectVoicemail y recado: el buzón se queda con el recado y no se conversa', async function () {
++  const r = await llamar(Object.assign({}, CONVERSACION, {
++    detectVoicemail: true, voicemailMessage: RECADO, voicemailDelaySeconds: 0
++  }), { contesta: true, contact: BUZON });
++  assert.strictEqual(r.info.state, 'COMPLETED');
++  assert.strictEqual(r.info.reason, 'voicemail_message');
++  assert.strictEqual(r.info.answeredBy, 'voicemail');
++  assert.deepStrictEqual(voz.dichas, [RECADO]);
++  assert.strictEqual(r.info.message, RECADO, 'la bitácora apunta lo que se dejó de verdad');
++  assert.ok(r.hecho.dialogos[0].colgado);
++});
++
++test('con detectVoicemail sin recado: se cuelga sin decir nada', async function () {
++  const r = await llamar(Object.assign({}, CONVERSACION, { detectVoicemail: true }),
++                         { contesta: true, contact: BUZON });
++  assert.strictEqual(r.info.state, 'FAILED');
++  assert.strictEqual(r.info.reason, 'voicemail');
++  assert.deepStrictEqual(voz.dichas, []);
++  assert.ok(r.hecho.dialogos[0].colgado);
++});
++
++test('sin detectVoicemail, el buzón no cambia nada: se conversa y acaba en no_speech', async function () {
++  const r = await llamar(CONVERSACION, { contesta: true, contact: BUZON }, [null, null]);
++  assert.strictEqual(r.info.state, 'COMPLETED');
++  assert.strictEqual(r.info.reason, 'no_speech');
++  assert.strictEqual(r.info.userTurns, 0);
++  assert.strictEqual(r.info.answeredBy, 'voicemail');
++  assert.ok(voz.dichas.includes(CONVERSACION.message));
++});
++
++test('si descuelga una persona, detectVoicemail no la toca', async function () {
++  const r = await llamar(Object.assign({}, CONVERSACION, {
++    detectVoicemail: true, voicemailMessage: RECADO, voicemailDelaySeconds: 0
++  }), { contesta: true, contact: PERSONA }, ['sí, dime', 'vale, adiós']);
++  assert.strictEqual(r.info.state, 'COMPLETED');
++  assert.strictEqual(r.info.reason, 'conversation_complete');
++  assert.strictEqual(r.info.answeredBy, 'person');
++  assert.strictEqual(r.info.userTurns, 2);
++  assert.ok(!voz.dichas.includes(RECADO));
++});
++
++test('descuelga una persona y no dice nada: no_speech sin turnos, pero answeredBy person (el backend lo da por cogida)', async function () {
++  // Mikel coge, oye el mensaje y no dice nada que se transcriba: habló encima del primer
++  // mensaje, o un «sí» tan bajo que no se oyó. claude-phone no decide si eso es cogerla;
++  // lo que tiene que hacer es contarlo tal cual, con answeredBy, para que el backend no
++  // vuelva a llamar a quien ya ha cogido.
++  const r = await llamar(Object.assign({}, CONVERSACION, {
++    detectVoicemail: true, voicemailMessage: RECADO, voicemailDelaySeconds: 0
++  }), { contesta: true, contact: PERSONA }, [null, null]);
++  assert.strictEqual(r.info.state, 'COMPLETED');
++  assert.strictEqual(r.info.reason, 'no_speech');
++  assert.strictEqual(r.info.answeredBy, 'person');
++  assert.strictEqual(r.info.userTurns, 0);
++  assert.ok(!voz.dichas.includes(RECADO), 'a una persona no se le deja el recado');
++});
++
++test('habló y luego se calló: no_speech, pero con turnos (el backend lo da por cogida)', async function () {
++  const r = await llamar(CONVERSACION, { contesta: true, contact: PERSONA },
++                         ['sí, dime', null, null]);
++  assert.strictEqual(r.info.reason, 'no_speech');
++  assert.strictEqual(r.info.userTurns, 1);
++});
++
++test('si falla el audio después de descolgar, también se cuelga', async function () {
++  const r = await llamar(CONVERSACION, { contesta: true, contact: PERSONA, falloModify: true });
++  assert.ok(r.hecho.dialogos[0].colgado, 'antes el catch solo destruía el endpoint');
++  assert.strictEqual(r.info.state, 'FAILED');
++  assert.strictEqual(r.info.reason, 'unplayed');
++});
++
++test('si no lo coge nadie, sigue siendo no_answer y nadie ha descolgado', async function () {
++  const r = await llamar(CONVERSACION, { contesta: false });
++  assert.strictEqual(r.info.state, 'FAILED');
++  assert.strictEqual(r.info.reason, 'no_answer');
++  assert.strictEqual(r.info.answeredBy, null);
++});
++
++test('un recado que no es texto se rechaza con 400', async function () {
++  const r = await llamar(Object.assign({}, CONVERSACION, {
++    detectVoicemail: true, voicemailMessage: 'x'.repeat(1001)
++  }), { contesta: true, contact: BUZON });
++  assert.strictEqual(r.codigo, 400);
++  assert.strictEqual(r.hecho.invites, 0);
++});
++
++test('el Contact queda en el log de cada llamada contestada', async function () {
++  await llamar(CONVERSACION, { contesta: true, contact: PERSONA }, ['adiós']);
++  assert.ok(registro.some(function (l) { return l.includes('Quién descuelga') && l.includes('person'); }));
++});
++
++test('GET /api/call/:id: lo que lee el backend, por la ruta de verdad', async function () {
++  const r = await llamar(CONVERSACION, { contesta: true, contact: PERSONA }, ['sí, dime', 'adiós']);
++  let codigo = 200;
++  let cuerpo = null;
++  const res = {
++    status: function (n) { codigo = n; return res; },
++    json: function (d) { cuerpo = d; return res; }
++  };
++  rutas['GET /call/:callId']({ params: { callId: r.sesion.callId } }, res);
++  assert.strictEqual(codigo, 200);
++  assert.strictEqual(cuerpo.data.state, 'COMPLETED');
++  assert.strictEqual(cuerpo.data.reason, 'conversation_complete');
++  assert.strictEqual(cuerpo.data.answeredBy, 'person');
++  assert.strictEqual(cuerpo.data.userTurns, 2);
++  assert.ok(cuerpo.data.answeredAt, 'answeredAt sigue ahí para el backend sin el 12');
++});

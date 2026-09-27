@@ -2,10 +2,10 @@
 
 [claude-phone](https://github.com/theNetworkChuck/claude-phone) se instaló en `caja` el
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
-Estos son los doce cambios que hubo que hacerle (el 12, todavía por aplicar), con el
+Estos son los doce cambios que hubo que hacerle (el 12, aplicado el 2026-09-27), con el
 síntoma que resuelve cada uno.
 
-> **Viven en `/home/malbisudlf/.claude-phone-cli/`, que es un clon del repositorio de
+> **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
 > `claude-phone update` —o borrar y reinstalar— se los lleva todos por delante, y el
 > síntoma no es un error: es que Jarvis vuelve a hablar en inglés y deja de contestarte.
@@ -27,7 +27,7 @@ síntoma que resuelve cada uno.
 | 9 | `voice-app/lib/claude-bridge.js` | Los tres mensajes que se dicen cuando Claude falla, al español, y uno propio para la sesión caducada | Con la sesión OAuth de Claude Code caducada, Jarvis descolgaba y a todo contestaba **«I encountered an unexpected error»**: en inglés y sin decir qué pasaba |
 | 10 | `voice-app/lib/audio-fork.js` | Dentro de una frase, compara con **tu nivel de voz**, no solo con el ruido; turno máximo de 25 s (`VAD_MAX_UTTERANCE_MS`) (detalle abajo) | En un sitio ruidoso el ruido picaba por encima del suelo del parche 5, reiniciaba la cuenta de silencio y **Jarvis no dejaba de escucharte** aunque hubieras terminado, hasta el tope de 60 s |
 | 11 | `claude-api-server/{server,bitacora}.js` y `voice-app/lib/outbound-session.js` | Memoria entre llamadas: una bitácora de las llamadas recientes que Claude recibe al empezar cada sesión (detalle abajo) | Cada llamada era una sesión nueva: si Jarvis te llamaba, no lo cogías y le devolvías la llamada, **no sabía para qué te había llamado** |
-| 12 | `voice-app/lib/{outbound-handler,outbound-routes,outbound-session,conversation-loop}.js` | Contestar no es coger: detecta que ha descolgado el buzón y deja ahí el recado, cuenta los turnos en que alguien habló, cuelga la línea en cualquier error después de descolgar y fija los estados finales (detalle abajo). **Por aplicar** | Si el buzón descuelga antes del timbre (el móvil rechaza la llamada en modo dormir), el backend la da por cogida: **ni segunda llamada ni recado**. Y un fallo de voz tras descolgar deja la línea abierta y el buzón grabando silencio |
+| 12 | `voice-app/lib/{outbound-handler,outbound-session,outbound-routes,conversation-loop}.js`, `voice-app/test/parche12.test.js` y `claude-api-server/bitacora.js` | Distingue el buzón de una persona por el `Contact` del 200 OK, cuenta cuántas veces habla alguien, **cuelga siempre** una llamada descolgada que falla y no deja que un final se reescriba (detalle abajo). **Aplicado el 2026-09-27**; la bitácora nueva, pendiente de reiniciar `claude-phone-api` | Si el buzón descuelga antes que el timbre del backend, para él la llamada está cogida: ni segunda llamada ni mensaje. Y si la voz falla tras descolgar, **la pata SIP se queda abierta** con el buzón grabando silencio hasta que cuelga él |
 
 ### Los parches 7 y 8, en detalle
 
@@ -207,57 +207,124 @@ Jarvis recibe las últimas 12 y solo las saca si le preguntas. Probado el 2026-0
 llamadas de prueba, se le devolvió la llamada y contó las tres. Para que olvide (p. ej.,
 tras unas pruebas): `echo "[]" > ~/telefono-jarvis/llamadas-recientes.json`.
 
-### El parche 12, en detalle (por aplicar)
+### El parche 12, en detalle
 
-Sale del 2026-09-27 (`docs/BUGS_HISTORICOS.md`): en el segundo intento de una serie **el
-buzón descolgó a los 7,5 s**, claude-phone pasó a PLAYING, el TTS falló (el contenedor
-estaba sin DNS), la sesión quedó en FAILED **sin colgar la pata SIP**, y el buzón grabó
-silencio hasta que colgó él, tres minutos después. Para el backend esa llamada estaba
-contestada. El backend ya habla el contrato de este parche (`_como_acabo` en
-`backend/main.py`, «Contestar no es coger» en `docs/LLAMADAS.md`), y sin él decide
-exactamente como antes. Lo que tiene que hacer el parche:
+**Aplicado en `caja` el 2026-09-27**: `git apply` del diff versionado aquí mismo
+(`telefono/parche-12.diff`), imagen reconstruida con los 15 tests en verde dentro de ella
+y `voice-app` cambiado sin ninguna llamada en curso. La imagen anterior sigue etiquetada
+como `claude-phone-voice-app:antes-p12` para volver atrás en un minuto. Falta solo la
+bitácora (`telefono/bitacora.js` → `~/.claude-phone-cli/claude-api-server/bitacora.js` y
+reiniciar `claude-phone-api`, que pide `sudo`).
 
-- **`outbound-routes.js`** acepta tres campos opcionales en `POST /api/outbound-call` (el
-  validador ya ignora los desconocidos, así que un backend viejo sigue valiendo):
-  `detectVoicemail` (booleano), `voicemailMessage` (texto, 1000 como mucho) y
-  `voicemailDelaySeconds` (0-30, la espera al saludo del buzón; el backend manda 8).
-  Nunca llegan en la llamada `announce` del final, que busca justo al buzón.
-- **`outbound-handler.js`**: al contestar, mira el `Contact` del 200 OK. El 3CX no pone
-  nombre en el Contact del buzón; con la extensión de verdad, sí. Se guarda
-  `answeredBy`: `'person'`, `'voicemail'` o `'unknown'`, y `answeredAt`.
-- **`outbound-session.js`**: si `detectVoicemail` y `answeredBy === 'voicemail'`, no se
-  conversa. Con `voicemailMessage`, espera `voicemailDelaySeconds`, lo dice y cuelga →
-  `COMPLETED/'voicemail_message'`; sin él, cuelga sin decir nada → `FAILED/'voicemail'`.
-  `getInfo()` devuelve **siempre** `answeredBy` (null antes de contestar: la clave es la
-  marca de contrato que el backend mira), `userTurns` y `answeredAt`.
-- **`conversation-loop.js`**: cuenta `userTurns` (turnos en los que se oyó a alguien). El
-  corte del parche 8 por dos turnos en silencio acaba en `COMPLETED/'no_speech'`, y un
-  error de la conversación en `COMPLETED/'conversation_error'`.
-- **Colgar siempre**: cualquier error después de descolgar (TTS, audio, FreeSWITCH)
-  cuelga la pata SIP antes de marcar el final. Si no se llegó a decir el primer mensaje,
-  el final es `FAILED/'unplayed'`.
-- **Estados finales fijos**: una sesión en COMPLETED o FAILED ya no cambia (hoy puede
-  pasar de FAILED a COMPLETED al colgar). Se guarda 60 s después del final, como ahora,
-  y el backend sondea cada 5 s.
+Sale del 2026-09-27. Con la web caída desde la madrugada, Jarvis llamó a las 07:00 (al
+acabar la franja nocturna). El primer intento sonó sus 14 s y colgó (`no_answer`). En el
+segundo **descolgó el buzón a los 7,5 s** —muy por debajo de los 40 del desvío; lo
+probable es que el móvil rechazara o silenciara la llamada (modo dormir) y el 3CX la
+mandara al buzón en el acto, sin que llegue nunca un 603—. claude-phone pasó a `PLAYING`,
+la voz falló (el contenedor no tenía DNS tras el reinicio de `caja`) y la llamada quedó
+en `FAILED`… **sin colgar**: el buzón estuvo grabando silencio 2 min 35 s, hasta que
+colgó él. Y el backend no insistió ni dejó el mensaje, porque para él aquella llamada ya
+había sido contestada. Los parches 7 y 8 y el timbre de 14 s daban por hecho que el buzón
+tarda en descolgar; ese día tardó menos que el timbre.
 
-Cómo lo lee el backend: `userTurns > 0` es cogida en cuanto se ve; `voicemail_message`
-es «recado dejado, se acaba la serie»; `voicemail` y `no_speech` sin turnos son «no
-cogida, sigue la serie», salvo `no_speech` con `answeredBy: 'person'`, que es cogida
-(quien descuelga y no dice nada que se oiga lo ha cogido igual); `unplayed` y
-`conversation_error` sin turnos son «sin voz», que no insiste y deja un ERROR. El interruptor es del backend (`TELEFONO_DETECTAR_BUZON=0`):
-sin `detectVoicemail` en la petición, el parche solo apunta el Contact en el log.
+**Quién descuelga.** El 3CX pone el nombre de la extensión en el `Contact` del 200 OK
+cuando descuelga una persona (`"Nombre" <sip:ext@...>`) y no lo pone cuando descuelga el
+buzón (`<sip:ext@...>`). Acertó en las 14 salientes contestadas del 20 al 27/09 (10
+personas, 4 buzones). El tiempo hasta descolgar **no sirve**: el buzón cogió entre 7,5 y
+41,5 s, y la persona entre 4,1 y 11,4. `quienContesta()` en `outbound-handler.js` devuelve
+`person`, `voicemail` o, sin `<...>` en la cabecera, `unknown` (y entonces todo sigue
+como antes). Cada llamada contestada deja una línea `Quién descuelga` en
+`docker logs voice-app` con el `Contact` en bruto: es lo que permite comprobar la
+heurística llamada a llamada.
 
-**Queda por hacer**: escribir el diff contra el clon de `caja`, probarlo con una llamada
-real rechazada desde el móvil (debe acabar en `voicemail_message` con el recado grabado)
-y versionarlo aquí. Lo aplica Mikel, o una sesión con su permiso explícito. Cuando haya
-acertado un par de veces, `TELEFONO_TIMBRE_SEG` puede volver de 14 a 25 s.
+**Lo que cambia, fichero a fichero:**
+
+- `outbound-handler.js`: el diálogo (`uac`) sale del `try` como ya hizo el 7 con el
+  `endpoint`, y si algo falla **después** de descolgar (`endpoint.modify`), el `catch`
+  lo cuelga y lanza `unplayed`. Antes solo destruía el endpoint.
+- `outbound-session.js`: `answeredBy` (null hasta que descuelgan) y `userTurns` (0), que
+  `getInfo()` —o sea, `GET /api/call/{id}`— devuelve **siempre**, también a null: que la
+  clave exista es lo que le dice al backend que habla con un claude-phone con el 12.
+  `transition()` ignora cualquier salida de `COMPLETED` o `FAILED` (un final es final:
+  antes el BYE del buzón podía convertir un `FAILED` en `COMPLETED` minutos después, y
+  avisaba dos veces a la bitácora). El temporizador que borra la sesión a los 60 s lleva
+  `.unref()`.
+- `outbound-routes.js`: tres campos opcionales en `POST /api/outbound-call`.
+  `detectVoicemail` (boolean), `voicemailMessage` (texto, 1000 caracteres como mucho) y
+  `voicemailDelaySeconds` (0-30, 8 por defecto). Si se pide la detección y descuelga el
+  buzón, no se conversa: con recado, se espera al saludo, se dice y la llamada acaba en
+  `COMPLETED`/`voicemail_message`; sin recado, se cuelga en el acto con
+  `FAILED`/`voicemail`. Tras la conversación, el motivo dice cómo acabó: `no_speech` si
+  fueron los dos turnos de silencio del parche 8, `conversation_error` si falló el audio.
+  Y en el `catch` final, si la llamada estaba descolgada, `FAILED`/`unplayed` **y se
+  cuelga**.
+- `conversation-loop.js`: una opción `onUserTurn`, que se llama con cada transcripción
+  de 2 caracteres o más (así cuenta `userTurns`), y devuelve `{ endReason }`:
+  `silence`, `goodbye`, `max_turns`, `hangup`, `no_audio` o `error`.
+
+**Lo que lee el backend** (`GET /api/call/{id}` → `data`): `state`, `reason`,
+`answeredBy` y `userTurns`. Los motivos nuevos y lo que significan para él:
+
+| Estado / motivo | Qué pasó | Para el backend |
+|---|---|---|
+| `FAILED` / `voicemail` | Descolgó el buzón, se colgó sin recado | No cogida: la serie sigue |
+| `COMPLETED` / `voicemail_message` | Descolgó el buzón y se le dejó el recado | En el buzón: la serie acaba |
+| `COMPLETED` / `no_speech` | Dos turnos sin oír a nadie | Con `userTurns` 0: cogida si `answeredBy` es `person`; si no, no cogida |
+| `COMPLETED` / `conversation_error` | Falló el audio de la conversación | Sin voz si `userTurns` es 0 |
+| `FAILED` / `unplayed` | Descolgada, pero Jarvis no pudo decir nada; se cuelga | Sin voz: no se insiste, y queda un ERROR en el log |
+
+Con `userTurns` mayor que 0 la llamada está cogida en cuanto se ve, sin esperar al final.
+Y si descolgó una persona (`answeredBy: 'person'`) está cogida aunque no llegue a hablar:
+pudo contestar encima del primer mensaje, cuando todavía no se escucha, o con un «sí» tan
+bajo que el detector de voz no lo pilló. `no_speech` solo cuenta como no cogida cuando el
+Contact dice buzón o no se entiende: es el respaldo de la heurística, no su rival. La
+heurística acertó con las 10 personas; volver a llamar a quien ya lo cogió son dos
+llamadas más, la segunda y la del buzón.
+
+**Compatibilidad**, en los dos sentidos: un claude-phone sin el 12 ignora los campos
+nuevos (su validador no rechaza lo desconocido) y no manda `answeredBy`, así que el
+backend decide exactamente como antes. Un backend viejo contra el 12 tampoco cambia:
+`no_speech` y `conversation_error` son `COMPLETED`, y `unplayed` es `FAILED`, como lo que
+ya conocía. El interruptor de la detección está en el backend:
+`TELEFONO_DETECTAR_BUZON=0`.
+
+**La bitácora** (`telefono/bitacora.js`, versionada aquí y copiada a mano como en el
+11): `voicemail_message` se apunta como mensaje en el buzón, y una saliente **no** cuenta
+como cogida si contestó el buzón (y nadie habló), si fue `no_speech` sin turnos y sin
+una persona al otro lado (`answeredBy` distinto de `person`) o si fue `unplayed`. Jarvis lo recuerda como «y NO lo cogió: contestó su buzón» o «no pudo
+hablar».
+
+**Cómo se prueba sin llamar a nadie**: `voice-app/test/parche12.test.js` (node:test, sin
+dependencias) engancha dobles de la centralita, FreeSWITCH, la voz y el oído antes de
+cargar `lib/`, y recorre 15 casos, entre ellos el del 27/09 (buzón y voz rota → la pata
+se cuelga) y el de la persona que descuelga y no dice nada. Contra el código de antes
+fallan los 15. Se lanza dentro de la imagen recién
+construida y sin red, antes de cambiar el contenedor:
+
+```bash
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche12.test.js
+# 15 pass → sin llamada en curso (curl -s localhost:3010/api/calls):
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Se le da el fichero: con el directorio (`test/`), Node no lo encuentra.
+
+**Lo que no resuelve**: la heurística sale de 14 llamadas. Si un día el 3CX manda el
+nombre también desde el buzón, se conversa con él como antes (el parche 8 cuelga a los
+~70-90 s, en `no_speech` sin turnos) y, como el Contact dijo persona, cuenta como cogida:
+ni segunda llamada ni recado, igual que sin el 12. Es el precio de no volver a llamar a
+quien sí lo cogió; la línea `Quién descuelga` es lo que dirá si pasa. Si al revés una
+persona llega sin nombre, oye el recado; no se le cuelga sin más. Y Whisper puede
+«oír» frases en el ruido de un buzón grabando: si pasa, esa llamada contaría con un
+turno.
 
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
   `claude-api-server` al arrancar. Sin él, los contenedores vuelven solos tras un
   reinicio y el puente con Claude Code no, así que la llamada entra y no contesta nadie.
-- Su `WorkingDirectory` es `/home/malbisudlf/telefono-jarvis/`, y el `CLAUDE.md` de ahí
+- Su `WorkingDirectory` es `~/telefono-jarvis/`, y el `CLAUDE.md` de ahí
   es la copia de `telefono/RUNBOOK.md` de este repositorio. **También se copia a mano.**
 - **No uses `claude-phone start`**: intentaría levantar su propio `claude-api-server`
   contra el puerto 3333 que ya ocupa systemd. Los contenedores se levantan con
@@ -286,6 +353,10 @@ acertado un par de veces, `TELEFONO_TIMBRE_SEG` puede volver de 14 a 25 s.
   esperar, y la app del móvil puede influir—, así que en `caja` `backend.env` lleva
   **`TELEFONO_TIMBRE_SEG=14`**: Jarvis cuelga antes de que el buzón pueda coger. Con
   14 s se probó la serie entera sin cogerlo: dos `no_answer` y el mensaje en el buzón.
+  Desde el parche 12 eso ya no depende del timbre: el buzón se reconoce al descolgar. El
+  2026-09-27 descolgó a los 7,5 s, por debajo incluso de los 14. Cuando la línea
+  `Quién descuelga` haya acertado un par de buzones de verdad, `TELEFONO_TIMBRE_SEG` puede
+  volver a 25.
 - El plan gratuito cubre llamadas entre extensiones. Llamar a un teléfono de la red
   telefónica normal necesitaría un troncal con número, que es de pago — y para eso ya
   está el camino de Twilio, escrito y apagado en `docs/LLAMADAS.md`.

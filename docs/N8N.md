@@ -31,7 +31,7 @@ resultado: un aviso al móvil pasado el 80 %.
 | | |
 |---|---|
 | Máquina | `caja` (ver `docs/MIGRACION_BACKEND.md`) |
-| Directorio | `/home/malbisudlf/docker/n8n/` |
+| Directorio | `~/docker/n8n/` |
 | Panel | `http://<caja>:5678` — **solo LAN**, el router no reenvía el puerto. La IP está en `HOMEASSISTANT.md` |
 | Imagen | `docker.n8n.io/n8nio/n8n:2.39.8`, versión fija |
 | Datos | volumen `n8n_n8n_data` (flujos, credenciales, ejecuciones) |
