@@ -251,18 +251,35 @@ def encargo_firmado(instruccion: str, firma: str) -> bool:
     return hmac.compare_digest(esperada, firma)
 
 
+# Lo único que puede llevar el host. Un `%2e` o un carácter que el navegador normaliza
+# a otra cosa darían dos lecturas distintas del mismo host.
+_ALUD_HOST_RE = re.compile(r"[a-z0-9.-]+")
+
+
 def alud_url_permitida(url: str) -> bool:
-    """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio)."""
+    """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio).
+
+    Copia de la de backend/main.py (ahí está el porqué de cada comprobación) y un test
+    exige que digan lo mismo: la fila de `jobs` se puede escribir sin pasar por el
+    backend, así que esta es la última barrera antes de que Edge abra la URL.
+    """
     if not isinstance(url, str) or not url:
+        return False
+    if "\\" in url or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         return False
     try:
         partes = urlsplit(url)
+        puerto = partes.port
     except ValueError:
         return False
     if partes.scheme != "https":
         return False
     host = (partes.hostname or "").lower()
-    if not host:
+    if not host or not _ALUD_HOST_RE.fullmatch(host):
+        return False
+    # El netloc es el host (y como mucho un puerto) y nada más: ni userinfo ni restos
+    # que otro parser pudiera leer como parte del host.
+    if partes.netloc.lower() != (host if puerto is None else f"{host}:{puerto}"):
         return False
     return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
@@ -381,21 +398,44 @@ def claim_job(job_id: str) -> bool:
         log.warning(f"Respuesta ilegible al reclamar el job: {e}")
         return False
 
-def start_job(job_id: str):
-    requests.post(
-        f"{API_BASE}/jobs/{job_id}/start",
-        headers=api_headers(),
-        json={"worker_id": WORKER_ID},
-        timeout=10,
-    )
+def _mover_job(job_id: str, tramo: str, cuerpo: dict, intentos: int = 3) -> bool:
+    """POST a /jobs/{id}/{tramo}. True solo si el backend lo aceptó.
 
-def finish_job(job_id: str, status: str):
-    requests.post(
-        f"{API_BASE}/jobs/{job_id}/finish",
-        headers=api_headers(),
-        json={"worker_id": WORKER_ID, "status": status},
-        timeout=10,
-    )
+    Antes el resultado se tiraba sin mirar: un start fallido dejaba el job en claimed
+    para siempre mientras el log decía «✅ Job completado». Reintenta lo transitorio
+    (red y 5xx), que es lo que pasa en el primer minuto tras el WOL; un 4xx no, porque
+    repetirlo no lo arregla: 409 es que el job no está en el estado que toca, y 401/403
+    es el token.
+    """
+    motivo = ""
+    for intento in range(1, intentos + 1):
+        try:
+            r = requests.post(
+                f"{API_BASE}/jobs/{job_id}/{tramo}",
+                headers=api_headers(),
+                json=cuerpo,
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            motivo = f"sin respuesta ({e})"
+        else:
+            if r.status_code < 300:
+                return True
+            motivo = f"HTTP {r.status_code}"
+            if r.status_code in (401, 403):
+                motivo += " — revisa AGENT_TOKEN"
+            if r.status_code < 500:
+                break
+        if intento < intentos:
+            time.sleep(2 * intento)
+    log.error(f"El backend no aceptó '{tramo}' del job {job_id}: {motivo}")
+    return False
+
+def start_job(job_id: str) -> bool:
+    return _mover_job(job_id, "start", {"worker_id": WORKER_ID})
+
+def finish_job(job_id: str, status: str) -> bool:
+    return _mover_job(job_id, "finish", {"worker_id": WORKER_ID, "status": status})
 
 # ── Cowork: abrir Claude Desktop y escribir instrucción ───────────────────────
 
@@ -1081,17 +1121,30 @@ def procesar_job(job: dict):
         return
 
     report_stage(job_id, "job_claimed", f"Worker {WORKER_ID} reclamó el job ({accion})")
-    start_job(job_id)
+    if not start_job(job_id):
+        # Sin running no se ejecuta nada: el backend no sabría que está en marcha y no
+        # podría cerrarlo. Se cierra como fallido desde claimed (el backend lo admite)
+        # para que se pueda reintentar desde el dashboard en vez de quedarse colgado.
+        finish_job(job_id, "failed")
+        report_stage(job_id, "job_done", "failed: el backend no aceptó el inicio del job")
+        return
     heartbeat("busy")
     try:
         handler(job_id, payload)
-        finish_job(job_id, "done")
-        report_stage(job_id, "job_done", "done")
-        log.info(f"✅ Job '{accion}' completado.")
     except Exception as e:
         log.error(f"Error en job '{accion}': {e}", exc_info=True)
         finish_job(job_id, "failed")
         report_stage(job_id, "job_done", f"failed: {e}")
+        return
+    if finish_job(job_id, "done"):
+        report_stage(job_id, "job_done", "done")
+        log.info(f"✅ Job '{accion}' completado.")
+    else:
+        # La acción sí se hizo; lo que falta es que conste. Se dice así, y no
+        # «completado», que es justo lo que tapaba el job colgado.
+        report_stage(job_id, "job_done", "done en el PC, pero el backend no registró el cierre")
+        log.error(f"Job '{accion}' hecho, pero el backend no registró el cierre: "
+                  "el dashboard lo verá sin terminar.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

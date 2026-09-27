@@ -172,7 +172,7 @@ Ficheros clave:
 | `telefono/PARCHES.md` | **Antes de tocar o actualizar claude-phone.** Los once parches que necesita el repositorio original para funcionar aquí (credenciales SIP, modelo retirado, puertos, idioma, detector de voz, dominio del saliente, colgar si no lo coges, colgar si nadie habla, errores en español, detector de voz con ruido, memoria entre llamadas). Viven solo en `caja` y **no están versionados**: un `claude-phone update` se los lleva |
 | `telefono/RUNBOOK.md` | Lo que Jarvis sabe y puede hacer cuando te llama por una avería: qué mirar, qué tocar con tu confirmación y qué no tocar nunca. **Se copia a mano** a `~/telefono-jarvis/CLAUDE.md` en `caja`, que es el directorio de trabajo del `claude-api-server` |
 | `docker/n8n/` | n8n empaquetado: su `compose.yml` y sus variables. Corre en `caja` y **se copia a mano**, igual que el add-on. **Los flujos ya no están aquí**: viven en el repositorio HomeLab (`caja/n8n/flujos/`), que es la fuente de verdad de esa máquina |
-| `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **No tiene tests ni puede tenerlos en CI** |
+| `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **Casi todo se prueba a mano**: en CI solo su lógica pura (`tests/backend/test_agente_pc.py`, que lo carga con `pyautogui` simulado) |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
 | `tests/backend/conftest.py` | Entorno simulado completo del backend (léelo antes de escribir tests) |
 | `tests/frontend/setup.js` | Stubs de `matchMedia` y `Notification` que jsdom no implementa |
@@ -327,6 +327,11 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
    que un payload puede llegar sin haber pasado por el backend. No quites ninguna de
    las tres. El enunciado extraído va delimitado como DATO en la instrucción de Cowork
    (`build_cowork_instruction`), no mezclado con las órdenes.
+   **Las tres barreras son la misma función y se saltaron las tres a la vez** hasta
+   septiembre de 2026: con una barra invertida, `urlsplit` y Edge leían hosts distintos
+   (ver `docs/BUGS_HISTORICOS.md`). Por eso rechaza todo lo que dos parsers pueden leer
+   distinto, y por eso las copias del backend y del agente tienen que ser idénticas: lo
+   exige `tests/backend/test_agente_pc.py`.
 8. **Cuerpos acotados**: nada de `await request.body()` ni `UploadFile.read()` sin
    tope — cargan en memoria lo que mande el cliente y la VM de Fly tiene 1 GB. Usa
    `_leer_cuerpo_limitado(request, limite)` (mira `Content-Length` y además cuenta el

@@ -262,6 +262,23 @@ class TestClaimStartFinish:
                         json={"worker_id": "w1", "status": "done"})
         assert r.json() == {"ok": True, "job": job}
 
+    def test_failed_se_puede_cerrar_desde_claimed(self, client, auth_headers, mock_requests):
+        """Si el agente no consiguió pasarlo a running, tiene que poder cerrarlo: si no,
+        se queda en claimed para siempre (ni /jobs/pending ni /retry lo recogen)."""
+        job = {"id": JOB_ID, "status": "failed"}
+        mock_requests.add("PATCH", "status=in.(claimed,running)&claimed_by=eq.w1", FakeResponse([job]))
+        r = client.post(f"/jobs/{JOB_ID}/finish", headers=auth_headers,
+                        json={"worker_id": "w1", "status": "failed"})
+        assert r.json() == {"ok": True, "job": job}
+
+    def test_done_sigue_exigiendo_running(self, client, auth_headers, mock_requests):
+        """No se ha terminado algo que no se llegó a empezar."""
+        mock_requests.add("PATCH", "status=eq.running&claimed_by=eq.w1", FakeResponse([]))
+        r = client.post(f"/jobs/{JOB_ID}/finish", headers=auth_headers,
+                        json={"worker_id": "w1", "status": "done"})
+        assert r.status_code == 409
+        assert mock_requests.called("PATCH", "status=eq.running&claimed_by=eq.w1")
+
 
 class TestRetry:
     def test_retry_incrementa_intento(self, client, auth_headers, mock_requests):

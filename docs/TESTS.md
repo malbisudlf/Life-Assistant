@@ -36,6 +36,12 @@ esté en `docs/BACKEND_REFERENCIA.md`, que el índice de `CLAUDE.md` y `docs/` c
 y que toda variable que lee `main.py` esté en `backend/.env.example`. Si falla tras
 añadir algo, lo que falta es la línea de documentación, no un arreglo en el test.
 
+`test_agente_pc.py` prueba lo que se puede de `agent/agent.py` sin un Windows: lo carga
+con `importlib` y con `pyautogui` y `dotenv` simulados, y anula `logging.basicConfig` y
+`FileHandler` para que importarlo no cree `agent.log` ni toque el logging de la suite.
+Además compara por AST `alud_url_permitida` del agente con la del backend: si cambias
+una, cambia la otra.
+
 ### Frontend (`tests/frontend`)
 
 Vitest + jsdom + Testing Library, configurado en `vite.config.js` (bloque `test`).

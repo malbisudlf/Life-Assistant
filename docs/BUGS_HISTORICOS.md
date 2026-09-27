@@ -3,6 +3,22 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **Una barra invertida se saltaba el invariante 7 entero.** `alud_url_permitida` sacaba
+  el host con `urlsplit(url).hostname`, que trata `\` como un carácter más del authority
+  y se queda con lo que va detrás de la última `@`. Edge (parser WHATWG) trata `\` como
+  `/`, así que para él el authority acaba en la barra. Con
+  `https://atacante.example\@alud.deusto.es/...` la función veía alud.deusto.es y Edge
+  abría atacante.example, con la sesión de Alud/Okta iniciada y Cowork esperando órdenes
+  en esa pestaña. Y como las tres barreras (extraer en `/calendar/events`, dar de alta en
+  `POST /jobs` y el agente) usaban la misma función, **se saltaban las tres a la vez**.
+  - Arreglo: se rechaza cualquier `\`, espacio o carácter de control, el userinfo y todo
+    netloc que no sea exactamente host[:puerto]; el host solo puede llevar `[a-z0-9.-]`.
+    Un test exige que la copia del agente sea idéntica a la del backend.
+  - Moraleja: **validar una URL con un parser que no es el que la va a abrir es validar
+    otra URL.** Lo que decide no es qué host lee Python, sino qué host lee el navegador;
+    y cuando no puedes preguntarle al navegador, rechaza todo lo que dos parsers puedan
+    leer distinto. Tres barreras con la misma lógica son una sola barrera.
+
 - **La huella de "Sal ya" recortaba el id de Graph.** `_regla_sal_ya` apuntaba cada aviso
   con la huella `salir:<los 60 primeros caracteres del id del evento>`, y `_ya_dicho` no
   deja repetir una huella en cinco días (`AVISOS_REPETIR_DIAS`). Los ids de Graph

@@ -1301,22 +1301,42 @@ async def _leer_cuerpo_limitado(request: Request, limite: int) -> bytes:
     return b"".join(trozos)
 
 
+# Lo único que puede llevar el host. Un `%2e` o un carácter que el navegador normaliza
+# a otra cosa darían dos lecturas distintas del mismo host.
+_ALUD_HOST_RE = re.compile(r"[a-z0-9.-]+")
+
+
 def alud_url_permitida(url: str) -> bool:
     """True si la URL es https y su host está en ALUD_ALLOWED_HOSTS (o es subdominio).
 
     Se exige https porque el agente abre esa URL con una sesión iniciada detrás: por
     http, cualquiera en la red del PC vería (y podría reescribir) lo que se navega.
+
+    Y se rechaza todo lo que Python y el navegador leen distinto. `urlsplit` no trata
+    la barra invertida como separador y Edge (parser WHATWG) sí, así que
+    `https://atacante.example\\@alud.deusto.es/` era alud.deusto.es para esta función
+    y atacante.example para el Edge que la abría: el invariante 7 entero se saltaba con
+    un carácter. Lo mismo con espacios y caracteres de control (el navegador se salta
+    tabuladores y saltos de línea) y con el userinfo, que una URL de Alud no lleva
+    nunca. La copia de agent/agent.py tiene que decir lo mismo: un test las compara.
     """
     if not isinstance(url, str) or not url:
         return False
+    if "\\" in url or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        return False
     try:
         partes = urlsplit(url)
+        puerto = partes.port
     except ValueError:
         return False
     if partes.scheme != "https":
         return False
     host = (partes.hostname or "").lower()
-    if not host:
+    if not host or not _ALUD_HOST_RE.fullmatch(host):
+        return False
+    # El netloc es el host (y como mucho un puerto) y nada más: ni userinfo ni restos
+    # que otro parser pudiera leer como parte del host.
+    if partes.netloc.lower() != (host if puerto is None else f"{host}:{puerto}"):
         return False
     return any(host == permitido or host.endswith("." + permitido) for permitido in ALUD_ALLOWED_HOSTS)
 
@@ -3004,8 +3024,14 @@ def finish_job(
     if body.status not in ("done", "failed"):
         raise HTTPException(status_code=400, detail="status debe ser done o failed")
     worker = _safe_worker(body.worker_id)
+    # "failed" se acepta también desde claimed: si el agente no consigue pasar el job a
+    # running (un corte justo después del WOL), tiene que poder cerrarlo igualmente.
+    # Antes solo se cerraba desde running, y ese job se quedaba en claimed para siempre:
+    # /jobs/pending no lo vuelve a dar y /retry solo acepta los failed. "done" sigue
+    # exigiendo running: no se ha terminado algo que no se llegó a empezar.
+    desde = "in.(claimed,running)" if body.status == "failed" else "eq.running"
     r = http.patch(
-        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status=eq.running&claimed_by=eq.{worker}",
+        f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&status={desde}&claimed_by=eq.{worker}",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"status": body.status},
     )
@@ -3013,7 +3039,8 @@ def finish_job(
         raise _supabase_error(r)
     rows = r.json()
     if len(rows) == 0:
-        raise HTTPException(status_code=409, detail="El job no está en estado running para este worker")
+        estado = "claimed ni running" if body.status == "failed" else "estado running"
+        raise HTTPException(status_code=409, detail=f"El job no está en {estado} para este worker")
     return {"ok": True, "job": rows[0]}
 
 @app.post("/jobs/{job_id}/events")

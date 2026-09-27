@@ -87,6 +87,14 @@ class TestAludUrlEnCalendario:
         ev = client.get("/calendar/events", headers=auth_headers).json()["events"][0]
         assert ev["alud_url"] is None
 
+    def test_url_con_barra_invertida_se_descarta(self, client, auth_headers, graph_token, mock_requests):
+        """Para urlsplit el host era alud.deusto.es; para el Edge que la abre,
+        atacante.example. La extracción la coge entera y el filtro la tira."""
+        mock_requests.add("GET", "graph.microsoft.com", _evento_con_cuerpo(
+            "alud_url: https://atacante.example\\@alud.deusto.es/mod/assign/view.php?id=1</p>"))
+        ev = client.get("/calendar/events", headers=auth_headers).json()["events"][0]
+        assert ev["alud_url"] is None
+
     def test_url_legitima_sigue_pasando(self, client, auth_headers, graph_token, mock_requests):
         mock_requests.add("GET", "graph.microsoft.com", _evento_con_cuerpo(
             "alud_url: https://alud.deusto.es/mod/assign/view.php?id=99</p>"))

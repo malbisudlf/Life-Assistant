@@ -22,6 +22,13 @@ cierra. Se registra en el backend con heartbeat. **Solo funciona en un PC Window
   Compatibilidad: jobs sin `accion` pero con `alud_url` → `resolver_alud`.
   `resolver_accion()` + guard `attempted` (cada job se intenta una vez por ejecución para
   no repetir en bucle si falla el claim por red).
+- **Cada paso del job mira lo que responde el backend.** `start_job` y `finish_job`
+  devuelven si se aceptaron (con tres intentos para la red y los 5xx; un 4xx no se
+  repite). Si el paso a running falla, la acción **no se ejecuta** y el job se cierra
+  como fallido desde claimed, que el backend admite solo para `failed`. Antes ninguno de
+  los dos miraba la respuesta: un 502 puntual tras el WOL dejaba el job en claimed para
+  siempre (ni `/jobs/pending` ni `/retry` lo recogen) mientras el log decía «✅ Job
+  completado». Si lo que falla es el cierre, se dice que se hizo pero no consta.
 
 ### Nada de PowerShell en el camino crítico
 

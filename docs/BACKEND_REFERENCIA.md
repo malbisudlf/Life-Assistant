@@ -68,7 +68,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /jobs` | JWT | Crea job en cola (valida `alud_url`, `dedupe_key` único) |
 | `GET /jobs/pending` | agente | Lo que sondea `agent.py`. **El corte temporal va como `Z`, nunca `+00:00`** |
 | `GET /jobs/by-id/{job_id}` | JWT | Job por ID |
-| `POST /jobs/{job_id}/claim` · `/jobs/{job_id}/start` · `/jobs/{job_id}/finish` | agente | Transiciones de estado (PATCH condicional, atómicas) |
+| `POST /jobs/{job_id}/claim` · `/jobs/{job_id}/start` · `/jobs/{job_id}/finish` | agente | Transiciones de estado (PATCH condicional, atómicas). `finish` con `failed` se acepta también desde `claimed`, para que un job que no llegó a arrancar no se quede colgado; `done` exige `running` |
 | `POST /jobs/{job_id}/events` | agente | Evento de progreso (stages) |
 | `GET /jobs/{job_id}/events` | JWT | Eventos de un job (lo consume la barra de progreso) |
 | `POST /jobs/{job_id}/retry` | JWT | Reintenta un job fallido (máx. `MAX_JOB_ATTEMPTS`) |
