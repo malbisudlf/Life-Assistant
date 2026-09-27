@@ -573,7 +573,11 @@ Reglas que no se deben romper:
 - **Una excepción no tumba el dashboard**: `momentoDelDia` va envuelto en `try` y, si algo
   revienta, devuelve solo el saludo.
 - En móvil la frase va en **una** línea con elipsis (el texto completo queda en `title`) y
-  los chips se desplazan en horizontal dentro de su fila, sin scroll de página.
+  los chips se desplazan en horizontal dentro de su fila, sin scroll de página. Para eso
+  `.header-momento` pasa a columna **con `flex-wrap: nowrap`**: con el `wrap` de escritorio
+  la columna es multilínea, la línea mide lo que la frase entera y la elipsis no llega a
+  actuar. Se vio de noche, cuando la frase dice «Mañana empiezas a las…» (ver
+  `docs/BUGS_HISTORICOS.md`).
 
 ### Derivación de datos de salud
 

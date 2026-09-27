@@ -3,6 +3,19 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **La cabecera desbordaba en el móvil, pero solo de noche (2026-09-27).** El E2E de
+  móvil pasó a las 17:31 y falló a las 23:22 con un commit que solo tocaba docs: la
+  página hacía scroll horizontal. El evento de prueba es «dentro de dos horas», y a esa
+  hora cae ya mañana, así que la frase del momento pasa a ser «Mañana empiezas a las
+  01:43 con…» y mide más que la pantalla. La elipsis de `.momento-frase` no actuaba porque
+  `.header-momento` pasaba a columna en móvil **conservando el `flex-wrap: wrap`** de
+  escritorio: una columna multilínea mide cada línea por su hijo más ancho, y el stretch
+  estiraba la frase hasta su ancho entero.
+  - Arreglo: `flex-wrap: nowrap` en la regla de móvil.
+  - Moraleja: **un test que depende de la hora pilla lo que depende de la hora**. No es
+    un flaky que haya que fijar, es cobertura que llegó sin buscarla: antes de «fijar el
+    reloj» de un test que falla solo a ciertas horas, mira qué cambia a esas horas.
+
 - **Gmail rechazó la contraseña y el correo de la mañana lo intentó cada cinco minutos
   todo el día (#244, 2026-09-27).** A la hora tope, `ha_brief_tick` montaba el correo
   entero —Graph, Supabase, clima, titulares— para fallar en el `login` con un 535, y
