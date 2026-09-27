@@ -28,3 +28,9 @@ El usuario entrena a personas y cobra 16 €/hora, generalmente cada 4 sesiones.
 - El último pago se obtiene con `order=created_at.desc` (no `order=date.desc`), para que
   sea el cobro más reciente en el tiempo y no solo por fecha.
 - El importe se calcula al marcar el cobro (horas desde el último cobro × precio).
+- **Si alguna de las lecturas falla, no se cobra nada: 502.** Leer un error como lista
+  vacía guardaba un cobro de 0 € (sin sesiones) o de todo el histórico (sin último
+  cobro), con `ok: true`, y ese cobro pasaba a ser el corte del pendiente; no hay
+  endpoint para borrar un cobro. Por lo mismo `/training/summary` responde 502 en vez de
+  enseñar «0 € pendientes», y un error al leer el cliente no se confunde con «no hay
+  cliente».

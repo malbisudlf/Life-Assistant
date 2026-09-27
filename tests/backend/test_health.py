@@ -521,6 +521,48 @@ class TestTraining:
         assert r.status_code == 502
         assert "secreto" not in r.text
 
+    def test_payment_no_se_guarda_si_falla_la_lectura_de_sesiones(self, client, auth_headers,
+                                                                  mock_requests):
+        """Leído como lista vacía, el 503 guardaba un cobro de 0 € con ok:true, y ese
+        cobro pasaba a ser el corte del pendiente. No hay forma de deshacerlo desde la app."""
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("GET", "training_payments", FakeResponse([]))
+        mock_requests.add("GET", "training_sessions", FakeResponse(None, 503, "caído"))
+        r = client.post("/training/payments", headers=auth_headers, json={"date": "2026-07-05"})
+        assert r.status_code == 502
+        assert mock_requests.called("POST", "training_payments") == []
+
+    def test_payment_no_se_guarda_si_falla_la_lectura_del_ultimo_cobro(self, client, auth_headers,
+                                                                       mock_requests):
+        """Sin último cobro desaparece el filtro por fecha y se sumaba el histórico entero."""
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("GET", "training_payments", FakeResponse(None, 503, "caído"))
+        mock_requests.add("GET", "training_sessions", FakeResponse(
+            [{"date": "2026-01-01", "duration_hours": 1.0}] * 50))
+        r = client.post("/training/payments", headers=auth_headers, json={"date": "2026-07-05"})
+        assert r.status_code == 502
+        assert mock_requests.called("POST", "training_payments") == []
+
+    def test_cobrar_por_jarvis_no_dice_cobrado_si_supabase_falla(self, mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("GET", "training_payments", FakeResponse([]))
+        mock_requests.add("GET", "training_sessions", FakeResponse(None, 503, "caído"))
+        r = main._jarvis_despachar("cobrar_entrenamiento", {})
+        assert "ok" not in r and "error" in r
+        assert mock_requests.called("POST", "training_payments") == []
+
+    def test_summary_con_supabase_caido_da_502_y_no_cero(self, client, auth_headers, mock_requests):
+        """«0 € pendientes» es un dato; que Supabase no conteste, no."""
+        mock_requests.add("GET", "training_clients", FakeResponse([self.CLIENT]))
+        mock_requests.add("GET", "training_payments", FakeResponse([]))
+        mock_requests.add("GET", "training_sessions", FakeResponse(None, 503, "caído"))
+        assert client.get("/training/summary", headers=auth_headers).status_code == 502
+
+    def test_un_error_al_leer_el_cliente_no_es_que_no_haya_cliente(self, client, auth_headers,
+                                                                   mock_requests):
+        mock_requests.add("GET", "training_clients", FakeResponse(None, 503, "caído"))
+        assert client.get("/training/summary", headers=auth_headers).status_code == 502
+
 
 class TestActualizarClienteEntrenamiento:
     """`PATCH /training/client` — cambiar el precio por hora o cada cuántas sesiones se

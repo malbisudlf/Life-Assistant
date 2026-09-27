@@ -2802,6 +2802,7 @@ const MOTIVOS_NO_RESPONDER = {
   automatico:         "Sin borrador · remitente automático",
   remitente_apartado: "Sin borrador · remitente apartado",
   en_copia:           "Sin borrador · vas en copia",
+  cuerpo_no_leido:    "Sin borrador · no se pudo leer",
 };
 export function motivoNoResponder(clave) {
   if (!clave) return "";
@@ -2885,4 +2886,25 @@ export function fusionarConfigWidgets(guardada, defaults, columnas = {}) {
     fusion.splice(pos, 0, { ...def });
   });
   return fusion;
+}
+
+/** Qué hacer con una nota de voz que el backend no pudo guardar.
+ *
+ *  Cuando falla el guardado, Whisper y GPT ya se han cobrado y el audio no se queda en
+ *  ningún sitio, así que el backend devuelve la transcripción dentro del error
+ *  (`detail: {mensaje, transcript}`). Si la hay, se devuelve para rellenar el formulario
+ *  de texto y reintentar por /ideas/text sin volver a dictar; si no (no se entendió el
+ *  audio, límite de peticiones, sin conexión), al menos un error que se vea: antes se
+ *  callaba y la nota desaparecía sin que nadie se enterara. */
+export function rescateNotaDeVoz(data) {
+  const detalle = data?.detail;
+  const texto = typeof detalle?.transcript === "string" ? detalle.transcript.trim() : "";
+  if (texto) {
+    return { texto, error: "No se pudo guardar la nota de voz; aquí tienes lo que dijiste" };
+  }
+  const motivo = typeof detalle === "string" ? detalle : detalle?.mensaje;
+  return {
+    texto: "",
+    error: motivo ? `No se pudo guardar la nota de voz (${motivo})` : "No se pudo guardar la nota de voz",
+  };
 }

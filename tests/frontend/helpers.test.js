@@ -21,7 +21,7 @@ import {
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
   alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   alarmaCuandoTexto, revisionDeUrl,
-  repartoPatrimonio,
+  repartoPatrimonio, rescateNotaDeVoz,
   RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
   tramosRelleno, escalaGrafica,
 } from "../../src/lib/helpers";
@@ -2914,5 +2914,25 @@ describe("fusionarConfigWidgets", () => {
     const r = fusionarConfigWidgets([{ id: "jarvis" }, { id: "__split__" }, { id: "timeline" }], DEFAULTS, COLUMNAS);
     expect(ids(r)).not.toContain("__split__");
     expect(ids(r)).toEqual(["jarvis", "siguiente", "timeline", "weather", "training"]);
+  });
+});
+
+describe("rescateNotaDeVoz", () => {
+  test("con la transcripción en el error la devuelve para reintentar", () => {
+    const r = rescateNotaDeVoz({ detail: { mensaje: "No se pudo guardar la idea", transcript: " comprar leche " } });
+    expect(r.texto).toBe("comprar leche");
+    expect(r.error).toContain("aquí tienes lo que dijiste");
+  });
+
+  test("sin transcripción no calla: da el motivo del backend", () => {
+    const r = rescateNotaDeVoz({ detail: "No se pudo transcribir el audio" });
+    expect(r.texto).toBe("");
+    expect(r.error).toContain("No se pudo transcribir el audio");
+  });
+
+  test("sin respuesta legible también hay error", () => {
+    const r = rescateNotaDeVoz(null);
+    expect(r.texto).toBe("");
+    expect(r.error).toBe("No se pudo guardar la nota de voz");
   });
 });

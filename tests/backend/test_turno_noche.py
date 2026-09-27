@@ -204,6 +204,40 @@ class TestElBuzonDeNoche(_Noche):
 
         assert main._cuerpos_de(["10"]) == {}
 
+    def test_sin_cuerpo_no_se_redacta_a_ciegas(self, monkeypatch, mock_requests):
+        """El de arriba comprueba `_cuerpos_de` por separado; esto es el turno entero. Un
+        cuerpo que Graph no sirve (o que no cabe) no puede acabar en un borrador escrito
+        solo con el asunto: un correo respondido a medias es peor que no respondido."""
+        monkeypatch.setattr(main, "_buzon_listo", lambda: "token-de-prueba")
+        monkeypatch.setattr(main, "_buzon_yo", lambda _t: "mikel@ejemplo.com")
+        monkeypatch.setattr(main, "_cabeceras_recientes", lambda: [
+            {"asunto": "Contrato", "de": "ana@ejemplo.com", "id": "10", "message_id": "<a@x>"}])
+        mock_requests.add("GET", "/me/messages/", FakeResponse(None, 500, "caído"))
+        recibido = _fake_modelo(monkeypatch, ["responder"])
+
+        items, _ = main._noche_correos()
+
+        assert mock_requests.called("POST", "/createReply") == []
+        assert len(recibido) == 1                      # solo el clasificador
+        assert items[0]["datos"]["borrador"] is False
+        assert items[0]["datos"]["no_responder"] == "cuerpo_no_leido"
+        assert "cuerpo_no_leido" in main._MOTIVOS_NO_RESPONDER
+
+    def test_un_fallo_al_saber_tu_direccion_no_se_queda_para_siempre(self, monkeypatch,
+                                                                     mock_requests):
+        """La dirección se pregunta una vez por proceso porque no cambia; el fallo sí es
+        pasajero. Guardado, apagaba la regla del «voy en copia» hasta el siguiente
+        despliegue."""
+        monkeypatch.setattr(main, "_buzon_yo_cache", None)
+        respuestas = [FakeResponse(None, 503, "caído"),
+                      FakeResponse({"mail": "Mikel@Ejemplo.com"}, 200)]
+        mock_requests.add("GET", "/v1.0/me?", lambda url, **kw: respuestas.pop(0))
+
+        assert main._buzon_yo("t") == ""
+        assert main._buzon_yo("t") == "mikel@ejemplo.com"
+        assert main._buzon_yo("t") == "mikel@ejemplo.com"
+        assert len(mock_requests.called("GET", "/v1.0/me?")) == 2   # ya se guardó
+
     def test_apagado_no_se_conecta_a_nada(self, monkeypatch):
         monkeypatch.setattr(main, "NOCHE_CORREO", False)
         llamadas = []

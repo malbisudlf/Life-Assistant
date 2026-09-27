@@ -19,7 +19,7 @@ import {
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
   revisionDeUrl, DIAS_SEMANA,
   agruparParteNoche, fraseParteNoche, motivoNoResponder,
-  hostStreaming,
+  hostStreaming, rescateNotaDeVoz,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
   esConfirmacionHablada, esNegacionHablada,
@@ -3130,15 +3130,24 @@ export default function Dashboard() {
       const blob = new Blob(chunksRef.current, { type: "audio/webm" });
       const fd = new FormData();
       fd.append("audio", blob, "audio.webm");
+      let data = null;
       try {
         const res = await apiFetch(`${API}/ideas/audio`, { method: "POST", headers: authHeaders(), body: fd });
-        const data = await res.json();
-        if (data.ok) {
-          avisarSiYaLoDijiste(data.idea);
-          setIdeas(prev => [data.idea, ...prev]);
-          recogerSugerencia(data);
-        }
-      } catch { /* mejor esfuerzo: ignorar */ }
+        data = await res.json();
+      } catch { /* sin respuesta legible: data se queda en null y cae en el rescate */ }
+      if (data?.ok) {
+        avisarSiYaLoDijiste(data.idea);
+        setIdeas(prev => [data.idea, ...prev]);
+        recogerSugerencia(data);
+      } else {
+        // Un fallo aquí ya ha cobrado Whisper y GPT: callarse perdía la nota sin que
+        // nadie se enterase. Se abre el formulario de texto con lo que se dijo (si el
+        // backend lo devolvió) para reintentar por /ideas/text sin volver a dictar.
+        const rescate = rescateNotaDeVoz(data);
+        setTextIdeaInput(rescate.texto);
+        setTextIdeaError(rescate.error);
+        setShowTextIdea(true);
+      }
       setProcessing(false);
     };
     mr.start();

@@ -186,6 +186,26 @@ class TestJarvisEditaElCalendario:
         # Sin hora de fin, una hora después: el mismo criterio que al crear.
         assert payload["end"]["dateTime"] == "2026-09-01T19:00:00"
 
+    def test_mover_a_ultima_hora_acaba_al_dia_siguiente(self, graph_token, mock_requests):
+        """Sumar una hora a "23:30" daba "00:30" del MISMO día: el evento acababa 23 h
+        antes de empezar y Graph rechazaba el cambio sin decir por qué."""
+        mock_requests.add("PATCH", "graph.microsoft.com", FakeResponse({}, 200))
+        main._j_editar_evento("ev1", fecha="2026-09-28", hora_inicio="23:30")
+        payload = mock_requests.called("PATCH", "graph.microsoft.com")[0][2]["json"]
+        assert payload["start"]["dateTime"] == "2026-09-28T23:30:00"
+        assert payload["end"]["dateTime"] == "2026-09-29T00:30:00"
+
+    def test_crear_a_ultima_hora_acaba_al_dia_siguiente(self, monkeypatch):
+        creados = []
+        monkeypatch.setattr(main, "create_event", lambda body, credentials=None: (
+            creados.append(body) or {"status": "ok", "id": "e"}))
+        main._j_crear_evento(titulo="Llamada", fecha="2026-12-31", hora_inicio="23:30")
+        assert creados[0].end == "2027-01-01T00:30:00"
+        # Un fin anterior al inicio es que cruza la medianoche, no un evento al revés.
+        main._j_crear_evento(titulo="Guardia", fecha="2026-09-28", hora_inicio="23:00",
+                             hora_fin="01:00")
+        assert (creados[1].start, creados[1].end) == ("2026-09-28T23:00:00", "2026-09-29T01:00:00")
+
     def test_sin_cambios_no_llama_a_graph(self, graph_token, mock_requests):
         assert main._j_editar_evento("ev1")["ok"] is False
         assert not mock_requests.called("PATCH", "graph.microsoft.com")

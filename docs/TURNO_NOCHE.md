@@ -90,6 +90,7 @@ a un modelo.*
 | `automatico` | el trozo anterior a la arroba es `noreply`, `no-responder`, `notificaciones`, `alertas`, `avisos`, `mailer`, `postmaster`, `bounce`, `newsletter`, `soporte`, `info`… |
 | `remitente_apartado` | la dirección o su dominio está en `NOCHE_NO_RESPONDER` (configurable: el banco, la gestora) |
 | `en_copia` | tu dirección **no** está en `toRecipients` y **sí** en `ccRecipients` |
+| `cuerpo_no_leido` | pasó la puerta, pero `_cuerpos_de()` no trajo su cuerpo: Graph falló, pasaba de `CORREO_MAX_DESCARGA` o no se entendía. Sin cuerpo no se redacta: el modelo contestaba solo con el asunto |
 
 Tres detalles que no son obvios:
 
@@ -102,7 +103,9 @@ Tres detalles que no son obvios:
 - **Sin destinatarios no se calla nada.** Un correo a una lista de distribución llega con
   `toRecipients` vacío, y no saber a quién iba no es prueba de que no iba a ti. Lo mismo
   si no se pudo averiguar la dirección del propio buzón (`_buzon_yo()`, una llamada a
-  `/me` por proceso): sin ella la regla del «voy en copia» simplemente no se aplica.
+  `/me` por proceso): sin ella la regla del «voy en copia» simplemente no se aplica. Lo
+  que se guarda es la dirección, **nunca el fallo**: un `/me` que no contesta deja la
+  regla apagada esa noche, y la siguiente se vuelve a preguntar.
 
 El motivo se guarda en `datos.no_responder` del item, así que el parte enseña **por qué**
 un correo se quedó sin borrador en vez de que parezca un olvido. Y solo se apunta en los

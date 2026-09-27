@@ -391,12 +391,51 @@ class TestIdeas:
         assert r.json() == {"ok": True}
 
     def test_save_idea_trunca_y_aplica_defaults(self, mock_requests):
-        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse(None, 500, "boom"))
-        # Con error de Supabase devuelve el payload construido (fallback)
-        out = main.save_idea("x" * 100, {})
-        assert out["key"] == "x" * 60      # default: primeros 60 chars del texto
-        assert out["tag"] == "idea"
-        assert out["full_text"] == "x" * 100
+        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse([{"id": "i1"}], 201))
+        main.save_idea("x" * 100, {})
+        enviado = mock_requests.called("POST", "/rest/v1/ideas")[0][2]["json"]
+        assert enviado["key"] == "x" * 60      # default: primeros 60 chars del texto
+        assert enviado["tag"] == "idea"
+        assert enviado["full_text"] == "x" * 100
+
+    def test_si_supabase_no_la_guarda_no_se_dice_que_se_guardo(self, client, auth_headers,
+                                                               mock_requests, monkeypatch):
+        """Antes se devolvía el payload local con ok:true: la idea salía en pantalla sin
+        id, no se podía borrar y al recargar ya no existía."""
+        monkeypatch.setattr(main, "extract_idea_from_text", lambda t: {"key": "k"})
+        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse(None, 401, "clave rotada"))
+        r = client.post("/ideas/text", headers=auth_headers, json={"text": "comprar leche"})
+        assert r.status_code == 502
+        assert "clave rotada" not in r.text
+        # Y Jarvis tampoco contesta «guardada».
+        assert "ok" not in main._jarvis_despachar("guardar_idea", {"texto": "comprar leche"})
+
+    def test_la_nota_de_voz_no_se_pierde_si_no_se_guarda(self, client, auth_headers,
+                                                         mock_requests, monkeypatch):
+        """Whisper ya se ha cobrado y el audio no se guarda: la transcripción vuelve en
+        el error para que quien grabó no tenga que repetirlo."""
+        class _Whisper:
+            audio = transcriptions = property(lambda self: self)
+
+            def create(self, **kw):
+                return type("T", (), {"text": "llamar al fontanero"})()
+
+        monkeypatch.setattr(main, "get_openai_client", lambda: _Whisper())
+        monkeypatch.setattr(main, "extract_idea_from_text", lambda t: {"key": "k"})
+        mock_requests.add("POST", "/rest/v1/ideas", FakeResponse(None, 503, "caído"))
+        r = client.post("/ideas/audio", headers=auth_headers,
+                        files={"audio": ("a.webm", b"xxxx", "audio/webm")})
+        assert r.status_code == 502
+        assert r.json()["detail"]["transcript"] == "llamar al fontanero"
+
+    def test_borrar_con_supabase_caido_no_dice_ok(self, client, auth_headers, mock_requests):
+        """Jarvis confirmaba el borrado aunque la nota siguiera ahí."""
+        mock_requests.add("DELETE", "/rest/v1/ideas", FakeResponse(None, 503, "caído"))
+        ident = "123e4567-e89b-12d3-a456-426614174000"
+        assert client.delete(f"/ideas/{ident}", headers=auth_headers).status_code == 502
+        r = client.post("/jarvis/ejecutar", headers=auth_headers,
+                        json={"herramienta": "borrar_idea", "argumentos": {"idea_id": ident}})
+        assert r.json()["ok"] is False
 
 
 class TestExport:

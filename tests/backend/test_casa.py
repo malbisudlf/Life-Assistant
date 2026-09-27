@@ -112,6 +112,17 @@ class TestOrdenesDeLaCasa:
         })
         assert main._ha_ordenes[0]["datos"] == {"brightness_pct": 40}
 
+    def test_los_datos_no_cambian_a_que_se_le_da_la_orden(self, mock_requests):
+        """HA mezcla `datos` con el `target`, y gana lo de `datos`. Con un `area_id` o un
+        `entity_id` ahí, una orden de luz —directa, sin botón— acababa abriendo el garaje."""
+        _con_catalogo(mock_requests, [{"id": "light.salon"}])
+        main._j_casa_ordenar("homeassistant.turn_on", "light.salon", {
+            "entity_id": "cover.garaje", "area_id": "garaje", "device_id": "abc",
+            "label_id": "x", "floor_id": "planta_baja", "brightness_pct": 40,
+        })
+        assert main._ha_ordenes[0]["entidad"] == "light.salon"
+        assert main._ha_ordenes[0]["datos"] == {"brightness_pct": 40}
+
 
 class TestFronteraDeLaCasa:
     def test_una_luz_es_como_pulsar_el_interruptor(self):

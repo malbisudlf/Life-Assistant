@@ -905,3 +905,31 @@
   - Moraleja: **en un workflow que corre con los secrets del repositorio, lo que llega en
     el evento lo ha escrito alguien, y en un repositorio público ese alguien puede ser
     cualquiera.** Filtra por autor o por repositorio, no por el nombre de lo que llega.
+
+- **Un error de Supabase leído como «no hay nada» acaba guardado como dato.** Cobrar un
+  entrenamiento leía el último cobro y las sesiones pendientes con
+  `r.json() if r.status_code < 300 else []`, e insertaba el cobro igual. Con un 503 en las
+  sesiones se guardaba un cobro de **0 €**; con un 503 en los cobros desaparecía el filtro
+  por fecha y se cobraba **el histórico entero**. Las dos respuestas salían con `ok: true`,
+  Jarvis decía «cobrado», y ese cobro falso pasaba a ser el corte del pendiente, sin
+  endpoint para deshacerlo. Mismo patrón en `save_idea` (devolvía el payload local sin id:
+  «guardada», y al recargar no existía; hoy `/ideas/audio` devuelve la transcripción en
+  el error y el dashboard la deja en el formulario de texto para reintentar, porque un
+  error que el cliente se traga no salva ninguna nota), en `delete_idea` (un `{"ok": false}` en un 200
+  que Jarvis no miraba) y en `_buzon_yo`, que guardaba en la caché la cadena vacía de un
+  fallo pasajero y dejaba la regla del «voy en copia» apagada hasta el siguiente
+  despliegue. Hoy todos cortan con `_supabase_error` o no cachean el fallo.
+  - Moraleja: **una lectura que falla no es una lectura vacía.** Y menos antes de
+    escribir: si lo que se va a guardar se calcula con lo leído, un fallo leído como `[]`
+    se convierte en un dato falso con cara de verdadero. El invariante 5 de `CLAUDE.md`
+    ya lo decía; los sitios que no lo cumplían eran los que nadie había visto fallar.
+
+- **Graph rechaza un `$filter` cuyo primer campo no es el del `$orderby`.** El buzón pedía
+  `isRead eq false and receivedDateTime ge …` con `$orderby=receivedDateTime desc`, y Graph
+  exige que lo que ordena aparezca en el filtro **y delante** de lo demás; si no, 400
+  `InefficientFilter`, que desde #199 es `BuzonCaido`: ni avisos de correo de día ni buzón
+  en el turno de noche. Los tests no podían verlo porque el simulador acepta cualquier URL.
+  Hoy el filtro empieza por `receivedDateTime` y un test mira la URL.
+  - Moraleja: **un simulador que acepta cualquier petición no prueba la petición.** Con
+    APIs de terceros que ponen reglas a la forma de la consulta, el test tiene que mirar
+    la URL, no solo lo que se hace con la respuesta.

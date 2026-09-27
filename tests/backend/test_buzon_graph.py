@@ -71,6 +71,11 @@ class TestLeerElBuzon:
 
         url = mock_requests.called("GET", "/mailFolders/inbox/messages")[0][1]
         assert "isRead eq false" in url
+        # Lo del $orderby tiene que ir el PRIMERO del $filter: con isRead delante, Graph
+        # responde 400 InefficientFilter y el buzón no se lee nunca. El simulador acepta
+        # cualquier URL, así que esto solo se ve mirándola.
+        assert "$orderby=receivedDateTime" in url
+        assert "$filter=receivedDateTime ge " in url
         assert "$select=id,subject,from," in url
         assert "$select" in url and "body" not in url   # el cuerpo no viaja aquí
         assert mock_requests.called("PATCH", "/me/messages") == []

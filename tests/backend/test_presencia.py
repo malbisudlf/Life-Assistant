@@ -226,6 +226,24 @@ class TestTramosPorDia:
         ahora = datetime(2026, 8, 4, 10, 0, tzinfo=main.LOCAL_TZ)
         assert main._tramos_por_dia(ahora, ahora - timedelta(hours=1)) == []
 
+    def test_los_dias_del_cambio_de_hora_duran_lo_que_duran(self):
+        """Dos bordes con el mismo tzinfo se restan por hora de reloj: el 29 de marzo
+        salía de 24 h, y en octubre el cuarto de hora que cruza la vuelta atrás ni se
+        troceaba. Se prueba en Madrid, que es la zona para la que se escribió."""
+        if str(main.LOCAL_TZ) != "Europe/Madrid":
+            pytest.skip("las fechas del cambio de hora son las de Europe/Madrid")
+        utc = timezone.utc
+        # Marzo: el día entero son 23 h, y un aviso de 15 min cruzando las 02:00 son 15 min.
+        assert main._tramos_por_dia(datetime(2026, 3, 28, 23, 0, tzinfo=utc),
+                                    datetime(2026, 3, 29, 22, 0, tzinfo=utc)) == [("2026-03-29", 23.0)]
+        assert main._tramos_por_dia(datetime(2026, 3, 29, 0, 50, tzinfo=utc),
+                                    datetime(2026, 3, 29, 1, 5, tzinfo=utc)) == [("2026-03-29", 0.25)]
+        # Octubre: 25 h, y el cuarto de hora de 02:50 de verano a 02:05 de invierno cuenta.
+        assert main._tramos_por_dia(datetime(2026, 10, 24, 22, 0, tzinfo=utc),
+                                    datetime(2026, 10, 25, 23, 0, tzinfo=utc)) == [("2026-10-25", 25.0)]
+        assert main._tramos_por_dia(datetime(2026, 10, 25, 0, 50, tzinfo=utc),
+                                    datetime(2026, 10, 25, 1, 5, tzinfo=utc)) == [("2026-10-25", 0.25)]
+
 
 class TestAcumulacionDiaria:
     @pytest.fixture(autouse=True)

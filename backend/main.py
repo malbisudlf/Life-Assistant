@@ -2438,7 +2438,11 @@ def delete_idea(
         f"{SUPABASE_URL}/rest/v1/ideas?id=eq.{idea_id}",
         headers=supabase_headers(),
     )
-    return {"ok": r.status_code < 300}
+    # Con un {"ok": false} en un 200 nadie miraba el resultado: Jarvis confirmaba el
+    # borrado igual y el detalle del fallo no quedaba en ningún registro.
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
 
 _HORA_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
 
@@ -2517,7 +2521,11 @@ def save_idea(text: str, idea_data: dict) -> dict:
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json=payload,
     )
-    return r.json()[0] if r.status_code < 300 else payload
+    # Devolver el payload local cuando Supabase fallaba hacía que /ideas/* y Jarvis
+    # contestaran "guardada" con una idea sin id que desaparecía al recargar.
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return r.json()[0]
 
 
 @app.post("/ideas/audio")
@@ -2554,7 +2562,13 @@ async def create_idea_from_audio(
 
     # 2. Extraer idea clave con GPT-4o mini y guardar en Supabase
     idea_data = extract_idea_from_text(text)
-    idea = save_idea(text, idea_data)
+    try:
+        idea = save_idea(text, idea_data)
+    except HTTPException as e:
+        # Whisper ya se ha cobrado y el audio no se guarda en ningún sitio: si la idea
+        # no entra, la transcripción viaja en el error para que la nota no se pierda.
+        raise HTTPException(status_code=e.status_code,
+                            detail={"mensaje": "No se pudo guardar la idea", "transcript": text})
     return {"ok": True, "idea": idea, "transcript": text, "evento_sugerido": sugerencia_evento(idea_data)}
 
 
@@ -3137,7 +3151,11 @@ def _get_training_client():
         f"{SUPABASE_URL}/rest/v1/training_clients?limit=1&order=created_at.asc",
         headers=supabase_headers(),
     )
-    rows = r.json() if r.status_code < 300 else []
+    # Un error de Supabase no es "no hay cliente": leerlo así enseñaba el widget vacío
+    # como si fuera un dato, y a quien escribe le daba un 400 que culpaba al usuario.
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    rows = r.json()
     return rows[0] if rows else None
 
 @app.get("/training/summary")
@@ -3154,12 +3172,16 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
     # dashboard con el arranque en frío de Fly por delante. Ahora son dos: el pago y las
     # sesiones no dependen entre sí, así que van en paralelo, y de una sola lista de
     # sesiones salen tanto las posteriores al último cobro como las diez más recientes.
+    # Un fallo de cualquiera de las dos corta con 502: calcular sobre una lista vacía
+    # enseñaba "0 € pendientes" (o todo el histórico) como si fuera el dato verdadero.
     def _pago():
         r = http.get(
             f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
             headers=supabase_headers(),
         )
-        return r.json() if r.status_code < 300 else []
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return r.json()
 
     def _sesiones():
         r = http.get(
@@ -3167,7 +3189,9 @@ def training_summary(credentials: HTTPAuthorizationCredentials = Depends(verify_
             f"&select=id,date,duration_hours,created_at&order=date.desc&limit={MAX_SESIONES_RESUMEN}",
             headers=supabase_headers(),
         )
-        return r.json() if r.status_code < 300 else []
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        return r.json()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_pay, f_sess = pool.submit(_pago), pool.submit(_sesiones)
@@ -5481,7 +5505,13 @@ def add_training_payment(
         f"{SUPABASE_URL}/rest/v1/training_payments?client_id=eq.{client_id}&order=created_at.desc&limit=1",
         headers=supabase_headers(),
     )
-    payments = r_pay.json() if r_pay.status_code < 300 else []
+    # Las dos lecturas tienen que haber salido bien ANTES de insertar nada. Leer un
+    # error como lista vacía guardaba un cobro de 0 € (sin sesiones) o de todo el
+    # histórico (sin último cobro), con un ok:true, y ese cobro pasaba a ser el corte
+    # del pendiente. No hay endpoint para deshacerlo: solo a mano en Supabase.
+    if r_pay.status_code >= 300:
+        raise _supabase_error(r_pay)
+    payments = r_pay.json()
     last_payment = payments[0] if payments else None
 
     date_filter = f"&created_at=gt.{quote(last_payment['created_at'])}" if last_payment else ""
@@ -5489,7 +5519,9 @@ def add_training_payment(
         f"{SUPABASE_URL}/rest/v1/training_sessions?client_id=eq.{client_id}{date_filter}",
         headers=supabase_headers(),
     )
-    sessions = r_sess.json() if r_sess.status_code < 300 else []
+    if r_sess.status_code >= 300:
+        raise _supabase_error(r_sess)
+    sessions = r_sess.json()
     amount = round(sum(float(s["duration_hours"]) for s in sessions) * float(client["price_per_hour"]), 2)
 
     r = http.post(
@@ -5604,23 +5636,38 @@ def _trozos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, datetime
     dos: el corte de medianoche es delicado —la semana del cambio de hora— y tenerlo
     escrito dos veces es tenerlo mal en una de ellas.
     """
+    # Se avanza y se compara en UTC, y solo el corte de medianoche se calcula en hora
+    # local. Dos datetimes con el MISMO tzinfo se comparan por hora de reloj, sin mirar
+    # el desfase: la madrugada de octubre, «02:50 de verano» < «02:05 de invierno» daba
+    # falso y ese cuarto de hora desaparecía sin trocearse.
     trozos: list[tuple[str, datetime, datetime]] = []
-    cursor = inicio.astimezone(LOCAL_TZ)
-    final  = fin.astimezone(LOCAL_TZ)
+    cursor = inicio.astimezone(timezone.utc)
+    final  = fin.astimezone(timezone.utc)
     while cursor < final:
+        local = cursor.astimezone(LOCAL_TZ)
         # Medianoche local del día siguiente. Se calcula sumando el día ANTES de poner
         # la hora a cero para que un cambio de hora no deje el corte en las 23:00.
-        siguiente = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        corte = min(siguiente, final)
+        siguiente = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        corte = min(siguiente.astimezone(timezone.utc), final)
         if corte > cursor:
-            trozos.append((cursor.date().isoformat(), cursor, corte))
+            trozos.append((local.date().isoformat(), local, corte.astimezone(LOCAL_TZ)))
         cursor = corte
     return trozos
 
 
+def _horas_trozo(desde: datetime, hasta: datetime) -> float:
+    """Horas REALES entre dos bordes de `_trozos_por_dia`.
+
+    Restados tal cual, dos bordes con el mismo tzinfo dan la diferencia de reloj: el
+    29 de marzo salía de 24 h y un aviso de quince minutos que cruzaba las 02:00 sumaba
+    1,25 h. En UTC no hay cambio de hora que se cuele.
+    """
+    return (hasta.astimezone(timezone.utc) - desde.astimezone(timezone.utc)).total_seconds() / 3600
+
+
 def _tramos_por_dia(inicio: datetime, fin: datetime) -> list[tuple[str, float]]:
     """Lo mismo, en horas: [(YYYY-MM-DD, horas), ...]."""
-    return [(dia, (hasta - desde).total_seconds() / 3600)
+    return [(dia, _horas_trozo(desde, hasta))
             for dia, desde, hasta in _trozos_por_dia(inicio, fin)]
 
 
@@ -5719,7 +5766,7 @@ def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
     # y el total es el derivado, y aparte porque cada uno falla por su cuenta: sin tramos
     # el carril se queda sin dibujo pero la serie diaria sigue alimentando los cruces.
     _guardar_tramos_presencia(trozos, en_casa)
-    tramos = [(dia, (h - d).total_seconds() / 3600) for dia, d, h in trozos]
+    tramos = [(dia, _horas_trozo(d, h)) for dia, d, h in trozos]
     try:
         existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
     except HTTPException:
@@ -10682,14 +10729,23 @@ def _j_casa_dispositivos(buscar: str = "") -> dict:
     return {"dispositivos": elegidas[:40], "hay_mas": len(elegidas) > 40}
 
 
+_CASA_CLAVES_OBJETIVO = frozenset({"entity_id", "area_id", "device_id", "label_id", "floor_id"})
+
+
 def _casa_datos_limpios(datos) -> dict:
     """Lo que acompaña a la orden (brillo, temperatura...). Acotado y solo con escalares:
-    lo redacta un modelo y viaja hasta un service call de HA."""
+    lo redacta un modelo y viaja hasta un service call de HA.
+
+    Las claves de OBJETIVO no pasan nunca. La automatización de HA mezcla `datos` con el
+    `target`, y en esa mezcla gana lo de `datos`: un `entity_id` ahí cambia la entidad y
+    un `area_id` amplía el alcance, así que `homeassistant.turn_on` sobre `light.salon`
+    con `{"area_id": "garaje"}` abría el garaje sin el botón que `_casa_pide_confirmar`
+    exige para un cover. El objetivo es `entidad`, que sí se valida contra el catálogo."""
     if not isinstance(datos, dict):
         return {}
     fuera = {}
     for k, v in list(datos.items())[:10]:
-        if not re.fullmatch(r"[a-z_]{1,40}", str(k)):
+        if not re.fullmatch(r"[a-z_]{1,40}", str(k)) or str(k) in _CASA_CLAVES_OBJETIVO:
             continue
         if isinstance(v, bool) or isinstance(v, (int, float)):
             fuera[str(k)] = v
@@ -14299,8 +14355,12 @@ def _buzon_yo(token: str) -> str:
             direccion = str(datos.get("mail") or datos.get("userPrincipalName") or "").lower()
     except Exception as e:
         logger.warning("Buzón: no se pudo saber de quién es el buzón (%s)", type(e).__name__)
-    with _buzon_yo_lock:
-        _buzon_yo_cache = direccion
+    # Solo se guarda lo que se supo. Guardar la cadena vacía de un fallo pasajero dejaba
+    # la regla del "voy en copia" apagada hasta el siguiente despliegue, que en caja
+    # pueden ser semanas; así la noche siguiente vuelve a preguntar.
+    if direccion:
+        with _buzon_yo_lock:
+            _buzon_yo_cache = direccion
     return direccion
 
 
@@ -14341,6 +14401,7 @@ _MOTIVOS_NO_RESPONDER = {
     "automatico":         "lo manda un remitente automático, que no espera respuesta",
     "remitente_apartado": "ese remitente está apartado de las respuestas",
     "en_copia":           "vas en copia y el correo no va dirigido a ti",
+    "cuerpo_no_leido":    "no pude leer el cuerpo del correo, y a ciegas no se contesta",
 }
 
 
@@ -14361,7 +14422,10 @@ def _cabeceras_recientes() -> list:
         "%Y-%m-%dT%H:%M:%SZ")
     r = http.get(
         "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
-        f"?$filter=isRead eq false and receivedDateTime ge {desde}"
+        # receivedDateTime va PRIMERO en el $filter: Graph exige que lo que está en el
+        # $orderby aparezca en el $filter y delante de lo demás. Con isRead delante
+        # respondía 400 InefficientFilter y el buzón no se leía nunca.
+        f"?$filter=receivedDateTime ge {desde} and isRead eq false"
         f"&$select=id,subject,from,toRecipients,ccRecipients,internetMessageId,receivedDateTime"
         f"&$orderby=receivedDateTime desc&$top={CORREO_MAX}",
         headers=_buzon_cabeceras(token),
@@ -14699,8 +14763,16 @@ def _noche_correos() -> tuple[list, dict]:
     for correo, categoria, motivo in zip(cabeceras, categorias, motivos):
         borrador, subido = "", False
         if correo in a_responder:
-            borrador = _redactar_respuesta(correo, cuerpos.get(correo.get("id", ""), ""))
-            subido   = _guardar_borrador(correo, borrador)
+            # Sin cuerpo no se redacta: `_cuerpos_de` se salta el correo que Graph no
+            # sirvió, el que pasa del tope y el que no se entiende, y el modelo contestaba
+            # igual con el asunto solo. Un borrador a ciegas es peor que ninguno, y así el
+            # parte dice por qué ese se quedó sin él.
+            cuerpo = cuerpos.get(correo.get("id", ""), "")
+            if cuerpo:
+                borrador = _redactar_respuesta(correo, cuerpo)
+                subido   = _guardar_borrador(correo, borrador)
+            else:
+                motivo = "cuerpo_no_leido"
         items.append({
             "area":    "correo",
             "titulo":  correo.get("asunto", "") or "(sin asunto)",
@@ -18960,6 +19032,26 @@ def _j_anadir_sesion(fecha: str, horas: float = 1.0) -> dict:
     return {"ok": True, "fecha": fecha, "horas": horas}
 
 
+def _tramo_evento(fecha: str, hora_inicio: str, hora_fin: str | None) -> tuple[str, str]:
+    """Inicio y fin de un evento con hora, como instantes completos para Graph.
+
+    El fin se calcula sobre la fecha y la hora juntas, no sobre la hora sola: sumar una
+    hora a "23:30" daba "00:30" y se pegaba al MISMO día, así que el evento acababa 23 h
+    antes de empezar y Graph lo rechazaba. Por lo mismo, un fin que no cae después del
+    inicio (23:00-01:00) se entiende como del día siguiente. Un fin igual al inicio no
+    dice nada, y se trata como si no hubiera fin: una hora, lo que promete la herramienta.
+    """
+    ini = datetime.strptime(f"{fecha} {hora_inicio}", "%Y-%m-%d %H:%M")
+    fin = ini + timedelta(hours=1)
+    if hora_fin and _HORA_RE.match(str(hora_fin)):
+        dado = datetime.strptime(f"{fecha} {hora_fin}", "%Y-%m-%d %H:%M")
+        if dado < ini:
+            fin = dado + timedelta(days=1)
+        elif dado > ini:
+            fin = dado
+    return ini.strftime("%Y-%m-%dT%H:%M:00"), fin.strftime("%Y-%m-%dT%H:%M:00")
+
+
 def _j_crear_evento(titulo: str, fecha: str, hora_inicio: str | None = None,
                     hora_fin: str | None = None, lugar: str | None = None) -> dict:
     """Crea el evento en Outlook. Solo se llega aquí desde /jarvis/ejecutar.
@@ -18985,10 +19077,7 @@ def _j_crear_evento(titulo: str, fecha: str, hora_inicio: str | None = None,
         inicio = f"{fecha}T00:00:00"
         fin    = f"{(dia + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00"
     else:
-        inicio = f"{fecha}T{hora_inicio}:00"
-        if not (hora_fin and _HORA_RE.match(str(hora_fin))):
-            hora_fin = (datetime.strptime(hora_inicio, "%H:%M") + timedelta(hours=1)).strftime("%H:%M")
-        fin = f"{fecha}T{hora_fin}:00"
+        inicio, fin = _tramo_evento(fecha, str(hora_inicio), hora_fin)
 
     r = create_event(
         body=CreateEventRequest(
@@ -19026,10 +19115,7 @@ def _j_editar_evento(evento_id: str, titulo: str | None = None, fecha: str | Non
             datetime.strptime(str(fecha), "%Y-%m-%d")
         except ValueError:
             return {"ok": False, "motivo": "Esa fecha no existe"}
-        campos["start"] = f"{fecha}T{hora_inicio}:00"
-        if not (hora_fin and _HORA_RE.match(str(hora_fin))):
-            hora_fin = (datetime.strptime(str(hora_inicio), "%H:%M") + timedelta(hours=1)).strftime("%H:%M")
-        campos["end"] = f"{fecha}T{hora_fin}:00"
+        campos["start"], campos["end"] = _tramo_evento(str(fecha), str(hora_inicio), hora_fin)
 
     if not campos:
         return {"ok": False, "motivo": "No has dicho qué cambiar"}

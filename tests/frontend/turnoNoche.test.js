@@ -85,6 +85,7 @@ describe("motivoNoResponder", () => {
   test("traduce los motivos que conoce", () => {
     expect(motivoNoResponder("en_copia")).toContain("en copia");
     expect(motivoNoResponder("automatico")).toContain("automático");
+    expect(motivoNoResponder("cuerpo_no_leido")).toContain("no se pudo leer");
   });
 
   test("sin motivo no dice nada, y uno nuevo se ve en vez de desaparecer", () => {
