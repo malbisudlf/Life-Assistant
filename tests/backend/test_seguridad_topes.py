@@ -143,8 +143,11 @@ class TestSSRFRangoCGNAT:
 
 
 def _ficheros_versionados():
+    """Rastreados + nuevos sin commitear (pero no ignorados): un fichero recién creado
+    con un dato personal, aún en `??` para git, tiene que saltar igual que uno editado."""
     try:
-        salida = subprocess.run(["git", "ls-files", "-z"], cwd=RAIZ, capture_output=True,
+        salida = subprocess.run(["git", "ls-files", "-z", "--cached", "--others",
+                                "--exclude-standard"], cwd=RAIZ, capture_output=True,
                                 check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip("sin git no se sabe qué está versionado")
