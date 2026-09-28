@@ -6,10 +6,12 @@
 A quién le debes respuesta. Es la 7.1 de `docs/IDEAS.md`, que se decidió el 28 de
 septiembre de 2026 sabiendo sus riesgos (abajo, «Lo que se aceptó»).
 
-**Estado: fase 1 escrita, sin encender.** El backend tiene el endpoint, la tabla, la regla
-del aviso y la herramienta de Jarvis. El puente está en el repositorio HomeLab
-(`caja/whatsapp/`), con su guion de instalación en `caja/whatsapp/INSTALAR.md`. Falta
-aplicar la migración, vincular el puente escaneando el QR y encender `WHATSAPP_LEER`.
+**Estado (2026-09-28): desplegado y encendido, a falta de dos pasos que son tuyos.** El
+backend (`43dfb76`) corre en `caja` con `WHATSAPP_LEER=1`, y el puente está arrancado
+(contenedor `whatsapp`, guion en `caja/whatsapp/INSTALAR.md` del repositorio HomeLab)
+esperando el QR. Falta **aplicar la migración `20260928_whatsapp`** —antes de vincular:
+sin la tabla, cada envío del puente es un 502 y un error en el registro cada 15 s— y
+**escanear el QR**.
 
 ## Cómo funciona
 
