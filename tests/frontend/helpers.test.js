@@ -1362,6 +1362,17 @@ describe("jarvisEtiquetaAccion", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "crear_evento", argumentos: { fecha: "2026-09-01" } })).toBeNull();
   });
 
+  test("una tarea de To Do, con y sin fecha", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_tarea",
+      argumentos: { titulo: "Pasar el contrato", fecha: "2026-10-01" },
+    })).toBe('Apuntar en To Do "Pasar el contrato", para el 01/10/2026');
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_tarea", argumentos: { titulo: "Llamar al taller", fecha: "mañana" },
+    })).toBe('Apuntar en To Do "Llamar al taller"');
+    expect(jarvisEtiquetaAccion({ herramienta: "crear_tarea", argumentos: {} })).toBeNull();
+  });
+
   const bloque = (titulo, hora_inicio, hora_fin, fecha = "2026-09-28") =>
     ({ titulo, fecha, hora_inicio, hora_fin });
 

@@ -131,6 +131,10 @@ SIN_COPIA = frozenset({
     "avisos_llamadas", "avisos_motivos", "casa_acciones", "jarvis_gasto",
     "noche_partes", "noche_items", "sesion_avisos", "migraciones_aplicadas",
     "presencia_tramos", "despertares",
+    # Horas de mensajes de WhatsApp. Se rehace sola al volver a vincular el puente (el
+    # historial que WhatsApp pasa al dispositivo nuevo), y son números de teléfono de
+    # terceros: no hay nada que ganar llevándolos a un volcado.
+    "whatsapp_chats",
 })
 
 VERSION_FORMATO = 1

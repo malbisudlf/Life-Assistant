@@ -862,6 +862,41 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   - Idempotencia con el mismo `uuid5` de la fecha contra la clave primaria de
     `jarvis_recordatorios`, y apagado (`JARVIS_PROACTIVO=0`) no cuesta ni una consulta.
 
+## Tareas: Microsoft To Do
+
+Lo que hay que hacer **sin hora**. Una cita va al calendario; «pásale el contrato a Luis
+cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es la 7.2 de
+`docs/IDEAS.md` (antes, la 2.3 de `docs/JARVIS_PROACTIVO.md`).
+
+- **Mismo token de Graph que el calendario**, con un permiso más (`SCOPES_TAREAS`,
+  `Tasks.ReadWrite`). Nace apagado (`TAREAS_TODO=0`) porque encenderlo obliga a volver a
+  conectar Outlook una vez. Encendido sin reconectar no rompe nada: la renovación prueba
+  antes quitando SOLO el permiso de tareas (`_scopes_de_repuesto()`), así que el buzón, si
+  estaba consentido, sigue funcionando. Con un único repuesto —los permisos de siempre—,
+  encender las tareas se llevaba también el correo hasta reconectar.
+- **Una sola lista, la de por defecto** («Tareas», `wellknownListName: defaultList`).
+  Elegir lista sería otra cosa en la que el modelo se puede equivocar. Su id se recuerda
+  una hora (`_todo_lista_cache`) y un 404 lo vuelve a buscar.
+- **Las fechas, en tu zona.** To Do guarda el vencimiento como la medianoche del día en la
+  zona en que se puso y lo devuelve en UTC: una tarea para el 1 de octubre vuelve como las
+  22:00 del 30 de septiembre. `_todo_fecha_local()` la devuelve a `LOCAL_TZ` antes de
+  quedarse con el día. Al crear se manda la medianoche con `timeZone` = `TIMEZONE`.
+- **Herramientas**: `tareas` (consulta, `confirmar: False`) y `crear_tarea` (acción,
+  `confirmar: True`: la propone el modelo y la aprueba una persona, como `crear_evento`).
+  No se anuncian con `TAREAS_TODO` apagado (`requiere_tareas`): anunciarlas para que
+  fallen es pagar su descripción en cada turno. No hay «completar tarea» a propósito: el
+  botón de confirmar tendría que enseñar un id de Graph, que no se puede leer, y el nombre
+  no puede salir del modelo (ver `jarvisEtiquetaAccion`). Se marca como hecha en To Do.
+- **`GET /tareas`** (JWT) devuelve las pendientes. Apagado o sin Outlook, 200 con
+  `activo: false` y el motivo, no un error: es un estado, no una avería.
+
+## WhatsApp: `whatsapp_pendientes`
+
+A quién le debes respuesta. Todo en `docs/WHATSAPP.md`. Para Jarvis es una consulta
+(`confirmar: False`) que solo se anuncia con `WHATSAPP_LEER` encendido
+(`requiere_whatsapp`), y su descripción le dice lo único que tiene que saber: **no sabe
+qué dicen los mensajes**, solo quién y desde cuándo, así que no puede inventárselo.
+
 ## Organizar el día: `huecos_libres` y `reservar_bloques`
 
 «Organízame mañana: dos horas de TFG e ir al gimnasio» son dos pasos, y cada uno es una

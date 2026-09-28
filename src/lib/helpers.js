@@ -2251,6 +2251,12 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       if ((a.lugar || "").trim()) partes.push(`en ${a.lugar.trim()}`);
       return partes.join(" ");
     }
+    case "crear_tarea": {
+      const titulo = (a.titulo || "").trim();
+      if (!titulo) return null;
+      const fecha = _fechaLegible(a.fecha);
+      return `Apuntar en To Do "${titulo}"${fecha ? `, para el ${fecha}` : ""}`;
+    }
     case "editar_evento": {
       if (!a.evento_id) return null;
       const cambios = [];

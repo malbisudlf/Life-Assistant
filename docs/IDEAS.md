@@ -23,10 +23,11 @@ capítulo de esa historia, no el final.**
 Repasado contra el código el 28 de septiembre de 2026. Todo lo que no sale aquí está hecho
 o descartado, y lo dice en su título.
 
-1. **7.1 WhatsApp, en modo lectura. PRIORITARIA.** Lo pendiente de contestar sale primero,
-   y sin modelo; las tareas hacia el calendario, después.
-2. **7.2 Microsoft To Do.** Es donde acaba lo que te piden sin fecha, así que va justo
-   detrás de la 7.1. Recoge la 2.3 de `docs/JARVIS_PROACTIVO.md`, que sigue sin hacer.
+1. **7.1 WhatsApp, en modo lectura. PRIORITARIA.** La fase 1 (pendientes de contestar, sin
+   modelo) está escrita el 28 de septiembre y falta montarla en `caja` (`docs/WHATSAPP.md`).
+   Queda la fase 2: las tareas hacia el calendario.
+2. **7.2 Microsoft To Do.** Escrita el 28 de septiembre (`docs/JARVIS.md`, «Tareas»); falta
+   encender `TAREAS_TODO` y volver a conectar Outlook.
 3. **7.3 a 7.5**, en el orden en que están escritas.
 4. Lo que sobró de rondas anteriores, que son arreglos pequeños y no ideas:
    - **5.3**: el acuse de entrega de los avisos al móvil. Sigue sin existir
@@ -390,7 +391,15 @@ Hay una regla común a todas, que ya sostiene el correo y el turno de noche: **l
 escribir en tu nombre no.** Lo que sale de aquí es una propuesta que apruebas, nunca algo
 que se envía o se crea solo.
 
-### 7.1 WhatsApp, en modo lectura ●●● — PRIORITARIA
+### 7.1 WhatsApp, en modo lectura ●●● — PRIORITARIA, FASE 1 ESCRITA
+
+> **Fase 1 escrita** (28 de septiembre de 2026): el backend, la migración
+> `20260928_whatsapp` y el puente en el repositorio HomeLab (`caja/whatsapp/`). Está todo
+> en `docs/WHATSAPP.md`. Lo que salió distinto de lo previsto: el puente **no tiene API
+> ninguna**, ni siquiera interna (en vez de una API que no se publica), y hubo que
+> traducir el id anónimo de WhatsApp (`@lid`) al número, porque la misma persona podía
+> salir como dos chats y el suyo quedar pendiente para siempre. Falta montarlo en `caja`
+> y la fase 2.
 
 **Qué.** Dos cosas, y en este orden:
 
@@ -465,7 +474,13 @@ con RLS y sin policies, como todas.
 en cabecera y el cuerpo acotado. La regla de pendientes va colgada del brief-tick, y el
 resultado va al parte del turno de noche.
 
-### 7.2 Microsoft To Do ●
+### 7.2 Microsoft To Do ● — ESCRITA
+
+> **Escrita** (28 de septiembre de 2026): `GET /tareas` y las herramientas `tareas` y
+> `crear_tarea` (ver `docs/JARVIS.md`, «Tareas»). Lo que salió distinto: no hay «completar
+> tarea», porque el botón de confirmar tendría que enseñar un id que no se puede leer; y la
+> renovación del token prueba antes quitando solo este permiso, para que encenderlo no
+> se lleve el buzón. Falta encender `TAREAS_TODO` y reconectar Outlook.
 
 **Qué.** Tareas de verdad, en To Do, que es de Microsoft y usa el mismo token de Graph
 que el calendario y el correo. Añadir, listar y completar desde Jarvis, y que sea el

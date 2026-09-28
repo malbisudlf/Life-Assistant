@@ -128,7 +128,10 @@ Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
 backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
-    ├── Microsoft Graph API ── calendario Outlook (tokens OAuth persistidos en Supabase)
+    ├── Microsoft Graph API ── calendario Outlook, buzón y tareas de To Do (tokens OAuth
+    │                          persistidos en Supabase)
+    ├── Puente de WhatsApp (en caja) ── EMPUJA la hora del último mensaje de cada chat,
+    │                                   solo lectura y sin texto (docs/WHATSAPP.md)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── Indexa Capital ── cartera de inversión (solo lectura, copia en memoria)
@@ -200,6 +203,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/ALARMAS.md` | Las alarmas de respaldo: si no confirmas que estás despierto, la casa te despierta. La máquina de estados, por qué el reloj es propio y por qué el ritual vive en Home Assistant |
 | `docs/BRIEF.md` | El resumen diario por correo y el informe semanal: qué va dentro, cuándo sale, la idempotencia y el interruptor |
 | `docs/JARVIS.md` | Jarvis (herramientas, confirmación, memoria, MCP, web, la casa) y todo lo proactivo: recordatorios, avisos al móvil, reglas, vigilancias, correo entrante y los vigilantes |
+| `docs/WHATSAPP.md` | **Antes de tocar WhatsApp.** El puente de `caja` en modo lectura: qué sale de él (dos horas por chat, nunca texto ni grupos), por qué «pendiente» no usa modelo, cómo se vigila que no se muera en silencio y los riesgos que se aceptaron |
 | `docs/TURNO_NOCHE.md` | **Antes de tocar el turno de noche.** Lo que se resuelve mientras duermes: el buzón clasificado y las respuestas ya redactadas en Borradores, el atajo que arregla el código sin esperar a preguntarte, y el parte de la mañana. Sus dos reglas —todo queda en borrador, y nace apagado— son lo que permite dejarlo corriendo sin nadie mirando |
 | `docs/JARVIS_VOZ.md` | **Léelo entero antes de tocar la voz.** El plan está hecho: habla Azure, escucha Scribe v2 de ElevenLabs con el micro abierto toda la llamada, avisa antes de usar cada herramienta, empieza a hablar mientras escribe y se le puede cortar a media frase. Lo que falta no es código: probar el corte por altavoz en el iPhone. Empieza por su sección «Dónde retomar». Decisiones, qué se toca, fases, coste y qué queda por resolver |
 | `docs/JARVIS_real_time_voice_stack.md` | El diseño conceptual de la voz en tiempo real, sin atarlo a este repositorio. Lo aterrizado está en `docs/JARVIS_VOZ.md` |

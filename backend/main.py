@@ -413,6 +413,42 @@ NOCHE_HORA_TURNO = os.getenv("NOCHE_HORA", "03:00")
 NOCHE_CORREO_MAX     = int(os.getenv("NOCHE_CORREO_MAX", "15"))
 NOCHE_BORRADORES_MAX = int(os.getenv("NOCHE_BORRADORES_MAX", "10"))
 
+# ── Tareas (Microsoft To Do) ──────────────────────────────────────────────────
+# Apagadas de inicio, y no por prudencia sino porque encenderlas pide un permiso nuevo
+# (`Tasks.ReadWrite`) y hay que volver a conectar Outlook una vez. Encendidas sin
+# reconectar no rompen nada: la renovación cae a los permisos de antes (ver
+# `_scopes_de_repuesto`) y lo único que no funciona son las tareas.
+TAREAS_TODO = _flag("TAREAS_TODO", "0")
+TAREAS_MAX  = int(os.getenv("TAREAS_MAX", "50"))
+
+# ── WhatsApp (solo lectura) ───────────────────────────────────────────────────
+# Lo que te piden y lo que prometes pasa casi todo por WhatsApp. `caja` se vincula como
+# un dispositivo más (el puente vive en el repositorio HomeLab) y le cuenta al backend,
+# de cada chat individual, QUIÉN escribió el último mensaje y CUÁNDO. Nada más: ni el
+# texto ni los grupos salen del puente. Ver `docs/WHATSAPP.md`.
+#
+# Nace apagado, como todo lo que lee algo tuyo sin que haya nadie mirando.
+WHATSAPP_LEER  = _flag("WHATSAPP_LEER", "0")
+# Token propio y no el de HA: si el puente se ve comprometido, lo único que se puede
+# hacer con él es apuntar horas de mensajes.
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+# Cuántas horas sin contestar hacen que un chat cuente como pendiente. Menos de un día
+# convierte cualquier conversación en curso en un pendiente.
+WHATSAPP_PENDIENTE_HORAS = float(os.getenv("WHATSAPP_PENDIENTE_HORAS", "24"))
+# Más allá de esto, un mensaje sin contestar ya no es un pendiente: es una conversación
+# que terminó así. Sin tope, el aviso arrastraría para siempre el «ok» de hace un mes.
+WHATSAPP_VENTANA_DIAS = int(os.getenv("WHATSAPP_VENTANA_DIAS", "7"))
+# A qué hora sale el aviso del día. A media mañana y no al despertar: a esa hora ya has
+# tenido ocasión de contestar lo de primera hora, y aún queda día para lo demás.
+WHATSAPP_HORA_AVISO = os.getenv("WHATSAPP_HORA_AVISO", "12:00")
+# Chats que no cuentan nunca como pendientes (ids tal cual los manda el puente, por
+# comas): el de un bot, el de un grupo de un solo contacto que no espera respuesta.
+WHATSAPP_IGNORAR = {t.strip() for t in os.getenv("WHATSAPP_IGNORAR", "").split(",") if t.strip()}
+# Cuántas horas sin saber nada del puente hacen que se dé por caído. El puente manda un
+# latido cada 30 minutos aunque no entre ningún mensaje: sin latido, «nadie te ha
+# escrito» y «el puente lleva un día muerto» serían la misma cosa.
+WHATSAPP_SILENCIO_HORAS = float(os.getenv("WHATSAPP_SILENCIO_HORAS", "3"))
+
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
 # RECOGEN (titular, fuente, hora, enlace, extracto y qué término toca hoy); quién elige
@@ -1632,16 +1668,37 @@ def _verify_oauth_state(state: str) -> bool:
 # con los de siempre (ver ahí) para que lo que se caiga sea el buzón y no la agenda.
 SCOPES_BASE   = ["Calendars.ReadWrite", "User.Read"]
 SCOPES_CORREO = ["Mail.ReadWrite"]
+SCOPES_TAREAS = ["Tasks.ReadWrite"]
 OAUTH_PROVIDER = "microsoft_graph"
 
 
 def _scopes() -> list:
-    """Los permisos a pedir: los de siempre, más el correo solo si está encendido.
+    """Los permisos a pedir: los de siempre, más el correo y las tareas solo si están
+    encendidos.
 
     Es una función y no una constante porque `CORREO_LEER` se define en la sección del
     correo, mucho más abajo, y porque los tests encienden el buzón con monkeypatch.
     """
-    return SCOPES_BASE + (SCOPES_CORREO if (CORREO_LEER or NOCHE_CORREO) else [])
+    return (SCOPES_BASE
+            + (SCOPES_CORREO if (CORREO_LEER or NOCHE_CORREO) else [])
+            + (SCOPES_TAREAS if TAREAS_TODO else []))
+
+
+def _scopes_de_repuesto() -> list:
+    """Los juegos de permisos a probar en una renovación, del más completo al mínimo.
+
+    Cada permiso nuevo llega con un consentimiento ya dado ahí fuera que no lo incluye, y
+    Microsoft no devuelve un token capado, devuelve un error. Con un solo repuesto (los de
+    siempre), encender las tareas con el correo ya consentido se llevaba también el correo
+    hasta volver a conectar Outlook: por eso se prueba antes quitando solo lo último que
+    se añadió.
+    """
+    juegos = [_scopes(), [s for s in _scopes() if s not in SCOPES_TAREAS], SCOPES_BASE]
+    unicos = []
+    for juego in juegos:
+        if juego not in unicos:
+            unicos.append(juego)
+    return unicos
 
 # Cliente MSAL compartido. Se construía de cero en /auth/login, /auth/callback y en
 # cada renovación de token, y cada construcción descubre la autoridad
@@ -1855,19 +1912,22 @@ def _renovar_token() -> str | None:
     refresh_token = data.get("refresh_token")
     if not refresh_token:
         return None
-    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=_scopes())
-    if "access_token" not in result and _scopes() != SCOPES_BASE:
-        # El consentimiento guardado es anterior al buzón y no incluye `Mail.ReadWrite`.
-        # Microsoft no devuelve un token capado, devuelve un error: sin este reintento,
-        # encender el correo dejaría también sin calendario, sin avisos y sin resumen
-        # diario, y el único síntoma sería "Sesión de Outlook caducada". El buzón se
-        # quedará en 403 —eso sí se ve y se arregla reconectando— pero lo que ya
+    juegos = _scopes_de_repuesto()
+    result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=juegos[0])
+    for repuesto in juegos[1:]:
+        if "access_token" in result:
+            break
+        # El consentimiento guardado es anterior a algún permiso encendido después (el
+        # buzón, las tareas). Microsoft no devuelve un token capado, devuelve un error:
+        # sin este reintento, encender el correo dejaría también sin calendario, sin avisos
+        # y sin resumen diario, y el único síntoma sería "Sesión de Outlook caducada". Lo
+        # nuevo se quedará en 403 —eso sí se ve y se arregla reconectando— pero lo que ya
         # funcionaba sigue funcionando.
         logger.warning(
-            "Graph: el consentimiento actual no cubre el correo (%s). El buzón no "
-            "funcionará hasta volver a conectar Outlook desde el dashboard.",
-            result.get("error", "?"))
-        result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=SCOPES_BASE)
+            "Graph: el consentimiento actual no cubre %s (%s). No funcionará hasta volver "
+            "a conectar Outlook desde el dashboard.",
+            ", ".join(s for s in juegos[0] if s not in repuesto), result.get("error", "?"))
+        result = _msal_app().acquire_token_by_refresh_token(refresh_token, scopes=repuesto)
     if "access_token" in result:
         _store_result(result)
         return result["access_token"]
@@ -2229,6 +2289,175 @@ def root():
     return {"status": "Life Assistant API running", "version": _version_desplegada(),
             "instancia": INSTANCIA,
             "arrancado": datetime.fromtimestamp(_ARRANQUE_PROCESO, timezone.utc).isoformat()}
+
+
+# ── TAREAS (Microsoft To Do) ──────────────────────────────────────────────────
+# Lo que hay que hacer sin hora. Una tarea con fecha y hora va al calendario, pero «pásale
+# el contrato cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado.
+# To Do es de Microsoft y va con el MISMO token de Graph que el calendario y el buzón: ni
+# cuenta nueva, ni credencial nueva, solo un permiso más (`SCOPES_TAREAS`).
+#
+# Se trabaja siempre sobre UNA lista, la de por defecto de To Do («Tareas»): elegir
+# lista sería otra cosa que el modelo puede equivocar, y la de por defecto es la que
+# enseñan todas las apps de Microsoft sin tocar nada.
+TODO_URL = "https://graph.microsoft.com/v1.0/me/todo/lists"
+# El id de la lista por defecto no cambia: se pregunta una vez por hora como mucho. Un
+# 404 con el id recordado lo vuelve a buscar (se borró, o se ha conectado otra cuenta).
+TODO_LISTA_TTL_S = 3600
+_todo_lista_cache: dict = {}
+
+
+class TareasApagadas(RuntimeError):
+    """Las tareas no se pueden usar: apagadas, o Outlook sin conectar."""
+
+
+def _todo_token() -> str:
+    if not TAREAS_TODO:
+        raise TareasApagadas("Las tareas están apagadas (TAREAS_TODO=0).")
+    token = get_valid_token()
+    if not token:
+        raise TareasApagadas("Outlook no está conectado.")
+    return token
+
+
+def _todo_fallo(r, contexto: str) -> str:
+    """El motivo, legible, si Graph no ha contestado bien; cadena vacía si sí.
+
+    El 403 tiene mensaje propio porque tiene arreglo propio y no evidente: el
+    consentimiento de Outlook es anterior a las tareas y hay que volver a darlo una vez.
+    El cuerpo de Graph va al registro y nunca a la respuesta.
+    """
+    if r.status_code < 300:
+        return ""
+    if r.status_code == 403:
+        logger.warning("Tareas: Outlook no ha dado permiso de tareas (403)")
+        return ("Outlook no ha dado permiso para las tareas: vuelve a conectar Outlook "
+                "desde el dashboard una vez.")
+    logger.error("Tareas %s: Graph respondió %s: %s", contexto, r.status_code, (r.text or "")[:300])
+    return "No se pudo hablar con Microsoft To Do."
+
+
+def _todo_lista(token: str, olvidar: bool = False) -> str:
+    """El id de la lista por defecto de To Do. Lanza `TareasApagadas` si no se encuentra."""
+    if olvidar:
+        _todo_lista_cache.clear()
+    if _todo_lista_cache.get("id") and time.time() - _todo_lista_cache.get("ts", 0) < TODO_LISTA_TTL_S:
+        return _todo_lista_cache["id"]
+    r = http.get(f"{TODO_URL}?$select=id,displayName,wellknownListName",
+                 headers={"Authorization": f"Bearer {token}"})
+    motivo = _todo_fallo(r, "listas")
+    if motivo:
+        raise TareasApagadas(motivo)
+    listas = (r.json() or {}).get("value") or []
+    elegida = next((l for l in listas if l.get("wellknownListName") == "defaultList"),
+                   listas[0] if listas else None)
+    if not elegida or not elegida.get("id"):
+        raise TareasApagadas("Microsoft To Do no tiene ninguna lista.")
+    _todo_lista_cache.update(id=elegida["id"], ts=time.time())
+    return elegida["id"]
+
+
+def _todo_fecha_local(vence: dict | None) -> str | None:
+    """La fecha de vencimiento como día LOCAL (YYYY-MM-DD).
+
+    To Do guarda el vencimiento como la medianoche del día en la zona en que se puso, y lo
+    devuelve pasado a UTC: una tarea para el 1 de octubre vuelve como las 22:00 del 30 de
+    septiembre. Tomar la fecha tal cual la adelantaba un día.
+    """
+    if not vence or not vence.get("dateTime"):
+        return None
+    iso = normalize_graph_dt(vence)
+    try:
+        return (datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                .astimezone(LOCAL_TZ).date().isoformat())
+    except ValueError:
+        return None
+
+
+def _todo_tarea(t: dict) -> dict:
+    return {
+        "id":         t.get("id"),
+        "titulo":     (t.get("title") or "").strip()[:200],
+        "fecha":      _todo_fecha_local(t.get("dueDateTime")),
+        "importante": t.get("importance") == "high",
+    }
+
+
+def _todo_pendientes() -> list:
+    """Las tareas sin completar de la lista por defecto, las que vencen antes primero."""
+    token = _todo_token()
+    for intento in range(2):
+        lista = _todo_lista(token, olvidar=bool(intento))
+        r = http.get(f"{TODO_URL}/{quote(lista, safe='')}/tasks"
+                     f"?$filter=status ne 'completed'&$top={TAREAS_MAX}"
+                     "&$select=id,title,dueDateTime,importance",
+                     headers={"Authorization": f"Bearer {token}"})
+        if r.status_code == 404 and not intento:
+            continue
+        motivo = _todo_fallo(r, "tareas")
+        if motivo:
+            raise TareasApagadas(motivo)
+        tareas = [_todo_tarea(t) for t in (r.json() or {}).get("value") or []]
+        # Sin fecha, al final; entre las que tienen, la que vence antes arriba.
+        return sorted(tareas, key=lambda t: (t["fecha"] is None, t["fecha"] or "", t["titulo"]))
+    raise TareasApagadas("No se encontró la lista de tareas.")
+
+
+def _todo_crear(titulo: str, fecha: str | None = None, nota: str | None = None) -> dict:
+    """Crea una tarea en la lista por defecto. Valida antes de llamar a Graph."""
+    titulo = str(titulo or "").strip()[:200]
+    if not titulo:
+        return {"ok": False, "motivo": "Falta el título de la tarea"}
+    cuerpo: dict = {"title": titulo}
+    fecha = str(fecha or "").strip()
+    if fecha:
+        if not _DATE_RE.match(fecha):
+            return {"ok": False, "motivo": "La fecha no tiene formato YYYY-MM-DD"}
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return {"ok": False, "motivo": "Esa fecha no existe"}
+        # Medianoche en TU zona, que es como la guarda la app de To Do: con UTC la tarea
+        # saldría en el móvil como del día anterior.
+        cuerpo["dueDateTime"] = {"dateTime": f"{fecha}T00:00:00", "timeZone": str(LOCAL_TZ)}
+    nota = str(nota or "").strip()[:1000]
+    if nota:
+        cuerpo["body"] = {"content": nota, "contentType": "text"}
+    try:
+        token = _todo_token()
+        lista = _todo_lista(token)
+        r = http.post(f"{TODO_URL}/{quote(lista, safe='')}/tasks",
+                      headers={"Authorization": f"Bearer {token}"}, json=cuerpo)
+    except TareasApagadas as e:
+        return {"ok": False, "motivo": str(e)}
+    motivo = _todo_fallo(r, "crear")
+    if motivo:
+        return {"ok": False, "motivo": motivo}
+    return {"ok": True, "id": (r.json() or {}).get("id"), "titulo": titulo, "fecha": fecha or None}
+
+
+@app.get("/tareas")
+def get_tareas(_: dict = Depends(verify_token)):
+    """Las tareas pendientes de Microsoft To Do."""
+    try:
+        return {"activo": True, "tareas": _todo_pendientes()}
+    except TareasApagadas as e:
+        return {"activo": False, "motivo": str(e), "tareas": []}
+    except requests.RequestException:
+        logger.exception("Tareas: Microsoft To Do no contestó")
+        raise HTTPException(status_code=502, detail="No se pudo hablar con Microsoft To Do")
+
+
+def _j_tareas() -> dict:
+    try:
+        return {"activo": True, "tareas": _todo_pendientes()}
+    except TareasApagadas as e:
+        return {"activo": False, "motivo": str(e), "tareas": []}
+
+
+def _j_crear_tarea(titulo: str, fecha: str | None = None, nota: str | None = None) -> dict:
+    """Solo se llega aquí desde /jarvis/ejecutar, con la tarea ya aprobada."""
+    return _todo_crear(titulo, fecha, nota)
 
 
 # ── MAPS ──────────────────────────────────────────────────────────────────────
@@ -10298,6 +10527,7 @@ TABLAS_CONOCIDAS = {
     "avisos_llamadas":       "20260923_llamadas_cotidianas",
     "backend_latidos":       "20260924_backend_latidos",
     "despertares":           "20260927_despertares",
+    "whatsapp_chats":        "20260928_whatsapp",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -15134,6 +15364,7 @@ _REGLAS = (
     ("hueco_entreno", _regla_hueco_entreno),
     ("vigilancias",   lambda: _revisar_vigilancias()),
     ("correo",        lambda: _revisar_correo()),
+    ("whatsapp",      lambda: _regla_whatsapp()),
     ("tuyas",         lambda: _correr_reglas_usuario()),
 )
 
@@ -16471,6 +16702,335 @@ def _revisar_vigilancias() -> int:
                                      huella=f"{v.get('clave')}:{nueva_huella[:32]}"):
             avisados += 1
     return avisados
+
+
+# ── WhatsApp: lo que tienes pendiente de contestar ───────────────────────────
+# WhatsApp no deja leer una cuenta personal: la API oficial es para números de empresa.
+# `caja` se vincula como un dispositivo más (el puente, en el repositorio HomeLab) y
+# empuja aquí, por cada chat individual, la hora del último mensaje SUYO y la del último
+# TUYO. Con eso basta para saber qué tienes pendiente, y es todo lo que sale del puente.
+#
+# Tres cosas que no se relajan (`docs/WHATSAPP.md`):
+#   - **Solo lectura, y no porque este código no llame a enviar.** El puente no tiene la
+#     función de enviar ni una API a la que pedírselo. Aquí no hay nada que desactivar.
+#   - **Sin texto.** Ni el mensaje ni un resumen suyo viajan aquí: dos horas y un nombre.
+#     Decidir si algo está pendiente es comparar dos horas, y lo que se puede decidir con
+#     un dato exacto no se le pregunta a un modelo.
+#   - **Sin grupos.** Un grupo no «espera tu respuesta» de la misma forma, y son los chats
+#     con más gente ajena dentro. Se descartan en el puente y otra vez aquí.
+REGLA_WHATSAPP         = "whatsapp"
+# El aviso de que el puente se ha callado. Regla propia para que marcar «no útil» los
+# pendientes no calle también el aviso de que el puente se ha caído, que es de otra clase.
+REGLA_WHATSAPP_PUENTE  = "whatsapp_puente"
+WHATSAPP_CHATS_URL     = f"{SUPABASE_URL}/rest/v1/whatsapp_chats"
+WHATSAPP_APUNTAR_URL   = f"{SUPABASE_URL}/rest/v1/rpc/whatsapp_apuntar"
+HORA_AVISO_WHATSAPP    = _hora_config(WHATSAPP_HORA_AVISO, (12, 0))
+# Lo que puede traer un envío. El puente manda de a uno en vivo y en lotes al vincularse
+# (el historial que WhatsApp le pasa al dispositivo nuevo); más de esto se trocea allí.
+WHATSAPP_MAX_CHATS     = 500
+# Chats individuales y nada más: un número (`…@s.whatsapp.net`) o el id anónimo que usa
+# WhatsApp cuando no enseña el número (`…@lid`). Un grupo (`…@g.us`), un canal o una
+# difusión no pasan. Es la segunda barrera: la primera es el puente.
+_WHATSAPP_CHAT_RE = re.compile(r"^[0-9]{5,20}@(?:s\.whatsapp\.net|lid)$")
+
+# Lo último que se sabe del puente. En memoria: perderlo en un reinicio solo retrasa el
+# aviso de puente caído (se cuenta desde el arranque), no se inventa nada.
+_whatsapp_lock       = threading.Lock()
+_whatsapp_arranque   = time.time()
+_whatsapp_estado: dict = {"senal": None, "conectado": None, "motivo": "", "caido_avisado": False}
+# Solo evita repetir la CONSULTA del aviso diario dentro de la vida del proceso: quien
+# impide el aviso duplicado es el id determinista contra la clave primaria.
+_whatsapp_avisado_dia: str | None = None
+
+
+class WhatsappChatIn(BaseModel):
+    chat:   str = Field(max_length=64)
+    nombre: str | None = Field(None, max_length=100)
+    suyo:   datetime | None = None
+    mio:    datetime | None = None
+
+
+class WhatsappEventoIn(BaseModel):
+    # `chats` trae horas de mensajes; `estado` es el latido (y el aviso de sesión cerrada).
+    tipo:      Literal["chats", "estado"]
+    chats:     list[WhatsappChatIn] = Field(default_factory=list, max_length=WHATSAPP_MAX_CHATS)
+    conectado: bool | None = None
+    motivo:    str | None = Field(None, max_length=100)
+
+
+def _whatsapp_utc(valor) -> datetime | None:
+    """Un instante como `datetime` en UTC, o None si no se entiende. Sin zona, es UTC."""
+    if valor is None or valor == "":
+        return None
+    if isinstance(valor, datetime):
+        instante = valor
+    else:
+        try:
+            instante = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if instante.tzinfo is None:
+        instante = instante.replace(tzinfo=timezone.utc)
+    return instante.astimezone(timezone.utc)
+
+
+def _whatsapp_filas(chats: list) -> tuple[list, int]:
+    """Lo que manda el puente, listo para `whatsapp_apuntar`. Devuelve (filas, descartados).
+
+    Un mismo chat puede venir dos veces en un lote (el historial trae varios mensajes de
+    cada conversación): se funde aquí, quedándose con la hora más reciente de cada lado,
+    porque el `on conflict` de Postgres no admite tocar la misma fila dos veces en una
+    sentencia. Una hora en el futuro no se guarda: un reloj mal puesto en el puente la
+    dejaría como «lo último» para siempre y taparía todo lo que llegara después.
+    """
+    tope = datetime.now(timezone.utc) + timedelta(hours=1)
+    juntos: dict = {}
+    descartados = 0
+    for c in chats:
+        chat = str(c.chat or "").strip()
+        if not _WHATSAPP_CHAT_RE.match(chat):
+            descartados += 1
+            continue
+        fila = juntos.setdefault(chat, {"chat": chat, "nombre": None, "suyo": None, "mio": None})
+        nombre = str(c.nombre or "").strip()[:100]
+        if nombre:
+            fila["nombre"] = nombre
+        for lado in ("suyo", "mio"):
+            instante = _whatsapp_utc(getattr(c, lado))
+            if instante and instante <= tope and (fila[lado] is None or instante > fila[lado]):
+                fila[lado] = instante
+    filas = []
+    for fila in juntos.values():
+        if fila["suyo"] is None and fila["mio"] is None:
+            descartados += 1
+            continue
+        filas.append({**fila, **{lado: fila[lado].isoformat() if fila[lado] else None
+                                 for lado in ("suyo", "mio")}})
+    return filas, descartados
+
+
+def _whatsapp_nombre(fila: dict) -> str:
+    """Cómo se llama un chat en el aviso. Sin nombre guardado, el número si lo hay."""
+    nombre = str(fila.get("nombre") or "").strip()
+    if nombre:
+        return nombre[:40]
+    chat = str(fila.get("chat") or "")
+    if chat.endswith("@s.whatsapp.net"):
+        return "+" + chat.split("@")[0]
+    return "alguien sin nombre guardado"
+
+
+def _whatsapp_pendientes(filas: list, ahora: datetime) -> list:
+    """Los chats en los que el último mensaje es suyo y lleva demasiado sin respuesta.
+
+    Pendiente es: su último mensaje es posterior al tuyo (o no hay ninguno tuyo), tiene
+    más de `WHATSAPP_PENDIENTE_HORAS` y menos de `WHATSAPP_VENTANA_DIAS`. Los más antiguos
+    primero, que son los que más urgen. Sin modelo: son dos horas comparadas.
+    """
+    ahora  = _whatsapp_utc(ahora) or datetime.now(timezone.utc)
+    limite = ahora - timedelta(hours=WHATSAPP_PENDIENTE_HORAS)
+    corte  = ahora - timedelta(days=WHATSAPP_VENTANA_DIAS)
+    salida = []
+    for f in filas or []:
+        chat = str(f.get("chat") or "")
+        if chat in WHATSAPP_IGNORAR or not _WHATSAPP_CHAT_RE.match(chat):
+            continue
+        suyo = _whatsapp_utc(f.get("ultimo_suyo"))
+        mio  = _whatsapp_utc(f.get("ultimo_mio"))
+        if not suyo or suyo > limite or suyo < corte:
+            continue
+        if mio and mio >= suyo:
+            continue
+        salida.append({
+            "chat":   chat,
+            "nombre": _whatsapp_nombre(f),
+            "desde":  suyo.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "horas":  int((ahora - suyo).total_seconds() // 3600),
+        })
+    salida.sort(key=lambda p: p["desde"])
+    return salida
+
+
+def _whatsapp_hace(horas: int) -> str:
+    dias = max(1, horas // 24)
+    return "1 día" if dias == 1 else f"{dias} días"
+
+
+def _frase_whatsapp(pendientes: list) -> str:
+    """El aviso en una línea que quepa en `RECORDATORIO_MAX_TEXTO`, nombres incluidos.
+
+    Se corta por nombres enteros y se dice cuántos faltan: un nombre partido por la mitad
+    en una notificación es peor que un «y 3 más».
+    """
+    cabeza = "Sin contestar en WhatsApp: "
+    trozos = [f"{p['nombre']} ({_whatsapp_hace(p['horas'])})" for p in pendientes]
+    for n in range(len(trozos), 0, -1):
+        resto = len(trozos) - n
+        frase = cabeza + ", ".join(trozos[:n]) + (f" y {resto} más." if resto else ".")
+        if len(frase) <= RECORDATORIO_MAX_TEXTO:
+            return frase
+    return f"Tienes {len(trozos)} chats de WhatsApp sin contestar."
+
+
+def _whatsapp_leer_chats(ahora: datetime) -> list:
+    """Los chats con mensaje suyo dentro de la ventana. Lanza si Supabase no contesta:
+    un fallo no puede parecerse a «no tienes nada pendiente»."""
+    corte = (_whatsapp_utc(ahora) - timedelta(days=WHATSAPP_VENTANA_DIAS)).isoformat()
+    r = http.get(f"{WHATSAPP_CHATS_URL}?ultimo_suyo=gte.{quote(corte, safe='')}"
+                 "&select=chat,nombre,ultimo_suyo,ultimo_mio&order=ultimo_suyo.asc",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return r.json() or []
+
+
+def _whatsapp_senal(conectado: bool | None, motivo: str = "") -> None:
+    """Apunta que el puente ha dicho algo. Si dice que está conectado, rearma el aviso de
+    puente caído para la próxima vez."""
+    with _whatsapp_lock:
+        _whatsapp_estado["senal"] = time.time()
+        _whatsapp_estado["conectado"] = conectado
+        _whatsapp_estado["motivo"] = (motivo or "")[:100]
+        if conectado is not False:
+            _whatsapp_estado["caido_avisado"] = False
+
+
+def _whatsapp_puente() -> dict:
+    """Cómo está el puente, para el dashboard, Jarvis y la vigilancia."""
+    with _whatsapp_lock:
+        senal = _whatsapp_estado["senal"]
+        desde = senal or _whatsapp_arranque
+        return {
+            "ultima_senal": (datetime.fromtimestamp(senal, timezone.utc)
+                             .strftime("%Y-%m-%dT%H:%M:%SZ") if senal else None),
+            "conectado":    _whatsapp_estado["conectado"],
+            "motivo":       _whatsapp_estado["motivo"],
+            # Cuenta desde el arranque si aún no ha dicho nada: sin eso, un backend recién
+            # reiniciado daría por caído un puente que simplemente no ha tenido su turno.
+            "mudo":         time.time() - desde > WHATSAPP_SILENCIO_HORAS * 3600,
+        }
+
+
+def _vigilar_puente_whatsapp() -> int:
+    """Avisa una vez si el puente se ha callado o si WhatsApp le ha cerrado la sesión.
+
+    Es lo que evita que esto se convierta en otra fuente que se muere en silencio: sin
+    el latido, «nadie te ha escrito» y «el puente lleva un día caído» son lo mismo.
+    """
+    puente = _whatsapp_puente()
+    cerrada = puente["conectado"] is False and puente["motivo"] == "sesion_cerrada"
+    if not (puente["mudo"] or cerrada):
+        return 0
+    with _whatsapp_lock:
+        if _whatsapp_estado["caido_avisado"]:
+            return 0
+        _whatsapp_estado["caido_avisado"] = True
+    if cerrada:
+        texto = ("WhatsApp ha cerrado la sesión de caja. Hasta que lo vuelvas a vincular "
+                 "no sabré qué tienes pendiente de contestar.")
+    else:
+        texto = (f"El puente de WhatsApp lleva más de {int(WHATSAPP_SILENCIO_HORAS)} h sin "
+                 "dar señales. Hasta que vuelva, no sabré qué tienes pendiente de contestar.")
+    logger.error("WhatsApp: %s", "sesión cerrada por WhatsApp" if cerrada else "el puente no da señales")
+    huella = f"whatsapp_puente:{'cerrada' if cerrada else 'mudo'}:{puente['ultima_senal'] or 'nunca'}"
+    return 1 if _apuntar_aviso(REGLA_WHATSAPP_PUENTE, texto, prioridad=PRIO_NORMAL,
+                               huella=huella) else 0
+
+
+def _uuid_aviso_whatsapp(fecha: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:aviso-whatsapp:{fecha}"))
+
+
+def _regla_whatsapp() -> int:
+    """Una vez al día, a partir de `WHATSAPP_HORA_AVISO`: a quién le debes respuesta."""
+    global _whatsapp_avisado_dia
+    if not WHATSAPP_LEER:
+        return 0
+    puestos = _vigilar_puente_whatsapp()
+    ahora = _ahora_local()
+    if (ahora.hour, ahora.minute) < HORA_AVISO_WHATSAPP:
+        return puestos
+    hoy = ahora.date().isoformat()
+    if _whatsapp_avisado_dia == hoy:
+        return puestos
+    try:
+        filas = _whatsapp_leer_chats(ahora)
+    except Exception as e:
+        logger.warning("WhatsApp: no se pudieron leer los chats (%s)", type(e).__name__)
+        return puestos
+    _whatsapp_avisado_dia = hoy
+    pendientes = _whatsapp_pendientes(filas, ahora)
+    if not pendientes:
+        return puestos
+    # La huella son los mensajes concretos, no el día: si mañana siguen sin contestar los
+    # mismos, no se repite hasta que pasen AVISOS_REPETIR_DIAS; si alguien vuelve a
+    # escribir, su hora cambia y el aviso es otro.
+    huella = "whatsapp:" + hashlib.sha256(
+        "|".join(f"{p['chat']}@{p['desde']}" for p in pendientes).encode("utf-8")).hexdigest()[:32]
+    if _apuntar_aviso(REGLA_WHATSAPP, _frase_whatsapp(pendientes), prioridad=PRIO_NORMAL,
+                      id=_uuid_aviso_whatsapp(hoy), huella=huella,
+                      motivo={"pendientes": len(pendientes),
+                              "horas_minimas": WHATSAPP_PENDIENTE_HORAS,
+                              "ventana_dias": WHATSAPP_VENTANA_DIAS,
+                              "mas_antiguo_horas": pendientes[0]["horas"]}):
+        puestos += 1
+    return puestos
+
+
+def _whatsapp_resumen() -> dict:
+    """Lo pendiente y el estado del puente. Lo comparten el endpoint y Jarvis."""
+    if not WHATSAPP_LEER:
+        return {"activo": False, "motivo": "WhatsApp está apagado (WHATSAPP_LEER=0).",
+                "pendientes": []}
+    ahora = _ahora_local()
+    pendientes = _whatsapp_pendientes(_whatsapp_leer_chats(ahora), ahora)
+    return {"activo": True, "pendientes": pendientes,
+            "horas_minimas": WHATSAPP_PENDIENTE_HORAS, "puente": _whatsapp_puente()}
+
+
+@app.post("/whatsapp/evento")
+def whatsapp_evento(request: Request, body: WhatsappEventoIn):
+    """Lo que manda el puente de `caja`: horas de mensajes por chat, o su latido.
+
+    Token solo por cabecera, desde el primer día: por la query acabaría escrito en el log
+    de uvicorn.
+    """
+    if not _token_ok(_extract_service_token(request), WHATSAPP_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not WHATSAPP_LEER:
+        # 503 y no un 200 vacío: el puente lo registra, y así se ve en sus logs que lo que
+        # falta es encenderlo aquí y no que no haya mensajes.
+        raise HTTPException(status_code=503,
+                            detail="WhatsApp está apagado en el backend (WHATSAPP_LEER=0)")
+    if body.tipo == "estado":
+        _whatsapp_senal(body.conectado, body.motivo or "")
+        return {"ok": True}
+
+    _whatsapp_senal(True, "")
+    filas, descartados = _whatsapp_filas(body.chats)
+    if filas:
+        r = http.post(WHATSAPP_APUNTAR_URL, headers=supabase_headers(), json={"filas": filas})
+        if r.status_code >= 300:
+            # Un fallo aquí corta con 502: el puente es una máquina que no lee el cuerpo, y
+            # un 200 con el error dentro sería indistinguible de haberlo guardado.
+            raise _supabase_error(r)
+    return {"ok": True, "guardados": len(filas), "descartados": descartados}
+
+
+@app.get("/whatsapp/pendientes")
+def whatsapp_pendientes(_: dict = Depends(verify_token)):
+    """A quién le debes respuesta en WhatsApp, y si el puente está vivo."""
+    try:
+        return _whatsapp_resumen()
+    except HTTPException:
+        raise
+    except requests.RequestException:
+        logger.exception("WhatsApp: no se pudieron leer los pendientes")
+        raise HTTPException(status_code=502, detail="No se pudieron leer los chats de WhatsApp")
+
+
+def _j_whatsapp_pendientes() -> dict:
+    return _whatsapp_resumen()
 
 
 # ── Avisos al móvil ──────────────────────────────────────────────────────────
@@ -22456,6 +23016,11 @@ def _j_mis_capacidades() -> dict:
     if not INDEXA_TOKEN:
         apagado.append("La cartera de Indexa Capital no está conectada (falta INDEXA_TOKEN), "
                        "así que no puedo decir cuánto tienes invertido.")
+    if not TAREAS_TODO:
+        apagado.append("Las tareas de Microsoft To Do están apagadas (TAREAS_TODO=0).")
+    if not WHATSAPP_LEER:
+        apagado.append("WhatsApp está apagado (WHATSAPP_LEER=0), así que no sé a quién le "
+                       "debes respuesta.")
 
     return {
         "herramientas": [{
@@ -22539,6 +23104,24 @@ _JARVIS_HERRAMIENTAS = {
         "fn":          _j_sueno,
         "descripcion": "Detalle noche a noche del sueño reciente, con las fases de cada una.",
         "parametros":  {"noches": {"type": "integer", "description": "Cuántas noches devolver (máx. 30)."}},
+    },
+    "tareas": {
+        "confirmar":     False,
+        "fn":            _j_tareas,
+        "descripcion":   "Tareas pendientes de Microsoft To Do (lo que hay que hacer sin hora), "
+                         "las que vencen antes primero. Para citas con hora, usa `agenda`.",
+        "parametros":    {},
+        "requiere_tareas": True,
+    },
+    "whatsapp_pendientes": {
+        "confirmar":     False,
+        "fn":            _j_whatsapp_pendientes,
+        "descripcion":   "A quién le debes respuesta en WhatsApp: chats individuales cuyo último "
+                         "mensaje es suyo y lleva horas sin contestar. Solo nombres y horas: no "
+                         "sabes QUÉ dicen los mensajes, así que no lo inventes. Si `puente.mudo` "
+                         "es verdadero, el dato puede estar desfasado.",
+        "parametros":    {},
+        "requiere_whatsapp": True,
     },
     "donde_estoy": {
         "confirmar":   False,
@@ -23009,6 +23592,20 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["titulo", "fecha"],
     },
+    "crear_tarea": {
+        "confirmar":   True,
+        "fn":          _j_crear_tarea,
+        "descripcion": "Propone apuntar una tarea en Microsoft To Do: algo que hacer sin hora "
+                       "concreta («pásale el contrato a Luis»). NO la crea: la aprueba el "
+                       "usuario. Si tiene día y hora, es un evento: usa `crear_evento`.",
+        "parametros":  {
+            "titulo": {"type": "string", "description": "Qué hay que hacer, en una frase."},
+            "fecha":  {"type": "string", "description": "YYYY-MM-DD en que vence, si lo tiene."},
+            "nota":   {"type": "string", "description": "Detalle opcional."},
+        },
+        "obligatorios": ["titulo"],
+        "requiere_tareas": True,
+    },
     "reservar_bloques": {
         # UNA herramienta con una lista y no varios `crear_evento` seguidos: el dashboard
         # solo admite un pendiente por turno, así que el segundo pisaría al primero.
@@ -23177,6 +23774,10 @@ def _jarvis_esquema() -> list:
     # Igual con la vuelta de «avísame»: sin rutina que disparar, contestar al aviso no
     # llevaría a ninguna parte.
     con_sesion  = bool(SESION_FIRE_URL and SESION_FIRE_TOKEN)
+    # Y las tareas y WhatsApp, que nacen apagadas: anunciarlas apagadas sería pagar su
+    # descripción en cada turno para que el modelo las pida y le digan que no.
+    con_tareas   = TAREAS_TODO
+    con_whatsapp = WHATSAPP_LEER
     return [{
         "type": "function",
         "function": {
@@ -23192,7 +23793,9 @@ def _jarvis_esquema() -> list:
         if (con_mcp or not h.get("requiere_mcp"))
         and (con_arreglo or not h.get("requiere_arreglo"))
         and (con_deploy or not h.get("requiere_despliegue"))
-        and (con_sesion or not h.get("requiere_sesion"))]
+        and (con_sesion or not h.get("requiere_sesion"))
+        and (con_tareas or not h.get("requiere_tareas"))
+        and (con_whatsapp or not h.get("requiere_whatsapp"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -24549,6 +25152,9 @@ _JARVIS_RELLENOS = {
     "agenda":             "Déjame mirar el calendario.",
     "huecos_libres":      "Miro dónde tienes hueco.",
     "crear_evento":       "Voy con el calendario.",
+    "tareas":             "Miro tus tareas.",
+    "crear_tarea":        "Voy con las tareas.",
+    "whatsapp_pendientes": "Miro WhatsApp.",
     "editar_evento":      "Voy con el calendario.",
     "borrar_evento":      "Voy con el calendario.",
     "clima":              "Miro el tiempo.",
