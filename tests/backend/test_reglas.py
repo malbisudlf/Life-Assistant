@@ -400,6 +400,56 @@ class TestAlSalirDeCasa(_Reglas):
         assert not mock_requests.called("POST", "/ha/ordenes")
         assert main._ha_ordenes == []
 
+    def test_con_apagar_encendido_apaga_y_no_avisa(self, monkeypatch, mock_requests):
+        """Pedido así: el aviso se leía, se pulsaba «Apagar» y ya. Con SALIR_CASA_APAGAR
+        se apaga directamente y no llega nada."""
+        monkeypatch.setattr(main, "SALIR_CASA_APAGAR", True)
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+            {"id": "fan.techo", "nombre": "Ventilador", "estado": "on"},
+            {"id": "light.cocina", "nombre": "Cocina", "estado": "off"},
+        ])
+        pedidas = []
+        monkeypatch.setattr(main, "_j_casa_ordenar",
+                            lambda servicio, entidad, datos=None:
+                            pedidas.append((servicio, entidad)) or {"ok": True})
+        assert main._regla_al_salir_de_casa() == 0
+        assert pedidas == [("light.turn_off", "light.salon"), ("fan.turn_off", "fan.techo")]
+        assert self._apuntados(mock_requests) == []
+
+    def test_con_apagar_encendido_avisa_solo_de_lo_que_no_pudo(self, monkeypatch,
+                                                               mock_requests):
+        monkeypatch.setattr(main, "SALIR_CASA_APAGAR", True)
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+            {"id": "light.pasillo", "nombre": "Pasillo", "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "_j_casa_ordenar",
+                            lambda servicio, entidad, datos=None:
+                            {"ok": entidad != "light.pasillo", "motivo": "HA no contesta"})
+        assert main._regla_al_salir_de_casa() == 1
+        apuntado = self._apuntados(mock_requests)[0]
+        assert apuntado["texto"] == "Te has ido y no he podido apagar: Pasillo."
+        # El botón del aviso sigue sirviendo para reintentar lo que falló, y solo eso.
+        assert apuntado["entidades"] == ["light.pasillo"]
+
+    def test_con_apagar_encendido_el_pc_no_se_corta(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "SALIR_CASA_APAGAR", True)
+        monkeypatch.setattr(main, "_casa_entidades", lambda: [
+            {"id": "switch.pc", "nombre": "PC", "estado": "on"},
+            {"id": "light.salon", "nombre": "Salón", "estado": "on"},
+        ])
+        monkeypatch.setattr(main, "SALIR_CASA_ENTIDADES", ("light.salon", "switch.pc"))
+        monkeypatch.setattr(main, "PC_ENTIDAD", "switch.pc")
+        pedidas = []
+        monkeypatch.setattr(main, "_j_casa_ordenar",
+                            lambda servicio, entidad, datos=None:
+                            pedidas.append(entidad) or {"ok": True})
+        # Solo el aviso del PC, que ofrece suspenderlo.
+        assert main._regla_al_salir_de_casa() == 1
+        assert pedidas == ["light.salon"]
+        assert self._apuntados(mock_requests)[0]["regla"] == main.REGLA_PC_ENCENDIDO
+
     def test_guarda_los_ids_para_poder_apagarlos(self, monkeypatch, mock_requests):
         """El aviso dice nombres, pero el botón necesita entity_ids, y los de ESE
         momento: el catálogo de dentro de una hora ya no habla de lo mismo."""

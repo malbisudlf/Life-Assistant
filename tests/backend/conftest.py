@@ -67,6 +67,8 @@ os.environ.setdefault("NOCHE_ARREGLA", "0")
 os.environ.setdefault("TAREAS_TODO", "0")
 os.environ.setdefault("WHATSAPP_LEER", "0")
 os.environ.setdefault("WHATSAPP_TOKEN", "whatsapp-token")
+# Y apagar al salir de casa sin preguntar: sus tests lo encienden.
+os.environ.setdefault("SALIR_CASA_APAGAR", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
 # herramienta y el grande CUÁL (ver el bucle de /jarvis). Con los dos al mismo valor ese
 # reparto queda desactivado, que es lo que quieren los tests del bucle — si no, cada

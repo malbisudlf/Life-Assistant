@@ -14839,6 +14839,12 @@ PC_ENTIDAD         = os.getenv("PC_ENTIDAD", "")
 SALIR_CASA_ENTIDADES = tuple(
     e.strip() for e in os.getenv("SALIR_CASA_ENTIDADES", "").split(",") if e.strip()
 )
+# Apagar sin preguntar al salir de casa, en vez de avisar con un botón. Pedido así el
+# 2026-09-28: el aviso se leía, se pulsaba «Apagar» y ya; la pregunta no aportaba nada.
+# Nace apagado en el código porque para quien despliegue el kit no es obvio que irse de
+# casa apague las luces a quien se quede dentro: la presencia es la de UN móvil. Solo se
+# avisa si algo no se pudo apagar, que es lo único que entonces hay que saber.
+SALIR_CASA_APAGAR = _flag("SALIR_CASA_APAGAR", "0")
 _reglas_dia: dict = {}
 
 
@@ -15239,10 +15245,9 @@ def _encendidos(dominios: tuple, solo: tuple = ()) -> list:
     dominios: es lo que separa tus aparatos de los 166 switches de ajustes que trae una
     casa con Alexas. Sin ella, cualquiera de esos dominios.
 
-    El catálogo lo empuja HA cada hora, así que puede ir con retraso: por eso esto sirve
-    para AVISAR y nunca para apagar nada por su cuenta. Con HA en directo el estado es el
-    de ahora mismo, pero la regla no cambia: preguntar sigue costando un toque y apagar
-    por error algo que alguien está usando en casa cuesta bastante más.
+    El catálogo lo empuja HA cada hora, así que puede ir con retraso; con HA en directo el
+    estado es el de ahora mismo. Apagar por su cuenta lo decide `SALIR_CASA_APAGAR`, no
+    esta función.
 
     Devuelve id y nombre. El nombre es lo que se lee en el aviso; el id es lo que hace
     falta para apagarlo si contestas que sí al botón, y tiene que quedar guardado con el
@@ -15266,8 +15271,10 @@ def _regla_al_salir_de_casa() -> int:
     """1.6 y 1.7 — Te has ido y te dejaste algo encendido (y el PC, si está declarado).
 
     Se dispara al CAMBIAR la presencia a fuera, no en el tick: es el único momento en
-    que este aviso sirve de algo. No apaga nada — el catálogo puede ir con una hora de
-    retraso y apagar a ciegas por un dato viejo es peor que preguntar.
+    que este aviso sirve de algo. Por defecto no apaga nada y pregunta con un botón; con
+    `SALIR_CASA_APAGAR` apaga sin preguntar y solo avisa de lo que no pudo apagar. Con HA
+    en directo el estado es el de ahora; sin él, el catálogo puede ir con una hora de
+    retraso, y apagar algo que ya estaba apagado no hace daño.
 
     Qué entidades cuentan lo decide `SALIR_CASA_ENTIDADES`; el porqué está en su
     comentario. Aquí solo importa que `switch` NO entra por dominio: es el dominio donde
@@ -15276,7 +15283,25 @@ def _regla_al_salir_de_casa() -> int:
     """
     luces = _encendidos(("light", "fan"), SALIR_CASA_ENTIDADES)
     puestos = 0
-    if luces:
+    if luces and SALIR_CASA_APAGAR:
+        # Sin preguntar. El PC no entra (su aviso de abajo ofrece suspenderlo), y el
+        # apagado pasa por la misma puerta que el botón, que valida contra el catálogo.
+        ids = [l["id"] for l in luces if l["id"] != PC_ENTIDAD]
+        apagadas = _apagar_entidades(ids[:AVISO_MAX_ENTIDADES])
+        logger.info("Al salir: apagando sin preguntar %s", ", ".join(apagadas) or "nada")
+        fallidas = [l["nombre"] for l in luces
+                    if l["id"] in ids and l["id"] not in apagadas]
+        if fallidas:
+            hoy = _ahora_local().date().isoformat()
+            puestos += int(_apuntar_aviso(
+                REGLA_AL_SALIR,
+                f"Te has ido y no he podido apagar: {', '.join(fallidas[:5])}.",
+                prioridad=PRIO_ALTA,
+                huella=f"sin_apagar:{hoy}:{','.join(sorted(fallidas))[:120]}",
+                entidades=[i for i in ids if i not in apagadas],
+                motivo={"apagadas": apagadas, "sin_apagar": fallidas},
+            ))
+    elif luces:
         nombres = [l["nombre"] for l in luces]
         # El PC se nombra en el aviso pero NO se apaga con el botón: cortarle la
         # corriente a un switch no es apagar un PC, es tirar del cable. Para eso está su

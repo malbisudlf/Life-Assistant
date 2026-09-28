@@ -419,10 +419,14 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     que abre ese día**, como «No llegas»: si el presupuesto lo pospone a las 08:30, diría
     «Mañana tienes libre…» cuando ese mañana ya es hoy.
   - **Al salir de casa** (`_regla_al_salir_de_casa`): se dispara en `POST /ha/presencia` al
-    CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **No apaga nada
-    por su cuenta**: el catálogo lo empuja HA cada hora y apagar con un dato viejo es
-    peor que preguntar. El PC solo si `PC_ENTIDAD` está declarada: adivinar cuál es por
-    el nombre acaba apagando otra cosa.
+    CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **Por defecto no
+    apaga nada por su cuenta** y pregunta con un botón. **Con `SALIR_CASA_APAGAR=1` apaga
+    sin preguntar** (encendido en `caja` desde el 2026-09-28, pedido así: el aviso se leía,
+    se pulsaba «Apagar» y ya) y solo avisa de lo que no pudo apagar, con el botón para
+    reintentarlo. Nace apagado en el código porque la presencia es la de un móvil: a
+    quien despliegue el kit le apagaría las luces a quien se quede en casa. El PC nunca
+    entra en ese apagado (su aviso ofrece suspenderlo), y solo si `PC_ENTIDAD` está
+    declarada: adivinar cuál es por el nombre acaba apagando otra cosa.
     **Qué cuenta como "encendido" lo decide `SALIR_CASA_ENTIDADES`**, una lista blanca de
     entity_ids. Antes miraba los dominios `light` y `switch` enteros, y ahí estaba el
     fallo: un catálogo real de una casa con Alexas trae 166 switches, y casi ninguno es un
