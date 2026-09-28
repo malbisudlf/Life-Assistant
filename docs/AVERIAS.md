@@ -84,9 +84,24 @@ revisión aprobada de día con «Arreglarlo» la mergea la propia sesión, y has
 2026-09-27 también pasaba por `arreglando`: `pr-listo` pedía permiso de despliegue por un
 PR que se estaba mergeando solo (y hacía sonar el teléfono), y como nada la sacaba de ese
 estado, el siguiente PR verde de cualquier `arreglo/…` —un encargo hablado— se ataba a
-ella con el título de otra cosa. Por lo mismo, `pr-listo` solo mira filas de las últimas
-24 h (`PR_LISTO_VENTANA_HORAS`, por `creado` o por `decidido_at`): una sesión que muere
-sin abrir PR deja su fila en `arreglando` para siempre.
+ella con el título de otra cosa.
+
+**Qué ata un PR a su fila es el id dentro de la rama**, no el orden (desde el
+2026-09-28). Toda instrucción que espera permiso le dicta a la sesión la rama
+`arreglo/<origen>-<id>` (`_rama_del_arreglo`), y `pr-listo` saca el id de ahí y hace la
+transición contra ESA fila, solo si sigue en `arreglando`. Una rama `arreglo/…` sin id
+—la revisión que se mergea sola, un encargo hablado— no cierra ningún aviso y no
+pregunta nada. Antes se ataba «la fila más reciente en `arreglando` de las últimas 24 h»,
+y falló así: las sesiones de dos averías del CI de la noche del 27 abrieron sus PR en
+ramas `claude/…` (nadie les dijo otro nombre), `pr-listo.yml` no los vio y sus filas se
+quedaron en `arreglando`; a la mañana siguiente el PR de la revisión aprobada con
+«Arreglarlo» se puso verde, se ató a una de ellas, y el teléfono sonó pidiendo permiso
+para subir a `main` un PR que su sesión mergeó sola 30 segundos después. La notificación
+crítica que acompañaba a la llamada citaba el motivo de aquella avería («el CI ha fallado
+en main…»), que es lo que parecía un CI roto nuevo.
+
+Una sesión que muere sin abrir PR sigue dejando su fila en `arreglando`, pero ya no
+atrapa nada: solo la puede cerrar un PR de su propia rama.
 
 `mergeado` se llamaba `desplegado` y se renombró el 2026-09-07, cuando el botón dejó de
 fingir que desplegaba. Las filas viejas conservan el nombre antiguo: son estados de un
@@ -147,6 +162,15 @@ despertar (o pasada la hora de respaldo, las 10:00); si no, queda pendiente
 (`_retomar_llamada_despliegue`) en cuanto te despiertas, si el permiso sigue esperando.
 Suena una sola vez por permiso: se reserva en `avisos_llamadas` con su id, y esa reserva
 no gasta el tope de las llamadas cotidianas.
+
+**Quien contesta esa llamada no puede subir nada a `main`.** Por la centralita descuelga
+Jarvis-Claude, que no tiene la herramienta `desplegar` (está fuera de la lista blanca del
+MCP del teléfono) y cuyo runbook le prohíbe los merges. Hasta el 2026-09-28 la llamada
+preguntaba igualmente «¿quieres que lo suba a main?», y al decir que sí Jarvis tenía que
+confesar que no podía. Ahora la apertura (`_apertura_despliegue_telefono`) manda al botón
+«Desplegar» de la notificación, y el contexto (`_contexto_despliegue`) le explica a Jarvis
+por qué. `_apertura_despliegue` sigue preguntando en la pantalla de llamada del dashboard,
+donde el Jarvis de GPT sí puede.
 
 Aquí solo importa quién pregunta y cuándo: `POST /revision/pr-listo` es el único sitio del
 backend que abre este canal. Dos cosas de `docs/LLAMADAS.md` que conviene saber sin abrirlo:

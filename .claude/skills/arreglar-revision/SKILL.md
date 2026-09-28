@@ -81,7 +81,12 @@ string en inglés que debía ir en español).
 ## 4. Hacerlo
 
 Rama de trabajo `arreglo/revision-AAAA-MM-DD` (la fecha del issue) desde `main`
-actualizado. Todo en español —comentarios, commits y strings— y comentarios que expliquen
+actualizado. **Si la instrucción te dicta una rama** (`arreglo/<origen>-<id>`: la llevan
+las averías, el vigilante y el turno de noche), usa esa, con ese nombre exacto: el id que
+va dentro es lo único que ata tu PR a su aviso, y con otro nombre el CI se pone verde sin
+que nadie se entere. **Nunca `claude/…`**, aunque sea el nombre que te proponga el
+entorno: el 2026-09-27 dos arreglos de averías se quedaron así, sin preguntar nunca, y a
+la mañana siguiente su aviso se ató al PR de otra cosa. Todo en español —comentarios, commits y strings— y comentarios que expliquen
 *por qué*, como el resto del repositorio.
 
 Cada arreglo con su test cuando cambie comportamiento: los tests del backend viven en
@@ -107,7 +112,8 @@ no lleva la línea «Generated with Claude Code»** ni nada que diga qué herram
 
 ## 5. El PR y el merge
 
-Abre el PR contra `main` con:
+Abre el PR contra `main`, **listo para revisar, no como borrador** (un borrador no se
+puede mergear, y el botón del permiso fallaría), con:
 
 - **Título**: `revisión: arreglar los hallazgos del <fecha>`.
 - **Cuerpo**: un apartado por hallazgo arreglado (qué se cambió y por qué), y un

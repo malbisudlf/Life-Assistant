@@ -18129,10 +18129,29 @@ ARREGLO_FIRE_TOKEN = os.getenv("ARREGLO_FIRE_TOKEN", "")
 # para pedir permiso de despliegue, y aquí no hay permiso que pedir. La columna no tiene
 # constraint de valores (20260831_averias.sql), así que no pide migración.
 ESTADO_ARREGLO_SE_MERGEA_SOLO = "arreglando_y_mergea"
-# Cuánto puede tardar un arreglo en ponerse verde desde que se lanzó. Más allá, una fila
-# que sigue en `arreglando` es una sesión que murió sin PR, y atarle el siguiente PR
-# verde de una rama `arreglo/…` sería pedir permiso con el título de otra cosa.
-PR_LISTO_VENTANA_HORAS = 24
+
+# Qué ata el PR de un arreglo al aviso que viene a cerrar: el id de su fila, DENTRO del
+# nombre de la rama, que la instrucción le dicta a la sesión. Hasta el 2026-09-28 lo ataba
+# el orden («la fila más reciente en `arreglando`») y falló por los dos lados a la vez: las
+# sesiones de dos averías del CI abrieron sus PR en ramas `claude/…` —nadie les dijo otro
+# nombre—, `pr-listo.yml` no los vio y sus filas se quedaron en `arreglando`; a la mañana
+# siguiente el PR de la revisión, que su sesión mergea sola, se puso verde, se ató a una de
+# ellas y el teléfono sonó pidiendo permiso para subir a `main` algo que se subió solo 30
+# segundos después. Con el id en la rama no hay nada que adivinar: una rama sin id no es
+# de ningún aviso y no pregunta nada.
+_ID_EN_RAMA = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _rama_del_arreglo(origen: str, rid: str) -> str:
+    """La rama en la que tiene que trabajar la sesión que arregla el aviso `rid`."""
+    return f"arreglo/{origen}-{rid}"
+
+
+def _instruccion_de_rama(origen: str, rid: str) -> str:
+    """La frase que le dicta la rama a la sesión. La lleva todo arreglo que espera permiso."""
+    return (f"Trabaja en la rama `{_rama_del_arreglo(origen, rid)}`, con ese nombre exacto: "
+            f"es lo único que ata tu PR a este aviso, y con otro nombre Mikel no se entera "
+            f"de que está listo. Abre el PR listo para revisar, no como borrador.")
 
 
 def _uuid_revision(numero: int) -> str:
@@ -18243,7 +18262,7 @@ def _arreglar_de_noche(rid: str, numero: int, titulo: str, url: str) -> dict:
         f"Esto lo ha lanzado el turno de noche mientras Mikel duerme, así que NO hay "
         f"nadie a quien preguntar. Abre un PR con el arreglo y DÉJALO ABIERTO — no lo "
         f"mergees, aunque el CI pase. El permiso lo da Mikel por la mañana, viendo el PR "
-        f"ya en verde.")
+        f"ya en verde. " + _instruccion_de_rama("issue", rid))
     ahora = datetime.now(timezone.utc).isoformat()
     try:
         r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.pendiente",
@@ -18392,7 +18411,8 @@ def _revision_decidir(rid: str, accion: str) -> dict:
             + (f"Hay un issue con el detalle: {url}. " if url else
                "No hay issue que leer: lo de arriba es todo lo que se sabe. ")
             + f"Abre un PR con el arreglo y DÉJALO ABIERTO — no lo mergees, aunque el CI "
-              f"pase. El permiso para desplegarlo lo da Mikel después.")
+              f"pase. El permiso para desplegarlo lo da Mikel después. "
+            + _instruccion_de_rama(origen, rid))
 
     resultado = _disparar_arreglo(numero, titulo, url, instruccion=instruccion)
     if not resultado["ok"]:
@@ -18870,7 +18890,8 @@ def averia(request: Request, body: AveriaIn, token: str = ""):
         f"Arregla esta avería del repositorio {JARVIS_REPO}: {fila['issue_titulo']}. "
         f"Es una AVERÍA, no un issue de la revisión nocturna: no hay issue que leer. "
         f"Abre un PR con el arreglo y DÉJALO ABIERTO — no lo mergees, aunque el CI pase. "
-        f"El permiso para desplegarlo lo da Mikel después."))
+        f"El permiso para desplegarlo lo da Mikel después. "
+        + _instruccion_de_rama(origen, rid)))
     if not resultado["ok"]:
         # Igual que en la revisión: una fila en "arreglando" sin nadie arreglando deja la
         # avería invisible. Se cierra y se avisa, que es el error recuperable.
@@ -19142,6 +19163,7 @@ def vigilancia_estado(request: Request, body: VigilanciaIn, token: str = ""):
 
 class PrListoIn(BaseModel):
     pr: int
+    rama: str = ""
     titulo: str = ""
 
 
@@ -19159,7 +19181,34 @@ class PrListoIn(BaseModel):
 _despliegue_por_llamar: bool | None = None
 
 
-def _llamar_despliegue(rid: str) -> bool:
+def _contexto_despliegue(pr: int = 0) -> str:
+    """Lo que sabe Jarvis-Claude al descolgar la llamada del permiso.
+
+    Hace falta porque quien contesta por la centralita NO puede subir nada a `main`: no
+    tiene la herramienta (`desplegar` está fuera de `_MCP_SERVIDOR_HERRAMIENTAS`) y su
+    runbook le prohíbe los merges. Sin esto, la llamada preguntaba «¿quieres que lo suba a
+    main?» y, al contestar que sí, Jarvis tenía que confesar que no podía (2026-09-28).
+    """
+    pr_txt = f"el PR #{pr}" if pr > 0 else "un PR"
+    return (f"Llamas por un permiso: una sesión de arreglo ha dejado {pr_txt} con el CI en "
+            f"verde, esperando a que Mikel diga si se sube a main. Tú NO puedes subirlo: "
+            f"no tienes la herramienta y el runbook te prohíbe mergear. Si dice que sí, "
+            f"dile que pulse «Desplegar» en la notificación del móvil (o el mismo botón en "
+            f"la pantalla de llamada del dashboard), y que después {PASO_QUE_FALTA}. Si "
+            f"pregunta qué se arregló, puedes mirar el PR con `gh` en solo lectura.")
+
+
+def _apertura_despliegue_telefono() -> str:
+    """La primera frase de la llamada del permiso por la centralita.
+
+    No es `_apertura_despliegue` porque esa pregunta «¿quieres que lo suba a main?», y
+    por este canal la respuesta no la puede ejecutar quien la escucha: la da el botón.
+    """
+    return ("He detectado un fallo y ya lo he corregido; el CI está en verde. Si quieres "
+            "que lo suba a main, pulsa Desplegar en la notificación que te acabo de mandar.")
+
+
+def _llamar_despliegue(rid: str, pr: int = 0) -> bool:
     """Reserva y lanza la llamada de ESE permiso. False si ya sonó o no se pudo.
 
     Sin poder apuntarla no se llama: sin la reserva no hay forma de que no suene dos
@@ -19180,7 +19229,7 @@ def _llamar_despliegue(rid: str) -> bool:
         logger.warning("Despliegue: no se pudo apuntar la llamada de %s (Supabase devolvió "
                        "%s)", rid, r.status_code)
         return False
-    return _llamar(_apertura_despliegue(), rid=rid)
+    return _llamar(_apertura_despliegue_telefono(), rid=rid, contexto=_contexto_despliegue(pr))
 
 
 def _retomar_llamada_despliegue() -> dict:
@@ -19196,7 +19245,8 @@ def _retomar_llamada_despliegue() -> dict:
     _despliegue_por_llamar = False
     if not fila:
         return {}
-    return {"despliegue_llamado": _llamar_despliegue(str(fila.get("id") or ""))}
+    return {"despliegue_llamado": _llamar_despliegue(str(fila.get("id") or ""),
+                                                     int(fila.get("pr_numero") or 0))}
 
 
 def _retomar_llamada_despliegue_segura() -> dict:
@@ -19228,52 +19278,36 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     if numero <= 0 or numero > 1_000_000:
         raise HTTPException(status_code=422, detail="Número de PR inválido")
 
-    # La avería que este PR viene a cerrar es la que sigue en "arreglando". Se busca la
-    # más reciente y no una por id porque la sesión de arreglo no puede devolvernos el
-    # nuestro: lo que ata las dos mitades es el orden, no una referencia.
-    # Acotado en el tiempo porque atar por orden solo vale mientras la fila es reciente:
-    # una sesión que murió sin abrir PR deja su fila en `arreglando` para siempre, y sin
-    # ventana el siguiente PR verde de cualquier `arreglo/…` pediría permiso con su
-    # título. Vale `creado` (las averías nacen ya arreglándose) o `decidido_at` (lo que
-    # esperó a tu botón, que puede llevar un día apuntado antes de que lo pulses).
-    desde = (datetime.now(timezone.utc)
-             - timedelta(hours=PR_LISTO_VENTANA_HORAS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        r = http.get(f"{REVISION_URL}?estado=eq.arreglando"
-                     f"&or=(creado.gte.{desde},decidido_at.gte.{desde})"
-                     "&select=id,origen,detalle,issue_titulo&order=creado.desc&limit=1",
-                     headers=supabase_headers())
-        if r.status_code >= 300:
-            raise _supabase_error(r)
-        filas = r.json() or []
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("PR listo: no se pudo buscar la avería de #%s (%s)", numero, e)
-        raise HTTPException(status_code=502, detail="No se pudo buscar la avería")
-    if not filas:
-        # Un PR verde que no cierra ninguna avería es lo normal: la mayoría de los PR los
-        # abres tú. No es un error y no se avisa de él.
-        return {"ok": True, "avisado": False, "motivo": "ese PR no cierra ninguna avería"}
+    # El aviso que este PR viene a cerrar lo dice su rama (`_rama_del_arreglo`), y nada
+    # más. Una rama `arreglo/…` sin id —la revisión que se mergea sola, un encargo
+    # hablado— no cierra ningún aviso: es lo normal, no un error, y no se pregunta nada.
+    # `titulo` es por compatibilidad: el workflow mandaba ahí la rama antes de que
+    # existiera `rama`.
+    encontrado = _ID_EN_RAMA.search(str(body.rama or body.titulo or "").lower())
+    if not encontrado:
+        return {"ok": True, "avisado": False, "motivo": "esa rama no es de ningún aviso"}
+    rid = encontrado.group(0)
 
-    fila = filas[0]
-    rid  = str(fila.get("id") or "")
     # PATCH condicional, igual que el resto de transiciones: dos ejecuciones del workflow
-    # sobre el mismo PR no pueden dejar dos avisos pidiendo el mismo permiso.
+    # sobre el mismo PR no pueden dejar dos avisos pidiendo el mismo permiso. Y solo desde
+    # `arreglando`: una revisión que se mergea sola (`arreglando_y_mergea`) no pide permiso
+    # aunque una sesión le copie el nombre de rama a otra.
     try:
         r = http.patch(f"{REVISION_URL}?id=eq.{rid}&estado=eq.arreglando",
                        headers={**supabase_headers(), "Prefer": "return=representation"},
                        json={"estado": "listo", "pr_numero": numero})
         if r.status_code >= 300:
             raise _supabase_error(r)
-        if not r.json():
-            return {"ok": True, "avisado": False, "motivo": "esa avería ya no estaba en arreglo"}
+        filas = r.json() or []
     except HTTPException:
         raise
     except Exception as e:
         logger.error("PR listo: no se pudo marcar la avería de #%s (%s)", numero, e)
         raise HTTPException(status_code=502, detail="No se pudo marcar la avería")
+    if not filas:
+        return {"ok": True, "avisado": False, "motivo": "esa avería ya no estaba en arreglo"}
 
+    fila  = filas[0]
     que   = str(fila.get("detalle") or fila.get("issue_titulo") or "algo")
     # Cabe en RECORDATORIO_MAX_TEXTO (200) contando el motivo, y por eso el motivo se
     # recorta aquí en vez de dejar que el corte se coma el final: lo último es lo que dice
@@ -19288,7 +19322,7 @@ def revision_pr_listo(request: Request, body: PrListoIn, token: str = ""):
     # madrugada sonaba de madrugada. Si no puede sonar (o no se ha podido apuntar), se
     # deja pendiente y lo retoma el tick de Home Assistant cuando te despiertes.
     puede, motivo = _telefono_puede_sonar(_ahora_local())
-    if not (puede and _llamar_despliegue(rid)):
+    if not (puede and _llamar_despliegue(rid, numero)):
         _despliegue_por_llamar = True
         if not puede:
             logger.info("PR #%s: la llamada del permiso espera (%s)", numero, motivo)

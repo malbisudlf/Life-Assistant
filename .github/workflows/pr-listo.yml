@@ -74,7 +74,11 @@ jobs:
             exit 1
           fi
 
-          CUERPO=$(jq -n --argjson n "$PR_NUMERO" --arg t "$RAMA" '{pr: $n, titulo: $t}')
+          # La rama es lo que ata el PR a su avería: lleva el id de la fila
+          # (`_rama_del_arreglo` en el backend). `titulo` repite la rama para el backend
+          # de antes de `rama`, que la leía de ahí.
+          CUERPO=$(jq -n --argjson n "$PR_NUMERO" --arg t "$RAMA" \
+            '{pr: $n, rama: $t, titulo: $t}')
 
           RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/revision/pr-listo" \
             -H "X-Auth-Token: $REVISION_TOKEN" \

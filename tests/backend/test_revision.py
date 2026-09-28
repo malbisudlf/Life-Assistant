@@ -201,6 +201,19 @@ class TestLosBotones:
                     json={"accion": "arreglar"}, headers=CABECERA)
         cambio = mock_requests.called("PATCH", "revision_hallazgos")[-1][2]["json"]
         assert "estado" not in cambio
+        # Y le dicta la rama: sin el id dentro, `pr-listo` no sabría a qué fila atarlo.
+        texto = mock_requests.called("POST", FIRE_URL)[0][2]["json"]["text"]
+        assert main._rama_del_arreglo("vigilante", main._uuid_revision(83)) in texto
+
+    def test_la_revision_de_dia_no_lleva_rama_con_id(self, client, mock_requests, correos):
+        """La que se mergea sola usa la rama de la skill (`arreglo/revision-<fecha>`), sin
+        id: así `pr-listo` no la confunde con un arreglo que espera permiso."""
+        self._pendiente(mock_requests)
+        mock_requests.add("POST", FIRE_URL, FakeResponse({}))
+        client.post(f"/revision/{main._uuid_revision(83)}/accion",
+                    json={"accion": "arreglar"}, headers=CABECERA)
+        texto = mock_requests.called("POST", FIRE_URL)[0][2]["json"]["text"]
+        assert not main._ID_EN_RAMA.search(texto)
 
     def test_la_transicion_es_condicional(self, client, mock_requests):
         """Dos toques seguidos no pueden lanzar dos agentes: quien pregunta si sigue

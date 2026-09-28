@@ -27,6 +27,12 @@ def _configurado(monkeypatch):
     monkeypatch.setattr(main, "LLAMADAS", False)
 
 
+def _listo_json(rid=None, pr=122):
+    """Lo que manda `pr-listo.yml`: el PR y su rama, que lleva el id de la avería."""
+    rama = main._rama_del_arreglo("ci", rid or main._uuid_averia("ci", "9911"))
+    return {"pr": pr, "rama": rama, "titulo": rama}
+
+
 @pytest.fixture
 def correos(monkeypatch):
     enviados = []
@@ -106,13 +112,12 @@ class TestElCiSeRompe:
 class TestElArregloEstaListo:
     def test_avisa_con_el_boton_de_desplegar(self, client, mock_requests):
         rid = main._uuid_averia("ci", "9911")
-        mock_requests.add("GET", "revision_hallazgos",
+        mock_requests.add("PATCH", "revision_hallazgos",
                           FakeResponse([{"id": rid, "origen": "ci",
                                          "detalle": "el CI ha fallado en main"}]))
-        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
 
-        r = client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        r = client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert r.status_code == 200 and r.json()["avisado"] is True
 
         cambio = mock_requests.called("PATCH", "revision_hallazgos")[0][2]["json"]
@@ -130,27 +135,69 @@ class TestElArregloEstaListo:
 
     def test_un_pr_que_no_cierra_averia_no_avisa(self, client, mock_requests):
         """La mayoría de los PR los abre el usuario. Eso no es un error y no se avisa."""
-        mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
-        r = client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        r = client.post("/revision/pr-listo",
+                        json={"pr": 122, "rama": "arreglo/encargo-luces"}, headers=REVISION)
         assert r.status_code == 200 and r.json()["avisado"] is False
+        assert not mock_requests.called("PATCH", "revision_hallazgos")
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
-    def test_solo_se_ata_a_un_arreglo_reciente(self, client, mock_requests):
-        """Una sesión que murió sin PR deja su fila en `arreglando` para siempre: sin
-        ventana, el siguiente PR verde de cualquier `arreglo/…` pedía permiso con su
-        título. Vale la fecha de alta o la de la decisión, porque lo que esperó a tu
-        botón puede llevar un día apuntado."""
-        mock_requests.add("GET", "revision_hallazgos", FakeResponse([]))
-        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
-        url = mock_requests.called("GET", "revision_hallazgos")[0][1]
-        assert "estado=eq.arreglando" in url
-        assert "or=(creado.gte." in url and ",decidido_at.gte." in url
+    def test_la_revision_que_se_mergea_sola_no_llama(self, client, mock_requests,
+                                                     monkeypatch):
+        """Lo que pasó el 2026-09-28. Dos averías del CI de la noche anterior seguían en
+        `arreglando` —sus sesiones abrieron el PR en ramas `claude/…` y `pr-listo.yml` no
+        los vio—, y el PR de la revisión aprobada con «Arreglarlo», que su sesión mergea
+        sola, se ató a una de ellas por ser «la más reciente»: sonó el teléfono pidiendo
+        permiso para subir a `main` algo que se subió solo 30 segundos después.
+
+        Ahora la rama de la revisión no lleva id, así que no toca ninguna fila."""
+        llamadas = []
+        monkeypatch.setattr(main, "_llamar", lambda *a, **k: llamadas.append(a) or True)
+        # Aunque hubiera una avería esperando, no se consulta: no hay nada que buscar.
+        mock_requests.add("PATCH", "revision_hallazgos",
+                          FakeResponse([{"id": main._uuid_averia("ci", "1")}]))
+        r = client.post("/revision/pr-listo",
+                        json={"pr": 250, "rama": "arreglo/revision-2026-09-28"},
+                        headers=REVISION)
+        assert r.json()["avisado"] is False
+        assert not mock_requests.called("PATCH", "revision_hallazgos")
+        assert not mock_requests.called("GET", "revision_hallazgos")
+        assert llamadas == []
+
+    def test_se_ata_a_la_averia_de_su_rama_y_a_ninguna_otra(self, client, mock_requests):
+        """El id viaja en la rama: la transición va contra ESA fila, y solo si sigue en
+        `arreglando` (una revisión que se mergea sola está en `arreglando_y_mergea`)."""
+        rid = main._uuid_averia("ci", "4242")
+        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([]))
+        client.post("/revision/pr-listo", json=_listo_json(rid), headers=REVISION)
+        url = mock_requests.called("PATCH", "revision_hallazgos")[0][1]
+        assert f"id=eq.{rid}" in url and "estado=eq.arreglando" in url
+        # Sin GET previo: «la más reciente» es justo lo que se ató mal.
+        assert not mock_requests.called("GET", "revision_hallazgos")
+
+    def test_el_backend_viejo_leia_la_rama_de_titulo(self, client, mock_requests):
+        """Compatibilidad: un workflow que solo mande `titulo` sigue funcionando."""
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([]))
+        client.post("/revision/pr-listo",
+                    json={"pr": 122, "titulo": main._rama_del_arreglo("ci", rid)},
+                    headers=REVISION)
+        assert f"id=eq.{rid}" in mock_requests.called("PATCH", "revision_hallazgos")[0][1]
+
+    def test_la_averia_le_dicta_la_rama_a_la_sesion(
+            self, client, mock_requests):
+        """La otra mitad: si la sesión no recibe el nombre, elige uno (`claude/…`) y el
+        PR no llega a preguntar nunca. Se comprueba en el disparo real de `/averia`."""
+        mock_requests.add("POST", "revision_hallazgos", FakeResponse([], 201))
+        mock_requests.add("POST", "fire", FakeResponse({"claude_code_session_url": "https://s"}))
+        client.post("/averia", json={"origen": "ci", "referencia": "9911"}, headers=REVISION)
+        texto = mock_requests.called("POST", "fire")[0][2]["json"]["text"]
+        assert main._rama_del_arreglo("ci", main._uuid_averia("ci", "9911")) in texto
+        assert "borrador" in texto
 
     def test_dos_ejecuciones_del_workflow_no_dejan_dos_avisos(self, client, mock_requests):
         """El PATCH condicional: si ya no estaba en 'arreglando', no hay nada que avisar."""
-        mock_requests.add("GET", "revision_hallazgos", FakeResponse([{"id": main._uuid_averia("ci", "1")}]))
         mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([]))
-        r = client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        r = client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert r.json()["avisado"] is False
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
@@ -160,13 +207,13 @@ class TestElArregloEstaListo:
                             lambda: main.datetime(2026, 9, 21, 12, 0, tzinfo=main.LOCAL_TZ))
         llamadas = []
         monkeypatch.setattr(main, "_llamar",
-                            lambda texto, rid="": llamadas.append((texto, rid)) or True)
+                            lambda texto, rid="", contexto="":
+                                llamadas.append((texto, rid, contexto)) or True)
         rid = main._uuid_averia("ci", "9911")
-        mock_requests.add("GET", "revision_hallazgos",
+        mock_requests.add("PATCH", "revision_hallazgos",
                           FakeResponse([{"id": rid, "detalle": "el CI ha fallado"}]))
-        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
 
-        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert llamadas and llamadas[0][1] == rid
         # Y lo que se oye NO recita el motivo, aunque quien llama lo tenga delante. Este
         # test pedía justo lo contrario ("una llamada que solo dice mira el móvil no
@@ -177,6 +224,18 @@ class TestElArregloEstaListo:
         assert "CI ha fallado" not in llamadas[0][0]
         assert "main" in llamadas[0][0]
 
+    def test_la_llamada_no_ofrece_lo_que_quien_contesta_no_puede_hacer(self, monkeypatch):
+        """Por la centralita contesta Jarvis-Claude, que no puede mergear (ni tiene la
+        herramienta ni se lo deja su runbook). El 2026-09-28 la llamada preguntaba
+        «¿quieres que lo suba a main?» y, al decir que sí, Jarvis tuvo que confesar que no
+        podía. Ahora la apertura manda al botón, y el contexto le dice a Jarvis por qué."""
+        assert "¿Quieres que lo suba" not in main._apertura_despliegue_telefono()
+        assert "Desplegar" in main._apertura_despliegue_telefono()
+        contexto = main._contexto_despliegue(250)
+        assert "#250" in contexto and "NO puedes" in contexto
+        assert main.PASO_QUE_FALTA in contexto
+        assert "desplegar" not in main._MCP_SERVIDOR_HERRAMIENTAS
+
     def _listo_con_centralita(self, mock_requests, monkeypatch):
         """Un PR verde que cierra una avería, con la centralita puesta y la llamada
         capturada en vez de lanzada."""
@@ -186,9 +245,12 @@ class TestElArregloEstaListo:
         monkeypatch.setattr(main, "_llamar_telefono",
                             lambda texto, rid="", contexto="": sonadas.append(rid) or True)
         rid = main._uuid_averia("ci", "9911")
-        mock_requests.add("GET", "revision_hallazgos",
+        # El PATCH es el de `pr-listo`; el GET, el permiso pendiente que mira el tick.
+        mock_requests.add("PATCH", "revision_hallazgos",
                           FakeResponse([{"id": rid, "detalle": "el CI ha fallado"}]))
-        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
+        mock_requests.add("GET", "revision_hallazgos",
+                          FakeResponse([{"id": rid, "pr_numero": 122,
+                                         "detalle": "el CI ha fallado"}]))
         return rid, sonadas
 
     def _a_las(self, monkeypatch, hora, minuto=0):
@@ -203,7 +265,7 @@ class TestElArregloEstaListo:
         que te has despertado."""
         rid, sonadas = self._listo_con_centralita(mock_requests, monkeypatch)
         self._a_las(monkeypatch, 4, 0)
-        r = client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        r = client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert r.status_code == 200
         assert sonadas == [] and main._despliegue_por_llamar is True
         assert not mock_requests.called("POST", "avisos_llamadas")
@@ -232,7 +294,7 @@ class TestElArregloEstaListo:
         rid, sonadas = self._listo_con_centralita(mock_requests, monkeypatch)
         self._a_las(monkeypatch, 12, 0)
         mock_requests.add("POST", "avisos_llamadas", FakeResponse({}, 409))
-        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert sonadas == []
         assert main._llamar_despliegue(rid) is False
 
@@ -322,12 +384,11 @@ class TestElPermisoDeDespliegue:
         backend contra el mismo Supabase.
         """
         rid = main._uuid_averia("ci", "9911")
-        mock_requests.add("GET", "revision_hallazgos",
+        mock_requests.add("PATCH", "revision_hallazgos",
                           FakeResponse([{"id": rid, "origen": "ci", "detalle": "algo"}]))
-        mock_requests.add("PATCH", "revision_hallazgos", FakeResponse([{"id": rid}]))
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
 
-        client.post("/revision/pr-listo", json={"pr": 122}, headers=REVISION)
+        client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         aviso = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
         assert main.PASO_QUE_FALTA in aviso["texto"]
         assert "add-on" not in aviso["texto"]

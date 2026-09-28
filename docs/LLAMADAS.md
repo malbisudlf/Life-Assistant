@@ -42,7 +42,8 @@ Desde que existe la centralita, no todos los «Hablarlo» suenan por el mismo si
 
 | Motivo | Quién contesta | Botón/disparo |
 |---|---|---|
-| Permiso de despliegue | Jarvis-GPT, dashboard | «Hablarlo» abre `PantallaLlamada` (`?llamada=1&tipo=despliegue`) |
+| Permiso de despliegue (botón) | Jarvis-GPT, dashboard | «Hablarlo» abre `PantallaLlamada` (`?llamada=1&tipo=despliegue`) |
+| Permiso de despliegue (llamada automática de `pr-listo`) | Jarvis-Claude, centralita | `_llamar_despliegue`. **No puede mergear**: la llamada manda al botón «Desplegar» de la notificación (ver `docs/AVERIAS.md`) |
 | Avería de infraestructura (vigilancia) | Jarvis-Claude, centralita | Automática, `_llamar()` desde `/vigilancia/estado` |
 | Hallazgo de revisión nocturna / vigilante | Jarvis-Claude, centralita | Botón «Hablarlo» → `POST /revision/{id}/accion` `{"accion":"hablar"}` |
 | Aviso de una sesión de Claude Code | Jarvis-Claude, centralita | Botón «Hablarlo» → `POST /sesion/{id}/accion` `{"accion":"hablar"}` |

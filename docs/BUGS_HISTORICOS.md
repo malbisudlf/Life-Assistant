@@ -109,6 +109,14 @@
   - Moraleja: **cuando un segundo camino reusa un estado o una reserva, pregunta qué más
     lee ese estado.** «Reusa entero el camino que ya existe» era verdad para quien
     escribía, no para quien leía.
+  - **Y el arreglo de entonces no bastaba** (2026-09-28): sacar la revisión de
+    `arreglando` quitó uno de los caminos que caían en la trampa, pero la trampa seguía
+    siendo atar por orden. Esa noche dos arreglos de averías abrieron su PR en ramas
+    `claude/…`, `pr-listo.yml` no los vio y sus filas se quedaron en `arreglando`; por la
+    mañana el PR de la revisión se ató a una de ellas y el teléfono pidió permiso para
+    algo que se mergeó solo medio minuto después. Hoy el id va dentro de la rama y
+    `pr-listo` no adivina nada. Moraleja: **si dos mitades tienen que encontrarse, dales
+    una referencia; «el más reciente» es una suposición sobre quién más escribe.**
 
 - **Dos huellas que no eran la situación: una demasiado ancha y otra demasiado fina.**
   La regla del proyecto ya estaba escrita («la huella es la SITUACIÓN, no el texto») y
