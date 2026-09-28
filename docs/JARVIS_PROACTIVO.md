@@ -214,6 +214,10 @@ fecha** y meterlo donde vive lo demás: el calendario y los recordatorios.
 
 ### 2.3 Una lista de tareas de verdad ●●
 
+> Sigue sin hacer. Se ha convertido en la **7.2 de `docs/IDEAS.md`** (Microsoft To Do, con
+> el mismo token de Graph), porque ahí tiene un motivo más: ser el destino de lo que se
+> saque de WhatsApp sin fecha.
+
 **Qué.** Conectar un gestor de tareas (Todoist, Notion) por MCP, para que las ideas por
 voz que son tareas acaben donde las miras.
 
