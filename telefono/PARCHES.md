@@ -3,7 +3,8 @@
 [claude-phone](https://github.com/theNetworkChuck/claude-phone) se instaló en `caja` el
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
 Estos son los doce cambios que hubo que hacerle (el 12, aplicado el 2026-09-27), con el
-síntoma que resuelve cada uno.
+síntoma que resuelve cada uno, más un decimotercero que no toca su código sino el
+`docker-compose.yml` que genera (ver «El parche 13» abajo).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -318,6 +319,39 @@ quien sí lo cogió; la línea `Quién descuelga` es lo que dirá si pasa. Si al
 persona llega sin nombre, oye el recado; no se le cuelga sin más. Y Whisper puede
 «oír» frases en el ruido de un buzón grabando: si pasa, esa llamada contaría con un
 turno.
+
+## El parche 13: drachtio espera a la red antes de arrancar
+
+Sale del 2026-09-29. Jarvis llevaba desde el reinicio de `caja` del día anterior **sin
+recibir una sola llamada**, con todo en verde: contenedores arriba, SBC conectado y la
+extensión `Registered`. El fallo no estaba en ningún log, estaba en `ss -lun`:
+
+- `--contact "sip:*:5070"` no escucha en «todas las interfaces» como `0.0.0.0`: drachtio
+  **enumera las IP que existen al arrancar** y abre un socket en cada una.
+- Tras el reinicio, drachtio arrancó 11 s después del arranque del sistema, antes de que
+  el DHCP diera IP a la red de casa. Se enganchó a `127.0.0.1` y a los puentes de Docker,
+  y a la IP de la LAN no.
+- La voice-app, en cambio, anuncia en el `Contact` del REGISTER la `EXTERNAL_IP` del
+  `.env` —la de la LAN—, así que el registro sale bien y el 3CX manda cada INVITE a un
+  puerto donde no escucha nadie. Tú oyes que suena y no contesta; aquí no queda rastro.
+
+El arreglo va en `~/.claude-phone/docker-compose.yml` (copia del original al lado, en
+`docker-compose.yml.antes-parche-13`): el servicio `drachtio` pasa a
+`entrypoint: ["/bin/sh", "-c"]` y su `command` espera, hasta 2 minutos, a que
+`${EXTERNAL_IP}` aparezca en `/proc/net/fib_trie` antes de hacer `exec /entrypoint.sh
+drachtio ...` con los mismos argumentos de antes (el `--secret` incluido). Pasados los 2
+minutos arranca igualmente, que nunca es peor que no esperar. Los `$` de la variable del
+bucle van como `$$` para que Compose no los interpole.
+
+Como `claude-phone setup` regenera ese fichero, **tras un `setup` hay que rehacerlo**. Y si
+alguna vez vuelve a pasar, lo que lo delata es:
+
+```bash
+ss -lun | grep :5070    # tiene que salir la IP de la LAN, no solo 127.0.0.1 y 172.x
+```
+
+Para salir del paso basta `docker compose -f ~/.claude-phone/docker-compose.yml restart
+drachtio voice-app`.
 
 ## Lo que además NO está en el repositorio original
 
