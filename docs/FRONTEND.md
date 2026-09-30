@@ -402,6 +402,12 @@ saber es distinto de saber que no llegó nada.
   - Estados: «Cargando…»; «No se pudo leer la casa.» con «Reintentar» (un refresco que
     falla no borra lo que ya se veía); sin catálogo, que HA todavía no lo ha mandado; y con
     catálogo pero sin favoritos, «Elige qué quieres tener a mano».
+- **`libros` (Libros)**: una fila por lectura en la tabla `libros`; el estado
+  (leyendo / pendiente / terminado) **no se guarda**, sale de `empezado`/`terminado`
+  (`estadoLibro` en `src/lib/libros.js`). El título se autocompleta con
+  `GET /libros/buscar` (tus libros + Open Library, con espera de 350 ms al escribir); si no
+  aparece, se escribe a mano y ya. Tocar la línea de fechas de un libro abre su editor;
+  `PATCH /libros/{id}` con `null` borra una fecha.
 - **`clothing` (Conteo ropa) es TEMPORAL**: lleva la cuenta de ropa comprada
   hasta saldar el gasto. Cuando ya no haga falta, se quita entero: el `case
   "clothing"` de `renderWidget`, su entrada en `ALL_DEFAULT_WIDGETS`/`DEFAULT_COLUMNS`,

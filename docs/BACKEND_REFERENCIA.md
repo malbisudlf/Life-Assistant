@@ -29,6 +29,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `DELETE /ideas/{idea_id}` | JWT | Elimina una idea |
 | `GET /export` | JWT | Exportación de datos |
 | `GET/POST /clothing`, `DELETE /clothing/{item_id}` | JWT | Widget **temporal** de conteo de ropa (ver `docs/FRONTEND.md`) |
+| `GET/POST /libros`, `PATCH/DELETE /libros/{libro_id}` | JWT | Widget de libros leídos: una fila por lectura con `empezado`/`terminado` (el PATCH con `null` borra la fecha) |
+| `GET /libros/buscar?q=` | JWT | Sugerencias de título: tus libros + Open Library (sin clave). Con límite por IP; si Open Library cae, solo los tuyos |
 | `GET /ha/events/soon` | servicio | Próximos eventos para las notificaciones de Alexa |
 | `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
 | `POST /ha/entidades` | servicio | HA empuja el catálogo de la casa (id, nombre, estado). Sin él Jarvis no sabe qué dispositivos hay |
