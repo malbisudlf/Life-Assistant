@@ -209,6 +209,43 @@ class TestHealthIngest:
         ]}})
         assert self._filas(mock_requests) == []
 
+    def test_el_peso_en_libras_se_convierte_a_kg(self, client, mock_requests):
+        """Entre el 10 y el 18/09/2026 el iPhone exportó el peso en libras y se guardó
+        tal cual: 160 "kg" en la gráfica y en la pendiente del mantenimiento."""
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "weight_body_mass", "units": "lb",
+             "data": [{"date": "2026-09-12 08:00:00", "qty": 160.83}]},
+            {"name": "lean_body_mass", "units": "lbs",
+             "data": [{"date": "2026-09-12 08:00:00", "qty": 123.9}]},
+        ]}})
+        filas = {f["metric_name"]: f for f in self._filas(mock_requests)}
+        assert filas["weight_body_mass"]["value"] == 72.95
+        assert filas["lean_body_mass"]["value"] == 56.2
+        assert {f["unit"] for f in filas.values()} == {"kg"}
+
+    def test_el_peso_en_kg_no_se_toca(self, client, mock_requests):
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "weight_body_mass", "units": "kg",
+             "data": [{"date": "2026-09-12 08:00:00", "qty": 71.7}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 71.7 and fila["unit"] == "kg"
+
+    def test_la_distancia_en_millas_se_convierte_a_km(self, client, mock_requests):
+        client.post(self.URL, json={"data": {"metrics": [
+            {"name": "walking_running_distance", "units": "mi",
+             "data": [{"date": "2026-09-11 08:00:00", "qty": 3.75}]}
+        ]}})
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 6.035 and fila["unit"] == "km"
+
+    def test_el_atajo_tambien_convierte_libras(self, client, mock_requests):
+        client.post("/health/ingest/simple?token=health-token", json=[
+            {"metric": "weight_body_mass", "date": "2026-09-12", "value": 160.83, "unit": "lb"}
+        ])
+        fila = self._filas(mock_requests)[0]
+        assert fila["value"] == 72.95 and fila["unit"] == "kg"
+
     def test_energia_kj_se_convierte_a_kcal(self, client, mock_requests):
         r = client.post(self.URL, json={"data": {"metrics": [
             {"name": "active_energy", "units": "kJ", "data": [{"date": "2026-07-05 08:00:00", "qty": 4184}]}

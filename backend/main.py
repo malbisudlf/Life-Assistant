@@ -5072,9 +5072,45 @@ def _normalizar_temperatura(name: str, value, unit):
     return round((float(value) - 32) / 1.8, 2), "degC"
 
 
+# Peso y distancia: la unidad la decide la región del iPhone, no este código. Entre el
+# 10 y el 18/09/2026 llegaron el peso en libras y la distancia andando en millas, y se
+# guardaron tal cual: 160 "kg" en la gráfica del peso y en la pendiente de las calorías
+# de mantenimiento. Misma lección que los kilojulios, y misma comparación laxa.
+MASA_METRICS = {"weight_body_mass", "weight", "lean_body_mass"}
+_UNIDADES_LB = {"lb", "lbs", "pound", "pounds", "libra", "libras"}
+_KG_POR_LB   = 0.45359237
+_UNIDADES_MI = {"mi", "mile", "miles", "milla", "millas"}
+_KM_POR_MI   = 1.609344
+
+
+def _unidad_limpia(unit) -> str:
+    return re.sub(r"[\s._-]", "", str(unit or "")).lower()
+
+
+def _normalizar_masa(name: str, value, unit):
+    """Devuelve (valor, unidad) con el peso corporal siempre en kg."""
+    if name not in MASA_METRICS or value is None or _unidad_limpia(unit) not in _UNIDADES_LB:
+        return value, unit
+    return round(float(value) * _KG_POR_LB, 2), "kg"
+
+
+def _normalizar_distancia(name: str, value, unit):
+    """Devuelve (valor, unidad) con las distancias siempre en km.
+
+    Va por sufijo y no por lista: `walking_running_distance`, `cycling_distance`… y
+    "mi" no puede significar otra cosa que millas.
+    """
+    if (not name.endswith("_distance") or value is None
+            or _unidad_limpia(unit) not in _UNIDADES_MI):
+        return value, unit
+    return round(float(value) * _KM_POR_MI, 3), "km"
+
+
 def _normalizar_unidades(name: str, value, unit):
-    """Las dos normalizaciones de unidad que se aplican en las DOS rutas de ingesta."""
+    """Las normalizaciones de unidad que se aplican en las DOS rutas de ingesta."""
     value, unit = _normalizar_energia(name, value, unit)
+    value, unit = _normalizar_masa(name, value, unit)
+    value, unit = _normalizar_distancia(name, value, unit)
     return _normalizar_temperatura(name, value, unit)
 
 

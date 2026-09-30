@@ -222,6 +222,12 @@ UNIQUE(metric_date, metric_name)
   mira `docs/BUGS_HISTORICOS.md`. Para reescribir filas ya guardadas está
   `backend/corregir_energia_kj.py` (simulacro por defecto, `--aplicar` para escribir);
   no basta con arreglar la ingesta, esas filas no se corrigen solas.
+- **Peso y distancia**: el peso (`weight_body_mass`, `weight`, `lean_body_mass`) se
+  guarda **siempre en kg** y las distancias (`*_distance`) **siempre en km**
+  (`_normalizar_masa` / `_normalizar_distancia`, en las dos rutas de ingesta). Entre el
+  10 y el 18/09/2026 el iPhone exportó en libras y millas y se guardó tal cual —160 "kg"
+  de peso—; esas 11 filas se reescribieron a mano el 2026-09-30. Si vuelve a pasar con
+  otra unidad, la pista es la columna `unit` de `health_metrics`.
 - **Métricas acumulativas**: nunca se sobreescriben con un valor menor (previene que un
   sync parcial del día borre el total). Sí se sobreescribe si el valor existente es 0.
 - **Upsert en lote con `on_conflict`**: ver "Ingesta de salud" en
