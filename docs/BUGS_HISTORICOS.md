@@ -741,6 +741,17 @@
   `http://localhost:<puerto>`, y ese nombre resuelve primero a `::1` mientras Edge escucha
   solo en IPv4: `ECONNREFUSED ::1:49605` con el navegador perfectamente vivo. En un
   loopback, escribe siempre `127.0.0.1`.
+- **«Apagar» no apagaba, y el WOL dejó de encender el PC.** El 2026-09-30 `caja` mandó
+  el paquete mágico cuatro veces sin que el PC despertara, y cada relanzado posterior
+  se quedó sin respuesta por SSH. `caja` no tenía nada roto: la MAC era la buena y el
+  paquete salía. Lo que había cambiado era el PC. La reinstalación de Windows del día
+  25 trajo el **Inicio rápido** activado de serie, así que «Apagar» desde el menú Inicio
+  hibernaba el núcleo en vez de apagar. Los eventos lo dicen claro: 42/187 de
+  `winlogon.exe` con `TargetState=6` (apagar) y `EffectiveState=5` (hibernar). Desde ese
+  estado la Realtek no atiende el WOL: su «Shutdown Wake-On-Lan» solo vale para el
+  apagado real. Se arregló con `HiberbootEnabled=0` (ver `agent/PUESTA_A_PUNTO.md`).
+  Moraleja: **tras reinstalar Windows, vuelve a mirar todo lo que se configuró fuera del
+  repositorio.** «Siempre ha funcionado» se refería a un Windows que ya no existía.
 - **Un `sleep` fijo esperando a que un servicio levante es un bug esperando su turno.**
   Los cuatro segundos que se dormían tras lanzar Edge bastaban en caliente y no en frío.
   Sustituido por espera activa contra el puerto, con límite.

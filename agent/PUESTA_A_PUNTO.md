@@ -191,6 +191,13 @@ vuelva solo, se aprovecha el apagado/suspensión que ya lanza Home Assistant:
       ya trabajando lanzaría un segundo agente compitiendo por la misma cola.
 - [ ] Confirmar que **WOL está habilitado** en BIOS y en la tarjeta de red (ya lo estaba
       para el flujo de Alud).
+- [ ] **Desactivar el Inicio rápido**, que viene activado de serie y vuelve con cada
+      reinstalación de Windows. Con él, «Apagar» no apaga: hiberna el núcleo, y desde
+      ese estado la tarjeta no atiende el paquete mágico. Desde PowerShell de
+      administrador:
+      `Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' HiberbootEnabled 0`.
+      En la tarjeta, que despierte solo con paquete mágico, no por patrón:
+      `Set-NetAdapterAdvancedProperty -Name Ethernet -DisplayName 'Wake on pattern match' -DisplayValue Disabled`.
 
 ## 6. OpenSSH en Windows (para el relanzado por HA) — de forma segura
 
