@@ -96,6 +96,7 @@ TABLAS = (
     ("training_payments",     "date,id",                 False,       None),
     ("ideas",                 "created_at,id",           False,       None),
     ("clothing",              "created_at,id",           False,       None),
+    ("libros",                "created_at,id",           False,       None),
     ("jarvis_memoria",        "clave",                   False,       None),
     ("jarvis_recordatorios",  "cuando,id",               False,       None),
     # Sin la columna `token`: es una credencial de GitHub que además caduca sola, así

@@ -28,6 +28,7 @@ import {
   tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS, sleepHistory, desgloseNoche,
   rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes, rachaSueno, rachaPasos,
 } from "../lib/helpers";
+import { agruparLibros, terminadosEnAnio, fechaLibro, textoDuracion, puedeBuscar } from "../lib/libros";
 import {
   proximoCompromiso, cuentaAtras, faltaPara, textoHueco, faseSalida, esUbicacionOnline,
   recordarModo, modoPara, textoErrorRuta, VENTANA_SALIDA_MIN, HORIZONTE_DIAS,
@@ -1616,6 +1617,7 @@ const DEFAULT_COLUMNS = {
   finanzas:          "right",
   ideas:             "right",
   clothing:          "right",
+  libros:            "right",
   alarmas:           "left",
   health_wellness:   "left",
   health_sleep:      "right",
@@ -1639,6 +1641,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "finanzas",          label: "Finanzas",          visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
   { id: "clothing",          label: "Conteo ropa",       visible: true,  column: "right" },
+  { id: "libros",            label: "Libros",            visible: true,  column: "right" },
   { id: "acciones_pc",       label: "Streaming PC",      visible: true,  column: "right" },
   { id: "casa",              label: "Casa",              visible: true,  column: "right" },
   { id: "alarmas",           label: "Alarmas",           visible: true,  column: "left"  },
@@ -2569,6 +2572,21 @@ export default function Dashboard() {
   const [clothingSaving, setClothingSaving]     = useState(false);
   const [clothingError, setClothingError]       = useState(null); // mensaje de fallo al guardar
   const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
+
+  // Libros leídos: la lista, el formulario de alta y el autocompletado del título.
+  const [libros, setLibros]                     = useState([]);
+  const [librosEstado, setLibrosEstado]         = useState("cargando"); // cargando | ok | error
+  const [showLibroForm, setShowLibroForm]       = useState(false);
+  const [libroTitulo, setLibroTitulo]           = useState("");
+  const [libroAutor, setLibroAutor]             = useState("");
+  const [libroPortada, setLibroPortada]         = useState(null);       // viene de la sugerencia elegida
+  const [libroEstadoNuevo, setLibroEstadoNuevo] = useState("leyendo");  // leyendo | terminado | pendiente
+  const [libroEmpezado, setLibroEmpezado]       = useState(() => isoHoy());
+  const [libroTerminado, setLibroTerminado]     = useState(() => isoHoy());
+  const [libroSugerencias, setLibroSugerencias] = useState([]);
+  const [libroSaving, setLibroSaving]           = useState(false);
+  const [libroError, setLibroError]             = useState(null);
+  const [libroEditando, setLibroEditando]       = useState(null);       // id del libro con las fechas abiertas
   const [isEditMode, setIsEditMode]       = useState(false);
   const [draggingId, setDraggingId]       = useState(null);
   const [dragPos, setDragPos]             = useState(null);
@@ -3013,6 +3031,33 @@ export default function Dashboard() {
       .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
   }, [token]);
+
+  // Cargar los libros
+  useEffect(() => {
+    if (!token) return;
+    apiFetch(`${API}/libros`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(data => { if (Array.isArray(data)) { setLibros(data); setLibrosEstado("ok"); } })
+      .catch(() => setLibrosEstado("error"));
+  }, [token]);
+
+  // Autocompletado del título: espera a que pares de escribir (350 ms) y descarta la
+  // respuesta si mientras tanto el texto cambió, para que una búsqueda lenta no pise a
+  // otra más nueva.
+  useEffect(() => {
+    if (!token || !showLibroForm || libroPortada || !puedeBuscar(libroTitulo)) {
+      setLibroSugerencias([]);
+      return;
+    }
+    let vigente = true;
+    const espera = setTimeout(() => {
+      apiFetch(`${API}/libros/buscar?q=${encodeURIComponent(libroTitulo.trim())}`, { headers: authHeaders() })
+        .then(r => r.ok ? r.json() : { resultados: [] })
+        .then(d => { if (vigente) setLibroSugerencias(Array.isArray(d.resultados) ? d.resultados : []); })
+        .catch(() => { if (vigente) setLibroSugerencias([]); });
+    }, 350);
+    return () => { vigente = false; clearTimeout(espera); };
+  }, [token, showLibroForm, libroTitulo, libroPortada]);
 
   // Geolocalización del dispositivo (para clima y origen del cálculo de salida).
   // Solo se pide con sesión iniciada (si no, el prompt saldría en la pantalla de
@@ -4629,6 +4674,75 @@ export default function Dashboard() {
     try {
       const r = await apiFetch(`${API}/clothing/${id}`, { method: "DELETE", headers: authHeaders() });
       if (r.ok) setClothing(prev => prev.filter(c => c.id !== id));
+    } catch { /* mejor esfuerzo: ignorar */ }
+  }
+
+  function cerrarLibroForm() {
+    setShowLibroForm(false);
+    setLibroError(null);
+    setLibroTitulo(""); setLibroAutor(""); setLibroPortada(null); setLibroSugerencias([]);
+    setLibroEstadoNuevo("leyendo");
+    setLibroEmpezado(isoHoy()); setLibroTerminado(isoHoy());
+  }
+
+  function elegirSugerenciaLibro(sug) {
+    setLibroTitulo(sug.titulo || "");
+    setLibroAutor(sug.autor || "");
+    setLibroPortada(sug.portada || null);
+    setLibroSugerencias([]);
+  }
+
+  async function addLibro() {
+    if (libroSaving || !libroTitulo.trim()) return;
+    setLibroSaving(true);
+    setLibroError(null);
+    const leyendo    = libroEstadoNuevo !== "pendiente";
+    const terminado  = libroEstadoNuevo === "terminado";
+    try {
+      const r = await apiFetch(`${API}/libros`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify({
+          titulo:    libroTitulo.trim(),
+          autor:     libroAutor.trim() || null,
+          portada:   libroPortada,
+          empezado:  leyendo && libroEmpezado ? libroEmpezado : null,
+          terminado: terminado && libroTerminado ? libroTerminado : null,
+        }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { /* respuesta sin cuerpo JSON */ }
+      if (r.ok && data.ok && data.libro) {
+        setLibros(prev => [data.libro, ...prev]);
+        cerrarLibroForm();
+      } else {
+        const detalle = typeof data.detail === "string" ? `: ${data.detail}` : "";
+        setLibroError(`No se pudo guardar (error ${r.status})${detalle}`);
+      }
+    } catch {
+      setLibroError("No se pudo conectar con el servidor.");
+    }
+    finally { setLibroSaving(false); }
+  }
+
+  // Cambia solo las fechas que se le pasen; `null` borra la fecha (desmarcar «terminado»).
+  async function fechasLibro(id, cambios) {
+    try {
+      const r = await apiFetch(`${API}/libros/${id}`, {
+        method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.libro) setLibros(prev => prev.map(l => l.id === id ? data.libro : l));
+      else setLibroError(typeof data.detail === "string" ? data.detail : `No se pudo actualizar (error ${r.status})`);
+    } catch {
+      setLibroError("No se pudo conectar con el servidor.");
+    }
+  }
+
+  async function deleteLibro(id) {
+    try {
+      const r = await apiFetch(`${API}/libros/${id}`, { method: "DELETE", headers: authHeaders() });
+      if (r.ok) setLibros(prev => prev.filter(l => l.id !== id));
     } catch { /* mejor esfuerzo: ignorar */ }
   }
 
@@ -7221,6 +7335,149 @@ export default function Dashboard() {
               <button style={s.newIdeaBtn} onClick={() => { setClothingError(null); setShowClothingForm(true); }}>
                 + Añadir prenda
               </button>
+            )}
+          </div>
+        );
+      }
+      case "libros": {
+        const grupos     = agruparLibros(libros);
+        const hoyLibros  = isoHoy();
+        const esteAnio   = terminadosEnAnio(libros, Number(hoyLibros.slice(0, 4)));
+        const secciones  = [
+          ["Leyendo", grupos.leyendo], ["Pendientes", grupos.pendientes], ["Leídos", grupos.terminados],
+        ].filter(([, l]) => l.length > 0);
+        const miniBtn = { background: "none", border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--accent)", fontSize: 11, padding: "3px 8px", cursor: "pointer", flexShrink: 0 };
+        return (
+          <div style={cardStyle} data-card={id} key="libros">
+            <div style={s.sectionLabel}>Libros</div>
+            {librosEstado === "error" && (
+              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>No se han podido cargar los libros.</div>
+            )}
+            {librosEstado === "ok" && libros.length === 0 && !showLibroForm && (
+              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>Sin libros todavía. ¡Apunta el primero!</div>
+            )}
+            {secciones.map(([titulo, lista]) => (
+              <div key={titulo} style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "var(--muted2)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{titulo}</div>
+                {lista.map(libro => {
+                  const dur = textoDuracion(libro, hoyLibros);
+                  return (
+                    <div key={libro.id} style={{ ...s.ideaCard, cursor: "default" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        {libro.portada ? (
+                          <img src={libro.portada} alt="" loading="lazy"
+                            style={{ width: 36, height: 52, objectFit: "cover", borderRadius: 4, flexShrink: 0, border: "0.5px solid var(--border2)" }} />
+                        ) : (
+                          <div style={{ width: 36, height: 52, borderRadius: 4, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--surface)", border: "0.5px solid var(--border2)", fontSize: 18 }}>📖</div>
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{libro.titulo}</div>
+                          {libro.autor && <div style={{ fontSize: 12, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{libro.autor}</div>}
+                          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", marginTop: 2, cursor: "pointer" }}
+                            onClick={() => setLibroEditando(libroEditando === libro.id ? null : libro.id)}>
+                            {libro.empezado ? `${fechaLibro(libro.empezado)}${libro.terminado ? ` → ${fechaLibro(libro.terminado)}` : " → …"}` : "Sin empezar"}
+                            {dur && ` · ${dur}`}
+                          </div>
+                        </div>
+                        {!libro.empezado && (
+                          <button style={miniBtn} onClick={() => fechasLibro(libro.id, { empezado: hoyLibros })}>Empezar</button>
+                        )}
+                        {libro.empezado && !libro.terminado && (
+                          <button style={miniBtn} onClick={() => fechasLibro(libro.id, { terminado: hoyLibros })}>Terminado</button>
+                        )}
+                        <span style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
+                          onClick={() => deleteLibro(libro.id)}>✕</span>
+                      </div>
+                      {libroEditando === libro.id && (
+                        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                          <label style={{ fontSize: 11, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 130 }}>
+                            Empezado
+                            <input style={INPUT_STYLE} type="date" value={libro.empezado || ""}
+                              onChange={e => fechasLibro(libro.id, { empezado: e.target.value || null })} />
+                          </label>
+                          <label style={{ fontSize: 11, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 130 }}>
+                            Terminado
+                            <input style={INPUT_STYLE} type="date" value={libro.terminado || ""} min={libro.empezado || undefined}
+                              onChange={e => fechasLibro(libro.id, { terminado: e.target.value || null })} />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+
+            {esteAnio > 0 && (
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 12, paddingTop: 12, borderTop: "0.5px solid var(--border2)" }}>
+                {esteAnio} {esteAnio === 1 ? "libro leído" : "libros leídos"} este año
+              </div>
+            )}
+
+            {showLibroForm ? (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ position: "relative" }}>
+                  <input style={INPUT_STYLE} placeholder="Título del libro" value={libroTitulo} autoComplete="off"
+                    onChange={e => { setLibroTitulo(e.target.value); setLibroPortada(null); }} />
+                  {libroSugerencias.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", marginTop: 4, background: "var(--surface2)", border: "0.5px solid var(--border2)", borderRadius: 8, overflow: "hidden" }}>
+                      {libroSugerencias.map((sug, i) => (
+                        <button key={`${sug.titulo}-${sug.autor}-${i}`} type="button"
+                          onClick={() => elegirSugerenciaLibro(sug)}
+                          style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, textAlign: "left", background: "none", border: "none", borderTop: i ? "0.5px solid var(--border)" : "none", padding: "8px 12px", cursor: "pointer", color: "var(--text)", fontFamily: "'DM Sans', sans-serif" }}>
+                          <span style={{ fontSize: 13 }}>{sug.titulo}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                            {[sug.autor, sug.anio, sug.origen === "mis_libros" ? "ya apuntado" : null].filter(Boolean).join(" · ")}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <input style={INPUT_STYLE} placeholder="Autor (opcional)" value={libroAutor}
+                  onChange={e => setLibroAutor(e.target.value)} />
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[["leyendo", "Leyendo"], ["terminado", "Terminado"], ["pendiente", "Pendiente"]].map(([val, txt]) => (
+                    <button key={val} type="button"
+                      style={{ ...s.newIdeaBtn, marginTop: 0, flex: 1, padding: "8px 4px",
+                        ...(libroEstadoNuevo === val ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                      onClick={() => setLibroEstadoNuevo(val)}>
+                      {txt}
+                    </button>
+                  ))}
+                </div>
+                {libroEstadoNuevo !== "pendiente" && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <label style={{ fontSize: 11, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 130 }}>
+                      Empezado
+                      <input style={INPUT_STYLE} type="date" value={libroEmpezado} onChange={e => setLibroEmpezado(e.target.value)} />
+                    </label>
+                    {libroEstadoNuevo === "terminado" && (
+                      <label style={{ fontSize: 11, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 130 }}>
+                        Terminado
+                        <input style={INPUT_STYLE} type="date" value={libroTerminado} min={libroEmpezado || undefined}
+                          onChange={e => setLibroTerminado(e.target.value)} />
+                      </label>
+                    )}
+                  </div>
+                )}
+                {libroError && <div style={{ fontSize: 12, color: "#d4645a", lineHeight: 1.4 }}>{libroError}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0 }} onClick={cerrarLibroForm}>Cancelar</button>
+                  <button style={{ ...s.newIdeaBtn, flex: 1, marginTop: 0,
+                    ...(libroTitulo.trim() ? { borderStyle: "solid", borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                    onClick={addLibro} disabled={!libroTitulo.trim() || libroSaving}>
+                    {libroSaving ? "Guardando..." : "Añadir"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {libroError && <div style={{ fontSize: 12, color: "#d4645a", marginTop: 8 }}>{libroError}</div>}
+                <button style={s.newIdeaBtn} onClick={() => { setLibroError(null); setShowLibroForm(true); }}>
+                  + Añadir libro
+                </button>
+              </>
             )}
           </div>
         );

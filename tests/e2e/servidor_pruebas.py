@@ -249,6 +249,7 @@ class _RouterSimulado:
               "full_text": "Contenido de la idea", "tag": "e2e",
               "created_at": f"{_dia(0)}T09:00:00Z"}])),
         ("/rest/v1/clothing", lambda: _Respuesta([])),
+        ("/rest/v1/libros", lambda: _Respuesta([])),
         ("/rest/v1/brief_envios", lambda: _Respuesta(
             [{"fecha": _dia(0), "enviado_at": _iso(-3), "fuente": "despertar"}])),
         ("/rest/v1/informe_envios", lambda: _Respuesta(

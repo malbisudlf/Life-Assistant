@@ -1,12 +1,12 @@
 ﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request,
-                     status, UploadFile, File, Path, WebSocket, WebSocketDisconnect)
+                     status, UploadFile, File, Path, Query, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Literal
 from jose import JWTError, jwt
 from openai import OpenAI
@@ -2995,6 +2995,200 @@ def delete_clothing(
 ):
     r = http.delete(
         f"{SUPABASE_URL}/rest/v1/clothing?id=eq.{item_id}",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True}
+
+
+# ── LIBROS LEÍDOS ────────────────────────────────────────────────────────────
+# Una fila por lectura. El «catálogo» que autocompleta el título son dos fuentes: lo que
+# ya has apuntado tú (también los libros metidos a mano) y Open Library, que es gratis y
+# no pide clave. Si Open Library no contesta, se sugiere solo lo tuyo: escribir a mano
+# sigue funcionando siempre.
+
+OPENLIBRARY_URL = "https://openlibrary.org/search.json"
+LIBROS_BUSQUEDA_MAX = 30       # peticiones por ventana: el frontend busca mientras escribes
+LIBROS_BUSQUEDA_VENTANA = 60
+
+class LibroIn(BaseModel):
+    titulo:    str = Field(min_length=1, max_length=300)
+    autor:     Optional[str] = Field(default=None, max_length=300)
+    portada:   Optional[str] = Field(default=None, max_length=500)
+    empezado:  Optional[date] = None
+    terminado: Optional[date] = None
+
+    @field_validator("titulo")
+    @classmethod
+    def _titulo_no_vacio(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("el título no puede estar vacío")
+        return v
+
+    @field_validator("portada")
+    @classmethod
+    def _portada_https(cls, v: Optional[str]) -> Optional[str]:
+        # Acaba en un <img src>: solo https, nada de javascript: ni data:.
+        if v and not v.lower().startswith("https://"):
+            raise ValueError("la portada debe ser una URL https")
+        return v or None
+
+    @model_validator(mode="after")
+    def _fechas_coherentes(self):
+        if self.empezado and self.terminado and self.terminado < self.empezado:
+            raise ValueError("terminado no puede ser anterior a empezado")
+        return self
+
+
+class LibroFechasIn(BaseModel):
+    """PATCH: solo cambia lo que venga en el cuerpo. Un `null` explícito BORRA la fecha
+    (desmarcar «terminado»); no mandar el campo la deja como estaba."""
+    empezado:  Optional[date] = None
+    terminado: Optional[date] = None
+
+
+@app.get("/libros")
+def get_libros(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/libros?order=created_at.desc",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return r.json()
+
+
+def _sugerencias_locales(q: str) -> list:
+    # Sin comodines del usuario: `*` y `%` dentro de un ilike cambiarían lo que busca.
+    limpio = re.sub(r"[*%,()\\]", " ", q).strip()
+    if not limpio:
+        return []
+    r = http.get(
+        f"{SUPABASE_URL}/rest/v1/libros?titulo=ilike.{quote('*' + limpio + '*', safe='*')}"
+        "&select=titulo,autor,portada&order=created_at.desc&limit=30",
+        headers=supabase_headers(),
+    )
+    if r.status_code >= 300:
+        logger.warning("libros: no se pudieron leer las sugerencias propias (%s)", r.status_code)
+        return []
+    vistos, salida = set(), []
+    for f in r.json():
+        clave = ((f.get("titulo") or "").lower(), (f.get("autor") or "").lower())
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        salida.append({"titulo": f.get("titulo"), "autor": f.get("autor"),
+                       "portada": f.get("portada"), "origen": "mis_libros"})
+    return salida[:5]
+
+
+def _sugerencias_openlibrary(q: str) -> list:
+    try:
+        r = http.get(
+            OPENLIBRARY_URL,
+            params={"q": q, "limit": 8, "fields": "title,author_name,first_publish_year,cover_i"},
+            headers={"User-Agent": "life-assistant (dashboard personal)"},
+            timeout=6,
+        )
+        if r.status_code >= 300:
+            return []
+        docs = r.json().get("docs") or []
+    except Exception as e:
+        logger.warning("libros: Open Library no contesta (%s)", type(e).__name__)
+        return []
+    salida = []
+    for d in docs:
+        titulo = (d.get("title") or "").strip()
+        if not titulo:
+            continue
+        autores = d.get("author_name") or []
+        cover = d.get("cover_i")
+        salida.append({
+            "titulo":  titulo[:300],
+            "autor":   (autores[0] if autores else None),
+            "anio":    d.get("first_publish_year"),
+            "portada": f"https://covers.openlibrary.org/b/id/{int(cover)}-M.jpg"
+                       if isinstance(cover, int) else None,
+            "origen":  "openlibrary",
+        })
+    return salida
+
+
+@app.get("/libros/buscar")
+def buscar_libros(
+    request: Request,
+    q: str = Query(..., min_length=2, max_length=100),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Sugerencias de título: primero lo que ya has apuntado, luego Open Library."""
+    _check_rate("libros_buscar", _client_ip(request), LIBROS_BUSQUEDA_MAX, LIBROS_BUSQUEDA_VENTANA)
+    q = q.strip()
+    propias = _sugerencias_locales(q)
+    externas = _sugerencias_openlibrary(q)
+    tengo = {((p["titulo"] or "").lower(), (p["autor"] or "").lower()) for p in propias}
+    externas = [e for e in externas
+                if ((e["titulo"] or "").lower(), (e["autor"] or "").lower()) not in tengo]
+    return {"resultados": propias + externas}
+
+
+@app.post("/libros")
+def create_libro(
+    body: LibroIn,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    payload = {
+        "titulo":    body.titulo,
+        "autor":     (body.autor or "").strip() or None,
+        "portada":   body.portada,
+        "empezado":  body.empezado.isoformat() if body.empezado else None,
+        "terminado": body.terminado.isoformat() if body.terminado else None,
+    }
+    r = http.post(
+        f"{SUPABASE_URL}/rest/v1/libros",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=payload,
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {"ok": True, "libro": r.json()[0]}
+
+
+@app.patch("/libros/{libro_id}")
+def update_libro_fechas(
+    body: LibroFechasIn,
+    libro_id: str = _uuid_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    cambios = {k: (getattr(body, k).isoformat() if getattr(body, k) else None)
+               for k in body.model_fields_set}
+    if not cambios:
+        raise HTTPException(status_code=422, detail="Nada que cambiar")
+    r = http.patch(
+        f"{SUPABASE_URL}/rest/v1/libros?id=eq.{libro_id}",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json=cambios,
+    )
+    if r.status_code >= 300:
+        # El check de la tabla rechaza terminado < empezado: eso es un error del
+        # usuario, no de Supabase.
+        if r.status_code == 400 and "libros_check" in (r.text or ""):
+            raise HTTPException(status_code=422, detail="terminado no puede ser anterior a empezado")
+        raise _supabase_error(r)
+    filas = r.json()
+    if not filas:
+        raise HTTPException(status_code=404, detail="Libro no encontrado")
+    return {"ok": True, "libro": filas[0]}
+
+
+@app.delete("/libros/{libro_id}")
+def delete_libro(
+    libro_id: str = _uuid_path(),
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    r = http.delete(
+        f"{SUPABASE_URL}/rest/v1/libros?id=eq.{libro_id}",
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
@@ -10496,6 +10690,7 @@ TABLAS_CONOCIDAS = {
     "job_results":           "20260511_job_results",
     "oauth_tokens":          "20260607_oauth_tokens",
     "clothing":              "20260724_clothing",
+    "libros":                "20260930_libros",
     "login_attempts":        "20260730_login_attempts",
     "app_logs":              "20260802_app_logs",
     "brief_envios":          "20260804_brief_envios",
