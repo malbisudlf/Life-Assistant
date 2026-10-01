@@ -118,14 +118,19 @@ class TestListaDeTablas:
 
     def _tablas_de_las_migraciones(self):
         raiz = os.path.join(os.path.dirname(__file__), "..", "..", "supabase", "migrations")
-        tablas = set()
+        tablas, borradas = set(), set()
         for ruta in glob.glob(os.path.join(raiz, "*.sql")):
             with open(ruta, encoding="utf-8") as f:
                 texto = f.read()
             for m in re.finditer(r"create table\s+(?:if not exists\s+)?(?:public\.)?([a-z_]+)",
                                  texto, re.IGNORECASE):
                 tablas.add(m.group(1))
-        return tablas
+            # Una tabla que una migración posterior borra (`whatsapp_chats`) ya no existe:
+            # la pestaña no tiene que contarla.
+            for m in re.finditer(r"drop table\s+(?:if exists\s+)?(?:public\.)?([a-z_]+)",
+                                 texto, re.IGNORECASE):
+                borradas.add(m.group(1))
+        return tablas - borradas
 
     def test_estan_todas_las_tablas_que_crean_las_migraciones(self):
         assert self._tablas_de_las_migraciones() == set(main.TABLAS_CONOCIDAS)

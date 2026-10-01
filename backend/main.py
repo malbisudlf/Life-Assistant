@@ -421,34 +421,6 @@ NOCHE_BORRADORES_MAX = int(os.getenv("NOCHE_BORRADORES_MAX", "10"))
 TAREAS_TODO = _flag("TAREAS_TODO", "0")
 TAREAS_MAX  = int(os.getenv("TAREAS_MAX", "50"))
 
-# ── WhatsApp (solo lectura) ───────────────────────────────────────────────────
-# Lo que te piden y lo que prometes pasa casi todo por WhatsApp. `caja` se vincula como
-# un dispositivo más (el puente vive en el repositorio HomeLab) y le cuenta al backend,
-# de cada chat individual, QUIÉN escribió el último mensaje y CUÁNDO. Nada más: ni el
-# texto ni los grupos salen del puente. Ver `docs/WHATSAPP.md`.
-#
-# Nace apagado, como todo lo que lee algo tuyo sin que haya nadie mirando.
-WHATSAPP_LEER  = _flag("WHATSAPP_LEER", "0")
-# Token propio y no el de HA: si el puente se ve comprometido, lo único que se puede
-# hacer con él es apuntar horas de mensajes.
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-# Cuántas horas sin contestar hacen que un chat cuente como pendiente. Menos de un día
-# convierte cualquier conversación en curso en un pendiente.
-WHATSAPP_PENDIENTE_HORAS = float(os.getenv("WHATSAPP_PENDIENTE_HORAS", "24"))
-# Más allá de esto, un mensaje sin contestar ya no es un pendiente: es una conversación
-# que terminó así. Sin tope, el aviso arrastraría para siempre el «ok» de hace un mes.
-WHATSAPP_VENTANA_DIAS = int(os.getenv("WHATSAPP_VENTANA_DIAS", "7"))
-# A qué hora sale el aviso del día. A media mañana y no al despertar: a esa hora ya has
-# tenido ocasión de contestar lo de primera hora, y aún queda día para lo demás.
-WHATSAPP_HORA_AVISO = os.getenv("WHATSAPP_HORA_AVISO", "12:00")
-# Chats que no cuentan nunca como pendientes (ids tal cual los manda el puente, por
-# comas): el de un bot, el de un grupo de un solo contacto que no espera respuesta.
-WHATSAPP_IGNORAR = {t.strip() for t in os.getenv("WHATSAPP_IGNORAR", "").split(",") if t.strip()}
-# Cuántas horas sin saber nada del puente hacen que se dé por caído. El puente manda un
-# latido cada 30 minutos aunque no entre ningún mensaje: sin latido, «nadie te ha
-# escrito» y «el puente lleva un día muerto» serían la misma cosa.
-WHATSAPP_SILENCIO_HORAS = float(os.getenv("WHATSAPP_SILENCIO_HORAS", "3"))
-
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
 # RECOGEN (titular, fuente, hora, enlace, extracto y qué término toca hoy); quién elige
@@ -10758,7 +10730,6 @@ TABLAS_CONOCIDAS = {
     "avisos_llamadas":       "20260923_llamadas_cotidianas",
     "backend_latidos":       "20260924_backend_latidos",
     "despertares":           "20260927_despertares",
-    "whatsapp_chats":        "20260928_whatsapp",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -15620,7 +15591,6 @@ _REGLAS = (
     ("hueco_entreno", _regla_hueco_entreno),
     ("vigilancias",   lambda: _revisar_vigilancias()),
     ("correo",        lambda: _revisar_correo()),
-    ("whatsapp",      lambda: _regla_whatsapp()),
     ("tuyas",         lambda: _correr_reglas_usuario()),
 )
 
@@ -16958,335 +16928,6 @@ def _revisar_vigilancias() -> int:
                                      huella=f"{v.get('clave')}:{nueva_huella[:32]}"):
             avisados += 1
     return avisados
-
-
-# ── WhatsApp: lo que tienes pendiente de contestar ───────────────────────────
-# WhatsApp no deja leer una cuenta personal: la API oficial es para números de empresa.
-# `caja` se vincula como un dispositivo más (el puente, en el repositorio HomeLab) y
-# empuja aquí, por cada chat individual, la hora del último mensaje SUYO y la del último
-# TUYO. Con eso basta para saber qué tienes pendiente, y es todo lo que sale del puente.
-#
-# Tres cosas que no se relajan (`docs/WHATSAPP.md`):
-#   - **Solo lectura, y no porque este código no llame a enviar.** El puente no tiene la
-#     función de enviar ni una API a la que pedírselo. Aquí no hay nada que desactivar.
-#   - **Sin texto.** Ni el mensaje ni un resumen suyo viajan aquí: dos horas y un nombre.
-#     Decidir si algo está pendiente es comparar dos horas, y lo que se puede decidir con
-#     un dato exacto no se le pregunta a un modelo.
-#   - **Sin grupos.** Un grupo no «espera tu respuesta» de la misma forma, y son los chats
-#     con más gente ajena dentro. Se descartan en el puente y otra vez aquí.
-REGLA_WHATSAPP         = "whatsapp"
-# El aviso de que el puente se ha callado. Regla propia para que marcar «no útil» los
-# pendientes no calle también el aviso de que el puente se ha caído, que es de otra clase.
-REGLA_WHATSAPP_PUENTE  = "whatsapp_puente"
-WHATSAPP_CHATS_URL     = f"{SUPABASE_URL}/rest/v1/whatsapp_chats"
-WHATSAPP_APUNTAR_URL   = f"{SUPABASE_URL}/rest/v1/rpc/whatsapp_apuntar"
-HORA_AVISO_WHATSAPP    = _hora_config(WHATSAPP_HORA_AVISO, (12, 0))
-# Lo que puede traer un envío. El puente manda de a uno en vivo y en lotes al vincularse
-# (el historial que WhatsApp le pasa al dispositivo nuevo); más de esto se trocea allí.
-WHATSAPP_MAX_CHATS     = 500
-# Chats individuales y nada más: un número (`…@s.whatsapp.net`) o el id anónimo que usa
-# WhatsApp cuando no enseña el número (`…@lid`). Un grupo (`…@g.us`), un canal o una
-# difusión no pasan. Es la segunda barrera: la primera es el puente.
-_WHATSAPP_CHAT_RE = re.compile(r"^[0-9]{5,20}@(?:s\.whatsapp\.net|lid)$")
-
-# Lo último que se sabe del puente. En memoria: perderlo en un reinicio solo retrasa el
-# aviso de puente caído (se cuenta desde el arranque), no se inventa nada.
-_whatsapp_lock       = threading.Lock()
-_whatsapp_arranque   = time.time()
-_whatsapp_estado: dict = {"senal": None, "conectado": None, "motivo": "", "caido_avisado": False}
-# Solo evita repetir la CONSULTA del aviso diario dentro de la vida del proceso: quien
-# impide el aviso duplicado es el id determinista contra la clave primaria.
-_whatsapp_avisado_dia: str | None = None
-
-
-class WhatsappChatIn(BaseModel):
-    chat:   str = Field(max_length=64)
-    nombre: str | None = Field(None, max_length=100)
-    suyo:   datetime | None = None
-    mio:    datetime | None = None
-
-
-class WhatsappEventoIn(BaseModel):
-    # `chats` trae horas de mensajes; `estado` es el latido (y el aviso de sesión cerrada).
-    tipo:      Literal["chats", "estado"]
-    chats:     list[WhatsappChatIn] = Field(default_factory=list, max_length=WHATSAPP_MAX_CHATS)
-    conectado: bool | None = None
-    motivo:    str | None = Field(None, max_length=100)
-
-
-def _whatsapp_utc(valor) -> datetime | None:
-    """Un instante como `datetime` en UTC, o None si no se entiende. Sin zona, es UTC."""
-    if valor is None or valor == "":
-        return None
-    if isinstance(valor, datetime):
-        instante = valor
-    else:
-        try:
-            instante = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if instante.tzinfo is None:
-        instante = instante.replace(tzinfo=timezone.utc)
-    return instante.astimezone(timezone.utc)
-
-
-def _whatsapp_filas(chats: list) -> tuple[list, int]:
-    """Lo que manda el puente, listo para `whatsapp_apuntar`. Devuelve (filas, descartados).
-
-    Un mismo chat puede venir dos veces en un lote (el historial trae varios mensajes de
-    cada conversación): se funde aquí, quedándose con la hora más reciente de cada lado,
-    porque el `on conflict` de Postgres no admite tocar la misma fila dos veces en una
-    sentencia. Una hora en el futuro no se guarda: un reloj mal puesto en el puente la
-    dejaría como «lo último» para siempre y taparía todo lo que llegara después.
-    """
-    tope = datetime.now(timezone.utc) + timedelta(hours=1)
-    juntos: dict = {}
-    descartados = 0
-    for c in chats:
-        chat = str(c.chat or "").strip()
-        if not _WHATSAPP_CHAT_RE.match(chat):
-            descartados += 1
-            continue
-        fila = juntos.setdefault(chat, {"chat": chat, "nombre": None, "suyo": None, "mio": None})
-        nombre = str(c.nombre or "").strip()[:100]
-        if nombre:
-            fila["nombre"] = nombre
-        for lado in ("suyo", "mio"):
-            instante = _whatsapp_utc(getattr(c, lado))
-            if instante and instante <= tope and (fila[lado] is None or instante > fila[lado]):
-                fila[lado] = instante
-    filas = []
-    for fila in juntos.values():
-        if fila["suyo"] is None and fila["mio"] is None:
-            descartados += 1
-            continue
-        filas.append({**fila, **{lado: fila[lado].isoformat() if fila[lado] else None
-                                 for lado in ("suyo", "mio")}})
-    return filas, descartados
-
-
-def _whatsapp_nombre(fila: dict) -> str:
-    """Cómo se llama un chat en el aviso. Sin nombre guardado, el número si lo hay."""
-    nombre = str(fila.get("nombre") or "").strip()
-    if nombre:
-        return nombre[:40]
-    chat = str(fila.get("chat") or "")
-    if chat.endswith("@s.whatsapp.net"):
-        return "+" + chat.split("@")[0]
-    return "alguien sin nombre guardado"
-
-
-def _whatsapp_pendientes(filas: list, ahora: datetime) -> list:
-    """Los chats en los que el último mensaje es suyo y lleva demasiado sin respuesta.
-
-    Pendiente es: su último mensaje es posterior al tuyo (o no hay ninguno tuyo), tiene
-    más de `WHATSAPP_PENDIENTE_HORAS` y menos de `WHATSAPP_VENTANA_DIAS`. Los más antiguos
-    primero, que son los que más urgen. Sin modelo: son dos horas comparadas.
-    """
-    ahora  = _whatsapp_utc(ahora) or datetime.now(timezone.utc)
-    limite = ahora - timedelta(hours=WHATSAPP_PENDIENTE_HORAS)
-    corte  = ahora - timedelta(days=WHATSAPP_VENTANA_DIAS)
-    salida = []
-    for f in filas or []:
-        chat = str(f.get("chat") or "")
-        if chat in WHATSAPP_IGNORAR or not _WHATSAPP_CHAT_RE.match(chat):
-            continue
-        suyo = _whatsapp_utc(f.get("ultimo_suyo"))
-        mio  = _whatsapp_utc(f.get("ultimo_mio"))
-        if not suyo or suyo > limite or suyo < corte:
-            continue
-        if mio and mio >= suyo:
-            continue
-        salida.append({
-            "chat":   chat,
-            "nombre": _whatsapp_nombre(f),
-            "desde":  suyo.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "horas":  int((ahora - suyo).total_seconds() // 3600),
-        })
-    salida.sort(key=lambda p: p["desde"])
-    return salida
-
-
-def _whatsapp_hace(horas: int) -> str:
-    dias = max(1, horas // 24)
-    return "1 día" if dias == 1 else f"{dias} días"
-
-
-def _frase_whatsapp(pendientes: list) -> str:
-    """El aviso en una línea que quepa en `RECORDATORIO_MAX_TEXTO`, nombres incluidos.
-
-    Se corta por nombres enteros y se dice cuántos faltan: un nombre partido por la mitad
-    en una notificación es peor que un «y 3 más».
-    """
-    cabeza = "Sin contestar en WhatsApp: "
-    trozos = [f"{p['nombre']} ({_whatsapp_hace(p['horas'])})" for p in pendientes]
-    for n in range(len(trozos), 0, -1):
-        resto = len(trozos) - n
-        frase = cabeza + ", ".join(trozos[:n]) + (f" y {resto} más." if resto else ".")
-        if len(frase) <= RECORDATORIO_MAX_TEXTO:
-            return frase
-    return f"Tienes {len(trozos)} chats de WhatsApp sin contestar."
-
-
-def _whatsapp_leer_chats(ahora: datetime) -> list:
-    """Los chats con mensaje suyo dentro de la ventana. Lanza si Supabase no contesta:
-    un fallo no puede parecerse a «no tienes nada pendiente»."""
-    corte = (_whatsapp_utc(ahora) - timedelta(days=WHATSAPP_VENTANA_DIAS)).isoformat()
-    r = http.get(f"{WHATSAPP_CHATS_URL}?ultimo_suyo=gte.{quote(corte, safe='')}"
-                 "&select=chat,nombre,ultimo_suyo,ultimo_mio&order=ultimo_suyo.asc",
-                 headers=supabase_headers())
-    if r.status_code >= 300:
-        raise _supabase_error(r)
-    return r.json() or []
-
-
-def _whatsapp_senal(conectado: bool | None, motivo: str = "") -> None:
-    """Apunta que el puente ha dicho algo. Si dice que está conectado, rearma el aviso de
-    puente caído para la próxima vez."""
-    with _whatsapp_lock:
-        _whatsapp_estado["senal"] = time.time()
-        _whatsapp_estado["conectado"] = conectado
-        _whatsapp_estado["motivo"] = (motivo or "")[:100]
-        if conectado is not False:
-            _whatsapp_estado["caido_avisado"] = False
-
-
-def _whatsapp_puente() -> dict:
-    """Cómo está el puente, para el dashboard, Jarvis y la vigilancia."""
-    with _whatsapp_lock:
-        senal = _whatsapp_estado["senal"]
-        desde = senal or _whatsapp_arranque
-        return {
-            "ultima_senal": (datetime.fromtimestamp(senal, timezone.utc)
-                             .strftime("%Y-%m-%dT%H:%M:%SZ") if senal else None),
-            "conectado":    _whatsapp_estado["conectado"],
-            "motivo":       _whatsapp_estado["motivo"],
-            # Cuenta desde el arranque si aún no ha dicho nada: sin eso, un backend recién
-            # reiniciado daría por caído un puente que simplemente no ha tenido su turno.
-            "mudo":         time.time() - desde > WHATSAPP_SILENCIO_HORAS * 3600,
-        }
-
-
-def _vigilar_puente_whatsapp() -> int:
-    """Avisa una vez si el puente se ha callado o si WhatsApp le ha cerrado la sesión.
-
-    Es lo que evita que esto se convierta en otra fuente que se muere en silencio: sin
-    el latido, «nadie te ha escrito» y «el puente lleva un día caído» son lo mismo.
-    """
-    puente = _whatsapp_puente()
-    cerrada = puente["conectado"] is False and puente["motivo"] == "sesion_cerrada"
-    if not (puente["mudo"] or cerrada):
-        return 0
-    with _whatsapp_lock:
-        if _whatsapp_estado["caido_avisado"]:
-            return 0
-        _whatsapp_estado["caido_avisado"] = True
-    if cerrada:
-        texto = ("WhatsApp ha cerrado la sesión de caja. Hasta que lo vuelvas a vincular "
-                 "no sabré qué tienes pendiente de contestar.")
-    else:
-        texto = (f"El puente de WhatsApp lleva más de {int(WHATSAPP_SILENCIO_HORAS)} h sin "
-                 "dar señales. Hasta que vuelva, no sabré qué tienes pendiente de contestar.")
-    logger.error("WhatsApp: %s", "sesión cerrada por WhatsApp" if cerrada else "el puente no da señales")
-    huella = f"whatsapp_puente:{'cerrada' if cerrada else 'mudo'}:{puente['ultima_senal'] or 'nunca'}"
-    return 1 if _apuntar_aviso(REGLA_WHATSAPP_PUENTE, texto, prioridad=PRIO_NORMAL,
-                               huella=huella) else 0
-
-
-def _uuid_aviso_whatsapp(fecha: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"life-assistant:aviso-whatsapp:{fecha}"))
-
-
-def _regla_whatsapp() -> int:
-    """Una vez al día, a partir de `WHATSAPP_HORA_AVISO`: a quién le debes respuesta."""
-    global _whatsapp_avisado_dia
-    if not WHATSAPP_LEER:
-        return 0
-    puestos = _vigilar_puente_whatsapp()
-    ahora = _ahora_local()
-    if (ahora.hour, ahora.minute) < HORA_AVISO_WHATSAPP:
-        return puestos
-    hoy = ahora.date().isoformat()
-    if _whatsapp_avisado_dia == hoy:
-        return puestos
-    try:
-        filas = _whatsapp_leer_chats(ahora)
-    except Exception as e:
-        logger.warning("WhatsApp: no se pudieron leer los chats (%s)", type(e).__name__)
-        return puestos
-    _whatsapp_avisado_dia = hoy
-    pendientes = _whatsapp_pendientes(filas, ahora)
-    if not pendientes:
-        return puestos
-    # La huella son los mensajes concretos, no el día: si mañana siguen sin contestar los
-    # mismos, no se repite hasta que pasen AVISOS_REPETIR_DIAS; si alguien vuelve a
-    # escribir, su hora cambia y el aviso es otro.
-    huella = "whatsapp:" + hashlib.sha256(
-        "|".join(f"{p['chat']}@{p['desde']}" for p in pendientes).encode("utf-8")).hexdigest()[:32]
-    if _apuntar_aviso(REGLA_WHATSAPP, _frase_whatsapp(pendientes), prioridad=PRIO_NORMAL,
-                      id=_uuid_aviso_whatsapp(hoy), huella=huella,
-                      motivo={"pendientes": len(pendientes),
-                              "horas_minimas": WHATSAPP_PENDIENTE_HORAS,
-                              "ventana_dias": WHATSAPP_VENTANA_DIAS,
-                              "mas_antiguo_horas": pendientes[0]["horas"]}):
-        puestos += 1
-    return puestos
-
-
-def _whatsapp_resumen() -> dict:
-    """Lo pendiente y el estado del puente. Lo comparten el endpoint y Jarvis."""
-    if not WHATSAPP_LEER:
-        return {"activo": False, "motivo": "WhatsApp está apagado (WHATSAPP_LEER=0).",
-                "pendientes": []}
-    ahora = _ahora_local()
-    pendientes = _whatsapp_pendientes(_whatsapp_leer_chats(ahora), ahora)
-    return {"activo": True, "pendientes": pendientes,
-            "horas_minimas": WHATSAPP_PENDIENTE_HORAS, "puente": _whatsapp_puente()}
-
-
-@app.post("/whatsapp/evento")
-def whatsapp_evento(request: Request, body: WhatsappEventoIn):
-    """Lo que manda el puente de `caja`: horas de mensajes por chat, o su latido.
-
-    Token solo por cabecera, desde el primer día: por la query acabaría escrito en el log
-    de uvicorn.
-    """
-    if not _token_ok(_extract_service_token(request), WHATSAPP_TOKEN):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    if not WHATSAPP_LEER:
-        # 503 y no un 200 vacío: el puente lo registra, y así se ve en sus logs que lo que
-        # falta es encenderlo aquí y no que no haya mensajes.
-        raise HTTPException(status_code=503,
-                            detail="WhatsApp está apagado en el backend (WHATSAPP_LEER=0)")
-    if body.tipo == "estado":
-        _whatsapp_senal(body.conectado, body.motivo or "")
-        return {"ok": True}
-
-    _whatsapp_senal(True, "")
-    filas, descartados = _whatsapp_filas(body.chats)
-    if filas:
-        r = http.post(WHATSAPP_APUNTAR_URL, headers=supabase_headers(), json={"filas": filas})
-        if r.status_code >= 300:
-            # Un fallo aquí corta con 502: el puente es una máquina que no lee el cuerpo, y
-            # un 200 con el error dentro sería indistinguible de haberlo guardado.
-            raise _supabase_error(r)
-    return {"ok": True, "guardados": len(filas), "descartados": descartados}
-
-
-@app.get("/whatsapp/pendientes")
-def whatsapp_pendientes(_: dict = Depends(verify_token)):
-    """A quién le debes respuesta en WhatsApp, y si el puente está vivo."""
-    try:
-        return _whatsapp_resumen()
-    except HTTPException:
-        raise
-    except requests.RequestException:
-        logger.exception("WhatsApp: no se pudieron leer los pendientes")
-        raise HTTPException(status_code=502, detail="No se pudieron leer los chats de WhatsApp")
-
-
-def _j_whatsapp_pendientes() -> dict:
-    return _whatsapp_resumen()
 
 
 # ── Avisos al móvil ──────────────────────────────────────────────────────────
@@ -23274,9 +22915,6 @@ def _j_mis_capacidades() -> dict:
                        "así que no puedo decir cuánto tienes invertido.")
     if not TAREAS_TODO:
         apagado.append("Las tareas de Microsoft To Do están apagadas (TAREAS_TODO=0).")
-    if not WHATSAPP_LEER:
-        apagado.append("WhatsApp está apagado (WHATSAPP_LEER=0), así que no sé a quién le "
-                       "debes respuesta.")
 
     return {
         "herramientas": [{
@@ -23368,16 +23006,6 @@ _JARVIS_HERRAMIENTAS = {
                          "las que vencen antes primero. Para citas con hora, usa `agenda`.",
         "parametros":    {},
         "requiere_tareas": True,
-    },
-    "whatsapp_pendientes": {
-        "confirmar":     False,
-        "fn":            _j_whatsapp_pendientes,
-        "descripcion":   "A quién le debes respuesta en WhatsApp: chats individuales cuyo último "
-                         "mensaje es suyo y lleva horas sin contestar. Solo nombres y horas: no "
-                         "sabes QUÉ dicen los mensajes, así que no lo inventes. Si `puente.mudo` "
-                         "es verdadero, el dato puede estar desfasado.",
-        "parametros":    {},
-        "requiere_whatsapp": True,
     },
     "donde_estoy": {
         "confirmar":   False,
@@ -24030,10 +23658,9 @@ def _jarvis_esquema() -> list:
     # Igual con la vuelta de «avísame»: sin rutina que disparar, contestar al aviso no
     # llevaría a ninguna parte.
     con_sesion  = bool(SESION_FIRE_URL and SESION_FIRE_TOKEN)
-    # Y las tareas y WhatsApp, que nacen apagadas: anunciarlas apagadas sería pagar su
-    # descripción en cada turno para que el modelo las pida y le digan que no.
+    # Y las tareas, que nacen apagadas: anunciarlas apagadas sería pagar su descripción
+    # en cada turno para que el modelo las pida y le digan que no.
     con_tareas   = TAREAS_TODO
-    con_whatsapp = WHATSAPP_LEER
     return [{
         "type": "function",
         "function": {
@@ -24050,8 +23677,7 @@ def _jarvis_esquema() -> list:
         and (con_arreglo or not h.get("requiere_arreglo"))
         and (con_deploy or not h.get("requiere_despliegue"))
         and (con_sesion or not h.get("requiere_sesion"))
-        and (con_tareas or not h.get("requiere_tareas"))
-        and (con_whatsapp or not h.get("requiere_whatsapp"))]
+        and (con_tareas or not h.get("requiere_tareas"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -25410,7 +25036,6 @@ _JARVIS_RELLENOS = {
     "crear_evento":       "Voy con el calendario.",
     "tareas":             "Miro tus tareas.",
     "crear_tarea":        "Voy con las tareas.",
-    "whatsapp_pendientes": "Miro WhatsApp.",
     "editar_evento":      "Voy con el calendario.",
     "borrar_evento":      "Voy con el calendario.",
     "clima":              "Miro el tiempo.",

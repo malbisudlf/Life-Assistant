@@ -413,9 +413,8 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "SESION_FIRE_TOKEN", "sesion-fire-token")
         monkeypatch.setattr(main, "DEPLOY_GITHUB_TOKEN", "gh-token")
         monkeypatch.setattr(main, "JARVIS_REPO", "usuario/Life-Assistant")
-        # Y las tareas y WhatsApp, que nacen apagadas.
+        # Y las tareas, que nacen apagadas.
         monkeypatch.setattr(main, "TAREAS_TODO", True)
-        monkeypatch.setattr(main, "WHATSAPP_LEER", True)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

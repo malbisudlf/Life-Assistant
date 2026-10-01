@@ -62,11 +62,9 @@ os.environ.setdefault("BRIEF_ECONOMIA", "0")
 os.environ.setdefault("NOCHE_TURNO", "0")
 os.environ.setdefault("NOCHE_CORREO", "0")
 os.environ.setdefault("NOCHE_ARREGLA", "0")
-# Las tareas y WhatsApp nacen apagadas; se fijan aquí por lo mismo que el turno de noche.
-# Sus tests las encienden con monkeypatch.
+# Las tareas nacen apagadas; se fijan aquí por lo mismo que el turno de noche. Sus
+# tests las encienden con monkeypatch.
 os.environ.setdefault("TAREAS_TODO", "0")
-os.environ.setdefault("WHATSAPP_LEER", "0")
-os.environ.setdefault("WHATSAPP_TOKEN", "whatsapp-token")
 # Y apagar al salir de casa sin preguntar: sus tests lo encienden.
 os.environ.setdefault("SALIR_CASA_APAGAR", "0")
 # Jarvis reparte el trabajo entre dos modelos: el pequeño decide SI hace falta una
@@ -300,12 +298,7 @@ def _limpiar_estado():
     main._despierto_mirado = None
     main._acostarse_cache.clear()
     main._despliegue_por_llamar = False
-    # WhatsApp y To Do: el estado del puente decide si se avisa de que está caído, el día
-    # ya avisado calla el aviso siguiente y el id de la lista de To Do se serviría sin
-    # pasar por el mock del test.
-    main._whatsapp_estado.update(senal=None, conectado=None, motivo="", caido_avisado=False)
-    main._whatsapp_arranque = main.time.time()
-    main._whatsapp_avisado_dia = None
+    # El id de la lista de To Do: sin vaciarlo, se serviría sin pasar por el mock del test.
     main._todo_lista_cache.clear()
 
 

@@ -23,13 +23,9 @@ capítulo de esa historia, no el final.**
 Repasado contra el código el 28 de septiembre de 2026. Todo lo que no sale aquí está hecho
 o descartado, y lo dice en su título.
 
-1. **7.1 WhatsApp, en modo lectura. PRIORITARIA.** La fase 1 (pendientes de contestar, sin
-   modelo) está escrita el 28 de septiembre y falta montarla en `caja` (`docs/WHATSAPP.md`).
-   Queda la fase 2: las tareas hacia el calendario.
-2. **7.2 Microsoft To Do.** Escrita el 28 de septiembre (`docs/JARVIS.md`, «Tareas»); falta
-   encender `TAREAS_TODO` y volver a conectar Outlook.
-3. **7.3 a 7.5**, en el orden en que están escritas.
-4. Lo que sobró de rondas anteriores, que son arreglos pequeños y no ideas:
+1. **7.3 a 7.5**, en el orden en que están escritas. La 7.1 (WhatsApp) se montó y se
+   quitó; la 7.2 (To Do) está hecha y encendida.
+2. Lo que sobró de rondas anteriores, que son arreglos pequeños y no ideas:
    - **5.3**: el acuse de entrega de los avisos al móvil. Sigue sin existir
      `POST /ha/avisos-entregados`.
    - **Del punto 1**: los cruces de `_CRUCES` siguen sin tener en cuenta la cobertura del
@@ -391,11 +387,17 @@ Hay una regla común a todas, que ya sostiene el correo y el turno de noche: **l
 escribir en tu nombre no.** Lo que sale de aquí es una propuesta que apruebas, nunca algo
 que se envía o se crea solo.
 
-### 7.1 WhatsApp, en modo lectura ●●● — PRIORITARIA, FASE 1 ESCRITA
+### 7.1 WhatsApp, en modo lectura ●●● — ❌ MONTADA Y QUITADA
 
+> **Quitada el 1 de octubre de 2026**, tres días después de montarla: no convenció. Llegó a
+> estar entera en producción (puente vinculado, 175 chats cargados) y se desmontó todo: el
+> código del backend, el puente de `caja` y la tabla (`20261001_quitar_whatsapp`). Si se
+> retoma, el código está en el historial: el commit `43dfb76` de este repositorio y el
+> `a32e7ff` (más `7b0faf4`) de HomeLab. Lo que hay debajo es el texto original.
+>
 > **Fase 1 escrita** (28 de septiembre de 2026): el backend, la migración
 > `20260928_whatsapp` y el puente en el repositorio HomeLab (`caja/whatsapp/`). Está todo
-> en `docs/WHATSAPP.md`. Lo que salió distinto de lo previsto: el puente **no tiene API
+> en `docs/WHATSAPP.md` (borrado; está en el historial). Lo que salió distinto de lo previsto: el puente **no tiene API
 > ninguna**, ni siquiera interna (en vez de una API que no se publica), y hubo que
 > traducir el id anónimo de WhatsApp (`@lid`) al número, porque la misma persona podía
 > salir como dos chats y el suyo quedar pendiente para siempre. Falta montarlo en `caja`
@@ -474,17 +476,16 @@ con RLS y sin policies, como todas.
 en cabecera y el cuerpo acotado. La regla de pendientes va colgada del brief-tick, y el
 resultado va al parte del turno de noche.
 
-### 7.2 Microsoft To Do ● — ESCRITA
+### 7.2 Microsoft To Do ● — ✅ HECHA
 
-> **Escrita** (28 de septiembre de 2026): `GET /tareas` y las herramientas `tareas` y
+> **Hecha y encendida** (28 de septiembre de 2026): `GET /tareas` y las herramientas `tareas` y
 > `crear_tarea` (ver `docs/JARVIS.md`, «Tareas»). Lo que salió distinto: no hay «completar
 > tarea», porque el botón de confirmar tendría que enseñar un id que no se puede leer; y la
 > renovación del token prueba antes quitando solo este permiso, para que encenderlo no
-> se lleve el buzón. Falta encender `TAREAS_TODO` y reconectar Outlook.
+> se lleve el buzón.
 
 **Qué.** Tareas de verdad, en To Do, que es de Microsoft y usa el mismo token de Graph
-que el calendario y el correo. Añadir, listar y completar desde Jarvis, y que sea el
-destino de lo que la 7.1 saque sin fecha.
+que el calendario y el correo. Añadir, listar y completar desde Jarvis.
 
 **Por qué.** Es la 2.3 de `docs/JARVIS_PROACTIVO.md`, que nunca se hizo, y ahora tiene un
 motivo nuevo. Una tarea con fecha va al calendario, pero «pásame el contrato cuando
@@ -497,12 +498,12 @@ Outlook una vez.
 
 ### 7.3 Cumpleaños y «hace mucho que no hablas con…» ●
 
-**Qué.** Un aviso el día antes de cada cumpleaños y, a partir de los datos de la 7.1, uno
-cuando alguien de una lista corta lleva más de N semanas sin cruzar un mensaje contigo.
+**Qué.** Un aviso el día antes de cada cumpleaños.
 
-**Por qué.** La segunda parte sale gratis: la tabla de la 7.1 ya guarda la hora del último
-mensaje de cada chat, sin guardar nada más. Es el tipo de aviso que se agradece y que
-ninguna app te da.
+> La segunda mitad —«hace mucho que no hablas con…»— salía de los datos de WhatsApp de la
+> 7.1, y se cayó con ella: sin el puente no hay de dónde sacarla.
+
+**Por qué.** Es el tipo de aviso que se agradece y que ninguna app te da.
 
 **Cuidado.** Los cumpleaños solo se pueden leer si están en Outlook: Graph tiene
 `birthday` en los contactos y un calendario de cumpleaños. Si viven en los contactos de

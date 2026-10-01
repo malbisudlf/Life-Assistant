@@ -894,13 +894,6 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
 - **`GET /tareas`** (JWT) devuelve las pendientes. Apagado o sin Outlook, 200 con
   `activo: false` y el motivo, no un error: es un estado, no una avería.
 
-## WhatsApp: `whatsapp_pendientes`
-
-A quién le debes respuesta. Todo en `docs/WHATSAPP.md`. Para Jarvis es una consulta
-(`confirmar: False`) que solo se anuncia con `WHATSAPP_LEER` encendido
-(`requiere_whatsapp`), y su descripción le dice lo único que tiene que saber: **no sabe
-qué dicen los mensajes**, solo quién y desde cuándo, así que no puede inventárselo.
-
 ## Organizar el día: `huecos_libres` y `reservar_bloques`
 
 «Organízame mañana: dos horas de TFG e ir al gimnasio» son dos pasos, y cada uno es una

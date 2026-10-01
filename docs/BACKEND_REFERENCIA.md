@@ -269,13 +269,9 @@ Cowork, en fracción de pantalla),
 | `POST /dev/reconstruir` | JWT | **Despliega**. En `caja` deja un pedido en `DESPLIEGUE_DIR` que `desplegar.path` (systemd) convierte en `desplegar.sh`; como add-on, le pide al Supervisor que se reconstruya. Devuelve `motor` y `version_antes` y se va — el proceso muere a continuación. 503 si no tiene con qué (o el directorio no está montado), 429 si se acaba de lanzar otro. Nunca lo dispara un token de servicio |
 
 | `GET /tareas` | JWT | Las tareas pendientes de la lista por defecto de Microsoft To Do, las que vencen antes primero. Apagado o sin Outlook responde 200 con `activo: false` y el motivo. Ver `docs/JARVIS.md`, «Tareas» |
-| `POST /whatsapp/evento` | `WHATSAPP_TOKEN` (solo cabecera) | Lo que manda el puente de `caja`: `tipo: "chats"` con la hora del último mensaje suyo y tuyo por chat individual (nunca texto, nunca grupos), o `tipo: "estado"` como latido. 503 si `WHATSAPP_LEER` está apagado. Ver `docs/WHATSAPP.md` |
-| `GET /whatsapp/pendientes` | JWT | A quién le debes respuesta en WhatsApp y cómo está el puente (`puente.mudo` si lleva más de `WHATSAPP_SILENCIO_HORAS` sin señal) |
 
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`,
-`TAREAS_TODO`, `TAREAS_MAX`, `WHATSAPP_LEER`, `WHATSAPP_TOKEN`,
-`WHATSAPP_PENDIENTE_HORAS`, `WHATSAPP_VENTANA_DIAS`, `WHATSAPP_HORA_AVISO`,
-`WHATSAPP_IGNORAR`, `WHATSAPP_SILENCIO_HORAS`.
+`TAREAS_TODO`, `TAREAS_MAX`.
 Todas documentadas una a una en `backend/.env.example`.
 

@@ -212,11 +212,10 @@ sabe **escribir** correo, no leerlo. Ojo: no es "resumir el buzón" —eso ya lo
 rutina del briefing y hacerlo dos veces sería peor— sino **extraer lo accionable con
 fecha** y meterlo donde vive lo demás: el calendario y los recordatorios.
 
-### 2.3 Una lista de tareas de verdad ●●
+### 2.3 Una lista de tareas de verdad ●● — HECHA
 
-> Sigue sin hacer. Se ha convertido en la **7.2 de `docs/IDEAS.md`** (Microsoft To Do, con
-> el mismo token de Graph), porque ahí tiene un motivo más: ser el destino de lo que se
-> saque de WhatsApp sin fecha.
+> **Hecha como la 7.2 de `docs/IDEAS.md`** (Microsoft To Do, con el mismo token de Graph;
+> ver `docs/JARVIS.md`, «Tareas»).
 
 **Qué.** Conectar un gestor de tareas (Todoist, Notion) por MCP, para que las ideas por
 voz que son tareas acaben donde las miras.
