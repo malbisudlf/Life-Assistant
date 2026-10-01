@@ -752,6 +752,15 @@
   apagado real. Se arregló con `HiberbootEnabled=0` (ver `agent/PUESTA_A_PUNTO.md`).
   Moraleja: **tras reinstalar Windows, vuelve a mirar todo lo que se configuró fuera del
   repositorio.** «Siempre ha funcionado» se refería a un Windows que ya no existía.
+  **Y no bastó.** Al día siguiente el PC, apagado de verdad, seguía sin despertar. Una
+  captura en el propio PC (`pktmon`, UDP 9) dijo cero paquetes y se culpó a la WiFi de
+  `caja`, que está en la LAN por cable y por WiFi: la difusión no la decide la métrica,
+  sino la tabla `local` de Linux, y salía solo por la WiFi. Se cambió `pc.sh`
+  (repositorio HomeLab) para mandarlo atado a cada interfaz. Pero esa captura **no se
+  había cerrado** (`BuffersWritten: 0` en su cabecera): repetida bien, llegaban los dos
+  paquetes, el del cable y el de la WiFi. La WiFi no era la causa. Moraleja: **una
+  prueba que dice «nada» tiene que demostrar antes que habría visto algo.** Una captura
+  vacía, un log vacío o un test sin aserciones se parecen mucho a «no ha pasado nada».
 - **Un `sleep` fijo esperando a que un servicio levante es un bug esperando su turno.**
   Los cuatro segundos que se dormían tras lanzar Edge bastaban en caliente y no en frío.
   Sustituido por espera activa contra el puerto, con límite.
