@@ -2850,13 +2850,23 @@ export function alarmaCuandoTexto(alarma, hoy = new Date()) {
 export function alarmaEstadoTexto(alarma) {
   const intentos = Number(alarma?.intentos) || 0;
   switch (alarma?.estado) {
-    case "armada":   return "puesta";
+    // «Déjame dormir»: sigue puesta, pero esta vez no va a sonar. Tiene que verse en la
+    // fila: una semanal que dice «puesta» a secas parece que te va a despertar igual.
+    case "armada":   return alarma?.saltada ? "esta vez no suena" : "puesta";
     // Ya sonó y sigue esperando respuesta: es lo que más importa distinguir de "puesta",
     // porque significa que la casa está a punto de despertarse.
     case "avisada":  return "esperando que confirmes";
     case "escalada": return `insistiendo (${intentos})`;
     default:         return alarma?.estado || "";
   }
+}
+
+/** El día que se salta «Déjame dormir», en palabras: "hoy", "mañana" o "el vie 12".
+ *  Es "hoy" cuando se pulsa de madrugada (a la 01:30, la alarma de las 07:00 es de hoy
+ *  aunque se piense en ella como "la de mañana"). */
+export function alarmaDormirDiaTexto(dia, hoy = new Date(), mayuscula = false) {
+  const texto = alarmaEnPalabras(`${dia || ""} 00:00`, hoy).replace(/ a las 00:00$/, "");
+  return mayuscula ? texto.charAt(0).toUpperCase() + texto.slice(1) : texto;
 }
 
 /** ¿Hay alguna alarma sonando ahora mismo? Es lo que decide si el widget enseña el

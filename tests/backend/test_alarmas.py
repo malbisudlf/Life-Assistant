@@ -830,3 +830,120 @@ class TestLoQueNoTieneQueSonar:
         mock_requests.add("PATCH", "estado=in.(avisada,escalada)", _reserva_ok)
         assert main._alarma_cancelar("11111111-1111-1111-1111-111111111111")["hecho"] is True
         assert calladas == [1]
+
+
+class TestDejameDormir:
+    """«Estoy reventado, cállate y déjame dormir»: la próxima mañana no suena nada, y la
+    semana que viene todo sigue como estaba. Lo que hay que proteger es eso último: que
+    saltarse un lunes no sea quedarse sin la alarma de los lunes."""
+
+    RID = "11111111-1111-1111-1111-111111111111"
+
+    def _dia(self, fila):
+        return main._alarma_cuando(fila).astimezone(main.LOCAL_TZ).date().isoformat()
+
+    def test_marca_las_de_la_proxima_manana(self, mock_requests):
+        fila = _fila(minutos_desde_ahora=8 * 60, repetir="1,2,3,4,5")
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([fila]))
+        r = main._j_dejame_dormir()
+        assert r["hecho"] is True and r["dia"] == self._dia(fila)
+        patch = mock_requests.called("PATCH", "/rest/v1/alarmas")[0]
+        assert patch[2]["json"] == {"saltar": self._dia(fila)}
+        # Condicional: si mientras tanto empezó a sonar, esto no la toca.
+        assert "estado=eq.armada" in patch[1]
+        # Y dice cuándo vuelve, que es lo que da confianza en pulsarlo.
+        assert r["alarmas"][0]["vuelve"]
+
+    def test_se_salta_todas_las_de_ese_dia_y_ninguna_de_otro(self, mock_requests):
+        a = _fila(minutos_desde_ahora=60, rid="11111111-1111-1111-1111-111111111111")
+        b = _fila(minutos_desde_ahora=90, rid="22222222-2222-2222-2222-222222222222")
+        c = _fila(minutos_desde_ahora=3 * 24 * 60, rid="33333333-3333-3333-3333-333333333333")
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([a, b, c]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([a, b]))
+        main._j_dejame_dormir()
+        url = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
+        if self._dia(a) == self._dia(b):     # a medianoche, 60 y 90 min pueden ser días distintos
+            assert a["id"] in url and b["id"] in url
+        assert c["id"] not in url
+
+    def test_sin_nada_en_24_horas_no_hace_nada(self, mock_requests):
+        mock_requests.add("GET", "/rest/v1/alarmas",
+                          FakeResponse([_fila(minutos_desde_ahora=3 * 24 * 60)]))
+        r = main._j_dejame_dormir()
+        assert r["hecho"] is False
+        assert mock_requests.called("PATCH", "/rest/v1/alarmas") == []
+
+    def test_deshacer_quita_la_marca(self, mock_requests):
+        fila = _fila(minutos_desde_ahora=8 * 60)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([fila]))
+        r = main._j_dejame_dormir(deshacer=True)
+        assert r["deshecho"] is True
+        assert mock_requests.called("PATCH", "/rest/v1/alarmas")[0][2]["json"] == {"saltar": None}
+
+    def test_la_semanal_saltada_no_suena_y_se_rearma(self, mock_requests, canal_movil):
+        fila = _fila(minutos_desde_ahora=-1, repetir="1,2,3,4,5,6,7")
+        fila["saltar"] = self._dia(fila)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        assert main._correr_alarmas()["escalar"] == 0
+        cambios = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert not any(c.get("estado") == "avisada" for c in cambios)
+        rearme = next(c for c in cambios if c.get("estado") == "armada")
+        # Vuelve la vez siguiente, y sin la marca: la semana que viene suena.
+        assert rearme["saltar"] is None
+        assert main._alarma_cuando(rearme) > datetime.now(timezone.utc)
+        assert main._avisos_movil == []
+
+    def test_la_suelta_saltada_acaba_como_saltada(self, mock_requests, canal_movil):
+        fila = _fila(minutos_desde_ahora=-1)
+        fila["saltar"] = self._dia(fila)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        cambios = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert cambios == [{"estado": "saltada"}]
+        assert main._avisos_movil == []
+
+    def test_saltada_hace_horas_no_cuenta_que_no_pudo_sonar(self, mock_requests, canal_movil):
+        fila = _fila(minutos_desde_ahora=-7 * 60)
+        fila["saltar"] = self._dia(fila)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        assert main._avisos_movil == []
+
+    def test_una_marca_de_otro_dia_no_calla_nada(self, mock_requests, canal_movil):
+        """La marca es «ese día no», no «la próxima vez no»: si después la moviste a
+        otro día, suena."""
+        fila = _fila(minutos_desde_ahora=-1)
+        fila["saltar"] = "2000-01-01"
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        cambios = [c[2]["json"] for c in mock_requests.called("PATCH", "/rest/v1/alarmas")]
+        assert any(c.get("estado") == "avisada" for c in cambios)
+
+    def test_el_resumen_del_widget(self):
+        a = _fila(minutos_desde_ahora=60, rid="11111111-1111-1111-1111-111111111111")
+        a["saltar"] = self._dia(a)
+        r = main._alarma_dormir_resumen([a])
+        assert r == {"dia": self._dia(a), "alarmas": 1, "saltadas": 1, "puesto": True}
+        assert main._alarma_listar([a])[0]["saltada"] is True
+        assert main._alarma_dormir_resumen([_fila(minutos_desde_ahora=3 * 24 * 60)]) is None
+
+    def test_endpoints_piden_jwt(self, client):
+        assert client.post("/alarmas/dejame-dormir").status_code in (401, 403)
+        assert client.post("/alarmas/dejame-dormir/deshacer").status_code in (401, 403)
+
+    def test_endpoint_con_jwt(self, client, auth_headers, mock_requests):
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([]))
+        r = client.post("/alarmas/dejame-dormir", headers=auth_headers)
+        assert r.status_code == 200 and r.json()["hecho"] is False
+
+    def test_herramienta_registrada_sin_confirmar(self):
+        h = main._JARVIS_HERRAMIENTAS["dejame_dormir"]
+        assert h["confirmar"] is False
+        assert "dejame_dormir" in {f["function"]["name"] for f in main._jarvis_esquema()}
+        assert main._relleno_herramienta("dejame_dormir") != main._JARVIS_RELLENO_GENERICO

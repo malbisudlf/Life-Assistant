@@ -94,6 +94,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /alarmas` | JWT | Pone una: `{fecha?, hora, etiqueta?, repetir?}`. `repetir` son los días ISO en que se repite (1 = lunes) y hace opcional la fecha |
 | `PATCH /alarmas/{id}` | JWT | Edita una alarma viva (mismo cuerpo que el POST): la rearma con la hora o los días nuevos y los contadores a cero |
 | `DELETE /alarmas/{id}` | JWT | La cancela (cambia el estado, no borra la fila) |
+| `POST /alarmas/dejame-dormir` | JWT | «Déjame dormir»: la próxima mañana (lo que iba a sonar en las próximas 24 h, ese día) no suena nada; las semanales vuelven la vez siguiente |
+| `POST /alarmas/dejame-dormir/deshacer` | JWT | Quita la marca: esa mañana vuelve a sonar |
 | `POST /health/ingest` | servicio | Webhook de Health Auto Export (métricas + workouts) |
 | `POST /health/ingest/simple` | servicio | iOS Shortcut — acepta dict único o NDJSON |
 | `GET /health/metrics?days=30` | JWT | Métricas de los últimos N días agrupadas por nombre + `last_sync` + `reloj` (qué días estuvo puesto y de qué fuente es cada métrica) + `ajustes` (el corte por cambio de dispositivo) |

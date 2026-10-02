@@ -41,6 +41,8 @@ Y si la alarma se repite, `confirmada` y `rendida` no son el final: vuelve sola 
 - **`rendida`**: pasaron `ALARMA_MAX_MIN` sin respuesta. **Se avisa de que se rinde**: una
   alarma que deja de sonar sola y no lo cuenta es indistinguible de una que nunca se armó,
   y eso es lo que hace que dejes de fiarte del respaldo.
+- **`saltada`**: una alarma de una sola vez cuya mañana te saltaste con «Déjame dormir»
+  (ver abajo). Una semanal no llega aquí: se rearma para la vez siguiente.
 - **`cancelada`**: la quitaste. Cancelar **cambia el estado, no borra la fila** — una
   alarma que sonó y escaló es parte de por qué la casa hizo ruido a las 8:32.
 
@@ -76,6 +78,35 @@ perdida, que es el mismo motivo por el que se avisa de la rendición.
 Lo que sigue **sin** hacerse es armar el respaldo de una alarma recurrente y que suene un
 festivo: eso lo decides tú al marcar los días. Marcar el domingo y olvidarlo es un
 despertador que suena el domingo, no un fallo.
+
+### «Déjame dormir»: saltarse una mañana
+
+«Estoy reventado, cállate y déjame dormir.» Un botón del widget (y la herramienta
+`dejame_dormir` de Jarvis) que hace que **la próxima mañana no suene nada** sin tocar las
+alarmas: las semanales vuelven la vez siguiente, como si hubieran sonado. Es justo lo que
+cancelar no sabe hacer — cancelar una semanal la quita para siempre, y el lunes que viene
+no suena.
+
+- **«Mañana» es la próxima mañana con algo puesto, no el día de calendario siguiente.**
+  Se salta el día de la primera alarma que iba a sonar en las próximas 24 horas
+  (`ALARMA_DORMIR_HORAS`). Dicho a las 23:00 del domingo es el lunes; a la 01:30 del
+  lunes, de vuelta a casa, también — con «el día siguiente» sería el martes y te
+  despertaba igual. Si no hay nada en 24 horas, el botón no sale.
+- **Se salta todo ese día**, no una alarma: la de las 7:00 y la de respaldo de las 7:30.
+  Lo que se pide es dormir. Lo apuntado **después** de pulsar sí suena (te acuerdas del
+  médico a las 11), y el botón vuelve a salir para que se vea que esa no va incluida.
+- **No mueve nada: marca el día.** La columna `saltar` (una fecha local) dice qué día no
+  suena, y es el tick quien, al llegarle la hora, ve que coincide y no avisa: si se
+  repite, `_alarma_reprogramar` desde `armada` (que borra la marca); si no, a `saltada`.
+  Así se puede **deshacer** sin recordar dónde estaba cada alarma, y la fila puede decir
+  «esta vez no suena» en vez de enseñar la semana que viene como si nada.
+- **Es una fecha, no un «la próxima vez no».** Si después editas la alarma a otro día, la
+  marca deja de coincidir y suena, que es lo que querías al moverla. Y una fecha pasada no
+  coincide con nada: no hay que limpiarla para que deje de valer.
+- **Va antes que el «no pudo sonar».** Una alarma que pediste saltarte no tiene nada que
+  contar aunque a su hora no hubiera backend.
+- **Solo toca lo que está `armada`.** Si ya está sonando, la marca no la calla: para eso
+  está «Estoy despierto».
 
 ### Las decisiones que no son obvias
 
@@ -204,6 +235,8 @@ la insistencia, la traza de la automatización).
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
 | `PATCH /alarmas/{id}` | JWT | Editarla (mismo cuerpo que el POST). La deja `armada` con los contadores a cero |
 | `DELETE /alarmas/{id}` | JWT | Cancelarla (no la borra) |
+| `POST /alarmas/dejame-dormir` | JWT | Saltarse la próxima mañana (ver arriba). `GET /alarmas` trae `dejame_dormir`: el día, cuántas suenan y si ya está puesto |
+| `POST /alarmas/dejame-dormir/deshacer` | JWT | Quitar la marca |
 
 `escalar` es lo que HA usa como **estado** del sensor y no un simple `true`: cambia en
 cada escalada, así que la automatización se dispara aunque dos escaladas seguidas dejaran
@@ -211,9 +244,11 @@ el mismo texto. Es el mismo cuidado que ya llevan los triggers de órdenes y avi
 
 ### Jarvis
 
-Cuatro herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
+Cinco herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
 semanales: «todos los lunes» es `[1]`, «entre semana» es `[1,2,3,4,5]`), `mis_alarmas`,
-`cancelar_alarma` (para una que **aún no ha sonado**; a una semanal la deja de repetir) y
+`cancelar_alarma` (para quitarla **del todo**; a una semanal la deja de repetir),
+`dejame_dormir` (saltarse **la próxima mañana**, con `deshacer` para anularlo: «quita la
+de mañana» es esta y no la anterior, que con una semanal se llevaba todos los lunes) y
 `estoy_despierto` (**sin parámetros**: calla la que esté sonando y cuenta como señal de
 despertar del resumen). Poner una no toca nada del mundo real, y callarla es justo lo que
 quieres poder hacer deprisa cuando está sonando. Las dos últimas están separadas a
@@ -228,6 +263,12 @@ estado y quitarlas. Mientras una está sonando, el botón «Estoy despierto» se
 widget: es lo único que quieres de esa pantalla en ese momento. Se recarga solo cada
 minuto mientras haya algo vivo (sin nada vivo no hay temporizador), porque una alarma que
 empieza a insistir tiene que verse moverse en una pantalla ya abierta.
+
+Encima de la lista, si algo va a sonar en las próximas 24 horas, sale el botón **«😴 Déjame
+dormir»** con cuántas suenan ese día; pulsado, la franja dice «Mañana duermes» con un
+«Deshacer», y cada fila saltada dice «esta vez no suena» en vez de «puesta». El día lo
+decide el backend (`dejame_dormir` en `GET /alarmas`) y lo pone en palabras
+`alarmaDormirDiaTexto`.
 
 Debajo del formulario hay siete círculos (L M X J V S D). Marcar uno convierte la alarma
 en semanal y **esconde el selector de fecha**, que ya no se manda. Se pintan siempre,

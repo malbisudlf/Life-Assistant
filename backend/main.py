@@ -13236,7 +13236,8 @@ def _alarma_reprogramar(fila: dict, estado_previo: str, ahora: datetime) -> Opti
             "intentos":      0,
             "avisado_at":    None,
             "escalado_at":   None,
-            "confirmado_at": None}):
+            "confirmado_at": None,
+            "saltar":        None}):
         return None
     # El reloj puede estar durmiendo hasta dentro de horas: sin esto, la alarma rearmada
     # no sonaría hasta que otra cosa despertara al tick.
@@ -13340,7 +13341,7 @@ def _correr_alarmas() -> dict:
 
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
-        f"&select=id,cuando,etiqueta,estado,intentos,repetir,avisado_at,escalado_at"
+        f"&select=id,cuando,etiqueta,estado,intentos,repetir,saltar,avisado_at,escalado_at"
         f"&order=cuando.asc&limit={ALARMAS_MAX}",
         headers=supabase_headers(),
     )
@@ -13360,6 +13361,12 @@ def _correr_alarmas() -> dict:
         if estado == "armada":
             if cuando > ahora:
                 siguiente = cuando if siguiente is None or cuando < siguiente else siguiente
+                continue
+            # «Déjame dormir»: hoy no toca. Va antes que el «no pudo sonar» — una alarma
+            # que pediste saltarte no tiene nada que contar aunque a su hora no hubiera
+            # backend.
+            if _alarma_saltada(fila):
+                _alarma_saltar(fila, ahora)
                 continue
             # Vencida hace más de lo que nunca se insiste: a su hora no había backend o no
             # había tick (una reconstrucción fallida deja el backend sin imagen). Sonar
@@ -13533,6 +13540,34 @@ def _alarma_no_pudo_sonar(fila: dict, ahora: datetime) -> None:
         logger.warning("Alarma %s: no se pudo avisar de que no sonó (%s)", rid, e)
 
 
+def _alarma_saltada(fila: dict) -> bool:
+    """¿Pediste que esta vez no sonara? La marca es un DÍA local, y vale solo si es el
+    de esta vez: una marca vieja (de una semana que ya pasó, o de antes de editarla a
+    otro día) no coincide con nada y no calla nada."""
+    cuando = _alarma_cuando(fila)
+    saltar = str(fila.get("saltar") or "")
+    return bool(cuando and saltar) and \
+        cuando.astimezone(LOCAL_TZ).date().isoformat() == saltar
+
+
+def _alarma_saltar(fila: dict, ahora: datetime) -> None:
+    """Le llegó la hora a una alarma de la mañana en que dijiste «déjame dormir».
+
+    Ni aviso ni casa: el silencio es exactamente lo pedido. Si se repite, se rearma para
+    la siguiente vez con el mismo PATCH condicional desde `armada` (si entretanto la
+    cancelaste, no resucita); si era de una sola vez, se acaba como `saltada`, que no es
+    lo mismo que `cancelada`: no la quitaste, te la saltaste.
+    """
+    rid = str(fila.get("id") or "")
+    if _alarma_dias(fila.get("repetir")):
+        proxima = _alarma_reprogramar(fila, "armada", ahora)
+        logger.info("Alarma %s: saltada por «déjame dormir»; vuelve el %s", rid,
+                    proxima.strftime("%Y-%m-%d %H:%M") if proxima else "?")
+        return
+    if _alarma_reservar(fila, "armada", {"estado": "saltada"}):
+        logger.info("Alarma %s: saltada por «déjame dormir»", rid)
+
+
 # ── Alarmas: las herramientas de Jarvis y el alta ────────────────────────────
 
 def _alarma_momento(fecha: str, hora: str, repetir=None) -> tuple:
@@ -13653,17 +13688,21 @@ def _alarma_editar(alarma_id: str, fecha: str, hora: str, etiqueta: str = "",
             "repetir": dias, "repeticion": _alarma_repeticion_texto(dias)}
 
 
-def _alarma_listar() -> list:
+def _alarma_leer_vivas() -> list:
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
-        f"&select=id,cuando,etiqueta,estado,intentos,repetir"
+        f"&select=id,cuando,etiqueta,estado,intentos,repetir,saltar"
         f"&order=cuando.asc&limit={ALARMAS_MAX}",
         headers=supabase_headers(),
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
+    return r.json() or []
+
+
+def _alarma_listar(filas: Optional[list] = None) -> list:
     fuera = []
-    for fila in r.json() or []:
+    for fila in (_alarma_leer_vivas() if filas is None else filas):
         cuando = _alarma_cuando(fila)
         if cuando is None:
             continue
@@ -13672,8 +13711,101 @@ def _alarma_listar() -> list:
                       "etiqueta": fila.get("etiqueta") or "",
                       "estado": fila.get("estado"),
                       "intentos": int(fila.get("intentos") or 0),
-                      "repetir": _alarma_dias(fila.get("repetir"))})
+                      "repetir": _alarma_dias(fila.get("repetir")),
+                      "saltada": fila.get("estado") == "armada" and _alarma_saltada(fila)})
     return fuera
+
+
+# ── «Déjame dormir» ──────────────────────────────────────────────────────────
+# «Estoy reventado, cállate y déjame dormir»: la próxima mañana no suena nada, y la
+# semana que viene todo sigue como estaba. Es justo lo que `cancelar_alarma` NO sabe
+# hacer con una alarma semanal — la mata, y el lunes siguiente no suena.
+#
+# «Mañana» no es el día de calendario siguiente: es la próxima mañana en que algo iba a
+# sonar, si cae en las próximas 24 horas. Dicho a las 23:00 del domingo es el lunes; a
+# la 01:30 del lunes, después de salir, también es el lunes — y con «el día de
+# calendario siguiente» sería el martes y te despertaba igual. Se saltan TODAS las de
+# ese día (la de las 7:00 y la de respaldo de las 7:30), porque lo que se pide es dormir,
+# no quitar una.
+#
+# No mueve nada: marca el día en `saltar` y es el tick quien, al llegar la hora, ve la
+# marca y no avisa. Por eso se puede deshacer sin tener que recordar dónde estaba cada
+# alarma, y por eso el widget puede decir «mañana no suena» en vez de enseñar la
+# semana que viene como si nada.
+
+ALARMA_DORMIR_HORAS = 24
+
+
+def _alarma_dormir_dia(filas: list, ahora: datetime) -> Optional[str]:
+    """El día (local, ISO) que «déjame dormir» se saltaría, o `None` si en las próximas
+    24 horas no iba a sonar nada."""
+    limite = ahora + timedelta(hours=ALARMA_DORMIR_HORAS)
+    for fila in filas:
+        cuando = _alarma_cuando(fila)
+        if fila.get("estado") == "armada" and cuando and cuando <= limite:
+            return cuando.astimezone(LOCAL_TZ).date().isoformat()
+    return None
+
+
+def _alarma_dormir_de(filas: list, dia: str) -> list:
+    """Las alarmas puestas que suenan ese día local."""
+    return [f for f in filas
+            if f.get("estado") == "armada" and _alarma_cuando(f)
+            and _alarma_cuando(f).astimezone(LOCAL_TZ).date().isoformat() == dia]
+
+
+def _alarma_dormir_resumen(filas: list, ahora: Optional[datetime] = None) -> Optional[dict]:
+    """Lo que el widget necesita para pintar el botón: qué día, cuántas, y si ya está
+    puesto. `None` si no hay nada que saltarse (y entonces el botón no sale)."""
+    ahora = ahora or datetime.now(timezone.utc)
+    dia   = _alarma_dormir_dia(filas, ahora)
+    if dia is None:
+        return None
+    del_dia  = _alarma_dormir_de(filas, dia)
+    saltadas = sum(1 for f in del_dia if _alarma_saltada(f))
+    # «Puesto» solo si lo están todas: una alarma apuntada DESPUÉS de pulsar el botón
+    # (te acuerdas de que tienes médico a las 11) sí suena, y el botón vuelve a salir
+    # para que se vea que esa no está incluida.
+    return {"dia": dia, "alarmas": len(del_dia), "saltadas": saltadas,
+            "puesto": saltadas == len(del_dia)}
+
+
+def _alarma_dejame_dormir(deshacer: bool = False) -> dict:
+    """Marca (o desmarca) la próxima mañana para que no suene nada."""
+    ahora = datetime.now(timezone.utc)
+    filas = _alarma_leer_vivas()
+    dia   = _alarma_dormir_dia(filas, ahora)
+    if dia is None:
+        return {"ok": True, "hecho": False,
+                "motivo": f"no hay ninguna alarma en las próximas {ALARMA_DORMIR_HORAS} horas"}
+    del_dia = _alarma_dormir_de(filas, dia)
+    ids     = [str(f.get("id")) for f in del_dia if re.match(_UUID_PATTERN, str(f.get("id") or ""))]
+    if not ids:
+        return {"ok": True, "hecho": False, "motivo": "no hay ninguna alarma que saltar"}
+    # Condicional sobre `armada`, como todo aquí: si mientras tanto empezó a sonar, la
+    # marca ya no tiene nada que callar — para eso está «estoy despierto».
+    r = http.patch(
+        f"{ALARMAS_URL}?id=in.({','.join(ids)})&estado=eq.armada",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"saltar": None if deshacer else dia},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    tocadas = r.json() or []
+    detalle = []
+    for fila in sorted(tocadas, key=lambda f: str(f.get("cuando") or "")):
+        cuando = _alarma_cuando(fila)
+        if cuando is None:
+            continue
+        vuelve = _alarma_proxima(cuando, fila.get("repetir"), cuando)
+        detalle.append({"hora":     cuando.astimezone(LOCAL_TZ).strftime("%H:%M"),
+                        "etiqueta": fila.get("etiqueta") or "",
+                        "repeticion": _alarma_repeticion_texto(fila.get("repetir")),
+                        "vuelve":   vuelve.strftime("%Y-%m-%d %H:%M") if vuelve and not deshacer else None})
+    logger.info("Alarmas: «déjame dormir» %s para el %s (%d)",
+                "deshecho" if deshacer else "puesto", dia, len(tocadas))
+    return {"ok": True, "hecho": bool(tocadas), "dia": dia, "deshecho": deshacer,
+            "cuantas": len(tocadas), "alarmas": detalle}
 
 
 def _alarma_cancelar(alarma_id: str) -> dict:
@@ -13770,6 +13902,10 @@ def _j_cancelar_alarma(alarma_id: str) -> dict:
     return _alarma_cancelar(alarma_id)
 
 
+def _j_dejame_dormir(deshacer: bool = False) -> dict:
+    return _alarma_dejame_dormir(bool(deshacer))
+
+
 def _j_estoy_despierto() -> dict:
     """«Estoy despierto» dicho a Jarvis. Dos cosas, porque son la misma información:
     calla la alarma que esté sonando (sin pedir id, que a esa hora no se tiene) y cuenta
@@ -13846,8 +13982,21 @@ def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str
 
 @app.get("/alarmas")
 def get_alarmas(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    return {"alarmas": _alarma_listar(), "espera_min": ALARMA_ESPERA_MIN,
-            "max_min": ALARMA_MAX_MIN}
+    filas = _alarma_leer_vivas()
+    return {"alarmas": _alarma_listar(filas), "espera_min": ALARMA_ESPERA_MIN,
+            "max_min": ALARMA_MAX_MIN, "dejame_dormir": _alarma_dormir_resumen(filas)}
+
+
+@app.post("/alarmas/dejame-dormir")
+def alarmas_dejame_dormir(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """«Déjame dormir»: la próxima mañana no suena nada; las semanales vuelven la
+    siguiente vez. Ver `_alarma_dejame_dormir`."""
+    return _alarma_dejame_dormir()
+
+
+@app.post("/alarmas/dejame-dormir/deshacer")
+def alarmas_dejame_dormir_deshacer(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    return _alarma_dejame_dormir(deshacer=True)
 
 
 class AlarmaIn(BaseModel):
@@ -23441,12 +23590,27 @@ _JARVIS_HERRAMIENTAS = {
     "cancelar_alarma": {
         "confirmar":   False,
         "fn":          _j_cancelar_alarma,
-        "descripcion": "Quita una alarma de respaldo que está PUESTA y aún no ha sonado "
-                       "(«quita la alarma de mañana»). El id sale de mis_alarmas. Si se "
-                       "repite, deja de repetirse. Para callar una que está sonando NO "
-                       "es esta: es estoy_despierto.",
+        "descripcion": "Quita DEL TODO una alarma de respaldo que está PUESTA y aún no ha "
+                       "sonado («quita la alarma de los lunes», «ya no la necesito»). El id "
+                       "sale de mis_alarmas. Si se repite, deja de repetirse. Para saltarse "
+                       "solo la de mañana NO es esta: es dejame_dormir. Para callar una que "
+                       "está sonando tampoco: es estoy_despierto.",
         "parametros":  {"alarma_id": {"type": "string", "description": "UUID de la alarma."}},
         "obligatorios": ["alarma_id"],
+    },
+    "dejame_dormir": {
+        "confirmar":   False,
+        "fn":          _j_dejame_dormir,
+        "descripcion": "Salta las alarmas de respaldo de la PRÓXIMA mañana sin quitarlas "
+                       "(«estoy reventado, mañana déjame dormir», «mañana no me "
+                       "despiertes», «quita la alarma de mañana»). Las que se repiten "
+                       "vuelven a sonar la vez siguiente; las de una sola vez no suenan. "
+                       "Sin id: se salta todo lo que iba a sonar en las próximas 24 horas, "
+                       "ese día. Con deshacer=true vuelve a dejarlas sonar. Prefiérela a "
+                       "cancelar_alarma cuando hable de UNA mañana: cancelar una semanal "
+                       "la quita para siempre.",
+        "parametros":  {"deshacer": {"type": "boolean",
+                                     "description": "true para anular un «déjame dormir» ya puesto."}},
     },
     "estoy_despierto": {
         "confirmar":   False,
@@ -23743,7 +23907,7 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
 # servía para que el modelo la intentara y fallara delante de Mikel.
 _MCP_SERVIDOR_ACCIONES = {
     "recordarme", "cancelar_recordatorio", "poner_alarma", "cancelar_alarma",
-    "estoy_despierto", "guardar_idea",
+    "dejame_dormir", "estoy_despierto", "guardar_idea",
     "anadir_sesion_entrenamiento", "encender_pc", "apagar_pc", "suspender_pc",
     "casa_ordenar",
 }
@@ -25054,6 +25218,7 @@ _JARVIS_RELLENOS = {
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",
     "estoy_despierto":    "Vale, la quito.",
+    "dejame_dormir":      "Miro las alarmas de mañana.",
     "estado_pc":          "Miro cómo está el ordenador.",
     "encender_pc":        "Enciendo el ordenador.",
     "casa_dispositivos":  "Miro la casa.",

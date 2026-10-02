@@ -16,7 +16,7 @@ import {
   repartoPatrimonio,
   RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
   tramosRelleno, escalaGrafica,
-  alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
+  alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto, alarmaDormirDiaTexto,
   revisionDeUrl, DIAS_SEMANA,
   agruparParteNoche, fraseParteNoche, motivoNoResponder,
   hostStreaming, rescateNotaDeVoz,
@@ -2548,6 +2548,9 @@ export default function Dashboard() {
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
   const [alarmaEspera, setAlarmaEspera]             = useState(2);
+  // «Déjame dormir»: qué día se saltaría y si ya está puesto. Lo calcula el backend
+  // (es el que sabe la zona horaria); `null` = no hay nada que saltar en 24 h.
+  const [alarmaDormir, setAlarmaDormir]             = useState(null);
   // El mando de la casa. `casaPedidos`: lo que se acaba de tocar y todavía no ha vuelto en
   // /casa/estado, por entidad ({ id, servicio, momento }); es lo que hace que la ficha
   // diga «pedido…» al instante. `casaAvisos`: el error de una ficha o el acuse de una
@@ -4893,6 +4896,7 @@ export default function Dashboard() {
       if (!r.ok) throw new Error("alarmas");
       const datos = await r.json();
       setAlarmas(datos.alarmas || []);
+      setAlarmaDormir(datos.dejame_dormir || null);
       setAlarmasError(false);
       if (datos.espera_min) setAlarmaEspera(datos.espera_min);
     } catch {
@@ -4959,6 +4963,16 @@ export default function Dashboard() {
     // Si la que se quita es la que se estaba editando, el formulario se vacía: guardar
     // después habría intentado editar una alarma que ya no está.
     setAlarmaForm(f => (f.editando === id ? ALARMA_FORM_VACIO : f));
+    await loadAlarmas();
+  }
+
+  // «Estoy reventado, déjame dormir»: la próxima mañana no suena nada y las semanales
+  // vuelven la vez siguiente. Se puede deshacer, que es por lo que no pide confirmación.
+  async function dejameDormir(deshacer) {
+    try {
+      await apiFetch(`${API}/alarmas/dejame-dormir${deshacer ? "/deshacer" : ""}`,
+                     { method: "POST", headers: authHeaders() });
+    } catch { /* idem: la recarga dice cómo ha quedado */ }
     await loadAlarmas();
   }
 
@@ -6927,6 +6941,30 @@ export default function Dashboard() {
               )}
               {alarmas?.length === 0 && (
                 <div style={{ color: "var(--muted)", fontSize: 13 }}>Ninguna puesta.</div>
+              )}
+              {alarmaDormir && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px",
+                  borderRadius: 8, background: "var(--surface)",
+                  border: `0.5px solid ${alarmaDormir.puesto ? "var(--accent)" : "var(--border2)"}` }}>
+                  <div style={{ flex: 1, minWidth: 0, fontSize: 12,
+                    color: alarmaDormir.puesto ? "var(--text)" : "var(--muted2)" }}>
+                    {alarmaDormirDiaTexto(alarmaDormir.dia, now, true)}{" "}
+                    {alarmaDormir.puesto ? "duermes: no suena ninguna"
+                      : alarmaDormir.alarmas === 1 ? "suena 1" : `suenan ${alarmaDormir.alarmas}`}
+                  </div>
+                  {alarmaDormir.puesto ? (
+                    <span {...comoBoton(() => dejameDormir(true), { etiqueta: "Deshacer déjame dormir" })}
+                      style={{ fontSize: 12, color: "var(--accent)", cursor: "pointer", flexShrink: 0 }}>
+                      Deshacer
+                    </span>
+                  ) : (
+                    <button onClick={() => dejameDormir(false)}
+                      title="Se salta todo lo de ese día; las que se repiten vuelven la vez siguiente"
+                      style={{ ...s.newIdeaBtn, width: "auto", marginTop: 0, flexShrink: 0, padding: "6px 10px" }}>
+                      😴 Déjame dormir
+                    </button>
+                  )}
+                </div>
               )}
               {alarmas?.map(a => (
                 <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>

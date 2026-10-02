@@ -19,7 +19,7 @@ import {
   elegirVozEspanola, textoHablable, esFinDeLlamada,
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
-  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto,
+  alarmaEnPalabras, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto, alarmaDormirDiaTexto,
   alarmaCuandoTexto, revisionDeUrl,
   repartoPatrimonio, rescateNotaDeVoz,
   RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
@@ -2473,6 +2473,15 @@ describe("alarmas de respaldo", () => {
     expect(alarmaEstadoTexto({ estado: "armada" })).toBe("puesta");
     expect(alarmaEstadoTexto({ estado: "avisada" })).toBe("esperando que confirmes");
     expect(alarmaEstadoTexto({ estado: "escalada", intentos: 3 })).toBe("insistiendo (3)");
+    // «Déjame dormir»: sigue puesta, pero tiene que verse que esta vez no suena.
+    expect(alarmaEstadoTexto({ estado: "armada", saltada: true })).toBe("esta vez no suena");
+  });
+
+  test("el día de «déjame dormir» se dice como se piensa", () => {
+    expect(alarmaDormirDiaTexto("2026-09-10", HOY)).toBe("mañana");
+    expect(alarmaDormirDiaTexto("2026-09-10", HOY, true)).toBe("Mañana");
+    // Pulsado de madrugada, la alarma de las 07:00 es de hoy.
+    expect(alarmaDormirDiaTexto("2026-09-10", new Date(2026, 8, 10, 1, 30))).toBe("hoy");
   });
 
   test("sonando distingue lo que ya avisó de lo que solo está puesto", () => {
