@@ -3,6 +3,7 @@ import {
   VENTANA_SALIDA_MIN, UMBRAL_PRONTO_MIN, HORIZONTE_DIAS,
   esUbicacionOnline, proximoCompromiso, cuentaAtras, faltaPara, textoHueco,
   textoErrorRuta, faseSalida, recordarModo, modoPara,
+  formularioDesdeEvento, cuerpoEvento,
 } from "../../src/lib/agenda";
 
 // Las fechas se construyen por componentes LOCALES (`new Date(a, m, d, h, min)`) y se
@@ -332,5 +333,53 @@ describe("recordarModo y modoPara", () => {
     expect(modoPara({}, "x")).toBe("driving");
     expect(modoPara({ ultimo: "walking" }, "x")).toBe("walking");
     expect(modoPara({ porEvento: "basura", ultimo: "walking" }, "x")).toBe("walking");
+  });
+});
+
+describe("formulario de evento", () => {
+  // Como llega de /calendar/events una entrega de Alud de día completo.
+  const todoElDia = { id: "x", title: "Entrega", isAllDay: true,
+                      start: "2026-10-05T00:00:00Z", end: "2026-10-06T00:00:00Z" };
+
+  test("un evento de todo el día se abre con su día literal y la casilla marcada", () => {
+    const f = formularioDesdeEvento(todoElDia);
+    expect(f.allDay).toBe(true);
+    expect(f.date).toBe("2026-10-05");
+    expect(f.dias).toBe(1);
+  });
+
+  test("ponerle hora a uno de todo el día manda is_all_day: false (si no, Graph lo rechaza)", () => {
+    const f = { ...formularioDesdeEvento(todoElDia), allDay: false, startTime: "16:00", endTime: "16:30" };
+    expect(cuerpoEvento(f)).toMatchObject({
+      is_all_day: false, start: "2026-10-05T16:00:00", end: "2026-10-05T16:30:00",
+    });
+  });
+
+  test("dejarlo de todo el día manda medianoche a medianoche y conserva los días que dura", () => {
+    const f = formularioDesdeEvento({ ...todoElDia, end: "2026-10-08T00:00:00Z" });
+    expect(f.dias).toBe(3);
+    expect(cuerpoEvento(f)).toMatchObject({
+      is_all_day: true, start: "2026-10-05T00:00:00", end: "2026-10-08T00:00:00",
+    });
+  });
+
+  test("un evento con hora se abre con su hora local", () => {
+    const f = formularioDesdeEvento({ title: "Clase", start: iso(L(2026, 10, 5, 9, 15)), end: iso(L(2026, 10, 5, 10, 45)) });
+    expect(f).toMatchObject({ allDay: false, date: "2026-10-05", startTime: "09:15", endTime: "10:45" });
+  });
+
+  test("si acaba antes de empezar, acaba al día siguiente", () => {
+    const f = { subject: " Cena ", date: "2026-10-05", startTime: "23:30", endTime: "00:30",
+                allDay: false, location: "", alud_url: "" };
+    expect(cuerpoEvento(f)).toEqual({
+      subject: "Cena", location: null, is_all_day: false,
+      start: "2026-10-05T23:30:00", end: "2026-10-06T00:30:00",
+    });
+  });
+
+  test("la URL de Alud va en la descripción", () => {
+    const f = { subject: "x", date: "2026-10-05", startTime: "09:00", endTime: "09:30",
+                allDay: false, location: "", alud_url: " https://alud.deusto.es/a " };
+    expect(cuerpoEvento(f).description).toBe("alud_url: https://alud.deusto.es/a");
   });
 });

@@ -32,6 +32,7 @@ import { agruparLibros, terminadosEnAnio, fechaLibro, textoDuracion, puedeBuscar
 import {
   proximoCompromiso, cuentaAtras, faltaPara, textoHueco, faseSalida, esUbicacionOnline,
   recordarModo, modoPara, textoErrorRuta, VENTANA_SALIDA_MIN, HORIZONTE_DIAS,
+  formularioDesdeEvento, cuerpoEvento,
 } from "../lib/agenda";
 import {
   construirLineaTiempo, textoEstadoCarril, etiquetaDia, desplazarDia, fechaLocalISO,
@@ -2706,7 +2707,7 @@ export default function Dashboard() {
   }, [loading]);
 
   function openCreateEvent() {
-    setEventForm({ subject: "", date: isoHoy(), startTime: "09:00", endTime: "09:30", location: "", calendarId: "", alud_url: "" });
+    setEventForm({ subject: "", date: isoHoy(), startTime: "09:00", endTime: "09:30", allDay: false, dias: 1, location: "", calendarId: "", alud_url: "" });
     setEditingEventId(null);
     setEventCreateError(null);
     setShowCreateEvent(true);
@@ -2719,18 +2720,7 @@ export default function Dashboard() {
   }
 
   function openEditEvent(ev) {
-    const pad = n => String(n).padStart(2, "0");
-    const sd = new Date(ev.start);
-    const ed = new Date(ev.end);
-    setEventForm({
-      subject: ev.title || "",
-      date: isoHoy(sd),
-      startTime: `${pad(sd.getHours())}:${pad(sd.getMinutes())}`,
-      endTime: `${pad(ed.getHours())}:${pad(ed.getMinutes())}`,
-      location: ev.location || "",
-      calendarId: "",
-      alud_url: ev.alud_url || "",
-    });
+    setEventForm(formularioDesdeEvento(ev));
     setEditingEventId(ev.id);
     setEventCreateError(null);
     setShowCreateEvent(true);
@@ -2744,23 +2734,15 @@ export default function Dashboard() {
 
   async function submitCreateEvent() {
     if (eventCreating) return;
-    const { subject, date, startTime, endTime, location, calendarId, alud_url } = eventForm;
-    if (!subject.trim() || !date || !startTime || !endTime) {
-      setEventCreateError("Completa título, fecha y horas");
+    const { subject, date, startTime, endTime, calendarId, allDay } = eventForm;
+    if (!subject.trim() || !date || (!allDay && (!startTime || !endTime))) {
+      setEventCreateError(allDay ? "Completa título y fecha" : "Completa título, fecha y horas");
       return;
     }
     setEventCreating(true);
     setEventCreateError(null);
     try {
-      const payload = {
-        subject: subject.trim(),
-        start: `${date}T${startTime}:00`,
-        end: `${date}T${endTime}:00`,
-        location: location.trim() || null,
-      };
-      if (alud_url && alud_url.trim()) {
-        payload.description = `alud_url: ${alud_url.trim()}`;
-      }
+      const payload = cuerpoEvento(eventForm);
       let r;
       if (editingEventId) {
         r = await apiFetch(`${API}/calendar/events/${editingEventId}`, {
@@ -9338,7 +9320,26 @@ export default function Dashboard() {
               </div>
 
               <div>
-                <div style={FIELD_LABEL_STYLE}>Hora</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={FIELD_LABEL_STYLE}>Hora</div>
+                  {/* Casilla propia y no un <input type="checkbox">: el reset global
+                      (`-webkit-appearance: none`) la deja invisible en Safari. */}
+                  <button type="button" role="checkbox" aria-checked={!!eventForm.allDay}
+                    onClick={() => setEventForm(f => ({ ...f, allDay: !f.allDay }))}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: 0, marginBottom: 6,
+                      background: "transparent", border: "none", cursor: "pointer",
+                      color: eventForm.allDay ? "var(--text)" : "var(--muted)", fontSize: 12,
+                      fontFamily: "'DM Sans', sans-serif" }}>
+                    <span style={{ width: 14, height: 14, lineHeight: "14px", borderRadius: 4,
+                      textAlign: "center", fontSize: 10, color: "#0e0f11",
+                      background: eventForm.allDay ? "var(--accent)" : "transparent",
+                      border: `0.5px solid ${eventForm.allDay ? "var(--accent)" : "var(--border2)"}` }}>
+                      {eventForm.allDay ? "✓" : ""}
+                    </span>
+                    Todo el día
+                  </button>
+                </div>
+                {!eventForm.allDay && (
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <TimeInput value={eventForm.startTime} onChange={v => setEventForm(f => {
                     const [hh, mm] = v.split(":").map(Number);
@@ -9349,6 +9350,7 @@ export default function Dashboard() {
                   <span style={{ color: "var(--muted2)", fontSize: 13 }}>→</span>
                   <TimeInput value={eventForm.endTime} onChange={v => setEventForm(f => ({ ...f, endTime: v }))} />
                 </div>
+                )}
               </div>
 
               <div>

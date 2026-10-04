@@ -10,7 +10,7 @@
 // la invariante número uno de este repositorio es no dejar que el navegador negocie
 // husos por su cuenta.
 
-import { aFechaLocal, tieneHora } from "./lineaTiempo.js";
+import { aFechaLocal, tieneHora, desplazarDia, fechaLocalISO } from "./lineaTiempo.js";
 import { MESES_CORTOS_ES } from "./helpers.js";
 
 // Espejo del valor por defecto de `SALIR_VENTANA_MIN` en el backend (las reglas de
@@ -224,4 +224,53 @@ export function recordarModo(mapa, key, modo, maximo = 50) {
 
 export function modoPara(mapa, key) {
   return mapa?.porEvento?.[key] || mapa?.ultimo || "driving";
+}
+
+// ── Formulario de evento (crear / editar en Outlook) ─────────────────────────
+
+// Lo que el modal enseña al abrir un evento existente. Uno de todo el día llega de Graph
+// como medianoche UTC sin más (y el fin, la medianoche del día siguiente): su día es el
+// literal del ISO, igual que en `normalizarEventos`. Pasarlo por la hora local lo dejaba
+// en «02:00 → 02:00» y, al guardar con horas, Graph lo rechazaba entero (ver
+// `cuerpoEvento`). Las horas de un evento de día completo son las que se pondrían si se
+// desmarca la casilla, no las suyas, que no tiene.
+export function formularioDesdeEvento(ev) {
+  const p = n => String(n).padStart(2, "0");
+  if (ev?.isAllDay) {
+    const desde = String(ev.start || "").slice(0, 10);
+    const hasta = String(ev.end || "").slice(0, 10);
+    const dias  = Math.max(1, Math.round((Date.parse(`${hasta}T12:00:00Z`) - Date.parse(`${desde}T12:00:00Z`)) / 86400000) || 1);
+    return { subject: ev.title || "", date: desde, allDay: true, dias,
+             startTime: "09:00", endTime: "09:30", location: ev.location || "",
+             calendarId: "", alud_url: ev.alud_url || "" };
+  }
+  const sd = aFechaLocal(ev?.start) || new Date();
+  const ed = aFechaLocal(ev?.end) || sd;
+  return { subject: ev?.title || "", date: fechaLocalISO(sd), allDay: false, dias: 1,
+           startTime: `${p(sd.getHours())}:${p(sd.getMinutes())}`,
+           endTime: `${p(ed.getHours())}:${p(ed.getMinutes())}`,
+           location: ev?.location || "", calendarId: "", alud_url: ev?.alud_url || "" };
+}
+
+// El cuerpo de POST/PATCH /calendar/events. `is_all_day` va SIEMPRE, también al editar:
+// si no se manda, Graph conserva el que tenía el evento, y a uno de todo el día no le
+// acepta un inicio que no sea medianoche («The Event.Start property for an all-day event
+// needs to be set to midnight»). Así cambiar la hora de una entrega de día completo lo
+// convierte en un evento con hora, que es lo que se ha pedido.
+export function cuerpoEvento(form) {
+  const { subject, date, startTime, endTime, location, alud_url, allDay } = form;
+  const cuerpo = { subject: subject.trim(), location: location.trim() || null };
+  if (allDay) {
+    cuerpo.is_all_day = true;
+    cuerpo.start = `${date}T00:00:00`;
+    cuerpo.end   = `${desplazarDia(date, Math.max(1, form.dias || 1))}T00:00:00`;
+  } else {
+    cuerpo.is_all_day = false;
+    cuerpo.start = `${date}T${startTime}:00`;
+    // «23:30 → 00:30» termina al día siguiente; con la misma fecha, Graph lo rechaza
+    // por acabar antes de empezar.
+    cuerpo.end = `${endTime < startTime ? desplazarDia(date, 1) : date}T${endTime}:00`;
+  }
+  if (alud_url && alud_url.trim()) cuerpo.description = `alud_url: ${alud_url.trim()}`;
+  return cuerpo;
 }
