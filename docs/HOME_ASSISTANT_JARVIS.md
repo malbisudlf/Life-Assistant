@@ -779,7 +779,9 @@ action:
    fallo está en un paso concreto del ritual: la traza dice cuál. Si no se disparó
    aunque el sensor cambió, la condición o el trigger están mal copiados.
 
-**El botón.** Mismo molde que los otros cinco, y sin `uri`: pulsarlo no abre nada en el
+**El botón** (los botones: «5 min más» va por esta MISMA automatización, con el id
+prefijado `posponer-`, y no necesita nada más; ver «5 minutos más» en `docs/ALARMAS.md`).
+Mismo molde que los otros cinco, y sin `uri`: pulsarlo no abre nada en el
 móvil, que es la mitad del sentido de este botón. Este salto —la app companion entregando
 el evento a HA— es el único del camino que no deja huella en ningún log, así que el
 backend contesta con otra notificación («⏰ Alarma quitada») para que se note cuando se

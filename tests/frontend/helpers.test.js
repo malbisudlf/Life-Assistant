@@ -2475,6 +2475,8 @@ describe("alarmas de respaldo", () => {
     expect(alarmaEstadoTexto({ estado: "escalada", intentos: 3 })).toBe("insistiendo (3)");
     // «Déjame dormir»: sigue puesta, pero tiene que verse que esta vez no suena.
     expect(alarmaEstadoTexto({ estado: "armada", saltada: true })).toBe("esta vez no suena");
+    // «5 min más»: callada, y dice cuándo vuelve.
+    expect(alarmaEstadoTexto({ estado: "pospuesta", vuelve: "07:05" })).toBe("vuelve a sonar a las 07:05");
   });
 
   test("el día de «déjame dormir» se dice como se piensa", () => {
@@ -2490,6 +2492,10 @@ describe("alarmas de respaldo", () => {
     expect(alarmaSonando(null)).toBeNull();
     // Una que está insistiendo pesa más que una que solo está puesta, esté donde esté.
     expect(alarmaSonando([{ estado: "armada" }, { id: "x", estado: "escalada" }]).id).toBe("x");
+    // Una pospuesta cuenta (va a volver y «Estoy despierto» la quita), pero lo que suena
+    // de verdad va antes.
+    expect(alarmaSonando([{ id: "p", estado: "pospuesta" }]).id).toBe("p");
+    expect(alarmaSonando([{ id: "p", estado: "pospuesta" }, { id: "s", estado: "avisada" }]).id).toBe("s");
   });
 });
 

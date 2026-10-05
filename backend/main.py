@@ -13863,8 +13863,15 @@ ALARMA_VOLUMEN      = float(os.getenv("ALARMA_VOLUMEN", "0.35"))
 # error: se oye poco, en vez de sonar donde no toca.
 ALARMA_ALTAVOZ      = os.getenv("ALARMA_ALTAVOZ", "")
 ALARMA_NO_MOLESTAR  = os.getenv("ALARMA_NO_MOLESTAR", "")
-# Los estados en los que una alarma todavía tiene algo pendiente que hacer.
-ALARMA_VIVOS        = ("armada", "avisada", "escalada")
+# «5 minutos más»: cuánto se calla una alarma que está sonando antes de volver a empezar.
+ALARMA_POSPONER_MIN = int(os.getenv("ALARMA_POSPONER_MIN", "5"))
+# Los estados en los que una alarma todavía tiene algo pendiente que hacer. `pospuesta`
+# es «5 minutos más»: callada, con la hora de volver a sonar en `avisado_at` (ver
+# `_alarma_posponer`).
+ALARMA_VIVOS        = ("armada", "avisada", "escalada", "pospuesta")
+# Los que cuentan como «sonando» para quien dice que está despierto: una alarma pospuesta
+# también, porque lo que quieres al decirlo es que no vuelva a sonar dentro de 5 minutos.
+ALARMA_SONANDO      = ("avisada", "escalada", "pospuesta")
 
 # Epoch de lo próximo que hay que mirar; `None` significa "no se sabe" y fuerza una
 # consulta. Es una caché, no la verdad: la verdad está en Supabase, y perderla en un
@@ -14135,6 +14142,23 @@ def _correr_alarmas() -> dict:
         if cuando is None:
             continue
 
+        if estado == "pospuesta":
+            # «5 minutos más»: la hora de volver está en `avisado_at`. Al llegar, vuelve a
+            # empezar desde el primer toque —el aviso al móvil y, dos minutos después, la
+            # casa—, con el reloj de la rendición también desde cero. `cuando` no se toca:
+            # es la hora de la alarma, y de ella sale la de la semana que viene.
+            vuelve = _alarma_cuando(fila, "avisado_at") or ahora
+            if vuelve > ahora:
+                siguiente = vuelve if siguiente is None or vuelve < siguiente else siguiente
+                continue
+            if not _alarma_reservar(fila, "pospuesta", {"estado": "avisada", "intentos": 0,
+                                                        "avisado_at": ahora.isoformat(),
+                                                        "escalado_at": None}):
+                continue
+            _alarma_avisar(fila, ahora)
+            siguiente = ahora + timedelta(minutes=ALARMA_ESPERA_MIN)
+            continue
+
         if estado == "armada":
             if cuando > ahora:
                 siguiente = cuando if siguiente is None or cuando < siguiente else siguiente
@@ -14226,7 +14250,13 @@ def _alarma_acciones(rid: str) -> list:
     lo hace **visible** — si pulsas y no llega, ya sabes que no ha entrado, que es
     exactamente lo que faltaba aquel día. Ver `docs/BUGS_HISTORICOS.md`.
     """
-    return [{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"}]
+    return [{"action": f"LA_DESPIERTO_{rid}", "title": "Estoy despierto"},
+            # «5 minutos más» va por la MISMA automatización de HA que «Estoy despierto»,
+            # para no pedir YAML nuevo: HA se queda con lo que va detrás del último `_` y
+            # llama a `/alarmas/<eso>/despierto`, y es ese endpoint quien ve el prefijo
+            # `posponer-` y pospone en vez de confirmar. Mismo truco que `LA_APAGAR_`.
+            {"action": f"LA_DESPIERTO_{ALARMA_PREFIJO_POSPONER}{rid}",
+             "title": f"{ALARMA_POSPONER_MIN} min más"}]
 
 
 def _alarma_avisar(fila: dict, ahora: datetime) -> None:
@@ -14455,7 +14485,8 @@ def _alarma_editar(alarma_id: str, fecha: str, hora: str, etiqueta: str = "",
     # Dos intentos en vez de uno con `in.(...)`, y solo para saber si estaba sonando: la
     # música se para SOLO si lo estaba. Un media_stop en cada edición callaría lo que
     # estuvieras escuchando por cambiar la hora de mañana.
-    if not _patch("estado=eq.armada"):
+    # Una pospuesta ya está callada: se edita como una armada, sin parar la música.
+    if not (_patch("estado=eq.armada") or _patch("estado=eq.pospuesta")):
         if not _patch("estado=in.(avisada,escalada)"):
             return {"ok": False, "hecho": False, "motivo": "esa alarma ya no estaba activa"}
         _alarma_callar()
@@ -14468,7 +14499,7 @@ def _alarma_editar(alarma_id: str, fecha: str, hora: str, etiqueta: str = "",
 def _alarma_leer_vivas() -> list:
     r = http.get(
         f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_VIVOS)})"
-        f"&select=id,cuando,etiqueta,estado,intentos,repetir,saltar"
+        f"&select=id,cuando,etiqueta,estado,intentos,repetir,saltar,avisado_at"
         f"&order=cuando.asc&limit={ALARMAS_MAX}",
         headers=supabase_headers(),
     )
@@ -14489,7 +14520,12 @@ def _alarma_listar(filas: Optional[list] = None) -> list:
                       "estado": fila.get("estado"),
                       "intentos": int(fila.get("intentos") or 0),
                       "repetir": _alarma_dias(fila.get("repetir")),
-                      "saltada": fila.get("estado") == "armada" and _alarma_saltada(fila)})
+                      "saltada": fila.get("estado") == "armada" and _alarma_saltada(fila),
+                      # «5 minutos más»: a qué hora vuelve a sonar.
+                      "vuelve": (_alarma_cuando(fila, "avisado_at").astimezone(LOCAL_TZ)
+                                 .strftime("%H:%M")
+                                 if fila.get("estado") == "pospuesta"
+                                 and _alarma_cuando(fila, "avisado_at") else None)})
     return fuera
 
 
@@ -14601,7 +14637,8 @@ def _alarma_cancelar(alarma_id: str) -> dict:
 
     # Dos intentos, como en la edición: la música se para SOLO si estaba sonando. Quitar
     # la alarma de mañana con el Echo puesto mandaba un media_stop y cortaba la música.
-    if _patch("estado=eq.armada"):
+    # Una pospuesta ya está callada: va con las que no suenan.
+    if _patch("estado=eq.armada") or _patch("estado=eq.pospuesta"):
         return {"ok": True, "hecho": True, "id": alarma_id}
     if not _patch("estado=in.(avisada,escalada)"):
         return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba activa"}
@@ -14641,7 +14678,7 @@ def _alarma_confirmar_sonando(origen: str, acusar: bool = True) -> dict:
     """
     ahora = datetime.now(timezone.utc)
     r = http.patch(
-        f"{ALARMAS_URL}?estado=in.(avisada,escalada)",
+        f"{ALARMAS_URL}?estado=in.({','.join(ALARMA_SONANDO)})",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"estado": "confirmada", "confirmado_at": ahora.isoformat()},
     )
@@ -14701,6 +14738,70 @@ def _j_estoy_despierto() -> dict:
     return {**alarma, "resumen": resumen}
 
 
+# ── «5 minutos más» ──────────────────────────────────────────────────────────
+# Callar una alarma que está sonando y que vuelva a empezar al rato. No es «estoy
+# despierto»: no cuenta como señal de despertar para el resumen, ni rearma la semanal.
+#
+# Es un estado más, `pospuesta`, y la hora de volver va en `avisado_at`. Lo obvio era
+# devolverla a `armada` con `cuando` dentro de cinco minutos, y eso rompe las semanales:
+# la de la semana que viene se calcula con la hora de `cuando` (`_alarma_proxima`), así
+# que cada «5 minutos más» la habría corrido cinco minutos para siempre. Con `cuando`
+# intacto, la hora de la alarma sigue siendo la que pusiste.
+ALARMA_PREFIJO_POSPONER = "posponer-"
+# El id que acepta `/alarmas/{id}/despierto`: un UUID, o el mismo con el prefijo del
+# botón «5 minutos más». Se valida igual de estricto que antes: se interpola en una URL
+# de Supabase (invariante 6 de CLAUDE.md).
+_ALARMA_ID_BOTON = r"^(posponer-)?" + _UUID_PATTERN.lstrip("^")
+
+
+def _alarma_posponer(alarma_id: str, minutos: int = 0) -> dict:
+    """Calla la alarma que suena y la vuelve a poner a sonar dentro de `minutos`.
+
+    Solo desde `avisada` o `escalada`, con el PATCH condicional de siempre: pulsar dos
+    veces el botón de una notificación vieja no la pospone otra vez, y una alarma que ya
+    confirmaste no vuelve a sonar por un toque tardío. Cada vez que vuelve empieza desde
+    el primer toque y con el reloj de la rendición a cero, así que se puede posponer
+    tantas veces como se quiera: es tu despertador.
+    """
+    alarma_id = str(alarma_id or "").strip()
+    if not re.match(_UUID_PATTERN, alarma_id):
+        return {"ok": False, "hecho": False, "motivo": "Ese id no tiene forma de UUID"}
+    minutos = max(1, min(int(minutos or ALARMA_POSPONER_MIN), 60))
+    vuelve  = datetime.now(timezone.utc) + timedelta(minutes=minutos)
+    r = http.patch(
+        f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.(avisada,escalada)",
+        headers={**supabase_headers(), "Prefer": "return=representation"},
+        json={"estado": "pospuesta", "avisado_at": vuelve.isoformat(),
+              "escalado_at": None, "intentos": 0},
+    )
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    if not r.json():
+        return {"ok": True, "hecho": False, "motivo": "esa alarma ya no estaba sonando"}
+    _alarma_callar()
+    # El reloj puede estar dormido hasta la próxima alarma de mañana.
+    _alarma_marcar_pendiente(vuelve)
+    hora = vuelve.astimezone(LOCAL_TZ).strftime("%H:%M")
+    logger.info("Alarma %s: pospuesta %d min, vuelve a las %s", alarma_id, minutos, hora)
+    # Efímero, como el de «Alarma quitada»: es la respuesta a un botón pulsado medio
+    # dormido, y dice que ha entrado.
+    _acusar_recibo(f"⏰ {minutos} minutos más", f"Vuelvo a sonar a las {hora}.",
+                   efimero=True)
+    return {"ok": True, "hecho": True, "id": alarma_id, "vuelve": hora, "minutos": minutos}
+
+
+def _j_posponer_alarma(minutos: int = 0) -> dict:
+    """«Cinco minutos más» dicho a Jarvis: pospone la que esté sonando, sin id."""
+    r = http.get(f"{ALARMAS_URL}?estado=in.(avisada,escalada)&select=id&limit=1",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    filas = r.json() or []
+    if not filas:
+        return {"ok": True, "hecho": False, "motivo": "no hay ninguna alarma sonando"}
+    return _alarma_posponer(str(filas[0].get("id") or ""), minutos)
+
+
 # ── Alarmas: los endpoints ───────────────────────────────────────────────────
 
 @app.get("/ha/alarma-tick")
@@ -14732,18 +14833,25 @@ def ha_alarma_tick(request: Request, token: str = ""):
 
 
 @app.post("/alarmas/{alarma_id}/despierto")
-def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str = ""):
+def alarma_despierto(request: Request, token: str = "",
+                     alarma_id: str = Path(..., pattern=_ALARMA_ID_BOTON)):
     """«Estoy despierto». Lo llama el botón de la notificación (HA) o el dashboard.
 
     Confirmar la alarma es además la señal de despertar del resumen diario: es la más
     exacta que hay (has pulsado un botón), y sin ella el correo se quedaría esperando a
     la hora tope las mañanas en que el móvil no estaba en el cargador. Va detrás y sin
     poder romper esto: quitar la alarma es lo que has pedido.
+
+    **Y es también el «5 minutos más» de la notificación**, si el id llega con el prefijo
+    `posponer-` (ver `_alarma_acciones`): así ese botón no necesita una automatización
+    nueva en Home Assistant.
     """
     _auth_boton(request, token)
+    if alarma_id.startswith(ALARMA_PREFIJO_POSPONER):
+        return _alarma_posponer(alarma_id[len(ALARMA_PREFIJO_POSPONER):])
     ahora = datetime.now(timezone.utc)
     r = http.patch(
-        f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.(avisada,escalada)",
+        f"{ALARMAS_URL}?id=eq.{alarma_id}&estado=in.({','.join(ALARMA_SONANDO)})",
         headers={**supabase_headers(), "Prefer": "return=representation"},
         json={"estado": "confirmada", "confirmado_at": ahora.isoformat()},
     )
@@ -14755,6 +14863,14 @@ def alarma_despierto(request: Request, alarma_id: str = _uuid_path(), token: str
     _alarma_confirmada(r.json(), ahora, acusar=True)
     _senal_despertar_segura("alarma")
     return {"ok": True, "hecho": True}
+
+
+@app.post("/alarmas/{alarma_id}/posponer")
+def alarma_posponer(request: Request, alarma_id: str = _uuid_path(), token: str = ""):
+    """«5 minutos más» desde el dashboard (JWT) o desde un cliente de servicio. El botón
+    de la notificación llega por `/despierto` con prefijo; ver `alarma_despierto`."""
+    _auth_boton(request, token)
+    return _alarma_posponer(alarma_id)
 
 
 @app.get("/alarmas")
@@ -24616,6 +24732,16 @@ _JARVIS_HERRAMIENTAS = {
         "parametros":  {"deshacer": {"type": "boolean",
                                      "description": "true para anular un «déjame dormir» ya puesto."}},
     },
+    "posponer_alarma": {
+        "confirmar":   False,
+        "fn":          _j_posponer_alarma,
+        "descripcion": "«Cinco minutos más», «déjame un poco más», «pospón la alarma»: "
+                       "calla la alarma de respaldo que esté sonando y la vuelve a hacer "
+                       "sonar al rato (5 minutos si no dice otra cosa). Sin id. NO es "
+                       "estoy_despierto: no cuenta como levantarse.",
+        "parametros":  {"minutos": {"type": "integer",
+                                    "description": "Minutos hasta que vuelva a sonar (por defecto 5)."}},
+    },
     "estoy_despierto": {
         "confirmar":   False,
         "fn":          _j_estoy_despierto,
@@ -24912,7 +25038,7 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
 _MCP_SERVIDOR_ACCIONES = {
     "recordarme", "recordarme_en_un_lugar", "cancelar_recordatorio", "poner_alarma",
     "cancelar_alarma",
-    "dejame_dormir", "estoy_despierto", "guardar_idea",
+    "dejame_dormir", "estoy_despierto", "posponer_alarma", "guardar_idea",
     "anadir_sesion_entrenamiento", "encender_pc", "apagar_pc", "suspender_pc",
     "casa_ordenar",
 }
@@ -26228,6 +26354,7 @@ _JARVIS_RELLENOS = {
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",
     "estoy_despierto":    "Vale, la quito.",
+    "posponer_alarma":    "Cinco minutos más.",
     "dejame_dormir":      "Miro las alarmas de mañana.",
     "estado_pc":          "Miro cómo está el ordenador.",
     "encender_pc":        "Enciendo el ordenador.",

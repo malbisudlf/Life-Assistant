@@ -89,7 +89,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha |
 | `DELETE /finanzas/etfs/{ticker}/aportaciones/{id}` | JWT | Borra una aportación mal metida (no hay PATCH: para corregirla se borra y se vuelve a crear) |
 | `GET /ha/alarma-tick` | servicio | El reloj de las alarmas de respaldo (sensor REST de HA a 60 s). Devuelve el nº de intento en pie —un ESTADO: se repite en cada tick mientras la alarma siga escalada—, 0 si no suena nada (ver `docs/ALARMAS.md`) |
-| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma, para la música y cuenta como señal de despertar del resumen diario. Lo llama el botón de la notificación o el dashboard |
+| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma (también una pospuesta), para la música y cuenta como señal de despertar del resumen diario. Lo llama el botón de la notificación o el dashboard. Con el id prefijado `posponer-<id>` es el botón «5 min más» de la notificación |
+| `POST /alarmas/{id}/posponer` | servicio o JWT | «5 minutos más»: calla la alarma que suena y la vuelve a hacer sonar dentro de `ALARMA_POSPONER_MIN`, sin mover su hora. No cuenta como señal de despertar |
 | `GET /alarmas` | JWT | Las alarmas de respaldo activas, en hora local |
 | `POST /alarmas` | JWT | Pone una: `{fecha?, hora, etiqueta?, repetir?}`. `repetir` son los días ISO en que se repite (1 = lunes) y hace opcional la fecha |
 | `PATCH /alarmas/{id}` | JWT | Edita una alarma viva (mismo cuerpo que el POST): la rearma con la hora o los días nuevos y los contadores a cero |

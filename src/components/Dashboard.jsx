@@ -4999,6 +4999,14 @@ export default function Dashboard() {
     await loadAlarmas();
   }
 
+  // «5 min más»: el segundo botón de la notificación, también aquí.
+  async function posponerAlarma(id) {
+    try {
+      await apiFetch(`${API}/alarmas/${id}/posponer`, { method: "POST", headers: authHeaders() });
+    } catch { /* idem */ }
+    await loadAlarmas();
+  }
+
   // ── Casa: el mando ─────────────────────────────────────────────────────────
   // Un refresco que falla no borra lo que ya se estaba viendo: el error solo se pinta si
   // no hay nada que enseñar. Lo de antes, con su edad, dice más que «no se pudo leer».
@@ -6930,12 +6938,23 @@ export default function Dashboard() {
                 <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
                   {sonando.etiqueta || "Es la hora"} — {alarmaEstadoTexto(sonando)}
                 </div>
-                <button onClick={() => confirmarDespierto(sonando.id)}
-                  style={{ width: "100%", padding: "10px 12px", background: "var(--accent)", border: "none",
-                    borderRadius: 6, color: "#0e0f11", fontSize: 14, fontWeight: 600, cursor: "pointer",
-                    fontFamily: "'DM Sans', sans-serif" }}>
-                  Estoy despierto
-                </button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => confirmarDespierto(sonando.id)}
+                    style={{ flex: 1, padding: "10px 12px", background: "var(--accent)", border: "none",
+                      borderRadius: 6, color: "#0e0f11", fontSize: 14, fontWeight: 600, cursor: "pointer",
+                      fontFamily: "'DM Sans', sans-serif" }}>
+                    Estoy despierto
+                  </button>
+                  {/* «5 min más»: solo mientras suena; una pospuesta ya está callada. */}
+                  {sonando.estado !== "pospuesta" && (
+                    <button onClick={() => posponerAlarma(sonando.id)}
+                      style={{ padding: "10px 12px", background: "var(--surface2)",
+                        border: "0.5px solid var(--border2)", borderRadius: 6, color: "var(--text)",
+                        fontSize: 14, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+                      5 min más
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

@@ -172,7 +172,7 @@ class TestSenalDeDespertar:
 
         r = client.post("/despertar?token=brief-token&fuente=cargador")
         assert r.json()["alarma"]["hecho"] is True
-        assert "estado=in.(avisada,escalada)" in mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
+        assert "estado=in.(avisada,escalada,pospuesta)" in mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
         assert ("media_player.media_stop", "media_player.cuarto") in [
             (o["servicio"], o["entidad"]) for o in main._ha_ordenes]
         # Y el resumen sale igual: la alarma es lo de menos de esta petición.
