@@ -169,7 +169,8 @@ dónde estás es él. Con esto, `/weather` y `/maps/departure` dejan de calcular
 desde casa, el resumen diario gana contexto y se guarda una serie diaria de horas en
 casa (métrica `time_at_home`) que el motor de correlaciones cruza con el sueño y la HRV.
 **No se guarda histórico de ubicación**: solo la posición actual, que se sobreescribe, y
-horas por día — nunca lugares.
+horas por día — nunca lugares, salvo la categoría «gimnasio» o «uni» de los tramos si
+declaras esas dos zonas (ver «Lugares», abajo).
 
 ```yaml
 rest_command:
@@ -211,6 +212,15 @@ automation:
 Sin coordenadas (un `device_tracker` por presencia en la red, por ejemplo) también
 funciona: `lat`/`lon` viajan como `null` y se sigue registrando la zona y la serie
 diaria, pero el clima y la hora de salida se quedan en sus valores por defecto.
+
+**Lugares (opcional)**: si creas en HA una zona para el gimnasio y otra para la
+universidad (Ajustes → Áreas, etiquetas y zonas → Zonas) con un nombre de
+`ZONAS_GIMNASIO` / `ZONAS_UNI` (por defecto `gimnasio`/`gym` y `uni`/`universidad`),
+Jarvis deja de avisar de lo que no corre prisa mientras estás allí, no te regaña por no
+entrenar el día que has ido, pregunta al salir del gimnasio si diste una sesión y acepta
+recordatorios «al llegar a…». No hay que tocar el YAML de arriba: la zona ya viaja en
+`zona`. Aplica la migración `20261005_lugares.sql` (columna `lugar` en los tramos y tabla
+de recordatorios por lugar). Ver «Lugares» en `docs/JARVIS.md`.
 
 ## 6 bis. Cartera de Indexa Capital (opcional)
 

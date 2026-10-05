@@ -2857,6 +2857,8 @@ export function alarmaEstadoTexto(alarma) {
     // porque significa que la casa está a punto de despertarse.
     case "avisada":  return "esperando que confirmes";
     case "escalada": return `insistiendo (${intentos})`;
+    // «5 min más»: callada, y vuelve a sonar a esa hora.
+    case "pospuesta": return alarma?.vuelve ? `vuelve a sonar a las ${alarma.vuelve}` : "pospuesta";
     default:         return alarma?.estado || "";
   }
 }
@@ -2870,9 +2872,11 @@ export function alarmaDormirDiaTexto(dia, hoy = new Date(), mayuscula = false) {
 }
 
 /** ¿Hay alguna alarma sonando ahora mismo? Es lo que decide si el widget enseña el
- *  botón grande de «Estoy despierto» en vez de la lista de siempre. */
+ *  botón grande de «Estoy despierto» en vez de la lista de siempre. Una pospuesta («5 min
+ *  más») cuenta: va a volver a sonar, y «Estoy despierto» es lo que la quita. */
 export function alarmaSonando(alarmas) {
-  return (alarmas || []).find(a => a?.estado === "avisada" || a?.estado === "escalada") || null;
+  return (alarmas || []).find(a => a?.estado === "avisada" || a?.estado === "escalada")
+    || (alarmas || []).find(a => a?.estado === "pospuesta") || null;
 }
 
 /** La decisión de revisión que hay que consumir por haber abierto el dashboard desde la

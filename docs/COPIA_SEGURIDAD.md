@@ -28,7 +28,8 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
 - **`health_metrics`** — el histórico del Watch. Es la única marcada **obligatoria**.
 - `training_clients`, `training_sessions`, `training_payments` — entrenamiento personal.
 - `ideas`, `clothing` — notas de voz y ropa.
-- `jarvis_memoria`, `jarvis_recordatorios`, `jarvis_mcp_servidores` — lo que Jarvis sabe.
+- `jarvis_memoria`, `jarvis_recordatorios`, `recordatorios_lugar`, `jarvis_mcp_servidores`
+  — lo que Jarvis sabe (los recordatorios por lugar son los de «al llegar a casa…»).
 - `reglas_usuario`, `vigilancias`, `avisos_reglas`, `ha_entidades` — lo proactivo.
 - `salud_ajustes`, `brief_ajustes` — ajustes que se escribieron a mano una vez.
 - `etf_holdings`, `etf_aportaciones` — la cartera introducida a mano.
@@ -56,7 +57,8 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
   propósito (ver `docs/BACKEND_PATRONES.md`), y `migraciones_aplicadas` se rellena sola
   al volver a aplicar las migraciones.
 - **`presencia_tramos`** — registro que se purga a los 35 días, y el dato más sensible
-  del proyecto: dónde has estado y a qué hora. No gana nada viajando en un volcado.
+  del proyecto: cuándo has estado en casa y, desde octubre de 2026, en el gimnasio o en
+  la uni. No gana nada viajando en un volcado.
 
 Si añades una tabla nueva, **decide dónde va**: en `TABLAS` si guarda algo que el usuario
 escribió a mano, o en `SIN_COPIA` si no. Lo que no está en `TABLAS` no se copia, y

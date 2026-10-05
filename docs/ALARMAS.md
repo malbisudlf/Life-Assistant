@@ -38,6 +38,8 @@ Y si la alarma se repite, `confirmada` y `rendida` no son el final: vuelve sola 
   calla lo que esté sonando). Se para la música y, si vino por el botón o el dashboard,
   llega la notificación de vuelta que dice que ha entrado. Y confirmar es además **la
   señal de despertar del resumen diario**, la misma que el cargador (`docs/BRIEF.md`).
+- **`pospuesta`**: pulsaste «5 min más» (ver abajo). Callada, y vuelve a `avisada` cuando
+  llega la hora guardada en `avisado_at`.
 - **`rendida`**: pasaron `ALARMA_MAX_MIN` sin respuesta. **Se avisa de que se rinde**: una
   alarma que deja de sonar sola y no lo cuenta es indistinguible de una que nunca se armó,
   y eso es lo que hace que dejes de fiarte del respaldo.
@@ -78,6 +80,35 @@ perdida, que es el mismo motivo por el que se avisa de la rendición.
 Lo que sigue **sin** hacerse es armar el respaldo de una alarma recurrente y que suene un
 festivo: eso lo decides tú al marcar los días. Marcar el domingo y olvidarlo es un
 despertador que suena el domingo, no un fallo.
+
+### «5 minutos más»
+
+La notificación trae dos botones: «Estoy despierto» y «5 min más» (`ALARMA_POSPONER_MIN`).
+El segundo también está en el widget mientras suena, y en Jarvis («cinco minutos más»,
+herramienta `posponer_alarma`, sin id). Calla lo que suena —música incluida— y a los cinco
+minutos vuelve a empezar **desde el primer toque**: el aviso al móvil y, si no confirmas,
+la casa dos minutos después. Se puede repetir tantas veces como quieras; cada vuelta
+pone a cero el reloj de la rendición.
+
+- **Es un estado, `pospuesta`, y la hora de volver va en `avisado_at`.** Lo obvio era
+  devolverla a `armada` con `cuando` dentro de cinco minutos, y eso rompía las
+  semanales: la de la semana que viene se calcula con la hora de `cuando`
+  (`_alarma_proxima`), así que cada «5 min más» la habría corrido cinco minutos para
+  siempre. Con `cuando` intacto, la hora de la alarma es la que pusiste.
+- **No es «estoy despierto».** No cuenta como señal de despertar del resumen diario ni
+  rearma la semanal. Y al revés, decir que estás despierto (botón, Jarvis, cargador)
+  **sí** quita una pospuesta: lo que quieres entonces es que no vuelva.
+- **Mismo PATCH condicional**, solo desde `avisada` o `escalada`: un toque tardío en una
+  notificación vieja no pospone una alarma que ya confirmaste.
+- **Sin YAML nuevo en Home Assistant.** El botón va por la automatización de «Estoy
+  despierto» con el id prefijado: `LA_DESPIERTO_posponer-<id>`. HA se queda con lo que va
+  tras el último `_` y llama a `/alarmas/posponer-<id>/despierto`; el backend ve el prefijo
+  y pospone. Por eso el prefijo lleva guion y no guion bajo. Mismo truco que `LA_APAGAR_`
+  para «Suspender» y compañía.
+- **Quitar o editar una pospuesta no manda `media_stop`**: ya estaba callada, y parar la
+  música cortaría lo que hayas puesto en esos cinco minutos.
+- El acuse («⏰ 5 minutos más — Vuelvo a sonar a las 07:05») va efímero, como el de
+  «Alarma quitada».
 
 ### «Déjame dormir»: saltarse una mañana
 
@@ -229,7 +260,8 @@ la insistencia, la traza de la automatización).
 | Ruta | Auth | Qué hace |
 |---|---|---|
 | `GET /ha/alarma-tick` | servicio (`HA_POLL_TOKEN`) | El reloj. Devuelve `escalar` (nº de intento en pie, 0 = no suena nada; se repite en cada tick mientras suene), `id` y `texto` |
-| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» y cuenta como señal de despertar del resumen |
+| `POST /alarmas/{id}/despierto` | servicio **o** JWT | «Estoy despierto». Lo llama el botón de la notificación o el dashboard. Si se lleva la fila, contesta al móvil con «⏰ Alarma quitada» y cuenta como señal de despertar del resumen. Con el id prefijado (`posponer-<id>`) es el «5 min más» de la notificación |
+| `POST /alarmas/{id}/posponer` | servicio **o** JWT | «5 minutos más» desde el dashboard: calla la que suena y vuelve a sonar dentro de `ALARMA_POSPONER_MIN` |
 | `POST /despertar` | servicio (`BRIEF_TOKEN`) | El Atajo del cargador. Es del resumen diario, pero de paso calla la alarma que esté sonando (sin id: todas las que suenen) |
 | `GET /alarmas` | JWT | Las alarmas activas, en hora local |
 | `POST /alarmas` | JWT | Poner una: `{fecha?, hora, etiqueta?, repetir?}`. Con `repetir` (días ISO, 1 = lunes) la fecha sobra: la primera vez es el próximo día marcado |
@@ -244,7 +276,8 @@ el mismo texto. Es el mismo cuidado que ya llevan los triggers de órdenes y avi
 
 ### Jarvis
 
-Cinco herramientas, ninguna pide confirmación: `poner_alarma` (con `repetir` para las
+Seis herramientas, ninguna pide confirmación: `posponer_alarma` («cinco minutos más»,
+ver arriba) y `poner_alarma` (con `repetir` para las
 semanales: «todos los lunes» es `[1]`, «entre semana» es `[1,2,3,4,5]`), `mis_alarmas`,
 `cancelar_alarma` (para quitarla **del todo**; a una semanal la deja de repetir),
 `dejame_dormir` (saltarse **la próxima mañana**, con `deshacer` para anularlo: «quita la
@@ -259,8 +292,9 @@ nada por no tener el id. Sus casos están en `evals/casos.json`.
 ### El widget
 
 `case "alarmas"` en `Dashboard.jsx`, columna izquierda. Poner hora, ver las puestas con su
-estado y quitarlas. Mientras una está sonando, el botón «Estoy despierto» se come el
-widget: es lo único que quieres de esa pantalla en ese momento. Se recarga solo cada
+estado y quitarlas. Mientras una está sonando, los botones «Estoy despierto» y «5 min
+más» se comen el widget: es lo único que quieres de esa pantalla en ese momento. Con la
+alarma pospuesta queda solo «Estoy despierto», con la hora a la que vuelve. Se recarga solo cada
 minuto mientras haya algo vivo (sin nada vivo no hay temporizador), porque una alarma que
 empieza a insistir tiene que verse moverse en una pantalla ya abierta.
 
@@ -311,6 +345,7 @@ rendida es historia, y cambiarla reescribiría por qué la casa hizo ruido a las
 |---|---|---|
 | `ALARMA_ESPERA_MIN` | `2` | Minutos sin confirmar antes de escalar, y entre insistencias |
 | `ALARMA_MAX_MIN` | `30` | Tope: pasado esto se rinde |
+| `ALARMA_POSPONER_MIN` | `5` | Lo que se calla con «5 min más» antes de volver a sonar |
 | `ALARMA_VOLUMEN` | `0.35` | A cuánto se pone el altavoz antes de hablar |
 | `ALARMA_ALTAVOZ` | — | El `media_player` del cuarto. Vacío: no se prepara el altavoz |
 | `ALARMA_NO_MOLESTAR` | — | El `switch` de "no molestar" de ese altavoz |

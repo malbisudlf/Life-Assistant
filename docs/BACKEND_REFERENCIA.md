@@ -32,7 +32,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET/POST /libros`, `PATCH/DELETE /libros/{libro_id}` | JWT | Widget de libros leídos: una fila por lectura con `empezado`/`terminado` (el PATCH con `null` borra la fecha) |
 | `GET /libros/buscar?q=` | JWT | Sugerencias de título: tus libros + Open Library (sin clave). Con límite por IP; si Open Library cae, solo los tuyos |
 | `GET /ha/events/soon` | servicio | Próximos eventos para las notificaciones de Alexa |
-| `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` |
+| `POST /ha/presencia` | servicio | HA empuja dónde estás (zona, `en_casa`, lat/lon). Acumula la serie diaria `time_at_home` y los tramos, y procesa las llegadas y salidas de los lugares (casa, gimnasio, uni; ver «Lugares» en `docs/JARVIS.md`). Devuelve también el `lugar` |
 | `POST /ha/entidades` | servicio | HA empuja el catálogo de la casa (id, nombre, estado). Sin él Jarvis no sabe qué dispositivos hay |
 | `GET /ha/ordenes-pending` | servicio | HA sondea y ejecuta lo que salga. Devuelve y **vacía** la cola; descarta lo que lleve más de `CASA_ORDEN_TTL` esperando |
 | `GET /ha/avisos-pending` | servicio | HA sondea y los manda a la app del móvil. Devuelve y **vacía** la cola; sondearlo es lo que declara vivo el canal |
@@ -56,8 +56,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `POST /mcp/telefono` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Servidor MCP (JSON-RPC 2.0) con las herramientas que usa la sesión de Claude Code que contesta el teléfono por la centralita. Auth antes de leer el cuerpo, acotado a `MAX_TELEFONO_BYTES` |
-| `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado) |
-| `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas y un booleano, nunca un lugar |
+| `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado), con su `lugar` (`casa`, `gimnasio`, `uni` o `fuera`) |
+| `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas, un booleano y, en los de fuera, `lugar` si fue el gimnasio o la uni; nunca la zona ni coordenadas |
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
 | `GET /casa/estado` | JWT | Todo el widget «Casa» en una petición: catálogo con su edad (`edad_min`), entidades de los dominios que se pueden tocar (el PC con `solo_lectura`), favoritos sugeridos, las órdenes de los últimos 15 min con su acuse (por la cola: `en_cola` / `recogida` / `confirmada` / `caducada`; en directo: `hecha` / `rechazada` / `sin_confirmar`, y esta última pasa a `confirmada` si una lectura posterior dice lo pedido) y la presencia con la forma de `GET /presencia`. El estado de cada entidad es el de HA en vivo si hay `HA_URL`/`HA_TOKEN` y contesta (`fuente: "vivo"`), o el del catálogo (`fuente: "catalogo"`); `edad_s` dice cuántos segundos tiene ese dato y `ha_directo` si el directo está configurado (configurado y `catalogo` = HA no contesta). Sin catálogo, 200 con `conocido: false` |
 | `POST /casa/orden` | JWT | `{entidad, accion, confirmado}`: un toque en el widget. La acción es de una lista cerrada y el servicio lo fija el backend; pasa por `_j_casa_ordenar` con origen `dashboard`: con HA en directo va a `POST /api/services/...`: si HA contesta 2xx, `directa: true`, `orden.estado: "hecha"` y `estado_entidad` (el estado de la entidad si HA lo incluye entre lo que cambió durante la llamada; si no, `null`, nunca una lectura de justo después, que puede ser la de antes); si HA la recibió y no contestó (timeout de lectura, conexión cortada, 5xx), 200 con `orden.estado: "sin_confirmar"`; si HA no aceptó ni la conexión, se encola para el Green (`directa: false`, `en_cola`). `directa` es lo mismo que guarda el historial: no pasó por la cola. Lo que HA recibió no se encola nunca. **400** si la acción no vale para el dominio o es el PC, **404** si la entidad ya no está en el catálogo, **409** si es una persiana o una cerradura sin `confirmado` (no manda ni encola nada), **502** si HA la rechazó (4xx de HA; nunca un 401, que cerraría la sesión del dashboard): no se ha hecho ni se ha encolado |
@@ -89,7 +89,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /finanzas/etfs/{ticker}/aportaciones` | JWT | Registra una aportación `{fecha, importe_eur, hora?}`; calcula las participaciones con el precio horario (si hay `hora`) o de cierre diario real de esa fecha |
 | `DELETE /finanzas/etfs/{ticker}/aportaciones/{id}` | JWT | Borra una aportación mal metida (no hay PATCH: para corregirla se borra y se vuelve a crear) |
 | `GET /ha/alarma-tick` | servicio | El reloj de las alarmas de respaldo (sensor REST de HA a 60 s). Devuelve el nº de intento en pie —un ESTADO: se repite en cada tick mientras la alarma siga escalada—, 0 si no suena nada (ver `docs/ALARMAS.md`) |
-| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma, para la música y cuenta como señal de despertar del resumen diario. Lo llama el botón de la notificación o el dashboard |
+| `POST /alarmas/{id}/despierto` | servicio o JWT | «Estoy despierto»: confirma la alarma (también una pospuesta), para la música y cuenta como señal de despertar del resumen diario. Lo llama el botón de la notificación o el dashboard. Con el id prefijado `posponer-<id>` es el botón «5 min más» de la notificación |
+| `POST /alarmas/{id}/posponer` | servicio o JWT | «5 minutos más»: calla la alarma que suena y la vuelve a hacer sonar dentro de `ALARMA_POSPONER_MIN`, sin mover su hora. No cuenta como señal de despertar |
 | `GET /alarmas` | JWT | Las alarmas de respaldo activas, en hora local |
 | `POST /alarmas` | JWT | Pone una: `{fecha?, hora, etiqueta?, repetir?}`. `repetir` son los días ISO en que se repite (1 = lunes) y hace opcional la fecha |
 | `PATCH /alarmas/{id}` | JWT | Edita una alarma viva (mismo cuerpo que el POST): la rearma con la hora o los días nuevos y los contadores a cero |
@@ -202,6 +203,9 @@ huecos; no se aplica al comprobar choques). Las tres son de `huecos_libres` y
 `reservar_bloques` — ver «Organizar el día» en `docs/JARVIS.md`.
 
 **Opcionales**: `PRESENCE_TTL_MINUTES`, `PRESENCE_MAX_GAP_HOURS`,
+`ZONAS_GIMNASIO`, `ZONAS_UNI`, `LUGAR_ESTABLE_MIN`, `GIMNASIO_SESION_MIN`,
+`GIMNASIO_SESION_HORAS`, `SALIR_YA_ESTAS_MIN`, `VUELTA_CASA_ENTIDADES`, `VUELTA_CASA_PC`
+(los lugares — ver «Lugares» en `docs/JARVIS.md`),
 `RELOJ_AVISO`, `RELOJ_AVISO_HORA`, `RELOJ_AVISO_NOCHES`,
 `AVISOS_MOVIL`, `AVISO_MOVIL_VIVO`, `AVISO_MOVIL_RESCATE`,
 `INGESTA_VIGILAR`, `INGESTA_AVISO_HORAS`, `INGESTA_CORREO_HORAS`, `INGESTA_VIGILA_CADA_MIN`,

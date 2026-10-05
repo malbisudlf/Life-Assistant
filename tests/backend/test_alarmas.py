@@ -168,7 +168,9 @@ class TestPrimerAviso:
         assert aviso["critico"] is False
         assert aviso["acciones"] == [
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
-             "title": "Estoy despierto"}]
+             "title": "Estoy despierto"},
+            {"action": "LA_DESPIERTO_posponer-11111111-1111-1111-1111-111111111111",
+             "title": f"{main.ALARMA_POSPONER_MIN} min más"}]
 
     def test_el_boton_no_abre_nada_aunque_haya_dashboard(self, monkeypatch):
         # Quitar una alarma pasa ENTERO de fondo: el botón no lleva `uri`, ni siquiera
@@ -179,7 +181,9 @@ class TestPrimerAviso:
         acciones = main._alarma_acciones("11111111-1111-1111-1111-111111111111")
         assert acciones == [
             {"action": "LA_DESPIERTO_11111111-1111-1111-1111-111111111111",
-             "title": "Estoy despierto"}]
+             "title": "Estoy despierto"},
+            {"action": "LA_DESPIERTO_posponer-11111111-1111-1111-1111-111111111111",
+             "title": f"{main.ALARMA_POSPONER_MIN} min más"}]
 
     def test_todavia_no_es_la_hora_y_no_avisa(self, mock_requests, canal_movil):
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([_fila(minutos_desde_ahora=30)]))
@@ -303,8 +307,9 @@ class TestLaEscaladaEsUnEstado:
 
     def test_cancelarla_la_apaga(self, client, mock_requests, canal_movil, auth_headers):
         self._escalar(mock_requests)
-        # Estaba sonando: el PATCH de «todavía armada» no se lleva nada.
+        # Estaba sonando: los PATCH de «todavía armada» y «pospuesta» no se llevan nada.
         mock_requests.routes.insert(0, ("PATCH", "estado=eq.armada", FakeResponse([])))
+        mock_requests.routes.insert(0, ("PATCH", "estado=eq.pospuesta", FakeResponse([])))
         client.delete("/alarmas/11111111-1111-1111-1111-111111111111", headers=auth_headers)
         assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
 
@@ -457,7 +462,8 @@ class TestEstoyDespiertoSinId:
         r = main._j_estoy_despierto()
         assert r["hecho"] is True and r["cuantas"] == 1
         url = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
-        assert "estado=in.(avisada,escalada)" in url and "id=eq." not in url
+        # La pospuesta («5 minutos más») también: decir que estás despierto es que no vuelva.
+        assert "estado=in.(avisada,escalada,pospuesta)" in url and "id=eq." not in url
         assert ("media_player.media_stop", "media_player.cuarto") in [
             (o["servicio"], o["entidad"]) for o in main._ha_ordenes]
         # Y es la señal de despertar del resumen, como el cargador.
@@ -730,9 +736,10 @@ class TestEditarUnaAlarma:
     def test_editar_una_que_estaba_sonando_la_calla(self, client, mock_requests,
                                                     auth_headers, monkeypatch):
         monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")
-        # El primer PATCH (condición `estado=eq.armada`) no se lleva nada: estaba sonando.
+        # Los PATCH de `armada` y `pospuesta` no se llevan nada: estaba sonando.
         def por_estado(url, **kwargs):
-            return FakeResponse([] if "estado=eq.armada" in url else [{"id": TestEditarUnaAlarma.RID}])
+            callada = "estado=eq.armada" in url or "estado=eq.pospuesta" in url
+            return FakeResponse([] if callada else [{"id": TestEditarUnaAlarma.RID}])
         mock_requests.add("PATCH", "/rest/v1/alarmas", por_estado)
         manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
         r = client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
@@ -947,3 +954,74 @@ class TestDejameDormir:
         assert h["confirmar"] is False
         assert "dejame_dormir" in {f["function"]["name"] for f in main._jarvis_esquema()}
         assert main._relleno_herramienta("dejame_dormir") != main._JARVIS_RELLENO_GENERICO
+
+
+class TestCincoMinutosMas:
+    """«5 minutos más»: callar lo que suena y que vuelva a empezar al rato, sin tocar la
+    hora de la alarma (de ella sale la de la semana que viene)."""
+
+    RID = "11111111-1111-1111-1111-111111111111"
+
+    def test_el_boton_de_ha_llega_por_despierto_con_prefijo(self):
+        # HA llama a `/alarmas/<lo que va tras el último _>/despierto`: el prefijo no
+        # puede llevar `_`, o HA cortaría el id.
+        accion = main._alarma_acciones(self.RID)[1]["action"]
+        assert accion.split("_")[-1] == f"posponer-{self.RID}"
+
+    def test_pospone_sin_tocar_la_hora_y_calla(self, client, mock_requests, monkeypatch,
+                                               senal_despertar):
+        acuses, callada = [], []
+        monkeypatch.setattr(main, "_acusar_recibo", lambda t, x, **k: acuses.append(t))
+        monkeypatch.setattr(main, "_alarma_callar", lambda: callada.append(1))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        r = client.post(f"/alarmas/posponer-{self.RID}/despierto",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 200 and r.json()["hecho"] is True
+        url, kw = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1:]
+        # Solo desde lo que está sonando, y sin `cuando`: la hora no se mueve.
+        assert "estado=in.(avisada,escalada)" in url
+        assert kw["json"]["estado"] == "pospuesta" and "cuando" not in kw["json"]
+        vuelve = datetime.fromisoformat(kw["json"]["avisado_at"])
+        assert timedelta(minutes=4) < vuelve - datetime.now(timezone.utc) <= timedelta(minutes=5)
+        assert callada and acuses
+        # Posponer no es levantarse: no cuenta como señal de despertar.
+        assert senal_despertar == []
+
+    def test_un_toque_tardio_no_pospone_lo_que_ya_no_suena(self, client, mock_requests):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_perdida)
+        r = client.post(f"/alarmas/{self.RID}/posponer", headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.json()["hecho"] is False
+
+    def test_un_id_raro_con_prefijo_no_pasa(self, client):
+        r = client.post("/alarmas/posponer-x/despierto", headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 422
+
+    def test_pasado_el_rato_vuelve_desde_el_primer_toque(self, mock_requests, canal_movil):
+        fila = _fila(minutos_desde_ahora=-10, estado="pospuesta", avisado_hace_min=0.5)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
+        main._correr_alarmas()
+        cambios = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][2]["json"]
+        assert cambios["estado"] == "avisada" and cambios["intentos"] == 0
+        assert len(canal_movil) == 1
+
+    def test_antes_de_tiempo_sigue_callada(self, mock_requests, canal_movil):
+        fila = _fila(minutos_desde_ahora=-3, estado="pospuesta", avisado_hace_min=-2)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([fila]))
+        main._correr_alarmas()
+        assert canal_movil == [] and mock_requests.called("PATCH", "/rest/v1/alarmas") == []
+
+    def test_estoy_despierto_tambien_quita_la_pospuesta(self, mock_requests):
+        mock_requests.add("PATCH", "/rest/v1/alarmas", FakeResponse([]))
+        main._alarma_confirmar_sonando("prueba", acusar=False)
+        url = mock_requests.called("PATCH", "/rest/v1/alarmas")[0][1]
+        assert "pospuesta" in url
+
+    def test_quitar_una_pospuesta_no_corta_la_musica(self, mock_requests, monkeypatch):
+        # Ya estaba callada: cancelarla no manda un media_stop que cortaría lo que suene.
+        monkeypatch.setattr(main, "ALARMA_ALTAVOZ", "media_player.cuarto")
+        mock_requests.add("PATCH", "estado=eq.armada", FakeResponse([]))
+        mock_requests.add("PATCH", "estado=eq.pospuesta", _reserva_ok)
+        assert main._alarma_cancelar(self.RID)["hecho"] is True
+        assert main._ha_ordenes == [] or all(
+            o["servicio"] != "media_player.media_stop" for o in main._ha_ordenes)

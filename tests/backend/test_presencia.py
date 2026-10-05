@@ -54,7 +54,7 @@ class TestRegistroDePresencia:
             "zona": "trabajo", "en_casa": False, "lat": 43.26, "lon": -2.93, "precision_m": 12,
         })
         assert r.status_code == 200
-        assert r.json() == {"ok": True, "zona": "trabajo", "en_casa": False}
+        assert r.json() == {"ok": True, "zona": "trabajo", "en_casa": False, "lugar": "fuera"}
         fila = capturado["json"][0]
         assert fila["zona"] == "trabajo" and fila["en_casa"] is False
         assert fila["lat"] == 43.26

@@ -188,6 +188,10 @@
   (perderlo deja al dashboard sin saber dónde estás hasta que te muevas de zona). Con
   copia en memoria (`_presencia_cache`), igual que el token de Graph y por lo mismo:
   `/weather` y `/maps/departure` lo consultan en cada carga.
+  La zona se traduce además a un **lugar** de una lista cerrada (casa, gimnasio, uni,
+  fuera) con un listón de estabilidad antes de contar como llegada o salida; todo eso, y
+  la única categoría de sitio que se guarda en los tramos, está en «Lugares» de
+  `docs/JARVIS.md`.
   **Un dato caducado no se usa**: `presencia_vigente()` devuelve `None` pasados
   `PRESENCE_TTL_MINUTES`, porque dar el clima de donde estabas hace horas como si fuera
   el de donde estás es peor que caer al default — la misma regla de siempre, "no lo sé"

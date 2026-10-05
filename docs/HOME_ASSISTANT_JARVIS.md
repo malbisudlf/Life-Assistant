@@ -435,6 +435,10 @@ encendido (el backend se las manda a HA en directo si tiene `HA_TOKEN`, y si no,
 HA no acepta la conexión, las encola y las recoge el sondeo de `ordenes-pending` que ya
 tienes puesto, así que no hace falta nada más).
 
+**Y también es el «Apuntar sesión» del aviso de salir del gimnasio y el «Encender» del de
+la vuelta a casa** (ver «Lugares» en `docs/JARVIS.md`). Mismo motivo: ni una línea nueva
+de YAML; el backend decide por la regla del aviso.
+
 **`LA_APAGAR_` también es el «Suspender» del aviso «Te has ido con el PC encendido»**, y
 no hay que tocar el YAML: la misma automatización y el mismo `rest_command` llaman a
 `/avisos/{id}/apagar`, y es el backend quien mira la regla del aviso y, si es la del PC,
@@ -775,7 +779,9 @@ action:
    fallo está en un paso concreto del ritual: la traza dice cuál. Si no se disparó
    aunque el sensor cambió, la condición o el trigger están mal copiados.
 
-**El botón.** Mismo molde que los otros cinco, y sin `uri`: pulsarlo no abre nada en el
+**El botón** (los botones: «5 min más» va por esta MISMA automatización, con el id
+prefijado `posponer-`, y no necesita nada más; ver «5 minutos más» en `docs/ALARMAS.md`).
+Mismo molde que los otros cinco, y sin `uri`: pulsarlo no abre nada en el
 móvil, que es la mitad del sentido de este botón. Este salto —la app companion entregando
 el evento a HA— es el único del camino que no deja huella en ningún log, así que el
 backend contesta con otra notificación («⏰ Alarma quitada») para que se note cuando se

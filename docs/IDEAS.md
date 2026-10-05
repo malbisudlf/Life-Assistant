@@ -560,7 +560,10 @@ Escrito aquí para no volver a proponerlo dentro de seis meses sin acordarse del
   día no podía dibujarse sin ellos y se leía como estropeado. La frontera es esa: el
   CUÁNDO se guarda —35 días y se purga—, el DÓNDE no. Ni zona, ni coordenadas, ni nombre
   de sitio: eso sigue viviendo solo en la fila `actual` de `presence`, que se pisa a sí
-  misma y no deja rastro.
+  misma y no deja rastro. **Movido un paso el 2026-10-05**, con «Lugares» (`docs/JARVIS.md`):
+  los tramos llevan la CATEGORÍA si fue el gimnasio o la uni, porque sin ella Jarvis te
+  regañaba por no entrenar el día que habías ido. Solo esas dos y solo de zonas que hayas
+  declarado tú; cualquier otro «fuera» sigue sin decir dónde.
 - **Interpretar los datos dentro del correo.** Quien lo lee ya es un modelo, y las
   conclusiones viven en `helpers.js` como única fuente de verdad. Portarlas a Python las
   duplicaría en dos lenguajes.

@@ -37,6 +37,7 @@
 
     { "id": "recordatorios-listar", "grupo": "pares", "peticion": "¿Qué recordatorios tengo pendientes?", "espera": ["mis_recordatorios"], "confundible": "recordarme", "nota": "consultar vs crear." },
     { "id": "recordatorio-crear", "grupo": "pares", "peticion": "Recuérdame mañana a las nueve que llame al dentista.", "espera": ["recordarme"], "confundible": "mis_recordatorios" },
+    { "id": "recordatorio-lugar", "grupo": "pares", "peticion": "Cuando llegue a casa recuérdame que saque la basura.", "espera": ["recordarme_en_un_lugar"], "confundible": "recordarme", "nota": "por lugar, no por hora." },
     { "id": "recordatorio-cancelar", "grupo": "pares", "peticion": "Anula el recordatorio del dentista, ya he llamado.", "espera": ["cancelar_recordatorio", "mis_recordatorios"], "confundible": "recordarme" },
     { "id": "reglas-listar", "grupo": "pares", "peticion": "¿Qué reglas de aviso tengo aprobadas?", "espera": ["mis_reglas"], "confundible": "proponer_regla" },
     { "id": "regla-crear", "grupo": "pares", "peticion": "Quiero que me avises siempre que lleve tres días seguidos sin entrenar.", "espera": ["proponer_regla"], "confundible": "recordarme", "nota": "Una condición permanente es una regla; un aviso con fecha es un recordatorio." },
@@ -51,6 +52,7 @@
     { "id": "alarma-cancelar", "grupo": "pares", "peticion": "Ya no voy a entrenar los lunes, quita esa alarma.", "espera": ["cancelar_alarma", "mis_alarmas"], "confundible": "dejame_dormir", "nota": "Quitarla para siempre es cancelar; saltarse una mañana es dejame_dormir." },
     { "id": "alarma-dejame-dormir", "grupo": "pares", "peticion": "Estoy reventado, mañana déjame dormir.", "espera": ["dejame_dormir"], "confundible": "cancelar_alarma", "nota": "Una mañana, no la alarma: cancelar una semanal la quitaría para siempre." },
     { "id": "alarma-manana-no", "grupo": "pares", "peticion": "Quita la alarma de mañana, no tengo que madrugar.", "espera": ["dejame_dormir"], "confundible": "cancelar_alarma", "nota": "«La de mañana» es una mañana: si es semanal, la semana que viene tiene que sonar." },
+    { "id": "alarma-posponer", "grupo": "pares", "peticion": "Cinco minutos más, porfa.", "espera": ["posponer_alarma"], "confundible": "estoy_despierto", "nota": "Posponer no es levantarse." },
     { "id": "alarma-despierto", "grupo": "pares", "peticion": "Ya estoy despierto, que se calle.", "espera": ["estoy_despierto"], "confundible": "cancelar_alarma", "nota": "Sin id y sin preguntar: a las siete de la mañana lo que se quiere es que aquello se calle." },
     { "id": "alarma-levantado", "grupo": "pares", "peticion": "Buenos días, ya me he levantado.", "espera": ["estoy_despierto"], "confundible": "agenda", "nota": "Decir que está despierto es la señal, aunque no mencione ninguna alarma." },
 
