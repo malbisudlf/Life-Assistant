@@ -37,6 +37,7 @@
 
     { "id": "recordatorios-listar", "grupo": "pares", "peticion": "¿Qué recordatorios tengo pendientes?", "espera": ["mis_recordatorios"], "confundible": "recordarme", "nota": "consultar vs crear." },
     { "id": "recordatorio-crear", "grupo": "pares", "peticion": "Recuérdame mañana a las nueve que llame al dentista.", "espera": ["recordarme"], "confundible": "mis_recordatorios" },
+    { "id": "recordatorio-lugar", "grupo": "pares", "peticion": "Cuando llegue a casa recuérdame que saque la basura.", "espera": ["recordarme_en_un_lugar"], "confundible": "recordarme", "nota": "por lugar, no por hora." },
     { "id": "recordatorio-cancelar", "grupo": "pares", "peticion": "Anula el recordatorio del dentista, ya he llamado.", "espera": ["cancelar_recordatorio", "mis_recordatorios"], "confundible": "recordarme" },
     { "id": "reglas-listar", "grupo": "pares", "peticion": "¿Qué reglas de aviso tengo aprobadas?", "espera": ["mis_reglas"], "confundible": "proponer_regla" },
     { "id": "regla-crear", "grupo": "pares", "peticion": "Quiero que me avises siempre que lleve tres días seguidos sin entrenar.", "espera": ["proponer_regla"], "confundible": "recordarme", "nota": "Una condición permanente es una regla; un aviso con fecha es un recordatorio." },

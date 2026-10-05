@@ -62,6 +62,7 @@ import {
   etiquetaAccion, tonoFase, acuseActivar, CASA_MAX_FAVORITOS,
 } from "../lib/casa";
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
+import { lugarDePresencia, ordenarPorLugar, reordenaEn, NOMBRES_LUGAR, notaPresenciaAhora } from "../lib/lugares";
 import { leerEstadoSistema } from "../lib/estadoSistema";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
@@ -2515,6 +2516,13 @@ export default function Dashboard() {
   const [healthLargoReloj, setHealthLargoReloj] = useState(null);
   const healthLargoPedido                     = useRef(false);
   const [simpleMode, setSimpleMode]       = useState(() => localStorage.getItem("la_simple_mode") === "1");
+  // Dónde estás (`GET /presencia`), para el orden del modo simple en la uni y en el
+  // gimnasio (`src/lib/lugares.js`). Y si ese orden está puesto: se puede quitar desde el
+  // propio aviso de arriba, y se recuerda.
+  const [presenciaAhora, setPresenciaAhora] = useState(null);
+  const [ordenPorLugar, setOrdenPorLugar]   = useState(() => {
+    try { return localStorage.getItem("la_orden_por_lugar") !== "0"; } catch { return true; }
+  });
   const [simpleHealthTab, setSimpleHealthTab] = useState("health_wellness");
   const [orientation, setOrientation]     = useState(() =>
     (typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches) ? "portrait" : "landscape");
@@ -2915,6 +2923,31 @@ export default function Dashboard() {
       .catch(() => { /* mejor esfuerzo: el carril se pinta igual, sin el matiz */ });
     return () => { vivo = false; };
   }, [token, lineaVisible, lineaDia]);
+
+  // La presencia para el orden del modo simple: solo en modo simple, que es el único que
+  // la usa, al cargar, cada cinco minutos con la pestaña a la vista y al volver a ella.
+  // `/presencia` no cuesta nada (el backend la tiene en memoria), pero no se pregunta a
+  // ciegas: con la pestaña oculta no hay nada que reordenar.
+  useEffect(() => {
+    if (!token || !simpleMode) return;
+    let vivo = true;
+    const pedir = () => {
+      if (document.visibilityState !== "visible") return;
+      apiFetch(`${API}/presencia`, { headers: authHeaders() })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => { if (vivo) setPresenciaAhora(d); })
+        .catch(() => { /* sin dato, el orden de siempre */ });
+    };
+    pedir();
+    const t = setInterval(pedir, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", pedir);
+    return () => { vivo = false; clearInterval(t); document.removeEventListener("visibilitychange", pedir); };
+  }, [token, simpleMode]);
+
+  function cambiarOrdenPorLugar(nv) {
+    setOrdenPorLugar(nv);
+    try { localStorage.setItem("la_orden_por_lugar", nv ? "1" : "0"); } catch { /* sin almacenamiento, vale para esta sesión */ }
+  }
 
   // El mando de la casa, con el mismo criterio que «El día»: si está oculto, no pregunta.
   const casaVisible = useMemo(
@@ -5913,9 +5946,7 @@ export default function Dashboard() {
                : !healthData   ? { estado: FUENTE_ERROR }
                : { estado: FUENTE_OK,
                    datos: { filas: findMetric(healthData, "time_at_home") },
-                   nota: lineaDia === hoyLinea && lineaPresenciaAhora?.conocida
-                     ? `ahora ${lineaPresenciaAhora.en_casa ? "en casa" : "fuera"}`
-                     : "" },
+                   nota: lineaDia === hoyLinea ? notaPresenciaAhora(lineaPresenciaAhora) : "" },
       presenciaTramos: lineaTramos,
       // lineaAvisos viene de /avisos/enviados: trae la hora real de cada aviso del día
       // pedido, así que el carril coloca un punto por aviso igual que el resto.
@@ -8619,7 +8650,31 @@ export default function Dashboard() {
 
     // Los widgets de salud se colapsan en un único bloque con pestañas
     // (HEALTH_TAB_LABELS) — más navegable en móvil que apilar seis tarjetas grandes.
-    const visibleWidgets = simpleWidgetConfig.filter(w => w.visible);
+    // En la uni o en el gimnasio, lo de ese sitio sube y lo de casa baja
+    // (`ordenarPorLugar`). Solo aquí: el modo completo es una distribución hecha a mano.
+    const lugarSimple = lugarDePresencia(presenciaAhora);
+    const enOrdenDeLugar = ordenPorLugar && reordenaEn(lugarSimple);
+    const visiblesEnOrden = simpleWidgetConfig.filter(w => w.visible);
+    const porId = new Map(visiblesEnOrden.map(w => [w.id, w]));
+    const visibleWidgets = enOrdenDeLugar
+      ? ordenarPorLugar(visiblesEnOrden.map(w => w.id), lugarSimple).map(id => porId.get(id))
+      : visiblesEnOrden;
+    const avisoLugar = reordenaEn(lugarSimple) ? (
+      <div key="simple-lugar" style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+        fontSize: 12, color: "var(--muted)", fontFamily: "'DM Sans', sans-serif",
+      }}>
+        <span>📍 {NOMBRES_LUGAR[lugarSimple]}{enOrdenDeLugar ? ": lo de aquí, arriba" : ""}</span>
+        <button
+          onClick={() => cambiarOrdenPorLugar(!enOrdenDeLugar)}
+          style={{
+            background: "none", border: "0.5px solid var(--border2)", borderRadius: 999,
+            color: "var(--muted)", fontSize: 11, padding: "3px 10px", cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >{enOrdenDeLugar ? "Orden de siempre" : "Ordenar para aquí"}</button>
+      </div>
+    ) : null;
     const healthTabs = visibleWidgets
       .filter(w => w.id in HEALTH_TAB_LABELS)
       .map(w => ({ id: w.id, label: HEALTH_TAB_LABELS[w.id] }));
@@ -8684,6 +8739,7 @@ export default function Dashboard() {
     if (portrait) {
       return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+          {avisoLugar}
           {items.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>)}
         </div>
       );
@@ -8695,6 +8751,7 @@ export default function Dashboard() {
     const rightItems = items.filter(it => it.column !== "left");
     return (
       <div style={{ flex: 1, display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {avisoLugar && <div style={{ flex: "1 1 100%" }}>{avisoLugar}</div>}
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
           {leftItems.map(it => <React.Fragment key={it.key}>{it.node}</React.Fragment>)}
         </div>

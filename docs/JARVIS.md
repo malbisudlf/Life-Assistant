@@ -582,6 +582,8 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     dice. Con la presencia caducada no se sabe dónde estás y se respeta lo que se decidió
     al apuntar. Estar fuera **quita la voz pero no retira el aviso**: puedes estar fuera y
     tener que ir igual.
+    En el gimnasio y en clase, además, lo que no corre prisa **espera** a que salgas, y
+    lo que ya no es verdad allí se retira: ver «Lugares: casa, gimnasio y uni», abajo.
     Y al **volver a casa** (`_retirar_avisos_de_salida`, desde `POST /ha/presencia` al
     pasar de fuera a en casa), las notificaciones de hoy de `al_salir` y `pc_encendido`
     que siguen sin valorar se **retiran del móvil** por su id (su `tag`), nunca por regla,
@@ -865,6 +867,97 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     forma más rápida de que se dejen de leer los dos.
   - Idempotencia con el mismo `uuid5` de la fecha contra la clave primaria de
     `jarvis_recordatorios`, y apagado (`JARVIS_PROACTIVO=0`) no cuesta ni una consulta.
+
+## Lugares: casa, gimnasio y uni
+
+Hasta octubre de 2026 la presencia solo decía «en casa» o «fuera», y todo lo proactivo
+hablaba a ciegas: «llevas tres días sin entrenar» llegaba estando en el gimnasio, y lo que
+no corría prisa sonaba en mitad de clase. Ahora dos sitios más tienen nombre. El código
+está en la sección «Lugares» de `backend/main.py`, y la lógica pura del dashboard en
+`src/lib/lugares.js`.
+
+- **Cómo sabe dónde estás.** Igual que antes: HA empuja la zona del `device_tracker` a
+  `POST /ha/presencia` (ver `docs/HOME_ASSISTANT_FLUJOS.md`). Lo nuevo es la traducción
+  de la zona a un **lugar**, que es una lista cerrada: `casa` (lo de siempre, `en_casa`),
+  `gimnasio` (zonas de `ZONAS_GIMNASIO`, por defecto `gimnasio,gym`), `uni`
+  (`ZONAS_UNI`, por defecto `uni,universidad`) y `fuera` para todo lo demás. Una zona que
+  no está en ninguna lista no se adivina por su nombre. **Para que funcione hay que crear
+  las dos zonas en HA** con uno de esos nombres; sin ellas todo se comporta como antes.
+- **Un lugar no cuenta hasta que llevas un rato** (`LUGAR_ESTABLE_MIN`, 5 min). Hay dos
+  estados en memoria: el *crudo* (lo último que dijo HA) y el *firme* (el que ha aguantado
+  ese rato). Las llegadas y las salidas son cambios del firme, así que pasar andando por
+  delante del gimnasio no calla nada, y un parpadeo del GPS a «fuera» durante un minuto no
+  es una salida. Las procesa `_procesar_lugar`, desde el aviso de presencia **y desde el
+  tick**: sin el tick, una llegada no contaría hasta el siguiente aviso de HA (15 min).
+  Tras un reinicio, el estado se reconstruye de los tramos guardados
+  (`_desde_recuperado`); tras un hueco de HA más largo que el TTL, se empieza de cero y
+  **no hay salida que procesar**: lo de entre medias no lo sabe nadie.
+  **Lo de casa NO espera**: apagar lo que te dejaste encendido sigue saltando con el
+  primer aviso de «fuera», sin el listón de estabilidad.
+- **El despacho espera en el gimnasio y en clase** (`_espera_por_lugar`, en
+  `_despachar_recordatorios`). Lo que no corre prisa del SISTEMA se queda pendiente con
+  `cuando` = ahora (para que al salir el retraso medido sea el real y no dispare la
+  alarma de retraso) y sale en el primer tick después de irte o de que termine la clase.
+  «En clase» es la uni como lugar firme **y** una clase del calendario de clases en curso:
+  una clase a la que no has ido no te tiene en un aula, y la uni entre clases no es una
+  clase. Las fronteras son las del presupuesto: lo que pediste tú (sin regla o `tuya:*`)
+  y lo urgente (`PRIO_SIN_TOPE`) salen siempre, y lo que se dice precisamente allí
+  (`_REGLAS_DEL_LUGAR`: el cobro al llegar al gimnasio) también. Va **antes** del
+  presupuesto: un aviso que solo tenía que esperar una hora no se manda a mañana. Sin
+  presencia vigente se habla, como siempre. En clase, además, lo `critico` sale pero sin
+  atravesar el silencio del móvil, y **el teléfono no suena** (`_telefono_puede_sonar`:
+  el lugar sale de lo que hay en memoria, sin consultar nada, y solo en la uni se mira el
+  calendario de clases, con diez minutos de caché).
+- **Lo que ya no es verdad allí se retira** (`_sigue_en_pie`): el «Llevas N días sin
+  entrenar» (`hueco_entreno`) en el gimnasio, y el «Sal ya» cuando ya estás donde es la
+  cita. Este último se recalcula solo estando en la uni o el gimnasio (desde casa el
+  cálculo de la regla ya era el bueno), con la caché de Maps de siempre, y se retira si el
+  trayecto es menor que `SALIR_YA_ESTAS_MIN`. Ante la duda (sin Maps, sin dirección) sale.
+- **No se regaña el día del gimnasio** (`_estuvo_en_gimnasio_hoy`): ni el motivo de días
+  sin entrenar del aviso diario ni `_regla_hueco_entreno` hablan si estás en el gimnasio
+  o hoy has pasado allí al menos `GIMNASIO_SESION_MIN`. El Watch no siempre registra el
+  entreno, o aún no lo ha sincronizado. Ante la duda, NO cuenta como ido: esto solo calla
+  un reproche.
+- **Lo que se dispara al llegar y al salir** (todo por `_apuntar_aviso`, detrás de
+  `REGLAS_PROACTIVAS`):
+  - **Al llegar al gimnasio** (`cobro_gimnasio`): sesiones sin cobrar por encima del punto
+    de cobro, dicho donde ves a quien entrenas. Huella `cobro:<n>`, la misma que mira el
+    aviso diario para no repetirlo.
+  - **Al salir del gimnasio** tras `GIMNASIO_SESION_MIN` (`sesion_gimnasio`): «¿Diste una
+    sesión?», con «Apuntar sesión» (`GIMNASIO_SESION_HORAS`, con la fecha del aviso, y
+    sin duplicar si ya hay una ese día) y «Entrené yo». **Estar allí no dice si
+    entrenabas tú o entrenabas a alguien**, así que no se apunta nada solo; lo que sí se
+    sabe es cuándo no preguntar: ya hay una sesión apuntada hoy, o el Watch tiene un
+    entreno tuyo que empezó en ese rato. «Entrené yo» manda `LA_UTIL_`, no un «No»: es
+    una buena respuesta a una buena pregunta, y votarla en contra silenciaría la regla.
+    Caduca a medianoche.
+  - **Al salir de la uni** (`entrega_uni`): una entrega (`ENTREGAS_MARKER`) para hoy o
+    mañana, de los dos calendarios. Comparte huella con el aviso diario de las 19:00.
+  - **Al salir de la uni o del gimnasio** (`vuelta_casa`): «¿Vuelves a casa? Puedo
+    encender…», solo si has declarado qué (`VUELTA_CASA_ENTIDADES`, `VUELTA_CASA_PC`) y
+    está apagado. Nunca enciende solo: no se sabe si vas a casa. Caduca en una hora.
+  Los dos botones que actúan («Apuntar sesión», «Encender») reutilizan `LA_APAGAR_`, como
+  el «Suspender» del PC: ni una línea nueva de YAML en HA; `POST /avisos/{id}/apagar`
+  decide qué hacer por la regla del aviso.
+- **Recordatorios por lugar** (`recordarme_en_un_lugar`, tabla `recordatorios_lugar`):
+  «recuérdame al llegar a casa…», «…al salir del gimnasio». Tabla aparte porque no tienen
+  hora y el despachador pregunta por `cuando`. Al llegar o salir (firme) se reservan con un
+  PATCH condicional y se convierten en un recordatorio normal **sin regla** —lo pediste
+  tú—, que entrega el despachador de siempre. Solo saltan si se apuntaron **antes** de
+  esa llegada o salida: si no, un «al llegar a casa» dicho en casa sonaría al momento, y un
+  reinicio que reprocesa la llegada los sonaría todos. `mis_recordatorios` y
+  `cancelar_recordatorio` cubren los dos tipos.
+- **Jarvis lo sabe sin preguntar** (`_jarvis_contexto_lugar`, en el prompt de sistema):
+  dónde estás, desde cuándo y, en la uni, si estás en clase. Va en el prompt y no solo en
+  `donde_estoy` porque cambia CÓMO contestar: en clase o entre dos series una respuesta de
+  diez líneas no se lee.
+- **Qué se guarda del dónde.** Los tramos de `presencia_tramos` llevan `lugar` (`gimnasio`
+  o `uni`) y nada más: ni el nombre de la zona, ni coordenadas, ni ningún sitio que no
+  hayas declarado. Es la frontera de `docs/IDEAS.md` movida un paso, a propósito. Sin la
+  migración `20261005_lugares`, los tramos se escriben y se leen sin esa columna
+  (`_tramos_sin_lugar`) y queda un error en el registro diciendo qué falta.
+- **Lo que se descartó**: callar la firma de malestar por la FC del gimnasio. Mira la FC
+  en reposo, la HRV y la respiración de cada día, que no se mueven por estar entrenando.
 
 ## Tareas: Microsoft To Do
 

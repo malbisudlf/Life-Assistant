@@ -6437,32 +6437,72 @@ def _unir_tramos(filas: list) -> list:
     a 22:00, en casa», que es lo que se quiere leer. Se unen aunque quede un hueco entre
     una y la siguiente: el hueco es el rato en que nadie informó, y partir el tramo ahí
     dibujaría un «no estabas» que nadie ha comprobado.
+
+    «Lo mismo» es el booleano Y el lugar: una tarde fuera que fue gimnasio y luego calle
+    son dos tramos, aunque los dos sean `en_casa: false`.
     """
     unidos: list = []
     for f in filas:
         en_casa = bool(f.get("en_casa"))
-        if unidos and unidos[-1]["en_casa"] == en_casa:
+        lugar   = None if en_casa else (f.get("lugar") or None)
+        if unidos and unidos[-1]["en_casa"] == en_casa and unidos[-1].get("lugar") == lugar:
             unidos[-1]["hasta"] = f.get("hasta")
             continue
-        unidos.append({"desde": f.get("desde"), "hasta": f.get("hasta"), "en_casa": en_casa})
+        tramo = {"desde": f.get("desde"), "hasta": f.get("hasta"), "en_casa": en_casa}
+        if lugar:
+            tramo["lugar"] = lugar
+        unidos.append(tramo)
     return unidos
 
 
-def _guardar_tramos_presencia(trozos: list, en_casa: bool) -> None:
+# La columna `lugar` de `presencia_tramos` llega con la migración `20261005_lugares`. Si
+# no está aplicada, PostgREST contesta 400 a todo lo que la nombre — y la presencia no se
+# puede quedar sin tramos por una columna de más. Esto recuerda, hasta reiniciar, que hay
+# que escribir y leer sin ella; el aviso sale una vez, no cada quince minutos.
+_tramos_sin_lugar = False
+
+
+def _falta_columna(r) -> bool:
+    """Si un 400 de PostgREST es «esa columna no existe» (migración sin aplicar)."""
+    if r.status_code != 400:
+        return False
+    texto = str(getattr(r, "text", "") or "")
+    return any(marca in texto for marca in ("PGRST204", "42703", "lugar"))
+
+
+def _sin_lugar_desde_ahora() -> None:
+    global _tramos_sin_lugar
+    if not _tramos_sin_lugar:
+        _tramos_sin_lugar = True
+        logger.error("Presencia: la tabla presencia_tramos no tiene la columna `lugar`; "
+                     "aplica la migración 20261005_lugares. Sigo guardando sin lugar")
+
+
+def _guardar_tramos_presencia(trozos: list, en_casa: bool, lugar: str = "") -> None:
     """Escribe los tramos con hora. Nunca lanza: es un extra del aviso de presencia.
 
-    Lo que se guarda es CUÁNDO, no dónde: un booleano y dos horas. Ni zona, ni
-    coordenadas, ni el nombre del sitio — eso sigue viviendo solo en la fila `actual` de
-    `presence`, que se pisa a sí misma y no deja rastro.
+    Lo que se guarda es CUÁNDO, y del dónde solo la CATEGORÍA de los dos sitios que se
+    declaran a mano (`gimnasio` o `uni`, ver «Lugares»): ni el nombre de la zona, ni
+    coordenadas, ni ningún sitio que no hayas declarado — eso sigue viviendo solo en la
+    fila `actual` de `presence`, que se pisa a sí misma y no deja rastro. Estar en casa ya
+    lo dice el booleano, y «fuera» sin más es justamente no decir dónde.
     """
     filas = [{"dia": dia, "desde": desde.isoformat(), "hasta": hasta.isoformat(),
               "en_casa": bool(en_casa)}
              for dia, desde, hasta in trozos]
     if not filas:
         return
+    con_lugar = lugar in LUGARES_GUARDADOS and not en_casa and not _tramos_sin_lugar
+    if con_lugar:
+        filas = [{**f, "lugar": lugar} for f in filas]
     try:
         r = http.post(PRESENCIA_TRAMOS_URL,
                       headers={**supabase_headers(), "Prefer": "return=minimal"}, json=filas)
+        if con_lugar and _falta_columna(r):
+            _sin_lugar_desde_ahora()
+            filas = [{k: v for k, v in f.items() if k != "lugar"} for f in filas]
+            r = http.post(PRESENCIA_TRAMOS_URL,
+                          headers={**supabase_headers(), "Prefer": "return=minimal"}, json=filas)
         if r.status_code >= 300:
             logger.warning("Presencia: no se pudieron guardar %s tramos (%s)",
                            len(filas), r.status_code)
@@ -6473,7 +6513,26 @@ def _guardar_tramos_presencia(trozos: list, en_casa: bool) -> None:
     _purgar_tramos_presencia()
 
 
-def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
+def _leer_tramos(filtro: str) -> list:
+    """Filas de `presencia_tramos` con `filtro` (query de PostgREST ya escapada).
+
+    Pide `lugar` y, si la columna no existe todavía, repite sin ella: un tramo sin lugar
+    es un tramo de antes, no un error. Lanza `requests.RequestException` o devuelve la
+    respuesta fallida a quien llama vía HTTPException, como antes de existir la columna.
+    """
+    campos = "desde,hasta,en_casa" if _tramos_sin_lugar else "desde,hasta,en_casa,lugar"
+    r = http.get(f"{PRESENCIA_TRAMOS_URL}?{filtro}&select={campos}",
+                 headers=supabase_headers())
+    if not _tramos_sin_lugar and _falta_columna(r):
+        _sin_lugar_desde_ahora()
+        r = http.get(f"{PRESENCIA_TRAMOS_URL}?{filtro}&select=desde,hasta,en_casa",
+                     headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return r.json() or []
+
+
+def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool, lugar: str = ""):
     """Suma el tramo transcurrido a la métrica diaria `time_at_home`.
 
     Se guardan HORAS, nunca lugares: la serie sirve para cruzarla con sueño y HRV, y
@@ -6491,7 +6550,7 @@ def _acumular_presencia(desde: datetime, hasta: datetime, en_casa: bool):
     # Los tramos con hora, para la línea del día. Van antes del total porque son el dato
     # y el total es el derivado, y aparte porque cada uno falla por su cuenta: sin tramos
     # el carril se queda sin dibujo pero la serie diaria sigue alimentando los cruces.
-    _guardar_tramos_presencia(trozos, en_casa)
+    _guardar_tramos_presencia(trozos, en_casa, lugar)
     tramos = [(dia, _horas_trozo(d, h)) for dia, d, h in trozos]
     try:
         existentes = _existentes_por_clave({f for f, _ in tramos}, {PRESENCE_METRIC})
@@ -6549,6 +6608,7 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
 
     zona    = body.zona.strip() or "desconocida"
     en_casa = body.en_casa if body.en_casa is not None else zona.lower() in ZONAS_CASA
+    lugar   = lugar_de_zona(zona, en_casa)
     # _ahora_local() y no datetime.now(timezone.utc) directo: mismo motivo que en el
     # resumen diario — es el punto único que un test puede fijar sin tocar el reloj del
     # módulo entero. Sin esto, un test que pidiera "60 minutos en casa" a caballo de la
@@ -6557,12 +6617,25 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
 
     # El tramo que acaba ahora se atribuye a donde se estaba ANTES, no a donde se está.
     anterior = _leer_presencia()
+    # Antes de pisar la fila: si el backend acaba de arrancar, el lugar en memoria se
+    # reconstruye con lo que había, no con lo que llega ahora (ver «Lugares»). Y si lo que
+    # había está caducado (HA caído un rato), no hay estancia que continuar ni salida que
+    # procesar: lo de entre medias no lo sabe nadie.
+    try:
+        anterior_edad = _edad_presencia(anterior) if anterior else None
+        if anterior_edad is not None and anterior_edad > PRESENCE_TTL_MINUTES:
+            _lugar_olvidar()
+        else:
+            _lugar_iniciar(anterior)
+    except Exception:
+        logger.exception("Lugares: no se pudo reconstruir el lugar al arrancar")
     if anterior:
         try:
             desde = datetime.fromisoformat((anterior.get("updated_at") or "").replace("Z", "+00:00"))
             if desde.tzinfo is None:
                 desde = desde.replace(tzinfo=timezone.utc)
-            _acumular_presencia(desde, ahora, bool(anterior.get("en_casa")))
+            _acumular_presencia(desde, ahora, bool(anterior.get("en_casa")),
+                                lugar_de_zona(anterior.get("zona"), anterior.get("en_casa")))
         except (ValueError, AttributeError):
             logger.warning("Presencia: updated_at anterior ilegible, no se acumula el tramo")
 
@@ -6588,6 +6661,7 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
         raise _supabase_error(r)
 
     _cachear_presencia({k: v for k, v in fila.items() if k != "id"})
+    _lugar_observar(lugar, ahora)
 
     # Acabas de SALIR de casa: es el único momento en que avisar de lo que te dejaste
     # encendido sirve de algo. Va aquí y no en el tick porque aquí es donde se sabe que
@@ -6607,7 +6681,12 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
         except Exception:
             logger.exception("Retirar avisos de salida al volver: fallo inesperado")
 
-    return {"ok": True, "zona": zona, "en_casa": en_casa}
+    # Las llegadas y salidas de los lugares con nombre. No sustituyen a lo de arriba: lo
+    # de casa se dispara al primer aviso, sin esperar, porque apagar la luz al irte no
+    # puede aguardar cinco minutos; esto espera a que el lugar sea firme.
+    _procesar_lugar_seguro()
+
+    return {"ok": True, "zona": zona, "en_casa": en_casa, "lugar": lugar}
 
 
 @app.get("/presencia")
@@ -6629,6 +6708,7 @@ def _presencia_panel() -> dict:
         "conocida":     True,
         "zona":         p.get("zona"),
         "en_casa":      bool(p.get("en_casa")),
+        "lugar":        lugar_de_zona(p.get("zona"), p.get("en_casa")),
         "hace_minutos": round(edad) if edad is not None else None,
         "vigente":      edad is not None and edad <= PRESENCE_TTL_MINUTES,
         "ttl_minutos":  PRESENCE_TTL_MINUTES,
@@ -6641,7 +6721,8 @@ def get_presencia_tramos(dia: str = "",
                          credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     """Los tramos de un día: cuándo estuviste en casa y cuándo fuera.
 
-    Devuelve horas y un booleano, nunca un lugar — la tabla tampoco los guarda. Los
+    Devuelve horas y un booleano, y `lugar` solo en los tramos de fuera que fueron en el
+    gimnasio o en la uni (lo único que se guarda del dónde, ver «Lugares»). Los
     tramos llegan ya unidos: HA empuja cada quince minutos, así que una tarde entera en
     casa son treinta y dos filas seguidas diciendo lo mismo, y dibujarlas de una en una
     sería un carril a rayas que no significa nada.
@@ -6650,18 +6731,703 @@ def get_presencia_tramos(dia: str = "",
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", dia):
         raise HTTPException(status_code=400, detail="dia debe ser YYYY-MM-DD")
     try:
-        r = http.get(f"{PRESENCIA_TRAMOS_URL}?dia=eq.{dia}"
-                     "&select=desde,hasta,en_casa&order=desde.asc&limit=2000",
-                     headers=supabase_headers())
-        if r.status_code >= 300:
-            raise _supabase_error(r)
-        filas = r.json() or []
+        filas = _leer_tramos(f"dia=eq.{dia}&order=desde.asc&limit=2000")
     except HTTPException:
         raise
     except requests.RequestException:
         logger.exception("Presencia: no se pudieron leer los tramos del %s", dia)
         raise HTTPException(status_code=502, detail="No se pudieron leer los tramos de presencia")
     return {"dia": dia, "tramos": _unir_tramos(filas)}
+
+
+# ── LUGARES ───────────────────────────────────────────────────────────────────
+# Hasta aquí la presencia solo sabía decir «en casa» o «fuera», y todo lo que Jarvis
+# hacía sin que se lo pidieras lo hacía a ciegas: te decía que llevabas tres días sin
+# entrenar estando en el gimnasio, o te mandaba un aviso de la cena en mitad de clase.
+# Esto le pone nombre a dos sitios más, el gimnasio y la uni, para que lo proactivo
+# sepa dónde estás antes de hablar.
+#
+# Tres decisiones que no son obvias:
+#
+#   - **Los lugares son una lista CERRADA** (casa, gimnasio, uni) y cada uno tiene su
+#     comportamiento escrito aquí. La zona de HA llega con el nombre que le hayas puesto
+#     («Gimnasio», «Universidad»…), y lo único configurable es qué nombres cuentan como
+#     cuál (`ZONAS_GIMNASIO`, `ZONAS_UNI`). Una zona que no sale en ninguna lista es
+#     «fuera», igual que antes: no se adivina qué es un sitio por su nombre.
+#
+#   - **Un lugar no cuenta hasta que llevas un rato en él** (`LUGAR_ESTABLE_MIN`). El GPS
+#     del móvil entra y sale de las zonas al pasar por delante, y sin este listón ir
+#     andando por la calle del gimnasio callaba tus avisos y te preguntaba si habías dado
+#     una sesión. Por eso hay dos estados: el CRUDO, lo último que dijo HA, y el FIRME, el
+#     que ha aguantado lo suficiente. Las llegadas y las salidas son cambios del firme, y
+#     un parpadeo de un minuto a «fuera» y vuelta no es una salida.
+#
+#   - **Del dónde solo se guarda la categoría, y solo de los sitios declarados.** Los
+#     tramos de la línea del día llevan `lugar` (gimnasio o uni) y nada más: ni el nombre
+#     de la zona, ni coordenadas, ni ningún sitio que no hayas puesto tú en esas listas.
+#     Es la misma frontera de `docs/IDEAS.md` movida un paso, y a propósito: «de 18:00 a
+#     19:30 en el gimnasio» es lo que hace falta para no regañarte por no entrenar.
+LUGAR_CASA, LUGAR_GIMNASIO, LUGAR_UNI, LUGAR_FUERA = "casa", "gimnasio", "uni", "fuera"
+# Los únicos lugares que se escriben en los tramos. Casa ya lo dice `en_casa`.
+LUGARES_GUARDADOS = (LUGAR_GIMNASIO, LUGAR_UNI)
+LUGARES_NOMBRADOS = (LUGAR_CASA, LUGAR_GIMNASIO, LUGAR_UNI)
+
+
+def _zonas_config(nombre: str, defecto: str) -> frozenset:
+    """Nombres de zona de HA separados por coma, en minúsculas y sin espacios."""
+    return frozenset(z.strip().lower() for z in os.getenv(nombre, defecto).split(",")
+                     if z.strip())
+
+
+ZONAS_GIMNASIO    = _zonas_config("ZONAS_GIMNASIO", "gimnasio,gym")
+ZONAS_UNI         = _zonas_config("ZONAS_UNI", "uni,universidad")
+LUGAR_ESTABLE_MIN = int(os.getenv("LUGAR_ESTABLE_MIN", "5"))
+
+# El estado en memoria: el lugar CRUDO (lo último que dijo HA) y el FIRME (el que ha
+# aguantado `LUGAR_ESTABLE_MIN`), cada uno con su hora de entrada, y la última llegada
+# que ya se procesó. En memoria y no en una tabla porque se puede reconstruir: al
+# arrancar, `_lugar_iniciar` saca la hora de entrada de los tramos guardados. Lo que se
+# pierde en un reinicio es como mucho repetir una llegada, y todo lo que dispara una
+# llegada es idempotente (la huella de los avisos, la marca de los recordatorios).
+_lugar_estado: dict = {}
+_lugar_lock = threading.Lock()
+
+
+def lugar_de_zona(zona, en_casa) -> str:
+    """El lugar de una zona de HA: casa, gimnasio, uni o fuera."""
+    if en_casa:
+        return LUGAR_CASA
+    z = str(zona or "").strip().lower()
+    if z in ZONAS_GIMNASIO:
+        return LUGAR_GIMNASIO
+    if z in ZONAS_UNI:
+        return LUGAR_UNI
+    return LUGAR_FUERA
+
+
+def _lugar_de_tramo(f: dict) -> str:
+    if f.get("en_casa"):
+        return LUGAR_CASA
+    return str(f.get("lugar") or LUGAR_FUERA)
+
+
+def _fecha_utc(iso) -> Optional[datetime]:
+    try:
+        d = datetime.fromisoformat(str(iso or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _desde_recuperado(lugar: str, p: dict) -> datetime:
+    """Desde cuándo estás en `lugar`, leído de los tramos guardados. Para el arranque.
+
+    Los tramos se escriben atribuidos a donde estabas ANTES de cada aviso de HA, así que
+    la cola de tramos con el mismo lugar es exactamente la estancia actual. Sin tramos (o
+    sin la columna `lugar`), lo más que se sabe es la hora del último aviso: es una cota
+    por abajo, y quedarse corto aquí solo retrasa un poco lo que depende de llevar un rato.
+    """
+    defecto = _fecha_utc(p.get("updated_at")) or datetime.now(timezone.utc)
+    try:
+        ayer  = (_ahora_local().date() - timedelta(days=1)).isoformat()
+        filas = _leer_tramos(f"dia=gte.{ayer}&order=desde.desc&limit=300")
+    except Exception as e:
+        logger.warning("Lugares: no se pudo recuperar desde cuándo estás en %s (%s)",
+                       lugar, type(e).__name__)
+        return defecto
+    desde = defecto
+    for f in filas:
+        if _lugar_de_tramo(f) != lugar:
+            break
+        inicio = _fecha_utc(f.get("desde"))
+        if inicio and inicio < desde:
+            desde = inicio
+    return desde
+
+
+def _lugar_iniciar(p: Optional[dict]) -> None:
+    """Rellena el estado en memoria si está vacío (al arrancar), a partir de la presencia.
+
+    Solo con una presencia VIGENTE: una caducada no dice dónde estás ahora, y arrancar
+    con ella haría que el primer aviso de HA pareciera una salida de un sitio del que te
+    fuiste hace horas.
+    """
+    with _lugar_lock:
+        if _lugar_estado.get("crudo"):
+            return
+    if not p:
+        return
+    edad = _edad_presencia(p)
+    if edad is None or edad > PRESENCE_TTL_MINUTES:
+        return
+    lugar = lugar_de_zona(p.get("zona"), p.get("en_casa"))
+    desde = _desde_recuperado(lugar, p)
+    with _lugar_lock:
+        if not _lugar_estado.get("crudo"):
+            _lugar_estado["crudo"] = (lugar, desde)
+            _lugar_estado["firme"] = (lugar, desde)
+
+
+def _lugar_observar(lugar: str, ahora: datetime) -> None:
+    """Apunta lo que acaba de decir HA. Solo cambia la hora si cambia el lugar."""
+    with _lugar_lock:
+        crudo = _lugar_estado.get("crudo")
+        if not crudo or crudo[0] != lugar:
+            _lugar_estado["crudo"] = (lugar, ahora)
+        _lugar_estado.setdefault("firme", _lugar_estado["crudo"])
+
+
+def _lugar_olvidar() -> None:
+    """Tras un hueco (HA caído más que el TTL) no se sabe qué pasó entre medias: no hay
+    salida que procesar, solo un estado nuevo que empieza ahora."""
+    with _lugar_lock:
+        _lugar_estado.clear()
+
+
+def _lugar_avanzar(ahora: datetime) -> Optional[tuple]:
+    """Si el lugar crudo ha aguantado lo suficiente y no es el firme, ese es el nuevo
+    firme. Devuelve ((viejo, desde), (nuevo, desde)) cuando hay transición."""
+    with _lugar_lock:
+        crudo, firme = _lugar_estado.get("crudo"), _lugar_estado.get("firme")
+        if not crudo:
+            return None
+        if not firme:
+            _lugar_estado["firme"] = crudo
+            return None
+        if crudo[0] == firme[0]:
+            return None
+        if (ahora - crudo[1]).total_seconds() < LUGAR_ESTABLE_MIN * 60:
+            return None
+        _lugar_estado["firme"] = crudo
+        return firme, crudo
+
+
+def lugar_actual() -> Optional[dict]:
+    """Dónde estás, si se sabe: {lugar, desde, minutos, zona}. None si no se sabe.
+
+    Es el lugar FIRME, no lo último que dijo HA: lo que se usa para decidir callarse o
+    hablar no puede cambiar porque el GPS haya parpadeado. Y con la presencia caducada es
+    None, como en todo lo demás: «no lo sé» no se disfraza de «en casa».
+    """
+    p = presencia_vigente()
+    if not p:
+        return None
+    _lugar_iniciar(p)
+    with _lugar_lock:
+        firme = _lugar_estado.get("firme")
+    if not firme:
+        return None
+    lugar, desde = firme
+    minutos = max(0, int((datetime.now(timezone.utc) - desde).total_seconds() // 60))
+    return {"lugar": lugar, "desde": desde, "minutos": minutos, "zona": p.get("zona")}
+
+
+def _lugar_en_memoria() -> dict:
+    """Como `lugar_actual()`, pero solo con lo que ya está en memoria: sin presencia en la
+    copia de memoria o sin lugar firme, {} (no se sabe), sin preguntar a nadie. Para los
+    caminos que no pueden pagar una consulta, como la puerta del teléfono."""
+    with _presencia_lock:
+        p = _presencia_cache
+    edad = _edad_presencia(p) if p else None
+    if edad is None or edad > PRESENCE_TTL_MINUTES:
+        return {}
+    with _lugar_lock:
+        firme = _lugar_estado.get("firme")
+    if not firme:
+        return {}
+    return {"lugar": firme[0], "desde": firme[1], "zona": p.get("zona")}
+
+
+def _lugar_actual_seguro() -> Optional[dict]:
+    """`lugar_actual()` que nunca lanza: quien pregunta esto está decidiendo si avisar, y
+    un fallo aquí tiene que caer al comportamiento de siempre (hablar), no a callarse."""
+    try:
+        return lugar_actual()
+    except Exception as e:
+        logger.warning("Lugares: no se pudo saber dónde estás (%s)", type(e).__name__)
+        return None
+
+
+# Las clases de hoy, recordadas un rato: `_clase_en_curso` lo preguntan el despacho de
+# avisos y la puerta del teléfono, y cada pregunta sería una lectura de 60 días del
+# calendario de clases. Diez minutos es menos de lo que dura una clase y más que el tick.
+LUGAR_CLASES_CACHE_S = 600
+_clases_hoy: dict = {"ts": 0.0, "eventos": None}
+
+
+def _clase_en_curso(ahora: Optional[datetime] = None) -> Optional[dict]:
+    """La clase que está en curso ahora (del calendario de clases), o None.
+
+    None también si no se puede saber: esto decide CALLAR avisos y el teléfono, y ante la
+    duda se habla. No mira si estás en la uni; eso lo hace quien llama, que ya lo sabe.
+    """
+    ahora = ahora or _ahora_local()
+    if time.time() - _clases_hoy["ts"] > LUGAR_CLASES_CACHE_S:
+        try:
+            eventos = _sin_error(get_class_events(credentials=None), "events")
+        except Exception as e:
+            logger.warning("Lugares: no se pudieron leer las clases (%s)", type(e).__name__)
+            eventos = None
+        _clases_hoy.update(ts=time.time(), eventos=eventos)
+    for ev in _clases_hoy["eventos"] or []:
+        if ev.get("isAllDay"):
+            continue
+        ini, fin = _fecha_utc(ev.get("start")), _fecha_utc(ev.get("end"))
+        if ini and fin and ini <= ahora.astimezone(timezone.utc) < fin:
+            return {"titulo": ev.get("title") or "clase", "fin": fin.astimezone(LOCAL_TZ)}
+    return None
+
+
+def _en_clase(lugar: Optional[dict] = None) -> Optional[dict]:
+    """La clase en curso si estás EN LA UNI y hay una; None en cualquier otro caso.
+
+    Hacen falta las dos cosas: una clase del calendario a la que no has ido no te tiene
+    sentado en un aula, y estar en la uni entre clases no es estar en clase.
+    """
+    lugar = lugar if lugar is not None else _lugar_actual_seguro()
+    if not lugar or lugar.get("lugar") != LUGAR_UNI:
+        return None
+    try:
+        return _clase_en_curso()
+    except Exception as e:
+        logger.warning("Lugares: no se pudo mirar si estás en clase (%s)", type(e).__name__)
+        return None
+
+
+def _texto_lugar(lugar: str) -> str:
+    return {LUGAR_CASA: "en casa", LUGAR_GIMNASIO: "en el gimnasio",
+            LUGAR_UNI: "en la uni"}.get(lugar, "fuera de casa")
+
+
+# ── Lo que pasa al llegar y al salir ──────────────────────────────────────────
+# Las transiciones del lugar FIRME. Las procesa `_procesar_lugar`, que llaman el aviso de
+# presencia de HA y el tick (cada 5 min): el tick es lo que hace que una llegada cuente
+# aunque HA no vuelva a decir nada en un cuarto de hora.
+#
+# Lo que pediste tú (los recordatorios por lugar) va siempre. Lo que decide el sistema
+# (el cobro al llegar al gimnasio, la sesión al salir, las entregas al salir de la uni,
+# la vuelta a casa) va detrás de `REGLAS_PROACTIVAS`, como cualquier otra regla, y deja
+# su aviso por `_apuntar_aviso`, así que hereda presupuesto, silenciado y memoria.
+REGLA_COBRO_GIMNASIO  = "cobro_gimnasio"
+REGLA_SESION_GIMNASIO = "sesion_gimnasio"
+REGLA_ENTREGA_UNI     = "entrega_uni"
+REGLA_VUELTA_CASA     = "vuelta_casa"
+# Lo que dura una estancia en el gimnasio para que merezca preguntar si diste una sesión.
+# Menos que una sesión es pasar a recoger algo.
+GIMNASIO_SESION_MIN   = int(os.getenv("GIMNASIO_SESION_MIN", "40"))
+# Lo que se apunta si contestas que sí. Fijo y no lo que estuviste dentro: llegas antes,
+# te quedas hablando, y lo que cobras es la sesión.
+GIMNASIO_SESION_HORAS = float(os.getenv("GIMNASIO_SESION_HORAS", "1"))
+# Lo que se ofrece encender al salir de la uni o del gimnasio, para cuando llegues.
+# Vacío y apagado = no se ofrece nada: lo que es «llegar a casa con la calefacción puesta»
+# en una casa es «encenderle a alguien la luz» en otra.
+VUELTA_CASA_ENTIDADES = tuple(
+    e.strip() for e in os.getenv("VUELTA_CASA_ENTIDADES", "").split(",") if e.strip()
+)
+VUELTA_CASA_PC        = _flag("VUELTA_CASA_PC", "0")
+RECORDATORIOS_LUGAR_URL = f"{SUPABASE_URL}/rest/v1/recordatorios_lugar"
+
+
+def _procesar_lugar() -> dict:
+    """Avanza el lugar firme y dispara lo que toque al llegar o al salir."""
+    p = presencia_vigente()
+    if not p:
+        return {}
+    _lugar_iniciar(p)
+    # El mismo reloj que `ha_presencia` usa para apuntar el lugar crudo: `_ahora_local()`
+    # es el punto único que un test puede fijar.
+    ahora = _ahora_local().astimezone(timezone.utc)
+    salida = {}
+    transicion = _lugar_avanzar(ahora)
+    if transicion:
+        (viejo, desde_viejo), (nuevo, desde_nuevo) = transicion
+        logger.info("Lugares: de %s a %s", viejo, nuevo)
+        n = _al_salir_de(viejo, desde_viejo, desde_nuevo)
+        if n:
+            salida["lugar_salida"] = n
+    with _lugar_lock:
+        firme = _lugar_estado.get("firme")
+        if not firme:
+            return salida
+        clave = f"{firme[0]}@{firme[1].isoformat()}"
+        nueva = (_lugar_estado.get("llegada") != clave
+                 and (ahora - firme[1]).total_seconds() >= LUGAR_ESTABLE_MIN * 60)
+        if nueva:
+            _lugar_estado["llegada"] = clave
+    if nueva:
+        n = _al_llegar_a(firme[0], firme[1])
+        if n:
+            salida["lugar_llegada"] = n
+    return salida
+
+
+def _procesar_lugar_seguro() -> dict:
+    """Ni el aviso de presencia ni el tick pueden caerse por esto."""
+    try:
+        return _procesar_lugar()
+    except Exception:
+        logger.exception("Lugares: fallo inesperado procesando el lugar")
+        return {}
+
+
+def _al_llegar_a(lugar: str, desde: datetime) -> int:
+    puestos = _disparar_recordatorios_lugar(lugar, "llegar", desde)
+    if REGLAS_PROACTIVAS and lugar == LUGAR_GIMNASIO:
+        try:
+            puestos += _regla_cobro_gimnasio()
+        except Exception:
+            logger.exception("Regla 'cobro_gimnasio': fallo inesperado")
+    return puestos
+
+
+def _al_salir_de(lugar: str, desde: datetime, hasta: datetime) -> int:
+    puestos = _disparar_recordatorios_lugar(lugar, "salir", hasta)
+    if not REGLAS_PROACTIVAS:
+        return puestos
+    for nombre, fn in (("sesion_gimnasio", lambda: _regla_sesion_gimnasio(desde, hasta)
+                        if lugar == LUGAR_GIMNASIO else 0),
+                       ("entrega_uni", lambda: _regla_entregas_al_salir()
+                        if lugar == LUGAR_UNI else 0),
+                       ("vuelta_casa", lambda: _regla_vuelta_casa()
+                        if lugar in (LUGAR_UNI, LUGAR_GIMNASIO) else 0)):
+        try:
+            puestos += fn()
+        except Exception:
+            logger.exception("Regla '%s': fallo inesperado", nombre)
+    return puestos
+
+
+def _regla_cobro_gimnasio() -> int:
+    """Al llegar al gimnasio con sesiones sin cobrar por encima del punto de cobro.
+
+    Es el aviso diario de siempre («llevas 4 sesiones sin cobrar»), dicho donde se puede
+    hacer algo con él: allí ves a quien entrenas. La huella es la cuenta de sesiones, la
+    misma que mira el aviso diario para no repetirlo (`_motivos_proactivos`).
+    """
+    entren = _brief_entrenamiento()
+    hechas = int(entren.get("sesiones_desde_cobro") or 0)
+    cada   = int(entren.get("sesiones_por_cobro") or 0)
+    if not cada or hechas < cada:
+        return 0
+    return int(_apuntar_aviso(
+        REGLA_COBRO_GIMNASIO,
+        f"Llevas {hechas} sesiones sin cobrar (cobras cada {cada}): "
+        f"{entren.get('importe_pendiente')} € pendientes.",
+        prioridad=PRIO_NORMAL, huella=f"cobro:{hechas}",
+        # Solo vale mientras estás allí. Si el presupuesto lo mandara a mañana, llegaría
+        # en casa, que es justo donde ya lo dice el aviso diario.
+        caduca=datetime.now(timezone.utc) + timedelta(hours=3),
+        motivo={"sesiones_desde_cobro": hechas, "sesiones_por_cobro": cada,
+                "importe_pendiente": entren.get("importe_pendiente")},
+    ))
+
+
+def _entreno_del_reloj_entre(desde: datetime, hasta: datetime) -> Optional[bool]:
+    """Si el Watch ya tiene un entreno que empezó durante esa estancia. None = no se sabe.
+
+    Mira solo el inicio y en hora de reloj del mismo día, que es lo que da el exportador
+    («2026-10-05 18:05:00 +0200»). Un entreno sin sincronizar todavía sale como «no»:
+    por eso esto solo sirve para NO preguntar, nunca para dar la sesión por dada.
+    """
+    dia = desde.astimezone(LOCAL_TZ).date().isoformat()
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{dia}"
+                     "&metric_name=in.(workouts,workout)&select=extra",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return None
+        filas = r.json() or []
+    except Exception:
+        return None
+    ini = (desde.astimezone(LOCAL_TZ) - timedelta(minutes=15)).strftime("%H:%M")
+    fin = hasta.astimezone(LOCAL_TZ).strftime("%H:%M")
+    for f in filas:
+        for w in ((f.get("extra") or {}).get("workouts") or []):
+            hora = _hora_entreno(w.get("start")) if isinstance(w, dict) else None
+            if hora and ini <= hora <= fin:
+                return True
+    return False
+
+
+def _regla_sesion_gimnasio(desde: datetime, hasta: datetime) -> int:
+    """Al salir del gimnasio tras un buen rato: ¿diste una sesión? Con un botón que la apunta.
+
+    Estar en el gimnasio no dice si entrenaste tú o entrenaste a alguien — los dos son
+    una hora allí dentro —, así que no se apunta nada solo: se pregunta. Lo que sí se
+    puede saber es cuándo NO hace falta preguntar: si ya hay una sesión apuntada hoy, o si
+    el Watch registró un entreno tuyo en ese rato (entonces entrenabas tú). La sesión se
+    apunta con el botón (`POST /avisos/{id}/apagar`, que decide por la regla) y con la
+    fecha del aviso, no la del día en que pulses.
+    """
+    minutos = (hasta - desde).total_seconds() / 60
+    if minutos < GIMNASIO_SESION_MIN:
+        return 0
+    if not _get_training_client():
+        return 0
+    hoy = desde.astimezone(LOCAL_TZ).date().isoformat()
+    r = http.get(f"{SUPABASE_URL}/rest/v1/training_sessions?date=eq.{hoy}&select=id&limit=1",
+                 headers=supabase_headers())
+    if r.status_code >= 300 or r.json():
+        # Ya apuntada, o no se sabe: preguntar por una sesión que ya está es justo el
+        # aviso que enseña a no leer los demás.
+        return 0
+    if _entreno_del_reloj_entre(desde, hasta):
+        return 0
+    horas = int(minutos // 60)
+    rato  = f"{horas} h {int(minutos % 60)} min" if horas else f"{int(minutos)} min"
+    medianoche = (desde.astimezone(LOCAL_TZ) + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return int(_apuntar_aviso(
+        REGLA_SESION_GIMNASIO,
+        f"Has estado {rato} en el gimnasio. ¿Diste una sesión? Si es así, la apunto.",
+        prioridad=PRIO_NORMAL,
+        huella=f"sesion_gym:{desde.astimezone(LOCAL_TZ).strftime('%Y%m%dT%H%M')}",
+        # Caduca a medianoche: mañana, «¿diste una sesión?» ya no dice de qué día.
+        caduca=medianoche,
+        motivo={"desde": desde.isoformat(), "hasta": hasta.isoformat(),
+                "minutos": round(minutos), "listón_min": GIMNASIO_SESION_MIN},
+    ))
+
+
+def _entregas_proximas() -> list:
+    """Las entregas (título con `ENTREGAS_MARKER`) que vencen hoy o mañana, de los dos
+    calendarios: las entregas se crean en el de clases, y el aviso diario mira el otro."""
+    vistos, salida = set(), []
+    for leer, clave in ((lambda: get_events(credentials=None), "events"),
+                        (lambda: get_class_events(credentials=None), "events")):
+        try:
+            eventos = _sin_error(leer(), clave)
+        except Exception as e:
+            logger.warning("Lugares: no se pudieron leer las entregas (%s)", type(e).__name__)
+            continue
+        for ev in eventos:
+            titulo = ev.get("title") or ""
+            if ENTREGAS_MARKER not in titulo or ev.get("id") in vistos:
+                continue
+            dias = _dias_hasta(ev.get("start", ""))
+            if dias is not None and 0 <= dias <= 1:
+                vistos.add(ev.get("id"))
+                salida.append({**ev, "dias": dias})
+    return salida
+
+
+def _huella_entrega(ev: dict) -> str:
+    return f"entrega:{_id_evento_corto(ev.get('id') or ev.get('title') or '')}"
+
+
+def _regla_entregas_al_salir() -> int:
+    """Al salir de la uni con una entrega para hoy o mañana: es cuando todavía se puede
+    preguntar algo en clase o quedar con alguien, y el aviso diario de las 19:00 llega
+    con eso ya imposible. Comparte huella con él para no decirlo dos veces."""
+    puestos = 0
+    for ev in _entregas_proximas():
+        limpio = (ev.get("title") or "").replace(ENTREGAS_MARKER, "").strip() or "(sin título)"
+        cuando = "hoy" if ev["dias"] == 0 else "mañana"
+        puestos += int(_apuntar_aviso(
+            REGLA_ENTREGA_UNI, f"Sales de la uni y tienes la entrega «{limpio}» {cuando}.",
+            prioridad=PRIO_ALTA, huella=_huella_entrega(ev),
+            motivo={"entrega": limpio, "dias": ev["dias"]},
+        ))
+    return puestos
+
+
+def _regla_vuelta_casa() -> int:
+    """Sales de la uni o del gimnasio: ¿enciendo lo que hayas declarado para cuando
+    llegues? Con un botón, nunca solo — no se sabe si vas a casa."""
+    apagadas = []
+    if VUELTA_CASA_ENTIDADES:
+        estados = {str(e.get("id")): str(e.get("estado") or "").lower()
+                   for e in _casa_entidades_al_dia()[0]}
+        apagadas = [e for e in VUELTA_CASA_ENTIDADES if estados.get(e) == "off"]
+    pc = bool(VUELTA_CASA_PC and not (PC_ENTIDAD and any(
+        str(e.get("id")) == PC_ENTIDAD and str(e.get("estado") or "").lower() == "on"
+        for e in _casa_entidades())))
+    if not apagadas and not pc:
+        return 0
+    nombres = {str(e.get("id")): e.get("nombre") or e.get("id") for e in _casa_entidades()}
+    cosas = [str(nombres.get(e, e)) for e in apagadas] + (["el PC"] if pc else [])
+    return int(_apuntar_aviso(
+        REGLA_VUELTA_CASA,
+        f"¿Vuelves a casa? Puedo encender {', '.join(cosas[:5])} para cuando llegues.",
+        prioridad=PRIO_NORMAL,
+        huella=f"vuelta:{_ahora_local().date().isoformat()}",
+        # El PC viaja como una entidad más con un nombre que no existe en HA: el botón
+        # sabe que esa la enciende por WOL y no por la casa.
+        entidades=apagadas + (["pc.wol"] if pc else []),
+        caduca=datetime.now(timezone.utc) + timedelta(hours=1),
+        motivo={"apagadas": apagadas, "pc": pc},
+    ))
+
+
+def _encender_entidades(ids: list) -> list:
+    """El espejo de `_apagar_entidades` para el botón de la vuelta a casa: por la misma
+    puerta (`_j_casa_ordenar`), que valida contra el catálogo y la lista blanca."""
+    encendidas = []
+    for eid in ids:
+        dominio = str(eid).split(".")[0]
+        if dominio not in ("light", "switch", "fan", "climate"):
+            logger.warning("Vuelta a casa: no enciendo '%s', no es de un dominio que se "
+                           "encienda así", eid)
+            continue
+        r = _j_casa_ordenar(f"{dominio}.turn_on", str(eid))
+        if r.get("ok"):
+            encendidas.append(str(eid))
+        else:
+            logger.warning("Vuelta a casa: no se pudo encolar '%s' (%s)", eid, r.get("motivo"))
+    return encendidas
+
+
+def _estuvo_en_gimnasio_hoy() -> bool:
+    """Si hoy has pasado un rato en el gimnasio (o estás ahora). Ante la duda, NO: esto
+    solo sirve para callar un reproche, y no saberlo no es haber ido."""
+    lugar = _lugar_actual_seguro()
+    if lugar and lugar["lugar"] == LUGAR_GIMNASIO:
+        return True
+    try:
+        hoy = _ahora_local().date().isoformat()
+        filas = _leer_tramos(f"dia=eq.{hoy}&lugar=eq.{LUGAR_GIMNASIO}&limit=200")
+    except Exception:
+        return False
+    minutos = 0.0
+    for f in filas:
+        ini, fin = _fecha_utc(f.get("desde")), _fecha_utc(f.get("hasta"))
+        if ini and fin:
+            minutos += (fin - ini).total_seconds() / 60
+    return minutos >= GIMNASIO_SESION_MIN
+
+
+# ── Recordatorios por lugar ───────────────────────────────────────────────────
+# «Recuérdame al llegar a casa…», «…al salir del gimnasio». Van a una tabla aparte y no a
+# `jarvis_recordatorios` porque no tienen hora: el despachador pregunta por `cuando`, y un
+# recordatorio sin `cuando` o con uno inventado (el año 2100) se mezclaría con todo lo que
+# mira esa tabla. Al dispararse se convierte en un recordatorio normal con `cuando` =
+# ahora y sin regla —lo pediste tú—, y lo entrega el despachador de siempre: nada de
+# camino nuevo hasta el móvil.
+#
+# Solo se dispara si se apuntó ANTES de la llegada o la salida. Sin eso, un «al llegar a
+# casa» dicho estando en casa sonaría al momento, y un reinicio del backend que vuelve a
+# procesar la llegada los sonaría todos.
+RECORDATORIOS_LUGAR_MAX = 30
+
+
+def _disparar_recordatorios_lugar(lugar: str, momento: str, cuando: datetime) -> int:
+    if lugar not in LUGARES_NOMBRADOS:
+        return 0
+    try:
+        r = http.get(f"{RECORDATORIOS_LUGAR_URL}?lugar=eq.{lugar}&momento=eq.{momento}"
+                     f"&disparado_at=is.null"
+                     f"&creado=lte.{quote(cuando.astimezone(timezone.utc).isoformat(), safe='')}"
+                     f"&select=id,texto&limit={RECORDATORIOS_LUGAR_MAX}",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            # 404 = la migración sin aplicar: no hay recordatorios por lugar que disparar.
+            if r.status_code != 404:
+                logger.warning("Lugares: no se pudieron leer los recordatorios (%s)",
+                               r.status_code)
+            return 0
+        filas = r.json() or []
+    except Exception as e:
+        logger.warning("Lugares: no se pudieron leer los recordatorios (%s)", type(e).__name__)
+        return 0
+    puestos = 0
+    ahora = datetime.now(timezone.utc).isoformat()
+    for fila in filas:
+        rid = str(fila.get("id") or "")
+        if not re.match(_UUID_PATTERN, rid):
+            continue
+        # La reserva ES la pregunta, como en el despacho: un PATCH condicional. Si dos
+        # pasadas se cruzan (el aviso de HA y el tick), solo una se lo lleva.
+        reserva = http.patch(f"{RECORDATORIOS_LUGAR_URL}?id=eq.{rid}&disparado_at=is.null",
+                             headers={**supabase_headers(), "Prefer": "return=representation"},
+                             json={"disparado_at": ahora})
+        if reserva.status_code >= 300 or not reserva.json():
+            continue
+        texto = str(fila.get("texto") or "")[:RECORDATORIO_MAX_TEXTO]
+        alta = http.post(RECORDATORIOS_URL,
+                         headers={**supabase_headers(), "Prefer": "return=minimal"},
+                         json={"cuando": ahora, "texto": texto})
+        if alta.status_code >= 300:
+            # Se libera para la próxima vez: un recordatorio perdido por un 500 de
+            # Supabase es justo el fallo que no se ve hasta que hace falta.
+            logger.error("Lugares: no se pudo convertir el recordatorio %s (%s)",
+                         rid, alta.status_code)
+            http.patch(f"{RECORDATORIOS_LUGAR_URL}?id=eq.{rid}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"disparado_at": None})
+            continue
+        puestos += 1
+    if puestos:
+        logger.info("Lugares: %d recordatorio(s) de %s %s", puestos,
+                    "llegar a" if momento == "llegar" else "salir de", lugar)
+    return puestos
+
+
+def _j_recordarme_lugar(texto: str, lugar: str, momento: str = "llegar") -> dict:
+    texto   = str(texto or "").strip()[:RECORDATORIO_MAX_TEXTO]
+    lugar   = str(lugar or "").strip().lower()
+    momento = str(momento or "llegar").strip().lower()
+    if not texto:
+        return {"ok": False, "motivo": "¿De qué te aviso?"}
+    if lugar not in LUGARES_NOMBRADOS:
+        return {"ok": False, "motivo": f"Solo sé de estos lugares: {', '.join(LUGARES_NOMBRADOS)}"}
+    if momento not in ("llegar", "salir"):
+        return {"ok": False, "motivo": "momento tiene que ser 'llegar' o 'salir'"}
+    cuenta = http.get(f"{RECORDATORIOS_LUGAR_URL}?disparado_at=is.null&select=id"
+                      f"&limit={RECORDATORIOS_LUGAR_MAX + 1}", headers=supabase_headers())
+    if cuenta.status_code == 404:
+        return {"ok": False, "motivo": "Falta aplicar la migración 20261005_lugares en "
+                                       "Supabase: sin ella no hay recordatorios por lugar"}
+    if cuenta.status_code < 300 and len(cuenta.json()) >= RECORDATORIOS_LUGAR_MAX:
+        return {"ok": False,
+                "motivo": f"Ya hay {RECORDATORIOS_LUGAR_MAX} recordatorios por lugar pendientes"}
+    r = http.post(RECORDATORIOS_LUGAR_URL,
+                  headers={**supabase_headers(), "Prefer": "return=representation"},
+                  json={"texto": texto, "lugar": lugar, "momento": momento})
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    aviso = ("Te lo diré cuando lleve unos minutos allí" if momento == "llegar"
+             else "Te lo diré unos minutos después de irte")
+    return {"ok": True, "id": (r.json() or [{}])[0].get("id"), "lugar": lugar,
+            "momento": momento, "texto": texto, "nota": aviso}
+
+
+def _recordatorios_lugar_pendientes() -> list:
+    """Los recordatorios por lugar sin disparar, para `mis_recordatorios`. [] si la tabla
+    no existe o no responde: la lista de los de con hora sigue valiendo sin estos."""
+    try:
+        r = http.get(f"{RECORDATORIOS_LUGAR_URL}?disparado_at=is.null"
+                     f"&select=id,texto,lugar,momento&order=creado.asc"
+                     f"&limit={RECORDATORIOS_LUGAR_MAX}", headers=supabase_headers())
+        if r.status_code >= 300:
+            return []
+        return [{"id": f.get("id"), "texto": f.get("texto"),
+                 "cuando": f"al {'llegar a' if f.get('momento') == 'llegar' else 'salir de'} "
+                           f"{f.get('lugar')}"}
+                for f in r.json() or []]
+    except Exception:
+        return []
+
+
+def _jarvis_contexto_lugar() -> str:
+    """Dónde estás, para el prompt de Jarvis. Vacío si no se sabe.
+
+    Va en el prompt y no solo en `donde_estoy` porque cambia CÓMO contestar, no solo qué:
+    el modelo no va a pedir la ubicación para decidir si alargarse, y en clase o entre dos
+    series una respuesta de diez líneas es una respuesta que no se lee.
+    """
+    lugar = _lugar_actual_seguro()
+    if not lugar:
+        return ""
+    desde = lugar["desde"].astimezone(LOCAL_TZ).strftime("%H:%M")
+    texto = f"\nAhora mismo el usuario está {_texto_lugar(lugar['lugar'])} (desde las {desde})."
+    clase = _en_clase(lugar)
+    if clase:
+        texto += (f" Está en clase («{clase['titulo']}») hasta las "
+                  f"{clase['fin'].strftime('%H:%M')}.")
+    if lugar["lugar"] in (LUGAR_GIMNASIO, LUGAR_UNI):
+        texto += (" Contesta todavía más corto de lo normal, y no le propongas cosas que "
+                  "solo tienen sentido en casa (encender el PC, la casa) si no las pide.")
+    return texto + "\n"
 
 
 # ── RESUMEN DIARIO POR CORREO ─────────────────────────────────────────────────
@@ -9941,7 +10707,10 @@ def ha_brief_tick(request: Request, token: str = ""):
     # así que una excepción suelta aquí dejaba sin entregar TODOS los recordatorios
     # vencidos mientras durase la avería, y en silencio — el 500 del tick solo lo veía
     # Home Assistant.
-    previos = {**_avisar_reloj_seguro(), **_vigilar_espera_sueno_seguro(),
+    previos = {# El lugar primero: las llegadas y salidas apuntan avisos, y el despacho de
+               # este mismo tick decide con el lugar ya al día qué sale y qué espera.
+               **_procesar_lugar_seguro(),
+               **_avisar_reloj_seguro(), **_vigilar_espera_sueno_seguro(),
                **_vigilar_ingesta_seguro(), **_vigilar_gemelos_seguro(),
                **_vigilar_espacio_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
@@ -10730,6 +11499,7 @@ TABLAS_CONOCIDAS = {
     "avisos_llamadas":       "20260923_llamadas_cotidianas",
     "backend_latidos":       "20260924_backend_latidos",
     "despertares":           "20260927_despertares",
+    "recordatorios_lugar":   "20261005_lugares",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -13031,7 +13801,7 @@ def _j_mis_recordatorios() -> dict:
             continue
         fuera.append({"id": fila.get("id"), "cuando": cuando.strftime("%Y-%m-%d %H:%M"),
                       "texto": fila.get("texto")})
-    return {"recordatorios": fuera}
+    return {"recordatorios": fuera + _recordatorios_lugar_pendientes()}
 
 
 def _j_cancelar_recordatorio(recordatorio_id: str) -> dict:
@@ -13041,6 +13811,13 @@ def _j_cancelar_recordatorio(recordatorio_id: str) -> dict:
     r = http.delete(f"{RECORDATORIOS_URL}?id=eq.{recordatorio_id}", headers=supabase_headers())
     if r.status_code >= 300:
         raise _supabase_error(r)
+    # El id puede ser de un recordatorio por lugar, que vive en otra tabla. Borrar en las
+    # dos es más simple que averiguar en cuál está, y un id que no existe no borra nada.
+    # Si esa tabla no existe todavía (migración sin aplicar), el 404 no es un fallo.
+    r2 = http.delete(f"{RECORDATORIOS_LUGAR_URL}?id=eq.{recordatorio_id}",
+                     headers=supabase_headers())
+    if r2.status_code >= 300 and r2.status_code != 404:
+        raise _supabase_error(r2)
     return {"ok": True, "id": recordatorio_id}
 
 
@@ -15058,6 +15835,10 @@ def _motivos_proactivos(ahora: datetime) -> list:
         titulo = ev.get("title") or ""
         if ENTREGAS_MARKER not in titulo:
             continue
+        # Ya te lo dije al salir de la uni (`_regla_entregas_al_salir`): misma entrega,
+        # misma huella, y dos avisos por lo mismo es como dejan de leerse los dos.
+        if _ya_dicho(REGLA_ENTREGA_UNI, _huella_entrega(ev)):
+            continue
         dias = _dias_hasta(ev.get("start", ""))
         if dias is not None and 0 <= dias <= 1:
             limpio = titulo.replace(ENTREGAS_MARKER, "").strip() or "(sin título)"
@@ -15069,7 +15850,8 @@ def _motivos_proactivos(ahora: datetime) -> list:
     if entren:
         hechas = entren.get("sesiones_desde_cobro") or 0
         cada   = entren.get("sesiones_por_cobro") or 0
-        if cada and hechas >= cada:
+        # Si ya te lo dije al llegar al gimnasio, con esta misma cuenta, sobra.
+        if cada and hechas >= cada and not _ya_dicho(REGLA_COBRO_GIMNASIO, f"cobro:{hechas}"):
             motivos.append(
                 f"Llevas {hechas} sesiones sin cobrar (cobras cada {cada}): "
                 f"{entren.get('importe_pendiente')} € pendientes."
@@ -15078,8 +15860,12 @@ def _motivos_proactivos(ahora: datetime) -> list:
     # 3. Días seguidos sin entrenar, contra el objetivo de 4 por semana. Solo se dice si
     #    HAY histórico de entrenos: sin él no se sabe si es una racha o es que el Watch
     #    nunca los ha registrado, y regañar por lo segundo sería inventarse el dato.
+    #    Y tampoco si hoy has estado en el gimnasio: el Watch no siempre registra el
+    #    entreno (o aún no lo ha sincronizado), y regañarte por no entrenar el día que
+    #    has ido es justo el aviso que enseña a no leer los demás.
     ultimo = (salud or {}).get("ultimo_entreno")
-    if ultimo and (ultimo.get("dias") or 0) >= JARVIS_PROACTIVO_SIN_ENTRENO:
+    if ultimo and (ultimo.get("dias") or 0) >= JARVIS_PROACTIVO_SIN_ENTRENO \
+            and not _estuvo_en_gimnasio_hoy():
         motivos.append(f"{ultimo['dias']} días desde el último entreno (el objetivo son 4 por semana).")
 
     return motivos
@@ -15551,6 +16337,9 @@ def _regla_hueco_entreno(obtener_salud) -> int:
     # Sin histórico de entrenos no se regaña: no se sabe si es una racha o es que el
     # Watch nunca los registró.
     if not dias or dias < JARVIS_PROACTIVO_SIN_ENTRENO:
+        return 0
+    # Hoy has estado en el gimnasio: la cuenta de días del Watch va por detrás de ti.
+    if _estuvo_en_gimnasio_hoy():
         return 0
 
     manana  = (_ahora_local() + timedelta(days=1)).date()
@@ -17214,6 +18003,16 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apagar"},
                 {"action": f"LA_UTIL_{rid}",   "title": "Útil"},
                 {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
+    if regla == REGLA_SESION_GIMNASIO:
+        # «Apuntarla» reutiliza `LA_APAGAR_`, como el «Suspender» del PC: ni una línea
+        # nueva de YAML en HA; qué hace lo decide `apagar_aviso` por la regla. Y la otra
+        # respuesta no es «No útil»: «entrené yo» es una respuesta buena a una pregunta
+        # buena, y contarla como voto en contra acabaría silenciando la regla.
+        return [{"action": f"LA_APAGAR_{rid}", "title": "Apuntar sesión"},
+                {"action": f"LA_UTIL_{rid}",   "title": "Entrené yo"}]
+    if regla == REGLA_VUELTA_CASA:
+        return [{"action": f"LA_APAGAR_{rid}", "title": "Encender"},
+                {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
     if regla == REGLA_PC_ENCENDIDO:
         # El prefijo `LA_APAGAR_` se reutiliza a propósito: la automatización y el
         # `rest_command` de HA que lo recogen ya existen, así que «Suspender» no necesita
@@ -17620,6 +18419,13 @@ def _telefono_puede_sonar(ahora: datetime) -> tuple[bool, str]:
         corte = _hora_de_acostarse(ahora)
         if hm >= corte:
             return False, f"pasada tu hora de dormir ({corte[0]:02d}:{corte[1]:02d})"
+    # En clase no suena, como dormido: el aviso ya ha llegado al móvil y la llamada no se
+    # aplaza (ver `_llamar`). Solo con la uni como lugar firme Y una clase del calendario
+    # en curso; ante la duda, suena. El lugar sale de lo que ya hay en memoria, sin
+    # preguntar a Supabase: de día esto no puede costar una consulta por llamada.
+    clase = _en_clase(_lugar_en_memoria())
+    if clase:
+        return False, f"estás en clase hasta las {clase['fin'].strftime('%H:%M')}"
     if hm >= LLAMADAS_SIN_SENAL_DESDE:
         return True, (f"ya son las {hm[0]:02d}:{hm[1]:02d}: desde las "
                       f"{LLAMADAS_SIN_SENAL_DESDE[0]:02d}:{LLAMADAS_SIN_SENAL_DESDE[1]:02d} "
@@ -18535,6 +19341,63 @@ def _apagar_entidades(ids: list) -> list:
     return apagadas
 
 
+def _marcar_util(aviso_id: str, regla: str) -> None:
+    """Actuar sobre un aviso es la valoración más fuerte que existe: cuenta como útil.
+    Fallar aquí solo cuesta una estadística; la acción ya está hecha."""
+    try:
+        http.patch(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"util": True})
+        _valorar_regla(regla, True)
+    except Exception as e:
+        logger.warning("Avisos: hecho, pero sin apuntar la valoración de %s (%s)", aviso_id, e)
+
+
+def _apuntar_sesion_del_aviso(aviso_id: str, fila: dict) -> dict:
+    """«Apuntar sesión» del aviso de salir del gimnasio. Con la fecha del AVISO, no la de
+    hoy: si lo pulsas pasada la medianoche, la sesión fue ayer."""
+    creado = _fecha_utc(fila.get("creado")) or datetime.now(timezone.utc)
+    fecha  = creado.astimezone(LOCAL_TZ).date().isoformat()
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/training_sessions?date=eq.{fecha}"
+                     "&select=id&limit=1", headers=supabase_headers())
+        ya = r.status_code < 300 and bool(r.json())
+    except Exception:
+        ya = False
+    if ya:
+        # Dos toques al botón (o el botón y el dashboard) no son dos sesiones.
+        _acusar_recibo("🏋️ Ya estaba apuntada", f"La sesión del {fecha} ya constaba.",
+                       efimero=True)
+        return {"ok": True, "ya_estaba": True, "fecha": fecha}
+    resultado = add_training_session(
+        TrainingSessionCreate(date=fecha, duration_hours=GIMNASIO_SESION_HORAS),
+        credentials=None)
+    _marcar_util(aviso_id, REGLA_SESION_GIMNASIO)
+    _acusar_recibo("🏋️ Sesión apuntada",
+                   f"{GIMNASIO_SESION_HORAS:g} h el {fecha}. Si no era, bórrala desde el "
+                   "dashboard.", efimero=True)
+    logger.info("Gimnasio: sesión del %s apuntada desde el aviso %s", fecha, aviso_id)
+    return {"ok": True, "fecha": fecha, "sesion": resultado.get("session")}
+
+
+def _encender_del_aviso(aviso_id: str, fila: dict) -> dict:
+    """«Encender» del aviso de la vuelta a casa: lo que decía el aviso, como el apagado."""
+    entidades = [str(e) for e in (fila.get("entidades") or []) if e]
+    pc = "pc.wol" in entidades
+    encendidas = _encender_entidades([e for e in entidades if e != "pc.wol"]
+                                     [:AVISO_MAX_ENTIDADES])
+    if pc:
+        _pedir_al_pc("wol")
+        encendidas.append("pc")
+    if not encendidas:
+        _acusar_recibo("💡 No he podido encender nada",
+                       "Pulsaste encender y no ha salido ninguna orden.")
+        raise HTTPException(status_code=502, detail="No se pudo encolar ningún encendido")
+    _marcar_util(aviso_id, REGLA_VUELTA_CASA)
+    logger.info("Vuelta a casa: encendiendo %s", ", ".join(encendidas))
+    return {"ok": True, "encendidas": encendidas}
+
+
 @app.post("/avisos/{aviso_id}/apagar")
 def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""):
     """El tercer botón del aviso de salir de casa: apágalo tú.
@@ -18562,7 +19425,7 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
     _auth_boton(request, token)
 
     try:
-        r = http.get(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}&select=regla,entidades",
+        r = http.get(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}&select=regla,entidades,creado",
                      headers=supabase_headers())
         if r.status_code >= 300:
             raise _supabase_error(r)
@@ -18576,6 +19439,10 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
     if not filas:
         raise HTTPException(status_code=404, detail="Ese aviso no existe")
     regla = str(filas[0].get("regla") or "")
+    if regla == REGLA_SESION_GIMNASIO:
+        return _apuntar_sesion_del_aviso(aviso_id, filas[0])
+    if regla == REGLA_VUELTA_CASA:
+        return _encender_del_aviso(aviso_id, filas[0])
     if regla == REGLA_PC_ENCENDIDO:
         _pedir_al_pc("suspender")
         # Mismo razonamiento que el apagado de abajo: actuar sobre el aviso es la
@@ -18592,9 +19459,9 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
         logger.info("Al salir: suspendiendo el PC desde el aviso %s", aviso_id)
         return {"ok": True, "suspendido": True}
     if regla != REGLA_AL_SALIR:
-        # Solo esos dos avisos llevan este botón. Si llega otro id es que el YAML de HA lo
-        # está mandando a donde no toca, y apagar "lo que sea" del aviso equivocado es
-        # justamente lo que no puede pasar.
+        # Solo esos cuatro avisos llevan este botón. Si llega otro id es que el YAML de
+        # HA lo está mandando a donde no toca, y apagar "lo que sea" del aviso
+        # equivocado es justamente lo que no puede pasar.
         raise HTTPException(status_code=422,
                             detail="Ese aviso no es de los que se apagan ni se suspenden")
 
@@ -20849,7 +21716,12 @@ def _sigue_en_pie(fila: dict, cache: dict) -> bool:
     es una llamada a Graph, y dos citas seguidas son dos «Sal ya» en el mismo tick.
     """
     try:
-        if str(fila.get("regla") or "") != "salir":
+        regla = str(fila.get("regla") or "")
+        if regla == "hueco_entreno":
+            # «Llevas N días sin entrenar» leído en el gimnasio es mentira o lo va a ser
+            # en una hora. No se pospone: al salir tampoco sería verdad.
+            return _lugar_de_pasada(cache) != LUGAR_GIMNASIO
+        if regla != "salir":
             return True
         huella = str(fila.get("huella") or "")
         if not _HUELLA_SALIR_RE.match(huella):
@@ -20859,10 +21731,107 @@ def _sigue_en_pie(fila: dict, cache: dict) -> bool:
         eventos = cache["eventos"]
         if eventos is None:
             return True
-        return any(_huella_salir(ev) == huella for ev in eventos)
+        cita = next((ev for ev in eventos if _huella_salir(ev) == huella), None)
+        if cita is None:
+            return False
+        return not _ya_estas_alli(cita, cache)
     except Exception as e:
         logger.warning("Avisos: no se pudo comprobar si el 'salir' sigue en pie (%s)", e)
         return True
+
+
+# Por debajo de esto, el «Sal ya» sobra: ya estás donde es la cita (o a un paso).
+SALIR_YA_ESTAS_MIN = int(os.getenv("SALIR_YA_ESTAS_MIN", "5"))
+
+
+def _en_clase_de_pasada(cache: dict) -> bool:
+    if "clase" not in cache:
+        _lugar_de_pasada(cache)
+        cache["clase"] = _en_clase(cache.get("lugar"))
+    return bool(cache["clase"])
+
+
+def _lugar_de_pasada(cache: dict) -> Optional[str]:
+    """El lugar firme, leído una vez por pasada del despachador. None si no se sabe."""
+    if "lugar" not in cache:
+        cache["lugar"] = _lugar_actual_seguro()
+    return (cache["lugar"] or {}).get("lugar")
+
+
+def _ya_estas_alli(cita: dict, cache: dict) -> bool:
+    """Si el «Sal ya» de esta cita sobra porque ya estás en el sitio.
+
+    El «Sal ya» se calcula hasta tres horas antes, normalmente desde casa; si para cuando
+    toca ya estás en la uni y la clase es en la uni, te mandaba salir hacia el aula en la
+    que estabas sentado. Solo se recalcula estando en un lugar con nombre que no es casa
+    (gimnasio, uni): desde casa el cálculo de la regla ya era el bueno, y «fuera» sin más
+    no dice si estás cerca. Es una llamada de pago a Maps, con la caché de siempre.
+    Ante la duda (sin Maps, sin dirección) no sobra: callar un «Sal ya» bueno cuesta la
+    cita.
+    """
+    if _lugar_de_pasada(cache) not in (LUGAR_GIMNASIO, LUGAR_UNI):
+        return False
+    destino = (cita.get("location") or "").strip()
+    salida  = _hora_salida(destino, str(cita.get("start") or ""))
+    if not salida:
+        return False
+    # `get_departure_time` resta además 10 minutos de margen a la duración del trayecto.
+    trayecto = (cita["ini"] - salida).total_seconds() / 60 - 10
+    if trayecto < SALIR_YA_ESTAS_MIN:
+        logger.info("Aviso de 'salir' para «%s»: ya estás allí (%d min de trayecto)",
+                    cita.get("title") or "?", max(0, round(trayecto)))
+        return True
+    return False
+
+
+# Las reglas que se dicen precisamente EN ese lugar, y por tanto no esperan a que salgas.
+_REGLAS_DEL_LUGAR = {
+    LUGAR_GIMNASIO: {REGLA_COBRO_GIMNASIO},
+    LUGAR_UNI:      set(),
+}
+
+
+def _espera_por_lugar(regla: str, prioridad: int, cache: dict) -> str:
+    """Por qué este aviso tiene que esperar a que cambies de sitio, o "" si puede salir.
+
+    En el gimnasio y en clase, lo que no corre prisa espera. No se pierde ni se pasa a
+    mañana: se queda pendiente y sale en el primer tick después de irte (o de que acabe
+    la clase), con su `caduca` de siempre si lo tiene.
+
+    Las fronteras son las del presupuesto, por lo mismo: lo que pediste tú (sin regla, o
+    una regla tuya) sale siempre, y lo urgente también — un «Sal ya» que espera a que
+    termines de entrenar ya no sirve. Y lo que se dice precisamente allí
+    (`_REGLAS_DEL_LUGAR`) tampoco espera, claro.
+    """
+    if not regla or _es_tuyo(regla) or prioridad <= PRIO_SIN_TOPE:
+        return ""
+    lugar = _lugar_de_pasada(cache)
+    if not lugar or regla in _REGLAS_DEL_LUGAR.get(lugar, ()):
+        return ""
+    if lugar == LUGAR_GIMNASIO:
+        return "estás en el gimnasio"
+    if lugar == LUGAR_UNI:
+        if _en_clase_de_pasada(cache):
+            return f"estás en clase hasta las {cache['clase']['fin'].strftime('%H:%M')}"
+    return ""
+
+
+def _retener_aviso(rid: str, regla: str, motivo: str, ahora: str) -> None:
+    """Deja el aviso pendiente con `cuando` = ahora, para el siguiente tick.
+
+    Se reescribe la hora para que, al salir, el retraso medido sea el de verdad (unos
+    minutos) y no las dos horas de gimnasio, que `_registrar_retraso` daría por avería del
+    reloj de los avisos — la misma razón por la que `_posponer_aviso` reescribe `cuando`.
+    """
+    try:
+        r = http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}&enviado=is.false",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"cuando": ahora})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        logger.info("Aviso de '%s' esperando: %s", regla or "?", motivo)
+    except Exception as e:
+        logger.warning("Avisos: no se pudo dejar esperando %s (%s)", rid, e)
 
 
 def _voz_al_despachar(fila: dict, regla: str) -> bool:
@@ -20912,7 +21881,7 @@ def _despachar_recordatorios() -> dict:
         return {"recordatorios": 0}
 
     presupuesto = max(0, AVISOS_MAX_DIA - _contar_enviados_hoy()) if vencidos else 0
-    enviados = pospuestos = caducados = retirados = llamadas = 0
+    enviados = pospuestos = caducados = retirados = llamadas = retenidos = 0
     # Lo que `_sigue_en_pie` lee una vez por pasada (los eventos del calendario).
     vigencia: dict = {}
     for fila in vencidos:
@@ -20951,12 +21920,21 @@ def _despachar_recordatorios() -> dict:
                 http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
                            headers={**supabase_headers(), "Prefer": "return=minimal"},
                            json={"enviado": True, "enviado_at": None})
-                logger.info("Aviso de 'salir' retirado sin mandar: la cita se ha movido "
-                            "o cancelado")
+                logger.info("Aviso de '%s' retirado sin mandar: ya no es verdad (cita "
+                            "movida o cancelada, o ya estás donde decía)", regla or "?")
                 retirados += 1
             except Exception as e:
                 logger.warning("Avisos: no se pudo cerrar el 'salir' retirado %s (%s)",
                                rid, e)
+            continue
+
+        # En el gimnasio o en clase, lo que no corre prisa espera a que salgas. Va antes
+        # del presupuesto: un aviso que espera no ha gastado nada, y mandarlo a mañana
+        # por el tope cuando solo tenía que esperar una hora sería perderlo para nada.
+        espera = _espera_por_lugar(regla, prioridad, vigencia)
+        if espera:
+            _retener_aviso(rid, regla, espera, ahora)
+            retenidos += 1
             continue
 
         # El presupuesto solo gobierna los avisos de REGLA que ha decidido el SISTEMA:
@@ -20990,7 +21968,11 @@ def _despachar_recordatorios() -> dict:
                                # urgente o importante no entra aquí — es la misma
                                # frontera que decide quién puede llamarte por teléfono.
                                critico=(regla in (REGLA_DESPLIEGUE,
-                                                  REGLA_SESION_BLOQUEADA)))
+                                                  REGLA_SESION_BLOQUEADA)
+                                        # En clase sale, pero sin atravesar el
+                                        # silencio: el trabajo parado puede esperar
+                                        # al final de la clase; el aula, no.
+                                        and not _en_clase_de_pasada(vigencia)))
             enviados += 1
             if regla and not _es_tuyo(regla):
                 presupuesto -= 1
@@ -21016,6 +21998,8 @@ def _despachar_recordatorios() -> dict:
         salida["avisos_caducados"] = caducados
     if retirados:
         salida["avisos_retirados"] = retirados
+    if retenidos:
+        salida["avisos_esperando"] = retenidos
     if llamadas:
         salida["avisos_llamados"] = llamadas
     return salida
@@ -23544,16 +24528,36 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["texto", "fecha", "hora"],
     },
+    "recordarme_en_un_lugar": {
+        "confirmar":   False,
+        "fn":          _j_recordarme_lugar,
+        "descripcion": "Te apunta un aviso para cuando LLEGUES a un sitio o SALGAS de él, "
+                       "en vez de para una hora: 'recuérdame al llegar a casa…', 'cuando "
+                       "salga del gimnasio…'. Sitios: casa, gimnasio, uni. Salta unos "
+                       "minutos después de llegar o de irte (el GPS necesita ese rato para "
+                       "saber que no es una pasada), y solo una vez. Si te dan una hora, "
+                       "usa recordarme.",
+        "parametros":  {
+            "texto":   {"type": "string", "description": "Qué recordarle, en una frase."},
+            "lugar":   {"type": "string", "enum": ["casa", "gimnasio", "uni"],
+                        "description": "casa, gimnasio o uni."},
+            "momento": {"type": "string", "enum": ["llegar", "salir"],
+                        "description": "llegar (por defecto) o salir."},
+        },
+        "obligatorios": ["texto", "lugar"],
+    },
     "mis_recordatorios": {
         "confirmar":   False,
         "fn":          _j_mis_recordatorios,
-        "descripcion": "Los recordatorios pendientes, con su id.",
+        "descripcion": "Los recordatorios pendientes, con su id: los de una hora y los de "
+                       "un lugar (al llegar a / al salir de).",
         "parametros":  {},
     },
     "cancelar_recordatorio": {
         "confirmar":   False,
         "fn":          _j_cancelar_recordatorio,
-        "descripcion": "Borra un recordatorio pendiente. El id sale de mis_recordatorios.",
+        "descripcion": "Borra un recordatorio pendiente, de hora o de lugar. El id sale de "
+                       "mis_recordatorios.",
         "parametros":  {"recordatorio_id": {"type": "string", "description": "UUID del recordatorio."}},
         "obligatorios": ["recordatorio_id"],
     },
@@ -23906,7 +24910,8 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
 # papelera), así que este servidor la rechazaba siempre. Anunciarla en `tools/list` solo
 # servía para que el modelo la intentara y fallara delante de Mikel.
 _MCP_SERVIDOR_ACCIONES = {
-    "recordarme", "cancelar_recordatorio", "poner_alarma", "cancelar_alarma",
+    "recordarme", "recordarme_en_un_lugar", "cancelar_recordatorio", "poner_alarma",
+    "cancelar_alarma",
     "dejame_dormir", "estoy_despierto", "guardar_idea",
     "anadir_sesion_entrenamiento", "encender_pc", "apagar_pc", "suspender_pc",
     "casa_ordenar",
@@ -24295,6 +25300,10 @@ def _jarvis_sistema(voz: bool = False, aviso: str = "", tipo: str = "") -> str:
         # El dato que ha motivado la llamada, ya mirado y metido aquí. Ver
         # `_jarvis_contexto_llamada`, que es quien decide CUÁL es ese dato.
         partes.append(_jarvis_contexto_llamada(aviso, tipo))
+
+    # Dónde está ahora (si se sabe). Cambia cómo contestar, no solo qué: ver
+    # `_jarvis_contexto_lugar`.
+    partes.append(_jarvis_contexto_lugar())
 
     if JARVIS_REPO:
         partes.append(
@@ -25214,6 +26223,7 @@ _JARVIS_RELLENOS = {
     "leer_pagina":        "Abro la página.",
     "recordar":           "Lo guardo en la memoria.",
     "recordarme":         "Te lo apunto.",
+    "recordarme_en_un_lugar": "Te lo apunto.",
     "mis_recordatorios":  "Miro qué tienes apuntado.",
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",

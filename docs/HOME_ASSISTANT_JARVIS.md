@@ -435,6 +435,10 @@ encendido (el backend se las manda a HA en directo si tiene `HA_TOKEN`, y si no,
 HA no acepta la conexión, las encola y las recoge el sondeo de `ordenes-pending` que ya
 tienes puesto, así que no hace falta nada más).
 
+**Y también es el «Apuntar sesión» del aviso de salir del gimnasio y el «Encender» del de
+la vuelta a casa** (ver «Lugares» en `docs/JARVIS.md`). Mismo motivo: ni una línea nueva
+de YAML; el backend decide por la regla del aviso.
+
 **`LA_APAGAR_` también es el «Suspender» del aviso «Te has ido con el PC encendido»**, y
 no hay que tocar el YAML: la misma automatización y el mismo `rest_command` llaman a
 `/avisos/{id}/apagar`, y es el backend quien mira la regla del aviso y, si es la del PC,

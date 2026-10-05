@@ -100,6 +100,13 @@ la app companion → automatización `la_presencia` → `rest_command` que hace
 - cambio de estado del `device_tracker` (te mueves de zona), y
 - un `time_pattern` cada 15 min (aviso periódico).
 
+**Las zonas del gimnasio y de la uni** se crean en HA como cualquier zona, con un nombre
+de `ZONAS_GIMNASIO` / `ZONAS_UNI`, y no piden nada más: la automatización ya manda el
+estado del `device_tracker`, que es el nombre de la zona. El backend las traduce a lugares
+y decide qué hacer al llegar y al salir (ver «Lugares» en `docs/JARVIS.md`). Ojo con el
+radio: el campus entero, no la puerta de la facultad; y el del gimnasio, lo justo para no
+coger la calle de al lado.
+
 El periódico no es redundancia: sin él, un dato se quedaría vigente durante horas sin
 que nadie confirme que HA sigue vivo, y `PRESENCE_TTL_MINUTES` no podría distinguir
 "sigues en casa" de "HA se cayó". Es el que hace que el silencio signifique algo. El

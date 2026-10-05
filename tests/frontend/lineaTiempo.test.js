@@ -568,6 +568,15 @@ describe("normalizarTramosPresencia", () => {
     expect(items[0].izquierdaPct).toBe(0);
   });
 
+  test("el gimnasio y la uni se pintan como sitios, no como el hueco de estar fuera", () => {
+    const items = normalizarTramosPresencia([
+      { desde: "2026-06-15T09:00:00", hasta: "2026-06-15T13:00:00", en_casa: false, lugar: "uni" },
+      { desde: "2026-06-15T18:00:00", hasta: "2026-06-15T19:30:00", en_casa: false, lugar: "gimnasio" },
+    ], DIA2);
+    expect(items.map(i => i.etiqueta)).toEqual(["Uni", "Gimnasio"]);
+    expect(items.map(i => i.tono)).toEqual(["normal", "normal"]);
+  });
+
   test("lo que no trae horas no se cuela como tramo inventado", () => {
     expect(normalizarTramosPresencia([{ en_casa: true }], DIA2)).toEqual([]);
     expect(normalizarTramosPresencia(null, DIA2)).toEqual([]);

@@ -208,6 +208,11 @@ def _limpiar_estado():
     # anterior no se pediría la lista de calendarios que el test ha simulado.
     main._clases_cal_cache = None
     main._presencia_cache = None
+    # El lugar en memoria (crudo, firme, última llegada) y las clases recordadas: sin
+    # vaciarlos, un test que te deja en el gimnasio dejaría ahí al siguiente.
+    main._lugar_estado.clear()
+    main._clases_hoy.update(ts=0.0, eventos=None)
+    main._tramos_sin_lugar = False
     # La caché de /maps/departure: sin vaciarla, el primer test que calcule una ruta le
     # serviría su respuesta al siguiente que pida la misma, sin pasar por su mock.
     main._salida_cache.clear()

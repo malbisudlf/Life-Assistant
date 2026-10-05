@@ -99,6 +99,8 @@ TABLAS = (
     ("libros",                "created_at,id",           False,       None),
     ("jarvis_memoria",        "clave",                   False,       None),
     ("jarvis_recordatorios",  "cuando,id",               False,       None),
+    # «Recuérdame al llegar a casa…»: escritos a mano como los de arriba, solo que sin hora.
+    ("recordatorios_lugar",   "creado,id",               False,       None),
     # Sin la columna `token`: es una credencial de GitHub que además caduca sola, así
     # que copiarla solo sirve para tener un secreto de más dentro del volcado.
     ("jarvis_mcp_servidores", "nombre",                  False,

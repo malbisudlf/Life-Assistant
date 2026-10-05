@@ -23,6 +23,8 @@
 //    ESTADO de su fuente: si no se pudo consultar, dice que no lo sabe en vez de
 //    quedarse en blanco como si la jornada hubiese estado vacía.
 
+import { etiquetaTramo } from "./lugares";
+
 export const MINUTOS_DIA = 1440;
 
 // Un evento de 5 min sobre un eje de 24 h ocupa un 0,35 %: invisible. El mínimo es
@@ -421,11 +423,12 @@ export function normalizarAvisos(avisos, diaISO) {
   return salida;
 }
 
-// Presencia, los TRAMOS: `/presencia/tramos` da [{desde, hasta, en_casa}] de un día, ya
-// unidos por el backend. Solo hay horas y un booleano — ni zonas ni coordenadas: lo que
-// `docs/IDEAS.md` descartó era guardar DÓNDE estabas, y esto guarda solo cuándo estabas
-// en casa. Los de "fuera" van atenuados: el carril es "presencia", y estar fuera es el
-// hueco, no un acontecimiento.
+// Presencia, los TRAMOS: `/presencia/tramos` da [{desde, hasta, en_casa, lugar?}] de un
+// día, ya unidos por el backend. Horas, un booleano y, en los tramos de fuera, la
+// CATEGORÍA si fue el gimnasio o la uni — ni zonas ni coordenadas: lo que `docs/IDEAS.md`
+// descartó era guardar DÓNDE estabas en general. Los de "fuera" sin más van atenuados: el
+// carril es "presencia", y estar fuera es el hueco, no un acontecimiento. El gimnasio y la
+// uni no lo son: son sitios a los que has ido, y se pintan como tales.
 export function normalizarTramosPresencia(tramos, diaISO) {
   const salida = [];
   (tramos || []).forEach((t, i) => {
@@ -436,8 +439,8 @@ export function normalizarTramosPresencia(tramos, diaISO) {
     const item = conTramo({
       id: `presencia-${i}`,
       carril: "presencia",
-      etiqueta: t.en_casa ? "En casa" : "Fuera",
-      tono: t.en_casa ? "normal" : "atenuado",
+      etiqueta: etiquetaTramo(t),
+      tono: t.en_casa || t.lugar ? "normal" : "atenuado",
     }, inicio, fin, diaISO);
     if (item) salida.push(item);
   });

@@ -489,6 +489,14 @@ en ⚙ → "Modo de vista" → [Simple] y se guarda en `la_simple_mode` (`"1"`/`
     el bloque de pestañas.
   - **Horizontal**: dos columnas — izquierda Entrenamiento + Entregas + salud, derecha
     Hoy (timeline) + Próximos eventos.
+- **En la uni y en el gimnasio cambia el orden** (`ordenarPorLugar`, `src/lib/lugares.js`):
+  lo de ese sitio sube (en la uni, «Lo siguiente», Hoy y Entregas; en el gimnasio,
+  Entrenamiento) y lo de casa baja, con Jarvis siempre el primero. El lugar sale de
+  `GET /presencia` (solo en modo simple, cada 5 min con la pestaña visible) y caducado no
+  cuenta. Arriba sale «📍 En la uni» con un botón para volver al orden de siempre, que se
+  recuerda (`la_orden_por_lugar`): un orden que cambia solo sin decirlo parece un fallo.
+  **Solo el modo simple**: el completo es una distribución hecha a mano con arrastrar, y
+  moverla sola pelearía con quien la editó.
 - **Bloque de salud con pestañas**: en vez de un scroll largo, una barra de pestañas
   (Bienestar · Sueño · Actividad · HRV · FC · Entrenos) que hace
   `renderWidget(simpleHealthTab)`. El estado arranca en `health_wellness`.
@@ -664,7 +672,8 @@ elegido en la gráfica de finanzas), `la_anio_modo` (el modo del mapa «Tu año�
 `bienestar`/`sueno`/`pasos`), `la_salida_modo` (coche o andando para la hora de salida:
 `{porEvento: {clave: modo}, ultimo}`, podado a 50 eventos con `recordarModo`; sin ella, o
 si localStorage lanza, se calcula en coche), `la_casa_favoritos` (las fichas del widget
-«Casa»). Si añades una, mantén el prefijo y el `try/catch` al parsear.
+«Casa»), `la_orden_por_lugar` (`"0"` si quitaste el orden del modo simple en la uni o el
+gimnasio). Si añades una, mantén el prefijo y el `try/catch` al parsear.
 
 ### Reglas de React/ESLint que aplican aquí (plugin react-hooks v7)
 
@@ -837,7 +846,10 @@ distinto que conviene no volver a crear:
   este widget existe para no crear. Ahora hay tramos con hora
   (`presencia_tramos`, `GET /presencia/tramos`) y se dibujan: en casa en color, fuera
   atenuado, porque estar fuera es el hueco y no un acontecimiento. **Lo que se guarda es
-  el CUÁNDO, nunca el DÓNDE**: un booleano y dos horas, sin zona ni coordenadas. Eso
+  el CUÁNDO, nunca el DÓNDE**: un booleano y dos horas, sin zona ni coordenadas. (Desde
+  octubre de 2026, con una excepción acotada: los tramos del gimnasio y de la uni llevan
+  esa categoría y se pintan como sitios, «Gimnasio» / «Uni», no atenuados; ver «Lugares»
+  en `docs/JARVIS.md`.) Eso
   acota la reversión de lo que `docs/IDEAS.md` había descartado. El total diario se
   mantiene como resumen debajo: responde otra pregunta (cuánto) y cubre los días
   anteriores a que los tramos existieran.
