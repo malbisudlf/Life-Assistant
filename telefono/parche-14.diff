@@ -1,0 +1,363 @@
+diff --git a/voice-app/lib/multi-registrar.js b/voice-app/lib/multi-registrar.js
+index 7e2c03e..0833994 100644
+--- a/voice-app/lib/multi-registrar.js
++++ b/voice-app/lib/multi-registrar.js
+@@ -1,13 +1,36 @@
+ /**
+  * Multi-Extension SIP Registrar
+  * Registers multiple extensions with 3CX independently
++ *
++ * Parche 14: cada REGISTER lleva un temporizador. Si en REGISTER_TIMEOUT_SECONDS (30
++ * por defecto) no ha llegado una respuesta final, se manda otro. Sin él, un REGISTER
++ * que se perdía sin respuesta (al arrancar antes que drachtio o que el SBC) no dejaba
++ * ningún temporizador vivo: ni reintento ni refresco, y la extensión se quedaba sin
++ * registrar hasta reiniciar el contenedor. Cada intento lleva su número, y la
++ * respuesta de un intento viejo que llegue tarde se ignora: si no, dos intentos
++ * contestados programarían dos refrescos y se irían duplicando.
+  */
+ 
++function segundosDeEspera() {
++  const valor = parseFloat(process.env.REGISTER_TIMEOUT_SECONDS);
++  return valor > 0 ? valor : 30;
++}
++
++// No es lo que mantiene vivo el proceso (para eso está el servidor HTTP), y así un
++// test puede terminar sin parar el registrador a mano.
++function temporizador(fn, segundos) {
++  const t = setTimeout(fn, segundos * 1000);
++  if (t.unref) t.unref();
++  return t;
++}
++
+ class MultiRegistrar {
+   constructor(srf, baseConfig) {
+     this.srf = srf;
+     this.baseConfig = baseConfig;
+     this.registrations = new Map();
++    this.estado = new Map();   // extensión → { intento, vigilante, siguiente }
++    this.parado = false;
+   }
+ 
+   /**
+@@ -17,7 +40,7 @@ class MultiRegistrar {
+   registerAll(devices) {
+     const extensions = Object.keys(devices);
+     console.log('[MULTI-REGISTRAR] Starting registration for ' + extensions.length + ' devices');
+-    
++
+     for (const [extension, device] of Object.entries(devices)) {
+       this.registerDevice(device);
+     }
+@@ -43,11 +66,42 @@ class MultiRegistrar {
+     this.sendRegister(device, config);
+   }
+ 
++  _estado(extension) {
++    let e = this.estado.get(extension);
++    if (!e) {
++      e = { intento: 0, vigilante: null, siguiente: null };
++      this.estado.set(extension, e);
++    }
++    return e;
++  }
++
++  _limpiar(e) {
++    if (e.vigilante) clearTimeout(e.vigilante);
++    if (e.siguiente) clearTimeout(e.siguiente);
++    e.vigilante = null;
++    e.siguiente = null;
++  }
++
+   /**
+    * Send REGISTER request for a device
+    */
+   sendRegister(device, config) {
+     const self = this;
++    if (this.parado) return;
++
++    const e = this._estado(config.extension);
++    this._limpiar(e);
++    const intento = ++e.intento;
++    const vigente = function() { return !self.parado && e.intento === intento; };
++
++    const espera = segundosDeEspera();
++    e.vigilante = temporizador(function() {
++      if (!vigente()) return;
++      e.vigilante = null;
++      console.error('[MULTI-REGISTRAR] ' + device.name + ' sin respuesta al REGISTER en ' + espera + 's, reintento');
++      self.sendRegister(device, config);
++    }, espera);
++
+     const uri = 'sip:' + config.registrar + ':' + config.registrar_port + ';transport=udp';
+     // Include local_port in Contact so INVITEs come to the right port (5070 when SBC is on 5060)
+     const localPort = config.local_port || 5060;
+@@ -56,75 +110,91 @@ class MultiRegistrar {
+     console.log('[MULTI-REGISTRAR] REGISTER ' + device.name + ' to ' + uri);
+     console.log('[MULTI-REGISTRAR]   Contact: ' + contact);
+ 
+-    this.srf.request(uri, {
+-      method: 'REGISTER',
+-      headers: {
+-        'From': '<sip:' + config.extension + '@' + config.domain + '>',
+-        'To': '<sip:' + config.extension + '@' + config.domain + '>',
+-        'Contact': '<' + contact + '>;expires=' + config.expiry,
+-        'Expires': config.expiry,
+-        'User-Agent': 'NetworkChuck-VoiceServer/1.0'
+-      },
+-      auth: {
+-        username: config.auth_id,
+-        password: config.password
+-      }
+-    }, function(err, req) {
+-      if (err) {
+-        console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
+-        self.scheduleRetry(device, config, 60);
+-        return;
+-      }
+-
+-      req.on('response', function(res) {
+-        if (res.status === 200) {
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' SUCCESS - Registered as ext ' + config.extension);
+-          
+-          var expiry = config.expiry;
+-          var contactHeader = res.get('Contact');
+-          if (contactHeader) {
+-            var match = contactHeader.match(/expires=(\d+)/i);
+-            if (match) expiry = parseInt(match[1], 10);
+-          }
+-          
+-          self.registrations.set(config.extension, {
+-            device: device,
+-            config: config,
+-            expiry: expiry,
+-            registeredAt: Date.now()
+-          });
+-          
+-          var refreshTime = Math.floor(expiry * 0.9);
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' refresh in ' + refreshTime + 's');
+-          self.scheduleRefresh(device, config, refreshTime);
+-          
+-        } else if (res.status === 401 || res.status === 407) {
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' auth challenge - handled by drachtio');
+-        } else {
+-          console.error('[MULTI-REGISTRAR] ' + device.name + ' FAILED: ' + res.status + ' ' + res.reason);
++    try {
++      this.srf.request(uri, {
++        method: 'REGISTER',
++        headers: {
++          'From': '<sip:' + config.extension + '@' + config.domain + '>',
++          'To': '<sip:' + config.extension + '@' + config.domain + '>',
++          'Contact': '<' + contact + '>;expires=' + config.expiry,
++          'Expires': config.expiry,
++          'User-Agent': 'NetworkChuck-VoiceServer/1.0'
++        },
++        auth: {
++          username: config.auth_id,
++          password: config.password
++        }
++      }, function(err, req) {
++        if (!vigente()) return;
++        if (err) {
++          console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
+           self.scheduleRetry(device, config, 60);
++          return;
+         }
++
++        req.on('response', function(res) {
++          if (!vigente()) return;
++          if (res.status === 200) {
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' SUCCESS - Registered as ext ' + config.extension);
++
++            var expiry = config.expiry;
++            var contactHeader = res.get('Contact');
++            if (contactHeader) {
++              var match = contactHeader.match(/expires=(\d+)/i);
++              if (match) expiry = parseInt(match[1], 10);
++            }
++
++            self.registrations.set(config.extension, {
++              device: device,
++              config: config,
++              expiry: expiry,
++              registeredAt: Date.now()
++            });
++
++            var refreshTime = Math.floor(expiry * 0.9);
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' refresh in ' + refreshTime + 's');
++            self.scheduleRefresh(device, config, refreshTime);
++
++          } else if (res.status === 401 || res.status === 407) {
++            // La respuesta final llega después; el vigilante sigue corriendo por si no.
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' auth challenge - handled by drachtio');
++          } else {
++            console.error('[MULTI-REGISTRAR] ' + device.name + ' FAILED: ' + res.status + ' ' + res.reason);
++            self.scheduleRetry(device, config, 60);
++          }
++        });
+       });
+-    });
++    } catch (err) {
++      console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
++      this.scheduleRetry(device, config, 60);
++    }
+   }
+ 
+   scheduleRefresh(device, config, seconds) {
+     const self = this;
+-    setTimeout(function() {
++    const e = this._estado(config.extension);
++    this._limpiar(e);
++    e.siguiente = temporizador(function() {
++      e.siguiente = null;
+       console.log('[MULTI-REGISTRAR] Refreshing ' + device.name);
+       self.sendRegister(device, config);
+-    }, seconds * 1000);
++    }, seconds);
+   }
+ 
+   scheduleRetry(device, config, seconds) {
+     const self = this;
++    const e = this._estado(config.extension);
++    this._limpiar(e);
+     console.log('[MULTI-REGISTRAR] ' + device.name + ' retry in ' + seconds + 's');
+-    setTimeout(function() {
++    e.siguiente = temporizador(function() {
++      e.siguiente = null;
+       self.sendRegister(device, config);
+-    }, seconds * 1000);
++    }, seconds);
+   }
+ 
+   stop() {
++    this.parado = true;
++    for (const e of this.estado.values()) this._limpiar(e);
+     this.registrations.clear();
+     console.log('[MULTI-REGISTRAR] Stopped all registrations');
+   }
+diff --git a/voice-app/test/parche14.test.js b/voice-app/test/parche14.test.js
+new file mode 100644
+index 0000000..a1fad05
+--- /dev/null
++++ b/voice-app/test/parche14.test.js
+@@ -0,0 +1,121 @@
++/**
++ * Parche 14: un REGISTER que se pierde sin respuesta se vuelve a mandar.
++ *
++ * Se prueba sin centralita: drachtio es un doble que decide qué pasa con cada
++ * REGISTER (perderse, contestar 200, contestar tarde, fallar). Lo que corre es el
++ * lib/multi-registrar.js de verdad. Se lanza con `node --test test/parche14.test.js`.
++ * Ver telefono/PARCHES.md, «El parche 14».
++ */
++'use strict';
++
++process.env.REGISTER_TIMEOUT_SECONDS = '0.05';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const { EventEmitter } = require('node:events');
++const MultiRegistrar = require('../lib/multi-registrar');
++
++const espera = function(ms) { return new Promise(function(r) { setTimeout(r, ms); }); };
++
++// Cada REGISTER consume el siguiente guion de la lista; sin guion, se pierde.
++function drachtioFalso(guiones) {
++  const srf = { enviados: [], pendientes: [] };
++  srf.request = function(uri, opts, cb) {
++    const guion = guiones.shift() || 'perder';
++    srf.enviados.push(guion);
++    if (guion === 'lanzar') throw new Error('drachtio no conectado');
++    const req = new EventEmitter();
++    cb(null, req);
++    const contestar = function(status) {
++      req.emit('response', { status: status, reason: 'x', get: function() { return null; } });
++    };
++    if (guion === 'ok') setImmediate(function() { contestar(200); });
++    if (guion === 'tarde') srf.pendientes.push(function() { contestar(200); });
++    if (guion === 'reto') setImmediate(function() { contestar(407); });
++  };
++  return srf;
++}
++
++let lineas = [];
++const silencio = function() {
++  const log = console.log, error = console.error;
++  lineas = [];
++  console.log = console.error = function(t) { lineas.push(String(t)); };
++  return function() { console.log = log; console.error = error; };
++};
++
++const base = { domain: 'd', registrar: '127.0.0.1', registrar_port: 5060, expiry: 3600,
++               local_address: '10.0.0.1', local_port: 5070 };
++const dispositivos = { '100': { name: 'Jarvis', extension: '100', authId: 'a', password: 'p' } };
++
++test('el caso del 2026-10-06: el primer REGISTER se pierde y el segundo registra', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso(['perder', 'ok']);
++  const r = new MultiRegistrar(srf, base);
++  r.registerAll(dispositivos);
++  await espera(150);
++  volver();
++  assert.deepStrictEqual(srf.enviados, ['perder', 'ok']);
++  assert.ok(r.registrations.has('100'));
++  r.stop();
++});
++
++test('registrado, ya no se reintenta: solo queda el refresco', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso(['ok']);
++  const r = new MultiRegistrar(srf, base);
++  r.registerAll(dispositivos);
++  await espera(200);
++  volver();
++  assert.deepStrictEqual(srf.enviados, ['ok']);
++  r.stop();
++});
++
++test('un reto 407 sin respuesta final también acaba en reintento', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso(['reto', 'ok']);
++  const r = new MultiRegistrar(srf, base);
++  r.registerAll(dispositivos);
++  await espera(150);
++  volver();
++  assert.deepStrictEqual(srf.enviados, ['reto', 'ok']);
++  assert.ok(r.registrations.has('100'));
++  r.stop();
++});
++
++test('la respuesta tardía de un intento viejo se ignora', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso(['tarde', 'ok']);
++  const r = new MultiRegistrar(srf, base);
++  r.registerAll(dispositivos);
++  await espera(90);                                // el segundo intento ya registró
++  srf.pendientes.forEach(function(f) { f(); });    // y ahora contesta el primero
++  await espera(20);
++  volver();
++  // Si no se ignorase, programaría un segundo refresco y se irían duplicando.
++  const exitos = lineas.filter(function(l) { return l.indexOf('SUCCESS') !== -1; });
++  assert.strictEqual(exitos.length, 1);
++  r.stop();
++});
++
++test('si drachtio lanza al pedir, se reintenta en vez de morir', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso(['lanzar']);
++  const r = new MultiRegistrar(srf, base);
++  assert.doesNotThrow(function() { r.registerAll(dispositivos); });
++  volver();
++  const e = r.estado.get('100');
++  assert.ok(e.siguiente, 'no quedó un reintento programado');
++  r.stop();
++});
++
++test('tras stop() no sale ningún REGISTER más', async function() {
++  const volver = silencio();
++  const srf = drachtioFalso([]);
++  const r = new MultiRegistrar(srf, base);
++  r.registerAll(dispositivos);
++  r.stop();
++  await espera(150);
++  volver();
++  assert.strictEqual(srf.enviados.length, 1);
++});

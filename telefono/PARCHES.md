@@ -4,7 +4,8 @@
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
 Estos son los doce cambios que hubo que hacerle (el 12, aplicado el 2026-09-27), con el
 síntoma que resuelve cada uno, más un decimotercero que no toca su código sino el
-`docker-compose.yml` que genera (ver «El parche 13» abajo).
+`docker-compose.yml` que genera (ver «El parche 13» abajo) y un decimocuarto, aplicado el
+2026-10-06, que reintenta el registro de la extensión si se pierde (ver «El parche 14»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -353,7 +354,7 @@ ss -lun | grep :5070    # tiene que salir la IP de la LAN, no solo 127.0.0.1 y 1
 Para salir del paso basta `docker compose -f ~/.claude-phone/docker-compose.yml restart
 drachtio voice-app`.
 
-## Tras un reinicio, la extensión de Jarvis puede quedarse sin registrar para siempre
+## El parche 14: el registro se reintenta si se pierde
 
 Sale del 2026-10-06. La extensión de Jarvis salía **«Not registered»** en el 3CX y
 llamarle iba directo al buzón, mientras que **las llamadas que hace Jarvis seguían
@@ -365,23 +366,43 @@ dos días antes.
 - Al arrancar, la voice-app mandó su único REGISTER **antes de que drachtio tuviera un
   solo socket SIP** (el primer `DRACHTIO Connected at` del log sale vacío: es el parche 13
   esperando a la red) **y antes de que arrancara el SBC**, que lo hizo 2 s después.
-- `voice-app/lib/multi-registrar.js` solo reintenta si la petición da error o si llega
-  una respuesta de fallo. Un REGISTER que se pierde sin respuesta **no deja ningún
-  temporizador**: ni reintento ni refresco, y el log no vuelve a decir nada.
+- `voice-app/lib/multi-registrar.js` solo reintentaba si la petición daba error o si
+  llegaba una respuesta de fallo. Un REGISTER que se perdía sin respuesta **no dejaba
+  ningún temporizador**: ni reintento ni refresco, y el log no volvía a decir nada.
 
-Lo que lo delata, en el log de la voice-app desde su último arranque: un
-`[MULTI-REGISTRAR] REGISTER Jarvis` sin `SUCCESS` detrás, y ningún `Refreshing` desde
-entonces (con el registro bien hay uno cada 27 minutos):
+**El arreglo** (`telefono/parche-14.diff`, sobre `~/.claude-phone-cli/`): cada REGISTER
+lleva un vigilante. Si en `REGISTER_TIMEOUT_SECONDS` (30 por defecto) no ha llegado una
+respuesta final —tampoco tras un reto 401/407—, se manda otro, y en el log sale
+`sin respuesta al REGISTER en 30s, reintento`. Cada intento lleva su número y la
+respuesta de uno viejo que llegue tarde se ignora: si no, dos intentos contestados
+programarían dos refrescos que se irían duplicando. Por la misma razón cada extensión
+tiene un solo temporizador vivo (el vigilante, el reintento o el refresco), y `stop()`
+los para todos; antes no paraba ninguno. Si `srf.request` lanza en vez de llamar al
+callback, también se reintenta.
+
+`voice-app/test/parche14.test.js` (node:test, drachtio de mentira) recorre seis casos;
+contra el código de antes falla el del 2026-10-06, el del reto sin respuesta final y el
+de la excepción. Se aplicó igual que el 12: imagen anterior etiquetada como
+`claude-phone-voice-app:antes-p14`, construir, pasar los tests dentro sin red (los 15 del
+12 siguen en verde) y cambiar el contenedor sin llamada en curso:
+
+```bash
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche14.test.js
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Si vuelve a salir «Not registered», mira el log de la voice-app desde su último arranque:
+con el registro bien hay un `Refreshing` cada 27 minutos, y con el parche un REGISTER
+perdido deja la línea del reintento.
 
 ```bash
 docker logs voice-app 2>&1 | grep MULTI-REGISTRAR | tail -5
 ```
 
-Arreglo: `docker compose -f ~/.claude-phone/docker-compose.yml restart voice-app`, sin
-llamada en curso (`curl -s localhost:3010/api/calls`). Con drachtio y el SBC ya arriba
-registra a la primera. **No está parcheado**: tras cada reinicio de `caja` puede volver a
-pasar. Lo que lo arreglaría es un temporizador en `sendRegister()` que reintente si en
-~30 s no ha llegado un 200.
+Para salir del paso, o si el parche se ha perdido con un `claude-phone update`:
+`docker compose -f ~/.claude-phone/docker-compose.yml restart voice-app`, sin llamada en
+curso (`curl -s localhost:3010/api/calls`).
 
 ## Lo que además NO está en el repositorio original
 
