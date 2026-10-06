@@ -353,6 +353,36 @@ ss -lun | grep :5070    # tiene que salir la IP de la LAN, no solo 127.0.0.1 y 1
 Para salir del paso basta `docker compose -f ~/.claude-phone/docker-compose.yml restart
 drachtio voice-app`.
 
+## Tras un reinicio, la extensión de Jarvis puede quedarse sin registrar para siempre
+
+Sale del 2026-10-06. La extensión de Jarvis salía **«Not registered»** en el 3CX y
+llamarle iba directo al buzón, mientras que **las llamadas que hace Jarvis seguían
+saliendo bien** (un INVITE se autentica por su cuenta con el 407 y no necesita el
+registro). Contenedores arriba, SBC y `claude-phone-api` activos, y el 5070 en la IP de
+la LAN: el parche 13 había hecho su trabajo. Llevaba así desde el reinicio de `caja` de
+dos días antes.
+
+- Al arrancar, la voice-app mandó su único REGISTER **antes de que drachtio tuviera un
+  solo socket SIP** (el primer `DRACHTIO Connected at` del log sale vacío: es el parche 13
+  esperando a la red) **y antes de que arrancara el SBC**, que lo hizo 2 s después.
+- `voice-app/lib/multi-registrar.js` solo reintenta si la petición da error o si llega
+  una respuesta de fallo. Un REGISTER que se pierde sin respuesta **no deja ningún
+  temporizador**: ni reintento ni refresco, y el log no vuelve a decir nada.
+
+Lo que lo delata, en el log de la voice-app desde su último arranque: un
+`[MULTI-REGISTRAR] REGISTER Jarvis` sin `SUCCESS` detrás, y ningún `Refreshing` desde
+entonces (con el registro bien hay uno cada 27 minutos):
+
+```bash
+docker logs voice-app 2>&1 | grep MULTI-REGISTRAR | tail -5
+```
+
+Arreglo: `docker compose -f ~/.claude-phone/docker-compose.yml restart voice-app`, sin
+llamada en curso (`curl -s localhost:3010/api/calls`). Con drachtio y el SBC ya arriba
+registra a la primera. **No está parcheado**: tras cada reinicio de `caja` puede volver a
+pasar. Lo que lo arreglaría es un temporizador en `sendRegister()` que reintente si en
+~30 s no ha llegado un 200.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
