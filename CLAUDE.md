@@ -363,6 +363,10 @@ esta tabla — un fichero que no está en el índice no lo lee nadie.
    transporta. Sin `AGENT_TOKEN` no hay firma posible y el encargo se rechaza con un 503
    que dice qué falta — nunca "va sin firmar". Y la herramienta de Jarvis va
    `confirmar: True`: la propone el modelo, la aprueba una persona.
+   **El enunciado de una entrega va firmado igual** (`firma_entrega()` /
+   `entrega_firmada()`, desde octubre de 2026): lo trae el backend de Moodle al encolar,
+   y la firma cubre también las URLs de los adjuntos, que es lo que impide que
+   `GET /jobs/{id}/adjunto/{n}` le pida a Moodle, con su token, algo que no apuntó él.
 10. **Sin inyección en el agente**: el enunciado extraído de Alud **nunca** se interpola
    en un comando de PowerShell. Se escribe a un fichero temporal UTF-8 (ruta generada
    por el SO) y `Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 -LiteralPath ...)`

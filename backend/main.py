@@ -2965,6 +2965,127 @@ def _j_moodle_entregas() -> dict:
     return {"activo": True, "aviso": _AVISO_WEB, "entregas": entregas}
 
 
+# ── Moodle: el enunciado, para el agente del PC ──
+# Hasta octubre de 2026 el enunciado lo leía Claude de la propia página: el agente abría
+# la entrega en Edge y Cowork tenía que iniciar sesión en Alud (con el push de Okta, y
+# nadie delante para aceptarlo), leerla y rellenar la respuesta allí. Ahora el backend lo
+# trae de Moodle al encolar el job y Cowork trabaja en una carpeta del PC, sin entrar en
+# Alud. No es solo comodidad: las entregas de Alud que se miraron se entregan subiendo un
+# fichero y tienen los borradores desactivados, y con esa configuración GUARDAR un
+# fichero ya es entregar. El «rellénalo pero no pulses enviar» de antes no protegía nada.
+MOODLE_ENUNCIADO_MAX = 20000
+MOODLE_ADJUNTOS_MAX  = 10
+# Un PDF de enunciado pesa cientos de KB; esto es para que un vídeo colgado como adjunto
+# no acabe entero en memoria (la descarga pasa por el backend, ver `get_job_adjunto`).
+MOODLE_ADJUNTO_BYTES = int(os.getenv("MOODLE_ADJUNTO_BYTES", str(25 * 1024 * 1024)))
+
+
+def _moodle_cmid(url) -> Optional[int]:
+    """El id de módulo de la URL de una tarea (`/mod/assign/view.php?id=N`), o None."""
+    if not isinstance(url, str):
+        return None
+    partes = urlsplit(url)
+    if not partes.path.endswith("/mod/assign/view.php"):
+        return None
+    ids = parse_qs(partes.query).get("id") or []
+    return int(ids[0]) if ids and ids[0].isdigit() else None
+
+
+def _moodle_host() -> str:
+    return (urlsplit(MOODLE_URL).hostname or "").lower()
+
+
+def _moodle_adjunto_valido(url) -> bool:
+    """Un fichero del propio Moodle servido por su web service, y nada más.
+
+    Es lo único que `get_job_adjunto` le pide a Moodle con el token: esta comprobación
+    es la que impide que ese endpoint sea un proxy que regala el token a otro host.
+    """
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return False
+    partes = urlsplit(url)
+    return ((partes.hostname or "").lower() == _moodle_host() != ""
+            and "/webservice/pluginfile.php/" in partes.path)
+
+
+def _texto_de_moodle(html, tope: int) -> str:
+    # jsonb no admite \u0000: un NUL en el enunciado haría fallar el insert del job.
+    return _html_a_texto(str(html or "")).replace("\x00", "")[:tope]
+
+
+def _moodle_enunciado(alud_url) -> Optional[dict]:
+    """El enunciado de la tarea de esa URL, con sus adjuntos, o None si no se puede.
+
+    None no es un error: sin Moodle, con una URL que no es de una tarea o con Moodle
+    caído, el job sale igual y el agente vuelve al camino de antes (abrir la entrega en
+    Edge). Pararlo aquí dejaría el botón inútil justo el día que Moodle falla.
+
+    La tarea se busca por el id de MÓDULO de la URL, no por el `instance` del evento de
+    calendario: comprobado contra Alud, no coinciden con el id de la tarea.
+    """
+    cmid = _moodle_cmid(alud_url)
+    if not cmid or not (MOODLE_URL and MOODLE_TOKEN):
+        return None
+    try:
+        modulo = (_moodle_llamar("core_course_get_course_module", {"cmid": cmid}) or {}).get("cm")
+        if not isinstance(modulo, dict) or modulo.get("modname") != "assign":
+            return None
+        curso_id = int(modulo.get("course"))
+        datos = _moodle_llamar("mod_assign_get_assignments", {"courseids[0]": curso_id})
+    except (MoodleApagado, AttributeError, TypeError, ValueError):
+        return None
+    cursos = [c for c in (datos.get("courses") or []) if isinstance(c, dict)] if isinstance(datos, dict) else []
+    for curso in cursos:
+        for tarea in curso.get("assignments") or []:
+            if isinstance(tarea, dict) and str(tarea.get("cmid")) == str(cmid):
+                break
+        else:
+            continue
+        break
+    else:
+        return None
+
+    enunciado = _texto_de_moodle(tarea.get("intro"), MOODLE_ENUNCIADO_MAX)
+    # Moodle 4 separa «instrucciones de la actividad» de la descripción.
+    actividad = _texto_de_moodle(tarea.get("activity"), MOODLE_ENUNCIADO_MAX)
+    if actividad:
+        enunciado = f"{enunciado}\n\nInstrucciones de la actividad:\n{actividad}".strip()[:MOODLE_ENUNCIADO_MAX]
+    adjuntos = []
+    for f in tarea.get("introattachments") or []:
+        if isinstance(f, dict) and _moodle_adjunto_valido(f.get("fileurl")):
+            adjuntos.append({
+                "nombre": str(f.get("filename") or "adjunto")[:150],
+                "tipo":   str(f.get("mimetype") or "application/octet-stream")[:100],
+                "bytes":  int(f.get("filesize") or 0),
+                "url":    str(f["fileurl"])[:1000],
+            })
+    vence = int(tarea.get("duedate") or 0)
+    return {
+        "moodle_cmid":  cmid,
+        # El id de la TAREA, que es el que piden las herramientas de moodle-mcp
+        # (`find_relevant_materials`, `get_assignment_status`…).
+        "moodle_tarea": int(tarea.get("id") or 0),
+        "nombre":       html_mod.unescape(str(tarea.get("name") or "")).strip()[:200],
+        "curso":        html_mod.unescape(str(curso.get("fullname") or curso.get("shortname") or "")).strip()[:120],
+        "vence":        datetime.fromtimestamp(vence, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if vence else "",
+        "enunciado":    enunciado,
+        "adjuntos":     adjuntos[:MOODLE_ADJUNTOS_MAX],
+    }
+
+
+def _entrega_canonica(entrega: dict) -> str:
+    """El texto que se firma. Claves ordenadas: el payload hace un viaje de ida y vuelta
+    por jsonb, que no conserva el orden. El agente lo calcula igual (`entrega_firmada`)."""
+    return json.dumps(entrega, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def firma_entrega(entrega: dict) -> str:
+    """La misma firma que el encargo libre (invariante 9), por el mismo motivo: el
+    enunciado es texto libre que acaba dentro de Cowork. Y además cubre las URLs de los
+    adjuntos, que es lo que deja a `get_job_adjunto` descargar solo lo que puso aquí."""
+    return firma_encargo(_entrega_canonica(entrega))
+
+
 # ── MAPS ──────────────────────────────────────────────────────────────────────
 
 class DepartureRequest(BaseModel):
@@ -4031,6 +4152,15 @@ def create_job(body: JobCreateRequest, credentials: HTTPAuthorizationCredentials
         entrada = {**entrada, "instruccion": instruccion,
                    "firma": firma_encargo(instruccion)}
 
+    # La entrega, con el enunciado traído de Moodle y firmado. Lo que el cliente mande en
+    # estos dos campos se tira siempre, por lo mismo que la firma del encargo: el único
+    # que puede afirmar «esto lo leí yo de Moodle» es este endpoint.
+    entrada = {k: v for k, v in entrada.items() if k not in ("entrega", "firma_entrega")}
+    if alud_url and AGENT_TOKEN and entrada.get("accion", "resolver_alud") == "resolver_alud":
+        entrega = _moodle_enunciado(alud_url)
+        if entrega:
+            entrada = {**entrada, "entrega": entrega, "firma_entrega": firma_entrega(entrega)}
+
     payload = {"dedupe_key": body.dedupe_key, "payload": entrada}
     # `on_conflict=dedupe_key` es obligatorio (mismo motivo que en la ingesta de salud):
     # sin él PostgREST resuelve el conflicto contra la clave primaria, que aquí es `id`
@@ -4165,6 +4295,60 @@ def finish_job(
         estado = "claimed ni running" if body.status == "failed" else "estado running"
         raise HTTPException(status_code=409, detail=f"El job no está en {estado} para este worker")
     return {"ok": True, "job": rows[0]}
+
+@app.get("/jobs/{job_id}/adjunto/{n}")
+def get_job_adjunto(
+    job_id: str = _JOB_ID_PATH,
+    n: int = Path(..., ge=0, lt=MOODLE_ADJUNTOS_MAX),
+    _auth = Depends(verify_agente),
+):
+    """El adjunto n del enunciado de una entrega, bajado de Moodle para el agente.
+
+    Pasa por aquí porque el token de Moodle no sale del backend: el PC no lo tiene. Y por
+    eso mismo no acepta una URL, sino un job y un índice, y antes de pedir nada comprueba
+    la firma de la entrega. La tabla `jobs` se puede escribir con la service key; sin la
+    firma, quien la tuviera podría poner cualquier URL en el payload y este endpoint se la
+    pediría a Moodle con el token —o a otro host, si no fuera por `_moodle_adjunto_valido`—.
+    Así solo se descarga lo que el propio backend apuntó al encolar.
+    """
+    r = http.get(f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}&select=payload",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    filas = r.json()
+    payload = (filas[0].get("payload") if filas else None) or {}
+    entrega = payload.get("entrega") if isinstance(payload, dict) else None
+    if not isinstance(entrega, dict):
+        raise HTTPException(status_code=404, detail="Ese job no trae enunciado de Moodle")
+    firma = str(payload.get("firma_entrega") or "")
+    esperada = firma_entrega(entrega)
+    if not esperada or not hmac.compare_digest(esperada, firma):
+        raise HTTPException(status_code=403, detail="La entrega de ese job no viene firmada por el backend")
+    adjuntos = entrega.get("adjuntos") or []
+    if n >= len(adjuntos):
+        raise HTTPException(status_code=404, detail="Esa entrega no tiene ese adjunto")
+    adjunto = adjuntos[n]
+    if not _moodle_adjunto_valido(adjunto.get("url")) or not MOODLE_TOKEN:
+        raise HTTPException(status_code=409, detail="Ese adjunto ya no se puede pedir a Moodle")
+    try:
+        # El token por POST, nunca en la URL (ver `_moodle_llamar`): pluginfile lo lee
+        # igual del cuerpo, comprobado contra Alud el 2026-10-07.
+        resp = http.post(adjunto["url"], data={"token": MOODLE_TOKEN}, stream=True)
+    except requests.RequestException as e:
+        logger.warning("Moodle: el adjunto no se pudo pedir (%s)", type(e).__name__)
+        raise HTTPException(status_code=502, detail="Moodle no contesta") from None
+    tipo = str(resp.headers.get("Content-Type") or "")
+    # Sin token o con uno caducado Moodle contesta 200 con un JSON de error, no un 4xx:
+    # mirar solo el código daría por bueno un «adjunto» que es el mensaje de error.
+    if resp.status_code >= 300 or (tipo.startswith("application/json")
+                                   and "json" not in str(adjunto.get("tipo"))):
+        resp.close()
+        logger.error("Moodle: el adjunto respondió %s (%s)", resp.status_code, tipo[:40])
+        raise HTTPException(status_code=502, detail="Moodle no ha dado el adjunto")
+    contenido = _descarga_acotada(resp, MOODLE_ADJUNTO_BYTES)
+    if contenido is None:
+        raise HTTPException(status_code=413, detail="El adjunto es demasiado grande")
+    return Response(content=contenido, media_type=str(adjunto.get("tipo") or "application/octet-stream"))
 
 @app.post("/jobs/{job_id}/events")
 def create_job_event(

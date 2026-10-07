@@ -68,11 +68,12 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /shutdown-pc` · `POST /suspend-pc` | JWT | Pedidos `apagar` / `suspender` para `caja`, o `_pc_power_action` para HA, igual que los anteriores |
 | `GET /ha/pc-power-pending` | servicio | HA lo recoge y apaga/suspende el PC por SSH (respaldo) |
 | `GET /pc/estado` | JWT | Lo que ha hecho `caja` con el PC: `{motor, ultimo, pendientes}`. `ultimo` es su `estado.json` (`accion`, `ok`, `detalle`, `cuando`, `destino`), leído con tope de 4 KB y `null` si falta o está roto — nunca un 500. `pendientes`, los pedidos aún sin atender. Con `motor: "ha"` no hay nada que leer. `motor: "caja_sin_montar"` es que hay `PC_DIR` pero el pedido no le llega (volumen sin montar o de solo lectura, o la última escritura falló y se cayó al flag de HA): mismo criterio que la escritura, no basta con que `PC_DIR` esté puesto. Lectura local: el modal del streaming lo sondea cada pocos segundos |
-| `POST /jobs` | JWT | Crea job en cola (valida `alud_url`, `dedupe_key` único) |
+| `POST /jobs` | JWT | Crea job en cola (valida `alud_url`, `dedupe_key` único). En una entrega de una tarea de Moodle añade `entrega` (enunciado y adjuntos, traídos de Moodle) y `firma_entrega`; lo que mande el cliente en esos dos campos se tira siempre. Ver `docs/MOODLE.md` |
 | `GET /jobs/pending` | agente | Lo que sondea `agent.py`. **El corte temporal va como `Z`, nunca `+00:00`** |
 | `GET /jobs/by-id/{job_id}` | JWT | Job por ID |
 | `POST /jobs/{job_id}/claim` · `/jobs/{job_id}/start` · `/jobs/{job_id}/finish` | agente | Transiciones de estado (PATCH condicional, atómicas). `finish` con `failed` se acepta también desde `claimed`, para que un job que no llegó a arrancar no se quede colgado; `done` exige `running` |
 | `POST /jobs/{job_id}/events` | agente | Evento de progreso (stages) |
+| `GET /jobs/{job_id}/adjunto/{n}` | agente | El adjunto `n` del enunciado de la entrega de ese job, bajado de Moodle con el token del backend (por POST, nunca en la URL). Antes comprueba la firma de la entrega: solo baja lo que el propio backend apuntó al encolar. 404 si el job no trae entrega o no hay ese adjunto, 403 con la firma mala, 502 si Moodle no lo da (sin token contesta **200 con un JSON de error**), 413 por encima de `MOODLE_ADJUNTO_BYTES` |
 | `GET /jobs/{job_id}/events` | JWT | Eventos de un job (lo consume la barra de progreso) |
 | `POST /jobs/{job_id}/retry` | JWT | Reintenta un job fallido (máx. `MAX_JOB_ATTEMPTS`) |
 | `POST /agents/heartbeat` | agente | El agente reporta que está vivo |
@@ -253,7 +254,8 @@ está duplicado en los dos lados y **tienen que coincidir**.
 Cowork, en fracción de pantalla),
 `ALUD_ALLOWED_HOSTS`, `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` (con las `SUNSHINE_*` como respaldo),
 `VPN_TIPO`/`TAILSCALE_EXE`/`TAILSCALE_SERVICIO`/`VPN_TIMEOUT`,
-`PANTALLAS_STREAMING`/`PANTALLAS_RESTAURAR`/`DISPLAYSWITCH_EXE`, `ARRANQUE_ESPERA_RED`.
+`PANTALLAS_STREAMING`/`PANTALLAS_RESTAURAR`/`DISPLAYSWITCH_EXE`, `ARRANQUE_ESPERA_RED`,
+`ENTREGAS_DIR` (dónde deja Cowork cada entrega; sin ella, `Entregas` dentro de la carpeta de ficheros de Cowork).
 **Ya no lleva `SUPABASE_URL`/`SUPABASE_KEY`**: se quitaron a propósito (ver "Cola de jobs" en `docs/BACKEND_PATRONES.md`).
 
 ## Endpoints añadidos en septiembre de 2026
@@ -281,6 +283,6 @@ Cowork, en fracción de pantalla),
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`,
 `TAREAS_TODO`, `TAREAS_MAX`, `MOODLE_URL`, `MOODLE_TOKEN`, `MOODLE_AL_CALENDARIO`,
-`MOODLE_CADA_MIN`, `MOODLE_AVISO_HORAS`, `MOODLE_VENCIDAS_DIAS`.
+`MOODLE_CADA_MIN`, `MOODLE_AVISO_HORAS`, `MOODLE_VENCIDAS_DIAS`, `MOODLE_ADJUNTO_BYTES`.
 Todas documentadas una a una en `backend/.env.example`.
 

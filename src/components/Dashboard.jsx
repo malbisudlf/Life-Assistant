@@ -1701,7 +1701,7 @@ const STAGE_LABELS = {
   "job_claimed":          "Job recogido",
   "login_ok":             "Login en Alud OK",
   "assignment_opened":    "Entrega abierta",
-  "enunciado_extracted":  "Enunciado extraído",
+  "enunciado_extracted":  "Enunciado de Moodle en el PC",
   "solver_started":       "Cowork iniciado",
   "result_saved":         "Instrucción enviada",
   "vpn_connecting":       "Conectando la VPN",

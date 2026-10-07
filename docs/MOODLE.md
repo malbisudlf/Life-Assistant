@@ -101,6 +101,87 @@ no el de clases, así que no se cruza con estos.
 - **El servidor `moodle`** por MCP, para todo lo demás («¿qué nota llevo en Redes?»,
   «¿qué materiales hay para la práctica 2?», «¿qué semana voy más cargado?»).
 
+## El botón de resolver: el enunciado, sin entrar en Alud
+
+Desde el 2026-10-07, al pulsar «resolver» en una entrega **el backend trae el enunciado de
+Moodle** y el agente del PC se lo da hecho a Cowork. Antes, Cowork entraba en Alud: abría
+la entrega en Edge, iniciaba sesión —con el push de Okta, y nadie delante para aceptarlo—,
+la leía y rellenaba la respuesta allí.
+
+Eso último era peligroso, y no se veía. Las entregas de Alud que se miraron (las dos
+pendientes ese día) **se entregan subiendo un fichero y tienen los borradores
+desactivados**: con esa configuración, guardar un fichero en la entrega ya es entregarla.
+El «rellénalo pero no pulses enviar» de la instrucción no protegía nada. Ahora Cowork no
+entra en Alud: deja la solución en una carpeta del PC y la subes tú.
+
+```
+POST /jobs (resolver_alud)
+   └─ _moodle_enunciado(alud_url)      cmid de la URL → core_course_get_course_module
+      │                                 → mod_assign_get_assignments → la tarea por cmid
+      └─ payload.entrega + firma_entrega (HMAC con AGENT_TOKEN, como el encargo)
+agente
+   ├─ entrega_firmada() o no se ejecuta
+   ├─ <Entregas>\<asignatura>\<entrega>\ENUNCIADO.md
+   ├─ cada adjunto ← GET /jobs/{id}/adjunto/{n} (el backend lo baja de Moodle)
+   └─ Cowork, con el enunciado delimitado como DATO y la carpeta donde dejar «SOLUCION…»
+```
+
+- **La tarea se busca por `cmid`** (el `id=` de `/mod/assign/view.php`), no por el
+  `instance` del evento de calendario: comprobado contra Alud, no coincide con el id de la
+  tarea.
+- **Con el texto solo no basta.** De las dos entregas pendientes del día, una tenía el
+  enunciado casi entero en un PDF adjunto y la otra no tenía ni texto ni adjuntos (estará
+  en los materiales del curso). Por eso van los adjuntos, y por eso Cowork tiene además el
+  servidor moodle-mcp para buscar materiales (ver abajo).
+- **El token de Moodle no sale de `caja`.** Los adjuntos los baja el backend y el agente se
+  los pide por job e índice, nunca por URL: así el endpoint no es un proxy que se lleve el
+  token a donde le digan. Antes de pedir nada comprueba la firma de la entrega, que cubre
+  las URLs: solo baja lo que el propio backend apuntó al encolar, y solo de
+  `/webservice/pluginfile.php/` del host de `MOODLE_URL`.
+- **Moodle contesta los errores de fichero con un 200.** Sin token, o con uno caducado,
+  `pluginfile.php` devuelve `200` y un JSON de error. Se mira el `Content-Type`, no solo el
+  código, o el «adjunto» sería el mensaje de error.
+- **Sin enunciado, el camino de antes.** Si Moodle no contesta o la entrega no es una tarea
+  (un evento metido a mano), el job sale igual y el agente abre la entrega en Edge, como
+  siempre, pero también le pide a Cowork que deje la solución en una carpeta y no toque
+  Alud. Y una entrega **con** enunciado cuya firma no cuadra no cae a ese camino: eso es un
+  payload manipulado, no un Moodle caído.
+- **La carpeta** es `ENTREGAS_DIR` del `agent/.env`; sin ella, `Entregas` dentro de la
+  carpeta de ficheros de Cowork (`coworkUserFilesPath` en `claude_desktop_config.json`),
+  que es la que Cowork puede tocar sin pedir permiso. Un reintento reescribe el enunciado y
+  los adjuntos y no toca lo demás: lo que Cowork dejara la otra vez sigue ahí.
+
+### Cowork con moodle-mcp
+
+El mismo servidor que usa Jarvis, conectado también a Claude Desktop en el PC, para que
+Cowork busque apuntes y materiales por su cuenta (`find_relevant_materials` con el id de
+la tarea, que va en la instrucción). Son las 24 herramientas de solo lectura; ninguna
+descarga ficheros, que es por lo que los adjuntos van aparte.
+
+Claude Desktop solo habla stdio con un servidor local, así que va por el puente
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (necesita Node), en
+`%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+"mcpServers": {
+  "moodle": {
+    "command": "npx",
+    "args": ["-y", "mcp-remote@0.14.3", "http://caja:8765/mcp", "--allow-http",
+             "--header", "Authorization:${MOODLE_AUTH}"],
+    "env": {"MOODLE_AUTH": "Bearer <MOODLE_MCP_TOKEN>"}
+  }
+}
+```
+
+- **Por el nombre del tailnet (`caja`), no por la IP**: el PC no está siempre en casa.
+- **`--allow-http`** porque mcp-remote rechaza http sin él. La llave viaja en claro por la
+  LAN o cifrada por WireGuard en el tailnet, igual que con Jarvis.
+- **La llave va en `env` y la cabecera sin espacio tras los dos puntos**: es la forma que
+  documenta mcp-remote para Windows, donde `npx` parte los argumentos por los espacios.
+- **Versión fija**, por lo mismo que en el `Dockerfile`.
+- Claude Desktop lee este fichero **al arrancar**: tras cambiarlo hay que cerrarlo del todo
+  (también de la bandeja) y volver a abrirlo.
+
 ## El servidor MCP (`docker/moodle-mcp/`)
 
 El paquete original solo habla por stdio (lo que pide Claude Desktop). `servidor.py` lo
@@ -141,4 +222,5 @@ El mismo contenedor sirve para una sesión de Claude Code:
 ## Variables
 
 `MOODLE_URL`, `MOODLE_TOKEN`, `MOODLE_AL_CALENDARIO` (1), `MOODLE_CADA_MIN` (30),
-`MOODLE_AVISO_HORAS` (36), `MOODLE_VENCIDAS_DIAS` (7). Una a una en `backend/.env.example`.
+`MOODLE_AVISO_HORAS` (36), `MOODLE_VENCIDAS_DIAS` (7), `MOODLE_ADJUNTO_BYTES` (25 MB).
+Una a una en `backend/.env.example`. En el agente, `ENTREGAS_DIR`.

@@ -165,7 +165,36 @@ máquina real: coinciden todos, sin caer ni una vez a la red de seguridad.
   del PC: los tests simulan Windows, no lo sustituyen, y un fallo suyo se descubre a las 6
   de la mañana.
 
-### Acción `resolver_alud` — notas de Edge y Claude Desktop
+### Acción `resolver_alud` — dos caminos
+
+**Desde el 2026-10-07, el normal no pasa por Alud.** El backend trae el enunciado de
+Moodle al encolar el job (`payload["entrega"]`, firmado) y el agente:
+
+1. comprueba la firma con `entrega_firmada()` — la misma defensa que el encargo libre;
+2. crea `<Entregas>\<asignatura>\<entrega>\` con `ENUNCIADO.md` y los adjuntos, que pide
+   a `GET /jobs/{id}/adjunto/{n}` (el PC no tiene el token de Moodle);
+3. le pasa a Cowork el enunciado delimitado como DATO y la carpeta donde dejar la
+   solución, con un nombre que empiece por «SOLUCION».
+
+Ni Edge, ni login, ni Okta. Y **Cowork no toca Alud**: con los borradores desactivados,
+subir el fichero ya es entregar. El porqué entero, en `docs/MOODLE.md` («El botón de
+resolver»).
+
+- **La carpeta** (`carpeta_entregas()`): `ENTREGAS_DIR`, o `Entregas` dentro de
+  `coworkUserFilesPath` de `claude_desktop_config.json` —la carpeta que Cowork puede tocar
+  sin pedir permiso, que es lo que importa cuando nadie está delante—, o
+  `Documents\Entregas`.
+- **Los nombres los escribe el profesorado** y acaban siendo carpetas: `nombre_seguro()`
+  quita separadores, `..` y los nombres reservados de Windows (`CON`, `NUL`…). Sin eso, el
+  nombre de una asignatura podía sacar la ruta de la carpeta de entregas.
+- **Un adjunto que falla no tumba la entrega**: se baja a `.parcial`, se renombra solo si
+  llega entero, y la instrucción dice cuál falta.
+- **Una entrega con enunciado y firma mala falla**; no cae al camino de Edge, porque eso no
+  es un Moodle caído, es un payload manipulado.
+
+**Sin enunciado** (Moodle caído, o un evento de Outlook metido a mano) queda el camino de
+siempre, que es lo que describe el resto de esta sección, con un cambio: Cowork deja la
+solución en una carpeta y no guarda nada en Alud.
 
 Flujo: `msedge.exe <url>` → la entrega abierta en el Edge del usuario → Claude Desktop →
 clic en «New» → clic en «Cowork» → Win+V → Enter → Enter. **El agente no controla el
@@ -179,8 +208,9 @@ navegador**: lo abre y se aparta.
   - DETACHED (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`): el navegador no es hijo de
     Python y **sobrevive cuando el agente termina**. Es el requisito que en su día hizo
     abandonar `launch_persistent_context`, que se llevaba Edge por delante al salir.
-- **El enunciado ya no se extrae**: lo lee Claude de la pestaña que le queda delante.
-  Era lo único que obligaba a controlar el navegador, y ese control es lo que fallaba.
+- **En este camino el enunciado no se extrae**: lo lee Claude de la pestaña que le queda
+  delante. Era lo único que obligaba a controlar el navegador, y ese control es lo que
+  fallaba. (En el camino normal tampoco se extrae: llega de Moodle.)
 - **Playwright ya no se usa aquí** (fuera de `requirements.txt`). Con él se fueron el
   CDP, el puerto de depuración, `login_alud_if_needed()` y `extract_enunciado()`.
 - **Y sobre todo: el perfil por defecto de Edge NO se puede controlar por programa.**
