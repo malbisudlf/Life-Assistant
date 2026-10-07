@@ -46,6 +46,7 @@ GRUPOS = [
     ("Resumen diario por correo", ["BRIEF_TOKEN", "BRIEF_TO", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
     ("Agente PC (cola de jobs)", ["AGENT_TOKEN"]),
     ("Finanzas (cartera de Indexa Capital)", ["INDEXA_TOKEN"]),
+    ("Moodle (entregas de la uni al calendario y avisos)", ["MOODLE_URL", "MOODLE_TOKEN"]),
     ("Revisión nocturna accionable (aviso con botones)",
      ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
     ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),

@@ -236,6 +236,16 @@ el backend no llama a ningún endpoint de Indexa que mueva dinero.
 Sin la variable, el widget dice que no está conectado y el resto del dashboard funciona
 igual. Detalle en `docs/FINANZAS.md`.
 
+## 6 ter. Entregas de Moodle (opcional)
+
+Si tu universidad usa Moodle, las entregas pendientes pueden llegar solas al calendario de
+clases (con `ENTREGAS_MARKER`, así que salen en el widget de entregas) y avisarte si una
+vence pronto y sigue sin entregar. Pon en el backend `MOODLE_URL` (la del sitio,
+`https://...`) y `MOODLE_TOKEN` (el del servicio «Moodle mobile web service», en
+`/user/managetoken.php` de tu Moodle), y aplica la migración `20261007_moodle.sql`. El
+servidor MCP con las demás herramientas (notas, materiales) es opcional y va aparte, en
+`docker/moodle-mcp/`. Detalle en `docs/MOODLE.md`.
+
 ## 7. Resumen diario por correo (opcional)
 
 Cada mañana el backend puede mandarte a tu propio buzón los datos del día —agenda,

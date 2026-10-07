@@ -415,6 +415,9 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "JARVIS_REPO", "usuario/Life-Assistant")
         # Y las tareas, que nacen apagadas.
         monkeypatch.setattr(main, "TAREAS_TODO", True)
+        # Y Moodle, que sin URL y token no tiene nada que consultar.
+        monkeypatch.setattr(main, "MOODLE_URL", "https://moodle.test")
+        monkeypatch.setattr(main, "MOODLE_TOKEN", "moodle-token")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)
