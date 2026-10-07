@@ -146,6 +146,9 @@ Qué hace cada uno:
 4. **Entregas (`entregas`)** — eventos con el marcador `VITE_ENTREGAS_MARKER` (📚) en el
    título, buscados en **ambos** calendarios (`allEvents` + `classEvents`). Incluye los
    de hoy y los futuros.
+   Desde octubre de 2026 esos eventos los crea la sincronización con Moodle
+   (`docs/MOODLE.md`), y al entregar pasan de 📚 a ✅, que es lo que los saca del widget:
+   el widget no sabe nada de Moodle, y así tiene que seguir.
 5. **Finanzas (`finanzas`)** — la cartera de Indexa Capital: valor total, plusvalía en
    euros y en porcentaje, cuánto se movió desde el último día con dato, la gráfica del
    valor frente a lo aportado (`GraficaAportado`, con rango, tooltip, reparto del cambio y

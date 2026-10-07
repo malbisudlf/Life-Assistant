@@ -133,6 +133,7 @@ backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── Indexa Capital ── cartera de inversión (solo lectura, copia en memoria)
+    ├── Moodle (Alud) ── entregas pendientes → calendario de clases y avisos
     ├── OpenAI ── Whisper (transcripción), GPT-4o-mini (extracción de ideas
     │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
@@ -177,6 +178,7 @@ Ficheros clave:
 | `addon/life-assistant/` | El backend empaquetado como add-on local de Home Assistant, de cuando corría en el Green (hasta el 2026-09-20). Allí sigue instalado, **parado y en `boot: manual`**, como camino de vuelta: arrancarlo es tener dos backends contra el mismo Supabase |
 | `telefono/PARCHES.md` | **Antes de tocar o actualizar claude-phone.** Los doce parches que necesita el repositorio original para funcionar aquí (credenciales SIP, modelo retirado, puertos, idioma, detector de voz, dominio del saliente, colgar si no lo coges, colgar si nadie habla, errores en español, detector de voz con ruido, memoria entre llamadas, y el 12 —contestar no es coger: el buzón deja recado—, aplicado el 2026-09-27 y versionado en `telefono/parche-12.diff`), más el 13, que no toca su código sino su `docker-compose.yml`: drachtio espera a que la red de casa tenga IP, porque si arranca antes no oye las llamadas; y el 14 (2026-10-06, `telefono/parche-14.diff`), que reintenta el registro de la extensión si el REGISTER se pierde al arrancar. Viven solo en `caja` y **no están versionados**: un `claude-phone update` se los lleva |
 | `telefono/RUNBOOK.md` | Lo que Jarvis sabe y puede hacer cuando te llama por una avería: qué mirar, qué tocar con tu confirmación y qué no tocar nunca. **Se copia a mano** a `~/telefono-jarvis/CLAUDE.md` en `caja`, que es el directorio de trabajo del `claude-api-server` |
+| `docker/moodle-mcp/` | El servidor [moodle-mcp](https://github.com/loyaniu/moodle-mcp) por HTTP y con llave, para Jarvis: `servidor.py` lo envuelve sin tocar el original. Corre en `caja` y **se copia a mano**, igual que n8n. Ver `docs/MOODLE.md` |
 | `docker/n8n/` | n8n empaquetado: su `compose.yml` y sus variables. Corre en `caja` y **se copia a mano**, igual que el add-on. **Los flujos ya no están aquí**: viven en el repositorio HomeLab (`caja/n8n/flujos/`), que es la fuente de verdad de esa máquina |
 | `agent/agent.py` | Agente PC. Solo funciona en Windows real (Edge, pyautogui, Claude Desktop). **Casi todo se prueba a mano**: en CI solo su lógica pura (`tests/backend/test_agente_pc.py`, que lo carga con `pyautogui` simulado) |
 | `supabase/migrations/*.sql` | Esquema de BD. Se aplican a mano en Supabase, no hay tooling de migraciones. **Toda tabla nueva lleva `enable row level security` sin policies**: solo el backend entra, con la service key, que la salta por diseño. Sin RLS, la anon key (pública por diseño) da acceso al REST de Supabase desde internet |
@@ -210,6 +212,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
+| `docs/MOODLE.md` | Las entregas de la uni desde Moodle (Alud): la sincronización con el calendario de clases (crear, adoptar, mover, tachar con ✅), sus dos avisos y el servidor moodle-mcp de `docker/moodle-mcp/` para que Jarvis consulte notas y materiales |
 | `docs/FINANZAS.md` | Módulo de finanzas, un widget con tres fuentes: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no tiene tabla), el saldo de Revolut por Enable Banking y la cartera manual de ETFs (Yahoo Finance, con sus dos tablas) |
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/N8N.md` | n8n, la automatización visual que corre en `caja`: la frontera con el backend (observa y avisa, no decide), los flujos que hay y sus trampas |

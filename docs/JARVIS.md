@@ -959,6 +959,13 @@ está en la sección «Lugares» de `backend/main.py`, y la lógica pura del das
 - **Lo que se descartó**: callar la firma de malestar por la FC del gimnasio. Mira la FC
   en reposo, la HRV y la respiración de cada día, que no se mueven por estar entrenando.
 
+## Moodle: las entregas
+
+`moodle_entregas` (consulta, directa, también en el MCP del teléfono) pregunta a Moodle lo
+que sigue pendiente; para notas, materiales o foros está el servidor MCP `moodle`. La
+sincronización con el calendario y sus avisos (`moodle_vence`, `moodle_nueva`) están en
+`docs/MOODLE.md`.
+
 ## Tareas: Microsoft To Do
 
 Lo que hay que hacer **sin hora**. Una cita va al calendario; «pásale el contrato a Luis

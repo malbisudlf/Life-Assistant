@@ -421,6 +421,24 @@ NOCHE_BORRADORES_MAX = int(os.getenv("NOCHE_BORRADORES_MAX", "10"))
 TAREAS_TODO = _flag("TAREAS_TODO", "0")
 TAREAS_MAX  = int(os.getenv("TAREAS_MAX", "50"))
 
+# ── Moodle (las entregas de la uni) ───────────────────────────────────────────
+# La URL del SITIO (https://alud.deusto.es), no la del servicio REST: la ruta se añade
+# aquí. Y el token del servicio «Moodle mobile web service». Sin los dos no se sincroniza
+# nada ni Jarvis anuncia la herramienta. Ver docs/MOODLE.md.
+MOODLE_URL   = os.getenv("MOODLE_URL", "").strip().rstrip("/")
+MOODLE_TOKEN = os.getenv("MOODLE_TOKEN", "").strip()
+# Llevar las entregas al calendario de clases como eventos con ENTREGAS_MARKER, que es lo
+# que hace que salgan solas en el widget, en «Lo siguiente» y en los avisos de siempre.
+MOODLE_AL_CALENDARIO = _flag("MOODLE_AL_CALENDARIO")
+# Cada cuánto pregunta el tick de HA a Moodle. Una entrega nueva no corre prisa de
+# minutos, y Moodle es de la universidad, no nuestro.
+MOODLE_CADA_MIN      = int(os.getenv("MOODLE_CADA_MIN", "30"))
+# Con cuánta antelación avisa de una entrega que sigue sin entregar. 36 h y no 24: casi
+# todas vencen a las 23:59, y 24 h antes es avisar a medianoche.
+MOODLE_AVISO_HORAS   = int(os.getenv("MOODLE_AVISO_HORAS", "36"))
+# Cuántos días hacia atrás se siguen mirando las ya vencidas sin entregar.
+MOODLE_VENCIDAS_DIAS = int(os.getenv("MOODLE_VENCIDAS_DIAS", "7"))
+
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
 # RECOGEN (titular, fuente, hora, enlace, extracto y qué término toca hoy); quién elige
@@ -2430,6 +2448,521 @@ def _j_tareas() -> dict:
 def _j_crear_tarea(titulo: str, fecha: str | None = None, nota: str | None = None) -> dict:
     """Solo se llega aquí desde /jarvis/ejecutar, con la tarea ya aprobada."""
     return _todo_crear(titulo, fecha, nota)
+
+
+# ── MOODLE (entregas) ─────────────────────────────────────────────────────────
+# Las entregas de la uni, sacadas de Moodle (Alud) en vez de apuntadas a mano.
+#
+# La decisión de fondo: **Moodle no tiene widget propio, alimenta el calendario.** Todo lo
+# que ya sabía de entregas —el widget, «Lo siguiente», el aviso al salir de la uni, el
+# botón de resolver con el agente— se apoya en eventos con ENTREGAS_MARKER en el
+# calendario de clases. Si Moodle escribe esos mismos eventos, todo eso funciona solo y
+# no hay una segunda lista de entregas que pueda decir otra cosa que la primera.
+#
+# Lo que Moodle sabe y el calendario no es si ya está ENTREGADA. Por eso los avisos de
+# «vence pronto» salen de aquí y no del calendario: preguntan a Moodle, y una entrega que
+# ya subiste no avisa.
+#
+# Se pregunta con `core_calendar_get_action_events_by_timesort`, que es la misma lista de
+# «pendientes» que enseña la app del móvil: solo devuelve lo que todavía pide que hagas
+# algo. Una entrega que desaparece de ahí es una que ya no está pendiente.
+#
+# La versión con las 24 herramientas (notas, materiales, foros) es el servidor MCP de
+# `docker/moodle-mcp/`, que Jarvis usa por `JARVIS_MCP_SERVERS`. Esto es lo que tiene que
+# pasar SIN que nadie pregunte, y por eso vive aquí: con tests y en el diff.
+MOODLE_SERVICIO     = "/webservice/rest/server.php"
+# El tope que admite la función de Moodle. Si vienen justo esas, la lista puede estar
+# cortada y NO se deduce nada de lo que falte (ver `_moodle_sincronizar`).
+MOODLE_LIMITE       = 50
+MOODLE_ENTREGAS_URL = f"{SUPABASE_URL}/rest/v1/moodle_entregas"
+# Lo que sustituye al marcador cuando deja de estar pendiente: el evento se queda (es tu
+# historial), pero fuera del widget y de los avisos.
+MOODLE_HECHA        = "✅"
+# outlook_id de una entrega cuyo evento BORRASTE tú. No se vuelve a crear: que algo que
+# has quitado del calendario reaparezca cada media hora es la forma de que dejes de
+# fiarte de todo lo que escribe esto.
+MOODLE_SIN_EVENTO   = "-"
+REGLA_MOODLE_NUEVA  = "moodle_nueva"
+REGLA_MOODLE_VENCE  = "moodle_vence"
+_MOODLE_ID_RE       = re.compile(r"moodle_id:\s*(\d+)")
+_moodle_ultima: dict = {"ts": 0.0}
+_moodle_lock = threading.Lock()
+
+
+class MoodleApagado(RuntimeError):
+    """Moodle no se puede usar: sin configurar, caído o con el token rechazado."""
+
+
+def _moodle_llamar(funcion: str, params: Optional[dict] = None):
+    """Una llamada al servicio REST de Moodle. Lanza `MoodleApagado` con el motivo legible.
+
+    El token va por POST, en el cuerpo, nunca en la query: `requests` mete la URL entera
+    en el texto de sus excepciones, y por GET un Moodle caído escribía el token en el
+    registro (es lo que le pasa al moodle-mcp original; ver docker/moodle-mcp/servidor.py).
+    Del error solo se registra el tipo o el código, por lo mismo.
+    """
+    if not (MOODLE_URL and MOODLE_TOKEN):
+        raise MoodleApagado("Moodle no está conectado (faltan MOODLE_URL o MOODLE_TOKEN).")
+    base = MOODLE_URL[:-len(MOODLE_SERVICIO)] if MOODLE_URL.endswith(MOODLE_SERVICIO) else MOODLE_URL
+    if not base.startswith("https://"):
+        raise MoodleApagado("MOODLE_URL tiene que empezar por https://.")
+    try:
+        r = http.post(base + MOODLE_SERVICIO,
+                      data={"wstoken": MOODLE_TOKEN, "wsfunction": funcion,
+                            "moodlewsrestformat": "json", **(params or {})})
+    except requests.RequestException as e:
+        logger.warning("Moodle: %s no contestó (%s)", funcion, type(e).__name__)
+        raise MoodleApagado("Moodle no contesta.") from None
+    if r.status_code >= 300:
+        logger.error("Moodle: %s respondió %s", funcion, r.status_code)
+        raise MoodleApagado("Moodle no ha contestado bien.")
+    try:
+        datos = r.json()
+    except ValueError:
+        logger.error("Moodle: %s no devolvió JSON", funcion)
+        raise MoodleApagado("Moodle no ha contestado bien.") from None
+    # Moodle contesta los errores con un 200 y el error dentro.
+    if isinstance(datos, dict) and (datos.get("exception") or datos.get("errorcode")):
+        codigo = str(datos.get("errorcode") or "")[:60]
+        logger.error("Moodle: %s devolvió el error '%s'", funcion, codigo)
+        if codigo in ("invalidtoken", "accessexception"):
+            raise MoodleApagado("Moodle ha rechazado el token (MOODLE_TOKEN): ha caducado o no "
+                                "es del servicio «Moodle mobile web service».")
+        raise MoodleApagado(f"Moodle devolvió un error ({codigo or 'sin código'}).")
+    return datos
+
+
+def _moodle_ts(valor) -> Optional[int]:
+    """Segundos Unix de un ISO (lo que guarda Supabase) o de un número (lo que da Moodle)."""
+    if isinstance(valor, (int, float)):
+        return int(valor)
+    try:
+        return int(datetime.fromisoformat(str(valor).replace("Z", "+00:00")).timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def _moodle_entrega(ev) -> Optional[dict]:
+    """Un evento de acción de Moodle, en la forma que usa el resto del backend.
+
+    Nombre y curso los escribe el profesorado: se desescapan (Moodle manda `&amp;`) y se
+    acotan, y la URL solo se conserva si es https.
+    """
+    if not isinstance(ev, dict):
+        return None
+    try:
+        mid = int(ev.get("id"))
+        vence = int(ev.get("timesort") or ev.get("timestart"))
+    except (TypeError, ValueError):
+        return None
+    curso = ev.get("course") if isinstance(ev.get("course"), dict) else {}
+    accion = ev.get("action") if isinstance(ev.get("action"), dict) else {}
+    nombre = html_mod.unescape(str(ev.get("activityname") or ev.get("name") or "")).strip()
+    url = next((str(u) for u in (ev.get("url"), accion.get("url"))
+                if str(u or "").startswith("https://")), "")
+    return {
+        "id":      mid,
+        "nombre":  nombre[:200] or "(sin título)",
+        "curso":   html_mod.unescape(str(curso.get("fullname") or curso.get("shortname") or "")).strip()[:120],
+        "tipo":    str(ev.get("modulename") or "")[:30],
+        "vence":   datetime.fromtimestamp(vence, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "vencida": vence < time.time(),
+        "url":     url[:500],
+    }
+
+
+def _moodle_entregas() -> tuple:
+    """(entregas pendientes, si la lista está completa), la que vence antes primero.
+
+    Incluye las vencidas de los últimos MOODLE_VENCIDAS_DIAS: una que se te pasó ayer y
+    todavía admite entrega tardía es justo la que más importa ver.
+    """
+    datos = _moodle_llamar("core_calendar_get_action_events_by_timesort", {
+        "timesortfrom": int(time.time()) - MOODLE_VENCIDAS_DIAS * 86400,
+        "limitnum":     MOODLE_LIMITE,
+        # Sin las de cursos de los que ya te han dado de baja.
+        "limittononsuspendedevents": 1,
+    })
+    crudos = datos.get("events") if isinstance(datos, dict) else None
+    if not isinstance(crudos, list):
+        logger.error("Moodle: la lista de entregas no tiene la forma esperada")
+        raise MoodleApagado("Moodle ha devuelto algo que no es una lista de entregas.")
+    entregas = [e for e in map(_moodle_entrega, crudos) if e]
+    return sorted(entregas, key=lambda e: (e["vence"], e["id"])), len(crudos) < MOODLE_LIMITE
+
+
+def _moodle_cuando(iso: str) -> str:
+    """«hoy a las 23:59», «mañana a las 23:59», «el jueves 9 a las 23:59»."""
+    try:
+        fecha = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+    except (ValueError, AttributeError):
+        return "sin fecha"
+    dias = (fecha.date() - _ahora_local().date()).days
+    hora = fecha.strftime("%H:%M")
+    if dias == 0:
+        return f"hoy a las {hora}"
+    if dias == 1:
+        return f"mañana a las {hora}"
+    if dias == -1:
+        return f"ayer a las {hora}"
+    return f"el {DIAS_SEMANA[fecha.weekday()]} {fecha.day} a las {hora}"
+
+
+# ── Moodle → calendario ──
+
+def _moodle_titulo(e: dict, hecha: bool = False) -> str:
+    curso = f" ({e['curso']})" if e.get("curso") else ""
+    return f"{MOODLE_HECHA if hecha else ENTREGAS_MARKER} {e['nombre']}{curso}"[:300]
+
+
+def _moodle_cuerpo(e: dict) -> str:
+    """El cuerpo del evento. Con `alud_url:` si el host está en la lista blanca: es lo que
+    activa el botón de resolver con el agente (invariante 7 de CLAUDE.md). Y con
+    `moodle_id:`, que es lo que permite reconocer el evento aunque se pierda la tabla."""
+    lineas = []
+    if e.get("url") and alud_url_permitida(e["url"]):
+        lineas.append(f"alud_url: {e['url']}")
+    elif e.get("url"):
+        lineas.append(f"Moodle: {e['url']}")
+    lineas += [f"moodle_id: {e['id']}",
+               "Lo ha traído Life Assistant desde Moodle. Si lo mueves, vuelve a la fecha "
+               "de Moodle en la siguiente sincronización; si lo borras, no se vuelve a crear."]
+    return "\n".join(lineas)
+
+
+def _moodle_franja(e: dict) -> dict:
+    """Media hora que TERMINA a la hora de entrega: el evento cae el día en que hay que
+    entregar, también cuando Moodle pone la entrega a las 00:00 del día siguiente."""
+    fin = datetime.fromisoformat(e["vence"].replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return {"start": {"dateTime": (fin - timedelta(minutes=30)).strftime(fmt), "timeZone": TIMEZONE},
+            "end":   {"dateTime": fin.strftime(fmt), "timeZone": TIMEZONE}}
+
+
+def _moodle_graph() -> Optional[tuple]:
+    """(cabeceras, URL donde se crean los eventos), o None con Outlook sin conectar.
+
+    En el calendario de clases, que es donde el widget y el aviso al salir de la uni
+    buscan las entregas. Si no existe, en el de por defecto: mejor ahí que en ningún sitio.
+    """
+    token = get_valid_token()
+    if not token:
+        return None
+    cabeceras = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    cal, _, _ = _id_calendario_clases(cabeceras)
+    url = (f"https://graph.microsoft.com/v1.0/me/calendars/{quote(cal, safe='')}/events"
+           if cal else "https://graph.microsoft.com/v1.0/me/events")
+    return cabeceras, url
+
+
+def _moodle_crear_evento(e: dict, graph: tuple) -> str:
+    cabeceras, url = graph
+    r = http.post(url, headers=cabeceras, json={
+        "subject": _moodle_titulo(e), **_moodle_franja(e),
+        "body": {"contentType": "text", "content": _moodle_cuerpo(e)},
+        # Una fecha límite no es tiempo ocupado (`huecos_libres` no tiene que esquivarla),
+        # y el recordatorio de Outlook 15 minutos antes de las 23:30 no avisa de nada:
+        # el aviso de verdad es el de `_moodle_avisar`.
+        "showAs": "free", "isReminderOn": False,
+    })
+    if r.status_code not in (200, 201):
+        logger.error("Moodle: Graph no creó el evento de la entrega %s (%s)", e["id"], r.status_code)
+        return ""
+    return str((r.json() or {}).get("id") or "")
+
+
+def _moodle_editar_evento(outlook_id: str, e: dict, graph: tuple, hecha: bool = False) -> Optional[bool]:
+    """True si quedó al día, False si falló, None si el evento ya no existe (lo borraste)."""
+    cuerpo = {"subject": _moodle_titulo(e, hecha)}
+    if not hecha:
+        cuerpo.update(_moodle_franja(e))
+        cuerpo["body"] = {"contentType": "text", "content": _moodle_cuerpo(e)}
+    r = http.patch(f"https://graph.microsoft.com/v1.0/me/events/{quote(outlook_id, safe='')}",
+                   headers=graph[0], json=cuerpo)
+    if r.status_code == 404:
+        return None
+    if r.status_code >= 300:
+        logger.error("Moodle: Graph no actualizó el evento de la entrega %s (%s)", e["id"], r.status_code)
+        return False
+    return True
+
+
+def _moodle_adoptable(e: dict, existentes: list) -> str:
+    """El id de un evento que YA es esta entrega, para no duplicarla.
+
+    Antes de esto las entregas las metía en el calendario la rutina de ALUD, con el mismo
+    marcador: crear las de Moodle encima habría dejado cada entrega dos veces. Se
+    reconoce por el `moodle_id:` del cuerpo (las nuestras), por la `alud_url` (las de la
+    rutina) o, a falta de las dos, por el nombre y la fecha (±1 día).
+    """
+    vence = _moodle_ts(e["vence"]) or 0
+    for ev in existentes:
+        titulo = str(ev.get("title") or "")
+        if ENTREGAS_MARKER not in titulo or not ev.get("id"):
+            continue
+        m = _MOODLE_ID_RE.search(str(ev.get("preview") or ""))
+        if m:
+            if int(m.group(1)) == e["id"]:
+                return str(ev["id"])
+            continue
+        if e.get("url") and ev.get("alud_url") == e["url"]:
+            return str(ev["id"])
+        inicio = _moodle_ts(ev.get("start"))
+        if (inicio and abs(inicio - vence) <= 86400
+                and e["nombre"].casefold() in titulo.casefold()):
+            return str(ev["id"])
+    return ""
+
+
+def _moodle_eventos_calendario() -> Optional[list]:
+    """Los eventos del calendario de clases, o None si no se pudieron leer.
+
+    None y no `[]` (que es lo que daría `_sin_error`): sin la lista no se puede adoptar
+    nada, y crear a ciegas duplicaría lo que ya hubiera. La entrega espera a la siguiente
+    pasada. Sin calendario de clases, en cambio, no hay nada que adoptar y se crea en el
+    de por defecto.
+    """
+    try:
+        datos = get_class_events(credentials=None)
+    except Exception as e:
+        logger.warning("Moodle: no se pudo leer el calendario de clases (%s)", type(e).__name__)
+        return None
+    if isinstance(datos, dict) and "available" in datos:
+        return []
+    if not isinstance(datos, dict) or "error" in datos:
+        return None
+    return datos.get("events") or []
+
+
+def _moodle_guardadas() -> dict:
+    """Lo que ya se sincronizó, por id de Moodle. Lanza si Supabase falla: sin saber qué
+    había, cada entrega parecería nueva y se crearía otra vez."""
+    desde = (datetime.now(timezone.utc) - timedelta(days=MOODLE_VENCIDAS_DIAS + 60)).isoformat()
+    r = http.get(f"{MOODLE_ENTREGAS_URL}?vence=gte.{quote(desde, safe='')}"
+                 "&select=moodle_id,nombre,curso,url,vence,outlook_id,estado"
+                 "&order=moodle_id.asc&limit=1000", headers=supabase_headers())
+    if r.status_code >= 300:
+        raise _supabase_error(r)
+    return {int(f["moodle_id"]): f for f in (r.json() or []) if f.get("moodle_id") is not None}
+
+
+def _moodle_fila(e: dict, outlook_id: str, estado: str) -> dict:
+    return {"moodle_id": e["id"], "nombre": e["nombre"], "curso": e.get("curso") or "",
+            "url": e.get("url") or "", "vence": e["vence"], "outlook_id": outlook_id or None,
+            "estado": estado, "actualizado": datetime.now(timezone.utc).isoformat()}
+
+
+def _moodle_sincronizar() -> dict:
+    """Una pasada: lo nuevo al calendario, lo movido a su fecha, lo entregado tachado.
+
+    Cada entrega nueva se crea en el calendario (o se adopta el evento que ya hubiera),
+    cada cambio de fecha o nombre en Moodle se lleva al evento, y una que deja de estar
+    pendiente pasa de 📚 a ✅. Lo que no se puede escribir en Outlook (sin conectar, un
+    fallo) se reintenta en la siguiente pasada: la fila se queda sin `outlook_id`.
+
+    Lo que falta en la lista solo cuenta como «entregada» si la lista está COMPLETA: con
+    50 resultados puede estar cortada, y tachar una entrega porque no cupo en la página
+    sería decirte que ya está hecha cuando no.
+    """
+    entregas, completa = _moodle_entregas()
+    guardadas = _moodle_guardadas()
+    graph = _moodle_graph() if MOODLE_AL_CALENDARIO else None
+    existentes = None
+    ahora = time.time()
+    filas, nuevas, outlook = [], [], {}
+    hechas = movidas = al_calendario = 0
+
+    for e in entregas:
+        fila = guardadas.get(e["id"])
+        antes = str((fila or {}).get("outlook_id") or "")
+        evento = antes
+        cambio = (fila is None or fila.get("estado") != "pendiente"
+                  or fila.get("nombre") != e["nombre"] or (fila.get("curso") or "") != e["curso"]
+                  or (fila.get("url") or "") != e["url"]
+                  or _moodle_ts(fila.get("vence")) != _moodle_ts(e["vence"]))
+        if graph and evento and evento != MOODLE_SIN_EVENTO and cambio:
+            hecho = _moodle_editar_evento(evento, e, graph)
+            if hecho is None:
+                evento = MOODLE_SIN_EVENTO
+            elif hecho and fila and _moodle_ts(fila.get("vence")) != _moodle_ts(e["vence"]):
+                movidas += 1
+        if graph and not evento:
+            if existentes is None:
+                existentes = _moodle_eventos_calendario()
+            if existentes is not None:
+                evento = _moodle_adoptable(e, existentes)
+                if evento:
+                    # Se adopta llevándolo a la fecha y al cuerpo de Moodle, que es quien manda.
+                    _moodle_editar_evento(evento, e, graph)
+                else:
+                    evento = _moodle_crear_evento(e, graph)
+                al_calendario += int(bool(evento))
+        if fila is None:
+            nuevas.append(e)
+        outlook[e["id"]] = evento
+        if cambio or evento != antes:
+            filas.append(_moodle_fila(e, evento, "pendiente"))
+
+    if completa:
+        vistas = {e["id"] for e in entregas}
+        for mid, fila in guardadas.items():
+            if mid in vistas or fila.get("estado") != "pendiente":
+                continue
+            vence = _moodle_ts(fila.get("vence")) or 0
+            evento = str(fila.get("outlook_id") or "")
+            e = {"id": mid, "nombre": fila.get("nombre") or "", "curso": fila.get("curso") or "",
+                 "url": fila.get("url") or "", "vence": fila.get("vence")}
+            if vence < ahora - MOODLE_VENCIDAS_DIAS * 86400:
+                # Se ha salido de la ventana, no se ha entregado: el evento ya es pasado y
+                # no sale en el widget, así que no se toca.
+                filas.append(_moodle_fila(e, evento, "fuera"))
+                continue
+            if evento and evento != MOODLE_SIN_EVENTO and MOODLE_AL_CALENDARIO:
+                if not graph or _moodle_editar_evento(evento, e, graph, hecha=True) is False:
+                    continue        # sin poder tacharla, se queda pendiente y se reintenta
+            filas.append(_moodle_fila(e, evento, "entregada"))
+            hechas += 1
+
+    if filas:
+        r = http.post(f"{MOODLE_ENTREGAS_URL}?on_conflict=moodle_id",
+                      headers={**supabase_headers(),
+                               "Prefer": "resolution=merge-duplicates,return=minimal"},
+                      json=filas)
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+
+    avisos = _moodle_avisar(entregas, nuevas, primera=not guardadas, outlook=outlook) \
+        if REGLAS_PROACTIVAS else 0
+    return {"pendientes": len(entregas), "nuevas": len(nuevas), "al_calendario": al_calendario,
+            "movidas": movidas, "entregadas": hechas, "avisos": avisos}
+
+
+# ── Moodle: los avisos ──
+
+def _huella_moodle_vence(moodle_id, vence) -> str:
+    """Qué entrega y para cuándo: si te amplían el plazo, vuelve a avisar."""
+    return f"moodle_vence:{moodle_id}:{_moodle_ts(vence)}"
+
+
+def _moodle_vence_dicho(ev: dict) -> bool:
+    """Si ya se avisó desde Moodle de la entrega de ESTE evento del calendario. Lo usa el
+    aviso al salir de la uni para no repetirlo: el evento termina a la hora de entrega
+    y lleva el `moodle_id` en el cuerpo."""
+    m = _MOODLE_ID_RE.search(str(ev.get("preview") or ""))
+    return bool(m) and _ya_dicho(REGLA_MOODLE_VENCE, _huella_moodle_vence(m.group(1), ev.get("end")))
+
+
+def _moodle_avisar(entregas: list, nuevas: list, primera: bool, outlook: dict) -> int:
+    """Dos avisos, por `_apuntar_aviso` (presupuesto, silenciado y memoria incluidos):
+
+    - **Vence pronto y sigue sin entregar** (MOODLE_AVISO_HORAS). Es el que importa, y
+      solo Moodle puede darlo bien: el calendario no sabe si ya la subiste.
+    - **Hay entregas nuevas**, todas en UN aviso. La primera vez que se conecta Moodle
+      pueden ser quince, y quince avisos se comerían el presupuesto de tres días.
+
+    Una nueva que ya vence pronto va solo por el primero: dos avisos de la misma entrega
+    en el mismo minuto es como dejan de leerse los dos.
+    """
+    ahora, puestos = time.time(), 0
+    nuevas_ids = {e["id"] for e in nuevas}
+    lejanas = []
+    for e in entregas:
+        horas = ((_moodle_ts(e["vence"]) or 0) - ahora) / 3600
+        urgente = 0 < horas <= MOODLE_AVISO_HORAS
+        if e["id"] in nuevas_ids and not urgente:
+            lejanas.append(e)
+        if not urgente:
+            continue
+        evento = outlook.get(e["id"]) or ""
+        # Ya te lo dijo el aviso al salir de la uni: no se repite.
+        if evento and evento != MOODLE_SIN_EVENTO and _ya_dicho(REGLA_ENTREGA_UNI, _huella_entrega({"id": evento})):
+            continue
+        inicio = "Nueva en Moodle: " if e["id"] in nuevas_ids else ""
+        curso = f" ({e['curso']})" if e["curso"] else ""
+        puestos += int(_apuntar_aviso(
+            REGLA_MOODLE_VENCE,
+            f"{inicio}«{e['nombre']}»{curso} vence {_moodle_cuando(e['vence'])} y en Moodle "
+            "sigue sin entregar.",
+            prioridad=PRIO_ALTA, huella=_huella_moodle_vence(e["id"], e["vence"]),
+            caduca=datetime.fromtimestamp(_moodle_ts(e["vence"]), timezone.utc),
+            motivo={"moodle_id": e["id"], "vence": e["vence"], "horas": round(horas, 1),
+                    "aviso_horas": MOODLE_AVISO_HORAS},
+        ))
+    if lejanas:
+        ids = ",".join(str(e["id"]) for e in sorted(lejanas, key=lambda e: e["id"]))
+        if primera:
+            texto = (f"He traído de Moodle {len(lejanas)} "
+                     f"{'entrega pendiente' if len(lejanas) == 1 else 'entregas pendientes'}"
+                     f"{' al calendario' if MOODLE_AL_CALENDARIO else ''}. La próxima: "
+                     f"«{lejanas[0]['nombre']}», {_moodle_cuando(lejanas[0]['vence'])}.")
+        elif len(lejanas) == 1:
+            e = lejanas[0]
+            curso = f" ({e['curso']})" if e["curso"] else ""
+            texto = f"Nueva entrega en Moodle: «{e['nombre']}»{curso}, vence {_moodle_cuando(e['vence'])}."
+        else:
+            lista = "; ".join(f"«{e['nombre']}», {_moodle_cuando(e['vence'])}" for e in lejanas[:4])
+            texto = f"{len(lejanas)} entregas nuevas en Moodle: {lista}{'…' if len(lejanas) > 4 else ''}."
+        puestos += int(_apuntar_aviso(
+            REGLA_MOODLE_NUEVA, texto, prioridad=PRIO_BAJA,
+            huella=f"moodle_nuevas:{hashlib.sha1(ids.encode()).hexdigest()[:16]}",
+            motivo={"ids": [e["id"] for e in lejanas], "primera": primera},
+        ))
+    return puestos
+
+
+def _moodle_tick() -> dict:
+    """Desde el tick de HA, cada MOODLE_CADA_MIN como mucho. La hora se apunta ANTES de
+    preguntar: un Moodle caído no puede convertirse en una llamada cada cinco minutos."""
+    if not (MOODLE_URL and MOODLE_TOKEN):
+        return {}
+    with _moodle_lock:
+        if time.time() - _moodle_ultima["ts"] < MOODLE_CADA_MIN * 60:
+            return {}
+        _moodle_ultima["ts"] = time.time()
+    resumen = _moodle_sincronizar()
+    cambios = {k: v for k, v in resumen.items() if k != "pendientes" and v}
+    return {"moodle": resumen} if cambios else {}
+
+
+def _moodle_tick_seguro() -> dict:
+    """Como cada pieza del tick: un Moodle caído no puede dejar sin despachar los avisos."""
+    try:
+        return _moodle_tick()
+    except MoodleApagado:
+        return {}           # el motivo ya quedó registrado en `_moodle_llamar`
+    except Exception:
+        logger.exception("Moodle: fallo inesperado sincronizando")
+        return {}
+
+
+@app.get("/moodle/entregas")
+def get_moodle_entregas(_: dict = Depends(verify_token)):
+    """Las entregas pendientes, preguntadas a Moodle en el momento."""
+    try:
+        entregas, _completa = _moodle_entregas()
+        return {"activo": True, "entregas": entregas}
+    except MoodleApagado as e:
+        return {"activo": False, "motivo": str(e), "entregas": []}
+
+
+@app.post("/moodle/sincronizar")
+def post_moodle_sincronizar(_: dict = Depends(verify_token)):
+    """La pasada del tick, ahora. Para no esperar media hora después de conectar Moodle."""
+    with _moodle_lock:
+        _moodle_ultima["ts"] = time.time()
+    try:
+        return {"ok": True, **_moodle_sincronizar()}
+    except MoodleApagado as e:
+        return {"ok": False, "motivo": str(e)}
+
+
+def _j_moodle_entregas() -> dict:
+    try:
+        entregas, _completa = _moodle_entregas()
+    except MoodleApagado as e:
+        return {"activo": False, "motivo": str(e), "entregas": []}
+    # Nombres y cursos los escribe el profesorado: se le pasan al modelo como DATO.
+    return {"activo": True, "aviso": _AVISO_WEB, "entregas": entregas}
 
 
 # ── MAPS ──────────────────────────────────────────────────────────────────────
@@ -7221,6 +7754,9 @@ def _regla_entregas_al_salir() -> int:
     con eso ya imposible. Comparte huella con él para no decirlo dos veces."""
     puestos = 0
     for ev in _entregas_proximas():
+        # Ya avisó Moodle de esta misma entrega (`_moodle_avisar`): no se dice dos veces.
+        if _moodle_vence_dicho(ev):
+            continue
         limpio = (ev.get("title") or "").replace(ENTREGAS_MARKER, "").strip() or "(sin título)"
         cuando = "hoy" if ev["dias"] == 0 else "mañana"
         puestos += int(_apuntar_aviso(
@@ -10714,6 +11250,8 @@ def ha_brief_tick(request: Request, token: str = ""):
                **_vigilar_ingesta_seguro(), **_vigilar_gemelos_seguro(),
                **_vigilar_espacio_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
+               # Moodle antes del despacho: sus avisos salen en este mismo tick.
+               **_moodle_tick_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
                **_turno_noche_seguro(),
@@ -11500,6 +12038,7 @@ TABLAS_CONOCIDAS = {
     "backend_latidos":       "20260924_backend_latidos",
     "despertares":           "20260927_despertares",
     "recordatorios_lugar":   "20261005_lugares",
+    "moodle_entregas":       "20261007_moodle",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -24164,6 +24703,9 @@ def _j_mis_capacidades() -> dict:
                        "así que no puedo decir cuánto tienes invertido.")
     if not TAREAS_TODO:
         apagado.append("Las tareas de Microsoft To Do están apagadas (TAREAS_TODO=0).")
+    if not (MOODLE_URL and MOODLE_TOKEN):
+        apagado.append("Moodle no está conectado (faltan MOODLE_URL y MOODLE_TOKEN), así que "
+                       "no puedo consultar las entregas de la uni.")
 
     return {
         "herramientas": [{
@@ -24255,6 +24797,16 @@ _JARVIS_HERRAMIENTAS = {
                          "las que vencen antes primero. Para citas con hora, usa `agenda`.",
         "parametros":    {},
         "requiere_tareas": True,
+    },
+    "moodle_entregas": {
+        "confirmar":     False,
+        "fn":            _j_moodle_entregas,
+        "descripcion":   "Entregas pendientes de la uni preguntadas a Moodle en este momento "
+                         "(curso, cuándo vencen, si ya están vencidas). Solo salen las que "
+                         "siguen SIN entregar. Para notas o materiales, el servidor MCP "
+                         "`moodle` si está conectado.",
+        "parametros":    {},
+        "requiere_moodle": True,
     },
     "donde_estoy": {
         "confirmar":   False,
@@ -24955,6 +25507,8 @@ def _jarvis_esquema() -> list:
     # Y las tareas, que nacen apagadas: anunciarlas apagadas sería pagar su descripción
     # en cada turno para que el modelo las pida y le digan que no.
     con_tareas   = TAREAS_TODO
+    # Moodle, igual: sin URL y token no hay entregas que consultar.
+    con_moodle   = bool(MOODLE_URL and MOODLE_TOKEN)
     return [{
         "type": "function",
         "function": {
@@ -24971,7 +25525,8 @@ def _jarvis_esquema() -> list:
         and (con_arreglo or not h.get("requiere_arreglo"))
         and (con_deploy or not h.get("requiere_despliegue"))
         and (con_sesion or not h.get("requiere_sesion"))
-        and (con_tareas or not h.get("requiere_tareas"))]
+        and (con_tareas or not h.get("requiere_tareas"))
+        and (con_moodle or not h.get("requiere_moodle"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -25031,6 +25586,7 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
     "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
     "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
+    "moodle_entregas",
 }
 # `borrar_idea` estuvo aquí y no podía usarse nunca: es `confirmar: True` (no hay
 # papelera), así que este servidor la rechazaba siempre. Anunciarla en `tools/list` solo
@@ -26334,6 +26890,7 @@ _JARVIS_RELLENOS = {
     "huecos_libres":      "Miro dónde tienes hueco.",
     "crear_evento":       "Voy con el calendario.",
     "tareas":             "Miro tus tareas.",
+    "moodle_entregas":    "Miro Moodle.",
     "crear_tarea":        "Voy con las tareas.",
     "editar_evento":      "Voy con el calendario.",
     "borrar_evento":      "Voy con el calendario.",

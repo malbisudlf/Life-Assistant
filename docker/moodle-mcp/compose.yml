@@ -1,0 +1,34 @@
+# moodle-mcp — las 24 herramientas de Moodle para Jarvis, por MCP.
+#
+# Proyecto compose APARTE de `~/stack`, por lo mismo que n8n (docker/n8n/compose.yml):
+# un `docker compose` en el stack no puede pararlo ni contarlo como huérfano. Vive en
+# ~/docker/moodle-mcp/ de `caja` y, como el add-on y n8n, se copia a mano: el del
+# repositorio es la copia buena.
+#
+#   cd ~/docker/moodle-mcp && docker compose up -d --build
+#
+# Lo que el backend hace solo con Moodle (entregas al calendario, avisos) NO pasa por
+# aquí: va directo desde main.py. Esto es para preguntar «¿qué nota llevo en X?» o
+# «¿qué materiales hay para esta práctica?». Ver docs/MOODLE.md.
+services:
+  moodle-mcp:
+    build: .
+    image: moodle-mcp-local:0.2.1
+    container_name: moodle-mcp
+    restart: unless-stopped
+
+    # MOODLE_URL, MOODLE_TOKEN y MOODLE_MCP_TOKEN. Ver .env.example.
+    env_file: .env
+
+    ports:
+      # Solo LAN, igual que n8n: el router no reenvía puertos. Y aun así lleva llave
+      # (servidor.py no arranca sin ella), porque la LAN no es solo `caja`.
+      #
+      # Sin IP en el bind, por lo mismo que n8n: `caja` se reinicia sola los domingos y
+      # un bind a una interfaz que aún no ha subido deja el contenedor sin arrancar.
+      - "8765:8765"
+
+    # Todo lo ajeno al homelab lleva techo y prioridad baja (ver docker/n8n/compose.yml).
+    cpus: 0.5
+    mem_limit: 256m
+    cpu_shares: 256

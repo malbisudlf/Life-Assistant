@@ -92,3 +92,7 @@ skills-lock.json
 # código, y cambia en cada ejecución; el histórico vive en los artefactos del workflow.
 evals/resultados.json
 docker/n8n/.env
+# El del servidor MCP de Moodle lleva el token de Moodle y la llave del servidor.
+docker/moodle-mcp/.env
+docker/moodle-mcp/.env.*
+!docker/moodle-mcp/.env.example
