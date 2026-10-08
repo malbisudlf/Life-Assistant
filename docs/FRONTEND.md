@@ -64,7 +64,8 @@ Definidos en `ALL_DEFAULT_WIDGETS`. Ids: `timeline`, `weather`, `upcoming`, `ent
 `health_wellness`, `health_sleep`, `health_heart`, `health_hrv`, `health_activity`,
 `health_workouts`, `health_hub` (Salud), `jarvis`, `siguiente` (Lo siguiente, ver su
 sección más abajo), `dia_linea` (El día, también con sección propia), `finanzas`,
-`casa`, `alarmas` y `noche` (Anoche). Cada uno se renderiza en `renderWidget(id)`, y
+`casa`, `alarmas`, `noche` (Anoche) y `uni` (las asignaturas de Moodle: lógica en
+`src/lib/uni.js`, datos y reglas en «El widget Uni» de `docs/MOODLE.md`). Cada uno se renderiza en `renderWidget(id)`, y
 **todo id nuevo va también en `DEFAULT_COLUMNS`**: si falta, reaparece en la izquierda
 al reconstruir una config guardada.
 La configuración (visibilidad, columna, orden, tamaño, splits) se persiste en

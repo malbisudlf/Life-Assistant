@@ -170,6 +170,7 @@ Ficheros clave:
 | `src/lib/ideas.js` | Lógica pura del widget de Ideas: búsqueda, etiquetas y agrupación de parecidas |
 | `src/lib/lugares.js` | Lógica pura de los lugares en el dashboard (casa, gimnasio, uni): cómo se llama cada uno y qué widgets suben en el modo simple. Lo que hace Jarvis según dónde estés vive en el backend («Lugares» en `docs/JARVIS.md`) |
 | `src/lib/agenda.js` | Lógica pura de «Lo siguiente»: el próximo compromiso (y lo que está en curso), la cuenta atrás, la fase de la hora de salida y la memoria del modo coche/andando |
+| `src/lib/uni.js` | Lógica pura del widget «Uni»: el orden de las asignaturas (lo que vence antes arriba) y cómo se dice lo pendiente sin confundir «nada pendiente» con «Moodle no contestó» |
 | `src/lib/momento.js` | Lógica pura de la cabecera «¿qué me toca ahora?»: la frase, los chips y el título de la pestaña. Lo que está en curso y lo siguiente los toma de `agenda.js`, para no decir otra cosa que el widget |
 | `backend/main.py` | Toda la API. Secciones marcadas con banners `# ── NOMBRE ──` |
 | `evals/` | Los casos y el runner de las evals de Jarvis (no corren en CI: cuestan dinero) |

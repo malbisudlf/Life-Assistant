@@ -336,3 +336,116 @@ class TestJarvis:
 
     def test_esta_en_el_mcp_del_telefono(self):
         assert "moodle_entregas" in main._MCP_SERVIDOR_SOLO_LECTURA
+
+
+# ── El widget Uni ──
+# Cursos inventados con la forma de `core_enrol_get_users_courses`: Moodle devuelve los de
+# todos los años, la mayoría con `enddate` a 0 y `progress` a null.
+HACE = lambda dias: int(time.time() - dias * 86400)  # noqa: E731
+
+
+def _curso(cid, nombre, empezo_hace=120, fin=0, progreso=None, oculto=False):
+    return {"id": cid, "fullname": nombre, "shortname": nombre[:20], "startdate": HACE(empezo_hace),
+            "enddate": fin, "progress": progreso, "hidden": oculto}
+
+
+@pytest.fixture
+def uni(moodle, mock_requests):
+    datos = {
+        "cursos": [
+            _curso(1, "2026-27 Óptica Aplicada (es)(12)"),
+            _curso(2, "2026-27 Física (Mecánica clásica) (en)(40)", progreso=37.5),
+            _curso(3, "2024-25 Geología (en)(7,21)", empezo_hace=800),            # de otro curso
+            _curso(4, "2025-26 Botánica [CLOSED] (en)(7)", empezo_hace=200, fin=HACE(30)),  # terminada
+            _curso(5, "2026-27 Oculta", oculto=True),
+        ],
+        "notas": {"grades": [{"courseid": 1, "grade": "7,50"}, {"courseid": 2, "grade": "-"},
+                             {"courseid": 3, "grade": "61,40"}]},
+        "fallan": set(),
+    }
+
+    def responder(url, **kw):
+        funcion = kw["data"]["wsfunction"]
+        if funcion in datos["fallan"]:
+            return FakeResponse({"exception": "x", "errorcode": "nopermissions"})
+        return FakeResponse({
+            "core_webservice_get_site_info": {"userid": 99},
+            "core_enrol_get_users_courses": datos["cursos"],
+            "gradereport_overview_get_course_grades": datos["notas"],
+            "core_calendar_get_action_events_by_timesort": {"events": moodle["eventos"]},
+        }[funcion])
+
+    mock_requests.routes.insert(0, ("POST", "moodle.test/webservice/rest/server.php", responder))
+    return datos
+
+
+def _ev_curso(mid, horas, cid, nombre="Práctica"):
+    ev = _evento(mid, horas, nombre)
+    ev["course"]["id"] = cid
+    return ev
+
+
+class TestUni:
+    def test_solo_las_de_este_curso_y_con_el_nombre_limpio(self, uni):
+        r = main._moodle_uni()
+        assert [a["nombre"] for a in r["asignaturas"]] == [
+            "Óptica Aplicada", "Física (Mecánica clásica)"]
+
+    def test_la_nota_tal_cual_y_sin_nota_es_none(self, uni):
+        a = {x["id"]: x for x in main._moodle_uni()["asignaturas"]}
+        assert a[1]["nota"] == "7,50"
+        assert a[2]["nota"] is None            # Moodle dice «-»: aún sin nota
+
+    def test_el_progreso_solo_si_lo_hay(self, uni):
+        a = {x["id"]: x for x in main._moodle_uni()["asignaturas"]}
+        assert a[1]["progreso"] is None and a[2]["progreso"] == 38
+
+    def test_las_entregas_de_cada_una_y_la_proxima(self, uni, moodle):
+        moodle["eventos"] = [_ev_curso(10, 50, 1, "Memoria"), _ev_curso(11, 5, 1, "Test 2")]
+        a = {x["id"]: x for x in main._moodle_uni()["asignaturas"]}
+        assert a[1]["pendientes"] == 2 and a[1]["proxima"]["nombre"] == "Test 2"
+        assert a[2]["pendientes"] == 0 and a[2]["proxima"] is None
+
+    def test_una_vieja_con_algo_pendiente_sale_igual(self, uni, moodle):
+        moodle["eventos"] = [_ev_curso(10, 20, 3)]
+        assert 3 in {x["id"] for x in main._moodle_uni()["asignaturas"]}
+
+    def test_sin_notas_sale_igual_y_dice_que_falta(self, uni):
+        uni["fallan"].add("gradereport_overview_get_course_grades")
+        r = main._moodle_uni()
+        assert r["incompleto"] == ["notas"] and all(a["nota"] is None for a in r["asignaturas"])
+
+    def test_sin_entregas_no_dice_cero(self, uni):
+        # «0 pendientes» porque Moodle no contestó sería mentir.
+        uni["fallan"].add("core_calendar_get_action_events_by_timesort")
+        r = main._moodle_uni()
+        assert r["incompleto"] == ["entregas"] and all(a["pendientes"] is None for a in r["asignaturas"])
+
+    def test_lleva_copia_y_el_usuario_se_pregunta_una_vez(self, uni, mock_requests):
+        main._moodle_uni()
+        main._moodle_uni()
+        llamadas = [c[2]["data"]["wsfunction"] for c in mock_requests.called("POST", "server.php")]
+        assert llamadas.count("core_enrol_get_users_courses") == 1
+        assert llamadas.count("core_webservice_get_site_info") == 1
+
+    def test_el_endpoint(self, client, auth_headers, uni):
+        r = client.get("/moodle/uni", headers=auth_headers).json()
+        assert r["activo"] is True and r["asignaturas"][0]["url"].endswith("/course/view.php?id=1")
+
+    def test_sin_cursos_responde_apagado(self, client, auth_headers, uni):
+        uni["fallan"].add("core_enrol_get_users_courses")
+        r = client.get("/moodle/uni", headers=auth_headers).json()
+        assert r["activo"] is False and r["asignaturas"] == []
+
+    def test_pide_sesion(self, client):
+        assert client.get("/moodle/uni").status_code in (401, 403)
+
+    @pytest.mark.parametrize("crudo,limpio", [
+        ("2026-27 Fundamentos de Óptica (es)(12)", "Fundamentos de Óptica"),
+        ("2026-27 Quantum Basics (English)", "Quantum Basics"),
+        ("2025-26 [CLOSED] ROBOT DESIGN [ABC &amp; XYZ] (en)(7) ", "ROBOT DESIGN"),
+        ("2024-25 HARDWARE LAB (Meta ABC &amp; XYZ)", "HARDWARE LAB (Meta ABC & XYZ)"),
+        ("Curso de bienvenida", "Curso de bienvenida"),
+    ])
+    def test_nombres(self, crudo, limpio):
+        assert main._moodle_nombre_curso(crudo) == limpio
