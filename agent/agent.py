@@ -45,7 +45,7 @@ load_dotenv()
 
 API_BASE      = os.getenv("LA_API_BASE", "https://api.lifeassistantbackend.bid")
 AGENT_ID      = "pc-mikel"
-AGENT_VERSION = "1.6.0"
+AGENT_VERSION = "1.6.1"
 WORKER_ID     = f"{AGENT_ID}-{uuid.uuid4().hex[:8]}"
 
 # Token con el que el agente habla con el backend. AGENT_TOKEN es un token de servicio
@@ -64,23 +64,24 @@ HEARTBEAT_INTERVAL = 10    # segundos entre heartbeats mientras espera job
 POLL_INTERVAL      = 5     # segundos entre checks de job pendiente
 CLAUDE_LAUNCH_WAIT = 6     # segundos esperando a que Claude Desktop cargue
 
-# Los dos clics que llevan a Cowork, en fracción de pantalla (no en píxeles: así el
-# mismo número vale si cambia la resolución). Claude Desktop **no tiene atajo de teclado
-# para cambiar entre Chat, Cowork y Code** — lo pide una issue abierta (anthropics/
-# claude-code#18818) y hoy solo se llega pinchando. El Ctrl+2 que había aquí funcionaba
-# con una versión anterior de la app; cuando dejó de existir, la instrucción se quedaba
-# escrita en el chat normal, que responde en vez de ponerse a trabajar.
+# Claude Desktop tiene dos modos, Chat/Cowork y Code, y abre en el último que se usó: si
+# la última vez se cerró en Code, la instrucción acababa pegada en una sesión de código.
+# Ctrl+Alt+Izquierda pasa de Code a Chat/Cowork, y estando ya en Chat/Cowork no hace
+# nada (no da la vuelta), así que pulsarlo siempre es seguro. Dentro de Chat/Cowork no
+# hay que elegir: la app decide sola si lo que le pides es de chat o de Cowork.
 #
-# Son lo único de todo este camino que depende de dónde estén las cosas en pantalla, por
-# eso salen del entorno: si la app mueve el compositor, se ajustan sin tocar el código.
-# Medidos sobre 2560x1440 con la ventana maximizada.
+# Los dos clics, en fracción de pantalla (no en píxeles: así el mismo número vale si
+# cambia la resolución). Son lo único de todo este camino que depende de dónde estén las
+# cosas en pantalla, por eso salen del entorno: si la app mueve algo, se ajustan sin
+# tocar el código, y `agent.py --posicion` dice qué número poner. Ventana maximizada.
 #   1) «New» en la barra lateral, para dejar la pantalla inicial: ahí el compositor está
 #      centrado y su posición es predecible (en una conversación abierta está abajo).
-#   2) «Cowork» en el selector Chat/Cowork del propio compositor.
-COWORK_NEW_XY    = (float(os.getenv("COWORK_NEW_X")    or 0.0219),
-                    float(os.getenv("COWORK_NEW_Y")    or 0.0757))
-COWORK_TOGGLE_XY = (float(os.getenv("COWORK_TOGGLE_X") or 0.4629),
-                    float(os.getenv("COWORK_TOGGLE_Y") or 0.4431))
+#   2) El campo de texto del compositor. Antes el foco lo dejaba el clic en el selector
+#      Chat/Cowork, que ya no existe; sin este clic el Win+V pegaba en ninguna parte.
+COWORK_NEW_XY   = (float(os.getenv("COWORK_NEW_X")   or 0.0219),
+                   float(os.getenv("COWORK_NEW_Y")   or 0.0757))
+COWORK_TEXTO_XY = (float(os.getenv("COWORK_TEXTO_X") or 0.5),
+                   float(os.getenv("COWORK_TEXTO_Y") or 0.41))
 # Ventana de reintentos del PRIMER sondeo. El agente arranca a la vez que Windows, y
 # tras un WOL la tarjeta puede no tener IP todavía: el primer intento moría con un
 # fallo de DNS a los 200 ms y el arranque se perdía entero — justo el que traía el job.
@@ -502,9 +503,16 @@ def build_entrega_instruction(entrega: dict, carpeta: str, bajados: list, fallid
         partes.append(f"- {', '.join(bajados)}: lo que el profesor adjuntó al enunciado.\n")
     if fallidos:
         partes.append(f"\nNo he podido bajar estos adjuntos: {', '.join(fallidos)}.\n")
-    if not enunciado and not bajados:
-        partes.append("\nEn Moodle esta entrega no tiene enunciado escrito ni adjuntos: lo "
-                      "más probable es que esté en los materiales del curso.\n")
+    # Sin enunciado escrito, Claude tiene que saber que no lo tiene delante: si no, el
+    # ENUNCIADO.md vacío se lee como «no hay nada que hacer» o se inventa uno.
+    if not enunciado and bajados:
+        partes.append("\nEn Moodle la tarea no trae el enunciado escrito: lo más probable "
+                      "es que esté en los adjuntos. Si tampoco está ahí, búscalo tú en los "
+                      "materiales del curso.\n")
+    elif not enunciado:
+        partes.append("\nEn Moodle esta entrega no tiene enunciado escrito ni adjuntos: "
+                      "tienes que buscarlo tú. Lo más probable es que esté en los materiales "
+                      "del curso (la sección donde está la tarea, los apuntes, los avisos).\n")
     if entrega.get("moodle_tarea"):
         partes.append(
             f"\nSi tienes las herramientas de Moodle (el servidor «moodle»), úsalas para "
@@ -517,8 +525,9 @@ def build_entrega_instruction(entrega: dict, carpeta: str, bajados: list, fallid
                       "----- FIN DEL ENUNCIADO -----\n")
     partes.append(
         "\nPor favor:\n"
-        "1. Lee el enunciado y los adjuntos.\n"
-        "2. Resuelve la entrega y deja el resultado en esa misma carpeta, en el formato "
+        + ("1. Lee el enunciado y los adjuntos.\n" if enunciado else
+           "1. Encuentra el enunciado como te digo arriba, y léelo con los adjuntos.\n")
+        + "2. Resuelve la entrega y deja el resultado en esa misma carpeta, en el formato "
         "que pida el enunciado (si no dice ninguno, un documento de Word), con un nombre "
         "que empiece por «SOLUCION».\n"
         f"3. {_NO_TOQUES_ALUD}\n\n"
@@ -549,6 +558,10 @@ def build_cowork_instruction(titulo: str, alud_url: str, carpeta: str = "") -> s
         f"Ya te la he dejado abierta en una pestaña de Edge.\n\n"
         f"URL de la entrega: {alud_url}\n\n"
         f"Título: {titulo}\n\n"
+        f"No he podido traer el enunciado de Moodle, así que no sé si está escrito en la "
+        f"tarea: léelo en la página. Si la tarea no lo trae, búscalo tú en sus adjuntos y "
+        f"en los materiales del curso (con las herramientas de Moodle, el servidor "
+        f"«moodle», si las tienes).\n\n"
         + (
             f"Si al llegar te encuentras la pantalla de inicio de sesión de Alud en vez de la entrega, entra tú: pulsa el botón «{DEUSTO_BUTTON}», y cuando Google pregunte por la cuenta elige {TARGET_ACCOUNT}. Puede abrirse en una ventana nueva. Si después salta Okta pidiendo aprobación en el móvil, espera a que llegue: el usuario la acepta desde el teléfono.\n\n"
             if TARGET_ACCOUNT else
@@ -695,7 +708,12 @@ def _pegar_en_cowork(instruccion: str):
     _focus_claude_window()
     time.sleep(1.5)  # tiempo suficiente para que la ventana esté lista
 
-    # ── Hasta Cowork, a base de clics (no hay atajo; ver COWORK_NEW_XY) ──
+    # ── Hasta el compositor de Chat/Cowork (ver COWORK_NEW_XY) ──
+    # Fuera de Code primero: «New» en Code abre una sesión de código, no una tarea.
+    log.info("Modo Chat/Cowork (Ctrl+Alt+Izquierda)...")
+    pyautogui.hotkey("ctrl", "alt", "left")
+    time.sleep(1.5)
+
     screen_w, screen_h = pyautogui.size()
 
     # 1) «New»: deja la pantalla inicial, con el compositor centrado y en sitio conocido.
@@ -703,11 +721,10 @@ def _pegar_en_cowork(instruccion: str):
     pyautogui.click(int(screen_w * COWORK_NEW_XY[0]), int(screen_h * COWORK_NEW_XY[1]))
     time.sleep(2)
 
-    # 2) «Cowork» en el selector Chat/Cowork del compositor. Deja el cursor dentro del
-    #    campo de texto, así que no hace falta un tercer clic para enfocarlo.
-    log.info("Clic en «Cowork»...")
-    pyautogui.click(int(screen_w * COWORK_TOGGLE_XY[0]), int(screen_h * COWORK_TOGGLE_XY[1]))
-    time.sleep(1.5)
+    # 2) El campo de texto, para que el pegado caiga dentro.
+    log.info("Clic en el campo de texto...")
+    pyautogui.click(int(screen_w * COWORK_TEXTO_XY[0]), int(screen_h * COWORK_TEXTO_XY[1]))
+    time.sleep(1.0)
 
     # Win+V → abre historial → Enter selecciona el más reciente → Enter envía
     log.info("Pegando instrucción via historial de portapapeles...")
@@ -1563,4 +1580,14 @@ if __name__ == "__main__":
         _i = sys.argv.index("--pantallas")
         _modo = sys.argv[_i + 1] if len(sys.argv) > _i + 1 else PANTALLAS_RESTAURAR
         sys.exit(0 if cambiar_modo_pantallas(_modo.strip().lower()) else 1)
+    # `agent.py --posicion`: para calibrar COWORK_NEW_*/COWORK_TEXTO_*. Pon el ratón
+    # encima de lo que toque (con Claude maximizado) y espera: dice qué poner en el .env.
+    if "--posicion" in sys.argv:
+        for _s in range(5, 0, -1):
+            print(f"Leyendo la posición del ratón en {_s}...")
+            time.sleep(1)
+        _ancho, _alto = pyautogui.size()
+        _x, _y = pyautogui.position()
+        print(f"Pantalla {_ancho}x{_alto}, ratón en ({_x}, {_y}) → X={_x / _ancho:.4f} Y={_y / _alto:.4f}")
+        sys.exit(0)
     main()

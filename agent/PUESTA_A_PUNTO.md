@@ -34,6 +34,10 @@ CLAUDE.md personal (antes estaba ignorado), el `git pull` puede chocar.
 - [ ] `git pull` en la carpeta del repo (trae el `agent/agent.py` efímero + despachador).
 - [ ] Reinstalar dependencias si hace falta: `pip install -r backend/requirements.txt`.
 - [ ] Revisar el `.env` del agente: `AGENT_TOKEN`, `ALUD_ACCOUNT`, `ALUD_ALLOWED_HOSTS`.
+      Para las entregas, además, los dos clics hasta Claude: `COWORK_NEW_X/Y` («New» en
+      la barra lateral) y `COWORK_TEXTO_X/Y` (el campo de texto de la pantalla inicial).
+      Para medirlos, con Claude maximizado, pon el ratón encima y ejecuta
+      `python agent.py --posicion`. Las antiguas `COWORK_TOGGLE_X/Y` ya no se usan.
       **`AGENT_TOKEN` sustituye a `LA_TOKEN`**: es un token de servicio que no caduca y
       debe valer lo mismo que la variable `AGENT_TOKEN` del backend. El JWT del
       dashboard duraba 30 días y al expirar el backend respondía 401 a todo, con lo que

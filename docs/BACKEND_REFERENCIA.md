@@ -250,8 +250,8 @@ está duplicado en los dos lados y **tienen que coincidir**.
 
 **Agente** (`agent/.env`): `AGENT_TOKEN` (mismo valor que en el backend), `LA_API_BASE`,
 `LA_TOKEN` (solo respaldo — caduca), `ALUD_ACCOUNT`,
-`COWORK_NEW_X`/`COWORK_NEW_Y`/`COWORK_TOGGLE_X`/`COWORK_TOGGLE_Y` (los dos clics hasta
-Cowork, en fracción de pantalla),
+`COWORK_NEW_X`/`COWORK_NEW_Y`/`COWORK_TEXTO_X`/`COWORK_TEXTO_Y` (los dos clics hasta el
+compositor, en fracción de pantalla; `agent.py --posicion` los mide),
 `ALUD_ALLOWED_HOSTS`, `APOLLO_EXE`/`APOLLO_SERVICIO`/`APOLLO_TIMEOUT` (con las `SUNSHINE_*` como respaldo),
 `VPN_TIPO`/`TAILSCALE_EXE`/`TAILSCALE_SERVICIO`/`VPN_TIMEOUT`,
 `PANTALLAS_STREAMING`/`PANTALLAS_RESTAURAR`/`DISPLAYSWITCH_EXE`, `ARRANQUE_ESPERA_RED`,

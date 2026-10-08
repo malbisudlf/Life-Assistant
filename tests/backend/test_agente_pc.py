@@ -487,3 +487,54 @@ class TestNombreSeguro:
         assert agente.carpeta_entregas() == agente.os.path.join(r"C:\Cowork", "Entregas")
         monkeypatch.setattr(agente, "CLAUDE_DESKTOP_CONFIG", str(tmp_path / "no-existe.json"))
         assert agente.carpeta_entregas().endswith(agente.os.path.join("Documents", "Entregas"))
+
+
+# ── Instrucción sin enunciado y camino hasta el compositor ─────────────────────
+
+class TestEntregaSinEnunciadoEscrito:
+    def _texto(self, agente, enunciado, bajados):
+        return agente.build_entrega_instruction(
+            {"nombre": "P2", "enunciado": enunciado}, "C:/Entregas/P2", bajados, [])
+
+    def test_con_enunciado_no_manda_a_buscarlo(self, agente):
+        texto = self._texto(agente, "Implementa quicksort.", [])
+        assert "INICIO DEL ENUNCIADO" in texto and "búscalo" not in texto
+
+    def test_sin_enunciado_pero_con_adjuntos_mira_ahi_y_luego_busca(self, agente):
+        texto = self._texto(agente, "", ["practica.pdf"])
+        assert "no trae el enunciado escrito" in texto and "adjuntos" in texto
+        assert "búscalo tú" in texto
+        assert "1. Encuentra el enunciado" in texto
+
+    def test_sin_enunciado_ni_adjuntos_le_dice_que_lo_busque(self, agente):
+        texto = self._texto(agente, "", [])
+        assert "tienes que buscarlo tú" in texto
+        assert "1. Encuentra el enunciado" in texto
+
+    def test_por_edge_avisa_de_que_no_se_trajo(self, agente):
+        texto = agente.build_cowork_instruction("P2", "https://alud.deusto.es/mod/assign/view.php?id=1")
+        assert "No he podido traer el enunciado de Moodle" in texto
+        assert "búscalo tú" in texto
+
+
+class TestCaminoHastaElCompositor:
+    def test_sale_de_code_antes_de_pinchar_y_pincha_en_el_texto(self, agente, monkeypatch):
+        pasos = []
+        pg = agente.pyautogui
+        monkeypatch.setattr(pg, "hotkey", lambda *t: pasos.append(("tecla",) + t), raising=False)
+        monkeypatch.setattr(pg, "press", lambda t: pasos.append(("pulsa", t)), raising=False)
+        monkeypatch.setattr(pg, "click", lambda x, y: pasos.append(("clic", x, y)), raising=False)
+        monkeypatch.setattr(pg, "size", lambda: (2000, 1000), raising=False)
+        monkeypatch.setattr(agente.subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setattr(agente.subprocess, "Popen", lambda *a, **k: None)
+        monkeypatch.setattr(agente, "_focus_claude_window", lambda: True)
+        monkeypatch.setattr(agente, "COWORK_TEXTO_XY", (0.5, 0.4))
+
+        agente._pegar_en_cowork("hola")
+
+        # Lo primero, salir de Code: «New» en Code abriría una sesión de código.
+        assert pasos[0] == ("tecla", "ctrl", "alt", "left")
+        clics = [p for p in pasos if p[0] == "clic"]
+        assert clics[-1] == ("clic", 1000, 400)
+        # Se pega después del clic en el campo de texto, no antes.
+        assert pasos.index(("tecla", "win", "v")) > pasos.index(clics[-1])

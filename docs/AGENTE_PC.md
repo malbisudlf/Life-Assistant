@@ -197,8 +197,15 @@ siempre, que es lo que describe el resto de esta sección, con un cambio: Cowork
 solución en una carpeta y no guarda nada en Alud.
 
 Flujo: `msedge.exe <url>` → la entrega abierta en el Edge del usuario → Claude Desktop →
-clic en «New» → clic en «Cowork» → Win+V → Enter → Enter. **El agente no controla el
-navegador**: lo abre y se aparta.
+Ctrl+Alt+Izquierda → clic en «New» → clic en el campo de texto → Win+V → Enter → Enter.
+**El agente no controla el navegador**: lo abre y se aparta. (El camino hasta Claude
+Desktop, de Ctrl+Alt+Izquierda en adelante, es el mismo con o sin enunciado.)
+
+Tanto aquí como con el enunciado de Moodle, **a Claude se le dice cuándo no tiene el
+enunciado delante**: si la tarea no lo trae escrito (con o sin adjuntos) o si no se ha
+podido traer de Moodle, la instrucción le dice que lo busque —adjuntos, materiales del
+curso, el servidor «moodle»— en vez de dejarle un `ENUNCIADO.md` vacío que puede leer
+como «no hay nada que hacer».
 
 - **Se llama a `msedge.exe <url>` sin un solo flag**, y cada ausencia cuenta:
   - Sin `--user-data-dir`, Edge arranca con el perfil de siempre y **la cuenta del
@@ -245,20 +252,24 @@ navegador**: lo abre y se aparta.
   sobre la página entera: lo que hay escrito ahí lo pone un tercero y no puede valer como
   orden. La validación de `alud_url` contra la lista blanca no se toca: sigue en los tres
   sitios.
-- **Para llegar a Cowork hay que pinchar: no hay atajo de teclado.** Aquí había un
-  `Ctrl+2` que funcionaba con una versión anterior de la app. Cuando dejó de existir, el
-  síntoma fue engañoso: todo el camino parecía ir bien —Claude se abría, la instrucción
-  se pegaba, se enviaba— pero aterrizaba en el **chat normal**, que contesta en vez de
-  ponerse a trabajar. Cambiar entre Chat, Cowork y Code solo se puede con el ratón; lo
-  pide una issue abierta (anthropics/claude-code#18818). Y la app es Electron: UI
-  Automation no ve su contenido (solo los tres botones de la barra de título), así que
-  tampoco se puede localizar el botón por accesibilidad.
-- **Los dos clics** (`COWORK_NEW_XY`, `COWORK_TOGGLE_XY`) van en **fracción de pantalla**,
+- **Claude Desktop tiene dos modos, Chat/Cowork y Code, y abre en el último usado.** Si
+  la última vez se cerró en Code, la instrucción acababa en una sesión de código. Por
+  eso lo primero es **Ctrl+Alt+Izquierda**, que pasa de Code a Chat/Cowork y, estando ya
+  ahí, no hace nada (no da la vuelta): pulsarlo siempre es seguro. Dentro de Chat/Cowork
+  no se elige nada: la app decide sola si es trabajo de chat o de Cowork. (Antes había un
+  selector Chat/Cowork en el compositor que se pinchaba, y antes aún un `Ctrl+2`; los dos
+  desaparecieron con versiones nuevas de la app, y el síntoma fue siempre el mismo: todo
+  parecía ir bien pero la instrucción aterrizaba donde no era.) La app es Electron: UI
+  Automation no ve su contenido, así que no se pueden localizar botones por
+  accesibilidad.
+- **Los dos clics** (`COWORK_NEW_XY`, `COWORK_TEXTO_XY`) van en **fracción de pantalla**,
   no en píxeles, y salen del entorno para poder ajustarlos sin tocar el código. Primero
   «New» en la barra lateral —que deja la pantalla inicial, donde el compositor está
   centrado y en un sitio predecible; con una conversación abierta está abajo— y luego
-  «Cowork» en el selector Chat/Cowork del propio compositor. Ese segundo clic deja el
-  cursor dentro del campo de texto, así que no hace falta un tercero para enfocarlo.
+  **el propio campo de texto**: sin ese clic el foco no está en el compositor y el Win+V
+  pega en ninguna parte (es lo que pasó cuando desapareció el selector, cuyo clic dejaba
+  el cursor dentro). Para medirlos: Claude maximizado, ratón encima, y
+  `python agent.py --posicion` dice qué `X`/`Y` poner en el `.env`.
 - **Claude Desktop** está instalado como app de la Microsoft Store: se lanza con
   `explorer.exe shell:AppsFolder\<APPID>` — **no** con el exe `claude.exe`, que es el CLI.
 - **Foco de la ventana**: `_focus_claude_window()` usa PowerShell + win32
