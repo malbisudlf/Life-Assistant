@@ -26,6 +26,14 @@ aquí no son opcionales:
    desde otra máquina de la LAN (o desde otro contenedor) contestaba 421 a todo. Esa
    protección existe para servidores locales SIN autenticación; aquí la puerta es la
    llave, que un navegador engañado no conoce.
+
+DOS MODOS, según haya o no `MOODLE_MCP_URL_PUBLICA`:
+
+- **Sin ella (LAN)**: solo la llave, en `Authorization: Bearer`. Es lo que usa Jarvis.
+- **Con ella (público, por el Cloudflare Tunnel)**: además, el inicio de sesión OAuth que
+  pide la app de Claude para un conector propio (`oauth.py`, con el porqué). La llave
+  sigue valiendo igual. Sin `MOODLE_MCP_CLAVE` este modo no arranca: un OAuth sin clave
+  sería dar acceso a tus notas a cualquiera que encontrara la URL.
 """
 
 import hmac
@@ -46,6 +54,12 @@ os.environ["MOODLE_URL"] = _url
 LLAVE = os.getenv("MOODLE_MCP_TOKEN", "").strip()
 if len(LLAVE) < 32:
     sys.exit("MOODLE_MCP_TOKEN falta o es corto (mínimo 32 caracteres): openssl rand -hex 32")
+
+URL_PUBLICA = os.getenv("MOODLE_MCP_URL_PUBLICA", "").strip().rstrip("/")
+CLAVE       = os.getenv("MOODLE_MCP_CLAVE", "")
+if URL_PUBLICA and (not URL_PUBLICA.startswith("https://") or len(CLAVE) < 12):
+    sys.exit("Con MOODLE_MCP_URL_PUBLICA hacen falta una URL https:// y MOODLE_MCP_CLAVE "
+             "(mínimo 12 caracteres): ver docker/moodle-mcp/.env.example")
 
 import requests                                         # noqa: E402
 import uvicorn                                          # noqa: E402
@@ -102,8 +116,34 @@ class Puerta:
         return await self.app(scope, receive, send)
 
 
+def _app():
+    if not URL_PUBLICA:
+        return Puerta(mcp.streamable_http_app())
+
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+    from oauth import Proveedor, Verificador
+
+    proveedor = Proveedor(URL_PUBLICA, CLAVE,
+                          os.getenv("MOODLE_MCP_DATOS", "/datos/oauth.json"))
+    mcp.settings.auth = AuthSettings(
+        issuer_url=URL_PUBLICA, resource_server_url=f"{URL_PUBLICA}/mcp",
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+        revocation_options=RevocationOptions(enabled=True),
+        # El token se comprueba contra lo guardado, que ya dice para qué se emitió.
+        validate_token_resource=False,
+    )
+    # Por los atributos y no por el constructor: el `FastMCP` lo crea el paquete original
+    # al importarse, y este fichero no toca su código.
+    mcp._auth_server_provider = proveedor
+    mcp._token_verifier = Verificador(proveedor, LLAVE)
+    mcp.custom_route("/entrar", methods=["GET", "POST"])(proveedor.pagina)
+    # Sin `Puerta`: con OAuth, el 401 lo da el SDK, y lo da con el `WWW-Authenticate`
+    # que la app de Claude necesita para encontrar dónde iniciar sesión.
+    return mcp.streamable_http_app()
+
+
 if __name__ == "__main__":
-    uvicorn.run(Puerta(mcp.streamable_http_app()), host="0.0.0.0",
+    uvicorn.run(_app(), host="0.0.0.0",
                 port=int(os.getenv("MOODLE_MCP_PUERTO", "8765")),
                 # Sin el registro de accesos de uvicorn: no lleva secretos (la llave va en
                 # cabecera), pero en un contenedor que nadie mira es ruido en el disco.

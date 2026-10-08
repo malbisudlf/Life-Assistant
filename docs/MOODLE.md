@@ -200,6 +200,55 @@ opcional (el porqué de cada cosa, en el propio fichero):
 (importa `mcp.server.fastmcp`, que ya no existe), y es lo que pip instala hoy por defecto.
 Subir moodle-mcp obliga a volver a mirar que ninguna herramienta escribe.
 
+## Desde la app de Claude (conector propio)
+
+**Por qué con la configuración de LAN no funciona**: un conector de claude.ai (web,
+escritorio, móvil, y de paso las sesiones de Claude Code en la nube) **no lo llama tu
+dispositivo, lo llaman los servidores de Anthropic** (salen de `160.79.104.0/21`). Pide
+dos cosas que el modo LAN no tiene:
+
+1. **Una URL https pública.** `http://<IP de caja>:8765` solo existe dentro de casa.
+2. **Una autenticación que esa app sepa hacer.** La llave fija en una cabecera
+   («Request headers» del diálogo) está en beta para unas pocas organizaciones y en un
+   plan personal no aparece. Lo que hace siempre es **OAuth**.
+
+Por eso el servidor tiene un **modo público** (`MOODLE_MCP_URL_PUBLICA` +
+`MOODLE_MCP_CLAVE`, en `docker/moodle-mcp/oauth.py`). Es un servidor OAuth mínimo
+montado sobre el del SDK de MCP: el SDK hace el descubrimiento, el registro dinámico y
+PKCE, y aquí solo se escribe lo que cada uno tiene que decidir:
+
+- **Quién da el permiso**: la página `/entrar`, que pide `MOODLE_MCP_CLAVE`. No hay
+  usuarios: es un servidor de una persona. Cinco fallos en un cuarto de hora la cierran.
+- **A dónde puede volver el permiso**: solo a la app de Claude
+  (`https://claude.ai/api/mcp/auth_callback`) y a Claude Code en local (localhost). Un
+  cliente que registre otra dirección se rechaza: si no, bastaría registrar uno que
+  devuelva el código a otra web y mandarte el enlace a la página de verdad.
+- **Dónde se guarda**: `/datos/oauth.json`, en un volumen, con **los tokens hasheados**.
+  Sin volumen, cada reconstrucción obligaría a reconectar la app a mano.
+- Tokens de acceso de una hora y de refresco de 90 días, **rotados** en cada refresco.
+
+**La llave fija sigue valiendo en los dos modos**, así que Jarvis no se entera del cambio,
+ni Claude Desktop por `mcp-remote` (sección anterior): ese puente sigue siendo la vía del
+escritorio del PC, y el conector es lo que lo lleva además a la web, al móvil y a las
+sesiones de Claude Code en la nube.
+Probado en local el 2026-10-08: el flujo entero de la app (descubrimiento → registro →
+clave → código → token → herramientas), el rechazo de un registro con otra dirección,
+de una clave mala, de un código reusado y de un token ya rotado, y que el permiso
+sobrevive a un reinicio. **No probado aún contra claude.ai de verdad.**
+
+Para encenderlo:
+
+1. Un hostname del Cloudflare Tunnel de `caja` (por ejemplo `moodle.<tu dominio>`) que
+   apunte al puerto 8765.
+2. En el `.env` del contenedor, `MOODLE_MCP_URL_PUBLICA=https://moodle.<tu dominio>` y
+   una `MOODLE_MCP_CLAVE` (≥ 12 caracteres), y `docker compose up -d --build`.
+3. En claude.ai: **Personalizar → Conectores → Añadir conector personalizado**, con la
+   URL `https://moodle.<tu dominio>/mcp`. Al pulsar **Conectar** se abre la página de la
+   clave; se pone y queda conectado en la web, el escritorio y el móvil.
+
+**Para Claude Code no hace falta nada de esto**: sabe mandar la llave en una cabecera
+(`claude mcp add`, abajo), y en `caja` llega por la LAN.
+
 ## Puesta en marcha
 
 1. **El token.** En Alud: Preferencias → Claves de seguridad
@@ -216,7 +265,7 @@ Subir moodle-mcp obliga a volver a mirar que ninguna herramienta escribe.
    (si ya hay otros servidores, se añade al mismo objeto).
 5. **Apagar la rutina de ALUD** que metía las entregas a mano en el calendario.
 
-El mismo contenedor sirve para una sesión de Claude Code:
+El mismo contenedor sirve para una sesión de Claude Code en `caja` (o en otra máquina de casa):
 `claude mcp add --transport http moodle http://<IP de caja>:8765/mcp --header "Authorization: Bearer <MOODLE_MCP_TOKEN>"`.
 
 ## Variables
