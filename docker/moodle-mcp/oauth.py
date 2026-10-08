@@ -143,8 +143,8 @@ class Proveedor:
             form, solicitud = {}, str(request.query_params.get("solicitud") or "")
         pendiente = self.solicitudes.get(solicitud)
         if not pendiente or pendiente[2] < time.time():
-            return _html("Este enlace ha caducado. Vuelve a conectar desde la app de Claude.",
-                         estado=400)
+            return _html("Este enlace ya no vale: caducó o ya se usó. Cierra esta pestaña y "
+                         "vuelve a pulsar «Conectar» en la app de Claude.", estado=400)
         cliente, params, _ = pendiente
         if request.method == "GET":
             return _formulario(solicitud, cliente, params)
@@ -250,18 +250,31 @@ _CABECERAS = {
     # Una página que da permisos no se deja meter en un iframe ajeno: sería pedirte la
     # clave con un botón de otro encima.
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
 
 
-def _html(cuerpo: str, estado: int = 200) -> HTMLResponse:
+def _origen(uri: str) -> str:
+    partes = urlsplit(uri)
+    return f"{partes.scheme}://{partes.netloc}"
+
+
+def _html(cuerpo: str, estado: int = 200, vuelve: str = "") -> HTMLResponse:
+    # `form-action` incluye el origen al que vuelve el permiso, y no es un adorno: Chrome
+    # aplica esa directiva también a la REDIRECCIÓN que sigue al envío del formulario.
+    # Con solo 'self', la clave era buena y el permiso se daba, pero el navegador
+    # bloqueaba en silencio la vuelta a claude.ai; el segundo Enter ya encontraba la
+    # solicitud gastada y decía «caducado». Pasó el 2026-10-08, al conectar el conector
+    # por primera vez. El origen ya viene filtrado por `_redireccion_permitida`.
+    destinos = f"'self' {vuelve}".strip()
     return HTMLResponse(
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
         "<title>Moodle · Life Assistant</title>"
         "<body style='font-family:system-ui;max-width:26rem;margin:3rem auto;padding:0 1rem'>"
-        f"{cuerpo}</body>", status_code=estado, headers=_CABECERAS)
+        f"{cuerpo}</body>", status_code=estado,
+        headers={**_CABECERAS, "Content-Security-Policy":
+                 f"default-src 'none'; style-src 'unsafe-inline'; form-action {destinos}"})
 
 
 def _formulario(solicitud, cliente, params, error: str = "", estado: int = 200) -> HTMLResponse:
@@ -279,4 +292,5 @@ def _formulario(solicitud, cliente, params, error: str = "", estado: int = 200) 
         "<p><input type=password name=clave autocomplete=current-password placeholder=Clave "
         "style='width:100%;padding:.5rem' autofocus></p>"
         "<button name=accion value=permitir>Permitir</button> "
-        "<button name=accion value=denegar>No</button></form>", estado)
+        "<button name=accion value=denegar>No</button></form>", estado,
+        vuelve=_origen(str(params.redirect_uri)))

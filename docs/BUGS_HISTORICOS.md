@@ -1141,3 +1141,14 @@
   dos listas con los `create table` de las migraciones.
   - Moraleja: **una lista blanca sin su lista negra no distingue «decidido» de
     «olvidado».** Escribe las dos y haz que un test compruebe que entre ambas está todo.
+
+- **El conector de Moodle no conectaba: la clave era buena y la página parecía no hacer
+  nada.** La página de permiso de `docker/moodle-mcp/oauth.py` llevaba
+  `Content-Security-Policy: form-action 'self'`, y Chrome aplica esa directiva también a la
+  redirección que sigue al envío del formulario. El servidor daba el permiso y redirigía a
+  `claude.ai`, y el navegador bloqueaba esa vuelta sin enseñar nada; el segundo Enter
+  encontraba la solicitud ya gastada y decía «caducado». La prueba en local con
+  `requests` pasaba entera porque `requests` no aplica CSP: hizo falta reproducirlo en
+  Chromium. Hoy `form-action` incluye el origen al que vuelve el permiso.
+  - Moraleja: **un flujo que acaba en un navegador se prueba en un navegador.** Un cliente
+    HTTP no ve las políticas que solo aplica el navegador, y ahí estaba el fallo entero.
