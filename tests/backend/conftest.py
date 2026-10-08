@@ -207,6 +207,10 @@ def _limpiar_estado():
     # El id del calendario de clases: cada test monta el suyo, y con la copia del
     # anterior no se pediría la lista de calendarios que el test ha simulado.
     main._clases_cal_cache = None
+    # Las copias de Moodle para el widget Uni: sin vaciarlas, un test le serviría al
+    # siguiente sus asignaturas sin pasar por su mock.
+    main._moodle_uni_cache.clear()
+    main._moodle_usuario.clear()
     main._presencia_cache = None
     # El lugar en memoria (crudo, firme, última llegada) y las clases recordadas: sin
     # vaciarlos, un test que te deja en el gimnasio dejaría ahí al siguiente.

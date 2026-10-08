@@ -438,6 +438,11 @@ MOODLE_CADA_MIN      = int(os.getenv("MOODLE_CADA_MIN", "30"))
 MOODLE_AVISO_HORAS   = int(os.getenv("MOODLE_AVISO_HORAS", "36"))
 # Cuántos días hacia atrás se siguen mirando las ya vencidas sin entregar.
 MOODLE_VENCIDAS_DIAS = int(os.getenv("MOODLE_VENCIDAS_DIAS", "7"))
+# Qué cuenta como «este curso» en el widget Uni: lo que empezó en los últimos tantos días
+# y no ha terminado. Moodle devuelve las asignaturas de TODOS los años en los que has
+# estado matriculado (35 el día que se escribió esto), y la mayoría son de cursos
+# pasados que siguen abiertos con `enddate` a 0.
+MOODLE_CURSO_DIAS    = int(os.getenv("MOODLE_CURSO_DIAS", "300"))
 
 # Economía en el resumen: dos secciones que no salen de ningún sensor. Un par de
 # titulares de economía general y un término económico distinto cada día. Aquí solo se
@@ -2565,6 +2570,7 @@ def _moodle_entrega(ev) -> Optional[dict]:
         "nombre":  nombre[:200] or "(sin título)",
         "curso":   html_mod.unescape(str(curso.get("fullname") or curso.get("shortname") or "")).strip()[:120],
         "tipo":    str(ev.get("modulename") or "")[:30],
+        "curso_id": curso.get("id") if isinstance(curso.get("id"), int) else None,
         "vence":   datetime.fromtimestamp(vence, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "vencida": vence < time.time(),
         "url":     url[:500],
@@ -2963,6 +2969,117 @@ def _j_moodle_entregas() -> dict:
         return {"activo": False, "motivo": str(e), "entregas": []}
     # Nombres y cursos los escribe el profesorado: se le pasan al modelo como DATO.
     return {"activo": True, "aviso": _AVISO_WEB, "entregas": entregas}
+
+
+# ── Moodle: el widget Uni ──
+# Una fila por asignatura de este curso: la nota que enseña Moodle, el progreso si la
+# asignatura lo lleva y las entregas que quedan. Se pide al cargar el dashboard, así que
+# lleva copia en memoria: son tres llamadas a un Moodle que no es nuestro.
+MOODLE_UNI_CACHE_S = 600
+_moodle_uni_cache: dict = {}
+_moodle_usuario: dict = {}
+# Lo que Alud añade al nombre y no dice nada: el año delante («2026-27 »), los códigos
+# entre corchetes y los paréntesis de idioma y grupo del final («(es)(12)», «(7,21)»,
+# «(English)»). Un paréntesis con minúsculas de verdad se queda: «Física (Mecánica
+# clásica)» no es un código.
+_MOODLE_NOMBRE_ANIO   = re.compile(r"^\s*\d{4}-\d{2,4}\s+")
+_MOODLE_NOMBRE_CORCH  = re.compile(r"\s*\[[^\]]*\]")
+_MOODLE_NOMBRE_COLA   = re.compile(r"(\s*\((?:es|en|eu|English|Español|Euskera|[A-Z0-9 ,&+.-]+)\))+\s*$")
+
+
+def _moodle_nombre_curso(nombre: str) -> str:
+    limpio = html_mod.unescape(str(nombre or ""))
+    limpio = _MOODLE_NOMBRE_CORCH.sub("", _MOODLE_NOMBRE_ANIO.sub("", limpio))
+    limpio = _MOODLE_NOMBRE_COLA.sub("", limpio).strip()
+    return (limpio or html_mod.unescape(str(nombre or "")).strip())[:120]
+
+
+def _moodle_id_usuario() -> int:
+    """El id de usuario de Moodle, que pide la lista de cursos. No cambia: se pregunta una vez."""
+    if not _moodle_usuario.get("id"):
+        info = _moodle_llamar("core_webservice_get_site_info")
+        try:
+            _moodle_usuario["id"] = int((info or {}).get("userid"))
+        except (TypeError, ValueError):
+            raise MoodleApagado("Moodle no ha dicho quién eres.") from None
+    return _moodle_usuario["id"]
+
+
+def _moodle_es_de_este_curso(c: dict, ahora: float) -> bool:
+    inicio, fin = c.get("startdate") or 0, c.get("enddate") or 0
+    return (not c.get("hidden") and inicio >= ahora - MOODLE_CURSO_DIAS * 86400
+            and (not fin or fin > ahora))
+
+
+def _moodle_uni() -> dict:
+    """Las asignaturas de este curso con su nota, su progreso y sus entregas pendientes.
+
+    Solo la lista de cursos es imprescindible. Si fallan las notas o las entregas, la
+    fila sale igual con ese dato a None y `incompleto` dice cuál falta: un «sin nota»
+    porque Moodle no contestó parecería un «aún no te han puesto nota».
+    """
+    copia = _moodle_uni_cache.get("datos")
+    if copia and time.time() - _moodle_uni_cache.get("ts", 0) < MOODLE_UNI_CACHE_S:
+        return copia
+    ahora = time.time()
+    cursos = _moodle_llamar("core_enrol_get_users_courses", {"userid": _moodle_id_usuario()})
+    if not isinstance(cursos, list):
+        raise MoodleApagado("Moodle ha devuelto algo que no es una lista de asignaturas.")
+    incompleto = []
+
+    notas = {}
+    try:
+        crudo = _moodle_llamar("gradereport_overview_get_course_grades")
+        for g in (crudo or {}).get("grades") or []:
+            nota = str(g.get("grade") or "").strip()
+            if g.get("courseid") is not None and nota and nota != "-":
+                notas[g["courseid"]] = nota[:20]
+    except MoodleApagado:
+        incompleto.append("notas")
+
+    pendientes: dict = {}
+    try:
+        entregas, _completa = _moodle_entregas()
+        for e in entregas:
+            pendientes.setdefault(e.get("curso_id"), []).append(e)
+    except MoodleApagado:
+        entregas = None
+        incompleto.append("entregas")
+
+    base = MOODLE_URL[:-len(MOODLE_SERVICIO)] if MOODLE_URL.endswith(MOODLE_SERVICIO) else MOODLE_URL
+    asignaturas = []
+    for c in cursos:
+        if not isinstance(c, dict) or not isinstance(c.get("id"), int):
+            continue
+        suyas = pendientes.get(c["id"], [])
+        # Una asignatura con algo por entregar sale aunque no parezca de este curso: es
+        # justo la que no se puede esconder.
+        if not suyas and not _moodle_es_de_este_curso(c, ahora):
+            continue
+        progreso = c.get("progress")
+        asignaturas.append({
+            "id":         c["id"],
+            "nombre":     _moodle_nombre_curso(c.get("fullname") or c.get("shortname")),
+            "nota":       notas.get(c["id"]),
+            "progreso":   round(progreso) if isinstance(progreso, (int, float)) else None,
+            "pendientes": None if entregas is None else len(suyas),
+            "proxima":    ({"nombre": suyas[0]["nombre"], "vence": suyas[0]["vence"],
+                            "vencida": suyas[0]["vencida"]} if suyas else None),
+            "url":        f"{base}/course/view.php?id={c['id']}",
+        })
+    datos = {"activo": True, "asignaturas": asignaturas, "incompleto": incompleto,
+             "actualizado": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    _moodle_uni_cache.update(ts=time.time(), datos=datos)
+    return datos
+
+
+@app.get("/moodle/uni")
+def get_moodle_uni(_: dict = Depends(verify_token)):
+    """El widget Uni: las asignaturas de este curso con nota, progreso y entregas."""
+    try:
+        return _moodle_uni()
+    except MoodleApagado as e:
+        return {"activo": False, "motivo": str(e), "asignaturas": []}
 
 
 # ── Moodle: el enunciado, para el agente del PC ──

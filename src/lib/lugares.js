@@ -19,12 +19,12 @@ export const NOMBRES_LUGAR = {
 // nombra conserva su orden.
 const ORDEN_POR_LUGAR = {
   uni: {
-    arriba: ["siguiente", "timeline", "entregas", "upcoming"],
+    arriba: ["siguiente", "timeline", "entregas", "uni", "upcoming"],
     abajo:  ["casa", "acciones_pc", "clothing", "finanzas"],
   },
   gimnasio: {
     arriba: ["training", "health_workouts", "siguiente"],
-    abajo:  ["casa", "acciones_pc", "entregas", "finanzas"],
+    abajo:  ["casa", "acciones_pc", "entregas", "uni", "finanzas"],
   },
 };
 

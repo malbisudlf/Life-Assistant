@@ -93,6 +93,28 @@ Por `_apuntar_aviso`, así que heredan presupuesto, silenciado y memoria. Solo c
 El aviso diario de las 19:00 (`_motivos_proactivos`) mira solo el calendario por defecto,
 no el de clases, así que no se cruza con estos.
 
+## El widget «Uni» (`GET /moodle/uni`)
+
+Una fila por asignatura de este curso, con la nota que enseña Moodle, el progreso si la
+asignatura lo lleva y lo que queda por entregar. Al pulsarla se abre la asignatura en Moodle.
+
+- **«Este curso» se decide por fechas** (`MOODLE_CURSO_DIAS`, 300): Moodle devuelve las
+  asignaturas de todos los años, casi todas con `enddate` a 0. Cuenta lo que empezó hace
+  menos de eso y no ha terminado, **más cualquier asignatura con algo pendiente**, que es
+  justo la que no se puede esconder.
+- **La nota va tal cual** («7,50», «61,40», «-»): cada asignatura usa su escala, y
+  convertirlas sería inventar. «-» es «sin nota todavía».
+- **El progreso casi nunca existe**: solo sale si la asignatura tiene activado el
+  seguimiento de finalización. Sin él no se pinta la barra.
+- **El nombre se limpia** (`_moodle_nombre_curso`): fuera el año, los códigos entre
+  corchetes y los paréntesis de idioma y grupo del final. Un paréntesis con minúsculas se
+  queda («Física (Mecánica clásica)»).
+- **«No lo sé» no se disfraza de «no hay»**: si fallan las notas o las entregas, la fila sale
+  igual con ese dato vacío y el widget dice qué faltó (`incompleto`); nunca «nada pendiente».
+- Copia en memoria de 10 minutos (son tres llamadas a un Moodle que no es nuestro), y el id
+  de usuario, que la lista de cursos necesita, se pregunta una sola vez.
+- En el modo simple sube junto a «Entregas» cuando estás en la uni (`src/lib/lugares.js`).
+
 ## Jarvis
 
 - **`moodle_entregas`** (consulta, directa): lo pendiente, preguntado a Moodle en el

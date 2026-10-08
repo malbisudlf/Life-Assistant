@@ -64,6 +64,7 @@ import {
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
 import { lugarDePresencia, ordenarPorLugar, reordenaEn, NOMBRES_LUGAR, notaPresenciaAhora } from "../lib/lugares";
 import { leerEstadoSistema } from "../lib/estadoSistema";
+import { detalleAsignatura, ordenarAsignaturas, avisoIncompleto } from "../lib/uni";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -1613,6 +1614,7 @@ const DEFAULT_COLUMNS = {
   weather:           "left",
   upcoming:          "left",
   entregas:          "right",
+  uni:               "right",
   acciones_pc:       "right",
   casa:              "right",
   training:          "right",
@@ -1639,6 +1641,7 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "weather",           label: "Clima",             visible: true,  column: "left"  },
   { id: "upcoming",          label: "Próximos eventos",  visible: true,  column: "left"  },
   { id: "entregas",          label: "Entregas",          visible: true,  column: "right" },
+  { id: "uni",               label: "Uni",               visible: true,  column: "right" },
   { id: "training",          label: "Entrenamiento",     visible: true,  column: "right" },
   { id: "finanzas",          label: "Finanzas",          visible: true,  column: "right" },
   { id: "ideas",             label: "Ideas",             visible: true,  column: "right" },
@@ -2585,6 +2588,10 @@ export default function Dashboard() {
   const [clothingError, setClothingError]       = useState(null); // mensaje de fallo al guardar
   const [clothingZoom, setClothingZoom]         = useState(null); // data URL en pantalla completa
 
+  // Uni: las asignaturas de este curso con nota y entregas (`GET /moodle/uni`).
+  const [uni, setUni]                           = useState(null);
+  const [uniEstado, setUniEstado]               = useState("cargando"); // cargando | ok | error
+
   // Libros leídos: la lista, el formulario de alta y el autocompletado del título.
   const [libros, setLibros]                     = useState([]);
   const [librosEstado, setLibrosEstado]         = useState("cargando"); // cargando | ok | error
@@ -3048,6 +3055,16 @@ export default function Dashboard() {
       .then(r => r.json())
       .then(data => Array.isArray(data) && setClothing(data))
       .catch(() => {});
+  }, [token]);
+
+  // Cargar la uni. Una vez por sesión: el backend ya guarda copia diez minutos, y las
+  // notas no cambian de un minuto a otro.
+  useEffect(() => {
+    if (!token) return;
+    apiFetch(`${API}/moodle/uni`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(data => { setUni(data); setUniEstado("ok"); })
+      .catch(() => setUniEstado("error"));
   }, [token]);
 
   // Cargar los libros
@@ -6159,6 +6176,66 @@ export default function Dashboard() {
           </div>
         </div>
       );
+      case "uni": {
+        const asignaturas = uni?.activo ? ordenarAsignaturas(uni.asignaturas) : [];
+        const aviso = uni?.activo ? avisoIncompleto(uni.incompleto) : "";
+        return (
+          <div style={cardStyle} data-card={id} key="uni">
+            <div style={s.sectionLabel}>Uni</div>
+            {uniEstado === "cargando" && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Preguntando a Moodle…</div>
+            )}
+            {/* Un fallo no es «no tienes asignaturas»: se dice cuál de las dos cosas es. */}
+            {uniEstado === "error" && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>No se ha podido consultar Moodle.</div>
+            )}
+            {uniEstado === "ok" && !uni?.activo && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>{uni?.motivo || "Moodle no está conectado."}</div>
+            )}
+            {uniEstado === "ok" && uni?.activo && asignaturas.length === 0 && (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin asignaturas este curso.</div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {asignaturas.map(a => {
+                const detalle = detalleAsignatura(a, now);
+                return (
+                  <a
+                    key={a.id} href={a.url} target="_blank" rel="noopener noreferrer"
+                    style={{ ...s.entregaRow, textDecoration: "none", color: "inherit" }}
+                    aria-label={`${a.nombre}${a.nota ? `, nota ${a.nota}` : ""}. Abrir en Moodle`}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ ...s.entregaTitle, fontSize: 14 }}>{a.nombre}</div>
+                      {detalle && (
+                        <div style={{
+                          ...s.entregaSubject,
+                          color: a.pendientes > 0 && a.proxima?.vencida ? "var(--red, #e05555)" : "var(--muted)",
+                        }}>{detalle}</div>
+                      )}
+                      {a.progreso !== null && a.progreso !== undefined && (
+                        <div
+                          role="progressbar" aria-valuenow={a.progreso} aria-valuemin={0} aria-valuemax={100}
+                          aria-label={`Progreso ${a.progreso}%`}
+                          style={{ height: 3, borderRadius: 2, background: "var(--border)", marginTop: 6 }}
+                        >
+                          <div style={{ width: `${a.progreso}%`, height: "100%", borderRadius: 2, background: "var(--accent)" }} />
+                        </div>
+                      )}
+                    </div>
+                    <div style={s.entregaCountdown}>
+                      <div style={{ ...s.daysNum, fontSize: 20, color: a.nota ? "var(--text)" : "var(--muted2)" }}>
+                        {a.nota || "—"}
+                      </div>
+                      <span style={s.daysLabel}>{a.nota ? "nota" : "sin nota"}</span>
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
+            {aviso && <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 8 }}>{aviso}</div>}
+          </div>
+        );
+      }
       case "training": return (
         <div style={cardStyle} data-card={id} key="training">
           <div style={s.sectionLabel}>Entrenamiento</div>
