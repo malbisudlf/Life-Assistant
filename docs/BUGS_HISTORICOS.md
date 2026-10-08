@@ -1152,3 +1152,10 @@
   Chromium. Hoy `form-action` incluye el origen al que vuelve el permiso.
   - Moraleja: **un flujo que acaba en un navegador se prueba en un navegador.** Un cliente
     HTTP no ve las políticas que solo aplica el navegador, y ahí estaba el fallo entero.
+  - Segunda parte, el mismo día: con la redirección ya arreglada, claude.ai decía «la
+    autorización con Moodle falló». El panel de Cloudflare enseñó que las únicas llamadas
+    de `Claude-User` a `/mcp` eran los 401 del principio: nunca usó el token. El SDK de
+    MCP publicaba el `issuer` con barra final (`AnyHttpUrl` de pydantic, python-sdk#1919)
+    y el cliente, que lo compara al pie de la letra, abandonaba. Hoy `SinBarra` la quita
+    de los metadatos, y `Registro` deja una línea por petición para no volver a
+    diagnosticar a ciegas.

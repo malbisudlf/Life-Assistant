@@ -157,7 +157,7 @@ def _app():
         return Puerta(mcp.streamable_http_app())
 
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
-    from oauth import Proveedor, Verificador
+    from oauth import Proveedor, SinBarra, Verificador
 
     proveedor = Proveedor(URL_PUBLICA, CLAVE,
                           os.getenv("MOODLE_MCP_DATOS", "/datos/oauth.json"))
@@ -175,7 +175,7 @@ def _app():
     mcp.custom_route("/entrar", methods=["GET", "POST"])(proveedor.pagina)
     # Sin `Puerta`: con OAuth, el 401 lo da el SDK, y lo da con el `WWW-Authenticate`
     # que la app de Claude necesita para encontrar dónde iniciar sesión.
-    return mcp.streamable_http_app()
+    return SinBarra(mcp.streamable_http_app(), URL_PUBLICA)
 
 
 _log = logging.getLogger("moodle-mcp.peticiones")
