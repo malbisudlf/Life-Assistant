@@ -102,8 +102,13 @@ asignatura lo lleva y lo que queda por entregar. Al pulsarla se abre la asignatu
   asignaturas de todos los años, casi todas con `enddate` a 0. Cuenta lo que empezó hace
   menos de eso y no ha terminado, **más cualquier asignatura con algo pendiente**, que es
   justo la que no se puede esconder.
-- **La nota va tal cual** («7,50», «61,40», «-»): cada asignatura usa su escala, y
-  convertirlas sería inventar. «-» es «sin nota todavía».
+- **La nota se enseña sobre 10** (`nota_10`, `_moodle_nota_sobre_10`). El resumen de notas
+  de Moodle da el número sin decir sobre cuánto, así que un 4 sobre 5 salía como «4». Para
+  cada asignatura CON nota se pide su total (`gradereport_user_get_grade_items`, el
+  elemento `itemtype: course`) y se convierte con su rango (nota, mínimo y máximo) o, si el
+  informe no lo enseña, con su porcentaje. Sin ninguno de los dos, o si esa llamada falla,
+  la nota sale tal cual («nota» y no «sobre 10» debajo): convertir a ciegas sería
+  inventar. La de Moodle queda en el tooltip. «-» es «sin nota todavía».
 - **El progreso casi nunca existe**: solo sale si la asignatura tiene activado el
   seguimiento de finalización. Sin él no se pinta la barra.
 - **El nombre se limpia** (`_moodle_nombre_curso`): fuera el año, los códigos entre

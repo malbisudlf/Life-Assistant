@@ -361,6 +361,9 @@ def uni(moodle, mock_requests):
         ],
         "notas": {"grades": [{"courseid": 1, "grade": "7,50"}, {"courseid": 2, "grade": "-"},
                              {"courseid": 3, "grade": "61,40"}]},
+        # El detalle por asignatura (`gradereport_user_get_grade_items`), con su total.
+        "detalle": {1: {"itemtype": "course", "graderaw": 7.5, "grademin": 0, "grademax": 10,
+                        "gradeformatted": "7,50", "percentageformatted": "75,00 %"}},
         "fallan": set(),
     }
 
@@ -373,6 +376,11 @@ def uni(moodle, mock_requests):
             "core_enrol_get_users_courses": datos["cursos"],
             "gradereport_overview_get_course_grades": datos["notas"],
             "core_calendar_get_action_events_by_timesort": {"events": moodle["eventos"]},
+            "gradereport_user_get_grade_items": {"usergrades": [{"gradeitems": [
+                {"itemtype": "mod", "itemname": "Práctica 1", "graderaw": 1, "grademin": 0, "grademax": 1},
+                *([datos["detalle"][kw["data"].get("courseid")]]
+                  if kw["data"].get("courseid") in datos["detalle"] else []),
+            ]}]},
         }[funcion])
 
     mock_requests.routes.insert(0, ("POST", "moodle.test/webservice/rest/server.php", responder))
@@ -449,3 +457,50 @@ class TestUni:
     ])
     def test_nombres(self, crudo, limpio):
         assert main._moodle_nombre_curso(crudo) == limpio
+
+
+class TestNotaSobre10:
+    """«Acabo de sacar un 4 sobre 5 y me pone 4»: el resumen de Moodle no dice sobre cuánto."""
+
+    def _nota(self, uni, total, nota="4,00"):
+        uni["notas"]["grades"][0]["grade"] = nota
+        uni["detalle"][1] = {"itemtype": "course", **total}
+        return {a["id"]: a for a in main._moodle_uni()["asignaturas"]}[1]
+
+    def test_con_el_rango_es_exacta(self, uni):
+        a = self._nota(uni, {"graderaw": 4, "grademin": 0, "grademax": 5})
+        assert a["nota"] == "4,00" and a["nota_10"] == "8"
+
+    def test_sin_rango_tira_del_porcentaje(self, uni):
+        a = self._nota(uni, {"percentageformatted": "69,30 %"}, nota="6,93")
+        assert a["nota_10"] == "6,93"
+
+    def test_un_minimo_distinto_de_cero_tambien_cuenta(self, uni):
+        a = self._nota(uni, {"graderaw": 6, "grademin": 2, "grademax": 10})
+        assert a["nota_10"] == "5"
+
+    def test_sin_total_no_se_inventa(self, uni):
+        uni["detalle"].clear()
+        a = {x["id"]: x for x in main._moodle_uni()["asignaturas"]}[1]
+        assert a["nota"] == "7,50" and a["nota_10"] is None
+
+    def test_si_el_detalle_falla_queda_la_nota_tal_cual(self, uni):
+        uni["fallan"].add("gradereport_user_get_grade_items")
+        r = main._moodle_uni()
+        a = {x["id"]: x for x in r["asignaturas"]}[1]
+        assert a["nota"] == "7,50" and a["nota_10"] is None and r["incompleto"] == []
+
+    def test_solo_se_pregunta_por_las_que_tienen_nota(self, uni, mock_requests):
+        main._moodle_uni()
+        detalles = [c[2]["data"].get("courseid") for c in mock_requests.called("POST", "server.php")
+                    if c[2]["data"]["wsfunction"] == "gradereport_user_get_grade_items"]
+        assert detalles == [1]
+
+    @pytest.mark.parametrize("valor,texto", [(8.0, "8"), (7.5, "7,5"), (6.933, "6,93"), (10, "10"), (0, "0")])
+    def test_formato(self, valor, texto):
+        assert main._moodle_formato_nota(valor) == texto
+
+    @pytest.mark.parametrize("crudo,numero", [("80,00 %", 80.0), ("7,5", 7.5), (4, 4.0), ("-", None), (None, None)])
+    def test_numeros_de_moodle(self, crudo, numero):
+        assert main._moodle_numero(crudo) == numero
+
