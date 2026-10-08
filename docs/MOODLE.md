@@ -226,6 +226,12 @@ PKCE, y aquí solo se escribe lo que cada uno tiene que decidir:
 - **Dónde se guarda**: `/datos/oauth.json`, en un volumen, con **los tokens hasheados**.
   Sin volumen, cada reconstrucción obligaría a reconectar la app a mano.
 - Tokens de acceso de una hora y de refresco de 90 días, **rotados** en cada refresco.
+- **El `issuer` se publica sin barra final** (`SinBarra`). El SDK lo convierte en
+  `https://…/` y la app de Claude, que lo compara al pie de la letra, abandonaba después
+  del canje del token sin usarlo (python-sdk#1919).
+- **Una línea de registro por petición** (`Registro`): ruta, código, cliente y tipo de
+  autenticación, nunca su valor. `docker logs moodle-mcp | grep peticiones` es lo primero
+  que mirar si la app no conecta.
 
 **La llave fija sigue valiendo en los dos modos**, así que Jarvis no se entera del cambio,
 ni Claude Desktop por `mcp-remote` (sección anterior): ese puente sigue siendo la vía del

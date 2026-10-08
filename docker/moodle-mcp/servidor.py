@@ -37,8 +37,10 @@ DOS MODOS, según haya o no `MOODLE_MCP_URL_PUBLICA`:
 """
 
 import hmac
+import logging
 import os
 import sys
+import time
 
 # El original lee MOODLE_URL al importarse y la quiere entera, con la ruta del servicio
 # REST. Aquí basta con la del sitio (la misma `MOODLE_URL` que usa el backend), y se
@@ -116,12 +118,46 @@ class Puerta:
         return await self.app(scope, receive, send)
 
 
+class Registro:
+    """Una línea por petición: método, ruta, código, cliente y CON QUÉ se autenticó.
+
+    Existe porque el primer intento de conectar la app de Claude falló sin dejar rastro
+    (el registro de accesos de uvicorn va apagado), y lo que importa saber en ese caso
+    —¿llegó la petición?, ¿con qué cliente?, ¿qué se le contestó?— no se puede reconstruir
+    después. Nunca la query ni el valor de la autenticación: solo su tipo (Bearer, Basic
+    o nada), que es lo que distingue «no la manda» de «la manda y no vale».
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cabeceras = dict(scope.get("headers") or [])
+        auth = cabeceras.get(b"authorization", b"").decode("latin-1").split(" ", 1)[0] or "nada"
+        cliente = cabeceras.get(b"user-agent", b"").decode("latin-1")[:60] or "?"
+        inicio, estado = time.monotonic(), {"codigo": "-"}
+
+        async def _send(mensaje):
+            if mensaje["type"] == "http.response.start":
+                estado["codigo"] = mensaje["status"]
+            await send(mensaje)
+
+        try:
+            return await self.app(scope, receive, _send)
+        finally:
+            _log.info("%s %s → %s (%.2fs) auth=%s cliente=%s", scope.get("method"),
+                      scope.get("path"), estado["codigo"], time.monotonic() - inicio,
+                      auth, cliente)
+
+
 def _app():
     if not URL_PUBLICA:
         return Puerta(mcp.streamable_http_app())
 
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
-    from oauth import Proveedor, Verificador
+    from oauth import Proveedor, SinBarra, Verificador
 
     proveedor = Proveedor(URL_PUBLICA, CLAVE,
                           os.getenv("MOODLE_MCP_DATOS", "/datos/oauth.json"))
@@ -139,11 +175,13 @@ def _app():
     mcp.custom_route("/entrar", methods=["GET", "POST"])(proveedor.pagina)
     # Sin `Puerta`: con OAuth, el 401 lo da el SDK, y lo da con el `WWW-Authenticate`
     # que la app de Claude necesita para encontrar dónde iniciar sesión.
-    return mcp.streamable_http_app()
+    return SinBarra(mcp.streamable_http_app(), URL_PUBLICA)
 
+
+_log = logging.getLogger("moodle-mcp.peticiones")
 
 if __name__ == "__main__":
-    uvicorn.run(_app(), host="0.0.0.0",
+    uvicorn.run(Registro(_app()), host="0.0.0.0",
                 port=int(os.getenv("MOODLE_MCP_PUERTO", "8765")),
                 # Sin el registro de accesos de uvicorn: no lleva secretos (la llave va en
                 # cabecera), pero en un contenedor que nadie mira es ruido en el disco.

@@ -232,6 +232,59 @@ class Proveedor:
             self._guardar()
 
 
+class SinBarra:
+    """Middleware ASGI: el `issuer` de los metadatos, sin la barra final que le pone el SDK.
+
+    El SDK guarda el issuer como `AnyHttpUrl` de pydantic, que convierte
+    `https://moodle.ejemplo` en `https://moodle.ejemplo/`, y así lo publica en
+    `/.well-known/oauth-authorization-server` y en `authorization_servers`. Un cliente que
+    compara el issuer al pie de la letra, como pide el RFC 8414, ve dos servidores
+    distintos y abandona después del canje del token. Le pasaba a la app de Claude el
+    2026-10-08: la clave entraba, el token se emitía, y claude.ai decía «la autorización
+    falló» sin hacer una sola llamada con él (las únicas que llegaban eran los 401 del
+    principio). Es python-sdk#1919, todavía abierto en la 1.30.
+
+    Se corrige aquí, sobre la respuesta, y no copiando los metadatos a mano: así sigue
+    valiendo si el SDK cambia qué publica, y el día que lo arreglen deja de tocar nada.
+    """
+
+    def __init__(self, app, base: str):
+        self.app, self.base = app, base.rstrip("/")
+
+    def _limpia(self, valor):
+        return self.base if valor == self.base + "/" else valor
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/.well-known/oauth-"):
+            return await self.app(scope, receive, send)
+        inicio, trozos = {}, []
+
+        async def _send(mensaje):
+            if mensaje["type"] == "http.response.start":
+                inicio.update(mensaje)
+                return
+            trozos.append(mensaje.get("body", b""))
+            if mensaje.get("more_body"):
+                return
+            cuerpo = b"".join(trozos)
+            try:
+                datos = json.loads(cuerpo)
+                for campo in ("issuer", "resource"):
+                    if campo in datos:
+                        datos[campo] = self._limpia(datos[campo])
+                if isinstance(datos.get("authorization_servers"), list):
+                    datos["authorization_servers"] = [self._limpia(a) for a in datos["authorization_servers"]]
+                cuerpo = json.dumps(datos).encode()
+            except (ValueError, AttributeError):
+                pass                # no es JSON (un 404, un OPTIONS): tal cual
+            cabeceras = [(k, v) for k, v in inicio.get("headers", []) if k.lower() != b"content-length"]
+            cabeceras.append((b"content-length", str(len(cuerpo)).encode()))
+            await send({**inicio, "headers": cabeceras})
+            await send({"type": "http.response.body", "body": cuerpo})
+
+        return await self.app(scope, receive, _send)
+
+
 class Verificador:
     """La llave fija primero (Jarvis, Claude Code); si no, un token de OAuth."""
 
