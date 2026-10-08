@@ -43,15 +43,20 @@ export function ordenarAsignaturas(lista) {
 }
 
 /** Qué nota se enseña y con qué etiqueta. Sobre 10 si el backend pudo pasarla (sabía sobre
- *  cuánto puntúa la asignatura); si no, la de Moodle tal cual, que es lo único cierto.
- *  `original` va al tooltip: un 8 que en Moodle pone «4,00» tiene que poder explicarse. */
+ *  cuánto puntúa cada nota); si no, la de Moodle tal cual, que es lo único cierto.
+ *  `original` va al tooltip: un 8 donde Moodle pone «4,00» tiene que poder explicarse, y
+ *  la explicación casi siempre es que la media sale solo de lo ya corregido. */
 export function notaUni(a) {
   if (!a?.nota) return null;
-  if (a.nota_10) {
-    return { valor: a.nota_10, etiqueta: "sobre 10",
-             original: a.nota_10 === a.nota ? null : `En Moodle: ${a.nota}` };
+  if (!a.nota_10) return { valor: a.nota, etiqueta: "nota", original: null };
+  const partes = [];
+  if (a.corregidas && a.evaluables) {
+    partes.push(a.corregidas < a.evaluables
+      ? `Media de lo corregido: ${a.corregidas} de ${a.evaluables} notas`
+      : `Media de ${a.corregidas === 1 ? "la nota" : `las ${a.corregidas} notas`}`);
   }
-  return { valor: a.nota, etiqueta: "nota", original: null };
+  if (a.nota_10 !== a.nota) partes.push(`En Moodle: ${a.nota}`);
+  return { valor: a.nota_10, etiqueta: "sobre 10", original: partes.join(". ") || null };
 }
 
 /** Qué no pudo leer el backend, en una frase. Vacía si llegó todo. */

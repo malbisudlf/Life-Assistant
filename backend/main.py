@@ -3039,28 +3039,59 @@ def _moodle_formato_nota(valor: float) -> str:
     return f"{round(valor, 2):.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
-def _moodle_nota_sobre_10(curso_id: int) -> Optional[str]:
-    """La nota total de una asignatura pasada a sobre 10, o None si no se puede saber.
+def _moodle_nota_sobre_10(curso_id: int) -> Optional[dict]:
+    """La nota de una asignatura sobre 10, contando SOLO lo ya corregido, o None.
 
-    El resumen de notas de Moodle (`gradereport_overview`) da el número sin decir sobre
-    cuánto: un «4,00» era un 8 en una asignatura que puntúa sobre 5. El total de la
-    asignatura (`itemtype: course`) sí lo dice, y se usa en este orden: la nota con su
-    rango, que es exacto; y si el informe no enseña el rango, su porcentaje. Sin ninguno
-    de los dos, None: el widget enseña entonces la nota tal cual, que es lo único cierto.
+    El resumen de Moodle (`gradereport_overview`) da el número sin decir sobre cuánto. El
+    total de la asignatura (`itemtype: course`) sí lo dice, pero cuenta lo que aún no está
+    corregido: con una prueba de 4 sobre 5 y otra de 5 sin nota, el total era 4 sobre 10 y
+    el widget decía «4» cuando lo que llevas es un 8 (pasó el 2026-10-08, con la primera
+    versión de esto, que usaba el total).
+
+    Así que se calcula con las notas sueltas que ya tienen nota: cada una sobre su máximo
+    y, si Moodle da el peso de todas (`weightraw`), ponderada con él; si no, por puntos
+    (que es lo que hace la agregación «natural» de Moodle, la de por defecto). El total
+    solo se usa si la asignatura no tiene notas sueltas que mirar.
+
+    Devuelve `{"valor", "corregidas", "evaluables"}` para que el widget pueda decir de
+    cuántas notas sale la media.
     """
     crudo = _moodle_llamar("gradereport_user_get_grade_items",
                            {"courseid": curso_id, "userid": _moodle_id_usuario()})
-    for usuario in (crudo or {}).get("usergrades") or []:
-        for item in usuario.get("gradeitems") or []:
-            if item.get("itemtype") != "course":
-                continue
-            nota = _moodle_numero(item.get("graderaw"))
-            minimo, maximo = _moodle_numero(item.get("grademin")), _moodle_numero(item.get("grademax"))
-            if nota is not None and minimo is not None and maximo and maximo > minimo:
-                return _moodle_formato_nota((nota - minimo) / (maximo - minimo) * 10)
-            porcentaje = _moodle_numero(item.get("percentageformatted"))
-            if porcentaje is not None:
-                return _moodle_formato_nota(porcentaje / 10)
+    items = [i for u in (crudo or {}).get("usergrades") or [] for i in u.get("gradeitems") or []
+             if isinstance(i, dict)]
+    total, partes = None, []
+    for item in items:
+        minimo, maximo = _moodle_numero(item.get("grademin")), _moodle_numero(item.get("grademax"))
+        tipo = item.get("itemtype")
+        if tipo == "course":
+            total = item
+        elif tipo != "category" and minimo is not None and maximo and maximo > minimo:
+            partes.append((item, minimo, maximo))
+
+    if partes:
+        corregidas = [(i, mn, mx, _moodle_numero(i.get("graderaw"))) for i, mn, mx in partes]
+        corregidas = [c for c in corregidas if c[3] is not None]
+        if not corregidas:
+            return None
+        pesos = [_moodle_numero(i.get("weightraw")) for i, *_ in corregidas]
+        if all(p and p > 0 for p in pesos):
+            nota = sum(p * (r - mn) / (mx - mn) for p, (_, mn, mx, r) in zip(pesos, corregidas)) / sum(pesos)
+        else:
+            nota = sum(r - mn for _, mn, _mx, r in corregidas) / sum(mx - mn for _, mn, mx, _r in corregidas)
+        return {"valor": _moodle_formato_nota(nota * 10),
+                "corregidas": len(corregidas), "evaluables": len(partes)}
+
+    if total:
+        nota = _moodle_numero(total.get("graderaw"))
+        minimo, maximo = _moodle_numero(total.get("grademin")), _moodle_numero(total.get("grademax"))
+        if nota is not None and minimo is not None and maximo and maximo > minimo:
+            return {"valor": _moodle_formato_nota((nota - minimo) / (maximo - minimo) * 10),
+                    "corregidas": None, "evaluables": None}
+        porcentaje = _moodle_numero(total.get("percentageformatted"))
+        if porcentaje is not None:
+            return {"valor": _moodle_formato_nota(porcentaje / 10),
+                    "corregidas": None, "evaluables": None}
     return None
 
 
@@ -3128,7 +3159,10 @@ def _moodle_uni() -> dict:
             "id":         c["id"],
             "nombre":     _moodle_nombre_curso(c.get("fullname") or c.get("shortname")),
             "nota":       notas.get(c["id"]),
-            "nota_10":    sobre_10,
+            "nota_10":    (sobre_10 or {}).get("valor"),
+            # De cuántas notas sale la media («1 de 2»); None si salió del total.
+            "corregidas": (sobre_10 or {}).get("corregidas"),
+            "evaluables": (sobre_10 or {}).get("evaluables"),
             "progreso":   round(progreso) if isinstance(progreso, (int, float)) else None,
             "pendientes": None if entregas is None else len(suyas),
             "proxima":    ({"nombre": suyas[0]["nombre"], "vence": suyas[0]["vence"],

@@ -108,13 +108,18 @@ asignatura lo lleva y lo que queda por entregar. Al pulsarla se abre la asignatu
   asignaturas de todos los años, casi todas con `enddate` a 0. Cuenta lo que empezó hace
   menos de eso y no ha terminado, **más cualquier asignatura con algo pendiente**, que es
   justo la que no se puede esconder.
-- **La nota se enseña sobre 10** (`nota_10`, `_moodle_nota_sobre_10`). El resumen de notas
-  de Moodle da el número sin decir sobre cuánto, así que un 4 sobre 5 salía como «4». Para
-  cada asignatura CON nota se pide su total (`gradereport_user_get_grade_items`, el
-  elemento `itemtype: course`) y se convierte con su rango (nota, mínimo y máximo) o, si el
-  informe no lo enseña, con su porcentaje. Sin ninguno de los dos, o si esa llamada falla,
-  la nota sale tal cual («nota» y no «sobre 10» debajo): convertir a ciegas sería
-  inventar. La de Moodle queda en el tooltip. «-» es «sin nota todavía».
+- **La nota se enseña sobre 10, y solo con lo ya corregido** (`nota_10`,
+  `_moodle_nota_sobre_10`). El resumen de notas de Moodle da el número sin decir sobre
+  cuánto, así que un 4 sobre 5 salía como «4». Para cada asignatura CON nota se piden sus
+  notas sueltas (`gradereport_user_get_grade_items`) y se hace la media de las que ya
+  tienen nota: cada una sobre su máximo y, si Moodle da el peso de todas (`weightraw`),
+  ponderada; si no, por puntos, que es lo que hace la agregación «natural» de Moodle.
+  **El total de la asignatura (`itemtype: course`) no sirve para esto**: cuenta lo que aún
+  no está corregido, y con una prueba de 4 sobre 5 y otra sin nota decía 4 sobre 10. Fue la
+  primera versión, y el widget enseñó «4 sobre 10» el 2026-10-08. El total solo se usa si
+  la asignatura no tiene notas sueltas. Sin nada corregido, o si la llamada falla, la nota
+  sale tal cual («nota» y no «sobre 10» debajo). El tooltip dice de cuántas notas sale la
+  media («1 de 2») y la de Moodle. «-» es «sin nota todavía».
 - **El progreso casi nunca existe**: solo sale si la asignatura tiene activado el
   seguimiento de finalización. Sin él no se pinta la barra.
 - **El nombre se limpia** (`_moodle_nombre_curso`): fuera el año, los códigos entre
