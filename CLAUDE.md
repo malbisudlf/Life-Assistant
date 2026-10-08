@@ -213,7 +213,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/FRONTEND.md` | Antes de tocar `src/components/Dashboard.jsx` o `src/lib/helpers.js`: organización, auth en el cliente, PWA, widgets, layout, panel ⚙, modo simple, motor de conclusiones de salud y reglas de React/ESLint |
 | `docs/SALUD.md` | Módulo del Apple Watch: flujo de ingesta, Health Auto Export, el Atajo de iOS, tabla `health_metrics` y las puntuaciones de bienestar y sueño |
 | `docs/ENTRENAMIENTO.md` | Módulo de entrenamiento personal (sesiones, cobros y sus trampas de query) |
-| `docs/MOODLE.md` | Las entregas de la uni desde Moodle (Alud): la sincronización con el calendario de clases (crear, adoptar, mover, tachar con ✅), sus dos avisos y el servidor moodle-mcp de `docker/moodle-mcp/` para que Jarvis consulte notas y materiales |
+| `docs/MOODLE.md` | Las entregas de la uni desde Moodle (Alud): la sincronización con el calendario de clases (crear, adoptar, mover, quitar al entregar), sus dos avisos y el servidor moodle-mcp de `docker/moodle-mcp/` para que Jarvis consulte notas y materiales |
 | `docs/FINANZAS.md` | Módulo de finanzas, un widget con tres fuentes: la cartera de Indexa Capital (API, caché, qué se tolera caído y por qué no tiene tabla), el saldo de Revolut por Enable Banking y la cartera manual de ETFs (Yahoo Finance, con sus dos tablas) |
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/N8N.md` | n8n, la automatización visual que corre en `caja`: la frontera con el backend (observa y avisa, no decide), los flujos que hay y sus trampas |

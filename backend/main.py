@@ -2466,7 +2466,8 @@ def _j_crear_tarea(titulo: str, fecha: str | None = None, nota: str | None = Non
 #
 # Lo que Moodle sabe y el calendario no es si ya está ENTREGADA. Por eso los avisos de
 # «vence pronto» salen de aquí y no del calendario: preguntan a Moodle, y una entrega que
-# ya subiste no avisa.
+# ya subiste no avisa. Y por lo mismo, al entregarla su evento se BORRA del calendario: lo
+# que queda en él es lo que falta por hacer, y el historial vive en `moodle_entregas`.
 #
 # Se pregunta con `core_calendar_get_action_events_by_timesort`, que es la misma lista de
 # «pendientes» que enseña la app del móvil: solo devuelve lo que todavía pide que hagas
@@ -2480,9 +2481,6 @@ MOODLE_SERVICIO     = "/webservice/rest/server.php"
 # cortada y NO se deduce nada de lo que falte (ver `_moodle_sincronizar`).
 MOODLE_LIMITE       = 50
 MOODLE_ENTREGAS_URL = f"{SUPABASE_URL}/rest/v1/moodle_entregas"
-# Lo que sustituye al marcador cuando deja de estar pendiente: el evento se queda (es tu
-# historial), pero fuera del widget y de los avisos.
-MOODLE_HECHA        = "✅"
 # outlook_id de una entrega cuyo evento BORRASTE tú. No se vuelve a crear: que algo que
 # has quitado del calendario reaparezca cada media hora es la forma de que dejes de
 # fiarte de todo lo que escribe esto.
@@ -2616,9 +2614,9 @@ def _moodle_cuando(iso: str) -> str:
 
 # ── Moodle → calendario ──
 
-def _moodle_titulo(e: dict, hecha: bool = False) -> str:
+def _moodle_titulo(e: dict) -> str:
     curso = f" ({e['curso']})" if e.get("curso") else ""
-    return f"{MOODLE_HECHA if hecha else ENTREGAS_MARKER} {e['nombre']}{curso}"[:300]
+    return f"{ENTREGAS_MARKER} {e['nombre']}{curso}"[:300]
 
 
 def _moodle_cuerpo(e: dict) -> str:
@@ -2631,8 +2629,9 @@ def _moodle_cuerpo(e: dict) -> str:
     elif e.get("url"):
         lineas.append(f"Moodle: {e['url']}")
     lineas += [f"moodle_id: {e['id']}",
-               "Lo ha traído Life Assistant desde Moodle. Si lo mueves, vuelve a la fecha "
-               "de Moodle en la siguiente sincronización; si lo borras, no se vuelve a crear."]
+               "Lo ha traído Life Assistant desde Moodle. Cuando la entregues, se quita solo "
+               "del calendario. Si lo mueves, vuelve a la fecha de Moodle en la siguiente "
+               "sincronización; si lo borras, no se vuelve a crear."]
     return "\n".join(lineas)
 
 
@@ -2677,12 +2676,10 @@ def _moodle_crear_evento(e: dict, graph: tuple) -> str:
     return str((r.json() or {}).get("id") or "")
 
 
-def _moodle_editar_evento(outlook_id: str, e: dict, graph: tuple, hecha: bool = False) -> Optional[bool]:
+def _moodle_editar_evento(outlook_id: str, e: dict, graph: tuple) -> Optional[bool]:
     """True si quedó al día, False si falló, None si el evento ya no existe (lo borraste)."""
-    cuerpo = {"subject": _moodle_titulo(e, hecha)}
-    if not hecha:
-        cuerpo.update(_moodle_franja(e))
-        cuerpo["body"] = {"contentType": "text", "content": _moodle_cuerpo(e)}
+    cuerpo = {"subject": _moodle_titulo(e), **_moodle_franja(e),
+              "body": {"contentType": "text", "content": _moodle_cuerpo(e)}}
     r = http.patch(f"https://graph.microsoft.com/v1.0/me/events/{quote(outlook_id, safe='')}",
                    headers=graph[0], json=cuerpo)
     if r.status_code == 404:
@@ -2691,6 +2688,17 @@ def _moodle_editar_evento(outlook_id: str, e: dict, graph: tuple, hecha: bool = 
         logger.error("Moodle: Graph no actualizó el evento de la entrega %s (%s)", e["id"], r.status_code)
         return False
     return True
+
+
+def _moodle_borrar_evento(outlook_id: str, mid, graph: tuple) -> bool:
+    """True si el evento ya no está en el calendario (también si ya lo habías borrado tú),
+    False si Graph falló y hay que reintentarlo."""
+    r = http.delete(f"https://graph.microsoft.com/v1.0/me/events/{quote(outlook_id, safe='')}",
+                    headers=graph[0])
+    if r.status_code in (200, 204, 404):
+        return True
+    logger.error("Moodle: Graph no quitó el evento de la entrega %s (%s)", mid, r.status_code)
+    return False
 
 
 def _moodle_adoptable(e: dict, existentes: list) -> str:
@@ -2759,16 +2767,16 @@ def _moodle_fila(e: dict, outlook_id: str, estado: str) -> dict:
 
 
 def _moodle_sincronizar() -> dict:
-    """Una pasada: lo nuevo al calendario, lo movido a su fecha, lo entregado tachado.
+    """Una pasada: lo nuevo al calendario, lo movido a su fecha, lo entregado fuera.
 
     Cada entrega nueva se crea en el calendario (o se adopta el evento que ya hubiera),
-    cada cambio de fecha o nombre en Moodle se lleva al evento, y una que deja de estar
-    pendiente pasa de 📚 a ✅. Lo que no se puede escribir en Outlook (sin conectar, un
-    fallo) se reintenta en la siguiente pasada: la fila se queda sin `outlook_id`.
+    cada cambio de fecha o nombre en Moodle se lleva al evento, y el evento de una que deja
+    de estar pendiente se borra. Lo que no se puede escribir en Outlook (sin conectar, un
+    fallo) se reintenta en la siguiente pasada.
 
     Lo que falta en la lista solo cuenta como «entregada» si la lista está COMPLETA: con
-    50 resultados puede estar cortada, y tachar una entrega porque no cupo en la página
-    sería decirte que ya está hecha cuando no.
+    50 resultados puede estar cortada, y quitar una entrega del calendario porque no cupo
+    en la página sería decirte que ya está hecha cuando no.
     """
     entregas, completa = _moodle_entregas()
     guardadas = _moodle_guardadas()
@@ -2809,25 +2817,35 @@ def _moodle_sincronizar() -> dict:
         if cambio or evento != antes:
             filas.append(_moodle_fila(e, evento, "pendiente"))
 
-    if completa:
-        vistas = {e["id"] for e in entregas}
-        for mid, fila in guardadas.items():
-            if mid in vistas or fila.get("estado") != "pendiente":
-                continue
-            vence = _moodle_ts(fila.get("vence")) or 0
-            evento = str(fila.get("outlook_id") or "")
-            e = {"id": mid, "nombre": fila.get("nombre") or "", "curso": fila.get("curso") or "",
-                 "url": fila.get("url") or "", "vence": fila.get("vence")}
-            if vence < ahora - MOODLE_VENCIDAS_DIAS * 86400:
-                # Se ha salido de la ventana, no se ha entregado: el evento ya es pasado y
-                # no sale en el widget, así que no se toca.
-                filas.append(_moodle_fila(e, evento, "fuera"))
-                continue
-            if evento and evento != MOODLE_SIN_EVENTO and MOODLE_AL_CALENDARIO:
-                if not graph or _moodle_editar_evento(evento, e, graph, hecha=True) is False:
-                    continue        # sin poder tacharla, se queda pendiente y se reintenta
-            filas.append(_moodle_fila(e, evento, "entregada"))
-            hechas += 1
+    vistas = {e["id"] for e in entregas}
+    for mid, fila in guardadas.items():
+        if mid in vistas or fila.get("estado") not in ("pendiente", "entregada"):
+            continue
+        entregada = fila.get("estado") == "entregada"
+        if not completa and not entregada:
+            continue
+        vence = _moodle_ts(fila.get("vence")) or 0
+        evento = str(fila.get("outlook_id") or "")
+        e = {"id": mid, "nombre": fila.get("nombre") or "", "curso": fila.get("curso") or "",
+             "url": fila.get("url") or "", "vence": fila.get("vence")}
+        if not entregada and vence < ahora - MOODLE_VENCIDAS_DIAS * 86400:
+            # Se ha salido de la ventana, no se ha entregado: el evento ya es pasado y
+            # no sale en el widget, así que no se toca.
+            filas.append(_moodle_fila(e, evento, "fuera"))
+            continue
+        quitar = bool(evento) and evento != MOODLE_SIN_EVENTO and MOODLE_AL_CALENDARIO
+        if entregada and not quitar:
+            continue                # ya está fuera del calendario: nada que hacer
+        if quitar:
+            if not graph or not _moodle_borrar_evento(evento, mid, graph):
+                continue            # sin poder quitarla, se queda como está y se reintenta
+            # Sin `outlook_id` y no con MOODLE_SIN_EVENTO: el evento lo ha quitado esto,
+            # no tú. Si la entrega vuelve a estar pendiente (te la reabren), se vuelve a
+            # crear. Las `entregada` que aún tienen evento son las que se tacharon con ✅
+            # antes de que se borraran: así se limpian solas.
+            evento = ""
+        filas.append(_moodle_fila(e, evento, "entregada"))
+        hechas += int(not entregada)
 
     if filas:
         r = http.post(f"{MOODLE_ENTREGAS_URL}?on_conflict=moodle_id",

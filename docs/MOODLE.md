@@ -8,7 +8,7 @@ Desde el 2026-10-07 las entregas salen de Moodle (Alud), no de apuntarlas a mano
 
 | | Qué hace | Dónde vive | Cuándo corre |
 |---|---|---|---|
-| **La sincronización** | Lleva las entregas pendientes al calendario, las mueve si cambia la fecha, las tacha al entregarlas y avisa si una vence pronto | `backend/main.py`, sección «MOODLE (entregas)» | Sola, desde el tick de Home Assistant |
+| **La sincronización** | Lleva las entregas pendientes al calendario, las mueve si cambia la fecha, las quita al entregarlas y avisa si una vence pronto | `backend/main.py`, sección «MOODLE (entregas)» | Sola, desde el tick de Home Assistant |
 | **El servidor MCP** | Las 24 herramientas de [moodle-mcp](https://github.com/loyaniu/moodle-mcp): notas, materiales, foros, progreso, carga de trabajo por semanas | `docker/moodle-mcp/`, contenedor en `caja` | Cuando Jarvis pregunta |
 
 Lo que tiene que pasar **sin que nadie pregunte** va en el backend, con tests y en el
@@ -50,7 +50,7 @@ algo**. Incluye las vencidas de los últimos `MOODLE_VENCIDAS_DIAS`.
 |---|---|---|
 | Aparece una nueva | Se crea el evento, o **se adopta** el que ya hubiera | Fila nueva, `pendiente` |
 | Cambia la fecha o el nombre | Se mueve / renombra el evento | Se actualiza |
-| Deja de estar pendiente | 📚 → ✅ (el evento se queda: es tu historial) | `entregada` |
+| Deja de estar pendiente | Se **borra** el evento | `entregada` |
 | Se sale de la ventana sin entregar | Nada: ya es pasado y no sale en el widget | `fuera` |
 
 Reglas que lo sostienen:
@@ -61,18 +61,24 @@ Reglas que lo sostienen:
   puede leer el calendario, no se crea nada**: crear a ciegas duplicaría lo que hubiera.
   Con la sincronización en marcha, **esa rutina sobra**: apágala, o cada entrega que meta
   la adoptará esto y la reescribirá con la fecha de Moodle.
-- **Solo se tacha lo que falta si la lista está completa.** Moodle devuelve 50 como
-  mucho (`MOODLE_LIMITE`); con 50 resultados la lista puede estar cortada, y tachar una
+- **Lo entregado se quita del calendario** (desde el 2026-10-08; el primer día se dejaba
+  con ✅ «como historial»). En el calendario queda lo que falta por hacer; el historial
+  está en `moodle_entregas`. La fila se queda **sin `outlook_id`**, no con `-`: lo ha
+  quitado esto, no tú, y si la entrega vuelve a estar pendiente (te la reabren) se crea
+  otra vez. Las que se tacharon con ✅ antes del cambio (`entregada` con evento) se borran
+  solas en la pasada siguiente.
+- **Solo se quita lo que falta si la lista está completa.** Moodle devuelve 50 como
+  mucho (`MOODLE_LIMITE`); con 50 resultados la lista puede estar cortada, y quitar una
   entrega porque no cupo en la página sería decirte que está hecha cuando no.
 - **Lo que borras no vuelve.** Si borras el evento, Graph responde 404 al moverlo y la
   fila se queda con `outlook_id = '-'`: no se vuelve a crear. Lo que sí pasa si lo
   MUEVES es que vuelve a la fecha de Moodle, porque quien manda en la fecha es Moodle.
 - **Sin Outlook conectado se guarda igual**, sin `outlook_id`, y el evento se crea en la
-  pasada siguiente. Una que no se pudo tachar por lo mismo se queda `pendiente` y se
+  pasada siguiente. Una que no se pudo quitar por lo mismo se queda `pendiente` y se
   reintenta.
 - **«Desaparecer» no es solo entregar.** También desaparece si te dan de baja del curso o
-  el profesor borra la tarea. El ✅ quiere decir «ya no está pendiente en Moodle», que es
-  lo único que se sabe.
+  el profesor borra la tarea. Que se quite quiere decir «ya no está pendiente en
+  Moodle», que es lo único que se sabe.
 
 ## Los avisos (`_moodle_avisar`)
 

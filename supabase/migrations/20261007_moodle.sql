@@ -4,7 +4,7 @@
 -- Hace falta memoria porque la sincronización tiene que distinguir tres cosas que desde
 -- Moodle se ven igual: una entrega NUEVA (se crea el evento y se avisa), una que ya estaba
 -- (se deja, o se mueve si cambió la fecha) y una que ha DESAPARECIDO de los pendientes
--- (se ha entregado: el 📚 del evento pasa a ✅). Sin esta tabla, cada pasada crearía otra
+-- (se ha entregado: su evento se quita del calendario). Sin esta tabla, cada pasada crearía otra
 -- vez todos los eventos.
 create table if not exists public.moodle_entregas (
   -- El id del evento de calendario de Moodle, no el de la tarea: es lo que devuelve la

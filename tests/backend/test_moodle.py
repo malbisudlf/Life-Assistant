@@ -52,6 +52,7 @@ def moodle(monkeypatch, mock_requests, graph_token):
                       lambda url, **kw: estado["upserts"].extend(kw["json"]) or FakeResponse(None, 201))
     mock_requests.add("POST", "/calendars/cal-clases/events", FakeResponse({"id": "ev-nuevo"}, 201))
     mock_requests.add("PATCH", "/me/events/", FakeResponse({}, 200))
+    mock_requests.add("DELETE", "/me/events/", FakeResponse(None, 204))
     return estado
 
 
@@ -198,29 +199,73 @@ class TestSincronizar:
         cuerpo = mock_requests.called("PATCH", "/me/events/ev-1")[0][2]["json"]
         assert "start" in cuerpo and cuerpo["subject"].startswith(main.ENTREGAS_MARKER)
 
-    def test_la_que_desaparece_pasa_a_entregada(self, moodle, mock_requests):
+    def test_la_que_desaparece_se_quita_del_calendario(self, moodle, mock_requests):
         e = main._moodle_entrega(_evento(1, 20))
         moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "pendiente")]
         r = main._moodle_sincronizar()
         assert r["entregadas"] == 1
-        cuerpo = mock_requests.called("PATCH", "/me/events/ev-1")[0][2]["json"]
-        assert cuerpo == {"subject": f"{main.MOODLE_HECHA} Práctica 1 (Redes)"}
+        assert mock_requests.called("DELETE", "/me/events/ev-1")
+        assert not mock_requests.called("PATCH", "/me/events/")
         assert moodle["upserts"][0]["estado"] == "entregada"
+        # Sin evento, pero no como «lo borraste tú»: si te la reabren, vuelve a crearse.
+        assert moodle["upserts"][0]["outlook_id"] is None
 
-    def test_con_la_lista_cortada_no_se_tacha_nada(self, moodle, mock_requests):
+    def test_si_graph_no_la_quita_se_reintenta(self, moodle, mock_requests):
+        mock_requests.routes.insert(0, ("DELETE", "/me/events/ev-1", FakeResponse({}, 503)))
+        e = main._moodle_entrega(_evento(1, 20))
+        moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "pendiente")]
+        r = main._moodle_sincronizar()
+        assert r["entregadas"] == 0 and not moodle["upserts"]
+
+    def test_si_ya_no_estaba_cuenta_como_quitada(self, moodle, mock_requests):
+        mock_requests.routes.insert(0, ("DELETE", "/me/events/ev-1", FakeResponse({}, 404)))
+        e = main._moodle_entrega(_evento(1, 20))
+        moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "pendiente")]
+        r = main._moodle_sincronizar()
+        assert r["entregadas"] == 1 and moodle["upserts"][0]["estado"] == "entregada"
+
+    def test_las_que_se_tacharon_con_el_tick_se_limpian(self, moodle, mock_requests):
+        # Antes una entregada se quedaba en el calendario con ✅: se borra en la siguiente
+        # pasada, aunque la lista venga cortada (ya se sabía que estaba entregada).
+        moodle["eventos"] = [_evento(100 + i, 10 + i) for i in range(main.MOODLE_LIMITE)]
+        e = main._moodle_entrega(_evento(1, -5))
+        moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "entregada")]
+        r = main._moodle_sincronizar()
+        assert mock_requests.called("DELETE", "/me/events/ev-1")
+        fila, = [f for f in moodle["upserts"] if f["moodle_id"] == 1]
+        assert fila["estado"] == "entregada" and fila["outlook_id"] is None
+        assert r["entregadas"] == 0
+
+    def test_una_entregada_sin_evento_no_se_toca(self, moodle, mock_requests):
+        e = main._moodle_entrega(_evento(1, -5))
+        moodle["guardadas"] = [main._moodle_fila(e, None, "entregada"),
+                               {**main._moodle_fila(e, main.MOODLE_SIN_EVENTO, "entregada"), "moodle_id": 2}]
+        main._moodle_sincronizar()
+        assert not mock_requests.called("DELETE", "/me/events/") and not moodle["upserts"]
+
+    def test_la_que_reabren_vuelve_al_calendario(self, moodle, mock_requests):
+        moodle["eventos"] = [_evento(1, 100)]
+        e = main._moodle_entrega(moodle["eventos"][0])
+        moodle["guardadas"] = [main._moodle_fila(e, None, "entregada")]
+        main._moodle_sincronizar()
+        assert mock_requests.called("POST", "/calendars/cal-clases/events")
+        assert moodle["upserts"][0]["outlook_id"] == "ev-nuevo"
+        assert moodle["upserts"][0]["estado"] == "pendiente"
+
+    def test_con_la_lista_cortada_no_se_quita_nada(self, moodle, mock_requests):
         # 50 resultados = el tope de Moodle: la que falta puede estar en la página siguiente.
         moodle["eventos"] = [_evento(100 + i, 10 + i) for i in range(main.MOODLE_LIMITE)]
         e = main._moodle_entrega(_evento(1, 200))
         moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "pendiente")]
         main._moodle_sincronizar()
-        assert not mock_requests.called("PATCH", "/me/events/ev-1")
+        assert not mock_requests.called("DELETE", "/me/events/ev-1")
         assert all(f["moodle_id"] != 1 for f in moodle["upserts"])
 
-    def test_la_que_se_sale_de_la_ventana_no_se_tacha(self, moodle, mock_requests):
+    def test_la_que_se_sale_de_la_ventana_no_se_quita(self, moodle, mock_requests):
         e = main._moodle_entrega(_evento(1, -24 * (main.MOODLE_VENCIDAS_DIAS + 1)))
         moodle["guardadas"] = [main._moodle_fila(e, "ev-1", "pendiente")]
         main._moodle_sincronizar()
-        assert not mock_requests.called("PATCH", "/me/events/ev-1")
+        assert not mock_requests.called("DELETE", "/me/events/ev-1")
         assert moodle["upserts"][0]["estado"] == "fuera"
 
     def test_el_evento_que_borraste_no_vuelve(self, moodle, mock_requests):
