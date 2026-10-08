@@ -1159,3 +1159,14 @@
     y el cliente, que lo compara al pie de la letra, abandonaba. Hoy `SinBarra` la quita
     de los metadatos, y `Registro` deja una línea por petición para no volver a
     diagnosticar a ciegas.
+
+- **La nota sobre 10 de la uni salía a la mitad: «4 sobre 10» con un 4 sobre 5.** La
+  primera versión convertía el total de la asignatura que da Moodle (`itemtype: course`),
+  y ese total cuenta lo que aún no está corregido: una prueba de 4 sobre 5 y otra de 5 sin
+  nota suman 4 sobre 10. Los tests pasaban porque el total que simulaban ya era el de lo
+  corregido. Hoy se hace la media de las notas sueltas que tienen nota, y el tooltip dice
+  de cuántas sale.
+  - Moraleja: **un total que agrega cosas sin terminar no es una nota.** Antes de
+    convertir un número, comprueba qué incluye; el dato de prueba tiene que tener el caso
+    incómodo (algo sin corregir), no el limpio.
+

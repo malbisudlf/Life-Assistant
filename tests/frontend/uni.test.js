@@ -67,13 +67,20 @@ describe("avisoIncompleto", () => {
 });
 
 describe("notaUni", () => {
-  test("sobre 10 cuando se pudo pasar, con la de Moodle a mano", () => {
-    expect(notaUni({ nota: "4,00", nota_10: "8" }))
-      .toEqual({ valor: "8", etiqueta: "sobre 10", original: "En Moodle: 4,00" });
+  test("sobre 10, diciendo de cuántas notas sale y la de Moodle", () => {
+    expect(notaUni({ nota: "4,00", nota_10: "8", corregidas: 1, evaluables: 2 })).toEqual({
+      valor: "8", etiqueta: "sobre 10",
+      original: "Media de lo corregido: 1 de 2 notas. En Moodle: 4,00",
+    });
   });
 
-  test("si ya era sobre 10, sin repetir la de Moodle", () => {
-    expect(notaUni({ nota: "7,5", nota_10: "7,5" }).original).toBeNull();
+  test("con todo corregido, sin el «de»", () => {
+    expect(notaUni({ nota: "6", nota_10: "6", corregidas: 3, evaluables: 3 }).original)
+      .toBe("Media de las 3 notas");
+  });
+
+  test("si salió del total y coincide, sin tooltip", () => {
+    expect(notaUni({ nota: "7,5", nota_10: "7,5", corregidas: null, evaluables: null }).original).toBeNull();
   });
 
   test("sin conversión, la de Moodle tal cual; sin nota, nada", () => {
@@ -81,4 +88,3 @@ describe("notaUni", () => {
     expect(notaUni({ nota: null })).toBeNull();
   });
 });
-

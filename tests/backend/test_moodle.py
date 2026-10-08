@@ -407,8 +407,10 @@ def uni(moodle, mock_requests):
         "notas": {"grades": [{"courseid": 1, "grade": "7,50"}, {"courseid": 2, "grade": "-"},
                              {"courseid": 3, "grade": "61,40"}]},
         # El detalle por asignatura (`gradereport_user_get_grade_items`), con su total.
-        "detalle": {1: {"itemtype": "course", "graderaw": 7.5, "grademin": 0, "grademax": 10,
-                        "gradeformatted": "7,50", "percentageformatted": "75,00 %"}},
+        # El detalle por asignatura (`gradereport_user_get_grade_items`): sus notas sueltas
+        # y su total, tal cual los devuelve Moodle.
+        "detalle": {1: [{"itemtype": "course", "graderaw": 7.5, "grademin": 0, "grademax": 10,
+                         "gradeformatted": "7,50", "percentageformatted": "75,00 %"}]},
         "fallan": set(),
     }
 
@@ -421,11 +423,8 @@ def uni(moodle, mock_requests):
             "core_enrol_get_users_courses": datos["cursos"],
             "gradereport_overview_get_course_grades": datos["notas"],
             "core_calendar_get_action_events_by_timesort": {"events": moodle["eventos"]},
-            "gradereport_user_get_grade_items": {"usergrades": [{"gradeitems": [
-                {"itemtype": "mod", "itemname": "Práctica 1", "graderaw": 1, "grademin": 0, "grademax": 1},
-                *([datos["detalle"][kw["data"].get("courseid")]]
-                  if kw["data"].get("courseid") in datos["detalle"] else []),
-            ]}]},
+            "gradereport_user_get_grade_items": {"usergrades": [{
+                "gradeitems": datos["detalle"].get(kw["data"].get("courseid"), [])}]},
         }[funcion])
 
     mock_requests.routes.insert(0, ("POST", "moodle.test/webservice/rest/server.php", responder))
@@ -505,26 +504,58 @@ class TestUni:
 
 
 class TestNotaSobre10:
-    """«Acabo de sacar un 4 sobre 5 y me pone 4»: el resumen de Moodle no dice sobre cuánto."""
+    """«Acabo de sacar un 4 sobre 5 y me pone 4»: el resumen de Moodle no dice sobre cuánto,
+    y el total de la asignatura cuenta lo que aún no está corregido."""
 
-    def _nota(self, uni, total, nota="4,00"):
+    @staticmethod
+    def _item(raw, maximo, minimo=0, peso=None, tipo="mod"):
+        item = {"itemtype": tipo, "itemname": "x", "graderaw": raw, "grademin": minimo, "grademax": maximo}
+        if peso is not None:
+            item["weightraw"] = peso
+        return item
+
+    def _asignatura(self, uni, items, nota="4,00"):
         uni["notas"]["grades"][0]["grade"] = nota
-        uni["detalle"][1] = {"itemtype": "course", **total}
+        uni["detalle"][1] = items
         return {a["id"]: a for a in main._moodle_uni()["asignaturas"]}[1]
 
-    def test_con_el_rango_es_exacta(self, uni):
-        a = self._nota(uni, {"graderaw": 4, "grademin": 0, "grademax": 5})
-        assert a["nota"] == "4,00" and a["nota_10"] == "8"
+    def test_el_caso_real_cuenta_solo_lo_corregido(self, uni):
+        # Una prueba de 4 sobre 5, otra de 5 sin corregir y un total que va 4 sobre 10.
+        a = self._asignatura(uni, [
+            self._item(4, 5), self._item(None, 5),
+            self._item(4, 10, tipo="course") | {"percentageformatted": "40,00 %"},
+        ])
+        assert a["nota_10"] == "8" and a["corregidas"] == 1 and a["evaluables"] == 2
 
-    def test_sin_rango_tira_del_porcentaje(self, uni):
-        a = self._nota(uni, {"percentageformatted": "69,30 %"}, nota="6,93")
-        assert a["nota_10"] == "6,93"
+    def test_con_pesos_pondera(self, uni):
+        a = self._asignatura(uni, [self._item(8, 10, peso=0.3), self._item(5, 10, peso=0.7)])
+        assert a["nota_10"] == "5,9"
+
+    def test_sin_pesos_por_puntos(self, uni):
+        a = self._asignatura(uni, [self._item(4, 5), self._item(3, 10)])
+        assert a["nota_10"] == "4,67"
 
     def test_un_minimo_distinto_de_cero_tambien_cuenta(self, uni):
-        a = self._nota(uni, {"graderaw": 6, "grademin": 2, "grademax": 10})
+        a = self._asignatura(uni, [self._item(6, 10, minimo=2)])
         assert a["nota_10"] == "5"
 
-    def test_sin_total_no_se_inventa(self, uni):
+    def test_las_categorias_no_cuentan_como_nota(self, uni):
+        a = self._asignatura(uni, [self._item(4, 5), self._item(1, 100, tipo="category")])
+        assert a["nota_10"] == "8" and a["evaluables"] == 1
+
+    def test_nada_corregido_no_se_inventa(self, uni):
+        a = self._asignatura(uni, [self._item(None, 5), self._item(0, 10, tipo="course")])
+        assert a["nota_10"] is None and a["nota"] == "4,00"
+
+    def test_sin_notas_sueltas_tira_del_total(self, uni):
+        a = self._asignatura(uni, [self._item(4, 5, tipo="course")])
+        assert a["nota_10"] == "8" and a["corregidas"] is None
+
+    def test_sin_rango_en_el_total_tira_del_porcentaje(self, uni):
+        a = self._asignatura(uni, [{"itemtype": "course", "percentageformatted": "69,30 %"}], nota="6,93")
+        assert a["nota_10"] == "6,93"
+
+    def test_sin_nada_no_se_inventa(self, uni):
         uni["detalle"].clear()
         a = {x["id"]: x for x in main._moodle_uni()["asignaturas"]}[1]
         assert a["nota"] == "7,50" and a["nota_10"] is None
