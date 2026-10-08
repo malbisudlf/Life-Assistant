@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { cuandoVence, detalleAsignatura, ordenarAsignaturas, avisoIncompleto } from "../../src/lib/uni";
+import { cuandoVence, detalleAsignatura, ordenarAsignaturas, avisoIncompleto, notaUni } from "../../src/lib/uni";
 
 // Un mediodía fijo, en hora local: los días se cuentan en la zona del navegador.
 const AHORA = new Date(2026, 9, 8, 12, 0);
@@ -65,3 +65,20 @@ describe("avisoIncompleto", () => {
       .toBe("Moodle no ha devuelto las notas ni las entregas; el resto está al día.");
   });
 });
+
+describe("notaUni", () => {
+  test("sobre 10 cuando se pudo pasar, con la de Moodle a mano", () => {
+    expect(notaUni({ nota: "4,00", nota_10: "8" }))
+      .toEqual({ valor: "8", etiqueta: "sobre 10", original: "En Moodle: 4,00" });
+  });
+
+  test("si ya era sobre 10, sin repetir la de Moodle", () => {
+    expect(notaUni({ nota: "7,5", nota_10: "7,5" }).original).toBeNull();
+  });
+
+  test("sin conversión, la de Moodle tal cual; sin nota, nada", () => {
+    expect(notaUni({ nota: "4,00", nota_10: null })).toEqual({ valor: "4,00", etiqueta: "nota", original: null });
+    expect(notaUni({ nota: null })).toBeNull();
+  });
+});
+

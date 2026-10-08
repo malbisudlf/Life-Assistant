@@ -64,7 +64,7 @@ import {
 import { momentoDelDia, destinoDeWidget } from "../lib/momento";
 import { lugarDePresencia, ordenarPorLugar, reordenaEn, NOMBRES_LUGAR, notaPresenciaAhora } from "../lib/lugares";
 import { leerEstadoSistema } from "../lib/estadoSistema";
-import { detalleAsignatura, ordenarAsignaturas, avisoIncompleto } from "../lib/uni";
+import { detalleAsignatura, ordenarAsignaturas, avisoIncompleto, notaUni } from "../lib/uni";
 
 // La zona dev son miles de líneas que casi nunca se abren: va en su propio chunk y se
 // descarga al pulsar 🛠, no en cada carga del dashboard en el móvil. Si la descarga
@@ -6202,7 +6202,7 @@ export default function Dashboard() {
                   <a
                     key={a.id} href={a.url} target="_blank" rel="noopener noreferrer"
                     style={{ ...s.entregaRow, textDecoration: "none", color: "inherit" }}
-                    aria-label={`${a.nombre}${a.nota ? `, nota ${a.nota}` : ""}. Abrir en Moodle`}
+                    aria-label={`${a.nombre}${notaUni(a) ? `, nota ${notaUni(a).valor}${a.nota_10 ? " sobre 10" : ""}` : ""}. Abrir en Moodle`}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ ...s.entregaTitle, fontSize: 14 }}>{a.nombre}</div>
@@ -6222,11 +6222,11 @@ export default function Dashboard() {
                         </div>
                       )}
                     </div>
-                    <div style={s.entregaCountdown}>
+                    <div style={s.entregaCountdown} title={notaUni(a)?.original || undefined}>
                       <div style={{ ...s.daysNum, fontSize: 20, color: a.nota ? "var(--text)" : "var(--muted2)" }}>
-                        {a.nota || "—"}
+                        {notaUni(a)?.valor || "—"}
                       </div>
-                      <span style={s.daysLabel}>{a.nota ? "nota" : "sin nota"}</span>
+                      <span style={s.daysLabel}>{notaUni(a)?.etiqueta || "sin nota"}</span>
                     </div>
                   </a>
                 );

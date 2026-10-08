@@ -42,6 +42,18 @@ export function ordenarAsignaturas(lista) {
     vence(x) - vence(y) || String(x.nombre).localeCompare(String(y.nombre), "es"));
 }
 
+/** Qué nota se enseña y con qué etiqueta. Sobre 10 si el backend pudo pasarla (sabía sobre
+ *  cuánto puntúa la asignatura); si no, la de Moodle tal cual, que es lo único cierto.
+ *  `original` va al tooltip: un 8 que en Moodle pone «4,00» tiene que poder explicarse. */
+export function notaUni(a) {
+  if (!a?.nota) return null;
+  if (a.nota_10) {
+    return { valor: a.nota_10, etiqueta: "sobre 10",
+             original: a.nota_10 === a.nota ? null : `En Moodle: ${a.nota}` };
+  }
+  return { valor: a.nota, etiqueta: "nota", original: null };
+}
+
 /** Qué no pudo leer el backend, en una frase. Vacía si llegó todo. */
 export function avisoIncompleto(incompleto) {
   const faltan = ["notas", "entregas"].filter(x => (incompleto || []).includes(x));

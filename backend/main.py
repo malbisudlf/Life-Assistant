@@ -3005,6 +3005,47 @@ def _moodle_id_usuario() -> int:
     return _moodle_usuario["id"]
 
 
+def _moodle_numero(texto) -> Optional[float]:
+    """Un número de Moodle, venga como 7.5, «7,50» o «80,00 %». None si no lo es."""
+    if isinstance(texto, (int, float)):
+        return float(texto)
+    limpio = str(texto or "").replace("%", "").replace("\xa0", "").strip().replace(",", ".")
+    try:
+        return float(limpio)
+    except ValueError:
+        return None
+
+
+def _moodle_formato_nota(valor: float) -> str:
+    """8.0 → «8», 7.5 → «7,5», 6.933 → «6,93»: como se escribe una nota aquí."""
+    return f"{round(valor, 2):.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _moodle_nota_sobre_10(curso_id: int) -> Optional[str]:
+    """La nota total de una asignatura pasada a sobre 10, o None si no se puede saber.
+
+    El resumen de notas de Moodle (`gradereport_overview`) da el número sin decir sobre
+    cuánto: un «4,00» era un 8 en una asignatura que puntúa sobre 5. El total de la
+    asignatura (`itemtype: course`) sí lo dice, y se usa en este orden: la nota con su
+    rango, que es exacto; y si el informe no enseña el rango, su porcentaje. Sin ninguno
+    de los dos, None: el widget enseña entonces la nota tal cual, que es lo único cierto.
+    """
+    crudo = _moodle_llamar("gradereport_user_get_grade_items",
+                           {"courseid": curso_id, "userid": _moodle_id_usuario()})
+    for usuario in (crudo or {}).get("usergrades") or []:
+        for item in usuario.get("gradeitems") or []:
+            if item.get("itemtype") != "course":
+                continue
+            nota = _moodle_numero(item.get("graderaw"))
+            minimo, maximo = _moodle_numero(item.get("grademin")), _moodle_numero(item.get("grademax"))
+            if nota is not None and minimo is not None and maximo and maximo > minimo:
+                return _moodle_formato_nota((nota - minimo) / (maximo - minimo) * 10)
+            porcentaje = _moodle_numero(item.get("percentageformatted"))
+            if porcentaje is not None:
+                return _moodle_formato_nota(porcentaje / 10)
+    return None
+
+
 def _moodle_es_de_este_curso(c: dict, ahora: float) -> bool:
     inicio, fin = c.get("startdate") or 0, c.get("enddate") or 0
     return (not c.get("hidden") and inicio >= ahora - MOODLE_CURSO_DIAS * 86400
@@ -3057,10 +3098,19 @@ def _moodle_uni() -> dict:
         if not suyas and not _moodle_es_de_este_curso(c, ahora):
             continue
         progreso = c.get("progress")
+        sobre_10 = None
+        if notas.get(c["id"]):
+            # Una llamada por asignatura con nota, no por asignatura: casi todas las de
+            # principio de curso no tienen ninguna. Si esta falla, la nota sale tal cual.
+            try:
+                sobre_10 = _moodle_nota_sobre_10(c["id"])
+            except MoodleApagado:
+                pass
         asignaturas.append({
             "id":         c["id"],
             "nombre":     _moodle_nombre_curso(c.get("fullname") or c.get("shortname")),
             "nota":       notas.get(c["id"]),
+            "nota_10":    sobre_10,
             "progreso":   round(progreso) if isinstance(progreso, (int, float)) else None,
             "pendientes": None if entregas is None else len(suyas),
             "proxima":    ({"nombre": suyas[0]["nombre"], "vence": suyas[0]["vence"],
