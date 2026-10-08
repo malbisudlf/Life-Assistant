@@ -17,8 +17,14 @@ services:
     container_name: moodle-mcp
     restart: unless-stopped
 
-    # MOODLE_URL, MOODLE_TOKEN y MOODLE_MCP_TOKEN. Ver .env.example.
+    # MOODLE_URL, MOODLE_TOKEN y MOODLE_MCP_TOKEN; y para la app de Claude,
+    # MOODLE_MCP_URL_PUBLICA y MOODLE_MCP_CLAVE. Ver .env.example.
     env_file: .env
+
+    # Los clientes y tokens de OAuth del modo público. Sin volumen, cada reconstrucción
+    # dejaría a la app de Claude con un token que ya no vale y habría que reconectarla.
+    volumes:
+      - datos:/datos
 
     ports:
       # Solo LAN, igual que n8n: el router no reenvía puertos. Y aun así lleva llave
@@ -32,3 +38,6 @@ services:
     cpus: 0.5
     mem_limit: 256m
     cpu_shares: 256
+
+volumes:
+  datos:

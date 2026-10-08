@@ -17,11 +17,13 @@ RUN pip install --no-cache-dir \
       python-dotenv==1.2.4 \
       uvicorn==0.54.0
 
-# Sin root: lo único que hace es hablar por red.
-RUN useradd --create-home --uid 10001 moodle
+# Sin root: lo único que hace es hablar por red. /datos es donde el modo público guarda
+# los clientes y los tokens de OAuth (oauth.py); va en un volumen, y se crea aquí con su
+# dueño para que el volumen nazca con él.
+RUN useradd --create-home --uid 10001 moodle && mkdir /datos && chown moodle /datos
 USER moodle
 WORKDIR /home/moodle
-COPY servidor.py .
+COPY servidor.py oauth.py ./
 
 EXPOSE 8765
 CMD ["python", "servidor.py"]
