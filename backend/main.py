@@ -16456,6 +16456,19 @@ def _error_de_servicio(mensaje: str) -> bool:
     return bool(_ERROR_DE_SERVICIO.search(str(mensaje or "")))
 
 
+# Y una cuarta: el silencio de los datos de salud (`_vigilar_ingesta`). Sale por
+# logger.error a propósito, para que entre en `app_logs` y se vea en el panel, pero lo
+# que dice es que el Watch/Health Auto Export/el Atajo dejaron de mandar: no hay nada que
+# cambiar en el código y #274 lo abrió el vigilante como si lo hubiera. Se avisa al móvil,
+# sin issue y sin botón de arreglo, con el listón de los errores de código.
+_SILENCIO_DE_DATOS = re.compile(r"sin recibir un solo dato de salud", re.I)
+
+
+def _silencio_de_datos(mensaje: str) -> bool:
+    """Si este error es el vigilante de la ingesta diciendo que no entran datos."""
+    return bool(_SILENCIO_DE_DATOS.search(str(mensaje or "")))
+
+
 def _vigilante_origen(origen: str) -> str:
     """El origen, limpio, para poder meterlo en una clave que se interpola en una URL.
 
@@ -16563,9 +16576,11 @@ def _averias_del_registro() -> list:
         firmas = por_origen.setdefault(origen, {})
         firma  = _firma_error(e.get("message"))
         dato   = firmas.setdefault(firma, {"mensaje": firma, "veces": 0, "red": 0,
-                                           "servicio": 0, "ultima": ""})
+                                           "servicio": 0, "silencio": 0, "ultima": ""})
         dato["veces"] += 1
-        if _error_de_servicio(e.get("message")):
+        if _silencio_de_datos(e.get("message")):
+            dato["silencio"] += 1
+        elif _error_de_servicio(e.get("message")):
             dato["servicio"] += 1
         elif _error_de_red(e.get("message")):
             dato["red"] += 1
@@ -16576,9 +16591,11 @@ def _averias_del_registro() -> list:
     for origen, firmas in por_origen.items():
         # Una forma de error cuenta como de red (o de credencial) cuando TODAS sus
         # apariciones lo parecen: si una sola no lo es, hay algo más y se trata como código.
-        grupos: dict = {"codigo": [], "red": [], "servicio": []}
+        grupos: dict = {"codigo": [], "red": [], "servicio": [], "silencio": []}
         for d in firmas.values():
-            if d["servicio"] == d["veces"]:
+            if d["silencio"] == d["veces"]:
+                grupos["silencio"].append(d)
+            elif d["servicio"] == d["veces"]:
                 grupos["servicio"].append(d)
             elif d["red"] == d["veces"]:
                 grupos["red"].append(d)
@@ -16610,6 +16627,7 @@ def _averias_del_registro() -> list:
                 "texto":    (f"{veces} errores en {origen} en las últimas {horas} h"
                              + {"red":      ", de red o de terceros: no es código.",
                                 "servicio": ": rechazan la credencial, no es código.",
+                                "silencio": ": no llegan datos de salud, no es código.",
                                 "codigo":   "."}[clase]),
                 "detalles": sorted(datos, key=lambda d: -d["veces"])[:VIGILANTE_MAX_DETALLES],
                 # Un issue es una petición de cambio de código. Por una caída de DNS, un
