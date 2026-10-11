@@ -207,6 +207,27 @@ class TestAveriasDeRed:
         assert "SMTPAuthenticationError" in aviso["texto"]
         assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
 
+    # ── El silencio de los datos de salud (#274) ─────────────────────────────
+    SILENCIO = ("Vigilante de ingesta: 30 h sin recibir un solo dato de salud "
+                "(última escritura 2026-10-10T06:00:00)")
+
+    def test_el_silencio_de_datos_no_es_codigo(self):
+        assert main._silencio_de_datos(self.SILENCIO) is True
+        assert main._silencio_de_datos(DNS_CAIDO) is False
+
+    def test_el_silencio_de_datos_avisa_sin_issue_ni_boton(self, mock_requests,
+                                                           issues_abiertos):
+        """#274: el vigilante de la ingesta dice que el Watch no manda nada, y el de errores
+        lo abrió como issue de código. No hay nada que cambiar: se avisa al móvil y ya."""
+        self._errores(mock_requests, [(self.SILENCIO, 3)])
+        r = main._vigilar_sistema()
+        assert r["aviso_vigilante"] is True
+        assert issues_abiertos == []
+        aviso = self._aviso(mock_requests)
+        assert aviso["regla"] == main.REGLA_VIGILANTE_SOLO
+        assert "no llegan datos de salud" in aviso["texto"]
+        assert not mock_requests.called("POST", "/rest/v1/revision_hallazgos")
+
     # ── Que el código siga como estaba ───────────────────────────────────────
     def test_un_error_de_codigo_repetido_sigue_abriendo_su_issue(self, mock_requests,
                                                                  issues_abiertos):
