@@ -274,6 +274,9 @@ def _limpiar_estado():
     # cambiaría el de otro.
     main._avisos_movil.clear()
     main._ultimo_sondeo_avisos = 0.0
+    # El tope por hora de las preguntas de Jarvis: sin vaciarlo, la suite entera
+    # compartiría seis notificaciones.
+    main._preguntas_enviadas.clear()
     # El reloj de "quién sigue sondeando" que alimenta la pestaña Crons de la zona dev:
     # lo escribe el middleware en CADA petición, así que sin limpiarlo un test se
     # llevaría los sondeos de todos los anteriores.

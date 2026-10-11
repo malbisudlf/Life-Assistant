@@ -212,6 +212,12 @@ class TestElArregloEstaListo:
         rid = main._uuid_averia("ci", "9911")
         mock_requests.add("PATCH", "revision_hallazgos",
                           FakeResponse([{"id": rid, "detalle": "el CI ha fallado"}]))
+        # El aviso que acaba de apuntar, para que la llamada lo saque antes de sonar.
+        mock_requests.add("GET", "jarvis_recordatorios",
+                          FakeResponse([{"texto": "He arreglado un fallo",
+                                         "regla": main.REGLA_DESPLIEGUE}]))
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
 
         client.post("/revision/pr-listo", json=_listo_json(), headers=REVISION)
         assert llamadas and llamadas[0][1] == rid
@@ -235,6 +241,58 @@ class TestElArregloEstaListo:
         assert "#250" in contexto and "NO puedes" in contexto
         assert main.PASO_QUE_FALTA in contexto
         assert "desplegar" not in main._MCP_SERVIDOR_HERRAMIENTAS
+
+    def test_la_notificacion_sale_antes_de_que_suene(self, mock_requests, monkeypatch):
+        """2026-10-11: el teléfono decía «pulsa Desplegar en la notificación que te acabo
+        de mandar» y la notificación seguía en la cola, esperando al tick de HA (o pasada
+        a mañana por el presupuesto). Ahora quien llama la manda antes de decirlo."""
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("GET", "jarvis_recordatorios",
+                          FakeResponse([{"texto": "He arreglado un fallo",
+                                         "regla": main.REGLA_DESPLIEGUE}]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": rid}]))
+        en_la_cola = []
+        def llamar(texto, rid="", contexto=""):
+            # Lo que había en la cola del móvil en el momento de sonar.
+            en_la_cola.extend(main._avisos_movil)
+            return True
+        monkeypatch.setattr(main, "_llamar", llamar)
+
+        assert main._llamar_despliegue(rid, 122) is True
+        assert [a["id"] for a in en_la_cola] == [rid]
+        aviso = en_la_cola[0]
+        assert aviso["critico"] is True
+        assert any(b["action"] == f"LA_DESPLEGAR_{rid}" for b in aviso["acciones"])
+        # Y queda reservado: el tick no lo vuelve a sacar.
+        reserva = mock_requests.called("PATCH", "jarvis_recordatorios")[0]
+        assert "enviado=is.false" in reserva[1] and reserva[2]["json"]["enviado"] is True
+
+    def test_sin_notificacion_no_dice_que_la_ha_mandado(self):
+        assert "acabo de mandar" in main._apertura_despliegue_telefono("movil")
+        for canal in ("correo", ""):
+            apertura = main._apertura_despliegue_telefono(canal)
+            assert "acabo de mandar" not in apertura and "dashboard" in apertura
+
+    def test_el_permiso_no_se_pasa_a_manana_por_el_presupuesto(self, client, mock_requests,
+                                                                monkeypatch):
+        """Con los avisos del día gastados, el permiso salía a las 08:30 del día siguiente
+        mientras el teléfono ya había sonado. Deja trabajo parado: sale igual."""
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
+        monkeypatch.setattr(main, "_contar_enviados_hoy", lambda: main.AVISOS_MAX_DIA)
+        rid = main._uuid_averia("ci", "9911")
+        mock_requests.add("GET", "jarvis_recordatorios?enviado=is.false",
+                          FakeResponse([{"id": rid, "texto": "¿Lo subo a main?",
+                                         "regla": main.REGLA_DESPLIEGUE,
+                                         "prioridad": main.PRIO_ALTA,
+                                         "cuando": "2026-10-11T10:00:00+00:00"}]))
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": rid}]))
+
+        salida = main._despachar_recordatorios()
+        assert salida["recordatorios"] == 1 and "avisos_pospuestos" not in salida
+        assert [a["id"] for a in main._avisos_movil] == [rid]
 
     def _listo_con_centralita(self, mock_requests, monkeypatch):
         """Un PR verde que cierra una avería, con la centralita puesta y la llamada

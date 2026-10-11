@@ -3,6 +3,24 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **El teléfono decía «te acabo de mandar la notificación» y no había ninguna
+  (2026-10-11).** Tras pulsar «Arreglarlo», el PR se puso verde y Jarvis llamó: «pulsa
+  Desplegar en la notificación que te acabo de mandar». No llegó nada. `pr-listo`
+  **apuntaba** el aviso en la cola y **llamaba** al instante: de la cola sale con el
+  siguiente tick de HA (hasta cinco minutos) y solo si el gobierno de avisos lo deja, y el
+  permiso (`PRIO_ALTA`) entraba en el presupuesto de tres avisos al día como cualquier
+  regla, así que con el día gastado se iba a las 08:30 de mañana. La frase de la llamada
+  era fija y no sabía nada de eso. Y Jarvis-Claude, al otro lado, no tenía forma de
+  mandarte nada: hablaba de un canal que no era suyo.
+  - Arreglo: la llamada saca la notificación antes de sonar (`_entregar_aviso_ya`) y la
+    apertura dice por dónde salió (`_apertura_despliegue_telefono(canal)`). El permiso y
+    la sesión bloqueada (`_REGLAS_BLOQUEANTES`) se saltan el presupuesto y la espera por
+    lugar. Y Jarvis tiene `mandar_notificacion`, `respuesta_notificacion` y
+    `reenviar_permiso` (ver «Preguntas al móvil» en `docs/JARVIS.md`).
+  - Moraleja: **no anuncies por un canal lo que va por otro que no controlas**. Si una
+    frase dice «te acabo de mandar», quien la dice tiene que haberlo mandado, y saber si
+    llegó.
+
 - **La cabecera desbordaba en el móvil, pero solo de noche (2026-09-27).** El E2E de
   móvil pasó a las 17:31 y falló a las 23:22 con un commit que solo tocaba docs: la
   página hacía scroll horizontal. El evento de prueba es «dentro de dos horas», y a esa

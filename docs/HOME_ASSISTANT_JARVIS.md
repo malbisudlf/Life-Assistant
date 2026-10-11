@@ -444,6 +444,11 @@ no hay que tocar el YAML: la misma automatización y el mismo `rest_command` lla
 `/avisos/{id}/apagar`, y es el backend quien mira la regla del aviso y, si es la del PC,
 encola la suspensión que ya recoge tu sondeo de `/ha/pc-power-pending`.
 
+**Y también lleva las respuestas a las preguntas de Jarvis** (`mandar_notificacion`, ver
+«Preguntas al móvil» en `docs/JARVIS.md`): sus botones son `LA_APAGAR_resp1-<id>`,
+`LA_APAGAR_resp2-<id>`…, así que lo que va tras el último `_` es `resp1-<id>` y el backend
+ve el prefijo. Tampoco pide YAML nuevo.
+
 ```yaml
 alias: Life Assistant - Apagar al salir
 mode: queued

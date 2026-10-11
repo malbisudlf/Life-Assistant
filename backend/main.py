@@ -12442,6 +12442,7 @@ TABLAS_CONOCIDAS = {
     "despertares":           "20260927_despertares",
     "recordatorios_lugar":   "20261005_lugares",
     "moodle_entregas":       "20261007_moodle",
+    "jarvis_preguntas":      "20261011_jarvis_preguntas",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -14435,6 +14436,14 @@ REGLA_VIGILANTE_SOLO = "vigilante_solo"
 # ahí y no dentro del texto. De paso, se puede silenciar una sin callar la otra.
 REGLA_SESION           = "sesion"
 REGLA_SESION_BLOQUEADA = "sesion_bloqueada"
+# Las que dejan TRABAJO PARADO hasta que contestes: un arreglo verificado esperando
+# permiso y una sesión que no puede seguir sin ti. Son las que suenan con el móvil en
+# silencio, y por lo mismo las que no se pueden pasar a mañana por el presupuesto del día
+# ni esperar a que salgas del gimnasio: hasta el 2026-10-11 el permiso de despliegue
+# (PRIO_ALTA) entraba en el presupuesto como cualquier regla, y con tres avisos ya
+# salidos se iba a las 08:30 del día siguiente mientras el teléfono sonaba diciendo «te
+# acabo de mandar la notificación».
+_REGLAS_BLOQUEANTES    = (REGLA_DESPLIEGUE, REGLA_SESION_BLOQUEADA)
 # El parte del turno de noche. No se valora con «útil / no útil» como los demás: lo que
 # se hace con él es abrirlo y aprobar lo que hay dentro, así que sus botones son otros.
 REGLA_NOCHE            = "noche"
@@ -20474,8 +20483,248 @@ def _encender_del_aviso(aviso_id: str, fila: dict) -> dict:
     return {"ok": True, "encendidas": encendidas}
 
 
+# ── Preguntas de Jarvis al móvil ──────────────────────────────────────────────
+# Jarvis te manda una notificación y tú le contestas con un botón, igual que «Estoy
+# despierto» / «5 min más» de la alarma. Nació el 2026-10-11 de una llamada en la que
+# Jarvis-Claude te decía «pulsa el botón de la notificación que te acabo de mandar» sin
+# poder mandar ninguna: el teléfono hablaba de un canal que no era suyo.
+#
+# **Los botones no piden YAML nuevo en Home Assistant.** Van por `LA_APAGAR_`, cuya
+# automatización ya existe y llama a `/avisos/<lo que va tras el último _>/apagar`; ahí,
+# el prefijo `resp<n>-` delante del id dice que es la respuesta n a una pregunta. Mismo
+# truco que el `posponer-` de la alarma.
+#
+# **La respuesta se apunta, no se ejecuta.** Lo que Jarvis pregunta es texto libre que
+# redacta un modelo, y un botón cuyo efecto decide un modelo sería saltarse por la
+# puerta de atrás la confirmación de todo lo demás (`confirmar: True`). Así que el botón
+# solo deja escrito qué has elegido, y quien lo lee —Jarvis, en la llamada o después—
+# hace lo que haría si se lo dijeras hablando, con sus mismas fronteras.
+#
+# Tabla propia (`jarvis_preguntas`) y no columnas en `jarvis_recordatorios`: si la
+# migración no está aplicada, lo único que se pierde son estas preguntas (la herramienta
+# lo dice), no el insert de todos los avisos del sistema.
+PREGUNTAS_URL          = f"{SUPABASE_URL}/rest/v1/jarvis_preguntas"
+PREGUNTA_PREFIJO       = "resp"
+PREGUNTA_MAX_OPCIONES  = 3
+PREGUNTA_MAX_OPCION    = 24      # lo que cabe en un botón de notificación sin cortarse
+PREGUNTA_MAX_TEXTO     = 300
+# Cuántas puede mandar en una hora. Un modelo en bucle con una herramienta que hace
+# vibrar el móvil es la peor forma de enseñar a ignorar el canal.
+PREGUNTAS_MAX_HORA     = 6
+# Lo más que `respuesta_notificacion` espera a que pulses. Por teléfono son veinte
+# segundos de silencio, y el runbook pide decirlo antes de callarse.
+PREGUNTA_ESPERA_MAX    = 20
+PREGUNTA_SONDEO_SEG    = 2
+_preguntas_enviadas: list = []
+# El id que acepta `/avisos/{id}/apagar`: un UUID, o el mismo con el prefijo de la
+# respuesta a una pregunta (`resp1-`, `resp2-`, `resp3-`).
+_AVISO_ID_BOTON = (rf"^(?:{PREGUNTA_PREFIJO}[1-{PREGUNTA_MAX_OPCIONES}]-)?"
+                   + _UUID_PATTERN.lstrip("^"))
+
+
+def _opciones_pregunta(opciones) -> list:
+    """Las respuestas posibles, de «Sí | No | Luego» a una lista limpia. Vacía si no hay.
+
+    Llegan como texto separado por `|` porque el esquema del MCP del teléfono solo sabe
+    de parámetros escalares. Se aceptan también comas si no hay ninguna barra, que es lo
+    que un modelo escribe cuando se olvida de la convención.
+    """
+    if isinstance(opciones, list):
+        trozos = [str(o) for o in opciones]
+    else:
+        texto  = str(opciones or "")
+        trozos = texto.split("|") if "|" in texto else texto.split(",")
+    limpias = []
+    for t in trozos:
+        t = " ".join(t.split())[:PREGUNTA_MAX_OPCION]
+        if t and t.lower() not in (o.lower() for o in limpias):
+            limpias.append(t)
+    return limpias[:PREGUNTA_MAX_OPCIONES]
+
+
+def _j_mandar_notificacion(texto: str, opciones: str = "", titulo: str = "") -> dict:
+    texto = (texto or "").strip()[:PREGUNTA_MAX_TEXTO]
+    if not texto:
+        return {"error": "Falta el texto de la notificación."}
+    ops   = _opciones_pregunta(opciones)
+    ahora = time.time()
+    _preguntas_enviadas[:] = [t for t in _preguntas_enviadas if ahora - t < 3600]
+    if len(_preguntas_enviadas) >= PREGUNTAS_MAX_HORA:
+        return {"ok": False,
+                "motivo": f"Ya le he mandado {PREGUNTAS_MAX_HORA} notificaciones en la "
+                          "última hora; no mando más. Díselo hablando."}
+    titulo = (titulo or "").strip()[:60] or ("🤖 Jarvis pregunta" if ops else "🤖 Jarvis")
+
+    if not ops:
+        try:
+            canal = _notificar(titulo, texto, acciones=[])
+        except Exception as e:
+            logger.warning("Jarvis: no se pudo mandar la notificación (%s)", e)
+            return {"ok": False, "motivo": "No he podido mandarla."}
+        _preguntas_enviadas.append(ahora)
+        return {"ok": True, "canal": canal,
+                "nota": ("Le ha llegado al móvil." if canal == "movil" else
+                         "El móvil no recoge notificaciones ahora: ha ido por correo.")}
+
+    pid = str(uuid.uuid4())
+    try:
+        r = http.post(PREGUNTAS_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"id": pid, "texto": texto, "opciones": ops})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        # Sin la fila, los botones llegarían al móvil y al pulsarlos no encontrarían nada:
+        # la avería clásica de este canal. Mejor no mandarlos y decirlo.
+        logger.error("Jarvis: no se pudo guardar la pregunta (%s)", e)
+        return {"ok": False,
+                "motivo": "No he podido guardar la pregunta, así que sus botones no "
+                          "servirían. Mándala sin opciones o pregúntaselo hablando."}
+    acciones = [{"action": f"LA_APAGAR_{PREGUNTA_PREFIJO}{i}-{pid}", "title": op}
+                for i, op in enumerate(ops, 1)]
+    cuerpo = texto
+    if not _movil_vivo():
+        # Irá por correo, y el correo no trae botones: que diga cómo se contesta.
+        cuerpo += f"\n\nContéstale a Jarvis: {' / '.join(ops)}."
+    try:
+        canal = _notificar(titulo, cuerpo, aviso_id=pid, acciones=acciones)
+    except Exception as e:
+        logger.warning("Jarvis: no se pudo mandar la pregunta %s (%s)", pid, e)
+        return {"ok": False, "motivo": "No he podido mandarla."}
+    _preguntas_enviadas.append(ahora)
+    logger.info("Jarvis: pregunta %s mandada por %s (%s)", pid, canal, " / ".join(ops))
+    return {"ok": True, "id": pid, "canal": canal, "opciones": ops,
+            "nota": ("Le ha llegado al móvil con los botones. Lo que pulse lo lees con "
+                     "respuesta_notificacion." if canal == "movil" else
+                     "El móvil no recoge notificaciones ahora: ha ido por correo, SIN "
+                     "botones. Pregúntaselo hablando.")}
+
+
+def _leer_pregunta(pid: str = "") -> dict:
+    """La pregunta con ese id, o la más reciente si no se da. {} si no hay ninguna."""
+    try:
+        r = http.get(f"{PREGUNTAS_URL}?" + (f"id=eq.{pid}&" if pid else "")
+                     + "select=id,texto,opciones,respuesta,respondido_at,creado"
+                       "&order=creado.desc&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Jarvis: no se pudo leer la pregunta (%s)", e)
+        raise HTTPException(status_code=502, detail="No se pudo leer la pregunta")
+    return filas[0] if filas else {}
+
+
+def _j_respuesta_notificacion(pregunta_id: str = "", esperar: int = 0) -> dict:
+    pregunta_id = (pregunta_id or "").strip().lower()
+    if pregunta_id and not re.match(_UUID_PATTERN, pregunta_id):
+        return {"error": "Ese id de pregunta no es válido."}
+    try:
+        espera = max(0, min(int(esperar or 0), PREGUNTA_ESPERA_MAX))
+    except (TypeError, ValueError):
+        espera = 0
+    fin = time.monotonic() + espera
+    while True:
+        fila = _leer_pregunta(pregunta_id)
+        if not fila:
+            return {"ok": False, "motivo": "No hay ninguna pregunta mandada con ese id."}
+        if fila.get("respuesta") or time.monotonic() >= fin:
+            break
+        time.sleep(PREGUNTA_SONDEO_SEG)
+    respuesta = str(fila.get("respuesta") or "")
+    return {"ok": True, "id": fila.get("id"), "pregunta": fila.get("texto"),
+            "opciones": fila.get("opciones") or [],
+            "respondida": bool(respuesta), "respuesta": respuesta or None,
+            "respondida_a_las": (_hora_local_txt(fila.get("respondido_at"))
+                                 if respuesta else None)}
+
+
+def _hora_local_txt(iso) -> Optional[str]:
+    """«HH:MM» en hora de aquí a partir de un ISO de Supabase, o None."""
+    momento = _fecha_utc(iso)
+    return momento.astimezone(LOCAL_TZ).strftime("%H:%M") if momento else None
+
+
+def _j_reenviar_permiso() -> dict:
+    fila = _despliegue_pendiente()
+    if not fila:
+        return {"ok": False, "motivo": "No hay ningún arreglo esperando permiso."}
+    rid = str(fila.get("id") or "")
+    pr  = int(fila.get("pr_numero") or 0)
+    canal = _entregar_aviso_ya(rid)
+    if not canal:
+        # El aviso no llegó a apuntarse (o no se puede leer). Uno nuevo con los mismos
+        # botones sirve igual: «Desplegar» decide sobre el permiso por su id, no sobre la
+        # fila del aviso.
+        try:
+            canal = _notificar("⏰ Arreglo esperando permiso",
+                               f"El PR #{pr} está con el CI en verde.\n\n¿Lo subo a main? "
+                               f"Luego {PASO_QUE_FALTA}.",
+                               aviso_id=rid, acciones=_acciones_aviso(rid, REGLA_DESPLIEGUE),
+                               critico=True)
+        except Exception as e:
+            logger.warning("Despliegue: no se pudo reenviar el permiso de %s (%s)", rid, e)
+            canal = ""
+    nota = {"movil": "Le ha llegado al móvil con el botón Desplegar.",
+            "correo": "El móvil no recoge notificaciones: ha ido por correo, sin botones. "
+                      "Que se lo diga a Jarvis en el dashboard."}.get(
+        canal, "No he podido mandarla. Que se lo diga a Jarvis en el dashboard.")
+    return {"ok": canal == "movil", "canal": canal or "ninguno", "pr": pr, "nota": nota}
+
+
+def _responder_pregunta(pid: str, n: int) -> dict:
+    """El botón n de una pregunta de Jarvis. Apunta la respuesta; no hace nada más."""
+    try:
+        r = http.get(f"{PREGUNTAS_URL}?id=eq.{pid}&select=opciones,respuesta",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        filas = r.json() or []
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Jarvis: no se pudo leer la pregunta %s (%s)", pid, e)
+        raise HTTPException(status_code=502, detail="No se pudo leer la pregunta")
+    if not filas:
+        raise HTTPException(status_code=404, detail="Esa pregunta no existe")
+    opciones = filas[0].get("opciones") or []
+    if not isinstance(opciones, list) or not 1 <= n <= len(opciones):
+        raise HTTPException(status_code=422, detail="Esa pregunta no tiene esa respuesta")
+    eleccion = str(opciones[n - 1])
+
+    # Condicional, como el resto de botones: la primera respuesta es la que vale, y un
+    # segundo toque (o el otro botón después) no la pisa.
+    try:
+        r = http.patch(f"{PREGUNTAS_URL}?id=eq.{pid}&respuesta=is.null",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"respuesta": eleccion,
+                             "respondido_at": datetime.now(timezone.utc).isoformat()})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        hecho = bool(r.json())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Jarvis: no se pudo apuntar la respuesta a %s (%s)", pid, e)
+        raise HTTPException(status_code=502, detail="No se pudo apuntar la respuesta")
+    if not hecho:
+        previa = str(filas[0].get("respuesta") or "") or "otra cosa"
+        _acusar_recibo("🤖 Ya habías contestado",
+                       f"Contestaste «{previa}». Si quieres cambiarlo, díselo a Jarvis.",
+                       efimero=True)
+        return {"ok": True, "hecho": False, "respuesta": previa}
+    # El acuse, como el «⏰ Alarma quitada»: el salto del móvil a HA se pierde sin dejar
+    # rastro, y esta es la única forma de que se note.
+    _acusar_recibo("🤖 Contestado", f"«{eleccion}»", efimero=True)
+    logger.info("Jarvis: pregunta %s contestada con «%s»", pid, eleccion)
+    return {"ok": True, "hecho": True, "respuesta": eleccion}
+
+
 @app.post("/avisos/{aviso_id}/apagar")
-def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""):
+def apagar_aviso(request: Request, token: str = "",
+                 aviso_id: str = Path(..., pattern=_AVISO_ID_BOTON)):
     """El tercer botón del aviso de salir de casa: apágalo tú.
 
     Hasta aquí el aviso te decía que te habías dejado la luz del salón encendida y ahí se
@@ -20497,8 +20746,14 @@ def apagar_aviso(request: Request, aviso_id: str = _uuid_path(), token: str = ""
     `pc_encendido` no hay entidades que apagar, se encola la suspensión por el mismo
     camino que `POST /suspend-pc` (`_pedir_al_pc`: el pedido para caja, o el flag que HA
     recoge en `/ha/pc-power-pending` si no hay caja).
+
+    **Y las respuestas a las preguntas de Jarvis**, con el id prefijado `resp<n>-` (ver
+    «Preguntas de Jarvis al móvil»): mismo botón, para no pedir YAML nuevo.
     """
     _auth_boton(request, token)
+    if aviso_id.startswith(PREGUNTA_PREFIJO):
+        n, _, pid = aviso_id[len(PREGUNTA_PREFIJO):].partition("-")
+        return _responder_pregunta(pid, int(n))
 
     try:
         r = http.get(f"{RECORDATORIOS_URL}?id=eq.{aviso_id}&select=regla,entidades,creado",
@@ -21730,6 +21985,64 @@ class PrListoIn(BaseModel):
 _despliegue_por_llamar: bool | None = None
 
 
+def _entregar_aviso_ya(rid: str) -> str:
+    """Saca AHORA al móvil el aviso apuntado con ese id, sin esperar a la cola. Devuelve el
+    canal por el que salió («movil», «correo») o "" si no salió.
+
+    Existe por la llamada del permiso (2026-10-11): sonaba el teléfono diciendo «pulsa
+    Desplegar en la notificación que te acabo de mandar» y la notificación no había
+    salido. `pr-listo` solo la APUNTABA, y de la cola sale cuando la despacha el tick de
+    HA (hasta cinco minutos después) y si el gobierno de avisos la deja: con el
+    presupuesto del día gastado se pasaba a mañana a las 08:30, y en el gimnasio esperaba
+    a que salieras. La llamada, en cambio, sale al instante. Así que quien va a decir «te
+    la acabo de mandar» la manda él antes de decirlo.
+
+    Si el tick ya la había sacado, se vuelve a mandar igual: lleva el mismo `tag`, así que
+    reemplaza a la anterior en vez de apilarse, y vuelve a ponerla arriba justo cuando
+    suena el teléfono hablando de ella.
+    """
+    if not re.match(_UUID_PATTERN, rid or ""):
+        return ""
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?id=eq.{rid}&select=texto,regla",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json() or []
+        if not filas:
+            return ""
+        texto = str(filas[0].get("texto") or "")
+        regla = str(filas[0].get("regla") or "")
+        # La reserva, igual que en el despachador: que el tick no la vuelva a sacar.
+        reserva = http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}&enviado=is.false",
+                             headers={**supabase_headers(), "Prefer": "return=representation"},
+                             json={"enviado": True,
+                                   "enviado_at": datetime.now(timezone.utc).isoformat()})
+        nueva = reserva.status_code < 300 and bool(reserva.json())
+    except Exception as e:
+        logger.warning("Avisos: no se pudo leer el aviso %s para sacarlo ya (%s)", rid, e)
+        return ""
+    try:
+        canal = _notificar(f"⏰ {texto[:60]}", f"{texto}\n\n— Jarvis", aviso_id=rid,
+                           acciones=_acciones_aviso(rid, regla),
+                           critico=regla in _REGLAS_BLOQUEANTES)
+    except Exception as e:
+        # Mismo criterio que el despachador: si no ha salido, la reserva se libera y el
+        # siguiente tick lo vuelve a intentar.
+        logger.warning("Avisos: no se pudo sacar ya el aviso %s (%s)", rid, e)
+        if nueva:
+            try:
+                http.patch(f"{RECORDATORIOS_URL}?id=eq.{rid}",
+                           headers={**supabase_headers(), "Prefer": "return=minimal"},
+                           json={"enviado": False, "enviado_at": None})
+            except Exception as e2:
+                logger.warning("Avisos: tampoco se pudo liberar %s (%s)", rid, e2)
+        return ""
+    if nueva and regla:
+        _apuntar_envio_regla(regla)
+    return canal
+
+
 def _contexto_despliegue(pr: int = 0) -> str:
     """Lo que sabe Jarvis-Claude al descolgar la llamada del permiso.
 
@@ -21744,17 +22057,32 @@ def _contexto_despliegue(pr: int = 0) -> str:
             f"no tienes la herramienta y el runbook te prohíbe mergear. Si dice que sí, "
             f"dile que pulse «Desplegar» en la notificación del móvil (o el mismo botón en "
             f"la pantalla de llamada del dashboard), y que después {PASO_QUE_FALTA}. Si "
-            f"pregunta qué se arregló, puedes mirar el PR con `gh` en solo lectura.")
+            f"pregunta qué se arregló, puedes mirar el PR con `gh` en solo lectura. Si te "
+            f"dice que la notificación no le ha llegado, vuelve a mandársela con la "
+            f"herramienta reenviar_permiso: lo que diga ella (móvil, correo o nada) es lo "
+            f"que le cuentas, sin adornarlo.")
 
 
-def _apertura_despliegue_telefono() -> str:
+def _apertura_despliegue_telefono(canal: str = "movil") -> str:
     """La primera frase de la llamada del permiso por la centralita.
 
     No es `_apertura_despliegue` porque esa pregunta «¿quieres que lo suba a main?», y
     por este canal la respuesta no la puede ejecutar quien la escucha: la da el botón.
+
+    `canal` es por dónde salió de verdad la notificación justo antes de llamar
+    (`_entregar_aviso_ya`). Decía «la notificación que te acabo de mandar» siempre, y el
+    2026-10-11 lo dijo con la notificación todavía en la cola.
     """
-    return ("He detectado un fallo y ya lo he corregido; el CI está en verde. Si quieres "
-            "que lo suba a main, pulsa Desplegar en la notificación que te acabo de mandar.")
+    inicio = "He detectado un fallo y ya lo he corregido; el CI está en verde. "
+    if canal == "movil":
+        return inicio + ("Si quieres que lo suba a main, pulsa Desplegar en la "
+                         "notificación que te acabo de mandar.")
+    if canal == "correo":
+        return inicio + ("El móvil no me recoge las notificaciones, así que te lo he "
+                         "mandado por correo, sin botones. Para subirlo, díselo a Jarvis "
+                         "en el dashboard.")
+    return inicio + ("No he podido mandarte la notificación con el botón. Para subirlo, "
+                     "díselo a Jarvis en el dashboard.")
 
 
 def _llamar_despliegue(rid: str, pr: int = 0) -> bool:
@@ -21778,7 +22106,10 @@ def _llamar_despliegue(rid: str, pr: int = 0) -> bool:
         logger.warning("Despliegue: no se pudo apuntar la llamada de %s (Supabase devolvió "
                        "%s)", rid, r.status_code)
         return False
-    return _llamar(_apertura_despliegue_telefono(), rid=rid, contexto=_contexto_despliegue(pr))
+    # Primero la notificación y luego la llamada que habla de ella (ver `_entregar_aviso_ya`).
+    canal = _entregar_aviso_ya(rid)
+    return _llamar(_apertura_despliegue_telefono(canal), rid=rid,
+                   contexto=_contexto_despliegue(pr))
 
 
 def _retomar_llamada_despliegue() -> dict:
@@ -22877,9 +23208,12 @@ def _espera_por_lugar(regla: str, prioridad: int, cache: dict) -> str:
     Las fronteras son las del presupuesto, por lo mismo: lo que pediste tú (sin regla, o
     una regla tuya) sale siempre, y lo urgente también — un «Sal ya» que espera a que
     termines de entrenar ya no sirve. Y lo que se dice precisamente allí
-    (`_REGLAS_DEL_LUGAR`) tampoco espera, claro.
+    (`_REGLAS_DEL_LUGAR`) tampoco espera, claro. Ni lo que deja trabajo parado
+    (`_REGLAS_BLOQUEANTES`): en clase sale sin atravesar el silencio (lo decide el
+    despachador), pero sale.
     """
-    if not regla or _es_tuyo(regla) or prioridad <= PRIO_SIN_TOPE:
+    if (not regla or _es_tuyo(regla) or prioridad <= PRIO_SIN_TOPE
+            or regla in _REGLAS_BLOQUEANTES):
         return ""
     lugar = _lugar_de_pasada(cache)
     if not lugar or regla in _REGLAS_DEL_LUGAR.get(lugar, ()):
@@ -23017,7 +23351,8 @@ def _despachar_recordatorios() -> dict:
         # lo que pediste tú sale siempre, venga sin regla (`recordarme`) o por una regla
         # tuya (`_es_tuyo`). Y lo urgente también, o el tope convertiría el aviso que más
         # corre en el primero en caerse.
-        if regla and not _es_tuyo(regla) and prioridad > PRIO_SIN_TOPE and presupuesto <= 0:
+        if (regla and not _es_tuyo(regla) and prioridad > PRIO_SIN_TOPE
+                and regla not in _REGLAS_BLOQUEANTES and presupuesto <= 0):
             _posponer_aviso(rid, regla)
             pospuestos += 1
             continue
@@ -23043,8 +23378,7 @@ def _despachar_recordatorios() -> dict:
                                # una sesión que no puede seguir sin ti. Lo que solo es
                                # urgente o importante no entra aquí — es la misma
                                # frontera que decide quién puede llamarte por teléfono.
-                               critico=(regla in (REGLA_DESPLIEGUE,
-                                                  REGLA_SESION_BLOQUEADA)
+                               critico=(regla in _REGLAS_BLOQUEANTES
                                         # En clase sale, pero sin atravesar el
                                         # silencio: el trabajo parado puede esperar
                                         # al final de la clase; el aula, no.
@@ -25727,6 +26061,61 @@ _JARVIS_HERRAMIENTAS = {
                        "parámetros y sin preguntar nada.",
         "parametros":  {},
     },
+    "mandar_notificacion": {
+        # Sin confirmación: solo le escribe al propio usuario, y lo que pulse se APUNTA,
+        # no se ejecuta (ver «Preguntas de Jarvis al móvil»). El tope por hora es lo que
+        # impide que un bucle lo convierta en ruido.
+        "confirmar":   False,
+        "fn":          _j_mandar_notificacion,
+        "descripcion": "Manda AHORA una notificación al móvil del usuario. Con opciones, "
+                       "llega con un botón por opción (hasta 3) para que conteste "
+                       "pulsando; su respuesta la lees con respuesta_notificacion, usando "
+                       "el id que devuelve esta. Úsala para dejarle por escrito algo que "
+                       "no debe olvidar, o para preguntarle algo que se contesta mejor "
+                       "con un toque que hablando. Pulsar un botón NO ejecuta nada: tú "
+                       "decides qué hacer con la respuesta, con las mismas reglas que si "
+                       "te la dijera. Mira el campo canal: si no es «movil», NO le ha "
+                       "llegado con botones y no le digas que pulse nada. Para el permiso "
+                       "de un despliegue no es esta: es reenviar_permiso.",
+        "parametros":  {
+            "texto":    {"type": "string",
+                         "description": "Lo que dice la notificación. Corto: se lee en "
+                                        "la pantalla de bloqueo."},
+            "opciones": {"type": "string",
+                         "description": "Respuestas posibles separadas por |, como "
+                                        "«Sí|No|Luego». Hasta 3, cortas. Vacío: sin "
+                                        "botones."},
+            "titulo":   {"type": "string",
+                         "description": "Título opcional. Por defecto «Jarvis»."},
+        },
+        "obligatorios": ["texto"],
+    },
+    "respuesta_notificacion": {
+        "confirmar":   False,
+        "fn":          _j_respuesta_notificacion,
+        "descripcion": "Qué ha contestado el usuario a una notificación con opciones de "
+                       "mandar_notificacion. Sin id, la última. Con esperar (hasta 20 "
+                       "segundos) espera a que pulse; por teléfono, avísale antes de "
+                       "quedarte callado esperando.",
+        "parametros":  {
+            "pregunta_id": {"type": "string",
+                            "description": "El id que devolvió mandar_notificacion."},
+            "esperar":     {"type": "integer",
+                            "description": "Segundos a esperar si aún no ha contestado "
+                                           "(0 a 20)."},
+        },
+    },
+    "reenviar_permiso": {
+        # Seguro por teléfono: no sube nada a main, solo vuelve a poner delante el botón
+        # con el que lo sube el usuario. La decisión sigue siendo suya y de su dedo.
+        "confirmar":   False,
+        "fn":          _j_reenviar_permiso,
+        "descripcion": "Vuelve a mandar AHORA al móvil la notificación del arreglo que "
+                       "espera permiso para subir a main, con su botón Desplegar. Úsala "
+                       "cuando diga que no le ha llegado. NO sube nada: lo sube él al "
+                       "pulsar. Mira el campo canal antes de decirle que la tiene.",
+        "parametros":  {},
+    },
 
     # ── Acciones a confirmar ─────────────────────────────────────────────────
     "crear_evento": {
@@ -26007,7 +26396,7 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
     "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
     "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
-    "moodle_entregas",
+    "moodle_entregas", "respuesta_notificacion",
 }
 # `borrar_idea` estuvo aquí y no podía usarse nunca: es `confirmar: True` (no hay
 # papelera), así que este servidor la rechazaba siempre. Anunciarla en `tools/list` solo
@@ -26018,6 +26407,10 @@ _MCP_SERVIDOR_ACCIONES = {
     "dejame_dormir", "estoy_despierto", "posponer_alarma", "guardar_idea",
     "anadir_sesion_entrenamiento", "encender_pc", "apagar_pc", "suspender_pc",
     "casa_ordenar",
+    # Hablar con el móvil desde la llamada (2026-10-11). Ninguna de las dos decide nada:
+    # una manda una notificación cuya respuesta solo se apunta, y la otra vuelve a poner
+    # delante el botón con el que el permiso lo da el usuario, no esta sesión.
+    "mandar_notificacion", "reenviar_permiso",
 }
 _MCP_SERVIDOR_HERRAMIENTAS = _MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
 

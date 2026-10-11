@@ -163,6 +163,22 @@ despertar (o pasada la hora de respaldo, las 10:00); si no, queda pendiente
 Suena una sola vez por permiso: se reserva en `avisos_llamadas` con su id, y esa reserva
 no gasta el tope de las llamadas cotidianas.
 
+**La notificación sale justo antes de que suene, y la saca quien llama** (desde el
+2026-10-11). `pr-listo` solo la apunta en la cola, y de la cola sale cuando la despacha
+el tick de HA —hasta cinco minutos después— y si el gobierno de avisos la deja pasar. La
+llamada sale al instante. Así que el teléfono decía «pulsa Desplegar en la notificación
+que te acabo de mandar» con la notificación aún en la cola, o **pasada a las 08:30 del día
+siguiente** porque el presupuesto del día (tres avisos) ya estaba gastado. Ahora
+`_llamar_despliegue` la saca antes de llamar (`_entregar_aviso_ya`), y la frase de
+apertura depende de por dónde salió de verdad: si fue por correo, o no salió, no dice que
+la tengas. Y si aun así no te llega, Jarvis-Claude tiene `reenviar_permiso` (ver
+«Preguntas al móvil» en `docs/JARVIS.md`).
+
+**El permiso tampoco se pasa a mañana ni espera a que salgas del gimnasio.** Junto con el
+aviso de una sesión bloqueada forma `_REGLAS_BLOQUEANTES`: lo que deja trabajo parado
+hasta que contestes. Esas ya eran las únicas que suenan con el móvil en silencio; ahora
+también se saltan el presupuesto del día y la espera por lugar.
+
 **Quien contesta esa llamada no puede subir nada a `main`.** Por la centralita descuelga
 Jarvis-Claude, que no tiene la herramienta `desplegar` (está fuera de la lista blanca del
 MCP del teléfono) y cuyo runbook le prohíbe los merges. Hasta el 2026-09-28 la llamada

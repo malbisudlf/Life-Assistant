@@ -89,6 +89,8 @@ TIMEOUT = 60
 #     solo le sirve al teléfono ese mismo día.
 #   · `moodle_entregas` — una copia de lo que dice Moodle. Se reconstruye sola en la
 #     siguiente pasada: los eventos que ya creó se reconocen por el `moodle_id` del cuerpo.
+#   · `jarvis_preguntas` — las preguntas de Jarvis al móvil y su botón pulsado. Solo
+#     valen mientras alguien espera la respuesta, como los avisos de sesión.
 # La lista con nombre está en `SIN_COPIA`, abajo.
 TABLAS = (
     # (nombre,                orden,                     obligatoria, columnas)
@@ -135,7 +137,7 @@ SIN_COPIA = frozenset({
     "revision_hallazgos", "averias", "backend_latidos",
     "avisos_llamadas", "avisos_motivos", "casa_acciones", "jarvis_gasto",
     "noche_partes", "noche_items", "sesion_avisos", "migraciones_aplicadas",
-    "presencia_tramos", "despertares", "moodle_entregas",
+    "presencia_tramos", "despertares", "moodle_entregas", "jarvis_preguntas",
     # De WhatsApp, que se quitó el 2026-10-01: la borra `20261001_quitar_whatsapp`. Sigue
     # aquí porque su `create table` sigue en las migraciones, y nunca se copió.
     "whatsapp_chats",

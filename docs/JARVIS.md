@@ -1052,6 +1052,45 @@ de clases, no aplicaba margen, no veía lo que venía de la noche anterior y, co
 `_eventos_con_fecha` devuelve `[]` cuando Outlook falla, **un Outlook caído le parecía un
 día entero libre**. Ahora, sin calendario, se calla.
 
+## Preguntas al móvil: `mandar_notificacion` y `respuesta_notificacion`
+
+Jarvis te puede mandar una notificación **ahora**, y si lleva opciones, contestarle con un
+botón —igual que «Estoy despierto» / «5 min más» de la alarma—. Nació el 2026-10-11: el
+teléfono sonó por un permiso de despliegue, Jarvis-Claude dijo «pulsa Desplegar en la
+notificación que te acabo de mandar», y no había llegado nada. El teléfono hablaba de un
+canal que no era suyo.
+
+Tres herramientas, las tres directas y las tres también en el MCP del teléfono:
+
+| Herramienta | Qué hace |
+|---|---|
+| `mandar_notificacion` | Manda la notificación al momento (`_notificar`, sin pasar por la cola). Con `opciones` («Sí\|No\|Luego», hasta 3) llega con un botón por opción y guarda la pregunta en `jarvis_preguntas` |
+| `respuesta_notificacion` | Lo que has pulsado. Sin id, la última pregunta. Con `esperar` (hasta 20 s) se queda mirando hasta que pulses |
+| `reenviar_permiso` | Vuelve a sacar al móvil la notificación del arreglo que espera permiso, con su botón «Desplegar». Para cuando dices «no me ha llegado» |
+
+Las reglas que la sostienen:
+
+- **Pulsar un botón no ejecuta nada: lo apunta.** Lo que se pregunta es texto libre que
+  redacta un modelo, y un botón cuyo efecto decidiera un modelo sería una puerta trasera a
+  la confirmación de todo lo demás. El botón deja escrita la respuesta y Jarvis hace con
+  ella lo mismo que si se la dijeras hablando, con sus mismas fronteras. La primera
+  respuesta es la que vale (PATCH condicional, `respuesta=is.null`).
+- **Sin YAML nuevo en Home Assistant.** Los botones van por `LA_APAGAR_`, que ya está
+  instalado: HA manda lo que va tras el último `_` a `POST /avisos/{id}/apagar`, y el
+  prefijo `resp<n>-` delante del id le dice al backend que es la respuesta n a una
+  pregunta. Mismo truco que el `posponer-` de la alarma. El acuse («🤖 Contestado: «Sí»»)
+  es lo que te deja saber que el salto del móvil a HA no se ha perdido.
+- **Nunca botones que no encuentran su pregunta.** Si no se puede guardar la pregunta
+  (por ejemplo, la migración `20261011_jarvis_preguntas` sin aplicar), no se manda y la
+  herramienta lo dice.
+- **La herramienta dice por dónde salió** (`canal`). Si el móvil no recoge avisos va por
+  correo, sin botones, y el correo dice cómo se contesta; Jarvis no puede decirte «púlsalo»
+  en ese caso.
+- **Tope: `PREGUNTAS_MAX_HORA` (6) por hora.** Un modelo en bucle con algo que hace
+  vibrar el móvil es la forma más rápida de enseñarte a ignorar el canal.
+- No pasa por el gobierno de avisos (presupuesto, silenciado): Jarvis te la manda porque
+  estáis hablando, como un `recordarme` que pides tú.
+
 ## Por qué te dije eso: la instantánea de cada aviso
 
 La señal de utilidad (`avisos_reglas`, el botón «me sirvió / no me sirvió») dice **qué**
