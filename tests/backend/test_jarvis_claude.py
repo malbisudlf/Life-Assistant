@@ -255,6 +255,8 @@ class TestElServicio:
         assert visto["input"] == "hola" and "hola" not in visto["args"]
         assert visto["cwd"] == str(tmp_path)
         assert TURNO in visto["mcp"]["mcpServers"]["jarvis"]["url"]
+        # Sin esto las herramientas del MCP quedan tras un buscador que `--tools ""` quita.
+        assert visto["env"]["ENABLE_TOOL_SEARCH"] == "false"
 
     def test_mal_formado_o_colgado(self, monkeypatch, tmp_path):
         servicio = _servicio(monkeypatch)

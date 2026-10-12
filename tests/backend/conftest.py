@@ -60,6 +60,10 @@ os.environ.setdefault("BRIEF_ECONOMIA", "0")
 # variables nacen apagadas en main.py; aquí se fijan explícitamente para que un
 # backend/.env local con el turno encendido no cambie lo que hace la suite.
 os.environ.setdefault("NOCHE_TURNO", "0")
+# OneDrive se fija con asignación y no con setdefault: Windows trae de serie una variable
+# `OneDrive` con la ruta de tu carpeta, y allí los nombres no distinguen mayúsculas, así
+# que `ONEDRIVE` ya «existía» y la suite arrancaba con OneDrive encendido en ese PC.
+os.environ["ONEDRIVE"] = "0"
 os.environ.setdefault("NOCHE_CORREO", "0")
 os.environ.setdefault("NOCHE_ARREGLA", "0")
 # Las tareas nacen apagadas; se fijan aquí por lo mismo que el turno de noche. Sus

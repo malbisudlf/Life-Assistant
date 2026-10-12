@@ -62,6 +62,18 @@ def _opciones_disponibles() -> str:
         return ""
 
 
+def entorno() -> dict:
+    """El entorno de `claude`: el del servicio, sin el buscador de herramientas.
+
+    Claude Code (2.1) no le da al modelo las herramientas MCP de entrada: las deja tras su
+    buscador de herramientas, que es una herramienta propia más. Con `--tools ""` ese
+    buscador también desaparece, y Jarvis arrancaba cada turno con las 76 herramientas
+    conectadas e invisibles: «no tengo acceso al tiempo», con el MCP en verde. Visto el
+    2026-10-13, la primera vez que se probó en `caja` contra el backend de verdad.
+    """
+    return {**os.environ, "ENABLE_TOOL_SEARCH": "false"}
+
+
 def comando(mcp_config: str, sistema: str, ayuda: str) -> list:
     """Los argumentos de `claude`. Se exportan para poder probarlos sin lanzarlo."""
     args = [CLAUDE_BIN, "-p",
@@ -130,7 +142,7 @@ def turno(cuerpo: dict, ayuda: str) -> tuple:
             try:
                 hecho = subprocess.run(comando(mcp, sis, ayuda), input=prompt,
                                        capture_output=True, text=True, cwd=DIRECTORIO,
-                                       timeout=TIMEOUT_S)
+                                       env=entorno(), timeout=TIMEOUT_S)
             except subprocess.TimeoutExpired:
                 return 504, {"error": f"Claude Code no terminó en {TIMEOUT_S} s"}
             except OSError as e:
