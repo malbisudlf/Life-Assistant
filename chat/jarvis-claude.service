@@ -1,0 +1,16 @@
+# El chat escrito de Jarvis con Claude Code (chat/jarvis_claude.py). Unidad de USUARIO,
+# no de sistema: tiene que correr como el usuario que tiene iniciada la sesión de Claude
+# Code, que es de quien es la suscripción. Instalación en docs/JARVIS.md, «El chat con
+# Claude Code».
+[Unit]
+Description=Jarvis: el chat escrito con Claude Code
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/jarvis-chat/.env
+ExecStart=/usr/bin/python3 -I %h/jarvis-chat/jarvis_claude.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

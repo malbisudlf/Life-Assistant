@@ -3622,11 +3622,18 @@ export default function Dashboard() {
       });
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
-      setJarvisMensajes(prev => [...prev, {
-        rol: "assistant",
-        texto: d.respuesta || "(sin respuesta)",
-        herramientas: d.herramientas || [],
-      }]);
+      setJarvisMensajes(prev => [
+        ...prev,
+        // Si el chat lo piensa Claude Code y no ha contestado, responde OpenAI: se dice,
+        // porque una respuesta peor sin saber por qué es justo lo que no tiene que pasar.
+        // Va como aviso, que se pinta distinto y no viaja en el historial.
+        ...(d.motor_aviso ? [{ rol: "aviso", texto: d.motor_aviso }] : []),
+        {
+          rol: "assistant",
+          texto: d.respuesta || "(sin respuesta)",
+          herramientas: d.herramientas || [],
+        },
+      ]);
       setJarvisPendiente(d.pendiente || null);
       // En llamada habla el ciclo de la llamada, para poder encadenar con la escucha.
       if (jarvisHabla && !voz) hablarJarvis(d.respuesta || "");

@@ -994,6 +994,65 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
 - **`GET /tareas`** (JWT) devuelve las pendientes. Apagado o sin Outlook, 200 con
   `activo: false` y el motivo, no un error: es un estado, no una avería.
 
+## El chat con Claude Code
+
+El chat escrito del dashboard puede pensarlo una **sesión normal de Claude Code** en
+`caja` —tu suscripción, Sonnet 5.5, la misma familia que contesta el teléfono— en vez
+del bucle de OpenAI. Se enciende con `JARVIS_MOTOR_CHAT=claude` (por defecto `openai`).
+Solo el chat: el modo llamada del navegador y el Atajo siguen con OpenAI, porque
+arrancar Claude Code cuesta unos segundos por turno y hablando se notan.
+
+```
+/jarvis ──▶ chat/jarvis_claude.py (caja) ──▶ claude -p ──▶ /mcp/chat ──▶ las herramientas
+```
+
+- **Sin terminal, a propósito.** Es la diferencia con el Claude Code del teléfono. El
+  servicio lanza `claude -p` con `--tools ""` (ni shell, ni ficheros, ni web propia),
+  `--strict-mcp-config` (solo el MCP de Jarvis; los que tenga la máquina, el del teléfono
+  incluido, no se cargan), `--permission-mode dontAsk` + `--allowedTools mcp__jarvis` y
+  `--restricted` si la versión lo tiene. Al chat llegan correos, páginas y documentos que
+  ha escrito cualquiera: con una terminal, uno bien escrito acabaría en un comando en la
+  máquina que lo aloja todo. Los argumentos los monta el servicio, no el backend, y sin
+  `--tools` en la CLI el servicio **no arranca**.
+- **Las mismas herramientas que el chat de OpenAI** (`/mcp/chat` anuncia
+  `_jarvis_esquema()`, con sus `requiere_*`), no la lista cerrada del teléfono: aquí hay
+  botón de confirmar. Lo que lo necesita **no se ejecuta**: se apunta como pendiente del
+  turno y vuelve al dashboard como el botón de siempre (`/jarvis/ejecutar`).
+- **El turno viaja en la URL del MCP** (`/mcp/chat?turno=<uuid>`): es lo que ata las
+  herramientas usadas y lo pendiente a la respuesta de ESE turno. No es una credencial
+  —la credencial es `JARVIS_MCP_CHAT_TOKEN`, distinto del del teléfono—; un turno
+  desconocido solo hace que lo pendiente no se pueda proponer.
+- **Cada turno es una sesión nueva** con la conversación entera en el mensaje
+  (`--no-session-persistence`): el historial sigue viviendo en el dashboard, como con
+  OpenAI, y en `caja` no hay sesiones que guardar ni purgar. El prompt es el de siempre
+  (`_jarvis_sistema`) y **sustituye** al de Claude Code, que es el de un programador.
+- **Si no contesta, contesta OpenAI, y lo dice.** Caja apagada, la sesión OAuth de Claude
+  Code caducada, un turno de más de `JARVIS_CLAUDE_TIMEOUT`: el backend lo registra,
+  contesta con el bucle de siempre y la respuesta lleva `motor_aviso`, que el chat pinta
+  como aviso. Una respuesta peor sin saber por qué es justo lo que esto viene a quitar.
+- **La memoria se sigue destilando** con `_quizas_destilar`, igual que con OpenAI: lo que
+  cuentas en el chat acaba en la misma memoria, piense quien piense.
+- **Coste:** lo paga la suscripción, no la API. Lo que sí cuenta es su límite de uso,
+  compartido con el teléfono y con lo que hagas con Claude Code en `caja`.
+
+**Montarlo en `caja`** (lo hace Mikel; nada de esto sale del repositorio solo):
+
+```bash
+mkdir -p ~/jarvis-chat ~/.config/systemd/user
+cp chat/jarvis_claude.py ~/jarvis-chat/
+cp chat/env.example ~/jarvis-chat/.env && chmod 600 ~/jarvis-chat/.env   # y rellenarlo
+cp chat/jarvis-claude.service ~/.config/systemd/user/
+loginctl enable-linger "$USER"        # para que corra sin sesión abierta
+systemctl --user daemon-reload && systemctl --user enable --now jarvis-claude
+curl -s http://172.17.0.1:3340/salud  # {"ok": true, "modelo": "claude-sonnet-5-5"}
+```
+
+Y en `backend/.env`: `JARVIS_MOTOR_CHAT=claude`, `JARVIS_CLAUDE_URL`,
+`JARVIS_CLAUDE_TOKEN` y `JARVIS_MCP_CHAT_TOKEN` (los dos tokens, iguales en los dos
+`.env`). Si el contenedor no llega a la IP del puente de Docker, la otra salida es
+`extra_hosts: ["host.docker.internal:host-gateway"]` en el compose de HomeLab. El
+registro del servicio: `journalctl --user -u jarvis-claude`.
+
 ## Documentos: OneDrive
 
 «¿Dónde está el contrato del piso?», «¿qué dice la póliza del coche sobre la grúa?». Es

@@ -592,6 +592,20 @@ JARVIS_VOZ_MODELO_DIRECTO = _flag("JARVIS_VOZ_MODELO_DIRECTO")
 # queda para hablar: las preguntas fáciles salían bien y las de varios pasos devolvían
 # un hueco en blanco. La reserva solo se paga si de verdad la usa.
 JARVIS_RESERVA_RAZONAMIENTO = int(os.getenv("JARVIS_RESERVA_RAZONAMIENTO", "2000"))
+# Quién piensa en el chat ESCRITO del dashboard: `openai` (el bucle de arriba) o
+# `claude`, una sesión de Claude Code en `caja` con tu suscripción, la misma familia que
+# contesta el teléfono. Solo el chat: el modo llamada del navegador y el Atajo siguen
+# con OpenAI, porque arrancar Claude Code cuesta unos segundos y hablando se notan. Ver
+# «El chat con Claude Code» en docs/JARVIS.md.
+JARVIS_MOTOR_CHAT     = (os.getenv("JARVIS_MOTOR_CHAT", "openai") or "openai").strip().lower()
+# Dónde escucha `chat/jarvis_claude.py` en `caja`, y el token para hablarle.
+JARVIS_CLAUDE_URL     = os.getenv("JARVIS_CLAUDE_URL", "").strip().rstrip("/")
+JARVIS_CLAUDE_TOKEN   = os.getenv("JARVIS_CLAUDE_TOKEN", "")
+# Un turno con varias herramientas puede tardar; más que esto es que algo se ha colgado,
+# y entonces contesta el de OpenAI.
+JARVIS_CLAUDE_TIMEOUT = int(os.getenv("JARVIS_CLAUDE_TIMEOUT", "150"))
+# Y el token con el que esa sesión entra en `/mcp/chat` a usar las herramientas.
+JARVIS_MCP_CHAT_TOKEN = os.getenv("JARVIS_MCP_CHAT_TOKEN", "")
 # Mismo criterio que /ideas/audio: es una llamada de pago por petición, así que va con
 # el limitador genérico por IP.
 JARVIS_MAX_REQUESTS   = int(os.getenv("JARVIS_MAX_REQUESTS", "30"))
@@ -26978,16 +26992,24 @@ def _mcp_servidor_tools_list() -> list:
     } for nombre, h in _JARVIS_HERRAMIENTAS.items() if nombre in _MCP_SERVIDOR_HERRAMIENTAS]
 
 
-def _mcp_servidor_auth(request: Request) -> None:
-    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+def _mcp_servidor_auth(request: Request, esperado: str = "") -> None:
+    if not _token_ok(_extract_service_token(request), esperado or JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 
-@app.post("/mcp/telefono")
-async def mcp_telefono(request: Request):
-    """Servidor MCP (Streamable HTTP, JSON-RPC 2.0) para la sesión de Claude Code del
-    teléfono. Un único endpoint POST: no hace falta streaming servidor→cliente, así que
-    se responde siempre JSON directo (nunca SSE).
+async def _mcp_servidor(request: Request, *, token: str, nombre_servidor: str,
+                        herramientas, catalogo, al_confirmar, boca: str, al_usar=None):
+    """Servidor MCP (Streamable HTTP, JSON-RPC 2.0) de una de las sesiones de Claude
+    Code que hablan con Jarvis. Un único endpoint POST: no hace falta streaming
+    servidor→cliente, así que se responde siempre JSON directo (nunca SSE).
+
+    Lo comparten el teléfono y el chat escrito, y lo que los separa entra por
+    parámetro: qué herramientas se dejan pasar (`herramientas`, el conjunto de nombres),
+    cómo se anuncian (`catalogo`) y qué pasa con una que necesita confirmación
+    (`al_confirmar`, que devuelve el `result` o el `error` de JSON-RPC). `al_usar`, si
+    viene, se entera de cada herramienta que se ha ejecutado de verdad. Dos copias de
+    este protocolo serían dos sitios donde arreglar el mismo fallo, y ya pasó con
+    `/mcp/telefono` (`docs/BUGS_HISTORICOS.md`).
 
     La auth va ANTES de tocar el cuerpo (invariante 8 de `CLAUDE.md`): con
     `body: dict = Body(...)`, FastAPI cargaba el JSON en memoria antes de que
@@ -26995,7 +27017,7 @@ async def mcp_telefono(request: Request):
     cuerpo arbitrariamente grande sin que nada lo acotara. Mismo caso que
     `/telefono/voz` (ver su comentario), pero con el orden invertido: aquí lo que faltaba
     no era una firma antes de leer, sino leer acotado antes de nada."""
-    _mcp_servidor_auth(request)
+    _mcp_servidor_auth(request, token)
 
     raw = await _leer_cuerpo_limitado(request, MAX_TELEFONO_BYTES)
     try:
@@ -27017,8 +27039,7 @@ async def mcp_telefono(request: Request):
                 "result": {
                     "protocolVersion": _MCP_PROTOCOLO_SERVIDOR,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "life-assistant-jarvis-telefono",
-                                   "version": "1.0"},
+                    "serverInfo": {"name": nombre_servidor, "version": "1.0"},
                 },
             }),
             media_type="application/json",
@@ -27035,39 +27056,249 @@ async def mcp_telefono(request: Request):
         raise HTTPException(status_code=404, detail="Sesión MCP desconocida o caducada")
 
     if metodo == "tools/list":
-        return {"jsonrpc": "2.0", "id": rpc_id,
-                "result": {"tools": _mcp_servidor_tools_list()}}
+        return {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": catalogo()}}
 
     if metodo == "tools/call":
         params      = body.get("params") or {}
         nombre      = str(params.get("name") or "")
         argumentos  = params.get("arguments") or {}
-        if nombre not in _MCP_SERVIDOR_HERRAMIENTAS:
+        if not isinstance(argumentos, dict):
+            argumentos = {}
+        if nombre not in herramientas():
             return {"jsonrpc": "2.0", "id": rpc_id,
                     "error": {"code": -32601,
-                              "message": "Herramienta no disponible por teléfono"}}
+                              "message": "Herramienta no disponible por aquí"}}
         herramienta = _JARVIS_HERRAMIENTAS[nombre]
         if _jarvis_confirma(herramienta, argumentos):
-            # El mismo gate que ya usa el chat de GPT: si una llamada concreta a
-            # `casa_ordenar` (una cerradura, no una luz) lo exige, se rechaza aquí
-            # aunque se haya pedido y confirmado por voz. No hay botón de confirmar al
-            # otro lado de un teléfono.
-            return {"jsonrpc": "2.0", "id": rpc_id,
-                    "error": {"code": -32602,
-                              "message": "Esta acción necesita una confirmación que no "
-                                         "se puede dar por teléfono. Dile a Mikel que "
-                                         "la haga él, o dile que no puedes hacerla así."}}
+            return {"jsonrpc": "2.0", "id": rpc_id, **al_confirmar(nombre, argumentos)}
+
+        def _despachar():
+            # Se pone aquí dentro y no fuera: `to_thread` copia el contexto al entrar, y
+            # lo que apunte el gasto de lo que haga la herramienta tiene que ir a ESTA boca.
+            marca = _boca_actual.set(boca)
+            try:
+                return _jarvis_despachar(nombre, argumentos)
+            finally:
+                _boca_actual.reset(marca)
+
         # En un hilo: este endpoint es `async` solo para poder leer el cuerpo acotado, y
         # las herramientas hacen HTTP bloqueante (Graph, Supabase, HA, Maps; 15 s cada
         # petición). Llamadas aquí dentro congelaban el bucle de eventos entero mientras
         # tanto: ni el tick de HA, ni n8n, ni el dashboard.
-        resultado = await asyncio.to_thread(_jarvis_despachar, nombre, argumentos)
+        resultado = await asyncio.to_thread(_despachar)
+        if al_usar:
+            al_usar(nombre)
         return {"jsonrpc": "2.0", "id": rpc_id,
                 "result": {"content": [{"type": "text",
-                                         "text": json.dumps(resultado, ensure_ascii=False)}]}}
+                                         "text": json.dumps(resultado, ensure_ascii=False,
+                                                            default=str)}]}}
 
     return {"jsonrpc": "2.0", "id": rpc_id,
             "error": {"code": -32601, "message": f"Método desconocido: {metodo}"}}
+
+
+def _mcp_telefono_confirmar(nombre: str, argumentos: dict) -> dict:
+    # El mismo gate que ya usa el chat: si una llamada concreta a `casa_ordenar` (una
+    # cerradura, no una luz) lo exige, se rechaza aquí aunque se haya pedido y confirmado
+    # por voz. No hay botón de confirmar al otro lado de un teléfono.
+    return {"error": {"code": -32602,
+                      "message": "Esta acción necesita una confirmación que no se puede "
+                                 "dar por teléfono. Dile a Mikel que la haga él, o dile "
+                                 "que no puedes hacerla así."}}
+
+
+@app.post("/mcp/telefono")
+async def mcp_telefono(request: Request):
+    """Servidor MCP para la sesión de Claude Code del teléfono. Ver `_mcp_servidor`."""
+    return await _mcp_servidor(
+        request, token=JARVIS_MCP_TELEFONO_TOKEN,
+        nombre_servidor="life-assistant-jarvis-telefono",
+        herramientas=lambda: _MCP_SERVIDOR_HERRAMIENTAS,
+        catalogo=_mcp_servidor_tools_list,
+        al_confirmar=_mcp_telefono_confirmar, boca="telefono")
+
+
+# ── El chat con Claude Code ───────────────────────────────────────────────────
+# El chat escrito del dashboard, pensado por una sesión de Claude Code en `caja` (tu
+# suscripción, Sonnet 5.5) en vez de por el bucle de OpenAI. Las piezas:
+#
+#   /jarvis ──▶ chat/jarvis_claude.py (en `caja`) ──▶ claude -p ──▶ /mcp/chat ──▶ herramientas
+#
+# Lo que NO cambia es lo que sostiene a Jarvis: las herramientas son las mismas
+# (`_jarvis_esquema()`, con sus `requiere_*`), y lo que necesita confirmación tampoco se
+# ejecuta aquí — se apunta como pendiente del turno y vuelve al dashboard como el botón de
+# siempre. La sesión NO tiene terminal ni ficheros (`--tools ""`): al chat llegan correos,
+# páginas y documentos escritos por otros, y nada de eso puede acabar en un comando en la
+# máquina que lo aloja todo. Esa es la diferencia con el Claude Code del teléfono, y es a
+# propósito.
+#
+# Cada turno lleva un id (`turno`) que viaja en la URL del MCP: es lo que ata lo que pase
+# dentro de `/mcp/chat` —qué herramientas se usaron, qué quedó pendiente— a la respuesta
+# de ESTE turno. No es una credencial (la credencial es el token); un id desconocido solo
+# hace que lo pendiente no se pueda proponer.
+CHAT_TURNO_TTL_S = 600
+_chat_turnos: dict = {}
+_chat_turnos_lock = threading.Lock()
+
+_AVISO_PENDIENTE = (
+    "NO se ha ejecutado nada todavía. Está solo PROPUESTO, esperando a que el usuario "
+    "pulse el botón de confirmar. No digas 'he creado', 'he enviado' ni 'está hecho': "
+    "dilo en futuro, como algo que harás si lo aprueba.")
+
+
+class ClaudeNoContesta(RuntimeError):
+    """La sesión de Claude Code no ha dado una respuesta: apagada, caída o colgada."""
+
+
+def _chat_turno_nuevo() -> str:
+    turno = str(uuid.uuid4())
+    ahora = time.time()
+    with _chat_turnos_lock:
+        for viejo in [t for t, d in _chat_turnos.items() if ahora - d["ts"] > CHAT_TURNO_TTL_S]:
+            _chat_turnos.pop(viejo, None)
+        _chat_turnos[turno] = {"ts": ahora, "usadas": [], "pendiente": None}
+    return turno
+
+
+def _mcp_chat_herramientas() -> set:
+    # Las mismas que ve el chat de OpenAI, con los mismos interruptores: lo que no se
+    # anuncia ahí (las tareas apagadas, OneDrive sin encender) tampoco existe aquí.
+    return {h["function"]["name"] for h in _jarvis_esquema()}
+
+
+def _mcp_chat_catalogo() -> list:
+    return [{
+        "name":        h["function"]["name"],
+        "description": h["function"]["description"],
+        "inputSchema": h["function"]["parameters"],
+    } for h in _jarvis_esquema()]
+
+
+@app.post("/mcp/chat")
+async def mcp_chat(request: Request, turno: str = ""):
+    """Servidor MCP de la sesión de Claude Code que piensa el chat escrito. Ver
+    «El chat con Claude Code» arriba y `_mcp_servidor`."""
+    turno = turno if re.match(_UUID_PATTERN, turno or "") else ""
+
+    def _al_confirmar(nombre: str, argumentos: dict) -> dict:
+        with _chat_turnos_lock:
+            datos = _chat_turnos.get(turno)
+            if datos is not None:
+                # Una por turno, como en el bucle de OpenAI: la última es la que se
+                # propone, que es la que el modelo acaba de decidir.
+                datos["pendiente"] = {"herramienta": nombre, "argumentos": argumentos}
+        if datos is None:
+            return {"error": {"code": -32602,
+                              "message": "Esta acción necesita que el usuario la confirme y "
+                                         "no se puede proponer desde aquí. Díselo."}}
+        return {"result": {"content": [{"type": "text", "text": json.dumps(
+            {"estado": "pendiente_de_confirmacion", "aviso": _AVISO_PENDIENTE},
+            ensure_ascii=False)}]}}
+
+    def _al_usar(nombre: str) -> None:
+        # Lo que se usó va a la respuesta del turno: el dashboard lo enseña debajo del
+        # mensaje, igual que con OpenAI.
+        with _chat_turnos_lock:
+            datos = _chat_turnos.get(turno)
+            if datos is not None:
+                datos["usadas"].append(nombre)
+
+    return await _mcp_servidor(
+        request, token=JARVIS_MCP_CHAT_TOKEN, nombre_servidor="life-assistant-jarvis-chat",
+        herramientas=_mcp_chat_herramientas, catalogo=_mcp_chat_catalogo,
+        al_confirmar=_al_confirmar, boca="chat", al_usar=_al_usar)
+
+
+def _prompt_chat(body) -> str:
+    """El mensaje y la conversación hasta aquí, en un solo texto.
+
+    El historial sigue viviendo en el cliente, como con OpenAI: cada turno es una sesión
+    nueva de Claude Code que recibe la conversación entera. Así no hay sesiones que
+    guardar ni que purgar en `caja`, y «Nueva conversación» en el dashboard sigue
+    significando lo mismo."""
+    partes = []
+    historial = body.historial[-JARVIS_MAX_HISTORIAL:]
+    if historial:
+        partes.append("Conversación hasta ahora, de lo más antiguo a lo más reciente:")
+        for t in historial:
+            partes.append(f"{'Usuario' if t.rol == 'user' else 'Jarvis'}: {t.texto}")
+        partes.append("")
+        partes.append("Mensaje nuevo del usuario, que es al que tienes que contestar:")
+    partes.append(body.mensaje.strip())
+    return "\n".join(partes)
+
+
+def _sistema_chat() -> str:
+    """El prompt de Jarvis de siempre, más lo que cambia al pensar con Claude Code."""
+    return (_jarvis_sistema(voz=False) + "\n\n"
+            "Cómo trabajas aquí:\n"
+            "- Tus herramientas son las del servidor MCP `jarvis`. Cuando estas reglas "
+            "nombran una (por ejemplo `agenda`), es `mcp__jarvis__agenda`.\n"
+            "- No tienes terminal ni acceso a ficheros: todo lo que puedes hacer es con "
+            "esas herramientas. Si algo no se puede hacer con ellas, dilo.\n"
+            "- Lo que necesita confirmación queda PROPUESTO y al usuario le sale un botón: "
+            "no lo des por hecho.\n\n" + _jarvis_ahora())
+
+
+def _jarvis_turno_claude(body) -> dict:
+    """Un turno del chat escrito pensado por Claude Code. Lanza `ClaudeNoContesta` si
+    no hay respuesta, y quien llama decide qué hacer (contestar con OpenAI)."""
+    if not (JARVIS_CLAUDE_URL and JARVIS_CLAUDE_TOKEN and JARVIS_MCP_CHAT_TOKEN):
+        raise ClaudeNoContesta("falta configurar JARVIS_CLAUDE_URL, JARVIS_CLAUDE_TOKEN "
+                               "o JARVIS_MCP_CHAT_TOKEN")
+    turno = _chat_turno_nuevo()
+    try:
+        r = http.post(f"{JARVIS_CLAUDE_URL}/turno",
+                      headers={"Authorization": f"Bearer {JARVIS_CLAUDE_TOKEN}"},
+                      json={"turno": turno, "prompt": _prompt_chat(body),
+                            "sistema": _sistema_chat()},
+                      timeout=JARVIS_CLAUDE_TIMEOUT)
+    except requests.RequestException as e:
+        raise ClaudeNoContesta(f"no contesta ({type(e).__name__})") from e
+    finally:
+        with _chat_turnos_lock:
+            datos = _chat_turnos.pop(turno, None) or {"usadas": [], "pendiente": None}
+    try:
+        d = r.json() if r.status_code < 300 else {}
+    except ValueError:
+        d = {}
+    texto = str(d.get("respuesta") or "").strip()
+    if r.status_code >= 300 or not texto:
+        raise ClaudeNoContesta(str(d.get("error") or f"respondió {r.status_code}")[:300])
+    return {"respuesta": texto, "herramientas": list(dict.fromkeys(datos["usadas"])),
+            "pendiente": datos["pendiente"], "motor": "claude"}
+
+
+def _jarvis_chat(body) -> dict:
+    """El turno del chat escrito: con Claude Code si toca, y si no contesta, con OpenAI.
+
+    Que se caiga no es silencioso: se registra y la respuesta lo dice (`motor_aviso`),
+    porque una respuesta peor sin saber por qué es exactamente lo que este cambio viene
+    a quitar."""
+    if JARVIS_MOTOR_CHAT == "claude" and not body.voz:
+        try:
+            resultado = _jarvis_turno_claude(body)
+        except ClaudeNoContesta as e:
+            logger.error("Jarvis: Claude Code no ha contestado al chat (%s); contesta OpenAI", e)
+            resultado = _jarvis_resultado(body)
+            return {**resultado, "motor": "openai",
+                    "motor_aviso": "Claude no ha contestado; te responde el modelo de respaldo."}
+        _destilar_chat(body, resultado["respuesta"])
+        return resultado
+    return _jarvis_resultado(body)
+
+
+def _destilar_chat(body, respuesta: str) -> None:
+    """La memoria se sigue destilando igual que con OpenAI (`_quizas_destilar`, con su
+    freno de 30 minutos): lo que cuentas por el chat tiene que acabar en la misma
+    memoria, piense quien piense. Un fallo aquí no puede llevarse la respuesta."""
+    turnos = [{"rol": t.rol, "texto": t.texto} for t in body.historial[-JARVIS_MAX_HISTORIAL:]]
+    turnos += [{"rol": "user", "texto": body.mensaje.strip()},
+               {"rol": "assistant", "texto": respuesta}]
+    try:
+        _quizas_destilar(get_openai_client(), turnos)
+    except Exception as e:   # noqa: BLE001 — la memoria es un extra del turno
+        logger.warning("Jarvis: no se pudo destilar la memoria del chat (%s)", e)
 
 
 def _jarvis_ahora() -> str:
@@ -27891,7 +28122,7 @@ def jarvis(
     _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
     marca = _boca_actual.set("chat")
     try:
-        return _jarvis_resultado(body)
+        return _jarvis_chat(body)
     finally:
         _boca_actual.reset(marca)
 

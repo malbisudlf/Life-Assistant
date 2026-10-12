@@ -56,6 +56,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /telefono/voz` | firma de Twilio | Lo que Twilio pregunta al descolgar. Devuelve el TwiML que abre el puente de voz |
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `POST /mcp/telefono` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Servidor MCP (JSON-RPC 2.0) con las herramientas que usa la sesión de Claude Code que contesta el teléfono por la centralita. Auth antes de leer el cuerpo, acotado a `MAX_TELEFONO_BYTES` |
+| `POST /mcp/chat?turno=` | servicio (`JARVIS_MCP_CHAT_TOKEN`) | El mismo servidor MCP para la sesión de Claude Code que piensa el chat escrito (`JARVIS_MOTOR_CHAT=claude`): las herramientas que ve el chat de OpenAI, no la lista cerrada del teléfono, y lo que necesita confirmación queda pendiente del `turno` en vez de rechazarse. Ver `docs/JARVIS.md`, «El chat con Claude Code» |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado), con su `lugar` (`casa`, `gimnasio`, `uni` o `fuera`) |
 | `GET /presencia/tramos` | JWT | Tramos casa/fuera de un día (`?dia=`), ya unidos. Horas, un booleano y, en los de fuera, `lugar` si fue el gimnasio o la uni; nunca la zona ni coordenadas |
 | `GET /casa/acciones` | JWT | Lo que se le pidió a la casa ese día (`?dia=`), con su hora y su origen |
@@ -287,6 +288,7 @@ Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `TAREAS_TODO`, `TAREAS_MAX`, `MOODLE_URL`, `MOODLE_TOKEN`, `MOODLE_AL_CALENDARIO`,
 `MOODLE_CADA_MIN`, `MOODLE_AVISO_HORAS`, `MOODLE_VENCIDAS_DIAS`, `MOODLE_ADJUNTO_BYTES`,
 `ONEDRIVE`, `ONEDRIVE_MAX_BYTES`, `ONEDRIVE_MAX_TEXTO`, `ONEDRIVE_MAX_PAGINAS`, `CUMPLES`,
-`CUMPLES_HORA`.
+`CUMPLES_HORA`, `JARVIS_MOTOR_CHAT`, `JARVIS_CLAUDE_URL`, `JARVIS_CLAUDE_TOKEN`,
+`JARVIS_CLAUDE_TIMEOUT`, `JARVIS_MCP_CHAT_TOKEN`.
 Todas documentadas una a una en `backend/.env.example`.
 

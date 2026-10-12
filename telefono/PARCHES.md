@@ -19,7 +19,7 @@ síntoma que resuelve cada uno, más un decimotercero que no toca su código sin
 | # | Fichero | Qué se cambió | Sin el parche |
 |---|---|---|---|
 | 1 | `cli/lib/docker.js` | Escribe `SIP_AUTH_PASSWORD` y `SIP_AUTH_USERNAME`, no solo `SIP_PASSWORD` | La voice-app lee `SIP_AUTH_PASSWORD`, no lo encuentra y **se registra con las credenciales de ejemplo del repositorio original** |
-| 2 | `claude-api-server/server.js` | `CLAUDE_MODEL` pasa a `claude-sonnet-5` | Invocaba `claude-sonnet-4-20250514`, **retirado en junio de 2026**: toda respuesta era un error |
+| 2 | `claude-api-server/server.js` | `CLAUDE_MODEL` pasa a `claude-sonnet-5-5` (era `claude-sonnet-5` hasta el 2026-10-12; ver «El parche 2» abajo) | Invocaba `claude-sonnet-4-20250514`, **retirado en junio de 2026**: toda respuesta era un error |
 | 3 | `voice-app/lib/{tts-service,conversation-loop,sip-handler}.js` | Las URLs de audio usan `HTTP_PORT` en vez de `3000` a fuego | Aquí el 3000 lo ocupa Grafana: FreeSWITCH le pedía los audios a Grafana y la llamada **descolgaba en silencio** |
 | 4 | `voice-app/lib/*` | Todo el texto al español, Whisper con `language: 'es'`, despedidas en español y TTS con `eleven_flash_v2_5` | Jarvis saludaba en inglés, `eleven_turbo_v2` es **solo inglés**, y Whisper intentaba entender el español como si fuera inglés |
 | 5 | `voice-app/lib/audio-fork.js` | Detector de fin de frase por percentil sobre ventana deslizante | El umbral fijo (RMS 650) daba por voz el ruido de la línea (3.300-4.700): **el turno no se cerraba nunca** y Jarvis no contestaba salvo que silenciaras el micro |
@@ -30,6 +30,26 @@ síntoma que resuelve cada uno, más un decimotercero que no toca su código sin
 | 10 | `voice-app/lib/audio-fork.js` | Dentro de una frase, compara con **tu nivel de voz**, no solo con el ruido; turno máximo de 25 s (`VAD_MAX_UTTERANCE_MS`) (detalle abajo) | En un sitio ruidoso el ruido picaba por encima del suelo del parche 5, reiniciaba la cuenta de silencio y **Jarvis no dejaba de escucharte** aunque hubieras terminado, hasta el tope de 60 s |
 | 11 | `claude-api-server/{server,bitacora}.js` y `voice-app/lib/outbound-session.js` | Memoria entre llamadas: una bitácora de las llamadas recientes que Claude recibe al empezar cada sesión (detalle abajo) | Cada llamada era una sesión nueva: si Jarvis te llamaba, no lo cogías y le devolvías la llamada, **no sabía para qué te había llamado** |
 | 12 | `voice-app/lib/{outbound-handler,outbound-session,outbound-routes,conversation-loop}.js`, `voice-app/test/parche12.test.js` y `claude-api-server/bitacora.js` | Distingue el buzón de una persona por el `Contact` del 200 OK, cuenta cuántas veces habla alguien, **cuelga siempre** una llamada descolgada que falla y no deja que un final se reescriba (detalle abajo). **Aplicado el 2026-09-27**; la bitácora nueva, pendiente de reiniciar `claude-phone-api` | Si el buzón descuelga antes que el timbre del backend, para él la llamada está cogida: ni segunda llamada ni mensaje. Y si la voz falla tras descolgar, **la pata SIP se queda abierta** con el buzón grabando silencio hasta que cuelga él |
+
+### El parche 2: el modelo
+
+Lo único que cambia es una línea de `server.js`, y por eso es el que más se olvida al
+actualizar: el modelo **no** sale de la configuración de Claude Code, sale de ahí. Para
+pasar a otro (el 2026-10-12, de Sonnet 5 a Sonnet 5.5):
+
+```bash
+cd ~/.claude-phone-cli/claude-api-server
+grep -n "CLAUDE_MODEL" server.js                 # lo que hay ahora
+sed -i "s/claude-sonnet-5'/claude-sonnet-5-5'/; s/claude-sonnet-5\"/claude-sonnet-5-5\"/" server.js
+grep -n "CLAUDE_MODEL" server.js                 # tiene que decir claude-sonnet-5-5
+curl -s localhost:3010/api/calls                 # sin llamada en curso antes de reiniciar
+sudo systemctl restart claude-phone-api
+```
+
+Y comprobarlo de verdad: una llamada a la extensión de Jarvis que conteste. Un modelo mal
+escrito no falla al arrancar, falla en la primera respuesta («he tenido un problema»).
+El chat escrito usa el mismo modelo por su cuenta (`JARVIS_CLAUDE_MODELO` en
+`chat/env.example`): si se cambia uno, se cambian los dos.
 
 ### Los parches 7 y 8, en detalle
 
