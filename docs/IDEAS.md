@@ -23,7 +23,7 @@ capítulo de esa historia, no el final.**
 Repasado contra el código el 28 de septiembre de 2026. Todo lo que no sale aquí está hecho
 o descartado, y lo dice en su título.
 
-1. **7.3 a 7.5**, en el orden en que están escritas. La 7.1 (WhatsApp) se montó y se
+1. **7.5**. La 7.3 (solo los cumpleaños) y la 7.4 están hechas. La 7.1 (WhatsApp) se montó y se
    quitó; la 7.2 (To Do) está hecha y encendida.
 2. Lo que sobró de rondas anteriores, que son arreglos pequeños y no ideas:
    - **5.3**: el acuse de entrega de los avisos al móvil. Sigue sin existir
@@ -496,7 +496,10 @@ Ideas, que es donde las cosas se quedan olvidadas.
 encendido, igual que `SCOPES_CORREO`. Ojo: pedir un permiso nuevo obliga a reconectar
 Outlook una vez.
 
-### 7.3 Cumpleaños y «hace mucho que no hablas con…» ●
+### 7.3 Cumpleaños y «hace mucho que no hablas con…» ● — ✅ HECHA LA PRIMERA MITAD (octubre de 2026)
+
+> Hecha la parte de los cumpleaños, de los contactos de Outlook y del calendario: ver
+> «Cumpleaños» en `docs/JARVIS.md`. La segunda mitad sigue sin fuente.
 
 **Qué.** Un aviso el día antes de cada cumpleaños.
 
@@ -511,7 +514,9 @@ iCloud, no hay API, y harían falta un Atajo que los empuje. Y la lista de «gen
 que no quiero perder el contacto» la escribes tú, no la deduce un modelo por frecuencia
 de mensajes.
 
-### 7.4 Tus documentos de OneDrive ●●
+### 7.4 Tus documentos de OneDrive ●● — ✅ HECHA (octubre de 2026)
+
+> Ver «Documentos: OneDrive» en `docs/JARVIS.md`.
 
 **Qué.** «¿Dónde está el contrato del piso?», «¿qué dice la póliza del coche sobre la
 grúa?». Búsqueda en OneDrive (`/me/drive/search`) y, si hace falta, lectura del documento

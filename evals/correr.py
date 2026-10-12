@@ -75,6 +75,8 @@ def _preparar_entorno() -> None:
     os.environ.setdefault("ARREGLO_FIRE_URL", "https://ejemplo.invalido/arreglo")
     os.environ.setdefault("ARREGLO_FIRE_TOKEN", "eval")
     os.environ.setdefault("DEPLOY_GITHUB_TOKEN", "eval")
+    os.environ.setdefault("ONEDRIVE", "1")
+    os.environ.setdefault("CUMPLES", "1")
 
     sys.path.insert(0, str(BACKEND))
 

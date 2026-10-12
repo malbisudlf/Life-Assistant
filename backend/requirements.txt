@@ -12,3 +12,6 @@ python-multipart==0.0.32
 # `/telefono/media` responde 404 en producción y todo lo demás funciona igual, que es
 # el peor de los fallos posibles: silencioso y solo en el camino nuevo.
 websockets==15.0.1
+# Para leer el texto de los PDF de OneDrive (pólizas, contratos), que es lo que más se
+# le va a preguntar a Jarvis de esos documentos. Python puro, sin nada del sistema.
+pypdf==6.19.0

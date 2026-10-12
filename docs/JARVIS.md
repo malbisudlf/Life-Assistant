@@ -994,6 +994,62 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
 - **`GET /tareas`** (JWT) devuelve las pendientes. Apagado o sin Outlook, 200 con
   `activo: false` y el motivo, no un error: es un estado, no una avería.
 
+## Documentos: OneDrive
+
+«¿Dónde está el contrato del piso?», «¿qué dice la póliza del coche sobre la grúa?». Es
+la 7.4 de `docs/IDEAS.md`, y la primera fuente que Jarvis **consulta** en vez de vigilar.
+
+- **Mismo token de Graph, un permiso más y de lectura** (`SCOPES_ARCHIVOS`,
+  `Files.Read`). Nace apagado (`ONEDRIVE=0`) y encenderlo obliga a volver a conectar
+  Outlook una vez. Escribir en OneDrive no se pide nunca.
+- **Dos herramientas, las dos directas** (`requiere_onedrive`): `buscar_documentos`
+  (`/me/drive/root/search`, por nombre y por contenido; solo ficheros, nunca carpetas) y
+  `leer_documento` (por el id que dio la búsqueda). El id lo escribe un modelo y va en la
+  ruta de Graph: se valida con `_DRIVE_ID_RE` antes de llamar.
+- **Lo que se sabe leer**: PDF (`pypdf`, hasta `ONEDRIVE_MAX_PAGINAS`), Word y
+  PowerPoint (son un zip de XML: se leen sin librería y con tope de descompresión, por si
+  es una bomba de zip), texto, Markdown, CSV, JSON y HTML. Una hoja de cálculo no: sin su
+  estructura, las celdas sueltas son peores que no contestar. Lo que no se lee —formato
+  desconocido, más de `ONEDRIVE_MAX_BYTES`, un PDF cifrado o escaneado— vuelve como
+  `error` **con el enlace**, para que el modelo diga «ábrelo aquí» en vez de inventarse lo
+  que pone.
+- **El texto de un documento es un dato, no una orden.** Llega con `_AVISO_DOCUMENTO`
+  delante, igual que una página web con `_AVISO_WEB`: un PDF que te mandaron puede llevar
+  instrucciones escritas para un modelo. Por eso mismo las dos herramientas **no están en
+  la lista blanca del teléfono** (`_MCP_SERVIDOR_SOLO_LECTURA`): al otro lado de la llamada
+  hay una sesión con shell en `caja`, y ahí ese texto podría torcer un comando y no solo
+  una respuesta.
+- La descarga va con `stream=True` y `_descarga_acotada`: el tamaño que declara Graph se
+  mira antes, pero el tope de verdad es lo que se lee.
+
+## Cumpleaños
+
+Un aviso el día antes, y Jarvis sabiendo cuáles vienen. Es la 7.3 de `docs/IDEAS.md`.
+
+- **Dos fuentes**: la fecha de nacimiento en la ficha de los contactos de Outlook
+  (`Contacts.Read`, `SCOPES_CONTACTOS`) y los eventos del calendario. Del calendario por
+  defecto, los que dicen «cumple», «cumpleaños» o «birthday» en el asunto; del calendario
+  de cumpleaños de Outlook.com («Birthdays»/«Cumpleaños»), todos. Los demás calendarios
+  —las clases— no se miran.
+- **Todo bajo `CUMPLES=0`**, que nace apagado y pide el permiso de contactos. Los eventos
+  no lo necesitan, pero van con él para que haya un solo interruptor.
+- **El día no se corre.** Outlook guarda la fecha de nacimiento como un instante (a
+  mediodía UTC, o a medianoche de tu zona): pasada a `LOCAL_TZ` el día es el bueno en los
+  dos casos. Un evento de todo el día se lee por su fecha tal cual, sin pasar por UTC. Sin
+  año (Outlook pone 1604) no se dice la edad. El 29 de febrero se celebra el 28 los años
+  que no lo tienen.
+- **El mismo cumpleaños no sale dos veces**: la ficha dice «Ane Etxeberria» y el
+  calendario de cumpleaños «Ane»; mismo día y un nombre dentro del otro es el mismo.
+- **Una fuente caída se dice** (`incompleto`): «no hay cumpleaños» y «no he podido mirar
+  los contactos» no pueden sonar igual. Con las dos caídas es un fallo.
+- **El aviso** es la regla `cumples` de `_REGLAS` (necesita `REGLAS_PROACTIVAS`): una vez
+  al día a `CUMPLES_HORA` (10:00), del DÍA ANTES, que es cuando todavía se puede comprar
+  algo. Todos los de mañana en **un** aviso, con huella `cumples:<fecha>` y caducidad a
+  medianoche: pasado ese momento diría «mañana» de algo que ya es hoy. Está en
+  `REGLAS_LLAMABLES`, así que también puede llamar si lo pides desde la zona dev.
+- **Herramienta `cumpleanos`** (directa, `requiere_cumples`, también por teléfono) y
+  `GET /cumpleanos?dias=`. Para «¿cuándo es el cumple de X?» el modelo pide 366 días.
+
 ## Organizar el día: `huecos_libres` y `reservar_bloques`
 
 «Organízame mañana: dos horas de TFG e ir al gimnasio» son dos pasos, y cada uno es una

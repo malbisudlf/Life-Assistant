@@ -89,6 +89,10 @@
 
     { "id": "buscar-internet", "grupo": "web", "peticion": "¿Cuándo juega el Athletic la próxima jornada de liga?", "espera": ["buscar_en_internet"] },
     { "id": "leer-pagina", "grupo": "web", "peticion": "Ábreme https://es.wikipedia.org/wiki/Bilbao y dime de qué habla la entradilla.", "espera": ["leer_pagina"], "confundible": "buscar_en_internet" },
+    { "id": "buscar-documento", "grupo": "documentos", "peticion": "¿Qué dice mi póliza del coche sobre la grúa?", "espera": ["buscar_documentos"], "confundible": "buscar_en_internet", "nota": "la póliza es SUYA: está en OneDrive, no en internet." },
+    { "id": "donde-documento", "grupo": "documentos", "peticion": "¿Dónde tengo guardado el contrato del piso?", "espera": ["buscar_documentos"], "confundible": "ideas" },
+    { "id": "cumple-cuando", "grupo": "consultas", "peticion": "¿Cuándo es el cumple de Ane?", "espera": ["cumpleanos"], "confundible": "agenda" },
+    { "id": "cumples-mes", "grupo": "consultas", "peticion": "¿Alguien cumple años este mes?", "espera": ["cumpleanos"], "confundible": "agenda" },
 
     { "id": "mcp-servidores", "grupo": "mcp", "peticion": "¿Qué servidores MCP tengo conectados ahora mismo?", "espera": ["mcp_servidores"], "confundible": "mcp_catalogo" },
     { "id": "mcp-catalogo", "grupo": "mcp", "peticion": "¿A qué servidores MCP me podría conectar que todavía no tenga?", "espera": ["mcp_catalogo"], "confundible": "mcp_servidores" },

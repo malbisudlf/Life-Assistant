@@ -418,6 +418,9 @@ class TestJarvisDespachador:
         # Y Moodle, que sin URL y token no tiene nada que consultar.
         monkeypatch.setattr(main, "MOODLE_URL", "https://moodle.test")
         monkeypatch.setattr(main, "MOODLE_TOKEN", "moodle-token")
+        # Y OneDrive y los cumpleaños, que nacen apagados como las tareas.
+        monkeypatch.setattr(main, "ONEDRIVE", True)
+        monkeypatch.setattr(main, "CUMPLES", True)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

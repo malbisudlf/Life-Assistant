@@ -277,6 +277,7 @@ compositor, en fracción de pantalla; `agent.py --posicion` los mide),
 | `POST /dev/reconstruir` | JWT | **Despliega**. En `caja` deja un pedido en `DESPLIEGUE_DIR` que `desplegar.path` (systemd) convierte en `desplegar.sh`; como add-on, le pide al Supervisor que se reconstruya. Devuelve `motor` y `version_antes` y se va — el proceso muere a continuación. 503 si no tiene con qué (o el directorio no está montado), 429 si se acaba de lanzar otro. Nunca lo dispara un token de servicio |
 
 | `GET /tareas` | JWT | Las tareas pendientes de la lista por defecto de Microsoft To Do, las que vencen antes primero. Apagado o sin Outlook responde 200 con `activo: false` y el motivo. Ver `docs/JARVIS.md`, «Tareas» |
+| `GET /cumpleanos?dias=` | JWT | Los cumpleaños de los próximos `dias` (30 por defecto, máx. 366): de la fecha de nacimiento de los contactos de Outlook y de los eventos del calendario que lo dicen en el asunto, sin repetir. `cumple` es la edad que cumple, si se sabe el año. Una fuente caída sale en `incompleto`; apagado o sin Outlook, 200 con `activo: false` y el motivo. Ver `docs/JARVIS.md`, «Cumpleaños» |
 | `GET /moodle/entregas` | JWT | Las entregas pendientes, preguntadas a Moodle en el momento (`core_calendar_get_action_events_by_timesort`): curso, `vence` en UTC-Z, `vencida` y la URL. Sin configurar o con Moodle caído responde 200 con `activo: false` y el motivo. Ver `docs/MOODLE.md` |
 | `POST /moodle/sincronizar` | JWT | La pasada del tick, ahora: entregas nuevas al calendario de clases, fechas movidas a su sitio y las ya entregadas fuera del calendario. Devuelve cuántas de cada. `ok: false` con el motivo si Moodle no responde |
 | `GET /moodle/uni` | JWT | El widget «Uni»: las asignaturas de este curso (empezadas hace menos de `MOODLE_CURSO_DIAS` y sin terminar, más cualquiera con algo pendiente) con su nota tal cual la da Moodle y pasada a sobre 10 con la media de lo ya corregido (`nota_10`, más `corregidas`/`evaluables`; el total de la asignatura solo si no hay notas sueltas), su progreso si lo lleva, cuántas entregas quedan y la próxima. Copia en memoria de 10 min. `incompleto` dice si faltaron las notas o las entregas; sin la lista de cursos responde `activo: false` con el motivo |
@@ -284,6 +285,8 @@ compositor, en fracción de pantalla; `agent.py --posicion` los mide),
 Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `GASTO_QUEUE_MAX`, `MODELO_TARIFAS`, `TARIFA_AUDIO_MINUTO`, `AUDIO_BYTES_POR_SEGUNDO`,
 `TAREAS_TODO`, `TAREAS_MAX`, `MOODLE_URL`, `MOODLE_TOKEN`, `MOODLE_AL_CALENDARIO`,
-`MOODLE_CADA_MIN`, `MOODLE_AVISO_HORAS`, `MOODLE_VENCIDAS_DIAS`, `MOODLE_ADJUNTO_BYTES`.
+`MOODLE_CADA_MIN`, `MOODLE_AVISO_HORAS`, `MOODLE_VENCIDAS_DIAS`, `MOODLE_ADJUNTO_BYTES`,
+`ONEDRIVE`, `ONEDRIVE_MAX_BYTES`, `ONEDRIVE_MAX_TEXTO`, `ONEDRIVE_MAX_PAGINAS`, `CUMPLES`,
+`CUMPLES_HORA`.
 Todas documentadas una a una en `backend/.env.example`.
 
