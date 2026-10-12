@@ -2,7 +2,7 @@
 
 Aquí el backend es SERVIDOR, no cliente: expone una lista blanca cerrada de
 `_JARVIS_HERRAMIENTAS` sobre Streamable HTTP / JSON-RPC 2.0. Lo que se comprueba es que
-la lista blanca es de verdad cerrada (nada de `desplegar`, `mcp_*`, `crear_evento`...) y
+la lista blanca es de verdad cerrada (nada de `desplegar`, `mcp_*`, `borrar_evento`...) y
 que la confirmación hablada reusa el mismo `_jarvis_confirma` que el chat de GPT: una
 herramienta que la exige se rechaza, no se ejecuta porque venga de una llamada.
 """
@@ -85,8 +85,11 @@ class TestToolsList:
         assert nombres == main._MCP_SERVIDOR_HERRAMIENTAS
         for peligrosa in ("desplegar", "mcp_conectar", "mcp_usar",
                           "encargar_a_una_sesion", "responder_a_la_sesion",
-                          "arreglar_revision", "crear_evento", "cobrar_entrenamiento"):
+                          "arreglar_revision", "borrar_evento", "cobrar_entrenamiento"):
             assert peligrosa not in nombres
+        # Las del calendario sí están desde el 2026-10-13, pero no se hacen por teléfono:
+        # se mandan al móvil con un botón (ver test_confirmar_en_movil.py).
+        assert main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL <= nombres
 
     def test_solo_lectura_marca_readonlyhint(self, client):
         sesion = _initialize(client).headers["mcp-session-id"]

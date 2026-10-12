@@ -2057,7 +2057,7 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     response = http.get(
-        f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay&$orderby=start/dateTime",
+        f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay,isOrganizer,attendees&$orderby=start/dateTime",
         headers=headers
     )
     response.encoding = "utf-8"
@@ -2078,6 +2078,11 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
             "preview": event.get("bodyPreview"),
             "alud_url": alud_url,
             "isAllDay": event.get("isAllDay"),
+            # Si la cita es tuya y si hay alguien más en ella. Lo mira «vas tarde» antes
+            # de ofrecer moverla: mover la reunión de otro no se puede, y mover una con
+            # invitados les manda a todos la actualización. Sin el dato, no se ofrece.
+            "organizo": event.get("isOrganizer"),
+            "invitados": len(event.get("attendees") or []),
         })
     
     return {"events": events}
@@ -6906,6 +6911,10 @@ def _health_ingest_procesar(request: Request, raw: bytes):
     workouts   = data_block.get("workouts", [])
 
     upserted = 0
+    # Aunque no traiga entrenos: un envío sin ellos dice que hasta ahora no hubo ninguno,
+    # que es justo lo que necesita saber «días sin entrenar» (`_entrenos_al_dia`).
+    global _ultimo_envio_entrenos
+    _ultimo_envio_entrenos = time.time()
 
     # ── Workouts: agrupar por fecha y guardar como una fila por día ──
     if workouts:
@@ -17355,6 +17364,24 @@ HORA_PROACTIVO           = _hora_config(JARVIS_PROACTIVO_HORA, (19, 0))
 # Días sin un solo entreno del Watch a partir de los cuales merece mencionarse. El
 # objetivo declarado son 4 sesiones por semana: tres días en blanco ya se lo comen.
 JARVIS_PROACTIVO_SIN_ENTRENO = int(os.getenv("JARVIS_PROACTIVO_SIN_ENTRENO", "3"))
+# Cuánto puede tener el último envío de Health Auto Export para fiarse de «llevas N días
+# sin entrenar». Los entrenos solo llegan por ahí, y el móvil los manda cuando le da: el
+# 2026-10-12 entrenaste por la tarde, el envío no llegó hasta las 00:42, y a las 19:00 y
+# a las 21:30 te avisó de que llevabas cuatro días sin entrenar. El reloj lo sabía; el
+# backend todavía no.
+ENTRENOS_FRESCOS_HORAS = float(os.getenv("ENTRENOS_FRESCOS_HORAS", "3"))
+# En memoria a propósito: tras un reinicio no se sabe cuándo fue, y no saberlo es no
+# regañar hasta el siguiente envío, que es lo que tiene que pasar.
+_ultimo_envio_entrenos = 0.0
+
+
+def _entrenos_al_dia() -> bool:
+    """Si lo que sabe el backend de tus entrenos está al día, o puede ir horas por detrás.
+
+    Ante la duda, NO, como `_estuvo_en_gimnasio_hoy`: solo sirve para callar un reproche,
+    y un reproche con datos viejos es justo el aviso que enseña a no leer los demás.
+    """
+    return time.time() - _ultimo_envio_entrenos <= ENTRENOS_FRESCOS_HORAS * 3600
 _proactivo_dia: str | None = None
 
 _PROACTIVO_SISTEMA = (
@@ -17417,7 +17444,7 @@ def _motivos_proactivos(ahora: datetime) -> list:
     #    has ido es justo el aviso que enseña a no leer los demás.
     ultimo = (salud or {}).get("ultimo_entreno")
     if ultimo and (ultimo.get("dias") or 0) >= JARVIS_PROACTIVO_SIN_ENTRENO \
-            and not _estuvo_en_gimnasio_hoy():
+            and _entrenos_al_dia() and not _estuvo_en_gimnasio_hoy():
         motivos.append(f"{ultimo['dias']} días desde el último entreno (el objetivo son 4 por semana).")
 
     return motivos
@@ -17749,6 +17776,102 @@ def _regla_no_llegas() -> int:
     return puestos
 
 
+# ── «Vas tarde»: moverla con un botón ─────────────────────────────────────────
+# La hora de salir ha pasado y sigues en casa: te ofrece mover la cita lo que vas tarde,
+# con un botón. Nada se mueve solo — lo que el botón hace es lo que dice el aviso, guardado
+# con él (ver «Lo que se confirma en el móvil»). Nació de la llamada del 2026-10-12: «que
+# Jarvis mueva las citas si llego tarde».
+REGLA_VAS_TARDE = "vas_tarde"
+# Minutos pasada la hora de salir a partir de los cuales es ir tarde, y no salir justo.
+VAS_TARDE_MIN   = int(os.getenv("VAS_TARDE_MIN", "10"))
+# Se mueve en tramos de un cuarto de hora: «a las 10:15», no «a las 10:13».
+VAS_TARDE_PASO  = 15
+
+
+def _salida_apuntada(ev: dict) -> Optional[datetime]:
+    """La hora de salir que calculó «Sal ya» para esta cita, sin volver a pagar Maps.
+
+    El aviso se apuntó con `cuando` = salida − SALIR_ANTES_MIN. Si se apuntó ya tarde,
+    `cuando` es aquel momento y la salida que sale de aquí es posterior a la real: se
+    queda corto al decir cuánto vas tarde, nunca largo.
+    """
+    try:
+        r = http.get(f"{RECORDATORIOS_URL}?regla=eq.salir"
+                     f"&huella=eq.{quote(_huella_salir(ev), safe='')}&select=cuando&limit=1",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            return None
+        filas = r.json() or []
+    except Exception:
+        return None
+    cuando = _fecha_utc(filas[0].get("cuando")) if filas else None
+    return (cuando + timedelta(minutes=SALIR_ANTES_MIN)).astimezone(LOCAL_TZ) if cuando else None
+
+
+def _regla_vas_tarde() -> int:
+    """Pasada la hora de salir y en casa: ¿muevo la cita?
+
+    Solo citas que se pueden mover sin molestar a nadie: tuyas (`organizo`) y sin
+    invitados. Mover la de otro no se puede, y mover una con gente les manda a todos la
+    actualización por una decisión tomada de un toque. Y solo estando en casa, que es lo
+    único que se sabe con certeza: fuera puede que ya vayas de camino.
+
+    No llama a Maps: la salida es la que ya calculó «Sal ya». Sin ese aviso (regla
+    silenciada, cita sin lugar) no hay con qué medir el retraso, y se calla.
+    """
+    if _regla_silenciada(REGLA_VAS_TARDE):
+        return 0
+    if not (presencia_vigente() or {}).get("en_casa"):
+        return 0
+    ahora, puestos = _ahora_local(), 0
+    for ev in _eventos_con_fecha(dias=1):
+        if not (ev.get("location") or "").strip() or ev["ini"] <= ahora or not ev.get("id"):
+            continue
+        if ev.get("organizo") is not True or ev.get("invitados"):
+            continue
+        if (ev["ini"] - ahora).total_seconds() / 60 > SALIR_VENTANA_MIN:
+            continue
+        huella = f"tarde:{_id_evento_corto(ev['id'])}:{ev['ini'].strftime('%Y%m%dT%H%M')}"
+        if _ya_dicho(REGLA_VAS_TARDE, huella):
+            continue
+        salida = _salida_apuntada(ev)
+        if not salida:
+            continue
+        retraso = (ahora - salida).total_seconds() / 60
+        if retraso < VAS_TARDE_MIN:
+            continue
+        mover = int(math.ceil(retraso / VAS_TARDE_PASO) * VAS_TARDE_PASO)
+        nuevo_ini = ev["ini"] + timedelta(minutes=mover)
+        nuevo_fin = ev["fin"] + timedelta(minutes=mover)
+        if nuevo_fin.date() != nuevo_ini.date():
+            # Correrla más allá de medianoche ya no es llegar tarde, es otro día.
+            continue
+        titulo = ev.get("title") or "tu cita"
+        texto  = (f"Vas tarde a «{titulo}»: había que salir a las {salida.strftime('%H:%M')} "
+                  f"y sigues en casa. ¿La muevo {mover} min, a las "
+                  f"{nuevo_ini.strftime('%H:%M')}?")
+        pid  = str(uuid.uuid4())
+        args = {"evento_id": ev["id"], "fecha": nuevo_ini.date().isoformat(),
+                "hora_inicio": nuevo_ini.strftime("%H:%M"),
+                "hora_fin": nuevo_fin.strftime("%H:%M")}
+        # La acción va primero y con el MISMO id que el aviso: el botón llega con el id del
+        # aviso y así encuentra qué mover. Si luego el aviso no se apunta (silenciado, ya
+        # dicho), la fila se queda huérfana y no hace nada: nadie tiene su botón.
+        if not _guardar_pregunta_con_accion(pid, texto, ["Moverla", "No, llego"],
+                                            "editar_evento", args, caduca=ev["ini"]):
+            continue
+        if _apuntar_aviso(
+            REGLA_VAS_TARDE, texto, prioridad=PRIO_URGENTE, id=pid, huella=huella,
+            # Empezada la cita, moverla ya no es llegar tarde a ella.
+            caduca=ev["ini"], voz=True,
+            motivo={"evento": titulo, "empieza": ev["ini"].isoformat(),
+                    "salida": salida.isoformat(), "retraso_min": round(retraso),
+                    "mover_min": mover, "listón_min": VAS_TARDE_MIN},
+        ):
+            puestos += 1
+    return puestos
+
+
 def _hora_habitual_dormir() -> Optional[tuple]:
     """A qué hora te sueles dormir, de las últimas noches medidas. None si no hay base.
 
@@ -17926,6 +18049,10 @@ def _regla_hueco_entreno(obtener_salud) -> int:
     # Sin histórico de entrenos no se regaña: no se sabe si es una racha o es que el
     # Watch nunca los registró.
     if not dias or dias < JARVIS_PROACTIVO_SIN_ENTRENO:
+        return 0
+    # El móvil no ha mandado nada en horas: el entreno de esta tarde puede estar en el
+    # reloj y no aquí (ver ENTRENOS_FRESCOS_HORAS).
+    if not _entrenos_al_dia():
         return 0
     # Hoy has estado en el gimnasio: la cuenta de días del Watch va por detrás de ti.
     if _estuvo_en_gimnasio_hoy():
@@ -18113,6 +18240,7 @@ def _correr_reglas_seguro() -> dict:
 _REGLAS = (
     ("sal_ya",        _regla_sal_ya),
     ("no_llegas",     _regla_no_llegas),
+    ("vas_tarde",     _regla_vas_tarde),
     ("madrugon",      _regla_madrugon),
     ("malestar",      _regla_malestar),
     ("hueco_entreno", _regla_hueco_entreno),
@@ -19600,6 +19728,12 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         # buena, y contarla como voto en contra acabaría silenciando la regla.
         return [{"action": f"LA_APAGAR_{rid}", "title": "Apuntar sesión"},
                 {"action": f"LA_UTIL_{rid}",   "title": "Entrené yo"}]
+    if regla == REGLA_VAS_TARDE:
+        # «Moverla» por `LA_APAGAR_`, como «Apuntar sesión»: ni una línea de YAML nueva.
+        # Y «No, llego» es `LA_UTIL_`: decir que llegas es contestar bien a una buena
+        # pregunta, y contarlo en contra acabaría silenciando la regla.
+        return [{"action": f"LA_APAGAR_{rid}", "title": "Moverla"},
+                {"action": f"LA_UTIL_{rid}",   "title": "No, llego"}]
     if regla == REGLA_VUELTA_CASA:
         return [{"action": f"LA_APAGAR_{rid}", "title": "Encender"},
                 {"action": f"LA_NOUTIL_{rid}", "title": "No"}]
@@ -20425,6 +20559,7 @@ REGLAS_LLAMABLES = {
     "reloj":         "El reloj lleva noches sin medir el sueño",
     "salir":         "Sal ya para llegar a tu cita",
     "no_llegas":     "Mañana no te da tiempo entre dos citas",
+    REGLA_VAS_TARDE: "Vas tarde a una cita y sigues en casa",
     "madrugon":      "Mañana empiezas temprano",
     "malestar":      "Tus señales de recuperación apuntan a que algo va mal",
     "hueco_entreno": "Llevas días sin entrenar y mañana tienes hueco",
@@ -20971,6 +21106,35 @@ def _apuntar_sesion_del_aviso(aviso_id: str, fila: dict) -> dict:
     return {"ok": True, "fecha": fecha, "sesion": resultado.get("session")}
 
 
+def _mover_del_aviso(aviso_id: str) -> dict:
+    """«Moverla» del aviso de ir tarde: lo que dijo el aviso, guardado con su mismo id."""
+    fila = _leer_pregunta(aviso_id)
+    if not fila or not fila.get("accion"):
+        raise HTTPException(status_code=422, detail="Ese aviso no dice qué mover")
+    # La primera respuesta vale, como en las preguntas: dos toques no la mueven dos veces.
+    try:
+        r = http.patch(f"{PREGUNTAS_URL}?id=eq.{aviso_id}&respuesta=is.null",
+                       headers={**supabase_headers(), "Prefer": "return=representation"},
+                       json={"respuesta": "Moverla",
+                             "respondido_at": datetime.now(timezone.utc).isoformat()})
+        if r.status_code >= 300:
+            raise _supabase_error(r)
+        primera = bool(r.json())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Vas tarde: no se pudo apuntar el «Moverla» de %s (%s)", aviso_id, e)
+        raise HTTPException(status_code=502, detail="No se pudo apuntar la respuesta")
+    if not primera:
+        _acusar_recibo("📅 Ya estaba", "Esa cita ya la habías movido (o dicho que no).",
+                       efimero=True)
+        return {"ok": True, "ya_estaba": True}
+    resultado = _ejecutar_accion_guardada(aviso_id, fila)
+    if resultado.get("ok"):
+        _marcar_util(aviso_id, REGLA_VAS_TARDE)
+    return {"ok": bool(resultado.get("ok")), "resultado": resultado}
+
+
 def _encender_del_aviso(aviso_id: str, fila: dict) -> dict:
     """«Encender» del aviso de la vuelta a casa: lo que decía el aviso, como el apagado."""
     entidades = [str(e) for e in (fila.get("entidades") or []) if e]
@@ -21109,8 +21273,9 @@ def _leer_pregunta(pid: str = "") -> dict:
     """La pregunta con ese id, o la más reciente si no se da. {} si no hay ninguna."""
     try:
         r = http.get(f"{PREGUNTAS_URL}?" + (f"id=eq.{pid}&" if pid else "")
-                     + "select=id,texto,opciones,respuesta,respondido_at,creado"
-                       "&order=creado.desc&limit=1",
+                     # `*` y no la lista: con la columna `resultado` sin migrar, nombrarla
+                     # rompería también las preguntas que no la usan.
+                     + "select=*&order=creado.desc&limit=1",
                      headers=supabase_headers())
         if r.status_code >= 300:
             raise _supabase_error(r)
@@ -21140,11 +21305,18 @@ def _j_respuesta_notificacion(pregunta_id: str = "", esperar: int = 0) -> dict:
             break
         time.sleep(PREGUNTA_SONDEO_SEG)
     respuesta = str(fila.get("respuesta") or "")
-    return {"ok": True, "id": fila.get("id"), "pregunta": fila.get("texto"),
-            "opciones": fila.get("opciones") or [],
-            "respondida": bool(respuesta), "respuesta": respuesta or None,
-            "respondida_a_las": (_hora_local_txt(fila.get("respondido_at"))
-                                 if respuesta else None)}
+    salida = {"ok": True, "id": fila.get("id"), "pregunta": fila.get("texto"),
+              "opciones": fila.get("opciones") or [],
+              "respondida": bool(respuesta), "respuesta": respuesta or None,
+              "respondida_a_las": (_hora_local_txt(fila.get("respondido_at"))
+                                   if respuesta else None)}
+    if fila.get("accion"):
+        # Una pregunta con acción (ver «Lo que se confirma en el móvil»): lo que importa
+        # no es qué pulsó, sino si se hizo. Sin `resultado` todavía, no se ha hecho.
+        salida["accion_hecha"] = bool((fila.get("resultado") or {}).get("ok"))
+        if fila.get("resultado"):
+            salida["resultado"] = fila["resultado"]
+    return salida
 
 
 def _hora_local_txt(iso) -> Optional[str]:
@@ -21183,7 +21355,8 @@ def _j_reenviar_permiso() -> dict:
 def _responder_pregunta(pid: str, n: int) -> dict:
     """El botón n de una pregunta de Jarvis. Apunta la respuesta; no hace nada más."""
     try:
-        r = http.get(f"{PREGUNTAS_URL}?id=eq.{pid}&select=opciones,respuesta",
+        # `*` por lo mismo que `_leer_pregunta`: `accion` y `creado` solo existen en unas.
+        r = http.get(f"{PREGUNTAS_URL}?id=eq.{pid}&select=*",
                      headers=supabase_headers())
         if r.status_code >= 300:
             raise _supabase_error(r)
@@ -21221,11 +21394,257 @@ def _responder_pregunta(pid: str, n: int) -> dict:
                        f"Contestaste «{previa}». Si quieres cambiarlo, díselo a Jarvis.",
                        efimero=True)
         return {"ok": True, "hecho": False, "respuesta": previa}
+    if filas[0].get("accion"):
+        # Una pregunta con acción: el primer botón es el «sí» y la ejecuta; cualquier
+        # otro es que no, y no hace nada más que quedar escrito.
+        if n == 1:
+            resultado = _ejecutar_accion_guardada(pid, filas[0])
+            return {"ok": True, "hecho": True, "respuesta": eleccion, "resultado": resultado}
+        _acusar_recibo("🤖 Vale, no lo hago", f"«{eleccion}»", efimero=True)
+        return {"ok": True, "hecho": True, "respuesta": eleccion}
     # El acuse, como el «⏰ Alarma quitada»: el salto del móvil a HA se pierde sin dejar
     # rastro, y esta es la única forma de que se note.
     _acusar_recibo("🤖 Contestado", f"«{eleccion}»", efimero=True)
     logger.info("Jarvis: pregunta %s contestada con «%s»", pid, eleccion)
     return {"ok": True, "hecho": True, "respuesta": eleccion}
+
+
+# ── Lo que se confirma en el móvil ────────────────────────────────────────────
+# La excepción a «pulsar un botón no ejecuta nada», y por qué no la rompe. Aquella regla
+# existe porque el texto de una pregunta lo redacta un modelo: un botón cuyo efecto
+# decidiera ese texto sería un «sí» a ciegas. Aquí el modelo no escribe la pregunta:
+# propone una ACCIÓN (herramienta + argumentos), el backend la guarda tal cual y escribe
+# él la frase a partir de esos mismos argumentos (`_describir_accion`), y el botón
+# ejecuta lo guardado. Lo que lees es lo que se hace. Es el botón de confirmar del
+# dashboard (`/jarvis/ejecutar`) llevado al móvil, para cuando no hay pantalla delante:
+# hablando por teléfono, o en el aviso que te ofrece mover una cita porque vas tarde.
+#
+# Nació el 2026-10-12 en una llamada: «dale acceso al calendario a Jarvis para crear
+# eventos», «que mueva las citas si llego tarde». Por teléfono no había forma de
+# confirmar nada (`_mcp_telefono_confirmar` lo rechazaba todo), así que el calendario
+# solo se podía leer.
+#
+# Solo las herramientas de aquí: un fallo en esta frontera tiene que poder crear o mover
+# una cita como mucho, nunca borrar, desplegar o mandar un correo. Y se comprueba otra
+# vez al ejecutar, porque la fila está en una tabla que la service key puede escribir.
+PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento"}
+PREGUNTA_SI                  = "Sí, hazlo"
+PREGUNTA_NO                  = "No"
+# Cuánto vale un «sí» desde que se propuso. Pulsar a las tres horas «Crear Dentista» no
+# es contestar a la conversación que lo propuso, es otra cosa.
+PREGUNTA_ACCION_VIGENCIA_MIN = int(os.getenv("PREGUNTA_ACCION_VIGENCIA_MIN", "30"))
+
+
+def _hhmm(iso_local: str) -> str:
+    return str(iso_local)[11:16]
+
+
+def _dia_txt(fecha: str) -> str:
+    """«el martes 14/10» a partir de YYYY-MM-DD; hoy y mañana, por su nombre."""
+    try:
+        dia = datetime.strptime(str(fecha)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return str(fecha)
+    hoy = _ahora_local().date()
+    if dia == hoy:
+        return "hoy"
+    if dia == hoy + timedelta(days=1):
+        return "mañana"
+    return f"el {DIAS_SEMANA[dia.weekday()]} {dia.day}/{dia.month}"
+
+
+def _evento_graph(evento_id: str) -> Optional[dict]:
+    """Un evento por su id, con lo que hace falta para describirlo. None si no está.
+
+    Con la hora en tu zona (`Prefer: outlook.timezone`): lo que se lee en el móvil es
+    «a las 10:00», no la hora UTC que Graph devolvería por defecto.
+    """
+    token = get_valid_token()
+    if not token or not evento_id:
+        return None
+    try:
+        r = http.get(f"https://graph.microsoft.com/v1.0/me/events/{quote(evento_id, safe='')}"
+                     "?$select=subject,start,end,isAllDay",
+                     headers={"Authorization": f"Bearer {token}",
+                              "Prefer": f'outlook.timezone="{TIMEZONE}"'})
+        if r.status_code >= 300:
+            return None
+        ev = r.json() or {}
+    except Exception as e:
+        logger.warning("Calendario: no se pudo leer el evento (%s)", type(e).__name__)
+        return None
+    ini = (ev.get("start") or {}).get("dateTime") or ""
+    return {"titulo": ev.get("subject") or "(sin título)", "inicio": ini[:16],
+            "todo_el_dia": bool(ev.get("isAllDay"))}
+
+
+def _describir_accion(herramienta: str, args: dict) -> dict:
+    """La frase que se lee en el móvil, escrita por el backend a partir de los argumentos.
+
+    Valida lo mismo que la herramienta al ejecutarse: un «sí» a algo que luego falla por
+    una fecha mal escrita es un botón que miente. Devuelve {"texto"} o {"error"}.
+    """
+    if herramienta == "crear_evento":
+        titulo = str(args.get("titulo") or "").strip()[:200]
+        fecha  = str(args.get("fecha") or "").strip()
+        if not titulo:
+            return {"error": "Falta el título del evento."}
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return {"error": "La fecha tiene que ser YYYY-MM-DD y existir."}
+        hora = str(args.get("hora_inicio") or "")
+        if hora and _HORA_RE.match(hora):
+            ini, fin = _tramo_evento(fecha, hora, args.get("hora_fin"))
+            cuando = f"{_dia_txt(fecha)} de {_hhmm(ini)} a {_hhmm(fin)}"
+        else:
+            cuando = f"{_dia_txt(fecha)}, todo el día"
+        lugar = str(args.get("lugar") or "").strip()[:80]
+        return {"texto": f"Crear «{titulo}» {cuando}" + (f", en {lugar}" if lugar else "") + "."}
+
+    if herramienta == "editar_evento":
+        actual = _evento_graph(str(args.get("evento_id") or "").strip())
+        if not actual:
+            return {"error": "No encuentro ese evento. Saca el id de la herramienta agenda."}
+        fecha, hora = str(args.get("fecha") or ""), str(args.get("hora_inicio") or "")
+        cambios = []
+        if fecha or hora:
+            if not (_DATE_RE.match(fecha) and _HORA_RE.match(hora)):
+                return {"error": "Para mover un evento hacen falta fecha (YYYY-MM-DD) y "
+                                 "hora_inicio (HH:MM), aunque la fecha sea la misma."}
+            try:
+                datetime.strptime(fecha, "%Y-%m-%d")
+            except ValueError:
+                return {"error": "Esa fecha no existe."}
+            ini, fin = _tramo_evento(fecha, hora, args.get("hora_fin"))
+            cambios.append(f"pasa a {_dia_txt(fecha)} de {_hhmm(ini)} a {_hhmm(fin)}")
+        if args.get("titulo"):
+            cambios.append(f"se llama «{str(args['titulo']).strip()[:200]}»")
+        if args.get("lugar"):
+            cambios.append(f"el lugar pasa a ser {str(args['lugar']).strip()[:80]}")
+        if not cambios:
+            return {"error": "No has dicho qué cambiar."}
+        antes = (f"{_dia_txt(actual['inicio'])}, todo el día" if actual["todo_el_dia"]
+                 else f"{_dia_txt(actual['inicio'])} a las {_hhmm(actual['inicio'])}")
+        return {"texto": f"«{actual['titulo']}» ({antes}) " + " y ".join(cambios) + "."}
+
+    return {"error": "Eso no se confirma desde el móvil."}
+
+
+def _args_de(herramienta: str, args: dict) -> dict:
+    """Solo los parámetros que la herramienta declara, como texto y acotados: lo que se
+    guarda es lo que se ejecutará, y no tiene por qué llevar nada más."""
+    declarados = _JARVIS_HERRAMIENTAS[herramienta]["parametros"]
+    return {k: str(v)[:300] for k, v in (args or {}).items()
+            if k in declarados and v not in (None, "")}
+
+
+def _guardar_pregunta_con_accion(pid: str, texto: str, opciones: list, herramienta: str,
+                                 argumentos: dict, caduca: Optional[datetime] = None) -> bool:
+    accion = {"herramienta": herramienta, "argumentos": argumentos}
+    if caduca:
+        accion["caduca"] = caduca.astimezone(timezone.utc).isoformat()
+    try:
+        r = http.post(PREGUNTAS_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"id": pid, "texto": texto, "opciones": opciones, "accion": accion})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        # Sin la fila, el «sí» no encontraría qué hacer. Pasa si falta la migración
+        # 20261013_preguntas_con_accion.
+        logger.error("Jarvis: no se pudo guardar la acción a confirmar (%s)", e)
+        return False
+    return True
+
+
+def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
+    """Manda al móvil una acción para que la confirmes con un botón. NO la hace."""
+    if herramienta not in PREGUNTAS_ACCIONES:
+        return {"ok": False, "motivo": "Eso no se confirma desde el móvil."}
+    args = _args_de(herramienta, argumentos)
+    desc = _describir_accion(herramienta, args)
+    if "error" in desc:
+        return {"ok": False, "motivo": desc["error"]}
+    if not _movil_vivo():
+        # Por correo no hay botón, y sin botón no hay confirmación: mejor no mandarlo.
+        return {"ok": False,
+                "motivo": "El móvil no está recogiendo notificaciones ahora, así que no "
+                          "puedo pedirle que lo confirme. Que lo haga en el chat del "
+                          "dashboard, donde hay botón."}
+    ahora = time.time()
+    _preguntas_enviadas[:] = [t for t in _preguntas_enviadas if ahora - t < 3600]
+    if len(_preguntas_enviadas) >= PREGUNTAS_MAX_HORA:
+        return {"ok": False, "motivo": f"Ya le he mandado {PREGUNTAS_MAX_HORA} "
+                                       "notificaciones en la última hora; no mando más."}
+    pid   = str(uuid.uuid4())
+    texto = desc["texto"]
+    if not _guardar_pregunta_con_accion(pid, texto, [PREGUNTA_SI, PREGUNTA_NO],
+                                        herramienta, args):
+        return {"ok": False, "motivo": "No he podido guardarlo para que lo confirme."}
+    acciones = [{"action": f"LA_APAGAR_{PREGUNTA_PREFIJO}{i}-{pid}", "title": op}
+                for i, op in enumerate((PREGUNTA_SI, PREGUNTA_NO), 1)]
+    try:
+        canal = _notificar("📅 ¿Lo hago?", texto, aviso_id=pid, acciones=acciones)
+    except Exception as e:
+        logger.warning("Jarvis: no se pudo mandar la confirmación %s (%s)", pid, e)
+        return {"ok": False, "motivo": "No he podido mandarlo al móvil."}
+    _preguntas_enviadas.append(ahora)
+    logger.info("Jarvis: %s propuesto al móvil (%s)", herramienta, pid)
+    return {"ok": True, "estado": "pendiente_en_el_movil", "id": pid, "canal": canal,
+            "lo_que_se_hara": texto,
+            "nota": "NO está hecho. Le ha llegado al móvil con un botón «Sí, hazlo»: "
+                    "hasta que lo pulse no cambia nada. Para saber si lo ha pulsado y "
+                    "cómo ha ido, respuesta_notificacion con este id (y esperar=20 si "
+                    "estáis hablando)."}
+
+
+def _lo_hecho(herramienta: str, args: dict) -> str:
+    """El acuse, en pasado: la pregunta ya la leíste y repetirla no confirma nada."""
+    if herramienta == "crear_evento":
+        return f"Creado «{args.get('titulo')}» {_dia_txt(str(args.get('fecha') or ''))}."
+    if args.get("hora_inicio"):
+        return (f"Movida a {_dia_txt(str(args.get('fecha') or ''))}, "
+                f"a las {args.get('hora_inicio')}.")
+    return "Cambiada en el calendario."
+
+
+def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
+    """El «sí» de una pregunta con acción: hace lo guardado, lo apunta y lo acusa."""
+    accion = fila.get("accion") or {}
+    herramienta = str(accion.get("herramienta") or "")
+    argumentos  = accion.get("argumentos")
+    if herramienta not in PREGUNTAS_ACCIONES or not isinstance(argumentos, dict):
+        logger.error("Jarvis: la pregunta %s trae una acción que no se ejecuta (%r)",
+                     pid, herramienta[:40])
+        resultado = {"ok": False, "motivo": "Esa acción no se hace desde un botón."}
+    else:
+        caduca = _fecha_utc(accion.get("caduca"))
+        if not caduca:
+            creado = _fecha_utc(fila.get("creado")) or datetime.now(timezone.utc)
+            caduca = creado + timedelta(minutes=PREGUNTA_ACCION_VIGENCIA_MIN)
+        if datetime.now(timezone.utc) > caduca:
+            resultado = {"ok": False, "motivo": "Llegó tarde: ya no lo hago. Pídemelo otra vez."}
+        else:
+            try:
+                resultado = _jarvis_despachar(herramienta, argumentos)
+            except Exception as e:
+                logger.exception("Jarvis: falló la acción confirmada %s", pid)
+                resultado = {"ok": False, "motivo": f"Falló al hacerlo ({type(e).__name__})."}
+    try:
+        http.patch(f"{PREGUNTAS_URL}?id=eq.{pid}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"resultado": resultado})
+    except Exception as e:
+        # Ya está hecho (o no): fallar aquí solo deja a Jarvis sin saberlo.
+        logger.warning("Jarvis: no se pudo apuntar el resultado de %s (%s)", pid, e)
+    if resultado.get("ok"):
+        _acusar_recibo("📅 Hecho", _lo_hecho(herramienta, argumentos), efimero=True)
+    else:
+        _acusar_recibo("📅 No lo he podido hacer",
+                       str(resultado.get("motivo") or "Sin motivo")[:200])
+    logger.info("Jarvis: acción confirmada %s → %s", pid,
+                "hecha" if resultado.get("ok") else resultado.get("motivo"))
+    return resultado
 
 
 @app.post("/avisos/{aviso_id}/apagar")
@@ -21280,6 +21699,8 @@ def apagar_aviso(request: Request, token: str = "",
         return _apuntar_sesion_del_aviso(aviso_id, filas[0])
     if regla == REGLA_VUELTA_CASA:
         return _encender_del_aviso(aviso_id, filas[0])
+    if regla == REGLA_VAS_TARDE:
+        return _mover_del_aviso(aviso_id)
     if regla == REGLA_PC_ENCENDIDO:
         _pedir_al_pc("suspender")
         # Mismo razonamiento que el apagado de abajo: actuar sobre el aviso es la
@@ -21296,7 +21717,7 @@ def apagar_aviso(request: Request, token: str = "",
         logger.info("Al salir: suspendiendo el PC desde el aviso %s", aviso_id)
         return {"ok": True, "suspendido": True}
     if regla != REGLA_AL_SALIR:
-        # Solo esos cuatro avisos llevan este botón. Si llega otro id es que el YAML de
+        # Solo esos avisos llevan este botón. Si llega otro id es que el YAML de
         # HA lo está mandando a donde no toca, y apagar "lo que sea" del aviso
         # equivocado es justamente lo que no puede pasar.
         raise HTTPException(status_code=422,
@@ -24702,6 +25123,36 @@ def _j_enviar_resumen() -> dict:
     return {"ok": True, "enviado_a": BRIEF_TO, "fecha": datos["fecha"]}
 
 
+# Lo que NO va en el resumen hablado. Las series de 30 días y el uso del reloj son para
+# el correo, que cruza métricas; contado en voz alta sobra. Y la economía, entera fuera:
+# son titulares de feeds de terceros, y esta herramienta también la usa el teléfono, que
+# al otro lado tiene una sesión con shell (mismo motivo que deja fuera `leer_documento`).
+_RESUMEN_HABLADO_FUERA_SALUD = ("series", "series_desde", "series_hasta", "reloj")
+
+
+def _j_resumen_del_dia() -> dict:
+    """El resumen de la mañana para contarlo hablando, cuando se pide.
+
+    Los mismos datos que el correo (`construir_brief`), sin mandar nada: es la idea del
+    2026-10-12 de que Jarvis te lo lea, con la condición que puso Mikel al aprobarla —solo
+    cuando él lo pida, por ejemplo conduciendo—. Por eso no hay regla que lo dispare.
+    """
+    datos = construir_brief()
+    salud = {k: v for k, v in (datos.get("salud") or {}).items()
+             if k not in _RESUMEN_HABLADO_FUERA_SALUD}
+    salida = {k: datos.get(k) for k in ("fecha", "dia_semana", "agenda", "clases",
+                                        "entregas", "clima", "entrenamiento", "presencia",
+                                        "cambios", "calendario_caido", "secciones_caidas")
+              if datos.get(k)}
+    if salud:
+        salida["salud"] = salud
+    salida["como_contarlo"] = ("Cuéntalo en pocas frases, como un parte: lo primero que "
+                               "tiene hoy y a qué hora, el tiempo, las entregas cercanas; "
+                               "la salud y lo demás solo si algo destaca. Sin listas. Si "
+                               "dice calendario_caido, dilo: no es un día libre.")
+    return {"ok": True, **salida}
+
+
 def _j_estado_resumen_diario() -> dict:
     return _brief_ajustes_estado()
 
@@ -26386,6 +26837,15 @@ _JARVIS_HERRAMIENTAS = {
         "parametros":  {"fecha": {"type": "string",
                                   "description": "YYYY-MM-DD. Sin ella, el último parte."}},
     },
+    "resumen_del_dia": {
+        "confirmar":   False,
+        "fn":          _j_resumen_del_dia,
+        "descripcion": "El resumen del día para CONTÁRSELO hablando: agenda, clases, "
+                       "entregas, tiempo, salud y entrenos. Solo cuando lo pida («léeme "
+                       "el resumen», «cuéntame cómo viene el día»), por ejemplo "
+                       "conduciendo. Para mandarlo por correo es enviar_resumen.",
+        "parametros":  {},
+    },
     "estado_resumen_diario": {
         "confirmar":   False,
         "fn":          _j_estado_resumen_diario,
@@ -26943,7 +27403,7 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
     "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
     "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
-    "moodle_entregas", "respuesta_notificacion", "cumpleanos",
+    "moodle_entregas", "respuesta_notificacion", "cumpleanos", "resumen_del_dia",
 }
 # `buscar_documentos` y `leer_documento` se quedan fuera a propósito: traen texto escrito
 # por terceros (un PDF que te mandaron), y al otro lado de esta llamada hay una sesión con
@@ -26962,7 +27422,15 @@ _MCP_SERVIDOR_ACCIONES = {
     # delante el botón con el que el permiso lo da el usuario, no esta sesión.
     "mandar_notificacion", "reenviar_permiso",
 }
-_MCP_SERVIDOR_HERRAMIENTAS = _MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
+# Las que se confirman, que por teléfono no tienen botón delante: se mandan al móvil con
+# uno (`_proponer_en_movil`, «Lo que se confirma en el móvil») y no se hacen hasta que lo
+# pulsas. Desde el 2026-10-13; antes, aquí no había ninguna que se confirmara.
+_MCP_SERVIDOR_CONFIRMA_EN_MOVIL = PREGUNTAS_ACCIONES
+_MCP_SERVIDOR_HERRAMIENTAS = (_MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
+                              | _MCP_SERVIDOR_CONFIRMA_EN_MOVIL)
+_MCP_AVISO_MOVIL = (" Por teléfono no se hace al momento: le llega al móvil con un botón "
+                    "«Sí, hazlo» y se hace cuando lo pulse. Díselo, y no digas que está "
+                    "hecho hasta que respuesta_notificacion diga accion_hecha.")
 
 assert _MCP_SERVIDOR_HERRAMIENTAS <= set(_JARVIS_HERRAMIENTAS), (
     "La lista blanca del MCP del teléfono apunta a una herramienta que ya no existe "
@@ -26980,7 +27448,8 @@ def _mcp_servidor_tools_list() -> list:
     """El catálogo que ve Jarvis-Claude: solo lo que está en la lista blanca."""
     return [{
         "name": nombre,
-        "description": h["descripcion"],
+        "description": h["descripcion"] + (_MCP_AVISO_MOVIL if nombre in
+                                           _MCP_SERVIDOR_CONFIRMA_EN_MOVIL else ""),
         "inputSchema": {
             "type": "object",
             "properties": {p: {"type": info.get("type", "string"),
@@ -27070,7 +27539,10 @@ async def _mcp_servidor(request: Request, *, token: str, nombre_servidor: str,
                               "message": "Herramienta no disponible por aquí"}}
         herramienta = _JARVIS_HERRAMIENTAS[nombre]
         if _jarvis_confirma(herramienta, argumentos):
-            return {"jsonrpc": "2.0", "id": rpc_id, **al_confirmar(nombre, argumentos)}
+            # En un hilo, por lo mismo que `_despachar` abajo: en el teléfono, confirmar
+            # es mandar la acción al móvil (Supabase, Graph y la notificación).
+            confirmado = await asyncio.to_thread(al_confirmar, nombre, argumentos)
+            return {"jsonrpc": "2.0", "id": rpc_id, **confirmado}
 
         def _despachar():
             # Se pone aquí dentro y no fuera: `to_thread` copia el contexto al entrar, y
@@ -27101,6 +27573,13 @@ def _mcp_telefono_confirmar(nombre: str, argumentos: dict) -> dict:
     # El mismo gate que ya usa el chat: si una llamada concreta a `casa_ordenar` (una
     # cerradura, no una luz) lo exige, se rechaza aquí aunque se haya pedido y confirmado
     # por voz. No hay botón de confirmar al otro lado de un teléfono.
+    #
+    # Salvo lo del calendario, que se lleva el botón al móvil: un «sí» dicho en voz alta
+    # lo oye un modelo, y quien confirma tiene que ser una persona pulsando algo que dice
+    # exactamente lo que va a pasar.
+    if nombre in _MCP_SERVIDOR_CONFIRMA_EN_MOVIL:
+        return {"result": {"content": [{"type": "text", "text": json.dumps(
+            _proponer_en_movil(nombre, argumentos), ensure_ascii=False)}]}}
     return {"error": {"code": -32602,
                       "message": "Esta acción necesita una confirmación que no se puede "
                                  "dar por teléfono. Dile a Mikel que la haga él, o dile "

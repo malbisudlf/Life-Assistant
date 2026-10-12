@@ -1302,8 +1302,17 @@ class TestMotivosProactivos:
         assert main._motivos_proactivos(self._ahora()) == []
 
     def test_los_dias_sin_entrenar(self, monkeypatch):
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos", main.time.time())
         self._fuentes(monkeypatch, salud={"ultimo_entreno": {"fecha": "2026-08-07", "dias": 4}})
         assert any("4 días desde el último entreno" in m for m in main._motivos_proactivos(self._ahora()))
+
+    def test_con_los_entrenos_atrasados_no_se_regaña(self, monkeypatch):
+        """El 2026-10-12: entrenaste por la tarde, el móvil no lo mandó hasta medianoche y
+        a las 19:00 te dijo que llevabas cuatro días sin entrenar."""
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos",
+                            main.time.time() - (main.ENTRENOS_FRESCOS_HORAS + 1) * 3600)
+        self._fuentes(monkeypatch, salud={"ultimo_entreno": {"fecha": "2026-08-07", "dias": 4}})
+        assert main._motivos_proactivos(self._ahora()) == []
 
     def test_sin_historico_de_entrenos_no_se_regaña(self, monkeypatch):
         """Sin histórico no se sabe si es una racha o es que el Watch nunca los registró."""

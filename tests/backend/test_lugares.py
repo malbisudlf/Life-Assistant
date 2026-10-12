@@ -423,6 +423,7 @@ class TestNoRegañarElDiaDelGimnasio:
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": []})
         monkeypatch.setattr(main, "_brief_entrenamiento", lambda: {})
         monkeypatch.setattr(main, "_brief_salud", lambda: {"ultimo_entreno": {"dias": 5}})
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos", main.time.time())
         assert main._motivos_proactivos(main._ahora_local())
         _en("gimnasio")
         _firme("gimnasio")

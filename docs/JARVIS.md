@@ -418,6 +418,20 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     Sin histórico de entrenos no se regaña, la regla de siempre. **Caduca a la medianoche
     que abre ese día**, como «No llegas»: si el presupuesto lo pospone a las 08:30, diría
     «Mañana tienes libre…» cuando ese mañana ya es hoy.
+    **Y solo con los entrenos al día** (`_entrenos_al_dia`, también en el aviso diario):
+    si Health Auto Export no ha mandado nada en `ENTRENOS_FRESCOS_HORAS` (3), se calla.
+    Los entrenos solo llegan por ahí y el móvil los manda cuando le da: el 2026-10-12
+    entrenaste por la tarde, el envío llegó a las 00:42, y a las 19:00 y a las 21:30 te
+    dijo que llevabas cuatro días sin entrenar. El momento del envío vive en memoria; tras
+    un reinicio no se sabe, y no saberlo es no regañar hasta el siguiente.
+  - **«Vas tarde»** (`_regla_vas_tarde`): pasada la hora de salir en más de
+    `VAS_TARDE_MIN` (10) y sigues en casa, te ofrece mover la cita lo que vas tarde (en
+    tramos de 15 min) con un botón «Moverla». La salida es la que ya calculó «Sal ya»
+    (`_salida_apuntada`, del `cuando` de su aviso): no vuelve a pagar Maps, y sin ese
+    aviso se calla. **Solo citas tuyas y sin invitados** (`organizo`, `invitados`, que
+    `get_events` trae desde entonces): la de otro no se puede mover, y mover una con gente
+    les manda la actualización a todos por un toque. «No, llego» es `LA_UTIL_`, no un voto
+    en contra. Cómo el botón sabe qué mover: «Lo que se confirma en el móvil», abajo.
   - **Al salir de casa** (`_regla_al_salir_de_casa`): se dispara en `POST /ha/presencia` al
     CAMBIAR a fuera, no en el tick — es el único momento en que sirve. **Por defecto no
     apaga nada por su cuenta** y pregunta con un botón. **Con `SALIR_CASA_APAGAR=1` apaga
@@ -1205,6 +1219,50 @@ Las reglas que la sostienen:
   vibrar el móvil es la forma más rápida de enseñarte a ignorar el canal.
 - No pasa por el gobierno de avisos (presupuesto, silenciado): Jarvis te la manda porque
   estáis hablando, como un `recordarme` que pides tú.
+
+## Lo que se confirma en el móvil: el calendario por teléfono
+
+La excepción a «pulsar un botón no ejecuta nada», y por qué no la rompe. Nació de las
+ideas que Jarvis apuntó en la llamada del 2026-10-12 («dale acceso al calendario para
+crear eventos», «que mueva las citas si llego tarde»): por teléfono no había forma de
+confirmar nada, así que el calendario solo se podía leer.
+
+- **El modelo propone una acción, no escribe la pregunta.** `crear_evento` y
+  `editar_evento` (`PREGUNTAS_ACCIONES`, y ninguna más) entran en el catálogo del
+  teléfono, pero al llamarlas no se hacen: `_proponer_en_movil` guarda herramienta y
+  argumentos en `jarvis_preguntas.accion` (solo los parámetros que la herramienta declara),
+  **escribe el backend** la frase a partir de esos argumentos (`_describir_accion`:
+  «Crear «Dentista» mañana de 10:00 a 11:00») y la manda al móvil con «Sí, hazlo» / «No».
+  El «sí» ejecuta lo guardado (`_ejecutar_accion_guardada`): lo que lees es lo que se hace.
+  Es el botón de confirmar del dashboard llevado al móvil.
+- **Un «sí» dicho en voz alta no vale**: lo oye un modelo. Quien confirma es una persona
+  pulsando algo que dice exactamente qué va a pasar.
+- **Se valida antes de proponer** lo mismo que al ejecutar (fecha que existe, fecha y hora
+  juntas para mover, el evento existe en Graph): un «sí» a algo que luego falla es un botón
+  que miente.
+- **Se vuelve a comprobar al ejecutar**: que la herramienta esté en `PREGUNTAS_ACCIONES`
+  (la tabla se puede escribir con la service key) y que siga vigente:
+  `PREGUNTA_ACCION_VIGENCIA_MIN` (30) desde que se propuso, o la `caduca` que traiga la
+  acción («vas tarde» caduca al empezar la cita).
+- **La primera respuesta vale** (PATCH condicional, como todas): dos toques no crean dos
+  eventos. El resultado se escribe en `resultado`, y `respuesta_notificacion` devuelve
+  `accion_hecha`: Jarvis no dice «hecho» hasta verlo. El acuse dice lo hecho en pasado
+  («📅 Hecho: Movida a hoy, a las 10:00»), o por qué no.
+- **Sin móvil no se manda**: por correo no hay botón, y sin botón no hay confirmación. La
+  herramienta lo dice y remite al chat del dashboard.
+- `borrar_evento` sigue fuera del teléfono a propósito: un fallo en esta frontera tiene que
+  poder crear o mover una cita como mucho.
+- Necesita la migración `20261013_preguntas_con_accion` (columnas `accion` y
+  `resultado`). Sin ella, proponer falla y lo dice; las preguntas sin acción siguen igual
+  porque la tabla se lee con `select=*`.
+
+## El resumen, contado: `resumen_del_dia`
+
+Los datos del correo de la mañana (`construir_brief`) para que Jarvis te los cuente
+hablando, **solo cuando lo pides** («léeme el resumen», conduciendo): esa fue la condición
+al aprobar la idea, así que no hay regla que lo dispare. Va sin la economía —titulares de
+feeds de terceros, y la herramienta también está en el teléfono, que tiene shell al otro
+lado— y sin las series de 30 días, que son para el correo.
 
 ## Por qué te dije eso: la instantánea de cada aviso
 

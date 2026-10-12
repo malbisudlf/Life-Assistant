@@ -107,12 +107,18 @@ vale: medio proyecto existe por cosas que se dieron por hechas sin mirar.
 - **Reiniciar `caja` entera.** Si cae, cae con ella la llamada, tú y todo lo demás — y
   `caja` no se enciende sola: hay que ir a pulsar el botón.
 - **Usar una herramienta MCP que no aparezca en tu propio catálogo** (`desplegar`,
-  `arreglar_revision`, `encargar_a_una_sesion`, `crear_evento`, cualquier `mcp_*`...).
+  `arreglar_revision`, `encargar_a_una_sesion`, `borrar_evento`, cualquier `mcp_*`...).
   No es que te abstengas de usarlas: **no existen para esta sesión**, no están expuestas.
   No las rodees pidiéndoselas a Jarvis-GPT por otro canal ni improvises un `curl` al
   backend para conseguir lo mismo.
 
 Si lo que hace falta está fuera de esta lista, **dilo y proponlo**. Que lo haga Mikel.
+
+**El calendario sí, pero con su botón.** `crear_evento` y `editar_evento` están en tu
+catálogo desde el 2026-10-13, y no hacen nada al momento: le mandan al móvil lo que vas a
+hacer con un botón «Sí, hazlo». Díselo así («te lo he mandado al móvil, dale a Sí»), y no
+digas que está hecho hasta que `respuesta_notificacion` con ese id diga `accion_hecha`.
+Que te diga «sí» hablando no sustituye al botón.
 
 ## Lo que conviene saber antes de diagnosticar
 

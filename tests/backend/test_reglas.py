@@ -32,6 +32,8 @@ class _Reglas:
         mock_requests.add("GET", "avisos_reglas", FakeResponse([]))
         mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([]))
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([], 201))
+        # Los entrenos al día: lo contrario lo prueba TestEntrenosConRetraso.
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos", main.time.time())
 
     def _eventos(self, monkeypatch, eventos, clases=()):
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": eventos})
@@ -937,3 +939,28 @@ class TestReglasQueProponeJarvis(_Reglas):
 
 
 _DIAS = main._DIAS_SEMANA
+
+
+class TestEntrenosConRetraso(_Reglas):
+    """«Llevas N días sin entrenar» solo con los entrenos al día: el móvil los manda cuando
+    le da, y el 2026-10-12 el entreno de la tarde no llegó hasta medianoche."""
+    AHORA = datetime(2026, 8, 17, 22, 0, tzinfo=main.LOCAL_TZ)
+
+    def test_sin_envio_reciente_se_calla(self, monkeypatch, mock_requests):
+        self._eventos(monkeypatch, [])
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos",
+                            main.time.time() - (main.ENTRENOS_FRESCOS_HORAS + 1) * 3600)
+        assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 0
+        assert self._apuntados(mock_requests) == []
+
+    def test_tras_un_reinicio_tampoco_se_sabe(self, monkeypatch, mock_requests):
+        self._eventos(monkeypatch, [])
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos", 0.0)
+        assert main._regla_hueco_entreno(lambda: {"ultimo_entreno": {"dias": 4}}) == 0
+
+    def test_un_envio_de_auto_export_lo_pone_al_dia(self, client, monkeypatch):
+        monkeypatch.setattr(main, "_ultimo_envio_entrenos", 0.0)
+        r = client.post("/health/ingest", headers={"X-Auth-Token": "health-token"},
+                        json={"data": {"metrics": [], "workouts": []}})
+        assert r.status_code < 500
+        assert main._entrenos_al_dia() is True
