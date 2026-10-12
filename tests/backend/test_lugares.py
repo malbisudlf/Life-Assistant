@@ -290,6 +290,14 @@ class TestSesionAlSalirDelGimnasio:
             {"extra": {"workouts": [{"start": hora.strftime("%Y-%m-%d %H:%M:%S +0200")}]}}]))
         assert main._regla_sesion_gimnasio(desde, hasta) == 0
 
+    def test_una_estancia_que_cruza_la_medianoche_ve_el_entreno(self, mock_requests):
+        # Hora fija: con `now()` el test solo fallaba si corría pasada la medianoche local.
+        desde = datetime(2026, 10, 12, 22, 1, tzinfo=timezone.utc)   # 00:01 locales
+        hasta = desde + timedelta(minutes=60)                        # 01:01 locales
+        mock_requests.add("GET", "health_metrics", FakeResponse([
+            {"extra": {"workouts": [{"start": "2026-10-13 00:11:00 +0200"}]}}]))
+        assert main._entreno_del_reloj_entre(desde, hasta) is True
+
     def test_sus_botones_no_votan_en_contra(self):
         botones = main._acciones_aviso("rid", main.REGLA_SESION_GIMNASIO)
         assert [b["action"] for b in botones] == ["LA_APAGAR_rid", "LA_UTIL_rid"]

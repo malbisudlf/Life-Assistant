@@ -8556,7 +8556,9 @@ def _entreno_del_reloj_entre(desde: datetime, hasta: datetime) -> Optional[bool]
     for f in filas:
         for w in ((f.get("extra") or {}).get("workouts") or []):
             hora = _hora_entreno(w.get("start")) if isinstance(w, dict) else None
-            if hora and ini <= hora <= fin:
+            # Si la estancia (o el cuarto de hora de margen) cruza la medianoche, `ini` es
+            # mayor que `fin` y el rango se parte en dos: «ini..24:00» y «00:00..fin».
+            if hora and ((ini <= hora <= fin) if ini <= fin else (hora >= ini or hora <= fin)):
                 return True
     return False
 
