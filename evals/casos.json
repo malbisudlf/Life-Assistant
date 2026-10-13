@@ -87,6 +87,7 @@
     { "id": "resumen-configurar", "grupo": "resumen", "peticion": "Pausa el resumen diario hasta el lunes que viene, que estoy de viaje.", "espera": ["configurar_resumen_diario"], "confundible": "estado_resumen_diario" },
     { "id": "resumen-enviar", "grupo": "resumen", "peticion": "Mándame ahora mismo el resumen al correo.", "espera": ["enviar_resumen"], "confundible": "configurar_resumen_diario" },
     { "id": "resumen-contado", "grupo": "resumen", "peticion": "Voy conduciendo, léeme el resumen de hoy.", "espera": ["resumen_del_dia"], "confundible": "enviar_resumen", "nota": "lo quiere OÍR, no en el correo." },
+    { "id": "briefing-leido", "grupo": "resumen", "peticion": "Léeme el briefing de hoy, la parte de inteligencia artificial.", "espera": ["leer_briefing"], "confundible": "resumen_del_dia", "nota": "el briefing es el de noticias de la rutina, no el resumen de datos." },
 
     { "id": "buscar-internet", "grupo": "web", "peticion": "¿Cuándo juega el Athletic la próxima jornada de liga?", "espera": ["buscar_en_internet"] },
     { "id": "leer-pagina", "grupo": "web", "peticion": "Ábreme https://es.wikipedia.org/wiki/Bilbao y dime de qué habla la entradilla.", "espera": ["leer_pagina"], "confundible": "buscar_en_internet" },

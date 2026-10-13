@@ -1264,6 +1264,32 @@ al aprobar la idea, así que no hay regla que lo dispare. Va sin la economía �
 feeds de terceros, y la herramienta también está en el teléfono, que tiene shell al otro
 lado— y sin las series de 30 días, que son para el correo.
 
+## El briefing, leído: `leer_briefing`
+
+El **briefing** no es lo anterior: es el correo «🌅 Buenos días Mikel — Briefing del
+dd/mm/aaaa» que redacta y envía la rutina de Claude (`RUTINA_BRIEFING.md`), con noticias,
+newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se lo pides
+(«léeme el briefing», «la parte de IA»), por escrito y **por teléfono**.
+
+- **Se busca en Enviados**, por el asunto exacto del día (`BRIEFING_ASUNTO` + la fecha),
+  no en la bandeja de entrada: ahí solo está lo que salió de tu cuenta, así que un correo
+  de fuera con el mismo asunto no puede colarse como briefing.
+- **Sigue siendo texto de terceros resumido** (titulares, newsletters), y el teléfono
+  tiene shell al otro lado: es justo lo que dejó la economía fuera de `resumen_del_dia`.
+  Entra igualmente porque lo pediste expreso, con dos defensas: la procedencia de arriba
+  y su aviso de dato (`_AVISO_BRIEFING`), como `leer_documento` y la web. Si algún día
+  se quiere cerrar, basta con sacarla de `_MCP_SERVIDOR_SOLO_LECTURA`.
+- **No depende de `CORREO_LEER`**: ese interruptor es para vigilar el buzón, y leer un
+  correo concreto que se pide no es vigilar nada.
+- Ronda las 3.000 palabras: la herramienta le dice a Jarvis que por teléfono cuente las
+  secciones y lo destacado, y lea entera la que pidas. Tope: `BRIEFING_MAX_CHARS`.
+- Sin briefing ese día, lo dice (sale después del correo de datos, que espera a que te
+  despiertes) en vez de leer el de ayer.
+
+**El mismo día entraron en el teléfono** las que no tenían motivo para faltar: `tareas`,
+`estado_resumen_diario`, `recordar`, `olvidar` y `dejar_de_vigilar`. Las que siguen
+fuera lo están a propósito (ver el comentario sobre `_MCP_SERVIDOR_SOLO_LECTURA`).
+
 ## Por qué te dije eso: la instantánea de cada aviso
 
 La señal de utilidad (`avisos_reglas`, el botón «me sirvió / no me sirvió») dice **qué**
