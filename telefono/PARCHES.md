@@ -4,8 +4,10 @@
 2026-09-20 desde el repositorio original, y **no funciona tal cual para lo que hace aquí**.
 Estos son los doce cambios que hubo que hacerle (el 12, aplicado el 2026-09-27), con el
 síntoma que resuelve cada uno, más un decimotercero que no toca su código sino el
-`docker-compose.yml` que genera (ver «El parche 13» abajo) y un decimocuarto, aplicado el
-2026-10-06, que reintenta el registro de la extensión si se pierde (ver «El parche 14»).
+`docker-compose.yml` que genera (ver «El parche 13» abajo), un decimocuarto, aplicado el
+2026-10-06, que reintenta el registro de la extensión si se pierde (ver «El parche 14»),
+y el 15 y el 16, aplicados el 2026-10-13: Claude piensa mientras suena la frase de
+espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -424,11 +426,76 @@ Para salir del paso, o si el parche se ha perdido con un `claude-phone update`:
 `docker compose -f ~/.claude-phone/docker-compose.yml restart voice-app`, sin llamada en
 curso (`curl -s localhost:3010/api/calls`).
 
+## Los parches 15 y 16: más rápido, y se le puede cortar
+
+Salen del 2026-10-13, de «¿por qué va Jarvis tan lento?» tras pasar a Sonnet 5.5. **No
+era el modelo**: medido en los logs, Sonnet 5.5 contestaba antes que Sonnet 5 (mediana
+~6,6 s frente a ~9 s), y con `--effort low` el resultado y el tiempo eran los mismos que
+por defecto (115 tokens, 4,4-5,1 s de modelo). Lo que pesaba estaba alrededor:
+
+- **El arranque de Claude Code en cada turno.** Cada turno es un `claude -p` nuevo
+  (`--resume`); con «Responde solo: hola» el modelo tardaba 1,7 s y el proceso entero
+  8,1 s. ~2,1 s eran conectar **todos los conectores de la cuenta de claude.ai** (Gmail,
+  Drive, Figma, Canva, Zapier…) en cada turno, y ~0,6 s tráfico no esencial. Se arregla
+  sin tocar el código: el drop-in de systemd de abajo. Quedan ~3,5 s fijos de arrancar
+  Node, que solo se quitarían con una sesión viva durante toda la llamada.
+- **La frase de espera se decía entera ANTES de preguntar a Claude** (~1,5-2 s por turno
+  sin hacer nada). Es el parche 15.
+- **En un sitio ruidoso el detector tardó ~10 s** en dar por acabado «Dime, ¿qué puedes
+  hacer?» (RMS de fondo 5.000-7.000; en casa ~500). No se ha tocado: es el parche 10
+  haciendo lo que puede.
+
+**Los dos bucles.** Las entrantes (las que haces tú) van por `voice-app/lib/sip-handler.js`
+y las salientes por `voice-app/lib/conversation-loop.js`, que es una copia del primero:
+cambiar uno no cambia el otro. Por eso los dos parches viven en un módulo nuevo,
+`voice-app/lib/turno-rapido.js`, y los dos bucles lo llaman.
+
+- **15 — `pensar()`**: lanza la consulta a Claude, y *mientras* dice la frase de espera y
+  pone la música. Si Claude ya ha contestado al acabar la frase, no suena la música. Un
+  error de Claude se sigue lanzando igual que antes.
+- **16 — barge-in, `decirInterrumpible()`**: mientras Jarvis dice la respuesta, el oído
+  sigue abierto (`session.armarBargeIn()` en `audio-fork.js`). Con `BARGE_IN_MS` (500)
+  de voz seguida, la sesión emite `barge`, el bucle hace `uuid_break` y Jarvis se calla.
+  El turno siguiente **no pita** y espera la frase que ya está entrando, con su principio
+  (si acaba antes de volver a escuchar, la sesión la guarda en `_sinRecoger`). A Claude
+  le llega con `AVISO_INTERRUPCION` delante, para que sepa que puede que no oyeras el
+  final. Solo la respuesta es interrumpible: ni el saludo, ni la frase de espera, ni la
+  música.
+- **Por qué la voz de Jarvis no se corta a sí misma**: el audio que llega al detector es
+  solo tu lado de la línea (`forkAudioStart` con `mixType: 'mono'`). Lo que sí puede
+  colarse es el eco acústico del altavoz de tu móvil o un ruido fuerte de medio segundo;
+  si pasa, sube `BARGE_IN_MS` o apágalo con `BARGE_IN=0`, las dos en el `.env` de
+  `~/.claude-phone/` y con `docker compose -f ~/.claude-phone/docker-compose.yml up -d
+  voice-app` (un `restart` no relee el `.env`). Lo que delata un corte es
+  `BARGE-IN: te pones a hablar` en el log.
+
+`telefono/parche-15-16.diff` (sobre `~/.claude-phone-cli/`), con
+`voice-app/test/parche15y16.test.js`: 13 casos, el detector de verdad con audio
+sintético y los dos bucles enteros con dobles. Contra el código de antes fallan los
+cinco del detector y de los bucles. Se aplicó igual que el 14: imagen anterior etiquetada
+como `claude-phone-voice-app:antes-p15`, construir, pasar los tests dentro sin red (los
+15 del 12 y los 6 del 14 siguen en verde) y cambiar el contenedor sin llamada en curso:
+
+```bash
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche15y16.test.js
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Volver atrás: `docker tag claude-phone-voice-app:antes-p15 claude-phone-voice-app` y el
+mismo `up -d`.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
   `claude-api-server` al arrancar. Sin él, los contenedores vuelven solos tras un
   reinicio y el puente con Claude Code no, así que la llamada entra y no contesta nadie.
+- **Su drop-in `claude-phone-api.service.d/rapido.conf`** (2026-10-13), con
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false` y `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`:
+  ~2,8 s menos por turno (ver «Los parches 15 y 16»). De paso, la sesión del teléfono ya
+  no carga los conectores de la cuenta de claude.ai (Gmail, Drive…), solo el MCP de
+  Jarvis de `~/telefono-jarvis/.mcp.json`. Como el `server.js` hereda el entorno del
+  servicio, sobrevive a un `claude-phone update`.
 - Su `WorkingDirectory` es `~/telefono-jarvis/`, y el `CLAUDE.md` de ahí
   es la copia de `telefono/RUNBOOK.md` de este repositorio. **También se copia a mano.**
 - **No uses `claude-phone start`**: intentaría levantar su propio `claude-api-server`

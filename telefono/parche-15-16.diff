@@ -1,0 +1,682 @@
+diff -ruN a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
+--- a/voice-app/lib/audio-fork.js	2026-10-13 16:50:42.038303300 +0200
++++ b/voice-app/lib/audio-fork.js	2026-10-13 16:50:42.114364600 +0200
+@@ -58,6 +58,14 @@
+     this._speechBytes = 0;
+     this._silenceMs = 0;
+ 
++    // Barge-in (parche 16): mientras Jarvis habla, el oído sigue abierto y avisa
++    // ('barge') cuando llevas BARGE_IN_MS de voz. Una frase que acaba sin nadie
++    // esperándola se guarda para el waitForUtterance siguiente: si no, la que
++    // empezaste encima de Jarvis se perdería entre su respuesta y el turno nuevo.
++    this._bargeArmado = false;
++    this._bargeMs = parseInt(process.env.BARGE_IN_MS) || 500;
++    this._sinRecoger = null;
++
+     // DEBUG: Track message counts
+     this._messageCount = 0;
+     this._binaryCount = 0;
+@@ -80,7 +88,20 @@
+     const was = this.captureEnabled;
+     this.captureEnabled = Boolean(enabled);
+     console.log('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
+-    if (!this.captureEnabled) this._resetUtterance();
++    if (!this.captureEnabled) {
++      this._resetUtterance();
++      this._bargeArmado = false;
++      this._sinRecoger = null;
++    }
++  }
++
++  /** Abre el oído mientras Jarvis habla (parche 16). Ver lib/turno-rapido.js. */
++  armarBargeIn() {
++    this._resetUtterance();
++    this._sinRecoger = null;
++    this._bargeArmado = true;
++    this.captureEnabled = true;
++    console.log('[AUDIO-DEBUG] barge-in armado (' + this._bargeMs + ' ms de voz) for ' + this.callUuid);
+   }
+ 
+   _chunkDurationMs(byteLen) {
+@@ -148,7 +169,9 @@
+       return false;
+     }
+     console.log('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
+-    this.emit('utterance', { callUuid: this.callUuid, audio, durationMs, speechMs, reason });
++    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason };
++    if (this.listenerCount('utterance') === 0) this._sinRecoger = u;
++    this.emit('utterance', u);
+     return true;
+   }
+ 
+@@ -287,6 +310,12 @@
+     if (isSpeech) this._silenceMs = 0;
+     else this._silenceMs += chunkMs;
+ 
++    if (this._bargeArmado && this._chunkDurationMs(this._speechBytes) >= this._bargeMs) {
++      this._bargeArmado = false;
++      console.log('[AUDIO-DEBUG] barge-in: ' + Math.round(this._chunkDurationMs(this._speechBytes)) + ' ms de voz mientras Jarvis habla, for ' + this.callUuid);
++      this.emit('barge');
++    }
++
+     const utteranceMs = this._chunkDurationMs(this._utteranceBytes);
+     if (utteranceMs >= this.maxUtteranceMs) return this._finalizeUtterance('max_utterance');
+     if (this._silenceMs >= this.endSilenceMs) return this._finalizeUtterance('end_silence');
+@@ -294,6 +323,12 @@
+ 
+   waitForUtterance({ timeoutMs = 30000 } = {}) {
+     console.log('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
++    if (this._sinRecoger) {
++      const u = this._sinRecoger;
++      this._sinRecoger = null;
++      console.log('[AUDIO-DEBUG] waitForUtterance: la frase ya había acabado (barge-in), ' + u.audio.length + ' bytes');
++      return Promise.resolve(u);
++    }
+     return new Promise((resolve, reject) => {
+       const onUtterance = (u) => {
+         cleanup();
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-10-13 16:50:42.055348000 +0200
++++ b/voice-app/lib/conversation-loop.js	2026-10-13 16:50:42.155418200 +0200
+@@ -13,6 +13,7 @@
+  */
+ 
+ const logger = require('./logger');
++const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -248,6 +249,9 @@
+     // Turnos seguidos sin oír a nadie: sin tope, una llamada vacía repetía
+     // «¿sigues ahí?» hasta maxTurns con la extensión de Jarvis ocupada.
+     let silencios = 0;
++    // Si interrumpiste la respuesta anterior (parche 16), ya estás hablando: ni pitido
++    // ni oído nuevo, se espera la frase que ya está entrando.
++    let interrumpio = false;
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -262,12 +266,16 @@
+       // ============================================
+       // READY BEEP: Signal "your turn to speak"
+       // ============================================
+-      try {
+-        if (callActive) await endpoint.play(READY_BEEP_URL);
+-      } catch (e) {
+-        if (!callActive) break;
+-        logger.warn('Ready beep failed', { callUuid, error: e.message });
++      if (!interrumpio) {
++        try {
++          if (callActive) await endpoint.play(READY_BEEP_URL);
++        } catch (e) {
++          if (!callActive) break;
++          logger.warn('Ready beep failed', { callUuid, error: e.message });
++        }
+       }
++      const fueInterrupcion = interrumpio;
++      interrumpio = false;
+ 
+       // Enable capture and wait for speech
+       session.setCaptureEnabled(true);
+@@ -356,36 +364,21 @@
+       // Check if call still active before thinking feedback
+       if (!callActive) break;
+ 
+-      // 1. Play random thinking phrase
++      // 1-4. Claude piensa mientras suenan la frase de espera y la música (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+-      logger.info('Playing thinking phrase', { callUuid, phrase: thinkingPhrase });
+-      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
+-      if (callActive) await endpoint.play(thinkingUrl);
+-
+-      // 2. Start hold music in background
+-      let musicPlaying = false;
+-      if (callActive) {
+-        endpoint.play(HOLD_MUSIC_URL).catch(e => {
+-          logger.warn('Hold music failed', { callUuid, error: e.message });
+-        });
+-        musicPlaying = true;
+-      }
+-
+-      // 3. Query Claude
+-      logger.info('Querying Claude', { callUuid });
+-      const claudeResponse = await claudeBridge.query(
+-        transcript,
+-        { callId: callUuid, devicePrompt: devicePrompt }
+-      );
+-
+-      // 4. Stop hold music
+-      if (musicPlaying && callActive) {
+-        try {
+-          await endpoint.api('uuid_break', endpoint.uuid);
+-        } catch (e) {
+-          // Ignore - music may have already stopped
+-        }
+-      }
++      logger.info('Querying Claude', { callUuid, phrase: thinkingPhrase });
++      const claudeResponse = await pensar({
++        consultar: () => claudeBridge.query(
++          fueInterrupcion ? AVISO_INTERRUPCION + transcript : transcript,
++          { callId: callUuid, devicePrompt: devicePrompt }
++        ),
++        endpoint,
++        ttsService,
++        frase: thinkingPhrase,
++        voiceId,
++        musicaUrl: HOLD_MUSIC_URL,
++        sigueActiva: () => callActive
++      });
+ 
+       // Check if call ended during Claude processing
+       if (!callActive) {
+@@ -400,7 +393,10 @@
+       logger.info('Voice line', { callUuid, voiceLine });
+ 
+       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
+-      if (callActive) await endpoint.play(responseUrl);
++      if (callActive) {
++        interrumpio = await decirInterrumpible(endpoint, session, responseUrl,
++          (m) => logger.info(m, { callUuid }));
++      }
+ 
+       logger.info('Turn complete', { callUuid, turn: turnCount });
+     }
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-10-13 16:50:42.070477100 +0200
++++ b/voice-app/lib/sip-handler.js	2026-10-13 16:50:42.135502800 +0200
+@@ -4,6 +4,7 @@
+  */
+ 
+ const { setTimeout: sleep } = require('node:timers/promises');
++const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -139,17 +140,24 @@
+     // Main conversation loop
+     let turnCount = 0;
+     const MAX_TURNS = 20;
++    // Si interrumpiste la respuesta anterior (parche 16), ya estás hablando: ni pitido
++    // ni oído nuevo, se espera la frase que ya está entrando.
++    let interrumpio = false;
+ 
+     while (turnCount < MAX_TURNS) {
+       turnCount++;
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + '/' + MAX_TURNS);
+ 
+       // READY BEEP
+-      try {
+-        await endpoint.play(READY_BEEP_URL);
+-      } catch (e) {
+-        console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++      if (!interrumpio) {
++        try {
++          await endpoint.play(READY_BEEP_URL);
++        } catch (e) {
++          console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++        }
+       }
++      const fueInterrupcion = interrumpio;
++      interrumpio = false;
+ 
+       session.setCaptureEnabled(true);
+       console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
+@@ -198,32 +206,23 @@
+         break;
+       }
+ 
+-      // THINKING FEEDBACK
++      // THINKING FEEDBACK + Claude, a la vez (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+-      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
+-      await endpoint.play(thinkingUrl);
+-
+-      // Hold music in background
+-      let musicPlaying = false;
+-      endpoint.play(HOLD_MUSIC_URL).catch(function(e) {
+-        console.log('[' + new Date().toISOString() + '] MUSIC: Hold music failed, continuing');
+-      });
+-      musicPlaying = true;
+-
+-      // Query Claude with device-specific prompt
+       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
+-      const claudeResponse = await claudeBridge.query(
+-        transcript,
+-        { callId: callUuid, devicePrompt: devicePrompt }
+-      );
+-
+-      // Stop hold music
+-      if (musicPlaying) {
+-        try {
+-          await endpoint.api('uuid_break', endpoint.uuid);
+-        } catch (e) {}
+-      }
++      const claudeResponse = await pensar({
++        consultar: function () {
++          return claudeBridge.query(
++            fueInterrupcion ? AVISO_INTERRUPCION + transcript : transcript,
++            { callId: callUuid, devicePrompt: devicePrompt }
++          );
++        },
++        endpoint: endpoint,
++        ttsService: ttsService,
++        frase: thinkingPhrase,
++        voiceId: voiceId,
++        musicaUrl: HOLD_MUSIC_URL
++      });
+ 
+       console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
+ 
+@@ -232,7 +231,9 @@
+       console.log('[' + new Date().toISOString() + '] VOICE: "' + voiceLine + '"');
+ 
+       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
+-      await endpoint.play(responseUrl);
++      interrumpio = await decirInterrumpible(endpoint, session, responseUrl, function (m) {
++        console.log('[' + new Date().toISOString() + '] ' + m);
++      });
+ 
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + ' complete');
+     }
+diff -ruN a/voice-app/lib/turno-rapido.js b/voice-app/lib/turno-rapido.js
+--- a/voice-app/lib/turno-rapido.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/lib/turno-rapido.js	2026-10-13 16:50:42.177281500 +0200
+@@ -0,0 +1,91 @@
++/**
++ * Parches 15 y 16: lo que comparten las dos conversaciones (la entrante, en
++ * sip-handler.js, y la saliente, en conversation-loop.js), que son dos bucles
++ * copiados y había que tocar igual. Ver telefono/PARCHES.md en Life Assistant.
++ *
++ * - pensar() (parche 15): Claude se pone a pensar a la vez que suena la frase de
++ *   espera, no después. Antes se esperaba a que la frase terminara (~1,5-2 s por
++ *   turno sin hacer nada), y la música de espera sonaba aunque Claude ya hubiera
++ *   contestado.
++ * - decirInterrumpible() (parche 16, barge-in): mientras Jarvis contesta, el oído
++ *   sigue abierto; si te pones a hablar, se calla y lo que dices es el turno
++ *   siguiente. Se apaga con BARGE_IN=0. El audio que llega al detector es solo tu
++ *   lado de la línea (forkAudioStart con mixType 'mono'), así que la voz de Jarvis
++ *   no se interrumpe a sí misma.
++ */
++
++// Lo que se le antepone a Claude cuando le has cortado: sin esto cree que oíste la
++// respuesta entera y puede dar por sabido lo que no llegaste a oír.
++const AVISO_INTERRUPCION = '[Te ha interrumpido mientras hablabas: puede que no oyera el final de tu respuesta] ';
++
++function bargeInActivo() {
++  return process.env.BARGE_IN !== '0';
++}
++
++/**
++ * Pregunta a Claude y, mientras piensa, dice la frase de espera y pone la música.
++ * Devuelve lo que conteste Claude (o lanza lo que lance claudeBridge.query).
++ *
++ * @param {Object} p
++ * @param {Function} p.consultar   - () => Promise<string>, la llamada a claudeBridge.query
++ * @param {Object}   p.endpoint
++ * @param {Object}   p.ttsService
++ * @param {string}   p.frase       - la frase de espera
++ * @param {string}   p.voiceId
++ * @param {string}   p.musicaUrl
++ * @param {Function} [p.sigueActiva] - () => boolean; false si se ha colgado
++ */
++async function pensar(p) {
++  const sigueActiva = p.sigueActiva || function () { return true; };
++  let listo = false;
++  const consulta = Promise.resolve().then(p.consultar);
++  // Marca el final sin tragarse el error: el `await consulta` de abajo lo relanza.
++  consulta.then(function () { listo = true; }, function () { listo = true; });
++
++  const fraseUrl = await p.ttsService.generateSpeech(p.frase, p.voiceId);
++  if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
++
++  let musica = false;
++  if (sigueActiva() && !listo) {
++    p.endpoint.play(p.musicaUrl).catch(function () {});
++    musica = true;
++  }
++
++  try {
++    return await consulta;
++  } finally {
++    if (musica && sigueActiva()) {
++      try { await p.endpoint.api('uuid_break', p.endpoint.uuid); } catch (e) { /* ya parada */ }
++    }
++  }
++}
++
++/**
++ * Reproduce `url` dejando que la persona interrumpa. Devuelve true si interrumpió:
++ * entonces el oído sigue abierto con lo que está diciendo, y el turno siguiente
++ * tiene que saltarse el pitido y esperar esa frase. Si no interrumpió, deja el oído
++ * cerrado, como estaba.
++ */
++async function decirInterrumpible(endpoint, session, url, log) {
++  if (!bargeInActivo() || !session || typeof session.armarBargeIn !== 'function') {
++    await endpoint.play(url);
++    return false;
++  }
++  let cortado = false;
++  const alInterrumpir = function () {
++    cortado = true;
++    if (log) log('BARGE-IN: te pones a hablar, Jarvis se calla');
++    endpoint.api('uuid_break', endpoint.uuid).catch(function () {});
++  };
++  session.on('barge', alInterrumpir);
++  session.armarBargeIn();
++  try {
++    await endpoint.play(url);
++  } finally {
++    session.off('barge', alInterrumpir);
++    if (!cortado) session.setCaptureEnabled(false);
++  }
++  return cortado;
++}
++
++module.exports = { pensar, decirInterrumpible, bargeInActivo, AVISO_INTERRUPCION };
+diff -ruN a/voice-app/test/parche15y16.test.js b/voice-app/test/parche15y16.test.js
+--- a/voice-app/test/parche15y16.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche15y16.test.js	2026-10-13 16:51:15.526875300 +0200
+@@ -0,0 +1,302 @@
++/**
++ * Parches 15 y 16: Claude piensa mientras suena la frase de espera, y se le puede
++ * interrumpir mientras contesta (barge-in).
++ *
++ * Igual que parche12.test.js: FreeSWITCH, la voz, Whisper, Claude y el oído son
++ * dobles, y lo que corre es el código de verdad de lib/ (sip-handler para las
++ * entrantes, conversation-loop para las salientes, audio-fork para el detector).
++ * Se lanza con `node --test test/parche15y16.test.js`, dentro de la imagen recién
++ * construida y sin red: ver telefono/PARCHES.md, «Los parches 15 y 16».
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++// `ws` solo hace falta para el servidor; la sesión recibe el socket hecho.
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++const registro = [];
++for (const nivel of ['log', 'warn', 'error']) {
++  console[nivel] = function () { registro.push(Array.from(arguments).join(' ')); };
++}
++
++const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('../lib/turno-rapido');
++const { AudioForkSession } = require('../lib/audio-fork');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++const tick = function () { return new Promise(function (r) { setImmediate(r); }); };
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++const tts = { generateSpeech: async function (texto) { return 'tts:' + texto; } };
++
++/**
++ * Un endpoint de FreeSWITCH que apunta lo que suena. `bloquea(url)` decide qué
++ * reproducciones se quedan sonando hasta un uuid_break (la música, o una respuesta
++ * que se va a interrumpir); el resto acaban solas.
++ */
++function endpointFalso(bloquea) {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep._sonando = [];
++  ep.play = function (url) {
++    ep.hecho.push('play ' + url);
++    if (bloquea && bloquea(url)) {
++      return new Promise(function (r) { ep._sonando.push(r); });
++    }
++    return Promise.resolve();
++  };
++  ep.api = async function (cmd) {
++    ep.hecho.push('api ' + cmd);
++    if (cmd === 'uuid_break') { const s = ep._sonando; ep._sonando = []; s.forEach(function (r) { r(); }); }
++  };
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++/** Claude: apunta lo que se le pregunta y contesta cuando se le dice (o al momento). */
++function claudeFalso(opciones) {
++  const c = { preguntas: [], pendientes: [] };
++  c.query = function (texto) {
++    c.preguntas.push(texto);
++    if (opciones && opciones.aMano) {
++      return new Promise(function (r) { c.pendientes.push(r); });
++    }
++    return Promise.resolve('🗣️ VOICE_RESPONSE: respuesta ' + c.preguntas.length);
++  };
++  c.contestar = function () { c.pendientes.shift()('🗣️ VOICE_RESPONSE: lista'); };
++  c.endSession = async function () {};
++  return c;
++}
++
++/**
++ * El oído de una conversación: lo que dice la persona en cada turno, y en qué
++ * respuestas de Jarvis se pone a hablar encima (emite 'barge' al armarse).
++ */
++function sesionFalsa(frases, cortaEnRespuesta) {
++  const s = new EventEmitter();
++  s.capturas = [];
++  let i = 0;
++  let respuestas = 0;
++  s.setCaptureEnabled = function (v) { s.capturas.push(v); };
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {
++    respuestas++;
++    s.capturas.push('armado');
++    if (cortaEnRespuesta.indexOf(respuestas) >= 0) setImmediate(function () { s.emit('barge'); });
++  };
++  s.waitForUtterance = async function () {
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  return s;
++}
++
++const whisper = { transcribe: async function (audio) { return audio.toString(); } };
++
++// ── Parche 15: pensar() ──────────────────────────────────────────────────────
++test('15: Claude ya está preguntado antes de que termine la frase de espera', async function () {
++  const ep = endpointFalso(function (url) { return url.indexOf('tts:') === 0 || url === 'musica'; });
++  const claude = claudeFalso({ aMano: true });
++  const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
++    ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
++  await tick(); await tick();
++  assert.deepStrictEqual(ep.hecho, ['play tts:Un momento...']);
++  assert.deepStrictEqual(claude.preguntas, ['hola'], 'antes del parche se preguntaba al acabar la frase');
++  // Claude contesta mientras suena la frase: se corta y no suena música.
++  claude.contestar();
++  await tick();
++  ep._sonando.forEach(function (r) { r(); });
++  assert.strictEqual(await hecho, '🗣️ VOICE_RESPONSE: lista');
++  assert.ok(ep.hecho.indexOf('play musica') < 0, 'sin música si Claude ya ha contestado');
++});
++
++test('15: si Claude tarda más que la frase, suena la música y se para al contestar', async function () {
++  const ep = endpointFalso(function (url) { return url === 'musica'; });
++  const claude = claudeFalso({ aMano: true });
++  const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
++    ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
++  await tick(); await tick(); await tick();
++  assert.deepStrictEqual(ep.hecho, ['play tts:Un momento...', 'play musica']);
++  claude.contestar();
++  await hecho;
++  assert.strictEqual(ep.hecho[ep.hecho.length - 1], 'api uuid_break');
++});
++
++test('15: un fallo de Claude se sigue lanzando, y la música se para igual', async function () {
++  const ep = endpointFalso(function (url) { return url === 'musica'; });
++  let rechazar;
++  const hecho = pensar({ consultar: function () { return new Promise(function (_, r) { rechazar = r; }); },
++    endpoint: ep, ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
++  await tick(); await tick(); await tick();
++  rechazar(new Error('Claude API returned failure'));
++  await assert.rejects(hecho, /Claude API returned failure/);
++  assert.strictEqual(ep.hecho[ep.hecho.length - 1], 'api uuid_break');
++});
++
++// ── Parche 16: decirInterrumpible() ──────────────────────────────────────────
++test('16: si hablas encima, Jarvis se calla y el oído sigue abierto', async function () {
++  const ep = endpointFalso(function () { return true; });
++  const s = sesionFalsa([], [1]);
++  const cortado = await decirInterrumpible(ep, s, 'tts:respuesta');
++  assert.strictEqual(cortado, true);
++  assert.deepStrictEqual(ep.hecho, ['play tts:respuesta', 'api uuid_break']);
++  assert.deepStrictEqual(s.capturas, ['armado'], 'no se cierra el oído: lo que dices es el turno siguiente');
++  assert.strictEqual(s.listenerCount('barge'), 0);
++});
++
++test('16: si no hablas, la respuesta suena entera y el oído se cierra como antes', async function () {
++  const ep = endpointFalso();
++  const s = sesionFalsa([], []);
++  assert.strictEqual(await decirInterrumpible(ep, s, 'tts:respuesta'), false);
++  assert.deepStrictEqual(ep.hecho, ['play tts:respuesta']);
++  assert.deepStrictEqual(s.capturas, ['armado', false]);
++});
++
++test('16: con BARGE_IN=0 no se arma nada', async function () {
++  process.env.BARGE_IN = '0';
++  try {
++    const ep = endpointFalso();
++    const s = sesionFalsa([], [1]);
++    assert.strictEqual(await decirInterrumpible(ep, s, 'tts:respuesta'), false);
++    assert.deepStrictEqual(s.capturas, []);
++  } finally {
++    delete process.env.BARGE_IN;
++  }
++});
++
++// ── Parche 16: el detector de verdad ─────────────────────────────────────────
++// 20 ms de audio a 16 kHz: 640 bytes. Voz = ±15000; silencio = ceros.
++function trozo(voz) {
++  const b = Buffer.alloc(640);
++  if (voz) for (let i = 0; i < 320; i++) b.writeInt16LE(i % 2 ? 15000 : -15000, i * 2);
++  return b;
++}
++function detector() {
++  const ws = new EventEmitter();
++  const s = new AudioForkSession({ ws: ws, callUuid: 'c1' });
++  s.oir = function (vozMs, silencioMs) {
++    for (let t = 0; t < vozMs; t += 20) ws.emit('message', trozo(true));
++    for (let t = 0; t < (silencioMs || 0); t += 20) ws.emit('message', trozo(false));
++  };
++  // El turno anterior escuchando en silencio: fija el orden de bytes y el suelo de
++  // ruido, como en una llamada (sin esto el suelo se plantaría en la propia voz).
++  s.setCaptureEnabled(true);
++  s.oir(0, 1000);
++  s.setCaptureEnabled(false);
++  return s;
++}
++
++test('16: el detector avisa a los 500 ms de voz con Jarvis hablando, y solo una vez', function () {
++  const s = detector();
++  let avisos = 0;
++  s.on('barge', function () { avisos++; });
++  s.armarBargeIn();
++  s.oir(0, 600);       // escuchas a Jarvis callado
++  assert.strictEqual(avisos, 0);
++  s.oir(300);
++  assert.strictEqual(avisos, 0, 'un «mm» o una tos no cortan a Jarvis');
++  s.oir(400);
++  assert.strictEqual(avisos, 1);
++  s.oir(1000);
++  assert.strictEqual(avisos, 1);
++});
++
++test('16: sin armar, hablar no avisa (el turno normal no cambia)', function () {
++  const s = detector();
++  let avisos = 0;
++  s.on('barge', function () { avisos++; });
++  s.setCaptureEnabled(true);
++  s.oir(1000);
++  assert.strictEqual(avisos, 0);
++});
++
++test('16: la frase que acaba antes de volver a escuchar no se pierde', async function () {
++  const s = detector();
++  s.armarBargeIn();
++  s.oir(800, 1600);    // hablas y te callas mientras Jarvis aún se está callando
++  s.setCaptureEnabled(true);
++  const u = await s.waitForUtterance({ timeoutMs: 50 });
++  assert.ok(u.speechMs >= 700, 'es la frase entera, con su principio');
++  assert.strictEqual(u.reason, 'end_silence');
++});
++
++test('16: cerrar el oído tira la frase guardada y desarma', async function () {
++  const s = detector();
++  let avisos = 0;
++  s.on('barge', function () { avisos++; });
++  s.armarBargeIn();
++  s.oir(400, 1600);    // 400 ms: se acepta como frase, pero no llega a cortar
++  assert.strictEqual(avisos, 0);
++  s.setCaptureEnabled(false);
++  s.setCaptureEnabled(true);
++  s.oir(800);
++  assert.strictEqual(avisos, 0, 'desarmado');
++  await assert.rejects(s.waitForUtterance({ timeoutMs: 30 }), /Timed out/);
++});
++
++// ── Los dos bucles, enteros ──────────────────────────────────────────────────
++function opcionesComunes(sesion, claude) {
++  return {
++    ttsService: tts, whisperClient: whisper, claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; }, cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++function beeps(ep) {
++  return ep.hecho.filter(function (h) { return h.indexOf('ready-beep') >= 0; }).length;
++}
++
++test('16, entrante: interrumpes la 1.ª respuesta → sin pitido, y Claude sabe que le cortaste', async function () {
++  const ep = endpointFalso(function (url) { return url === 'tts:respuesta 1' || url.indexOf('hold-music') >= 0; });
++  const sesion = sesionFalsa(['¿qué tengo hoy?', 'para, ¿y mañana?', 'adiós'], [1]);
++  const claude = claudeFalso();
++  const dialogo = new EventEmitter();
++  dialogo.destroy = function () {};
++  const opciones = opcionesComunes(sesion, claude);
++  opciones.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++  const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++  await handleInvite(req, { send: function () {} }, opciones);
++
++  assert.deepStrictEqual(claude.preguntas, ['¿qué tengo hoy?', AVISO_INTERRUPCION + 'para, ¿y mañana?']);
++  assert.ok(ep.hecho.indexOf('api uuid_break') >= 0);
++  // Pitidos: turno 1 y turno 3. El 2 empezó hablando encima de Jarvis.
++  assert.strictEqual(beeps(ep), 2);
++  assert.ok(ep.hecho.indexOf('play tts:Hasta luego. Llámame cuando quieras.') >= 0);
++});
++
++test('16, saliente: igual en conversation-loop', async function () {
++  const ep = endpointFalso(function (url) { return url === 'tts:respuesta 1' || url.indexOf('hold-music') >= 0; });
++  const sesion = sesionFalsa(['dime', 'espera, otra cosa', 'adiós'], [1]);
++  const claude = claudeFalso();
++  const dialogo = new EventEmitter();
++  const r = await runConversationLoop(ep, dialogo, 'c-sal', Object.assign(opcionesComunes(sesion, claude), { skipGreeting: true }));
++  assert.strictEqual(r.endReason, 'goodbye');
++  assert.deepStrictEqual(claude.preguntas, ['dime', AVISO_INTERRUPCION + 'espera, otra cosa']);
++  assert.strictEqual(beeps(ep), 2);
++});
++
++test('16, entrante sin interrumpir: todo como antes (pitido en cada turno, pregunta tal cual)', async function () {
++  const ep = endpointFalso(function (url) { return url.indexOf('hold-music') >= 0; });
++  const sesion = sesionFalsa(['hola', 'adiós'], []);
++  const claude = claudeFalso();
++  const dialogo = new EventEmitter();
++  dialogo.destroy = function () {};
++  const opciones = opcionesComunes(sesion, claude);
++  opciones.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++  const req = { get: function () { return '<sip:10001@x>'; }, body: 'v=0' };
++  await handleInvite(req, { send: function () {} }, opciones);
++  assert.deepStrictEqual(claude.preguntas, ['hola']);
++  assert.strictEqual(beeps(ep), 2);
++  assert.ok(ep.hecho.indexOf('api uuid_break') < 0 || ep.hecho.indexOf('play tts:respuesta 1') > ep.hecho.lastIndexOf('api uuid_break'),
++    'el único uuid_break posible es el de la música, antes de la respuesta');
++});
