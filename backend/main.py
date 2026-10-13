@@ -8534,16 +8534,43 @@ def _regla_cobro_gimnasio() -> int:
     ))
 
 
+def _inicio_entreno(inicio) -> Optional[datetime]:
+    """El instante en que empezó un entreno, con su zona. None si no se entiende.
+
+    Viene como texto del exportador («2026-10-05 18:05:00 +0200») o como ISO. Sin zona se
+    entiende hora de aquí, que es la del reloj.
+    """
+    texto = str(inicio or "").strip()
+    for formato in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M %z"):
+        try:
+            return datetime.strptime(texto, formato)
+        except ValueError:
+            pass
+    try:
+        momento = datetime.fromisoformat(texto.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return momento if momento.tzinfo else momento.replace(tzinfo=LOCAL_TZ)
+
+
 def _entreno_del_reloj_entre(desde: datetime, hasta: datetime) -> Optional[bool]:
     """Si el Watch ya tiene un entreno que empezó durante esa estancia. None = no se sabe.
 
-    Mira solo el inicio y en hora de reloj del mismo día, que es lo que da el exportador
-    («2026-10-05 18:05:00 +0200»). Un entreno sin sincronizar todavía sale como «no»:
-    por eso esto solo sirve para NO preguntar, nunca para dar la sesión por dada.
+    Mira solo el inicio. Un entreno sin sincronizar todavía sale como «no»: por eso esto
+    solo sirve para NO preguntar, nunca para dar la sesión por dada.
+
+    **Instantes completos, no horas sueltas, y los días que toque la estancia.** Comparaba
+    «HH:MM» contra las filas del día en que empezó, y una estancia que cruzaba la
+    medianoche se rompía de dos formas: el rango 23:45..01:00 salía vacío (el CI lo pilló
+    el 2026-10-13 a las 01:01, con un test que dependía de la hora), y un entreno pasada
+    la medianoche está en la fila del día siguiente, que no se leía.
     """
-    dia = desde.astimezone(LOCAL_TZ).date().isoformat()
+    ini = desde - timedelta(minutes=15)
+    dias = sorted({ini.astimezone(LOCAL_TZ).date().isoformat(),
+                   hasta.astimezone(LOCAL_TZ).date().isoformat()})
     try:
-        r = http.get(f"{SUPABASE_URL}/rest/v1/health_metrics?metric_date=eq.{dia}"
+        r = http.get(f"{SUPABASE_URL}/rest/v1/health_metrics"
+                     f"?metric_date=in.({','.join(dias)})"
                      "&metric_name=in.(workouts,workout)&select=extra",
                      headers=supabase_headers())
         if r.status_code >= 300:
@@ -8551,14 +8578,10 @@ def _entreno_del_reloj_entre(desde: datetime, hasta: datetime) -> Optional[bool]
         filas = r.json() or []
     except Exception:
         return None
-    ini = (desde.astimezone(LOCAL_TZ) - timedelta(minutes=15)).strftime("%H:%M")
-    fin = hasta.astimezone(LOCAL_TZ).strftime("%H:%M")
     for f in filas:
         for w in ((f.get("extra") or {}).get("workouts") or []):
-            hora = _hora_entreno(w.get("start")) if isinstance(w, dict) else None
-            # Si la estancia (o el cuarto de hora de margen) cruza la medianoche, `ini` es
-            # mayor que `fin` y el rango se parte en dos: «ini..24:00» y «00:00..fin».
-            if hora and ((ini <= hora <= fin) if ini <= fin else (hora >= ini or hora <= fin)):
+            empezo = _inicio_entreno(w.get("start")) if isinstance(w, dict) else None
+            if empezo and ini <= empezo <= hasta:
                 return True
     return False
 

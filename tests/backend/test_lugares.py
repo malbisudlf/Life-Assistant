@@ -287,7 +287,7 @@ class TestSesionAlSalirDelGimnasio:
         desde, hasta = self._salida(60)
         hora = (desde + timedelta(minutes=10)).astimezone(main.LOCAL_TZ)
         mock_requests.add("GET", "health_metrics", FakeResponse([
-            {"extra": {"workouts": [{"start": hora.strftime("%Y-%m-%d %H:%M:%S +0200")}]}}]))
+            {"extra": {"workouts": [{"start": hora.strftime("%Y-%m-%d %H:%M:%S %z")}]}}]))
         assert main._regla_sesion_gimnasio(desde, hasta) == 0
 
     def test_una_estancia_que_cruza_la_medianoche_ve_el_entreno(self, mock_requests):
@@ -297,6 +297,25 @@ class TestSesionAlSalirDelGimnasio:
         mock_requests.add("GET", "health_metrics", FakeResponse([
             {"extra": {"workouts": [{"start": "2026-10-13 00:11:00 +0200"}]}}]))
         assert main._entreno_del_reloj_entre(desde, hasta) is True
+
+    def test_lee_tambien_el_dia_siguiente(self, mock_requests):
+        """De 23:30 a 01:00, un entreno a las 00:10 está en la fila del día siguiente."""
+        desde = datetime(2026, 10, 12, 21, 30, tzinfo=timezone.utc)  # 23:30 locales
+        hasta = desde + timedelta(minutes=90)                        # 01:00 locales
+        mock_requests.add("GET", "health_metrics", FakeResponse([
+            {"extra": {"workouts": [{"start": "2026-10-13 00:10:00 +0200"}]}}]))
+        assert main._entreno_del_reloj_entre(desde, hasta) is True
+        url = mock_requests.called("GET", "health_metrics")[0][1]
+        assert "metric_date=in.(2026-10-12,2026-10-13)" in url
+
+    def test_la_madrugada_de_antes_no_cuenta(self, mock_requests):
+        """Con horas sueltas, un entreno a las 00:30 de la noche ANTERIOR caía «dentro» de
+        una estancia de 23:30 a 01:00."""
+        desde = datetime(2026, 10, 12, 21, 30, tzinfo=timezone.utc)
+        hasta = desde + timedelta(minutes=90)
+        mock_requests.add("GET", "health_metrics", FakeResponse([
+            {"extra": {"workouts": [{"start": "2026-10-12 00:30:00 +0200"}]}}]))
+        assert main._entreno_del_reloj_entre(desde, hasta) is False
 
     def test_sus_botones_no_votan_en_contra(self):
         botones = main._acciones_aviso("rid", main.REGLA_SESION_GIMNASIO)
