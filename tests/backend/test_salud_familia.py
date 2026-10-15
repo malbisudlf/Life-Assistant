@@ -247,8 +247,9 @@ class TestBriefing:
     def correos(self, monkeypatch):
         enviados = []
         monkeypatch.setattr(main, "enviar_correo",
-                            lambda asunto, cuerpo, adjunto=None, destino=None:
-                            enviados.append({"asunto": asunto, "cuerpo": cuerpo, "destino": destino}))
+                            lambda asunto, cuerpo, adjunto=None, destino=None, html=None:
+                            enviados.append({"asunto": asunto, "cuerpo": cuerpo,
+                                             "destino": destino, "html": html}))
         return enviados
 
     def test_va_a_su_correo_con_el_pie(self, client, familia, mock_requests, correos):
@@ -293,6 +294,30 @@ class TestBriefing:
         borrado = mock_requests.called("DELETE", "salud_familia_envios")
         assert borrado and "persona=eq.ama" in borrado[0][1]
 
+    def test_alerta_no_gasta_el_informe_del_dia(self, client, familia, mock_requests, correos):
+        mock_requests.add("POST", "salud_familia_envios", FakeResponse({}, 409))
+        r = client.post("/familia/salud/briefing", headers=_cab(TOKEN_AMA),
+                        json={"texto": "Pulso alto dos días", "tipo": "alerta"})
+        assert r.status_code == 200 and r.json()["tipo"] == "alerta"
+        assert mock_requests.called("POST", "salud_familia_envios") == []
+        assert correos[0]["destino"] == CORREO_AMA
+
+    def test_tipo_desconocido_422(self, client, familia, mock_requests, correos):
+        r = client.post("/familia/salud/briefing", headers=_cab(TOKEN_AMA),
+                        json={"texto": "x", "tipo": "otro"})
+        assert r.status_code == 422 and correos == []
+
+    def test_html_lleva_el_pie_dentro_del_cuerpo(self, client, familia, mock_requests, correos):
+        client.post("/familia/salud/briefing", headers=_cab(TOKEN_AMA),
+                    json={"texto": "Hola", "html": "<html><body><h1>Hola</h1></body></html>"})
+        html = correos[0]["html"]
+        assert "No es una opinión médica" in html
+        assert html.index("No es una opinión médica") < html.index("</body>")
+
+    def test_sin_html_no_hay_html(self, client, familia, mock_requests, correos):
+        client.post("/familia/salud/briefing", headers=_cab(TOKEN_AMA), json={"texto": "Hola"})
+        assert correos[0]["html"] is None
+
     def test_sin_token(self, client, familia, mock_requests, correos):
         r = client.post("/familia/salud/briefing", json={"texto": "Hola"},
                         headers=_cab("health-token"))
@@ -324,6 +349,11 @@ class TestEnviarCorreoDestino:
         main.enviar_correo("a", "b", destino=CORREO_AMA)
         main.enviar_correo("a", "b")
         assert [m["To"] for m in enviados] == [CORREO_AMA, "mikel@test"]
+        # Sin html, el correo de siempre: texto plano y nada más.
+        assert enviados[1].get_content_type() == "text/plain"
+        main.enviar_correo("a", "b", destino=CORREO_AMA, html="<p>hola</p>")
+        assert enviados[2].get_content_type() == "multipart/alternative"
+        assert [p.get_content_type() for p in enviados[2].iter_parts()] == ["text/plain", "text/html"]
 
 
 class TestCiclo:
@@ -393,3 +423,33 @@ class TestCiclo:
     def test_sin_registros_no_hay_seccion(self, client, familia, mock_requests):
         d = client.get("/familia/salud/resumen", headers=_cab(TOKEN_AMA)).json()
         assert d["ciclo"] == {} and "CICLO" not in d["texto"]
+
+
+class TestDatosCrudos:
+    def test_sus_filas_tal_cual_y_solo_las_suyas(self, client, familia, mock_requests):
+        filas = [{"metric_date": "2026-10-14", "metric_name": "heart_rate", "value": 70,
+                  "unit": "count/min", "extra": {"Min": 50, "Max": 140}},
+                 {"metric_date": "2026-10-15", "metric_name": "sleep_analysis", "value": 7.1,
+                  "unit": "hr", "extra": {"sleepStart": "2026-10-14 23:40:00 +0200"}}]
+        mock_requests.add("GET", "/rest/v1/salud_familia", FakeResponse(filas))
+        r = client.get("/familia/salud/datos?dias=10", headers=_cab(TOKEN_AITA))
+        assert r.status_code == 200
+        d = r.json()
+        assert d["filas"] == filas and d["dias"] == 10
+        assert d["ultimo_dia_por_metrica"] == {"heart_rate": "2026-10-14",
+                                               "sleep_analysis": "2026-10-15"}
+        lecturas = mock_requests.called("GET", "salud_familia")
+        assert len(lecturas) == 1 and "persona=eq.aita" in lecturas[0][1]
+        _sin_health_metrics(mock_requests)
+
+    def test_dias_acotados(self, client, familia, mock_requests):
+        assert client.get("/familia/salud/datos?dias=0", headers=_cab(TOKEN_AMA)).status_code == 422
+        assert client.get("/familia/salud/datos?dias=401", headers=_cab(TOKEN_AMA)).status_code == 422
+
+    def test_sin_su_token_no(self, client, familia, mock_requests):
+        assert client.get("/familia/salud/datos", headers=_cab("health-token")).status_code == 403
+        assert mock_requests.calls == []
+
+    def test_supabase_caido_502(self, client, familia, mock_requests):
+        mock_requests.add("GET", "salud_familia", FakeResponse({}, 500))
+        assert client.get("/familia/salud/datos", headers=_cab(TOKEN_AMA)).status_code == 502

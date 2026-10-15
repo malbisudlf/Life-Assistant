@@ -11078,7 +11078,7 @@ def _motivo_espera_correo(espera: dict) -> str:
 
 
 def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None,
-                  destino: str | None = None):
+                  destino: str | None = None, html: str | None = None):
     """Envía por SMTP con la librería estándar: no hace falta ninguna dependencia
     nueva ni una cuenta en un servicio de envío. Con Gmail, usa una contraseña de
     aplicación en SMTP_PASSWORD (la normal no sirve si tienes 2FA).
@@ -11108,6 +11108,10 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None,
     msg["From"] = BRIEF_FROM or SMTP_USER
     msg["To"] = destino or BRIEF_TO
     msg.set_content(cuerpo)
+    # La versión HTML va como alternativa del texto, no en su lugar: el cliente de correo
+    # elige, y el texto sigue ahí para quien no pinte HTML. Hoy solo la usa la familia.
+    if html:
+        msg.add_alternative(html, subtype="html")
     if adjunto:
         nombre, datos, subtipo = adjunto
         msg.add_attachment(datos, maintype="application", subtype=subtipo, filename=nombre)
@@ -11166,6 +11170,7 @@ def _mandar_brief(datos: dict) -> None:
 SALUD_FAMILIA_TOKEN_MIN      = 32
 SALUD_FAMILIA_RETENCION_DIAS = int(os.getenv("SALUD_FAMILIA_RETENCION_DIAS", "400"))
 SALUD_FAMILIA_TEXTO_MAX      = 20_000
+SALUD_FAMILIA_HTML_MAX       = 100_000
 SALUD_FAMILIA_ENVIOS_DIA     = 5      # briefings por persona y día, contando los forzados
 _SLUG_FAMILIA   = re.compile(r"^[a-z0-9_-]{1,32}$")
 _CORREO_FAMILIA = re.compile(r"^[^@\s,:]+@[^@\s,:]+\.[^@\s,:]+$")
@@ -11389,6 +11394,37 @@ def familia_salud_resumen(request: Request):
     return {**datos, "texto": render_familia_texto(datos)}
 
 
+@app.get("/familia/salud/datos")
+def familia_salud_datos(request: Request, dias: int = Query(8, ge=1, le=400)):
+    """Sus filas tal cual están guardadas, de los últimos `dias` días.
+
+    Para una rutina que hace sus propios cálculos (notas de recuperación, zonas de pulso,
+    su panel con histórico) y necesita el día a día que el resumen no trae: el pulso
+    mínimo y máximo, las horas de acostarse y levantarse, el pulso de cada entreno. Es lo
+    mismo que se guardó, sin quitar nada salvo lo que ya descarta la ingesta.
+    """
+    persona = _persona_o_403(request)
+    _check_rate("familia_datos", persona, 30, 3600)
+    hoy   = datetime.now(LOCAL_TZ).date()
+    desde = (hoy - timedelta(days=dias - 1)).isoformat()
+    r, filas = _leer_todas(
+        f"{SALUD_FAMILIA_URL}?persona=eq.{quote(persona, safe='')}&metric_date=gte.{desde}"
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc,metric_name.asc",
+    )
+    if filas is None:
+        logger.error("Salud de la familia (%s): no se pudieron leer sus datos (%s)",
+                     persona, r.status_code)
+        raise _supabase_error(r)
+    # El último día con dato de cada métrica: lo que hace falta para decir «no han llegado
+    # datos nuevos» sin recorrer las filas.
+    ultimo: dict = {}
+    for f in filas:
+        if f["metric_date"] > ultimo.get(f["metric_name"], ""):
+            ultimo[f["metric_name"]] = f["metric_date"]
+    return {"hoy": hoy.isoformat(), "zona": TIMEZONE, "desde": desde, "dias": dias,
+            "ultimo_dia_por_metrica": ultimo, "filas": filas}
+
+
 def _resumir_ciclo(filas: list) -> dict:
     """Los registros del ciclo de la ventana, y cuándo empezó cada ciclo.
 
@@ -11445,6 +11481,10 @@ def render_familia_texto(d: dict) -> str:
 class BriefingFamilia(BaseModel):
     texto:  str           = Field(..., min_length=1, max_length=SALUD_FAMILIA_TEXTO_MAX)
     asunto: Optional[str] = Field(None, max_length=150)
+    # «alerta» es un correo aparte del informe del día (un pulso en reposo alto dos días
+    # seguidos…): no gasta la reserva diaria, solo el tope de SALUD_FAMILIA_ENVIOS_DIA.
+    tipo:   Literal["informe", "alerta"] = "informe"
+    html:   Optional[str] = Field(None, max_length=SALUD_FAMILIA_HTML_MAX)
 
 
 # El pie lo pone el backend y no el prompt de la rutina: así va en todos los correos
@@ -11452,6 +11492,17 @@ class BriefingFamilia(BaseModel):
 _PIE_FAMILIA = ("\n\n—\nEste resumen lo ha escrito tu Claude a partir de los datos de tu"
                 " reloj y tu iPhone. No es una opinión médica: si algo te preocupa,"
                 " coméntalo con tu médico.\n")
+_PIE_FAMILIA_HTML = ('<hr><p style="color:#777;font-size:12px">Este resumen lo ha escrito tu'
+                     ' Claude a partir de los datos de tu reloj y tu iPhone. No es una opinión'
+                     ' médica: si algo te preocupa, coméntalo con tu médico.</p>')
+
+
+def _html_con_pie(html: str) -> str:
+    """El pie, dentro del cuerpo si el HTML trae uno; si no, al final."""
+    cierre = html.lower().rfind("</body>")
+    if cierre == -1:
+        return html + _PIE_FAMILIA_HTML
+    return html[:cierre] + _PIE_FAMILIA_HTML + html[cierre:]
 
 
 @app.post("/familia/salud/briefing")
@@ -11470,14 +11521,17 @@ def familia_salud_briefing(body: BriefingFamilia, request: Request, forzar: bool
         raise HTTPException(status_code=503,
                             detail=f"El correo no sale ahora: {_motivo_espera_correo(espera)}")
     fecha = _ahora_local().date().isoformat()
-    if not forzar and not _reservar_familia(persona, fecha):
+    # Solo el informe reserva el día: una alerta es un correo de más, no el del día.
+    reserva = body.tipo == "informe" and not forzar
+    if reserva and not _reservar_familia(persona, fecha):
         raise HTTPException(status_code=409, detail="Hoy ya se le mandó su resumen")
     asunto = " ".join((body.asunto or "").split()) or f"Tu resumen de salud — {fecha}"
     try:
         enviar_correo(asunto, body.texto.strip() + _PIE_FAMILIA,
-                      destino=SALUD_FAMILIA[persona]["correo"])
+                      destino=SALUD_FAMILIA[persona]["correo"],
+                      html=_html_con_pie(body.html) if body.html else None)
     except Exception as e:
-        if not forzar:
+        if reserva:
             _liberar_familia(persona, fecha)
         if isinstance(e, HTTPException):
             raise
@@ -11486,7 +11540,7 @@ def familia_salud_briefing(body: BriefingFamilia, request: Request, forzar: bool
                      persona, type(e).__name__)
         raise HTTPException(status_code=502,
                             detail="No se pudo mandar el correo; reinténtalo más tarde")
-    return {"ok": True, "fecha": fecha}
+    return {"ok": True, "fecha": fecha, "tipo": body.tipo}
 
 
 def _reservar_familia(persona: str, fecha: str) -> bool:

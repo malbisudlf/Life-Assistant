@@ -47,6 +47,8 @@ funcionar; no quedó nada de él ni en el repositorio ni en `caja`.
 | `GET /familia/salud/resumen` | La sección de salud del correo de Mikel (`_resumir_salud` y `_render_salud_texto`, compartidas), en JSON (`salud`) y en texto (`texto`), sacada solo de sus filas. Si Supabase no contesta, **502**, nunca «sin datos»: quien lo lee es un modelo y lo contaría como que el reloj no mandó nada. 30 lecturas por hora |
 | `POST /familia/salud/briefing` | `{texto, asunto?}`. Lo manda por SMTP, **desde la cuenta de Mikel**, a su correo, con un pie que pone el backend («no es una opinión médica…») para que salga aunque cambie el prompt. Uno al día (`salud_familia_envios`, la misma reserva atómica que `brief_envios`: 409 si ya salió). `?forzar=1` se salta la reserva para probar, dentro del tope de `SALUD_FAMILIA_ENVIOS_DIA` (5) al día. Si el envío falla, libera el día |
 | Ciclo menstrual | La ingesta de la familia lee además `data.cycleTracking` (la exportación del ciclo de Health Auto Export: `start`, `end`, `name`, `value` y `isCycleStart`). Se guarda una fila por día de inicio (`metric_name = cycle_tracking`) con los registros en `extra.registros`, **solo con esos cinco campos y recortados**: es texto que escribe un cliente y acaba delante de un modelo. El resumen lo lee con su propia ventana de `SALUD_FAMILIA_CICLO_DIAS` (180) —en 30 días no cabe ni un par de ciclos— y lo saca en `ciclo` y en la sección `## CICLO MENSTRUAL`: los registros, los inicios de ciclo y los días entre inicios (aritmética, no conclusión). La ingesta de Mikel no lee ese bloque. Se añadió el 2026-10-15, a petición de la persona, para que su Claude lo valore |
+| `GET /familia/salud/datos?dias=N` | Sus filas tal cual (1-400 días): el día a día que el resumen no trae (pulso mínimo y máximo en `extra`, `sleepStart`/`sleepEnd` del sueño, los entrenos enteros con su pulso para las zonas, los registros del ciclo), más `ultimo_dia_por_metrica`. Existe porque la madre ya tenía un prompt propio que lo calcula todo con código y guarda su panel en un Artifact; con el resumen no le llegaba |
+| Alertas y HTML | `POST /familia/salud/briefing` admite `tipo: "alerta"` (un correo aparte del informe: no gasta la reserva del día, sí el tope de 5) y `html` (alternativa del texto; el pie va dentro del `<body>`) |
 | Retención | Al recibir datos, como mucho una vez al día por persona, se borra lo de esa persona con más de `SALUD_FAMILIA_RETENCION_DIAS` (400) días. 0 lo apaga |
 | Copia de seguridad | **No se copian** (`SIN_COPIA` en `scripts/copia_supabase.py`): un volcado más es un sitio más donde viven datos de salud que no son de Mikel, y Health Auto Export puede reenviar el histórico |
 
@@ -191,6 +193,26 @@ requests.
    - 200: hecho. 409: ya se le mandó hoy; termina sin error.
    - 503 o 502: espera cinco minutos y reinténtalo una vez.
 ```
+
+### Si la persona trae su propio prompt
+
+Puede usar `GET /familia/salud/datos` en vez del resumen y hacer ella todos los cálculos.
+Lo que tiene que saber su prompt de cómo vienen los datos, que no es como en un correo de
+Health Auto Export:
+
+- Una fila por métrica y día: `metric_date`, `metric_name`, `value`, `unit` y `extra` (el
+  punto tal cual lo mandó el exportador, sin su `date`). El pulso trae `Min`/`Avg`/`Max` en
+  `extra`; el sueño, sus fases y `sleepStart`/`sleepEnd`, y además `sleep_start` («HH:MM»).
+- Las unidades ya vienen normalizadas: energía en **kcal**, distancias en **km**, peso en
+  **kg**.
+- Los entrenos: una fila `workouts` por día de inicio, con la lista entera en
+  `extra.workouts` tal cual llegó (duración en segundos y, si se exportó, el pulso minuto a
+  minuto).
+- El ciclo: una fila `cycle_tracking` por día de inicio, con `extra.registros`
+  (`start`, `end`, `name`, `value` y `isCycleStart`).
+- Sin duplicados ni envíos vacíos: la ingesta ya se queda con un valor por métrica y día.
+- El correo, siempre por `POST /familia/salud/briefing` (el informe y, aparte, las alertas
+  con `tipo: "alerta"`), nunca con un conector de Gmail: el destinatario lo pone el backend.
 
 ### Coste
 
