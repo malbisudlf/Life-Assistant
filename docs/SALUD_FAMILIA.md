@@ -134,36 +134,56 @@ apagado. Se montan en `claude.ai/code/routines` desde su cuenta.
    409 (ya enviado): es lo correcto.
 
 ```text
-Redactas cada mañana el resumen de salud de <NOMBRE> a partir de los datos de su reloj y
-su iPhone, y se lo mandas. No hagas nada más: no crees ficheros, ramas ni pull requests.
+Cada mañana analizas la salud de <NOMBRE> con los datos de su reloj y su iPhone y le
+mandas por correo un análisis con conclusiones: qué va bien, qué puede mejorar y qué
+hacer al respecto. No hagas nada más: no crees ficheros en el repositorio, ramas ni pull
+requests.
 
 1. Pide los datos:
    curl -sS -w '\nHTTP %{http_code}\n' https://api.lifeassistantbackend.bid/familia/salud/resumen
    La autenticación la añade el entorno: no la pidas ni la escribas.
    - 403: el token del entorno está mal. Para aquí y no mandes nada.
    - 502 u otro 5xx: espera dos minutos y reinténtalo una vez; si sigue, para.
-2. Lee el campo "texto" de la respuesta (en "salud" está lo mismo en JSON). Cómo leerlo:
-   - n = días con dato. Con n bajo no hables de tendencias ni de cambios.
+
+2. Lee el campo "texto" de la respuesta (en "salud" y "ciclo" está lo mismo en JSON).
+   Cómo leerlo, porque son datos crudos:
+   - Cada media va con su n (días con dato). Con n bajo no hables de tendencias.
    - «Anoche: el sueño todavía no ha llegado» NO significa que no llevara el reloj: el dato
      tarda en sincronizar. No digas nada sobre si lo llevó puesto.
-   - Los días atípicos dicen qué se sale de su costumbre; no son un diagnóstico.
-3. Escribe el resumen en español, cercano y claro, para alguien que no es médico ni
-   técnico, sin jerga ni siglas sin explicar, en 150-300 palabras: cómo ha dormido, cuánto
-   se ha movido, cómo va su corazón en reposo, lo que más destaque de la semana y una
-   sugerencia sencilla para hoy. Tutéale. Sin listas de números: como mucho dos o tres
-   cifras que importen.
-   - Nunca diagnostiques ni le asustes. Si algo se sale mucho de lo suyo varios días
-     seguidos, sugiérele con calma comentarlo con su médico.
-   - Si no hay datos, díselo con naturalidad y recuérdale llevar el reloj y abrir la app
-     de Health Auto Export. No inventes valores.
-   - Si hay sección CICLO MENSTRUAL, coméntalo con tacto y en un párrafo propio: en qué
-     punto del ciclo está, si la duración entre inicios es regular comparada con sus
-     ciclos anteriores y cómo puede estar influyendo en su sueño, su energía o su pulso
-     de estos días. Una irregularidad que se repite (ciclos muy cortos o muy largos,
-     sangrados fuera de lo habitual) se sugiere comentarla con su ginecóloga, sin
-     alarmar. Un registro que falta no es un dato: puede que no se apuntara.
-   Guárdalo en resumen.txt, solo el texto del correo, sin saludo de asistente ni notas.
-4. Mándaselo. Construye el JSON con Python para que las comillas y los saltos de línea
+   - La serie diaria es lo que te deja ver tendencias y cruzar métricas entre sí (por
+     ejemplo, si duerme peor los días que se mueve menos). Los días atípicos dicen qué se
+     sale de su costumbre; no son un diagnóstico.
+
+3. Analiza, comparando siempre con su propia historia (últimos 7 días contra su media de
+   30) y no con valores de manual:
+   - Sueño: cuánto duerme, a qué hora se acuesta y si es regular, y las fases si las hay.
+   - Actividad: pasos, energía activa y entrenamientos.
+   - Corazón y recuperación: frecuencia en reposo, variabilidad (HRV) y, si están,
+     respiración, oxígeno y VO2max.
+   - Peso u otras medidas, si hay datos.
+   - Ciclo menstrual, si hay sección CICLO MENSTRUAL: en qué punto del ciclo está, si la
+     duración entre inicios es regular comparada con sus ciclos anteriores y cómo puede
+     estar influyendo en su sueño, su energía o su pulso de estos días.
+
+4. Escribe el correo en español, cercano y claro, tuteándole, para alguien que no es
+   médico ni técnico: sin jerga ni siglas sin explicar, y solo las cifras que importen.
+   Entre 250 y 450 palabras, con esta estructura y estos títulos en texto plano:
+   - «Cómo estás»: dos o tres frases con la idea general.
+   - «Lo que va bien»: dos o tres cosas, con el dato que lo respalda.
+   - «Lo que puedes mejorar»: dos o tres cosas, cada una con una acción concreta y
+     realista (no «duerme más», sino «acuéstate a las 23:00 esta semana»).
+   - «Para hoy»: una sola cosa sencilla.
+   - Los domingos, añade «Tu semana»: cómo ha ido la semana entera frente a la anterior.
+   Reglas:
+   - Nunca diagnostiques ni asustes. Si algo se sale mucho de lo suyo varios días
+     seguidos (pulso en reposo alto, oxígeno bajo, ciclos muy irregulares o sangrados fuera
+     de lo habitual), sugiere con calma comentarlo con su médico o su ginecóloga.
+   - Si faltan datos, dilo con naturalidad y recuérdale llevar el reloj y ejecutar el
+     Atajo. No inventes valores ni rellenes huecos.
+   - Un registro que falta no es un dato: puede que no se apuntara.
+   Guárdalo en resumen.txt: solo el texto del correo, sin saludo de asistente ni notas.
+
+5. Mándaselo. Construye el JSON con Python para que las comillas y los saltos de línea
    vayan bien escapados:
    python3 -c 'import json,sys; print(json.dumps({"asunto": sys.argv[1], "texto": open(sys.argv[2]).read()}))' "<un asunto corto y amable>" resumen.txt > cuerpo.json
    curl -sS -w '\nHTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' \
