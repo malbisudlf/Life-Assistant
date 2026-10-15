@@ -56,6 +56,10 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
   solos y perderlos no cuesta nada. `presence` además es una sola fila sin histórico, a
   propósito (ver `docs/BACKEND_PATRONES.md`), y `migraciones_aplicadas` se rellena sola
   al volver a aplicar las migraciones.
+- **`salud_familia`, `salud_familia_envios`** — la salud de otras personas (ver
+  `docs/SALUD_FAMILIA.md`). Fuera por decisión: un volcado más es un sitio más donde
+  viven datos de salud que no son tuyos, y Health Auto Export puede reenviar su
+  histórico desde su iPhone si alguna vez hiciera falta.
 - **`presencia_tramos`** — registro que se purga a los 35 días, y el dato más sensible
   del proyecto: cuándo has estado en casa y, desde octubre de 2026, en el gimnasio o en
   la uni. No gana nada viajando en un volcado.

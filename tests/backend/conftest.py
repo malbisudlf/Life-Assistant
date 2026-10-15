@@ -321,6 +321,9 @@ def _limpiar_estado():
     main._todo_lista_cache.clear()
     # Lo ya mirado para la voz: sin vaciarlo, un test vería la agenda de otro.
     main._contexto_voz_cache.clear()
+    # El día de la última purga de la salud de la familia: sin vaciarlo, solo el primer
+    # test que ingiera algo vería el DELETE de la retención.
+    main._familia_purgado.clear()
 
 
 @pytest.fixture(autouse=True)

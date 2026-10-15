@@ -1341,6 +1341,7 @@ def _tope_de_cuerpo(ruta: str) -> int:
     excepciones = {
         "/health/ingest":        MAX_INGEST_BYTES,
         "/health/ingest/simple": MAX_INGEST_BYTES,
+        "/familia/salud/ingest": MAX_INGEST_BYTES,
         # El multipart envuelve el audio con sus cabeceras y separadores: el margen es
         # para que un audio justo en el tope siga llegando al 413 con mensaje propio.
         "/ideas/audio":          MAX_AUDIO_BYTES + 64 * 1024,
@@ -6621,6 +6622,11 @@ def _cero_sin_medida(name: str, value, extra: dict | None = None) -> bool:
 # documenta; antes no se notaba porque cada métrica se escribía por separado y tenía un
 # PATCH de respaldo, y al pasar a un upsert en bloque ese respaldo desapareció.
 HEALTH_UPSERT_URL = f"{SUPABASE_URL}/rest/v1/health_metrics?on_conflict=metric_date,metric_name"
+# La salud de la familia, en su propia tabla (ver «Salud de la familia»). Misma trampa
+# del on_conflict, con la persona dentro de la restricción.
+SALUD_FAMILIA_URL        = f"{SUPABASE_URL}/rest/v1/salud_familia"
+SALUD_FAMILIA_UPSERT_URL = f"{SALUD_FAMILIA_URL}?on_conflict=persona,metric_date,metric_name"
+SALUD_FAMILIA_ENVIOS_URL = f"{SUPABASE_URL}/rest/v1/salud_familia_envios"
 
 def _resumen_cuerpo(request: Request, raw: bytes, body) -> dict:
     """Qué forma tenía lo que llegó, para una sincronización que no guardó nada.
@@ -6748,22 +6754,26 @@ def _diagnostico_cuerpo(request: Request, raw: bytes, msg: str) -> dict:
 
 
 
-def _existentes_por_clave(fechas: set, nombres: set) -> dict:
+def _existentes_por_clave(fechas: set, nombres: set, persona: str | None = None) -> dict:
     """Trae de una sola vez las filas ya guardadas para esas fechas y métricas.
 
     Se filtra por rango de fechas (in.(...)) y por nombre: acotar por ambos evita
     arrastrar el histórico entero cuando el lote toca solo un par de días.
+
+    Con `persona`, lee las de esa persona en `salud_familia` (ver «Salud de la familia»)
+    y nunca `health_metrics`.
     """
     if not fechas or not nombres:
         return {}
     f = ",".join(sorted(fechas))
     n = ",".join(sorted(nombres))
+    base = (f"{SALUD_FAMILIA_URL}?persona=eq.{quote(persona, safe='')}&" if persona else
+            f"{SUPABASE_URL}/rest/v1/health_metrics?")
     # Paginado: un export de 30 días de Health Auto Export pasa de largo las 1.000 filas
     # que corta Supabase, y lo que no se leía aquí se daba por no guardado — con lo que
     # la regla de las acumulativas dejaba de proteger el total de esos días.
     r, filas = _leer_todas(
-        f"{SUPABASE_URL}/rest/v1/health_metrics"
-        f"?metric_date=in.({quote(f, safe=',')})&metric_name=in.({quote(n, safe=',')})"
+        f"{base}metric_date=in.({quote(f, safe=',')})&metric_name=in.({quote(n, safe=',')})"
         f"&select=metric_date,metric_name,value,extra&order=metric_date.asc,metric_name.asc",
     )
     if filas is None:
@@ -6789,13 +6799,19 @@ FUENTE_ATAJO       = "atajo"
 FUENTE_PRESENCIA   = "home_assistant"
 
 
-def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
-    """Aplica la regla de las acumulativas y escribe todo en un upsert en bloque."""
+def _guardar_metricas(agrupadas: dict, fuente: str = "", persona: str | None = None) -> int:
+    """Aplica la regla de las acumulativas y escribe todo en un upsert en bloque.
+
+    Con `persona`, todo va a `salud_familia` con esa persona en cada fila: ni se lee ni
+    se escribe `health_metrics`. Las reglas (acumulativas, ceros sin medida, noches
+    anuladas) son las mismas, porque son forma del dato y no de quién lo manda.
+    """
     if not agrupadas:
         return 0
     existentes = _existentes_por_clave(
         {fecha for fecha, _ in agrupadas},
         {nombre for _, nombre in agrupadas},
+        persona,
     )
 
     filas = []
@@ -6832,6 +6848,8 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
         # que sí la dejó, y un hueco vale más que una atribución equivocada.
         if fuente:
             fila["fuente"] = fuente
+        if persona:
+            fila["persona"] = persona
         filas.append(fila)
 
     # El descarte era mudo, y eso deja sin distinguir las dos explicaciones de que una
@@ -6839,16 +6857,18 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
     # mandado a cero y el backend la haya tirado aquí. Desde fuera son idénticas —falta
     # la fila— y se arreglan en sitios distintos (el teléfono o este fichero). Va en
     # WARNING porque un lote que trae la métrica y la pierde no es rutina.
+    etiqueta = f"Ingesta de salud ({persona})" if persona else "Ingesta de salud"
     if descartadas:
-        logger.warning("Ingesta de salud: %d métrica(s) descartada(s) por llegar a cero "
-                       "sin medida: %s", len(descartadas), ", ".join(sorted(descartadas)))
+        logger.warning("%s: %d métrica(s) descartada(s) por llegar a cero "
+                       "sin medida: %s", etiqueta, len(descartadas), ", ".join(sorted(descartadas)))
 
     if not filas:
         return 0
     # merge-duplicates + on_conflict (ver HEALTH_UPSERT_URL): inserción y actualización
-    # en una sola llamada, resueltas contra unique(metric_date, metric_name).
+    # en una sola llamada, resueltas contra unique(metric_date, metric_name) — o contra
+    # unique(persona, metric_date, metric_name) en la tabla de la familia.
     r = http.post(
-        HEALTH_UPSERT_URL,
+        SALUD_FAMILIA_UPSERT_URL if persona else HEALTH_UPSERT_URL,
         headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
         json=filas,
     )
@@ -6856,7 +6876,7 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "") -> int:
     # que el endpoint respondiera 200 {"ok": true}, así que el Watch y el Shortcut
     # daban la sincronización por buena mientras los datos se perdían en silencio.
     if r.status_code >= 300:
-        logger.error("Ingesta de salud: upsert en bloque de %d filas falló", len(filas))
+        logger.error("%s: upsert en bloque de %d filas falló", etiqueta, len(filas))
         raise _supabase_error(r)
     return len(filas)
 
@@ -6874,7 +6894,12 @@ async def health_ingest(request: Request, token: str = ""):
     return await asyncio.to_thread(_health_ingest_procesar, request, raw)
 
 
-def _health_ingest_procesar(request: Request, raw: bytes):
+def _leer_lote_salud(request: Request, raw: bytes, etiqueta: str = "Ingesta de salud") -> dict:
+    """El cuerpo de Health Auto Export ya normalizado, o un 400 que dice qué llegó.
+
+    Lo comparten la ingesta de Mikel y la de la familia (`etiqueta` solo cambia el
+    registro): la forma del envío es la misma venga del iPhone que venga.
+    """
     try:
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
@@ -6897,59 +6922,37 @@ def _health_ingest_procesar(request: Request, raw: bytes):
             # configurar. Sigue siendo 400: para lo que quiera que haya al otro lado,
             # este envío no ha guardado nada.
             logger.warning(
-                "Ingesta de salud: cuerpo VACÍO (0 bytes), el cliente no mandó ningún dato. "
-                "Forma: %s", forma)
+                "%s: cuerpo VACÍO (0 bytes), el cliente no mandó ningún dato. "
+                "Forma: %s", etiqueta, forma)
             raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
                 request, raw,
                 "El cuerpo llegó vacío (0 bytes): el cliente no mandó ningún dato. "
                 "Revisa el paso que construye el cuerpo de la petición."))
-        logger.warning("Ingesta de salud: cuerpo no reconocido, lote rechazado. Forma: %s", forma)
+        logger.warning("%s: cuerpo no reconocido, lote rechazado. Forma: %s", etiqueta, forma)
         raise HTTPException(status_code=400, detail=_diagnostico_cuerpo(
             request, raw, "El cuerpo no es un objeto JSON. Esto es lo que recibí:"))
-    data_block = body.get("data", {})
-    metrics    = data_block.get("metrics", [])
-    workouts   = data_block.get("workouts", [])
+    return body
 
-    upserted = 0
-    # Aunque no traiga entrenos: un envío sin ellos dice que hasta ahora no hubo ninguno,
-    # que es justo lo que necesita saber «días sin entrenar» (`_entrenos_al_dia`).
-    global _ultimo_envio_entrenos
-    _ultimo_envio_entrenos = time.time()
 
-    # ── Workouts: agrupar por fecha y guardar como una fila por día ──
-    if workouts:
-        by_date: dict = defaultdict(list)
-        for w in workouts:
-            date_raw = str(w.get("start", w.get("date", "")))
-            d = date_raw[:10] if len(date_raw) >= 10 else None
-            if d:
-                by_date[d].append(w)
-        for d, day_workouts in by_date.items():
-            payload = {
-                "metric_date": d,
-                "metric_name": "workouts",
-                "value": float(len(day_workouts)),
-                "unit": "count",
-                "extra": {"workouts": day_workouts},
-            }
-            r = http.post(
-                f"{SUPABASE_URL}/rest/v1/health_metrics",
-                headers={**supabase_headers(), "Prefer": "return=minimal"},
-                json=payload,
-            )
-            if r.status_code == 409:
-                r = http.patch(
-                    f"{SUPABASE_URL}/rest/v1/health_metrics"
-                    f"?metric_date=eq.{d}&metric_name=eq.workouts",
-                    headers={**supabase_headers(), "Prefer": "return=minimal"},
-                    json={"value": payload["value"], "extra": payload["extra"]},
-                )
-            if r.status_code < 300:
-                upserted += 1
+def _entrenos_por_dia(workouts: list) -> dict:
+    """Los entrenos del lote agrupados por el día en que empezaron."""
+    by_date: dict = defaultdict(list)
+    for w in workouts or []:
+        date_raw = str(w.get("start", w.get("date", "")))
+        d = date_raw[:10] if len(date_raw) >= 10 else None
+        if d:
+            by_date[d].append(w)
+    return by_date
 
-    # ── Métricas normales (CUMULATIVE_METRICS/ENERGY_METRICS son de módulo) ──
 
+def _agrupar_metricas_lote(metrics: list) -> tuple:
+    """Las métricas del lote agrupadas por (fecha, nombre), con su valor ya normalizado.
+
+    Devuelve `(agrupadas, sin_fecha)`. Pura: no lee ni escribe nada, así que la usan igual
+    la ingesta de Mikel y la de la familia.
+    """
     # Agrupar por (date, name) y quedarse con el valor máximo del batch entrante
+    # (CUMULATIVE_METRICS/ENERGY_METRICS son de módulo).
     grouped_metrics: dict = {}
     sin_fecha: dict = {}
     for metric in metrics:
@@ -7018,6 +7021,48 @@ def _health_ingest_procesar(request: Request, raw: bytes):
                 current = grouped_metrics[key]["value"]
                 if current is None or value > current:
                     grouped_metrics[key] = {"unit": unidad_punto, "value": value, "extra": extra}
+    return grouped_metrics, sin_fecha
+
+
+def _health_ingest_procesar(request: Request, raw: bytes):
+    body       = _leer_lote_salud(request, raw)
+    data_block = body.get("data", {})
+    metrics    = data_block.get("metrics", [])
+    workouts   = data_block.get("workouts", [])
+
+    upserted = 0
+    # Aunque no traiga entrenos: un envío sin ellos dice que hasta ahora no hubo ninguno,
+    # que es justo lo que necesita saber «días sin entrenar» (`_entrenos_al_dia`).
+    global _ultimo_envio_entrenos
+    _ultimo_envio_entrenos = time.time()
+
+    # ── Workouts: agrupar por fecha y guardar como una fila por día ──
+    if workouts:
+        for d, day_workouts in _entrenos_por_dia(workouts).items():
+            payload = {
+                "metric_date": d,
+                "metric_name": "workouts",
+                "value": float(len(day_workouts)),
+                "unit": "count",
+                "extra": {"workouts": day_workouts},
+            }
+            r = http.post(
+                f"{SUPABASE_URL}/rest/v1/health_metrics",
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                json=payload,
+            )
+            if r.status_code == 409:
+                r = http.patch(
+                    f"{SUPABASE_URL}/rest/v1/health_metrics"
+                    f"?metric_date=eq.{d}&metric_name=eq.workouts",
+                    headers={**supabase_headers(), "Prefer": "return=minimal"},
+                    json={"value": payload["value"], "extra": payload["extra"]},
+                )
+            if r.status_code < 300:
+                upserted += 1
+
+    # ── Métricas normales ──
+    grouped_metrics, sin_fecha = _agrupar_metricas_lote(metrics)
 
     # Escritura en dos viajes en vez de uno por métrica.
     #
@@ -7047,22 +7092,28 @@ def _health_ingest_procesar(request: Request, raw: bytes):
     # La condición mira lo RECONOCIDO, no lo escrito: un lote entero de acumulativas que
     # ya tenían guardado un valor mayor escribe cero y es perfectamente correcto.
     if not grouped_metrics and not workouts:
-        recibido = _resumen_cuerpo(request, raw, body)
-        # Un lote vacío del exportador es normal (ver _lote_vacio): se responde ok
-        # porque no hay nada roto, y se registra a INFO para que no se persista.
-        if _lote_vacio(body):
-            logger.info("Ingesta de salud: lote vacío, nada que exportar. Recibido: %s", recibido)
-            return {"ok": True, "upserted": 0, "vacio": True,
-                    "detalle": "El exportador no tenía datos nuevos que enviar"}
-        logger.warning("Ingesta de salud: nada que guardar. Recibido: %s", recibido)
-        # El resumen va también en la respuesta, no solo al registro: el cliente es un
-        # Shortcut que enseña el cuerpo en pantalla, así que la siguiente ejecución ya
-        # dice qué llegó sin tener que ir a buscarlo a ningún sitio.
-        return {"ok": False, "upserted": 0,
-                "detalle": "No se guardó ninguna métrica: el cuerpo no traía datos legibles",
-                "recibido": recibido}
+        return _respuesta_sin_nada(request, raw, body)
 
     return {"ok": True, "upserted": upserted}
+
+
+def _respuesta_sin_nada(request: Request, raw: bytes, body,
+                        etiqueta: str = "Ingesta de salud") -> dict:
+    """Lo que contesta la ingesta cuando del lote no se ha reconocido nada."""
+    recibido = _resumen_cuerpo(request, raw, body)
+    # Un lote vacío del exportador es normal (ver _lote_vacio): se responde ok
+    # porque no hay nada roto, y se registra a INFO para que no se persista.
+    if _lote_vacio(body):
+        logger.info("%s: lote vacío, nada que exportar. Recibido: %s", etiqueta, recibido)
+        return {"ok": True, "upserted": 0, "vacio": True,
+                "detalle": "El exportador no tenía datos nuevos que enviar"}
+    logger.warning("%s: nada que guardar. Recibido: %s", etiqueta, recibido)
+    # El resumen va también en la respuesta, no solo al registro: el cliente es un
+    # Shortcut que enseña el cuerpo en pantalla, así que la siguiente ejecución ya
+    # dice qué llegó sin tener que ir a buscarlo a ningún sitio.
+    return {"ok": False, "upserted": 0,
+            "detalle": "No se guardó ninguna métrica: el cuerpo no traía datos legibles",
+            "recibido": recibido}
 
 
 class SimpleHealthSample(BaseModel):
@@ -9326,7 +9377,15 @@ def _brief_salud() -> dict:
     if filas is None:
         logger.error("Resumen diario: no se pudieron leer las métricas de salud (%s)", r.status_code)
         return {}
+    return _resumir_salud(filas)
 
+
+def _resumir_salud(filas: list) -> dict:
+    """La sección de salud del resumen a partir de las filas de la ventana.
+
+    Pura: no sabe de qué tabla vienen. La usan el resumen diario de Mikel
+    (`health_metrics`) y el de la familia (`salud_familia`, ya filtrada por persona).
+    """
     hoy      = datetime.now(LOCAL_TZ).date()
     desde_7  = (hoy - timedelta(days=6)).isoformat()
     desde_30 = (hoy - timedelta(days=29)).isoformat()
@@ -10321,6 +10380,170 @@ def _cuando_titular(iso: str | None, hoy: str) -> str:
     return f"{etiqueta} {cuando.strftime('%H:%M')}"
 
 
+def _render_salud_texto(s: dict, caida: bool, averia: str) -> list:
+    """Las secciones de salud del correo (reloj, salud, atípicos, entrenos y serie).
+
+    Aparte de `render_brief_texto` para que el resumen de la familia salga con la misma
+    lectura —y las mismas advertencias para el modelo que lo redacta— que el de Mikel.
+    """
+    L: list = []
+    # Va ANTES de la salud porque es lo que dice cómo hay que leerla: sin esto, un mes
+    # de métricas nocturnas a n=3 se lee como una ingesta rota y era el reloj en un cajón.
+    r = (s or {}).get("reloj")
+    if r:
+        L.append(f"## RELOJ  ({r['desde']} → {r['hasta']}, {r['dias_ventana']} días)")
+        L.append(
+            "   Una métrica del Watch solo puede tener dato los días que estuvo puesto:"
+            " ese es el denominador de sus medias."
+        )
+        L.append(
+            f"   Puesto {r['dias_puesto']}/{r['dias_ventana']} días"
+            f" y {r['noches_puesto']}/{r['dias_ventana']} noches"
+            f"   (últimos 7: {r['dias_puesto_7d']} días, {r['noches_puesto_7d']} noches)"
+        )
+        if r.get("ultimo"):
+            dias = r.get("dias_desde")
+            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
+            L.append(f"   {'Último rastro':<20} {r['ultimo']} ({cuando})")
+        else:
+            L.append(f"   {'Último rastro':<20} ninguno en la ventana")
+        racha = r.get("racha_sin_reloj") or 0
+        if racha:
+            L.append(
+                f"   {'Sin reloj':<20} {racha} día(s) seguidos antes de hoy"
+                " (días con datos del móvil pero ninguno del reloj)"
+            )
+        if r.get("anoche") == "si":
+            L.append(
+                f"   {'Anoche':<20} con reloj"
+                f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
+            )
+        else:
+            # Explícito y en voz alta porque quien lee esto es un modelo que redacta el
+            # briefing: sin la segunda frase, "no ha llegado" se cuenta como "no lo
+            # llevó", que es el error que esta línea existe para no volver a cometer.
+            L.append(f"   {'Anoche':<20} el sueño todavía no ha llegado")
+            L.append(
+                "                        NO significa que no llevara el reloj: el dato se"
+                " sincroniza al abrir la app y puede tardar horas."
+                " No digas nada sobre si lo llevó puesto anoche."
+            )
+            L.append(f"   {'Hoy hasta ahora':<20} {_ESTADO_RELOJ.get(r.get('hoy'), '?')}")
+        if r.get("sin_datos"):
+            L.append(
+                f"   {'Ojo':<20} {r['sin_datos']} día(s) sin datos de NINGUNA fuente:"
+                " ahí no se sabe si hubo reloj o falló la sincronización"
+            )
+        L.append(
+            "   Marcas: A = día y noche · D = solo día · N = solo noche"
+            " · . = sin reloj (pero el móvil sí mandó datos) · - = sin datos de nada"
+        )
+        # Separadas por espacios aunque en los datos vayan pegadas: una tirada de
+        # veintiséis puntos seguidos no se cuenta bien, y estas posiciones tienen que
+        # poder alinearse una a una con las de la serie diaria.
+        L.append(f"   {'Día a día':<20} {' '.join(r['marcas'])}   (mismo orden que la serie diaria)")
+        L.append("")
+
+    # El `n=` de cada media no es decoración: es lo que distingue "esto se desvía de tu
+    # media" de "esto es el único dato que hay". Sin él, una métrica con una sola
+    # observación sale con las tres cifras idénticas y se lee como normalidad absoluta.
+    L.append("## SALUD  (último · media 7d · media 30d; n = días con dato / días que se pudo medir)")
+    L.append("   Con n=1 la media ES el último valor: no hay base para hablar de desviación.")
+    if r:
+        # Solo si la sección existe: mandar a mirar algo que no está en el correo es
+        # peor que no decir nada.
+        L.append("   Si n iguala a su denominador no falta ingesta: falta reloj (ver ## RELOJ).")
+    if s:
+        for clave in _BRIEF_ORDEN:
+            m = s.get(clave)
+            if not m:
+                continue
+            dias = m.get("dias_atras")
+            edad = (
+                "hoy"   if dias == 0 else
+                "ayer"  if dias == 1 else
+                f"hace {dias} días" if dias is not None else "sin fecha"
+            )
+            extremos = ""
+            if m.get("min") is not None or m.get("max") is not None:
+                extremos = f" · min {_cifra(m.get('min'))} / máx {_cifra(m.get('max'))}"
+
+            def _n(ventana, m=m):
+                """"3/3" en lo que mide el reloj, "3" en lo que mide el teléfono."""
+                n, posibles = m.get(f"n_{ventana}", "?"), m.get(f"posibles_{ventana}")
+                return f"{n}/{posibles}" if posibles is not None else f"{n}"
+
+            L.append(
+                f"  {_BRIEF_ETIQUETA[clave]:<20} {_cifra(m['ultimo'])} {m['unidad']}{extremos}"
+                f"   (7d: {_cifra(m['media_7d'])} n={_n('7d')},"
+                f" 30d: {_cifra(m['media_30d'])} n={_n('30d')})"
+                f"   [{m['fecha']}, {edad}]"
+            )
+        sueno = s.get("sueno") or {}
+        if sueno.get("inicio"):
+            L.append(f"  {'Se acostó a las':<20} {sueno['inicio']}")
+        if sueno.get("fases"):
+            f = sueno["fases"]
+            L.append(
+                f"  {'Fases de anoche':<20} profundo {_cifra(f['profundo'])} h"
+                f" · REM {_cifra(f['rem'])} h · ligero {_cifra(f['ligero'])} h"
+                f" · despierto {_cifra(f['despierto'])} h"
+            )
+        if s.get("ultimo_entreno"):
+            ue = s["ultimo_entreno"]
+            dias = ue["dias"]
+            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
+            L.append(f"  {'Último entreno':<20} {cuando} ({ue['fecha']})")
+    else:
+        L.append(averia if caida else "  (sin datos)")
+    L.append("")
+
+    # Dónde mirar. No interpreta nada: dice qué días se salen de la propia costumbre de
+    # cada métrica, que es lo que no se ve leyendo seiscientos números en fila.
+    if s.get("atipicos"):
+        L.append(f"## DÍAS ATÍPICOS  (±{BRIEF_SIGMA_ATIPICO}σ sobre la propia ventana de cada métrica,"
+                 f" mínimo {BRIEF_MIN_DIAS_ATIPICO} días de dato)")
+        L.append("   La media y la σ se calculan SIN el día señalado: si no, un valor extremo tira de"
+                 " la media hacia sí mismo y se tapa solo.")
+        for a in s["atipicos"]:
+            signo = "por encima" if a["sigmas"] > 0 else "por debajo"
+            L.append(
+                f"  {a['fecha']}  {_BRIEF_ETIQUETA.get(a['metrica'], a['metrica']):<20}"
+                f" {_cifra(a['valor'])} {a['unidad']}"
+                f"   ({signo}, {_cifra(abs(a['sigmas']))}σ; su media {_cifra(a['media'])})"
+            )
+        L.append("")
+
+    if s.get("entrenos"):
+        L.append(f"## ENTRENOS DEL WATCH (los {BRIEF_MAX_ENTRENOS} más recientes de la ventana)")
+        for e in s["entrenos"]:
+            partes = [p for p in (
+                f"{_cifra(e['minutos'])} min" if e["minutos"] is not None else None,
+                f"{_cifra(e['kcal'])} kcal"   if e["kcal"] is not None else None,
+            ) if p]
+            hora = f" {e['hora']}" if e.get("hora") else ""
+            L.append(f"  {e['fecha']}{hora}  {e['tipo']}" + (f" — {' · '.join(partes)}" if partes else ""))
+        L.append("")
+
+    # Las medias dicen dónde estás; la serie, hacia dónde vas. Y es lo único con lo que
+    # se pueden cruzar dos métricas entre sí, que es de donde salen las conclusiones que
+    # no se ven mirando un solo número.
+    if s.get("series"):
+        L.append(
+            f"## SERIE DIARIA  ({s.get('series_desde')} → {s.get('series_hasta')},"
+            " un valor por día en ese orden, sin saltarse ninguno; \"-\" = sin dato)"
+        )
+        L.append(f"   Solo las métricas con {BRIEF_MIN_DIAS_SERIE}+ días de dato en la ventana.")
+        for clave in (*_BRIEF_ORDEN, *(c for c, _ in _BRIEF_SERIES_SUENO)):
+            valores = s["series"].get(clave)
+            if not valores:
+                continue
+            pintados = " ".join(_cifra(v) for v in valores)
+            L.append(f"  {_BRIEF_ETIQUETA[clave]:<20} {pintados}")
+        L.append("")
+    return L
+
+
 def render_brief_texto(d: dict) -> str:
     """Texto plano del correo. Datos etiquetados, sin interpretar: lo lee un modelo
     que redacta el correo diario, y de paso es legible si lo abres tú."""
@@ -10474,161 +10697,7 @@ def render_brief_texto(d: dict) -> str:
         L.append(f"  Ayer {p['horas_casa_ayer']} h en casa · {p.get('horas_fuera_ayer', 0)} h fuera")
     L.append("")
 
-    s = d["salud"]
-    # Va ANTES de la salud porque es lo que dice cómo hay que leerla: sin esto, un mes
-    # de métricas nocturnas a n=3 se lee como una ingesta rota y era el reloj en un cajón.
-    r = (s or {}).get("reloj")
-    if r:
-        L.append(f"## RELOJ  ({r['desde']} → {r['hasta']}, {r['dias_ventana']} días)")
-        L.append(
-            "   Una métrica del Watch solo puede tener dato los días que estuvo puesto:"
-            " ese es el denominador de sus medias."
-        )
-        L.append(
-            f"   Puesto {r['dias_puesto']}/{r['dias_ventana']} días"
-            f" y {r['noches_puesto']}/{r['dias_ventana']} noches"
-            f"   (últimos 7: {r['dias_puesto_7d']} días, {r['noches_puesto_7d']} noches)"
-        )
-        if r.get("ultimo"):
-            dias = r.get("dias_desde")
-            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
-            L.append(f"   {'Último rastro':<20} {r['ultimo']} ({cuando})")
-        else:
-            L.append(f"   {'Último rastro':<20} ninguno en la ventana")
-        racha = r.get("racha_sin_reloj") or 0
-        if racha:
-            L.append(
-                f"   {'Sin reloj':<20} {racha} día(s) seguidos antes de hoy"
-                " (días con datos del móvil pero ninguno del reloj)"
-            )
-        if r.get("anoche") == "si":
-            L.append(
-                f"   {'Anoche':<20} con reloj"
-                f"   ·   hoy hasta ahora: {_ESTADO_RELOJ.get(r.get('hoy'), '?')}"
-            )
-        else:
-            # Explícito y en voz alta porque quien lee esto es un modelo que redacta el
-            # briefing: sin la segunda frase, "no ha llegado" se cuenta como "no lo
-            # llevó", que es el error que esta línea existe para no volver a cometer.
-            L.append(f"   {'Anoche':<20} el sueño todavía no ha llegado")
-            L.append(
-                "                        NO significa que no llevara el reloj: el dato se"
-                " sincroniza al abrir la app y puede tardar horas."
-                " No digas nada sobre si lo llevó puesto anoche."
-            )
-            L.append(f"   {'Hoy hasta ahora':<20} {_ESTADO_RELOJ.get(r.get('hoy'), '?')}")
-        if r.get("sin_datos"):
-            L.append(
-                f"   {'Ojo':<20} {r['sin_datos']} día(s) sin datos de NINGUNA fuente:"
-                " ahí no se sabe si hubo reloj o falló la sincronización"
-            )
-        L.append(
-            "   Marcas: A = día y noche · D = solo día · N = solo noche"
-            " · . = sin reloj (pero el móvil sí mandó datos) · - = sin datos de nada"
-        )
-        # Separadas por espacios aunque en los datos vayan pegadas: una tirada de
-        # veintiséis puntos seguidos no se cuenta bien, y estas posiciones tienen que
-        # poder alinearse una a una con las de la serie diaria.
-        L.append(f"   {'Día a día':<20} {' '.join(r['marcas'])}   (mismo orden que la serie diaria)")
-        L.append("")
-
-    # El `n=` de cada media no es decoración: es lo que distingue "esto se desvía de tu
-    # media" de "esto es el único dato que hay". Sin él, una métrica con una sola
-    # observación sale con las tres cifras idénticas y se lee como normalidad absoluta.
-    L.append("## SALUD  (último · media 7d · media 30d; n = días con dato / días que se pudo medir)")
-    L.append("   Con n=1 la media ES el último valor: no hay base para hablar de desviación.")
-    if r:
-        # Solo si la sección existe: mandar a mirar algo que no está en el correo es
-        # peor que no decir nada.
-        L.append("   Si n iguala a su denominador no falta ingesta: falta reloj (ver ## RELOJ).")
-    if s:
-        for clave in _BRIEF_ORDEN:
-            m = s.get(clave)
-            if not m:
-                continue
-            dias = m.get("dias_atras")
-            edad = (
-                "hoy"   if dias == 0 else
-                "ayer"  if dias == 1 else
-                f"hace {dias} días" if dias is not None else "sin fecha"
-            )
-            extremos = ""
-            if m.get("min") is not None or m.get("max") is not None:
-                extremos = f" · min {_cifra(m.get('min'))} / máx {_cifra(m.get('max'))}"
-
-            def _n(ventana, m=m):
-                """"3/3" en lo que mide el reloj, "3" en lo que mide el teléfono."""
-                n, posibles = m.get(f"n_{ventana}", "?"), m.get(f"posibles_{ventana}")
-                return f"{n}/{posibles}" if posibles is not None else f"{n}"
-
-            L.append(
-                f"  {_BRIEF_ETIQUETA[clave]:<20} {_cifra(m['ultimo'])} {m['unidad']}{extremos}"
-                f"   (7d: {_cifra(m['media_7d'])} n={_n('7d')},"
-                f" 30d: {_cifra(m['media_30d'])} n={_n('30d')})"
-                f"   [{m['fecha']}, {edad}]"
-            )
-        sueno = s.get("sueno") or {}
-        if sueno.get("inicio"):
-            L.append(f"  {'Se acostó a las':<20} {sueno['inicio']}")
-        if sueno.get("fases"):
-            f = sueno["fases"]
-            L.append(
-                f"  {'Fases de anoche':<20} profundo {_cifra(f['profundo'])} h"
-                f" · REM {_cifra(f['rem'])} h · ligero {_cifra(f['ligero'])} h"
-                f" · despierto {_cifra(f['despierto'])} h"
-            )
-        if s.get("ultimo_entreno"):
-            ue = s["ultimo_entreno"]
-            dias = ue["dias"]
-            cuando = "hoy" if dias == 0 else "ayer" if dias == 1 else f"hace {dias} días"
-            L.append(f"  {'Último entreno':<20} {cuando} ({ue['fecha']})")
-    else:
-        L.append(averia if "salud" in caidas else "  (sin datos)")
-    L.append("")
-
-    # Dónde mirar. No interpreta nada: dice qué días se salen de la propia costumbre de
-    # cada métrica, que es lo que no se ve leyendo seiscientos números en fila.
-    if s.get("atipicos"):
-        L.append(f"## DÍAS ATÍPICOS  (±{BRIEF_SIGMA_ATIPICO}σ sobre la propia ventana de cada métrica,"
-                 f" mínimo {BRIEF_MIN_DIAS_ATIPICO} días de dato)")
-        L.append("   La media y la σ se calculan SIN el día señalado: si no, un valor extremo tira de"
-                 " la media hacia sí mismo y se tapa solo.")
-        for a in s["atipicos"]:
-            signo = "por encima" if a["sigmas"] > 0 else "por debajo"
-            L.append(
-                f"  {a['fecha']}  {_BRIEF_ETIQUETA.get(a['metrica'], a['metrica']):<20}"
-                f" {_cifra(a['valor'])} {a['unidad']}"
-                f"   ({signo}, {_cifra(abs(a['sigmas']))}σ; su media {_cifra(a['media'])})"
-            )
-        L.append("")
-
-    if s.get("entrenos"):
-        L.append(f"## ENTRENOS DEL WATCH (los {BRIEF_MAX_ENTRENOS} más recientes de la ventana)")
-        for e in s["entrenos"]:
-            partes = [p for p in (
-                f"{_cifra(e['minutos'])} min" if e["minutos"] is not None else None,
-                f"{_cifra(e['kcal'])} kcal"   if e["kcal"] is not None else None,
-            ) if p]
-            hora = f" {e['hora']}" if e.get("hora") else ""
-            L.append(f"  {e['fecha']}{hora}  {e['tipo']}" + (f" — {' · '.join(partes)}" if partes else ""))
-        L.append("")
-
-    # Las medias dicen dónde estás; la serie, hacia dónde vas. Y es lo único con lo que
-    # se pueden cruzar dos métricas entre sí, que es de donde salen las conclusiones que
-    # no se ven mirando un solo número.
-    if s.get("series"):
-        L.append(
-            f"## SERIE DIARIA  ({s.get('series_desde')} → {s.get('series_hasta')},"
-            " un valor por día en ese orden, sin saltarse ninguno; \"-\" = sin dato)"
-        )
-        L.append(f"   Solo las métricas con {BRIEF_MIN_DIAS_SERIE}+ días de dato en la ventana.")
-        for clave in (*_BRIEF_ORDEN, *(c for c, _ in _BRIEF_SERIES_SUENO)):
-            valores = s["series"].get(clave)
-            if not valores:
-                continue
-            pintados = " ".join(_cifra(v) for v in valores)
-            L.append(f"  {_BRIEF_ETIQUETA[clave]:<20} {pintados}")
-        L.append("")
+    L += _render_salud_texto(d["salud"], "salud" in caidas, averia)
 
     t = d["entrenamiento"]
     L.append("## ENTRENAMIENTO PERSONAL (cliente)")
@@ -11005,7 +11074,8 @@ def _motivo_espera_correo(espera: dict) -> str:
             f"hasta las {espera['hasta'].hour:02d}:{espera['hasta'].minute:02d}")
 
 
-def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
+def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None,
+                  destino: str | None = None):
     """Envía por SMTP con la librería estándar: no hace falta ninguna dependencia
     nueva ni una cuenta en un servicio de envío. Con Gmail, usa una contraseña de
     aplicación en SMTP_PASSWORD (la normal no sirve si tienes 2FA).
@@ -11019,9 +11089,11 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     antes de montar nada (el correo entero cuesta más que el login). Aquí solo se apunta
     si el servidor la rechaza, y se levanta si deja entrar.
     """
+    # `destino` es para el resumen de la familia, que va a SU correo; sin él, todo va
+    # a BRIEF_TO, que es lo de siempre.
     faltan = [n for n, v in (
         ("SMTP_HOST", SMTP_HOST), ("SMTP_USER", SMTP_USER),
-        ("SMTP_PASSWORD", SMTP_PASSWORD), ("BRIEF_TO", BRIEF_TO),
+        ("SMTP_PASSWORD", SMTP_PASSWORD), ("BRIEF_TO", destino or BRIEF_TO),
     ) if not v]
     if faltan:
         raise HTTPException(
@@ -11031,7 +11103,7 @@ def enviar_correo(asunto: str, cuerpo: str, adjunto: tuple | None = None):
     msg = EmailMessage()
     msg["Subject"] = asunto
     msg["From"] = BRIEF_FROM or SMTP_USER
-    msg["To"] = BRIEF_TO
+    msg["To"] = destino or BRIEF_TO
     msg.set_content(cuerpo)
     if adjunto:
         nombre, datos, subtipo = adjunto
@@ -11070,6 +11142,279 @@ def _mandar_brief(datos: dict) -> None:
         adjunto=(f"brief-{datos['fecha']}.json",
                  json.dumps(datos, ensure_ascii=False, indent=1).encode("utf-8"), "json"),
     )
+
+
+# ── SALUD DE LA FAMILIA ───────────────────────────────────────────────────────
+#
+# Otras personas (los padres de Mikel) mandan aquí lo de su Apple Watch/iPhone y su
+# propio Claude les redacta el resumen. Tres reglas que no son decoración (el detalle,
+# en docs/SALUD_FAMILIA.md):
+#  - Sus datos viven en `salud_familia`, NUNCA en `health_metrics`. Esa tabla la leen
+#    decenas de sitios (el resumen, Jarvis, las reglas, el dashboard) sin filtrar por
+#    persona; con una columna, un filtro olvidado bastaría para mezclar su salud con la
+#    de Mikel. Aquí ninguna lectura de lo de Mikel puede verla.
+#  - La persona sale del TOKEN y de nada más: ni del cuerpo ni de la query. Cada token
+#    solo abre lo de su persona, y un token igual que cualquier otro del entorno se
+#    descarta al arrancar (con el de la ingesta de Mikel abriría sus datos).
+#  - El correo va a la dirección del backend.env, nunca a una que traiga la petición: un
+#    token filtrado puede, como mucho, mandarle a esa persona su propio resumen.
+#
+# Configuración: SALUD_FAMILIA="persona:token:correo,persona:token:correo".
+SALUD_FAMILIA_TOKEN_MIN      = 32
+SALUD_FAMILIA_RETENCION_DIAS = int(os.getenv("SALUD_FAMILIA_RETENCION_DIAS", "400"))
+SALUD_FAMILIA_TEXTO_MAX      = 20_000
+SALUD_FAMILIA_ENVIOS_DIA     = 5      # briefings por persona y día, contando los forzados
+_SLUG_FAMILIA   = re.compile(r"^[a-z0-9_-]{1,32}$")
+_CORREO_FAMILIA = re.compile(r"^[^@\s,:]+@[^@\s,:]+\.[^@\s,:]+$")
+
+
+def _leer_salud_familia(crudo: str, entorno: dict) -> dict:
+    """`persona → {"token", "correo"}` a partir de SALUD_FAMILIA.
+
+    Una entrada mal escrita se descarta ella sola y se dice cuál (por posición, no por
+    contenido: el registro puede acabar en un issue de un repositorio público). No tumba
+    el arranque: un error en la configuración de la familia no puede dejar a Mikel sin
+    backend. Descartar es el fallo seguro — esa persona no entra, nada más.
+    """
+    leidas = []
+    for n, trozo in enumerate((crudo or "").split(","), start=1):
+        if not trozo.strip():
+            continue
+        partes = [p.strip() for p in trozo.split(":")]
+        if len(partes) != 3:
+            logger.error("Salud de la familia: la entrada %d de SALUD_FAMILIA no es "
+                         "persona:token:correo; descartada", n)
+            continue
+        leidas.append((n, *partes))
+
+    # Un token que se repite no identifica a nadie: fuera las dos entradas, no solo la
+    # segunda. Y uno igual que otra variable del entorno abriría lo que abra esa otra.
+    repetidos = {t for _, _, t, _ in leidas if sum(1 for x in leidas if x[2] == t) > 1}
+    otros     = {v for k, v in entorno.items() if k != "SALUD_FAMILIA" and v}
+    personas: dict = {}
+    for n, slug, token, correo in leidas:
+        motivo = (
+            "el identificador solo admite a-z, 0-9, _ y -" if not _SLUG_FAMILIA.match(slug) else
+            "identificador repetido"                         if slug in personas else
+            f"token de menos de {SALUD_FAMILIA_TOKEN_MIN} caracteres"
+                if len(token) < SALUD_FAMILIA_TOKEN_MIN else
+            "el mismo token que otra persona"                 if token in repetidos else
+            "el mismo token que otra variable del entorno"    if token in otros else
+            "correo no válido"                                if not _CORREO_FAMILIA.match(correo) else
+            None
+        )
+        if motivo:
+            logger.error("Salud de la familia: entrada %d de SALUD_FAMILIA descartada: %s",
+                         n, motivo)
+            continue
+        personas[slug] = {"token": token, "correo": correo}
+    return personas
+
+
+SALUD_FAMILIA = _leer_salud_familia(os.getenv("SALUD_FAMILIA", ""), dict(os.environ))
+
+# Último día en que se purgó lo de cada persona: la retención se aplica como mucho una
+# vez al día, no en cada sincronización (Health Auto Export manda cada pocos minutos).
+_familia_purgado: dict = {}
+
+
+def _persona_del_token(request: Request) -> str | None:
+    """De quién es el token de la petición, o None. Solo por cabecera: es una
+    integración nueva y por la query el token acabaría en el registro de URLs."""
+    dado = _extract_service_token(request, "")
+    persona = None
+    # Sin cortar al encontrarla: compara contra todas para que el tiempo no diga cuántas
+    # hay ni en qué posición está la buena.
+    for slug, p in SALUD_FAMILIA.items():
+        if _token_ok(dado, p["token"]):
+            persona = slug
+    return persona
+
+
+def _persona_o_403(request: Request) -> str:
+    persona = _persona_del_token(request)
+    if not persona:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return persona
+
+
+@app.post("/familia/salud/ingest")
+async def familia_salud_ingest(request: Request):
+    """Health Auto Export de un familiar: lo mismo que /health/ingest, a su tabla."""
+    persona = _persona_o_403(request)
+    raw = await _leer_cuerpo_limitado(request, MAX_INGEST_BYTES)
+    return await asyncio.to_thread(_familia_ingest_procesar, persona, request, raw)
+
+
+def _familia_ingest_procesar(persona: str, request: Request, raw: bytes) -> dict:
+    """La ingesta de Mikel sin nada de lo que cuelga de ella: ni la señal de la noche
+    recibida, ni el correo de la mañana, ni «días sin entrenar». Solo guardar."""
+    etiqueta   = f"Ingesta de salud ({persona})"
+    body       = _leer_lote_salud(request, raw, etiqueta)
+    data_block = body.get("data", {})
+    metrics    = data_block.get("metrics", [])
+    workouts   = data_block.get("workouts", [])
+
+    agrupadas, sin_fecha = _agrupar_metricas_lote(metrics)
+    # Los entrenos van en el mismo upsert, una fila por día como en health_metrics: la
+    # tabla nueva ya nace con su restricción única, así que no hace falta el POST+PATCH
+    # de la ruta de Mikel.
+    for d, del_dia in _entrenos_por_dia(workouts).items():
+        agrupadas[(d, "workouts")] = {"value": float(len(del_dia)), "unit": "count",
+                                      "extra": {"workouts": del_dia}}
+    guardadas = _guardar_metricas(agrupadas, FUENTE_AUTO_EXPORT, persona=persona)
+    if sin_fecha:
+        logger.warning("%s: puntos sin fecha legible, descartados. Métrica → claves del "
+                       "punto: %s", etiqueta, sin_fecha)
+    _purgar_familia_si_toca(persona)
+    if not agrupadas:
+        return _respuesta_sin_nada(request, raw, body, etiqueta)
+    return {"ok": True, "upserted": guardadas}
+
+
+def _purgar_familia_si_toca(persona: str) -> None:
+    """Borra lo de esa persona con más de SALUD_FAMILIA_RETENCION_DIAS (0 = nunca).
+
+    Son datos de salud de otra persona: se guardan lo que hace falta para sus medias y
+    su histórico, no para siempre. Un fallo solo se registra — guardar lo que acaba de
+    llegar importa más que borrar lo viejo, y mañana se vuelve a intentar.
+    """
+    if SALUD_FAMILIA_RETENCION_DIAS <= 0:
+        return
+    hoy = _ahora_local().date()
+    if _familia_purgado.get(persona) == hoy:
+        return
+    _familia_purgado[persona] = hoy
+    limite = (hoy - timedelta(days=SALUD_FAMILIA_RETENCION_DIAS)).isoformat()
+    p = quote(persona, safe="")
+    try:
+        for url in (f"{SALUD_FAMILIA_URL}?persona=eq.{p}&metric_date=lt.{limite}",
+                    f"{SALUD_FAMILIA_ENVIOS_URL}?persona=eq.{p}&fecha=lt.{limite}"):
+            r = http.delete(url, headers={**supabase_headers(), "Prefer": "return=minimal"})
+            if r.status_code >= 300:
+                logger.error("Salud de la familia (%s): no se pudo purgar lo anterior al %s (%s)",
+                             persona, limite, r.status_code)
+    except requests.RequestException:
+        logger.exception("Salud de la familia (%s): no se pudo purgar lo anterior al %s",
+                         persona, limite)
+
+
+@app.get("/familia/salud/resumen")
+def familia_salud_resumen(request: Request):
+    """Los datos crudos de su salud, para que su Claude redacte el resumen.
+
+    Lo mismo que la sección de salud del correo de Mikel (medias con su n, uso del reloj,
+    serie diaria, atípicos), en JSON y en texto, sacado solo de las filas de su persona.
+    """
+    persona = _persona_o_403(request)
+    _check_rate("familia_resumen", persona, 30, 3600)
+    desde = (datetime.now(LOCAL_TZ) - timedelta(days=BRIEF_DIAS_SALUD)).strftime("%Y-%m-%d")
+    r, filas = _leer_todas(
+        f"{SALUD_FAMILIA_URL}?persona=eq.{quote(persona, safe='')}&metric_date=gte.{desde}"
+        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc,metric_name.asc",
+    )
+    # Aquí sí un 502 y no una sección vacía: quien lee esto es un modelo, y «sin datos»
+    # lo contaría como que el reloj no mandó nada.
+    if filas is None:
+        logger.error("Salud de la familia (%s): no se pudieron leer sus métricas (%s)",
+                     persona, r.status_code)
+        raise _supabase_error(r)
+    salud = _resumir_salud(filas)
+    hoy   = datetime.now(LOCAL_TZ).date()
+    datos = {"fecha": hoy.isoformat(), "dia_semana": DIAS_SEMANA[hoy.weekday()],
+             "zona": TIMEZONE, "salud": salud}
+    return {**datos, "texto": render_familia_texto(datos)}
+
+
+def render_familia_texto(d: dict) -> str:
+    L = [
+        f"Datos de salud — {d['dia_semana']} {d['fecha']} ({d['zona']})",
+        "",
+        "Son datos crudos de su reloj y su iPhone, sin interpretar, para redactar su"
+        " resumen de salud de hoy.",
+        "",
+    ]
+    if not d["salud"]:
+        L += [f"(Sin un solo dato en los últimos {BRIEF_DIAS_SALUD} días: el iPhone no ha"
+              " mandado nada. Dilo así; no inventes valores.)", ""]
+    L += _render_salud_texto(d["salud"], False, "")
+    return "\n".join(L) + "\n"
+
+
+class BriefingFamilia(BaseModel):
+    texto:  str           = Field(..., min_length=1, max_length=SALUD_FAMILIA_TEXTO_MAX)
+    asunto: Optional[str] = Field(None, max_length=150)
+
+
+# El pie lo pone el backend y no el prompt de la rutina: así va en todos los correos
+# aunque alguien cambie el prompt, o el modelo decida no ponerlo.
+_PIE_FAMILIA = ("\n\n—\nEste resumen lo ha escrito tu Claude a partir de los datos de tu"
+                " reloj y tu iPhone. No es una opinión médica: si algo te preocupa,"
+                " coméntalo con tu médico.\n")
+
+
+@app.post("/familia/salud/briefing")
+def familia_salud_briefing(body: BriefingFamilia, request: Request, forzar: bool = False):
+    """Su Claude entrega aquí el resumen ya redactado y el backend se lo manda por correo.
+
+    Hace falta porque desde una rutina de Claude no se puede ENVIAR un correo (el conector
+    de Gmail solo deja borradores). Uno al día (`salud_familia_envios`, misma reserva
+    atómica que el resumen de Mikel); `?forzar=1` se la salta para probar, dentro del
+    tope diario.
+    """
+    persona = _persona_o_403(request)
+    _check_rate("familia_briefing", persona, SALUD_FAMILIA_ENVIOS_DIA, 86400)
+    espera = _espera_correo()
+    if espera:
+        raise HTTPException(status_code=503,
+                            detail=f"El correo no sale ahora: {_motivo_espera_correo(espera)}")
+    fecha = _ahora_local().date().isoformat()
+    if not forzar and not _reservar_familia(persona, fecha):
+        raise HTTPException(status_code=409, detail="Hoy ya se le mandó su resumen")
+    asunto = " ".join((body.asunto or "").split()) or f"Tu resumen de salud — {fecha}"
+    try:
+        enviar_correo(asunto, body.texto.strip() + _PIE_FAMILIA,
+                      destino=SALUD_FAMILIA[persona]["correo"])
+    except Exception as e:
+        if not forzar:
+            _liberar_familia(persona, fecha)
+        if isinstance(e, HTTPException):
+            raise
+        # Solo el tipo: el mensaje de una excepción SMTP puede traer la dirección.
+        logger.error("Salud de la familia (%s): el resumen no salió (%s)",
+                     persona, type(e).__name__)
+        raise HTTPException(status_code=502,
+                            detail="No se pudo mandar el correo; reinténtalo más tarde")
+    return {"ok": True, "fecha": fecha}
+
+
+def _reservar_familia(persona: str, fecha: str) -> bool:
+    """Como `_reservar_envio`: el 409 de la clave primaria es la pregunta atómica."""
+    r = http.post(SALUD_FAMILIA_ENVIOS_URL,
+                  headers={**supabase_headers(), "Prefer": "return=minimal"},
+                  json=[{"persona": persona, "fecha": fecha}])
+    if r.status_code == 409:
+        return False
+    if r.status_code >= 300:
+        logger.error("Salud de la familia (%s): no se pudo reservar el envío del %s (%s)",
+                     persona, fecha, r.status_code)
+        raise _supabase_error(r)
+    return True
+
+
+def _liberar_familia(persona: str, fecha: str) -> None:
+    """Si el correo no salió, el día no puede quedar marcado como enviado."""
+    try:
+        r = http.delete(
+            f"{SALUD_FAMILIA_ENVIOS_URL}?persona=eq.{quote(persona, safe='')}&fecha=eq.{fecha}",
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+        )
+        if r.status_code >= 300:
+            logger.error("Salud de la familia (%s): la reserva del %s se quedó puesta (%s)",
+                         persona, fecha, r.status_code)
+    except requests.RequestException:
+        logger.exception("Salud de la familia (%s): no se pudo liberar la reserva del %s",
+                         persona, fecha)
 
 
 # ── DESPERTAR: CUÁNDO SALE EL RESUMEN ─────────────────────────────────────────
@@ -12954,6 +13299,8 @@ TABLAS_CONOCIDAS = {
     "recordatorios_lugar":   "20261005_lugares",
     "moodle_entregas":       "20261007_moodle",
     "jarvis_preguntas":      "20261011_jarvis_preguntas",
+    "salud_familia":         "20261015_salud_familia",
+    "salud_familia_envios":  "20261015_salud_familia",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"

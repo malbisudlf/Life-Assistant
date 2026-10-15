@@ -5,6 +5,9 @@
 
 ### Flujo de datos
 
+> **La salud de otras personas** (la familia) entra por otro camino y vive en otra tabla
+> (`salud_familia`): ver `docs/SALUD_FAMILIA.md`. Nada de este fichero la lee.
+
 Dos fuentes de ingesta en paralelo:
 
 1. **Health Auto Export** (app) → `POST /health/ingest` → Supabase — incluye workouts y

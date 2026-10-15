@@ -141,6 +141,10 @@ SIN_COPIA = frozenset({
     # De WhatsApp, que se quitó el 2026-10-01: la borra `20261001_quitar_whatsapp`. Sigue
     # aquí porque su `create table` sigue en las migraciones, y nunca se copió.
     "whatsapp_chats",
+    # La salud de la familia: datos de salud de OTRAS personas. No se copian por
+    # decisión (2026-10-15): un volcado más es un sitio más donde viven, y Health Auto
+    # Export puede reenviar su histórico si hiciera falta. Ver docs/SALUD_FAMILIA.md.
+    "salud_familia", "salud_familia_envios",
 })
 
 VERSION_FORMATO = 1

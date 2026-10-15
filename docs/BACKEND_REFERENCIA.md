@@ -108,6 +108,9 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /health/latest` | JWT | Último valor de cada métrica |
 | `GET /health/diagnostico` | JWT | Por métrica: último día con MEDIDA, huecos intercalados, qué fuente la escribe y filas de relleno; más la última escritura de cada cliente y `ajustes` (el cambio de dispositivo, misma forma que en `/health/metrics`; sin fila o sin Supabase, con los dos campos a `null`), con el que la zona dev da por no medida lo que lleva más de 7 días callado. `?dias=` (1-365) |
 | `PATCH /health/sleep/{date}/exclude` | JWT | Alterna `extra.excluded`: anula/restaura una noche |
+| `POST /familia/salud/ingest` | token de su persona (`SALUD_FAMILIA`) | Health Auto Export de un familiar: lo mismo que `/health/ingest`, a `salud_familia` con la persona que dice el token. Solo cabecera, nunca query. No dispara nada de lo de Mikel (ver `docs/SALUD_FAMILIA.md`) |
+| `GET /familia/salud/resumen` | token de su persona | Los datos crudos de SU salud (misma sección que el correo de Mikel) en JSON y en `texto`, para que su Claude redacte el resumen. 502 si Supabase no contesta, nunca «sin datos» |
+| `POST /familia/salud/briefing` | token de su persona | `{texto, asunto?}`: su Claude entrega el resumen y el backend se lo manda a SU correo (el del `.env`, nunca uno de la petición). Uno al día (409 si ya salió); `?forzar=1` se salta la reserva dentro del tope de `SALUD_FAMILIA_ENVIOS_DIA` |
 | `GET /brief` | JWT | Datos del día en crudo (sin interpretar) |
 | `POST /brief/send` | `BRIEF_TOKEN` | Red de seguridad: envía el resumen si hoy no ha salido. `?forzar=1` se salta la idempotencia |
 | `GET /brief/ajustes` · `PATCH /brief/ajustes` | JWT | El interruptor del resumen: activo/apagado, pausa con fecha y si el de hoy ya salió |
@@ -155,6 +158,11 @@ fichero no sobrevive a un despliegue), `ENABLE_BANKING_REDIRECT_URL`,
 
 **Tokens de servicio** (valores aleatorios distintos entre sí): `HA_POLL_TOKEN`,
 `HEALTH_INGEST_TOKEN`, `BRIEF_TOKEN`, `AGENT_TOKEN`.
+
+**Salud de la familia**: `SALUD_FAMILIA` (`persona:token:correo` separadas por comas; una
+entrada mal escrita, con token corto o con el mismo token que otra variable del entorno
+se descarta al arrancar) y `SALUD_FAMILIA_RETENCION_DIAS` (400; 0 = no purgar). Ver
+`docs/SALUD_FAMILIA.md`.
 
 **El PC por `caja`**: `PC_DIR` (el directorio de pedidos montado en el contenedor; vacío =
 las órdenes al PC van por los flags que sondea Home Assistant, como antes).
