@@ -9,7 +9,8 @@ síntoma que resuelve cada uno, más un decimotercero que no toca su código sin
 y el 15 y el 16, aplicados el 2026-10-13: Claude piensa mientras suena la frase de
 espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»). El 17
 (2026-10-15) deja de adivinar el orden de los bytes del audio, que en el coche se
-adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»).
+adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»). Y el 18, el
+mismo día: la llamada lee el briefing entero de un tirón (ver «El parche 18»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -524,6 +525,54 @@ etiquetada `claude-phone-voice-app:antes-p17`, construir, pasar los tests dentro
 (los 15 del 12, los 6 del 14 y los 13 del 15-16 siguen en verde) y cambiar el contenedor
 sin llamada en curso. Volver atrás: `docker tag claude-phone-voice-app:antes-p17
 claude-phone-voice-app` y `up -d voice-app`.
+
+## El parche 18: el briefing, leído de un tirón
+
+Sale del 2026-10-15: «arregla lo de que me lea el briefing diario, no es capaz de leerlo
+todo del tirón». El 14/10 se le pidió en el coche y Jarvis leía un trozo, preguntaba
+«¿sigo?» y había que contestarle cada vez («Todas», «Sí, no pidas permiso, solamente
+sigue»). No era el modelo: **claude-phone no deja otra cosa**. El `VOICE_CONTEXT` de
+`claude-api-server` le pide a Claude 40 palabras por respuesta, y `extractVoiceLine`, en
+los dos bucles, tira cualquier `VOICE_RESPONSE` de más de 60. Quitar los topes tampoco
+servía: el briefing son ~15.000 caracteres, y que Claude los recitara serían más de un
+minuto de música de espera por turno.
+
+Así que **Claude no lo lee**. Pone una línea `📖 LEER: briefing` (con `desde=`, `hasta=`
+y `fecha=` opcionales; ver `telefono/RUNBOOK.md`) y la voice-app hace el resto,
+`voice-app/lib/lectura.js`:
+
+1. Pide el texto al backend, `GET /telefono/briefing` (`backend/main.py`, «El briefing,
+   leído en voz alta por teléfono»), que lo devuelve **preparado para la voz**: sin
+   enlaces, emojis, viñetas ni la sección de incidencias, «20 M$» dicho «20 millones de
+   dólares», y por secciones en trozos de ~700 caracteres.
+2. Lo lee trozo a trozo con `decirInterrumpible` (parche 16): **mientras suena uno se
+   sintetiza el siguiente**, así que no hay silencios entre trozos, y cada uno se puede
+   cortar hablando.
+3. Si le cortas, a Claude le llega en qué sección iba (`[Le estabas leyendo el briefing y
+   te ha cortado en la sección 2 de 6 …]`), y si le dices «sigue», vuelve a poner la línea
+   con ese `desde=`. Si acaba, le llega que ha terminado. Si el backend no puede (no hay
+   briefing, Outlook caído), dice por qué en voz alta.
+
+De paso, el texto de terceros del briefing (newsletters, titulares) va del correo al
+altavoz **sin pasar por la sesión con shell**, que es lo que pedía `_AVISO_BRIEFING`.
+
+**Lo que cuesta**: cada lectura entera son ~15.000 caracteres de ElevenLabs. Cortar a
+mitad solo gasta el trozo que estaba sonando y el siguiente, ya pedido.
+
+**Variables en `~/.claude-phone/.env`**: `LECTURA_TOKEN`, el mismo valor que
+`JARVIS_MCP_TELEFONO_TOKEN` del backend (y que el `Authorization` de
+`~/telefono-jarvis/.mcp.json`), y `LECTURA_URL` si el backend no está en
+`http://127.0.0.1:8080` (la voice-app va con `network_mode: host`). Sin el token, la
+llamada dice «No he podido traer el briefing para leértelo».
+
+`telefono/parche-18.diff` (sobre `~/.claude-phone-cli/`), con `voice-app/lib/lectura.js`
+y `voice-app/test/parche18.test.js`: siete casos, la lectura entera en orden, el corte
+con su aviso a Claude, el backend caído y los dos bucles enteros (saliente que lee hasta
+el final, entrante al que se le corta a media lectura). Se aplicó como los anteriores:
+imagen `claude-phone-voice-app:antes-p18`, construir, todos los tests dentro sin red y
+`up -d voice-app` sin llamada en curso. El `RUNBOOK.md` nuevo se copia a
+`~/telefono-jarvis/CLAUDE.md`: sin él, Claude no sabe que existe la línea y sigue leyendo
+a trozos de 40 palabras.
 
 ## Lo que además NO está en el repositorio original
 

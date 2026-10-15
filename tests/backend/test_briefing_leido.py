@@ -113,3 +113,87 @@ class TestElTelefonoAmpliado:
 
     def test_el_briefing_tiene_relleno_de_voz(self):
         assert "leer_briefing" in main._JARVIS_RELLENOS
+
+
+# Con la forma del de verdad: el bloque de la fecha y las incidencias, separadores de
+# guiones bajos, títulos «N. emoji», viñetas y enlaces `Nombre<url>`.
+BRIEFING = """Jueves, 15 de octubre de 2026
+
+⚠️ Incidencias de recopilación
+
+  *   Remitente no contemplado: un boletín nuevo.
+________________________________
+1. 🖥️ Tecnología General
+
+  *   Un móvil plegable sale a la venta por 2.000 €. (The Verge) The Verge<https://ejemplo.com/a> · Xataka<https://ejemplo.com/b>
+________________________________
+2. 🤖 Inteligencia Artificial
+
+IA General
+
+  *   Una empresa (capítulo 11) recibe una oferta de 20 M$ y gastaba 1 M$ al mes. Otra frase. Fuente<https://ejemplo.com/c>
+________________________________
+3.5. 💹 Economía y Geopolítica
+
+  *   El IBEX sube un 1 %.
+"""
+
+
+class TestBriefingParaLaVoz:
+    def test_secciones_sin_las_incidencias(self):
+        secciones = main._briefing_secciones(BRIEFING)
+        assert [(s["n"], s["titulo"]) for s in secciones] == [
+            (1, "Tecnología General"), (2, "Inteligencia Artificial"),
+            (3, "Economía y Geopolítica")]
+        assert "boletín" not in str(secciones)
+
+    def test_sin_enlaces_emojis_ni_vinetas(self):
+        texto = " ".join(t for s in main._briefing_para_voz(BRIEFING) for t in s["trozos"])
+        assert "http" not in texto and "<" not in texto and "*" not in texto
+        assert "🤖" not in texto and "Xataka" not in texto and "(The Verge)" not in texto
+        assert "Un móvil plegable sale a la venta por 2.000 €." in texto
+
+    def test_un_parentesis_del_texto_no_se_toma_por_la_fuente(self):
+        ia = main._briefing_para_voz(BRIEFING, 2, 2)[0]["trozos"][0]
+        assert ia.startswith("Inteligencia Artificial. IA General. Una empresa (capítulo 11)")
+        assert "20 millones de dólares" in ia and "un millón de dólares" in ia
+        assert ia.endswith("Otra frase.")
+
+    def test_desde_hasta(self):
+        assert [s["n"] for s in main._briefing_para_voz(BRIEFING, 2)] == [2, 3]
+        assert main._briefing_para_voz(BRIEFING, 9) == []
+
+    def test_trozos_acotados(self):
+        largo = ("Una frase cualquiera de relleno. " * 80).strip()
+        trozos = main._trocear(["Título.", largo, "Corta."], tope=200)
+        assert all(len(t) <= 200 for t in trozos)
+        assert " ".join(trozos).split() == ("Título. " + largo + " Corta.").split()
+
+    def test_leer_briefing_dice_las_secciones(self, mock_requests):
+        mock_requests.add("GET", "sentitems", _correo(BRIEFING))
+        assert main._j_leer_briefing()["secciones"][1] == {
+            "n": 2, "titulo": "Inteligencia Artificial"}
+
+
+class TestElEndpointDelTelefono:
+    CABECERA = {"Authorization": "Bearer mcp-telefono-token"}
+
+    @pytest.fixture(autouse=True)
+    def _token(self, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_MCP_TELEFONO_TOKEN", "mcp-telefono-token")
+
+    def test_sin_token_no(self, client):
+        assert client.get("/telefono/briefing").status_code == 401
+        assert client.get("/telefono/briefing",
+                          headers={"Authorization": "Bearer otro"}).status_code == 401
+
+    def test_devuelve_las_secciones_pedidas(self, client, mock_requests):
+        mock_requests.add("GET", "sentitems", _correo(BRIEFING))
+        r = client.get("/telefono/briefing?desde=2&hasta=2", headers=self.CABECERA).json()
+        assert r["ok"] is True and [s["titulo"] for s in r["secciones"]] == [
+            "Inteligencia Artificial"]
+
+    def test_lo_que_no_se_puede_leer_se_dice(self, client, mock_requests):
+        mock_requests.add("GET", "sentitems", FakeResponse({"value": []}))
+        r = client.get("/telefono/briefing", headers=self.CABECERA).json()
+        assert r["ok"] is False and "briefing" in r["frase"]

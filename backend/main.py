@@ -25364,12 +25364,150 @@ def _j_leer_briefing(fecha=None) -> dict:
         "aviso":        _AVISO_BRIEFING,
         "briefing":     texto[:BRIEFING_MAX_CHARS],
         "recortado":    len(texto) > BRIEFING_MAX_CHARS,
+        # Los números son los que entiende la lectura por teléfono (`desde`/`hasta` de
+        # `/telefono/briefing`): «léeme la de IA» es leer de la 2 a la 2.
+        "secciones":    [{"n": s["n"], "titulo": s["titulo"]}
+                         for s in _briefing_secciones(texto)],
         "como_contarlo": ("Es largo (unos 15 minutos leído entero). Si lo pide sin más, "
                           "di qué secciones trae y lo más destacado de cada una en una "
                           "frase, y pregunta cuál quiere oír entera. Si pide una sección "
                           "o «léemelo entero», léela tal cual, sin emojis ni viñetas. Las "
                           "incidencias de recopilación solo si las pide."),
     }
+
+
+# ── El briefing, leído en voz alta por teléfono ──────────────────────────────
+# «Léeme el briefing» por teléfono no podía salir bien: claude-phone deja 40 palabras por
+# respuesta (y tira lo que pase de 60), y aunque no lo hiciera, que el modelo repitiera
+# quince minutos de texto tardaría más de un minuto de música de espera por turno. Así que
+# el modelo no lo lee: pone en su respuesta `📖 LEER: briefing` y la voice-app pide aquí el
+# texto ya preparado para la voz y lo lee ella, trozo a trozo (parche 18,
+# `telefono/PARCHES.md`). De paso, el texto de terceros que trae el briefing va del correo
+# al altavoz sin pasar por la sesión con shell.
+_BRIEFING_SEPARADOR = re.compile(r"^\s*_{5,}\s*$", re.M)
+_BRIEFING_ENLACE    = re.compile(r"<https?://[^>]*>")
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+                       "\U00002B00-\U00002BFF\U0000FE0F\U0000200D\U000023E9-\U000023FA]")
+# Un trozo es lo que se sintetiza de una vez: lo bastante corto para que la voz empiece
+# enseguida y para que cortarle no tire mucho audio ya pagado, y lo bastante largo para
+# que no se note el salto entre uno y otro.
+BRIEFING_TROZO_CHARS = 700
+
+
+def _quitar_fuentes(linea: str) -> str:
+    """Una noticia sin sus enlaces: «… (TLDR AI) Character.AI<url> · The Next Web<url>»
+    se queda en el texto. Leer «hache te te pe dos puntos» no le sirve a nadie."""
+    i = linea.find("<http")
+    if i < 0:
+        return linea
+    previo = linea[:i]
+    # La atribución entre paréntesis seguida solo de nombres de enlace, sin punto.
+    m = re.search(r"\s*\([^()]*\)\s*[^().]*$", previo)
+    if m:
+        previo = previo[:m.start()]
+    else:
+        fin = previo.rfind(". ")
+        if fin >= 0:
+            previo = previo[:fin + 1]
+    return previo.rstrip()
+
+
+def _frase_para_voz(linea: str) -> str:
+    s = _BRIEFING_ENLACE.sub("", _quitar_fuentes(linea))
+    s = re.sub(r"https?://\S+", "", s)
+    s = _EMOJI_RE.sub("", s)
+    s = re.sub(r"^\s*(?:[*•·-]+|\d+(?:\.\d+)*\.)\s+", "", s)     # viñetas y «3.5.»
+    s = s.replace("*", "").replace("~", "unos ").replace(" × ", " por ")
+    s = re.sub(r"(?<![\d.,])1\s*M([$€])", lambda m: "un millón de "
+               + ("dólares" if m.group(1) == "$" else "euros"), s)
+    s = re.sub(r"(\d)\s*M\$", r"\1 millones de dólares", s)
+    s = re.sub(r"(\d)\s*M€", r"\1 millones de euros", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" ·")
+    # Un subtítulo suelto («IA General») sin punto se pegaría a la frase siguiente.
+    if s and s[-1] not in ".!?:;…»)":
+        s += "."
+    return s
+
+
+def _trocear(frases: list, tope: int = BRIEFING_TROZO_CHARS) -> list:
+    """Junta frases en trozos de hasta `tope` caracteres; una frase más larga que el tope
+    se parte por sus puntos y, si ni así, va sola."""
+    piezas = []
+    for f in frases:
+        if len(f) <= tope:
+            piezas.append(f)
+            continue
+        actual = ""
+        for oracion in re.split(r"(?<=[.!?])\s+", f):
+            if actual and len(actual) + 1 + len(oracion) > tope:
+                piezas.append(actual)
+                actual = oracion
+            else:
+                actual = f"{actual} {oracion}".strip()
+        if actual:
+            piezas.append(actual)
+    trozos, actual = [], ""
+    for p in piezas:
+        if actual and len(actual) + 1 + len(p) > tope:
+            trozos.append(actual)
+            actual = p
+        else:
+            actual = f"{actual} {p}".strip()
+    if actual:
+        trozos.append(actual)
+    return trozos
+
+
+def _briefing_secciones(texto: str) -> list:
+    """Las secciones del briefing, numeradas desde 1 y listas para decirse.
+
+    El primer bloque (la fecha y las incidencias de recopilación) no es una sección: las
+    incidencias son para quien mantiene la rutina, no para oírlas conduciendo."""
+    secciones = []
+    for bloque in _BRIEFING_SEPARADOR.split(texto or "")[1:]:
+        lineas = [l for l in bloque.splitlines() if l.strip()]
+        if not lineas:
+            continue
+        titulo = _frase_para_voz(lineas[0]).rstrip(".")
+        frases = [f for f in (_frase_para_voz(l) for l in lineas[1:]) if len(f) > 1]
+        if not titulo and not frases:
+            continue
+        secciones.append({"n": len(secciones) + 1, "titulo": titulo or "Sin título",
+                          "frases": frases})
+    return secciones
+
+
+def _briefing_para_voz(texto: str, desde: int = 1, hasta: int = 0) -> list:
+    """Las secciones pedidas, cada una con sus trozos; el título va delante del primero."""
+    salida = []
+    for s in _briefing_secciones(texto):
+        if s["n"] < desde or (hasta and s["n"] > hasta):
+            continue
+        trozos = _trocear([f"{s['titulo']}."] + s["frases"])
+        salida.append({"n": s["n"], "titulo": s["titulo"], "trozos": trozos})
+    return salida
+
+
+@app.get("/telefono/briefing")
+def telefono_briefing(request: Request, fecha: str = "", desde: int = 1, hasta: int = 0):
+    """El briefing troceado para que la voice-app lo lea en voz alta (parche 18).
+
+    Con el token del MCP del teléfono, en cabecera: lo pide la misma máquina que ya lo
+    tiene. Siempre 200 con `ok`: lo que no sea leer, la voice-app lo dice tal cual en
+    `frase`, que es lo único que puede hacer a media llamada."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    r = _j_leer_briefing(fecha or None)
+    if r.get("error"):
+        return {"ok": False, "frase": r["error"]}
+    if not r.get("hay_briefing"):
+        return {"ok": False, "frase": "Hoy no hay briefing enviado todavía."}
+    secciones = _briefing_para_voz(r["briefing"], max(1, desde), max(0, hasta))
+    if not secciones:
+        return {"ok": False, "frase": "El briefing no tiene esa sección."}
+    logger.info("Briefing por teléfono: secciones %s-%s, %d trozos", desde, hasta or "fin",
+                sum(len(s["trozos"]) for s in secciones))
+    return {"ok": True, "fecha": r["fecha"], "secciones": secciones}
 
 
 def _j_turno_de_noche(fecha=None) -> dict:

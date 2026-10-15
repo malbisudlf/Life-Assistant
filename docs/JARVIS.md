@@ -1292,8 +1292,14 @@ newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se l
   se quiere cerrar, basta con sacarla de `_MCP_SERVIDOR_SOLO_LECTURA`.
 - **No depende de `CORREO_LEER`**: ese interruptor es para vigilar el buzón, y leer un
   correo concreto que se pide no es vigilar nada.
-- Ronda las 3.000 palabras: la herramienta le dice a Jarvis que por teléfono cuente las
-  secciones y lo destacado, y lea entera la que pidas. Tope: `BRIEFING_MAX_CHARS`.
+- Ronda las 3.000 palabras: la herramienta le dice a Jarvis que cuente las secciones y lo
+  destacado, y lea entera la que pidas. Tope: `BRIEFING_MAX_CHARS`. Trae `secciones`
+  (número y título), que son los números que entiende la lectura por teléfono.
+- **Por teléfono, leerlo no lo hace Jarvis** (desde el 2026-10-15): claude-phone deja 40
+  palabras por respuesta, y leía un trozo y preguntaba «¿sigo?». Ahora Jarvis pone la
+  línea `📖 LEER: briefing` y la propia llamada pide `GET /telefono/briefing` (el texto ya
+  preparado para la voz, por secciones y trozos) y lo lee de un tirón; se le puede cortar
+  hablando. Parche 18 en `telefono/PARCHES.md`.
 - Sin briefing ese día, lo dice (sale después del correo de datos, que espera a que te
   despiertes) en vez de leer el de ayer.
 
