@@ -17,7 +17,7 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(main.LOCAL_TZ).isoformat()
 
 
-def _fuentes(monkeypatch, eventos=None, clases=None, clima=None, tareas=None,
+def _fuentes(monkeypatch, eventos=None, clases=None, tareas=None,
              recordatorios=None, lugar=""):
     """Sustituye cada fuente por una fija y cuenta las veces que se pregunta a Outlook."""
     llamadas = {"outlook": 0}
@@ -29,8 +29,9 @@ def _fuentes(monkeypatch, eventos=None, clases=None, clima=None, tareas=None,
     monkeypatch.setattr(main, "get_events", _eventos)
     monkeypatch.setattr(main, "get_class_events",
                         lambda credentials=None: clases if clases is not None else {"events": []})
-    monkeypatch.setattr(main, "_brief_clima", lambda: clima if clima is not None else
-                        {"ahora": 14.4, "max": 18.2, "min": 9.0, "codigo_wmo": 61})
+    # El tiempo no va en el contexto: si se volviera a llamar, se notaría aquí.
+    monkeypatch.setattr(main, "_brief_clima", lambda: (_ for _ in ()).throw(
+        AssertionError("el contexto de voz no lleva el tiempo")))
     monkeypatch.setattr(main, "_j_tareas", lambda: tareas if tareas is not None else
                         {"activo": False, "tareas": []})
     monkeypatch.setattr(main, "_j_mis_recordatorios", lambda: recordatorios or
@@ -57,7 +58,7 @@ class TestTexto:
         assert "Ya pasó" not in texto
         assert "En marcha" in texto and "en curso" in texto
         assert "10:00 Dentista (en Calle Mayor)" in texto
-        assert "con lluvia" in texto and "máxima 18" in texto
+        assert "Tiempo" not in texto
 
     def test_outlook_caido_no_suena_a_dia_libre(self, monkeypatch):
         _fuentes(monkeypatch, eventos={"error": "sin sesión"})
@@ -74,7 +75,7 @@ class TestTexto:
         monkeypatch.setattr(main, "_j_tareas", _revienta)
         texto = main._contexto_de_voz()
         assert "Tareas: no lo he podido mirar" in texto
-        assert "Tiempo:" in texto and "nada en la agenda" in texto
+        assert "nada en la agenda" in texto
 
     def test_tareas_que_vencen_y_to_do_apagado(self, monkeypatch):
         hoy = datetime.now(main.LOCAL_TZ).date()

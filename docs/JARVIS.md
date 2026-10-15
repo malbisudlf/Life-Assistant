@@ -1312,14 +1312,16 @@ fuera lo están a propósito (ver el comentario sobre `_MCP_SERVIDOR_SOLO_LECTUR
 Por voz, una pregunta con herramienta son tres pasos en serie (pedirla, ejecutarla y
 redactar con el resultado), que es lo que separa los 1,7 s de los 9,7 s de
 `docs/JARVIS_VOZ.md`. Y las preguntas de una llamada son casi siempre las mismas:
-«¿qué tengo hoy?», «¿va a llover?», «¿qué me queda pendiente?». Desde el 2026-10-15 el
+«¿qué tengo hoy?», «¿a qué hora es…?», «¿qué me queda pendiente?». Desde el 2026-10-15 el
 backend se las da ya miradas, que es el truco del permiso de despliegue aplicado a lo
 cotidiano:
 
 - **Qué lleva**: lo que queda de hoy y lo de mañana en la agenda (Outlook y clases, hasta
-  `CONTEXTO_VOZ_EVENTOS` por día, con lo que está en curso marcado), el tiempo, las tareas
+  `CONTEXTO_VOZ_EVENTOS` por día, con lo que está en curso marcado), las tareas
   que vencen ya o mañana (si To Do está encendido) y los recordatorios hasta mañana. Por
-  teléfono, además, dónde estás; el dashboard ya lo lleva en el prompt.
+  teléfono, además, dónde estás; el dashboard ya lo lleva en el prompt. **El tiempo no**:
+  entró y se quitó el mismo día, porque no se pregunta y cada línea se paga en todos los
+  turnos de voz; para eso está la herramienta `clima`.
 - **Quién lo usa**: la llamada del dashboard y el Atajo (todo turno con `voz: true`), en
   el mismo mensaje de sistema que la hora, **al final**: cambia cada cinco minutos y no
   puede romper el caché del prefijo. Y el teléfono, que lo pide una vez al abrir cada

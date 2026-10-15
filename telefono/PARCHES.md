@@ -12,7 +12,7 @@ espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»). 
 adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»). Y el 18, el
 mismo día: la llamada lee el briefing entero de un tirón (ver «El parche 18»). Y el 19,
 también el 2026-10-15: un solo proceso de Claude por llamada en vez de uno por turno, y lo
-que ya está mirado (agenda, tiempo, tareas) metido al descolgar (ver «El parche 19»).
+que ya está mirado (agenda, tareas, recordatorios) metido al descolgar (ver «El parche 19»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -603,7 +603,7 @@ voice-app.
 - **Contexto al descolgar** (`claude-api-server/contexto.js`). Al abrir sesión —en la
   primera pregunta, la misma en la que entra la bitácora del parche 11— pide al backend
   `GET /telefono/contexto` y se lo mete a Claude: lo que queda de hoy y lo de mañana en
-  la agenda, el tiempo, las tareas que vencen, los recordatorios y dónde estás. Es el
+  la agenda, las tareas que vencen, los recordatorios y dónde estás. Es el
   truco del permiso de despliegue (9,7 s → 1,7 s) aplicado a «¿qué tengo hoy?». La
   consulta va **a la vez** que el arranque del proceso, con un tope de 2,5 s
   (`CONTEXTO_ESPERA_MS`): si el backend no contesta, la llamada sigue sin él. El token es

@@ -25525,9 +25525,10 @@ def telefono_briefing(request: Request, fecha: str = "", desde: int = 1, hasta: 
 # Por voz, una pregunta que necesita una herramienta cuesta tres pasos en serie —pedirla,
 # ejecutarla y redactar con el resultado— y eso es lo que separa los 1,7 s de los 9,7 s
 # medidos en `docs/JARVIS_VOZ.md`. Las preguntas de una llamada son casi siempre las
-# mismas («¿qué tengo hoy?», «¿va a llover?», «¿qué me queda pendiente?»), así que el
+# mismas («¿qué tengo hoy?», «¿a qué hora es…?», «¿qué me queda pendiente?»), así que el
 # backend se las da ya miradas: es el mismo truco que el permiso de despliegue, aplicado
-# a lo cotidiano. Lo usan la llamada del dashboard y el Atajo (al final del prompt, junto
+# a lo cotidiano. El tiempo estuvo y se quitó el mismo día: Mikel no se lo pregunta, y
+# cada línea de aquí se paga en todos los turnos de voz (para eso está `clima`). Lo usan la llamada del dashboard y el Atajo (al final del prompt, junto
 # a la hora, para no romper el caché del prefijo) y el teléfono, que lo pide una vez al
 # empezar cada llamada (`GET /telefono/contexto`, parche 19 de `telefono/PARCHES.md`).
 #
@@ -25539,20 +25540,6 @@ CONTEXTO_VOZ_EVENTOS  = 8      # por día: es prompt, y se paga en cada turno de
 CONTEXTO_VOZ_TAREAS   = 5
 JARVIS_VOZ_CONTEXTO   = os.getenv("JARVIS_VOZ_CONTEXTO", "1") == "1"
 _contexto_voz_cache: dict = {}   # incluir_lugar -> (instante, texto)
-
-_WMO_TEXTO = ((0, "despejado"), (3, "con nubes"), (48, "con niebla"), (57, "con llovizna"),
-              (67, "con lluvia"), (77, "con nieve"), (82, "con chubascos"),
-              (99, "con tormenta"))
-
-
-def _wmo_texto(codigo) -> str:
-    """El código WMO de Open-Meteo dicho en palabras (en el dashboard lo hace
-    `weatherFromCode`; aquí basta con saber si llueve)."""
-    try:
-        c = int(codigo)
-    except (TypeError, ValueError):
-        return ""
-    return next((texto for tope, texto in _WMO_TEXTO if c <= tope), "")
 
 
 def _contexto_agenda(ahora: datetime) -> list:
@@ -25609,17 +25596,6 @@ def _contexto_agenda(ahora: datetime) -> list:
     return lineas
 
 
-def _contexto_clima() -> list:
-    c = _brief_clima()
-    if not c or c.get("ahora") is None:
-        return ["Tiempo: no lo he podido mirar."]
-    estado = _wmo_texto(c.get("codigo_wmo"))
-    texto  = f"Tiempo: {round(c['ahora'])} grados ahora" + (f", {estado}" if estado else "")
-    if c.get("max") is not None and c.get("min") is not None:
-        texto += f"; máxima {round(c['max'])} y mínima {round(c['min'])}"
-    return [texto + "."]
-
-
 def _contexto_tareas(ahora: datetime) -> list:
     r = _j_tareas()
     if not r.get("activo"):
@@ -25657,7 +25633,7 @@ def _contexto_de_voz(incluir_lugar: bool = False) -> str:
     if vez and time.time() - vez[0] < CONTEXTO_VOZ_SEG:
         return vez[1]
     ahora  = datetime.now(LOCAL_TZ)
-    partes = [("agenda", lambda: _contexto_agenda(ahora)), ("clima", _contexto_clima),
+    partes = [("agenda", lambda: _contexto_agenda(ahora)),
               ("tareas", lambda: _contexto_tareas(ahora)),
               ("recordatorios", lambda: _contexto_recordatorios(ahora))]
     lineas = []
