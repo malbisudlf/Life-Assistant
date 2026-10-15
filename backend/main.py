@@ -21449,10 +21449,17 @@ def _responder_pregunta(pid: str, n: int) -> dict:
 # confirmar nada (`_mcp_telefono_confirmar` lo rechazaba todo), así que el calendario
 # solo se podía leer.
 #
-# Solo las herramientas de aquí: un fallo en esta frontera tiene que poder crear o mover
-# una cita como mucho, nunca borrar, desplegar o mandar un correo. Y se comprueba otra
-# vez al ejecutar, porque la fila está en una tabla que la service key puede escribir.
-PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento"}
+# Solo las herramientas de aquí, y se comprueba otra vez al ejecutar, porque la fila está
+# en una tabla que la service key puede escribir. Nació con crear y mover una cita; el
+# 2026-10-15 Mikel pidió más por teléfono («quitar eventos y tal») y entraron borrar un
+# evento, reservar varios bloques, apuntar una tarea y borrar una nota. Las cuatro ya se
+# confirmaban con un botón en el chat: aquí el botón es el mismo, solo que en el móvil.
+# Borrar un evento NO es para siempre (Graph lo deja en Elementos eliminados de Outlook);
+# borrar una nota sí, y por eso su frase lleva el texto de la nota, no solo su título.
+# Siguen fuera desplegar, mandar un correo, cobrar y todo lo que lance una sesión: un
+# fallo en esta frontera tiene que quedarse en tu calendario, tus tareas y tus notas.
+PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento",
+                                "reservar_bloques", "crear_tarea", "borrar_idea"}
 PREGUNTA_SI                  = "Sí, hazlo"
 PREGUNTA_NO                  = "No"
 # Cuánto vale un «sí» desde que se propuso. Pulsar a las tres horas «Crear Dentista» no
@@ -21489,7 +21496,7 @@ def _evento_graph(evento_id: str) -> Optional[dict]:
         return None
     try:
         r = http.get(f"https://graph.microsoft.com/v1.0/me/events/{quote(evento_id, safe='')}"
-                     "?$select=subject,start,end,isAllDay",
+                     "?$select=subject,start,end,isAllDay,isOrganizer,attendees",
                      headers={"Authorization": f"Bearer {token}",
                               "Prefer": f'outlook.timezone="{TIMEZONE}"'})
         if r.status_code >= 300:
@@ -21500,7 +21507,24 @@ def _evento_graph(evento_id: str) -> Optional[dict]:
         return None
     ini = (ev.get("start") or {}).get("dateTime") or ""
     return {"titulo": ev.get("subject") or "(sin título)", "inicio": ini[:16],
-            "todo_el_dia": bool(ev.get("isAllDay"))}
+            "todo_el_dia": bool(ev.get("isAllDay")),
+            # Borrar una reunión que organizaste les manda la cancelación a los invitados:
+            # eso sale de casa, y la frase del botón tiene que decirlo.
+            "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0}
+
+
+def _idea_guardada(idea_id: str) -> Optional[dict]:
+    """Una nota por su id, para poder decir en el botón QUÉ se borra. None si no está."""
+    if not re.match(_UUID_PATTERN, str(idea_id or "")):
+        return None
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/ideas?id=eq.{idea_id}&select=key,full_text",
+                     headers=supabase_headers())
+        filas = r.json() if r.status_code < 300 else []
+    except Exception as e:
+        logger.warning("Jarvis: no se pudo leer la nota a borrar (%s)", type(e).__name__)
+        return None
+    return filas[0] if isinstance(filas, list) and filas else None
 
 
 def _describir_accion(herramienta: str, args: dict) -> dict:
@@ -21553,6 +21577,59 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
                  else f"{_dia_txt(actual['inicio'])} a las {_hhmm(actual['inicio'])}")
         return {"texto": f"«{actual['titulo']}» ({antes}) " + " y ".join(cambios) + "."}
 
+    if herramienta == "borrar_evento":
+        actual = _evento_graph(str(args.get("evento_id") or "").strip())
+        if not actual:
+            return {"error": "No encuentro ese evento. Saca el id de la herramienta agenda."}
+        cuando = (f"{_dia_txt(actual['inicio'])}, todo el día" if actual["todo_el_dia"]
+                  else f"{_dia_txt(actual['inicio'])} a las {_hhmm(actual['inicio'])}")
+        texto = f"Borrar «{actual['titulo']}» ({cuando})."
+        if actual.get("invitados"):
+            n = actual["invitados"]
+            texto += (f" Les llegará la cancelación a {n} invitados." if n > 1
+                      else " Le llegará la cancelación al invitado.")
+        return {"texto": texto}
+
+    if herramienta == "reservar_bloques":
+        bloques = args.get("bloques")
+        if not isinstance(bloques, list) or not bloques:
+            return {"error": "No hay bloques que reservar."}
+        if len(bloques) > RESERVAR_BLOQUES_MAX:
+            return {"error": f"Como mucho reservo {RESERVAR_BLOQUES_MAX} bloques de una vez."}
+        partes = []
+        for bruto in bloques:
+            b, motivo = _validar_bloque(bruto, _ahora_local())
+            if motivo:
+                return {"error": f"«{b['titulo']}»: {motivo}."}
+            partes.append(f"«{b['titulo']}» {_dia_txt(b['fecha'])} de {b['hora_inicio']} "
+                          f"a {b['hora_fin']}")
+        return {"texto": "Reservar " + "; ".join(partes) + "."}
+
+    if herramienta == "crear_tarea":
+        titulo = str(args.get("titulo") or "").strip()[:200]
+        if not titulo:
+            return {"error": "Falta el título de la tarea."}
+        fecha = str(args.get("fecha") or "").strip()
+        if fecha:
+            try:
+                datetime.strptime(fecha, "%Y-%m-%d")
+            except ValueError:
+                return {"error": "La fecha tiene que ser YYYY-MM-DD y existir."}
+        return {"texto": f"Apuntar en To Do «{titulo}»"
+                         + (f", para {_dia_txt(fecha)}" if fecha else "") + "."}
+
+    if herramienta == "borrar_idea":
+        idea = _idea_guardada(str(args.get("idea_id") or "").strip())
+        if not idea:
+            return {"error": "No encuentro esa nota. Saca el id de la herramienta ideas."}
+        # El texto y no solo el título: esto no tiene papelera, y el título lo pone un
+        # modelo al guardar; dos notas pueden llamarse casi igual.
+        cuerpo = " ".join(str(idea.get("full_text") or "").split())
+        if len(cuerpo) > 140:
+            cuerpo = cuerpo[:140].rsplit(" ", 1)[0] + "…"
+        return {"texto": f"Borrar para siempre la nota «{idea.get('key') or 'sin título'}»"
+                         + (f": {cuerpo}" if cuerpo else "") + "."}
+
     return {"error": "Eso no se confirma desde el móvil."}
 
 
@@ -21560,8 +21637,21 @@ def _args_de(herramienta: str, args: dict) -> dict:
     """Solo los parámetros que la herramienta declara, como texto y acotados: lo que se
     guarda es lo que se ejecutará, y no tiene por qué llevar nada más."""
     declarados = _JARVIS_HERRAMIENTAS[herramienta]["parametros"]
-    return {k: str(v)[:300] for k, v in (args or {}).items()
-            if k in declarados and v not in (None, "")}
+    limpios = {}
+    for k, v in (args or {}).items():
+        if k not in declarados or v in (None, ""):
+            continue
+        if declarados[k].get("type") == "array":
+            # Los bloques de `reservar_bloques`: una lista de objetos con sus campos
+            # declarados, cada uno como texto. Pasarla por str() la guardaba como una
+            # cadena que la herramienta ya no sabía leer.
+            campos = set((declarados[k].get("items") or {}).get("properties") or {})
+            limpios[k] = [{c: str(x)[:300] for c, x in b.items() if c in campos}
+                          for b in v[:RESERVAR_BLOQUES_MAX + 1] if isinstance(b, dict)] \
+                if isinstance(v, list) else []
+        else:
+            limpios[k] = str(v)[:300]
+    return limpios
 
 
 def _guardar_pregunta_con_accion(pid: str, texto: str, opciones: list, herramienta: str,
@@ -21623,10 +21713,20 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
                     "estáis hablando)."}
 
 
-def _lo_hecho(herramienta: str, args: dict) -> str:
+def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) -> str:
     """El acuse, en pasado: la pregunta ya la leíste y repetirla no confirma nada."""
     if herramienta == "crear_evento":
         return f"Creado «{args.get('titulo')}» {_dia_txt(str(args.get('fecha') or ''))}."
+    if herramienta == "borrar_evento":
+        return "Borrado del calendario. Si fue un error, está en Elementos eliminados."
+    if herramienta == "reservar_bloques":
+        # Puede entrar solo una parte (choques al releer el calendario): la frase de la
+        # herramienta ya dice cuáles sí y cuáles no.
+        return str((resultado or {}).get("dile_al_usuario_literalmente") or "Reservado.")
+    if herramienta == "crear_tarea":
+        return f"Apuntada en To Do: «{args.get('titulo')}»."
+    if herramienta == "borrar_idea":
+        return "Nota borrada."
     if args.get("hora_inicio"):
         return (f"Movida a {_dia_txt(str(args.get('fecha') or ''))}, "
                 f"a las {args.get('hora_inicio')}.")
@@ -21663,7 +21763,7 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
         # Ya está hecho (o no): fallar aquí solo deja a Jarvis sin saberlo.
         logger.warning("Jarvis: no se pudo apuntar el resultado de %s (%s)", pid, e)
     if resultado.get("ok"):
-        _acusar_recibo("📅 Hecho", _lo_hecho(herramienta, argumentos), efimero=True)
+        _acusar_recibo("📅 Hecho", _lo_hecho(herramienta, argumentos, resultado), efimero=True)
     else:
         _acusar_recibo("📅 No lo he podido hacer",
                        str(resultado.get("motivo") or "Sin motivo")[:200])
@@ -27521,10 +27621,11 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
 # servidores MCP ya conectados, p.ej. GitHub con PAT), `encargar_a_una_sesion` /
 # `responder_a_la_sesion` / `arreglar_revision` (disparan sesiones de Claude Code con
 # permiso de escritura sobre el repo — este canal es para consultar, no para lanzar el
-# arreglo desde la llamada), `cobrar_entrenamiento`, `encargar_al_pc`, `crear_evento` /
-# `editar_evento` / `borrar_evento` / `reservar_bloques` (tocan el calendario, invariante
-# de docs/JARVIS.md),
-# y el resto de administrativas.
+# arreglo desde la llamada), `cobrar_entrenamiento`, `encargar_al_pc` (texto libre que
+# ejecuta el PC), `proponer_regla`, `buscar_en_internet` / `leer_pagina` /
+# `vigilar_pagina` (traen texto de desconocidos a una sesión con shell), `turno_de_noche`
+# (trae resúmenes de correos ajenos) y el resto de administrativas. Lo del calendario, las
+# tareas y las notas que se confirma va por `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`, abajo.
 _MCP_SERVIDOR_SOLO_LECTURA = {
     "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
@@ -27555,10 +27656,17 @@ _MCP_SERVIDOR_ACCIONES = {
     # 2026-10-13: la memoria de Jarvis y dejar una vigilancia. Pequeñas y reversibles,
     # como guardar_idea o cancelar_recordatorio; ninguna se confirma en el chat tampoco.
     "recordar", "olvidar", "dejar_de_vigilar",
+    # 2026-10-15, «dale más permisos al Jarvis de la llamada»: las que en el chat ya van
+    # sin confirmar y se deshacen igual que se hacen (una regla se vuelve a proponer, el
+    # resumen se reactiva, la noche anulada se restaura con la misma herramienta) o solo
+    # vuelven a intentar algo que ya se había pedido (el job, el agente, el streaming).
+    "quitar_regla", "reintentar_job", "relanzar_agente", "lanzar_streaming",
+    "enviar_resumen", "configurar_resumen_diario", "anular_noche",
 }
 # Las que se confirman, que por teléfono no tienen botón delante: se mandan al móvil con
 # uno (`_proponer_en_movil`, «Lo que se confirma en el móvil») y no se hacen hasta que lo
-# pulsas. Desde el 2026-10-13; antes, aquí no había ninguna que se confirmara.
+# pulsas. Desde el 2026-10-13 (crear y mover citas); desde el 2026-10-15 también borrar
+# una cita, reservar bloques, apuntar una tarea y borrar una nota (`PREGUNTAS_ACCIONES`).
 _MCP_SERVIDOR_CONFIRMA_EN_MOVIL = PREGUNTAS_ACCIONES
 _MCP_SERVIDOR_HERRAMIENTAS = (_MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
                               | _MCP_SERVIDOR_CONFIRMA_EN_MOVIL)
@@ -27586,8 +27694,11 @@ def _mcp_servidor_tools_list() -> list:
                                            _MCP_SERVIDOR_CONFIRMA_EN_MOVIL else ""),
         "inputSchema": {
             "type": "object",
+            # `items` cuando lo hay: sin él, los bloques de `reservar_bloques` serían una
+            # lista de no se sabe qué y el modelo se inventaría los campos.
             "properties": {p: {"type": info.get("type", "string"),
-                                "description": info.get("description", "")}
+                                "description": info.get("description", ""),
+                                **({"items": info["items"]} if "items" in info else {})}
                            for p, info in h["parametros"].items()},
             "required": h.get("obligatorios", []),
         },

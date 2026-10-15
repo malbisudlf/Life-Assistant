@@ -107,7 +107,7 @@ class TestElTelefonoAmpliado:
             assert main._JARVIS_HERRAMIENTAS[nombre]["confirmar"] is False, nombre
 
     def test_lo_que_sigue_fuera_a_proposito(self):
-        for nombre in ("desplegar", "buscar_documentos", "leer_documento", "borrar_evento",
+        for nombre in ("desplegar", "buscar_documentos", "leer_documento",
                        "encargar_a_una_sesion", "mcp_usar", "cobrar_entrenamiento"):
             assert nombre not in main._MCP_SERVIDOR_HERRAMIENTAS, nombre
 

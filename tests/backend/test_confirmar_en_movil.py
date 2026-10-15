@@ -5,7 +5,7 @@ por teléfono, y que mueva las citas si llegas tarde. Lo que se comprueba es lo 
 que un botón pueda ejecutar algo sin romper la regla de «pulsar no ejecuta nada»:
 
 - la frase del móvil la escribe el backend a partir de los argumentos, no el modelo;
-- el botón ejecuta lo GUARDADO, y solo si es crear o mover un evento y sigue vigente;
+- el botón ejecuta lo GUARDADO, y solo si es de `PREGUNTAS_ACCIONES` y sigue vigente;
 - el «no» no hace nada, y dos toques no lo hacen dos veces;
 - por teléfono, lo que se confirma no se ejecuta: se manda al móvil.
 """
@@ -36,7 +36,8 @@ def movil(monkeypatch):
 def hechas(monkeypatch):
     """Sustituye las herramientas del calendario: lo que se ejecute queda apuntado aquí."""
     apuntadas = []
-    for nombre in ("crear_evento", "editar_evento", "borrar_evento"):
+    for nombre in ("crear_evento", "editar_evento", "borrar_evento", "reservar_bloques",
+                   "crear_tarea", "borrar_idea", "cobrar_entrenamiento"):
         def _fn(_n=nombre, **kw):
             apuntadas.append((_n, kw))
             return {"ok": True}
@@ -85,6 +86,82 @@ class TestLaFrase:
                                                                     "hora_inicio": "10:30"})
 
 
+class TestLoQueSeAmplio:
+    """2026-10-15: borrar una cita, reservar bloques, apuntar una tarea y borrar una nota."""
+
+    def test_borrar_dice_que_y_cuando(self, monkeypatch):
+        monkeypatch.setattr(main, "_evento_graph", lambda i: {
+            "titulo": "Fisio", "inicio": "2026-10-13T10:00", "todo_el_dia": False,
+            "invitados": 0})
+        d = main._describir_accion("borrar_evento", {"evento_id": "AAA"})
+        assert d["texto"] == "Borrar «Fisio» (hoy a las 10:00)."
+
+    def test_borrar_una_reunion_tuya_avisa_de_la_cancelacion(self, monkeypatch):
+        # Les llega un correo a otros: el botón tiene que decirlo antes de pulsarlo.
+        monkeypatch.setattr(main, "_evento_graph", lambda i: {
+            "titulo": "Reunión", "inicio": "2026-10-13T10:00", "todo_el_dia": False,
+            "invitados": 3})
+        d = main._describir_accion("borrar_evento", {"evento_id": "AAA"})
+        assert "cancelación a 3 invitados" in d["texto"]
+
+    def test_borrar_lo_que_no_existe_no_se_propone(self, monkeypatch):
+        monkeypatch.setattr(main, "_evento_graph", lambda i: None)
+        assert "error" in main._describir_accion("borrar_evento", {"evento_id": "x"})
+
+    def test_reservar_bloques(self):
+        d = main._describir_accion("reservar_bloques", {"bloques": [
+            {"titulo": "Estudiar", "fecha": "2026-10-14", "hora_inicio": "10:00",
+             "hora_fin": "12:00"},
+            {"titulo": "Gimnasio", "fecha": "2026-10-14", "hora_inicio": "18:00",
+             "hora_fin": "19:00"}]})
+        assert d["texto"] == ("Reservar «Estudiar» mañana de 10:00 a 12:00; "
+                              "«Gimnasio» mañana de 18:00 a 19:00.")
+
+    def test_un_bloque_malo_no_propone_ninguno(self):
+        d = main._describir_accion("reservar_bloques", {"bloques": [
+            {"titulo": "Estudiar", "fecha": "2026-10-12", "hora_inicio": "10:00",
+             "hora_fin": "12:00"}]})
+        assert "ya ha pasado" in d["error"]
+
+    def test_los_bloques_se_guardan_como_lista(self, mock_requests, movil):
+        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+        bloque = {"titulo": "Estudiar", "fecha": "2026-10-14", "hora_inicio": "10:00",
+                  "hora_fin": "12:00", "colado": "x"}
+        r = main._proponer_en_movil("reservar_bloques", {"bloques": [bloque]})
+        assert r["ok"] is True
+        fila = mock_requests.called("POST", "jarvis_preguntas")[0][2]["json"]
+        assert fila["accion"]["argumentos"] == {"bloques": [
+            {k: v for k, v in bloque.items() if k != "colado"}]}
+
+    def test_crear_tarea(self):
+        d = main._describir_accion("crear_tarea", {"titulo": "Pasar el contrato a Luis",
+                                                    "fecha": "2026-10-14"})
+        assert d["texto"] == "Apuntar en To Do «Pasar el contrato a Luis», para mañana."
+        assert "error" in main._describir_accion("crear_tarea", {"titulo": ""})
+
+    def test_borrar_una_nota_lleva_su_texto(self, mock_requests):
+        mock_requests.add("GET", "rest/v1/ideas", FakeResponse([{
+            "key": "Regalo", "full_text": "Comprar el libro de cocina para el cumpleaños"}]))
+        d = main._describir_accion("borrar_idea", {"idea_id": PID})
+        assert d["texto"] == ("Borrar para siempre la nota «Regalo»: "
+                              "Comprar el libro de cocina para el cumpleaños.")
+
+    def test_borrar_una_nota_que_no_existe(self, mock_requests):
+        mock_requests.add("GET", "rest/v1/ideas", FakeResponse([]))
+        assert "error" in main._describir_accion("borrar_idea", {"idea_id": PID})
+        assert "error" in main._describir_accion("borrar_idea", {"idea_id": "no-uuid"})
+
+    def test_el_si_de_borrar_hace_lo_guardado(self, client, mock_requests, movil, hechas):
+        mock_requests.add("GET", "jarvis_preguntas", FakeResponse([{
+            "id": PID, "opciones": [main.PREGUNTA_SI, main.PREGUNTA_NO], "respuesta": None,
+            "accion": _accion("borrar_evento", {"evento_id": "ev1"}),
+            "creado": datetime.now(timezone.utc).isoformat()}]))
+        mock_requests.add("PATCH", "jarvis_preguntas", FakeResponse([{"id": PID}]))
+        client.post(f"/avisos/resp1-{PID}/apagar", headers=CABECERA)
+        assert hechas == [("borrar_evento", {"evento_id": "ev1"})]
+        assert "Elementos eliminados" in main._avisos_movil[-1]["texto"]
+
+
 class TestProponer:
     def test_guarda_la_accion_y_manda_dos_botones(self, mock_requests, movil):
         mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
@@ -107,8 +184,8 @@ class TestProponer:
         assert r["ok"] is False and "dashboard" in r["motivo"]
         assert not mock_requests.called("POST", "jarvis_preguntas")
 
-    def test_solo_crear_y_mover(self, mock_requests, movil):
-        r = main._proponer_en_movil("borrar_evento", {"evento_id": "x"})
+    def test_solo_lo_de_la_lista(self, mock_requests, movil):
+        r = main._proponer_en_movil("cobrar_entrenamiento", {})
         assert r["ok"] is False and main._avisos_movil == []
 
     def test_sin_la_migracion_lo_dice_y_no_manda_botones(self, mock_requests, movil):
@@ -142,10 +219,10 @@ class TestElSi:
         r = client.post(f"/avisos/resp2-{PID}/apagar", headers=CABECERA)
         assert r.status_code == 200 and hechas == []
 
-    def test_lo_que_no_es_del_calendario_no_se_ejecuta_aunque_este_guardado(
+    def test_lo_que_no_esta_en_la_lista_no_se_ejecuta_aunque_este_guardado(
             self, client, mock_requests, movil, hechas):
         # La tabla se puede escribir con la service key: el backend vuelve a mirar.
-        self._pregunta(mock_requests, _accion("borrar_evento", {"evento_id": "x"}))
+        self._pregunta(mock_requests, _accion("cobrar_entrenamiento", {}))
         r = client.post(f"/avisos/resp1-{PID}/apagar", headers=CABECERA)
         assert r.json()["resultado"]["ok"] is False and hechas == []
 
@@ -197,9 +274,25 @@ class TestPorTelefono:
         assert "pendiente_en_el_movil" in texto and hechas == []
         assert main._avisos_movil[0]["titulo"] == "📅 ¿Lo hago?"
 
-    def test_borrar_sigue_sin_existir_por_telefono(self, client, mock_requests, movil, hechas):
+    def test_borrar_un_evento_tambien_va_al_movil(self, client, mock_requests, movil,
+                                                  hechas, monkeypatch):
+        monkeypatch.setattr(main, "_evento_graph", lambda i: {
+            "titulo": "Fisio", "inicio": "2026-10-14T10:00", "todo_el_dia": False,
+            "invitados": 0})
+        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
         r = self._llamar(client, "borrar_evento", {"evento_id": "x"})
+        assert "pendiente_en_el_movil" in r["result"]["content"][0]["text"] and hechas == []
+        assert main._avisos_movil[0]["texto"] == "Borrar «Fisio» (mañana a las 10:00)."
+
+    def test_cobrar_sigue_sin_existir_por_telefono(self, client, mock_requests, movil,
+                                                   hechas):
+        r = self._llamar(client, "cobrar_entrenamiento", {})
         assert "error" in r and hechas == []
+
+    def test_reservar_bloques_llega_con_su_esquema(self):
+        por_nombre = {t["name"]: t for t in main._mcp_servidor_tools_list()}
+        bloques = por_nombre["reservar_bloques"]["inputSchema"]["properties"]["bloques"]
+        assert bloques["type"] == "array" and "titulo" in bloques["items"]["properties"]
 
     def test_el_catalogo_le_dice_que_va_al_movil(self):
         por_nombre = {t["name"]: t for t in main._mcp_servidor_tools_list()}

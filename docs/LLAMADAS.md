@@ -642,12 +642,16 @@ en `build_cowork_instruction`.
   lista exacta). Protegido con `JARVIS_MCP_TELEFONO_TOKEN` (`Authorization: Bearer`,
   fail-closed como todo token de servicio). La lista blanca de herramientas es cerrada
   (`_MCP_SERVIDOR_HERRAMIENTAS` en `backend/main.py`) y deja fuera a propósito todo lo que
-  toca producción, el repositorio o el calendario (`desplegar`, `mcp_*`,
-  `encargar_a_una_sesion`, `responder_a_la_sesion`, `arreglar_revision`, `crear_evento`,
-  `cobrar_entrenamiento`...). La confirmación hablada reusa `_jarvis_confirma()` tal cual:
-  si una herramienta la exige con los argumentos que se han pedido (por ejemplo
-  `casa_ordenar` sobre una cerradura), el servidor la RECHAZA con un error — no hay botón
-  de confirmar al otro lado de una llamada, así que no se ejecuta solo por venir de ahí.
+  toca producción o el repositorio, o trae texto de desconocidos (`desplegar`, `mcp_*`,
+  `encargar_a_una_sesion`, `responder_a_la_sesion`, `arreglar_revision`,
+  `cobrar_entrenamiento`, `leer_pagina`, `buscar_documentos`...). La confirmación hablada
+  reusa `_jarvis_confirma()` tal cual: si una herramienta la exige con los argumentos que
+  se han pedido (por ejemplo `casa_ordenar` sobre una cerradura), el servidor la RECHAZA
+  con un error — no hay botón de confirmar al otro lado de una llamada, así que no se
+  ejecuta solo por venir de ahí. **Salvo el calendario, las tareas y las notas**
+  (`PREGUNTAS_ACCIONES`: crear, mover y borrar eventos, reservar bloques, apuntar una tarea
+  y borrar una nota, ampliado el 2026-10-15), que se mandan al móvil con un botón «Sí,
+  hazlo» y se hacen al pulsarlo; ver «Lo que se confirma en el móvil» en `docs/JARVIS.md`.
 
 ## Coste
 

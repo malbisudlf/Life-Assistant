@@ -557,9 +557,10 @@ class TestTelefono:
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         por_nombre = {t["name"]: t for t in r.json()["result"]["tools"]}
         assert por_nombre["huecos_libres"]["annotations"]["readOnlyHint"] is True
-        assert "reservar_bloques" not in por_nombre
+        # Desde el 2026-10-15 está, pero no se hace por teléfono: va al móvil con botón.
+        assert "Sí, hazlo" in por_nombre["reservar_bloques"]["description"]
 
-    def test_reservar_por_telefono_da_error(self, client, monkeypatch):
+    def test_reservar_por_telefono_no_reserva(self, client, monkeypatch):
         llamado = []
         monkeypatch.setattr(main, "_jarvis_despachar", lambda *a, **k: llamado.append(a) or {})
         sesion = self._sesion(client)
@@ -568,5 +569,7 @@ class TestTelefono:
                               "params": {"name": "reservar_bloques",
                                          "arguments": {"bloques": [_bloque("TFG", "09:00",
                                                                            "11:00")]}}})
-        assert "error" in r.json()
+        # Sin móvil que recoja el botón, ni siquiera se propone; con él, se propone. En
+        # ningún caso se reserva desde la llamada.
+        assert "pendiente_en_el_movil" not in r.json()["result"]["content"][0]["text"]
         assert not llamado

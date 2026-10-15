@@ -1227,8 +1227,8 @@ ideas que Jarvis apuntó en la llamada del 2026-10-12 («dale acceso al calendar
 crear eventos», «que mueva las citas si llego tarde»): por teléfono no había forma de
 confirmar nada, así que el calendario solo se podía leer.
 
-- **El modelo propone una acción, no escribe la pregunta.** `crear_evento` y
-  `editar_evento` (`PREGUNTAS_ACCIONES`, y ninguna más) entran en el catálogo del
+- **El modelo propone una acción, no escribe la pregunta.** `crear_evento`,
+  `editar_evento` y las cuatro de más abajo (`PREGUNTAS_ACCIONES`) entran en el catálogo del
   teléfono, pero al llamarlas no se hacen: `_proponer_en_movil` guarda herramienta y
   argumentos en `jarvis_preguntas.accion` (solo los parámetros que la herramienta declara),
   **escribe el backend** la frase a partir de esos argumentos (`_describir_accion`:
@@ -1250,8 +1250,19 @@ confirmar nada, así que el calendario solo se podía leer.
   («📅 Hecho: Movida a hoy, a las 10:00»), o por qué no.
 - **Sin móvil no se manda**: por correo no hay botón, y sin botón no hay confirmación. La
   herramienta lo dice y remite al chat del dashboard.
-- `borrar_evento` sigue fuera del teléfono a propósito: un fallo en esta frontera tiene que
-  poder crear o mover una cita como mucho.
+- **Desde el 2026-10-15 entran cuatro más**, porque Mikel pidió «más permisos al Jarvis de
+  la llamada, quitar eventos y tal»: `borrar_evento`, `reservar_bloques`, `crear_tarea` y
+  `borrar_idea`. Las cuatro ya se confirmaban con botón en el chat. La frontera se movió
+  de «crear o mover una cita como mucho» a «tu calendario, tus tareas y tus notas»: siguen
+  fuera desplegar, mandar correos, cobrar y lanzar sesiones. Lo que cuida cada frase:
+  - **Borrar un evento** dice cuál y cuándo, y si es una reunión tuya con invitados,
+    que **les llegará la cancelación** (eso sale de casa). No es para siempre: Graph lo deja
+    en Elementos eliminados de Outlook, y el acuse lo recuerda.
+  - **Borrar una nota** sí es para siempre (no hay papelera), así que la frase lleva el
+    texto de la nota (140 caracteres), no solo el título que le puso un modelo.
+  - **Reservar bloques** se valida bloque a bloque como al ejecutar; si uno no vale, no
+    se propone ninguno. Al pulsar vuelve a mirar choques, y el acuse dice cuáles entraron.
+    `_args_de` guarda la lista como lista (antes lo pasaba todo por `str()`).
 - Necesita la migración `20261013_preguntas_con_accion` (columnas `accion` y
   `resultado`). Sin ella, proponer falla y lo dice; las preguntas sin acción siguen igual
   porque la tabla se lee con `select=*`.
