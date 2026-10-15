@@ -1,0 +1,141 @@
+diff -ruN a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
+--- a/voice-app/lib/audio-fork.js	2026-10-15 11:57:12.918418896 +0200
++++ b/voice-app/lib/audio-fork.js	2026-10-15 11:57:12.918418896 +0200
+@@ -190,13 +190,37 @@
+     return this._finalizeUtterance('dtmf_trigger');
+   }
+ 
++  // Parche 17: el orden de los bytes NO se adivina. El original se quedaba con la
++  // lectura que daba más volumen, y leído al revés el audio siempre "suena" más
++  // fuerte: en cuanto el primer trozo no era silencio digital exacto (el Bluetooth
++  // del coche, una línea con algo de ruido), elegía BE y toda la llamada se leía
++  // como ruido a tope (RMS ~19.000, picos de 32.767): el detector no sabía cuándo
++  // hablabas ni cuándo callabas. FreeSWITCH manda L16 en el orden de la máquina, y
++  // whisper-client ya lo lee como LE (Int16Array en x86) y transcribe bien.
++  // AUDIO_FORK_ENDIAN=BE lo fuerza al revés; =auto adivina, pero por suavidad: el
++  // audio de verdad cambia poco de una muestra a la siguiente, el leído al revés no.
+   _detectEndian(buf) {
+-    const le = pcmStats(buf, 'LE');
+-    const be = pcmStats(buf, 'BE');
+-    const leScore = le.maxAbs + le.rms;
+-    const beScore = be.maxAbs + be.rms;
+-    const result = leScore >= beScore ? 'LE' : 'BE';
+-    console.log('[AUDIO-DEBUG] Detected endian: ' + result + ' (LE score=' + Math.round(leScore) + ', BE score=' + Math.round(beScore) + ')');
++    const pedido = String(process.env.AUDIO_FORK_ENDIAN || 'LE').toUpperCase();
++    if (pedido !== 'AUTO') {
++      const result = pedido === 'BE' ? 'BE' : 'LE';
++      console.log('[AUDIO-DEBUG] Endian: ' + result + ' (fijo, AUDIO_FORK_ENDIAN)');
++      return result;
++    }
++    const salto = function (leer) {
++      const n = Math.floor(buf.length / 2);
++      let suma = 0;
++      let previa = n > 0 ? leer.call(buf, 0) : 0;
++      for (let i = 1; i < n; i++) {
++        const m = leer.call(buf, i * 2);
++        suma += Math.abs(m - previa);
++        previa = m;
++      }
++      return n > 1 ? suma / (n - 1) : 0;
++    };
++    const le = salto(Buffer.prototype.readInt16LE);
++    const be = salto(Buffer.prototype.readInt16BE);
++    const result = le <= be ? 'LE' : 'BE';
++    console.log('[AUDIO-DEBUG] Endian: ' + result + ' (auto: salto LE=' + Math.round(le) + ', BE=' + Math.round(be) + ')');
+     return result;
+   }
+ 
+diff -ruN a/voice-app/test/parche17.test.js b/voice-app/test/parche17.test.js
+--- a/voice-app/test/parche17.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche17.test.js	2026-10-15 11:57:12.918418896 +0200
+@@ -0,0 +1,90 @@
++/**
++ * Parche 17: el detector no adivina el orden de los bytes por volumen.
++ *
++ * El 2026-10-14, en el coche, dos llamadas seguidas: el primer trozo de audio traía
++ * un poco de ruido del Bluetooth (RMS 53 y 160), el original eligió BE porque leído
++ * al revés daba más volumen, y el resto de la llamada el detector vio ruido a tope
++ * (RMS ~19.000). Jarvis no sabía cuándo hablabas. Se lanza con
++ * `node --test test/parche17.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++console.log = function () {};
++
++const { AudioForkSession } = require('../lib/audio-fork');
++
++const RATE = 16000;
++const TROZO = 320; // 20 ms a 16 kHz
++
++/** Muestras LE: un seno de `amp` más un ruido de fondo de `ruido`. */
++function audio(ms, amp, ruido, fase) {
++  const n = Math.round(RATE * ms / 1000);
++  const buf = Buffer.alloc(n * 2);
++  for (let i = 0; i < n; i++) {
++    const t = (fase || 0) + i;
++    const v = amp * Math.sin(2 * Math.PI * 220 * t / RATE) + ruido * (Math.random() * 2 - 1);
++    buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), i * 2);
++  }
++  return buf;
++}
++
++function trozos(buf) {
++  const out = [];
++  for (let i = 0; i < buf.length; i += TROZO * 2) out.push(buf.subarray(i, i + TROZO * 2));
++  return out;
++}
++
++function sesion() {
++  const ws = { on: function () {}, close: function () {} };
++  return new AudioForkSession({ ws, callUuid: 'p17', sampleRate: RATE });
++}
++
++/** Mete silencio con algo de ruido, una frase y otra vez silencio; devuelve la frase. */
++async function conversar(s) {
++  const fin = s.waitForUtterance({ timeoutMs: 5000 });
++  const todo = Buffer.concat([audio(600, 0, 60), audio(1200, 6000, 60), audio(2000, 0, 60)]);
++  for (const t of trozos(todo)) s._onMessage(t);
++  return fin;
++}
++
++test('con algo de ruido al empezar (el coche) se lee LE y la frase se cierra', async function () {
++  delete process.env.AUDIO_FORK_ENDIAN;
++  const s = sesion();
++  const u = await conversar(s);
++  assert.strictEqual(s._pcmEndian, 'LE');
++  assert.strictEqual(u.reason, 'end_silence');
++  assert.ok(u.speechMs >= 800, 'se oyó la frase: ' + u.speechMs + ' ms');
++});
++
++test('AUDIO_FORK_ENDIAN=BE lo fuerza', function () {
++  process.env.AUDIO_FORK_ENDIAN = 'BE';
++  try {
++    assert.strictEqual(sesion()._detectEndian(audio(20, 0, 60)), 'BE');
++  } finally {
++    delete process.env.AUDIO_FORK_ENDIAN;
++  }
++});
++
++test('auto acierta con LE y con BE, también con un trozo casi en silencio', function () {
++  process.env.AUDIO_FORK_ENDIAN = 'auto';
++  try {
++    const le = audio(20, 3000, 60);
++    const be = Buffer.from(le);
++    be.swap16();
++    assert.strictEqual(sesion()._detectEndian(le), 'LE');
++    assert.strictEqual(sesion()._detectEndian(be), 'BE');
++    const flojo = audio(20, 0, 60);
++    assert.strictEqual(sesion()._detectEndian(flojo), 'LE');
++  } finally {
++    delete process.env.AUDIO_FORK_ENDIAN;
++  }
++});

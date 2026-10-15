@@ -527,6 +527,8 @@ con su PATCH condicional, como el botón.
 - **La primera prueba en el coche.** Está probado el enlace, la pantalla y la apertura,
   pero **nadie lo ha usado conduciendo**, que es el único sitio donde se sabrá si el
   volumen, el Bluetooth y los turnos por silencio aguantan con ruido de carretera.
+  (Por la centralita sí se probó, el 2026-10-14, y falló por algo que no era el ruido: el
+  orden de los bytes del audio, parche 17 en `telefono/PARCHES.md`.)
 - **Barge-in**: sigue pendiente, y sigue siendo el mismo micrófono que el del teléfono
   (`docs/JARVIS_VOZ.md`, fases 5 a 7). No se ha movido.
 

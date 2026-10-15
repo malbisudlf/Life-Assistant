@@ -7,7 +7,9 @@ síntoma que resuelve cada uno, más un decimotercero que no toca su código sin
 `docker-compose.yml` que genera (ver «El parche 13» abajo), un decimocuarto, aplicado el
 2026-10-06, que reintenta el registro de la extensión si se pierde (ver «El parche 14»),
 y el 15 y el 16, aplicados el 2026-10-13: Claude piensa mientras suena la frase de
-espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»).
+espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»). El 17
+(2026-10-15) deja de adivinar el orden de los bytes del audio, que en el coche se
+adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -484,6 +486,44 @@ docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
 
 Volver atrás: `docker tag claude-phone-voice-app:antes-p15 claude-phone-voice-app` y el
 mismo `up -d`.
+
+## El parche 17: el orden de los bytes no se adivina
+
+Sale del 2026-10-15, de «la llamada de Jarvis no funciona bien cuando el móvil está
+conectado al coche». **No era el ruido del coche.** Las dos llamadas que fallaron el
+14/10 a las 09:08 tienen el mismo log: el primer trozo de audio con algo de ruido
+(RMS 53 y 160, el Bluetooth no manda silencio digital) y justo después
+`Detected endian: BE`. A partir de ahí el detector leía **toda la llamada** en un RMS de
+~19.000 con picos de 32.767, sin un solo trozo en silencio: no podía saber cuándo
+hablabas ni cuándo callabas. La tercera llamada, un minuto después, funcionó porque su
+primer trozo era un cero exacto (`LE score=2, BE score=2` → empate → LE).
+
+**La causa, en `audio-fork.js` del original**: `_detectEndian` se quedaba con la lectura
+que daba **más** volumen (`maxAbs + rms`). Leído al revés, el audio siempre da más
+volumen: los bytes bajos, que son ruido, pasan a mandar. Así que con cualquier cosa que no
+fuera silencio exacto en los primeros 20 ms, elegía mal. Whisper no se enteraba porque
+`whisper-client.js` lee el audio por su cuenta como LE (`Int16Array` en x86), y por eso
+la transcripción salía bien y lo único roto era decidir cuándo has terminado de hablar.
+
+El parche fija LE y deja de adivinar. `AUDIO_FORK_ENDIAN=BE` lo fuerza al revés, y
+`=auto` adivina con un criterio que sí vale: el audio de verdad cambia poco de una
+muestra a la siguiente, y el leído al revés no. En `caja` no hace falta ponerla.
+
+**Sospecha que queda abierta**: los niveles con los que se afinaron los parches 5 y 10
+(«ruido de la línea 3.300-4.700, voz 16.000-20.000», «sitio ruidoso RMS 5.000-7.000») son
+justo los de un audio leído al revés. Si aquellas llamadas también salieron BE, parte de
+los «problemillas» del turno de palabra eran esto. Desde el 17, el registro enseña los
+niveles de verdad (en casa, voz de unos pocos miles y silencio de cientos): si el detector
+vuelve a fallar, mira primero los `VAD:` del log antes de tocar umbrales.
+
+`telefono/parche-17.diff` (sobre `~/.claude-phone-cli/`), con
+`voice-app/test/parche17.test.js`: tres casos. El del coche (silencio con ruido, una frase
+y otra vez silencio, que tiene que leerse LE y cerrarse por `end_silence`) y el de `auto`
+fallan contra el código de antes. Se aplicó igual que el 15 y el 16: imagen anterior
+etiquetada `claude-phone-voice-app:antes-p17`, construir, pasar los tests dentro sin red
+(los 15 del 12, los 6 del 14 y los 13 del 15-16 siguen en verde) y cambiar el contenedor
+sin llamada en curso. Volver atrás: `docker tag claude-phone-voice-app:antes-p17
+claude-phone-voice-app` y `up -d voice-app`.
 
 ## Lo que además NO está en el repositorio original
 
