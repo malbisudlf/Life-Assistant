@@ -6709,7 +6709,7 @@ def _lote_vacio(body) -> bool:
     return not data.get("metrics") and not data.get("workouts")
 
 
-def _normalizar_lote_salud(body):
+def _normalizar_lote_salud(body, claves: tuple = ("metrics", "workouts")):
     """Lleva a `{"data": {...}}` las formas que manda Health Auto Export.
 
     El endpoint solo aceptaba el envoltorio `{"data": {...}}` y devolvía 400 a todo lo
@@ -6725,20 +6725,22 @@ def _normalizar_lote_salud(body):
     """
     if isinstance(body, list):
         # Lista de lotes: se fusionan en uno. Cada elemento puede venir con envoltorio
-        # o sin él, así que se normaliza cada uno antes de juntarlos.
-        metrics, workouts, reconocido = [], [], False
+        # o sin él, así que se normaliza cada uno antes de juntarlos. `claves` son los
+        # bloques que se conservan al fusionar: la ingesta de la familia añade
+        # `cycleTracking`, la de Mikel sigue con los dos de siempre.
+        juntos, reconocido = {c: [] for c in claves}, False
         for parte in body:
-            parte = _normalizar_lote_salud(parte)
+            parte = _normalizar_lote_salud(parte, claves)
             if not isinstance(parte, dict) or not isinstance(parte.get("data"), dict):
                 continue
             reconocido = True
-            metrics  += parte["data"].get("metrics") or []
-            workouts += parte["data"].get("workouts") or []
+            for c in claves:
+                juntos[c] += parte["data"].get(c) or []
         # Una lista de lotes vacíos sí se reconoce: es el exportador diciendo que no
         # tiene nada, y eso lo resuelve `_lote_vacio` más adelante, no un 400.
         if not reconocido:
             return body
-        return {"data": {"metrics": metrics, "workouts": workouts}}
+        return {"data": juntos}
     return body
 
 
@@ -6894,7 +6896,8 @@ async def health_ingest(request: Request, token: str = ""):
     return await asyncio.to_thread(_health_ingest_procesar, request, raw)
 
 
-def _leer_lote_salud(request: Request, raw: bytes, etiqueta: str = "Ingesta de salud") -> dict:
+def _leer_lote_salud(request: Request, raw: bytes, etiqueta: str = "Ingesta de salud",
+                     claves: tuple = ("metrics", "workouts")) -> dict:
     """El cuerpo de Health Auto Export ya normalizado, o un 400 que dice qué llegó.
 
     Lo comparten la ingesta de Mikel y la de la familia (`etiqueta` solo cambia el
@@ -6904,7 +6907,7 @@ def _leer_lote_salud(request: Request, raw: bytes, etiqueta: str = "Ingesta de s
         body = json.loads(raw.decode("utf-8-sig", errors="replace")) if raw.strip() else None
     except (json.JSONDecodeError, ValueError):
         body = None
-    body = _normalizar_lote_salud(body)
+    body = _normalizar_lote_salud(body, claves)
     if not isinstance(body, dict):
         # El detalle del 400 solo lo veía el cliente, y el cliente es una app del móvil
         # que no lo enseña: el endpoint llevaba semanas rechazando cada envío del Watch
@@ -11250,10 +11253,11 @@ def _familia_ingest_procesar(persona: str, request: Request, raw: bytes) -> dict
     """La ingesta de Mikel sin nada de lo que cuelga de ella: ni la señal de la noche
     recibida, ni el correo de la mañana, ni «días sin entrenar». Solo guardar."""
     etiqueta   = f"Ingesta de salud ({persona})"
-    body       = _leer_lote_salud(request, raw, etiqueta)
+    body       = _leer_lote_salud(request, raw, etiqueta, _CLAVES_LOTE_FAMILIA)
     data_block = body.get("data", {})
     metrics    = data_block.get("metrics", [])
     workouts   = data_block.get("workouts", [])
+    ciclo      = data_block.get("cycleTracking", [])
 
     agrupadas, sin_fecha = _agrupar_metricas_lote(metrics)
     # Los entrenos van en el mismo upsert, una fila por día como en health_metrics: la
@@ -11262,14 +11266,63 @@ def _familia_ingest_procesar(persona: str, request: Request, raw: bytes) -> dict
     for d, del_dia in _entrenos_por_dia(workouts).items():
         agrupadas[(d, "workouts")] = {"value": float(len(del_dia)), "unit": "count",
                                       "extra": {"workouts": del_dia}}
+    for d, del_dia in _ciclo_por_dia(ciclo).items():
+        agrupadas[(d, METRICA_CICLO)] = {"value": float(len(del_dia)), "unit": "count",
+                                         "extra": {"registros": del_dia}}
     guardadas = _guardar_metricas(agrupadas, FUENTE_AUTO_EXPORT, persona=persona)
     if sin_fecha:
         logger.warning("%s: puntos sin fecha legible, descartados. Métrica → claves del "
                        "punto: %s", etiqueta, sin_fecha)
     _purgar_familia_si_toca(persona)
     if not agrupadas:
+        # Un lote con sus bloques vacíos es el exportador sin nada nuevo, también cuando
+        # el bloque es el del ciclo. `_lote_vacio` es el de Mikel y no lo conoce.
+        if (isinstance(data_block, dict) and data_block
+                and not set(data_block) - set(_CLAVES_LOTE_FAMILIA)
+                and not any(data_block.values())):
+            logger.info("%s: lote vacío, nada que exportar", etiqueta)
+            return {"ok": True, "upserted": 0, "vacio": True,
+                    "detalle": "El exportador no tenía datos nuevos que enviar"}
         return _respuesta_sin_nada(request, raw, body, etiqueta)
     return {"ok": True, "upserted": guardadas}
+
+
+# El ciclo menstrual llega en su propio bloque (`data.cycleTracking`), con un registro
+# por entrada de la app Salud: `start`, `end`, `name` (Menstrual Flow, Ovulation Test
+# Result…), `value` y, en el inicio de un ciclo, `isCycleStart`. Solo lo lee la ingesta
+# de la familia: la de Mikel no lo pide ni lo guarda.
+METRICA_CICLO        = "cycle_tracking"
+_CLAVES_LOTE_FAMILIA = ("metrics", "workouts", "cycleTracking")
+_CAMPOS_CICLO        = ("start", "end", "name", "value", "isCycleStart")
+SALUD_FAMILIA_CICLO_DIAS = 180   # varios ciclos: con uno solo no se ve la regularidad
+_FECHA_CICLO = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _ciclo_por_dia(registros: list) -> dict:
+    """Los registros del ciclo agrupados por el día en que empiezan.
+
+    Se guardan solo los campos conocidos y recortados: es texto que escribe un cliente y
+    acaba delante de un modelo. Un registro sin nombre o sin fecha legible se descarta.
+    """
+    por_dia: dict = defaultdict(list)
+    for r in registros if isinstance(registros, list) else []:
+        if not isinstance(r, dict):
+            continue
+        inicio = str(r.get("start") or "")
+        # La fecha acaba interpolada en la URL de Supabase al leer lo existente.
+        if not isinstance(r.get("name"), str) or not r["name"] or not _FECHA_CICLO.match(inicio):
+            continue
+        limpio = {}
+        for k in _CAMPOS_CICLO:
+            v = r.get(k)
+            if isinstance(v, bool) or v is None:
+                limpio[k] = v
+            else:
+                limpio[k] = str(v)[:100]
+        if not limpio.get("isCycleStart"):
+            limpio.pop("isCycleStart", None)
+        por_dia[inicio[:10]].append(limpio)
+    return por_dia
 
 
 def _purgar_familia_si_toca(persona: str) -> None:
@@ -11308,22 +11361,54 @@ def familia_salud_resumen(request: Request):
     """
     persona = _persona_o_403(request)
     _check_rate("familia_resumen", persona, 30, 3600)
-    desde = (datetime.now(LOCAL_TZ) - timedelta(days=BRIEF_DIAS_SALUD)).strftime("%Y-%m-%d")
-    r, filas = _leer_todas(
-        f"{SALUD_FAMILIA_URL}?persona=eq.{quote(persona, safe='')}&metric_date=gte.{desde}"
-        f"&select=metric_date,metric_name,value,unit,extra&order=metric_date.asc,metric_name.asc",
+    hoy = datetime.now(LOCAL_TZ).date()
+    p   = quote(persona, safe="")
+    # El ciclo va aparte y con su propia ventana: en la de 30 días no cabe ni un par de
+    # ciclos, y mezclado con lo demás un día con solo un registro del ciclo contaría como
+    # «el móvil mandó datos» en el uso del reloj.
+    lecturas = (
+        (f"{SALUD_FAMILIA_URL}?persona=eq.{p}&metric_name=neq.{METRICA_CICLO}"
+         f"&metric_date=gte.{(hoy - timedelta(days=BRIEF_DIAS_SALUD)).isoformat()}"),
+        (f"{SALUD_FAMILIA_URL}?persona=eq.{p}&metric_name=eq.{METRICA_CICLO}"
+         f"&metric_date=gte.{(hoy - timedelta(days=SALUD_FAMILIA_CICLO_DIAS)).isoformat()}"),
     )
-    # Aquí sí un 502 y no una sección vacía: quien lee esto es un modelo, y «sin datos»
-    # lo contaría como que el reloj no mandó nada.
-    if filas is None:
-        logger.error("Salud de la familia (%s): no se pudieron leer sus métricas (%s)",
-                     persona, r.status_code)
-        raise _supabase_error(r)
-    salud = _resumir_salud(filas)
-    hoy   = datetime.now(LOCAL_TZ).date()
+    resultados = []
+    for url in lecturas:
+        r, filas = _leer_todas(f"{url}&select=metric_date,metric_name,value,unit,extra"
+                               f"&order=metric_date.asc,metric_name.asc")
+        # Aquí sí un 502 y no una sección vacía: quien lee esto es un modelo, y «sin
+        # datos» lo contaría como que el reloj no mandó nada.
+        if filas is None:
+            logger.error("Salud de la familia (%s): no se pudieron leer sus métricas (%s)",
+                         persona, r.status_code)
+            raise _supabase_error(r)
+        resultados.append(filas)
     datos = {"fecha": hoy.isoformat(), "dia_semana": DIAS_SEMANA[hoy.weekday()],
-             "zona": TIMEZONE, "salud": salud}
+             "zona": TIMEZONE, "salud": _resumir_salud(resultados[0]),
+             "ciclo": _resumir_ciclo(resultados[1])}
     return {**datos, "texto": render_familia_texto(datos)}
+
+
+def _resumir_ciclo(filas: list) -> dict:
+    """Los registros del ciclo de la ventana, y cuándo empezó cada ciclo.
+
+    Dato crudo, como el resto del resumen: los días entre un inicio y el siguiente son
+    aritmética sobre las fechas, no una conclusión. Valorarlo es de quien redacta.
+    """
+    registros = []
+    for f in filas:
+        for reg in ((f.get("extra") or {}).get("registros") or []):
+            if isinstance(reg, dict):
+                registros.append(reg)
+    if not registros:
+        return {}
+    registros.sort(key=lambda reg: str(reg.get("start") or ""))
+    inicios = sorted({str(reg["start"])[:10] for reg in registros
+                      if reg.get("isCycleStart") and _FECHA_CICLO.match(str(reg.get("start")))})
+    dias = [(date.fromisoformat(b[:10]) - date.fromisoformat(a[:10])).days
+            for a, b in zip(inicios, inicios[1:])]
+    return {"dias_ventana": SALUD_FAMILIA_CICLO_DIAS, "registros": registros,
+            "inicios_de_ciclo": inicios, "dias_entre_inicios": dias}
 
 
 def render_familia_texto(d: dict) -> str:
@@ -11338,6 +11423,22 @@ def render_familia_texto(d: dict) -> str:
         L += [f"(Sin un solo dato en los últimos {BRIEF_DIAS_SALUD} días: el iPhone no ha"
               " mandado nada. Dilo así; no inventes valores.)", ""]
     L += _render_salud_texto(d["salud"], False, "")
+    c = d.get("ciclo") or {}
+    if c:
+        L.append(f"## CICLO MENSTRUAL  (registros de la app Salud, últimos {c['dias_ventana']} días)")
+        L.append("   Tal cual los apunta la app: tipo, valor y fechas. Un registro que falta no"
+                 " significa que no ocurriera, solo que no se apuntó.")
+        for reg in c["registros"]:
+            inicio, fin = str(reg.get("start") or "")[:10], str(reg.get("end") or "")[:10]
+            tramo  = inicio if not fin or fin == inicio else f"{inicio} → {fin}"
+            valor  = f": {reg['value']}" if reg.get("value") else ""
+            marca  = "   (inicio de ciclo)" if reg.get("isCycleStart") else ""
+            L.append(f"  {tramo:<25} {reg.get('name')}{valor}{marca}")
+        if c["inicios_de_ciclo"]:
+            L.append(f"  {'Inicios de ciclo':<25} {', '.join(c['inicios_de_ciclo'])}")
+        if c["dias_entre_inicios"]:
+            L.append(f"  {'Días entre inicios':<25} {', '.join(map(str, c['dias_entre_inicios']))}")
+        L.append("")
     return "\n".join(L) + "\n"
 
 

@@ -223,7 +223,7 @@ class TestResumen:
         assert d["salud"]["fc_reposo"]["ultimo"] == 60
         assert "## SALUD" in d["texto"]
         lecturas = mock_requests.called("GET", "salud_familia")
-        assert len(lecturas) == 1 and "persona=eq.ama" in lecturas[0][1]
+        assert len(lecturas) == 2 and all("persona=eq.ama" in c[1] for c in lecturas)
         _sin_health_metrics(mock_requests)
 
     def test_sin_datos_lo_dice(self, client, familia, mock_requests):
@@ -324,3 +324,72 @@ class TestEnviarCorreoDestino:
         main.enviar_correo("a", "b", destino=CORREO_AMA)
         main.enviar_correo("a", "b")
         assert [m["To"] for m in enviados] == [CORREO_AMA, "mikel@test"]
+
+
+class TestCiclo:
+    """El ciclo menstrual llega en `data.cycleTracking` y solo lo lee la ingesta de la
+    familia. Es el dato más sensible de la tabla: se guarda lo justo y tal cual."""
+
+    REGISTROS = [
+        {"start": "2026-09-01 00:00:00 +0200", "end": "2026-09-05 23:59:59 +0200",
+         "name": "Menstrual Flow", "value": "Medium", "isCycleStart": True, "basura": "x" * 50},
+        {"start": "2026-09-14 08:00:00 +0200", "end": "2026-09-14 08:00:00 +0200",
+         "name": "Ovulation Test Result", "value": "Positive/Peak"},
+        {"start": "no-es-fecha", "name": "Menstrual Flow", "value": "Light"},
+        {"start": "2026-09-20 00:00:00 +0200", "value": "Light"},          # sin nombre
+        "no-es-un-registro",
+    ]
+
+    def test_se_guarda_en_su_tabla_limpio(self, client, familia, mock_requests):
+        r = client.post("/familia/salud/ingest", headers=_cab(TOKEN_AMA),
+                        json={"data": {"cycleTracking": self.REGISTROS}})
+        assert r.json() == {"ok": True, "upserted": 2}
+        filas = {f["metric_date"]: f for f in mock_requests.called("POST", "salud_familia")[0][2]["json"]}
+        assert set(filas) == {"2026-09-01", "2026-09-14"}
+        assert all(f["metric_name"] == "cycle_tracking" and f["persona"] == "ama" for f in filas.values())
+        assert filas["2026-09-01"]["extra"] == {"registros": [{
+            "start": "2026-09-01 00:00:00 +0200", "end": "2026-09-05 23:59:59 +0200",
+            "name": "Menstrual Flow", "value": "Medium", "isCycleStart": True}]}
+        assert "isCycleStart" not in filas["2026-09-14"]["extra"]["registros"][0]
+        _sin_health_metrics(mock_requests)
+
+    def test_en_lista_de_lotes_tambien(self, client, familia, mock_requests):
+        r = client.post("/familia/salud/ingest", headers=_cab(TOKEN_AMA),
+                        json=[{"data": {"cycleTracking": self.REGISTROS[:1]}}, _lote()])
+        assert r.json() == {"ok": True, "upserted": 2}
+
+    def test_bloque_vacio_es_lote_vacio(self, client, familia, mock_requests):
+        r = client.post("/familia/salud/ingest", headers=_cab(TOKEN_AMA),
+                        json={"data": {"cycleTracking": []}})
+        assert r.json()["ok"] is True and r.json()["vacio"] is True
+
+    def test_la_ingesta_de_mikel_no_lo_guarda(self, client, familia, mock_requests):
+        r = client.post("/health/ingest", headers=_cab("health-token"),
+                        json={"data": {"cycleTracking": self.REGISTROS}})
+        assert r.json()["ok"] is False
+        assert mock_requests.called("POST", "health_metrics") == []
+
+    def test_sale_en_el_resumen(self, client, familia, mock_requests):
+        hoy = datetime.now(main.LOCAL_TZ).date()
+        def dia(n):
+            return (hoy - timedelta(days=n)).isoformat()
+        filas = [
+            {"metric_date": dia(60), "metric_name": "cycle_tracking", "value": 1, "unit": "count",
+             "extra": {"registros": [{"start": f"{dia(60)} 00:00:00 +0200", "end": f"{dia(56)} 23:59:59 +0200",
+                                      "name": "Menstrual Flow", "value": "Medium", "isCycleStart": True}]}},
+            {"metric_date": dia(31), "metric_name": "cycle_tracking", "value": 1, "unit": "count",
+             "extra": {"registros": [{"start": f"{dia(31)} 00:00:00 +0200", "end": f"{dia(27)} 23:59:59 +0200",
+                                      "name": "Menstrual Flow", "value": "Light", "isCycleStart": True}]}},
+        ]
+        mock_requests.add("GET", "metric_name=eq.cycle_tracking", FakeResponse(filas))
+        d = client.get("/familia/salud/resumen", headers=_cab(TOKEN_AMA)).json()
+        assert d["ciclo"]["inicios_de_ciclo"] == [dia(60), dia(31)]
+        assert d["ciclo"]["dias_entre_inicios"] == [29]
+        assert "## CICLO MENSTRUAL" in d["texto"] and "Días entre inicios" in d["texto"]
+        lecturas = [c[1] for c in mock_requests.called("GET", "salud_familia")]
+        assert any("metric_name=neq.cycle_tracking" in u for u in lecturas)
+        assert all("persona=eq.ama" in u for u in lecturas)
+
+    def test_sin_registros_no_hay_seccion(self, client, familia, mock_requests):
+        d = client.get("/familia/salud/resumen", headers=_cab(TOKEN_AMA)).json()
+        assert d["ciclo"] == {} and "CICLO" not in d["texto"]
