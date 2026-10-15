@@ -11068,8 +11068,9 @@ def _mandar_brief(datos: dict) -> None:
 # El correo ya no sale a una hora fija, sino cuando te despiertas — y si nadie avisa
 # de que te has despertado, a BRIEF_HORA_TOPE como muy tarde.
 #
-# El disparador ya no puede ser el cron de GitHub Actions: se retrasa 10-15 min
-# cuando su cola va cargada, así que el correo llegaba tarde y a una hora distinta
+# El disparador ya no puede ser el cron de GitHub Actions: se retrasa (no 10-15 min,
+# como se creyó, sino horas: en octubre de 2026, de cinco a nueve), así que el correo
+# llegaba tarde y a una hora distinta
 # cada día. Actions queda solo como red de seguridad por si se cae la casa entera, y
 # el reloj puntual lo pone Home Assistant, que está siempre encendido y ya sondea
 # este backend. Un hilo de fondo aquí dentro no serviría: Fly escala a cero, y sin

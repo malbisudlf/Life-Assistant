@@ -155,8 +155,10 @@ backend está en `docs/BACKEND_PATRONES.md`.
     credencial rechazada es una clase propia, con aviso pero sin issue ni botón de arreglo
     (ver «Y un fallo de red no es un cambio de código» en `docs/JARVIS.md`).
 - **Cuándo sale el correo: al despertarse, no a una hora fija.** Lo disparaba el cron de
-  `.github/workflows/resumen-diario.yml`, y Actions se retrasa 10-15 min cuando su cola
-  va cargada — un disparador que no sabe decirte a qué hora va a disparar no vale para
+  `.github/workflows/resumen-diario.yml`, y Actions retrasa sus crons horas, no los
+  10-15 min que se dieron por buenos (en octubre de 2026 el de las 09:00 UTC corría entre
+  las 14:20 y las 18:36). Hoy esa red de seguridad la lanza a su hora el «Reloj de
+  programados» de n8n (`docs/N8N.md`), con el cron de GitHub de respaldo — un disparador que no sabe decirte a qué hora va a disparar no vale para
   algo que tiene que pasar "al despertarte". Ahora hay tres fuentes y **`enviar_brief_si_toca()`
   es la única puerta**: cada fuente sabe CUÁNDO llamar, y quien decide SI se manda es ella.
   - `POST /despertar` (`BRIEF_TOKEN`) — el Atajo del iPhone al desenchufar el cargador.

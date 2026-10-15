@@ -63,6 +63,7 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Vigilante de la web** | Cada 5 min sondea la web de Vercel. Cuenta lo que ve a `POST /vigilancia/estado`, vivo o muerto | Activo desde el 2026-09-20, 19:23 |
 | **Vigilante del backend** | Cada 5 min sondea el backend. Si lleva tres sondeos caído, **llama al móvil por la centralita**, sin pasar por el backend | Activo desde el 2026-09-20, 19:23 |
 | **Caducidad del dominio** | Cada día a las 9 pregunta a RDAP cuándo caduca `lifeassistantbackend.bid`. Calla si faltan más de 30 días; si no, avisa por `POST /programado/roto` con `aviso: true`. Si RDAP no contesta, lo dice solo los lunes | Activo desde el 2026-09-24 |
+| **Reloj de programados** | Lanza a su hora, por `workflow_dispatch`, los tres workflows programados de GitHub: la revisión nocturna (03:37), la red de seguridad del resumen diario (10:30) y la copia de Supabase (lunes, 06:17), todo en hora de Madrid. Calla si GitHub contesta 204; si no, avisa por `POST /programado/roto`. Ver «El reloj de los programados» | Activo desde el 2026-10-15 |
 | **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Activo desde el 2026-09-22 |
 
 > **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
@@ -171,6 +172,70 @@ hace que esto valga la pena escribirlo: el flujo se veía verde.*
 
 El id del flujo es `HablarloTelefono`, y el fichero que lo define vive en el repositorio
 HomeLab (`caja/n8n/flujos/hablarlo.json`), que es la fuente de verdad de esa máquina.
+
+## El reloj de los programados
+
+**GitHub Actions no es puntual, y no por unos minutos.** Los comentarios de los workflows
+decían que el cron «se retrasa 10-15 min cuando la cola va cargada», y nadie lo volvió a
+medir. Medido el 2026-10-15 sobre los runs de las dos semanas anteriores:
+
+| Workflow | Cron (UTC) | Cuándo corría de verdad (UTC) |
+|---|---|---|
+| Revisión nocturna | 01:37 | 06:21 – 08:21 |
+| Resumen diario (red de seguridad) | 09:00 | 14:20 – 18:36 |
+| Copia de Supabase | lunes 04:17 | 09:58 – 12:03 |
+
+Un correo de respaldo que sale a las seis de la tarde no respalda nada, y una revisión
+«nocturna» que arranca a las diez de la mañana ya se cruza con los commits del día.
+
+**Lo que se hizo: n8n pone la hora y GitHub sigue haciendo el trabajo.** El flujo
+`Reloj de programados` (id `RelojProgramados`, fichero `caja/n8n/flujos/reloj-programados.json`
+en HomeLab) llama a `POST /repos/.../actions/workflows/<fichero>/dispatches` con
+`{"ref": "main"}` a la hora de cada uno. Un `workflow_dispatch` arranca en segundos: el
+primero de prueba entró en 4.
+
+```
+3 Schedule trigger (cron, Europe/Madrid) → Set (fichero, nombre) → HTTP dispatch → Code (¿204?) → HTTP /programado/roto
+```
+
+Por qué así y no pasando la lógica a n8n:
+
+- **La frontera de arriba se respeta.** n8n solo da la hora; qué se revisa, qué se copia y
+  si el correo hace falta lo siguen decidiendo los workflows, que están versionados, tienen
+  registro y los vigila `programado-roto.yml`. Ese aviso sigue funcionando igual: escucha
+  `workflow_run` de esos workflows, los lance quien los lance.
+- **No hay que darle a n8n ninguna credencial nueva peligrosa.** Pasar la copia a n8n
+  habría sido darle la service key de Supabase, que es justo lo que este fichero dice que
+  no. Lo único que necesita es la credencial `GitHub token` que ya usaban el traductor de
+  averías y la primera pasada de PRs. Ya tenía permiso de escritura en Actions: se
+  comprobó con el primer disparo.
+- **Lo que reacciona a eventos de GitHub se queda en GitHub.** `ci.yml`, `ci-averiado`,
+  `pr-listo`, `revision-aviso` y `programado-roto` no tienen reloj. Además, el n8n de
+  `caja` solo es accesible desde la red de casa y no podría recibir webhooks de GitHub sin
+  exponerse.
+
+**El `schedule:` de cada workflow se queda como respaldo**, por si n8n o `caja` están
+caídos. Si corren los dos, no pasa nada, y en los tres casos por un motivo distinto:
+
+- El resumen pasa por la puerta idempotente de `brief_envios`: el segundo contesta «no
+  hacía falta».
+- La revisión nocturna encuentra la etiqueta `ultima-revision-nocturna` ya movida y no
+  dispara la routine. Si entre medias han entrado commits, revisa solo esos, y la noche
+  siguiente ya no los repite.
+- La copia sale dos veces ese lunes. Son dos artefactos, y no estorban.
+
+**Silencio cuando da la hora bien.** GitHub contesta 204 sin cuerpo; con eso el flujo
+termina sin decir nada. Con cualquier otra cosa avisa por `POST /programado/roto` con
+`aviso: true` (credencial `Header Auth account`, la de `REVISION_TOKEN`, igual que la
+caducidad del dominio): un 401 es el token caducado, y un 403 o un 404, que le falta el
+permiso de Actions. Un disparo fallido no es grave, porque el cron de GitHub lo acaba
+haciendo, pero el día que caduque el token fallará **siempre**. Sin ese aviso, los
+programados volverían a ir horas tarde sin que nadie se diera cuenta.
+
+**Probarlo:** `docker exec -e N8N_RUNNERS_BROKER_PORT=5699 n8n n8n execute --id=RelojProgramados`
+lanza el **resumen diario**, que se puede disparar de más sin coste. No es casual: ver la
+trampa de `n8n execute` más abajo, que el 2026-10-15 lanzó la revisión nocturna en vez
+de ese.
 
 ## La IA de los flujos: Gemini en el plan gratuito
 
@@ -319,6 +384,12 @@ aplicar sin que nadie lo diga.
 - **`n8n execute` necesita un disparador manual.** Un flujo que solo tiene
   `scheduleTrigger` falla con «Missing node to start execution», así que para probarlo por
   CLI hay que añadirle un `manualTrigger` temporal.
+
+- **…pero no empieza por él.** Con el `manualTrigger` presente, la CLI arranca por el
+  **primer disparador del fichero**, sea el que sea (en la 2.39.8). Con el reloj de
+  programados el primero era el de la revisión nocturna, y la prueba la lanzó de verdad, en
+  vez del resumen diario al que iba conectado «Probar a mano». En un flujo con varios
+  disparadores, pon primero el que se pueda ejecutar de más sin consecuencias.
 
 ## Añadir un flujo
 

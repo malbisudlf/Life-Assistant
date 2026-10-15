@@ -49,7 +49,7 @@ El cron de Actions no es de fiar, y cada uno de sus fallos se tapa por separado:
 
 | Fallo | Quién lo cubre |
 |---|---|
-| Llega tarde | Nadie, y da igual: son las tres de la mañana |
+| Llega tarde | El «Reloj de programados» de n8n (`docs/N8N.md`), que lo lanza a las 03:37 por `workflow_dispatch`. Se creía que daba igual, pero no eran minutos: en octubre de 2026 corría entre las 06:21 y las 08:21 UTC, con la mañana empezada |
 | No llega (Actions descarta la ejecución) | La etiqueta: no se movió, así que la noche siguiente arrastra el rango |
 | Llega, pero la sesión se cae a mitad de revisión | El barrido semanal de la routine |
 

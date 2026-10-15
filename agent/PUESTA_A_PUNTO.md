@@ -404,7 +404,8 @@ entiende zonas horarias):
 | `0 5 * * *` | 07:00 | 06:00 |
 
 - [ ] Déjale margen antes de que tu rutina lea el correo: los cron de Actions se
-      retrasan cuando GitHub va cargado (a veces 10-15 min).
+      retrasan cuando GitHub va cargado, y pueden ser horas (se han visto de cinco a
+      nueve), así que no cuentes con la hora exacta.
 - [ ] Revisarlo en los cambios de hora si quieres que la hora local se mantenga fija.
 
 ## 6. Probar sin esperar a mañana

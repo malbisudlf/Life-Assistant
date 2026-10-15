@@ -292,8 +292,10 @@ Si prefieres la hora fija de siempre, no configures ninguna señal: el workflow 
 Actions sigue disparando por su cuenta. Su cron va en **UTC** y no entiende de zonas
 horarias, así que hay que retocarlo en los cambios de hora (`0 9 * * *` son las 11:00
 en Madrid en verano y las 10:00 en invierno). Ten en cuenta que los cron de Actions se
-retrasan cuando GitHub está cargado, a veces 10-15 min: por eso aquí es la red de
-seguridad y no el disparador.
+retrasan cuando GitHub está cargado, y no unos minutos: se han visto **de cinco a nueve
+horas**. Por eso aquí es la red de seguridad y no el disparador, y si tienes algo
+encendido siempre en casa (n8n, un cron de Linux) es mejor que lance el workflow a su
+hora por `workflow_dispatch` y dejar el `schedule` de respaldo.
 
 **4. Pruébalo sin esperar a mañana**: Actions → *Resumen diario por correo* → *Run
 workflow*, o `POST /brief/send?forzar=1` con tu `BRIEF_TOKEN`, que se salta la

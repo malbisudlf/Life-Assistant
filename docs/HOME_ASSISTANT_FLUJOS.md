@@ -200,7 +200,8 @@ que son dos cosas distintas y se caen por separado. Por eso el despacho registra
 cuánto retraso sale cada aviso (`AVISO_RETRASO_AVERIA_MIN`): es la única forma de ver
 desde dentro que el reloj se paró. HA pone el reloj
 porque está siempre encendido y es puntual al minuto, las dos cosas que el cron de
-GitHub Actions no garantiza (se retrasa 10-15 min cuando su cola va cargada). Un hilo
+GitHub Actions no garantiza (se retrasa horas, no minutos: de cinco a nueve en octubre de
+2026). Un hilo
 dentro del backend no valdría: Fly escala a cero y sin nadie que llame no hay proceso
 vivo que mire la hora. Sondear cada 5 min es barato a propósito — antes de
 `BRIEF_HORA_TOPE` el endpoint no toca Supabase ni construye nada.

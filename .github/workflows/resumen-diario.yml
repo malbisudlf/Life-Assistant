@@ -4,10 +4,16 @@ name: Resumen diario por correo (red de seguridad)
 # (POST /despertar desde el iPhone), con el sondeo de Home Assistant (POST
 # /ha/brief-tick) como reloj de respaldo a partir de BRIEF_HORA_TOPE.
 #
-# Por qué dejó de serlo: el cron de GitHub Actions se retrasa 10-15 min cuando la
-# cola va cargada, así que el correo llegaba tarde y a una hora distinta cada día. Un
+# Por qué dejó de serlo: el cron de GitHub Actions se retrasa, y no poco. Durante un
+# tiempo se escribió aquí que eran 10-15 min; en octubre de 2026 este mismo cron de las
+# 09:00 UTC corría entre las 14:20 y las 18:36 UTC, de cinco a nueve horas tarde. Un
 # disparador que no sabe decirte a qué hora va a disparar no sirve para algo que tiene
 # que pasar "al despertarte".
+#
+# QUIÉN LO LANZA A SU HORA: el flujo «Reloj de programados» de n8n, en `caja`, que lo
+# dispara por `workflow_dispatch` a las 10:30 de Madrid (ver docs/N8N.md). El `schedule`
+# de abajo se queda de respaldo por si n8n no lo hace; que corra dos veces es inofensivo
+# por lo que se explica más abajo.
 #
 # Lo que sí cubre: que se caiga la casa entera (Home Assistant apagado, router sin
 # luz, móvil sin batería). En ese escenario nadie llama al backend y el correo no

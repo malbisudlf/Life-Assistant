@@ -217,8 +217,8 @@ dentro del backend capaz de mirar la hora**. Un `while True: sleep(60)` no exist
 Así que el reloj es externo: Home Assistant tiene un `time_pattern` cada 5 minutos que
 llama a `POST /ha/brief-tick`. Ese tick es lo que despacha los recordatorios, evalúa las
 reglas proactivas, revisa el correo entrante, vigila la ingesta y vigila el sistema. Se
-eligió HA y no el cron de GitHub Actions porque **Actions se retrasa 10–15 minutos** cuando
-su cola va cargada, y un disparador que no sabe decirte a qué hora va a disparar no vale
+eligió HA y no el cron de GitHub Actions porque **Actions se retrasa**, y no los 10–15
+minutos que se creyó al principio, sino horas (en octubre de 2026, de cinco a nueve), y un disparador que no sabe decirte a qué hora va a disparar no vale
 para algo que tiene que pasar «al despertarte».
 
 Corolario: el tick tiene que ser **barato**. Antes de la hora tope no toca la base de datos

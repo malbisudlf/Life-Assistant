@@ -20,7 +20,10 @@ on:
   schedule:
     # Lunes a las 04:17 UTC. El minuto raro es a propósito: en punto es cuando GitHub
     # tiene la cola llena y los crons se retrasan. Aquí llegar tarde da igual, pero no
-    # ejecutarse, no.
+    # ejecutarse, no. Y se retrasa de todos modos: en octubre de 2026 corría entre las
+    # 10:00 y las 12:00 UTC. Lo lanza a su hora el flujo «Reloj de programados» de n8n
+    # (lunes, 06:17 de Madrid, por `workflow_dispatch`; ver docs/N8N.md), y esto queda de
+    # respaldo. Si corren los dos, salen dos copias ese lunes: no estorba.
     - cron: '17 4 * * 1'
   workflow_dispatch:        # también a mano, antes de tocar algo que escriba en la BD
 
