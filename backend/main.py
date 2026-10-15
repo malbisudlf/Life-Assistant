@@ -8858,8 +8858,17 @@ def _jarvis_contexto_lugar() -> str:
     lugar = _lugar_actual_seguro()
     if not lugar:
         return ""
-    desde = lugar["desde"].astimezone(LOCAL_TZ).strftime("%H:%M")
-    texto = f"\nAhora mismo el usuario está {_texto_lugar(lugar['lugar'])} (desde las {desde})."
+    desde_dt = lugar["desde"].astimezone(LOCAL_TZ)
+    desde    = desde_dt.strftime("%H:%M")
+    # Sin el día, «en casa desde las 22:08» leído a las 18:53 suena a que acabas de llegar.
+    dias = (datetime.now(LOCAL_TZ).date() - desde_dt.date()).days
+    if dias == 1:
+        desde = f"ayer a las {desde}"
+    elif dias > 1:
+        desde = f"el {desde_dt.strftime('%d/%m')} a las {desde}"
+    else:
+        desde = f"las {desde}"
+    texto = f"\nAhora mismo el usuario está {_texto_lugar(lugar['lugar'])} (desde {desde})."
     clase = _en_clase(lugar)
     if clase:
         texto += (f" Está en clase («{clase['titulo']}») hasta las "

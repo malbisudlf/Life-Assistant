@@ -112,6 +112,17 @@ class TestTelefono:
         assert "en el gimnasio" in r.json()["texto"]
 
 
+class TestLugar:
+    def test_dice_el_dia_si_no_es_hoy(self, monkeypatch):
+        ahora = datetime.now(main.LOCAL_TZ)
+        for desde, esperado in ((ahora - timedelta(days=1), "desde ayer a las"),
+                                (ahora - timedelta(days=3), "desde el "),
+                                (ahora, "desde las ")):
+            monkeypatch.setattr(main, "_lugar_actual_seguro",
+                                lambda d=desde: {"lugar": main.LUGAR_CASA, "desde": d})
+            assert esperado in main._jarvis_contexto_lugar()
+
+
 class TestTurno:
     def test_por_voz_va_al_final_y_por_escrito_no(self, client, auth_headers, monkeypatch):
         _fuentes(monkeypatch)
