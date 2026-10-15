@@ -10,7 +10,9 @@ y el 15 y el 16, aplicados el 2026-10-13: Claude piensa mientras suena la frase 
 espera, y se le puede interrumpir mientras habla (ver «Los parches 15 y 16»). El 17
 (2026-10-15) deja de adivinar el orden de los bytes del audio, que en el coche se
 adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»). Y el 18, el
-mismo día: la llamada lee el briefing entero de un tirón (ver «El parche 18»).
+mismo día: la llamada lee el briefing entero de un tirón (ver «El parche 18»). Y el 19,
+también el 2026-10-15: un solo proceso de Claude por llamada en vez de uno por turno, y lo
+que ya está mirado (agenda, tiempo, tareas) metido al descolgar (ver «El parche 19»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -573,6 +575,60 @@ imagen `claude-phone-voice-app:antes-p18`, construir, todos los tests dentro sin
 `up -d voice-app` sin llamada en curso. El `RUNBOOK.md` nuevo se copia a
 `~/telefono-jarvis/CLAUDE.md`: sin él, Claude no sabe que existe la línea y sigue leyendo
 a trozos de 40 palabras.
+
+## El parche 19: un Claude por llamada, y lo ya mirado al descolgar
+
+Sale del 2026-10-15, de «dale más capacidad al Jarvis de voz»: lo que más se notaba no
+era lo que sabía hacer, sino lo que tardaba. Los dos cambios viven en
+`claude-api-server/` (que es un servicio de systemd, no un contenedor) y no tocan la
+voice-app.
+
+- **Sesión viva** (`claude-api-server/sesion-viva.js`). Cada turno era un `claude -p
+  --resume` nuevo, con ~3,5 s fijos de arrancar Node antes de pensar nada (ver «Los
+  parches 15 y 16»). Ahora la primera pregunta de la llamada abre **un** proceso con
+  `--input-format stream-json --output-format stream-json`, que se queda leyendo
+  mensajes por stdin y suelta un `result` por turno. Mismos argumentos de siempre
+  (permisos, modelo, `--session-id`/`--resume`), así que la sesión sigue guardándose en
+  disco. Medido en `caja` con el servidor parcheado: turnos de 2,4, 4,4 y 1,6 s, contra
+  los ~8 s de antes.
+  - **Si el proceso falla, el turno no se pierde**: muere, se cuelga más de
+    `SESION_VIVA_TURNO_MS` (120 s, y entonces se mata) o hay ya `SESION_VIVA_MAX` (3)
+    abiertas → ese turno va por el camino viejo, un proceso con `--resume`, que retoma
+    la misma conversación desde el disco. En el registro sale `SESION-VIVA: falló (…)`.
+  - **Nada vivo al colgar**: `/end-session`, que la voice-app ya llamaba al colgar, cierra
+    el proceso; y si nadie lo cierra (la voice-app reiniciada a media llamada), se cierra
+    solo tras `SESION_VIVA_INACTIVA_MS` (10 min) sin turnos.
+  - **Apagarlo**: `SESION_VIVA=0` en el entorno del servicio (un drop-in como
+    `rapido.conf`, que necesita `sudo`) vuelve exactamente al camino de antes.
+- **Contexto al descolgar** (`claude-api-server/contexto.js`). Al abrir sesión —en la
+  primera pregunta, la misma en la que entra la bitácora del parche 11— pide al backend
+  `GET /telefono/contexto` y se lo mete a Claude: lo que queda de hoy y lo de mañana en
+  la agenda, el tiempo, las tareas que vencen, los recordatorios y dónde estás. Es el
+  truco del permiso de despliegue (9,7 s → 1,7 s) aplicado a «¿qué tengo hoy?». La
+  consulta va **a la vez** que el arranque del proceso, con un tope de 2,5 s
+  (`CONTEXTO_ESPERA_MS`): si el backend no contesta, la llamada sigue sin él. El token es
+  el del MCP del teléfono y se lee del `.mcp.json` del directorio de trabajo
+  (`CONTEXTO_TOKEN` lo sustituye), así que no hay otro sitio donde rotarlo. Lo que dice y
+  por qué, en «Lo que ya está mirado al descolgar» de `docs/JARVIS.md`.
+
+`telefono/parche-19.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`claude-api-server/test/parche19.test.js`: siete casos con un Claude de mentira que
+contesta stream-json (turnos en orden, error marcado, proceso que muere, turno colgado,
+cerrar, el token del `.mcp.json` y el backend caído). Se aplicó así:
+
+```bash
+cd ~/.claude-phone-cli
+cp claude-api-server/server.js claude-api-server/server.js.bak-20261015-p19
+patch -p1 < parche-19.diff
+(cd claude-api-server && node --test test/parche19.test.js)
+curl -s localhost:3010/api/calls                     # sin llamada en curso
+kill "$(systemctl show -p MainPID --value claude-phone-api)"   # Restart=always lo levanta
+```
+
+`kill` en vez de `systemctl restart` porque no hace falta `sudo`: el servicio corre con tu
+usuario (`User=` de la unidad) y systemd lo vuelve a levantar a los 10 s. Volver atrás: copiar el `.bak` y
+el mismo `kill`. Lo que delata que funciona es `SESION-VIVA: nueva` en
+`journalctl -u claude-phone-api` y que no salga `[CONTEXTO]` con un aviso.
 
 ## Lo que además NO está en el repositorio original
 

@@ -1,0 +1,478 @@
+diff -ruN a/claude-api-server/contexto.js b/claude-api-server/contexto.js
+--- a/claude-api-server/contexto.js	1970-01-01 01:00:00.000000000 +0100
++++ b/claude-api-server/contexto.js	2026-10-15 18:47:17.577549584 +0200
+@@ -0,0 +1,63 @@
++/**
++ * Lo que Jarvis ya sabe al descolgar (parche 19): la agenda que queda de hoy y la de
++ * mañana, el tiempo, las tareas que vencen, los recordatorios y dónde estás, pedidos al
++ * backend (`GET /telefono/contexto`) y metidos al empezar cada sesión.
++ *
++ * Es lo mismo que el permiso de despliegue ya hacía: la pregunta más probable de la
++ * llamada se contesta sin ir a buscar el dato, que por herramienta son tres pasos en
++ * serie. Si el backend no contesta a tiempo, la llamada sigue sin él: es un extra de
++ * velocidad, no una condición.
++ *
++ * El token es el del MCP del teléfono, el mismo que ya lleva `.mcp.json` en el
++ * directorio de trabajo (y `LECTURA_TOKEN` en la voice-app): no hace falta otro sitio
++ * donde ponerlo ni otro sitio donde rotarlo.
++ */
++
++const fs = require('fs');
++const path = require('path');
++
++const URL_BACKEND = process.env.CONTEXTO_URL || 'http://127.0.0.1:8080';
++const ESPERA_MS   = parseInt(process.env.CONTEXTO_ESPERA_MS) || 2500;
++
++function token() {
++  if (process.env.CONTEXTO_TOKEN) return process.env.CONTEXTO_TOKEN;
++  try {
++    const mcp = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.mcp.json'), 'utf8'));
++    for (const servidor of Object.values(mcp.mcpServers || {})) {
++      const auth = (servidor.headers || {}).Authorization || '';
++      if (/^Bearer /.test(auth) && /\/mcp\/telefono/.test(servidor.url || '')) {
++        return auth.slice('Bearer '.length);
++      }
++    }
++  } catch { /* sin .mcp.json no hay token */ }
++  return '';
++}
++
++/** El bloque para el prompt, o '' si no se ha podido traer. Nunca lanza. */
++async function pedir({ fetchFn = globalThis.fetch } = {}) {
++  const t = token();
++  if (!t) {
++    console.warn('[CONTEXTO] Sin token del MCP del teléfono: la llamada empieza sin contexto');
++    return '';
++  }
++  const abortar = new AbortController();
++  const reloj = setTimeout(function () { abortar.abort(); }, ESPERA_MS);
++  try {
++    const r = await fetchFn(URL_BACKEND + '/telefono/contexto', {
++      headers: { Authorization: 'Bearer ' + t }, signal: abortar.signal,
++    });
++    if (!r.ok) {
++      console.warn('[CONTEXTO] El backend respondió ' + r.status);
++      return '';
++    }
++    const texto = String(((await r.json()) || {}).texto || '').trim();
++    return texto ? '[CONTEXTO AL DESCOLGAR]\n' + texto + '\n[FIN DEL CONTEXTO]\n\n' : '';
++  } catch (e) {
++    console.warn('[CONTEXTO] No se pudo traer (' + (e.name === 'AbortError' ? 'tardó más de ' + ESPERA_MS + ' ms' : e.message) + ')');
++    return '';
++  } finally {
++    clearTimeout(reloj);
++  }
++}
++
++module.exports = { pedir, token };
+diff -ruN a/claude-api-server/server.js b/claude-api-server/server.js
+--- a/claude-api-server/server.js	2026-10-15 18:47:17.573549579 +0200
++++ b/claude-api-server/server.js	2026-10-15 18:47:17.577549584 +0200
+@@ -25,6 +25,11 @@
+   buildRepairPrompt,
+ } = require('./structured');
+ const bitacora = require('./bitacora');
++// Parche 19: un proceso de Claude por llamada y el contexto ya mirado al descolgar.
++const sesionViva = require('./sesion-viva');
++const contexto = require('./contexto');
++const SESION_VIVA = process.env.SESION_VIVA !== '0';
++const SESION_VIVA_MAX = parseInt(process.env.SESION_VIVA_MAX) || 3;
+ 
+ const app = express();
+ const PORT = process.env.PORT || 3333;
+@@ -190,6 +195,43 @@
+   });
+ }
+ 
++// Parche 19: los procesos vivos, uno por llamada (callId -> sesión de sesion-viva.js).
++const vivas = new Map();
++
++/**
++ * La sesión viva de esta llamada, creándola si no la hay. Lanza si no se puede (hay
++ * demasiadas abiertas): quien llama cae entonces al camino de un proceso por turno.
++ * Se crea ANTES de pedir el contexto al backend para que los dos arranques —el de
++ * Claude Code y la consulta— vayan a la vez.
++ */
++function obtenerViva(callId, timestamp) {
++  const actual = vivas.get(callId);
++  if (actual && actual.viva) return actual;
++  if (vivas.size >= SESION_VIVA_MAX) {
++    throw new Error(`ya hay ${vivas.size} sesiones vivas abiertas`);
++  }
++  const args = [
++    '--dangerously-skip-permissions',
++    '-p',
++    '--input-format', 'stream-json',
++    '--output-format', 'stream-json',
++    '--verbose',
++    '--model', CLAUDE_MODEL,
++  ];
++  if (sessions.has(callId)) {
++    args.push('--resume', callId);
++    console.log(`[${timestamp}] SESION-VIVA: reabre ${callId}`);
++  } else {
++    args.push('--session-id', callId);
++    sessions.set(callId, true);
++    console.log(`[${timestamp}] SESION-VIVA: nueva ${callId}`);
++  }
++  const s = sesionViva.crear({ args, env: claudeEnv });
++  s.alMorir(function () { if (vivas.get(callId) === s) vivas.delete(callId); });
++  vivas.set(callId, s);
++  return s;
++}
++
+ /**
+  * Voice Context - Prepended to all voice queries
+  *
+@@ -288,22 +330,54 @@
+     }
+ 
+     fullPrompt += VOICE_CONTEXT;
+-    // Memoria entre llamadas: solo al abrir sesión, las siguientes ya la llevan dentro.
+-    if (callId && !sessions.has(callId)) fullPrompt += bitacora.contexto(callId);
++    // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
++    // siguientes ya lo llevan dentro.
++    const nueva = Boolean(callId) && !sessions.has(callId);
++    if (nueva) fullPrompt += bitacora.contexto(callId);
++
++    // Parche 19: el proceso se lanza ya, y el contexto se pide mientras arranca.
++    let viva = null;
++    if (SESION_VIVA && callId) {
++      try {
++        viva = obtenerViva(callId, timestamp);
++      } catch (e) {
++        console.warn(`[${timestamp}] SESION-VIVA: no (${e.message}); un proceso por turno`);
++      }
++    }
++    if (nueva) fullPrompt += await contexto.pedir();
+     fullPrompt += prompt;
+     const esAvisoSaliente = bitacora.apuntarConsulta(callId, prompt);
+ 
+-    const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
+-
+-    if (code !== 0) {
+-      console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${code}`);
+-      console.error(`STDERR: ${stderr}`);
+-      console.error(`STDOUT: ${stdout.substring(0, 500)}`);
+-      const errorMsg = stderr || stdout || `Exit code ${code}`;
+-      return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
++    let response, sessionId, duration_ms;
++    let respondida = false;
++    if (viva) {
++      try {
++        const r = await viva.preguntar(fullPrompt);
++        duration_ms = r.duration_ms;
++        if (r.isError) {
++          console.error(`[${new Date().toISOString()}] ERROR (sesión viva): ${r.response.substring(0, 500)}`);
++          return res.json({ success: false, error: `Claude CLI failed: ${r.response}`, duration_ms });
++        }
++        ({ response, sessionId } = r);
++        respondida = true;
++      } catch (e) {
++        // La sesión está en disco: el camino viejo la retoma con --resume.
++        console.warn(`[${new Date().toISOString()}] SESION-VIVA: falló (${e.message}); vuelvo a un proceso por turno`);
++      }
+     }
+ 
+-    const { response, sessionId } = parseClaudeStdout(stdout);
++    if (!respondida) {
++      const r = await runClaudeOnce({ fullPrompt, callId, timestamp });
++      duration_ms = r.duration_ms;
++      if (r.code !== 0) {
++        console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${r.code}`);
++        console.error(`STDERR: ${r.stderr}`);
++        console.error(`STDOUT: ${r.stdout.substring(0, 500)}`);
++        const errorMsg = r.stderr || r.stdout || `Exit code ${r.code}`;
++        return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
++      }
++      ({ response, sessionId } = parseClaudeStdout(r.stdout));
++    }
+ 
+     if (sessionId && callId) {
+       sessions.set(callId, sessionId);
+@@ -481,6 +555,12 @@
+     sessions.delete(callId);
+     console.log(`[${timestamp}] SESSION ENDED: ${callId}`);
+   }
++  // Parche 19: nada vivo después de colgar.
++  const viva = callId ? vivas.get(callId) : null;
++  if (viva) {
++    viva.cerrar();
++    console.log(`[${timestamp}] SESION-VIVA cerrada: ${callId}`);
++  }
+ 
+   res.json({ success: true });
+ });
+diff -ruN a/claude-api-server/sesion-viva.js b/claude-api-server/sesion-viva.js
+--- a/claude-api-server/sesion-viva.js	1970-01-01 01:00:00.000000000 +0100
++++ b/claude-api-server/sesion-viva.js	2026-10-15 18:47:17.577549584 +0200
+@@ -0,0 +1,125 @@
++/**
++ * Sesión viva: UN proceso de Claude Code por llamada, en vez de uno por turno (parche 19).
++ *
++ * Hasta aquí cada turno era un `claude -p --resume` nuevo, y arrancarlo costaba ~3,5 s
++ * fijos de Node antes de que el modelo empezara a pensar (medido el 2026-10-13, ver
++ * «Los parches 15 y 16» en telefono/PARCHES.md del repo de Life Assistant). Con
++ * `--input-format stream-json` el proceso se queda abierto leyendo mensajes por stdin y
++ * suelta un evento `result` por turno: medido en caja el 2026-10-15, el segundo turno
++ * de «responde solo: adiós» bajó de ~8 s a 1,3 s.
++ *
++ * Lo que no se puede perder respecto al camino viejo:
++ *  - **Los mismos argumentos de siempre** (permisos, modelo, --session-id/--resume): la
++ *    sesión se guarda en disco igual, así que si el proceso muere a media llamada el
++ *    turno siguiente puede seguir por el camino viejo con --resume sin perder el hilo.
++ *  - **Un turno colgado no deja la llamada colgada para siempre**: pasado TURNO_MS se
++ *    mata el proceso, y lo que esperaba falla (quien llama cae al camino viejo).
++ *  - **Nada vivo al colgar**: se cierra en /end-session, y si nadie lo cierra (la
++ *    voice-app reiniciada a media llamada), por inactividad.
++ */
++
++const { spawn } = require('child_process');
++
++const TURNO_MS    = parseInt(process.env.SESION_VIVA_TURNO_MS) || 120 * 1000;
++const INACTIVA_MS = parseInt(process.env.SESION_VIVA_INACTIVA_MS) || 10 * 60 * 1000;
++const CIERRE_MS   = 5000;
++
++function crear({ args, env, cwd, bin }) {
++  const inicio = Date.now();
++  const proc = spawn(bin || process.env.CLAUDE_BIN || 'claude', args, {
++    stdio: ['pipe', 'pipe', 'pipe'], shell: false, env, cwd,
++  });
++  const pendientes = [];          // FIFO: Claude contesta los turnos en orden
++  const alMorir = [];
++  let buffer = '';
++  let stderr = '';
++  let viva = true;
++  let inactividad = null;
++
++  function morir(motivo) {
++    if (!viva) return;
++    viva = false;
++    clearTimeout(inactividad);
++    const error = new Error(motivo + (stderr ? ': ' + stderr.slice(-500) : ''));
++    while (pendientes.length) {
++      const p = pendientes.shift();
++      clearTimeout(p.reloj);
++      p.reject(error);
++    }
++    for (const fn of alMorir) {
++      try { fn(); } catch { /* quien escucha no puede tumbar a los demás */ }
++    }
++  }
++
++  function cerrar() {
++    if (!viva) return;
++    try { proc.stdin.end(); } catch { /* ya cerrado */ }
++    const matar = setTimeout(function () { try { proc.kill('SIGTERM'); } catch { /* ya muerto */ } }, CIERRE_MS);
++    if (matar.unref) matar.unref();
++    morir('la sesión viva se ha cerrado');
++  }
++
++  function reiniciarInactividad() {
++    clearTimeout(inactividad);
++    inactividad = setTimeout(function () {
++      console.log('[SESION-VIVA] Cerrada por inactividad');
++      cerrar();
++    }, INACTIVA_MS);
++    if (inactividad.unref) inactividad.unref();
++  }
++
++  proc.stdout.on('data', function (trozo) {
++    buffer += trozo.toString();
++    let i;
++    while ((i = buffer.indexOf('\n')) >= 0) {
++      const linea = buffer.slice(0, i);
++      buffer = buffer.slice(i + 1);
++      let evento;
++      try { evento = JSON.parse(linea); } catch { continue; }
++      if (evento.type !== 'result') continue;
++      const p = pendientes.shift();
++      if (!p) continue;
++      clearTimeout(p.reloj);
++      p.resolve({
++        response: String(evento.result || ''),
++        sessionId: evento.session_id || null,
++        isError: Boolean(evento.is_error),
++        duration_ms: Date.now() - p.enviado,
++      });
++    }
++  });
++  proc.stderr.on('data', function (trozo) {
++    stderr = (stderr + trozo.toString()).slice(-4000);
++  });
++  proc.on('error', function (e) { morir('no se pudo lanzar claude (' + e.message + ')'); });
++  proc.on('close', function (code) { morir('claude se cerró (código ' + code + ')'); });
++  proc.stdin.on('error', function () { /* lo cuenta el close */ });
++
++  function preguntar(texto) {
++    if (!viva) return Promise.reject(new Error('la sesión viva ya no está'));
++    reiniciarInactividad();
++    return new Promise(function (resolve, reject) {
++      const p = { resolve, reject, enviado: Date.now() };
++      p.reloj = setTimeout(function () {
++        console.warn('[SESION-VIVA] Turno sin respuesta en ' + TURNO_MS + ' ms: se mata');
++        try { proc.kill('SIGTERM'); } catch { /* ya muerto */ }
++        morir('turno sin respuesta en ' + TURNO_MS + ' ms');
++      }, TURNO_MS);
++      pendientes.push(p);
++      proc.stdin.write(JSON.stringify({
++        type: 'user', message: { role: 'user', content: String(texto) },
++      }) + '\n');
++    });
++  }
++
++  reiniciarInactividad();
++  return {
++    preguntar,
++    cerrar,
++    alMorir: function (fn) { alMorir.push(fn); },
++    get viva() { return viva; },
++    get edad_ms() { return Date.now() - inicio; },
++  };
++}
++
++module.exports = { crear, TURNO_MS, INACTIVA_MS };
+diff -ruN a/claude-api-server/test/parche19.test.js b/claude-api-server/test/parche19.test.js
+--- a/claude-api-server/test/parche19.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/claude-api-server/test/parche19.test.js	2026-10-15 18:47:17.577549584 +0200
+@@ -0,0 +1,140 @@
++/**
++ * Parche 19: la sesión viva (un proceso de Claude por llamada) y el contexto al descolgar.
++ *
++ * Claude es un doble: un script de Node que lee los mensajes stream-json de stdin y
++ * contesta un `result` por cada uno, como hace `claude -p --input-format stream-json`.
++ * Se lanza con `node --test test/parche19.test.js` desde claude-api-server/, sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parche19-'));
++const CLAUDE_FALSO = path.join(dir, 'claude-falso.js');
++fs.writeFileSync(CLAUDE_FALSO, `
++// Como el de verdad: un turno detrás de otro, nunca dos a la vez.
++let buf = '';
++const cola = [];
++let ocupado = false;
++function siguiente() {
++  if (ocupado || !cola.length) return;
++  ocupado = true;
++  const texto = cola.shift();
++  if (texto === 'muere') process.exit(3);
++  if (texto === 'cuelgate') return;
++  const espera = texto === 'lento' ? 150 : 0;
++  setTimeout(() => {
++    if (texto === 'error') console.log(JSON.stringify({type:'result', is_error:true, result:'Invalid API key'}));
++    else console.log(JSON.stringify({type:'result', result:'eco: ' + texto, session_id:'s1'}));
++    ocupado = false;
++    siguiente();
++  }, espera);
++}
++process.stdin.on('data', d => {
++  buf += d;
++  let i;
++  while ((i = buf.indexOf('\\n')) >= 0) {
++    cola.push(JSON.parse(buf.slice(0, i)).message.content); buf = buf.slice(i + 1);
++  }
++  siguiente();
++});
++process.stdin.on('end', () => process.exit(0));
++`);
++
++const sesionViva = require('../sesion-viva');
++const contexto = require('../contexto');
++
++function abrir() {
++  return sesionViva.crear({ bin: process.execPath, args: [CLAUDE_FALSO], env: process.env });
++}
++
++test('contesta los turnos en orden, aunque el primero tarde más', async function () {
++  const s = abrir();
++  try {
++    const [a, b] = await Promise.all([s.preguntar('lento'), s.preguntar('rápido')]);
++    assert.strictEqual(a.response, 'eco: lento');
++    assert.strictEqual(b.response, 'eco: rápido');
++    assert.strictEqual(a.sessionId, 's1');
++  } finally {
++    s.cerrar();
++  }
++});
++
++test('un error de Claude vuelve marcado, no como respuesta', async function () {
++  const s = abrir();
++  try {
++    const r = await s.preguntar('error');
++    assert.strictEqual(r.isError, true);
++    assert.match(r.response, /Invalid API key/);
++  } finally {
++    s.cerrar();
++  }
++});
++
++test('si el proceso muere, lo que esperaba falla y se avisa a quien escucha', async function () {
++  const s = abrir();
++  let avisado = false;
++  s.alMorir(function () { avisado = true; });
++  await assert.rejects(s.preguntar('muere'), /se cerró/);
++  assert.strictEqual(s.viva, false);
++  assert.strictEqual(avisado, true);
++  await assert.rejects(s.preguntar('otra'), /ya no está/);
++});
++
++test('un turno colgado no deja la llamada colgada: se mata el proceso', async function () {
++  process.env.SESION_VIVA_TURNO_MS = '200';
++  delete require.cache[require.resolve('../sesion-viva')];
++  const conTope = require('../sesion-viva');
++  const s = conTope.crear({ bin: process.execPath, args: [CLAUDE_FALSO], env: process.env });
++  await assert.rejects(s.preguntar('cuelgate'), /sin respuesta/);
++  assert.strictEqual(s.viva, false);
++  delete process.env.SESION_VIVA_TURNO_MS;
++});
++
++test('cerrar deja la sesión muerta y no deja nada esperando', async function () {
++  const s = abrir();
++  await s.preguntar('hola');
++  s.cerrar();
++  assert.strictEqual(s.viva, false);
++});
++
++test('el contexto sale del token de .mcp.json y llega envuelto', async function () {
++  const antes = process.cwd();
++  const trabajo = fs.mkdtempSync(path.join(os.tmpdir(), 'parche19-cwd-'));
++  fs.writeFileSync(path.join(trabajo, '.mcp.json'), JSON.stringify({ mcpServers: { la: {
++    type: 'http', url: 'https://backend/mcp/telefono',
++    headers: { Authorization: 'Bearer secreto' } } } }));
++  process.chdir(trabajo);
++  try {
++    let pedido = null;
++    const texto = await contexto.pedir({ fetchFn: async function (url, opciones) {
++      pedido = { url, auth: opciones.headers.Authorization };
++      return { ok: true, json: async function () { return { texto: 'Mañana: 10:00 Dentista.' }; } };
++    } });
++    assert.match(pedido.url, /\/telefono\/contexto$/);
++    assert.strictEqual(pedido.auth, 'Bearer secreto');
++    assert.match(texto, /CONTEXTO AL DESCOLGAR[\s\S]*Dentista/);
++  } finally {
++    process.chdir(antes);
++  }
++});
++
++test('sin backend, la llamada sigue sin contexto (y sin lanzar)', async function () {
++  process.env.CONTEXTO_TOKEN = 'secreto';
++  try {
++    assert.strictEqual(await contexto.pedir({ fetchFn: async function () {
++      throw new Error('ECONNREFUSED');
++    } }), '');
++    assert.strictEqual(await contexto.pedir({ fetchFn: async function () {
++      return { ok: false, status: 404 };
++    } }), '');
++  } finally {
++    delete process.env.CONTEXTO_TOKEN;
++  }
++});

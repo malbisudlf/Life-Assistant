@@ -319,6 +319,8 @@ def _limpiar_estado():
     main._despliegue_por_llamar = False
     # El id de la lista de To Do: sin vaciarlo, se serviría sin pasar por el mock del test.
     main._todo_lista_cache.clear()
+    # Lo ya mirado para la voz: sin vaciarlo, un test vería la agenda de otro.
+    main._contexto_voz_cache.clear()
 
 
 @pytest.fixture(autouse=True)

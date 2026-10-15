@@ -1307,6 +1307,35 @@ newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se l
 `estado_resumen_diario`, `recordar`, `olvidar` y `dejar_de_vigilar`. Las que siguen
 fuera lo están a propósito (ver el comentario sobre `_MCP_SERVIDOR_SOLO_LECTURA`).
 
+## Lo que ya está mirado al descolgar: `_contexto_de_voz`
+
+Por voz, una pregunta con herramienta son tres pasos en serie (pedirla, ejecutarla y
+redactar con el resultado), que es lo que separa los 1,7 s de los 9,7 s de
+`docs/JARVIS_VOZ.md`. Y las preguntas de una llamada son casi siempre las mismas:
+«¿qué tengo hoy?», «¿va a llover?», «¿qué me queda pendiente?». Desde el 2026-10-15 el
+backend se las da ya miradas, que es el truco del permiso de despliegue aplicado a lo
+cotidiano:
+
+- **Qué lleva**: lo que queda de hoy y lo de mañana en la agenda (Outlook y clases, hasta
+  `CONTEXTO_VOZ_EVENTOS` por día, con lo que está en curso marcado), el tiempo, las tareas
+  que vencen ya o mañana (si To Do está encendido) y los recordatorios hasta mañana. Por
+  teléfono, además, dónde estás; el dashboard ya lo lleva en el prompt.
+- **Quién lo usa**: la llamada del dashboard y el Atajo (todo turno con `voz: true`), en
+  el mismo mensaje de sistema que la hora, **al final**: cambia cada cinco minutos y no
+  puede romper el caché del prefijo. Y el teléfono, que lo pide una vez al abrir cada
+  llamada (`GET /telefono/contexto`, con el token del MCP del teléfono; parche 19 de
+  `telefono/PARCHES.md`). Por escrito no va: ahí los segundos no se notan.
+- **No poder mirar algo se dice.** La agenda no pasa por `_sin_error`: con Outlook caído
+  el texto dice que no se ha podido mirar y que no diga que no tiene nada, igual que
+  `_j_ocupados`. Cada parte va por separado, y una que revienta solo se cambia por su
+  «no lo he podido mirar».
+- **Dice de qué hora es** («a las 09:12»), y el modelo tiene la orden de ir a la
+  herramienta para cualquier cosa que no esté ahí o necesite más detalle. Se guarda
+  `CONTEXTO_VOZ_SEG` (300) en memoria: un turno de voz no paga Graph cada vez.
+- **Coste**: unos cientos de tokens sin cachear por turno de voz. `JARVIS_VOZ_CONTEXTO=0`
+  lo apaga en el dashboard y el Atajo; en el teléfono, sin el endpoint la llamada
+  simplemente empieza sin él.
+
 ## Por qué te dije eso: la instantánea de cada aviso
 
 La señal de utilidad (`avisos_reglas`, el botón «me sirvió / no me sirvió») dice **qué**

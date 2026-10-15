@@ -25511,6 +25511,177 @@ def telefono_briefing(request: Request, fecha: str = "", desde: int = 1, hasta: 
     return {"ok": True, "fecha": r["fecha"], "secciones": secciones}
 
 
+# ── Lo que Jarvis ya sabe al descolgar ────────────────────────────────────────
+#
+# Por voz, una pregunta que necesita una herramienta cuesta tres pasos en serie —pedirla,
+# ejecutarla y redactar con el resultado— y eso es lo que separa los 1,7 s de los 9,7 s
+# medidos en `docs/JARVIS_VOZ.md`. Las preguntas de una llamada son casi siempre las
+# mismas («¿qué tengo hoy?», «¿va a llover?», «¿qué me queda pendiente?»), así que el
+# backend se las da ya miradas: es el mismo truco que el permiso de despliegue, aplicado
+# a lo cotidiano. Lo usan la llamada del dashboard y el Atajo (al final del prompt, junto
+# a la hora, para no romper el caché del prefijo) y el teléfono, que lo pide una vez al
+# empezar cada llamada (`GET /telefono/contexto`, parche 19 de `telefono/PARCHES.md`).
+#
+# Dos reglas: **no poder mirar algo se dice**, nunca se convierte en «no tienes nada» (la
+# agenda no pasa por `_sin_error`, igual que `_j_ocupados`), y **dice de qué hora es**,
+# porque en una llamada larga o desde la copia en memoria el dato puede tener minutos.
+CONTEXTO_VOZ_SEG      = int(os.getenv("CONTEXTO_VOZ_SEG", "300"))
+CONTEXTO_VOZ_EVENTOS  = 8      # por día: es prompt, y se paga en cada turno de voz
+CONTEXTO_VOZ_TAREAS   = 5
+JARVIS_VOZ_CONTEXTO   = os.getenv("JARVIS_VOZ_CONTEXTO", "1") == "1"
+_contexto_voz_cache: dict = {}   # incluir_lugar -> (instante, texto)
+
+_WMO_TEXTO = ((0, "despejado"), (3, "con nubes"), (48, "con niebla"), (57, "con llovizna"),
+              (67, "con lluvia"), (77, "con nieve"), (82, "con chubascos"),
+              (99, "con tormenta"))
+
+
+def _wmo_texto(codigo) -> str:
+    """El código WMO de Open-Meteo dicho en palabras (en el dashboard lo hace
+    `weatherFromCode`; aquí basta con saber si llueve)."""
+    try:
+        c = int(codigo)
+    except (TypeError, ValueError):
+        return ""
+    return next((texto for tope, texto in _WMO_TEXTO if c <= tope), "")
+
+
+def _contexto_agenda(ahora: datetime) -> list:
+    """Lo que queda de hoy y lo de mañana, de Outlook y del calendario de clases."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_ev = pool.submit(get_events, credentials=None)
+        f_cl = pool.submit(get_class_events, credentials=None)
+        try:
+            eventos = f_ev.result()
+        except Exception as e:
+            logger.warning("Contexto de voz: Outlook no respondió (%s)", _causa(e))
+            eventos = None
+        try:
+            clases = f_cl.result()
+        except Exception as e:
+            logger.warning("Contexto de voz: las clases no respondieron (%s)", _causa(e))
+            clases = None
+    if not isinstance(eventos, dict) or "error" in eventos:
+        return ["Agenda: no la he podido mirar (Outlook no responde). No digas que no "
+                "tiene nada: usa la herramienta agenda si te lo pregunta."]
+    lineas, todos = [], list(eventos.get("events") or [])
+    if isinstance(clases, dict) and "error" not in clases:
+        todos += clases.get("events") or []
+    elif not (isinstance(clases, dict) and "available" in clases):
+        lineas.append("Las clases no las he podido mirar.")
+
+    hoy, manana = ahora.date(), ahora.date() + timedelta(days=1)
+    por_dia: dict = {hoy: [], manana: []}
+    for ev in todos:
+        try:
+            ini = _j_local(ev.get("start") or "")
+            fin = _j_local(ev.get("end") or "") if ev.get("end") else ini
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if ini.date() not in por_dia or (ini.date() == hoy and fin <= ahora):
+            continue
+        hora  = "todo el día" if ev.get("isAllDay") else ini.strftime("%H:%M")
+        texto = f"{hora} {ev.get('title') or '(sin título)'}"
+        if ev.get("location"):
+            texto += f" (en {str(ev['location'])[:60]})"
+        if ini <= ahora < fin and not ev.get("isAllDay"):
+            texto += f", en curso hasta las {fin.strftime('%H:%M')}"
+        por_dia[ini.date()].append((0 if ev.get("isAllDay") else 1, ini, texto))
+
+    for dia, nombre in ((hoy, "Lo que queda de hoy"),
+                        (manana, f"Mañana, {DIAS_SEMANA[manana.weekday()]}")):
+        items = [t for _, _, t in sorted(por_dia[dia])]
+        if not items:
+            lineas.append(f"{nombre}: nada en la agenda.")
+            continue
+        sobra = len(items) - CONTEXTO_VOZ_EVENTOS
+        texto = "; ".join(items[:CONTEXTO_VOZ_EVENTOS])
+        lineas.append(f"{nombre}: {texto}" + (f"; y {sobra} más." if sobra > 0 else "."))
+    return lineas
+
+
+def _contexto_clima() -> list:
+    c = _brief_clima()
+    if not c or c.get("ahora") is None:
+        return ["Tiempo: no lo he podido mirar."]
+    estado = _wmo_texto(c.get("codigo_wmo"))
+    texto  = f"Tiempo: {round(c['ahora'])} grados ahora" + (f", {estado}" if estado else "")
+    if c.get("max") is not None and c.get("min") is not None:
+        texto += f"; máxima {round(c['max'])} y mínima {round(c['min'])}"
+    return [texto + "."]
+
+
+def _contexto_tareas(ahora: datetime) -> list:
+    r = _j_tareas()
+    if not r.get("activo"):
+        return []          # To Do apagado: no es un fallo, simplemente no hay tareas aquí
+    tareas = r.get("tareas") or []
+    if not tareas:
+        return ["Tareas: ninguna pendiente."]
+    limite = (ahora.date() + timedelta(days=1)).isoformat()
+    urgentes = [t for t in tareas if t.get("fecha") and t["fecha"] <= limite]
+    texto = f"Tareas: {len(tareas)} pendientes"
+    if urgentes:
+        nombres = "; ".join(f"{t['titulo']} ({'vencida' if t['fecha'] < ahora.date().isoformat() else t['fecha']})"
+                            for t in urgentes[:CONTEXTO_VOZ_TAREAS])
+        texto += f", de las que vencen ya o mañana: {nombres}"
+    return [texto + "."]
+
+
+def _contexto_recordatorios(ahora: datetime) -> list:
+    limite = (ahora + timedelta(days=1)).strftime("%Y-%m-%d 23:59")
+    proximos = [r for r in _j_mis_recordatorios().get("recordatorios") or []
+                if r.get("cuando") and r["cuando"] <= limite]
+    if not proximos:
+        return []
+    return ["Recordatorios apuntados: " + "; ".join(
+        f"{r['cuando'][5:]} {str(r.get('texto') or '')[:80]}" for r in proximos[:5]) + "."]
+
+
+def _contexto_de_voz(incluir_lugar: bool = False) -> str:
+    """El texto, armado y con una copia de `CONTEXTO_VOZ_SEG` en memoria.
+
+    Cada parte va por separado y un fallo en una no se lleva a las demás: es un extra de
+    latencia, y un turno de voz no puede caerse por él. Si no sale nada, vacío.
+    """
+    vez = _contexto_voz_cache.get(incluir_lugar)
+    if vez and time.time() - vez[0] < CONTEXTO_VOZ_SEG:
+        return vez[1]
+    ahora  = datetime.now(LOCAL_TZ)
+    partes = [("agenda", lambda: _contexto_agenda(ahora)), ("clima", _contexto_clima),
+              ("tareas", lambda: _contexto_tareas(ahora)),
+              ("recordatorios", lambda: _contexto_recordatorios(ahora))]
+    lineas = []
+    with ThreadPoolExecutor(max_workers=len(partes)) as pool:
+        futuros = [(nombre, pool.submit(fn)) for nombre, fn in partes]
+        for nombre, f in futuros:
+            try:
+                lineas += f.result()
+            except Exception as e:
+                logger.warning("Contexto de voz: %s falló (%s)", nombre, _causa(e))
+                lineas.append(f"{nombre.capitalize()}: no lo he podido mirar.")
+    if incluir_lugar:
+        lugar = _jarvis_contexto_lugar().strip()
+        if lugar:
+            lineas.append(lugar)
+    texto = ""
+    if lineas:
+        texto = (f"LO QUE YA ESTÁ MIRADO (a las {ahora.strftime('%H:%M')}). Úsalo para "
+                 "contestar sin llamar a herramientas; si te piden más detalle, otro día, "
+                 "o algo que no esté aquí, usa la herramienta.\n- " + "\n- ".join(lineas))
+    _contexto_voz_cache[incluir_lugar] = (time.time(), texto)
+    return texto
+
+
+@app.get("/telefono/contexto")
+def telefono_contexto(request: Request):
+    """Lo que la llamada de teléfono sabe al descolgar, para metérselo a Claude al
+    empezar la sesión (parche 19). Con el token del MCP del teléfono, como el briefing."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    return {"texto": _contexto_de_voz(incluir_lugar=True)}
+
+
 def _j_turno_de_noche(fecha=None) -> dict:
     """El parte de la noche, para contarlo hablando o por escrito.
 
@@ -28632,8 +28803,18 @@ def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
     for turno in body.historial[-JARVIS_MAX_HISTORIAL:]:
         mensajes.append({"role": turno.rol, "content": turno.texto})
     # La hora va aquí, al final y no en el prompt de sistema: lo que cambia a cada minuto
-    # no puede ir delante de lo que se quiere cachear (ver _jarvis_ahora).
-    mensajes.append({"role": "system", "content": _jarvis_ahora()})
+    # no puede ir delante de lo que se quiere cachear (ver _jarvis_ahora). Por voz lleva
+    # además lo que ya está mirado, por lo mismo: cambia cada cinco minutos.
+    ahora_y_contexto = _jarvis_ahora()
+    if voz and JARVIS_VOZ_CONTEXTO:
+        try:
+            contexto = _contexto_de_voz()
+        except Exception as e:
+            logger.warning("Contexto de voz: no se pudo armar (%s)", _causa(e))
+            contexto = ""
+        if contexto:
+            ahora_y_contexto += "\n\n" + contexto
+    mensajes.append({"role": "system", "content": ahora_y_contexto})
     mensajes.append({"role": "user", "content": mensaje})
 
     cliente   = get_openai_client()

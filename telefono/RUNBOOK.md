@@ -73,7 +73,9 @@ consultar el estado de un contenedor, y cualquiera de estas herramientas MCP de 
 consulta: `agenda`, `clima`, `salud`, `sueno`, `donde_estoy`, `entrenamiento`, `finanzas`,
 `estado_pc`, `ideas`, `diagnostico`, `mis_capacidades`, `mis_recordatorios`,
 `mis_alarmas`, `casa_dispositivos`, `mis_reglas`, `mis_vigilancias`, `errores`, `jobs`,
-`contar_revision`, `respuesta_notificacion`. Nada de esto cambia nada, así que hazlo
+`contar_revision`, `respuesta_notificacion`, `huecos_libres`, `tareas`,
+`moodle_entregas`, `cumpleanos`, `resumen_del_dia`, `estado_resumen_diario`,
+`leer_briefing`. Nada de esto cambia nada, así que hazlo
 antes de abrir la boca:
 **llegar con un diagnóstico vale más que llegar con una pregunta.**
 
@@ -91,7 +93,8 @@ Esta es la lista de comandos, y es cerrada:
 | Reiniciar la propia centralita | `docker compose -f ~/.claude-phone/docker-compose.yml restart voice-app` |
 
 Y esta es la lista de herramientas MCP de acción, también cerrada — todas de bajo riesgo
-y reversibles: `recordarme`, `cancelar_recordatorio`, `poner_alarma`, `cancelar_alarma`,
+y reversibles: `recordarme`, `recordarme_en_un_lugar`, `cancelar_recordatorio`,
+`poner_alarma`, `cancelar_alarma`, `posponer_alarma`, `dejame_dormir`,
 `estoy_despierto`, `guardar_idea`, `anadir_sesion_entrenamiento`,
 `encender_pc`, `apagar_pc`, `suspender_pc`, `casa_ordenar`, `recordar`, `olvidar`,
 `dejar_de_vigilar`, `quitar_regla`, `reintentar_job`, `relanzar_agente`,
