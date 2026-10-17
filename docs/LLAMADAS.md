@@ -266,6 +266,13 @@ las tareas), y por eso no es una llamada cotidiana:
 - **Va detrás del aviso**, como todas: la notificación sale por el despachador de siempre
   y después suena, con los reintentos y el recado en el buzón de `_insistir`. Un fallo
   llamando no libera el aviso ya entregado.
+- **Sale al minuto, no a los cinco.** El despachador cuelga del brief-tick, que pasa cada
+  5 minutos, y el mismo día de estrenarlo «llámame en un minuto» (para las 15:06) sonó a
+  las 15:10, después de preguntarle dos veces a Jarvis por qué no llamaba. Desde entonces
+  lo que apuntas con `recordarme` sale también por el tick de las alarmas (60 s), con una
+  caché en memoria para que los minutos sin nada pendiente no consulten nada («El reloj de
+  lo que pides tú» en `backend/main.py`). Solo lo pedido: los avisos de regla siguen
+  saliendo en el brief-tick, que es donde se decide con el lugar recién procesado.
 - Se apunta en la `huella` del recordatorio (`llamar:<leer>:<azar>`), no en una columna
   nueva: sin migración, y una columna sin aplicar habría tumbado `recordarme` entero.
 - El contexto le dice a Jarvis-Claude que no es una avería y, si toca, que empiece

@@ -310,7 +310,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   `jarvis_recordatorios`): lo único que hace que Jarvis hable sin que le hablen. Las tres
   decisiones son las que ya tomó el resumen diario, por lo mismo: viven en Supabase (Fly
   escala a cero), **el reloj es el tick de HA** (`/ha/brief-tick`, que por eso ya no es
-  gratis antes de la hora tope: ~300 SELECT al día contra un índice) y **la reserva es un
+  gratis antes de la hora tope: ~300 SELECT al día contra un índice; lo que pides con
+  `recordarme` sale además por el tick de alarmas, al minuto, ver «Sale al minuto» en
+  `docs/LLAMADAS.md`) y **la reserva es un
   PATCH condicional, no un GET previo** — es lo que hace la pregunta atómica, y con un GET
   dos ticks solapados mandan el mismo aviso dos veces. Si el correo falla **se libera la
   reserva**, o un error transitorio de SMTP se come el recordatorio. Un fallo despachando

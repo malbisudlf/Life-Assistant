@@ -15779,6 +15779,7 @@ def _j_recordarme(texto: str, fecha: str, hora: str, llamar=False, leer: str = "
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
+    _recordatorio_marcar(cuando)
     salida = {"ok": True, "id": (r.json() or [{}])[0].get("id"),
               "cuando": f"{fecha} {hora}", "texto": texto}
     if llamar:
@@ -15842,6 +15843,91 @@ def _llamada_pedida_segura(rid: str, texto: str, huella: str) -> bool:
     except Exception:
         logger.exception("Llamadas: fallo inesperado en la llamada pedida %s", rid)
         return False
+
+
+# ── El reloj de lo que pides tú ───────────────────────────────────────────────
+#
+# Los recordatorios los despacha el brief-tick, que pasa cada 5 minutos: lo que pedías
+# para las 15:06 salía a las 15:10. Para un aviso de una regla da igual; para «llámame en
+# un minuto» no: el 2026-10-17 la llamada llegó cuatro minutos tarde y en medio dio
+# tiempo a preguntarle dos veces a Jarvis por qué no llamaba. Lo que apuntas con
+# `recordarme` (regla vacía) sale además por el tick de las alarmas, que pasa cada
+# 60 s. Con la misma economía que aquel: `_recordatorio_siguiente` recuerda cuándo toca
+# lo siguiente, y hasta entonces el tick no consulta nada. El brief-tick sigue
+# despachándolo todo, así que perder esta caché (un reinicio) cuesta una consulta, y
+# fallar aquí deja el retraso de antes, no un aviso perdido. Los dos ticks a la vez no
+# mandan nada dos veces: la reserva del despacho es un PATCH condicional.
+#
+# Solo lo que pides tú, y no los avisos de regla: esos se deciden en el brief-tick con
+# el lugar recién procesado (`_procesar_lugar_seguro` va antes del despacho), y sacarlos
+# de ahí sería decidir con un lugar de hasta cinco minutos atrás.
+
+# Epoch de lo próximo pedido; `None` = "no se sabe" (fuerza una consulta), infinito =
+# no hay nada pendiente.
+_recordatorio_siguiente: float | None = None
+_recordatorio_lock = threading.Lock()
+# Lo que `recordarme` apunta mientras un despacho corre, como en `_alarma_apuntes`: el
+# despacho recalcula con lo que leyó, y sin esto pisaría lo apuntado a mitad.
+_recordatorio_apuntes: list = []
+_recordatorio_corriendo = False
+
+
+def _recordatorio_marcar(cuando: datetime) -> None:
+    """Adelanta el reloj si lo nuevo toca antes. Solo adelanta, igual que el de alarmas."""
+    global _recordatorio_siguiente
+    momento = cuando.timestamp()
+    with _recordatorio_lock:
+        _recordatorio_apuntes.append((momento, time.time()))
+        if _recordatorio_siguiente is None or momento < _recordatorio_siguiente:
+            _recordatorio_siguiente = momento
+
+
+def _recordatorio_hay_que_mirar() -> bool:
+    with _recordatorio_lock:
+        return (not _recordatorio_corriendo
+                and (_recordatorio_siguiente is None or time.time() >= _recordatorio_siguiente))
+
+
+def _despachar_pedidos() -> None:
+    """Despacha lo pedido que ya toca y deja apuntado cuándo toca lo siguiente."""
+    global _recordatorio_siguiente, _recordatorio_corriendo
+    inicio = time.time()
+    try:
+        _despachar_recordatorios(solo_pedidos=True)
+        r = http.get(f"{RECORDATORIOS_URL}?enviado=is.false&regla=is.null"
+                     f"&select=cuando&order=cuando.asc&limit=1", headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        filas = r.json()
+        leido = (datetime.fromisoformat(str(filas[0]["cuando"]).replace("Z", "+00:00")).timestamp()
+                 if filas else float("inf"))
+        # Uno vencido que sigue ahí (el aviso falló y se liberó) se reintenta al minuto,
+        # no en cada sondeo.
+        leido = max(leido, time.time() + 60) if leido <= time.time() else leido
+    except Exception as e:
+        logger.warning("Recordatorios: el reloj rápido no pudo mirar (%s); queda el de 5 min", e)
+        leido = time.time() + 60
+    with _recordatorio_lock:
+        _recordatorio_apuntes[:] = [(m, en) for m, en in _recordatorio_apuntes if en >= inicio]
+        _recordatorio_siguiente = min([leido] + [m for m, _ in _recordatorio_apuntes])
+        _recordatorio_corriendo = False
+
+
+def _lanzar_despacho_pedidos() -> None:
+    """En un hilo: mandar el aviso y lanzar la llamada no puede retrasar la respuesta del
+    tick de las alarmas, que es de lo que vive el sensor de HA."""
+    global _recordatorio_corriendo
+    with _recordatorio_lock:
+        if _recordatorio_corriendo:
+            return
+        _recordatorio_corriendo = True
+    try:
+        threading.Thread(target=_despachar_pedidos, daemon=True, name="recordatorios").start()
+    except Exception as e:
+        # Sin soltar la marca, el reloj rápido no volvería a mirar hasta reiniciar.
+        logger.warning("Recordatorios: no se pudo lanzar el despacho rápido (%s)", e)
+        with _recordatorio_lock:
+            _recordatorio_corriendo = False
 
 
 def _j_mis_recordatorios() -> dict:
@@ -16875,6 +16961,10 @@ def ha_alarma_tick(request: Request, token: str = ""):
     """
     if not _token_ok(_extract_service_token(request, token), HA_POLL_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
+    # De paso, lo que pediste con `recordarme` (ver «El reloj de lo que pides tú»). Va
+    # antes y en su hilo: no puede cambiar ni retrasar lo que contesta este tick.
+    if _recordatorio_hay_que_mirar():
+        _lanzar_despacho_pedidos()
     if not _alarma_hay_que_mirar():
         # El caso normal: 1.400 veces al día no hay nada que hacer y no se consulta nada.
         # Y mientras una alarma esté escalada se repite la última escalada, que es un
@@ -25035,17 +25125,21 @@ def _voz_al_despachar(fila: dict, regla: str) -> bool:
         return bool(fila.get("voz"))
 
 
-def _despachar_recordatorios() -> dict:
+def _despachar_recordatorios(solo_pedidos: bool = False) -> dict:
     """Manda los que ya han vencido. Lo llama el tick de HA.
 
     No puede tumbar a quien lo llama: el tick existe sobre todo para el resumen diario, y
     un fallo aquí se registra y se sigue. Mismo criterio que el disparo de la rutina.
+
+    `solo_pedidos` es el reloj rápido (ver «El reloj de lo que pides tú»): solo lo que no
+    lleva regla.
     """
     try:
         ahora_dt = datetime.now(timezone.utc)
         ahora    = ahora_dt.isoformat()
         r = http.get(
             f"{RECORDATORIOS_URL}?enviado=is.false&cuando=lte.{quote(ahora, safe='')}"
+            + ("&regla=is.null" if solo_pedidos else "") +
             f"&select=id,cuando,texto,regla,prioridad,caduca,voz,huella"
             # Por prioridad primero: el presupuesto se gasta en lo que más corre, no en
             # lo que se apuntó antes. Con el orden por fecha, un aviso de "sal ya" podía

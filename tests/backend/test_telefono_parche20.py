@@ -20,6 +20,9 @@ TOKEN_SI  = {"Authorization": "Bearer confirmar-token"}
 PID = "0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11"
 RID = "11111111-2222-3333-4444-555555555555"
 AHORA = datetime(2026, 10, 17, 12, 0, tzinfo=main.LOCAL_TZ)
+# Relativa al reloj de verdad, no a AHORA: `recordarme` rechaza lo que ya ha pasado con
+# `datetime.now`, y una fecha fija hacía fallar la suite al día siguiente de escribirla.
+MANANA = (datetime.now(main.LOCAL_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +127,7 @@ def centralita(monkeypatch):
 class TestRecordarmeConLlamada:
     def test_se_apunta_con_su_huella(self, mock_requests, centralita):
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([{"id": RID}], 201))
-        r = main._j_recordarme("Leerte el briefing", "2026-10-18", "08:10", leer="briefing")
+        r = main._j_recordarme("Leerte el briefing", MANANA, "08:10", leer="briefing")
         assert r["ok"] is True and r["llamada"] is True
         fila = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
         assert fila["huella"].startswith("llamar:briefing:")
@@ -132,21 +135,21 @@ class TestRecordarmeConLlamada:
 
     def test_sin_llamar_no_lleva_huella(self, mock_requests, centralita):
         mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([{"id": RID}], 201))
-        main._j_recordarme("Comprar pan", "2026-10-18", "18:00")
+        main._j_recordarme("Comprar pan", MANANA, "18:00")
         assert "huella" not in mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
 
     def test_de_madrugada_no_se_deja_apuntar(self, mock_requests, centralita):
-        r = main._j_recordarme("Despiértame", "2026-10-18", "05:30", llamar=True)
+        r = main._j_recordarme("Despiértame", MANANA, "05:30", llamar=True)
         assert r["ok"] is False and "poner_alarma" in r["motivo"]
         assert not mock_requests.called("POST", "jarvis_recordatorios")
 
     def test_sin_centralita_lo_dice(self, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "_telefono_configurado", lambda: False)
-        r = main._j_recordarme("x", "2026-10-18", "12:00", llamar="true")
+        r = main._j_recordarme("x", MANANA, "12:00", llamar="true")
         assert r["ok"] is False and "centralita" in r["motivo"]
 
     def test_leer_algo_desconocido_no_vale(self, mock_requests, centralita):
-        r = main._j_recordarme("x", "2026-10-18", "12:00", leer="poemas")
+        r = main._j_recordarme("x", MANANA, "12:00", leer="poemas")
         assert r["ok"] is False
 
 
@@ -193,6 +196,82 @@ class TestLaLlamadaPedida:
         assert liberados == []
 
 
+class TestElRelojRapido:
+    """Lo pedido sale por el tick de alarmas (60 s), no solo por el brief-tick (5 min):
+    «llámame en un minuto» llegó cuatro minutos tarde el 2026-10-17."""
+    CABECERA = {"X-Auth-Token": "ha-poll-token"}
+
+    @pytest.fixture
+    def lanzados(self, monkeypatch):
+        hechos = []
+        monkeypatch.setattr(main, "_lanzar_despacho_pedidos", lambda: hechos.append(1))
+        return hechos
+
+    def test_recordarme_adelanta_el_reloj(self, mock_requests, centralita):
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse([{"id": RID}], 201))
+        main._j_recordarme("Leerte el briefing", MANANA, "08:10", leer="briefing")
+        assert main._recordatorio_siguiente < float("inf")
+
+    def test_sin_nada_pendiente_el_tick_no_lanza_nada(self, client, mock_requests, lanzados):
+        assert client.get("/ha/alarma-tick", headers=self.CABECERA).status_code == 200
+        assert lanzados == []
+
+    def test_cuando_toca_el_tick_lo_lanza(self, client, mock_requests, lanzados):
+        main._recordatorio_siguiente = main.time.time() - 1
+        assert client.get("/ha/alarma-tick", headers=self.CABECERA).json()["escalar"] == 0
+        assert lanzados == [1]
+
+    def test_tras_un_reinicio_mira_una_vez(self, client, mock_requests, lanzados):
+        main._recordatorio_siguiente = None
+        client.get("/ha/alarma-tick", headers=self.CABECERA)
+        assert lanzados == [1]
+
+    def test_despacha_solo_lo_pedido_y_apunta_lo_siguiente(self, mock_requests, centralita,
+                                                          monkeypatch):
+        monkeypatch.setattr(main, "enviar_correo", lambda *a, **k: None)
+        luego = datetime.now(timezone.utc) + timedelta(hours=2)
+
+        def _get(url, **kw):
+            if "cuando=lte." in url:
+                return FakeResponse([{"id": RID, "cuando": "2026-10-17T10:00:00+00:00",
+                                      "texto": "Leerte el briefing", "regla": None,
+                                      "huella": "llamar:briefing:abc"}])
+            return FakeResponse([{"cuando": luego.isoformat()}])
+        mock_requests.add("GET", "jarvis_recordatorios", _get)
+        mock_requests.add("PATCH", "jarvis_recordatorios", FakeResponse([{"id": RID}]))
+        main._recordatorio_siguiente = None
+        main._recordatorio_corriendo = True
+        main._despachar_pedidos()
+        vencidos = [c for c in mock_requests.called("GET", "jarvis_recordatorios")
+                    if "cuando=lte." in c[1]]
+        assert "regla=is.null" in vencidos[0][1]
+        assert len(centralita) == 1
+        assert abs(main._recordatorio_siguiente - luego.timestamp()) < 1
+        assert main._recordatorio_corriendo is False
+
+    def test_sin_nada_mas_se_duerme(self, mock_requests):
+        main._despachar_pedidos()
+        assert main._recordatorio_siguiente == float("inf")
+
+    def test_lo_apuntado_a_mitad_no_se_pierde(self, mock_requests):
+        en_cinco = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+        def _get(url, **kw):
+            if "cuando=lte." in url:
+                main._recordatorio_marcar(en_cinco)      # un recordarme, a mitad
+            return FakeResponse([])
+        mock_requests.add("GET", "jarvis_recordatorios", _get)
+        main._despachar_pedidos()
+        assert main._recordatorio_siguiente <= en_cinco.timestamp()
+
+    def test_si_supabase_falla_reintenta_al_minuto(self, mock_requests):
+        mock_requests.add("GET", "jarvis_recordatorios", FakeResponse([], 500))
+        main._recordatorio_corriendo = True
+        main._despachar_pedidos()
+        assert main._recordatorio_siguiente <= main.time.time() + 61
+        assert main._recordatorio_corriendo is False
+
+
 # ── El «sí» dicho por teléfono ────────────────────────────────────────────────
 
 @pytest.fixture
@@ -214,7 +293,7 @@ def _pregunta(mock_requests, herramienta="crear_evento", argumentos=None, hace_s
         "id": PID, "texto": "Crear «Dentista» mañana de 10:00 a 11:00.",
         "opciones": [main.PREGUNTA_SI, main.PREGUNTA_NO], "respuesta": respuesta,
         "accion": {"herramienta": herramienta,
-                   "argumentos": argumentos or {"titulo": "Dentista", "fecha": "2026-10-18",
+                   "argumentos": argumentos or {"titulo": "Dentista", "fecha": MANANA,
                                                 "hora_inicio": "10:00"}},
         "creado": creado}]))
     mock_requests.add("PATCH", "jarvis_preguntas",
@@ -245,7 +324,7 @@ class TestElSiHablado:
         r = client.post(f"/telefono/confirmar/{PID}", headers=TOKEN_SI,
                         json={"respuesta": "si"}).json()
         assert r["hecho"] is True and r["frase"].startswith("Hecho.")
-        assert hechas == [("crear_evento", {"titulo": "Dentista", "fecha": "2026-10-18",
+        assert hechas == [("crear_evento", {"titulo": "Dentista", "fecha": MANANA,
                                             "hora_inicio": "10:00"})]
         assert PID in main._avisos_borrar or not main._movil_vivo()
 
@@ -284,7 +363,7 @@ class TestElSiHablado:
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
             "titulo": "Reunión", "inicio": "2026-10-18T10:00", "todo_el_dia": False,
             "invitados": 2, "organizo": True, "asistentes": 2})
-        _pregunta(mock_requests, "editar_evento", {"evento_id": "ev1", "fecha": "2026-10-18",
+        _pregunta(mock_requests, "editar_evento", {"evento_id": "ev1", "fecha": MANANA,
                                                    "hora_inicio": "11:00"})
         r = client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()
         assert r["ok"] is False and "más gente" in r["motivo"]
@@ -293,7 +372,7 @@ class TestElSiHablado:
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
             "titulo": "Fisio", "inicio": "2026-10-18T10:00", "todo_el_dia": False,
             "invitados": 0, "organizo": True, "asistentes": 0})
-        _pregunta(mock_requests, "editar_evento", {"evento_id": "ev1", "fecha": "2026-10-18",
+        _pregunta(mock_requests, "editar_evento", {"evento_id": "ev1", "fecha": MANANA,
                                                    "hora_inicio": "11:00"})
         r = client.post(f"/telefono/confirmar/{PID}", headers=TOKEN_SI,
                         json={"respuesta": "si"}).json()

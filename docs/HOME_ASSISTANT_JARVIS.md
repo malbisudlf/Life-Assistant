@@ -658,8 +658,9 @@ min). El canal puede fallar; lo que no puede es tragarse avisos en silencio.
 ## Recordatorios: el mismo reloj
 
 Los recordatorios (`recordarme`) los despacha `POST /ha/brief-tick`, la automatización que
-ya existe para el resumen diario (`la_brief_tick`, cada 5 minutos). No hay que añadir
-nada: si ese tick funciona, los avisos salen (por el móvil si el punto 4 está puesto, y
+ya existe para el resumen diario (`la_brief_tick`, cada 5 minutos), y los que pides tú
+también el sensor de `/ha/alarma-tick` (cada 60 s), para que salgan al minuto. No hay que
+añadir nada: si esos ticks funcionan, los avisos salen (por el móvil si el punto 4 está puesto, y
 si no por correo). Si HA está apagado, no salen — es el mismo
 compromiso que el resumen diario, y por eso el reloj vive en la casa y no en Fly, que
 escala a cero.
