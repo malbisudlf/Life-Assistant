@@ -142,23 +142,29 @@ dijo «sync hace 22 min» con el iPhone dos días sin mandar una sola fila: la p
 hoy bastaba para dar el sync por reciente. `last_sync` responde a «¿llega algo del
 móvil?», y solo lo que escribe el móvil puede contestarlo.
 
-**Y el Atajo que llama a `/health/ingest` con el *Bulk Export* de Health Auto Export no
-es quien entrega los datos**: lleva desde agosto mandando 0 bytes (400 en `app_logs`,
-decenas al día), aunque en el iPhone termine en verde porque «Obtener contenido de URL»
-no falla con un 4xx. Lo que entrega es la automatización REST de dentro de la app. Si
-deja de llegar el sueño, mira primero esa automatización, no el Atajo.
+**El Atajo de Health Auto Export es quien entrega los datos, y además manda un POST
+vacío en cada ejecución.** Aquí ponía lo contrario —que el Atajo solo mandaba 0 bytes y
+que entregaba la automatización REST de dentro de la app— y era falso: el 2026-10-17, con
+el aviso del token por query diciendo ya el User-Agent, en `/health/ingest` salió **un
+solo cliente**, `BackgroundShortcutRunner` (Atajos en segundo plano), y por las mismas
+dos conexiones llegaron dos 200 cada una y luego un 400 de 0 bytes cada una. Si la app
+mandara por su cuenta habría salido un segundo aviso con otro User-Agent. O sea:
 
-Comprobado otra vez el 2026-10-17: 585 rechazos en `app_logs` entre el 23/09 y el 17/10
-(la tabla guarda unos 30 días; antes del 23/09 no hay registro, no es que no pasara),
-entre 12 y 48 al día, a cualquier hora, siempre `BackgroundShortcutRunner/5037.x`
-—Atajos en segundo plano— y a veces dos seguidos en el mismo segundo. **Sin un solo
-hueco**: `health_metrics` tiene sus ocho métricas de `auto_export` y la noche todos los
-días desde el 15/09, y **ninguna fila con fuente `atajo`**: `/health/ingest/simple` no lo
-llama nadie desde hace más de un mes. Los envíos buenos llegan a ráfagas, varios POST en
-paralelo por dos conexiones a la vez, que es como manda la app y no como manda un Atajo.
+- **El Atajo se ejecuta dos veces a la vez** (dos automatizaciones que lo lanzan, o dos
+  copias del Atajo), y cada ejecución hace tres «Obtener contenido de URL».
+- **El tercero va siempre vacío**: la exportación que lo precede no produce nada y el
+  cuerpo de tipo Archivo sale con 0 bytes. Llega al backend, así que no es la trampa del
+  JSON sin campos de arriba (esa ni sale del teléfono). En el iPhone termina en verde
+  porque «Obtener contenido de URL» no falla con un 4xx.
+- **No se pierde nada**: los dos primeros guardan. 585 rechazos en `app_logs` del 23/09
+  al 17/10 (la tabla guarda unos 30 días; antes no hay registro, no es que no pasara),
+  entre 12 y 48 al día, y `health_metrics` con sus ocho métricas y la noche todos los
+  días desde el 15/09. Ninguna fila con fuente `atajo`: `/health/ingest/simple` no lo
+  llama nadie.
 
-Y **los dos mandan el token en la query**. Desde el 17/10 el aviso «Token de servicio por
-query string» dice el User-Agent de quien lo hace, una vez por ruta y cliente: es la
+Si deja de llegar el sueño, mira ese Atajo y sus automatizaciones, no la app. Y **manda
+el token en la URL**, en los tres pasos: desde el 17/10 el aviso «Token de servicio por
+query string» dice el User-Agent de quien lo hace, una vez por ruta y cliente, que es la
 lista de lo que falta migrar a `X-Auth-Token` antes de quitar ese camino.
 
 **Si la ingesta responde 200 y la noche sigue sin salir, mira la lectura.** El
