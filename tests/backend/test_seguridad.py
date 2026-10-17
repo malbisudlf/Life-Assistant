@@ -416,6 +416,22 @@ class TestSuperficieQueNoHaceFalta:
             client.get("/ha/events/soon?token=ha-poll-token")
         assert caplog.text.count("Token de servicio por query string en /ha/events/soon") == 1
 
+    def test_el_rastro_dice_que_cliente_es(self, client, mock_requests, caplog):
+        """En /health/ingest llaman Health Auto Export y un Atajo con el mismo token: sin
+        el User-Agent no se sabe cuál de los dos hay que migrar en el teléfono."""
+        with caplog.at_level("WARNING"):
+            for ua in ("BackgroundShortcutRunner/5037", "Health Auto Export/8", "BackgroundShortcutRunner/5037"):
+                client.get("/ha/events/soon?token=ha-poll-token", headers={"User-Agent": ua})
+        assert caplog.text.count("(cliente: BackgroundShortcutRunner/5037)") == 1
+        assert caplog.text.count("(cliente: Health Auto Export/8)") == 1
+
+    def test_el_rastro_tiene_tope(self, client, mock_requests, caplog):
+        """Corre antes de mirar el token: rotar el User-Agent no puede llenar app_logs."""
+        with caplog.at_level("WARNING"):
+            for i in range(50):
+                client.get("/ha/events/soon?token=malo", headers={"User-Agent": f"ua-{i}"})
+        assert caplog.text.count("por query string") == 32
+
     def test_por_cabecera_no_deja_rastro(self, client, mock_requests, caplog):
         with caplog.at_level("WARNING"):
             client.get("/ha/events/soon", headers={"X-Auth-Token": "ha-poll-token"})

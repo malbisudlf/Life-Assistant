@@ -148,6 +148,19 @@ decenas al día), aunque en el iPhone termine en verde porque «Obtener contenid
 no falla con un 4xx. Lo que entrega es la automatización REST de dentro de la app. Si
 deja de llegar el sueño, mira primero esa automatización, no el Atajo.
 
+Comprobado otra vez el 2026-10-17: 585 rechazos en `app_logs` entre el 23/09 y el 17/10
+(la tabla guarda unos 30 días; antes del 23/09 no hay registro, no es que no pasara),
+entre 12 y 48 al día, a cualquier hora, siempre `BackgroundShortcutRunner/5037.x`
+—Atajos en segundo plano— y a veces dos seguidos en el mismo segundo. **Sin un solo
+hueco**: `health_metrics` tiene sus ocho métricas de `auto_export` y la noche todos los
+días desde el 15/09, y **ninguna fila con fuente `atajo`**: `/health/ingest/simple` no lo
+llama nadie desde hace más de un mes. Los envíos buenos llegan a ráfagas, varios POST en
+paralelo por dos conexiones a la vez, que es como manda la app y no como manda un Atajo.
+
+Y **los dos mandan el token en la query**. Desde el 17/10 el aviso «Token de servicio por
+query string» dice el User-Agent de quien lo hace, una vez por ruta y cliente: es la
+lista de lo que falta migrar a `X-Auth-Token` antes de quitar ese camino.
+
 **Si la ingesta responde 200 y la noche sigue sin salir, mira la lectura.** El
 2026-09-23 la fila estaba en `health_metrics` y el dashboard no la enseñaba porque
 Supabase devuelve como mucho 1.000 filas por petición y `/health/metrics` las pedía en

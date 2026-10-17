@@ -1460,17 +1460,22 @@ def _extract_service_token(request: Request, token_qs: str = "") -> str:
         return auth[7:].strip()
     if token_qs:
         # El camino de la query se mantiene por el Atajo de iOS, pero ya no se sabía quién
-        # más lo usaba. Se dice una vez por ruta y proceso: es la lista de lo que falta
-        # migrar a cabecera antes de poder quitarlo.
+        # más lo usaba. Se dice una vez por ruta, cliente y proceso: es la lista de lo que
+        # falta migrar a cabecera antes de poder quitarlo. Sin el cliente no servía: en
+        # /health/ingest llaman Health Auto Export y un Atajo con el mismo token, y «migra
+        # ese cliente» no decía cuál de los dos abrir en el teléfono.
         ruta = getattr(getattr(request, "url", None), "path", "?")
-        if ruta not in _token_por_query_visto:
-            _token_por_query_visto.add(ruta)
-            logger.warning("Token de servicio por query string en %s: migra ese cliente a la "
-                           "cabecera X-Auth-Token", ruta)
+        clave = (ruta, _cliente_http(request))
+        # Con tope: esto corre antes de mirar el token y el User-Agent lo pone el cliente,
+        # así que sin él cualquiera podría llenar el conjunto y app_logs rotándolo.
+        if clave not in _token_por_query_visto and len(_token_por_query_visto) < 32:
+            _token_por_query_visto.add(clave)
+            logger.warning("Token de servicio por query string en %s (cliente: %s): migra "
+                           "ese cliente a la cabecera X-Auth-Token", *clave)
     return token_qs
 
 
-# Rutas que han recibido el token por la query desde que arrancó el proceso.
+# (ruta, cliente) que han mandado el token por la query desde que arrancó el proceso.
 _token_por_query_visto: set = set()
 
 
