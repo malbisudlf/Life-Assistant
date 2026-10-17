@@ -1,0 +1,722 @@
+diff -ruN a/voice-app/lib/confirmacion.js b/voice-app/lib/confirmacion.js
+--- a/voice-app/lib/confirmacion.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/lib/confirmacion.js	2026-10-17 14:13:15.959304824 +0200
+@@ -0,0 +1,149 @@
++/**
++ * Parche 20: confirmar de viva voz lo que Jarvis propone por teléfono. Ver
++ * telefono/PARCHES.md y «El sí dicho por teléfono» en docs/JARVIS.md, en Life Assistant.
++ *
++ * Lo que se confirma (crear una cita, una tarea…) llega al móvil con un botón «Sí,
++ * hazlo», y en el coche no se puede pulsar. Ahora Claude pone en su respuesta
++ *
++ *   ✅ CONFIRMAR: <id>
++ *
++ * y la llamada hace el resto, SIN Claude:
++ *   1. Pide al backend la frase de lo que se hará (GET /telefono/confirmar/<id>), que la
++ *      escribió el backend a partir de lo guardado, no el modelo, y la lee: «Crear
++ *      Dentista mañana de 10 a 11. ¿Lo hago? Di sí o no.»
++ *   2. Lo siguiente que digas lo decide `siONo`, con una lista cerrada: la frase ENTERA
++ *      tiene que ser un sí («sí», «vale», «hazlo») o un no. «Sí, pero a las 11» no es
++ *      ninguna de las dos y va a Claude como siempre, con la propuesta todavía pendiente.
++ *   3. Con un sí o un no, se lo dice al backend (POST, con TELEFONO_CONFIRMAR_TOKEN, que
++ *      no tiene Claude) y lee lo que contesta: «Hecho. Creado Dentista mañana.»
++ *
++ * El backend vuelve a comprobarlo todo: solo lo que se deshace fácil, recién propuesto
++ * y sin contestar. Si ya lo pulsaste en el móvil, el «sí» hablado no hace nada más.
++ *
++ * Variables: LECTURA_URL (el backend, como la lectura) y CONFIRMAR_TOKEN.
++ */
++'use strict';
++
++const { decirInterrumpible } = require('./turno-rapido');
++
++const MARCA = /✅\s*CONFIRMAR:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
++
++// Las mismas listas que el modo llamada del dashboard (esConfirmacionHablada, en
++// src/lib/helpers.js de Life Assistant). Órdenes, no opiniones: «perfecto» o «eso es»
++// se dicen al oír una propuesta sin haber decidido nada todavía.
++const SI = new Set([
++  'si', 'si si', 'si claro', 'si vale', 'si adelante', 'si hazlo', 'si dale',
++  'vale', 'venga', 'venga va', 'va', 'dale', 'adelante', 'hazlo', 'hazlo ya',
++  'confirmo', 'confirmado', 'ok', 'okey', 'oka', 'de acuerdo', 'procede', 'tira'
++]);
++const NO = new Set([
++  'no', 'no no', 'no gracias', 'dejalo', 'dejalo estar', 'deja', 'cancela',
++  'cancelalo', 'olvidalo', 'mejor no', 'no lo hagas', 'no hagas nada', 'para',
++  'quita', 'anula'
++]);
++
++function normalizar(texto) {
++  return String(texto || '')
++    .toLowerCase()
++    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
++    .replace(/[.,;:!?¡¿"«»]/g, ' ')
++    .replace(/\b(por favor|porfa|porfi|gracias|jarvis)\b/g, ' ')
++    .replace(/\s+/g, ' ')
++    .trim();
++}
++
++/** 'si', 'no' o null. Null es «no lo sé», y entonces no se confirma nada. */
++function siONo(texto) {
++  const t = normalizar(texto);
++  if (NO.has(t)) return 'no';
++  if (SI.has(t)) return 'si';
++  return null;
++}
++
++/** El id que trae la respuesta de Claude, o null. */
++function pedidoDeConfirmacion(respuesta) {
++  const m = String(respuesta || '').match(MARCA);
++  return m ? m[1].toLowerCase() : null;
++}
++
++function base() {
++  return (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
++}
++
++function cabeceras() {
++  return { Authorization: 'Bearer ' + (process.env.CONFIRMAR_TOKEN || ''),
++           'Content-Type': 'application/json' };
++}
++
++async function decir(c, texto) {
++  const url = await c.ttsService.generateSpeech(texto, c.voiceId);
++  return decirInterrumpible(c.endpoint, c.session, url, c.log || function () {});
++}
++
++/**
++ * Si la respuesta trae `✅ CONFIRMAR`, lee lo que se hará y pregunta. Devuelve
++ * { pendiente, interrumpio }: `pendiente` es lo que espera respuesta ({ id, frase }) o
++ * null si no hay nada que preguntar (sin marca, o el backend dice que esto va con
++ * botón: entonces Claude ya ha dicho que le ha llegado al móvil, y no se añade nada).
++ */
++async function preguntarSiLoPide(respuesta, c) {
++  const id = pedidoDeConfirmacion(respuesta);
++  if (!id) return { pendiente: null, interrumpio: false };
++  const log = c.log || function () {};
++  if (!process.env.CONFIRMAR_TOKEN) {
++    log('CONFIRMAR: sin CONFIRMAR_TOKEN, se queda en el botón del móvil');
++    return { pendiente: null, interrumpio: false };
++  }
++  let datos;
++  try {
++    const r = await (c.fetchImpl || fetch)(base() + '/telefono/confirmar/' + id, {
++      headers: cabeceras(), signal: AbortSignal.timeout(10000)
++    });
++    datos = r.ok ? await r.json() : { ok: false, motivo: 'HTTP ' + r.status };
++  } catch (e) {
++    datos = { ok: false, motivo: e.message };
++  }
++  if (!datos || !datos.ok) {
++    log('CONFIRMAR: ' + id + ' va con botón (' + ((datos && datos.motivo) || '?') + ')');
++    return { pendiente: null, interrumpio: false };
++  }
++  if (c.sigueActiva && !c.sigueActiva()) return { pendiente: null, interrumpio: false };
++  log('CONFIRMAR: pregunto ' + id);
++  const interrumpio = await decir(c, datos.frase + ' ¿Lo hago? Di sí o no.');
++  return { pendiente: { id: id, frase: datos.frase }, interrumpio: interrumpio };
++}
++
++/**
++ * Lo que has dicho después de la pregunta. Devuelve { resuelta, interrumpio, aviso }:
++ * con un sí o un no, `resuelta` (ya está dicho y hecho, no hace falta Claude para este
++ * turno); si no, lo dicho sigue su camino a Claude con `aviso` delante.
++ */
++async function resolverConfirmacion(pendiente, transcript, c) {
++  const log = c.log || function () {};
++  const respuesta = siONo(transcript);
++  if (!respuesta) {
++    log('CONFIRMAR: ' + pendiente.id + ' sin un sí o un no claro, sigue pendiente');
++    return { resuelta: false, interrumpio: false,
++             aviso: '[Le has preguntado de viva voz si hacías «' + pendiente.frase + '» y no ha ' +
++                    'contestado sí o no: sigue pendiente en el móvil, no lo des por hecho.] ' };
++  }
++  let datos;
++  try {
++    const r = await (c.fetchImpl || fetch)(base() + '/telefono/confirmar/' + pendiente.id, {
++      method: 'POST', headers: cabeceras(), body: JSON.stringify({ respuesta: respuesta }),
++      signal: AbortSignal.timeout(20000)
++    });
++    datos = r.ok ? await r.json() : { ok: false, frase: 'No he podido confirmarlo. Tienes el botón en el móvil.' };
++  } catch (e) {
++    datos = { ok: false, frase: 'No he podido confirmarlo. Tienes el botón en el móvil.' };
++  }
++  const frase = (datos && datos.frase) || 'No he podido confirmarlo. Tienes el botón en el móvil.';
++  log('CONFIRMAR: ' + pendiente.id + ' → ' + respuesta + ' → ' + frase);
++  const interrumpio = await decir(c, frase);
++  return { resuelta: true, interrumpio: interrumpio,
++           aviso: '[Has preguntado de viva voz por «' + pendiente.frase + '» y ha contestado «' +
++                  (respuesta === 'si' ? 'sí' : 'no') + '». Resultado, ya dicho en voz alta: «' +
++                  frase + '». No lo repitas.] ' };
++}
++
++module.exports = { preguntarSiLoPide, resolverConfirmacion, siONo, pedidoDeConfirmacion };
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-10-17 14:13:15.951304818 +0200
++++ b/voice-app/lib/conversation-loop.js	2026-10-17 14:13:15.955304821 +0200
+@@ -16,6 +16,8 @@
+ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ // Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
+ const { leerSiLoPide } = require('./lectura');
++// Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
++const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -256,6 +258,8 @@
+     let interrumpio = false;
+     // Lo que pasó con la última lectura (parche 18), para anteponerlo a la pregunta.
+     let avisoLectura = '';
++    // Lo que espera un sí o un no de viva voz (parche 20), o null.
++    let pendienteConfirmar = null;
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -361,6 +365,22 @@
+         break;
+       }
+ 
++      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
++      if (pendienteConfirmar) {
++        const pendiente = pendienteConfirmar;
++        pendienteConfirmar = null;
++        const rc = await resolverConfirmacion(pendiente, transcript, {
++          endpoint, session, ttsService, voiceId,
++          log: (m) => logger.info(m, { callUuid })
++        });
++        if (rc.resuelta) {
++          interrumpio = rc.interrumpio;
++          avisoLectura = rc.aviso;
++          continue;
++        }
++        avisoLectura = rc.aviso + avisoLectura;
++      }
++
+       // ============================================
+       // THINKING FEEDBACK
+       // ============================================
+@@ -411,6 +431,15 @@
+         interrumpio = lectura.interrumpio;
+         avisoLectura = lectura.aviso;
+       }
++      if (callActive && !interrumpio && !avisoLectura) {
++        const pc = await preguntarSiLoPide(claudeResponse, {
++          endpoint, session, ttsService, voiceId,
++          log: (m) => logger.info(m, { callUuid }),
++          sigueActiva: () => callActive
++        });
++        pendienteConfirmar = pc.pendiente;
++        interrumpio = pc.interrumpio;
++      }
+ 
+       logger.info('Turn complete', { callUuid, turn: turnCount });
+     }
+diff -ruN a/voice-app/lib/lectura.js b/voice-app/lib/lectura.js
+--- a/voice-app/lib/lectura.js	2026-10-17 14:13:15.955304821 +0200
++++ b/voice-app/lib/lectura.js	2026-10-17 14:13:15.955304821 +0200
+@@ -1,5 +1,5 @@
+ /**
+- * Parche 18: leer en voz alta lo que no cabe en una respuesta. Ver
++ * Parches 18 y 20: leer en voz alta lo que no cabe en una respuesta. Ver
+  * telefono/PARCHES.md en Life Assistant.
+  *
+  * Cada respuesta de Claude por teléfono son 40 palabras (VOICE_CONTEXT, en
+@@ -10,13 +10,18 @@
+  *
+  * Así que Claude no lo lee. Pone en su respuesta una línea
+  *
+- *   📖 LEER: briefing [desde=N] [hasta=M] [fecha=YYYY-MM-DD]
++ *   📖 LEER: <qué> [desde=N] [hasta=M] [fecha=YYYY-MM-DD]
+  *
+- * y la llamada pide el texto ya preparado para la voz al backend de Life Assistant
+- * (GET /telefono/briefing) y lo lee ella, trozo a trozo: mientras suena uno se
++ * con <qué> = briefing, semana (la agenda), correo (el parte de la noche) o tareas, y
++ * la llamada pide el texto ya preparado para la voz al backend de Life Assistant
++ * (GET /telefono/lectura) y lo lee ella, trozo a trozo: mientras suena uno se
+  * sintetiza el siguiente, y cada trozo se puede cortar hablando (barge-in, parche
+  * 16). Si le cortas, a Claude le llega en qué sección iba, para seguir desde ahí.
+  *
++ * El parche 18 solo sabía leer el briefing; el 20 lee también lo demás. De paso, el
++ * texto de terceros (asuntos y remitentes del correo) va del backend al altavoz sin
++ * pasar por Claude, que es una sesión con shell.
++ *
+  * Variables: LECTURA_URL (por defecto http://127.0.0.1:8080, el backend en la misma
+  * máquina; la voice-app va con network_mode host) y LECTURA_TOKEN (el token del MCP
+  * del teléfono, JARVIS_MCP_TELEFONO_TOKEN del backend).
+@@ -25,40 +30,48 @@
+ 
+ const { decirInterrumpible } = require('./turno-rapido');
+ 
+-const MARCA = /📖\s*LEER:\s*briefing\b([^\n]*)/i;
+-const NO_PUEDO = 'No he podido traer el briefing para leértelo.';
++const QUE = ['briefing', 'semana', 'correo', 'tareas'];
++const MARCA = new RegExp('📖\\s*LEER:\\s*(' + QUE.join('|') + ')\\b([^\\n]*)', 'i');
++const NOMBRE = { briefing: 'el briefing', semana: 'la agenda de la semana',
++                 correo: 'el parte del correo', tareas: 'tus tareas' };
+ 
+ /** El pedido de lectura que trae la respuesta de Claude, o null si no lo trae. */
+ function pedidoDeLectura(respuesta) {
+   const m = String(respuesta || '').match(MARCA);
+   if (!m) return null;
+-  const resto = m[1] || '';
++  const resto = m[2] || '';
+   const valor = function (clave, patron) {
+     const r = resto.match(new RegExp(clave + '\\s*=\\s*(' + patron + ')'));
+     return r ? r[1] : '';
+   };
+   return {
++    que: m[1].toLowerCase(),
+     fecha: valor('fecha', '\\d{4}-\\d{2}-\\d{2}'),
+     desde: parseInt(valor('desde', '\\d+'), 10) || 1,
+     hasta: parseInt(valor('hasta', '\\d+'), 10) || 0
+   };
+ }
+ 
+-async function traerBriefing(pedido, fetchImpl) {
++function noPuedo(que) {
++  return 'No he podido traer ' + (NOMBRE[que] || 'eso') + ' para leértelo.';
++}
++
++async function traerLectura(pedido, fetchImpl) {
+   const base = (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
+-  const q = new URLSearchParams({ desde: String(pedido.desde), hasta: String(pedido.hasta) });
++  const que = pedido.que || 'briefing';
++  const q = new URLSearchParams({ que: que, desde: String(pedido.desde), hasta: String(pedido.hasta) });
+   if (pedido.fecha) q.set('fecha', pedido.fecha);
+   try {
+-    const r = await (fetchImpl || fetch)(base + '/telefono/briefing?' + q.toString(), {
++    const r = await (fetchImpl || fetch)(base + '/telefono/lectura?' + q.toString(), {
+       headers: { Authorization: 'Bearer ' + (process.env.LECTURA_TOKEN || '') },
+       signal: AbortSignal.timeout(20000)
+     });
+-    if (!r.ok) return { ok: false, frase: NO_PUEDO, motivo: 'HTTP ' + r.status };
++    if (!r.ok) return { ok: false, frase: noPuedo(que), motivo: 'HTTP ' + r.status };
+     const datos = await r.json();
+-    if (!datos || !datos.ok) return { ok: false, frase: (datos && datos.frase) || NO_PUEDO };
++    if (!datos || !datos.ok) return { ok: false, frase: (datos && datos.frase) || noPuedo(que) };
+     return datos;
+   } catch (e) {
+-    return { ok: false, frase: NO_PUEDO, motivo: e.message };
++    return { ok: false, frase: noPuedo(que), motivo: e.message };
+   }
+ }
+ 
+@@ -75,17 +88,18 @@
+   if (!pedido) return { interrumpio: false, aviso: '' };
+   const log = c.log || function () {};
+   const sigueActiva = c.sigueActiva || function () { return true; };
+-  log('LECTURA: briefing desde=' + pedido.desde + ' hasta=' + (pedido.hasta || 'fin') +
++  log('LECTURA: ' + pedido.que + ' desde=' + pedido.desde + ' hasta=' + (pedido.hasta || 'fin') +
+       (pedido.fecha ? ' fecha=' + pedido.fecha : ''));
+ 
+-  const datos = await traerBriefing(pedido, c.fetchImpl);
++  const datos = await traerLectura(pedido, c.fetchImpl);
++  const nombre = datos.nombre || NOMBRE[pedido.que];
+   if (!datos.ok) {
+     log('LECTURA: no se puede (' + (datos.motivo || datos.frase) + ')');
+     if (!sigueActiva()) return { interrumpio: false, aviso: '' };
+     const url = await c.ttsService.generateSpeech(datos.frase, c.voiceId);
+     const cortado = await decirInterrumpible(c.endpoint, c.session, url, log);
+     return { interrumpio: cortado,
+-             aviso: '[La lectura del briefing no se pudo hacer: «' + datos.frase + '»] ' };
++             aviso: '[La lectura de ' + nombre + ' no se pudo hacer: «' + datos.frase + '»] ' };
+   }
+ 
+   const cola = [];
+@@ -95,7 +109,8 @@
+   if (!cola.length) return { interrumpio: false, aviso: '' };
+   const total = (datos.secciones || []).length;
+   const ultima = cola[cola.length - 1].n;
+-  cola.push({ n: ultima, titulo: cola[cola.length - 1].titulo, texto: 'Hasta aquí el briefing.' });
++  cola.push({ n: ultima, titulo: cola[cola.length - 1].titulo,
++              texto: pedido.que === 'briefing' ? 'Hasta aquí el briefing.' : 'Eso es todo.' });
+ 
+   // El siguiente trozo se sintetiza mientras suena el actual: así no hay silencio entre
+   // uno y otro. Un fallo de la voz se guarda como null y corta la lectura ahí.
+@@ -112,7 +127,7 @@
+     siguiente = i + 1 < cola.length ? sintetizar(cola[i + 1].texto) : null;
+     if (!url) {
+       return { interrumpio: false,
+-               aviso: '[La lectura del briefing se cortó por un fallo de la voz en la sección ' +
++               aviso: '[La lectura de ' + nombre + ' se cortó por un fallo de la voz en la sección ' +
+                       cola[i].n + ' («' + cola[i].titulo + '»). Dile dónde se quedó.] ' };
+     }
+     const cortado = await decirInterrumpible(c.endpoint, c.session, url, log);
+@@ -120,16 +135,17 @@
+       if (siguiente) siguiente.catch(function () {});
+       log('LECTURA: cortada en la sección ' + cola[i].n);
+       return { interrumpio: true,
+-               aviso: '[Le estabas leyendo el briefing y te ha cortado en la sección ' +
++               aviso: '[Le estabas leyendo ' + nombre + ' y te ha cortado en la sección ' +
+                       cola[i].n + ' de ' + total + ' («' + cola[i].titulo + '»). Si te pide ' +
+-                      'que sigas, vuelve a poner la línea 📖 LEER: briefing desde=' + cola[i].n +
+-                      (pedido.fecha ? ' fecha=' + pedido.fecha : '') + '] ' };
++                      'que sigas, vuelve a poner la línea 📖 LEER: ' + pedido.que + ' desde=' +
++                      cola[i].n + (pedido.fecha ? ' fecha=' + pedido.fecha : '') + '] ' };
+     }
+   }
+   log('LECTURA: terminada (' + (cola.length - 1) + ' trozos)');
+   return { interrumpio: false,
+-           aviso: '[Ya le has leído el briefing entero (de la sección ' + pedido.desde +
++           aviso: '[Ya le has leído ' + nombre + ' entero (de la sección ' + pedido.desde +
+                   ' a la ' + ultima + ').] ' };
+ }
+ 
+-module.exports = { leerSiLoPide, pedidoDeLectura, traerBriefing };
++// `traerBriefing` se queda por compatibilidad con lo que lo importara (parche 18).
++module.exports = { leerSiLoPide, pedidoDeLectura, traerLectura, traerBriefing: traerLectura };
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-10-17 14:13:15.951304818 +0200
++++ b/voice-app/lib/sip-handler.js	2026-10-17 14:13:15.951304818 +0200
+@@ -7,6 +7,8 @@
+ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ // Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
+ const { leerSiLoPide } = require('./lectura');
++// Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
++const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -147,6 +149,9 @@
+     let interrumpio = false;
+     // Lo que pasó con la última lectura (parche 18), para anteponerlo a la pregunta.
+     let avisoLectura = '';
++    // Lo que espera un sí o un no de viva voz (parche 20), o null.
++    let pendienteConfirmar = null;
++    const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
+ 
+     while (turnCount < MAX_TURNS) {
+       turnCount++;
+@@ -210,6 +215,22 @@
+         break;
+       }
+ 
++      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
++      if (pendienteConfirmar) {
++        const pendiente = pendienteConfirmar;
++        pendienteConfirmar = null;
++        const rc = await resolverConfirmacion(pendiente, transcript, {
++          endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++          log: logTurno
++        });
++        if (rc.resuelta) {
++          interrumpio = rc.interrumpio;
++          avisoLectura = rc.aviso;
++          continue;
++        }
++        avisoLectura = rc.aviso + avisoLectura;
++      }
++
+       // THINKING FEEDBACK + Claude, a la vez (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+@@ -247,6 +268,14 @@
+         interrumpio = lectura.interrumpio;
+         avisoLectura = lectura.aviso;
+       }
++      if (!interrumpio && !avisoLectura) {
++        const pc = await preguntarSiLoPide(claudeResponse, {
++          endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++          log: logTurno
++        });
++        pendienteConfirmar = pc.pendiente;
++        interrumpio = pc.interrumpio;
++      }
+ 
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + ' complete');
+     }
+diff -ruN a/voice-app/test/parche18.test.js b/voice-app/test/parche18.test.js
+--- a/voice-app/test/parche18.test.js	2026-10-17 14:13:15.959304824 +0200
++++ b/voice-app/test/parche18.test.js	2026-10-17 14:13:15.959304824 +0200
+@@ -91,9 +91,9 @@
+ // ── El pedido ────────────────────────────────────────────────────────────────
+ test('18: la marca se lee con y sin parámetros, y sin ella no hay pedido', function () {
+   assert.deepStrictEqual(pedidoDeLectura('🗣️ VOICE_RESPONSE: Te lo leo.\n📖 LEER: briefing'),
+-    { fecha: '', desde: 1, hasta: 0 });
++    { que: 'briefing', fecha: '', desde: 1, hasta: 0 });
+   assert.deepStrictEqual(pedidoDeLectura('📖 LEER: briefing desde=2 hasta=3 fecha=2026-10-14'),
+-    { fecha: '2026-10-14', desde: 2, hasta: 3 });
++    { que: 'briefing', fecha: '2026-10-14', desde: 2, hasta: 3 });
+   assert.strictEqual(pedidoDeLectura('🗣️ VOICE_RESPONSE: hola'), null);
+   assert.strictEqual(pedidoDeLectura('📖 LEER: otra cosa'), null);
+ });
+@@ -110,7 +110,8 @@
+     'play tts:Inteligencia Artificial. Tres.', 'play tts:Hasta aquí el briefing.']);
+   assert.strictEqual(r.interrumpio, false);
+   assert.match(r.aviso, /leído el briefing entero/);
+-  assert.match(pedidos[0].url, /\/telefono\/briefing\?desde=1&hasta=0$/);
++  // Desde el parche 20 todo se pide a /telefono/lectura, el briefing incluido.
++  assert.match(pedidos[0].url, /\/telefono\/lectura\?que=briefing&desde=1&hasta=0$/);
+   assert.match(pedidos[0].opciones.headers.Authorization, /^Bearer /);
+ });
+ 
+diff -ruN a/voice-app/test/parche20.test.js b/voice-app/test/parche20.test.js
+--- a/voice-app/test/parche20.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche20.test.js	2026-10-17 14:13:15.963304828 +0200
+@@ -0,0 +1,266 @@
++/**
++ * Parche 20: la llamada lee también la semana, el correo y las tareas, y lo que Jarvis
++ * propone (`✅ CONFIRMAR: <id>`) se confirma diciendo sí o no, sin que lo decida Claude.
++ *
++ * Mismos dobles que parche18.test.js; el backend es un fetch falso. Se lanza con
++ * `node --test test/parche20.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { leerSiLoPide, pedidoDeLectura } = require('../lib/lectura');
++const { preguntarSiLoPide, resolverConfirmacion, siONo, pedidoDeConfirmacion } =
++  require('../lib/confirmacion');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++const ID = '0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11';
++const FRASE = 'Crear «Dentista» mañana de 10:00 a 11:00.';
++
++// ── Dobles (los de parche18.test.js) ─────────────────────────────────────────
++function ttsFalso() {
++  const t = { pedidos: [] };
++  t.generateSpeech = async function (texto) { t.pedidos.push(texto); return 'tts:' + texto; };
++  return t;
++}
++
++function endpointFalso(bloquea) {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep._sonando = [];
++  ep.play = function (url) {
++    ep.hecho.push('play ' + url);
++    if (bloquea && bloquea(url)) return new Promise(function (r) { ep._sonando.push(r); });
++    return Promise.resolve();
++  };
++  ep.api = async function (cmd) {
++    ep.hecho.push('api ' + cmd);
++    if (cmd === 'uuid_break') { const s = ep._sonando; ep._sonando = []; s.forEach(function (r) { r(); }); }
++  };
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++function sesionFalsa(frases, cortaEn) {
++  const s = new EventEmitter();
++  let i = 0;
++  let armados = 0;
++  s.setCaptureEnabled = function () {};
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {
++    armados++;
++    if ((cortaEn || []).indexOf(armados) >= 0) setImmediate(function () { s.emit('barge'); });
++  };
++  s.waitForUtterance = async function () {
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  return s;
++}
++
++function interrumpibles(ep) {
++  return ep.hecho.filter(function (h) { return h.indexOf('play tts:') === 0; });
++}
++
++/** El backend: GET de la confirmación, POST con la respuesta, y lecturas. */
++function backendFalso(apunte, opciones) {
++  const o = opciones || {};
++  return async function (url, op) {
++    const metodo = (op && op.method) || 'GET';
++    apunte.push({ url: url, metodo: metodo, cuerpo: op && op.body, auth: op && op.headers.Authorization });
++    let datos;
++    if (url.indexOf('/telefono/confirmar/') >= 0 && metodo === 'GET') {
++      datos = o.ver || { ok: true, frase: FRASE };
++    } else if (url.indexOf('/telefono/confirmar/') >= 0) {
++      const r = JSON.parse(op.body).respuesta;
++      datos = r === 'si' ? { ok: true, hecho: true, frase: 'Hecho. Creado «Dentista» mañana.' }
++                         : { ok: true, hecho: true, frase: 'Vale, no lo hago.' };
++    } else {
++      datos = o.lectura || { ok: true, nombre: 'la agenda de la semana', secciones: [
++        { n: 1, titulo: 'Mañana', trozos: ['Mañana. A las 10:00, Dentista.'] }] };
++    }
++    return { ok: true, status: 200, json: async function () { return datos; } };
++  };
++}
++
++function conToken(fn) {
++  return async function () {
++    const antes = process.env.CONFIRMAR_TOKEN;
++    process.env.CONFIRMAR_TOKEN = 'confirmar';
++    try { await fn(); } finally {
++      if (antes === undefined) delete process.env.CONFIRMAR_TOKEN; else process.env.CONFIRMAR_TOKEN = antes;
++    }
++  };
++}
++
++// ── Lectura de otras cosas ───────────────────────────────────────────────────
++test('20: la marca lee semana, correo y tareas; lo demás no', function () {
++  assert.strictEqual(pedidoDeLectura('📖 LEER: semana').que, 'semana');
++  assert.strictEqual(pedidoDeLectura('📖 LEER: correo desde=2').desde, 2);
++  assert.strictEqual(pedidoDeLectura('📖 LEER: tareas').que, 'tareas');
++  assert.strictEqual(pedidoDeLectura('📖 LEER: briefing').que, 'briefing');
++  assert.strictEqual(pedidoDeLectura('📖 LEER: poemas'), null);
++});
++
++test('20: la semana se pide a /telefono/lectura y se cierra con «Eso es todo»', async function () {
++  const ep = endpointFalso();
++  const pedidos = [];
++  const r = await leerSiLoPide('📖 LEER: semana', {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: backendFalso(pedidos) });
++  assert.match(pedidos[0].url, /\/telefono\/lectura\?que=semana&desde=1&hasta=0$/);
++  assert.deepStrictEqual(interrumpibles(ep), ['play tts:Mañana. A las 10:00, Dentista.',
++    'play tts:Eso es todo.']);
++  assert.match(r.aviso, /leído la agenda de la semana entero/);
++});
++
++// ── El sí o el no ────────────────────────────────────────────────────────────
++test('20: sí o no con la frase entera, y lo demás es «no lo sé»', function () {
++  assert.strictEqual(siONo('Sí.'), 'si');
++  assert.strictEqual(siONo('Vale, por favor.'), 'si');
++  assert.strictEqual(siONo('Hazlo'), 'si');
++  assert.strictEqual(siONo('No.'), 'no');
++  assert.strictEqual(siONo('Mejor no'), 'no');
++  assert.strictEqual(siONo('Sí, pero a las once'), null);
++  assert.strictEqual(siONo('Perfecto'), null);
++  assert.strictEqual(siONo(''), null);
++});
++
++test('20: el id sale de la marca, y sin marca no hay nada', function () {
++  assert.strictEqual(pedidoDeConfirmacion('🗣️ VOICE_RESPONSE: x\n✅ CONFIRMAR: ' + ID), ID);
++  assert.strictEqual(pedidoDeConfirmacion('✅ CONFIRMAR: no-es-un-id'), null);
++  assert.strictEqual(pedidoDeConfirmacion('🗣️ VOICE_RESPONSE: hola'), null);
++});
++
++test('20: sin su token no pregunta nada (se queda en el botón)', async function () {
++  delete process.env.CONFIRMAR_TOKEN;
++  const ep = endpointFalso();
++  const r = await preguntarSiLoPide('✅ CONFIRMAR: ' + ID, {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: function () { throw new Error('no debería preguntar'); } });
++  assert.deepStrictEqual(r, { pendiente: null, interrumpio: false });
++  assert.deepStrictEqual(ep.hecho, []);
++});
++
++test('20: lee la frase del BACKEND y pregunta', conToken(async function () {
++  const ep = endpointFalso();
++  const pedidos = [];
++  const r = await preguntarSiLoPide('🗣️ VOICE_RESPONSE: Te lo leo.\n✅ CONFIRMAR: ' + ID, {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: backendFalso(pedidos) });
++  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE });
++  assert.deepStrictEqual(interrumpibles(ep), ['play tts:' + FRASE + ' ¿Lo hago? Di sí o no.']);
++  assert.strictEqual(pedidos[0].auth, 'Bearer confirmar');
++}));
++
++test('20: si el backend dice que va con botón, no pregunta', conToken(async function () {
++  const ep = endpointFalso();
++  const r = await preguntarSiLoPide('✅ CONFIRMAR: ' + ID, {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: backendFalso([], { ver: { ok: false, motivo: 'Esto se confirma con el botón del móvil.' } }) });
++  assert.strictEqual(r.pendiente, null);
++  assert.deepStrictEqual(ep.hecho, []);
++}));
++
++test('20: un sí claro se confirma y se dice lo que contestó el backend', conToken(async function () {
++  const ep = endpointFalso();
++  const pedidos = [];
++  const r = await resolverConfirmacion({ id: ID, frase: FRASE }, 'Sí, por favor.', {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: backendFalso(pedidos) });
++  assert.strictEqual(r.resuelta, true);
++  assert.deepStrictEqual(JSON.parse(pedidos[0].cuerpo), { respuesta: 'si' });
++  assert.deepStrictEqual(interrumpibles(ep), ['play tts:Hecho. Creado «Dentista» mañana.']);
++  assert.match(r.aviso, /ha contestado «sí»/);
++}));
++
++test('20: lo que no es un sí ni un no no confirma nada y va a Claude', conToken(async function () {
++  const ep = endpointFalso();
++  const r = await resolverConfirmacion({ id: ID, frase: FRASE }, 'Mejor a las once', {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: function () { throw new Error('no debería confirmar nada'); } });
++  assert.strictEqual(r.resuelta, false);
++  assert.match(r.aviso, /sigue pendiente en el móvil/);
++  assert.deepStrictEqual(ep.hecho, []);
++}));
++
++// ── Los dos bucles ───────────────────────────────────────────────────────────
++function claudeQuePropone() {
++  const c = { preguntas: [] };
++  c.query = async function (texto) {
++    c.preguntas.push(texto);
++    return c.preguntas.length === 1
++      ? '🗣️ VOICE_RESPONSE: Te lo leo para que me confirmes.\n✅ CONFIRMAR: ' + ID + '\n🎯 COMPLETED: propuesta'
++      : '🗣️ VOICE_RESPONSE: vale';
++  };
++  c.endSession = async function () {};
++  return c;
++}
++function opcionesComunes(sesion, claude) {
++  return {
++    ttsService: ttsFalso(), whisperClient: { transcribe: async function (a) { return a.toString(); } },
++    claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++
++test('20, saliente: «sí» lo confirma sin pasar por Claude, y Claude se entera después',
++  conToken(async function () {
++    const fetchAntes = global.fetch;
++    const pedidos = [];
++    global.fetch = backendFalso(pedidos);
++    try {
++      const ep = endpointFalso(function (url) { return url.indexOf('hold-music') >= 0; });
++      const claude = claudeQuePropone();
++      const sesion = sesionFalsa(['apúntame el dentista mañana a las diez', 'sí', 'gracias', 'adiós'], []);
++      const r = await runConversationLoop(ep, new EventEmitter(), 'c-sal',
++        Object.assign(opcionesComunes(sesion, claude), { skipGreeting: true }));
++      assert.strictEqual(r.endReason, 'goodbye');
++      // Dos preguntas a Claude, no tres: el «sí» no le llega como pregunta.
++      assert.strictEqual(claude.preguntas.length, 2);
++      assert.match(claude.preguntas[1], /^\[Has preguntado de viva voz .* ha contestado «sí».*\] gracias$/);
++      assert.ok(interrumpibles(ep).indexOf('play tts:Hecho. Creado «Dentista» mañana.') >= 0);
++      assert.deepStrictEqual(pedidos.filter(function (p) { return p.metodo === 'POST'; })
++        .map(function (p) { return JSON.parse(p.cuerpo); }), [{ respuesta: 'si' }]);
++    } finally {
++      global.fetch = fetchAntes;
++    }
++  }));
++
++test('20, entrante: si contestas otra cosa, va a Claude con la propuesta pendiente',
++  conToken(async function () {
++    const fetchAntes = global.fetch;
++    const pedidos = [];
++    global.fetch = backendFalso(pedidos);
++    try {
++      const ep = endpointFalso(function (url) { return url.indexOf('hold-music') >= 0; });
++      const claude = claudeQuePropone();
++      const sesion = sesionFalsa(['apúntame el dentista', 'mejor a las once', 'adiós'], []);
++      const dialogo = new EventEmitter();
++      dialogo.destroy = function () {};
++      const opciones = opcionesComunes(sesion, claude);
++      opciones.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++      const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++      await handleInvite(req, { send: function () {} }, opciones);
++      assert.match(claude.preguntas[1], /^\[Le has preguntado de viva voz .*sigue pendiente en el móvil.*\] mejor a las once$/);
++      assert.strictEqual(pedidos.filter(function (p) { return p.metodo === 'POST'; }).length, 0);
++    } finally {
++      global.fetch = fetchAntes;
++    }
++  }));

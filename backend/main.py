@@ -2383,8 +2383,11 @@ def _todo_lista(token: str, olvidar: bool = False) -> str:
         _todo_lista_cache.clear()
     if _todo_lista_cache.get("id") and time.time() - _todo_lista_cache.get("ts", 0) < TODO_LISTA_TTL_S:
         return _todo_lista_cache["id"]
-    r = http.get(f"{TODO_URL}?$select=id,displayName,wellknownListName",
-                 headers={"Authorization": f"Bearer {token}"})
+    # Sin `$select`: en las listas de To Do Graph lo rechaza con un 400 «ParseUri»
+    # (comprobado el 2026-10-17 contra la cuenta real), y con él `tareas` llevaba sin
+    # funcionar desde que se escribió. Son cuatro o cinco listas: pedirlas enteras no
+    # cuesta nada.
+    r = http.get(TODO_URL, headers={"Authorization": f"Bearer {token}"})
     motivo = _todo_fallo(r, "listas")
     if motivo:
         raise TareasApagadas(motivo)
@@ -2428,9 +2431,9 @@ def _todo_pendientes() -> list:
     token = _todo_token()
     for intento in range(2):
         lista = _todo_lista(token, olvidar=bool(intento))
+        # Sin `$select`, por lo mismo que en `_todo_lista`: To Do lo rechaza con un 400.
         r = http.get(f"{TODO_URL}/{quote(lista, safe='')}/tasks"
-                     f"?$filter=status ne 'completed'&$top={TAREAS_MAX}"
-                     "&$select=id,title,dueDateTime,importance",
+                     f"?$filter=status ne 'completed'&$top={TAREAS_MAX}",
                      headers={"Authorization": f"Bearer {token}"})
         if r.status_code == 404 and not intento:
             continue

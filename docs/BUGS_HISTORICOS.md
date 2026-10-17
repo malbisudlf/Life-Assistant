@@ -1188,3 +1188,14 @@
     convertir un número, comprueba qué incluye; el dato de prueba tiene que tener el caso
     incómodo (algo sin corregir), no el limpio.
 
+
+- **`tareas` no funcionó nunca: To Do rechaza el `$select`.** Las dos consultas a Microsoft
+  To Do (las listas y las tareas de la lista) pedían solo unos campos con `$select`, como
+  se hace con el calendario, y Graph contesta a eso un 400 `RequestBroker--ParseUri` en
+  los dos sitios. Los tests pasaban porque el doble de Graph no sabe que ese parámetro
+  existe. Se vio el 2026-10-17 al probar en vivo la lectura de tareas por teléfono, y se
+  comprobó variante a variante contra la cuenta real: sin `$select`, 200. Hoy hay un test
+  que mira que la URL no lo lleve.
+  - Moraleja: **lo que vale en una API de Graph no vale en todas.** Un parámetro OData que
+    funciona en `/events` puede no existir en `/todo`; la primera llamada contra la cuenta
+    real es la prueba que ningún doble sustituye.

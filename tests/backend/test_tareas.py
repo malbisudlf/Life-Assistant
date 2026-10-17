@@ -74,6 +74,16 @@ class TestLeer:
         url = mock_requests.called("GET", "/tasks")[0][1]
         assert "status ne 'completed'" in url
 
+    def test_sin_select_que_to_do_rechaza(self, encendidas, mock_requests):
+        """To Do contesta 400 «ParseUri» a un `$select`, en las listas y en las tareas
+        (comprobado el 2026-10-17 contra la cuenta real): con él, `tareas` no llegó a
+        funcionar nunca. Los dobles de aquí no lo saben, así que se mira la URL."""
+        mock_requests.add("GET", "/lista-def/tasks", FakeResponse({"value": []}))
+        mock_requests.add("GET", "/me/todo/lists", LISTAS)
+        main._todo_pendientes()
+        urls = [c[1] for c in mock_requests.calls if "/me/todo/" in c[1]]
+        assert urls and all("$select" not in u for u in urls)
+
     def test_la_lista_se_recuerda(self, encendidas, mock_requests):
         mock_requests.add("GET", "/lista-def/tasks", FakeResponse({"value": []}))
         mock_requests.add("GET", "/me/todo/lists", LISTAS)

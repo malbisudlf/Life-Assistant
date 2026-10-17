@@ -13,6 +13,8 @@ adivinaba mal y Jarvis dejaba de saber cuándo hablabas (ver «El parche 17»). 
 mismo día: la llamada lee el briefing entero de un tirón (ver «El parche 18»). Y el 19,
 también el 2026-10-15: un solo proceso de Claude por llamada en vez de uno por turno, y lo
 que ya está mirado (agenda, tareas, recordatorios) metido al descolgar (ver «El parche 19»).
+Y el 20 (2026-10-17): la llamada lee también la semana, el correo y las tareas, y lo que
+Jarvis propone se confirma diciendo sí o no, sin que lo decida Claude (ver «El parche 20»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -629,6 +631,60 @@ kill "$(systemctl show -p MainPID --value claude-phone-api)"   # Restart=always 
 usuario (`User=` de la unidad) y systemd lo vuelve a levantar a los 10 s. Volver atrás: copiar el `.bak` y
 el mismo `kill`. Lo que delata que funciona es `SESION-VIVA: nueva` en
 `journalctl -u claude-phone-api` y que no salga `[CONTEXTO]` con un aviso.
+
+## El parche 20: leer más cosas, y el «sí» de viva voz
+
+Sale del 2026-10-17, de dos de las propuestas del análisis del Jarvis de voz: que la
+lectura del parche 18 sirva para más que el briefing, y que lo que se confirma por
+teléfono no obligue a coger el móvil (en el coche no se puede). Los dos viven en la
+voice-app, en los dos bucles (entrante y saliente), igual que el 18.
+
+- **Leer más cosas** (`voice-app/lib/lectura.js`, generalizado). La línea es ahora
+  `📖 LEER: <qué>` con `briefing`, `semana`, `correo` o `tareas`, y todo se pide a
+  `GET /telefono/lectura?que=…` del backend (el briefing incluido; `/telefono/briefing`
+  sigue existiendo). El correo es el parte de la noche, y va del backend al altavoz sin
+  pasar por Claude, que no tiene herramienta para leerlo. Los avisos a Claude («le estabas
+  leyendo X y te ha cortado en la sección N») dicen qué se estaba leyendo.
+- **El «sí» de viva voz** (`voice-app/lib/confirmacion.js`, nuevo). Si la respuesta de
+  Claude trae `✅ CONFIRMAR: <id>` (la propuesta del backend se la da hecha), la llamada:
+  1. pide `GET /telefono/confirmar/<id>` y, si se puede confirmar hablando, lee la frase
+     que escribió el backend y pregunta «¿Lo hago? Di sí o no.»;
+  2. lo siguiente que digas lo decide `siONo`, con las mismas listas cerradas que el
+     dashboard: la frase **entera** tiene que ser un sí o un no, y el no gana;
+  3. con un sí o un no, `POST /telefono/confirmar/<id>` y lee lo que contesta el backend
+     («Hecho. Creado Dentista mañana.»). Ese turno no pasa por Claude; en el siguiente le
+     llega entre corchetes qué contestaste y qué pasó. Con cualquier otra cosa, lo dicho
+     va a Claude como siempre, con la propuesta todavía pendiente en el móvil.
+  El backend lo vuelve a comprobar todo (solo lo reversible, recién propuesto y sin
+  contestar; ver «El sí dicho por teléfono» en `docs/JARVIS.md`).
+
+**Variables**: `CONFIRMAR_TOKEN` en `~/.claude-phone/.env`, el mismo valor que
+`TELEFONO_CONFIRMAR_TOKEN` en `~/stack/backend.env`. Es **otro** token que el del MCP a
+propósito: ese lo tiene la configuración de Claude, y este solo la voice-app. Sin él, la
+llamada no pregunta nada y todo se confirma con el botón, como antes. La lectura sigue
+usando `LECTURA_TOKEN`.
+
+`telefono/parche-20.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`voice-app/test/parche20.test.js`: once casos (las marcas, el sí o el no, sin token, el
+backend que dice «botón», y los dos bucles enteros: el saliente confirma sin preguntar a
+Claude y el entrante pasa la respuesta ambigua a Claude). Cambia dos aserciones de
+`parche18.test.js`, porque el pedido trae ahora `que` y la URL es `/telefono/lectura`. Se
+aplicó como el 17 y el 18:
+
+```bash
+cd ~/.claude-phone-cli
+docker tag claude-phone-voice-app claude-phone-voice-app:antes-p20
+patch -p1 < parche-20.diff
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche20.test.js
+curl -s localhost:3010/api/calls                     # sin llamada en curso
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Dentro de la imagen y sin red pasan el 20 (11), el 18 (7), el 15-16 (13), el 12 (15), el
+14 (6) y el 17 (3). Volver atrás: `docker tag claude-phone-voice-app:antes-p20
+claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
+`CONFIRMAR: pregunto` y `LECTURA: semana` en `docker logs voice-app`.
 
 ## Lo que además NO está en el repositorio original
 
