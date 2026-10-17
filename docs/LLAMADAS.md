@@ -251,6 +251,26 @@ Si en unas semanas dejas de coger estas llamadas, la solución no es bajar el to
 apagar las reglas que no aportan, porque el coste de verdad es que dejes de coger
 también la de la avería.
 
+### Las llamadas que pides tú (desde el 2026-10-17)
+
+«Llámame mañana a las 8:10 y léeme el briefing.» Es `recordarme` con `llamar=true` (y
+`leer`, si quieres que al cogerlo te lea el briefing, la agenda de la semana, el correo o
+las tareas), y por eso no es una llamada cotidiana:
+
+- **No gasta el tope diario ni hace falta encender ninguna regla**: lo has pedido tú, la
+  misma frontera que saca a `recordarme` del presupuesto de avisos.
+- **Lo que sí respeta** es lo que no depende de haberlo pedido: el suelo nocturno (entre
+  `VIGILANCIA_NOCHE_DESDE` y `VIGILANCIA_NOCHE_HASTA` ni se deja apuntar: para eso está
+  `poner_alarma`, que sabe insistir y escalar a la casa) y el «en clase». No espera a la
+  señal de despertar (`aunque_duermas`): una hora que eliges tú ya es la señal.
+- **Va detrás del aviso**, como todas: la notificación sale por el despachador de siempre
+  y después suena, con los reintentos y el recado en el buzón de `_insistir`. Un fallo
+  llamando no libera el aviso ya entregado.
+- Se apunta en la `huella` del recordatorio (`llamar:<leer>:<azar>`), no en una columna
+  nueva: sin migración, y una columna sin aplicar habría tumbado `recordarme` entero.
+- El contexto le dice a Jarvis-Claude que no es una avería y, si toca, que empiece
+  leyendo (`📖 LEER: …`) en cuanto contestes.
+
 ### Si no lo coges (desde el 2026-09-25)
 
 Ese día Jarvis llamó, no se cogió, y al devolverle la llamada **su extensión daba

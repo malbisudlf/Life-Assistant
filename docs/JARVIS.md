@@ -1307,6 +1307,43 @@ newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se l
 `estado_resumen_diario`, `recordar`, `olvidar` y `dejar_de_vigilar`. Las que siguen
 fuera lo están a propósito (ver el comentario sobre `_MCP_SERVIDOR_SOLO_LECTURA`).
 
+**Desde el 2026-10-17 la llamada lee igual otras tres cosas** (parche 20,
+`GET /telefono/lectura`): `📖 LEER: semana` (la agenda de siete días), `📖 LEER: correo`
+(el último parte de la noche) y `📖 LEER: tareas`. El correo no tiene herramienta en el
+teléfono a propósito (`turno_de_noche` trae asuntos y remitentes de desconocidos y al otro
+lado hay una shell) y **no la necesita**: así, ese texto va del backend al altavoz sin
+pasar por Claude, que solo sabe que se ha leído. Un Outlook caído no se lee como «no
+tienes nada»: se dice que no se ha podido mirar.
+
+## El «sí» dicho por teléfono
+
+La excepción que faltaba en «Lo que se confirma en el móvil»: en el coche no se pulsa un
+botón. Desde el 2026-10-17 (parche 20) lo propuesto por teléfono también se puede
+confirmar de viva voz, y la regla de que **un «sí» dicho en voz alta no vale porque lo oye
+un modelo** no se rompe, porque aquí no lo oye un modelo:
+
+- Claude pone `✅ CONFIRMAR: <id>` (la propuesta le devuelve la línea hecha,
+  `linea_para_la_llamada`) y se aparta. La **voice-app** pide `GET /telefono/confirmar/<id>`,
+  lee la frase que escribió el backend (`_describir_accion`, la misma del botón) y decide
+  ella si lo siguiente que dices es un sí o un no: lista cerrada, **la frase entera** («sí»,
+  «vale», «hazlo»; el no gana), las mismas listas que `esConfirmacionHablada` del dashboard.
+  Cualquier otra cosa («sí, pero a las once») va a Claude con la propuesta todavía
+  pendiente en el móvil.
+- `POST /telefono/confirmar/<id>` con **su propio token** (`TELEFONO_CONFIRMAR_TOKEN`, que
+  vive en la voice-app y no en la configuración de Claude) responde exactamente como el
+  botón (`_responder_pregunta`, PATCH condicional: la primera respuesta vale) y retira la
+  notificación del móvil.
+- **Solo lo reversible** (`PREGUNTAS_HABLADAS`): crear una cita, reservar bloques, apuntar
+  una tarea y mover una cita tuya **sin invitados** (`_evento_graph` dice `organizo` y
+  `asistentes`). Borrar algo, o mover una reunión con gente, sigue siendo solo botón.
+- **Solo recién propuesto** (`PREGUNTA_HABLADA_SEG`, 180 s): es la respuesta a lo que se
+  acaba de decir, no a una notificación de hace media hora.
+- Lo que **no** protege: la sesión del teléfono tiene shell en `caja` y ya puede leer
+  `backend.env` entero. El token aparte separa el camino normal; contra una sesión que se
+  saltara el RUNBOOK no protege nada que no estuviera ya expuesto. La separación de verdad
+  sería un Jarvis sin terminal para lo cotidiano (propuesta 4 del análisis del 2026-10-15),
+  que no está hecha.
+
 ## Lo que ya está mirado al descolgar: `_contexto_de_voz`
 
 Por voz, una pregunta con herramienta son tres pasos en serie (pedirla, ejecutarla y

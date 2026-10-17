@@ -15717,12 +15717,19 @@ def _apuntar_envio_regla(regla: str) -> None:
 RECORDATORIOS_POR_TICK = 10
 
 
-def _j_recordarme(texto: str, fecha: str, hora: str) -> dict:
+def _j_recordarme(texto: str, fecha: str, hora: str, llamar=False, leer: str = "") -> dict:
     """Apunta un aviso para más tarde. Llega por correo, que es lo que suena en el móvil
-    sin depender de que el dashboard esté abierto."""
+    sin depender de que el dashboard esté abierto.
+
+    Con `llamar`, además del aviso suena el teléfono a esa hora (y con `leer`, Jarvis
+    empieza leyéndote eso al cogerlo). Ver «Las llamadas que pides tú» en
+    `docs/LLAMADAS.md`."""
     texto = str(texto or "").strip()[:RECORDATORIO_MAX_TEXTO]
     fecha = str(fecha or "").strip()
     hora  = str(hora or "").strip()
+    leer  = str(leer or "").strip().lower()
+    # Lo redacta un modelo: «true», «sí» o un booleano de verdad, todo vale como sí.
+    llamar = llamar is True or str(llamar).strip().lower() in ("true", "si", "sí", "1") or bool(leer)
     if not texto:
         return {"ok": False, "motivo": "¿De qué te aviso?"}
     if not _DATE_RE.match(fecha) or not _HORA_RE.match(hora):
@@ -15733,21 +15740,100 @@ def _j_recordarme(texto: str, fecha: str, hora: str) -> dict:
         return {"ok": False, "motivo": "Esa fecha u hora no existen"}
     if cuando < datetime.now(LOCAL_TZ) - timedelta(minutes=1):
         return {"ok": False, "motivo": "Esa hora ya ha pasado"}
+    if leer and leer not in LECTURAS_TELEFONO:
+        return {"ok": False, "motivo": "Al llamar te puedo leer: " + ", ".join(LECTURAS_TELEFONO)}
+    if llamar:
+        if not _telefono_configurado():
+            return {"ok": False, "motivo": "La centralita no está configurada: no puedo "
+                                           "llamarte. Te lo apunto sin llamada si quieres."}
+        if _es_de_noche(cuando):
+            # El suelo de siempre del teléfono, que ni una llamada pedida salta: para
+            # despertarte está poner_alarma, que sí sabe insistir y escalar a la casa.
+            return {"ok": False, "motivo": f"Entre las {VIGILANCIA_NOCHE_DESDE:02d}:00 y las "
+                                           f"{VIGILANCIA_NOCHE_HASTA:02d}:00 no te llamo. Para "
+                                           "despertarte, mejor una alarma (poner_alarma)."}
 
     cuenta = http.get(f"{RECORDATORIOS_URL}?enviado=is.false&select=id&limit={RECORDATORIOS_MAX + 1}",
                       headers=supabase_headers())
     if cuenta.status_code < 300 and len(cuenta.json()) > RECORDATORIOS_MAX:
         return {"ok": False, "motivo": f"Ya hay {RECORDATORIOS_MAX} recordatorios pendientes"}
 
+    fila = {"cuando": cuando.astimezone(timezone.utc).isoformat(), "texto": texto}
+    if llamar:
+        # Va en `huella`, que ya existe, y no en una columna nueva: sin regla, ningún
+        # otro camino la mira, y una columna habría hecho que recordarme entero
+        # devolviera 400 mientras la migración no estuviera aplicada.
+        fila["huella"] = _huella_llamada(leer)
     r = http.post(
         RECORDATORIOS_URL,
         headers={**supabase_headers(), "Prefer": "return=representation"},
-        json={"cuando": cuando.astimezone(timezone.utc).isoformat(), "texto": texto},
+        json=fila,
     )
     if r.status_code >= 300:
         raise _supabase_error(r)
-    return {"ok": True, "id": (r.json() or [{}])[0].get("id"),
-            "cuando": f"{fecha} {hora}", "texto": texto}
+    salida = {"ok": True, "id": (r.json() or [{}])[0].get("id"),
+              "cuando": f"{fecha} {hora}", "texto": texto}
+    if llamar:
+        salida["llamada"] = True
+        salida["nota"] = ("A esa hora te llega el aviso y además suena el teléfono"
+                          + (f", y al cogerlo te leo {leer}" if leer else "") +
+                          ". Si estás en clase, no suena (el aviso sí).")
+    return salida
+
+
+# ── Las llamadas que pides tú ─────────────────────────────────────────────────
+#
+# «Llámame a las 8:10 y léeme el briefing», «llámame cuando sea la hora de salir». Es un
+# `recordarme` con el teléfono detrás, y por eso no es una llamada cotidiana: no gasta su
+# tope diario ni necesita que la regla esté marcada para llamar, porque **lo pediste tú**
+# (la misma frontera que saca a `recordarme` del presupuesto de avisos). Lo que sí
+# respeta es lo que no depende de haberlo pedido: el suelo nocturno del teléfono (ni se
+# deja apuntar dentro) y el «en clase». La llamada va **detrás** del aviso, como todas: si
+# el teléfono no suena, lo que había que decir ya ha llegado.
+_HUELLA_LLAMADA = "llamar:"
+
+
+def _huella_llamada(leer: str) -> str:
+    # El sufijo aleatorio es para que dos llamadas pedidas no compartan huella con nada:
+    # la huella existe para reconocer la misma situación, y estas no se repiten.
+    return f"{_HUELLA_LLAMADA}{leer or '-'}:{uuid.uuid4().hex[:8]}"
+
+
+def _llamada_pedida(rid: str, texto: str, huella: str) -> bool:
+    """La llamada de un `recordarme` con `llamar`. True si llegó a sonar."""
+    leer  = huella[len(_HUELLA_LLAMADA):].split(":", 1)[0]
+    leer  = leer if leer in LECTURAS_TELEFONO else ""
+    ahora = _ahora_local()
+    if _es_de_noche(ahora):
+        logger.info("Llamada pedida %s no sale: franja nocturna", rid)
+        return False
+    clase = _en_clase(_lugar_en_memoria())
+    if clase:
+        logger.info("Llamada pedida %s no sale: en clase hasta las %s", rid,
+                    clase["fin"].strftime("%H:%M"))
+        return False
+    mensaje = f"Hola, te llamo porque me lo pediste: {texto}."
+    if leer:
+        mensaje += " ¿Empiezo a leértelo?"
+    contexto = ("LLAMADA QUE TE PIDIÓ ÉL MISMO: te dijo que le llamaras a esta hora por "
+                f"esto: «{texto}». No es una avería: no mires ni toques nada en la máquina.")
+    if leer:
+        contexto += (f" Al descolgar te pidió que le leyeras {leer}: si contesta que sí, o "
+                     "cualquier cosa que no sea un no, di solo «Allá voy» y pon en tu "
+                     f"respuesta la línea 📖 LEER: {leer}")
+    # `aunque_duermas`: el suelo y la clase ya se han mirado aquí; lo que se salta es la
+    # señal de despertar, porque una llamada a una hora que eliges tú es la señal.
+    return _llamar(mensaje, rid=rid, contexto=contexto, aunque_duermas=True,
+                   solo_centralita=True)
+
+
+def _llamada_pedida_segura(rid: str, texto: str, huella: str) -> bool:
+    """Nada de esto puede deshacer el aviso que ya salió: un fallo se registra y ya."""
+    try:
+        return _llamada_pedida(rid, texto, huella)
+    except Exception:
+        logger.exception("Llamadas: fallo inesperado en la llamada pedida %s", rid)
+        return False
 
 
 def _j_mis_recordatorios() -> dict:
@@ -22022,7 +22108,11 @@ def _evento_graph(evento_id: str) -> Optional[dict]:
             "todo_el_dia": bool(ev.get("isAllDay")),
             # Borrar una reunión que organizaste les manda la cancelación a los invitados:
             # eso sale de casa, y la frase del botón tiene que decirlo.
-            "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0}
+            "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0,
+            # Para el «sí» hablado (`_se_confirma_hablando`): mover algo que no es tuyo, o
+            # que tiene gente, se queda en el botón.
+            "organizo":   bool(ev.get("isOrganizer")),
+            "asistentes": len(ev.get("attendees") or [])}
 
 
 def _idea_guardada(idea_id: str) -> Optional[dict]:
@@ -22217,12 +22307,17 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
         return {"ok": False, "motivo": "No he podido mandarlo al móvil."}
     _preguntas_enviadas.append(ahora)
     logger.info("Jarvis: %s propuesto al móvil (%s)", herramienta, pid)
-    return {"ok": True, "estado": "pendiente_en_el_movil", "id": pid, "canal": canal,
-            "lo_que_se_hara": texto,
-            "nota": "NO está hecho. Le ha llegado al móvil con un botón «Sí, hazlo»: "
-                    "hasta que lo pulse no cambia nada. Para saber si lo ha pulsado y "
-                    "cómo ha ido, respuesta_notificacion con este id (y esperar=20 si "
-                    "estáis hablando)."}
+    salida = {"ok": True, "estado": "pendiente_en_el_movil", "id": pid, "canal": canal,
+              "lo_que_se_hara": texto,
+              "nota": "NO está hecho. Le ha llegado al móvil con un botón «Sí, hazlo»: "
+                      "hasta que lo pulse no cambia nada. Para saber si lo ha pulsado y "
+                      "cómo ha ido, respuesta_notificacion con este id (y esperar=20 si "
+                      "estáis hablando)."}
+    if herramienta in PREGUNTAS_HABLADAS:
+        # Por teléfono (parche 20): con esta línea en la respuesta, la llamada le lee lo
+        # que se hará y le deja contestar sí o no de viva voz, sin coger el móvil.
+        salida["linea_para_la_llamada"] = f"✅ CONFIRMAR: {pid}"
+    return salida
 
 
 def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) -> str:
@@ -22282,6 +22377,109 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
     logger.info("Jarvis: acción confirmada %s → %s", pid,
                 "hecha" if resultado.get("ok") else resultado.get("motivo"))
     return resultado
+
+
+# ── El «sí» dicho por teléfono ────────────────────────────────────────────────
+#
+# Por teléfono, lo que se confirma va al móvil con un botón, y en el coche no se puede
+# pulsar. Desde el 2026-10-17 (parche 20) la llamada también lo puede preguntar en voz
+# alta, y lo que sostiene que eso no rompa la frontera es lo mismo que sostiene el botón:
+#   - **El modelo no decide nada.** Claude pone `✅ CONFIRMAR: <id>` y se aparta. La
+#     voice-app pide aquí la frase que escribió el BACKEND (`_describir_accion`), la lee,
+#     y decide ella si lo que contestas es un sí o un no con una lista cerrada (la frase
+#     ENTERA tiene que ser un sí: «sí, pero cambia la hora» no lo es). Es lo mismo que el
+#     modo llamada del dashboard (`esConfirmacionHablada`) y que `_sio_no` de Twilio.
+#   - **Su propio token** (`TELEFONO_CONFIRMAR_TOKEN`), que vive en la voice-app y no en
+#     la configuración de Claude: el del MCP del teléfono no vale aquí.
+#   - **Solo lo que se deshace con la misma facilidad con que se hace**
+#     (`PREGUNTAS_HABLADAS`): crear una cita, una tarea o unos bloques, y mover una cita
+#     tuya sin invitados. Borrar sigue siendo solo con botón, y mover una reunión con
+#     gente también (les llega la actualización).
+#   - **Solo recién propuesta** (`PREGUNTA_HABLADA_SEG`): es la respuesta a lo que se
+#     acaba de decir en la llamada, no a una pregunta de hace media hora.
+#   - La primera respuesta vale, por el mismo PATCH condicional que el botón: si ya lo
+#     pulsaste en el móvil, el «sí» hablado no hace nada más.
+# Lo que esto NO protege, y conviene tenerlo claro: al otro lado hay una sesión con shell
+# en `caja`, que ya puede leer `backend.env` entero. El token aparte la separa del camino
+# normal; contra una sesión que se salta el RUNBOOK no protege nada que no estuviera ya
+# expuesto. Ver «El sí dicho por teléfono» en `docs/JARVIS.md`.
+TELEFONO_CONFIRMAR_TOKEN = os.getenv("TELEFONO_CONFIRMAR_TOKEN", "")
+PREGUNTAS_HABLADAS       = {"crear_evento", "editar_evento", "reservar_bloques", "crear_tarea"}
+PREGUNTA_HABLADA_SEG     = int(os.getenv("PREGUNTA_HABLADA_SEG", "180"))
+
+
+def _se_confirma_hablando(fila: dict) -> str:
+    """'' si esta pregunta se puede confirmar de viva voz; si no, el motivo."""
+    if not fila:
+        return "Esa propuesta no existe."
+    if fila.get("respuesta"):
+        return f"Ya está contestada («{fila['respuesta']}»)."
+    accion = fila.get("accion") or {}
+    herramienta = str(accion.get("herramienta") or "")
+    if herramienta not in PREGUNTAS_HABLADAS:
+        return "Esto se confirma con el botón del móvil."
+    creado = _fecha_utc(fila.get("creado"))
+    if not creado or (datetime.now(timezone.utc) - creado).total_seconds() > PREGUNTA_HABLADA_SEG:
+        return "Hace demasiado que se propuso: se confirma con el botón del móvil."
+    if herramienta == "editar_evento":
+        actual = _evento_graph(str((accion.get("argumentos") or {}).get("evento_id") or ""))
+        if not actual:
+            return "No encuentro ese evento."
+        if not actual.get("organizo") or actual.get("asistentes"):
+            return "Es una reunión con más gente: se confirma con el botón del móvil."
+    return ""
+
+
+def _auth_confirmar(request: Request) -> None:
+    if not _token_ok(_extract_service_token(request), TELEFONO_CONFIRMAR_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+
+class ConfirmarHabladoIn(BaseModel):
+    respuesta: Literal["si", "no"]
+
+
+@app.get("/telefono/confirmar/{pid}")
+def telefono_confirmar_ver(request: Request, pid: str = Path(..., pattern=_UUID_PATTERN)):
+    """Lo que la llamada lee antes de preguntar «¿lo hago?». Siempre 200 con `ok`."""
+    _auth_confirmar(request)
+    fila   = _leer_pregunta(pid)
+    motivo = _se_confirma_hablando(fila)
+    if motivo:
+        return {"ok": False, "motivo": motivo}
+    return {"ok": True, "frase": str(fila.get("texto") or "")}
+
+
+@app.post("/telefono/confirmar/{pid}")
+def telefono_confirmar(request: Request, body: ConfirmarHabladoIn,
+                       pid: str = Path(..., pattern=_UUID_PATTERN)):
+    """El sí o el no dicho en la llamada, ya decidido por la voice-app con su lista
+    cerrada. Vuelve a mirar todo lo de `GET` antes de hacer nada: entre la pregunta y la
+    respuesta pueden haber pasado segundos, y el botón del móvil sigue vivo."""
+    _auth_confirmar(request)
+    fila   = _leer_pregunta(pid)
+    motivo = _se_confirma_hablando(fila)
+    if motivo:
+        return {"ok": False, "frase": motivo}
+    r = _responder_pregunta(pid, 1 if body.respuesta == "si" else 2)
+    # Contestada de viva voz: el botón que sigue en el móvil ya no pregunta nada.
+    _retirar_del_movil(pid)
+    if not r.get("hecho"):
+        return {"ok": True, "hecho": False,
+                "frase": f"Ya lo habías contestado en el móvil: «{r.get('respuesta')}»."}
+    if body.respuesta == "no":
+        logger.info("Teléfono: propuesta %s descartada de viva voz", pid)
+        return {"ok": True, "hecho": True, "frase": "Vale, no lo hago."}
+    resultado = r.get("resultado") or {}
+    accion    = fila.get("accion") or {}
+    logger.info("Teléfono: propuesta %s confirmada de viva voz → %s", pid,
+                "hecha" if resultado.get("ok") else resultado.get("motivo"))
+    if resultado.get("ok"):
+        return {"ok": True, "hecho": True, "resultado": resultado,
+                "frase": "Hecho. " + _lo_hecho(str(accion.get("herramienta") or ""),
+                                               accion.get("argumentos") or {}, resultado)}
+    return {"ok": True, "hecho": True, "resultado": resultado,
+            "frase": "No lo he podido hacer: " + str(resultado.get("motivo") or "sin motivo")}
 
 
 @app.post("/avisos/{aviso_id}/apagar")
@@ -24958,6 +25156,10 @@ def _despachar_recordatorios() -> dict:
             # `except` de abajo liberaría un aviso que ya se ha entregado.
             if regla and _llamada_cotidiana_segura(rid, regla, texto):
                 llamadas += 1
+            huella = str(fila.get("huella") or "")
+            if not regla and huella.startswith(_HUELLA_LLAMADA) \
+                    and _llamada_pedida_segura(rid, texto, huella):
+                llamadas += 1
         except Exception as e:
             # Un fallo transitorio de SMTP no puede consumir el recordatorio: se libera y
             # el siguiente tick lo reintenta. Igual que _liberar_envio en el brief.
@@ -26044,29 +26246,42 @@ JARVIS_VOZ_CONTEXTO   = os.getenv("JARVIS_VOZ_CONTEXTO", "1") == "1"
 _contexto_voz_cache: dict = {}   # incluir_lugar -> (instante, texto)
 
 
-def _contexto_agenda(ahora: datetime) -> list:
-    """Lo que queda de hoy y lo de mañana, de Outlook y del calendario de clases."""
+def _eventos_y_clases() -> tuple:
+    """Los eventos de Outlook y del calendario de clases, juntos.
+
+    Devuelve `(eventos, notas)`. `eventos` es None si Outlook no contesta: **no poder
+    mirar nunca es un día libre** (como `_j_ocupados`). Que el calendario de clases no
+    exista es configuración, no un fallo; que no conteste va en `notas`.
+    """
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_ev = pool.submit(get_events, credentials=None)
         f_cl = pool.submit(get_class_events, credentials=None)
         try:
             eventos = f_ev.result()
         except Exception as e:
-            logger.warning("Contexto de voz: Outlook no respondió (%s)", _causa(e))
+            logger.warning("Agenda para la voz: Outlook no respondió (%s)", _causa(e))
             eventos = None
         try:
             clases = f_cl.result()
         except Exception as e:
-            logger.warning("Contexto de voz: las clases no respondieron (%s)", _causa(e))
+            logger.warning("Agenda para la voz: las clases no respondieron (%s)", _causa(e))
             clases = None
     if not isinstance(eventos, dict) or "error" in eventos:
-        return ["Agenda: no la he podido mirar (Outlook no responde). No digas que no "
-                "tiene nada: usa la herramienta agenda si te lo pregunta."]
-    lineas, todos = [], list(eventos.get("events") or [])
+        return None, []
+    notas, todos = [], list(eventos.get("events") or [])
     if isinstance(clases, dict) and "error" not in clases:
         todos += clases.get("events") or []
     elif not (isinstance(clases, dict) and "available" in clases):
-        lineas.append("Las clases no las he podido mirar.")
+        notas.append("Las clases no las he podido mirar.")
+    return todos, notas
+
+
+def _contexto_agenda(ahora: datetime) -> list:
+    """Lo que queda de hoy y lo de mañana, de Outlook y del calendario de clases."""
+    todos, lineas = _eventos_y_clases()
+    if todos is None:
+        return ["Agenda: no la he podido mirar (Outlook no responde). No digas que no "
+                "tiene nada: usa la herramienta agenda si te lo pregunta."]
 
     hoy, manana = ahora.date(), ahora.date() + timedelta(days=1)
     por_dia: dict = {hoy: [], manana: []}
@@ -26167,6 +26382,168 @@ def telefono_contexto(request: Request):
     if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
     return {"texto": _contexto_de_voz(incluir_lugar=True)}
+
+
+# ── Lo que el teléfono lee en voz alta ────────────────────────────────────────
+#
+# El parche 18 hizo que la llamada leyera el briefing sin pasar por Claude (40 palabras
+# por respuesta no dan para 15 minutos). El 20 lo generaliza a lo demás que no cabe en
+# una respuesta: la agenda de la semana, el parte del correo de la noche y las tareas.
+# Claude pone `📖 LEER: <qué>` y la voice-app pide aquí el texto ya preparado para la voz.
+#
+# De paso, **el texto de terceros (asuntos y remitentes del correo) va del backend al
+# altavoz sin pasar por la sesión con shell**, que es lo que dejaba fuera del teléfono a
+# `turno_de_noche`: Claude solo sabe que se ha leído, no qué ponía.
+#
+# Mismo contrato que `/telefono/briefing`: siempre 200 con `ok`, secciones numeradas con
+# sus trozos (para poder seguir `desde=` donde se cortó) y `nombre`, que es como la
+# llamada dice qué estaba leyendo.
+LECTURAS_TELEFONO   = ("briefing", "semana", "correo", "tareas")
+LECTURA_SEMANA_DIAS = 7
+
+
+def _seccion_voz(n: int, titulo: str, frases: list) -> dict:
+    limpias = [f for f in (_frase_para_voz(str(x)) for x in frases) if len(f) > 1]
+    return {"n": n, "titulo": titulo, "trozos": _trocear([f"{titulo}."] + limpias)}
+
+
+def _lectura_semana() -> dict:
+    todos, notas = _eventos_y_clases()
+    if todos is None:
+        return {"ok": False, "frase": "No he podido mirar tu calendario: Outlook no responde."}
+    hoy = _ahora_local().date()
+    dias: dict = {}
+    for ev in todos:
+        try:
+            ini = _j_local(ev.get("start") or "")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not hoy <= ini.date() < hoy + timedelta(days=LECTURA_SEMANA_DIAS):
+            continue
+        titulo = str(ev.get("title") or "sin título")
+        lugar  = str(ev.get("location") or "")[:60]
+        if ev.get("isAllDay"):
+            frase = f"Todo el día: {titulo}"
+        else:
+            frase = f"A las {ini.strftime('%H:%M')}, {titulo}"
+        if lugar:
+            frase += f", en {lugar}"
+        dias.setdefault(ini.date(), []).append((0 if ev.get("isAllDay") else 1, ini, frase))
+    if not dias:
+        return {"ok": False, "frase": "No tienes nada en la agenda en los próximos siete días."}
+    secciones = []
+    for dia in sorted(dias):
+        nombre = _dia_txt(dia.isoformat())
+        if nombre in ("hoy", "mañana"):
+            titulo = nombre.capitalize()
+        else:
+            titulo = f"{DIAS_SEMANA[dia.weekday()].capitalize()} {dia.day}"
+        secciones.append(_seccion_voz(len(secciones) + 1, titulo,
+                                      [f for _, _, f in sorted(dias[dia])]))
+    if notas:
+        secciones[0]["trozos"].insert(0, " ".join(notas))
+    return {"ok": True, "nombre": "la agenda de la semana", "secciones": secciones}
+
+
+def _remitente_para_voz(de: str) -> str:
+    """«Ane Etxeberria <ane@…>» se dice «Ane Etxeberria»: una dirección leída en voz alta
+    no se entiende, y sin nombre se queda solo la parte de antes de la arroba."""
+    de = str(de or "").strip()
+    nombre = de.split("<")[0].strip().strip('"')
+    if nombre and "@" not in nombre:
+        return nombre
+    direccion = de.split("<")[-1].rstrip(">").strip()
+    return direccion.split("@")[0] or "alguien"
+
+
+def _lectura_correo() -> dict:
+    parte = _ultimo_parte()
+    if not parte:
+        return {"ok": False, "frase": "Todavía no hay ningún parte de la noche."}
+    secciones = []
+    fecha = str(parte.get("fecha") or "")
+    if parte.get("frase"):
+        de_cuando = "" if fecha == _ahora_local().date().isoformat() else \
+            f" Es el parte de {_dia_txt(fecha)}."
+        secciones.append(_seccion_voz(1, "Resumen", [str(parte["frase"]) + de_cuando]))
+    items   = parte.get("items") or []
+    correos = [i for i in items if i.get("area") == "correo"]
+    otros   = [i for i in items if i.get("area") != "correo"]
+    if correos:
+        frases = []
+        for i in correos:
+            datos = i.get("datos") or {}
+            frase = (f"De {_remitente_para_voz(datos.get('de'))}: "
+                     f"{i.get('titulo') or 'sin asunto'}")
+            if datos.get("borrador"):
+                frase += ". Te he dejado una respuesta en borradores"
+            frases.append(frase)
+        secciones.append(_seccion_voz(len(secciones) + 1, "Correos", frases))
+    if otros:
+        secciones.append(_seccion_voz(len(secciones) + 1, "Lo demás",
+                                      [str(i.get("titulo") or "") for i in otros]))
+    if not secciones:
+        return {"ok": False, "frase": "El parte de la noche está vacío."}
+    return {"ok": True, "nombre": "el parte del correo", "secciones": secciones}
+
+
+def _lectura_tareas() -> dict:
+    r = _j_tareas()
+    if not r.get("activo"):
+        return {"ok": False, "frase": str(r.get("motivo") or "Las tareas no están encendidas.")}
+    tareas = r.get("tareas") or []
+    if not tareas:
+        return {"ok": False, "frase": "No tienes ninguna tarea pendiente."}
+    hoy = _ahora_local().date().isoformat()
+    grupos = (("Vencidas", [t for t in tareas if t.get("fecha") and t["fecha"] < hoy]),
+              ("Para hoy", [t for t in tareas if t.get("fecha") == hoy]),
+              ("Para más adelante", [t for t in tareas if t.get("fecha") and t["fecha"] > hoy]),
+              ("Sin fecha", [t for t in tareas if not t.get("fecha")]))
+    secciones = []
+    for titulo, lista in grupos:
+        if not lista:
+            continue
+        frases = []
+        for t in lista:
+            frase = str(t.get("titulo") or "")
+            if titulo == "Para más adelante":
+                frase += f", para {_dia_txt(t['fecha'])}"
+            frases.append(frase)
+        secciones.append(_seccion_voz(len(secciones) + 1, titulo, frases))
+    return {"ok": True, "nombre": "tus tareas", "secciones": secciones}
+
+
+_LECTURAS = {"semana": _lectura_semana, "correo": _lectura_correo, "tareas": _lectura_tareas}
+
+
+@app.get("/telefono/lectura")
+def telefono_lectura(request: Request,
+                     que: str = Query(..., pattern="^(briefing|semana|correo|tareas)$"),
+                     desde: int = 1, hasta: int = 0, fecha: str = ""):
+    """Lo que la llamada lee en voz alta cuando Claude pone `📖 LEER: <que>` (parche 20).
+
+    Con el token del MCP del teléfono, como el briefing, y el mismo contrato: siempre 200,
+    y lo que no se pueda leer va en `frase` para que la voice-app lo diga tal cual."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    if que == "briefing":
+        if fecha and not _DATE_RE.match(fecha):
+            return {"ok": False, "frase": "Esa fecha no la entiendo."}
+        r = telefono_briefing(request, fecha, desde, hasta)
+        return {**r, "nombre": "el briefing"} if r.get("ok") else r
+    try:
+        r = _LECTURAS[que]()
+    except Exception as e:
+        logger.error("Lectura por teléfono de '%s' falló (%s)", que, _causa(e))
+        return {"ok": False, "frase": "Ahora mismo no lo puedo mirar."}
+    if not r.get("ok"):
+        return r
+    secciones = [x for x in r["secciones"]
+                 if x["n"] >= max(1, desde) and (not hasta or x["n"] <= hasta)]
+    if not secciones:
+        return {"ok": False, "frase": f"No hay esa parte en {r['nombre']}."}
+    logger.info("Lectura por teléfono: %s, secciones %s-%s", que, desde, hasta or "fin")
+    return {"ok": True, "nombre": r["nombre"], "secciones": secciones}
 
 
 def _j_turno_de_noche(fecha=None) -> dict:
@@ -27969,11 +28346,20 @@ _JARVIS_HERRAMIENTAS = {
                        "para un aviso ya puesto. Si te piden 'que sea por notificación y "
                        "no por correo' (o al revés), dilo tal cual en vez de prometerlo. "
                        "Es lo único que te permite hablarle sin que él empiece: ofrécelo "
-                       "cuando mencione algo que tiene que hacer luego.",
+                       "cuando mencione algo que tiene que hacer luego. Si pide que le "
+                       "LLAMES ('llámame a las 8', 'llámame y léeme el briefing'), "
+                       "llamar=true: además del aviso suena su teléfono a esa hora. Entre "
+                       "las 00 y las 07 no se puede (para despertarse, poner_alarma).",
         "parametros":  {
             "texto": {"type": "string", "description": "Qué recordarle, en una frase."},
             "fecha": {"type": "string", "description": "YYYY-MM-DD. Resuelve tú 'mañana' o 'el jueves'."},
             "hora":  {"type": "string", "description": "HH:MM en 24h."},
+            "llamar": {"type": "boolean",
+                       "description": "true si quiere que le llames por teléfono a esa hora."},
+            "leer":  {"type": "string", "enum": ["briefing", "semana", "correo", "tareas"],
+                      "description": "Solo si pide que al llamarle le leas algo: el "
+                                     "briefing, la agenda de la semana, el parte del "
+                                     "correo o las tareas. Implica llamar."},
         },
         "obligatorios": ["texto", "fecha", "hora"],
     },
@@ -28469,7 +28855,9 @@ _MCP_SERVIDOR_HERRAMIENTAS = (_MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONE
                               | _MCP_SERVIDOR_CONFIRMA_EN_MOVIL)
 _MCP_AVISO_MOVIL = (" Por teléfono no se hace al momento: le llega al móvil con un botón "
                     "«Sí, hazlo» y se hace cuando lo pulse. Díselo, y no digas que está "
-                    "hecho hasta que respuesta_notificacion diga accion_hecha.")
+                    "hecho hasta que respuesta_notificacion diga accion_hecha. Si la "
+                    "respuesta trae linea_para_la_llamada, ponla tal cual en tu respuesta: "
+                    "la llamada le leerá lo que se hará y podrá contestar sí o no hablando.")
 
 assert _MCP_SERVIDOR_HERRAMIENTAS <= set(_JARVIS_HERRAMIENTAS), (
     "La lista blanca del MCP del teléfono apunta a una herramienta que ya no existe "

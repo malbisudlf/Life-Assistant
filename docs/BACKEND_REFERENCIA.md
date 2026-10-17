@@ -57,6 +57,9 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `WS /telefono/media` | JWT de un solo uso (`purpose: llamada`) | El audio de la llamada en los dos sentidos: Whisper → Jarvis → ElevenLabs |
 | `GET /telefono/briefing` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | El briefing de la mañana preparado para leerse en voz alta (sin enlaces ni emojis, por secciones y trozos), con `fecha`, `desde` y `hasta`. Lo pide la voice-app de claude-phone cuando Jarvis pone `📖 LEER: briefing` (parche 18). Siempre 200: lo que no se pueda leer va en `frase` |
 | `GET /telefono/contexto` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Lo que Jarvis ya sabe al descolgar (lo que queda de hoy y mañana en la agenda, tareas que vencen, recordatorios y dónde estás), en `texto`. Lo pide el `claude-api-server` al empezar cada llamada (parche 19); el dashboard y el Atajo lo llevan dentro del turno de voz. Copia de `CONTEXTO_VOZ_SEG` |
+| `GET /telefono/lectura` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Lo que la llamada lee en voz alta cuando Jarvis pone `📖 LEER: <que>` (parche 20): `que` = `briefing`, `semana` (la agenda de siete días), `correo` (el último parte de la noche) o `tareas`, con `desde`/`hasta` por secciones. Mismo contrato que `/telefono/briefing`, más `nombre`. Siempre 200: lo que no se pueda leer va en `frase` |
+| `GET /telefono/confirmar/{pid}` | servicio (`TELEFONO_CONFIRMAR_TOKEN`) | Si una propuesta del teléfono se puede confirmar de viva voz y la frase que la describe (la escribió el backend). Lo pide la voice-app al ver `✅ CONFIRMAR: <id>` (parche 20). Siempre 200 con `ok` |
+| `POST /telefono/confirmar/{pid}` | servicio (`TELEFONO_CONFIRMAR_TOKEN`) | El sí o el no que la voice-app oyó (`{"respuesta": "si"\|"no"}`, decidido por su lista cerrada, nunca por el modelo). Vuelve a comprobarlo todo y responde como el botón del móvil (`_responder_pregunta`): solo lo de `PREGUNTAS_HABLADAS`, recién propuesto (`PREGUNTA_HABLADA_SEG`) y sin contestar. Devuelve la `frase` que se dice |
 | `POST /mcp/telefono` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Servidor MCP (JSON-RPC 2.0) con las herramientas que usa la sesión de Claude Code que contesta el teléfono por la centralita. Auth antes de leer el cuerpo, acotado a `MAX_TELEFONO_BYTES` |
 | `POST /mcp/chat?turno=` | servicio (`JARVIS_MCP_CHAT_TOKEN`) | El mismo servidor MCP para la sesión de Claude Code que piensa el chat escrito (`JARVIS_MOTOR_CHAT=claude`): las herramientas que ve el chat de OpenAI, no la lista cerrada del teléfono, y lo que necesita confirmación queda pendiente del `turno` en vez de rechazarse. Ver `docs/JARVIS.md`, «El chat con Claude Code» |
 | `GET /presencia` | JWT | Ubicación actual para el panel de estado (devuelve lo caducado, marcado), con su `lugar` (`casa`, `gimnasio`, `uni` o `fuera`) |
@@ -240,7 +243,8 @@ arreglar desde el móvil — ver `docs/REVISION_NOCTURNA.md`),
 («avísame»: que una sesión de Claude Code te avise al móvil y puedas contestarle
 hablando — ver `docs/AVISAME.md`),
 `TELEFONO_URL`, `TELEFONO_EXTENSION`, `TELEFONO_DISPOSITIVO`,
-`JARVIS_MCP_TELEFONO_TOKEN`, `MAX_TELEFONO_BYTES` (el teléfono que suena hoy, por la
+`JARVIS_MCP_TELEFONO_TOKEN`, `MAX_TELEFONO_BYTES`, `TELEFONO_CONFIRMAR_TOKEN`,
+`PREGUNTA_HABLADA_SEG` (el teléfono que suena hoy, por la
 centralita 3CX y claude-phone en `caja`: sin las dos primeras no llama por ahí —
 ver `docs/LLAMADAS.md`),
 `LLAMADAS`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_NUMERO`,
