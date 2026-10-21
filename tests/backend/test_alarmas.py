@@ -1025,3 +1025,106 @@ class TestCincoMinutosMas:
         assert main._alarma_cancelar(self.RID)["hecho"] is True
         assert main._ha_ordenes == [] or all(
             o["servicio"] != "media_player.media_stop" for o in main._ha_ordenes)
+
+
+class TestAlarmaDelEntreno:
+    """La alarma que se pone sola si mañana hay entreno a primera hora.
+
+    Lo que se protege: que se ponga una vez (no una por tick), que quitarla valga (no
+    resucita), que no pise una tuya, y que solo se quite sola cuando se SABE que el
+    entreno ya no está — con el calendario caído no se toca nada.
+    """
+    RID = "22222222-2222-2222-2222-222222222222"
+
+    @pytest.fixture(autouse=True)
+    def encendida(self, monkeypatch):
+        monkeypatch.setattr(main, "ALARMA_ENTRENO_TITULO", "entrenamiento gente")
+        monkeypatch.setattr(main, "ALARMA_ENTRENO_HORA", "07:15")
+        monkeypatch.setattr(main, "ALARMA_ENTRENO_ALARMA", "06:45")
+        monkeypatch.setitem(main._alarma_entreno_ultima, "ts", 0.0)
+
+    @staticmethod
+    def _manana(hora, minuto):
+        dia = (datetime.now(main.LOCAL_TZ) + timedelta(days=1)).date()
+        return datetime(dia.year, dia.month, dia.day, hora, minuto, tzinfo=main.LOCAL_TZ)
+
+    def _calendario(self, monkeypatch, eventos):
+        monkeypatch.setattr(main, "_eventos_con_fecha_o_none", lambda dias=2: eventos)
+
+    def _evento(self, titulo="Entrenamiento gente", hora=(7, 15)):
+        ini = self._manana(*hora)
+        return {"id": "ev1", "title": titulo, "ini": ini, "fin": ini + timedelta(hours=1)}
+
+    def _fila_auto(self, estado="armada", hora=(6, 45), etiqueta="Entrenamiento a las 07:15"):
+        return {"id": self.RID, "estado": estado, "etiqueta": etiqueta,
+                "cuando": self._manana(*hora).astimezone(timezone.utc).isoformat()}
+
+    def test_con_entreno_a_las_715_pone_la_de_las_645(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, [self._evento()])
+        mock_requests.add("POST", "/rest/v1/alarmas", FakeResponse([{"id": self.RID}]))
+        r = main._alarma_entreno()
+        post = mock_requests.called("POST", "/rest/v1/alarmas")
+        assert len(post) == 1
+        cuando = datetime.fromisoformat(post[0][2]["json"]["cuando"]).astimezone(main.LOCAL_TZ)
+        assert cuando == self._manana(6, 45)
+        assert post[0][2]["json"]["etiqueta"] == "Entrenamiento a las 07:15"
+        assert r["alarma_entreno"]["puestas"] == [self._manana(6, 45).strftime("%Y-%m-%d %H:%M")]
+
+    def test_a_otra_hora_no_pone_nada(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, [self._evento(hora=(9, 0)),
+                                       self._evento(titulo="Entrenamiento", hora=(7, 15))])
+        assert main._alarma_entreno() == {}
+        assert mock_requests.called("POST", "/rest/v1/alarmas") == []
+
+    def test_el_titulo_no_distingue_mayusculas(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, [self._evento(titulo="ENTRENAMIENTO GENTE - Ane")])
+        main._alarma_entreno()
+        assert len(mock_requests.called("POST", "/rest/v1/alarmas")) == 1
+
+    @pytest.mark.parametrize("fila", [
+        {"estado": "armada"},                                   # ya puesta
+        {"estado": "cancelada"},                                # la quitaste: no resucita
+        {"estado": "armada", "etiqueta": "Mi alarma"},          # una tuya a esa hora
+        {"estado": "armada", "hora": (6, 30)},                  # la moviste a las 6:30
+    ])
+    def test_si_ese_dia_ya_hay_alarma_no_pone_otra(self, mock_requests, monkeypatch, fila):
+        self._calendario(monkeypatch, [self._evento()])
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([self._fila_auto(**fila)]))
+        main._alarma_entreno()
+        assert mock_requests.called("POST", "/rest/v1/alarmas") == []
+
+    def test_si_el_entreno_desaparece_la_quita(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, [])
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([self._fila_auto()]))
+        mock_requests.add("PATCH", "estado=eq.armada", _reserva_ok)
+        r = main._alarma_entreno()
+        assert r["alarma_entreno"]["quitadas"]
+        assert mock_requests.called("PATCH", f"id=eq.{self.RID}")[0][2]["json"] == {
+            "estado": "cancelada"}
+
+    def test_no_quita_las_tuyas(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, [])
+        mock_requests.add("GET", "/rest/v1/alarmas",
+                          FakeResponse([self._fila_auto(etiqueta="Mi alarma")]))
+        assert main._alarma_entreno() == {}
+        assert mock_requests.called("PATCH", "/rest/v1/alarmas") == []
+
+    def test_con_el_calendario_caido_no_toca_nada(self, mock_requests, monkeypatch):
+        self._calendario(monkeypatch, None)
+        mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse([self._fila_auto()]))
+        assert main._alarma_entreno() == {}
+        assert mock_requests.calls == []
+
+    def test_solo_mira_cada_tanto(self, mock_requests, monkeypatch):
+        leidas = []
+        monkeypatch.setattr(main, "_eventos_con_fecha_o_none",
+                            lambda dias=2: leidas.append(1) or [])
+        main._alarma_entreno()
+        main._alarma_entreno()
+        assert len(leidas) == 1
+
+    def test_apagada_sin_titulo(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "ALARMA_ENTRENO_TITULO", "")
+        self._calendario(monkeypatch, [self._evento()])
+        assert main._alarma_entreno() == {}
+        assert mock_requests.calls == []

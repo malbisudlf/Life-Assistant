@@ -12674,6 +12674,8 @@ def ha_brief_tick(request: Request, token: str = ""):
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # Moodle antes del despacho: sus avisos salen en este mismo tick.
                **_moodle_tick_seguro(),
+               # La alarma del entreno temprano, si el calendario dice que mañana toca.
+               **_alarma_entreno_seguro(),
                # El turno de noche va aquí y no en un reloj propio: este tick es el único
                # que corre a las tres de la mañana. Su guarda de hora está dentro.
                **_turno_noche_seguro(),
@@ -17071,6 +17073,117 @@ def editar_alarma(body: AlarmaIn, alarma_id: str = _uuid_path(),
 def borrar_alarma(alarma_id: str = _uuid_path(),
                   credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     return _alarma_cancelar(alarma_id)
+
+
+# ── Alarma automática del entreno temprano ───────────────────────────────────
+# Si en el calendario hay un evento cuyo título contiene ALARMA_ENTRENO_TITULO y empieza
+# a ALARMA_ENTRENO_HORA, se pone sola una alarma de respaldo ese día a
+# ALARMA_ENTRENO_ALARMA. Pedido el 2026-10-21 para «entrenamiento gente» a las 7:15 →
+# alarma a las 6:45. Va en el brief-tick (cada 5 min, mira cada ALARMA_ENTRENO_CADA_MIN)
+# y no en las reglas: una alarma no es un aviso y no puede depender de REGLAS_PROACTIVAS.
+#
+# Las decisiones:
+#   - **La idempotencia es «ese día ya hay alarma», en CUALQUIER estado**: una a la hora
+#     de la automática (tuya o suya, suelta o semanal) o una con su etiqueta. Si la
+#     quitaste, la fila cancelada sigue ahí y no se vuelve a poner: quitarla tiene que
+#     valer. Si la moviste a las 6:30, tampoco se pone otra a las 6:45.
+#   - **Si el entreno desaparece o se mueve, la automática se quita** — solo si sigue
+#     `armada`, lleva la etiqueta de las automáticas y su día cae dentro de lo leído.
+#     Con Graph caído no se toca nada: «no se sabe» no es «se ha cancelado».
+#   - Título vacío = apagado. Es un dato de una agenda concreta y el repositorio es
+#     público, como las entidades del altavoz.
+ALARMA_ENTRENO_TITULO    = os.getenv("ALARMA_ENTRENO_TITULO", "").strip().lower()
+ALARMA_ENTRENO_HORA      = os.getenv("ALARMA_ENTRENO_HORA", "07:15").strip()
+ALARMA_ENTRENO_ALARMA    = os.getenv("ALARMA_ENTRENO_ALARMA", "06:45").strip()
+ALARMA_ENTRENO_CADA_MIN  = int(os.getenv("ALARMA_ENTRENO_CADA_MIN", "15"))
+# Hasta dónde se mira. Dos días cubre «mañana» se mire a la hora que se mire.
+ALARMA_ENTRENO_DIAS      = 2
+_alarma_entreno_ultima   = {"ts": 0.0}
+
+
+def _alarma_entreno_etiqueta() -> str:
+    """La etiqueta de las automáticas: es lo que dicen el móvil y el altavoz al sonar, y
+    lo que las distingue de las tuyas a la hora de quitarlas."""
+    return f"Entrenamiento a las {ALARMA_ENTRENO_HORA}"
+
+
+def _alarma_entreno() -> dict:
+    """Pone (o quita) la alarma del entreno temprano según lo que diga el calendario."""
+    if not ALARMA_ENTRENO_TITULO:
+        return {}
+    if not (_HORA_RE.match(ALARMA_ENTRENO_HORA) and _HORA_RE.match(ALARMA_ENTRENO_ALARMA)):
+        logger.error("Alarma del entreno: ALARMA_ENTRENO_HORA o ALARMA_ENTRENO_ALARMA "
+                     "no son HH:MM; no se pone nada")
+        return {}
+    # La hora se apunta ANTES de preguntar, como en Moodle: un Graph caído no puede
+    # convertirse en una lectura del calendario en cada tick.
+    if time.time() - _alarma_entreno_ultima["ts"] < ALARMA_ENTRENO_CADA_MIN * 60:
+        return {}
+    _alarma_entreno_ultima["ts"] = time.time()
+
+    eventos = _eventos_con_fecha_o_none(dias=ALARMA_ENTRENO_DIAS)
+    if eventos is None:
+        return {}
+    ahora = _ahora_local()
+    h, m  = int(ALARMA_ENTRENO_ALARMA[:2]), int(ALARMA_ENTRENO_ALARMA[3:])
+    # Los días con entreno a esa hora, y la hora de su alarma. Se compara la hora LOCAL
+    # del inicio, que es como lo apuntas en el calendario.
+    objetivos = {}
+    for ev in eventos:
+        if (ALARMA_ENTRENO_TITULO in (ev.get("title") or "").lower()
+                and ev["ini"].strftime("%H:%M") == ALARMA_ENTRENO_HORA):
+            suena = datetime.combine(ev["ini"].date(), datetime.min.time(),
+                                     tzinfo=LOCAL_TZ).replace(hour=h, minute=m)
+            if suena > ahora:
+                objetivos[suena.date()] = suena
+
+    desde = datetime.now(timezone.utc) - timedelta(days=1)
+    r = http.get(f"{ALARMAS_URL}?cuando=gte.{desde.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                 f"&select=id,cuando,estado,etiqueta&order=cuando.asc&limit=100",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        logger.error("Alarma del entreno: no se pudieron leer las alarmas (%s)", r.status_code)
+        return {}
+    etiqueta = _alarma_entreno_etiqueta()
+    filas    = [(f, c.astimezone(LOCAL_TZ)) for f in (r.json() or [])
+                for c in [_alarma_cuando(f)] if c]
+
+    puestas, quitadas = [], []
+    for dia, suena in sorted(objetivos.items()):
+        if any(c == suena or (c.date() == dia and f.get("etiqueta") == etiqueta)
+               for f, c in filas):
+            continue
+        hecho = _alarma_crear(dia.isoformat(), ALARMA_ENTRENO_ALARMA, etiqueta)
+        if hecho.get("ok"):
+            puestas.append(hecho["cuando"])
+            logger.info("Alarma del entreno: puesta para %s", hecho["cuando"])
+        else:
+            logger.warning("Alarma del entreno: no se pudo poner (%s)", hecho.get("motivo"))
+
+    # Solo lo que cae holgadamente dentro de lo leído: la alarma de un día cuyo entreno
+    # queda fuera de la ventana no se ha cancelado, simplemente no se ha mirado. Doce
+    # horas de margen cubren de sobra la media hora entre la alarma y el entreno.
+    tope = ahora + timedelta(days=ALARMA_ENTRENO_DIAS) - timedelta(hours=12)
+    for f, cuando in filas:
+        if (f.get("estado") != "armada" or f.get("etiqueta") != etiqueta
+                or cuando.date() in objetivos or not (ahora < cuando <= tope)):
+            continue
+        if _alarma_cancelar(str(f.get("id") or "")).get("hecho"):
+            quitadas.append(cuando.strftime("%Y-%m-%d %H:%M"))
+            logger.info("Alarma del entreno: quitada la de %s, ya no hay entreno",
+                        quitadas[-1])
+
+    salida = {k: v for k, v in (("puestas", puestas), ("quitadas", quitadas)) if v}
+    return {"alarma_entreno": salida} if salida else {}
+
+
+def _alarma_entreno_seguro() -> dict:
+    """Como cada pieza del tick: un fallo aquí no puede dejar sin despachar los avisos."""
+    try:
+        return _alarma_entreno()
+    except Exception:
+        logger.exception("Alarma del entreno: fallo inesperado")
+        return {}
 
 
 

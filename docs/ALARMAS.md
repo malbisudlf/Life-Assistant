@@ -139,6 +139,27 @@ no suena.
 - **Solo toca lo que está `armada`.** Si ya está sonando, la marca no la calla: para eso
   está «Estoy despierto».
 
+### La que se pone sola: el entreno temprano
+
+Si en el calendario hay un evento cuyo título contiene `ALARMA_ENTRENO_TITULO` («entrenamiento
+gente») y empieza **exactamente** a `ALARMA_ENTRENO_HORA` (07:15), ese día se pone sola una
+alarma a `ALARMA_ENTRENO_ALARMA` (06:45) con la etiqueta «Entrenamiento a las 07:15». A
+partir de ahí es una alarma como cualquier otra: se ve en el widget, se pospone, se
+confirma y «Déjame dormir» la salta. `_alarma_entreno` en `backend/main.py`.
+
+- **Va en el brief-tick, no en las reglas.** Mira el calendario cada
+  `ALARMA_ENTRENO_CADA_MIN` (15) de los próximos dos días. Una alarma no es un aviso: no
+  puede apagarse con `REGLAS_PROACTIVAS` ni gastar presupuesto.
+- **Una por día, y quitarla vale.** Si ese día ya hay una alarma a esa hora —tuya o
+  suya, suelta o semanal, **en cualquier estado**— o una con su etiqueta (la moviste a las
+  6:30), no se pone otra. La fila cancelada es lo que impide que una alarma que quitaste
+  vuelva a aparecer quince minutos después.
+- **Si el entreno desaparece o cambia de hora, la automática se quita sola**, pero solo
+  si sigue `armada`, lleva su etiqueta y su día cae dentro de lo leído. Con Graph caído no
+  se toca nada: «no se sabe» no es «se ha cancelado». El precio aceptado: si el entreno
+  vuelve después, la alarma no (su fila ya está cancelada); se pone a mano.
+- **Título vacío = apagado**, como las entidades del altavoz: es un dato de una agenda.
+
 ### Las decisiones que no son obvias
 
 - **El reloj es propio, no el tick del resumen diario.** Aquel pasa cada 5 minutos, y una
@@ -349,6 +370,10 @@ rendida es historia, y cambiarla reescribiría por qué la casa hizo ruido a las
 | `ALARMA_VOLUMEN` | `0.35` | A cuánto se pone el altavoz antes de hablar |
 | `ALARMA_ALTAVOZ` | — | El `media_player` del cuarto. Vacío: no se prepara el altavoz |
 | `ALARMA_NO_MOLESTAR` | — | El `switch` de "no molestar" de ese altavoz |
+| `ALARMA_ENTRENO_TITULO` | — | Texto del título del evento que pone la alarma sola. Vacío: apagado |
+| `ALARMA_ENTRENO_HORA` | `07:15` | Hora a la que tiene que empezar ese evento |
+| `ALARMA_ENTRENO_ALARMA` | `06:45` | Hora de la alarma que se pone ese día |
+| `ALARMA_ENTRENO_CADA_MIN` | `15` | Cada cuánto se mira el calendario |
 
 Las dos últimas van vacías por defecto porque son entidades de una casa concreta y este
 repositorio es público. Sin ellas la alarma suena igual, solo que puede pillar el altavoz
