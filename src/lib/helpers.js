@@ -2216,6 +2216,20 @@ export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
     .map(m => ({ rol: m.rol, texto: m.texto.slice(0, JARVIS_MAX_TURNO) }));
 }
 
+/** El color de cada tipo de evento (`tipo` lo pone el backend: deporte, clase, uni u
+ *  otro). Los mismos tonos que ya usaban los entrenos y las clases en el resto del
+ *  dashboard, para que «verde» signifique deporte en todas partes. */
+export const COLORES_TIPO_EVENTO = {
+  deporte: "#6aaa82",
+  clase:   "#8bb4d4",
+  uni:     "#d9925a",
+  otro:    "#c8a96e",
+};
+
+export function colorTipoEvento(tipo) {
+  return COLORES_TIPO_EVENTO[tipo] || COLORES_TIPO_EVENTO.otro;
+}
+
 /** Fecha ISO a DD/MM/AAAA para las etiquetas de confirmación. */
 function _fechaLegible(iso) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return "";
@@ -2297,6 +2311,9 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       if (n > 6) lineas.push("(son más de 6: no se reservará ninguno)");
       return lineas.join("\n");
     }
+    case "ordenar_calendario":
+      // Solo llega aquí con simular=false: simular es directo y no deja nada pendiente.
+      return "Mover a su calendario (Deporte, Uni) los eventos que Jarvis acaba de enseñarte";
     case "borrar_evento":
       if (!a.evento_id) return null;
       return `Borrar del calendario el evento ${nombreDe(contexto.eventos, a.evento_id, "title")}`;

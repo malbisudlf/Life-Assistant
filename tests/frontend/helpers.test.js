@@ -16,6 +16,7 @@ import {
   relojPuesto, relojCobertura, relojRachaSinReloj,
   formatMoney, clothingTotals, hostStreaming,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError, JARVIS_MAX_HISTORIAL, JARVIS_MAX_TURNO,
+  colorTipoEvento, COLORES_TIPO_EVENTO,
   elegirVozEspanola, textoHablable, esFinDeLlamada,
   esConfirmacionHablada, esNegacionHablada,
   formatoEuros, formatoPorcentaje, formatoRentabilidad, mezclaCartera, variacionCartera,
@@ -1360,6 +1361,18 @@ describe("jarvisEtiquetaAccion", () => {
 
   test("sin título no hay nada que confirmar", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "crear_evento", argumentos: { fecha: "2026-09-01" } })).toBeNull();
+  });
+
+  test("ordenar el calendario dice qué se aprueba", () => {
+    expect(jarvisEtiquetaAccion({ herramienta: "ordenar_calendario", argumentos: { simular: false } }))
+      .toContain("Deporte");
+  });
+
+  test("cada tipo de evento tiene su color, y lo desconocido es «otro»", () => {
+    expect(new Set(Object.values(COLORES_TIPO_EVENTO)).size).toBe(4);
+    expect(colorTipoEvento("deporte")).toBe(COLORES_TIPO_EVENTO.deporte);
+    expect(colorTipoEvento(undefined)).toBe(COLORES_TIPO_EVENTO.otro);
+    expect(colorTipoEvento("inventado")).toBe(COLORES_TIPO_EVENTO.otro);
   });
 
   test("una serie semanal dice qué día se repite y hasta cuándo", () => {

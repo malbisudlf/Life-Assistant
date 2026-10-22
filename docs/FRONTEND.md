@@ -126,6 +126,10 @@ Qué hace cada uno:
    por hora, con nodos activos/pasados/futuros y calculador de hora de salida por Google
    Maps. Al pulsar "¿A qué hora salir?" aparece un selector inline 🚗/🚶 antes de
    calcular; el resultado muestra el icono del modo elegido y un botón ↺ para recalcular.
+   Cada nodo (y el punto de cada fila en «Próximos eventos») lleva el color de su `tipo`,
+   que pone el backend (`colorTipoEvento` en `helpers.js`: verde deporte, azul clase,
+   naranja uni, dorado el resto). Son los mismos tonos que los entrenos y las clases en el
+   resto del dashboard. Lo pasado se apaga igual que antes.
 2. **Clima (`weather`)** — Open-Meteo, con la geolocalización del navegador si la hay.
 3. **Próximos eventos (`upcoming`)** — próximos 7 días (máx. 5). "+ Evento" abre un modal
    para crear un evento en Outlook vía Graph.

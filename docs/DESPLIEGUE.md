@@ -87,6 +87,9 @@ Notas:
   delante, y un JWT del dashboard caduca a los 30 días y lo deja mudo sin avisar.
 - `CLASSES_CALENDAR` es el nombre de un calendario de Outlook aparte para clases
   con horario; si no lo usas, ignora el panel de clases.
+- `CALENDARIOS_POR_TIPO=1` (opcional, apagado por defecto) reparte los eventos en un
+  calendario por tipo (`CALENDARIO_DEPORTE`, `CALENDARIO_UNI`), que es lo que les da color
+  en el calendario del iPhone. Ver «Calendarios por tipo» en `docs/BACKEND_PATRONES.md`.
 - `WEATHER_LAT`/`WEATHER_LON` son las coordenadas del widget de clima (Open-Meteo,
   gratis y sin API key). Por defecto Madrid.
 - Google Maps: activa **Distance Matrix API** en tu proyecto de Google Cloud y

@@ -421,6 +421,8 @@ class TestJarvisDespachador:
         # Y OneDrive y los cumpleaños, que nacen apagados como las tareas.
         monkeypatch.setattr(main, "ONEDRIVE", True)
         monkeypatch.setattr(main, "CUMPLES", True)
+        # Y los calendarios por tipo, que también nacen apagados.
+        monkeypatch.setattr(main, "CALENDARIOS_POR_TIPO", True)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

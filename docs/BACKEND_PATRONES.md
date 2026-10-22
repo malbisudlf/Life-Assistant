@@ -49,6 +49,39 @@
   La guía de despliegue para terceros es `docs/DESPLIEGUE.md`: si añades una
   variable o migración, actualízala. No reintroduzcas valores personales
   hardcodeados en el código.
+- **Calendarios por tipo** (`CALENDARIOS_POR_TIPO`, nace apagado; sección del mismo
+  nombre en `main.py`). Existe para ver los eventos de colores en el widget del iPhone,
+  que colorea por **calendario** y no por evento: las categorías de Outlook no le llegan,
+  y por eso no se usan. Cada tipo vive en su calendario: Deporte (`CALENDARIO_DEPORTE`),
+  Clases (`CLASSES_CALENDAR`), Uni (`CALENDARIO_UNI`: entregas, exámenes y lo demás de
+  clase) y el de por defecto para el resto. El tipo lo decide `tipo_evento()` con palabras
+  enteras sin tildes (las de uni ganan: «examen de educación física» es un examen), y
+  **el calendario manda sobre el asunto**: lo que está en Deporte es deporte se llame como
+  se llame. Lo que no se puede relajar:
+  - **Leer es leerlos todos.** `get_events` junta el de por defecto con Deporte y Uni, y
+    `/ha/events/soon` también. Todo lo que mira la agenda (Jarvis, `huecos_libres`, la
+    alarma del entreno, el resumen, las entregas) pasa por ahí. Cualquier lectura nueva
+    del calendario que vaya directa a `/me/calendarView` solo ve el de por defecto: usa
+    `get_events` o suma `_calendarios_extra()`. Las entregas de Moodle se buscan también en
+    Uni (`_moodle_eventos_calendario`).
+  - **Lo nuevo nace en su sitio.** `POST /calendar/events` sin `calendar_id` (dashboard y
+    Jarvis) y las entregas nuevas de Moodle van al calendario de su tipo, que se crea si no
+    existe (`_calendario_de_tipo(crear=True)`).
+  - **Mover es crear y borrar** (`_mover_evento`), porque Graph no mueve eventos entre
+    calendarios: el evento cambia de id. Primero la copia y luego el borrado; si el
+    original no se deja borrar, se borra la copia, para que nunca quede dos veces. Si era
+    una entrega de Moodle, se apunta su id nuevo en `moodle_entregas`, o la sincronización
+    la daría por borrada a mano.
+  - **Solo se mueve lo que no tiene efectos fuera**: tuyo (`isOrganizer`), suelto
+    (`singleInstance`) y sin invitados. Borrar una reunión con gente les manda la
+    cancelación; recrear una serie pierde sus excepciones. Esas se quedan, y se dice cuáles.
+  - **Nunca en automático.** Lo hace la herramienta `ordenar_calendario` de Jarvis,
+    simulando primero; mover de verdad se confirma con el botón. Un barrido periódico
+    volvería a mover cada evento que devolvieras a mano a su sitio (en el iPhone, cambiar
+    de calendario también es crear y borrar, así que el evento parece nuevo).
+  - Con el interruptor apagado lo único que cambia es el `tipo` de cada evento, que el
+    dashboard usa para pintarlo (`colorTipoEvento`). No hace falta ningún permiso nuevo de
+    Graph: crear calendarios y mover eventos es `Calendars.ReadWrite`.
 - **Tokens OAuth de Graph** se persisten en la tabla `oauth_tokens` de Supabase
   (`supabase/migrations/20260607_oauth_tokens.sql`). Antes se guardaban en
   `backend/.token`, pero ese fichero se perdía en cada `fly deploy` (el filesystem del

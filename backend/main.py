@@ -2065,8 +2065,9 @@ def callback(code: str, state: str = ""):
     if "access_token" in result:
         _store_result(result)
         # Puede ser otra cuenta de Outlook: el calendario de clases recordado es de la
-        # anterior (ver `_clases_cal_cache`).
+        # anterior (ver `_clases_cal_cache`), y los de cada tipo también.
         _clases_cal_cache = None
+        _tipo_cal_cache.clear()
         return {"status": "ok", "message": "Autenticado correctamente"}
     return {"error": result.get("error_description")}
 
@@ -2079,35 +2080,43 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
     headers = {"Authorization": f"Bearer {token}"}
     start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    response = http.get(
-        f"https://graph.microsoft.com/v1.0/me/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay,isOrganizer,attendees&$orderby=start/dateTime",
-        headers=headers
-    )
-    response.encoding = "utf-8"
-    fallo = _graph_fallo(response, "calendarView")
-    if fallo:
-        return fallo
-    data = response.json()
-    
+    consulta = (f"/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay,isOrganizer,attendees&$orderby=start/dateTime")
+    # El de por defecto y, con los calendarios por tipo, Deporte y Uni: lo que se movió
+    # allí sigue siendo tu agenda. Un fallo en cualquiera es un fallo de todo, como
+    # siempre: una agenda a medias se lee como horas libres que no lo son.
+    fuentes = [(None, "https://graph.microsoft.com/v1.0/me" + consulta)] + [
+        (tipo, f"https://graph.microsoft.com/v1.0/me/calendars/{quote(cal, safe='')}" + consulta)
+        for tipo, cal in _calendarios_extra(headers)]
+
     events = []
-    for event in data.get("value", []):
-        alud_url = _extraer_alud_url(event)
-        events.append({
-            "id": event.get("id"),
-            "title": _clean_class_title(event.get("subject", "")),
-            "start": normalize_graph_dt(event.get("start", {})),
-            "end": normalize_graph_dt(event.get("end", {})),
-            "location": event.get("location", {}).get("displayName"),
-            "preview": event.get("bodyPreview"),
-            "alud_url": alud_url,
-            "isAllDay": event.get("isAllDay"),
-            # Si la cita es tuya y si hay alguien más en ella. Lo mira «vas tarde» antes
-            # de ofrecer moverla: mover la reunión de otro no se puede, y mover una con
-            # invitados les manda a todos la actualización. Sin el dato, no se ofrece.
-            "organizo": event.get("isOrganizer"),
-            "invitados": len(event.get("attendees") or []),
-        })
-    
+    for tipo_fijo, url in fuentes:
+        response = http.get(url, headers=headers)
+        response.encoding = "utf-8"
+        fallo = _graph_fallo(response, f"calendarView ({tipo_fijo})" if tipo_fijo else "calendarView")
+        if fallo:
+            return fallo
+        for event in response.json().get("value", []):
+            alud_url = _extraer_alud_url(event)
+            events.append({
+                "id": event.get("id"),
+                "title": _clean_class_title(event.get("subject", "")),
+                "start": normalize_graph_dt(event.get("start", {})),
+                "end": normalize_graph_dt(event.get("end", {})),
+                "location": event.get("location", {}).get("displayName"),
+                "preview": event.get("bodyPreview"),
+                "alud_url": alud_url,
+                "isAllDay": event.get("isAllDay"),
+                # Si la cita es tuya y si hay alguien más en ella. Lo mira «vas tarde» antes
+                # de ofrecer moverla: mover la reunión de otro no se puede, y mover una con
+                # invitados les manda a todos la actualización. Sin el dato, no se ofrece.
+                "organizo": event.get("isOrganizer"),
+                "invitados": len(event.get("attendees") or []),
+                # El calendario manda sobre el asunto: si lo pusiste en Deporte, es deporte.
+                "tipo": tipo_fijo or tipo_evento(event.get("subject", "")),
+            })
+    if len(fuentes) > 1:
+        events.sort(key=lambda e: str(e.get("start") or ""))
+
     return {"events": events}
 
 @app.get("/calendar/calendars")
@@ -2175,12 +2184,15 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
                         "endDate": body.repeat_weekly_until,
                         "recurrenceTimeZone": TIMEZONE},
         }
+    # Sin calendario pedido, el de su tipo (calendarios por tipo): el pádel nace ya en
+    # Deporte, y no hay que moverlo después.
+    calendario = body.calendar_id or _calendario_para(body.subject, headers)
     # quote() obligatorio: el id se interpola en la ruta de Graph y un valor con '/',
     # '?' o '#' cambiaría el endpoint al que se llama. El token de Graph tiene alcance
     # Calendars.ReadWrite sobre toda la cuenta, así que el margen no es estrecho.
     url = (
-        f"https://graph.microsoft.com/v1.0/me/calendars/{quote(body.calendar_id, safe='')}/events"
-        if body.calendar_id
+        f"https://graph.microsoft.com/v1.0/me/calendars/{quote(calendario, safe='')}/events"
+        if calendario
         else "https://graph.microsoft.com/v1.0/me/events"
     )
     r = http.post(url, headers=headers, json=payload)
@@ -2350,9 +2362,303 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
             "preview": event.get("bodyPreview"),
             "alud_url": _extraer_alud_url(event),
             "isAllDay": event.get("isAllDay"),
+            # Clase, salvo las entregas y exámenes que viven aquí (las de Moodle se creaban
+            # en este calendario antes de que hubiera uno de Uni).
+            "tipo": tipo_evento(event.get("subject", ""), de_clases=True),
         })
     logger.debug("[CLASES] Total eventos devueltos: %d", len(events))
     return {"events": events}
+
+
+# ── Calendarios por tipo ──────────────────────────────────────────────────────
+#
+# Para ver los eventos de colores en el widget del iPhone. El calendario de iOS colorea
+# por CALENDARIO, no por evento: las categorías de Outlook no le llegan. Así que cada
+# tipo vive en su propio calendario (el color se le pone a cada uno en el iPhone, una
+# vez): Deporte, Clases (el de siempre, `CLASSES_CALENDAR`), Uni para entregas, exámenes
+# y lo demás de clase, y el de por defecto para el resto.
+#
+# Lo que no se puede relajar:
+#   - **Leer es leerlos todos.** `get_events` mira también Deporte y Uni: sacar el pádel
+#     del calendario por defecto no puede quitárselo a la agenda de Jarvis, a los huecos,
+#     a la alarma del entreno ni al aviso de los 15 minutos.
+#   - **Mover es crear y borrar**, porque Graph no mueve eventos entre calendarios: el
+#     evento cambia de id. Por eso solo se mueve lo tuyo, suelto y sin invitados (borrar
+#     una reunión con gente les manda la cancelación), y nunca en automático: un evento que
+#     devolvieras a mano a su sitio volvería a moverse en cada pasada.
+#   - **Nace apagado** (`CALENDARIOS_POR_TIPO`). Con él apagado lo único que cambia es que
+#     cada evento lleva su `tipo`, para que el dashboard lo pinte de su color.
+CALENDARIOS_POR_TIPO = _flag("CALENDARIOS_POR_TIPO", "0")
+CALENDARIO_DEPORTE   = os.getenv("CALENDARIO_DEPORTE", "Deporte").strip() or "Deporte"
+CALENDARIO_UNI       = os.getenv("CALENDARIO_UNI", "Uni").strip() or "Uni"
+TIPOS_EVENTO         = ("deporte", "clase", "uni", "otro")
+# El color con el que nacen en Outlook. En el iPhone manda el que les pongas allí.
+_COLOR_CALENDARIO    = {"deporte": "lightGreen", "uni": "lightOrange"}
+# Hasta dónde mira `ordenar_calendario`, y cuántos mueve como mucho en una pasada.
+ORDENAR_DIAS = 90
+ORDENAR_MAX  = 50
+
+
+def _sin_tildes(texto: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", texto.casefold())
+                   if unicodedata.category(c) != "Mn")
+
+
+# Palabras enteras y sin tildes. Las de uni van antes que las de deporte: «examen de
+# educación física» es un examen.
+_PALABRAS_UNI = re.compile(r"\b(?:" + "|".join((
+    "examen", "examenes", "parcial", "parciales", "entrega", "entregas", "defensa",
+    "tutoria", "tutorias", "quiz", "prueba", "pruebas", "presentacion", "exposicion",
+    # Nada que pueda ser una sesión de clase («laboratorio», «seminario»): esas son clase.
+    "revision de examen", "recuperacion", "evaluacion", "tfg", "tfm", "trabajo en grupo",
+    )) + r")\b")
+_PALABRAS_DEPORTE = re.compile(r"\b(?:" + "|".join((
+    "padel", "gimnasio", "gym", "entreno", "entrenos", "entrenamiento", "entrenar",
+    "futbol", "futbito", "correr", "running", "carrera", "natacion", "nadar", "piscina",
+    "crossfit", "hyrox", "yoga", "pilates", "spinning", "ciclismo", "bici", "tenis",
+    "baloncesto", "basket", "boxeo", "escalada", "rocodromo", "surf", "esqui", "ski",
+    "senderismo", "monte", "partido", "pesas", "cardio", "maraton", "triatlon", "squash",
+    "voley", "rugby", "golf", "remo", "kayak", "deporte")) + r")\b")
+
+
+def tipo_evento(asunto: str, de_clases: bool = False) -> str:
+    """deporte, clase, uni u otro, a partir del asunto y de en qué calendario está.
+
+    Lo marcado con `ENTREGAS_MARKER` o que suena a examen o entrega es uni, venga de
+    donde venga; lo demás del calendario de clases es clase.
+    """
+    asunto = str(asunto or "")
+    plano  = _sin_tildes(asunto)
+    if ENTREGAS_MARKER in asunto or _PALABRAS_UNI.search(plano):
+        return "uni"
+    if de_clases:
+        return "clase"
+    if _PALABRAS_DEPORTE.search(plano):
+        return "deporte"
+    return "otro"
+
+
+def _nombre_calendario(tipo: str) -> str:
+    return {"deporte": CALENDARIO_DEPORTE, "uni": CALENDARIO_UNI,
+            "clase": CLASSES_CALENDAR}.get(tipo, "")
+
+
+# Los ids de Deporte y Uni, como `_clases_cal_cache` hace con el de clases: el id de un
+# calendario no cambia, y buscarlo cada vez era pedir la lista entera a Graph.
+_tipo_cal_cache: dict = {}
+
+
+def _calendario_de_tipo(tipo: str, headers: dict, crear: bool = False) -> Optional[str]:
+    """El id (sin escapar) del calendario de un tipo, o None: el de por defecto (otro),
+    el que no existe y no se pide crear, o Graph sin responder."""
+    if tipo == "clase":
+        cal, _, _ = _id_calendario_clases(headers)
+        return cal
+    nombre = _nombre_calendario(tipo)
+    if not nombre:
+        return None
+    guardado = _tipo_cal_cache.get(nombre.lower())
+    if guardado and time.time() - guardado[0] < CLASES_CAL_TTL:
+        return guardado[1]
+    r = http.get("https://graph.microsoft.com/v1.0/me/calendars?$select=id,name", headers=headers)
+    if _graph_fallo(r, f"me/calendars ({tipo})"):
+        return None
+    cal = next((c for c in r.json().get("value", [])
+                if str(c.get("name") or "").lower() == nombre.lower()), None)
+    if not cal and crear:
+        r = http.post("https://graph.microsoft.com/v1.0/me/calendars", headers=headers,
+                      json={"name": nombre, "color": _COLOR_CALENDARIO.get(tipo, "auto")})
+        if r.status_code not in (200, 201):
+            logger.error("Calendarios por tipo: Graph no creó «%s» (%s)", nombre, r.status_code)
+            return None
+        logger.info("Calendarios por tipo: creado el calendario «%s»", nombre)
+        cal = r.json() or {}
+    if not cal or not cal.get("id"):
+        return None
+    _tipo_cal_cache[nombre.lower()] = (time.time(), str(cal["id"]))
+    return str(cal["id"])
+
+
+def _calendarios_extra(headers: dict) -> list:
+    """[(tipo, id)] de los calendarios por tipo que hay que leer además del de por
+    defecto. Vacío con el interruptor apagado o si todavía no existen."""
+    if not CALENDARIOS_POR_TIPO:
+        return []
+    salida = []
+    for tipo in ("deporte", "uni"):
+        cal = _calendario_de_tipo(tipo, headers)
+        if cal:
+            salida.append((tipo, cal))
+    return salida
+
+
+def _calendario_para(asunto: str, headers: dict) -> Optional[str]:
+    """Dónde se crea un evento nuevo: el calendario de su tipo (creándolo si hace
+    falta) o None para el de por defecto."""
+    if not CALENDARIOS_POR_TIPO:
+        return None
+    tipo = tipo_evento(asunto)
+    if tipo not in ("deporte", "uni"):
+        return None
+    return _calendario_de_tipo(tipo, headers, crear=True)
+
+
+# Lo que se copia al mover. Sin asistentes (solo se mueve lo que no los tiene) ni
+# recurrencia (las series se quedan: ver `_ordenar_calendario`).
+_CAMPOS_AL_MOVER = ("subject", "start", "end", "isAllDay", "showAs", "isReminderOn",
+                    "reminderMinutesBeforeStart", "sensitivity", "importance", "categories")
+
+
+def _moodle_seguir_evento(viejo: str, nuevo: str) -> None:
+    """Si el evento movido era una entrega de Moodle, apunta su id nuevo. Sin esto la
+    sincronización lo daría por borrado a mano y no lo quitaría al entregarla."""
+    try:
+        r = http.patch(f"{MOODLE_ENTREGAS_URL}?outlook_id=eq.{quote(viejo, safe='')}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"outlook_id": nuevo})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.error("Calendarios por tipo: no se pudo apuntar el id nuevo de una entrega (%s)", e)
+
+
+def _mover_evento(evento_id: str, cal_destino: str, headers: dict) -> str:
+    """Lleva un evento a otro calendario. '' si salió bien; si no, por qué.
+
+    Graph no mueve: se crea la copia y se borra el original. Si el original no se deja
+    borrar, se borra la copia, para que nunca quede dos veces.
+    """
+    ruta = f"https://graph.microsoft.com/v1.0/me/events/{quote(evento_id, safe='')}"
+    r = http.get(ruta + "?$select=" + ",".join(_CAMPOS_AL_MOVER + ("body", "location")),
+                 headers=headers)
+    if r.status_code >= 300:
+        logger.error("Calendarios por tipo: no se pudo leer el evento a mover (%s)", r.status_code)
+        return "No lo he podido leer"
+    ev = r.json() or {}
+    copia = {k: ev[k] for k in _CAMPOS_AL_MOVER if ev.get(k) is not None}
+    cuerpo = ev.get("body") or {}
+    if cuerpo.get("content"):
+        copia["body"] = {"contentType": cuerpo.get("contentType") or "text",
+                         "content": cuerpo["content"]}
+    if (ev.get("location") or {}).get("displayName"):
+        copia["location"] = {"displayName": ev["location"]["displayName"]}
+    r = http.post(f"https://graph.microsoft.com/v1.0/me/calendars/{quote(cal_destino, safe='')}/events",
+                  headers={**headers, "Content-Type": "application/json"}, json=copia)
+    if r.status_code not in (200, 201):
+        logger.error("Calendarios por tipo: Graph no creó la copia (%s)", r.status_code)
+        return "No he podido crear la copia"
+    nuevo = str((r.json() or {}).get("id") or "")
+    r = http.delete(ruta, headers=headers)
+    if r.status_code not in (200, 204, 404):
+        logger.error("Calendarios por tipo: no se pudo quitar el original (%s); se deshace", r.status_code)
+        if nuevo:
+            http.delete(f"https://graph.microsoft.com/v1.0/me/events/{quote(nuevo, safe='')}",
+                        headers=headers)
+        return "No he podido quitar el original, así que lo dejo como estaba"
+    if nuevo:
+        _moodle_seguir_evento(evento_id, nuevo)
+    return ""
+
+
+def _ordenar_calendario(simular=True) -> dict:
+    """Mueve a Deporte y a Uni lo que ya estaba en el calendario por defecto (y las
+    entregas y exámenes del de clases). Con `simular`, solo dice qué haría.
+
+    Nunca en automático, y solo lo que se puede mover sin efectos fuera: tuyo, suelto y
+    sin invitados. Las series se quedan, porque recrearlas pierde sus excepciones (la
+    semana que la moviste, la que la quitaste); en el iPhone se cambian de calendario
+    enteras.
+    """
+    simular = simular not in (False, "false", "False", 0, "0")
+    if not CALENDARIOS_POR_TIPO:
+        return {"ok": False, "motivo": "Los calendarios por tipo están apagados: hace falta "
+                                       "CALENDARIOS_POR_TIPO=1 en el backend."}
+    token = get_valid_token()
+    if not token:
+        return {"ok": False, "motivo": "Outlook no está conectado."}
+    headers = {"Authorization": f"Bearer {token}"}
+    desde = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    hasta = desde + timedelta(days=ORDENAR_DIAS)
+    consulta = (f"/calendarView?startDateTime={desde.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"&endDateTime={hasta.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                "&$top=500&$select=subject,start,isAllDay,type,isOrganizer,attendees,seriesMasterId"
+                "&$orderby=start/dateTime")
+    origenes = [(False, "https://graph.microsoft.com/v1.0/me")]
+    clases, _, _ = _id_calendario_clases(headers)
+    if clases:
+        origenes.append((True, f"https://graph.microsoft.com/v1.0/me/calendars/{quote(clases, safe='')}"))
+
+    mover, se_quedan, series = [], [], set()
+    for de_clases, base in origenes:
+        r = http.get(base + consulta, headers=headers)
+        if _graph_fallo(r, "calendarView (ordenar)"):
+            return {"ok": False, "motivo": "No he podido leer el calendario, así que no he "
+                                           "movido nada."}
+        for ev in r.json().get("value", []):
+            tipo = tipo_evento(ev.get("subject", ""), de_clases=de_clases)
+            if tipo not in ("deporte", "uni"):
+                continue
+            titulo = _clean_class_title(ev.get("subject", "")) or "(sin título)"
+            if ev.get("type") != "singleInstance":
+                serie = ev.get("seriesMasterId") or ev.get("id")
+                if serie not in series:
+                    series.add(serie)
+                    se_quedan.append({"titulo": titulo, "motivo": "se repite: cámbiala de "
+                                      "calendario entera desde el iPhone"})
+                continue
+            if not ev.get("isOrganizer"):
+                se_quedan.append({"titulo": titulo, "motivo": "no lo organizas tú"})
+            elif ev.get("attendees"):
+                se_quedan.append({"titulo": titulo, "motivo": "tiene invitados: moverlo les "
+                                  "mandaría una cancelación"})
+            else:
+                # En hora local: es lo que se le enseña para que diga si le parece bien.
+                inicio = (str((ev.get("start") or {}).get("dateTime"))[:10] if ev.get("isAllDay")
+                          else datetime.fromisoformat(normalize_graph_dt(ev.get("start") or {})
+                                                      .replace("Z", "+00:00"))
+                          .astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M"))
+                mover.append({"id": ev["id"], "titulo": titulo, "inicio": inicio, "tipo": tipo,
+                              "a": _nombre_calendario(tipo)})
+
+    para_luego = max(0, len(mover) - ORDENAR_MAX)
+    mover = mover[:ORDENAR_MAX]
+    lista = [{k: m[k] for k in ("titulo", "inicio", "a")} for m in mover]
+    if simular:
+        return {"ok": True, "simulado": True, "se_moverian": lista, "se_quedan": se_quedan,
+                "para_otra_pasada": para_luego,
+                "nota": "NO se ha movido nada. Enséñale la lista y, si le parece bien, "
+                        "propón ordenar_calendario con simular=false."}
+
+    movidos, fallidos, destinos = [], [], {}
+    for m in mover:
+        cal = destinos.get(m["tipo"]) or _calendario_de_tipo(m["tipo"], headers, crear=True)
+        if not cal:
+            fallidos.append({"titulo": m["titulo"], "motivo": f"No he podido crear «{m['a']}»"})
+            continue
+        destinos[m["tipo"]] = cal
+        motivo = _mover_evento(m["id"], cal, headers)
+        if motivo:
+            fallidos.append({"titulo": m["titulo"], "motivo": motivo})
+        else:
+            movidos.append({k: m[k] for k in ("titulo", "inicio", "a")})
+
+    if movidos:
+        por_calendario = {}
+        for m in movidos:
+            por_calendario.setdefault(m["a"], []).append(m["titulo"])
+        frase = "He movido " + "; ".join(
+            f"{len(t)} a {cal}" for cal, t in por_calendario.items()) + "."
+    else:
+        frase = "No he movido nada."
+    if fallidos:
+        frase += " Fallaron: " + "; ".join(f"«{f['titulo']}» ({f['motivo']})" for f in fallidos) + "."
+    if se_quedan:
+        frase += f" Se quedan donde estaban {len(se_quedan)} (series, con invitados o no tuyos)."
+    if para_luego:
+        frase += f" Quedan {para_luego} más para otra pasada."
+    return {"ok": bool(movidos) or not fallidos, "movidos": movidos, "fallidos": fallidos,
+            "se_quedan": se_quedan, "para_otra_pasada": para_luego,
+            "dile_al_usuario_literalmente": frase}
 
 
 def _version_desplegada() -> str:
@@ -3178,7 +3484,9 @@ def _moodle_graph() -> Optional[tuple]:
     if not token:
         return None
     cabeceras = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    cal, _, _ = _id_calendario_clases(cabeceras)
+    # Con los calendarios por tipo, en Uni: una entrega es de otro color que las clases.
+    cal = ((_calendario_de_tipo("uni", cabeceras, crear=True) if CALENDARIOS_POR_TIPO else None)
+           or _id_calendario_clases(cabeceras)[0])
     url = (f"https://graph.microsoft.com/v1.0/me/calendars/{quote(cal, safe='')}/events"
            if cal else "https://graph.microsoft.com/v1.0/me/events")
     return cabeceras, url
@@ -3262,14 +3570,18 @@ def _moodle_eventos_calendario() -> Optional[list]:
     """
     try:
         datos = get_class_events(credentials=None)
+        # Con los calendarios por tipo, las entregas viven en Uni, que lee `get_events`.
+        otros = get_events(credentials=None) if CALENDARIOS_POR_TIPO else {"events": []}
     except Exception as e:
         logger.warning("Moodle: no se pudo leer el calendario de clases (%s)", type(e).__name__)
         return None
+    if not isinstance(otros, dict) or "error" in otros:
+        return None
     if isinstance(datos, dict) and "available" in datos:
-        return []
+        return otros.get("events") or []
     if not isinstance(datos, dict) or "error" in datos:
         return None
-    return datos.get("events") or []
+    return (datos.get("events") or []) + (otros.get("events") or [])
 
 
 def _moodle_guardadas() -> dict:
@@ -4594,24 +4906,32 @@ def ha_events_soon(request: Request, token: str = ""):
     # {"event": None} de siempre, y con cualquier otra cosa la automatización de voz
     # se queda a medias. Es la misma regla que ya aplica al resto del endpoint, solo
     # que le faltaba el caso en que Graph no llega ni a contestar.
+    consulta = ("/calendarView"
+                f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime")
+    eventos = []
     try:
-        response = http.get(
-            "https://graph.microsoft.com/v1.0/me/calendarView"
-            f"?startDateTime={now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-            f"&endDateTime={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-            "&$top=20&$select=subject,start,isAllDay&$orderby=start/dateTime",
-            headers=headers,
-        )
+        # Con los calendarios por tipo, también Deporte y Uni: el aviso del pádel no puede
+        # desaparecer por haberlo cambiado de calendario.
+        urls = ["https://graph.microsoft.com/v1.0/me" + consulta] + [
+            f"https://graph.microsoft.com/v1.0/me/calendars/{quote(cal, safe='')}" + consulta
+            for _, cal in _calendarios_extra(headers)]
+        for url in urls:
+            response = http.get(url, headers=headers)
+            # Sin esta comprobación, un fallo de Graph acababa en `.json()` sobre un cuerpo
+            # que puede no ser JSON (500 con HTML → excepción y 500 propio) o en un
+            # `.get("value")` vacío que HA interpreta como "no hay nada a la vista". Se
+            # registra y se sigue con lo que haya: aquí un calendario de menos es un aviso
+            # de menos, no una agenda que miente.
+            if _graph_fallo(response, "calendarView (ha/events/soon)"):
+                continue
+            eventos += response.json().get("value", [])
     except requests.RequestException as e:
         logger.error("calendarView (ha/events/soon): sin respuesta de Graph (%s)", type(e).__name__)
-        return {"event": None}
-    # Sin esta comprobación, un fallo de Graph acababa en `.json()` sobre un cuerpo que
-    # puede no ser JSON (500 con HTML → excepción y 500 propio) o en un `.get("value")`
-    # vacío que HA interpreta como "no hay nada a la vista". Se registra y se devuelve
-    # el mismo `{"event": None}` de siempre para no romper la automatización.
-    if _graph_fallo(response, "calendarView (ha/events/soon)"):
-        return {"event": None}
-    for event in response.json().get("value", []):
+        if not eventos:
+            return {"event": None}
+    for event in sorted(eventos, key=lambda e: normalize_graph_dt(e.get("start", {}))):
         if event.get("isAllDay"):
             continue
         start_iso = normalize_graph_dt(event.get("start", {}))
@@ -28932,6 +29252,24 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios": ["titulo"],
         "requiere_tareas": True,
     },
+    "ordenar_calendario": {
+        # Simular es leer y va directa; mover de verdad cambia ids y calendarios, y eso lo
+        # aprueba una persona.
+        "confirmar":   lambda a: a.get("simular") in (False, "false", "False", 0, "0"),
+        "fn":          _ordenar_calendario,
+        "descripcion": "Lleva cada evento a su calendario por tipo (Deporte, Uni para "
+                       "entregas y exámenes; las clases y el resto se quedan), que es lo que "
+                       "le da color en el widget del iPhone. Llámala PRIMERO con "
+                       "simular=true y enséñale la lista; solo si dice que sí, con "
+                       "simular=false, que hay que confirmar. Solo mueve lo suyo, suelto y "
+                       "sin invitados; lo nuevo ya nace en su calendario.",
+        "parametros":  {
+            "simular": {"type": "boolean",
+                        "description": "true: solo dice qué movería. false: lo mueve."},
+        },
+        "obligatorios": ["simular"],
+        "requiere_calendarios": True,
+    },
     "reservar_bloques": {
         # UNA herramienta con una lista y no varios `crear_evento` seguidos: el dashboard
         # solo admite un pendiente por turno, así que el segundo pisaría al primero.
@@ -29110,6 +29448,7 @@ def _jarvis_esquema() -> list:
     # Y OneDrive y los cumpleaños, que nacen apagados como las tareas.
     con_onedrive = ONEDRIVE
     con_cumples  = CUMPLES
+    con_calendarios = CALENDARIOS_POR_TIPO
     return [{
         "type": "function",
         "function": {
@@ -29129,7 +29468,8 @@ def _jarvis_esquema() -> list:
         and (con_tareas or not h.get("requiere_tareas"))
         and (con_moodle or not h.get("requiere_moodle"))
         and (con_onedrive or not h.get("requiere_onedrive"))
-        and (con_cumples or not h.get("requiere_cumples"))]
+        and (con_cumples or not h.get("requiere_cumples"))
+        and (con_calendarios or not h.get("requiere_calendarios"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:

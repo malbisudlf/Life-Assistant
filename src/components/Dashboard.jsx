@@ -27,6 +27,7 @@ import {
   fusionarConfigWidgets,
   tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS, sleepHistory, desgloseNoche,
   rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes, rachaSueno, rachaPasos,
+  colorTipoEvento,
 } from "../lib/helpers";
 import { agruparLibros, terminadosEnAnio, fechaLibro, textoDuracion, puedeBuscar } from "../lib/libros";
 import {
@@ -6090,6 +6091,11 @@ export default function Dashboard() {
                             ...(node.ev.active ? s.nodeActive : {}),
                             ...(node.ev.past   ? s.nodePast   : {}),
                             ...(!node.ev.active && !node.ev.past ? s.nodeFuture : {}),
+                            // El color de su tipo, salvo lo ya pasado, que se apaga igual.
+                            ...(!node.ev.past ? {
+                              borderColor: colorTipoEvento(node.ev.tipo),
+                              ...(node.ev.active ? { background: colorTipoEvento(node.ev.tipo) } : {}),
+                            } : {}),
                           }} />
                           <div style={s.nodeLabel}>
                             <div style={s.nodeTime}>{node.ev.time}</div>
@@ -6143,7 +6149,7 @@ export default function Dashboard() {
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
             ) : upcomingEvents.map((ev, i) => (
               <div key={i} style={{ ...s.eventRow, flexWrap: "wrap", alignItems: "flex-start" }}>
-                <div style={s.eventDot} />
+                <div style={{ ...s.eventDot, background: colorTipoEvento(ev.tipo) }} />
                 <div style={s.eventRowTime}>{ev.time}</div>
                 <div style={{ flex: 1 }}>
                   <div style={s.eventRowTitle}>{ev.title}</div>

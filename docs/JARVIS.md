@@ -1203,6 +1203,22 @@ de clases, no aplicaba margen, no veía lo que venía de la noche anterior y, co
 `_eventos_con_fecha` devuelve `[]` cuando Outlook falla, **un Outlook caído le parecía un
 día entero libre**. Ahora, sin calendario, se calla.
 
+## Colores en el iPhone: `ordenar_calendario`
+
+«Ordena mi calendario por colores» lleva cada evento a su calendario por tipo (Deporte,
+Uni), que es lo único que el widget del iPhone sabe colorear. Cómo y por qué está en
+«Calendarios por tipo» de `docs/BACKEND_PATRONES.md`; aquí, lo de Jarvis:
+
+- **Solo se anuncia con `CALENDARIOS_POR_TIPO`** (`requiere_calendarios`), como las tareas
+  o los cumpleaños: apagada no puede hacer nada.
+- **`confirmar` depende del argumento.** `simular=true` es leer y va directa: devuelve
+  `se_moverian` (en hora local, para enseñárselo) y `se_quedan` con su motivo.
+  `simular=false` mueve, y eso se aprueba con el botón. La descripción le pide simular
+  primero y proponer solo si dices que sí. No está en el MCP del teléfono ni en lo que se
+  confirma en el móvil: cambia ids y calendarios, y se mira mejor en una pantalla.
+- **Lo nuevo no necesita esto**: `crear_evento` y `reservar_bloques` ya crean cada evento
+  en el calendario de su tipo.
+
 ## Preguntas al móvil: `mandar_notificacion` y `respuesta_notificacion`
 
 Jarvis te puede mandar una notificación **ahora**, y si lleva opciones, contestarle con un
