@@ -1362,6 +1362,14 @@ describe("jarvisEtiquetaAccion", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "crear_evento", argumentos: { fecha: "2026-09-01" } })).toBeNull();
   });
 
+  test("una serie semanal dice qué día se repite y hasta cuándo", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "crear_evento",
+      argumentos: { titulo: "Pádel", fecha: "2026-10-23", hora_inicio: "10:00",
+                    hora_fin: "12:00", repetir_hasta: "2026-12-31" },
+    })).toBe('Crear "Pádel" cada viernes del 23/10/2026 al 31/12/2026 a las 10:00');
+  });
+
   test("una tarea de To Do, con y sin fecha", () => {
     expect(jarvisEtiquetaAccion({
       herramienta: "crear_tarea",

@@ -71,13 +71,31 @@ class TestMcpChat:
         _herramienta(monkeypatch, "crear_evento", lambda **kw: ejecutado.append(kw))
         main._chat_turnos[TURNO] = {"ts": main.time.time(), "usadas": [], "pendiente": None}
         sesion = _sesion(client)
-        r = _rpc(client, "tools/call", {"name": "crear_evento", "arguments": {"titulo": "Cena"}},
+        cena = {"titulo": "Cena", "fecha": "2026-10-30"}
+        r = _rpc(client, "tools/call", {"name": "crear_evento", "arguments": cena},
                  sesion=sesion)
         texto = json.loads(r.json()["result"]["content"][0]["text"])
         assert texto["estado"] == "pendiente_de_confirmacion"
         assert ejecutado == []
         assert main._chat_turnos[TURNO]["pendiente"] == {"herramienta": "crear_evento",
-                                                         "argumentos": {"titulo": "Cena"}}
+                                                         "argumentos": cena}
+
+    def test_lo_que_se_rechazaria_al_pulsar_no_llega_a_proponerse(self, client, monkeypatch):
+        """Diez pádel hasta Navidad por `reservar_bloques`, que solo llega a 14 días: el
+        «no» tiene que llegarle al modelo en el turno, no a ti después de pulsar."""
+        monkeypatch.setattr(main, "_ahora_local",
+                            lambda: main.datetime(2026, 10, 22, 12, 0, tzinfo=main.LOCAL_TZ))
+        main._chat_turnos[TURNO] = {"ts": main.time.time(), "usadas": [], "pendiente": None}
+        sesion = _sesion(client)
+        bloques = [{"titulo": "Pádel", "fecha": "2026-12-04", "hora_inicio": "10:00",
+                    "hora_fin": "12:00"}]
+        r = _rpc(client, "tools/call",
+                 {"name": "reservar_bloques", "arguments": {"bloques": bloques}}, sesion=sesion)
+        resultado = r.json()["result"]
+        assert resultado["isError"] is True
+        assert "14 días" in resultado["content"][0]["text"]
+        assert "repetir_hasta" in resultado["content"][0]["text"]
+        assert main._chat_turnos[TURNO]["pendiente"] is None
 
     def test_sin_turno_conocido_no_se_puede_proponer(self, client, monkeypatch):
         """Sin turno no hay respuesta a la que colgar el botón: se dice, no se ejecuta."""

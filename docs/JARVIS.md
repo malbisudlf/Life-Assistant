@@ -1142,7 +1142,27 @@ herramienta con su lado de la frontera de confirmación:
   `RESERVAR_BLOQUES_MAX`, 6) en Outlook con un solo botón. La etiqueta del botón
   (`jarvisEtiquetaAccion`) pinta una línea por bloque sacada de los argumentos, y marca
   como «no se reservará» lo que no tenga forma válida. No está en el MCP del teléfono en
-  ninguna de sus dos listas: es confirmable y allí se rechazaría siempre.
+  ninguna de sus dos listas: es confirmable y allí se rechazaría siempre. Solo reserva
+  hasta `HUECOS_DIAS_MAX` días, lo mismo que mira `huecos_libres`, y su descripción lo dice.
+
+Lo que se repite **no** es cosa de `reservar_bloques`. «El pádel todos los viernes de 10
+a 12 hasta año nuevo» es UN `crear_evento` con `repetir_hasta` (YYYY-MM-DD): una serie
+semanal en Outlook (`recurrence` de Graph, `repeat_weekly_until` en
+`POST /calendar/events`) que se repite el día de la semana de `fecha`, como mucho un año
+(`REPETIR_DIAS_MAX`). Es una serie de verdad y no N eventos sueltos, porque se mueve o se
+borra entera desde Outlook. El botón dice el día, las dos fechas y cuántas veces son
+(«cada viernes del 23/10 al 25/12 (10 veces) de 10:00 a 12:00»): «hasta el 25/12» no
+dice si se aprueban tres eventos o treinta. Nació el 2026-10-22: sin recurrencia, Jarvis
+partió diez pádel en dos tandas de `reservar_bloques`, y las dos fallaron al pulsar por
+el tope de 14 días.
+
+**Lo que se rechazaría al pulsar se rechaza al proponer** (`_propuesta_invalida`, en el
+bucle de OpenAI y en `/mcp/chat`). Para `crear_evento` y `reservar_bloques`, que se
+pueden validar enteras sin salir a la red, se pasa la misma validación que la frase del
+móvil (`_describir_accion`). Si falla, no queda nada pendiente y el modelo recibe el
+motivo como fallo de la herramienta en el mismo turno, con la pista de `repetir_hasta`
+si lo que falló fue el tope de días. Antes salía el botón y el «no» llegaba después del
+«sí». Editar y borrar no entran porque validarlas es leer el evento de Graph.
 
 Lo que no se puede relajar, y por qué:
 

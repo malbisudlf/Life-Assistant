@@ -16,7 +16,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /auth/login` | JWT | Devuelve la `auth_url` del flujo OAuth de Microsoft Graph, con `state` firmado |
 | `GET /auth/callback` | `state` | Callback OAuth de Microsoft (lo llama Microsoft, verifica el `state`) |
 | `GET /calendar/events` | JWT | Eventos de los próximos 30 días (Graph). Extrae `alud_url` del cuerpo HTML. Si falla responde 200 con `{error}`, y con `reconectar: true` solo cuando se arregla reconectando Outlook (sin token o 401/403 de Graph): una caída de Graph no lo lleva |
-| `POST /calendar/events` | JWT | Crea evento en Outlook — `subject`, `start`, `end` (ISO sin zona, se asume `TIMEZONE`), `location?`, `is_all_day?`, `calendar_id?` |
+| `POST /calendar/events` | JWT | Crea evento en Outlook — `subject`, `start`, `end` (ISO sin zona, se asume `TIMEZONE`), `location?`, `is_all_day?`, `calendar_id?`, `repeat_weekly_until?` (YYYY-MM-DD: una serie semanal el mismo día de la semana que `start`, hasta ese día incluido) |
 | `PATCH /calendar/events/{event_id}` | JWT | Edita un evento — mismos campos salvo `calendar_id` (no se puede mover de calendario); solo manda los campos presentes en el body |
 | `DELETE /calendar/events/{event_id}` | JWT | Borra un evento. Un 404 de Graph cuenta como borrado: para quien borra, "no existe" y "ya no existe" son lo mismo |
 | `GET /calendar/classes` | JWT | Eventos del calendario de clases (`CLASSES_CALENDAR`) — 60 días, máx. 200 |

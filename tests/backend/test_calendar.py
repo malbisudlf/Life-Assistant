@@ -130,6 +130,90 @@ class TestCreateEvent:
         assert r.status_code == 200
         assert "error" in r.json()
 
+    def test_sin_repeticion_no_manda_recurrencia(self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("POST", "graph.microsoft.com", FakeResponse({"id": "e"}, 201))
+        client.post("/calendar/events", headers=auth_headers, json={
+            "subject": "X", "start": "2026-07-10T09:00:00", "end": "2026-07-10T10:00:00",
+        })
+        assert "recurrence" not in mock_requests.called("POST", "graph.microsoft.com")[0][2]["json"]
+
+
+class TestSerieSemanal:
+    """«El pádel todos los viernes de 10 a 12 hasta año nuevo»: UNA serie en Outlook, no
+    diez eventos sueltos que luego hay que mover o borrar de uno en uno."""
+
+    def test_graph_recibe_una_serie_del_dia_de_la_semana_del_inicio(
+            self, client, auth_headers, graph_token, mock_requests):
+        mock_requests.add("POST", "graph.microsoft.com", FakeResponse({"id": "serie"}, 201))
+        r = client.post("/calendar/events", headers=auth_headers, json={
+            "subject": "Pádel", "start": "2026-10-23T10:00:00", "end": "2026-10-23T12:00:00",
+            "repeat_weekly_until": "2026-12-31",
+        })
+        assert r.json() == {"status": "ok", "id": "serie"}
+        payload = mock_requests.called("POST", "graph.microsoft.com")[0][2]["json"]
+        assert payload["recurrence"] == {
+            "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["friday"],
+                        "firstDayOfWeek": "monday"},
+            "range":   {"type": "endDate", "startDate": "2026-10-23", "endDate": "2026-12-31",
+                        "recurrenceTimeZone": "Europe/Madrid"},
+        }
+
+    def test_jarvis_la_crea_y_dice_cuantas_veces(self, monkeypatch):
+        creados = []
+        monkeypatch.setattr(main, "create_event", lambda body, credentials=None: (
+            creados.append(body) or {"status": "ok", "id": "serie"}))
+        r = main._j_crear_evento(titulo="Pádel", fecha="2026-10-23", hora_inicio="10:00",
+                                 hora_fin="12:00", repetir_hasta="2026-12-31")
+        assert creados[0].repeat_weekly_until == "2026-12-31"
+        assert (r["ok"], r["hasta"], r["veces"]) == (True, "2026-12-31", 10)
+        assert main._lo_hecho("crear_evento", {"titulo": "Pádel"}, r) == (
+            "Creado «Pádel» cada semana hasta el 31/12: 10 veces.")
+
+    def test_sin_repetir_hasta_es_un_evento_suelto(self, monkeypatch):
+        creados = []
+        monkeypatch.setattr(main, "create_event", lambda body, credentials=None: (
+            creados.append(body) or {"status": "ok", "id": "e"}))
+        r = main._j_crear_evento(titulo="Dentista", fecha="2026-10-23", hora_inicio="10:00")
+        assert creados[0].repeat_weekly_until is None
+        assert "veces" not in r
+
+    @staticmethod
+    def _no_llamar(*a, **k):
+        raise AssertionError("no debería llegar a Graph")
+
+    def test_rechaza_series_imposibles_sin_llamar_a_graph(self, monkeypatch):
+        monkeypatch.setattr(main, "create_event", self._no_llamar)
+        casos = {
+            "2026-10-01": "La repetición no puede acabar antes del primer día",
+            "2027-12-31": "Una repetición no puede durar más de un año",
+            "2026-02-30": "La fecha de fin de la repetición no existe",
+            "fin de año": "La fecha de fin de la repetición no tiene formato YYYY-MM-DD",
+        }
+        for hasta, motivo in casos.items():
+            r = main._j_crear_evento(titulo="Pádel", fecha="2026-10-23", hora_inicio="10:00",
+                                     repetir_hasta=hasta)
+            assert r == {"ok": False, "motivo": motivo}
+
+    def test_el_boton_dice_el_dia_las_fechas_y_las_veces(self):
+        texto = main._describir_accion("crear_evento", {
+            "titulo": "Pádel", "fecha": "2026-10-23", "hora_inicio": "10:00",
+            "hora_fin": "12:00", "repetir_hasta": "2026-12-25"})
+        assert texto == {"texto": "Crear «Pádel» cada viernes del 23/10 al 25/12 (10 veces) "
+                                  "de 10:00 a 12:00."}
+
+    def test_una_serie_imposible_no_llega_a_proponerse(self):
+        motivo = main._propuesta_invalida("crear_evento", {
+            "titulo": "Pádel", "fecha": "2026-10-23", "repetir_hasta": "2026-10-01"})
+        assert "NO se ha propuesto nada" in motivo
+        assert "antes del primer día" in motivo
+        assert main._propuesta_invalida("crear_evento", {
+            "titulo": "Pádel", "fecha": "2026-10-23", "repetir_hasta": "2026-12-31"}) == ""
+
+    def test_el_modelo_ve_el_parametro(self):
+        h = main._JARVIS_HERRAMIENTAS["crear_evento"]
+        assert "repetir_hasta" in h["parametros"]
+        assert "repetir_hasta" not in h["obligatorios"]
+
 
 class TestUpdateEvent:
     def test_actualiza_campos_enviados(self, client, auth_headers, graph_token, mock_requests):

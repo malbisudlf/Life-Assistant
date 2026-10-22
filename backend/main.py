@@ -2131,6 +2131,15 @@ class CreateEventRequest(BaseModel):
     is_all_day: bool = False
     calendar_id: str | None = Field(None, max_length=200)
     description: str | None = Field(None, max_length=5000)
+    # Se repite cada semana, el mismo día de la semana que `start`, hasta esta fecha
+    # incluida. Solo semanal a propósito: es lo que se pide de verdad («el pádel todos los
+    # viernes»), y cada patrón de más es una frase de confirmación más que tiene que
+    # decir exactamente qué se aprueba.
+    repeat_weekly_until: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+# Para el `daysOfWeek` de Graph, en el orden de `date.weekday()`.
+_DIAS_GRAPH = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 @app.post("/calendar/events")
@@ -2149,6 +2158,23 @@ def create_event(body: CreateEventRequest, credentials: HTTPAuthorizationCredent
         payload["location"] = {"displayName": body.location}
     if body.description:
         payload["body"] = {"content": body.description, "bodyType": "text"}
+    if body.repeat_weekly_until:
+        # Una serie de verdad, no N eventos sueltos: se mueve o se borra entera desde
+        # Outlook. El día de la semana sale del propio inicio, porque Graph exige que la
+        # primera ocurrencia caiga en un día del patrón.
+        try:
+            inicio = datetime.strptime(body.start[:10], "%Y-%m-%d").date()
+            datetime.strptime(body.repeat_weekly_until, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Fechas de la repetición no válidas")
+        payload["recurrence"] = {
+            "pattern": {"type": "weekly", "interval": 1,
+                        "daysOfWeek": [_DIAS_GRAPH[inicio.weekday()]],
+                        "firstDayOfWeek": "monday"},
+            "range":   {"type": "endDate", "startDate": inicio.isoformat(),
+                        "endDate": body.repeat_weekly_until,
+                        "recurrenceTimeZone": TIMEZONE},
+        }
     # quote() obligatorio: el id se interpola en la ruta de Graph y un valor con '/',
     # '?' o '#' cambiaría el endpoint al que se llama. El token de Graph tiene alcance
     # Calendars.ReadWrite sobre toda la cuenta, así que el margen no es estrecho.
@@ -22408,12 +22434,23 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
             datetime.strptime(fecha, "%Y-%m-%d")
         except ValueError:
             return {"error": "La fecha tiene que ser YYYY-MM-DD y existir."}
+        hasta, veces, motivo = _repeticion_semanal(fecha, args.get("repetir_hasta"))
+        if motivo:
+            return {"error": f"{motivo}."}
         hora = str(args.get("hora_inicio") or "")
+        if hasta:
+            # Con el número de veces: «cada viernes hasta el 25/12» no dice si son tres o
+            # treinta, y eso es lo que se está aprobando.
+            dia = datetime.strptime(fecha, "%Y-%m-%d").date()
+            cuando = (f"cada {DIAS_SEMANA[dia.weekday()]} del {dia.day}/{dia.month} al "
+                      f"{hasta.day}/{hasta.month} ({veces} {'vez' if veces == 1 else 'veces'})")
+        else:
+            cuando = _dia_txt(fecha)
         if hora and _HORA_RE.match(hora):
             ini, fin = _tramo_evento(fecha, hora, args.get("hora_fin"))
-            cuando = f"{_dia_txt(fecha)} de {_hhmm(ini)} a {_hhmm(fin)}"
+            cuando += f" de {_hhmm(ini)} a {_hhmm(fin)}"
         else:
-            cuando = f"{_dia_txt(fecha)}, todo el día"
+            cuando += ", todo el día"
         lugar = str(args.get("lugar") or "").strip()[:80]
         return {"texto": f"Crear «{titulo}» {cuando}" + (f", en {lugar}" if lugar else "") + "."}
 
@@ -22497,6 +22534,31 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
                          + (f": {cuerpo}" if cuerpo else "") + "."}
 
     return {"error": "Eso no se confirma desde el móvil."}
+
+
+# Las que se pueden validar ENTERAS sin salir a la red: lo mismo que se rechazaría al
+# pulsar. Editar y borrar quedan fuera porque comprobarlas es leer el evento de Graph.
+_VALIDAR_AL_PROPONER = {"crear_evento", "reservar_bloques"}
+
+
+def _propuesta_invalida(herramienta: str, argumentos: dict) -> str:
+    """'' si se puede dejar propuesta; si no, por qué, dicho para el modelo.
+
+    Sin esto el chat enseñaba un botón de confirmar para algo que el backend iba a
+    rechazar al pulsarlo: diez pádel de octubre a Navidad propuestos por
+    `reservar_bloques`, que solo llega a `HUECOS_DIAS_MAX` días, y el «no» llegaba
+    después del «sí». Rechazado aquí, el modelo se entera en el mismo turno y puede
+    corregirse o decirlo, en vez de pedirte que apruebes algo imposible.
+    """
+    if herramienta not in _VALIDAR_AL_PROPONER:
+        return ""
+    error = _describir_accion(herramienta, argumentos or {}).get("error")
+    if not error:
+        return ""
+    if herramienta == "reservar_bloques" and "Solo reservo hasta" in error:
+        error += (" Si es algo que se repite cada semana, propónlo como UN `crear_evento` "
+                  "con `repetir_hasta`.")
+    return "NO se ha propuesto nada, el usuario no ve ningún botón: " + error
 
 
 def _args_de(herramienta: str, args: dict) -> dict:
@@ -22587,6 +22649,10 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
 def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) -> str:
     """El acuse, en pasado: la pregunta ya la leíste y repetirla no confirma nada."""
     if herramienta == "crear_evento":
+        if (resultado or {}).get("hasta"):
+            fin = datetime.strptime(resultado["hasta"], "%Y-%m-%d").date()
+            return (f"Creado «{args.get('titulo')}» cada semana hasta el "
+                    f"{fin.day}/{fin.month}: {resultado.get('veces')} veces.")
         return f"Creado «{args.get('titulo')}» {_dia_txt(str(args.get('fecha') or ''))}."
     if herramienta == "borrar_evento":
         return "Borrado del calendario. Si fue un error, está en Elementos eliminados."
@@ -25699,13 +25765,42 @@ def _tramo_evento(fecha: str, hora_inicio: str, hora_fin: str | None) -> tuple[s
     return ini.strftime("%Y-%m-%dT%H:%M:00"), fin.strftime("%Y-%m-%dT%H:%M:00")
 
 
+# Hasta dónde llega una serie semanal. Un «todos los lunes» sin fin no se aprueba de un
+# vistazo, y un año ya cubre cualquier temporada (un curso, una liga, un abono).
+REPETIR_DIAS_MAX = 366
+
+
+def _repeticion_semanal(fecha: str, hasta) -> tuple:
+    """(último día, veces, None) o (None, 0, motivo). Sin `hasta`: (None, 0, None).
+
+    La comparten la frase del botón y la creación: un «sí» a una serie que luego Graph
+    no acepta es un botón que miente. `fecha` ya viene validada.
+    """
+    hasta = str(hasta or "").strip()
+    if not hasta:
+        return None, 0, None
+    if not _DATE_RE.match(hasta):
+        return None, 0, "La fecha de fin de la repetición no tiene formato YYYY-MM-DD"
+    try:
+        fin = datetime.strptime(hasta, "%Y-%m-%d").date()
+    except ValueError:
+        return None, 0, "La fecha de fin de la repetición no existe"
+    inicio = datetime.strptime(fecha, "%Y-%m-%d").date()
+    if fin < inicio:
+        return None, 0, "La repetición no puede acabar antes del primer día"
+    if fin > inicio + timedelta(days=REPETIR_DIAS_MAX):
+        return None, 0, "Una repetición no puede durar más de un año"
+    return fin, (fin - inicio).days // 7 + 1, None
+
+
 def _j_crear_evento(titulo: str, fecha: str, hora_inicio: str | None = None,
-                    hora_fin: str | None = None, lugar: str | None = None) -> dict:
+                    hora_fin: str | None = None, lugar: str | None = None,
+                    repetir_hasta: str | None = None) -> dict:
     """Crea el evento en Outlook. Solo se llega aquí desde /jarvis/ejecutar.
 
     Valida con el mismo criterio que sugerencia_evento(): fecha y hora con forma real
     (nada de 2026-02-30) y título no vacío. Lo que propone un modelo no se manda a Graph
-    tal cual.
+    tal cual. Con `repetir_hasta` es una serie semanal, un solo evento en Outlook.
     """
     titulo = str(titulo or "").strip()[:200]
     fecha  = str(fecha or "").strip()
@@ -25717,6 +25812,9 @@ def _j_crear_evento(titulo: str, fecha: str, hora_inicio: str | None = None,
         dia = datetime.strptime(fecha, "%Y-%m-%d")
     except ValueError:
         return {"ok": False, "motivo": "Esa fecha no existe"}
+    hasta, veces, motivo = _repeticion_semanal(fecha, repetir_hasta)
+    if motivo:
+        return {"ok": False, "motivo": motivo}
 
     todo_el_dia = not (hora_inicio and _HORA_RE.match(str(hora_inicio)))
     if todo_el_dia:
@@ -25731,12 +25829,16 @@ def _j_crear_evento(titulo: str, fecha: str, hora_inicio: str | None = None,
             subject=titulo, start=inicio, end=fin,
             location=(str(lugar)[:300] if lugar else None),
             is_all_day=todo_el_dia,
+            repeat_weekly_until=(hasta.isoformat() if hasta else None),
         ),
         credentials=None,
     )
     if r.get("status") != "ok":
         return {"ok": False, "motivo": r.get("error") or "No se pudo crear el evento"}
-    return {"ok": True, "id": r.get("id"), "titulo": titulo, "cuando": inicio}
+    salida = {"ok": True, "id": r.get("id"), "titulo": titulo, "cuando": inicio}
+    if hasta:
+        salida.update({"se_repite": "cada semana", "hasta": hasta.isoformat(), "veces": veces})
+    return salida
 
 
 def _j_editar_evento(evento_id: str, titulo: str | None = None, fecha: str | None = None,
@@ -28802,13 +28904,17 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   True,
         "fn":          _j_crear_evento,
         "descripcion": "Propone crear un evento en Outlook. NO lo crea: el usuario tiene que "
-                       "confirmarlo, así que no digas que está hecho.",
+                       "confirmarlo, así que no digas que está hecho. Si se repite cada "
+                       "semana («el pádel todos los viernes hasta fin de año»), es UN solo "
+                       "evento con `repetir_hasta`: una serie que Outlook mueve o borra "
+                       "entera. No lo partas en varios eventos ni en `reservar_bloques`.",
         "parametros":  {
             "titulo":      {"type": "string", "description": "Título del evento."},
-            "fecha":       {"type": "string", "description": "Fecha en formato YYYY-MM-DD."},
+            "fecha":       {"type": "string", "description": "Fecha en formato YYYY-MM-DD. Si se repite, la PRIMERA vez: su día de la semana es el que se repite."},
             "hora_inicio": {"type": "string", "description": "Hora de inicio HH:MM (24h). Omítela si dura todo el día."},
             "hora_fin":    {"type": "string", "description": "Hora de fin HH:MM. Por defecto, una hora después."},
             "lugar":       {"type": "string", "description": "Ubicación, si la hay."},
+            "repetir_hasta": {"type": "string", "description": "Solo si se repite cada semana: el último día que puede caer, YYYY-MM-DD (incluido). Como mucho un año después de `fecha`."},
         },
         "obligatorios": ["titulo", "fecha"],
     },
@@ -28832,9 +28938,11 @@ _JARVIS_HERRAMIENTAS = {
         "confirmar":   True,
         "fn":          _j_reservar_bloques,
         "descripcion": "Propone reservar VARIOS bloques de tiempo en Outlook de una vez "
-                       "(máximo 6), para organizar un día. NO los crea: el usuario los "
-                       "aprueba con un solo botón. Mira antes `huecos_libres` y propón "
-                       "bloques que quepan en ellos. Para un único evento con lugar, usa "
+                       f"(máximo {RESERVAR_BLOQUES_MAX}), para organizar un día. Solo de hoy "
+                       f"a dentro de {HUECOS_DIAS_MAX} días: más allá se rechaza. NO los "
+                       "crea: el usuario los aprueba con un solo botón. Mira antes "
+                       "`huecos_libres` y propón bloques que quepan en ellos. Para un único "
+                       "evento con lugar, o uno que se repite cada semana, usa "
                        "`crear_evento`.",
         "parametros":  {
             "bloques": {
@@ -29360,6 +29468,14 @@ async def mcp_chat(request: Request, turno: str = ""):
     def _al_confirmar(nombre: str, argumentos: dict) -> dict:
         with _chat_turnos_lock:
             datos = _chat_turnos.get(turno)
+        invalida = datos is not None and _propuesta_invalida(nombre, argumentos)
+        if invalida:
+            # Como resultado con `isError` y no como error de protocolo: es la herramienta
+            # diciendo que no, y el modelo tiene que leerlo para corregir la propuesta.
+            return {"result": {"isError": True,
+                               "content": [{"type": "text", "text": invalida}]}}
+        with _chat_turnos_lock:
+            datos = _chat_turnos.get(turno)
             if datos is not None:
                 # Una por turno, como en el bucle de OpenAI: la última es la que se
                 # propone, que es la que el modelo acaba de decidir.
@@ -29722,6 +29838,9 @@ def _jarvis_sistema(voz: bool = False, aviso: str = "", tipo: str = "") -> str:
         "empezar otro de cero.\n"
         "- Para organizar un día: `huecos_libres` primero y luego UNA sola propuesta con "
         "`reservar_bloques`; no encadenes varios `crear_evento`.\n"
+        "- Lo que se repite cada semana («todos los viernes de 10 a 12 hasta fin de año») "
+        "es UN `crear_evento` con `repetir_hasta`, no una lista de bloques: sí puedes "
+        "crear eventos que se repiten.\n"
     ]
 
     if voz:
@@ -30217,8 +30336,14 @@ def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
             except json.JSONDecodeError:
                 argumentos = {}
             herramienta = _JARVIS_HERRAMIENTAS.get(c.function.name)
+            invalida    = herramienta and _jarvis_confirma(herramienta, argumentos) \
+                and _propuesta_invalida(c.function.name, argumentos)
 
-            if herramienta and _jarvis_confirma(herramienta, argumentos):
+            if invalida:
+                # Ni pendiente ni ejecutada: vuelve al modelo como un fallo de la
+                # herramienta, para que lo corrija o lo diga en este mismo turno.
+                resultado = {"ok": False, "error": invalida}
+            elif herramienta and _jarvis_confirma(herramienta, argumentos):
                 # No se ejecuta: se propone. Al modelo se le devuelve que ha quedado
                 # pendiente para que redacte la respuesta como propuesta y no como hecho
                 # consumado — si no, contesta "ya lo he creado" sobre algo que no existe.

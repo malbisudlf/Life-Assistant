@@ -2245,7 +2245,15 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       if (!titulo) return null;
       const partes = [`Crear "${titulo}"`];
       const fecha = _fechaLegible(a.fecha);
-      if (fecha) partes.push(`el ${fecha}`);
+      const hasta = _fechaLegible(a.repetir_hasta);
+      // Una serie se aprueba con el mismo botón que un evento suelto: tiene que verse que
+      // se repite y hasta cuándo, o se aprueba una cosa creyendo que es otra.
+      if (fecha && hasta) {
+        const [y, m, d] = a.fecha.split("-").map(Number);
+        const dia = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"][
+          new Date(y, m - 1, d).getDay()];
+        partes.push(`cada ${dia} del ${fecha} al ${hasta}`);
+      } else if (fecha) partes.push(`el ${fecha}`);
       if (/^\d{2}:\d{2}$/.test(a.hora_inicio || "")) partes.push(`a las ${a.hora_inicio}`);
       else partes.push("(todo el día)");
       if ((a.lugar || "").trim()) partes.push(`en ${a.lugar.trim()}`);

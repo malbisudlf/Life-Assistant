@@ -328,6 +328,24 @@ class TestReservarPuerta:
         assert datos["pendiente"]["argumentos"]["bloques"] == bloques
         assert datos["herramientas"] == []
 
+    def test_mas_alla_del_tope_no_se_propone(self, client, auth_headers, monkeypatch):
+        """El pádel de los viernes hasta Navidad: antes salía el botón y el «solo reservo
+        hasta dentro de 14 días» llegaba DESPUÉS de pulsarlo. Ahora lo lee el modelo en
+        el mismo turno, con la pista de que una serie es un `crear_evento`."""
+        from test_jarvis import _con_modelo, _llamada, _mensaje
+
+        lejos = [_bloque("Pádel", "10:00", "12:00", fecha="2026-10-12")]
+        cliente = _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("reservar_bloques", {"bloques": lejos})]),
+            _mensaje("Eso queda fuera de lo que puedo reservar."),
+        ])
+        datos = client.post("/jarvis", json={"mensaje": "pádel el 12"},
+                            headers=auth_headers).json()
+        assert datos["pendiente"] is None
+        devuelto = [m for m in cliente.recibido[-1]["messages"] if m["role"] == "tool"][-1]
+        assert "Solo reservo hasta dentro de 14 días" in devuelto["content"]
+        assert "repetir_hasta" in devuelto["content"]
+
     def test_ejecutar_los_crea(self, client, auth_headers, monkeypatch, creados):
         _calendario(monkeypatch, [], [])
         r = client.post("/jarvis/ejecutar", headers=auth_headers, json={
