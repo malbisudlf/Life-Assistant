@@ -61,6 +61,10 @@ jobs:
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
+    # Una ejecución sana tarda un par de minutos. Sin tope, GitHub aplica el suyo: seis
+    # horas. El 2026-10-22 el apt de las dependencias de Chromium se colgó y el run se
+    # quedó «en curso» con el despliegue esperando detrás, sin fallar ni avisar.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,11 +96,16 @@ jobs:
         # Solo Chromium: los otros navegadores triplican el tiempo de instalación y
         # aquí no aportan — lo que se prueba es que la app arranca y pinta.
         if: steps.cache-playwright.outputs.cache-hit != 'true'
+        # Descarga el navegador Y pasa por el mismo apt que el paso de abajo.
+        timeout-minutes: 10
         run: npx playwright install --with-deps chromium
       - name: Dependencias del sistema de Chromium
         # La caché guarda el navegador, no las librerías del sistema que necesita: esas
         # viven fuera de ~/.cache y el runner nace limpio en cada ejecución.
         if: steps.cache-playwright.outputs.cache-hit == 'true'
+        # Es un apt-get contra los mirrors de Ubuntu: tarda segundos o no termina nunca.
+        # Mejor un fallo a los cinco minutos que relanzar a mano tras horas «en curso».
+        timeout-minutes: 5
         run: npx playwright install-deps chromium
       - name: Tests end-to-end
         # playwright.config.js arranca y espera al backend simulado y al preview del
