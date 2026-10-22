@@ -183,7 +183,7 @@ class TestConstruirBrief:
     @pytest.mark.parametrize("seccion, funcion", [
         ("clima", "_brief_clima"), ("salud", "_brief_salud"),
         ("entrenamiento", "_brief_entrenamiento"), ("presencia", "_brief_presencia"),
-        ("economia", "_brief_economia"),
+        ("economia", "_brief_economia"), ("ft", "_brief_ft"),
     ])
     def test_una_seccion_que_revienta_no_tumba_el_resumen(
             self, graph_token, mock_requests, monkeypatch, seccion, funcion):
@@ -1474,6 +1474,65 @@ class TestEconomiaDelResumen:
         assert "CAÍDA (no se pudo descargar)" in texto
         assert "## TÉRMINO ECONÓMICO DEL DÍA" in texto and "Interés compuesto" in texto
         assert "Euríbor · Prima de riesgo" in texto
+
+    # ── Financial Times ─────────────────────────────────────────────────────
+    def test_el_ft_va_en_su_propia_seccion(self, monkeypatch):
+        """Mismo lector de feeds, pero aparte: si compartiera la lista, el FT y la
+        economía española competirían por los mismos ocho huecos."""
+        feeds = {
+            "https://feed.test/es": self._rss([("Sube el euríbor", "https://e.test/1", "", 2)]),
+            "https://feed.test/ft": self._rss(
+                [("Global stocks tumble as oil prices rise", "https://ft.test/1", "Crude jumps", 1)],
+                canal="International homepage"),
+        }
+        self._montar(monkeypatch, {"https://feed.test/es": feeds["https://feed.test/es"]})
+        monkeypatch.setattr(main, "BRIEF_FT", True)
+        monkeypatch.setattr(main, "BRIEF_FT_FEEDS", "https://feed.test/ft")
+        monkeypatch.setattr(main, "_descargar",
+                            lambda url, saltos=3: (url, feeds[url]) if feeds.get(url) else None)
+        assert [t["titulo"] for t in main._brief_economia()["titulares"]] == ["Sube el euríbor"]
+        ft = main._brief_ft()
+        assert [t["titulo"] for t in ft["titulares"]] == ["Global stocks tumble as oil prices rise"]
+        assert ft["fuentes"][0]["fuente"] == "International homepage"
+
+    def test_el_ft_apagado_no_pide_nada(self, monkeypatch):
+        monkeypatch.setattr(main, "BRIEF_FT", False)
+        monkeypatch.setattr(main, "_descargar",
+                            lambda *a, **k: pytest.fail("con el FT apagado no se descarga nada"))
+        assert main._brief_ft() == {}
+
+    def test_el_ft_descarta_contra_su_propia_lista(self, monkeypatch):
+        """Los repetidos se miran contra lo que salió del FT ayer, con su propio tope."""
+        monkeypatch.setattr(main, "BRIEF_FT_MAX", 1)
+        ft = {"titulares": [{"titulo": f"Story {i}"} for i in range(3)], "fuentes": []}
+        previa = {"economia": [main._clave_titular({"titulo": "Story 1"})],
+                  "ft": [main._clave_titular({"titulo": "Story 0"})]}
+        nuevos = main._titulares_nuevos(ft, previa, clave="ft", tope=main.BRIEF_FT_MAX)
+        assert [t["titulo"] for t in nuevos["titulares"]] == ["Story 1"]
+        assert nuevos["repetidos_del_anterior"] == 1
+
+    def test_la_instantanea_guarda_los_del_ft(self):
+        inst = main._instantanea_brief({
+            "fecha": "2026-10-22", "salud": {}, "entregas": [], "entrenamiento": {},
+            "ft": {"titulares": [{"titulo": "Global stocks tumble"}]},
+        })
+        assert inst["ft"] == [main._clave_titular({"titulo": "Global stocks tumble"})]
+        assert inst["economia"] == []
+
+    def test_el_ft_va_en_el_correo_con_la_nota_del_acceso(self):
+        texto = main.render_brief_texto({
+            "fecha": "2026-10-22", "dia_semana": "jueves", "zona": "Europe/Madrid",
+            "agenda": [], "clases": [], "entregas": [], "clima": {}, "salud": {},
+            "entrenamiento": {},
+            "ft": {"ventana_horas": 30, "fuentes": [],
+                   "titulares": [{"titulo": "Global stocks tumble", "fuente": "Markets",
+                                  "fecha": "2026-10-22T13:03:38+00:00",
+                                  "enlace": "https://www.ft.com/content/x"}]},
+        })
+        assert "## FINANCIAL TIMES — TITULARES" in texto
+        assert "acceso completo con la cuenta de la universidad" in texto
+        assert "Global stocks tumble" in texto and "https://www.ft.com/content/x" in texto
+        assert "## ECONOMÍA — TITULARES" not in texto
 
     def test_sin_titulares_lo_dice(self):
         texto = main.render_brief_texto({

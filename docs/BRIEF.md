@@ -414,6 +414,25 @@ backend está en `docs/BACKEND_PATRONES.md`.
     redacta el briefing tiene que saber que estas secciones existen. Sin tocar su prompt,
     el correo llega con los titulares y el término dentro y el briefing no los cuenta.
 
+- **Financial Times** (`_brief_ft`, sección `## FINANCIAL TIMES — TITULARES`,
+  interruptor `BRIEF_FT`, feeds en `BRIEF_FT_FEEDS`, tope `BRIEF_FT_MAX`): titulares,
+  entradilla y enlace de la portada internacional, economía global y mercados del FT.
+  Mismo lector que la economía (`_titulares_de_feeds`), misma ventana y mismo descarte
+  contra el resumen anterior, con su propia lista en la instantánea (`ft`). Tres cosas:
+  - **Va aparte, no dentro de `BRIEF_ECONOMIA_FEEDS`**: los dos bloques hacen papeles
+    distintos (economía española que te toca contra lectura internacional) y en una sola
+    lista competirían por los mismos ocho huecos.
+  - **El backend no inicia sesión en el FT.** Los RSS son públicos; el artículo entero se
+    lee con la cuenta de la universidad al abrir el enlace en el navegador. Guardar la
+    credencial del SSO de la universidad (o sus cookies) en el servidor para bajar
+    artículos completos metería una llave que no es suya y va contra las condiciones del
+    FT. Por eso la sección lleva una nota que dice que hay acceso completo: sin ella, quien
+    redacta el briefing supone un muro de pago y se queda en el titular.
+  - Comprobados vivos el 2026-10-22. Cualquier sección de ft.com tiene su feed añadiendo
+    `?format=rss` (`/companies`, `/europe`, `/world`…).
+  Como con la economía, **la rutina que redacta el briefing tiene que saber que la sección
+  existe**: su prompt no vive en este repositorio.
+
 - **Informe semanal** (`construir_informe_semanal`, `render_informe_texto`,
   `_enviar_informe_si_toca`, tabla `informe_envios`): los domingos (`INFORME_DIA`), medias
   **por semana** de las últimas `INFORME_SEMANAS`. Una media de 30 días dice dónde estás;

@@ -231,8 +231,9 @@ huecos; no se aplica al comprobar choques). Las tres son de `huecos_libres` y
 `BRIEF_DISPARA_SUENO`,
 `BRIEF_ECONOMIA`, `BRIEF_ECONOMIA_FEEDS`, `BRIEF_ECONOMIA_MAX`,
 `BRIEF_ECONOMIA_HORAS`, `FEED_CONGELADO_DIAS`, `BRIEF_CLIMA_INTENTOS`,
-`BRIEF_CLIMA_ESPERA` (los titulares de economía, el término del día y el clima
-del resumen — ver `docs/BRIEF.md`),
+`BRIEF_CLIMA_ESPERA`, `BRIEF_FT`, `BRIEF_FT_FEEDS`, `BRIEF_FT_MAX` (los titulares de
+economía y del Financial Times, el término del día y el clima del resumen — ver
+`docs/BRIEF.md`),
 `RUTINA_FIRE_URL`, `RUTINA_FIRE_TOKEN`, `BRIEF_RUTINA_DESDE`, `RUTINA_BETA`,
 `REVISION_TOKEN`, `ARREGLO_FIRE_URL`, `ARREGLO_FIRE_TOKEN` (la revisión nocturna
 accionable: sin ellas, el issue de la noche sigue saliendo pero no avisa ni se puede

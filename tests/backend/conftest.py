@@ -55,6 +55,7 @@ os.environ.setdefault("LATIDO", "0")
 # encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
 # en una suite que no toca la red. Sus tests la encienden a mano.
 os.environ.setdefault("BRIEF_ECONOMIA", "0")
+os.environ.setdefault("BRIEF_FT", "0")
 # Y con el turno de noche, por lo mismo: cuelga del mismo tick y, pasada su hora, leería
 # el buzón y llamaría a dos modelos en cualquier test que fije el reloj de madrugada. Sus
 # variables nacen apagadas en main.py; aquí se fijan explícitamente para que un

@@ -510,6 +510,23 @@ BRIEF_ECONOMIA_HORAS = int(os.getenv("BRIEF_ECONOMIA_HORAS", "30"))
 # Tope por feed antes de mezclarlos: un feed con 200 entradas no debe decidir él solo
 # qué titulares se ven.
 BRIEF_ECONOMIA_POR_FUENTE = 25
+# Financial Times en el resumen: titulares aparte de los de economía, porque hacen otro
+# papel — los de arriba son economía española que te toca en el bolsillo, estos son la
+# lectura internacional (mercados, bancos centrales, empresas). Mezclarlos en una sola
+# lista haría competir a los dos por los mismos ocho huecos.
+# Los feeds RSS del FT son públicos y no piden sesión: traen titular, entradilla y enlace.
+# El artículo entero se lee con la cuenta de la universidad, en el navegador, al abrir el
+# enlace. El backend NO inicia sesión en el FT: guardar aquí la credencial del SSO de la
+# universidad (o sus cookies) para descargar artículos completos sería meter en el
+# servidor una llave que no es suya, y además lo prohíben las condiciones del FT.
+# Comprobados vivos el 2026-10-22. Misma ventana y mismo descarte que los de economía.
+BRIEF_FT = _flag("BRIEF_FT")
+BRIEF_FT_FEEDS = os.getenv("BRIEF_FT_FEEDS", ",".join((
+    "https://www.ft.com/rss/home/international",
+    "https://www.ft.com/global-economy?format=rss",
+    "https://www.ft.com/markets?format=rss",
+)))
+BRIEF_FT_MAX = int(os.getenv("BRIEF_FT_MAX", "8"))
 
 # Topes de cuerpo de las subidas. Sin ellos, `UploadFile.read()` y `request.body()`
 # cargan en memoria lo que mande el cliente: la VM de Fly tiene 1 GB y bastan unos
@@ -9905,14 +9922,28 @@ def _brief_economia() -> dict:
     descartar tres no deje el correo con cinco."""
     if not BRIEF_ECONOMIA:
         return {}
-    urls = [u.strip() for u in BRIEF_ECONOMIA_FEEDS.split(",") if u.strip()]
+    return _titulares_de_feeds(BRIEF_ECONOMIA_FEEDS, "economía")
+
+
+def _brief_ft() -> dict:
+    """Titulares del Financial Times, con las mismas reglas que los de economía (ver
+    BRIEF_FT_FEEDS). Sección aparte para que no compitan por los mismos huecos."""
+    if not BRIEF_FT:
+        return {}
+    return _titulares_de_feeds(BRIEF_FT_FEEDS, "Financial Times")
+
+
+def _titulares_de_feeds(feeds: str, nombre: str) -> dict:
+    """Lee una lista de feeds separados por comas y deja los titulares de la ventana,
+    sin repetidos y con lo que aportó cada fuente. Común a economía y FT."""
+    urls = [u.strip() for u in feeds.split(",") if u.strip()]
     if not urls:
         return {}
     try:
         with ThreadPoolExecutor(max_workers=min(4, len(urls))) as pool:
             leidos = list(pool.map(_leer_feed, urls))
     except Exception as e:
-        logger.warning("Resumen diario: economía no disponible (%s)", e)
+        logger.warning("Resumen diario: %s no disponible (%s)", nombre, e)
         return {}
 
     limite = datetime.now(timezone.utc) - timedelta(hours=BRIEF_ECONOMIA_HORAS)
@@ -9955,19 +9986,21 @@ def _brief_economia() -> dict:
     return {"titulares": titulares, "fuentes": fuentes, "ventana_horas": BRIEF_ECONOMIA_HORAS}
 
 
-def _titulares_nuevos(economia: dict, previa: dict) -> dict:
+def _titulares_nuevos(economia: dict, previa: dict, clave: str = "economia",
+                      tope: int | None = None) -> dict:
     """Quita los titulares que ya iban en el resumen anterior y recorta al tope.
 
     La ventana es más ancha que un día a propósito (ver BRIEF_ECONOMIA_HORAS), así que
     dos correos seguidos se solapan. Comparar contra lo que se mandó de verdad es exacto
     y no depende de la hora a la que salga el correo, que es justamente lo que aquí
-    cambia cada día."""
+    cambia cada día. `clave` es la lista de la instantánea con la que se compara: la de
+    economía o la del FT."""
     if not economia:
         return economia
-    ya_vistos = set((previa or {}).get("economia") or [])
+    ya_vistos = set((previa or {}).get(clave) or [])
     frescos = [t for t in economia["titulares"] if _clave_titular(t) not in ya_vistos]
     return {**economia,
-            "titulares": frescos[:BRIEF_ECONOMIA_MAX],
+            "titulares": frescos[:BRIEF_ECONOMIA_MAX if tope is None else tope],
             "repetidos_del_anterior": len(economia["titulares"]) - len(frescos)}
 
 
@@ -9999,6 +10032,7 @@ def _instantanea_brief(datos: dict) -> dict:
         # decide qué es noticia vieja. Ocupan una línea y tienen identidad de un día
         # para otro, que es el criterio de esta instantánea.
         "economia":  [_clave_titular(t) for t in ((datos.get("economia") or {}).get("titulares") or [])],
+        "ft":        [_clave_titular(t) for t in ((datos.get("ft") or {}).get("titulares") or [])],
     }
 
 
@@ -10171,7 +10205,7 @@ def construir_brief() -> dict:
     # hereda la normalización de fechas, el filtrado de alud_url y el manejo de errores
     # que ya tienen, en vez de duplicar sus consultas.
     hoy = datetime.now(LOCAL_TZ).date()
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=9) as pool:
         f_eventos = pool.submit(get_events, credentials=None)
         f_clases  = pool.submit(get_class_events, credentials=None)
         f_clima   = pool.submit(_brief_clima)
@@ -10179,6 +10213,7 @@ def construir_brief() -> dict:
         f_entren  = pool.submit(_brief_entrenamiento)
         f_presen  = pool.submit(_brief_presencia)
         f_econom  = pool.submit(_brief_economia)
+        f_ft      = pool.submit(_brief_ft)
         # La instantánea de ayer entra en el paralelo porque ahora la usan DOS cosas: el
         # diff de siempre y el descarte de titulares ya contados. Pedirla después sería
         # un viaje a Supabase en serie por delante del arranque en frío de Fly.
@@ -10195,6 +10230,8 @@ def construir_brief() -> dict:
         previa        = f_previa.result()
         economia      = _titulares_nuevos(_seccion_del_pool(f_econom, "economia", caidas),
                                           previa)
+        ft            = _titulares_nuevos(_seccion_del_pool(f_ft, "ft", caidas),
+                                          previa, clave="ft", tope=BRIEF_FT_MAX)
 
     def _es_hoy(ev):
         d = _dias_hasta(ev.get("start", ""))
@@ -10247,6 +10284,7 @@ def construir_brief() -> dict:
         "entrenamiento": entrenamiento,
         "presencia":     presencia,
         "economia":      economia,
+        "ft":            ft,
         # El término no depende de la red ni de Supabase: es la fecha y una lista. Va
         # aparte de los titulares para que un feed caído no se lo lleve por delante.
         "termino_economico": _termino_del_dia(hoy) if BRIEF_ECONOMIA else {},
@@ -10375,6 +10413,46 @@ def _hora_local(iso: str | None) -> str:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(LOCAL_TZ).strftime("%H:%M")
     except (ValueError, AttributeError):
         return "--:--"
+
+
+def _render_titulares(e: dict, titulo: str, hoy: str, caida: bool, averia: str,
+                      nota: str = "") -> list:
+    """Una sección de titulares en texto: economía o FT, que tienen la misma forma."""
+    if not e:
+        return [titulo, averia, ""] if caida else []
+    L = []
+    cabecera = f"{titulo}  (últimas {e.get('ventana_horas')} h"
+    if e.get("repetidos_del_anterior"):
+        cabecera += f"; {e['repetidos_del_anterior']} ya iban en el resumen anterior, quitados"
+    L.append(cabecera + ")")
+    if nota:
+        L.append(nota)
+    # Cada fuente con lo que aportó hoy. Un 0 sostenido es la única forma de
+    # enterarse de que una URL lleva semanas muerta: sin esto, la sección se queda
+    # corta y parece que no hubo noticias. Y un feed CONGELADO ni siquiera da un 0
+    # que llame la atención —responde 200, con XML válido y noticias de hace años—,
+    # así que se dice con su fecha: es la diferencia entre "hoy no ha publicado" y
+    # "cambia esta fuente". El de RTVE se pasó así desde 2022.
+    for f in e.get("fuentes", []):
+        if f.get("error"):
+            estado = f"CAÍDA ({f['error']})"
+        elif f.get("congelado_desde"):
+            estado = (f"CONGELADA — no publica desde {f['congelado_desde']} "
+                      f"({f['congelado_dias']} días). Cambia la fuente")
+        else:
+            estado = f"{f.get('titulares', 0)} titulares"
+        L.append(f"   · {f.get('fuente')}: {estado}")
+    for t in e.get("titulares", []):
+        L.append(f"  [{_cuando_titular(t.get('fecha'), hoy)}] {t.get('titulo')}"
+                 f"  — {t.get('fuente')}")
+        if t.get("extracto"):
+            L.append(f"      {t['extracto']}")
+        if t.get("enlace"):
+            L.append(f"      {t['enlace']}")
+    if not e.get("titulares"):
+        L.append("  (ningún titular nuevo en la ventana)")
+    L.append("")
+    return L
 
 
 def _cuando_titular(iso: str | None, hoy: str) -> str:
@@ -10650,39 +10728,14 @@ def render_brief_texto(d: dict) -> str:
     # Las dos únicas secciones que no salen de un sensor. Los titulares van en crudo,
     # con su medio y su hora: elegir cuál cuenta es de quien redacta el correo. Y el
     # término del día es una palabra, no una explicación, por lo mismo.
-    e = d.get("economia") or {}
-    if e:
-        cabecera = f"## ECONOMÍA — TITULARES  (últimas {e.get('ventana_horas')} h"
-        if e.get("repetidos_del_anterior"):
-            cabecera += f"; {e['repetidos_del_anterior']} ya iban en el resumen anterior, quitados"
-        L.append(cabecera + ")")
-        # Cada fuente con lo que aportó hoy. Un 0 sostenido es la única forma de
-        # enterarse de que una URL lleva semanas muerta: sin esto, la sección se queda
-        # corta y parece que no hubo noticias. Y un feed CONGELADO ni siquiera da un 0
-        # que llame la atención —responde 200, con XML válido y noticias de hace años—,
-        # así que se dice con su fecha: es la diferencia entre "hoy no ha publicado" y
-        # "cambia esta fuente". El de RTVE se pasó así desde 2022.
-        for f in e.get("fuentes", []):
-            if f.get("error"):
-                estado = f"CAÍDA ({f['error']})"
-            elif f.get("congelado_desde"):
-                estado = (f"CONGELADA — no publica desde {f['congelado_desde']} "
-                          f"({f['congelado_dias']} días). Cambia la fuente")
-            else:
-                estado = f"{f.get('titulares', 0)} titulares"
-            L.append(f"   · {f.get('fuente')}: {estado}")
-        for t in e.get("titulares", []):
-            L.append(f"  [{_cuando_titular(t.get('fecha'), d['fecha'])}] {t.get('titulo')}"
-                     f"  — {t.get('fuente')}")
-            if t.get("extracto"):
-                L.append(f"      {t['extracto']}")
-            if t.get("enlace"):
-                L.append(f"      {t['enlace']}")
-        if not e.get("titulares"):
-            L.append("  (ningún titular nuevo en la ventana)")
-        L.append("")
-    elif "economia" in caidas:
-        L += ["## ECONOMÍA — TITULARES", averia, ""]
+    L += _render_titulares(d.get("economia") or {}, "## ECONOMÍA — TITULARES", d["fecha"],
+                           "economia" in caidas, averia)
+    # El FT va en inglés y con la nota del acceso: sin ella, quien redacta el briefing
+    # da por hecho que tras el enlace hay un muro de pago y se queda en el titular.
+    L += _render_titulares(d.get("ft") or {}, "## FINANCIAL TIMES — TITULARES", d["fecha"],
+                           "ft" in caidas, averia,
+                           nota="  (en inglés; hay acceso completo con la cuenta de la "
+                                "universidad, así que los enlaces abren el artículo entero)")
 
     g = d.get("termino_economico") or {}
     if g:
