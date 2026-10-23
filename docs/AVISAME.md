@@ -5,7 +5,8 @@
 
 **Estado: la ida funciona, la vuelta está sin probar (5 de septiembre de 2026).** El
 montaje está hecho: la migración `20260904_sesion_avisos` aplicada, y `SESION_TOKEN`,
-`SESION_FIRE_URL` y `SESION_FIRE_TOKEN` puestos en Fly. La rutina «Retomar aviso —
+`SESION_FIRE_URL` y `SESION_FIRE_TOKEN` puestos (entonces en Fly; hoy en el entorno del
+backend en `caja`, ver «2. El token de las sesiones»). La rutina «Retomar aviso —
 Life-Assistant» existe.
 
 Lo que se probó el 4 de septiembre y consta en `sesion_avisos`: cuatro avisos, los cuatro
@@ -34,8 +35,8 @@ Sesión de Claude Code: termina lo que le pediste, o se queda BLOQUEADA
 Backend: lo guarda en `sesion_avisos` y apunta el aviso
       │  notificación al móvil: «Hablarlo» · «Vale»
       ▼
-Pulsas «Hablarlo» → dashboard/?llamada=1&aviso=<id>&tipo=sesion → PantallaLlamada
-      │  GET /llamada/pendiente → la apertura + el contexto
+Pulsas «Hablarlo» → HA → n8n → POST /sesion/{id}/accion {"accion":"hablar"}
+      │  suena el teléfono (centralita, Jarvis-Claude) con el aviso entero delante
       ▼
 Descuelgas. Jarvis YA sabe qué pediste y qué se hizo (no va a buscarlo)
       │  hablas: «pues cambia X», «mergéalo», «déjalo»
@@ -71,7 +72,7 @@ repositorio delante. Tú hablas con Jarvis; quien toca el código es otro.
 
 **La misma rutina para las dos cosas.** `encargar_a_una_sesion` dispara la rutina que ya
 existía, la de retomar, con otro texto. Una rutina por caso habría sido otro trigger, otro
-token y otro par de secretos en Fly — y otra cosa que se queda a medias el día que se
+token y otro par de secretos en el entorno del backend — y otra cosa que se queda a medias el día que se
 ponga uno solo. Lo único que las separa es el texto que se manda, y por eso el prompt
 guardado de la rutina cubre los dos casos (ver «3. La rutina»).
 
@@ -199,20 +200,21 @@ Como todas: aquí no hay tooling de migraciones.
 
 ```bash
 openssl rand -hex 32          # o: python -c "import secrets; print(secrets.token_hex(32))"
-# y se añade a /config/life_assistant.env del Green:
-#   SESION_TOKEN='<lo que salga>'
+# y se añade al backend.env de caja (~/stack/backend.env):
+#   SESION_TOKEN=<lo que salga>
 ```
 
-Con el backend en el Green, las variables viven en `/config/life_assistant.env` (ver
-`docs/MIGRACION_BACKEND.md`). **Todo valor va entre comillas simples**: el fichero se lee
-con `source` y un valor con espacios sin comillas tumba el arranque. Después, *Reiniciar*
-el add-on `local_life-assistant`. Antes esto era `fly secrets set`, que reiniciaba la
-máquina sola: no hace falta un despliegue detrás, y no lo hagas — el deploy del
-backend es manual y aparte, por lo que dice `CLAUDE.md`.
+Con el backend en `caja` (desde el 2026-09-20), las variables viven en
+`~/stack/backend.env`, el `env_file` de su compose (repositorio HomeLab). **Después hay
+que recrear el contenedor**, no reiniciarlo: el `env_file` se lee al crearlo, y un
+`restart` sigue con el valor viejo. `./desplegar.sh` lo recrea, o
+`docker compose up -d backend` en `~/stack`. Antes esto fue `fly secrets set` y luego
+`/config/life_assistant.env` del add-on del Green; ninguno de los dos atiende ya
+tráfico, y reiniciar el add-on hoy es arrancar un segundo backend (ver «Despliegue» en
+`CLAUDE.md`).
 
 Ese mismo valor es el que llevan las sesiones en `X-Auth-Token` al llamar a
-`POST /sesion/aviso`. Si `fly auth whoami` se queja, pasa el token por `FLY_API_TOKEN` en
-vez de intentar un login interactivo.
+`POST /sesion/aviso`.
 
 ### 3. La rutina que retoma el trabajo
 
@@ -267,9 +269,9 @@ Luego, en la rutina: lápiz → *Add another trigger* → **API** → *Generate 
 URL y un token, **y el token se enseña una sola vez**. Los dos van al entorno del backend:
 
 ```bash
-# En /config/life_assistant.env del Green, y reiniciar el add-on:
-SESION_FIRE_URL='<la url>'
-SESION_FIRE_TOKEN='<el token>'
+# En ~/stack/backend.env de caja, y recrear el contenedor (ver el paso 2):
+SESION_FIRE_URL=<la url>
+SESION_FIRE_TOKEN=<el token>
 ```
 
 Hasta que estén, Jarvis **no anuncia** la herramienta `responder_a_la_sesion`: se cae del
@@ -280,7 +282,9 @@ esquema a propósito, para no ofrecer lo que no puede hacer nada.
 Instalado el 4 de septiembre de 2026: `rest_command.la_sesion_accion` en
 `configuration.yaml` y la automatización `Life Assistant - Vale, aviso leido` en
 `automations.yaml` (el YAML está en `docs/HOME_ASSISTANT_JARVIS.md`). El otro botón,
-«Hablarlo», no necesitaba nada: es un `action: "URI"` que abre el dashboard.
+«Hablarlo», ya no abre el dashboard (2026-09-22): HA reenvía su `action` a n8n, que llama
+a `POST /sesion/{id}/accion` y hace sonar el teléfono. Ver «El primer flujo por webhook:
+«Hablarlo»» en `docs/N8N.md`.
 
 ## Cómo probarlo
 
