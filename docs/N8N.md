@@ -65,6 +65,7 @@ los ficheros del add-on, se copia a mano a la máquina. Si lo cambias aquí, có
 | **Caducidad del dominio** | Cada día a las 9 pregunta a RDAP cuándo caduca `lifeassistantbackend.bid`. Calla si faltan más de 30 días; si no, avisa por `POST /programado/roto` con `aviso: true`. Si RDAP no contesta, lo dice solo los lunes | Activo desde el 2026-09-24 |
 | **Reloj de programados** | Lanza a su hora, por `workflow_dispatch`, los tres workflows programados de GitHub: la revisión nocturna (03:37), la red de seguridad del resumen diario (10:30) y la copia de Supabase (lunes, 06:17), todo en hora de Madrid. Calla si GitHub contesta 204; si no, avisa por `POST /programado/roto`. Ver «El reloj de los programados» | Activo desde el 2026-10-15 |
 | **Hablarlo, por teléfono** | Webhook `/hablarlo`: recibe el botón «Hablarlo» de un hallazgo de revisión/vigilante o de un aviso de sesión (reenviado por HA), decide de qué tabla es por el prefijo y llama a `POST /revision/{id}/accion` o `POST /sesion/{id}/accion` con `{"accion":"hablar"}` | Activo desde el 2026-09-22 |
+| **Alerta de Grafana** | Webhook `/alerta`: recibe las alertas del Grafana de `caja` (ventilador, temperatura, throttling, disco, MariaDB, medidores caídos; reglas en HomeLab `caja/monitor/grafana/alertas.yml`) y cuenta cada una que salta por `POST /programado/roto` con `aviso: true`. Calla el «resuelto». El nombre de la alerta es la huella con la que el backend deduplica | Activo desde el 2026-10-23 |
 
 > **Los tres vigilantes se activaron el 2026-09-20 a las 19:23**, y hasta ese momento
 > ninguno lo estaba: la tabla de aquí arriba llevaba una tarde diciendo que el del Green
@@ -337,8 +338,9 @@ aplicar sin que nadie lo diga.
   son transitorios, y los dos dejaban la ejecución en rojo sin que ese aviso llegara a
   ningún sitio — exactamente el síntoma de «n8n ha fallado y no me he enterado». Todos
   los nodos que avisan (`Contarselo al backend` en los tres vigilantes y en caducidad del
-  dominio, `Llamar por la centralita` en el del backend, y las llamadas a
-  `api.github.com` del traductor de averías y de la primera pasada de PRs) llevan ahora
+  dominio, `Llamar por la centralita` en el del backend, las llamadas a
+  `api.github.com` del traductor de averías y de la primera pasada de PRs, y desde el
+  2026-10-23 los dos de «Hablarlo» y el de la alerta de Grafana) llevan ahora
   `retryOnFail` con 3 intentos y 10 s de espera. Al añadir un nodo nuevo que avise de
   algo, dale el mismo trato: una sonda puede fallar limpio, un aviso no puede fallar
   nunca sin más.
