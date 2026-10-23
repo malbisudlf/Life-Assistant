@@ -734,13 +734,14 @@ Para probar el aviso sin gastar una llamada, apaga `LLAMADAS`.
 
 ## Lo que le falta
 
-- **El routing de `revision`/`sesion` hacia la centralita no se ha probado en producción.**
-  El código está cubierto por tests (`tests/backend/test_revision_hablar.py`,
-  `test_sesion_hablar.py`, `test_mcp_telefono.py`), pero la primera vez que suene de
-  verdad por un hallazgo de la revisión nocturna o un aviso de sesión es la prueba que
-  falta — igual que pasó con el canal de averías antes de confirmarse. Y el servidor MCP
-  (`/mcp/telefono`) solo se ha probado con `curl` a mano: falta que Claude Code en `caja`
-  lo conecte de verdad y llame a una herramienta en caliente.
+- ~~**El routing de `revision`/`sesion` hacia la centralita no se ha probado en
+  producción.**~~ **Probado el 2026-09-22**: el botón «Hablarlo» pasa por n8n (flujo
+  `Hablarlo, por teléfono`, ver `docs/N8N.md`) y hace sonar el teléfono con Jarvis-Claude
+  y el issue entero delante. El primer intento contestaba 403 en silencio por la
+  credencial equivocada; la trampa está escrita allí. La rama de `sesion` es el mismo
+  flujo con el endpoint gemelo. Y el servidor MCP (`/mcp/telefono`) ya no es solo `curl`:
+  Claude Code en `caja` lo tiene dado de alta (`.mcp.json` de `~/telefono-jarvis/`) y lo
+  usa en las llamadas.
 
 - **Interrumpirle (barge-in).** Mientras Jarvis piensa o habla, el audio que entra se
   tira. Es exactamente lo que también le falta al modo llamada del navegador

@@ -9,6 +9,8 @@ que consulta, actúa y avisa sin que se le pida.
 > **¿Quieres el tuyo?** El proyecto es replicable: cada instancia corre con tus
 > propias cuentas (Outlook, Supabase, API keys) sobre free tiers de Vercel y
 > Fly.io. Guía completa paso a paso en [`docs/DESPLIEGUE.md`](docs/DESPLIEGUE.md).
+> (La instancia de la demo ya no usa Fly: su backend corre en un servidor de casa;
+> ver «Despliegue».)
 
 ![Dashboard](public/screenshot.png)
 
@@ -62,7 +64,7 @@ El sistema también habla sin que se le pregunte: avisa de la hora de salida con
 Un correo con los datos del día en crudo (sin interpretar por ningún modelo) que sale al detectar que te has despertado — o, como red de seguridad, a una hora tope si nada más lo dispara. Un solo envío garantizado por día. Los domingos se añade un informe semanal con la evolución de las últimas trece semanas.
 
 ### Hogar inteligente
-- **Wake-on-LAN** — enciende el PC físico desde el dashboard a través de Home Assistant, sin conexión directa desde el browser
+- **Wake-on-LAN** — enciende el PC físico desde el dashboard a través del servidor de casa (`caja`), sin conexión directa desde el browser
 - **Apagado/suspensión remotos** del PC por SSH
 - **Notificaciones Alexa** — anuncia el nombre del evento 15 minutos antes en voz alta
 - **Avisos al móvil** — la app companion de Home Assistant entrega lo proactivo y las alertas del sistema con botones de acción
@@ -73,7 +75,7 @@ Cada madrugada, si hubo commits ese día en `main`, una sesión de Claude Code l
 ### Agente PC autónomo
 El agente recibe un job desde el dashboard y ejecuta la entrega universitaria de forma semiautónoma:
 
-1. El dashboard manda señal WOL → Home Assistant enciende el PC
+1. El dashboard manda señal WOL → `caja` enciende el PC
 2. El PC arranca y el agente inicia heartbeat
 3. Playwright abre Edge con el perfil real del usuario (cookies persistidas), navega a Alud (Moodle de Deusto) y extrae el enunciado
 4. Abre Claude Desktop en modo Cowork y le pega el enunciado con instrucciones
@@ -88,14 +90,14 @@ El dashboard muestra la barra de progreso en tiempo real con las etapas del agen
 | Capa | Tecnología |
 |---|---|
 | Frontend | React 19 + Vite, desplegado en Vercel (PWA instalable) |
-| Backend | FastAPI (Python 3.11), un solo fichero, desplegado en Fly.io (escala a cero) |
+| Backend | FastAPI (Python 3.11), un solo fichero, en Docker Compose sobre `caja` (un portátil con Debian en casa), publicado por Cloudflare Tunnel |
 | Base de datos | Supabase (PostgreSQL vía REST, solo accesible con la service key) |
 | Calendario | Microsoft Graph API (Outlook) |
 | Mapas | Google Maps Distance Matrix API |
 | Clima | Open-Meteo (gratis, sin API key) |
 | IA | OpenAI Whisper + GPT-4o-mini — transcripción, extracción de ideas y el cerebro de Jarvis |
 | Salud | Apple Watch → Health Auto Export + iOS Shortcuts |
-| Smart home | Home Assistant (sondeo REST + SSH) |
+| Smart home | Home Assistant (su API REST en la LAN, con el sondeo REST de respaldo) |
 | Agente PC | Playwright (Edge) + pyautogui + Claude Desktop, en Windows |
 | CI | GitHub Actions — lint, tests de frontend/backend y build en tres jobs paralelos |
 
@@ -107,14 +109,17 @@ El dashboard muestra la barra de progreso en tiempo real con las etapas del agen
 Browser (React 19 + Vite, Vercel)
     │  JWT en localStorage + REST
     ▼
-backend/main.py (FastAPI, Fly.io, escala a cero — un solo fichero, ~10.700 líneas)
+backend/main.py (FastAPI, en `caja` tras Cloudflare Tunnel — un solo fichero, ~31.000 líneas)
     ├── Microsoft Graph API   ─── Calendario Outlook (tokens OAuth en Supabase)
     ├── Google Maps API       ─── Hora de salida con tráfico real
     ├── Open-Meteo            ─── Clima
     ├── OpenAI API            ─── Whisper (voz) + GPT-4o-mini (ideas y Jarvis)
     ├── Supabase REST         ─── Ideas, ropa, jobs, entrenamiento, salud, memoria...
-    └── Home Assistant        ─── HA sondea órdenes (WOL, avisos, apagado por SSH,
-                                   tick del resumen diario) y EMPUJA presencia
+    ├── caja (el anfitrión)   ─── Pedidos al PC: WOL, relanzar el agente, suspender
+    │                              y apagar por SSH, ejecutados fuera del contenedor
+    └── Home Assistant        ─── El backend le pregunta en la LAN (estado y órdenes);
+                                   HA sondea avisos, la cola de respaldo y el tick del
+                                   resumen diario, y EMPUJA presencia
 
 Apple Watch ── Health Auto Export + iOS Shortcuts ──► POST /health/ingest
 
@@ -196,13 +201,18 @@ El backend expone `POST /health/ingest?token=HEALTH_INGEST_TOKEN` compatible con
 
 **Frontend** — push a `main` despliega automáticamente en Vercel.
 
-**Backend (Fly.io)**:
-```bash
-cd backend
-fly deploy
-```
+**Backend** — corre en `caja`, un portátil con Debian en casa, con Docker Compose, y sale
+a internet por su propio Cloudflare Tunnel. Nunca se despliega en automático: se lanza
+`desplegar.sh` en `caja` (`git pull --ff-only`, escribe el SHA en `VERSION`, reconstruye
+y espera al healthcheck) o el botón *Desplegar* de la zona dev, que le deja el pedido.
+`GET /` devuelve `version`, el commit que está sirviendo, para comprobar que ha entrado.
+La configuración de esa máquina (compose, `desplegar.sh`, secretos) vive en un
+repositorio aparte y privado; el detalle, en «Despliegue» de [`CLAUDE.md`](CLAUDE.md).
+Fly.io está suspendida, y el add-on de Home Assistant de `addon/` queda parado como
+camino de vuelta.
 
-Los secrets se configuran con `fly secrets set KEY=value` y no se incluyen en el repositorio.
+Los secretos viven en el `.env` del backend en esa máquina y no se incluyen en el
+repositorio.
 
 ---
 
@@ -211,11 +221,11 @@ Los secrets se configuran con `fly secrets set KEY=value` y no se incluyen en el
 ```
 ├── src/
 │   ├── components/
-│   │   └── Dashboard.jsx      # UI completa (~5.600 líneas)
+│   │   └── Dashboard.jsx      # UI completa (~10.300 líneas)
 │   └── lib/
 │       └── helpers.js         # Lógica pura del frontend, testeada aparte
 ├── backend/
-│   └── main.py                # API FastAPI, un solo fichero (~10.700 líneas, 73 endpoints)
+│   └── main.py                # API FastAPI, un solo fichero (~31.000 líneas, ~150 endpoints)
 ├── agent/
 │   └── agent.py                # Agente PC autónomo (solo funciona en Windows real)
 ├── supabase/
