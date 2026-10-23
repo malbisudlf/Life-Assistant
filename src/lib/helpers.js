@@ -1305,6 +1305,13 @@ export const METRICAS_DEL_DESGLOSE = {
   "🌬️ Resp.":               ["respiratory_rate"],
 };
 
+// Lo que nunca se da por "no medido". Dos semanas sin entrenos ni minutos de ejercicio
+// son también dos semanas sin ir al gimnasio, y desde los datos no hay forma de separar
+// una cosa de la otra. Mientras el desglose solo escondía la fila daba igual; desde que
+// lo no medido deja también de puntuar (`desgloseMedible`), sacarlo del total premiaría
+// justo no entrenar. Por eso el componente tampoco se marca nunca `sinDatos`.
+const _SIEMPRE_MEDIBLES = new Set(["💪 Entreno"]);
+
 // Conjunto de etiquetas del desglose cuyas métricas llevan sin traer nada el tiempo
 // suficiente como para darlas por muertas.
 //
@@ -1327,6 +1334,7 @@ export function metricasMuertas(healthData, {
 
   const muertas = new Set();
   for (const [etiqueta, nombres] of Object.entries(METRICAS_DEL_DESGLOSE)) {
+    if (_SIEMPRE_MEDIBLES.has(etiqueta)) continue;
     const serie = findMetric(healthData, ...nombres);
     const hayEn = (desde, fin) => serie.some(
       d => d && d.date != null && String(d.date) >= desde && String(d.date) <= fin && _tieneMedida(d));
@@ -1409,6 +1417,83 @@ export function scoreFromBreakdown(breakdown) {
     cobertura: maxTotal > 0 ? max / maxTotal : null,
     componentes: filas.length,
     sinDatos:    todas.length - filas.length,
+  };
+}
+
+// El desglose sin los componentes que este aparato no mide (`metricasMuertas`). Antes
+// solo se escondían en el tooltip y seguían sumando al total: el % de grasa o el VO₂max
+// arrastran su último valor conocido, así que una medida de hace semanas del reloj
+// anterior puntuaba cada día sin verse, y las filas del tooltip no cuadraban con el
+// número grande. Quien pinta el desglose y quien saca el total usan ESTA lista.
+export function desgloseMedible(breakdown, noMedidos) {
+  if (!noMedidos || !noMedidos.size) return breakdown || [];
+  return (breakdown || []).filter(b => b && !noMedidos.has(b.label));
+}
+
+// ── El widget de bienestar: días, no registros ───────────────────
+// Las medias «de la semana» del widget salían de `slice(-7)` y el «vs semana pasada» del
+// peso, del octavo registro hacia atrás. Es el fallo que ya se había corregido en el
+// correo (`_media`) y en el motor de conclusiones (`seriesTrend`), y que aquí seguía
+// vivo: con la serie agujereada, siete registros pueden ser dos meses, y uno no se pesa
+// a diario. Todo va por FECHA, con el «hoy» por parámetro para poder probarlo.
+export const BIENESTAR_SEMANA_DIAS = 7;
+
+// El valor de UN día, o null. La vista «Hoy» caía a la última fila de la serie cuando
+// no había la de hoy —la de ayer, o la de hace tres semanas— y la puntuaba como si fuera
+// de hoy sin decirlo. Un 0 es «no se midió», como en el resto del módulo.
+export function valorDelDia(serie, dia) {
+  if (!dia) return null;
+  let v = null;
+  for (const d of serie || []) {
+    if (d && String(d.date) === String(dia)) v = Number(d.value);
+  }
+  return v != null && !isNaN(v) && v > 0 ? v : null;
+}
+
+// Las filas de los `dias` días que terminan en `hoy` (incluido).
+export function filasDeLaSemana(serie, hoy, dias = BIENESTAR_SEMANA_DIAS) {
+  const desde = _sumarDias(hoy, -(dias - 1));
+  if (desde == null) return [];
+  return (serie || []).filter(d => d && d.date != null
+    && String(d.date) >= desde && String(d.date) <= String(hoy));
+}
+
+// Media de los días con dato de esa misma ventana, o null si no hay ninguno: nunca la de
+// hace un mes con otro nombre. Es `mediaReciente` con la ventana de la semana.
+export function mediaDeLaSemana(serie, hoy, dias = BIENESTAR_SEMANA_DIAS) {
+  const m = mediaReciente(serie, hoy, { dias });
+  return m ? m.valor : null;
+}
+
+// El «vs semana pasada» del peso, la grasa y la masa magra: la última medida contra la
+// más cercana a `dias` días ANTES DE ELLA, dentro de una holgura. Anclado a la última
+// medida y no a hoy a propósito: así un día sin pesada no cambia nada (ni la flecha ni su
+// color), y la comparación solo se mueve cuando llega una medida nueva. Sin una medida
+// dentro de la holgura no hay delta: comparar con la de hace un mes y llamarlo «semana
+// pasada» es la mentira de antes. `diasAtras` dice cuántos días son de verdad.
+export const CAMBIO_SEMANAL_HOLGURA = 3;
+
+export function cambioSemanal(serie, { dias = 7, holgura = CAMBIO_SEMANAL_HOLGURA } = {}) {
+  const medidas = (serie || [])
+    .filter(d => d && d.date != null && Number(d.value) > 0 && _sumarDias(String(d.date), 0) != null)
+    .map(d => ({ fecha: String(d.date), valor: Number(d.value) }))
+    .sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0));
+  if (!medidas.length) return null;
+  const ultima = medidas[medidas.length - 1];
+  let ref = null;
+  for (const m of medidas) {
+    const atras = _diasEntre(m.fecha, ultima.fecha);
+    if (atras == null || atras <= 0 || Math.abs(atras - dias) > holgura) continue;
+    // Gana la más cercana a `dias`; a igualdad, la más antigua (la que cubre la semana).
+    const mejor = ref == null || Math.abs(atras - dias) < Math.abs(ref.atras - dias)
+      || (Math.abs(atras - dias) === Math.abs(ref.atras - dias) && atras > ref.atras);
+    if (mejor) ref = { ...m, atras };
+  }
+  return {
+    valor: ultima.valor, fecha: ultima.fecha,
+    delta:         ref ? ultima.valor - ref.valor : null,
+    diasAtras:     ref ? ref.atras : null,
+    fechaAnterior: ref ? ref.fecha : null,
   };
 }
 

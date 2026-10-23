@@ -497,6 +497,15 @@
   Arreglado con ventanas por fecha real contra un `hoy` inyectable, exigiendo fondo a los
   dos lados antes de hablar de tendencia, y con tests. Moraleja, la de siempre: **un
   arreglo que no se busca en los demás sitios donde vive el mismo patrón está a medias.**
+  **Y estaba a medias** (octubre de 2026): el «arreglado» de arriba valía para el motor
+  de conclusiones, pero el widget de bienestar tenía su propia copia en el memo
+  `datosSalud` —`slice(-7)` para las medias de la semana, el octavo registro para el
+  «vs semana pasada» del peso, la última fila de la serie como si fuera la de hoy— y
+  los widgets de sueño y HRV, la suya para su «media 7d». Este fichero decía que el peso
+  estaba corregido y el número que se ve cada día seguía con el fallo. Ahora salen de
+  `mediaDeLaSemana`, `valorDelDia` y `cambioSemanal`, con tests de series con huecos y
+  uno del widget montado. Al apuntar un arreglo aquí, apunta también **dónde**: «el
+  peso» eran dos sitios.
 
 - **Un percentil calculado "a día de hoy" habría hecho el histórico irreproducible.** Al
   meter líneas base personales, la tentación es calcular los percentiles con todo lo que

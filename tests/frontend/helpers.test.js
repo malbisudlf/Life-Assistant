@@ -31,6 +31,8 @@ import {
   refRecuperacion, SUENO_REF_DIAS, sleepHistory, desgloseNoche,
   rejillaCalendario, estadoCelda, fechaLargaCorta, fechaDiaMes,
   racha, rachaSueno, rachaPasos, RACHA_HUECO_MAX,
+  valorDelDia, filasDeLaSemana, mediaDeLaSemana, cambioSemanal, desgloseMedible,
+  BIENESTAR_SEMANA_DIAS, CAMBIO_SEMANAL_HOLGURA,
 } from "../../src/lib/helpers";
 
 afterEach(() => {
@@ -3015,5 +3017,123 @@ describe("rescateNotaDeVoz", () => {
     const r = rescateNotaDeVoz(null);
     expect(r.texto).toBe("");
     expect(r.error).toBe("No se pudo guardar la nota de voz");
+  });
+});
+
+// El widget de bienestar sacaba las medias «de la semana» con `slice(-7)` y el «vs semana
+// pasada» del peso con el octavo registro hacia atrás: con una serie agujereada eso son
+// las últimas siete MEDIDAS, no los últimos siete días. Las series de aquí tienen huecos a
+// propósito, porque con una serie completa los dos cálculos coinciden y el fallo no se ve.
+describe("bienestar: días, no registros", () => {
+  const HOY = "2026-10-23";
+
+  test("la vista «Hoy» solo puntúa con la fila de hoy", () => {
+    const pasos = [
+      { date: "2026-10-21", value: 12000 },
+      { date: "2026-10-22", value: 9000 },   // ayer: no es hoy aunque sea la última
+    ];
+    expect(valorDelDia(pasos, HOY)).toBe(null);
+    expect(valorDelDia([...pasos, { date: HOY, value: 3000 }], HOY)).toBe(3000);
+    // Un 0 es «no se midió», como en el resto del módulo.
+    expect(valorDelDia([...pasos, { date: HOY, value: 0 }], HOY)).toBe(null);
+    expect(valorDelDia(null, HOY)).toBe(null);
+  });
+
+  test("la media de la semana cuenta los siete días que terminan hoy, no siete registros", () => {
+    // Tres días esta semana y cuatro de hace un mes, cuando sí se llevaba el reloj.
+    // `slice(-7)` los mezclaba y daba 70 como «media de la semana».
+    const hrv = [
+      { date: "2026-09-20", value: 90 }, { date: "2026-09-21", value: 90 },
+      { date: "2026-09-22", value: 90 }, { date: "2026-09-23", value: 90 },
+      { date: "2026-10-19", value: 40 }, { date: "2026-10-21", value: 50 },
+      { date: "2026-10-23", value: 60 },
+    ];
+    expect(mediaDeLaSemana(hrv, HOY)).toBe(50);
+    // El primer día de la ventana es hoy - 6.
+    expect(mediaDeLaSemana([{ date: "2026-10-17", value: 70 }], HOY)).toBe(70);
+    expect(mediaDeLaSemana([{ date: "2026-10-16", value: 70 }], HOY)).toBe(null);
+    // Sin nada en la ventana no hay media: nunca la de hace un mes con otro nombre.
+    expect(mediaDeLaSemana(hrv.slice(0, 4), HOY)).toBe(null);
+    expect(BIENESTAR_SEMANA_DIAS).toBe(7);
+  });
+
+  test("las filas de la semana son las de esos siete días", () => {
+    const sueno = [
+      { date: "2026-09-30", value: 8 }, { date: "2026-10-20", value: 7.5 },
+      { date: "2026-10-23", value: 6 },
+    ];
+    expect(filasDeLaSemana(sueno, HOY).map(d => d.date)).toEqual(["2026-10-20", "2026-10-23"]);
+  });
+
+  test("el peso se compara con la pesada más cercana a una semana antes, no con el octavo registro", () => {
+    // Una pesada por semana: el octavo registro hacia atrás no existe y el código de
+    // antes caía en el primero de todos, a tres semanas, llamándolo «semana pasada».
+    const peso = [
+      { date: "2026-10-02", value: 82 }, { date: "2026-10-09", value: 81 },
+      { date: "2026-10-16", value: 80.5 }, { date: "2026-10-23", value: 80 },
+    ];
+    const c = cambioSemanal(peso);
+    expect(c.valor).toBe(80);
+    expect(c.delta).toBeCloseTo(-0.5);
+    expect(c.diasAtras).toBe(7);
+  });
+
+  test("con pesadas diarias sale lo mismo que antes: hace siete días", () => {
+    const peso = [];
+    for (let i = 0; i < 12; i++) peso.push({ date: `2026-10-${String(12 + i).padStart(2, "0")}`, value: 80 - i * 0.1 });
+    const c = cambioSemanal(peso);
+    expect(c.diasAtras).toBe(7);
+    expect(c.delta).toBeCloseTo(-0.7);
+  });
+
+  test("sin una pesada en torno a hace una semana no hay flecha", () => {
+    // La anterior es de hace un mes: compararla y llamarlo «vs semana pasada» es mentir.
+    const c = cambioSemanal([{ date: "2026-09-22", value: 83 }, { date: "2026-10-23", value: 80 }]);
+    expect(c.valor).toBe(80);
+    expect(c.delta).toBe(null);
+    expect(c.diasAtras).toBe(null);
+    // Dentro de la holgura sí, y dice cuántos días son de verdad.
+    const holgada = cambioSemanal([{ date: "2026-10-14", value: 81 }, { date: "2026-10-23", value: 80 }]);
+    expect(holgada.diasAtras).toBe(9);
+    expect(holgada.delta).toBeCloseTo(-1);
+    expect(CAMBIO_SEMANAL_HOLGURA).toBe(3);
+  });
+
+  test("un día sin pesada no mueve la flecha", () => {
+    const peso = [
+      { date: "2026-10-09", value: 81 }, { date: "2026-10-16", value: 80.5 },
+      { date: "2026-10-22", value: 80 },
+    ];
+    const antes = cambioSemanal(peso);
+    // Un día que llega sin medida (una fila a 0, o ninguna fila) no es una pesada:
+    // la última sigue siendo la de ayer y su referencia, la misma.
+    expect(cambioSemanal([...peso, { date: HOY, value: 0 }])).toEqual(antes);
+    expect(antes.fecha).toBe("2026-10-22");
+    expect(antes.delta).toBeCloseTo(-0.5);
+    expect(cambioSemanal([])).toBe(null);
+  });
+
+  test("lo que el aparato no mide deja de puntuar, no solo de pintarse", () => {
+    // El % de grasa lleva semanas sin llegar, pero el widget arrastra su último valor:
+    // escondido en el tooltip y sumando en el total, el desglose no cuadraba.
+    const desglose = wellnessBreakdown({ isDaily: true, sleep: 7.5, steps: 10000, bodyFat: 35 });
+    const conGrasa = scoreFromBreakdown(desglose);
+    const medible  = desgloseMedible(desglose, new Set(["⚖️ % Grasa"]));
+    expect(medible.map(b => b.label)).not.toContain("⚖️ % Grasa");
+    expect(scoreFromBreakdown(medible).score).toBeGreaterThan(conGrasa.score);
+    expect(scoreFromBreakdown(medible).max).toBe(conGrasa.max - 4);
+    // Sin nada que quitar, el desglose sale intacto.
+    expect(desgloseMedible(desglose, new Set())).toEqual(desglose);
+    expect(desgloseMedible(desglose, null)).toEqual(desglose);
+  });
+
+  test("el entreno nunca se da por no medido: no entrenar no es no tener sensor", () => {
+    // Dos semanas sin entrenos ni minutos de ejercicio son también dos semanas sin ir
+    // al gimnasio. Sacar el componente del total premiaría justo eso.
+    const pasos = [];
+    for (let i = 1; i <= 23; i++) pasos.push({ date: `2026-10-${String(i).padStart(2, "0")}`, value: 9000 });
+    const muertas = metricasMuertas({ step_count: pasos }, { hoy: HOY });
+    expect(muertas.has("💪 Entreno")).toBe(false);
+    expect(muertas.has("🧍 De pie")).toBe(true);
   });
 });

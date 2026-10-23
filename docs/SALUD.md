@@ -343,6 +343,13 @@ Hay **dos ventanas**, y una métrica muere por la que se cumpla antes:
 | Larga (`METRICA_MUERTA_DIAS`, 14) | Siempre, en cuanto el corte lleva 14 días de recorrido | Todas |
 | Corta (`METRICA_MUERTA_DIAS_TRAS_CAMBIO`, 5) | Solo con corte puesto, y solo si la ventana cabe **entera** después de él | Solo las que llegaban a diario antes del corte (`_eraRegular`, ≥50% de los 14 días previos) |
 
+**Lo que se da por no medido deja también de puntuar** (desde octubre de 2026): el widget
+lo saca del desglose antes de sumar (`desgloseMedible`), no solo del tooltip. Mientras
+solo se escondía, las esporádicas que arrastran su último valor (VO₂max, % grasa,
+recuperación cardíaca) seguían sumando con una medida de hace semanas sin que se viera.
+**`💪 Entreno` no se da nunca por no medido**: dos semanas sin entrenos son también dos
+semanas sin ir al gimnasio, y sacarlo del total premiaría justo eso.
+
 La corta existe porque el cambio de aparato es una **explicación**: una métrica que
 llegaba todos los días, que deja de llegar justo el día que cambias de pulsera y sigue
 sin llegar cinco días, no es un hueco. Sin esa explicación catorce días son lo mínimo
