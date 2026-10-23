@@ -686,6 +686,40 @@ Dentro de la imagen y sin red pasan el 20 (11), el 18 (7), el 15-16 (13), el 12 
 claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
 `CONFIRMAR: pregunto` y `LECTURA: semana` en `docker logs voice-app`.
 
+## El parche 21: el `claude-api-server`, solo en local
+
+Sale del 2026-10-23, del vigía de seguridad de `caja` (repositorio HomeLab,
+`caja/vigias/seguridad.sh`), que encontró el puerto 3333 escuchando en `0.0.0.0`. El
+original hace `app.listen(PORT, '0.0.0.0')` a mano, y `POST /ask` **no pide ninguna
+credencial** y lanza Claude Code con `--dangerously-skip-permissions` como el usuario de
+`caja`, que está en el grupo `docker`: equivale a root. Cualquier aparato de la wifi o del
+tailnet podía mandar en la máquina. El riesgo aceptado en `docs/LLAMADAS.md` era el 3010
+de la voice-app, no este.
+
+El arreglo es una línea: escucha en `HOST`, que por defecto es `127.0.0.1`. Nada lo pierde:
+la voice-app corre con la red del host y llega por `CLAUDE_API_URL=http://localhost:3333`,
+y nadie más lo usa (ni n8n, ni el backend; el `POST /ask-structured` «para n8n» del original
+no tiene ningún flujo que lo llame, comprobado el mismo día). Si algún día hiciera falta
+desde fuera, se pone `Environment=HOST=…` en el servicio, pero entonces con una credencial
+delante, no así.
+
+`telefono/parche-21.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`). El fichero no pasa por
+ninguna imagen: lo lee `node` directamente desde el servicio de systemd, así que basta con
+reiniciarlo (con sudo, es un servicio del sistema):
+
+```bash
+cd ~/.claude-phone-cli/claude-api-server
+cp -p server.js server.js.bak-AAAAMMDD-antes-p21
+cd .. && patch -p1 < parche-21.diff
+node --check claude-api-server/server.js
+sudo systemctl restart claude-phone-api
+ss -tlnp | grep 3333                                 # 127.0.0.1:3333, no 0.0.0.0
+curl -s localhost:3333/health
+```
+
+Volver atrás: copiar el `.bak` encima y el mismo `restart`. En `caja` la copia es
+`server.js.bak-20261023-antes-p21`.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

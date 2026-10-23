@@ -1,0 +1,20 @@
+--- a/claude-api-server/server.js	2026-10-15 18:51:18.329818731 +0200
++++ b/claude-api-server/server.js	2026-10-23 21:59:44.038013314 +0200
+@@ -604,11 +604,15 @@
+ });
+ 
+ // Start server
+-app.listen(PORT, '0.0.0.0', () => {
++// Parche 21 (Life Assistant, telefono/PARCHES.md): solo en local. /ask lanza Claude Code con
++// --dangerously-skip-permissions y no pide credencial: en 0.0.0.0 cualquiera de la LAN o del
++// tailnet mandaba en caja. La voice-app (red del host) llega por localhost:3333.
++const HOST = process.env.HOST || '127.0.0.1';
++app.listen(PORT, HOST, () => {
+   console.log('='.repeat(64));
+   console.log('Claude HTTP API Server');
+   console.log('='.repeat(64));
+-  console.log(`\nListening on: http://0.0.0.0:${PORT}`);
++  console.log(`\nListening on: http://${HOST}:${PORT}`);
+   console.log(`Health check: http://localhost:${PORT}/health`);
+   console.log('\nReady to receive Claude queries from voice interface.\n');
+ });
