@@ -20,7 +20,7 @@ import {
   alarmaCuandoTexto, alarmaEstadoTexto, alarmaSonando, alarmaRepeticionTexto, alarmaDormirDiaTexto,
   revisionDeUrl, DIAS_SEMANA,
   agruparParteNoche, fraseParteNoche, motivoNoResponder,
-  hostStreaming, rescateNotaDeVoz,
+  hostStreaming, rescateNotaDeVoz, textoErrorMicro, permisoNotificaciones,
   cierreDeJob, textoEstadoCaja, agenteSinArrancar, AGENTE_ARRANQUE_MAX_MS,
   jarvisHistorial, jarvisEtiquetaAccion, jarvisMotivoError,
   elegirVozEspanola, textoHablable, esFinDeLlamada, JARVIS_SILENCIO_MS,
@@ -46,7 +46,7 @@ import { escucharConScribe } from "../lib/vozScribe";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
-import { textoErrorApi, detalleDeError, mensajeErrorLogin, leerCalendario, borradoConfirmado } from "../lib/respuestas";
+import { textoErrorApi, detalleDeError, mensajeErrorLogin, leerCalendario, borradoConfirmado, leerEscritura, SIN_CONEXION } from "../lib/respuestas";
 import { API, authHeaders, jsonHeaders, apiFetch } from "../lib/api";
 import { comoBoton } from "../lib/teclado";
 // `src/lib/dev.js` NO se importa aquí de forma estática, aunque el panel ⚙ use su
@@ -1674,6 +1674,89 @@ const FALLO_SALUD = {
   health_hub:      ["Salud",              "la salud"],
 };
 
+// Los botones de icono de cada alarma (✎, ✕). 44 px es el mínimo táctil de Apple: con
+// 12 px, quitar la alarma de mañana estaba a un roce de pulsar «Editar».
+const TOQUE_ALARMA = {
+  display: "inline-flex", alignItems: "center", justifyContent: "center",
+  minWidth: 44, minHeight: 44, flexShrink: 0,
+  fontSize: 15, color: "var(--muted2)", cursor: "pointer",
+};
+
+// «No lo sé» con su «Reintentar», para cualquier widget cuya lectura ha fallado. Es el
+// camino de `FALLO_SALUD` sacado a componente: un fallo al leer se pinta como fallo,
+// nunca como lista vacía. `que` nombra el botón («Reintentar leer el clima»): con varios
+// widgets fallando a la vez, son varios «Reintentar» iguales en la misma pantalla.
+function FalloLectura({ texto, que, onReintentar, estilo }) {
+  return (
+    <div style={{ color: "var(--muted)", fontSize: 13, ...estilo }}>
+      {texto}{" "}
+      <button
+        onClick={onReintentar}
+        aria-label={que ? `Reintentar leer ${que}` : undefined}
+        style={{
+          background: "none", border: "none", padding: 0, font: "inherit",
+          color: "var(--accent)", cursor: "pointer",
+        }}
+      >
+        Reintentar
+      </button>
+    </div>
+  );
+}
+
+// Lo que dice una escritura que no ha entrado. Va al lado del botón que la lanzó: un
+// aviso lejos de donde se tocó no se lee.
+function AvisoEscritura({ texto, estilo }) {
+  if (!texto) return null;
+  return <div role="alert" style={{ fontSize: 12, color: "#d4645a", marginTop: 6, ...estilo }}>{texto}</div>;
+}
+
+// Pinta lo que devuelva `render`. Existe solo para que `renderWidget` ejecute el cuerpo
+// del widget DENTRO de `WidgetProtegido`: un boundary atrapa lo que lanzan sus hijos al
+// pintarse, no lo que lanza quien construye el JSX, y el switch de `renderWidget` corre
+// en el render de `Dashboard`.
+function Pintar({ render }) {
+  return render();
+}
+
+// Un `ErrorBoundary` por widget (idea 6.4 de agosto). Sin él, una excepción en cualquier
+// widget —un dato con una forma que no se esperaba— desmontaba el dashboard entero y
+// dejaba la pantalla en negro, alarmas y Jarvis incluidos. Ahora se queda en su tarjeta
+// con un «Reintentar», que vuelve a pintarlo con lo que haya en ese momento.
+class WidgetProtegido extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { fallo: null };
+  }
+
+  static getDerivedStateFromError(fallo) {
+    return { fallo };
+  }
+
+  render() {
+    const { id, titulo, estilo, children } = this.props;
+    if (!this.state.fallo) return children;
+    return (
+      <div style={estilo} data-card={id}>
+        <div style={s.sectionLabel}>{titulo}</div>
+        <div style={{ color: "var(--muted)", fontSize: 13 }}>
+          «{titulo}» ha fallado al pintarse; el resto del dashboard sigue.{" "}
+          <button
+            onClick={() => this.setState({ fallo: null })}
+            aria-label={`Reintentar pintar ${titulo}`}
+            style={{
+              background: "none", border: "none", padding: 0, font: "inherit",
+              color: "var(--accent)", cursor: "pointer",
+            }}
+          >
+            Reintentar
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
 // (para incorporar widgets nuevos que aún no estén guardados, en su sitio y no al
 // final: ver `fusionarConfigWidgets`) y saneando cada entrada. Se usa tanto para el
@@ -2312,6 +2395,7 @@ export default function Dashboard() {
   const [verTodasIdeas, setVerTodasIdeas]   = useState(false);
   const [grupoAbierto, setGrupoAbierto]     = useState(null);   // id de la cabeza del grupo
   const [borrandoIdea, setBorrandoIdea]     = useState(null);   // id pendiente del segundo toque
+  const [grabarError, setGrabarError]       = useState("");     // por qué no se pudo empezar a grabar
   const [yaLoDijiste, setYaLoDijiste]       = useState(null);   // { nueva, anterior }
   // Empieza en "cargando" y no en null: así el efecto de carga no tiene que ponerlo a
   // mano (setState síncrono en un efecto, ver docs/FRONTEND.md).
@@ -2462,6 +2546,8 @@ export default function Dashboard() {
   const [wolError, setWolError]       = useState("");     // por qué no se pudo encolar la entrega
   const [confirmShutdown, setConfirmShutdown] = useState(false); // confirmación de apagar
   const [weather, setWeather]         = useState(null);
+  const [weatherFallo, setWeatherFallo] = useState(false);   // la última lectura del clima falló
+  const [weatherIntento, setWeatherIntento] = useState(0);   // sube con cada «Reintentar»
   const [weatherExpanded, setWeatherExpanded] = useState(false);
   // {lat, lon} | false (sin permiso/soporte) | null (pendiente). Arranca en false
   // si el navegador no tiene geolocalización, para no hacer setState síncrono en el efecto.
@@ -2493,12 +2579,14 @@ export default function Dashboard() {
   // cambiado, y entonces todo se comporta igual que antes de que esto existiera.
   const corteDispositivo = healthAjustes?.cambio_dispositivo || null;
   const [dispositivoGuardando, setDispositivoGuardando] = useState(false);
+  const [dispositivoError, setDispositivoError]         = useState("");   // el PATCH no entró
   const [dispositivoFecha, setDispositivoFecha] = useState("");
   const [dispositivoNombre, setDispositivoNombre] = useState("");
   const [wellnessView, setWellnessView]     = useState("weekly");
   const [scoreTooltip, setScoreTooltip]       = useState(false);
   const [sleepScoreTooltip, setSleepScoreTooltip] = useState(false);
   const [sleepExcluding, setSleepExcluding]       = useState(null); // date string being toggled
+  const [sleepExcluirError, setSleepExcluirError] = useState("");   // anular/restaurar que no entró
   // Los tres salen del mismo `la_body_goals`: se lee una vez en vez de parsearlo
   // por separado en cada inicializador.
   const [bodyGoals, setBodyGoals] = useState(() => {
@@ -2527,6 +2615,7 @@ export default function Dashboard() {
   // suya se borraría en el próximo cold start de Fly.
   const [briefCfg, setBriefCfg]           = useState(null);
   const [briefGuardando, setBriefGuardando] = useState(false);
+  const [briefError, setBriefError]         = useState("");      // el PATCH del resumen no entró
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   // Histórico largo, solo para el panel de patrones del modal (ver efecto de carga).
   const [healthLargo, setHealthLargo]         = useState(null);
@@ -2569,10 +2658,13 @@ export default function Dashboard() {
   // El parte del turno de noche. `null` mientras no se sabe y `{}` cuando no hay
   // ninguno: son cosas distintas y el widget dice una u otra, no la misma.
   const [parteNoche, setParteNoche]                 = useState(null);
+  const [nocheError, setNocheError]                 = useState(null);   // {id, texto}: «Visto»/«Descartar» que no entró
   // `repetir`: días ISO (1 = lunes) en los que se repite. Vacío = una sola vez, y
   // entonces sí hace falta la fecha. `editando`: el id de la alarma que se está
   // cambiando — el mismo formulario sirve para poner y para editar, que es lo que evita
   // tener dos sitios donde escribir una hora y que uno de los dos valide distinto.
+  const [alarmaError, setAlarmaError]               = useState("");     // una acción sobre una alarma que no entró
+  const [borrandoAlarma, setBorrandoAlarma]         = useState(null);   // id pendiente del segundo toque del ✕
   const [alarmaForm, setAlarmaForm]                 = useState({ fecha: "", hora: "", etiqueta: "", repetir: [], editando: "", guardando: false, error: "" });
   // Cuánto se espera antes de despertar a la casa. Lo dice el backend (es suyo, va por
   // variable de entorno) para que la frase del widget no se quede mintiendo si cambia.
@@ -2708,7 +2800,9 @@ export default function Dashboard() {
   // máquina de Fly y recibir un 401.
   function loadEvents() {
     return apiFetch(`${API}/calendar/events`, { headers: authHeaders() })
-      .then(r => r.json())
+      // Un 5xx con cuerpo JSON (`{detail}`) no trae `error` ni `events`, y `leerCalendario`
+      // lo habría leído como una agenda vacía: «Sin eventos» con el backend roto.
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => {
         // Las dos marcas se reescriben en CADA carga, también en la buena: antes solo se
         // ponían a true, y un fallo pasajero dejaba «Conectar Outlook» pegado hasta
@@ -2790,9 +2884,11 @@ export default function Dashboard() {
           body: JSON.stringify(payload),
         });
       }
-      const data = await r.json();
-      if (data.error) {
-        setEventCreateError(data.error);
+      // Un 422 (la validación del backend) trae `{detail}` y no `error`: mirando solo
+      // `error`, se cerraba el formulario como si el evento se hubiera creado.
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data.error) {
+        setEventCreateError(data.error || textoErrorApi(r.status, data));
       } else {
         setShowCreateEvent(false);
         setEditingEventId(null);
@@ -2804,19 +2900,26 @@ export default function Dashboard() {
     setEventCreating(false);
   }
 
-  // Cargar clases
-  useEffect(() => {
-    if (!token) return;
-    apiFetch(`${API}/calendar/classes`, { headers: authHeaders() })
-      .then(r => r.json())
+  // Cargar clases. «Lo siguiente» y «Entregas» lo dicen si falla: sin esto, una clase (o
+  // una entrega del calendario de clases) que no se pudo leer se quedaría fuera sin
+  // rastro, y el widget afirmaría otra cosa con toda seguridad. El fallo se reescribe en
+  // cada carga, también en la buena, para que un reintento que sale bien lo quite.
+  function loadClases() {
+    return apiFetch(`${API}/calendar/classes`, { headers: authHeaders() })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => {
         if (Array.isArray(data.events)) setClassEvents(data.events);
-        // «Lo siguiente» lo dice: sin esto, una clase que no se pudo leer se quedaría
-        // fuera sin rastro y lo siguiente sería otra cosa, afirmado con toda seguridad.
-        if (data.error) setClasesFallo(true);
+        setClasesFallo(!!data.error || !Array.isArray(data.events));
       })
       .catch(() => setClasesFallo(true));
-  }, [token]);
+  }
+  useEffect(() => { if (token) loadClases(); }, [token]);
+
+  // Las entregas salen de los dos calendarios: se relee el que falló.
+  function reintentarEntregas() {
+    if (authNeeded || calendarError) loadEvents();
+    if (clasesFallo) loadClases();
+  }
 
   // Cargar resumen entrenamiento
   useEffect(() => { if (token) loadTraining(); }, [token]);
@@ -3055,6 +3158,15 @@ export default function Dashboard() {
     return () => { clearTimeout(t); document.removeEventListener("click", fuera); };
   }, [borrandoIdea]);
 
+  // Lo mismo para el ✕ de una alarma.
+  useEffect(() => {
+    if (!borrandoAlarma) return;
+    const t = setTimeout(() => setBorrandoAlarma(null), 4000);
+    const fuera = () => setBorrandoAlarma(null);
+    document.addEventListener("click", fuera);
+    return () => { clearTimeout(t); document.removeEventListener("click", fuera); };
+  }, [borrandoAlarma]);
+
   function cambiarAgruparIdeas(valor) {
     setAgruparIdeas(valor);
     try { localStorage.setItem("la_ideas_agrupar", valor ? "1" : "0"); } catch { /* mejor esfuerzo: la preferencia vive solo en esta sesión */ }
@@ -3141,14 +3253,22 @@ export default function Dashboard() {
 
   // Cargar clima — con las coordenadas del dispositivo si las hay, si no las fijas.
   // Espera a que la geolocalización se resuelva (coords o false) para no pedir dos veces.
+  // Un fallo se apunta aparte (`weatherFallo`) y no tocando `weather`: lo que ya se veía
+  // se queda, y la tarjeta distingue «cargando» de «no contestó». Antes las dos cosas
+  // eran «Sin datos de clima», sin forma de reintentar; el «Reintentar» sube
+  // `weatherIntento`, que vuelve a lanzar este efecto.
   useEffect(() => {
     if (!token || geo === null) return;
     const q = geo ? `?lat=${geo.lat}&lon=${geo.lon}` : "";
     apiFetch(`${API}/weather${q}`, { headers: authHeaders() })
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data && typeof data.temp === "number") setWeather(data); })
-      .catch(() => {});
-  }, [geo, token]);
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        if (!data || typeof data.temp !== "number") throw new Error("clima sin temperatura");
+        setWeather(data);
+        setWeatherFallo(false);
+      })
+      .catch(() => setWeatherFallo(true));
+  }, [geo, token, weatherIntento]);
 
   // Estado del agente PC (heartbeat). Solo se sondea con el modal de encendido abierto:
   // es el único sitio donde se pinta (isAgentOnline). Sondear siempre, cada 10s, mantenía
@@ -3178,7 +3298,7 @@ export default function Dashboard() {
   // Notificaciones del navegador — solicitar permiso
   useEffect(() => {
     if (!token || !notificationsEnabled) return;
-    if (Notification.permission === "default") {
+    if (permisoNotificaciones() === "default") {
       Notification.requestPermission().then(perm => {
         if (perm === "granted") {
           localStorage.setItem("la_notifications", "true");
@@ -3257,8 +3377,23 @@ export default function Dashboard() {
 
   // Audio
   async function startRecording() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mr = new MediaRecorder(stream);
+    // Sin permiso, sin micrófono o en un navegador que no graba, antes no pasaba nada: la
+    // promesa rechazada se perdía en la consola y el botón parecía roto. Ahora se dice por
+    // qué, y lo de escribir la idea sigue a un toque.
+    setGrabarError("");
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setGrabarError(textoErrorMicro("sin_soporte"));
+      return;
+    }
+    let stream, mr;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mr = new MediaRecorder(stream);
+    } catch (e) {
+      stream?.getTracks().forEach(t => t.stop());
+      setGrabarError(textoErrorMicro(e));
+      return;
+    }
     chunksRef.current = [];
     mr.ondataavailable = e => chunksRef.current.push(e.data);
     mr.onstop = async () => {
@@ -3583,15 +3718,22 @@ export default function Dashboard() {
     }
   }
 
+  // Sin `catch`, un fallo de red era una promesa rechazada en la consola; sin mirar
+  // `r.ok`, un 502 dejaba la noche como estaba sin decir nada. Las dos cosas se dicen.
   async function excludeSleepNight(date) {
     setSleepExcluding(date);
+    setSleepExcluirError("");
+    const queNoSeHizo = `No se ha cambiado la noche del ${isoToDdMmYyyy(date)}`;
     try {
       const r = await apiFetch(`${API}/health/sleep/${date}/exclude`, {
         method: "PATCH",
         headers: authHeaders(),
       });
-      if (r.ok) {
-        const { excluded } = await r.json();
+      const { ok, cuerpo, error } = await leerEscritura(r);
+      if (!ok) {
+        setSleepExcluirError(`${queNoSeHizo}: ${error}`);
+      } else {
+        const { excluded } = cuerpo;
         setHealthData(prev => {
           if (!prev?.sleep_analysis) return prev;
           return {
@@ -3604,6 +3746,8 @@ export default function Dashboard() {
           };
         });
       }
+    } catch {
+      setSleepExcluirError(`${SIN_CONEXION}. ${queNoSeHizo}.`);
     } finally {
       setSleepExcluding(null);
     }
@@ -4863,12 +5007,19 @@ export default function Dashboard() {
   async function guardarBriefAjustes(cambios) {
     if (briefGuardando) return;
     setBriefGuardando(true);
+    setBriefError("");
+    // Si no entra, se dice: el interruptor sigue pintando lo que diga el backend, así que
+    // sin aviso el toque simplemente «no hacía nada».
     try {
       const r = await apiFetch(`${API}/brief/ajustes`, {
         method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
       });
-      if (r.ok) setBriefCfg(await r.json());
-    } catch { /* mejor esfuerzo: ignorar */ }
+      const { ok, cuerpo, error } = await leerEscritura(r);
+      if (ok) setBriefCfg(cuerpo);
+      else setBriefError(`No se ha guardado: ${error}`);
+    } catch {
+      setBriefError(`${SIN_CONEXION}: no se ha guardado`);
+    }
     setBriefGuardando(false);
   }
 
@@ -4878,15 +5029,17 @@ export default function Dashboard() {
   async function guardarCambioDispositivo(cambios) {
     if (dispositivoGuardando) return;
     setDispositivoGuardando(true);
+    setDispositivoError("");
     try {
       const r = await apiFetch(`${API}/health/ajustes`, {
         method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(cambios),
       });
-      if (r.ok) {
-        const d = await r.json();
-        setHealthAjustes({ cambio_dispositivo: d.cambio_dispositivo, dispositivo: d.dispositivo });
-      }
-    } catch { /* mejor esfuerzo: ignorar */ }
+      const { ok, cuerpo: d, error } = await leerEscritura(r);
+      if (ok) setHealthAjustes({ cambio_dispositivo: d.cambio_dispositivo, dispositivo: d.dispositivo });
+      else setDispositivoError(`No se ha guardado: ${error}`);
+    } catch {
+      setDispositivoError(`${SIN_CONEXION}: no se ha guardado`);
+    }
     setDispositivoGuardando(false);
   }
 
@@ -4944,17 +5097,23 @@ export default function Dashboard() {
   // Aprobar aquí NO envía nada: quiere decir «visto y me vale». El correo lo mandas tú
   // desde Borradores, que es donde está el borrador. La lista se actualiza en local sin
   // recargar el parte entero: la decisión ya la ha confirmado el backend.
+  // Si no entra, se dice bajo el propio item y los botones se quedan: antes un fallo
+  // dejaba el item igual sin una palabra, y el segundo toque parecía el primero.
   async function decidirItemNoche(id, accion) {
+    setNocheError(null);
     try {
       const r = await apiFetch(`${API}/noche/items/${id}/decidir`, {
         method: "POST", headers: jsonHeaders(), body: JSON.stringify({ accion }),
       });
-      if (!r.ok) return;
+      const { ok, error } = await leerEscritura(r);
+      if (!ok) { setNocheError({ id, texto: error }); return; }
       setParteNoche(previo => previo && ({
         ...previo,
         items: (previo.items || []).map(i => (i.id === id ? { ...i, estado: accion } : i)),
       }));
-    } catch { /* mejor esfuerzo: el parte sigue ahí y se puede reintentar */ }
+    } catch {
+      setNocheError({ id, texto: `${SIN_CONEXION}: no se ha guardado` });
+    }
   }
 
   // ── Alarmas de respaldo ────────────────────────────────────────────────────
@@ -5027,40 +5186,49 @@ export default function Dashboard() {
     }
   }
 
-  async function borrarAlarma(id) {
+  // Toda acción sobre una alarma termina releyendo, que es lo que dice cómo ha quedado
+  // de verdad. Pero releer no basta: con «Estoy despierto» fallando, la alarma seguía
+  // sonando en pantalla sin una palabra de por qué. Si el backend no la confirma, se dice
+  // en el widget. Devuelve si entró.
+  async function accionAlarma(ruta, metodo, queNoSeHizo) {
+    setAlarmaError("");
+    let ok = false;
     try {
-      await apiFetch(`${API}/alarmas/${id}`, { method: "DELETE", headers: authHeaders() });
-    } catch { /* si falla, la recarga de abajo lo deja como esté de verdad */ }
+      const r = await apiFetch(`${API}/alarmas${ruta}`, { method: metodo, headers: authHeaders() });
+      const leido = await leerEscritura(r);
+      ok = leido.ok;
+      if (!ok) setAlarmaError(`${queNoSeHizo}: ${leido.error}`);
+    } catch {
+      setAlarmaError(`${SIN_CONEXION}. ${queNoSeHizo}.`);
+    }
+    await loadAlarmas();
+    return ok;
+  }
+
+  // Se llega aquí desde el segundo toque del ✕ («¿Quitar?»): quitar la alarma de mañana
+  // por un roce con el dedo es justo lo que una alarma de respaldo no se puede permitir.
+  async function borrarAlarma(id) {
+    const ok = await accionAlarma(`/${id}`, "DELETE", "No se ha quitado la alarma");
     // Si la que se quita es la que se estaba editando, el formulario se vacía: guardar
     // después habría intentado editar una alarma que ya no está.
-    setAlarmaForm(f => (f.editando === id ? ALARMA_FORM_VACIO : f));
-    await loadAlarmas();
+    if (ok) setAlarmaForm(f => (f.editando === id ? ALARMA_FORM_VACIO : f));
   }
 
   // «Estoy reventado, déjame dormir»: la próxima mañana no suena nada y las semanales
   // vuelven la vez siguiente. Se puede deshacer, que es por lo que no pide confirmación.
-  async function dejameDormir(deshacer) {
-    try {
-      await apiFetch(`${API}/alarmas/dejame-dormir${deshacer ? "/deshacer" : ""}`,
-                     { method: "POST", headers: authHeaders() });
-    } catch { /* idem: la recarga dice cómo ha quedado */ }
-    await loadAlarmas();
+  function dejameDormir(deshacer) {
+    return accionAlarma(`/dejame-dormir${deshacer ? "/deshacer" : ""}`, "POST",
+                        deshacer ? "No se ha deshecho «Déjame dormir»" : "No se ha puesto «Déjame dormir»");
   }
 
   // El mismo botón que trae la notificación del móvil, para cuando la tienes delante.
-  async function confirmarDespierto(id) {
-    try {
-      await apiFetch(`${API}/alarmas/${id}/despierto`, { method: "POST", headers: authHeaders() });
-    } catch { /* idem */ }
-    await loadAlarmas();
+  function confirmarDespierto(id) {
+    return accionAlarma(`/${id}/despierto`, "POST", "No se ha callado: sigue sonando");
   }
 
   // «5 min más»: el segundo botón de la notificación, también aquí.
-  async function posponerAlarma(id) {
-    try {
-      await apiFetch(`${API}/alarmas/${id}/posponer`, { method: "POST", headers: authHeaders() });
-    } catch { /* idem */ }
-    await loadAlarmas();
+  function posponerAlarma(id) {
+    return accionAlarma(`/${id}/posponer`, "POST", "No se ha pospuesto");
   }
 
   // ── Casa: el mando ─────────────────────────────────────────────────────────
@@ -6046,7 +6214,21 @@ export default function Dashboard() {
     fija:  { ...s.card, height: "100%", overflowY: "auto" },
   }), []);
 
+  // Cada widget va dentro de su `WidgetProtegido`, y su cuerpo (`pintarWidget`) se ejecuta
+  // dentro de él a través de `Pintar`: así una excepción en un widget se queda en su
+  // tarjeta en vez de desmontar el dashboard. Todos los sitios que pintan widgets (modo
+  // completo, modo simple, el modal de salud) pasan por aquí.
   function renderWidget(id, cfg = {}) {
+    const cardStyle = typeof cfg.height === "number" ? estilosTarjeta.fija : estilosTarjeta.libre;
+    const titulo = ALL_DEFAULT_WIDGETS.find(w => w.id === id)?.label || id;
+    return (
+      <WidgetProtegido key={id} id={id} titulo={titulo} estilo={cardStyle}>
+        <Pintar render={() => pintarWidget(id, cfg)} />
+      </WidgetProtegido>
+    );
+  }
+
+  function pintarWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
     const cardStyle = fixedH ? estilosTarjeta.fija : estilosTarjeta.libre;
 
@@ -6060,19 +6242,7 @@ export default function Dashboard() {
       return (
         <div style={cardStyle} data-card={id} key={id}>
           <div style={s.sectionLabel}>{titulo}</div>
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>
-            No se han podido leer los datos de salud.{" "}
-            <button
-              onClick={reintentarSalud}
-              aria-label={`Reintentar leer ${que}`}
-              style={{
-                background: "none", border: "none", padding: 0, font: "inherit",
-                color: "var(--accent)", cursor: "pointer",
-              }}
-            >
-              Reintentar
-            </button>
-          </div>
+          <FalloLectura texto="No se han podido leer los datos de salud." que={que} onReintentar={reintentarSalud} />
         </div>
       );
     }
@@ -6121,18 +6291,8 @@ export default function Dashboard() {
               </button>
             </div>
           ) : calendarError ? (
-            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
-              {calendarError}.{" "}
-              <button
-                onClick={loadEvents}
-                style={{
-                  background: "none", border: "none", padding: 0, font: "inherit",
-                  color: "var(--accent)", cursor: "pointer",
-                }}
-              >
-                Reintentar
-              </button>
-            </div>
+            <FalloLectura texto={`${calendarError}.`} que="el calendario" onReintentar={loadEvents}
+              estilo={{ padding: "8px 0" }} />
           ) : todayEvents.length === 0 && todayClasses.length === 0 ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Sin eventos hoy</div>
           ) : (
@@ -6206,7 +6366,21 @@ export default function Dashboard() {
             }}>+ Evento</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-            {upcomingEvents.length === 0 ? (
+            {/* «Sin eventos próximos» solo cuando se SABE: sin Outlook o con el
+                calendario caído, la lista vacía no dice nada de tu semana. */}
+            {loading ? (
+              <div style={{ color: "var(--muted2)", fontSize: 13 }}>Cargando eventos…</div>
+            ) : authNeeded ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                Outlook no está conectado: no sé qué tienes.{" "}
+                <button onClick={conectarOutlook} style={{
+                  background: "none", border: "none", padding: 0, font: "inherit",
+                  color: "var(--accent)", cursor: "pointer",
+                }}>Conectar Outlook</button>
+              </div>
+            ) : calendarError ? (
+              <FalloLectura texto={`${calendarError}.`} que="los próximos eventos" onReintentar={loadEvents} />
+            ) : upcomingEvents.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin eventos próximos</div>
             ) : upcomingEvents.map((ev, i) => (
               <div key={i} style={{ ...s.eventRow, flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -6229,7 +6403,24 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="entregas">
           <div style={s.sectionLabel}>Entregas pendientes</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-            {entregas.length === 0 ? (
+            {/* Salen de los DOS calendarios: si falla cualquiera, «sin entregas» no se
+                puede afirmar. Lo que sí se leyó se sigue enseñando, con la nota debajo. */}
+            {loading ? (
+              <div style={{ color: "var(--muted2)", fontSize: 13 }}>Cargando entregas…</div>
+            ) : authNeeded && entregas.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                Outlook no está conectado: no sé qué entregas tienes.{" "}
+                <button onClick={conectarOutlook} style={{
+                  background: "none", border: "none", padding: 0, font: "inherit",
+                  color: "var(--accent)", cursor: "pointer",
+                }}>Conectar Outlook</button>
+              </div>
+            ) : calendarError && entregas.length === 0 ? (
+              <FalloLectura texto={`${calendarError}.`} que="las entregas" onReintentar={reintentarEntregas} />
+            ) : clasesFallo && entregas.length === 0 ? (
+              <FalloLectura texto="No se han podido leer las clases: puede haber entregas que no veo."
+                que="las entregas" onReintentar={reintentarEntregas} />
+            ) : entregas.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>{`Sin entregas con ${ENTREGAS_MARKER} en el título`}</div>
             ) : entregas.map((e, i) => {
               const color = urgencyColor(e.days);
@@ -6247,6 +6438,11 @@ export default function Dashboard() {
                 </div>
               );
             })}
+            {entregas.length > 0 && !loading && (authNeeded || calendarError || clasesFallo) && (
+              <FalloLectura texto={authNeeded ? "Outlook no está conectado: puede faltar alguna."
+                                              : "Falta un calendario por leer: puede faltar alguna."}
+                que="las entregas" onReintentar={reintentarEntregas} estilo={{ fontSize: 12 }} />
+            )}
           </div>
         </div>
       );
@@ -6977,6 +7173,7 @@ export default function Dashboard() {
               ✎ Escribir idea
             </button>
           </div>
+          <AvisoEscritura texto={grabarError} />
         </div>
         );
       }
@@ -7059,6 +7256,7 @@ export default function Dashboard() {
                             {item.estado === "aprobado" ? "Visto" : "Descartado"}
                           </div>
                         )}
+                        {nocheError?.id === item.id && <AvisoEscritura texto={nocheError.texto} />}
                       </div>
                     ))}
                   </div>
@@ -7108,6 +7306,8 @@ export default function Dashboard() {
                 </div>
               </div>
             )}
+
+            <AvisoEscritura texto={alarmaError} estilo={{ marginTop: 10 }} />
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
               {alarmas === null && !alarmasError && (
@@ -7163,10 +7363,18 @@ export default function Dashboard() {
                       {alarmaForm.editando === a.id ? "editándola abajo" : alarmaEstadoTexto(a)}
                     </div>
                   </div>
-                  <span title="Editar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 2px", flexShrink: 0 }}
+                  <span title="Editar" style={TOQUE_ALARMA}
                     {...comoBoton(() => editarAlarma(a), { etiqueta: "Editar alarma" })}>✎</span>
-                  <span title="Quitar" style={{ fontSize: 12, color: "var(--muted2)", cursor: "pointer", padding: "0 4px", flexShrink: 0 }}
-                    {...comoBoton(() => borrarAlarma(a.id), { etiqueta: "Quitar alarma" })}>✕</span>
+                  {/* Dos toques, como el borrado de ideas: el primero arma «¿Quitar?» y el
+                      segundo quita. Antes era un ✕ de 12 px que quitaba al primer roce. */}
+                  {borrandoAlarma === a.id ? (
+                    <span title="Quitar" style={{ ...TOQUE_ALARMA, color: "#d4645a", fontSize: 12, whiteSpace: "nowrap" }}
+                      {...comoBoton(e => { e.stopPropagation(); setBorrandoAlarma(null); borrarAlarma(a.id); },
+                                    { etiqueta: "Confirmar quitar alarma" })}>¿Quitar?</span>
+                  ) : (
+                    <span title="Quitar" style={TOQUE_ALARMA}
+                      {...comoBoton(e => { e.stopPropagation(); setBorrandoAlarma(a.id); }, { etiqueta: "Quitar alarma" })}>✕</span>
+                  )}
                 </div>
               ))}
             </div>
@@ -7751,10 +7959,17 @@ export default function Dashboard() {
       );
       case "weather": {
         if (!weather) {
+          // Sin dato: o todavía no ha llegado (la geolocalización va antes) o no contestó.
+          // Son cosas distintas y la segunda se reintenta.
           return (
             <div style={cardStyle} data-card={id} key="weather">
               <div style={s.sectionLabel}>Clima</div>
-              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>Sin datos de clima</div>
+              {weatherFallo ? (
+                <FalloLectura texto="No se ha podido consultar el clima." que="el clima"
+                  onReintentar={() => setWeatherIntento(n => n + 1)} estilo={{ marginTop: 4 }} />
+              ) : (
+                <div style={{ color: "var(--muted2)", fontSize: 13, marginTop: 4 }}>Cargando el clima…</div>
+              )}
             </div>
           );
         }
@@ -8476,6 +8691,7 @@ export default function Dashboard() {
                     >
                       {sleepExcluding === latestDisplay.date ? "…" : latestExcluded ? "Restaurar noche" : "Anular noche"}
                     </button>
+                    <AvisoEscritura texto={sleepExcluirError} estilo={{ marginTop: 4 }} />
                   </div>
                 )}
                 {latestDisplay && (ldd != null || lrd != null || lcd != null) && !latestExcluded && (
@@ -10073,6 +10289,7 @@ export default function Dashboard() {
                 </div>
                 </>
               )}
+              <AvisoEscritura texto={dispositivoError} estilo={{ marginTop: 0, marginBottom: 8 }} />
               <div style={{ fontSize: 11, color: "var(--muted2)", lineHeight: 1.5 }}>
                 Las puntuaciones comparan cada día contra tu propia historia (HRV, respiración, FC en reposo).
                 Marcar el cambio evita que la referencia se haga con datos del aparato anterior, que mide distinto.
@@ -10084,8 +10301,9 @@ export default function Dashboard() {
             <div style={{ borderTop: "0.5px solid var(--border)", marginTop: 16, paddingTop: 16 }}>
               <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "var(--muted2)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 12 }}>Notificaciones</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <button onClick={() => {
-                  if (Notification.permission === "default") {
+                <button disabled={permisoNotificaciones() === "no_hay"} onClick={() => {
+                  const permiso = permisoNotificaciones();
+                  if (permiso === "default") {
                     Notification.requestPermission().then(perm => {
                       if (perm === "granted") {
                         localStorage.setItem("la_notifications", "true");
@@ -10095,7 +10313,7 @@ export default function Dashboard() {
                         setNotificationsEnabled(false);
                       }
                     });
-                  } else if (Notification.permission === "granted") {
+                  } else if (permiso === "granted") {
                     localStorage.setItem("la_notifications", "false");
                     setNotificationsEnabled(false);
                   }
@@ -10110,7 +10328,13 @@ export default function Dashboard() {
                   {notificationsEnabled ? "Activadas" : "Desactivadas"}
                 </button>
                 <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                  {Notification.permission === "granted" ? "Evento en 15 min, job completado" : Notification.permission === "denied" ? "Permisos denegados" : "Pulsa para solicitar permiso"}
+                  {{
+                    granted: "Evento en 15 min, job completado",
+                    denied:  "Permisos denegados",
+                    default: "Pulsa para solicitar permiso",
+                    // Safari en el iPhone solo tiene notificaciones con la app instalada.
+                    no_hay:  "Este navegador no tiene notificaciones (en el iPhone, solo con la app en la pantalla de inicio)",
+                  }[permisoNotificaciones()]}
                 </span>
               </div>
             </div>
@@ -10160,6 +10384,7 @@ export default function Dashboard() {
               <div style={{ fontSize: 11, color: "var(--muted2)", marginTop: 6 }}>
                 Último día sin resumen, incluido. Después vuelve solo.
               </div>
+              <AvisoEscritura texto={briefError} />
             </div>
 
             {/* ── Estado del sistema ── */}

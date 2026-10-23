@@ -25,6 +25,7 @@ import {
   repartoPatrimonio, rescateNotaDeVoz,
   RANGOS_CARTERA, rangosDisponibles, recortarSerie, repartoRango, mayorCaida, distanciaMaximo,
   tramosRelleno, escalaGrafica,
+  textoErrorMicro, permisoNotificaciones,
 } from "../../src/lib/helpers";
 import {
   tramo, TRAMOS_SUENO, TRAMOS_BIENESTAR, TRAMOS_PASOS,
@@ -3193,5 +3194,37 @@ describe("bienestar: días, no registros", () => {
     const muertas = metricasMuertas({ step_count: pasos }, { hoy: HOY });
     expect(muertas.has("💪 Entreno")).toBe(false);
     expect(muertas.has("🧍 De pie")).toBe(true);
+  });
+});
+
+describe("textoErrorMicro", () => {
+  const error = name => Object.assign(new Error("x"), { name });
+
+  test("cada fallo de getUserMedia dice qué hacer", () => {
+    expect(textoErrorMicro(error("NotAllowedError"))).toMatch(/Sin permiso del micrófono/);
+    expect(textoErrorMicro(error("SecurityError"))).toMatch(/Sin permiso del micrófono/);
+    expect(textoErrorMicro(error("NotFoundError"))).toBe("No hay ningún micrófono conectado");
+    expect(textoErrorMicro(error("NotReadableError"))).toMatch(/ocupado/);
+  });
+
+  test("sin soporte manda a escribir, y lo desconocido no se calla", () => {
+    expect(textoErrorMicro("sin_soporte")).toMatch(/escribe la idea/);
+    expect(textoErrorMicro(error("RaroError"))).toBe("No se ha podido abrir el micrófono");
+    expect(textoErrorMicro(undefined)).toBe("No se ha podido abrir el micrófono");
+  });
+});
+
+describe("permisoNotificaciones", () => {
+  test("lee el permiso de la API que le den", () => {
+    expect(permisoNotificaciones({ permission: "granted" })).toBe("granted");
+    expect(permisoNotificaciones({ permission: "denied" })).toBe("denied");
+    expect(permisoNotificaciones({ permission: "default" })).toBe("default");
+  });
+
+  test("sin la API (Safari fuera de la PWA) no lanza: dice que no hay", () => {
+    expect(permisoNotificaciones(null)).toBe("no_hay");
+    expect(permisoNotificaciones({})).toBe("no_hay");
+    const quePeta = { get permission() { throw new Error("no"); } };
+    expect(permisoNotificaciones(quePeta)).toBe("no_hay");
   });
 });

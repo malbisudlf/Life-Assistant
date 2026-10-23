@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   detalleDeError, textoErrorApi, mensajeErrorLogin, leerCalendario, borradoConfirmado,
+  leerEscritura,
 } from "../../src/lib/respuestas.js";
 import { eventoDelDetalle } from "../../src/lib/helpers.js";
 import { diaTrasCambioDeHoy } from "../../src/lib/lineaTiempo.js";
@@ -126,5 +127,38 @@ describe("historialTrasCorte", () => {
   it("sin nada dicho y sin turno cerrado, no toca el historial", () => {
     const antes = [{ rol: "user", texto: "hola" }];
     expect(historialTrasCorte(antes, "  ", false)).toBe(antes);
+  });
+});
+
+describe("leerEscritura", () => {
+  const r = (cuerpo, status = 200) => ({
+    status, ok: status >= 200 && status < 300,
+    json: cuerpo instanceof Error ? async () => { throw cuerpo; } : async () => cuerpo,
+  });
+
+  it("un 2xx que no dice que no ha entrado, con su cuerpo", async () => {
+    expect(await leerEscritura(r({ activo: true }))).toEqual({ ok: true, cuerpo: { activo: true }, error: "" });
+  });
+
+  it("un 5xx dice lo que explique el backend", async () => {
+    const leido = await leerEscritura(r({ detail: "No se pudo guardar la decisión" }, 502));
+    expect(leido.ok).toBe(false);
+    expect(leido.error).toBe("No se pudo guardar la decisión");
+  });
+
+  it("un 422 de validación lo dice como datos no válidos", async () => {
+    const leido = await leerEscritura(r({ detail: [{ msg: "Value error, Hora inválida" }] }, 422));
+    expect(leido.error).toBe("Datos no válidos: Hora inválida");
+  });
+
+  it("un 200 con ok: false NO ha entrado, y se dice su motivo", async () => {
+    const leido = await leerEscritura(r({ ok: false, motivo: "esa alarma ya no estaba activa" }));
+    expect(leido).toMatchObject({ ok: false, error: "esa alarma ya no estaba activa" });
+    expect((await leerEscritura(r({ ok: false }))).error).toBe("El backend no lo ha confirmado");
+  });
+
+  it("un cuerpo que no es JSON no lanza: se queda en el código", async () => {
+    const leido = await leerEscritura(r(new SyntaxError("no es JSON"), 502));
+    expect(leido).toMatchObject({ ok: false, error: "El backend ha fallado (error 502)" });
   });
 });

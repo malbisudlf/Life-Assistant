@@ -315,7 +315,10 @@ nada por no tener el id. Sus casos están en `evals/casos.json`.
 `case "alarmas"` en `Dashboard.jsx`, columna izquierda. Poner hora, ver las puestas con su
 estado y quitarlas. Mientras una está sonando, los botones «Estoy despierto» y «5 min
 más» se comen el widget: es lo único que quieres de esa pantalla en ese momento. Con la
-alarma pospuesta queda solo «Estoy despierto», con la hora a la que vuelve. Se recarga solo cada
+alarma pospuesta queda solo «Estoy despierto», con la hora a la que vuelve. Quitar una va
+en dos toques (el ✕ pasa a «¿Quitar?»), con botones de 44 px, y lo que el backend no
+confirma —quitarla, callarla, posponerla, «Déjame dormir»— se dice encima de la lista en
+vez de recargar en silencio. Se recarga solo cada
 minuto mientras haya algo vivo (sin nada vivo no hay temporizador), porque una alarma que
 empieza a insistir tiene que verse moverse en una pantalla ya abierta.
 
