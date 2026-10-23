@@ -82,3 +82,23 @@ export function leerCalendario(data) {
 export function borradoConfirmado(status, cuerpo) {
   return status >= 200 && status < 300 && cuerpo?.ok !== false;
 }
+
+/** Lo que se dice cuando la petición ni siquiera llegó (sin red, backend desplegándose,
+ *  túnel caído): `apiFetch` lanza y no hay respuesta que leer. */
+export const SIN_CONEXION = "Sin conexión con el backend";
+
+/** Lo que ha dicho el backend a una ESCRITURA: `{ ok, cuerpo, error }`, con `error` ya
+ *  en frase si no ha entrado.
+ *
+ *  Es el `borradoConfirmado` de cualquier escritura. `apiFetch` no lanza con un 4xx ni
+ *  con un 5xx, así que un `try/catch` solo se entera de que no había red: lo demás hay
+ *  que leerlo aquí. Y hay escrituras que responden 200 diciendo que no (`{ok: false,
+ *  motivo}`, como quitar una alarma que ya no estaba activa): ahí también se dice por
+ *  qué, con el motivo del backend si lo trae. */
+export async function leerEscritura(r) {
+  const cuerpo = await r.json().catch(() => ({}));
+  if (borradoConfirmado(r.status, cuerpo)) return { ok: true, cuerpo, error: "" };
+  if (!r.ok) return { ok: false, cuerpo, error: textoErrorApi(r.status, cuerpo) };
+  const motivo = typeof cuerpo?.motivo === "string" ? cuerpo.motivo.trim() : "";
+  return { ok: false, cuerpo, error: motivo || detalleDeError(cuerpo) || "El backend no lo ha confirmado" };
+}

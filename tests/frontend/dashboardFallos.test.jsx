@@ -58,7 +58,8 @@ describe("calendario", () => {
       "/calendar/events": respuesta({ error: "No se pudo consultar el calendario de Outlook" }),
     });
     render(<Dashboard />);
-    expect(await screen.findByText("No se pudo consultar el calendario de Outlook.")).toBeInTheDocument();
+    // Lo dicen «Hoy», «Próximos eventos» y «Entregas»: los tres viven del mismo calendario.
+    expect((await screen.findAllByText("No se pudo consultar el calendario de Outlook.")).length).toBeGreaterThan(0);
     expect(screen.queryByText("→ Conectar Outlook")).toBeNull();
   });
 
@@ -81,7 +82,7 @@ describe("calendario", () => {
     });
     const user = userEvent.setup();
     render(<Dashboard />);
-    await screen.findByText("No se ha podido cargar el calendario.");
+    await screen.findAllByText("No se ha podido cargar el calendario.");
     const hoy = document.querySelector('[data-card="timeline"]');
     await user.click(within(hoy).getByText("Reintentar"));
     expect((await screen.findAllByText("Dentista")).length).toBeGreaterThan(0);

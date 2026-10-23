@@ -49,8 +49,9 @@ export function formatShortDate(dateStr) {
   const [, m, d] = dateStr.split("-").map(Number);
   // No toda fecha que llega aquí viene garantizada como "YYYY-MM-DD" (p.ej. la serie de
   // Indexa Capital): un mes fuera de 1-12 rompía toda la página, porque MONTHS_ES[m-1]
-  // salía undefined y .slice petaba sin que nada por encima lo capturara (no hay
-  // ErrorBoundary). Mejor "—" que tirar el árbol de React entero.
+  // salía undefined y .slice petaba sin que nada por encima lo capturara (entonces no
+  // había ErrorBoundary; hoy lo hay por widget, pero sigue siendo mejor "—" que un widget
+  // caído).
   if (!Number.isInteger(m) || m < 1 || m > 12 || !Number.isFinite(d)) return "—";
   return `${d} ${MONTHS_ES[m - 1].slice(0, 3)}`;
 }
@@ -3168,4 +3169,39 @@ export function rescateNotaDeVoz(data) {
     texto: "",
     error: motivo ? `No se pudo guardar la nota de voz (${motivo})` : "No se pudo guardar la nota de voz",
   };
+}
+
+/** Por qué no se ha podido empezar a grabar una nota de voz, en una frase que diga qué
+ *  hacer. `error` es lo que lanzó `getUserMedia` (un `DOMException`, que se distingue por
+ *  `name`), o `"sin_soporte"` si el navegador no tiene `mediaDevices` o `MediaRecorder`
+ *  (Safari antiguo, una página sin https). Antes no había `try`: el botón no hacía nada
+ *  y la promesa rechazada se perdía en la consola. */
+export function textoErrorMicro(error) {
+  if (error === "sin_soporte") return "Este navegador no deja grabar audio: escribe la idea";
+  switch (error?.name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Sin permiso del micrófono: dalo en los ajustes del navegador y vuelve a probar";
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return "No hay ningún micrófono conectado";
+    case "NotReadableError":
+    case "AbortError":
+      return "El micrófono está ocupado por otra aplicación";
+    default:
+      return "No se ha podido abrir el micrófono";
+  }
+}
+
+/** El permiso de notificaciones del navegador: `"granted"`, `"denied"`, `"default"` o
+ *  `"no_hay"` si el navegador no tiene la API. Safari en el iPhone solo la tiene con la
+ *  PWA instalada: fuera de ella `Notification` ni siquiera existe, y leer
+ *  `Notification.permission` en el render tiraba el panel ⚙ (y con él la página). */
+export function permisoNotificaciones(api = globalThis.Notification) {
+  try {
+    const permiso = api?.permission;
+    return ["granted", "denied", "default"].includes(permiso) ? permiso : "no_hay";
+  } catch {
+    return "no_hay";
+  }
 }

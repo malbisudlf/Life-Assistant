@@ -519,6 +519,27 @@
   con la fusión habría mezclado las dos en la gráfica; se separó. Moraleja: **«como ya
   hace X» en un documento es una afirmación sobre X, y se comprueba como cualquier otra.**
 
+- **El dashboard seguía diciendo «no hay nada» y callándose las escrituras** (octubre de
+  2026, bloque 8). La revisión de septiembre había corregido una decena de sitios, y el
+  mismo vicio seguía en los que no miró. En lectura: «Próximos eventos» y «Entregas»
+  decían «Sin eventos» / «Sin entregas» con Outlook sin conectar o el calendario caído
+  (solo «Hoy» lo distinguía), un 5xx con `{detail}` de `/calendar/events` se leía como
+  agenda vacía, y el clima decía «Sin datos de clima» lo mismo cargando que fallando. En
+  escritura: «Visto»/«Descartar» del parte, el interruptor y la pausa del resumen, el
+  cambio de dispositivo, «Estoy despierto» y «Anular noche» fallaban sin una palabra
+  (este último, sin `catch`); quitar una alarma era un ✕ de 12 px que quitaba al primer
+  roce y no miraba la respuesta; crear un evento daba por bueno un 422 y cerraba el
+  formulario; «● Grabar idea» no tenía `try` alrededor de `getUserMedia`; y leer
+  `Notification.permission` en el render de ⚙ tiraba la página entera en Safari fuera de
+  la PWA, porque ni había `ErrorBoundary`.
+  - Arreglo: `FalloLectura`, `leerEscritura` + `AvisoEscritura` y un `WidgetProtegido`
+    por widget (ver «Vacío no es error» en `docs/FRONTEND.md`), con tests de componente
+    en `tests/frontend/vacioYEscrituras.test.jsx`.
+  - Moraleja: **arreglar un vicio sitio a sitio deja vivo el vicio en los sitios que no
+    se miraron.** Lo que lo cierra es una pieza común que haga el camino bueno el más
+    corto: un widget nuevo que use `FalloLectura` y `leerEscritura` no puede olvidarse
+    del fallo, y uno que reviente ya no se lleva el resto.
+
 - **Un 502 de `/health/metrics` era «Sin datos aún» en siete widgets** (octubre de 2026).
   La carga no miraba `r.ok` —`apiFetch` no lanza con un 5xx—, así que el `{detail}` del
   error se leía como respuesta buena y se guardaba `{}`. Con Supabase caído, el dashboard

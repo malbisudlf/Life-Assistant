@@ -583,6 +583,11 @@ diga cuál se cayó.
 **Nota.** Esto no contradice la regla de «no crees componentes en ficheros nuevos por
 organizar»: no es organización, es una capacidad que no existe.
 
+**Hecho** el 2026-10-23 (bloque 8 de `docs/PLAN_2026_10.md`): `WidgetProtegido` en
+`Dashboard.jsx`. Envolver el `switch` no bastaba tal cual —un boundary solo atrapa lo que
+lanzan sus hijos al pintarse—, así que el switch se ejecuta dentro de él a través de un
+componente `Pintar`. El fallo pinta el `data-card` del widget; no se manda al registro.
+
 ### 6.5 Cerrar el bucle del sueño: lo que sí controlas ●●
 
 **Qué.** Registrar tres o cuatro cosas que hoy no se miden y que dependen de decisiones

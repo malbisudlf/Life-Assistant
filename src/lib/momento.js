@@ -238,7 +238,8 @@ function _momento({
 }
 
 /** La cabecera entera: `{ saludo, frase, tono, chips, titulo }`. Una cabecera no puede
- *  tumbar el dashboard (no hay ErrorBoundary): ante cualquier dato raro, solo el saludo. */
+ *  tumbar el dashboard (va en la cabecera, fuera del ErrorBoundary de cada widget): ante
+ *  cualquier dato raro, solo el saludo. */
 export function momentoDelDia(entrada) {
   try {
     return _momento(entrada || {});

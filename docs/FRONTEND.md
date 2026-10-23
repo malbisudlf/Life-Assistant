@@ -30,8 +30,38 @@ JWT en `localStorage` (`la_token`, 30 días) → cabecera `Bearer` en todas las 
   los borrados, `borradoConfirmado()`, que también mira el `{ok: false}` con que
   respondían 200 antes de pasar a 502). Qué frase
   merece cada fallo está en `src/lib/respuestas.js` (`textoErrorApi`, `mensajeErrorLogin`,
-  `leerCalendario`). Un fallo al cargar un widget se pinta como fallo, con su «Reintentar»,
-  nunca como lista vacía (ver `docs/BUGS_HISTORICOS.md`).
+  `leerCalendario`, `leerEscritura`). Un fallo al cargar un widget se pinta como fallo, con
+  su «Reintentar», nunca como lista vacía (ver `docs/BUGS_HISTORICOS.md` y «Vacío no es
+  error» aquí abajo).
+- **Vacío no es error, y las escrituras dicen si entraron** (octubre de 2026, bloque 8 de
+  `docs/PLAN_2026_10.md`). Tres piezas en `Dashboard.jsx`, a nivel de módulo, que es lo
+  que hay que usar al tocar un widget:
+  - **`FalloLectura`** es el «no lo sé» con su «Reintentar» (`que` nombra el botón:
+    «Reintentar leer el clima»). Salió del camino de `FALLO_SALUD` y lo usan salud, «Hoy»,
+    «Próximos eventos», «Entregas» y «Clima». **Una lista vacía solo se pinta cuando se
+    SABE que está vacía**: cargando, sin Outlook (`authNeeded`) o con el calendario caído
+    (`calendarError`), «Sin eventos próximos» era mentir. «Entregas» sale de los dos
+    calendarios, así que también mira `clasesFallo` (que ahora se reescribe en cada carga,
+    `loadClases`); con entregas en pantalla y un calendario sin leer, las enseña con una
+    nota de que puede faltar alguna. `loadEvents` y `loadClases` miran `r.ok`: un 5xx con
+    `{detail}` no traía ni `error` ni `events` y salía como agenda vacía. El clima apunta
+    su fallo aparte (`weatherFallo`) y distingue «Cargando el clima…» de «No se ha podido
+    consultar el clima»; su «Reintentar» sube `weatherIntento`, que relanza el efecto.
+  - **`leerEscritura(r)`** (`respuestas.js`) lee la respuesta de cualquier escritura:
+    `{ ok, cuerpo, error }`, con el `{ok: false, motivo}` de un 200 tratado como lo que es.
+    **`AvisoEscritura`** pinta ese `error` junto al botón que lo lanzó. Lo usan «Visto» y
+    «Descartar» del parte, el interruptor y la pausa del resumen diario, el cambio de
+    dispositivo, «Anular noche», «Estoy despierto», «5 min más», «Déjame dormir» y quitar
+    una alarma (las de alarmas pasan todas por `accionAlarma`). Sin red, `SIN_CONEXION`.
+    Crear o editar un evento mira `r.ok` además de `data.error`: un 422 cerraba el
+    formulario como si el evento se hubiera creado.
+  - **`WidgetProtegido`** es el `ErrorBoundary` de cada widget: `renderWidget` envuelve en
+    él a `pintarWidget` (el switch de siempre) a través de `Pintar`. Hace falta `Pintar`
+    porque un boundary atrapa lo que lanzan sus HIJOS al pintarse, y el switch corre en el
+    render de `Dashboard`: llamarlo directamente dentro del boundary no protegería nada.
+    Una excepción deja la tarjeta con «“X” ha fallado al pintarse» y un «Reintentar»; el
+    resto del dashboard sigue. La cabecera del momento no va dentro (tiene su propio
+    `try`).
 - **`authHeaders()` / `jsonHeaders()`**: única forma de construir las cabeceras de
   una llamada autenticada (la segunda añade `Content-Type: application/json`). No
   vuelvas a escribir `localStorage.getItem("la_token")` suelto en un handler — por
@@ -131,8 +161,13 @@ Qué hace cada uno:
    naranja uni, dorado el resto). Son los mismos tonos que los entrenos y las clases en el
    resto del dashboard. Lo pasado se apaga igual que antes.
 2. **Clima (`weather`)** — Open-Meteo, con la geolocalización del navegador si la hay.
+   Mientras llega dice «Cargando el clima…»; si falla, «No se ha podido consultar el clima»
+   con «Reintentar» (antes las dos cosas eran «Sin datos de clima»).
 3. **Próximos eventos (`upcoming`)** — próximos 7 días (máx. 5). "+ Evento" abre un modal
-   para crear un evento en Outlook vía Graph.
+   para crear un evento en Outlook vía Graph. Sin Outlook dice que no está conectado (con
+   el botón de conectar) y con el calendario caído, el fallo con «Reintentar»: «Sin eventos
+   próximos» solo cuando se ha podido leer. Si el backend rechaza el evento (un 422 de
+   validación, un 5xx), el modal se queda abierto con el motivo.
    - **Edición**: el icono ✎ junto a cada evento (y junto al evento activo del timeline)
      abre el mismo modal precargado (`openEditEvent`), en modo edición. El selector de
      calendario se oculta al editar (el `PATCH` no soporta mover de calendario).
@@ -151,6 +186,9 @@ Qué hace cada uno:
 4. **Entregas (`entregas`)** — eventos con el marcador `VITE_ENTREGAS_MARKER` (📚) en el
    título, buscados en **ambos** calendarios (`allEvents` + `classEvents`). Incluye los
    de hoy y los futuros.
+   Como mira los dos calendarios, «Sin entregas» exige haber leído los dos: sin Outlook,
+   con el calendario caído o con las clases sin leer, lo dice (y con entregas en pantalla,
+   una nota de que puede faltar alguna).
    Desde octubre de 2026 esos eventos los crea la sincronización con Moodle
    (`docs/MOODLE.md`), y al entregar pasan de 📚 a ✅, que es lo que los saca del widget:
    el widget no sabe nada de Moodle, y así tiene que seguir.
@@ -163,7 +201,9 @@ Qué hace cada uno:
 6. **Entrenamiento (`training`)** — sesiones desde el último cobro, euros pendientes,
    formulario de añadir sesión, botón de cobro.
 7. **Ideas (`ideas`)** — grabación de audio (Whisper) **o** texto escrito ("✎ Escribir
-   idea") → extracción con GPT-4o-mini → Supabase. Si la nota señala una cita, ofrece un
+   idea") → extracción con GPT-4o-mini → Supabase. Si no se puede grabar (permiso del
+   micrófono denegado, sin micrófono, un navegador sin `MediaRecorder`), «● Grabar idea»
+   lo dice debajo (`textoErrorMicro`, helpers) en vez de no hacer nada. Si la nota señala una cita, ofrece un
    chip para crear el evento (nunca lo crea solo).
 
    Para que no sea una lista sin fondo, todo en el cliente con lo que ya devuelve
@@ -363,7 +403,11 @@ saber es distinto de saber que no llegó nada.
   su estado y quitarlas. Mientras una suena, el botón «Estoy despierto» se come el widget
   —es lo único que quieres de esa pantalla en ese momento— y se recarga solo cada minuto
   mientras haya algo vivo. La lógica pura (`alarmaEnPalabras`, `alarmaEstadoTexto`,
-  `alarmaSonando`) está en `helpers.js`; el resto, en `docs/ALARMAS.md`.
+  `alarmaSonando`) está en `helpers.js`; el resto, en `docs/ALARMAS.md`. **Quitar va en
+  dos toques**, como el borrado de ideas (el ✕ arma «¿Quitar?», que se desarma a los 4 s o
+  tocando fuera), y el ✕ y el ✎ miden 44 px (`TOQUE_ALARMA`): con 12 px, la alarma de
+  mañana estaba a un roce. Lo que el backend no confirma —quitarla, «Estoy despierto», «5
+  min más», «Déjame dormir»— se dice encima de la lista.
 - **`casa`** es el mando de la casa: una línea de estado (presencia y de dónde sale lo que se ve),
   una fila con las escenas y scripts (ocho como mucho) y una rejilla de fichas de los
   favoritos que se tocan para encender, apagar, abrir o bloquear. Pide
@@ -471,8 +515,12 @@ momento del día). `Escape` lo cierra; tiene `maxHeight: 90vh`
 - "Editar distribución →" — activa el modo edición del layout.
 - Ajustes de entrenamiento: precio/hora, sesiones por cobro, **días de entrenamiento**
   (selector L M X J V S D) e historial de sesiones.
+- **Notificaciones** — el permiso se lee con `permisoNotificaciones()` (helpers), nunca con
+  `Notification.permission` suelto: Safari en el iPhone fuera de la PWA no tiene
+  `Notification`, y leerlo en el render tiraba la página entera al abrir ⚙. Sin la API, el
+  botón se desactiva y lo dice.
 - **Resumen diario** — el interruptor del correo de la mañana ([Activado]/[Desactivado])
-  y la pausa con fecha. No va a `localStorage` como el resto de esta lista, y no puede
+  y la pausa con fecha. Si el PATCH no entra, se dice debajo. No va a `localStorage` como el resto de esta lista, y no puede
   ir: quien manda el correo es el backend, que no lo ve (`GET`/`PATCH /brief/ajustes`).
   El estado que se pinta es siempre el que devuelve el backend, nunca el que creíamos
   haber puesto — es él quien decide si una pausa sigue viva.
