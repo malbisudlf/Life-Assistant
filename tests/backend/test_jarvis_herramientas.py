@@ -247,3 +247,9 @@ class TestEnviarResumenHerramienta:
                                               "cuerpo del día")]
         # El mismo correo que sale cada mañana, con su JSON adjunto (#244).
         assert enviados[0][2][0] == "brief-2026-08-17.json"
+
+
+def test_despachar_sin_argumento_obligatorio_no_revienta():
+    import main
+    r = main._jarvis_despachar("cancelar_recordatorio", {})
+    assert "recordatorio_id" in r["error"]

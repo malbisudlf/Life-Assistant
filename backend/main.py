@@ -7172,6 +7172,27 @@ FUENTE_ATAJO       = "atajo"
 FUENTE_PRESENCIA   = "home_assistant"
 
 
+def _upsert_salud(url: str, filas: list):
+    """Upsert en bloque de métricas, a prueba de interbloqueos entre ingestas.
+
+    Dos ingestas a la vez (el Watch y el Atajo reenvían los mismos días) bloquean las
+    mismas filas en orden distinto y Postgres aborta una con «waits for ShareLock …
+    blocked by process» (40P01). Ordenar las filas hace que todas las ingestas las
+    bloqueen en el mismo orden, y lo que aun así se cruce se reintenta: el upsert es
+    idempotente, repetirlo es seguro.
+    """
+    filas = sorted(filas, key=lambda f: (f.get("persona") or "", f["metric_date"], f["metric_name"]))
+    for intento in range(3):
+        r = http.post(
+            url,
+            headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
+            json=filas,
+        )
+        if r.status_code < 300 or not ("40P01" in r.text or "ShareLock" in r.text) or intento == 2:
+            return r
+        time.sleep(0.3 * (intento + 1))
+
+
 def _guardar_metricas(agrupadas: dict, fuente: str = "", persona: str | None = None) -> int:
     """Aplica la regla de las acumulativas y escribe todo en un upsert en bloque.
 
@@ -7240,11 +7261,7 @@ def _guardar_metricas(agrupadas: dict, fuente: str = "", persona: str | None = N
     # merge-duplicates + on_conflict (ver HEALTH_UPSERT_URL): inserción y actualización
     # en una sola llamada, resueltas contra unique(metric_date, metric_name) — o contra
     # unique(persona, metric_date, metric_name) en la tabla de la familia.
-    r = http.post(
-        SALUD_FAMILIA_UPSERT_URL if persona else HEALTH_UPSERT_URL,
-        headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-        json=filas,
-    )
+    r = _upsert_salud(SALUD_FAMILIA_UPSERT_URL if persona else HEALTH_UPSERT_URL, filas)
     # Un fallo aquí es que no se ha guardado NADA del lote. Devolver 0 y seguir hacía
     # que el endpoint respondiera 200 {"ok": true}, así que el Watch y el Shortcut
     # daban la sincronización por buena mientras los datos se perdían en silencio.
@@ -7674,11 +7691,7 @@ def _health_ingest_simple_procesar(request: Request, raw: bytes):
         })
 
     if filas:
-        r = http.post(
-            HEALTH_UPSERT_URL,
-            headers={**supabase_headers(), "Prefer": "return=minimal,resolution=merge-duplicates"},
-            json=filas,
-        )
+        r = _upsert_salud(HEALTH_UPSERT_URL, filas)
         # Igual que en /health/ingest: si el upsert falla no se ha guardado nada, y
         # responder 200 {"ok": true} con el fallo escondido en `errors` es lo que hacía
         # que el Shortcut no diera ningún error mientras dejaba de sincronizar. El
@@ -29488,6 +29501,12 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
     # función envuelta (`credentials`, `days`...) y decidiría cosas que no le tocan.
     permitidos = set(herramienta["parametros"])
     limpios    = {k: v for k, v in (argumentos or {}).items() if k in permitidos}
+    # El modelo a veces llama sin un argumento obligatorio: eso es un fallo suyo y no de la
+    # herramienta, así que se le devuelve el motivo para que lo corrija, sin traceback.
+    faltan = [o for o in herramienta.get("obligatorios", []) if limpios.get(o) in (None, "")]
+    if faltan:
+        logger.warning("Jarvis: la herramienta %s se llamó sin %s", nombre, ", ".join(faltan))
+        return {"error": f"Falta el argumento obligatorio: {', '.join(faltan)}"}
     try:
         return herramienta["fn"](**limpios)
     except HTTPException as e:
