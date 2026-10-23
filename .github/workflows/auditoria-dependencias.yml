@@ -1,0 +1,115 @@
+name: Auditoría de dependencias
+
+# Cada lunes mira si alguna dependencia de PRODUCCIÓN tiene una vulnerabilidad conocida, y
+# solo si la hay te avisa al móvil (`POST /programado/roto` con `aviso: true`, el mismo
+# canal que la caducidad del dominio). Silencio cuando no hay nada que decir.
+#
+# Sin modelo de por medio, a propósito: `npm audit` y `pip-audit` ya traen el paquete, el
+# aviso y la versión que lo arregla. Lo único que añadía un modelo era decidir si llega a
+# producción, y eso lo decide `--omit=dev` en el frontend y que el backend se audite por su
+# `requirements.txt` fijado (lo que construye el `Dockerfile`). Se probó primero como
+# rutina de Claude Code y se cambió por esto el 2026-10-23: gastar tokens cada semana en
+# algo determinista no tenía sentido.
+#
+# Lo que NO mira: `agent/requirements.txt`, que no fija versiones (`>=`), así que auditarlo
+# solo diría qué tiene la última versión de cada paquete, no lo que corre en el PC.
+#
+# Si el propio workflow falla (no la auditoría: el workflow), avisa `programado-roto.yml`,
+# que lo tiene en su lista como todo lo que lleva `schedule:`.
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # lunes, 06:17 UTC (08:17 en verano y 07:17 en invierno en Madrid)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auditar:
+    name: Auditar y avisar si hace falta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # la del CI y la del backend/Dockerfile
+
+      # `npm audit` lee `package-lock.json`: no hace falta instalar nada. Sale con código
+      # distinto de cero cuando encuentra algo, y eso aquí no es un fallo del workflow.
+      - name: npm audit (producción)
+        run: npm audit --omit=dev --json > npm-audit.json || true
+
+      - name: pip-audit (backend)
+        run: |
+          python -m pip install --quiet pip-audit
+          pip-audit -r backend/requirements.txt --format json --output pip-audit.json || true
+
+      - name: Resumir y avisar
+        env:
+          BACKEND_URL:    ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN: ${{ secrets.REVISION_TOKEN }}
+          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Un fichero que falta o no es JSON es que la herramienta se rompió, no que esté
+          # todo bien: eso tiene que fallar en rojo para que avise programado-roto.
+          python3 - <<'PY' > resumen.txt
+          import json, sys
+
+          graves = []
+          with open("npm-audit.json") as f:
+              npm = json.load(f)
+          for nombre, v in (npm.get("vulnerabilities") or {}).items():
+              if v.get("severity") in ("high", "critical"):
+                  arreglo = v.get("fixAvailable")
+                  if isinstance(arreglo, dict):
+                      arreglo = f"{arreglo.get('name')}@{arreglo.get('version')}" + (" (major)" if arreglo.get("isSemVerMajor") else "")
+                  graves.append(f"npm {nombre} ({v['severity']}, arreglo: {arreglo or 'no hay'})")
+
+          with open("pip-audit.json") as f:
+              pip = json.load(f)
+          deps = pip.get("dependencies", []) if isinstance(pip, dict) else pip
+          # pip-audit no trae severidad: en el backend fijado, cualquier aviso conocido
+          # merece mirarse. Una línea por paquete, no por aviso (pypdf traía ocho, y alguno
+          # repetido por sus alias), con la versión más alta que los arregla todos.
+          def _clave(ver):
+              return tuple(int(p) if p.isdigit() else 0 for p in ver.split("."))
+          for d in deps:
+              ids = sorted({v["id"] for v in d.get("vulns", [])})
+              if not ids:
+                  continue
+              arreglos = [f for v in d["vulns"] for f in (v.get("fix_versions") or [])]
+              hasta = f"→ {max(arreglos, key=_clave)}" if arreglos else "sin arreglo"
+              graves.append(f"pip {d['name']} {d['version']} {hasta} ({len(ids)} avisos)")
+
+          print("\n".join(graves))
+          PY
+
+          if [ ! -s resumen.txt ]; then
+            echo "Nada grave en producción." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          { echo "## Vulnerabilidades en producción"; sed 's/^/- /' resumen.txt; } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN." >&2
+            exit 1
+          fi
+
+          N=$(wc -l < resumen.txt | tr -d ' ')
+          DETALLE="$N paquetes en producción: $(sed 's/^\(npm\|pip\) //' resumen.txt | paste -sd ';' -)"
+          CUERPO=$(jq -n --arg d "${DETALLE:0:200}" --arg u "$RUN_URL" \
+            '{workflow: "Auditoría de dependencias", aviso: true, detalle: $d, url: $u}')
+
+          curl --fail-with-body -sS -X POST "$BACKEND_URL/programado/roto" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 60 --retry 3 --retry-delay 10 --retry-connrefused \
+            -d "$CUERPO"

@@ -13610,6 +13610,7 @@ PROGRAMADOS = {
     "copia-supabase.yml":    ("Copia de Supabase",                 7 * 24),
     "resumen-diario.yml":    ("Resumen diario (red de seguridad)", 24),
     "revision-nocturna.yml": ("Revisión nocturna del código",      24),
+    "auditoria-dependencias.yml": ("Auditoría de dependencias",    7 * 24),
 }
 # El margen antes de dar un cron por parado no vive aquí sino en el frontend
 # (`MARGEN_PROGRAMADO`, `src/lib/dev.js`): es quien decide el color de la fila, y el

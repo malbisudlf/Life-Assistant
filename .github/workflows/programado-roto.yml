@@ -27,6 +27,7 @@ on:
       - Resumen diario por correo (red de seguridad)
       - Revisión nocturna del código
       - Evals de Jarvis          # hoy solo se lanza a mano, pero si falla tampoco lo ve nadie
+      - Auditoría de dependencias
     types: [completed]
 
 # Un aviso por run. Si dos programados se rompen a la vez, son dos avisos distintos y
