@@ -1662,6 +1662,18 @@ const ALL_DEFAULT_WIDGETS = [
   { id: "noche",             label: "Anoche",            visible: true,  column: "left"  },
 ];
 
+// Los widgets que viven de /health/metrics: [título de la tarjeta, de qué habla el
+// «Reintentar»]. Si esa carga falla, todos se pintan como fallo (ver `renderWidget`).
+const FALLO_SALUD = {
+  health_wellness: ["Bienestar",          "el bienestar"],
+  health_sleep:    ["Sueño",              "el sueño"],
+  health_heart:    ["Frecuencia cardíaca", "la frecuencia cardíaca"],
+  health_hrv:      ["HRV",                "la HRV"],
+  health_activity: ["Actividad",          "la actividad"],
+  health_workouts: ["Entrenamientos",     "los entrenamientos del reloj"],
+  health_hub:      ["Salud",              "la salud"],
+};
+
 // Carga una config de widgets desde localStorage, fusionándola con los defaults
 // (para incorporar widgets nuevos que aún no estén guardados, en su sitio y no al
 // final: ver `fusionarConfigWidgets`) y saneando cada entrada. Se usa tanto para el
@@ -2470,6 +2482,9 @@ export default function Dashboard() {
   // diferencia entre "no hay dato" y "no se pudo medir", que hasta ahora solo sabía el
   // correo de la mañana.
   const [healthReloj, setHealthReloj]       = useState(null);
+  // La última carga de /health/metrics falló (un 5xx o sin red). Sin esto, un 502 de
+  // Supabase se guardaba como métricas vacías y siete widgets decían «Sin datos aún».
+  const [healthFallo, setHealthFallo]       = useState(false);
   // Ajustes de salud: hoy solo la fecha del cambio de dispositivo. Las puntuaciones
   // comparan cada día contra la propia historia, así que sin este corte se estaría
   // midiendo la diferencia entre dos relojes y leyéndola como fisiología.
@@ -2827,22 +2842,36 @@ export default function Dashboard() {
   }, [token, alarmas?.length, alarmasError]);
 
   // Cargar datos de salud
-  useEffect(() => {
-    if (!token) return;
-    apiFetch(`${API}/health/metrics?days=30`, { headers: authHeaders() })
-      .then(r => r.json())
-      .then(data => {
-        setHealthData(data.metrics || {});
-        setHealthLastSync(data.last_sync || null);
-        // Qué días estuvo puesto el reloj. `null` si el backend no lo manda (no es lo
-        // mismo que "no lo llevaste": es que no se sabe), y las conclusiones lo tratan
-        // como tal.
-        setHealthReloj(data.reloj || null);
-        setHealthAjustes(data.ajustes || null);
-        setHealthLoading(false);
-      })
-      .catch(() => setHealthLoading(false));
-  }, [token]);
+  useEffect(() => { if (token) loadHealth(); }, [token]);
+
+  // Mismo criterio que `loadTraining`: `apiFetch` no lanza con un 5xx, así que sin mirar
+  // `r.ok` el `{detail}` de un 502 se leía como respuesta buena, `data.metrics` salía
+  // `undefined` y se guardaba `{}`: siete widgets diciendo «Sin datos aún» con el
+  // histórico entero en Supabase. Un fallo deja lo que hubiera y se dice.
+  async function loadHealth() {
+    try {
+      const r = await apiFetch(`${API}/health/metrics?days=30`, { headers: authHeaders() });
+      if (!r.ok) { setHealthFallo(true); return; }
+      const data = await r.json();
+      setHealthData(data.metrics || {});
+      setHealthLastSync(data.last_sync || null);
+      // Qué días estuvo puesto el reloj. `null` si el backend no lo manda (no es lo
+      // mismo que "no lo llevaste": es que no se sabe), y las conclusiones lo tratan
+      // como tal.
+      setHealthReloj(data.reloj || null);
+      setHealthAjustes(data.ajustes || null);
+      setHealthFallo(false);
+    } catch {
+      setHealthFallo(true);
+    } finally {
+      setHealthLoading(false);
+    }
+  }
+
+  function reintentarSalud() {
+    setHealthLoading(true);
+    loadHealth();
+  }
 
   // Histórico largo para el panel de patrones. Se pide APARTE y solo al abrir el
   // modal, no en la carga inicial: un año de métricas es bastante más payload que 30
@@ -2855,7 +2884,8 @@ export default function Dashboard() {
     if (!token || !healthModalOpen || healthLargoPedido.current) return;
     healthLargoPedido.current = true;
     apiFetch(`${API}/health/metrics?days=${HEALTH_DIAS_PATRONES}`, { headers: authHeaders() })
-      .then(r => r.json())
+      // Un 5xx también es fallo, no un año vacío (el mismo error que la carga de arriba).
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(data => { setHealthLargo(data.metrics || {}); setHealthLargoReloj(data.reloj || null); })
       .catch(() => setHealthLargoFallo(true));
   }, [token, healthModalOpen]);
@@ -5722,8 +5752,10 @@ export default function Dashboard() {
     return new Date(a, m, d, 12);
   }, [diaActual]);
   const conclusionesSalud = useMemo(
-    () => healthConclusions(healthData, hoyConclusiones, { reloj: healthReloj }),
-    [healthData, healthReloj, hoyConclusiones],
+    // Con el corte: sin él, las tendencias y la firma de malestar comparaban la semana del
+    // aparato nuevo contra el mes del viejo, que es justo lo que el corte existe para evitar.
+    () => healthConclusions(healthData, hoyConclusiones, { reloj: healthReloj, corte: corteDispositivo }),
+    [healthData, healthReloj, hoyConclusiones, corteDispositivo],
   );
   // Estado del reloj HOY. Se usa solo como matiz de la puntuación diaria: a media
   // mañana "sin señal todavía" es de lo más normal y no es una conclusión de nada.
@@ -6017,6 +6049,33 @@ export default function Dashboard() {
   function renderWidget(id, cfg = {}) {
     const fixedH = typeof cfg.height === "number";
     const cardStyle = fixedH ? estilosTarjeta.fija : estilosTarjeta.libre;
+
+    // Si /health/metrics falló, los siete widgets de salud lo dicen con su «Reintentar»
+    // en vez de pintarse vacíos: «Sin datos aún» con el histórico entero en Supabase era
+    // mentir. Va aquí, antes del switch, para que ninguno se quede sin el camino. El
+    // nombre del botón lleva el widget: son siete «Reintentar» iguales en la pantalla.
+    const falloSalud = !healthLoading && healthFallo && FALLO_SALUD[id];
+    if (falloSalud) {
+      const [titulo, que] = falloSalud;
+      return (
+        <div style={cardStyle} data-card={id} key={id}>
+          <div style={s.sectionLabel}>{titulo}</div>
+          <div style={{ color: "var(--muted)", fontSize: 13 }}>
+            No se han podido leer los datos de salud.{" "}
+            <button
+              onClick={reintentarSalud}
+              aria-label={`Reintentar leer ${que}`}
+              style={{
+                background: "none", border: "none", padding: 0, font: "inherit",
+                color: "var(--accent)", cursor: "pointer",
+              }}
+            >
+              Reintentar
+            </button>
+          </div>
+        </div>
+      );
+    }
 
     switch (id) {
       case "siguiente": return (
@@ -8484,7 +8543,11 @@ export default function Dashboard() {
         );
       }
       case "health_heart": {
-        const hrData = findMetric(healthData, "heart_rate", "heartRate", "resting_heart_rate");
+        // La FC en reposo NO es un alias de la FC: es el respaldo si no llega ninguna. Con
+        // `findMetric` fusionando por fecha, pasarla como tercer nombre mezclaría las dos
+        // en la misma gráfica los días que falte una.
+        const hrFc   = findMetric(healthData, "heart_rate", "heartRate");
+        const hrData = hrFc.length ? hrFc : findMetric(healthData, "resting_heart_rate");
         const last30 = hrData.slice(-30);
         const latest = hrData[hrData.length - 1];
         const vals   = last30.map(d => d.value).filter(Boolean);

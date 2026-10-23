@@ -256,6 +256,14 @@ para los cruces entre series.
   el conteo por registros, que es lo único que se puede hacer sin fechas.
 - **Una tendencia necesita fondo a los dos lados** (`nCorto >= 3` y `nLargo >= 7`). Con
   menos, se dice el valor y sobre cuántas noches se apoya, en vez de un porcentaje.
+- **Las tendencias no cruzan el cambio de aparato** (`healthConclusions(…, { corte })`,
+  que llega a `seriesTrend` como `corte`; desde octubre de 2026). Lo anterior al corte
+  sale de las dos ventanas, así que la firma de malestar —que se apoya en tres
+  tendencias— tampoco lo cruza. Sin él, la semana del aparato nuevo contra el mes del
+  viejo podía dar «tu HRV está un N% por debajo de tu media» o la firma de estar incubando algo justo después de
+  cambiar de pulsera. Recién cambiado no hay fondo y sale «sin base», que es lo correcto.
+  Los valores de la semana («HRV en 45ms», «duermes 7h») sí se dicen con todo lo que hay:
+  como en el resto del módulo, el corte quita la referencia, no el dato.
 - **Las conclusiones saben cuándo NO se pudo medir**: `healthConclusions(datos, now,
   { reloj })` recibe el `reloj` de `/health/metrics` y añade un dominio "Reloj" que dice
   cuántas noches de la semana se llevó puesto, avisa de la racha y —aparte— de los días
@@ -638,6 +646,26 @@ conclusiones. Las reglas, todas con su helper y sus tests en `helpers.js`:
   del tooltip, así que el % de grasa o el VO₂max del reloj anterior seguían sumando con su
   último valor sin verse, y el tooltip no cuadraba con su total.
 - **Peso, grasa y masa magra**: `cambioSemanal`, ver el widget de bienestar más arriba.
+
+**Un fallo de `/health/metrics` es un fallo** (octubre de 2026). La carga (`loadHealth`)
+mira `r.ok`; antes no lo hacía, así que el `{detail}` de un 502 de Supabase se guardaba
+como métricas vacías y los siete widgets que viven de ellas (`FALLO_SALUD`: bienestar,
+sueño, FC, HRV, actividad, entrenamientos del reloj y el hub) decían «Sin datos aún» con
+el histórico entero guardado. Ahora, con `healthFallo`, `renderWidget` pinta esos siete
+como fallo **antes del switch** —para que ningún widget nuevo se quede sin el camino— con
+un «Reintentar» que lleva el nombre del widget. `healthData` se queda como estaba (`null`
+en la primera carga), y eso es lo que hace que la línea del día diga «no lo sé» en sus
+carriles de sueño, entrenos y presencia. El histórico largo del modal mira `r.ok` igual.
+
+**`findMetric` fusiona los alias por fecha** (octubre de 2026): con dos nombres con filas
+(`apple_exercise_time` del exportador y `exercise_time` del Atajo), devuelve la unión
+ordenada por fecha y, si los dos escribieron el mismo día, gana el primero de la lista;
+es la misma regla que `_filas_por_alias` en el backend. Antes se quedaba con el primero
+que tuviera filas y descartaba el otro entero, aunque este fichero y `docs/BRIEF.md`
+dijeran que fusionaba. Consecuencia: **un nombre que no es alias sino respaldo no va en
+la misma llamada**. La FC del widget `health_heart` usa la FC en reposo solo si no hay
+ninguna FC, y eso se escribe aparte; pasarla como tercer nombre mezclaría las dos
+métricas en la misma gráfica.
 
 **Nota de sueño: una sola fuente, anclada a su fecha.** `sleepHistory()` (helpers) da una
 entrada por noche con su nota ya calculada, y de ahí leen la cabecera del widget de sueño,

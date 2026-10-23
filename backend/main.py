@@ -7851,7 +7851,9 @@ def get_health_metrics(
 
     grouped: dict = {}
     last_sync: str | None = None
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # «Hoy» en la zona del usuario, como el resto del módulo: en UTC, entre medianoche y
+    # las dos (en Madrid) una fila de hoy no contaba como de hoy y la de ayer sí.
+    today_str = _ahora_local().strftime("%Y-%m-%d")
     has_today = False
     for row in filas:
         name = row["metric_name"]

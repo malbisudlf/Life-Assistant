@@ -458,7 +458,9 @@
     muestra con medida se registra (`logger.warning`).
   - El resumen leía cada métrica **del primer nombre que tuviera filas**, así que un día
     suelto de `apple_exercise_time` tapaba meses de `exercise_time`. Ahora fusiona por
-    fecha (`_filas_por_alias`), como ya hacía `findMetric` en el frontend.
+    fecha (`_filas_por_alias`), «como ya hacía `findMetric` en el frontend»… que **no lo
+    hacía**: tenía exactamente el mismo fallo, y esta frase lo tapó hasta octubre de 2026
+    (ver «`findMetric` no fusionaba», más abajo).
   - Y descartaba las filas con `value` a null aunque llevaran la medida dentro de `extra`
     (las que dejó el bug del `Avg`): histórico real que estaba guardado y no se leía.
 - **El Watch dejó de sincronizar otra vez, y esta vez el registro decía "400" y nada
@@ -506,6 +508,32 @@
   `mediaDeLaSemana`, `valorDelDia` y `cambioSemanal`, con tests de series con huecos y
   uno del widget montado. Al apuntar un arreglo aquí, apunta también **dónde**: «el
   peso» eran dos sitios.
+
+- **`findMetric` no fusionaba, y dos documentos decían que sí** (octubre de 2026).
+  Devolvía el primer alias con filas y descartaba el otro entero: el mismo fallo que se
+  había corregido en el correo con `_filas_por_alias`, cuyo apunte (más arriba) y
+  `docs/BRIEF.md` lo citaban como el modelo a seguir. Nadie lo volvió a mirar porque el
+  texto ya decía que estaba bien. Ahora fusiona por fecha con la misma preferencia que el
+  backend, con test. Al fusionar salió el reverso: `health_heart` le pasaba
+  `resting_heart_rate` como tercer «alias» de la FC, que era un respaldo y no un alias, y
+  con la fusión habría mezclado las dos en la gráfica; se separó. Moraleja: **«como ya
+  hace X» en un documento es una afirmación sobre X, y se comprueba como cualquier otra.**
+
+- **Un 502 de `/health/metrics` era «Sin datos aún» en siete widgets** (octubre de 2026).
+  La carga no miraba `r.ok` —`apiFetch` no lanza con un 5xx—, así que el `{detail}` del
+  error se leía como respuesta buena y se guardaba `{}`. Con Supabase caído, el dashboard
+  afirmaba que no había ni una noche medida. Es el mismo error que ya se había corregido
+  en el entrenamiento y las alarmas; ahora los siete widgets se pintan como fallo con su
+  «Reintentar» (`FALLO_SALUD`, antes del switch de `renderWidget`), con un test que monta
+  el dashboard con el 502.
+
+- **Las tendencias de salud cruzaban el cambio de aparato** (octubre de 2026). Las líneas
+  base, la HRV de referencia y la nota de sueño respetaban el corte desde que existe; las
+  conclusiones (`healthConclusions` → `seriesTrend`) no lo recibían, así que la semana de
+  la pulsera nueva se comparaba contra el mes del reloj viejo y podía salir la firma de
+  «estar incubando algo» por la diferencia entre dos sensores. El aviso de `docs/SALUD.md`
+  («si añades otro sitio que compare contra la historia, pásale el corte») ya estaba
+  escrito; faltaba este sitio.
 
 - **Un percentil calculado "a día de hoy" habría hecho el histórico irreproducible.** Al
   meter líneas base personales, la tentación es calcular los percentiles con todo lo que

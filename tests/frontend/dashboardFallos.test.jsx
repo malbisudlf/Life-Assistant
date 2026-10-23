@@ -275,3 +275,47 @@ describe("ideas", () => {
     expect(screen.getByText("Texto completo B")).toBeInTheDocument();
   });
 });
+
+describe("salud", () => {
+  // Las tres tarjetas de salud que se ven sin tocar nada (las otras cuatro nacen ocultas
+  // y comparten el mismo camino).
+  const TARJETAS = ["health_wellness", "health_sleep", "health_hub"];
+  const tarjeta = id => within(document.querySelector(`[data-card="${id}"]`));
+
+  function hoyIso() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  test("un 502 de /health/metrics no se pinta como «Sin datos aún»", async () => {
+    localStorage.setItem("la_token", "jwt");
+    let intentos = 0;
+    simularBackend({
+      "/health/metrics": () => (++intentos === 1
+        ? respuesta({ detail: "Error en el almacenamiento de datos" }, 502)
+        : respuesta({ metrics: { sleep_analysis: [{ date: hoyIso(), value: 7.5, extra: {} }] } })),
+    });
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await waitFor(() => expect(tarjeta("health_sleep").getByText(/No se han podido leer los datos de salud/)).toBeInTheDocument());
+    for (const id of TARJETAS) {
+      expect(tarjeta(id).getByText(/No se han podido leer los datos de salud/)).toBeInTheDocument();
+      expect(tarjeta(id).queryByText(/Sin datos/)).toBeNull();
+    }
+    // Cada «Reintentar» lleva su nombre: son siete iguales en la misma pantalla.
+    await user.click(tarjeta("health_sleep").getByRole("button", { name: "Reintentar leer el sueño" }));
+    await waitFor(() => expect(tarjeta("health_sleep").queryByText(/No se han podido leer/)).toBeNull());
+    expect(intentos).toBe(2);
+    expect(tarjeta("health_sleep").queryByText(/Sin datos de sueño/)).toBeNull();
+    // Un reintento que sale bien quita el fallo de todas, no solo de la que se tocó.
+    for (const id of TARJETAS) expect(tarjeta(id).queryByText(/No se han podido leer/)).toBeNull();
+  });
+
+  test("sin conexión con el backend, igual: es un fallo, no una semana vacía", async () => {
+    localStorage.setItem("la_token", "jwt");
+    simularBackend({ "/health/metrics": new TypeError("Failed to fetch") });
+    render(<Dashboard />);
+    await waitFor(() => expect(tarjeta("health_hub").getByText(/No se han podido leer los datos de salud/)).toBeInTheDocument());
+    expect(tarjeta("health_hub").queryByText(/Sin datos de salud aún/)).toBeNull();
+  });
+});
