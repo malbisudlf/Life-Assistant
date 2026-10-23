@@ -223,7 +223,11 @@ Qué hace cada uno:
     fila, cada uno con flecha ↑↓ coloreada. La del peso se colorea según si te acercas o
     alejas del objetivo configurado en ⚙; la barra de progreso indica la **distancia real**
     ("faltan X.X kg", no solo un %) y se colorea según la tendencia reciente
-    (`weightDelta`): verde si te acercas, rojo si te alejas.
+    (`weightDelta`): verde si te acercas, rojo si te alejas. Cada flecha compara la última
+    medida con la más cercana a **siete días antes de ella** (`cambioSemanal`, holgura de
+    ±3 días, `CAMBIO_SEMANAL_HOLGURA`); sin ninguna en esa franja no hay flecha, y si no
+    son justo siete días el texto dice cuántos («vs hace 9 días»). Va anclada a la última
+    medida y no a hoy: un día sin pesada no mueve nada.
 11. **Sueño (`health_sleep`)** — noche anterior: duración, fases (profundo/REM/core/
     despierto) con tooltips, puntuación 0–100 y resumen de las últimas 7 noches. Botón
     **"Anular noche"** para excluir noches con datos malos (p. ej. el Watch en carga);
@@ -614,6 +618,26 @@ necesita un valor derivado, añádelo al `return` del memo y a su destructuring 
 `healthOverall` están memorizados aparte (`conclusionesSalud`/`veredictoSalud`):
 antes se llamaban dos veces por render, una por el widget compacto y otra por el
 modal.
+
+**El memo cuenta días, no registros** (octubre de 2026). Hasta entonces era el último
+sitio con el fallo de `slice(-7)` que ya se había corregido en el correo y en el motor de
+conclusiones. Las reglas, todas con su helper y sus tests en `helpers.js`:
+
+- **Vista «Semana»**: cada media es la de los siete DÍAS que terminan hoy
+  (`mediaDeLaSemana`, que es `mediaReciente` con esa ventana; `filasDeLaSemana` para
+  contar noches buenas). Sin nada en la ventana, `null` y el componente sale «sin datos»
+  en vez de puntuar con lo último que llegó. Igual la «media 7d» de los widgets de sueño y
+  HRV, y la media de 30 días con la que se compara esta última.
+- **Vista «Hoy»**: solo la fila de hoy (`valorDelDia`). Antes caía a la última fila de la
+  serie —la de ayer o la de hace semanas— y la puntuaba como de hoy sin decirlo. A
+  primera hora, sin sincronizar, la tarjeta dice «Aún no ha llegado nada de hoy». Es lo
+  que ya hacía `wellnessHistory` con cada día de la sparkline. (Las esporádicas —VO₂max,
+  % grasa, recuperación cardíaca— siguen arrastrando su último valor, a propósito.)
+- **Lo que el aparato no mide no puntúa** (`desgloseMedible` con `metricasMuertas`): sale
+  del desglose ANTES de sumar, y el tooltip pinta esa misma lista. Antes solo se escondía
+  del tooltip, así que el % de grasa o el VO₂max del reloj anterior seguían sumando con su
+  último valor sin verse, y el tooltip no cuadraba con su total.
+- **Peso, grasa y masa magra**: `cambioSemanal`, ver el widget de bienestar más arriba.
 
 **Nota de sueño: una sola fuente, anclada a su fecha.** `sleepHistory()` (helpers) da una
 entrada por noche con su nota ya calculada, y de ahí leen la cabecera del widget de sueño,

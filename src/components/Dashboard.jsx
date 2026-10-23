@@ -6,6 +6,7 @@ import {
   hoursToHM, sleepHours, findMetric,
   mantenimientoEstimado, metricasMuertas, fechaCambioSugerida,
   mediaReciente, refHrv,
+  valorDelDia, filasDeLaSemana, mediaDeLaSemana, cambioSemanal, desgloseMedible,
   weatherFromCode, weekdayShort,
   healthConclusions, healthOverall, healthCorrelations, healthCoverageDays,
   wellnessBreakdown, scoreFromBreakdown, wellnessBaselines,
@@ -5825,17 +5826,6 @@ export default function Dashboard() {
           const wFlightsRaw   = findMetric(healthData, "flights_climbed");
 
           const avg7 = arr => arr.length ? arr.reduce((s,d)=>s+(d.value||0),0)/arr.length : null;
-          const last7Sleep    = wSleepRaw.slice(-7);
-          const last7Steps    = wStepsRaw.slice(-7);
-          const last7Hrv      = wHrvRaw.slice(-7);
-          const last7Rhr      = wRhrRaw.slice(-7);
-          const last7Ae       = wAeRaw.slice(-7);
-          const last7Exercise = wExerciseRaw.slice(-7);
-          const last7Stand    = wStandRaw.slice(-7);
-          const last7WalkHr   = wWalkHrRaw.slice(-7);
-          const last7Daylight = wDaylightRaw.slice(-7);
-          const last7Resp     = wRespRaw.slice(-7);
-          const last7Flights  = wFlightsRaw.slice(-7);
 
           // Semana actual desde el lunes
           const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
@@ -5854,22 +5844,29 @@ export default function Dashboard() {
           }
 
           // ── promedios semanales ──
-          const avgSleep    = avg7(last7Sleep);
-          const avgSteps    = avg7(last7Steps);
-          const avgHrv      = avg7(last7Hrv);
+          // Los siete DÍAS que terminan hoy, no los siete últimos registros (ver
+          // `mediaDeLaSemana` en helpers): con la serie agujereada, `slice(-7)` mezclaba
+          // la semana con medidas de hace un mes y lo llamaba «media de la semana». Lo
+          // que no tiene nada en la ventana sale como `null` y el desglose lo da por
+          // «sin datos», en vez de puntuar con lo último que llegó.
+          const semana      = serie => mediaDeLaSemana(serie, todayStr);
+          const last7Sleep  = filasDeLaSemana(wSleepRaw, todayStr);
+          const avgSleep    = semana(wSleepRaw);
+          const avgSteps    = semana(wStepsRaw);
+          const avgHrv      = semana(wHrvRaw);
           // Por FECHA y respetando el corte de dispositivo, no por número de registros
           // (ver `refHrv` en helpers): con la serie agujereada las "últimas 7 medidas"
           // pueden abarcar meses, y sin el corte la referencia se hacía con el aparato
           // anterior justo cuando más importa no mezclarlos.
           const avgHrvPrev  = refHrv(wHrvRaw, todayStr, corteDispositivo);
-          const avgRhr      = avg7(last7Rhr);
-          const avgAe       = avg7(last7Ae);
-          const avgExercise = avg7(last7Exercise);
-          const avgStand    = avg7(last7Stand);
-          const avgWalkHr   = avg7(last7WalkHr);
-          const avgDaylight = avg7(last7Daylight);
-          const avgResp     = avg7(last7Resp);
-          const avgFlights  = avg7(last7Flights);
+          const avgRhr      = semana(wRhrRaw);
+          const avgAe       = semana(wAeRaw);
+          const avgExercise = semana(wExerciseRaw);
+          const avgStand    = semana(wStandRaw);
+          const avgWalkHr   = semana(wWalkHrRaw);
+          const avgDaylight = semana(wDaylightRaw);
+          const avgResp     = semana(wRespRaw);
+          const avgFlights  = semana(wFlightsRaw);
           const allWorkoutDates  = wWorkRaw.flatMap(d => (d.extra?.workouts||[]).map(w => (w.start||"").slice(0,10))).filter(Boolean).sort();
           const lastWorkoutDate  = allWorkoutDates[allWorkoutDates.length - 1];
           const daysSinceWorkout = lastWorkoutDate ? Math.floor((new Date() - new Date(lastWorkoutDate + "T12:00:00")) / 86400000) : null;
@@ -5879,40 +5876,45 @@ export default function Dashboard() {
           const avgCardioRec = thisWeekRecov.length ? avg7(thisWeekRecov) : (wCardioRecRaw.length ? wCardioRecRaw[wCardioRecRaw.length - 1].value : null);
 
           // ── valores diarios ──
-          const latestOrToday = (arr) => arr.find(d => d.date === todayStr) || arr[arr.length - 1];
-          const todaySleepEntry   = wSleepRaw[wSleepRaw.length - 1];
-          const todaySleep        = todaySleepEntry?.value > 0 ? todaySleepEntry.value : null;
-          const todaySteps        = latestOrToday(wStepsRaw)?.value > 0 ? latestOrToday(wStepsRaw).value : null;
-          const todayHrv          = latestOrToday(wHrvRaw)?.value > 0 ? latestOrToday(wHrvRaw).value : null;
+          // Solo la fila de HOY (`valorDelDia`). Antes, sin ella, se cogía la última de
+          // la serie —la de ayer, o la de hace tres semanas— y se puntuaba como si fuera
+          // de hoy sin decirlo. Lo que aún no ha llegado sale como «sin datos», que es lo
+          // que el tooltip ya sabe contar («Calculado sobre N de M componentes»), y es
+          // también lo que hace `wellnessHistory` con el punto de hoy de la sparkline.
+          const hoy               = serie => valorDelDia(serie, todayStr);
+          const todaySleep        = hoy(wSleepRaw);
+          const todaySteps        = hoy(wStepsRaw);
+          const todayHrv          = hoy(wHrvRaw);
           // Para PUNTUAR se usa la media de tres días, no el valor suelto: es el mismo
           // suavizado que aplica el histórico y por la misma razón (ver HRV_SUAVIZADO_DIAS
           // en helpers). La tarjeta sigue enseñando `todayHrv`, que es el dato del día.
           const todayHrvMedia     = mediaReciente(wHrvRaw, todayStr, { corte: corteDispositivo });
-          const todayRhr          = latestOrToday(wRhrRaw)?.value > 0 ? latestOrToday(wRhrRaw).value : null;
-          const todayAe           = latestOrToday(wAeRaw)?.value > 0 ? latestOrToday(wAeRaw).value : null;
+          const todayRhr          = hoy(wRhrRaw);
+          const todayAe           = hoy(wAeRaw);
           const todayWorkEntry    = wWorkRaw.find(d => d.date === todayStr);
           const todayWorkoutCount = todayWorkEntry?.extra?.workouts?.length || 0;
-          const todayExercise     = latestOrToday(wExerciseRaw)?.value > 0 ? latestOrToday(wExerciseRaw).value : null;
-          const todayStand        = latestOrToday(wStandRaw)?.value > 0 ? latestOrToday(wStandRaw).value : null;
-          const todayFlights      = latestOrToday(wFlightsRaw)?.value > 0 ? latestOrToday(wFlightsRaw).value : null;
-          const todayWalkHr       = latestOrToday(wWalkHrRaw)?.value > 0 ? latestOrToday(wWalkHrRaw).value : null;
-          const todayDaylight     = latestOrToday(wDaylightRaw)?.value > 0 ? latestOrToday(wDaylightRaw).value : null;
-          const todayResp         = latestOrToday(wRespRaw)?.value > 0 ? latestOrToday(wRespRaw).value : null;
+          const todayExercise     = hoy(wExerciseRaw);
+          const todayStand        = hoy(wStandRaw);
+          const todayFlights      = hoy(wFlightsRaw);
+          const todayWalkHr       = hoy(wWalkHrRaw);
+          const todayDaylight     = hoy(wDaylightRaw);
+          const todayResp         = hoy(wRespRaw);
 
           // ── peso y composición corporal ──
-          const latestWeight  = wWeightRaw.length ? wWeightRaw[wWeightRaw.length - 1] : null;
-          const prevWeight    = wWeightRaw.length >= 2 ? wWeightRaw[wWeightRaw.length - 8] ?? wWeightRaw[0] : null;
-          const currentWeight = latestWeight?.value > 0 ? latestWeight.value : null;
-          const prevWeightVal = prevWeight?.value > 0 ? prevWeight.value : null;
-          const weightDelta   = currentWeight != null && prevWeightVal != null ? currentWeight - prevWeightVal : null;
-          const latestBodyFat = wBodyFatRaw.length ? wBodyFatRaw[wBodyFatRaw.length - 1] : null;
-          const currentBodyFat = latestBodyFat?.value > 0 ? latestBodyFat.value : null;
-          const prevBodyFat   = wBodyFatRaw.length >= 2 ? (wBodyFatRaw[wBodyFatRaw.length - 8] ?? wBodyFatRaw[0]) : null;
-          const bodyFatDelta  = currentBodyFat != null && prevBodyFat?.value > 0 ? currentBodyFat - prevBodyFat.value : null;
-          const latestLean    = wLeanMassRaw.length ? wLeanMassRaw[wLeanMassRaw.length - 1] : null;
-          const currentLean   = latestLean?.value > 0 ? latestLean.value : null;
-          const prevLean      = wLeanMassRaw.length >= 2 ? (wLeanMassRaw[wLeanMassRaw.length - 8] ?? wLeanMassRaw[0]) : null;
-          const leanDelta     = currentLean != null && prevLean?.value > 0 ? currentLean - prevLean.value : null;
+          // Cada uno contra su medida más cercana a una semana ANTES DE LA ÚLTIMA, no
+          // contra el octavo registro (ver `cambioSemanal`): uno no se pesa a diario, y
+          // el octavo registro hacia atrás podían ser dos meses. Anclado a la última
+          // medida, un día sin pesada no mueve la flecha.
+          const cambioPeso    = cambioSemanal(wWeightRaw);
+          const cambioGrasa   = cambioSemanal(wBodyFatRaw);
+          const cambioMagra   = cambioSemanal(wLeanMassRaw);
+          const currentWeight = cambioPeso?.valor ?? null;
+          const weightDelta   = cambioPeso?.delta ?? null;
+          const weightDeltaDias = cambioPeso?.diasAtras ?? null;
+          const currentBodyFat = cambioGrasa?.valor ?? null;
+          const bodyFatDelta  = cambioGrasa?.delta ?? null;
+          const currentLean   = cambioMagra?.valor ?? null;
+          const leanDelta     = cambioMagra?.delta ?? null;
           const targetWeight  = bodyGoals.targetWeight;
           const targetBodyFat = bodyGoals.targetBodyFat;
           const weightToGoal  = currentWeight != null && targetWeight ? currentWeight - targetWeight : null;
@@ -5927,7 +5929,7 @@ export default function Dashboard() {
           // número que se ve cada día, no.
           const baselines = wellnessBaselines(healthData, todayStr, { corte: corteDispositivo });
 
-    return { avg7, avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, baselines, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayHrvMedia, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightToGoal };
+    return { avgAe, avgCardioRec, avgDaylight, avgExercise, avgFlights, avgHrv, avgHrvPrev, avgResp, avgRhr, avgSleep, avgStand, avgSteps, avgWalkHr, baselines, bodyFatDelta, currentBodyFat, currentLean, currentWeight, daysSinceWorkout, daysToMonday, expectedByNow, last7Sleep, lastVo2, leanDelta, targetBodyFat, targetWeight, todayAe, todayDaylight, todayExercise, todayFlights, todayHrv, todayHrvMedia, todayResp, todayRhr, todaySleep, todayStand, todaySteps, todayStr, todayWalkHr, todayWorkoutCount, wAeRaw, wBodyFatRaw, wCardioRecRaw, wDaylightRaw, wExerciseRaw, wFlightsRaw, wHrvRaw, wLeanMassRaw, wRespRaw, wRhrRaw, wSleepRaw, wStandRaw, wStepsRaw, wVo2Raw, wWalkHrRaw, wWeightRaw, wWorkRaw, weekStart, weekWorkoutCount, weightDelta, weightDeltaDias, weightToGoal };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [healthData, trainingDays, bodyGoals, diaActual, corteDispositivo]);
 
@@ -7800,6 +7802,7 @@ export default function Dashboard() {
           wWeightRaw,
           weekWorkoutCount,
           weightDelta,
+          weightDeltaDias,
           weightToGoal,
         } = datosSalud;
 
@@ -7827,7 +7830,9 @@ export default function Dashboard() {
         // Todos los umbrales viven en wellnessBreakdown (helpers), fuera del render.
         // El desglose es la única fuente de verdad y el total sale de sumarlo, así que
         // no se puede volver a sumar un componente sin que aparezca en el detalle.
-        const breakdown = wellnessBreakdown({
+        // Lo que este aparato no mide sale ANTES de sumar (`desgloseMedible`): antes solo
+        // se escondía del tooltip y seguía puntuando con su último valor conocido.
+        const breakdown = desgloseMedible(wellnessBreakdown({
           isDaily, expectedByNow,
           sleep:        sleepVal,
           work:         workVal,
@@ -7851,7 +7856,7 @@ export default function Dashboard() {
           // fijo ahí premia la constitución, no el progreso. El desglose dice en cada
           // fila con cuál de los dos se ha puntuado.
           baselines,
-        });
+        }), componentesNoMedidos);
 
         // Normalizado a 100: la vista diaria puntúa sobre más componentes que la semanal,
         // así que con umbrales fijos "Semana excelente" era casi inalcanzable y "Día
@@ -7948,7 +7953,10 @@ export default function Dashboard() {
         // Composición corporal: insight de peso
         if (currentWeight != null) {
           const wSign = weightDelta != null ? (weightDelta > 0 ? "+" : "") : "";
-          const wTrend = weightDelta != null ? ` (${wSign}${weightDelta.toFixed(1)} kg vs semana pasada)` : "";
+          // «Semana pasada» solo si son siete días: con la holgura de `cambioSemanal`
+          // pueden ser de cuatro a diez, y se dice cuántos.
+          const wHace = weightDeltaDias === 7 ? "semana pasada" : `hace ${weightDeltaDias} días`;
+          const wTrend = weightDelta != null ? ` (${wSign}${weightDelta.toFixed(1)} kg vs ${wHace})` : "";
           if (weightToGoal != null && Math.abs(weightToGoal) < 0.5) {
             insights.push({ icon: "⚖️", color: "var(--green)", text: `Peso objetivo alcanzado — ${currentWeight.toFixed(1)} kg${wTrend}` });
           } else if (weightToGoal != null && weightToGoal > 0) {
@@ -8012,7 +8020,7 @@ export default function Dashboard() {
                       boxShadow: "0 4px 16px rgba(0,0,0,0.4)", fontSize: 12,
                       display: "flex", flexDirection: "column", gap: 5,
                     }}>
-                      {breakdown.filter(b => !componentesNoMedidos.has(b.label)).map((b, i) => (
+                      {breakdown.map((b, i) => (
                         <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, opacity: b.sinDatos ? 0.45 : 1 }}>
                           <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{b.label}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
@@ -8048,7 +8056,13 @@ export default function Dashboard() {
             {healthLoading ? (
               <div style={{ color: "var(--muted)", fontSize: 13 }}>Cargando...</div>
             ) : !hasAnyData ? (
-              <div style={{ color: "var(--muted)", fontSize: 13 }}>Sin datos todavía — los insights aparecerán cuando haya varios días de datos.</div>
+              <div style={{ color: "var(--muted)", fontSize: 13 }}>
+                {/* La vista «Hoy» ya no tira de la fila de ayer: a primera hora, antes
+                    de sincronizar, lo normal es que de hoy no haya nada todavía. */}
+                {isDaily
+                  ? "Aún no ha llegado nada de hoy — mira la semana mientras tanto."
+                  : "Sin datos todavía — los insights aparecerán cuando haya varios días de datos."}
+              </div>
             ) : (
               <>
                 {potential && (
@@ -8288,8 +8302,9 @@ export default function Dashboard() {
         // MISMA nota en vez de calcular cada una la suya.
         const sleepData    = historicoSueno.filter(n => !n.anulada);
         const ultimas7     = historicoSueno.slice(-7);
-        const last7        = sleepData.slice(-7);
-        const avg7         = last7.length ? last7.reduce((s, n) => s + (n.horas || 0), 0) / last7.length : null;
+        // La «media 7d» son las noches de los siete últimos DÍAS, no las siete últimas
+        // filas: con noches sin reloj, `slice(-7)` se iba semanas atrás (`mediaDeLaSemana`).
+        const avg7         = mediaDeLaSemana(sleepData.map(n => ({ date: n.date, value: n.horas })), isoHoyConclusiones);
         const latest       = sleepData[sleepData.length - 1];
         const sleepColor = v => v >= 7 ? "var(--green)" : v >= 6 ? "var(--accent)" : "#d4645a";
 
@@ -8504,10 +8519,11 @@ export default function Dashboard() {
       case "health_hrv": {
         const hrvData = findMetric(healthData, "heart_rate_variability", "heartRateVariability", "hrv");
         const last30  = hrvData.slice(-30);
-        const last7   = hrvData.slice(-7);
         const latest  = hrvData[hrvData.length - 1];
-        const avg7    = last7.length  ? last7.reduce((s, d)  => s + (d.value || 0), 0) / last7.length  : null;
-        const avg30   = last30.length ? last30.reduce((s, d) => s + (d.value || 0), 0) / last30.length : null;
+        // Por días, no por registros: con huecos, las «7 últimas» y las «30 últimas»
+        // acababan siendo casi las mismas medidas y la flecha comparaba algo consigo mismo.
+        const avg7    = mediaDeLaSemana(hrvData, isoHoyConclusiones);
+        const avg30   = mediaDeLaSemana(hrvData, isoHoyConclusiones, 30);
         const trend   = avg7 && avg30 ? (avg7 > avg30 * 1.03 ? "↑" : avg7 < avg30 * 0.97 ? "↓" : "→") : null;
         const trendColor = trend === "↑" ? "var(--green)" : trend === "↓" ? "#d4645a" : "var(--muted)";
         return (
