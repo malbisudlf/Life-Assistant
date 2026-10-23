@@ -257,7 +257,10 @@ UNIQUE(metric_date, metric_name)
   GET + POST/PATCH por métrica, que se retiró al pasar a lotes.)*
 - **`last_sync` en `/health/metrics`**: como el upsert no actualiza `created_at`, si hay
   cualquier fila con `metric_date = hoy` se devuelve `datetime.now()` como `last_sync` en
-  vez del `created_at` real.
+  vez del `created_at` real. Ese «hoy» es el **local** (`_ahora_local()`), como en el
+  resto del módulo; hasta octubre de 2026 era el de UTC, y entre medianoche y las dos una
+  fila de hoy no contaba como de hoy y la de ayer sí (hallazgo 1.6 de
+  `docs/REVISION_2026_08.md`).
 - **Reenvíos de varios días soportados**: el Shortcut puede mandar `sleep_analysis` (y el
   resto) de los últimos N días en cada sync — cada muestra se procesa con su propio
   `metric_date`, así que cada día es una fila independiente y no pisa otras fechas. Para
@@ -290,8 +293,11 @@ diferencia entre dos fabricantes y leyéndola como fisiología. **El histórico 
 ni se toca**: sigue entero en las gráficas, solo deja de servir como referencia.
 
 Respetan el corte `baselinePersonal`, `refHrv` (vía `wellnessHistory({ corte })` y el
-widget), `mediaReciente` y `refRecuperacion` (la referencia de la nota de sueño, vía
-`sleepHistory({ corte })`; sustituyó al `baseline30` que calculaba el widget). Si el corte deja la muestra
+widget), `mediaReciente`, `refRecuperacion` (la referencia de la nota de sueño, vía
+`sleepHistory({ corte })`; sustituyó al `baseline30` que calculaba el widget) y, desde
+octubre de 2026, las tendencias de las conclusiones (`seriesTrend` vía
+`healthConclusions({ corte })`, y con ellas la firma de malestar), que hasta entonces
+comparaban la semana del aparato nuevo contra el mes del viejo. Si el corte deja la muestra
 por debajo del mínimo, `baselinePersonal` devuelve `null` y quien llama cae al umbral
 fijo — que es lo correcto mientras el aparato nuevo no tenga historia propia.
 

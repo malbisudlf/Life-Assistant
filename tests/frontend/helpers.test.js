@@ -232,6 +232,31 @@ describe("helpers de salud", () => {
     expect(findMetric(null, "steps")).toEqual([]);
   });
 
+  test("findMetric fusiona los alias por fecha: un día suelto de uno no tapa meses del otro", () => {
+    // Health Auto Export escribe `apple_exercise_time` y el Atajo `exercise_time`. Antes
+    // ganaba el primero que tuviera filas y el histórico del otro se descartaba entero.
+    const metrics = {
+      apple_exercise_time: [{ date: "2026-07-05", value: 40 }],
+      exercise_time: [
+        { date: "2026-07-03", value: 20 },
+        { date: "2026-07-04", value: 25 },
+        { date: "2026-07-05", value: 10 },
+      ],
+    };
+    expect(findMetric(metrics, "apple_exercise_time", "exercise_time")).toEqual([
+      { date: "2026-07-03", value: 20 },
+      { date: "2026-07-04", value: 25 },
+      // El mismo día en los dos: gana el primero de la lista, como `_filas_por_alias`.
+      { date: "2026-07-05", value: 40 },
+    ]);
+  });
+
+  test("findMetric con un solo alias con filas devuelve esa serie tal cual", () => {
+    // La misma referencia: los memos que dependen de ella no se rehacen por nada.
+    const serie = [{ date: "2026-07-05", value: 100 }];
+    expect(findMetric({ steps: serie }, "step_count", "steps")).toBe(serie);
+  });
+
   test("weatherFromCode traduce códigos WMO y cae en un default", () => {
     expect(weatherFromCode(0)).toEqual({ emoji: "☀️", label: "Despejado" });
     expect(weatherFromCode(3)).toEqual({ emoji: "☁️", label: "Nublado" });
@@ -624,6 +649,39 @@ describe("firma de algo va mal", () => {
   test("sin las tres series no hay firma que dar", () => {
     expect(firma(healthConclusions({ resting_heart_rate: serie(50, 60) }, AHORA))).toBeUndefined();
     expect(firma(healthConclusions({}, AHORA))).toBeUndefined();
+  });
+
+  test("la firma no cruza el cambio de aparato", () => {
+    // Los 23 días «viejos» son del reloj anterior y los 7 recientes del nuevo: sin el
+    // corte, la diferencia entre dos sensores se leía como estar incubando algo.
+    const corte = d(6);
+    expect(firma(healthConclusions(CLARO, AHORA, { corte }))).toBeUndefined();
+    // Sin corte, los mismos datos sí la dan: lo que la quita es el corte, no los datos.
+    expect(firma(healthConclusions(CLARO, AHORA))).toBeTruthy();
+  });
+
+  test("las tendencias tampoco comparan contra el aparato anterior", () => {
+    const corte = d(6);
+    const c = healthConclusions(CLARO, AHORA, { corte });
+    expect(c.some(x => /HRV está un \d+% por debajo/.test(x.text))).toBe(false);
+    expect(c.some(x => /FC en reposo ha subido/.test(x.text))).toBe(false);
+    expect(c.some(x => /frecuencia respiratoria nocturna ha subido/.test(x.text))).toBe(false);
+    // El valor de la semana se sigue diciendo: el corte quita la referencia, no el dato.
+    expect(c.some(x => /HRV estable en torno a 45ms/.test(x.text))).toBe(true);
+  });
+
+  test("recién cambiado, sin historia propia, no hay base para hablar de tendencia", () => {
+    // Tres días con el aparato nuevo: la ventana larga no llega a siete medidas.
+    const c = healthConclusions(CLARO, AHORA, { corte: d(2) });
+    expect(c.find(x => /^HRV en 45ms/.test(x.text))?.text).toMatch(/sin base para hablar de tendencia/);
+  });
+
+  test("el sueño no dice «empeorando frente al mes» comparando dos aparatos", () => {
+    const sueno = Array.from({ length: 30 }, (_, i) => ({ date: d(29 - i), value: i < 23 ? 8 : 6.8 }));
+    const sin = healthConclusions({ sleep_analysis: sueno }, AHORA).find(x => x.domain === "Sueño");
+    expect(sin.text).toMatch(/empeorando frente al mes/);
+    const con = healthConclusions({ sleep_analysis: sueno }, AHORA, { corte: d(6) }).find(x => x.domain === "Sueño");
+    expect(con.text).not.toMatch(/frente al mes/);
   });
 });
 

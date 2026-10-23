@@ -196,8 +196,15 @@ export function calcRecoveryMod(hrv, rhr, resp, hrvBase, rhrBase, respBase) {
 // (30 días) para detectar señales tempranas: HRV cayendo, FC en reposo subiendo,
 // peso derivando, etc. `data` es la serie ya ordenada por fecha ascendente tal
 // como la sirve el backend ([{ date, value }, ...]). Devuelve null si no hay datos.
-export function seriesTrend(data, shortDays = 7, longDays = 30, { hoy = null } = {}) {
-  const clean = (data || []).filter(d => d && d.value != null && !isNaN(Number(d.value)));
+//
+// `corte` (fecha del cambio de dispositivo) deja fuera lo anterior en las DOS ventanas:
+// una tendencia que compara la semana del aparato nuevo contra el mes del viejo mide la
+// diferencia entre dos sensores, no la fisiología. Recién cambiado, la ventana larga se
+// queda corta y quien llama cae en «sin base», que es lo correcto.
+export function seriesTrend(data, shortDays = 7, longDays = 30, { hoy = null, corte = null } = {}) {
+  const desdeCorte = corte ? String(corte).slice(0, 10) : null;
+  const clean = (data || []).filter(d => d && d.value != null && !isNaN(Number(d.value))
+    && (desdeCorte == null || d.date == null || String(d.date) >= desdeCorte));
   if (!clean.length) return null;
   const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
   const fin = hoy || _isoHoy();
@@ -718,8 +725,11 @@ function _firmaMalestar({ tRhr, tHrv, tResp, fiable, nochesReloj = null }) {
 
 // `now` es inyectable para poder testear el cómputo de "últimos 7 días". `reloj` es lo
 // que manda /health/metrics: con él, las conclusiones saben cuándo NO se pudo medir y
-// dejan de confundirlo con "no ha pasado nada".
-export function healthConclusions(healthData, now = new Date(), { reloj = null } = {}) {
+// dejan de confundirlo con "no ha pasado nada". `corte` es la fecha del cambio de
+// dispositivo: las TENDENCIAS (y con ellas la firma de malestar) no lo cruzan. Los
+// valores de la semana se siguen diciendo con todo lo que hay, como en el resto del
+// módulo: el corte quita la referencia, no el dato.
+export function healthConclusions(healthData, now = new Date(), { reloj = null, corte = null } = {}) {
   const C = [];
   const push = (domain, tone, text) => C.push({ domain, tone, text });
   const round = n => Math.round(n);
@@ -764,7 +774,7 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   const sleep7 = ventana(sleep);
   if (sleep7.length) {
     const a7 = _avgVal(sleep7);
-    const t  = seriesTrend(sleep, 7, 30, { hoy });
+    const t  = seriesTrend(sleep, 7, 30, { hoy, corte });
     const tone = a7 >= 7.5 ? "good" : a7 >= 6.5 ? "warn" : "bad";
     let text = `Duermes de media ${hoursToHM(a7)} ${sleep7.length >= 7 ? "las últimas 7 noches" : `sobre ${base(sleep7.length)} esta semana`}`;
     if      (a7 < 6.5)  text += " — por debajo de lo recomendable, prioriza descansar";
@@ -784,7 +794,7 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   // ── Recuperación: HRV ──
   const hrv  = findMetric(healthData, "heart_rate_variability", "heartRateVariability").filter(d => d.value > 0);
   const hrv7 = ventana(hrv);
-  const tHrv = seriesTrend(hrv, 7, 30, { hoy });
+  const tHrv = seriesTrend(hrv, 7, 30, { hoy, corte });
   if (hrv7.length) {
     const a7 = _avgVal(hrv7);
     if      (fiable(tHrv) && tHrv.deltaPct <= -8) push("Recuperación", "bad",  `Tu HRV está un ${Math.abs(round(tHrv.deltaPct))}% por debajo de tu media de 30 días (${round(a7)}ms) — señal de fatiga o estrés. Baja intensidad y prioriza el sueño.`);
@@ -797,7 +807,7 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
   // ── Recuperación: FC en reposo ──
   const rhr  = findMetric(healthData, "resting_heart_rate").filter(d => d.value > 0);
   const rhr7 = ventana(rhr);
-  const tRhr = seriesTrend(rhr, 7, 30, { hoy });
+  const tRhr = seriesTrend(rhr, 7, 30, { hoy, corte });
   if (rhr7.length) {
     const a7 = _avgVal(rhr7);
     if (fiable(tRhr) && tRhr.deltaPct >= 5) push("Recuperación", "warn", `Tu FC en reposo ha subido un ${round(tRhr.deltaPct)}% (${round(a7)} bpm) — puede indicar carga acumulada, falta de sueño o algo incubándose.`);
@@ -806,7 +816,7 @@ export function healthConclusions(healthData, now = new Date(), { reloj = null }
 
   // ── Recuperación: frecuencia respiratoria y firma de "algo va mal" ──
   const resp  = findMetric(healthData, "respiratory_rate").filter(d => d.value > 0);
-  const tResp = seriesTrend(resp, 7, 30, { hoy });
+  const tResp = seriesTrend(resp, 7, 30, { hoy, corte });
   // La firma vive AQUÍ y no en el catálogo `_CRUCES` a propósito. Aquel cruza dos series
   // entre sí para describir un hábito estable ("los días que…") y lo ejecuta también el
   // panel de patrones sobre la ventana larga, donde esto no significaría nada: una firma
@@ -2229,12 +2239,27 @@ export function agenteSinArrancar({ desde, ahora, status, eventos } = {}) {
   return ahora - desde > AGENTE_ARRANQUE_MAX_MS;
 }
 
+// Las filas de una métrica que las dos fuentes escriben con nombres distintos (Health
+// Auto Export `apple_exercise_time`, el Atajo `exercise_time`), FUSIONADAS POR FECHA. Si
+// las dos escribieron el mismo día, gana la primera de `names`. Es la misma regla que
+// `_filas_por_alias` en el backend. Hasta octubre de 2026 devolvía solo el primer alias
+// con filas —y los docs decían que fusionaba—: bastaba un día suelto escrito por una
+// fuente para tapar meses guardados por la otra. Con un solo alias con filas devuelve esa
+// serie tal cual (misma referencia), que es el caso de casi todas las métricas.
 export function findMetric(metrics, ...names) {
   if (!metrics) return [];
-  for (const name of names) {
-    if (metrics[name]?.length) return metrics[name];
+  const conFilas = names.filter(n => metrics[n]?.length);
+  if (conFilas.length <= 1) return conFilas.length ? metrics[conFilas[0]] : [];
+  const porFecha = new Map();
+  const sinFecha = [];
+  for (const n of conFilas) {
+    for (const f of metrics[n]) {
+      if (f?.date == null) { sinFecha.push(f); continue; }
+      const k = String(f.date).slice(0, 10);
+      if (!porFecha.has(k)) porFecha.set(k, f);
+    }
   }
-  return [];
+  return [...[...porFecha.keys()].sort().map(k => porFecha.get(k)), ...sinFecha];
 }
 
 // Traduce el código WMO de Open-Meteo a icono + texto en español.

@@ -187,6 +187,9 @@ El efecto práctico es pequeño (`last_sync` se pone a «ahora» de todas formas
 siempre hay filas de ayer), pero es una inconsistencia de las que se cobran más tarde: la
 próxima cosa que se cuelgue de `has_today` heredará el desfase.
 
+**Arreglado** el 2026-10-23 (bloque 3 de `docs/PLAN_2026_10.md`): `today_str` sale de
+`_ahora_local()`. `since` se queda en UTC: como mucho trae un día de más, que no cambia nada.
+
 ### 1.7 `_check_rate` poda con la ventana equivocada (latente)
 
 `backend/main.py:780`

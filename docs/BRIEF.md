@@ -44,7 +44,8 @@ backend está en `docs/BACKEND_PATRONES.md`.
     llaman a todo (`apple_exercise_time` contra `exercise_time`), así que el histórico
     vive partido en dos nombres y quedarse con uno descarta el otro entero. Se fusiona
     por fecha, con el orden de la tupla como preferencia. Es lo mismo que hace
-    `findMetric` en helpers.js, que ya recibía los dos nombres.
+    `findMetric` en helpers.js desde octubre de 2026 (antes este apunte lo daba por
+    hecho y no lo estaba: se quedaba con el primer nombre, igual que el correo).
   - **Qué días estuvo puesto el reloj** (`_uso_del_reloj()`, sección `## RELOJ`). Es el
     denominador que le faltaba a todo lo demás: una métrica del Watch **no puede** tener
     dato un día que estuvo en un cajón, así que su `n` hay que leerlo contra los días que

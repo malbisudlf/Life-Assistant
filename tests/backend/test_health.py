@@ -1560,7 +1560,8 @@ class TestUltimoSync:
     iPhone dos días sin mandar una sola fila."""
 
     def test_las_horas_en_casa_no_cuentan_como_sync(self, client, mock_requests, auth_headers):
-        hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # «Hoy» en la zona del usuario, que es como lo cuenta el endpoint.
+        hoy = main._ahora_local().strftime("%Y-%m-%d")
         mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.", FakeResponse([
             {"metric_date": "2026-09-01", "metric_name": "sleep_analysis", "value": 7,
              "unit": "hr", "extra": {}, "fuente": "auto_export",
@@ -1573,6 +1574,34 @@ class TestUltimoSync:
         assert r.json()["last_sync"] == "2026-09-01T05:00:00+00:00"
         # La métrica se sigue devolviendo: solo deja de contar como señal de sync.
         assert r.json()["metrics"]["time_at_home"][0]["value"] == 9.5
+
+    # Las 00:30 del 2 de enero en Madrid son todavía las 23:30 del 1 en UTC. Año lejano a
+    # propósito: con el «hoy» en UTC de antes, la fecha de la máquina no coincide con
+    # ninguna de las dos y el test no puede pasar por casualidad.
+    MADRUGADA = datetime(2030, 1, 2, 0, 30, tzinfo=main.LOCAL_TZ)
+
+    @staticmethod
+    def _fila(fecha):
+        return {"metric_date": fecha, "metric_name": "step_count", "value": 300,
+                "unit": "count", "extra": {}, "fuente": "auto_export",
+                "created_at": "2029-12-31T20:00:00+00:00"}
+
+    def test_hoy_es_el_dia_local_no_el_de_utc(self, client, mock_requests, auth_headers, monkeypatch):
+        """Hallazgo 1.6 de agosto: todo el módulo cuenta los días en la zona del usuario
+        y este endpoint en UTC, así que entre medianoche y las dos una fila de hoy no
+        contaba como de hoy y `last_sync` se quedaba con el `created_at` viejo."""
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.MADRUGADA)
+        mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.",
+                          FakeResponse([self._fila("2030-01-02")]))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.json()["last_sync"] != "2029-12-31T20:00:00+00:00"
+
+    def test_la_fila_de_ayer_no_es_de_hoy_aunque_en_utc_lo_sea(self, client, mock_requests, auth_headers, monkeypatch):
+        monkeypatch.setattr(main, "_ahora_local", lambda: self.MADRUGADA)
+        mock_requests.add("GET", "/rest/v1/health_metrics?metric_date=gte.",
+                          FakeResponse([self._fila("2030-01-01")]))
+        r = client.get("/health/metrics", headers=auth_headers)
+        assert r.json()["last_sync"] == "2029-12-31T20:00:00+00:00"
 
 
 class TestLecturaPaginada:
