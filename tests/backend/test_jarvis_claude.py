@@ -275,6 +275,8 @@ class TestElServicio:
         assert TURNO in visto["mcp"]["mcpServers"]["jarvis"]["url"]
         # Sin esto las herramientas del MCP quedan tras un buscador que `--tools ""` quita.
         assert visto["env"]["ENABLE_TOOL_SEARCH"] == "false"
+        # Y sin tráfico no esencial: ~0,6 s menos de arranque en cada turno.
+        assert visto["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
 
     def test_mal_formado_o_colgado(self, monkeypatch, tmp_path):
         servicio = _servicio(monkeypatch)

@@ -70,8 +70,14 @@ def entorno() -> dict:
     buscador también desaparece, y Jarvis arrancaba cada turno con las 76 herramientas
     conectadas e invisibles: «no tengo acceso al tiempo», con el MCP en verde. Visto el
     2026-10-13, la primera vez que se probó en `caja` contra el backend de verdad.
+
+    Y sin el tráfico no esencial (telemetría, avisos de versión…), que es ~0,6 s de cada
+    turno, porque cada turno es un `claude -p` que arranca de cero. Medido en el teléfono,
+    que hace lo mismo: ver «Los parches 15 y 16» en `telefono/PARCHES.md`.
     """
-    return {**os.environ, "ENABLE_TOOL_SEARCH": "false"}
+    return {**os.environ,
+            "ENABLE_TOOL_SEARCH":                       "false",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
 
 
 def comando(mcp_config: str, sistema: str, ayuda: str) -> list:
