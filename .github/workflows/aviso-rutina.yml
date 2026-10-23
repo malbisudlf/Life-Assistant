@@ -1,0 +1,71 @@
+name: Avisar de una rutina
+
+# Las rutinas de Claude Code en la nube que solo tienen algo que CONTAR (no un hallazgo que
+# arreglar): la auditoría de dependencias, los docs que no dicen lo que hace el código, el
+# avance del plan, la preparación de un examen. Abren un issue con el título
+# «Aviso de rutina: …» y esto se lo cuenta al backend, que deja el aviso en el móvil por
+# `POST /programado/roto` con `aviso: true` — el mismo canal que la caducidad del dominio.
+#
+# Por qué por un issue y no la rutina directamente: la rutina no tiene dónde guardar un
+# secreto (lo que se le pase acaba en la transcripción de la sesión) y Actions sí. Es el
+# mismo motivo que `revision-aviso.yml`, del que esto copia la forma.
+#
+# El título es el contrato con los prompts de las rutinas: cambiar el prefijo aquí deja
+# mudas a todas. La huella con la que el backend deduplica es el título entero, así que
+# una rutina que repite el mismo aviso cada semana no lo repite en el móvil.
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: aviso-rutina-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  avisar:
+    name: Avisar al backend
+    # Solo los issues del dueño del repositorio. Es público y cualquier cuenta puede abrir
+    # un issue con este título: sin esta condición su texto llegaría al móvil. Las rutinas
+    # corren con la cuenta del dueño.
+    if: >
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, 'Aviso de rutina:')
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /programado/roto
+        env:
+          BACKEND_URL:    ${{ vars.BACKEND_URL }}
+          REVISION_TOKEN: ${{ secrets.REVISION_TOKEN }}
+          TITULO:         ${{ github.event.issue.title }}
+          CUERPO_ISSUE:   ${{ github.event.issue.body }}
+          ISSUE_URL:      ${{ github.event.issue.html_url }}
+        # Todo por variable de entorno y dentro del JSON con jq, nunca interpolado en el
+        # script: el título y el cuerpo los escribe quien abre el issue.
+        #
+        # El detalle es la primera línea del cuerpo que no esté vacía: los prompts de las
+        # rutinas la escriben como resumen de una frase. El backend la recorta a 200.
+        run: |
+          set -euo pipefail
+
+          if [ -z "$BACKEND_URL" ] || [ -z "$REVISION_TOKEN" ]; then
+            echo "Falta la variable BACKEND_URL o el secret REVISION_TOKEN." >&2
+            exit 1
+          fi
+
+          NOMBRE="${TITULO#Aviso de rutina: }"
+          DETALLE=$(printf '%s\n' "$CUERPO_ISSUE" | sed '/^[[:space:]]*$/d' | head -n 1 | cut -c1-200)
+          CUERPO=$(jq -n --arg w "$NOMBRE" --arg d "$DETALLE" --arg u "$ISSUE_URL" \
+            '{workflow: $w, aviso: true, detalle: $d, url: $u}')
+
+          RESPUESTA=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/programado/roto" \
+            -H "X-Auth-Token: $REVISION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --max-time 60 \
+            --retry 3 --retry-delay 10 --retry-connrefused \
+            -d "$CUERPO")
+
+          echo "Avisado: $RESPUESTA"
+          echo "\`$NOMBRE\`: \`$RESPUESTA\`" >> "$GITHUB_STEP_SUMMARY"
