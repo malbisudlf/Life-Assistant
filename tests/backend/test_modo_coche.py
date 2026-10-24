@@ -71,6 +71,30 @@ def test_reconectar_el_coche_no_vuelve_a_llamar(client, mock_requests):
     assert len(lanzadas) == 1
 
 
+def test_a_demanda_es_una_llamada_normal_y_sin_pausa(client, mock_requests):
+    """El «Oye Siri, Jarvis» con música: sin escucha pasiva, y cuantas veces la pidas."""
+    lanzadas = _centralita(mock_requests)
+    client.post("/telefono/modo-coche", headers=CABECERA)                 # la del coche
+    for _ in range(2):
+        r = client.post("/telefono/modo-coche?escucha=normal", headers=CABECERA)
+        assert r.json()["llamada"] is True
+    assert [("escuchaPasiva" in c) for c in lanzadas] == [True, False, False]
+    assert lanzadas[1]["detectVoicemail"] is True
+
+
+def test_a_demanda_no_gasta_la_pausa_de_la_automatizacion(client, mock_requests):
+    lanzadas = _centralita(mock_requests)
+    client.post("/telefono/modo-coche?escucha=normal", headers=CABECERA)
+    assert client.post("/telefono/modo-coche", headers=CABECERA).json()["llamada"] is True
+    assert len(lanzadas) == 2
+
+
+def test_un_modo_inventado_no_llama(client, mock_requests):
+    lanzadas = _centralita(mock_requests)
+    assert client.post("/telefono/modo-coche?escucha=fiesta", headers=CABECERA).status_code == 400
+    assert lanzadas == []
+
+
 def test_si_la_centralita_falla_lo_dice_y_no_cuenta_la_pausa(client, mock_requests):
     _centralita(mock_requests, estado=503)
     r = client.post("/telefono/modo-coche", headers=CABECERA)

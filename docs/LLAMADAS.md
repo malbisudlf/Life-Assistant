@@ -308,19 +308,36 @@ Whisper por hora, céntimos). Tope de 3 horas por llamada.
    iPhone (`HEALTH_INGEST_TOKEN`, el mismo del Atajo del cargador). Sin mirar si estás
    despierto (lo pides tú), sin insistir si no lo coges, colgando si descuelga el buzón y
    una vez cada `MODO_COCHE_PAUSA_MIN` (10): CarPlay se reconecta en cada parada corta.
-2. **Un Atajo de iOS que lo dispara al conectar con el coche**: Atajos → Automatización →
-   Nueva → **CarPlay** → *Se conecta* → *Ejecutar inmediatamente* (sin preguntar). Acción:
-   *Obtener contenido de URL*, `https://api.lifeassistantbackend.bid/telefono/modo-coche`,
-   método **POST**, cabecera `X-Auth-Token` con el token. Si el coche no tiene CarPlay, la
-   misma automatización con *Bluetooth* → el dispositivo del coche.
+2. **Dos automatizaciones de Atajos, una por coche**, con la misma acción:
+   - **El coche con CarPlay**: Atajos → Automatización → Nueva → **CarPlay** → *Se
+     conecta* → *Ejecutar inmediatamente*.
+   - **El coche sin CarPlay**: Automatización → Nueva → **Bluetooth** → dispositivo **«MB
+     Bluetooth»** → *Se conecta* → *Ejecutar inmediatamente*.
+   - La acción de las dos: *Obtener contenido de URL*,
+     `https://api.lifeassistantbackend.bid/telefono/modo-coche`, método **POST**, cabecera
+     `X-Auth-Token` con el token (cópielo del Atajo del cargador, que lleva el mismo).
+   Si algún día un coche tuviera las dos cosas, las dos dispararían: la pausa de 10 minutos
+   hace que suene una sola vez.
 3. **Que la llamada se coja sola**: Ajustes → Accesibilidad → Tocar → Enrutamiento de
    audio de llamadas → **Respuesta automática** (unos segundos). Afecta a todas las
    llamadas, también a las que no son de Jarvis, y Atajos no tiene acción para
    encenderla y apagarla. **Sin probar** con la app del 3CX (que entra por CallKit, como
    una llamada normal): si no la coge sola, queda un toque en la pantalla del coche.
 
-**También a mano**: llamar a la extensión de Jarvis y decir «modo coche». O «Oye Siri,
-Jarvis» con un Atajo que haga la misma petición del paso 2.
+**Con música, no.** Mientras hay una llamada abierta, iOS pausa la música (Spotify, Apple
+Music, la radio del móvil): una llamada se queda el audio para ella, y CallKit no deja
+mezclarlo. Escucha pasiva y música son, en el iPhone, una cosa o la otra. Para los viajes
+con música está la llamada **a demanda**:
+
+- Un Atajo llamado **«Jarvis»** con la misma acción del paso 2, pero a
+  `…/telefono/modo-coche?escucha=normal`. «Oye Siri, Jarvis» lo lanza; la música se pausa,
+  Jarvis dice «¿Señor?», se habla, «cuelga», y la música vuelve sola.
+- Esa llamada no tiene la pausa de 10 minutos ni la gasta: se puede pedir cuantas veces haga
+  falta.
+- Si la automatización le llama al arrancar y quiere música: «Jarvis, cuelga», y Siri
+  para lo que surja.
+
+**También a mano**: llamar a la extensión de Jarvis y decir «modo coche».
 
 **Lo que no hace**: no hay palabra clave sin llamada abierta (eso es Siri, y Apple no deja
 cambiarle el nombre). Y mientras la llamada está abierta la extensión de Jarvis está
