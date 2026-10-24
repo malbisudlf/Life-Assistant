@@ -1,0 +1,977 @@
+diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+index b597d2d..f71e1aa 100644
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -18,6 +18,8 @@ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapi
+ const { leerSiLoPide } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
++// Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
++const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -26,11 +28,11 @@ const HOLD_MUSIC_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Un momento...",
+-  "Déjame pensar...",
++  "Un momento, señor...",
++  "Enseguida...",
+   "Vamos a ver...",
+   "Estoy en ello...",
+-  "Buena pregunta...",
++  "Comprobándolo...",
+   "Consultando...",
+   "Ahora mismo lo miro...",
+   "Procesando...",
+@@ -120,6 +122,7 @@ function extractVoiceLine(response) {
+  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
+  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
+  * @param {number} [options.maxTurns=20] - Maximum conversation turns
++ * @param {boolean} [options.escuchaPasiva=false] - Empezar a la escucha (parche 22)
+  * @param {Function} [options.onUserTurn] - Se llama cada vez que el otro lado dice algo
+  *   que se entiende (parche 12): es la prueba de que hay una persona
+  * @returns {Promise<{endReason: string}>} Por qué acabó (parche 12): 'silence' (dos
+@@ -136,6 +139,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     skipGreeting = false,
+     deviceConfig = null,
+     maxTurns = 20,
++    escuchaPasiva = false,
+     onUserTurn = null
+   } = options;
+   // Por qué acaba la conversación. Lo que importa distinguir es 'silence': una llamada
+@@ -260,6 +264,10 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     let avisoLectura = '';
+     // Lo que espera un sí o un no de viva voz (parche 20), o null.
+     let pendienteConfirmar = null;
++    // Parche 22: la escucha pasiva; la llamada del coche ya empieza en ella.
++    const pasiva = new EscuchaPasiva({
++      log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
++    });
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -271,89 +279,133 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         break;
+       }
+ 
+-      // ============================================
+-      // READY BEEP: Signal "your turn to speak"
+-      // ============================================
+-      if (!interrumpio) {
+-        try {
+-          if (callActive) await endpoint.play(READY_BEEP_URL);
+-        } catch (e) {
+-          if (!callActive) break;
+-          logger.warn('Ready beep failed', { callUuid, error: e.message });
++      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
++      let transcript = null;
++      let llamado = false;
++      let fueInterrupcion = false;
++      if (pasiva.dormida()) {
++        const oido = await pasiva.esperarPalabra({ session, whisperClient, sigueActiva: () => callActive });
++        if (!oido) break;
++        if (oido.tope) {
++          if (callActive) await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
++          fin = 'pasiva_tope';
++          break;
++        }
++        turnCount = 1;
++        llamado = true;
++        if (onUserTurn) {
++          try { onUserTurn(oido.resto || 'Jarvis'); } catch (e) { /* contar no puede cortar la llamada */ }
++        }
++        if (oido.resto) {
++          transcript = oido.resto;
++        } else if (callActive) {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
+         }
+       }
+-      const fueInterrupcion = interrumpio;
+-      interrumpio = false;
+ 
+-      // Enable capture and wait for speech
+-      session.setCaptureEnabled(true);
+-      logger.info('Waiting for speech (press # to send immediately)', { callUuid });
++      if (transcript === null) {
++        // ============================================
++        // READY BEEP: Signal "your turn to speak"
++        // ============================================
++        if (!interrumpio) {
++          try {
++            if (callActive) await endpoint.play(READY_BEEP_URL);
++          } catch (e) {
++            if (!callActive) break;
++            logger.warn('Ready beep failed', { callUuid, error: e.message });
++          }
++        }
++        fueInterrupcion = interrumpio;
++        interrumpio = false;
+ 
+-      let utterance = null;
+-      try {
+-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+-        logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
+-      } catch (err) {
+-        if (!callActive) break;
+-        logger.info('Utterance timeout', { callUuid, error: err.message });
+-      }
++        // Enable capture and wait for speech
++        session.setCaptureEnabled(true);
++        logger.info('Waiting for speech (press # to send immediately)', { callUuid });
+ 
+-      session.setCaptureEnabled(false);
++        let utterance = null;
++        try {
++          utterance = await session.waitForUtterance({ timeoutMs: pasiva.esperaTurnoMs(30000) });
++          logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
++        } catch (err) {
++          if (!callActive) break;
++          logger.info('Utterance timeout', { callUuid, error: err.message });
++        }
+ 
+-      // Check if call ended during speech detection
+-      if (!callActive) {
+-        logger.info('Call ended during speech detection', { callUuid });
+-        break;
+-      }
++        session.setCaptureEnabled(false);
+ 
+-      // Handle no speech
+-      if (!utterance) {
+-        silencios++;
+-        if (silencios >= 2) {
+-          logger.info('Dos turnos sin oír a nadie, cuelgo', { callUuid });
+-          fin = 'silence';
++        // Check if call ended during speech detection
++        if (!callActive) {
++          logger.info('Call ended during speech detection', { callUuid });
+           break;
+         }
+-        const promptUrl = await ttsService.generateSpeech(
+-          "No te he oído. ¿Sigues ahí?",
+-          voiceId
+-        );
+-        if (callActive) await endpoint.play(promptUrl);
+-        continue;
+-      }
+-      silencios = 0;
+ 
+-      // ============================================
+-      // GOT-IT BEEP: Signal "I heard you, processing"
+-      // ============================================
+-      try {
+-        if (callActive) await endpoint.play(GOTIT_BEEP_URL);
+-      } catch (e) {
+-        if (!callActive) break;
+-        logger.warn('Got-it beep failed', { callUuid, error: e.message });
+-      }
++        // Parche 22: tras contestar, si no le dices nada más, vuelve a dormirse sin preguntar.
++        if (!utterance && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
+ 
+-      // Transcribe
+-      const transcript = await whisperClient.transcribe(utterance.audio, {
+-        format: 'pcm',
+-        sampleRate: 16000,
+-        language: 'es'
+-      });
++        // Handle no speech
++        if (!utterance) {
++          silencios++;
++          if (silencios >= 2) {
++            logger.info('Dos turnos sin oír a nadie, cuelgo', { callUuid });
++            fin = 'silence';
++            break;
++          }
++          const promptUrl = await ttsService.generateSpeech(
++            "No te he oído. ¿Sigues ahí?",
++            voiceId
++          );
++          if (callActive) await endpoint.play(promptUrl);
++          continue;
++        }
++        silencios = 0;
++
++        // ============================================
++        // GOT-IT BEEP: Signal "I heard you, processing"
++        // ============================================
++        try {
++          if (callActive) await endpoint.play(GOTIT_BEEP_URL);
++        } catch (e) {
++          if (!callActive) break;
++          logger.warn('Got-it beep failed', { callUuid, error: e.message });
++        }
++
++        // Transcribe
++        transcript = await whisperClient.transcribe(utterance.audio, {
++          format: 'pcm',
++          sampleRate: 16000,
++          language: 'es'
++        });
++
++        logger.info('Transcribed', { callUuid, transcript });
+ 
+-      logger.info('Transcribed', { callUuid, transcript });
++        if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
++
++        // Handle empty transcription
++        if (!transcript || transcript.trim().length < 2) {
++          const clarifyUrl = await ttsService.generateSpeech(
++            "Perdona, no te he entendido. ¿Puedes repetir?",
++            voiceId
++          );
++          if (callActive) await endpoint.play(clarifyUrl);
++          continue;
++        }
++      }
+ 
+-      // Handle empty transcription
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech(
+-          "Perdona, no te he entendido. ¿Puedes repetir?",
+-          voiceId
+-        );
+-        if (callActive) await endpoint.play(clarifyUrl);
++      // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
++      const ordenPasiva = pasiva.orden(transcript);
++      if (ordenPasiva) {
++        if (callActive) await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+       }
+ 
+       // Alguien ha dicho algo que se entiende: hay una persona al otro lado.
+-      if (onUserTurn) {
++      if (onUserTurn && !llamado) {
+         try { onUserTurn(transcript); } catch (e) { /* contar no puede cortar la llamada */ }
+       }
+ 
+@@ -393,6 +445,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       logger.info('Querying Claude', { callUuid, phrase: thinkingPhrase });
+       const claudeResponse = await pensar({
+         consultar: () => claudeBridge.query(
++          (llamado ? AVISO_PASIVA : '') +
+           (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
+           { callId: callUuid, devicePrompt: devicePrompt }
+         ),
+diff --git a/voice-app/lib/escucha-pasiva.js b/voice-app/lib/escucha-pasiva.js
+new file mode 100644
+index 0000000..228bf83
+--- /dev/null
++++ b/voice-app/lib/escucha-pasiva.js
+@@ -0,0 +1,223 @@
++/**
++ * Parche 22: la escucha pasiva («modo coche»). Ver telefono/PARCHES.md en Life Assistant.
++ *
++ * La llamada se queda abierta y Jarvis callado: oye todo lo que pasa, pero no contesta
++ * hasta que alguien dice su nombre, como un altavoz de los que se despiertan con una
++ * palabra. «Jarvis, ¿qué tengo hoy?» es una pregunta; lo que se hable en el coche sin
++ * nombrarle no sale de la voice-app (ni llega a Claude ni se guarda en la bitácora).
++ *
++ * - Se enciende diciendo «modo coche» (o «escucha pasiva», «quédate escuchando») en
++ *   cualquier llamada, o desde el principio con `escuchaPasiva: true` en
++ *   POST /api/outbound-call, que es lo que pide el backend cuando el iPhone se conecta
++ *   al coche.
++ * - Despierto, contesta y deja ESCUCHA_PASIVA_SEGUIMIENTO_MS (8 s) para seguir hablando
++ *   sin repetir el nombre. Si nadie dice nada, o se le dice «gracias» o «eso es todo»,
++ *   vuelve a dormirse en silencio. «Cuelga» o «adiós» cuelgan, como siempre.
++ * - «Modo normal» lo apaga y la llamada sigue como cualquier otra.
++ * - Dormido no hay «¿sigues ahí?» ni cuenta de silencios (parche 8): el silencio es lo
++ *   normal. El tope es de tiempo, ESCUCHA_PASIVA_MAX_MIN (180 min).
++ *
++ * Lo que cuesta: cada frase que oye dormido se transcribe, pero solo sus primeros
++ * ESCUCHA_PASIVA_VENTANA_MS (4 s) si es larga; la frase entera solo cuando el
++ * principio trae el nombre. Por eso, en una frase larga, «Jarvis» tiene que ir al
++ * principio. Con la radio puesta todo el viaje son unos 8 minutos de Whisper por hora.
++ */
++'use strict';
++
++const { setTimeout: dormirMs } = require('node:timers/promises');
++
++// Cómo transcribe Whisper «Jarvis» en español: jarvis, yarvis, charvis, jarbis, yervis,
++// harvis, llarvis, javis… Con «oye», «hey» o «eh» delante, opcional.
++const PALABRA_POR_DEFECTO =
++  '(?:(?:oye|hey|ey|eh|hola)[\\s,]+)?(?:j|y|ch|g|h|ll|sh|dj)[aei]r?[bv]is';
++
++const LETRA = 'a-záéíóúüñ';
++
++// Lo que se dice al despertarle sin pregunta, al encender, al apagar y al dormirse.
++const FRASES = {
++  activada:  'Escucha pasiva activada, señor. Diga «Jarvis» cuando me necesite.',
++  despierta: '¿Señor?',
++  dormir:    'A su disposición.',
++  normal:    'Modo normal, señor. Le escucho.',
++  tope:      'Llevo mucho rato a la escucha, señor. Cuelgo; llámeme cuando quiera.'
++};
++
++// A Claude, para que sepa por qué le llega una pregunta de repente y que debe ser breve.
++const AVISO_PASIVA =
++  '[Modo coche: estabas a la escucha en silencio y te ha llamado por tu nombre. ' +
++  'Contesta breve; después vuelves a escuchar sin hablar.] ';
++
++function entero(nombre, porDefecto) {
++  const n = parseInt(process.env[nombre], 10);
++  return Number.isFinite(n) && n > 0 ? n : porDefecto;
++}
++
++function expresionPalabra() {
++  const propia = process.env.ESCUCHA_PASIVA_PALABRA;
++  return new RegExp('(^|[^' + LETRA + '])(' + (propia || PALABRA_POR_DEFECTO) + ')(?![' + LETRA + '])', 'i');
++}
++
++function limpiar(texto) {
++  return String(texto || '').replace(/^[\s,.;:!?¡¿…-]+/, '').replace(/[\s,;:-]+$/, '').trim();
++}
++
++/**
++ * ¿Le han llamado? Devuelve null, o { resto } con lo que hay que contestar: lo que va
++ * detrás del nombre («Jarvis, pon música» → «pon música») o, si el nombre va al final
++ * («¿qué hora es, Jarvis?»), la frase que lo lleva. `resto` vacío es que solo le han
++ * nombrado: toca preguntar «¿Señor?» y escuchar.
++ */
++function buscarPalabra(texto) {
++  const t = String(texto || '');
++  const m = expresionPalabra().exec(t);
++  if (!m) return null;
++  const inicio = m.index + m[1].length;
++  const despues = limpiar(t.slice(inicio + m[2].length));
++  if (/[a-záéíóúüñ0-9]{2,}/i.test(despues)) return { resto: despues };
++  // Nada detrás: vale la última frase de delante (lo anterior puede ser otra conversación).
++  const antes = t.slice(0, inicio).split(/[.!?…]+\s/).pop();
++  return { resto: limpiar(antes) };
++}
++
++function pideEscuchaPasiva(texto) {
++  return /\b(modo (coche|pasivo|escucha|copiloto)|escucha pasiva|qu[eé]date (escuchando|a la escucha))\b/i
++    .test(String(texto || ''));
++}
++
++function pideModoNormal(texto) {
++  return /\b(modo normal|sal (del modo|de la escucha)|deja de escuchar|desactiva (el modo|la escucha))\b/i
++    .test(String(texto || ''));
++}
++
++// «Gracias», «eso es todo», «nada más»… dicho SOLO (la frase entera): vuelve a dormirse.
++function esFinDeTurno(texto) {
++  const t = String(texto || '').toLowerCase().replace(/[¡!¿?.,]/g, ' ').replace(/\s+/g, ' ').trim()
++    .replace(/\s*\b(jarvis|señor)\b\s*/g, ' ').trim();
++  return /^(vale |ok |perfecto )?(muchas gracias|gracias|eso es todo|nada m[aá]s|ya est[aá]|perfecto|vale)( gracias)?$/.test(t);
++}
++
++class EscuchaPasiva {
++  /**
++   * @param {Object} [o]
++   * @param {Function} [o.log]
++   * @param {boolean}  [o.activa] - empezar ya a la escucha (la llamada del coche)
++   */
++  constructor(o) {
++    const op = o || {};
++    this.log = op.log || function () {};
++    this.activa = Boolean(op.activa);
++    this.despierta = false;
++    this.seguimientoMs = entero('ESCUCHA_PASIVA_SEGUIMIENTO_MS', 8000);
++    this.ventanaMs = entero('ESCUCHA_PASIVA_VENTANA_MS', 4000);
++    this.topeMs = entero('ESCUCHA_PASIVA_MAX_MIN', 180) * 60000;
++    this.desde = this.activa ? Date.now() : null;
++  }
++
++  /** ¿Toca esperar a que le nombren antes de escuchar el turno? */
++  dormida() {
++    return this.activa && !this.despierta;
++  }
++
++  activar() {
++    if (!this.activa) this.desde = Date.now();
++    this.activa = true;
++    this.despierta = false;
++    this.log('ESCUCHA-PASIVA: activada');
++  }
++
++  dormir() {
++    if (this.activa && this.despierta) this.log('ESCUCHA-PASIVA: vuelvo a escuchar en silencio');
++    this.despierta = false;
++  }
++
++  /**
++   * Las órdenes de la propia escucha, antes de que la frase vaya a Claude. Devuelve null
++   * o { frase } con lo que hay que decir (el estado ya cambiado).
++   */
++  orden(texto) {
++    if (!this.activa) {
++      if (pideEscuchaPasiva(texto)) { this.activar(); return { frase: FRASES.activada }; }
++      return null;
++    }
++    if (pideModoNormal(texto)) {
++      this.activa = false;
++      this.despierta = false;
++      this.log('ESCUCHA-PASIVA: apagada');
++      return { frase: FRASES.normal };
++    }
++    if (pideEscuchaPasiva(texto)) { this.dormir(); return { frase: FRASES.activada }; }
++    if (esFinDeTurno(texto)) { this.dormir(); return { frase: FRASES.dormir }; }
++    return null;
++  }
++
++  /** El tiempo que espera el turno siguiente: corto si es seguir hablando tras despertar. */
++  esperaTurnoMs(normal) {
++    return this.activa ? this.seguimientoMs : normal;
++  }
++
++  async _transcribir(whisperClient, audio) {
++    return whisperClient.transcribe(audio, {
++      format: 'pcm', sampleRate: 16000, language: 'es', prompt: 'Jarvis.'
++    });
++  }
++
++  /**
++   * Escucha en silencio hasta que alguien le nombra. Devuelve { resto } (ver
++   * buscarPalabra), { tope: true } si se acabó el tiempo, o null si se ha colgado.
++   *
++   * @param {Object}   p
++   * @param {Object}   p.session        - AudioForkSession
++   * @param {Object}   p.whisperClient
++   * @param {Function} [p.sigueActiva]  - () => boolean
++   */
++  async esperarPalabra(p) {
++    const sigueActiva = p.sigueActiva || function () { return true; };
++    // 16 kHz, 16 bits, mono: 32 bytes por milisegundo.
++    const ventana = this.ventanaMs * 32;
++    let oidas = 0;
++    this.log('ESCUCHA-PASIVA: a la escucha');
++    while (sigueActiva()) {
++      if (Date.now() - this.desde > this.topeMs) {
++        this.log('ESCUCHA-PASIVA: tope de tiempo');
++        return { tope: true };
++      }
++      p.session.setCaptureEnabled(true);
++      let u = null;
++      try {
++        u = await p.session.waitForUtterance({ timeoutMs: 60000 });
++      } catch (err) {
++        if (/closed/i.test(err.message || '')) return null;
++        continue;                                 // un minuto en silencio: a seguir
++      }
++      if (!sigueActiva()) return null;
++      oidas++;
++      let texto = '';
++      const larga = u.audio.length > ventana * 1.5;
++      try {
++        texto = await this._transcribir(p.whisperClient, larga ? u.audio.subarray(0, ventana) : u.audio);
++      } catch (err) {
++        this.log('ESCUCHA-PASIVA: Whisper falló (' + err.message + ')');
++        await dormirMs(1000);
++        continue;
++      }
++      let hallada = buscarPalabra(texto);
++      // Lo que se habla sin nombrarle no se registra: ni el texto, solo que no era.
++      if (!hallada) continue;
++      if (larga) {
++        try {
++          hallada = buscarPalabra(await this._transcribir(p.whisperClient, u.audio)) || hallada;
++        } catch (err) { /* vale con lo del principio */ }
++      }
++      p.session.setCaptureEnabled(false);
++      this.despierta = true;
++      this.log('ESCUCHA-PASIVA: me llaman (tras ' + oidas + ' frases sin mí)');
++      return hallada;
++    }
++    return null;
++  }
++}
++
++module.exports = {
++  EscuchaPasiva, buscarPalabra, pideEscuchaPasiva, pideModoNormal, esFinDeTurno,
++  FRASES, AVISO_PASIVA
++};
+diff --git a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
+index cd4bf88..a04548d 100644
+--- a/voice-app/lib/outbound-routes.js
++++ b/voice-app/lib/outbound-routes.js
+@@ -97,6 +97,14 @@ function validateRequest(body) {
+     }
+   }
+ 
++  // Parche 22: la llamada del coche empieza en escucha pasiva.
++  if (body.escuchaPasiva !== undefined && typeof body.escuchaPasiva !== 'boolean') {
++    return { valid: false, error: 'Field "escuchaPasiva" must be a boolean' };
++  }
++  if (body.escuchaPasiva === true && body.mode !== 'conversation') {
++    return { valid: false, error: 'Field "escuchaPasiva" needs mode "conversation"' };
++  }
++
+   return { valid: true };
+ }
+ 
+@@ -112,6 +120,8 @@ function validateRequest(body) {
+  *   - device: Device extension or name for voice/personality (optional)
+  *   - callerId: Caller ID (optional)
+  *   - timeoutSeconds: Ring timeout (optional, default: 30)
++ *   - escuchaPasiva: true para empezar callado hasta oír «Jarvis» (parche 22, solo
++ *     con mode 'conversation')
+  */
+ router.post('/outbound-call', async function(req, res) {
+   var startTime = Date.now();
+@@ -151,6 +161,7 @@ router.post('/outbound-call', async function(req, res) {
+     var voicemailDelaySeconds = req.body.voicemailDelaySeconds === undefined ? 8
+       : Math.min(Math.max(Number(req.body.voicemailDelaySeconds) || 0, 0), 30);
+     var webhookUrl = req.body.webhookUrl;
++    var escuchaPasiva = req.body.escuchaPasiva === true;
+ 
+     // Look up device configuration
+     var deviceConfig = null;
+@@ -299,6 +310,7 @@ router.post('/outbound-call', async function(req, res) {
+               context: context,           // NEW: pass structured context
+               skipGreeting: true,
+               maxTurns: 20,
++              escuchaPasiva: escuchaPasiva,
+               onUserTurn: function() { session.userTurns++; }
+             });
+ 
+diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+index 9bbf10b..a84904a 100644
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -9,6 +9,8 @@ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapi
+ const { leerSiLoPide } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
++// Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
++const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -20,11 +22,11 @@ const DEFAULT_VOICE_ID = 'JAgnJveGGUh4qy4kh6dF';
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Un momento...",
+-  "Déjame pensar...",
++  "Un momento, señor...",
++  "Enseguida...",
+   "Vamos a ver...",
+   "Estoy en ello...",
+-  "Buena pregunta...",
++  "Comprobándolo...",
+   "Consultando...",
+   "Ahora mismo lo miro...",
+   "Procesando...",
+@@ -116,9 +118,11 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+   const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
+   const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
+   const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
+-  const greeting = deviceConfig && deviceConfig.name !== 'Morpheus'
+-    ? "Hola, soy " + deviceConfig.name + ". ¿En qué puedo ayudarte?"
+-    : "Hola, soy tu servidor. ¿En qué puedo ayudarte?";
++  const greeting = deviceConfig && deviceConfig.name === 'Jarvis'
++    ? "A su servicio, señor."
++    : deviceConfig && deviceConfig.name !== 'Morpheus'
++      ? "Hola, soy " + deviceConfig.name + ". ¿En qué puedo ayudarte?"
++      : "Hola, soy tu servidor. ¿En qué puedo ayudarte?";
+ 
+   try {
+     console.log('[' + new Date().toISOString() + '] CONVERSATION Starting (session: ' + callUuid + ', device: ' + deviceName + ', voice: ' + voiceId + ')...');
+@@ -152,60 +156,106 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+     // Lo que espera un sí o un no de viva voz (parche 20), o null.
+     let pendienteConfirmar = null;
+     const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
++    // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
++    const pasiva = new EscuchaPasiva({ log: logTurno });
++    let viva = true;
++    dialog.on('destroy', function () { viva = false; });
+ 
+-    while (turnCount < MAX_TURNS) {
++    while (turnCount < MAX_TURNS && viva) {
+       turnCount++;
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + '/' + MAX_TURNS);
+ 
+-      // READY BEEP
+-      if (!interrumpio) {
+-        try {
+-          await endpoint.play(READY_BEEP_URL);
+-        } catch (e) {
+-          console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
++      let transcript = null;
++      let llamado = false;
++      let fueInterrupcion = false;
++      if (pasiva.dormida()) {
++        const oido = await pasiva.esperarPalabra({
++          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; }
++        });
++        if (!oido) break;
++        if (oido.tope) {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
++          break;
++        }
++        turnCount = 1;
++        llamado = true;
++        if (oido.resto) {
++          transcript = oido.resto;
++        } else {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
+         }
+       }
+-      const fueInterrupcion = interrumpio;
+-      interrumpio = false;
+ 
+-      session.setCaptureEnabled(true);
+-      console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
++      if (transcript === null) {
++        // READY BEEP
++        if (!interrumpio) {
++          try {
++            await endpoint.play(READY_BEEP_URL);
++          } catch (e) {
++            console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++          }
++        }
++        fueInterrupcion = interrumpio;
++        interrumpio = false;
+ 
+-      let utterance = null;
+-      try {
+-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+-        console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
+-      } catch (err) {
+-        console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
+-      }
++        session.setCaptureEnabled(true);
++        console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
+ 
+-      session.setCaptureEnabled(false);
++        let utterance = null;
++        try {
++          utterance = await session.waitForUtterance({ timeoutMs: pasiva.esperaTurnoMs(30000) });
++          console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
++        } catch (err) {
++          console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
++        }
+ 
+-      if (!utterance) {
+-        const promptUrl = await ttsService.generateSpeech("No te he oído. ¿Sigues ahí?", voiceId);
+-        await endpoint.play(promptUrl);
+-        continue;
+-      }
++        session.setCaptureEnabled(false);
+ 
+-      // GOT-IT BEEP
+-      try {
+-        await endpoint.play(GOTIT_BEEP_URL);
+-      } catch (e) {
+-        console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
+-      }
++        // Parche 22: tras contestar, si no le dices nada más, vuelve a dormirse sin preguntar.
++        if (!utterance && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
+ 
+-      // Transcribe
+-      const transcript = await whisperClient.transcribe(utterance.audio, {
+-        format: 'pcm',
+-        sampleRate: 16000,
+-        language: 'es'
+-      });
++        if (!utterance) {
++          const promptUrl = await ttsService.generateSpeech("No te he oído. ¿Sigues ahí?", voiceId);
++          await endpoint.play(promptUrl);
++          continue;
++        }
++
++        // GOT-IT BEEP
++        try {
++          await endpoint.play(GOTIT_BEEP_URL);
++        } catch (e) {
++          console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
++        }
++
++        // Transcribe
++        transcript = await whisperClient.transcribe(utterance.audio, {
++          format: 'pcm',
++          sampleRate: 16000,
++          language: 'es'
++        });
++
++        console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
++
++        if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
+ 
+-      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
++        if (!transcript || transcript.trim().length < 2) {
++          const clarifyUrl = await ttsService.generateSpeech("Perdona, no te he entendido. ¿Puedes repetir?", voiceId);
++          await endpoint.play(clarifyUrl);
++          continue;
++        }
++      }
+ 
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech("Perdona, no te he entendido. ¿Puedes repetir?", voiceId);
+-        await endpoint.play(clarifyUrl);
++      // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
++      const ordenPasiva = pasiva.orden(transcript);
++      if (ordenPasiva) {
++        await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+       }
+ 
+@@ -238,6 +288,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+       const claudeResponse = await pensar({
+         consultar: function () {
+           return claudeBridge.query(
++            (llamado ? AVISO_PASIVA : '') +
+             (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
+             { callId: callUuid, devicePrompt: devicePrompt }
+           );
+diff --git a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
+index bc22705..9976731 100644
+--- a/voice-app/lib/whisper-client.js
++++ b/voice-app/lib/whisper-client.js
+@@ -55,7 +55,8 @@ async function transcribe(audioBuffer, options = {}) {
+   const {
+     format = "pcm",
+     sampleRate = 8000,
+-    language = "es"
++    language = "es",
++    prompt = null
+   } = options;
+ 
+   const client = getOpenAIClient();
+@@ -80,6 +81,8 @@ async function transcribe(audioBuffer, options = {}) {
+       file: fs.createReadStream(tempFile),
+       model: "whisper-1",
+       language: language,
++      // Parche 22: la escucha pasiva le pasa «Jarvis.» para que escriba bien el nombre.
++      ...(prompt ? { prompt: prompt } : {}),
+       response_format: "text"
+     });
+ 
+diff --git a/voice-app/test/parche22.test.js b/voice-app/test/parche22.test.js
+new file mode 100644
+index 0000000..0c65a2a
+--- /dev/null
++++ b/voice-app/test/parche22.test.js
+@@ -0,0 +1,214 @@
++/**
++ * Parche 22: la escucha pasiva («modo coche»). La llamada se queda abierta, Jarvis
++ * callado, y solo contesta cuando alguien dice su nombre.
++ *
++ * Mismos dobles que parche20.test.js. Se lanza con `node --test test/parche22.test.js`,
++ * dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { EscuchaPasiva, buscarPalabra, esFinDeTurno, FRASES, AVISO_PASIVA } =
++  require('../lib/escucha-pasiva');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++function ttsFalso() {
++  const t = { pedidos: [] };
++  t.generateSpeech = async function (texto) { t.pedidos.push(texto); return 'tts:' + texto; };
++  return t;
++}
++
++function endpointFalso() {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep.play = async function (url) { ep.hecho.push('play ' + url); };
++  ep.api = async function (cmd) { ep.hecho.push('api ' + cmd); };
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++/** Cada frase es lo que se oye; null es un minuto (o los 8 s de seguir) sin que nadie hable. */
++function sesionFalsa(frases) {
++  const s = new EventEmitter();
++  let i = 0;
++  s.setCaptureEnabled = function () {};
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {};
++  s.esperas = [];
++  s.waitForUtterance = async function (o) {
++    s.esperas.push(o && o.timeoutMs);
++    if (i >= frases.length) throw new Error('AudioForkSession closed for call x');
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  return s;
++}
++
++function whisperFalso() {
++  const w = { oido: [], prompts: [] };
++  w.transcribe = async function (a, o) { w.oido.push(a.toString()); w.prompts.push(o && o.prompt); return a.toString(); };
++  return w;
++}
++
++function claudeFalso() {
++  const c = { preguntas: [] };
++  c.query = async function (texto) { c.preguntas.push(texto); return '🗣️ VOICE_RESPONSE: Doce grados, señor.'; };
++  c.endSession = async function () {};
++  return c;
++}
++
++function opciones(sesion, claude, whisper, tts) {
++  return {
++    ttsService: tts, whisperClient: whisper, claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++
++function dichas(ep) {
++  return ep.hecho.filter(function (h) { return h.indexOf('play tts:') === 0; })
++    .map(function (h) { return h.slice('play tts:'.length); });
++}
++
++// ── La palabra ───────────────────────────────────────────────────────────────
++test('22: oye su nombre como lo escribe Whisper, y no lo confunde', function () {
++  assert.deepStrictEqual(buscarPalabra('Jarvis, ¿qué tengo hoy?'), { resto: 'qué tengo hoy?' });
++  assert.deepStrictEqual(buscarPalabra('Oye Yarvis pon música'), { resto: 'pon música' });
++  assert.deepStrictEqual(buscarPalabra('Charvis, apaga la luz.'), { resto: 'apaga la luz.' });
++  assert.deepStrictEqual(buscarPalabra('jarbis cuánto queda'), { resto: 'cuánto queda' });
++  // Al final: la frase que lo lleva, no lo que se hablaba antes.
++  assert.deepStrictEqual(buscarPalabra('Y eso fue todo. ¿Qué hora es, Jarvis?'), { resto: 'Qué hora es' });
++  // Solo el nombre: toca preguntar.
++  assert.deepStrictEqual(buscarPalabra('Jarvis.'), { resto: '' });
++  for (const t of ['Fuimos al cine con Travis', 'Gervasio llega tarde', 'el coche de Marvis', 'avisa a tu madre', '']) {
++    assert.strictEqual(buscarPalabra(t), null, t);
++  }
++});
++
++test('22: «gracias» o «eso es todo» solos le duermen; dentro de otra frase, no', function () {
++  assert.ok(esFinDeTurno('Gracias.'));
++  assert.ok(esFinDeTurno('Vale, gracias, Jarvis.'));
++  assert.ok(esFinDeTurno('Eso es todo'));
++  assert.ok(!esFinDeTurno('Gracias, y pon música'));
++});
++
++test('22: las órdenes de la escucha', function () {
++  const p = new EscuchaPasiva();
++  assert.strictEqual(p.orden('gracias'), null, 'sin escucha pasiva, «gracias» va a Claude');
++  assert.deepStrictEqual(p.orden('Pon el modo coche'), { frase: FRASES.activada });
++  assert.ok(p.dormida());
++  p.despierta = true;
++  assert.deepStrictEqual(p.orden('gracias'), { frase: FRASES.dormir });
++  assert.ok(p.dormida());
++  assert.deepStrictEqual(p.orden('modo normal'), { frase: FRASES.normal });
++  assert.ok(!p.activa && !p.dormida());
++});
++
++// ── Escuchar dormido ─────────────────────────────────────────────────────────
++test('22: dormido no contesta a la charla, y despierta con su nombre', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const w = whisperFalso();
++  const r = await p.esperarPalabra({
++    session: sesionFalsa([null, 'hablábamos del partido', 'Jarvis, ¿y el tiempo?']), whisperClient: w });
++  assert.deepStrictEqual(r, { resto: 'y el tiempo?' });
++  assert.deepStrictEqual(w.oido, ['hablábamos del partido', 'Jarvis, ¿y el tiempo?']);
++  assert.ok(w.prompts.every(function (x) { return x === 'Jarvis.'; }), 'le pista el nombre a Whisper');
++  assert.ok(!p.dormida());
++});
++
++test('22: de una frase larga transcribe solo el principio, y entera si trae el nombre', async function () {
++  process.env.ESCUCHA_PASIVA_VENTANA_MS = '1';            // 32 bytes
++  try {
++    const p = new EscuchaPasiva({ activa: true });
++    const w = whisperFalso();
++    const charla = 'esto es una frase larga de las que se dicen en el coche';
++    const orden = 'Jarvis, apaga la calefacción de casa que se nos ha olvidado';
++    const r = await p.esperarPalabra({ session: sesionFalsa([charla, orden]), whisperClient: w });
++    const principio = function (t) { return Buffer.from(t).subarray(0, 32).toString(); };
++    assert.deepStrictEqual(w.oido, [principio(charla), principio(orden), orden]);
++    assert.strictEqual(r.resto, 'apaga la calefacción de casa que se nos ha olvidado');
++  } finally {
++    delete process.env.ESCUCHA_PASIVA_VENTANA_MS;
++  }
++});
++
++test('22: al colgar deja de escuchar, y el tope de tiempo cuelga', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  assert.strictEqual(await p.esperarPalabra({ session: sesionFalsa(['charla']), whisperClient: whisperFalso() }), null);
++  const viejo = new EscuchaPasiva({ activa: true });
++  viejo.desde = Date.now() - viejo.topeMs - 1;
++  assert.deepStrictEqual(await viejo.esperarPalabra({ session: sesionFalsa([]), whisperClient: whisperFalso() }),
++    { tope: true });
++});
++
++// ── Los dos bucles ───────────────────────────────────────────────────────────
++test('22, saliente: la llamada del coche empieza callada y solo contesta a «Jarvis»', async function () {
++  const ep = endpointFalso();
++  const tts = ttsFalso();
++  const claude = claudeFalso();
++  const turnos = [];
++  const sesion = sesionFalsa(['qué tráfico hay hoy', 'Jarvis, ¿qué tiempo hace?', null,
++    'otra vez charla', 'Jarvis', 'pon las noticias', 'gracias', 'Jarvis, cuelga']);
++  const r = await runConversationLoop(ep, new EventEmitter(), 'c-coche',
++    Object.assign(opciones(sesion, claude, whisperFalso(), tts),
++      { skipGreeting: true, escuchaPasiva: true, onUserTurn: function (t) { turnos.push(t); } }));
++  assert.strictEqual(r.endReason, 'goodbye');
++  // Solo lo que iba con su nombre (y lo que siguió al «¿Señor?») llega a Claude.
++  assert.deepStrictEqual(claude.preguntas, [AVISO_PASIVA + 'qué tiempo hace?', AVISO_PASIVA + 'pon las noticias']);
++  const d = dichas(ep);
++  assert.ok(d.indexOf('No te he oído. ¿Sigues ahí?') < 0, 'dormido, el silencio es lo normal');
++  assert.ok(d.indexOf(FRASES.despierta) >= 0);
++  assert.ok(d.indexOf(FRASES.dormir) >= 0);
++  // Tras contestar, los 8 s para seguir hablando sin repetir el nombre.
++  assert.ok(sesion.esperas.indexOf(8000) >= 0);
++  assert.deepStrictEqual(turnos, ['qué tiempo hace?', 'Jarvis', 'cuelga']);
++});
++
++test('22, entrante: «modo coche» a media llamada, y «modo normal» la devuelve', async function () {
++  const ep = endpointFalso();
++  const tts = ttsFalso();
++  const claude = claudeFalso();
++  const sesion = sesionFalsa(['activa el modo coche', 'charla del coche', null,
++    'Jarvis, modo normal', 'qué hora es', 'adiós']);
++  const dialogo = new EventEmitter();
++  dialogo.destroy = function () {};
++  const o = opciones(sesion, claude, whisperFalso(), tts);
++  o.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++  const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++  await handleInvite(req, { send: function () {} }, o);
++  const d = dichas(ep);
++  assert.ok(d.indexOf(FRASES.activada) >= 0);
++  assert.ok(d.indexOf(FRASES.normal) >= 0);
++  // «modo coche» y «modo normal» no van a Claude; la charla tampoco. Lo de después, sí,
++  // y ya sin el aviso del modo coche.
++  assert.deepStrictEqual(claude.preguntas, ['qué hora es']);
++  assert.ok(d.indexOf('Hasta luego. Llámame cuando quieras.') >= 0);
++});
++
++test('22: sin escucha pasiva, todo sigue como antes', async function () {
++  const ep = endpointFalso();
++  const claude = claudeFalso();
++  const r = await runConversationLoop(ep, new EventEmitter(), 'c-normal',
++    Object.assign(opciones(sesionFalsa(['hola', null, null]), claude, whisperFalso(), ttsFalso()),
++      { skipGreeting: true }));
++  assert.strictEqual(r.endReason, 'silence');
++  assert.deepStrictEqual(claude.preguntas, ['hola']);
++  assert.ok(dichas(ep).indexOf('No te he oído. ¿Sigues ahí?') >= 0);
++});

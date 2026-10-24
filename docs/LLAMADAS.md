@@ -278,6 +278,55 @@ las tareas), y por eso no es una llamada cotidiana:
 - El contexto le dice a Jarvis-Claude que no es una avería y, si toca, que empiece
   leyendo (`📖 LEER: …`) en cuanto contestes.
 
+### Modo coche: Jarvis a la escucha (desde el 2026-10-24)
+
+Que Jarvis esté siempre escuchando en el coche y se despierte con su nombre, como un
+altavoz de los de «Alexa». Un iPhone no deja a ninguna app escuchar en segundo plano a
+la espera de una palabra (solo a Siri), así que la escucha va **dentro de una llamada**:
+la línea se queda abierta, Jarvis callado, y la voice-app solo le pasa a Claude lo que
+alguien dice después de «Jarvis». El resto de lo que se habla en el coche no sale de la
+voice-app: ni llega a Claude ni se guarda en la bitácora.
+
+**Cómo funciona dentro de la llamada** (parche 22, `telefono/PARCHES.md`):
+
+| Dices | Pasa |
+|---|---|
+| «Jarvis, ¿qué tengo hoy?» | Contesta, y te deja 8 s para seguir sin repetir el nombre |
+| «Jarvis» (solo) | «¿Señor?», y escucha la pregunta |
+| «gracias», «eso es todo» | «A su disposición.» y vuelve a escuchar en silencio |
+| «modo normal» | Llamada normal, sin palabra clave |
+| «Jarvis, cuelga» / «adiós» | Cuelga |
+| «modo coche» en cualquier llamada | La pone en escucha pasiva |
+
+En una frase larga, «Jarvis» tiene que ir **al principio**: de cada frase oída dormido
+solo se transcriben los primeros 4 s (así la radio todo el viaje son unos 8 minutos de
+Whisper por hora, céntimos). Tope de 3 horas por llamada.
+
+**Cómo empieza sin tocar el móvil** — tres piezas, las tres en el iPhone y el backend:
+
+1. **El backend te llama en modo coche**: `POST /telefono/modo-coche`, con el token del
+   iPhone (`HEALTH_INGEST_TOKEN`, el mismo del Atajo del cargador). Sin mirar si estás
+   despierto (lo pides tú), sin insistir si no lo coges, colgando si descuelga el buzón y
+   una vez cada `MODO_COCHE_PAUSA_MIN` (10): CarPlay se reconecta en cada parada corta.
+2. **Un Atajo de iOS que lo dispara al conectar con el coche**: Atajos → Automatización →
+   Nueva → **CarPlay** → *Se conecta* → *Ejecutar inmediatamente* (sin preguntar). Acción:
+   *Obtener contenido de URL*, `https://api.lifeassistantbackend.bid/telefono/modo-coche`,
+   método **POST**, cabecera `X-Auth-Token` con el token. Si el coche no tiene CarPlay, la
+   misma automatización con *Bluetooth* → el dispositivo del coche.
+3. **Que la llamada se coja sola**: Ajustes → Accesibilidad → Tocar → Enrutamiento de
+   audio de llamadas → **Respuesta automática** (unos segundos). Afecta a todas las
+   llamadas, también a las que no son de Jarvis, y Atajos no tiene acción para
+   encenderla y apagarla. **Sin probar** con la app del 3CX (que entra por CallKit, como
+   una llamada normal): si no la coge sola, queda un toque en la pantalla del coche.
+
+**También a mano**: llamar a la extensión de Jarvis y decir «modo coche». O «Oye Siri,
+Jarvis» con un Atajo que haga la misma petición del paso 2.
+
+**Lo que no hace**: no hay palabra clave sin llamada abierta (eso es Siri, y Apple no deja
+cambiarle el nombre). Y mientras la llamada está abierta la extensión de Jarvis está
+ocupada: si salta una avería, el aviso llega al móvil igual, pero la llamada de la avería
+no puede entrar.
+
 ### Si no lo coges (desde el 2026-09-25)
 
 Ese día Jarvis llamó, no se cogió, y al devolverle la llamada **su extensión daba

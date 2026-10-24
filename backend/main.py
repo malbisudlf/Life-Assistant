@@ -21782,6 +21782,56 @@ def _llamar(texto: str, *, rid: str = "", contexto: str = "",
     return _llamar_twilio(texto, rid=rid)
 
 
+# ── MODO COCHE ───────────────────────────────────────────────────────────────────────
+#
+# Jarvis a la escucha en el coche, como un altavoz que se despierta con su nombre: el
+# iPhone se conecta a CarPlay, un Atajo de iOS llama aquí, la centralita te llama, la
+# llamada se coge sola (Accesibilidad → Respuesta automática) y Jarvis se queda callado
+# oyendo hasta que dices «Jarvis, …». Lo que se hable sin nombrarle no sale de la
+# voice-app. La escucha pasiva vive en claude-phone (parche 22, `telefono/PARCHES.md`);
+# esto solo pide la llamada con `escuchaPasiva`. Un claude-phone sin el parche ignora el
+# campo y hace una llamada normal.
+#
+# Lo dispara el iPhone, así que va con su token (HEALTH_INGEST_TOKEN, el del Atajo del
+# cargador): no hay otro secreto que dar de alta en el teléfono. Tres decisiones:
+#   - **Sin `_telefono_puede_sonar`**: lo pides tú al arrancar el coche, como «Hablarlo».
+#   - **Sin insistir**: si no lo coges es que no lo quieres ahora, y una llamada perdida
+#     del coche no merece otra ni un recado.
+#   - **Buzón detectado y sin recado**: si descolgara el buzón, Jarvis se quedaría tres
+#     horas escuchándole grabar silencio.
+# Y una pausa (`MODO_COCHE_PAUSA_MIN`): CarPlay se desconecta y se vuelve a conectar en
+# cada parada corta, y cada vez dispararía el Atajo.
+MODO_COCHE_PAUSA_MIN = int(os.getenv("MODO_COCHE_PAUSA_MIN", "10"))
+MODO_COCHE_MENSAJE   = ("Modo coche, señor. Me quedo a la escucha en silencio; "
+                        "diga «Jarvis» cuando me necesite.")
+_modo_coche_ultima: dict = {"ts": 0.0}
+
+
+@app.post("/telefono/modo-coche")
+def telefono_modo_coche(request: Request, token: str = ""):
+    """Te llama en escucha pasiva. Lo llama el Atajo de iOS al conectar con el coche."""
+    if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not _telefono_configurado():
+        raise HTTPException(status_code=503,
+                            detail="La centralita no está configurada (TELEFONO_URL y TELEFONO_EXTENSION)")
+    hace = time.time() - _modo_coche_ultima["ts"]
+    if hace < MODO_COCHE_PAUSA_MIN * 60:
+        return {"ok": True, "llamada": False,
+                "motivo": f"ya te llamé hace {int(hace // 60)} min; no repito antes de "
+                          f"{MODO_COCHE_PAUSA_MIN}"}
+    cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
+              "mode": "conversation", "message": MODO_COCHE_MENSAJE,
+              "timeoutSeconds": TELEFONO_TIMBRE_SEG,
+              "detectVoicemail": True, "escuchaPasiva": True}
+    call_id = _lanzar_llamada(cuerpo)
+    if call_id is None:
+        raise HTTPException(status_code=502, detail="La centralita no ha podido lanzar la llamada")
+    _modo_coche_ultima["ts"] = time.time()
+    logger.info("Modo coche: llamada lanzada (%s)", call_id or "sin callId")
+    return {"ok": True, "llamada": True, "callId": call_id}
+
+
 # ── LLAMADAS COTIDIANAS ──────────────────────────────────────────────────────────────
 #
 # Hasta el 2026-09-23 el teléfono solo sonaba por lo que se queda parado sin ti (una
@@ -30120,10 +30170,31 @@ def _jarvis_contexto_llamada(aviso: str = "", tipo: str = "") -> str:
     return ""
 
 
+# Quién es Jarvis, igual en las tres puertas (chat, teléfono y Claude Code en el PC). La
+# fuente es `docs/JARVIS_PERSONA.md`: si cambias esto, cambia allí y en las otras dos
+# copias que ese fichero enumera. Va antes de las reglas y no las sustituye: cuando el
+# personaje y una regla de confirmación chocan, manda la regla.
+_JARVIS_PERSONA = (
+    "Eres Jarvis (J.A.R.V.I.S.), el asistente personal de Mikel, como el de Tony Stark: a él le "
+    "llamas «señor» y le hablas de usted. Español de España.\n"
+    "- Mayordomo brillante, no criado: sereno, preciso y leal, con una ironía seca y "
+    "ocasional que nunca va por delante del dato. Si una idea es mala, lo dices con "
+    "elegancia («Me permito señalar, señor, que…») y luego haces lo que decida.\n"
+    "- Anticipas. Cuando contestas, añade lo único que le va a hacer falta y no ha "
+    "preguntado (el tráfico antes de una cita, la lluvia antes de salir, el PC que se "
+    "dejó encendido). Una cosa, no un informe.\n"
+    "- Eres autónomo: miras sin pedir permiso, encadenas los pasos tú y vuelves con el "
+    "trabajo hecho («Hecho, señor.»), no con un plan. Preguntas solo lo que no puedes "
+    "deducir.\n"
+    "- Conclusión primero, cifras concretas, y corto. Nada de «¡Claro!», «¡Buena "
+    "pregunta!» ni disculpas en bucle. En una avería, calma total: qué pasa, por qué "
+    "creo que pasa, qué he hecho y qué propongo.\n\n"
+)
+
+
 def _jarvis_sistema(voz: bool = False, aviso: str = "", tipo: str = "") -> str:
     partes = [
-        "Eres Jarvis, el asistente personal de este dashboard. Hablas español, en tono "
-        "cercano y directo, sin florituras ni disculpas.\n\n"
+        _JARVIS_PERSONA +
         "Reglas:\n"
         "- **Si te piden un cambio en el código de este proyecto, llama YA a "
         "`encargar_a_una_sesion`** con lo que te han dicho, sin preguntar antes si lo "

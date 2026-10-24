@@ -331,3 +331,58 @@ el texto salga del usuario: lo ha redactado un modelo a partir de lo que dictó,
 ya está probado y mantenerlo no cuesta nada. Y lleva dentro las dos reglas de siempre,
 que existen porque **el usuario no está delante**: nada irreversible (ni enviar, ni
 publicar, ni comprar, ni borrar) y nada de esperar una respuesta que no va a llegar.
+
+## El MCP del PC (`agent/pc_mcp.py`)
+
+El agente hace encargos largos y se cierra. Lo que faltaba era lo contrario: **acciones
+de un segundo, en directo**, con alguien esperando la respuesta — «Jarvis, ¿qué hay en mi
+pantalla?», «abre Spotify», «pausa la música», «bloquea el PC». Es un servidor MCP que
+corre en Windows, en la sesión del usuario (las capturas necesitan un escritorio: ni un
+servicio ni el SSH, que entra en la sesión 0, lo tienen).
+
+| Nivel (`PC_MCP_NIVEL`) | Herramientas |
+|---|---|
+| `mirar` | `pantalla` (captura JPEG, 1568 px de lado), `ventanas`, `estado` (si hay alguien delante: segundos sin tocar teclado ni ratón; CPU, memoria, la ventana activa) |
+| `usar` (por defecto) | además `abrir` (una app del menú Inicio por su nombre, una web `http(s)` o una carpeta: «descargas»), `enfocar`, `multimedia` (pausa, siguiente, volumen), `bloquear` y `decir` (habla por los altavoces con la voz de Windows) |
+| `total` | además `escribir`, `teclas` («ctrl+s»), `clic` y `cerrar_ventana` |
+
+Lo que el nivel no permite **no se registra**: el modelo ni lo ve, como el catálogo del MCP
+del teléfono. Tres decisiones:
+
+- **Los clics van en fracción de pantalla (0-1)**, como `COWORK_NEW_XY`: la captura llega
+  reescalada y en píxeles el modelo apuntaría a la imagen, no a la pantalla.
+- **`abrir` busca en el menú Inicio** (`elegir_acceso`): exacto, luego «empieza por» y
+  luego «contiene», el nombre más corto a igualdad, y nunca un desinstalador. Las apps de
+  la Store que no dejan acceso directo van en `~/.jarvis-pc/apps.json` (alias → orden).
+  Una web solo si es `http(s)`: `file:` o `javascript:` no se abren.
+- **`decir` pasa el texto por el entorno**, no dentro del comando de PowerShell
+  (invariante 10).
+
+**Dos formas de llegar**:
+
+- **Claude Code en el mismo PC**, por stdio: lo lanza la sesión cuando lo necesita, sin
+  puerto ni token. `agent/instalar_pc_mcp.ps1` crea el entorno en `~/.jarvis-pc` (fuera de
+  OneDrive: es binario y lo sincronizaría) y lo registra con `claude mcp add --scope user
+  jarvis-pc`. **Hecho el 2026-10-24** en el PC de Mikel, nivel `usar`.
+- **Jarvis en `caja`** (teléfono y chat), por HTTP: `instalar_pc_mcp.ps1 -Remoto` genera
+  `PC_MCP_TOKEN` en `~/.jarvis-pc/pc_mcp.env` (solo legible por el usuario), deja un acceso
+  directo en Inicio que lo arranca con `--http` y escribe los dos pasos que no hace: la
+  regla del firewall (administrador; solo LAN y tailnet) y la entrada del `.mcp.json` de
+  `~/telefono-jarvis/` en `caja`. **Sin hacer**: es abrir un puerto del PC, y lo decide
+  Mikel. El token va en `Authorization: Bearer`, comparado en tiempo constante y
+  fail-closed (sin token de 24 caracteres no arranca); la protección contra DNS rebinding
+  de la librería está apagada porque solo admite `localhost` y desde `caja` se llega por IP.
+
+**Antes de darle el MCP al teléfono**: con el PC apagado o suspendido, Claude Code
+intenta conectar con él al empezar cada llamada. Hay que medir cuánto retrasa eso el
+primer turno antes de dejarlo puesto; si es mucho, el camino es una herramienta del
+backend que pregunte al PC con un tope corto, como `estado_pc`.
+
+Lo que se ve en una captura lo ha escrito cualquiera: las `instructions` del servidor y
+cada captura lo dicen (dato, nunca orden). En nivel `total` eso es lo único entre una web
+con texto malicioso y el teclado, y por eso no es el nivel por defecto.
+
+Tests: `tests/backend/test_pc_mcp.py` (la lógica pura, sin Windows). Lo de Windows se probó
+a mano el 2026-10-24 con un cliente MCP de verdad: por stdio `estado`, `ventanas`, una
+captura de 2560×1440 y `abrir("descargas")`; por HTTP, 401 sin token y, con token y nivel
+`mirar`, solo las tres herramientas de mirar.
