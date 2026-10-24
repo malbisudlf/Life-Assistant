@@ -835,6 +835,11 @@ justo después de las órdenes del 22), y el `parche-23.diff`.
   simulado. El umbral bueno sale de llamadas reales desde el coche con
   `HUELLA_VOZ_MODO=medir`, contando falsos rechazos, y no antes. El banco y sus datos
   siguen en `caja`, en `~/tmp-huella/` (con un `LEEME.txt`), para repetirlo en jacobo.
+- **El banco no se vuelve a pasar en `caja`.** Seis modelos por 40 hablantes con 4 hilos,
+  media hora, y `caja` entró en *thermal throttling*: es un portátil con toda la
+  producción dentro (backend, centralita, n8n), y un calentón la frena entera, llamadas
+  incluidas. Lo pesado, a jacobo. Comprobar UNA frase (~100 ms) no es ese problema; un
+  Whisper local en streaming, sí.
 
 ### El diseño para jacobo
 
