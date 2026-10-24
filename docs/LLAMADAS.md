@@ -344,6 +344,38 @@ con música está la llamada **a demanda**:
 
 **También a mano**: llamar a la extensión de Jarvis y decir «modo coche».
 
+**Lo que hay montado (2026-10-24), y por qué no son las automatizaciones.** Mikel conduce
+casi siempre con música, y una automatización que llama al conectar el coche le cortaría
+la música en cada viaje. Así que son dos atajos que se lanzan con Siri, los dos probados
+ese día de punta a punta:
+
+| «Oye Siri, …» | URL | Para |
+|---|---|---|
+| «Jarvis» | `…/telefono/modo-coche?escucha=normal` | Con música: una pregunta y vuelve la música |
+| «Jarvis al volante» | `…/telefono/modo-coche` | Sin música: escucha pasiva todo el viaje |
+
+Las automatizaciones del paso 2 quedan como opción, con *Preguntar antes de ejecutar* en
+vez de *Ejecutar inmediatamente*, si algún día sale a cuenta. La respuesta automática
+(paso 3) **sigue sin probar**: en las pruebas se contestó a mano. No se llama «modo coche»
+porque Siri lo puede confundir con el modo de concentración «Conducción».
+
+**Tres trampas al crear el atajo**, las tres pasaron al montarlo:
+
+- **El método.** «Obtener contenido de URL» es GET por defecto y el nombre no lo dice: si
+  no se cambia a POST en «Mostrar más», el backend contesta **405** y no llama.
+- **Una cabecera vacía** (la fila «Key/Text» en gris) se manda como cabecera sin nombre,
+  y **Cloudflare** contesta **400** antes de que llegue al backend: en `caja` no queda
+  rastro. Borrarla con el ⊖.
+- **El token** es `HEALTH_INGEST_TOKEN`, el del Atajo del cargador y Health Auto Export.
+  El `BRIEF_TOKEN` (el del resumen diario) da **403**.
+
+**Cómo hablarle.** «Jarvis, ¿qué hora es?» de un tirón contesta directamente; «Jarvis» solo
+y una pausa da «¿Señor?» y espera la pregunta. Por la ventana de 4 s, en una charla
+seguida conviene hacer una pausa antes del nombre. Que lo oiga en cualquier punto de la
+frase llegará con el Whisper local en jacobo («El parche 23, en espera» en
+`telefono/PARCHES.md`); subir `ESCUCHA_PASIVA_VENTANA_MS` lo arreglaría antes, pero manda a
+OpenAI toda la charla del coche, y se descartó.
+
 **Lo que no hace**: no hay palabra clave sin llamada abierta (eso es Siri, y Apple no deja
 cambiarle el nombre). Y mientras la llamada está abierta la extensión de Jarvis está
 ocupada: si salta una avería, el aviso llega al móvil igual, pero la llamada de la avería
