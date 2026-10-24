@@ -774,6 +774,104 @@ contestar en modo coche). Volver atrás: `docker tag claude-phone-voice-app:ante
 claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
 `ESCUCHA-PASIVA: a la escucha` y `me llaman` en `docker logs voice-app`.
 
+## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
+
+Pedido el 2026-10-24: que la escucha pasiva del 22 solo se despierte cuando quien dice
+«Jarvis» es Mikel, no un pasajero ni la radio. **Se paró a medias a petición suya**: la
+transcripción va a mudarse de OpenAI a un Whisper local en **jacobo** (el PC de casa con
+el i5-9400F y la RX 580 de 8 GB, en cuanto tenga fuente), y la huella tiene que vivir
+allí, junto a él. **Nada está aplicado**: la voice-app sigue en el 22 y no hay ningún
+servicio nuevo corriendo.
+
+### Lo que hay hecho (`telefono/huella-voz/`, sin aplicar)
+
+- `servidor.py`: el servicio de la huella. HTTP de la biblioteca estándar y
+  [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (2.0.0, ~4 MB más su núcleo; trae
+  su propio onnxruntime). `GET /salud`, `POST /verificar` (PCM 16 kHz de una frase →
+  `{es_el, similitud, umbral}`) y `POST /alta` (las frases seguidas, con sus largos en la
+  cabecera `X-Frases`; descarta las que no se parecen al resto y guarda la anterior en
+  `huella.anterior.json`). Escucha en `127.0.0.1` y **fuera de local no arranca sin
+  `HUELLA_TOKEN`**, que es lo que permite moverlo a jacobo. Ni audio ni texto en disco:
+  solo el vector y sus números.
+- `huella-voz.js`: lo que iría en `voice-app/lib/`. `comprobarVoz()` (con
+  `HUELLA_VOZ_MODO=medir`, que apunta la similitud pero despierta siempre, para fijar el
+  umbral con llamadas reales; y `HUELLA_VOZ_SI_FALLA=despertar|dormir`, por defecto
+  despertar) y `aprenderVoz()`, el alta por teléfono: «Jarvis, aprende mi voz», ocho
+  frases que empiezan por «Jarvis» y una libre, ~30 s.
+- `banco.py`: el banco de abajo.
+
+**Lo que falta**: restar la media del canal en `servidor.py` (ver abajo), su `Dockerfile`
+y su `compose.yml`, los tests de los dos lados, el enganche en `esperarPalabra` (comprobar
+la voz cuando el principio trae el nombre y **antes** de transcribir la frase entera, para
+que lo que dice un pasajero no salga a Whisper) y en los dos bucles («aprende mi voz»
+justo después de las órdenes del 22), y el `parche-23.diff`.
+
+### Lo medido
+
+- **La línea es G.711 μ-law (PCMU, 8 kHz).** El SBC contesta `m=audio … RTP/AVP 0 101`
+  (logs de drachtio): 300-3.400 Hz. El canal cambia la huella más que el ruido, así que
+  el alta tiene que hacerse **por la misma línea** que la comprobación, nunca con el micro
+  del PC.
+- **Banco** (`banco.py`, en `caja` el 2026-10-24): LibriSpeech test-clean, 40 hablantes,
+  ~30 s de alta y 12 pruebas de 1,5-4 s por hablante, todo por un G.711 simulado; «coche»
+  es además ruido marrón a 10 dB de SNR. EER (falsos rechazos = falsos aceptados) y tiempo
+  por frase en el i7-8650U de `caja`:
+
+  | Modelo | ms/frase | tel | tel + coche | tel, − media | tel + coche, − media | Umbral (− media) |
+  |---|---|---|---|---|---|---|
+  | **3D-Speaker ERes2Net (VoxCeleb)** | 94 | 3,2 % | 3,8 % | **2,3 %** | **2,7 %** | ~0,33-0,36 |
+  | NeMo TitaNet large | 98 | 3,8 % | 6,0 % | 2,5 % | 4,6 % | ~0,32 |
+  | NeMo TitaNet small | 48 | 3,1 % | 7,9 % | 2,3 % | 6,4 % | ~0,26 |
+  | 3D-Speaker CAM++ (zh/en) | 51 | 5,2 % | 9,8 % | 3,8 % | 5,9 % | ~0,34 |
+  | WeSpeaker ResNet34 / CAM++ | 81 / 52 | 22 % / 48 % | — | — | — | inservibles |
+
+  «− media» es restar a cada vector, antes del coseno, la media de **otras** voces por el
+  mismo canal: el G.711 empuja todas las huellas hacia un mismo sitio y con eso se
+  compensa. En producción sería un vector guardado junto al modelo, sacado de LibriSpeech
+  por el canal simulado; no es la cohorte real, así que ayudará algo menos que aquí. Los
+  WeSpeaker dan resultados de azar con sherpa-onnx 2.0.0 (se sospecha de las
+  características de entrada); no usarlos sin averiguar por qué.
+- **Lo que el banco no dice**: es inglés leído, no español dicho en un coche, y el canal es
+  simulado. El umbral bueno sale de llamadas reales desde el coche con
+  `HUELLA_VOZ_MODO=medir`, contando falsos rechazos, y no antes. El banco y sus datos
+  siguen en `caja`, en `~/tmp-huella/` (con un `LEEME.txt`), para repetirlo en jacobo.
+
+### El diseño para jacobo
+
+Una sola pieza, el «oído», en jacobo: **transcripción y huella sobre el mismo audio**, y
+la voice-app de `caja` le habla por la LAN.
+
+- **Transcribir mientras se habla.** Whisper no es de flujo: transcribe trozos enteros.
+  Lo de hoy es esperar a que acabes, subir la frase y esperar a OpenAI. En jacobo, la
+  voice-app le manda el audio por WebSocket según llega del audio fork (trozos de 20 ms),
+  y jacobo vuelve a transcribir la frase en curso cada ~0,5-1 s, dando por fijo lo que
+  coincide en dos pasadas seguidas (la técnica *LocalAgreement* de
+  [whisper_streaming](https://github.com/ufal/whisper_streaming)). Al acabar la frase
+  solo queda el último trozo, así que el texto está casi en el acto. El precio es
+  decodificar la misma frase varias veces: hace falta la GPU, o un modelo pequeño.
+- **En el modo coche, lo mejor.** El nombre se ve en el primer parcial (~1 s): la charla
+  que no empieza por «Jarvis» se deja de transcribir ahí (lo que hoy hace la ventana de
+  4 s del 22), y la huella se calcula sobre ese primer trozo mientras sigue hablando. Y el
+  audio ya no sale de casa.
+- **La RX 580 es Polaris (gfx803)**: el ROCm actual no la soporta, así que PyTorch y
+  faster-whisper (CTranslate2, que solo acelera con CUDA) no la usan. El camino con GPU
+  es [whisper.cpp](https://github.com/ggml-org/whisper.cpp) con su backend Vulkan. Sin
+  GPU, faster-whisper en los 6 núcleos del i5-9400F con un modelo `small` o `medium`.
+  **Nada de esto está medido**: antes de prometer latencias, el banco de tiempos en
+  jacobo con frases de las llamadas.
+- **La huella no necesita GPU**: ~100 ms por frase en CPU. Va dentro del oído, con la
+  misma API que `servidor.py` (o como su parte), la llave obligatoria por estar en la LAN
+  (`HUELLA_TOKEN`) y la regla del parche 21: nada que escuche fuera de local sin
+  credencial.
+- **El fin de frase sigue en la voice-app** (parches 5, 10 y 17), y **si jacobo no
+  contesta** (apagado, reiniciando) la voice-app vuelve a OpenAI Whisper como hoy y la
+  huella hace lo que diga `HUELLA_VOZ_SI_FALLA`. Jarvis no puede quedarse sordo porque un
+  PC de sobremesa esté apagado.
+- **openWakeWord, descartado de momento** (se pidió valorarlo): ahorraba Whisper de pago
+  con la radio puesta, y con Whisper local ese ahorro desaparece. Además su modelo es «hey
+  jarvis» en inglés y a 16 kHz de banda ancha, no «Jarvis» en español por un G.711. No se
+  ha medido.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
