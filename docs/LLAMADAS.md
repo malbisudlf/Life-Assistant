@@ -302,6 +302,11 @@ En una frase larga, «Jarvis» tiene que ir **al principio**: de cada frase oíd
 solo se transcriben los primeros 4 s (así la radio todo el viaje son unos 8 minutos de
 Whisper por hora, céntimos). Tope de 3 horas por llamada.
 
+**Cualquiera que diga «Jarvis» le despierta**, también un pasajero o la radio. Que solo
+lo haga su voz es el parche 23, **en espera**: la huella de voz irá a «jacobo», junto al
+Whisper local que transcribirá mientras habla. Lo medido y el diseño, en «El parche 23,
+en espera» de `telefono/PARCHES.md`.
+
 **Cómo empieza sin tocar el móvil** — tres piezas, las tres en el iPhone y el backend:
 
 1. **El backend te llama en modo coche**: `POST /telefono/modo-coche`, con el token del
