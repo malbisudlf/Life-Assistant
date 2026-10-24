@@ -753,10 +753,11 @@ dispara desde CarPlay, en «Modo coche» de `docs/LLAMADAS.md`.
 `voice-app/test/parche22.test.js`: nueve casos (la palabra y sus falsos amigos —Travis,
 Gervasio—, las órdenes, la ventana de 4 s, colgar y el tope, y los dos bucles enteros:
 la saliente del coche que solo contesta a «Jarvis» y la entrante que pasa a modo coche y
-vuelve). **Construido y probado en `caja` el 2026-10-24 sin aplicarlo**: copia del árbol en
-`/tmp/p22`, imagen aparte `claude-phone-voice-app:p22`, y dentro, sin red, pasan el 22 (9),
-el 20 (11), el 18 (7), el 17 (3), el 15-16 (13), el 14 (6) y el 12 (15). La voice-app en
-marcha no se tocó. Para aplicarlo de verdad, como el 20:
+vuelve). **Aplicado en `caja` el 2026-10-24**, como el 20: imagen anterior etiquetada
+`claude-phone-voice-app:antes-p22`, construir, y dentro, sin red, pasan el 22 (9), el 20
+(11), el 18 (7), el 17 (3), el 15-16 (13), el 14 (6) y el 12 (15); `up -d voice-app` sin
+llamada en curso y la extensión registrada a la primera. El `CLAUDE.md` anterior del
+teléfono quedó en `~/telefono-jarvis/CLAUDE.md.bak-20261024-antes-p22`. Los pasos:
 
 ```bash
 cd ~/.claude-phone-cli
