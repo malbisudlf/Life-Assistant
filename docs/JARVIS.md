@@ -152,6 +152,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     tiempo de espera**. No hace falta — su límite propio ronda el minuto y el arranque en
     frío de Fly son 10–15 s la primera vez del día. Si el atajo falla, no es por ahí.
 
+- **Jarvis por Telegram** (`POST /telegram/webhook`, desde el 2026-10-24): la tercera boca
+  escrita, con texto y notas de voz. Mismo cerebro (`_jarvis_chat`), boca `telegram` en
+  `jarvis_gasto`, y lo `confirmar: True` llega con dos botones (✅ Sí / ❌ No) que ejecutan
+  por el mismo camino que `/jarvis/ejecutar` (`_jarvis_ejecutar_confirmado`). Lo que tiene
+  de distinto —la ventana corta de conversación EN MEMORIA, la excepción meditada a «el
+  backend no guarda conversaciones»— está en `docs/TELEGRAM.md`.
+
 - **Jarvis en internet** (`buscar_en_internet`, `leer_pagina`): dos invariantes, y las dos
   son de seguridad, no de comodidad.
   - **SSRF.** `leer_pagina` recibe una URL que en el mejor caso sale de un buscador y en
@@ -1468,7 +1475,7 @@ era la factura. Ahora se mide solo (tabla `jarvis_gasto`, migración `20260903_g
   `sin_tarifa`. No saber lo que cuesta algo no es que sea gratis, y un total que no
   incluye todo el gasto se marca como `euros_incompleto` en vez de callarlo.
 - **`boca`** es por dónde entró la petición (`chat`, `voz`, `atajo`, `telefono`,
-  `proactivo`, `correo`, `destilar`, `ideas`). Es una `contextvar` (`_boca_actual`), como
+  `telegram`, `proactivo`, `correo`, `destilar`, `ideas`). Es una `contextvar` (`_boca_actual`), como
   `_peticion_actual` en el registro, porque el alternativa era pasarla por seis funciones
   que no pintan nada en esto. Es la pregunta que no se podía responder: **por dónde se va
   el dinero**.

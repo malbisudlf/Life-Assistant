@@ -223,6 +223,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/HOME_ASSISTANT_FLUJOS.md` | Los flujos entre HA y el backend (WOL, presencia, avisos al móvil, la casa, el tick del resumen) |
 | `docs/N8N.md` | n8n, la automatización visual que corre en `caja`: la frontera con el backend (observa y avisa, no decide), los flujos que hay y sus trampas |
 | `docs/AGENTE_PC.md` | `agent/agent.py`: ciclo de vida, por qué no hay PowerShell en el camino crítico, streaming y Alud. Y el MCP del PC (`agent/pc_mcp.py`): qué ve y qué toca Jarvis en Windows, por niveles |
+| `docs/TELEGRAM.md` | Jarvis por Telegram: el webhook y sus tres llaves, la ventana corta de conversación en memoria (y por qué no es una tabla), las notas de voz con Fish delante, los botones Sí/No y el formato. **Empieza con el parte de la noche del 2026-10-24** |
 | `docs/JARVIS_PERSONA.md` | **Antes de tocar cómo habla Jarvis.** El personaje (J.A.R.V.I.S. de Iron Man: «señor», de usted, autónomo, anticipa) y sus tres copias —backend, teléfono y Claude Code en el PC—, que se cambian juntas |
 | `docs/TESTS.md` | Antes de escribir tests: cómo está montado cada suite y sus trampas conocidas |
 | `docs/EVALS.md` | Las evals de Jarvis: cuánto acierta eligiendo herramienta, contra la API real. Qué mide, cómo se corre, qué cuesta y por qué NO vive en `tests/backend` |

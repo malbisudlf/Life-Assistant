@@ -142,7 +142,7 @@ cambió nada. En una llamada eso cae entero en la primera frase de cada respuest
 
 **El orden vive en `_VOZ_ORDEN_LLAMADA` y `_VOZ_ORDEN_NOTAS`** (`backend/main.py`), y
 `_decir_con(texto, orden)` prueba las voces en ese orden. Las notas de voz que no se
-escuchan en directo —las de Telegram, cuando se hagan— van **al revés: Fish delante y
+escuchan en directo —las de Telegram (`docs/TELEGRAM.md`)— van **al revés: Fish delante y
 Azure detrás**, porque ahí tres segundos no se notan y la calidad sí. Decidido por Mikel
 el 24 de octubre de 2026.
 

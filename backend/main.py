@@ -30897,15 +30897,26 @@ def jarvis_ejecutar(
     un ejecutor de herramientas arbitrarias por HTTP, que es justo lo contrario de lo que
     hace falta.
     """
-    herramienta = _JARVIS_HERRAMIENTAS.get(body.herramienta)
-    # Entran las marcadas con `confirmar` fijo o dinámico (mcp_usar): son las únicas que
-    # el bucle puede dejar pendientes. Las demás siguen fuera — este endpoint no es un
-    # ejecutor genérico de herramientas.
+    resultado = _jarvis_ejecutar_confirmado(body.herramienta, body.argumentos)
+    if resultado is None:
+        raise HTTPException(status_code=400, detail="Esa acción no se confirma por aquí")
+    return {"ok": bool(resultado.get("ok")), "resultado": resultado}
+
+
+def _jarvis_ejecutar_confirmado(nombre: str, argumentos: dict) -> Optional[dict]:
+    """Lo que hay detrás de un «sí» pulsado por una persona: el botón del dashboard
+    (`/jarvis/ejecutar`) y el de Telegram (`_telegram_boton`). `None` si esa herramienta
+    no se confirma, para que cada puerta lo diga a su manera.
+
+    Entran las marcadas con `confirmar` fijo o dinámico (mcp_usar): son las únicas que el
+    bucle puede dejar pendientes. Las demás siguen fuera — esto no es un ejecutor genérico
+    de herramientas, venga el «sí» de donde venga.
+    """
+    herramienta = _JARVIS_HERRAMIENTAS.get(nombre)
     confirmable = herramienta and (callable(herramienta["confirmar"]) or herramienta["confirmar"])
     if not confirmable:
-        raise HTTPException(status_code=400, detail="Esa acción no se confirma por aquí")
-    resultado = _jarvis_despachar(body.herramienta, body.argumentos)
-    return {"ok": bool(resultado.get("ok")), "resultado": resultado}
+        return None
+    return _jarvis_despachar(nombre, argumentos)
 
 
 class JarvisAtajoIn(BaseModel):
@@ -31043,8 +31054,8 @@ VOZ_DECIR_WINDOW_SECONDS = int(os.getenv("VOZ_DECIR_WINDOW_SECONDS", "300"))
 # Detrás y no delante por la latencia, medida el 24 de octubre de 2026 desde casa: Fish
 # contesta desde Hong Kong y tarda ~3 s por frase entera (0,9 s al primer byte) frente a
 # los 0,7 s de Azure en París. En una llamada eso cae justo en la primera frase de cada
-# respuesta. Donde no haya nadie esperando al otro lado —las notas de voz de Telegram,
-# cuando existan— el orden se invierte: Fish delante y Azure detrás (`_VOZ_ORDEN_*`).
+# respuesta. Donde no haya nadie esperando al otro lado —las notas de voz de Telegram
+# (`_decir_nota`)— el orden se invierte: Fish delante y Azure detrás (`_VOZ_ORDEN_*`).
 #
 # El timeout es propio: en frío Fish ha tardado 7,7 s (con 8 s se cortaba), y los 15 s
 # del cliente compartido son demasiado silencio para una frase que ya llega tarde porque
@@ -31061,12 +31072,13 @@ def _voz_fish_configurada() -> bool:
     return bool(FISH_AUDIO_API_KEY)
 
 
-def _decir_fish(texto: str) -> bytes:
-    """Una frase con Fish Audio, en MP3. `b""` si no ha salido (el motivo va al registro).
+def _decir_fish(texto: str, formato: str = "mp3") -> bytes:
+    """Una frase con Fish Audio, en MP3 (u `opus` para las notas de Telegram). `b""` si no
+    ha salido (el motivo va al registro).
 
     Aquí no hay marcado que escapar: el texto va como campo de un JSON, no como SSML.
     """
-    cuerpo = {"text": texto, "format": "mp3", "latency": FISH_AUDIO_LATENCIA}
+    cuerpo = {"text": texto, "format": formato, "latency": FISH_AUDIO_LATENCIA}
     if FISH_AUDIO_VOICE:
         cuerpo["reference_id"] = FISH_AUDIO_VOICE
     try:
@@ -31106,8 +31118,9 @@ def _ssml(texto: str, voz: str) -> str:
             + html_mod.escape(texto, quote=False) + '</voice></speak>')
 
 
-def _decir_azure(texto: str) -> bytes:
-    """Una frase con Azure, en MP3. `b""` si no ha salido (el motivo va al registro)."""
+def _decir_azure(texto: str, formato: str = "") -> bytes:
+    """Una frase con Azure, en MP3 (o en el `formato` que se pida: las notas de Telegram
+    van en OGG/Opus). `b""` si no ha salido (el motivo va al registro)."""
     try:
         r = http.post(
             f"https://{quote(AZURE_SPEECH_REGION, safe='')}"
@@ -31115,7 +31128,7 @@ def _decir_azure(texto: str) -> bytes:
             data=_ssml(texto, AZURE_SPEECH_VOICE).encode("utf-8"),
             headers={"Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
                      "Content-Type": "application/ssml+xml",
-                     "X-Microsoft-OutputFormat": AZURE_SPEECH_FORMATO,
+                     "X-Microsoft-OutputFormat": formato or AZURE_SPEECH_FORMATO,
                      "User-Agent": "life-assistant"},
         )
     except Exception as e:   # noqa: BLE001 — la llamada sigue con la voz del navegador
@@ -31136,7 +31149,7 @@ def _decir_azure(texto: str) -> bytes:
 
 
 # Qué voz va primero en cada sitio. La de la llamada prima la latencia (Azure, 0,7 s);
-# la de las notas de voz, cuando las haya, la calidad (Fish), porque nadie espera en
+# la de las notas de voz de Telegram, la calidad (Fish), porque nadie espera en
 # directo. Cambiar el orden es cambiar esta tupla, no el endpoint.
 _VOZ_ORDEN_LLAMADA = ("azure", "fish")
 _VOZ_ORDEN_NOTAS   = ("fish", "azure")
@@ -31829,3 +31842,686 @@ def _sio_no(dicho: str) -> Optional[bool]:
         if principio == frase or principio.startswith(frase + " "):
             return True
     return None
+
+
+# ── TELEGRAM: otra boca para el mismo cerebro ─────────────────────────────────
+# Como el teléfono o el Atajo: la conversación y las herramientas siguen aquí, y Telegram
+# solo es la puerta. Un mensaje entra por el webhook, se contesta 200 en el acto y el turno
+# se trabaja en segundo plano, porque Telegram reintenta si tardas; lo que diga Jarvis
+# vuelve por la Bot API. Ver docs/TELEGRAM.md.
+#
+# Cuatro decisiones que conviene entender antes de tocar esto:
+#
+#   - **Tres llaves, y sin cualquiera de ellas no pasa nada.** El webhook exige la cabecera
+#     `X-Telegram-Bot-Api-Secret-Token` (`TELEGRAM_WEBHOOK_SECRET`, con `_token_ok`: sin
+#     secreto configurado, 401 a todo), y solo atiende a `TELEGRAM_CHAT_ID` como chat Y como
+#     remitente, o sea el chat privado de Mikel con el bot. Lo demás recibe un 200 mudo:
+#     contestar otra cosa le diría a quien prueba que ahí hay alguien.
+#   - **El token del bot va en la URL de la Bot API** (`/bot<token>/…`): no hay otra forma.
+#     Por eso aquí no se registra nunca una URL ni el texto de una excepción de `requests`
+#     (que la lleva dentro): solo el método, el código y la `description` de Telegram.
+#   - **La conversación vive en memoria y en ventana corta** (`JARVIS_MAX_HISTORIAL` turnos,
+#     y se olvida tras `TELEGRAM_CONTEXTO_MIN` sin hablar). Guardar el historial de Jarvis en
+#     el backend se descartó a propósito (docs/IDEAS.md), y eso sigue en pie: no hay tabla
+#     ni nada que purgar. Un chat sin memoria de un mensaje al siguiente no sirve para
+#     nada; esto es lo mínimo para que «¿y mañana?» se entienda, y un reinicio se lo lleva.
+#   - **La frontera de confirmación es la de siempre.** Lo `confirmar: True` llega con dos
+#     botones; lo que se ejecuta es lo que guardó el backend al proponerlo (el botón solo
+#     lleva un id), y el «sí» va por `_jarvis_ejecutar_confirmado`, lo mismo que el botón
+#     del dashboard. Caduca a los `TELEGRAM_BOTON_MIN`.
+TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+TELEGRAM_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CONTEXTO_MIN   = int(os.getenv("TELEGRAM_CONTEXTO_MIN", "30"))
+TELEGRAM_BOTON_MIN      = int(os.getenv("TELEGRAM_BOTON_MIN", "30"))
+# Lo que se manda a sintetizar de una respuesta para la nota de voz. Por voz Jarvis ya
+# contesta corto (`JARVIS_MAX_TOKENS_VOZ`); esto es el techo por si no.
+TELEGRAM_VOZ_MAX_CHARS  = int(os.getenv("TELEGRAM_VOZ_MAX_CHARS", "1500"))
+TELEGRAM_TIMEOUT        = float(os.getenv("TELEGRAM_TIMEOUT", "30"))
+# Topes de la Bot API: 4096 caracteres por mensaje y 1024 por pie de nota, ya parseadas
+# las entidades. Se trocea por debajo para dejar sitio a lo que añade el formato (la tabla
+# alineada, el cierre de un bloque de código partido).
+_TELEGRAM_TROZO      = 3500
+_TELEGRAM_MAX_PIE    = 1000
+_TELEGRAM_API        = "https://api.telegram.org"
+# El formato de Azure para las notas: OGG/Opus, que es lo que Telegram pinta como nota de
+# voz con su onda. Fish no documenta en qué contenedor da su `opus`, así que se mira la
+# firma (`OggS`) y, si no lo es, se pide en MP3, que `sendVoice` también acepta.
+_AZURE_FORMATO_NOTA  = "ogg-24khz-16bit-mono-opus"
+
+_telegram_lock       = threading.Lock()
+_telegram_vistos: dict = {}          # update_id → cuándo; para no atender dos veces lo mismo
+_telegram_ventana: deque = deque(maxlen=JARVIS_MAX_HISTORIAL)
+_telegram_ventana_ts = 0.0
+_telegram_pendientes: dict = {}      # id del botón → lo propuesto, tal cual se guardó
+# Un hilo, no uno por mensaje: es un solo chat, y dos mensajes seguidos tienen que
+# contestarse en orden y con la ventana del anterior ya escrita.
+_telegram_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram")
+
+
+def _sin_token_telegram(texto: str) -> str:
+    """Por si acaso: el token del bot no sale nunca en el registro."""
+    texto = str(texto)
+    return texto.replace(TELEGRAM_BOT_TOKEN, "<token>") if TELEGRAM_BOT_TOKEN else texto
+
+
+# ── Markdown → HTML de Telegram (funciones puras) ─────────────────────────────
+# Jarvis escribe Markdown; Telegram entiende un HTML muy pequeño (b, i, s, code, pre, a,
+# blockquote) y exige escapar `&`, `<` y `>` en todo lo demás. Si algo sale mal formado,
+# Telegram rechaza el mensaje entero y se reenvía en texto plano (`_telegram_mandar`).
+
+_TG_VALLA      = re.compile(r"^\s*```\s*([\w+#.-]*)\s*$")
+_TG_SEPARADOR  = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+_TG_ENLACE     = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+
+
+def _tg_esc(texto: str) -> str:
+    return html_mod.escape(texto, quote=False)
+
+
+def _tg_enfasis(t: str) -> str:
+    """Negrita, tachado y cursiva sobre texto YA escapado. La cursiva con `_` exige que no
+    toque una letra a ningún lado: `mis_capacidades` no es una cursiva."""
+    t = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"__(?=\S)(.+?)(?<=\S)__", r"<b>\1</b>", t)
+    t = re.sub(r"~~(?=\S)(.+?)(?<=\S)~~", r"<s>\1</s>", t)
+    t = re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"<i>\1</i>", t)
+    t = re.sub(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])", r"<i>\1</i>", t)
+    return t
+
+
+def _tg_en_linea(texto: str) -> str:
+    """El formato de dentro de una línea. Código y enlaces se apartan antes de escapar,
+    para que ni el `**` de dentro de un `código` ni el `_` de una URL se interpreten."""
+    apartados: list = []
+
+    def _apartar(html_: str) -> str:
+        apartados.append(html_)
+        return f"\x00{len(apartados) - 1}\x00"
+
+    def _enlace(m):
+        etiqueta, url = m.group(1), m.group(2)
+        # Solo web: un `javascript:` o un `tg://` con forma de enlace se queda en texto.
+        if not re.match(r"^https?://[^\s<>\"']+$", url, re.I):
+            return _apartar(_tg_esc(m.group(0)))
+        return _apartar(f'<a href="{html_mod.escape(url, quote=True)}">'
+                        f'{_tg_enfasis(_tg_esc(etiqueta))}</a>')
+
+    texto = texto.replace("\x00", "")
+    texto = re.sub(r"`([^`\n]+)`", lambda m: _apartar(f"<code>{_tg_esc(m.group(1))}</code>"),
+                   texto)
+    texto = _TG_ENLACE.sub(_enlace, texto)
+    texto = _tg_enfasis(_tg_esc(texto))
+    return re.sub(r"\x00(\d+)\x00", lambda m: apartados[int(m.group(1))], texto)
+
+
+def _tg_celdas(linea: str) -> list:
+    s = linea.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [re.sub(r"\*\*|__|`", "", c).strip() for c in s.split("|")]
+
+
+def _tg_tabla(filas: list) -> str:
+    """Una tabla de Markdown, alineada en monoespaciado: Telegram no tiene tablas, y sin
+    alinear las columnas no se leen."""
+    n = max(len(f) for f in filas)
+    filas = [f + [""] * (n - len(f)) for f in filas]
+    anchos = [max(len(f[k]) for f in filas) for k in range(n)]
+    lineas = ["  ".join(c.ljust(anchos[k]) for k, c in enumerate(f)).rstrip() for f in filas]
+    lineas.insert(1, "  ".join("-" * a for a in anchos))
+    return "\n".join(lineas)
+
+
+def _md_a_telegram(texto: str) -> str:
+    """Markdown → el HTML que entiende `parse_mode: HTML` de Telegram. Pura.
+
+    Bloques de código con su lenguaje, tablas en `<pre>` alineadas, citas, títulos en
+    negrita y viñetas como «•». Lo de dentro de cada línea, `_tg_en_linea`.
+    """
+    lineas = (texto or "").replace("\r\n", "\n").split("\n")
+    salida, i = [], 0
+    while i < len(lineas):
+        linea = lineas[i]
+        valla = _TG_VALLA.match(linea)
+        if valla:
+            cuerpo, j = [], i + 1
+            while j < len(lineas) and lineas[j].strip() != "```":
+                cuerpo.append(lineas[j])
+                j += 1
+            codigo = _tg_esc("\n".join(cuerpo))
+            lenguaje = valla.group(1)
+            salida.append(f'<pre><code class="language-{lenguaje}">{codigo}</code></pre>'
+                          if lenguaje else f"<pre>{codigo}</pre>")
+            i = j + 1
+            continue
+        if "|" in linea and i + 1 < len(lineas) and _TG_SEPARADOR.match(lineas[i + 1]):
+            filas, j = [_tg_celdas(linea)], i + 2
+            while j < len(lineas) and "|" in lineas[j] and lineas[j].strip():
+                filas.append(_tg_celdas(lineas[j]))
+                j += 1
+            salida.append(f"<pre>{_tg_esc(_tg_tabla(filas))}</pre>")
+            i = j
+            continue
+        if linea.lstrip().startswith(">"):
+            cita = []
+            while i < len(lineas) and lineas[i].lstrip().startswith(">"):
+                cita.append(_tg_en_linea(lineas[i].lstrip()[1:].lstrip()))
+                i += 1
+            salida.append("<blockquote>" + "\n".join(cita) + "</blockquote>")
+            continue
+        titulo = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", linea)
+        vineta = re.match(r"^(\s*)[-*+]\s+(.*)$", linea)
+        if titulo:
+            salida.append(f"<b>{_tg_en_linea(titulo.group(1))}</b>")
+        elif re.match(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$", linea):
+            salida.append("──────────")
+        elif vineta:
+            salida.append(f"{vineta.group(1)}• {_tg_en_linea(vineta.group(2))}")
+        else:
+            salida.append(_tg_en_linea(linea))
+        i += 1
+    return "\n".join(salida)
+
+
+def _partir_telegram(texto: str, limite: int = _TELEGRAM_TROZO) -> list:
+    """Trozos de como mucho `limite` caracteres, partidos por líneas. Pura.
+
+    Un bloque de código que queda partido se cierra al final de un trozo y se vuelve a
+    abrir al principio del siguiente, para que cada trozo se pueda formatear solo.
+    """
+    texto = (texto or "").strip()
+    if len(texto) <= limite:
+        return [texto] if texto else []
+    trozos, actual, tam = [], [], 0
+    en_codigo, valla = False, "```"
+    # Lo que puede añadirse al cerrar un trozo y abrir el siguiente («\n```» y la valla
+    # con su lenguaje): se reserva para que ningún trozo pase del límite.
+    margen = 4 + 32
+    for linea in texto.split("\n"):
+        for pieza in [linea[k:k + limite - margen]
+                      for k in range(0, len(linea), limite - margen)] or [""]:
+            if actual and tam + len(pieza) + 1 > limite - margen:
+                if en_codigo:
+                    actual.append("```")
+                trozos.append("\n".join(actual))
+                actual = [valla] if en_codigo else []
+                tam = sum(len(x) + 1 for x in actual)
+            actual.append(pieza)
+            tam += len(pieza) + 1
+            if _TG_VALLA.match(pieza):
+                en_codigo = not en_codigo
+                valla = pieza.strip()[:32] if en_codigo else "```"
+    if actual:
+        trozos.append("\n".join(actual))
+    return [t.strip("\n") for t in trozos if t.strip()]
+
+
+def _texto_para_nota(texto: str) -> str:
+    """Lo que se le pasa a la voz: sin marcas de Markdown ni URLs, que se leerían letra a
+    letra. El texto entero va igualmente en el pie de la nota."""
+    t = re.sub(r"```.*?```", " ", texto or "", flags=re.S)
+    t = _TG_ENLACE.sub(lambda m: m.group(1), t)
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"[`*_~#>|]+", "", t)
+    return re.sub(r"\s+", " ", t).strip()[:TELEGRAM_VOZ_MAX_CHARS]
+
+
+# ── La Bot API ────────────────────────────────────────────────────────────────
+
+def _telegram_api(metodo: str, *, datos: Optional[dict] = None, ficheros: Optional[dict] = None):
+    """Llama a un método de la Bot API. Devuelve `(result, código)`; `result` es None si
+    no salió. Código 0 = ni contestó. Nunca registra la URL (lleva el token)."""
+    url = f"{_TELEGRAM_API}/bot{TELEGRAM_BOT_TOKEN}/{metodo}"
+    try:
+        if ficheros:
+            # multipart: los campos van como texto, y lo que sea JSON (botones) serializado.
+            campos = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list))
+                          else str(v)) for k, v in (datos or {}).items()}
+            r = http.post(url, data=campos, files=ficheros, timeout=TELEGRAM_TIMEOUT)
+        else:
+            r = http.post(url, json=datos or {}, timeout=TELEGRAM_TIMEOUT)
+    except Exception as e:   # noqa: BLE001 — su texto lleva la URL, y con ella el token
+        logger.error("Telegram %s: no contesta (%s)", metodo, type(e).__name__)
+        return None, 0
+    try:
+        cuerpo = r.json()
+    except ValueError:
+        cuerpo = {}
+    cuerpo = cuerpo if isinstance(cuerpo, dict) else {}
+    if r.status_code >= 300 or not cuerpo.get("ok"):
+        # `description` es el motivo que da Telegram («can't parse entities…»): no lleva
+        # el token, y sin él un 400 no se puede arreglar.
+        logger.warning("Telegram %s: %s %s", metodo, r.status_code,
+                       _sin_token_telegram(cuerpo.get("description") or "")[:200])
+        return None, r.status_code or 0
+    return cuerpo.get("result", True), r.status_code
+
+
+def _telegram_mandar(texto_md: str, *, botones: Optional[list] = None) -> Optional[int]:
+    """Manda un texto (Markdown) troceado. Devuelve el `message_id` del último trozo, que es
+    el que lleva los botones si los hay; None si no salió ninguno.
+
+    Si Telegram rechaza el HTML (un 400: entidades mal formadas, o demasiado largo tras
+    alinear una tabla), ese trozo se reenvía en texto plano: mejor feo que callado."""
+    ultimo = None
+    trozos = _partir_telegram(texto_md) or ["…"]
+    for n, trozo in enumerate(trozos):
+        datos = {"chat_id": TELEGRAM_CHAT_ID, "text": _md_a_telegram(trozo),
+                 "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}}
+        if botones and n == len(trozos) - 1:
+            datos["reply_markup"] = {"inline_keyboard": [botones]}
+        res, codigo = _telegram_api("sendMessage", datos=datos)
+        if res is None and codigo == 400:
+            plano = {k: v for k, v in datos.items() if k != "parse_mode"}
+            res, codigo = _telegram_api("sendMessage", datos={**plano, "text": trozo[:4096]})
+        if isinstance(res, dict):
+            ultimo = res.get("message_id")
+    return ultimo
+
+
+def _telegram_editar(mensaje: dict, texto_html: str) -> None:
+    """Reescribe el mensaje de los botones y se los quita: lo contestado no puede seguir
+    preguntando."""
+    chat = (mensaje.get("chat") or {}).get("id")
+    mid  = mensaje.get("message_id")
+    if chat is None or mid is None:
+        return
+    datos = {"chat_id": chat, "message_id": mid, "text": texto_html[:4096],
+             "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []},
+             "link_preview_options": {"is_disabled": True}}
+    res, codigo = _telegram_api("editMessageText", datos=datos)
+    if res is None and codigo == 400:
+        plano = {k: v for k, v in datos.items() if k != "parse_mode"}
+        plano["text"] = html_mod.unescape(re.sub(r"<[^>]+>", "", texto_html))[:4096]
+        _telegram_api("editMessageText", datos=plano)
+
+
+_VOCES_NOTA = {
+    "fish":  lambda texto: _decir_fish(texto, "opus"),
+    "azure": lambda texto: _decir_azure(texto, _AZURE_FORMATO_NOTA),
+}
+
+
+def _decir_nota(texto: str) -> tuple:
+    """La respuesta como nota de voz: `(audio, "ogg" | "mp3")`, o `(b"", "")` si ninguna voz.
+
+    En el orden de las notas (`_VOZ_ORDEN_NOTAS`: Fish delante, que aquí nadie espera en
+    directo y la calidad sí se nota; ver «Fish Audio, de reserva» en docs/JARVIS_VOZ.md).
+    Se pide OGG/Opus; si una voz contesta en otro contenedor, esa misma voz lo da en MP3.
+    """
+    for voz in _voces_puestas(_VOZ_ORDEN_NOTAS):
+        audio = _VOCES_NOTA[voz](texto)
+        if not audio:
+            continue
+        if audio[:4] == b"OggS":
+            return audio, "ogg"
+        logger.warning("Telegram: la voz %s no ha dado OGG/Opus; la nota va en MP3", voz)
+        mp3 = _VOCES[voz][1](texto)
+        if mp3:
+            return mp3, "mp3"
+    return b"", ""
+
+
+def _telegram_mandar_voz(texto_md: str, oido: str = "") -> None:
+    """Contesta con una nota de voz, y el texto en el pie (o detrás, si no cabe). Si no
+    hay voz o Telegram no la acepta, al menos el texto."""
+    pie = (f"🎙 _«{oido[:300]}»_\n\n" if oido else "") + texto_md
+    hablado = _texto_para_nota(texto_md)
+    audio, tipo = _decir_nota(hablado) if hablado else (b"", "")
+    if audio:
+        cabe = len(pie) <= _TELEGRAM_MAX_PIE
+        base = {"chat_id": TELEGRAM_CHAT_ID}
+        con_pie = {**base, "caption": _md_a_telegram(pie), "parse_mode": "HTML"} if cabe else base
+        nombre, mime = ("jarvis.ogg", "audio/ogg") if tipo == "ogg" else ("jarvis.mp3", "audio/mpeg")
+        intentos = [("sendVoice", "voice", con_pie)]
+        if cabe:
+            intentos.append(("sendVoice", "voice", {**base, "caption": pie}))
+        if tipo == "mp3":
+            # Por si este cliente no la acepta como nota: como audio entra siempre.
+            intentos.append(("sendAudio", "audio", {**base, "caption": pie} if cabe else base))
+        for metodo, campo, datos in intentos:
+            res, codigo = _telegram_api(metodo, datos=datos,
+                                        ficheros={campo: (nombre, audio, mime)})
+            if res is not None:
+                if not cabe:
+                    _telegram_mandar(pie)
+                return
+            if codigo != 400:
+                break
+    _telegram_mandar(pie)
+
+
+# ── La conversación ───────────────────────────────────────────────────────────
+
+def _telegram_historial() -> list:
+    with _telegram_lock:
+        if time.time() - _telegram_ventana_ts > TELEGRAM_CONTEXTO_MIN * 60:
+            _telegram_ventana.clear()
+        return [JarvisTurno(rol=rol, texto=texto) for rol, texto in _telegram_ventana]
+
+
+def _telegram_apuntar(rol: str, texto: str) -> None:
+    global _telegram_ventana_ts
+    texto = (texto or "").strip()
+    if not texto:
+        return
+    with _telegram_lock:
+        _telegram_ventana.append((rol, texto[:JARVIS_MAX_MENSAJE]))
+        _telegram_ventana_ts = time.time()
+
+
+def _telegram_olvidar() -> None:
+    global _telegram_ventana_ts
+    with _telegram_lock:
+        _telegram_ventana.clear()
+        _telegram_ventana_ts = 0.0
+
+
+def _detalle_http(e: HTTPException) -> str:
+    d = e.detail
+    if isinstance(d, dict):
+        d = d.get("mensaje") or d.get("detail") or ""
+    return str(d or "")[:200]
+
+
+def _telegram_turno(texto: str, *, voz: bool) -> None:
+    """Un turno de Jarvis con lo que ha llegado. El mismo cerebro que el chat
+    (`_jarvis_chat`: con Claude Code si toca), con la ventana de esta conversación."""
+    texto = (texto or "").strip()[:JARVIS_MAX_MENSAJE]
+    if not texto:
+        return
+    try:
+        # Mismo cubo que /jarvis y el Atajo: es el mismo gasto, entre por donde entre.
+        _check_rate("jarvis", "telegram", JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
+    except HTTPException as e:
+        _telegram_mandar(f"Demasiados mensajes seguidos, señor. {_detalle_http(e)}.")
+        return
+    cuerpo = JarvisIn(mensaje=texto, historial=_telegram_historial(), voz=voz)
+    try:
+        resultado = _jarvis_chat(cuerpo)
+    except HTTPException as e:
+        logger.warning("Telegram: el turno de Jarvis falló (%s)", _detalle_http(e))
+        _telegram_mandar(f"No he podido contestar: {_detalle_http(e)}")
+        return
+    respuesta = (resultado.get("respuesta") or "").strip() or "No sé qué decirle, señor."
+    _telegram_apuntar("user", texto)
+    _telegram_apuntar("assistant", respuesta)
+    if resultado.get("motor_aviso"):
+        respuesta += f"\n\n_{resultado['motor_aviso']}_"
+    pendiente = resultado.get("pendiente")
+    if voz:
+        _telegram_mandar_voz(respuesta, oido=texto)
+        if pendiente:
+            _telegram_proponer(pendiente, "")
+    elif pendiente:
+        _telegram_proponer(pendiente, respuesta)
+    else:
+        _telegram_mandar(respuesta)
+
+
+def _telegram_describir(nombre: str, argumentos: dict) -> dict:
+    """La frase del botón, escrita por el backend con los argumentos guardados: lo que se
+    lee es lo que se hace. `{"texto"}` o `{"error"}`.
+
+    Para lo del calendario, las tareas y las notas, la misma frase que el móvil
+    (`_describir_accion`, que además valida: un «sí» a algo que luego falla es un botón que
+    miente). Para el resto, la herramienta y sus argumentos tal cual, como el dashboard."""
+    if nombre in PREGUNTAS_ACCIONES:
+        try:
+            return _describir_accion(nombre, argumentos)
+        except Exception as e:   # noqa: BLE001 — sin frase no hay botón, pero sí respuesta
+            logger.warning("Telegram: no se pudo describir %s (%s)", nombre, type(e).__name__)
+            return {"error": "No he podido comprobar lo que iba a proponer."}
+    declarados = (_JARVIS_HERRAMIENTAS.get(nombre) or {}).get("parametros") or {}
+    partes = [f"{k}: {str(v)[:200]}" for k, v in (argumentos or {}).items() if k in declarados]
+    return {"texto": f"`{nombre}`" + (" — " + "; ".join(partes) if partes else "")}
+
+
+def _telegram_proponer(pendiente: dict, texto: str) -> None:
+    """Lo que hay que confirmar, con dos botones. El botón solo lleva un id; lo que se
+    ejecutará se queda aquí, tal cual lo propuso el turno."""
+    nombre = str(pendiente.get("herramienta") or "")
+    argumentos = pendiente.get("argumentos") or {}
+    frase = _telegram_describir(nombre, argumentos)
+    if frase.get("error"):
+        _telegram_mandar((texto + "\n\n" if texto else "")
+                         + f"No se lo propongo: {frase['error']}")
+        return
+    pid = secrets.token_hex(8)
+    cuerpo = (texto + "\n\n" if texto else "") + f"**Para confirmar:** {frase['texto']}"
+    ahora = time.time()
+    with _telegram_lock:
+        for viejo in [k for k, p in _telegram_pendientes.items()
+                      if ahora - p["ts"] > TELEGRAM_BOTON_MIN * 60]:
+            del _telegram_pendientes[viejo]
+        _telegram_pendientes[pid] = {"herramienta": nombre, "argumentos": argumentos,
+                                     "ts": ahora, "texto": cuerpo, "frase": frase["texto"]}
+    mid = _telegram_mandar(cuerpo, botones=[{"text": "✅ Sí", "callback_data": f"si:{pid}"},
+                                            {"text": "❌ No", "callback_data": f"no:{pid}"}])
+    if mid is None:
+        # Sin mensaje no hay botón que pulsar: no se deja nada esperando.
+        with _telegram_lock:
+            _telegram_pendientes.pop(pid, None)
+
+
+def _telegram_boton(cq: dict) -> None:
+    """La respuesta a los botones Sí/No. La primera vale: el id se saca de la lista antes
+    de hacer nada, así que dos toques no ejecutan dos veces."""
+    cq_id   = str(cq.get("id") or "")
+    mensaje = cq.get("message") or {}
+    accion, _, pid = str(cq.get("data") or "").partition(":")
+    with _telegram_lock:
+        propuesta = _telegram_pendientes.pop(pid, None)
+
+    def _contestar(texto: str) -> None:
+        if cq_id:
+            _telegram_api("answerCallbackQuery", datos={"callback_query_id": cq_id,
+                                                        "text": texto[:200]})
+
+    if propuesta is None or accion not in ("si", "no"):
+        # Tras un reinicio, o ya contestada: se dice y se quitan los botones.
+        _contestar("Esto ya no está pendiente.")
+        _telegram_editar(mensaje, _tg_esc(str(mensaje.get("text") or ""))
+                         + "\n\n<b>⌛ Ya no está pendiente.</b> Pídamelo otra vez si hace falta.")
+        return
+    cuerpo_html = _md_a_telegram(propuesta["texto"])
+    if time.time() - propuesta["ts"] > TELEGRAM_BOTON_MIN * 60:
+        _contestar("Caducado")
+        _telegram_editar(mensaje, cuerpo_html + "\n\n<b>⌛ Caducado.</b> Pídamelo otra vez "
+                                                "si sigue haciendo falta.")
+        return
+    if accion == "no":
+        _contestar("Cancelado")
+        _telegram_editar(mensaje, cuerpo_html + "\n\n<b>❌ Cancelado.</b>")
+        _telegram_apuntar("assistant", f"(Cancelado por el usuario: {propuesta['frase']})")
+        return
+    # Se contesta ANTES de ejecutar: Telegram deja el botón girando hasta que se contesta,
+    # y una herramienta puede tardar unos segundos.
+    _contestar("Confirmado")
+    resultado = _jarvis_ejecutar_confirmado(propuesta["herramienta"], propuesta["argumentos"])
+    if resultado is None:
+        desenlace = "No ha salido: esa acción no se confirma por aquí."
+    elif resultado.get("error") or resultado.get("ok") is False:
+        desenlace = "No ha salido: " + str(resultado.get("error") or "sin motivo")[:300]
+    else:
+        desenlace = "Hecho."
+    _telegram_editar(mensaje, cuerpo_html + f"\n\n<b>✅ Confirmado.</b> {_tg_esc(desenlace)}")
+    _telegram_apuntar("assistant", f"(Confirmado por el usuario: {propuesta['frase']}. "
+                                   f"{desenlace})")
+
+
+def _telegram_bajar(ruta: str) -> Optional[bytes]:
+    """Baja el fichero de una nota, acotado a `MAX_AUDIO_BYTES`. None si no se pudo."""
+    try:
+        r = http.get(f"{_TELEGRAM_API}/file/bot{TELEGRAM_BOT_TOKEN}/{ruta}", stream=True,
+                     timeout=TELEGRAM_TIMEOUT)
+    except Exception as e:   # noqa: BLE001 — su texto lleva la URL con el token
+        logger.error("Telegram: no se pudo bajar la nota (%s)", type(e).__name__)
+        return None
+    if r.status_code >= 300:
+        logger.warning("Telegram: bajar la nota devolvió %s", r.status_code)
+        return None
+    trozos, leido = [], 0
+    try:
+        for trozo in r.iter_content(chunk_size=16384):
+            leido += len(trozo or b"")
+            if leido > MAX_AUDIO_BYTES:
+                return None
+            trozos.append(trozo or b"")
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Telegram: se cortó la descarga de la nota (%s)", type(e).__name__)
+        return None
+    finally:
+        try:
+            r.close()
+        except Exception:   # noqa: BLE001
+            pass
+    return b"".join(trozos)
+
+
+def _telegram_nota(voz: dict) -> None:
+    """Una nota de voz: se baja (con tope), se transcribe con Whisper (de pago: con su
+    limitador) y se contesta con voz, que es como le han hablado."""
+    demasiado = "La nota es demasiado larga para mí, señor. Pártala en dos, si es tan amable."
+    if int(voz.get("file_size") or 0) > MAX_AUDIO_BYTES:
+        _telegram_mandar(demasiado)
+        return
+    try:
+        _check_rate("telegram_audio", "telegram", AUDIO_MAX_REQUESTS, AUDIO_WINDOW_SECONDS)
+    except HTTPException as e:
+        _telegram_mandar(f"Demasiadas notas seguidas, señor. {_detalle_http(e)}.")
+        return
+    info, _ = _telegram_api("getFile", datos={"file_id": str(voz.get("file_id") or "")})
+    info = info if isinstance(info, dict) else {}
+    ruta = str(info.get("file_path") or "")
+    # La ruta la da Telegram y va a una URL: se exige su forma antes de pegarla.
+    if not re.fullmatch(r"[A-Za-z0-9_\-/.]{1,256}", ruta) or ".." in ruta:
+        _telegram_mandar("No he podido recoger la nota de voz, señor.")
+        return
+    if int(info.get("file_size") or 0) > MAX_AUDIO_BYTES:
+        _telegram_mandar(demasiado)
+        return
+    audio = _telegram_bajar(ruta)
+    if not audio:
+        _telegram_mandar("No he podido recoger la nota de voz, señor.")
+        return
+    try:
+        transcrito = get_openai_client().audio.transcriptions.create(
+            model="whisper-1", file=("nota.ogg", audio, "audio/ogg"), language="es")
+        _apuntar_gasto("telegram", "whisper-1",
+                       segundos_audio=float(voz.get("duration") or 0)
+                       or len(audio) / AUDIO_BYTES_POR_SEGUNDO)
+        texto = (getattr(transcrito, "text", "") or "").strip()
+    except HTTPException as e:
+        _telegram_mandar(f"No he podido escucharla: {_detalle_http(e)}")
+        return
+    except Exception as e:   # noqa: BLE001
+        logger.error("Telegram: Whisper falló (%s)", type(e).__name__)
+        _telegram_mandar("No he podido escuchar la nota, señor. Pruebe por escrito.")
+        return
+    if not texto:
+        _telegram_mandar("No le he entendido nada en la nota, señor.")
+        return
+    _telegram_turno(texto, voz=True)
+
+
+def _telegram_atender(update: dict) -> None:
+    """Lo que se hace con un mensaje ya aceptado, en segundo plano. Nada de aquí puede
+    reventar sin decirlo: se registra y se le dice a Mikel."""
+    marca = _boca_actual.set("telegram")
+    try:
+        if update.get("callback_query"):
+            _telegram_boton(update["callback_query"])
+            return
+        m = update.get("message") or {}
+        if m.get("voice"):
+            _telegram_nota(m["voice"])
+            return
+        texto = str(m.get("text") or "").strip()
+        if not texto:
+            _telegram_mandar("Por aquí entiendo texto y notas de voz, señor.")
+            return
+        orden = texto.split()[0].split("@")[0].lower()
+        if orden == "/start":
+            _telegram_mandar("A su servicio, señor. Escríbame o mándeme una nota de voz.")
+        elif orden == "/nuevo":
+            _telegram_olvidar()
+            _telegram_mandar("Empezamos de cero, señor.")
+        else:
+            _telegram_turno(texto, voz=False)
+    except Exception as e:   # noqa: BLE001
+        logger.error("Telegram: el mensaje reventó (%s: %s)", type(e).__name__,
+                     _sin_token_telegram(str(e))[:300])
+        try:
+            _telegram_mandar("Me he liado con eso, señor. Queda en el registro.")
+        except Exception:   # noqa: BLE001
+            pass
+    finally:
+        _boca_actual.reset(marca)
+
+
+def _telegram_lanzar(update: dict) -> None:
+    """En segundo plano y en orden (un solo hilo). Los tests lo sustituyen por la llamada
+    directa a `_telegram_atender`."""
+    _telegram_pool.submit(_telegram_atender, update)
+
+
+def _telegram_es_de_mikel(update: dict) -> bool:
+    """El chat Y el remitente tienen que ser `TELEGRAM_CHAT_ID`: su chat privado con el
+    bot, donde los dos coinciden. Un grupo no cuela aunque Mikel esté dentro."""
+    if update.get("callback_query"):
+        cq = update["callback_query"] or {}
+        chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
+        de   = (cq.get("from") or {}).get("id")
+    else:
+        m = update.get("message") or {}
+        chat = (m.get("chat") or {}).get("id")
+        de   = (m.get("from") or {}).get("id")
+    return (_token_ok(str(chat if chat is not None else ""), TELEGRAM_CHAT_ID)
+            and _token_ok(str(de if de is not None else ""), TELEGRAM_CHAT_ID))
+
+
+def _telegram_ya_visto(update_id: int) -> bool:
+    """Telegram reintenta lo que no se contestó a tiempo: el mismo `update_id` se atiende
+    una vez. En memoria: tras un reinicio solo puede repetirse lo que estaba en vuelo."""
+    with _telegram_lock:
+        if update_id in _telegram_vistos:
+            return True
+        _telegram_vistos[update_id] = time.time()
+        while len(_telegram_vistos) > 1000:
+            del _telegram_vistos[next(iter(_telegram_vistos))]
+        return False
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Lo que manda Telegram. Contesta 200 enseguida y trabaja en segundo plano.
+
+    `async` solo para leer el cuerpo acotado DESPUÉS de mirar el secreto; todo lo demás
+    va a su hilo (`_telegram_lanzar`), o el bucle de eventos se quedaría parado lo que
+    tarde el turno (`docs/BUGS_HISTORICOS.md`, «Un endpoint async que llama a algo
+    síncrono…»)."""
+    if not _token_ok(request.headers.get("x-telegram-bot-api-secret-token", ""),
+                     TELEGRAM_WEBHOOK_SECRET):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    crudo = await _leer_cuerpo_limitado(request, MAX_BODY_BYTES)
+    try:
+        update = json.loads(crudo or b"{}")
+    except ValueError:
+        logger.warning("Telegram: el webhook recibió algo que no es JSON")
+        return {"ok": True}
+    if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
+        return {"ok": True}
+    if _telegram_ya_visto(update["update_id"]):
+        return {"ok": True}
+    if not _telegram_es_de_mikel(update):
+        logger.info("Telegram: mensaje de otro chat, ignorado")
+        return {"ok": True}
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Telegram: llega un mensaje y falta TELEGRAM_BOT_TOKEN para contestar")
+        return {"ok": True}
+    _telegram_lanzar(update)
+    return {"ok": True}

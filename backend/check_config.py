@@ -57,6 +57,7 @@ GRUPOS = [
     ("Avísame (una sesión te avisa y le contestas hablando)",
      ["SESION_TOKEN", "SESION_FIRE_URL", "SESION_FIRE_TOKEN"]),
     ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
+    ("Jarvis por Telegram", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_CHAT_ID"]),
     ("El teléfono (Jarvis te llama)",
      ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",
       "BACKEND_URL", "ELEVENLABS_API_KEY", "OPENAI_API_KEY"]),

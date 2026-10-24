@@ -334,6 +334,12 @@ def _limpiar_estado():
     # El día de la última purga de la salud de la familia: sin vaciarlo, solo el primer
     # test que ingiera algo vería el DELETE de la retención.
     main._familia_purgado.clear()
+    # Telegram: lo ya atendido, la ventana de la conversación y los botones pendientes.
+    # Sin vaciarlos, un update_id de un test se daría por repetido en el siguiente, y la
+    # conversación de uno viajaría como historial del otro.
+    main._telegram_vistos.clear()
+    main._telegram_pendientes.clear()
+    main._telegram_olvidar()
 
 
 @pytest.fixture(autouse=True)
