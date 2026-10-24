@@ -1,0 +1,4 @@
+mcp>=1.9,<2
+mss
+pillow
+psutil

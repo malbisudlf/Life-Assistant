@@ -720,6 +720,59 @@ curl -s localhost:3333/health
 Volver atrás: copiar el `.bak` encima y el mismo `restart`. En `caja` la copia es
 `server.js.bak-20261023-antes-p21`.
 
+## El parche 22: escucha pasiva («modo coche»)
+
+Sale del 2026-10-24, de «que en el coche esté siempre escuchando, aunque no le diga nada,
+y que se active con un comando, tipo Alexa». Un iPhone no deja a ninguna app esperar una
+palabra en segundo plano, así que la escucha va dentro de la llamada: la línea abierta,
+Jarvis callado, y solo lo que va detrás de «Jarvis» llega a Claude. Cómo se usa y cómo se
+dispara desde CarPlay, en «Modo coche» de `docs/LLAMADAS.md`.
+
+- **`voice-app/lib/escucha-pasiva.js`** (nuevo): la palabra (`buscarPalabra`, con las
+  formas en que Whisper escribe «Jarvis» en español: yarvis, charvis, jarbis…; se cambia
+  con `ESCUCHA_PASIVA_PALABRA`), las órdenes («modo coche», «modo normal», «gracias») y
+  `esperarPalabra`, que escucha sin contestar. De cada frase oída dormido transcribe solo
+  los primeros `ESCUCHA_PASIVA_VENTANA_MS` (4 s) si es larga, y la frase entera solo si el
+  principio trae el nombre. Lo que no lleva el nombre no se registra, ni el texto.
+- **Los dos bucles** (`sip-handler.js` y `conversation-loop.js`): dormido, el turno no
+  empieza hasta que le nombran; despierto, el turno siguiente espera
+  `ESCUCHA_PASIVA_SEGUIMIENTO_MS` (8 s) en vez de 30 y, si nadie habla, se vuelve a dormir
+  sin «¿sigues ahí?» ni contar silencios (el parche 8 no aplica: el silencio es lo normal).
+  La pregunta llega a Claude con `[Modo coche: …]` delante. Tope por tiempo,
+  `ESCUCHA_PASIVA_MAX_MIN` (180).
+- **`outbound-routes.js`**: `escuchaPasiva: true` en `POST /api/outbound-call` (solo con
+  `mode: 'conversation'`) empieza la llamada ya dormida. Es lo que pide el backend en
+  `POST /telefono/modo-coche`. Un claude-phone sin el parche ignora el campo.
+- **`whisper-client.js`**: acepta `prompt`, y la escucha le pasa «Jarvis.» para que escriba
+  bien el nombre.
+- De paso, el personaje (`docs/JARVIS_PERSONA.md`): la entrante de Jarvis saluda «A su
+  servicio, señor.» y las frases de espera dicen «señor». La despedida no cambia (la mira
+  el test del 16).
+
+`telefono/parche-22.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`voice-app/test/parche22.test.js`: nueve casos (la palabra y sus falsos amigos —Travis,
+Gervasio—, las órdenes, la ventana de 4 s, colgar y el tope, y los dos bucles enteros:
+la saliente del coche que solo contesta a «Jarvis» y la entrante que pasa a modo coche y
+vuelve). **Construido y probado en `caja` el 2026-10-24 sin aplicarlo**: copia del árbol en
+`/tmp/p22`, imagen aparte `claude-phone-voice-app:p22`, y dentro, sin red, pasan el 22 (9),
+el 20 (11), el 18 (7), el 17 (3), el 15-16 (13), el 14 (6) y el 12 (15). La voice-app en
+marcha no se tocó. Para aplicarlo de verdad, como el 20:
+
+```bash
+cd ~/.claude-phone-cli
+docker tag claude-phone-voice-app claude-phone-voice-app:antes-p22
+patch -p1 < parche-22.diff
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche22.test.js
+curl -s localhost:3010/api/calls                     # sin llamada en curso
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Y el `RUNBOOK.md` nuevo a `~/telefono-jarvis/CLAUDE.md` (trae el personaje y cómo
+contestar en modo coche). Volver atrás: `docker tag claude-phone-voice-app:antes-p22
+claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
+`ESCUCHA-PASIVA: a la escucha` y `me llaman` en `docker logs voice-app`.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

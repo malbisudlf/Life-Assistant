@@ -58,6 +58,7 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `GET /telefono/briefing` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | El briefing de la mañana preparado para leerse en voz alta (sin enlaces ni emojis, por secciones y trozos), con `fecha`, `desde` y `hasta`. Lo pide la voice-app de claude-phone cuando Jarvis pone `📖 LEER: briefing` (parche 18). Siempre 200: lo que no se pueda leer va en `frase` |
 | `GET /telefono/contexto` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Lo que Jarvis ya sabe al descolgar (lo que queda de hoy y mañana en la agenda, tareas que vencen, recordatorios y dónde estás), en `texto`. Lo pide el `claude-api-server` al empezar cada llamada (parche 19); el dashboard y el Atajo lo llevan dentro del turno de voz. Copia de `CONTEXTO_VOZ_SEG` |
 | `GET /telefono/lectura` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Lo que la llamada lee en voz alta cuando Jarvis pone `📖 LEER: <que>` (parche 20): `que` = `briefing`, `semana` (la agenda de siete días), `correo` (el último parte de la noche) o `tareas`, con `desde`/`hasta` por secciones. Mismo contrato que `/telefono/briefing`, más `nombre`. Siempre 200: lo que no se pueda leer va en `frase` |
+| `POST /telefono/modo-coche` | servicio (`HEALTH_INGEST_TOKEN`) | Te llama en **escucha pasiva** (parche 22 de claude-phone): callado hasta oír «Jarvis». Lo dispara el Atajo de iOS al conectar con CarPlay. Sin `_telefono_puede_sonar` (lo pides tú), sin insistir si no lo coges y colgando si descuelga el buzón. Una vez cada `MODO_COCHE_PAUSA_MIN` (10): lo demás devuelve `llamada: false` con el motivo |
 | `GET /telefono/confirmar/{pid}` | servicio (`TELEFONO_CONFIRMAR_TOKEN`) | Si una propuesta del teléfono se puede confirmar de viva voz y la frase que la describe (la escribió el backend). Lo pide la voice-app al ver `✅ CONFIRMAR: <id>` (parche 20). Siempre 200 con `ok` |
 | `POST /telefono/confirmar/{pid}` | servicio (`TELEFONO_CONFIRMAR_TOKEN`) | El sí o el no que la voice-app oyó (`{"respuesta": "si"\|"no"}`, decidido por su lista cerrada, nunca por el modelo). Vuelve a comprobarlo todo y responde como el botón del móvil (`_responder_pregunta`): solo lo de `PREGUNTAS_HABLADAS`, recién propuesto (`PREGUNTA_HABLADA_SEG`) y sin contestar. Devuelve la `frase` que se dice |
 | `POST /mcp/telefono` | servicio (`JARVIS_MCP_TELEFONO_TOKEN`) | Servidor MCP (JSON-RPC 2.0) con las herramientas que usa la sesión de Claude Code que contesta el teléfono por la centralita. Auth antes de leer el cuerpo, acotado a `MAX_TELEFONO_BYTES` |
@@ -207,7 +208,7 @@ de intentarlo lo automático tras un rechazo de la credencial; ver `docs/BRIEF.m
 `VIGILANTE`, `VIGILANTE_CADA_MIN`, `VIGILANTE_MIN_ERRORES`, `VIGILANTE_VENTANA_DIAS`,
 `VIGILANTE_ISSUES`, `LLAMADAS_COTIDIANAS_DIA`, `TELEFONO_TIMBRE_SEG`, `TELEFONO_INTENTOS`,
 `TELEFONO_REINTENTO_SEG`, `TELEFONO_BUZON`, `TELEFONO_BUZON_TIMBRE_SEG`, `TELEFONO_BUZON_ESPERA_SEG`,
-`TELEFONO_DETECTAR_BUZON`, `LLAMADAS_SIN_SENAL_DESDE`, `TELEFONO_DORMIR_MARGEN_MIN`,
+`TELEFONO_DETECTAR_BUZON`, `MODO_COCHE_PAUSA_MIN`, `LLAMADAS_SIN_SENAL_DESDE`, `TELEFONO_DORMIR_MARGEN_MIN`,
 `AVISOS_MAX_DIA`, `AVISOS_NO_UTILES`, `AVISOS_REPETIR_DIAS`,
 `AVISOS_HORA_DIFERIDOS`, `REGLAS_PROACTIVAS`, `SALIR_VENTANA_MIN`, `SALIR_ANTES_MIN`,
 `REGLAS_HORA_NOCHE`, `REGLAS_HORA_MANANA`, `MADRUGON_HASTA`, `SUENO_OBJETIVO_H`,
