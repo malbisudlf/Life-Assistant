@@ -1661,6 +1661,18 @@ describe("jarvisEtiquetaAccion — lo que se aprueba con un botón", () => {
     })).toBe("En casa: ejecutar lock.unlock sobre lock.puerta");
   });
 
+  test("jellyfin dice qué pone y dónde", () => {
+    expect(jarvisEtiquetaAccion({
+      herramienta: "jellyfin_reproducir",
+      argumentos: { item_id: "a".repeat(32), titulo: "Dune", dispositivo: "tele" },
+    })).toBe('Poner en Jellyfin "Dune" en "tele"');
+    expect(jarvisEtiquetaAccion({
+      herramienta: "jellyfin_reproducir", argumentos: { item_id: "a".repeat(32), titulo: "Dune" },
+    })).toBe('Poner en Jellyfin "Dune" en el cliente que esté abierto');
+    expect(jarvisEtiquetaAccion({ herramienta: "jellyfin_reproducir", argumentos: { titulo: "Dune" } }))
+      .toBeNull();
+  });
+
   test("cobrar dice lo que hace sin necesitar contexto", () => {
     expect(jarvisEtiquetaAccion({ herramienta: "cobrar_entrenamiento", argumentos: {} }))
       .toContain("cobradas");

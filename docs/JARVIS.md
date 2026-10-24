@@ -982,6 +982,12 @@ está en la sección «Lugares» de `backend/main.py`, y la lógica pura del das
 - **Lo que se descartó**: callar la firma de malestar por la FC del gimnasio. Mira la FC
   en reposo, la HRV y la respiración de cada día, que no se mueven por estar entrenando.
 
+## Jellyfin
+
+`jellyfin_seguir`, `jellyfin_novedades` y `jellyfin_buscar` (directas, también por
+teléfono) y `jellyfin_reproducir` (con botón, y el título del botón se comprueba contra el
+elemento real al ejecutar). Todo en `docs/JELLYFIN.md`.
+
 ## Moodle: las entregas
 
 `moodle_entregas` (consulta, directa, también en el MCP del teléfono) pregunta a Moodle lo

@@ -9,14 +9,17 @@
 
 1. **Telegram** (encargo 1): crear el bot, poner las tres variables, desplegar y
    `setWebhook`. Los pasos, en «Lo hace Mikel», justo debajo.
+2. **Jellyfin** (encargo 3): la clave de API, tu id de usuario y comprobar que el
+   contenedor del backend llega a `http://172.17.0.1:8096`. En «Lo hace Mikel» de
+   `docs/JELLYFIN.md`. Se despliega con lo de Telegram, en el mismo despliegue.
 
 **Hecho:**
 
 | Encargo | Estado | Commit |
 |---|---|---|
 | 1. Jarvis por Telegram | Hecho y probado con la API de Telegram simulada. Sin desplegar | `telegram: …` |
-| 3. Jellyfin en Jarvis | En curso | — |
-| 2. El programador | Pendiente | — |
+| 3. Jellyfin en Jarvis | Hecho y probado con Jellyfin simulado. Sin desplegar | `jellyfin: …` |
+| 2. El programador | En curso | — |
 | 5. Copia de n8n | Pendiente | — |
 
 **Lo que salió distinto de lo previsto:**
@@ -26,6 +29,11 @@
   (`ogg-24khz-16bit-mono-opus`) y Fish da `opus` sin documentar el contenedor, así que se
   mira la firma `OggS` y, si no lo es, esa voz se pide en MP3. `sendAudio` queda como
   último recurso si un cliente rechaza el MP3 como nota.
+- El botón de confirmar del dashboard **solo aparece si `jarvisEtiquetaAccion` sabe
+  describir la herramienta**, así que `jellyfin_reproducir` ha necesitado su línea en
+  `src/lib/helpers.js`. Como ese texto lo redacta el modelo, el backend comprueba al
+  ejecutar que el título casa con el elemento real. Y las tres de leer entran en el
+  teléfono (nombres cortos, sin sinopsis, como `moodle_entregas`).
 
 ---
 

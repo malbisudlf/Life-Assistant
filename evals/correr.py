@@ -77,6 +77,9 @@ def _preparar_entorno() -> None:
     os.environ.setdefault("DEPLOY_GITHUB_TOKEN", "eval")
     os.environ.setdefault("ONEDRIVE", "1")
     os.environ.setdefault("CUMPLES", "1")
+    os.environ.setdefault("JELLYFIN_URL", "http://jellyfin.invalido:8096")
+    os.environ.setdefault("JELLYFIN_API_KEY", "eval")
+    os.environ.setdefault("JELLYFIN_USER_ID", "0" * 32)
 
     sys.path.insert(0, str(BACKEND))
 

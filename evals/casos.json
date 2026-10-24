@@ -95,6 +95,11 @@
     { "id": "donde-documento", "grupo": "documentos", "peticion": "¿Dónde tengo guardado el contrato del piso?", "espera": ["buscar_documentos"], "confundible": "ideas" },
     { "id": "cumple-cuando", "grupo": "consultas", "peticion": "¿Cuándo es el cumple de Ane?", "espera": ["cumpleanos"], "confundible": "agenda" },
     { "id": "cumples-mes", "grupo": "consultas", "peticion": "¿Alguien cumple años este mes?", "espera": ["cumpleanos"], "confundible": "agenda" },
+    { "id": "jellyfin-por-donde", "grupo": "jellyfin", "peticion": "¿Por dónde iba de la serie que estoy viendo?", "espera": ["jellyfin_seguir"], "confundible": "jellyfin_novedades" },
+    { "id": "jellyfin-nuevo", "grupo": "jellyfin", "peticion": "¿Qué han añadido nuevo a Jellyfin esta semana?", "espera": ["jellyfin_novedades"], "confundible": "jellyfin_seguir" },
+    { "id": "jellyfin-tengo", "grupo": "jellyfin", "peticion": "¿Tengo Interstellar en Jellyfin?", "espera": ["jellyfin_buscar"], "confundible": "buscar_en_internet" },
+    { "id": "jellyfin-pon", "grupo": "jellyfin", "peticion": "Ponme Dune en la tele del salón.", "espera": ["jellyfin_buscar", "jellyfin_reproducir"], "confundible": "casa_ordenar", "nota": "Sin el id no puede reproducir: buscarlo primero es el camino bueno. La tele es un cliente de Jellyfin, no un dispositivo de la casa." },
+    { "id": "jellyfin-sigue", "grupo": "jellyfin", "peticion": "Pon el siguiente capítulo de The Office.", "espera": ["jellyfin_seguir", "jellyfin_buscar", "jellyfin_reproducir"], "confundible": "casa_ordenar" },
 
     { "id": "mcp-servidores", "grupo": "mcp", "peticion": "¿Qué servidores MCP tengo conectados ahora mismo?", "espera": ["mcp_servidores"], "confundible": "mcp_catalogo" },
     { "id": "mcp-catalogo", "grupo": "mcp", "peticion": "¿A qué servidores MCP me podría conectar que todavía no tenga?", "espera": ["mcp_catalogo"], "confundible": "mcp_servidores" },

@@ -2433,6 +2433,14 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       return `Borrar la nota ${nombreDe(contexto.ideas, a.idea_id, "key")}`;
     case "cobrar_entrenamiento":
       return "Marcar como cobradas las sesiones pendientes de entrenamiento";
+    case "jellyfin_reproducir": {
+      // El título lo escribe el modelo, pero el backend comprueba al ejecutar que es el
+      // del elemento que va a poner: si no casa, no pone nada (`_jellyfin_cuadra`).
+      const titulo = String(a.titulo || "").trim();
+      if (!titulo || !String(a.item_id || "").trim()) return null;
+      const donde = String(a.dispositivo || "").trim();
+      return `Poner en Jellyfin "${titulo}" ${donde ? `en "${donde}"` : "en el cliente que esté abierto"}`;
+    }
     case "arreglar_revision":
       // Sin argumentos que enseñar: lo que se aprueba es lanzar un agente que va a
       // tocar el repositorio, así que la etiqueta dice exactamente eso.

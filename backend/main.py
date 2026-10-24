@@ -28294,6 +28294,266 @@ def _j_mcp_usar(servidor: str, herramienta: str, argumentos: dict | None = None)
     }
 
 
+# ── Jellyfin: lo que se ve en casa ────────────────────────────────────────────
+# Jellyfin corre en `caja` (el proyecto «pelis» del repositorio HomeLab), con el 8096
+# publicado solo en la LAN y la tailnet. El backend vive en un contenedor de la misma
+# máquina, así que `localhost` es el propio contenedor y NO `caja`: la URL buena es la
+# puerta del puente de Docker (`http://172.17.0.1:8096`) o `host.docker.internal` con su
+# `extra_hosts`. Ver docs/JELLYFIN.md.
+#
+# Tres decisiones:
+#   - **La clave va en la cabecera `Authorization` (`MediaBrowser … Token="…"`), nunca en
+#     la query**: por la query acabaría en cualquier registro de URLs, como el token de HA.
+#   - **Leer es directo y reproducir se confirma.** Mirar qué ibas viendo o qué hay nuevo
+#     no cambia nada; poner algo en la tele de otra habitación, sí.
+#   - **Solo nombres, nunca sinopsis.** Los títulos salen de metadatos de terceros (y, si
+#     Jellyfin no reconoce un fichero, de su nombre, que puso quien subió el torrent):
+#     van con `_AVISO_WEB` y recortados, y la sinopsis —un párrafo entero de texto ajeno—
+#     no viaja al modelo. Es lo que deja meter las de leer en el teléfono.
+JELLYFIN_URL     = os.getenv("JELLYFIN_URL", "").strip().rstrip("/")
+JELLYFIN_API_KEY = os.getenv("JELLYFIN_API_KEY", "")
+JELLYFIN_USER_ID = os.getenv("JELLYFIN_USER_ID", "").strip()
+JELLYFIN_TIMEOUT = float(os.getenv("JELLYFIN_TIMEOUT", "8"))
+# Cuánto hace como mucho que un cliente dio señales para contar como «abierto».
+JELLYFIN_SESION_S = int(os.getenv("JELLYFIN_SESION_S", "900"))
+_JELLYFIN_MAX     = 15
+_JELLYFIN_ID_RE   = re.compile(r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")
+_JELLYFIN_TIPOS   = {"pelicula": "Movie", "serie": "Series", "capitulo": "Episode"}
+_JELLYFIN_DEVICE  = "life-assistant-backend"
+
+
+class JellyfinNoContesta(Exception):
+    """Jellyfin sin configurar, caído o rechazando la clave. El texto es para el modelo."""
+
+
+def _jellyfin_configurado() -> bool:
+    return bool(JELLYFIN_URL and JELLYFIN_API_KEY and _JELLYFIN_ID_RE.match(JELLYFIN_USER_ID))
+
+
+def _jellyfin_cabeceras() -> dict:
+    return {"Authorization": f'MediaBrowser Client="Life Assistant", Device="backend", '
+                             f'DeviceId="{_JELLYFIN_DEVICE}", Version="1.0", '
+                             f'Token="{JELLYFIN_API_KEY}"',
+            "Accept": "application/json"}
+
+
+def _jellyfin(metodo: str, ruta: str, params: Optional[dict] = None):
+    """Una llamada a Jellyfin. Lanza `JellyfinNoContesta` con un motivo que se puede decir.
+
+    Del error solo se registra el tipo o el código: el texto de una excepción de `requests`
+    lleva la URL, y el cuerpo de Jellyfin no tiene nada que hacer en `app_logs`.
+    """
+    if not _jellyfin_configurado():
+        raise JellyfinNoContesta("Jellyfin no está configurado (faltan JELLYFIN_URL, "
+                                 "JELLYFIN_API_KEY o JELLYFIN_USER_ID).")
+    llamada = http.post if metodo == "POST" else http.get
+    try:
+        r = llamada(f"{JELLYFIN_URL}{ruta}", params=params or {},
+                    headers=_jellyfin_cabeceras(), timeout=JELLYFIN_TIMEOUT)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Jellyfin %s %s: no contesta (%s)", metodo, ruta.split("/")[1],
+                       type(e).__name__)
+        raise JellyfinNoContesta("Jellyfin no contesta ahora mismo (¿caja apagada o el "
+                                 "contenedor parado?).")
+    if r.status_code in (401, 403):
+        logger.error("Jellyfin rechaza la clave (%s)", r.status_code)
+        raise JellyfinNoContesta("Jellyfin ha rechazado la clave: hay que revisar "
+                                 "JELLYFIN_API_KEY.")
+    if r.status_code >= 300:
+        logger.warning("Jellyfin %s %s: %s", metodo, ruta.split("/")[1], r.status_code)
+        raise JellyfinNoContesta(f"Jellyfin ha devuelto un error ({r.status_code}).")
+    if r.status_code == 204:
+        return {}
+    try:
+        return r.json()
+    except ValueError:
+        # Un 200 vacío (alguna orden lo devuelve así) no es un error; basura, sí.
+        if not (r.text or "").strip():
+            return {}
+        raise JellyfinNoContesta("Jellyfin ha contestado algo que no se entiende.")
+
+
+def _jellyfin_elemento(it: dict) -> dict:
+    """Lo que ve el modelo de un elemento: nombres recortados y números, sin sinopsis."""
+    tipo = it.get("Type") or ""
+    d = {"id": str(it.get("Id") or ""),
+         "tipo": {"Movie": "película", "Episode": "capítulo", "Series": "serie"}.get(tipo, tipo),
+         "titulo": str(it.get("Name") or "")[:120]}
+    if tipo == "Episode":
+        d["serie"] = str(it.get("SeriesName") or "")[:120]
+        if it.get("ParentIndexNumber") is not None:
+            d["temporada"] = it.get("ParentIndexNumber")
+        if it.get("IndexNumber") is not None:
+            d["capitulo"] = it.get("IndexNumber")
+    if it.get("ProductionYear"):
+        d["anio"] = it.get("ProductionYear")
+    if it.get("RunTimeTicks"):
+        d["duracion_min"] = round(int(it["RunTimeTicks"]) / 600_000_000)
+    datos = it.get("UserData") or {}
+    if datos.get("PlaybackPositionTicks"):
+        d["vas_por_min"] = round(int(datos["PlaybackPositionTicks"]) / 600_000_000)
+    if datos.get("Played"):
+        d["visto"] = True
+    if it.get("DateCreated"):
+        d["anadido"] = str(it["DateCreated"])[:10]
+    return d
+
+
+def _jellyfin_lista(respuesta) -> list:
+    """`/Items/Latest` devuelve una lista; lo demás, `{"Items": [...]}`."""
+    filas = respuesta if isinstance(respuesta, list) else (respuesta or {}).get("Items") or []
+    return [_jellyfin_elemento(it) for it in filas if isinstance(it, dict)][:_JELLYFIN_MAX]
+
+
+def _jellyfin_limite(limite, defecto: int) -> int:
+    try:
+        return max(1, min(int(limite or defecto), _JELLYFIN_MAX))
+    except (TypeError, ValueError):
+        return defecto
+
+
+def _j_jellyfin_seguir(limite: int = 6) -> dict:
+    n = _jellyfin_limite(limite, 6)
+    try:
+        a_medias = _jellyfin_lista(_jellyfin("GET", "/UserItems/Resume", {
+            "userId": JELLYFIN_USER_ID, "limit": n, "mediaTypes": "Video",
+            "enableUserData": "true", "enableImages": "false"}))
+        siguientes = _jellyfin_lista(_jellyfin("GET", "/Shows/NextUp", {
+            "userId": JELLYFIN_USER_ID, "limit": n, "enableUserData": "true",
+            "enableImages": "false"}))
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    vistos = {x["id"] for x in a_medias}
+    return {"ok": True, "aviso": _AVISO_WEB, "a_medias": a_medias,
+            "siguientes": [x for x in siguientes if x["id"] not in vistos]}
+
+
+def _j_jellyfin_novedades(limite: int = 10, tipo: str = "") -> dict:
+    params = {"userId": JELLYFIN_USER_ID, "limit": _jellyfin_limite(limite, 10),
+              "groupItems": "true", "enableImages": "false", "enableUserData": "true",
+              "fields": "DateCreated"}
+    if _JELLYFIN_TIPOS.get(_sin_tildes(str(tipo or ""))):
+        params["includeItemTypes"] = _JELLYFIN_TIPOS[_sin_tildes(str(tipo))]
+    try:
+        return {"ok": True, "aviso": _AVISO_WEB,
+                "novedades": _jellyfin_lista(_jellyfin("GET", "/Items/Latest", params))}
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _j_jellyfin_buscar(texto: str, tipo: str = "", limite: int = 8) -> dict:
+    texto = str(texto or "").strip()[:100]
+    if not texto:
+        return {"ok": False, "error": "Dime qué busco."}
+    tipos = _JELLYFIN_TIPOS.get(_sin_tildes(str(tipo or ""))) or "Movie,Series,Episode"
+    try:
+        encontrado = _jellyfin_lista(_jellyfin("GET", "/Items", {
+            "userId": JELLYFIN_USER_ID, "searchTerm": texto, "recursive": "true",
+            "includeItemTypes": tipos, "limit": _jellyfin_limite(limite, 8),
+            "enableUserData": "true", "enableImages": "false"}))
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "aviso": _AVISO_WEB, "resultados": encontrado,
+            **({} if encontrado else {"nota": f"No hay nada que se llame «{texto}» en "
+                                              "Jellyfin."})}
+
+
+def _jellyfin_nombre(it: dict) -> str:
+    """Cómo se dice un elemento en un botón: «Serie — T2E5 «Capítulo»» o «Película (año)»."""
+    if it.get("Type") == "Episode":
+        t, c = it.get("ParentIndexNumber"), it.get("IndexNumber")
+        num = f" — T{t}E{c}" if t is not None and c is not None else ""
+        return f"{it.get('SeriesName') or ''}{num} «{it.get('Name') or ''}»"[:200]
+    anio = f" ({it['ProductionYear']})" if it.get("ProductionYear") else ""
+    return f"{it.get('Name') or ''}{anio}"[:200]
+
+
+def _jellyfin_cuadra(titulo: str, it: dict) -> bool:
+    """¿El título del botón es este elemento? Lo escribió el modelo y lo lee una persona:
+    si no casa con lo que de verdad se va a poner, no se pone."""
+    plano = lambda s: re.sub(r"[^a-z0-9]+", " ", _sin_tildes(str(s or ""))).strip()
+    t = plano(titulo)
+    nombres = [plano(it.get("Name")), plano(it.get("SeriesName"))]
+    return bool(t) and any(n and (n in t or t in n) for n in nombres)
+
+
+def _jellyfin_cliente(dispositivo: str) -> dict:
+    """El cliente donde reproducir. Lanza `JellyfinNoContesta` con lo que hay que decir."""
+    sesiones = _jellyfin("GET", "/Sessions", {"controllableByUserId": JELLYFIN_USER_ID,
+                                              "activeWithinSeconds": JELLYFIN_SESION_S})
+    clientes = [s for s in (sesiones if isinstance(sesiones, list) else [])
+                if isinstance(s, dict) and s.get("Id") and s.get("SupportsRemoteControl")
+                and s.get("DeviceId") != _JELLYFIN_DEVICE]
+    if not clientes:
+        raise JellyfinNoContesta("No hay ningún cliente de Jellyfin abierto. Que abra "
+                                 "Jellyfin en la tele o en el móvil y me lo vuelva a pedir.")
+    nombre = lambda s: f"{s.get('DeviceName') or '?'} ({s.get('Client') or '?'})"
+    buscado = _sin_tildes(str(dispositivo or "")).strip()
+    if buscado:
+        cuales = [s for s in clientes
+                  if buscado in _sin_tildes(f"{s.get('DeviceName') or ''} {s.get('Client') or ''}")]
+        if len(cuales) == 1:
+            return cuales[0]
+        raise JellyfinNoContesta(
+            ("Hay varios que encajan con «" if cuales else "No encuentro ningún cliente que "
+             "sea «") + str(dispositivo)[:60] + "». Abiertos: "
+            + ", ".join(nombre(s) for s in clientes) + ".")
+    if len(clientes) == 1:
+        return clientes[0]
+    raise JellyfinNoContesta("Hay varios clientes abiertos; dime en cuál: "
+                             + ", ".join(nombre(s) for s in clientes) + ".")
+
+
+def _jellyfin_a_poner(item_id: str, titulo: str) -> dict:
+    """El elemento que se pondrá de verdad, comprobado. De una serie, su capítulo siguiente."""
+    item_id = str(item_id or "").strip()
+    if not _JELLYFIN_ID_RE.match(item_id):
+        raise JellyfinNoContesta("Ese id no es de Jellyfin: sácalo de jellyfin_buscar.")
+    it = _jellyfin("GET", f"/Items/{item_id}", {"userId": JELLYFIN_USER_ID})
+    if not isinstance(it, dict) or not it.get("Id"):
+        raise JellyfinNoContesta("Jellyfin no tiene nada con ese id.")
+    if not _jellyfin_cuadra(titulo, it):
+        raise JellyfinNoContesta(f"El título «{str(titulo)[:80]}» no es el de ese elemento "
+                                 f"({_jellyfin_nombre(it)}): búscalo otra vez.")
+    if it.get("Type") == "Series":
+        siguiente = _jellyfin_lista_cruda(_jellyfin("GET", "/Shows/NextUp", {
+            "userId": JELLYFIN_USER_ID, "seriesId": it["Id"], "limit": 1}))
+        if not siguiente:
+            raise JellyfinNoContesta(f"De {it.get('Name')} no hay capítulo siguiente: dime "
+                                     "cuál quiere ver.")
+        it = siguiente[0]
+    return it
+
+
+def _jellyfin_lista_cruda(respuesta) -> list:
+    filas = respuesta if isinstance(respuesta, list) else (respuesta or {}).get("Items") or []
+    return [it for it in filas if isinstance(it, dict) and it.get("Id")]
+
+
+def _describir_jellyfin_reproducir(args: dict) -> dict:
+    """La frase del botón con los datos de Jellyfin, no los del modelo (ver
+    `_telegram_describir`). Valida de paso que el elemento existe y que su título casa."""
+    try:
+        it = _jellyfin_a_poner(args.get("item_id"), args.get("titulo"))
+    except JellyfinNoContesta as e:
+        return {"error": str(e)}
+    donde = str(args.get("dispositivo") or "").strip()[:60]
+    return {"texto": f"Poner en Jellyfin {_jellyfin_nombre(it)}"
+                     + (f" en «{donde}»" if donde else " en el cliente que esté abierto")}
+
+
+def _j_jellyfin_reproducir(item_id: str, titulo: str, dispositivo: str = "") -> dict:
+    try:
+        it = _jellyfin_a_poner(item_id, titulo)
+        cliente = _jellyfin_cliente(dispositivo)
+        _jellyfin("POST", f"/Sessions/{quote(str(cliente['Id']), safe='')}/Playing",
+                  {"playCommand": "PlayNow", "itemIds": it["Id"]})
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "reproduciendo": _jellyfin_nombre(it),
+            "en": f"{cliente.get('DeviceName') or '?'} ({cliente.get('Client') or '?'})"}
+
+
 # ── Jarvis: conectar servidores MCP sin tocar la configuración ───────────────
 # La regla de fondo NO cambia: un servidor entra en la lista blanca porque lo aprueba una
 # persona. Lo que cambia es el trámite — antes era editar un secret de Fly y redesplegar,
@@ -28581,6 +28841,9 @@ def _j_mis_capacidades() -> dict:
     if not (MOODLE_URL and MOODLE_TOKEN):
         apagado.append("Moodle no está conectado (faltan MOODLE_URL y MOODLE_TOKEN), así que "
                        "no puedo consultar las entregas de la uni.")
+    if not _jellyfin_configurado():
+        apagado.append("Jellyfin no está conectado (faltan JELLYFIN_URL, JELLYFIN_API_KEY o "
+                       "JELLYFIN_USER_ID), así que no sé qué está viendo ni puedo ponerle nada.")
 
     return {
         "herramientas": [{
@@ -28703,6 +28966,61 @@ _JARVIS_HERRAMIENTAS = {
         "parametros":    {"dias": {"type": "integer",
                                    "description": "Cuántos días hacia delante (por defecto 30, máx. 366)."}},
         "requiere_cumples": True,
+    },
+    "jellyfin_seguir": {
+        "confirmar":     False,
+        "fn":            _j_jellyfin_seguir,
+        "descripcion":   "Jellyfin: lo que estaba viendo a medias (con por dónde iba) y el "
+                         "capítulo siguiente de cada serie que sigue. Para «¿por dónde iba?», "
+                         "«¿qué me queda de la serie?».",
+        "parametros":    {"limite": {"type": "integer",
+                                     "description": "Cuántos de cada (por defecto 6)."}},
+        "requiere_jellyfin": True,
+    },
+    "jellyfin_novedades": {
+        "confirmar":     False,
+        "fn":            _j_jellyfin_novedades,
+        "descripcion":   "Jellyfin: lo último que se ha añadido a la biblioteca (películas y "
+                         "capítulos nuevos), con la fecha.",
+        "parametros":    {"limite": {"type": "integer",
+                                     "description": "Cuántos (por defecto 10)."},
+                          "tipo":   {"type": "string",
+                                     "description": "pelicula, serie o capitulo; vacío = todo."}},
+        "requiere_jellyfin": True,
+    },
+    "jellyfin_buscar": {
+        "confirmar":     False,
+        "fn":            _j_jellyfin_buscar,
+        "descripcion":   "Busca en la biblioteca de Jellyfin por título: si una película o "
+                         "serie está, y su id (que es lo que pide jellyfin_reproducir).",
+        "parametros":    {"texto":  {"type": "string", "description": "El título o parte."},
+                          "tipo":   {"type": "string",
+                                     "description": "pelicula, serie o capitulo; vacío = todo."},
+                          "limite": {"type": "integer",
+                                     "description": "Cuántos resultados (por defecto 8)."}},
+        "obligatorios":  ["texto"],
+        "requiere_jellyfin": True,
+    },
+    "jellyfin_reproducir": {
+        "confirmar":     True,
+        "fn":            _j_jellyfin_reproducir,
+        "describir":     _describir_jellyfin_reproducir,
+        "descripcion":   "Pone algo de Jellyfin en un cliente abierto (la tele, el móvil). "
+                         "Saca antes el id con jellyfin_buscar o jellyfin_seguir. De una serie "
+                         "pone el capítulo siguiente. Sin `dispositivo`, el único abierto; "
+                         "si hay varios, te dirá cuáles. NO lo pone al momento: lo aprueba el "
+                         "usuario.",
+        "parametros":    {"item_id":     {"type": "string",
+                                          "description": "El id que dio jellyfin_buscar."},
+                          "titulo":      {"type": "string",
+                                          "description": "El título tal cual vino con ese id "
+                                                         "(se comprueba que casan)."},
+                          "dispositivo": {"type": "string",
+                                          "description": "Dónde: parte del nombre del cliente "
+                                                         "(«tele», «salón»). Vacío = el único "
+                                                         "abierto."}},
+        "obligatorios":  ["item_id", "titulo"],
+        "requiere_jellyfin": True,
     },
     "moodle_entregas": {
         "confirmar":     False,
@@ -29528,6 +29846,8 @@ def _jarvis_esquema() -> list:
     con_onedrive = ONEDRIVE
     con_cumples  = CUMPLES
     con_calendarios = CALENDARIOS_POR_TIPO
+    # Jellyfin, como Moodle: sin URL, clave y usuario no hay biblioteca que mirar.
+    con_jellyfin = _jellyfin_configurado()
     return [{
         "type": "function",
         "function": {
@@ -29548,7 +29868,8 @@ def _jarvis_esquema() -> list:
         and (con_moodle or not h.get("requiere_moodle"))
         and (con_onedrive or not h.get("requiere_onedrive"))
         and (con_cumples or not h.get("requiere_cumples"))
-        and (con_calendarios or not h.get("requiere_calendarios"))]
+        and (con_calendarios or not h.get("requiere_calendarios"))
+        and (con_jellyfin or not h.get("requiere_jellyfin"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -29620,6 +29941,12 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # texto resumido de terceros, pero sale de Enviados (lo escribió tu rutina, no
     # cualquiera) y va con `_AVISO_BRIEFING`; ver `_j_leer_briefing`.
     "tareas", "estado_resumen_diario", "leer_briefing",
+    # 2026-10-24: Jellyfin, las tres de leer. Traen nombres de metadatos de terceros (o el
+    # del fichero, si Jellyfin no lo reconoce), igual que `moodle_entregas` trae los que
+    # escribe el profesorado: recortados, con `_AVISO_WEB` y sin sinopsis, que es donde
+    # cabría un párrafo con instrucciones. `jellyfin_reproducir` no: se confirma, y aquí
+    # no hay botón.
+    "jellyfin_seguir", "jellyfin_novedades", "jellyfin_buscar",
 }
 # `buscar_documentos` y `leer_documento` se quedan fuera a propósito: traen texto escrito
 # por terceros (un PDF que te mandaron), y al otro lado de esta llamada hay una sesión con
@@ -32268,10 +32595,12 @@ def _telegram_describir(nombre: str, argumentos: dict) -> dict:
 
     Para lo del calendario, las tareas y las notas, la misma frase que el móvil
     (`_describir_accion`, que además valida: un «sí» a algo que luego falla es un botón que
-    miente). Para el resto, la herramienta y sus argumentos tal cual, como el dashboard."""
-    if nombre in PREGUNTAS_ACCIONES:
+    miente); la herramienta que trae su propio `describir` (Jellyfin), con el suyo. Para el
+    resto, la herramienta y sus argumentos tal cual, como el dashboard."""
+    describir = (_JARVIS_HERRAMIENTAS.get(nombre) or {}).get("describir")
+    if describir or nombre in PREGUNTAS_ACCIONES:
         try:
-            return _describir_accion(nombre, argumentos)
+            return describir(argumentos) if describir else _describir_accion(nombre, argumentos)
         except Exception as e:   # noqa: BLE001 — sin frase no hay botón, pero sí respuesta
             logger.warning("Telegram: no se pudo describir %s (%s)", nombre, type(e).__name__)
             return {"error": "No he podido comprobar lo que iba a proponer."}

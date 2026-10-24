@@ -423,6 +423,10 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "CUMPLES", True)
         # Y los calendarios por tipo, que también nacen apagados.
         monkeypatch.setattr(main, "CALENDARIOS_POR_TIPO", True)
+        # Y Jellyfin, que sin URL, clave y usuario no tiene biblioteca que mirar.
+        monkeypatch.setattr(main, "JELLYFIN_URL", "http://jellyfin.test:8096")
+        monkeypatch.setattr(main, "JELLYFIN_API_KEY", "jellyfin-clave")
+        monkeypatch.setattr(main, "JELLYFIN_USER_ID", "0" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)
