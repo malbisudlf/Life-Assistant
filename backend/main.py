@@ -21801,34 +21801,47 @@ def _llamar(texto: str, *, rid: str = "", contexto: str = "",
 #     horas escuchándole grabar silencio.
 # Y una pausa (`MODO_COCHE_PAUSA_MIN`): CarPlay se desconecta y se vuelve a conectar en
 # cada parada corta, y cada vez dispararía el Atajo.
+#
+# Con música, la escucha pasiva no sirve: mientras hay una llamada abierta, iOS pausa la
+# música. Para eso está `escucha=normal`, el «Oye Siri, Jarvis»: una llamada corriente,
+# a demanda, que al colgar devuelve la música. Esa no tiene pausa (la pides tú, ahora) ni
+# cuenta para la de la automatización.
 MODO_COCHE_PAUSA_MIN = int(os.getenv("MODO_COCHE_PAUSA_MIN", "10"))
 MODO_COCHE_MENSAJE   = ("Modo coche, señor. Me quedo a la escucha en silencio; "
                         "diga «Jarvis» cuando me necesite.")
+MODO_COCHE_A_DEMANDA = "¿Señor?"
 _modo_coche_ultima: dict = {"ts": 0.0}
 
 
 @app.post("/telefono/modo-coche")
-def telefono_modo_coche(request: Request, token: str = ""):
-    """Te llama en escucha pasiva. Lo llama el Atajo de iOS al conectar con el coche."""
+def telefono_modo_coche(request: Request, token: str = "", escucha: str = "pasiva"):
+    """Te llama desde el coche: en escucha pasiva (la automatización de CarPlay o del
+    Bluetooth del coche) o, con `escucha=normal`, una llamada a demanda (Siri)."""
     if not _token_ok(_extract_service_token(request, token), HEALTH_INGEST_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
+    if escucha not in ("pasiva", "normal"):
+        raise HTTPException(status_code=400, detail="escucha es «pasiva» o «normal»")
     if not _telefono_configurado():
         raise HTTPException(status_code=503,
                             detail="La centralita no está configurada (TELEFONO_URL y TELEFONO_EXTENSION)")
+    pasiva = escucha == "pasiva"
     hace = time.time() - _modo_coche_ultima["ts"]
-    if hace < MODO_COCHE_PAUSA_MIN * 60:
+    if pasiva and hace < MODO_COCHE_PAUSA_MIN * 60:
         return {"ok": True, "llamada": False,
                 "motivo": f"ya te llamé hace {int(hace // 60)} min; no repito antes de "
                           f"{MODO_COCHE_PAUSA_MIN}"}
     cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
-              "mode": "conversation", "message": MODO_COCHE_MENSAJE,
-              "timeoutSeconds": TELEFONO_TIMBRE_SEG,
-              "detectVoicemail": True, "escuchaPasiva": True}
+              "mode": "conversation",
+              "message": MODO_COCHE_MENSAJE if pasiva else MODO_COCHE_A_DEMANDA,
+              "timeoutSeconds": TELEFONO_TIMBRE_SEG, "detectVoicemail": True}
+    if pasiva:
+        cuerpo["escuchaPasiva"] = True
     call_id = _lanzar_llamada(cuerpo)
     if call_id is None:
         raise HTTPException(status_code=502, detail="La centralita no ha podido lanzar la llamada")
-    _modo_coche_ultima["ts"] = time.time()
-    logger.info("Modo coche: llamada lanzada (%s)", call_id or "sin callId")
+    if pasiva:
+        _modo_coche_ultima["ts"] = time.time()
+    logger.info("Modo coche (%s): llamada lanzada (%s)", escucha, call_id or "sin callId")
     return {"ok": True, "llamada": True, "callId": call_id}
 
 

@@ -662,7 +662,9 @@ class TestRepeticionSemanal:
                   rid="22222222-2222-2222-2222-222222222222")]))
         mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
         main._correr_alarmas()
-        assert main._alarma_siguiente < main.time.time() + 86400
+        # Mañana a la misma hora, que es menos de cinco días. No «menos de 24 h»: la víspera
+        # del cambio de hora de octubre, mañana a la misma hora está a 25 h (2026-10-24).
+        assert main._alarma_siguiente < main.time.time() + 86400 + 3600
 
     def test_listar_devuelve_los_dias(self, mock_requests):
         mock_requests.add("GET", "/rest/v1/alarmas", FakeResponse(
@@ -716,11 +718,15 @@ class TestEditarUnaAlarma:
         # Misma trampa que al ponerla: sin esto, adelantar una alarma a dentro de dos
         # minutos no la haría sonar, porque el tick sigue durmiendo hasta la hora vieja.
         mock_requests.add("PATCH", "/rest/v1/alarmas", _reserva_ok)
-        main._alarma_siguiente = main.time.time() + 86400
+        # El reloj viejo, a tres días: «mañana a las 9:15» está a más de 24 h si el test
+        # corre antes de las 9:15 (o la noche del cambio de hora), y comparar con 24 h
+        # hacía que fallara según a qué hora se lanzara la suite.
+        antes = main.time.time() + 3 * 86400
+        main._alarma_siguiente = antes
         manana = (HOY + timedelta(days=1)).strftime("%Y-%m-%d")
         client.patch(f"/alarmas/{self.RID}", headers=auth_headers,
                      json={"fecha": manana, "hora": "09:15"})
-        assert main._alarma_siguiente < main.time.time() + 86400
+        assert main._alarma_siguiente < antes
 
     def test_editar_una_que_no_sonaba_no_para_la_musica(self, client, mock_requests,
                                                         auth_headers, monkeypatch):
