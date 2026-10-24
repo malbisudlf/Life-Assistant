@@ -31034,6 +31034,58 @@ VOZ_DECIR_MAX_CHARS  = int(os.getenv("VOZ_DECIR_MAX_CHARS", "600"))
 VOZ_DECIR_MAX_REQUESTS   = int(os.getenv("VOZ_DECIR_MAX_REQUESTS", "240"))
 VOZ_DECIR_WINDOW_SECONDS = int(os.getenv("VOZ_DECIR_WINDOW_SECONDS", "300"))
 
+# ── Fish Audio: la voz de reserva de la llamada (octubre de 2026) ────────────
+# Mismo camino que Azure: el audio lo sirve `/voz/decir`, una petición por frase, así que
+# el reproductor del navegador (`src/lib/vozAzure.js`) es el mismo. En la llamada va
+# DETRÁS de Azure: si Azure falla en una frase (cuota del mes, caída), esa frase la dice
+# Fish y la llamada sigue con voz de verdad en vez de caer a la robótica del navegador.
+#
+# Detrás y no delante por la latencia, medida el 24 de octubre de 2026 desde casa: Fish
+# contesta desde Hong Kong y tarda ~3 s por frase entera (0,9 s al primer byte) frente a
+# los 0,7 s de Azure en París. En una llamada eso cae justo en la primera frase de cada
+# respuesta. Donde no haya nadie esperando al otro lado —las notas de voz de Telegram,
+# cuando existan— el orden se invierte: Fish delante y Azure detrás (`_VOZ_ORDEN_*`).
+#
+# El timeout es propio: en frío Fish ha tardado 7,7 s (con 8 s se cortaba), y los 15 s
+# del cliente compartido son demasiado silencio para una frase que ya llega tarde porque
+# Azure ha fallado.
+FISH_AUDIO_API_KEY  = os.getenv("FISH_AUDIO_API_KEY", "")
+FISH_AUDIO_MODEL    = os.getenv("FISH_AUDIO_MODEL", "s2.1-pro-free")
+# El `reference_id` de una voz de fish.audio. Vacío = la voz por defecto del modelo.
+FISH_AUDIO_VOICE    = os.getenv("FISH_AUDIO_VOICE", "")
+FISH_AUDIO_LATENCIA = os.getenv("FISH_AUDIO_LATENCIA", "balanced")
+FISH_AUDIO_TIMEOUT  = float(os.getenv("FISH_AUDIO_TIMEOUT", "12"))
+
+
+def _voz_fish_configurada() -> bool:
+    return bool(FISH_AUDIO_API_KEY)
+
+
+def _decir_fish(texto: str) -> bytes:
+    """Una frase con Fish Audio, en MP3. `b""` si no ha salido (el motivo va al registro).
+
+    Aquí no hay marcado que escapar: el texto va como campo de un JSON, no como SSML.
+    """
+    cuerpo = {"text": texto, "format": "mp3", "latency": FISH_AUDIO_LATENCIA}
+    if FISH_AUDIO_VOICE:
+        cuerpo["reference_id"] = FISH_AUDIO_VOICE
+    try:
+        r = http.post("https://api.fish.audio/v1/tts", json=cuerpo,
+                      headers={"Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
+                               "model": FISH_AUDIO_MODEL},
+                      timeout=FISH_AUDIO_TIMEOUT)
+    except Exception as e:   # noqa: BLE001 — quien la llama tiene otra voz detrás
+        logger.error("Fish Audio: no se pudo sintetizar (%s)", e)
+        return b""
+    if r.status_code >= 400:
+        # El cuerpo dice el motivo (cuota, modelo, voz) y no lleva la clave.
+        logger.error("Fish Audio: %s %s", r.status_code, r.text[:300])
+        return b""
+    if not r.content:
+        logger.error("Fish Audio: 200 sin audio para %d caracteres", len(texto))
+        return b""
+    return r.content
+
 
 def _voz_azure_configurada() -> bool:
     return bool(AZURE_SPEECH_KEY and AZURE_SPEECH_REGION and AZURE_SPEECH_VOICE)
@@ -31054,33 +31106,8 @@ def _ssml(texto: str, voz: str) -> str:
             + html_mod.escape(texto, quote=False) + '</voice></speak>')
 
 
-class VozDecirIn(BaseModel):
-    texto: str = Field(max_length=VOZ_DECIR_MAX_CHARS)
-
-
-@app.post("/voz/decir")
-def voz_decir(
-    body: VozDecirIn,
-    request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
-):
-    """Sintetiza UNA frase con Azure y la devuelve como MP3.
-
-    Endpoint de usuario: lo llama el modo llamada del dashboard, una vez por frase. El
-    límite es generoso (240 en 5 minutos) porque una conversación normal son bastantes
-    frases cortas seguidas; sigue estando para que una pestaña en bucle no se coma la
-    cuota gratuita del mes en una tarde.
-
-    Devuelve 503 y no 500 si falta configuración: no es un error, es que esta voz no está
-    puesta, y el cliente sabe caerse a la del navegador con eso.
-    """
-    _check_rate("voz_decir", _client_ip(request), VOZ_DECIR_MAX_REQUESTS,
-                VOZ_DECIR_WINDOW_SECONDS)
-    texto = body.texto.strip()
-    if not texto:
-        raise HTTPException(status_code=400, detail="No hay nada que decir")
-    if not _voz_azure_configurada():
-        raise HTTPException(status_code=503, detail="La voz de Azure no está configurada")
+def _decir_azure(texto: str) -> bytes:
+    """Una frase con Azure, en MP3. `b""` si no ha salido (el motivo va al registro)."""
     try:
         r = http.post(
             f"https://{quote(AZURE_SPEECH_REGION, safe='')}"
@@ -31093,19 +31120,80 @@ def voz_decir(
         )
     except Exception as e:   # noqa: BLE001 — la llamada sigue con la voz del navegador
         logger.error("Azure Speech: no se pudo sintetizar (%s)", e)
-        raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
+        return b""
     if r.status_code >= 400:
         # El cuerpo dice el motivo (voz inexistente, cuota agotada, clave mala) y no
         # lleva la clave dentro, así que se registra: sin esto, quedarse sin cuota el día
         # 20 del mes sería otro fallo mudo más.
         logger.error("Azure Speech: %s %s", r.status_code, r.text[:300])
-        raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
+        return b""
     # Un 200 con el cuerpo vacío es el fallo mudo de siempre con otra cara: el cliente se
     # quedaría esperando un audio que no existe. Mejor decirlo aquí.
     if not r.content:
         logger.error("Azure Speech: 200 sin audio para %d caracteres", len(texto))
+        return b""
+    return r.content
+
+
+# Qué voz va primero en cada sitio. La de la llamada prima la latencia (Azure, 0,7 s);
+# la de las notas de voz, cuando las haya, la calidad (Fish), porque nadie espera en
+# directo. Cambiar el orden es cambiar esta tupla, no el endpoint.
+_VOZ_ORDEN_LLAMADA = ("azure", "fish")
+_VOZ_ORDEN_NOTAS   = ("fish", "azure")
+_VOCES = {
+    "azure": (_voz_azure_configurada, _decir_azure),
+    "fish":  (_voz_fish_configurada, _decir_fish),
+}
+
+
+def _voces_puestas(orden: tuple) -> list:
+    return [v for v in orden if _VOCES[v][0]()]
+
+
+def _decir_con(texto: str, orden: tuple) -> bytes:
+    """La frase con la primera voz del `orden` que dé audio. `b""` si ninguna.
+
+    Una frase con la otra voz en mitad de una respuesta se oye rara, pero mucho menos que
+    la voz robótica del navegador o que el silencio.
+    """
+    for voz in _voces_puestas(orden):
+        audio = _VOCES[voz][1](texto)
+        if audio:
+            return audio
+    return b""
+
+
+class VozDecirIn(BaseModel):
+    texto: str = Field(max_length=VOZ_DECIR_MAX_CHARS)
+
+
+@app.post("/voz/decir")
+def voz_decir(
+    body: VozDecirIn,
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+):
+    """Sintetiza UNA frase y la devuelve como MP3: con Azure y, si falla, con Fish Audio.
+
+    Endpoint de usuario: lo llama el modo llamada del dashboard, una vez por frase. El
+    límite es generoso (240 en 5 minutos) porque una conversación normal son bastantes
+    frases cortas seguidas; sigue estando para que una pestaña en bucle no se coma la
+    cuota gratuita del mes en una tarde.
+
+    Devuelve 503 y no 500 si falta configuración: no es un error, es que no hay voz
+    puesta, y el cliente sabe caerse a la del navegador con eso.
+    """
+    _check_rate("voz_decir", _client_ip(request), VOZ_DECIR_MAX_REQUESTS,
+                VOZ_DECIR_WINDOW_SECONDS)
+    texto = body.texto.strip()
+    if not texto:
+        raise HTTPException(status_code=400, detail="No hay nada que decir")
+    if not _voces_puestas(_VOZ_ORDEN_LLAMADA):
+        raise HTTPException(status_code=503, detail="No hay ninguna voz configurada")
+    audio = _decir_con(texto, _VOZ_ORDEN_LLAMADA)
+    if not audio:
         raise HTTPException(status_code=502, detail="No se pudo sintetizar la voz")
-    return Response(content=r.content, media_type="audio/mpeg",
+    return Response(content=audio, media_type="audio/mpeg",
                     headers={"Cache-Control": "no-store"})
 
 
@@ -31193,12 +31281,18 @@ def voz_token(
     _check_rate("voz_token", _client_ip(request), VOZ_TOKEN_MAX_REQUESTS, VOZ_TOKEN_WINDOW_SECONDS)
     # La transcripción en directo sigue siendo cosa de ElevenLabs: Azure está aquí solo
     # para hablar. Pedir `realtime_scribe` no puede acabar en la voz de Azure.
-    if body.tipo == "tts_websocket" and _voz_azure_configurada():
-        # Con Azure esto importa MÁS que antes: el audio pasa por aquí, así que una
-        # máquina dormida ya no retrasa solo la respuesta, retrasa también la voz. Antes
-        # el audio venía directo de ElevenLabs al navegador y se saltaba a Fly entero.
+    puestas = _voces_puestas(_VOZ_ORDEN_LLAMADA)
+    if body.tipo == "tts_websocket" and puestas:
+        # Con el audio pasando por aquí esto importa MÁS que antes: una máquina dormida
+        # ya no retrasa solo la respuesta, retrasa también la voz. Antes el audio venía
+        # directo de ElevenLabs al navegador y se saltaba a Fly entero.
         _calentar_para_hablar()
-        return {"proveedor": "azure", "voz": AZURE_SPEECH_VOICE,
+        # Azure y Fish se sirven igual (por `/voz/decir`); `proveedor` solo dice cuál
+        # suena primero, para el aviso del chat si la voz se rinde.
+        if puestas[0] == "azure":
+            return {"proveedor": "azure", "voz": AZURE_SPEECH_VOICE,
+                    "max_minutos": JARVIS_VOZ_MAX_MINUTOS}
+        return {"proveedor": "fish", "voz": FISH_AUDIO_VOICE or FISH_AUDIO_MODEL,
                 "max_minutos": JARVIS_VOZ_MAX_MINUTOS}
     # 503 y no 500: no es un fallo, es que la voz de pago no está configurada. El
     # frontend lo lee y se queda con el modo llamada gratuito en vez de romperse.

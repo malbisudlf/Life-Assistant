@@ -49,6 +49,8 @@ GRUPOS = [
     ("Moodle (entregas de la uni al calendario y avisos)", ["MOODLE_URL", "MOODLE_TOKEN"]),
     ("Revisión nocturna accionable (aviso con botones)",
      ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "ARREGLO_FIRE_TOKEN", "JARVIS_REPO"]),
+    ("Voz de Jarvis con Azure Speech", ["AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION"]),
+    ("Voz de reserva de Jarvis con Fish Audio", ["FISH_AUDIO_API_KEY"]),
     ("Voz de Jarvis con ElevenLabs", ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
     ("Despliegue con permiso (arreglo automático del CI roto)",
      ["REVISION_TOKEN", "ARREGLO_FIRE_URL", "DEPLOY_GITHUB_TOKEN", "JARVIS_REPO"]),

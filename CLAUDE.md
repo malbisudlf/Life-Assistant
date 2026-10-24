@@ -162,7 +162,7 @@ Ficheros clave:
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
-| `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |
+| `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»), con Fish Audio de reserva en el backend desde octubre («Fish Audio, de reserva»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |
 | `src/lib/vozScribe.js` | El micrófono de la llamada: Scribe v2 Realtime de ElevenLabs por WebSocket. Se abre al descolgar y no se cierra hasta colgar — cobra por minuto abierto |
 | `src/lib/vozMicro.js` | El respaldo de lo anterior: mide energía para saber si le has cortado, sin transcribir. Solo se usa cuando no hay Scribe |
 | `src/lib/casa.js` | Lógica pura del widget «Casa»: qué manda un toque (lo contrario de lo que se ve, nunca toggle), qué enseña la ficha mientras la orden viaja, qué favoritos se pintan, si el estado es de HA en directo o del catálogo y cada cuánto se pregunta |

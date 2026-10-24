@@ -25,6 +25,9 @@ os.environ.setdefault("AGENT_TOKEN", "agent-token")
 # ejecute la suite. Rompió un test que no tenía nada que ver con Revolut.
 os.environ.setdefault("ENABLE_BANKING_APPLICATION_ID", "")
 os.environ.setdefault("ENABLE_BANKING_PRIVATE_KEY_PATH", "")
+# Lo mismo con la voz: con Fish Audio en el backend/.env local, los tests de Azure que
+# esperan un fallo (502) caerían a Fish y darían 200.
+os.environ.setdefault("FISH_AUDIO_API_KEY", "")
 # El registro persistente escribe en Supabase desde un hilo de fondo. Encendido en los
 # tests, ese hilo colaría POSTs a app_logs en el MockRouter de cualquier test que además
 # registre un warning, y reventaría los asertos de "cuántas llamadas se hicieron". Los

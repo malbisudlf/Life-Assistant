@@ -119,6 +119,41 @@ no rescata nada (si le has hablado encima, lo que tenía preparado ya no viene a
 mientras suena la actual**, que es lo que quita la costura entre frases cuando cada una
 es una petición aparte.
 
+### Fish Audio, de reserva (octubre de 2026)
+
+Desde el 24 de octubre de 2026, `/voz/decir` tiene **dos voces en fila**: Azure delante
+y **Fish Audio** (`s2.1-pro-free`, `POST https://api.fish.audio/v1/tts`) detrás. Si
+Azure no da audio en una frase (cuota del mes, caída, 200 vacío), esa frase la dice
+Fish, y la llamada no cae a la voz del navegador. El cliente no se entera: el
+reproductor es el mismo `vozAzure.js` y `/voz/token` dice `proveedor: "azure"` mientras
+Azure esté puesto (`"fish"` si solo está Fish).
+
+**Por qué detrás y no delante: la latencia.** Medido el 24 de octubre desde casa, con una
+frase de 77 caracteres:
+
+| | Primer byte | Frase entera |
+|---|---|---|
+| Fish, primera petición (en frío) | 5,5 s | 7,7 s |
+| Fish, ya caliente | 0,9 s | 2,7–3,5 s |
+| Azure | — | 0,7 s |
+
+Fish contesta desde **Hong Kong** (`x-fishaudio-datacenter`), y `latency: balanced` no
+cambió nada. En una llamada eso cae entero en la primera frase de cada respuesta.
+
+**El orden vive en `_VOZ_ORDEN_LLAMADA` y `_VOZ_ORDEN_NOTAS`** (`backend/main.py`), y
+`_decir_con(texto, orden)` prueba las voces en ese orden. Las notas de voz que no se
+escuchan en directo —las de Telegram, cuando se hagan— van **al revés: Fish delante y
+Azure detrás**, porque ahí tres segundos no se notan y la calidad sí. Decidido por Mikel
+el 24 de octubre de 2026.
+
+Dos detalles que no conviene deshacer:
+
+- **`FISH_AUDIO_TIMEOUT` (12 s) es propio.** En frío Fish ha llegado a tardar 7,7 s, así
+  que 8 s cortaba respuestas buenas; los 15 s del cliente compartido serían demasiado
+  silencio para una frase que ya viene tarde porque Azure ha fallado.
+- **Sin `FISH_AUDIO_VOICE` se usa la voz por defecto del modelo.** Para elegir otra, se
+  pone su `reference_id` (el id de la URL de la voz en fish.audio).
+
 ### La latencia, medida (fase 8)
 
 Desde dentro de la máquina de Fly, o sea **sin la red del móvil y sin la síntesis**:

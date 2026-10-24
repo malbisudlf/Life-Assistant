@@ -4599,9 +4599,11 @@ export default function Dashboard() {
     // `invalid_token` y la llamada empezaría con un aviso rojo y la voz robótica. Se
     // tira y se pide otro para la siguiente; esta va con la del navegador desde el
     // principio, sin dar el rodeo.
-    // El permiso de Azure no caduca porque no hay tal permiso: su audio lo sirve el
-    // backend con el JWT de siempre. Solo el de ElevenLabs tiene fecha.
-    const fresco  = permiso && (permiso.proveedor === "azure"
+    // El permiso de Fish y el de Azure no caducan porque no hay tal permiso: su audio lo
+    // sirve el backend (`/voz/decir`) con el JWT de siempre. Solo el de ElevenLabs tiene
+    // fecha.
+    const porBackend = permiso && (permiso.proveedor === "fish" || permiso.proveedor === "azure");
+    const fresco  = permiso && (porBackend
       || Date.now() - (permiso.pedidoEn || 0) < VOZ_TOKEN_VIDA_MS);
     if (permiso && !fresco) { vozPermisoRef.current = null; pedirPermisoVoz(); }
     // Cualquiera de las dos voces de pago puede quedarse muda a media llamada, y las dos
@@ -4622,12 +4624,13 @@ export default function Dashboard() {
         hablarJarvis(texto, alTerminar, { encolar: i > 0 });
       });
     };
-    if (fresco && permiso.proveedor === "azure") {
+    if (fresco && porBackend) {
       // Sin token que gastar ni que renovar: por eso aquí no se vuelve a pedir permiso,
-      // al revés que en la rama de ElevenLabs.
+      // al revés que en la rama de ElevenLabs. El reproductor es el mismo para Azure y
+      // Fish; si la primera falla en una frase, el backend ya la ha dicho con la otra.
       vozDePago = abrirVozAzure({
         pedirAudio: pedirAudioVoz,
-        alFallar:   caerAlNavegador("Azure"),
+        alFallar:   caerAlNavegador(permiso.proveedor === "fish" ? "Fish Audio" : "Azure"),
       });
     } else if (fresco) {
       vozDePago = abrirVozEleven({
