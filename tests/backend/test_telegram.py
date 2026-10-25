@@ -157,7 +157,7 @@ class TestTelegramTexto:
         """Para `jarvis_gasto` y lo que dependa de por dónde entró."""
         vistas = []
 
-        def _turno(body):
+        def _turno(body, **kw):
             vistas.append((main._boca_actual.get(), body.voz))
             return {"respuesta": "Hecho."}
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
@@ -167,7 +167,7 @@ class TestTelegramTexto:
     def test_la_ventana_lleva_la_conversacion(self, client, telegram, monkeypatch):
         historiales = []
 
-        def _turno(body):
+        def _turno(body, **kw):
             historiales.append([(t.rol, t.texto) for t in body.historial])
             return {"respuesta": f"Respuesta a {body.mensaje}"}
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
@@ -180,7 +180,7 @@ class TestTelegramTexto:
     def test_la_ventana_caduca(self, client, telegram, monkeypatch):
         historiales = []
 
-        def _turno(body):
+        def _turno(body, **kw):
             historiales.append(list(body.historial))
             return {"respuesta": "Vale."}
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
@@ -193,7 +193,7 @@ class TestTelegramTexto:
     def test_la_ventana_no_pasa_del_tope_de_historial(self, client, telegram, monkeypatch):
         historiales = []
 
-        def _turno(body):
+        def _turno(body, **kw):
             historiales.append(len(body.historial))
             return {"respuesta": "Vale."}
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
@@ -204,7 +204,7 @@ class TestTelegramTexto:
     def test_nuevo_olvida_la_conversacion(self, client, telegram, monkeypatch):
         historiales = []
 
-        def _turno(body):
+        def _turno(body, **kw):
             historiales.append(list(body.historial))
             return {"respuesta": "Vale."}
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
@@ -215,7 +215,7 @@ class TestTelegramTexto:
 
     def test_si_el_turno_falla_lo_dice_sin_detalles_de_fuera(self, client, telegram,
                                                              monkeypatch):
-        def _turno(body):
+        def _turno(body, **kw):
             raise main.HTTPException(status_code=503, detail="Falta OPENAI_API_KEY")
         monkeypatch.setattr(main, "_jarvis_chat", _turno)
         _post(client, _mensaje_tg("hola"))
@@ -226,7 +226,7 @@ class TestTelegramTexto:
         respuestas = [FakeResponse({"ok": False, "description": "can't parse entities"}, 400),
                       FakeResponse({"ok": True, "result": {"message_id": 3}})]
         telegram.routes.insert(0, ("POST", "/sendMessage", lambda url, **kw: respuestas.pop(0)))
-        monkeypatch.setattr(main, "_jarvis_chat", lambda body: {"respuesta": "**raro*"})
+        monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: {"respuesta": "**raro*"})
         _post(client, _mensaje_tg("hola"))
         envios = _api(telegram, "sendMessage")
         assert len(envios) == 2
@@ -236,7 +236,7 @@ class TestTelegramTexto:
 
     def test_lo_largo_se_parte(self, client, telegram, monkeypatch):
         largo = "\n".join(f"Línea {n} " + "x" * 80 for n in range(120))
-        monkeypatch.setattr(main, "_jarvis_chat", lambda body: {"respuesta": largo})
+        monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: {"respuesta": largo})
         _post(client, _mensaje_tg("cuéntame mucho"))
         envios = _api(telegram, "sendMessage")
         assert len(envios) >= 3
@@ -334,6 +334,27 @@ class TestTelegramVoz:
         (_, _, ficheros), = _api(telegram, "sendVoice")
         assert ficheros["voice"] == ("jarvis.mp3", b"ID3mp3", "audio/mpeg")
 
+    def test_con_claude_de_motor_la_nota_la_piensa_claude(self, client, telegram, monkeypatch):
+        """Pedido el 2026-10-25: las notas de voz de Telegram también van a Claude, con el
+        prompt de voz, y la voz sigue siendo la de las notas (Fish delante)."""
+        cliente = _con_oido(monkeypatch, telegram, [_mensaje("no debería llegar a OpenAI")])
+        _fish(monkeypatch, telegram, FakeResponse(content=OGG))
+        monkeypatch.setattr(main, "JARVIS_MOTOR_CHAT", "claude")
+        vistos = []
+
+        def _claude(body):
+            vistos.append((body.voz, main._sistema_chat(voz=body.voz)))
+            return {"respuesta": "Mañana dos cosas, señor.", "herramientas": [],
+                    "pendiente": None, "motor": "claude"}
+        monkeypatch.setattr(main, "_jarvis_turno_claude", _claude)
+        _post(client, _mensaje_tg(voz=_nota()))
+        (voz, sistema), = vistos
+        assert voz is True and "HABLADA" in sistema
+        assert not [c for c in cliente.recibido if c.get("messages")]   # OpenAI, ni tocado
+        assert cliente.audios                                           # Whisper sí
+        (_, datos, ficheros), = _api(telegram, "sendVoice")
+        assert ficheros["voice"][1] == OGG and "dos cosas" in datos["caption"]
+
     def test_mp3_rechazado_como_nota_va_como_audio(self, client, telegram, monkeypatch):
         _con_oido(monkeypatch, telegram, [_mensaje("Vale.")])
         respuestas = [FakeResponse(content=b"no-ogg"), FakeResponse(content=b"ID3mp3")]
@@ -378,7 +399,7 @@ class TestTelegramVoz:
 # ── Lo que se confirma: los botones ───────────────────────────────────────────
 
 def _propone(monkeypatch, herramienta="cobrar_entrenamiento", argumentos=None):
-    monkeypatch.setattr(main, "_jarvis_chat", lambda body: {
+    monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: {
         "respuesta": "Le propongo cobrar las sesiones.",
         "pendiente": {"herramienta": herramienta, "argumentos": argumentos or {}}})
 

@@ -30852,9 +30852,10 @@ def _prompt_chat(body) -> str:
     return "\n".join(partes)
 
 
-def _sistema_chat() -> str:
-    """El prompt de Jarvis de siempre, más lo que cambia al pensar con Claude Code."""
-    return (_jarvis_sistema(voz=False) + "\n\n"
+def _sistema_chat(voz: bool = False) -> str:
+    """El prompt de Jarvis de siempre, más lo que cambia al pensar con Claude Code. Con
+    `voz`, el de las respuestas que se van a escuchar (las notas de voz de Telegram)."""
+    return (_jarvis_sistema(voz=voz) + "\n\n"
             "Cómo trabajas aquí:\n"
             "- Tus herramientas son las del servidor MCP `jarvis`. Cuando estas reglas "
             "nombran una (por ejemplo `agenda`), es `mcp__jarvis__agenda`.\n"
@@ -30875,7 +30876,7 @@ def _jarvis_turno_claude(body) -> dict:
         r = http.post(f"{JARVIS_CLAUDE_URL}/turno",
                       headers={"Authorization": f"Bearer {JARVIS_CLAUDE_TOKEN}"},
                       json={"turno": turno, "prompt": _prompt_chat(body),
-                            "sistema": _sistema_chat()},
+                            "sistema": _sistema_chat(voz=bool(body.voz))},
                       timeout=JARVIS_CLAUDE_TIMEOUT)
     except requests.RequestException as e:
         raise ClaudeNoContesta(f"no contesta ({type(e).__name__})") from e
@@ -30893,13 +30894,18 @@ def _jarvis_turno_claude(body) -> dict:
             "pendiente": datos["pendiente"], "motor": "claude"}
 
 
-def _jarvis_chat(body) -> dict:
+def _jarvis_chat(body, *, voz_con_claude: bool = False) -> dict:
     """El turno del chat escrito: con Claude Code si toca, y si no contesta, con OpenAI.
 
     Que se caiga no es silencioso: se registra y la respuesta lo dice (`motor_aviso`),
     porque una respuesta peor sin saber por qué es exactamente lo que este cambio viene
-    a quitar."""
-    if JARVIS_MOTOR_CHAT == "claude" and not body.voz:
+    a quitar.
+
+    La voz va a OpenAI porque arrancar Claude Code cuesta segundos y en una llamada se
+    oyen. `voz_con_claude` es la excepción de las notas de voz de Telegram, donde nadie
+    espera en directo: las piensa Claude, con el prompt de voz (pedido por Mikel el
+    2026-10-25)."""
+    if JARVIS_MOTOR_CHAT == "claude" and (not body.voz or voz_con_claude):
         try:
             resultado = _jarvis_turno_claude(body)
         except ClaudeNoContesta as e:
@@ -33147,7 +33153,9 @@ def _telegram_turno(texto: str, *, voz: bool) -> None:
         return
     cuerpo = JarvisIn(mensaje=texto, historial=_telegram_historial(), voz=voz)
     try:
-        resultado = _jarvis_chat(cuerpo)
+        # Las notas de voz también las piensa Claude (si es el motor del chat): aquí nadie
+        # espera en directo a la primera palabra, que es lo que manda la voz a OpenAI.
+        resultado = _jarvis_chat(cuerpo, voz_con_claude=True)
     except HTTPException as e:
         logger.warning("Telegram: el turno de Jarvis falló (%s)", _detalle_http(e))
         _telegram_mandar(f"No he podido contestar: {_detalle_http(e)}")

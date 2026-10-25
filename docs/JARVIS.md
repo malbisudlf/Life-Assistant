@@ -1035,7 +1035,8 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
 El chat escrito del dashboard puede pensarlo una **sesión normal de Claude Code** en
 `caja` —tu suscripción, Sonnet 5.5, la misma familia que contesta el teléfono— en vez
 del bucle de OpenAI. Se enciende con `JARVIS_MOTOR_CHAT=claude` (por defecto `openai`).
-Solo el chat: el modo llamada del navegador y el Atajo siguen con OpenAI, porque
+Solo el chat (y Telegram, notas de voz incluidas: ahí nadie espera en directo, ver
+`docs/TELEGRAM.md`): el modo llamada del navegador y el Atajo siguen con OpenAI, porque
 arrancar Claude Code cuesta unos segundos por turno y hablando se notan.
 
 ```

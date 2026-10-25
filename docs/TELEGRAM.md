@@ -201,6 +201,12 @@ turno destila igual que en el chat.
 - Si te hablaron por voz, **se contesta con voz**: el turno va con `voz: true` (frases
   cortas, sin markdown) y la respuesta sale como nota, con lo que entendió y lo que dice
   en el pie. Si no hay voz configurada o Telegram la rechaza, por escrito.
+- **La nota la piensa Claude**, igual que el texto, si es el motor del chat
+  (`JARVIS_MOTOR_CHAT=claude`): `_jarvis_chat(..., voz_con_claude=True)`, con el prompt
+  de voz en `_sistema_chat(voz=True)`. Es la excepción a «la voz va a OpenAI», que existe
+  porque arrancar Claude Code cuesta segundos y en una llamada se oyen; aquí nadie espera
+  en directo. Pedido por Mikel el 2026-10-25. Lo que sigue en OpenAI es la
+  **transcripción** (Whisper): Claude Code no escucha audio.
 - **El orden es el de las notas** (`_VOZ_ORDEN_NOTAS`): **Fish delante y Azure detrás**,
   al revés que en la llamada, porque aquí nadie espera en directo y la calidad se nota (ver
   «Fish Audio, de reserva» en `docs/JARVIS_VOZ.md`).
@@ -252,7 +258,9 @@ trozo se reenvía en texto plano**: mejor feo que callado.
 
 ### Coste
 
-Lo mismo que el chat: los turnos van por OpenAI (o por Claude Code con
-`JARVIS_MOTOR_CHAT=claude`; por voz siempre OpenAI) y se apuntan con boca `telegram`.
+Lo mismo que el chat: los turnos van por OpenAI, o por Claude Code con
+`JARVIS_MOTOR_CHAT=claude` (también las notas de voz), y se apuntan con boca `telegram`.
+Con Claude Code los paga la suscripción, y cuentan contra el mismo límite que el teléfono,
+el chat del dashboard y el programador.
 Una nota de voz suma Whisper (~0,006 €/min) y la síntesis (Fish o Azure, dentro de sus
 niveles gratuitos para este uso).
