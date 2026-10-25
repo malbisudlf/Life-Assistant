@@ -164,6 +164,22 @@ class TestTelegramTexto:
         _post(client, _mensaje_tg("hola"))
         assert vistas == [("telegram", False)]
 
+    def test_mientras_piensa_dice_escribiendo(self, client, telegram, monkeypatch):
+        """El hilo manda la acción al entrar; con el turno ya acabado deja de mandarla."""
+        def _turno(body, **kw):
+            import time as _t
+            _t.sleep(0.2)              # deja al hilo mandar la primera
+            return {"respuesta": "Hecho."}
+        monkeypatch.setattr(main, "_jarvis_chat", _turno)
+        _post(client, _mensaje_tg("hola"))
+        acciones = _api(telegram, "sendChatAction")
+        assert acciones and all(c["action"] == "typing" and c["chat_id"] == CHAT
+                                for _, c, _ in acciones)
+        antes = len(acciones)
+        import time as _t
+        _t.sleep(0.3)
+        assert len(_api(telegram, "sendChatAction")) == antes
+
     def test_la_ventana_lleva_la_conversacion(self, client, telegram, monkeypatch):
         historiales = []
 
@@ -350,6 +366,8 @@ class TestTelegramVoz:
         _post(client, _mensaje_tg(voz=_nota()))
         (voz, sistema), = vistos
         assert voz is True and "HABLADA" in sistema
+        acciones = {c["action"] for _, c, _ in _api(telegram, "sendChatAction")}
+        assert acciones <= {"record_voice"}       # «grabando audio», no «escribiendo»
         assert not [c for c in cliente.recibido if c.get("messages")]   # OpenAI, ni tocado
         assert cliente.audios                                           # Whisper sí
         (_, datos, ficheros), = _api(telegram, "sendVoice")

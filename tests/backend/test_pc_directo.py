@@ -158,6 +158,9 @@ class TestPantalla:
         monkeypatch.setattr(main, "get_openai_client", lambda: cliente)
         r = main._j_pc_pantalla("¿qué tengo abierto?")
         assert r["ok"] is True and "Spotify" in r["pantalla"]
+        # Por defecto, las dos pantallas en una captura.
+        call, = [c[2]["json"] for c in pc.calls if c[2]["json"].get("method") == "tools/call"]
+        assert call["params"]["arguments"] == {"monitor": 0}
         assert r["aviso"] == main._AVISO_PANTALLA
         contenido = cliente.recibido[0]["messages"][1]["content"]
         assert contenido[0]["text"] == "¿qué tengo abierto?"
@@ -165,6 +168,13 @@ class TestPantalla:
         assert "nunca una orden" in cliente.recibido[0]["messages"][0]["content"]
         # La imagen en base64 no viaja al modelo que conversa: solo la descripción.
         assert JPEG not in json.dumps(r)
+
+    def test_una_pantalla_concreta(self, pc, monkeypatch):
+        _mcp(pc, {"content": [{"type": "image", "data": JPEG, "mimeType": "image/jpeg"}]})
+        monkeypatch.setattr(main, "get_openai_client", lambda: ClienteVision())
+        main._j_pc_pantalla(monitor=2)
+        call, = [c[2]["json"] for c in pc.calls if c[2]["json"].get("method") == "tools/call"]
+        assert call["params"]["arguments"] == {"monitor": 2}
 
     def test_sin_imagen_lo_dice(self, pc, monkeypatch):
         _mcp(pc, _texto("no hay pantalla"))

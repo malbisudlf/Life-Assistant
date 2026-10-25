@@ -28737,7 +28737,8 @@ def _describir_captura(b64: str, mime: str, pregunta: str = "") -> str:
         messages=[
             {"role": "system", "content": (
                 "Describes en español y con precisión la captura de pantalla del PC de "
-                "Mikel: qué aplicaciones y ventanas hay, qué se está viendo o haciendo, y "
+                "Mikel (si salen varias pantallas una al lado de otra, cuenta cada una): qué "
+                "aplicaciones y ventanas hay, qué se está viendo o haciendo, y "
                 "el texto importante tal cual. Corto: lo que sirva para contestarle. "
                 + _AVISO_PANTALLA)},
             {"role": "user", "content": [
@@ -28765,9 +28766,14 @@ def _pc_hacer(herramienta: str, argumentos: dict, dato: bool = False) -> dict:
     return salida
 
 
-def _j_pc_pantalla(pregunta: str = "") -> dict:
+def _j_pc_pantalla(pregunta: str = "", monitor: int = 0) -> dict:
+    # 0 = todas las pantallas en una captura (el PC de Mikel tiene dos); 1, 2… una sola.
     try:
-        resultado = _pc_mcp_llamar("pantalla", {"monitor": 1})
+        monitor = max(0, min(int(monitor or 0), 8))
+    except (TypeError, ValueError):
+        monitor = 0
+    try:
+        resultado = _pc_mcp_llamar("pantalla", {"monitor": monitor})
     except PcNoContesta as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:   # noqa: BLE001
@@ -29711,12 +29717,16 @@ _JARVIS_HERRAMIENTAS = {
     "pc_pantalla": {
         "confirmar":     False,
         "fn":            _j_pc_pantalla,
-        "descripcion":   "Mira la pantalla del PC de Mikel (una captura, descrita) y dice qué "
-                         "hay o contesta lo que se pregunte de ella. Si el PC está dormido o "
-                         "apagado lo enciende antes (tarda hasta dos minutos).",
+        "descripcion":   "Mira las pantallas del PC de Mikel (una captura, descrita) y dice qué "
+                         "hay o contesta lo que se pregunte de ellas. Por defecto todas a la "
+                         "vez; si pide una concreta, monitor 1 (la principal) o 2. Si el PC "
+                         "está dormido o apagado lo enciende antes (tarda hasta dos minutos).",
         "parametros":    {"pregunta": {"type": "string",
                                        "description": "Qué quiere saber de la pantalla; vacío "
-                                                      "= describirla."}},
+                                                      "= describirla."},
+                          "monitor":  {"type": "integer",
+                                       "description": "0 = todas (por defecto), 1 = la "
+                                                      "principal, 2 = la segunda."}},
         "requiere_pc_mcp": True,
     },
     "pc_ventanas": {
@@ -33423,6 +33433,37 @@ def _detalle_http(e: HTTPException) -> str:
     return str(d or "")[:200]
 
 
+class _TelegramOcupado:
+    """«Escribiendo…» (o «grabando audio», si va a contestar con voz) mientras Jarvis
+    piensa. Telegram lo quita solo a los ~5 s o al llegar un mensaje, así que se repite
+    cada 4 s en un hilo hasta salir del bloque. Es cosmético: un fallo no toca nada."""
+
+    def __init__(self, accion: str = "typing"):
+        self.accion = accion
+        self._parar = threading.Event()
+
+    def _bucle(self):
+        while not self._parar.is_set():
+            _telegram_api("sendChatAction", datos={"chat_id": TELEGRAM_CHAT_ID,
+                                                   "action": self.accion})
+            self._parar.wait(_TELEGRAM_OCUPADO_CADA_S)
+
+    def __enter__(self):
+        self._hilo = threading.Thread(target=self._bucle, daemon=True, name="telegram-ocupado")
+        self._hilo.start()
+        return self
+
+    def __exit__(self, *exc):
+        # Se espera al hilo (con tope): un «escribiendo» que llegara DESPUÉS de la
+        # respuesta dejaría el chat diciendo que sigue escribiendo cinco segundos más.
+        self._parar.set()
+        self._hilo.join(timeout=TELEGRAM_TIMEOUT)
+        return False
+
+
+_TELEGRAM_OCUPADO_CADA_S = 4.0
+
+
 def _telegram_turno(texto: str, *, voz: bool) -> None:
     """Un turno de Jarvis con lo que ha llegado. El mismo cerebro que el chat
     (`_jarvis_chat`: con Claude Code si toca), con la ventana de esta conversación."""
@@ -33439,7 +33480,8 @@ def _telegram_turno(texto: str, *, voz: bool) -> None:
     try:
         # Las notas de voz también las piensa Claude (si es el motor del chat): aquí nadie
         # espera en directo a la primera palabra, que es lo que manda la voz a OpenAI.
-        resultado = _jarvis_chat(cuerpo, voz_con_claude=True)
+        with _TelegramOcupado("record_voice" if voz else "typing"):
+            resultado = _jarvis_chat(cuerpo, voz_con_claude=True)
     except HTTPException as e:
         logger.warning("Telegram: el turno de Jarvis falló (%s)", _detalle_http(e))
         _telegram_mandar(f"No he podido contestar: {_detalle_http(e)}")

@@ -164,6 +164,9 @@ la sección «TELEGRAM» al final de `backend/main.py`; los tests, en
   `docs/BUGS_HISTORICOS.md`.)
 - **Deduplicado por `update_id`**, en memoria (los últimos mil). Tras un reinicio solo
   podría repetirse lo que estaba en vuelo.
+- **«Escribiendo…» mientras piensa** (`_TelegramOcupado`): `sendChatAction` cada 4 s
+  hasta que sale la respuesta, porque Telegram lo quita solo a los ~5 s. Con una nota de
+  voz es «grabando audio» (`record_voice`). Cosmético: si falla, no toca nada.
 - La boca es `telegram` (`_boca_actual`): así sale en `jarvis_gasto` y en el origen de
   las órdenes de la casa. El hilo la fija él, porque una `contextvar` no viaja sola a otro
   hilo.
