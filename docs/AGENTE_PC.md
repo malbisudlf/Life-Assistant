@@ -390,6 +390,12 @@ del teléfono. Tres decisiones:
   botón. Nivel `usar`: **sin teclado ni ratón**. En el teléfono entran todas menos la
   pantalla, que trae lo que diga una web o un correo abiertos a una sesión con shell.
 
+  **Escucha solo en la IP de Tailscale del PC** (lo que pone el instalador si la hay): en el
+  PC de Mikel hay reglas viejas del cortafuegos que dejan entrar a `python.exe` y
+  `pythonw.exe` por cualquier puerto, también en redes públicas, así que el cortafuegos no
+  es la frontera; atarse a la tailnet sí. Si Tailscale no está levantado al arrancar, el MCP
+  no arranca: falla cerrado.
+
   El token va en `Authorization: Bearer`, comparado en tiempo constante y fail-closed (sin
   token de 24 caracteres no arranca); la protección contra DNS rebinding de la librería
   está apagada porque solo admite `localhost` y desde `caja` se llega por IP.

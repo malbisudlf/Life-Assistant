@@ -20,7 +20,9 @@
 param(
   [switch]$Remoto,
   [ValidateSet("mirar", "usar", "total")][string]$Nivel = "usar",
-  [string]$Escucha = "0.0.0.0",
+  # Vacío = la IP del PC en Tailscale si la hay (así, desde la red de casa o una wifi
+  # pública no hay nada que alcanzar, diga lo que diga el cortafuegos), y si no, todas.
+  [string]$Escucha = "",
   [int]$Puerto = 8765,
   [int]$ApagarMin = 15
 )
@@ -47,6 +49,8 @@ Write-Host "Listo: Claude Code de este PC tiene el MCP jarvis-pc (nivel $Nivel).
 if (-not $Remoto) { return }
 
 # ── Por HTTP, para caja ──────────────────────────────────────────────────────────────
+$ip = try { & tailscale ip -4 2>$null | Select-Object -First 1 } catch { $null }
+if (-not $Escucha) { $Escucha = if ($ip) { $ip } else { "0.0.0.0" } }
 $token = $null
 if (Test-Path $config) {
   $linea = Select-String -Path $config -Pattern '^PC_MCP_TOKEN=(.+)$' | Select-Object -First 1
@@ -76,7 +80,6 @@ Register-ScheduledTask -TaskName "LifeAssistantPcMcp" -Action $accion -Settings 
 $viejo = Join-Path ([Environment]::GetFolderPath("Startup")) "Jarvis PC.lnk"
 if (Test-Path $viejo) { Remove-Item $viejo }
 Write-Host "Tarea LifeAssistantPcMcp creada: arranca a demanda y se apaga tras $ApagarMin min sin uso."
-$ip = try { & tailscale ip -4 2>$null | Select-Object -First 1 } catch { $null }
 if (-not $ip) { $ip = "<IP-del-PC-en-la-tailnet>" }
 
 Write-Host ""
