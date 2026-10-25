@@ -3,55 +3,61 @@
 
 # Jarvis por Telegram
 
-## Parte de la noche (2026-10-24)
+## Parte de la noche (del 24 al 25 de octubre de 2026)
 
-**Lo que tiene que hacer usted, señor**, por orden:
+**Lo que tiene que hacer usted, señor**, por orden de lo que más vale:
 
-1. **Telegram** (encargo 1): crear el bot, poner las tres variables, desplegar y
-   `setWebhook`. Los pasos, en «Lo hace Mikel», justo debajo.
-2. **Jellyfin** (encargo 3): la clave de API, tu id de usuario y comprobar que el
-   contenedor del backend llega a `http://172.17.0.1:8096`. En «Lo hace Mikel» de
-   `docs/JELLYFIN.md`. Se despliega con lo de Telegram, en el mismo despliegue.
-3. **El programador** (encargo 2): instalarlo en `caja` siguiendo
-   `caja/programador/INSTALAR.md` del repositorio HomeLab (dos tokens, construir la
-   imagen, el servicio, y el primer encargo de prueba). Las cuatro `PROGRAMADOR_*` del
-   backend entran en el mismo despliegue.
+1. **La copia de n8n** (encargo 5), que es la única que protege datos: HomeLab,
+   `caja/n8n/copia/INSTALAR.md`. La frase de cifrado (**también a su gestor de
+   contraseñas**), instalar, primera copia a mano, el timer, rclone a OneDrive y la
+   restauración de prueba en un n8n de usar y tirar. No necesita desplegar nada.
+2. **Desplegar el backend** con las variables de lo que quiera encender: sin ellas, lo
+   nuevo de esta noche se queda apagado y ni se anuncia. Telegram, en «Lo hace Mikel»
+   aquí debajo (bot, tres variables, y después del despliegue el `setWebhook`); Jellyfin,
+   en `docs/JELLYFIN.md` (clave, id de usuario y comprobar que el contenedor llega a
+   `http://172.17.0.1:8096`).
+3. **El programador** (encargo 2), lo más largo: HomeLab, `caja/programador/INSTALAR.md`
+   (dos tokens, construir la imagen, el servicio y los dos encargos de prueba), y sus
+   cuatro `PROGRAMADOR_*` en el backend.
+4. **HomeLab en este PC**: commitear lo que hay sin commitear (abajo) y juntarlo con `main`.
 
-**Hecho:**
+No he desplegado, ni instalado, ni entrado en `caja`.
 
-| Encargo | Estado | Commit |
+| Encargo | Estado | Commits |
 |---|---|---|
-| 1. Jarvis por Telegram | Hecho y probado con la API de Telegram simulada. Sin desplegar | `telegram: …` |
-| 3. Jellyfin en Jarvis | Hecho y probado con Jellyfin simulado. Sin desplegar | `jellyfin: …` |
-| 2. El programador | Escrito y probado sin `caja`: 33 tests del backend y 40 de la lógica del puente. Sin instalar | `programador: …` aquí y en HomeLab |
-| 5. Copia de n8n | En curso | — |
+| 1. Jarvis por Telegram | Hecho, 54 tests con la Bot API simulada | `6067094` |
+| 3. Jellyfin en Jarvis | Hecho, 23 tests con Jellyfin simulado | `6e8a926` |
+| 2. El programador | Escrito; 33 tests en el backend y 40 de la lógica del puente. Nada ha corrido contra Docker, Claude Code ni GitHub | `188fbac` y HomeLab `046285d` |
+| 5. Copia de n8n | Escrita; 25 comprobaciones contra un directorio de prueba en el PC | HomeLab `33c4e83`, y este (`docs/N8N.md` y el parte) |
+
+CI en verde en los tres de Life Assistant antes de pasar al siguiente. HomeLab no tiene CI.
 
 **Lo que salió distinto de lo previsto:**
 
-- `sendVoice` **no** pide solo OGG/Opus: la Bot API acepta también MP3 y M4A. Aun así la
-  nota se pide en OGG/Opus (es la que Telegram pinta con su onda): Azure lo da
-  (`ogg-24khz-16bit-mono-opus`) y Fish da `opus` sin documentar el contenedor, así que se
-  mira la firma `OggS` y, si no lo es, esa voz se pide en MP3. `sendAudio` queda como
-  último recurso si un cliente rechaza el MP3 como nota.
-- El botón de confirmar del dashboard **solo aparece si `jarvisEtiquetaAccion` sabe
-  describir la herramienta**, así que `jellyfin_reproducir` ha necesitado su línea en
-  `src/lib/helpers.js`. Como ese texto lo redacta el modelo, el backend comprueba al
-  ejecutar que el título casa con el elemento real. Y las tres de leer entran en el
-  teléfono (nombres cortos, sin sinopsis, como `moodle_entregas`).
-- **El programador**: el git que empuja vive **fuera** del contenedor (un directorio git
-  del puente con `--work-tree` a la carpeta del proyecto): si el puente hiciera `git
-  commit` sobre un `.git` que el contenedor puede tocar, un hook plantado se ejecutaría en
-  `caja`. Y el commit lo escribe el puente con tu identidad, así que ningún
-  `Co-Authored-By` puede llegar a tus repos. La red aislada del contenedor (`red.sh`) está
-  escrita y **sin probar**. `hablar_con_el_programador` va sin botón, como pediste: un
-  mensaje a un encargo ya terminado lo reabre sin confirmar (acotado por la rama y el PR).
+- **Telegram**: `sendVoice` acepta OGG/Opus, MP3 y M4A. Se pide OGG/Opus (la nota con su
+  onda): Azure lo da tal cual; Fish da `opus` sin documentar el contenedor, así que se mira
+  la firma `OggS` y si no, MP3; `sendAudio`, de último recurso.
+- **El botón de confirmar del dashboard solo sale si `jarvisEtiquetaAccion` sabe describir
+  la herramienta**: `jellyfin_reproducir` y `encargar_proyecto` han necesitado su línea en
+  `src/lib/helpers.js`. Como el título de Jellyfin lo redacta el modelo, el backend
+  comprueba al ejecutar que casa con el elemento real.
+- **El programador**: el git que empuja vive **fuera** del contenedor (si no, un hook
+  plantado se ejecutaría en `caja`) y el commit lo escribe el puente con su identidad, así
+  que ningún `Co-Authored-By` llega a sus repos. `hablar_con_el_programador` va sin botón,
+  como pidió: un mensaje a un encargo ya terminado lo reabre sin confirmar. La red aislada
+  del contenedor (`red.sh`) está escrita **sin probar**.
+- **n8n, con su CLI en caliente y no el volumen en frío**: en frío habría que parar n8n
+  cada noche, y n8n es el reloj de los programados. Se pierde el usuario y el historial de
+  ejecuciones, que no hacen falta. El destino fuera de `caja` (OneDrive) queda propuesto y
+  pendiente de su `rclone config`: hasta entonces, una sola copia en el mismo disco.
 - **HomeLab no estaba limpio**: la copia de este PC está en la rama vieja
   `claude/wol-caja`, con `caja/vigias/`, `caja/copias-ha/` y cambios en `CLAUDE.md`,
   `DECISIONES.md` y `RUNBOOK.md` **sin commitear en ninguna rama**, y `caja/pelis/` solo en
-  `origin/claude/eager-gates-tre7f5`. No he tocado esa copia: lo de esta noche va a `main`
-  desde un worktree aparte. Al juntarlo, `DECISIONES.md` y `RUNBOOK.md` tendrán entradas
-  nuevas en los dos lados (se quedan las dos). Y OneDrive dejó copias de conflicto
-  `*-PC-MIKEL.md` en esa carpeta.
+  `origin/claude/eager-gates-tre7f5`; OneDrive dejó además copias de conflicto
+  `*-PC-MIKEL.md`. No la he tocado: lo de esta noche fue a `main` desde un worktree aparte.
+  Al juntarlo, `DECISIONES.md` y `RUNBOOK.md` tendrán entradas nuevas en los dos lados (se
+  quedan las dos). Por eso el aviso de fallo de la copia de n8n lleva su propio
+  `avisar-fallo.sh` en vez de usar el de `caja/vigias/`, que en `main` no existe.
 
 ---
 

@@ -353,9 +353,14 @@ aplicar sin que nadie lo diga.
   en su propia salida y es fácil pasarlo por alto: la base de datos queda cambiada y el
   proceso en marcha sigue con lo viejo, así que el panel y la realidad discrepan.
 
-- **El volumen no entra en ninguna copia de seguridad.** `scripts/copia_supabase.py`
-  solo mira tablas de Supabase. Los flujos y las credenciales de n8n existen en **una
-  sola copia**, dentro de `caja`. Pendiente.
+- **El volumen no entraba en ninguna copia de seguridad**: `scripts/copia_supabase.py`
+  solo mira tablas de Supabase, y los flujos y las credenciales existían en **una sola
+  copia**, dentro de `caja`. Desde el 2026-10-25 hay copia escrita (sin instalar) en el
+  repositorio HomeLab, `caja/n8n/copia/`: cada noche, con la CLI y en caliente, flujos y
+  credenciales **junto con la clave** (`N8N_ENCRYPTION_KEY`), cifrados con gpg y con
+  aviso al móvil si falla. Cómo se restaura, en el `RUNBOOK.md` de HomeLab. Un flujo nuevo
+  entra solo en la copia; traerlo a `caja/n8n/flujos/` sigue haciendo falta para tenerlo
+  revisable en el repositorio.
 
 - **1 GB de memoria, no 512 MB.** Medido el 2026-09-20: ~446 MiB **en reposo**. Con
   512m, el primer flujo que haga algo de verdad se lo lleva por delante con un OOM.
