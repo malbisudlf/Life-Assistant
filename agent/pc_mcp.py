@@ -7,7 +7,9 @@ Lo usan dos clases de Claude:
   sesión cuando lo necesita. Ya tiene terminal; lo que gana es VER la pantalla.
 - **Jarvis en `caja`** (teléfono y chat), por HTTP con `--http`, a través de la LAN o de
   la tailnet y con `PC_MCP_TOKEN`. Es lo que permite «Jarvis, ¿qué hay en mi pantalla?» o
-  «abre Spotify en el PC» desde el coche. Ver docs/AGENTE_PC.md, «El MCP del PC».
+  «abre Spotify en el PC» desde el coche. No está siempre encendido: lo arranca caja cuando
+  hace falta (la tarea LifeAssistantPcMcp, por SSH) y se apaga solo tras
+  `PC_MCP_APAGAR_MIN` minutos sin uso. Ver docs/AGENTE_PC.md, «El MCP del PC».
 
 Por qué no es el agente (`agent.py`): el agente es efímero (arranca, drena la cola de
 jobs y se cierra) y hace encargos largos. Esto es lo contrario: acciones de un segundo,
@@ -473,6 +475,41 @@ def crear_servidor(**ajustes):
     return mcp
 
 
+# ── Por HTTP, solo mientras se usa ───────────────────────────────────────────────────
+# Desde caja no se arranca «cuando hace falta» como por stdio: Jarvis piensa en otra
+# máquina. Lo arranca caja a demanda (la tarea programada LifeAssistantPcMcp, por SSH, la
+# orden `mcp` de pc.sh) y se apaga solo tras PC_MCP_APAGAR_MIN minutos sin peticiones:
+# así el puerto solo está abierto mientras se usa. 0 = no se apaga nunca.
+_ultimo_uso = time.monotonic()
+
+
+def marcar_uso() -> None:
+    global _ultimo_uso
+    _ultimo_uso = time.monotonic()
+
+
+def sin_uso_hace(ahora: float = None) -> float:
+    return (time.monotonic() if ahora is None else ahora) - _ultimo_uso
+
+
+def vigilar_inactividad(minutos: float, salir=None) -> None:
+    """Hilo que cierra el proceso tras `minutos` sin peticiones. No hay nada que guardar
+    (cada llamada es independiente), así que basta con salir."""
+    import threading
+    if minutos <= 0:
+        return
+
+    def _bucle():
+        while True:
+            time.sleep(30)
+            if sin_uso_hace() > minutos * 60:
+                print(f"pc_mcp: {minutos:g} min sin uso; me apago", file=sys.stderr, flush=True)
+                (salir or os._exit)(0)
+                return
+
+    threading.Thread(target=_bucle, daemon=True, name="inactividad").start()
+
+
 def app_http(mcp, token: str):
     """La app ASGI del transporte HTTP, con el token delante (fail-closed).
 
@@ -487,6 +524,7 @@ def app_http(mcp, token: str):
 
     async def con_token(scope, receive, send):
         if scope["type"] == "http":
+            marcar_uso()
             recibido = dict(scope.get("headers") or []).get(b"authorization", b"")
             if not token or not hmac.compare_digest(recibido, esperado):
                 await JSONResponse({"error": "Token inválido"}, status_code=401)(scope, receive, send)
@@ -516,7 +554,15 @@ def main() -> None:
     # pasar `localhost`, y desde caja se llega por la IP de la LAN o de la tailnet.
     mcp = crear_servidor(host=host, port=puerto, transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False))
-    print(f"pc_mcp: nivel {NIVEL}, escuchando en {host}:{puerto}", file=sys.stderr, flush=True)
+    try:
+        apagar_min = float(os.environ.get("PC_MCP_APAGAR_MIN", "15"))
+    except ValueError:
+        apagar_min = 15.0
+    marcar_uso()
+    vigilar_inactividad(apagar_min)
+    print(f"pc_mcp: nivel {NIVEL}, escuchando en {host}:{puerto}"
+          + (f", me apago tras {apagar_min:g} min sin uso" if apagar_min > 0 else ""),
+          file=sys.stderr, flush=True)
     uvicorn.run(app_http(mcp, token), host=host, port=puerto, log_level="warning")
 
 

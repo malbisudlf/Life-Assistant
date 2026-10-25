@@ -82,6 +82,8 @@ def _preparar_entorno() -> None:
     os.environ.setdefault("JELLYFIN_USER_ID", "0" * 32)
     os.environ.setdefault("PROGRAMADOR_URL", "http://programador.invalido:3341")
     os.environ.setdefault("PROGRAMADOR_TOKEN", "eval")
+    os.environ.setdefault("PC_MCP_URL", "http://pc.invalido:8765/mcp")
+    os.environ.setdefault("PC_MCP_TOKEN", "eval-token-de-mas-de-24-caracteres")
 
     sys.path.insert(0, str(BACKEND))
 

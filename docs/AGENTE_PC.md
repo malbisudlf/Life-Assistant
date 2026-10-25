@@ -364,19 +364,39 @@ del teléfono. Tres decisiones:
   puerto ni token. `agent/instalar_pc_mcp.ps1` crea el entorno en `~/.jarvis-pc` (fuera de
   OneDrive: es binario y lo sincronizaría) y lo registra con `claude mcp add --scope user
   jarvis-pc`. **Hecho el 2026-10-24** en el PC de Mikel, nivel `usar`.
-- **Jarvis en `caja`** (teléfono y chat), por HTTP: `instalar_pc_mcp.ps1 -Remoto` genera
-  `PC_MCP_TOKEN` en `~/.jarvis-pc/pc_mcp.env` (solo legible por el usuario), deja un acceso
-  directo en Inicio que lo arranca con `--http` y escribe los dos pasos que no hace: la
-  regla del firewall (administrador; solo LAN y tailnet) y la entrada del `.mcp.json` de
-  `~/telefono-jarvis/` en `caja`. **Sin hacer**: es abrir un puerto del PC, y lo decide
-  Mikel. El token va en `Authorization: Bearer`, comparado en tiempo constante y
-  fail-closed (sin token de 24 caracteres no arranca); la protección contra DNS rebinding
-  de la librería está apagada porque solo admite `localhost` y desde `caja` se llega por IP.
+- **Jarvis en `caja`** (chat, Telegram y teléfono), por HTTP y **arrancado a demanda**
+  (desde el 2026-10-25, pedido así: «no quiero tenerlo siempre arrancado»). Por stdio no
+  puede ser —Jarvis piensa en `caja`, no en el PC—, y por SSH arrancaría en una sesión sin
+  escritorio, sin capturas. Así que:
+  1. `instalar_pc_mcp.ps1 -Remoto` genera `PC_MCP_TOKEN` en `~/.jarvis-pc/pc_mcp.env` (solo
+     legible por el usuario) y crea la **tarea programada `LifeAssistantPcMcp`**, sin
+     disparador: solo arranca cuando se la pide, en la sesión de Mikel, y una segunda
+     petición con ella ya en marcha no abre otra. Escribe los dos pasos que no hace: la regla
+     del firewall (administrador; solo LAN y tailnet) y las dos líneas de `backend.env`.
+  2. Las herramientas `pc_*` del backend (sección «El PC en directo» de `main.py`) llaman al
+     MCP; **si no se puede conectar**, piden a `caja` las órdenes `wol` y `mcp` (`pc.sh`
+     lanza la tarea por SSH, como el «relanzar» del agente) y reintentan durante
+     `PC_MCP_ESPERA_S`. Un error **a mitad** de llamada no se reintenta: la orden pudo
+     llegar, y repetirla abriría dos veces.
+  3. El MCP **se apaga solo** tras `PC_MCP_APAGAR_MIN` (15) minutos sin peticiones: el
+     puerto solo está abierto mientras se usa.
 
-**Antes de darle el MCP al teléfono**: con el PC apagado o suspendido, Claude Code
-intenta conectar con él al empezar cada llamada. Hay que medir cuánto retrasa eso el
-primer turno antes de dejarlo puesto; si es mucho, el camino es una herramienta del
-backend que pregunte al PC con un tope corto, como `estado_pc`.
+  **Herramientas propias y no `mcp_usar`**: el cliente MCP genérico del backend convierte
+  una imagen en texto inútil, así que «¿qué tengo en pantalla?» no funcionaba por ahí.
+  `pc_pantalla` hace la captura y la describe un modelo con visión (`_describir_captura`,
+  `PC_VISION_MODELO`); lo que vuelve es la descripción, marcada como dato
+  (`_AVISO_PANTALLA`). Las demás —`pc_ventanas`, `pc_abrir`, `pc_multimedia`,
+  `pc_bloquear`, `pc_decir`— van directas, como `encender_pc`: son lo mismo que pulsar un
+  botón. Nivel `usar`: **sin teclado ni ratón**. En el teléfono entran todas menos la
+  pantalla, que trae lo que diga una web o un correo abiertos a una sesión con shell.
+
+  El token va en `Authorization: Bearer`, comparado en tiempo constante y fail-closed (sin
+  token de 24 caracteres no arranca); la protección contra DNS rebinding de la librería
+  está apagada porque solo admite `localhost` y desde `caja` se llega por IP.
+
+**Al teléfono le llega por el backend** (las `pc_*` de su lista blanca), no con su propio
+`.mcp.json`: así no intenta conectar con un PC apagado al empezar cada llamada, que era lo
+que retrasaba el primer turno.
 
 Lo que se ve en una captura lo ha escrito cualquiera: las `instructions` del servidor y
 cada captura lo dicen (dato, nunca orden). En nivel `total` eso es lo único entre una web

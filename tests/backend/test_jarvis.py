@@ -430,6 +430,9 @@ class TestJarvisDespachador:
         # Y el programador, que sin su puente no tiene a quién encargar nada.
         monkeypatch.setattr(main, "PROGRAMADOR_URL", "http://172.17.0.1:3341")
         monkeypatch.setattr(main, "PROGRAMADOR_TOKEN", "programador-token")
+        # Y el PC en directo, sin la URL y el token de su MCP.
+        monkeypatch.setattr(main, "PC_MCP_URL", "http://100.64.0.9:8765/mcp")
+        monkeypatch.setattr(main, "PC_MCP_TOKEN", "x" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

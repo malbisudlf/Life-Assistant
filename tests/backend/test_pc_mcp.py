@@ -100,3 +100,46 @@ def test_lo_que_el_nivel_no_permite_no_existe(pc):
     nombres = {t.name for t in asyncio.run(pc.crear_servidor().list_tools())}
     assert {"pantalla", "ventanas", "estado", "abrir", "multimedia", "bloquear", "decir"} <= nombres
     assert not nombres & {"escribir", "teclas", "clic", "cerrar_ventana"}
+
+
+def test_se_apaga_solo_tras_los_minutos_sin_uso(pc, monkeypatch):
+    """Desde caja se arranca a demanda; el puerto solo está abierto mientras se usa."""
+    salidas, esperas = [], []
+
+    class Hilo:
+        def __init__(self, target, **kw):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    import threading
+    monkeypatch.setattr(threading, "Thread", Hilo)
+    monkeypatch.setattr(pc.time, "sleep", lambda s: esperas.append(s))
+    pc.marcar_uso()
+    reloj = [pc.time.monotonic()]
+    monkeypatch.setattr(pc.time, "monotonic", lambda: reloj[0])
+    # Un minuto de uso no lo apaga; dieciséis sin nada, sí.
+    reloj[0] += 60
+    assert pc.sin_uso_hace() == pytest.approx(60)
+    reloj[0] += 15 * 60
+    pc.vigilar_inactividad(15, salir=salidas.append)
+    assert salidas == [0] and esperas
+
+
+def test_con_cero_no_se_apaga_nunca(pc, monkeypatch):
+    import threading
+    arrancados = []
+    monkeypatch.setattr(threading, "Thread", lambda **kw: arrancados.append(kw))
+    pc.vigilar_inactividad(0)
+    assert not arrancados
+
+
+def test_cada_peticion_cuenta_como_uso(pc, monkeypatch):
+    reloj = [1000.0]
+    monkeypatch.setattr(pc.time, "monotonic", lambda: reloj[0])
+    pc.marcar_uso()
+    reloj[0] += 300
+    assert pc.sin_uso_hace() == pytest.approx(300)
+    pc.marcar_uso()
+    assert pc.sin_uso_hace() == pytest.approx(0)
