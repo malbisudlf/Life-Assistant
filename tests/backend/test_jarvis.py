@@ -427,6 +427,9 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "JELLYFIN_URL", "http://jellyfin.test:8096")
         monkeypatch.setattr(main, "JELLYFIN_API_KEY", "jellyfin-clave")
         monkeypatch.setattr(main, "JELLYFIN_USER_ID", "0" * 32)
+        # Y el programador, que sin su puente no tiene a quién encargar nada.
+        monkeypatch.setattr(main, "PROGRAMADOR_URL", "http://172.17.0.1:3341")
+        monkeypatch.setattr(main, "PROGRAMADOR_TOKEN", "programador-token")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

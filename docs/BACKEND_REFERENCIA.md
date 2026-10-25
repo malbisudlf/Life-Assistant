@@ -286,6 +286,7 @@ compositor, en fracción de pantalla; `agent.py --posicion` los mide),
 | Ruta | Auth | Qué hace |
 |---|---|---|
 | `POST /jarvis/atajo` | `JARVIS_TOKEN` (cabecera) o JWT | Un turno suelto de Jarvis para el Atajo de iOS. Sin historial, siempre `voz`, y dice en voz alta lo que queda pendiente de confirmar. Ver `docs/JARVIS.md` |
+| `POST /programador/terminado` | servicio (`PROGRAMADOR_AVISO_TOKEN`, cabecera) | El puente del programador avisa de que un encargo ha terminado o fallado: deja el aviso al móvil por `_apuntar_aviso` (regla `programador`, fuera del presupuesto: lo pidió Mikel). El enlace al PR solo viaja si es de GitHub y de un dueño de `PROGRAMADOR_DUENOS`. Ver `docs/PROGRAMADOR.md` |
 | `POST /telegram/webhook` | servicio (cabecera `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET`) | Lo que manda el bot de Telegram. Sin secreto configurado, 401 a todo. Solo atiende a `TELEGRAM_CHAT_ID` (como chat y como remitente); lo demás, 200 mudo. Deduplica por `update_id`, contesta 200 en el acto y trabaja en segundo plano: texto y notas de voz al turno de Jarvis (boca `telegram`), y los botones Sí/No de lo que se confirma. Ver `docs/TELEGRAM.md` |
 | `GET /avisos/enviados?dia=&limite=` | JWT | Los avisos que salieron ese día (por defecto hoy), con hora y con su valoración. Ventana desde la medianoche **local** |
 | `GET /avisos/{id}/porque` | JWT | Los valores crudos con los que se disparó ese aviso. `motivo: null` con 200 si no se guardó |
@@ -315,6 +316,7 @@ Variables nuevas: `JARVIS_TOKEN`, `ENCARGO_MAX_CHARS`, `GASTO_PERSIST`,
 `JARVIS_CLAUDE_TIMEOUT`, `JARVIS_MCP_CHAT_TOKEN`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_CHAT_ID`, `TELEGRAM_CONTEXTO_MIN`, `TELEGRAM_BOTON_MIN`,
 `TELEGRAM_VOZ_MAX_CHARS`, `TELEGRAM_TIMEOUT`, `JELLYFIN_URL`, `JELLYFIN_API_KEY`,
-`JELLYFIN_USER_ID`, `JELLYFIN_TIMEOUT`, `JELLYFIN_SESION_S`.
+`JELLYFIN_USER_ID`, `JELLYFIN_TIMEOUT`, `JELLYFIN_SESION_S`, `PROGRAMADOR_URL`,
+`PROGRAMADOR_TOKEN`, `PROGRAMADOR_AVISO_TOKEN`, `PROGRAMADOR_DUENOS`, `PROGRAMADOR_TIMEOUT`.
 Todas documentadas una a una en `backend/.env.example`.
 

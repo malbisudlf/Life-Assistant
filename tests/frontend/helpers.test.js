@@ -1661,6 +1661,18 @@ describe("jarvisEtiquetaAccion — lo que se aprueba con un botón", () => {
     })).toBe("En casa: ejecutar lock.unlock sobre lock.puerta");
   });
 
+  test("el encargo al programador dice qué, dónde y que no toca main", () => {
+    const etiqueta = jarvisEtiquetaAccion({
+      herramienta: "encargar_proyecto",
+      argumentos: { titulo: "docs: README", encargo: "Añade una sección de instalación.", repo: "yo/repo" },
+    });
+    expect(etiqueta).toContain('"docs: README"');
+    expect(etiqueta).toContain("sobre yo/repo");
+    expect(etiqueta).toContain("sin tocar main");
+    expect(jarvisEtiquetaAccion({ herramienta: "encargar_proyecto", argumentos: { titulo: "x" } }))
+      .toBeNull();
+  });
+
   test("jellyfin dice qué pone y dónde", () => {
     expect(jarvisEtiquetaAccion({
       herramienta: "jellyfin_reproducir",

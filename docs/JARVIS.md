@@ -982,6 +982,13 @@ está en la sección «Lugares» de `backend/main.py`, y la lógica pura del das
 - **Lo que se descartó**: callar la firma de malestar por la FC del gimnasio. Mira la FC
   en reposo, la HRV y la respiración de cada día, que no se mueven por estar entrenando.
 
+## El programador
+
+`encargar_proyecto` (con botón), `ver_proyectos` y `hablar_con_el_programador`: Jarvis le
+encarga a Claude Code, en un contenedor de `caja`, un proyecto entero y lo sigue. No es
+`encargar_a_una_sesion`: aquel es para el código de este repositorio y corre en la nube;
+este, para cualquier otro proyecto. Todo en `docs/PROGRAMADOR.md`.
+
 ## Jellyfin
 
 `jellyfin_seguir`, `jellyfin_novedades` y `jellyfin_buscar` (directas, también por

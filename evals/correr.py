@@ -80,6 +80,8 @@ def _preparar_entorno() -> None:
     os.environ.setdefault("JELLYFIN_URL", "http://jellyfin.invalido:8096")
     os.environ.setdefault("JELLYFIN_API_KEY", "eval")
     os.environ.setdefault("JELLYFIN_USER_ID", "0" * 32)
+    os.environ.setdefault("PROGRAMADOR_URL", "http://programador.invalido:3341")
+    os.environ.setdefault("PROGRAMADOR_TOKEN", "eval")
 
     sys.path.insert(0, str(BACKEND))
 

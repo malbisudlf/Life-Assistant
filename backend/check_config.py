@@ -59,6 +59,8 @@ GRUPOS = [
     ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
     ("Jarvis por Telegram", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_CHAT_ID"]),
     ("Jellyfin en Jarvis", ["JELLYFIN_URL", "JELLYFIN_API_KEY", "JELLYFIN_USER_ID"]),
+    ("El programador (Jarvis encarga proyectos a Claude Code)",
+     ["PROGRAMADOR_URL", "PROGRAMADOR_TOKEN", "PROGRAMADOR_AVISO_TOKEN", "PROGRAMADOR_DUENOS"]),
     ("El teléfono (Jarvis te llama)",
      ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_NUMERO", "TWILIO_MI_NUMERO",
       "BACKEND_URL", "ELEVENLABS_API_KEY", "OPENAI_API_KEY"]),

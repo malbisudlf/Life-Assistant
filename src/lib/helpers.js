@@ -2433,6 +2433,17 @@ export function jarvisEtiquetaAccion(pendiente, contexto = {}) {
       return `Borrar la nota ${nombreDe(contexto.ideas, a.idea_id, "key")}`;
     case "cobrar_entrenamiento":
       return "Marcar como cobradas las sesiones pendientes de entrenamiento";
+    case "encargar_proyecto": {
+      // Se aprueba trabajo de un programador con terminal: tiene que verse qué y dónde.
+      const titulo = String(a.titulo || "").trim();
+      const encargo = String(a.encargo || "").replace(/\s+/g, " ").trim();
+      if (!titulo || !encargo) return null;
+      const repo = String(a.repo || "").trim();
+      const proyecto = String(a.proyecto || "").trim();
+      const donde = repo ? ` sobre ${repo} (rama y PR, sin tocar main)`
+        : proyecto ? ` (sigue el proyecto ${proyecto})` : " (proyecto nuevo, en caja)";
+      return `Encargar al programador "${titulo}"${donde}: ${encargo.slice(0, 300)}${encargo.length > 300 ? "…" : ""}`;
+    }
     case "jellyfin_reproducir": {
       // El título lo escribe el modelo, pero el backend comprueba al ejecutar que es el
       // del elemento que va a poner: si no casa, no pone nada (`_jellyfin_cuadra`).

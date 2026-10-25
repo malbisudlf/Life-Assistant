@@ -15874,6 +15874,11 @@ REGLA_VIGILANTE_SOLO = "vigilante_solo"
 # ahí y no dentro del texto. De paso, se puede silenciar una sin callar la otra.
 REGLA_SESION           = "sesion"
 REGLA_SESION_BLOQUEADA = "sesion_bloqueada"
+# La del «el programador ha terminado» (`POST /programador/terminado`). Es algo que
+# pidió Mikel —encargó el proyecto con un botón—, así que no compite con las reglas del
+# sistema por el presupuesto del día (`_es_tuyo`), igual que un `recordarme`. Sigue
+# teniendo regla propia para poder silenciarla si algún día se vuelve ruido.
+REGLA_PROGRAMADOR      = "programador"
 # Las que dejan TRABAJO PARADO hasta que contestes: un arreglo verificado esperando
 # permiso y una sesión que no puede seguir sin ti. Son las que suenan con el móvil en
 # silencio, y por lo mismo las que no se pueden pasar a mañana por el presupuesto del día
@@ -16062,7 +16067,7 @@ def _es_tuyo(regla: str) -> bool:
     dejar rastro de por qué. El presupuesto existe para que las reglas del SISTEMA
     compitan entre ellas, no para racionar lo que has pedido a mano.
     """
-    return regla.startswith(REGLA_TUYA_PREFIJO)
+    return regla.startswith(REGLA_TUYA_PREFIJO) or regla == REGLA_PROGRAMADOR
 
 
 def _contar_enviados_hoy() -> int:
@@ -20955,6 +20960,10 @@ def _acciones_aviso(rid: str, regla: str) -> list:
         botones = [{"action": f"LA_HABLAR_SES_{rid}", "title": "Hablarlo"}]
         botones.append({"action": f"LA_VALE_{rid}", "title": "Vale"})
         return botones
+    if regla == REGLA_PROGRAMADOR:
+        # Nada que decidir: el PR se revisa en GitHub, y votar «no útil» un encargo que
+        # pidió él mismo silenciaría la regla por algo que no es suyo.
+        return []
     if regla == REGLA_NOCHE:
         # Ningún botón decide nada aquí: el parte se mira entero o se escucha entero, y
         # lo que se aprueba son las cosas de dentro, una a una. Los dos abren el
@@ -22949,6 +22958,10 @@ def _propuesta_invalida(herramienta: str, argumentos: dict) -> str:
     después del «sí». Rechazado aquí, el modelo se entera en el mismo turno y puede
     corregirse o decirlo, en vez de pedirte que apruebes algo imposible.
     """
+    validar = (_JARVIS_HERRAMIENTAS.get(herramienta) or {}).get("validar")
+    if validar:
+        error = validar(argumentos or {})
+        return ("NO se ha propuesto nada, el usuario no ve ningún botón: " + error) if error else ""
     if herramienta not in _VALIDAR_AL_PROPONER:
         return ""
     error = _describir_accion(herramienta, argumentos or {}).get("error")
@@ -28554,6 +28567,226 @@ def _j_jellyfin_reproducir(item_id: str, titulo: str, dispositivo: str = "") -> 
             "en": f"{cliente.get('DeviceName') or '?'} ({cliente.get('Client') or '?'})"}
 
 
+# ── El programador: Jarvis le encarga a Claude Code un proyecto entero ────────
+# El trabajo lo hace un servicio de `caja` (el «puente», `caja/programador/` del
+# repositorio HomeLab): una cola de encargos de uno en uno, cada uno en un contenedor que
+# solo ve la carpeta de su proyecto. Aquí viven las tres herramientas y el endpoint que
+# recibe el «terminado». Ver docs/PROGRAMADOR.md.
+#
+# Lo que no se relaja:
+#   - **Tokens en los dos sentidos, y fail-closed.** Backend → puente con
+#     `PROGRAMADOR_TOKEN`; puente → backend con `PROGRAMADOR_AVISO_TOKEN`, otro distinto,
+#     con `_token_ok()`. Sin cualquiera de los dos, esa dirección no funciona.
+#   - **El encargo va FIRMADO, como el del agente PC (invariante 9 de CLAUDE.md).** Lo que
+#     va a ejecutar Claude Code con terminal es texto libre que no se puede validar contra
+#     una lista: se valida QUIÉN lo escribió. La firma se calcula aquí, de cero y tras el
+#     «sí» de una persona (la herramienta es `confirmar: True`), y el puente la comprueba
+#     al recibirlo y al sacarlo de la cola. Los mensajes van firmados igual, con el
+#     destinatario dentro.
+#   - **Solo repositorios de `PROGRAMADOR_DUENOS`**, comprobado aquí al proponer y otra vez
+#     en el puente. Trabaja en una rama `arreglo/…` y abre PR: nunca mergea ni empuja a
+#     `main`, y ni la rama, ni el commit, ni el PR dicen qué herramienta hizo el trabajo.
+PROGRAMADOR_URL         = os.getenv("PROGRAMADOR_URL", "").strip().rstrip("/")
+PROGRAMADOR_TOKEN       = os.getenv("PROGRAMADOR_TOKEN", "")
+PROGRAMADOR_AVISO_TOKEN = os.getenv("PROGRAMADOR_AVISO_TOKEN", "")
+PROGRAMADOR_DUENOS      = os.getenv("PROGRAMADOR_DUENOS", "")
+PROGRAMADOR_TIMEOUT     = float(os.getenv("PROGRAMADOR_TIMEOUT", "10"))
+PROGRAMADOR_MAX_ENCARGO = 8000
+PROGRAMADOR_MAX_MENSAJE = 2000
+_PROG_REPO_RE   = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})$")
+_PROG_SLUG_RE   = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
+
+
+def _programador_configurado() -> bool:
+    return bool(PROGRAMADOR_URL and PROGRAMADOR_TOKEN)
+
+
+def _firma_programador(campos: dict) -> str:
+    """HMAC-SHA256 del JSON canónico de los campos. El MISMO canónico que `logica.firmar`
+    del puente: un vector de prueba idéntico vive en los dos repositorios."""
+    if not PROGRAMADOR_TOKEN:
+        return ""
+    canonico = json.dumps(campos, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hmac.new(PROGRAMADOR_TOKEN.encode("utf-8"), canonico.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def _repo_programable(repo: str) -> bool:
+    m = _PROG_REPO_RE.match(str(repo or ""))
+    if not m or m.group(2) in (".", "..") or m.group(2).endswith(".git"):
+        return False
+    duenos = {d.strip().lower() for d in PROGRAMADOR_DUENOS.split(",") if d.strip()}
+    return m.group(1).lower() in duenos
+
+
+def _validar_encargo(args: dict) -> str:
+    """'' si el encargo se puede proponer; si no, por qué. Sin red: se mira al proponer
+    (`_propuesta_invalida`) y otra vez al ejecutar, y el puente lo vuelve a mirar."""
+    titulo  = str(args.get("titulo") or "").strip()
+    encargo = str(args.get("encargo") or "").strip()
+    repo    = str(args.get("repo") or "").strip()
+    proyecto = str(args.get("proyecto") or "").strip()
+    if not 3 <= len(titulo) <= 80:
+        return "El título tiene que tener entre 3 y 80 caracteres («área: qué»)."
+    if not 20 <= len(encargo) <= PROGRAMADOR_MAX_ENCARGO:
+        return (f"El encargo tiene que tener entre 20 y {PROGRAMADOR_MAX_ENCARGO} caracteres: "
+                "detallado y que se entienda solo.")
+    if repo and not _repo_programable(repo):
+        return ("Ese repositorio no está en la lista blanca (PROGRAMADOR_DUENOS): solo "
+                "trabaja sobre repositorios de sus dueños, con la forma dueño/nombre.")
+    if proyecto and not _PROG_SLUG_RE.match(proyecto):
+        return "El proyecto se nombra por su slug tal cual sale en ver_proyectos."
+    if repo and proyecto:
+        return "O un repositorio nuevo para él, o un proyecto suyo que ya existe; no los dos."
+    return ""
+
+
+def _describir_encargo(args: dict) -> dict:
+    error = _validar_encargo(args)
+    if error:
+        return {"error": error}
+    donde = (f" sobre {args['repo']}" if args.get("repo") else
+             f" (sigue el proyecto {args['proyecto']})" if args.get("proyecto") else
+             " (proyecto nuevo, en caja)")
+    encargo = re.sub(r"\s+", " ", str(args["encargo"]).strip())
+    return {"texto": f"Encargar al programador «{str(args['titulo']).strip()}»{donde}: "
+                     f"{encargo[:300]}{'…' if len(encargo) > 300 else ''}"}
+
+
+def _programador(metodo: str, ruta: str, cuerpo: Optional[dict] = None):
+    """Una llamada al puente. Devuelve `(datos, error)`; el error, dicho para el modelo.
+
+    El texto que devuelva el puente no se reenvía tal cual (invariante 5: lo de un
+    servicio de fuera se traduce, no se copia); cada código, a su arreglo."""
+    if not _programador_configurado():
+        return None, "El programador no está configurado (faltan PROGRAMADOR_URL o PROGRAMADOR_TOKEN)."
+    llamada = http.post if metodo == "POST" else http.get
+    try:
+        r = llamada(f"{PROGRAMADOR_URL}{ruta}", json=cuerpo,
+                    headers={"Authorization": f"Bearer {PROGRAMADOR_TOKEN}"},
+                    timeout=PROGRAMADOR_TIMEOUT)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Programador %s %s: no contesta (%s)", metodo, ruta.split("/")[1],
+                       type(e).__name__)
+        return None, "El programador no contesta (¿caja apagada o el servicio parado?)."
+    if r.status_code >= 300:
+        logger.warning("Programador %s %s: %s %s", metodo, ruta.split("/")[1], r.status_code,
+                       (r.text or "")[:200])
+        return None, {
+            401: "El programador ha rechazado la firma o el token: PROGRAMADOR_TOKEN no es el "
+                 "mismo en los dos lados.",
+            403: "El programador no acepta ese repositorio (lista blanca de dueños).",
+            404: "El programador no tiene ningún encargo así.",
+            409: "Ese proyecto está en marcha: háblale con hablar_con_el_programador.",
+        }.get(r.status_code, f"El programador ha devuelto un error ({r.status_code}).")
+    try:
+        return r.json(), None
+    except ValueError:
+        return None, "El programador ha contestado algo que no se entiende."
+
+
+def _j_encargar_proyecto(titulo: str, encargo: str, repo: str = "", proyecto: str = "") -> dict:
+    args = {"titulo": titulo, "encargo": encargo, "repo": repo, "proyecto": proyecto}
+    error = _validar_encargo(args)
+    if error:
+        return {"ok": False, "error": error}
+    campos = {"id": str(uuid.uuid4()), "titulo": str(titulo).strip(),
+              "encargo": str(encargo).strip(), "repo": str(repo or "").strip(),
+              "proyecto": str(proyecto or "").strip(), "ts": int(time.time())}
+    # De cero, siempre: este es el único sitio donde consta que una persona dijo que sí.
+    firma = _firma_programador(campos)
+    datos, error = _programador("POST", "/encargos", {**campos, "firma": firma})
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "id": (datos or {}).get("id") or campos["id"],
+            "posicion": (datos or {}).get("posicion"),
+            "nota": "Encargado. Trabaja en segundo plano (de minutos a una hora) y avisará "
+                    "al móvil al terminar; con ver_proyectos se ve cómo va."}
+
+
+def _j_ver_proyectos() -> dict:
+    datos, error = _programador("GET", "/encargos")
+    if error:
+        return {"ok": False, "error": error}
+    filas = datos if isinstance(datos, list) else []
+    # Resúmenes y respuestas los escribe un modelo que ha leído repositorios ajenos: dato.
+    return {"ok": True, "aviso": _AVISO_WEB, "proyectos": [{
+        k: (str(f.get(k))[:1500] if isinstance(f.get(k), str) else f.get(k))
+        for k in ("id", "titulo", "proyecto", "estado", "repo", "progreso", "ahora",
+                  "hace_s", "duracion_min", "resumen", "motivo", "respuesta", "rama", "pr",
+                  "se_puede_hablar")} for f in filas[:10] if isinstance(f, dict)]}
+
+
+def _j_hablar_con_el_programador(mensaje: str, proyecto: str = "") -> dict:
+    texto = str(mensaje or "").strip()[:PROGRAMADOR_MAX_MENSAJE]
+    if not texto:
+        return {"ok": False, "error": "¿Qué le digo?"}
+    para = str(proyecto or "").strip() or "activo"
+    if not (para == "activo" or _PROG_SLUG_RE.match(para) or re.match(_UUID_PATTERN, para)):
+        return {"ok": False, "error": "El proyecto se nombra por su id o su slug de ver_proyectos."}
+    campos = {"para": para, "texto": texto, "ts": int(time.time())}
+    datos, error = _programador("POST", f"/encargos/{quote(para, safe='')}/mensaje",
+                                {**campos, "firma": _firma_programador(campos)})
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, "estado": (datos or {}).get("estado"),
+            "como": (datos or {}).get("como") or ""}
+
+
+class ProgramadorTerminadoIn(BaseModel):
+    id:        str = Field(pattern=_UUID_PATTERN)
+    titulo:    str = Field(default="", max_length=200)
+    estado:    Literal["terminado", "fallido"]
+    resumen:   str = Field(default="", max_length=4000)
+    motivo:    str = Field(default="", max_length=1000)
+    pr:        str = Field(default="", max_length=300)
+    rama:      str = Field(default="", max_length=120)
+    proyecto:  str = Field(default="", max_length=60)
+    repo:      str = Field(default="", max_length=150)
+    ejecucion: int = Field(default=1, ge=1, le=10000)
+
+
+def verify_programador(request: Request):
+    """Solo el puente: `PROGRAMADOR_AVISO_TOKEN`, de cabecera y nunca por la query.
+    Sin token configurado no entra nadie (`_token_ok`)."""
+    if not _token_ok(_extract_service_token(request), PROGRAMADOR_AVISO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+
+def _pr_de_confianza(url: str) -> str:
+    """El enlace al PR solo si es de GitHub y de un dueño de la lista: el texto de un
+    aviso no puede llevar a donde diga quien lo manda."""
+    m = re.match(r"^https://github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/\d{1,7}$",
+                 str(url or ""))
+    return url if m and _repo_programable(f"{m.group(1)}/{m.group(2)}") else ""
+
+
+def _una_linea(texto: str, n: int) -> str:
+    texto = re.sub(r"\s+", " ", str(texto or "")).strip()
+    return texto if len(texto) <= n else texto[:n - 1] + "…"
+
+
+@app.post("/programador/terminado")
+def programador_terminado(body: ProgramadorTerminadoIn, _auth=Depends(verify_programador)):
+    """El puente avisa de que un encargo ha terminado (o fallado). Deja el aviso por la
+    puerta de siempre (`_apuntar_aviso`, con su silenciado y su memoria), y como es algo
+    que pidió Mikel, el presupuesto del día no lo retiene (`_es_tuyo`).
+
+    La huella lleva la vuelta (`ejecucion`): un mensaje a un encargo acabado lo reabre, y
+    su segundo «terminado» es otro aviso; el mismo repetido por un reintento del puente, no.
+    """
+    titulo = _una_linea(body.titulo, 80) or "sin título"
+    if body.estado == "terminado":
+        pr = _pr_de_confianza(body.pr)
+        texto = (f"🧑‍💻 El programador ha terminado «{titulo}». {_una_linea(body.resumen, 400)}"
+                 + (f" PR: {pr}" if pr else ""))
+    else:
+        texto = f"⚠️ El encargo «{titulo}» no ha salido: {_una_linea(body.motivo, 300)}"
+    apuntado = _apuntar_aviso(REGLA_PROGRAMADOR, texto.strip(), prioridad=PRIO_NORMAL,
+                              huella=f"programador:{body.id}:{body.ejecucion}:{body.estado}")
+    return {"ok": True, "avisado": apuntado}
+
+
 # ── Jarvis: conectar servidores MCP sin tocar la configuración ───────────────
 # La regla de fondo NO cambia: un servidor entra en la lista blanca porque lo aprueba una
 # persona. Lo que cambia es el trámite — antes era editar un secret de Fly y redesplegar,
@@ -28841,6 +29074,9 @@ def _j_mis_capacidades() -> dict:
     if not (MOODLE_URL and MOODLE_TOKEN):
         apagado.append("Moodle no está conectado (faltan MOODLE_URL y MOODLE_TOKEN), así que "
                        "no puedo consultar las entregas de la uni.")
+    if not _programador_configurado():
+        apagado.append("El programador no está conectado (faltan PROGRAMADOR_URL y "
+                       "PROGRAMADOR_TOKEN), así que no puedo encargarle proyectos a Claude Code.")
     if not _jellyfin_configurado():
         apagado.append("Jellyfin no está conectado (faltan JELLYFIN_URL, JELLYFIN_API_KEY o "
                        "JELLYFIN_USER_ID), así que no sé qué está viendo ni puedo ponerle nada.")
@@ -29021,6 +29257,58 @@ _JARVIS_HERRAMIENTAS = {
                                                          "abierto."}},
         "obligatorios":  ["item_id", "titulo"],
         "requiere_jellyfin": True,
+    },
+    "encargar_proyecto": {
+        "confirmar":     True,
+        "fn":            _j_encargar_proyecto,
+        "validar":       _validar_encargo,
+        "describir":     _describir_encargo,
+        "descripcion":   "Encarga al programador (Claude Code en caja, en segundo plano y en "
+                         "un contenedor aislado) un proyecto de programación: una web, una "
+                         "app, un script, o un cambio en un repositorio de GitHub de la lista "
+                         "blanca o en un proyecto suyo ya encargado. Trabaja en una rama y abre "
+                         "PR, nunca toca main; tarda de minutos a una hora y avisa al móvil. "
+                         "NO es para el código de Jarvis ni de este dashboard: eso es "
+                         "encargar_a_una_sesion. NO se encarga al momento: lo aprueba el usuario.",
+        "parametros":    {"titulo":   {"type": "string",
+                                       "description": "Nombre corto en forma «área: qué», en "
+                                                      "minúscula (será el commit y el PR)."},
+                          "encargo":  {"type": "string",
+                                       "description": "El encargo detallado y que se entienda "
+                                                      "solo: qué, para qué, cómo probarlo."},
+                          "repo":     {"type": "string",
+                                       "description": "dueño/nombre si es sobre un repositorio "
+                                                      "de GitHub que ya existe; vacío si no."},
+                          "proyecto": {"type": "string",
+                                       "description": "Slug de un proyecto suyo (de "
+                                                      "ver_proyectos) para modificarlo; vacío "
+                                                      "si es nuevo."}},
+        "obligatorios":  ["titulo", "encargo"],
+        "requiere_programador": True,
+    },
+    "ver_proyectos": {
+        "confirmar":     False,
+        "fn":            _j_ver_proyectos,
+        "descripcion":   "Los últimos encargos del programador: estado (en cola, trabajando, "
+                         "terminado, fallido), progreso con el plan y qué hace ahora, su "
+                         "última respuesta, el resumen y el PR.",
+        "parametros":    {},
+        "requiere_programador": True,
+    },
+    "hablar_con_el_programador": {
+        "confirmar":     False,
+        "fn":            _j_hablar_con_el_programador,
+        "descripcion":   "Le manda un mensaje al programador sobre un encargo: si está "
+                         "trabajando lo lee tras el paso que esté dando; si está en cola, se "
+                         "añade al encargo; si ya terminó, sigue con ese proyecto recordando lo "
+                         "que hizo. Para un proyecto nuevo, encargar_proyecto.",
+        "parametros":    {"mensaje":  {"type": "string",
+                                       "description": "Lo que quiere decirle, tal cual."},
+                          "proyecto": {"type": "string",
+                                       "description": "id o slug de ver_proyectos; vacío = el "
+                                                      "que está trabajando o el último."}},
+        "obligatorios":  ["mensaje"],
+        "requiere_programador": True,
     },
     "moodle_entregas": {
         "confirmar":     False,
@@ -29848,6 +30136,8 @@ def _jarvis_esquema() -> list:
     con_calendarios = CALENDARIOS_POR_TIPO
     # Jellyfin, como Moodle: sin URL, clave y usuario no hay biblioteca que mirar.
     con_jellyfin = _jellyfin_configurado()
+    # Y el programador, sin su puente no tiene a quién encargar nada.
+    con_programador = _programador_configurado()
     return [{
         "type": "function",
         "function": {
@@ -29869,7 +30159,8 @@ def _jarvis_esquema() -> list:
         and (con_onedrive or not h.get("requiere_onedrive"))
         and (con_cumples or not h.get("requiere_cumples"))
         and (con_calendarios or not h.get("requiere_calendarios"))
-        and (con_jellyfin or not h.get("requiere_jellyfin"))]
+        and (con_jellyfin or not h.get("requiere_jellyfin"))
+        and (con_programador or not h.get("requiere_programador"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -29929,7 +30220,9 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
 # arreglo desde la llamada), `cobrar_entrenamiento`, `encargar_al_pc` (texto libre que
 # ejecuta el PC), `proponer_regla`, `buscar_en_internet` / `leer_pagina` /
 # `vigilar_pagina` (traen texto de desconocidos a una sesión con shell), `turno_de_noche`
-# (trae resúmenes de correos ajenos) y el resto de administrativas. Lo del calendario, las
+# (trae resúmenes de correos ajenos), las tres del programador (encargar y hablar lanzan
+# trabajo de Claude Code con terminal; ver_proyectos trae resúmenes escritos tras leer
+# repositorios ajenos) y el resto de administrativas. Lo del calendario, las
 # tareas y las notas que se confirma va por `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`, abajo.
 _MCP_SERVIDOR_SOLO_LECTURA = {
     "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
