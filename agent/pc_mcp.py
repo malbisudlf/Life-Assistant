@@ -543,6 +543,14 @@ def main() -> None:
     if not args.http:
         crear_servidor().run("stdio")
         return
+    # La tarea programada lo lanza con pythonw.exe (sin ventana), y ahí no hay consola:
+    # sys.stderr es None y el primer print lo tumbaba (código 1, sin decir nada). Sin
+    # consola, lo que diría va a un registro al lado de su configuración.
+    if sys.stderr is None or sys.stdout is None:
+        registro = open(Path.home() / ".jarvis-pc" / "pc_mcp.log", "a", encoding="utf-8",
+                        buffering=1)
+        sys.stdout = sys.stdout or registro
+        sys.stderr = sys.stderr or registro
     token = os.environ.get("PC_MCP_TOKEN", "")
     if len(token) < 24:
         sys.exit("pc_mcp: falta PC_MCP_TOKEN (24 caracteres o más) para servir por HTTP")
