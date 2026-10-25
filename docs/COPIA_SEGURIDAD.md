@@ -50,9 +50,10 @@ Lo que hay en `TABLAS` (`scripts/copia_supabase.py`), que es la lista canónica:
   `presence`, `brief_envios`, `informe_envios`, `vigilante_estado`,
   `revision_hallazgos`, `averias`, `backend_latidos`, `avisos_llamadas`,
   `avisos_motivos`, `casa_acciones`, `jarvis_gasto`, `noche_partes`, `noche_items`,
-  `sesion_avisos`, `migraciones_aplicadas`, `despertares`** — estado operativo y
-  registro (`despertares` es la primera señal de despertar de cada día, que solo le
-  sirve al teléfono ese mismo día). Se regeneran
+  `sesion_avisos`, `migraciones_aplicadas`, `despertares`, `lecturas_telefono`** —
+  estado operativo y registro (`despertares` es la primera señal de despertar de cada
+  día, que solo le sirve al teléfono ese mismo día; `lecturas_telefono`, por dónde iba
+  una lectura por teléfono, que caduca a las pocas horas). Se regeneran
   solos y perderlos no cuesta nada. `presence` además es una sola fila sin histórico, a
   propósito (ver `docs/BACKEND_PATRONES.md`), y `migraciones_aplicadas` se rellena sola
   al volver a aplicar las migraciones.

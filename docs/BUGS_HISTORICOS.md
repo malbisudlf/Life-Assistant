@@ -3,6 +3,24 @@
 
 ## Bugs históricos (no los reintroduzcas)
 
+- **«Léeme el briefing» leía una sola línea, o todo como una sección (2026-10-25).** La
+  lectura por teléfono (parche 18, 15/10) partía el briefing por los separadores de
+  guiones bajos, que es como venía entonces. La rutina dejó de ponerlos entre secciones:
+  el 24/10 había uno solo, al final, antes de las fuentes, así que el briefing tenía
+  **una sección: la línea de «Fuentes base…»**, un trozo, y eso es lo que se habría
+  leído; el 25/10 había uno solo al principio y salía todo como «Tecnología General», con
+  29 trozos. `leer_briefing` le pasaba a Jarvis esas mismas secciones, así que «léeme la
+  de IA» tampoco podía salir. Ningún test lo vio porque el ejemplo de los tests llevaba
+  separadores entre secciones, como el correo del día en que se escribió.
+  - Arreglo: `_briefing_secciones` parte por los títulos numerados («1. 🖥️ …», «3.5. …»),
+    que sí son estables, y solo usa los separadores para cerrar la sección en la que caen
+    (el pie) o si no hay ningún título. Los tests llevan ahora las formas reales del 24/10
+    y del 25/10.
+  - Moraleja: **un texto que redacta un modelo no tiene formato fijo**. Si hay que
+    partirlo, por la marca que lleva el contenido (el número del título), no por la
+    decoración que lo separa, y probándolo con el correo de esta semana, no con el del
+    día en que se escribió el parser.
+
 - **El teléfono decía «te acabo de mandar la notificación» y no había ninguna
   (2026-10-11).** Tras pulsar «Arreglarlo», el PR se puso verde y Jarvis llamó: «pulsa
   Desplegar en la notificación que te acabo de mandar». No llegó nada. `pr-listo`

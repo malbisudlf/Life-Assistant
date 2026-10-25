@@ -1353,6 +1353,13 @@ newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se l
 - Ronda las 3.000 palabras: la herramienta le dice a Jarvis que cuente las secciones y lo
   destacado, y lea entera la que pidas. Tope: `BRIEFING_MAX_CHARS`. Trae `secciones`
   (número y título), que son los números que entiende la lectura por teléfono.
+- **Las secciones salen de los títulos numerados** («1. 🖥️ Tecnología General», «3.5. 💹
+  Economía y Geopolítica»), no de los separadores de guiones bajos: la rutina los pone
+  donde cae, y hasta el 2026-10-25 eso dejaba el briefing en una sola sección (o en la
+  línea de las fuentes; ver `docs/BUGS_HISTORICOS.md`). `n` es el orden (la 3.5 es la 4);
+  el número del correo va aparte, en `etiqueta`. Cada subtítulo («IA General», «🌦️
+  Clima», «💡 La palabra del día…») abre un **bloque** con trozo propio, que es lo que
+  salta «siguiente» por teléfono.
 - **Por teléfono, leerlo no lo hace Jarvis** (desde el 2026-10-15): claude-phone deja 40
   palabras por respuesta, y leía un trozo y preguntaba «¿sigo?». Ahora Jarvis pone la
   línea `📖 LEER: briefing` y la propia llamada pide `GET /telefono/briefing` (el texto ya
@@ -1360,6 +1367,18 @@ newsletters y la palabra del día. Desde el 2026-10-13 Jarvis lo lee cuando se l
   hablando. Parche 18 en `telefono/PARCHES.md`.
 - Sin briefing ese día, lo dice (sale después del correo de datos, que espera a que te
   despiertes) en vez de leer el de ayer.
+- **Con mando** (desde el 2026-10-25, parche 24): la llamada le dice al backend qué trozo
+  empieza a sonar (`POST /telefono/lectura/posicion`), así que si cuelgas a media lectura,
+  «sigue leyendo» —en otra llamada, hasta `LECTURA_SEGUIR_HORAS` después— retoma ese
+  mismo trozo (`GET /telefono/lectura?seguir=true`). La posición vive en memoria y en
+  `lecturas_telefono` (migración `20261025_lecturas_telefono`), para que un despliegue
+  entre medias no se la lleve; sin la tabla, solo en memoria, y lo dice una vez. La
+  llamada nueva lo sabe por `/telefono/contexto` («LECTURA A MEDIAS…»). Cortándole,
+  «siguiente», «sáltate esto», «siguiente sección», «anterior», «repite», «desde el
+  principio», «para» y «ve a la de economía» (o «la sección cuatro», con los números del
+  correo) los resuelve la voice-app con el `indice` que manda el backend, **sin pasar por
+  Claude**: es una lista cerrada y la frase entera tiene que ser la orden, como el «sí»
+  hablado. Lo que no lo es («para, ¿qué hora es?») va a Claude como siempre.
 
 **El mismo día entraron en el teléfono** las que no tenían motivo para faltar: `tareas`,
 `estado_resumen_diario`, `recordar`, `olvidar` y `dejar_de_vigilar`. Las que siguen

@@ -1,0 +1,1087 @@
+diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+index f71e1aa..5ed7502 100644
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -15,7 +15,8 @@
+ const logger = require('./logger');
+ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ // Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
+-const { leerSiLoPide } = require('./lectura');
++// Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
++const { leerSiLoPide, ControlLectura } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+@@ -264,6 +265,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     let avisoLectura = '';
+     // Lo que espera un sí o un no de viva voz (parche 20), o null.
+     let pendienteConfirmar = null;
++    // Parche 24: por dónde va la lectura, para seguirla o saltar sin pasar por Claude.
++    const control = new ControlLectura();
+     // Parche 22: la escucha pasiva; la llamada del coche ya empieza en ella.
+     const pasiva = new EscuchaPasiva({
+       log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
+@@ -433,6 +436,18 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         avisoLectura = rc.aviso + avisoLectura;
+       }
+ 
++      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
++      const ordenLectura = await control.atender(transcript, {
++        endpoint, session, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }),
++        sigueActiva: () => callActive
++      });
++      if (ordenLectura) {
++        interrumpio = ordenLectura.interrumpio;
++        avisoLectura = ordenLectura.aviso;
++        continue;
++      }
++
+       // ============================================
+       // THINKING FEEDBACK
+       // ============================================
+@@ -464,6 +479,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       }
+ 
+       logger.info('Claude responded', { callUuid });
++      control.turnoDeClaude();
+ 
+       // 5. Extract and play voice line
+       const voiceLine = extractVoiceLine(claudeResponse);
+@@ -479,7 +495,8 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         const lectura = await leerSiLoPide(claudeResponse, {
+           endpoint, session, ttsService, voiceId,
+           log: (m) => logger.info(m, { callUuid }),
+-          sigueActiva: () => callActive
++          sigueActiva: () => callActive,
++          control
+         });
+         interrumpio = lectura.interrumpio;
+         avisoLectura = lectura.aviso;
+diff --git a/voice-app/lib/lectura.js b/voice-app/lib/lectura.js
+index 8873675..65f18a5 100644
+--- a/voice-app/lib/lectura.js
++++ b/voice-app/lib/lectura.js
+@@ -1,6 +1,6 @@
+ /**
+- * Parches 18 y 20: leer en voz alta lo que no cabe en una respuesta. Ver
+- * telefono/PARCHES.md en Life Assistant.
++ * Parches 18, 20 y 24: leer en voz alta lo que no cabe en una respuesta, y con mando.
++ * Ver telefono/PARCHES.md en Life Assistant.
+  *
+  * Cada respuesta de Claude por teléfono son 40 palabras (VOICE_CONTEXT, en
+  * claude-api-server) y lo que pase de 60 se tira (extractVoiceLine). El briefing de
+@@ -10,7 +10,7 @@
+  *
+  * Así que Claude no lo lee. Pone en su respuesta una línea
+  *
+- *   📖 LEER: <qué> [desde=N] [hasta=M] [fecha=YYYY-MM-DD]
++ *   📖 LEER: <qué> [desde=N] [hasta=M] [fecha=YYYY-MM-DD] [seguir]
+  *
+  * con <qué> = briefing, semana (la agenda), correo (el parte de la noche) o tareas, y
+  * la llamada pide el texto ya preparado para la voz al backend de Life Assistant
+@@ -22,6 +22,21 @@
+  * texto de terceros (asuntos y remitentes del correo) va del backend al altavoz sin
+  * pasar por Claude, que es una sesión con shell.
+  *
++ * El 24 le da mando, sin pasar por Claude (ControlLectura):
++ * - Antes de que suene cada trozo, se le dice al backend por dónde va
++ *   (POST /telefono/lectura/posicion). Así, si cuelgas a media lectura, «sigue
++ *   leyendo» en otra llamada —o `📖 LEER: briefing seguir`— retoma ese mismo trozo.
++ * - Cortándole, entiende una lista cerrada de órdenes: «sigue», «siguiente» o
++ *   «sáltate esto» (el bloque siguiente: «IA General», «España»…), «siguiente
++ *   sección», «anterior», «repite», «desde el principio», «para», y «ve a la de
++ *   economía» o «la sección cuatro» (con el `indice` que manda el backend). La frase
++ *   ENTERA tiene que ser la orden, como el «sí» del parche 20: «para, ¿qué hora es?»
++ *   no es parar, y va a Claude.
++ * - Las órdenes sueltas («sigue», «siguiente», «para») solo valen justo después de
++ *   leer: tras un turno de Claude, «sigue» puede contestar a otra cosa. Las que dicen
++ *   qué («sigue leyendo», «ve a la de economía») valen siempre, y «sigue leyendo» vale
++ *   también en una llamada nueva.
++ *
+  * Variables: LECTURA_URL (por defecto http://127.0.0.1:8080, el backend en la misma
+  * máquina; la voice-app va con network_mode host) y LECTURA_TOKEN (el token del MCP
+  * del teléfono, JARVIS_MCP_TELEFONO_TOKEN del backend).
+@@ -31,10 +46,20 @@
+ const { decirInterrumpible } = require('./turno-rapido');
+ 
+ const QUE = ['briefing', 'semana', 'correo', 'tareas'];
+-const MARCA = new RegExp('📖\\s*LEER:\\s*(' + QUE.join('|') + ')\\b([^\\n]*)', 'i');
++const MARCA = new RegExp('📖\\s*LEER:\\s*(' + QUE.join('|') + '|seguir)\\b([^\\n]*)', 'i');
+ const NOMBRE = { briefing: 'el briefing', semana: 'la agenda de la semana',
+                  correo: 'el parte del correo', tareas: 'tus tareas' };
+ 
++// Lo que dice la propia llamada al obedecer una orden.
++const FRASES = {
++  parar: 'Lo dejo aquí, señor. Cuando quiera, dígame «sigue».',
++  fin:   'Ya no queda nada más, señor.'
++};
++
++function urlBase() {
++  return (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
++}
++
+ /** El pedido de lectura que trae la respuesta de Claude, o null si no lo trae. */
+ function pedidoDeLectura(respuesta) {
+   const m = String(respuesta || '').match(MARCA);
+@@ -44,12 +69,17 @@ function pedidoDeLectura(respuesta) {
+     const r = resto.match(new RegExp(clave + '\\s*=\\s*(' + patron + ')'));
+     return r ? r[1] : '';
+   };
+-  return {
+-    que: m[1].toLowerCase(),
++  const que = m[1].toLowerCase();
++  const pedido = {
++    que: que === 'seguir' ? '' : que,
+     fecha: valor('fecha', '\\d{4}-\\d{2}-\\d{2}'),
+     desde: parseInt(valor('desde', '\\d+'), 10) || 1,
+     hasta: parseInt(valor('hasta', '\\d+'), 10) || 0
+   };
++  const trozo = parseInt(valor('trozo', '\\d+'), 10) || 0;
++  if (trozo) pedido.trozo = trozo;
++  if (que === 'seguir' || /(^|\s)seguir\b/i.test(resto)) pedido.seguir = true;
++  return pedido;
+ }
+ 
+ function noPuedo(que) {
+@@ -57,12 +87,16 @@ function noPuedo(que) {
+ }
+ 
+ async function traerLectura(pedido, fetchImpl) {
+-  const base = (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
+-  const que = pedido.que || 'briefing';
+-  const q = new URLSearchParams({ que: que, desde: String(pedido.desde), hasta: String(pedido.hasta) });
++  const que = pedido.que || '';
++  const q = new URLSearchParams();
++  if (que) q.set('que', que);
++  q.set('desde', String(pedido.desde || 1));
++  q.set('hasta', String(pedido.hasta || 0));
+   if (pedido.fecha) q.set('fecha', pedido.fecha);
++  if (pedido.trozo) q.set('trozo', String(pedido.trozo));
++  if (pedido.seguir) q.set('seguir', 'true');
+   try {
+-    const r = await (fetchImpl || fetch)(base + '/telefono/lectura?' + q.toString(), {
++    const r = await (fetchImpl || fetch)(urlBase() + '/telefono/lectura?' + q.toString(), {
+       headers: { Authorization: 'Bearer ' + (process.env.LECTURA_TOKEN || '') },
+       signal: AbortSignal.timeout(20000)
+     });
+@@ -76,42 +110,83 @@ async function traerLectura(pedido, fetchImpl) {
+ }
+ 
+ /**
+- * Si la respuesta pide leer, lee. Devuelve { interrumpio, aviso }: `interrumpio` como
+- * decirInterrumpible (el oído queda abierto con lo que estás diciendo), y `aviso`, lo
+- * que hay que anteponer a lo siguiente que se le pregunte a Claude ('' si nada).
+- *
+- * @param {string} respuesta - lo que contestó Claude
+- * @param {Object} c - { endpoint, session, ttsService, voiceId, log, sigueActiva, fetchImpl }
++ * Le dice al backend por dónde va, sin esperar: es lo que retoma «sigue leyendo» si se
++ * cuelga. Un fallo aquí no puede parar la lectura; como mucho, se pierde el sitio.
+  */
+-async function leerSiLoPide(respuesta, c) {
+-  const pedido = pedidoDeLectura(respuesta);
+-  if (!pedido) return { interrumpio: false, aviso: '' };
++function apuntarPosicion(lectura, item, terminada, c) {
++  if (!lectura.que) return;
++  const log = c.log || function () {};
++  const cuerpo = { que: lectura.que, fecha: lectura.fecha || '', n: item.n,
++                   trozo: item.trozo, titulo: item.titulo || '', terminada: !!terminada };
++  try {
++    const p = (c.fetchImpl || fetch)(urlBase() + '/telefono/lectura/posicion', {
++      method: 'POST',
++      headers: { Authorization: 'Bearer ' + (process.env.LECTURA_TOKEN || ''),
++                 'Content-Type': 'application/json' },
++      body: JSON.stringify(cuerpo),
++      signal: AbortSignal.timeout(5000)
++    });
++    Promise.resolve(p).catch(function (e) {
++      log('LECTURA: no se pudo apuntar por dónde va (' + e.message + ')');
++    });
++  } catch (e) {
++    log('LECTURA: no se pudo apuntar por dónde va (' + e.message + ')');
++  }
++}
++
++function listaDeSecciones(indice) {
++  return (indice || []).map(function (s) { return (s.etiqueta || s.n) + ' ' + s.titulo; }).join('; ');
++}
++
++/**
++ * Lee lo que diga `pedido`. Devuelve { interrumpio, aviso, estado }: `interrumpio` como
++ * decirInterrumpible (el oído queda abierto con lo que estás diciendo), `aviso`, lo que
++ * hay que anteponer a lo siguiente que se le pregunte a Claude ('' si nada), y `estado`,
++ * por dónde se quedó (para ControlLectura), o null si no se leyó nada.
++ */
++async function leer(pedido, c) {
+   const log = c.log || function () {};
+   const sigueActiva = c.sigueActiva || function () { return true; };
+-  log('LECTURA: ' + pedido.que + ' desde=' + pedido.desde + ' hasta=' + (pedido.hasta || 'fin') +
+-      (pedido.fecha ? ' fecha=' + pedido.fecha : ''));
++  log('LECTURA: ' + (pedido.que || 'lo último') + ' desde=' + pedido.desde +
++      ' hasta=' + (pedido.hasta || 'fin') + (pedido.trozo ? ' trozo=' + pedido.trozo : '') +
++      (pedido.seguir ? ' seguir' : '') + (pedido.fecha ? ' fecha=' + pedido.fecha : ''));
+ 
+   const datos = await traerLectura(pedido, c.fetchImpl);
+-  const nombre = datos.nombre || NOMBRE[pedido.que];
++  const que = datos.que || pedido.que || '';
++  const nombre = datos.nombre || NOMBRE[que] || 'lo que te estaba leyendo';
+   if (!datos.ok) {
+     log('LECTURA: no se puede (' + (datos.motivo || datos.frase) + ')');
+-    if (!sigueActiva()) return { interrumpio: false, aviso: '' };
++    if (!sigueActiva()) return { interrumpio: false, aviso: '', estado: null };
+     const url = await c.ttsService.generateSpeech(datos.frase, c.voiceId);
+     const cortado = await decirInterrumpible(c.endpoint, c.session, url, log);
+-    return { interrumpio: cortado,
+-             aviso: '[La lectura de ' + nombre + ' no se pudo hacer: «' + datos.frase + '»] ' };
++    return { interrumpio: cortado, estado: null,
++             aviso: '[La lectura ' + (que ? 'de ' + nombre : 'a medias que te pidió seguir') +
++                    ' no se pudo hacer: «' + datos.frase + '»] ' };
+   }
+ 
++  const lectura = { que: que, fecha: datos.fecha || pedido.fecha || '', nombre: nombre,
++                    indice: datos.indice || [] };
+   const cola = [];
+   for (const s of datos.secciones || []) {
+-    for (const t of s.trozos || []) cola.push({ n: s.n, titulo: s.titulo, texto: t });
++    const base = s.primer_trozo || 0;
++    (s.trozos || []).forEach(function (t, i) {
++      cola.push({ n: s.n, titulo: s.titulo, trozo: base + i, texto: t });
++    });
++  }
++  if (!cola.length) return { interrumpio: false, aviso: '', estado: null };
++  const total = (lectura.indice.length || (datos.secciones || []).length);
++  const primero = cola[0];
++  const ultimo = cola[cola.length - 1];
++  // Retomar otra llamada sin decir dónde deja a quien escucha sin saber qué oye.
++  if (pedido.seguir) {
++    cola.unshift({ n: primero.n, titulo: primero.titulo, entrada: true,
++                   texto: 'Sigo con ' + nombre + ', en «' + primero.titulo + '».' });
+   }
+-  if (!cola.length) return { interrumpio: false, aviso: '' };
+-  const total = (datos.secciones || []).length;
+-  const ultima = cola[cola.length - 1].n;
+-  cola.push({ n: ultima, titulo: cola[cola.length - 1].titulo,
+-              texto: pedido.que === 'briefing' ? 'Hasta aquí el briefing.' : 'Eso es todo.' });
++  cola.push({ n: ultimo.n, titulo: ultimo.titulo, trozo: ultimo.trozo, final: true,
++              texto: que === 'briefing' ? 'Hasta aquí el briefing.' : 'Eso es todo.' });
+ 
++  const estado = Object.assign({}, lectura, { n: primero.n, trozo: primero.trozo,
++                                              titulo: primero.titulo, fin: false, recien: true });
+   // El siguiente trozo se sintetiza mientras suena el actual: así no hay silencio entre
+   // uno y otro. Un fallo de la voz se guarda como null y corta la lectura ahí.
+   const sintetizar = function (texto) {
+@@ -122,30 +197,353 @@ async function leerSiLoPide(respuesta, c) {
+   };
+   let siguiente = sintetizar(cola[0].texto);
+   for (let i = 0; i < cola.length; i++) {
+-    if (!sigueActiva()) return { interrumpio: false, aviso: '' };
++    if (!sigueActiva()) return { interrumpio: false, aviso: '', estado: estado };
++    const item = cola[i];
+     const url = await siguiente;
+     siguiente = i + 1 < cola.length ? sintetizar(cola[i + 1].texto) : null;
+     if (!url) {
+-      return { interrumpio: false,
++      return { interrumpio: false, estado: estado,
+                aviso: '[La lectura de ' + nombre + ' se cortó por un fallo de la voz en la sección ' +
+-                      cola[i].n + ' («' + cola[i].titulo + '»). Dile dónde se quedó.] ' };
++                      item.n + ' («' + item.titulo + '»). Dile dónde se quedó; con 📖 LEER: ' +
++                      que + ' seguir, sigue ahí.] ' };
++    }
++    if (!item.entrada) {
++      if (item.final) {
++        estado.fin = true;
++      } else {
++        estado.n = item.n;
++        estado.trozo = item.trozo;
++        estado.titulo = item.titulo;
++      }
++      apuntarPosicion(lectura, item, !!item.final, c);
+     }
+     const cortado = await decirInterrumpible(c.endpoint, c.session, url, log);
+     if (cortado) {
+       if (siguiente) siguiente.catch(function () {});
+-      log('LECTURA: cortada en la sección ' + cola[i].n);
+-      return { interrumpio: true,
++      if (item.final) {
++        log('LECTURA: terminada (cortada en el cierre)');
++        return { interrumpio: true, estado: estado,
++                 aviso: '[Ya le has leído ' + nombre + ' entero; te ha cortado en la despedida.] ' };
++      }
++      log('LECTURA: cortada en la sección ' + item.n + ' (trozo ' + item.trozo + ')');
++      return { interrumpio: true, estado: estado,
+                aviso: '[Le estabas leyendo ' + nombre + ' y te ha cortado en la sección ' +
+-                      cola[i].n + ' de ' + total + ' («' + cola[i].titulo + '»). Si te pide ' +
+-                      'que sigas, vuelve a poner la línea 📖 LEER: ' + pedido.que + ' desde=' +
+-                      cola[i].n + (pedido.fecha ? ' fecha=' + pedido.fecha : '') + '] ' };
++                      item.n + ' de ' + total + ' («' + item.titulo + '»). La llamada entiende ' +
++                      'sola «sigue», «siguiente», «anterior», «repite», «para» y «ve a la de…»; ' +
++                      'si aun así te pide seguir, pon la línea 📖 LEER: ' + que + ' seguir, y ' +
++                      'para otra sección, 📖 LEER: ' + que + ' desde=N' +
++                      (lectura.fecha ? ' fecha=' + lectura.fecha : '') +
++                      (lectura.indice.length ? '. Secciones: ' + listaDeSecciones(lectura.indice) : '') +
++                      '] ' };
+     }
+   }
+   log('LECTURA: terminada (' + (cola.length - 1) + ' trozos)');
+-  return { interrumpio: false,
+-           aviso: '[Ya le has leído ' + nombre + ' entero (de la sección ' + pedido.desde +
+-                  ' a la ' + ultima + ').] ' };
++  return { interrumpio: false, estado: estado,
++           aviso: '[Ya le has leído ' + nombre + ' entero (de la sección ' + primero.n +
++                  ' a la ' + ultimo.n + ').] ' };
++}
++
++/**
++ * Si la respuesta pide leer, lee. Devuelve { interrumpio, aviso } (y `estado`, ver
++ * leer); si en `c` viene el ControlLectura de la llamada, le deja dicho por dónde va.
++ *
++ * @param {string} respuesta - lo que contestó Claude
++ * @param {Object} c - { endpoint, session, ttsService, voiceId, log, sigueActiva, fetchImpl, control }
++ */
++async function leerSiLoPide(respuesta, c) {
++  const pedido = pedidoDeLectura(respuesta);
++  if (!pedido) return { interrumpio: false, aviso: '' };
++  const r = await leer(pedido, c);
++  if (c.control && r.estado) c.control.estado = r.estado;
++  return r;
++}
++
++// ── Las órdenes ──────────────────────────────────────────────────────────────
++
++function normalizar(texto) {
++  return String(texto || '')
++    .toLowerCase()
++    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
++    .replace(/[.,;:!?¡¿"«»()]/g, ' ')
++    .replace(/\s+/g, ' ')
++    .trim();
++}
++
++// Lo que se dice delante o detrás de una orden sin cambiarla. «ya» solo se quita del
++// final: «ya está» es parar y «está» no es nada.
++const RELLENO = new Set(['vale', 'venga', 'va', 'si', 'ok', 'okey', 'bueno', 'pues', 'eh',
++  'oye', 'jarvis', 'senor', 'anda', 'porfa', 'porfi', 'perfecto', 'genial', 'gracias',
++  'ahora', 'entonces', 'mejor', 'y', 'vamos a ver', 'a ver']);
++
++function limpiarOrden(texto) {
++  const w = normalizar(texto).replace(/\b(por favor|a ver)\b/g, ' ').split(' ').filter(Boolean);
++  while (w.length && RELLENO.has(w[0])) w.shift();
++  while (w.length && (RELLENO.has(w[w.length - 1]) || w[w.length - 1] === 'ya')) w.pop();
++  return w.join(' ');
++}
++
++const VERBO_SEGUIR = new Set(['sigue', 'siga', 'continua', 'continue', 'prosigue', 'retoma',
++  'retomalo', 'reanuda', 'seguimos', 'sigamos', 'continuamos', 'adelante', 'dale']);
++const PALABRA_LECTURA = new Set(['leyendo', 'leyendome', 'leyendomelo', 'leyendolo', 'leer',
++  'lectura', 'resto', 'donde']);
++const NEXO = new Set(['con', 'el', 'la', 'las', 'los', 'lo', 'de', 'del', 'me', 'por', 'desde',
++  'que', 'estabas', 'ibas', 'iba', 'ibamos', 'dejaste', 'dejamos', 'quedaste', 'quedamos',
++  'has', 'dejado', 'a', 'al', 'te', 'estabamos', 'nos', 'eso', 'ello', 'esto', 'queda',
++  'falta', 'sigue']);
++const QUE_PALABRA = { briefing: 'briefing', brifing: 'briefing', briefin: 'briefing',
++  breafing: 'briefing', agenda: 'semana', semana: 'semana', correo: 'correo',
++  correos: 'correo', parte: 'correo', tareas: 'tareas', pendientes: 'tareas' };
++
++/** «sigue», «sigue leyendo», «sigue con el briefing», «léeme el resto»… o null. */
++function ordenSeguir(t) {
++  const p = t.split(' ');
++  let resto;
++  if (VERBO_SEGUIR.has(p[0])) {
++    resto = p.slice(1);
++  } else if (/^(leeme|lee|leete|cuentame)$/.test(p[0]) && /\b(resto|lo que (queda|falta))\b/.test(t)) {
++    resto = p.slice(1);
++  } else {
++    return null;
++  }
++  let que = '';
++  let explicita = false;
++  for (const w of resto) {
++    if (QUE_PALABRA[w]) { que = QUE_PALABRA[w]; explicita = true; }
++    else if (PALABRA_LECTURA.has(w)) explicita = true;
++    else if (!NEXO.has(w)) return null;          // «sigue buscando» no es seguir leyendo
++  }
++  return { que: que, explicita: explicita };
++}
++
++const VERBO_IR = '(?:(?:pasa|salta|saltate|ve|vete|vamos|sigue|vuelve|regresa|pon|ponme|lee|leeme)' +
++  '(?: a| al| con| hasta)? )?';
++const COSA = '(?:noticia|bloque|tema|parte|cosa|seccion|apartado)';
++function direccion(palabra) {
++  return new RegExp('^' + VERBO_IR + '(?:(?:la|lo|el) )?(?:' + palabra + '(?: ' + COSA + ')?|' +
++                    COSA + ' ' + palabra + ')$');
++}
++const SIGUIENTE = direccion('(?:siguiente|proxima|proximo|otra|otro)');
++const ANTERIOR = direccion('anterior');
++const SALTAR = /^(?:salta|saltala|saltalo|saltatela|saltatelo|saltate|pasa|pasala|pasalo|omite|omitela|next)(?: (?:de )?(?:esta|esto|eso|esa|este|ese)(?: (?:seccion|parte|noticia|bloque|tema))?)?$/;
++const NO_INTERESA = /^(?:(?:esto|eso|esta|esa) )?no me interesa(?: (?:nada|esto|eso))?$/;
++const ATRAS = /^(?:(?:vuelve|ve|vete|regresa)(?: hacia)? )?atras$/;
++const REPETIR = /^(?:repite|repitelo|repitela|repitemelo|repitemela|otra vez|de nuevo|vuelve a leer(?:lo|la|melo|mela)?|(?:lee|leeme)(?:lo|la)? otra vez|leemelo otra vez|vuelve a empezar)(?: (?:esta|esa|la|el|este|ese) (?:seccion|parte|noticia|bloque|apartado))?$/;
++const PARAR = /^(?:para|pare|paralo|parala|basta|stop|calla|callate|pausa|detente|dejalo|deja de leer|ya esta|ya basta|suficiente|es suficiente|(?:para|dejalo) (?:ahi|aqui|de leer|un momento|un segundo|para luego|para despues|para mas tarde)|luego (?:sigues|seguimos|me lo sigues|continuamos))$/;
++const PRINCIPIO = /^(?:(?:empieza|empiezalo|vuelve|ve|vete|lee|leeme|leemelo|leelo|repite|repitelo|vuelve a empezar|empieza otra vez|empieza de nuevo|lee otra vez|otra vez)(?: (?:desde|por|al|a))?(?: (?:el|la))? )?(?:desde el |por el |al )?(?:principio|inicio|comienzo)(?: (?:de (?:todo|la seccion|esta seccion)|del (?:todo|briefing)))?$/;
++// «Ve a la de economía», «léeme lo del Financial Times», «la sección cuatro». «Salta» y
++// «pasa» solo con «a»: «sáltate la palabra del día» es saltársela, no ir a ella.
++const PREFIJO_IR = /^(?:(?:(?:ve|vete|ir|pasa|salta|vamos|vuelve|regresa)(?: (?:a|al|hasta|hasta el|hasta la|directamente a|directo a))|(?:lee|leeme|leete|cuentame|pon|ponme|quiero oir)(?: con)?)(?: (?:la|el|lo|las|los))?(?: (?:seccion|parte|apartado|bloque|noticias?))?(?: (?:de|del|sobre|numero))?|(?:la|el|lo|las) (?:(?:seccion|parte|apartado)(?: (?:de|del|sobre|numero))?|de|del|sobre|numero)|(?:seccion|apartado|parte) (?:de |del |sobre |numero )?)\s+(.+)$/;
++
++const NUMEROS = { uno: 1, una: 1, primera: 1, primero: 1, dos: 2, segunda: 2, segundo: 2,
++  tres: 3, tercera: 3, tercero: 3, cuatro: 4, cuarta: 4, cuarto: 4, cinco: 5, quinta: 5,
++  quinto: 5, seis: 6, sexta: 6, sexto: 6, siete: 7, septima: 7, septimo: 7, setima: 7,
++  ocho: 8, octava: 8, octavo: 8, nueve: 9, novena: 9, noveno: 9, diez: 10, decima: 10,
++  decimo: 10 };
++const VACIAS = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'y', 'e', 'a', 'al', 'en',
++  'sobre', 'que', 'lo', 'con', 'mas', 'un', 'una', 'tu', 'mi', 'su', 'para', 'por', 'seccion',
++  'parte', 'apartado', 'bloque', 'noticia', 'noticias', 'es', 'esto', 'eso']);
++// Cómo se pide una sección sin decir su título tal cual.
++const SINONIMOS = { ia: 'inteligencia artificial', ai: 'inteligencia artificial',
++  tiempo: 'clima', ft: 'financial times', salud: 'estado fisico', sueno: 'estado fisico',
++  uni: 'entregas', universidad: 'entregas', tech: 'tecnologia', mercados: 'economia',
++  bolsa: 'economia', mundo: 'resto mundo', internacional: 'resto mundo' };
++
++function palabras(texto) {
++  const salida = [];
++  for (const w of normalizar(texto).split(' ')) {
++    if (!w || VACIAS.has(w)) continue;
++    for (const s of (SINONIMOS[w] || w).split(' ')) salida.push(s);
++  }
++  return salida;
++}
++
++function seParecen(a, b) {
++  if (a === b) return true;
++  const corta = Math.min(a.length, b.length);
++  if (corta >= 4 && (a.startsWith(b) || b.startsWith(a))) return true;
++  return corta >= 6 && a.slice(0, 6) === b.slice(0, 6);
++}
++
++/** Todas las secciones y sus bloques, en orden, desde el `indice` del backend. */
++function entradasDe(indice) {
++  const lista = [];
++  for (const s of indice || []) {
++    lista.push({ n: s.n, trozo: 0, titulo: s.titulo, seccion: true,
++                 etiqueta: String(s.etiqueta || s.n) });
++    for (const b of s.bloques || []) {
++      lista.push({ n: s.n, trozo: b.trozo || 0, titulo: b.titulo, seccion: false });
++    }
++  }
++  return lista;
++}
++
++/** Las paradas para moverse: una por sitio (un bloque al principio de su sección es la sección). */
++function paradasDe(entradas) {
++  const vistas = new Set();
++  return entradas.filter(function (e) {
++    const clave = e.n + ':' + e.trozo;
++    if (vistas.has(clave)) return false;
++    vistas.add(clave);
++    return true;
++  });
++}
++
++function dondeEstoy(paradas, n, trozo) {
++  let i = 0;
++  paradas.forEach(function (p, j) {
++    if (p.n < n || (p.n === n && p.trozo <= trozo)) i = j;
++  });
++  return i;
++}
++
++function numeroDe(destino) {
++  const d = destino.replace(/^(?:la|el|numero|seccion|parte) /, '').replace(/^(?:la|el|numero|seccion|parte) /, '');
++  let m = d.match(/^(\d{1,2})(?:[ .,](\d))?$/);
++  if (m) return m[2] ? m[1] + '.' + m[2] : m[1];
++  m = d.match(/^([a-z]+) (?:y media|y medio|coma cinco|punto cinco)$/);
++  if (m && NUMEROS[m[1]]) return NUMEROS[m[1]] + '.5';
++  if (NUMEROS[d]) return String(NUMEROS[d]);
++  if (d === 'ultima' || d === 'ultimo') return 'ultima';
++  return null;
++}
++
++/** La entrada a la que se refiere «economía», «la palabra del día», «la cuatro»… o null. */
++function buscarDestino(entradas, destino, estricto) {
++  const secciones = entradas.filter(function (e) { return e.seccion; });
++  const num = numeroDe(destino);
++  if (num === 'ultima') return secciones[secciones.length - 1] || null;
++  if (num) {
++    return secciones.find(function (s) { return s.etiqueta === num; }) ||
++           secciones.find(function (s) { return String(s.n) === num; }) || null;
++  }
++  const buscadas = palabras(destino);
++  if (!buscadas.length || (estricto && buscadas.every(function (w) { return w.length < 3; }))) return null;
++  let mejor = null;
++  let empate = false;
++  for (const e of entradas) {
++    const suyas = palabras(e.titulo);
++    if (!suyas.length) continue;
++    const aciertos = buscadas.filter(function (w) {
++      return suyas.some(function (s) { return seParecen(w, s); });
++    }).length;
++    // Todas las palabras dichas; con tres o más, vale fallar una (Whisper y los nombres propios).
++    const basta = buscadas.length >= 3 && !estricto ? buscadas.length - 1 : buscadas.length;
++    if (aciertos < basta) continue;
++    const cubre = aciertos / suyas.length;
++    const puntos = aciertos * 10 + cubre + (e.seccion ? 0.01 : 0);
++    if (!mejor || puntos > mejor.puntos) {
++      mejor = { puntos: puntos, entrada: e };
++      empate = false;
++    } else if (puntos === mejor.puntos && (mejor.entrada.n !== e.n || mejor.entrada.trozo !== e.trozo)) {
++      empate = true;
++    }
++  }
++  return mejor && !empate ? mejor.entrada : null;
++}
++
++/**
++ * La orden que es `texto` para la lectura de `estado` (o sin lectura en esta llamada),
++ * o null si no es una orden y tiene que ir a Claude. Pura: no lee ni dice nada.
++ *
++ * Devuelve { tipo: 'seguir'|'ir'|'parar'|'nada', n, trozo, que, backend }: 'ir' y
++ * 'seguir' con n/trozo leen desde ahí; 'seguir' con `backend` pide al backend la última
++ * lectura a medias (la de `que`, si se dijo); 'nada' dice FRASES.fin.
++ */
++function ordenDeLectura(texto, estado) {
++  const t = limpiarOrden(texto);
++  if (!t) return null;
++  const e = estado;
++  const suelta = !!(e && e.recien);
++
++  const s = ordenSeguir(t);
++  if (s && (s.explicita || suelta)) {
++    if (e && !e.fin && (!s.que || s.que === e.que)) return { tipo: 'seguir', n: e.n, trozo: e.trozo };
++    if (s.explicita) return { tipo: 'seguir', backend: true, que: s.que };
++    return null;
++  }
++  if (!e) return null;
++  if (suelta && PARAR.test(t)) return { tipo: 'parar' };
++
++  const entradas = entradasDe(e.indice);
++  const paradas = paradasDe(entradas);
++  if (!paradas.length) return null;                 // un backend sin índice: que lo vea Claude
++  const i = dondeEstoy(paradas, e.n, e.trozo);
++  const ir = function (p) { return p ? { tipo: 'ir', n: p.n, trozo: p.trozo, titulo: p.titulo } : { tipo: 'nada' }; };
++  const deSeccion = /\b(seccion|apartado)\b/.test(t);
++
++  if (SIGUIENTE.test(t) || (suelta && (SALTAR.test(t) || NO_INTERESA.test(t)))) {
++    if (deSeccion) return ir(paradas.find(function (p) { return p.seccion && p.n > e.n; }));
++    return suelta ? ir(paradas[i + 1]) : null;
++  }
++  if (ANTERIOR.test(t) || (suelta && ATRAS.test(t))) {
++    if (!deSeccion && !suelta) return null;
++    if (deSeccion) {
++      const previas = paradas.filter(function (p) { return p.seccion && p.n < e.n; });
++      return ir(previas.length ? previas[previas.length - 1] : paradas.find(function (p) { return p.n === e.n; }));
++    }
++    return ir(paradas[Math.max(0, i - 1)]);
++  }
++  if (PRINCIPIO.test(t)) {
++    if (/\bseccion\b/.test(t)) return ir(paradas.find(function (p) { return p.n === e.n; }));
++    return ir(paradas[0]);
++  }
++  // «Repite» a secas es lo que estaba sonando; «repite esta noticia», el bloque entero.
++  if (REPETIR.test(t) && (suelta || deSeccion)) {
++    if (deSeccion) return ir(paradas.find(function (p) { return p.n === e.n; }));
++    if (/\b(noticia|bloque|parte|tema)\b/.test(t)) return ir(paradas[i]);
++    return { tipo: 'ir', n: e.n, trozo: e.trozo, titulo: e.titulo };
++  }
++
++  const m = t.match(PREFIJO_IR);
++  const destino = m ? m[1].replace(/^(?:la|el|lo|las|los) /, '') : (suelta ? t : '');
++  if (!destino) return null;
++  const encontrada = buscarDestino(entradas, destino, !m);
++  return encontrada ? ir(encontrada) : null;
++}
++
++/**
++ * El mando de la lectura en una llamada. Uno por llamada: guarda por dónde va la última
++ * lectura y atiende las órdenes antes de que lleguen a Claude.
++ */
++class ControlLectura {
++  constructor() {
++    this.estado = null;
++  }
++
++  /** Tras un turno de Claude, las órdenes sueltas («sigue», «para») ya no son para la lectura. */
++  turnoDeClaude() {
++    if (this.estado) this.estado.recien = false;
++  }
++
++  /**
++   * Si `transcript` es una orden de la lectura, la cumple y devuelve { interrumpio, aviso }
++   * (como leerSiLoPide); si no, null y lo dicho va a Claude.
++   */
++  async atender(transcript, c) {
++    const orden = ordenDeLectura(transcript, this.estado);
++    if (!orden) return null;
++    const log = c.log || function () {};
++    const e = this.estado;
++    log('LECTURA: orden «' + String(transcript).trim() + '» → ' + orden.tipo +
++        (orden.n ? ' sección ' + orden.n + ' trozo ' + orden.trozo : ''));
++    if (orden.tipo === 'parar' || orden.tipo === 'nada') {
++      const url = await c.ttsService.generateSpeech(FRASES[orden.tipo === 'parar' ? 'parar' : 'fin'], c.voiceId);
++      const cortado = await decirInterrumpible(c.endpoint, c.session, url, log);
++      const aviso = orden.tipo === 'parar'
++        ? '[Le estabas leyendo ' + e.nombre + ' y te ha pedido que pares en la sección ' + e.n +
++          ' («' + e.titulo + '»). Si luego te pide que sigas, pon la línea 📖 LEER: ' + e.que + ' seguir.] '
++        : '[Le has dicho que no queda nada más de ' + e.nombre + '.] ';
++      return { interrumpio: cortado, aviso: aviso };
++    }
++    const pedido = orden.backend
++      ? { que: orden.que || '', desde: 1, hasta: 0, fecha: '', seguir: true }
++      : { que: e.que, fecha: e.fecha, desde: orden.n, hasta: 0, trozo: orden.trozo };
++    const r = await leer(pedido, Object.assign({}, c, { control: this }));
++    if (r.estado) this.estado = r.estado;
++    return { interrumpio: r.interrumpio, aviso: r.aviso };
++  }
+ }
+ 
+ // `traerBriefing` se queda por compatibilidad con lo que lo importara (parche 18).
+-module.exports = { leerSiLoPide, pedidoDeLectura, traerLectura, traerBriefing: traerLectura };
++module.exports = { leerSiLoPide, pedidoDeLectura, traerLectura, traerBriefing: traerLectura,
++                   ControlLectura, ordenDeLectura, limpiarOrden, FRASES };
+diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+index a84904a..493866e 100644
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -6,7 +6,8 @@
+ const { setTimeout: sleep } = require('node:timers/promises');
+ const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
+ // Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
+-const { leerSiLoPide } = require('./lectura');
++// Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
++const { leerSiLoPide, ControlLectura } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+@@ -155,6 +156,8 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+     let avisoLectura = '';
+     // Lo que espera un sí o un no de viva voz (parche 20), o null.
+     let pendienteConfirmar = null;
++    // Parche 24: por dónde va la lectura, para seguirla o saltar sin pasar por Claude.
++    const control = new ControlLectura();
+     const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
+     // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
+     const pasiva = new EscuchaPasiva({ log: logTurno });
+@@ -281,6 +284,17 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+         avisoLectura = rc.aviso + avisoLectura;
+       }
+ 
++      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
++      const ordenLectura = await control.atender(transcript, {
++        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      });
++      if (ordenLectura) {
++        interrumpio = ordenLectura.interrumpio;
++        avisoLectura = ordenLectura.aviso;
++        continue;
++      }
++
+       // THINKING FEEDBACK + Claude, a la vez (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+@@ -301,6 +315,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+       });
+ 
+       console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
++      control.turnoDeClaude();
+ 
+       // Extract and play voice line with device voice
+       const voiceLine = extractVoiceLine(claudeResponse);
+@@ -314,7 +329,9 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+       if (!interrumpio) {
+         const lectura = await leerSiLoPide(claudeResponse, {
+           endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
+-          log: function (m) { console.log('[' + new Date().toISOString() + '] ' + m); }
++          log: function (m) { console.log('[' + new Date().toISOString() + '] ' + m); },
++          sigueActiva: function () { return viva; },
++          control: control
+         });
+         interrumpio = lectura.interrumpio;
+         avisoLectura = lectura.aviso;
+diff --git a/voice-app/test/parche18.test.js b/voice-app/test/parche18.test.js
+index 28c9d05..e38b1d1 100644
+--- a/voice-app/test/parche18.test.js
++++ b/voice-app/test/parche18.test.js
+@@ -122,7 +122,8 @@ test('18: si le cortas, se calla ahí y a Claude le llega en qué sección iba',
+     fetchImpl: fetchFalso(BRIEFING) });
+   assert.strictEqual(r.interrumpio, true);
+   assert.match(r.aviso, /sección 2 de 2 \(«Inteligencia Artificial»\)/);
+-  assert.match(r.aviso, /📖 LEER: briefing desde=2/);
++  // Desde el parche 24, seguir es `seguir`: retoma el trozo exacto, no el principio.
++  assert.match(r.aviso, /📖 LEER: briefing seguir/);
+   assert.ok(ep.hecho.indexOf('play tts:Hasta aquí el briefing.') < 0);
+ });
+ 
+diff --git a/voice-app/test/parche24.test.js b/voice-app/test/parche24.test.js
+new file mode 100644
+index 0000000..6475a02
+--- /dev/null
++++ b/voice-app/test/parche24.test.js
+@@ -0,0 +1,369 @@
++/**
++ * Parche 24: el lector con mando. Si cuelgas a media lectura, «sigue leyendo» en otra
++ * llamada sigue por el mismo trozo; y cortándole, «siguiente», «anterior», «repite»,
++ * «para» o «ve a la de economía» los cumple la llamada sin preguntarle a Claude.
++ *
++ * Mismos dobles que parche18.test.js; el backend es un fetch falso que trocea como el
++ * de verdad (`desde`, `trozo`, `seguir`) y se acuerda de la última posición apuntada.
++ * Se lanza con `node --test test/parche24.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { leerSiLoPide, pedidoDeLectura, ordenDeLectura, ControlLectura, FRASES } = require('../lib/lectura');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++// ── El briefing de mentira ───────────────────────────────────────────────────
++// Con la forma del de verdad: una sección «3.5», bloques que empiezan a media sección y
++// bloques en el trozo 0 (que son la misma parada que su sección).
++const SECCIONES = [
++  { n: 1, etiqueta: '1', titulo: 'Tecnología General', trozos: ['Tec·0', 'Tec·1'], bloques: [] },
++  { n: 2, etiqueta: '2', titulo: 'Inteligencia Artificial', trozos: ['IA·0', 'IA·1', 'IA·2', 'IA·3'],
++    bloques: [{ trozo: 0, titulo: 'IA General' }, { trozo: 2, titulo: 'Nuevos lanzamientos y actualizaciones' }] },
++  { n: 3, etiqueta: '3', titulo: 'Actualidad General', trozos: ['Act·0', 'Act·1', 'Act·2'],
++    bloques: [{ trozo: 0, titulo: 'España' }, { trozo: 1, titulo: 'Resto del mundo' },
++              { trozo: 2, titulo: 'El Blog de Enrique Dans' }] },
++  { n: 4, etiqueta: '3.5', titulo: 'Economía y Geopolítica', trozos: ['Eco·0', 'Eco·1', 'Eco·2'],
++    bloques: [{ trozo: 0, titulo: 'Al día' }, { trozo: 1, titulo: 'Financial Times' },
++              { trozo: 2, titulo: 'La palabra del día: SEPA y las transferencias inmediatas' }] },
++  { n: 5, etiqueta: '4', titulo: 'Tu agenda de hoy', trozos: ['Age·0'], bloques: [] },
++  { n: 6, etiqueta: '5', titulo: 'Tu día', trozos: ['Dia·0', 'Dia·1'],
++    bloques: [{ trozo: 0, titulo: 'Clima' }, { trozo: 1, titulo: 'Estado físico' }] }
++];
++const INDICE = SECCIONES.map(function (s) {
++  return { n: s.n, etiqueta: s.etiqueta, titulo: s.titulo, bloques: s.bloques };
++});
++
++/** El backend: trocea como /telefono/lectura y apunta lo que le manda la llamada. */
++function backendFalso(posicion) {
++  const b = { gets: [], posts: [], posicion: posicion || null };
++  b.fetch = async function (url, opciones) {
++    if (opciones && opciones.method === 'POST') {
++      const cuerpo = JSON.parse(opciones.body);
++      b.posts.push(cuerpo);
++      b.posicion = cuerpo;
++      return { ok: true, status: 200, json: async function () { return { ok: true }; } };
++    }
++    b.gets.push(url);
++    const q = new URL(url).searchParams;
++    let desde = parseInt(q.get('desde'), 10) || 1;
++    let trozo = parseInt(q.get('trozo'), 10) || 0;
++    if (q.get('seguir')) {
++      if (!b.posicion || b.posicion.terminada) {
++        return { ok: true, status: 200, json: async function () {
++          return { ok: false, frase: 'No tengo ninguna lectura a medias que seguir.' }; } };
++      }
++      desde = b.posicion.n;
++      trozo = b.posicion.trozo;
++    }
++    const secciones = SECCIONES.filter(function (s) { return s.n >= desde; }).map(function (s, i) {
++      const k = i === 0 ? trozo : 0;
++      return { n: s.n, titulo: s.titulo, trozos: s.trozos.slice(k), primer_trozo: k };
++    });
++    const datos = { ok: true, que: 'briefing', nombre: 'el briefing', fecha: '2026-10-25',
++                    indice: INDICE, secciones: secciones };
++    return { ok: true, status: 200, json: async function () { return datos; } };
++  };
++  return b;
++}
++
++// ── Dobles de la llamada (los de parche18.test.js) ───────────────────────────
++function ttsFalso() {
++  const t = { pedidos: [] };
++  t.generateSpeech = async function (texto) { t.pedidos.push(texto); return 'tts:' + texto; };
++  return t;
++}
++
++/** Lo que `bloquea` devuelve true se queda sonando hasta un uuid_break (solo la vez que diga). */
++function endpointFalso(bloquea) {
++  const ep = new EventEmitter();
++  const veces = {};
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep._sonando = [];
++  ep.play = function (url) {
++    ep.hecho.push('play ' + url);
++    veces[url] = (veces[url] || 0) + 1;
++    if (bloquea && bloquea(url, veces[url])) return new Promise(function (r) { ep._sonando.push(r); });
++    return Promise.resolve();
++  };
++  ep.api = async function (cmd) {
++    ep.hecho.push('api ' + cmd);
++    if (cmd === 'uuid_break') { const s = ep._sonando; ep._sonando = []; s.forEach(function (r) { r(); }); }
++  };
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++/** El oído: corta en la reproducción interrumpible número N (cuenta desde 1). */
++function sesionFalsa(frases, cortaEn) {
++  const s = new EventEmitter();
++  let i = 0;
++  let armados = 0;
++  s.setCaptureEnabled = function () {};
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {
++    armados++;
++    if ((cortaEn || []).indexOf(armados) >= 0) setImmediate(function () { s.emit('barge'); });
++  };
++  s.waitForUtterance = async function () {
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  return s;
++}
++
++function interrumpibles(ep) {
++  return ep.hecho.filter(function (h) { return h.indexOf('play tts:') === 0; })
++    .map(function (h) { return h.slice('play tts:'.length); });
++}
++
++function estadoEn(n, trozo, recien) {
++  return { que: 'briefing', fecha: '2026-10-25', nombre: 'el briefing', indice: INDICE,
++           n: n, trozo: trozo, titulo: SECCIONES[n - 1].titulo, fin: false, recien: recien !== false };
++}
++
++function donde(o) { return o && o.tipo + ' ' + o.n + ':' + o.trozo; }
++
++// ── La marca ─────────────────────────────────────────────────────────────────
++test('24: la marca entiende `seguir`, con y sin qué, y `trozo`', function () {
++  assert.deepStrictEqual(pedidoDeLectura('📖 LEER: briefing seguir'),
++    { que: 'briefing', fecha: '', desde: 1, hasta: 0, seguir: true });
++  assert.deepStrictEqual(pedidoDeLectura('📖 LEER: seguir'),
++    { que: '', fecha: '', desde: 1, hasta: 0, seguir: true });
++  assert.strictEqual(pedidoDeLectura('📖 LEER: briefing desde=2 trozo=3').trozo, 3);
++  // Lo de siempre no cambia de forma (parche 18).
++  assert.deepStrictEqual(pedidoDeLectura('📖 LEER: briefing'),
++    { que: 'briefing', fecha: '', desde: 1, hasta: 0 });
++});
++
++// ── Las órdenes ──────────────────────────────────────────────────────────────
++test('24: seguir, suelto justo después de leer y explícito siempre', function () {
++  assert.strictEqual(donde(ordenDeLectura('Sigue.', estadoEn(2, 1))), 'seguir 2:1');
++  assert.strictEqual(donde(ordenDeLectura('Vale, sigue, por favor', estadoEn(2, 1))), 'seguir 2:1');
++  // Tras un turno de Claude, «sigue» puede contestar a otra cosa: que lo vea Claude.
++  assert.strictEqual(ordenDeLectura('sigue', estadoEn(2, 1, false)), null);
++  assert.strictEqual(donde(ordenDeLectura('sigue leyendo', estadoEn(2, 1, false))), 'seguir 2:1');
++  assert.strictEqual(donde(ordenDeLectura('continúa por donde ibas', estadoEn(3, 2, false))), 'seguir 3:2');
++  assert.strictEqual(ordenDeLectura('sigue buscando', estadoEn(2, 1)), null);
++});
++
++test('24: en una llamada nueva, solo «sigue leyendo» y parecidos, y se lo pide al backend', function () {
++  assert.deepStrictEqual(ordenDeLectura('Sigue leyendo', null), { tipo: 'seguir', backend: true, que: '' });
++  assert.deepStrictEqual(ordenDeLectura('sigue con el briefing', null),
++    { tipo: 'seguir', backend: true, que: 'briefing' });
++  assert.deepStrictEqual(ordenDeLectura('léeme el resto de la agenda', null),
++    { tipo: 'seguir', backend: true, que: 'semana' });
++  assert.strictEqual(ordenDeLectura('sigue', null), null);
++  assert.strictEqual(ordenDeLectura('ve a la de economía', null), null);
++});
++
++test('24: siguiente salta al bloque siguiente; «siguiente sección», a la sección', function () {
++  // En la 2, trozo 0 («IA General», que es la misma parada que la sección).
++  assert.strictEqual(donde(ordenDeLectura('siguiente', estadoEn(2, 0))), 'ir 2:2');
++  assert.strictEqual(donde(ordenDeLectura('¡Sáltate esto!', estadoEn(2, 1))), 'ir 2:2');
++  assert.strictEqual(donde(ordenDeLectura('esto no me interesa', estadoEn(2, 3))), 'ir 3:0');
++  assert.strictEqual(donde(ordenDeLectura('pasa a la siguiente sección', estadoEn(2, 0, false))), 'ir 3:0');
++  assert.strictEqual(donde(ordenDeLectura('la siguiente noticia', estadoEn(3, 0))), 'ir 3:1');
++  // Pasado el último bloque no hay adónde ir.
++  assert.strictEqual(ordenDeLectura('siguiente', estadoEn(6, 1)).tipo, 'nada');
++});
++
++test('24: anterior, repite y desde el principio', function () {
++  assert.strictEqual(donde(ordenDeLectura('anterior', estadoEn(3, 2))), 'ir 3:1');
++  assert.strictEqual(donde(ordenDeLectura('vuelve atrás', estadoEn(3, 1))), 'ir 3:0');
++  assert.strictEqual(donde(ordenDeLectura('la sección anterior', estadoEn(3, 2, false))), 'ir 2:0');
++  assert.strictEqual(donde(ordenDeLectura('repite', estadoEn(2, 3))), 'ir 2:3');
++  assert.strictEqual(donde(ordenDeLectura('repite esta noticia', estadoEn(2, 3))), 'ir 2:2');
++  assert.strictEqual(donde(ordenDeLectura('repite la sección', estadoEn(2, 3, false))), 'ir 2:0');
++  assert.strictEqual(donde(ordenDeLectura('desde el principio', estadoEn(4, 1, false))), 'ir 1:0');
++});
++
++test('24: ir a una sección o a un bloque, por título o por número', function () {
++  const e = estadoEn(1, 1, false);
++  assert.strictEqual(donde(ordenDeLectura('ve a la de economía', e)), 'ir 4:0');
++  assert.strictEqual(donde(ordenDeLectura('pasa a la de IA', e)), 'ir 2:0');
++  assert.strictEqual(donde(ordenDeLectura('léeme la palabra del día', e)), 'ir 4:2');
++  assert.strictEqual(donde(ordenDeLectura('lo del Financial Times', e)), 'ir 4:1');
++  assert.strictEqual(donde(ordenDeLectura('lee el blog de Enrique Dance', e)), 'ir 3:2');
++  assert.strictEqual(donde(ordenDeLectura('salta a las noticias de España', e)), 'ir 3:0');
++  // Los números son los del correo: «4. Tu agenda» es la quinta, porque hay una 3.5.
++  assert.strictEqual(donde(ordenDeLectura('la sección cuatro', e)), 'ir 5:0');
++  assert.strictEqual(donde(ordenDeLectura('ve a la tres y media', e)), 'ir 4:0');
++  assert.strictEqual(donde(ordenDeLectura('ve a la última', e)), 'ir 6:0');
++  // «Tu día» y «La palabra del día» tienen «día»: gana la que no tiene más.
++  assert.strictEqual(donde(ordenDeLectura('ve a tu día', e)), 'ir 6:0');
++});
++
++test('24: recién cortado vale el título a secas; lo que no es una orden va a Claude', function () {
++  assert.strictEqual(donde(ordenDeLectura('el tiempo', estadoEn(2, 1))), 'ir 6:0');
++  assert.strictEqual(donde(ordenDeLectura('economía', estadoEn(2, 1))), 'ir 4:0');
++  assert.strictEqual(ordenDeLectura('economía', estadoEn(2, 1, false)), null);
++  for (const frase of ['¿qué hora es?', 'pon música', 'para, ¿qué hora es?', 'apaga la luz',
++                       'sáltate la palabra del día', 'no', 'gracias']) {
++    assert.strictEqual(ordenDeLectura(frase, estadoEn(2, 1)), null, frase);
++  }
++  assert.strictEqual(ordenDeLectura('para', estadoEn(2, 1)).tipo, 'parar');
++  assert.strictEqual(ordenDeLectura('déjalo ahí', estadoEn(2, 1)).tipo, 'parar');
++  assert.strictEqual(ordenDeLectura('para', estadoEn(2, 1, false)), null);
++});
++
++test('24: con un backend sin índice, seguir vale y moverse se lo deja a Claude', function () {
++  const e = Object.assign(estadoEn(2, 1), { indice: [] });
++  assert.strictEqual(donde(ordenDeLectura('sigue', e)), 'seguir 2:1');
++  assert.strictEqual(ordenDeLectura('siguiente', e), null);
++  assert.strictEqual(ordenDeLectura('ve a la de economía', e), null);
++});
++
++// ── La posición ──────────────────────────────────────────────────────────────
++test('24: apunta cada trozo antes de que suene, y que terminó al acabar', async function () {
++  const b = backendFalso();
++  const control = new ControlLectura();
++  await leerSiLoPide('📖 LEER: briefing desde=5', {
++    endpoint: endpointFalso(), session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: b.fetch, control: control });
++  assert.deepStrictEqual(b.posts.map(function (p) { return p.n + ':' + p.trozo + (p.terminada ? ' fin' : ''); }),
++    ['5:0', '6:0', '6:1', '6:1 fin']);
++  assert.strictEqual(b.posts[0].que, 'briefing');
++  assert.strictEqual(b.posts[0].fecha, '2026-10-25');
++  assert.strictEqual(control.estado.fin, true);
++});
++
++test('24: si cuelgas, lo último apuntado es el trozo que sonaba', async function () {
++  const b = backendFalso();
++  let viva = true;
++  const ep = endpointFalso();
++  const playDeVerdad = ep.play;
++  ep.play = function (url) {
++    if (url === 'tts:IA·1') viva = false;           // cuelga mientras suena
++    return playDeVerdad(url);
++  };
++  await leerSiLoPide('📖 LEER: briefing desde=2', {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: b.fetch, sigueActiva: function () { return viva; } });
++  assert.deepStrictEqual(b.posicion, { que: 'briefing', fecha: '2026-10-25', n: 2, trozo: 1,
++                                       titulo: 'Inteligencia Artificial', terminada: false });
++});
++
++test('24: seguir en otra llamada retoma ese trozo y dice dónde está', async function () {
++  const b = backendFalso({ que: 'briefing', fecha: '2026-10-25', n: 4, trozo: 1, terminada: false });
++  const ep = endpointFalso();
++  await leerSiLoPide('🗣️ VOICE_RESPONSE: Sigo.\n📖 LEER: briefing seguir', {
++    endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v', fetchImpl: b.fetch });
++  assert.match(b.gets[0], /\/telefono\/lectura\?que=briefing&desde=1&hasta=0&seguir=true$/);
++  assert.deepStrictEqual(interrumpibles(ep).slice(0, 3),
++    ['Sigo con el briefing, en «Economía y Geopolítica».', 'Eco·1', 'Eco·2']);
++  // La posición cuenta desde el principio de la sección, no desde donde retomó.
++  assert.strictEqual(b.posts[0].n + ':' + b.posts[0].trozo, '4:1');
++});
++
++// ── Los dos bucles ───────────────────────────────────────────────────────────
++function claudeQueLee() {
++  const c = { preguntas: [] };
++  c.query = async function (texto) {
++    c.preguntas.push(texto);
++    return c.preguntas.length === 1
++      ? '🗣️ VOICE_RESPONSE: Te lo leo.\n📖 LEER: briefing\n🎯 COMPLETED: lectura'
++      : '🗣️ VOICE_RESPONSE: vale';
++  };
++  c.endSession = async function () {};
++  return c;
++}
++function opcionesComunes(sesion, claude) {
++  return {
++    ttsService: ttsFalso(), whisperClient: { transcribe: async function (a) { return a.toString(); } },
++    claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++
++test('24, saliente: «siguiente», «para» y «sigue» sin preguntarle a Claude', async function () {
++  const b = backendFalso();
++  const fetchAntes = global.fetch;
++  global.fetch = b.fetch;
++  try {
++    // Se quedan sonando (para cortarlos) la primera vez que suenan IA·0 y Act·0.
++    const ep = endpointFalso(function (url, vez) {
++      return url.indexOf('hold-music') >= 0 || (vez === 1 && (url === 'tts:IA·0' || url === 'tts:Act·0'));
++    });
++    const claude = claudeQueLee();
++    // Interrumpibles: 1 «Te lo leo», 2 Tec·0, 3 Tec·1, 4 IA·0 ← corta; «siguiente» →
++    // 5 IA·2, 6 IA·3, 7 Act·0 ← corta; «para» → 8 la frase de parar; «sigue» → Act·0…
++    const sesion = sesionFalsa(['léeme el briefing', 'siguiente', 'para', 'sigue', 'adiós'], [4, 7]);
++    const r = await runConversationLoop(ep, new EventEmitter(), 'c-sal',
++      Object.assign(opcionesComunes(sesion, claude), { skipGreeting: true }));
++    assert.strictEqual(r.endReason, 'goodbye');
++    assert.strictEqual(claude.preguntas.length, 1, 'Claude solo pidió la lectura');
++    const leido = interrumpibles(ep);
++    assert.deepStrictEqual(leido.slice(leido.indexOf('Te lo leo.')), [
++      'Te lo leo.', 'Tec·0', 'Tec·1', 'IA·0',
++      'IA·2', 'IA·3', 'Act·0',
++      FRASES.parar,
++      'Act·0', 'Act·1', 'Act·2', 'Eco·0', 'Eco·1', 'Eco·2', 'Age·0', 'Dia·0', 'Dia·1',
++      'Hasta aquí el briefing.', 'Hasta luego. Llámame cuando quieras.']);
++    assert.deepStrictEqual(b.posicion.terminada, true);
++  } finally {
++    global.fetch = fetchAntes;
++  }
++});
++
++test('24, entrante: llamada nueva, «sigue leyendo» y sigue donde se colgó', async function () {
++  const b = backendFalso({ que: 'briefing', fecha: '2026-10-25', n: 6, trozo: 1, terminada: false });
++  const fetchAntes = global.fetch;
++  global.fetch = b.fetch;
++  try {
++    const ep = endpointFalso(function (url) { return url.indexOf('hold-music') >= 0; });
++    const claude = claudeQueLee();
++    const sesion = sesionFalsa(['sigue leyendo', 'adiós'], []);
++    const dialogo = new EventEmitter();
++    dialogo.destroy = function () {};
++    const opciones = opcionesComunes(sesion, claude);
++    opciones.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++    const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++    await handleInvite(req, { send: function () {} }, opciones);
++    assert.strictEqual(claude.preguntas.length, 0, 'ni siquiera pasó por Claude');
++    assert.match(b.gets[0], /seguir=true/);
++    const leido = interrumpibles(ep);
++    assert.deepStrictEqual(leido.slice(leido.indexOf('Sigo con el briefing, en «Tu día».'), -1),
++      ['Sigo con el briefing, en «Tu día».', 'Dia·1', 'Hasta aquí el briefing.']);
++  } finally {
++    global.fetch = fetchAntes;
++  }
++});
++
++test('24, entrante: «sigue leyendo» sin nada a medias lo dice y Claude se entera', async function () {
++  const b = backendFalso(null);
++  const fetchAntes = global.fetch;
++  global.fetch = b.fetch;
++  try {
++    const ep = endpointFalso(function (url) { return url.indexOf('hold-music') >= 0; });
++    const claude = claudeQueLee();
++    const sesion = sesionFalsa(['sigue leyendo', 'pues léeme el briefing', 'adiós'], []);
++    const dialogo = new EventEmitter();
++    dialogo.destroy = function () {};
++    const opciones = opcionesComunes(sesion, claude);
++    opciones.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++    const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++    await handleInvite(req, { send: function () {} }, opciones);
++    assert.ok(interrumpibles(ep).indexOf('No tengo ninguna lectura a medias que seguir.') >= 0);
++    assert.match(claude.preguntas[0], /^\[La lectura a medias que te pidió seguir no se pudo hacer: «No tengo ninguna lectura a medias que seguir\.»\] pues léeme el briefing$/);
++  } finally {
++    global.fetch = fetchAntes;
++  }
++});

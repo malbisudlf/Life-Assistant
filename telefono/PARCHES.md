@@ -15,6 +15,8 @@ también el 2026-10-15: un solo proceso de Claude por llamada en vez de uno por 
 que ya está mirado (agenda, tareas, recordatorios) metido al descolgar (ver «El parche 19»).
 Y el 20 (2026-10-17): la llamada lee también la semana, el correo y las tareas, y lo que
 Jarvis propone se confirma diciendo sí o no, sin que lo decida Claude (ver «El parche 20»).
+Y el 24 (2026-10-25, sin aplicar): el lector con mando, que sigue donde se quedó aunque
+se cuelgue y salta de sección o de bloque sin pasar por Claude (ver «El parche 24»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -773,6 +775,71 @@ Y el `RUNBOOK.md` nuevo a `~/telefono-jarvis/CLAUDE.md` (trae el personaje y có
 contestar en modo coche). Volver atrás: `docker tag claude-phone-voice-app:antes-p22
 claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
 `ESCUCHA-PASIVA: a la escucha` y `me llaman` en `docker logs voice-app`.
+
+## El parche 24: el lector con mando
+
+Sale del 2026-10-25: «cuando le pido a Jarvis que lea el briefing, quiero que tenga
+control sobre el lector. Si en medio de la lectura cuelgo la llamada y luego le digo que
+siga leyendo, quiero que siga por donde iba. También quiero poder pedirle que salte
+secciones, o que avance hasta una en específico». Con el 18 y el 20, la posición vivía en
+la memoria de la llamada (colgar la perdía), cortarle obligaba a un turno de Claude para
+cualquier cosa, y el troceado por secciones del backend llevaba días roto (ver
+`docs/BUGS_HISTORICOS.md`): no había secciones a las que saltar.
+
+- **`voice-app/lib/lectura.js`**:
+  - antes de que suene cada trozo, `POST /telefono/lectura/posicion` al backend (sin
+    esperar: un fallo ahí no para la lectura). Al colgar, lo último apuntado es el trozo
+    que sonaba, que es el que se repite al seguir;
+  - `📖 LEER: briefing seguir` (o `📖 LEER: seguir`, la última a medias) pide
+    `GET /telefono/lectura?seguir=true` y dice primero dónde retoma («Sigo con el
+    briefing, en «Economía y Geopolítica».»);
+  - `ControlLectura`, uno por llamada, con las órdenes de una lista cerrada que se cumplen
+    sin Claude: «sigue», «siguiente» / «sáltate esto» / «esto no me interesa» (el bloque
+    siguiente: «IA General», «España»…), «siguiente sección», «anterior», «sección
+    anterior», «repite» (el trozo que sonaba), «repite la sección», «desde el principio»,
+    «para», y «ve a la de economía», «léeme la palabra del día», «la sección cuatro» (con
+    los números del correo: la 3.5 existe) o, recién cortado, el título a secas. La frase
+    entera tiene que ser la orden, como el «sí» del 20.
+  - Las sueltas («sigue», «siguiente», «para») solo justo después de leer: tras un turno
+    de Claude, «sigue» puede ser la respuesta a otra cosa. Las que dicen qué («sigue
+    leyendo», «ve a la de economía») valen siempre, y «sigue leyendo» también en una
+    llamada nueva, sin pasar por Claude. «Sáltate X» no va a X: «salta» y «pasa» solo
+    llevan a un sitio con «a».
+- **Los dos bucles**: el control atiende lo dicho antes que Claude (después de las órdenes
+  del modo coche, la despedida y el «sí» pendiente), y se entera de cada turno de Claude.
+  La entrante pasa ahora `sigueActiva` a la lectura, como ya hacía la saliente.
+- **El backend** (`docs/JARVIS.md`, «El briefing, leído»): el troceado por títulos
+  numerados con bloques por subtítulo, la posición (memoria + `lecturas_telefono`), el
+  `indice` y `seguir` en `/telefono/lectura`, y la línea «LECTURA A MEDIAS» en
+  `/telefono/contexto`. **Va primero**: con la voice-app nueva y el backend viejo, seguir
+  y saltar no funcionan (la lectura normal, sí).
+
+`telefono/parche-24.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`voice-app/test/parche24.test.js`: catorce casos (la marca, cada orden y sus falsos
+amigos, el backend sin índice, la posición antes de cada trozo, colgar, seguir en otra
+llamada, y los bucles enteros: la saliente que salta, para y sigue sin preguntarle a
+Claude, y la entrante que retoma con «sigue leyendo»). Cambia una aserción de
+`parche18.test.js`: el aviso de corte ya no propone `desde=N` para seguir, sino `seguir`.
+Probado fuera de `caja` sobre una copia exacta de su `~/.claude-phone-cli/` del
+2026-10-25: el diff entra limpio y pasan el 24 (14), el 22 (9), el 20 (11), el 18 (7), el
+17 (3), el 15-16 (13), el 14 (6) y el 12 (15). **Sin aplicar todavía**; los pasos, como el
+22, después de desplegar el backend y aplicar la migración:
+
+```bash
+cd ~/.claude-phone-cli
+docker tag claude-phone-voice-app claude-phone-voice-app:antes-p24
+patch -p1 < parche-24.diff
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche24.test.js
+curl -s localhost:3010/api/calls                     # sin llamada en curso
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Y el `RUNBOOK.md` nuevo a `~/telefono-jarvis/CLAUDE.md` (trae `seguir` y que el mando lo
+lleva la llamada). Volver atrás: `docker tag claude-phone-voice-app:antes-p24
+claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
+`LECTURA: orden «siguiente» → ir` en `docker logs voice-app`, y `sigue la anterior` en
+el registro del backend.
 
 ## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
 

@@ -13881,6 +13881,7 @@ TABLAS_CONOCIDAS = {
     "jarvis_preguntas":      "20261011_jarvis_preguntas",
     "salud_familia":         "20261015_salud_familia",
     "salud_familia_envios":  "20261015_salud_familia",
+    "lecturas_telefono":     "20261025_lecturas_telefono",
 }
 
 MIGRACIONES_URL = f"{SUPABASE_URL}/rest/v1/migraciones_aplicadas"
@@ -26954,34 +26955,106 @@ def _trocear(frases: list, tope: int = BRIEFING_TROZO_CHARS) -> list:
     return trozos
 
 
+# «1. 🖥️ Tecnología General», «3.5. 💹 Economía y Geopolítica»: pegado al margen y corto.
+_BRIEFING_CABECERA     = re.compile(r"^(\d{1,2}(?:\.\d{1,2})?)\.\s+(\S.*)$")
+BRIEFING_CABECERA_MAX  = 80
+BRIEFING_SUBTITULO_MAX = 70
+
+
+def _es_subtitulo(linea: str) -> bool:
+    """«IA General», «🔭 Antes de que sea tendencia», «💡 La palabra del día: …»: corta,
+    pegada al margen, sin viñeta ni punto final. Abre un bloque dentro de la sección, que
+    es lo que salta «siguiente» por teléfono."""
+    s = linea.rstrip()
+    if not s or s != s.lstrip() or len(s) > BRIEFING_SUBTITULO_MAX:
+        return False
+    if re.match(r"[*•·-]|\d+(?:\.\d+)*\.\s", s):
+        return False
+    return s[-1] not in ".!?;,…)»\"" and any(c.isalpha() for c in s)
+
+
 def _briefing_secciones(texto: str) -> list:
     """Las secciones del briefing, numeradas desde 1 y listas para decirse.
 
-    El primer bloque (la fecha y las incidencias de recopilación) no es una sección: las
-    incidencias son para quien mantiene la rutina, no para oírlas conduciendo."""
-    secciones = []
-    for bloque in _BRIEFING_SEPARADOR.split(texto or "")[1:]:
-        lineas = [l for l in bloque.splitlines() if l.strip()]
-        if not lineas:
+    Las marcan sus títulos numerados («1. 🖥️ …», «3.5. …»), no los separadores de guiones
+    bajos: la rutina los pone donde cae (el 24/10, uno solo al final, antes de las
+    fuentes; el 25/10, uno solo al principio), y partir por ellos leía el briefing entero
+    como una sección o, peor, solo la línea de las fuentes. Un separador sí cierra la
+    sección en la que está: lo que va detrás del último es el pie. Un título solo cuenta
+    si su número es mayor que el del anterior, para que una lista numerada del texto no
+    abra secciones. Sin ningún título numerado, se parte por los separadores, como antes.
+
+    Lo de antes del primer título (la fecha, el saludo y las incidencias de recopilación)
+    no es una sección: las incidencias son para quien mantiene la rutina, no para oírlas
+    conduciendo.
+
+    Cada sección trae sus `bloques`: el primero es lo que va antes del primer subtítulo
+    (título vacío) y luego uno por subtítulo (ver `_es_subtitulo`)."""
+    crudas, actual, ultimo = [], None, 0.0
+    for linea in (texto or "").splitlines():
+        if _BRIEFING_SEPARADOR.match(linea):
+            actual = None
             continue
-        titulo = _frase_para_voz(lineas[0]).rstrip(".")
-        frases = [f for f in (_frase_para_voz(l) for l in lineas[1:]) if len(f) > 1]
+        m = _BRIEFING_CABECERA.match(linea)
+        if m and len(linea.strip()) <= BRIEFING_CABECERA_MAX and float(m.group(1)) > ultimo:
+            ultimo = float(m.group(1))
+            actual = (m.group(1), linea, [])
+            crudas.append(actual)
+        elif actual is not None:
+            actual[2].append(linea)
+    if not crudas:
+        for bloque in _BRIEFING_SEPARADOR.split(texto or "")[1:]:
+            lineas = [l for l in bloque.splitlines() if l.strip()]
+            if lineas:
+                crudas.append(("", lineas[0], lineas[1:]))
+
+    secciones = []
+    for etiqueta, cabecera, cuerpo in crudas:
+        titulo = _frase_para_voz(cabecera).rstrip(".:")
+        bloques = [{"titulo": "", "frases": []}]
+        for linea in cuerpo:
+            frase = _frase_para_voz(linea) if linea.strip() else ""
+            if len(frase) <= 1:
+                continue
+            if _es_subtitulo(linea):
+                bloques.append({"titulo": frase.rstrip(".:"), "frases": [frase]})
+            else:
+                bloques[-1]["frases"].append(frase)
+        frases = [f for b in bloques for f in b["frases"]]
         if not titulo and not frases:
             continue
-        secciones.append({"n": len(secciones) + 1, "titulo": titulo or "Sin título",
-                          "frases": frases})
+        n = len(secciones) + 1
+        secciones.append({"n": n, "etiqueta": etiqueta or str(n),
+                          "titulo": titulo or "Sin título", "frases": frases,
+                          "bloques": bloques})
     return secciones
+
+
+def _voz_de_seccion(s: dict) -> dict:
+    """Una sección con sus trozos, el título delante del primero, y en `bloques` el trozo
+    en que empieza cada subtítulo. Cada subtítulo abre trozo nuevo: así «siguiente» por
+    teléfono cae justo en él, con su título dicho, y no a mitad de un trozo que traía el
+    final del bloque anterior."""
+    trozos, bloques = [], []
+    pendiente = [f"{s['titulo']}."]
+    for b in s.get("bloques") or [{"titulo": "", "frases": s.get("frases") or []}]:
+        frases, pendiente = pendiente + b["frases"], []
+        if not b["titulo"] and not b["frases"]:
+            pendiente = frases      # nada antes del primer subtítulo: el título va con él
+            continue
+        if b["titulo"]:
+            bloques.append({"trozo": len(trozos), "titulo": b["titulo"]})
+        trozos += _trocear(frases)
+    if pendiente:
+        trozos += _trocear(pendiente)
+    return {"n": s["n"], "etiqueta": s.get("etiqueta") or str(s["n"]),
+            "titulo": s["titulo"], "trozos": trozos, "bloques": bloques}
 
 
 def _briefing_para_voz(texto: str, desde: int = 1, hasta: int = 0) -> list:
     """Las secciones pedidas, cada una con sus trozos; el título va delante del primero."""
-    salida = []
-    for s in _briefing_secciones(texto):
-        if s["n"] < desde or (hasta and s["n"] > hasta):
-            continue
-        trozos = _trocear([f"{s['titulo']}."] + s["frases"])
-        salida.append({"n": s["n"], "titulo": s["titulo"], "trozos": trozos})
-    return salida
+    return [_voz_de_seccion(s) for s in _briefing_secciones(texto)
+            if s["n"] >= desde and not (hasta and s["n"] > hasta)]
 
 
 @app.get("/telefono/briefing")
@@ -27163,7 +27236,10 @@ def telefono_contexto(request: Request):
     empezar la sesión (parche 19). Con el token del MCP del teléfono, como el briefing."""
     if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
-    return {"texto": _contexto_de_voz(incluir_lugar=True)}
+    texto, lectura = _contexto_de_voz(incluir_lugar=True), _contexto_lectura()
+    if lectura:
+        texto = f"{texto}\n\n{lectura}" if texto else lectura
+    return {"texto": texto}
 
 
 # ── Lo que el teléfono lee en voz alta ────────────────────────────────────────
@@ -27186,7 +27262,8 @@ LECTURA_SEMANA_DIAS = 7
 
 def _seccion_voz(n: int, titulo: str, frases: list) -> dict:
     limpias = [f for f in (_frase_para_voz(str(x)) for x in frases) if len(f) > 1]
-    return {"n": n, "titulo": titulo, "trozos": _trocear([f"{titulo}."] + limpias)}
+    return {"n": n, "etiqueta": str(n), "titulo": titulo,
+            "trozos": _trocear([f"{titulo}."] + limpias), "bloques": []}
 
 
 def _lectura_semana() -> dict:
@@ -27298,34 +27375,243 @@ def _lectura_tareas() -> dict:
 _LECTURAS = {"semana": _lectura_semana, "correo": _lectura_correo, "tareas": _lectura_tareas}
 
 
-@app.get("/telefono/lectura")
-def telefono_lectura(request: Request,
-                     que: str = Query(..., pattern="^(briefing|semana|correo|tareas)$"),
-                     desde: int = 1, hasta: int = 0, fecha: str = ""):
-    """Lo que la llamada lee en voz alta cuando Claude pone `📖 LEER: <que>` (parche 20).
-
-    Con el token del MCP del teléfono, como el briefing, y el mismo contrato: siempre 200,
-    y lo que no se pueda leer va en `frase` para que la voice-app lo diga tal cual."""
-    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
-        raise HTTPException(status_code=401, detail="Token inválido")
+def _lectura_entera(que: str, fecha: str = "") -> dict:
+    """Todo lo que hay que leer de `que`, por secciones, con sus trozos y sus bloques."""
     if que == "briefing":
-        if fecha and not _DATE_RE.match(fecha):
-            return {"ok": False, "frase": "Esa fecha no la entiendo."}
-        r = telefono_briefing(request, fecha, desde, hasta)
-        return {**r, "nombre": "el briefing"} if r.get("ok") else r
+        r = _j_leer_briefing(fecha or None)
+        if r.get("error"):
+            return {"ok": False, "frase": r["error"]}
+        if not r.get("hay_briefing"):
+            return {"ok": False, "frase": "Hoy no hay briefing enviado todavía." if not fecha
+                    else "Ese día no hay briefing enviado."}
+        secciones = [_voz_de_seccion(s) for s in _briefing_secciones(r["briefing"])]
+        if not secciones:
+            return {"ok": False, "frase": "El briefing no trae ninguna sección que pueda leer."}
+        return {"ok": True, "nombre": "el briefing", "fecha": r["fecha"], "secciones": secciones}
     try:
-        r = _LECTURAS[que]()
+        return _LECTURAS[que]()
     except Exception as e:
         logger.error("Lectura por teléfono de '%s' falló (%s)", que, _causa(e))
         return {"ok": False, "frase": "Ahora mismo no lo puedo mirar."}
+
+
+def _recortar_lectura(secciones: list, desde: int = 1, hasta: int = 0, trozo: int = 0) -> list:
+    """De la sección `desde` a la `hasta`, la primera empezando en su trozo `trozo`.
+    `primer_trozo` dice en cuál empieza cada una, para que la llamada apunte por dónde va
+    contando desde el principio de la sección y no desde donde empezó a leer."""
+    salida = []
+    for s in secciones:
+        if s["n"] < desde or (hasta and s["n"] > hasta):
+            continue
+        k = min(trozo, len(s["trozos"]) - 1) if not salida and s["n"] == desde else 0
+        salida.append({"n": s["n"], "titulo": s["titulo"], "trozos": s["trozos"][max(k, 0):],
+                       "primer_trozo": max(k, 0)})
+    return salida
+
+
+# ── Por dónde iba la lectura ─────────────────────────────────────────────────
+#
+# Colgar a media lectura perdía el sitio: la posición vivía en la voice-app, en la memoria
+# de esa llamada. Desde el parche 24 la voice-app avisa aquí de cada trozo que empieza a
+# sonar (`POST /telefono/lectura/posicion`), y «sigue leyendo» —en la misma llamada o en
+# otra, horas después— retoma ese trozo con `seguir`. Una fila por `que` en
+# `lecturas_telefono`, para que un despliegue entre medias no se lo lleve; sin la
+# migración, vive solo en memoria y lo dice una vez.
+LECTURA_SEGUIR_HORAS  = float(os.getenv("LECTURA_SEGUIR_HORAS", "12"))
+LECTURA_PERSISTIR     = _flag("LECTURA_PERSISTIR")
+LECTURAS_TELEFONO_URL = f"{SUPABASE_URL}/rest/v1/lecturas_telefono"
+_lectura_posiciones: dict = {}     # que -> la fila
+_lectura_lock = threading.Lock()
+_lectura_cargada = False
+_lectura_fallo_dicho = False
+
+
+def _lectura_fallo(motivo: str) -> None:
+    global _lectura_fallo_dicho
+    if not _lectura_fallo_dicho:
+        _lectura_fallo_dicho = True
+        logger.warning("Lectura: la posición no se pudo guardar en Supabase (%s; ¿falta "
+                       "20261025_lecturas_telefono?). Sigue solo en memoria; no se repite "
+                       "hasta el próximo arranque", motivo)
+
+
+def _lectura_cargar() -> None:
+    """Lo guardado, la primera vez que hace falta tras arrancar. Lo que ya haya en memoria
+    gana: es más nuevo que cualquier fila."""
+    global _lectura_cargada
+    if _lectura_cargada or not LECTURA_PERSISTIR:
+        return
+    _lectura_cargada = True
+    try:
+        r = http.get(f"{LECTURAS_TELEFONO_URL}?select=*", headers=supabase_headers())
+        if r.status_code >= 300:
+            return _lectura_fallo(f"HTTP {r.status_code}")
+        filas = r.json() or []
+    except Exception as e:
+        return _lectura_fallo(type(e).__name__)
+    with _lectura_lock:
+        for fila in filas:
+            if isinstance(fila, dict) and fila.get("que") in LECTURAS_TELEFONO:
+                _lectura_posiciones.setdefault(fila["que"], fila)
+
+
+def _lectura_guardar(pos: dict) -> None:
+    with _lectura_lock:
+        _lectura_posiciones[pos["que"]] = pos
+    if not LECTURA_PERSISTIR:
+        return
+    try:
+        r = http.post(f"{LECTURAS_TELEFONO_URL}?on_conflict=que",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json=pos)
+        if r.status_code >= 300:
+            _lectura_fallo(f"HTTP {r.status_code}")
+    except Exception as e:
+        _lectura_fallo(type(e).__name__)
+
+
+def _lectura_pendiente(que: str = "") -> Optional[dict]:
+    """La lectura a medias más reciente (o la de `que`) de las últimas
+    LECTURA_SEGUIR_HORAS. Una terminada no cuenta: «sigue» ahí no tiene nada que seguir."""
+    _lectura_cargar()
+    limite = datetime.now(timezone.utc) - timedelta(hours=LECTURA_SEGUIR_HORAS)
+    with _lectura_lock:
+        candidatas = [dict(p) for p in _lectura_posiciones.values()
+                      if (not que or p.get("que") == que) and not p.get("terminada")]
+    vivas = []
+    for p in candidatas:
+        try:
+            cuando = datetime.fromisoformat(str(p.get("actualizado") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if cuando.tzinfo is None:
+            cuando = cuando.replace(tzinfo=timezone.utc)
+        if cuando >= limite:
+            vivas.append((cuando, p))
+    return max(vivas, key=lambda x: x[0])[1] if vivas else None
+
+
+def _donde_seguir(secciones: list, pos: dict) -> tuple:
+    """La sección y el trozo donde retomar. Si lo que se leía ha cambiado —la agenda y las
+    tareas no son un texto fijo—, se busca la sección por su título; si ya no está, se
+    sigue por el mismo número, desde su principio."""
+    n, titulo = int(pos.get("n") or 1), str(pos.get("titulo") or "")
+    for s in secciones:
+        if s["n"] == n and (not titulo or s["titulo"] == titulo):
+            return n, int(pos.get("trozo") or 0)
+    for s in secciones:
+        if titulo and s["titulo"] == titulo:
+            return s["n"], 0
+    return min(n, secciones[-1]["n"]), 0
+
+
+def _contexto_lectura() -> str:
+    """La lectura que se quedó a medias, para que «sigue» en una llamada nueva sepa qué
+    es. Va fuera de la copia de CONTEXTO_VOZ_SEG: cambia a cada trozo."""
+    try:
+        p = _lectura_pendiente()
+    except Exception as e:
+        logger.warning("Contexto de voz: la lectura a medias falló (%s)", _causa(e))
+        return ""
+    if not p:
+        return ""
+    nombre = str(p.get("nombre") or p["que"])
+    if p.get("fecha") and p["fecha"] != _ahora_local().date().isoformat():
+        nombre += f" del {p['fecha'][8:10]}/{p['fecha'][5:7]}"
+    donde = f"la sección {p.get('n') or 1}" + (f" de {p['total']}" if p.get("total") else "")
+    if p.get("titulo"):
+        donde += f", «{p['titulo']}»"
+    try:
+        hora = f" a las {_j_local(str(p['actualizado'])).strftime('%H:%M')}"
+    except (KeyError, ValueError, TypeError):
+        hora = ""
+    return (f"LECTURA A MEDIAS: la llamada le estaba leyendo {nombre} y se quedó en {donde}"
+            f"{hora}. Si te pide que sigas, pon la línea «📖 LEER: {p['que']} seguir», que "
+            "retoma el trozo exacto. Si llama poco después de cortarse, puedes ofrecérselo "
+            "en una frase.")
+
+
+@app.get("/telefono/lectura")
+def telefono_lectura(request: Request,
+                     que: str = Query("", pattern="^(briefing|semana|correo|tareas)?$"),
+                     desde: int = 1, hasta: int = 0, fecha: str = "",
+                     trozo: int = 0, seguir: bool = False):
+    """Lo que la llamada lee en voz alta cuando Claude pone `📖 LEER: <que>` (parche 20).
+
+    Con el token del MCP del teléfono, como el briefing, y el mismo contrato: siempre 200,
+    y lo que no se pueda leer va en `frase` para que la voice-app lo diga tal cual.
+
+    Parche 24: `seguir` retoma la última lectura a medias —la de `que`, o la más reciente
+    si no se dice— en el trozo exacto en que se quedó, aunque fuera en otra llamada;
+    `trozo` empieza la sección `desde` en ese trozo. La respuesta trae `indice` (todas las
+    secciones, con sus bloques), que es con lo que la llamada entiende «siguiente»,
+    «anterior» o «ve a la de economía» sin preguntarle a Claude."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    pos = None
+    if seguir:
+        pos = _lectura_pendiente(que)
+        if not pos:
+            return {"ok": False, "frase": "No tengo ninguna lectura a medias que seguir."}
+        que, fecha = pos["que"], str(pos.get("fecha") or "")
+    if not que:
+        return {"ok": False, "frase": "No sé qué quieres que te lea."}
+    if fecha and not _DATE_RE.match(fecha):
+        return {"ok": False, "frase": "Esa fecha no la entiendo."}
+    r = _lectura_entera(que, fecha)
     if not r.get("ok"):
         return r
-    secciones = [x for x in r["secciones"]
-                 if x["n"] >= max(1, desde) and (not hasta or x["n"] <= hasta)]
+    todas = r["secciones"]
+    if pos:
+        desde, trozo = _donde_seguir(todas, pos)
+        hasta = 0
+    secciones = _recortar_lectura(todas, max(1, desde), max(0, hasta), max(0, trozo))
     if not secciones:
         return {"ok": False, "frase": f"No hay esa parte en {r['nombre']}."}
-    logger.info("Lectura por teléfono: %s, secciones %s-%s", que, desde, hasta or "fin")
-    return {"ok": True, "nombre": r["nombre"], "secciones": secciones}
+    indice = [{"n": s["n"], "etiqueta": s.get("etiqueta") or str(s["n"]),
+               "titulo": s["titulo"], "bloques": s.get("bloques") or []} for s in todas]
+    _lectura_guardar({"que": que, "fecha": r.get("fecha") or "", "nombre": r["nombre"],
+                      "n": secciones[0]["n"], "titulo": secciones[0]["titulo"],
+                      "trozo": secciones[0]["primer_trozo"], "total": len(todas),
+                      "indice": indice, "terminada": False,
+                      "actualizado": datetime.now(timezone.utc).isoformat()})
+    logger.info("Lectura por teléfono: %s, secciones %s-%s desde el trozo %s%s", que,
+                secciones[0]["n"], hasta or "fin", secciones[0]["primer_trozo"],
+                " (sigue la anterior)" if pos else "")
+    salida = {"ok": True, "que": que, "nombre": r["nombre"], "secciones": secciones,
+              "indice": indice}
+    if r.get("fecha"):
+        salida["fecha"] = r["fecha"]
+    return salida
+
+
+class PosicionLectura(BaseModel):
+    que:       Literal["briefing", "semana", "correo", "tareas"]
+    fecha:     str  = Field("", pattern=r"^(\d{4}-\d{2}-\d{2})?$")
+    n:         int  = Field(1, ge=1, le=500)
+    trozo:     int  = Field(0, ge=0, le=5000)
+    titulo:    str  = Field("", max_length=300)
+    terminada: bool = False
+
+
+@app.post("/telefono/lectura/posicion")
+def telefono_lectura_posicion(request: Request, cuerpo: PosicionLectura):
+    """La voice-app avisa del trozo que empieza a sonar (parche 24), o de que ha terminado:
+    es lo que retoma «sigue leyendo», aunque sea en otra llamada. Se apunta antes de que
+    suene, así que tras colgar se repite el trozo que estaba sonando, no el siguiente."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    _lectura_cargar()
+    with _lectura_lock:
+        previa = dict(_lectura_posiciones.get(cuerpo.que) or {})
+    if (previa.get("fecha") or "") != cuerpo.fecha:
+        previa = {}       # de otra lectura: ni su índice ni su nombre valen para esta
+    _lectura_guardar({**previa, "que": cuerpo.que, "fecha": cuerpo.fecha, "n": cuerpo.n,
+                      "trozo": cuerpo.trozo, "titulo": cuerpo.titulo or previa.get("titulo") or "",
+                      "terminada": cuerpo.terminada,
+                      "actualizado": datetime.now(timezone.utc).isoformat()})
+    return {"ok": True}
 
 
 def _j_turno_de_noche(fecha=None) -> dict:

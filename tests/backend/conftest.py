@@ -54,6 +54,10 @@ os.environ.setdefault("INGESTA_VIGILAR", "0")
 # un hilo: encendido, cada test del cliente sumaría un POST a destiempo a sus asertos de
 # llamadas. Sus tests lo encienden a mano.
 os.environ.setdefault("LATIDO", "0")
+# La posición de lo que lee el teléfono se guarda en Supabase en cada trozo: encendido,
+# cualquier test de `/telefono/lectura` haría un POST de verdad a `lecturas_telefono`.
+# Sus tests lo encienden a mano.
+os.environ.setdefault("LECTURA_PERSISTIR", "0")
 # Y con la economía del resumen: sus titulares salen de feeds por HTTP, así que
 # encendida por defecto cada test del resumen intentaría descargar tres URLs de internet
 # en una suite que no toca la red. Sus tests la encienden a mano.
@@ -240,6 +244,10 @@ def _limpiar_estado():
     main._mcp_sesiones.clear()
     main._mcp_lectura.clear()
     main._ha_ordenes.clear()
+    # Por dónde iba la lectura del teléfono: sin vaciarla, «sigue» en un test seguiría
+    # la lectura que dejó a medias el anterior.
+    main._lectura_posiciones.clear()
+    main._lectura_cargada = False
     main._ha_ordenes_hist.clear()
     # Lo último que se leyó de HA en directo, y si se le dio por caído: sin vaciarlo, un
     # test serviría sus estados (o su HA caído) al siguiente sin pasar por su mock. Y
