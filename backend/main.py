@@ -29272,6 +29272,10 @@ def _j_pelis_buscar(texto: str, limite: int = 6) -> dict:
     try:
         encontradas = [m for m in _arr_lista(_arr("radarr", "GET", "/movie/lookup",
                                                   {"term": texto})) if m.get("tmdbId")]
+        # Por popularidad, no en el orden de TMDB: con «el padrino», la de 1972 salía cuarta,
+        # detrás de tres que también se llaman así (2026-10-26). Quien dice «bájame El
+        # Padrino» quiere esa.
+        encontradas.sort(key=lambda m: -float(m.get("popularity") or 0))
         encontradas = encontradas[:_arr_limite(limite, 6)]
         # La búsqueda dice si ya la tiene (`id`), pero no si está bajada: eso, de la biblioteca.
         biblioteca = ({m.get("id"): m for m in _arr_lista(_arr("radarr", "GET", "/movie"))}

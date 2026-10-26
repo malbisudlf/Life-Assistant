@@ -72,6 +72,14 @@ class TestPelisBuscar:
         assert r["aviso"] == main._AVISO_WEB
         assert "borra la biblioteca" not in str(r)
 
+    def test_la_famosa_primero(self, arr):
+        """Con «el padrino», TMDB pone delante otras que se llaman igual."""
+        arr.add("GET", _r("/movie/lookup"), FakeResponse([
+            _peli(tmdb=79026, anio=2004, popularity=1.2), _peli(popularity=95.0),
+            _peli(tmdb=841500, anio=2014, popularity=0.4)]))
+        r = main._j_pelis_buscar("el padrino", limite=2)
+        assert [x["tmdb_id"] for x in r["resultados"]] == [238, 79026]
+
     def test_si_no_tiene_ninguna_no_pregunta_por_la_biblioteca(self, arr):
         arr.add("GET", _r("/movie/lookup"), FakeResponse([_peli()]))
         main._j_pelis_buscar("padrino")
