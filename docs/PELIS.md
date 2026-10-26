@@ -69,10 +69,14 @@ tests, en `tests/backend/test_pelis.py`.
   original, `_peli_cuadra`); si no, no hacen nada. En Telegram la frase la escribe el
   backend con los datos de Radarr (`describir`).
 - **Borrar no quita la película de Radarr.** Es lo mismo que borrarla desde Jellyfin
-  (`caja/pelis/INSTALAR.md`, paso 8): fuera el fichero y deja de vigilarla. Si se quitara
-  entera, Radarr perdería el rastro del torrent que aún se comparte —es el mismo fichero,
-  con un enlace duro— y esa copia no saldría nunca de la imagen de las pelis. Hay un test
-  que exige que no haya `DELETE /movie`.
+  (`caja/pelis/INSTALAR.md`, paso 8): fuera el fichero y deja de vigilarla. Así sigue
+  constando como «borrada» (`pelis_buscar`), y pedirla otra vez la reutiliza en vez de
+  añadirla dos veces. Hay un test que exige que no haya `DELETE /movie`.
+- **El torrent no lo quita el backend**: lo quita `notar-borrados.py` en `caja`, cada 10
+  minutos, cuando el fichero de un torrent completo de Radarr se queda sin su gemelo de
+  `pelis/` (es el mismo fichero, con un enlace duro). Mira el disco y no Radarr, así que
+  vale igual se borre desde Jellyfin, desde Radarr o con Jarvis, y el backend no necesita
+  la contraseña de qBittorrent.
 - **El 400 de las pruebas de indexadores es la respuesta**, no un error: Prowlarr contesta
   así, con la lista de fallos, cuando alguno no funciona (`validacion=True` en `_arr`). En
   cualquier otra llamada, un 400 sigue siendo un error.

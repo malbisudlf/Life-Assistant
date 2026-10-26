@@ -29087,9 +29087,9 @@ def _j_jellyfin_reproducir(item_id: str, titulo: str, dispositivo: str = "") -> 
 #     y borrar quita el fichero, sin papelera. Probar los indexadores y pasar uno por
 #     FlareSolverr no tocan nada de Mikel: son directas.
 #   - **Borrar es lo mismo que borrar desde Jellyfin**: fuera el fichero, y Radarr deja de
-#     vigilarla, pero la película se queda en Radarr. Quitarla entera le haría perder el
-#     rastro del torrent que sigue compartiendo, y esa copia no se iría nunca de la imagen
-#     de las pelis (`caja/pelis/INSTALAR.md` de HomeLab, paso 8).
+#     vigilarla, pero la película se queda en Radarr, con su historial. El torrent que la
+#     seguía compartiendo lo quita de qBittorrent `notar-borrados.py` en caja, mirando el
+#     disco (`caja/pelis/INSTALAR.md` de HomeLab, paso 8).
 #   - **Solo títulos y años, nunca sinopsis**, como en Jellyfin. De los avisos de Radarr y
 #     de los fallos de los indexadores, una línea recortada: los escribe quien subió el
 #     torrent o la web del indexador.
@@ -29424,8 +29424,8 @@ def _j_pelis_borrar(tmdb_id, titulo: str) -> dict:
     return {"ok": True, "borrada": _peli_nombre(m),
             "fichero_borrado": bool(m.get("hasFile") and fichero),
             "descargas_canceladas": canceladas,
-            "nota": "Radarr ya no la busca. Si se compartía por torrent, esa copia se va sola "
-                    "al terminar de compartirse."}
+            "nota": "Radarr ya no la busca. Si se compartía por torrent, en 10 minutos como "
+                    "mucho la quita de qBittorrent el vigía de caja, y el sitio queda libre."}
 
 
 def _prowlarr_indexador(nombre: str, indexadores: list) -> dict:

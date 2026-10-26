@@ -3,7 +3,7 @@
 Lo que se protege: que la clave vaya en la cabecera y nunca en la URL; que pedir y borrar
 sigan la frontera de siempre (se confirman, y lo que se pide o se borra es lo que dice el
 botón); que borrar sea lo mismo que borrar desde Jellyfin —fuera el fichero y deja de
-vigilarla, pero la película se queda en Radarr, que si no pierde el rastro del torrent—;
+vigilarla, pero la película se queda en Radarr, que así la sabe «borrada»—;
 que un Radarr o un Prowlarr caído o sin configurar se diga; y que la prueba de
 indexadores entienda su 400 de «no funciona».
 """
@@ -200,7 +200,7 @@ class TestPelisBorrar:
         assert arr.called("DELETE", _r("/moviefile/77"))
         (_, _, put), = arr.called("PUT", _r("/movie/10"))
         assert put["json"]["monitored"] is False
-        # Quitarla entera de Radarr dejaría el torrent compartiéndose para siempre.
+        # La película se queda en Radarr, «borrada»: el torrent lo suelta el vigía de caja.
         assert not arr.called("DELETE", _r("/movie/"))
 
     def test_si_no_esta_en_radarr_lo_dice(self, arr):
