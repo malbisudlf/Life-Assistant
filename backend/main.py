@@ -29074,6 +29074,470 @@ def _j_jellyfin_reproducir(item_id: str, titulo: str, dispositivo: str = "") -> 
             "en": f"{cliente.get('DeviceName') or '?'} ({cliente.get('Client') or '?'})"}
 
 
+# ── Pelis: pedirlas, ver cómo bajan y los indexadores (Radarr y Prowlarr) ─────
+# Radarr pide y baja las películas; Prowlarr lleva los indexadores, las webs de donde salen
+# los torrents. Corren en `caja`, en el proyecto «pelis» de HomeLab, dentro de la red de la
+# VPN (gluetun), que publica sus webs en el 7878 y el 9696 solo para la LAN y la tailnet. El
+# backend llega como a Jellyfin: por la puerta del puente de Docker
+# (`http://172.17.0.1:7878`). Ver docs/PELIS.md.
+#
+# Lo que no se relaja:
+#   - **La clave va en la cabecera `X-Api-Key`, nunca en la query**, como la de Jellyfin.
+#   - **Mirar es directo; pedir y borrar, con botón.** Pedir baja decenas de GB por la VPN,
+#     y borrar quita el fichero, sin papelera. Probar los indexadores y pasar uno por
+#     FlareSolverr no tocan nada de Mikel: son directas.
+#   - **Borrar es lo mismo que borrar desde Jellyfin**: fuera el fichero, y Radarr deja de
+#     vigilarla, pero la película se queda en Radarr. Quitarla entera le haría perder el
+#     rastro del torrent que sigue compartiendo, y esa copia no se iría nunca de la imagen
+#     de las pelis (`caja/pelis/INSTALAR.md` de HomeLab, paso 8).
+#   - **Solo títulos y años, nunca sinopsis**, como en Jellyfin. De los avisos de Radarr y
+#     de los fallos de los indexadores, una línea recortada: los escribe quien subió el
+#     torrent o la web del indexador.
+RADARR_URL         = os.getenv("RADARR_URL", "").strip().rstrip("/")
+RADARR_API_KEY     = os.getenv("RADARR_API_KEY", "")
+# El perfil de calidad con el que se piden, por su nombre en Radarr. Sin él no se pide
+# nada: el primero de la lista («Any») bajaría hasta grabaciones de cine.
+RADARR_PERFIL      = os.getenv("RADARR_PERFIL", "").strip()
+PROWLARR_URL       = os.getenv("PROWLARR_URL", "").strip().rstrip("/")
+PROWLARR_API_KEY   = os.getenv("PROWLARR_API_KEY", "")
+ARR_TIMEOUT        = float(os.getenv("ARR_TIMEOUT", "15"))
+# Probar un indexador tras Cloudflare pasa por FlareSolverr, que tarda de 20 s a dos
+# minutos; probarlos todos, más de uno (77 s el 2026-10-26, con trece).
+ARR_PRUEBA_TIMEOUT = float(os.getenv("ARR_PRUEBA_TIMEOUT", "180"))
+_PELIS_MAX         = 10
+# El estado de una descarga, dicho como lo diría Mikel. Los de importar (trackedDownloadState)
+# mandan sobre los de qBittorrent (status): «bajada» no dice que falta pasarla a Jellyfin.
+_ARR_ESTADOS = {
+    "downloading": "bajando", "queued": "en cola", "paused": "en pausa", "delay": "esperando",
+    "completed": "bajada", "importPending": "bajada; falta pasarla a Jellyfin",
+    "importing": "pasándola a Jellyfin", "failedPending": "falló", "failed": "falló",
+    "warning": "con un problema", "downloadClientUnavailable": "qBittorrent no contesta",
+}
+
+
+class ArrNoContesta(Exception):
+    """Radarr o Prowlarr sin configurar, caídos o rechazando la clave. El texto es para el
+    modelo."""
+
+
+def _radarr_configurado() -> bool:
+    return bool(RADARR_URL and RADARR_API_KEY)
+
+
+def _prowlarr_configurado() -> bool:
+    return bool(PROWLARR_URL and PROWLARR_API_KEY)
+
+
+def _arr(servicio: str, metodo: str, ruta: str, params: Optional[dict] = None, cuerpo=None,
+         timeout: Optional[float] = None, validacion: bool = False):
+    """Una llamada a Radarr (`servicio="radarr"`, API v3) o a Prowlarr (v1). Lanza
+    `ArrNoContesta` con un motivo que se puede decir; del error solo se registra el tipo o el
+    código, como en `_jellyfin`.
+
+    `validacion`: las pruebas de indexadores contestan 400 con la lista de fallos cuando el
+    indexador no funciona. Ahí el 400 es la respuesta, no un error.
+    """
+    radarr = servicio == "radarr"
+    nombre = "Radarr" if radarr else "Prowlarr"
+    base, clave = (RADARR_URL, RADARR_API_KEY) if radarr else (PROWLARR_URL, PROWLARR_API_KEY)
+    if not (base and clave):
+        raise ArrNoContesta(f"{nombre} no está configurado (faltan {nombre.upper()}_URL o "
+                            f"{nombre.upper()}_API_KEY).")
+    extra = {"json": cuerpo} if cuerpo is not None else {}
+    try:
+        r = getattr(http, metodo.lower())(
+            f"{base}/api/{'v3' if radarr else 'v1'}{ruta}", params=params or {},
+            headers={"X-Api-Key": clave, "Accept": "application/json"},
+            timeout=timeout or ARR_TIMEOUT, **extra)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("%s %s %s: no contesta (%s)", nombre, metodo, ruta.split("/")[1],
+                       type(e).__name__)
+        raise ArrNoContesta(f"{nombre} no contesta ahora mismo (¿caja apagada, o caída la VPN, "
+                            "que lo lleva dentro?).")
+    if r.status_code in (401, 403):
+        logger.error("%s rechaza la clave (%s)", nombre, r.status_code)
+        raise ArrNoContesta(f"{nombre} ha rechazado la clave: hay que revisar "
+                            f"{nombre.upper()}_API_KEY.")
+    if r.status_code >= 300 and not (validacion and r.status_code == 400):
+        logger.warning("%s %s %s: %s", nombre, metodo, ruta.split("/")[1], r.status_code)
+        raise ArrNoContesta(f"{nombre} ha devuelto un error ({r.status_code}).")
+    if r.status_code == 204:
+        return {}
+    try:
+        return r.json()
+    except ValueError:
+        if not (r.text or "").strip():
+            return {}
+        raise ArrNoContesta(f"{nombre} ha contestado algo que no se entiende.")
+
+
+def _arr_lista(respuesta) -> list:
+    return [x for x in respuesta if isinstance(x, dict)] if isinstance(respuesta, list) else []
+
+
+def _arr_limite(limite, defecto: int) -> int:
+    try:
+        return max(1, min(int(limite or defecto), _PELIS_MAX))
+    except (TypeError, ValueError):
+        return defecto
+
+
+def _arr_minutos(queda) -> Optional[int]:
+    """El tiempo que le queda a una descarga, «1.02:03:04» o «00:10:10», en minutos."""
+    m = re.fullmatch(r"(?:(\d+)\.)?(\d+):(\d+):(\d+)(?:\.\d+)?", str(queda or "").strip())
+    if not m:
+        return None
+    dias, horas, mins, segs = (int(x or 0) for x in m.groups())
+    return dias * 1440 + horas * 60 + mins + (segs >= 30)
+
+
+def _peli_nombre(m: dict) -> str:
+    """Cómo se dice una película en un botón: «Título (año)»."""
+    anio = f" ({m['year']})" if m.get("year") else ""
+    return f"{str(m.get('title') or '')[:120]}{anio}"
+
+
+def _peli_cuadra(titulo: str, m: dict) -> bool:
+    """¿El título del botón es esta película? Como `_jellyfin_cuadra`, y con el título
+    original: Radarr las nombra en español y Mikel puede pedirla por el de siempre."""
+    plano = lambda s: re.sub(r"[^a-z0-9]+", " ", _sin_tildes(str(s or ""))).strip()
+    t = plano(titulo)
+    nombres = [plano(m.get("title")), plano(m.get("originalTitle"))]
+    return bool(t) and any(n and (n in t or t in n) for n in nombres)
+
+
+def _tmdb_id(valor) -> int:
+    """El id de TMDB, comprobado: va a la URL de Radarr."""
+    try:
+        tmdb = int(str(valor).strip())
+    except (TypeError, ValueError):
+        tmdb = 0
+    if not 0 < tmdb < 100_000_000:
+        raise ArrNoContesta("Ese id no es de TMDB: sácalo de pelis_buscar.")
+    return tmdb
+
+
+def _peli_en_radarr(tmdb: int) -> Optional[dict]:
+    return next(iter(_arr_lista(_arr("radarr", "GET", "/movie", {"tmdbId": tmdb}))), None)
+
+
+def _peli_a_pedir(tmdb_id, titulo: str) -> dict:
+    """La película que se pedirá de verdad, comprobada: la de Radarr si ya la tiene (con su
+    `id`), o la ficha de TMDB si no. Lanza `ArrNoContesta`."""
+    tmdb = _tmdb_id(tmdb_id)
+    m = _peli_en_radarr(tmdb)
+    if m is None:
+        m = _arr("radarr", "GET", "/movie/lookup/tmdb", {"tmdbId": tmdb})
+        if not isinstance(m, dict) or not m.get("tmdbId"):
+            raise ArrNoContesta("TMDB no tiene ninguna película con ese id.")
+    if not _peli_cuadra(titulo, m):
+        raise ArrNoContesta(f"El título «{str(titulo)[:80]}» no es el de ese id "
+                            f"({_peli_nombre(m)}): búscala otra vez.")
+    return m
+
+
+def _peli_a_borrar(tmdb_id, titulo: str) -> dict:
+    """La película de Radarr que se borrará, comprobada. Lanza `ArrNoContesta`."""
+    m = _peli_en_radarr(_tmdb_id(tmdb_id))
+    if not m or not m.get("id"):
+        raise ArrNoContesta("Esa película no está en Radarr: no hay nada que borrar.")
+    if not _peli_cuadra(titulo, m):
+        raise ArrNoContesta(f"El título «{str(titulo)[:80]}» no es el de ese id "
+                            f"({_peli_nombre(m)}): búscala otra vez.")
+    return m
+
+
+def _radarr_perfil_id() -> int:
+    if not RADARR_PERFIL:
+        raise ArrNoContesta("Falta RADARR_PERFIL, el perfil de calidad con el que se piden: "
+                            "sin él no pido nada.")
+    perfil = next((p for p in _arr_lista(_arr("radarr", "GET", "/qualityprofile"))
+                   if str(p.get("name") or "").casefold() == RADARR_PERFIL.casefold()), None)
+    if not perfil or not perfil.get("id"):
+        raise ArrNoContesta(f"Radarr no tiene ningún perfil «{RADARR_PERFIL}» (RADARR_PERFIL).")
+    return int(perfil["id"])
+
+
+def _radarr_raiz() -> str:
+    raices = [r for r in _arr_lista(_arr("radarr", "GET", "/rootfolder")) if r.get("path")]
+    if not raices:
+        raise ArrNoContesta("Radarr no tiene carpeta de películas.")
+    return str(raices[0]["path"])
+
+
+def _j_pelis_buscar(texto: str, limite: int = 6) -> dict:
+    texto = str(texto or "").strip()[:100]
+    if not texto:
+        return {"ok": False, "error": "Dime qué película busco."}
+    try:
+        encontradas = [m for m in _arr_lista(_arr("radarr", "GET", "/movie/lookup",
+                                                  {"term": texto})) if m.get("tmdbId")]
+        encontradas = encontradas[:_arr_limite(limite, 6)]
+        # La búsqueda dice si ya la tiene (`id`), pero no si está bajada: eso, de la biblioteca.
+        biblioteca = ({m.get("id"): m for m in _arr_lista(_arr("radarr", "GET", "/movie"))}
+                      if any(m.get("id") for m in encontradas) else {})
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    resultados = []
+    for m in encontradas:
+        d = {"tmdb_id": int(m["tmdbId"]), "titulo": str(m.get("title") or "")[:120]}
+        original = str(m.get("originalTitle") or "")[:120]
+        if original and original != d["titulo"]:
+            d["titulo_original"] = original
+        if m.get("year"):
+            d["anio"] = m["year"]
+        if m.get("runtime"):
+            d["duracion_min"] = m["runtime"]
+        suya = biblioteca.get(m.get("id")) if m.get("id") else None
+        if suya:
+            d["en_radarr"] = ("descargada" if suya.get("hasFile") else
+                              "pedida, sin bajar aún" if suya.get("monitored") else "borrada")
+        resultados.append(d)
+    return {"ok": True, "aviso": _AVISO_WEB, "resultados": resultados,
+            **({} if resultados else {"nota": f"No encuentro ninguna película «{texto}»."})}
+
+
+def _describir_pelis_pedir(args: dict) -> dict:
+    """La frase del botón con los datos de Radarr, no los del modelo (ver
+    `_telegram_describir`). Valida de paso que la película existe y que su título casa."""
+    try:
+        m = _peli_a_pedir(args.get("tmdb_id"), args.get("titulo"))
+    except ArrNoContesta as e:
+        return {"error": str(e)}
+    if m.get("id") and m.get("hasFile"):
+        return {"error": f"{_peli_nombre(m)} ya está descargada: está en Jellyfin."}
+    return {"texto": f"Pedir a Radarr {_peli_nombre(m)}"
+                     + (" (ya la tenía: la vuelve a buscar)" if m.get("id") else "")}
+
+
+def _j_pelis_pedir(tmdb_id, titulo: str) -> dict:
+    try:
+        m = _peli_a_pedir(tmdb_id, titulo)
+        if m.get("id") and m.get("hasFile"):
+            return {"ok": True, "ya_estaba": _peli_nombre(m),
+                    "nota": "Ya está descargada: está en Jellyfin."}
+        if m.get("id"):
+            # Ya la tiene: pedida y sin encontrar, o borrada (y Radarr la dejó de vigilar). Se
+            # vuelve a vigilar y a buscar, sin añadirla dos veces.
+            if not m.get("monitored"):
+                _arr("radarr", "PUT", f"/movie/{int(m['id'])}", cuerpo=dict(m, monitored=True))
+            _arr("radarr", "POST", "/command", cuerpo={"name": "MoviesSearch",
+                                                        "movieIds": [int(m["id"])]})
+            return {"ok": True, "buscando": _peli_nombre(m),
+                    "nota": "Ya estaba en Radarr: la está buscando otra vez."}
+        nueva = {k: v for k, v in m.items() if k != "id"}
+        nueva.update(qualityProfileId=_radarr_perfil_id(), rootFolderPath=_radarr_raiz(),
+                     monitored=True, minimumAvailability="released",
+                     addOptions={"searchForMovie": True})
+        _arr("radarr", "POST", "/movie", cuerpo=nueva)
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "pedida": _peli_nombre(m),
+            "nota": "Radarr la está buscando; en cuanto encuentre una buena empieza a bajar "
+                    "(pelis_descargas), y al terminar aparece sola en Jellyfin."}
+
+
+def _j_pelis_descargas() -> dict:
+    try:
+        cola = _arr("radarr", "GET", "/queue", {"includeMovie": "true", "pageSize": 50})
+        pelis = _arr_lista(_arr("radarr", "GET", "/movie"))
+        raices = _arr_lista(_arr("radarr", "GET", "/rootfolder"))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    bajando, en_cola = [], set()
+    for q in _arr_lista((cola or {}).get("records") if isinstance(cola, dict) else []):
+        m = q.get("movie") if isinstance(q.get("movie"), dict) else {}
+        en_cola.add(q.get("movieId"))
+        total, falta = float(q.get("size") or 0), float(q.get("sizeleft") or 0)
+        estado = str((q.get("trackedDownloadState")
+                      if q.get("trackedDownloadState") in ("importPending", "importing",
+                                                            "failedPending", "failed")
+                      else q.get("status")) or "")
+        # Sin película (no la reconoció), el nombre del torrent: lo puso quien lo subió.
+        d = {"pelicula": _peli_nombre(m) if m else str(q.get("title") or "")[:120],
+             "estado": _ARR_ESTADOS.get(estado, estado[:40]),
+             "porcentaje": round(100 * (1 - falta / total)) if total else 0,
+             "tamano_gb": round(total / 1e9, 1)}
+        if m.get("tmdbId"):
+            d["tmdb_id"] = m["tmdbId"]
+        if _arr_minutos(q.get("timeleft")) is not None:
+            d["quedan_min"] = _arr_minutos(q.get("timeleft"))
+        calidad = ((q.get("quality") or {}).get("quality") or {}).get("name")
+        if calidad:
+            d["calidad"] = str(calidad)[:40]
+        avisos = [str(x)[:160] for s in q.get("statusMessages") or [] if isinstance(s, dict)
+                  for x in s.get("messages") or []]
+        if q.get("errorMessage"):
+            avisos.insert(0, str(q["errorMessage"])[:160])
+        if avisos:
+            d["avisos"] = avisos[:3]
+        bajando.append(d)
+    sin_encontrar = [{"pelicula": _peli_nombre(m), "tmdb_id": m.get("tmdbId"),
+                      "pedida": str(m.get("added") or "")[:10]}
+                     for m in pelis if m.get("monitored") and not m.get("hasFile")
+                     and m.get("id") not in en_cola]
+    r = {"ok": True, "aviso": _AVISO_WEB, "bajando": bajando[:_PELIS_MAX],
+         "pedidas_sin_encontrar": sin_encontrar[:_PELIS_MAX]}
+    if raices and raices[0].get("freeSpace") is not None:
+        r["libre_gb"] = round(float(raices[0]["freeSpace"]) / 1e9)
+    if not bajando and not sin_encontrar:
+        r["nota"] = "No se está bajando nada, ni hay nada pedido sin encontrar."
+    return r
+
+
+def _describir_pelis_borrar(args: dict) -> dict:
+    try:
+        m = _peli_a_borrar(args.get("tmdb_id"), args.get("titulo"))
+    except ArrNoContesta as e:
+        return {"error": str(e)}
+    if not m.get("hasFile") and not m.get("monitored"):
+        return {"error": f"{_peli_nombre(m)} ya está borrada."}
+    return {"texto": f"Borrar {_peli_nombre(m)}"
+                     + (" con su fichero (no hay papelera)" if m.get("hasFile")
+                        else ": dejar de buscarla y quitar lo que tenga a medias")}
+
+
+def _j_pelis_borrar(tmdb_id, titulo: str) -> dict:
+    try:
+        m = _peli_a_borrar(tmdb_id, titulo)
+        mid = int(m["id"])
+        # Lo que tenga a medias, fuera de qBittorrent con lo ya bajado; sin vetar esa
+        # versión, por si se vuelve a pedir.
+        canceladas = 0
+        for q in _arr_lista(_arr("radarr", "GET", "/queue/details", {"movieId": mid})):
+            if q.get("id"):
+                _arr("radarr", "DELETE", f"/queue/{int(q['id'])}",
+                     {"removeFromClient": "true", "blocklist": "false"})
+                canceladas += 1
+        fichero = (m.get("movieFile") or {}).get("id") or m.get("movieFileId")
+        if m.get("hasFile") and fichero:
+            _arr("radarr", "DELETE", f"/moviefile/{int(fichero)}")
+        actual = _arr("radarr", "GET", f"/movie/{mid}")
+        if isinstance(actual, dict) and actual.get("monitored"):
+            _arr("radarr", "PUT", f"/movie/{mid}", cuerpo=dict(actual, monitored=False))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "borrada": _peli_nombre(m),
+            "fichero_borrado": bool(m.get("hasFile") and fichero),
+            "descargas_canceladas": canceladas,
+            "nota": "Radarr ya no la busca. Si se compartía por torrent, esa copia se va sola "
+                    "al terminar de compartirse."}
+
+
+def _prowlarr_indexador(nombre: str, indexadores: list) -> dict:
+    """El indexador que se llama así (o el único que lo contiene). Lanza `ArrNoContesta`
+    con los que hay, para que el modelo elija."""
+    buscado = _sin_tildes(str(nombre or "")).strip()
+    nombre_de = lambda i: _sin_tildes(str(i.get("name") or ""))
+    cuales = [i for i in indexadores if buscado and buscado in nombre_de(i)]
+    exactos = [i for i in cuales if nombre_de(i) == buscado]
+    if len(exactos) == 1:
+        return exactos[0]
+    if len(cuales) == 1:
+        return cuales[0]
+    raise ArrNoContesta(("Hay varios que encajan con «" if cuales
+                         else "No hay ningún indexador «") + str(nombre)[:60] + "». Hay: "
+                        + ", ".join(str(i.get("name") or "?")[:60] for i in indexadores) + ".")
+
+
+def _prowlarr_fallo(fallos) -> str:
+    """Una línea con por qué falla un indexador. La escribe Prowlarr, a menudo citando lo que
+    contestó la web: recortada."""
+    textos = [str(f.get("errorMessage") or "")[:160] for f in _arr_lista(fallos)
+              if f.get("errorMessage")]
+    return "; ".join(textos)[:300] or "falla sin decir por qué"
+
+
+def _prowlarr_probar(indexador: dict) -> dict:
+    fallos = _arr("prowlarr", "POST", "/indexer/test", cuerpo=indexador,
+                  timeout=ARR_PRUEBA_TIMEOUT, validacion=True)
+    d = {"nombre": str(indexador.get("name") or "")[:60], "funciona": not _arr_lista(fallos)}
+    if not d["funciona"]:
+        d["fallo"] = _prowlarr_fallo(fallos)
+    return d
+
+
+def _con_flaresolverr(proxies: list) -> set:
+    """Las etiquetas que pasan un indexador por FlareSolverr: las de su proxy en Prowlarr."""
+    return {t for p in proxies if p.get("implementation") == "FlareSolverr"
+            for t in p.get("tags") or [] if isinstance(t, int)}
+
+
+def _j_indexadores_estado() -> dict:
+    try:
+        indexadores = _arr_lista(_arr("prowlarr", "GET", "/indexer"))
+        avisos = [str(h.get("message") or "")[:200]
+                  for h in _arr_lista(_arr("prowlarr", "GET", "/health")) if h.get("message")]
+        etiquetas = _con_flaresolverr(_arr_lista(_arr("prowlarr", "GET", "/indexerproxy")))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    # Radarr avisa de lo suyo: sin indexadores, qBittorrent caído, la carpeta llena.
+    try:
+        avisos_radarr = [str(h.get("message") or "")[:200]
+                         for h in _arr_lista(_arr("radarr", "GET", "/health")) if h.get("message")]
+    except ArrNoContesta as e:
+        avisos_radarr = [str(e)]
+    en_avisos = " ".join(avisos).casefold()
+    lista = []
+    for i in indexadores:
+        d = {"nombre": str(i.get("name") or "")[:60], "activo": bool(i.get("enable")),
+             "flaresolverr": bool(etiquetas & set(i.get("tags") or []))}
+        if d["nombre"] and d["nombre"].casefold() in en_avisos:
+            d["sale_en_los_avisos"] = True
+        lista.append(d)
+    return {"ok": True, "indexadores": lista, "avisos_prowlarr": avisos[:8],
+            "avisos_radarr": avisos_radarr[:8],
+            "nota": "Los avisos son de la última comprobación de Prowlarr (y salen recortados); "
+                    "indexadores_probar los prueba ahora."}
+
+
+def _j_indexadores_probar(nombre: str = "") -> dict:
+    try:
+        indexadores = _arr_lista(_arr("prowlarr", "GET", "/indexer"))
+        if str(nombre or "").strip():
+            resultados = [_prowlarr_probar(_prowlarr_indexador(nombre, indexadores))]
+        else:
+            nombres = {i.get("id"): str(i.get("name") or "")[:60] for i in indexadores}
+            resultados = []
+            for r in _arr_lista(_arr("prowlarr", "POST", "/indexer/testall",
+                                     timeout=ARR_PRUEBA_TIMEOUT, validacion=True)):
+                d = {"nombre": nombres.get(r.get("id"), f"#{r.get('id')}"),
+                     "funciona": bool(r.get("isValid"))}
+                if not d["funciona"]:
+                    d["fallo"] = _prowlarr_fallo(r.get("validationFailures"))
+                resultados.append(d)
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    r = {"ok": True, "aviso": _AVISO_WEB, "resultados": resultados,
+         "funcionan": sum(x["funciona"] for x in resultados), "de": len(resultados)}
+    if any("cloudflare" in x.get("fallo", "").casefold() for x in resultados):
+        r["nota"] = ("Los que bloquea Cloudflare se arreglan pasándolos por FlareSolverr "
+                     "(indexadores_flaresolverr), de uno en uno.")
+    return r
+
+
+def _j_indexadores_flaresolverr(nombre: str) -> dict:
+    try:
+        indexadores = _arr_lista(_arr("prowlarr", "GET", "/indexer"))
+        i = _prowlarr_indexador(nombre, indexadores)
+        etiquetas = _con_flaresolverr(_arr_lista(_arr("prowlarr", "GET", "/indexerproxy")))
+        if not etiquetas:
+            raise ArrNoContesta("Prowlarr no tiene FlareSolverr con etiqueta: no hay por dónde "
+                                "pasarlo (configurar-arr.py, en caja/pelis de HomeLab).")
+        ya_estaba = etiquetas <= set(i.get("tags") or [])
+        if not ya_estaba:
+            i = dict(i, tags=sorted(set(i.get("tags") or []) | etiquetas))
+            # Sin `forceSave`, Prowlarr lo prueba antes de guardar y, si falla, no guarda; aquí
+            # se guarda siempre y se prueba después, para decir el resultado.
+            _arr("prowlarr", "PUT", f"/indexer/{int(i['id'])}", {"forceSave": "true"}, cuerpo=i)
+        prueba = _prowlarr_probar(i)
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "aviso": _AVISO_WEB, "indexador": prueba["nombre"],
+            "ya_lo_tenia": ya_estaba, "funciona": prueba["funciona"],
+            **({} if prueba["funciona"] else {"fallo": prueba["fallo"]})}
+
+
 # ── El programador: Jarvis le encarga a Claude Code un proyecto entero ────────
 # El trabajo lo hace un servicio de `caja` (el «puente», `caja/programador/` del
 # repositorio HomeLab): una cola de encargos de uno en uno, cada uno en un contenedor que
@@ -29591,6 +30055,12 @@ def _j_mis_capacidades() -> dict:
     if not _jellyfin_configurado():
         apagado.append("Jellyfin no está conectado (faltan JELLYFIN_URL, JELLYFIN_API_KEY o "
                        "JELLYFIN_USER_ID), así que no sé qué está viendo ni puedo ponerle nada.")
+    if not _radarr_configurado():
+        apagado.append("Radarr no está conectado (faltan RADARR_URL y RADARR_API_KEY), así que "
+                       "no puedo pedir películas, ni decir cómo van, ni borrarlas.")
+    if not _prowlarr_configurado():
+        apagado.append("Prowlarr no está conectado (faltan PROWLARR_URL y PROWLARR_API_KEY), así "
+                       "que no puedo mirar ni arreglar los indexadores.")
 
     return {
         "herramientas": [{
@@ -29827,6 +30297,87 @@ _JARVIS_HERRAMIENTAS = {
                                                          "abierto."}},
         "obligatorios":  ["item_id", "titulo"],
         "requiere_jellyfin": True,
+    },
+    "pelis_buscar": {
+        "confirmar":     False,
+        "fn":            _j_pelis_buscar,
+        "descripcion":   "Busca una película para pedirla (en TMDB, a través de Radarr): título, "
+                         "año, su tmdb_id (lo que piden pelis_pedir y pelis_borrar) y si ya "
+                         "está en Radarr. Para ver si ya se puede ver, jellyfin_buscar.",
+        "parametros":    {"texto":  {"type": "string", "description": "El título o parte."},
+                          "limite": {"type": "integer",
+                                     "description": "Cuántos resultados (por defecto 6)."}},
+        "obligatorios":  ["texto"],
+        "requiere_radarr": True,
+    },
+    "pelis_pedir": {
+        "confirmar":     True,
+        "fn":            _j_pelis_pedir,
+        "describir":     _describir_pelis_pedir,
+        "descripcion":   "Pide una película a Radarr para que la baje (aparece sola en Jellyfin "
+                         "al terminar). Saca antes el tmdb_id con pelis_buscar; si ya estaba "
+                         "pedida o borrada, la vuelve a buscar. NO la pide al momento: lo "
+                         "aprueba el usuario.",
+        "parametros":    {"tmdb_id": {"type": "integer",
+                                      "description": "El tmdb_id que dio pelis_buscar."},
+                          "titulo":  {"type": "string",
+                                      "description": "El título tal cual vino con ese id "
+                                                     "(se comprueba que casan)."}},
+        "obligatorios":  ["tmdb_id", "titulo"],
+        "requiere_radarr": True,
+    },
+    "pelis_descargas": {
+        "confirmar":     False,
+        "fn":            _j_pelis_descargas,
+        "descripcion":   "Cómo van las películas pedidas: lo que se está bajando (porcentaje, "
+                         "minutos que quedan, avisos), lo pedido que Radarr aún no encuentra y "
+                         "el espacio libre.",
+        "parametros":    {},
+        "requiere_radarr": True,
+    },
+    "pelis_borrar": {
+        "confirmar":     True,
+        "fn":            _j_pelis_borrar,
+        "describir":     _describir_pelis_borrar,
+        "descripcion":   "Borra una película: su fichero (desaparece de Jellyfin; no hay "
+                         "papelera), lo que tenga a medias, y Radarr deja de buscarla. Saca el "
+                         "tmdb_id de pelis_buscar o pelis_descargas. NO la borra al momento: lo "
+                         "aprueba el usuario.",
+        "parametros":    {"tmdb_id": {"type": "integer", "description": "Su tmdb_id."},
+                          "titulo":  {"type": "string",
+                                      "description": "El título tal cual vino con ese id "
+                                                     "(se comprueba que casan)."}},
+        "obligatorios":  ["tmdb_id", "titulo"],
+        "requiere_radarr": True,
+    },
+    "indexadores_estado": {
+        "confirmar":     False,
+        "fn":            _j_indexadores_estado,
+        "descripcion":   "Los indexadores de Prowlarr (de dónde salen los torrents): cuáles hay, "
+                         "si están activos y pasan por FlareSolverr, y los avisos de Prowlarr y "
+                         "Radarr. Es lo último que comprobaron, sin probar nada ahora.",
+        "parametros":    {},
+        "requiere_prowlarr": True,
+    },
+    "indexadores_probar": {
+        "confirmar":     False,
+        "fn":            _j_indexadores_probar,
+        "descripcion":   "Prueba ahora los indexadores (uno, o todos si no dices cuál) y dice "
+                         "cuáles funcionan y por qué fallan los demás. Todos tarda uno o dos "
+                         "minutos: dile antes que espere.",
+        "parametros":    {"nombre": {"type": "string",
+                                     "description": "El indexador; vacío = todos."}},
+        "requiere_prowlarr": True,
+    },
+    "indexadores_flaresolverr": {
+        "confirmar":     False,
+        "fn":            _j_indexadores_flaresolverr,
+        "descripcion":   "Arregla un indexador que falla «blocked by CloudFlare Protection»: lo "
+                         "pasa por FlareSolverr y lo vuelve a probar (hasta dos minutos). De uno "
+                         "en uno, con el nombre que dio indexadores_probar.",
+        "parametros":    {"nombre": {"type": "string", "description": "El indexador."}},
+        "obligatorios":  ["nombre"],
+        "requiere_prowlarr": True,
     },
     "encargar_proyecto": {
         "confirmar":     True,
@@ -30706,6 +31257,9 @@ def _jarvis_esquema() -> list:
     con_calendarios = CALENDARIOS_POR_TIPO
     # Jellyfin, como Moodle: sin URL, clave y usuario no hay biblioteca que mirar.
     con_jellyfin = _jellyfin_configurado()
+    # Y Radarr y Prowlarr, cada uno con su URL y su clave.
+    con_radarr   = _radarr_configurado()
+    con_prowlarr = _prowlarr_configurado()
     # Y el programador, sin su puente no tiene a quién encargar nada.
     con_programador = _programador_configurado()
     # Y el PC en directo, sin la URL y el token de su MCP.
@@ -30732,6 +31286,8 @@ def _jarvis_esquema() -> list:
         and (con_cumples or not h.get("requiere_cumples"))
         and (con_calendarios or not h.get("requiere_calendarios"))
         and (con_jellyfin or not h.get("requiere_jellyfin"))
+        and (con_radarr or not h.get("requiere_radarr"))
+        and (con_prowlarr or not h.get("requiere_prowlarr"))
         and (con_programador or not h.get("requiere_programador"))
         and (con_pc_mcp or not h.get("requiere_pc_mcp"))]
 
@@ -30813,6 +31369,10 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # cabría un párrafo con instrucciones. `jellyfin_reproducir` no: se confirma, y aquí
     # no hay botón.
     "jellyfin_seguir", "jellyfin_novedades", "jellyfin_buscar",
+    # 2026-10-26: las pelis, las tres de mirar, con el mismo criterio: títulos y años (y de
+    # una descarga, sus avisos recortados), sin sinopsis. Pedir y borrar no: se confirman.
+    # Probar los indexadores tampoco: tarda un par de minutos y trae lo que contesta la web.
+    "pelis_buscar", "pelis_descargas", "indexadores_estado",
     # 2026-10-25: las ventanas del PC (títulos cortos, como los de Jellyfin). La pantalla
     # NO: su descripción trae lo que diga una web o un correo abiertos, y al otro lado de
     # esta llamada hay una shell.

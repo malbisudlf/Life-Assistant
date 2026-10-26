@@ -427,6 +427,11 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "JELLYFIN_URL", "http://jellyfin.test:8096")
         monkeypatch.setattr(main, "JELLYFIN_API_KEY", "jellyfin-clave")
         monkeypatch.setattr(main, "JELLYFIN_USER_ID", "0" * 32)
+        # Y Radarr y Prowlarr, cada uno con su URL y su clave.
+        monkeypatch.setattr(main, "RADARR_URL", "http://radarr.test:7878")
+        monkeypatch.setattr(main, "RADARR_API_KEY", "radarr-clave")
+        monkeypatch.setattr(main, "PROWLARR_URL", "http://prowlarr.test:9696")
+        monkeypatch.setattr(main, "PROWLARR_API_KEY", "prowlarr-clave")
         # Y el programador, que sin su puente no tiene a quién encargar nada.
         monkeypatch.setattr(main, "PROGRAMADOR_URL", "http://172.17.0.1:3341")
         monkeypatch.setattr(main, "PROGRAMADOR_TOKEN", "programador-token")

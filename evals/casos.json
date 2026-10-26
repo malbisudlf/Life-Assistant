@@ -110,6 +110,11 @@
     { "id": "jellyfin-tengo", "grupo": "jellyfin", "peticion": "¿Tengo Interstellar en Jellyfin?", "espera": ["jellyfin_buscar"], "confundible": "buscar_en_internet" },
     { "id": "jellyfin-pon", "grupo": "jellyfin", "peticion": "Ponme Dune en la tele del salón.", "espera": ["jellyfin_buscar", "jellyfin_reproducir"], "confundible": "casa_ordenar", "nota": "Sin el id no puede reproducir: buscarlo primero es el camino bueno. La tele es un cliente de Jellyfin, no un dispositivo de la casa." },
     { "id": "jellyfin-sigue", "grupo": "jellyfin", "peticion": "Pon el siguiente capítulo de The Office.", "espera": ["jellyfin_seguir", "jellyfin_buscar", "jellyfin_reproducir"], "confundible": "casa_ordenar" },
+    { "id": "pelis-bajame", "grupo": "pelis", "peticion": "Bájame Interstellar.", "espera": ["pelis_buscar", "pelis_pedir"], "confundible": "jellyfin_buscar", "nota": "Sin el tmdb_id no puede pedirla: buscarla primero es el camino bueno. jellyfin_buscar solo mira lo que ya se puede ver." },
+    { "id": "pelis-como-va", "grupo": "pelis", "peticion": "¿Cuánto le queda a la peli que se está descargando?", "espera": ["pelis_descargas"], "confundible": "jellyfin_novedades" },
+    { "id": "pelis-borra", "grupo": "pelis", "peticion": "Ya he visto El Padrino, bórrala.", "espera": ["pelis_buscar", "pelis_borrar"], "confundible": "borrar_idea" },
+    { "id": "pelis-indexadores", "grupo": "pelis", "peticion": "¿Están funcionando los indexadores de las pelis?", "espera": ["indexadores_estado", "indexadores_probar"], "confundible": "diagnostico" },
+    { "id": "pelis-cloudflare", "grupo": "pelis", "peticion": "El indexador ExtraTorrent dice que lo bloquea Cloudflare, arréglalo.", "espera": ["indexadores_flaresolverr"], "confundible": "buscar_en_internet" },
 
     { "id": "mcp-servidores", "grupo": "mcp", "peticion": "¿Qué servidores MCP tengo conectados ahora mismo?", "espera": ["mcp_servidores"], "confundible": "mcp_catalogo" },
     { "id": "mcp-catalogo", "grupo": "mcp", "peticion": "¿A qué servidores MCP me podría conectar que todavía no tenga?", "espera": ["mcp_catalogo"], "confundible": "mcp_servidores" },

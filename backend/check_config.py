@@ -59,6 +59,8 @@ GRUPOS = [
     ("Jarvis desde el Atajo de iOS (\"Oye Siri, dile a Jarvis...\")", ["JARVIS_TOKEN"]),
     ("Jarvis por Telegram", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_CHAT_ID"]),
     ("Jellyfin en Jarvis", ["JELLYFIN_URL", "JELLYFIN_API_KEY", "JELLYFIN_USER_ID"]),
+    ("Pedir pelis en Jarvis (Radarr)", ["RADARR_URL", "RADARR_API_KEY", "RADARR_PERFIL"]),
+    ("Los indexadores en Jarvis (Prowlarr)", ["PROWLARR_URL", "PROWLARR_API_KEY"]),
     ("El PC en directo (pantalla, abrir apps, música)", ["PC_MCP_URL", "PC_MCP_TOKEN"]),
     ("El programador (Jarvis encarga proyectos a Claude Code)",
      ["PROGRAMADOR_URL", "PROGRAMADOR_TOKEN", "PROGRAMADOR_AVISO_TOKEN", "PROGRAMADOR_DUENOS"]),

@@ -995,6 +995,13 @@ este, para cualquier otro proyecto. Todo en `docs/PROGRAMADOR.md`.
 teléfono) y `jellyfin_reproducir` (con botón, y el título del botón se comprueba contra el
 elemento real al ejecutar). Todo en `docs/JELLYFIN.md`.
 
+## Las pelis: Radarr y Prowlarr
+
+`pelis_buscar`, `pelis_descargas` e `indexadores_estado` (directas, también por teléfono),
+`indexadores_probar` e `indexadores_flaresolverr` (directas, no por teléfono) y
+`pelis_pedir` y `pelis_borrar` (con botón; el título se comprueba contra la película real).
+Borrar quita el fichero, no la película de Radarr. Todo en `docs/PELIS.md`.
+
 ## Moodle: las entregas
 
 `moodle_entregas` (consulta, directa, también en el MCP del teléfono) pregunta a Moodle lo
