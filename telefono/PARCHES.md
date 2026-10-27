@@ -944,6 +944,102 @@ la voice-app de `caja` le habla por la LAN.
   jarvis» en inglés y a 16 kHz de banda ancha, no «Jarvis» en español por un G.711. No se
   ha medido.
 
+### Whisper medido en jacobo (2026-10-27)
+
+Jacobo ya está montado (Ubuntu 24.04, 8 GB). La RX 580 va por **Vulkan con RADV** y
+whisper.cpp la usa. Lo instalado y el banco están en `telefono/oido/banco/`:
+`preparar.sh` (Docker, Mesa Vulkan y compilador; whisper.cpp pide además SPIRV-Headers,
+que se montan en local), `bajar_mls.py`, `preparar_audio.sh`, `pasar_cpp.sh` y
+`banco_whisper.py`. Las frases son 40 de Multilingual LibriSpeech en español (test, 20
+hablantes, 523 s), pasadas por un G.711 simulado y vueltas a 16 kHz. «3 s» es el
+principio de cada frase, el largo de una orden; WER sobre las frases enteras.
+
+| Motor | WER | 3 s (mediana / p95) | Frase entera (mediana) |
+|---|---|---|---|
+| **whisper-1 de OpenAI (lo de hoy)** | 4,7 % | 1.034 / 2.799 ms | 1,55 s |
+| whisper.cpp `large-v3-turbo` q5_0, GPU | **3,5 %** | 1.039 / 1.079 ms | 1,15 s |
+| whisper.cpp `large-v3-turbo` f16, GPU | 3,4 % | 1.085 / 1.111 ms | 1,21 s |
+| whisper.cpp `medium` q5_0, GPU | 5,3 % | 749 / 1.052 ms | 1,17 s |
+| whisper.cpp `small`, GPU | 7,9 % | **289 / 331 ms** | 0,52 s |
+| faster-whisper `small` int8, CPU (6 hilos) | 7,9 % | 1.494 / 1.665 ms | 1,95 s |
+| whisper.cpp `small`, CPU | 7,9 % | 2.245 / 2.408 ms | 2,96 s |
+
+- **`turbo` q5_0 en la GPU acierta más que OpenAI** con la misma mediana y un p95 de
+  1,1 s en vez de 2,8 s; el f16 no aporta nada. Lo de OpenAI lleva su ida y vuelta por
+  internet; lo de jacobo no lleva aún la de la red de casa (abajo).
+- **Para transcribir mientras se habla**, cada pasada de `turbo` ocupa ~1 s de GPU, justo
+  la cadencia que pide *LocalAgreement*. Lo que encaja es `small` (~0,3 s) para el texto
+  parcial y para oír «Jarvis», y `turbo` una sola vez al acabar la frase.
+- **Recortar el contexto del codificador (`audio_ctx`) no sirve**: el WER sube al 11 % y
+  aparecen bucles de alucinación (p95 de 4 a 13 s). Whisper necesita su ventana de 30 s.
+- **Sin GPU es inservible para esto**: `small` en CPU tarda 1,5-2,2 s por orden, y en la
+  CPU el mejor es faster-whisper, no whisper.cpp.
+- **La red**: jacobo va por Wi-Fi (adaptador USB Realtek, `rtw_8822bu`) detrás de otro
+  router, en otra subred. Tailscale va directo, pero de `caja` a jacobo el ping va de 4 a
+  157 ms (63 de media) aun mandando cada 200 ms. El mínimo de 4 ms dice que el problema
+  es el Wi-Fi, no la subred. **Era el ahorro de energía del adaptador**: quitado con
+  `wifi-sin-ahorro.sh` (`disable_lps_deep=y` para `rtw88_core` y una regla de udev con
+  `iw … power_save off`), tras reiniciar y en un minuto de ping cada 200 ms: mediana
+  **4,3 ms**, p95 7,8, p99 14,7 y máximo 31. Cada 20 ms, la cadencia del audio, 4,7 de
+  media y máximo 24. La subred no hace falta tocarla.
+  **La regla de udev no puede usar `%k`**: corre con el nombre del kernel (`wlan0`) y no
+  con el `wlx…` que la interfaz recibe al arrancar, e `iw` falla sin que se note. Por eso
+  es `99-wifi-sin-ahorro.rules` y recorre `/sys/class/net/wl*` (`wifi-sin-ahorro-2.sh`).
+- **Calor y ventilador** (`carga.py` y `pasar_carga.sh`, con `turbo` y `small` cargados a
+  la vez). La RX 580 no da las revoluciones (`fan1_input` devuelve `EINVAL`), así que se
+  mide su PWM. En reposo el ventilador está **parado** (0 %, 30 °C, 9-10 W). En una
+  **llamada** (4 s hablando con `small` cada 0,5 s, `turbo` al acabar y 6 s escuchando),
+  durante 5 min: GPU ocupada al 65 %, 59 W de media, 60 °C de máximo y ventilador hasta
+  el 54 %. En el **modo coche con la radio hablando sin parar** (`small` cada 0,5 s todo
+  el rato), el peor caso: ocupada al 91 %, 76 W y estable en 67 °C, ventilador al 34-36 %.
+  Arranca hacia los 50 °C y se para a los ~2 min de acabar. La CPU no pasa de 46 °C. Si
+  el coche pesa demasiado, se puede comprobar «Jarvis» cada 1 s en vez de cada 0,5.
+- Lo que el banco no dice, igual que el de la huella: es castellano leído, no dicho en un
+  coche, y el canal es simulado. La GPU llegó a 66 °C.
+
+### El servicio del oído en jacobo (`telefono/oido/`, 2026-10-27)
+
+Montado y probado en jacobo; **caja todavía no lo usa** (el parche de la voice-app que
+lo llama está por hacer y por aprobar). Un contenedor Docker (`compose.yml`, se copia a
+mano a `~/oido/servicio/` con su `.env`) con dos whisper-server de whisper.cpp dentro,
+`small` y `turbo` q5_0, los dos en la GPU, y delante `servidor.py` (aiohttp) en el 8770:
+
+- `POST /transcribir`: un audio entero (cualquier formato que lea ffmpeg; el cuerpo tal
+  cual, no multipart) → `{texto, segundos, ms}`. `X-Modelo: rapido` usa `small`.
+- `WS /escucha?hz=8000`: PCM s16le en binario; contesta parciales `{fijo, provisional,
+  nombre}` y, al mandarle `{"tipo":"fin"}`, el final de `turbo`. La lógica de qué queda
+  fijo (*LocalAgreement*) y de qué cuenta como «Jarvis» está en `acuerdo.py`, con tests
+  en `tests/backend/test_oido.py`. **Quién decide que la frase ha acabado es el cliente**.
+- Llave obligatoria (`OIDO_TOKEN`, `X-Auth-Token` o `Bearer`): sin ella no arranca
+  escuchando fuera de local. No llega a los whisper-server. Los logs llevan duraciones,
+  nunca texto, y el audio no toca el disco.
+
+Medido de punta a punta con `probar.py` (audio a su ritmo real, trozos de 20 ms):
+
+- Un parcial cada ~0,8 s (la pasada de `small` tarda 0,25-0,55 s y crece con la frase).
+  **El final llega 1,05-1,2 s después de decir «fin»**, igual que `turbo` a solas.
+- **«Jarvis» salta como provisional a los 0,6-1 s de decirlo y como fijo ~0,8 s
+  después**, al principio o a media frase, sin ningún aviso falso en las frases sin él.
+  Hizo falta añadir «arvis» a `NOMBRES`: `small` parte el nombre («Y Arvis, ¿qué
+  tiempo…», «ya, Arvis, pon la radio») y `turbo` sí lo escribe bien. Probado con la voz
+  sintética de Windows, no con la de Mikel por el coche.
+- Whisper escribe acotaciones de subtítulo («[MÚSICA]») al empezar con ruido:
+  `limpia()` las quita antes de nada.
+
+Dos trampas que costaron una tarde:
+
+- **La GPU se dormía y el servicio iba cinco veces más lento.** Sin pantalla y sin
+  trabajo, amdgpu la mete en reposo profundo (BACO, *runtime PM*), saca los modelos de
+  la VRAM a la memoria del sistema (GTT) y al despertar **no los devuelve**: `small`
+  pasaba de 0,28 s a 1,4 y `turbo` de 1,04 a 3,5. Reiniciar el contenedor lo arreglaba
+  hasta el siguiente reposo, que es lo que lo hacía parecer aleatorio. Se ve en
+  `mem_info_vram_used` (5 MB) frente a `mem_info_gtt_used` (1,6 GB). Arreglo: la regla
+  `99-gpu-sin-reposo.rules` (`power/control=on` al cargar amdgpu), que pone
+  `telefono/oido/gpu-sin-reposo.sh`. Despierta y sin trabajo consume lo mismo, ~10 W.
+- **whisper-server no avisa por stdout de que está listo**: lo escribe con búfer y sin
+  terminal no llega nunca. `servidor.py` pregunta al puerto hasta que contesta, y mira
+  stderr solo para saber si ha cogido la GPU.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

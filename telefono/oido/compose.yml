@@ -1,0 +1,41 @@
+# El oído en jacobo. Se copia a mano a ~/oido/servicio/ con su .env (ver .env.example) y
+# se levanta con `docker compose up -d --build`. Arranca solo con el equipo.
+services:
+  oido:
+    build: .
+    image: oido:local
+    container_name: oido
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OIDO_HOST: 0.0.0.0
+    # La GPU: /dev/dri y los grupos que la abren, con los números de jacobo (en .env)
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?falta RENDER_GID en .env}"
+      - "${VIDEO_GID:?falta VIDEO_GID en .env}"
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${MODELOS:?falta MODELOS en .env}:/modelos:ro
+      # Los sombreadores de Vulkan compilados: sin esto, cada arranque los recompila
+      - cache:/cache
+    ports:
+      - "8770:8770"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8770/salud', headers={'X-Auth-Token': os.environ['OIDO_TOKEN']}), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  cache:

@@ -96,6 +96,10 @@ docker/n8n/.env
 docker/moodle-mcp/.env
 docker/moodle-mcp/.env.*
 !docker/moodle-mcp/.env.example
+# El del oído de jacobo lleva OIDO_TOKEN, la llave del servicio de transcripción.
+telefono/oido/.env
+telefono/oido/.env.*
+!telefono/oido/.env.example
 # Flujos de n8n de otra persona, de referencia: llevan su chat de Telegram, su dominio
 # e ids de credenciales.
 Jarvis/Jarvis.json
