@@ -1009,6 +1009,35 @@ quitar el código, copiar los `.bak` encima, `docker tag
 claude-phone-voice-app:antes-p27 claude-phone-voice-app`, el `up -d` y reiniciar
 `claude-phone-api`.
 
+### Las herramientas, cargadas desde el principio (2026-10-27)
+
+Probado el 27 en una llamada de verdad, seguía pareciendo lento. La transcripción ya no
+pesaba (101 ms al cerrar la frase). Lo que pesaba era el número de viajes de Claude al
+modelo: «¿tengo una alarma a las siete menos cuarto?» tardó 14,7 s en tres viajes. Claude
+Code difiere las herramientas MCP y, antes de usar una, gasta un viaje en `ToolSearch`
+para cargarla; en esa llamada el viaje siguiente tardó 10,4 s él solo.
+
+Medido en caja con `claude -p` desde `~/telefono-jarvis` (Sonnet 5.5, tres veces cada una,
+medianas):
+
+| Pregunta | Ahora | `ENABLE_TOOL_SEARCH=false` |
+|---|---|---|
+| ¿Tengo alguna alarma puesta para mañana? | 8,4 s (3 viajes) | **4,8 s** (2) |
+| ¿Qué tiempo hace hoy? | 12,3 s (3) | **5,4 s** (2) |
+
+Mismas respuestas y siempre la herramienta correcta. Tokens: las herramientas de Jarvis
+ocupan unos 25.000, que van en cada petición pero se leen de caché (el 10 % del precio).
+Una pregunta con herramienta sale un 33 % más barata (un viaje menos) y una sin
+herramienta un 12 % más cara. `--effort low` o `medium` no ganan nada: el ruido de la API
+(4-10 s por petición) se lo come, y con `low` una vez no supo la hora.
+
+**Aplicado** añadiendo `Environment=ENABLE_TOOL_SEARCH=false` al drop-in `rapido.conf`
+(ver abajo), `daemon-reload` y reinicio de `claude-phone-api`. Comprobado por el puente
+(precalentar y pregunta de alarma): `ToolSearch` ya no aparece y `mis_alarmas` va en el
+primer viaje. A veces Claude añade un `date +%A` para saber qué día es mañana, porque el
+contexto al descolgar no dice el día de la semana. Volver atrás: quitar esa línea,
+`sudo systemctl daemon-reload` y reiniciar.
+
 ## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
 
 Pedido el 2026-10-24: que la escucha pasiva del 22 solo se despierte cuando quien dice
@@ -1219,7 +1248,10 @@ Dos trampas que costaron una tarde:
   ~2,8 s menos por turno (ver «Los parches 15 y 16»). De paso, la sesión del teléfono ya
   no carga los conectores de la cuenta de claude.ai (Gmail, Drive…), solo el MCP de
   Jarvis de `~/telefono-jarvis/.mcp.json`. Como el `server.js` hereda el entorno del
-  servicio, sobrevive a un `claude-phone update`.
+  servicio, sobrevive a un `claude-phone update`. Desde el 2026-10-27 lleva además
+  `ENABLE_TOOL_SEARCH=false`: las herramientas MCP van cargadas desde el principio, sin
+  un viaje de `ToolSearch` antes de cada una (ver «Las herramientas, cargadas desde el
+  principio»).
 - Su `WorkingDirectory` es `~/telefono-jarvis/`, y el `CLAUDE.md` de ahí
   es la copia de `telefono/RUNBOOK.md` de este repositorio. **También se copia a mano.**
 - **No uses `claude-phone start`**: intentaría levantar su propio `claude-api-server`
