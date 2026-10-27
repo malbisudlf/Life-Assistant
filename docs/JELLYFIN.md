@@ -93,8 +93,9 @@ Las tres de leer **entran** en la lista blanca del teléfono (`_MCP_SERVIDOR_SOL
 con el criterio que ya tiene: se admite lo que trae poco texto ajeno y marcado como dato
 (`moodle_entregas`, con lo que escribe el profesorado), y se deja fuera lo que trae
 párrafos de desconocidos a una sesión con shell (`leer_documento`, la web). Aquí son
-nombres cortos, sin sinopsis. `jellyfin_reproducir` **no** entra: se confirma, y por
-teléfono no hay botón.
+nombres cortos, sin sinopsis. `jellyfin_reproducir` entra desde el 2026-10-27 por el
+camino del calendario: va al móvil con el botón «Sí, hazlo» (`PREGUNTAS_ACCIONES`) y se
+puede confirmar también hablando (`PREGUNTAS_HABLADAS`), con la frase de su `describir`.
 
 ## Evals
 

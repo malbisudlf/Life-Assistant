@@ -88,8 +88,20 @@ tests, en `tests/backend/test_pelis.py`.
 
 Las tres de mirar (`pelis_buscar`, `pelis_descargas`, `indexadores_estado`) **entran** en
 `_MCP_SERVIDOR_SOLO_LECTURA`, con el criterio de Jellyfin: poco texto ajeno, recortado y
-marcado como dato. Pedir y borrar **no**: se confirman, y por teléfono no hay botón. Probar
-los indexadores tampoco: tarda un par de minutos y trae lo que contesta cada web.
+marcado como dato.
+
+Desde el 2026-10-27 («los mismos permisos que el Jarvis de Telegram») también lo demás:
+
+- **Pedir y borrar** van al móvil con el botón «Sí, hazlo» (`PREGUNTAS_ACCIONES`, el
+  mismo camino que el calendario: «Lo que se confirma en el móvil» en `docs/JARVIS.md`).
+  La frase la escribe `describir` con los datos de Radarr, igual que el botón de
+  Telegram, y el «sí» ejecuta lo guardado. **Pedir** se puede confirmar además hablando
+  (`PREGUNTAS_HABLADAS`): en el coche no hay botón, y se deshace borrándola. **Borrar**
+  no: se lleva el fichero y no hay papelera, así que solo con el botón.
+- **Probar y arreglar los indexadores** van sin preguntar (`_MCP_SERVIDOR_ACCIONES`),
+  como en el chat. Lo que traen de cada web es el porqué del fallo, escrito por Prowlarr
+  y recortado (`_prowlarr_fallo`). Tardan hasta dos minutos: su descripción le dice que
+  avise antes de callarse.
 
 ## Evals
 

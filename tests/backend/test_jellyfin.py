@@ -228,7 +228,10 @@ class TestJellyfinReproducir:
 
 
 class TestJellyfinTelefono:
-    def test_las_de_leer_si_y_reproducir_no(self):
+    def test_las_de_leer_si_y_reproducir_con_su_boton(self):
         assert {"jellyfin_seguir", "jellyfin_novedades",
                 "jellyfin_buscar"} <= main._MCP_SERVIDOR_SOLO_LECTURA
-        assert "jellyfin_reproducir" not in main._MCP_SERVIDOR_HERRAMIENTAS
+        # Desde el 2026-10-27, como en Telegram: va al móvil con botón, y se puede
+        # confirmar hablando.
+        assert "jellyfin_reproducir" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+        assert "jellyfin_reproducir" in main.PREGUNTAS_HABLADAS

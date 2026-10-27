@@ -22755,10 +22755,21 @@ def _responder_pregunta(pid: str, n: int) -> dict:
 # confirmaban con un botón en el chat: aquí el botón es el mismo, solo que en el móvil.
 # Borrar un evento NO es para siempre (Graph lo deja en Elementos eliminados de Outlook);
 # borrar una nota sí, y por eso su frase lleva el texto de la nota, no solo su título.
+# El 2026-10-27 («que el Jarvis del teléfono pueda añadir y borrar pelis, lo mismo que el
+# de Telegram») entraron pedir y borrar una película y poner algo en Jellyfin: las tres
+# ya iban con botón en Telegram y en el chat, y traen su propia frase (`describir`), que
+# sale de Radarr y de Jellyfin, no del modelo. Borrar una película sí es para siempre, y
+# su frase lo dice.
 # Siguen fuera desplegar, mandar un correo, cobrar y todo lo que lance una sesión: un
-# fallo en esta frontera tiene que quedarse en tu calendario, tus tareas y tus notas.
+# fallo en esta frontera tiene que quedarse en tu calendario, tus tareas, tus notas y
+# tus pelis.
 PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento",
-                                "reservar_bloques", "crear_tarea", "borrar_idea"}
+                                "reservar_bloques", "crear_tarea", "borrar_idea",
+                                "pelis_pedir", "pelis_borrar", "jellyfin_reproducir"}
+# Lo que no es del calendario lleva su propio dibujo en el móvil: «📅 ¿Lo hago?» encima
+# de «Borrar El padrino» despista.
+PREGUNTAS_EMOJI              = {"pelis_pedir": "🎬", "pelis_borrar": "🎬",
+                                "jellyfin_reproducir": "🎬"}
 PREGUNTA_SI                  = "Sí, hazlo"
 PREGUNTA_NO                  = "No"
 # Cuánto vale un «sí» desde que se propuso. Pulsar a las tres horas «Crear Dentista» no
@@ -22944,6 +22955,12 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
         return {"texto": f"Borrar para siempre la nota «{idea.get('key') or 'sin título'}»"
                          + (f": {cuerpo}" if cuerpo else "") + "."}
 
+    # Las pelis y Jellyfin traen la suya, la misma que el botón de Telegram.
+    describir = (_JARVIS_HERRAMIENTAS.get(herramienta) or {}).get("describir")
+    if describir and herramienta in PREGUNTAS_ACCIONES:
+        d = describir(args)
+        return d if "error" in d else {"texto": d["texto"].rstrip(".") + "."}
+
     return {"error": "Eso no se confirma desde el móvil."}
 
 
@@ -23042,7 +23059,8 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
     acciones = [{"action": f"LA_APAGAR_{PREGUNTA_PREFIJO}{i}-{pid}", "title": op}
                 for i, op in enumerate((PREGUNTA_SI, PREGUNTA_NO), 1)]
     try:
-        canal = _notificar("📅 ¿Lo hago?", texto, aviso_id=pid, acciones=acciones)
+        canal = _notificar(f"{PREGUNTAS_EMOJI.get(herramienta, '📅')} ¿Lo hago?", texto,
+                           aviso_id=pid, acciones=acciones)
     except Exception as e:
         logger.warning("Jarvis: no se pudo mandar la confirmación %s (%s)", pid, e)
         return {"ok": False, "motivo": "No he podido mandarlo al móvil."}
@@ -23079,6 +23097,14 @@ def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) ->
         return f"Apuntada en To Do: «{args.get('titulo')}»."
     if herramienta == "borrar_idea":
         return "Nota borrada."
+    r = resultado or {}
+    if herramienta == "pelis_pedir":
+        nombre = r.get("pedida") or r.get("buscando") or r.get("ya_estaba") or "La película"
+        return f"{nombre}: {r.get('nota') or 'pedida a Radarr.'}"
+    if herramienta == "pelis_borrar":
+        return f"Borrada {r.get('borrada') or 'la película'}."
+    if herramienta == "jellyfin_reproducir":
+        return f"Poniendo {r.get('reproduciendo') or 'lo pedido'} en {r.get('en') or 'Jellyfin'}."
     if args.get("hora_inicio"):
         return (f"Movida a {_dia_txt(str(args.get('fecha') or ''))}, "
                 f"a las {args.get('hora_inicio')}.")
@@ -23114,11 +23140,15 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
     except Exception as e:
         # Ya está hecho (o no): fallar aquí solo deja a Jarvis sin saberlo.
         logger.warning("Jarvis: no se pudo apuntar el resultado de %s (%s)", pid, e)
+    emoji = PREGUNTAS_EMOJI.get(herramienta, "📅")
     if resultado.get("ok"):
-        _acusar_recibo("📅 Hecho", _lo_hecho(herramienta, argumentos, resultado), efimero=True)
+        _acusar_recibo(f"{emoji} Hecho", _lo_hecho(herramienta, argumentos, resultado),
+                       efimero=True)
     else:
-        _acusar_recibo("📅 No lo he podido hacer",
-                       str(resultado.get("motivo") or "Sin motivo")[:200])
+        # Las pelis y Jellyfin dicen su fallo en `error`, no en `motivo`.
+        _acusar_recibo(f"{emoji} No lo he podido hacer",
+                       str(resultado.get("motivo") or resultado.get("error")
+                           or "Sin motivo")[:200])
     logger.info("Jarvis: acción confirmada %s → %s", pid,
                 "hecha" if resultado.get("ok") else resultado.get("motivo"))
     return resultado
@@ -23138,8 +23168,10 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 #     la configuración de Claude: el del MCP del teléfono no vale aquí.
 #   - **Solo lo que se deshace con la misma facilidad con que se hace**
 #     (`PREGUNTAS_HABLADAS`): crear una cita, una tarea o unos bloques, y mover una cita
-#     tuya sin invitados. Borrar sigue siendo solo con botón, y mover una reunión con
-#     gente también (les llega la actualización).
+#     tuya sin invitados; desde el 2026-10-27, pedir una película y ponerla en Jellyfin
+#     (en el coche no hay botón que pulsar, y las dos se deshacen con otra frase).
+#     Borrar sigue siendo solo con botón —una película borrada se lleva su fichero—, y
+#     mover una reunión con gente también (les llega la actualización).
 #   - **Solo recién propuesta** (`PREGUNTA_HABLADA_SEG`): es la respuesta a lo que se
 #     acaba de decir en la llamada, no a una pregunta de hace media hora.
 #   - La primera respuesta vale, por el mismo PATCH condicional que el botón: si ya lo
@@ -23149,7 +23181,8 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 # normal; contra una sesión que se salta el RUNBOOK no protege nada que no estuviera ya
 # expuesto. Ver «El sí dicho por teléfono» en `docs/JARVIS.md`.
 TELEFONO_CONFIRMAR_TOKEN = os.getenv("TELEFONO_CONFIRMAR_TOKEN", "")
-PREGUNTAS_HABLADAS       = {"crear_evento", "editar_evento", "reservar_bloques", "crear_tarea"}
+PREGUNTAS_HABLADAS       = {"crear_evento", "editar_evento", "reservar_bloques", "crear_tarea",
+                            "pelis_pedir", "jellyfin_reproducir"}
 PREGUNTA_HABLADA_SEG     = int(os.getenv("PREGUNTA_HABLADA_SEG", "180"))
 
 
@@ -31359,7 +31392,8 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
 # (trae resúmenes de correos ajenos), las tres del programador (encargar y hablar lanzan
 # trabajo de Claude Code con terminal; ver_proyectos trae resúmenes escritos tras leer
 # repositorios ajenos) y el resto de administrativas. Lo del calendario, las
-# tareas y las notas que se confirma va por `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`, abajo.
+# tareas, las notas y las pelis que se confirma va por `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`,
+# abajo.
 _MCP_SERVIDOR_SOLO_LECTURA = {
     "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
@@ -31377,8 +31411,9 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # no hay botón.
     "jellyfin_seguir", "jellyfin_novedades", "jellyfin_buscar",
     # 2026-10-26: las pelis, las tres de mirar, con el mismo criterio: títulos y años (y de
-    # una descarga, sus avisos recortados), sin sinopsis. Pedir y borrar no: se confirman.
-    # Probar los indexadores tampoco: tarda un par de minutos y trae lo que contesta la web.
+    # una descarga, sus avisos recortados), sin sinopsis. Pedir y borrar, desde el
+    # 2026-10-27, con el botón del móvil (`PREGUNTAS_ACCIONES`); probar y arreglar los
+    # indexadores, en `_MCP_SERVIDOR_ACCIONES`.
     "pelis_buscar", "pelis_descargas", "indexadores_estado",
     # 2026-10-25: las ventanas del PC (títulos cortos, como los de Jellyfin). La pantalla
     # NO: su descripción trae lo que diga una web o un correo abiertos, y al otro lado de
@@ -31413,11 +31448,18 @@ _MCP_SERVIDOR_ACCIONES = {
     # 2026-10-25: el PC en directo, lo mismo que encender_pc: abrir, la música, bloquearlo
     # y hablar por sus altavoces. Sin teclado ni ratón.
     "pc_abrir", "pc_multimedia", "pc_bloquear", "pc_decir",
+    # 2026-10-27, «los mismos permisos que el de Telegram»: probar los indexadores y pasar
+    # uno por FlareSolverr. En el chat van sin confirmar y lo segundo se deshace quitando
+    # una etiqueta. Lo que traen de la web es el porqué de cada fallo, escrito por
+    # Prowlarr, recortado a 160 caracteres y con `_AVISO_WEB`, como los títulos de
+    # Jellyfin. Tardan hasta dos minutos: su descripción ya le dice que avise antes.
+    "indexadores_probar", "indexadores_flaresolverr",
 }
 # Las que se confirman, que por teléfono no tienen botón delante: se mandan al móvil con
 # uno (`_proponer_en_movil`, «Lo que se confirma en el móvil») y no se hacen hasta que lo
 # pulsas. Desde el 2026-10-13 (crear y mover citas); desde el 2026-10-15 también borrar
-# una cita, reservar bloques, apuntar una tarea y borrar una nota (`PREGUNTAS_ACCIONES`).
+# una cita, reservar bloques, apuntar una tarea y borrar una nota; desde el 2026-10-27,
+# pedir y borrar una película y poner algo en Jellyfin (`PREGUNTAS_ACCIONES`).
 _MCP_SERVIDOR_CONFIRMA_EN_MOVIL = PREGUNTAS_ACCIONES
 _MCP_SERVIDOR_HERRAMIENTAS = (_MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONES
                               | _MCP_SERVIDOR_CONFIRMA_EN_MOVIL)

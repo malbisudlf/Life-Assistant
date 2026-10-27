@@ -7,6 +7,8 @@ vigilarla, pero la película se queda en Radarr, que así la sabe «borrada»—
 que un Radarr o un Prowlarr caído o sin configurar se diga; y que la prueba de
 indexadores entienda su 400 de «no funciona».
 """
+import json
+
 import pytest
 import requests
 
@@ -403,9 +405,81 @@ class TestCaidosYSinConfigurar:
 
 
 class TestPelisTelefono:
-    def test_las_de_mirar_si_y_las_demas_no(self):
+    """Desde el 2026-10-27, lo mismo que en Telegram: pedir y borrar llegan al móvil con
+    su botón (y pedir se puede confirmar hablando), y los indexadores se prueban y se
+    arreglan sin preguntar, como en el chat."""
+    TOKEN = {"Authorization": "Bearer mcp-telefono-token"}
+    PID   = "0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11"
+
+    @pytest.fixture(autouse=True)
+    def _telefono(self, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_MCP_TELEFONO_TOKEN", "mcp-telefono-token")
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
+
+    def _llamar(self, client, nombre, argumentos):
+        sesion = client.post("/mcp/telefono", headers=self.TOKEN, json={
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "1"}}}).headers["mcp-session-id"]
+        return client.post("/mcp/telefono", headers={**self.TOKEN, "Mcp-Session-Id": sesion},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                 "params": {"name": nombre, "arguments": argumentos}}).json()
+
+    def test_estan_todas(self):
         assert {"pelis_buscar", "pelis_descargas",
                 "indexadores_estado"} <= main._MCP_SERVIDOR_SOLO_LECTURA
-        for fuera in ("pelis_pedir", "pelis_borrar", "indexadores_probar",
-                      "indexadores_flaresolverr"):
-            assert fuera not in main._MCP_SERVIDOR_HERRAMIENTAS
+        assert {"pelis_pedir", "pelis_borrar"} <= main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+        assert {"indexadores_probar", "indexadores_flaresolverr"} <= main._MCP_SERVIDOR_ACCIONES
+
+    def test_borrar_va_al_movil_y_no_borra_nada(self, client, arr):
+        TestPelisBorrar()._montar(arr)
+        arr.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+        r = self._llamar(client, "pelis_borrar", {"tmdb_id": 238, "titulo": "El padrino"})
+        salida = json.loads(r["result"]["content"][0]["text"])
+        assert salida["estado"] == "pendiente_en_el_movil"
+        # Borrar se lleva el fichero: solo con botón, nunca con un «sí» dicho.
+        assert "linea_para_la_llamada" not in salida
+        assert not arr.called("DELETE", RADARR)
+        aviso = main._avisos_movil[0]
+        assert aviso["titulo"] == "🎬 ¿Lo hago?"
+        assert aviso["texto"] == "Borrar El padrino (1972) con su fichero (no hay papelera)."
+
+    def test_pedir_se_puede_confirmar_hablando(self, client, arr):
+        _montar_nueva(arr)
+        arr.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+        r = self._llamar(client, "pelis_pedir", {"tmdb_id": 238, "titulo": "El padrino"})
+        salida = json.loads(r["result"]["content"][0]["text"])
+        assert salida["linea_para_la_llamada"] == f"✅ CONFIRMAR: {salida['id']}"
+        assert not arr.called("POST", _r("/movie"))
+
+    def test_un_titulo_que_no_casa_no_llega_al_movil(self, client, arr):
+        TestPelisBorrar()._montar(arr)
+        r = self._llamar(client, "pelis_borrar", {"tmdb_id": 238, "titulo": "Interstellar"})
+        salida = json.loads(r["result"]["content"][0]["text"])
+        assert salida["ok"] is False and "no es el de ese id" in salida["motivo"]
+        assert main._avisos_movil == []
+
+    def test_el_si_borra_lo_guardado(self, client, arr):
+        TestPelisBorrar()._montar(arr)
+        # Guardado como lo guarda `_args_de`: el id, como texto.
+        arr.add("GET", "jarvis_preguntas", FakeResponse([{
+            "id": self.PID, "texto": "Borrar El padrino (1972) con su fichero.",
+            "opciones": [main.PREGUNTA_SI, main.PREGUNTA_NO], "respuesta": None,
+            "accion": {"herramienta": "pelis_borrar",
+                       "argumentos": {"tmdb_id": "238", "titulo": "El padrino"}},
+            "creado": main.datetime.now(main.timezone.utc).isoformat()}]))
+        arr.add("PATCH", "jarvis_preguntas", FakeResponse([{"id": self.PID}]))
+        r = client.post(f"/avisos/resp1-{self.PID}/apagar",
+                        headers={"X-Auth-Token": "ha-poll-token"})
+        assert r.status_code == 200 and r.json()["resultado"]["ok"] is True
+        assert arr.called("DELETE", _r("/moviefile/77"))
+        assert main._avisos_movil[-1]["titulo"] == "🎬 Hecho"
+        assert main._avisos_movil[-1]["texto"] == "Borrada El padrino (1972)."
+
+    def test_probar_los_indexadores_va_directo(self, client, arr):
+        arr.add("GET", _p("/indexer"), FakeResponse([{"id": 1, "name": "1337x"}]))
+        arr.add("POST", _p("/indexer/test"), FakeResponse([]))
+        r = self._llamar(client, "indexadores_probar", {"nombre": "1337x"})
+        salida = json.loads(r["result"]["content"][0]["text"])
+        assert salida["ok"] is True and salida["funcionan"] == 1

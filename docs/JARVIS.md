@@ -1293,6 +1293,11 @@ ideas que Jarvis apuntó en la llamada del 2026-10-12 («dale acceso al calendar
 crear eventos», «que mueva las citas si llego tarde»): por teléfono no había forma de
 confirmar nada, así que el calendario solo se podía leer.
 
+Desde el 2026-10-27 entran también **pedir y borrar una película y poner algo en
+Jellyfin** (`pelis_pedir`, `pelis_borrar`, `jellyfin_reproducir`), con la frase de su
+propio `describir` —la misma del botón de Telegram— y 🎬 en vez de 📅 en la
+notificación. Ver «El teléfono» en `docs/PELIS.md` y en `docs/JELLYFIN.md`.
+
 - **El modelo propone una acción, no escribe la pregunta.** `crear_evento`,
   `editar_evento` y las cuatro de más abajo (`PREGUNTAS_ACCIONES`) entran en el catálogo del
   teléfono, pero al llamarlas no se hacen: `_proponer_en_movil` guarda herramienta y
@@ -1420,7 +1425,8 @@ un modelo** no se rompe, porque aquí no lo oye un modelo:
   notificación del móvil.
 - **Solo lo reversible** (`PREGUNTAS_HABLADAS`): crear una cita, reservar bloques, apuntar
   una tarea y mover una cita tuya **sin invitados** (`_evento_graph` dice `organizo` y
-  `asistentes`). Borrar algo, o mover una reunión con gente, sigue siendo solo botón.
+  `asistentes`); desde el 2026-10-27, pedir una película y ponerla en Jellyfin. Borrar
+  algo (una película incluida), o mover una reunión con gente, sigue siendo solo botón.
 - **Solo recién propuesto** (`PREGUNTA_HABLADA_SEG`, 180 s): es la respuesta a lo que se
   acaba de decir, no a una notificación de hace media hora.
 - Lo que **no** protege: la sesión del teléfono tiene shell en `caja` y ya puede leer
