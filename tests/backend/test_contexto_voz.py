@@ -55,6 +55,7 @@ class TestTexto:
         ]})
         texto = main._contexto_de_voz()
         assert f"a las {ahora.strftime('%H:%M')}" in texto
+        assert f"hoy, {main.DIAS_SEMANA[ahora.weekday()]} {ahora.day}," in texto
         assert "Ya pasó" not in texto
         assert "En marcha" in texto and "en curso" in texto
         assert "10:00 Dentista (en Calle Mayor)" in texto

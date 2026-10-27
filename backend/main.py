@@ -27225,7 +27225,10 @@ def _contexto_de_voz(incluir_lugar: bool = False) -> str:
             lineas.append(lugar)
     texto = ""
     if lineas:
-        texto = (f"LO QUE YA ESTÁ MIRADO (a las {ahora.strftime('%H:%M')}). Úsalo para "
+        # El día de la semana, porque las alarmas se repiten por días: sin él, el
+        # teléfono gastaba un viaje en `date +%A` para saber cuáles suenan mañana.
+        texto = (f"LO QUE YA ESTÁ MIRADO (hoy, {DIAS_SEMANA[ahora.weekday()]} {ahora.day}, "
+                 f"a las {ahora.strftime('%H:%M')}). Úsalo para "
                  "contestar sin llamar a herramientas; si te piden más detalle, otro día, "
                  "o algo que no esté aquí, usa la herramienta.\n- " + "\n- ".join(lineas))
     _contexto_voz_cache[incluir_lugar] = (time.time(), texto)
