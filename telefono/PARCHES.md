@@ -1038,6 +1038,48 @@ primer viaje. A veces Claude añade un `date +%A` para saber qué día es mañan
 contexto al descolgar no dice el día de la semana. Volver atrás: quitar esa línea,
 `sudo systemctl daemon-reload` y reiniciar.
 
+## El parche 28: la pregunta no espera al precalentado
+
+Una llamada del 27 tardó ~13 s desde que Mikel dejó de hablar hasta oír la respuesta a
+«¿qué tengo mañana?», y 7,2 s fueron de espera: preguntó a los 5,5 s de descolgar y el
+precalentado del 27, que suele tardar 2-5 s, esa vez tardó 12,7 s (11,8 s una sola
+petición a la API para contestar «listo»). La pregunta iba en la cola detrás.
+
+Lo que importa medir es **desde que deja de hablar hasta la primera palabra de Jarvis**.
+Ese tiempo ahora no paga nunca un precalentado lento: si `/ask` llega con el turno de
+precalentar aún en marcha, el puente lo corta (`control_request` con `subtype:
+interrupt` por el stdin de la sesión viva) y manda la pregunta detrás.
+
+Medido en caja con el Claude Code de verdad (`/tmp/probar-interrupt.js`, no versionado):
+
+- Cortado en marcha, el turno suelta su `result` (`error_during_execution`), así que la
+  FIFO de `sesion-viva.js` no se descuadra, y lo enviado se queda en la conversación (en
+  el transcript aparece «[Request interrupted by user]»). La pregunta siguiente conoce
+  el contexto: se probó con una palabra clave y la sabía.
+- Cortado **antes** de que el turno empiece no hace nada: el turno corre entero. Por eso
+  `sesion-viva.js` marca cada turno como empezado con el `system init` que Claude Code
+  suelta al arrancar cada uno, y si la orden llega antes la guarda y la manda entonces.
+
+Cambios: `sesion-viva.js` gana `interrumpir()` (false si no hay turno pendiente o ya se
+cortó) y devuelve `cortado` en el resultado. En `server.js`, `/precalentar` guarda
+`{enviado, hecho, cortado}`; `/ask` espera a que el turno largo esté enviado y, si no ha
+acabado, lo corta. Cortado no es fallido: no se borra la sesión ni se repite el
+contexto, y el registro dice `PRECALENTAR cortado por la pregunta a los N ms`.
+
+`telefono/parche-28.diff` (sobre `~/.claude-phone-cli/` con el 27 puesto), con
+`claude-api-server/test/parche28.test.js` (5 casos, con un Claude falso que hace lo
+medido: `system init` por turno, el corte suelta `result` con error y sin turno en curso
+no hace nada). El Claude falso de `parche27.test.js` ignora ya las órdenes de corte.
+Pasan los 16 del puente.
+
+Probado contra el Claude de verdad, con el puente parcheado en otro puerto y la pregunta
+1 s después de descolgar: cortado a ~1,05 s, y «¿qué tengo mañana por la mañana?» en
+1,4-4,0 s, sabiendo la agenda.
+
+**Aplicado en `caja` el 2026-10-27**: `server.js.bak-20261027-antes-p28` y
+`sesion-viva.js.bak-20261027-antes-p28`, y reinicio de `claude-phone-api`. Volver atrás:
+copiar los `.bak` encima y reiniciar.
+
 ## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
 
 Pedido el 2026-10-24: que la escucha pasiva del 22 solo se despierte cuando quien dice

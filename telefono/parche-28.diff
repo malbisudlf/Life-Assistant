@@ -1,0 +1,318 @@
+diff -ruN a/claude-api-server/server.js b/claude-api-server/server.js
+--- a/claude-api-server/server.js	2026-10-27 16:20:12.000000000 +0100
++++ b/claude-api-server/server.js	2026-10-27 20:24:29.928718100 +0100
+@@ -342,8 +342,17 @@
+      */
+     let fullPrompt = cabecera(devicePrompt);
+     // Parche 27: si se está precalentando, que su turno (con el contexto) vaya delante.
++    // Parche 28: y si ese turno sigue en marcha, se corta: el contexto ya está dentro
++    // y la pregunta no espera a un «listo» que nadie va a oír (llegó a tardar 12,7 s).
+     const pre = callId ? precalentando.get(callId) : null;
+-    if (pre) await pre.catch(() => {});
++    if (pre) {
++      await pre.enviado.catch(() => {});
++      const v = vivas.get(callId);
++      if (!pre.hecho && v && v.interrumpir()) {
++        pre.cortado = true;
++        console.log(`[${timestamp}] PRECALENTAR: la pregunta llega antes de acabar; se corta`);
++      }
++    }
+     // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
+     // siguientes ya lo llevan dentro.
+     const nueva = Boolean(callId) && !sessions.has(callId);
+@@ -613,8 +622,13 @@
+     const fullPrompt = cabecera(devicePrompt) + bitacora.contexto(callId) + (await contexto.pedir()) + AVISO_PRECALENTAR;
+     turno = viva.preguntar(fullPrompt);
+   })();
+-  precalentando.set(callId, enviado);
++  const estado = { enviado, hecho: false, cortado: false };
++  precalentando.set(callId, estado);
+   enviado.then(() => turno).then((r) => {
++    if (estado.cortado) {
++      console.log(`[${new Date().toISOString()}] PRECALENTAR cortado por la pregunta a los ${Date.now() - t0} ms`);
++      return;
++    }
+     if (r.isError) throw new Error(r.response.substring(0, 200));
+     console.log(`[${new Date().toISOString()}] PRECALENTADA ${callId} en ${Date.now() - t0} ms`);
+   }).catch((e) => {
+@@ -623,7 +637,8 @@
+     // que quizá no llegó a guardarse.
+     sessions.delete(callId);
+   }).finally(() => {
+-    if (precalentando.get(callId) === enviado) precalentando.delete(callId);
++    estado.hecho = true;
++    if (precalentando.get(callId) === estado) precalentando.delete(callId);
+   });
+ });
+ 
+diff -ruN a/claude-api-server/sesion-viva.js b/claude-api-server/sesion-viva.js
+--- a/claude-api-server/sesion-viva.js	2026-10-15 18:51:18.000000000 +0200
++++ b/claude-api-server/sesion-viva.js	2026-10-27 20:24:12.906642200 +0100
+@@ -76,6 +76,16 @@
+       buffer = buffer.slice(i + 1);
+       let evento;
+       try { evento = JSON.parse(linea); } catch { continue; }
++      // Parche 28: Claude Code suelta un `system init` al empezar cada turno. Así se
++      // sabe cuál está en marcha, que es el único que una interrupción puede cortar.
++      if (evento.type === 'system' && evento.subtype === 'init') {
++        const p = pendientes.find(function (x) { return !x.empezado; });
++        if (p) {
++          p.empezado = true;
++          if (p.cortar) enviarInterrupcion();
++        }
++        continue;
++      }
+       if (evento.type !== 'result') continue;
+       const p = pendientes.shift();
+       if (!p) continue;
+@@ -84,6 +94,7 @@
+         response: String(evento.result || ''),
+         sessionId: evento.session_id || null,
+         isError: Boolean(evento.is_error),
++        cortado: Boolean(p.cortar),
+         duration_ms: Date.now() - p.enviado,
+       });
+     }
+@@ -112,9 +123,31 @@
+     });
+   }
+ 
++  let cortes = 0;
++  function enviarInterrupcion() {
++    proc.stdin.write(JSON.stringify({
++      type: 'control_request', request_id: 'corta-' + (++cortes), request: { subtype: 'interrupt' },
++    }) + '\n');
++  }
++
++  /**
++   * Parche 28: corta el turno en curso, que suelta igualmente su `result` (con error),
++   * así que la FIFO no se descuadra, y lo ya enviado se queda en la conversación. Si
++   * el turno aún no ha empezado, se corta en cuanto empiece: interrumpir antes no hace
++   * nada y el turno correría entero. Devuelve false si no hay nada que cortar.
++   */
++  function interrumpir() {
++    const p = pendientes[0];
++    if (!viva || !p || p.cortar) return false;
++    p.cortar = true;
++    if (p.empezado) enviarInterrupcion();
++    return true;
++  }
++
+   reiniciarInactividad();
+   return {
+     preguntar,
++    interrumpir,
+     cerrar,
+     alMorir: function (fn) { alMorir.push(fn); },
+     get viva() { return viva; },
+diff -ruN a/claude-api-server/test/parche27.test.js b/claude-api-server/test/parche27.test.js
+--- a/claude-api-server/test/parche27.test.js	2026-10-27 16:20:12.000000000 +0100
++++ b/claude-api-server/test/parche27.test.js	2026-10-27 20:24:52.819568800 +0100
+@@ -24,7 +24,9 @@
+   buf += d;
+   let i;
+   while ((i = buf.indexOf('\\n')) >= 0) {
+-    const texto = JSON.parse(buf.slice(0, i)).message.content; buf = buf.slice(i + 1);
++    const linea = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
++    if (linea.type !== 'user') continue;          // las órdenes de corte del parche 28
++    const texto = linea.message.content;
+     fs.appendFileSync(${JSON.stringify(RECIBIDO)}, JSON.stringify(texto) + '\\n');
+     const calentar = /responde únicamente «listo»/.test(texto);
+     if (calentar && process.env.FALLA_PRECALENTAR) {
+diff -ruN a/claude-api-server/test/parche28.test.js b/claude-api-server/test/parche28.test.js
+--- a/claude-api-server/test/parche28.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/claude-api-server/test/parche28.test.js	2026-10-27 20:25:51.813756700 +0100
+@@ -0,0 +1,193 @@
++/**
++ * Parche 28: si la primera pregunta llega con el precalentado aún en marcha, se corta
++ * ese turno en vez de esperar a su «listo».
++ *
++ * El Claude falso hace lo que se midió en caja con el de verdad: un `system init` al
++ * empezar cada turno, la interrupción corta el turno en curso y suelta su `result` con
++ * error, y una interrupción sin turno en curso no hace nada. Se lanza con
++ * `node --test test/parche28.test.js` desde claude-api-server/, sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++const { spawn } = require('node:child_process');
++
++const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parche28-'));
++const RECIBIDO = path.join(dir, 'recibido.jsonl');
++const CLAUDE_FALSO = path.join(dir, 'claude-falso');
++fs.writeFileSync(CLAUDE_FALSO, `#!${process.execPath}
++const fs = require('fs');
++const apuntar = (x) => fs.appendFileSync(${JSON.stringify(RECIBIDO)}, JSON.stringify(x) + '\\n');
++const ARRANQUE_MS = parseInt(process.env.ARRANQUE_MS || '0');
++const LISTO_MS = parseInt(process.env.LISTO_MS || '0');
++let buf = '', cola = [], enCurso = null, arrancado = false;
++setTimeout(() => { arrancado = true; siguiente(); }, ARRANQUE_MS);
++function siguiente() {
++  if (!arrancado || enCurso || !cola.length) return;
++  const texto = cola.shift();
++  console.log(JSON.stringify({type:'system', subtype:'init'}));
++  const calentar = /responde únicamente «listo»/.test(texto);
++  enCurso = setTimeout(() => {
++    enCurso = null;
++    console.log(JSON.stringify({type:'result', subtype:'success', result: calentar ? 'listo' : '🗣️ VOICE_RESPONSE: eco ' + texto.slice(-12), session_id:'s1'}));
++    siguiente();
++  }, calentar ? LISTO_MS : 20);
++}
++process.stdin.on('data', d => {
++  buf += d;
++  let i;
++  while ((i = buf.indexOf('\\n')) >= 0) {
++    const l = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
++    if (l.type === 'control_request') {
++      apuntar({ corte: true, enCurso: Boolean(enCurso) });
++      console.log(JSON.stringify({type:'control_response', response:{subtype:'success', request_id:l.request_id}}));
++      if (enCurso) {
++        clearTimeout(enCurso); enCurso = null;
++        console.log(JSON.stringify({type:'result', subtype:'error_during_execution', is_error:true, result:''}));
++        siguiente();
++      }
++      continue;
++    }
++    apuntar(l.message.content);
++    cola.push(l.message.content);
++  }
++  siguiente();
++});
++process.stdin.on('end', () => process.exit(0));
++`, { mode: 0o755 });
++
++const recibido = () => fs.existsSync(RECIBIDO)
++  ? fs.readFileSync(RECIBIDO, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
++const limpiar = () => { try { fs.unlinkSync(RECIBIDO); } catch { /* no estaba */ } };
++const espera = (ms) => new Promise((r) => setTimeout(r, ms));
++const LISTO = 'Prepárate. [responde únicamente «listo»]';
++
++// ── La sesión viva por dentro ────────────────────────────────────────────────
++function abrir(entorno) {
++  const sesionViva = require('../sesion-viva');
++  return sesionViva.crear({ bin: process.execPath, args: [CLAUDE_FALSO],
++    env: Object.assign({}, process.env, entorno) });
++}
++
++test('28: corta el turno en curso y la pregunta sale detrás sin esperarlo', async function () {
++  limpiar();
++  const s = abrir({ LISTO_MS: '5000' });
++  try {
++    const calentar = s.preguntar(LISTO);
++    await espera(200);
++    const t0 = Date.now();
++    assert.strictEqual(s.interrumpir(), true);
++    const r = await s.preguntar('¿qué tengo mañana?');
++    assert.ok(Date.now() - t0 < 1000, 'no espera a los 5 s del «listo»');
++    assert.match(r.response, /engo mañana\?$/);
++    const c = await calentar;
++    assert.strictEqual(c.cortado, true);
++    assert.strictEqual(c.isError, true);
++    assert.deepStrictEqual(recibido().filter((x) => x.corte), [{ corte: true, enCurso: true }]);
++  } finally {
++    s.cerrar();
++  }
++});
++
++test('28: si el turno aún no ha empezado, el corte espera a que empiece', async function () {
++  limpiar();
++  const s = abrir({ LISTO_MS: '5000', ARRANQUE_MS: '300' });
++  try {
++    const calentar = s.preguntar(LISTO);
++    assert.strictEqual(s.interrumpir(), true);
++    assert.strictEqual(s.interrumpir(), false, 'dos veces no corta dos turnos');
++    const t0 = Date.now();
++    const r = await s.preguntar('¿qué tengo mañana?');
++    assert.ok(Date.now() - t0 < 1500);
++    assert.match(r.response, /engo mañana\?$/);
++    assert.strictEqual((await calentar).cortado, true);
++    assert.deepStrictEqual(recibido().filter((x) => x.corte), [{ corte: true, enCurso: true }],
++      'el corte llega con el turno ya en marcha, no antes');
++  } finally {
++    s.cerrar();
++  }
++});
++
++test('28: sin turno pendiente no hay nada que cortar', async function () {
++  limpiar();
++  const s = abrir({});
++  try {
++    assert.strictEqual(s.interrumpir(), false);
++    await s.preguntar('hola');
++    assert.strictEqual(s.interrumpir(), false);
++    assert.strictEqual(recibido().filter((x) => x.corte).length, 0);
++  } finally {
++    s.cerrar();
++  }
++});
++
++// ── El puente de verdad ──────────────────────────────────────────────────────
++let puerto = 34300;
++async function servidor(entorno) {
++  limpiar();
++  const p = ++puerto;
++  const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
++    cwd: dir,
++    env: Object.assign({}, process.env, { PORT: String(p), CLAUDE_BIN: CLAUDE_FALSO, CONTEXTO_URL: 'http://127.0.0.1:9' }, entorno),
++    stdio: ['ignore', 'pipe', 'pipe'],
++  });
++  let salida = '';
++  await new Promise((resolve, reject) => {
++    proc.stdout.on('data', (d) => { salida += d; if (/Listening on/.test(d.toString())) resolve(); });
++    proc.on('exit', (c) => reject(new Error('server.js salió con ' + c)));
++  });
++  proc.stdout.on('data', (d) => { salida += d; });
++  const url = 'http://127.0.0.1:' + p;
++  return {
++    pedir: async (ruta, cuerpo) => (await fetch(url + ruta, {
++      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo),
++    })).json(),
++    salida: () => salida,
++    parar: () => proc.kill('SIGTERM'),
++  };
++}
++
++test('28, puente: precalentado lento; la pregunta lo corta y lleva el hilo', async function () {
++  const s = await servidor({ LISTO_MS: '8000' });
++  try {
++    await s.pedir('/precalentar', { callId: 'c1', devicePrompt: 'Eres Jarvis' });
++    await espera(300);
++    const t0 = Date.now();
++    const r = await s.pedir('/ask', { prompt: '¿qué tengo mañana?', callId: 'c1', devicePrompt: 'Eres Jarvis' });
++    assert.ok(Date.now() - t0 < 2000, 'no espera a los 8 s del «listo»');
++    assert.strictEqual(r.success, true);
++    assert.match(r.response, /engo mañana\?$/);
++    const r2 = await s.pedir('/ask', { prompt: '¿y pasado?', callId: 'c1', devicePrompt: 'Eres Jarvis' });
++    assert.match(r2.response, /y pasado\?$/);
++    await espera(100);
++    const m = recibido().filter((x) => typeof x === 'string');
++    assert.strictEqual(m.length, 3);
++    assert.match(m[0], /responde únicamente «listo»/);
++    for (const t of m.slice(1)) {
++      assert.doesNotMatch(t, /llamadas recientes|CONTEXTO AL DESCOLGAR|responde únicamente/i,
++        'cortado no es fallido: el contexto no se repite');
++    }
++    assert.match(s.salida(), /PRECALENTAR cortado por la pregunta/);
++    assert.doesNotMatch(s.salida(), /PRECALENTAR falló/);
++  } finally {
++    s.parar();
++  }
++});
++
++test('28, puente: si el precalentado ya acabó, no se corta nada', async function () {
++  const s = await servidor({ LISTO_MS: '50' });
++  try {
++    await s.pedir('/precalentar', { callId: 'c2', devicePrompt: 'Eres Jarvis' });
++    await espera(500);
++    const r = await s.pedir('/ask', { prompt: 'hola', callId: 'c2', devicePrompt: 'Eres Jarvis' });
++    assert.match(r.response, /hola$/);
++    assert.strictEqual(recibido().filter((x) => x.corte).length, 0);
++    assert.match(s.salida(), /PRECALENTADA c2/);
++  } finally {
++    s.parar();
++  }
++});
