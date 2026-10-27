@@ -104,9 +104,16 @@ jobs:
         # viven fuera de ~/.cache y el runner nace limpio en cada ejecución.
         if: steps.cache-playwright.outputs.cache-hit == 'true'
         # Es un apt-get contra los mirrors de Ubuntu: tarda segundos o no termina nunca.
-        # Mejor un fallo a los cinco minutos que relanzar a mano tras horas «en curso».
-        timeout-minutes: 5
-        run: npx playwright install-deps chromium
+        # Cada intento tiene su tope y se reintenta: el 2026-10-27 un mirror lento
+        # (21 MB en más de cinco minutos) tumbó el CI de main sin que el código tuviera
+        # nada que ver. Si los tres fallan, falla el paso: nunca «va sin dependencias».
+        timeout-minutes: 10
+        run: |
+          for intento in 1 2 3; do
+            timeout 180 npx playwright install-deps chromium && exit 0
+            echo "Intento $intento fallido, reintentando"
+          done
+          exit 1
       - name: Tests end-to-end
         # playwright.config.js arranca y espera al backend simulado y al preview del
         # build de producción, y los apaga al terminar.
