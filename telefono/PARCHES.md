@@ -17,6 +17,9 @@ Y el 20 (2026-10-17): la llamada lee también la semana, el correo y las tareas,
 Jarvis propone se confirma diciendo sí o no, sin que lo decida Claude (ver «El parche 20»).
 Y el 24 (2026-10-25, sin aplicar): el lector con mando, que sigue donde se quedó aunque
 se cuelgue y salta de sección o de bloque sin pasar por Claude (ver «El parche 24»).
+Y el 25 (2026-10-27): el oído deja de ser OpenAI y pasa a ser jacobo, con OpenAI de
+reserva (ver «El parche 25»). Y el 26, el mismo día: se transcribe durante el silencio
+que cierra la frase, no después (ver «El parche 26»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -841,6 +844,171 @@ claude-phone-voice-app` y el mismo `up -d`. Lo que delata que funciona es
 `LECTURA: orden «siguiente» → ir` en `docker logs voice-app`, y `sigue la anterior` en
 el registro del backend.
 
+## El parche 25: el oído es jacobo, OpenAI de reserva
+
+Sale del 2026-10-27, de «probemos a aplicar el cambio del STT a whisper local». Solo
+toca `voice-app/lib/whisper-client.js`, que es por donde pasan las dos bocas (los dos
+bucles y la escucha pasiva del 22), así que el cambio les llega a todas sin tocarlas:
+
+- Con `OIDO_URL` y `OIDO_TOKEN` en `~/.claude-phone/.env`, cada frase va antes a
+  `POST /transcribir` del oído (`turbo` q5_0 en la GPU de jacobo), en WAV y con
+  `X-Idioma`. Si no contesta en `OIDO_TIMEOUT_MS` (4.000) o da error, **la misma frase**
+  va a whisper-1 de OpenAI, y el oído se salta `OIDO_PAUSA_MS` (60.000) para no pagar la
+  espera en cada turno mientras jacobo esté apagado. `OIDO=0` lo apaga sin quitar nada.
+- `OIDO_URL` es la IP de Tailscale de jacobo y el puerto 8770 (`tailscale status` en
+  caja la da): la voice-app va con `network_mode: host` y dentro no resuelve el nombre
+  `jacobo`. La llave es el mismo `OIDO_TOKEN` del `.env` del oído en jacobo; se pasó
+  de máquina a máquina por tubería, sin escribirla en pantalla.
+- El oído no admite `prompt`: la pista «Jarvis.» del 22 solo le llega a OpenAI. `turbo`
+  ya escribe bien el nombre, y `buscarPalabra` sigue aceptando sus variantes.
+- El log dice de dónde salió cada frase: `WHISPER (jacobo 1427 ms)` o `WHISPER (openai)`,
+  y `El oído de jacobo falla (…)` cuando salta a la reserva.
+
+Medido desde caja con el cliente parcheado y cuatro frases del banco (11-15 s, canal
+telefónico simulado): **jacobo 1,45-1,57 s, OpenAI 0,86-3,19 s**, con el mismo texto
+salvo puntuación (el oído a veces la omite, lo que a Claude le da igual). Con el oído
+inalcanzable, la primera frase va a OpenAI tras el `ECONNREFUSED` y la segunda ni lo
+intenta. Un detalle que vino de regalo: con medio segundo de silencio OpenAI escribe
+«Subtítulos realizados por la comunidad de Amara.org», y el oído lo filtra.
+
+`telefono/parche-25.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`voice-app/test/parche25.test.js`: siete casos con `fetch` y `openai` de mentira (jacobo
+contesta; error y reserva; la pausa; volver tras la pausa; el silencio no es un fallo;
+sin variables u `OIDO=0`; `isAvailable`). **Aplicado en `caja` el 2026-10-27**: imagen
+anterior `claude-phone-voice-app:antes-p25`, `whisper-client.js.bak-20261027-antes-p25`
+y `.env.bak-20261027-antes-p25`; dentro y sin red pasan el 25 (7) y todos los
+anteriores (12, 14, 15-16, 17, 18, 20, 22, 24); `up -d voice-app` sin llamada en curso y
+la extensión registrada a la primera. Una frase del banco por el contenedor ya en marcha
+salió por jacobo en 1,4 s. **Falta una llamada de verdad**, que es la que dice cómo va
+con su voz y el ruido del coche.
+
+Volver atrás: `OIDO=0` en el `.env` y `docker compose -f ~/.claude-phone/docker-compose.yml
+up -d voice-app` (un `restart` no relee el `.env`), o, para quitar el código,
+`docker tag claude-phone-voice-app:antes-p25 claude-phone-voice-app` y el mismo `up -d`.
+
+## El parche 26: se transcribe durante el silencio que cierra la frase
+
+Sale del 2026-10-27, de «¿no se suponía que jacobo era más rápido que OpenAI?». En la
+mediana no lo es (empatan en ~1,04 s por orden; jacobo gana en el p95 y en acierto), y
+medido desde caja **el tiempo es turbo, no la red**: ~1,1 s fijos aunque la frase dure
+3 s, porque Whisper siempre procesa su ventana de 30 s; la red pone de 50 a 240 ms
+(ping de 3-4 ms; lo que crece es subir el WAV). Lo que sí se podía quitar es el orden:
+el detector da la frase por acabada tras `endSilenceMs` (1,5 s) de silencio, y la
+transcripción empezaba después. Ahora empieza a los 400 ms de ese silencio.
+
+- **`audio-fork.js`**: a los `STT_ANTICIPO_MS` (400; 0 lo apaga) de silencio, con al
+  menos `minSpeechMs` de voz y alguien escuchando, emite `pausa` con lo dicho hasta ahí,
+  una vez por silencio. Si vuelves a hablar, la pausa deja de valer. La frase que cierra
+  ESE silencio (`end_silence`, no la # ni el tope) la lleva en `utterance.pausa`.
+- **`anticipo.js`** (nuevo): `armarAnticipo` manda cada pausa al oído y
+  `transcribirFrase` usa esa transcripción si la frase la cerró esa pausa; si no, o si
+  falló, transcribe la frase entera como siempre (con su reserva de OpenAI).
+- **Solo contra jacobo** (`soloOido` y `oidoDisponible()` en `whisper-client.js`):
+  contra OpenAI, cada pausa a media frase sería una llamada de pago tirada.
+- **No con la escucha pasiva dormida**: con la radio del coche las pausas no paran, y
+  cada una sería una pasada más de la GPU para nada. Despierto, sí.
+- Los dos bucles lanzan la transcripción **antes** del pitido de «te he oído», no
+  después: lo que le falte al anticipo corre mientras pita.
+
+Es el mismo modelo sobre el mismo audio, menos el silencio del final: no se cambia
+precisión por velocidad. Lo que puede escaparse es una coletilla dicha tan bajo que el
+detector la cuente como silencio (por debajo del 30 % de tu nivel de voz): el anticipo
+no la lleva y la frase entera sí.
+
+Medido el 2026-10-27 con `medir.js` (audio del banco a su ritmo real por el detector de
+verdad, contra jacobo; dos pasadas de cada), la espera desde que el detector cierra la
+frase hasta tener el texto:
+
+| Frase | Sin anticipo | Con anticipo | Pasadas de más en la GPU |
+|---|---|---|---|
+| 3 s («orden») | 1,22-1,26 s | **0,08-0,09 s** | 0 |
+| 5 s | 1,30 s | **0,14-0,16 s** | 1 |
+| 11-16 s, leídas | 1,49-1,68 s | **0,35-0,50 s** | 2-5 |
+
+Mismo texto en todas. En las largas quedan ~0,4 s porque turbo tarda más que el
+silencio que le queda y porque las pausas de leer con comas encolan pasadas en la GPU;
+si el calor o el ruido de jacobo molestan, subir `STT_ANTICIPO_MS` a 600 las reduce.
+
+`telefono/parche-26.diff` (sobre `~/.claude-phone-cli/` con el 25 ya puesto), con
+`voice-app/test/parche26.test.js`: nueve casos (la pausa, que se invalide al hablar, sin
+oyente / a 0 / con la #, una tos, el anticipo usado una sola vez, el oído caído, el
+anticipo que falla, la pasiva dormida, y que los dobles de los otros tests sin
+`oidoDisponible` sigan igual). **Aplicado en `caja` el 2026-10-27**: imagen anterior
+`claude-phone-voice-app:antes-p26`; dentro y sin red pasan el 26 (9) y todos los
+anteriores; `up -d voice-app` sin llamada en curso y la extensión registrada a la
+primera. Lo que delata que funciona es `ANTICIPO: transcrita durante el silencio` en
+`docker logs voice-app`. **Falta una llamada de verdad.**
+
+Volver atrás: `STT_ANTICIPO_MS=0` en el `.env` y `up -d voice-app`, o
+`docker tag claude-phone-voice-app:antes-p26 claude-phone-voice-app` y el mismo `up -d`.
+
+## El parche 27: Claude arranca al descolgar
+
+Sale del 2026-10-27, de mirar dónde se va el tiempo de Claude. En los 43 turnos de las
+dos semanas anteriores: mediana 3,8 s, p90 10 s y máximo 47 s (herramientas). **El
+primer turno de cada llamada tarda 3,6-5,8 s y los siguientes 1,8-2,3 s**: el primero
+paga arrancar Claude Code, conectar su MCP, leer en frío su prompt de sistema y el
+`CLAUDE.md`, y el turno largo con la identidad, la bitácora y el contexto.
+
+- **`claude-api-server/server.js`**: `POST /precalentar {callId, devicePrompt}` abre la
+  sesión viva (parche 19) y le manda ya ese turno largo, terminado en
+  `AVISO_PRECALENTAR` («responde únicamente "listo"»: Claude no deja mandarle nada sin
+  que conteste). Contesta al momento. La primera pregunta espera solo a que ese turno
+  esté **mandado** (el contexto del backend tarda hasta 2,5 s), no contestado, y como la
+  sesión ya no es nueva no repite el contexto. Si precalentar falla, olvida la sesión
+  para que la primera pregunta empiece de cero con su contexto, como antes.
+- **`voice-app`**: `claudeBridge.precalentar()` (3 s de tope, nunca lanza; contra un
+  puente sin el parche da 404 y no pasa nada; `PRECALENTAR=0` lo apaga). La entrante lo
+  llama antes del saludo; la saliente, cuando no trae aviso (el modo coche), porque con
+  aviso ya lo arranca la consulta del aviso.
+
+`telefono/parche-27.diff` (sobre `~/.claude-phone-cli/` con el 26 puesto), con
+`claude-api-server/test/parche27.test.js` (4 casos, arrancando `server.js` de verdad
+con un Claude de mentira) y `voice-app/test/parche27.test.js` (4). Pasan con todos los
+anteriores.
+
+Al ir a medirlo, el 2026-10-27, Claude Code en caja respondía «OAuth session expired
+and could not be refreshed» **desde el 2026-10-26 a las 21:30**: ninguna llamada
+pensaba. Mikel volvió a entrar esa tarde. *Si el teléfono contesta a todo que la sesión
+ha caducado, es esto: `ssh -t caja claude` y `/login`.*
+
+Medido después con `telefono/medir-primer-turno.js` desde caja (sesión nueva cada vez,
+«¿Qué tengo mañana por la mañana?», contexto real del backend), el tiempo de la primera
+pregunta:
+
+| Modo | Primera pregunta |
+|---|---|
+| En frío, como hasta ahora, con la caché de Anthropic fría (lo normal entre llamadas) | 5,5 s |
+| En frío con la caché caliente (otra llamada hace poco) | 3,3-3,4 s |
+| Solo el proceso arrancado antes | 1,9-3,9 s |
+| **Precalentado entero** (lo que hace el parche) | **2,0-3,6 s** |
+
+El turno de precalentar tarda 1,8-7 s, y en una entrante queda tapado por el saludo, el
+pitido, lo que dices y el segundo y medio de silencio. Si la pregunta llega antes, va
+detrás en la cola y no tarda más que antes. Tras precalentar, Claude empieza a veces con
+«Ya lo tengo en el contexto…» antes del `VOICE_RESPONSE`: no se dice (solo se lee esa
+línea) y el aviso pide que no lo haga, pero no siempre obedece.
+
+**Aplicado en `caja` el 2026-10-27**: imagen anterior `claude-phone-voice-app:antes-p27`,
+`server.js.bak-20261027-antes-p27` y `claude-bridge.js.bak-20261027-antes-p27`; pasan
+los del puente (19 y 27) y todos los de la voice-app; `up -d voice-app` sin llamada en
+curso, y `sudo systemctl restart claude-phone-api` para servir `/precalentar`. Lo que
+delata que funciona es `PRECALENTADA <callId> en … ms` en
+`journalctl -u claude-phone-api`.
+
+Comprobado tras el reinicio contra el puente de verdad, con `curl` desde caja: precalentar
+tarda 2,3-3,9 s. Con «¿Qué hora es?», que Jarvis contesta con la hora y el aviso de
+madrugar de mañana, la pregunta tarda 8,0-8,2 s sin precalentar y 5,4-7,1 s
+precalentando con 8 s de margen. Si la pregunta llega a 1 s del descolgado, espera a que
+acabe la preparación y tarda lo mismo que sin ella (7,2 s). El `callId` ha de ser un
+UUID, como el de las llamadas reales: con otra cosa Claude Code se niega y el puente
+vuelve a un proceso por turno.
+
+Volver atrás: `PRECALENTAR=0` en `~/.claude-phone/.env` y `up -d voice-app`; o, para
+quitar el código, copiar los `.bak` encima, `docker tag
+claude-phone-voice-app:antes-p27 claude-phone-voice-app`, el `up -d` y reiniciar
+`claude-phone-api`.
+
 ## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
 
 Pedido el 2026-10-24: que la escucha pasiva del 22 solo se despierte cuando quien dice
@@ -999,8 +1167,9 @@ principio de cada frase, el largo de una orden; WER sobre las frases enteras.
 
 ### El servicio del oído en jacobo (`telefono/oido/`, 2026-10-27)
 
-Montado y probado en jacobo; **caja todavía no lo usa** (el parche de la voice-app que
-lo llama está por hacer y por aprobar). Un contenedor Docker (`compose.yml`, se copia a
+Montado y probado en jacobo. **La voice-app de caja lo usa desde el 2026-10-27** para
+cada frase entera (`POST /transcribir`), con el parche 25; el streaming (`WS /escucha`)
+sigue sin cliente. Un contenedor Docker (`compose.yml`, se copia a
 mano a `~/oido/servicio/` con su `.env`) con dos whisper-server de whisper.cpp dentro,
 `small` y `turbo` q5_0, los dos en la GPU, y delante `servidor.py` (aiohttp) en el 8770:
 

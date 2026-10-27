@@ -1,0 +1,479 @@
+diff -ruN a/voice-app/lib/anticipo.js b/voice-app/lib/anticipo.js
+--- a/voice-app/lib/anticipo.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/lib/anticipo.js	2026-10-27 15:53:52.437930000 +0100
+@@ -0,0 +1,66 @@
++/**
++ * Parche 26: transcribir durante el silencio que cierra la frase, no después.
++ * Ver telefono/PARCHES.md en Life Assistant.
++ *
++ * El detector (audio-fork.js) da la frase por acabada tras endSilenceMs (1,5 s) de
++ * silencio, y hasta aquí la transcripción empezaba entonces: ~1,1 s más de turbo en
++ * jacobo, que siempre procesa una ventana de 30 s aunque la frase dure 3. Ahora, a los
++ * STT_ANTICIPO_MS (400) de silencio, la sesión emite 'pausa' con lo dicho hasta ahí y
++ * se le manda al oído. Si el silencio sigue hasta cerrar la frase, la transcripción ya
++ * está hecha o a punto; si vuelves a hablar, esa pausa se tira y la frase entera se
++ * transcribe como siempre.
++ *
++ * - Es el mismo modelo sobre el mismo audio (menos el silencio del final): no se
++ *   cambia precisión por velocidad.
++ * - Solo contra jacobo (`soloOido`): contra OpenAI, cada pausa a media frase sería
++ *   una llamada de pago tirada. Con el oído caído, todo sigue como antes.
++ * - No con la escucha pasiva dormida (`activo`): con la radio del coche las pausas no
++ *   paran, y cada una sería una pasada más de la GPU de jacobo para nada.
++ */
++
++const OPCIONES = { format: 'pcm', sampleRate: 16000, language: 'es' };
++
++/**
++ * Engancha el anticipo a la sesión de audio de una llamada.
++ * @param {Object}   session        - AudioForkSession
++ * @param {Object}   whisperClient
++ * @param {Object}   [p]
++ * @param {Function} [p.activo]     - () => boolean; false para no anticipar ahora
++ * @returns {Function} lo desengancha
++ */
++function armarAnticipo(session, whisperClient, p) {
++  p = p || {};
++  if (!session || typeof session.on !== 'function') return function () {};
++  if (!whisperClient || typeof whisperClient.oidoDisponible !== 'function') return function () {};
++  const activo = p.activo || function () { return true; };
++  const alPausar = function (pausa) {
++    if (!activo() || !whisperClient.oidoDisponible()) return;
++    pausa.desde = Date.now();
++    pausa.transcripcion = whisperClient.transcribe(pausa.audio, Object.assign({ soloOido: true }, OPCIONES));
++    // Que una pausa tirada que falla no acabe en un unhandledRejection.
++    pausa.transcripcion.catch(function () {});
++  };
++  session.on('pausa', alPausar);
++  return function () { session.off('pausa', alPausar); };
++}
++
++/**
++ * La transcripción de una frase: la del anticipo si la frase la cerró esa pausa y
++ * salió bien; si no, la de la frase entera, con la reserva de OpenAI de siempre.
++ */
++async function transcribirFrase(whisperClient, utterance, log) {
++  const pausa = utterance && utterance.pausa;
++  if (pausa && pausa.transcripcion) {
++    const t0 = Date.now();
++    try {
++      const texto = await pausa.transcripcion;
++      if (log) log('ANTICIPO: transcrita durante el silencio; al cerrar la frase, ' + (Date.now() - t0) + ' ms de espera');
++      return texto;
++    } catch (e) {
++      if (log) log('ANTICIPO: falló (' + e.message + '); transcribo la frase entera');
++    }
++  }
++  return whisperClient.transcribe(utterance.audio, OPCIONES);
++}
++
++module.exports = { armarAnticipo, transcribirFrase, OPCIONES };
+diff -ruN a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
+--- a/voice-app/lib/audio-fork.js	2026-10-15 11:56:41.000000000 +0200
++++ b/voice-app/lib/audio-fork.js	2026-10-27 15:53:20.147793100 +0100
+@@ -66,6 +66,13 @@
+     this._bargeMs = parseInt(process.env.BARGE_IN_MS) || 500;
+     this._sinRecoger = null;
+ 
++    // Parche 26: a los STT_ANTICIPO_MS de silencio se avisa ('pausa') con lo dicho
++    // hasta ahí, para transcribirlo mientras se esperan los endSilenceMs que cierran
++    // la frase. Si vuelves a hablar, esa pausa deja de valer. 0 lo apaga.
++    this._anticipoMs = parseInt(process.env.STT_ANTICIPO_MS || '400', 10);
++    this._pausa = null;
++    this._pausaEmitida = false;
++
+     // DEBUG: Track message counts
+     this._messageCount = 0;
+     this._binaryCount = 0;
+@@ -126,6 +133,8 @@
+     this._speechBytes = 0;
+     this._silenceMs = 0;
+     this._rmsVoz = [];
++    this._pausa = null;
++    this._pausaEmitida = false;
+ 
+     if (this._preRollChunks.length) {
+       for (const chunk of this._preRollChunks) this._appendUtterance(chunk, false);
+@@ -147,9 +156,13 @@
+     this._utteranceBytes = 0;
+     this._speechBytes = 0;
+     this._silenceMs = 0;
++    this._pausa = null;
++    this._pausaEmitida = false;
+   }
+ 
+   _finalizeUtterance(reason) {
++    // Parche 26: la pausa solo vale si la frase la cerró ese mismo silencio.
++    const pausa = reason === 'end_silence' ? this._pausa : null;
+     const durationMs = this._chunkDurationMs(this._utteranceBytes);
+     const speechMs = this._chunkDurationMs(this._speechBytes);
+     const speechRatio = this._utteranceBytes > 0 ? this._speechBytes / this._utteranceBytes : 0;
+@@ -169,7 +182,7 @@
+       return false;
+     }
+     console.log('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
+-    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason };
++    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason, pausa };
+     if (this.listenerCount('utterance') === 0) this._sinRecoger = u;
+     this.emit('utterance', u);
+     return true;
+@@ -331,8 +344,21 @@
+ 
+     this._appendUtterance(data, isSpeech);
+ 
+-    if (isSpeech) this._silenceMs = 0;
+-    else this._silenceMs += chunkMs;
++    if (isSpeech) {
++      this._silenceMs = 0;
++      this._pausa = null;
++      this._pausaEmitida = false;
++    } else {
++      this._silenceMs += chunkMs;
++    }
++
++    if (this._anticipoMs > 0 && !this._pausaEmitida && this._silenceMs >= this._anticipoMs &&
++        this._silenceMs < this.endSilenceMs && this.listenerCount('pausa') > 0 &&
++        this._chunkDurationMs(this._speechBytes) >= this.minSpeechMs) {
++      this._pausaEmitida = true;
++      this._pausa = { audio: Buffer.concat(this._utteranceChunks) };
++      this.emit('pausa', this._pausa);
++    }
+ 
+     if (this._bargeArmado && this._chunkDurationMs(this._speechBytes) >= this._bargeMs) {
+       this._bargeArmado = false;
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-10-25 17:19:38.000000000 +0100
++++ b/voice-app/lib/conversation-loop.js	2026-10-27 15:54:28.295613500 +0100
+@@ -21,6 +21,8 @@
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 26: se transcribe durante el silencio que cierra la frase.
++const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -271,6 +273,7 @@
+     const pasiva = new EscuchaPasiva({
+       log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
+     });
++    armarAnticipo(session, whisperClient, { activo: () => !pasiva.dormida() });
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -365,6 +368,10 @@
+         }
+         silencios = 0;
+ 
++        // Parche 26: la transcripción (o lo que le falte al anticipo) corre mientras pita.
++        const transcribiendo = transcribirFrase(whisperClient, utterance, (m) => logger.info(m, { callUuid }));
++        transcribiendo.catch(() => {});
++
+         // ============================================
+         // GOT-IT BEEP: Signal "I heard you, processing"
+         // ============================================
+@@ -376,11 +383,7 @@
+         }
+ 
+         // Transcribe
+-        transcript = await whisperClient.transcribe(utterance.audio, {
+-          format: 'pcm',
+-          sampleRate: 16000,
+-          language: 'es'
+-        });
++        transcript = await transcribiendo;
+ 
+         logger.info('Transcribed', { callUuid, transcript });
+ 
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-10-25 17:19:38.000000000 +0100
++++ b/voice-app/lib/sip-handler.js	2026-10-27 15:54:17.363217700 +0100
+@@ -12,6 +12,8 @@
+ const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 26: se transcribe durante el silencio que cierra la frase.
++const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -161,6 +163,7 @@
+     const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
+     // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
+     const pasiva = new EscuchaPasiva({ log: logTurno });
++    armarAnticipo(session, whisperClient, { activo: function () { return !pasiva.dormida(); } });
+     let viva = true;
+     dialog.on('destroy', function () { viva = false; });
+ 
+@@ -227,6 +230,10 @@
+           continue;
+         }
+ 
++        // Parche 26: la transcripción (o lo que le falte al anticipo) corre mientras pita.
++        const transcribiendo = transcribirFrase(whisperClient, utterance, logTurno);
++        transcribiendo.catch(function () {});
++
+         // GOT-IT BEEP
+         try {
+           await endpoint.play(GOTIT_BEEP_URL);
+@@ -235,11 +242,7 @@
+         }
+ 
+         // Transcribe
+-        transcript = await whisperClient.transcribe(utterance.audio, {
+-          format: 'pcm',
+-          sampleRate: 16000,
+-          language: 'es'
+-        });
++        transcript = await transcribiendo;
+ 
+         console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
+ 
+diff -ruN a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
+--- a/voice-app/lib/whisper-client.js	2026-10-27 15:44:04.000000000 +0100
++++ b/voice-app/lib/whisper-client.js	2026-10-27 15:53:36.551573800 +0100
+@@ -40,6 +40,12 @@
+   return !!(process.env.OIDO_URL && process.env.OIDO_TOKEN) && process.env.OIDO !== "0";
+ }
+ 
++// Parche 26: el anticipo solo se lanza si contestaría jacobo; contra OpenAI cada pausa
++// a media frase sería una llamada de pago tirada.
++function oidoDisponible() {
++  return oidoConfigurado() && Date.now() >= oidoCaidoHasta;
++}
++
+ /**
+  * Convert L16 PCM buffer to WAV format for Whisper API
+  * @param {Buffer} pcmBuffer - Raw L16 PCM audio data
+@@ -119,6 +125,7 @@
+  * @param {number} options.sampleRate - Sample rate for PCM (default: 8000)
+  * @param {string} options.language - Language code (default: "es")
+  * @param {string} options.prompt - Pista para whisper-1 (el oído la ignora)
++ * @param {boolean} options.soloOido - Parche 26: sin reserva; si el oído falla, lanza
+  * @returns {Promise<string>} Transcribed text
+  */
+ async function transcribe(audioBuffer, options = {}) {
+@@ -126,9 +133,14 @@
+     format = "pcm",
+     sampleRate = 8000,
+     language = "es",
+-    prompt = null
++    prompt = null,
++    soloOido = false
+   } = options;
+ 
++  if (soloOido && !oidoDisponible()) {
++    throw new Error("el oído de jacobo no está disponible");
++  }
++
+   // Convert PCM to WAV if needed
+   let wavBuffer;
+   if (format === "pcm") {
+@@ -150,6 +162,7 @@
+       oidoCaidoHasta = Date.now() + OIDO_PAUSA_MS;
+       const motivo = e.name === "TimeoutError" ? "sin respuesta en " + OIDO_TIMEOUT_MS + " ms" : (e.cause && e.cause.code) || e.message;
+       console.warn("[WHISPER] El oído de jacobo falla (" + motivo + "): OpenAI durante " + Math.round(OIDO_PAUSA_MS / 1000) + " s");
++      if (soloOido) throw e;
+     }
+   }
+ 
+@@ -174,5 +187,6 @@
+ module.exports = {
+   transcribe,
+   pcmToWav,
+-  isAvailable
++  isAvailable,
++  oidoDisponible
+ };
+diff -ruN a/voice-app/test/parche26.test.js b/voice-app/test/parche26.test.js
+--- a/voice-app/test/parche26.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche26.test.js	2026-10-27 15:54:57.664479900 +0100
+@@ -0,0 +1,188 @@
++/**
++ * Parche 26: se transcribe durante el silencio que cierra la frase (el anticipo).
++ *
++ * El detector de verdad (audio-fork) con audio sintético, como en parche15y16.test.js,
++ * y Whisper como doble. Se lanza con `node --test test/parche26.test.js`, dentro de la
++ * imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { AudioForkSession } = require('../lib/audio-fork');
++const { armarAnticipo, transcribirFrase } = require('../lib/anticipo');
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++function trozo(voz) {
++  const b = Buffer.alloc(640);
++  if (voz) for (let i = 0; i < 320; i++) b.writeInt16LE(i % 2 ? 15000 : -15000, i * 2);
++  return b;
++}
++function detector() {
++  const ws = new EventEmitter();
++  const s = new AudioForkSession({ ws: ws, callUuid: 'p26' });
++  s.oir = function (vozMs, silencioMs) {
++    for (let t = 0; t < vozMs; t += 20) ws.emit('message', trozo(true));
++    for (let t = 0; t < (silencioMs || 0); t += 20) ws.emit('message', trozo(false));
++  };
++  s.setCaptureEnabled(true);
++  s.oir(0, 1000);          // fija el orden de bytes y el suelo de ruido
++  return s;
++}
++
++/** Whisper: apunta lo que se le pide y contesta según `oido` (jacobo arriba o no). */
++function whisperFalso(opciones) {
++  opciones = opciones || {};
++  const w = { pedidos: [], oido: opciones.oido !== false };
++  w.oidoDisponible = function () { return w.oido; };
++  w.transcribe = function (audio, o) {
++    w.pedidos.push({ bytes: audio.length, soloOido: !!(o && o.soloOido) });
++    if (opciones.falla && o && o.soloOido) return Promise.reject(new Error('jacobo no contesta'));
++    return Promise.resolve((o && o.soloOido ? 'anticipo ' : 'entera ') + audio.length);
++  };
++  return w;
++}
++
++function frase(s) {
++  return new Promise(function (r) { s.once('utterance', r); });
++}
++
++// ── El detector ──────────────────────────────────────────────────────────────
++test('a los 400 ms de silencio avisa una vez, y la frase lleva esa pausa', async function () {
++  const s = detector();
++  const pausas = [];
++  s.on('pausa', function (p) { pausas.push(p); });
++  const llega = frase(s);
++  s.oir(1000, 300);
++  assert.strictEqual(pausas.length, 0, 'a los 300 ms aún no');
++  s.oir(0, 200);
++  assert.strictEqual(pausas.length, 1);
++  s.oir(0, 1100);
++  const u = await llega;
++  assert.strictEqual(pausas.length, 1, 'una sola vez por silencio');
++  assert.strictEqual(u.reason, 'end_silence');
++  assert.strictEqual(u.pausa, pausas[0]);
++  assert.ok(u.pausa.audio.length < u.audio.length, 'la pausa no lleva el silencio del final');
++});
++
++test('si vuelves a hablar, esa pausa no vale y la frase lleva la nueva', async function () {
++  const s = detector();
++  const pausas = [];
++  s.on('pausa', function (p) { pausas.push(p); });
++  const llega = frase(s);
++  s.oir(800, 600);         // pausa a media frase…
++  s.oir(800, 1500);        // …y sigues hablando
++  const u = await llega;
++  assert.strictEqual(pausas.length, 2);
++  assert.strictEqual(u.pausa, pausas[1]);
++  assert.ok(u.pausa.audio.length > pausas[0].audio.length);
++});
++
++test('sin nadie escuchando, con STT_ANTICIPO_MS=0 o con la frase cerrada por tope, no hay pausa', async function () {
++  let s = detector();
++  let llega = frase(s);
++  s.oir(800, 1500);
++  assert.strictEqual((await llega).pausa, null, 'sin oyente no se copia el audio');
++
++  process.env.STT_ANTICIPO_MS = '0';
++  try {
++    s = detector();
++    let pausas = 0;
++    s.on('pausa', function () { pausas++; });
++    llega = frase(s);
++    s.oir(800, 1500);
++    assert.strictEqual((await llega).pausa, null);
++    assert.strictEqual(pausas, 0);
++  } finally {
++    delete process.env.STT_ANTICIPO_MS;
++  }
++
++  s = detector();
++  s.on('pausa', function () {});
++  llega = frase(s);
++  s.oir(800, 600);
++  s.forceFinalize();       // la # del teclado: no lo cerró ese silencio
++  assert.strictEqual((await llega).pausa, null);
++});
++
++test('una tos (menos de minSpeechMs de voz) no lanza anticipo', function () {
++  const s = detector();
++  let pausas = 0;
++  s.on('pausa', function () { pausas++; });
++  s.oir(200, 600);
++  assert.strictEqual(pausas, 0);
++});
++
++// ── El anticipo ──────────────────────────────────────────────────────────────
++test('con jacobo arriba, la frase sale del anticipo y no se transcribe dos veces', async function () {
++  const s = detector();
++  const w = whisperFalso();
++  armarAnticipo(s, w);
++  const llega = frase(s);
++  s.oir(1000, 1500);
++  const u = await llega;
++  assert.strictEqual(w.pedidos.length, 1);
++  assert.strictEqual(w.pedidos[0].soloOido, true, 'el anticipo nunca va a OpenAI');
++  assert.strictEqual(await transcribirFrase(w, u), 'anticipo ' + u.pausa.audio.length);
++  assert.strictEqual(w.pedidos.length, 1);
++});
++
++test('con el oído caído no se anticipa, y la frase va por el camino de siempre', async function () {
++  const s = detector();
++  const w = whisperFalso({ oido: false });
++  armarAnticipo(s, w);
++  const llega = frase(s);
++  s.oir(1000, 1500);
++  const u = await llega;
++  assert.strictEqual(w.pedidos.length, 0);
++  assert.strictEqual(await transcribirFrase(w, u), 'entera ' + u.audio.length);
++  assert.strictEqual(w.pedidos[0].soloOido, false, 'con su reserva de OpenAI');
++});
++
++test('si el anticipo falla, se transcribe la frase entera', async function () {
++  const s = detector();
++  const w = whisperFalso({ falla: true });
++  armarAnticipo(s, w);
++  const llega = frase(s);
++  s.oir(1000, 1500);
++  const u = await llega;
++  assert.strictEqual(await transcribirFrase(w, u), 'entera ' + u.audio.length);
++  assert.strictEqual(w.pedidos.length, 2);
++});
++
++test('con la escucha pasiva dormida no se anticipa (la radio del coche)', async function () {
++  const s = detector();
++  const w = whisperFalso();
++  let dormida = true;
++  armarAnticipo(s, w, { activo: function () { return !dormida; } });
++  let llega = frase(s);
++  s.oir(1000, 1500);
++  await llega;
++  assert.strictEqual(w.pedidos.length, 0);
++  dormida = false;
++  llega = frase(s);
++  s.oir(1000, 1500);
++  await llega;
++  assert.strictEqual(w.pedidos.length, 1);
++});
++
++test('un whisperClient sin oidoDisponible (los dobles de los otros tests) no se toca', async function () {
++  const s = detector();
++  const w = { pedidos: 0, transcribe: async function () { w.pedidos++; return 'hola'; } };
++  armarAnticipo(s, w);
++  const llega = frase(s);
++  s.oir(1000, 1500);
++  const u = await llega;
++  assert.strictEqual(w.pedidos, 0);
++  assert.strictEqual(await transcribirFrase(w, u), 'hola');
++});

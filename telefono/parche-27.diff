@@ -1,0 +1,420 @@
+diff -ruN a/claude-api-server/server.js b/claude-api-server/server.js
+--- a/claude-api-server/server.js	2026-10-23 21:59:44.000000000 +0200
++++ b/claude-api-server/server.js	2026-10-27 16:14:08.114361200 +0100
+@@ -264,6 +264,23 @@
+ 
+ `;
+ 
++function cabecera(devicePrompt) {
++  let texto = '';
++  if (devicePrompt) {
++    texto += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
++  }
++  return texto + VOICE_CONTEXT;
++}
++
++// Parche 27: el turno con el que se precalienta. Claude lo contesta (no hay forma de
++// mandarle algo sin que conteste), así que se le pide lo más corto posible. Lo de
++// después evita que el primer turno de verdad empiece comentando el contexto («ya lo
++// tengo en el contexto…»): no se dice, pero se escribe antes del VOICE_RESPONSE.
++const AVISO_PRECALENTAR = '[Acaba de descolgar y todavía no ha dicho nada. Este mensaje solo prepara la llamada: responde únicamente «listo». A lo que diga después contesta directamente con el formato de voz, sin mencionar este mensaje ni el contexto.]';
++
++// callId -> promesa que se cumple cuando el turno de precalentar ya está mandado.
++const precalentando = new Map();
++
+ // Middleware
+ app.use(express.json());
+ 
+@@ -323,13 +340,10 @@
+      * 2. VOICE_CONTEXT - general voice call instructions
+      * 3. User's prompt - what they actually said
+      */
+-    let fullPrompt = '';
+-
+-    if (devicePrompt) {
+-      fullPrompt += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
+-    }
+-
+-    fullPrompt += VOICE_CONTEXT;
++    let fullPrompt = cabecera(devicePrompt);
++    // Parche 27: si se está precalentando, que su turno (con el contexto) vaya delante.
++    const pre = callId ? precalentando.get(callId) : null;
++    if (pre) await pre.catch(() => {});
+     // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
+     // siguientes ya lo llevan dentro.
+     const nueva = Boolean(callId) && !sessions.has(callId);
+@@ -566,6 +580,54 @@
+ });
+ 
+ /**
++ * POST /precalentar (parche 27)
++ *
++ * La voice-app lo llama al descolgar, mientras suena el saludo. Arranca la sesión viva
++ * de la llamada y le manda ya el turno largo (identidad, bitácora, contexto) con
++ * AVISO_PRECALENTAR. Sin esto, la primera pregunta pagaba todo eso: arrancar Claude
++ * Code, conectar su MCP y leer en frío su prompt de sistema, el CLAUDE.md y el
++ * contexto. Contesta al momento; lo demás sigue solo.
++ *
++ * Request body: { "callId": "...", "devicePrompt": "..." }
++ */
++app.post('/precalentar', (req, res) => {
++  const { callId, devicePrompt } = req.body || {};
++  const timestamp = new Date().toISOString();
++  if (!callId || !SESION_VIVA) {
++    return res.json({ success: false, error: callId ? 'sin sesión viva' : 'falta callId' });
++  }
++  if (sessions.has(callId)) return res.json({ success: true, yaEstaba: true });
++
++  let viva;
++  try {
++    viva = obtenerViva(callId, timestamp);
++  } catch (e) {
++    console.warn(`[${timestamp}] PRECALENTAR: no (${e.message})`);
++    return res.json({ success: false, error: e.message });
++  }
++  res.json({ success: true });
++
++  const t0 = Date.now();
++  let turno = null;
++  const enviado = (async () => {
++    const fullPrompt = cabecera(devicePrompt) + bitacora.contexto(callId) + (await contexto.pedir()) + AVISO_PRECALENTAR;
++    turno = viva.preguntar(fullPrompt);
++  })();
++  precalentando.set(callId, enviado);
++  enviado.then(() => turno).then((r) => {
++    if (r.isError) throw new Error(r.response.substring(0, 200));
++    console.log(`[${new Date().toISOString()}] PRECALENTADA ${callId} en ${Date.now() - t0} ms`);
++  }).catch((e) => {
++    console.warn(`[${new Date().toISOString()}] PRECALENTAR falló (${e.message}): la primera pregunta empieza de cero`);
++    // Que la primera pregunta lleve su contexto y no intente un --resume de una sesión
++    // que quizá no llegó a guardarse.
++    sessions.delete(callId);
++  }).finally(() => {
++    if (precalentando.get(callId) === enviado) precalentando.delete(callId);
++  });
++});
++
++/**
+  * POST /bitacora
+  * voice-app avisa al acabar cada llamada saliente, contestada o no. Las no cogidas y
+  * las del buzón no pasan por /ask, y sin esto Jarvis no sabría que te llamó.
+@@ -598,6 +660,7 @@
+     endpoints: {
+       'POST /ask': 'Send a prompt to Claude',
+       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
++      'POST /precalentar': 'Arranca la sesión de una llamada al descolgar (parche 27)',
+       'GET /health': 'Health check'
+     }
+   });
+diff -ruN a/claude-api-server/test/parche27.test.js b/claude-api-server/test/parche27.test.js
+--- a/claude-api-server/test/parche27.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/claude-api-server/test/parche27.test.js	2026-10-27 16:09:48.744227400 +0100
+@@ -0,0 +1,117 @@
++/**
++ * Parche 27: la sesión de la llamada se precalienta al descolgar (POST /precalentar).
++ *
++ * Arranca server.js de verdad, en un directorio temporal y con un Claude de mentira que
++ * apunta lo que recibe y contesta un `result` por mensaje, como el de parche19.test.js.
++ * Se lanza con `node --test test/parche27.test.js` desde claude-api-server/, sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++const { spawn } = require('node:child_process');
++
++const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parche27-'));
++const RECIBIDO = path.join(dir, 'recibido.jsonl');
++const CLAUDE_FALSO = path.join(dir, 'claude-falso');
++fs.writeFileSync(CLAUDE_FALSO, `#!${process.execPath}
++const fs = require('fs');
++let buf = '';
++process.stdin.on('data', d => {
++  buf += d;
++  let i;
++  while ((i = buf.indexOf('\\n')) >= 0) {
++    const texto = JSON.parse(buf.slice(0, i)).message.content; buf = buf.slice(i + 1);
++    fs.appendFileSync(${JSON.stringify(RECIBIDO)}, JSON.stringify(texto) + '\\n');
++    const calentar = /responde únicamente «listo»/.test(texto);
++    if (calentar && process.env.FALLA_PRECALENTAR) {
++      console.log(JSON.stringify({type:'result', is_error:true, result:'OAuth session expired'}));
++    } else {
++      console.log(JSON.stringify({type:'result', result: calentar ? 'listo' : '🗣️ VOICE_RESPONSE: eco ' + texto.slice(-12), session_id:'s1'}));
++    }
++  }
++});
++process.stdin.on('end', () => process.exit(0));
++`, { mode: 0o755 });
++
++let puerto = 34100;
++async function servidor(entorno) {
++  try { fs.unlinkSync(RECIBIDO); } catch { /* no estaba */ }
++  const p = ++puerto;
++  const proc = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
++    cwd: dir,
++    env: Object.assign({}, process.env, { PORT: String(p), CLAUDE_BIN: CLAUDE_FALSO, CONTEXTO_URL: 'http://127.0.0.1:9' }, entorno),
++    stdio: ['ignore', 'pipe', 'pipe'],
++  });
++  await new Promise((resolve, reject) => {
++    proc.stdout.on('data', (d) => { if (/Listening on/.test(d.toString())) resolve(); });
++    proc.on('exit', (c) => reject(new Error('server.js salió con ' + c)));
++  });
++  const url = 'http://127.0.0.1:' + p;
++  return {
++    pedir: async (ruta, cuerpo) => (await fetch(url + ruta, {
++      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo),
++    })).json(),
++    recibido: () => fs.existsSync(RECIBIDO)
++      ? fs.readFileSync(RECIBIDO, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [],
++    parar: () => proc.kill('SIGTERM'),
++  };
++}
++const espera = (ms) => new Promise((r) => setTimeout(r, ms));
++
++test('precalentar contesta al momento, y la primera pregunta va detrás de su turno', async function () {
++  const s = await servidor();
++  try {
++    assert.deepStrictEqual(await s.pedir('/precalentar', { callId: 'c1', devicePrompt: 'Eres Jarvis' }), { success: true });
++    const r = await s.pedir('/ask', { prompt: '¿qué tengo hoy?', callId: 'c1', devicePrompt: 'Eres Jarvis' });
++    assert.strictEqual(r.success, true);
++    assert.match(r.response, /tengo hoy\?$/,'la respuesta es la de la pregunta, no la de precalentar');
++    const m = s.recibido();
++    assert.strictEqual(m.length, 2);
++    assert.match(m[0], /\[DEVICE IDENTITY\]\nEres Jarvis/);
++    assert.match(m[0], /responde únicamente «listo»/);
++    assert.doesNotMatch(m[1], /llamadas recientes|CONTEXTO AL DESCOLGAR/i, 'el contexto no se repite');
++  } finally {
++    s.parar();
++  }
++});
++
++test('dos veces, o sin callId, no arranca nada de más', async function () {
++  const s = await servidor();
++  try {
++    await s.pedir('/precalentar', { callId: 'c2' });
++    assert.deepStrictEqual(await s.pedir('/precalentar', { callId: 'c2' }), { success: true, yaEstaba: true });
++    assert.strictEqual((await s.pedir('/precalentar', {})).success, false);
++    await espera(300);
++    assert.strictEqual(s.recibido().length, 1);
++  } finally {
++    s.parar();
++  }
++});
++
++test('si precalentar falla, la primera pregunta empieza de cero con su contexto', async function () {
++  const s = await servidor({ FALLA_PRECALENTAR: '1' });
++  try {
++    await s.pedir('/precalentar', { callId: 'c3', devicePrompt: 'Eres Jarvis' });
++    await espera(500);
++    const r = await s.pedir('/ask', { prompt: 'hola', callId: 'c3', devicePrompt: 'Eres Jarvis' });
++    assert.strictEqual(r.success, true);
++    assert.match(r.response, /hola$/);
++  } finally {
++    s.parar();
++  }
++});
++
++test('con SESION_VIVA=0 no hay precalentado y /ask sigue como siempre', async function () {
++  const s = await servidor({ SESION_VIVA: '0' });
++  try {
++    assert.strictEqual((await s.pedir('/precalentar', { callId: 'c4' })).success, false);
++    await espera(200);
++    assert.strictEqual(s.recibido().length, 0);
++  } finally {
++    s.parar();
++  }
++});
+diff -ruN a/voice-app/lib/claude-bridge.js b/voice-app/lib/claude-bridge.js
+--- a/voice-app/lib/claude-bridge.js	2026-09-26 18:03:27.000000000 +0200
++++ b/voice-app/lib/claude-bridge.js	2026-10-27 16:08:10.054630600 +0100
+@@ -96,6 +96,28 @@
+ }
+ 
+ /**
++ * Parche 27: que el puente arranque la sesión de la llamada mientras suena el saludo.
++ * Nunca lanza ni hace esperar: si el puente es viejo (404) o no llega, la primera
++ * pregunta arranca la sesión como antes.
++ * @param {string} callId
++ * @param {string} devicePrompt
++ */
++async function precalentar(callId, devicePrompt) {
++  if (!callId || process.env.PRECALENTAR === '0') return false;
++  try {
++    const r = await axios.post(
++      `${CLAUDE_API_URL}/precalentar`,
++      { callId, devicePrompt },
++      { timeout: 3000, headers: { 'Content-Type': 'application/json' } }
++    );
++    return Boolean(r.data && r.data.success);
++  } catch (error) {
++    console.warn(`[${new Date().toISOString()}] CLAUDE No se pudo precalentar: ${error.message}`);
++    return false;
++  }
++}
++
++/**
+  * Check if Claude API is available
+  * @returns {Promise<boolean>} True if API is reachable
+  */
+@@ -111,5 +133,6 @@
+ module.exports = {
+   query,
+   endSession,
++  precalentar,
+   isAvailable
+ };
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-10-27 16:00:40.000000000 +0100
++++ b/voice-app/lib/conversation-loop.js	2026-10-27 16:08:17.526249300 +0100
+@@ -190,6 +190,10 @@
+         `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
+         { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true }
+       ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
++    } else if (callActive && typeof claudeBridge.precalentar === 'function') {
++      // Parche 27: sin aviso que dar (el modo coche, por ejemplo), Claude arranca ya y
++      // no con la primera pregunta. Con aviso, la consulta de arriba ya lo arranca.
++      claudeBridge.precalentar(callUuid, devicePrompt).catch(() => {});
+     }
+ 
+     // Check if call is still active before starting audio fork
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-10-27 16:00:40.000000000 +0100
++++ b/voice-app/lib/sip-handler.js	2026-10-27 16:08:14.012408100 +0100
+@@ -130,6 +130,11 @@
+   try {
+     console.log('[' + new Date().toISOString() + '] CONVERSATION Starting (session: ' + callUuid + ', device: ' + deviceName + ', voice: ' + voiceId + ')...');
+ 
++    // Parche 27: Claude arranca mientras suena el saludo, no con la primera pregunta.
++    if (typeof claudeBridge.precalentar === 'function') {
++      claudeBridge.precalentar(callUuid, devicePrompt).catch(function () {});
++    }
++
+     // Play device-specific greeting with device voice
+     const greetingUrl = await ttsService.generateSpeech(greeting, voiceId);
+     await endpoint.play(greetingUrl);
+diff -ruN a/voice-app/test/parche27.test.js b/voice-app/test/parche27.test.js
+--- a/voice-app/test/parche27.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche27.test.js	2026-10-27 16:09:24.743920000 +0100
+@@ -0,0 +1,119 @@
++/**
++ * Parche 27: la voice-app pide al puente que precaliente la sesión de Claude al
++ * descolgar, antes de que suene el saludo.
++ *
++ * Mismos dobles que parche22.test.js. Se lanza con `node --test test/parche27.test.js`,
++ * dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++process.env.CLAUDE_API_URL = 'http://127.0.0.1:9';     // nadie escucha ahí
++const claudeBridge = require('../lib/claude-bridge');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++const orden = [];
++const tts = { generateSpeech: async function (texto) { return 'tts:' + texto; } };
++
++function endpointFalso() {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.play = async function (url) { orden.push('play ' + url); };
++  ep.api = async function () {};
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++function sesionFalsa(frases) {
++  const s = new EventEmitter();
++  let i = 0;
++  s.setCaptureEnabled = function () {};
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {};
++  s.waitForUtterance = async function () {
++    if (i >= frases.length) throw new Error('AudioForkSession closed for call x');
++    return { audio: Buffer.from(frases[i++]), reason: 'end_silence' };
++  };
++  return s;
++}
++
++function claudeFalso() {
++  const c = { preguntas: [], precalentadas: [] };
++  c.query = async function (texto) { c.preguntas.push(texto); return '🗣️ VOICE_RESPONSE: Hecho, señor.'; };
++  c.precalentar = async function (callId) { orden.push('precalentar ' + callId); c.precalentadas.push(callId); return true; };
++  c.endSession = async function () {};
++  return c;
++}
++
++function opciones(sesion, claude) {
++  return {
++    ttsService: tts, whisperClient: { transcribe: async function (a) { return a.toString(); } },
++    claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++
++// ── Casos ────────────────────────────────────────────────────────────────────
++test('27, entrante: precalienta antes de que suene el saludo', async function () {
++  orden.length = 0;
++  const ep = endpointFalso();
++  const claude = claudeFalso();
++  const dialogo = new EventEmitter();
++  dialogo.destroy = function () {};
++  const o = opciones(sesionFalsa(['qué tengo hoy', 'adiós']), claude);
++  o.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++  const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++  await handleInvite(req, { send: function () {} }, o);
++  assert.strictEqual(claude.precalentadas.length, 1);
++  assert.match(orden[0], /^precalentar /, 'lo primero, antes del saludo');
++  assert.ok(orden[1].indexOf('play tts:') === 0);
++  assert.deepStrictEqual(claude.preguntas.length, 1);
++});
++
++test('27, saliente: sin aviso precalienta; con aviso, ya lo arranca la consulta del aviso', async function () {
++  let claude = claudeFalso();
++  await runConversationLoop(endpointFalso(), new EventEmitter(), 'c-sin',
++    Object.assign(opciones(sesionFalsa(['adiós']), claude), { skipGreeting: true }));
++  assert.deepStrictEqual(claude.precalentadas, ['c-sin']);
++
++  claude = claudeFalso();
++  await runConversationLoop(endpointFalso(), new EventEmitter(), 'c-con',
++    Object.assign(opciones(sesionFalsa(['adiós']), claude), { skipGreeting: true, initialContext: 'Tienes clase' }));
++  assert.deepStrictEqual(claude.precalentadas, []);
++});
++
++test('27: un puente sin precalentar (los dobles de antes) no rompe nada', async function () {
++  const claude = claudeFalso();
++  delete claude.precalentar;
++  const r = await runConversationLoop(endpointFalso(), new EventEmitter(), 'c-viejo',
++    Object.assign(opciones(sesionFalsa(['qué hora es', 'adiós']), claude), { skipGreeting: true }));
++  assert.strictEqual(r.endReason, 'goodbye');
++  assert.strictEqual(claude.preguntas.length, 1);
++});
++
++test('27: precalentar nunca lanza: sin callId, apagado o con el puente caído', async function () {
++  assert.strictEqual(await claudeBridge.precalentar(''), false);
++  process.env.PRECALENTAR = '0';
++  try {
++    assert.strictEqual(await claudeBridge.precalentar('c1'), false);
++  } finally {
++    delete process.env.PRECALENTAR;
++  }
++  assert.strictEqual(await claudeBridge.precalentar('c1', 'Eres Jarvis'), false);
++});

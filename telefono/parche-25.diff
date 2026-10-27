@@ -1,0 +1,309 @@
+diff -ruN a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
+--- a/voice-app/lib/whisper-client.js	2026-10-27 15:41:41.253061100 +0100
++++ b/voice-app/lib/whisper-client.js	2026-10-27 15:42:04.224796700 +0100
+@@ -1,6 +1,12 @@
+ /**
+- * OpenAI Whisper API Client for Speech-to-Text
++ * Speech-to-Text: primero el oído de jacobo, OpenAI Whisper de reserva
+  * Converts audio buffers (L16 PCM from FreeSWITCH) to text
++ *
++ * Parche 25: si están OIDO_URL y OIDO_TOKEN, cada frase va antes a `POST /transcribir`
++ * del oído (whisper.cpp `large-v3-turbo` en la GPU de jacobo). Si no contesta a tiempo o
++ * falla, la misma frase va a whisper-1 de OpenAI, y el oído se salta durante
++ * OIDO_PAUSA_MS para no pagar la espera en cada turno mientras jacobo esté caído.
++ * OIDO=0 lo apaga sin quitar las variables.
+  */
+ 
+ const OpenAI = require("openai");
+@@ -8,6 +14,12 @@
+ const fs = require("fs");
+ const path = require("path");
+ 
++const OIDO_TIMEOUT_MS = parseInt(process.env.OIDO_TIMEOUT_MS || "4000", 10);
++const OIDO_PAUSA_MS = parseInt(process.env.OIDO_PAUSA_MS || "60000", 10);
++
++// Hasta cuándo no se le pregunta al oído (después de un fallo)
++let oidoCaidoHasta = 0;
++
+ // Lazy-initialized OpenAI client
+ let openai = null;
+ 
+@@ -24,6 +36,10 @@
+   return openai;
+ }
+ 
++function oidoConfigurado() {
++  return !!(process.env.OIDO_URL && process.env.OIDO_TOKEN) && process.env.OIDO !== "0";
++}
++
+ /**
+  * Convert L16 PCM buffer to WAV format for Whisper API
+  * @param {Buffer} pcmBuffer - Raw L16 PCM audio data
+@@ -43,41 +59,41 @@
+ }
+ 
+ /**
+- * Transcribe audio using OpenAI Whisper API
+- * @param {Buffer} audioBuffer - Audio data (either WAV or raw PCM)
+- * @param {Object} options - Transcription options
+- * @param {string} options.format - Input format: "wav" or "pcm" (default: "pcm")
+- * @param {number} options.sampleRate - Sample rate for PCM (default: 8000)
+- * @param {string} options.language - Language code (default: "en")
+- * @returns {Promise<string>} Transcribed text
++ * El oído de jacobo. El WAV va tal cual en el cuerpo (no multipart); el oído lo pasa a
++ * 16 kHz con ffmpeg. No admite `prompt`: `turbo` ya escribe bien «Jarvis».
++ * @returns {Promise<{texto: string, ms: number}>}
+  */
+-async function transcribe(audioBuffer, options = {}) {
+-  const {
+-    format = "pcm",
+-    sampleRate = 8000,
+-    language = "es",
+-    prompt = null
+-  } = options;
++async function transcribirEnOido(wavBuffer, language) {
++  const url = process.env.OIDO_URL.replace(/\/+$/, "") + "/transcribir";
++  const r = await fetch(url, {
++    method: "POST",
++    headers: {
++      "X-Auth-Token": process.env.OIDO_TOKEN,
++      "X-Idioma": language,
++      "Content-Type": "audio/wav"
++    },
++    body: wavBuffer,
++    signal: AbortSignal.timeout(OIDO_TIMEOUT_MS)
++  });
++  if (!r.ok) {
++    throw new Error("HTTP " + r.status);
++  }
++  const datos = await r.json();
++  return { texto: datos.texto || "", ms: datos.ms };
++}
+ 
++async function transcribirEnOpenAI(wavBuffer, language, prompt) {
+   const client = getOpenAIClient();
+   if (!client) {
+     throw new Error("OpenAI API key not configured");
+   }
+ 
+-  // Convert PCM to WAV if needed
+-  let wavBuffer;
+-  if (format === "pcm") {
+-    wavBuffer = pcmToWav(audioBuffer, sampleRate);
+-  } else {
+-    wavBuffer = audioBuffer;
+-  }
+-
+   // Write to temp file (Whisper API requires a file)
+   const tempFile = path.join("/tmp", "whisper-" + Date.now() + ".wav");
+   fs.writeFileSync(tempFile, wavBuffer);
+ 
+   try {
+-    const transcription = await client.audio.transcriptions.create({
++    return await client.audio.transcriptions.create({
+       file: fs.createReadStream(tempFile),
+       model: "whisper-1",
+       language: language,
+@@ -85,11 +101,6 @@
+       ...(prompt ? { prompt: prompt } : {}),
+       response_format: "text"
+     });
+-
+-    const timestamp = new Date().toISOString();
+-    console.log("[" + timestamp + "] WHISPER Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
+-
+-    return transcription;
+   } finally {
+     // Clean up temp file
+     try {
+@@ -101,11 +112,63 @@
+ }
+ 
+ /**
+- * Check if Whisper API is configured and available
+- * @returns {boolean} True if API key is set
++ * Transcribe audio: el oído de jacobo y, si falla, OpenAI Whisper
++ * @param {Buffer} audioBuffer - Audio data (either WAV or raw PCM)
++ * @param {Object} options - Transcription options
++ * @param {string} options.format - Input format: "wav" or "pcm" (default: "pcm")
++ * @param {number} options.sampleRate - Sample rate for PCM (default: 8000)
++ * @param {string} options.language - Language code (default: "es")
++ * @param {string} options.prompt - Pista para whisper-1 (el oído la ignora)
++ * @returns {Promise<string>} Transcribed text
++ */
++async function transcribe(audioBuffer, options = {}) {
++  const {
++    format = "pcm",
++    sampleRate = 8000,
++    language = "es",
++    prompt = null
++  } = options;
++
++  // Convert PCM to WAV if needed
++  let wavBuffer;
++  if (format === "pcm") {
++    wavBuffer = pcmToWav(audioBuffer, sampleRate);
++  } else {
++    wavBuffer = audioBuffer;
++  }
++
++  let transcription = null;
++  let origen = "openai";
++
++  if (oidoConfigurado() && Date.now() >= oidoCaidoHasta) {
++    const t0 = Date.now();
++    try {
++      const oido = await transcribirEnOido(wavBuffer, language);
++      transcription = oido.texto;
++      origen = "jacobo " + (Date.now() - t0) + " ms";
++    } catch (e) {
++      oidoCaidoHasta = Date.now() + OIDO_PAUSA_MS;
++      const motivo = e.name === "TimeoutError" ? "sin respuesta en " + OIDO_TIMEOUT_MS + " ms" : (e.cause && e.cause.code) || e.message;
++      console.warn("[WHISPER] El oído de jacobo falla (" + motivo + "): OpenAI durante " + Math.round(OIDO_PAUSA_MS / 1000) + " s");
++    }
++  }
++
++  if (transcription === null) {
++    transcription = await transcribirEnOpenAI(wavBuffer, language, prompt);
++  }
++
++  const timestamp = new Date().toISOString();
++  console.log("[" + timestamp + "] WHISPER (" + origen + ") Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
++
++  return transcription;
++}
++
++/**
++ * Check if some STT is configured and available
++ * @returns {boolean} True if the oído or the OpenAI API key is set
+  */
+ function isAvailable() {
+-  return !!process.env.OPENAI_API_KEY;
++  return oidoConfigurado() || !!process.env.OPENAI_API_KEY;
+ }
+ 
+ module.exports = {
+diff -ruN a/voice-app/test/parche25.test.js b/voice-app/test/parche25.test.js
+--- a/voice-app/test/parche25.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche25.test.js	2026-10-27 15:43:02.080608300 +0100
+@@ -0,0 +1,120 @@
++/**
++ * Parche 25: el STT va primero al oído de jacobo y, si falla, a whisper-1 de OpenAI.
++ *
++ * `fetch` y `openai` son dobles: se lanza con `node --test test/parche25.test.js`,
++ * dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++const openaiPedidos = [];
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'openai') {
++    return function OpenAI() {
++      this.audio = { transcriptions: { create: async function (p) {
++        openaiPedidos.push(p);
++        p.file.on('error', function () {}); // el de verdad lo lee; aquí se abre ya borrado
++        return 'de openai\n';
++      } } };
++    };
++  }
++  return requireDeVerdad.apply(this, arguments);
++};
++
++let fetchPedidos = [];
++function fetchQue(responde) {
++  fetchPedidos = [];
++  global.fetch = async function (url, opciones) {
++    fetchPedidos.push({ url: url, opciones: opciones });
++    return responde(url, opciones);
++  };
++}
++
++const RUTA = require.resolve('../lib/whisper-client');
++function cliente(entorno) {
++  for (const k of ['OIDO', 'OIDO_URL', 'OIDO_TOKEN', 'OIDO_PAUSA_MS', 'OPENAI_API_KEY']) delete process.env[k];
++  Object.assign(process.env, entorno);
++  delete require.cache[RUTA];
++  openaiPedidos.length = 0;
++  return require('../lib/whisper-client');
++}
++
++const PCM = Buffer.alloc(16000 * 2); // 0,5 s de silencio a 16 kHz
++const CON_OIDO = { OIDO_URL: 'http://jacobo:8770/', OIDO_TOKEN: 'llave', OPENAI_API_KEY: 'sk-x' };
++const bien = async function () {
++  return { ok: true, status: 200, json: async function () { return { texto: 'Jarvis, ¿qué tengo hoy?', ms: 900 }; } };
++};
++
++// ── Casos ────────────────────────────────────────────────────────────────────
++test('con el oído configurado, transcribe jacobo y OpenAI no se toca', async function () {
++  fetchQue(bien);
++  const w = cliente(CON_OIDO);
++  const texto = await w.transcribe(PCM, { format: 'pcm', sampleRate: 16000, language: 'es', prompt: 'Jarvis.' });
++  assert.strictEqual(texto, 'Jarvis, ¿qué tengo hoy?');
++  assert.strictEqual(openaiPedidos.length, 0);
++  assert.strictEqual(fetchPedidos.length, 1);
++  const p = fetchPedidos[0];
++  assert.strictEqual(p.url, 'http://jacobo:8770/transcribir');
++  assert.strictEqual(p.opciones.headers['X-Auth-Token'], 'llave');
++  assert.strictEqual(p.opciones.headers['X-Idioma'], 'es');
++  assert.strictEqual(p.opciones.body.subarray(0, 4).toString(), 'RIFF');
++  assert.ok(p.opciones.signal, 'lleva tiempo máximo');
++});
++
++test('si el oído contesta con error, la misma frase va a OpenAI', async function () {
++  fetchQue(async function () { return { ok: false, status: 503, json: async function () { return {}; } }; });
++  const w = cliente(CON_OIDO);
++  assert.strictEqual(await w.transcribe(PCM, { sampleRate: 16000, prompt: 'Jarvis.' }), 'de openai\n');
++  assert.strictEqual(openaiPedidos.length, 1);
++  assert.strictEqual(openaiPedidos[0].prompt, 'Jarvis.');
++});
++
++test('tras un fallo, el oído se salta durante la pausa', async function () {
++  fetchQue(async function () { const e = new Error('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e; });
++  const w = cliente(CON_OIDO);
++  await w.transcribe(PCM);
++  await w.transcribe(PCM);
++  assert.strictEqual(fetchPedidos.length, 1, 'solo se le pregunta una vez');
++  assert.strictEqual(openaiPedidos.length, 2);
++});
++
++test('pasada la pausa, se le vuelve a preguntar al oído', async function () {
++  let primera = true;
++  fetchQue(async function () {
++    if (primera) { primera = false; const e = new Error('timeout'); e.name = 'TimeoutError'; throw e; }
++    return bien();
++  });
++  const w = cliente(Object.assign({ OIDO_PAUSA_MS: '0' }, CON_OIDO));
++  assert.strictEqual(await w.transcribe(PCM), 'de openai\n');
++  assert.strictEqual(await w.transcribe(PCM), 'Jarvis, ¿qué tengo hoy?');
++  assert.strictEqual(fetchPedidos.length, 2);
++});
++
++test('el silencio del oído es un texto vacío, no un fallo', async function () {
++  fetchQue(async function () { return { ok: true, status: 200, json: async function () { return { texto: '', ms: 300 }; } }; });
++  const w = cliente(CON_OIDO);
++  assert.strictEqual(await w.transcribe(PCM), '');
++  assert.strictEqual(openaiPedidos.length, 0);
++});
++
++test('sin OIDO_URL, o con OIDO=0, va directo a OpenAI', async function () {
++  fetchQue(bien);
++  let w = cliente({ OPENAI_API_KEY: 'sk-x' });
++  assert.strictEqual(await w.transcribe(PCM), 'de openai\n');
++  w = cliente(Object.assign({ OIDO: '0' }, CON_OIDO));
++  assert.strictEqual(await w.transcribe(PCM), 'de openai\n');
++  assert.strictEqual(fetchPedidos.length, 0);
++});
++
++test('isAvailable vale con cualquiera de los dos', function () {
++  assert.strictEqual(cliente({}).isAvailable(), false);
++  assert.strictEqual(cliente({ OIDO_URL: 'http://jacobo:8770', OIDO_TOKEN: 'llave' }).isAvailable(), true);
++  assert.strictEqual(cliente({ OPENAI_API_KEY: 'sk-x' }).isAvailable(), true);
++});
