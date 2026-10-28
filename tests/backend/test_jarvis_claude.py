@@ -147,8 +147,10 @@ class TestElChat:
 
         assert r.json() == {"respuesta": "¿Te la apunto el viernes?", "herramientas": ["agenda"],
                             "pendiente": {"herramienta": "crear_evento", "argumentos": {"titulo": "Cena"}},
-                            "motor": "claude"}
+                            "motor": "claude", "modelo": ""}
         [(_, _, kw)] = mock_requests.called("POST", "/turno")
+        # Sin pedir potencia, el servicio usa el suyo de siempre.
+        assert kw["json"]["modelo"] == ""
         assert kw["headers"] == {"Authorization": "Bearer claude-token"}
         # La conversación viaja entera: cada turno es una sesión nueva.
         assert "Usuario: hola" in kw["json"]["prompt"] and "Jarvis: dime" in kw["json"]["prompt"]
@@ -156,6 +158,23 @@ class TestElChat:
         assert "mcp__jarvis__" in kw["json"]["sistema"]
         # El turno no se queda colgado en memoria.
         assert main._chat_turnos == {}
+
+    def test_la_potencia_maxima_pide_el_modelo_potente(self, client, auth_headers,
+                                                       mock_requests, con_claude):
+        """La vista de Jarvis lo pide con `potente`; el modelo de la respuesta es el que
+        dice el servicio, no el pedido: uno sin actualizar lo ignora."""
+        mock_requests.add("POST", "caja.test:3340/turno",
+                          FakeResponse({"respuesta": "A sus órdenes", "modelo": "claude-opus-5-5"}))
+        r = client.post("/jarvis", headers=auth_headers, json={"mensaje": "hola", "potente": True})
+        [(_, _, kw)] = mock_requests.called("POST", "/turno")
+        assert kw["json"]["modelo"] == main.JARVIS_CLAUDE_MODELO_POTENTE == "claude-opus-5-5"
+        assert r.json()["modelo"] == "claude-opus-5-5"
+
+    def test_un_servicio_viejo_no_dice_modelo(self, client, auth_headers, mock_requests,
+                                              con_claude):
+        mock_requests.add("POST", "caja.test:3340/turno", FakeResponse({"respuesta": "Hola"}))
+        r = client.post("/jarvis", headers=auth_headers, json={"mensaje": "hola", "potente": True})
+        assert r.json()["modelo"] == ""
 
     def test_si_claude_no_contesta_contesta_openai_y_lo_dice(self, client, auth_headers,
                                                              mock_requests, monkeypatch):
@@ -241,6 +260,17 @@ class TestElServicio:
         assert "--restricted" not in args
         assert args[args.index("--system-prompt") + 1] == "Eres Jarvis"
 
+    def test_el_modelo_potente_y_nada_mas(self, monkeypatch, tmp_path):
+        """Solo se acepta el potente; cualquier otro pedido sale con el de siempre."""
+        servicio = _servicio(monkeypatch)
+        assert servicio.elegir_modelo("claude-opus-5-5") == "claude-opus-5-5"
+        assert servicio.elegir_modelo("") == servicio.elegir_modelo(None) == "claude-sonnet-5-5"
+        assert servicio.elegir_modelo("cualquier-otro") == "claude-sonnet-5-5"
+        sistema = tmp_path / "s.txt"
+        sistema.write_text("Eres Jarvis")
+        args = servicio.comando("mcp.json", str(sistema), "--tools", "claude-opus-5-5")
+        assert args[args.index("--model") + 1] == "claude-opus-5-5"
+
     def test_el_turno_va_en_la_url_del_mcp(self, monkeypatch):
         servicio = _servicio(monkeypatch)
         jarvis = servicio.config_mcp(TURNO)["mcpServers"]["jarvis"]
@@ -269,6 +299,7 @@ class TestElServicio:
         codigo, datos = servicio.turno({"turno": TURNO, "prompt": "hola", "sistema": "Eres Jarvis"},
                                        "--tools --system-prompt-file")
         assert (codigo, datos["respuesta"]) == (200, "Hola")
+        assert datos["modelo"] == "claude-sonnet-5-5"
         # El mensaje entra por la entrada estándar, no como argumento.
         assert visto["input"] == "hola" and "hola" not in visto["args"]
         assert visto["cwd"] == str(tmp_path)

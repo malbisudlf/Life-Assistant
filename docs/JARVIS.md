@@ -1097,6 +1097,36 @@ Y en `backend/.env`: `JARVIS_MOTOR_CHAT=claude`, `JARVIS_CLAUDE_URL`,
 `extra_hosts: ["host.docker.internal:host-gateway"]` en el compose de HomeLab. El
 registro del servicio: `journalctl --user -u jarvis-claude`.
 
+## La vista a pantalla completa
+
+El botón **J.A.R.V.I.S.** de la cabecera (o «⤢ Pantalla completa» en la tarjeta) abre
+`src/components/jarvis/JarvisHUD.jsx`: el reactor en el centro, la conversación debajo,
+el sistema a la izquierda (motor, último turno, protocolos usados) y el día a la derecha
+(reloj, la frase del momento, el clima y lo que hay en el radar). Esc la cierra.
+
+- **No es otro chat.** Mensajes, envío, botón de confirmar, dictado, voz y modo llamada
+  son los de la tarjeta (`Dashboard.jsx`): lo que hables en una sigue en la otra. Tapa el
+  dashboard sin desmontarlo, así que una llamada en curso no se corta al abrirla o
+  cerrarla; la pantalla de llamada entrante va por encima.
+- **El reactor dice el estado**: cian en reposo, ámbar pensando (con los segundos del
+  turno), verde escuchando, barras de voz mientras habla y rojo cuando algo espera tu
+  autorización. Lo decide `estadoHud` en `src/lib/jarvisHud.js`.
+- **⚡ Potencia máxima**: el turno lo piensa `JARVIS_CLAUDE_MODELO_POTENTE` (Opus 5.5)
+  en vez del Sonnet de siempre. Viaja como `potente: true` en `/jarvis`, el backend lo
+  pasa como `modelo` al servicio de `caja`, y `chat/jarvis_claude.py` **solo acepta ese
+  o el suyo** (`elegir_modelo`): cualquier otro sale con el de siempre. Solo por escrito
+  y solo con `JARVIS_MOTOR_CHAT=claude`: la llamada sigue con OpenAI. Más lento y gasta
+  más límite de la suscripción, por eso es un interruptor (`la_jarvis_potente`).
+- **El modelo que se enseña es el que dice el servicio**, no el pedido: la respuesta trae
+  `modelo` desde `jarvis_claude.py`. Un servicio sin actualizar ignora `modelo` y no lo
+  devuelve, y la vista lo avisa («el servicio de caja aún no acepta la potencia máxima»)
+  en vez de presumir de Opus.
+- **Las respuestas se pintan con formato** (párrafos, listas, `**negritas**`, títulos)
+  troceando el texto en datos (`trocearRespuesta`), nunca como HTML: lo escribe el modelo.
+
+Para que la potencia funcione hay que copiar `chat/jarvis_claude.py` a `caja` y añadir
+`JARVIS_CLAUDE_MODELO_POTENTE` a `~/jarvis-chat/.env` (ver «El chat con Claude Code»).
+
 ## Documentos: OneDrive
 
 «¿Dónde está el contrato del piso?», «¿qué dice la póliza del coche sobre la grúa?». Es

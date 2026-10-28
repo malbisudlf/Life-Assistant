@@ -621,6 +621,10 @@ JARVIS_CLAUDE_TOKEN   = os.getenv("JARVIS_CLAUDE_TOKEN", "")
 # Un turno con varias herramientas puede tardar; más que esto es que algo se ha colgado,
 # y entonces contesta el de OpenAI.
 JARVIS_CLAUDE_TIMEOUT = int(os.getenv("JARVIS_CLAUDE_TIMEOUT", "150"))
+# El modelo de la «potencia máxima» de la vista de Jarvis: el turno lo pide así y el
+# servicio de `caja` solo lo acepta si es este o el suyo de siempre. Más lento y gasta
+# más límite de la suscripción, por eso es un interruptor y no el de siempre.
+JARVIS_CLAUDE_MODELO_POTENTE = os.getenv("JARVIS_CLAUDE_MODELO_POTENTE", "claude-opus-5-5").strip()
 # Y el token con el que esa sesión entra en `/mcp/chat` a usar las herramientas.
 JARVIS_MCP_CHAT_TOKEN = os.getenv("JARVIS_MCP_CHAT_TOKEN", "")
 # Mismo criterio que /ideas/audio: es una llamada de pago por petición, así que va con
@@ -31779,7 +31783,10 @@ def _jarvis_turno_claude(body) -> dict:
         r = http.post(f"{JARVIS_CLAUDE_URL}/turno",
                       headers={"Authorization": f"Bearer {JARVIS_CLAUDE_TOKEN}"},
                       json={"turno": turno, "prompt": _prompt_chat(body),
-                            "sistema": _sistema_chat(voz=bool(body.voz))},
+                            "sistema": _sistema_chat(voz=bool(body.voz)),
+                            # Vacío = el de siempre del servicio. Telegram no lo trae.
+                            "modelo": JARVIS_CLAUDE_MODELO_POTENTE
+                                      if getattr(body, "potente", False) else ""},
                       timeout=JARVIS_CLAUDE_TIMEOUT)
     except requests.RequestException as e:
         raise ClaudeNoContesta(f"no contesta ({type(e).__name__})") from e
@@ -31793,8 +31800,11 @@ def _jarvis_turno_claude(body) -> dict:
     texto = str(d.get("respuesta") or "").strip()
     if r.status_code >= 300 or not texto:
         raise ClaudeNoContesta(str(d.get("error") or f"respondió {r.status_code}")[:300])
+    # El modelo lo dice el servicio, no lo que se pidió: uno sin actualizar ignora
+    # `modelo` y contesta con el suyo, y la vista no puede presumir de Opus entonces.
     return {"respuesta": texto, "herramientas": list(dict.fromkeys(datos["usadas"])),
-            "pendiente": datos["pendiente"], "motor": "claude"}
+            "pendiente": datos["pendiente"], "motor": "claude",
+            "modelo": str(d.get("modelo") or "")[:64]}
 
 
 def _jarvis_chat(body, *, voz_con_claude: bool = False) -> dict:
@@ -32257,6 +32267,9 @@ class JarvisIn(BaseModel):
     # los escribe cualquiera.
     aviso:     str = Field(default="", max_length=36, pattern=r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$")
     tipo:      str = Field(default="", pattern=r"^(despliegue|sesion|revision)?$")
+    # La «potencia máxima» de la vista de Jarvis: el turno lo piensa
+    # JARVIS_CLAUDE_MODELO_POTENTE. Solo cuenta con el motor `claude` y por escrito.
+    potente:   bool = False
 
 
 class JarvisEjecutarIn(BaseModel):

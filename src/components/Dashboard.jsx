@@ -95,6 +95,24 @@ const ZonaDev = lazy(() =>
   ),
 );
 
+// La vista de Jarvis a pantalla completa, igual: su propio chunk, que solo se baja al
+// abrirla. Si falla la descarga no se reintenta (eso ya lo hace la zona dev con su
+// recarga): se vuelve al dashboard diciéndolo, que la tarjeta de Jarvis sigue ahí.
+const JarvisHUD = lazy(() =>
+  import("./jarvis/JarvisHUD").catch(() => ({ default: JarvisHUDSinCargar })),
+);
+
+function JarvisHUDSinCargar({ onSalir }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 95, display: "grid", placeItems: "center", background: "#02060b", color: "#9fdcef", padding: 24, textAlign: "center" }}>
+      <div>
+        <p>No se ha podido cargar la vista de Jarvis. ¿Hay conexión?</p>
+        <button onClick={onSalir} style={{ marginTop: 12 }}>Volver al dashboard</button>
+      </div>
+    </div>
+  );
+}
+
 function ZonaDevSinCargar({ onSalir }) {
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", color: "var(--muted, #94a3b8)", padding: 24, textAlign: "center" }}>
@@ -117,6 +135,8 @@ const HA_DISPONIBLE = Boolean(import.meta.env.VITE_HA_URL);
 const ENTREGAS_MARKER = import.meta.env.VITE_ENTREGAS_MARKER || "📚";
 // Identificador del agente PC, el mismo que manda el heartbeat desde agent/agent.py
 const AGENT_ID = import.meta.env.VITE_AGENT_ID || "pc-mikel";
+// El backend tal como lo enseña la vista de Jarvis («Enlace»): solo el host.
+const hostDeApi = (() => { try { return new URL(API).host; } catch { return API; } })();
 
 // Ritmo del seguimiento de un job del agente PC.
 const JOB_POLL_ACTIVO_MS = 2_000;    // modal delante: la barra de progreso va en vivo
@@ -2445,6 +2465,16 @@ export default function Dashboard() {
   });
   const jarvisFinRef = useRef(null);
   const jarvisVozRef = useRef(null);
+  // La vista a pantalla completa (src/components/jarvis/) y su «potencia máxima»: el
+  // turno lo piensa Opus en vez de Sonnet. Se recuerda porque es una preferencia, no un
+  // estado de la conversación.
+  const [jarvisHud, setJarvisHud] = useState(false);
+  const [jarvisPotente, setJarvisPotente] = useState(() => {
+    try { return localStorage.getItem("la_jarvis_potente") === "1"; } catch { return false; }
+  });
+  // Si la voz del navegador está leyendo una respuesta: es lo que mueve las barras del
+  // reactor fuera de una llamada (en llamada lo dice `jarvisFase`).
+  const [jarvisHablando, setJarvisHablando] = useState(false);
 
   // ── Modo llamada ──
   // Hablar con Jarvis como por teléfono: escucha seguida, se envía solo al detectar que
@@ -3787,6 +3817,9 @@ export default function Dashboard() {
     setJarvisBorrador("");
     setJarvisPendiente(null);
     setJarvisPensando(true);
+    const inicio = Date.now();
+    // La potencia solo vale por escrito: hablando, el turno lo piensa OpenAI igualmente.
+    const potente = jarvisPotente && !voz;
     try {
       // El motivo va solo en llamada: es lo único que lo trae, y por escrito el backend
       // ni siquiera mira el contexto de lo pendiente.
@@ -3794,7 +3827,7 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/jarvis`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({ mensaje, historial, voz, ...motivo }),
+        body: JSON.stringify({ mensaje, historial, voz, ...motivo, ...(potente ? { potente } : {}) }),
       });
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
@@ -3808,11 +3841,17 @@ export default function Dashboard() {
           rol: "assistant",
           texto: d.respuesta || "(sin respuesta)",
           herramientas: d.herramientas || [],
+          // Lo que enseña la vista de Jarvis debajo de cada respuesta: quién la pensó y
+          // cuánto tardó. No viaja al backend (jarvisHistorial solo manda rol y texto).
+          motor: d.motor || "", modelo: d.modelo || "", ms: Date.now() - inicio, potente,
         },
       ]);
       setJarvisPendiente(d.pendiente || null);
       // En llamada habla el ciclo de la llamada, para poder encadenar con la escucha.
-      if (jarvisHabla && !voz) hablarJarvis(d.respuesta || "");
+      if (jarvisHabla && !voz) {
+        setJarvisHablando(true);
+        hablarJarvis(d.respuesta || "", () => setJarvisHablando(false));
+      }
       return d.respuesta || "";
     } catch (e) {
       // Un fallo no puede parecerse a una respuesta: se marca como aviso, que se pinta
@@ -3882,6 +3921,12 @@ export default function Dashboard() {
     try { localStorage.setItem("la_jarvis_voz", ahora ? "1" : "0"); } catch { /* mejor esfuerzo */ }
     if (ahora) hablarJarvis("Voz activada.");
     else VOZ_SINTESIS?.cancel();
+  }
+
+  function alternarPotenciaJarvis() {
+    const ahora = !jarvisPotente;
+    setJarvisPotente(ahora);
+    try { localStorage.setItem("la_jarvis_potente", ahora ? "1" : "0"); } catch { /* mejor esfuerzo */ }
   }
 
   // Dictado con el reconocimiento del navegador: no cuesta nada y no sale del
@@ -6883,6 +6928,7 @@ export default function Dashboard() {
         <div style={cardStyle} data-card={id} key="jarvis">
           <div style={{ ...s.sectionLabel, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Jarvis</span>
+            <span style={{ display: "flex", gap: 6 }}>
             {jarvisMensajes.length > 0 && !jarvisLlamada && (
               <button onClick={nuevaConversacionJarvis} disabled={jarvisPensando}
                 title="Empezar una conversación nueva (no borra lo que Jarvis recuerda de ti)"
@@ -6893,6 +6939,14 @@ export default function Dashboard() {
                   opacity: jarvisPensando ? 0.5 : 1,
                 }}>Nueva conversación</button>
             )}
+              <button onClick={() => setJarvisHud(true)} title="Abrir Jarvis a pantalla completa"
+                aria-label="Abrir Jarvis a pantalla completa"
+                style={{
+                  padding: "2px 8px", borderRadius: 5, fontSize: 11, textTransform: "none",
+                  letterSpacing: 0, border: "0.5px solid var(--border2)", background: "transparent",
+                  color: "var(--accent)", cursor: "pointer",
+                }}>⤢ Pantalla completa</button>
+            </span>
           </div>
           <JarvisChat
             mensajes={jarvisMensajes}
@@ -9244,6 +9298,47 @@ export default function Dashboard() {
 
   return (
     <>
+      {/* La vista de Jarvis tapa el dashboard pero no lo desmonta: la conversación, la
+          llamada y la voz son las de la tarjeta, y siguen vivas al salir. La pantalla de
+          llamada entrante va por encima (z-index 100 frente a 95). */}
+      {jarvisHud && (
+        <Suspense fallback={<div style={{ position: "fixed", inset: 0, zIndex: 95, background: "#02060b" }} />}>
+          <JarvisHUD
+            mensajes={jarvisMensajes}
+            borrador={jarvisBorrador}
+            setBorrador={setJarvisBorrador}
+            onEnviar={enviarAJarvis}
+            pensando={jarvisPensando}
+            etiquetaPendiente={jarvisEtiquetaAccion(jarvisPendiente, { eventos: [...allEvents, ...classEvents], ideas })}
+            onConfirmar={confirmarAccionJarvis}
+            onDescartar={() => setJarvisPendiente(null)}
+            confirmando={jarvisConfirmando}
+            escuchando={jarvisEscuchando}
+            onDictar={dictarAJarvis}
+            habla={jarvisHabla}
+            onHabla={alternarVozJarvis}
+            hablando={jarvisHablando}
+            enLlamada={jarvisLlamada}
+            faseLlamada={jarvisFase}
+            parcial={jarvisParcial}
+            onLlamar={() => iniciarLlamada()}
+            onColgar={() => colgarLlamada()}
+            potente={jarvisPotente}
+            onPotente={alternarPotenciaJarvis}
+            onNueva={nuevaConversacionJarvis}
+            onSalir={() => setJarvisHud(false)}
+            host={hostDeApi}
+            briefing={{
+              frase:  momento.frase || momento.saludo,
+              clima:  weather?.temp != null
+                ? `${weather.temp}°${weather.temp_max != null ? ` · máx ${weather.temp_max}° · mín ${weather.temp_min}°` : ""}`
+                : "",
+              lineas: momento.chips.map(c => c.texto).slice(0, 5),
+            }}
+          />
+        </Suspense>
+      )}
+
       {/* Va antes que el dashboard y por encima de todo: mientras la llamada dure, es lo
           único que importa. Se cierra al colgar —con el botón o diciendo «adiós»— y la
           conversación queda debajo, en la tarjeta de Jarvis. */}
@@ -9302,6 +9397,11 @@ export default function Dashboard() {
                 borderRadius: 7, color: "var(--muted2)", fontSize: 13, cursor: "pointer",
                 padding: "3px 8px", fontFamily: "inherit", lineHeight: 1,
               }}>🛠</button>
+              <button onClick={() => setJarvisHud(true)} title="Jarvis a pantalla completa" aria-label="Jarvis a pantalla completa" style={{
+                background: "transparent", border: "0.5px solid rgba(94,231,255,0.35)",
+                borderRadius: 7, color: "#5ee7ff", fontSize: 12, cursor: "pointer",
+                padding: "3px 8px", fontFamily: "inherit", lineHeight: 1, letterSpacing: "0.12em",
+              }}>J.A.R.V.I.S.</button>
               <button onClick={() => {
                 setTrainingSettingsPrice(String(training?.client?.price_per_hour ?? ""));
                 setTrainingSettingsSpp(String(training?.client?.sessions_per_payment ?? ""));

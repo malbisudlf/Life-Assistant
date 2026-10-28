@@ -156,10 +156,12 @@ Ficheros clave:
 | Fichero | Qué es |
 |---|---|
 | `src/components/Dashboard.jsx` | TODA la UI (~9.700 líneas, un componente principal + subcomponentes en el mismo fichero) |
-| `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Única excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
+| `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
+| `src/components/jarvis/JarvisHUD.jsx` | La vista de Jarvis a pantalla completa (el HUD: reactor, conversación y telemetría). **La otra excepción**, por lo mismo que la zona dev: se carga en diferido y no es un widget. No tiene estado propio de la conversación: usa el de la tarjeta de Jarvis. Ver «La vista a pantalla completa» en `docs/JARVIS.md` |
 | `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
 | `src/lib/dev.js` | La lógica de la zona dev: estilos, lectura del estado del sistema y el resumen de una línea que enseña el panel ⚙ |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
+| `src/lib/jarvisHud.js` | Lógica pura de la vista de Jarvis: el estado del reactor, el nombre del modelo, los protocolos usados y cómo se trocea una respuesta (párrafos, listas, negritas) sin meter HTML |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |
 | `src/lib/vozAzure.js` | La voz que habla hoy (Azure Speech, desde septiembre; ver `docs/JARVIS_VOZ.md`, «La voz se mudó a Azure»), con Fish Audio de reserva en el backend desde octubre («Fish Audio, de reserva»). Si falla, devuelve lo que se quedó sin decir para que otra voz lo diga |

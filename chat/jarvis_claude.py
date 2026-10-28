@@ -35,6 +35,9 @@ TOKEN      = os.environ.get("JARVIS_CLAUDE_TOKEN", "")
 MCP_URL    = os.environ.get("JARVIS_MCP_URL", "").rstrip("/")
 MCP_TOKEN  = os.environ.get("JARVIS_MCP_CHAT_TOKEN", "")
 MODELO     = os.environ.get("JARVIS_CLAUDE_MODELO", "claude-sonnet-5-5")
+# El que pide la «potencia máxima» de la vista de Jarvis. Es el único otro que se acepta:
+# el cuerpo lo escribe el backend, pero un modelo arbitrario por HTTP no aporta nada.
+MODELO_POTENTE = os.environ.get("JARVIS_CLAUDE_MODELO_POTENTE", "claude-opus-5-5")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 HOST       = os.environ.get("JARVIS_CLAUDE_HOST", "127.0.0.1")
 PUERTO     = int(os.environ.get("JARVIS_CLAUDE_PUERTO", "3340"))
@@ -80,10 +83,10 @@ def entorno() -> dict:
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
 
 
-def comando(mcp_config: str, sistema: str, ayuda: str) -> list:
+def comando(mcp_config: str, sistema: str, ayuda: str, modelo: str = "") -> list:
     """Los argumentos de `claude`. Se exportan para poder probarlos sin lanzarlo."""
     args = [CLAUDE_BIN, "-p",
-            "--model", MODELO,
+            "--model", modelo or MODELO,
             "--output-format", "json",
             "--tools", "",
             "--strict-mcp-config", "--mcp-config", mcp_config,
@@ -126,11 +129,18 @@ def leer_salida(salida: str) -> dict:
             "turnos": datos.get("num_turns")}
 
 
+def elegir_modelo(pedido) -> str:
+    """El modelo del turno: el potente si se pide ese, y si no (o se pide otro), el de
+    siempre. Lo desconocido no es un error: el turno sale igual, con el de siempre."""
+    return MODELO_POTENTE if pedido and pedido == MODELO_POTENTE else MODELO
+
+
 def turno(cuerpo: dict, ayuda: str) -> tuple:
     """Un turno entero. Devuelve (código HTTP, respuesta)."""
     turno_id = str(cuerpo.get("turno") or "")
     prompt   = str(cuerpo.get("prompt") or "").strip()
     sistema  = str(cuerpo.get("sistema") or "")
+    modelo   = elegir_modelo(cuerpo.get("modelo"))
     if not _UUID.match(turno_id) or not prompt:
         return 400, {"error": "Falta el turno o el mensaje"}
     if not _cupo.acquire(blocking=False):
@@ -146,7 +156,7 @@ def turno(cuerpo: dict, ayuda: str) -> tuple:
             with open(sis, "w", encoding="utf-8") as f:
                 f.write(sistema)
             try:
-                hecho = subprocess.run(comando(mcp, sis, ayuda), input=prompt,
+                hecho = subprocess.run(comando(mcp, sis, ayuda, modelo), input=prompt,
                                        capture_output=True, text=True, cwd=DIRECTORIO,
                                        env=entorno(), timeout=TIMEOUT_S)
             except subprocess.TimeoutExpired:
@@ -159,7 +169,7 @@ def turno(cuerpo: dict, ayuda: str) -> tuple:
             print(f"jarvis-claude: falló el turno (código {hecho.returncode}): "
                   f"{datos.get('error') or ''} {hecho.stderr[-500:]}", file=sys.stderr, flush=True)
             return 502, {"error": datos.get("error") or f"Claude Code salió con {hecho.returncode}"}
-        return 200, datos
+        return 200, {**datos, "modelo": modelo}
     finally:
         _cupo.release()
 
@@ -177,7 +187,8 @@ class Manejador(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/salud":
-            return self._responder(200, {"ok": True, "modelo": MODELO})
+            return self._responder(200, {"ok": True, "modelo": MODELO,
+                                          "modelo_potente": MODELO_POTENTE})
         self._responder(404, {"error": "No existe"})
 
     def do_POST(self):
