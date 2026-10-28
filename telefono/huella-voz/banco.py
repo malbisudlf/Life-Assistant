@@ -11,11 +11,25 @@ canal»), que es lo que más ayuda.
     # de github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
     docker run --rm -v $PWD:/w -w /w python:3.12-slim sh -c \\
       "pip install -q sherpa-onnx==2.0.0 numpy soundfile && python banco.py modelo1.onnx ..."
+
+Además deja, por modelo, `media-<modelo>.npy`: la media de las altas de los 40 hablantes
+por el canal, que es la que resta servidor.py (HUELLA_MEDIA) en producción. Con
+BANCO_HILOS se elige cuántos hilos (servidor.py usa 2), y con BANCO_RAPL la URL de un
+node-exporter con el colector rapl: entonces dice también los julios de CPU por frase.
 """
-import glob, os, sys, time
+import glob, os, re, sys, time, urllib.request
 import numpy as np
 import soundfile as sf
 import sherpa_onnx
+
+HILOS = int(os.getenv('BANCO_HILOS', '4'))
+RAPL = os.getenv('BANCO_RAPL', '')
+
+def julios():
+    if not RAPL:
+        return None
+    texto = urllib.request.urlopen(RAPL, timeout=5).read().decode()
+    return sum(float(m) for m in re.findall(r'^node_rapl_package_joules_total\{[^}]*\} (\S+)', texto, re.M))
 
 rng = np.random.default_rng(7)
 
@@ -59,19 +73,27 @@ def eer(mismo, otro):
 modelos = sys.argv[1:]
 for modelo in modelos:
     ex = sherpa_onnx.SpeakerEmbeddingExtractor(
-        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=modelo, num_threads=4))
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=modelo, num_threads=HILOS))
     def emb(x):
         s = ex.create_stream(); s.accept_waveform(16000, x); s.input_finished()
         e = np.array(ex.compute(s)); return e / np.linalg.norm(e)
-    t0 = time.time(); n = 0
+    # El canal se simula antes de cronometrar: lo que se mide es solo el modelo.
+    tel = {h: ([telefono(x) for x in alta], [telefono(x) for x in pruebas],
+               [telefono(x, snr=10) for x in pruebas]) for h, (alta, pruebas) in datos.items()}
+    j0 = julios(); t0 = time.time(); n = 0; segs = 0
     E = {}
-    for h, (alta, pruebas) in datos.items():
-        ea = [emb(telefono(x)) for x in alta]
-        ep = [emb(telefono(x)) for x in pruebas]
-        er = [emb(telefono(x, snr=10)) for x in pruebas]
-        n += len(ea) + 2 * len(ep)
-        E[h] = (np.array(ea), np.array(ep), np.array(er))
-    print(f'\n== {os.path.basename(modelo)}  {(time.time() - t0) / n * 1000:.0f} ms/frase', flush=True)
+    for h, grupos in tel.items():
+        E[h] = tuple(np.array([emb(x) for x in g]) for g in grupos)
+        n += sum(len(g) for g in grupos); segs += sum(len(x) for g in grupos for x in g) / 16000
+    t = time.time() - t0
+    gasto = ''
+    if j0 is not None:
+        j = julios() - j0
+        gasto = f'  {j / n:.2f} J/frase, CPU a {j / t:.0f} W de media'
+    print(f'\n== {os.path.basename(modelo)}  {t / n * 1000:.0f} ms/frase ({segs / n:.1f} s de audio, '
+          f'{HILOS} hilos){gasto}', flush=True)
+    np.save(f'media-{os.path.splitext(os.path.basename(modelo))[0]}.npy',
+            np.mean(np.concatenate([E[h][0] for h in hablantes]), axis=0).astype(np.float32))
     for norma in ('coseno', 'menos-media'):
         for cual, nombre in ((1, 'tel'), (2, 'tel+coche')):
             mismo, otro = [], []

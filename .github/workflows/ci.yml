@@ -53,7 +53,8 @@ jobs:
           python-version: '3.11'   # misma versión que backend/Dockerfile (python:3.11-slim)
           cache: pip
       - name: Instalar dependencias
-        run: pip install -r backend/requirements.txt pytest
+        # numpy no es del backend: es de la huella de voz de jacobo (test_huella_voz.py)
+        run: pip install -r backend/requirements.txt pytest numpy
       - name: Tests
         # conftest.py define las variables de entorno simuladas: no hacen falta secretos.
         run: python -m pytest tests/backend -q

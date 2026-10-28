@@ -100,6 +100,10 @@ docker/moodle-mcp/.env.*
 telefono/oido/.env
 telefono/oido/.env.*
 !telefono/oido/.env.example
+# Y el de la huella de voz, con HUELLA_TOKEN: quien la tenga puede grabar otra huella.
+telefono/huella-voz/.env
+telefono/huella-voz/.env.*
+!telefono/huella-voz/.env.example
 # Flujos de n8n de otra persona, de referencia: llevan su chat de Telegram, su dominio
 # e ids de credenciales.
 Jarvis/Jarvis.json

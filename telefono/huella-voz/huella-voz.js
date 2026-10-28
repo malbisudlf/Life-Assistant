@@ -2,13 +2,13 @@
  * Parche 23: la huella de voz. Ver telefono/PARCHES.md y telefono/huella-voz/ en Life
  * Assistant.
  *
- * BORRADOR EN ESPERA (2026-10-24): va a `voice-app/lib/huella-voz.js` de claude-phone,
- * pero no está enganchado ni probado. Se paró porque la huella se muda a «jacobo» junto
- * al Whisper local (ver «El parche 23, en espera» en telefono/PARCHES.md).
+ * BORRADOR SIN ENGANCHAR: va a `voice-app/lib/huella-voz.js` de claude-phone, pero no
+ * está enganchado ni probado. El servicio al que llama ya corre en «jacobo» desde el
+ * 2026-10-28 (ver «El parche 23» en telefono/PARCHES.md).
  *
  * En el modo coche (parche 22) cualquiera que diga «Jarvis» le despierta: un pasajero, o
  * la radio. Ahora, cuando la frase trae el nombre y ANTES de despertar, se pregunta al
- * servicio de la huella (un contenedor aparte, en 127.0.0.1) si esa voz es la de Mikel.
+ * servicio de la huella (un contenedor aparte, en jacobo) si esa voz es la de Mikel.
  * Si no lo es, sigue dormido y en el registro queda solo que se rechazó y cuánto se
  * parecía, nunca lo que se dijo. Y como la frase rechazada ya no se transcribe entera,
  * lo que dice un pasajero tampoco sale a Whisper más allá de sus primeros 4 s.

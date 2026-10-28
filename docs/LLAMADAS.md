@@ -372,7 +372,7 @@ porque Siri lo puede confundir con el modo de concentración «Conducción».
 **Cómo hablarle.** «Jarvis, ¿qué hora es?» de un tirón contesta directamente; «Jarvis» solo
 y una pausa da «¿Señor?» y espera la pregunta. Por la ventana de 4 s, en una charla
 seguida conviene hacer una pausa antes del nombre. Que lo oiga en cualquier punto de la
-frase llegará con el Whisper local en jacobo («El parche 23, en espera» en
+frase llegará con el Whisper local en jacobo («El parche 23» en
 `telefono/PARCHES.md`); subir `ESCUCHA_PASIVA_VENTANA_MS` lo arreglaría antes, pero manda a
 OpenAI toda la charla del coche, y se descartó.
 

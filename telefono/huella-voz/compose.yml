@@ -1,0 +1,37 @@
+# La huella de voz en jacobo. Se copia a mano a ~/huella/servicio/ con su .env (ver
+# .env.example) y se levanta con `docker compose up -d --build`. Arranca solo con el
+# equipo. El modelo y la media del canal, en ${MODELO_DIR}: huella.onnx (el ERes2Net de
+# VoxCeleb) y media.npy (la que deja banco.py para ese modelo).
+services:
+  huella:
+    build: .
+    image: huella:local
+    container_name: huella
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HUELLA_HOST: 0.0.0.0
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${MODELO_DIR:?falta MODELO_DIR en .env}:/modelo:ro
+      # Solo la huella (un vector y sus números): ni audio ni texto, ver servidor.py
+      - ${DATOS_DIR:?falta DATOS_DIR en .env}:/datos
+    ports:
+      - "8771:3020"
+    # Que una ráfaga de altas no le quite CPU al oído en mitad de una llamada
+    cpus: 2
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:3020/salud', headers={'X-Auth-Token': os.environ['HUELLA_TOKEN']}), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

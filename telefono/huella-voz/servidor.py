@@ -1,10 +1,9 @@
 """La huella de voz de Mikel: ¿es él quien acaba de decir «Jarvis»?
 
-BORRADOR EN ESPERA (2026-10-24): no corre en ningún sitio. Se paró porque la huella va a
-vivir en «jacobo», junto al Whisper local, y probablemente acabe siendo una parte del
-servicio de transcripción y no uno aparte. Lo que le falta y lo medido, en «El parche 23,
-en espera» de telefono/PARCHES.md. Modelo previsto: el ERes2Net de 3D-Speaker (VoxCeleb),
-el mejor del banco (banco.py).
+Corre en «jacobo» desde el 2026-10-28, en su propio contenedor junto al oído (y no dentro
+de él: así no se toca el servicio que ya transcribe las llamadas). La voice-app aún no lo
+llama: eso es el parche 23, en «El parche 23» de telefono/PARCHES.md. Modelo: el ERes2Net
+de 3D-Speaker (VoxCeleb), el mejor del banco (banco.py), restando la media del canal.
 
 Parche 23 de claude-phone (ver telefono/PARCHES.md). En el modo coche la llamada está
 abierta todo el viaje y Jarvis se despierta al oír su nombre; sin esto, también lo
@@ -26,10 +25,16 @@ Tres reglas:
    3CX negocia G.711 (8 kHz, 300-3.400 Hz), y una huella grabada con el micro del PC y
    comparada con la voz del teléfono se parece a la de otra persona. Por eso el alta es
    hablando por teléfono («Jarvis, aprende mi voz») y no subiendo un fichero.
-3. UNA HUELLA ES DE UN MODELO. Si se cambia `HUELLA_MODELO`, la huella guardada no vale
-   (sus vectores no se pueden comparar con los del modelo nuevo) y se contesta
-   `sin_huella` hasta grabar otra: la voice-app hace entonces lo que diga
-   `HUELLA_VOZ_SI_FALLA`.
+3. UNA HUELLA ES DE UN MODELO Y DE UNA MEDIA. Si se cambia `HUELLA_MODELO` o
+   `HUELLA_MEDIA`, la huella guardada no vale (sus vectores no se pueden comparar con los
+   nuevos) y se contesta `sin_huella` hasta grabar otra: la voice-app hace entonces lo que
+   diga `HUELLA_VOZ_SI_FALLA`.
+
+La media del canal: el G.711 empuja todas las huellas hacia un mismo sitio, y restarle a
+cada vector la media de muchas voces por ese canal antes del coseno lo compensa (en el
+banco, el error del ERes2Net en coche baja del 4,1 % al 2,5 %). `HUELLA_MEDIA` es esa
+media, un .npy que deja banco.py; sin ella el coseno es a pelo y el umbral de 0,40 ya no
+sirve, por eso si se nombra y no está, no arranca. `HUELLA_MEDIA=` (vacía) la quita.
 
 API (cuerpo: PCM s16le, 16 kHz, mono, que es lo que da el audio fork de FreeSWITCH):
 
@@ -42,7 +47,9 @@ API (cuerpo: PCM s16le, 16 kHz, mono, que es lo que da el audio fork de FreeSWIT
                      huella.anterior.json.
 """
 
+import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -56,12 +63,14 @@ import numpy as np
 HOST    = os.getenv("HUELLA_HOST", "127.0.0.1")
 PUERTO  = int(os.getenv("HUELLA_PUERTO", "3020"))
 MODELO  = os.getenv("HUELLA_MODELO", "/modelo/huella.onnx")
+MEDIA   = os.getenv("HUELLA_MEDIA", "/modelo/media.npy")
 DATOS   = os.getenv("HUELLA_DATOS", "/datos")
 TOKEN   = os.getenv("HUELLA_TOKEN", "")
 HILOS   = int(os.getenv("HUELLA_HILOS", "2"))
-# El umbral depende del modelo y del canal. El de por defecto sale del banco de
-# LibriSpeech por un G.711 simulado (ver «El parche 23» en telefono/PARCHES.md); el bueno
-# sale de las llamadas de verdad desde el coche, con la voice-app en HUELLA_VOZ_MODO=medir.
+# El umbral depende del modelo, de la media y del canal. El de por defecto sale del banco
+# de LibriSpeech por un G.711 simulado restando la media: 0,40 deja pasar un 1 % de voces
+# ajenas (ver «El parche 23» en telefono/PARCHES.md). El bueno sale de las llamadas de
+# verdad desde el coche, con la voice-app en HUELLA_VOZ_MODO=medir.
 UMBRAL  = float(os.getenv("HUELLA_UMBRAL", "0.40"))
 
 MUESTRAS_SEG       = 16000
@@ -95,6 +104,35 @@ class Extractor:
             s.input_finished()
             v = np.array(self._ex.compute(s), dtype=np.float32)
         return unitario(v)
+
+
+class ConMedia:
+    """Un extractor que le resta a cada vector la media del canal (ver arriba).
+
+    Igual que en banco.py: el vector unitario del modelo, menos la media, y otra vez a
+    unitario. `id` va en la huella guardada: con otra media, la huella no vale.
+    """
+
+    def __init__(self, extractor, media, id_media):
+        self._ex = extractor
+        self.media = np.asarray(media, dtype=np.float32)
+        self.nombre = extractor.nombre
+        self.id = "%s+%s" % (extractor.nombre, id_media)
+
+    def vector(self, muestras):
+        return unitario(self._ex.vector(muestras) - self.media)
+
+
+def leer_media(ruta):
+    """(vector, id) de la media del canal, o (None, None) si HUELLA_MEDIA va vacía."""
+    if not ruta:
+        return None, None
+    if not os.path.exists(ruta):
+        raise RuntimeError("HUELLA_MEDIA=%s no existe: sin ella el umbral no sirve "
+                           "(HUELLA_MEDIA= vacía para el coseno a pelo)" % ruta)
+    with open(ruta, "rb") as f:
+        datos = f.read()
+    return np.load(io.BytesIO(datos)), "media-" + hashlib.sha256(datos).hexdigest()[:12]
 
 
 def unitario(v):
@@ -312,12 +350,18 @@ def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(message)s")
     comprobar_arranque(HOST, TOKEN)
+    media, id_media = leer_media(MEDIA)
     ex = Extractor(MODELO)
+    clave = ex.nombre
+    if media is not None:
+        ex = ConMedia(ex, media, id_media)
+        clave = ex.id
     os.makedirs(DATOS, exist_ok=True)
-    servicio = Huella(ex, Almacen(DATOS, ex.nombre))
+    servicio = Huella(ex, Almacen(DATOS, clave))
     servidor = ThreadingHTTPServer((HOST, PUERTO), manejador(servicio))
-    log.info("huella de voz en %s:%d, modelo %s, umbral %.2f, %s", HOST, PUERTO, ex.nombre,
-             UMBRAL, "con huella" if servicio.almacen.huella() is not None else "SIN huella todavía")
+    log.info("huella de voz en %s:%d, modelo %s, %s, umbral %.2f, %s", HOST, PUERTO, ex.nombre,
+             id_media or "SIN media del canal", UMBRAL,
+             "con huella" if servicio.almacen.huella() is not None else "SIN huella todavía")
     servidor.serve_forever()
 
 

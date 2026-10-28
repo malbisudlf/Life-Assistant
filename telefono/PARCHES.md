@@ -1080,16 +1080,15 @@ Probado contra el Claude de verdad, con el puente parcheado en otro puerto y la 
 `sesion-viva.js.bak-20261027-antes-p28`, y reinicio de `claude-phone-api`. Volver atrás:
 copiar los `.bak` encima y reiniciar.
 
-## El parche 23, en espera: la huella de voz (y por qué se va a jacobo)
+## El parche 23: la huella de voz (servicio en jacobo; la voice-app, sin enganchar)
 
 Pedido el 2026-10-24: que la escucha pasiva del 22 solo se despierte cuando quien dice
-«Jarvis» es Mikel, no un pasajero ni la radio. **Se paró a medias a petición suya**: la
-transcripción va a mudarse de OpenAI a un Whisper local en **jacobo** (el PC de casa con
-el i5-9400F y la RX 580 de 8 GB, en cuanto tenga fuente), y la huella tiene que vivir
-allí, junto a él. **Nada está aplicado**: la voice-app sigue en el 22 y no hay ningún
-servicio nuevo corriendo.
+«Jarvis» es Mikel, no un pasajero ni la radio. Se paró a medias para llevarlo a
+**jacobo**, junto al Whisper local. **Desde el 2026-10-28 el servicio de la huella corre
+allí** (ver «La huella en jacobo», abajo). **La voice-app aún no lo llama**: sigue en el
+22 para esto, y engancharla es el parche 23 propiamente dicho.
 
-### Lo que hay hecho (`telefono/huella-voz/`, sin aplicar)
+### Lo que hay hecho (`telefono/huella-voz/`)
 
 - `servidor.py`: el servicio de la huella. HTTP de la biblioteca estándar y
   [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (2.0.0, ~4 MB más su núcleo; trae
@@ -1106,11 +1105,16 @@ servicio nuevo corriendo.
   frases que empiezan por «Jarvis» y una libre, ~30 s.
 - `banco.py`: el banco de abajo.
 
-**Lo que falta**: restar la media del canal en `servidor.py` (ver abajo), su `Dockerfile`
-y su `compose.yml`, los tests de los dos lados, el enganche en `esperarPalabra` (comprobar
-la voz cuando el principio trae el nombre y **antes** de transcribir la frase entera, para
-que lo que dice un pasajero no salga a Whisper) y en los dos bucles («aprende mi voz»
-justo después de las órdenes del 22), y el `parche-23.diff`.
+- `Dockerfile`, `compose.yml` y `.env.example`: el contenedor de jacobo (2026-10-28).
+- `probar.py`: la prueba de punta a punta (alta y verificaciones por HTTP).
+- Los tests del servicio: `tests/backend/test_huella_voz.py` (con un extractor de
+  mentira; numpy lo instala el CI solo para ellos).
+
+**Lo que falta**: los tests del lado de la voice-app, el enganche en `esperarPalabra`
+(comprobar la voz cuando el principio trae el nombre y **antes** de transcribir la frase
+entera, para que lo que dice un pasajero no salga a Whisper) y en los dos bucles
+(«aprende mi voz» justo después de las órdenes del 22), y el `parche-23.diff`. Después,
+el alta de Mikel por teléfono y unas semanas en `HUELLA_VOZ_MODO=medir`.
 
 ### Lo medido
 
@@ -1140,12 +1144,43 @@ justo después de las órdenes del 22), y el `parche-23.diff`.
 - **Lo que el banco no dice**: es inglés leído, no español dicho en un coche, y el canal es
   simulado. El umbral bueno sale de llamadas reales desde el coche con
   `HUELLA_VOZ_MODO=medir`, contando falsos rechazos, y no antes. El banco y sus datos
-  siguen en `caja`, en `~/tmp-huella/` (con un `LEEME.txt`), para repetirlo en jacobo.
+  siguen en `caja`, en `~/archivo/huella/tmp-huella/` (con un `LEEME.txt`), y desde el
+  2026-10-28 también en jacobo (`~/huella/banco/`).
 - **El banco no se vuelve a pasar en `caja`.** Seis modelos por 40 hablantes con 4 hilos,
   media hora, y `caja` entró en *thermal throttling*: es un portátil con toda la
   producción dentro (backend, centralita, n8n), y un calentón la frena entera, llamadas
   incluidas. Lo pesado, a jacobo. Comprobar UNA frase (~100 ms) no es ese problema; un
   Whisper local en streaming, sí.
+
+### La huella en jacobo (2026-10-28)
+
+**El banco, repetido en jacobo** (i5-9400F, 2 hilos como en producción, `--cpus 2`):
+mismos errores que en caja, como debe ser con los mismos datos (ERes2Net, restando la
+media: 2,3 % por teléfono y 2,5 % en coche). Tiempo y gasto de CPU por frase de ~3 s,
+medidos con RAPL:
+
+| Modelo | ms/frase | J/frase | tel + coche, − media |
+|---|---|---|---|
+| **3D-Speaker ERes2Net (VoxCeleb)** | 84 | 2,4 | **2,5 %** |
+| NeMo TitaNet small | 31 | 0,8 | 6,7 % |
+
+Se queda el ERes2Net: TitaNet small es tres veces más barato, pero en el coche falla casi
+el triple, y 2,4 J por «Jarvis» no se notan (mil al día serían 0,0007 kWh).
+
+**El servicio**: el contenedor `huella` (`compose.yml`, copiado a mano a
+`~/huella/servicio/` con su `.env`, llave en `HUELLA_TOKEN`) en el puerto 8771, al lado
+del oído y no dentro: así no se toca el servicio que ya transcribe las llamadas, y para la
+voice-app es otra URL. Modelo y media del canal en `~/huella/modelo/` (`huella.onnx` y
+`media.npy`, la que deja `banco.py` para ese modelo); la huella, en `~/huella/datos/`. Con
+`--cpus 2` y 512 MB de tope, para que una alta no le quite CPU al oído; en reposo, 0 % de
+CPU y 88 MB. El banco y sus datos quedan en `~/huella/banco/` de jacobo.
+
+**Probado de punta a punta** (`probar.py`, por Tailscale como lo haría la voice-app): alta
+de un hablante de LibriSpeech por el canal simulado (8 frases, 31 s, consistencia 0,75),
+y 49 de 51 bien: rechazó una frase suya (0,19) y aceptó una ajena (0,43, por encima del
+umbral de 0,40), que es lo que cabe esperar con un 2-3 % de error. **72 ms por petición**
+(p95 110) y 2,1 J. Esa huella de prueba se borró después: el servicio está **sin
+huella** hasta que Mikel grabe la suya por teléfono.
 
 ### El diseño para jacobo
 
