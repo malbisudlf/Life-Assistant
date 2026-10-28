@@ -107,12 +107,23 @@ def elegir_acceso(nombre: str, accesos: list) -> object:
     pedido y luego el que lo contiene; a igualdad, el nombre más corto («Spotify» antes que
     «Spotify Widget»). Los desinstaladores y manuales no cuentan nunca.
     """
+    return elegir_por_nombre(nombre, accesos, lambda acceso: Path(str(acceso)).stem)
+
+
+def elegir_app_tienda(nombre: str, apps: list) -> object:
+    """Lo mismo para las aplicaciones de la Microsoft Store: `apps` son pares
+    (nombre, AppID) de `Get-StartApps`."""
+    return elegir_por_nombre(nombre, apps, lambda app: app[0])
+
+
+def elegir_por_nombre(nombre: str, candidatos: list, nombre_de) -> object:
+    """El candidato cuyo nombre (`nombre_de(c)`) mejor casa con `nombre`, o None."""
     pedido = normalizar(nombre)
     if not pedido:
         return None
     mejor, nota_mejor = None, None
-    for acceso in accesos:
-        base = normalizar(Path(str(acceso)).stem)
+    for acceso in candidatos:
+        base = normalizar(nombre_de(acceso))
         if not base or _NO_ES_LA_APP.search(base):
             continue
         if base == pedido:
@@ -309,6 +320,33 @@ def accesos_menu_inicio() -> list:
     return accesos
 
 
+_tienda = {"cuando": 0.0, "apps": []}
+
+
+def apps_de_la_tienda() -> list:
+    """Las aplicaciones del menú Inicio que NO tienen acceso directo en disco: las de la
+    Microsoft Store (Spotify, WhatsApp…). Sin esto «abre Spotify» no encontraba nada y el
+    modelo acababa abriendo la web (2026-10-28). Solo se pregunta si no hay acceso
+    directo, y se guarda diez minutos: es un PowerShell de un segundo largo."""
+    if time.time() - _tienda["cuando"] < 600:
+        return _tienda["apps"]
+    try:
+        salida = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-StartApps | ForEach-Object { $_.Name + [char]9 + $_.AppID }"],
+            capture_output=True, text=True, timeout=15, creationflags=0x08000000).stdout
+    except (OSError, subprocess.SubprocessError):
+        return _tienda["apps"]
+    apps = []
+    for linea in salida.splitlines():
+        nombre, _, appid = linea.partition("\t")
+        # Las de la tienda llevan «!» en el AppID; las demás ya salen como accesos directos.
+        if nombre.strip() and "!" in appid:
+            apps.append((nombre.strip(), appid.strip()))
+    _tienda.update(cuando=time.time(), apps=apps)
+    return apps
+
+
 def leer_catalogo() -> dict:
     """`apps.json`: alias → orden ("spotify": ["explorer.exe", "spotify:"]). Opcional."""
     try:
@@ -395,10 +433,15 @@ def crear_servidor(**ajustes):
                              creationflags=0x00000008 | 0x00000200)   # DETACHED | NEW_GROUP
             return f"Abierto {que} (catálogo)"
         acceso = elegir_acceso(que, accesos_menu_inicio())
-        if not acceso:
-            raise LookupError(f"No encuentro «{que}» en el menú Inicio ni en {CATALOGO.name}")
-        os.startfile(str(acceso))
-        return f"Abierto {Path(str(acceso)).stem}"
+        if acceso:
+            os.startfile(str(acceso))
+            return f"Abierto {Path(str(acceso)).stem}"
+        app = elegir_app_tienda(que, apps_de_la_tienda())
+        if app:
+            os.startfile("shell:AppsFolder\\" + app[1])
+            return f"Abierta la aplicación {app[0]}"
+        raise LookupError(f"No encuentro «{que}» instalado (menú Inicio, Microsoft Store ni "
+                          f"{CATALOGO.name}). No abras su web en su lugar sin preguntar.")
 
     @herramienta("usar")
     def enfocar(ventana: str) -> str:

@@ -61,6 +61,16 @@ def test_elige_el_acceso_directo_que_toca(pc):
     assert pc.elegir_acceso("", accesos) is None
 
 
+def test_las_apps_de_la_tienda_tambien_se_encuentran(pc):
+    """Spotify de la Microsoft Store no deja acceso directo en disco: sin esto, «abre
+    Spotify» no encontraba nada y el modelo abría la web."""
+    apps = [("Spotify", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"),
+            ("WhatsApp", "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")]
+    assert pc.elegir_app_tienda("spotify", apps)[1].endswith("!Spotify")
+    assert pc.elegir_app_tienda("whatsapp", apps)[0] == "WhatsApp"
+    assert pc.elegir_app_tienda("steam", apps) is None
+
+
 def test_los_desinstaladores_no_se_abren_nunca(pc):
     assert pc.elegir_acceso("spotify", [Path("Uninstall Spotify.lnk")]) is None
 
