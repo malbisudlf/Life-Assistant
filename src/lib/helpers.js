@@ -1,6 +1,8 @@
 // ── HELPERS PUROS DEL DASHBOARD ──────────────────────────────────
 // Extraídos de Dashboard.jsx para poder testearlos de forma aislada.
 
+import { marcaDeCorte } from "./voz.js";
+
 // ── Fechas ───────────────────────────────────────────────────────
 export function isToday(dateStr) {
   const d = new Date(dateStr);
@@ -2324,7 +2326,14 @@ export function jarvisHistorial(mensajes, max = JARVIS_MAX_HISTORIAL) {
   return (mensajes || [])
     .filter(m => (m?.rol === "user" || m?.rol === "assistant") && (m?.texto || "").trim())
     .slice(-max)
-    .map(m => ({ rol: m.rol, texto: m.texto.slice(0, JARVIS_MAX_TURNO) }));
+    // La marca del corte va al final y por fuera del recorte: si se cortara con el
+    // texto, una respuesta larga perdería justo lo que dice que no se oyó entera.
+    .map(m => {
+      const marca = marcaDeCorte(m);
+      return { rol: m.rol, texto: marca
+        ? `${m.texto.slice(0, JARVIS_MAX_TURNO - marca.length - 1)} ${marca}`
+        : m.texto.slice(0, JARVIS_MAX_TURNO) };
+    });
 }
 
 /** El color de cada tipo de evento (`tipo` lo pone el backend: deporte, clase, uni u

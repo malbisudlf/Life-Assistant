@@ -321,9 +321,29 @@ export function pareceEco(texto, dicho, { minPalabras = 3, proporcion = 0.8 } = 
   return coinciden / oidas.length >= proporcion;
 }
 
-// Lo que se añade al texto de Jarvis en el historial cuando le cortas.
-export const MARCA_CORTE = "(te pusiste a hablar y me cortaste aquí)";
-export const MARCA_CORTE_TRAS_FIN = "(te pusiste a hablar mientras lo decía y me cortaste: puede que no oyeras el final)";
+// Lo que se le cuenta al modelo cuando le cortas. Es para él, no para la pantalla: el
+// corte se apunta en el mensaje (`cortado`) y la marca la añade `jarvisHistorial` al
+// mandarlo al backend. Hasta el 2026-10-28 iba pegada al texto, así que se pintaba
+// debajo de la respuesta y, encima, tuteando.
+export const MARCA_CORTE = "(aquí el señor empezó a hablar y me cortó)";
+export const MARCA_CORTE_TRAS_FIN = "(el señor empezó a hablar mientras lo decía y me cortó: puede que no oyera el final)";
+const MARCAS_VIEJAS = [
+  " (te pusiste a hablar y me cortaste aquí)",
+  " (te pusiste a hablar mientras lo decía y me cortaste: puede que no oyeras el final)",
+];
+
+/** La marca del corte que le toca a un mensaje, o "" si no se cortó. */
+export function marcaDeCorte(m) {
+  return m?.cortado === "final" ? MARCA_CORTE_TRAS_FIN : m?.cortado === "aqui" ? MARCA_CORTE : "";
+}
+
+/** El texto de un mensaje sin las marcas que se pegaban antes al texto: las
+ *  conversaciones guardadas en localStorage aún las traen. */
+export function sinMarcaVieja(texto) {
+  let t = String(texto ?? "");
+  for (const marca of MARCAS_VIEJAS) if (t.endsWith(marca)) t = t.slice(0, -marca.length);
+  return t;
+}
 
 /** El historial de la llamada después de cortarle a Jarvis.
  *
@@ -341,10 +361,10 @@ export function historialTrasCorte(mensajes, dicho, turnoCerrado) {
     for (let i = lista.length - 1; i >= 0; i--) {
       if (lista[i]?.rol !== "assistant") continue;
       const copia = lista.slice();
-      copia[i] = { ...lista[i], texto: `${lista[i].texto} ${MARCA_CORTE_TRAS_FIN}` };
+      copia[i] = { ...lista[i], cortado: "final" };
       return copia;
     }
   }
   if (!texto) return lista;
-  return [...lista, { rol: "assistant", texto: `${texto} ${MARCA_CORTE}` }];
+  return [...lista, { rol: "assistant", texto, cortado: "aqui" }];
 }

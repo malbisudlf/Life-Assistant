@@ -12,6 +12,7 @@ import {
   estadoHud, TEXTO_ESTADO, motorEsperado, nombreModelo, protocolosUsados,
   nombreProtocolo, trocearRespuesta, duracionTecleo, textoDuracion,
 } from "../../lib/jarvisHud";
+import { sinMarcaVieja } from "../../lib/voz";
 
 const VOZ_NAVEGADOR = typeof window !== "undefined"
   && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -315,7 +316,7 @@ const Mensaje = React.memo(function Mensaje({ m, teclear }) {
           <span className="jh-msg-meta">{[modelo, textoDuracion(m.ms)].filter(Boolean).join(" · ")}</span>
         )}
       </div>
-      <Tecleado texto={m.texto} activo={teclear && !SIN_MOVIMIENTO} />
+      <Tecleado texto={sinMarcaVieja(m.texto)} activo={teclear && !SIN_MOVIMIENTO} />
       {m.herramientas?.length > 0 && (
         <div className="jh-chips">
           {m.herramientas.map(h => <span key={h} className="jh-chip">▸ {nombreProtocolo(h)}</span>)}

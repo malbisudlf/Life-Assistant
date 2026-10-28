@@ -11,7 +11,8 @@ import {
 } from "../../src/lib/respuestas.js";
 import { eventoDelDetalle } from "../../src/lib/helpers.js";
 import { diaTrasCambioDeHoy } from "../../src/lib/lineaTiempo.js";
-import { historialTrasCorte, MARCA_CORTE, MARCA_CORTE_TRAS_FIN } from "../../src/lib/voz.js";
+import { historialTrasCorte, MARCA_CORTE, MARCA_CORTE_TRAS_FIN, sinMarcaVieja } from "../../src/lib/voz.js";
+import { jarvisHistorial } from "../../src/lib/helpers.js";
 
 describe("detalleDeError / textoErrorApi", () => {
   it("un 422 de FastAPI trae una lista, no un texto", () => {
@@ -106,6 +107,22 @@ describe("diaTrasCambioDeHoy", () => {
   });
 });
 
+describe("sinMarcaVieja", () => {
+  it("quita las marcas que se pegaban antes al texto, y solo al final", () => {
+    expect(sinMarcaVieja("Hecho. (te pusiste a hablar y me cortaste aquí)")).toBe("Hecho.");
+    expect(sinMarcaVieja("Vale. (te pusiste a hablar mientras lo decía y me cortaste: puede que no oyeras el final)")).toBe("Vale.");
+    expect(sinMarcaVieja("Sin marca")).toBe("Sin marca");
+    expect(sinMarcaVieja(undefined)).toBe("");
+  });
+
+  it("las marcas nuevas no tutean", () => {
+    expect(MARCA_CORTE.split(/\s+/)).not.toContain("te");
+    expect(MARCA_CORTE).not.toMatch(/cortaste/);
+    expect(MARCA_CORTE_TRAS_FIN.split(/\s+/)).not.toContain("te");
+    expect(MARCA_CORTE_TRAS_FIN).not.toMatch(/cortaste|oyeras/);
+  });
+});
+
 describe("historialTrasCorte", () => {
   const respuesta = { rol: "assistant", texto: "Mañana tienes dentista. Luego clase. Y cena.", herramientas: ["agenda"] };
 
@@ -113,7 +130,10 @@ describe("historialTrasCorte", () => {
     const antes = [{ rol: "user", texto: "¿Qué tengo mañana?" }, respuesta];
     const despues = historialTrasCorte(antes, respuesta.texto, true);
     expect(despues).toHaveLength(2);
-    expect(despues[1].texto).toBe(`${respuesta.texto} ${MARCA_CORTE_TRAS_FIN}`);
+    // El texto queda limpio para la pantalla; el corte va aparte y lo cuenta el historial.
+    expect(despues[1].texto).toBe(respuesta.texto);
+    expect(despues[1].cortado).toBe("final");
+    expect(jarvisHistorial(despues).at(-1).texto).toBe(`${respuesta.texto} ${MARCA_CORTE_TRAS_FIN}`);
     expect(despues[1].herramientas).toEqual(["agenda"]);
     expect(antes[1].texto).toBe(respuesta.texto);   // sin mutar el estado anterior
   });
@@ -121,7 +141,8 @@ describe("historialTrasCorte", () => {
   it("antes de `fin` guarda lo dicho como mensaje propio", () => {
     const antes = [{ rol: "user", texto: "¿Qué tengo mañana?" }];
     const despues = historialTrasCorte(antes, "Mañana tienes dentista.", false);
-    expect(despues).toEqual([...antes, { rol: "assistant", texto: `Mañana tienes dentista. ${MARCA_CORTE}` }]);
+    expect(despues).toEqual([...antes, { rol: "assistant", texto: "Mañana tienes dentista.", cortado: "aqui" }]);
+    expect(jarvisHistorial(despues).at(-1).texto).toBe(`Mañana tienes dentista. ${MARCA_CORTE}`);
   });
 
   it("sin nada dicho y sin turno cerrado, no toca el historial", () => {
