@@ -438,6 +438,9 @@ class TestJarvisDespachador:
         # Y el PC en directo, sin la URL y el token de su MCP.
         monkeypatch.setattr(main, "PC_MCP_URL", "http://100.64.0.9:8765/mcp")
         monkeypatch.setattr(main, "PC_MCP_TOKEN", "x" * 32)
+        # Y Spotify, sin su app registrada.
+        monkeypatch.setattr(main, "SPOTIFY_CLIENT_ID", "spotify-id")
+        monkeypatch.setattr(main, "SPOTIFY_CLIENT_SECRET", "spotify-secreto")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

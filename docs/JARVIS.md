@@ -1135,6 +1135,40 @@ contestaba OpenAI de respaldo. El chat apunta al nativo con `CLAUDE_BIN` en
 `~/jarvis-chat/.env`; el `claude-api-server` del teléfono sigue con el de npm (lo coge
 del `PATH`), así que actualizar uno no toca al otro.
 
+## Spotify: elegir qué suena
+
+Hasta el 2026-10-28 la música era `pc_multimedia`: las teclas multimedia del PC. Saltaban
+de canción, pero no elegían qué sonaba («no soy capaz de elegir la lista») y «pausa» y
+«play» eran la misma tecla, así que pausar algo ya pausado lo ponía en marcha. Ahora hay
+cuatro herramientas sobre la API de Spotify (sección `# ── Spotify` de `backend/main.py`):
+
+| Herramienta | Qué hace |
+|---|---|
+| `musica_poner` | Pone una lista, disco, artista o canción. **Primero busca entre sus listas** («pon mi lista de lofi»), luego en el catálogo: sin tipo, un artista que se llame exactamente así gana; si no, una lista |
+| `musica_control` | Pausa (de verdad), reanudar, siguiente, anterior, volumen 0-100, aleatorio y repetir |
+| `musica_que_suena` | Canción, artistas, la lista de la que viene, dispositivo y volumen |
+| `musica_mis_listas` | Los nombres de sus listas |
+
+- **Dónde suena**: el dispositivo que se pida («pc», «móvil» o un nombre), el activo, o el
+  ordenador. Si no hay ningún Spotify abierto y el PC está conectado a Jarvis, lo abre con
+  `pc_abrir` y espera a que aparezca (`SPOTIFY_ESPERA_DISPOSITIVO_S`).
+- **Se anuncian si la app está registrada** (`SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET`),
+  esté conectada o no: si falta conectarla, la herramienta lo dice, que es como se entera.
+- **Conectar**: botón «Conectar Spotify» en el panel Sistema de la vista J.A.R.V.I.S. →
+  `/auth/spotify/login` (JWT) → consentimiento → `/auth/spotify/callback`, con un `state`
+  firmado de `purpose` propio (`oauth_state_spotify`): ni vale en el callback de Outlook ni
+  como sesión. El refresh token va a `oauth_tokens` con `provider = spotify`.
+- **Premium** para controlar la reproducción (Spotify devuelve 403 sin él y se dice); mirar
+  no lo pide.
+- **Lo que trae es de terceros** (nombres de canciones y listas ajenas): recortado y con
+  `_AVISO_WEB`, como Jellyfin. Por eso `musica_que_suena` y `musica_mis_listas` entran en
+  el teléfono como de lectura, y poner y controlar como acciones (reversibles).
+
+**Montarlo** (lo hace Mikel, una vez): crear una app en developer.spotify.com con la
+redirect URI `https://<backend>/auth/spotify/callback` (la misma que da `BACKEND_URL`, o
+`SPOTIFY_REDIRECT_URI` si se pone), poner `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` en
+el `backend.env` de caja, desplegar y pulsar «Conectar Spotify».
+
 ## Documentos: OneDrive
 
 «¿Dónde está el contrato del piso?», «¿qué dice la póliza del coche sobre la grúa?». Es

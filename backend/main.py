@@ -1,7 +1,7 @@
 ﻿from fastapi import (FastAPI, BackgroundTasks, Depends, HTTPException, Request,
                      status, UploadFile, File, Path, Query, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta, timezone
@@ -29,7 +29,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote, urlsplit, urljoin, parse_qs, parse_qsl
+from urllib.parse import quote, urlsplit, urljoin, parse_qs, parse_qsl, urlencode
 from http.client import RemoteDisconnected as _RemoteDisconnected
 # urllib3 viene con requests (no es una dependencia más): hace falta para saber si una
 # orden a Home Assistant llegó a salir (`_ha_no_llego`).
@@ -28854,6 +28854,431 @@ def _j_pc_decir(texto: str) -> dict:
     return _pc_hacer("decir", {"texto": texto}) if texto else {"ok": False, "error": "¿Qué digo?"}
 
 
+# ── Spotify: la música, en cualquier dispositivo ──────────────────────────────
+# Las teclas multimedia del PC (pc_multimedia) solo saben pausar y saltar: no eligen qué
+# suena ni saben qué está sonando, y «pausa» y «play» son la misma tecla. Con la API de
+# Spotify Jarvis pone una lista, un disco, un artista o una canción concretos, en el PC o
+# en el móvil, y puede decir qué suena y desde dónde. Ver «Spotify» en docs/JARVIS.md.
+#
+# La cuenta se conecta una vez (OAuth con `state` firmado, como Outlook) y el refresh
+# token vive en `oauth_tokens` con su propio `provider`. Controlar la reproducción pide
+# Premium; mirar, no.
+SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+# Vacío = el callback de este mismo backend. Tiene que coincidir letra a letra con el
+# que se registró en la app de Spotify.
+SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "").strip()
+SPOTIFY_PROVIDER      = "spotify"
+SPOTIFY_SCOPES        = ("user-read-playback-state user-modify-playback-state "
+                         "user-read-currently-playing playlist-read-private "
+                         "playlist-read-collaborative user-library-read")
+_SPOTIFY_API          = "https://api.spotify.com/v1"
+_SPOTIFY_CUENTAS      = "https://accounts.spotify.com"
+# Cuánto se espera a que aparezca el Spotify del PC después de abrirlo.
+SPOTIFY_ESPERA_DISPOSITIVO_S = int(os.getenv("SPOTIFY_ESPERA_DISPOSITIVO_S", "20"))
+_spotify_lock  = threading.Lock()
+_spotify_cache: dict = {}
+
+
+class SpotifyNoVa(Exception):
+    """Spotify sin conectar, sin Premium o sin dispositivo. El texto es para el modelo."""
+
+
+def _spotify_configurado() -> bool:
+    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET)
+
+
+def _spotify_redirect() -> str:
+    return SPOTIFY_REDIRECT_URI or f"{BACKEND_URL.rstrip('/')}/auth/spotify/callback"
+
+
+def _spotify_state() -> str:
+    """El `state` del consentimiento. Con su propio `purpose`: el de Outlook no vale aquí,
+    ni este allí, ni ninguno de los dos como sesión (`_jwt_de_usuario` los rechaza)."""
+    expira = datetime.now(timezone.utc) + timedelta(minutes=10)
+    return jwt.encode({"exp": expira, "purpose": "oauth_state_spotify"}, SECRET_KEY,
+                      algorithm=ALGORITHM)
+
+
+def _spotify_state_valido(state: str) -> bool:
+    try:
+        claims = jwt.decode(state, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    return claims.get("purpose") == "oauth_state_spotify"
+
+
+def _spotify_guardar(datos: dict) -> None:
+    """Persiste el token. Spotify no siempre devuelve refresh_token al renovar: si no
+    viene, sigue valiendo el anterior."""
+    anterior = _spotify_cargar() or {}
+    payload = {
+        "provider":      SPOTIFY_PROVIDER,
+        "access_token":  datos["access_token"],
+        "refresh_token": datos.get("refresh_token") or anterior.get("refresh_token"),
+        "expires_at":    datetime.now(timezone.utc).timestamp() + int(datos.get("expires_in") or 3600),
+        "updated_at":    datetime.now(timezone.utc).isoformat(),
+    }
+    url = f"{SUPABASE_URL}/rest/v1/oauth_tokens"
+    cab = {**supabase_headers(), "Prefer": "return=minimal"}
+    existe = http.get(f"{url}?provider=eq.{SPOTIFY_PROVIDER}&select=provider", headers=supabase_headers())
+    if existe.status_code < 300 and existe.json():
+        w = http.patch(f"{url}?provider=eq.{SPOTIFY_PROVIDER}", headers=cab, json=payload)
+    else:
+        w = http.post(url, headers=cab, json=payload)
+    if w.status_code >= 300:
+        logger.error("Spotify: no se pudo guardar el token (%s)", w.status_code)
+    with _spotify_lock:
+        _spotify_cache.clear()
+        _spotify_cache.update(payload)
+
+
+def _spotify_cargar() -> Optional[dict]:
+    with _spotify_lock:
+        if _spotify_cache:
+            return dict(_spotify_cache)
+    r = http.get(f"{SUPABASE_URL}/rest/v1/oauth_tokens?provider=eq.{SPOTIFY_PROVIDER}"
+                 "&select=access_token,refresh_token,expires_at", headers=supabase_headers())
+    if r.status_code < 300 and r.json():
+        datos = r.json()[0]
+        with _spotify_lock:
+            _spotify_cache.update(datos)
+        return datos
+    return None
+
+
+def _spotify_pedir_token(cuerpo: dict) -> dict:
+    r = http.post(f"{_SPOTIFY_CUENTAS}/api/token", data=cuerpo,
+                  auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET), timeout=10)
+    if r.status_code >= 300:
+        # El código basta para saber si es la app (400/401) o Spotify (5xx).
+        logger.warning("Spotify: el canje del token devolvió %s", r.status_code)
+        raise SpotifyNoVa("Spotify ha rechazado la conexión: hay que volver a conectarlo "
+                          "desde la vista J.A.R.V.I.S.")
+    return r.json()
+
+
+def _spotify_token() -> str:
+    if not _spotify_configurado():
+        raise SpotifyNoVa("Spotify no está configurado en el backend (faltan SPOTIFY_CLIENT_ID "
+                          "y SPOTIFY_CLIENT_SECRET).")
+    datos = _spotify_cargar()
+    if not datos or not datos.get("refresh_token"):
+        raise SpotifyNoVa("Spotify no está conectado: el señor tiene que conectarlo una vez "
+                          "desde la vista J.A.R.V.I.S. (panel Sistema).")
+    if float(datos.get("expires_at") or 0) - 60 > datetime.now(timezone.utc).timestamp():
+        return datos["access_token"]
+    nuevo = _spotify_pedir_token({"grant_type": "refresh_token",
+                                  "refresh_token": datos["refresh_token"]})
+    _spotify_guardar(nuevo)
+    return nuevo["access_token"]
+
+
+def _spotify(metodo: str, ruta: str, **kw):
+    """Una llamada a la API. Devuelve el JSON (o {} si no trae cuerpo). Traduce los
+    errores que importan a algo que el modelo pueda decir."""
+    def _una():
+        cab = {"Authorization": f"Bearer {_spotify_token()}"}
+        return getattr(http, metodo)(f"{_SPOTIFY_API}{ruta}", headers=cab, timeout=10, **kw)
+    r = _una()
+    if r.status_code == 401:
+        # Revocado o caducado antes de tiempo: se fuerza la renovación una vez.
+        with _spotify_lock:
+            _spotify_cache["expires_at"] = 0
+        r = _una()
+    if r.status_code < 300:
+        # 204 es «hecho, sin nada que contar» (y también «no suena nada» en /me/player).
+        if r.status_code == 204:
+            return {}
+        try:
+            datos = r.json()
+        except ValueError:
+            return {}
+        return datos if isinstance(datos, dict) else {}
+    try:
+        motivo = str(((r.json() or {}).get("error") or {}).get("reason") or "")
+    except (ValueError, AttributeError):
+        motivo = ""
+    if motivo == "PREMIUM_REQUIRED" or r.status_code == 403:
+        raise SpotifyNoVa("Spotify solo deja controlar la reproducción con Premium.")
+    if motivo == "NO_ACTIVE_DEVICE" or r.status_code == 404:
+        raise SpotifyNoVa("No hay ningún Spotify abierto donde poner música.")
+    if r.status_code == 429:
+        raise SpotifyNoVa("Spotify pide esperar un momento antes de volver a intentarlo.")
+    logger.warning("Spotify: %s %s devolvió %s", metodo.upper(), ruta.split("?")[0], r.status_code)
+    raise SpotifyNoVa(f"Spotify ha devuelto un error ({r.status_code}).")
+
+
+def _spotify_texto(t, n: int = 120) -> str:
+    """Nombres de terceros (canciones, listas ajenas): recortados y en una línea."""
+    return re.sub(r"\s+", " ", str(t or "")).strip()[:n]
+
+
+def _spotify_parecido(pedido: str, nombre: str):
+    """0 = igual, 1 = empieza igual, 2 = lo contiene, 3 = tiene todas sus palabras, None =
+    nada que ver. Sin tildes, mayúsculas ni signos: «lofi», «Lo-Fi» y «lo fi» casan."""
+    a = re.sub(r"[^a-z0-9]+", "", _sin_tildes(pedido).lower())
+    b = re.sub(r"[^a-z0-9]+", "", _sin_tildes(nombre).lower())
+    if not a or not b:
+        return None
+    if a == b:
+        return 0
+    if b.startswith(a):
+        return 1
+    if a in b:
+        return 2
+    palabras = [p for p in re.split(r"[^a-z0-9]+", _sin_tildes(pedido).lower()) if len(p) > 2]
+    if palabras and all(p in _sin_tildes(nombre).lower() for p in palabras):
+        return 3
+    return None
+
+
+def _spotify_mis_listas(max_listas: int = 200) -> list:
+    listas, ruta = [], "/me/playlists?limit=50"
+    while ruta and len(listas) < max_listas:
+        datos = _spotify("get", ruta)
+        listas += [l for l in (datos.get("items") or []) if isinstance(l, dict)]
+        siguiente = datos.get("next") or ""
+        ruta = siguiente[len(_SPOTIFY_API):] if siguiente.startswith(_SPOTIFY_API) else ""
+    return listas
+
+
+def _spotify_elegir_mia(pedido: str, listas: list) -> Optional[dict]:
+    """La lista propia que mejor casa con lo pedido; a igualdad, la de nombre más corto."""
+    mejor, nota = None, None
+    for l in listas:
+        n = _spotify_parecido(pedido, l.get("name") or "")
+        if n is None:
+            continue
+        clave = (n, len(l.get("name") or ""))
+        if nota is None or clave < nota:
+            mejor, nota = l, clave
+    return mejor
+
+
+_SPOTIFY_TIPOS = {"lista": "playlist", "disco": "album", "album": "album",
+                  "artista": "artist", "cancion": "track"}
+
+
+def _spotify_buscar(que: str, tipo: str) -> Optional[dict]:
+    """Lo mejor del catálogo para `que`. Sin tipo: un artista que se llame así gana
+    («pon a Rosalía»); si no, una lista («pon lofi»), luego una canción y un disco."""
+    tipos = [_SPOTIFY_TIPOS[tipo]] if tipo in _SPOTIFY_TIPOS else ["artist", "playlist", "track", "album"]
+    datos = _spotify("get", "/search", params={"q": que[:100], "type": ",".join(tipos),
+                                               "limit": 5, "market": "from_token"})
+    for t in tipos:
+        items = [i for i in ((datos.get(f"{t}s") or {}).get("items") or []) if isinstance(i, dict)]
+        if not items:
+            continue
+        if t == "artist" and len(tipos) > 1:
+            exacto = next((i for i in items if _spotify_parecido(que, i.get("name") or "") == 0), None)
+            if not exacto:
+                continue
+            return {**exacto, "_tipo": t}
+        return {**items[0], "_tipo": t}
+    return None
+
+
+def _spotify_dispositivo(pedido: str = "") -> dict:
+    """Dónde poner la música: el que se pida por nombre o por tipo («móvil», «pc»), el
+    activo, o el ordenador. Si no hay ninguno y el PC está conectado a Jarvis, abre
+    Spotify en el PC y espera a que aparezca."""
+    p = _sin_tildes(pedido).lower()
+
+    def _lista():
+        return [d for d in (_spotify("get", "/me/player/devices").get("devices") or [])
+                if isinstance(d, dict) and d.get("id") and not d.get("is_restricted")]
+
+    def _elegir(ds):
+        if p:
+            tipo = ("smartphone" if any(x in p for x in ("movil", "telefono", "iphone"))
+                    else "computer" if any(x in p for x in ("pc", "ordenador", "portatil"))
+                    else "")
+            return (next((d for d in ds if p in _sin_tildes(d.get("name") or "").lower()), None)
+                    or next((d for d in ds if tipo and (d.get("type") or "").lower() == tipo), None))
+        return (next((d for d in ds if d.get("is_active")), None)
+                or next((d for d in ds if (d.get("type") or "").lower() == "computer"), None)
+                or (ds[0] if ds else None))
+
+    elegido = _elegir(_lista())
+    if elegido:
+        return elegido
+    quiere_pc = not p or any(x in p for x in ("pc", "ordenador"))
+    if quiere_pc and _pc_mcp_configurado():
+        try:
+            _pc_mcp_llamar("abrir", {"que": "spotify"})
+        except PcNoContesta as e:
+            raise SpotifyNoVa(f"No hay ningún Spotify abierto y no he podido abrirlo en el PC: {e}")
+        fin = time.time() + SPOTIFY_ESPERA_DISPOSITIVO_S
+        while time.time() < fin:
+            time.sleep(2)
+            elegido = _elegir(_lista())
+            if elegido:
+                return elegido
+        raise SpotifyNoVa("He abierto Spotify en el PC, pero todavía no aparece como dispositivo.")
+    raise SpotifyNoVa("No hay ningún Spotify abierto" + (f" que se llame «{pedido}»." if pedido else "."))
+
+
+def _j_musica_poner(que: str, tipo: str = "", dispositivo: str = "") -> dict:
+    que  = str(que or "").strip()[:150]
+    tipo = _sin_tildes(str(tipo or "")).strip().lower()
+    if not que:
+        return {"ok": False, "error": "¿Qué pongo?"}
+    try:
+        elegido, origen = None, "catálogo"
+        # Primero sus listas: «pon mi lista de lofi» es la suya, no la primera de Spotify.
+        if tipo in ("", "lista"):
+            elegido = _spotify_elegir_mia(que, _spotify_mis_listas())
+            if elegido:
+                elegido, origen = {**elegido, "_tipo": "playlist"}, "sus listas"
+        if not elegido:
+            elegido = _spotify_buscar(que, tipo)
+        if not elegido or not elegido.get("uri"):
+            return {"ok": False, "error": f"No encuentro nada en Spotify para «{que}»."}
+        disp = _spotify_dispositivo(str(dispositivo or "").strip()[:60])
+        cuerpo = ({"uris": [elegido["uri"]]} if elegido["_tipo"] == "track"
+                  else {"context_uri": elegido["uri"]})
+        _spotify("put", f"/me/player/play?device_id={quote(disp['id'], safe='')}", json=cuerpo)
+    except SpotifyNoVa as e:
+        return {"ok": False, "error": str(e)}
+    nombres = {"playlist": "la lista", "album": "el disco", "artist": "a", "track": "la canción"}
+    return {"ok": True, "aviso": _AVISO_WEB, "de": origen,
+            "poniendo": f"{nombres[elegido['_tipo']]} {_spotify_texto(elegido.get('name'))}",
+            "dispositivo": _spotify_texto(disp.get("name"), 60)}
+
+
+_SPOTIFY_ACCIONES = ("pausa", "reanudar", "siguiente", "anterior", "volumen", "aleatorio",
+                     "repetir")
+
+
+def _j_musica_control(accion: str, valor: str = "") -> dict:
+    accion = _sin_tildes(str(accion or "")).strip().lower()
+    accion = {"play": "reanudar", "seguir": "reanudar", "pausar": "pausa",
+              "para": "pausa", "parar": "pausa"}.get(accion, accion)
+    valor  = _sin_tildes(str(valor or "")).strip().lower()
+    if accion not in _SPOTIFY_ACCIONES:
+        return {"ok": False, "error": f"accion es una de: {', '.join(_SPOTIFY_ACCIONES)}"}
+    try:
+        if accion == "pausa":
+            _spotify("put", "/me/player/pause")
+        elif accion == "reanudar":
+            _spotify("put", "/me/player/play")
+        elif accion == "siguiente":
+            _spotify("post", "/me/player/next")
+        elif accion == "anterior":
+            _spotify("post", "/me/player/previous")
+        elif accion == "volumen":
+            cifra = re.sub(r"[^0-9]", "", valor)
+            if not cifra:
+                return {"ok": False, "error": "El volumen va de 0 a 100."}
+            nivel = max(0, min(100, int(cifra)))
+            _spotify("put", f"/me/player/volume?volume_percent={nivel}")
+            return {"ok": True, "hecho": f"volumen al {nivel} %"}
+        elif accion == "aleatorio":
+            si = valor not in ("no", "off", "false", "0", "quitar", "desactivar", "apagar")
+            _spotify("put", f"/me/player/shuffle?state={'true' if si else 'false'}")
+            return {"ok": True, "hecho": f"aleatorio {'activado' if si else 'desactivado'}"}
+        elif accion == "repetir":
+            modo = ("track" if valor in ("cancion", "una", "track") else
+                    "off" if valor in ("no", "off", "false", "0", "quitar", "nada") else "context")
+            _spotify("put", f"/me/player/repeat?state={modo}")
+            return {"ok": True, "hecho": f"repetir: {modo}"}
+    except SpotifyNoVa as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "hecho": accion}
+
+
+def _j_musica_que_suena() -> dict:
+    try:
+        datos = _spotify("get", "/me/player")
+        if not datos:
+            return {"ok": True, "sonando": False, "nota": "No suena nada en ningún Spotify."}
+        item = datos.get("item") or {}
+        lista = ""
+        contexto = datos.get("context") or {}
+        if contexto.get("type") == "playlist" and contexto.get("uri"):
+            pid = contexto["uri"].rsplit(":", 1)[-1]
+            if re.fullmatch(r"[A-Za-z0-9]{10,40}", pid):
+                try:
+                    lista = _spotify("get", f"/playlists/{pid}?fields=name").get("name") or ""
+                except SpotifyNoVa:
+                    lista = ""
+        disp = datos.get("device") or {}
+    except SpotifyNoVa as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True, "aviso": _AVISO_WEB,
+        "sonando":     bool(datos.get("is_playing")),
+        "cancion":     _spotify_texto(item.get("name")),
+        "artistas":    ", ".join(_spotify_texto(a.get("name"), 60) for a in (item.get("artists") or [])[:3]),
+        "disco":       _spotify_texto((item.get("album") or {}).get("name")),
+        "lista":       _spotify_texto(lista),
+        "dispositivo": _spotify_texto(disp.get("name"), 60),
+        "volumen":     disp.get("volume_percent"),
+        "aleatorio":   bool(datos.get("shuffle_state")),
+    }
+
+
+def _j_musica_mis_listas() -> dict:
+    try:
+        listas = _spotify_mis_listas()
+    except SpotifyNoVa as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "aviso": _AVISO_WEB, "total": len(listas),
+            "listas": [_spotify_texto(l.get("name"), 80) for l in listas[:60]]}
+
+
+def _pagina_conexion(titulo: str, texto: str) -> str:
+    """La página que ve el navegador al volver del consentimiento de Spotify."""
+    t, x = html_mod.escape(titulo), html_mod.escape(texto)
+    return ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+            f"<title>{t}</title><body style='font-family:system-ui;background:#02060b;color:#d9f6ff;"
+            "display:grid;place-items:center;height:100vh;margin:0;text-align:center;padding:16px'>"
+            f"<div><h1 style='color:#5ee7ff;font-weight:600'>{t}</h1><p>{x}</p></div>")
+
+
+@app.get("/auth/spotify/login")
+def spotify_login(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """La URL del consentimiento de Spotify. Con JWT por lo mismo que /auth/login: sin
+    él, cualquiera podía conectar SU cuenta y Jarvis pondría su música."""
+    if not _spotify_configurado():
+        raise HTTPException(status_code=503, detail="Spotify no está configurado en el backend")
+    params = {"client_id": SPOTIFY_CLIENT_ID, "response_type": "code",
+              "redirect_uri": _spotify_redirect(), "scope": SPOTIFY_SCOPES,
+              "state": _spotify_state()}
+    return {"auth_url": f"{_SPOTIFY_CUENTAS}/authorize?{urlencode(params)}"}
+
+
+@app.get("/auth/spotify/callback")
+def spotify_callback(code: str = "", state: str = "", error: str = ""):
+    # Lo llama Spotify por redirect, sin el JWT: el `state` firmado es la prueba de que
+    # el consentimiento empezó desde una sesión iniciada.
+    if not _spotify_state_valido(state):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Solicitud de conexión no reconocida o caducada. Repite el proceso desde el dashboard.")
+    if error or not code:
+        return HTMLResponse(_pagina_conexion("No se ha conectado Spotify",
+                                             f"Spotify ha dicho: {error[:80] or 'sin código'}."),
+                            status_code=400)
+    try:
+        datos = _spotify_pedir_token({"grant_type": "authorization_code", "code": code[:1000],
+                                      "redirect_uri": _spotify_redirect()})
+    except SpotifyNoVa as e:
+        return HTMLResponse(_pagina_conexion("No se ha conectado Spotify", str(e)), status_code=502)
+    _spotify_guardar(datos)
+    return HTMLResponse(_pagina_conexion("Spotify conectado",
+                                         "Jarvis ya puede poner su música. Puede cerrar esta pestaña."))
+
+
+@app.get("/spotify/estado")
+def spotify_estado(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """Si Spotify está configurado y conectado. Solo mira el token, no llama a Spotify."""
+    if not _spotify_configurado():
+        return {"configurado": False, "conectado": False}
+    datos = _spotify_cargar()
+    return {"configurado": True, "conectado": bool(datos and datos.get("refresh_token"))}
+
+
 # ── Jellyfin: lo que se ve en casa ────────────────────────────────────────────
 # Jellyfin corre en `caja` (el proyecto «pelis» del repositorio HomeLab), con el 8096
 # publicado solo en la LAN y la tailnet. El backend vive en un contenedor de la misma
@@ -30288,6 +30713,56 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios":  ["texto"],
         "requiere_pc_mcp": True,
     },
+    "musica_poner": {
+        "confirmar":     False,
+        "fn":            _j_musica_poner,
+        "descripcion":   "Spotify: pone una lista, un disco, un artista o una canción. Busca "
+                         "primero entre las listas del señor («pon mi lista de lofi») y luego "
+                         "en todo Spotify. Por defecto suena donde ya esté sonando, o en el PC "
+                         "(si no está abierto, lo abre). Para elegir qué suena, usa esto y no "
+                         "pc_multimedia.",
+        "parametros":    {"que":         {"type": "string",
+                                          "description": "Lo que hay que poner, tal cual lo "
+                                                         "dijo: «lofi», «Bad Bunny», «Thriller»."},
+                          "tipo":        {"type": "string",
+                                          "enum": ["", "lista", "disco", "artista", "cancion"],
+                                          "description": "Si lo dijo. Vacío si no está claro."},
+                          "dispositivo": {"type": "string",
+                                          "description": "Dónde, si lo dijo: «pc», «móvil» o el "
+                                                         "nombre de un altavoz. Vacío = el de "
+                                                         "siempre."}},
+        "obligatorios":  ["que"],
+        "requiere_spotify": True,
+    },
+    "musica_control": {
+        "confirmar":     False,
+        "fn":            _j_musica_control,
+        "descripcion":   "Spotify: pausa, reanudar, siguiente, anterior, volumen (valor 0-100), "
+                         "aleatorio (valor «sí»/«no») y repetir (valor «canción», «lista» o "
+                         "«no»). Mejor que pc_multimedia: pausa no reanuda por error y sirve en "
+                         "cualquier dispositivo.",
+        "parametros":    {"accion": {"type": "string",
+                                     "enum": list(_SPOTIFY_ACCIONES)},
+                          "valor":  {"type": "string",
+                                     "description": "Para volumen, aleatorio y repetir."}},
+        "obligatorios":  ["accion"],
+        "requiere_spotify": True,
+    },
+    "musica_que_suena": {
+        "confirmar":     False,
+        "fn":            _j_musica_que_suena,
+        "descripcion":   "Spotify: qué está sonando ahora, de qué lista, en qué dispositivo y a "
+                         "qué volumen.",
+        "parametros":    {},
+        "requiere_spotify": True,
+    },
+    "musica_mis_listas": {
+        "confirmar":     False,
+        "fn":            _j_musica_mis_listas,
+        "descripcion":   "Spotify: los nombres de las listas del señor.",
+        "parametros":    {},
+        "requiere_spotify": True,
+    },
     "jellyfin_seguir": {
         "confirmar":     False,
         "fn":            _j_jellyfin_seguir,
@@ -31309,6 +31784,9 @@ def _jarvis_esquema() -> list:
     con_programador = _programador_configurado()
     # Y el PC en directo, sin la URL y el token de su MCP.
     con_pc_mcp = _pc_mcp_configurado()
+    # Y Spotify, sin la app registrada (conectada o no: si falta conectarla, la
+    # herramienta lo dice, que es como se entera el señor).
+    con_spotify = _spotify_configurado()
     return [{
         "type": "function",
         "function": {
@@ -31334,7 +31812,8 @@ def _jarvis_esquema() -> list:
         and (con_radarr or not h.get("requiere_radarr"))
         and (con_prowlarr or not h.get("requiere_prowlarr"))
         and (con_programador or not h.get("requiere_programador"))
-        and (con_pc_mcp or not h.get("requiere_pc_mcp"))]
+        and (con_pc_mcp or not h.get("requiere_pc_mcp"))
+        and (con_spotify or not h.get("requiere_spotify"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -31424,6 +31903,9 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # NO: su descripción trae lo que diga una web o un correo abiertos, y al otro lado de
     # esta llamada hay una shell.
     "pc_ventanas",
+    # 2026-10-28: la música, con el mismo criterio que Jellyfin: nombres recortados de
+    # canciones y listas, con `_AVISO_WEB`.
+    "musica_que_suena", "musica_mis_listas",
 }
 # `buscar_documentos` y `leer_documento` se quedan fuera a propósito: traen texto escrito
 # por terceros (un PDF que te mandaron), y al otro lado de esta llamada hay una sesión con
@@ -31453,6 +31935,8 @@ _MCP_SERVIDOR_ACCIONES = {
     # 2026-10-25: el PC en directo, lo mismo que encender_pc: abrir, la música, bloquearlo
     # y hablar por sus altavoces. Sin teclado ni ratón.
     "pc_abrir", "pc_multimedia", "pc_bloquear", "pc_decir",
+    # 2026-10-28: poner y controlar la música. Reversibles como las teclas multimedia.
+    "musica_poner", "musica_control",
     # 2026-10-27, «los mismos permisos que el de Telegram»: probar los indexadores y pasar
     # uno por FlareSolverr. En el chat van sin confirmar y lo segundo se deshace quitando
     # una etiqueta. Lo que traen de la web es el porqué de cada fallo, escrito por
@@ -33296,6 +33780,8 @@ _JARVIS_RELLENOS = {
     "posponer_alarma":    "Cinco minutos más.",
     "dejame_dormir":      "Miro las alarmas de mañana.",
     "estado_pc":          "Miro cómo está el ordenador.",
+    "musica_poner":       "Se la pongo.",
+    "musica_que_suena":   "Miro qué suena.",
     "encender_pc":        "Enciendo el ordenador.",
     "casa_dispositivos":  "Miro la casa.",
     "casa_ordenar":       "Voy con la casa.",

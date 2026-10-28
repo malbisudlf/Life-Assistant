@@ -13,6 +13,7 @@ import {
   nombreProtocolo, trocearRespuesta, duracionTecleo, textoDuracion,
 } from "../../lib/jarvisHud";
 import { sinMarcaVieja } from "../../lib/voz";
+import { API, authHeaders, apiFetch } from "../../lib/api";
 
 const VOZ_NAVEGADOR = typeof window !== "undefined"
   && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -54,6 +55,22 @@ export default function JarvisHUD({
     [mensajes],
   );
   const motor      = motorEsperado({ potente, ultimo });
+  // Si Spotify está conectado. Lo pregunta la vista y no el dashboard: es el único sitio
+  // donde se conecta, y así no cuesta nada a quien no la abre.
+  const [spotify, setSpotify] = useState(null);
+  useEffect(() => {
+    apiFetch(`${API}/spotify/estado`, { headers: authHeaders() })
+      .then(r => (r.ok ? r.json() : null))
+      .then(setSpotify)
+      .catch(() => { /* sin backend: el panel no dice nada de la música */ });
+  }, []);
+  async function conectarSpotify() {
+    try {
+      const r = await apiFetch(`${API}/auth/spotify/login`, { headers: authHeaders() });
+      const d = await r.json();
+      if (d.auth_url) window.open(d.auth_url, "_blank", "noopener,noreferrer");
+    } catch { /* mejor esfuerzo: se puede pulsar otra vez */ }
+  }
   const protocolos = useMemo(() => protocolosUsados(mensajes), [mensajes]);
 
   useEffect(() => {
@@ -147,6 +164,16 @@ export default function JarvisHUD({
                           textoDuracion(ultimo.ms)].filter(Boolean).join(" · ") || "—"} />
           )}
           <Dato etiqueta="Enlace" valor={host} />
+          {spotify?.configurado && (spotify.conectado
+            ? <Dato etiqueta="Música" valor="Spotify conectado" />
+            : (
+              <div className="jh-dato">
+                <div className="jh-dato-etiqueta">Música</div>
+                <button type="button" className="jh-boton-fino" style={{ marginTop: 4 }} onClick={conectarSpotify}>
+                  Conectar Spotify
+                </button>
+              </div>
+            ))}
           <Dato etiqueta="Sesión" valor={`${mensajes.filter(m => m.rol !== "aviso").length} mensajes`} />
 
           <div className="jh-panel-titulo" style={{ marginTop: 18 }}>Protocolos</div>
