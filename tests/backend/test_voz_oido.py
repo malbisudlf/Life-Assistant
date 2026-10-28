@@ -71,26 +71,66 @@ def test_un_token_con_proposito_no_vale_como_sesion(client, jacobo):
     assert e.value.code == 1008
 
 
-def test_el_audio_y_el_fin_pasan_y_vuelve_el_texto(client, jacobo):
+class _Navegador:
+    """El WebSocket del navegador, simulado: entrega los mensajes de `guion` y luego se
+    desconecta, y apunta lo que le mandan."""
+
+    def __init__(self, guion):
+        self.guion = list(guion) + [{"type": "websocket.disconnect"}]
+        self.enviado = []
+        self.cerrado = False
+
+    async def receive(self):
+        # Un respiro entre mensajes, para que lo que contesta jacobo llegue en orden.
+        await asyncio.sleep(0.01)
+        return self.guion.pop(0)
+
+    async def send_text(self, texto):
+        self.enviado.append(json.loads(texto))
+
+    async def close(self):
+        self.cerrado = True
+
+
+def _puente(navegador, jacobo):
+    asyncio.run(main._oido_puente(navegador, jacobo, max_seg=5))
+
+
+def test_el_audio_y_el_fin_pasan_y_vuelve_el_texto():
+    jacobo, nav = _Jacobo(), _Navegador([
+        {"type": "websocket.receive", "bytes": b"\x01\x00" * 160},
+        {"type": "websocket.receive", "text": json.dumps({"tipo": "fin"})},
+        {"type": "websocket.receive", "text": json.dumps({"tipo": "reinicia"})},
+    ])
+    _puente(nav, jacobo)
+    assert jacobo.recibido[0] == b"\x01\x00" * 160
+    assert json.loads(jacobo.recibido[1]) == {"tipo": "fin"}
+    assert nav.enviado == [{"tipo": "final", "texto": "abre spotify"}]
+    assert jacobo.cerrado and nav.cerrado
+
+
+def test_solo_pasa_lo_que_el_protocolo_conoce():
+    jacobo, nav = _Jacobo(), _Navegador([
+        {"type": "websocket.receive", "text": json.dumps({"tipo": "cualquier_cosa", "x": 1})},
+        {"type": "websocket.receive", "text": "no es json"},
+        {"type": "websocket.receive", "bytes": b"\x00" * (main.OIDO_TROZO_MAX + 2)},
+        {"type": "websocket.receive", "text": json.dumps({"tipo": "fin"})},
+    ])
+    _puente(nav, jacobo)
+    assert jacobo.recibido == [json.dumps({"tipo": "fin"})]
+
+
+def test_si_jacobo_se_cierra_el_navegador_se_entera():
+    jacobo, nav = _Jacobo(), _Navegador([{"type": "websocket.receive", "text": "{}"}] * 50)
+    jacobo.cola.put_nowait(None)          # jacobo cuelga en cuanto empieza
+    _puente(nav, jacobo)
+    assert nav.enviado[-1] == {"tipo": "error", "detalle": "jacobo_se_cerro"}
+
+
+def test_el_puente_por_el_endpoint_dice_listo(client, jacobo):
     with client.websocket_connect("/voz/oido") as ws:
         ws.send_text(json.dumps({"token": main.create_token()}))
         assert json.loads(ws.receive_text()) == {"tipo": "listo"}
-        ws.send_bytes(b"\x01\x00" * 160)
-        ws.send_text(json.dumps({"tipo": "fin"}))
-        assert json.loads(ws.receive_text()) == {"tipo": "final", "texto": "abre spotify"}
-    assert jacobo.recibido[0] == b"\x01\x00" * 160
-    assert json.loads(jacobo.recibido[1]) == {"tipo": "fin"}
-
-
-def test_solo_pasa_lo_que_el_protocolo_conoce(client, jacobo):
-    with client.websocket_connect("/voz/oido") as ws:
-        ws.send_text(json.dumps({"token": main.create_token()}))
-        ws.receive_text()
-        ws.send_text(json.dumps({"tipo": "cualquier_cosa", "x": 1}))
-        ws.send_bytes(b"\x00" * (main.OIDO_TROZO_MAX + 2))   # un trozo desmedido se tira
-        ws.send_text(json.dumps({"tipo": "fin"}))
-        ws.receive_text()
-    assert jacobo.recibido == [json.dumps({"tipo": "fin"})]
 
 
 def test_sin_oido_configurado_lo_dice(client, monkeypatch):

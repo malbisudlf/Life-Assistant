@@ -33638,7 +33638,12 @@ async def voz_oido(ws: WebSocket):
         await ws.close(code=1011)
         return
     await ws.send_text(json.dumps({"tipo": "listo"}))
+    await _oido_puente(ws, arriba)
 
+
+async def _oido_puente(ws, arriba, max_seg: float = None) -> None:
+    """Los dos sentidos del puente hasta que uno de los dos lados cierre. Aparte del
+    endpoint para poder probarlo con dobles, sin el cliente de pruebas de por medio."""
     async def subir():
         while True:
             msg = await ws.receive()
@@ -33663,7 +33668,7 @@ async def voz_oido(ws: WebSocket):
 
     tareas = [asyncio.create_task(subir()), asyncio.create_task(bajar())]
     try:
-        hechas, _ = await asyncio.wait(tareas, timeout=OIDO_MAX_SEG,
+        hechas, _ = await asyncio.wait(tareas, timeout=max_seg or OIDO_MAX_SEG,
                                        return_when=asyncio.FIRST_COMPLETED)
         if not hechas:
             logger.info("Oído: sesión cerrada por duración máxima")
