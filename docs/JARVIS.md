@@ -1126,6 +1126,14 @@ el sistema a la izquierda (motor, último turno, protocolos usados) y el día a 
 
 Para que la potencia funcione hay que copiar `chat/jarvis_claude.py` a `caja` y añadir
 `JARVIS_CLAUDE_MODELO_POTENTE` a `~/jarvis-chat/.env` (ver «El chat con Claude Code»).
+Hecho el 2026-10-28.
+
+**Opus 5.5 pide Claude Code 2.1.280 o superior.** En `caja` hay dos: el de npm
+(`/usr/bin/claude`, 2.1.197 ese día) y el nativo (`~/.local/bin/claude`, que se actualiza
+solo). Con el viejo, el turno potente devolvía `400 … does not support this model` y
+contestaba OpenAI de respaldo. El chat apunta al nativo con `CLAUDE_BIN` en
+`~/jarvis-chat/.env`; el `claude-api-server` del teléfono sigue con el de npm (lo coge
+del `PATH`), así que actualizar uno no toca al otro.
 
 ## Documentos: OneDrive
 
