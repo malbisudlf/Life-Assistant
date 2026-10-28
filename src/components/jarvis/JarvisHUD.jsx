@@ -7,13 +7,18 @@
 // la confirmación, el dictado y la llamada son los de la tarjeta de Jarvis (Dashboard.jsx),
 // así que lo que hables aquí sigue allí al salir y al revés. La lógica de qué se pinta
 // está en src/lib/jarvisHud.js.
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   estadoHud, TEXTO_ESTADO, motorEsperado, nombreModelo, protocolosUsados,
   nombreProtocolo, trocearRespuesta, duracionTecleo, textoDuracion,
 } from "../../lib/jarvisHud";
 import { sinMarcaVieja } from "../../lib/voz";
 import { API, authHeaders, apiFetch } from "../../lib/api";
+import { moverPanel } from "../../lib/gestos";
+import { useCamara } from "./useCamara";
+import { PanelCamara } from "./Camara";
+import Manos from "./Manos";
+import PanelProyectos from "./Proyectos";
 
 const VOZ_NAVEGADOR = typeof window !== "undefined"
   && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -23,6 +28,19 @@ const SIN_MOVIMIENTO = typeof window !== "undefined"
 
 // El arranque se ve una vez por carga de la página: es una presentación, no un peaje.
 let arrancado = false;
+
+// Dónde ha dejado el señor cada panel (desplazamiento desde su sitio), y si los proyectos
+// estaban abiertos. Preferencias de este navegador, nada más.
+const CLAVE_PANELES = "la_jarvis_paneles";
+function leerPaneles() {
+  try {
+    const d = JSON.parse(localStorage.getItem(CLAVE_PANELES) || "{}");
+    return d && typeof d === "object" ? d : {};
+  } catch { return {}; }
+}
+function guardarPaneles(posiciones) {
+  try { localStorage.setItem(CLAVE_PANELES, JSON.stringify(posiciones)); } catch { /* mejor esfuerzo */ }
+}
 
 const LINEAS_ARRANQUE = [
   "J.A.R.V.I.S. — inicializando",
@@ -37,7 +55,7 @@ export default function JarvisHUD({
   etiquetaPendiente, onConfirmar, onDescartar, confirmando,
   escuchando, onDictar, habla, onHabla, hablando,
   enLlamada, faseLlamada, parcial, onLlamar, onColgar,
-  potente, onPotente, onNueva, onSalir, briefing, host,
+  potente, onPotente, onNueva, onSalir, briefing, host, onCapturador,
 }) {
   const [arranque, setArranque] = useState(!arrancado && !SIN_MOVIMIENTO);
   const [ahora, setAhora]       = useState(() => new Date());
@@ -72,6 +90,73 @@ export default function JarvisHUD({
     } catch { /* mejor esfuerzo: se puede pulsar otra vez */ }
   }
   const protocolos = useMemo(() => protocolosUsados(mensajes), [mensajes]);
+
+  // ── Cámara, manos y proyectos ──
+  const [camaraOn, setCamaraOn]   = useState(false);
+  const [jarvisVe, setJarvisVe]   = useState(true);
+  const [manosOn, setManosOn]     = useState(false);
+  const [estadoManos, setEstadoManos] = useState("apagada");
+  const [proyectosOn, setProyectosOn] = useState(false);
+  const camara = useCamara(camaraOn);
+  const { capturar } = camara;
+  // El fotograma viaja con cada mensaje solo con la cámara en directo y «Jarvis ve».
+  // Al cerrar la vista o apagar la cámara, el dashboard deja de tener a quién pedírselo.
+  useEffect(() => {
+    onCapturador?.(camaraOn && jarvisVe ? capturar : null);
+    return () => onCapturador?.(null);
+  }, [camaraOn, jarvisVe, capturar, onCapturador]);
+
+  // ── Paneles que se mueven ──
+  const [posiciones, setPosiciones] = useState(leerPaneles);
+  // El último panel movido queda por encima de los demás.
+  const [delante, setDelante] = useState(null);
+  const arrastre = useRef(null);
+  const onArrastre = useCallback((id, fase, punto) => {
+    if (fase === "empieza") {
+      const el = document.querySelector(`[data-panel="${id}"]`);
+      if (!el) return;
+      const inicio = posiciones[id] || { x: 0, y: 0 };
+      const r = el.getBoundingClientRect();
+      arrastre.current = { id, inicio, desde: punto,
+                           caja: { left: r.left - inicio.x, top: r.top - inicio.y, width: r.width, height: r.height } };
+      el.classList.add("jh-arrastrando");
+      setDelante(id);
+      return;
+    }
+    const a = arrastre.current;
+    if (!a || a.id !== id) return;
+    if (fase === "mueve") {
+      const nueva = moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y }, a.caja,
+                               { width: window.innerWidth, height: window.innerHeight });
+      setPosiciones(prev => ({ ...prev, [id]: nueva }));
+    } else if (fase === "suelta") {
+      document.querySelector(`[data-panel="${id}"]`)?.classList.remove("jh-arrastrando");
+      arrastre.current = null;
+      setPosiciones(prev => { guardarPaneles(prev); return prev; });
+    }
+  }, [posiciones]);
+  // El ratón mueve los paneles igual que la mano: por el mismo camino.
+  const asaDe = useCallback((id) => ({
+    "data-arrastre": id,
+    title: "Arrastre para mover el panel",
+    onPointerDown: (e) => {
+      if (e.button !== 0 || e.target.closest("button, input, textarea, a")) return;
+      e.preventDefault();
+      onArrastre(id, "empieza", { x: e.clientX, y: e.clientY });
+      const mueve = (ev) => onArrastre(id, "mueve", { x: ev.clientX, y: ev.clientY });
+      const suelta = (ev) => {
+        onArrastre(id, "suelta", { x: ev.clientX, y: ev.clientY });
+        window.removeEventListener("pointermove", mueve);
+        window.removeEventListener("pointerup", suelta);
+      };
+      window.addEventListener("pointermove", mueve);
+      window.addEventListener("pointerup", suelta);
+    },
+  }), [onArrastre]);
+  const estiloPanel = (id) => (posiciones[id]
+    ? { transform: `translate(${posiciones[id].x}px, ${posiciones[id].y}px)`, zIndex: delante === id ? 6 : 5 }
+    : undefined);
+  const hayMovidos = Object.keys(posiciones).length > 0;
 
   useEffect(() => {
     if (!arranque) return;
@@ -138,6 +223,12 @@ export default function JarvisHUD({
           <span className="jh-marca-sub">Just A Rather Very Intelligent System</span>
         </div>
         <div className="jh-cabecera-acciones">
+          {hayMovidos && (
+            <button type="button" className="jh-boton-fino" onClick={() => { setPosiciones({}); guardarPaneles({}); }}
+                    title="Devolver los paneles a su sitio">Recolocar</button>
+          )}
+          <button type="button" className={`jh-boton-fino${proyectosOn ? " activo" : ""}`}
+                  onClick={() => setProyectosOn(v => !v)} aria-pressed={proyectosOn}>Proyectos</button>
           {mensajes.length > 0 && !enLlamada && (
             <button type="button" className="jh-boton-fino" onClick={onNueva} disabled={pensando}
                     title="Empezar una conversación nueva (no borra lo que Jarvis recuerda de usted)">
@@ -152,9 +243,10 @@ export default function JarvisHUD({
 
       <div className="jh-cuerpo">
         {/* ── Telemetría izquierda: el sistema ── */}
-        <aside className="jh-panel jh-panel-izq" aria-label="Estado del sistema">
+        <div className="jh-columna jh-columna-izq">
+        <section className="jh-panel" data-panel="sistema" style={estiloPanel("sistema")} aria-label="Estado del sistema">
           <Esquinas />
-          <div className="jh-panel-titulo">Sistema</div>
+          <div className="jh-panel-titulo jh-asa" {...asaDe("sistema")}>Sistema</div>
           <Dato etiqueta="Motor" valor={`Claude · ${motor.nombre}`} acento={potente} />
           {motor.nota && <div className="jh-nota">{motor.nota}</div>}
           <Dato etiqueta="Potencia" valor={potente ? "Máxima" : "Estándar"} acento={potente} />
@@ -186,7 +278,17 @@ export default function JarvisHUD({
                 {p.veces > 1 && <span className="jh-protocolo-veces">×{p.veces}</span>}
               </div>
             ))}
-        </aside>
+        </section>
+        {camaraOn && (
+          <section className="jh-panel" data-panel="camara" style={estiloPanel("camara")} aria-label="Cámara">
+            <Esquinas />
+            <PanelCamara videoRef={camara.videoRef} estado={camara.estado} error={camara.error}
+                         jarvisVe={jarvisVe} onJarvisVe={() => setJarvisVe(v => !v)}
+                         manos={manosOn} onManos={() => setManosOn(v => !v)} estadoManos={estadoManos}
+                         asa={asaDe("camara")} />
+          </section>
+        )}
+        </div>
 
         {/* ── Centro: el reactor y la conversación ── */}
         <main className="jh-centro">
@@ -255,6 +357,10 @@ export default function JarvisHUD({
                       title={potente
                         ? "Potencia máxima: piensa Opus 5.5 (más lento, gasta más límite). Pulse para volver a Sonnet"
                         : "Activar la potencia máxima: Opus 5.5"}>⚡</button>
+              <button type="button" className={`jh-icono${camaraOn ? " activo jh-icono-vivo" : ""}`}
+                      onClick={() => { setCamaraOn(v => !v); if (camaraOn) setManosOn(false); }}
+                      aria-pressed={camaraOn} aria-label="Cámara"
+                      title={camaraOn ? "Apagar la cámara" : "Encender la cámara: Jarvis le ve y puede usar las manos"}>📷</button>
               <span className="jh-prompt" aria-hidden="true">›</span>
               <input
                 ref={inputRef}
@@ -286,9 +392,10 @@ export default function JarvisHUD({
         </main>
 
         {/* ── Telemetría derecha: el día ── */}
-        <aside className="jh-panel jh-panel-der" aria-label="El día">
+        <div className="jh-columna jh-columna-der">
+        <section className="jh-panel" data-panel="dia" style={estiloPanel("dia")} aria-label="El día">
           <Esquinas />
-          <div className="jh-reloj">{hh}<span className="jh-reloj-sep">:</span>{mm}<span className="jh-reloj-seg">{ss}</span></div>
+          <div className="jh-asa jh-asa-reloj" {...asaDe("dia")}><div className="jh-reloj">{hh}<span className="jh-reloj-sep">:</span>{mm}<span className="jh-reloj-seg">{ss}</span></div></div>
           <div className="jh-fecha">{fecha}</div>
           {briefing?.frase && <div className="jh-briefing-frase">{briefing.frase}</div>}
           {briefing?.clima && <Dato etiqueta="Exterior" valor={briefing.clima} />}
@@ -298,8 +405,21 @@ export default function JarvisHUD({
               {briefing.lineas.map(l => <div key={l} className="jh-radar">{l}</div>)}
             </>
           )}
-        </aside>
+        </section>
+        {proyectosOn && (
+          <section className="jh-panel jh-panel-proyectos" data-panel="proyectos" style={estiloPanel("proyectos")}
+                   aria-label="Proyectos">
+            <Esquinas />
+            <PanelProyectos asa={asaDe("proyectos")} />
+          </section>
+        )}
+        </div>
       </div>
+
+      {/* Las manos van por encima de todo, y sin atrapar el ratón: el clic de un pellizco
+          tiene que caer en lo que hay debajo. */}
+      <Manos videoRef={camara.videoRef} activa={camaraOn && manosOn && camara.estado === "en_directo"}
+             onArrastre={onArrastre} onEstado={setEstadoManos} />
     </div>
   );
 }
@@ -560,9 +680,16 @@ const CSS = `
   display: grid; grid-template-columns: 250px minmax(0, 1fr) 250px; gap: 22px;
   padding: 6px 22px max(18px, env(safe-area-inset-bottom));
 }
+.jh-columna {
+  align-self: start; margin-top: 30px; min-width: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  max-height: calc(100vh - 110px); overflow: visible;
+}
 .jh-panel {
-  position: relative; align-self: start; margin-top: 30px;
-  border: 1px solid var(--jh-c3); background: linear-gradient(180deg, rgba(94,231,255,.04), transparent);
+  position: relative;
+  border: 1px solid var(--jh-c3);
+  /* Opaco: un panel movido encima de otro no puede dejar ver lo de debajo. */
+  background: linear-gradient(180deg, rgba(94,231,255,.05), rgba(94,231,255,0) 60%), rgba(3,10,17,.94);
   padding: 16px 16px 18px; border-radius: 2px; transition: border-color .6s;
   clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
   animation: jhPanel .6s ease-out;
@@ -571,7 +698,81 @@ const CSS = `
   font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: .3em;
   text-transform: uppercase; color: var(--jh-c); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
 }
-.jh-panel-titulo::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--jh-c2), transparent); }
+.jh-panel-titulo::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--jh-c2), transparent); order: 1; }
+.jh-panel-titulo > .jh-mini, .jh-panel-titulo > .jh-directo { order: 2; }
+
+/* Lo que se arrastra: el título de cada panel (con el ratón o con un pellizco). */
+.jh-asa { cursor: grab; user-select: none; touch-action: none; }
+.jh-arrastrando { z-index: 20; box-shadow: 0 0 30px var(--jh-c2); animation: none !important; }
+.jh-arrastrando .jh-asa { cursor: grabbing; }
+.jh-asa-reloj { margin-bottom: 0; }
+
+.jh-boton-fino.activo { color: var(--jh-c); border-color: var(--jh-c2); background: var(--jh-c3); }
+.jh-mini {
+  font-family: 'DM Mono', monospace !important; font-size: 10px; letter-spacing: .08em; text-transform: none;
+  background: transparent; border: 1px solid var(--jh-c3); color: var(--jh-c); padding: 3px 8px; border-radius: 3px; cursor: pointer;
+}
+.jh-mini:disabled { opacity: .4; cursor: default; }
+
+/* La cámara */
+.jh-directo { font-family: 'DM Mono', monospace; font-size: 9.5px; letter-spacing: .12em; color: var(--jh-tenue); }
+.jh-directo.vivo { color: var(--jh-rojo); animation: jhLatido 1.6s infinite; }
+.jh-camara {
+  position: relative; aspect-ratio: 16 / 10; overflow: hidden; border: 1px solid var(--jh-c3);
+  background: #000; border-radius: 2px;
+}
+.jh-camara-video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; filter: saturate(.85) contrast(1.05); }
+.jh-camara-reticula {
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    linear-gradient(var(--jh-c) 0 0) center / 18px 1px no-repeat,
+    linear-gradient(var(--jh-c) 0 0) center / 1px 18px no-repeat,
+    linear-gradient(transparent 49.5%, rgba(94,231,255,.07) 50%, transparent 50.5%) 0 0 / 100% 6px;
+  opacity: .55; mix-blend-mode: screen;
+}
+.jh-camara-aviso { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 10px; font-size: 12px; color: var(--jh-tenue); }
+.jh-camara-botones { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.jh-camara-botones .jh-boton-fino { font-size: 10.5px; padding: 5px 8px; letter-spacing: .1em; }
+.jh-icono-vivo { box-shadow: 0 0 0 1px rgba(255,95,87,.5), 0 0 12px rgba(255,95,87,.35); }
+
+/* Las manos */
+.jh-manos-lienzo { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 40; }
+.jh-manos-cursor {
+  position: fixed; left: 0; top: 0; z-index: 41; pointer-events: none; opacity: 0;
+  width: 0; height: 0; transition: opacity .2s; --fuerza: 0;
+}
+.jh-manos-cursor span {
+  position: absolute; left: -18px; top: -18px; width: 36px; height: 36px; border-radius: 50%;
+  border: 2px solid var(--jh-c); box-shadow: 0 0 16px var(--jh-c2), inset 0 0 calc(var(--fuerza) * 18px) var(--jh-c);
+  transform: scale(calc(1 - var(--fuerza) * .45)); transition: transform .08s;
+}
+.jh-manos-cursor.cerrado span { background: var(--jh-c3); border-color: #fff; }
+.jh-manos-cursor.pulso span { animation: jhPulso .26s ease-out; }
+.jh-mano-encima { outline: 2px solid var(--jh-c) !important; outline-offset: 2px; box-shadow: 0 0 18px var(--jh-c2) !important; }
+
+/* Los proyectos */
+.jh-panel-proyectos { max-height: 56vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--jh-c3) transparent; }
+.jh-proy { border-top: 1px dashed var(--jh-c3); padding: 7px 0; }
+.jh-proy-cab { width: 100%; display: flex; align-items: baseline; gap: 8px; background: none; border: none; color: var(--jh-texto); cursor: pointer; padding: 0; text-align: left; }
+.jh-proy-titulo { flex: 1; font-size: 13px; line-height: 1.35; }
+.jh-proy-estado { font-family: 'DM Mono', monospace; font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--jh-tenue); white-space: nowrap; }
+.jh-proy-estado.e-trabajando { color: var(--jh-amb); }
+.jh-proy-estado.e-terminado { color: #7dffc4; }
+.jh-proy-estado.e-fallido { color: var(--jh-rojo); }
+.jh-proy-barra { height: 3px; background: var(--jh-c3); margin-top: 6px; border-radius: 2px; overflow: hidden; }
+.jh-proy-barra span { display: block; height: 100%; background: var(--jh-c); box-shadow: 0 0 8px var(--jh-c); }
+.jh-proy-ahora { font-size: 11.5px; color: var(--jh-tenue); margin-top: 4px; line-height: 1.4; }
+.jh-proy-detalle { margin-top: 8px; }
+.jh-proy-texto { font-size: 12.5px; line-height: 1.5; color: var(--jh-texto); white-space: pre-line; }
+.jh-proy-pr { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--jh-c); }
+.jh-proy-hablar { display: flex; gap: 6px; margin-top: 8px; }
+.jh-proy-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.jh-proy-aviso { font-size: 12px; color: var(--jh-amb); margin: 4px 0 8px; line-height: 1.4; }
+.jh-campo {
+  width: 100%; min-width: 0; background: rgba(2,12,20,.8); border: 1px solid var(--jh-c3); color: var(--jh-texto);
+  font-family: 'DM Sans', sans-serif; font-size: 12.5px; padding: 7px 9px; border-radius: 3px; resize: vertical; outline: none;
+}
+.jh-campo:focus { border-color: var(--jh-c2); }
 .jh-dato { margin-bottom: 9px; }
 .jh-dato-etiqueta { font-family: 'DM Mono', monospace; font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--jh-tenue); }
 .jh-dato-valor { font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 16px; color: var(--jh-texto); overflow-wrap: anywhere; }
@@ -741,11 +942,11 @@ const CSS = `
 /* Móvil y pantallas estrechas: sin paneles laterales */
 @media (max-width: 1080px) {
   .jh-cuerpo { grid-template-columns: 210px minmax(0, 1fr); }
-  .jh-panel-der { display: none; }
+  .jh-columna-der { display: none; }
 }
 @media (max-width: 820px) {
   .jh-cuerpo { grid-template-columns: minmax(0, 1fr); padding: 0 12px max(12px, env(safe-area-inset-bottom)); gap: 0; }
-  .jh-panel { display: none; }
+  .jh-columna { display: none; }
   .jh-cabecera { padding-left: 16px; padding-right: 12px; }
   .jh-marca { font-size: 16px; letter-spacing: .26em; }
   .jh-marca-sub { display: none; }
@@ -776,6 +977,7 @@ const CSS = `
 @keyframes jhPunto { 0%, 100% { opacity: .25; transform: rotate(45deg) scale(.7); } 50% { opacity: 1; transform: rotate(45deg) scale(1); } }
 @keyframes jhMsg { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes jhPanel { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes jhPulso { from { transform: scale(.4); box-shadow: 0 0 0 0 var(--jh-c); } to { transform: scale(1.3); box-shadow: 0 0 0 14px transparent; } }
 @keyframes jhAlerta { 0%, 100% { box-shadow: 0 0 0 rgba(255,95,87,0); } 50% { box-shadow: 0 0 24px rgba(255,95,87,.25); } }
 
 @media (prefers-reduced-motion: reduce) {

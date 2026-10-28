@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, lazy, Suspense } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from "react";
 import {
   isToday, isFuture, isPast, isActive, isoHoy, daysUntil, formatTime, formatUpcomingTime,
   eventoDelDetalle,
@@ -2476,6 +2476,17 @@ export default function Dashboard() {
   // Si la voz del navegador está leyendo una respuesta: es lo que mueve las barras del
   // reactor fuera de una llamada (en llamada lo dice `jarvisFase`).
   const [jarvisHablando, setJarvisHablando] = useState(false);
+  // Lo que da el fotograma de la cámara de la vista J.A.R.V.I.S. cuando está encendida y
+  // con «Jarvis ve»; null si no. En ref y no en estado: solo se lee al mandar un turno.
+  const camaraRef = useRef(null);
+  const ponerCapturador = useCallback((fn) => { camaraRef.current = fn; }, []);
+  /** El fotograma de ahora, o nada. Va en el cuerpo del turno (`camara`). */
+  const fotogramaCamara = () => {
+    try {
+      const b64 = camaraRef.current?.() || "";
+      return b64 ? { camara: b64 } : {};
+    } catch { return {}; }
+  };
 
   // ── Modo llamada ──
   // Hablar con Jarvis como por teléfono: escucha seguida, se envía solo al detectar que
@@ -3828,7 +3839,8 @@ export default function Dashboard() {
       const r = await apiFetch(`${API}/jarvis`, {
         method: "POST",
         headers: jsonHeaders(),
-        body: JSON.stringify({ mensaje, historial, voz, ...motivo, ...(potente ? { potente } : {}) }),
+        body: JSON.stringify({ mensaje, historial, voz, ...motivo, ...(potente ? { potente } : {}),
+                               ...fotogramaCamara() }),
       });
       if (!r.ok) throw await motivoJarvis(r);
       const d = await r.json();
@@ -4360,7 +4372,7 @@ export default function Dashboard() {
         // El motivo de la llamada acompaña a cada turno, no solo al primero: el prompt
         // se arma de cero en cada uno, así que olvidarlo aquí es olvidarlo siempre.
         body:    JSON.stringify({ mensaje: dicho, historial, voz: true,
-                                  ...motivoLlamadaRef.current }),
+                                  ...motivoLlamadaRef.current, ...fotogramaCamara() }),
         signal:  aborto?.signal,
       });
       if (!r.ok) throw await motivoJarvis(r);
@@ -9370,6 +9382,7 @@ export default function Dashboard() {
             onNueva={nuevaConversacionJarvis}
             onSalir={() => setJarvisHud(false)}
             host={hostDeApi}
+            onCapturador={ponerCapturador}
             briefing={{
               frase:  momento.frase || momento.saludo,
               clima:  weather?.temp != null

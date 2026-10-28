@@ -775,7 +775,8 @@ Prefijo `la_`: `la_token` (JWT), `la_widget_config`, `la_num_columns`, `la_col_s
 `la_notifications`, `la_simple_mode`, `la_body_goals`, `la_training_days`,
 `la_simple_widget_config`, `la_jarvis_chat` (la conversación con Jarvis: el backend no
 guarda ninguna), `la_jarvis_voz` (si Jarvis contesta en voz alta), `la_jarvis_potente` (la «potencia
-máxima» de la vista de Jarvis, `"1"`/`"0"`), `la_ideas_agrupar`
+máxima» de la vista de Jarvis, `"1"`/`"0"`), `la_jarvis_paneles` (dónde se dejó cada panel de
+esa vista), `la_ideas_agrupar`
 («Agrupar parecidas» del widget de Ideas, `"1"`/`"0"`), `la_finanzas_rango` (el rango
 elegido en la gráfica de finanzas), `la_anio_modo` (el modo del mapa «Tu año»:
 `bienestar`/`sueno`/`pasos`), `la_salida_modo` (coche o andando para la hora de salida:

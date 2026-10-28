@@ -161,6 +161,8 @@ Ficheros clave:
 | `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
 | `src/lib/dev.js` | La lógica de la zona dev: estilos, lectura del estado del sistema y el resumen de una línea que enseña el panel ⚙ |
 | `src/lib/helpers.js` | Helpers puros del frontend (fechas, `sleepHours`/`sleepBreakdown`/`sleepScore`, recovery). **La lógica pura nueva va aquí, no en Dashboard.jsx** |
+| `src/components/jarvis/` (resto) | Lo que cuelga de la vista: `useCamara.js` y `Camara.jsx` (la cámara y su panel), `Manos.jsx` (MediaPipe, el holograma de la mano y el cursor) y `Proyectos.jsx` (el panel del programador). Ver «La cámara, las manos y los proyectos» en `docs/JARVIS.md` |
+| `src/lib/gestos.js` | Lógica pura de las manos: de los 21 puntos de MediaPipe a un cursor, el pellizco con histéresis, cuándo es clic y cuánto se puede mover un panel |
 | `src/lib/jarvisHud.js` | Lógica pura de la vista de Jarvis: el estado del reactor, el nombre del modelo, los protocolos usados y cómo se trocea una respuesta (párrafos, listas, negritas) sin meter HTML |
 | `src/lib/voz.js` | Lógica pura del modo llamada: dónde se corta una frase para el TTS y qué se le quita al texto antes de decirlo |
 | `src/lib/vozEleven.js` | Cliente del WebSocket de ElevenLabs y su reproductor. Sin clave dentro: se autentica con el token de un solo uso de `/voz/token` |

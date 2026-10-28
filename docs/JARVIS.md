@@ -1135,6 +1135,35 @@ contestaba OpenAI de respaldo. El chat apunta al nativo con `CLAUDE_BIN` en
 `~/jarvis-chat/.env`; el `claude-api-server` del teléfono sigue con el de npm (lo coge
 del `PATH`), así que actualizar uno no toca al otro.
 
+### La cámara, las manos y los proyectos (2026-10-28)
+
+Lo que pidió Mikel: «que se parezca todo lo que pueda al Jarvis de Iron Man: que me vea
+en tiempo real, arrastrar cosas con las manos, pinchar en ellas… y crear proyectos y
+trabajar en ellos».
+
+- **📷 en la consola** enciende la cámara: un panel «Visión» con el vídeo en espejo y
+  «● EN DIRECTO» en rojo mientras está abierta. Se apaga al pulsarlo otra vez y al cerrar
+  la vista (`src/components/jarvis/useCamara.js`).
+- **«Jarvis le ve»** (encendido por defecto con la cámara): cada turno, escrito o en
+  llamada, lleva un fotograma de 640 px en JPEG (`camara` en `/jarvis` y `/jarvis/voz`).
+  El backend lo describe una vez con visión (`_describir_camara`, `detail: low`) y pega la
+  descripción al mensaje como DATO (`_con_camara`); el modelo que piensa —Claude por `-p`
+  o el bucle de OpenAI— recibe texto, no la imagen. El fotograma no se guarda ni se
+  registra. `/jarvis` y `/jarvis/voz` admiten por eso más cuerpo (`_tope_de_cuerpo`).
+- **«Usar las manos»**: MediaPipe HandLandmarker en el navegador (el vídeo no sale del
+  equipo para esto; el motor y el modelo se bajan de su CDN la primera vez). La mano se
+  dibuja en grande sobre la pantalla y lleva un cursor: **pellizcar** (pulgar e índice)
+  pulsa lo que hay debajo, y **pellizcar sobre el título de un panel y mover** lo arrastra.
+  Las reglas (umbral con histéresis relativo al tamaño de la mano, espejo, cuándo un
+  pellizco es clic) están en `src/lib/gestos.js`; el bucle, en `Manos.jsx`.
+- **Los paneles se mueven** también con el ratón, por el mismo camino, y se quedan donde
+  se dejan (`la_jarvis_paneles`). «Recolocar» los devuelve a su sitio.
+- **Proyectos** (botón de la cabecera): el panel del programador (`docs/PROGRAMADOR.md`).
+  Lista con estado y progreso (`GET /programador/proyectos`), detalle con la última
+  respuesta y el PR, hablarle (`POST /programador/mensaje`) y **«+ Nuevo»**, que encarga
+  por `/jarvis/ejecutar` con `encargar_proyecto`: pulsar «Encargar» es el «sí».
+- **En móvil** las columnas no caben y no se ven; la cámara y las manos son de escritorio.
+
 ## Spotify: elegir qué suena
 
 Hasta el 2026-10-28 la música era `pc_multimedia`: las teclas multimedia del PC. Saltaban
