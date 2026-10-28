@@ -1160,6 +1160,15 @@ trabajar en ellos».
   fotogramas de la cámara, que se pide a 60 si los da. Las reglas (umbral con histéresis
   relativo al tamaño de la mano, espejo, cuándo un pellizco es clic, el filtro) están en
   `src/lib/gestos.js`; el bucle, en `Manos.jsx`.
+- **Cerrar el puño abre el menú de los proyectos** (`MenuRadial.jsx`): un círculo grande
+  alrededor del puño y, saliendo de él, una burbuja por proyecto (los que están en marcha
+  primero, con su progreso) y una de «+ Nuevo». Se elige **moviendo el puño hacia una y
+  abriendo la mano**, y se abre en el panel de proyectos. Si se abre la mano sin elegir,
+  el menú se queda seis segundos para pulsar una burbuja con un pellizco o con el ratón;
+  Esc o el centro lo cierran. El puño hay que aguantarlo 250 ms (`DetectorDePuno`): una
+  mano que pasa por un puño al moverse no abre nada. Y con el índice plegado no hay
+  pellizco, porque al cerrar el puño el pulgar roza el índice y pulsaba lo de debajo.
+  Los datos de proyectos los piden juntos el panel y el menú (`useProyectos.js`).
 - **«Jarvis le ve» no es vídeo**: es una foto en el instante de mandar cada mensaje.
 - **Los paneles se mueven** también con el ratón, por el mismo camino, y se quedan donde
   se dejan (`la_jarvis_paneles`). «Recolocar» los devuelve a su sitio.

@@ -14,11 +14,14 @@ import {
 } from "../../lib/jarvisHud";
 import { sinMarcaVieja } from "../../lib/voz";
 import { API, authHeaders, apiFetch } from "../../lib/api";
-import { moverPanel } from "../../lib/gestos";
+import { moverPanel, posicionesRadiales, elegirPorDireccion, centroDelMenu } from "../../lib/gestos";
+import { proyectosDelMenu } from "../../lib/proyectos";
 import { useCamara } from "./useCamara";
 import { PanelCamara } from "./Camara";
 import Manos from "./Manos";
 import PanelProyectos from "./Proyectos";
+import MenuRadial from "./MenuRadial";
+import { useProyectos } from "./useProyectos";
 
 const VOZ_NAVEGADOR = typeof window !== "undefined"
   && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -28,6 +31,11 @@ const SIN_MOVIMIENTO = typeof window !== "undefined"
 
 // El arranque se ve una vez por carga de la página: es una presentación, no un peaje.
 let arrancado = false;
+
+// El menú del puño: radio del círculo de burbujas y cuánto se queda abierto si se abre la
+// mano sin haber elegido (para pulsar una con un pellizco o con el ratón).
+const RADIO_MENU = 175;
+const MENU_ESPERA_MS = 6000;
 
 // Dónde ha dejado el señor cada panel (desplazamiento desde su sitio), y si los proyectos
 // estaban abiertos. Preferencias de este navegador, nada más.
@@ -97,6 +105,57 @@ export default function JarvisHUD({
   const [manosOn, setManosOn]     = useState(false);
   const [estadoManos, setEstadoManos] = useState("apagada");
   const [proyectosOn, setProyectosOn] = useState(false);
+  // Los proyectos se piden si se pueden ver: el panel abierto o las manos puestas (el
+  // puño los saca en el menú).
+  const proyectos = useProyectos(proyectosOn || manosOn);
+  const [abrirProyecto, setAbrirProyecto] = useState(null);
+
+  // ── El menú del puño ──
+  // `radial`: { centro, clave (qué mano), sujeto (el puño sigue cerrado), elegido }.
+  const [radial, setRadial] = useState(null);
+  const radialRef = useRef(null);
+  useEffect(() => { radialRef.current = radial; }, [radial]);
+  const itemsMenu = useMemo(() => {
+    const d = proyectos.datos;
+    const lista = proyectosDelMenu(d?.proyectos || []);
+    return d?.configurado ? [...lista, { id: "nuevo" }] : lista;
+  }, [proyectos.datos]);
+  const itemsRef = useRef(itemsMenu);
+  useEffect(() => { itemsRef.current = itemsMenu; }, [itemsMenu]);
+  const posicionesMenu = useMemo(() => posicionesRadiales(itemsMenu.length, RADIO_MENU), [itemsMenu.length]);
+
+  const elegirDelMenu = useCallback((id) => {
+    setRadial(null);
+    if (!id) return;
+    setProyectosOn(true);
+    setAbrirProyecto({ id, vez: Date.now() });
+  }, []);
+  const onPuno = useCallback((fase, punto, clave) => {
+    const r = radialRef.current;
+    if (fase === "cierra") {
+      if (r?.sujeto && r.clave !== clave) return;   // la otra mano ya lo tiene abierto
+      setRadial({ clave, sujeto: true, elegido: -1,
+                  centro: centroDelMenu(punto, RADIO_MENU, { width: window.innerWidth, height: window.innerHeight }) });
+      return;
+    }
+    if (!r || r.clave !== clave || !r.sujeto) return;
+    if (fase === "mueve") {
+      const elegido = elegirPorDireccion({ x: punto.x - r.centro.x, y: punto.y - r.centro.y }, itemsRef.current.length);
+      if (elegido !== r.elegido) setRadial({ ...r, elegido });
+    } else if (fase === "abre") {
+      if (r.elegido >= 0 && itemsRef.current[r.elegido]) elegirDelMenu(itemsRef.current[r.elegido].id);
+      else setRadial({ ...r, sujeto: false });
+    } else if (fase === "perdida") {
+      // La mano ha salido del fotograma con el puño cerrado: no se elige nada a ciegas.
+      setRadial({ ...r, sujeto: false, elegido: -1 });
+    }
+  }, [elegirDelMenu]);
+  // Abierta la mano sin elegir, el menú espera un poco a un pellizco o un clic.
+  useEffect(() => {
+    if (!radial || radial.sujeto) return;
+    const t = setTimeout(() => setRadial(null), MENU_ESPERA_MS);
+    return () => clearTimeout(t);
+  }, [radial]);
   const camara = useCamara(camaraOn);
   const { capturar } = camara;
   // El fotograma viaja con cada mensaje solo con la cámara en directo y «Jarvis ve».
@@ -192,7 +251,10 @@ export default function JarvisHUD({
 
   useEffect(() => {
     function tecla(e) {
-      if (e.key === "Escape" && !enLlamada) { e.preventDefault(); onSalir(); }
+      if (e.key !== "Escape") return;
+      // Primero se cierra el menú del puño, si está; luego, la vista.
+      if (radialRef.current) { e.preventDefault(); setRadial(null); return; }
+      if (!enLlamada) { e.preventDefault(); onSalir(); }
     }
     document.addEventListener("keydown", tecla);
     return () => document.removeEventListener("keydown", tecla);
@@ -413,7 +475,8 @@ export default function JarvisHUD({
           <section className="jh-panel jh-panel-proyectos" data-panel="proyectos" style={estiloPanel("proyectos")}
                    aria-label="Proyectos">
             <Esquinas />
-            <PanelProyectos asa={asaDe("proyectos")} />
+            <PanelProyectos asa={asaDe("proyectos")} datos={proyectos.datos} recargar={proyectos.recargar}
+                            abrir={abrirProyecto} />
           </section>
         )}
         </div>
@@ -421,7 +484,11 @@ export default function JarvisHUD({
 
       {/* Las manos van por encima de todo, y sin atrapar el ratón: el clic de un pellizco
           tiene que caer en lo que hay debajo. */}
+      <MenuRadial centro={radial?.centro} items={itemsMenu} posiciones={posicionesMenu}
+                  elegido={radial?.elegido ?? -1} sujeto={radial?.sujeto}
+                  onElegir={elegirDelMenu} onCerrar={() => setRadial(null)} />
       <Manos videoRef={camara.videoRef} activa={camaraOn && manosOn && camara.estado === "en_directo"}
+             onPuno={onPuno}
              onArrastre={onArrastre} onEstado={setEstadoManos} />
     </div>
   );
@@ -753,6 +820,51 @@ const CSS = `
 .jh-manos-cursor.pulso span { animation: jhPulso .26s ease-out; }
 .jh-mano-encima { outline: 2px solid var(--jh-c) !important; outline-offset: 2px; box-shadow: 0 0 18px var(--jh-c2) !important; }
 
+/* El menú del puño */
+.jh-radial { position: fixed; inset: 0; z-index: 38; pointer-events: none; animation: jhEntrada .25s ease-out; }
+/* El velo: la vista de detrás se apaga alrededor del puño para que el menú se lea. */
+.jh-radial::before {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(circle at var(--cx) var(--cy), rgba(2,6,11,.92) 0, rgba(2,6,11,.86) 300px, rgba(2,6,11,.55) 520px, rgba(2,6,11,.35) 100%);
+}
+.jh-radial-radios { position: absolute; inset: 0; width: 100%; height: 100%; }
+.jh-radial-radios line { stroke: var(--jh-c); stroke-width: 1; opacity: .25; stroke-dasharray: 3 5; }
+.jh-radial-radios line.elegido { opacity: .9; stroke-width: 2; stroke-dasharray: none; filter: drop-shadow(0 0 6px var(--jh-c)); }
+.jh-radial-nucleo {
+  position: absolute; width: 220px; height: 220px; margin: -110px 0 0 -110px; border-radius: 50%;
+  pointer-events: auto; cursor: pointer; background: radial-gradient(circle, rgba(94,231,255,.14), rgba(2,8,14,.55) 62%, transparent 72%);
+  border: none; color: var(--jh-texto); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.jh-radial-anillo {
+  position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--jh-c); box-shadow: 0 0 24px var(--jh-c2), inset 0 0 24px var(--jh-c3);
+  border-top-color: transparent; border-bottom-color: transparent; animation: jhGiro 6s linear infinite;
+}
+.jh-radial-anillo.dos { inset: 14px; border-width: 1px; border-style: dashed; animation-duration: 14s; animation-direction: reverse; opacity: .6; border-top-color: var(--jh-c); }
+.jh-radial-titulo { font-family: 'Rajdhani', sans-serif; font-weight: 700; letter-spacing: .32em; text-transform: uppercase; font-size: 15px; color: var(--jh-c); text-shadow: 0 0 12px var(--jh-c2); }
+.jh-radial-cuenta { font-family: 'DM Mono', monospace; font-size: 9.5px; color: var(--jh-tenue); max-width: 140px; text-align: center; line-height: 1.4; }
+.jh-burbuja {
+  position: absolute; width: 112px; height: 112px; margin: -56px 0 0 -56px; border-radius: 50%; pointer-events: auto; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 12px; text-align: center;
+  background: radial-gradient(circle, rgba(3,16,26,.96) 60%, rgba(94,231,255,.12)); color: var(--jh-texto);
+  border: 1px solid var(--jh-c2); box-shadow: 0 0 18px var(--jh-c3);
+  animation: jhBurbuja .38s cubic-bezier(.2,1.4,.4,1) both; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.jh-burbuja-progreso {
+  position: absolute; inset: -4px; border-radius: 50%; pointer-events: none;
+  background: conic-gradient(var(--jh-c) calc(var(--pct) * 1%), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 61px, #000 62px); mask: radial-gradient(circle, transparent 61px, #000 62px);
+  opacity: .85;
+}
+.jh-burbuja-nombre { font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 14px; line-height: 1.15; }
+.jh-burbuja-estado { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--jh-tenue); text-transform: uppercase; letter-spacing: .06em; }
+.jh-burbuja-pct { display: block; margin-top: 2px; font-size: 11px; color: var(--jh-texto); letter-spacing: .04em; }
+.jh-burbuja.e-trabajando { border-color: rgba(255,192,97,.7); }
+.jh-burbuja.e-trabajando .jh-burbuja-estado { color: var(--jh-amb); }
+.jh-burbuja.nueva { border-style: dashed; }
+.jh-burbuja.nueva .jh-burbuja-nombre { color: var(--jh-c); }
+.jh-burbuja.elegida, .jh-burbuja:hover { transform: scale(1.14); border-color: #fff; box-shadow: 0 0 30px var(--jh-c), inset 0 0 18px var(--jh-c3); }
+.jh-manos-cursor.puno span { border-radius: 30%; border-color: var(--jh-amb); box-shadow: 0 0 20px rgba(255,181,71,.6); }
+
 /* Los proyectos */
 .jh-panel-proyectos { max-height: 56vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--jh-c3) transparent; }
 .jh-proy { border-top: 1px dashed var(--jh-c3); padding: 7px 0; }
@@ -980,6 +1092,7 @@ const CSS = `
 @keyframes jhPunto { 0%, 100% { opacity: .25; transform: rotate(45deg) scale(.7); } 50% { opacity: 1; transform: rotate(45deg) scale(1); } }
 @keyframes jhMsg { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes jhPanel { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes jhBurbuja { from { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(.3); } to { opacity: 1; transform: none; } }
 @keyframes jhPulso { from { transform: scale(.4); box-shadow: 0 0 0 0 var(--jh-c); } to { transform: scale(1.3); box-shadow: 0 0 0 14px transparent; } }
 @keyframes jhAlerta { 0%, 100% { box-shadow: 0 0 0 rgba(255,95,87,0); } 50% { box-shadow: 0 0 24px rgba(255,95,87,.25); } }
 

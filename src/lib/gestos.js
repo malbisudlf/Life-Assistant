@@ -98,7 +98,10 @@ export class LectorDeMano {
     const tam = distancia(puntos[PUNTO.MUNECA], puntos[PUNTO.NUDILLO_CORAZON]) || 1;
     const separacion = distancia(puntos[PUNTO.PULGAR], puntos[PUNTO.INDICE]) / tam;
     let cambio = null;
-    if (!this.pellizco && separacion < this.cierra) { this.pellizco = true; cambio = "baja"; }
+    // Con el índice plegado no es un pellizco: es un puño, y al cerrarlo el pulgar roza el
+    // índice. Sin esto, cerrar el puño para abrir el menú pulsaba lo que hubiera debajo.
+    const indicePlegado = plegado(puntos, PUNTO.INDICE, tam);
+    if (!this.pellizco && separacion < this.cierra && !indicePlegado) { this.pellizco = true; cambio = "baja"; }
     else if (this.pellizco && separacion > this.abre) { this.pellizco = false; cambio = "sube"; }
     // El cursor es el punto entre pulgar e índice: al pellizcar, el índice se mueve hacia
     // el pulgar y el cursor apuntado se iría con él justo al hacer clic.
@@ -121,6 +124,111 @@ export class LectorDeMano {
     this.fy.reinicia();
     return estaba ? "sube" : null;
   }
+}
+
+// ── El puño ───────────────────────────────────────────────────────────────────────
+// Cerrar el puño abre el menú radial de los proyectos. Un dedo está plegado cuando su
+// punta queda cerca del centro de la palma (la media de la muñeca y los cuatro nudillos),
+// en proporción al tamaño de la mano. Extendido, la punta está a ~1,5 veces ese tamaño;
+// plegado, a menos de 0,8.
+const PUNTAS_DEDOS = [8, 12, 16, 20];
+
+function centroPalma(puntos) {
+  const ids = [0, 5, 9, 13, 17];
+  return {
+    x: ids.reduce((a, i) => a + puntos[i].x, 0) / ids.length,
+    y: ids.reduce((a, i) => a + puntos[i].y, 0) / ids.length,
+  };
+}
+
+function plegado(puntos, punta, tam, umbral = 0.8) {
+  return distancia(puntos[punta], centroPalma(puntos)) / tam < umbral;
+}
+
+/** El centro de la palma en pantalla: donde se ancla el menú del puño. */
+export function palmaEnPantalla(puntos, ancho, alto, opciones) {
+  return aPantalla(centroPalma(puntos), ancho, alto, opciones);
+}
+
+/** El centro del menú del puño, metido en la pantalla con el radio y sus burbujas. */
+export function centroDelMenu(punto, radio, ventana, margen = 70) {
+  const borde = radio + margen;
+  return {
+    x: Math.round(Math.min(ventana.width - borde, Math.max(borde, punto.x))),
+    y: Math.round(Math.min(ventana.height - borde, Math.max(borde, punto.y))),
+  };
+}
+
+/** Cuánto se parece a un puño: cuántos de los cuatro dedos están plegados (0-4). */
+export function dedosPlegados(puntos, umbral = 0.8) {
+  if (!puntos || puntos.length < 21) return 0;
+  const tam = distancia(puntos[PUNTO.MUNECA], puntos[PUNTO.NUDILLO_CORAZON]) || 1;
+  return PUNTAS_DEDOS.filter(p => plegado(puntos, p, tam, umbral)).length;
+}
+
+/** Decide cuándo el puño está cerrado de verdad. Hace falta aguantarlo `aguantaMs`: una
+ *  mano que pasa por un puño al moverse (o que se cierra para pellizcar) no abre nada. Se
+ *  da por abierto en cuanto se extienden dos dedos, que es menos que lo que pide cerrarlo:
+ *  así no parpadea con un dedo a medias. */
+export class DetectorDePuno {
+  constructor({ aguantaMs = 250 } = {}) {
+    this.aguantaMs = aguantaMs;
+    this.cerrado = false;
+    this.desde = null;
+  }
+
+  /** `t` en milisegundos. Devuelve "cierra" al confirmarse el puño, "abre" al soltarlo
+   *  y null si nada cambia. */
+  leer(puntos, t) {
+    const n = dedosPlegados(puntos);
+    if (!this.cerrado) {
+      if (n === 4) {
+        if (this.desde == null) this.desde = t;
+        if (t - this.desde >= this.aguantaMs) { this.cerrado = true; return "cierra"; }
+      } else {
+        this.desde = null;
+      }
+      return null;
+    }
+    if (n <= 2) {
+      this.cerrado = false;
+      this.desde = null;
+      return "abre";
+    }
+    return null;
+  }
+
+  /** La mano ha salido del fotograma. */
+  perdida() {
+    const estaba = this.cerrado;
+    this.cerrado = false;
+    this.desde = null;
+    return estaba ? "abre" : null;
+  }
+}
+
+/** Dónde va cada burbuja del menú radial alrededor del puño, empezando arriba y en el
+ *  sentido de las agujas del reloj. Desplazamientos desde el centro, en píxeles. */
+export function posicionesRadiales(n, radio) {
+  return Array.from({ length: n }, (_, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+    return { x: Math.round(Math.cos(a) * radio), y: Math.round(Math.sin(a) * radio) };
+  });
+}
+
+/** Qué burbuja se elige moviendo el puño desde el centro: la que está en esa dirección,
+ *  si se ha movido al menos `umbral` píxeles; -1 si no. */
+export function elegirPorDireccion(desplazamiento, n, { umbral = 70 } = {}) {
+  if (!n || Math.hypot(desplazamiento.x, desplazamiento.y) < umbral) return -1;
+  const angulo = Math.atan2(desplazamiento.y, desplazamiento.x);
+  let mejor = -1;
+  let menor = Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+    const d = Math.abs(Math.atan2(Math.sin(angulo - a), Math.cos(angulo - a)));
+    if (d < menor) { menor = d; mejor = i; }
+  }
+  return mejor;
 }
 
 /** Acerca lo que se pinta a lo último que se vio: el seguimiento llega a lo que dé la

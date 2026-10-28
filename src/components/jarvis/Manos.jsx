@@ -1,7 +1,9 @@
 // Las manos de la vista J.A.R.V.I.S.: las manos que ve la cámara (hasta dos), dibujadas
 // en grande sobre la pantalla como un holograma, y con cada una un cursor. El índice y el
 // pulgar juntos (pellizco) pulsan lo que hay debajo; pellizcar sobre el título de un panel
-// y mover la mano lo arrastra. Con las dos se pueden llevar dos paneles a la vez.
+// y mover la mano lo arrastra. Con las dos se pueden llevar dos paneles a la vez. Y
+// cerrar el puño abre el menú de los proyectos alrededor de él (MenuRadial.jsx): aquí
+// solo se avisa de que el puño se cierra, se mueve y se abre (`onPuno`).
 //
 // El seguimiento es MediaPipe (HandLandmarker) en el propio navegador: el vídeo no sale
 // del equipo para esto. Su motor (WASM) y el modelo se bajan de su CDN la primera vez que
@@ -13,7 +15,9 @@
 // cámara (unos 30 fotogramas por segundo) y lo que se pinta se acerca a lo último visto en
 // cada fotograma de la pantalla (60 o más). Atados, el cursor iba a saltos.
 import { useEffect, useRef } from "react";
-import { LectorDeMano, HUESOS, aPantalla, esClic, acercar, claveDeMano } from "../../lib/gestos";
+import {
+  LectorDeMano, DetectorDePuno, HUESOS, aPantalla, esClic, acercar, claveDeMano, palmaEnPantalla,
+} from "../../lib/gestos";
 
 const VERSION_MEDIAPIPE = "0.10.35";   // la de package.json: el WASM tiene que casar
 const WASM   = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VERSION_MEDIAPIPE}/wasm`;
@@ -27,13 +31,14 @@ const PUNTAS = new Set([4, 8, 12, 16, 20]);
 const ACERCA_CURSOR = 0.55;
 const ACERCA_MANO = 0.6;
 
-export default function Manos({ videoRef, activa, onArrastre, onEstado }) {
+export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }) {
   const lienzoRef = useRef(null);
   const cursoresRef = useRef([]);
   // Los callbacks cambian en cada render del HUD; el bucle de vídeo vive mucho más.
   const arrastreRef = useRef(onArrastre);
   const estadoRef = useRef(onEstado);
-  useEffect(() => { arrastreRef.current = onArrastre; estadoRef.current = onEstado; });
+  const punoRef = useRef(onPuno);
+  useEffect(() => { arrastreRef.current = onArrastre; estadoRef.current = onEstado; punoRef.current = onPuno; });
 
   useEffect(() => {
     if (!activa) return;
@@ -84,11 +89,19 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado }) {
         if (!m) {
           const hueco = huecoLibre();
           if (hueco < 0) return;
-          m = { lector: new LectorDeMano(), hueco, pulsado: null, puntosPintados: null, cursorPintado: null };
+          m = { lector: new LectorDeMano(), puno: new DetectorDePuno(), hueco, pulsado: null,
+                puntosPintados: null, cursorPintado: null };
           manos.set(clave, m);
         }
         vistas.add(clave);
         m.puntos = puntos.map(q => aPantalla(q, ancho, alto));
+        // El puño, antes que el pellizco: con el puño cerrado no se pulsa ni se arrastra.
+        const palma = palmaEnPantalla(puntos, ancho, alto);
+        const puno = m.puno.leer(puntos, performance.now());
+        if (puno === "cierra") punoRef.current?.("cierra", palma, clave);
+        else if (puno === "abre") punoRef.current?.("abre", palma, clave);
+        else if (m.puno.cerrado) punoRef.current?.("mueve", palma, clave);
+        m.cerrado = m.puno.cerrado;
         const r = m.lector.leer(puntos, ancho, alto, undefined, performance.now() / 1000);
         if (!r) return;
         m.cursor = { x: r.x, y: r.y };
@@ -113,6 +126,7 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado }) {
       for (const [clave, m] of manos) {
         if (vistas.has(clave)) continue;
         if (m.lector.perdida() === "sube" || m.pulsado) soltar(clave, m, m.cursor?.x ?? 0, m.cursor?.y ?? 0);
+        if (m.puno.perdida() === "abre") punoRef.current?.("perdida", m.cursor || { x: 0, y: 0 }, clave);
         const cursor = cursoresRef.current[m.hueco];
         if (cursor) cursor.style.opacity = "0";
         manos.delete(clave);
@@ -180,6 +194,7 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado }) {
           cursor.style.transform = `translate3d(${m.cursorPintado.x}px, ${m.cursorPintado.y}px, 0)`;
           cursor.style.setProperty("--fuerza", (m.fuerza || 0).toFixed(2));
           cursor.classList.toggle("cerrado", Boolean(m.pellizco));
+          cursor.classList.toggle("puno", Boolean(m.cerrado));
         }
       }
     }
@@ -220,6 +235,7 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado }) {
       try { detector?.close(); } catch { /* ya cerrado */ }
       for (const [clave, m] of manos) {
         if (m.pulsado?.arrastre) arrastreRef.current?.(m.pulsado.arrastre, "suelta", { x: 0, y: 0 }, clave);
+        if (m.puno.cerrado) punoRef.current?.("perdida", { x: 0, y: 0 }, clave);
       }
       encimaAntes.forEach(el => el.classList.remove("jh-mano-encima"));
       estadoRef.current?.("apagada");

@@ -8,28 +8,15 @@
 // herramienta pide, igual que el botón de confirmar de la tarjeta. Lo que cuenta el
 // programador lo escribe un modelo que ha leído repositorios: se pinta como texto, nunca
 // como HTML, y el enlace al PR solo si es de GitHub.
-import { useCallback, useEffect, useState } from "react";
-import { API, jsonHeaders, authHeaders, apiFetch } from "../../lib/api";
+import { useState } from "react";
+import { API, jsonHeaders, apiFetch } from "../../lib/api";
 import { porcentajeDe } from "../../lib/gestos";
+import { ESTADOS, prDeConfianza, recorta } from "../../lib/proyectos";
 
-const CADA_MS = 20000;
-const ESTADOS = {
-  trabajando: "Trabajando", en_cola: "En cola", cola: "En cola", terminado: "Terminado",
-  fallido: "Fallido", esperando: "Esperando",
-};
-
-function prDeConfianza(url) {
-  return /^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}\/pull\/\d{1,7}$/.test(String(url || ""))
-    ? url : "";
-}
-
-function recorta(texto, n) {
-  const t = String(texto || "").replace(/\s+/g, " ").trim();
-  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
-}
-
-export default function PanelProyectos({ asa }) {
-  const [datos, setDatos]       = useState(null);
+/** Los datos los trae `useProyectos` (los comparte con el menú del puño). `abrir` es lo
+ *  que se eligió en ese menú: `{ id, vez }`, con `id` el del proyecto o "nuevo". */
+export default function PanelProyectos({ asa, datos, recargar, abrir }) {
+  const cargar = recargar;
   const [abierto, setAbierto]   = useState(null);
   const [nuevo, setNuevo]       = useState(false);
   const [titulo, setTitulo]     = useState("");
@@ -38,19 +25,14 @@ export default function PanelProyectos({ asa }) {
   const [mensaje, setMensaje]   = useState("");
   const [enviando, setEnviando] = useState(false);
   const [aviso, setAviso]       = useState("");
-
-  const cargar = useCallback(() => {
-    apiFetch(`${API}/programador/proyectos`, { headers: authHeaders() })
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d) setDatos(d); })
-      .catch(() => { /* sin red: se queda lo último que se vio */ });
-  }, []);
-
-  useEffect(() => {
-    cargar();
-    const t = setInterval(cargar, CADA_MS);
-    return () => clearInterval(t);
-  }, [cargar]);
+  // Lo elegido con el puño abre aquí su proyecto (o el formulario de uno nuevo). Se ajusta
+  // durante el render, no en un efecto: es estado que sigue a una prop.
+  const [abrirVisto, setAbrirVisto] = useState(null);
+  if (abrir && abrir !== abrirVisto) {
+    setAbrirVisto(abrir);
+    if (abrir.id === "nuevo") { setNuevo(true); setAviso(""); }
+    else { setNuevo(false); setAbierto(abrir.id); }
+  }
 
   async function encargar(e) {
     e.preventDefault();

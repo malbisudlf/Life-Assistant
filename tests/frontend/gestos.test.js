@@ -1,16 +1,31 @@
 import { describe, it, expect } from "vitest";
 import {
   LectorDeMano, FiltroOneEuro, aPantalla, esClic, moverPanel, porcentajeDe, distancia, acercar, claveDeMano,
+  DetectorDePuno, dedosPlegados, posicionesRadiales, elegirPorDireccion,
 } from "../../src/lib/gestos";
 
-/** Una mano de juguete: muñeca abajo, nudillo del corazón 0,2 más arriba, y el pulgar y
- *  el índice separados `abierto` veces ese tamaño. */
+/** Una mano con los cuatro dedos extendidos hacia arriba, o plegados sobre la palma. */
+function manoDeDedos(plegados) {
+  const x = 0.5;
+  const p = Array.from({ length: 21 }, () => ({ x, y: 0.5 }));
+  p[0] = { x, y: 0.7 };                               // muñeca
+  [5, 9, 13, 17].forEach((i, k) => { p[i] = { x: x - 0.06 + k * 0.04, y: 0.5 }; });   // nudillos
+  [8, 12, 16, 20].forEach((i, k) => {
+    p[i] = plegados > k ? { x: x - 0.06 + k * 0.04, y: 0.58 } : { x: x - 0.06 + k * 0.04, y: 0.2 };
+  });
+  p[4] = { x: x - 0.09, y: 0.55 };
+  return p;
+}
+
+/** Una mano de juguete: muñeca abajo, nudillo del corazón 0,2 más arriba, y las puntas
+ *  del pulgar y el índice por encima de la palma (como al pellizcar de verdad), separadas
+ *  `abierto` veces ese tamaño. */
 function mano(abierto, { x = 0.5, y = 0.5 } = {}) {
   const p = Array.from({ length: 21 }, () => ({ x, y }));
   p[0] = { x, y: y + 0.2 };
   p[9] = { x, y };
-  p[4] = { x: x - (abierto * 0.2) / 2, y };
-  p[8] = { x: x + (abierto * 0.2) / 2, y };
+  p[4] = { x: x - (abierto * 0.2) / 2, y: y - 0.25 };
+  p[8] = { x: x + (abierto * 0.2) / 2, y: y - 0.25 };
   return p;
 }
 
@@ -86,6 +101,55 @@ describe("FiltroOneEuro", () => {
     const f = new FiltroOneEuro();
     f.filtrar(100, 1);
     expect(f.filtrar(300, 0.5)).toBe(300);
+  });
+});
+
+describe("el puño", () => {
+  it("cuenta los dedos plegados", () => {
+    expect(dedosPlegados(manoDeDedos(0))).toBe(0);
+    expect(dedosPlegados(manoDeDedos(4))).toBe(4);
+    expect(dedosPlegados(manoDeDedos(2))).toBe(2);
+  });
+
+  it("hay que aguantarlo para que cuente, y se suelta al extender dos dedos", () => {
+    const d = new DetectorDePuno({ aguantaMs: 250 });
+    expect(d.leer(manoDeDedos(4), 0)).toBe(null);
+    expect(d.leer(manoDeDedos(4), 100)).toBe(null);
+    expect(d.leer(manoDeDedos(4), 260)).toBe("cierra");
+    expect(d.leer(manoDeDedos(3), 300)).toBe(null);    // un dedo a medias no lo suelta
+    expect(d.leer(manoDeDedos(2), 340)).toBe("abre");
+  });
+
+  it("un puño de paso no abre nada", () => {
+    const d = new DetectorDePuno({ aguantaMs: 250 });
+    d.leer(manoDeDedos(4), 0);
+    d.leer(manoDeDedos(0), 100);
+    expect(d.leer(manoDeDedos(4), 300)).toBe(null);
+  });
+
+  it("con el índice plegado no hay pellizco aunque el pulgar lo toque", () => {
+    const l = new LectorDeMano();
+    const puno = manoDeDedos(4);
+    puno[4] = { ...puno[8] };                          // el pulgar sobre el índice plegado
+    expect(l.leer(puno, 1000, 800, undefined, 0).pellizco).toBe(false);
+  });
+});
+
+describe("el menú radial", () => {
+  it("las burbujas empiezan arriba y siguen las agujas del reloj", () => {
+    const [arriba, derecha, abajo, izquierda] = posicionesRadiales(4, 100);
+    expect(arriba).toEqual({ x: 0, y: -100 });
+    expect(derecha).toEqual({ x: 100, y: 0 });
+    expect(abajo.y).toBe(100);
+    expect(izquierda.x).toBe(-100);
+  });
+
+  it("se elige moviendo el puño hacia una, y sin moverse no se elige ninguna", () => {
+    expect(elegirPorDireccion({ x: 0, y: -120 }, 4)).toBe(0);
+    expect(elegirPorDireccion({ x: 110, y: 10 }, 4)).toBe(1);
+    expect(elegirPorDireccion({ x: -90, y: -5 }, 4)).toBe(3);
+    expect(elegirPorDireccion({ x: 20, y: 10 }, 4)).toBe(-1);
+    expect(elegirPorDireccion({ x: 200, y: 0 }, 0)).toBe(-1);
   });
 });
 
