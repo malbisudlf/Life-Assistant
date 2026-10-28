@@ -86,6 +86,27 @@ después de agotar el turno. Está entero en `docs/BUGS_HISTORICOS.md`, con la m
 todo lo que se cuelgue del cierre de un turno se cobra en el silencio que el usuario está
 esperando para hablar.
 
+## El oído es jacobo (octubre de 2026)
+
+Desde el 2026-10-28 la llamada del navegador escucha primero con el Whisper de jacobo,
+el mismo que transcribe el teléfono, y Scribe pasa a ser la reserva. Se notó porque
+ElevenLabs se quedó sin cuota a media llamada y el aviso dejó claro que la web nunca
+había usado jacobo.
+
+```
+micro ─PCM 16 kHz─▶ /voz/oido (backend, JWT) ─llave─▶ jacobo /escucha ─▶ parciales y final
+```
+
+- **El puente existe porque jacobo está en la red de casa** y su llave no puede ir en una
+  página. La sesión viaja en el primer mensaje del WebSocket, no en la URL.
+- **El corte de frases lo hace el cliente** (`CortadorDeFrases` en `src/lib/vozOido.js`):
+  el oído no tiene VAD propio y espera a que le digan `fin`, como hace la voice-app. Se
+  manda audio solo mientras hablas, con ~320 ms de antes para no comerse la primera
+  sílaba, y `fin` tras 750 ms de silencio. El umbral se adapta al ruido de fondo.
+- **Orden de caída**: jacobo → Scribe → reconocimiento del navegador. Si jacobo no
+  contesta al descolgar, se pasa a Scribe sin avisar; si se cae a media llamada, se dice.
+- **Coste**: cero por minuto. Scribe solo se paga cuando jacobo falla.
+
 ## La voz se mudó a Azure (septiembre de 2026)
 
 **El problema no era el modelo, era el idioma.** En plan gratuito las voces españolas de

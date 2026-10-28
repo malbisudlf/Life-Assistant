@@ -30255,7 +30255,8 @@ _JARVIS_HERRAMIENTAS = {
         "fn":            _j_pc_abrir,
         "descripcion":   "Abre en el PC de Mikel una aplicación por su nombre («spotify»), "
                          "una web (http/https) o una carpeta («descargas»). Si el PC está "
-                         "dormido, lo enciende antes.",
+                         "dormido, lo enciende antes. Si pide una aplicación, pásale el "
+                         "nombre, no su web; si no la encuentra, dilo en vez de abrir la web.",
         "parametros":    {"que": {"type": "string",
                                   "description": "La aplicación, la web o la carpeta."}},
         "obligatorios":  ["que"],
@@ -33096,6 +33097,109 @@ def _calentar_para_hablar() -> None:
         finally:
             _calentando.release()
     threading.Thread(target=_trabajo, daemon=True, name="calentar-voz").start()
+
+
+# ── El oído de jacobo, para la llamada del navegador ─────────────────────────────
+# La llamada del dashboard escuchaba con Scribe de ElevenLabs (de pago, por minuto de
+# micrófono abierto) mientras el teléfono ya transcribía gratis con el Whisper de jacobo
+# (`telefono/oido/`). El navegador no puede hablarle directamente: jacobo está en la red
+# de casa y su llave no puede viajar en una página. Así que esto es un puente: el
+# navegador abre `/voz/oido`, se identifica con su sesión y lo que manda (PCM a 16 kHz y
+# los avisos de fin de frase) pasa tal cual a `/escucha` de jacobo, con la llave puesta
+# aquí. Lo que contesta jacobo vuelve igual. El protocolo está en la cabecera de
+# `telefono/oido/servidor.py`.
+#
+# La sesión va en el PRIMER MENSAJE y no en la URL: un WebSocket del navegador no
+# admite cabeceras, y en la query el JWT acabaría en los registros de URLs (es lo que
+# obligó a rotar HA_POLL_TOKEN).
+OIDO_URL        = os.getenv("OIDO_URL", "").strip().rstrip("/")
+OIDO_TOKEN      = os.getenv("OIDO_TOKEN", "")
+# Una llamada olvidada no puede tener la GPU de jacobo ocupada para siempre.
+OIDO_MAX_SEG    = int(os.getenv("OIDO_MAX_SEG", str(30 * 60)))
+OIDO_TROZO_MAX  = 64 * 1024          # bytes por mensaje: ~2 s de audio, de sobra
+
+
+def _oido_url_escucha() -> str:
+    base = OIDO_URL.replace("https://", "wss://").replace("http://", "ws://")
+    return f"{base}/escucha?hz=16000&idioma=es"
+
+
+async def _oido_conectar():
+    """El WebSocket con jacobo. Aparte para poder sustituirlo en los tests."""
+    from websockets.asyncio.client import connect
+    return await connect(_oido_url_escucha(),
+                         additional_headers={"Authorization": f"Bearer {OIDO_TOKEN}"},
+                         open_timeout=5, max_size=1024 * 1024)
+
+
+@app.websocket("/voz/oido")
+async def voz_oido(ws: WebSocket):
+    """Puente entre la llamada del navegador y el oído de jacobo. Ver la cabecera."""
+    await ws.accept()
+    try:
+        hola = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=10))
+        _jwt_de_usuario(str((hola or {}).get("token") or ""))
+    except (asyncio.TimeoutError, ValueError, AttributeError, HTTPException, WebSocketDisconnect):
+        await ws.close(code=1008)
+        return
+    if not (OIDO_URL and OIDO_TOKEN):
+        await ws.send_text(json.dumps({"tipo": "error", "detalle": "sin_oido"}))
+        await ws.close(code=1011)
+        return
+    try:
+        arriba = await _oido_conectar()
+    except Exception as e:   # noqa: BLE001 — jacobo apagado, sin red o sin llave: lo mismo
+        logger.warning("Oído: jacobo no contesta (%s)", type(e).__name__)
+        await ws.send_text(json.dumps({"tipo": "error", "detalle": "jacobo_no_contesta"}))
+        await ws.close(code=1011)
+        return
+    await ws.send_text(json.dumps({"tipo": "listo"}))
+
+    async def subir():
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+            if msg.get("bytes") is not None:
+                if len(msg["bytes"]) <= OIDO_TROZO_MAX:
+                    await arriba.send(msg["bytes"])
+            elif msg.get("text") is not None:
+                # Solo lo que el protocolo conoce: esto no es un túnel genérico a jacobo.
+                try:
+                    tipo = json.loads(msg["text"]).get("tipo")
+                except (ValueError, AttributeError):
+                    tipo = None
+                if tipo in ("fin", "reinicia"):
+                    await arriba.send(json.dumps({"tipo": tipo}))
+
+    async def bajar():
+        async for msg in arriba:
+            if isinstance(msg, str):
+                await ws.send_text(msg)
+
+    tareas = [asyncio.create_task(subir()), asyncio.create_task(bajar())]
+    try:
+        hechas, _ = await asyncio.wait(tareas, timeout=OIDO_MAX_SEG,
+                                       return_when=asyncio.FIRST_COMPLETED)
+        if not hechas:
+            logger.info("Oído: sesión cerrada por duración máxima")
+        elif tareas[1] in hechas and not tareas[0].done():
+            # Se cerró jacobo, no el navegador: que el cliente lo sepa y caiga a Scribe.
+            await ws.send_text(json.dumps({"tipo": "error", "detalle": "jacobo_se_cerro"}))
+    except Exception as e:   # noqa: BLE001 — un puente roto se cierra, no tumba nada
+        logger.warning("Oído: el puente se ha roto (%s)", type(e).__name__)
+    finally:
+        for t in tareas:
+            t.cancel()
+        await asyncio.gather(*tareas, return_exceptions=True)
+        try:
+            await arriba.close()
+        except Exception:   # noqa: BLE001
+            pass
+        try:
+            await ws.close()
+        except Exception:   # noqa: BLE001 — ya cerrado por el otro lado
+            pass
 
 
 @app.post("/voz/token")

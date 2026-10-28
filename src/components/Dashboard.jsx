@@ -41,8 +41,9 @@ import {
   posicionAhora, diaTrasCambioDeHoy,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco, historialTrasCorte } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco, historialTrasCorte, sinMarcaVieja } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
+import { escucharConOido, urlDelOido } from "../lib/vozOido";
 import { abrirVozEleven } from "../lib/vozEleven";
 import { abrirVozAzure } from "../lib/vozAzure";
 import { vigilarInterrupcion } from "../lib/vozMicro";
@@ -1094,7 +1095,7 @@ const JarvisMensaje = React.memo(function JarvisMensaje({ m }) {
         background: esUsuario ? "var(--accent)" : "var(--surface2)",
         border: esUsuario ? "none" : "0.5px solid var(--border)",
       }}>
-        {m.texto}
+        {sinMarcaVieja(m.texto)}
         {!esUsuario && m.herramientas?.length > 0 && (
           <div style={{ marginTop: 6, fontSize: 10, color: "var(--muted2)", letterSpacing: "0.05em" }}>
             {m.herramientas.join(" · ")}
@@ -4510,12 +4511,53 @@ export default function Dashboard() {
   }
 
   /** Arranca el micrófono continuo de la llamada. No se espera: si tarda o falla, la
-   *  llamada ya está escuchando con el navegador y esto solo la mejora cuando llega.
+   *  llamada ya está escuchando con el navegador y esto solo la mejora cuando llega. Se
+   *  llama UNA vez por llamada, no por turno.
    *
-   *  Se llama UNA vez por llamada, no por turno. Es la diferencia entera con el
-   *  reconocimiento del navegador, y también lo que hay que recordar del coste: a partir
-   *  de aquí corre el contador (0,39 $/hora) hasta que se cuelgue. */
-  function abrirEscuchaDePago() {
+   *  El primero que se prueba es el Whisper de jacobo, por el puente `/voz/oido`: gratis
+   *  y el mismo oído que el teléfono. Si jacobo no contesta al empezar, se pasa a Scribe
+   *  sin decir nada; si se cae a media llamada, se dice y se pasa a Scribe, y si tampoco
+   *  hay Scribe, al reconocimiento del navegador. */
+  function abrirEscuchaDeJacobo() {
+    const miTurno = vozTurnoRef.current;
+    // La misma marca que usa Scribe: mientras se monta, el reconocimiento del navegador
+    // espera en vez de abrir un segundo micrófono (ver abrirEscuchaDeScribe).
+    scribeRef.current = "pidiendo";
+    const aScribe = () => {
+      if (scribeRef.current === "pidiendo") scribeRef.current = null;
+      if (!llamadaRef.current) return;
+      abrirEscuchaDeScribe();
+      // Sin permiso de Scribe no hay nada en vuelo: que escuche el navegador.
+      if (!scribeRef.current && !hablandoRef.current) cicloRef.current.escuchar?.();
+    };
+    escucharConOido({
+      url:   urlDelOido(API),
+      token: (() => { try { return localStorage.getItem("la_token") || ""; } catch { return ""; } })(),
+      alParcial: (texto) => cicloRef.current.parcial?.(texto),
+      alCerrar:  (texto) => cicloRef.current.cerrada?.(texto),
+      alFallar:  (motivo) => {
+        scribeRef.current = null;
+        if (!llamadaRef.current) return;
+        setJarvisMensajes(prev => [...prev, {
+          rol: "aviso", texto: `He perdido el oído de jacobo (${motivo}); sigo escuchando por otra vía.`,
+        }]);
+        aScribe();
+      },
+    }).then((escucha) => {
+      if (!escucha) { aScribe(); return; }
+      if (!llamadaRef.current || vozTurnoRef.current < miTurno) {
+        escucha.parar();
+        if (scribeRef.current === "pidiendo") scribeRef.current = null;
+        return;
+      }
+      scribeRef.current = escucha;
+      pararEscucha();   // dos capturas del micro a la vez se rompen en iOS
+    }).catch(() => { aScribe(); });
+  }
+
+  /** El de reserva: Scribe de ElevenLabs, de pago por minuto de micro abierto (0,39 $/h)
+   *  hasta que se cuelgue. */
+  function abrirEscuchaDeScribe() {
     const permiso = scribePermisoRef.current;
     // El token vale 15 minutos y el de la voz ya enseñó lo que pasa al estrenar uno
     // pasado de fecha: el socket lo acepta y lo cierra acto seguido con `invalid_token`.
@@ -4555,7 +4597,7 @@ export default function Dashboard() {
         scribeRef.current = null;
         if (!llamadaRef.current) return;
         setJarvisMensajes(prev => [...prev, {
-          rol: "aviso", texto: `No he podido escucharte con ElevenLabs (${motivo}); sigo con el micrófono del navegador.`,
+          rol: "aviso", texto: `No he podido escucharle con ElevenLabs (${motivo}); sigo con el micrófono del navegador.`,
         }]);
         if (!hablandoRef.current) cicloRef.current.escuchar?.();
       },
@@ -4697,7 +4739,7 @@ export default function Dashboard() {
     // El micrófono de pago se abre UNA vez por llamada y desde el gesto, como el audio:
     // en iOS un AudioContext creado fuera de un toque nace suspendido. No se espera a que
     // esté —la llamada arranca escuchando con el navegador— y cuando llega, sustituye.
-    abrirEscuchaDePago();
+    abrirEscuchaDeJacobo();
     setJarvisLlamada(true);
     setJarvisParcial("");
     setJarvisFase("hablando");
