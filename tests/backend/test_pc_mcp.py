@@ -153,3 +153,22 @@ def test_cada_peticion_cuenta_como_uso(pc, monkeypatch):
     assert pc.sin_uso_hace() == pytest.approx(300)
     pc.marcar_uso()
     assert pc.sin_uso_hace() == pytest.approx(0)
+
+
+def test_espera_a_que_el_puerto_se_pueda_usar(pc):
+    """Dos arranques seguidos murieron con «could not bind» el 2026-10-28: se reintenta."""
+    intentos = []
+
+    def _probar():
+        intentos.append(1)
+        if len(intentos) < 3:
+            raise OSError(10049, "La dirección solicitada no es válida en este contexto")
+    assert pc.esperar_puerto("100.1.2.3", 8765, espera_s=60, probar=_probar, dormir=lambda s: None) == ""
+    assert len(intentos) == 3
+
+
+def test_si_el_puerto_no_se_libera_dice_por_que(pc):
+    def _ocupado():
+        raise OSError(10048, "Solo se permite un uso de cada dirección de socket")
+    error = pc.esperar_puerto("100.1.2.3", 8765, espera_s=0, probar=_ocupado, dormir=lambda s: None)
+    assert "10048" in error and "socket" in error

@@ -553,6 +553,33 @@ def vigilar_inactividad(minutos: float, salir=None) -> None:
     threading.Thread(target=_bucle, daemon=True, name="inactividad").start()
 
 
+def esperar_puerto(host: str, puerto: int, espera_s: float = 45.0, pausa_s: float = 2.0,
+                   probar=None, dormir=time.sleep) -> str:
+    """Espera a poder escuchar en host:puerto. Devuelve "" si se puede, o el último error.
+
+    El 2026-10-28 dos arranques seguidos pedidos por caja murieron con «could not bind»,
+    sin más (uvicorn no dice el motivo), y Jarvis acabó diciendo que el PC estaba apagado
+    con el PC delante. Los dos candidatos son la IP de la tailnet aún sin levantar (justo
+    al despertar) y el puerto todavía cogido por la instancia anterior. Cualquiera de los
+    dos se pasa esperando unos segundos, y el motivo queda en el registro."""
+    import socket
+
+    def _probar():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, puerto))
+
+    fin = time.monotonic() + espera_s
+    while True:
+        try:
+            (probar or _probar)()
+            return ""
+        except OSError as e:
+            error = f"{type(e).__name__} {getattr(e, 'winerror', None) or e.errno}: {e.strerror or e}"
+        if time.monotonic() >= fin:
+            return error
+        dormir(pausa_s)
+
+
 def app_http(mcp, token: str):
     """La app ASGI del transporte HTTP, con el token delante (fail-closed).
 
@@ -609,6 +636,10 @@ def main() -> None:
         apagar_min = float(os.environ.get("PC_MCP_APAGAR_MIN", "15"))
     except ValueError:
         apagar_min = 15.0
+    error = esperar_puerto(host, puerto)
+    if error:
+        print(f"pc_mcp: no puedo escuchar en {host}:{puerto} ({error})", file=sys.stderr, flush=True)
+        sys.exit(3)
     marcar_uso()
     vigilar_inactividad(apagar_min)
     print(f"pc_mcp: nivel {NIVEL}, escuchando en {host}:{puerto}"

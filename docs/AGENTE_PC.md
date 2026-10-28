@@ -394,7 +394,14 @@ del teléfono. Tres decisiones:
   PC de Mikel hay reglas viejas del cortafuegos que dejan entrar a `python.exe` y
   `pythonw.exe` por cualquier puerto, también en redes públicas, así que el cortafuegos no
   es la frontera; atarse a la tailnet sí. Si Tailscale no está levantado al arrancar, el MCP
-  no arranca: falla cerrado.
+  no arranca: falla cerrado. **Pero antes espera hasta 45 s** (`esperar_puerto`): el
+  2026-10-28 dos arranques seguidos pedidos por caja murieron con «could not bind» sin
+  decir por qué, y Jarvis contestó que el PC estaba apagado con el PC encendido. Si sigue
+  sin poder, el registro (`~/.jarvis-pc/pc_mcp.log`) dice ya el error de Windows (10049 es
+  la IP de la tailnet sin levantar; 10048, el puerto aún cogido) y sale con código 3.
+- **`abrir` busca también las apps de la Microsoft Store** (`Get-StartApps`, solo si no hay
+  acceso directo, y guardado diez minutos). Spotify instalado desde la Store no deja `.lnk`
+  en el menú Inicio, así que «abre Spotify» no encontraba nada y el modelo abría la web.
 
   El token va en `Authorization: Bearer`, comparado en tiempo constante y fail-closed (sin
   token de 24 caracteres no arranca); la protección contra DNS rebinding de la librería
