@@ -1093,16 +1093,26 @@ allí** (ver «La huella en jacobo», abajo). **La voice-app aún no lo llama**:
 - `servidor.py`: el servicio de la huella. HTTP de la biblioteca estándar y
   [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (2.0.0, ~4 MB más su núcleo; trae
   su propio onnxruntime). `GET /salud`, `POST /verificar` (PCM 16 kHz de una frase →
-  `{es_el, similitud, umbral}`) y `POST /alta` (las frases seguidas, con sus largos en la
-  cabecera `X-Frases`; descarta las que no se parecen al resto y guarda la anterior en
-  `huella.anterior.json`). Escucha en `127.0.0.1` y **fuera de local no arranca sin
-  `HUELLA_TOKEN`**, que es lo que permite moverlo a jacobo. Ni audio ni texto en disco:
-  solo el vector y sus números.
+  `{es_el, similitud, perfil, umbral}`), `POST /alta` (las frases seguidas, con sus
+  largos en la cabecera `X-Frases` y el nombre en `X-Perfil`; descarta las que no se
+  parecen al resto) y `DELETE /perfil/<nombre>`. Escucha en `127.0.0.1` y **fuera de
+  local no arranca sin `HUELLA_TOKEN`**, que es lo que permite moverlo a jacobo. Ni audio
+  ni texto en disco: solo los vectores y sus números (`huellas.json`, y el de antes del
+  último cambio en `huellas.anterior.json`).
+- **Varias voces** (2026-10-28, pedido por Mikel): una huella por sitio con nombre
+  (`coche`, `altavoz`…), y pasa quien se parezca a cualquiera. La misma voz suena muy
+  distinta por el altavoz del móvil en casa que por el manos libres en marcha, y con una
+  sola huella del sofá el coche rechaza más. Cada perfil es una puerta más para una voz
+  ajena (con dos, en el peor caso, el doble de colados), así que hay tope:
+  `HUELLA_MAX_PERFILES`, 3. **Cada una se graba donde se va a usar.**
 - `huella-voz.js`: lo que iría en `voice-app/lib/`. `comprobarVoz()` (con
   `HUELLA_VOZ_MODO=medir`, que apunta la similitud pero despierta siempre, para fijar el
   umbral con llamadas reales; y `HUELLA_VOZ_SI_FALLA=despertar|dormir`, por defecto
-  despertar) y `aprenderVoz()`, el alta por teléfono: «Jarvis, aprende mi voz», ocho
-  frases que empiezan por «Jarvis» y una libre, ~30 s.
+  despertar) y `aprenderVoz()`, el alta por teléfono: «Jarvis, aprende mi voz [del coche |
+  con el altavoz | …]», ocho frases que empiezan por «Jarvis» y una libre, ~30 s. Sin
+  sitio es la `general`. Y `olvidarVoz()`: «Jarvis, olvida mi voz del coche».
+  `pideAprenderVoz()` / `pideOlvidarVoz()` sacan el nombre de lo dicho (probadas a mano
+  con Node: «con el manos libres» → `manos-libres`; aquí no hay tests de JS del teléfono).
 - `banco.py`: el banco de abajo.
 
 - `Dockerfile`, `compose.yml` y `.env.example`: el contenedor de jacobo (2026-10-28).
@@ -1179,8 +1189,14 @@ CPU y 88 MB. El banco y sus datos quedan en `~/huella/banco/` de jacobo.
 de un hablante de LibriSpeech por el canal simulado (8 frases, 31 s, consistencia 0,75),
 y 49 de 51 bien: rechazó una frase suya (0,19) y aceptó una ajena (0,43, por encima del
 umbral de 0,40), que es lo que cabe esperar con un 2-3 % de error. **72 ms por petición**
-(p95 110) y 2,1 J. Esa huella de prueba se borró después: el servicio está **sin
-huella** hasta que Mikel grabe la suya por teléfono.
+(p95 110) y 2,1 J.
+
+**Con dos perfiles** (`probar.py` de ahora): el mismo hablante grabado dos veces,
+`prueba-altavoz` por el canal a pelo y `prueba-coche` con el ruido de coche del banco.
+Sus frases limpias, 11 de 12 bien (10 las aceptó `altavoz`); sus frases con ruido, 12 de
+12 (10 por `coche`); de las 39 voces ajenas, mitad limpias y mitad con ruido, **ninguna
+pasó**. 65 ms por petición y 2 J. `probar.py` borra sus perfiles al acabar: el servicio
+está **sin huella** hasta que Mikel grabe las suyas por teléfono.
 
 ### El diseño para jacobo
 

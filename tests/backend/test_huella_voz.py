@@ -48,9 +48,9 @@ def servicio(tmp_path, extractor=None, clave="falso.onnx", umbral=0.4):
     return hv.Huella(ex, hv.Almacen(str(tmp_path), clave), umbral=umbral)
 
 
-def alta(s, valores, segundos=6):
+def alta(s, valores, segundos=6, perfil="general"):
     frases = [pcm(segundos, v) for v in valores]
-    return s.alta(b"".join(frases), ",".join(str(len(f)) for f in frases))
+    return s.alta(b"".join(frases), ",".join(str(len(f)) for f in frases), perfil)
 
 
 class TestAlta:
@@ -73,7 +73,7 @@ class TestAlta:
         s = servicio(tmp_path)
         codigo, info = alta(s, [1000, 1001, 1002], segundos=2)
         assert codigo == 422 and info["motivo"] == "poca_voz"
-        assert s.almacen.huella() is None
+        assert s.almacen.perfiles() == {}
 
     def test_frases_mal_contadas(self, tmp_path):
         s = servicio(tmp_path)
@@ -83,7 +83,7 @@ class TestAlta:
         s = servicio(tmp_path)
         alta(s, [1000, 1001, 1002])
         alta(s, [1000, 1001, 1002])
-        assert os.path.exists(tmp_path / "huella.anterior.json")
+        assert os.path.exists(tmp_path / "huellas.anterior.json")
 
 
 class TestVerificar:
@@ -99,10 +99,10 @@ class TestVerificar:
 class TestHuellaDeOtroModelo:
     def test_otra_clave_no_carga_la_huella(self, tmp_path):
         alta(servicio(tmp_path, clave="falso.onnx+media-aaa"), [1000, 1001, 1002])
-        assert hv.Almacen(str(tmp_path), "falso.onnx+media-aaa").huella() is not None
-        # Misma huella.json, pero con otra media (o sin ella): no vale
-        assert hv.Almacen(str(tmp_path), "falso.onnx+media-bbb").huella() is None
-        assert hv.Almacen(str(tmp_path), "falso.onnx").huella() is None
+        assert hv.Almacen(str(tmp_path), "falso.onnx+media-aaa").perfiles()
+        # Mismo huellas.json, pero con otra media (o sin ella): no vale
+        assert hv.Almacen(str(tmp_path), "falso.onnx+media-bbb").perfiles() == {}
+        assert hv.Almacen(str(tmp_path), "falso.onnx").perfiles() == {}
 
 
 class TestMediaDelCanal:
@@ -148,6 +148,64 @@ class TestMediaDelCanal:
         assert hv.leer_media("") == (None, None)
 
 
+# El coche y el altavoz: la misma persona, pero el sitio la cambia. Con solo la huella
+# del altavoz, su voz en el coche no llega al umbral; con las dos, sí.
+COCHE = {3000: [0.1, 1.0, 0.0], 3001: [0.15, 1.0, 0.05], 3002: [0.1, 0.95, 0.1]}
+VOCES_SITIOS = {**VOCES, **COCHE}
+
+
+class TestPerfiles:
+    def test_acepta_si_se_parece_a_cualquiera(self, tmp_path):
+        s = servicio(tmp_path, ExtractorFalso(VOCES_SITIOS))
+        alta(s, [1000, 1001, 1002], perfil="altavoz")
+        assert not s.verificar(pcm(2, 3000))[1]["es_el"]           # en el coche no le reconoce
+        alta(s, [3000, 3001, 3002], perfil="coche")
+        codigo, r = s.verificar(pcm(2, 3000))
+        assert codigo == 200 and r["es_el"] and r["perfil"] == "coche"
+        r = s.verificar(pcm(2, 1000))[1]
+        assert r["es_el"] and r["perfil"] == "altavoz"
+        assert not s.verificar(pcm(2, 2000))[1]["es_el"]           # el otro sigue fuera
+
+    def test_grabar_un_perfil_no_toca_los_demas(self, tmp_path):
+        s = servicio(tmp_path, ExtractorFalso(VOCES_SITIOS))
+        alta(s, [1000, 1001, 1002], perfil="altavoz")
+        alta(s, [3000, 3001, 3002], perfil="coche")
+        alta(s, [3000, 3001, 3002], perfil="coche")
+        assert sorted(s.almacen.perfiles()) == ["altavoz", "coche"]
+        # Y sobreviven a un reinicio
+        assert sorted(hv.Almacen(str(tmp_path), "falso.onnx").perfiles()) == ["altavoz", "coche"]
+
+    def test_sin_nombre_es_general(self, tmp_path):
+        s = servicio(tmp_path)
+        frases = [pcm(6, v) for v in (1000, 1001, 1002)]
+        assert s.alta(b"".join(frases), ",".join(str(len(f)) for f in frases))[1]["perfil"] == "general"
+
+    def test_tope_de_perfiles(self, tmp_path):
+        s = hv.Huella(ExtractorFalso(VOCES), hv.Almacen(str(tmp_path), "falso.onnx", max_perfiles=2))
+        alta(s, [1000, 1001, 1002], perfil="a")
+        alta(s, [1000, 1001, 1002], perfil="b")
+        codigo, r = alta(s, [1000, 1001, 1002], perfil="c")
+        assert codigo == 409 and r["motivo"] == "demasiados_perfiles" and r["perfiles"] == ["a", "b"]
+        # Regrabar uno que ya está sí cabe
+        assert alta(s, [1000, 1001, 1002], perfil="a")[0] == 200
+
+    def test_nombre_mal(self, tmp_path):
+        s = servicio(tmp_path)
+        for nombre in ("", "Coche", "../x", "a b", "x" * 33):
+            assert alta(s, [1000, 1001, 1002], perfil=nombre)[1]["motivo"] == "perfil_mal"
+
+    def test_olvidar(self, tmp_path):
+        s = servicio(tmp_path, ExtractorFalso(VOCES_SITIOS))
+        alta(s, [1000, 1001, 1002], perfil="altavoz")
+        alta(s, [3000, 3001, 3002], perfil="coche")
+        assert s.olvidar("coche") == (200, {"ok": True, "perfil": "coche"})
+        assert sorted(s.almacen.perfiles()) == ["altavoz"]
+        assert s.olvidar("coche")[0] == 404
+        s.olvidar("altavoz")
+        assert s.verificar(pcm(2, 1000))[0] == 409
+        assert s.salud()[1]["perfiles"] is None
+
+
 class TestArranque:
     def test_fuera_de_local_sin_llave_no(self):
         with pytest.raises(RuntimeError):
@@ -159,6 +217,8 @@ class TestArranque:
 class TestNadaDeAudioEnDisco:
     def test_solo_el_vector_y_sus_numeros(self, tmp_path):
         alta(servicio(tmp_path), [1000, 1001, 1002])
-        assert sorted(os.listdir(tmp_path)) == ["huella.json"]
-        d = json.loads((tmp_path / "huella.json").read_text(encoding="utf-8"))
-        assert set(d) == {"frases", "descartadas", "segundos", "consistencia", "modelo", "fecha", "vector"}
+        assert sorted(os.listdir(tmp_path)) == ["huellas.json"]
+        d = json.loads((tmp_path / "huellas.json").read_text(encoding="utf-8"))
+        assert set(d) == {"modelo", "perfiles"}
+        assert set(d["perfiles"]["general"]) == {"frases", "descartadas", "segundos", "consistencia",
+                                                 "fecha", "vector"}

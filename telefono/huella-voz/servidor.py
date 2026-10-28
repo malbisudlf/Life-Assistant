@@ -36,15 +36,27 @@ banco, el error del ERes2Net en coche baja del 4,1 % al 2,5 %). `HUELLA_MEDIA` e
 media, un .npy que deja banco.py; sin ella el coseno es a pelo y el umbral de 0,40 ya no
 sirve, por eso si se nombra y no está, no arranca. `HUELLA_MEDIA=` (vacía) la quita.
 
+VARIAS VOCES (perfiles, 2026-10-28). La misma persona suena distinta por el altavoz del
+móvil en casa que por el manos libres del coche en marcha, y una sola huella grabada en
+el sofá le rechaza más en la carretera. Así que se guarda una por sitio, con nombre
+(`coche`, `altavoz`…), y /verificar acepta si se parece lo bastante a CUALQUIERA. El
+precio: cada perfil es una puerta más para una voz ajena (con dos, en el peor caso, el
+doble de colados), y por eso hay tope, `HUELLA_MAX_PERFILES` (3).
+
 API (cuerpo: PCM s16le, 16 kHz, mono, que es lo que da el audio fork de FreeSWITCH):
 
-  GET  /salud      → {ok, modelo, umbral, huella: {frases, segundos, fecha} | null}
-  POST /verificar  → {es_el, similitud, umbral, segundos}
-                     409 sin_huella · 400 poco_audio / audio_impar · 413 demasiado_audio
-  POST /alta       → cabecera X-Frases con los bytes de cada frase, separados por comas;
-                     el cuerpo, todas seguidas. {ok, frases, descartadas, segundos,
-                     consistencia}, o 422 poca_voz. La huella anterior queda en
-                     huella.anterior.json.
+  GET    /salud           → {ok, modelo, umbral, perfiles: {nombre: {frases, segundos,
+                             fecha, consistencia}} | null}
+  POST   /verificar       → {es_el, similitud, perfil, umbral, segundos}: la similitud y
+                             el perfil son los del que más se parece.
+                             409 sin_huella · 400 poco_audio / audio_impar · 413 demasiado_audio
+  POST   /alta            → cabecera X-Frases con los bytes de cada frase, separados por
+                             comas, y X-Perfil con el nombre (`general` si no va); el cuerpo,
+                             todas seguidas. {ok, perfil, frases, descartadas, segundos,
+                             consistencia}, o 422 poca_voz, 400 perfil_mal, 409
+                             demasiados_perfiles. Graba encima del perfil si ya existía; el
+                             fichero de antes queda en huellas.anterior.json.
+  DELETE /perfil/<nombre> → {ok, perfil} o 404 sin_perfil.
 """
 
 import hashlib
@@ -53,6 +65,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -83,6 +96,10 @@ ALTA_MIN_FRASES    = 3
 # Una frase del alta que no se parece al resto (la radio, alguien que habló encima) se
 # descarta en vez de ensuciar la huella. Bajo a propósito: solo lo claramente ajeno.
 ALTA_DESCARTE      = float(os.getenv("HUELLA_ALTA_DESCARTE", "0.25"))
+MAX_PERFILES       = int(os.getenv("HUELLA_MAX_PERFILES", "3"))
+PERFIL_POR_DEFECTO = "general"
+# El nombre lo deriva la voice-app de lo que se dice («…mi voz del coche» → `coche`)
+PERFIL_VALIDO      = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 log = logging.getLogger("huella")
 
@@ -181,16 +198,20 @@ def calcular_huella(vectores, segundos):
     return huella, info
 
 
-class Almacen:
-    """La huella en disco: huella.json, y la anterior al lado para poder volver."""
+CAMPOS_INFO = ("frases", "descartadas", "segundos", "fecha", "consistencia")
 
-    def __init__(self, directorio, modelo):
-        self.ruta = os.path.join(directorio, "huella.json")
-        self.anterior = os.path.join(directorio, "huella.anterior.json")
+
+class Almacen:
+    """Las huellas en disco, una por perfil, en huellas.json; el fichero de antes del
+    último cambio queda al lado (huellas.anterior.json) para poder volver."""
+
+    def __init__(self, directorio, modelo, max_perfiles=MAX_PERFILES):
+        self.ruta = os.path.join(directorio, "huellas.json")
+        self.anterior = os.path.join(directorio, "huellas.anterior.json")
         self.modelo = modelo
+        self.max_perfiles = max_perfiles
         self._cerrojo = threading.Lock()
-        self._huella = None
-        self._info = None
+        self._perfiles = {}                 # nombre → (vector unitario, info)
         self._leer()
 
     def _leer(self):
@@ -200,35 +221,55 @@ class Almacen:
         except FileNotFoundError:
             return
         except (OSError, ValueError) as e:
-            log.error("huella.json ilegible (%s): sin huella hasta grabar otra", e)
+            log.error("huellas.json ilegible (%s): sin huella hasta grabar otra", e)
             return
         if d.get("modelo") != self.modelo:
-            log.warning("la huella es del modelo %s y el de ahora es %s: hay que grabarla otra vez",
+            log.warning("las huellas son de %s y lo de ahora es %s: hay que grabarlas otra vez",
                         d.get("modelo"), self.modelo)
             return
-        self._huella = unitario(np.array(d["vector"], dtype=np.float32))
-        self._info = {k: d.get(k) for k in ("frases", "segundos", "fecha", "consistencia")}
+        for nombre, p in (d.get("perfiles") or {}).items():
+            self._perfiles[nombre] = (unitario(np.array(p["vector"], dtype=np.float32)),
+                                      {k: p.get(k) for k in CAMPOS_INFO})
 
-    def huella(self):
+    def perfiles(self):
+        """{nombre: vector}; vacío si no hay ninguna huella."""
         with self._cerrojo:
-            return self._huella
+            return {n: v for n, (v, _) in self._perfiles.items()}
 
     def info(self):
         with self._cerrojo:
-            return dict(self._info) if self._info else None
+            return {n: dict(i) for n, (_, i) in self._perfiles.items()} or None
 
-    def guardar(self, huella, info):
-        d = dict(info, modelo=self.modelo, fecha=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                 vector=[round(float(x), 6) for x in huella])
-        tmp = self.ruta + ".tmp"
+    def cabe(self, nombre):
         with self._cerrojo:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(d, f)
-            if os.path.exists(self.ruta):
-                os.replace(self.ruta, self.anterior)
-            os.replace(tmp, self.ruta)
-            self._huella = unitario(np.array(d["vector"], dtype=np.float32))
-            self._info = {k: d.get(k) for k in ("frases", "segundos", "fecha", "consistencia")}
+            return nombre in self._perfiles or len(self._perfiles) < self.max_perfiles
+
+    def _escribir(self, perfiles):
+        d = {"modelo": self.modelo, "perfiles": {
+            n: dict(i, vector=[round(float(x), 6) for x in v]) for n, (v, i) in perfiles.items()}}
+        tmp = self.ruta + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        if os.path.exists(self.ruta):
+            os.replace(self.ruta, self.anterior)
+        os.replace(tmp, self.ruta)
+
+    def guardar(self, nombre, huella, info):
+        info = dict({k: info.get(k) for k in CAMPOS_INFO}, fecha=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+        with self._cerrojo:
+            perfiles = dict(self._perfiles)
+            perfiles[nombre] = (unitario(np.asarray(huella, dtype=np.float32)), info)
+            self._escribir(perfiles)
+            self._perfiles = perfiles
+
+    def olvidar(self, nombre):
+        with self._cerrojo:
+            if nombre not in self._perfiles:
+                return False
+            perfiles = {n: p for n, p in self._perfiles.items() if n != nombre}
+            self._escribir(perfiles)
+            self._perfiles = perfiles
+            return True
 
 
 class Huella:
@@ -241,7 +282,7 @@ class Huella:
 
     def salud(self):
         return 200, {"ok": True, "modelo": self.ex.nombre, "umbral": self.umbral,
-                     "huella": self.almacen.info()}
+                     "perfiles": self.almacen.info()}
 
     def verificar(self, pcm):
         if len(pcm) % 2:
@@ -249,18 +290,30 @@ class Huella:
         segundos = len(pcm) / BYTES_SEG
         if segundos < VERIFICAR_MIN_SEG:
             return 400, {"motivo": "poco_audio", "segundos": round(segundos, 2)}
-        huella = self.almacen.huella()
-        if huella is None:
+        perfiles = self.almacen.perfiles()
+        if not perfiles:
             return 409, {"motivo": "sin_huella"}
         t0 = time.monotonic()
-        similitud = float(self.ex.vector(pcm_a_muestras(pcm)) @ huella)
+        v = self.ex.vector(pcm_a_muestras(pcm))
+        perfil, similitud = max(((n, float(v @ h)) for n, h in perfiles.items()), key=lambda p: p[1])
         es_el = similitud >= self.umbral
-        log.info("verificar %.1f s → %.2f (umbral %.2f) %s, %.0f ms", segundos, similitud,
-                 self.umbral, "sí" if es_el else "NO", (time.monotonic() - t0) * 1000)
-        return 200, {"es_el": es_el, "similitud": round(similitud, 3), "umbral": self.umbral,
-                     "segundos": round(segundos, 2)}
+        log.info("verificar %.1f s → %.2f con «%s» (umbral %.2f) %s, %.0f ms", segundos, similitud,
+                 perfil, self.umbral, "sí" if es_el else "NO", (time.monotonic() - t0) * 1000)
+        return 200, {"es_el": es_el, "similitud": round(similitud, 3), "perfil": perfil,
+                     "umbral": self.umbral, "segundos": round(segundos, 2)}
 
-    def alta(self, cuerpo, cabecera):
+    def olvidar(self, perfil):
+        if not self.almacen.olvidar(perfil):
+            return 404, {"motivo": "sin_perfil", "perfil": perfil}
+        log.info("perfil «%s» olvidado", perfil)
+        return 200, {"ok": True, "perfil": perfil}
+
+    def alta(self, cuerpo, cabecera, perfil=PERFIL_POR_DEFECTO):
+        if not PERFIL_VALIDO.match(perfil or ""):
+            return 400, {"motivo": "perfil_mal"}
+        if not self.almacen.cabe(perfil):
+            return 409, {"motivo": "demasiados_perfiles", "perfiles": sorted(self.almacen.info() or {}),
+                         "maximo": self.almacen.max_perfiles}
         frases = partir_frases(cuerpo, cabecera)
         if frases is None:
             return 400, {"motivo": "frases_mal_contadas"}
@@ -271,11 +324,11 @@ class Huella:
             return 422, {"motivo": "poca_voz", "frases": 0, "descartadas": 0, "segundos": 0}
         huella, info = calcular_huella(vectores, segundos)
         if huella is None:
-            log.info("alta rechazada: %s", info)
-            return 422, info
-        self.almacen.guardar(huella, info)
-        log.info("huella nueva: %s", info)
-        return 200, dict(info, ok=True)
+            log.info("alta de «%s» rechazada: %s", perfil, info)
+            return 422, dict(info, perfil=perfil)
+        self.almacen.guardar(perfil, huella, info)
+        log.info("huella nueva para «%s»: %s", perfil, info)
+        return 200, dict(info, ok=True, perfil=perfil)
 
 
 def manejador(servicio, token=TOKEN):
@@ -331,11 +384,23 @@ def manejador(servicio, token=TOKEN):
                 if self.path == "/verificar":
                     r = servicio.verificar(cuerpo)
                 else:
-                    r = servicio.alta(cuerpo, self.headers.get("X-Frases"))
+                    r = servicio.alta(cuerpo, self.headers.get("X-Frases"),
+                                      self.headers.get("X-Perfil") or PERFIL_POR_DEFECTO)
             except Exception:
                 log.exception("fallo en %s", self.path)
                 r = (500, {"motivo": "fallo_interno"})
             self._responder(*r)
+
+        def do_DELETE(self):
+            self.close_connection = True
+            if not self._llave():
+                return self._responder(401, {"motivo": "sin_llave"})
+            if not self.path.startswith("/perfil/"):
+                return self._responder(404, {"motivo": "no_existe"})
+            perfil = self.path[len("/perfil/"):]
+            if not PERFIL_VALIDO.match(perfil):
+                return self._responder(400, {"motivo": "perfil_mal"})
+            self._responder(*servicio.olvidar(perfil))
 
     return Manejador
 
@@ -361,7 +426,8 @@ def main():
     servidor = ThreadingHTTPServer((HOST, PUERTO), manejador(servicio))
     log.info("huella de voz en %s:%d, modelo %s, %s, umbral %.2f, %s", HOST, PUERTO, ex.nombre,
              id_media or "SIN media del canal", UMBRAL,
-             "con huella" if servicio.almacen.huella() is not None else "SIN huella todavía")
+             "perfiles: " + ", ".join(sorted(servicio.almacen.perfiles())) if servicio.almacen.perfiles()
+             else "SIN huella todavía")
     servidor.serve_forever()
 
 
