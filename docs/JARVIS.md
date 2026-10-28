@@ -1154,8 +1154,13 @@ trabajar en ellos».
   equipo para esto; el motor y el modelo se bajan de su CDN la primera vez). La mano se
   dibuja en grande sobre la pantalla y lleva un cursor: **pellizcar** (pulgar e índice)
   pulsa lo que hay debajo, y **pellizcar sobre el título de un panel y mover** lo arrastra.
-  Las reglas (umbral con histéresis relativo al tamaño de la mano, espejo, cuándo un
-  pellizco es clic) están en `src/lib/gestos.js`; el bucle, en `Manos.jsx`.
+  **Hasta dos manos**, cada una con su cursor: se pueden llevar dos paneles a la vez, y
+  un panel cogido por una mano no lo mueve la otra. El cursor va por un filtro One Euro
+  (quieto no tiembla, rápido no se retrasa) y lo pintado se interpola a 60 fps entre
+  fotogramas de la cámara, que se pide a 60 si los da. Las reglas (umbral con histéresis
+  relativo al tamaño de la mano, espejo, cuándo un pellizco es clic, el filtro) están en
+  `src/lib/gestos.js`; el bucle, en `Manos.jsx`.
+- **«Jarvis le ve» no es vídeo**: es una foto en el instante de mandar cada mensaje.
 - **Los paneles se mueven** también con el ratón, por el mismo camino, y se quedan donde
   se dejan (`la_jarvis_paneles`). «Recolocar» los devuelve a su sitio.
 - **Proyectos** (botón de la cabecera): el panel del programador (`docs/PROGRAMADOR.md`).

@@ -110,28 +110,31 @@ export default function JarvisHUD({
   const [posiciones, setPosiciones] = useState(leerPaneles);
   // El último panel movido queda por encima de los demás.
   const [delante, setDelante] = useState(null);
-  const arrastre = useRef(null);
-  const onArrastre = useCallback((id, fase, punto) => {
+  // Los arrastres en curso, uno por panel: con las dos manos se llevan dos a la vez.
+  // `quien` es la mano (o el ratón) que lo cogió; la otra no puede moverlo mientras tanto.
+  const arrastres = useRef({});
+  const onArrastre = useCallback((id, fase, punto, quien = "raton") => {
     if (fase === "empieza") {
+      if (arrastres.current[id]) return;
       const el = document.querySelector(`[data-panel="${id}"]`);
       if (!el) return;
       const inicio = posiciones[id] || { x: 0, y: 0 };
       const r = el.getBoundingClientRect();
-      arrastre.current = { id, inicio, desde: punto,
-                           caja: { left: r.left - inicio.x, top: r.top - inicio.y, width: r.width, height: r.height } };
+      arrastres.current[id] = { quien, inicio, desde: punto,
+                                caja: { left: r.left - inicio.x, top: r.top - inicio.y, width: r.width, height: r.height } };
       el.classList.add("jh-arrastrando");
       setDelante(id);
       return;
     }
-    const a = arrastre.current;
-    if (!a || a.id !== id) return;
+    const a = arrastres.current[id];
+    if (!a || a.quien !== quien) return;
     if (fase === "mueve") {
       const nueva = moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y }, a.caja,
                                { width: window.innerWidth, height: window.innerHeight });
       setPosiciones(prev => ({ ...prev, [id]: nueva }));
     } else if (fase === "suelta") {
       document.querySelector(`[data-panel="${id}"]`)?.classList.remove("jh-arrastrando");
-      arrastre.current = null;
+      delete arrastres.current[id];
       setPosiciones(prev => { guardarPaneles(prev); return prev; });
     }
   }, [posiciones]);

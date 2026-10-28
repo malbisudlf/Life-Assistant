@@ -29,7 +29,10 @@ export function useCamara(activa) {
       Promise.resolve().then(() => { setEstado("error"); setError("Este navegador no da acceso a la cámara"); });
       return;
     }
-    medios.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false })
+    // A 60 fps si la cámara los da: las manos se siguen al ritmo de los fotogramas, y a
+    // 30 el cursor se nota más lento. Si no los da, se queda en lo que pueda.
+    medios.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 },
+                                   frameRate: { ideal: 60 }, facingMode: "user" }, audio: false })
       .then((s) => {
         if (cancelado) { s.getTracks().forEach(t => t.stop()); return; }
         stream = s;

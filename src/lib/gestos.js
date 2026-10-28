@@ -33,24 +33,67 @@ export function aPantalla(p, ancho, alto, { margen = 0.15, espejo = true } = {})
   return { x: nx * ancho, y: ny * alto };
 }
 
+/** El filtro «One Euro» (Casiez, Roussel y Vogel, 2012), el de siempre para cursores
+ *  que siguen una mano: con la mano quieta filtra mucho (el seguimiento tiembla unos
+ *  píxeles en cada fotograma) y con la mano rápida casi nada, así que no tiembla ni se
+ *  queda atrás. Una media móvil fija, que es lo que había, solo podía elegir una de las
+ *  dos cosas: a 0,4 el cursor arrastraba un retraso que se notaba al mover el brazo. */
+export class FiltroOneEuro {
+  constructor({ minCorte = 1.0, beta = 0.015, corteDerivada = 1.0 } = {}) {
+    Object.assign(this, { minCorte, beta, corteDerivada });
+    this.reinicia();
+  }
+
+  reinicia() {
+    this.previo = null;
+    this.derivada = 0;
+    this.t = null;
+  }
+
+  static alfa(corte, dt) {
+    const tau = 1 / (2 * Math.PI * corte);
+    return 1 / (1 + tau / dt);
+  }
+
+  /** `t` en segundos. */
+  filtrar(valor, t) {
+    if (this.previo == null || this.t == null || t <= this.t) {
+      this.previo = valor;
+      this.t = t;
+      return valor;
+    }
+    const dt = t - this.t;
+    this.t = t;
+    const derivadaCruda = (valor - this.previo) / dt;
+    const ad = FiltroOneEuro.alfa(this.corteDerivada, dt);
+    this.derivada = ad * derivadaCruda + (1 - ad) * this.derivada;
+    const corte = this.minCorte + this.beta * Math.abs(this.derivada);
+    const a = FiltroOneEuro.alfa(corte, dt);
+    this.previo = a * valor + (1 - a) * this.previo;
+    return this.previo;
+  }
+}
+
 /** Sigue una mano fotograma a fotograma.
  *
  *  El pellizco se mide en proporción al tamaño de la mano (muñeca → nudillo del corazón),
  *  así que vale igual con la mano cerca o lejos de la cámara. Lleva histéresis —se cierra
  *  por debajo de `cierra` y no se abre hasta pasar de `abre`— para que un pellizco no
- *  parpadee en el límite y dispare diez clics. El cursor se suaviza, porque el seguimiento
- *  tiembla unos píxeles en cada fotograma. */
+ *  parpadee en el límite y dispare diez clics. El cursor va por `FiltroOneEuro`. */
 export class LectorDeMano {
-  constructor({ cierra = 0.32, abre = 0.45, suavizado = 0.4 } = {}) {
-    Object.assign(this, { cierra, abre, suavizado });
+  constructor({ cierra = 0.32, abre = 0.45, filtro = {} } = {}) {
+    Object.assign(this, { cierra, abre });
+    this.fx = new FiltroOneEuro(filtro);
+    this.fy = new FiltroOneEuro(filtro);
     this.pellizco = false;
     this.cursor = null;
   }
 
-  /** `puntos`: los 21 de una mano. Devuelve `{ x, y, pellizco, cambio, fuerza }`, donde
-   *  `cambio` es "baja" al cerrar el pellizco, "sube" al abrirlo y null si sigue igual, y
-   *  `fuerza` va de 0 (dedos separados) a 1 (pellizco cerrado), para pintar el anillo. */
-  leer(puntos, ancho, alto, opciones) {
+  /** `puntos`: los 21 de una mano; `t`, el instante del fotograma en segundos. Devuelve
+   *  `{ x, y, pellizco, cambio, fuerza }`, donde `cambio` es "baja" al cerrar el
+   *  pellizco, "sube" al abrirlo y null si sigue igual, y `fuerza` va de 0 (dedos
+   *  separados) a 1 (pellizco cerrado), para pintar el anillo. */
+  leer(puntos, ancho, alto, opciones, t = (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000) {
     if (!puntos || puntos.length < 21) return null;
     const tam = distancia(puntos[PUNTO.MUNECA], puntos[PUNTO.NUDILLO_CORAZON]) || 1;
     const separacion = distancia(puntos[PUNTO.PULGAR], puntos[PUNTO.INDICE]) / tam;
@@ -64,10 +107,7 @@ export class LectorDeMano {
       y: (puntos[PUNTO.PULGAR].y + puntos[PUNTO.INDICE].y) / 2,
     };
     const crudo = aPantalla(medio, ancho, alto, opciones);
-    const a = this.suavizado;
-    this.cursor = this.cursor
-      ? { x: this.cursor.x + (crudo.x - this.cursor.x) * (1 - a), y: this.cursor.y + (crudo.y - this.cursor.y) * (1 - a) }
-      : crudo;
+    this.cursor = { x: this.fx.filtrar(crudo.x, t), y: this.fy.filtrar(crudo.y, t) };
     const fuerza = Math.min(1, Math.max(0, (this.abre * 1.6 - separacion) / (this.abre * 1.6 - this.cierra)));
     return { x: this.cursor.x, y: this.cursor.y, pellizco: this.pellizco, cambio, fuerza };
   }
@@ -77,8 +117,25 @@ export class LectorDeMano {
     const estaba = this.pellizco;
     this.pellizco = false;
     this.cursor = null;
+    this.fx.reinicia();
+    this.fy.reinicia();
     return estaba ? "sube" : null;
   }
+}
+
+/** Acerca lo que se pinta a lo último que se vio: el seguimiento llega a lo que dé la
+ *  cámara (unos 30 fotogramas por segundo) y la pantalla pinta a 60 o más. Sin esto el
+ *  cursor y la mano iban a saltos aunque el filtro estuviera bien. */
+export function acercar(actual, destino, factor = 0.5) {
+  if (!actual) return destino;
+  return { x: actual.x + (destino.x - actual.x) * factor, y: actual.y + (destino.y - actual.y) * factor };
+}
+
+/** De qué mano es cada detección, para que cada una siga con su cursor aunque MediaPipe
+ *  las devuelva en otro orden. `handedness` es la de MediaPipe; si no viene, el orden. */
+export function claveDeMano(handedness, i) {
+  const nombre = handedness?.[i]?.[0]?.categoryName;
+  return nombre === "Left" || nombre === "Right" ? nombre : `mano${i}`;
 }
 
 /** Al soltar un pellizco que no ha arrastrado nada: ¿era un clic? Lo es si apenas se
