@@ -131,6 +131,8 @@ falla si alguna ruta de `main.py` no aparece en este fichero.
 | `POST /jarvis` | JWT | Un turno de conversación con herramientas (incluye búsqueda y lectura web). Rate limit por IP (llamada de pago) |
 | `POST /jarvis/voz` | JWT | El mismo turno que `/jarvis`, retransmitido por SSE: un evento `herramienta` (con la frase que decir en voz alta) antes de usar cada una, eventos `texto` con la respuesta según se escribe, y un `fin` con el resultado más `por_decir` (lo que aún no ha salido por el altavoz). Se consume con `fetch`+reader, no con `EventSource` |
 | `POST /jarvis/ejecutar` | JWT | Ejecuta una acción que Jarvis dejó propuesta. Solo admite las marcadas `confirmar` |
+| `GET /programador/proyectos` | JWT | Los proyectos del programador para el panel de la vista J.A.R.V.I.S. (lo mismo que `ver_proyectos`), o `configurado: false`. Crear uno va por `/jarvis/ejecutar` con `encargar_proyecto` |
+| `POST /programador/mensaje` | JWT | `{mensaje, proyecto}`: lo mismo que `hablar_con_el_programador`, firmado. 503 sin programador |
 | `GET /auth/spotify/login` | JWT | La URL del consentimiento de Spotify, con `state` firmado (`oauth_state_spotify`). 503 sin app configurada |
 | `GET /auth/spotify/callback` | `state` firmado | Canjea el código y guarda el refresh token en `oauth_tokens` (`provider = spotify`). Devuelve una página, no JSON: la abre el navegador |
 | `GET /spotify/estado` | JWT | `{configurado, conectado}`, sin llamar a Spotify |
