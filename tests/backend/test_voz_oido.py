@@ -6,6 +6,7 @@ si jacobo no está, el navegador se entere a tiempo de caer a Scribe.
 """
 import asyncio
 import json
+import time
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -38,6 +39,21 @@ class _Jacobo:
 
     async def close(self):
         self.cerrado = True
+
+
+def _colgar(ws, jacobo):
+    """Cuelga y espera a que el puente termine de cerrar.
+
+    Al salir del `with`, el cliente de pruebas manda el «disconnect» y cancela la app en
+    el acto: si el puente aún no ha procesado la desconexión, la cancelación le llega a
+    mitad de su limpieza y el test muere con `CancelledError` (solo bajo carga, que es
+    como lo vio el CI). Esperar a que cierre el WebSocket de jacobo es esperar a esa
+    limpieza."""
+    ws.close()
+    for _ in range(500):
+        if jacobo.cerrado:
+            return
+        time.sleep(0.01)
 
 
 @pytest.fixture
@@ -78,6 +94,7 @@ def test_el_audio_y_el_fin_pasan_y_vuelve_el_texto(client, jacobo):
         ws.send_bytes(b"\x01\x00" * 160)
         ws.send_text(json.dumps({"tipo": "fin"}))
         assert json.loads(ws.receive_text()) == {"tipo": "final", "texto": "abre spotify"}
+        _colgar(ws, jacobo)
     assert jacobo.recibido[0] == b"\x01\x00" * 160
     assert json.loads(jacobo.recibido[1]) == {"tipo": "fin"}
 
@@ -90,6 +107,7 @@ def test_solo_pasa_lo_que_el_protocolo_conoce(client, jacobo):
         ws.send_bytes(b"\x00" * (main.OIDO_TROZO_MAX + 2))   # un trozo desmedido se tira
         ws.send_text(json.dumps({"tipo": "fin"}))
         ws.receive_text()
+        _colgar(ws, jacobo)
     assert jacobo.recibido == [json.dumps({"tipo": "fin"})]
 
 
