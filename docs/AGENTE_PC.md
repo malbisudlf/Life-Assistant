@@ -399,6 +399,10 @@ del teléfono. Tres decisiones:
   decir por qué, y Jarvis contestó que el PC estaba apagado con el PC encendido. Si sigue
   sin poder, el registro (`~/.jarvis-pc/pc_mcp.log`) dice ya el error de Windows (10049 es
   la IP de la tailnet sin levantar; 10048, el puerto aún cogido) y sale con código 3.
+- **Las carpetas («descargas», «escritorio»…) son las carpetas conocidas de Windows**
+  (`SHGetKnownFolderPath`), no `~/Desktop`: con la copia de OneDrive, Documentos,
+  Escritorio e Imágenes viven en `~/OneDrive/…` y «abre el escritorio» abría una ruta que
+  no existía (2026-10-28).
 - **`abrir` busca también las apps de la Microsoft Store** (`Get-StartApps`, solo si no hay
   acceso directo, y guardado diez minutos). Spotify instalado desde la Store no deja `.lnk`
   en el menú Inicio, así que «abre Spotify» no encontraba nada y el modelo abría la web.

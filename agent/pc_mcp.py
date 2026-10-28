@@ -188,6 +188,17 @@ MULTIMEDIA = {"pausa": 0xB3, "play": 0xB3, "siguiente": 0xB0, "anterior": 0xB1,
 
 CARPETAS = {"descargas": "Downloads", "documentos": "Documents", "escritorio": "Desktop",
             "imagenes": "Pictures", "musica": "Music", "videos": "Videos"}
+# Dónde las tiene Windows de verdad (las «carpetas conocidas»). Con OneDrive haciendo copia
+# de Documentos, Escritorio e Imágenes, viven en ~/OneDrive/… y no en ~/: «abre el
+# escritorio» abría una ruta que no existía (2026-10-28).
+_CARPETAS_GUID = {
+    "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "Documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+    "Desktop":   "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "Pictures":  "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+    "Music":     "{4BD8D571-6D19-48D3-BE97-422220080E43}",
+    "Videos":    "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
+}
 
 
 # ── Windows ──────────────────────────────────────────────────────────────────────────
@@ -309,6 +320,32 @@ def segundos_sin_tocar() -> int:
     return max(0, (kernel32.GetTickCount() - info.dwTime) // 1000)
 
 
+def carpeta_conocida(nombre: str) -> Path:
+    """La ruta real de una carpeta conocida de Windows (`SHGetKnownFolderPath`), o
+    ~/nombre si Windows no la da."""
+    guid = _CARPETAS_GUID.get(nombre)
+    if guid and ES_WINDOWS:
+        try:
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                            ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+            g = GUID()
+            ctypes.oledll.ole32.CLSIDFromString(guid, ctypes.byref(g))
+            puntero = ctypes.c_wchar_p()
+            ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(puntero))
+            try:
+                if puntero.value:
+                    return Path(puntero.value)
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(puntero)
+        except OSError:
+            pass
+    return Path.home() / nombre
+
+
 def accesos_menu_inicio() -> list:
     raices = [Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
               Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
@@ -423,7 +460,7 @@ def crear_servidor(**ajustes):
             return f"Abierta {que}"
         clave = normalizar(que)
         if clave in CARPETAS:
-            ruta = Path.home() / CARPETAS[clave]
+            ruta = carpeta_conocida(CARPETAS[clave])
             os.startfile(str(ruta))
             return f"Abierta la carpeta {ruta.name}"
         orden = leer_catalogo().get(clave)
