@@ -1,0 +1,165 @@
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -9,6 +9,10 @@
+  * colgaba. Ahora las voces van en orden (`TTS_ORDEN`, por defecto ElevenLabs y luego
+  * Azure, la misma voz que el dashboard) y la que falla se aparta un rato para no pagar
+  * su viaje en cada frase.
++ *
++ * Parche 30: la primera voz puede ser la de casa, Piper en jacobo (telefono/voz/), sin
++ * cuotas ni internet. Va delante si `TTS_ORDEN` empieza por `jacobo`; si jacobo no
++ * contesta a tiempo, la frase sigue por las de fuera.
+  */
+ 
+ const axios = require('axios');
+@@ -33,6 +37,17 @@
+ const AZURE_SPEECH_VOICE   = process.env.AZURE_SPEECH_VOICE || 'es-ES-SaulNeural';
+ const AZURE_SPEECH_FORMATO = process.env.AZURE_SPEECH_FORMATO || 'audio-24khz-48kbitrate-mono-mp3';
+ 
++// La voz de jacobo (telefono/voz/servidor.py). Devuelve WAV: FreeSWITCH lo reproduce
++// igual y se ahorra codificar. `VOZ_VOZ` elige la voz (vacía = la que tenga jacobo por
++// defecto) y `VOZ_VELOCIDAD` la acelera o la frena (0,5-2).
++const VOZ_URL       = (process.env.VOZ_URL || '').replace(/\/+$/, '');
++const VOZ_TOKEN     = process.env.VOZ_TOKEN || '';
++const VOZ_VOZ       = process.env.VOZ_VOZ || '';
++const VOZ_VELOCIDAD = parseFloat(process.env.VOZ_VELOCIDAD || '1') || 1;
++// Más corto que el de las de fuera: Piper tarda ~0,1-0,3 s por frase, así que pasar de
++// esto es que jacobo o su red no están, y hay otra voz esperando.
++const VOZ_TIMEOUT_MS = parseInt(process.env.VOZ_TIMEOUT_MS || '3000', 10);
++
+ // Sin tope, una API colgada deja la llamada en silencio hasta que FreeSWITCH se canse.
+ const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '8000', 10);
+ // Cuánto se aparta una voz que ha fallado. La cuota o la llave no se arreglan solas en
+@@ -42,11 +57,18 @@
+ const TTS_PAUSA_MS       = parseInt(process.env.TTS_PAUSA_MS || '60000', 10);
+ 
+ const VOCES = {
++  jacobo: {
++    ext: 'wav',
++    configurada: function () { return !!(VOZ_URL && VOZ_TOKEN); },
++    sintetizar: sintetizarJacobo
++  },
+   elevenlabs: {
++    ext: 'mp3',
+     configurada: function () { return !!ELEVENLABS_API_KEY; },
+     sintetizar: sintetizarElevenLabs
+   },
+   azure: {
++    ext: 'mp3',
+     configurada: function () { return !!(AZURE_SPEECH_KEY && AZURE_SPEECH_REGION && AZURE_SPEECH_VOICE); },
+     sintetizar: sintetizarAzure
+   }
+@@ -83,11 +105,11 @@
+  * @param {string} text - Text being converted
+  * @returns {string} Filename (without path)
+  */
+-function generateFilename(text) {
++function generateFilename(text, ext = 'mp3') {
+   // Hash text to create unique identifier
+   const hash = crypto.createHash('md5').update(text).digest('hex').substring(0, 8);
+   const timestamp = Date.now();
+-  return `tts-${timestamp}-${hash}.mp3`;
++  return `tts-${timestamp}-${hash}.${ext}`;
+ }
+ 
+ async function sintetizarElevenLabs(text, voiceId) {
+@@ -115,6 +137,20 @@
+   return Buffer.from(response.data);
+ }
+ 
++async function sintetizarJacobo(text) {
++  const datos = { texto: text, velocidad: VOZ_VELOCIDAD };
++  if (VOZ_VOZ) datos.voz = VOZ_VOZ;
++  const response = await axios({
++    method: 'POST',
++    url: `${VOZ_URL}/decir`,
++    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': VOZ_TOKEN },
++    data: datos,
++    responseType: 'arraybuffer',
++    timeout: VOZ_TIMEOUT_MS
++  });
++  return Buffer.from(response.data);
++}
++
+ // El texto lo ha escrito el modelo a partir de lo que oyó: va como DATO, escapado, igual
+ // que `_ssml` del backend. Sin esto un `<` rompe el SSML y Azure devuelve 400.
+ function escaparXml(s) {
+@@ -160,7 +196,7 @@
+ /**
+  * Convert text to speech, trying each configured voice in order (`TTS_ORDEN`)
+  * @param {string} text - Text to convert to speech
+- * @param {string} voiceId - ElevenLabs voice ID (optional; Azure uses AZURE_SPEECH_VOICE)
++ * @param {string} voiceId - ElevenLabs voice ID (optional; Azure and jacobo use their own)
+  * @returns {Promise<string>} HTTP URL to audio file
+  */
+ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
+@@ -184,7 +220,7 @@
+       const audio = await VOCES[voz].sintetizar(text, voiceId);
+       if (!audio || !audio.length) throw new Error('respuesta sin audio');
+ 
+-      const filename = generateFilename(text);
++      const filename = generateFilename(text, VOCES[voz].ext);
+       fs.writeFileSync(path.join(audioDir, filename), audio);
+       delete apartadaHasta[voz];
+ 
+@@ -230,7 +266,7 @@
+ 
+     let deletedCount = 0;
+     files.forEach(file => {
+-      if (!file.startsWith('tts-') || !file.endsWith('.mp3')) {
++      if (!file.startsWith('tts-') || !(file.endsWith('.mp3') || file.endsWith('.wav'))) {
+         return;
+       }
+ 
+--- a/voice-app/test/parche29.test.js
++++ b/voice-app/test/parche29.test.js
+@@ -33,7 +33,7 @@
+ const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'p29-'));
+ function servicio(entorno) {
+   for (const k of ['ELEVENLABS_API_KEY', 'AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION', 'AZURE_SPEECH_VOICE',
+-                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS']) delete process.env[k];
++                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS', 'VOZ_URL', 'VOZ_TOKEN', 'VOZ_VOZ']) delete process.env[k];
+   Object.assign(process.env, entorno);
+   delete require.cache[RUTA];
+   pedidos = [];
+@@ -123,3 +123,41 @@
+   await s.generateSpeech('Hola', 'voz1');
+   assert.deepStrictEqual(pedidos.map(esEleven), [true]);
+ });
++
++// ── Parche 30: la voz de jacobo ─────────────────────────────────────────────────
++const CON_JACOBO = Object.assign({}, AMBAS, { VOZ_URL: 'http://jacobo:8772/', VOZ_TOKEN: 'llave',
++                                              TTS_ORDEN: 'jacobo,azure,elevenlabs' });
++const WAV = Buffer.from('RIFFfake-wav');
++function esJacobo(o) { return o.url.indexOf('jacobo') !== -1; }
++
++test('p30: con jacobo delante, habla jacobo en WAV y con su llave en cabecera', async function () {
++  responder = async function (o) { return { data: esJacobo(o) ? WAV : MP3 }; };
++  const s = servicio(Object.assign({}, CON_JACOBO, { VOZ_VOZ: 'piper:es_ES-davefx-medium' }));
++  const url = await s.generateSpeech('Hola, señor.', 'voz1');
++  assert.match(url, /\.wav$/);
++  assert.strictEqual(pedidos.length, 1);
++  assert.strictEqual(pedidos[0].url, 'http://jacobo:8772/decir');
++  assert.strictEqual(pedidos[0].headers['X-Auth-Token'], 'llave');
++  assert.strictEqual(pedidos[0].data.voz, 'piper:es_ES-davefx-medium');
++  assert.ok(pedidos[0].url.indexOf('llave') === -1, 'la llave nunca en la URL');
++  assert.ok(pedidos[0].timeout <= 3000);
++  assert.deepStrictEqual(fs.readFileSync(path.join(DIR, url.split('/').pop())), WAV);
++});
++
++test('p30: si jacobo no contesta, la frase sigue por Azure en MP3', async function () {
++  responder = async function (o) {
++    if (esJacobo(o)) { const e = new Error('connect ECONNREFUSED'); throw e; }
++    return { data: MP3 };
++  };
++  const s = servicio(CON_JACOBO);
++  const url = await s.generateSpeech('Hola', 'voz1');
++  assert.match(url, /\.mp3$/);
++  assert.deepStrictEqual(pedidos.map(esJacobo), [true, false]);
++});
++
++test('p30: sin VOZ_TOKEN jacobo no cuenta como configurada', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(Object.assign({}, CON_JACOBO, { VOZ_TOKEN: '' }));
++  await s.generateSpeech('Hola', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esJacobo), [false]);
++});

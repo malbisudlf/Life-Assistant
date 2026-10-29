@@ -21,7 +21,8 @@ Y el 25 (2026-10-27): el oído deja de ser OpenAI y pasa a ser jacobo, con OpenA
 reserva (ver «El parche 25»). Y el 26, el mismo día: se transcribe durante el silencio
 que cierra la frase, no después (ver «El parche 26»). Y el 29 (2026-10-29): si
 ElevenLabs se queda sin cuota, la frase la dice Azure en vez de colgar (ver «El parche
-29»).
+29»). Y el 30, el mismo día: la primera voz es la de casa, Piper en jacobo (ver «La voz
+en jacobo»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1118,6 +1119,69 @@ voice-app.
 `~/.claude-phone/.env.bak-20261029-antes-p29` e imagen `claude-phone-voice-app:antes-p29`.
 Volver atrás: copiar el `.bak` encima y `docker compose up -d --build voice-app` en
 `~/.claude-phone`.
+
+## La voz en jacobo (`telefono/voz/`) y el parche 30
+
+Pedido por Mikel el 2026-10-29, tras el parche 29: que la voz, como el oído, salga de
+casa y no dependa de cuotas. El servicio `voz` (`servidor.py`, contenedor `voz` en
+jacobo, puerto 8772, llave `VOZ_TOKEN` en `~/voz/servicio/.env`, chmod 600; **nunca la
+imprimas**) sintetiza con **Piper** en la CPU, por ONNX: la RX 580 se queda para
+Whisper. Devuelve WAV (PCM 16 bits, 22.050 Hz), que FreeSWITCH reproduce igual que el MP3
+y se ahorra ffmpeg. Las frases cortas (≤ 80 caracteres: despedidas, «¿sigues ahí?») se
+guardan en una caché en memoria; nada en disco, y el registro no dice qué se dijo.
+
+**Las voces** (`~/voz/modelos/piper/`, de `rhasspy/piper-voices` v1.0.0) se llaman
+`piper:<modelo>[:<hablante>]`. Elegir voz es `VOZ_POR_DEFECTO` en el `.env` de jacobo (y
+`docker compose up -d`), o `VOZ_VOZ` en el `.env` de la voice-app para pedir otra sin
+tocar jacobo; `VOZ_VELOCIDAD` (0,5-2) la acelera o la frena. `GET /salud` las lista. Las
+de 2026-10-29, con la misma frase transcrita por el oído para ver que se entienden:
+
+| Voz | Quién | Whisper la entiende |
+|---|---|---|
+| `piper:es_ES-davefx-medium` (**por defecto**) | hombre, España | entera |
+| `piper:es_ES-sharvard-medium:M` | hombre, España | entera |
+| `piper:es_ES-sharvard-medium:F` | mujer, España | dos palabras de más |
+| `piper:es_ES-carlfm-x_low` | hombre, España, baja calidad | entera |
+| `piper:es_MX-ald-medium` | hombre, México | «les» por «le» |
+| `piper:es_MX-claude-high` | mujer, México | «tienen» por «tiene» |
+
+`es_MX-ald-medium.onnx.json` viene con `"phoneme_type": "PhonemeType.ESPEAK"` y Piper
+1.3.0 no lo carga: hay que dejarlo en `"espeak"`. Las dos mexicanas no están en jacobo
+todavía (ver abajo, la red). Una voz clonada (la «Jarvis» de Fish, por ejemplo) pide
+XTTS o F5-TTS, que sin CUDA no van en tiempo real: espera a la P100. Kokoro-82M suena
+más natural, pero tardó 2,3 s por frase en caja con dos hilos (Piper, 0,25 s): el código
+lo carga si la imagen trae `kokoro-onnx` y sus ficheros están en `/modelos/kokoro/`, y
+hoy no va.
+
+**La red de jacobo no aguanta tráfico sostenido**, y es lo que más costó montarlo: con
+una descarga de solo ~0,2 MB/s desde internet, el ping desde caja subía de 4 ms a 1-4 s
+con un 40 % de pérdida, y una copia a 20 Mbit/s lo tiraba entero ~30 s (la misma firma
+que el iperf3 del 27). Con 2 Mbit/s se queda en 3 ms. Por eso la imagen **no se baja nada
+en jacobo**: los paquetes se bajan en caja (`pip download --only-binary=:all: --platform
+manylinux_2_28_x86_64 --python-version 3.12 -d ruedas piper-tts==1.3.0
+aiohttp==3.12.15 numpy==2.3.4`, ~55 MB) y se copian a `~/voz/servicio/ruedas/` con
+`scp -l 2000`; el `Dockerfile` instala desde ahí. Hasta que no se arregle el enlace,
+nada de copias grandes a jacobo sin límite.
+
+**El parche 30** (`telefono/parche-30.diff`, sobre el 29): `tts-service.js` gana la voz
+`jacobo` (`VOZ_URL`, `VOZ_TOKEN`, `VOZ_VOZ`, `VOZ_VELOCIDAD`, timeout propio de 3 s,
+`VOZ_TIMEOUT_MS`), que guarda `.wav` en vez de `.mp3`, y la limpieza borra los dos. Va
+delante con `TTS_ORDEN=jacobo,azure,elevenlabs`; si jacobo no contesta, la frase sigue
+por las de fuera y jacobo se aparta 60 s. Tres casos más en `parche29.test.js`: pasan
+los 108 de la voice-app.
+
+Medido el 2026-10-29 desde caja, con la red de por medio: 0,06 s una frase corta, 0,18 s
+una de 80 caracteres y 0,30 s una de 130 (Azure: 0,3-1,0 s), 13 ms si está en la caché.
+Desde la voice-app en marcha, 0,09-0,11 s. Arranque del servicio: 10,5 s para cargar las
+cuatro voces.
+
+**Aplicado el 2026-10-29**: en jacobo, `~/voz/servicio` (copia a mano de `telefono/voz/`,
+construido con `--network none --build-arg PIP_NO_INDEX=1`) y `~/voz/modelos/piper`. En
+caja, `VOZ_URL`, `VOZ_TOKEN` y `TTS_ORDEN=jacobo,azure,elevenlabs` en
+`~/.claude-phone/.env`; copias `lib/tts-service.js.bak-20261029-antes-p30`,
+`~/.claude-phone/.env.bak-20261029-antes-p30` e imagen `claude-phone-voice-app:antes-p30`.
+Apagar solo la voz de casa: quitar `jacobo` de `TTS_ORDEN` y `docker compose up -d
+voice-app`. Falta oírlo en una llamada de verdad.
 
 ## El parche 23: la huella de voz (servicio en jacobo; la voice-app, sin enganchar)
 

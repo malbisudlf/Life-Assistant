@@ -1,0 +1,33 @@
+# La voz en jacobo. Se copia a mano a ~/voz/servicio/ con su .env (VOZ_TOKEN, chmod 600,
+# y VOZ_POR_DEFECTO si se quiere otra voz) y se levanta con `docker compose up -d --build`.
+# Arranca solo con el equipo. Los modelos, en ~/voz/modelos (ver «La voz en jacobo»).
+services:
+  voz:
+    build: .
+    image: voz:local
+    container_name: voz
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VOZ_HOST: 0.0.0.0
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${HOME}/voz/modelos:/modelos:ro
+    ports:
+      - "8772:8772"
+    # Que una síntesis larga no se coma la CPU del oído
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8772/salud', headers={'X-Auth-Token': os.environ['VOZ_TOKEN']}), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

@@ -109,3 +109,10 @@ telefono/huella-voz/.env.*
 Jarvis/Jarvis.json
 Jarvis/Jarvis - Homelab MCP.json
 Jarvis/Jarvis - Programador MCP.json
+
+# Los paquetes de la voz de jacobo, bajados en caja (telefono/voz/Dockerfile)
+telefono/voz/ruedas/*.whl
+
+telefono/voz/.env
+telefono/voz/.env.*
+!telefono/voz/.env.example
