@@ -1230,7 +1230,8 @@ disco, como antes.
 
 **Aplicado en `caja` el 2026-10-29**: copias `*.bak-20261029-antes-p31` de
 `lib/tts-service.js`, `index.js`, `test/parche29.test.js` y `~/.claude-phone/.env`, e
-imagen `claude-phone-voice-app:antes-p31`. Falta oírlo en una llamada de verdad.
+imagen `claude-phone-voice-app:antes-p31`. **Probado en una llamada de verdad el mismo día**
+(Mikel: «todo bien»): las cinco frases las dijo Fish, listas para sonar en 0,61-0,73 s.
 
 ## El parche 23: la huella de voz (servicio en jacobo; la voice-app, sin enganchar)
 
