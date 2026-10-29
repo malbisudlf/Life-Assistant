@@ -62,6 +62,11 @@ os.environ.setdefault("DEPLOY_GITHUB_TOKEN", "gh-e2e-token")
 # en la shell o en el CI, el E2E le mandaría órdenes a la casa de verdad con el token real.
 os.environ["HA_URL"]   = ""
 os.environ["HA_TOKEN"] = ""
+# Las voces de pago, igual: con la clave de Fish de un backend/.env local, `/voz/decir`
+# probaba a sintetizar contra la red simulada, que no sabe devolver audio, y reventaba con
+# un 500 en vez de caer a la voz del navegador como en el CI.
+os.environ["FISH_AUDIO_API_KEY"] = ""
+os.environ["AZURE_SPEECH_KEY"]   = ""
 # El frontend se sirve desde otro puerto: sin esto, el navegador bloquea las llamadas.
 # El puerto sale de la misma variable que usa playwright.config.js, o el login falla con
 # un error de CORS que en el navegador NO se parece a un problema de puertos — es el

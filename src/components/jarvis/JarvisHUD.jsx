@@ -14,7 +14,9 @@ import {
 } from "../../lib/jarvisHud";
 import { sinMarcaVieja } from "../../lib/voz";
 import { API, authHeaders, apiFetch } from "../../lib/api";
-import { moverPanel, posicionesRadiales, elegirPorDireccion, centroDelMenu } from "../../lib/gestos";
+import {
+  moverPanel, posicionesRadiales, elegirPorDireccion, centroDelMenu, velocidadDeSuelta, pasoDeInercia,
+} from "../../lib/gestos";
 import { proyectosDelMenu } from "../../lib/proyectos";
 import { useCamara } from "./useCamara";
 import { PanelCamara } from "./Camara";
@@ -36,6 +38,12 @@ let arrancado = false;
 // mano sin haber elegido (para pulsar una con un pellizco o con el ratón).
 const RADIO_MENU = 175;
 const MENU_ESPERA_MS = 6000;
+
+// Desde dónde NO se coge un panel para moverlo: lo que se pulsa o se escribe, y el texto
+// que se quiere poder seleccionar.
+const NO_ARRASTRA = 'button, input, textarea, select, a, label, [role="button"], .jh-proy-texto';
+// Por debajo de esta velocidad al soltar (px/ms) el panel se queda donde está.
+const VELOCIDAD_LANZAR = 0.35;
 
 // Dónde ha dejado el señor cada panel (desplazamiento desde su sitio), y si los proyectos
 // estaban abiertos. Preferencias de este navegador, nada más.
@@ -105,6 +113,16 @@ export default function JarvisHUD({
   const [manosOn, setManosOn]     = useState(false);
   const [estadoManos, setEstadoManos] = useState("apagada");
   const [proyectosOn, setProyectosOn] = useState(false);
+  // El modo inmersivo: la cámara a pantalla completa, los paneles flotando encima como
+  // ventanas de cristal y cada dedo pulsando (Manos.jsx). Enciende la cámara y las manos;
+  // al salir se quedan como estén, y apagar la cámara lo apaga.
+  const [inmersivo, setInmersivo] = useState(false);
+  const alternarInmersivo = useCallback(() => {
+    setInmersivo(v => {
+      if (!v) { setCamaraOn(true); setManosOn(true); }
+      return !v;
+    });
+  }, []);
   // Los proyectos se piden si se pueden ver: el panel abierto o las manos puestas (el
   // puño los saca en el menú).
   const proyectos = useProyectos(proyectosOn || manosOn);
@@ -156,8 +174,7 @@ export default function JarvisHUD({
     const t = setTimeout(() => setRadial(null), MENU_ESPERA_MS);
     return () => clearTimeout(t);
   }, [radial]);
-  const camara = useCamara(camaraOn);
-  const { capturar } = camara;
+  const { videoRef, ponVideo, estado: estadoCamara, error: errorCamara, capturar } = useCamara(camaraOn);
   // El fotograma viaja con cada mensaje solo con la cámara en directo y «Jarvis ve».
   // Al cerrar la vista o apagar la cámara, el dashboard deja de tener a quién pedírselo.
   useEffect(() => {
@@ -166,20 +183,71 @@ export default function JarvisHUD({
   }, [camaraOn, jarvisVe, capturar, onCapturador]);
 
   // ── Paneles que se mueven ──
+  // Mientras se arrastra, la posición se escribe directamente en el `transform` del panel
+  // y React no se entera hasta soltar. Antes cada movimiento era un `setPosiciones`, o sea
+  // pintar otra vez la vista entera (más de mil líneas, el reactor y la conversación) a
+  // 60 veces por segundo, y el panel iba a tirones detrás del ratón o de la mano. Se coge
+  // de cualquier punto del panel que no sea un botón o un campo, no solo del título; al
+  // soltarlo con impulso sigue deslizándose y frena; y con doble clic en el título vuelve
+  // a su sitio.
   const [posiciones, setPosiciones] = useState(leerPaneles);
+  const posicionesRef = useRef(posiciones);
+  useEffect(() => { posicionesRef.current = posiciones; }, [posiciones]);
   // El último panel movido queda por encima de los demás.
   const [delante, setDelante] = useState(null);
+  const traerDelante = useCallback((id) => setDelante(id), []);
   // Los arrastres en curso, uno por panel: con las dos manos se llevan dos a la vez.
   // `quien` es la mano (o el ratón) que lo cogió; la otra no puede moverlo mientras tanto.
   const arrastres = useRef({});
+  const inercias = useRef({});
+  const ventana = () => ({ width: window.innerWidth, height: window.innerHeight });
+  const colocar = (el, p) => { el.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`; };
+  const fijar = useCallback((id, p) => {
+    setPosiciones(prev => {
+      const nuevas = { ...prev, [id]: p };
+      guardarPaneles(nuevas);
+      return nuevas;
+    });
+  }, []);
+  // Lo que sigue deslizándose al soltar con impulso, hasta pararse o tocar el borde.
+  const lanzar = useCallback((id, a, vel) => {
+    const el = document.querySelector(`[data-panel="${id}"]`);
+    if (!el || Math.hypot(vel.x, vel.y) < VELOCIDAD_LANZAR) { fijar(id, a.actual); return; }
+    let p = a.actual;
+    let v = vel;
+    let antes = performance.now();
+    const paso = (ahora) => {
+      // El reloj del fotograma puede ir por detrás del `performance.now()` de arriba, y
+      // con la pestaña en segundo plano los fotogramas se espacian: ni negativo ni enorme.
+      const dt = Math.max(0, Math.min(100, ahora - antes));
+      antes = ahora;
+      const r = pasoDeInercia(v, dt);
+      const nueva = moverPanel(a.inicio, { x: p.x - a.inicio.x + r.dx, y: p.y - a.inicio.y + r.dy }, a.caja, ventana());
+      // Contra el borde se para en seco en ese eje: rebotar marea más que ayuda.
+      v = { x: nueva.x === Math.round(p.x + r.dx) ? r.vel.x : 0, y: nueva.y === Math.round(p.y + r.dy) ? r.vel.y : 0 };
+      p = nueva;
+      colocar(el, p);
+      if (Math.hypot(v.x, v.y) > 0.02) inercias.current[id] = requestAnimationFrame(paso);
+      else { delete inercias.current[id]; fijar(id, p); }
+    };
+    inercias.current[id] = requestAnimationFrame(paso);
+  }, [fijar]);
+  useEffect(() => () => Object.values(inercias.current).forEach(cancelAnimationFrame), []);
   const onArrastre = useCallback((id, fase, punto, quien = "raton") => {
     if (fase === "empieza") {
       if (arrastres.current[id]) return;
       const el = document.querySelector(`[data-panel="${id}"]`);
       if (!el) return;
-      const inicio = posiciones[id] || { x: 0, y: 0 };
+      // Cogerlo mientras aún desliza lo para donde esté.
+      if (inercias.current[id]) {
+        cancelAnimationFrame(inercias.current[id]);
+        delete inercias.current[id];
+      }
+      const m = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px/.exec(el.style.transform || "");
+      const inicio = m ? { x: Number(m[1]), y: Number(m[2]) } : (posicionesRef.current[id] || { x: 0, y: 0 });
       const r = el.getBoundingClientRect();
-      arrastres.current[id] = { quien, inicio, desde: punto,
+      arrastres.current[id] = { quien, inicio, actual: inicio, desde: punto, el,
+                                muestras: [{ t: performance.now(), x: punto.x, y: punto.y }],
                                 caja: { left: r.left - inicio.x, top: r.top - inicio.y, width: r.width, height: r.height } };
       el.classList.add("jh-arrastrando");
       setDelante(id);
@@ -187,22 +255,40 @@ export default function JarvisHUD({
     }
     const a = arrastres.current[id];
     if (!a || a.quien !== quien) return;
+    const t = performance.now();
     if (fase === "mueve") {
-      const nueva = moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y }, a.caja,
-                               { width: window.innerWidth, height: window.innerHeight });
-      setPosiciones(prev => ({ ...prev, [id]: nueva }));
+      a.actual = moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y }, a.caja, ventana());
+      a.muestras.push({ t, x: punto.x, y: punto.y });
+      while (a.muestras.length > 2 && t - a.muestras[0].t > 250) a.muestras.shift();
+      colocar(a.el, a.actual);
     } else if (fase === "suelta") {
-      document.querySelector(`[data-panel="${id}"]`)?.classList.remove("jh-arrastrando");
+      a.el.classList.remove("jh-arrastrando");
       delete arrastres.current[id];
-      setPosiciones(prev => { guardarPaneles(prev); return prev; });
+      // Con la mano, lo último antes de soltar es el tirón de abrir los dedos: se descarta.
+      const vel = velocidadDeSuelta(a.muestras, t, { hastaMs: quien === "raton" ? 0 : 30 });
+      lanzar(id, a, vel);
     }
-  }, [posiciones]);
-  // El ratón mueve los paneles igual que la mano: por el mismo camino.
-  const asaDe = useCallback((id) => ({
+  }, [lanzar]);
+  const recolocar = useCallback((id) => {
+    if (inercias.current[id]) {
+      cancelAnimationFrame(inercias.current[id]);
+      delete inercias.current[id];
+    }
+    const el = document.querySelector(`[data-panel="${id}"]`);
+    if (el) el.style.transform = "";
+    setPosiciones(prev => {
+      const nuevas = { ...prev };
+      delete nuevas[id];
+      guardarPaneles(nuevas);
+      return nuevas;
+    });
+  }, []);
+  // El ratón mueve los paneles igual que la mano: por el mismo camino. Se engancha al
+  // panel entero; el título solo lleva el doble clic de devolverlo a su sitio.
+  const movibleDe = useCallback((id) => ({
     "data-arrastre": id,
-    title: "Arrastre para mover el panel",
     onPointerDown: (e) => {
-      if (e.button !== 0 || e.target.closest("button, input, textarea, a")) return;
+      if (e.button !== 0 || e.target.closest(NO_ARRASTRA)) return;
       e.preventDefault();
       onArrastre(id, "empieza", { x: e.clientX, y: e.clientY });
       const mueve = (ev) => onArrastre(id, "mueve", { x: ev.clientX, y: ev.clientY });
@@ -210,14 +296,20 @@ export default function JarvisHUD({
         onArrastre(id, "suelta", { x: ev.clientX, y: ev.clientY });
         window.removeEventListener("pointermove", mueve);
         window.removeEventListener("pointerup", suelta);
+        window.removeEventListener("pointercancel", suelta);
       };
       window.addEventListener("pointermove", mueve);
       window.addEventListener("pointerup", suelta);
+      window.addEventListener("pointercancel", suelta);
     },
   }), [onArrastre]);
+  const asaDe = useCallback((id) => ({
+    title: "Arrastre para mover el panel · doble clic para devolverlo a su sitio",
+    onDoubleClick: (e) => { if (!e.target.closest(NO_ARRASTRA)) recolocar(id); },
+  }), [recolocar]);
   const estiloPanel = (id) => (posiciones[id]
-    ? { transform: `translate(${posiciones[id].x}px, ${posiciones[id].y}px)`, zIndex: delante === id ? 6 : 5 }
-    : undefined);
+    ? { transform: `translate3d(${posiciones[id].x}px, ${posiciones[id].y}px, 0)`, zIndex: delante === id ? 6 : 5 }
+    : (delante === id ? { zIndex: 6 } : undefined));
   const hayMovidos = Object.keys(posiciones).length > 0;
 
   useEffect(() => {
@@ -252,23 +344,28 @@ export default function JarvisHUD({
   useEffect(() => {
     function tecla(e) {
       if (e.key !== "Escape") return;
-      // Primero se cierra el menú del puño, si está; luego, la vista.
+      // Primero se cierra el menú del puño, si está; luego el modo inmersivo; luego, la vista.
       if (radialRef.current) { e.preventDefault(); setRadial(null); return; }
+      if (inmersivo) { e.preventDefault(); setInmersivo(false); return; }
       if (!enLlamada) { e.preventDefault(); onSalir(); }
     }
     document.addEventListener("keydown", tecla);
     return () => document.removeEventListener("keydown", tecla);
-  }, [enLlamada, onSalir]);
+  }, [enLlamada, onSalir, inmersivo]);
 
   const puedeEnviar = borrador.trim() && !pensando;
+  const verInmersivo = inmersivo && camaraOn;
   const hh = String(ahora.getHours()).padStart(2, "0");
   const mm = String(ahora.getMinutes()).padStart(2, "0");
   const ss = String(ahora.getSeconds()).padStart(2, "0");
   const fecha = ahora.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long" });
 
   return (
-    <div className="jh" data-estado={estado} role="dialog" aria-modal="true" aria-label="Jarvis">
+    <div className={`jh${verInmersivo ? " jh-inmersivo" : ""}`} data-estado={estado} role="dialog" aria-modal="true" aria-label="Jarvis">
       <style>{CSS}</style>
+      {verInmersivo && (
+        <video ref={ponVideo} muted playsInline autoPlay className="jh-inmersivo-video" aria-hidden="true" />
+      )}
       <div className="jh-fondo" aria-hidden="true" />
       <div className="jh-barrido" aria-hidden="true" />
 
@@ -289,9 +386,19 @@ export default function JarvisHUD({
         </div>
         <div className="jh-cabecera-acciones">
           {hayMovidos && (
-            <button type="button" className="jh-boton-fino" onClick={() => { setPosiciones({}); guardarPaneles({}); }}
+            <button type="button" className="jh-boton-fino" onClick={() => {
+              Object.values(inercias.current).forEach(cancelAnimationFrame);
+              inercias.current = {};
+              document.querySelectorAll(".jh [data-panel]").forEach(el => { el.style.transform = ""; });
+              setPosiciones({}); guardarPaneles({});
+            }}
                     title="Devolver los paneles a su sitio">Recolocar</button>
           )}
+          <button type="button" className={`jh-boton-fino${verInmersivo ? " activo" : ""}`}
+                  onClick={alternarInmersivo} aria-pressed={verInmersivo}
+                  title="La cámara en grande con los paneles flotando: cada dedo pulsa al doblarlo (Esc para salir)">
+            Inmersivo
+          </button>
           <button type="button" className={`jh-boton-fino${proyectosOn ? " activo" : ""}`}
                   onClick={() => setProyectosOn(v => !v)} aria-pressed={proyectosOn}>Proyectos</button>
           {mensajes.length > 0 && !enLlamada && (
@@ -309,7 +416,8 @@ export default function JarvisHUD({
       <div className="jh-cuerpo">
         {/* ── Telemetría izquierda: el sistema ── */}
         <div className="jh-columna jh-columna-izq">
-        <section className="jh-panel" data-panel="sistema" style={estiloPanel("sistema")} aria-label="Estado del sistema">
+        <section className="jh-panel jh-movible" data-panel="sistema" style={estiloPanel("sistema")} aria-label="Estado del sistema"
+                 {...movibleDe("sistema")}>
           <Esquinas />
           <div className="jh-panel-titulo jh-asa" {...asaDe("sistema")}>Sistema</div>
           <Dato etiqueta="Motor" valor={`Claude · ${motor.nombre}`} acento={potente} />
@@ -345,11 +453,13 @@ export default function JarvisHUD({
             ))}
         </section>
         {camaraOn && (
-          <section className="jh-panel" data-panel="camara" style={estiloPanel("camara")} aria-label="Cámara">
+          <section className="jh-panel jh-movible" data-panel="camara" style={estiloPanel("camara")} aria-label="Cámara"
+                   {...movibleDe("camara")}>
             <Esquinas />
-            <PanelCamara videoRef={camara.videoRef} estado={camara.estado} error={camara.error}
+            <PanelCamara ponVideo={ponVideo} estado={estadoCamara} error={errorCamara}
                          jarvisVe={jarvisVe} onJarvisVe={() => setJarvisVe(v => !v)}
                          manos={manosOn} onManos={() => setManosOn(v => !v)} estadoManos={estadoManos}
+                         inmersivo={verInmersivo} onInmersivo={alternarInmersivo}
                          asa={asaDe("camara")} />
           </section>
         )}
@@ -423,7 +533,7 @@ export default function JarvisHUD({
                         ? "Potencia máxima: piensa Opus 5.5 (más lento, gasta más límite). Pulse para volver a Sonnet"
                         : "Activar la potencia máxima: Opus 5.5"}>⚡</button>
               <button type="button" className={`jh-icono${camaraOn ? " activo jh-icono-vivo" : ""}`}
-                      onClick={() => { setCamaraOn(v => !v); if (camaraOn) setManosOn(false); }}
+                      onClick={() => { setCamaraOn(v => !v); if (camaraOn) { setManosOn(false); setInmersivo(false); } }}
                       aria-pressed={camaraOn} aria-label="Cámara"
                       title={camaraOn ? "Apagar la cámara" : "Encender la cámara: Jarvis le ve y puede usar las manos"}>📷</button>
               <span className="jh-prompt" aria-hidden="true">›</span>
@@ -458,7 +568,8 @@ export default function JarvisHUD({
 
         {/* ── Telemetría derecha: el día ── */}
         <div className="jh-columna jh-columna-der">
-        <section className="jh-panel" data-panel="dia" style={estiloPanel("dia")} aria-label="El día">
+        <section className="jh-panel jh-movible" data-panel="dia" style={estiloPanel("dia")} aria-label="El día"
+                 {...movibleDe("dia")}>
           <Esquinas />
           <div className="jh-asa jh-asa-reloj" {...asaDe("dia")}><div className="jh-reloj">{hh}<span className="jh-reloj-sep">:</span>{mm}<span className="jh-reloj-seg">{ss}</span></div></div>
           <div className="jh-fecha">{fecha}</div>
@@ -472,8 +583,8 @@ export default function JarvisHUD({
           )}
         </section>
         {proyectosOn && (
-          <section className="jh-panel jh-panel-proyectos" data-panel="proyectos" style={estiloPanel("proyectos")}
-                   aria-label="Proyectos">
+          <section className="jh-panel jh-panel-proyectos jh-movible" data-panel="proyectos" style={estiloPanel("proyectos")}
+                   aria-label="Proyectos" {...movibleDe("proyectos")}>
             <Esquinas />
             <PanelProyectos asa={asaDe("proyectos")} datos={proyectos.datos} recargar={proyectos.recargar}
                             abrir={abrirProyecto} />
@@ -487,8 +598,8 @@ export default function JarvisHUD({
       <MenuRadial centro={radial?.centro} items={itemsMenu} posiciones={posicionesMenu}
                   elegido={radial?.elegido ?? -1} sujeto={radial?.sujeto}
                   onElegir={elegirDelMenu} onCerrar={() => setRadial(null)} />
-      <Manos videoRef={camara.videoRef} activa={camaraOn && manosOn && camara.estado === "en_directo"}
-             onPuno={onPuno}
+      <Manos videoRef={videoRef} activa={camaraOn && manosOn && estadoCamara === "en_directo"}
+             inmersivo={verInmersivo} onPuno={onPuno} onDelante={traerDelante}
              onArrastre={onArrastre} onEstado={setEstadoManos} />
     </div>
   );
@@ -771,9 +882,20 @@ const CSS = `
 .jh-panel-titulo::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--jh-c2), transparent); order: 1; }
 .jh-panel-titulo > .jh-mini, .jh-panel-titulo > .jh-directo { order: 2; }
 
-/* Lo que se arrastra: el título de cada panel (con el ratón o con un pellizco). */
-.jh-asa { cursor: grab; user-select: none; touch-action: none; }
-.jh-arrastrando { z-index: 20; box-shadow: 0 0 30px var(--jh-c2); animation: none !important; }
+/* Lo que se arrastra: el panel entero (con el ratón o con un pellizco), menos lo que se
+   pulsa o se escribe. El brillo va en el borde y el fondo: el clip-path de las esquinas
+   recorta cualquier sombra. */
+.jh-movible { cursor: grab; user-select: none; touch-action: none; }
+.jh-movible :is(button, input, textarea, select, a) { cursor: pointer; }
+.jh-movible :is(input, textarea) { cursor: text; user-select: text; }
+.jh-movible .jh-proy-texto { cursor: auto; user-select: text; }
+.jh-asa { cursor: grab; user-select: none; }
+.jh-arrastrando {
+  z-index: 20 !important; cursor: grabbing; will-change: transform; animation: none !important;
+  border-color: var(--jh-c) !important; transition: none !important;
+  background: linear-gradient(180deg, rgba(94,231,255,.13), rgba(94,231,255,.02) 60%), rgba(3,10,17,.96);
+}
+.jh-arrastrando .jh-esq { border-color: #fff; }
 .jh-arrastrando .jh-asa { cursor: grabbing; }
 .jh-asa-reloj { margin-bottom: 0; }
 
@@ -819,6 +941,34 @@ const CSS = `
 .jh-manos-cursor.cerrado span { background: var(--jh-c3); border-color: #fff; }
 .jh-manos-cursor.pulso span { animation: jhPulso .26s ease-out; }
 .jh-mano-encima { outline: 2px solid var(--jh-c) !important; outline-offset: 2px; box-shadow: 0 0 18px var(--jh-c2) !important; }
+
+/* El modo inmersivo: la cámara de fondo y todo lo demás flotando encima, de cristal. */
+.jh-inmersivo { background: #000; }
+.jh-inmersivo-video {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0;
+  transform: scaleX(-1); pointer-events: none; filter: saturate(.9) brightness(.78) contrast(1.05);
+}
+.jh-inmersivo .jh-fondo { opacity: .45; mask-image: none; background:
+  radial-gradient(ellipse 120% 100% at 50% 50%, transparent 55%, rgba(0,4,8,.75) 100%),
+  linear-gradient(rgba(94,231,255,.05) 1px, transparent 1px) 0 0 / 44px 44px,
+  linear-gradient(90deg, rgba(94,231,255,.05) 1px, transparent 1px) 0 0 / 44px 44px; }
+.jh-inmersivo .jh-barrido { opacity: .25; }
+.jh-inmersivo .jh-panel {
+  background: linear-gradient(180deg, rgba(94,231,255,.10), rgba(94,231,255,.02) 60%), rgba(3,12,20,.42);
+  backdrop-filter: blur(10px) saturate(1.2); -webkit-backdrop-filter: blur(10px) saturate(1.2);
+  border-color: var(--jh-c2);
+}
+.jh-inmersivo .jh-arrastrando { background: linear-gradient(180deg, rgba(94,231,255,.18), rgba(94,231,255,.04) 60%), rgba(3,12,20,.55); }
+.jh-inmersivo .jh-reactor-zona { transform: scale(.62); transform-origin: 50% 0; margin-bottom: -16vh; opacity: .9; }
+/* La conversación no tapa el centro de la imagen: el cristal va en cada mensaje. */
+.jh-inmersivo :is(.jh-msg, .jh-autorizacion, .jh-vacio-titulo, .jh-sugerencia) {
+  background: rgba(3,12,20,.5); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.jh-inmersivo .jh-msg { padding: 8px 12px; border: 1px solid var(--jh-c3); }
+.jh-inmersivo .jh-vacio-titulo { display: inline-block; padding: 4px 12px; }
+.jh-inmersivo .jh-consola { background: rgba(3,12,20,.55); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+.jh-inmersivo .jh-cabecera { background: linear-gradient(180deg, rgba(0,4,8,.7), transparent); }
+.jh-inmersivo .jh-mano-encima { background: var(--jh-c3) !important; }
 
 /* El menú del puño */
 .jh-radial { position: fixed; inset: 0; z-index: 38; pointer-events: none; animation: jhEntrada .25s ease-out; }

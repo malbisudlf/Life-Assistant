@@ -167,6 +167,22 @@ escuchan en directo —las de Telegram (`docs/TELEGRAM.md`)— van **al revés: 
 Azure detrás**, porque ahí tres segundos no se notan y la calidad sí. Decidido por Mikel
 el 24 de octubre de 2026.
 
+**Desde el 2026-10-29 Fish va delante también en la web** (`_VOZ_ORDEN_LLAMADA =
+("fish", "azure")`), con la voz «Jarvis» que ya hablaba en el teléfono (parche 31) y en
+Telegram. Lo pidió Mikel sabiendo lo de la tabla: la espera de más cae en la **primera**
+frase de cada respuesta, porque `vozAzure.js` pide la siguiente mientras suena la anterior.
+`/voz/token` dice ahora `proveedor: "fish"`, y Azure es la reserva. Si la primera frase se
+hace larga, lo siguiente es que `/voz/decir` sirva el audio de Fish según llega, como el
+parche 31 en el teléfono.
+
+**Y las respuestas escritas suenan con esa voz.** El 🔊 («que Jarvis conteste en voz
+alta»), fuera de una llamada, leía con la voz robótica del navegador; ahora abre la misma
+voz del backend (`vozLeida` en `Dashboard.jsx`, por frases con `trocearParaVoz`, porque
+`/voz/decir` no admite más de 600 caracteres). Se abre desde el gesto de encender el 🔊 o de
+enviar, por el desbloqueo del audio en iOS. Si el backend no da audio (503 sin voces,
+502 si fallan las dos), lo que quede se lee con la del navegador y no se reintenta hasta
+recargar.
+
 Dos detalles que no conviene deshacer:
 
 - **`FISH_AUDIO_TIMEOUT` (12 s) es propio.** En frío Fish ha llegado a tardar 7,7 s, así

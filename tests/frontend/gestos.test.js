@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   LectorDeMano, FiltroOneEuro, aPantalla, esClic, moverPanel, porcentajeDe, distancia, acercar, claveDeMano,
   DetectorDePuno, dedosPlegados, posicionesRadiales, elegirPorDireccion,
+  DetectorDeToques, extensiones, velocidadDeSuelta, pasoDeInercia,
 } from "../../src/lib/gestos";
 
 /** Una mano con los cuatro dedos extendidos hacia arriba, o plegados sobre la palma. */
@@ -212,5 +213,123 @@ describe("porcentajeDe", () => {
 describe("distancia", () => {
   it("euclídea", () => {
     expect(distancia({ x: 0, y: 0 }, { x: 3, y: 4 })).toBe(5);
+  });
+});
+
+/** Una mano abierta de frente, con `doblados` (números de punta de MediaPipe) doblados
+ *  sobre la palma. El pulgar, extendido hacia un lado salvo que esté en la lista. */
+function manoAbierta(doblados = []) {
+  const p = manoDeDedos(0);
+  [8, 12, 16, 20].forEach((i, k) => { if (doblados.includes(i)) p[i] = { x: 0.44 + k * 0.04, y: 0.56 }; });
+  p[4] = doblados.includes(4) ? { x: 0.56, y: 0.55 } : { x: 0.3, y: 0.5 };
+  return p;
+}
+
+describe("los toques con la punta de los dedos", () => {
+  it("la mano abierta tiene los cinco dedos extendidos y el puño ninguno", () => {
+    const abierta = extensiones(manoAbierta());
+    expect(abierta.every((e, i) => e > [0.75, 1.05, 1.05, 1.0, 0.95][i])).toBe(true);
+    const cerrada = extensiones(manoAbierta([4, 8, 12, 16, 20]));
+    expect(cerrada.every(e => e < 0.7)).toBe(true);
+  });
+
+  it("doblar de golpe un dedo es un toque donde apuntaba antes de doblarse", () => {
+    const d = new DetectorDeToques();
+    expect(d.leer(manoAbierta(), 0)).toEqual([]);
+    expect(d.leer(manoAbierta(), 33)).toEqual([]);
+    expect(d.leer(manoAbierta([12]), 120)).toEqual([]);   // espera a confirmarlo
+    const toques = d.leer(manoAbierta([12]), 200);
+    expect(toques).toHaveLength(1);
+    expect(toques[0].punta).toBe(12);
+    expect(toques[0].punto.y).toBeCloseTo(0.2);      // la punta arriba, no doblada
+  });
+
+  it("vale con cualquier dedo, también el pulgar", () => {
+    for (const punta of [4, 8, 16, 20]) {
+      const d = new DetectorDeToques();
+      d.leer(manoAbierta(), 0);
+      d.leer(manoAbierta([punta]), 100);
+      expect(d.leer(manoAbierta([punta]), 180).map(x => x.punta)).toEqual([punta]);
+    }
+  });
+
+  it("cerrar la mano no pulsa nada", () => {
+    const d = new DetectorDeToques();
+    d.leer(manoAbierta(), 0);
+    expect(d.leer(manoAbierta([8, 12, 16, 20]), 100)).toEqual([]);
+    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 150)).toEqual([]);
+    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 300)).toEqual([]);
+  });
+
+  it("ni cerrarla con el pulgar primero", () => {
+    const d = new DetectorDeToques();
+    d.leer(manoAbierta(), 0);
+    expect(d.leer(manoAbierta([4]), 100)).toEqual([]);
+    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 133)).toEqual([]);
+    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 300)).toEqual([]);
+  });
+
+  it("doblarlo despacio tampoco: es mover la mano, no pulsar", () => {
+    const d = new DetectorDeToques({ ventanaMs: 280 });
+    d.leer(manoAbierta(), 0);
+    expect(d.leer(manoAbierta([12]), 600)).toEqual([]);
+  });
+
+  it("el mismo dedo no vuelve a pulsar hasta estirarlo otra vez", () => {
+    const d = new DetectorDeToques();
+    d.leer(manoAbierta(), 0);
+    d.leer(manoAbierta([8]), 100);
+    expect(d.leer(manoAbierta([8]), 180)).toHaveLength(1);
+    expect(d.leer(manoAbierta([8]), 250)).toEqual([]);
+    d.leer(manoAbierta(), 300);
+    d.leer(manoAbierta(), 350);
+    d.leer(manoAbierta([8]), 420);
+    expect(d.leer(manoAbierta([8]), 500)).toHaveLength(1);
+  });
+
+  it("en pausa (pellizcando) se olvida lo visto", () => {
+    const d = new DetectorDeToques();
+    d.leer(manoAbierta(), 0);
+    d.pausa();
+    d.leer(manoAbierta([8]), 100);
+    expect(d.leer(manoAbierta([8]), 200)).toEqual([]);
+  });
+});
+
+describe("aPantalla sobre el vídeo a pantalla completa", () => {
+  it("cae encima de lo que se ve, con el recorte del cover", () => {
+    // Vídeo 1280x720 en una pantalla 1000x1000: se escala a 1777x1000 y sobra por los lados.
+    const cubre = { ancho: 1280, alto: 720 };
+    const centro = aPantalla({ x: 0.5, y: 0.5 }, 1000, 1000, { cubre });
+    expect(centro.x).toBeCloseTo(500);
+    expect(centro.y).toBeCloseTo(500);
+    const arriba = aPantalla({ x: 0.5, y: 0 }, 1000, 1000, { cubre });
+    expect(arriba.y).toBeCloseTo(0);
+    // En espejo: lo que está a la izquierda del fotograma sale a la derecha.
+    expect(aPantalla({ x: 0.3, y: 0.5 }, 1000, 1000, { cubre }).x).toBeGreaterThan(500);
+  });
+});
+
+describe("soltar con impulso", () => {
+  it("la velocidad sale del tramo antes de soltar, sin el tirón del final", () => {
+    const muestras = [
+      { t: 0, x: 0, y: 0 }, { t: 50, x: 50, y: 0 }, { t: 100, x: 100, y: 0 },
+      { t: 140, x: 400, y: 0 },                        // el tirón al abrir los dedos
+    ];
+    const v = velocidadDeSuelta(muestras, 150, { desdeMs: 150, hastaMs: 30 });
+    expect(v.x).toBeCloseTo(1);
+    expect(v.y).toBe(0);
+  });
+
+  it("sin muestras suficientes no hay impulso, y tiene tope", () => {
+    expect(velocidadDeSuelta([{ t: 0, x: 0, y: 0 }], 50)).toEqual({ x: 0, y: 0 });
+    const loco = velocidadDeSuelta([{ t: 0, x: 0, y: 0 }, { t: 60, x: 6000, y: 0 }], 100, { max: 3 });
+    expect(loco.x).toBe(3);
+  });
+
+  it("la inercia frena a la mitad en su media vida", () => {
+    const { dx, vel } = pasoDeInercia({ x: 2, y: 0 }, 110, { mediaVidaMs: 110 });
+    expect(dx).toBeCloseTo(220);
+    expect(vel.x).toBeCloseTo(1);
   });
 });

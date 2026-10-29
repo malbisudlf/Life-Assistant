@@ -1,9 +1,9 @@
-"""Tests de Fish Audio como voz de reserva de la llamada (`POST /voz/decir`).
+"""Tests de Fish Audio como la voz de Jarvis en la web (`POST /voz/decir`).
 
-En la llamada habla Azure, que tarda 0,7 s por frase frente a los ~3 s de Fish; Fish va
-detrás. Lo que hay que proteger: que Azure siga yendo primero, que un fallo suyo —error,
-200 vacío o red caída— acabe en Fish y no en silencio, que la clave no salga, y que el
-orden de las notas de voz (Fish delante) sea de verdad el contrario.
+Desde el 2026-10-29 habla Fish (la voz «Jarvis») y Azure va detrás, como en el teléfono
+y en las notas de Telegram. Lo que hay que proteger: que Fish vaya primero, que un fallo
+suyo —error, 200 vacío o red caída— acabe en Azure y no en silencio, que la clave no
+salga, y que con una sola de las dos baste.
 """
 import requests
 
@@ -36,39 +36,39 @@ def _sin_azure(monkeypatch):
 
 
 class TestVozDecir:
-    def test_azure_va_antes_que_fish(self, client, auth_headers, monkeypatch, mock_requests):
+    def test_fish_va_antes_que_azure(self, client, auth_headers, monkeypatch, mock_requests):
         _fish(monkeypatch, mock_requests)
         _azure(monkeypatch, mock_requests)
         r = client.post("/voz/decir", json={"texto": "Buenas tardes, señor"},
                         headers=auth_headers)
         assert r.status_code == 200
-        assert r.content == AUDIO_AZURE
-        # Ni una petición a Fish si Azure contesta: sería gastar cuota y nada más.
-        assert not mock_requests.called("POST", FISH)
+        assert r.content == AUDIO_FISH
+        # Ni una petición a Azure si Fish contesta: sería gastar cuota y nada más.
+        assert not mock_requests.called("POST", AZURE)
 
-    def test_si_azure_falla_habla_fish(self, client, auth_headers, monkeypatch, mock_requests):
+    def test_si_fish_falla_habla_azure(self, client, auth_headers, monkeypatch, mock_requests):
         """Una frase con otra voz se oye rara; el silencio o la voz robótica, peor."""
-        _azure(monkeypatch, mock_requests, FakeResponse(status_code=429, text="cuota"))
-        _fish(monkeypatch, mock_requests)
+        _fish(monkeypatch, mock_requests, FakeResponse(status_code=429, text="cuota"))
+        _azure(monkeypatch, mock_requests)
         r = client.post("/voz/decir", json={"texto": "hola"}, headers=auth_headers)
         assert r.status_code == 200
         assert r.headers["content-type"] == "audio/mpeg"
-        assert r.content == AUDIO_FISH
+        assert r.content == AUDIO_AZURE
 
-    def test_un_200_vacio_de_azure_tampoco_vale(self, client, auth_headers, monkeypatch,
-                                                mock_requests):
-        _azure(monkeypatch, mock_requests, FakeResponse(content=b""))
-        _fish(monkeypatch, mock_requests)
+    def test_un_200_vacio_de_fish_tampoco_vale(self, client, auth_headers, monkeypatch,
+                                               mock_requests):
+        _fish(monkeypatch, mock_requests, FakeResponse(content=b""))
+        _azure(monkeypatch, mock_requests)
         r = client.post("/voz/decir", json={"texto": "hola"}, headers=auth_headers)
-        assert r.content == AUDIO_FISH
+        assert r.content == AUDIO_AZURE
 
-    def test_azure_caido_cae_a_fish(self, client, auth_headers, monkeypatch, mock_requests):
+    def test_fish_caido_cae_a_azure(self, client, auth_headers, monkeypatch, mock_requests):
         def _timeout(url, **kwargs):
-            raise requests.Timeout("París no contesta")
-        _azure(monkeypatch, mock_requests, _timeout)
-        _fish(monkeypatch, mock_requests)
+            raise requests.Timeout("Hong Kong no contesta")
+        _fish(monkeypatch, mock_requests, _timeout)
+        _azure(monkeypatch, mock_requests)
         r = client.post("/voz/decir", json={"texto": "hola"}, headers=auth_headers)
-        assert r.status_code == 200 and r.content == AUDIO_FISH
+        assert r.status_code == 200 and r.content == AUDIO_AZURE
 
     def test_lo_que_se_le_manda_a_fish(self, client, auth_headers, monkeypatch, mock_requests):
         _sin_azure(monkeypatch)
@@ -105,6 +105,12 @@ class TestVozDecir:
         r = client.post("/voz/decir", json={"texto": "hola"}, headers=auth_headers)
         assert r.status_code == 200 and r.content == AUDIO_FISH
 
+    def test_solo_azure_basta(self, client, auth_headers, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "FISH_AUDIO_API_KEY", "")
+        _azure(monkeypatch, mock_requests)
+        r = client.post("/voz/decir", json={"texto": "hola"}, headers=auth_headers)
+        assert r.status_code == 200 and r.content == AUDIO_AZURE
+
 
 class TestElOrdenDeLasNotas:
     """Las notas de voz (Telegram, cuando existan) priman la calidad: Fish delante."""
@@ -122,12 +128,12 @@ class TestElOrdenDeLasNotas:
 
 
 class TestQueVozSeElige:
-    def test_con_las_dos_el_proveedor_es_azure(self, client, auth_headers, monkeypatch,
-                                               mock_requests):
+    def test_con_las_dos_el_proveedor_es_fish(self, client, auth_headers, monkeypatch,
+                                              mock_requests):
         _fish(monkeypatch, mock_requests)
         _azure(monkeypatch, mock_requests)
         r = client.post("/voz/token", json={"tipo": "tts_websocket"}, headers=auth_headers)
-        assert r.status_code == 200 and r.json()["proveedor"] == "azure"
+        assert r.status_code == 200 and r.json()["proveedor"] == "fish"
 
     def test_solo_con_fish_el_proveedor_es_fish(self, client, auth_headers, monkeypatch,
                                                 mock_requests):

@@ -33441,13 +33441,14 @@ VOZ_DECIR_MAX_CHARS  = int(os.getenv("VOZ_DECIR_MAX_CHARS", "600"))
 VOZ_DECIR_MAX_REQUESTS   = int(os.getenv("VOZ_DECIR_MAX_REQUESTS", "240"))
 VOZ_DECIR_WINDOW_SECONDS = int(os.getenv("VOZ_DECIR_WINDOW_SECONDS", "300"))
 
-# ── Fish Audio: la voz de reserva de la llamada (octubre de 2026) ────────────
+# ── Fish Audio: la voz de Jarvis (octubre de 2026) ───────────────────────────
 # Mismo camino que Azure: el audio lo sirve `/voz/decir`, una petición por frase, así que
-# el reproductor del navegador (`src/lib/vozAzure.js`) es el mismo. En la llamada va
-# DETRÁS de Azure: si Azure falla en una frase (cuota del mes, caída), esa frase la dice
-# Fish y la llamada sigue con voz de verdad en vez de caer a la robótica del navegador.
+# el reproductor del navegador (`src/lib/vozAzure.js`) es el mismo. Entró DETRÁS de Azure,
+# de reserva: si Azure fallaba en una frase (cuota del mes, caída), esa frase la decía
+# Fish. Desde el 2026-10-29 va DELANTE también en la web (`_VOZ_ORDEN_LLAMADA`), y Azure
+# es la reserva.
 #
-# Detrás y no delante por la latencia, medida el 24 de octubre de 2026 desde casa: Fish
+# Había ido detrás por la latencia, medida el 24 de octubre de 2026 desde casa: Fish
 # contesta desde Hong Kong y tarda ~3 s por frase entera (0,9 s al primer byte) frente a
 # los 0,7 s de Azure en París. En una llamada eso cae justo en la primera frase de cada
 # respuesta. Donde no haya nadie esperando al otro lado —las notas de voz de Telegram
@@ -33544,10 +33545,13 @@ def _decir_azure(texto: str, formato: str = "") -> bytes:
     return r.content
 
 
-# Qué voz va primero en cada sitio. La de la llamada prima la latencia (Azure, 0,7 s);
-# la de las notas de voz de Telegram, la calidad (Fish), porque nadie espera en
-# directo. Cambiar el orden es cambiar esta tupla, no el endpoint.
-_VOZ_ORDEN_LLAMADA = ("azure", "fish")
+# Qué voz va primero en cada sitio. Cambiar el orden es cambiar esta tupla, no el
+# endpoint. La web (llamada y «voz alta» de las respuestas escritas) iba con Azure
+# delante por la latencia (0,7 s frente a ~3 s); desde el 2026-10-29 va Fish, la voz
+# «Jarvis» que ya habla en el teléfono y en Telegram: lo pidió Mikel, y el reproductor
+# (`vozAzure.js`) pide la frase siguiente mientras suena la anterior, así que la espera
+# de más cae en la primera frase de cada respuesta y no en todas.
+_VOZ_ORDEN_LLAMADA = ("fish", "azure")
 _VOZ_ORDEN_NOTAS   = ("fish", "azure")
 _VOCES = {
     "azure": (_voz_azure_configurada, _decir_azure),
@@ -33582,7 +33586,7 @@ def voz_decir(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
 ):
-    """Sintetiza UNA frase y la devuelve como MP3: con Azure y, si falla, con Fish Audio.
+    """Sintetiza UNA frase y la devuelve como MP3: con Fish Audio y, si falla, con Azure.
 
     Endpoint de usuario: lo llama el modo llamada del dashboard, una vez por frase. El
     límite es generoso (240 en 5 minutos) porque una conversación normal son bastantes
@@ -33785,8 +33789,8 @@ def voz_token(
     Endpoint de USUARIO (`verify_token`), no de servicio: lo llama el dashboard con el
     JWT de la sesión. Nada que arranque solo necesita voz.
 
-    Devuelve `proveedor` para que el cliente sepa a qué atenerse, y AZURE VA PRIMERO
-    cuando está configurado: es el que tiene voces españolas de verdad. Se responde aquí
+    Devuelve `proveedor` para que el cliente sepa a qué atenerse: el primero de
+    `_VOZ_ORDEN_LLAMADA` que esté configurado (Fish desde el 2026-10-29). Se responde aquí
     y no en un endpoint aparte para no meter otra ida y vuelta antes de descolgar — el
     dashboard ya pide esto por adelantado justo para eso, y una llamada más volvería a
     poner el arranque en frío de Fly delante de la primera palabra.

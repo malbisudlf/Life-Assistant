@@ -13,10 +13,17 @@
 //
 // Detectar y pintar van a ritmos distintos a propósito: MediaPipe corre a lo que dé la
 // cámara (unos 30 fotogramas por segundo) y lo que se pinta se acerca a lo último visto en
-// cada fotograma de la pantalla (60 o más). Atados, el cursor iba a saltos.
+// cada fotograma de la pantalla (60 o más). Atados, el cursor iba a saltos. Por lo mismo,
+// un panel cogido se mueve desde lo que se pinta y no desde lo que se ve: a 60 y suave.
+//
+// En el modo inmersivo (`inmersivo`) la cámara ocupa la pantalla entera y lo dibujado cae
+// encima de la mano que se ve, sin margen. Ahí, además, **cada punta de cada dedo pulsa**:
+// doblar un dedo de golpe es un toque donde apuntaba (`DetectorDeToques`), con un anillo
+// en cada punta y lo que pulsaría iluminado.
 import { useEffect, useRef } from "react";
 import {
-  LectorDeMano, DetectorDePuno, HUESOS, aPantalla, esClic, acercar, claveDeMano, palmaEnPantalla,
+  LectorDeMano, DetectorDePuno, DetectorDeToques, HUESOS, aPantalla, esClic, acercar, claveDeMano,
+  palmaEnPantalla,
 } from "../../lib/gestos";
 
 const VERSION_MEDIAPIPE = "0.10.35";   // la de package.json: el WASM tiene que casar
@@ -27,18 +34,37 @@ const MAX_MANOS = 2;
 // Lo que se puede pulsar con un pellizco. Lo demás (texto, fondos) no reacciona.
 const PULSABLE = 'button:not(:disabled), a[href], input:not(:disabled), textarea, select, [role="button"]';
 const PUNTAS = new Set([4, 8, 12, 16, 20]);
+const PUNTAS_LISTA = [...PUNTAS];
 // Cuánto se acerca lo pintado a lo visto en cada fotograma de pantalla.
 const ACERCA_CURSOR = 0.55;
 const ACERCA_MANO = 0.6;
 
-export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }) {
+// Lo que dura el círculo que deja un toque.
+const ONDA_MS = 420;
+
+/** El elemento pulsable bajo un punto de la pantalla, o null. */
+function pulsableEn(x, y) {
+  return document.elementFromPoint(x, y)?.closest?.(PULSABLE) || null;
+}
+
+function pulsar(el) {
+  if (el.matches("input, textarea, select")) el.focus();
+  else el.click();
+}
+
+export default function Manos({ videoRef, activa, inmersivo = false, onArrastre, onEstado, onPuno, onDelante }) {
   const lienzoRef = useRef(null);
   const cursoresRef = useRef([]);
   // Los callbacks cambian en cada render del HUD; el bucle de vídeo vive mucho más.
   const arrastreRef = useRef(onArrastre);
   const estadoRef = useRef(onEstado);
   const punoRef = useRef(onPuno);
-  useEffect(() => { arrastreRef.current = onArrastre; estadoRef.current = onEstado; punoRef.current = onPuno; });
+  const delanteRef = useRef(onDelante);
+  const inmersivoRef = useRef(inmersivo);
+  useEffect(() => {
+    arrastreRef.current = onArrastre; estadoRef.current = onEstado; punoRef.current = onPuno;
+    delanteRef.current = onDelante; inmersivoRef.current = inmersivo;
+  });
 
   useEffect(() => {
     if (!activa) return;
@@ -52,6 +78,8 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
     // cursor, cursorPintado, pellizco, fuerza, encima }.
     const manos = new Map();
     let encimaAntes = new Set();
+    // Los círculos de los toques: { x, y, t }.
+    let ondas = [];
     estadoRef.current?.("cargando");
 
     function huecoLibre() {
@@ -69,19 +97,37 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
         return;
       }
       if (p.objetivo && esClic({ movido: p.movido, ms: performance.now() - p.t0 })) {
-        const el = p.objetivo;
-        if (el.matches("input, textarea, select")) el.focus();
-        else el.click();
+        pulsar(p.objetivo);
         const cursor = cursoresRef.current[m.hueco];
         cursor?.classList.add("pulso");
         setTimeout(() => cursor?.classList.remove("pulso"), 260);
       }
     }
 
+    // El encuadre: en el modo inmersivo, encima del vídeo que se ve a pantalla completa.
+    function encuadre() {
+      const v = videoRef.current;
+      return inmersivoRef.current && v?.videoWidth
+        ? { cubre: { ancho: v.videoWidth, alto: v.videoHeight } }
+        : undefined;
+    }
+
+    /** Un toque con la punta de un dedo: lo de debajo se pulsa y, si es un panel, se trae
+     *  delante. */
+    function tocar(punto) {
+      ondas.push({ x: punto.x, y: punto.y, t: performance.now() });
+      const el = pulsableEn(punto.x, punto.y);
+      if (el) { pulsar(el); return; }
+      const panel = document.elementFromPoint(punto.x, punto.y)?.closest?.("[data-panel]");
+      if (panel) delanteRef.current?.(panel.dataset.panel);
+    }
+
     // ── Detectar: una vez por fotograma de la cámara ──
     function detectar(resultado) {
       const ancho = window.innerWidth;
       const alto = window.innerHeight;
+      const opciones = encuadre();
+      const ahora = performance.now();
       const vistas = new Set();
       (resultado?.landmarks || []).slice(0, MAX_MANOS).forEach((puntos, i) => {
         const clave = claveDeMano(resultado.handedness, i);
@@ -89,20 +135,21 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
         if (!m) {
           const hueco = huecoLibre();
           if (hueco < 0) return;
-          m = { lector: new LectorDeMano(), puno: new DetectorDePuno(), hueco, pulsado: null,
-                puntosPintados: null, cursorPintado: null };
+          m = { lector: new LectorDeMano(), puno: new DetectorDePuno(), toques: new DetectorDeToques(),
+                hueco, pulsado: null, puntosPintados: null, cursorPintado: null, puntas: [] };
           manos.set(clave, m);
         }
         vistas.add(clave);
-        m.puntos = puntos.map(q => aPantalla(q, ancho, alto));
+        m.clave = clave;
+        m.puntos = puntos.map(q => aPantalla(q, ancho, alto, opciones));
         // El puño, antes que el pellizco: con el puño cerrado no se pulsa ni se arrastra.
-        const palma = palmaEnPantalla(puntos, ancho, alto);
+        const palma = palmaEnPantalla(puntos, ancho, alto, opciones);
         const puno = m.puno.leer(puntos, performance.now());
         if (puno === "cierra") punoRef.current?.("cierra", palma, clave);
         else if (puno === "abre") punoRef.current?.("abre", palma, clave);
         else if (m.puno.cerrado) punoRef.current?.("mueve", palma, clave);
         m.cerrado = m.puno.cerrado;
-        const r = m.lector.leer(puntos, ancho, alto, undefined, performance.now() / 1000);
+        const r = m.lector.leer(puntos, ancho, alto, opciones, ahora / 1000);
         if (!r) return;
         m.cursor = { x: r.x, y: r.y };
         m.pellizco = r.pellizco;
@@ -111,16 +158,24 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
         const pulsable = bajo?.closest?.(PULSABLE) || null;
         m.encima = m.pulsado ? null : pulsable;
         if (r.cambio === "baja") {
-          const asa = bajo?.closest?.("[data-arrastre]");
-          m.pulsado = { x0: r.x, y0: r.y, t0: performance.now(), movido: 0,
+          // Pellizcar sobre un botón es pulsarlo; sobre el resto de un panel, cogerlo.
+          const asa = pulsable ? null : bajo?.closest?.("[data-arrastre]");
+          const desde = m.cursorPintado || { x: r.x, y: r.y };
+          m.pulsado = { x0: r.x, y0: r.y, t0: ahora, movido: 0,
                         arrastre: asa?.dataset.arrastre || null, objetivo: pulsable };
-          if (m.pulsado.arrastre) arrastreRef.current?.(m.pulsado.arrastre, "empieza", { x: r.x, y: r.y }, clave);
+          if (m.pulsado.arrastre) arrastreRef.current?.(m.pulsado.arrastre, "empieza", desde, clave);
         } else if (r.cambio === "sube") {
-          soltar(clave, m, r.x, r.y);
+          soltar(clave, m, m.cursorPintado?.x ?? r.x, m.cursorPintado?.y ?? r.y);
         } else if (m.pulsado) {
           m.pulsado.movido = Math.max(m.pulsado.movido, Math.hypot(r.x - m.pulsado.x0, r.y - m.pulsado.y0));
-          if (m.pulsado.arrastre) arrastreRef.current?.(m.pulsado.arrastre, "mueve", { x: r.x, y: r.y }, clave);
         }
+
+        // Las cinco puntas, solo en el modo inmersivo y con la mano libre: pellizcando o
+        // con el puño cerrado los dedos se doblan sin querer pulsar nada.
+        if (!inmersivoRef.current) { m.puntas = []; return; }
+        m.puntas = PUNTAS_LISTA.map(i => m.puntos[i]);
+        if (m.pellizco || m.cerrado || m.pulsado) { m.toques.pausa(); return; }
+        for (const toque of m.toques.leer(puntos, ahora)) tocar(aPantalla(toque.punto, ancho, alto, opciones));
       });
       // La que ya no se ve suelta lo que tuviera y deja su cursor libre.
       for (const [clave, m] of manos) {
@@ -134,6 +189,14 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
       // Lo que tiene alguna mano encima, resaltado; lo demás, no. Con dos manos sobre el
       // mismo botón, que una se vaya no lo apaga.
       const encima = new Set([...manos.values()].map(m => m.encima).filter(Boolean));
+      // En el modo inmersivo se ilumina también lo que tiene una punta encima: es lo que
+      // pulsaría ese dedo al doblarlo.
+      for (const m of manos.values()) {
+        for (const q of m.puntas || []) {
+          const el = q && pulsableEn(q.x, q.y);
+          if (el) encima.add(el);
+        }
+      }
       encimaAntes.forEach(el => { if (!encima.has(el)) el.classList.remove("jh-mano-encima"); });
       encima.forEach(el => el.classList.add("jh-mano-encima"));
       encimaAntes = encima;
@@ -158,6 +221,9 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
       const g = lienzo.getContext("2d");
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.clearRect(0, 0, ancho, alto);
+      // Con la mano de verdad a la vista, el holograma va más fino para no taparla.
+      const inm = inmersivoRef.current;
+      const ahora = performance.now();
       for (const m of manos.values()) {
         if (!m.puntos) continue;
         m.puntosPintados = m.puntosPintados
@@ -170,8 +236,8 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
         g.strokeStyle = color;
         g.shadowColor = color;
         g.shadowBlur = 8;
-        g.globalAlpha = 0.55;
-        g.lineWidth = 3;
+        g.globalAlpha = inm ? 0.35 : 0.55;
+        g.lineWidth = inm ? 2 : 3;
         g.beginPath();
         for (const [a, b] of HUESOS) { g.moveTo(p[a].x, p[a].y); g.lineTo(p[b].x, p[b].y); }
         g.stroke();
@@ -185,6 +251,16 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
           g.arc(q.x, q.y, r, 0, Math.PI * 2);
         });
         g.fill();
+        // Las puntas que pulsan, con su retícula: un anillo que se ve sobre cualquier fondo.
+        if (inm) {
+          g.globalAlpha = 0.95;
+          g.lineWidth = 2;
+          g.shadowBlur = 10;
+          g.beginPath();
+          for (const i of PUNTAS_LISTA) { g.moveTo(p[i].x + 13, p[i].y); g.arc(p[i].x, p[i].y, 13, 0, Math.PI * 2); }
+          g.stroke();
+          g.shadowBlur = 0;
+        }
         g.globalAlpha = 1;
 
         const cursor = cursoresRef.current[m.hueco];
@@ -196,7 +272,23 @@ export default function Manos({ videoRef, activa, onArrastre, onEstado, onPuno }
           cursor.classList.toggle("cerrado", Boolean(m.pellizco));
           cursor.classList.toggle("puno", Boolean(m.cerrado));
         }
+        // Un panel cogido va con lo pintado, no con lo visto: así se mueve a 60 y suave.
+        if (m.pulsado?.arrastre && m.cursorPintado) {
+          arrastreRef.current?.(m.pulsado.arrastre, "mueve", m.cursorPintado, m.clave);
+        }
       }
+      // Los círculos de los toques se abren y se apagan.
+      ondas = ondas.filter(o => ahora - o.t < ONDA_MS);
+      for (const o of ondas) {
+        const f = (ahora - o.t) / ONDA_MS;
+        g.globalAlpha = 1 - f;
+        g.strokeStyle = color;
+        g.lineWidth = 3 * (1 - f) + 1;
+        g.beginPath();
+        g.arc(o.x, o.y, 14 + f * 34, 0, Math.PI * 2);
+        g.stroke();
+      }
+      g.globalAlpha = 1;
     }
 
     (async () => {

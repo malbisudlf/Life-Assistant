@@ -1171,7 +1171,30 @@ trabajar en ellos».
   Los datos de proyectos los piden juntos el panel y el menú (`useProyectos.js`).
 - **«Jarvis le ve» no es vídeo**: es una foto en el instante de mandar cada mensaje.
 - **Los paneles se mueven** también con el ratón, por el mismo camino, y se quedan donde
-  se dejan (`la_jarvis_paneles`). «Recolocar» los devuelve a su sitio.
+  se dejan (`la_jarvis_paneles`). «Recolocar» los devuelve a su sitio, y el doble clic en
+  el título devuelve solo ese. **Se cogen de cualquier punto del panel** que no sea un
+  botón, un campo o el texto de un proyecto, con el ratón o con un pellizco (pellizcar un
+  botón lo pulsa). Mientras se arrastra, el panel se mueve escribiendo su `transform`
+  directamente y React no se entera hasta soltar: antes cada movimiento repintaba la vista
+  entera y el panel iba a tirones. Con la mano, el panel sigue al cursor **pintado** (a
+  60 fps) y no al visto (a lo que dé la cámara). **Soltado con impulso, sigue deslizándose
+  y frena** (`velocidadDeSuelta`, `pasoDeInercia`); con la mano se descartan los últimos
+  30 ms, que son el tirón de abrir los dedos.
+- **El modo inmersivo** («Inmersivo» en la cabecera o en el panel Visión; Esc lo cierra):
+  la cámara a pantalla completa, en espejo, y los paneles y los mensajes flotando encima
+  como ventanas de cristal. Enciende la cámara y las manos. Lo dibujado cae **encima de la
+  mano que se ve** (`aPantalla` con `cubre`, que reproduce el recorte de `object-fit:
+  cover`) y no con el margen del modo normal. Y **cada punta de cada dedo pulsa**: doblar
+  un dedo de golpe (`DetectorDeToques`, en menos de 280 ms y hasta el 70 % de lo que
+  estaba estirado) es un toque donde apuntaba la punta justo antes de doblarse. Pulsa lo
+  que haya debajo, o trae delante el panel si no es un botón, y deja un círculo. Lo que
+  pulsaría cada punta se ilumina. Si se doblan dos dedos en menos de 200 ms es la mano
+  cerrándose y no cuenta (por eso el toque se confirma a los 70 ms), y pellizcando o con
+  el puño cerrado no se toca nada. **Los umbrales salen de una mano de prueba, no de una
+  cámara de verdad**: si pulsa sin querer o le cuesta, se tocan en `DEDOS_TOQUE` y en el
+  constructor de `DetectorDeToques` (`src/lib/gestos.js`). El vídeo es el mismo directo
+  que el panel (`ponVideo` en `useCamara.js` lo engancha al `<video>` que esté a la
+  vista), así que no se pide la cámara dos veces.
 - **Proyectos** (botón de la cabecera): el panel del programador (`docs/PROGRAMADOR.md`).
   Lista con estado y progreso (`GET /programador/proyectos`), detalle con la última
   respuesta y el PR, hablarle (`POST /programador/mensaje`) y **«+ Nuevo»**, que encarga

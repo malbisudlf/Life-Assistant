@@ -41,7 +41,7 @@ import {
   posicionAhora, diaTrasCambioDeHoy,
   FUENTE_OK, FUENTE_CARGANDO, FUENTE_ERROR, FUENTE_PARCIAL,
 } from "../lib/lineaTiempo";
-import { partirEventosSse, trocearParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco, historialTrasCorte, sinMarcaVieja } from "../lib/voz";
+import { partirEventosSse, trocearParaVoz, textoParaVoz, llamadaEntranteDeUrl, avisoDeLlamadaDeUrl, tipoDeLlamadaDeUrl, nocheDeLlamadaDeUrl, aperturaDeLlamada, pareceEco, historialTrasCorte, sinMarcaVieja } from "../lib/voz";
 import { escucharConScribe } from "../lib/vozScribe";
 import { escucharConOido, urlDelOido } from "../lib/vozOido";
 import { abrirVozEleven } from "../lib/vozEleven";
@@ -1000,6 +1000,22 @@ const VOZ_SINTESIS = typeof window !== "undefined" && "speechSynthesis" in windo
 // configurado, que es el caso por defecto.
 let vozDePago = null;
 
+// La voz con la que se leen en alto las respuestas ESCRITAS (el 🔊), fuera de una
+// llamada: la del backend, la misma que la de la llamada (Fish delante y Azure detrás,
+// por `/voz/decir`), y no la robótica del navegador, que era lo que sonaba hasta el
+// 2026-10-29. Variable de módulo por lo mismo que `vozDePago`. La abre el dashboard
+// (`abrirVozLeida`), que es quien tiene la sesión; si se rinde, lo que quede se lee con
+// la del navegador y no se vuelve a intentar hasta recargar.
+let vozLeida = null;
+let vozLeidaRendida = false;
+
+function rendirVozLeida(sinDecir) {
+  try { vozLeida?.cerrar(); } catch { /* mejor esfuerzo */ }
+  vozLeida = null;
+  vozLeidaRendida = true;
+  sinDecir.forEach(([texto, alTerminar], i) => hablarJarvis(texto, alTerminar, { encolar: i > 0 }));
+}
+
 /** Lee la respuesta en voz alta. `alTerminar` se llama SIEMPRE, hable o no: el modo
  *  llamada encadena la escucha con él, y un camino que no avisara dejaría la llamada
  *  colgada en silencio esperando a alguien que ya no va a hablar.
@@ -1012,6 +1028,15 @@ function hablarJarvis(texto, alTerminar, { encolar = false } = {}) {
   // La voz de pago encola siempre por su cuenta (ver `decir` en vozEleven.js): cortar es
   // trabajo de `callar`, que es cosa del barge-in.
   if (vozDePago) { vozDePago.decir(texto, fin); return; }
+  if (vozLeida) {
+    if (!encolar) vozLeida.callar();
+    // Por frases: `/voz/decir` no admite más de 600 caracteres, y así empieza a sonar la
+    // primera sin esperar a que se sintetice el párrafo entero.
+    const { trozos } = trocearParaVoz(textoParaVoz(texto), { fin: true });
+    if (!trozos.length) { fin(); return; }
+    trozos.forEach((t, i) => vozLeida.decir(t, i === trozos.length - 1 ? fin : undefined));
+    return;
+  }
   if (!VOZ_SINTESIS) { fin(); return; }
   try {
     // Una respuesta NUEVA corta a la anterior a media frase; un trozo más de la misma
@@ -3822,6 +3847,8 @@ export default function Dashboard() {
   async function enviarAJarvis(texto, { voz = false } = {}) {
     const mensaje = (texto || "").trim();
     if (!mensaje || jarvisPensando) return null;
+    // Desde el gesto de enviar, como el toggle: el audio se desbloquea dentro de uno.
+    if (jarvisHabla && !voz) abrirVozLeida();
     // El historial se toma ANTES de añadir el turno nuevo: el mensaje va aparte en el
     // cuerpo, y mandarlo también dentro del historial lo duplicaría.
     const historial = jarvisHistorial(jarvisMensajes);
@@ -3932,8 +3959,14 @@ export default function Dashboard() {
     const ahora = !jarvisHabla;
     setJarvisHabla(ahora);
     try { localStorage.setItem("la_jarvis_voz", ahora ? "1" : "0"); } catch { /* mejor esfuerzo */ }
-    if (ahora) hablarJarvis("Voz activada.");
-    else VOZ_SINTESIS?.cancel();
+    if (ahora) { abrirVozLeida(); hablarJarvis("Voz activada."); }
+    else { vozLeida?.callar(); VOZ_SINTESIS?.cancel(); }
+  }
+
+  /** Abre la voz del backend para leer las respuestas escritas (ver `vozLeida`). */
+  function abrirVozLeida() {
+    if (vozLeida || vozLeidaRendida) return;
+    vozLeida = abrirVozAzure({ pedirAudio: pedirAudioVoz, alFallar: rendirVozLeida });
   }
 
   function alternarPotenciaJarvis() {
@@ -4705,6 +4738,8 @@ export default function Dashboard() {
     const fresco  = permiso && (porBackend
       || Date.now() - (permiso.pedidoEn || 0) < VOZ_TOKEN_VIDA_MS);
     if (permiso && !fresco) { vozPermisoRef.current = null; pedirPermisoVoz(); }
+    // Lo que se estuviera leyendo de una respuesta escrita se calla al descolgar.
+    vozLeida?.callar();
     // Cualquiera de las dos voces de pago puede quedarse muda a media llamada, y las dos
     // se rinden igual: se renuncia a ella para el resto de la llamada y se dice con la
     // del navegador todo lo que quedó sin decir. Una voz robótica es mucho mejor que el
@@ -4903,6 +4938,8 @@ export default function Dashboard() {
     // esto se quedaría un socket abierto por cada vez que entras y sales.
     try { vozDePago?.cerrar(); } catch { /* mejor esfuerzo */ }
     vozDePago = null;
+    try { vozLeida?.cerrar(); } catch { /* mejor esfuerzo */ }
+    vozLeida = null;
   }, []);
 
   // La conversación sobrevive a una recarga, acotada: guardar el hilo entero llenaría

@@ -13,15 +13,27 @@ const ANCHO_FOTOGRAMA = 640;
 const CALIDAD_FOTOGRAMA = 0.72;
 
 /** Abre la cámara mientras `activa` y devuelve la referencia del <video>, en qué estado
- *  está y `capturar()`, que da el fotograma actual en base64 (sin el prefijo data:). */
+ *  está y `capturar()`, que da el fotograma actual en base64 (sin el prefijo data:).
+ *
+ *  El <video> se engancha con `ponVideo` (una ref de función) y no con `videoRef`: el
+ *  vídeo cambia de sitio —el panel «Visión» o la pantalla entera del modo inmersivo— y
+ *  el que aparece tiene que recibir el directo que ya está abierto, sin volver a pedir
+ *  la cámara. `videoRef` sigue siendo el que está a la vista, para las manos y la foto. */
 export function useCamara(activa) {
-  const videoRef = useRef(null);
+  const videoRef  = useRef(null);
+  const streamRef = useRef(null);
+  const ponVideo  = useCallback((el) => {
+    videoRef.current = el;
+    if (el && streamRef.current && el.srcObject !== streamRef.current) {
+      el.srcObject = streamRef.current;
+      el.play?.()?.catch?.(() => { /* autoplay silenciado: el vídeo arranca igual */ });
+    }
+  }, []);
   const [estado, setEstado] = useState("pidiendo");   // pidiendo | en_directo | error
   const [error, setError]   = useState("");
 
   useEffect(() => {
     if (!activa) return;
-    const video = videoRef.current;
     let stream = null;
     let cancelado = false;
     const medios = navigator.mediaDevices;
@@ -36,10 +48,8 @@ export function useCamara(activa) {
       .then((s) => {
         if (cancelado) { s.getTracks().forEach(t => t.stop()); return; }
         stream = s;
-        if (video) {
-          video.srcObject = s;
-          video.play?.()?.catch?.(() => { /* autoplay silenciado: el vídeo arranca igual */ });
-        }
+        streamRef.current = s;
+        ponVideo(videoRef.current);
         setError("");
         setEstado("en_directo");
       })
@@ -52,10 +62,11 @@ export function useCamara(activa) {
     return () => {
       cancelado = true;
       stream?.getTracks().forEach(t => t.stop());
-      if (video) video.srcObject = null;
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
       setEstado("pidiendo");
     };
-  }, [activa]);
+  }, [activa, ponVideo]);
 
   const capturar = useCallback(() => {
     const v = videoRef.current;
@@ -72,5 +83,5 @@ export function useCamara(activa) {
     }
   }, []);
 
-  return { videoRef, estado: activa ? estado : "apagada", error, capturar };
+  return { videoRef, ponVideo, estado: activa ? estado : "apagada", error, capturar };
 }
