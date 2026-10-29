@@ -1,0 +1,413 @@
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -1,6 +1,14 @@
+ /**
+- * ElevenLabs Text-to-Speech Service
++ * Text-to-Speech Service
+  * Generates speech audio files and returns URLs for FreeSWITCH playback
++ *
++ * Parche 29 (Life Assistant, telefono/PARCHES.md): ElevenLabs ya no es la única voz.
++ * El 2026-10-28 a las 18:00 se acabó su cuota del mes (10.000 créditos, el plan
++ * gratuito) y desde entonces toda llamada se descolgaba y se colgaba sin decir nada:
++ * ElevenLabs devuelve 401 `quota_exceeded`, generateSpeech lanzaba y la voice-app
++ * colgaba. Ahora las voces van en orden (`TTS_ORDEN`, por defecto ElevenLabs y luego
++ * Azure, la misma voz que el dashboard) y la que falla se aparta un rato para no pagar
++ * su viaje en cada frase.
+  */
+ 
+ const axios = require('axios');
+@@ -18,6 +26,41 @@
+ // flash_v2_5 es multilingüe y aún más rápido.
+ const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5';
+ 
++// Azure Speech: la voz del dashboard (backend/main.py, «La voz se mudó a Azure»), con
++// las mismas variables. 24 kHz y 48 kbit/s, como allí: por teléfono sobra.
++const AZURE_SPEECH_KEY     = process.env.AZURE_SPEECH_KEY || '';
++const AZURE_SPEECH_REGION  = process.env.AZURE_SPEECH_REGION || '';
++const AZURE_SPEECH_VOICE   = process.env.AZURE_SPEECH_VOICE || 'es-ES-SaulNeural';
++const AZURE_SPEECH_FORMATO = process.env.AZURE_SPEECH_FORMATO || 'audio-24khz-48kbitrate-mono-mp3';
++
++// Sin tope, una API colgada deja la llamada en silencio hasta que FreeSWITCH se canse.
++const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '8000', 10);
++// Cuánto se aparta una voz que ha fallado. La cuota o la llave no se arreglan solas en
++// un minuto (la de ElevenLabs vuelve con el mes), así que esas van largas; una caída o
++// un timeout, cortas, como la pausa del oído en el parche 25.
++const TTS_PAUSA_CUOTA_MS = parseInt(process.env.TTS_PAUSA_CUOTA_MS || String(30 * 60 * 1000), 10);
++const TTS_PAUSA_MS       = parseInt(process.env.TTS_PAUSA_MS || '60000', 10);
++
++const VOCES = {
++  elevenlabs: {
++    configurada: function () { return !!ELEVENLABS_API_KEY; },
++    sintetizar: sintetizarElevenLabs
++  },
++  azure: {
++    configurada: function () { return !!(AZURE_SPEECH_KEY && AZURE_SPEECH_REGION && AZURE_SPEECH_VOICE); },
++    sintetizar: sintetizarAzure
++  }
++};
++
++function ordenDeVoces() {
++  return (process.env.TTS_ORDEN || 'elevenlabs,azure')
++    .split(',').map(function (s) { return s.trim().toLowerCase(); })
++    .filter(function (s) { return VOCES[s]; });
++}
++
++// voz → instante (ms) hasta el que no se le pide nada
++const apartadaHasta = {};
++
+ // Audio output directory (set via setAudioDir)
+ let audioDir = path.join(__dirname, '../audio-temp');
+ 
+@@ -47,93 +90,133 @@
+   return `tts-${timestamp}-${hash}.mp3`;
+ }
+ 
+-/**
+- * Convert text to speech using ElevenLabs API
+- * @param {string} text - Text to convert to speech
+- * @param {string} voiceId - ElevenLabs voice ID (optional)
+- * @returns {Promise<string>} HTTP URL to audio file
+- */
+-async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
+-  const startTime = Date.now();
+-
+-  try {
+-    if (!ELEVENLABS_API_KEY) {
+-      throw new Error('ELEVENLABS_API_KEY environment variable not set');
+-    }
+-
+-    logger.info('Generating speech with ElevenLabs', {
+-      textLength: text.length,
+-      voiceId,
+-      model: MODEL_ID
+-    });
++async function sintetizarElevenLabs(text, voiceId) {
++  const response = await axios({
++    method: 'POST',
++    url: `${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`,
++    headers: {
++      'Accept': 'audio/mpeg',
++      'Content-Type': 'application/json',
++      'xi-api-key': ELEVENLABS_API_KEY
++    },
++    data: {
++      text,
++      model_id: MODEL_ID,
++      voice_settings: {
++        stability: 0.5,
++        similarity_boost: 0.75,
++        style: 0.0,
++        use_speaker_boost: true
++      }
++    },
++    responseType: 'arraybuffer',
++    timeout: TTS_TIMEOUT_MS
++  });
++  return Buffer.from(response.data);
++}
+ 
+-    // Call ElevenLabs API
+-    const response = await axios({
+-      method: 'POST',
+-      url: `${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`,
+-      headers: {
+-        'Accept': 'audio/mpeg',
+-        'Content-Type': 'application/json',
+-        'xi-api-key': ELEVENLABS_API_KEY
+-      },
+-      data: {
+-        text,
+-        model_id: MODEL_ID,
+-        voice_settings: {
+-          stability: 0.5,
+-          similarity_boost: 0.75,
+-          style: 0.0,
+-          use_speaker_boost: true
+-        }
+-      },
+-      responseType: 'arraybuffer'
+-    });
++// El texto lo ha escrito el modelo a partir de lo que oyó: va como DATO, escapado, igual
++// que `_ssml` del backend. Sin esto un `<` rompe el SSML y Azure devuelve 400.
++function escaparXml(s) {
++  return String(s)
++    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
++}
+ 
+-    // Generate filename and save audio
+-    const filename = generateFilename(text);
+-    const filepath = path.join(audioDir, filename);
+-
+-    fs.writeFileSync(filepath, response.data);
+-
+-    const latency = Date.now() - startTime;
+-    const fileSize = response.data.length;
+-
+-    logger.info('Speech generation successful', {
+-      filename,
+-      fileSize,
+-      latency,
+-      textLength: text.length
+-    });
++function ssml(texto, voz) {
++  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="es-ES">'
++    + '<voice name="' + escaparXml(voz) + '">' + escaparXml(texto) + '</voice></speak>';
++}
+ 
+-    // Return HTTP URL (assumes audio-temp is served via HTTP)
+-    // Format: http://localhost:PORT/audio/filename.mp3
+-    // The HTTP server setup is handled elsewhere
+-    const audioUrl = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/audio-files/${filename}`;
++async function sintetizarAzure(text) {
++  const response = await axios({
++    method: 'POST',
++    url: `https://${encodeURIComponent(AZURE_SPEECH_REGION)}.tts.speech.microsoft.com/cognitiveservices/v1`,
++    headers: {
++      'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
++      'Content-Type': 'application/ssml+xml',
++      'X-Microsoft-OutputFormat': AZURE_SPEECH_FORMATO,
++      'User-Agent': 'claude-phone'
++    },
++    data: ssml(text, AZURE_SPEECH_VOICE),
++    responseType: 'arraybuffer',
++    timeout: TTS_TIMEOUT_MS
++  });
++  return Buffer.from(response.data);
++}
+ 
+-    return audioUrl;
++// Cuota, llave o límite: no pasa solo en un minuto.
++function esFalloDeCuota(error) {
++  const status = error.response && error.response.status;
++  return status === 401 || status === 402 || status === 403 || status === 429;
++}
+ 
+-  } catch (error) {
+-    const latency = Date.now() - startTime;
++function cuerpoDelError(error) {
++  const datos = error.response && error.response.data;
++  if (!datos) return undefined;
++  return (Buffer.isBuffer(datos) ? datos.toString('utf8') : String(datos)).slice(0, 300);
++}
+ 
+-    logger.error('Speech generation failed', {
+-      error: error.message,
+-      latency,
+-      textLength: text?.length,
+-      responseStatus: error.response?.status,
+-      responseData: error.response?.data?.toString()
+-    });
++/**
++ * Convert text to speech, trying each configured voice in order (`TTS_ORDEN`)
++ * @param {string} text - Text to convert to speech
++ * @param {string} voiceId - ElevenLabs voice ID (optional; Azure uses AZURE_SPEECH_VOICE)
++ * @returns {Promise<string>} HTTP URL to audio file
++ */
++async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
++  const startTime = Date.now();
++  const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
++  if (!orden.length) {
++    throw new Error('TTS generation failed: no hay ninguna voz configurada (ELEVENLABS_API_KEY o AZURE_SPEECH_*)');
++  }
+ 
+-    // Handle specific errors
+-    if (error.response?.status === 401) {
+-      throw new Error('ElevenLabs API authentication failed - check API key');
+-    } else if (error.response?.status === 429) {
+-      throw new Error('ElevenLabs API rate limit exceeded');
+-    } else if (error.response?.status === 400) {
+-      throw new Error('Invalid request to ElevenLabs API');
++  // Las apartadas van al final, no fuera: si todas lo están, se prueban igual antes
++  // que dejar la llamada muda.
++  const ahora = Date.now();
++  const libres    = orden.filter(function (v) { return !(apartadaHasta[v] > ahora); });
++  const apartadas = orden.filter(function (v) { return apartadaHasta[v] > ahora; });
++
++  let ultimo = null;
++  for (const voz of libres.concat(apartadas)) {
++    const inicioVoz = Date.now();
++    try {
++      logger.info('Generating speech', { proveedor: voz, textLength: text.length, voiceId });
++      const audio = await VOCES[voz].sintetizar(text, voiceId);
++      if (!audio || !audio.length) throw new Error('respuesta sin audio');
++
++      const filename = generateFilename(text);
++      fs.writeFileSync(path.join(audioDir, filename), audio);
++      delete apartadaHasta[voz];
++
++      logger.info('Speech generation successful', {
++        proveedor: voz,
++        filename,
++        fileSize: audio.length,
++        latency: Date.now() - startTime,
++        textLength: text.length
++      });
++
++      // Return HTTP URL (assumes audio-temp is served via HTTP)
++      // Format: http://localhost:PORT/audio/filename.mp3
++      // The HTTP server setup is handled elsewhere
++      return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/audio-files/${filename}`;
++    } catch (error) {
++      ultimo = error;
++      const pausa = esFalloDeCuota(error) ? TTS_PAUSA_CUOTA_MS : TTS_PAUSA_MS;
++      apartadaHasta[voz] = Date.now() + pausa;
++      logger.error('Speech generation failed', {
++        proveedor: voz,
++        error: error.message,
++        latency: Date.now() - inicioVoz,
++        textLength: text?.length,
++        responseStatus: error.response?.status,
++        responseData: cuerpoDelError(error),
++        apartadaMs: pausa
++      });
+     }
+-
+-    throw new Error(`TTS generation failed: ${error.message}`);
+   }
++
++  throw new Error(`TTS generation failed: ninguna voz ha podido (${ultimo && ultimo.message})`);
+ }
+ 
+ /**
+@@ -199,10 +282,10 @@
+ // Initialize audio directory
+ setAudioDir(audioDir);
+ 
+-// Setup periodic cleanup (every 30 minutes)
++// Setup periodic cleanup (every 30 minutes); unref para que no retenga el proceso (tests)
+ setInterval(() => {
+   cleanupOldFiles();
+-}, 30 * 60 * 1000);
++}, 30 * 60 * 1000).unref();
+ 
+ module.exports = {
+   generateSpeech,
+--- /dev/null
++++ b/voice-app/test/parche29.test.js
+@@ -0,0 +1,125 @@
++/**
++ * Parche 29: si ElevenLabs se queda sin cuota (o cae), la frase la dice Azure.
++ *
++ * `axios` es un doble: se lanza con `node --test test/parche29.test.js`, dentro de la
++ * imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const os = require('node:os');
++const fs = require('node:fs');
++const path = require('node:path');
++
++for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
++
++// ── Dobles ───────────────────────────────────────────────────────────────────
++let pedidos = [];
++let responder = null;
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'axios') {
++    return async function axios(opciones) {
++      pedidos.push(opciones);
++      return responder(opciones);
++    };
++  }
++  return requireDeVerdad.apply(this, arguments);
++};
++
++const RUTA = require.resolve('../lib/tts-service');
++const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'p29-'));
++function servicio(entorno) {
++  for (const k of ['ELEVENLABS_API_KEY', 'AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION', 'AZURE_SPEECH_VOICE',
++                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS']) delete process.env[k];
++  Object.assign(process.env, entorno);
++  delete require.cache[RUTA];
++  pedidos = [];
++  const s = require('../lib/tts-service');
++  s.setAudioDir(DIR);
++  return s;
++}
++
++const AMBAS = { ELEVENLABS_API_KEY: 'sk_x', AZURE_SPEECH_KEY: 'az', AZURE_SPEECH_REGION: 'francecentral',
++                AZURE_SPEECH_VOICE: 'es-ES-AlvaroNeural' };
++const MP3 = Buffer.from('ID3fake-mp3');
++function esEleven(o) { return o.url.indexOf('elevenlabs') !== -1; }
++function sinCuota() {
++  const e = new Error('Request failed with status code 401');
++  e.response = { status: 401, data: Buffer.from('{"detail":{"status":"quota_exceeded"}}') };
++  return e;
++}
++
++// ── Casos ────────────────────────────────────────────────────────────────────
++test('con ElevenLabs bien, habla ElevenLabs y Azure no se toca', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(AMBAS);
++  const url = await s.generateSpeech('Buenos días, señor.', 'voz1');
++  assert.match(url, /\/audio-files\/tts-\d+-[0-9a-f]{8}\.mp3$/);
++  assert.strictEqual(pedidos.length, 1);
++  assert.ok(esEleven(pedidos[0]));
++  assert.ok(pedidos[0].timeout > 0, 'sin timeout una API colgada deja la llamada muda');
++});
++
++test('ElevenLabs sin cuota: la frase la dice Azure, y la siguiente ya no pregunta a ElevenLabs', async function () {
++  responder = async function (o) { if (esEleven(o)) throw sinCuota(); return { data: MP3 }; };
++  const s = servicio(AMBAS);
++  const url = await s.generateSpeech('Hola', 'voz1');
++  assert.match(url, /\.mp3$/);
++  assert.deepStrictEqual(pedidos.map(esEleven), [true, false]);
++  const fichero = path.join(DIR, url.split('/').pop());
++  assert.deepStrictEqual(fs.readFileSync(fichero), MP3);
++
++  pedidos = [];
++  await s.generateSpeech('Otra frase', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esEleven), [false], 'apartada: no se paga su viaje en cada frase');
++});
++
++test('el SSML de Azure va escapado y con la voz configurada', async function () {
++  responder = async function (o) { if (esEleven(o)) throw sinCuota(); return { data: MP3 }; };
++  const s = servicio(AMBAS);
++  await s.generateSpeech('5 < 6 & "Jarvis" <voice name="x">', 'voz1');
++  const az = pedidos[1];
++  assert.match(az.url, /^https:\/\/francecentral\.tts\.speech\.microsoft\.com\//);
++  assert.strictEqual(az.headers['Ocp-Apim-Subscription-Key'], 'az');
++  assert.match(az.data, /<voice name="es-ES-AlvaroNeural">/);
++  assert.ok(az.data.indexOf('<voice name="x">') === -1, 'el texto no puede meter marcado');
++  assert.match(az.data, /5 &lt; 6 &amp; &quot;Jarvis&quot;/);
++});
++
++test('si todas fallan, lanza (y las apartadas se prueban igual antes que callar)', async function () {
++  responder = async function () { throw sinCuota(); };
++  const s = servicio(AMBAS);
++  await assert.rejects(s.generateSpeech('Hola', 'voz1'), /ninguna voz/);
++  pedidos = [];
++  await assert.rejects(s.generateSpeech('Hola', 'voz1'), /ninguna voz/);
++  assert.strictEqual(pedidos.length, 2, 'apartadas, pero se intentan');
++});
++
++test('TTS_ORDEN manda, y una voz sin configurar se salta', async function () {
++  responder = async function () { return { data: MP3 }; };
++  let s = servicio(Object.assign({}, AMBAS, { TTS_ORDEN: 'azure,elevenlabs' }));
++  await s.generateSpeech('Hola', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esEleven), [false]);
++
++  s = servicio({ AZURE_SPEECH_KEY: 'az', AZURE_SPEECH_REGION: 'francecentral' });
++  await s.generateSpeech('Hola', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esEleven), [false], 'sin llave de ElevenLabs, directa a Azure');
++});
++
++test('una caída (no la cuota) aparta poco: pasada la pausa vuelve a ElevenLabs', async function () {
++  let caida = true;
++  responder = async function (o) {
++    if (esEleven(o) && caida) { const e = new Error('timeout of 8000ms exceeded'); throw e; }
++    return { data: MP3 };
++  };
++  const s = servicio(Object.assign({}, AMBAS, { TTS_PAUSA_MS: '1' }));
++  await s.generateSpeech('Hola', 'voz1');
++  caida = false;
++  await new Promise(function (r) { setTimeout(r, 5); });
++  pedidos = [];
++  await s.generateSpeech('Hola', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esEleven), [true]);
++});

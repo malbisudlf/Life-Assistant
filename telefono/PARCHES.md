@@ -19,7 +19,9 @@ Y el 24 (2026-10-25, sin aplicar): el lector con mando, que sigue donde se qued�
 se cuelgue y salta de sección o de bloque sin pasar por Claude (ver «El parche 24»).
 Y el 25 (2026-10-27): el oído deja de ser OpenAI y pasa a ser jacobo, con OpenAI de
 reserva (ver «El parche 25»). Y el 26, el mismo día: se transcribe durante el silencio
-que cierra la frase, no después (ver «El parche 26»).
+que cierra la frase, no después (ver «El parche 26»). Y el 29 (2026-10-29): si
+ElevenLabs se queda sin cuota, la frase la dice Azure en vez de colgar (ver «El parche
+29»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1079,6 +1081,43 @@ Probado contra el Claude de verdad, con el puente parcheado en otro puerto y la 
 **Aplicado en `caja` el 2026-10-27**: `server.js.bak-20261027-antes-p28` y
 `sesion-viva.js.bak-20261027-antes-p28`, y reinicio de `claude-phone-api`. Volver atrás:
 copiar los `.bak` encima y reiniciar.
+
+## El parche 29: si ElevenLabs se queda sin cuota, habla Azure
+
+El 2026-10-28 a las 18:00 se acabó la cuota del mes de ElevenLabs (10.000 créditos, el
+plan gratuito; una lectura entera del briefing ya son ~15.000 caracteres). Desde
+entonces **toda llamada, entrante o saliente, se descolgaba y se cortaba**: ElevenLabs
+devuelve `401 quota_exceeded`, `generateSpeech` lanzaba, la voice-app colgaba y el
+backend registraba «contestada en el intento 1, pero Jarvis no ha podido hablar», que es
+lo que tenía al vigilante avisando cada pocas horas (#292). Lo único que no fallaba era
+el primer saludo si cabía en los créditos que quedaban.
+
+`voice-app/lib/tts-service.js` prueba las voces en orden (`TTS_ORDEN`, por defecto
+`elevenlabs,azure`) y Azure dice la frase si ElevenLabs falla. Azure es la voz del
+dashboard, con sus mismas variables (`AZURE_SPEECH_KEY`, `_REGION`, `_VOICE`, copiadas de
+`~/stack/backend.env` a `~/.claude-phone/.env`) y su mismo formato (MP3 de 24 kHz), y el
+SSML va escapado como en `_ssml` del backend. La voz que falla se aparta un rato para no
+pagar su viaje en cada frase: 30 min si es cuota o llave (401/402/403/429,
+`TTS_PAUSA_CUOTA_MS`), 60 s si es una caída o un timeout (`TTS_PAUSA_MS`). Si todas
+están apartadas se prueban igual antes que dejar la llamada muda. Y las dos llevan
+timeout (`TTS_TIMEOUT_MS`, 8 s), que ElevenLabs no tenía.
+
+Medido en caja: Azure, 1,0 s la primera frase en frío y 0,3-0,6 s después; el 401 de
+ElevenLabs cuesta ~0,2-0,35 s, y solo en la primera frase de cada media hora.
+
+**Ojo con el orden**: con el plan gratuito, ElevenLabs se agotará cada mes en cuanto se
+lea un briefing, y desde entonces la voz del teléfono cambia a la de Azure a mitad de
+mes. Si se prefiere una sola voz todo el mes, `TTS_ORDEN=azure,elevenlabs` en
+`~/.claude-phone/.env` y `docker compose up -d voice-app`.
+
+`telefono/parche-29.diff` (sobre `~/.claude-phone-cli/` con los anteriores puestos), con
+`voice-app/test/parche29.test.js` (6 casos, `axios` doble). Pasan los 105 de la
+voice-app.
+
+**Aplicado en `caja` el 2026-10-29**: `lib/tts-service.js.bak-20261029-antes-p29`,
+`~/.claude-phone/.env.bak-20261029-antes-p29` e imagen `claude-phone-voice-app:antes-p29`.
+Volver atrás: copiar el `.bak` encima y `docker compose up -d --build voice-app` en
+`~/.claude-phone`.
 
 ## El parche 23: la huella de voz (servicio en jacobo; la voice-app, sin enganchar)
 
