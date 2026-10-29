@@ -21,8 +21,9 @@ Y el 25 (2026-10-27): el oído deja de ser OpenAI y pasa a ser jacobo, con OpenA
 reserva (ver «El parche 25»). Y el 26, el mismo día: se transcribe durante el silencio
 que cierra la frase, no después (ver «El parche 26»). Y el 29 (2026-10-29): si
 ElevenLabs se queda sin cuota, la frase la dice Azure en vez de colgar (ver «El parche
-29»). Y el 30, el mismo día: la primera voz es la de casa, Piper en jacobo (ver «La voz
-en jacobo»).
+29»). Y el 30, el mismo día: la voz de casa, Piper en jacobo (ver «La voz en jacobo»).
+Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver «El parche
+31»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1182,6 +1183,54 @@ caja, `VOZ_URL`, `VOZ_TOKEN` y `TTS_ORDEN=jacobo,azure,elevenlabs` en
 `~/.claude-phone/.env.bak-20261029-antes-p30` e imagen `claude-phone-voice-app:antes-p30`.
 Apagar solo la voz de casa: quitar `jacobo` de `TTS_ORDEN` y `docker compose up -d
 voice-app`. Falta oírlo en una llamada de verdad.
+
+Mikel la oyó el mismo día y no le gustó («bastante asquerosas»): Piper es entendible pero
+plano. Desde el parche 31 jacobo va **tercera**, como reserva sin internet.
+
+## El parche 31: Fish («Jarvis») en directo, delante
+
+Comparadas el 2026-10-29 con la misma frase: la «Jarvis» de Fish (la de las notas de
+Telegram) «la mejor de lejos»; la británica de Azure `en-GB-Ryan:DragonHDLatestNeural`
+hablando español, «no está mal». Pero Fish entera tardaba **5,7 s** por frase y Ryan
+2,2 s. Lo que tarda es generar; el primer byte llega mucho antes (Fish, 0,6-1,0 s; Ryan,
+0,3 s). Así que la frase se reproduce **según llega**.
+
+En FreeSWITCH las `http://` son de `mod_httapi`, que **descarga el fichero entero antes
+de sonar** (por eso el WAV de jacobo funciona: luego lo abre `mod_sndfile`). Las
+`shout://` son de `mod_shout`, el de las radios por internet, que suena mientras baja.
+Con las voces de `TTS_EN_DIRECTO` (por defecto `fish,azure`), `generateSpeech` pide el
+audio en streaming, **espera solo al primer trozo** y devuelve
+`shout://127.0.0.1:<HTTP_PORT>/tts-stream/<id>.mp3`. La ruta (`servirEnDirecto`, montada
+en `index.js` antes del 404) manda lo ya llegado y lo que va llegando. No toca disco: los
+trozos viven en memoria y caducan a los 5 min de acabar, porque FreeSWITCH puede volver a
+pedirlos. Si el primer trozo no llega en `TTS_PRIMER_BYTE_MS` (3 s), o la voz contesta
+con error, la frase sigue por la siguiente, como en el 29. Un barge-in cierra la conexión
+de FreeSWITCH; el audio se sigue recogiendo hasta el final.
+
+Las variables `FISH_AUDIO_API_KEY`, `_VOICE` y `_MODEL` se copian de
+`~/stack/backend.env` a `~/.claude-phone/.env`. En ese mismo fichero,
+`AZURE_SPEECH_VOICE=en-GB-Ryan:DragonHDLatestNeural` (solo en el teléfono: el dashboard
+sigue con la suya) y `TTS_ORDEN=fish,azure,jacobo,elevenlabs`. El SSML lleva ahora
+`<lang xml:lang="es-ES">`, que hace hablar español a una voz multilingüe; con las
+españolas no cambia nada (probado con Saúl, Álvaro y Jorge).
+
+Medido el 2026-10-29 en caja con Fish de verdad, de punta a punta (pedir, servir y leer
+como FreeSWITCH): **listo para sonar en 0,59-0,81 s**. Una frase de 137 caracteres acaba
+de llegar a los 3,5 s, más deprisa de lo que se tarda en oírla (~8 s), así que no se
+queda sin audio a mitad.
+
+**Ojo**: la cuenta de Fish tiene **0 de saldo** y usa el modelo gratuito
+`s2.1-pro-free`. Si Fish empieza a decir que no (402/429), se aparta 30 min y habla Ryan.
+`mod_shout` no se ha podido probar sin una llamada: este FreeSWITCH no tiene los canales
+`loopback` ni `null`. Volver al 30: `TTS_EN_DIRECTO=` (vacío) deja todo entero y a
+disco, como antes.
+
+`telefono/parche-31.diff` (sobre el 30), con cinco casos más en `parche29.test.js`
+(`axios` doble que entrega streams): pasan los 113 de la voice-app.
+
+**Aplicado en `caja` el 2026-10-29**: copias `*.bak-20261029-antes-p31` de
+`lib/tts-service.js`, `index.js`, `test/parche29.test.js` y `~/.claude-phone/.env`, e
+imagen `claude-phone-voice-app:antes-p31`. Falta oírlo en una llamada de verdad.
 
 ## El parche 23: la huella de voz (servicio en jacobo; la voice-app, sin enganchar)
 

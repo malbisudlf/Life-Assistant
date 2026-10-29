@@ -1,0 +1,397 @@
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -13,12 +13,21 @@
+  * Parche 30: la primera voz puede ser la de casa, Piper en jacobo (telefono/voz/), sin
+  * cuotas ni internet. Va delante si `TTS_ORDEN` empieza por `jacobo`; si jacobo no
+  * contesta a tiempo, la frase sigue por las de fuera.
++ *
++ * Parche 31: Fish Audio (la voz «Jarvis» que eligió Mikel) habla EN DIRECTO. Entera
++ * tardaba 5,7 s por frase; su primer byte llega en ~0,8-1 s. Las voces de
++ * `TTS_EN_DIRECTO` (por defecto fish y azure) no se guardan en disco: se devuelve una
++ * URL `shout://` y FreeSWITCH (mod_shout, el de las radios) va sonando según llega el
++ * audio. Las `http://` las descarga enteras mod_httapi antes de sonar, que es justo lo
++ * que no se quiere aquí. Solo se da por buena la voz cuando ha llegado el primer trozo:
++ * si no llega en `TTS_PRIMER_BYTE_MS`, la frase sigue por la siguiente.
+  */
+ 
+ const axios = require('axios');
+ const fs = require('fs');
+ const path = require('path');
+ const crypto = require('crypto');
++const { EventEmitter } = require('events');
+ const logger = require('./logger');
+ 
+ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+@@ -37,6 +46,13 @@
+ const AZURE_SPEECH_VOICE   = process.env.AZURE_SPEECH_VOICE || 'es-ES-SaulNeural';
+ const AZURE_SPEECH_FORMATO = process.env.AZURE_SPEECH_FORMATO || 'audio-24khz-48kbitrate-mono-mp3';
+ 
++// Fish Audio: la voz «Jarvis» (`FISH_AUDIO_VOICE`, el reference_id), las mismas variables
++// que el backend. `balanced` es su modo de menos latencia.
++const FISH_AUDIO_API_KEY  = process.env.FISH_AUDIO_API_KEY || '';
++const FISH_AUDIO_MODEL    = process.env.FISH_AUDIO_MODEL || 's2.1-pro-free';
++const FISH_AUDIO_VOICE    = process.env.FISH_AUDIO_VOICE || '';
++const FISH_AUDIO_LATENCIA = process.env.FISH_AUDIO_LATENCIA || 'balanced';
++
+ // La voz de jacobo (telefono/voz/servidor.py). Devuelve WAV: FreeSWITCH lo reproduce
+ // igual y se ahorra codificar. `VOZ_VOZ` elige la voz (vacía = la que tenga jacobo por
+ // defecto) y `VOZ_VELOCIDAD` la acelera o la frena (0,5-2).
+@@ -55,8 +71,17 @@
+ // un timeout, cortas, como la pausa del oído en el parche 25.
+ const TTS_PAUSA_CUOTA_MS = parseInt(process.env.TTS_PAUSA_CUOTA_MS || String(30 * 60 * 1000), 10);
+ const TTS_PAUSA_MS       = parseInt(process.env.TTS_PAUSA_MS || '60000', 10);
++// En directo: cuánto se espera al primer trozo de audio antes de pasar a otra voz, y
++// cuánto vive en memoria un audio ya servido (FreeSWITCH puede volver a pedirlo).
++const TTS_PRIMER_BYTE_MS  = parseInt(process.env.TTS_PRIMER_BYTE_MS || '3000', 10);
++const TTS_DIRECTO_VIDA_MS = 5 * 60 * 1000;
+ 
+ const VOCES = {
++  fish: {
++    ext: 'mp3',
++    configurada: function () { return !!FISH_AUDIO_API_KEY; },
++    peticion: peticionFish
++  },
+   jacobo: {
+     ext: 'wav',
+     configurada: function () { return !!(VOZ_URL && VOZ_TOKEN); },
+@@ -70,10 +95,16 @@
+   azure: {
+     ext: 'mp3',
+     configurada: function () { return !!(AZURE_SPEECH_KEY && AZURE_SPEECH_REGION && AZURE_SPEECH_VOICE); },
+-    sintetizar: sintetizarAzure
++    peticion: peticionAzure
+   }
+ };
+ 
++function enDirecto(voz) {
++  return (process.env.TTS_EN_DIRECTO === undefined ? 'fish,azure' : process.env.TTS_EN_DIRECTO)
++    .split(',').map(function (s) { return s.trim().toLowerCase(); })
++    .indexOf(voz) !== -1 && !!VOCES[voz].peticion;
++}
++
+ function ordenDeVoces() {
+   return (process.env.TTS_ORDEN || 'elevenlabs,azure')
+     .split(',').map(function (s) { return s.trim().toLowerCase(); })
+@@ -159,13 +190,16 @@
+     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+ }
+ 
++// `<lang>` hace que una voz multilingüe (la británica, `en-GB-Ryan:DragonHDLatestNeural`)
++// hable en español; con las españolas no cambia nada.
+ function ssml(texto, voz) {
+   return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="es-ES">'
+-    + '<voice name="' + escaparXml(voz) + '">' + escaparXml(texto) + '</voice></speak>';
++    + '<voice name="' + escaparXml(voz) + '"><lang xml:lang="es-ES">' + escaparXml(texto)
++    + '</lang></voice></speak>';
+ }
+ 
+-async function sintetizarAzure(text) {
+-  const response = await axios({
++function peticionAzure(text) {
++  return {
+     method: 'POST',
+     url: `https://${encodeURIComponent(AZURE_SPEECH_REGION)}.tts.speech.microsoft.com/cognitiveservices/v1`,
+     headers: {
+@@ -174,13 +208,128 @@
+       'X-Microsoft-OutputFormat': AZURE_SPEECH_FORMATO,
+       'User-Agent': 'claude-phone'
+     },
+-    data: ssml(text, AZURE_SPEECH_VOICE),
+-    responseType: 'arraybuffer',
+-    timeout: TTS_TIMEOUT_MS
++    data: ssml(text, AZURE_SPEECH_VOICE)
++  };
++}
++
++// Aquí no hay marcado: el texto va como campo de un JSON.
++function peticionFish(text) {
++  const datos = { text: text, format: 'mp3', latency: FISH_AUDIO_LATENCIA };
++  if (FISH_AUDIO_VOICE) datos.reference_id = FISH_AUDIO_VOICE;
++  return {
++    method: 'POST',
++    url: 'https://api.fish.audio/v1/tts',
++    headers: { 'Authorization': `Bearer ${FISH_AUDIO_API_KEY}`, 'model': FISH_AUDIO_MODEL,
++               'Content-Type': 'application/json' },
++    data: datos
++  };
++}
++
++// Una voz con `peticion` y sin `sintetizar` se sintetiza entera igual, si no va en directo
++for (const v of Object.keys(VOCES)) {
++  if (!VOCES[v].sintetizar && VOCES[v].peticion) {
++    VOCES[v].sintetizar = async function (text) {
++      const cfg = VOCES[v].peticion(text);
++      cfg.responseType = 'arraybuffer';
++      cfg.timeout = TTS_TIMEOUT_MS;
++      const response = await axios(cfg);
++      return Buffer.from(response.data);
++    };
++  }
++}
++
++// ── En directo ──────────────────────────────────────────────────────────────────────
++// id → { trozos: [Buffer], bytes, acabado, error, avisos: EventEmitter, caduca, inicio }
++const directos = new Map();
++
++/**
++ * Pide el audio en streaming y vuelve en cuanto llega el primer trozo. Lanza si no llega
++ * a tiempo o si la voz contesta con error, para que generateSpeech pruebe la siguiente.
++ */
++function abrirEnDirecto(voz, text) {
++  return new Promise(function (resolve, reject) {
++    const cfg = VOCES[voz].peticion(text);
++    cfg.responseType = 'stream';
++    cfg.timeout = TTS_PRIMER_BYTE_MS;
++    let resuelto = false;
++    let respuesta = null;
++    const reloj = setTimeout(function () {
++      if (resuelto) return;
++      resuelto = true;
++      if (respuesta) respuesta.data.destroy();
++      reject(new Error(`sin audio en ${TTS_PRIMER_BYTE_MS} ms`));
++    }, TTS_PRIMER_BYTE_MS);
++
++    function falla(e) {
++      if (resuelto) return;
++      resuelto = true;
++      clearTimeout(reloj);
++      reject(e);
++    }
++
++    axios(cfg).then(function (r) {
++      respuesta = r;
++      if (resuelto) { r.data.destroy(); return; }
++      const id = crypto.randomBytes(8).toString('hex');
++      const d = { trozos: [], bytes: 0, acabado: false, error: null, avisos: new EventEmitter(),
++                  caduca: Date.now() + TTS_DIRECTO_VIDA_MS, inicio: Date.now() };
++      r.data.on('data', function (trozo) {
++        d.trozos.push(trozo);
++        d.bytes += trozo.length;
++        d.avisos.emit('trozo', trozo);
++        if (!resuelto) {
++          resuelto = true;
++          clearTimeout(reloj);
++          directos.set(id, d);
++          resolve(id);
++        }
++      });
++      r.data.on('end', function () {
++        d.acabado = true;
++        d.caduca = Date.now() + TTS_DIRECTO_VIDA_MS;
++        d.avisos.emit('fin');
++        logger.info('Speech stream completed', { proveedor: voz, id, bytes: d.bytes,
++                                                  ms: Date.now() - d.inicio });
++        falla(new Error('respuesta sin audio'));
++      });
++      r.data.on('error', function (e) {
++        d.error = e;
++        d.acabado = true;
++        d.avisos.emit('fin');
++        logger.error('Speech stream failed', { proveedor: voz, id, error: e.message, bytes: d.bytes });
++        falla(e);
++      });
++    }).catch(falla);
+   });
+-  return Buffer.from(response.data);
+ }
+ 
++/**
++ * GET /tts-stream/:id — lo que ya ha llegado y lo que va llegando. Lo monta index.js en
++ * el servidor HTTP de la voice-app, antes del 404.
++ */
++function servirEnDirecto(req, res) {
++  const id = String(req.params.id || '').replace(/\.mp3$/, '');
++  const d = directos.get(id);
++  if (!d) return res.status(404).end();
++  res.setHeader('Content-Type', 'audio/mpeg');
++  res.setHeader('Cache-Control', 'no-store');
++  for (const t of d.trozos) res.write(t);
++  if (d.acabado) return res.end();
++  const alTrozo = function (t) { res.write(t); };
++  const alFin = function () { quitar(); res.end(); };
++  function quitar() { d.avisos.off('trozo', alTrozo); d.avisos.off('fin', alFin); }
++  d.avisos.on('trozo', alTrozo);
++  d.avisos.on('fin', alFin);
++  // Si le cortan (barge-in) FreeSWITCH cierra: se deja de escribir, pero el audio se
++  // sigue recogiendo hasta el final por si lo vuelve a pedir.
++  res.on('close', quitar);
++}
++
++setInterval(function () {
++  const ahora = Date.now();
++  for (const [id, d] of directos) if (d.acabado && d.caduca < ahora) directos.delete(id);
++}, 60 * 1000).unref();
++
+ // Cuota, llave o límite: no pasa solo en un minuto.
+ function esFalloDeCuota(error) {
+   const status = error.response && error.response.status;
+@@ -190,6 +339,7 @@
+ function cuerpoDelError(error) {
+   const datos = error.response && error.response.data;
+   if (!datos) return undefined;
++  if (typeof datos.pipe === 'function') return '(stream)';
+   return (Buffer.isBuffer(datos) ? datos.toString('utf8') : String(datos)).slice(0, 300);
+ }
+ 
+@@ -217,6 +367,14 @@
+     const inicioVoz = Date.now();
+     try {
+       logger.info('Generating speech', { proveedor: voz, textLength: text.length, voiceId });
++      if (enDirecto(voz)) {
++        const id = await abrirEnDirecto(voz, text);
++        delete apartadaHasta[voz];
++        logger.info('Speech generation successful', {
++          proveedor: voz, enDirecto: true, id, latency: Date.now() - startTime, textLength: text.length
++        });
++        return `shout://127.0.0.1:${process.env.HTTP_PORT || 3000}/tts-stream/${id}.mp3`;
++      }
+       const audio = await VOCES[voz].sintetizar(text, voiceId);
+       if (!audio || !audio.length) throw new Error('respuesta sin audio');
+ 
+@@ -325,6 +483,7 @@
+ 
+ module.exports = {
+   generateSpeech,
++  servirEnDirecto,
+   setAudioDir,
+   cleanupOldFiles,
+   getAvailableVoices
+--- a/voice-app/index.js
++++ b/voice-app/index.js
+@@ -218,6 +218,9 @@
+   httpServer.app.use("/api", queryRouter);
+   console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
+ 
++  // Parche 31: el audio en directo (Fish, Azure) que FreeSWITCH pide por shout://
++  httpServer.app.get("/tts-stream/:id", ttsService.servirEnDirecto);
++
+   // Finalize HTTP server
+   httpServer.finalize();
+ 
+--- a/voice-app/test/parche29.test.js
++++ b/voice-app/test/parche29.test.js
+@@ -12,6 +12,7 @@
+ const os = require('node:os');
+ const fs = require('node:fs');
+ const path = require('node:path');
++const { Readable, PassThrough } = require('node:stream');
+ 
+ for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
+ 
+@@ -23,7 +24,10 @@
+   if (id === 'axios') {
+     return async function axios(opciones) {
+       pedidos.push(opciones);
+-      return responder(opciones);
++      const r = await responder(opciones);
++      // En directo (parche 31) se pide un stream: un Buffer se entrega como uno de un trozo
++      if (opciones.responseType === 'stream' && Buffer.isBuffer(r.data)) r.data = Readable.from([r.data]);
++      return r;
+     };
+   }
+   return requireDeVerdad.apply(this, arguments);
+@@ -33,7 +37,10 @@
+ const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'p29-'));
+ function servicio(entorno) {
+   for (const k of ['ELEVENLABS_API_KEY', 'AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION', 'AZURE_SPEECH_VOICE',
+-                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS', 'VOZ_URL', 'VOZ_TOKEN', 'VOZ_VOZ']) delete process.env[k];
++                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS', 'VOZ_URL', 'VOZ_TOKEN', 'VOZ_VOZ',
++                   'TTS_EN_DIRECTO', 'TTS_PRIMER_BYTE_MS', 'FISH_AUDIO_API_KEY', 'FISH_AUDIO_VOICE']) delete process.env[k];
++  // Los casos de los parches 29 y 30 son de voces enteras, a disco
++  process.env.TTS_EN_DIRECTO = '';
+   Object.assign(process.env, entorno);
+   delete require.cache[RUTA];
+   pedidos = [];
+@@ -161,3 +168,92 @@
+   await s.generateSpeech('Hola', 'voz1');
+   assert.deepStrictEqual(pedidos.map(esJacobo), [false]);
+ });
++
++// ── Parche 31: Fish (y Azure) en directo ────────────────────────────────────────
++const CON_FISH = Object.assign({}, AMBAS, { FISH_AUDIO_API_KEY: 'fk', FISH_AUDIO_VOICE: 'jarvis-id',
++                                            TTS_ORDEN: 'fish,azure', TTS_EN_DIRECTO: 'fish,azure' });
++function esFish(o) { return o.url.indexOf('fish.audio') !== -1; }
++
++// Un `res` de express mínimo para servirEnDirecto
++function resFalso() {
++  const escrito = [];
++  const r = new (require('node:events').EventEmitter)();
++  r.cabeceras = {};
++  r.acabado = false;
++  r.setHeader = function (k, v) { r.cabeceras[k] = v; };
++  r.status = function (c) { r.codigo = c; return r; };
++  r.write = function (b) { escrito.push(Buffer.from(b)); };
++  r.end = function () { r.acabado = true; r.emit('acabado'); };
++  r.cuerpo = function () { return Buffer.concat(escrito); };
++  return r;
++}
++
++test('p31: Fish en directo devuelve shout:// en cuanto llega el primer trozo, y sirve el resto según llega', async function () {
++  const flujo = new PassThrough();
++  responder = async function (o) { return { status: 200, data: flujo }; };
++  const s = servicio(CON_FISH);
++  setTimeout(function () { flujo.write(Buffer.from('ID3uno')); }, 5);
++  const url = await s.generateSpeech('Buenos días, señor.', 'voz1');
++  assert.match(url, /^shout:\/\/127\.0\.0\.1:\d+\/tts-stream\/[0-9a-f]{16}\.mp3$/);
++  assert.strictEqual(pedidos.length, 1);
++  assert.ok(esFish(pedidos[0]));
++  assert.strictEqual(pedidos[0].responseType, 'stream');
++  assert.strictEqual(pedidos[0].headers.Authorization, 'Bearer fk');
++  assert.strictEqual(pedidos[0].data.reference_id, 'jarvis-id');
++  assert.strictEqual(pedidos[0].data.text, 'Buenos días, señor.');
++
++  const res = resFalso();
++  s.servirEnDirecto({ params: { id: url.split('/').pop() } }, res);
++  assert.strictEqual(res.cabeceras['Content-Type'], 'audio/mpeg');
++  flujo.write(Buffer.from('dos'));
++  flujo.end(Buffer.from('tres'));
++  await new Promise(function (r) { res.once('acabado', r); });
++  assert.strictEqual(res.cuerpo().toString(), 'ID3unodostres');
++
++  // Ya acabado se puede volver a pedir entero
++  const otra = resFalso();
++  s.servirEnDirecto({ params: { id: url.split('/').pop() } }, otra);
++  assert.ok(otra.acabado);
++  assert.strictEqual(otra.cuerpo().toString(), 'ID3unodostres');
++});
++
++test('p31: un id que no existe es un 404', async function () {
++  const s = servicio(CON_FISH);
++  const res = resFalso();
++  s.servirEnDirecto({ params: { id: 'nada.mp3' } }, res);
++  assert.strictEqual(res.codigo, 404);
++});
++
++test('p31: si Fish no da audio a tiempo, la frase la dice Azure (también en directo, con <lang>)', async function () {
++  responder = async function (o) {
++    if (esFish(o)) return { status: 200, data: new PassThrough() };   // nunca llega nada
++    return { status: 200, data: MP3 };
++  };
++  const s = servicio(Object.assign({}, CON_FISH, { TTS_PRIMER_BYTE_MS: '30',
++                                                   AZURE_SPEECH_VOICE: 'en-GB-Ryan:DragonHDLatestNeural' }));
++  const url = await s.generateSpeech('Hola', 'voz1');
++  assert.match(url, /^shout:/);
++  assert.deepStrictEqual(pedidos.map(esFish), [true, false]);
++  assert.match(pedidos[1].data, /<voice name="en-GB-Ryan:DragonHDLatestNeural"><lang xml:lang="es-ES">Hola<\/lang>/);
++});
++
++test('p31: Fish sin cuota se aparta y la siguiente frase va directa a Azure', async function () {
++  responder = async function (o) {
++    if (esFish(o)) { const e = new Error('Request failed with status code 402'); e.response = { status: 402, data: new PassThrough() }; throw e; }
++    return { status: 200, data: MP3 };
++  };
++  const s = servicio(CON_FISH);
++  await s.generateSpeech('Hola', 'voz1');
++  pedidos = [];
++  await s.generateSpeech('Otra', 'voz1');
++  assert.deepStrictEqual(pedidos.map(esFish), [false]);
++});
++
++test('p31: fuera de TTS_EN_DIRECTO, Fish se pide entero y se guarda en disco', async function () {
++  responder = async function () { return { status: 200, data: MP3 }; };
++  const s = servicio(Object.assign({}, CON_FISH, { TTS_EN_DIRECTO: '' }));
++  const url = await s.generateSpeech('Hola', 'voz1');
++  assert.match(url, /^http:\/\/.*\.mp3$/);
++  assert.strictEqual(pedidos[0].responseType, 'arraybuffer');
++  assert.deepStrictEqual(fs.readFileSync(path.join(DIR, url.split('/').pop())), MP3);
++});
