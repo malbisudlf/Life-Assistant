@@ -1180,6 +1180,16 @@ trabajar en ellos».
   60 fps) y no al visto (a lo que dé la cámara). **Soltado con impulso, sigue deslizándose
   y frena** (`velocidadDeSuelta`, `pasoDeInercia`); con la mano se descartan los últimos
   30 ms, que son el tirón de abrir los dedos.
+- **Con las dos manos se redimensionan** (2026-10-29): con un panel cogido por una mano,
+  pellizcar con la otra ese mismo panel —aunque sea encima de un botón— o el vacío lo
+  coge también. Separarlas lo agranda y juntarlas lo encoge (`escalaDePinza`, de 0,6 a
+  2,2 veces), y el panel va con el punto medio de las dos; una línea discontinua las une
+  y las esquinas se ponen blancas. Se escala entero, letra incluida (`scale` en el mismo
+  `transform`), en vez de cambiar el ancho, para que el contenido no se recoloque a cada
+  fotograma. Soltando una, la otra lo sigue llevando con su tamaño. La escala se guarda
+  con la posición (`{ x, y, s }` en `la_jarvis_paneles`) y el doble clic en el título la
+  quita también. El ratón no hace pinza. Probado en `tests/frontend/jarvisPaneles.test.jsx`
+  con las manos simuladas.
 - **El modo inmersivo** («Inmersivo» en la cabecera o en el panel Visión; Esc lo cierra):
   la cámara a pantalla completa, en espejo, y los paneles y los mensajes flotando encima
   como ventanas de cristal. Enciende la cámara y las manos. Lo dibujado cae **encima de la

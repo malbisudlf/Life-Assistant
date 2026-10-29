@@ -16,6 +16,7 @@ import { sinMarcaVieja } from "../../lib/voz";
 import { API, authHeaders, apiFetch } from "../../lib/api";
 import {
   moverPanel, posicionesRadiales, elegirPorDireccion, centroDelMenu, velocidadDeSuelta, pasoDeInercia,
+  escalaDePinza, cajaEscalada,
 } from "../../lib/gestos";
 import { proyectosDelMenu } from "../../lib/proyectos";
 import { useCamara } from "./useCamara";
@@ -44,6 +45,20 @@ const MENU_ESPERA_MS = 6000;
 const NO_ARRASTRA = 'button, input, textarea, select, a, label, [role="button"], .jh-proy-texto';
 // Por debajo de esta velocidad al soltar (px/ms) el panel se queda donde está.
 const VELOCIDAD_LANZAR = 0.35;
+
+/** El `transform` de un panel movido (y quizá escalado): `{ x, y, s }`. */
+function transformDe(p) {
+  const s = p.s ?? 1;
+  return `translate3d(${p.x}px, ${p.y}px, 0)${s !== 1 ? ` scale(${s.toFixed(3)})` : ""}`;
+}
+
+/** Lo contrario, del `style.transform` que se escribió: null si no hay. */
+function leerTransform(texto) {
+  const m = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px/.exec(texto || "");
+  if (!m) return null;
+  const e = /scale\(([\d.]+)\)/.exec(texto);
+  return { x: Number(m[1]), y: Number(m[2]), s: e ? Number(e[1]) : 1 };
+}
 
 // Dónde ha dejado el señor cada panel (desplazamiento desde su sitio), y si los proyectos
 // estaban abiertos. Preferencias de este navegador, nada más.
@@ -189,7 +204,9 @@ export default function JarvisHUD({
   // 60 veces por segundo, y el panel iba a tirones detrás del ratón o de la mano. Se coge
   // de cualquier punto del panel que no sea un botón o un campo, no solo del título; al
   // soltarlo con impulso sigue deslizándose y frena; y con doble clic en el título vuelve
-  // a su sitio.
+  // a su sitio. Con las dos manos sobre el mismo panel se redimensiona: separarlas lo
+  // agranda, juntarlas lo encoge, y va con el punto medio de las dos. La escala viaja con
+  // la posición (`{ x, y, s }`) y se guarda igual.
   const [posiciones, setPosiciones] = useState(leerPaneles);
   const posicionesRef = useRef(posiciones);
   useEffect(() => { posicionesRef.current = posiciones; }, [posiciones]);
@@ -197,11 +214,13 @@ export default function JarvisHUD({
   const [delante, setDelante] = useState(null);
   const traerDelante = useCallback((id) => setDelante(id), []);
   // Los arrastres en curso, uno por panel: con las dos manos se llevan dos a la vez.
-  // `quien` es la mano (o el ratón) que lo cogió; la otra no puede moverlo mientras tanto.
+  // `quien` es la mano (o el ratón) que lo cogió. Si la otra mano pellizca el mismo panel
+  // (`segunda`), deja de ser un arrastre y pasa a ser una pinza: escala y posición salen
+  // de las dos.
   const arrastres = useRef({});
   const inercias = useRef({});
   const ventana = () => ({ width: window.innerWidth, height: window.innerHeight });
-  const colocar = (el, p) => { el.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`; };
+  const colocar = (el, p) => { el.style.transform = transformDe(p); };
   const fijar = useCallback((id, p) => {
     setPosiciones(prev => {
       const nuevas = { ...prev, [id]: p };
@@ -222,7 +241,8 @@ export default function JarvisHUD({
       const dt = Math.max(0, Math.min(100, ahora - antes));
       antes = ahora;
       const r = pasoDeInercia(v, dt);
-      const nueva = moverPanel(a.inicio, { x: p.x - a.inicio.x + r.dx, y: p.y - a.inicio.y + r.dy }, a.caja, ventana());
+      const nueva = { ...moverPanel(a.inicio, { x: p.x - a.inicio.x + r.dx, y: p.y - a.inicio.y + r.dy },
+                                    cajaEscalada(a.caja, p.s ?? 1), ventana()), s: p.s ?? 1 };
       // Contra el borde se para en seco en ese eje: rebotar marea más que ayuda.
       v = { x: nueva.x === Math.round(p.x + r.dx) ? r.vel.x : 0, y: nueva.y === Math.round(p.y + r.dy) ? r.vel.y : 0 };
       p = nueva;
@@ -233,9 +253,25 @@ export default function JarvisHUD({
     inercias.current[id] = requestAnimationFrame(paso);
   }, [fijar]);
   useEffect(() => () => Object.values(inercias.current).forEach(cancelAnimationFrame), []);
+  // La pinza: lo de partida al juntarse las dos manos en un panel.
+  const empezarPinza = (a) => {
+    const p1 = a.puntos[a.quien];
+    const p2 = a.puntos[a.segunda];
+    a.pinza = { s0: a.actual.s ?? 1, d0: Math.hypot(p2.x - p1.x, p2.y - p1.y),
+                medio0: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, inicio: a.actual };
+    a.el.classList.add("jh-pinza");
+  };
   const onArrastre = useCallback((id, fase, punto, quien = "raton") => {
     if (fase === "empieza") {
-      if (arrastres.current[id]) return;
+      const ya = arrastres.current[id];
+      if (ya) {
+        // La otra mano sobre un panel ya cogido: a redimensionar. El ratón no hace pinza.
+        if (ya.segunda || ya.quien === quien || quien === "raton" || ya.quien === "raton") return;
+        ya.segunda = quien;
+        ya.puntos[quien] = punto;
+        empezarPinza(ya);
+        return;
+      }
       const el = document.querySelector(`[data-panel="${id}"]`);
       if (!el) return;
       // Cogerlo mientras aún desliza lo para donde esté.
@@ -243,25 +279,56 @@ export default function JarvisHUD({
         cancelAnimationFrame(inercias.current[id]);
         delete inercias.current[id];
       }
-      const m = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px/.exec(el.style.transform || "");
-      const inicio = m ? { x: Number(m[1]), y: Number(m[2]) } : (posicionesRef.current[id] || { x: 0, y: 0 });
+      const inicio = leerTransform(el.style.transform) || { s: 1, ...(posicionesRef.current[id] || { x: 0, y: 0 }) };
+      // El tamaño sin escalar sale de `offsetWidth`, que no lo cambia el `transform`; la
+      // caja del rectángulo que se ve sí, y con ella se sabe dónde está el panel sin mover.
       const r = el.getBoundingClientRect();
-      arrastres.current[id] = { quien, inicio, actual: inicio, desde: punto, el,
+      const ancho = el.offsetWidth;
+      const alto = el.offsetHeight;
+      const s0 = inicio.s ?? 1;
+      arrastres.current[id] = { quien, segunda: null, inicio, actual: inicio, desde: punto, el,
+                                puntos: { [quien]: punto },
                                 muestras: [{ t: performance.now(), x: punto.x, y: punto.y }],
-                                caja: { left: r.left - inicio.x, top: r.top - inicio.y, width: r.width, height: r.height } };
+                                caja: { left: r.left - inicio.x - (ancho * (1 - s0)) / 2,
+                                        top: r.top - inicio.y - (alto * (1 - s0)) / 2, width: ancho, height: alto } };
       el.classList.add("jh-arrastrando");
       setDelante(id);
       return;
     }
     const a = arrastres.current[id];
-    if (!a || a.quien !== quien) return;
+    if (!a || (a.quien !== quien && a.segunda !== quien)) return;
     const t = performance.now();
     if (fase === "mueve") {
-      a.actual = moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y }, a.caja, ventana());
-      a.muestras.push({ t, x: punto.x, y: punto.y });
-      while (a.muestras.length > 2 && t - a.muestras[0].t > 250) a.muestras.shift();
+      a.puntos[quien] = punto;
+      if (a.segunda) {
+        const p1 = a.puntos[a.quien];
+        const p2 = a.puntos[a.segunda];
+        const escala = escalaDePinza(a.pinza.s0, a.pinza.d0, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+        const medio = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+        a.actual = { ...moverPanel(a.pinza.inicio, { x: medio.x - a.pinza.medio0.x, y: medio.y - a.pinza.medio0.y },
+                                   cajaEscalada(a.caja, escala), ventana()), s: escala };
+      } else {
+        a.actual = { ...moverPanel(a.inicio, { x: punto.x - a.desde.x, y: punto.y - a.desde.y },
+                                   cajaEscalada(a.caja, a.inicio.s ?? 1), ventana()), s: a.inicio.s ?? 1 };
+        a.muestras.push({ t, x: punto.x, y: punto.y });
+        while (a.muestras.length > 2 && t - a.muestras[0].t > 250) a.muestras.shift();
+      }
       colocar(a.el, a.actual);
     } else if (fase === "suelta") {
+      if (a.segunda) {
+        // Se suelta una de las dos: la que queda sigue llevándolo desde donde está, sin
+        // impulso, que después de una pinza no hay gesto de lanzar.
+        const queda = quien === a.quien ? a.segunda : a.quien;
+        delete a.puntos[quien];
+        a.quien = queda;
+        a.segunda = null;
+        a.pinza = null;
+        a.inicio = a.actual;
+        a.desde = a.puntos[queda];
+        a.muestras = [];
+        a.el.classList.remove("jh-pinza");
+        return;
+      }
       a.el.classList.remove("jh-arrastrando");
       delete arrastres.current[id];
       // Con la mano, lo último antes de soltar es el tirón de abrir los dedos: se descarta.
@@ -308,7 +375,7 @@ export default function JarvisHUD({
     onDoubleClick: (e) => { if (!e.target.closest(NO_ARRASTRA)) recolocar(id); },
   }), [recolocar]);
   const estiloPanel = (id) => (posiciones[id]
-    ? { transform: `translate3d(${posiciones[id].x}px, ${posiciones[id].y}px, 0)`, zIndex: delante === id ? 6 : 5 }
+    ? { transform: transformDe(posiciones[id]), zIndex: delante === id ? 6 : 5 }
     : (delante === id ? { zIndex: 6 } : undefined));
   const hayMovidos = Object.keys(posiciones).length > 0;
 
@@ -896,6 +963,8 @@ const CSS = `
   background: linear-gradient(180deg, rgba(94,231,255,.13), rgba(94,231,255,.02) 60%), rgba(3,10,17,.96);
 }
 .jh-arrastrando .jh-esq { border-color: #fff; }
+/* Con las dos manos encima: las esquinas, que son de donde se estira, en blanco y más grandes. */
+.jh-pinza .jh-esq { width: 20px; height: 20px; border-color: #fff; }
 .jh-arrastrando .jh-asa { cursor: grabbing; }
 .jh-asa-reloj { margin-bottom: 0; }
 

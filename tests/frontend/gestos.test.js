@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   LectorDeMano, FiltroOneEuro, aPantalla, esClic, moverPanel, porcentajeDe, distancia, acercar, claveDeMano,
   DetectorDePuno, dedosPlegados, posicionesRadiales, elegirPorDireccion,
-  DetectorDePulsaciones, cercanias, velocidadDeSuelta, pasoDeInercia,
+  DetectorDePulsaciones, cercanias, velocidadDeSuelta, pasoDeInercia, escalaDePinza, cajaEscalada,
 } from "../../src/lib/gestos";
 
 /** Una mano con los cuatro dedos extendidos hacia arriba, o plegados sobre la palma. */
@@ -347,5 +347,22 @@ describe("soltar con impulso", () => {
     const { dx, vel } = pasoDeInercia({ x: 2, y: 0 }, 110, { mediaVidaMs: 110 });
     expect(dx).toBeCloseTo(220);
     expect(vel.x).toBeCloseTo(1);
+  });
+});
+
+describe("redimensionar con las dos manos", () => {
+  it("la escala sigue a la distancia entre las manos, con topes", () => {
+    expect(escalaDePinza(1, 200, 300)).toBeCloseTo(1.5);
+    expect(escalaDePinza(1.5, 200, 100)).toBeCloseTo(0.75);
+    expect(escalaDePinza(1, 200, 5000)).toBe(2.2);
+    expect(escalaDePinza(1, 200, 1)).toBe(0.6);
+    expect(escalaDePinza(1.3, 0, 100)).toBe(1.3);        // sin distancia de partida, quieta
+  });
+
+  it("la caja escalada crece desde el centro", () => {
+    expect(cajaEscalada({ left: 100, top: 100, width: 200, height: 100 }, 2))
+      .toEqual({ left: 0, top: 50, width: 400, height: 200 });
+    expect(cajaEscalada({ left: 100, top: 100, width: 200, height: 100 }))
+      .toEqual({ left: 100, top: 100, width: 200, height: 100 });
   });
 });

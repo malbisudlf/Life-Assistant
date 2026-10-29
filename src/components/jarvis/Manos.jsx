@@ -159,10 +159,16 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
         m.encima = m.pulsado ? null : pulsable;
         if (r.cambio === "baja") {
           // Pellizcar sobre un botón es pulsarlo; sobre el resto de un panel, cogerlo.
-          const asa = pulsable ? null : bajo?.closest?.("[data-arrastre]");
+          const panelBajo = bajo?.closest?.("[data-arrastre]")?.dataset.arrastre || null;
+          // Con la otra mano sujetando un panel, pellizcar ese mismo panel —aunque sea
+          // encima de un botón— o en el vacío lo coge también, y con las dos se
+          // redimensiona. En el vacío porque un panel pequeño no da sitio a dos manos.
+          const otra = [...manos.values()].find(o => o !== m && o.pulsado?.arrastre)?.pulsado.arrastre || null;
+          const aLaPinza = otra && (panelBajo === otra || (!panelBajo && !pulsable));
+          const arrastre = aLaPinza ? otra : (pulsable ? null : panelBajo);
           const desde = m.cursorPintado || { x: r.x, y: r.y };
           m.pulsado = { x0: r.x, y0: r.y, t0: ahora, movido: 0,
-                        arrastre: asa?.dataset.arrastre || null, objetivo: pulsable };
+                        arrastre, objetivo: aLaPinza ? null : pulsable };
           if (m.pulsado.arrastre) arrastreRef.current?.(m.pulsado.arrastre, "empieza", desde, clave);
         } else if (r.cambio === "sube") {
           soltar(clave, m, m.cursorPintado?.x ?? r.x, m.cursorPintado?.y ?? r.y);
@@ -287,6 +293,21 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
         if (m.pulsado?.arrastre && m.cursorPintado) {
           arrastreRef.current?.(m.pulsado.arrastre, "mueve", m.cursorPintado, m.clave);
         }
+      }
+      // Las dos manos sobre el mismo panel: la línea que las une es lo que se estira.
+      const enPinza = [...manos.values()].filter(m => m.pulsado?.arrastre && m.cursorPintado);
+      if (enPinza.length === 2 && enPinza[0].pulsado.arrastre === enPinza[1].pulsado.arrastre) {
+        const [a, b] = enPinza.map(m => m.cursorPintado);
+        g.globalAlpha = 0.8;
+        g.strokeStyle = color;
+        g.lineWidth = 2;
+        g.setLineDash([6, 6]);
+        g.beginPath();
+        g.moveTo(a.x, a.y);
+        g.lineTo(b.x, b.y);
+        g.stroke();
+        g.setLineDash([]);
+        g.globalAlpha = 1;
       }
       // Los círculos de los toques se abren y se apagan.
       ondas = ondas.filter(o => ahora - o.t < ONDA_MS);

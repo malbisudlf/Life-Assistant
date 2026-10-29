@@ -402,6 +402,32 @@ export function moverPanel(inicio, delta, caja, ventana, { asa = 60 } = {}) {
   };
 }
 
+// ── Redimensionar un panel con las dos manos ──────────────────────────────────────
+// Una mano coge el panel y la otra lo pellizca también: separarlas lo agranda y juntarlas
+// lo encoge, como en las gafas de realidad virtual, y el panel va con el punto medio de
+// las dos. Se escala entero (letra incluida) en vez de cambiar el ancho: así no se
+// recoloca el contenido a cada fotograma.
+export const ESCALA_MIN = 0.6;
+export const ESCALA_MAX = 2.2;
+
+/** La escala que toca al separar o juntar las manos: la de partida por cuánto ha
+ *  cambiado la distancia entre ellas, dentro de los topes. */
+export function escalaDePinza(inicial, distanciaInicial, distancia, { min = ESCALA_MIN, max = ESCALA_MAX } = {}) {
+  if (!(distanciaInicial > 0) || !(distancia >= 0)) return inicial;
+  return Math.min(max, Math.max(min, inicial * (distancia / distanciaInicial)));
+}
+
+/** La caja de un panel escalado desde su centro (`transform-origin` por defecto), para
+ *  que `moverPanel` lo meta en la pantalla por lo que se ve y no por su tamaño original. */
+export function cajaEscalada(caja, escala = 1) {
+  return {
+    left: caja.left + (caja.width * (1 - escala)) / 2,
+    top: caja.top + (caja.height * (1 - escala)) / 2,
+    width: caja.width * escala,
+    height: caja.height * escala,
+  };
+}
+
 /** Lo que el panel de proyectos enseña del progreso, venga como venga del puente: un
  *  número (0-100 o 0-1), un objeto con `pct`/`porcentaje`/`hechos` y `pasos`, o texto. */
 export function porcentajeDe(progreso) {
