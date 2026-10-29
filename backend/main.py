@@ -3357,7 +3357,10 @@ def _moodle_llamar(funcion: str, params: Optional[dict] = None):
         logger.warning("Moodle: %s no contestó (%s)", funcion, type(e).__name__)
         raise MoodleApagado("Moodle no contesta.") from None
     if r.status_code >= 300:
-        logger.error("Moodle: %s respondió %s", funcion, r.status_code)
+        # Un 5xx es Moodle (o su proxy) caído, igual que no contestar: no apunta a un
+        # cambio de código, así que no es ERROR (el vigilante abriría un issue por ello).
+        (logger.warning if r.status_code >= 500 else logger.error)(
+            "Moodle: %s respondió %s", funcion, r.status_code)
         raise MoodleApagado("Moodle no ha contestado bien.")
     try:
         datos = r.json()
