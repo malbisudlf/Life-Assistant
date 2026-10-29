@@ -81,6 +81,16 @@ class TestCliente:
         with pytest.raises(main.MoodleApagado, match="MOODLE_TOKEN"):
             main._moodle_entregas()
 
+    def test_un_5xx_de_moodle_es_aviso_y_un_4xx_es_error(self, moodle, mock_requests, caplog):
+        # Moodle caído no es un fallo de código: no debe contar como ERROR en el registro.
+        for codigo, nivel in ((503, "WARNING"), (404, "ERROR")):
+            caplog.clear()
+            mock_requests.routes.insert(0, ("POST", "server.php", FakeResponse({}, codigo)))
+            with pytest.raises(main.MoodleApagado):
+                main._moodle_entregas()
+            niveles = [r.levelname for r in caplog.records if "respondió" in r.getMessage()]
+            assert niveles == [nivel]
+
     def test_una_respuesta_sin_lista_no_pasa_por_lista_vacia(self, moodle, mock_requests):
         # Si se tomara por «no hay entregas», la pasada tacharía todas las guardadas.
         mock_requests.routes.insert(0, ("POST", "server.php", FakeResponse({"warnings": []})))
