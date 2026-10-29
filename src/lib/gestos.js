@@ -216,88 +216,105 @@ export class DetectorDePuno {
   }
 }
 
-// ── Los toques con la punta de cada dedo (modo inmersivo) ─────────────────────────
-// Con una webcam no hay profundidad de fiar para «empujar» un botón en el aire, así que
-// un toque es lo que se ve bien de frente: un dedo extendido que se dobla de golpe, como
-// quien pulsa una tecla. Cuenta dónde estaba la punta justo ANTES de doblarse, que es a
-// lo que apuntaba. Un dedo solo: si se doblan dos o más a la vez es la mano cerrándose
-// (un puño, un pellizco, agarrar), y eso no pulsa nada.
-const DEDOS_TOQUE = [
-  // El pulgar se mide contra el nudillo del meñique: extendido queda lejos y doblado
-  // cruza la palma. Contra el centro de la palma apenas cambia.
-  { punta: 4,  ref: 17,   extendido: 0.75 },
-  { punta: 8,  ref: null, extendido: 1.05 },
-  { punta: 12, ref: null, extendido: 1.05 },
-  { punta: 16, ref: null, extendido: 1.0 },
-  { punta: 20, ref: null, extendido: 0.95 },
-];
+// ── Pulsar con la punta de un dedo (modo inmersivo) ──────────────────────────────
+// Se pulsa como un botón de verdad: echando la punta HACIA la pantalla. Una webcam no da
+// la profundidad exacta, pero sí dos pistas que se suman en la «cercanía» de cada punta:
+//   - el tamaño aparente de la mano: si se empuja la mano entera, crece en la imagen
+//     (va en logaritmo, para que cuente lo mismo cerca que lejos de la cámara);
+//   - la `z` de MediaPipe de la punta, relativa a la muñeca y negativa hacia la cámara:
+//     si solo se adelanta el dedo, esa punta se acerca más que el resto de la mano.
+// Es una pulsación cuando la cercanía de una punta sube `umbral` en menos de `ventanaMs`
+// —un empujón, no acercarse despacio— sin que la punta se desplace mucho por la imagen
+// (eso es barrer, no pulsar) y sin que el dedo se pliegue (al cerrar la mano las puntas
+// también se acercan a la cámara). Cuenta dónde estaba la punta al empezar el empujón,
+// que es a lo que apuntaba, y no vuelve a pulsar hasta echar la mano atrás.
+export const PUNTAS_PULSAN = [4, 8, 12, 16, 20];
+// Contra qué se mide si un dedo se ha plegado: su nudillo (el del pulgar, su base).
+const BASE_DEDO = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 };
 
-/** Cuánto de extendido está cada dedo, en proporción al tamaño de la mano. */
-export function extensiones(puntos) {
-  if (!puntos || puntos.length < 21) return null;
-  const tam = distancia(puntos[PUNTO.MUNECA], puntos[PUNTO.NUDILLO_CORAZON]) || 1;
-  const palma = centroPalma(puntos);
-  return DEDOS_TOQUE.map(d => distancia(puntos[d.punta], d.ref == null ? palma : puntos[d.ref]) / tam);
+/** El tamaño de la mano en la imagen: la media de su largo (muñeca → nudillo del
+ *  corazón) y su ancho (nudillo del índice → nudillo del meñique). Con las dos, girar la
+ *  mano cambia menos el número que con una sola. */
+export function tamanoMano(puntos) {
+  return (distancia(puntos[0], puntos[9]) + distancia(puntos[5], puntos[17])) / 2 || 1e-6;
 }
 
-export class DetectorDeToques {
-  /** `ventanaMs`: lo rápido que tiene que ser el doblez; `caida`: hasta qué fracción de
-   *  lo extendido tiene que bajar; `rearme`: cuánto hay que volver a estirarlo para que
-   *  el mismo dedo pueda pulsar otra vez; `confirmaMs`: lo que se espera antes de dar el
-   *  toque por bueno, y `agarreMs`, cuánto tiempo otro dedo que se dobla lo anula. Al
-   *  cerrar la mano los dedos no caen a la vez: primero cuatro y un fotograma después el
-   *  pulgar, que solo parecería un toque. */
-  constructor({ ventanaMs = 280, caida = 0.7, rearme = 0.88, confirmaMs = 70, agarreMs = 200 } = {}) {
-    Object.assign(this, { ventanaMs, caida, rearme, confirmaMs, agarreMs });
+/** Lo cerca de la cámara que está cada punta (`PUNTAS_PULSAN`), en unidades sin escala. */
+export function cercanias(puntos, { beta = 0.35 } = {}) {
+  if (!puntos || puntos.length < 21) return null;
+  const tam = tamanoMano(puntos);
+  const base = Math.log(tam);
+  return PUNTAS_PULSAN.map(i => base + beta * (-(puntos[i].z ?? 0) / tam));
+}
+
+export class DetectorDePulsaciones {
+  /** `umbral`: cuánto tiene que acercarse la punta (0,1 ≈ la mano un 10 % más grande en la
+   *  imagen); `ventanaMs`: en cuánto tiempo, como mucho; `deriva`: cuánto puede moverse la
+   *  punta por la imagen mientras tanto, en tamaños de mano; `plegado`: hasta qué fracción
+   *  de su largo puede encogerse el dedo; `vuelta`: cuánto hay que echarse atrás (en
+   *  umbrales) para poder pulsar otra vez. */
+  constructor({ umbral = 0.1, ventanaMs = 300, deriva = 0.8, plegado = 0.7, vuelta = 0.5, beta = 0.35,
+                rearmeMs = 1500 } = {}) {
+    Object.assign(this, { umbral, ventanaMs, deriva, plegado, vuelta, beta, rearmeMs });
     this.reinicia();
   }
 
   reinicia() {
-    this.dedos = DEDOS_TOQUE.map(() => ({ muestras: [], armado: true, rearmaEn: 0, caidaEn: -Infinity }));
-    this.pendiente = null;
+    this.muestras = [];
+    this.pulsada = null;      // { i, cima, t }: la punta que pulsó, hasta echarse atrás
+    this.progreso = PUNTAS_PULSAN.map(() => 0);
   }
 
-  /** `t` en milisegundos. Devuelve los toques de este fotograma (cero o uno), cada uno
-   *  como `{ punta, punto }`: el número de MediaPipe de la punta y dónde estaba en el
-   *  fotograma (0-1) al apuntar. */
+  /** `t` en milisegundos. Devuelve las pulsaciones de este fotograma (cero o una), cada
+   *  una como `{ punta, punto }`: el número de MediaPipe de la punta y dónde estaba en el
+   *  fotograma (0-1) al empezar a empujar. Deja en `progreso` (0-1 por punta) cuánto le
+   *  falta a cada una, para dibujarlo. */
   leer(puntos, t) {
-    const ext = extensiones(puntos);
-    if (!ext) return [];
-    const candidatos = [];
-    this.dedos.forEach((d, i) => {
-      const e = ext[i];
-      d.muestras.push({ t, e, p: { x: puntos[DEDOS_TOQUE[i].punta].x, y: puntos[DEDOS_TOQUE[i].punta].y } });
-      while (d.muestras.length && t - d.muestras[0].t > this.ventanaMs) d.muestras.shift();
-      if (!d.armado) {
-        if (e >= d.rearmaEn) d.armado = true;
-        return;
+    const c = cercanias(puntos, this);
+    if (!c) return [];
+    const tam = tamanoMano(puntos);
+    const largos = PUNTAS_PULSAN.map(i => distancia(puntos[i], puntos[BASE_DEDO[i]]) / tam);
+    const pos = PUNTAS_PULSAN.map(i => ({ x: puntos[i].x, y: puntos[i].y }));
+    this.muestras.push({ t, c, pos, largos, tam });
+    while (this.muestras.length > 1 && t - this.muestras[0].t > this.ventanaMs) this.muestras.shift();
+
+    if (this.pulsada) {
+      const { i, cima } = this.pulsada;
+      const cimaNueva = Math.max(cima, c[i]);
+      this.pulsada.cima = cimaNueva;
+      this.progreso = PUNTAS_PULSAN.map((_, j) => (j === i ? 1 : 0));
+      if (c[i] <= cimaNueva - this.umbral * this.vuelta || t - this.pulsada.t > this.rearmeMs) {
+        this.pulsada = null;
+        this.muestras = [this.muestras[this.muestras.length - 1]];
       }
-      const alto = d.muestras.reduce((a, m) => (m.e > a.e ? m : a), d.muestras[0]);
-      if (alto.e >= DEDOS_TOQUE[i].extendido && e <= alto.e * this.caida) candidatos.push({ i, alto });
-    });
-    const otroReciente = i => this.dedos.some((d, j) => j !== i && t - d.caidaEn < this.agarreMs);
-    for (const { i, alto } of candidatos) {
-      const d = this.dedos[i];
-      const reciente = otroReciente(i);
-      d.armado = false;
-      d.rearmaEn = Math.max(DEDOS_TOQUE[i].extendido, alto.e * this.rearme);
-      d.muestras = [];
-      if (candidatos.length > 1 || reciente) this.pendiente = null;
-      else this.pendiente = { i, alto, t };
-      d.caidaEn = t;
+      return [];
     }
-    if (candidatos.length > 1) this.pendiente = null;
-    const p = this.pendiente;
-    if (!p || t - p.t < this.confirmaMs) return [];
-    this.pendiente = null;
-    return [{ punta: DEDOS_TOQUE[p.i].punta, punto: p.alto.p }];
+
+    let mejor = -1;
+    this.progreso = PUNTAS_PULSAN.map((_, i) => {
+      // El punto de partida es el más lejano de la ventana: desde ahí empezó el empujón.
+      const desde = this.muestras.reduce((a, m) => (m.c[i] < a.c[i] ? m : a), this.muestras[0]);
+      const subida = c[i] - desde.c[i];
+      const quieta = distancia(pos[i], desde.pos[i]) / Math.max(tam, desde.tam) <= this.deriva;
+      const estirado = largos[i] >= desde.largos[i] * this.plegado;
+      const p = quieta && estirado ? Math.max(0, Math.min(1, subida / this.umbral)) : 0;
+      if (p >= 1 && (mejor < 0 || c[i] > c[mejor])) mejor = i;
+      return p;
+    });
+    if (mejor < 0) return [];
+    // De las que han empujado a la vez (la mano entera hacia delante), la que va más
+    // adelantada: la del dedo que apunta.
+    const desde = this.muestras.reduce((a, m) => (m.c[mejor] < a.c[mejor] ? m : a), this.muestras[0]);
+    this.pulsada = { i: mejor, cima: c[mejor], t };
+    return [{ punta: PUNTAS_PULSAN[mejor], punto: desde.pos[mejor] }];
   }
 
-  /** Pellizcando o con el puño cerrado no se toca nada: se olvida lo visto, para que al
-   *  soltar no cuente como doblez lo que pasó mientras tanto. */
+  /** Pellizcando o con el puño cerrado no se pulsa nada: se olvida lo visto, para que al
+   *  soltar no cuente como empujón lo que pasó mientras tanto. */
   pausa() {
-    for (const d of this.dedos) d.muestras = [];
-    this.pendiente = null;
+    this.muestras = [];
+    this.pulsada = null;
+    this.progreso = PUNTAS_PULSAN.map(() => 0);
   }
 }
 

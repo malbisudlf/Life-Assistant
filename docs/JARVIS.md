@@ -1184,15 +1184,21 @@ trabajar en ellos».
   la cámara a pantalla completa, en espejo, y los paneles y los mensajes flotando encima
   como ventanas de cristal. Enciende la cámara y las manos. Lo dibujado cae **encima de la
   mano que se ve** (`aPantalla` con `cubre`, que reproduce el recorte de `object-fit:
-  cover`) y no con el margen del modo normal. Y **cada punta de cada dedo pulsa**: doblar
-  un dedo de golpe (`DetectorDeToques`, en menos de 280 ms y hasta el 70 % de lo que
-  estaba estirado) es un toque donde apuntaba la punta justo antes de doblarse. Pulsa lo
-  que haya debajo, o trae delante el panel si no es un botón, y deja un círculo. Lo que
-  pulsaría cada punta se ilumina. Si se doblan dos dedos en menos de 200 ms es la mano
-  cerrándose y no cuenta (por eso el toque se confirma a los 70 ms), y pellizcando o con
-  el puño cerrado no se toca nada. **Los umbrales salen de una mano de prueba, no de una
-  cámara de verdad**: si pulsa sin querer o le cuesta, se tocan en `DEDOS_TOQUE` y en el
-  constructor de `DetectorDeToques` (`src/lib/gestos.js`). El vídeo es el mismo directo
+  cover`) y no con el margen del modo normal. Y **cada punta de cada dedo pulsa como un
+  botón de verdad: echándola hacia la pantalla** (`DetectorDePulsaciones`; hasta el
+  2026-10-29 era doblando el dedo, y Mikel lo quiso así). La webcam no da la profundidad
+  exacta, así que la «cercanía» de cada punta suma dos pistas: lo que crece la mano en la
+  imagen (empujar la mano entera) y la `z` de MediaPipe de esa punta (adelantar solo el
+  dedo). Pulsa cuando sube un 0,1 (≈ la mano un 10 % más grande) en menos de 300 ms, sin
+  que la punta barra la imagen más de 0,8 tamaños de mano y sin que el dedo se pliegue
+  (al cerrar la mano las puntas también vienen hacia la cámara). Si empujan varias a la
+  vez, gana la más adelantada, la del dedo que apunta, y cuenta dónde estaba al empezar
+  el empujón. No vuelve a pulsar hasta echar la mano un poco atrás. El anillo de cada
+  punta se cierra y se rellena según empuja: cerrado del todo, ha pulsado. Pulsa lo que
+  haya debajo, o trae delante el panel si no es un botón, y deja un círculo; pellizcando
+  o con el puño cerrado no se pulsa nada. **Los umbrales salen de una mano de prueba, no
+  de una cámara de verdad**: si pulsa sin querer o le cuesta, se tocan en el constructor
+  de `DetectorDePulsaciones` (`src/lib/gestos.js`): `umbral` y `ventanaMs` primero. El vídeo es el mismo directo
   que el panel (`ponVideo` en `useCamara.js` lo engancha al `<video>` que esté a la
   vista), así que no se pide la cámara dos veces.
 - **Proyectos** (botón de la cabecera): el panel del programador (`docs/PROGRAMADOR.md`).

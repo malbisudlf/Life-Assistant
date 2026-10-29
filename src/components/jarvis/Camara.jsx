@@ -35,7 +35,7 @@ export function PanelCamara({ ponVideo, estado, error, jarvisVe, onJarvisVe, man
         </button>
         <button type="button" className={`jh-boton-fino${inmersivo ? " activo" : ""}`} onClick={onInmersivo}
                 aria-pressed={inmersivo}
-                title="La cámara a pantalla completa con los paneles flotando encima: cada dedo pulsa al doblarlo">
+                title="La cámara a pantalla completa con los paneles flotando encima: cada dedo pulsa al empujarlo hacia la pantalla">
           {inmersivo ? "Salir del inmersivo" : "Modo inmersivo"}
         </button>
       </div>

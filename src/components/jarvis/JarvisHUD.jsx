@@ -396,7 +396,7 @@ export default function JarvisHUD({
           )}
           <button type="button" className={`jh-boton-fino${verInmersivo ? " activo" : ""}`}
                   onClick={alternarInmersivo} aria-pressed={verInmersivo}
-                  title="La cámara en grande con los paneles flotando: cada dedo pulsa al doblarlo (Esc para salir)">
+                  title="La cámara en grande con los paneles flotando: cada dedo pulsa al empujarlo hacia la pantalla (Esc para salir)">
             Inmersivo
           </button>
           <button type="button" className={`jh-boton-fino${proyectosOn ? " activo" : ""}`}

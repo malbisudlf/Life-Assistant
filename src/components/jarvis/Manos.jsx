@@ -17,12 +17,12 @@
 // un panel cogido se mueve desde lo que se pinta y no desde lo que se ve: a 60 y suave.
 //
 // En el modo inmersivo (`inmersivo`) la cámara ocupa la pantalla entera y lo dibujado cae
-// encima de la mano que se ve, sin margen. Ahí, además, **cada punta de cada dedo pulsa**:
-// doblar un dedo de golpe es un toque donde apuntaba (`DetectorDeToques`), con un anillo
-// en cada punta y lo que pulsaría iluminado.
+// encima de la mano que se ve, sin margen. Ahí, además, **cada punta de cada dedo pulsa**
+// como un botón de verdad: echándola hacia la pantalla (`DetectorDePulsaciones`). Cada
+// punta lleva un anillo que se cierra según empuja, y lo que pulsaría va iluminado.
 import { useEffect, useRef } from "react";
 import {
-  LectorDeMano, DetectorDePuno, DetectorDeToques, HUESOS, aPantalla, esClic, acercar, claveDeMano,
+  LectorDeMano, DetectorDePuno, DetectorDePulsaciones, HUESOS, aPantalla, esClic, acercar, claveDeMano,
   palmaEnPantalla,
 } from "../../lib/gestos";
 
@@ -135,7 +135,7 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
         if (!m) {
           const hueco = huecoLibre();
           if (hueco < 0) return;
-          m = { lector: new LectorDeMano(), puno: new DetectorDePuno(), toques: new DetectorDeToques(),
+          m = { lector: new LectorDeMano(), puno: new DetectorDePuno(), pulsador: new DetectorDePulsaciones(),
                 hueco, pulsado: null, puntosPintados: null, cursorPintado: null, puntas: [] };
           manos.set(clave, m);
         }
@@ -171,11 +171,11 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
         }
 
         // Las cinco puntas, solo en el modo inmersivo y con la mano libre: pellizcando o
-        // con el puño cerrado los dedos se doblan sin querer pulsar nada.
+        // con el puño cerrado las puntas se mueven sin querer pulsar nada.
         if (!inmersivoRef.current) { m.puntas = []; return; }
         m.puntas = PUNTAS_LISTA.map(i => m.puntos[i]);
-        if (m.pellizco || m.cerrado || m.pulsado) { m.toques.pausa(); return; }
-        for (const toque of m.toques.leer(puntos, ahora)) tocar(aPantalla(toque.punto, ancho, alto, opciones));
+        if (m.pellizco || m.cerrado || m.pulsado) { m.pulsador.pausa(); return; }
+        for (const toque of m.pulsador.leer(puntos, ahora)) tocar(aPantalla(toque.punto, ancho, alto, opciones));
       });
       // La que ya no se ve suelta lo que tuviera y deja su cursor libre.
       for (const [clave, m] of manos) {
@@ -190,7 +190,7 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
       // mismo botón, que una se vaya no lo apaga.
       const encima = new Set([...manos.values()].map(m => m.encima).filter(Boolean));
       // En el modo inmersivo se ilumina también lo que tiene una punta encima: es lo que
-      // pulsaría ese dedo al doblarlo.
+      // pulsaría ese dedo al empujarlo.
       for (const m of manos.values()) {
         for (const q of m.puntas || []) {
           const el = q && pulsableEn(q.x, q.y);
@@ -251,14 +251,25 @@ export default function Manos({ videoRef, activa, inmersivo = false, onArrastre,
           g.arc(q.x, q.y, r, 0, Math.PI * 2);
         });
         g.fill();
-        // Las puntas que pulsan, con su retícula: un anillo que se ve sobre cualquier fondo.
+        // Las puntas que pulsan, con su retícula: un anillo que se ve sobre cualquier fondo
+        // y que se cierra y se rellena según la punta empuja hacia la pantalla, como un
+        // botón que se hunde. Cerrado del todo, ha pulsado.
         if (inm) {
-          g.globalAlpha = 0.95;
+          const progreso = m.pulsador?.progreso || [];
           g.lineWidth = 2;
           g.shadowBlur = 10;
-          g.beginPath();
-          for (const i of PUNTAS_LISTA) { g.moveTo(p[i].x + 13, p[i].y); g.arc(p[i].x, p[i].y, 13, 0, Math.PI * 2); }
-          g.stroke();
+          PUNTAS_LISTA.forEach((i, k) => {
+            const f = progreso[k] || 0;
+            const radio = 13 - f * 6;
+            g.globalAlpha = 0.95;
+            g.beginPath();
+            g.arc(p[i].x, p[i].y, radio, 0, Math.PI * 2);
+            g.stroke();
+            if (f > 0.05) {
+              g.globalAlpha = 0.25 + f * 0.55;
+              g.fill();
+            }
+          });
           g.shadowBlur = 0;
         }
         g.globalAlpha = 1;

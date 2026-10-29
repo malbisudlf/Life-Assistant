@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   LectorDeMano, FiltroOneEuro, aPantalla, esClic, moverPanel, porcentajeDe, distancia, acercar, claveDeMano,
   DetectorDePuno, dedosPlegados, posicionesRadiales, elegirPorDireccion,
-  DetectorDeToques, extensiones, velocidadDeSuelta, pasoDeInercia,
+  DetectorDePulsaciones, cercanias, velocidadDeSuelta, pasoDeInercia,
 } from "../../src/lib/gestos";
 
 /** Una mano con los cuatro dedos extendidos hacia arriba, o plegados sobre la palma. */
@@ -222,77 +222,93 @@ function manoAbierta(doblados = []) {
   const p = manoDeDedos(0);
   [8, 12, 16, 20].forEach((i, k) => { if (doblados.includes(i)) p[i] = { x: 0.44 + k * 0.04, y: 0.56 }; });
   p[4] = doblados.includes(4) ? { x: 0.56, y: 0.55 } : { x: 0.3, y: 0.5 };
-  return p;
+  p[2] = { x: 0.42, y: 0.56 };                         // la base del pulgar
+  return p.map(q => ({ ...q, z: 0 }));
 }
 
-describe("los toques con la punta de los dedos", () => {
-  it("la mano abierta tiene los cinco dedos extendidos y el puño ninguno", () => {
-    const abierta = extensiones(manoAbierta());
-    expect(abierta.every((e, i) => e > [0.75, 1.05, 1.05, 1.0, 0.95][i])).toBe(true);
-    const cerrada = extensiones(manoAbierta([4, 8, 12, 16, 20]));
-    expect(cerrada.every(e => e < 0.7)).toBe(true);
+/** La misma mano, `escala` veces más grande en la imagen (más cerca de la cámara),
+ *  movida `dx` y con la `z` que se diga en algunas puntas. */
+function transformar(p, { escala = 1, dx = 0, z = {} } = {}) {
+  return p.map((q, i) => ({
+    x: 0.5 + (q.x - 0.5) * escala + dx,
+    y: 0.5 + (q.y - 0.5) * escala,
+    z: (z[i] ?? q.z ?? 0) * escala,
+  }));
+}
+
+describe("pulsar echando la punta hacia delante", () => {
+  it("empujar la mano hacia la pantalla pulsa con la punta más adelantada", () => {
+    const d = new DetectorDePulsaciones();
+    const quieta = transformar(manoAbierta(), { z: { 8: -0.04 } });     // el índice apunta
+    expect(d.leer(quieta, 0)).toEqual([]);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.05, z: { 8: -0.04 } }), 80)).toEqual([]);
+    const pulsa = d.leer(transformar(manoAbierta(), { escala: 1.14, z: { 8: -0.04 } }), 160);
+    expect(pulsa).toHaveLength(1);
+    expect(pulsa[0].punta).toBe(8);
+    // Donde apuntaba al empezar el empujón, no donde acabó.
+    expect(pulsa[0].punto).toEqual({ x: quieta[8].x, y: quieta[8].y });
   });
 
-  it("doblar de golpe un dedo es un toque donde apuntaba antes de doblarse", () => {
-    const d = new DetectorDeToques();
-    expect(d.leer(manoAbierta(), 0)).toEqual([]);
-    expect(d.leer(manoAbierta(), 33)).toEqual([]);
-    expect(d.leer(manoAbierta([12]), 120)).toEqual([]);   // espera a confirmarlo
-    const toques = d.leer(manoAbierta([12]), 200);
-    expect(toques).toHaveLength(1);
-    expect(toques[0].punta).toBe(12);
-    expect(toques[0].punto.y).toBeCloseTo(0.2);      // la punta arriba, no doblada
-  });
-
-  it("vale con cualquier dedo, también el pulgar", () => {
-    for (const punta of [4, 8, 16, 20]) {
-      const d = new DetectorDeToques();
+  it("adelantar solo un dedo también pulsa, con ese dedo", () => {
+    for (const punta of [4, 12, 20]) {
+      const d = new DetectorDePulsaciones();
       d.leer(manoAbierta(), 0);
-      d.leer(manoAbierta([punta]), 100);
-      expect(d.leer(manoAbierta([punta]), 180).map(x => x.punta)).toEqual([punta]);
+      const r = d.leer(transformar(manoAbierta(), { z: { [punta]: -0.06 } }), 120);
+      expect(r.map(x => x.punta)).toEqual([punta]);
     }
   });
 
-  it("cerrar la mano no pulsa nada", () => {
-    const d = new DetectorDeToques();
-    d.leer(manoAbierta(), 0);
-    expect(d.leer(manoAbierta([8, 12, 16, 20]), 100)).toEqual([]);
-    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 150)).toEqual([]);
-    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 300)).toEqual([]);
+  it("acercarse despacio no pulsa: es acercar la mano, no empujar", () => {
+    const d = new DetectorDePulsaciones({ ventanaMs: 300 });
+    for (let k = 0; k <= 10; k++) {
+      expect(d.leer(transformar(manoAbierta(), { escala: 1 + k * 0.03 }), k * 100)).toEqual([]);
+    }
   });
 
-  it("ni cerrarla con el pulgar primero", () => {
-    const d = new DetectorDeToques();
+  it("barrer de lado mientras se acerca no pulsa", () => {
+    const d = new DetectorDePulsaciones();
     d.leer(manoAbierta(), 0);
-    expect(d.leer(manoAbierta([4]), 100)).toEqual([]);
-    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 133)).toEqual([]);
-    expect(d.leer(manoAbierta([4, 8, 12, 16, 20]), 300)).toEqual([]);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.15, dx: 0.25 }), 120)).toEqual([]);
   });
 
-  it("doblarlo despacio tampoco: es mover la mano, no pulsar", () => {
-    const d = new DetectorDeToques({ ventanaMs: 280 });
+  it("cerrar la mano no pulsa aunque las puntas vengan hacia la cámara", () => {
+    const d = new DetectorDePulsaciones();
     d.leer(manoAbierta(), 0);
-    expect(d.leer(manoAbierta([12]), 600)).toEqual([]);
+    const puno = transformar(manoAbierta([4, 8, 12, 16, 20]), { z: { 4: -0.06, 8: -0.06, 12: -0.06, 16: -0.06, 20: -0.06 } });
+    expect(d.leer(puno, 120)).toEqual([]);
   });
 
-  it("el mismo dedo no vuelve a pulsar hasta estirarlo otra vez", () => {
-    const d = new DetectorDeToques();
+  it("no vuelve a pulsar hasta echar la mano atrás", () => {
+    const d = new DetectorDePulsaciones();
     d.leer(manoAbierta(), 0);
-    d.leer(manoAbierta([8]), 100);
-    expect(d.leer(manoAbierta([8]), 180)).toHaveLength(1);
-    expect(d.leer(manoAbierta([8]), 250)).toEqual([]);
-    d.leer(manoAbierta(), 300);
-    d.leer(manoAbierta(), 350);
-    d.leer(manoAbierta([8]), 420);
-    expect(d.leer(manoAbierta([8]), 500)).toHaveLength(1);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.15 }), 100)).toHaveLength(1);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.3 }), 180)).toEqual([]);   // sigue empujando
+    d.leer(transformar(manoAbierta(), { escala: 1.2 }), 400);                         // atrás
+    d.leer(transformar(manoAbierta(), { escala: 1.2 }), 450);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.38 }), 550)).toHaveLength(1);
+  });
+
+  it("el progreso sube con el empujón, para dibujar cuánto falta", () => {
+    const d = new DetectorDePulsaciones();
+    d.leer(manoAbierta(), 0);
+    d.leer(transformar(manoAbierta(), { escala: 1.05 }), 60);
+    expect(Math.max(...d.progreso)).toBeGreaterThan(0.3);
+    expect(Math.max(...d.progreso)).toBeLessThan(1);
   });
 
   it("en pausa (pellizcando) se olvida lo visto", () => {
-    const d = new DetectorDeToques();
+    const d = new DetectorDePulsaciones();
     d.leer(manoAbierta(), 0);
     d.pausa();
-    d.leer(manoAbierta([8]), 100);
-    expect(d.leer(manoAbierta([8]), 200)).toEqual([]);
+    expect(d.leer(transformar(manoAbierta(), { escala: 1.15 }), 100)).toEqual([]);
+  });
+
+  it("la cercanía crece con la mano y con la punta adelantada", () => {
+    const [, lejos] = cercanias(manoAbierta());
+    const [, cerca] = cercanias(transformar(manoAbierta(), { escala: 1.2 }));
+    const [, adelantado] = cercanias(transformar(manoAbierta(), { z: { 8: -0.05 } }));
+    expect(cerca).toBeGreaterThan(lejos);
+    expect(adelantado).toBeGreaterThan(lejos);
   });
 });
 
