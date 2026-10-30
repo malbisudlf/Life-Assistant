@@ -395,6 +395,9 @@ que se envía o se crea solo.
 > retoma, el código está en el historial: el commit `43dfb76` de este repositorio y el
 > `a32e7ff` (más `7b0faf4`) de HomeLab. Lo que hay debajo es el texto original.
 >
+> **Retomada el 30 de octubre de 2026, de otra forma**: leer y enviar, sin avisos ni
+> tabla. Ver `docs/WHATSAPP.md`.
+>
 > **Fase 1 escrita** (28 de septiembre de 2026): el backend, la migración
 > `20260928_whatsapp` y el puente en el repositorio HomeLab (`caja/whatsapp/`). Está todo
 > en `docs/WHATSAPP.md` (borrado; está en el historial). Lo que salió distinto de lo previsto: el puente **no tiene API
