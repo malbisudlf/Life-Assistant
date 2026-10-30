@@ -441,6 +441,9 @@ class TestJarvisDespachador:
         # Y Spotify, sin su app registrada.
         monkeypatch.setattr(main, "SPOTIFY_CLIENT_ID", "spotify-id")
         monkeypatch.setattr(main, "SPOTIFY_CLIENT_SECRET", "spotify-secreto")
+        # Y WhatsApp, sin el puente de caja.
+        monkeypatch.setattr(main, "WHATSAPP_PUENTE_URL", "http://whatsapp:8090")
+        monkeypatch.setattr(main, "WHATSAPP_PUENTE_TOKEN", "x" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)
