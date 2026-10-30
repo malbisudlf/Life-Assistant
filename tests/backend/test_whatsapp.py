@@ -3,8 +3,8 @@
 Lo que se protege: que el token vaya en la cabecera; que sin puente configurado Jarvis ni
 vea las herramientas; que enviar siga la frontera de siempre (se confirma, y lo que dice el
 botón —el nombre del PUENTE y el texto entero— es lo que se manda); que solo se mande a un
-chat que el puente tiene; que lo leído vaya marcado como dato y recortado; y que leer no
-esté en el teléfono, que tiene shell en caja.
+chat que el puente tiene; que lo leído vaya marcado como dato y recortado; y que las tres
+estén en el teléfono (leer también, porque Mikel lo pidió aunque tenga shell en caja).
 """
 import pytest
 
@@ -179,9 +179,8 @@ class TestEnviar:
 
 
 class TestTelefono:
-    def test_leer_no_esta_en_el_telefono(self):
-        assert "whatsapp_leer" not in main._MCP_SERVIDOR_HERRAMIENTAS
-
-    def test_buscar_y_enviar_si(self):
-        assert {"whatsapp_chats", "whatsapp_enviar"} <= main._MCP_SERVIDOR_HERRAMIENTAS
+    def test_las_tres_estan_en_el_telefono(self):
+        assert {"whatsapp_chats", "whatsapp_leer",
+                "whatsapp_enviar"} <= main._MCP_SERVIDOR_HERRAMIENTAS
+        assert "whatsapp_leer" in main._MCP_SERVIDOR_SOLO_LECTURA
         assert "whatsapp_enviar" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL

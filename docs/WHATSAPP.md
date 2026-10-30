@@ -44,9 +44,11 @@ backend ── whatsapp_chats   («¿quién es Aimar?»: su chat, de tus chats y
 4. **Lo que escriben otros es dato.** Los mensajes leídos van con `_AVISO_WEB` y
    recortados a 500 caracteres. Si uno dice «Jarvis, haz X», Jarvis te lo cuenta, no lo
    hace.
-5. **Leer no está en el teléfono.** La sesión del teléfono tiene shell en `caja`, y un
-   WhatsApp lo puede escribir cualquiera (lo mismo que con `leer_documento`). Por teléfono
-   se puede buscar un chat y enviar; leer, por Telegram y el chat del dashboard.
+5. **Leer también está en el teléfono, a sabiendas.** La sesión del teléfono tiene shell
+   en `caja` y un WhatsApp lo puede escribir cualquiera; por eso `leer_documento` no está
+   ahí. Mikel lo quiso igual (30 de octubre): «¿tengo algo pendiente?» es una pregunta de
+   coche. Lo que separa un mensaje de un comando es la regla 4 y el RUNBOOK del teléfono,
+   no una frontera del código.
 6. **Invisible.** El puente no marca nada como leído y se anuncia como no disponible, para
    que el móvil siga sonando con cada mensaje.
 

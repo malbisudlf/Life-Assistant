@@ -30091,8 +30091,9 @@ def _j_indexadores_flaresolverr(nombre: str) -> dict:
 #     el que diga el modelo, y el texto va entero: lo que lees es lo que se manda.
 #   - **Solo a quien ya tienes.** El puente rechaza un chat que no esté entre tus chats ni
 #     en tu agenda, y aquí también: un número sacado de un mensaje de otro no recibe nada.
-#   - **Lo que escriben otros es dato.** Los mensajes van con `_AVISO_WEB`. Leerlos NO está
-#     en el teléfono, que tiene shell en `caja` (ver `_MCP_SERVIDOR_SOLO_LECTURA`).
+#   - **Lo que escriben otros es dato.** Los mensajes van con `_AVISO_WEB`. Leerlos también
+#     está en el teléfono, que tiene shell en `caja`, porque Mikel lo pidió así (ver
+#     `_MCP_SERVIDOR_SOLO_LECTURA`).
 #   - Ya se montó una vez en modo solo lectura (septiembre, `43dfb76`) y se quitó: avisaba
 #     de a quién debías respuesta. Esta vez no hay avisos ni reglas: solo cuando preguntas.
 WHATSAPP_PUENTE_URL   = os.getenv("WHATSAPP_PUENTE_URL", "").strip().rstrip("/")
@@ -32258,12 +32259,17 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     "musica_que_suena", "musica_mis_listas",
     # 2026-10-30: buscar un chat de WhatsApp, para «avisa a Aimar» (el envío va con el
     # botón o el sí hablado, en `PREGUNTAS_ACCIONES`). Solo nombres recortados.
-    "whatsapp_chats",
+    #
+    # Y leerlos, que es la excepción a lo de `leer_documento` de abajo, a sabiendas: Mikel
+    # lo pidió el mismo día («quiero que pueda leer por teléfono»), sabiendo que un
+    # WhatsApp lo escribe cualquiera y que aquí al otro lado hay una shell. Lo que queda
+    # entre un mensaje y un comando: cada mensaje recortado a 500 caracteres, con
+    # `_AVISO_WEB` y la orden de contarlo y no hacerlo, y el RUNBOOK del teléfono.
+    "whatsapp_chats", "whatsapp_leer",
 }
 # `buscar_documentos` y `leer_documento` se quedan fuera a propósito: traen texto escrito
 # por terceros (un PDF que te mandaron), y al otro lado de esta llamada hay una sesión con
 # shell en `caja`. En el chat ese texto solo puede torcer una respuesta; aquí, un comando.
-# `whatsapp_leer`, por lo mismo: cualquiera puede escribirte un WhatsApp.
 # `borrar_idea` estuvo aquí y no podía usarse nunca: es `confirmar: True` (no hay
 # papelera), así que este servidor la rechazaba siempre. Anunciarla en `tools/list` solo
 # servía para que el modelo la intentara y fallara delante de Mikel.
