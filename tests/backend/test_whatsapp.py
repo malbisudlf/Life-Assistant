@@ -184,3 +184,39 @@ class TestTelefono:
                 "whatsapp_enviar"} <= main._MCP_SERVIDOR_HERRAMIENTAS
         assert "whatsapp_leer" in main._MCP_SERVIDOR_SOLO_LECTURA
         assert "whatsapp_enviar" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+
+
+class TestOlvidarElTexto:
+    """El texto vive en `jarvis_preguntas` solo mientras espera el sí (docs/WHATSAPP.md)."""
+
+    def _parchear(self, monkeypatch):
+        llamadas = []
+
+        def patch(url, **kw):
+            llamadas.append((url, kw.get("json")))
+            return FakeResponse([])
+        monkeypatch.setattr(main.http, "patch", patch)
+        return llamadas
+
+    def test_tras_ejecutar_se_vacia(self, monkeypatch):
+        llamadas = self._parchear(monkeypatch)
+        monkeypatch.setattr(main, "_jarvis_despachar",
+                            lambda h, a: {"ok": True, "enviado_a": "Aimar"})
+        monkeypatch.setattr(main, "_acusar_recibo", lambda *a, **k: None)
+        pid = "00000000-0000-4000-8000-000000000001"
+        fila = {"creado": main.datetime.now(main.timezone.utc).isoformat(),
+                "accion": {"herramienta": "whatsapp_enviar",
+                           "argumentos": {"chat": AIMAR, "texto": "llego tarde"}}}
+        main._ejecutar_accion_guardada(pid, fila)
+        vaciado = [j for u, j in llamadas if j and "accion" in j]
+        assert vaciado and vaciado[0]["accion"]["argumentos"] == {}
+        assert "llego tarde" not in str(vaciado[0])
+
+    def test_otras_herramientas_no_se_tocan(self, monkeypatch):
+        llamadas = self._parchear(monkeypatch)
+        monkeypatch.setattr(main, "_acusar_recibo", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_jarvis_despachar", lambda h, a: {"ok": True})
+        fila = {"creado": main.datetime.now(main.timezone.utc).isoformat(),
+                "accion": {"herramienta": "crear_tarea", "argumentos": {"titulo": "x"}}}
+        main._ejecutar_accion_guardada("00000000-0000-4000-8000-000000000002", fila)
+        assert not [j for u, j in llamadas if j and "accion" in j]

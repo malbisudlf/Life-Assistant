@@ -31,7 +31,10 @@ backend ── whatsapp_chats   («¿quién es Aimar?»: su chat, de tus chats y
 1. **El texto se queda en `caja`.** El puente lo guarda 30 días
    (`PUENTE_RETENCION_DIAS`) y lo purga cada hora. El backend lo pide cuando Jarvis lo
    necesita, lo usa y lo olvida, como el cuerpo de un correo. En Supabase no hay tabla de
-   WhatsApp ni la habrá.
+   WhatsApp ni la habrá. **Una excepción, acotada:** mientras espera tu «sí» la propuesta
+   (chat y texto) está en `jarvis_preguntas`, porque es lo que se manda; al contestar
+   (sí o no) `_olvidar_whatsapp` los vacía, y las que nadie contesta se barren al
+   proponer la siguiente, pasada su vigencia.
 2. **Enviar se confirma.** Es la única acción de Jarvis que le llega a otra persona. La
    frase del botón la escribe el backend con el nombre que da el PUENTE y el texto entero
    (`_describir_whatsapp_enviar`): lo que lees es lo que se manda. Por teléfono también
