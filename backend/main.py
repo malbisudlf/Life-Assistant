@@ -22736,6 +22736,7 @@ def _responder_pregunta(pid: str, n: int) -> dict:
             resultado = _ejecutar_accion_guardada(pid, filas[0])
             return {"ok": True, "hecho": True, "respuesta": eleccion, "resultado": resultado}
         _acusar_recibo("🤖 Vale, no lo hago", f"«{eleccion}»", efimero=True)
+        _olvidar_whatsapp(f"id=eq.{pid}")
         return {"ok": True, "hecho": True, "respuesta": eleccion}
     # El acuse, como el «⏰ Alarma quitada»: el salto del móvil a HA se pierde sin dejar
     # rastro, y esta es la única forma de que se note.
@@ -23034,6 +23035,29 @@ def _args_de(herramienta: str, args: dict) -> dict:
     return limpios
 
 
+_WHATSAPP_OLVIDADO = "Mensaje de WhatsApp (borrado)"
+
+
+def _olvidar_whatsapp(filtro: str) -> None:
+    """Borra de `jarvis_preguntas` el texto y el chat de un WhatsApp ya resuelto.
+
+    El texto tiene que estar en la fila mientras espera el «sí» (es lo que se manda), pero
+    `docs/WHATSAPP.md` promete que el backend lo usa y lo olvida: pasado el «sí», el «no»
+    o la caducidad no hay motivo para conservar con quién hablas ni qué le dices. Se deja
+    la fila (el id, la respuesta y cuándo) y se vacía lo demás. Si falla, solo se avisa:
+    el envío ya está hecho o descartado y esto es limpieza.
+    """
+    try:
+        r = http.patch(f"{PREGUNTAS_URL}?{filtro}&accion-%3E%3Eherramienta=eq.whatsapp_enviar",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"texto": _WHATSAPP_OLVIDADO,
+                             "accion": {"herramienta": "whatsapp_enviar", "argumentos": {}}})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:
+        logger.warning("WhatsApp: no se pudo borrar el texto de una propuesta (%s)", e)
+
+
 def _guardar_pregunta_con_accion(pid: str, texto: str, opciones: list, herramienta: str,
                                  argumentos: dict, caduca: Optional[datetime] = None) -> bool:
     accion = {"herramienta": herramienta, "argumentos": argumentos}
@@ -23073,6 +23097,12 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
                                        "notificaciones en la última hora; no mando más."}
     pid   = str(uuid.uuid4())
     texto = desc["texto"]
+    if herramienta == "whatsapp_enviar":
+        # Las que nadie contestó no pasan por ningún «sí» ni «no» que las limpie: se
+        # barren al proponer la siguiente, pasada su vigencia.
+        corte = datetime.now(timezone.utc) - timedelta(minutes=PREGUNTA_ACCION_VIGENCIA_MIN)
+        _olvidar_whatsapp(f"respuesta=is.null&texto=neq.{quote(_WHATSAPP_OLVIDADO)}"
+                          f"&creado=lt.{quote(corte.isoformat())}")
     if not _guardar_pregunta_con_accion(pid, texto, [PREGUNTA_SI, PREGUNTA_NO],
                                         herramienta, args):
         return {"ok": False, "motivo": "No he podido guardarlo para que lo confirme."}
@@ -23162,6 +23192,8 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
     except Exception as e:
         # Ya está hecho (o no): fallar aquí solo deja a Jarvis sin saberlo.
         logger.warning("Jarvis: no se pudo apuntar el resultado de %s (%s)", pid, e)
+    if herramienta == "whatsapp_enviar":
+        _olvidar_whatsapp(f"id=eq.{pid}")
     emoji = PREGUNTAS_EMOJI.get(herramienta, "📅")
     if resultado.get("ok"):
         _acusar_recibo(f"{emoji} Hecho", _lo_hecho(herramienta, argumentos, resultado),
