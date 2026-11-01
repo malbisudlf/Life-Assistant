@@ -21835,14 +21835,16 @@ def _llamar(texto: str, *, rid: str = "", contexto: str = "",
 #     máquina, dice que sí. No decide por ti ni cuenta de ti más que lo que le diste.
 #   - **No se graba.** La transcripción vive en memoria (las últimas
 #     `TERCEROS_RECIENTES_MAX` llamadas) y lo que te llega es el resumen.
-#   - Nace apagado (`TERCEROS_LLAMADAS=0`), con tope diario, franja horaria y una sola
-#     llamada a la vez: la línea fija es una.
+#   - Nace apagado (`TERCEROS_LLAMADAS=0`), con franja horaria y una sola llamada a la
+#     vez: la línea fija es una. El tope diario existe (`TERCEROS_DIA_MAX`) pero va a 0,
+#     sin tope, desde el 2026-11-01: lo pidió Mikel.
 TERCEROS_LLAMADAS        = _flag("TERCEROS_LLAMADAS", "0")
 # Voice-app → backend: con qué se autentica cada turno de la conversación. Otro token, no
 # el de confirmar: este solo sirve para pensar la frase siguiente de una llamada viva.
 TELEFONO_TERCEROS_TOKEN  = os.getenv("TELEFONO_TERCEROS_TOKEN", "")
 TERCEROS_MODELO          = os.getenv("TERCEROS_MODELO", "") or JARVIS_MODEL
-TERCEROS_DIA_MAX         = int(os.getenv("TERCEROS_DIA_MAX", "8"))
+# Llamadas al día a otras personas; 0 = sin tope (desde el 2026-11-01, a petición de Mikel).
+TERCEROS_DIA_MAX         = int(os.getenv("TERCEROS_DIA_MAX", "0"))
 TERCEROS_DESDE           = int(os.getenv("TERCEROS_DESDE", "9"))
 TERCEROS_HASTA           = int(os.getenv("TERCEROS_HASTA", "22"))
 TERCEROS_TIMBRE_SEG      = int(os.getenv("TERCEROS_TIMBRE_SEG", "30"))
@@ -22150,7 +22152,7 @@ def _j_llamar_a_alguien(nombre: str, mensaje: str, objetivo: str, contexto: str 
     if not (TERCEROS_DESDE <= hora < TERCEROS_HASTA):
         return {"ok": False, "error": f"No llamo a nadie entre las {TERCEROS_HASTA}:00 y "
                                       f"las {TERCEROS_DESDE}:00."}
-    if _terceros_hoy() >= TERCEROS_DIA_MAX:
+    if TERCEROS_DIA_MAX > 0 and _terceros_hoy() >= TERCEROS_DIA_MAX:
         return {"ok": False, "error": f"Ya van {TERCEROS_DIA_MAX} llamadas hoy, que es el tope."}
     en_curso = _tercero_en_curso()
     if en_curso:

@@ -214,6 +214,13 @@ class TestLlamar:
             m["estado"] = "hecha"
         assert "tope" in _llamar()["error"]
 
+    def test_sin_tope_por_defecto(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "TERCEROS_DIA_MAX", 0)
+        for _ in range(12):
+            assert _llamar()["ok"] is True
+            for m in main._terceros.values():
+                m["estado"] = "hecha"
+
     def test_llamame_no_gasta_el_tope(self, terceros, monkeypatch):
         monkeypatch.setattr(main, "TERCEROS_DIA_MAX", 1)
         monkeypatch.setattr(main, "MI_MOVIL", "711223344")

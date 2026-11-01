@@ -117,9 +117,10 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    Mikel»).
 5. **No se graba.** El audio no se guarda en ningún sitio, y la transcripción vive en la
    memoria del backend (las últimas 20 llamadas). Lo que queda es el aviso con el resumen.
-6. **Frenos**: nace apagado; entre las 9:00 y las 22:00 (`TERCEROS_DESDE/HASTA`); 8
-   llamadas al día como mucho (`TERCEROS_DIA_MAX`); una a la vez (la línea es una); 30 s de
-   timbre, 14 intervenciones del otro y 5 minutos de llamada.
+6. **Frenos**: nace apagado; entre las 9:00 y las 22:00 (`TERCEROS_DESDE/HASTA`); una a la
+   vez (la línea es una); 30 s de timbre, 14 intervenciones del otro y 5 minutos de
+   llamada. Sin tope diario desde el 2026-11-01, a petición de Mikel (`TERCEROS_DIA_MAX`,
+   0; con un número vuelve a haberlo, y «llámame» no cuenta).
 
 ## La línea O2 (parche 32 de claude-phone)
 
