@@ -1548,6 +1548,8 @@ tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
 - **Un «sí» suelto se perdía**: 300 ms de voz, y el detector tira lo que no llega a 350.
   En estas llamadas la voz mínima es 200 ms (`VOZ_MINIMA_MS`); el ruido suelto que se
   vio eran 40 ms.
+- **Y el silencio que cierra cada frase**, 0,9 s en vez de 1,5 (`FIN_FRASE_MS`): aquí
+  son respuestas cortas, y ese medio segundo largo se notaba en cada turno.
 
 ## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
 

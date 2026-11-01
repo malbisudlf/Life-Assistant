@@ -24,11 +24,14 @@ Sin dependencias: biblioteca estándar de Python, para no tener que mantener otr
 import hmac
 import json
 import os
+import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN      = os.environ.get("JARVIS_CLAUDE_TOKEN", "")
@@ -174,6 +177,164 @@ def turno(cuerpo: dict, ayuda: str) -> tuple:
         _cupo.release()
 
 
+# ── Las llamadas a otras personas (docs/LLAMADAS_TERCEROS.md) ─────────────────
+# Quien habla por teléfono con Erik es una sesión de Claude Code ABIERTA toda la llamada:
+# un `claude -p` por turno son unos segundos más de arranque, y por teléfono se notan. El
+# backend la abre al marcar (mientras suena) y cada frase del otro entra por stdin
+# (`--input-format stream-json`). Medido el 2026-11-01 con Haiku y esfuerzo bajo: 1,6-1,8 s
+# por turno, lo mismo que gpt-4o-mini.
+#
+# Sin NADA a mano, y más cerrada que la del chat: ni herramientas (`--tools ""`), ni un
+# solo servidor MCP (`--strict-mcp-config` sin `--mcp-config`), ni permisos que conceder.
+# Lo que diga por teléfono alguien que no es Mikel solo puede torcer una frase.
+TERCERO_MODELO   = os.environ.get("JARVIS_TERCERO_MODELO", "claude-haiku-5-5")
+TERCERO_ESFUERZO = os.environ.get("JARVIS_TERCERO_ESFUERZO", "low")
+# Un turno que no llega en esto deja la sesión desfasada (la respuesta llegaría tarde, en
+# el turno siguiente), así que se cierra y el backend sigue la llamada con OpenAI.
+TERCERO_TURNO_S  = float(os.environ.get("JARVIS_TERCERO_TURNO_S", "10"))
+# Una sesión que nadie usa en este rato se cierra sola: la llamada acabó y el backend no
+# pudo avisar (se reinició, por ejemplo).
+TERCERO_VIDA_S   = int(os.environ.get("JARVIS_TERCERO_VIDA_S", "600"))
+# La línea fija es una: más de dos es que algo se ha quedado colgado.
+TERCERO_MAX      = 2
+
+_terceros: dict = {}
+_terceros_lock = threading.Lock()
+
+
+def comando_tercero(sistema: str, ayuda: str) -> list:
+    """Los argumentos de la sesión de una llamada. Se exportan para poder probarlos."""
+    args = [CLAUDE_BIN, "-p",
+            "--model", TERCERO_MODELO,
+            "--input-format", "stream-json",
+            "--output-format", "stream-json", "--verbose",
+            "--tools", "",
+            "--strict-mcp-config",
+            "--permission-mode", "dontAsk",
+            "--no-session-persistence"]
+    if "--effort" in ayuda:
+        args += ["--effort", TERCERO_ESFUERZO]
+    if "--restricted" in ayuda:
+        args.append("--restricted")
+    if "--system-prompt-file" in ayuda:
+        args += ["--system-prompt-file", sistema]
+    else:
+        with open(sistema, encoding="utf-8") as f:
+            args += ["--system-prompt", f.read()]
+    return args
+
+
+class Tercero:
+    """Una sesión de Claude Code viva durante una llamada."""
+
+    def __init__(self, proceso, tmp: str):
+        self.proceso = proceso
+        self.tmp = tmp
+        self.usada = time.time()
+        self._turno = threading.Lock()
+        self._lineas: queue.Queue = queue.Queue()
+        threading.Thread(target=self._leer, daemon=True).start()
+
+    def _leer(self) -> None:
+        for linea in self.proceso.stdout:
+            self._lineas.put(linea)
+        self._lineas.put(None)
+
+    def turno(self, texto: str) -> str:
+        """Lo que contesta a `texto`. Lanza si no llega a tiempo o la sesión se cerró."""
+        with self._turno:
+            self.usada = time.time()
+            mensaje = {"type": "user", "message": {"role": "user", "content": texto}}
+            self.proceso.stdin.write(json.dumps(mensaje, ensure_ascii=False) + "\n")
+            self.proceso.stdin.flush()
+            fin = time.time() + TERCERO_TURNO_S
+            while True:
+                try:
+                    linea = self._lineas.get(timeout=max(0.01, fin - time.time()))
+                except queue.Empty:
+                    raise TimeoutError(f"sin respuesta en {TERCERO_TURNO_S:g} s")
+                if linea is None:
+                    raise EOFError("Claude Code se ha cerrado")
+                try:
+                    datos = json.loads(linea)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(datos, dict) and datos.get("type") == "result":
+                    if datos.get("is_error") or datos.get("subtype") not in (None, "success"):
+                        raise RuntimeError(str(datos.get("result") or datos.get("subtype"))[:300])
+                    return str(datos.get("result") or "").strip()
+
+    def cerrar(self) -> None:
+        try:
+            self.proceso.stdin.close()
+            self.proceso.wait(timeout=5)
+        except Exception:
+            self.proceso.kill()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+def tercero_abrir(cuerpo: dict, ayuda: str) -> tuple:
+    tid = str(cuerpo.get("id") or "")
+    sistema = str(cuerpo.get("sistema") or "")
+    if not _UUID.match(tid) or not sistema:
+        return 400, {"error": "Falta el id o el sistema"}
+    with _terceros_lock:
+        if tid in _terceros:
+            return 200, {"ok": True}
+        if len(_terceros) >= TERCERO_MAX:
+            return 429, {"error": "Ya hay demasiadas llamadas abiertas"}
+    tmp = tempfile.mkdtemp(prefix="jarvis-tercero-")
+    sis = os.path.join(tmp, "sistema.txt")
+    with open(sis, "w", encoding="utf-8") as f:
+        f.write(sistema)
+    os.makedirs(DIRECTORIO, exist_ok=True)
+    try:
+        proceso = subprocess.Popen(comando_tercero(sis, ayuda), stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, encoding="utf-8", cwd=DIRECTORIO, env=entorno())
+    except OSError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return 503, {"error": f"No se pudo lanzar Claude Code ({e})"}
+    with _terceros_lock:
+        _terceros[tid] = Tercero(proceso, tmp)
+    return 200, {"ok": True, "modelo": TERCERO_MODELO}
+
+
+def tercero_turno(cuerpo: dict) -> tuple:
+    tid = str(cuerpo.get("id") or "")
+    texto = str(cuerpo.get("texto") or "").strip()[:2000]
+    with _terceros_lock:
+        sesion = _terceros.get(tid)
+    if not sesion:
+        return 404, {"error": "No hay sesión abierta para esa llamada"}
+    if not texto:
+        return 400, {"error": "Falta el texto"}
+    try:
+        return 200, {"respuesta": sesion.turno(texto)}
+    except Exception as e:
+        # Desfasada o muerta: no se reutiliza. El backend sigue la llamada con OpenAI.
+        print(f"jarvis-claude: la sesión de la llamada {tid} falló ({e})", file=sys.stderr, flush=True)
+        tercero_cerrar({"id": tid})
+        return 502, {"error": str(e)[:300]}
+
+
+def tercero_cerrar(cuerpo: dict) -> tuple:
+    with _terceros_lock:
+        sesion = _terceros.pop(str(cuerpo.get("id") or ""), None)
+    if sesion:
+        sesion.cerrar()
+    return 200, {"ok": True}
+
+
+def _recoger_terceros() -> None:
+    while True:
+        time.sleep(30)
+        with _terceros_lock:
+            viejas = [t for t, s in _terceros.items() if time.time() - s.usada > TERCERO_VIDA_S]
+        for tid in viejas:
+            tercero_cerrar({"id": tid})
+
+
 class Manejador(BaseHTTPRequestHandler):
     ayuda = ""
 
@@ -196,7 +357,7 @@ class Manejador(BaseHTTPRequestHandler):
         # Sin token configurado no entra nadie: fail-closed, como en el backend.
         if not TOKEN or not hmac.compare_digest(recibido.encode(), f"Bearer {TOKEN}".encode()):
             return self._responder(401, {"error": "Token inválido"})
-        if self.path != "/turno":
+        if self.path not in ("/turno", "/tercero/abrir", "/tercero/turno", "/tercero/cerrar"):
             return self._responder(404, {"error": "No existe"})
         try:
             largo = int(self.headers.get("Content-Length") or 0)
@@ -210,6 +371,12 @@ class Manejador(BaseHTTPRequestHandler):
             return self._responder(400, {"error": "JSON inválido"})
         if not isinstance(cuerpo, dict):
             return self._responder(400, {"error": "JSON inválido"})
+        if self.path == "/tercero/abrir":
+            return self._responder(*tercero_abrir(cuerpo, self.ayuda))
+        if self.path == "/tercero/turno":
+            return self._responder(*tercero_turno(cuerpo))
+        if self.path == "/tercero/cerrar":
+            return self._responder(*tercero_cerrar(cuerpo))
         self._responder(*turno(cuerpo, self.ayuda))
 
     def log_message(self, formato, *args):
@@ -226,6 +393,7 @@ def main() -> None:
     if "--tools" not in Manejador.ayuda:
         # Sin `--tools` no hay forma de quitarle la terminal: mejor no arrancar.
         sys.exit("jarvis-claude: esta versión de Claude Code no tiene --tools; actualízala")
+    threading.Thread(target=_recoger_terceros, daemon=True).start()
     print(f"jarvis-claude: escuchando en {HOST}:{PUERTO} con {MODELO}", file=sys.stderr, flush=True)
     ThreadingHTTPServer((HOST, PUERTO), Manejador).serve_forever()
 

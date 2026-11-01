@@ -318,3 +318,61 @@ class TestElServicio:
             raise subprocess.TimeoutExpired(args, 1)
         monkeypatch.setattr(servicio.subprocess, "run", _colgado)
         assert servicio.turno({"turno": TURNO, "prompt": "hola", "sistema": ""}, "")[0] == 504
+
+
+class TestLaSesionDeUnaLlamada:
+    """La de las llamadas a otras personas: viva toda la llamada y sin NADA a mano."""
+
+    def test_sin_herramientas_ni_mcp_y_haiku_en_bajo(self, monkeypatch, tmp_path):
+        servicio = _servicio(monkeypatch)
+        sistema = tmp_path / "s.txt"
+        sistema.write_text("Eres Jarvis")
+        args = servicio.comando_tercero(str(sistema), "--tools --effort --system-prompt-file --restricted")
+        assert args[args.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in args and "--mcp-config" not in args
+        assert "--allowedTools" not in args
+        assert args[args.index("--model") + 1] == "claude-haiku-5-5"
+        assert args[args.index("--effort") + 1] == "low"
+        assert args[args.index("--input-format") + 1] == "stream-json"
+        assert "--restricted" in args
+
+    def test_un_turno_por_stdin(self, monkeypatch, tmp_path):
+        servicio = _servicio(monkeypatch)
+        escrito = []
+
+        class Entrada:
+            def write(self, t): escrito.append(t)
+            def flush(self): pass
+            def close(self): pass
+
+        lineas = [json.dumps({"type": "system"}) + "\n",
+                  json.dumps({"type": "result", "subtype": "success", "result": '{"decir": "Hola"}'}) + "\n"]
+        proceso = SimpleNamespace(stdin=Entrada(), stdout=iter(lineas), wait=lambda timeout=None: 0,
+                                  kill=lambda: None)
+        sesion = servicio.Tercero(proceso, str(tmp_path))
+        assert sesion.turno("¿Sí?") == '{"decir": "Hola"}'
+        assert json.loads(escrito[0])["message"] == {"role": "user", "content": "¿Sí?"}
+
+    def test_si_no_contesta_a_tiempo_lanza(self, monkeypatch, tmp_path):
+        servicio = _servicio(monkeypatch)
+        monkeypatch.setattr(servicio, "TERCERO_TURNO_S", 0.05)
+
+        class Entrada:
+            def write(self, t): pass
+            def flush(self): pass
+
+        def nunca():
+            import time
+            time.sleep(1)
+            yield from ()
+        sesion = servicio.Tercero(SimpleNamespace(stdin=Entrada(), stdout=nunca()), str(tmp_path))
+        with pytest.raises(TimeoutError):
+            sesion.turno("hola")
+
+    def test_turno_sin_sesion_es_404(self, monkeypatch):
+        servicio = _servicio(monkeypatch)
+        assert servicio.tercero_turno({"id": TURNO, "texto": "hola"})[0] == 404
+
+    def test_abrir_pide_id_valido(self, monkeypatch):
+        servicio = _servicio(monkeypatch)
+        assert servicio.tercero_abrir({"id": "x", "sistema": "s"}, "")[0] == 400

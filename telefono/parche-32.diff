@@ -1,6 +1,6 @@
 diff -ruN a/voice-app/index.js b/voice-app/index.js
 --- a/voice-app/index.js	2026-11-01 11:09:44.202783500 +0100
-+++ b/voice-app/index.js	2026-11-01 11:28:24.115737900 +0100
++++ b/voice-app/index.js	2026-11-01 11:40:08.860027300 +0100
 @@ -31,6 +31,9 @@
  var outboundModule = require("./lib/outbound-routes");
  var outboundRouter = outboundModule.router;
@@ -57,8 +57,8 @@ diff -ruN a/voice-app/index.js b/voice-app/index.js
          mediaServer: mediaServer,
 diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
 --- a/voice-app/lib/conversacion-tercero.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:28:24.135253500 +0100
-@@ -0,0 +1,250 @@
++++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:40:08.883732800 +0100
+@@ -0,0 +1,256 @@
 +/**
 + * Parche 32: la conversación de Jarvis con OTRA persona (llamar_a_alguien).
 + * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -91,6 +91,11 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +// un «sí» suelto de 300 ms (2026-11-01), y aquí un «sí» o un «vale» es justo la
 +// respuesta que se busca. El ruido suelto se queda en decenas de ms: sigue fuera.
 +const VOZ_MINIMA_MS = 200;
++// El silencio que da una frase por acabada. El de siempre (1,5 s, audio-fork.js) es para
++// hablar con Jarvis, que a veces se piensa lo que dice; aquí son respuestas cortas
++// («sí», «a las dos») y ese medio segundo largo se notaba en cada turno (2026-11-01).
++// La transcripción anticipada (400 ms, parche 26) sigue cabiendo antes.
++const FIN_FRASE_MS = 900;
 +const ESPERA_TURNO_MS = 15000;
 +const TURNOS_MAX = 20;
 +const PREGUNTA_BACKEND_MS = 15000;
@@ -228,6 +233,7 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +    }
 +    desarmar = armarAnticipo(session, o.whisperClient);
 +    if (typeof session.minSpeechMs === 'number') session.minSpeechMs = Math.min(session.minSpeechMs, VOZ_MINIMA_MS);
++    if (typeof session.endSilenceMs === 'number') session.endSilenceMs = Math.min(session.endSilenceMs, FIN_FRASE_MS);
 +
 +    // El «¿Sí?» del otro: se espera lo justo y Jarvis se presenta enseguida. Se transcribe
 +    // de fondo, solo para el historial de la llamada: a la presentación no le hace falta.
@@ -311,7 +317,7 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +module.exports = { runConversacionTercero, preguntarAlBackend, esperarSaludo, FRASES };
 diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 --- a/voice-app/lib/linea-o2.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/linea-o2.js	2026-11-01 11:28:24.118242800 +0100
++++ b/voice-app/lib/linea-o2.js	2026-11-01 11:40:08.867440900 +0100
 @@ -0,0 +1,199 @@
 +/**
 + * Parche 32: la línea fija de casa (O2/Telefónica) por SIP, para que Jarvis llame a
@@ -514,7 +520,7 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +module.exports = { LineaO2 };
 diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
 --- a/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:28:24.131252800 +0100
++++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:40:08.877686900 +0100
 @@ -51,7 +51,9 @@
      message,
      callerId,
@@ -569,7 +575,7 @@ diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.j
      // Modify endpoint with remote SDP to complete media connection
 diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 --- a/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:28:24.130252200 +0100
++++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:40:08.877686900 +0100
 @@ -11,6 +11,8 @@
  const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
@@ -751,8 +757,8 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
  
 diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 --- a/voice-app/test/parche32.test.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/test/parche32.test.js	2026-11-01 11:28:24.110741700 +0100
-@@ -0,0 +1,283 @@
++++ b/voice-app/test/parche32.test.js	2026-11-01 11:40:08.860027300 +0100
+@@ -0,0 +1,287 @@
 +/**
 + * Parche 32: la línea fija de O2 y la conversación con otra persona.
 + *
@@ -996,9 +1002,13 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  const e = escena({ oido: ['¿Sí?', 'Sí'], backend: [{ decir: 'Genial. ¡Adiós!', colgar: true }] });
 +  const sesiones = [];
 +  const original = e.o.audioForkServer.expectSession;
-+  e.o.audioForkServer.expectSession = async () => { const s = await original(); s.minSpeechMs = 350; sesiones.push(s); return s; };
++  e.o.audioForkServer.expectSession = async () => {
++    const s = await original(); s.minSpeechMs = 350; s.endSilenceMs = 1500; sesiones.push(s); return s;
++  };
 +  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
 +  assert.strictEqual(sesiones[0].minSpeechMs, 200);
++  // Y la frase se da por acabada a los 0,9 s de silencio, no a los 1,5.
++  assert.strictEqual(sesiones[0].endSilenceMs, 900);
 +});
 +
 +test('si nadie dice nada al descolgar, se presenta igual', async () => {

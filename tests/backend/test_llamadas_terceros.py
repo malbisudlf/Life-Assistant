@@ -62,6 +62,8 @@ def terceros(monkeypatch, mock_requests):
     monkeypatch.setattr(main, "ICLOUD_USUARIO", "")
     monkeypatch.setattr(main, "ICLOUD_CONTRASENA_APP", "")
     monkeypatch.setattr(main, "MI_MOVIL", "")
+    monkeypatch.setattr(main, "TERCEROS_MOTOR", "openai")
+    monkeypatch.setattr(main, "_terceros_claude_listo", {})
     monkeypatch.setattr(main, "get_valid_token", lambda: "graph-token")
     mock_requests.add("GET", "/me/contacts", _contactos(ERIK, ERIKA, ITZIAR))
     mock_requests.add("POST", "/api/outbound-call", FakeResponse({"success": True, "callId": "llamada-1"}))
@@ -439,3 +441,141 @@ class TestICloud:
         terceros.routes.insert(0, ("GET", "/me/contacts", _contactos(
             {**ERIK, "mobilePhone": "600222333"})))
         assert _llamar()["ok"] is True
+
+
+# ── Con Claude (una sesión de Claude Code en caja, sin nada a mano) ───────────
+def _respuesta_claude(datos):
+    return FakeResponse({"respuesta": "```json\n" + json.dumps(datos, ensure_ascii=False) + "\n```"})
+
+
+@pytest.fixture
+def con_claude(terceros, monkeypatch):
+    monkeypatch.setattr(main, "TERCEROS_MOTOR", "claude")
+    monkeypatch.setattr(main, "JARVIS_CLAUDE_URL", "http://caja.prueba:3340")
+    monkeypatch.setattr(main, "JARVIS_CLAUDE_TOKEN", "claude-token")
+    terceros.add("POST", "/tercero/abrir", FakeResponse({"ok": True}))
+    terceros.add("POST", "/tercero/cerrar", FakeResponse({"ok": True}))
+
+    def sin_openai():
+        raise AssertionError("no debía pensar OpenAI")
+    monkeypatch.setattr(main, "get_openai_client", sin_openai)
+    return terceros
+
+
+def _esperar_abierta():
+    for m in main._terceros.values():
+        main._terceros_claude_listo[m["tid"]].wait(2)
+        return m
+
+
+class TestConClaude:
+    def test_se_abre_al_marcar_con_el_encargo(self, con_claude):
+        assert _llamar()["ok"] is True
+        mision = _esperar_abierta()
+        assert mision["claude"] == "abierta"
+        _, url, kw = con_claude.called("POST", "/tercero/abrir")[0]
+        assert kw["json"]["id"] == mision["tid"]
+        assert "saber si come con Mikel" in kw["json"]["sistema"]
+        assert kw["headers"]["Authorization"] == "Bearer claude-token"
+
+    def test_piensa_claude_y_solo_le_llega_lo_nuevo(self, client, con_claude):
+        _llamar()
+        tid = _esperar_abierta()["tid"]
+        con_claude.add("POST", "/tercero/turno",
+                       _respuesta_claude({"decir": "¡Genial! ¿A qué hora?", "colgar": False, "resultado": ""}))
+        h = {"X-Auth-Token": TOKEN}
+        r = client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Sí, claro"}, headers=h).json()
+        assert r == {"decir": "¡Genial! ¿A qué hora?", "colgar": False}
+        client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "A las dos"}, headers=h)
+        textos = [kw["json"]["texto"] for _, _, kw in con_claude.called("POST", "/tercero/turno")]
+        assert textos == ["Sí, claro", "A las dos"]
+
+    def test_si_claude_falla_sigue_openai_hasta_el_final(self, client, con_claude, monkeypatch):
+        _llamar()
+        tid = _esperar_abierta()["tid"]
+        con_claude.add("POST", "/tercero/turno", FakeResponse({"error": "x"}, 502))
+        modelo = _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""},
+                         {"decir": "Adiós.", "colgar": True, "resultado": "Dice que sí."})
+        monkeypatch.setattr(main, "get_openai_client", lambda: modelo)
+        h = {"X-Auth-Token": TOKEN}
+        assert client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Hola"}, headers=h).json()["decir"] == "Vale."
+        assert client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Sí"}, headers=h).json()["colgar"] is True
+        assert len(con_claude.called("POST", "/tercero/turno")) == 1   # después, ya no
+        assert con_claude.called("POST", "/tercero/cerrar")
+        # OpenAI recibe la transcripción entera, no solo lo último.
+        assert [m["content"] for m in modelo.pedidos[1]["messages"] if m["role"] == "user"] == ["Hola", "Sí"]
+
+    def test_sin_json_tambien_cae_a_openai(self, client, con_claude, monkeypatch):
+        _llamar()
+        tid = _esperar_abierta()["tid"]
+        con_claude.add("POST", "/tercero/turno", FakeResponse({"respuesta": "Hola, ¿qué tal?"}))
+        monkeypatch.setattr(main, "get_openai_client",
+                            lambda: _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""}))
+        r = client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Hola"},
+                        headers={"X-Auth-Token": TOKEN}).json()
+        assert r["decir"] == "Vale."
+
+    def test_si_no_se_abre_piensa_openai(self, client, con_claude, monkeypatch):
+        con_claude.routes.insert(0, ("POST", "/tercero/abrir", FakeResponse({"error": "x"}, 503)))
+        _llamar()
+        mision = _esperar_abierta()
+        assert mision["claude"] == "rota"
+        monkeypatch.setattr(main, "get_openai_client",
+                            lambda: _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""}))
+        r = client.post(f"/telefono/tercero/{mision['tid']}/turno", json={"dicho": "Hola"},
+                        headers={"X-Auth-Token": TOKEN}).json()
+        assert r["decir"] == "Vale."
+        assert not con_claude.called("POST", "/tercero/turno")
+
+    def test_al_colgar_se_cierra(self, con_claude, monkeypatch):
+        monkeypatch.setattr(main, "_notificar", lambda *a, **kw: "movil")
+        monkeypatch.setattr(main, "_dormir", lambda s: None)
+        con_claude.add("GET", "/api/call/llamada-1", FakeResponse(
+            {"success": True, "data": {"state": "FAILED", "reason": "no_answer", "answeredAt": None}}))
+        _llamar()
+        mision = _esperar_abierta()
+        main._seguir_tercero(mision["tid"])
+        assert con_claude.called("POST", "/tercero/cerrar")
+        assert mision["tid"] not in main._terceros_claude_listo
+
+
+class TestDevolverLaLlamada:
+    def _seguir(self, terceros, monkeypatch, boca):
+        llamadas, avisos = [], []
+        monkeypatch.setattr(main, "_llamar_telefono",
+                            lambda texto, **kw: llamadas.append((texto, kw)) or True)
+        monkeypatch.setattr(main, "_notificar", lambda t, x, **kw: avisos.append(x) or "movil")
+        monkeypatch.setattr(main, "_dormir", lambda s: None)
+        terceros.add("GET", "/api/call/llamada-1", FakeResponse(
+            {"success": True, "data": {"state": "COMPLETED", "reason": "conversation_complete",
+                                       "answeredAt": "2026-11-01T11:00:05Z"}}))
+        marca = main._boca_actual.set(boca)
+        try:
+            _llamar(nombre="Erika")
+        finally:
+            main._boca_actual.reset(marca)
+        mision = next(iter(main._terceros.values()))
+        mision.update(estado="hablando", resultado="Erika dice que llega a las 21:30.")
+        main._seguir_tercero(mision["tid"])
+        return llamadas, avisos
+
+    def test_pedido_por_telefono_le_llama_y_solo_lee(self, terceros, monkeypatch):
+        llamadas, avisos = self._seguir(terceros, monkeypatch, "telefono")
+        assert avisos == ["Erika dice que llega a las 21:30."]
+        texto, kw = llamadas[0]
+        assert texto == "Señor, le cuento la llamada a Erika Ruiz. Erika dice que llega a las 21:30."
+        # Solo lee y cuelga: con la conversación, contestaría el Claude Code con terminal.
+        assert kw["modo"] == "announce"
+
+    def test_pedido_por_el_chat_basta_el_aviso(self, terceros, monkeypatch):
+        llamadas, avisos = self._seguir(terceros, monkeypatch, "chat")
+        assert avisos and not llamadas
+
+    def test_llamar_telefono_en_modo_aviso(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "TELEFONO_URL", VOZ)
+        monkeypatch.setattr(main, "TELEFONO_EXTENSION", "11411")
+        monkeypatch.setattr(main, "_insistir_en_segundo_plano", lambda *a: None)
+        mock_requests.add("POST", "/api/outbound-call", FakeResponse({"success": True, "callId": "c"}))
+        assert main._llamar_telefono("Hola", modo="announce") is True
+        _, _, kw = mock_requests.called("POST", "/api/outbound-call")[0]
+        assert kw["json"]["mode"] == "announce"

@@ -61,12 +61,24 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
 
 ## Las reglas
 
-1. **Al otro lado no hay herramientas.** La conversación con el tercero la piensa el
-   backend (`_tercero_turno`) con un modelo al que no se le da ninguna herramienta, no el
-   Claude Code con shell en `caja` que te atiende a ti. Lo que diga por teléfono alguien
+1. **Al otro lado no hay herramientas.** La conversación con el tercero la piensa
+   (`_tercero_turno`) una sesión de Claude Code sin NADA a mano —Haiku con esfuerzo bajo,
+   sin herramientas, sin MCP (`--strict-mcp-config` sin config), con tu suscripción— que
+   `chat/jarvis_claude.py` abre al marcar, mientras suena, y mantiene viva toda la llamada
+   (`TERCEROS_MOTOR=claude`, desde el 2026-11-01; medido: 1,6-1,8 s por turno, como
+   gpt-4o-mini, y arrancándola en cada turno serían unos segundos más). Si falla en un
+   turno, la llamada sigue con OpenAI (gpt-4o-mini, sin herramientas) hasta el final. No
+   es el Claude Code con shell en `caja` que te atiende a ti. Lo que diga por teléfono alguien
    que no eres tú —o quien conteste el teléfono de Erik— es texto de cualquiera: aquí solo
    puede torcer una frase de la llamada, nunca ejecutar nada. Y el resumen que te llega va
    marcado como dato (`_AVISO_WEB`) cuando Jarvis lo vuelve a leer.
+
+   **Si se lo encargaste por teléfono, al acabar te llama para contártelo**
+   (`_devolver_llamada`), además del aviso escrito. Pero en modo *aviso*: lee el
+   resultado y cuelga. En una conversación te atendería el Claude Code con shell, y el
+   resultado sale de lo que dijo alguien que no eres tú. Para preguntar más, «¿qué ha
+   dicho Aita?» en otra llamada (`llamadas_a_otros`, que lo marca como dato). Pedido por
+   el chat o por Telegram, basta el aviso.
 2. **Solo a quien ya tienes.** `llamar_a_alguien` busca un nombre en tus contactos de
    Outlook (208 en noviembre de 2026, 177 con teléfono) y de iCloud, que son los del
    iPhone (CardDAV a `contacts.icloud.com`, solo lectura, con una contraseña de
