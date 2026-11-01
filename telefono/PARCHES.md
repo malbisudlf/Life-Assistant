@@ -1501,7 +1501,7 @@ parches 1-31 ya puestos).
 | `lib/outbound-handler.js` | `lineaO2`: marca por el proxy de O2, sin credencial; `answeredBy` es siempre `unknown` (el truco del Contact es del 3CX) |
 | `lib/outbound-routes.js` | `mode: "tercero"` + `linea: "o2"` (van juntos), `tercero` (el id del backend) y solo números de persona de España. Registra antes de marcar y suelta en el `finally` |
 | `index.js` | Crea la línea al conectar con drachtio si hay `O2_SIP_USUARIO`, y **rechaza con 480 toda llamada entrante que venga del proxy de O2** |
-| `test/parche32.test.js` (nuevo) | 16 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
+| `test/parche32.test.js` (nuevo) | 21 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
 
 Variables nuevas en `~/.claude-phone/.env`: `O2_SIP_USUARIO`, `O2_PROXY` (`ip:5070`),
 `O2_DOMINIO` (opcional, `telefonica.net`) y `TELEFONO_TERCEROS_TOKEN`.
@@ -1539,7 +1539,15 @@ tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
   generando la presentación. La presentación se pide ahora a la voz al marcar
   (`aperturaUrl`, en `outbound-routes.js`): la voz en directo guarda la frase entera y la
   sirve desde el principio cuando FreeSWITCH la pide, así que al descolgar ya está. Si
-  falla, se pide al descolgar como antes. Queda la espera del saludo.
+  falla, se pide al descolgar como antes.
+- **Y la espera del saludo**, que era el resto: el «¿Sí?» se esperaba como un turno
+  normal (1,5 s de silencio para cerrarlo, 4 s de tope). Ahora `esperarSaludo` mira el
+  detector de voz: tras hablar y callar 450 ms, o si en 2 s no ha empezado a hablar,
+  Jarvis se presenta (tope 3 s), y el saludo se transcribe de fondo. Probado: de
+  descolgar a oír la presentación, **1,1 s** (antes 4,8).
+- **Un «sí» suelto se perdía**: 300 ms de voz, y el detector tira lo que no llega a 350.
+  En estas llamadas la voz mínima es 200 ms (`VOZ_MINIMA_MS`); el ruido suelto que se
+  vio eran 40 ms.
 
 ## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
 
