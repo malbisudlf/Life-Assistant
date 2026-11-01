@@ -1550,6 +1550,11 @@ tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
   vio eran 40 ms.
 - **Y el silencio que cierra cada frase**, 0,9 s en vez de 1,5 (`FIN_FRASE_MS`): aquí
   son respuestas cortas, y ese medio segundo largo se notaba en cada turno.
+- **Y lo preparado**: el backend (Claude) escribe un guion con las respuestas probables
+  mientras suena; `prepararGuion` lo lee de `GET /telefono/tercero/{id}/guion` y pide la
+  voz de esas frases por adelantado (se usa si la respuesta es una de ellas). Y se
+  transcribe con el modelo pequeño del oído: `conModeloRapido` añade `rapido` a cada
+  `transcribe`, que `whisper-client.js` manda como `X-Modelo: rapido`.
 
 ## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
 

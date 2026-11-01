@@ -21858,7 +21858,10 @@ TERCEROS_MOTOR           = (os.getenv("TERCEROS_MOTOR", "openai") or "openai").s
 # Lo más que se espera a Claude en un turno (la voice-app espera 15 s al backend entero) y
 # a que la sesión acabe de abrirse si el otro contesta antes.
 TERCEROS_CLAUDE_TIMEOUT  = float(os.getenv("TERCEROS_CLAUDE_TIMEOUT", "8"))
-TERCEROS_CLAUDE_ESPERA   = 4.0
+# Abrirla y preparar el guion (ver `_TERCERO_GUION`) cabe de sobra en lo que suena y dura
+# la presentación; si el otro contesta antes, su turno espera hasta esto.
+TERCEROS_CLAUDE_ESPERA   = 8.0
+TERCEROS_GUION_MAX       = 8
 # Cuánto vale la copia de los contactos. Si un nombre no está, se vuelve a mirar en el
 # momento: el que acabas de guardar en el móvil no espera diez minutos.
 TERCEROS_CONTACTOS_SEG   = 600
@@ -22188,7 +22191,7 @@ def _j_llamar_a_alguien(nombre: str, mensaje: str, objetivo: str, contexto: str 
               # `_devolver_llamada`). Por el chat o Telegram basta el aviso.
               "devolver": _boca_actual.get() == "telefono" and not propio,
               "claude": "abriendo" if _tercero_con_claude() else "", "dia": _ahora_local().date().isoformat(), "turnos": [{"quien": "jarvis", "texto": apertura}],
-              "resultado": "", "call_id": "", "fin": ""}
+              "resultado": "", "call_id": "", "fin": "", "guion": {}, "aciertos": 0}
     with _terceros_lock:
         _terceros[tid] = mision
         # Las más viejas fuera: en memoria se queda lo justo para «¿qué ha dicho Erik?».
@@ -22246,12 +22249,49 @@ Responde SOLO con un JSON: {{"decir": "lo que dices ahora", "colgar": true o fal
 «Erik dice que sí, a las 14:30»); vacío si todavía no hay nada"}}"""
 
 
-def _tercero_sistema(mision: dict) -> str:
-    return _TERCERO_SISTEMA.format(
+# Lo que solo sabe la sesión de Claude: el guion. Jarvis sabe a quién llama y para qué, y
+# las respuestas a su presentación son pocas; mientras suena las prepara, la voice-app
+# genera su voz por adelantado y en cada turno Claude solo dice cuál toca (unas pocas
+# palabras en vez de la frase entera). Lo que no encaja se contesta como siempre. Pedido
+# el 2026-11-01: «Jarvis sabe que va a llamar, que se prepare».
+_TERCERO_GUION = """
+
+Cómo te llegan los mensajes en esta conversación:
+- El primero lo escribe el sistema, no la persona: «PREPARA_GUION». Contesta SOLO con un \
+JSON {{"ramas": [{{"id": "B1", "cuando": "lo que ha dicho la persona", "decir": "lo que \
+contestas", "colgar": true o false}}, ...]}} con las 4 a 6 respuestas más probables a tu \
+presentación (por ejemplo: que sí, que no, que te da el dato que buscas, que pregunta quién \
+eres, que ahora no puede hablar, que ha saltado un buzón de voz). Cada "decir" tiene que \
+valer tal cual, sin datos que aún no sabes: si te da una hora, «Perfecto, se lo digo a \
+Mikel. ¡Hasta luego!», sin repetir la hora.
+- Los demás mensajes son lo que dice la persona, transcrito. Si encaja de verdad con una \
+rama del guion, contesta SOLO {{"rama": "B2"}}. Si no encaja del todo, contesta con el JSON \
+completo de siempre."""
+
+
+def _tercero_sistema(mision: dict, guion: bool = False) -> str:
+    return (_TERCERO_SISTEMA + (_TERCERO_GUION if guion else "")).format(
         nombre=("el propio Mikel (una prueba de la línea: le hablas de usted y le llamas "
                 "«señor»)" if mision.get("propio") else mision["nombre"]),
         apertura=mision["apertura"], objetivo=mision["objetivo"],
         contexto=mision["contexto"] or "nada más que el motivo de la llamada")
+
+
+def _guion_de(texto: str) -> dict:
+    """Las ramas que ha preparado Claude: id -> {decir, colgar}. Lo que no cuadra, fuera."""
+    m = re.search(r"\{.*\}", texto or "", re.S)
+    try:
+        ramas = (json.loads(m.group(0)) if m else {}).get("ramas") or []
+    except (ValueError, AttributeError):
+        return {}
+    guion = {}
+    for r in ramas[:TERCEROS_GUION_MAX] if isinstance(ramas, list) else []:
+        if not isinstance(r, dict):
+            continue
+        rid, decir = str(r.get("id") or ""), str(r.get("decir") or "").strip()
+        if re.fullmatch(r"B\d{1,2}", rid) and 0 < len(decir) <= 200:
+            guion[rid] = {"decir": decir, "colgar": bool(r.get("colgar"))}
+    return guion
 
 
 def _tercero_con_claude() -> bool:
@@ -22269,11 +22309,21 @@ def _tercero_claude(ruta: str, cuerpo: dict, timeout: float) -> dict:
 def _abrir_tercero_claude(mision: dict) -> None:
     """Abre la sesión de Claude de la llamada mientras suena. En un hilo."""
     try:
-        _tercero_claude("abrir", {"id": mision["tid"], "sistema": _tercero_sistema(mision)}, 30)
+        _tercero_claude("abrir", {"id": mision["tid"], "sistema": _tercero_sistema(mision, True)}, 30)
         if mision["claude"] == "abriendo":
             mision["claude"] = "abierta"
     except Exception as e:
         logger.warning("Terceros: no se pudo abrir la sesión de Claude (%s); piensa OpenAI", e)
+        mision["claude"] = "rota"
+        return
+    try:
+        texto = _tercero_claude("turno", {"id": mision["tid"], "texto": "PREPARA_GUION"},
+                                20).get("respuesta") or ""
+        mision["guion"] = _guion_de(texto)
+        logger.info("Terceros: guion de %d ramas (%s)", len(mision["guion"]), mision["tid"])
+    except Exception as e:
+        # Un turno fallido cierra la sesión en caja: sin guion y sin Claude, piensa OpenAI.
+        logger.warning("Terceros: no se pudo preparar el guion (%s); piensa OpenAI", e)
         mision["claude"] = "rota"
     finally:
         listo = _terceros_claude_listo.get(mision["tid"])
@@ -22311,7 +22361,16 @@ def _tercero_turno_claude(mision: dict) -> dict:
     m = re.search(r"\{.*\}", texto, re.S)
     if not m:
         raise ValueError("Claude no devolvió JSON")
-    return _tercero_respuesta(json.loads(m.group(0)))
+    datos = json.loads(m.group(0))
+    rama = datos.get("rama") if isinstance(datos, dict) and not datos.get("decir") else None
+    if rama:
+        elegida = mision["guion"].get(str(rama))
+        if not elegida:
+            raise ValueError(f"rama desconocida ({str(rama)[:10]})")
+        mision["aciertos"] += 1
+        # El resultado lo saca `_resumir_tercero` de la transcripción al colgar.
+        return {"decir": elegida["decir"], "colgar": elegida["colgar"], "resultado": ""}
+    return _tercero_respuesta(datos)
 
 
 def _tercero_turno(mision: dict) -> dict:
@@ -22383,6 +22442,21 @@ def telefono_tercero_turno(request: Request, body: TerceroTurnoIn,
     return {"decir": r["decir"], "colgar": r["colgar"]}
 
 
+@app.get("/telefono/tercero/{tid}/guion")
+def telefono_tercero_guion(request: Request, tid: str = Path(..., pattern=_UUID_PATTERN)):
+    """Las frases del guion, para que la voice-app genere su voz antes de que hagan falta.
+    `listo` dice que no va a haber más (preparado, o sin Claude): deja de preguntar."""
+    if not _token_ok(_extract_service_token(request), TELEFONO_TERCEROS_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    with _terceros_lock:
+        mision = _terceros.get(tid)
+    if not mision:
+        raise HTTPException(status_code=404, detail="No existe esa llamada")
+    listo = _terceros_claude_listo.get(tid)
+    return {"frases": [r["decir"] for r in mision["guion"].values()],
+            "listo": not listo or listo.is_set()}
+
+
 # Cómo acabó, dicho para el aviso: lo que devuelve claude-phone en `reason`.
 _TERCERO_SIN_HABLAR = {"no_answer": "no lo ha cogido", "busy": "comunicaba",
                        "declined": "ha rechazado la llamada", "not_found": "el número no existe",
@@ -22452,7 +22526,8 @@ def _seguir_tercero(tid: str) -> None:
         mision.update(estado="fallida", fin=razon or "sin noticias de la voice-app")
         texto = f"He intentado llamar a {mision['nombre']}, pero la llamada no ha salido bien."
     _cerrar_tercero_claude(mision)
-    logger.info("Terceros: llamada %s terminada (%s, %s)", tid, mision["estado"], mision["fin"])
+    logger.info("Terceros: llamada %s terminada (%s, %s; %d del guion)", tid, mision["estado"],
+                mision["fin"], mision["aciertos"])
     _notificar(f"📞 {mision['nombre']}", texto)
     if mision.get("devolver"):
         _devolver_llamada(mision, texto)

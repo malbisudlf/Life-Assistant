@@ -73,6 +73,19 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    puede torcer una frase de la llamada, nunca ejecutar nada. Y el resumen que te llega va
    marcado como dato (`_AVISO_WEB`) cuando Jarvis lo vuelve a leer.
 
+   **Se prepara mientras suena** (2026-11-01, «Jarvis sabe que va a llamar»). Al abrir la
+   sesión, Claude escribe un guion: las 4-6 respuestas probables a su presentación (que
+   sí, que no, que da el dato, que quién es, que no puede, un buzón) con lo que contestará
+   a cada una (`PREPARA_GUION`, `_guion_de`). La voice-app lo lee
+   (`GET /telefono/tercero/{id}/guion`) y genera la voz de esas frases mientras el otro
+   habla; en cada turno Claude solo dice qué rama toca (`{"rama": "B2"}`) y la frase
+   suena al instante. Lo que no encaja se contesta entero, como siempre; el resultado lo
+   saca al colgar `_resumir_tercero` de la transcripción. Y la transcripción, con el modelo
+   pequeño del oído (`small`, ~0,3 s en vez de ~1,1). Medido antes de esto: ~4,5 s desde que
+   el otro calla hasta oír a Jarvis (0,9 de silencio, 0,7 de transcripción, 2,1-2,6 de
+   Claude, 0,65 de voz). Por debajo de ~2,5 s no se baja con Claude por la suscripción: el
+   silencio que cierra la frase y lo que tarda en empezar a contestar ya suman eso.
+
    **Si se lo encargaste por teléfono, al acabar te llama para contártelo**
    (`_devolver_llamada`), además del aviso escrito. Pero en modo *aviso*: lee el
    resultado y cuelga. En una conversación te atendería el Claude Code con shell, y el
