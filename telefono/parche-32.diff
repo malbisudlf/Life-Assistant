@@ -1,6 +1,6 @@
 diff -ruN a/voice-app/index.js b/voice-app/index.js
 --- a/voice-app/index.js	2026-11-01 11:09:44.202783500 +0100
-+++ b/voice-app/index.js	2026-11-01 11:53:05.833636600 +0100
++++ b/voice-app/index.js	2026-11-01 12:53:06.499300700 +0100
 @@ -31,6 +31,9 @@
  var outboundModule = require("./lib/outbound-routes");
  var outboundRouter = outboundModule.router;
@@ -57,8 +57,8 @@ diff -ruN a/voice-app/index.js b/voice-app/index.js
          mediaServer: mediaServer,
 diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
 --- a/voice-app/lib/conversacion-tercero.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:53:05.845156900 +0100
-@@ -0,0 +1,315 @@
++++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 12:53:06.516566000 +0100
+@@ -0,0 +1,428 @@
 +/**
 + * Parche 32: la conversación de Jarvis con OTRA persona (llamar_a_alguien).
 + * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -106,19 +106,51 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +// Lo más que se espera a FreeSWITCH al cerrar el audio: con la llamada ya colgada,
 +// forkAudioStop puede no contestar nunca (EPIPE) y dejar la conversación sin terminar.
 +const CIERRE_MS = 2000;
++// El buzón de voz. Un «¿Sí?» dura menos de un segundo; una locución («El número al que
++// llama no está disponible; deje su mensaje después de la señal»), varios. Si a los
++// ESPERA_SALUDO_MS sigue hablando, se le deja acabar (hasta LOCUCION_MAX_MS); y con más
++// de SALUDO_LARGO_MS de audio se mira qué ha dicho antes de presentarse. Si es un buzón,
++// se espera al pitido (PITIDO_SILENCIO_MS callado tras él) y se deja el recado: la
++// presentación, que ya dice el motivo, y FRASES.recado. Sin esto, Jarvis se presentaba
++// encima de la locución y el buzón le cortaba (2026-11-01).
++const SALUDO_LARGO_MS = 1800;
++const LOCUCION_MAX_MS = 30000;
++const BUZON_TRANSCRIPCION_MS = 3000;
++// Una locución grabada hace pausas entre frases; 1,5 s callado ya es el pitido y después.
++const PITIDO_SILENCIO_MS = 1500;
++const PITIDO_MAX_MS = 15000;
++// Lo que dice un buzón. Va por lo que transcribe el oído, que con el modelo pequeño y el
++// idioma en español TRADUCE las locuciones en inglés: la de Mikel salió como «Tu llamada
++// ha estado forwardada a Voice Mail. Si lo estás intentando alcanzar, no es disponible»
++// (2026-11-01). Por eso hay palabras de los dos idiomas y de la traducción.
++const BUZON_RE = new RegExp([
++  'mensaje', 'se[ñn]al', 'buz[oó]n', 'contestador', 'correo de voz', 'voice ?mail',
++  'disponible', 'available', 'grab(e|ar|aci)', 'tono', 'desv[ií]', 'forward', 'alcanzar',
++  'leave a message', 'after the (tone|beep)'
++].join('|'), 'i');
 +
 +const FRASES = {
 +  hola: '¿Hola? ¿Me oyes?',
 +  repite: 'Perdona, no te he entendido bien. ¿Me lo repites?',
 +  fallo: 'Perdona, se me ha cortado algo por aquí. Mikel te escribirá. ¡Hasta luego!',
-+  tope: 'Bueno, te dejo, que se lo cuento a Mikel. ¡Hasta luego!'
++  tope: 'Bueno, te dejo, que se lo cuento a Mikel. ¡Hasta luego!',
++  recado: 'Cuando puedas, contéstale a Mikel. ¡Hasta luego!'
 +};
++
++function dormir(ms) {
++  return new Promise(function (r) { setTimeout(r, ms); });
++}
++
++/** Milisegundos de audio: 16 kHz, 16 bits, mono (el fork de FreeSWITCH). */
++function duracionMs(audio) {
++  return audio ? audio.length / 32 : 0;
++}
 +
 +/**
 + * Espera el «¿Sí?» de quien descuelga, sin la espera de un turno normal. Vuelve con
 + * {audio} en cuanto, tras hablar, lleva SALUDO_SILENCIO_MS callado (o la frase se cierra
-+ * sola); con null si en SALUDO_NADIE_MS no ha empezado a hablar o si pasa
-+ * ESPERA_SALUDO_MS. Mira el estado del detector de voz de la sesión (audio-fork.js), que
++ * sola); con null si en SALUDO_NADIE_MS no ha empezado a hablar; y si a los
++ * ESPERA_SALUDO_MS sigue hablando, con lo dicho y `larga` (una locución). Mira el estado del detector de voz de la sesión (audio-fork.js), que
 + * es quien sabe si está hablando; quien llama apaga la captura después, lo que descarta
 + * la frase a medias.
 + */
@@ -143,7 +175,52 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +      const pasado = Date.now() - inicio;
 +      if (session._inSpeech && session._silenceMs >= SALUDO_SILENCIO_MS) return acabar(loDicho());
 +      if (!session._inSpeech && pasado >= SALUDO_NADIE_MS) return acabar(null);
-+      if (pasado >= ESPERA_SALUDO_MS) return acabar(session._inSpeech ? loDicho() : null);
++      if (pasado >= ESPERA_SALUDO_MS) {
++        return acabar(session._inSpeech
++          ? Object.assign(loDicho() || { audio: Buffer.alloc(0) }, { larga: true }) : null);
++      }
++    }, SALUDO_SONDEO_MS);
++  });
++}
++
++/**
++ * Deja acabar una locución larga: vuelve con la frase entera (`larga`) cuando el detector
++ * la cierra, o con lo último que tenía si la tira o pasa LOCUCION_MAX_MS.
++ */
++function esperarLocucion(session) {
++  return new Promise(function (resolver) {
++    const inicio = Date.now();
++    let ultimo = null;
++    let hecho = false;
++    const acabar = function (u) {
++      if (hecho) return;
++      hecho = true;
++      clearInterval(sondeo);
++      session.off('utterance', alAcabar);
++      resolver(u || ultimo);
++    };
++    const alAcabar = function (u) { acabar(Object.assign({}, u, { larga: true })); };
++    session.on('utterance', alAcabar);
++    const sondeo = setInterval(function () {
++      if (session._utteranceChunks && session._utteranceChunks.length) {
++        ultimo = { audio: Buffer.concat(session._utteranceChunks), larga: true };
++      }
++      if (!session._inSpeech || Date.now() - inicio >= LOCUCION_MAX_MS) acabar(null);
++    }, SALUDO_SONDEO_MS);
++  });
++}
++
++/** El pitido del buzón: espera a PITIDO_SILENCIO_MS sin voz (el pitido cuenta como voz). */
++function esperarSilencio(session) {
++  return new Promise(function (resolver) {
++    const inicio = Date.now();
++    let callado = Date.now();
++    const sondeo = setInterval(function () {
++      if (session._inSpeech) callado = Date.now();
++      if (Date.now() - callado >= PITIDO_SILENCIO_MS || Date.now() - inicio >= PITIDO_MAX_MS) {
++        clearInterval(sondeo);
++        resolver();
++      }
 +    }, SALUDO_SONDEO_MS);
 +  });
 +}
@@ -294,18 +371,41 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +    if (typeof session.endSilenceMs === 'number') session.endSilenceMs = Math.min(session.endSilenceMs, FIN_FRASE_MS);
 +
 +    // El «¿Sí?» del otro: se espera lo justo y Jarvis se presenta enseguida. Se transcribe
-+    // de fondo, solo para el historial de la llamada: a la presentación no le hace falta.
++    // de fondo, para el historial; solo si es largo (una locución) se mira antes qué dice.
 +    session.setCaptureEnabled(true);
-+    const saludo = await (o.esperarSaludo || esperarSaludo)(session);
++    let saludo = await (o.esperarSaludo || esperarSaludo)(session);
++    if (saludo && saludo.larga && activa) {
++      saludo = (await (o.esperarLocucion || esperarLocucion)(session)) || saludo;
++    }
++    let buzon = false;
++    let transcrito = null;
++    if (saludo && activa) {
++      transcrito = transcribirFrase(oido, saludo, log).catch(function () { return ''; });
++      if (saludo.larga || duracionMs(saludo.audio) >= SALUDO_LARGO_MS) {
++        const t = String(await Promise.race([transcrito, dormir(BUZON_TRANSCRIPCION_MS).then(function () { return ''; })]) || '');
++        buzon = BUZON_RE.test(t);
++        if (buzon && activa) {
++          log('TERCERO: buzón de voz («' + t.slice(0, 60) + '»); espero al pitido');
++          await (o.esperarSilencio || esperarSilencio)(session);
++        }
++      }
++    }
 +    session.setCaptureEnabled(false);
 +    if (!activa) { fin = 'hangup'; return { endReason: fin }; }
-+    if (saludo) {
-+      transcribirFrase(oido, saludo, log).then(function (t) {
++    if (transcrito) {
++      transcrito.then(function (t) {
 +        if (t && t.trim()) {
 +          if (o.onTurno) o.onTurno('otro', t.trim());
 +          if (o.onUserTurn) o.onUserTurn(t.trim());
 +        }
-+      }, function () {});
++      });
++    }
++    if (buzon) {
++      // El recado: la presentación (ya dice quién y para qué) y que le conteste a Mikel.
++      await decir(o.apertura, o.aperturaUrl);
++      if (activa) await decir(FRASES.recado);
++      fin = activa ? 'voicemail' : 'hangup';
++      return { endReason: fin };
 +    }
 +
 +    let interrumpio = await decir(o.apertura, o.aperturaUrl);
@@ -333,6 +433,19 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +
 +      const dicho = String(await transcribirFrase(oido, frase, log).catch(function () { return ''; }) || '').trim();
 +      if (!activa) break;
++      if (turnos === 1 && BUZON_RE.test(dicho)) {
++        // El buzón se ha reconocido tarde (la locución hizo una pausa y Jarvis ya se había
++        // presentado encima): se espera al pitido y se deja el recado entero.
++        log('TERCERO: buzón de voz en la primera respuesta («' + dicho.slice(0, 60) + '»); espero al pitido');
++        if (o.onTurno) o.onTurno('otro', dicho);
++        session.setCaptureEnabled(true);
++        await (o.esperarSilencio || esperarSilencio)(session);
++        session.setCaptureEnabled(false);
++        if (activa) await decir(o.apertura, o.aperturaUrl);
++        if (activa) await decir(FRASES.recado);
++        fin = activa ? 'voicemail' : 'hangup';
++        return { endReason: fin };
++      }
 +      if (dicho.length < 2) {
 +        interrumpio = await decir(FRASES.repite);
 +        continue;
@@ -372,11 +485,11 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +  return { endReason: fin };
 +}
 +
-+module.exports = { runConversacionTercero, preguntarAlBackend, esperarSaludo, prepararGuion,
-+                   conModeloRapido, FRASES };
++module.exports = { runConversacionTercero, preguntarAlBackend, esperarSaludo, esperarLocucion,
++                   esperarSilencio, prepararGuion, conModeloRapido, FRASES };
 diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 --- a/voice-app/lib/linea-o2.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/linea-o2.js	2026-11-01 11:53:05.834136700 +0100
++++ b/voice-app/lib/linea-o2.js	2026-11-01 12:53:06.501299200 +0100
 @@ -0,0 +1,199 @@
 +/**
 + * Parche 32: la línea fija de casa (O2/Telefónica) por SIP, para que Jarvis llame a
@@ -579,7 +692,7 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +module.exports = { LineaO2 };
 diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
 --- a/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:53:05.845156900 +0100
++++ b/voice-app/lib/outbound-handler.js	2026-11-01 12:53:06.513048100 +0100
 @@ -51,7 +51,9 @@
      message,
      callerId,
@@ -634,7 +747,7 @@ diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.j
      // Modify endpoint with remote SDP to complete media connection
 diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 --- a/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:53:05.845156900 +0100
++++ b/voice-app/lib/outbound-routes.js	2026-11-01 12:53:06.512042800 +0100
 @@ -11,6 +11,8 @@
  const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
@@ -762,7 +875,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          var endpoint = result.endpoint;
  
          session.setDialog(dialog);
-@@ -263,6 +326,34 @@
+@@ -263,6 +326,35 @@
          session.answeredBy = result.answeredBy || 'unknown';
          var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
  
@@ -788,6 +901,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 +          });
 +          var motivoT = 'conversation_complete';
 +          if (finT.endReason === 'silence') motivoT = 'no_speech';
++          else if (finT.endReason === 'voicemail') motivoT = 'voicemail_message';
 +          else if (finT.endReason === 'error' || finT.endReason === 'no_audio') motivoT = 'conversation_error';
 +          session.transition('COMPLETED', motivoT);
 +          await hangupCall(dialog, endpoint, callId);
@@ -797,7 +911,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          if (detectVoicemail && session.answeredBy === 'voicemail') {
            if (!voicemailMessage) {
              // El FAILED antes de colgar: así ningún BYE posterior puede reescribir el final.
-@@ -359,6 +450,8 @@
+@@ -359,6 +451,8 @@
          if (session.dialog || session.endpoint) {
            await hangupCall(session.dialog, session.endpoint, callId);
          }
@@ -806,7 +920,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
        }
      })();
  
-@@ -467,6 +560,7 @@
+@@ -467,6 +561,7 @@
    claudeBridge = deps.claudeBridge || null;
    ttsService = deps.ttsService || null;
    wsPort = deps.wsPort || 3001;
@@ -816,7 +930,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
  
 diff -ruN a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
 --- a/voice-app/lib/whisper-client.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/whisper-client.js	2026-11-01 11:53:05.845156900 +0100
++++ b/voice-app/lib/whisper-client.js	2026-11-01 12:53:06.512042800 +0100
 @@ -69,13 +69,16 @@
   * 16 kHz con ffmpeg. No admite `prompt`: `turbo` ya escribe bien «Jarvis».
   * @returns {Promise<{texto: string, ms: number}>}
@@ -867,8 +981,8 @@ diff -ruN a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
        const motivo = e.name === "TimeoutError" ? "sin respuesta en " + OIDO_TIMEOUT_MS + " ms" : (e.cause && e.cause.code) || e.message;
 diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 --- a/voice-app/test/parche32.test.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/test/parche32.test.js	2026-11-01 11:53:05.826900900 +0100
-@@ -0,0 +1,340 @@
++++ b/voice-app/test/parche32.test.js	2026-11-01 12:53:06.487739300 +0100
+@@ -0,0 +1,414 @@
 +/**
 + * Parche 32: la línea fija de O2 y la conversación con otra persona.
 + *
@@ -884,7 +998,8 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
 +
 +const { LineaO2 } = require('../lib/linea-o2');
-+const { runConversacionTercero, esperarSaludo, prepararGuion, conModeloRapido, FRASES } = require('../lib/conversacion-tercero');
++const { runConversacionTercero, esperarSaludo, esperarLocucion, esperarSilencio, prepararGuion,
++        conModeloRapido, FRASES } = require('../lib/conversacion-tercero');
 +
 +const USUARIO = 'usuario-de-prueba';
 +const TID = '11111111-2222-3333-4444-555555555555';
@@ -1169,6 +1284,79 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  await rapido.transcribe(Buffer.from(''), { soloOido: true });
 +  assert.deepStrictEqual(pedidas[0], { soloOido: true, rapido: true });
 +  assert.strictEqual(rapido.oidoDisponible(), true);
++});
++
++// ── El buzón de voz ─────────────────────────────────────────────────────────
++test('saludo: hablando sin parar a los 3 s es una locución (larga)', async () => {
++  const s = detector();
++  s._inSpeech = true; s._utteranceChunks = [Buffer.from('el número')];
++  const u = await esperarSaludo(s);
++  assert.strictEqual(u.larga, true);
++});
++
++test('locución: vuelve con la frase entera cuando se cierra', async () => {
++  const s = detector();
++  s._inSpeech = true; s._utteranceChunks = [Buffer.from('el número')];
++  setTimeout(() => s.emit('utterance', { audio: Buffer.from('el número no está disponible') }), 60);
++  const u = await esperarLocucion(s);
++  assert.strictEqual(u.audio.toString(), 'el número no está disponible');
++  assert.strictEqual(u.larga, true);
++});
++
++test('pitido: espera a que lleve 1,5 s sin voz', async () => {
++  const s = detector();
++  s._inSpeech = true;
++  setTimeout(() => { s._inSpeech = false; }, 300);
++  const t0 = Date.now();
++  await esperarSilencio(s);
++  const ms = Date.now() - t0;
++  assert.ok(ms >= 1750 && ms < 2200, 'tardó ' + ms + ' ms');
++});
++
++test('buzón reconocido tarde: en la primera respuesta, recado entero tras el pitido', async () => {
++  const e = escena({ oido: ['Tu llamada ha estado forwardada a Voice Mail.',
++                            'Si lo estás intentando alcanzar, no es disponible.'], backend: [] });
++  let pitido = false;
++  e.o.esperarSilencio = async () => { pitido = true; };
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'voicemail');
++  assert.ok(pitido);
++  assert.deepStrictEqual(e.dichos, [e.o.apertura, e.o.apertura, FRASES.recado]);
++  assert.strictEqual(e.pedidosBackend.length, 0);
++});
++
++test('la locución de Mikel, traducida por el oído, suena a buzón', async () => {
++  const e = escenaBuzon('Tu llamada ha estado forwardada a Voice Mail.');
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'voicemail');
++});
++
++function escenaBuzon(locucion) {
++  const e = escena({ oido: [], backend: [] });
++  e.o.esperarSaludo = async () => ({ audio: Buffer.from('El número'), larga: true });
++  e.o.esperarLocucion = async () => ({ audio: Buffer.from(locucion), larga: true });
++  let pitido = false;
++  e.o.esperarSilencio = async () => { pitido = true; };
++  e.pitido = () => pitido;
++  return e;
++}
++
++test('buzón: espera al pitido, deja el recado y cuelga sin preguntar al backend', async () => {
++  const e = escenaBuzon('El número al que llama no está disponible. Deje su mensaje después de la señal.');
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'voicemail');
++  assert.ok(e.pitido());
++  assert.deepStrictEqual(e.dichos, [e.o.apertura, FRASES.recado]);
++  assert.strictEqual(e.pedidosBackend.length, 0);
++});
++
++test('una persona que habla mucho al descolgar no es un buzón', async () => {
++  const e = escenaBuzon('Hola hola, dime, que estoy conduciendo y te oigo regular');
++  e.o.esperarSaludo = async () => ({ audio: Buffer.from('Hola hola'), larga: true });
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.ok(!e.pitido());
++  assert.strictEqual(e.dichos[0], e.o.apertura);
++  assert.notStrictEqual(r.endReason, 'voicemail');
 +});
 +
 +test('si nadie dice nada al descolgar, se presenta igual', async () => {
