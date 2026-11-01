@@ -23,8 +23,10 @@ que cierra la frase, no después (ver «El parche 26»). Y el 29 (2026-10-29): s
 ElevenLabs se queda sin cuota, la frase la dice Azure en vez de colgar (ver «El parche
 29»). Y el 30, el mismo día: la voz de casa, Piper en jacobo (ver «La voz en jacobo»).
 Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver «El parche
-31»). Y el 32 (2026-10-31, `telefono/parche-32.diff`, **sin aplicar**): llamar a otras
-personas por la línea fija de O2 (ver «El parche 32»).
+31»). Y el 32 (2026-10-31, `telefono/parche-32.diff`, aplicado el 2026-11-01): llamar a
+otras personas por la línea fija de O2 (ver «El parche 32»). Y el 33 (2026-11-01), que
+como el 13 no toca su código sino su `docker-compose.yml`: drachtio y FreeSWITCH salen
+por la IP de la LAN, sin lo que el 32 no se registra ni se oye (ver «El parche 33»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1499,7 +1501,7 @@ parches 1-31 ya puestos).
 | `lib/outbound-handler.js` | `lineaO2`: marca por el proxy de O2, sin credencial; `answeredBy` es siempre `unknown` (el truco del Contact es del 3CX) |
 | `lib/outbound-routes.js` | `mode: "tercero"` + `linea: "o2"` (van juntos), `tercero` (el id del backend) y solo números de persona de España. Registra antes de marcar y suelta en el `finally` |
 | `index.js` | Crea la línea al conectar con drachtio si hay `O2_SIP_USUARIO`, y **rechaza con 480 toda llamada entrante que venga del proxy de O2** |
-| `test/parche32.test.js` (nuevo) | 11 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
+| `test/parche32.test.js` (nuevo) | 14 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
 
 Variables nuevas en `~/.claude-phone/.env`: `O2_SIP_USUARIO`, `O2_PROXY` (`ip:5070`),
 `O2_DOMINIO` (opcional, `telefonica.net`) y `TELEFONO_TERCEROS_TOKEN`.
@@ -1521,6 +1523,60 @@ El `patch -p1` va desde `~/.claude-phone-cli` porque el diff compara `a/voice-ap
 **Lo que no se ha probado** (no se puede sin una llamada): que el audio pase en los dos
 sentidos por el NAT del router. Todo lo demás —el registro, el INVITE, la conversación
 contra el backend— tiene test, y los 124 de la voice-app pasan dentro de su imagen.
+
+**Lo que enseñó la primera llamada** (2026-11-01, tres pruebas al móvil de Mikel; las
+tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
+
+- **Telefónica concede 70 s** al registro, y lo dice en la cabecera `Expires`, no en
+  nuestro `Contact`. `_concedido` lee las dos, y si no viene en ninguna supone 70, no lo
+  pedido: renovando a los 72 s, una llamada de más de un minuto se quedaba sin registro.
+- **Al colgar el otro, el flujo de la llamada no acababa.** FreeSWITCH da `EPIPE` al
+  cerrar el audio de una pata ya colgada, `forkAudioStop` no vuelve nunca, el `finally`
+  no llega y el registro se siguió renovando cada 42 s: mientras, `caja` rechazaba con
+  480 las llamadas al fijo. Ahora la línea se suelta con el `destroy` del diálogo (una
+  sola vez, `soltarLinea`) y el cierre del audio espera como mucho 2 s (`CIERRE_MS`).
+
+## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
+
+Del 2026-11-01, en `~/.claude-phone/docker-compose.yml` (copia de antes en
+`docker-compose.yml.antes-lan` y `.antes-rtp`). Sin él, el parche 32 no funciona, y por
+dos sitios distintos:
+
+- **drachtio** escuchaba con `--contact "sip:*:5070"`, que se engancha a TODAS las
+  direcciones de `caja`, y para un destino que no es local sale por la primera que
+  encontró: la de Tailscale. El REGISTER a O2 salía por el cable de la LAN
+  con esa dirección de origen y la respuesta no tenía a dónde volver: `o2_register_timeout`.
+  Ahora escucha solo en `sip:${EXTERNAL_IP}:5070` (la primera, la de salida) y en
+  `sip:127.0.0.1:5070` (la del SBC del 3CX, lo único que pasaba por la 5070 hasta
+  entonces). El parche 13 ya garantiza que `EXTERNAL_IP` exista al arrancar.
+- **FreeSWITCH** anuncia el audio en `$${local_ip_v4}`, y arrancando antes que la red (el
+  reinicio de las 02:30 de ese día) se quedó con `127.0.0.1`. Con el 3CX da igual, su SBC
+  está en la misma máquina; con O2 el audio de vuelta iba a `127.0.0.1` de nadie y llegaba
+  silencio (RMS 1). Ahora espera a `EXTERNAL_IP` como drachtio y fija `rtp-ip` y
+  `ext-rtp-ip` del perfil `drachtio_mrf` a ella antes de arrancar.
+
+```yaml
+  drachtio:
+    command:
+      - |
+        n=0
+        until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
+        exec /entrypoint.sh drachtio --contact "sip:${EXTERNAL_IP}:5070;transport=tcp,udp" --contact "sip:127.0.0.1:5070;transport=tcp,udp" --secret ${DRACHTIO_SECRET} --port 9022 --loglevel info
+  freeswitch:
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        n=0
+        until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
+        sed -i -e "s|name=\"rtp-ip\" value=\"[^\"]*\"|name=\"rtp-ip\" value=\"${EXTERNAL_IP}\"|" -e "s|name=\"ext-rtp-ip\" value=\"[^\"]*\"|name=\"ext-rtp-ip\" value=\"${EXTERNAL_IP}\"|" /usr/local/freeswitch/conf/sip_profiles/mrf.xml
+        exec /entrypoint.sh freeswitch --sip-port 5080 --rtp-range-start 30000 --rtp-range-end 30100
+```
+
+Comprobarlo: `sofia status profile drachtio_mrf` (con `fs_cli -p` y el secreto de
+`FREESWITCH_SECRET`) dice como `RTP-IP` la IP de la LAN, los logs de drachtio dicen
+`listening at udp/<EXTERNAL_IP>:5070` y la extensión del 3CX vuelve a registrarse
+(`MULTI-REGISTRAR … SUCCESS`). La extensión siguió funcionando tras el cambio; una
+llamada entrante por el 3CX no se ha probado aún con él.
 
 ## Lo que además NO está en el repositorio original
 
