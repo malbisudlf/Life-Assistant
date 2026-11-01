@@ -62,6 +62,8 @@ def terceros(monkeypatch, mock_requests):
     monkeypatch.setattr(main, "ICLOUD_USUARIO", "")
     monkeypatch.setattr(main, "ICLOUD_CONTRASENA_APP", "")
     monkeypatch.setattr(main, "MI_MOVIL", "")
+    monkeypatch.setattr(main, "TERCEROS_APODOS", {})
+    monkeypatch.setattr(main, "TERCEROS_NUNCA", set())
     monkeypatch.setattr(main, "TERCEROS_MOTOR", "openai")
     monkeypatch.setattr(main, "_terceros_claude_listo", {})
     monkeypatch.setattr(main, "get_valid_token", lambda: "graph-token")
@@ -181,6 +183,34 @@ class TestLlamar:
     def test_sin_outlook_lo_dice(self, terceros, monkeypatch):
         monkeypatch.setattr(main, "get_valid_token", lambda: None)
         assert "Outlook no está conectado" in _llamar()["error"]
+
+    def test_apodo_lleva_a_una_ficha_y_saluda_por_su_nombre(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "TERCEROS_APODOS",
+                            {"erika": {"contacto": "Erik Uni", "saludo": "Eri"}, "el primo": "Erika Ruiz"})
+        r = _llamar(nombre="Érika")
+        assert r["ok"] is True and r["llamando_a"] == "Erik Uni"
+        _, _, kw = terceros.called("POST", "/api/outbound-call")[0]
+        assert kw["json"]["to"] == "+34600111222"
+        assert kw["json"]["message"].startswith("Hola, Eri. Soy Jarvis")
+        main._terceros.clear()
+        assert _llamar(nombre="el primo")["llamando_a"] == "Erika Ruiz"
+
+    def test_nunca_se_llama_al_vetado(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "TERCEROS_NUNCA", {"erik uni"})
+        r = _llamar(nombre="Erik")
+        assert r["ok"] is False and not terceros.called("POST", "/api/outbound-call")
+        assert _llamar(nombre="Erik Uni")["ok"] is False
+        # Y un apodo que apunte a él tampoco lo salta.
+        monkeypatch.setattr(main, "TERCEROS_APODOS", {"eri": "Erik Uni"})
+        assert _llamar(nombre="eri")["ok"] is False
+
+    def test_apodos_de_entorno(self, monkeypatch):
+        monkeypatch.setenv("X_PRUEBA", '{"Ama": "Ficha"}')
+        assert main._json_de_entorno("X_PRUEBA", {}) == {"Ama": "Ficha"}
+        monkeypatch.setenv("X_PRUEBA", "no es json")
+        assert main._json_de_entorno("X_PRUEBA", {}) == {}
+        monkeypatch.setenv("X_PRUEBA", '["a"]')
+        assert main._json_de_entorno("X_PRUEBA", {}) == {}
 
     def test_llamame_le_llama_a_el(self, terceros, monkeypatch):
         monkeypatch.setattr(main, "MI_MOVIL", "711 22 33 44")

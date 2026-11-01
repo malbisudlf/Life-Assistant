@@ -21923,6 +21923,28 @@ ICLOUD_TIMEOUT        = float(os.getenv("ICLOUD_TIMEOUT", "40"))
 MI_MOVIL              = os.getenv("MI_MOVIL", "").strip() or TWILIO_HASTA
 _YO = {"yo", "mi", "me", "a mi", "mi mismo", "yo mismo", "conmigo"}
 
+
+def _json_de_entorno(nombre: str, vacio):
+    try:
+        valor = json.loads(os.getenv(nombre, "") or "null")
+    except ValueError:
+        logger.error("%s no es JSON válido: se ignora", nombre)
+        return vacio
+    return valor if isinstance(valor, type(vacio)) else vacio
+
+
+# A quién se refiere Mikel con cada nombre, y a quién no se llama nunca. Van en
+# backend.env y no aquí porque son nombres de personas (el repositorio es público).
+# Pedido el 2026-11-01: «llama a Saioa» tenía que ser su madre y salía otra Saioa, la
+# única con ese nombre y teléfono; decidirlo en el modelo no da garantías, esto sí.
+#   TERCEROS_APODOS={"saioa": {"contacto": "Ficha", "saludo": "Saioa"}, "ama": "Ficha"}
+#     (cómo lo dice → la ficha a la que llamar, por su nombre exacto; `saludo`, con qué
+#     nombre se le saluda si no es el de la ficha)
+#   TERCEROS_NUNCA=["Nombre de la ficha"]   (no se le llama aunque se pida)
+TERCEROS_APODOS = {_sin_tildes(str(k)).strip(): v
+                   for k, v in _json_de_entorno("TERCEROS_APODOS", {}).items()}
+TERCEROS_NUNCA  = {_sin_tildes(str(n)).strip() for n in _json_de_entorno("TERCEROS_NUNCA", [])}
+
 _DAV_HREF = r"<(?:[\w-]+:)?href[^>]*>\s*([^<\s]+)\s*</(?:[\w-]+:)?href>"
 
 
@@ -22100,9 +22122,24 @@ def _buscar_contacto(nombre: str) -> list:
     buscado = _sin_tildes(str(nombre or "")).strip()
     if not buscado:
         return []
+    apodo = TERCEROS_APODOS.get(buscado)
+    if apodo:
+        # Un apodo apunta a UNA ficha, por su nombre exacto: nada de buscar por palabra.
+        ficha = apodo.get("contacto") if isinstance(apodo, dict) else apodo
+        saludo = (apodo.get("saludo") if isinstance(apodo, dict) else "") or ""
+        objetivo = _sin_tildes(str(ficha or "")).strip()
+        for fresco in (False, True):
+            fichas = [dict(c, **({"pila": str(saludo)[:40]} if saludo else {}))
+                      for c in _contactos(fresco=fresco)
+                      if _sin_tildes(c["nombre"]).strip() == objetivo
+                      and objetivo not in TERCEROS_NUNCA]
+            if any(c["telefono"] for c in fichas):
+                return [c for c in fichas if c["telefono"]][:1]
+        return fichas[:1]
     patron = re.compile(r"\b" + re.escape(buscado) + r"\b")
     for fresco in (False, True):
-        filas = _contactos(fresco=fresco)
+        filas = [c for c in _contactos(fresco=fresco)
+                 if _sin_tildes(c["nombre"]).strip() not in TERCEROS_NUNCA]
         encontrados = ([c for c in filas if buscado in c["nombres"]]
                        or [c for c in filas if any(patron.search(n) for n in c["nombres"])])
         if encontrados:
