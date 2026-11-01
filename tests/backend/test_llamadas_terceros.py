@@ -444,6 +444,12 @@ class TestICloud:
 
 
 # ── Con Claude (una sesión de Claude Code en caja, sin nada a mano) ───────────
+GUION = {"ramas": [
+    {"id": "B1", "cuando": "da la hora", "decir": "Perfecto, se lo digo a Mikel. ¡Hasta luego!", "colgar": True},
+    {"id": "B2", "cuando": "pregunta quién es", "decir": "Soy Jarvis, el asistente de Mikel.", "colgar": False},
+]}
+
+
 def _respuesta_claude(datos):
     return FakeResponse({"respuesta": "```json\n" + json.dumps(datos, ensure_ascii=False) + "\n```"})
 
@@ -455,6 +461,16 @@ def con_claude(terceros, monkeypatch):
     monkeypatch.setattr(main, "JARVIS_CLAUDE_TOKEN", "claude-token")
     terceros.add("POST", "/tercero/abrir", FakeResponse({"ok": True}))
     terceros.add("POST", "/tercero/cerrar", FakeResponse({"ok": True}))
+    # La primera petición de turno es la del guion; las demás, lo que dice la persona
+    # (sus respuestas, en orden, en `turnos_claude`).
+    turnos = []
+
+    def turno(url, **kw):
+        if kw["json"]["texto"] == "PREPARA_GUION":
+            return _respuesta_claude(GUION)
+        return turnos.pop(0) if turnos else FakeResponse({"error": "sin respuesta"}, 502)
+    terceros.add("POST", "/tercero/turno", turno)
+    terceros.turnos_claude = turnos
 
     def sin_openai():
         raise AssertionError("no debía pensar OpenAI")
@@ -481,26 +497,27 @@ class TestConClaude:
     def test_piensa_claude_y_solo_le_llega_lo_nuevo(self, client, con_claude):
         _llamar()
         tid = _esperar_abierta()["tid"]
-        con_claude.add("POST", "/tercero/turno",
-                       _respuesta_claude({"decir": "¡Genial! ¿A qué hora?", "colgar": False, "resultado": ""}))
+        con_claude.turnos_claude += [
+            _respuesta_claude({"decir": "¡Genial! ¿A qué hora?", "colgar": False, "resultado": ""}),
+            _respuesta_claude({"decir": "Vale.", "colgar": False, "resultado": ""})]
         h = {"X-Auth-Token": TOKEN}
         r = client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Sí, claro"}, headers=h).json()
         assert r == {"decir": "¡Genial! ¿A qué hora?", "colgar": False}
         client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "A las dos"}, headers=h)
         textos = [kw["json"]["texto"] for _, _, kw in con_claude.called("POST", "/tercero/turno")]
-        assert textos == ["Sí, claro", "A las dos"]
+        assert textos == ["PREPARA_GUION", "Sí, claro", "A las dos"]
 
     def test_si_claude_falla_sigue_openai_hasta_el_final(self, client, con_claude, monkeypatch):
         _llamar()
         tid = _esperar_abierta()["tid"]
-        con_claude.add("POST", "/tercero/turno", FakeResponse({"error": "x"}, 502))
+        con_claude.turnos_claude.append(FakeResponse({"error": "x"}, 502))
         modelo = _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""},
                          {"decir": "Adiós.", "colgar": True, "resultado": "Dice que sí."})
         monkeypatch.setattr(main, "get_openai_client", lambda: modelo)
         h = {"X-Auth-Token": TOKEN}
         assert client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Hola"}, headers=h).json()["decir"] == "Vale."
         assert client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Sí"}, headers=h).json()["colgar"] is True
-        assert len(con_claude.called("POST", "/tercero/turno")) == 1   # después, ya no
+        assert len(con_claude.called("POST", "/tercero/turno")) == 2   # guion y uno; después, ya no
         assert con_claude.called("POST", "/tercero/cerrar")
         # OpenAI recibe la transcripción entera, no solo lo último.
         assert [m["content"] for m in modelo.pedidos[1]["messages"] if m["role"] == "user"] == ["Hola", "Sí"]
@@ -508,7 +525,7 @@ class TestConClaude:
     def test_sin_json_tambien_cae_a_openai(self, client, con_claude, monkeypatch):
         _llamar()
         tid = _esperar_abierta()["tid"]
-        con_claude.add("POST", "/tercero/turno", FakeResponse({"respuesta": "Hola, ¿qué tal?"}))
+        con_claude.turnos_claude.append(FakeResponse({"respuesta": "Hola, ¿qué tal?"}))
         monkeypatch.setattr(main, "get_openai_client",
                             lambda: _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""}))
         r = client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "Hola"},
@@ -579,3 +596,62 @@ class TestDevolverLaLlamada:
         assert main._llamar_telefono("Hola", modo="announce") is True
         _, _, kw = mock_requests.called("POST", "/api/outbound-call")[0]
         assert kw["json"]["mode"] == "announce"
+
+
+class TestElGuion:
+    """Mientras suena, Claude prepara las respuestas probables; en cada turno solo elige."""
+
+    def test_se_prepara_al_abrir_y_la_voice_app_lo_lee(self, client, con_claude):
+        _llamar()
+        mision = _esperar_abierta()
+        assert set(mision["guion"]) == {"B1", "B2"}
+        _, _, kw = con_claude.called("POST", "/tercero/abrir")[0]
+        assert "PREPARA_GUION" in kw["json"]["sistema"]
+        r = client.get(f"/telefono/tercero/{mision['tid']}/guion", headers={"X-Auth-Token": TOKEN})
+        assert r.json() == {"frases": ["Perfecto, se lo digo a Mikel. ¡Hasta luego!",
+                                       "Soy Jarvis, el asistente de Mikel."], "listo": True}
+
+    def test_el_guion_pide_token(self, client, con_claude):
+        _llamar()
+        tid = _esperar_abierta()["tid"]
+        assert client.get(f"/telefono/tercero/{tid}/guion").status_code == 401
+
+    def test_claude_elige_una_rama(self, client, con_claude):
+        _llamar()
+        mision = _esperar_abierta()
+        con_claude.turnos_claude.append(_respuesta_claude({"rama": "B1"}))
+        r = client.post(f"/telefono/tercero/{mision['tid']}/turno", json={"dicho": "A las cinco"},
+                        headers={"X-Auth-Token": TOKEN}).json()
+        assert r == {"decir": "Perfecto, se lo digo a Mikel. ¡Hasta luego!", "colgar": True}
+        assert mision["aciertos"] == 1
+
+    def test_rama_inventada_cae_a_openai(self, client, con_claude, monkeypatch):
+        _llamar()
+        mision = _esperar_abierta()
+        con_claude.turnos_claude.append(_respuesta_claude({"rama": "B9"}))
+        monkeypatch.setattr(main, "get_openai_client",
+                            lambda: _Modelo({"decir": "Vale.", "colgar": False, "resultado": ""}))
+        r = client.post(f"/telefono/tercero/{mision['tid']}/turno", json={"dicho": "Hola"},
+                        headers={"X-Auth-Token": TOKEN}).json()
+        assert r["decir"] == "Vale."
+
+    def test_sin_guion_no_hay_claude(self, con_claude):
+        con_claude.routes.insert(0, ("POST", "/tercero/turno", FakeResponse({"error": "x"}, 502)))
+        _llamar()
+        mision = _esperar_abierta()
+        assert mision["claude"] == "rota" and mision["guion"] == {}
+
+    def test_openai_no_ve_el_protocolo_del_guion(self, terceros):
+        _llamar()
+        mision = next(iter(main._terceros.values()))
+        assert "PREPARA_GUION" not in main._tercero_sistema(mision)
+
+    @pytest.mark.parametrize("texto,ids", [
+        ('{"ramas": [{"id": "B1", "decir": "Vale", "colgar": true}]}', {"B1"}),
+        ('{"ramas": [{"id": "X1", "decir": "Vale"}, {"id": "B2", "decir": ""}]}', set()),
+        ('{"ramas": [{"id": "B3", "decir": "' + "a" * 201 + '"}]}', set()),
+        ("no es json", set()),
+        ('{"ramas": "B1"}', set()),
+    ])
+    def test_el_guion_se_valida(self, texto, ids):
+        assert set(main._guion_de(texto)) == ids
