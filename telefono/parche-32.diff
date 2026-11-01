@@ -1,6 +1,6 @@
 diff -ruN a/voice-app/index.js b/voice-app/index.js
 --- a/voice-app/index.js	2026-11-01 11:09:44.202783500 +0100
-+++ b/voice-app/index.js	2026-11-01 11:09:44.257110700 +0100
++++ b/voice-app/index.js	2026-11-01 11:20:21.111336900 +0100
 @@ -31,6 +31,9 @@
  var outboundModule = require("./lib/outbound-routes");
  var outboundRouter = outboundModule.router;
@@ -57,8 +57,8 @@ diff -ruN a/voice-app/index.js b/voice-app/index.js
          mediaServer: mediaServer,
 diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
 --- a/voice-app/lib/conversacion-tercero.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:09:44.274474700 +0100
-@@ -0,0 +1,203 @@
++++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:20:21.130988100 +0100
+@@ -0,0 +1,205 @@
 +/**
 + * Parche 32: la conversación de Jarvis con OTRA persona (llamar_a_alguien).
 + * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -138,6 +138,8 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 + * @param {number} o.wsPort
 + * @param {string} o.tercero    - el id de la llamada en el backend
 + * @param {string} o.apertura   - la presentación («Hola, Erik. Soy Jarvis…»)
++ * @param {Promise<string>} [o.aperturaUrl] - la presentación ya pedida a la voz mientras
++ *   sonaba; si falla (null), se pide aquí
 + * @param {string} [o.voiceId]
 + * @param {Function} [o.onTurno] - (quien, texto) por cada frase, para GET /api/call
 + * @param {Function} [o.onUserTurn]
@@ -157,9 +159,9 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +  let desarmar = function () {};
 +  let fin = 'max_turns';
 +
-+  const decir = async function (texto) {
++  const decir = async function (texto, previa) {
 +    if (o.onTurno) o.onTurno('jarvis', texto);
-+    const url = await o.ttsService.generateSpeech(texto, voiceId);
++    const url = (previa && await previa) || await o.ttsService.generateSpeech(texto, voiceId);
 +    if (!activa) return false;
 +    return decirInterrumpible(endpoint, session, url, log);
 +  };
@@ -197,7 +199,7 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +      }
 +    }
 +
-+    let interrumpio = await decir(o.apertura);
++    let interrumpio = await decir(o.apertura, o.aperturaUrl);
 +    let silencios = 0;
 +    let turnos = 0;
 +
@@ -264,7 +266,7 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +module.exports = { runConversacionTercero, preguntarAlBackend, FRASES };
 diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 --- a/voice-app/lib/linea-o2.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/linea-o2.js	2026-11-01 11:09:44.257110700 +0100
++++ b/voice-app/lib/linea-o2.js	2026-11-01 11:20:21.111336900 +0100
 @@ -0,0 +1,199 @@
 +/**
 + * Parche 32: la línea fija de casa (O2/Telefónica) por SIP, para que Jarvis llame a
@@ -467,7 +469,7 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +module.exports = { LineaO2 };
 diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
 --- a/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.269231400 +0100
++++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:20:21.128791200 +0100
 @@ -51,7 +51,9 @@
      message,
      callerId,
@@ -522,7 +524,7 @@ diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.j
      // Modify endpoint with remote SDP to complete media connection
 diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 --- a/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.268449800 +0100
++++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:20:21.127994700 +0100
 @@ -11,6 +11,8 @@
  const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
@@ -596,7 +598,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          logger.error('Conversation mode dependencies not ready', {
            audioForkServer: !!audioForkServer,
            whisperClient: !!whisperClient,
-@@ -244,18 +273,41 @@
+@@ -244,18 +273,52 @@
  
      // Continue asynchronously
      (async function() {
@@ -624,6 +626,17 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 +          }
 +        }
 +
++        // La presentación se pide a la voz ya, mientras suena: al descolgar está lista y
++        // no se pagan sus ~0,7-1,5 s. La voz en directo guarda la frase entera y la sirve
++        // desde el principio cuando FreeSWITCH la pide (5 min de vida, de sobra para 30 s
++        // de timbre). Si falla, la conversación la pide otra vez al descolgar.
++        var aperturaUrl = tercero
++          ? ttsService.generateSpeech(message, (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null).catch(function(e) {
++              logger.warn('Presentación anticipada fallida', { callId: callId, error: e.message });
++              return null;
++            })
++          : null;
++
          var result = await initiateOutboundCall(srf, mediaServer, {
            to: to,
            message: message,
@@ -639,7 +652,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          var endpoint = result.endpoint;
  
          session.setDialog(dialog);
-@@ -263,6 +315,33 @@
+@@ -263,6 +326,34 @@
          session.answeredBy = result.answeredBy || 'unknown';
          var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
  
@@ -653,6 +666,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 +            wsPort: wsPort,
 +            tercero: tercero,
 +            apertura: message,
++            aperturaUrl: aperturaUrl,
 +            voiceId: voiceId,
 +            onTurno: function(quien, texto) {
 +              session.turnCount++;
@@ -673,7 +687,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          if (detectVoicemail && session.answeredBy === 'voicemail') {
            if (!voicemailMessage) {
              // El FAILED antes de colgar: así ningún BYE posterior puede reescribir el final.
-@@ -359,6 +438,8 @@
+@@ -359,6 +450,8 @@
          if (session.dialog || session.endpoint) {
            await hangupCall(session.dialog, session.endpoint, callId);
          }
@@ -682,7 +696,7 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
        }
      })();
  
-@@ -467,6 +548,7 @@
+@@ -467,6 +560,7 @@
    claudeBridge = deps.claudeBridge || null;
    ttsService = deps.ttsService || null;
    wsPort = deps.wsPort || 3001;
@@ -692,8 +706,8 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
  
 diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 --- a/voice-app/test/parche32.test.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/test/parche32.test.js	2026-11-01 11:09:44.251243400 +0100
-@@ -0,0 +1,211 @@
++++ b/voice-app/test/parche32.test.js	2026-11-01 11:20:21.108820600 +0100
+@@ -0,0 +1,228 @@
 +/**
 + * Parche 32: la línea fija de O2 y la conversación con otra persona.
 + *
@@ -868,6 +882,23 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  assert.strictEqual(e.pedidosBackend[0].opciones.headers['X-Auth-Token'], 'token-de-prueba');
 +  assert.deepStrictEqual(e.pedidosBackend[0].cuerpo, { dicho: 'Sí, a las dos y media' });
 +  assert.deepStrictEqual(turnos.map((t) => t[0]), ['otro', 'jarvis', 'otro', 'jarvis']);
++});
++
++test('la presentación pedida mientras sonaba no se vuelve a pedir', async () => {
++  const e = escena({ oido: ['¿Sí?', 'Vale'], backend: [{ decir: 'Genial. ¡Adiós!', colgar: true }] });
++  const pedidas = [];
++  e.o.ttsService = { generateSpeech: async (t) => { pedidas.push(t); return 'tts:' + t; } };
++  e.o.aperturaUrl = Promise.resolve('tts:PREVIA');
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.deepStrictEqual(e.dichos, ['PREVIA', 'Genial. ¡Adiós!']);
++  assert.deepStrictEqual(pedidas, ['Genial. ¡Adiós!']);
++});
++
++test('si la presentación anticipada falló, se pide al descolgar', async () => {
++  const e = escena({ oido: ['¿Sí?', 'Vale'], backend: [{ decir: 'Adiós.', colgar: true }] });
++  e.o.aperturaUrl = Promise.resolve(null);
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(e.dichos[0], e.o.apertura);
 +});
 +
 +test('si nadie dice nada al descolgar, se presenta igual', async () => {
