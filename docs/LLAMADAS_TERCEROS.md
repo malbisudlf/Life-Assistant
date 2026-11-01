@@ -22,7 +22,9 @@ el router.
 3. En `backend.env`: `TERCEROS_LLAMADAS=1` y el mismo `TELEFONO_TERCEROS_TOKEN`.
    Desplegar. Los contactos se leen con el permiso `Contacts.Read` de Outlook, que ya
    está concedido porque `CUMPLES=1`; sin los cumpleaños, habría que volver a conectar
-   Outlook una vez.
+   Outlook una vez. Para los contactos del iPhone, `ICLOUD_USUARIO` y
+   `ICLOUD_CONTRASENA_APP` (una contraseña de aplicación de appleid.apple.com); para
+   «llámame», `MI_MOVIL`.
 4. Probar el registro solo (sin llamar a nadie) y después una llamada a tu móvil.
 
 ## Cómo funciona
@@ -32,7 +34,7 @@ Mikel: «llama a Erik y pregúntale si come hoy»
    │
    ▼
 Jarvis (chat, Telegram o el teléfono) ── llamar_a_alguien(nombre, mensaje, objetivo, contexto)
-   │  busca a Erik en tus contactos de Outlook (Graph /me/contacts, por el nombre)
+   │  busca a Erik en tus contactos de Outlook (Graph) y de iCloud (CardDAV), por el nombre
    ▼
 backend ── POST /api/outbound-call {linea: "o2", mode: "tercero", tercero: <id>}
    │
@@ -64,13 +66,18 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    puede torcer una frase de la llamada, nunca ejecutar nada. Y el resumen que te llega va
    marcado como dato (`_AVISO_WEB`) cuando Jarvis lo vuelve a leer.
 2. **Solo a quien ya tienes.** `llamar_a_alguien` busca un nombre en tus contactos de
-   Outlook (los del móvil: 208 en noviembre de 2026, 177 con teléfono) y nunca acepta un
-   número suelto: es lo que impide que un número sacado de un correo, una web o un
+   Outlook (208 en noviembre de 2026, 177 con teléfono) y de iCloud, que son los del
+   iPhone (CardDAV a `contacts.icloud.com`, solo lectura, con una contraseña de
+   aplicación), y nunca acepta un número suelto: es lo que impide que un número sacado de un correo, una web o un
    WhatsApp reciba una llamada aunque el modelo se equivoque o lo engañen. Para que llame
    a alguien nuevo, guárdalo en el móvil. Se busca por el nombre guardado, el de pila, el
    apodo o nombre y apellido, sin tildes; si hay dos que encajan, pregunta cuál. Del
    contacto se usa el primer número llamable: el móvil antes que el de casa o el del
-   trabajo. La copia de los contactos dura diez minutos, y si un nombre no aparece se
+   trabajo; el mismo número en Outlook y en iCloud cuenta como uno. Una fuente caída no
+   tumba la otra, pero el «no lo encuentro» dice cuál no contestó. La única excepción al
+   nombre es **«llámame»** (`nombre: "yo"`): te llama a ti, a `MI_MOVIL`, saludándote
+   como siempre («Hola, señor») y sin buscar en los contactos; es la prueba de la línea.
+   La copia de los contactos dura diez minutos, y si un nombre no aparece se
    vuelve a mirar en el momento. Hasta el 2026-11-01 había una lista aparte en Supabase,
    apuntada con botón; no llegó a encenderse.
 3. **Solo números de persona en España** (`_tel_llamable`): móviles (6, 71-74) y fijos

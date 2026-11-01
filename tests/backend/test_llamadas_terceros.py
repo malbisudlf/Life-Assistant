@@ -57,8 +57,11 @@ def terceros(monkeypatch, mock_requests):
     monkeypatch.setattr(main, "TELEFONO_TERCEROS_TOKEN", TOKEN)
     monkeypatch.setattr(main, "_ahora_local", lambda: datetime(2026, 10, 31, 12, 0, tzinfo=main.LOCAL_TZ))
     monkeypatch.setattr(main, "_terceros", {})
-    monkeypatch.setattr(main, "_contactos_cache", {"ts": 0.0, "filas": []})
+    monkeypatch.setattr(main, "_contactos_cache", {"ts": 0.0, "filas": [], "incompleto": ""})
     monkeypatch.setattr(main, "_seguir_tercero_seguro", lambda tid: None)
+    monkeypatch.setattr(main, "ICLOUD_USUARIO", "")
+    monkeypatch.setattr(main, "ICLOUD_CONTRASENA_APP", "")
+    monkeypatch.setattr(main, "MI_MOVIL", "")
     monkeypatch.setattr(main, "get_valid_token", lambda: "graph-token")
     mock_requests.add("GET", "/me/contacts", _contactos(ERIK, ERIKA, ITZIAR))
     mock_requests.add("POST", "/api/outbound-call", FakeResponse({"success": True, "callId": "llamada-1"}))
@@ -177,6 +180,21 @@ class TestLlamar:
         monkeypatch.setattr(main, "get_valid_token", lambda: None)
         assert "Outlook no está conectado" in _llamar()["error"]
 
+    def test_llamame_le_llama_a_el(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "MI_MOVIL", "711 22 33 44")
+        r = _llamar(nombre="Yo", mensaje="Es una prueba de la línea.")
+        assert r["ok"] is True
+        _, _, kw = terceros.called("POST", "/api/outbound-call")[0]
+        assert kw["json"]["to"] == "+34711223344"
+        assert kw["json"]["message"] == "Hola, señor. Soy Jarvis, desde el fijo de casa. Es una prueba de la línea."
+        assert not terceros.called("GET", "/me/contacts")   # no busca en los contactos
+        mision = next(iter(main._terceros.values()))
+        assert mision["propio"] is True
+
+    def test_llamame_sin_su_numero_lo_dice(self, terceros):
+        r = _llamar(nombre="mí")
+        assert r["ok"] is False and "MI_MOVIL" in r["error"]
+
     def test_de_noche_no(self, terceros, monkeypatch):
         monkeypatch.setattr(main, "_ahora_local",
                             lambda: datetime(2026, 10, 31, 23, 0, tzinfo=main.LOCAL_TZ))
@@ -235,6 +253,16 @@ class TestTurno:
         assert "tools" not in pedido
         assert "saber si come con Mikel" in pedido["messages"][0]["content"]
         assert pedido["messages"][-1] == {"role": "user", "content": "A las dos y media"}
+
+    def test_a_el_mismo_le_habla_como_a_el(self, client, terceros, monkeypatch):
+        monkeypatch.setattr(main, "MI_MOVIL", "711223344")
+        _llamar(nombre="yo")
+        tid = next(iter(main._terceros))
+        modelo = _Modelo({"decir": "Le oigo perfectamente, señor.", "colgar": True, "resultado": "Se oye bien."})
+        monkeypatch.setattr(main, "get_openai_client", lambda: modelo)
+        client.post(f"/telefono/tercero/{tid}/turno", json={"dicho": "¿Me oyes?"},
+                    headers={"X-Auth-Token": TOKEN})
+        assert "propio Mikel" in modelo.pedidos[0]["messages"][0]["content"]
 
     def test_si_el_modelo_falla_se_despide_y_cuelga(self, client, terceros, monkeypatch):
         tid = self._mision(terceros)
@@ -297,3 +325,117 @@ class TestAlColgar:
         assert r["aviso"] == main._AVISO_WEB
         assert r["llamadas"][0]["a"] == "Erik Uni" and r["llamadas"][0]["como_acabo"] == "comunicaba"
 
+
+# ── iCloud (CardDAV) ─────────────────────────────────────────────────────────
+VCARD_ERIK = (
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Uni;Erik;;;\r\nFN:Erik Uni\r\n"
+    "NICKNAME:Eriko\r\nitem1.TEL;type=pref:944 11 12 22\r\n"
+    "TEL;type=CELL;type=VOICE:+34 600 22 2\r\n 3 33\r\nPHOTO;ENCODING=b:AAAA\r\nEND:VCARD\r\n")
+VCARD_GRUPO = "BEGIN:VCARD\r\nFN:Familia\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nEND:VCARD\r\n"
+VCARD_MIKEL = ("BEGIN:VCARD\r\nN:Albisu;Mikel;;;\r\nFN:Mikel Albisu\r\n"
+               "TEL;type=IPHONE;type=CELL:711 22 33 44\r\nEND:VCARD\r\n")
+
+
+def _multistatus(*respuestas):
+    return '<?xml version="1.0"?><multistatus xmlns="DAV:">' + "".join(respuestas) + "</multistatus>"
+
+
+class _ICloud:
+    """http.request para CardDAV: responde por método y URL, y guarda lo que se pidió."""
+
+    def __init__(self, vcards, estado=207):
+        self.pedidos = []
+        self.vcards = vcards
+        self.estado = estado
+
+    def __call__(self, metodo, url, **kw):
+        self.pedidos.append((metodo, url, kw))
+        if self.estado != 207:
+            return FakeResponse({}, self.estado)
+        if url == "https://contacts.icloud.com/":
+            xml = _multistatus("<response><href>/</href><propstat><prop><current-user-principal>"
+                               "<href>/123/principal/</href></current-user-principal></prop>"
+                               "</propstat></response>")
+        elif url.endswith("/principal/"):
+            xml = _multistatus('<response><href>/123/principal/</href><propstat><prop>'
+                               '<C:addressbook-home-set xmlns:C="urn:ietf:params:xml:ns:carddav">'
+                               '<href xmlns="DAV:">https://p45-contacts.icloud.com:443/123/carddav/</href>'
+                               '</C:addressbook-home-set></prop></propstat></response>')
+        elif metodo == "PROPFIND":
+            xml = _multistatus("<response><href>/123/carddav/</href><propstat><prop><resourcetype>"
+                               "<collection/></resourcetype></prop></propstat></response>",
+                               "<response><href>/123/carddav/card/</href><propstat><prop><resourcetype>"
+                               '<collection/><C:addressbook xmlns:C="urn:ietf:params:xml:ns:carddav"/>'
+                               "</resourcetype></prop></propstat></response>")
+        else:
+            xml = _multistatus(*[
+                f'<response><href>/123/carddav/card/{i}.vcf</href><propstat><prop>'
+                f'<C:address-data xmlns:C="urn:ietf:params:xml:ns:carddav">'
+                f'{v.replace("&", "&amp;").replace("<", "&lt;")}</C:address-data>'
+                f'</prop></propstat></response>' for i, v in enumerate(self.vcards)])
+        return FakeResponse({}, 207, text=xml)
+
+
+@pytest.fixture
+def icloud(terceros, monkeypatch):
+    monkeypatch.setattr(main, "ICLOUD_USUARIO", "apple@prueba.invalid")
+    monkeypatch.setattr(main, "ICLOUD_CONTRASENA_APP", "abcd-efgh-ijkl-mnop")
+    falso = _ICloud([VCARD_ERIK, VCARD_GRUPO, VCARD_MIKEL])
+    monkeypatch.setattr(main.http, "request", falso)
+    # En Outlook no está Erik: solo Erika y la óptica.
+    terceros.routes.insert(0, ("GET", "/me/contacts", _contactos(ERIKA, ITZIAR)))
+    return falso
+
+
+class TestICloud:
+    def test_la_vcard(self):
+        c = main._vcard_contacto(VCARD_ERIK)
+        assert c["nombre"] == "Erik Uni" and c["pila"] == "Erik" and c["apodo"] == "Eriko"
+        # El móvil antes que el «pref», aunque venga después y partido en dos líneas.
+        assert c["tels"] == ["+34 600 22 23 33", "944 11 12 22"]
+        assert main._vcard_contacto(VCARD_GRUPO) is None
+
+    def test_escapes_de_la_vcard(self):
+        c = main._vcard_contacto("BEGIN:VCARD\nFN:Ane\\, la de clase\nEND:VCARD")
+        assert c["nombre"] == "Ane, la de clase" and c["pila"] == "" and c["tels"] == []
+
+    def test_descubre_la_agenda_y_lee_las_vcards(self, icloud):
+        contactos = main._contactos_icloud()
+        assert [c["nombre"] for c in contactos] == ["Erik Uni", "Mikel Albisu"]
+        metodos = [(m, u) for m, u, _ in icloud.pedidos]
+        assert metodos[-1] == ("REPORT", "https://p45-contacts.icloud.com:443/123/carddav/card/")
+        _, _, kw = icloud.pedidos[0]
+        assert kw["auth"] == ("apple@prueba.invalid", "abcd-efgh-ijkl-mnop")
+
+    def test_llama_a_alguien_que_solo_esta_en_icloud(self, icloud, terceros):
+        r = _llamar(nombre="eriko")
+        assert r["ok"] is True and r["llamando_a"] == "Erik Uni"
+        _, _, kw = terceros.called("POST", "/api/outbound-call")[0]
+        assert kw["json"]["to"] == "+34600222333"
+
+    def test_por_nombre_y_apellido(self, icloud):
+        assert _llamar(nombre="Mikel Albisu")["llamando_a"] == "Mikel Albisu"
+
+    def test_outlook_caido_no_tumba_icloud(self, icloud, terceros):
+        terceros.routes.insert(0, ("GET", "/me/contacts", FakeResponse({}, 403)))
+        assert _llamar()["ok"] is True
+        main._terceros.clear()
+        r = _llamar(nombre="Aimar")
+        assert "No encuentro a «Aimar»" in r["error"] and "Outlook" in r["error"]
+
+    def test_icloud_con_mala_contrasena_y_outlook_bien(self, icloud):
+        icloud.estado = 401
+        r = _llamar()
+        assert r["ok"] is False and "iCloud no acepta" in r["error"]
+        assert _llamar(nombre="Erika")["ok"] is True
+
+    def test_los_dos_caidos(self, icloud, terceros):
+        icloud.estado = 401
+        terceros.routes.insert(0, ("GET", "/me/contacts", FakeResponse({}, 500)))
+        r = _llamar()
+        assert "No he podido mirar sus contactos" in r["error"] and "iCloud" in r["error"]
+
+    def test_el_mismo_en_outlook_y_en_icloud_no_es_ambiguo(self, icloud, terceros):
+        terceros.routes.insert(0, ("GET", "/me/contacts", _contactos(
+            {**ERIK, "mobilePhone": "600222333"})))
+        assert _llamar()["ok"] is True
