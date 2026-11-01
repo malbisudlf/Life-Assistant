@@ -1,6 +1,6 @@
 diff -ruN a/voice-app/index.js b/voice-app/index.js
 --- a/voice-app/index.js	2026-11-01 11:09:44.202783500 +0100
-+++ b/voice-app/index.js	2026-11-01 11:20:21.111336900 +0100
++++ b/voice-app/index.js	2026-11-01 11:28:24.115737900 +0100
 @@ -31,6 +31,9 @@
  var outboundModule = require("./lib/outbound-routes");
  var outboundRouter = outboundModule.router;
@@ -57,8 +57,8 @@ diff -ruN a/voice-app/index.js b/voice-app/index.js
          mediaServer: mediaServer,
 diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
 --- a/voice-app/lib/conversacion-tercero.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:20:21.130988100 +0100
-@@ -0,0 +1,205 @@
++++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:28:24.135253500 +0100
+@@ -0,0 +1,250 @@
 +/**
 + * Parche 32: la conversación de Jarvis con OTRA persona (llamar_a_alguien).
 + * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -70,16 +70,27 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 + *     teléfono no puede llegar a él.
 + *   - **Sin pitidos, sin música de espera, sin «Un momento, señor».** Eso es para Mikel;
 + *     a un amigo suyo le suena a centralita.
-+ *   - **Primero contesta él.** Quien coge dice «¿Sí?»: se le deja decirlo (hasta
-+ *     ESPERA_SALUDO_MS) y entonces Jarvis se presenta. Hablar nada más descolgar pisa el
-+ *     «¿Diga?» y lo primero que oye es media frase.
++ *   - **Primero contesta él.** Quien coge dice «¿Sí?»: se le deja decirlo y entonces
++ *     Jarvis se presenta. Hablar nada más descolgar pisa el «¿Diga?» y lo primero que oye
++ *     es media frase. Pero sin la espera de una frase normal (`esperarSaludo`): los 1,5 s
++ *     de silencio que cierran un turno, más 4 s de tope, eran casi todo el retraso entre
++ *     descolgar y oír algo (~4,8 s el 2026-11-01).
 + *   - Nada de lectura, confirmaciones ni escucha pasiva: aquí no hay nada de eso que hacer.
 + */
 +
 +const { decirInterrumpible } = require('./turno-rapido');
 +const { armarAnticipo, transcribirFrase } = require('./anticipo');
 +
-+const ESPERA_SALUDO_MS = 4000;
++// El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
++// por dicho (un «¿Sí?» no necesita los 1,5 s de `endSilenceMs`).
++const ESPERA_SALUDO_MS = 3000;
++const SALUDO_NADIE_MS = 2000;
++const SALUDO_SILENCIO_MS = 450;
++const SALUDO_SONDEO_MS = 50;
++// La voz mínima para que una frase cuente. La de siempre (350 ms, audio-fork.js) tiraba
++// un «sí» suelto de 300 ms (2026-11-01), y aquí un «sí» o un «vale» es justo la
++// respuesta que se busca. El ruido suelto se queda en decenas de ms: sigue fuera.
++const VOZ_MINIMA_MS = 200;
 +const ESPERA_TURNO_MS = 15000;
 +const TURNOS_MAX = 20;
 +const PREGUNTA_BACKEND_MS = 15000;
@@ -93,6 +104,40 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +  fallo: 'Perdona, se me ha cortado algo por aquí. Mikel te escribirá. ¡Hasta luego!',
 +  tope: 'Bueno, te dejo, que se lo cuento a Mikel. ¡Hasta luego!'
 +};
++
++/**
++ * Espera el «¿Sí?» de quien descuelga, sin la espera de un turno normal. Vuelve con
++ * {audio} en cuanto, tras hablar, lleva SALUDO_SILENCIO_MS callado (o la frase se cierra
++ * sola); con null si en SALUDO_NADIE_MS no ha empezado a hablar o si pasa
++ * ESPERA_SALUDO_MS. Mira el estado del detector de voz de la sesión (audio-fork.js), que
++ * es quien sabe si está hablando; quien llama apaga la captura después, lo que descarta
++ * la frase a medias.
++ */
++function esperarSaludo(session) {
++  return new Promise(function (resolver) {
++    const inicio = Date.now();
++    let hecho = false;
++    const acabar = function (u) {
++      if (hecho) return;
++      hecho = true;
++      clearInterval(sondeo);
++      session.off('utterance', alAcabar);
++      resolver(u || null);
++    };
++    const loDicho = function () {
++      return session._utteranceChunks && session._utteranceChunks.length
++        ? { audio: Buffer.concat(session._utteranceChunks) } : null;
++    };
++    const alAcabar = function (u) { acabar(u); };
++    session.on('utterance', alAcabar);
++    const sondeo = setInterval(function () {
++      const pasado = Date.now() - inicio;
++      if (session._inSpeech && session._silenceMs >= SALUDO_SILENCIO_MS) return acabar(loDicho());
++      if (!session._inSpeech && pasado >= SALUDO_NADIE_MS) return acabar(null);
++      if (pasado >= ESPERA_SALUDO_MS) return acabar(session._inSpeech ? loDicho() : null);
++    }, SALUDO_SONDEO_MS);
++  });
++}
 +
 +function backendUrl() {
 +  return (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
@@ -182,21 +227,21 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +      return { endReason: fin };
 +    }
 +    desarmar = armarAnticipo(session, o.whisperClient);
++    if (typeof session.minSpeechMs === 'number') session.minSpeechMs = Math.min(session.minSpeechMs, VOZ_MINIMA_MS);
 +
-+    // El «¿Sí?» del otro: se espera, se transcribe y va con la presentación.
++    // El «¿Sí?» del otro: se espera lo justo y Jarvis se presenta enseguida. Se transcribe
++    // de fondo, solo para el historial de la llamada: a la presentación no le hace falta.
 +    session.setCaptureEnabled(true);
-+    let saludo = null;
-+    try {
-+      saludo = await session.waitForUtterance({ timeoutMs: ESPERA_SALUDO_MS });
-+    } catch (e) { /* no ha dicho nada: Jarvis empieza igual */ }
++    const saludo = await (o.esperarSaludo || esperarSaludo)(session);
 +    session.setCaptureEnabled(false);
 +    if (!activa) { fin = 'hangup'; return { endReason: fin }; }
 +    if (saludo) {
-+      const t = await transcribirFrase(o.whisperClient, saludo, log).catch(function () { return ''; });
-+      if (t && t.trim()) {
-+        if (o.onTurno) o.onTurno('otro', t.trim());
-+        if (o.onUserTurn) o.onUserTurn(t.trim());
-+      }
++      transcribirFrase(o.whisperClient, saludo, log).then(function (t) {
++        if (t && t.trim()) {
++          if (o.onTurno) o.onTurno('otro', t.trim());
++          if (o.onUserTurn) o.onUserTurn(t.trim());
++        }
++      }, function () {});
 +    }
 +
 +    let interrumpio = await decir(o.apertura, o.aperturaUrl);
@@ -263,10 +308,10 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +  return { endReason: fin };
 +}
 +
-+module.exports = { runConversacionTercero, preguntarAlBackend, FRASES };
++module.exports = { runConversacionTercero, preguntarAlBackend, esperarSaludo, FRASES };
 diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 --- a/voice-app/lib/linea-o2.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/linea-o2.js	2026-11-01 11:20:21.111336900 +0100
++++ b/voice-app/lib/linea-o2.js	2026-11-01 11:28:24.118242800 +0100
 @@ -0,0 +1,199 @@
 +/**
 + * Parche 32: la línea fija de casa (O2/Telefónica) por SIP, para que Jarvis llame a
@@ -469,7 +514,7 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +module.exports = { LineaO2 };
 diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
 --- a/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:20:21.128791200 +0100
++++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:28:24.131252800 +0100
 @@ -51,7 +51,9 @@
      message,
      callerId,
@@ -524,7 +569,7 @@ diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.j
      // Modify endpoint with remote SDP to complete media connection
 diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
 --- a/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.213894800 +0100
-+++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:20:21.127994700 +0100
++++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:28:24.130252200 +0100
 @@ -11,6 +11,8 @@
  const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
@@ -706,8 +751,8 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
  
 diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 --- a/voice-app/test/parche32.test.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/test/parche32.test.js	2026-11-01 11:20:21.108820600 +0100
-@@ -0,0 +1,228 @@
++++ b/voice-app/test/parche32.test.js	2026-11-01 11:28:24.110741700 +0100
+@@ -0,0 +1,283 @@
 +/**
 + * Parche 32: la línea fija de O2 y la conversación con otra persona.
 + *
@@ -723,7 +768,7 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
 +
 +const { LineaO2 } = require('../lib/linea-o2');
-+const { runConversacionTercero, FRASES } = require('../lib/conversacion-tercero');
++const { runConversacionTercero, esperarSaludo, FRASES } = require('../lib/conversacion-tercero');
 +
 +const USUARIO = 'usuario-de-prueba';
 +const TID = '11111111-2222-3333-4444-555555555555';
@@ -856,6 +901,8 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +    tercero: TID,
 +    apertura: 'Hola, Erik. Soy Jarvis, el asistente de Mikel. ¿Comes hoy con él?',
 +    onTurno: () => {},
++    // El saludo, del mismo guion que el resto (esperarSaludo se prueba aparte).
++    esperarSaludo: (s) => s.waitForUtterance({ timeoutMs: 1 }).catch(() => null),
 +    fetch: async (url, opciones) => {
 +      pedidosBackend.push({ url, opciones, cuerpo: JSON.parse(opciones.body) });
 +      const r = guion.backend.shift();
@@ -881,7 +928,9 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  assert.ok(e.pedidosBackend[0].url.endsWith('/telefono/tercero/' + TID + '/turno'));
 +  assert.strictEqual(e.pedidosBackend[0].opciones.headers['X-Auth-Token'], 'token-de-prueba');
 +  assert.deepStrictEqual(e.pedidosBackend[0].cuerpo, { dicho: 'Sí, a las dos y media' });
-+  assert.deepStrictEqual(turnos.map((t) => t[0]), ['otro', 'jarvis', 'otro', 'jarvis']);
++  // El saludo se transcribe de fondo: entra en el historial cuando llega.
++  assert.deepStrictEqual(turnos.map((t) => t[0]).sort(), ['jarvis', 'jarvis', 'otro', 'otro']);
++  assert.deepStrictEqual(turnos.find((t) => t[0] === 'jarvis'), ['jarvis', e.o.apertura]);
 +});
 +
 +test('la presentación pedida mientras sonaba no se vuelve a pedir', async () => {
@@ -899,6 +948,57 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  e.o.aperturaUrl = Promise.resolve(null);
 +  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
 +  assert.strictEqual(e.dichos[0], e.o.apertura);
++});
++
++// ── El saludo ────────────────────────────────────────────────────────────────
++function detector() {
++  const s = new EventEmitter();
++  s._inSpeech = false; s._silenceMs = 0; s._utteranceChunks = [];
++  return s;
++}
++
++test('saludo: tras decir «¿Sí?» y callar 450 ms, no espera más', async () => {
++  const s = detector();
++  const t0 = Date.now();
++  setTimeout(() => { s._inSpeech = true; s._utteranceChunks = [Buffer.from('si')]; }, 100);
++  setTimeout(() => { s._silenceMs = 500; }, 300);
++  const u = await esperarSaludo(s);
++  assert.strictEqual(u.audio.toString(), 'si');
++  assert.ok(Date.now() - t0 < 600, 'tardó ' + (Date.now() - t0) + ' ms');
++});
++
++test('saludo: si nadie habla en 2 s, se presenta sin esperar los 3', async () => {
++  const s = detector();
++  const t0 = Date.now();
++  assert.strictEqual(await esperarSaludo(s), null);
++  const ms = Date.now() - t0;
++  assert.ok(ms >= 1950 && ms < 2400, 'tardó ' + ms + ' ms');
++});
++
++test('saludo: si la frase se cierra sola, vale esa', async () => {
++  const s = detector();
++  setTimeout(() => s.emit('utterance', { audio: Buffer.from('diga') }), 50);
++  const u = await esperarSaludo(s);
++  assert.strictEqual(u.audio.toString(), 'diga');
++  assert.strictEqual(s.listenerCount('utterance'), 0);
++});
++
++test('saludo: hablando sin parar, a los 3 s se presenta con lo dicho', async () => {
++  const s = detector();
++  s._inSpeech = true; s._utteranceChunks = [Buffer.from('bla')];
++  const t0 = Date.now();
++  const u = await esperarSaludo(s);
++  assert.ok(Date.now() - t0 >= 2950);
++  assert.strictEqual(u.audio.toString(), 'bla');
++});
++
++test('un «sí» suelto cuenta: la voz mínima baja a 200 ms', async () => {
++  const e = escena({ oido: ['¿Sí?', 'Sí'], backend: [{ decir: 'Genial. ¡Adiós!', colgar: true }] });
++  const sesiones = [];
++  const original = e.o.audioForkServer.expectSession;
++  e.o.audioForkServer.expectSession = async () => { const s = await original(); s.minSpeechMs = 350; sesiones.push(s); return s; };
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(sesiones[0].minSpeechMs, 200);
 +});
 +
 +test('si nadie dice nada al descolgar, se presenta igual', async () => {
