@@ -36,6 +36,10 @@ backend, el túnel, la base de datos y n8n. Lo que puede y no puede hacer está 
 máquina, porque `claude-api-server` lo invoca con `--dangerously-skip-permissions`. Hoy lo
 único que lo protege es que ese puerto no sale de la LAN. Ver «Seguridad», abajo.
 
+**Llamar a otras personas** («llama a Erik y pregúntale si come») no va por la
+centralita, que no sale a la red telefónica: va por la línea fija de O2 y tiene su propio
+fichero, `docs/LLAMADAS_TERCEROS.md`.
+
 ### Qué motivo suena por dónde
 
 Desde que existe la centralita, no todos los «Hablarlo» suenan por el mismo sitio:

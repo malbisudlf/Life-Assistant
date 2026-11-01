@@ -444,6 +444,10 @@ class TestJarvisDespachador:
         # Y WhatsApp, sin el puente de caja.
         monkeypatch.setattr(main, "WHATSAPP_PUENTE_URL", "http://whatsapp:8090")
         monkeypatch.setattr(main, "WHATSAPP_PUENTE_TOKEN", "x" * 32)
+        # Y las llamadas a otras personas, que nacen apagadas.
+        monkeypatch.setattr(main, "TERCEROS_LLAMADAS", True)
+        monkeypatch.setattr(main, "TELEFONO_URL", "http://voz.test:3000")
+        monkeypatch.setattr(main, "TELEFONO_TERCEROS_TOKEN", "x" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

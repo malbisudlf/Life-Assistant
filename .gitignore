@@ -36,6 +36,9 @@ agent/.env.*
 !agent/.env.example
 
 # Datos personales
+# Notas y pruebas a mano de Jarvis (la línea O2, las configuraciones MCP): llevan IPs de
+# la LAN, identificadores de la línea y tokens. Lo que vale de ahí está en docs/.
+Jarvis/
 *.xlsx
 *.xls
 *.zip
