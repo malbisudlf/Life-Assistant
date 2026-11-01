@@ -1501,7 +1501,7 @@ parches 1-31 ya puestos).
 | `lib/outbound-handler.js` | `lineaO2`: marca por el proxy de O2, sin credencial; `answeredBy` es siempre `unknown` (el truco del Contact es del 3CX) |
 | `lib/outbound-routes.js` | `mode: "tercero"` + `linea: "o2"` (van juntos), `tercero` (el id del backend) y solo números de persona de España. Registra antes de marcar y suelta en el `finally` |
 | `index.js` | Crea la línea al conectar con drachtio si hay `O2_SIP_USUARIO`, y **rechaza con 480 toda llamada entrante que venga del proxy de O2** |
-| `test/parche32.test.js` (nuevo) | 14 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
+| `test/parche32.test.js` (nuevo) | 16 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
 
 Variables nuevas en `~/.claude-phone/.env`: `O2_SIP_USUARIO`, `O2_PROXY` (`ip:5070`),
 `O2_DOMINIO` (opcional, `telefonica.net`) y `TELEFONO_TERCEROS_TOKEN`.
@@ -1535,6 +1535,11 @@ tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
   no llega y el registro se siguió renovando cada 42 s: mientras, `caja` rechazaba con
   480 las llamadas al fijo. Ahora la línea se suelta con el `destroy` del diálogo (una
   sola vez, `soltarLinea`) y el cierre del audio espera como mucho 2 s (`CIERRE_MS`).
+- **De descolgar a oír algo pasaban ~4,8 s**: hasta 4 s esperando el «¿Sí?» y ~0,8 s
+  generando la presentación. La presentación se pide ahora a la voz al marcar
+  (`aperturaUrl`, en `outbound-routes.js`): la voz en directo guarda la frase entera y la
+  sirve desde el principio cuando FreeSWITCH la pide, así que al descolgar ya está. Si
+  falla, se pide al descolgar como antes. Queda la espera del saludo.
 
 ## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
 
