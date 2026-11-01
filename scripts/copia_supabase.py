@@ -126,6 +126,8 @@ TABLAS = (
     # que se rearma sola, escrita a mano como un recordatorio: sin copia, una restauración
     # las borraba sin avisar.
     ("alarmas",               "cuando,id",               False,       None),
+    # A quién puede llamar Jarvis por la línea fija: nombres y números apuntados a mano,
+    # uno a uno y con el botón del móvil.
 )
 
 # Las tablas que no se copian, con nombre (el porqué, en el comentario de arriba). La

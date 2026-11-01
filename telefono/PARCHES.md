@@ -23,7 +23,8 @@ que cierra la frase, no después (ver «El parche 26»). Y el 29 (2026-10-29): s
 ElevenLabs se queda sin cuota, la frase la dice Azure en vez de colgar (ver «El parche
 29»). Y el 30, el mismo día: la voz de casa, Piper en jacobo (ver «La voz en jacobo»).
 Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver «El parche
-31»).
+31»). Y el 32 (2026-10-31, `telefono/parche-32.diff`, **sin aplicar**): llamar a otras
+personas por la línea fija de O2 (ver «El parche 32»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1483,6 +1484,43 @@ Dos trampas que costaron una tarde:
 - **whisper-server no avisa por stdout de que está listo**: lo escribe con búfer y sin
   terminal no llega nunca. `servidor.py` pregunta al puerto hasta que contesta, y mira
   stderr solo para saber si ha cogido la GPU.
+
+## El parche 32: llamar a otras personas por la línea fija (O2)
+
+Del 2026-10-31. Lo que hace y por qué, en `docs/LLAMADAS_TERCEROS.md`; aquí, lo que toca
+de claude-phone. Es el único parche que se versiona entero desde el primer día
+(`telefono/parche-32.diff`, generado contra la copia de `caja` de ese día, con los
+parches 1-31 ya puestos).
+
+| Fichero | Qué |
+|---|---|
+| `lib/linea-o2.js` (nuevo) | `LineaO2`: el REGISTER en el proxy de O2 solo mientras dura una llamada, con refresco, y la baja quitando **solo nuestro Contact** (nunca `*`, que se llevaría el registro del router). Las URIs y cabeceras con las que Telefónica dejó sonar un móvil |
+| `lib/conversacion-tercero.js` (nuevo) | La conversación con el tercero: espera su «¿Sí?», dice la presentación y manda cada frase a `POST /telefono/tercero/{id}/turno` del backend (`TELEFONO_TERCEROS_TOKEN`, `LECTURA_URL`). Sin pitidos, sin música, sin Claude Code |
+| `lib/outbound-handler.js` | `lineaO2`: marca por el proxy de O2, sin credencial; `answeredBy` es siempre `unknown` (el truco del Contact es del 3CX) |
+| `lib/outbound-routes.js` | `mode: "tercero"` + `linea: "o2"` (van juntos), `tercero` (el id del backend) y solo números de persona de España. Registra antes de marcar y suelta en el `finally` |
+| `index.js` | Crea la línea al conectar con drachtio si hay `O2_SIP_USUARIO`, y **rechaza con 480 toda llamada entrante que venga del proxy de O2** |
+| `test/parche32.test.js` (nuevo) | 11 casos, con drachtio, FreeSWITCH, el oído, la voz y el backend de mentira |
+
+Variables nuevas en `~/.claude-phone/.env`: `O2_SIP_USUARIO`, `O2_PROXY` (`ip:5070`),
+`O2_DOMINIO` (opcional, `telefonica.net`) y `TELEFONO_TERCEROS_TOKEN`.
+
+**Aplicarlo:**
+
+```bash
+cd ~/.claude-phone-cli && cp -a voice-app voice-app.antes-p32
+patch -p1 --dry-run < parche-32.diff && patch -p1 < parche-32.diff   # el diff, copiado a mano
+docker run --rm -v $PWD/voice-app/lib:/app/lib:ro -v $PWD/voice-app/test:/app/test:ro   -w /app --entrypoint node claude-phone-voice-app --test test/          # 124 en verde
+curl -s localhost:3000/api/calls                                         # sin llamadas en curso
+docker compose -f ~/.claude-phone/docker-compose.yml up -d --build voice-app
+docker logs voice-app 2>&1 | grep O2                                     # «Línea fija lista»
+```
+
+El `patch -p1` va desde `~/.claude-phone-cli` porque el diff compara `a/voice-app` con
+`b/voice-app`. Las rutas del puerto HTTP (`3000` arriba) son las de `HTTP_PORT` del `.env`.
+
+**Lo que no se ha probado** (no se puede sin una llamada): que el audio pase en los dos
+sentidos por el NAT del router. Todo lo demás —el registro, el INVITE, la conversación
+contra el backend— tiene test, y los 124 de la voice-app pasan dentro de su imagen.
 
 ## Lo que además NO está en el repositorio original
 
