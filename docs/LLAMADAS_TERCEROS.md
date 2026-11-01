@@ -12,7 +12,9 @@ plan gratuito no sale a la red telefónica. Esto sale por la **línea fija de O2
 habla SIP directamente con el proxy de voz de Telefónica, el mismo en el que se registra
 el router.
 
-**Estado: escrito y probado por partes, sin encender.** Lo que falta, en orden:
+**Estado: funcionando desde el 2026-11-01.** Tres llamadas de prueba al móvil de Mikel: la
+segunda y la tercera se oyeron en los dos sentidos (hizo falta el parche 33). Cómo se
+encendió, en orden:
 
 1. En `~/.claude-phone/.env` de `caja`: `O2_SIP_USUARIO` (el *Auth Username* de
    *Voice → Basic* en el router; no se escribe en ningún otro sitio), `O2_PROXY`
@@ -115,14 +117,14 @@ un móvil de verdad; sin registrar, el mismo INVITE dio 403. Por eso:
 
 Lo que **no** se sabe todavía, y la primera llamada lo dirá:
 
-- **Si el audio pasa.** Hasta ahora solo se ha visto `180 Ringing`. FreeSWITCH anuncia la
-  IP de `caja` en la LAN; que el audio vuelva depende de que el SBC de Telefónica mande el
-  RTP a donde le llega (lo normal con clientes detrás de NAT) y de que el router lo deje
-  pasar. Si se oye en un sentido y no en el otro, empieza por ahí.
+- ~~Si el audio pasa~~: **pasa**, en los dos sentidos, desde que FreeSWITCH anuncia la IP
+  de la LAN (parche 33). El SBC de Telefónica devuelve el RTP a donde le
+  llega. Si algún día llega silencio (RMS 1 en los logs de la voice-app), lo primero es
+  mirar qué `c=IN IP4` sale en el INVITE.
 - **Si las condiciones de O2 permiten usar la línea así.** Llamadas sueltas a tus
   contactos no se parecen a un uso abusivo, pero no se ha consultado.
-- **Qué número ve Erik**: debería ser el fijo de casa (lo pone Telefónica según el
-  registro).
+- **Qué número ve quien recibe la llamada**: debería ser el fijo de casa (lo pone
+  Telefónica según el registro); está por confirmar.
 
 ## Lo que no hace
 

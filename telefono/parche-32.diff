@@ -1,6 +1,6 @@
 diff -ruN a/voice-app/index.js b/voice-app/index.js
---- a/voice-app/index.js	2026-11-01 07:13:33.130252000 +0100
-+++ b/voice-app/index.js	2026-11-01 07:16:04.570700400 +0100
+--- a/voice-app/index.js	2026-11-01 11:09:44.202783500 +0100
++++ b/voice-app/index.js	2026-11-01 11:09:44.257110700 +0100
 @@ -31,6 +31,9 @@
  var outboundModule = require("./lib/outbound-routes");
  var outboundRouter = outboundModule.router;
@@ -57,8 +57,8 @@ diff -ruN a/voice-app/index.js b/voice-app/index.js
          mediaServer: mediaServer,
 diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
 --- a/voice-app/lib/conversacion-tercero.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 07:16:04.570700400 +0100
-@@ -0,0 +1,197 @@
++++ b/voice-app/lib/conversacion-tercero.js	2026-11-01 11:09:44.274474700 +0100
+@@ -0,0 +1,203 @@
 +/**
 + * Parche 32: la conversación de Jarvis con OTRA persona (llamar_a_alguien).
 + * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -83,6 +83,9 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +const ESPERA_TURNO_MS = 15000;
 +const TURNOS_MAX = 20;
 +const PREGUNTA_BACKEND_MS = 15000;
++// Lo más que se espera a FreeSWITCH al cerrar el audio: con la llamada ya colgada,
++// forkAudioStop puede no contestar nunca (EPIPE) y dejar la conversación sin terminar.
++const CIERRE_MS = 2000;
 +
 +const FRASES = {
 +  hola: '¿Hola? ¿Me oyes?',
@@ -249,7 +252,10 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +    if (session) session.setCaptureEnabled(false);
 +    if (o.audioForkServer.cancelExpectation) o.audioForkServer.cancelExpectation(callId);
 +    if (fork) {
-+      try { await endpoint.forkAudioStop(); } catch (e) { /* ya parado */ }
++      try {
++        await Promise.race([endpoint.forkAudioStop(),
++                            new Promise(function (r) { setTimeout(r, CIERRE_MS); })]);
++      } catch (e) { /* ya parado */ }
 +    }
 +  }
 +  return { endReason: fin };
@@ -258,8 +264,8 @@ diff -ruN a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-t
 +module.exports = { runConversacionTercero, preguntarAlBackend, FRASES };
 diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 --- a/voice-app/lib/linea-o2.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/lib/linea-o2.js	2026-11-01 07:16:04.570700400 +0100
-@@ -0,0 +1,191 @@
++++ b/voice-app/lib/linea-o2.js	2026-11-01 11:09:44.257110700 +0100
+@@ -0,0 +1,199 @@
 +/**
 + * Parche 32: la línea fija de casa (O2/Telefónica) por SIP, para que Jarvis llame a
 + * otras personas. Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
@@ -283,6 +289,10 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +
 +const DOMINIO_DEFECTO = 'telefonica.net';
 +const REFRESCO_MIN_SEG = 20;
++// Lo que Telefónica da a la línea (el router se registra cada 70 s). Si el 200 OK no dice
++// cuánto nos concede, se supone esto y no lo pedido: renovar a destiempo deja la línea
++// sin registro a mitad de una llamada.
++const CONCEDIDO_SI_NO_DICE = 70;
 +
 +class LineaO2 {
 +  /**
@@ -426,14 +436,18 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +    return promesa;
 +  }
 +
-+  /** Los segundos concedidos a NUESTRO Contact (Telefónica devuelve también los demás). */
++  /** Los segundos concedidos a NUESTRO Contact (Telefónica devuelve también los demás);
++   *  si no lo dice ahí, la cabecera Expires; si tampoco, CONCEDIDO_SI_NO_DICE. */
 +  _concedido(res, pedido) {
-+    const contactos = (res && typeof res.get === 'function' && res.get('Contact')) || '';
-+    const nuestro = contactos.split(/,(?=\s*<)/).find(function (c) {
++    const leer = function (h) { return (res && typeof res.get === 'function' && res.get(h)) || ''; };
++    const nuestro = String(leer('Contact')).split(/,(?=\s*<)/).find(function (c) {
 +      return c.indexOf('@' + this.ipLocal + ':' + this.puertoLocal) >= 0;
 +    }, this);
 +    const m = nuestro && nuestro.match(/expires=(\d+)/i);
-+    return m ? parseInt(m[1], 10) : pedido;
++    if (m) return parseInt(m[1], 10);
++    const cabecera = parseInt(leer('Expires'), 10);
++    if (cabecera > 0) return cabecera;
++    return Math.min(pedido, CONCEDIDO_SI_NO_DICE);
 +  }
 +
 +  _programarRefresco(concedido) {
@@ -452,8 +466,8 @@ diff -ruN a/voice-app/lib/linea-o2.js b/voice-app/lib/linea-o2.js
 +
 +module.exports = { LineaO2 };
 diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
---- a/voice-app/lib/outbound-handler.js	2026-11-01 07:13:33.146027100 +0100
-+++ b/voice-app/lib/outbound-handler.js	2026-11-01 07:16:04.583395300 +0100
+--- a/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.213894800 +0100
++++ b/voice-app/lib/outbound-handler.js	2026-11-01 11:09:44.269231400 +0100
 @@ -51,7 +51,9 @@
      message,
      callerId,
@@ -507,8 +521,8 @@ diff -ruN a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.j
  
      // Modify endpoint with remote SDP to complete media connection
 diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
---- a/voice-app/lib/outbound-routes.js	2026-11-01 07:13:33.142365200 +0100
-+++ b/voice-app/lib/outbound-routes.js	2026-11-01 07:16:04.570700400 +0100
+--- a/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.213894800 +0100
++++ b/voice-app/lib/outbound-routes.js	2026-11-01 11:09:44.268449800 +0100
 @@ -11,6 +11,8 @@
  const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
@@ -582,11 +596,20 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          logger.error('Conversation mode dependencies not ready', {
            audioForkServer: !!audioForkServer,
            whisperClient: !!whisperClient,
-@@ -244,15 +273,28 @@
+@@ -244,18 +273,41 @@
  
      // Continue asynchronously
      (async function() {
 +      var conLinea = false;
++      var soltada = false;
++      // Una sola vez, sea por el BYE o por el finally: si el flujo se queda colgado tras
++      // un BYE (el EPIPE de FreeSWITCH al cerrar el audio, 2026-11-01), el registro en O2
++      // seguía renovándose y caja rechazaba con 480 las llamadas al fijo.
++      var soltarLinea = function() {
++        if (!conLinea || soltada) return Promise.resolve();
++        soltada = true;
++        return lineaO2.soltar();
++      };
        try {
          session.transition('DIALING');
  
@@ -612,7 +635,11 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          });
  
          var dialog = result.dialog;
-@@ -263,6 +305,33 @@
++        if (tercero && dialog) dialog.once('destroy', function() { soltarLinea(); });
+         var endpoint = result.endpoint;
+ 
+         session.setDialog(dialog);
+@@ -263,6 +315,33 @@
          session.answeredBy = result.answeredBy || 'unknown';
          var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
  
@@ -646,16 +673,16 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
          if (detectVoicemail && session.answeredBy === 'voicemail') {
            if (!voicemailMessage) {
              // El FAILED antes de colgar: así ningún BYE posterior puede reescribir el final.
-@@ -359,6 +428,8 @@
+@@ -359,6 +438,8 @@
          if (session.dialog || session.endpoint) {
            await hangupCall(session.dialog, session.endpoint, callId);
          }
 +      } finally {
-+        if (conLinea) await lineaO2.soltar();
++        await soltarLinea();
        }
      })();
  
-@@ -467,6 +538,7 @@
+@@ -467,6 +548,7 @@
    claudeBridge = deps.claudeBridge || null;
    ttsService = deps.ttsService || null;
    wsPort = deps.wsPort || 3001;
@@ -665,8 +692,8 @@ diff -ruN a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
  
 diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 --- a/voice-app/test/parche32.test.js	1970-01-01 01:00:00.000000000 +0100
-+++ b/voice-app/test/parche32.test.js	2026-11-01 07:16:04.566657200 +0100
-@@ -0,0 +1,186 @@
++++ b/voice-app/test/parche32.test.js	2026-11-01 11:09:44.251243400 +0100
+@@ -0,0 +1,211 @@
 +/**
 + * Parche 32: la línea fija de O2 y la conversación con otra persona.
 + *
@@ -750,6 +777,24 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  assert.ok(baja.headers.Contact.startsWith(`<sip:${USUARIO}@192.0.2.5:5070`));
 +  assert.ok(!baja.headers.Contact.includes('*'));
 +  assert.strictEqual(l.registrada, false);
++});
++
++test('lo concedido: el de nuestro Contact, si no la cabecera Expires, si no 70', () => {
++  const l = linea({});
++  const res = (cab) => ({ get: (h) => cab[h] || '' });
++  assert.strictEqual(l._concedido(res({ Contact: '<sip:u@203.0.113.1:5070>;expires=1275', Expires: '70' }), 120), 70);
++  assert.strictEqual(l._concedido(res({}), 120), 70);
++  assert.strictEqual(l._concedido(res({}), 60), 60);
++  assert.strictEqual(l._concedido(res({ Contact: `<sip:${USUARIO}@192.0.2.5:5070>;expires=90`, Expires: '70' }), 120), 90);
++});
++
++test('con 70 concedidos renueva a los 42 s, antes de que caduque', () => {
++  const l = linea({});
++  const antes = global.setTimeout;
++  let ms = null;
++  global.setTimeout = function (fn, t) { ms = t; return { unref() {} }; };
++  try { l._programarRefresco(70); } finally { global.setTimeout = antes; }
++  assert.strictEqual(ms, 42000);
 +});
 +
 +test('dos usos a la vez: un registro, y la baja con el último', async () => {
@@ -844,6 +889,13 @@ diff -ruN a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
 +  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
 +  assert.strictEqual(r.endReason, 'silence');
 +  assert.deepStrictEqual(e.dichos, [e.o.apertura, FRASES.hola]);
++});
++
++test('si FreeSWITCH no contesta al cerrar el audio, la conversación acaba igual', async () => {
++  const e = escena({ oido: ['¿Sí?', 'Vale'], backend: [{ decir: 'Adiós.', colgar: true }] });
++  e.endpoint.forkAudioStop = () => new Promise(() => {});   // el EPIPE: nunca resuelve
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'goodbye');
 +});
 +
 +test('si cuelga el otro, acaba como hangup sin seguir hablando', async () => {
