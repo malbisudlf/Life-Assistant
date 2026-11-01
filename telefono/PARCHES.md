@@ -1555,6 +1555,10 @@ tres sonaron y la segunda y la tercera se oyeron en los dos sentidos):
   voz de esas frases por adelantado (se usa si la respuesta es una de ellas). Y se
   transcribe con el modelo pequeño del oído: `conModeloRapido` añade `rapido` a cada
   `transcribe`, que `whisper-client.js` manda como `X-Modelo: rapido`.
+- **El buzón de voz**: si a los 3 s el otro sigue hablando es una locución, no un «¿Sí?»
+  (`esperarSaludo` → `larga`, `esperarLocucion`). Con más de 1,8 s de saludo se transcribe
+  antes de presentarse y, si suena a buzón (`BUZON_RE`), se espera al pitido
+  (`esperarSilencio`) y se deja el recado; acaba en `voicemail` → `voicemail_message`.
 
 ## El parche 33: drachtio y FreeSWITCH por la IP de la LAN
 

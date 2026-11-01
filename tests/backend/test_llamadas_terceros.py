@@ -214,6 +214,15 @@ class TestLlamar:
             m["estado"] = "hecha"
         assert "tope" in _llamar()["error"]
 
+    def test_llamame_no_gasta_el_tope(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "TERCEROS_DIA_MAX", 1)
+        monkeypatch.setattr(main, "MI_MOVIL", "711223344")
+        for _ in range(2):
+            assert _llamar(nombre="yo")["ok"] is True
+            for m in main._terceros.values():
+                m["estado"] = "hecha"
+        assert _llamar()["ok"] is True
+
     def test_si_la_voice_app_falla_se_dice(self, terceros):
         terceros.routes.insert(0, ("POST", "/api/outbound-call", FakeResponse({}, 503)))
         r = _llamar()
@@ -309,6 +318,14 @@ class TestAlColgar:
         main._terceros[tid].update(estado="hablando", resultado="Erik dice que sí, a las 14:30.")
         main._seguir_tercero(tid)
         assert avisos == [("📞 Erik Uni", "Erik dice que sí, a las 14:30.")]
+
+    def test_buzon_con_recado(self, terceros, monkeypatch):
+        tid, avisos = self._seguir(terceros, monkeypatch,
+                                   {"state": "COMPLETED", "reason": "voicemail_message",
+                                    "answeredAt": "2026-10-31T11:00:05Z"})
+        main._seguir_tercero(tid)
+        assert avisos == [("📞 Erik Uni", "Ha saltado el buzón de Erik Uni y le he dejado el recado.")]
+        assert main._terceros[tid]["fin"] == "buzón de voz"
 
     def test_sin_resultado_se_resume(self, terceros, monkeypatch):
         tid, avisos = self._seguir(terceros, monkeypatch,

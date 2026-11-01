@@ -22114,9 +22114,11 @@ def _buscar_contacto(nombre: str) -> list:
 
 
 def _terceros_hoy() -> int:
+    """Las llamadas de hoy a otras personas. Las de «llámame» no cuentan: el tope es para
+    no molestar a nadie, y probar la línea con tu propio móvil no molesta a nadie."""
     hoy = _ahora_local().date().isoformat()
     with _terceros_lock:
-        return sum(1 for m in _terceros.values() if m["dia"] == hoy)
+        return sum(1 for m in _terceros.values() if m["dia"] == hoy and not m.get("propio"))
 
 
 def _tercero_en_curso() -> Optional[dict]:
@@ -22515,7 +22517,13 @@ def _seguir_tercero(tid: str) -> None:
         if info.get("state") in ("COMPLETED", "FAILED"):
             break
     razon = str(info.get("reason") or "")
-    if info.get("state") == "FAILED" and razon in _TERCERO_SIN_HABLAR and not info.get("answeredAt"):
+    if razon == "voicemail_message":
+        # Saltó el buzón y la voice-app dejó el recado (la presentación, que ya dice el
+        # motivo) sin preguntar aquí: no hay conversación que resumir.
+        mision.update(estado="hecha", fin="buzón de voz")
+        mision["resultado"] = texto = (f"Ha saltado el buzón de {mision['nombre']} y le he "
+                                       "dejado el recado.")
+    elif info.get("state") == "FAILED" and razon in _TERCERO_SIN_HABLAR and not info.get("answeredAt"):
         mision.update(estado="sin_hablar", fin=_TERCERO_SIN_HABLAR[razon])
         texto = f"He llamado a {mision['nombre']} y {mision['fin']}."
     elif info.get("state") in ("COMPLETED", "FAILED") or mision["estado"] == "hablando":

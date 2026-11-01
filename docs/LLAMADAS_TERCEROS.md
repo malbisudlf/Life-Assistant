@@ -155,8 +155,13 @@ Lo que **no** se sabe todavía, y la primera llamada lo dirá:
 
 - **No llama a quien no esté en tus contactos**, aunque se lo dictes con el número:
   primero lo guardas en el móvil.
-- **No sabe distinguir un buzón por las cabeceras**, como sí hace con el 3CX: lo decide el
-  modelo por lo que oye («deje su mensaje») y deja un recado corto.
+- **No sabe distinguir un buzón por las cabeceras**, como sí hace con el 3CX: lo decide la
+  voice-app por lo que oye. Si al descolgar le hablan más de lo que dura un «¿Sí?» (más de
+  3 s seguidos, o más de 1,8 s de audio), deja acabar la locución y la transcribe; si dice
+  «mensaje», «señal», «buzón», «contestador», «disponible»…, espera al pitido y deja el
+  recado (la presentación, que ya dice el motivo, y «Cuando puedas, contéstale a Mikel») y
+  cuelga sin preguntar al backend. Te llega «Ha saltado el buzón de Aita y le he dejado el
+  recado». Si es una persona que habla mucho, sigue la conversación normal.
 - **No insiste.** Si no lo coge, te llega «no lo ha cogido» y decides tú.
 - **No hay llamadas entrantes.** Llamar al fijo y que conteste Jarvis es justo lo que el
   480 impide.
