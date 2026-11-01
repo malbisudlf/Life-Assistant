@@ -104,6 +104,11 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    tumba la otra, pero el «no lo encuentro» dice cuál no contestó. La única excepción al
    nombre es **«llámame»** (`nombre: "yo"`): te llama a ti, a `MI_MOVIL`, saludándote
    como siempre («Hola, señor») y sin buscar en los contactos; es la prueba de la línea.
+   **Apodos y vetos** (`TERCEROS_APODOS`, `TERCEROS_NUNCA` en `backend.env`, fuera del
+   repositorio porque son nombres de personas): un apodo lleva a UNA ficha por su nombre
+   exacto y con el nombre con que se le saluda; un veto la saca de toda búsqueda. Desde el
+   2026-11-01: «llama a Saioa» tenía que ser su madre y la única «Saioa» con teléfono era
+   otra. Decidirlo en el modelo (la memoria de Jarvis) no da garantías; esto sí.
    La copia de los contactos dura diez minutos, y si un nombre no aparece se
    vuelve a mirar en el momento. Hasta el 2026-11-01 había una lista aparte en Supabase,
    apuntada con botón; no llegó a encenderse.
