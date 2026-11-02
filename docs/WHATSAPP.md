@@ -8,8 +8,9 @@ Pedido el 30 de octubre de 2026. La primera versión (septiembre, solo lectura y
 de a quién debías respuesta) se quitó a los tres días porque no convenció. Esta no avisa
 de nada: Jarvis solo mira tus chats cuando le preguntas.
 
-**Estado: escrito, sin encender.** Falta montar el puente en `caja`, vincularlo con el QR
-y poner las dos variables (`caja/whatsapp/INSTALAR.md` de HomeLab).
+**Estado: encendido desde el 2026-11-02.** El puente está en `caja` y vinculado, y el
+backend tiene sus dos variables (`caja/whatsapp/INSTALAR.md` de HomeLab). Los programados
+llegaron el mismo día, detrás.
 
 ## Cómo funciona
 
@@ -19,12 +20,42 @@ Tu WhatsApp (el móvil)
     ▼
 puente en caja (Go + whatsmeow, contenedor `whatsapp`, sin `ports`)
     │  guarda el texto de los últimos 30 días en ~/stack/whatsapp-datos/mensajes.db
-    │  API con token, solo por la red de Compose: /chats, /mensajes, /enviar, /estado
+    │  y los programados, que manda él mismo a su hora (mira cada 20 s)
+    │  API con token, solo por la red de Compose: /chats, /mensajes, /enviar, /estado,
+    │  /programar, /programados
     ▼
-backend ── whatsapp_chats   («¿quién es Aimar?»: su chat, de tus chats y tu agenda)
-        ── whatsapp_leer    («¿tengo algo pendiente?», «¿qué me ha dicho Ane?»)
-        ── whatsapp_enviar  (con botón, o con un «sí» dicho en la llamada)
+backend ── whatsapp_chats      («¿quién es Aimar?»: su chat, de tus chats y tu agenda)
+        ── whatsapp_leer       («¿tengo algo pendiente?», «¿qué me ha dicho Ane?»)
+        ── whatsapp_enviar     (con botón, o con un «sí» dicho en la llamada)
+        ── whatsapp_programar  («mañana a las 9 dile a Aimar…»: igual que enviar, con la hora)
+        ── whatsapp_programados y whatsapp_cancelar_programado
 ```
+
+## Los programados
+
+«Mañana a las 9 dile a Aimar que no llego», «el viernes a las 00:00 felicita a Ane».
+Pedido el 2026-11-02.
+
+- **Los guarda y los manda el puente**, no el backend. Es la regla 1: el texto se queda
+  en `caja`. Y el puente es el proceso que está siempre conectado; el backend solo los
+  propone, los lista y los cancela.
+- **Se confirman como un envío de ahora**, con botón o con el «sí» hablado, y la frase
+  lleva la hora: «Mandar por WhatsApp mañana a las 09:00 a Aimar: «No llego»». Al
+  mandarlo, el puente vuelve a comprobar que el chat sigue siendo tuyo.
+- **Uno que llega tarde, caduca.** Si el puente estuvo caído y ya ha pasado más de una
+  hora de su hora (`PUENTE_PROGRAMADO_MARGEN_MIN`), no sale: «llego en cinco minutos» con
+  tres horas de retraso es peor que no mandarlo.
+- **Si WhatsApp no lo acepta, se reintenta** cinco veces (una cada 20 s) y luego queda
+  `fallido`. Desconectado no cuenta como intento: espera hasta que caduca.
+- **Uno cortado a mitad no se repite.** Antes de mandarlo se marca `enviando`; si el
+  proceso muere ahí, al arrancar queda `fallido`. Puede que ya saliera, y un mensaje
+  repetido a otra persona es peor que uno perdido del que se te avisa.
+- **El que no salió se te cuenta una vez**: el brief-tick pregunta al puente
+  (`_avisar_whatsapp_programados`) y apunta un aviso con regla `whatsapp`, que es tuyo y
+  no gasta el presupuesto del día. El aviso lleva el nombre, la hora y el motivo, **nunca
+  el texto**: el aviso pasa por Supabase.
+- Como mucho 50 pendientes y a un año vista. Lo resuelto (enviado, fallido, cancelado) se
+  borra con la misma retención que los mensajes.
 
 ## Las reglas
 
