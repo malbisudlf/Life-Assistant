@@ -5,7 +5,11 @@ vea las herramientas; que enviar siga la frontera de siempre (se confirma, y lo 
 botón —el nombre del PUENTE y el texto entero— es lo que se manda); que solo se mande a un
 chat que el puente tiene; que lo leído vaya marcado como dato y recortado; y que las tres
 estén en el teléfono (leer también, porque Mikel lo pidió aunque tenga shell en caja).
+Y los programados: que se confirmen con la hora en la frase, que viajen en UTC, y que el
+que no salió se avise una vez y sin su texto.
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 import main
@@ -178,9 +182,128 @@ class TestEnviar:
         assert r["ok"] is False and "no está conectado" in r["error"]
 
 
+def _manana():
+    return (main._ahora_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+class TestProgramar:
+    def test_se_confirma_como_enviar(self):
+        h = main._JARVIS_HERRAMIENTAS["whatsapp_programar"]
+        assert main._jarvis_confirma(h, {"chat": AIMAR, "texto": "hola"}) is True
+        assert "whatsapp_programar" in main.PREGUNTAS_ACCIONES
+        assert "whatsapp_programar" in main.PREGUNTAS_HABLADAS
+
+    def test_la_frase_lleva_la_hora_el_nombre_y_el_texto(self, wa):
+        wa.add("GET", "/chats", _chats(_aimar(nombre="Aimar Ibáñez")))
+        d = main._describir_whatsapp_programar(
+            {"chat": AIMAR, "texto": "No llego", "fecha": _manana(), "hora": "09:00"})
+        assert d == {"texto": "Mandar por WhatsApp mañana a las 09:00 a Aimar Ibáñez: «No llego»"}
+
+    def test_valida_antes_de_proponer(self):
+        ayer = (main._ahora_local() - timedelta(days=1)).strftime("%Y-%m-%d")
+        lejos = (main._ahora_local() + timedelta(days=400)).strftime("%Y-%m-%d")
+        invalida = lambda **a: main._propuesta_invalida(
+            "whatsapp_programar", {"chat": AIMAR, "texto": "hola", **a})
+        assert "ya ha pasado" in invalida(fecha=ayer, hora="10:00")
+        assert "un año" in invalida(fecha=lejos, hora="10:00")
+        assert "fecha" in invalida(fecha="mañana", hora="10:00")
+        assert "no es válido" in invalida(chat="+34 600", fecha=_manana(), hora="10:00")
+        assert invalida(fecha=_manana(), hora="10:00") == ""
+
+    def test_lo_guardado_para_el_movil_no_se_recorta(self):
+        texto = "palabra " * 60
+        args = main._args_de("whatsapp_programar", {"chat": AIMAR, "texto": texto,
+                                                    "fecha": _manana(), "hora": "09:00"})
+        assert args["texto"] == texto
+
+    def test_programa_en_utc_en_el_puente(self, wa):
+        wa.add("POST", "/programar", FakeResponse({"id": 7, "nombre": "Aimar",
+                                                   "estado": "pendiente"}))
+        r = main._jarvis_despachar("whatsapp_programar", {
+            "chat": AIMAR, "texto": " No llego ", "fecha": _manana(), "hora": "09:00"})
+        assert r["ok"] is True and r["id"] == 7 and r["cuando"] == "mañana a las 09:00"
+        cuerpo = wa.called("POST", "/programar")[0][2]["json"]
+        assert cuerpo["chat"] == AIMAR and cuerpo["texto"] == "No llego"
+        esperado = datetime.strptime(f"{_manana()} 09:00", "%Y-%m-%d %H:%M").replace(
+            tzinfo=main.LOCAL_TZ).astimezone(timezone.utc)
+        assert main._fecha_utc(cuerpo["cuando"]) == esperado and cuerpo["cuando"].endswith("Z")
+        assert main._lo_hecho("whatsapp_programar", {}, r) == \
+            "Programado para Aimar, mañana a las 09:00."
+
+    def test_el_rechazo_del_puente_se_dice(self, wa):
+        wa.add("POST", "/programar", FakeResponse({"error": "ya hay 50 mensajes programados"}, 409))
+        r = main._j_whatsapp_programar(AIMAR, "hola", _manana(), "09:00")
+        assert r["ok"] is False and "50 mensajes" in r["error"]
+
+
+class TestProgramados:
+    def test_lista_con_estado_y_motivo(self, wa):
+        wa.add("GET", "/programados", FakeResponse({"programados": [
+            {"id": 1, "chat": AIMAR, "nombre": "Aimar", "texto": "No llego",
+             "cuando": "2026-11-03T08:00:00Z", "estado": "pendiente"},
+            {"id": 2, "chat": AIMAR, "nombre": "Aimar", "texto": "Hola",
+             "cuando": "2026-11-01T08:00:00Z", "estado": "caducado",
+             "error": "el puente no pudo mandarlo a su hora"}]}))
+        r = main._j_whatsapp_programados()
+        assert wa.called("GET", "/programados")[0][2]["params"] == {"todos": "1"}
+        pendiente, caducado = r["programados"]
+        assert pendiente["estado"] == "pendiente" and pendiente["texto"] == "No llego"
+        assert "motivo" not in pendiente
+        assert caducado["estado"] == "no salió a tiempo" and "a su hora" in caducado["motivo"]
+
+    def test_cancelar_manda_el_id_como_numero(self, wa):
+        wa.add("POST", "/programados/cancelar", FakeResponse({"ok": True, "id": 3}))
+        assert main._j_whatsapp_cancelar_programado("#3") == {"ok": True, "cancelado": 3}
+        assert wa.called("POST", "/programados/cancelar")[0][2]["json"] == {"id": 3}
+
+    def test_cancelar_un_id_raro_no_llega_al_puente(self, wa):
+        assert main._j_whatsapp_cancelar_programado("../x")["ok"] is False
+        assert not wa.called("POST", "/programados/cancelar")
+
+
+class TestAvisoDeLoQueNoSalio:
+    def test_avisa_una_vez_y_sin_el_texto(self, wa, monkeypatch):
+        apuntados = []
+        monkeypatch.setattr(main, "_apuntar_aviso",
+                            lambda regla, texto, **kw: apuntados.append((regla, texto, kw)) or True)
+        wa.add("GET", "/programados", FakeResponse({"programados": [
+            {"id": 9, "chat": AIMAR, "nombre": "Aimar", "texto": "secreto",
+             "cuando": "2026-11-03T08:00:00Z", "estado": "fallido",
+             "error": "WhatsApp no lo ha aceptado: sin respuesta"}]}))
+        wa.add("POST", "/programados/avisados", FakeResponse({"ok": True}))
+        assert main._avisar_whatsapp_programados() == {"whatsapp_sin_salir": 1}
+        assert wa.called("GET", "/programados")[0][2]["params"] == {"sin_avisar": "1"}
+        (regla, texto, kw), = apuntados
+        assert regla == main.REGLA_WHATSAPP and main._es_tuyo(regla)
+        assert "Aimar" in texto and "sin respuesta" in texto and "secreto" not in texto
+        assert kw["huella"] == "wa:9"
+        assert wa.called("POST", "/programados/avisados")[0][2]["json"] == {"ids": [9]}
+
+    def test_sin_nada_no_marca_nada(self, wa):
+        wa.add("GET", "/programados", FakeResponse({"programados": []}))
+        assert main._avisar_whatsapp_programados() == {}
+        assert not wa.called("POST", "/programados/avisados")
+
+    def test_sin_puente_no_pregunta(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "WHATSAPP_PUENTE_URL", "")
+        assert main._avisar_whatsapp_programados_seguro() == {}
+        assert not mock_requests.called("GET", "/programados")
+
+    def test_un_puente_caido_no_tumba_el_tick(self, wa):
+        def caido(url, **kw):
+            raise ConnectionError("nada")
+        wa.add("GET", "/programados", caido)
+        assert main._avisar_whatsapp_programados_seguro() == {}
+
+
 class TestTelefono:
     def test_las_tres_estan_en_el_telefono(self):
         assert {"whatsapp_chats", "whatsapp_leer",
                 "whatsapp_enviar"} <= main._MCP_SERVIDOR_HERRAMIENTAS
         assert "whatsapp_leer" in main._MCP_SERVIDOR_SOLO_LECTURA
         assert "whatsapp_enviar" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+
+    def test_los_programados_tambien(self):
+        assert "whatsapp_programados" in main._MCP_SERVIDOR_SOLO_LECTURA
+        assert "whatsapp_programar" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+        assert "whatsapp_cancelar_programado" in main._MCP_SERVIDOR_ACCIONES

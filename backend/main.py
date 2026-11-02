@@ -13109,7 +13109,9 @@ def ha_brief_tick(request: Request, token: str = ""):
                **_turno_noche_seguro(),
                # La llamada del permiso de despliegue que se aplazó porque dormías: el
                # tick es lo único que pasa cuando te despiertas sin que nadie más llame.
-               **_retomar_llamada_despliegue_segura()}
+               **_retomar_llamada_despliegue_segura(),
+               # El WhatsApp programado que el puente no pudo mandar, para contártelo.
+               **_avisar_whatsapp_programados_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -15894,6 +15896,10 @@ REGLA_SESION_BLOQUEADA = "sesion_bloqueada"
 # sistema por el presupuesto del día (`_es_tuyo`), igual que un `recordarme`. Sigue
 # teniendo regla propia para poder silenciarla si algún día se vuelve ruido.
 REGLA_PROGRAMADOR      = "programador"
+# La de «no he podido mandar el WhatsApp programado» (`_avisar_whatsapp_programados`).
+# Lo pediste tú —programaste el mensaje con un botón—, así que tampoco compite por el
+# presupuesto del día: enterarte a las 08:30 de mañana de que no salió no sirve de nada.
+REGLA_WHATSAPP         = "whatsapp"
 # Las que dejan TRABAJO PARADO hasta que contestes: un arreglo verificado esperando
 # permiso y una sesión que no puede seguir sin ti. Son las que suenan con el móvil en
 # silencio, y por lo mismo las que no se pueden pasar a mañana por el presupuesto del día
@@ -16082,7 +16088,7 @@ def _es_tuyo(regla: str) -> bool:
     dejar rastro de por qué. El presupuesto existe para que las reglas del SISTEMA
     compitan entre ellas, no para racionar lo que has pedido a mano.
     """
-    return regla.startswith(REGLA_TUYA_PREFIJO) or regla == REGLA_PROGRAMADOR
+    return regla.startswith(REGLA_TUYA_PREFIJO) or regla in (REGLA_PROGRAMADOR, REGLA_WHATSAPP)
 
 
 def _contar_enviados_hoy() -> int:
@@ -23585,18 +23591,20 @@ def _responder_pregunta(pid: str, n: int) -> dict:
 # El 2026-10-30 («Jarvis, avisa a Aimar de que llego cinco minutos tarde») entró mandar
 # un WhatsApp: es lo único de aquí que le llega a otra persona, y por eso su frase lleva
 # el nombre que da el puente y el texto entero, y solo va a quien ya está en tus chats o
-# en tu agenda (`_describir_whatsapp_enviar`).
+# en tu agenda (`_describir_whatsapp_enviar`). El 2026-11-02, programarlo para luego, con
+# la hora en la frase (`_describir_whatsapp_programar`).
 # Siguen fuera desplegar, mandar un correo, cobrar y todo lo que lance una sesión: un
 # fallo en esta frontera tiene que quedarse en tu calendario, tus tareas, tus notas,
 # tus pelis y un mensaje que tú has leído antes de que salga.
 PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento",
                                 "reservar_bloques", "crear_tarea", "borrar_idea",
                                 "pelis_pedir", "pelis_borrar", "jellyfin_reproducir",
-                                "whatsapp_enviar"}
+                                "whatsapp_enviar", "whatsapp_programar"}
 # Lo que no es del calendario lleva su propio dibujo en el móvil: «📅 ¿Lo hago?» encima
 # de «Borrar El padrino» despista.
 PREGUNTAS_EMOJI              = {"pelis_pedir": "🎬", "pelis_borrar": "🎬",
-                                "jellyfin_reproducir": "🎬", "whatsapp_enviar": "💬"}
+                                "jellyfin_reproducir": "🎬", "whatsapp_enviar": "💬",
+                                "whatsapp_programar": "💬"}
 PREGUNTA_SI                  = "Sí, hazlo"
 PREGUNTA_NO                  = "No"
 # Cuánto vale un «sí» desde que se propuso. Pulsar a las tres horas «Crear Dentista» no
@@ -23836,7 +23844,7 @@ def _args_de(herramienta: str, args: dict) -> dict:
             limpios[k] = [{c: str(x)[:300] for c, x in b.items() if c in campos}
                           for b in v[:RESERVAR_BLOQUES_MAX + 1] if isinstance(b, dict)] \
                 if isinstance(v, list) else []
-        elif herramienta == "whatsapp_enviar" and k == "texto":
+        elif herramienta in ("whatsapp_enviar", "whatsapp_programar") and k == "texto":
             # El mensaje va entero o no va: recortado, se mandaría otra cosa que la que
             # pidió. Su tope lo pone `_wa_validar_envio`.
             limpios[k] = str(v)[:_WHATSAPP_TEXTO_MAX + 1]
@@ -23938,6 +23946,8 @@ def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) ->
         return f"Poniendo {r.get('reproduciendo') or 'lo pedido'} en {r.get('en') or 'Jellyfin'}."
     if herramienta == "whatsapp_enviar":
         return f"Enviado a {r.get('enviado_a') or 'ese chat'}."
+    if herramienta == "whatsapp_programar":
+        return f"Programado para {r.get('para') or 'ese chat'}, {r.get('cuando') or 'a su hora'}."
     if args.get("hora_inicio"):
         return (f"Movida a {_dia_txt(str(args.get('fecha') or ''))}, "
                 f"a las {args.get('hora_inicio')}.")
@@ -24008,7 +24018,8 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 #     La excepción, a sabiendas: mandar un WhatsApp (2026-10-30). No se deshace (se puede
 #     borrar, pero ya lo habrán visto), y entra igual porque es para el coche, donde no
 #     hay botón que pulsar. Lo que lo sostiene es que la llamada te lee el nombre y el
-#     texto ENTEROS antes del sí, y que solo va a quien ya tienes.
+#     texto ENTEROS antes del sí, y que solo va a quien ya tienes. Programarlo para luego
+#     (2026-11-02) entra por lo mismo, y la llamada lee también la hora.
 #   - **Solo recién propuesta** (`PREGUNTA_HABLADA_SEG`): es la respuesta a lo que se
 #     acaba de decir en la llamada, no a una pregunta de hace media hora.
 #   - La primera respuesta vale, por el mismo PATCH condicional que el botón: si ya lo
@@ -24019,7 +24030,8 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 # expuesto. Ver «El sí dicho por teléfono» en `docs/JARVIS.md`.
 TELEFONO_CONFIRMAR_TOKEN = os.getenv("TELEFONO_CONFIRMAR_TOKEN", "")
 PREGUNTAS_HABLADAS       = {"crear_evento", "editar_evento", "reservar_bloques", "crear_tarea",
-                            "pelis_pedir", "jellyfin_reproducir", "whatsapp_enviar"}
+                            "pelis_pedir", "jellyfin_reproducir", "whatsapp_enviar",
+                            "whatsapp_programar"}
 PREGUNTA_HABLADA_SEG     = int(os.getenv("PREGUNTA_HABLADA_SEG", "180"))
 
 
@@ -31093,6 +31105,149 @@ def _j_whatsapp_enviar(chat: str, texto: str) -> dict:
     return {"ok": True, "enviado_a": _wa_recortar(r.get("a"), 60), "hora": _wa_hora(r.get("hora"))}
 
 
+# ── Los programados: «mañana a las 9 dile a Aimar que no llego» ───────────────
+# Pedido el 2026-11-02. Los guarda y los manda el PUENTE, no el backend: el texto se queda
+# en `caja` (regla 1 de `docs/WHATSAPP.md`) y el puente es el proceso que está siempre
+# conectado, con su propio reloj de 20 s. Aquí solo se proponen —con botón o con el «sí»
+# hablado, igual que un envío de ahora: lo que lees es lo que saldrá, y cuándo—, se listan,
+# se cancelan, y el brief-tick te cuenta el que no salió (fallido o caducado), una vez.
+# Del aviso solo va a Supabase el nombre, la hora y el motivo; el texto, nunca.
+_WHATSAPP_PROGRAMADO_DIAS = 366
+
+
+def _wa_validar_programado(args: dict) -> tuple:
+    """(chat, texto, cuando, motivo). Lo mismo al proponer, al describir y al programar."""
+    chat, texto, motivo = _wa_validar_envio(args)
+    if motivo:
+        return "", "", None, motivo
+    fecha = str(args.get("fecha") or "").strip()
+    hora  = str(args.get("hora") or "").strip()
+    if not _DATE_RE.match(fecha) or not _HORA_RE.match(hora):
+        return "", "", None, "Necesito fecha (YYYY-MM-DD) y hora (HH:MM) para programarlo."
+    try:
+        cuando = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+    except ValueError:
+        return "", "", None, "Esa fecha u hora no existen."
+    ahora = datetime.now(LOCAL_TZ)
+    if cuando < ahora - timedelta(minutes=1):
+        return "", "", None, "Esa hora ya ha pasado: para ahora mismo, whatsapp_enviar."
+    if cuando > ahora + timedelta(days=_WHATSAPP_PROGRAMADO_DIAS):
+        return "", "", None, "Como mucho se programa a un año vista."
+    return chat, texto, cuando, ""
+
+
+def _wa_cuando_txt(cuando: datetime) -> str:
+    """«mañana a las 09:00», «el viernes 7/11 a las 20:30»."""
+    local = cuando.astimezone(LOCAL_TZ)
+    return f"{_dia_txt(local.strftime('%Y-%m-%d'))} a las {local.strftime('%H:%M')}"
+
+
+def _describir_whatsapp_programar(args: dict) -> dict:
+    """Como la de enviar, con la hora delante: es lo otro que se decide al pulsar."""
+    chat, texto, cuando, motivo = _wa_validar_programado(args)
+    if motivo:
+        return {"error": motivo}
+    try:
+        c = _wa_chat_guardado(chat)
+    except WhatsappNoContesta as e:
+        return {"error": str(e)}
+    if not c:
+        return {"error": "Ese chat no está ni en tus chats ni en tu agenda: búscalo con "
+                         "whatsapp_chats."}
+    nombre = _wa_recortar(c.get("nombre"), 60) or chat.split("@", 1)[0]
+    return {"texto": f"Mandar por WhatsApp {_wa_cuando_txt(cuando)} "
+                     f"{'al grupo ' if c.get('grupo') else 'a '}{nombre}: «{texto}»"}
+
+
+def _j_whatsapp_programar(chat: str, texto: str, fecha: str, hora: str) -> dict:
+    chat, texto, cuando, motivo = _wa_validar_programado(
+        {"chat": chat, "texto": texto, "fecha": fecha, "hora": hora})
+    if motivo:
+        return {"ok": False, "error": motivo}
+    try:
+        r = _whatsapp("POST", "/programar", cuerpo={
+            "chat": chat, "texto": texto,
+            "cuando": cuando.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")})
+    except WhatsappNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    logger.info("WhatsApp: mensaje programado (%d caracteres)", len(texto))
+    return {"ok": True, "id": r.get("id"), "para": _wa_recortar(r.get("nombre"), 60),
+            "cuando": _wa_cuando_txt(cuando),
+            "nota": "Lo manda el puente de caja a esa hora. Si no puede, te aviso."}
+
+
+_WA_ESTADOS = {"pendiente": "pendiente", "enviando": "saliendo ahora",
+               "enviado": "enviado", "fallido": "no salió", "caducado": "no salió a tiempo",
+               "cancelado": "cancelado"}
+
+
+def _j_whatsapp_programados() -> dict:
+    try:
+        filas = _whatsapp("GET", "/programados", {"todos": "1"}).get("programados") or []
+    except WhatsappNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    programados = []
+    for f in filas:
+        cuando = _fecha_utc(f.get("cuando"))
+        programados.append({
+            "id": f.get("id"), "para": _wa_recortar(f.get("nombre"), 60),
+            "cuando": _wa_cuando_txt(cuando) if cuando else "",
+            "estado": _WA_ESTADOS.get(f.get("estado"), str(f.get("estado"))),
+            "texto": _wa_recortar(f.get("texto"), 300),
+            **({"motivo": _wa_recortar(f.get("error"), 160)}
+               if f.get("estado") in ("fallido", "caducado") and f.get("error") else {})})
+    if not programados:
+        return {"ok": True, "programados": [], "nota": "No hay ningún WhatsApp programado."}
+    return {"ok": True, "programados": programados,
+            "nota": "Los pendientes y lo de los últimos 7 días."}
+
+
+def _j_whatsapp_cancelar_programado(programado_id) -> dict:
+    try:
+        pid = int(str(programado_id).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Ese id no vale: sácalo de whatsapp_programados."}
+    try:
+        _whatsapp("POST", "/programados/cancelar", cuerpo={"id": pid})
+    except WhatsappNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "cancelado": pid}
+
+
+def _avisar_whatsapp_programados() -> dict:
+    """Del brief-tick: el programado que no salió se cuenta una vez, y solo eso."""
+    if not _whatsapp_configurado():
+        return {}
+    filas = _whatsapp("GET", "/programados", {"sin_avisar": "1"}).get("programados") or []
+    avisados = []
+    for f in filas:
+        cuando = _fecha_utc(f.get("cuando"))
+        nombre = _wa_recortar(f.get("nombre"), 60) or "ese chat"
+        de = f" de {_wa_cuando_txt(cuando)}" if cuando else ""
+        motivo = _wa_recortar(f.get("error"), 120) or "no sé por qué"
+        # Lo apuntado y no apuntado se marca igual: un aviso silenciado o ya dicho
+        # tampoco tiene que volver a mirarse en cada tick.
+        _apuntar_aviso(REGLA_WHATSAPP, f"No he podido mandar el WhatsApp programado a "
+                                       f"{nombre}{de}: {motivo}.",
+                       prioridad=PRIO_ALTA, huella=f"wa:{f.get('id')}")
+        avisados.append(f.get("id"))
+    if avisados:
+        _whatsapp("POST", "/programados/avisados", cuerpo={"ids": avisados})
+        return {"whatsapp_sin_salir": len(avisados)}
+    return {}
+
+
+def _avisar_whatsapp_programados_seguro() -> dict:
+    """Como cada pieza del tick: un puente caído no puede dejar sin despachar los avisos."""
+    try:
+        return _avisar_whatsapp_programados()
+    except WhatsappNoContesta:
+        return {}           # el motivo ya quedó registrado en `_whatsapp`
+    except Exception:
+        logger.exception("WhatsApp: fallo inesperado mirando los programados")
+        return {}
+
+
 # ── El programador: Jarvis le encarga a Claude Code un proyecto entero ────────
 # El trabajo lo hace un servicio de `caja` (el «puente», `caja/programador/` del
 # repositorio HomeLab): una cola de encargos de uno en uno, cada uno en un contenedor que
@@ -32052,10 +32207,48 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion":   "Manda un mensaje de WhatsApp en nombre del usuario a un chat que ya "
                          "tiene (saca el `chat` con whatsapp_chats). Escribe el texto como lo "
                          "escribiría él: en primera persona, corto, sin firmar como Jarvis. NO "
-                         "lo manda al momento: lo aprueba el usuario.",
+                         "lo manda al momento: lo aprueba el usuario. Si es para más tarde, "
+                         "whatsapp_programar.",
         "parametros":    {"chat":  {"type": "string", "description": "El chat de whatsapp_chats."},
                           "texto": {"type": "string", "description": "El mensaje, tal cual."}},
         "obligatorios":  ["chat", "texto"],
+        "requiere_whatsapp": True,
+    },
+    "whatsapp_programar": {
+        "confirmar":     True,
+        "fn":            _j_whatsapp_programar,
+        "describir":     _describir_whatsapp_programar,
+        "validar":       lambda a: _wa_validar_programado(a)[3],
+        "descripcion":   "Programa un WhatsApp para una fecha y hora («mañana a las 9 dile a "
+                         "Aimar que no llego», «el viernes a las 00:00 felicita a Ane»). El "
+                         "texto, como whatsapp_enviar: en primera persona y sin firmar. Lo "
+                         "manda el puente de caja a esa hora; si no puede, se le avisa. NO se "
+                         "programa al momento: lo aprueba el usuario. Para ahora mismo, "
+                         "whatsapp_enviar.",
+        "parametros":    {"chat":  {"type": "string", "description": "El chat de whatsapp_chats."},
+                          "texto": {"type": "string", "description": "El mensaje, tal cual."},
+                          "fecha": {"type": "string",
+                                    "description": "YYYY-MM-DD. Resuelve tú 'mañana' o 'el jueves'."},
+                          "hora":  {"type": "string", "description": "HH:MM en 24h."}},
+        "obligatorios":  ["chat", "texto", "fecha", "hora"],
+        "requiere_whatsapp": True,
+    },
+    "whatsapp_programados": {
+        "confirmar":     False,
+        "fn":            _j_whatsapp_programados,
+        "descripcion":   "Los WhatsApp programados: los pendientes, con su id, y lo que "
+                         "salió o no salió en los últimos 7 días.",
+        "parametros":    {},
+        "requiere_whatsapp": True,
+    },
+    "whatsapp_cancelar_programado": {
+        "confirmar":     False,
+        "fn":            _j_whatsapp_cancelar_programado,
+        "descripcion":   "Cancela un WhatsApp programado que aún no ha salido. El id sale de "
+                         "whatsapp_programados.",
+        "parametros":    {"programado_id": {"type": "integer",
+                                            "description": "El id de whatsapp_programados."}},
+        "obligatorios":  ["programado_id"],
         "requiere_whatsapp": True,
     },
     "llamar_a_alguien": {
@@ -33121,6 +33314,8 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # entre un mensaje y un comando: cada mensaje recortado a 500 caracteres, con
     # `_AVISO_WEB` y la orden de contarlo y no hacerlo, y el RUNBOOK del teléfono.
     "whatsapp_chats", "whatsapp_leer",
+    # 2026-11-02: los programados. Los textos son los tuyos; los nombres, recortados.
+    "whatsapp_programados",
     # 2026-10-31: cómo fueron las llamadas a otras personas. Trae lo que dijeron, resumido
     # y con `_AVISO_WEB`, como un WhatsApp leído.
     "llamadas_a_otros",
@@ -33166,6 +33361,9 @@ _MCP_SERVIDOR_ACCIONES = {
     # tercero no le habla esta sesión con shell, sino el backend con un modelo sin
     # herramientas.
     "llamar_a_alguien",
+    # 2026-11-02: cancelar un WhatsApp programado. Lo contrario de mandar: no le llega
+    # nada a nadie, y se vuelve a programar con la misma frase.
+    "whatsapp_cancelar_programado",
 }
 # Las que se confirman, que por teléfono no tienen botón delante: se mandan al móvil con
 # uno (`_proponer_en_movil`, «Lo que se confirma en el móvil») y no se hacen hasta que lo
