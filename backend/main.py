@@ -14739,6 +14739,9 @@ _CASA_DOMINIOS = {
 # equivocarse cuesta un segundo. Abrir una cerradura, el garaje o desarmar la alarma no
 # está en la misma categoría, así que se proponen y los aprueba el usuario.
 _CASA_DIRECTOS = _CASA_DOMINIOS - {"lock", "cover", "alarm_control_panel"}
+_CASA_NOMBRE_DELICADO = re.compile(
+    r"alarm|garaje|garage|puerta|portal|porton|verja|cancela|cerradura|cerrojo|persiana|"
+    r"\block\b|door|gate|desarm|camara.*(privacy|record|notif|microphone)", re.I)
 # Del dominio `homeassistant`, solo lo genérico de encender y apagar. El resto
 # (`restart`, `stop`, `reload_*`, `update_entity`...) es administrar HA, no la casa, y por
 # la cola lo ejecutaría el Green con sus privilegios de administrador.
@@ -15331,9 +15334,14 @@ def _casa_pide_confirmar(argumentos: dict) -> bool:
     botón, y también por teléfono. Ante la duda (falta uno de los dos) se pregunta.
     """
     argumentos = argumentos or {}
-    dominios = {str(argumentos.get(k) or "").strip().lower().split(".")[0]
-                for k in ("servicio", "entidad")}
-    return not dominios <= _CASA_DIRECTOS
+    valores = [str(argumentos.get(k) or "").strip().lower() for k in ("servicio", "entidad")]
+    dominios = {v.split(".")[0] for v in valores}
+    if not dominios <= _CASA_DIRECTOS:
+        return True
+    # El dominio no basta: `script.quitar_alarm_script` o `script.abrir_puerta_garaje` son
+    # un `script`, y se ejecutaban sin botón (visto el 2026-11-04). Lo mismo un interruptor
+    # que mueva una puerta. Con que el nombre lo parezca, se pregunta.
+    return any(_CASA_NOMBRE_DELICADO.search(v) for v in valores)
 
 
 def _j_casa_dispositivos(buscar: str = "") -> dict:
