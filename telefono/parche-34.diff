@@ -271,7 +271,7 @@
  const fs = require('fs');
  const path = require('path');
  const crypto = require('crypto');
-@@ -349,7 +352,64 @@
+@@ -349,7 +352,68 @@
   * @param {string} voiceId - ElevenLabs voice ID (optional; Azure and jacobo use their own)
   * @returns {Promise<string>} HTTP URL to audio file
   */
@@ -282,6 +282,8 @@
 +// y salen al instante, o sin esperar a Fish si se cae.
 +const fijas = new Set();
 +
++const DIR_FIJAS = path.join(__dirname, '..', 'config', 'frases-fijas');
++
 +function ficheroFija(text) {
 +  const huella = crypto.createHash('md5').update([FISH_AUDIO_MODEL, FISH_AUDIO_VOICE, text].join('|')).digest('hex').slice(0, 16);
 +  return 'fija-' + huella + '.mp3';
@@ -289,9 +291,10 @@
 +
 +async function prepararFrasesFijas(frases) {
 +  if (!FISH_AUDIO_API_KEY) return;
++  fs.mkdirSync(DIR_FIJAS, { recursive: true });
 +  let nuevas = 0;
 +  for (const text of frases) {
-+    const ruta = path.join(audioDir, ficheroFija(text));
++    const ruta = path.join(DIR_FIJAS, ficheroFija(text));
 +    try {
 +      if (!fs.existsSync(ruta)) {
 +        const audio = await VOCES.fish.sintetizar(text);
@@ -321,8 +324,9 @@
 +}
 +
  async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
-+  if (fijas.has(text)) {
-+    return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/audio-files/${ficheroFija(text)}`;
++  // Mirando el disco cada vez: que falte el fichero no puede costar una llamada.
++  if (fijas.has(text) && fs.existsSync(path.join(DIR_FIJAS, ficheroFija(text)))) {
++    return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/frases-fijas/${ficheroFija(text)}`;
 +  }
 +  const ya = anticipadas.get(text);
 +  if (ya) {
@@ -336,7 +340,7 @@
    const startTime = Date.now();
    const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
    if (!orden.length) {
-@@ -483,6 +543,8 @@
+@@ -483,6 +547,8 @@
  
  module.exports = {
    generateSpeech,
@@ -347,7 +351,7 @@
    cleanupOldFiles,
 --- a/voice-app/lib/turno-rapido.js
 +++ b/voice-app/lib/turno-rapido.js
-@@ -40,10 +40,26 @@
+@@ -40,14 +40,36 @@
    let listo = false;
    const consulta = Promise.resolve().then(p.consultar);
    // Marca el final sin tragarse el error: el `await consulta` de abajo lo relanza.
@@ -365,18 +369,42 @@
 -  if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
 +  // Parche 34: la mayoría de las respuestas sin herramientas llegan antes de esto, y
 +  // entonces no hace falta decir «un momento» para contestar justo después.
-+  const esperaMs = parseInt(process.env.ESPERA_FRASE_MS || '1800', 10);
++  const esperaMs = parseInt(process.env.ESPERA_FRASE_MS || '2500', 10);
 +  await new Promise(function (resolve) {
 +    const reloj = setTimeout(resolve, esperaMs);
 +    consulta.then(function () { clearTimeout(reloj); resolve(); }, function () { clearTimeout(reloj); resolve(); });
 +  });
 +  if (sigueActiva() && !listo) {
-+    const fraseUrl = await p.ttsService.generateSpeech(p.frase, p.voiceId);
-+    if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
++    // Un adorno no puede tumbar la llamada: el 2026-11-04, un File Not Found aquí
++    // acababa en «Perdona, algo ha fallado» y colgaba con la respuesta en camino.
++    try {
++      const fraseUrl = await p.ttsService.generateSpeech(p.frase, p.voiceId);
++      if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
++    } catch (e) {
++      console.warn('[PENSAR] La frase de espera falló (' + e.message + '); se sigue esperando');
++    }
 +  }
  
    let musica = false;
    if (sigueActiva() && !listo) {
+-    p.endpoint.play(p.musicaUrl).catch(function () {});
++    Promise.resolve().then(function () { return p.endpoint.play(p.musicaUrl); }).catch(function () {});
+     musica = true;
+   }
+ 
+--- a/voice-app/lib/http-server.js
++++ b/voice-app/lib/http-server.js
+@@ -36,6 +36,10 @@
+   app.use('/audio', express.raw({ type: 'audio/*', limit: '10mb' }));
+ 
+   // Serve static audio files
++  // Parche 34: las frases fijas viven aparte: la limpieza de abajo se lleva todo lo de
++  // audioDir que pase de FILE_MAX_AGE, y el 2026-11-04 se las llevó a media tarde.
++  app.use('/frases-fijas', express.static(path.join(__dirname, '..', 'config', 'frases-fijas')));
++
+   app.use('/audio-files', express.static(audioDir, {
+     setHeaders: (res, filepath) => {
+       // Set appropriate content type for audio files
 --- a/voice-app/lib/sip-handler.js
 +++ b/voice-app/lib/sip-handler.js
 @@ -18,6 +18,7 @@
@@ -566,16 +594,16 @@
      CLAUDECODE: '1',
      CLAUDE_CODE_ENTRYPOINT: 'cli',
    };
-@@ -120,7 +123,41 @@
+@@ -120,7 +123,59 @@
  const sessions = new Map();
  
  // Model selection - Sonnet for balanced speed/quality
--const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5-5';
-+// Parche 34 (2026-11-04): en la llamada piensa Haiku. Medido en caja con la sesión real:
-+// un turno sin herramientas 1,3-2,1 s (Sonnet 1,8-5,6), con una herramienta 2,9 s
-+// (Sonnet 4,4-9,6). «Piénsalo bien» pasa ese turno a Sonnet (CLAUDE_MODEL_PESADO).
-+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-5-5';
-+const CLAUDE_MODEL_PESADO = process.env.CLAUDE_MODEL_PESADO || 'claude-sonnet-5-5';
++// Parche 34 (2026-11-04): Sonnet en la sesión adelgazada y sin pensamiento extendido: un
++// turno sin herramientas 2-2,4 s, con una herramienta ~5 s. Se probó Haiku (1,3-2,1 y
++// 2,9 s), pero Mikel lo notó enseguida: contestaba peor y se liaba. «Piénsalo bien» pasa
++// ese turno a Opus (CLAUDE_MODEL_PESADO).
+ const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5-5';
++const CLAUDE_MODEL_PESADO = process.env.CLAUDE_MODEL_PESADO || 'claude-opus-5-5';
 +const PIDE_PENSAR = /\b(?:pi[eé]ns(?:a|alo|atelo|átelo)|razona(?:lo)?|m[ií]ralo|analiza(?:lo)?)\b.*\b(?:bien|a fondo|con calma|despacio|detenidamente)\b|\bmodo potente\b|\bcon sonnet\b/i;
 +
 +// Parche 34: la sesión adelgazada. Sin las herramientas integradas que no se usan por
@@ -585,6 +613,23 @@
 +const SESION_FLACA = process.env.SESION_FLACA !== '0';
 +const FICHERO_SISTEMA = path.join(process.cwd(), '.sistema-llamada.md');
 +
++// El MCP del teléfono, sin salir de la máquina: por el túnel son 175 ms cada petición, y en
++// local 14 (medido el 2026-11-04). El backend está en este mismo `caja`.
++function ficheroMcpLocal() {
++  const original = path.join(process.cwd(), '.mcp.json');
++  try {
++    const mcp = JSON.parse(fs.readFileSync(original, 'utf8'));
++    for (const s of Object.values(mcp.mcpServers || {})) {
++      if (/\/mcp\/telefono/.test(s.url || '')) s.url = (process.env.CONTEXTO_URL || 'http://127.0.0.1:8080') + '/mcp/telefono';
++    }
++    const local = path.join(process.cwd(), '.mcp-llamada.json');
++    fs.writeFileSync(local, JSON.stringify(mcp), { mode: 0o600 });
++    return local;
++  } catch {
++    return original;
++  }
++}
++
 +function argsFlacos() {
 +  if (!SESION_FLACA) return [];
 +  let runbook = '';
@@ -592,7 +637,7 @@
 +  fs.writeFileSync(FICHERO_SISTEMA, FORMATO_VOZ + '\n\n' + runbook);
 +  return [
 +    '--setting-sources', '',
-+    '--strict-mcp-config', '--mcp-config', path.join(process.cwd(), '.mcp.json'),
++    '--strict-mcp-config', '--mcp-config', ficheroMcpLocal(),
 +    '--tools', 'Bash',
 +    '--system-prompt-file', FICHERO_SISTEMA,
 +  ];
@@ -609,7 +654,7 @@
  
  function parseClaudeStdout(stdout) {
    // Claude Code CLI may output JSONL; when it does, extract the `result` message.
-@@ -150,13 +187,14 @@
+@@ -150,13 +205,14 @@
    return { response, sessionId };
  }
  
@@ -626,7 +671,7 @@
    ];
  
    if (callId) {
-@@ -217,6 +255,7 @@
+@@ -217,6 +273,7 @@
      '--output-format', 'stream-json',
      '--verbose',
      '--model', CLAUDE_MODEL,
@@ -634,7 +679,7 @@
    ];
    if (sessions.has(callId)) {
      args.push('--resume', callId);
-@@ -240,6 +279,18 @@
+@@ -240,6 +297,18 @@
   * - Output COMPLETED for status logging (12 words max)
   * - For Slack delivery requests: do the work, send to Slack, then acknowledge
   */
@@ -653,7 +698,7 @@
  const VOICE_CONTEXT = `[VOICE CALL CONTEXT]
  This query comes via voice call. You MUST include BOTH of these lines in your response:
  
-@@ -269,7 +320,8 @@
+@@ -269,7 +338,8 @@
    if (devicePrompt) {
      texto += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
    }
@@ -663,7 +708,7 @@
  }
  
  // Parche 27: el turno con el que se precalienta. Claude lo contesta (no hay forma de
-@@ -340,7 +392,8 @@
+@@ -340,7 +410,8 @@
       * 2. VOICE_CONTEXT - general voice call instructions
       * 3. User's prompt - what they actually said
       */
@@ -673,7 +718,7 @@
      // Parche 27: si se está precalentando, que su turno (con el contexto) vaya delante.
      // Parche 28: y si ese turno sigue en marcha, se corta: el contexto ya está dentro
      // y la pregunta no espera a un «listo» que nadie va a oír (llegó a tardar 12,7 s).
-@@ -356,6 +409,7 @@
+@@ -356,6 +427,7 @@
      // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
      // siguientes ya lo llevan dentro.
      const nueva = Boolean(callId) && !sessions.has(callId);
@@ -681,7 +726,7 @@
      if (nueva) fullPrompt += bitacora.contexto(callId);
  
      // Parche 19: el proceso se lanza ya, y el contexto se pide mientras arranca.
-@@ -368,14 +422,21 @@
+@@ -368,14 +440,21 @@
        }
      }
      if (nueva) fullPrompt += await contexto.pedir();
@@ -704,7 +749,7 @@
          duration_ms = r.duration_ms;
          if (r.isError) {
            console.error(`[${new Date().toISOString()}] ERROR (sesión viva): ${r.response.substring(0, 500)}`);
-@@ -390,7 +451,7 @@
+@@ -390,7 +469,7 @@
      }
  
      if (!respondida) {
@@ -713,18 +758,9 @@
        duration_ms = r.duration_ms;
        if (r.code !== 0) {
          console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${r.code}`);
-@@ -491,7 +552,7 @@
- 
-     for (let attempt = 0; attempt <= retries; attempt++) {
-       attemptsMade = attempt + 1;
--      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
-+      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp, modelo: CLAUDE_MODEL_PESADO });
-       totalDuration += duration_ms;
- 
-       if (code !== 0) {
 --- /dev/null
 +++ b/voice-app/lib/tele.js
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,539 @@
 +/**
 + * Parche 34: la tele de la sala (Samsung Q70 de 65", Tizen, 2020), en local y sin nube.
 + * Ver «El parche 34» en telefono/PARCHES.md de Life Assistant.
@@ -735,11 +771,14 @@
 + * milisegundos, sin pasar por Claude (reflejos.js). El backend llega por `POST /api/tele`.
 + *
 + * Tres puertas de la tele, cada una para lo suyo:
-+ *  - WebSocket 8002: las teclas del mando y abrir aplicaciones. La PRIMERA vez la tele
-+ *    pregunta en pantalla si deja entrar a «Jarvis» y hay que aceptar con el mando; el
-+ *    token que da entonces se guarda en config/ y no vuelve a preguntar.
-+ *  - UPnP 9197: leer y poner el volumen y el silencio. No pide emparejar.
-+ *  - REST 8001: si está encendida. Sin contestar es que está apagada del todo.
++ *  - WebSocket 8002: las teclas del mando. La PRIMERA vez la tele pregunta en pantalla si
++ *    deja entrar a «Jarvis» y hay que aceptar con el mando; el token que da entonces se
++ *    guarda en config/ y no vuelve a preguntar.
++ *  - UPnP 9197: leer el volumen y el silencio (poner, esta tele no deja). No pide emparejar.
++ *  - REST 8001: si está encendida, y las aplicaciones. Una vez emparejada, POST abre una
++ *    aplicación (la enciende si está en reposo) y GET dice si está en pantalla. La orden
++ *    por WebSocket (`ed.apps.launch`) esta tele la ignora, y `ed.installedApp.get` no lo
++ *    contesta (comprobado el 2026-11-04): la lista sale de preguntar por las conocidas.
 + */
 +
 +const fs = require('fs');
@@ -774,6 +813,8 @@
 +  'disney+': '3201901017640', max: '3201601007230', 'apple tv': '3201807016597',
 +  spotify: '3201606009684', dazn: '3201806016381', plex: '3201512006963',
 +  jellyfin: 'AprZAARz4r.Jellyfin', 'movistar plus+': '3201707014489', twitch: '3202203026841',
++  tiktok: '3202008021577', filmin: '3201703012079', rtve: '3201909019175', atresplayer: '3201710014981',
++  mitele: '3201710015037', pluto: '3201808016802', 'samsung tv plus': '3201707014361',
 +};
 +// Lo que se dice → el nombre con el que se busca
 +const ALIAS = {
@@ -873,7 +914,6 @@
 +let canal = null;       // { ws, listo: Promise }
 +let apagarCanal = null;
 +let appsCache = null;   // { hasta, lista: [{id, nombre, tipo}] }
-+let esperaLista = null; // quien espera la lista de aplicaciones
 +
 +class SinPermiso extends Error {}
 +
@@ -917,13 +957,6 @@
 +        clearTimeout(reloj);
 +        if (canal === este) canal = null;
 +        reject(new SinPermiso('la tele ha rechazado a Jarvis'));
-+      } else if (m.event === 'ed.installedApp.get' && esperaLista) {
-+        const lista = ((m.data && m.data.data) || []).map(function (a) {
-+          return { id: a.appId, nombre: a.name, tipo: a.app_type };
-+        });
-+        const fn = esperaLista;
-+        esperaLista = null;
-+        fn(lista);
 +      }
 +    });
 +    ws.on('error', function (e) {
@@ -954,13 +987,24 @@
 +  }
 +}
 +
-+async function apps(alPedirPermiso) {
++/** Lo que dice la tele de una aplicación ({name, running, visible}), o null si no la tiene. */
++async function estadoApp(id, msTope) {
++  try {
++    const r = await pedirHttp({ port: 8001, path: '/api/v2/applications/' + encodeURIComponent(id), method: 'GET' }, null, msTope || 2500);
++    return r.status === 200 ? JSON.parse(r.cuerpo) : null;
++  } catch (e) {
++    return null;
++  }
++}
++
++/** Las conocidas que la tele dice tener. Solo responde con el token puesto (emparejada). */
++async function apps() {
 +  if (appsCache && appsCache.hasta > Date.now()) return appsCache.lista;
-+  const ws = await abrirCanal(alPedirPermiso);
-+  const lista = await new Promise(function (resolve) {
-+    const reloj = setTimeout(function () { esperaLista = null; resolve([]); }, 2500);
-+    esperaLista = function (l) { clearTimeout(reloj); resolve(l); };
-+    ws.send(JSON.stringify({ method: 'ms.channel.emit', params: { event: 'ed.installedApp.get', to: 'host' } }));
++  const ids = Object.values(APPS_CONOCIDAS);
++  const datos = await Promise.all(ids.map(function (id) { return estadoApp(id); }));
++  const lista = [];
++  datos.forEach(function (d, i) {
++    if (d && d.name) lista.push({ id: ids[i], nombre: d.name, tipo: 2 });
 +  });
 +  if (lista.length) appsCache = { hasta: Date.now() + 10 * 60 * 1000, lista: lista };
 +  return lista;
@@ -970,6 +1014,7 @@
 +function buscarApp(lista, dicho) {
 +  let q = normalizar(dicho);
 +  q = ALIAS[q] || q;
++  if (q === 'max' && lista.some(function (a) { return normalizar(a.nombre) === 'hbo max'; })) q = 'hbo max';
 +  const instaladas = lista.map(function (a) { return Object.assign({}, a, { n: normalizar(a.nombre) }); });
 +  const exacta = instaladas.find(function (a) { return a.n === q; });
 +  if (exacta) return exacta;
@@ -991,15 +1036,27 @@
 +  return !!(appsCache && buscarApp(appsCache.lista, dicho));
 +}
 +
-+async function lanzarApp(app, alPedirPermiso) {
-+  const ws = await abrirCanal(alPedirPermiso);
-+  ws.send(JSON.stringify({
-+    method: 'ms.channel.emit',
-+    params: {
-+      event: 'ed.apps.launch', to: 'host',
-+      data: { appId: app.id, action_type: app.tipo === 4 ? 'NATIVE_LAUNCH' : 'DEEP_LINK' },
-+    },
-+  }));
++/**
++ * Abre la aplicación y COMPRUEBA que ha salido en pantalla: true solo si la tele lo dice.
++ * Si está en reposo, el POST la enciende; entonces tarda unos segundos en contestar.
++ */
++async function lanzarApp(app, msTope) {
++  const hasta = Date.now() + (msTope || 12000);
++  let abierta = false;
++  while (Date.now() < hasta) {
++    if (!abierta) {
++      try {
++        const r = await pedirHttp({ port: 8001, path: '/api/v2/applications/' + encodeURIComponent(app.id), method: 'POST' }, null, 3000);
++        abierta = r.status < 300;
++      } catch (e) { /* despertándose: se reintenta */ }
++    }
++    if (abierta) {
++      const d = await estadoApp(app.id, 1500);
++      if (d && d.visible) return true;
++    }
++    await dormir(700);
++  }
++  return false;
 +}
 +
 +/**
@@ -1057,15 +1114,18 @@
 +}
 +
 +async function encender(alPedirPermiso) {
-+  if ((await estado()) === 'on') return true;
++  const antes = await estado();
++  if (antes === 'on') return true;
 +  cerrarCanal();
++  // En reposo contesta y la tecla la despierta; apagada del todo, solo el paquete mágico.
++  if (antes === 'standby') {
++    try { await tecla('KEY_POWER', 1, alPedirPermiso); } catch (e) { /* queda el paquete */ }
++    if (await esperarEstado('on', 5000)) return true;
++  }
 +  await mandarWol();
 +  if (await esperarEstado('on', 8000)) return true;
 +  await mandarWol();
-+  if ((await estado()) === 'standby') {
-+    try { await tecla('KEY_POWER', 1, alPedirPermiso); } catch (e) { /* sigue probando */ }
-+  }
-+  return esperarEstado('on', 8000);
++  return esperarEstado('on', 6000);
 +}
 +
 +async function apagar(alPedirPermiso) {
@@ -1183,23 +1243,26 @@
 +    if (accion === 'abrir') {
 +      const dicho = String(valor || '').trim();
 +      if (!dicho) return mal('¿Qué aplicación abro, señor?');
++      if (!emparejada()) {
++        // Sin token la tele no deja abrir nada: esto saca el permiso en pantalla.
++        await abrirCanal(pedirPermiso);
++      }
 +      const e = await estado();
-+      if (e !== 'on') {
++      if (e === 'apagada') {
 +        avisar('Enciendo la tele, señor, y abro ' + dicho + '.');
 +        if (!(await encender(pedirPermiso))) return mal('La tele no se ha encendido, señor.');
-+        await dormir(2500);
++      } else if (e === 'standby') {
++        avisar('Enciendo la tele, señor, y abro ' + dicho + '.');
 +      }
-+      const lista = await apps(pedirPermiso);
-+      const app = buscarApp(lista, dicho);
-+      if (!app) {
-+        return mal('No encuentro ' + dicho + ' en la tele, señor.');
-+      }
-+      await lanzarApp(app, pedirPermiso);
-+      return bien('Abriendo ' + (app.nombre || dicho) + ', señor.', 'abrir ' + (app.nombre || dicho) + ' en la tele');
++      const app = buscarApp(await apps(), dicho);
++      if (!app) return mal('No encuentro ' + dicho + ' en la tele, señor.');
++      const nombre = String(app.nombre || dicho).split(' - ')[0];
++      if (await lanzarApp(app)) return bien(nombre + ' en pantalla, señor.', 'abrir ' + nombre + ' en la tele', { visible: true });
++      return mal('He pedido abrir ' + nombre + ', señor, pero la tele no me confirma que esté en pantalla.');
 +    }
 +
 +    if (accion === 'apps') {
-+      const lista = await apps(pedirPermiso);
++      const lista = await apps();
 +      return bien('Tiene ' + lista.length + ' aplicaciones instaladas, señor.', 'mirar las aplicaciones de la tele',
 +        { apps: lista.map(function (a) { return a.nombre; }) });
 +    }
@@ -1239,7 +1302,7 @@
 +};
 --- /dev/null
 +++ b/voice-app/lib/reflejos.js
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,155 @@
 +/**
 + * Parche 34: lo que la llamada cumple sola, sin pasar por Claude. Hoy, la tele: «baja el
 + * volumen», «apaga la tele», «pon Netflix». Claude tarda de 1,5 a 3 s en decidir lo que
@@ -1312,6 +1375,9 @@
 +  // El silencio
 +  [new RegExp('^(?:silencia(?:me)?|mutea|silenciar|pon en silencio|quita(?:me)? (?:el )?(?:sonido|volumen)' + EN_TELE + ')(?: ' + TELE + ')?$'), function () { return { accion: 'silenciar' }; }],
 +  [new RegExp('^(?:quita(?:le)?(?: el)? silencio|pon(?:le)?(?: el)? sonido|devuelvele el sonido)' + EN_TELE + '$'), function () { return { accion: 'quitar_silencio' }; }],
++
++  // «Enciende la tele y pon Netflix»: abrir ya la enciende si hace falta.
++  [new RegExp('^(?:enciende(?:me)?|prende|pon(?:me)?) ' + TELE + ' (?:y|e) (?:abre(?:me)?|pon(?:me)?|lanza|arranca|entra en)(?: (?:la )?(?:app|aplicacion)(?: de)?)? (' + APPS_VOZ + ')$'), function (m) { return { accion: 'abrir', valor: m[1] }; }],
 +
 +  // Reproducción. «para» y «sigue» a secas son del lector: aquí necesitan objeto.
 +  [new RegExp('^(?:pausa|pausar|pausame|pon(?:me)? pausa|pon en pausa)(?: (?:a )?' + OBRA + ')?$'), function () { return { accion: 'pausa' }; }],
@@ -1394,7 +1460,7 @@
 +module.exports = { interpretar, atender, limpiar, numero };
 --- /dev/null
 +++ b/voice-app/test/parche34.test.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,81 @@
 +// Parche 34: node voice-app/test/parche34.test.js (sin tele ni red)
 +const assert = require('assert');
 +const { interpretar } = require('../lib/reflejos');
@@ -1429,6 +1495,8 @@
 +  ['Pon YouTube en la tele.', { accion: 'abrir', valor: 'youtube' }],
 +  ['Oye, abre la aplicación de Disney', { accion: 'abrir', valor: 'disney' }],
 +  ['Pon el canal cinco', { accion: 'canal', valor: 5 }],
++  ['Enciende la tele y ponme Netflix.', { accion: 'abrir', valor: 'netflix' }],
++  ['Abre Prime Video en la tele, porfa.', { accion: 'abrir', valor: 'prime video' }],
 +];
 +for (const [dicho, esperado] of si) {
 +  assert.deepStrictEqual(interpretar(dicho), esperado, dicho);
@@ -1469,6 +1537,7 @@
 +assert.strictEqual(encuentra('disney'), '3');
 +assert.strictEqual(encuentra('you tube'), '4');
 +assert.strictEqual(encuentra('hbo'), '6');
++assert.strictEqual(tele.buscarApp([{ id: '9', nombre: 'HBO Max', tipo: 2 }], 'max').id, '9');
 +assert.strictEqual(encuentra('tiktok'), null);
 +assert.strictEqual(tele.buscarApp([], 'netflix').id, '3201907018807');
 +

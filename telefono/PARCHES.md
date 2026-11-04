@@ -27,7 +27,7 @@ Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver �
 otras personas por la línea fija de O2 (ver «El parche 32»). Y el 33 (2026-11-01), que
 como el 13 no toca su código sino su `docker-compose.yml`: drachtio y FreeSWITCH salen
 por la IP de la LAN, sin lo que el 32 no se registra ni se oye (ver «El parche 33»).
-Y el 34 (2026-11-04): la llamada, de 15 s a 3, y la tele de la sala (ver «El parche 34»).
+Y el 34 (2026-11-04): la llamada, de 15 s a unos 5, y la tele de la sala (ver «El parche 34»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1603,7 +1603,7 @@ Comprobarlo: `sofia status profile drachtio_mrf` (con `fs_cli -p` y el secreto d
 (`MULTI-REGISTRAR … SUCCESS`). La extensión siguió funcionando tras el cambio; una
 llamada entrante por el 3CX no se ha probado aún con él.
 
-## El parche 34: la llamada, de 15 s a 3, y la tele
+## El parche 34: la llamada, de 15 s a unos 5, y la tele
 
 Del 2026-11-04 (`telefono/parche-34.diff`; vuelta atrás: imagen `antes-p34` y los
 `*.bak-20261104-antes-p34`). Mikel: «vuelve a ser demasiado lento». Medido ese día en una
@@ -1613,8 +1613,8 @@ llamada de verdad, desde que deja de hablar hasta oír la respuesta:
 |---|---|---|---|
 | Cerrar la frase | 1,5 s | silencio fijo | 0,7 s si la frase parece acabada, 1,2 s si no |
 | Oído, con jacobo caído | 4 s + 3,2 s | esperaba a que jacobo fallara; `whisper-1` | 0 + 0,85 s |
-| Claude | 4,9-9,2 s | Sonnet, con 55.000 tokens por turno y pensamiento extendido | 1,6-3,8 s |
-| Primera frase de espera | 0,7 s, siempre | se sintetizaba cada vez | solo a los 1,8 s, y al instante |
+| Claude | 4,9-9,2 s | Sonnet, con 55.000 tokens por turno y pensamiento extendido | 1,4-5 s sin herramientas, 9-10 s con dos |
+| Primera frase de espera | 0,7 s, siempre | se sintetizaba cada vez | solo a los 2,5 s, y al instante |
 | «¿Señor?» al descolgar | 3 s | Fish en frío | al instante |
 | Voz de la respuesta | 0,65 s | | 0,65 s (conexión reutilizada) |
 
@@ -1632,19 +1632,25 @@ Lo que se hizo, por piezas:
   antes de necesitarlo, y vuelve solo. Si aun así tarda más de 1,5 s, sale OpenAI a la vez:
   gana el primero. En OpenAI, `gpt-4o-transcribe` (mismo texto, mismo precio; mediana 0,83 s
   y máximo 1,1 s, frente a 1,14 y 3 s de `whisper-1`), con `whisper-1` en carrera a 1,5 s.
-- **`server.js` + `sesion-viva.js`: Haiku flaco.** `claude-haiku-5-5`, `--tools Bash`, sin los
+- **`server.js` + `sesion-viva.js`: la sesión flaca.** `claude-sonnet-5-5`, `--tools Bash`, sin los
   ajustes ni el prompt de sistema de Claude Code (`--setting-sources ''`,
   `--system-prompt-file`), `MAX_THINKING_TOKENS=0`, y la hora en cada turno para no gastar un
   viaje en `date`. El formato de voz va en el prompt de sistema (`.sistema-llamada.md`, que
-  se regenera con el `CLAUDE.md`), sin la línea `COMPLETED`, que no oía nadie. Probado que
-  respeta `📖 LEER` y `✅ CONFIRMAR`. **«Piénsalo bien», «a fondo», «con calma» pasan ese turno
-  a Sonnet** con `set_model` (`CLAUDE_MODEL_PESADO`; 20 s, avisado por la frase de espera).
+  se regenera con el `CLAUDE.md`), sin la línea `COMPLETED`, que no oía nadie. El MCP, en local
+  (`.mcp-llamada.json`): 14 ms por petición frente a 175 por el túnel. **«Piénsalo bien», «a
+  fondo», «con calma» pasan ese turno a Opus** con `set_model` (`CLAUDE_MODEL_PESADO`).
   `SESION_FLACA=0` lo deshace. Quitar el MCP entero no gana nada: el suelo es el mismo.
+- **Se probó Haiku y se quitó el mismo día.** Era el más rápido (1,3-2,1 s; 2,9 s con una
+  herramienta), pero Mikel lo notó en dos turnos: se liaba y contestaba peor. Con Sonnet flaco
+  se pierde menos de un segundo. No lo pruebes otra vez sin preguntárselo.
 - **`tts-service.js`: frases fijas.** Lo que se dice siempre igual se sintetiza una vez
-  (`audio/fija-*.mp3`, en el volumen; `prepararFrasesFijas` en `index.js`). Y `anticipar`: la
+  (`config/frases-fijas/`, en un volumen; `prepararFrasesFijas` en `index.js`). **No en `audio/`:**
+  el `cleanupOldFiles` de `http-server.js` lo barre, se las llevó la primera tarde, y cada turno
+  lento acababa en «Perdona, algo ha fallado». Y `anticipar`: la
   respuesta se sintetiza en cuanto Claude la tiene, aunque suene la frase de espera.
-- **`turno-rapido.js`:** sin frase de espera hasta `ESPERA_FRASE_MS` (1,8 s). Lo sin
+- **`turno-rapido.js`:** sin frase de espera hasta `ESPERA_FRASE_MS` (2,5 s). Lo sin
   herramientas suele llegar antes, y decir «un momento» justo antes de contestar solo retrasa.
+  Si esa frase falla, se sigue esperando a Claude: un adorno no puede tumbar la llamada.
 
 **Lo que no se ha hecho, y por qué:** hablar mientras Claude escribe: con Haiku, 40 palabras
 tardan ~0,4 s en escribirse; gana 0,2 s a cambio de mucha fontanería. Lanzar a Claude en la
@@ -1660,16 +1666,19 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
   regla es de **frase entera**: «apaga la tele cuando acabe la película» va a Claude. Lista y
   casos en `test/parche34.test.js`. `REFLEJOS=0` los apaga.
 - **`POST /api/tele`** (con `TELEFONO_TERCEROS_TOKEN`): la herramienta `tele` del backend.
-- **Tres puertas:** WebSocket 8002 (teclas y aplicaciones; **la primera vez hay que aceptar en
-  pantalla con el mando**, y el token queda en `config/tele-token.json`), UPnP 9197 (LEER el volumen y
-  el silencio, sin emparejar; esta tele contesta 501 a SetVolume, así que se pone con las teclas) y REST 8001 (si está encendida).
+- **Tres puertas:** WebSocket 8002 (teclas; **la primera vez hay que aceptar en pantalla con el
+  mando**, hecho el 2026-11-04, y el token queda en `config/tele-token.json`), UPnP 9197 (LEER el
+  volumen y el silencio; esta tele contesta 501 a SetVolume, así que se pone con las teclas) y
+  REST 8001 (si está encendida, y las aplicaciones). **Abrir va por REST**: `POST` la abre, y la
+  enciende si está en reposo, y `GET` dice si está en pantalla, que es lo que decide el `ok`. Por
+  WebSocket, `ed.apps.launch` no hace nada y `ed.installedApp.get` no contesta en esta tele.
 - `TELE_VOLUMEN_MAX` (60): por encima no lo pone a ciegas, que un «noventa» mal oído se oye en
   toda la casa.
-- **Sin comprobar al desplegar:** todo lo que pide emparejar (apagar, encender, pausa, abrir),
-  porque nadie aceptó en pantalla; y encender desde apagada, que necesita que esté apagada.
-  El volumen (lectura por UPnP) sí está comprobado.
-- **Home Assistant no sirve de atajo:** su `HA_TOKEN` da 401 (2026-11-04), y además WoL desde
-  la voice-app no depende de él.
+- **Comprobado:** emparejar, estado, lista de aplicaciones, volumen con teclas (10→11→10) y abrir
+  Netflix desde reposo. **Sin comprobar:** apagar, encender con la tecla o el paquete mágico, y la
+  pausa, porque había alguien usándola.
+- **Home Assistant no sirve de atajo:** en `caja`, `HA_TOKEN` está vacío (no caducado), así que
+  el backend no le puede hablar por esa vía. Y el vigilante no lo mira mientras esté vacío.
 
 ### El vigilante de lo que sostiene a Jarvis (`_vigilar_servicios`, backend)
 
