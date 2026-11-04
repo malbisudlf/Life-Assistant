@@ -1697,10 +1697,25 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
 
 El tick de HA pregunta a la voice-app (`GET /api/salud`) y a Home Assistant. Lo que esté caído
 va en el contexto al descolgar («AVERÍAS AHORA», y Jarvis lo dice en su primera frase). Si
-lleva `VIGIA_SERVICIOS_MIN` (10) caído, **le llama una vez por caída** por `_llamar` (dormido o
-en clase no suena: lo reintenta el tick siguiente). Al volver, aviso al móvil sin llamada. El
+lleva `VIGIA_SERVICIOS_MIN` (10) caído, **le llama**, como mucho una vez cada
+`VIGIA_SERVICIOS_SILENCIO_H` (12), por `_llamar` (dormido o en clase no suena: lo reintenta el
+tick siguiente). Al volver, aviso al móvil sin llamada. El
 estado va en `vigilante_estado` (`servicio:<clave>`), y `VIGIA_SERVICIOS=0` lo apaga. Para
 añadir otra cosa que vigilar: `_servicios_caidos` y `_VIGIA_DETALLE`.
+
+### Qué le pasa a jacobo (2026-11-04)
+
+El Prometheus de `caja` guarda 30 días (`up{maquina="jacobo"}`, `node_boot_time_seconds`). Lo que
+dijo: de los arranques del 27/10 al 31/10 no hay ninguno más, y aun así jacobo estuvo el 50-60 % del
+tiempo inaccesible del 1 al 3/11, en decenas de cortes de 5 a 90 minutos. Antes de cada corte, todo
+normal: 45 °C, 89 % de memoria libre, sin presión de E/S ni errores de red. **No se caía: perdía la
+red.** Y el arranque del 31/10 a las 16:10 no volvió a verse hasta las 17:28: arrancar no es lo
+mismo que aparecer. Va por relé de Tailscale (`relay "mad"`), detrás del doble NAT del Archer y del
+tramo Archer-router, ya sospechoso. Los cortes pueden ser ese
+tramo, pero desde fuera no se puede distinguir.
+
+`telefono/jacobo-caja-negra.sh` (sin aplicar: se ejecuta con `sudo` en jacobo cuando vuelva) deja en su
+disco qué tramo cae primero, el registro del arranque anterior, y que GRUB no se pare en su menú.
 
 ## Lo que además NO está en el repositorio original
 
