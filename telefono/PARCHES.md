@@ -1661,8 +1661,8 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
   casos en `test/parche34.test.js`. `REFLEJOS=0` los apaga.
 - **`POST /api/tele`** (con `TELEFONO_TERCEROS_TOKEN`): la herramienta `tele` del backend.
 - **Tres puertas:** WebSocket 8002 (teclas y aplicaciones; **la primera vez hay que aceptar en
-  pantalla con el mando**, y el token queda en `config/tele-token.json`), UPnP 9197 (volumen
-  y silencio, sin emparejar) y REST 8001 (si está encendida).
+  pantalla con el mando**, y el token queda en `config/tele-token.json`), UPnP 9197 (LEER el volumen y
+  el silencio, sin emparejar; esta tele contesta 501 a SetVolume, así que se pone con las teclas) y REST 8001 (si está encendida).
 - `TELE_VOLUMEN_MAX` (60): por encima no lo pone a ciegas, que un «noventa» mal oído se oye en
   toda la casa.
 - **Sin comprobar al desplegar:** todo lo que pide emparejar (apagar, encender, pausa, abrir),

@@ -724,7 +724,7 @@
        if (code !== 0) {
 --- /dev/null
 +++ b/voice-app/lib/tele.js
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,512 @@
 +/**
 + * Parche 34: la tele de la sala (Samsung Q70 de 65", Tizen, 2020), en local y sin nube.
 + * Ver «El parche 34» en telefono/PARCHES.md de Life Assistant.
@@ -1002,6 +1002,22 @@
 +  }));
 +}
 +
++/**
++ * Deja el volumen en `n` y devuelve en cuánto ha quedado. Esta tele deja LEERLO por UPnP,
++ * pero SetVolume contesta 501 (comprobado el 2026-11-04): se intenta por si otra lo admite,
++ * y si no, se pulsa la tecla las veces que falten.
++ */
++async function llevarVolumen(n, alPedirPermiso) {
++  try {
++    return await ponerVolumen(n);
++  } catch (e) { /* a las teclas */ }
++  const antes = await leerVolumen();
++  const falta = n - antes;
++  if (falta !== 0) await tecla(falta > 0 ? 'KEY_VOLUP' : 'KEY_VOLDOWN', Math.abs(falta), alPedirPermiso);
++  await dormir(300);
++  return leerVolumen();
++}
++
 +// ── Encender y apagar ───────────────────────────────────────────────────────────────
 +
 +function paqueteMagico() {
@@ -1132,31 +1148,34 @@
 +    if (accion === 'volumen_subir' || accion === 'volumen_bajar') {
 +      const paso = Math.max(1, Math.min(30, parseInt(valor, 10) || PASO_VOLUMEN));
 +      const signo = accion === 'volumen_subir' ? 1 : -1;
-+      try {
-+        const antes = await leerVolumen();
-+        const quiere = Math.max(0, Math.min(VOLUMEN_MAX, antes + signo * paso));
-+        const queda = await ponerVolumen(quiere);
-+        return bien('Volumen a ' + queda + ', señor.', 'poner el volumen de la tele a ' + queda, { volumen: queda });
-+      } catch (e) {
++      let antes = null;
++      try { antes = await leerVolumen(); } catch (e) { /* sin saberlo, se pulsa igual */ }
++      if (antes === null) {
 +        await tecla(signo > 0 ? 'KEY_VOLUP' : 'KEY_VOLDOWN', paso, pedirPermiso);
 +        return bien('Hecho, señor.', (signo > 0 ? 'subir' : 'bajar') + ' el volumen de la tele');
 +      }
++      const queda = await llevarVolumen(Math.max(0, Math.min(VOLUMEN_MAX, antes + signo * paso)), pedirPermiso);
++      return bien('Volumen a ' + queda + ', señor.', 'poner el volumen de la tele a ' + queda, { volumen: queda });
 +    }
 +
 +    if (accion === 'volumen_poner') {
 +      const n = parseInt(valor, 10);
 +      if (!Number.isFinite(n) || n < 0 || n > 100) return mal('¿A cuánto lo pongo, señor? Del cero al cien.');
 +      if (n > VOLUMEN_MAX) return mal('Por encima de ' + VOLUMEN_MAX + ' no lo pongo a ciegas, señor. Se oiría en toda la casa.');
-+      const queda = await ponerVolumen(n);
++      const queda = await llevarVolumen(n, pedirPermiso);
 +      return bien('Volumen a ' + queda + ', señor.', 'poner el volumen de la tele a ' + queda, { volumen: queda });
 +    }
 +
 +    if (accion === 'silenciar' || accion === 'quitar_silencio') {
 +      const quiere = accion === 'silenciar';
-+      try {
-+        await soap('SetMute', '<DesiredMute>' + (quiere ? 1 : 0) + '</DesiredMute>');
-+      } catch (e) {
-+        await tecla('KEY_MUTE', 1, pedirPermiso);
++      let ahora = null;
++      try { ahora = await leerSilencio(); } catch (e) { /* entonces, la tecla */ }
++      if (ahora !== quiere) {
++        try {
++          await soap('SetMute', '<DesiredMute>' + (quiere ? 1 : 0) + '</DesiredMute>');
++        } catch (e) {
++          await tecla('KEY_MUTE', 1, pedirPermiso);
++        }
 +      }
 +      return bien(quiere ? 'Silenciada, señor.' : 'Con sonido, señor.', quiere ? 'silenciar la tele' : 'devolverle el sonido a la tele');
 +    }
