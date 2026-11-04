@@ -80,7 +80,15 @@
    };
    session.on('pausa', alPausar);
    return function () { session.off('pausa', alPausar); };
-@@ -63,4 +74,16 @@
+@@ -55,6 +66,7 @@
+     try {
+       const texto = await pausa.transcripcion;
+       if (log) log('ANTICIPO: transcrita durante el silencio; al cerrar la frase, ' + (Date.now() - t0) + ' ms de espera');
++      if (typeof whisperClient.sombra === 'function') whisperClient.sombra(utterance.audio, texto, OPCIONES);
+       return texto;
+     } catch (e) {
+       if (log) log('ANTICIPO: falló (' + e.message + '); transcribo la frase entera');
+@@ -63,4 +75,16 @@
    return whisperClient.transcribe(utterance.audio, OPCIONES);
  }
  
@@ -185,7 +193,7 @@
  /**
   * Convert L16 PCM buffer to WAV format for Whisper API
   * @param {Buffer} pcmBuffer - Raw L16 PCM audio data
-@@ -91,20 +160,31 @@
+@@ -91,23 +160,48 @@
    return { texto: datos.texto || "", ms: datos.ms };
  }
  
@@ -198,6 +206,20 @@
 +    function () { return pedirAOpenAI(wavBuffer, language, prompt, OPENAI_RESERVA); },
 +    OPENAI_CARRERA_MS
 +  );
++}
++
++// Parche 34: en la segunda llamada real, gpt-4o-transcribe se iba de idioma («outra vez»,
++// «achterneefjes») pese a `language`. Con una pista de cómo suena la conversación se
++// agarra al español y a los nombres de aquí. Si hay silencio, estos modelos pueden
++// devolver la pista tal cual: eso se trata como que no se ha oído nada (`esEcoDePista`).
++const PISTA_STT = process.env.OPENAI_STT_PISTA ||
++  "Llamada de teléfono en español de España con Jarvis, su asistente: la tele, el volumen, Netflix, YouTube, Prime Video, Disney, Jellyfin, WhatsApp.";
++
++function esEcoDePista(texto) {
++  if (/#{2,}/.test(String(texto || ""))) return true;   // con ruido puro llegó a dar «context: ###»
++  const n = function (s) { return String(s || "").toLowerCase().replace(/[^a-záéíóúñ ]/g, "").trim(); };
++  const t = n(texto);
++  return t.length > 12 && n(PISTA_STT).includes(t);
 +}
 +
 +async function pedirAOpenAI(wavBuffer, language, prompt, modelo) {
@@ -218,8 +240,12 @@
 +      model: modelo,
        language: language,
        // Parche 22: la escucha pasiva le pasa «Jarvis.» para que escriba bien el nombre.
-       ...(prompt ? { prompt: prompt } : {}),
-@@ -159,20 +239,33 @@
+-      ...(prompt ? { prompt: prompt } : {}),
++      prompt: prompt || PISTA_STT,
+       response_format: "text"
+     });
+   } finally {
+@@ -159,21 +253,35 @@
  
    if (oidoConfigurado() && Date.now() >= oidoCaidoHasta) {
      const t0 = Date.now();
@@ -257,8 +283,32 @@
      transcription = await transcribirEnOpenAI(wavBuffer, language, prompt);
 +    origen = "openai " + (Date.now() - t0) + " ms";
    }
++  if (esEcoDePista(transcription)) transcription = "";
  
    const timestamp = new Date().toISOString();
+   console.log("[" + timestamp + "] WHISPER (" + origen + ") Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
+@@ -189,8 +297,21 @@
+   return oidoConfigurado() || !!process.env.OPENAI_API_KEY;
+ }
+ 
++// Parche 34: mismo audio por whisper-1, solo para el registro, para decidir el transcriptor
++// con la voz de Mikel por teléfono y no con voz sintética (`docker logs voice-app | grep
++// STT-SOMBRA`). Unos 0,03 céntimos por turno; STT_SOMBRA=0 lo apaga.
++function sombra(audioBuffer, texto, opciones) {
++  if (process.env.STT_SOMBRA === "0" || !process.env.OPENAI_API_KEY) return;
++  const o = opciones || {};
++  pedirAOpenAI(pcmToWav(audioBuffer, o.sampleRate || 8000), o.language || "es", null, OPENAI_RESERVA)
++    .then(function (otro) {
++      console.log("[STT-SOMBRA] usado: «" + String(texto || "").trim() + "» | " + OPENAI_RESERVA + ": «" + String(otro || "").trim() + "»");
++    }, function () {});
++}
++
+ module.exports = {
+   transcribe,
++  sombra,
+   pcmToWav,
+   isAvailable,
+   oidoDisponible
 --- a/voice-app/lib/tts-service.js
 +++ b/voice-app/lib/tts-service.js
 @@ -24,6 +24,9 @@
@@ -1302,7 +1352,7 @@
 +};
 --- /dev/null
 +++ b/voice-app/lib/reflejos.js
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,183 @@
 +/**
 + * Parche 34: lo que la llamada cumple sola, sin pasar por Claude. Hoy, la tele: «baja el
 + * volumen», «apaga la tele», «pon Netflix». Claude tarda de 1,5 a 3 s en decidir lo que
@@ -1423,28 +1473,56 @@
 +}
 +
 +/**
++ * Las órdenes que hay en lo dicho: una, o varias unidas por «y» («baja el volumen y abre
++ * Jellyfin»; con Claude eran 11 s). Con el mismo criterio de frase entera: si UNA de las
++ * partes no es una orden clara, no se hace ninguna y lo piensa Claude.
++ */
++function interpretarVarias(texto) {
++  const una = interpretar(texto);
++  if (una) return [una];
++  const t = limpiar(texto);
++  if (t.length > 120) return null;
++  const partes = t.split(/ (?:y|e) (?:luego |despues |tambien )?|, (?:y )?/).filter(Boolean);
++  if (partes.length < 2 || partes.length > 3) return null;
++  const ordenes = partes.map(interpretar);
++  return ordenes.every(Boolean) ? ordenes : null;
++}
++
++/**
 + * Si lo dicho es un reflejo, lo cumple y lo dice. null si no lo era y debe pensarlo Claude.
 + * @returns {Promise<null|{interrumpio: boolean, aviso: string}>}
 + */
 +async function atender(transcript, p) {
 +  if (process.env.REFLEJOS === '0') return null;
-+  const o = interpretar(transcript);
-+  if (!o) return null;
++  const ordenes = interpretarVarias(transcript);
++  if (!ordenes) return null;
 +  const t0 = Date.now();
 +  const log = p.log || function () {};
 +  // Lo que se dice mientras la orden tarda (encender, el permiso en pantalla) va en fila
 +  // y sin solaparse: la respuesta espera a que acabe.
 +  let hablando = Promise.resolve();
-+  const r = await tele.orden(o, {
-+    avisar: function (frase) {
-+      hablando = hablando.then(async function () {
-+        const url = await p.ttsService.generateSpeech(frase, p.voiceId);
-+        if (p.sigueActiva()) await p.endpoint.play(url);
-+      }).catch(function () {});
-+    }
-+  });
++  const avisar = function (frase) {
++    hablando = hablando.then(async function () {
++      const url = await p.ttsService.generateSpeech(frase, p.voiceId);
++      if (p.sigueActiva()) await p.endpoint.play(url);
++    }).catch(function () {});
++  };
++  const resultados = [];
++  for (const o of ordenes) {
++    const un = await tele.orden(o, { avisar: avisar });
++    resultados.push(un);
++    if (!un.ok) break;   // lo siguiente solía depender de esto
++  }
 +  await hablando;
-+  log('REFLEJO ' + JSON.stringify(o) + ' → ' + (r.ok ? 'hecho' : 'falló') + ' en ' + (Date.now() - t0) + ' ms');
++  const r = {
++    ok: resultados.every(function (x) { return x.ok; }),
++    // «Volumen a 8. Jellyfin en pantalla, señor.»: el «señor», solo una vez.
++    frase: resultados.map(function (x, i) {
++      return i + 1 < resultados.length ? x.frase.replace(/, señor\.$/, '.') : x.frase;
++    }).join(' '),
++    hecho: resultados.map(function (x) { return x.hecho; }).filter(Boolean).join(' y '),
++  };
++  log('REFLEJO ' + JSON.stringify(ordenes) + ' → ' + (r.ok ? 'hecho' : 'falló') + ' en ' + (Date.now() - t0) + ' ms');
 +  let interrumpio = false;
 +  if (p.sigueActiva()) {
 +    const url = await p.ttsService.generateSpeech(r.frase, p.voiceId);
@@ -1457,13 +1535,13 @@
 +  return { interrumpio: interrumpio, aviso: aviso };
 +}
 +
-+module.exports = { interpretar, atender, limpiar, numero };
++module.exports = { interpretar, interpretarVarias, atender, limpiar, numero };
 --- /dev/null
 +++ b/voice-app/test/parche34.test.js
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,90 @@
 +// Parche 34: node voice-app/test/parche34.test.js (sin tele ni red)
 +const assert = require('assert');
-+const { interpretar } = require('../lib/reflejos');
++const { interpretar, interpretarVarias } = require('../lib/reflejos');
 +const { pareceCompleta } = require('../lib/anticipo');
 +const tele = require('../lib/tele');
 +
@@ -1515,6 +1593,15 @@
 +for (const dicho of no) {
 +  assert.strictEqual(interpretar(dicho), null, dicho);
 +}
++
++// Varias a la vez: todas o ninguna
++assert.deepStrictEqual(interpretarVarias('Puedes, por ejemplo, baja el volumen dos niveles y abre Jellyfin.'), null);
++assert.deepStrictEqual(interpretarVarias('Baja el volumen dos niveles y abre Jellyfin.'),
++  [{ accion: 'volumen_bajar', valor: 2 }, { accion: 'abrir', valor: 'jellyfin' }]);
++assert.deepStrictEqual(interpretarVarias('Apaga la tele.'), [{ accion: 'apagar' }]);
++assert.strictEqual(interpretarVarias('Abre Netflix y ponme El mentalista otra vez.'), null);
++assert.strictEqual(interpretarVarias('Apaga la tele y llama a Erik.'), null);
++assert.strictEqual(interpretarVarias('Apaga la luz y la tele.'), null);
 +
 +// El cierre rápido de la frase
 +for (const t of ['Apaga la tele.', '¿Qué tiempo hace?', 'Vale.', 'Llámame a las ocho.']) {
