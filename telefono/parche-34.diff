@@ -1,0 +1,1456 @@
+--- a/voice-app/lib/audio-fork.js
++++ b/voice-app/lib/audio-fork.js
+@@ -29,7 +29,9 @@
+     ws,
+     callUuid,
+     sampleRate = 16000,
+-    endSilenceMs = 1500,
++    // Parche 34: era 1500. Si la frase ya parece acabada se cierra antes aún, a los
++    // VAD_CIERRE_RAPIDO_MS (ver cerrarPausa y anticipo.js).
++    endSilenceMs = parseInt(process.env.VAD_END_SILENCE_MS) || 1200,
+     minSpeechMs = 350,
+     // Tope de un turno. Era 60 s: con ruido de fondo que el detector confunde con
+     // voz, era lo que tardaba en contestar. Si hablas más, lo que sobra entra en el
+@@ -69,7 +71,8 @@
+     // Parche 26: a los STT_ANTICIPO_MS de silencio se avisa ('pausa') con lo dicho
+     // hasta ahí, para transcribirlo mientras se esperan los endSilenceMs que cierran
+     // la frase. Si vuelves a hablar, esa pausa deja de valer. 0 lo apaga.
+-    this._anticipoMs = parseInt(process.env.STT_ANTICIPO_MS || '400', 10);
++    this._anticipoMs = parseInt(process.env.STT_ANTICIPO_MS || '300', 10);
++    this._cierreRapidoMs = parseInt(process.env.VAD_CIERRE_RAPIDO_MS || '700', 10);
+     this._pausa = null;
+     this._pausaEmitida = false;
+ 
+@@ -368,9 +371,20 @@
+ 
+     const utteranceMs = this._chunkDurationMs(this._utteranceBytes);
+     if (utteranceMs >= this.maxUtteranceMs) return this._finalizeUtterance('max_utterance');
++    // Parche 34: la transcripción de esta pausa dice que la frase está acabada.
++    if (this._pausa && this._pausa.completa && this._silenceMs >= this._cierreRapidoMs) {
++      console.log('[AUDIO-DEBUG] Cierre rápido a los ' + Math.round(this._silenceMs) + ' ms de silencio');
++      return this._finalizeUtterance('end_silence');
++    }
+     if (this._silenceMs >= this.endSilenceMs) return this._finalizeUtterance('end_silence');
+   }
+ 
++  // Parche 34: quien transcribe la pausa avisa de que lo dicho parece una frase entera.
++  // Si mientras tanto has vuelto a hablar, esa pausa ya no es la actual y no hace nada.
++  cerrarPausa(pausa) {
++    if (pausa && pausa === this._pausa) pausa.completa = true;
++  }
++
+   waitForUtterance({ timeoutMs = 30000 } = {}) {
+     console.log('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
+     if (this._sinRecoger) {
+--- a/voice-app/lib/anticipo.js
++++ b/voice-app/lib/anticipo.js
+@@ -12,8 +12,11 @@
+  *
+  * - Es el mismo modelo sobre el mismo audio (menos el silencio del final): no se
+  *   cambia precisión por velocidad.
+- * - Solo contra jacobo (`soloOido`): contra OpenAI, cada pausa a media frase sería
+- *   una llamada de pago tirada. Con el oído caído, todo sigue como antes.
++ * - Parche 34: también contra OpenAI. Una pausa a media frase son 0,03 céntimos
++ *   tirados, y con jacobo caído ahorra ~1 s por turno. Y la transcripción de la pausa
++ *   decide si se cierra antes: si parece una frase acabada, no se esperan los
++ *   endSilenceMs enteros (session.cerrarPausa). Con jacobo se pregunta además a
++ *   `small`, que tarda 0,3 s, solo para decidir eso; lo que se transcribe es turbo.
+  * - No con la escucha pasiva dormida (`activo`): con la radio del coche las pausas no
+  *   paran, y cada una sería una pasada más de la GPU de jacobo para nada.
+  */
+@@ -34,11 +37,19 @@
+   if (!whisperClient || typeof whisperClient.oidoDisponible !== 'function') return function () {};
+   const activo = p.activo || function () { return true; };
+   const alPausar = function (pausa) {
+-    if (!activo() || !whisperClient.oidoDisponible()) return;
++    if (!activo()) return;
+     pausa.desde = Date.now();
+-    pausa.transcripcion = whisperClient.transcribe(pausa.audio, Object.assign({ soloOido: true }, OPCIONES));
++    pausa.transcripcion = whisperClient.transcribe(pausa.audio, OPCIONES);
+     // Que una pausa tirada que falla no acabe en un unhandledRejection.
+     pausa.transcripcion.catch(function () {});
++    const decidir = function (texto) {
++      if (pareceCompleta(texto) && typeof session.cerrarPausa === 'function') session.cerrarPausa(pausa);
++    };
++    pausa.transcripcion.then(decidir, function () {});
++    if (whisperClient.oidoDisponible()) {
++      whisperClient.transcribe(pausa.audio, Object.assign({ soloOido: true, rapido: true }, OPCIONES))
++        .then(decidir, function () {});
++    }
+   };
+   session.on('pausa', alPausar);
+   return function () { session.off('pausa', alPausar); };
+@@ -63,4 +74,16 @@
+   return whisperClient.transcribe(utterance.audio, OPCIONES);
+ }
+ 
+-module.exports = { armarAnticipo, transcribirFrase, OPCIONES };
++// Lo que deja la frase claramente a medias, si acaba en ello. Whisper pone punto final
++// aunque te hayas quedado pensando, así que el punto no dice nada.
++const A_MEDIAS = /(?:^|\s)(?:y|e|o|u|ni|que|de|del|a|al|en|por|para|con|sin|pero|porque|si|como|cuando|donde|el|la|los|las|un|una|unos|unas|mi|mis|tu|tus|su|sus|me|te|se|lo|le|les|nos|es|eh|em|mm+|este|esto|esta|pues|entonces|o sea|a ver|tambien|también|mas|más|muy|ya que|y que)$/i;
++
++function pareceCompleta(texto) {
++  const s = String(texto || '').trim();
++  if (s.length < 2) return false;
++  if (/(?:\.\.\.|…|,|:|;|-)$/.test(s)) return false;
++  const sin = s.replace(/[.?!¿¡"»”]+$/, '').trim();
++  return sin.length > 0 && !A_MEDIAS.test(sin);
++}
++
++module.exports = { armarAnticipo, transcribirFrase, pareceCompleta, OPCIONES };
+--- a/voice-app/lib/whisper-client.js
++++ b/voice-app/lib/whisper-client.js
+@@ -14,7 +14,15 @@
+ const fs = require("fs");
+ const path = require("path");
+ 
+-const OIDO_TIMEOUT_MS = parseInt(process.env.OIDO_TIMEOUT_MS || "4000", 10);
++// Parche 34: el 2026-11-04, con jacobo apagado, cada 60 s un turno perdía estos 4 s
++// enteros antes de ir a OpenAI. Ahora un sondeo lo sabe antes de que haga falta, y si
++// aun así no contesta a OIDO_CARRERA_MS sale OpenAI a la vez: gana quien llegue antes.
++const OIDO_TIMEOUT_MS = parseInt(process.env.OIDO_TIMEOUT_MS || "2500", 10);
++const OIDO_CARRERA_MS = parseInt(process.env.OIDO_CARRERA_MS || "1500", 10);
++const OPENAI_MODELO = process.env.OPENAI_STT_MODELO || "gpt-4o-transcribe";
++const OPENAI_RESERVA = process.env.OPENAI_STT_RESERVA || "whisper-1";
++const OPENAI_CARRERA_MS = parseInt(process.env.OPENAI_CARRERA_MS || "1500", 10);
++const OIDO_SONDEO_MS = parseInt(process.env.OIDO_SONDEO_MS || "8000", 10);
+ const OIDO_PAUSA_MS = parseInt(process.env.OIDO_PAUSA_MS || "60000", 10);
+ 
+ // Hasta cuándo no se le pregunta al oído (después de un fallo)
+@@ -46,6 +54,67 @@
+   return oidoConfigurado() && Date.now() >= oidoCaidoHasta;
+ }
+ 
++// Parche 34: cualquier respuesta vale (401 incluido, /salud pide llave): lo que se
++// quiere saber es si hay alguien al otro lado. Dos fallos seguidos lo dan por caído
++// hasta el sondeo siguiente; uno bueno lo devuelve al momento.
++let fallosSondeo = 0;
++async function sondearOido() {
++  if (!oidoConfigurado()) return;
++  try {
++    const r = await fetch(process.env.OIDO_URL.replace(/\/+$/, "") + "/salud", {
++      headers: { "X-Auth-Token": process.env.OIDO_TOKEN },
++      signal: AbortSignal.timeout(2000)
++    });
++    if (r.status >= 500) throw new Error("HTTP " + r.status);
++    if (oidoCaidoHasta) console.log("[WHISPER] El oído de jacobo ha vuelto");
++    fallosSondeo = 0;
++    oidoCaidoHasta = 0;
++  } catch (e) {
++    if (++fallosSondeo >= 2) {
++      if (!oidoCaidoHasta) console.warn("[WHISPER] El oído de jacobo no contesta al sondeo: OpenAI");
++      oidoCaidoHasta = Date.now() + OIDO_SONDEO_MS * 3;
++    }
++  }
++}
++sondearOido();
++const relojSondeo = setInterval(sondearOido, OIDO_SONDEO_MS);
++if (relojSondeo.unref) relojSondeo.unref();
++
++/**
++ * La primera que salga bien. La segunda solo arranca si la primera tarda más de `ms`
++ * o falla; si fallan las dos, lanza el último error.
++ */
++function carrera(primera, lanzarSegunda, ms) {
++  return new Promise(function (resolve, reject) {
++    let acabado = false;
++    let lanzada = false;
++    let vivas = 1;
++    const bien = function (v) {
++      if (acabado) return;
++      acabado = true;
++      clearTimeout(reloj);
++      resolve(v);
++    };
++    const lanzar = function () {
++      if (lanzada || acabado) return;
++      lanzada = true;
++      vivas++;
++      Promise.resolve().then(lanzarSegunda).then(bien, mal);
++    };
++    const mal = function (e) {
++      vivas--;
++      if (acabado) return;
++      if (!lanzada) return lanzar();
++      if (vivas <= 0) {
++        acabado = true;
++        reject(e);
++      }
++    };
++    const reloj = setTimeout(lanzar, ms);
++    primera.then(bien, mal);
++  });
++}
++
+ /**
+  * Convert L16 PCM buffer to WAV format for Whisper API
+  * @param {Buffer} pcmBuffer - Raw L16 PCM audio data
+@@ -91,20 +160,31 @@
+   return { texto: datos.texto || "", ms: datos.ms };
+ }
+ 
++// Parche 34: gpt-4o-transcribe da el mismo texto que whisper-1 y mucha menos cola
++// (medido el 2026-11-04 con voz real: mediana 0,83 s y máximo 1,1 s, frente a 1,14 y
++// 3 s), y cuesta lo mismo. Si tarda, sale whisper-1 detrás.
+ async function transcribirEnOpenAI(wavBuffer, language, prompt) {
++  return carrera(
++    pedirAOpenAI(wavBuffer, language, prompt, OPENAI_MODELO),
++    function () { return pedirAOpenAI(wavBuffer, language, prompt, OPENAI_RESERVA); },
++    OPENAI_CARRERA_MS
++  );
++}
++
++async function pedirAOpenAI(wavBuffer, language, prompt, modelo) {
+   const client = getOpenAIClient();
+   if (!client) {
+     throw new Error("OpenAI API key not configured");
+   }
+ 
+   // Write to temp file (Whisper API requires a file)
+-  const tempFile = path.join("/tmp", "whisper-" + Date.now() + ".wav");
++  const tempFile = path.join("/tmp", "whisper-" + Date.now() + "-" + Math.random().toString(36).slice(2) + ".wav");
+   fs.writeFileSync(tempFile, wavBuffer);
+ 
+   try {
+     return await client.audio.transcriptions.create({
+       file: fs.createReadStream(tempFile),
+-      model: "whisper-1",
++      model: modelo,
+       language: language,
+       // Parche 22: la escucha pasiva le pasa «Jarvis.» para que escriba bien el nombre.
+       ...(prompt ? { prompt: prompt } : {}),
+@@ -159,20 +239,33 @@
+ 
+   if (oidoConfigurado() && Date.now() >= oidoCaidoHasta) {
+     const t0 = Date.now();
+-    try {
+-      const oido = await transcribirEnOido(wavBuffer, language, rapido);
+-      transcription = oido.texto;
+-      origen = "jacobo" + (rapido ? " rápido " : " ") + (Date.now() - t0) + " ms";
+-    } catch (e) {
++    const delOido = transcribirEnOido(wavBuffer, language, rapido).then(function (oido) {
++      return { texto: oido.texto, origen: "jacobo" + (rapido ? " rápido " : " ") + (Date.now() - t0) + " ms" };
++    }).catch(function (e) {
+       oidoCaidoHasta = Date.now() + OIDO_PAUSA_MS;
+       const motivo = e.name === "TimeoutError" ? "sin respuesta en " + OIDO_TIMEOUT_MS + " ms" : (e.cause && e.cause.code) || e.message;
+       console.warn("[WHISPER] El oído de jacobo falla (" + motivo + "): OpenAI durante " + Math.round(OIDO_PAUSA_MS / 1000) + " s");
+-      if (soloOido) throw e;
++      throw e;
++    });
++    if (soloOido) {
++      const r = await delOido;
++      transcription = r.texto;
++      origen = r.origen;
++    } else {
++      const r = await carrera(delOido, function () {
++        return transcribirEnOpenAI(wavBuffer, language, prompt).then(function (texto) {
++          return { texto: texto, origen: "openai, en carrera " + (Date.now() - t0) + " ms" };
++        });
++      }, OIDO_CARRERA_MS);
++      transcription = r.texto;
++      origen = r.origen;
+     }
+   }
+ 
+   if (transcription === null) {
++    const t0 = Date.now();
+     transcription = await transcribirEnOpenAI(wavBuffer, language, prompt);
++    origen = "openai " + (Date.now() - t0) + " ms";
+   }
+ 
+   const timestamp = new Date().toISOString();
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -24,6 +24,9 @@
+  */
+ 
+ const axios = require('axios');
++const https = require('https');
++// Parche 34: sin esto, cada frase pagaba un TLS nuevo con Fish (100-200 ms).
++axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 8 });
+ const fs = require('fs');
+ const path = require('path');
+ const crypto = require('crypto');
+@@ -349,7 +352,64 @@
+  * @param {string} voiceId - ElevenLabs voice ID (optional; Azure and jacobo use their own)
+  * @returns {Promise<string>} HTTP URL to audio file
+  */
++// ── Parche 34: lo que se dice siempre igual, ya sintetizado ─────────────────────────
++// El «¿Señor?» de hoy tardó 3 s con el móvil ya descolgado, y cada «Un momento» 0,7 s
++// para decir algo que no cambia nunca. Se sintetizan una vez, enteras, y se guardan en
++// el volumen de audio (`fija-*`, que cleanupOldFiles no toca): sobreviven a un reinicio
++// y salen al instante, o sin esperar a Fish si se cae.
++const fijas = new Set();
++
++function ficheroFija(text) {
++  const huella = crypto.createHash('md5').update([FISH_AUDIO_MODEL, FISH_AUDIO_VOICE, text].join('|')).digest('hex').slice(0, 16);
++  return 'fija-' + huella + '.mp3';
++}
++
++async function prepararFrasesFijas(frases) {
++  if (!FISH_AUDIO_API_KEY) return;
++  let nuevas = 0;
++  for (const text of frases) {
++    const ruta = path.join(audioDir, ficheroFija(text));
++    try {
++      if (!fs.existsSync(ruta)) {
++        const audio = await VOCES.fish.sintetizar(text);
++        if (!audio || !audio.length) continue;
++        fs.writeFileSync(ruta, audio);
++        nuevas++;
++      }
++      fijas.add(text);
++    } catch (e) {
++      logger.warn('Frase fija sin sintetizar', { text, error: e.message });
++    }
++  }
++  logger.info('Frases fijas listas', { total: fijas.size, nuevas });
++}
++
++// ── Parche 34: la respuesta se sintetiza en cuanto Claude la tiene, aunque aún suene la
++// frase de espera. El generateSpeech que venga después con ese texto se la encuentra.
++const anticipadas = new Map();
++
++function anticipar(text, voiceId) {
++  if (!text || fijas.has(text) || anticipadas.has(text)) return;
++  const p = generar(text, voiceId);
++  p.catch(function () {});
++  anticipadas.set(text, p);
++  const reloj = setTimeout(function () { anticipadas.delete(text); }, 20000);
++  if (reloj.unref) reloj.unref();
++}
++
+ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
++  if (fijas.has(text)) {
++    return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/audio-files/${ficheroFija(text)}`;
++  }
++  const ya = anticipadas.get(text);
++  if (ya) {
++    anticipadas.delete(text);
++    return ya;
++  }
++  return generar(text, voiceId);
++}
++
++async function generar(text, voiceId = DEFAULT_VOICE_ID) {
+   const startTime = Date.now();
+   const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
+   if (!orden.length) {
+@@ -483,6 +543,8 @@
+ 
+ module.exports = {
+   generateSpeech,
++  prepararFrasesFijas,
++  anticipar,
+   servirEnDirecto,
+   setAudioDir,
+   cleanupOldFiles,
+--- a/voice-app/lib/turno-rapido.js
++++ b/voice-app/lib/turno-rapido.js
+@@ -40,10 +40,26 @@
+   let listo = false;
+   const consulta = Promise.resolve().then(p.consultar);
+   // Marca el final sin tragarse el error: el `await consulta` de abajo lo relanza.
+-  consulta.then(function () { listo = true; }, function () { listo = true; });
++  // Parche 34: y en cuanto Claude contesta se sintetiza la respuesta, sin esperar a
++  // que acabe la frase de espera (`extraer` saca de la respuesta lo que se va a decir).
++  consulta.then(function (respuesta) {
++    listo = true;
++    try {
++      if (p.extraer && p.ttsService.anticipar) p.ttsService.anticipar(p.extraer(respuesta), p.voiceId);
++    } catch (e) { /* lo intentará quien llama */ }
++  }, function () { listo = true; });
+ 
+-  const fraseUrl = await p.ttsService.generateSpeech(p.frase, p.voiceId);
+-  if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
++  // Parche 34: la mayoría de las respuestas sin herramientas llegan antes de esto, y
++  // entonces no hace falta decir «un momento» para contestar justo después.
++  const esperaMs = parseInt(process.env.ESPERA_FRASE_MS || '1800', 10);
++  await new Promise(function (resolve) {
++    const reloj = setTimeout(resolve, esperaMs);
++    consulta.then(function () { clearTimeout(reloj); resolve(); }, function () { clearTimeout(reloj); resolve(); });
++  });
++  if (sigueActiva() && !listo) {
++    const fraseUrl = await p.ttsService.generateSpeech(p.frase, p.voiceId);
++    if (sigueActiva() && !listo) await p.endpoint.play(fraseUrl);
++  }
+ 
+   let musica = false;
+   if (sigueActiva() && !listo) {
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -18,6 +18,7 @@
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+ const GOTIT_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/gotit-beep.wav`;
++const reflejos = require('./reflejos');
+ const HOLD_MUSIC_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/hold-music.wav`;
+ 
+ // Default voice ID (Morpheus)
+@@ -25,14 +26,11 @@
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Un momento, señor...",
+-  "Enseguida...",
+-  "Vamos a ver...",
+-  "Estoy en ello...",
+-  "Comprobándolo...",
+-  "Consultando...",
+-  "Ahora mismo lo miro...",
+-  "Procesando...",
++  "Un momento, señor.",
++  "Enseguida, señor.",
++  "Déjeme ver.",
++  "Ahora mismo.",
++  "Lo miro.",
+ ];
+ 
+ function getRandomThinkingPhrase() {
+@@ -303,6 +301,17 @@
+         continue;
+       }
+ 
++      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
++      const reflejo = await reflejos.atender(transcript, {
++        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      });
++      if (reflejo) {
++        interrumpio = reflejo.interrumpio;
++        avisoLectura = reflejo.aviso;
++        continue;
++      }
++
+       // THINKING FEEDBACK + Claude, a la vez (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+@@ -319,7 +328,8 @@
+         ttsService: ttsService,
+         frase: thinkingPhrase,
+         voiceId: voiceId,
+-        musicaUrl: HOLD_MUSIC_URL
++        musicaUrl: HOLD_MUSIC_URL,
++        extraer: extractVoiceLine
+       });
+ 
+       console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -27,18 +27,16 @@
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+ const GOTIT_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/gotit-beep.wav`;
++const reflejos = require('./reflejos');
+ const HOLD_MUSIC_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/hold-music.wav`;
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Un momento, señor...",
+-  "Enseguida...",
+-  "Vamos a ver...",
+-  "Estoy en ello...",
+-  "Comprobándolo...",
+-  "Consultando...",
+-  "Ahora mismo lo miro...",
+-  "Procesando...",
++  "Un momento, señor.",
++  "Enseguida, señor.",
++  "Déjeme ver.",
++  "Ahora mismo.",
++  "Lo miro.",
+ ];
+ 
+ function getRandomThinkingPhrase() {
+@@ -455,6 +453,18 @@
+         continue;
+       }
+ 
++      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
++      const reflejo = await reflejos.atender(transcript, {
++        endpoint, session, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }),
++        sigueActiva: () => callActive
++      });
++      if (reflejo) {
++        interrumpio = reflejo.interrumpio;
++        avisoLectura = reflejo.aviso;
++        continue;
++      }
++
+       // ============================================
+       // THINKING FEEDBACK
+       // ============================================
+@@ -476,7 +486,8 @@
+         frase: thinkingPhrase,
+         voiceId,
+         musicaUrl: HOLD_MUSIC_URL,
+-        sigueActiva: () => callActive
++        sigueActiva: () => callActive,
++        extraer: extractVoiceLine
+       });
+ 
+       // Check if call ended during Claude processing
+--- a/voice-app/index.js
++++ b/voice-app/index.js
+@@ -234,6 +234,33 @@
+   httpServer.app.use("/api", queryRouter);
+   console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
+ 
++  // Parche 34: la tele, para el backend (la herramienta `tele`). Con la misma llave que
++  // las llamadas a terceros.
++  httpServer.app.post("/api/tele", async function (req, res) {
++    const llave = process.env.TELEFONO_TERCEROS_TOKEN || "";
++    if (!llave || req.get("X-Auth-Token") !== llave) return res.status(403).json({ ok: false, frase: "Sin permiso" });
++    res.json(await require("./lib/tele").orden(req.body || {}));
++  });
++
++  // Parche 34: cómo está lo que sostiene la llamada, para el vigilante del backend.
++  httpServer.app.get("/api/salud", function (req, res) {
++    const llave = process.env.TELEFONO_TERCEROS_TOKEN || "";
++    if (!llave || req.get("X-Auth-Token") !== llave) return res.status(403).json({ ok: false });
++    res.json({ ok: true, oido: { configurado: !!process.env.OIDO_URL, disponible: whisperClient.oidoDisponible() } });
++  });
++
++  // Parche 34: lo que se dice siempre igual, ya sintetizado (en segundo plano).
++  setTimeout(function () {
++    ttsService.prepararFrasesFijas([
++      "¿Señor?", "Un momento, señor.", "Enseguida, señor.", "Déjeme ver.", "Ahora mismo.", "Lo miro.",
++      "Hecho, señor.", "Apagada, señor.", "Encendida, señor.", "Silenciada, señor.", "Con sonido, señor.",
++      "Encendiendo la tele, señor.", "Ya está encendida, señor.", "Ya está apagada, señor.",
++      "La tele no responde, señor.", "La tele me pide permiso, señor. Acéptelo en la pantalla con el mando.",
++      "Abriendo Netflix, señor.", "Abriendo YouTube, señor.",
++      "No te he oído. ¿Sigues ahí?", "Perdona, no te he entendido. ¿Puedes repetir?", "Hasta luego. Llámame cuando quieras."
++    ]).catch(function (e) { console.warn("[TTS] Frases fijas: " + e.message); });
++  }, 3000);
++
+   // Parche 31: el audio en directo (Fish, Azure) que FreeSWITCH pide por shout://
+   httpServer.app.get("/tts-stream/:id", ttsService.servirEnDirecto);
+ 
+--- a/claude-api-server/sesion-viva.js
++++ b/claude-api-server/sesion-viva.js
+@@ -123,6 +123,16 @@
+     });
+   }
+ 
++  // Parche 34: cambia de modelo para los turnos siguientes (se manda por stdin, así que
++  // va en orden con las preguntas).
++  let controles = 0;
++  function fijarModelo(modelo) {
++    if (!viva) return;
++    proc.stdin.write(JSON.stringify({
++      type: 'control_request', request_id: 'modelo-' + (++controles), request: { subtype: 'set_model', model: modelo },
++    }) + '\n');
++  }
++
+   let cortes = 0;
+   function enviarInterrupcion() {
+     proc.stdin.write(JSON.stringify({
+@@ -148,6 +158,7 @@
+   return {
+     preguntar,
+     interrumpir,
++    fijarModelo,
+     cerrar,
+     alMorir: function (fn) { alMorir.push(fn); },
+     get viva() { return viva; },
+--- a/claude-api-server/server.js
++++ b/claude-api-server/server.js
+@@ -94,6 +94,9 @@
+     PYENV_ROOT: path.join(HOME, '.pyenv'),
+     BUN_INSTALL: path.join(HOME, '.bun'),
+     // CRITICAL: These tell Claude Code it's running in the proper environment
++    // Parche 34: sin pensamiento extendido. Por teléfono no aporta y un turno con él
++    // llegó a 9,6 s, frente a 4,4 sin él (medido el 2026-11-04).
++    MAX_THINKING_TOKENS: '0',
+     CLAUDECODE: '1',
+     CLAUDE_CODE_ENTRYPOINT: 'cli',
+   };
+@@ -120,7 +123,41 @@
+ const sessions = new Map();
+ 
+ // Model selection - Sonnet for balanced speed/quality
+-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5-5';
++// Parche 34 (2026-11-04): en la llamada piensa Haiku. Medido en caja con la sesión real:
++// un turno sin herramientas 1,3-2,1 s (Sonnet 1,8-5,6), con una herramienta 2,9 s
++// (Sonnet 4,4-9,6). «Piénsalo bien» pasa ese turno a Sonnet (CLAUDE_MODEL_PESADO).
++const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-haiku-5-5';
++const CLAUDE_MODEL_PESADO = process.env.CLAUDE_MODEL_PESADO || 'claude-sonnet-5-5';
++const PIDE_PENSAR = /\b(?:pi[eé]ns(?:a|alo|atelo|átelo)|razona(?:lo)?|m[ií]ralo|analiza(?:lo)?)\b.*\b(?:bien|a fondo|con calma|despacio|detenidamente)\b|\bmodo potente\b|\bcon sonnet\b/i;
++
++// Parche 34: la sesión adelgazada. Sin las herramientas integradas que no se usan por
++// teléfono (solo Bash), sin el prompt de sistema de Claude Code ni los ajustes, plugins
++// y conectores de la cuenta: de 55.000 tokens por turno a 28.000. El formato de voz y el
++// RUNBOOK van en el prompt de sistema, una vez, en vez de repetirse en cada turno.
++const SESION_FLACA = process.env.SESION_FLACA !== '0';
++const FICHERO_SISTEMA = path.join(process.cwd(), '.sistema-llamada.md');
++
++function argsFlacos() {
++  if (!SESION_FLACA) return [];
++  let runbook = '';
++  try { runbook = fs.readFileSync(path.join(process.cwd(), 'CLAUDE.md'), 'utf8'); } catch { /* sin él, el formato */ }
++  fs.writeFileSync(FICHERO_SISTEMA, FORMATO_VOZ + '\n\n' + runbook);
++  return [
++    '--setting-sources', '',
++    '--strict-mcp-config', '--mcp-config', path.join(process.cwd(), '.mcp.json'),
++    '--tools', 'Bash',
++    '--system-prompt-file', FICHERO_SISTEMA,
++  ];
++}
++
++// La hora en cada turno: sin el prompt de sistema de Claude Code no la sabe, y mirarla
++// con `date` sería un viaje más al modelo.
++function horaAhora() {
++  const f = new Intl.DateTimeFormat('es-ES', {
++    timeZone: 'Europe/Madrid', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
++  });
++  return '[Ahora: ' + f.format(new Date()) + '] ';
++}
+ 
+ function parseClaudeStdout(stdout) {
+   // Claude Code CLI may output JSONL; when it does, extract the `result` message.
+@@ -150,13 +187,14 @@
+   return { response, sessionId };
+ }
+ 
+-function runClaudeOnce({ fullPrompt, callId, timestamp }) {
++function runClaudeOnce({ fullPrompt, callId, timestamp, modelo, flaca = false }) {
+   const startTime = Date.now();
+ 
+   const args = [
+     '--dangerously-skip-permissions',
+     '-p', fullPrompt,
+-    '--model', CLAUDE_MODEL
++    '--model', modelo || CLAUDE_MODEL,
++    ...(flaca ? argsFlacos() : [])
+   ];
+ 
+   if (callId) {
+@@ -217,6 +255,7 @@
+     '--output-format', 'stream-json',
+     '--verbose',
+     '--model', CLAUDE_MODEL,
++    ...argsFlacos(),
+   ];
+   if (sessions.has(callId)) {
+     args.push('--resume', callId);
+@@ -240,6 +279,18 @@
+  * - Output COMPLETED for status logging (12 words max)
+  * - For Slack delivery requests: do the work, send to Slack, then acknowledge
+  */
++const FORMATO_VOZ = `# El formato de cada respuesta
++
++Te están oyendo por teléfono. CADA respuesta, sin excepción, lleva esta línea, y es lo
++único que se oye:
++
++🗣️ VOICE_RESPONSE: lo que quieres decir, en una sola línea y menos de 40 palabras, como lo
++dirías hablando. Contesta de verdad a lo que te ha dicho: no vale un «hecho» sin más.
++
++Fuera de esa línea no escribas nada más que las líneas especiales que explica este
++documento (📖 LEER, ✅ CONFIRMAR). Sin explicar lo que vas a hacer: haz y contesta.
++Cuantos menos pasos, mejor: si ya lo sabes por el contexto, contesta sin herramientas.`;
++
+ const VOICE_CONTEXT = `[VOICE CALL CONTEXT]
+ This query comes via voice call. You MUST include BOTH of these lines in your response:
+ 
+@@ -269,7 +320,8 @@
+   if (devicePrompt) {
+     texto += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
+   }
+-  return texto + VOICE_CONTEXT;
++  // Parche 34: el formato ya va en el prompt de sistema.
++  return SESION_FLACA ? texto : texto + VOICE_CONTEXT;
+ }
+ 
+ // Parche 27: el turno con el que se precalienta. Claude lo contesta (no hay forma de
+@@ -340,7 +392,8 @@
+      * 2. VOICE_CONTEXT - general voice call instructions
+      * 3. User's prompt - what they actually said
+      */
+-    let fullPrompt = cabecera(devicePrompt);
++    // Parche 34: la cabecera, solo al abrir sesión; luego ya la lleva dentro.
++    let fullPrompt = '';
+     // Parche 27: si se está precalentando, que su turno (con el contexto) vaya delante.
+     // Parche 28: y si ese turno sigue en marcha, se corta: el contexto ya está dentro
+     // y la pregunta no espera a un «listo» que nadie va a oír (llegó a tardar 12,7 s).
+@@ -356,6 +409,7 @@
+     // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
+     // siguientes ya lo llevan dentro.
+     const nueva = Boolean(callId) && !sessions.has(callId);
++    if (nueva || !callId) fullPrompt += cabecera(devicePrompt);
+     if (nueva) fullPrompt += bitacora.contexto(callId);
+ 
+     // Parche 19: el proceso se lanza ya, y el contexto se pide mientras arranca.
+@@ -368,14 +422,21 @@
+       }
+     }
+     if (nueva) fullPrompt += await contexto.pedir();
+-    fullPrompt += prompt;
++    fullPrompt += horaAhora() + prompt;
++    // Parche 34: «piénsalo bien» va con Sonnet solo ese turno.
++    const pesado = PIDE_PENSAR.test(prompt);
+     const esAvisoSaliente = bitacora.apuntarConsulta(callId, prompt);
+ 
+     let response, sessionId, duration_ms;
+     let respondida = false;
+     if (viva) {
+       try {
++        if (pesado) {
++          console.log(`[${timestamp}] MODELO: este turno, ${CLAUDE_MODEL_PESADO}`);
++          viva.fijarModelo(CLAUDE_MODEL_PESADO);
++        }
+         const r = await viva.preguntar(fullPrompt);
++        if (pesado) viva.fijarModelo(CLAUDE_MODEL);
+         duration_ms = r.duration_ms;
+         if (r.isError) {
+           console.error(`[${new Date().toISOString()}] ERROR (sesión viva): ${r.response.substring(0, 500)}`);
+@@ -390,7 +451,7 @@
+     }
+ 
+     if (!respondida) {
+-      const r = await runClaudeOnce({ fullPrompt, callId, timestamp });
++      const r = await runClaudeOnce({ fullPrompt, callId, timestamp, modelo: pesado ? CLAUDE_MODEL_PESADO : CLAUDE_MODEL, flaca: true });
+       duration_ms = r.duration_ms;
+       if (r.code !== 0) {
+         console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${r.code}`);
+@@ -491,7 +552,7 @@
+ 
+     for (let attempt = 0; attempt <= retries; attempt++) {
+       attemptsMade = attempt + 1;
+-      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
++      const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp, modelo: CLAUDE_MODEL_PESADO });
+       totalDuration += duration_ms;
+ 
+       if (code !== 0) {
+--- /dev/null
++++ b/voice-app/lib/tele.js
+@@ -0,0 +1,493 @@
++/**
++ * Parche 34: la tele de la sala (Samsung Q70 de 65", Tizen, 2020), en local y sin nube.
++ * Ver «El parche 34» en telefono/PARCHES.md de Life Assistant.
++ *
++ * Vive en la voice-app y no en el backend por dos motivos: la voice-app está en la red
++ * del host, que es la única desde la que el paquete mágico de encender llega a la LAN
++ * (desde la red de Docker no sale un broadcast), y así una orden de viva voz tarda
++ * milisegundos, sin pasar por Claude (reflejos.js). El backend llega por `POST /api/tele`.
++ *
++ * Tres puertas de la tele, cada una para lo suyo:
++ *  - WebSocket 8002: las teclas del mando y abrir aplicaciones. La PRIMERA vez la tele
++ *    pregunta en pantalla si deja entrar a «Jarvis» y hay que aceptar con el mando; el
++ *    token que da entonces se guarda en config/ y no vuelve a preguntar.
++ *  - UPnP 9197: leer y poner el volumen y el silencio. No pide emparejar.
++ *  - REST 8001: si está encendida. Sin contestar es que está apagada del todo.
++ */
++
++const fs = require('fs');
++const path = require('path');
++const http = require('http');
++const dgram = require('dgram');
++const WebSocket = require('ws');
++
++const IP  = process.env.TELE_IP || '';
++const MAC = process.env.TELE_MAC || '';
++const NOMBRE = Buffer.from(process.env.TELE_NOMBRE || 'Jarvis').toString('base64');
++const FICHERO_TOKEN = process.env.TELE_TOKEN_FICHERO || path.join(__dirname, '..', 'config', 'tele-token.json');
++const ESPERA_PERMISO_MS = parseInt(process.env.TELE_ESPERA_PERMISO_MS || '30000', 10);
++const VOLUMEN_MAX = parseInt(process.env.TELE_VOLUMEN_MAX || '60', 10);
++const PASO_VOLUMEN = parseInt(process.env.TELE_PASO_VOLUMEN || '3', 10);
++const INACTIVA_MS = 60 * 1000;
++
++// Las teclas que se pueden pedir por su nombre
++const TECLAS = {
++  pausa: 'KEY_PAUSE', reproducir: 'KEY_PLAY', parar: 'KEY_STOP',
++  adelantar: 'KEY_FF', retroceder: 'KEY_REWIND',
++  arriba: 'KEY_UP', abajo: 'KEY_DOWN', izquierda: 'KEY_LEFT', derecha: 'KEY_RIGHT',
++  ok: 'KEY_ENTER', atras: 'KEY_RETURN', salir: 'KEY_EXIT', inicio: 'KEY_HOME', menu: 'KEY_MENU',
++  canal_subir: 'KEY_CHUP', canal_bajar: 'KEY_CHDOWN', fuente: 'KEY_SOURCE',
++  hdmi: 'KEY_HDMI', hdmi1: 'KEY_HDMI1', hdmi2: 'KEY_HDMI2', hdmi3: 'KEY_HDMI3', hdmi4: 'KEY_HDMI4',
++  guia: 'KEY_GUIDE', info: 'KEY_INFO',
++};
++
++// Por si la tele no da la lista de lo instalado. Se usa la de la tele si la hay.
++const APPS_CONOCIDAS = {
++  netflix: '3201907018807', youtube: '111299001912', 'prime video': '3201910019365',
++  'disney+': '3201901017640', max: '3201601007230', 'apple tv': '3201807016597',
++  spotify: '3201606009684', dazn: '3201806016381', plex: '3201512006963',
++  jellyfin: 'AprZAARz4r.Jellyfin', 'movistar plus+': '3201707014489', twitch: '3202203026841',
++};
++// Lo que se dice → el nombre con el que se busca
++const ALIAS = {
++  hbo: 'max', 'hbo max': 'max', disney: 'disney+', 'disney plus': 'disney+',
++  prime: 'prime video', amazon: 'prime video', 'amazon prime': 'prime video',
++  apple: 'apple tv', 'apple tv plus': 'apple tv', movistar: 'movistar plus+', 'movistar plus': 'movistar plus+',
++  'you tube': 'youtube', yutub: 'youtube',
++};
++
++function normalizar(s) {
++  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
++    .replace(/[^a-z0-9+ ]/g, ' ').replace(/\s+/g, ' ').trim();
++}
++
++function dormir(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
++
++// ── El token ────────────────────────────────────────────────────────────────────────
++
++function leerToken() {
++  if (process.env.TELE_TOKEN) return process.env.TELE_TOKEN;
++  try { return JSON.parse(fs.readFileSync(FICHERO_TOKEN, 'utf8')).token || ''; } catch (e) { return ''; }
++}
++
++function guardarToken(token) {
++  try {
++    fs.writeFileSync(FICHERO_TOKEN, JSON.stringify({ token: String(token) }), { mode: 0o600 });
++  } catch (e) {
++    console.warn('[TELE] No se pudo guardar el token: ' + e.message);
++  }
++}
++
++function emparejada() { return !!leerToken(); }
++
++// ── REST: cómo está ─────────────────────────────────────────────────────────────────
++
++function pedirHttp(opciones, cuerpo, msTope) {
++  return new Promise(function (resolve, reject) {
++    const r = http.request(Object.assign({ host: IP }, opciones), function (res) {
++      let d = '';
++      res.setEncoding('utf8');
++      res.on('data', function (t) { d += t; });
++      res.on('end', function () { resolve({ status: res.statusCode, cuerpo: d }); });
++    });
++    r.setTimeout(msTope, function () { r.destroy(new Error('sin respuesta en ' + msTope + ' ms')); });
++    r.on('error', reject);
++    if (cuerpo) r.write(cuerpo);
++    r.end();
++  });
++}
++
++/** 'on' | 'standby' | 'apagada' (apagada = ni contesta). Nunca lanza. */
++async function estado(msTope) {
++  try {
++    const r = await pedirHttp({ port: 8001, path: '/api/v2/', method: 'GET' }, null, msTope || 2500);
++    const d = JSON.parse(r.cuerpo);
++    const p = String((d.device && d.device.PowerState) || 'on').toLowerCase();
++    return p === 'on' ? 'on' : 'standby';
++  } catch (e) {
++    return 'apagada';
++  }
++}
++
++// ── UPnP: el volumen ────────────────────────────────────────────────────────────────
++
++const RC = 'urn:schemas-upnp-org:service:RenderingControl:1';
++
++async function soap(accion, dentro) {
++  const cuerpo = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' +
++    's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:' + accion + ' xmlns:u="' + RC + '">' +
++    '<InstanceID>0</InstanceID><Channel>Master</Channel>' + dentro + '</u:' + accion + '></s:Body></s:Envelope>';
++  const r = await pedirHttp({
++    port: 9197, path: '/upnp/control/RenderingControl1', method: 'POST',
++    headers: { 'Content-Type': 'text/xml; charset="utf-8"', SOAPAction: '"' + RC + '#' + accion + '"', 'Content-Length': Buffer.byteLength(cuerpo) },
++  }, cuerpo, 2500);
++  if (r.status !== 200) throw new Error('UPnP ' + accion + ' devolvió ' + r.status);
++  return r.cuerpo;
++}
++
++async function leerVolumen() {
++  const m = /<CurrentVolume>(\d+)<\/CurrentVolume>/.exec(await soap('GetVolume', ''));
++  if (!m) throw new Error('la tele no dice el volumen');
++  return parseInt(m[1], 10);
++}
++
++async function ponerVolumen(n) {
++  await soap('SetVolume', '<DesiredVolume>' + n + '</DesiredVolume>');
++  return leerVolumen();
++}
++
++async function leerSilencio() {
++  const m = /<CurrentMute>(\d)<\/CurrentMute>/.exec(await soap('GetMute', ''));
++  return !!(m && m[1] === '1');
++}
++
++// ── WebSocket: el mando y las aplicaciones ──────────────────────────────────────────
++
++let canal = null;       // { ws, listo: Promise }
++let apagarCanal = null;
++let appsCache = null;   // { hasta, lista: [{id, nombre, tipo}] }
++let esperaLista = null; // quien espera la lista de aplicaciones
++
++class SinPermiso extends Error {}
++
++function cerrarCanal() {
++  if (canal && canal.ws) { try { canal.ws.terminate(); } catch (e) { /* ya cerrado */ } }
++  canal = null;
++}
++
++function abrirCanal(alPedirPermiso) {
++  if (canal) {
++    clearTimeout(apagarCanal);
++    apagarCanal = setTimeout(cerrarCanal, INACTIVA_MS);
++    return canal.listo;
++  }
++  const token = leerToken();
++  const url = 'wss://' + IP + ':8002/api/v2/channels/samsung.remote.control?name=' + NOMBRE +
++    (token ? '&token=' + encodeURIComponent(token) : '');
++  const ws = new WebSocket(url, { rejectUnauthorized: false, handshakeTimeout: 5000 });
++  const este = { ws: ws };
++  canal = este;
++  este.listo = new Promise(function (resolve, reject) {
++    // Sin token la tele se queda callada hasta que aceptan en pantalla: se avisa una vez.
++    const espera = token ? 6000 : ESPERA_PERMISO_MS;
++    const reloj = setTimeout(function () {
++      cerrarCanal();
++      reject(token ? new Error('la tele no contesta') : new SinPermiso('nadie ha aceptado en la pantalla'));
++    }, espera);
++    ws.on('open', function () { if (!token && alPedirPermiso) alPedirPermiso(); });
++    ws.on('message', function (datos) {
++      let m;
++      try { m = JSON.parse(datos.toString()); } catch (e) { return; }
++      if (m.event === 'ms.channel.connect') {
++        clearTimeout(reloj);
++        const nuevo = m.data && m.data.token;
++        if (nuevo && String(nuevo) !== token) {
++          guardarToken(nuevo);
++          console.log('[TELE] Emparejada: token guardado');
++        }
++        resolve(ws);
++      } else if (m.event === 'ms.channel.unauthorized') {
++        clearTimeout(reloj);
++        if (canal === este) canal = null;
++        reject(new SinPermiso('la tele ha rechazado a Jarvis'));
++      } else if (m.event === 'ed.installedApp.get' && esperaLista) {
++        const lista = ((m.data && m.data.data) || []).map(function (a) {
++          return { id: a.appId, nombre: a.name, tipo: a.app_type };
++        });
++        const fn = esperaLista;
++        esperaLista = null;
++        fn(lista);
++      }
++    });
++    ws.on('error', function (e) {
++      clearTimeout(reloj);
++      if (canal === este) canal = null;
++      reject(e);
++    });
++    ws.on('close', function () {
++      clearTimeout(reloj);
++      if (canal === este) canal = null;
++      reject(new Error('la tele ha cerrado la conexión'));
++    });
++  });
++  este.listo.catch(function () {});
++  clearTimeout(apagarCanal);
++  apagarCanal = setTimeout(cerrarCanal, INACTIVA_MS);
++  return este.listo;
++}
++
++async function tecla(nombre, veces, alPedirPermiso, tipo) {
++  const ws = await abrirCanal(alPedirPermiso);
++  for (let i = 0; i < (veces || 1); i++) {
++    ws.send(JSON.stringify({
++      method: 'ms.remote.control',
++      params: { Cmd: tipo || 'Click', DataOfCmd: nombre, Option: 'false', TypeOfRemote: 'SendRemoteKey' },
++    }));
++    if (i + 1 < (veces || 1)) await dormir(130);
++  }
++}
++
++async function apps(alPedirPermiso) {
++  if (appsCache && appsCache.hasta > Date.now()) return appsCache.lista;
++  const ws = await abrirCanal(alPedirPermiso);
++  const lista = await new Promise(function (resolve) {
++    const reloj = setTimeout(function () { esperaLista = null; resolve([]); }, 2500);
++    esperaLista = function (l) { clearTimeout(reloj); resolve(l); };
++    ws.send(JSON.stringify({ method: 'ms.channel.emit', params: { event: 'ed.installedApp.get', to: 'host' } }));
++  });
++  if (lista.length) appsCache = { hasta: Date.now() + 10 * 60 * 1000, lista: lista };
++  return lista;
++}
++
++/** Busca una aplicación por lo que se ha dicho. null si no hay ninguna que se parezca. */
++function buscarApp(lista, dicho) {
++  let q = normalizar(dicho);
++  q = ALIAS[q] || q;
++  const instaladas = lista.map(function (a) { return Object.assign({}, a, { n: normalizar(a.nombre) }); });
++  const exacta = instaladas.find(function (a) { return a.n === q; });
++  if (exacta) return exacta;
++  const empieza = instaladas.find(function (a) { return a.n.startsWith(q) || q.startsWith(a.n); });
++  if (empieza) return empieza;
++  const contiene = instaladas.find(function (a) { return a.n.includes(q); });
++  if (contiene) return contiene;
++  if (instaladas.length) return null;
++  // Sin lista de la tele, las de siempre.
++  const id = APPS_CONOCIDAS[q];
++  return id ? { id: id, nombre: dicho, tipo: 2 } : null;
++}
++
++/** Si lo que se ha dicho es el nombre de una aplicación que conocemos, sin tocar la tele. */
++function esAppConocida(dicho) {
++  const q = normalizar(dicho);
++  const clave = ALIAS[q] || q;
++  if (APPS_CONOCIDAS[clave]) return true;
++  return !!(appsCache && buscarApp(appsCache.lista, dicho));
++}
++
++async function lanzarApp(app, alPedirPermiso) {
++  const ws = await abrirCanal(alPedirPermiso);
++  ws.send(JSON.stringify({
++    method: 'ms.channel.emit',
++    params: {
++      event: 'ed.apps.launch', to: 'host',
++      data: { appId: app.id, action_type: app.tipo === 4 ? 'NATIVE_LAUNCH' : 'DEEP_LINK' },
++    },
++  }));
++}
++
++// ── Encender y apagar ───────────────────────────────────────────────────────────────
++
++function paqueteMagico() {
++  const mac = Buffer.from(MAC.replace(/[^0-9a-f]/gi, ''), 'hex');
++  const paquete = Buffer.alloc(102, 0xff);
++  for (let i = 0; i < 16; i++) mac.copy(paquete, 6 + i * 6);
++  return paquete;
++}
++
++function mandarWol() {
++  return new Promise(function (resolve) {
++    const s = dgram.createSocket('udp4');
++    const destinos = [process.env.TELE_BROADCAST || IP.replace(/\.\d+$/, '.255'), '255.255.255.255', IP];
++    s.on('error', function () { try { s.close(); } catch (e) { /* ya cerrado */ } resolve(); });
++    s.bind(function () {
++      s.setBroadcast(true);
++      const p = paqueteMagico();
++      let faltan = destinos.length * 2;
++      destinos.forEach(function (d) {
++        [9, 7].forEach(function (puerto) {
++          s.send(p, puerto, d, function () {
++            if (--faltan === 0) { try { s.close(); } catch (e) { /* ya cerrado */ } resolve(); }
++          });
++        });
++      });
++    });
++  });
++}
++
++async function esperarEstado(buscado, ms) {
++  const hasta = Date.now() + ms;
++  while (Date.now() < hasta) {
++    if ((await estado(1500)) === buscado) return true;
++    await dormir(500);
++  }
++  return false;
++}
++
++async function encender(alPedirPermiso) {
++  if ((await estado()) === 'on') return true;
++  cerrarCanal();
++  await mandarWol();
++  if (await esperarEstado('on', 8000)) return true;
++  await mandarWol();
++  if ((await estado()) === 'standby') {
++    try { await tecla('KEY_POWER', 1, alPedirPermiso); } catch (e) { /* sigue probando */ }
++  }
++  return esperarEstado('on', 8000);
++}
++
++async function apagar(alPedirPermiso) {
++  if ((await estado()) !== 'on') return true;
++  await tecla('KEY_POWER', 1, alPedirPermiso);
++  if (await esperarNoOn(3500)) { cerrarCanal(); return true; }
++  // Algunas Samsung solo se apagan del todo con la tecla mantenida.
++  try {
++    await tecla('KEY_POWER', 1, alPedirPermiso, 'Press');
++    await dormir(3000);
++    await tecla('KEY_POWER', 1, alPedirPermiso, 'Release');
++  } catch (e) { /* lo dirá el estado */ }
++  const hecho = await esperarNoOn(3000);
++  cerrarCanal();
++  return hecho;
++}
++
++async function esperarNoOn(ms) {
++  const hasta = Date.now() + ms;
++  while (Date.now() < hasta) {
++    if ((await estado(1200)) !== 'on') return true;
++    await dormir(400);
++  }
++  return false;
++}
++
++// ── La orden ────────────────────────────────────────────────────────────────────────
++
++const AVISO_PERMISO = 'La tele me pide permiso, señor. Acéptelo en la pantalla con el mando.';
++const FRASE_SIN_PERMISO = 'Nadie ha aceptado en la pantalla de la tele, señor. Sin eso no puedo manejarla.';
++const FRASE_NO_RESPONDE = 'La tele no responde, señor.';
++
++/**
++ * Cumple una orden. Nunca lanza.
++ * @param {{accion: string, valor: (string|number|undefined)}} o
++ * @param {{avisar: Function}} [p] avisar(frase): para decir algo si va a tardar
++ * @returns {Promise<{ok: boolean, frase: string, hecho: string, estado: (string|undefined)}>}
++ */
++async function orden(o, p) {
++  const accion = String((o && o.accion) || '').trim().toLowerCase();
++  const valor = o ? o.valor : undefined;
++  const avisar = (p && p.avisar) || function () {};
++  let avisado = false;
++  const pedirPermiso = function () {
++    if (avisado) return;
++    avisado = true;
++    try { avisar(AVISO_PERMISO); } catch (e) { /* no puede tumbar la orden */ }
++  };
++  const bien = function (frase, hecho, extra) { return Object.assign({ ok: true, frase: frase, hecho: hecho }, extra || {}); };
++  const mal = function (frase) { return { ok: false, frase: frase, hecho: '' }; };
++  if (!IP) return mal('La tele no está configurada, señor: falta TELE_IP.');
++
++  try {
++    if (accion === 'estado') {
++      const e = await estado();
++      const extra = { estado: e };
++      if (e === 'on') {
++        try {
++          extra.volumen = await leerVolumen();
++          extra.silencio = await leerSilencio();
++        } catch (err) { /* lo principal es si está encendida */ }
++        return bien('La tele está encendida, señor' + (extra.volumen !== undefined ? ', con el volumen a ' + extra.volumen : '') + '.', 'mirar la tele', extra);
++      }
++      return bien('La tele está apagada, señor.', 'mirar la tele', extra);
++    }
++
++    if (accion === 'encender') {
++      if ((await estado()) === 'on') return bien('Ya está encendida, señor.', 'comprobar que la tele está encendida');
++      avisar('Encendiendo la tele, señor.');
++      const r = await encender(pedirPermiso);
++      return r ? bien('Encendida, señor.', 'encender la tele') : mal('La tele no se ha encendido, señor. Puede que tenga desactivado el encendido por red.');
++    }
++
++    if (accion === 'apagar') {
++      if ((await estado()) !== 'on') return bien('Ya está apagada, señor.', 'comprobar que la tele está apagada');
++      const r = await apagar(pedirPermiso);
++      return r ? bien('Apagada, señor.', 'apagar la tele') : mal('La tele sigue encendida, señor. No me ha hecho caso.');
++    }
++
++    if (accion === 'volumen_subir' || accion === 'volumen_bajar') {
++      const paso = Math.max(1, Math.min(30, parseInt(valor, 10) || PASO_VOLUMEN));
++      const signo = accion === 'volumen_subir' ? 1 : -1;
++      try {
++        const antes = await leerVolumen();
++        const quiere = Math.max(0, Math.min(VOLUMEN_MAX, antes + signo * paso));
++        const queda = await ponerVolumen(quiere);
++        return bien('Volumen a ' + queda + ', señor.', 'poner el volumen de la tele a ' + queda, { volumen: queda });
++      } catch (e) {
++        await tecla(signo > 0 ? 'KEY_VOLUP' : 'KEY_VOLDOWN', paso, pedirPermiso);
++        return bien('Hecho, señor.', (signo > 0 ? 'subir' : 'bajar') + ' el volumen de la tele');
++      }
++    }
++
++    if (accion === 'volumen_poner') {
++      const n = parseInt(valor, 10);
++      if (!Number.isFinite(n) || n < 0 || n > 100) return mal('¿A cuánto lo pongo, señor? Del cero al cien.');
++      if (n > VOLUMEN_MAX) return mal('Por encima de ' + VOLUMEN_MAX + ' no lo pongo a ciegas, señor. Se oiría en toda la casa.');
++      const queda = await ponerVolumen(n);
++      return bien('Volumen a ' + queda + ', señor.', 'poner el volumen de la tele a ' + queda, { volumen: queda });
++    }
++
++    if (accion === 'silenciar' || accion === 'quitar_silencio') {
++      const quiere = accion === 'silenciar';
++      try {
++        await soap('SetMute', '<DesiredMute>' + (quiere ? 1 : 0) + '</DesiredMute>');
++      } catch (e) {
++        await tecla('KEY_MUTE', 1, pedirPermiso);
++      }
++      return bien(quiere ? 'Silenciada, señor.' : 'Con sonido, señor.', quiere ? 'silenciar la tele' : 'devolverle el sonido a la tele');
++    }
++
++    if (accion === 'abrir') {
++      const dicho = String(valor || '').trim();
++      if (!dicho) return mal('¿Qué aplicación abro, señor?');
++      const e = await estado();
++      if (e !== 'on') {
++        avisar('Enciendo la tele, señor, y abro ' + dicho + '.');
++        if (!(await encender(pedirPermiso))) return mal('La tele no se ha encendido, señor.');
++        await dormir(2500);
++      }
++      const lista = await apps(pedirPermiso);
++      const app = buscarApp(lista, dicho);
++      if (!app) {
++        return mal('No encuentro ' + dicho + ' en la tele, señor.');
++      }
++      await lanzarApp(app, pedirPermiso);
++      return bien('Abriendo ' + (app.nombre || dicho) + ', señor.', 'abrir ' + (app.nombre || dicho) + ' en la tele');
++    }
++
++    if (accion === 'apps') {
++      const lista = await apps(pedirPermiso);
++      return bien('Tiene ' + lista.length + ' aplicaciones instaladas, señor.', 'mirar las aplicaciones de la tele',
++        { apps: lista.map(function (a) { return a.nombre; }) });
++    }
++
++    if (accion === 'canal') {
++      const n = String(parseInt(valor, 10));
++      if (n === 'NaN') return mal('¿Qué canal, señor?');
++      for (const c of n) { await tecla('KEY_' + c, 1, pedirPermiso); await dormir(150); }
++      await tecla('KEY_ENTER', 1, pedirPermiso);
++      return bien('Canal ' + n + ', señor.', 'poner el canal ' + n);
++    }
++
++    if (accion === 'tecla') {
++      const k = String(valor || '').trim().toUpperCase();
++      if (!/^KEY_[A-Z0-9_]+$/.test(k)) return mal('Esa tecla no la conozco, señor.');
++      await tecla(k, 1, pedirPermiso);
++      return bien('Hecho, señor.', 'pulsar ' + k + ' en la tele');
++    }
++
++    if (TECLAS[accion]) {
++      const veces = Math.max(1, Math.min(10, parseInt(valor, 10) || 1));
++      await tecla(TECLAS[accion], veces, pedirPermiso);
++      return bien('Hecho, señor.', accion.replace('_', ' ') + ' en la tele');
++    }
++
++    return mal('Eso no sé hacerlo con la tele, señor.');
++  } catch (e) {
++    console.warn('[TELE] ' + accion + ': ' + e.message);
++    if (e instanceof SinPermiso) return mal(FRASE_SIN_PERMISO);
++    return mal(FRASE_NO_RESPONDE);
++  }
++}
++
++module.exports = {
++  orden, estado, emparejada, buscarApp, esAppConocida, normalizar, leerVolumen,
++  TECLAS, VOLUMEN_MAX, AVISO_PERMISO,
++};
+--- /dev/null
++++ b/voice-app/lib/reflejos.js
+@@ -0,0 +1,152 @@
++/**
++ * Parche 34: lo que la llamada cumple sola, sin pasar por Claude. Hoy, la tele: «baja el
++ * volumen», «apaga la tele», «pon Netflix». Claude tarda de 1,5 a 3 s en decidir lo que
++ * aquí son 200 ms, y para esto no hay nada que pensar.
++ *
++ * El criterio es de frase ENTERA, a propósito: «apaga la tele» es una orden, y «apaga la
++ * tele cuando acabe la película» no. Todo lo que no encaje del todo sigue su camino hacia
++ * Claude, que tiene la herramienta `tele` para lo que sea más raro. Un falso positivo aquí
++ * es peor que uno de menos.
++ *
++ * interpretar() es pura, para poder probarla sin tele (test/parche34.test.js).
++ */
++
++const { decirInterrumpible } = require('./turno-rapido');
++const tele = require('./tele');
++
++const N = tele.normalizar;
++
++const NUMEROS = {
++  un: 1, una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10,
++  once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, dieciseis: 16, diecisiete: 17, dieciocho: 18,
++  diecinueve: 19, veinte: 20, veinticinco: 25, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60,
++};
++
++function numero(s) {
++  const t = String(s || '').trim();
++  if (/^\d+$/.test(t)) return parseInt(t, 10);
++  if (NUMEROS[t] !== undefined) return NUMEROS[t];
++  const m = /^(veinti|treinta y |cuarenta y |cincuenta y )(\w+)$/.exec(t);
++  if (m && NUMEROS[m[2]] !== undefined) {
++    return ({ 'veinti': 20, 'treinta y ': 30, 'cuarenta y ': 40, 'cincuenta y ': 50 })[m[1]] + NUMEROS[m[2]];
++  }
++  return null;
++}
++
++// Lo que se dice de más al pedir algo, por delante y por detrás
++const DELANTE = /^(?:(?:oye|mira|venga|vale|hola|buenas|eh|em|ah|jarvis|harvis|senor|bueno|pues|y|ya|por favor|porfa|ahora|anda|a ver)\b ?)+/;
++const PETICION = /^(?:(?:puedes|podrias|quiero que|me gustaria que|necesito que|haz el favor de|hazme el favor de)\b ?)+/;
++const DETRAS = /(?: (?:por favor|porfa|jarvis|harvis|senor|ya|ahora|ahora mismo|anda|gracias))+$/;
++
++const TELE = '(?:la )?(?:tele|television|tv)(?: (?:de|del|de la) (?:la )?(?:sala|salon))?';
++const OBRA = '(?:la (?:peli|pelicula|serie|tele|television|tv)|el (?:video|contenido|capitulo|programa|partido|episodio)|esto|eso)';
++const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch';
++
++const EN_TELE = '(?: (?:en|de|a) ' + TELE + ')?';
++
++const REGLAS = [
++  // Encender y apagar
++  [new RegExp('^(?:enciende(?:me)?|encender|prende|pon|ponme) ' + TELE + '$'), function () { return { accion: 'encender' }; }],
++  [new RegExp('^(?:apaga(?:me)?|apagar|quita) ' + TELE + '$'), function () { return { accion: 'apagar' }; }],
++
++  // El volumen
++  [new RegExp('^(?:sube(?:me|le)?|subir)(?: un poco| un poquito)?(?: el)? (?:volumen|sonido)' + EN_TELE + '(?: un poco| un poquito)?$'), function () { return { accion: 'volumen_subir' }; }],
++  [new RegExp('^(?:baja(?:me|le)?|bajar)(?: un poco| un poquito)?(?: el)? (?:volumen|sonido)' + EN_TELE + '(?: un poco| un poquito)?$'), function () { return { accion: 'volumen_bajar' }; }],
++  [new RegExp('^(?:sube(?:me|le)?|subir) ' + TELE + '(?: un poco| un poquito)?$'), function () { return { accion: 'volumen_subir' }; }],
++  [new RegExp('^(?:baja(?:me|le)?|bajar) ' + TELE + '(?: un poco| un poquito)?$'), function () { return { accion: 'volumen_bajar' }; }],
++  [new RegExp('^(?:sube(?:me|le)?|subir)(?: el)?(?: (?:volumen|sonido))?' + EN_TELE + ' (\\w+)(?: puntos?| rayas?| niveles?)?$'), function (m) {
++    const n = numero(m[1]);
++    return n ? { accion: 'volumen_subir', valor: n } : null;
++  }],
++  [new RegExp('^(?:baja(?:me|le)?|bajar)(?: el)?(?: (?:volumen|sonido))?' + EN_TELE + ' (\\w+)(?: puntos?| rayas?| niveles?)?$'), function (m) {
++    const n = numero(m[1]);
++    return n ? { accion: 'volumen_bajar', valor: n } : null;
++  }],
++  [new RegExp('^(?:pon|ponme|deja|dejame|cambia|sube|baja)(?: el)? (?:volumen|sonido)' + EN_TELE + ' (?:a|al|en) (\\w+(?: y \\w+)?)$'), function (m) {
++    const n = numero(m[1]);
++    return n !== null ? { accion: 'volumen_poner', valor: n } : null;
++  }],
++
++  // El silencio
++  [new RegExp('^(?:silencia(?:me)?|mutea|silenciar|pon en silencio|quita(?:me)? (?:el )?(?:sonido|volumen)' + EN_TELE + ')(?: ' + TELE + ')?$'), function () { return { accion: 'silenciar' }; }],
++  [new RegExp('^(?:quita(?:le)?(?: el)? silencio|pon(?:le)?(?: el)? sonido|devuelvele el sonido)' + EN_TELE + '$'), function () { return { accion: 'quitar_silencio' }; }],
++
++  // Reproducción. «para» y «sigue» a secas son del lector: aquí necesitan objeto.
++  [new RegExp('^(?:pausa|pausar|pausame|pon(?:me)? pausa|pon en pausa)(?: (?:a )?' + OBRA + ')?$'), function () { return { accion: 'pausa' }; }],
++  [new RegExp('^(?:para|parame) ' + OBRA + '$'), function () { return { accion: 'pausa' }; }],
++  [new RegExp('^(?:reanuda(?:me)?|reanudar|play|dale al play|dale a play|quita(?:le)? (?:la )?pausa)(?: (?:a )?' + OBRA + ')?$'), function () { return { accion: 'reproducir' }; }],
++  [new RegExp('^(?:sigue con|continua con|continua|sigue|vuelve a poner) ' + OBRA + '$'), function () { return { accion: 'reproducir' }; }],
++
++  // Aplicaciones
++  [new RegExp('^(?:abre(?:me)?|abrir|pon(?:me)?|lanza|arranca|entra en)(?: (?:la )?(?:app|aplicacion)(?: de)?)? (' + APPS_VOZ + ')' + EN_TELE + '$'), function (m) { return { accion: 'abrir', valor: m[1] }; }],
++
++  // Por dónde va
++  [new RegExp('^(?:vuelve al inicio|ve al inicio|pulsa inicio)' + EN_TELE + '$'), function () { return { accion: 'inicio' }; }],
++  [new RegExp('^(?:sube|siguiente|cambia(?: de)?)(?: el)? canal' + EN_TELE + '$'), function () { return { accion: 'canal_subir' }; }],
++  [new RegExp('^(?:baja|anterior)(?: el)? canal' + EN_TELE + '$'), function () { return { accion: 'canal_bajar' }; }],
++  [new RegExp('^(?:pon|ponme|cambia al|cambia a)(?: el)? canal (\\w+)' + EN_TELE + '$'), function (m) {
++    const n = numero(m[1]);
++    return n !== null ? { accion: 'canal', valor: n } : null;
++  }],
++];
++
++function limpiar(texto) {
++  let t = N(texto);
++  let antes;
++  do {
++    antes = t;
++    t = t.replace(DELANTE, '').replace(PETICION, '').replace(DETRAS, '').trim();
++  } while (t !== antes);
++  return t;
++}
++
++/** La orden que hay en lo dicho, o null si no es (del todo) una orden para la tele. */
++function interpretar(texto) {
++  const t = limpiar(texto);
++  if (!t || t.length > 70) return null;
++  for (const [patron, hacer] of REGLAS) {
++    const m = patron.exec(t);
++    if (m) {
++      const o = hacer(m);
++      if (o) return o;
++    }
++  }
++  return null;
++}
++
++/**
++ * Si lo dicho es un reflejo, lo cumple y lo dice. null si no lo era y debe pensarlo Claude.
++ * @returns {Promise<null|{interrumpio: boolean, aviso: string}>}
++ */
++async function atender(transcript, p) {
++  if (process.env.REFLEJOS === '0') return null;
++  const o = interpretar(transcript);
++  if (!o) return null;
++  const t0 = Date.now();
++  const log = p.log || function () {};
++  // Lo que se dice mientras la orden tarda (encender, el permiso en pantalla) va en fila
++  // y sin solaparse: la respuesta espera a que acabe.
++  let hablando = Promise.resolve();
++  const r = await tele.orden(o, {
++    avisar: function (frase) {
++      hablando = hablando.then(async function () {
++        const url = await p.ttsService.generateSpeech(frase, p.voiceId);
++        if (p.sigueActiva()) await p.endpoint.play(url);
++      }).catch(function () {});
++    }
++  });
++  await hablando;
++  log('REFLEJO ' + JSON.stringify(o) + ' → ' + (r.ok ? 'hecho' : 'falló') + ' en ' + (Date.now() - t0) + ' ms');
++  let interrumpio = false;
++  if (p.sigueActiva()) {
++    const url = await p.ttsService.generateSpeech(r.frase, p.voiceId);
++    interrumpio = await decirInterrumpible(p.endpoint, p.session, url, log);
++  }
++  // Para que Claude no se pierda: en su turno siguiente sabe qué se ha hecho sin él.
++  const aviso = r.ok
++    ? '[Mientras tanto, la llamada acaba de ' + r.hecho + ' sin pasar por ti, y ya se lo ha dicho.] '
++    : '[Mikel ha pedido algo de la tele y ha fallado; ya se lo ha dicho: «' + r.frase + '».] ';
++  return { interrumpio: interrumpio, aviso: aviso };
++}
++
++module.exports = { interpretar, atender, limpiar, numero };
+--- /dev/null
++++ b/voice-app/test/parche34.test.js
+@@ -0,0 +1,78 @@
++// Parche 34: node voice-app/test/parche34.test.js (sin tele ni red)
++const assert = require('assert');
++const { interpretar } = require('../lib/reflejos');
++const { pareceCompleta } = require('../lib/anticipo');
++const tele = require('../lib/tele');
++
++const si = [
++  ['Apaga la tele.', { accion: 'apagar' }],
++  ['Jarvis, apaga la tele de la sala, por favor.', { accion: 'apagar' }],
++  ['¿Puedes apagar la televisión?', { accion: 'apagar' }],
++  ['Enciende la tele', { accion: 'encender' }],
++  ['Pon la tele.', { accion: 'encender' }],
++  ['Sube el volumen.', { accion: 'volumen_subir' }],
++  ['Baja el volumen de la tele un poco.', { accion: 'volumen_bajar' }],
++  ['Baja la tele.', { accion: 'volumen_bajar' }],
++  ['Sube el volumen cinco.', { accion: 'volumen_subir', valor: 5 }],
++  ['Baja el volumen 3 puntos.', { accion: 'volumen_bajar', valor: 3 }],
++  ['Pon el volumen a 20.', { accion: 'volumen_poner', valor: 20 }],
++  ['Pon el volumen de la tele al veinticinco.', { accion: 'volumen_poner', valor: 25 }],
++  ['Pon el volumen a treinta y dos', { accion: 'volumen_poner', valor: 32 }],
++  ['Silencia la tele', { accion: 'silenciar' }],
++  ['Quita el sonido de la tele', { accion: 'silenciar' }],
++  ['Quita el silencio', { accion: 'quitar_silencio' }],
++  ['Pausa.', { accion: 'pausa' }],
++  ['Pausa la película.', { accion: 'pausa' }],
++  ['Pon pausa', { accion: 'pausa' }],
++  ['Para la tele.', { accion: 'pausa' }],
++  ['Reanuda.', { accion: 'reproducir' }],
++  ['Dale al play', { accion: 'reproducir' }],
++  ['Sigue con la peli', { accion: 'reproducir' }],
++  ['Abre Netflix.', { accion: 'abrir', valor: 'netflix' }],
++  ['Pon YouTube en la tele.', { accion: 'abrir', valor: 'youtube' }],
++  ['Oye, abre la aplicación de Disney', { accion: 'abrir', valor: 'disney' }],
++  ['Pon el canal cinco', { accion: 'canal', valor: 5 }],
++];
++for (const [dicho, esperado] of si) {
++  assert.deepStrictEqual(interpretar(dicho), esperado, dicho);
++}
++
++// Lo que NO puede disparar nada: o es de otra cosa, o lleva una condición que hay que pensar.
++const no = [
++  'Sigue.', 'Para.', 'Siguiente.', 'Sigue leyendo.', 'Atrás.',
++  'Apaga la tele cuando acabe la película.',
++  'Apaga la luz.', 'Apaga el PC.', 'Pon una alarma a las ocho.',
++  'Pon Breaking Bad en la tele.', 'Pon música.', 'Sube la persiana.', 'Baja la persiana.',
++  '¿Está encendida la tele?', '¿Qué es Netflix?', 'Cuánto cuesta Netflix',
++  'Sube el volumen del PC.', 'Baja el volumen del móvil.', 'Sube la nota del examen.',
++  'Max', 'Netflix', 'Pon la lavadora.', 'Mándale a Erik que apague la tele.',
++];
++for (const dicho of no) {
++  assert.strictEqual(interpretar(dicho), null, dicho);
++}
++
++// El cierre rápido de la frase
++for (const t of ['Apaga la tele.', '¿Qué tiempo hace?', 'Vale.', 'Llámame a las ocho.']) {
++  assert.strictEqual(pareceCompleta(t), true, t);
++}
++for (const t of ['', 'Quiero que.', 'Mándale un mensaje a', 'Dile que y...', 'Pregúntale si,', 'Eh.', 'Mañana tengo que ir a la.', 'Pues']) {
++  assert.strictEqual(pareceCompleta(t), false, t);
++}
++
++// Encontrar la aplicación por lo que se dice
++const instaladas = [
++  { id: '1', nombre: 'Netflix', tipo: 2 }, { id: '2', nombre: 'Prime Video', tipo: 2 },
++  { id: '3', nombre: 'Disney+', tipo: 2 }, { id: '4', nombre: 'YouTube', tipo: 4 },
++  { id: '5', nombre: 'Jellyfin', tipo: 4 }, { id: '6', nombre: 'Max', tipo: 2 },
++];
++const encuentra = function (d) { const a = tele.buscarApp(instaladas, d); return a && a.id; };
++assert.strictEqual(encuentra('netflix'), '1');
++assert.strictEqual(encuentra('prime'), '2');
++assert.strictEqual(encuentra('amazon'), '2');
++assert.strictEqual(encuentra('disney'), '3');
++assert.strictEqual(encuentra('you tube'), '4');
++assert.strictEqual(encuentra('hbo'), '6');
++assert.strictEqual(encuentra('tiktok'), null);
++assert.strictEqual(tele.buscarApp([], 'netflix').id, '3201907018807');
++
++console.log('parche 34: todo bien');

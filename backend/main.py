@@ -13098,7 +13098,7 @@ def ha_brief_tick(request: Request, token: str = ""):
                **_procesar_lugar_seguro(),
                **_avisar_reloj_seguro(), **_vigilar_espera_sueno_seguro(),
                **_vigilar_ingesta_seguro(), **_vigilar_gemelos_seguro(),
-               **_vigilar_espacio_seguro(),
+               **_vigilar_espacio_seguro(), **_vigilar_servicios_seguro(),
                **_vigilar_sistema_seguro(), **_hablar_seguro(), **_correr_reglas_seguro(),
                # Moodle antes del despacho: sus avisos salen en este mismo tick.
                **_moodle_tick_seguro(),
@@ -17997,6 +17997,140 @@ def _vigilar_espacio_seguro() -> dict:
         return _vigilar_espacio()
     except Exception:
         logger.exception("Espacio: fallo inesperado en el tick")
+        return {}
+
+
+# ── Lo que sostiene a Jarvis: si se cae, te llama ────────────────────────────
+# El 2026-11-03 jacobo se cayó y nadie dijo nada: las llamadas siguieron funcionando con
+# OpenAI, solo que cada vez más lentas, y Mikel lo supo un día después, por lo lento que
+# iba. Lo que pidió: que se lo diga al llamar y, mejor, que le llame él. Así que:
+#   - al descolgar, en el contexto de la llamada, va lo que esté caído en ese momento
+#     (`_contexto_averias`), y Jarvis lo dice en su primera frase;
+#   - si lleva `VIGIA_SERVICIOS_MIN` caído, le llama UNA vez por caída (con la puerta de
+#     siempre: dormido o en clase no suena, y lo intenta en el tick siguiente);
+#   - al volver, un aviso al móvil, sin llamada.
+# El estado va en `vigilante_estado` (`servicio:<clave>`): sobrevive a un despliegue, y
+# `issue_url` guarda cuándo se llamó (es el campo «ya se ha hecho» de esa tabla).
+REGLA_SERVICIOS      = "servicios"
+VIGIA_SERVICIOS_MIN  = int(os.getenv("VIGIA_SERVICIOS_MIN", "10"))
+VIGIA_SERVICIOS      = os.getenv("VIGIA_SERVICIOS", "1").strip() != "0"
+VIGIA_MIRAR_S        = 3
+_VIGIA_DETALLE = {
+    "jacobo": "Jacobo no responde, señor. Las llamadas siguen funcionando, pero transcribe OpenAI "
+              "y van algo más lentas. Habría que mirar si está encendido o si se ha quedado sin red.",
+    "home_assistant": "Home Assistant rechaza mi llave, señor: el token de larga duración "
+                      "ha caducado o lo han borrado, y sin él no puedo mandar en la casa.",
+    "home_assistant_red": "No llego a Home Assistant, señor: o el Green está apagado o "
+                          "se ha quedado sin red.",
+}
+_VIGIA_NOMBRE = {"jacobo": "jacobo", "home_assistant": "Home Assistant (el token)",
+                 "home_assistant_red": "Home Assistant (la red)"}
+
+
+def _servicios_caidos() -> list:
+    """Las claves de lo que está caído AHORA. Si no se puede saber, no cuenta como caído:
+    un aviso falso de este vigilante vale una llamada de teléfono."""
+    caidos = []
+    if _tele_configurada():
+        try:
+            r = http.get(f"{TELEFONO_URL.rstrip('/')}/api/salud",
+                         headers={"X-Auth-Token": TELEFONO_TERCEROS_TOKEN}, timeout=VIGIA_MIRAR_S)
+            oido = (r.json() or {}).get("oido") or {} if r.status_code == 200 else {}
+            if oido.get("configurado") and oido.get("disponible") is False:
+                caidos.append("jacobo")
+        except (requests.RequestException, ValueError) as e:
+            logger.info("Servicios: la centralita no contesta (%s)", type(e).__name__)
+    if HA_URL and HA_TOKEN:
+        try:
+            r = http.get(f"{HA_URL}/api/", headers=_ha_cabeceras(), timeout=VIGIA_MIRAR_S)
+            if r.status_code in (401, 403):
+                caidos.append("home_assistant")
+        except requests.RequestException:
+            caidos.append("home_assistant_red")
+    return caidos
+
+
+def _contexto_averias() -> str:
+    """Lo que está caído al descolgar, para que Jarvis lo diga. Nunca lanza."""
+    try:
+        caidos = _servicios_caidos()
+    except Exception as e:
+        logger.warning("Contexto de voz: no se han podido mirar los servicios (%s)", _causa(e))
+        return ""
+    if not caidos:
+        return ""
+    return ("AVERÍAS AHORA (díselo en tu primera respuesta, antes de nada, en una frase):\n- "
+            + "\n- ".join(_VIGIA_DETALLE[c] for c in caidos))
+
+
+def _vigia_filas() -> dict:
+    r = http.get(f"{VIGILANTE_ESTADO_URL}?clave=like.servicio:*&select=clave,primera_vez,issue_url",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    return {f["clave"].split(":", 1)[1]: f for f in r.json()}
+
+
+def _vigilar_servicios() -> dict:
+    if not VIGIA_SERVICIOS or not SUPABASE_URL:
+        return {}
+    ahora   = datetime.now(timezone.utc)
+    caidos  = _servicios_caidos()
+    filas   = _vigia_filas()
+    salida  = {"servicios_caidos": caidos} if caidos else {}
+    # Lo que ha vuelto
+    for clave, fila in filas.items():
+        if clave in caidos:
+            continue
+        http.delete(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote('servicio:' + clave, safe='')}",
+                    headers=supabase_headers())
+        if fila.get("issue_url"):
+            _apuntar_aviso(REGLA_SERVICIOS, f"{_VIGIA_NOMBRE.get(clave, clave)} ha vuelto, señor.",
+                           prioridad=PRIO_NORMAL,
+                           id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                             f"life-assistant:servicio-vuelve:{clave}:{fila.get('primera_vez')}")))
+            salida["aviso_servicios"] = True
+    # Lo que se acaba de caer: se apunta, y se empieza a contar
+    pendientes = []
+    for clave in caidos:
+        fila = filas.get(clave)
+        if not fila:
+            http.post(VIGILANTE_ESTADO_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                      json={"clave": f"servicio:{clave}", "primera_vez": ahora.isoformat(),
+                            "ultima_vez": ahora.isoformat(), "veces": 1})
+            continue
+        if fila.get("issue_url"):
+            continue
+        desde = datetime.fromisoformat(str(fila["primera_vez"]).replace("Z", "+00:00"))
+        if (ahora - desde).total_seconds() >= VIGIA_SERVICIOS_MIN * 60:
+            pendientes.append((clave, fila))
+    if not pendientes:
+        return salida
+    # Una sola llamada, aunque se hayan caído varias cosas a la vez
+    texto = " ".join(_VIGIA_DETALLE[c] for c, _ in pendientes)
+    contexto = ("Has llamado tú a Mikel porque esto lleva más de "
+                f"{VIGIA_SERVICIOS_MIN} minutos caído: "
+                + "; ".join(_VIGIA_NOMBRE.get(c, c) for c, _ in pendientes)
+                + ". No puedes arreglarlo desde aquí salvo que te diga cómo.")
+    for clave, fila in pendientes:
+        _apuntar_aviso(REGLA_SERVICIOS, _VIGIA_DETALLE[clave], prioridad=PRIO_ALTA,
+                       id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                         f"life-assistant:servicio-cae:{clave}:{fila.get('primera_vez')}")))
+    if _llamar(texto[:900], rid="servicios:" + ",".join(c for c, _ in pendientes),
+               contexto=contexto, solo_centralita=True):
+        for clave, _ in pendientes:
+            http.patch(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote('servicio:' + clave, safe='')}",
+                       headers={**supabase_headers(), "Prefer": "return=minimal"},
+                       json={"issue_url": "llamado:" + ahora.isoformat(), "ultima_vez": ahora.isoformat()})
+        salida["llamada_servicios"] = True
+    return salida
+
+
+def _vigilar_servicios_seguro() -> dict:
+    try:
+        return _vigilar_servicios()
+    except Exception:
+        logger.exception("Servicios: fallo inesperado en el tick")
         return {}
 
 
@@ -28123,9 +28257,14 @@ def telefono_contexto(request: Request):
     empezar la sesión (parche 19). Con el token del MCP del teléfono, como el briefing."""
     if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
-    texto, lectura = _contexto_de_voz(incluir_lugar=True), _contexto_lectura()
-    if lectura:
-        texto = f"{texto}\n\n{lectura}" if texto else lectura
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        # A la vez: las averías no pueden hacer esperar al resto, ni al revés.
+        f_voz, f_averias = pool.submit(_contexto_de_voz, True), pool.submit(_contexto_averias)
+        texto, averias = f_voz.result(), f_averias.result()
+    lectura = _contexto_lectura()
+    for extra in (lectura, averias):
+        if extra:
+            texto = f"{texto}\n\n{extra}" if texto else extra
     return {"texto": texto}
 
 
@@ -29745,6 +29884,44 @@ def _j_pc_bloquear() -> dict:
 def _j_pc_decir(texto: str) -> dict:
     texto = str(texto or "").strip()[:500]
     return _pc_hacer("decir", {"texto": texto}) if texto else {"ok": False, "error": "¿Qué digo?"}
+
+
+# ── La tele de la sala ────────────────────────────────────────────────────────
+# La Samsung se maneja desde la voice-app (`telefono/` parche 34: `lib/tele.js`), que está
+# en la red del host: solo desde ahí sale el paquete mágico que la enciende. Desde la
+# llamada, las órdenes de frase entera ni pasan por aquí (`lib/reflejos.js`); esto es
+# para el resto: Telegram, el chat y lo que por teléfono haya que pensar.
+TELE_ESPERA_S  = 55     # el permiso en pantalla son 30 s, y encender hasta 16 más
+TELE_ACCIONES  = ("encender", "apagar", "estado", "volumen_subir", "volumen_bajar",
+                  "volumen_poner", "silenciar", "quitar_silencio", "pausa", "reproducir",
+                  "parar", "adelantar", "retroceder", "abrir", "apps", "canal",
+                  "canal_subir", "canal_bajar", "arriba", "abajo", "izquierda", "derecha",
+                  "ok", "atras", "salir", "inicio", "menu", "fuente", "hdmi", "hdmi1",
+                  "hdmi2", "hdmi3", "hdmi4", "tecla")
+
+
+def _tele_configurada() -> bool:
+    return bool(TELEFONO_URL and TELEFONO_TERCEROS_TOKEN)
+
+
+def _j_tele(accion: str, valor: str = "") -> dict:
+    accion = str(accion or "").strip().lower()
+    if accion not in TELE_ACCIONES:
+        return {"ok": False, "motivo": f"No conozco esa acción. Son: {', '.join(TELE_ACCIONES)}."}
+    if not _tele_configurada():
+        return {"ok": False, "motivo": "La tele se maneja desde la centralita, y aquí no está configurada."}
+    try:
+        r = http.post(f"{TELEFONO_URL.rstrip('/')}/api/tele",
+                      json={"accion": accion, "valor": str(valor or "").strip()[:60]},
+                      headers={"X-Auth-Token": TELEFONO_TERCEROS_TOKEN}, timeout=TELE_ESPERA_S)
+        if r.status_code >= 300:
+            return {"ok": False, "motivo": f"La centralita contestó {r.status_code}."}
+        datos = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "motivo": f"No llego a la centralita ({type(e).__name__})."}
+    if not isinstance(datos, dict):
+        return {"ok": False, "motivo": "La centralita ha contestado algo raro."}
+    return datos
 
 
 # ── Spotify: la música, en cualquier dispositivo ──────────────────────────────
@@ -31979,6 +32156,27 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios":  ["texto"],
         "requiere_pc_mcp": True,
     },
+    "tele": {
+        "confirmar":     False,
+        "fn":            _j_tele,
+        "descripcion":   "La tele Samsung de la sala de Mikel: encender, apagar, volumen, pausa, "
+                         "abrir aplicaciones (Netflix, YouTube, Prime, Disney, Max, Jellyfin...), "
+                         "cambiar de canal o de HDMI y moverse por los menús. Solo esa tele; "
+                         "para poner una película concreta de Jellyfin, jellyfin_reproducir. "
+                         "Contesta con `frase`, ya lista para decirla, y `ok`. Si `ok` es false "
+                         "no se ha hecho. La primera vez, la tele pide permiso en pantalla.",
+        "parametros":    {"accion": {"type": "string", "enum": list(TELE_ACCIONES),
+                                     "description": "Qué hacer. `estado` dice si está encendida y "
+                                                    "el volumen; `apps`, lo que tiene instalado; "
+                                                    "`tecla`, cualquier tecla del mando (KEY_...)."},
+                          "valor":  {"type": "string",
+                                     "description": "Con abrir, la aplicación. Con volumen_poner, "
+                                                    "el nivel. Con volumen_subir y bajar, cuánto "
+                                                    "(por defecto 3). Con canal, el número. Con "
+                                                    "tecla, su nombre. Vacío en lo demás."}},
+        "obligatorios":  ["accion"],
+        "requiere_tele": True,
+    },
     "musica_poner": {
         "confirmar":     False,
         "fn":            _j_musica_poner,
@@ -33212,7 +33410,8 @@ def _jarvis_esquema() -> list:
         and (con_pc_mcp or not h.get("requiere_pc_mcp"))
         and (con_spotify or not h.get("requiere_spotify"))
         and (con_whatsapp or not h.get("requiere_whatsapp"))
-        and (con_terceros or not h.get("requiere_terceros"))]
+        and (con_terceros or not h.get("requiere_terceros"))
+        and (_tele_configurada() or not h.get("requiere_tele"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -33348,6 +33547,8 @@ _MCP_SERVIDOR_ACCIONES = {
     # 2026-10-25: el PC en directo, lo mismo que encender_pc: abrir, la música, bloquearlo
     # y hablar por sus altavoces. Sin teclado ni ratón.
     "pc_abrir", "pc_multimedia", "pc_bloquear", "pc_decir",
+    # 2026-11-04: la tele. Reversible y sin datos de nadie: como las de arriba.
+    "tele",
     # 2026-10-28: poner y controlar la música. Reversibles como las teclas multimedia.
     "musica_poner", "musica_control",
     # 2026-10-27, «los mismos permisos que el de Telegram»: probar los indexadores y pasar
@@ -35209,6 +35410,7 @@ _JARVIS_RELLENOS = {
     "mis_recordatorios":  "Miro qué tienes apuntado.",
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",
+    "tele":               "Voy con la tele.",
     "estoy_despierto":    "Vale, la quito.",
     "posponer_alarma":    "Cinco minutos más.",
     "dejame_dormir":      "Miro las alarmas de mañana.",

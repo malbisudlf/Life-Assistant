@@ -709,6 +709,13 @@ alternativa gratuita necesita UDP y una conexión siempre viva, y lo que ahorras
 minutos lo pagas en máquina. Si algún día se reabre esto, **empieza por ahí**: la
 pregunta no es cuánto cuesta el minuto, es qué exige el transporte.
 
+## La tele y las averías, desde la llamada (2026-11-04)
+
+Jarvis maneja la tele de la sala: lo sencillo lo cumple la llamada sin pasar por Claude
+(«apaga la tele», «baja el volumen», «pon Netflix») y lo demás, la herramienta `tele`. Y si
+se cae lo que la sostiene (jacobo, Home Assistant), lo dice al descolgar y, pasados diez
+minutos, te llama. Todo en «El parche 34» de `telefono/PARCHES.md`.
+
 ## Lo que costó descubrir
 
 Cosas que no estaban en ningún sitio y que costaría volver a averiguar.
