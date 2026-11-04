@@ -146,6 +146,29 @@ class TestVigilante:
         assert salida["aviso_servicios"] is True
         assert "ha vuelto" in vigia.avisos[0]
         assert not vigia.llamadas
+        assert [c for c in vigia.calls if c[0] == "DELETE"]
+
+    def test_si_flaquea_no_llama_otra_vez_durante_el_silencio(self, vigia):
+        # Vuelve: la fila se queda, porque se llamó hace poco
+        fila = {"clave": "servicio:jacobo", "primera_vez": _hace(60), "issue_url": "llamado:" + _hace(30)}
+        _jacobo(vigia, True)
+        _filas(vigia, [fila])
+        main._vigilar_servicios()
+        assert not [c for c in vigia.calls if c[0] == "DELETE"]
+        # Se vuelve a caer: ni fila nueva ni llamada
+        vigia.routes.clear()
+        _jacobo(vigia, False)
+        _filas(vigia, [fila])
+        main._vigilar_servicios()
+        assert not vigia.llamadas
+        assert not [c for c in vigia.calls if c[0] == "POST"]
+
+    def test_pasado_el_silencio_se_olvida(self, vigia):
+        _jacobo(vigia, True)
+        _filas(vigia, [{"clave": "servicio:jacobo", "primera_vez": _hace(900), "issue_url": "llamado:" + _hace(800)}])
+        vigia.add("DELETE", "vigilante_estado", FakeResponse({}))
+        main._vigilar_servicios()
+        assert [c for c in vigia.calls if c[0] == "DELETE"]
 
     def test_centralita_caida_no_es_jacobo_caido(self, vigia, monkeypatch):
         def falla(url, **k):
