@@ -18006,14 +18006,17 @@ def _vigilar_espacio_seguro() -> dict:
 # iba. Lo que pidió: que se lo diga al llamar y, mejor, que le llame él. Así que:
 #   - al descolgar, en el contexto de la llamada, va lo que esté caído en ese momento
 #     (`_contexto_averias`), y Jarvis lo dice en su primera frase;
-#   - si lleva `VIGIA_SERVICIOS_MIN` caído, le llama UNA vez por caída (con la puerta de
-#     siempre: dormido o en clase no suena, y lo intenta en el tick siguiente);
+#   - si lleva `VIGIA_SERVICIOS_MIN` caído, le llama (con la puerta de siempre: dormido o en
+#     clase no suena, y lo intenta en el tick siguiente), pero como mucho una vez cada
+#     `VIGIA_SERVICIOS_SILENCIO_H`: del 31/10 al 04/11 jacobo se cayó decenas de veces al día
+#     y cada una habría sido una llamada;
 #   - al volver, un aviso al móvil, sin llamada.
 # El estado va en `vigilante_estado` (`servicio:<clave>`): sobrevive a un despliegue, y
 # `issue_url` guarda cuándo se llamó (es el campo «ya se ha hecho» de esa tabla).
 REGLA_SERVICIOS      = "servicios"
 VIGIA_SERVICIOS_MIN  = int(os.getenv("VIGIA_SERVICIOS_MIN", "10"))
 VIGIA_SERVICIOS      = os.getenv("VIGIA_SERVICIOS", "1").strip() != "0"
+VIGIA_SERVICIOS_SILENCIO_H = float(os.getenv("VIGIA_SERVICIOS_SILENCIO_H", "12"))
 VIGIA_MIRAR_S        = 3
 _VIGIA_DETALLE = {
     "jacobo": "Jacobo no responde, señor. Las llamadas siguen funcionando, pero transcribe OpenAI "
@@ -18071,6 +18074,18 @@ def _vigia_filas() -> dict:
     return {f["clave"].split(":", 1)[1]: f for f in r.json()}
 
 
+def _vigia_en_silencio(fila: dict, ahora: datetime) -> bool:
+    """Si la llamada de esta caída se hizo hace menos de `VIGIA_SERVICIOS_SILENCIO_H`."""
+    marca = str(fila.get("issue_url") or "")
+    if not marca.startswith("llamado:"):
+        return False
+    try:
+        cuando = datetime.fromisoformat(marca.split(":", 1)[1].replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (ahora - cuando).total_seconds() < VIGIA_SERVICIOS_SILENCIO_H * 3600
+
+
 def _vigilar_servicios() -> dict:
     if not VIGIA_SERVICIOS or not SUPABASE_URL:
         return {}
@@ -18082,14 +18097,18 @@ def _vigilar_servicios() -> dict:
     for clave, fila in filas.items():
         if clave in caidos:
             continue
-        http.delete(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote('servicio:' + clave, safe='')}",
-                    headers=supabase_headers())
         if fila.get("issue_url"):
+            # El `id` hace que se avise una vez aunque este tramo pase en cada tick.
             _apuntar_aviso(REGLA_SERVICIOS, f"{_VIGIA_NOMBRE.get(clave, clave)} ha vuelto, señor.",
                            prioridad=PRIO_NORMAL,
                            id=str(uuid.uuid5(uuid.NAMESPACE_URL,
                                              f"life-assistant:servicio-vuelve:{clave}:{fila.get('primera_vez')}")))
             salida["aviso_servicios"] = True
+            # La fila se queda durante el silencio: si vuelve a caer, ya está llamado.
+            if _vigia_en_silencio(fila, ahora):
+                continue
+        http.delete(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote('servicio:' + clave, safe='')}",
+                    headers=supabase_headers())
     # Lo que se acaba de caer: se apunta, y se empieza a contar
     pendientes = []
     for clave in caidos:
