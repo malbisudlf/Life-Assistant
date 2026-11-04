@@ -1630,8 +1630,14 @@ Lo que se hizo, por piezas:
   que se usa es `turbo`. **Sin probar con jacobo**, que estaba caído.
 - **`whisper-client.js`: sondeo y carrera.** `GET /salud` cada 8 s: se sabe que está caído
   antes de necesitarlo, y vuelve solo. Si aun así tarda más de 1,5 s, sale OpenAI a la vez:
-  gana el primero. En OpenAI, `gpt-4o-transcribe` (mismo texto, mismo precio; mediana 0,83 s
-  y máximo 1,1 s, frente a 1,14 y 3 s de `whisper-1`), con `whisper-1` en carrera a 1,5 s.
+  gana el primero. En OpenAI, `gpt-4o-transcribe` (mismo precio; mediana 0,83 s y máximo 1,1 s,
+  frente a 1,14 y 3 s de `whisper-1`; con voz de Fish degradada a línea de teléfono y ruido, WER
+  del 6,2 % frente al 13,6 %), con `whisper-1` en carrera a 1,5 s. Con la voz real de Mikel se
+  iba de idioma («outra vez», «achterneefjes»), así que lleva una pista (`OPENAI_STT_PISTA`), y
+  lo que devuelva la pista tal cual o `###` cuenta como silencio. **Pendiente de decidir con
+  datos reales:** cada turno deja en el registro lo que habría dicho `whisper-1`
+  (`docker logs voice-app | grep STT-SOMBRA`; `STT_SOMBRA=0` lo apaga). Con unas cuantas
+  llamadas se ve cuál se queda.
 - **`server.js` + `sesion-viva.js`: la sesión flaca.** `claude-sonnet-5-5`, `--tools Bash`, sin los
   ajustes ni el prompt de sistema de Claude Code (`--setting-sources ''`,
   `--system-prompt-file`), `MAX_THINKING_TOKENS=0`, y la hora en cada turno para no gastar un
@@ -1652,6 +1658,11 @@ Lo que se hizo, por piezas:
   herramientas suele llegar antes, y decir «un momento» justo antes de contestar solo retrasa.
   Si esa frase falla, se sigue esperando a Claude: un adorno no puede tumbar la llamada.
 
+**Medido en dos llamadas reales del 2026-11-04:** cierre rápido a 1,04-1,06 s (lo limita el
+transcriptor: 0,3 s de anticipo + 0,7 s de OpenAI), transcripción ya lista al cerrar y sin errores
+de reproducción. Un turno con dos herramientas seguía en 11-12 s (tres viajes a Sonnet): de ahí
+las órdenes compuestas.
+
 **Lo que no se ha hecho, y por qué:** hablar mientras Claude escribe: con Haiku, 40 palabras
 tardan ~0,4 s en escribirse; gana 0,2 s a cambio de mucha fontanería. Lanzar a Claude en la
 pausa, antes de cerrar la frase: una sesión no se puede deshacer si sigues hablando.
@@ -1664,7 +1675,9 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
 - **Reflejos:** «apaga la tele», «baja el volumen», «pon Netflix», «pausa»… los cumple la
   llamada sin pasar por Claude, y se lo cuenta entre corchetes en el turno siguiente. La
   regla es de **frase entera**: «apaga la tele cuando acabe la película» va a Claude. Lista y
-  casos en `test/parche34.test.js`. `REFLEJOS=0` los apaga.
+  casos en `test/parche34.test.js`. `REFLEJOS=0` los apaga. Varias órdenes unidas por «y»
+  también («baja el volumen y abre Jellyfin»; con Claude eran 11 s), pero todas o ninguna: si
+  una parte no es una orden clara, lo piensa Claude entero.
 - **`POST /api/tele`** (con `TELEFONO_TERCEROS_TOKEN`): la herramienta `tele` del backend.
 - **Tres puertas:** WebSocket 8002 (teclas; **la primera vez hay que aceptar en pantalla con el
   mando**, hecho el 2026-11-04, y el token queda en `config/tele-token.json`), UPnP 9197 (LEER el
