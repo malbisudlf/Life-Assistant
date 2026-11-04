@@ -1687,9 +1687,14 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
   WebSocket, `ed.apps.launch` no hace nada y `ed.installedApp.get` no contesta en esta tele.
 - `TELE_VOLUMEN_MAX` (60): por encima no lo pone a ciegas, que un «noventa» mal oído se oye en
   toda la casa.
-- **Comprobado:** emparejar, estado, lista de aplicaciones, volumen con teclas (10→11→10) y abrir
-  Netflix desde reposo. **Sin comprobar:** apagar, encender con la tecla o el paquete mágico, y la
-  pausa, porque había alguien usándola.
+- **`standby` no es apagada.** Es un paso de unos segundos al apagarse o encenderse (medido: `on` →
+  `standby` a los 3 s → sin conexión a los 12 s). El 2026-11-04 Jarvis contestó «ya está apagada» sin
+  pulsar nada (7 ms), con la tele recién encendida. Ahora `estadoFirme`: `on` vale a la primera,
+  apagada con dos fallos seguidos, y `standby` se espera a ver en qué queda. `REFLEJO` deja en el
+  registro la frase que se dijo.
+- **Comprobado:** emparejar, estado, lista de aplicaciones, volumen con teclas (10→11→10), abrir
+  Netflix desde reposo y apagar con `KEY_POWER`. **Sin comprobar:** encender con la tecla o el
+  paquete mágico, y la pausa.
 - **Home Assistant no sirve de atajo:** en `caja`, `HA_TOKEN` está vacío (no caducado), así que
   el backend no le puede hablar por esa vía. Y el vigilante no lo mira mientras esté vacío.
 
