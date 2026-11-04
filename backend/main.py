@@ -15344,6 +15344,129 @@ def _casa_pide_confirmar(argumentos: dict) -> bool:
     return any(_CASA_NOMBRE_DELICADO.search(v) for v in valores)
 
 
+_CASA_RUIDO = re.compile(
+    r"no_molestar|barajar|repetir|apagado_automatico|actualizacion_automatica|amazon_kids|"
+    r"_anuncios|_comunicaciones|_led$|led_de_red|diagnose|_flip|lens_distortion|media_sync|"
+    r"rich_notifications|automatically_upgrade|automatic_reboot|noise_cancellation|"
+    r"privacy_zones|usar_camara|permitir_sonido|music_mode|dreamview", re.I)
+
+# Lo de otras personas de la casa no sale nunca: ni dónde están, ni sus móviles, ni sus listas.
+# Es la regla 5 de la guía de Home Assistant, y mandar la ubicación de otro sería un fallo grave.
+_CASA_LEER_DOMINIOS = {"sensor", "binary_sensor", "climate", "alarm_control_panel", "light",
+                       "switch", "fan", "cover", "lock"}
+_CASA_PRIVADO = re.compile(
+    r"iphone|ipad|apple_watch|aalbisuc|saioa|asier|(^|[._])jon([._]|$)|bmw|wh_1000|geocod|"
+    r"ubicaci|location|latitud|longitud|coordinate|direccion_ip|numero_de_serie", re.I)
+
+
+def _ha_estados_completos() -> list:
+    """Todo lo que HA dice ahora, sin lo privado ni lo que no contesta."""
+    r = http.get(f"{HA_URL}/api/states", headers=_ha_cabeceras(), timeout=5)
+    if r.status_code != 200:
+        raise RuntimeError(f"HA contestó {r.status_code}")
+    return [x for x in r.json()
+            if str(x.get("entity_id", "")).split(".")[0] in _CASA_LEER_DOMINIOS
+            and not _CASA_PRIVADO.search(
+                f"{x.get('entity_id', '')} {(x.get('attributes') or {}).get('friendly_name', '')}")]
+
+
+def _casa_ficha(x: dict) -> dict:
+    a = x.get("attributes") or {}
+    ficha = {"id": x["entity_id"], "nombre": a.get("friendly_name") or x["entity_id"],
+             "estado": x.get("state")}
+    if a.get("unit_of_measurement"):
+        ficha["unidad"] = a["unit_of_measurement"]
+    if x["entity_id"].startswith("climate."):
+        ficha["actual"], ficha["objetivo"] = a.get("current_temperature"), a.get("temperature")
+    return ficha
+
+
+def _j_casa_leer(buscar: str = "") -> dict:
+    if not _ha_directo():
+        return {"ok": False, "motivo": "Sin conexión directa con Home Assistant."}
+    try:
+        todos = _ha_estados_completos()
+    except (requests.RequestException, RuntimeError, ValueError) as e:
+        return {"ok": False, "motivo": f"Home Assistant no contesta ({type(e).__name__})."}
+    palabras = [p for p in str(buscar or "").lower().split() if p][:4]
+    if palabras:
+        elegidas = [x for x in todos
+                    if x.get("state") not in ("unavailable", "unknown")
+                    and all(p in f"{x['entity_id']} {(x.get('attributes') or {}).get('friendly_name', '')}".lower()
+                            for p in palabras)]
+    else:
+        elegidas = [x for x in todos if x["entity_id"].startswith(("climate.", "alarm_control_panel."))]
+    return {"ok": True, "lecturas": [_casa_ficha(x) for x in elegidas[:30]], "hay_mas": len(elegidas) > 30}
+
+
+# Los Echo, por lo que se dice. `notify.<nombre>_hablar` lo da la integración de Alexa.
+_CASA_ECHOS = {"cocina": "cocina", "jardin": "jardin", "mikel": "mikel", "mi cuarto": "mikel",
+               "marco": "marco", "jon": "mediano", "mediano": "mediano",
+               "principal": "hab_principal", "padres": "hab_principal"}
+_CASA_VOZ_MAX = 240
+
+
+def _j_casa_anunciar(texto: str, donde: str = "cocina") -> dict:
+    texto = str(texto or "").strip()[:_CASA_VOZ_MAX]
+    if not texto:
+        return {"ok": False, "motivo": "¿Qué digo?"}
+    if not _ha_directo():
+        return {"ok": False, "motivo": "Sin conexión directa con Home Assistant."}
+    pedido = unicodedata.normalize("NFD", str(donde or "cocina").lower())
+    pedido = "".join(c for c in pedido if unicodedata.category(c) != "Mn").strip()
+    if pedido in ("toda la casa", "todos", "todas", "casa"):
+        destinos = sorted(set(_CASA_ECHOS.values()))
+    else:
+        destinos = [v for k, v in _CASA_ECHOS.items() if k in pedido][:1]
+    if not destinos:
+        return {"ok": False, "motivo": "Puedo decirlo en: " + ", ".join(sorted(_CASA_ECHOS)) + ", o en toda la casa."}
+    hora = _ahora_local().hour
+    if (hora >= 23 or hora < 8) and destinos != ["mikel"]:
+        return {"ok": False, "motivo": "De 23:00 a 8:00 solo hablo por el Echo de Mikel: en la casa duerme más gente."}
+    fallos = 0
+    for d in destinos:
+        try:
+            r = http.post(f"{HA_URL}/api/services/notify/send_message", headers=_ha_cabeceras(),
+                          json={"entity_id": f"notify.{d}_hablar", "message": texto}, timeout=6)
+            fallos += r.status_code >= 300
+        except requests.RequestException:
+            fallos += 1
+    if fallos == len(destinos):
+        return {"ok": False, "motivo": "Los Echo no han aceptado el mensaje."}
+    return {"ok": True, "frase": "Dicho, señor.", "dicho_en": destinos, "fallidos": fallos}
+
+
+def _contexto_casa() -> str:
+    """El mapa de la casa al descolgar: con los ids a mano, encender algo es un viaje menos
+    al modelo. Nunca lanza, y sin conexión directa no dice nada."""
+    if not _ha_directo():
+        return ""
+    try:
+        todos = _ha_estados_completos()
+    except Exception as e:
+        logger.warning("Contexto de voz: la casa no contesta (%s)", _causa(e))
+        return ""
+    vivos = [x for x in todos if x.get("state") != "unavailable"]
+    zonas = [f"{x['entity_id']} {(x.get('attributes') or {}).get('current_temperature')}°"
+             f"→{(x.get('attributes') or {}).get('temperature')}°"
+             for x in vivos if x["entity_id"].startswith("climate.")]
+    luces = [f"{x['entity_id']} {x['state']}" for x in vivos
+             if x["entity_id"].startswith("light.") or x["entity_id"] in _CASA_SWITCHES_MAPA]
+    alarma = [x["state"] for x in vivos if x["entity_id"].startswith("alarm_control_panel.")]
+    lineas = ["LA CASA, ids exactos (con estos no hace falta casa_dispositivos; más lecturas, casa_leer):"]
+    if zonas:
+        lineas.append("- Calefacción (actual→objetivo): " + ", ".join(zonas))
+    if luces:
+        lineas.append("- Luces y enchufes: " + ", ".join(luces))
+    if alarma:
+        lineas.append("- Alarma: " + alarma[0])
+    return "\n".join(lineas) if len(lineas) > 1 else ""
+
+
+_CASA_SWITCHES_MAPA = {"switch.luces_jardin", "switch.jardin_izquierda_2", "switch.jardin_derecha",
+                       "switch.fan", "switch.speaker", "switch.enchufe_pasillo"}
+
+
 def _j_casa_dispositivos(buscar: str = "") -> dict:
     """Qué hay en casa, filtrable. Una casa entera son decenas de entidades y todas
     juntas se pagan por token en cada turno, igual que pasaba con el MCP de GitHub.
@@ -15357,11 +15480,15 @@ def _j_casa_dispositivos(buscar: str = "") -> dict:
             "haga no puedo saber qué dispositivos hay, así que no te los inventes."
         )}
     palabras = [p for p in str(buscar or "").lower().split() if p][:4]
+    # Dos tercios del catálogo son ajustes de los Echo y de las cámaras («no molestar»,
+    # «barajar»…): tapaban lo que se busca, que no pasaba del tope de 40. Si se pide uno
+    # por su nombre, sale igual.
+    utiles = [e for e in lista if not _CASA_RUIDO.search(str(e.get("id") or ""))]
     if palabras:
-        elegidas = [e for e in lista
-                    if all(p in f"{e.get('id','')} {e.get('nombre','')}".lower() for p in palabras)]
+        coincide = lambda e: all(p in f"{e.get('id','')} {e.get('nombre','')}".lower() for p in palabras)
+        elegidas = [e for e in utiles if coincide(e)] or [e for e in lista if coincide(e)]
     else:
-        elegidas = lista
+        elegidas = utiles
     if palabras and not elegidas:
         return {
             "dispositivos": [],
@@ -28284,15 +28411,33 @@ def telefono_contexto(request: Request):
     empezar la sesión (parche 19). Con el token del MCP del teléfono, como el briefing."""
     if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         # A la vez: las averías no pueden hacer esperar al resto, ni al revés.
         f_voz, f_averias = pool.submit(_contexto_de_voz, True), pool.submit(_contexto_averias)
-        texto, averias = f_voz.result(), f_averias.result()
+        f_casa = pool.submit(_contexto_casa)
+        texto, averias, casa = f_voz.result(), f_averias.result(), f_casa.result()
     lectura = _contexto_lectura()
-    for extra in (lectura, averias):
+    for extra in (lectura, casa, averias):
         if extra:
             texto = f"{texto}\n\n{extra}" if texto else extra
     return {"texto": texto}
+
+
+class TelefonoCasaIn(BaseModel):
+    servicio: str = Field(max_length=80)
+    entidad:  str = Field(max_length=120)
+    datos:    Optional[dict] = None
+
+
+@app.post("/telefono/casa")
+def telefono_casa(body: TelefonoCasaIn, request: Request):
+    """Las órdenes de la casa que la llamada cumple sin pasar por Claude (`reflejos.js`). Por
+    el mismo `_j_casa_ordenar` y con la misma frontera: lo delicado no pasa por aquí."""
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    if _casa_pide_confirmar({"servicio": body.servicio, "entidad": body.entidad}):
+        return {"ok": False, "motivo": "Eso se confirma desde el móvil."}
+    return _j_casa_ordenar(body.servicio, body.entidad, body.datos)
 
 
 # ── Lo que el teléfono lee en voz alta ────────────────────────────────────────
@@ -32952,6 +33097,28 @@ _JARVIS_HERRAMIENTAS = {
                        "necesitas el id exacto y no puedes inventártelo.",
         "parametros":  {"buscar": {"type": "string", "description": "Una o dos palabras: estancia, nombre o tipo."}},
     },
+    "casa_leer": {
+        "confirmar":   False,
+        "fn":          _j_casa_leer,
+        "descripcion": "Lee Home Assistant en este momento: la temperatura de cada zona, la "
+                       "alarma, los sensores, la lavadora, la secadora, la impresora 3D, el "
+                       "coche... Vacío da la calefacción y la alarma. Nunca da dónde está nadie "
+                       "ni nada de los móviles de la familia: eso no se mira.",
+        "parametros":  {"buscar": {"type": "string",
+                                   "description": "Una o dos palabras: «lavadora», «cocina temperatura», «fuel»."}},
+        "requiere_ha_directo": True,
+    },
+    "casa_anunciar": {
+        "confirmar":   False,
+        "fn":          _j_casa_anunciar,
+        "descripcion": "Dice algo en voz alta por un Echo de casa: la cocina, el jardín, el "
+                       "cuarto de Mikel, el de Marco, el de Jon, el principal o toda la casa. "
+                       "Solo si Mikel lo pide. Por la noche, solo en su cuarto.",
+        "parametros":  {"texto": {"type": "string", "description": "Lo que hay que decir."},
+                        "donde": {"type": "string", "description": "Dónde; por defecto, la cocina."}},
+        "obligatorios": ["texto"],
+        "requiere_ha_directo": True,
+    },
     "casa_ordenar": {
         # Encender una luz es como pulsar el interruptor; abrir la cerradura o el garaje
         # no. Ver _casa_pide_confirmar().
@@ -33438,7 +33605,8 @@ def _jarvis_esquema() -> list:
         and (con_spotify or not h.get("requiere_spotify"))
         and (con_whatsapp or not h.get("requiere_whatsapp"))
         and (con_terceros or not h.get("requiere_terceros"))
-        and (_tele_configurada() or not h.get("requiere_tele"))]
+        and (_tele_configurada() or not h.get("requiere_tele"))
+        and (_ha_directo() or not h.get("requiere_ha_directo"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -33506,7 +33674,7 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
 _MCP_SERVIDOR_SOLO_LECTURA = {
     "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
-    "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "mis_reglas",
+    "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "casa_leer", "mis_reglas",
     "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
     "moodle_entregas", "respuesta_notificacion", "cumpleanos", "resumen_del_dia",
     # 2026-10-13: las que no tenían motivo para faltar, y el briefing. Este último trae
@@ -33575,7 +33743,7 @@ _MCP_SERVIDOR_ACCIONES = {
     # y hablar por sus altavoces. Sin teclado ni ratón.
     "pc_abrir", "pc_multimedia", "pc_bloquear", "pc_decir",
     # 2026-11-04: la tele. Reversible y sin datos de nadie: como las de arriba.
-    "tele",
+    "tele", "casa_anunciar",
     # 2026-10-28: poner y controlar la música. Reversibles como las teclas multimedia.
     "musica_poner", "musica_control",
     # 2026-10-27, «los mismos permisos que el de Telegram»: probar los indexadores y pasar
@@ -35438,6 +35606,8 @@ _JARVIS_RELLENOS = {
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",
     "tele":               "Voy con la tele.",
+    "casa_leer":          "Lo miro en la casa.",
+    "casa_anunciar":      "Lo digo por el altavoz.",
     "estoy_despierto":    "Vale, la quito.",
     "posponer_alarma":    "Cinco minutos más.",
     "dejame_dormir":      "Miro las alarmas de mañana.",

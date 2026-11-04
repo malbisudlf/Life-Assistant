@@ -448,6 +448,9 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "TERCEROS_LLAMADAS", True)
         monkeypatch.setattr(main, "TELEFONO_URL", "http://voz.test:3000")
         monkeypatch.setattr(main, "TELEFONO_TERCEROS_TOKEN", "x" * 32)
+        # Y lo que lee Home Assistant en directo.
+        monkeypatch.setattr(main, "HA_URL", "http://ha.test:8123")
+        monkeypatch.setattr(main, "HA_TOKEN", "ha-token")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)
