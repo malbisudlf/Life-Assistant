@@ -27,6 +27,7 @@ Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver �
 otras personas por la línea fija de O2 (ver «El parche 32»). Y el 33 (2026-11-01), que
 como el 13 no toca su código sino su `docker-compose.yml`: drachtio y FreeSWITCH salen
 por la IP de la LAN, sin lo que el 32 no se registra ni se oye (ver «El parche 33»).
+Y el 34 (2026-11-04): la llamada, de 15 s a 3, y la tele de la sala (ver «El parche 34»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1601,6 +1602,83 @@ Comprobarlo: `sofia status profile drachtio_mrf` (con `fs_cli -p` y el secreto d
 `listening at udp/<EXTERNAL_IP>:5070` y la extensión del 3CX vuelve a registrarse
 (`MULTI-REGISTRAR … SUCCESS`). La extensión siguió funcionando tras el cambio; una
 llamada entrante por el 3CX no se ha probado aún con él.
+
+## El parche 34: la llamada, de 15 s a 3, y la tele
+
+Del 2026-11-04 (`telefono/parche-34.diff`; vuelta atrás: imagen `antes-p34` y los
+`*.bak-20261104-antes-p34`). Mikel: «vuelve a ser demasiado lento». Medido ese día en una
+llamada de verdad, desde que deja de hablar hasta oír la respuesta:
+
+| Tramo | Antes | Por qué | Después |
+|---|---|---|---|
+| Cerrar la frase | 1,5 s | silencio fijo | 0,7 s si la frase parece acabada, 1,2 s si no |
+| Oído, con jacobo caído | 4 s + 3,2 s | esperaba a que jacobo fallara; `whisper-1` | 0 + 0,85 s |
+| Claude | 4,9-9,2 s | Sonnet, con 55.000 tokens por turno y pensamiento extendido | 1,6-3,8 s |
+| Primera frase de espera | 0,7 s, siempre | se sintetizaba cada vez | solo a los 1,8 s, y al instante |
+| «¿Señor?» al descolgar | 3 s | Fish en frío | al instante |
+| Voz de la respuesta | 0,65 s | | 0,65 s (conexión reutilizada) |
+
+**La regresión era jacobo caído**: `OIDO_PAUSA_MS` lo apartaba 60 s, y las llamadas tienen
+turnos más separados que eso, así que casi cada turno pagaba los 4 s otra vez.
+
+Lo que se hizo, por piezas:
+
+- **`audio-fork.js` + `anticipo.js`: cierre rápido.** A los 300 ms de silencio se transcribe
+  (ahora también contra OpenAI: 0,03 céntimos por pausa). Si lo transcrito parece acabado
+  (`pareceCompleta`: que no termine en «y», «que», «de», «a», «eh», «,»…), la frase se
+  cierra a los 700 ms; si no, a los 1.200. Con jacobo, `small` (0,3 s) decide el cierre y lo
+  que se usa es `turbo`. **Sin probar con jacobo**, que estaba caído.
+- **`whisper-client.js`: sondeo y carrera.** `GET /salud` cada 8 s: se sabe que está caído
+  antes de necesitarlo, y vuelve solo. Si aun así tarda más de 1,5 s, sale OpenAI a la vez:
+  gana el primero. En OpenAI, `gpt-4o-transcribe` (mismo texto, mismo precio; mediana 0,83 s
+  y máximo 1,1 s, frente a 1,14 y 3 s de `whisper-1`), con `whisper-1` en carrera a 1,5 s.
+- **`server.js` + `sesion-viva.js`: Haiku flaco.** `claude-haiku-5-5`, `--tools Bash`, sin los
+  ajustes ni el prompt de sistema de Claude Code (`--setting-sources ''`,
+  `--system-prompt-file`), `MAX_THINKING_TOKENS=0`, y la hora en cada turno para no gastar un
+  viaje en `date`. El formato de voz va en el prompt de sistema (`.sistema-llamada.md`, que
+  se regenera con el `CLAUDE.md`), sin la línea `COMPLETED`, que no oía nadie. Probado que
+  respeta `📖 LEER` y `✅ CONFIRMAR`. **«Piénsalo bien», «a fondo», «con calma» pasan ese turno
+  a Sonnet** con `set_model` (`CLAUDE_MODEL_PESADO`; 20 s, avisado por la frase de espera).
+  `SESION_FLACA=0` lo deshace. Quitar el MCP entero no gana nada: el suelo es el mismo.
+- **`tts-service.js`: frases fijas.** Lo que se dice siempre igual se sintetiza una vez
+  (`audio/fija-*.mp3`, en el volumen; `prepararFrasesFijas` en `index.js`). Y `anticipar`: la
+  respuesta se sintetiza en cuanto Claude la tiene, aunque suene la frase de espera.
+- **`turno-rapido.js`:** sin frase de espera hasta `ESPERA_FRASE_MS` (1,8 s). Lo sin
+  herramientas suele llegar antes, y decir «un momento» justo antes de contestar solo retrasa.
+
+**Lo que no se ha hecho, y por qué:** hablar mientras Claude escribe: con Haiku, 40 palabras
+tardan ~0,4 s en escribirse; gana 0,2 s a cambio de mucha fontanería. Lanzar a Claude en la
+pausa, antes de cerrar la frase: una sesión no se puede deshacer si sigues hablando.
+
+### La tele (`lib/tele.js`, `lib/reflejos.js`)
+
+La Samsung Q70 de la sala (por cable; `TELE_IP` y `TELE_MAC` en `~/.claude-phone/.env`). Va en la voice-app porque
+está en la red del host: desde la red de Docker no sale el paquete mágico de encender.
+
+- **Reflejos:** «apaga la tele», «baja el volumen», «pon Netflix», «pausa»… los cumple la
+  llamada sin pasar por Claude, y se lo cuenta entre corchetes en el turno siguiente. La
+  regla es de **frase entera**: «apaga la tele cuando acabe la película» va a Claude. Lista y
+  casos en `test/parche34.test.js`. `REFLEJOS=0` los apaga.
+- **`POST /api/tele`** (con `TELEFONO_TERCEROS_TOKEN`): la herramienta `tele` del backend.
+- **Tres puertas:** WebSocket 8002 (teclas y aplicaciones; **la primera vez hay que aceptar en
+  pantalla con el mando**, y el token queda en `config/tele-token.json`), UPnP 9197 (LEER el volumen y
+  el silencio, sin emparejar; esta tele contesta 501 a SetVolume, así que se pone con las teclas) y REST 8001 (si está encendida).
+- `TELE_VOLUMEN_MAX` (60): por encima no lo pone a ciegas, que un «noventa» mal oído se oye en
+  toda la casa.
+- **Sin comprobar al desplegar:** todo lo que pide emparejar (apagar, encender, pausa, abrir),
+  porque nadie aceptó en pantalla; y encender desde apagada, que necesita que esté apagada.
+  El volumen (lectura por UPnP) sí está comprobado.
+- **Home Assistant no sirve de atajo:** su `HA_TOKEN` da 401 (2026-11-04), y además WoL desde
+  la voice-app no depende de él.
+
+### El vigilante de lo que sostiene a Jarvis (`_vigilar_servicios`, backend)
+
+El tick de HA pregunta a la voice-app (`GET /api/salud`) y a Home Assistant. Lo que esté caído
+va en el contexto al descolgar («AVERÍAS AHORA», y Jarvis lo dice en su primera frase). Si
+lleva `VIGIA_SERVICIOS_MIN` (10) caído, **le llama una vez por caída** por `_llamar` (dormido o
+en clase no suena: lo reintenta el tick siguiente). Al volver, aviso al móvil sin llamada. El
+estado va en `vigilante_estado` (`servicio:<clave>`), y `VIGIA_SERVICIOS=0` lo apaga. Para
+añadir otra cosa que vigilar: `_servicios_caidos` y `_VIGIA_DETALLE`.
 
 ## Lo que además NO está en el repositorio original
 
