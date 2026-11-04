@@ -27,7 +27,7 @@ Y el 31: la «Jarvis» de Fish va delante y suena según llega, en ~0,7 s (ver �
 otras personas por la línea fija de O2 (ver «El parche 32»). Y el 33 (2026-11-01), que
 como el 13 no toca su código sino su `docker-compose.yml`: drachtio y FreeSWITCH salen
 por la IP de la LAN, sin lo que el 32 no se registra ni se oye (ver «El parche 33»).
-Y el 34 (2026-11-04): la llamada, de 15 s a 3, y la tele de la sala (ver «El parche 34»).
+Y el 34 (2026-11-04): la llamada, de 15 s a unos 4, y la tele de la sala (ver «El parche 34»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1603,7 +1603,7 @@ Comprobarlo: `sofia status profile drachtio_mrf` (con `fs_cli -p` y el secreto d
 (`MULTI-REGISTRAR … SUCCESS`). La extensión siguió funcionando tras el cambio; una
 llamada entrante por el 3CX no se ha probado aún con él.
 
-## El parche 34: la llamada, de 15 s a 3, y la tele
+## El parche 34: la llamada, de 15 s a unos 4, y la tele
 
 Del 2026-11-04 (`telefono/parche-34.diff`; vuelta atrás: imagen `antes-p34` y los
 `*.bak-20261104-antes-p34`). Mikel: «vuelve a ser demasiado lento». Medido ese día en una
@@ -1613,7 +1613,7 @@ llamada de verdad, desde que deja de hablar hasta oír la respuesta:
 |---|---|---|---|
 | Cerrar la frase | 1,5 s | silencio fijo | 0,7 s si la frase parece acabada, 1,2 s si no |
 | Oído, con jacobo caído | 4 s + 3,2 s | esperaba a que jacobo fallara; `whisper-1` | 0 + 0,85 s |
-| Claude | 4,9-9,2 s | Sonnet, con 55.000 tokens por turno y pensamiento extendido | 1,6-3,8 s |
+| Claude | 4,9-9,2 s | Sonnet, con 55.000 tokens por turno y pensamiento extendido | 1,6-5 s |
 | Primera frase de espera | 0,7 s, siempre | se sintetizaba cada vez | solo a los 1,8 s, y al instante |
 | «¿Señor?» al descolgar | 3 s | Fish en frío | al instante |
 | Voz de la respuesta | 0,65 s | | 0,65 s (conexión reutilizada) |
@@ -1668,8 +1668,8 @@ está en la red del host: desde la red de Docker no sale el paquete mágico de e
 - **Sin comprobar al desplegar:** todo lo que pide emparejar (apagar, encender, pausa, abrir),
   porque nadie aceptó en pantalla; y encender desde apagada, que necesita que esté apagada.
   El volumen (lectura por UPnP) sí está comprobado.
-- **Home Assistant no sirve de atajo:** su `HA_TOKEN` da 401 (2026-11-04), y además WoL desde
-  la voice-app no depende de él.
+- **Home Assistant no sirve de atajo:** en `caja`, `HA_TOKEN` está vacío (no caducado), así que
+  el backend no le puede hablar por esa vía. Y el vigilante no lo mira mientras esté vacío.
 
 ### El vigilante de lo que sostiene a Jarvis (`_vigilar_servicios`, backend)
 
