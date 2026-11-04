@@ -1708,6 +1708,22 @@ tick siguiente). Al volver, aviso al móvil sin llamada. El
 estado va en `vigilante_estado` (`servicio:<clave>`), y `VIGIA_SERVICIOS=0` lo apaga. Para
 añadir otra cosa que vigilar: `_servicios_caidos` y `_VIGIA_DETALLE`.
 
+### La casa desde la llamada (2026-11-04)
+
+Con `HA_TOKEN` puesto (ese día, en `~/stack/backend.env`) el backend habla con HA en el acto: 38 ms
+y 1028 entidades, frente al catálogo de cada hora y la cola de 15 s.
+
+- **`LA CASA`, en el contexto al descolgar** (`_contexto_casa`): ids y temperaturas, un viaje menos.
+- **`casa_leer`** (sensores, en vivo) y **`casa_anunciar`** (por los Echo; por la noche solo en el
+  de Mikel). `_CASA_PRIVADO` deja fuera a la familia: ni ubicación, ni móviles, ni listas.
+- **Reflejos** (`reflejos.js`, `POST /telefono/casa`): «apaga el jardín», «pon la calefacción de la
+  cocina a 21». Solo zonas comunes y su cuarto: los cuartos de los demás los piensa Claude. Entre 15
+  y 25 grados; fuera de ahí, también.
+- `_casa_pide_confirmar` ya mira el nombre: la alarma y el garaje eran scripts y pasaban sin botón.
+
+**Comprobado:** leer, y orden en directo sin efecto (apagar lo ya apagado). **Sin comprobar en una
+llamada:** los reflejos de la casa y `casa_anunciar` en otro Echo que el de Mikel.
+
 ### Qué le pasa a jacobo (2026-11-04)
 
 El Prometheus de `caja` guarda 30 días (`up{maquina="jacobo"}`, `node_boot_time_seconds`). Lo que

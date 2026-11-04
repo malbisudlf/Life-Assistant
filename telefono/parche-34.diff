@@ -1382,7 +1382,7 @@
 +};
 --- /dev/null
 +++ b/voice-app/lib/reflejos.js
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,241 @@
 +/**
 + * Parche 34: lo que la llamada cumple sola, sin pasar por Claude. Hoy, la tele: «baja el
 + * volumen», «apaga la tele», «pon Netflix». Claude tarda de 1,5 a 3 s en decidir lo que
@@ -1428,6 +1428,64 @@
 +const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch';
 +
 +const EN_TELE = '(?: (?:en|de|a) ' + TELE + ')?';
++
++// La casa. Solo lo común y el cuarto de Mikel: en los cuartos de los demás, que piense Claude.
++const INTERRUPTORES = [
++  ['(?:las? )?(?:luz|luces) del jardin|el jardin', 'switch.luces_jardin'],
++  ['(?:las? )?(?:luz|luces) de (?:la )?mesa|(?:las? )?(?:luz|luces) de mi (?:cuarto|habitacion)|mi luz', 'light.luces_mesa'],
++  ['el ventilador', 'switch.fan'],
++  ['el altavoz', 'switch.speaker'],
++  ['el enchufe del pasillo', 'switch.enchufe_pasillo'],
++];
++const ZONAS = [
++  ['mi cuarto|mi habitacion', 'climate.hab_mikel', 'Su cuarto'],
++  ['(?:el )?salon', 'climate.salon', 'El salón'],
++  ['(?:la )?cocina', 'climate.cocina', 'La cocina'],
++  ['(?:el )?atico', 'climate.atico', 'El ático'],
++  ['(?:la )?planta baja', 'climate.planta_baja', 'La planta baja'],
++  ['(?:el )?pasillo', 'climate.pasillo_habitaciones', 'El pasillo'],
++  ['(?:el )?txoko', 'climate.txoko', 'El txoko'],
++  ['(?:el )?recibidor', 'climate.recibidor', 'El recibidor'],
++];
++const GRADOS_MIN = 15;
++const GRADOS_MAX = 25;
++
++const REGLAS_CASA = [];
++for (const [dicho, entidad] of INTERRUPTORES) {
++  const dominio = entidad.split('.')[0];
++  REGLAS_CASA.push([new RegExp('^(?:enciende(?:me)?|encender|prende|pon(?:me)?) (?:' + dicho + ')$'),
++    function () { return { casa: { servicio: dominio + '.turn_on', entidad: entidad } }; }]);
++  REGLAS_CASA.push([new RegExp('^(?:apaga(?:me)?|apagar|quita(?:me)?) (?:' + dicho + ')$'),
++    function () { return { casa: { servicio: dominio + '.turn_off', entidad: entidad } }; }]);
++}
++for (const [dicho, entidad, nombre] of ZONAS) {
++  REGLAS_CASA.push([new RegExp('^(?:pon(?:me)?|sube|baja|deja|ajusta)(?: la)?(?: calefaccion)?(?: de| del| en)? (?:' + dicho + ') (?:a|en) (\\w+(?: y \\w+)?)(?: grados)?$'),
++    function (m) {
++      const n = numero(m[1]);
++      if (n === null || n < GRADOS_MIN || n > GRADOS_MAX) return null;
++      return { casa: { servicio: 'climate.set_temperature', entidad: entidad, datos: { temperature: n } },
++        frase: nombre + ' a ' + n + ' grados, señor.' };
++    }]);
++}
++
++/** Por la ruta del backend, que aplica la misma frontera que a Claude. Nunca lanza. */
++async function ordenCasa(o) {
++  const hecho = 'ordenar ' + o.casa.servicio + ' en ' + o.casa.entidad;
++  try {
++    const base = (process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
++    const r = await fetch(base + '/telefono/casa', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': process.env.LECTURA_TOKEN || '' },
++      body: JSON.stringify(o.casa),
++      signal: AbortSignal.timeout(8000),
++    });
++    const d = await r.json();
++    if (d && d.ok) return { ok: true, frase: o.frase || 'Hecho, señor.', hecho: hecho };
++    return { ok: false, frase: 'No se ha podido, señor: ' + String((d && (d.motivo || d.nota)) || 'la casa no contesta'), hecho: '' };
++  } catch (e) {
++    return { ok: false, frase: 'La casa no contesta, señor.', hecho: '' };
++  }
++}
 +
 +const REGLAS = [
 +  // Encender y apagar
@@ -1492,7 +1550,7 @@
 +function interpretar(texto) {
 +  const t = limpiar(texto);
 +  if (!t || t.length > 70) return null;
-+  for (const [patron, hacer] of REGLAS) {
++  for (const [patron, hacer] of REGLAS.concat(REGLAS_CASA)) {
 +    const m = patron.exec(t);
 +    if (m) {
 +      const o = hacer(m);
@@ -1539,7 +1597,7 @@
 +  };
 +  const resultados = [];
 +  for (const o of ordenes) {
-+    const un = await tele.orden(o, { avisar: avisar });
++    const un = o.casa ? await ordenCasa(o) : await tele.orden(o, { avisar: avisar });
 +    resultados.push(un);
 +    if (!un.ok) break;   // lo siguiente solía depender de esto
 +  }
@@ -1549,7 +1607,7 @@
 +    // «Volumen a 8. Jellyfin en pantalla, señor.»: el «señor», solo una vez.
 +    frase: resultados.map(function (x, i) {
 +      return i + 1 < resultados.length ? x.frase.replace(/, señor\.$/, '.') : x.frase;
-+    }).join(' '),
++    }).filter(function (f, i, todas) { return todas.indexOf(f) === i; }).join(' '),
 +    hecho: resultados.map(function (x) { return x.hecho; }).filter(Boolean).join(' y '),
 +  };
 +  log('REFLEJO ' + JSON.stringify(ordenes) + ' → ' + (r.ok ? 'hecho' : 'falló') + ' en ' + (Date.now() - t0) + ' ms: «' + r.frase + '»');
@@ -1568,7 +1626,7 @@
 +module.exports = { interpretar, interpretarVarias, atender, limpiar, numero };
 --- /dev/null
 +++ b/voice-app/test/parche34.test.js
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,107 @@
 +// Parche 34: node voice-app/test/parche34.test.js (sin tele ni red)
 +const assert = require('assert');
 +const { interpretar, interpretarVarias } = require('../lib/reflejos');
@@ -1623,6 +1681,23 @@
 +for (const dicho of no) {
 +  assert.strictEqual(interpretar(dicho), null, dicho);
 +}
++
++// La casa
++const casa = function (d) { const o = interpretar(d); return o && o.casa; };
++assert.deepStrictEqual(casa('Apaga el jardín.'), { servicio: 'switch.turn_off', entidad: 'switch.luces_jardin' });
++assert.deepStrictEqual(casa('Enciende las luces del jardín, por favor.'), { servicio: 'switch.turn_on', entidad: 'switch.luces_jardin' });
++assert.deepStrictEqual(casa('Apaga mi luz'), { servicio: 'light.turn_off', entidad: 'light.luces_mesa' });
++assert.deepStrictEqual(casa('Pon la calefacción de la cocina a 21.'), { servicio: 'climate.set_temperature', entidad: 'climate.cocina', datos: { temperature: 21 } });
++assert.deepStrictEqual(casa('Pon mi cuarto a veintidós grados'), { servicio: 'climate.set_temperature', entidad: 'climate.hab_mikel', datos: { temperature: 22 } });
++assert.deepStrictEqual(casa('Baja la calefacción de mi cuarto a 19 grados'), { servicio: 'climate.set_temperature', entidad: 'climate.hab_mikel', datos: { temperature: 19 } });
++assert.strictEqual(interpretar('Pon la calefacción de la cocina a 30'), null);   // fuera de rango: Claude
++assert.strictEqual(interpretar('Pon la calefacción a 21'), null);                 // sin zona: Claude
++assert.strictEqual(interpretar('Pon el cuarto de Marco a 21'), null);             // el de otro: Claude
++assert.strictEqual(interpretar('Abre el garaje'), null);
++assert.strictEqual(interpretar('Quita la alarma'), null);
++assert.strictEqual(interpretar('Apaga la luz'), null);                            // ¿cuál?
++assert.strictEqual(interpretar('Apaga el jardín cuando anochezca'), null);
++assert.deepStrictEqual(interpretarVarias('Apaga el jardín y baja el volumen.').map(function (o) { return !!o.casa; }), [true, false]);
 +
 +// Varias a la vez: todas o ninguna
 +assert.deepStrictEqual(interpretarVarias('Puedes, por ejemplo, baja el volumen dos niveles y abre Jellyfin.'), null);
