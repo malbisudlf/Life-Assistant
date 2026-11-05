@@ -127,7 +127,13 @@ def test_si_jacobo_se_cierra_el_navegador_se_entera():
     assert nav.enviado[-1] == {"tipo": "error", "detalle": "jacobo_se_cerro"}
 
 
-def test_el_puente_por_el_endpoint_dice_listo(client, jacobo):
+def test_el_puente_por_el_endpoint_dice_listo(client, jacobo, monkeypatch):
+    # El puente en sí se prueba arriba con dobles. Aquí se simula para que el endpoint
+    # termine solo tras decir «listo»: si se queda dentro del puente al salir del `with`,
+    # el cliente de pruebas cancela su future y el test falla a veces (CancelledError).
+    async def _sin_puente(ws, arriba, max_seg=None):
+        return
+    monkeypatch.setattr(main, "_oido_puente", _sin_puente)
     with client.websocket_connect("/voz/oido") as ws:
         ws.send_text(json.dumps({"token": main.create_token()}))
         assert json.loads(ws.receive_text()) == {"tipo": "listo"}
