@@ -5,8 +5,9 @@
 
 «Jarvis, avisa a Aimar de que llego cinco minutos tarde.» «¿Tengo algo pendiente?»
 Pedido el 30 de octubre de 2026. La primera versión (septiembre, solo lectura y con avisos
-de a quién debías respuesta) se quitó a los tres días porque no convenció. Esta no avisa
-de nada: Jarvis solo mira tus chats cuando le preguntas.
+de a quién debías respuesta) se quitó a los tres días porque no convenció. Esta mira tus
+chats cuando le preguntas, y por su cuenta solo avisa de lo que tiene hora o plazo (ver «La
+vigilancia»).
 
 **Estado: encendido desde el 2026-11-02.** El puente está en `caja` y vinculado, y el
 backend tiene sus dos variables (`caja/whatsapp/INSTALAR.md` de HomeLab). Los programados
@@ -111,6 +112,48 @@ Lo que queda: un grupo cuyo nombre sean cuatro palabras con intención («borra 
 llega así a la frase del botón y, por ella, a Claude. Sin signos ni más de cuatro palabras
 no da para una instrucción que se siga; quitarlo del todo sería no saber a qué grupo dices
 que sí.
+
+## La vigilancia
+
+«Quiero que Jarvis siempre pueda leer WhatsApp y avisarme si me llega algo importante, como
+que he quedado en 10 minutos» (2026-11-05). **Apagada por defecto** (`WHATSAPP_VIGILANCIA`).
+
+| Tipo | Aviso | Botón |
+|---|---|---|
+| Quedada | «Aimar: cena hoy a las 19:00 en Indautxu.» | Añadir al calendario |
+| Plazo | «Ane: entrega de RL, el viernes 7/11.» | Añadir al calendario |
+| Urgente | «Aimar pide que le llame; parece urgente.» | Útil / no útil |
+
+**Cómo va.** El reloj es el tick de las alarmas, de 60 s: `_wa_vig_pasada` pide al puente las
+últimas dos horas y atiende cada ráfaga cuando lleva 75 s sin mensajes nuevos, o a los 5 minutos
+si la conversación no para. Lo que llegó antes de arrancar el backend no se mira, y lo que llegue
+durante un reinicio tampoco. Un aviso sale unos 2 o 3 minutos después del mensaje.
+
+**Por qué un mensaje no manda aquí.** Es el texto ajeno más expuesto de Jarvis: llega solo y
+nadie lo ha pedido. Por eso no pasa por un turno de conversación:
+
+- **El modelo no tiene herramientas.** Rellena una ficha con esquema cerrado (tipo, fecha, hora,
+  lugar, asunto, pide) y no ve ningún nombre de perfil: las líneas dicen MIKEL u OTRO.
+- **El aviso lo escribe el backend**, con esa ficha y `_wa_nombre_seguro`. Lugar y asunto solo
+  pasan si son cinco palabras o menos, sin signos, y **todas aparecen en los mensajes**: ni un
+  invento del modelo ni una frase que sirva de instrucción. Eso es lo único del mensaje que llega
+  a Supabase (regla 1).
+- **Lo dirigido a Jarvis se tira** sin gastar modelo: lo que nombra a «Jarvis» o dice «ignora tus
+  instrucciones», si no lo has escrito tú. «MUY IMPORTANTE» no cuenta para nada.
+- **Solo tus contactos.** Chats individuales con quien está en tu agenda; los grupos, solo los de
+  `WHATSAPP_VIGILAR_GRUPOS`. De los demás, el texto no llega al modelo.
+- **Topes:** 3 avisos por chat y día, 10 en total, y una urgencia por chat y día. Nunca llama,
+  nunca suena con el móvil en silencio y nunca crea nada en el calendario sin el botón.
+
+**Lo demás que hace.** Si la cita ya está en el calendario (a ±30 minutos y con ese nombre o ese
+asunto en el título), no avisa; si a esa hora hay otra cosa, lo dice («Le coincide con…»). En clase
+espera a que termine (`_espera_por_lugar`), y una quedada caduca a su hora: un «en 10 minutos»
+durante la clase se puede perder, porque así se pidió. «No útil» tres veces calla la regla
+`whatsapp_aviso`, como cualquier otra.
+
+**Lo que cuesta.** Esos mensajes van a OpenAI (`gpt-4o-mini`), de forma continua y sin que quien
+los escribe lo sepa. Se decidió así para empezar, y pasa a local cuando llegue la P100. Son
+céntimos al mes: unas 16 ráfagas al día de chats individuales.
 
 ## Por qué un mensaje no puede darle órdenes
 
