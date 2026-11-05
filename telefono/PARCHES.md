@@ -1639,6 +1639,10 @@ Lo que se hizo, por piezas:
   datos reales:** cada turno deja en el registro lo que habría dicho `whisper-1`
   (`docker logs voice-app | grep STT-SOMBRA`; `STT_SOMBRA=0` lo apaga). Con unas cuantas
   llamadas se ve cuál se queda.
+  **Un sondeo bueno levanta también la pausa de `OIDO_PAUSA_MS`** (comprobado el 2026-11-05). Si
+  `/salud` contesta y solo falla `/transcribir`, se le vuelve a preguntar a los 8 s como mucho, no
+  a los 60. Si falla rápido no cuesta nada; si `/transcribir` se cuelga, 1,5 s en cada turno hasta
+  que sale OpenAI. Se ha dejado así.
 - **`server.js` + `sesion-viva.js`: la sesión flaca.** `claude-sonnet-5-5`, `--tools Bash`, sin los
   ajustes ni el prompt de sistema de Claude Code (`--setting-sources ''`,
   `--system-prompt-file`), `MAX_THINKING_TOKENS=0`, y la hora en cada turno para no gastar un
@@ -1769,9 +1773,27 @@ pero a las once», «Sí, a las nueve» o «Si no» no son un sí.
 
 `test/parche35.test.js`: 12 casos con las frases de esas llamadas; contra el código de antes
 fallan 11. En `test/parche32.test.js`, uno nuevo para el barge-in, que contra el código de antes
-falla. **La suite entera da 133 en verde y 26 en rojo; los 26 ya fallaban antes de este parche
-y son los mismos** (voz, oído y `pensar`; varios con `Cannot set properties of undefined
-(setting 'httpsAgent')`). Sin arreglar.
+falla. **La suite entera da 171 en verde y 0 en rojo**, tres vueltas seguidas, dentro de la imagen
+y sin red.
+
+**Los 26 en rojo que había al aplicar este parche** venían del 34, y todos estaban en los tests,
+ninguno en el código: lo de antes del 34 con sus tests da 145 de 145, y lo que esperaban esos
+tests es justo lo que el 34 cambió a propósito. Arreglado el 2026-11-05
+(`telefono/parche-34-tests.diff`; vuelta atrás: `test/*.bak-20261105-antes-tests-p34`). Solo toca
+`test/`, así que no hay que reconstruir nada.
+
+| Tests | Por qué fallaban | Arreglo |
+|---|---|---|
+| 14 de voz (`parche29`) | El doble de `axios` no tenía `defaults`, y `tts-service` le pone ahí su `httpsAgent` al cargarse | El doble lleva `defaults` |
+| 3 de `pensar` (`parche15y16`) | Esperaban la frase de espera al momento; ahora sale a los `ESPERA_FRASE_MS` | Esos casos van con la espera a 0 |
+| 1 de `18, saliente` (`parche18`) | `slice(i, 6)`: el final era absoluto y contaba con un «Un momento» delante, que ya no suena | `slice(i, i + 5)` |
+| 3 del oído (`parche25`) | El sondeo de `/salud` pasaba por el mismo `fetch` falso: contaba como pedido y gastaba el fallo preparado | `/salud` va aparte |
+| 5 del anticipo (`parche26`) | La pausa era de 400 ms, y solo contra jacobo; ahora 300 ms, también contra OpenAI, y además `small` | Las expectativas nuevas |
+
+Además, 12 casos nuevos de lo del 34 que no tenía test: `ESPERA_FRASE_MS`, `anticipar`, la frase de
+espera que falla, la carrera, el sondeo, el eco de la pista, el cierre rápido y la conexión
+reutilizada. Contra el código de antes del 34 no pasan esos 12 ni 4 de los reescritos del anticipo:
+16 en total.
 
 **Aplicarlo** (lib/ va dentro de la imagen, así que editar los ficheros no cambia nada hasta
 reconstruir):
