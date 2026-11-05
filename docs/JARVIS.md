@@ -160,7 +160,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   backend no guarda conversaciones»— está en `docs/TELEGRAM.md`.
 
 - **Jarvis en internet** (`buscar_en_internet`, `leer_pagina`): dos invariantes, y las dos
-  son de seguridad, no de comodidad.
+  son de seguridad, no de comodidad. **Por teléfono no están**: allí Claude tiene shell, así
+  que busca `_lectura_internet`, un modelo con estas dos como únicas herramientas y sin otro
+  dato que la pregunta, y su respuesta va al altavoz sin pasar por Claude (parche 37).
   - **SSRF.** `leer_pagina` recibe una URL que en el mejor caso sale de un buscador y en
     el peor la ha redactado un modelo leyendo una web. El backend vive donde
     `169.254.169.254` son las credenciales de la instancia y `127.0.0.1` es él mismo, así

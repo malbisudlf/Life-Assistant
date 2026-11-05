@@ -1844,6 +1844,43 @@ claude-phone-voice-app:antes-p36 claude-phone-voice-app` y el mismo `up -d`. Lo 
 que funciona es `LECTURA: whatsapp` en `docker logs voice-app` y `Lectura por teléfono:
 whatsapp` en el registro del backend.
 
+## El parche 37: internet, buscado por otro y leído por la llamada
+
+Del 2026-11-05, porque Mikel lo echó en falta en una llamada. El Claude de la llamada no tiene
+`buscar_en_internet` porque tiene shell en `caja` y `backend.env` a la vista, y una web la
+escribe cualquiera: es el agujero del parche 36. Así que no se le da. Claude pone la pregunta,
+`📖 LEER: internet pregunta=…`; la contesta en el backend `_lectura_internet`, un modelo con la
+web como únicas herramientas y sin más datos que la pregunta; y la respuesta va al altavoz.
+
+- **`voice-app/lib/lectura.js`**: `internet` entra en lo que se lee, con `pregunta=` (la
+  última, porque es texto libre: se saca antes de mirar `seguir` o `desde=`). Espera 45 s en vez
+  de 20, con la música de espera. Sin «Eso es todo» al acabar, y lo que vuelve a Claude solo dice
+  que se ha leído. La pregunta no va al registro.
+- **`voice-app/lib/conversation-loop.js`**: le pasa la música.
+
+`telefono/parche-37.diff` (sobre `~/.claude-phone-cli/`, `patch -p1`), con
+`voice-app/test/parche37.test.js`: cinco casos (la marca, que a Claude no le vuelva nada de la
+web, la música, el cierre y el fallo). **Va detrás del backend**: con la voice-app nueva y el
+backend viejo, el `que=internet` da un 422 y la llamada dice que no ha podido.
+
+```bash
+cd ~/.claude-phone-cli
+curl -s localhost:3010/api/calls                     # sin llamada en curso
+docker tag claude-phone-voice-app claude-phone-voice-app:antes-p37
+patch -p1 < parche-37.diff
+docker compose -f ~/.claude-phone/docker-compose.yml build voice-app
+docker run --rm --network none --entrypoint node claude-phone-voice-app --test test/parche37.test.js
+docker compose -f ~/.claude-phone/docker-compose.yml up -d voice-app
+```
+
+Y el `RUNBOOK.md` nuevo a `~/telefono-jarvis/CLAUDE.md`: sin él, Claude no sabe que existe la
+línea. Volver atrás: `docker tag claude-phone-voice-app:antes-p37 claude-phone-voice-app` y el
+mismo `up -d`. Lo que delata que funciona: `LECTURA: internet` en `docker logs voice-app`.
+
+**Lo que no arregla:** no es un cortafuegos. `caja` sale a internet, y Claude podría hacer un
+`curl` si se lo pidiera alguien; lo frena el RUNBOOK, no la máquina. Quitar la shell de esa
+sesión sería el arreglo de verdad.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
