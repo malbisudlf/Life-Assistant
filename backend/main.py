@@ -8788,22 +8788,6 @@ def lugar_actual() -> Optional[dict]:
     return {"lugar": lugar, "desde": desde, "minutos": minutos, "zona": p.get("zona")}
 
 
-def _lugar_en_memoria() -> dict:
-    """Como `lugar_actual()`, pero solo con lo que ya está en memoria: sin presencia en la
-    copia de memoria o sin lugar firme, {} (no se sabe), sin preguntar a nadie. Para los
-    caminos que no pueden pagar una consulta, como la puerta del teléfono."""
-    with _presencia_lock:
-        p = _presencia_cache
-    edad = _edad_presencia(p) if p else None
-    if edad is None or edad > PRESENCE_TTL_MINUTES:
-        return {}
-    with _lugar_lock:
-        firme = _lugar_estado.get("firme")
-    if not firme:
-        return {}
-    return {"lugar": firme[0], "desde": firme[1], "zona": p.get("zona")}
-
-
 def _lugar_actual_seguro() -> Optional[dict]:
     """`lugar_actual()` que nunca lanza: quien pregunta esto está decidiendo si avisar, y
     un fallo aquí tiene que caer al comportamiento de siempre (hablar), no a callarse."""
@@ -8844,15 +8828,14 @@ def _clase_en_curso(ahora: Optional[datetime] = None) -> Optional[dict]:
     return None
 
 
-def _en_clase(lugar: Optional[dict] = None) -> Optional[dict]:
-    """La clase en curso si estás EN LA UNI y hay una; None en cualquier otro caso.
+def _en_clase() -> Optional[dict]:
+    """La clase del calendario en curso, o None. Decide callar avisos y el teléfono.
 
-    Hacen falta las dos cosas: una clase del calendario a la que no has ido no te tiene
-    sentado en un aula, y estar en la uni entre clases no es estar en clase.
+    No mira dónde consta que estás. Antes hacía falta además la uni como lugar firme, y el
+    2026-11-05 el teléfono de Mikel llevaba desde la noche anterior en «casa» para Home
+    Assistant: en plena clase le sonó una llamada y le llegó una alerta. Un aviso que
+    espera al final de una clase a la que no fuiste cuesta poco; sonar en el aula, no.
     """
-    lugar = lugar if lugar is not None else _lugar_actual_seguro()
-    if not lugar or lugar.get("lugar") != LUGAR_UNI:
-        return None
     try:
         return _clase_en_curso()
     except Exception as e:
@@ -9323,9 +9306,9 @@ def _jarvis_contexto_lugar() -> str:
     else:
         desde = f"las {desde}"
     texto = f"\nAhora mismo el usuario está {_texto_lugar(lugar['lugar'])} (desde {desde})."
-    clase = _en_clase(lugar)
+    clase = _en_clase()
     if clase:
-        texto += (f" Está en clase («{clase['titulo']}») hasta las "
+        texto += (f" Según su calendario tiene clase («{clase['titulo']}») hasta las "
                   f"{clase['fin'].strftime('%H:%M')}.")
     if lugar["lugar"] in (LUGAR_GIMNASIO, LUGAR_UNI):
         texto += (" Contesta todavía más corto de lo normal, y no le propongas cosas que "
@@ -16394,7 +16377,7 @@ def _llamada_pedida(rid: str, texto: str, huella: str) -> bool:
     if _es_de_noche(ahora):
         logger.info("Llamada pedida %s no sale: franja nocturna", rid)
         return False
-    clase = _en_clase(_lugar_en_memoria())
+    clase = _en_clase()
     if clase:
         logger.info("Llamada pedida %s no sale: en clase hasta las %s", rid,
                     clase["fin"].strftime("%H:%M"))
@@ -21342,7 +21325,11 @@ def _notificar(titulo: str, texto: str, *, voz: bool = False, aviso_id: str = ""
     botón y en el momento: el mismo texto leído en el buzón media hora después no informa
     de nada y encima hace dudar de si la acción se hizo. Nada que tenga algo que contar
     por sí solo puede ir efímero; para eso está el correo, que es el canal que llega.
+
+    En clase, nada atraviesa el silencio, venga de donde venga: por eso se mira aquí.
     """
+    if critico and _en_clase():
+        critico = False
     if _movil_vivo() and len(_avisos_movil) < AVISOS_MOVIL_MAX:
         _avisos_movil.append({
             "titulo": titulo[:120], "texto": texto[:600], "puesto": time.time(),
@@ -21710,11 +21697,10 @@ def _telefono_puede_sonar(ahora: datetime) -> tuple[bool, str]:
         corte = _hora_de_acostarse(ahora)
         if hm >= corte:
             return False, f"pasada tu hora de dormir ({corte[0]:02d}:{corte[1]:02d})"
-    # En clase no suena, como dormido: el aviso ya ha llegado al móvil y la llamada no se
-    # aplaza (ver `_llamar`). Solo con la uni como lugar firme Y una clase del calendario
-    # en curso; ante la duda, suena. El lugar sale de lo que ya hay en memoria, sin
-    # preguntar a Supabase: de día esto no puede costar una consulta por llamada.
-    clase = _en_clase(_lugar_en_memoria())
+    # En clase no suena, como dormido: la llamada no se aplaza (ver `_llamar`). Basta una
+    # clase del calendario en curso (`_en_clase`), con su caché: de día esto no puede
+    # costar una consulta por llamada. Si no se puede leer el calendario, suena.
+    clase = _en_clase()
     if clase:
         return False, f"estás en clase hasta las {clase['fin'].strftime('%H:%M')}"
     if hm >= LLAMADAS_SIN_SENAL_DESDE:
@@ -25524,16 +25510,20 @@ def _vigilancia_notificar(titulo: str, texto: str) -> None:
     YA marcada como enviada, con `regla=REGLA_VIGILANCIA`, para que "útil/no útil"
     tenga qué votar y la regla se pueda silenciar sola si deja de servir — que es
     justo lo que prometía el comentario de `REGLA_VIGILANCIA` y no hacía nada.
+
+    En clase la fila se queda sin enviar y la saca el despachador al acabar
+    (`_espera_por_lugar`). Urgente, para que el presupuesto no la pase a mañana.
     """
     aviso_id = str(uuid.uuid4())
+    en_clase = bool(_en_clase())
+    ahora    = datetime.now(timezone.utc).isoformat()
     try:
         r = http.post(RECORDATORIOS_URL,
                       headers={**supabase_headers(), "Prefer": "return=minimal"},
-                      json={"id": aviso_id, "texto": texto,
-                            "regla": REGLA_VIGILANCIA, "prioridad": PRIO_NORMAL,
-                            "cuando": datetime.now(timezone.utc).isoformat(),
-                            "enviado": True,
-                            "enviado_at": datetime.now(timezone.utc).isoformat()})
+                      json={"id": aviso_id, "texto": texto, "regla": REGLA_VIGILANCIA,
+                            "prioridad": PRIO_URGENTE if en_clase else PRIO_NORMAL,
+                            "cuando": ahora, "enviado": not en_clase,
+                            "enviado_at": None if en_clase else ahora})
         if r.status_code >= 300:
             raise RuntimeError(f"Supabase devolvió {r.status_code}")
     except Exception as e:
@@ -25541,6 +25531,9 @@ def _vigilancia_notificar(titulo: str, texto: str) -> None:
         # este arreglo, y se dice por qué.
         logger.warning("Vigilancia: sin fila que votar (%s)", e)
         aviso_id = ""
+    if en_clase and aviso_id:
+        logger.info("Vigilancia: el aviso de «%s» espera al final de la clase", titulo[:60])
+        return
     _notificar(titulo, texto, aviso_id=aviso_id,
                acciones=_acciones_aviso(aviso_id, REGLA_VIGILANCIA))
 
@@ -26820,8 +26813,7 @@ SALIR_YA_ESTAS_MIN = int(os.getenv("SALIR_YA_ESTAS_MIN", "5"))
 
 def _en_clase_de_pasada(cache: dict) -> bool:
     if "clase" not in cache:
-        _lugar_de_pasada(cache)
-        cache["clase"] = _en_clase(cache.get("lugar"))
+        cache["clase"] = _en_clase()
     return bool(cache["clase"])
 
 
@@ -26872,24 +26864,22 @@ def _espera_por_lugar(regla: str, prioridad: int, cache: dict) -> str:
     mañana: se queda pendiente y sale en el primer tick después de irte (o de que acabe
     la clase), con su `caduca` de siempre si lo tiene.
 
-    Las fronteras son las del presupuesto, por lo mismo: lo que pediste tú (sin regla, o
-    una regla tuya) sale siempre, y lo urgente también — un «Sal ya» que espera a que
-    termines de entrenar ya no sirve. Y lo que se dice precisamente allí
-    (`_REGLAS_DEL_LUGAR`) tampoco espera, claro. Ni lo que deja trabajo parado
-    (`_REGLAS_BLOQUEANTES`): en clase sale sin atravesar el silencio (lo decide el
-    despachador), pero sale.
+    Lo que pediste tú (sin regla, o una regla tuya) sale siempre. En clase, lo demás
+    espera, sea urgente o deje trabajo parado (pedido por Mikel el 2026-11-05): un «Sal ya»
+    que caduca durante la clase se pierde, y da igual, porque estabas en clase. En el
+    gimnasio siguen saliendo lo urgente —un «Sal ya» que espera a que termines de entrenar
+    ya no sirve—, lo que deja trabajo parado (`_REGLAS_BLOQUEANTES`) y lo que se dice
+    precisamente allí (`_REGLAS_DEL_LUGAR`).
     """
-    if (not regla or _es_tuyo(regla) or prioridad <= PRIO_SIN_TOPE
-            or regla in _REGLAS_BLOQUEANTES):
+    if not regla or _es_tuyo(regla):
+        return ""
+    if _en_clase_de_pasada(cache):
+        return f"estás en clase hasta las {cache['clase']['fin'].strftime('%H:%M')}"
+    if prioridad <= PRIO_SIN_TOPE or regla in _REGLAS_BLOQUEANTES:
         return ""
     lugar = _lugar_de_pasada(cache)
-    if not lugar or regla in _REGLAS_DEL_LUGAR.get(lugar, ()):
-        return ""
-    if lugar == LUGAR_GIMNASIO:
+    if lugar == LUGAR_GIMNASIO and regla not in _REGLAS_DEL_LUGAR[LUGAR_GIMNASIO]:
         return "estás en el gimnasio"
-    if lugar == LUGAR_UNI:
-        if _en_clase_de_pasada(cache):
-            return f"estás en clase hasta las {cache['clase']['fin'].strftime('%H:%M')}"
     return ""
 
 
@@ -27049,11 +27039,7 @@ def _despachar_recordatorios(solo_pedidos: bool = False) -> dict:
                                # una sesión que no puede seguir sin ti. Lo que solo es
                                # urgente o importante no entra aquí — es la misma
                                # frontera que decide quién puede llamarte por teléfono.
-                               critico=(regla in _REGLAS_BLOQUEANTES
-                                        # En clase sale, pero sin atravesar el
-                                        # silencio: el trabajo parado puede esperar
-                                        # al final de la clase; el aula, no.
-                                        and not _en_clase_de_pasada(vigencia)))
+                               critico=regla in _REGLAS_BLOQUEANTES)
             enviados += 1
             if regla and not _es_tuyo(regla):
                 presupuesto -= 1

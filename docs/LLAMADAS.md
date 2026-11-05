@@ -143,12 +143,11 @@ se la puede saltar. Decide en este orden:
    fallida (móvil sin batería, Atajo apagado).
 4. Antes de esa hora, **solo con la señal de despertar de hoy**.
 
-Y **en clase no suena** (desde el 2026-10-05), en cualquier franja: con la uni como lugar
-firme y una clase del calendario de clases en curso, `_telefono_puede_sonar` contesta que
-no, con el motivo «estás en clase hasta las HH:MM». Como en los demás casos, el aviso ya
-ha llegado al móvil y la llamada no se aplaza. El lugar sale de lo que hay en memoria,
-sin consultar nada; solo estando en la uni se mira el calendario de clases, y con diez
-minutos de caché. Ver «Lugares» en `docs/JARVIS.md`.
+Y **en clase no suena** (desde el 2026-10-05), en cualquier franja: con una clase del
+calendario de clases en curso, estés donde conste que estás, `_telefono_puede_sonar`
+contesta que no, con el motivo «estás en clase hasta las HH:MM». La llamada no se aplaza, y
+el aviso espera al final de la clase. El calendario va con diez minutos de caché. Ver
+«Lugares» en `docs/JARVIS.md`.
 
 **La señal es la misma que ya usa el resumen diario**, sin inventar otra: el Atajo del
 cargador (`POST /despertar`), la alarma de respaldo confirmada y decirle a Jarvis «estoy

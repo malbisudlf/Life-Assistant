@@ -120,7 +120,6 @@ def centralita(monkeypatch):
                        "aunque_duermas": aunque_duermas, "solo_centralita": solo_centralita})
         return True
     monkeypatch.setattr(main, "_llamar", _llamar)
-    monkeypatch.setattr(main, "_lugar_en_memoria", lambda: {})
     return hechas
 
 
@@ -168,7 +167,7 @@ class TestLaLlamadaPedida:
 
     def test_en_clase_no_suena(self, centralita, monkeypatch):
         monkeypatch.setattr(main, "_en_clase",
-                            lambda lugar: {"fin": AHORA + timedelta(minutes=30), "titulo": "SO"})
+                            lambda: {"fin": AHORA + timedelta(minutes=30), "titulo": "SO"})
         assert not main._llamada_pedida(RID, "x", "llamar:-:abc") and centralita == []
 
     def test_dentro_del_despacho_va_detras_del_aviso(self, mock_requests, centralita, monkeypatch):

@@ -605,8 +605,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     dice. Con la presencia caducada no se sabe dónde estás y se respeta lo que se decidió
     al apuntar. Estar fuera **quita la voz pero no retira el aviso**: puedes estar fuera y
     tener que ir igual.
-    En el gimnasio y en clase, además, lo que no corre prisa **espera** a que salgas, y
-    lo que ya no es verdad allí se retira: ver «Lugares: casa, gimnasio y uni», abajo.
+    En el gimnasio lo que no corre prisa, y en clase todo lo que no pediste tú, **espera**
+    a que salgas, y lo que ya no es verdad allí se retira: ver «Lugares: casa, gimnasio y
+    uni», abajo.
     Y al **volver a casa** (`_retirar_avisos_de_salida`, desde `POST /ha/presencia` al
     pasar de fuera a en casa), las notificaciones de hoy de `al_salir` y `pc_encendido`
     que siguen sin valorar se **retiran del móvil** por su id (su `tag`), nunca por regla,
@@ -921,16 +922,17 @@ está en la sección «Lugares» de `backend/main.py`, y la lógica pura del das
   `_despachar_recordatorios`). Lo que no corre prisa del SISTEMA se queda pendiente con
   `cuando` = ahora (para que al salir el retraso medido sea el real y no dispare la
   alarma de retraso) y sale en el primer tick después de irte o de que termine la clase.
-  «En clase» es la uni como lugar firme **y** una clase del calendario de clases en curso:
-  una clase a la que no has ido no te tiene en un aula, y la uni entre clases no es una
-  clase. Las fronteras son las del presupuesto: lo que pediste tú (sin regla o `tuya:*`)
-  y lo urgente (`PRIO_SIN_TOPE`) salen siempre, y lo que se dice precisamente allí
-  (`_REGLAS_DEL_LUGAR`: el cobro al llegar al gimnasio) también. Va **antes** del
-  presupuesto: un aviso que solo tenía que esperar una hora no se manda a mañana. Sin
-  presencia vigente se habla, como siempre. En clase, además, lo `critico` sale pero sin
-  atravesar el silencio del móvil, y **el teléfono no suena** (`_telefono_puede_sonar`:
-  el lugar sale de lo que hay en memoria, sin consultar nada, y solo en la uni se mira el
-  calendario de clases, con diez minutos de caché).
+  «En clase» es una clase del calendario de clases en curso, estés donde conste que estás
+  (desde el 2026-11-05: el iPhone se quedó en «casa» en Home Assistant y a Mikel le sonó el
+  teléfono en plena clase). Lo que pediste tú (sin regla o `tuya:*`) sale siempre. **En
+  clase, lo demás espera**, también lo urgente y lo que deja trabajo parado, y la vigilancia
+  («X no responde») se apunta para el final de la clase. En el gimnasio salen lo urgente
+  (`PRIO_SIN_TOPE`), lo que deja trabajo parado y lo que se dice allí (`_REGLAS_DEL_LUGAR`: el
+  cobro al llegar). Va **antes** del presupuesto: un aviso que solo tenía que esperar una
+  hora no se manda a mañana. Sin presencia vigente, en el gimnasio se habla. En clase, además,
+  nada es `critico` (lo mira `_notificar`) y **el teléfono no suena**
+  (`_telefono_puede_sonar`, con diez minutos de caché del calendario de clases). Si no se
+  puede leer ese calendario, se habla.
 - **Lo que ya no es verdad allí se retira** (`_sigue_en_pie`): el «Llevas N días sin
   entrenar» (`hueco_entreno`) en el gimnasio, y el «Sal ya» cuando ya estás donde es la
   cita. Este último se recalcula solo estando en la uni o el gimnasio (desde casa el
