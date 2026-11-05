@@ -124,6 +124,8 @@ que he quedado en 10 minutos» (2026-11-05). **Apagada por defecto** (`WHATSAPP_
 | Plazo | «Ane: entrega de RL, el viernes 7/11.» | Añadir al calendario |
 | Urgente | «Aimar pide que le llame; parece urgente.» | Útil / no útil |
 
+De a quién le debes respuesta no avisa nunca, y una quedada de hoy tiene que llevar hora.
+
 **Cómo va.** El reloj es el tick de las alarmas, de 60 s: `_wa_vig_pasada` pide al puente las
 últimas dos horas y atiende cada ráfaga cuando lleva 75 s sin mensajes nuevos, o a los 5 minutos
 si la conversación no para. Lo que llegó antes de arrancar el backend no se mira, y lo que llegue
@@ -135,7 +137,7 @@ nadie lo ha pedido. Por eso no pasa por un turno de conversación:
 - **El modelo no tiene herramientas.** Rellena una ficha con esquema cerrado (tipo, fecha, hora,
   lugar, asunto, pide) y no ve ningún nombre de perfil: las líneas dicen MIKEL u OTRO.
 - **El aviso lo escribe el backend**, con esa ficha y `_wa_nombre_seguro`. Lugar y asunto solo
-  pasan si son cinco palabras o menos, sin signos, y **todas aparecen en los mensajes**: ni un
+  pasan si son cuatro palabras o menos, sin signos, y **todas aparecen en los mensajes**: ni un
   invento del modelo ni una frase que sirva de instrucción. Eso es lo único del mensaje que llega
   a Supabase (regla 1).
 - **Lo dirigido a Jarvis se tira** sin gastar modelo: lo que nombra a «Jarvis» o dice «ignora tus
@@ -144,6 +146,19 @@ nadie lo ha pedido. Por eso no pasa por un turno de conversación:
   `WHATSAPP_VIGILAR_GRUPOS`. De los demás, el texto no llega al modelo.
 - **Topes:** 3 avisos por chat y día, 10 en total, y una urgencia por chat y día. Nunca llama,
   nunca suena con el móvil en silencio y nunca crea nada en el calendario sin el botón.
+
+**Lo que enseñó el ensayo.** Antes de encenderla se pasó una semana de mensajes reales por el
+clasificador. Tres cosas salieron de ahí: el modelo ponía la hora del mensaje si nadie decía
+ninguna, una quedada de hoy sin hora era casi siempre un «a ver si quedamos», y «espera
+respuesta» se colaba como urgente, que es lo que hundió la versión de septiembre. Ahora esa hora
+no vale, esa quedada no se avisa, y urgente es que te pidan que llames, que te estén esperando o
+una emergencia. Los grupos dieron 35 avisos en esa semana contra 4 de los individuales, que tras
+los ajustes se quedaron en 1: por eso no entran salvo que se elijan. Y como pedirle al modelo que
+ignorase «MUY IMPORTANTE» no bastaba, esas palabras y las mayúsculas se quitan antes de que lo lea.
+
+**Lo que no se sabe.** Cuántas cosas importantes se le escapan: medirlo exigiría leer todos los
+mensajes a mano. Con casos inventados acertó 29 de 30 en dos pasadas; falló un plan cuyo día estaba
+en un mensaje anterior.
 
 **Lo demás que hace.** Si la cita ya está en el calendario (a ±30 minutos y con ese nombre o ese
 asunto en el título), no avisa; si a esa hora hay otra cosa, lo dice («Le coincide con…»). En clase
