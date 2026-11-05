@@ -233,16 +233,85 @@ class TestDespachoSegunElLugar:
         self._pendientes(mock_requests, [fila])
         assert main._despachar_recordatorios() == {"recordatorios": 0, "avisos_retirados": 1}
 
-    def test_en_clase_lo_critico_no_atraviesa_el_silencio(self, mock_requests):
+    @pytest.mark.parametrize("regla, prioridad", [
+        ("despliegue", 3),            # lo que deja trabajo parado
+        ("sesion_bloqueada", 1),
+        ("salir", 1),                 # lo urgente
+        ("gemelo", 1),
+    ])
+    def test_en_clase_lo_urgente_espera(self, mock_requests, regla, prioridad):
         _en("Universidad")
         _firme("uni")
         self.clases = [{"title": "Cálculo", "isAllDay": False,
                         "start": (AHORA - timedelta(minutes=20)).isoformat(),
                         "end": (AHORA + timedelta(minutes=40)).isoformat()}]
+        self._pendientes(mock_requests, [self._fila(regla=regla, prioridad=prioridad)])
+        assert main._despachar_recordatorios() == {"recordatorios": 0, "avisos_esperando": 1}
+        assert self.enviados == []
+
+    def test_con_el_movil_en_casa_la_clase_cuenta_igual(self, mock_requests):
+        """El 2026-11-05 el iPhone llevaba desde la noche en «casa» para Home Assistant."""
+        _en("home")
+        _firme("casa")
+        self.clases = [{"title": "Cálculo", "isAllDay": False,
+                        "start": (AHORA - timedelta(minutes=20)).isoformat(),
+                        "end": (AHORA + timedelta(minutes=40)).isoformat()}]
+        self._pendientes(mock_requests, [self._fila(regla=main.REGLA_DESPLIEGUE,
+                                                    prioridad=main.PRIO_URGENTE)])
+        assert main._despachar_recordatorios() == {"recordatorios": 0, "avisos_esperando": 1}
+
+    def test_en_clase_lo_que_pediste_tu_sale(self, mock_requests):
+        _en("Universidad")
+        _firme("uni")
+        self.clases = [{"title": "Cálculo", "isAllDay": False,
+                        "start": (AHORA - timedelta(minutes=20)).isoformat(),
+                        "end": (AHORA + timedelta(minutes=40)).isoformat()}]
+        self._pendientes(mock_requests, [self._fila(regla="")])
+        assert main._despachar_recordatorios() == {"recordatorios": 1}
+
+    def test_sin_clase_lo_critico_sigue_sonando(self, mock_requests):
+        self.clases = []
         self._pendientes(mock_requests, [self._fila(regla=main.REGLA_DESPLIEGUE,
                                                     prioridad=main.PRIO_URGENTE)])
         assert main._despachar_recordatorios()["recordatorios"] == 1
-        assert self.enviados[0]["critico"] is False
+        assert self.enviados[0]["critico"] is True
+
+
+class TestEnClaseNadaSuena:
+    CLASE = {"fin": AHORA + timedelta(minutes=30), "titulo": "SO"}
+
+    def test_nada_atraviesa_el_silencio(self, monkeypatch):
+        """Ni lo que sale por `_entregar_aviso_ya`, que no pasa por el despachador."""
+        monkeypatch.setattr(main, "_en_clase", lambda: self.CLASE)
+        monkeypatch.setattr(main, "_movil_vivo", lambda: True)
+        monkeypatch.setattr(main, "_avisos_movil", [])
+        main._notificar("Permiso", "x", critico=True)
+        assert main._avisos_movil[-1]["critico"] is False
+
+    def test_fuera_de_clase_lo_critico_suena(self, monkeypatch):
+        monkeypatch.setattr(main, "_en_clase", lambda: None)
+        monkeypatch.setattr(main, "_movil_vivo", lambda: True)
+        monkeypatch.setattr(main, "_avisos_movil", [])
+        main._notificar("Permiso", "x", critico=True)
+        assert main._avisos_movil[-1]["critico"] is True
+
+    def test_la_vigilancia_espera_al_final_de_la_clase(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "_en_clase", lambda: self.CLASE)
+        enviados = []
+        monkeypatch.setattr(main, "_notificar", lambda *a, **k: enviados.append(a))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse({}, 201))
+        main._vigilancia_notificar("jacobo no responde", "lleva 3 sondeos")
+        assert enviados == []
+        fila = mock_requests.called("POST", "jarvis_recordatorios")[0][2]["json"]
+        assert fila["enviado"] is False and fila["prioridad"] == main.PRIO_URGENTE
+
+    def test_la_vigilancia_no_se_pierde_si_no_se_puede_apuntar(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "_en_clase", lambda: self.CLASE)
+        enviados = []
+        monkeypatch.setattr(main, "_notificar", lambda *a, **k: enviados.append(a))
+        mock_requests.add("POST", "jarvis_recordatorios", FakeResponse({}, 500))
+        main._vigilancia_notificar("jacobo no responde", "lleva 3 sondeos")
+        assert len(enviados) == 1
 
 
 class TestTelefonoEnClase:

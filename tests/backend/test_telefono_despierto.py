@@ -112,8 +112,11 @@ class TestCuandoPuedeSonar:
         _puede(reloj(23, 30))
         assert len(mock_requests.called("GET", "sleep_analysis")) == 1
 
-    def test_a_mediodia_no_se_pregunta_nada(self, mock_requests, reloj):
-        """El caso de casi todas las llamadas: de día no cuesta ni una consulta."""
+    def test_a_mediodia_no_se_pregunta_nada(self, mock_requests, reloj, monkeypatch):
+        """El caso de casi todas las llamadas: de día, con las clases de hoy ya en caché,
+        no cuesta ni una consulta."""
+        monkeypatch.setitem(main._clases_hoy, "ts", main.time.time())
+        monkeypatch.setitem(main._clases_hoy, "eventos", [])
         assert _puede(reloj(12)) is True
         assert mock_requests.calls == []
 

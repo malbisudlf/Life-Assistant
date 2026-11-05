@@ -179,10 +179,11 @@ class TestProponer:
         assert [b["action"] for b in aviso["acciones"]] == [
             f"LA_APAGAR_resp1-{r['id']}", f"LA_APAGAR_resp2-{r['id']}"]
 
-    def test_sin_movil_no_se_manda(self, mock_requests):
+    def test_sin_movil_no_se_notifica_pero_se_propone(self, mock_requests):
+        """Lo confirma la llamada; por correo no habría botón."""
+        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
         r = main._proponer_en_movil("crear_evento", {"titulo": "Dentista", "fecha": "2026-10-14"})
-        assert r["ok"] is False and "dashboard" in r["motivo"]
-        assert not mock_requests.called("POST", "jarvis_preguntas")
+        assert r["ok"] is True and r["canal"] == "ninguno" and main._avisos_movil == []
 
     def test_solo_lo_de_la_lista(self, mock_requests, movil):
         r = main._proponer_en_movil("cobrar_entrenamiento", {})
@@ -294,10 +295,10 @@ class TestPorTelefono:
         bloques = por_nombre["reservar_bloques"]["inputSchema"]["properties"]["bloques"]
         assert bloques["type"] == "array" and "titulo" in bloques["items"]["properties"]
 
-    def test_el_catalogo_le_dice_que_va_al_movil(self):
+    def test_el_catalogo_le_dice_que_se_confirma_hablando(self):
         por_nombre = {t["name"]: t for t in main._mcp_servidor_tools_list()}
-        assert "Sí, hazlo" in por_nombre["crear_evento"]["description"]
-        assert "Sí, hazlo" not in por_nombre["agenda"]["description"]
+        assert "linea_para_la_llamada" in por_nombre["crear_evento"]["description"]
+        assert "linea_para_la_llamada" not in por_nombre["agenda"]["description"]
 
 
 class TestVasTarde:

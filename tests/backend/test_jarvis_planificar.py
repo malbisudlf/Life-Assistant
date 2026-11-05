@@ -575,8 +575,8 @@ class TestTelefono:
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         por_nombre = {t["name"]: t for t in r.json()["result"]["tools"]}
         assert por_nombre["huecos_libres"]["annotations"]["readOnlyHint"] is True
-        # Desde el 2026-10-15 está, pero no se hace por teléfono: va al móvil con botón.
-        assert "Sí, hazlo" in por_nombre["reservar_bloques"]["description"]
+        # Está, pero no se hace sin más: la llamada pregunta y él contesta hablando.
+        assert "linea_para_la_llamada" in por_nombre["reservar_bloques"]["description"]
 
     def test_reservar_por_telefono_no_reserva(self, client, monkeypatch):
         llamado = []

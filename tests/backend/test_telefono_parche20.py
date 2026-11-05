@@ -120,7 +120,6 @@ def centralita(monkeypatch):
                        "aunque_duermas": aunque_duermas, "solo_centralita": solo_centralita})
         return True
     monkeypatch.setattr(main, "_llamar", _llamar)
-    monkeypatch.setattr(main, "_lugar_en_memoria", lambda: {})
     return hechas
 
 
@@ -168,7 +167,7 @@ class TestLaLlamadaPedida:
 
     def test_en_clase_no_suena(self, centralita, monkeypatch):
         monkeypatch.setattr(main, "_en_clase",
-                            lambda lugar: {"fin": AHORA + timedelta(minutes=30), "titulo": "SO"})
+                            lambda: {"fin": AHORA + timedelta(minutes=30), "titulo": "SO"})
         assert not main._llamada_pedida(RID, "x", "llamar:-:abc") and centralita == []
 
     def test_dentro_del_despacho_va_detras_del_aviso(self, mock_requests, centralita, monkeypatch):
@@ -339,8 +338,21 @@ class TestElSiHablado:
         assert client.post(f"/telefono/confirmar/{PID}", headers=TOKEN_SI,
                            json={"respuesta": "vale"}).status_code == 422
 
-    def test_borrar_se_queda_en_el_boton(self, client, mock_requests, hechas):
+    def test_borrar_tambien_se_confirma_hablando(self, client, mock_requests, hechas):
         _pregunta(mock_requests, "borrar_evento", {"evento_id": "ev1"})
+        assert client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()["ok"] is True
+        r = client.post(f"/telefono/confirmar/{PID}", headers=TOKEN_SI,
+                        json={"respuesta": "si"}).json()
+        assert hechas[0][0] == "borrar_evento"
+
+    def test_todo_lo_que_se_propone_se_confirma_hablando(self):
+        assert main.PREGUNTAS_HABLADAS == main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+
+    def test_la_alarma_y_el_garaje_no_entran(self):
+        assert "casa_ordenar" not in main.PREGUNTAS_HABLADAS
+
+    def test_una_accion_que_no_se_propone_no_se_confirma_hablando(self, client, mock_requests, hechas):
+        _pregunta(mock_requests, "desplegar", {})
         assert client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()["ok"] is False
         r = client.post(f"/telefono/confirmar/{PID}", headers=TOKEN_SI,
                         json={"respuesta": "si"}).json()
@@ -358,15 +370,21 @@ class TestElSiHablado:
                         json={"respuesta": "si"}).json()
         assert r["ok"] is False and hechas == []
 
-    def test_mover_una_reunion_con_gente_se_queda_en_el_boton(self, client, mock_requests,
+    def test_mover_una_reunion_con_gente_se_confirma_hablando(self, client, mock_requests,
                                                               hechas, monkeypatch):
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
             "titulo": "Reunión", "inicio": "2026-10-18T10:00", "todo_el_dia": False,
             "invitados": 2, "organizo": True, "asistentes": 2})
         _pregunta(mock_requests, "editar_evento", {"evento_id": "ev1", "fecha": MANANA,
                                                    "hora_inicio": "11:00"})
-        r = client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()
-        assert r["ok"] is False and "más gente" in r["motivo"]
+        assert client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()["ok"] is True
+
+    def test_la_frase_de_mover_dice_a_quien_le_llega(self, monkeypatch):
+        monkeypatch.setattr(main, "_evento_graph", lambda i: {
+            "titulo": "Reunión", "inicio": "2026-10-18T10:00", "todo_el_dia": False,
+            "invitados": 2, "organizo": True, "asistentes": 2})
+        d = main._describir_accion("editar_evento", {"evento_id": "ev1", "titulo": "Otra"})
+        assert "Les llegará el cambio a 2 invitados." in d["texto"]
 
     def test_mover_una_cita_tuya_sola_si(self, client, mock_requests, hechas, monkeypatch):
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
@@ -387,7 +405,28 @@ class TestLaPropuesta:
         r = main._proponer_en_movil("crear_tarea", {"titulo": "Pasar el contrato"})
         assert r["linea_para_la_llamada"] == f"✅ CONFIRMAR: {r['id']}"
 
-    def test_borrar_no_la_lleva(self, mock_requests, monkeypatch):
+    def test_sin_movil_se_pregunta_igual(self, mock_requests, monkeypatch):
+        """Lo confirma la llamada: el móvil sin cobertura no puede impedirlo."""
+        monkeypatch.setattr(main, "AVISOS_MOVIL", True)
+        monkeypatch.setattr(main, "_movil_vivo", lambda: False)
+        avisos = []
+        monkeypatch.setattr(main, "_notificar", lambda *a, **k: avisos.append(a))
+        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+        r = main._proponer_en_movil("crear_tarea", {"titulo": "Pasar el contrato"})
+        assert r["ok"] is True and r["canal"] == "ninguno" and avisos == []
+        assert r["linea_para_la_llamada"] == f"✅ CONFIRMAR: {r['id']}"
+
+    def test_si_falla_el_aviso_se_pregunta_igual(self, mock_requests, monkeypatch):
+        monkeypatch.setattr(main, "_movil_vivo", lambda: True)
+
+        def _falla(*a, **k):
+            raise RuntimeError("sin red")
+        monkeypatch.setattr(main, "_notificar", _falla)
+        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+        r = main._proponer_en_movil("crear_tarea", {"titulo": "Pasar el contrato"})
+        assert r["ok"] is True and r["linea_para_la_llamada"]
+
+    def test_borrar_tambien_la_lleva(self, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "AVISOS_MOVIL", True)
         monkeypatch.setattr(main, "_ultimo_sondeo_avisos", main.time.time())
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
@@ -395,4 +434,4 @@ class TestLaPropuesta:
             "invitados": 0})
         mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
         r = main._proponer_en_movil("borrar_evento", {"evento_id": "ev1"})
-        assert r["ok"] is True and "linea_para_la_llamada" not in r
+        assert r["ok"] is True and r["linea_para_la_llamada"] == f"✅ CONFIRMAR: {r['id']}"
