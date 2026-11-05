@@ -129,15 +129,19 @@ dos motores del chat). Es una frontera de código: no depende de que el modelo s
 |---|---|
 | Mirar lo tuyo: agenda, Moodle, recordatorios, finanzas… (`_TRAS_AJENO_SE_PUEDE`) | Sí |
 | Lo que se confirma: crear una cita, mandar un WhatsApp | Se propone, con su botón |
-| Lo que actúa sin confirmar: `recordarme`, `recordar`, notificar, luces, el PC… | No |
+| Lo que has pedido tú en ese mensaje: «mira lo de Aimar y ponme un aviso» (`_AJENO_SI_LO_PIDES`) | Sí, sin preguntar |
+| Lo que actúa sin confirmar y no has pedido: `recordarme`, `recordar`, notificar, luces, el PC… | No |
 | Lo que lanza código aunque tenga botón: encargos, desplegar, un MCP nuevo (`_AJENO_NI_CON_BOTON`) | No |
-| Salir a la web desde un WhatsApp: una URL inventada es por donde se sacaría lo leído | No |
+| Abrir una web desde un WhatsApp sin que lo pidas: una URL inventada es por donde se sacaría lo leído | No |
 
-- **En tu siguiente mensaje vuelve a poder.** «Pepe pide que te deje un aviso a las 6. ¿Te
-  lo pongo?» «Sí.» Ese turno no ha leído nada, y el historial solo lleva texto, nunca el
-  resultado de una herramienta. Es un paso más cuando de verdad quieres las dos cosas de
-  una vez («mira lo de Aimar y ponme un aviso»), y es a propósito: el código no sabe si la
-  idea del aviso es tuya o del mensaje.
+- **Leer no pide permiso, y lo que ya has pedido tampoco.** `whatsapp_leer` nunca se
+  confirma. Y «mira lo de Aimar y ponme un aviso» sale a la primera: el aviso se busca en tu
+  mensaje de este turno, que ningún texto ajeno puede tocar, y no en lo leído ni en el
+  historial. Valen las órdenes en imperativo: «mira si Aimar me ha avisado» no pide ningún
+  aviso. Un grupo que pida un aviso sigue sin poder, porque tú no lo has pedido.
+- **Si la idea es del mensaje, te pregunta una vez.** «Pepe pide que te deje un aviso a las
+  6. ¿Te lo pongo?» «Sí.» Ese turno no ha leído nada, y el historial solo lleva texto, nunca
+  el resultado de una herramienta.
 - **Las listas son cerradas.** Una herramienta nueva nace bloqueada tras leer texto ajeno,
   y hay que apuntarla a sabiendas. Traen texto ajeno (`_HERRAMIENTAS_AJENAS`): WhatsApp, lo
   que dijeron en una llamada, el parte del buzón, los documentos, la web, la pantalla del
