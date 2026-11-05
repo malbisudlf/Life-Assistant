@@ -113,6 +113,13 @@ jobs:
           for intento in 1 2 3; do
             timeout 180 npx playwright install-deps chromium && exit 0
             echo "Intento $intento fallido, reintentando"
+            # El timeout mata npx pero no el apt-get que lanzó: queda huérfano con el
+            # bloqueo de dpkg y los reintentos fallaban al instante (CI de main,
+            # 2026-11-05). Se espera a que termine, con tope, antes de volver a probar.
+            for _ in $(seq 1 60); do
+              sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+              sleep 5
+            done
           done
           exit 1
       - name: Tests end-to-end
