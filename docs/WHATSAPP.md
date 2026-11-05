@@ -160,6 +160,24 @@ ignorase «MUY IMPORTANTE» no bastaba, esas palabras y las mayúsculas se quita
 mensajes a mano. Con casos inventados acertó 29 de 30 en dos pasadas; falló un plan cuyo día estaba
 en un mensaje anterior.
 
+**La primera noche.** A los 7 minutos de encenderla avisó de que «le están esperando» por un
+«En 5'» de un contacto. Decirle al modelo que «ya voy» o «llego en 10» no lo son no sirvió: siguió
+fallando cuatro de cuatro. Ahora, para que valga, alguno de los mensajes nuevos tiene que decir
+que esperan o dónde están (`_WA_VIG_ESPERANDO`).
+
+**Las notas de voz.** Son buena parte de los planes: en una semana llegaron 16 a chats
+individuales y 42 a grupos, y una quedada para el gimnasio se cerró casi entera por audio. El
+puente las baja a memoria, las manda al oído de jacobo (`POST /transcribir`, Whisper local) de una
+en una y cambia `[audio]` por `[audio] lo que dice`. Una nota de 22 s tarda 1,5 s, y una de 3:39,
+14 s. El audio no se escribe en disco ni sale de casa; **el texto sí va al clasificador**, a OpenAI
+como cualquier mensaje. Hasta 5 minutos y 16 MB. Las del historial del vínculo no se transcriben.
+
+La ráfaga espera a la transcripción: si lleva un `[audio]` a secas, se atiende cuando llega el
+texto o a los 3 minutos (`WA_VIG_AUDIO_ESPERA_SEG`). Si jacobo está caído no hay OpenAI de reserva:
+ese audio se queda sin leer para siempre, y la ráfaga se clasifica sin él. Con `PUENTE_OIDO_URL` y
+`PUENTE_OIDO_TOKEN` en `whatsapp.env` se enciende; sin ellas, todo sigue como antes. Al leerla por
+teléfono o por el chat, una nota se corta a 500 caracteres, unos 30 s, como cualquier mensaje.
+
 **Lo demás que hace.** Si la cita ya está en el calendario (a ±30 minutos y con ese nombre o ese
 asunto en el título), no avisa; si a esa hora hay otra cosa, lo dice («Le coincide con…»). En clase
 espera a que termine (`_espera_por_lugar`), y una quedada caduca a su hora: un «en 10 minutos»
@@ -231,8 +249,8 @@ pasar es que algo ocurra sin que lo veas, y eso es lo que aquí se cierra.
   los chats individuales; los grupos, con `grupos=true` o pidiendo uno por su chat.
 - **Lo que mandas desde el puente no vuelve como evento**: se guarda a mano al enviarlo.
   Lo que mandas desde el móvil sí llega, y así Jarvis sabe si ya contestaste.
-- **Un audio es `[audio]`**, sin transcribir. Transcribirlo con «oído» en jacobo es lo
-  siguiente natural, si hace falta.
+- **Una nota de voz es `[audio] lo que dice`** si es de un contacto de tu agenda, o tuya en
+  ese chat. Las de los grupos y las de desconocidos se quedan en `[audio]`. Ver «Las notas de voz».
 - **El texto del envío no se recorta** al guardarlo para el botón del móvil (`_args_de`
   corta el resto de argumentos a 300 caracteres): recortado, se mandaría otra cosa.
 
