@@ -438,8 +438,8 @@ class TestPelisTelefono:
         r = self._llamar(client, "pelis_borrar", {"tmdb_id": 238, "titulo": "El padrino"})
         salida = json.loads(r["result"]["content"][0]["text"])
         assert salida["estado"] == "pendiente_en_el_movil"
-        # Borrar se lleva el fichero: solo con botón, nunca con un «sí» dicho.
-        assert "linea_para_la_llamada" not in salida
+        # Se lleva el fichero: se oye antes del sí, y hasta el sí no pasa nada.
+        assert salida["linea_para_la_llamada"] == f"✅ CONFIRMAR: {salida['id']}"
         assert not arr.called("DELETE", RADARR)
         aviso = main._avisos_movil[0]
         assert aviso["titulo"] == "🎬 ¿Lo hago?"

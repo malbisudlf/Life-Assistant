@@ -23943,11 +23943,7 @@ def _evento_graph(evento_id: str) -> Optional[dict]:
             "todo_el_dia": bool(ev.get("isAllDay")),
             # Borrar una reunión que organizaste les manda la cancelación a los invitados:
             # eso sale de casa, y la frase del botón tiene que decirlo.
-            "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0,
-            # Para el «sí» hablado (`_se_confirma_hablando`): mover algo que no es tuyo, o
-            # que tiene gente, se queda en el botón.
-            "organizo":   bool(ev.get("isOrganizer")),
-            "asistentes": len(ev.get("attendees") or [])}
+            "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0}
 
 
 def _idea_guardada(idea_id: str) -> Optional[dict]:
@@ -24023,7 +24019,13 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
             return {"error": "No has dicho qué cambiar."}
         antes = (f"{_dia_txt(actual['inicio'])}, todo el día" if actual["todo_el_dia"]
                  else f"{_dia_txt(actual['inicio'])} a las {_hhmm(actual['inicio'])}")
-        return {"texto": f"«{actual['titulo']}» ({antes}) " + " y ".join(cambios) + "."}
+        texto = f"«{actual['titulo']}» ({antes}) " + " y ".join(cambios) + "."
+        n = actual.get("invitados")
+        if n:
+            # Se confirma también de oído: lo que le llega a otros tiene que sonar.
+            texto += (f" Les llegará el cambio a {n} invitados." if n > 1
+                      else " Le llegará el cambio al invitado.")
+        return {"texto": texto}
 
     if herramienta == "borrar_evento":
         actual = _evento_graph(str(args.get("evento_id") or "").strip())
@@ -24160,19 +24162,14 @@ def _guardar_pregunta_con_accion(pid: str, texto: str, opciones: list, herramien
 
 
 def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
-    """Manda al móvil una acción para que la confirmes con un botón. NO la hace."""
+    """Deja una acción propuesta en la llamada, que te la pregunta de viva voz, y además en
+    el móvil con un botón si está recogiendo avisos. NO la hace."""
     if herramienta not in PREGUNTAS_ACCIONES:
         return {"ok": False, "motivo": "Eso no se confirma desde el móvil."}
     args = _args_de(herramienta, argumentos)
     desc = _describir_accion(herramienta, args)
     if "error" in desc:
         return {"ok": False, "motivo": desc["error"]}
-    if not _movil_vivo():
-        # Por correo no hay botón, y sin botón no hay confirmación: mejor no mandarlo.
-        return {"ok": False,
-                "motivo": "El móvil no está recogiendo notificaciones ahora, así que no "
-                          "puedo pedirle que lo confirme. Que lo haga en el chat del "
-                          "dashboard, donde hay botón."}
     ahora = time.time()
     _preguntas_enviadas[:] = [t for t in _preguntas_enviadas if ahora - t < 3600]
     if len(_preguntas_enviadas) >= PREGUNTAS_MAX_HORA:
@@ -24185,25 +24182,26 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
         return {"ok": False, "motivo": "No he podido guardarlo para que lo confirme."}
     acciones = [{"action": f"LA_APAGAR_{PREGUNTA_PREFIJO}{i}-{pid}", "title": op}
                 for i, op in enumerate((PREGUNTA_SI, PREGUNTA_NO), 1)]
-    try:
-        canal = _notificar(f"{PREGUNTAS_EMOJI.get(herramienta, '📅')} ¿Lo hago?", texto,
-                           aviso_id=pid, acciones=acciones)
-    except Exception as e:
-        logger.warning("Jarvis: no se pudo mandar la confirmación %s (%s)", pid, e)
-        return {"ok": False, "motivo": "No he podido mandarlo al móvil."}
+    # El móvil es un extra: lo que confirma es la llamada. Que esté sin cobertura o que el
+    # aviso falle no puede impedir preguntárselo a quien está al teléfono. Sin móvil vivo no
+    # se manda nada, porque por correo no habría botón.
+    canal = "ninguno"
+    if _movil_vivo():
+        try:
+            canal = _notificar(f"{PREGUNTAS_EMOJI.get(herramienta, '📅')} ¿Lo hago?", texto,
+                               aviso_id=pid, acciones=acciones)
+        except Exception as e:
+            logger.warning("Jarvis: no se pudo mandar la confirmación %s (%s)", pid, e)
     _preguntas_enviadas.append(ahora)
-    logger.info("Jarvis: %s propuesto al móvil (%s)", herramienta, pid)
-    salida = {"ok": True, "estado": "pendiente_en_el_movil", "id": pid, "canal": canal,
-              "lo_que_se_hara": texto,
-              "nota": "NO está hecho. Le ha llegado al móvil con un botón «Sí, hazlo»: "
-                      "hasta que lo pulse no cambia nada. Para saber si lo ha pulsado y "
-                      "cómo ha ido, respuesta_notificacion con este id (y esperar=20 si "
-                      "estáis hablando)."}
-    if herramienta in PREGUNTAS_HABLADAS:
-        # Por teléfono (parche 20): con esta línea en la respuesta, la llamada le lee lo
-        # que se hará y le deja contestar sí o no de viva voz, sin coger el móvil.
-        salida["linea_para_la_llamada"] = f"✅ CONFIRMAR: {pid}"
-    return salida
+    logger.info("Jarvis: %s propuesto en la llamada (%s), móvil: %s", herramienta, pid, canal)
+    # Con esta línea en la respuesta, la llamada le lee lo que se hará y le deja contestar
+    # sí o no de viva voz (parche 20).
+    return {"ok": True, "estado": "pendiente_en_el_movil", "id": pid, "canal": canal,
+            "lo_que_se_hara": texto,
+            "linea_para_la_llamada": f"✅ CONFIRMAR: {pid}",
+            "nota": "NO está hecho. Pon linea_para_la_llamada tal cual en tu respuesta: la "
+                    "llamada le lee lo que se hará y él contesta sí o no hablando. Un sí "
+                    "hablado vale, no le mandes al móvil. Tú no confirmas nada."}
 
 
 def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) -> str:
@@ -24299,19 +24297,17 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 #     modo llamada del dashboard (`esConfirmacionHablada`) y que `_sio_no` de Twilio.
 #   - **Su propio token** (`TELEFONO_CONFIRMAR_TOKEN`), que vive en la voice-app y no en
 #     la configuración de Claude: el del MCP del teléfono no vale aquí.
-#   - **Solo lo que se deshace con la misma facilidad con que se hace**
-#     (`PREGUNTAS_HABLADAS`): crear una cita, una tarea o unos bloques, y mover una cita
-#     tuya sin invitados; desde el 2026-10-27, pedir una película y ponerla en Jellyfin
-#     (en el coche no hay botón que pulsar, y las dos se deshacen con otra frase).
-#     Borrar sigue siendo solo con botón —una película borrada se lleva su fichero—, y
-#     mover una reunión con gente también (les llega la actualización).
-#     La excepción, a sabiendas: mandar un WhatsApp (2026-10-30). No se deshace (se puede
-#     borrar, pero ya lo habrán visto), y entra igual porque es para el coche, donde no
-#     hay botón que pulsar. Lo que lo sostiene es que la llamada te lee el nombre y el
-#     texto ENTEROS antes del sí, y que solo va a quien ya tienes. Programarlo para luego
-#     (2026-11-02) entra por lo mismo, y la llamada lee también la hora.
-#   - **Solo recién propuesta** (`PREGUNTA_HABLADA_SEG`): es la respuesta a lo que se
-#     acaba de decir en la llamada, no a una pregunta de hace media hora.
+#   - **Todo lo que se propone por teléfono** (`PREGUNTAS_HABLADAS`, pedido por Mikel el
+#     2026-11-05: «que acepte el sí en el teléfono, no en el móvil»). Empezó siendo solo lo
+#     que se deshace, y fue quedando claro que en el coche no hay botón que pulsar. Entran
+#     también borrar una cita, una nota o una película (esta se lleva su fichero), mover una
+#     reunión con gente y mandar un WhatsApp. Lo que lo sostiene es que la llamada lee la
+#     frase ENTERA antes del sí, con los invitados a los que les llegará, y que el sí lo
+#     decide la voice-app. La alarma, el garaje y las cámaras no pasan por aquí
+#     (`_casa_pide_confirmar`): cualquiera que diga «Jarvis» despierta el modo coche, y
+#     hasta que la huella de voz esté enganchada, eso se queda en el botón.
+#   - **Solo de esta llamada** (`PREGUNTA_HABLADA_SEG`): no vale para una pregunta de ayer.
+#     La llamada vuelve a leer la frase antes del sí, así que nadie contesta a ciegas.
 #   - La primera respuesta vale, por el mismo PATCH condicional que el botón: si ya lo
 #     pulsaste en el móvil, el «sí» hablado no hace nada más.
 # Lo que esto NO protege, y conviene tenerlo claro: al otro lado hay una sesión con shell
@@ -24319,10 +24315,8 @@ def _ejecutar_accion_guardada(pid: str, fila: dict) -> dict:
 # normal; contra una sesión que se salta el RUNBOOK no protege nada que no estuviera ya
 # expuesto. Ver «El sí dicho por teléfono» en `docs/JARVIS.md`.
 TELEFONO_CONFIRMAR_TOKEN = os.getenv("TELEFONO_CONFIRMAR_TOKEN", "")
-PREGUNTAS_HABLADAS       = {"crear_evento", "editar_evento", "reservar_bloques", "crear_tarea",
-                            "pelis_pedir", "jellyfin_reproducir", "whatsapp_enviar",
-                            "whatsapp_programar"}
-PREGUNTA_HABLADA_SEG     = int(os.getenv("PREGUNTA_HABLADA_SEG", "180"))
+PREGUNTAS_HABLADAS       = PREGUNTAS_ACCIONES
+PREGUNTA_HABLADA_SEG     = int(os.getenv("PREGUNTA_HABLADA_SEG", "1800"))
 
 
 def _se_confirma_hablando(fila: dict) -> str:
@@ -24338,12 +24332,6 @@ def _se_confirma_hablando(fila: dict) -> str:
     creado = _fecha_utc(fila.get("creado"))
     if not creado or (datetime.now(timezone.utc) - creado).total_seconds() > PREGUNTA_HABLADA_SEG:
         return "Hace demasiado que se propuso: se confirma con el botón del móvil."
-    if herramienta == "editar_evento":
-        actual = _evento_graph(str((accion.get("argumentos") or {}).get("evento_id") or ""))
-        if not actual:
-            return "No encuentro ese evento."
-        if not actual.get("organizo") or actual.get("asistentes"):
-            return "Es una reunión con más gente: se confirma con el botón del móvil."
     return ""
 
 
@@ -34046,11 +34034,9 @@ _MCP_NOTAS_TELEFONO = {
                        "los lee sin pasar por ti. Los nombres son los de su agenda; quien no "
                        "está en ella sale por su número."),
 }
-_MCP_AVISO_MOVIL = (" Por teléfono no se hace al momento: le llega al móvil con un botón "
-                    "«Sí, hazlo» y se hace cuando lo pulse. Díselo, y no digas que está "
-                    "hecho hasta que respuesta_notificacion diga accion_hecha. Si la "
-                    "respuesta trae linea_para_la_llamada, ponla tal cual en tu respuesta: "
-                    "la llamada le leerá lo que se hará y podrá contestar sí o no hablando.")
+_MCP_AVISO_MOVIL = (" Por teléfono no se hace al momento: pon la linea_para_la_llamada de la "
+                    "respuesta tal cual en la tuya, y la llamada le leerá lo que se hará y él "
+                    "contestará sí o no hablando. No le mandes al móvil.")
 
 assert _MCP_SERVIDOR_HERRAMIENTAS <= set(_JARVIS_HERRAMIENTAS), (
     "La lista blanca del MCP del teléfono apunta a una herramienta que ya no existe "

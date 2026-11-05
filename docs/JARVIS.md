@@ -1577,11 +1577,12 @@ un modelo** no se rompe, porque aquí no lo oye un modelo:
   vive en la voice-app y no en la configuración de Claude) responde exactamente como el
   botón (`_responder_pregunta`, PATCH condicional: la primera respuesta vale) y retira la
   notificación del móvil.
-- **Solo lo reversible** (`PREGUNTAS_HABLADAS`): crear una cita, reservar bloques, apuntar
-  una tarea y mover una cita tuya **sin invitados** (`_evento_graph` dice `organizo` y
-  `asistentes`); desde el 2026-10-27, pedir una película y ponerla en Jellyfin. Borrar
-  algo (una película incluida), o mover una reunión con gente, sigue siendo solo botón.
-- **Solo recién propuesto** (`PREGUNTA_HABLADA_SEG`, 180 s): es la respuesta a lo que se
+- **Todo lo que se propone por teléfono** (`PREGUNTAS_HABLADAS`, desde el 2026-11-05), borrar
+  incluido: en el coche no hay botón. La frase se lee entera antes del sí, con los invitados
+  a los que les llegará. El móvil es un extra: sin él la llamada pregunta igual. La alarma, el
+  garaje y las cámaras (`_casa_pide_confirmar`) no pasan por aquí, porque cualquiera que diga
+  «Jarvis» despierta el modo coche y la huella de voz no está enganchada.
+- **Solo de esta llamada** (`PREGUNTA_HABLADA_SEG`, 30 min): es la respuesta a lo que se
   acaba de decir, no a una notificación de hace media hora.
 - **Qué cuenta como sí** lo decide la voice-app, no el modelo (`siONo`, parche 35): la frase
   entera hecha de palabras de sí y de relleno («Sí, créalo, anda, venga»). «Sí, pero a las

@@ -95,9 +95,9 @@ Desde el 2026-10-27 («los mismos permisos que el Jarvis de Telegram») también
 - **Pedir y borrar** van al móvil con el botón «Sí, hazlo» (`PREGUNTAS_ACCIONES`, el
   mismo camino que el calendario: «Lo que se confirma en el móvil» en `docs/JARVIS.md`).
   La frase la escribe `describir` con los datos de Radarr, igual que el botón de
-  Telegram, y el «sí» ejecuta lo guardado. **Pedir** se puede confirmar además hablando
-  (`PREGUNTAS_HABLADAS`): en el coche no hay botón, y se deshace borrándola. **Borrar**
-  no: se lleva el fichero y no hay papelera, así que solo con el botón.
+  Telegram, y el «sí» ejecuta lo guardado. Las dos se pueden confirmar además hablando
+  (`PREGUNTAS_HABLADAS`), porque en el coche no hay botón. **Borrar** se lleva el fichero y
+  no hay papelera, y la frase que se lee antes del sí lo dice.
 - **Probar y arreglar los indexadores** van sin preguntar (`_MCP_SERVIDOR_ACCIONES`),
   como en el chat. Lo que traen de cada web es el porqué del fallo, escrito por Prowlarr
   y recortado (`_prowlarr_fallo`). Tardan hasta dos minutos: su descripción le dice que

@@ -66,9 +66,8 @@ Pedido el 2026-11-02.
 2. **Enviar se confirma.** Es la única acción de Jarvis que le llega a otra persona. La
    frase del botón la escribe el backend con un nombre seguro (regla 7) y el texto entero
    (`_describir_whatsapp_enviar`): lo que lees es lo que se manda. Por teléfono también
-   vale el «sí» hablado (`PREGUNTAS_HABLADAS`), y es la excepción a «solo lo que se
-   deshace»: un WhatsApp no se deshace, pero el caso es el coche, donde no hay botón. La
-   llamada te lee el nombre y el texto antes de preguntar.
+   vale el «sí» hablado (`PREGUNTAS_HABLADAS`): un WhatsApp no se deshace, pero el caso es
+   el coche, donde no hay botón. La llamada te lee el nombre y el texto antes de preguntar.
 3. **Solo a quien ya tienes.** El puente rechaza un chat que no esté entre tus chats ni en
    tu agenda, y el backend no propone nada que el puente no reconozca. Un número sacado
    de un mensaje de otro no recibe nada.
