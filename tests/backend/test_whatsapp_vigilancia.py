@@ -445,9 +445,11 @@ class TestLasRafagas:
 
     def test_lo_ya_visto_va_de_contexto(self, puente, monkeypatch):
         cliente = _modelo(monkeypatch, _ficha("nada"), _ficha("nada"))
-        puente.mensajes = [_m("¿a las 19?", hace=500)]
+        # El mismo mensaje, con su misma hora, como lo devuelve el puente.
+        antes = _m("¿a las 19?", hace=500)
+        puente.mensajes = [antes]
         main._wa_vig_pasada()
-        puente.mensajes = [_m("¿a las 19?", hace=500), _m("vale", hace=100)]
+        puente.mensajes = [antes, _m("vale", hace=100)]
         main._wa_vig_pasada()
         contenido = cliente.recibido[1]["messages"][1]["content"]
         assert "ANTERIORES" in contenido and "¿a las 19?" in contenido.split("NUEVOS")[0]
