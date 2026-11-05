@@ -52,6 +52,10 @@ voice-app (caja, parche 32)
 backend (hilo que sigue la llamada) ── «📞 Erik: dice que sí, a las 14:30» al móvil
 ```
 
+**Sin barge-in** (parche 35, 2026-11-05, a petición de Mikel): Jarvis dice cada frase entera
+con el oído cerrado. Lo que el otro diga encima no le corta y no se oye; se escucha desde que
+Jarvis acaba.
+
 Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
 
 | Herramienta | Qué hace | ¿Se confirma? |

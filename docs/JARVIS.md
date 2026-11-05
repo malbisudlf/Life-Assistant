@@ -1583,6 +1583,9 @@ un modelo** no se rompe, porque aquí no lo oye un modelo:
   algo (una película incluida), o mover una reunión con gente, sigue siendo solo botón.
 - **Solo recién propuesto** (`PREGUNTA_HABLADA_SEG`, 180 s): es la respuesta a lo que se
   acaba de decir, no a una notificación de hace media hora.
+- **Qué cuenta como sí** lo decide la voice-app, no el modelo (`siONo`, parche 35): la frase
+  entera hecha de palabras de sí y de relleno («Sí, créalo, anda, venga»). «Sí, pero a las
+  once» va a Claude, que no confirma: solo puede hacer que la llamada lo pregunte otra vez.
 - Lo que **no** protege: la sesión del teléfono tiene shell en `caja` y ya puede leer
   `backend.env` entero. El token aparte separa el camino normal; contra una sesión que se
   saltara el RUNBOOK no protege nada que no estuviera ya expuesto. La separación de verdad

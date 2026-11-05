@@ -316,7 +316,10 @@ en espera» de `telefono/PARCHES.md`.
 1. **El backend te llama en modo coche**: `POST /telefono/modo-coche`, con el token del
    iPhone (`HEALTH_INGEST_TOKEN`, el mismo del Atajo del cargador). Sin mirar si estás
    despierto (lo pides tú), sin insistir si no lo coges, colgando si descuelga el buzón y
-   una vez cada `MODO_COCHE_PAUSA_MIN` (10): CarPlay se reconecta en cada parada corta.
+   sin pausa entre llamadas: `MODO_COCHE_PAUSA_MIN` vale 10 por defecto (CarPlay se reconecta
+   en cada parada corta), pero en `caja` está a **0** desde el 2026-11-05, a petición de
+   Mikel: la pausa también le impedía lanzarlo a mano. Si la automatización de CarPlay vuelve
+   a sonar en cada parada, este es el motivo.
 2. **Dos automatizaciones de Atajos, una por coche**, con la misma acción:
    - **El coche con CarPlay**: Atajos → Automatización → Nueva → **CarPlay** → *Se
      conecta* → *Ejecutar inmediatamente*.

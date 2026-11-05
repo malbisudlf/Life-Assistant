@@ -28,6 +28,7 @@ otras personas por la línea fija de O2 (ver «El parche 32»). Y el 33 (2026-11
 como el 13 no toca su código sino su `docker-compose.yml`: drachtio y FreeSWITCH salen
 por la IP de la LAN, sin lo que el 32 no se registra ni se oye (ver «El parche 33»).
 Y el 34 (2026-11-04): la llamada, de 15 s a unos 5, y la tele de la sala (ver «El parche 34»).
+Y el 35 (2026-11-05): sin barge-in al llamar a otros, y el sí hablado se oye (ver «El parche 35»).
 
 > **Viven en `~/.claude-phone-cli/`, que es un clon del repositorio de
 > NetworkChuck, no de éste. No están versionados en ningún sitio.** Un
@@ -1737,6 +1738,50 @@ tramo, pero desde fuera no se puede distinguir.
 
 `telefono/jacobo-caja-negra.sh` (sin aplicar: se ejecuta con `sudo` en jacobo cuando vuelva) deja en su
 disco qué tramo cae primero, el registro del arranque anterior, y que GRUB no se pare en su menú.
+
+## El parche 35: sin barge-in al llamar a otros, y el sí hablado se oye
+
+Del 2026-11-05, aplicado ese día (`telefono/parche-35.diff`, sobre la copia de `caja` con el 34;
+vuelta atrás: imagen `antes-p35` y los `*.bak-20261105-antes-p35`). **Sin probar aún en una
+llamada real.**
+
+**Llamadas a otros (`conversacion-tercero.js`):** Jarvis dice cada frase entera con el oído
+cerrado (`endpoint.play`, sin `decirInterrumpible`). Lo que el otro diga encima no se oye. Las
+llamadas de Mikel con Jarvis siguen siendo interrumpibles.
+
+**El sí hablado.** Mikel dijo que sí a varias preguntas y acabó con Jarvis mandándole al botón
+y diciendo que «un sí hablado no vale». Lo que había en los registros:
+
+| Lo que dijo | Qué pasó | Arreglo |
+|---|---|---|
+| «Sí» suelto (340 ms) | El detector tira lo que no llega a 350 ms | Contestando a una pregunta, 200 ms (`esperarRespuestaCorta`) |
+| «Sí» entre ruido (520 ms, 11 % de voz) | El detector pide un 12 % | Contestando a una pregunta, 5 % |
+| «Sí, créalo, anda, venga, créalo» | La lista exigía una frase exacta | Palabra a palabra, con relleno (`siONo`) |
+| «Sí, sí, audio, venga» | Palabra mal oída: va a Claude | Si suena a sí (`pareceSi`), se pregunta una vez más |
+| «Sí, sí…» a los 7 s, en el coche | Los 8 s de seguir hablando la cortaban a medias y se dormía | 20 s con pregunta en el aire (`CONFIRMAR_ESPERA_MS`) |
+| «Vale», en el coche | `esFinDeTurno` lo tomaba por «vuelve a dormirte» | Con pregunta en el aire, un sí o un no va primero |
+| Ruido, en el coche | Transcripción vacía: se dormía | Con pregunta en el aire, sigue esperando |
+| «Pero si le he dado que sí» | Claude contestaba que hacía falta el botón | El aviso y el RUNBOOK: pone otra vez `✅ CONFIRMAR` y la llamada pregunta |
+
+**Lo que no cambia:** el sí lo sigue decidiendo la voice-app y el backend lo vuelve a comprobar
+(`PREGUNTA_HABLADA_SEG`). Claude nunca confirma: como mucho hace que se pregunte otra vez. «Sí,
+pero a las once», «Sí, a las nueve» o «Si no» no son un sí.
+
+`test/parche35.test.js`: 12 casos con las frases de esas llamadas; contra el código de antes
+fallan 11. En `test/parche32.test.js`, uno nuevo para el barge-in, que contra el código de antes
+falla. **La suite entera da 133 en verde y 26 en rojo; los 26 ya fallaban antes de este parche
+y son los mismos** (voz, oído y `pensar`; varios con `Cannot set properties of undefined
+(setting 'httpsAgent')`). Sin arreglar.
+
+**Aplicarlo** (lib/ va dentro de la imagen, así que editar los ficheros no cambia nada hasta
+reconstruir):
+
+```bash
+curl -s localhost:3010/api/calls                                         # sin llamadas en curso
+docker tag claude-phone-voice-app:latest claude-phone-voice-app:antes-p35
+docker compose -f ~/.claude-phone/docker-compose.yml up -d --build voice-app
+tr -d '\r' < RUNBOOK.md > ~/telefono-jarvis/CLAUDE.md                    # el del repositorio
+```
 
 ## Lo que además NO está en el repositorio original
 

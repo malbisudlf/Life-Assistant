@@ -1,0 +1,639 @@
+--- a/voice-app/lib/conversacion-tercero.js
++++ b/voice-app/lib/conversacion-tercero.js
+@@ -19,9 +19,11 @@
+  *     voz mientras habla el otro (`prepararGuion`): si la respuesta es del guion, suena al
+  *     instante. Y se transcribe con el modelo pequeño del oído (`conModeloRapido`).
+  *   - Nada de lectura, confirmaciones ni escucha pasiva: aquí no hay nada de eso que hacer.
++ *   - **Sin barge-in (parche 35).** Jarvis dice su frase entera, con el oído cerrado: lo
++ *     que el otro diga encima no le corta ni cuenta como turno. Mikel lo quiso así
++ *     (2026-11-05). En sus propias llamadas con Jarvis se le sigue pudiendo cortar.
+  */
+ 
+-const { decirInterrumpible } = require('./turno-rapido');
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ 
+ // El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
+@@ -286,8 +288,8 @@
+     if (o.onTurno) o.onTurno('jarvis', texto);
+     const lista = previa || guion.get(texto);
+     const url = (lista && await lista) || await o.ttsService.generateSpeech(texto, voiceId);
+-    if (!activa) return false;
+-    return decirInterrumpible(endpoint, session, url, log);
++    if (!activa) return;
++    await endpoint.play(url);
+   };
+ 
+   try {
+@@ -347,14 +349,13 @@
+       return { endReason: fin };
+     }
+ 
+-    let interrumpio = await decir(o.apertura, o.aperturaUrl);
++    await decir(o.apertura, o.aperturaUrl);
+     let silencios = 0;
+     let turnos = 0;
+ 
+     while (activa && turnos < TURNOS_MAX) {
+       turnos++;
+-      if (!interrumpio) session.setCaptureEnabled(true);
+-      interrumpio = false;
++      session.setCaptureEnabled(true);
+       let frase = null;
+       try {
+         frase = await session.waitForUtterance({ timeoutMs: ESPERA_TURNO_MS });
+@@ -365,7 +366,7 @@
+       if (!frase) {
+         silencios++;
+         if (silencios >= 2) { fin = 'silence'; break; }
+-        interrumpio = await decir(FRASES.hola);
++        await decir(FRASES.hola);
+         continue;
+       }
+       silencios = 0;
+@@ -386,7 +387,7 @@
+         return { endReason: fin };
+       }
+       if (dicho.length < 2) {
+-        interrumpio = await decir(FRASES.repite);
++        await decir(FRASES.repite);
+         continue;
+       }
+       log('TERCERO: oído «' + dicho.slice(0, 80) + '»');
+@@ -396,12 +397,11 @@
+       const r = await preguntarAlBackend(o.tercero, dicho, { log: log, fetch: o.fetch });
+       if (!activa) break;
+       if (r.colgar) {
+-        // La despedida entera: si le corta, ya se ha despedido él.
+         await decir(r.decir);
+         fin = r.fallo ? 'error' : 'goodbye';
+         break;
+       }
+-      interrumpio = await decir(r.decir);
++      await decir(r.decir);
+     }
+ 
+     if (activa && turnos >= TURNOS_MAX && fin === 'max_turns') await decir(FRASES.tope);
+--- a/voice-app/lib/audio-fork.js
++++ b/voice-app/lib/audio-fork.js
+@@ -49,6 +49,8 @@
+ 
+     this.captureEnabled = true;
+     this._pcmEndian = null;
++    // Parche 35: contestando a «¿lo hago?» vale un «sí» suelto. Ver esperarRespuestaCorta.
++    this._respuestaCorta = false;
+ 
+     this._preRollChunks = [];
+     this._preRollBytes = 0;
+@@ -102,9 +104,23 @@
+       this._resetUtterance();
+       this._bargeArmado = false;
+       this._sinRecoger = null;
++      this._respuestaCorta = false;
+     }
+   }
+ 
++  /**
++   * Parche 35: el turno de contestar a una pregunta de sí o no, hasta que se cierre el oído.
++   * Un «sí» dura ~300 ms y en el coche va rodeado de ruido: con los 350 ms y el 12 % de voz
++   * de siempre se tiraba (340 ms, y 520 ms al 11 %, en llamadas reales del 2026-11-04 y 05).
++   */
++  esperarRespuestaCorta() {
++    this._respuestaCorta = true;
++  }
++
++  _vozMinimaMs() {
++    return this._respuestaCorta ? Math.min(this.minSpeechMs, 200) : this.minSpeechMs;
++  }
++
+   /** Abre el oído mientras Jarvis habla (parche 16). Ver lib/turno-rapido.js. */
+   armarBargeIn() {
+     this._resetUtterance();
+@@ -177,8 +193,8 @@
+ 
+     // For DTMF-triggered finalization, be more lenient with requirements
+     const isDtmfTriggered = reason === 'dtmf_trigger';
+-    const minSpeechRequired = isDtmfTriggered ? 100 : this.minSpeechMs;
+-    const minRatioRequired = isDtmfTriggered ? 0.05 : 0.12;
++    const minSpeechRequired = isDtmfTriggered ? 100 : this._vozMinimaMs();
++    const minRatioRequired = (isDtmfTriggered || this._respuestaCorta) ? 0.05 : 0.12;
+ 
+     if (speechMs < minSpeechRequired || speechRatio < minRatioRequired) {
+       console.log('[AUDIO-DEBUG] Utterance REJECTED: speechMs=' + Math.round(speechMs) + ' < ' + minSpeechRequired + ' OR speechRatio=' + speechRatio.toFixed(2) + ' < ' + minRatioRequired);
+@@ -357,7 +373,7 @@
+ 
+     if (this._anticipoMs > 0 && !this._pausaEmitida && this._silenceMs >= this._anticipoMs &&
+         this._silenceMs < this.endSilenceMs && this.listenerCount('pausa') > 0 &&
+-        this._chunkDurationMs(this._speechBytes) >= this.minSpeechMs) {
++        this._chunkDurationMs(this._speechBytes) >= this._vozMinimaMs()) {
+       this._pausaEmitida = true;
+       this._pausa = { audio: Buffer.concat(this._utteranceChunks) };
+       this.emit('pausa', this._pausa);
+--- a/voice-app/lib/confirmacion.js
++++ b/voice-app/lib/confirmacion.js
+@@ -20,7 +20,12 @@
+  * El backend vuelve a comprobarlo todo: solo lo que se deshace fácil, recién propuesto
+  * y sin contestar. Si ya lo pulsaste en el móvil, el «sí» hablado no hace nada más.
+  *
+- * Variables: LECTURA_URL (el backend, como la lectura) y CONFIRMAR_TOKEN.
++ * Parche 35: «Sí, créalo, anda, venga» también es un sí. Vale la frase hecha SOLO de
++ * palabras de sí y de relleno (ver siONo); «Sí, pero a las 11» sigue yendo a Claude. Y si
++ * suena a sí con alguna palabra mal oída («Sí, sí, audio, venga»), se pregunta otra vez.
++ *
++ * Variables: LECTURA_URL (el backend, como la lectura), CONFIRMAR_TOKEN y
++ * CONFIRMAR_ESPERA_MS.
+  */
+ 'use strict';
+ 
+@@ -42,6 +47,27 @@
+   'quita', 'anula'
+ ]);
+ 
++// Parche 35: palabra a palabra. Las de sí y las de no deciden; el relleno, solo, no dice nada
++// («perfecto» o «anda» sueltos siguen sin ser un sí), y mezclar sí y no es «no lo sé».
++const PALABRAS_SI = new Set([
++  'si', 'sip', 'vale', 'venga', 'va', 'dale', 'adelante', 'claro', 'hazlo', 'confirmo',
++  'confirmado', 'ok', 'okey', 'oka', 'procede', 'tira', 'mandalo', 'mandaselo', 'envialo',
++  'enviaselo', 'crealo', 'apuntalo', 'ponlo', 'pidelo', 'reservalo', 'programalo', 'guardalo'
++]);
++const PALABRAS_NO = new Set([
++  'no', 'dejalo', 'cancela', 'cancelalo', 'olvidalo', 'anula', 'anulalo', 'quita', 'para'
++]);
++const RELLENO = new Set([
++  'anda', 'ando', 'tio', 'tia', 'hombre', 'joder', 'hostia', 'ostia', 'cono', 'ya', 'pues',
++  'eh', 'ah', 'oye', 'mira', 'bueno', 'perfecto', 'que', 'senor', 'ahora', 'mismo'
++]);
++// Lo que convierte un sí en otra cosa: esto nunca se vuelve a preguntar, va a Claude.
++const MATIZA = new Set(['pero', 'mejor', 'espera', 'cambia', 'aunque', 'antes', 'despues', 'nunca', 'nada']);
++
++// Lo que se espera un sí o un no. Los 8 s de seguir hablando en el modo coche se acababan
++// con la respuesta a medias y se dormía sin oírla (2026-11-05).
++const ESPERA_RESPUESTA_MS = 20000;
++
+ function normalizar(texto) {
+   return String(texto || '')
+     .toLowerCase()
+@@ -57,7 +83,32 @@
+   const t = normalizar(texto);
+   if (NO.has(t)) return 'no';
+   if (SI.has(t)) return 'si';
+-  return null;
++  const palabras = t ? t.split(' ') : [];
++  const conocida = function (p) { return PALABRAS_SI.has(p) || PALABRAS_NO.has(p) || RELLENO.has(p); };
++  if (!palabras.every(conocida)) return null;
++  const si = palabras.some(function (p) { return PALABRAS_SI.has(p); });
++  const no = palabras.some(function (p) { return PALABRAS_NO.has(p); });
++  if (si === no) return null;
++  return si ? 'si' : 'no';
++}
++
++/** Casi todo es un sí y nada lo matiza: una palabra mal oída, no otra idea. */
++function pareceSi(texto) {
++  const palabras = normalizar(texto).split(' ').filter(Boolean);
++  if (!palabras.some(function (p) { return PALABRAS_SI.has(p); })) return false;
++  if (palabras.some(function (p) { return PALABRAS_NO.has(p) || MATIZA.has(p); })) return false;
++  const buenas = palabras.filter(function (p) { return PALABRAS_SI.has(p) || RELLENO.has(p); }).length;
++  return buenas / palabras.length >= 0.6;
++}
++
++/**
++ * El tiempo que espera el turno. Con una pregunta en el aire, el oído admite un «sí» suelto
++ * y espera a que conteste, también en el modo coche.
++ */
++function turnoDeRespuesta(session, pendiente, normalMs) {
++  if (!pendiente) return normalMs;
++  if (typeof session.esperarRespuestaCorta === 'function') session.esperarRespuestaCorta();
++  return parseInt(process.env.CONFIRMAR_ESPERA_MS || String(ESPERA_RESPUESTA_MS), 10);
+ }
+ 
+ /** El id que trae la respuesta de Claude, o null. */
+@@ -121,11 +172,19 @@
+ async function resolverConfirmacion(pendiente, transcript, c) {
+   const log = c.log || function () {};
+   const respuesta = siONo(transcript);
++  if (!respuesta && !pendiente.repetida && pareceSi(transcript)) {
++    log('CONFIRMAR: ' + pendiente.id + ' suena a sí pero no está claro, lo pregunto otra vez');
++    const cortada = await decir(c, 'Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.');
++    return { resuelta: true, interrumpio: cortada, aviso: '',
++             pendiente: { id: pendiente.id, frase: pendiente.frase, repetida: true } };
++  }
+   if (!respuesta) {
+     log('CONFIRMAR: ' + pendiente.id + ' sin un sí o un no claro, sigue pendiente');
+     return { resuelta: false, interrumpio: false,
+              aviso: '[Le has preguntado de viva voz si hacías «' + pendiente.frase + '» y no ha ' +
+-                    'contestado sí o no: sigue pendiente en el móvil, no lo des por hecho.] ' };
++                    'contestado sí o no: sigue pendiente en el móvil, no lo des por hecho. Un sí hablado ' +
++                    'sí vale: si quiere hacerlo, pon otra vez la línea ✅ CONFIRMAR: ' + pendiente.id +
++                    ' y la llamada se lo volverá a preguntar. No le mandes al botón.] ' };
+   }
+   let datos;
+   try {
+@@ -146,4 +205,5 @@
+                   frase + '». No lo repitas.] ' };
+ }
+ 
+-module.exports = { preguntarSiLoPide, resolverConfirmacion, siONo, pedidoDeConfirmacion };
++module.exports = { preguntarSiLoPide, resolverConfirmacion, siONo, pareceSi, turnoDeRespuesta,
++                   pedidoDeConfirmacion };
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -18,7 +18,7 @@
+ // Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
+ const { leerSiLoPide, ControlLectura } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+-const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
++const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
+ // Parche 26: se transcribe durante el silencio que cierra la frase.
+@@ -332,7 +332,9 @@
+ 
+         let utterance = null;
+         try {
+-          utterance = await session.waitForUtterance({ timeoutMs: pasiva.esperaTurnoMs(30000) });
++          utterance = await session.waitForUtterance({
++            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
++          });
+           logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
+         } catch (err) {
+           if (!callActive) break;
+@@ -390,7 +392,8 @@
+         logger.info('Transcribed', { callUuid, transcript });
+ 
+         if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
+-          pasiva.dormir();
++          // Parche 35: ruido en mitad de una pregunta: sigue esperando el sí o el no.
++          if (!pendienteConfirmar) pasiva.dormir();
+           continue;
+         }
+ 
+@@ -406,7 +409,8 @@
+       }
+ 
+       // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
+-      const ordenPasiva = pasiva.orden(transcript);
++      // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
+       if (ordenPasiva) {
+         if (callActive) await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+@@ -434,6 +438,7 @@
+           log: (m) => logger.info(m, { callUuid })
+         });
+         if (rc.resuelta) {
++          pendienteConfirmar = rc.pendiente || null;
+           interrumpio = rc.interrumpio;
+           avisoLectura = rc.aviso;
+           continue;
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -9,7 +9,7 @@
+ // Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
+ const { leerSiLoPide, ControlLectura } = require('./lectura');
+ // Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
+-const { preguntarSiLoPide, resolverConfirmacion } = require('./confirmacion');
++const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
+ // Parche 26: se transcribe durante el silencio que cierra la frase.
+@@ -213,7 +213,9 @@
+ 
+         let utterance = null;
+         try {
+-          utterance = await session.waitForUtterance({ timeoutMs: pasiva.esperaTurnoMs(30000) });
++          utterance = await session.waitForUtterance({
++            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
++          });
+           console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
+         } catch (err) {
+           console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
+@@ -250,7 +252,8 @@
+         console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
+ 
+         if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
+-          pasiva.dormir();
++          // Parche 35: ruido en mitad de una pregunta: sigue esperando el sí o el no.
++          if (!pendienteConfirmar) pasiva.dormir();
+           continue;
+         }
+ 
+@@ -262,7 +265,8 @@
+       }
+ 
+       // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
+-      const ordenPasiva = pasiva.orden(transcript);
++      // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
+       if (ordenPasiva) {
+         await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+@@ -283,6 +287,7 @@
+           log: logTurno
+         });
+         if (rc.resuelta) {
++          pendienteConfirmar = rc.pendiente || null;
+           interrumpio = rc.interrumpio;
+           avisoLectura = rc.aviso;
+           continue;
+--- a/voice-app/test/parche32.test.js
++++ b/voice-app/test/parche32.test.js
+@@ -199,6 +199,33 @@
+   assert.strictEqual(e.dichos[0], e.o.apertura);
+ });
+ 
++// ── Sin barge-in (parche 35) ─────────────────────────────────────────────────
++test('Jarvis dice cada frase entera: oído cerrado, sin armar el corte y sin uuid_break', async () => {
++  const e = escena({ oido: ['¿Sí?', 'Sí', 'x', 'Vale'],
++                     backend: [{ decir: '¿A qué hora?' }, { decir: 'Hecho. ¡Adiós!', colgar: true }] });
++  const original = e.o.audioForkServer.expectSession;
++  let captura = false;
++  let armados = 0;
++  const cortes = [];
++  const oidoAlHablar = [];
++  e.o.audioForkServer.expectSession = async () => {
++    const s = await original();
++    s.setCaptureEnabled = (v) => { captura = v; };
++    s.armarBargeIn = () => { armados++; captura = true; };
++    return s;
++  };
++  const decirAntes = e.endpoint.play;
++  e.endpoint.play = async function (url) { oidoAlHablar.push(captura); return decirAntes.call(this, url); };
++  e.endpoint.api = async (orden) => { cortes.push(orden); };
++  e.endpoint.uuid = 'u';
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'goodbye');
++  assert.strictEqual(armados, 0);
++  assert.deepStrictEqual(cortes, []);
++  assert.ok(oidoAlHablar.length >= 3);
++  assert.ok(oidoAlHablar.every((abierto) => abierto === false), JSON.stringify(oidoAlHablar));
++});
++
+ // ── El saludo ────────────────────────────────────────────────────────────────
+ function detector() {
+   const s = new EventEmitter();
+--- a/voice-app/test/parche35.test.js
++++ b/voice-app/test/parche35.test.js
+@@ -0,0 +1,264 @@
++/**
++ * Parche 35: el sí hablado se oye. Las frases de los casos son las de llamadas reales del
++ * 2026-11-04 y 05, en las que Mikel dijo que sí y Jarvis acabó mandándole al botón.
++ *
++ * FreeSWITCH, la voz, el oído, Claude y el backend son dobles; el detector es el de verdad
++ * con audio sintético. Se lanza con `node --test test/parche35.test.js`, dentro de la imagen
++ * y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { siONo, pareceSi, turnoDeRespuesta, resolverConfirmacion } = require('../lib/confirmacion');
++const { AudioForkSession } = require('../lib/audio-fork');
++const { FRASES } = require('../lib/escucha-pasiva');
++const { handleInvite } = require('../lib/sip-handler');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++const ID = '0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11';
++const FRASE = 'Mandar por WhatsApp a Aimar: «Llego tarde».';
++const HECHO = 'Hecho. Mandado a Aimar.';
++const OTRA_VEZ = 'Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.';
++
++// ── Lo que cuenta como sí ────────────────────────────────────────────────────
++test('35: un sí con relleno es un sí', function () {
++  for (const f of ['Sí, créalo, anda, venga, créalo', 'Sí, sí, sí, ando, tío.', 'Sí, mándalo',
++                   'Venga, sí, joder', 'Vale, envíaselo', 'Claro, hazlo ya']) {
++    assert.strictEqual(siONo(f), 'si', f);
++  }
++  for (const f of ['No, joder', 'Que no, hombre', 'No, cancélalo', 'Mejor no']) {
++    assert.strictEqual(siONo(f), 'no', f);
++  }
++});
++
++test('35: lo que dice otra cosa sigue sin ser ni sí ni no', function () {
++  for (const f of ['Sí, pero a las once', 'Sí, a las nueve', 'Si lo haces', 'Si no', 'Vale, para',
++                   'No, no, lo que quiero que hagas es que apuntes a las 9', 'No, venga, hazlo',
++                   'Perfecto', 'Anda', 'Pero si le he dado que sí', '']) {
++    assert.strictEqual(siONo(f), null, f);
++  }
++});
++
++test('35: suena a sí solo con casi todo de sí y nada que lo matice', function () {
++  assert.strictEqual(pareceSi('Sí, sí, audio, venga.'), true);
++  for (const f of ['Sí, a las nueve', 'Sí, pero a las once', 'Le acabo de dar, ¿vale?',
++                   'Hola, buenos días', 'No, sí, audio', '¿Puedes ir al gimnasio o a clase?']) {
++    assert.strictEqual(pareceSi(f), false, f);
++  }
++});
++
++// ── El detector de verdad ────────────────────────────────────────────────────
++function trozo(voz) {
++  const b = Buffer.alloc(640);
++  if (voz) for (let i = 0; i < 320; i++) b.writeInt16LE(i % 2 ? 15000 : -15000, i * 2);
++  return b;
++}
++function detector() {
++  const ws = new EventEmitter();
++  const s = new AudioForkSession({ ws: ws, callUuid: 'c1' });
++  s.oir = function (vozMs, silencioMs) {
++    for (let t = 0; t < vozMs; t += 20) ws.emit('message', trozo(true));
++    for (let t = 0; t < (silencioMs || 0); t += 20) ws.emit('message', trozo(false));
++  };
++  s.setCaptureEnabled(true);
++  s.oir(0, 1000);
++  s.setCaptureEnabled(false);
++  return s;
++}
++function frasesDe(s, oir) {
++  const oidas = [];
++  const alOir = function (u) { oidas.push(u); };
++  s.on('utterance', alOir);
++  oir();
++  s.off('utterance', alOir);
++  return oidas;
++}
++// Una frase con mucho silencio dentro: la voz se queda por debajo del 12 %.
++function aTrozos(s) {
++  for (let i = 0; i < 6; i++) s.oir(120, 1000);
++  s.oir(0, 1400);
++}
++
++test('35: un «sí» de 300 ms se tira en un turno normal y vale contestando a una pregunta', function () {
++  const s = detector();
++  s.setCaptureEnabled(true);
++  assert.strictEqual(frasesDe(s, function () { s.oir(300, 1400); }).length, 0);
++  s.setCaptureEnabled(false);
++
++  s.setCaptureEnabled(true);
++  assert.strictEqual(turnoDeRespuesta(s, { id: ID }, 8000), 20000);
++  assert.strictEqual(frasesDe(s, function () { s.oir(300, 1400); }).length, 1);
++  s.setCaptureEnabled(false);
++
++  // Al cerrar el oído vuelve a lo de siempre: el turno siguiente no hereda nada.
++  s.setCaptureEnabled(true);
++  assert.strictEqual(frasesDe(s, function () { s.oir(300, 1400); }).length, 0);
++  s.setCaptureEnabled(false);
++});
++
++test('35: tampoco se tira por llevar poca voz entre el ruido', function () {
++  const s = detector();
++  s.setCaptureEnabled(true);
++  assert.strictEqual(frasesDe(s, function () { aTrozos(s); }).length, 0);
++  s.setCaptureEnabled(false);
++
++  s.setCaptureEnabled(true);
++  turnoDeRespuesta(s, { id: ID }, 8000);
++  assert.strictEqual(frasesDe(s, function () { aTrozos(s); }).length, 1);
++  s.setCaptureEnabled(false);
++});
++
++test('35: sin pregunta en el aire el turno espera lo de siempre', function () {
++  const s = detector();
++  s.setCaptureEnabled(true);
++  assert.strictEqual(turnoDeRespuesta(s, null, 8000), 8000);
++  assert.strictEqual(s._respuestaCorta, false);
++});
++
++// ── Los dos bucles ───────────────────────────────────────────────────────────
++function ttsFalso() {
++  return { generateSpeech: async function (texto) { return 'tts:' + texto; } };
++}
++function endpointFalso() {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep.play = async function (url) { ep.hecho.push(url); };
++  ep.api = async function () {};
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++function sesionFalsa(frases) {
++  const s = new EventEmitter();
++  let i = 0;
++  s.setCaptureEnabled = function () {};
++  s.forceFinalize = function () {};
++  s.armarBargeIn = function () {};
++  s.esperas = [];
++  s.waitForUtterance = async function (o) {
++    s.esperas.push(o && o.timeoutMs);
++    if (i >= frases.length) throw new Error('AudioForkSession closed for call x');
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  return s;
++}
++function claudeQuePropone() {
++  const c = { preguntas: [] };
++  c.query = async function (texto) {
++    c.preguntas.push(texto);
++    return c.preguntas.length === 1
++      ? '🗣️ VOICE_RESPONSE: Te lo leo para que me confirmes.\n✅ CONFIRMAR: ' + ID
++      : '🗣️ VOICE_RESPONSE: vale';
++  };
++  c.endSession = async function () {};
++  return c;
++}
++function opciones(sesion, claude) {
++  return {
++    ttsService: ttsFalso(), claudeBridge: claude, wsPort: 3001,
++    whisperClient: { transcribe: async function (a) { return a.toString(); } },
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} }
++  };
++}
++function conBackend(fn) {
++  return async function () {
++    const antesF = global.fetch;
++    const antesT = process.env.CONFIRMAR_TOKEN;
++    process.env.CONFIRMAR_TOKEN = 'confirmar';
++    const posts = [];
++    global.fetch = async function (url, op) {
++      const post = op && op.method === 'POST';
++      if (post) posts.push(JSON.parse(op.body).respuesta);
++      const datos = post ? { ok: true, hecho: true, frase: HECHO } : { ok: true, frase: FRASE };
++      return { ok: true, status: 200, json: async function () { return datos; } };
++    };
++    try { await fn(posts); } finally {
++      global.fetch = antesF;
++      if (antesT === undefined) delete process.env.CONFIRMAR_TOKEN; else process.env.CONFIRMAR_TOKEN = antesT;
++    }
++  };
++}
++function coche(frases) {
++  const ep = endpointFalso();
++  const claude = claudeQuePropone();
++  const sesion = sesionFalsa(frases);
++  return runConversationLoop(ep, new EventEmitter(), 'c-coche',
++    Object.assign(opciones(sesion, claude), { skipGreeting: true, escuchaPasiva: true }))
++    .then(function (r) { return { r, ep, claude, sesion }; });
++}
++
++test('35, coche: «vale» confirma, y no le duerme', conBackend(async function (posts) {
++  const { ep, sesion, claude } = await coche(['Jarvis, dile a Aimar que llego tarde', 'vale', 'Jarvis, cuelga']);
++  assert.deepStrictEqual(posts, ['si']);
++  assert.ok(ep.hecho.indexOf('tts:' + HECHO) >= 0);
++  assert.ok(ep.hecho.indexOf('tts:' + FRASES.dormir) < 0);
++  assert.ok(sesion.esperas.indexOf(20000) >= 0, JSON.stringify(sesion.esperas));
++  assert.strictEqual(claude.preguntas.length, 1);
++}));
++
++test('35, coche: el ruido en mitad de la pregunta no le duerme, y el sí de después vale',
++  conBackend(async function (posts) {
++    const { ep } = await coche(['Jarvis, dile a Aimar que llego tarde', '', 'sí', 'Jarvis, cuelga']);
++    assert.deepStrictEqual(posts, ['si']);
++    assert.ok(ep.hecho.indexOf('tts:' + HECHO) >= 0);
++  }));
++
++test('35, coche: si sigue diciendo que no con relleno, no se manda', conBackend(async function (posts) {
++  await coche(['Jarvis, dile a Aimar que llego tarde', 'no, joder', 'Jarvis, cuelga']);
++  assert.deepStrictEqual(posts, ['no']);
++}));
++
++test('35, saliente: lo que suena a sí se pregunta una vez más, sin pasar por Claude',
++  conBackend(async function (posts) {
++    const ep = endpointFalso();
++    const claude = claudeQuePropone();
++    const sesion = sesionFalsa(['dile a Aimar que llego tarde', 'Sí, sí, audio, venga', 'sí', 'adiós']);
++    await runConversationLoop(ep, new EventEmitter(), 'c-sal',
++      Object.assign(opciones(sesion, claude), { skipGreeting: true }));
++    assert.deepStrictEqual(posts, ['si']);
++    assert.ok(ep.hecho.indexOf('tts:' + OTRA_VEZ) >= 0);
++    assert.strictEqual(claude.preguntas.length, 1);
++  }));
++
++test('35, entrante: se vuelve a preguntar una sola vez; la segunda va a Claude y no confirma',
++  conBackend(async function (posts) {
++    const ep = endpointFalso();
++    const claude = claudeQuePropone();
++    const sesion = sesionFalsa(['dile a Aimar que llego tarde', 'Sí, sí, audio, venga', 'sí, sí, radio, venga', 'adiós']);
++    const dialogo = new EventEmitter();
++    dialogo.destroy = function () {};
++    const o = opciones(sesion, claude);
++    o.mediaServer = { connectCaller: async function () { return { endpoint: ep, dialog: dialogo }; } };
++    const req = { get: function (h) { return h === 'To' ? '<sip:10001@x>' : '<sip:10000@x>'; }, body: 'v=0' };
++    await handleInvite(req, { send: function () {} }, o);
++    assert.deepStrictEqual(posts, []);
++    assert.strictEqual(ep.hecho.filter(function (u) { return u === 'tts:' + OTRA_VEZ; }).length, 1);
++    assert.match(claude.preguntas[1], /sigue pendiente en el móvil/);
++  }));
++
++test('35: Claude sabe que puede volver a preguntar, y con qué id', async function () {
++  const ep = endpointFalso();
++  const r = await resolverConfirmacion({ id: ID, frase: FRASE }, 'Mejor a las once', {
++    endpoint: ep, session: sesionFalsa([]), ttsService: ttsFalso(), voiceId: 'v',
++    fetchImpl: function () { throw new Error('no debería confirmar nada'); } });
++  assert.strictEqual(r.resuelta, false);
++  assert.ok(r.aviso.indexOf('✅ CONFIRMAR: ' + ID) >= 0);
++  assert.match(r.aviso, /Un sí hablado sí vale/);
++  assert.deepStrictEqual(ep.hecho, []);
++});
