@@ -1,0 +1,414 @@
+--- a/voice-app/test/parche15y16.test.js
++++ b/voice-app/test/parche15y16.test.js
+@@ -105,12 +105,21 @@
+ const whisper = { transcribe: async function (audio) { return audio.toString(); } };
+ 
+ // ── Parche 15: pensar() ──────────────────────────────────────────────────────
+-test('15: Claude ya está preguntado antes de que termine la frase de espera', async function () {
++// Desde el parche 34 la frase de espera no suena hasta ESPERA_FRASE_MS (2,5 s). Estos tres
++// casos son de lo que pasa una vez suena, así que se les quita esa espera.
++const pasan = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
++function esperaDeFrase(t, ms) {
++  process.env.ESPERA_FRASE_MS = String(ms);
++  t.after(function () { delete process.env.ESPERA_FRASE_MS; });
++}
++
++test('15: Claude ya está preguntado antes de que termine la frase de espera', async function (t) {
++  esperaDeFrase(t, 0);
+   const ep = endpointFalso(function (url) { return url.indexOf('tts:') === 0 || url === 'musica'; });
+   const claude = claudeFalso({ aMano: true });
+   const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
+     ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
+-  await tick(); await tick();
++  await pasan(20);
+   assert.deepStrictEqual(ep.hecho, ['play tts:Un momento...']);
+   assert.deepStrictEqual(claude.preguntas, ['hola'], 'antes del parche se preguntaba al acabar la frase');
+   // Claude contesta mientras suena la frase: se corta y no suena música.
+@@ -121,29 +130,70 @@
+   assert.ok(ep.hecho.indexOf('play musica') < 0, 'sin música si Claude ya ha contestado');
+ });
+ 
+-test('15: si Claude tarda más que la frase, suena la música y se para al contestar', async function () {
++test('15: si Claude tarda más que la frase, suena la música y se para al contestar', async function (t) {
++  esperaDeFrase(t, 0);
+   const ep = endpointFalso(function (url) { return url === 'musica'; });
+   const claude = claudeFalso({ aMano: true });
+   const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
+     ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
+-  await tick(); await tick(); await tick();
++  await pasan(20);
+   assert.deepStrictEqual(ep.hecho, ['play tts:Un momento...', 'play musica']);
+   claude.contestar();
+   await hecho;
+   assert.strictEqual(ep.hecho[ep.hecho.length - 1], 'api uuid_break');
+ });
+ 
+-test('15: un fallo de Claude se sigue lanzando, y la música se para igual', async function () {
++test('15: un fallo de Claude se sigue lanzando, y la música se para igual', async function (t) {
++  esperaDeFrase(t, 0);
+   const ep = endpointFalso(function (url) { return url === 'musica'; });
+   let rechazar;
+   const hecho = pensar({ consultar: function () { return new Promise(function (_, r) { rechazar = r; }); },
+     endpoint: ep, ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
+-  await tick(); await tick(); await tick();
++  await pasan(20);
+   rechazar(new Error('Claude API returned failure'));
+   await assert.rejects(hecho, /Claude API returned failure/);
+   assert.strictEqual(ep.hecho[ep.hecho.length - 1], 'api uuid_break');
+ });
+ 
++test('34: si Claude contesta antes de ESPERA_FRASE_MS, ni frase ni música', async function (t) {
++  esperaDeFrase(t, 1000);
++  const ep = endpointFalso();
++  const claude = claudeFalso({ aMano: true });
++  const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
++    ttsService: tts, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
++  await tick();
++  claude.contestar();
++  assert.strictEqual(await hecho, '🗣️ VOICE_RESPONSE: lista');
++  assert.deepStrictEqual(ep.hecho, []);
++});
++
++test('34: la respuesta se sintetiza en cuanto Claude la tiene', async function (t) {
++  esperaDeFrase(t, 1000);
++  const anticipadas = [];
++  const ttsConAnticipo = Object.assign({ anticipar: function (texto, voz) { anticipadas.push([texto, voz]); } }, tts);
++  const claude = claudeFalso({ aMano: true });
++  const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: endpointFalso(),
++    ttsService: ttsConAnticipo, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica',
++    extraer: function (r) { return r.replace('🗣️ VOICE_RESPONSE: ', ''); } });
++  await tick();
++  claude.contestar();
++  await hecho;
++  assert.deepStrictEqual(anticipadas, [['lista', 'v']]);
++});
++
++test('34: si la frase de espera falla, se sigue esperando a Claude', async function (t) {
++  esperaDeFrase(t, 0);
++  const ep = endpointFalso(function (url) { return url === 'musica'; });
++  const claude = claudeFalso({ aMano: true });
++  const ttsRoto = { generateSpeech: async function () { throw new Error('File Not Found'); } };
++  const hecho = pensar({ consultar: function () { return claude.query('hola'); }, endpoint: ep,
++    ttsService: ttsRoto, frase: 'Un momento...', voiceId: 'v', musicaUrl: 'musica' });
++  await pasan(20);
++  assert.deepStrictEqual(ep.hecho, ['play musica'], 'un adorno no puede tumbar la llamada');
++  claude.contestar();
++  assert.strictEqual(await hecho, '🗣️ VOICE_RESPONSE: lista');
++});
++
+ // ── Parche 16: decirInterrumpible() ──────────────────────────────────────────
+ test('16: si hablas encima, Jarvis se calla y el oído sigue abierto', async function () {
+   const ep = endpointFalso(function () { return true; });
+--- a/voice-app/test/parche18.test.js
++++ b/voice-app/test/parche18.test.js
+@@ -182,7 +182,8 @@
+       Object.assign(opcionesComunes(sesion, claude), { skipGreeting: true }));
+     assert.strictEqual(r.endReason, 'goodbye');
+     const leido = interrumpibles(ep);
+-    assert.deepStrictEqual(leido.slice(leido.indexOf('play tts:Te lo leo entero.'), 6), [
++    const desde = leido.indexOf('play tts:Te lo leo entero.');
++    assert.deepStrictEqual(leido.slice(desde, desde + 5), [
+       'play tts:Te lo leo entero.', 'play tts:Tecnología. Uno.', 'play tts:Dos.',
+       'play tts:Inteligencia Artificial. Tres.', 'play tts:Hasta aquí el briefing.']);
+     assert.match(claude.preguntas[1], /^\[Ya le has leído el briefing entero.*\] gracias$/);
+--- a/voice-app/test/parche25.test.js
++++ b/voice-app/test/parche25.test.js
+@@ -1,5 +1,6 @@
+ /**
+- * Parche 25: el STT va primero al oído de jacobo y, si falla, a whisper-1 de OpenAI.
++ * Parche 25: el STT va primero al oído de jacobo y, si falla, a OpenAI.
++ * Parche 34: el sondeo de /salud y la carrera contra OpenAI.
+  *
+  * `fetch` y `openai` son dobles: se lanza con `node --test test/parche25.test.js`,
+  * dentro de la imagen y sin red.
+@@ -28,10 +29,15 @@
+   return requireDeVerdad.apply(this, arguments);
+ };
+ 
++// Parche 34: whisper-client sondea /salud al cargarse y cada OIDO_SONDEO_MS. Eso va por
++// `salud`, sin contar en fetchPedidos, que son las transcripciones.
+ let fetchPedidos = [];
+-function fetchQue(responde) {
++const saludBien = async function () { return { status: 200 }; };
++const saludCaida = async function () { const e = new Error('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e; };
++function fetchQue(responde, salud) {
+   fetchPedidos = [];
+   global.fetch = async function (url, opciones) {
++    if (url.endsWith('/salud')) return (salud || saludBien)(url, opciones);
+     fetchPedidos.push({ url: url, opciones: opciones });
+     return responde(url, opciones);
+   };
+@@ -39,7 +45,7 @@
+ 
+ const RUTA = require.resolve('../lib/whisper-client');
+ function cliente(entorno) {
+-  for (const k of ['OIDO', 'OIDO_URL', 'OIDO_TOKEN', 'OIDO_PAUSA_MS', 'OPENAI_API_KEY']) delete process.env[k];
++  for (const k of ['OIDO', 'OIDO_URL', 'OIDO_TOKEN', 'OIDO_PAUSA_MS', 'OIDO_CARRERA_MS', 'OIDO_SONDEO_MS', 'OPENAI_API_KEY']) delete process.env[k];
+   Object.assign(process.env, entorno);
+   delete require.cache[RUTA];
+   openaiPedidos.length = 0;
+@@ -76,8 +82,10 @@
+   assert.strictEqual(openaiPedidos[0].prompt, 'Jarvis.');
+ });
+ 
++// Con jacobo apagado también falla el sondeo. Si /salud contesta y solo falla /transcribir,
++// el sondeo siguiente lo devuelve antes de tiempo: ver «El parche 34» en PARCHES.md.
+ test('tras un fallo, el oído se salta durante la pausa', async function () {
+-  fetchQue(async function () { const e = new Error('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e; });
++  fetchQue(async function () { const e = new Error('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e; }, saludCaida);
+   const w = cliente(CON_OIDO);
+   await w.transcribe(PCM);
+   await w.transcribe(PCM);
+@@ -118,3 +126,48 @@
+   assert.strictEqual(cliente({ OIDO_URL: 'http://jacobo:8770', OIDO_TOKEN: 'llave' }).isAvailable(), true);
+   assert.strictEqual(cliente({ OPENAI_API_KEY: 'sk-x' }).isAvailable(), true);
+ });
++
++// ── Parche 34 ────────────────────────────────────────────────────────────────
++test('p34: si el oído tarda más que OIDO_CARRERA_MS, sale OpenAI a la vez y gana', async function () {
++  fetchQue(function () { return new Promise(function () {}); });
++  const w = cliente(Object.assign({ OIDO_CARRERA_MS: '5' }, CON_OIDO));
++  assert.strictEqual(await w.transcribe(PCM, { sampleRate: 16000 }), 'de openai\n');
++  assert.strictEqual(fetchPedidos.length, 1);
++  assert.strictEqual(openaiPedidos.length, 1);
++  assert.strictEqual(openaiPedidos[0].model, 'gpt-4o-transcribe');
++});
++
++test('p34: lo que devuelve la pista tal cual es silencio', async function () {
++  fetchQue(async function () {
++    return { ok: true, status: 200, json: async function () { return { texto: 'Netflix, YouTube, Prime Video', ms: 300 }; } };
++  });
++  const w = cliente(CON_OIDO);
++  assert.strictEqual(await w.transcribe(PCM), '');
++});
++
++// Estos dos dejan un sondeo corriendo cada 20 ms hasta el final del fichero: van los últimos.
++const pasan = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
++
++test('p34: dos sondeos fallidos lo apartan sin gastar un turno, y uno bueno lo devuelve', async function () {
++  let salud = saludCaida;
++  fetchQue(bien, function () { return salud(); });
++  const w = cliente(Object.assign({ OIDO_SONDEO_MS: '20' }, CON_OIDO));
++  await pasan(50);
++  assert.strictEqual(w.oidoDisponible(), false);
++  assert.strictEqual(await w.transcribe(PCM), 'de openai\n');
++  assert.strictEqual(fetchPedidos.length, 0, 'ya se sabía: no se le pregunta');
++  salud = saludBien;
++  await pasan(50);
++  assert.strictEqual(w.oidoDisponible(), true);
++});
++
++test('p34: un 401 en /salud cuenta como que está, y un 500 como que no', async function () {
++  fetchQue(bien, async function () { return { status: 401 }; });
++  let w = cliente(Object.assign({ OIDO_SONDEO_MS: '20' }, CON_OIDO));
++  await pasan(50);
++  assert.strictEqual(w.oidoDisponible(), true);
++  fetchQue(bien, async function () { return { status: 500 }; });
++  w = cliente(Object.assign({ OIDO_SONDEO_MS: '20' }, CON_OIDO));
++  await pasan(50);
++  assert.strictEqual(w.oidoDisponible(), false);
++});
+--- a/voice-app/test/parche26.test.js
++++ b/voice-app/test/parche26.test.js
+@@ -1,5 +1,7 @@
+ /**
+  * Parche 26: se transcribe durante el silencio que cierra la frase (el anticipo).
++ * Parche 34: a los 300 ms, también contra OpenAI, y si lo transcrito parece acabado la
++ * frase se cierra antes (con jacobo lo decide `small`; lo que se usa es turbo).
+  *
+  * El detector de verdad (audio-fork) con audio sintético, como en parche15y16.test.js,
+  * y Whisper como doble. Se lanza con `node --test test/parche26.test.js`, dentro de la
+@@ -40,15 +42,20 @@
+   return s;
+ }
+ 
+-/** Whisper: apunta lo que se le pide y contesta según `oido` (jacobo arriba o no). */
++/**
++ * Whisper: apunta lo que se le pide y contesta según `oido` (jacobo arriba o no). `falla`
++ * lo hace fallar todo hasta que se apague; `dice` es el texto de turbo y de `small`.
++ */
+ function whisperFalso(opciones) {
+   opciones = opciones || {};
+-  const w = { pedidos: [], oido: opciones.oido !== false };
++  const w = { pedidos: [], oido: opciones.oido !== false, falla: !!opciones.falla };
+   w.oidoDisponible = function () { return w.oido; };
+   w.transcribe = function (audio, o) {
+-    w.pedidos.push({ bytes: audio.length, soloOido: !!(o && o.soloOido) });
+-    if (opciones.falla && o && o.soloOido) return Promise.reject(new Error('jacobo no contesta'));
+-    return Promise.resolve((o && o.soloOido ? 'anticipo ' : 'entera ') + audio.length);
++    const rapido = !!(o && o.rapido);
++    w.pedidos.push({ bytes: audio.length, soloOido: !!(o && o.soloOido), rapido: rapido });
++    if (w.falla) return Promise.reject(new Error('no contesta'));
++    if (opciones.dice) return Promise.resolve(opciones.dice);
++    return Promise.resolve((rapido ? 'small ' : 'turbo ') + audio.length);
+   };
+   return w;
+ }
+@@ -58,13 +65,13 @@
+ }
+ 
+ // ── El detector ──────────────────────────────────────────────────────────────
+-test('a los 400 ms de silencio avisa una vez, y la frase lleva esa pausa', async function () {
++test('a los 300 ms de silencio avisa una vez, y la frase lleva esa pausa', async function () {
+   const s = detector();
+   const pausas = [];
+   s.on('pausa', function (p) { pausas.push(p); });
+   const llega = frase(s);
+-  s.oir(1000, 300);
+-  assert.strictEqual(pausas.length, 0, 'a los 300 ms aún no');
++  s.oir(1000, 200);
++  assert.strictEqual(pausas.length, 0, 'a los 200 ms aún no');
+   s.oir(0, 200);
+   assert.strictEqual(pausas.length, 1);
+   s.oir(0, 1100);
+@@ -131,22 +138,22 @@
+   const llega = frase(s);
+   s.oir(1000, 1500);
+   const u = await llega;
+-  assert.strictEqual(w.pedidos.length, 1);
+-  assert.strictEqual(w.pedidos[0].soloOido, true, 'el anticipo nunca va a OpenAI');
+-  assert.strictEqual(await transcribirFrase(w, u), 'anticipo ' + u.pausa.audio.length);
+-  assert.strictEqual(w.pedidos.length, 1);
++  assert.deepStrictEqual(w.pedidos.map(function (p) { return [p.soloOido, p.rapido]; }),
++    [[false, false], [true, true]], 'turbo con su reserva, y small solo contra jacobo');
++  assert.strictEqual(await transcribirFrase(w, u), 'turbo ' + u.pausa.audio.length, 'lo que se usa es turbo');
++  assert.strictEqual(w.pedidos.length, 2);
+ });
+ 
+-test('con el oído caído no se anticipa, y la frase va por el camino de siempre', async function () {
++test('con el oído caído se anticipa igual, por OpenAI y sin preguntar a small', async function () {
+   const s = detector();
+   const w = whisperFalso({ oido: false });
+   armarAnticipo(s, w);
+   const llega = frase(s);
+   s.oir(1000, 1500);
+   const u = await llega;
+-  assert.strictEqual(w.pedidos.length, 0);
+-  assert.strictEqual(await transcribirFrase(w, u), 'entera ' + u.audio.length);
+-  assert.strictEqual(w.pedidos[0].soloOido, false, 'con su reserva de OpenAI');
++  assert.deepStrictEqual(w.pedidos.map(function (p) { return [p.soloOido, p.rapido]; }), [[false, false]]);
++  assert.strictEqual(await transcribirFrase(w, u), 'turbo ' + u.pausa.audio.length);
++  assert.strictEqual(w.pedidos.length, 1, 'no se transcribe dos veces');
+ });
+ 
+ test('si el anticipo falla, se transcribe la frase entera', async function () {
+@@ -156,8 +163,10 @@
+   const llega = frase(s);
+   s.oir(1000, 1500);
+   const u = await llega;
+-  assert.strictEqual(await transcribirFrase(w, u), 'entera ' + u.audio.length);
+-  assert.strictEqual(w.pedidos.length, 2);
++  w.falla = false;
++  assert.strictEqual(await transcribirFrase(w, u), 'turbo ' + u.audio.length);
++  assert.strictEqual(w.pedidos.length, 3, 'turbo y small en la pausa, y la frase entera');
++  assert.strictEqual(w.pedidos[2].bytes, u.audio.length);
+ });
+ 
+ test('con la escucha pasiva dormida no se anticipa (la radio del coche)', async function () {
+@@ -173,7 +182,7 @@
+   llega = frase(s);
+   s.oir(1000, 1500);
+   await llega;
+-  assert.strictEqual(w.pedidos.length, 1);
++  assert.strictEqual(w.pedidos.length, 2, 'despierta: turbo y small');
+ });
+ 
+ test('un whisperClient sin oidoDisponible (los dobles de los otros tests) no se toca', async function () {
+@@ -186,3 +195,47 @@
+   assert.strictEqual(w.pedidos, 0);
+   assert.strictEqual(await transcribirFrase(w, u), 'hola');
+ });
++
++// ── El cierre rápido (parche 34) ─────────────────────────────────────────────
++test('34: si lo transcrito parece acabado, la frase se cierra a los 700 ms', async function () {
++  const s = detector();
++  armarAnticipo(s, whisperFalso({ dice: 'Apaga la tele.' }));
++  let cerrada = false;
++  s.once('utterance', function () { cerrada = true; });
++  s.oir(1000, 400);
++  await new Promise(setImmediate);   // aquí llega la transcripción de la pausa
++  s.oir(0, 200);
++  assert.strictEqual(cerrada, false, 'a los 600 ms aún no');
++  s.oir(0, 100);
++  assert.strictEqual(cerrada, true);
++});
++
++test('34: si se queda a medias, se esperan los 1.200 ms', async function () {
++  const s = detector();
++  armarAnticipo(s, whisperFalso({ dice: 'Mándale un mensaje a' }));
++  let cerrada = false;
++  s.once('utterance', function () { cerrada = true; });
++  s.oir(1000, 400);
++  await new Promise(setImmediate);
++  s.oir(0, 700);
++  assert.strictEqual(cerrada, false, 'a los 1.100 ms aún no');
++  s.oir(0, 100);
++  assert.strictEqual(cerrada, true);
++});
++
++test('34: si has vuelto a hablar, la transcripción de la pausa vieja no cierra nada', async function () {
++  const s = detector();
++  armarAnticipo(s, whisperFalso({ dice: 'Apaga la tele.' }));
++  let cerrada = false;
++  s.once('utterance', function () { cerrada = true; });
++  s.oir(1000, 250);
++  s.oir(0, 100);           // la pausa ya salió, y su transcripción aún no ha llegado…
++  s.oir(500, 0);           // …cuando vuelves a hablar
++  await new Promise(setImmediate);
++  s.oir(0, 280);           // sin llegar a los 300 de la pausa nueva
++  await new Promise(setImmediate);
++  s.oir(0, 400);
++  assert.strictEqual(cerrada, false, 'a los 680 ms: la pausa nueva sale aquí y aún no tiene texto');
++  s.oir(0, 520);
++  assert.strictEqual(cerrada, true);
++});
+--- a/voice-app/test/parche29.test.js
++++ b/voice-app/test/parche29.test.js
+@@ -19,17 +19,17 @@
+ // ── Dobles ───────────────────────────────────────────────────────────────────
+ let pedidos = [];
+ let responder = null;
++const axiosFalso = async function axios(opciones) {
++  pedidos.push(opciones);
++  const r = await responder(opciones);
++  // En directo (parche 31) se pide un stream: un Buffer se entrega como uno de un trozo
++  if (opciones.responseType === 'stream' && Buffer.isBuffer(r.data)) r.data = Readable.from([r.data]);
++  return r;
++};
++axiosFalso.defaults = {};   // parche 34: tts-service le pone aquí su httpsAgent al cargarse
+ const requireDeVerdad = Module.prototype.require;
+ Module.prototype.require = function (id) {
+-  if (id === 'axios') {
+-    return async function axios(opciones) {
+-      pedidos.push(opciones);
+-      const r = await responder(opciones);
+-      // En directo (parche 31) se pide un stream: un Buffer se entrega como uno de un trozo
+-      if (opciones.responseType === 'stream' && Buffer.isBuffer(r.data)) r.data = Readable.from([r.data]);
+-      return r;
+-    };
+-  }
++  if (id === 'axios') return axiosFalso;
+   return requireDeVerdad.apply(this, arguments);
+ };
+ 
+@@ -257,3 +257,20 @@
+   assert.strictEqual(pedidos[0].responseType, 'arraybuffer');
+   assert.deepStrictEqual(fs.readFileSync(path.join(DIR, url.split('/').pop())), MP3);
+ });
++
++// ── Parche 34 ────────────────────────────────────────────────────────────────
++test('p34: la conexión con las voces se reutiliza', function () {
++  servicio(AMBAS);
++  assert.strictEqual(axiosFalso.defaults.httpsAgent.keepAlive, true);
++});
++
++test('p34: la respuesta anticipada se sintetiza una vez, y solo sirve para esa frase', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(AMBAS);
++  s.anticipar('Ya está, señor.', 'voz1');
++  const url = await s.generateSpeech('Ya está, señor.', 'voz1');
++  assert.match(url, /\.mp3$/);
++  assert.strictEqual(pedidos.length, 1);
++  await s.generateSpeech('Ya está, señor.', 'voz1');
++  assert.strictEqual(pedidos.length, 2, 'ya gastada, la siguiente se sintetiza');
++});
