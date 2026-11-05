@@ -789,7 +789,9 @@ en `build_cowork_instruction`.
   (`_MCP_SERVIDOR_HERRAMIENTAS` en `backend/main.py`) y deja fuera a propósito todo lo que
   toca producción o el repositorio, o trae texto de desconocidos (`desplegar`, `mcp_*`,
   `encargar_a_una_sesion`, `responder_a_la_sesion`, `arreglar_revision`,
-  `cobrar_entrenamiento`, `leer_pagina`, `buscar_documentos`...). La confirmación hablada
+  `cobrar_entrenamiento`, `leer_pagina`, `buscar_documentos`...). Internet llega por otro
+  camino, sin pasar por esta sesión (`📖 LEER: internet`, `_lectura_internet`, parche 37), y de
+  GitHub solo una ficha de los PR de Mikel (`github_prs`). La confirmación hablada
   reusa `_jarvis_confirma()` tal cual: si una herramienta la exige con los argumentos que
   se han pedido (por ejemplo `casa_ordenar` sobre una cerradura), el servidor la RECHAZA
   con un error — no hay botón de confirmar al otro lado de una llamada, así que no se
