@@ -50,7 +50,7 @@ quien sepa algo, lo empuja.
                                         ▼
         ┌──────────────────────────────────────────────────────────┐
         │   backend/main.py — FastAPI en `caja` (Docker, Debian)    │
-        │   un solo fichero, ~23.500 líneas, 127 endpoints          │
+        │   un solo fichero, ~35.300 líneas, 160 endpoints          │
         └───┬───────┬───────┬────────┬────────┬────────┬───────────┘
             │       │       │        │        │        │
             ▼       ▼       ▼        ▼        ▼        ▼
@@ -90,9 +90,9 @@ capricho: es la única forma que hay de cruzar la frontera de la red local.
 
 ### Frontend — `src/components/Dashboard.jsx`
 React 19 sobre Vite, en Vercel, **deploy automático al hacer push a `main`**. Sin router,
-sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~9.700
+sin gestor de estado, sin ORM, sin framework de CSS: un componente principal de ~10.800
 líneas con `useState`/`useEffect`, y la lógica pura extraída a `src/lib/helpers.js`
-(~2.900 líneas, testeada aparte) y a otros ficheros de `src/lib/` cuando es un tema propio.
+(~3.200 líneas, testeada aparte) y a otros ficheros de `src/lib/` cuando es un tema propio.
 
 Es una decisión, no una deuda: el proyecto es de una persona y un solo fichero de UI se
 navega con `grep` de los banners. Lo que sí está prohibido es meter lógica ahí — todo lo
@@ -103,7 +103,7 @@ widgets configurables (visibles, columna, orden, tamaño) persistidos en `localS
 un **modo simple** para el móvil que reutiliza los mismos widgets con otra distribución.
 
 ### Backend — `backend/main.py`
-FastAPI, **un solo fichero de ~23.500 líneas** con 127 endpoints, organizado por banners
+FastAPI, **un solo fichero de ~35.300 líneas** con 160 endpoints, organizado por banners
 `# ── NOMBRE ──`. Corre con Docker Compose en `caja`, un portátil con Debian en casa, y sale
 a internet por un Cloudflare Tunnel. Nació en Fly.io, donde se suponía que escalaba a cero
 y nunca lo hizo (Home Assistant lo sondeaba cada pocos segundos), aunque la mitad de las
@@ -252,7 +252,7 @@ error de SMTP de un minuto te deja sin briefing hasta mañana.
 
 ### 6.4 La frontera de confirmación
 
-El asistente tiene 51 herramientas. Algunas las ejecuta él solo; otras **solo las propone**
+El asistente tiene 106 herramientas. Algunas las ejecuta él solo; otras **solo las propone**
 y hace falta un botón.
 
 La línea no es «peligroso / no peligroso», es más precisa: **lo que ya tiene un botón en el
@@ -295,7 +295,7 @@ cliente **solo manda texto**: toda la decisión de qué herramienta usar vive en
 para que el día que se le hable desde otro sitio (el PC, un altavoz) no haya que
 reimplementarla.
 
-Las 51 herramientas **no son integraciones nuevas**: son envoltorios de los endpoints que
+Las 106 herramientas **no son integraciones nuevas**: son envoltorios de los endpoints que
 ya existen, llamados igual que los llama el resumen diario, para heredar su normalización y
 su manejo de errores. Añadir una capacidad es añadir una entrada a un diccionario, y de ahí
 salen a la vez el esquema que ve el modelo, el despachador y la puerta de confirmación.
@@ -542,13 +542,13 @@ El mismo fallo, dos veces, en dos sitios que no se parecen en nada.
 
 | | |
 |---|---|
-| Backend | ~23.500 líneas, **1 fichero**, 127 endpoints |
-| Frontend | ~9.700 líneas de UI + ~2.900 de lógica pura en `helpers.js` (más la voz, la línea del día y la zona dev, aparte) |
-| Agente PC | ~1.200 líneas |
-| Herramientas del asistente | **62** |
-| Tablas en Supabase | 41 migraciones |
-| Tests | ~1.900 de backend, ~480 de frontend, más E2E con navegador real |
-| Documentación | 33 ficheros en `docs/` + el índice |
+| Backend | ~35.300 líneas, **1 fichero**, 160 endpoints |
+| Frontend | ~10.800 líneas de UI + ~3.200 de lógica pura en `helpers.js` (más la voz, la línea del día y la zona dev, aparte) |
+| Agente PC | ~1.600 líneas |
+| Herramientas del asistente | **106** |
+| Tablas en Supabase | 52 migraciones |
+| Tests | ~3.100 de backend, ~1.000 de frontend, más E2E con navegador real |
+| Documentación | 42 ficheros en `docs/` + el índice |
 | Servicios externos | Microsoft Graph, Google Maps, Open-Meteo, OpenAI, Supabase, Home Assistant |
 
 **Cómo se desarrolla.** Cuatro comprobaciones obligatorias antes de cada commit (lint sin un

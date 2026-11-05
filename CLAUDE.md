@@ -127,7 +127,7 @@ El E2E no entra en la verificación obligatoria de arriba porque tarda bastante 
 Browser (React 19 + Vite 8, Vercel)
     │  JWT en localStorage("la_token") + fetch REST
     ▼
-backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
+backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~35.300 líneas)
     ├── Microsoft Graph API ── calendario Outlook, buzón y tareas de To Do (tokens OAuth
     │                          persistidos en Supabase)
     ├── Google Maps Distance Matrix ── hora de salida con tráfico
@@ -155,7 +155,7 @@ Ficheros clave:
 
 | Fichero | Qué es |
 |---|---|
-| `src/components/Dashboard.jsx` | TODA la UI (~9.700 líneas, un componente principal + subcomponentes en el mismo fichero) |
+| `src/components/Dashboard.jsx` | TODA la UI (~10.800 líneas, un componente principal + subcomponentes en el mismo fichero) |
 | `src/components/dev/` | La zona de desarrollo (`docs/ZONA_DEV.md`), una pestaña por fichero. **Excepción a la regla de "toda la UI en `Dashboard.jsx`"**: no es un widget, es otra aplicación dentro de la aplicación |
 | `src/components/jarvis/JarvisHUD.jsx` | La vista de Jarvis a pantalla completa (el HUD: reactor, conversación y telemetría). **La otra excepción**, por lo mismo que la zona dev: se carga en diferido y no es un widget. No tiene estado propio de la conversación: usa el de la tarjeta de Jarvis. Ver «La vista a pantalla completa» en `docs/JARVIS.md` |
 | `src/lib/api.js` | Cómo se habla con el backend (`API`, `authHeaders`, `jsonHeaders`, `apiFetch`). Único sitio que toca el esquema de autenticación del cliente |
