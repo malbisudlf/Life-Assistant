@@ -26866,7 +26866,6 @@ def _ya_estas_alli(cita: dict, cache: dict) -> bool:
 # Las reglas que se dicen precisamente EN ese lugar, y por tanto no esperan a que salgas.
 _REGLAS_DEL_LUGAR = {
     LUGAR_GIMNASIO: {REGLA_COBRO_GIMNASIO},
-    LUGAR_UNI:      set(),
 }
 
 
