@@ -171,6 +171,11 @@ puente las baja a memoria, las manda al oído de jacobo (`POST /transcribir`, Wh
 en una y cambia `[audio]` por `[audio] lo que dice`. Una nota de 22 s tarda 1,5 s, y una de 3:39,
 14 s. El audio no se escribe en disco ni sale de casa; **el texto sí va al clasificador**, a OpenAI
 como cualquier mensaje. Hasta 5 minutos y 16 MB. Las del historial del vínculo no se transcriben.
+Se transcriben las de tus contactos por privado y, desde el 2026-11-07, **todas las de tus
+grupos**, sea quien sea quien la mande: las pediste para leerlas con Jarvis. La vigilancia sigue
+mirando solo los chats individuales, así que el texto de un grupo no va al clasificador; solo lo lee
+el modelo cuando le pides ese grupo. Bajarla no la marca como escuchada: eso solo lo manda
+`MarkRead`, que el puente no llama nunca, y el micrófono sigue gris para quien la mandó.
 
 La ráfaga espera a la transcripción: si lleva un `[audio]` a secas, se atiende cuando llega el
 texto o a los 3 minutos (`WA_VIG_AUDIO_ESPERA_SEG`). Si jacobo está caído no hay OpenAI de reserva:
@@ -249,8 +254,8 @@ pasar es que algo ocurra sin que lo veas, y eso es lo que aquí se cierra.
   los chats individuales; los grupos, con `grupos=true` o pidiendo uno por su chat.
 - **Lo que mandas desde el puente no vuelve como evento**: se guarda a mano al enviarlo.
   Lo que mandas desde el móvil sí llega, y así Jarvis sabe si ya contestaste.
-- **Una nota de voz es `[audio] lo que dice`** si es de un contacto de tu agenda, o tuya en
-  ese chat. Las de los grupos y las de desconocidos se quedan en `[audio]`. Ver «Las notas de voz».
+- **Una nota de voz es `[audio] lo que dice`** si es de un contacto de tu agenda, de un grupo
+  o tuya. Las de desconocidos por privado se quedan en `[audio]`. Ver «Las notas de voz».
 - **El texto del envío no se recorta** al guardarlo para el botón del móvil (`_args_de`
   corta el resto de argumentos a 300 caracteres): recortado, se mandaría otra cosa.
 
