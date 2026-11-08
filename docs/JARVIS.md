@@ -1146,6 +1146,28 @@ contestaba OpenAI de respaldo. El chat apunta al nativo con `CLAUDE_BIN` en
 `~/jarvis-chat/.env`; el `claude-api-server` del teléfono sigue con el de npm (lo coge
 del `PATH`), así que actualizar uno no toca al otro.
 
+### El tablero de la tele (2026-11-08)
+
+La vista J.A.R.V.I.S. para la tele de la sala: `https://<frontend>/#tele=<llave>` pinta la
+hora, el tiempo, lo que queda de hoy, la próxima alarma, cómo están caja, jacobo y la casa, y
+cuántos WhatsApp esperan respuesta. Se refresca sola cada minuto y no tiene nada que pulsar
+(`src/components/jarvis/TableroTele.jsx`, lógica en `src/lib/tablero.js`; `App.jsx` la carga
+en vez del dashboard cuando el fragmento empieza por `#tele`, en diferido).
+
+- **Su propia llave, de solo lectura** (`TELE_TABLERO_TOKEN`, `GET /tele/tablero`). La tele no
+  manda cabeceras ni guarda un JWT de 30 días, así que la llave va en el **fragmento** (no
+  llega a ningún servidor ni a ningún log): la página la guarda en `localStorage` y deja la
+  barra en `#tele`, porque la pantalla la ve toda la casa.
+- **Lo que no sale, a propósito**: de WhatsApp, ni quién ni qué (solo cuántos); de la agenda,
+  solo hoy, y las invitaciones que dan órdenes como «Invitación (título oculto)»; de la familia,
+  nada.
+- **Lo que falta, y por qué no se ha hecho sin Mikel**: que salga sola. Esta tele ignora la
+  orden de abrir una URL (`ed.apps.launch`, comprobado el 2026-11-04), así que el camino es
+  abrir la página UNA vez en su navegador y dejarla como inicio; luego, encenderla y lanzar el
+  navegador (`tele.js`, un reflejo «pon el tablero»), que vuelve a la última página. Encenderla
+  sola «al detectar a alguien en la sala» es encender la tele de todos: necesita su visto bueno
+  y una prueba con la tele delante (regla de la casa: nada de encender «para probar»).
+
 ### La cámara, las manos y los proyectos (2026-10-28)
 
 Lo que pidió Mikel: «que se parezca todo lo que pueda al Jarvis de Iron Man: que me vea

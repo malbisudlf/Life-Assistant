@@ -29003,6 +29003,88 @@ def telefono_contexto(request: Request):
     return {"texto": texto}
 
 
+# ── El tablero de la tele (2026-11-08) ─────────────────────────────────────────
+# La vista J.A.R.V.I.S. en la tele de la sala por la mañana: la hora, el tiempo, lo de hoy,
+# la próxima alarma, cómo están caja y jacobo, y cuántos WhatsApp esperan respuesta. La tele
+# no puede mandar cabeceras ni guardar un JWT de 30 días que caduca solo, así que tiene su
+# propia llave, de SOLO LECTURA y solo para esto (`TELE_TABLERO_TOKEN`, en cabecera: la página
+# la saca del fragmento de la URL, #tele=…, que no llega a ningún servidor ni a ningún log).
+#
+# La tele es de la sala y la ve toda la casa: de WhatsApp solo va CUÁNTOS, nunca de quién ni
+# qué; de la agenda, solo hoy, y las invitaciones que dan órdenes, escondidas como en todo lo
+# demás (`_titulo_de_evento`). De la familia, nada (`docs/SALUD_FAMILIA.md`, `_CASA_PRIVADO`).
+TELE_TABLERO_TOKEN = os.getenv("TELE_TABLERO_TOKEN", "")
+_TABLERO_SEG = 60
+_tablero_cache: dict = {"ts": 0.0, "datos": None}
+
+
+def _tablero_agenda(ahora: datetime) -> list:
+    todos, _ = _eventos_y_clases()
+    fuera = []
+    for ev in todos or []:
+        try:
+            ini = _j_local(ev.get("start") or "")
+            fin = _j_local(ev.get("end") or "") if ev.get("end") else ini
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if ini.date() != ahora.date() or (fin <= ahora and not ev.get("isAllDay")):
+            continue
+        titulo, oculto = _titulo_de_evento(ev)
+        fuera.append({"hora": "todo el día" if ev.get("isAllDay") else ini.strftime("%H:%M"),
+                      "titulo": "Invitación (título oculto)" if oculto else titulo[:60],
+                      "en_curso": ini <= ahora < fin and not ev.get("isAllDay")})
+    return sorted(fuera, key=lambda e: (e["hora"] != "todo el día", e["hora"]))[:8]
+
+
+def _tablero_whatsapp() -> Optional[int]:
+    """Cuántos chats individuales de las últimas 24 h acaban en un mensaje que no es tuyo."""
+    if not _whatsapp_configurado():
+        return None
+    mensajes = _whatsapp("GET", "/mensajes", {"horas": 24, "limite": 400}).get("mensajes") or []
+    ultimo: dict = {}
+    for m in mensajes:
+        ultimo[m.get("chat")] = bool(m.get("mio"))
+    return sum(1 for mio in ultimo.values() if not mio)
+
+
+def _tablero_maquinas() -> dict:
+    """caja contesta si este backend contesta; jacobo y Home Assistant, lo que diga el
+    vigilante (`_servicios_caidos`): True en pie, False caído."""
+    caidos = set(_servicios_caidos())
+    return {"caja": True, "jacobo": "jacobo" not in caidos,
+            "casa": not ({"home_assistant", "home_assistant_red"} & caidos)}
+
+
+def _tablero() -> dict:
+    ahora = _ahora_local()
+    datos: dict = {"hora": ahora.strftime("%H:%M"), "fecha": ahora.date().isoformat(),
+                   "dia": DIAS_SEMANA[ahora.weekday()]}
+    partes = {"tiempo": lambda: _brief_clima(), "agenda": lambda: _tablero_agenda(ahora),
+              "alarma": lambda: _contexto_alarma(ahora), "maquinas": _tablero_maquinas,
+              "whatsapp_pendientes": _tablero_whatsapp}
+    with ThreadPoolExecutor(max_workers=len(partes)) as pool:
+        futuros = {k: pool.submit(fn) for k, fn in partes.items()}
+        for k, f in futuros.items():
+            try:
+                datos[k] = f.result()
+            except Exception as e:
+                # Una parte que falla se queda en null y el resto sale: es una pantalla.
+                logger.warning("Tablero: %s falló (%s)", k, type(e).__name__)
+                datos[k] = None
+    return datos
+
+
+@app.get("/tele/tablero")
+def tele_tablero(request: Request):
+    """Lo que pinta el tablero de la tele. Con `TELE_TABLERO_TOKEN` en `X-Auth-Token`; sin
+    la variable puesta, nadie entra (`_token_ok` es falso sin token esperado)."""
+    if not _token_ok(_extract_service_token(request), TELE_TABLERO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    if _tablero_cache["datos"] is None or time.time() - _tablero_cache["ts"] > _TABLERO_SEG:
+        _tablero_cache.update(ts=time.time(), datos=_tablero())
+    return _tablero_cache["datos"]
+
+
 class TelefonoCasaIn(BaseModel):
     servicio: str = Field(max_length=80)
     entidad:  str = Field(max_length=120)

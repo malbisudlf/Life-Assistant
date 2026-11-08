@@ -9,7 +9,9 @@ export default defineConfig([
   // dentro del checkout principal: sin esto, `npm run lint` desde la raíz las recorre
   // todas, tarda varias veces más y avisa de errores que no son del árbol que se revisa.
   // `test-results/` y `playwright-report/` son la salida del E2E, no código.
-  globalIgnores(['dist', '.claude/worktrees/', 'test-results/', 'playwright-report/']),
+  // `telefono/claude-phone/` es la foto de lo que corre en caja (ver su README): código de
+  // claude-phone con sus propias reglas, que se comprueba con su suite, no con esta.
+  globalIgnores(['dist', '.claude/worktrees/', 'test-results/', 'playwright-report/', 'telefono/claude-phone/']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [
