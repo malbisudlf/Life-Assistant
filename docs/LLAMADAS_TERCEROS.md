@@ -131,6 +131,28 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    llamada. Sin tope diario desde el 2026-11-01, a petición de Mikel (`TERCEROS_DIA_MAX`,
    0; con un número vuelve a haberlo, y «llámame» no cuenta).
 
+## Lo que pasa después y en medio (2026-11-08)
+
+**La cita, al calendario con botón.** Al colgar, si la llamada fue de verdad (ni buzón ni
+sin hablar), un modelo sin herramientas mira si se QUEDÓ EN FIRME día y hora
+(`_tercero_cita`, campos cerrados). El código lo comprueba todo: fecha futura y en
+`TERCEROS_CITA_DIAS` (90), hora con forma, y el asunto y el lugar solo con palabras dichas en
+la llamada (`_wa_vig_palabras`, como la vigilancia de WhatsApp). Si pasa, te llega «En la
+llamada, X ha quedado el jueves a las 17:30. ¿Lo apunto?» con su botón (`crear_evento`), y
+si la pediste por teléfono, Jarvis te lo dice al devolverte la llamada. Nada de la
+transcripción llega al calendario sin tu botón.
+
+**Te consulta sin colgar.** Si el otro propone algo que el encargo no cubre («solo tengo el
+jueves a las 9»), el modelo puede devolver `consultar` (la pregunta) y `opciones` (hasta 3).
+El backend te la manda al móvil por «preguntas al móvil» (`_j_mandar_notificacion`: el botón
+solo apunta), contesta `esperar: true` y la voice-app (parche 39) le dice al otro «Un segundo,
+que se lo consulto a Mikel», le pone música y pregunta a `GET /telefono/tercero/{id}/consulta`
+cada 2 s, con un «sigo aquí» cada 30. Lo que pulses entra como «[Mikel contesta: Sí]» y la
+llamada sigue. Sin respuesta en `TERCEROS_CONSULTA_SEG` (90), sigue con «no contesta ahora»
+y el modelo se despide. Como mucho `TERCEROS_CONSULTAS_MAX` (2) por llamada, y solo si el
+móvil recoge avisos: por correo no hay botón, así que entonces se despide y te deja la
+pregunta en el resultado.
+
 ## La línea O2 (parche 32 de claude-phone)
 
 Lo que se averiguó a mano antes de escribir nada (sesión del 2026-10-31, con scripts de

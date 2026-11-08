@@ -1939,6 +1939,21 @@ cd ~/stack && docker compose up -d prometheus grafana      # extra_hosts y el pa
 
 Y después, la foto: `telefono/claude-phone/exportar.sh` (ver su README).
 
+## El parche 39: consultar a Mikel sin colgar al otro
+
+Del 2026-11-08 (`telefono/parche-39.diff`, sobre el 38; vuelta atrás: imagen `antes-p39`). Va
+con el backend que devuelve `esperar` (ver «Lo que pasa después y en medio» en
+`docs/LLAMADAS_TERCEROS.md`): sin ese backend la voice-app no ve nunca `esperar` y todo
+sigue como antes, así que el orden al desplegar da igual.
+
+- `preguntarAlBackend` pasa `esperar` (nunca junto a `colgar`).
+- `esperarConsulta`: música al otro (`static/hold-music.wav`), `GET …/consulta` cada
+  `CONSULTA_SONDEO_MS` (2 s), «Sigo aquí, un momento, que me está contestando» cada
+  `CONSULTA_RECUERDO_MS` (30 s) cortando la música, y la despedida de fallo si el backend
+  falla tres veces seguidas o pasan `CONSULTA_TOPE_MS` (120 s; el backend corta antes, a los
+  90). Si cuelgan mientras, deja de esperar.
+- Tests: `test/parche39.test.js` (6). Suite entera con el 38 y el 39: 196 de 196.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
