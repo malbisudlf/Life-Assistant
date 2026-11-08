@@ -19513,6 +19513,61 @@ def _regla_madrugon() -> int:
     ))
 
 
+REGLA_ALARMA_TARDE = "alarma_tarde"
+
+
+def _regla_alarma_tarde() -> int:
+    """Mañana suena una alarma de respaldo que no deja tiempo para lo primero del día.
+
+    Lo proactivo ya juntaba la agenda con el tráfico (sal ya, vas tarde, no llegas) y con el
+    sueño (madrugón), pero nadie la juntaba con las alarmas: el 2026-11-08 había una semanal
+    de los viernes a las 5:00 y nada comprobaba que el viernes siguiera bastando. Solo avisa
+    del choque (una alarma que existe y llega tarde), no de que falte: muchas mañanas no hay
+    alarma de respaldo a propósito, y avisar de eso cada noche sería ruido. Propone otra con
+    un botón; la que llega tarde no se toca.
+    """
+    if not _toca_una_vez(REGLA_ALARMA_TARDE, HORA_REGLAS_NOCHE):
+        return 0
+    manana   = (_ahora_local() + timedelta(days=1)).date()
+    primeros = [e for e in _eventos_con_fecha(dias=2)
+                if e["ini"].date() == manana and not e.get("isAllDay")]
+    if not primeros:
+        return 0
+    primero = primeros[0]
+    alarmas = []
+    for a in _alarma_listar():
+        if a.get("estado") != "armada" or a.get("saltada"):
+            continue
+        try:
+            cuando = datetime.strptime(a["cuando"], "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cuando.date() == manana:
+            alarmas.append(cuando)
+    if not alarmas:
+        return 0
+    suena  = min(alarmas)
+    limite = primero["ini"] - timedelta(minutes=PREP_MANANA_MIN)
+    if suena <= limite:
+        return 0
+    propuesta = limite.replace(minute=limite.minute - limite.minute % 5)
+    titulo    = str(primero.get("title") or "lo primero")[:60]
+    texto = (f"Mañana tiene «{titulo}» a las {primero['ini'].strftime('%H:%M')} y la alarma de "
+             f"respaldo suena a las {suena.strftime('%H:%M')}: con {PREP_MANANA_MIN} min para "
+             f"prepararse no le da. ¿Le pongo otra a las {propuesta.strftime('%H:%M')}?")
+    pid  = str(uuid.uuid4())
+    args = _args_de("poner_alarma", {"hora": propuesta.strftime("%H:%M"),
+                                     "fecha": manana.isoformat(), "etiqueta": titulo[:30]})
+    _guardar_pregunta_con_accion(pid, texto, [PREGUNTA_SI, PREGUNTA_NO], "poner_alarma", args,
+                                 caduca=propuesta)
+    return int(_apuntar_aviso(
+        REGLA_ALARMA_TARDE, texto, prioridad=PRIO_ALTA, id=pid, caduca=propuesta,
+        huella=f"{REGLA_ALARMA_TARDE}:{manana.isoformat()}:{suena.strftime('%H%M')}",
+        motivo={"primer_evento": primero["ini"].isoformat(), "alarma": suena.isoformat(),
+                "propuesta": propuesta.isoformat(), "prep_manana_min": PREP_MANANA_MIN},
+    ))
+
+
 HORA_CUMPLES = _hora_config(os.getenv("CUMPLES_HORA", "10:00"), (10, 0))
 
 
@@ -19796,6 +19851,7 @@ _REGLAS = (
     ("no_llegas",     _regla_no_llegas),
     ("vas_tarde",     _regla_vas_tarde),
     ("madrugon",      _regla_madrugon),
+    (REGLA_ALARMA_TARDE, _regla_alarma_tarde),
     ("malestar",      _regla_malestar),
     ("hueco_entreno", _regla_hueco_entreno),
     ("cumples",       _regla_cumples),
@@ -23000,6 +23056,7 @@ REGLAS_LLAMABLES = {
     "no_llegas":     "Mañana no te da tiempo entre dos citas",
     REGLA_VAS_TARDE: "Vas tarde a una cita y sigues en casa",
     "madrugon":      "Mañana empiezas temprano",
+    REGLA_ALARMA_TARDE: "La alarma de mañana no deja tiempo para lo primero",
     "malestar":      "Tus señales de recuperación apuntan a que algo va mal",
     "hueco_entreno": "Llevas días sin entrenar y mañana tienes hueco",
     "cumples":       "Mañana es el cumpleaños de alguien",
@@ -23886,10 +23943,10 @@ def _responder_pregunta(pid: str, n: int) -> dict:
 PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento",
                                 "reservar_bloques", "crear_tarea", "borrar_idea",
                                 "pelis_pedir", "pelis_borrar", "jellyfin_reproducir",
-                                "whatsapp_enviar", "whatsapp_programar"}
+                                "whatsapp_enviar", "whatsapp_programar", "poner_alarma"}
 # Lo que no es del calendario lleva su propio dibujo en el móvil: «📅 ¿Lo hago?» encima
 # de «Borrar El padrino» despista.
-PREGUNTAS_EMOJI              = {"pelis_pedir": "🎬", "pelis_borrar": "🎬",
+PREGUNTAS_EMOJI              = {"poner_alarma": "⏰", "pelis_pedir": "🎬", "pelis_borrar": "🎬",
                                 "jellyfin_reproducir": "🎬", "whatsapp_enviar": "💬",
                                 "whatsapp_programar": "💬"}
 PREGUNTA_SI                  = "Sí, hazlo"
@@ -23993,6 +24050,20 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
             cuando += ", todo el día"
         lugar = str(args.get("lugar") or "").strip()[:80]
         return {"texto": f"Crear «{titulo}» {cuando}" + (f", en {lugar}" if lugar else "") + "."}
+
+    if herramienta == "poner_alarma":
+        # La propone `_regla_alarma_tarde`. Mismas comprobaciones que `_j_poner_alarma`.
+        hora  = str(args.get("hora") or "").strip()
+        fecha = str(args.get("fecha") or "").strip()
+        if not _HORA_RE.match(hora):
+            return {"error": "La hora tiene que ser HH:MM."}
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return {"error": "La fecha tiene que ser YYYY-MM-DD y existir."}
+        etiqueta = str(args.get("etiqueta") or "").strip()[:30]
+        return {"texto": f"Poner una alarma de respaldo {_dia_txt(fecha)} a las {hora}"
+                         + (f" ({etiqueta})" if etiqueta else "") + "."}
 
     if herramienta == "editar_evento":
         actual = _evento_graph(str(args.get("evento_id") or "").strip())

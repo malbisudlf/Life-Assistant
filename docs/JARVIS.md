@@ -421,6 +421,13 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     habitual se ancla a la **noche anterior al evento**, no al día de la hora recomendada:
     con un evento a las 08:30 la recomendada es las 00:00, y anclar ahí un hábito de las
     23:00 lo ponía casi 24 h tarde y avisaba a quien ya se duerme antes de tiempo.
+  - **«La alarma de mañana llega tarde»** (`_regla_alarma_tarde`, 2026-11-08): a la hora de
+    las reglas de la noche, si la primera alarma de respaldo armada de mañana suena después
+    de «lo primero del día menos `PREP_MANANA_MIN`», lo dice y **propone otra con botón**
+    (`poner_alarma` entró en `PREGUNTAS_ACCIONES`, así que también vale el «sí» hablado). La
+    que llega tarde no se toca. **Solo el choque**: que falte alarma no se avisa, porque
+    muchas mañanas no la hay a propósito y eso cada noche sería ruido. Las saltadas y lo de
+    todo el día no cuentan.
   - **Firma de malestar** (`_regla_malestar`): las tres señales a la vez. Es el espejo en
     Python de `_firmaMalestar` de `helpers.js` — se acepta la duplicación a propósito
     porque las conclusiones no se portan al backend, y allí solo se ve abriendo el
