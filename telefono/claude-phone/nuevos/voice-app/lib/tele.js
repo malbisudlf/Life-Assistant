@@ -271,6 +271,23 @@ async function apps() {
   return lista;
 }
 
+/**
+ * Parche 41: una app conocida que no salió en la lista se pregunta sola, con más tiempo.
+ * La lista se hace preguntando por todas a la vez y esta tele, con veinte peticiones juntas,
+ * deja algunas sin contestar a tiempo: el 2026-11-08 salieron 5 de 8 (faltaban Netflix,
+ * Jellyfin y el tablero) y la lista se guardaba diez minutos así. Si la encuentra, la lista se
+ * tira para que la próxima vez se vuelva a hacer.
+ */
+async function appConocidaSuelta(dicho) {
+  const q = normalizar(dicho);
+  const id = APPS_CONOCIDAS[ALIAS[q] || q];
+  if (!id) return null;
+  const d = await estadoApp(id, 6000);
+  if (!d || !d.name) return null;
+  appsCache = null;
+  return { id: id, nombre: d.name, tipo: 2 };
+}
+
 /** Busca una aplicación por lo que se ha dicho. null si no hay ninguna que se parezca. */
 function buscarApp(lista, dicho) {
   let q = normalizar(dicho);
@@ -525,7 +542,8 @@ async function orden(o, p) {
       } else if (e === 'standby') {
         avisar('Enciendo la tele, señor, y abro ' + dicho + '.');
       }
-      const app = buscarApp(await apps(), dicho);
+      let app = buscarApp(await apps(), dicho);
+      if (!app) app = await appConocidaSuelta(dicho);
       if (!app) return mal('No encuentro ' + dicho + ' en la tele, señor.');
       const nombre = String(app.nombre || dicho).split(' - ')[0];
       if (await lanzarApp(app)) return bien(nombre + ' en pantalla, señor.', 'abrir ' + nombre + ' en la tele', { visible: true });

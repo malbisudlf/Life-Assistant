@@ -16,6 +16,8 @@ URL del tablero con su llave.
 **La llave no está aquí**: `instalar.sh` la lee de `~/stack/backend.env` y la mete en el paquete,
 que se hace en un directorio temporal y se borra.
 
+**Instalada el 2026-11-08** (`JarvisTabl.Tablero`, 1.0.0) y comprobada: «pon el tablero» la abre y carga el tablero.
+
 ## Instalar (con la tele encendida)
 
 La tele tiene que estar en **modo desarrollador con «Host PC IP» = caja** (se puso el

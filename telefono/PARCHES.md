@@ -1966,6 +1966,16 @@ suite entera, 198 de 198.
 `patch` lo rechaza («different line endings»). Se aplicó copiando los ficheros probados; la
 foto (`telefono/claude-phone/`, byte a byte) es la referencia.
 
+## El parche 41: la app que no salió en la lista
+
+Del 2026-11-08 (`telefono/parche-41.diff`; vuelta atrás: imagen `antes-p41`). La lista de apps de la tele se hace
+preguntando por todas a la vez, y esta tele deja algunas sin contestar a tiempo: ese día salieron 5
+de 8 (faltaban Netflix, Jellyfin y el tablero recién instalado), y la lista se guarda 10 minutos.
+Ahora, si lo pedido es una app conocida y no está en la lista, `appConocidaSuelta` le pregunta a la
+tele por ella sola (6 s) antes de decir que no está, y tira la lista. Comprobado con la tele: «pon el
+tablero» → «Jarvis en pantalla, señor», y la tele cargó el tablero. Suite: 199 de 199. Aplicado
+copiando `tele.js` (CRLF en caja, ver el 40).
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
