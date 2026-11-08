@@ -11267,13 +11267,62 @@ def _informe_avisos() -> dict:
         return {}
 
 
+def _informe_jarvis() -> dict:
+    """La bitácora de la semana (2026-11-08): lo que ha costado Jarvis, tus entrenos contra
+    el plan, a quién llamó por ti y lo que ha fallado. Cada parte por separado, como el
+    resto del informe: la que no se puede leer se queda fuera y lo dice con su clave
+    `sin_<parte>`, sin tumbar las demás."""
+    salida: dict = {}
+    try:
+        g = get_gasto(dias=7, credentials=None)
+        tot = g.get("total") or {}
+        bocas = sorted((g.get("por_boca") or {}).items(), key=lambda kv: -(kv[1].get("euros") or 0))
+        salida["gasto"] = {"euros": tot.get("euros"), "incompleto": bool(tot.get("euros_incompleto")),
+                           "llamadas": tot.get("llamadas"),
+                           "por_boca": [(b, round(v.get("euros") or 0, 2)) for b, v in bocas[:5]]}
+    except Exception as e:
+        logger.warning("Informe semanal: sin gasto (%s)", type(e).__name__)
+        salida["sin_gasto"] = True
+    try:
+        p = _j_plan_entreno()
+        salida["entreno"] = {"hechos": p["hechos"], "plan": p["plan"],
+                             "sesiones": len(p.get("sesiones") or [])}
+    except Exception as e:
+        logger.warning("Informe semanal: sin entrenos (%s)", type(e).__name__)
+        salida["sin_entreno"] = True
+    try:
+        desde = time.time() - 7 * 86400
+        with _terceros_lock:
+            semana = [m for m in _terceros.values() if (m.get("creada") or 0) >= desde]
+        salida["terceros"] = {"llamadas": len(semana),
+                              "hablaron": sum(1 for m in semana if m.get("estado") == "hecha"),
+                              "citas": sum(1 for m in semana if m.get("cita"))}
+    except Exception as e:
+        logger.warning("Informe semanal: sin llamadas (%s)", type(e).__name__)
+    try:
+        logs = get_logs(nivel="ERROR", dias=7, limite=200, fuentes=False, credentials=None)
+        donde: dict = {}
+        for e in logs.get("entradas") or []:
+            clave = str(e.get("source") or "?")[:30]
+            donde[clave] = donde.get(clave, 0) + 1
+        salida["fallos"] = {"total": logs.get("errores") if isinstance(logs.get("errores"), int)
+                            else sum(donde.values()),
+                            "donde": sorted(donde.items(), key=lambda kv: -kv[1])[:5]}
+    except Exception as e:
+        logger.warning("Informe semanal: sin fallos (%s)", type(e).__name__)
+        salida["sin_fallos"] = True
+    return salida
+
+
 def construir_informe_semanal(hoy=None) -> dict:
     hoy = hoy or _ahora_local().date()
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         f_salud  = pool.submit(_informe_salud, INFORME_SEMANAS, hoy)
         f_entren = pool.submit(_brief_entrenamiento)
         f_avisos = pool.submit(_informe_avisos)
+        f_jarvis = pool.submit(_informe_jarvis)
         salud, entrenamiento, avisos = f_salud.result(), f_entren.result(), f_avisos.result()
+        jarvis = f_jarvis.result()
     return {
         "fecha":         hoy.isoformat(),
         "semanas":       INFORME_SEMANAS,
@@ -11281,6 +11330,7 @@ def construir_informe_semanal(hoy=None) -> dict:
         "salud":         salud,
         "entrenamiento": entrenamiento,
         "avisos":        avisos,
+        "jarvis":        jarvis,
     }
 
 
@@ -11297,7 +11347,7 @@ def render_informe_texto(d: dict) -> str:
         "",
     ]
     if not lunes:
-        return "\n".join(L + ["(sin datos de salud)", ""]) + "\n"
+        return "\n".join(L + ["(sin datos de salud)", ""] + _render_bitacora(d)) + "\n"
 
     L.append("## SEMANAS  (lunes de cada una)")
     L.append("  " + " ".join(l[5:] for l in lunes))
@@ -11350,7 +11400,51 @@ def render_informe_texto(d: dict) -> str:
             estado = " [SILENCIADA]" if r.get("silenciada") else ""
             L.append(f"  {str(r.get('regla') or '?'):<16} {r.get('enviados', 0):>3} enviados · "
                      f"{r.get('utiles', 0)} útiles · {r.get('no_utiles', 0)} no{estado}")
+
+    L += _render_bitacora(d)
     return "\n".join(L) + "\n"
+
+
+def _render_bitacora(d: dict) -> list:
+    """Las líneas de la bitácora (`_informe_jarvis`): lo de esta semana, no la tendencia.
+    Aparte para que salga también cuando no hay datos de salud."""
+    j = d.get("jarvis") or {}
+    L: list = []
+    if j:
+        L.append("")
+        L.append("## ESTA SEMANA, CON JARVIS")
+        e = j.get("entreno")
+        if e:
+            partes = []
+            for tipo, (lo, hi) in (e.get("plan") or {}).items():
+                objetivo = f"{lo}" if lo == hi else f"{lo}-{hi}"
+                partes.append(f"{tipo} {e['hechos'].get(tipo, 0)}/{objetivo}")
+            L.append("  Entrenos: " + (", ".join(partes) or f"{e.get('sesiones', 0)} sesiones"))
+        elif j.get("sin_entreno"):
+            L.append("  Entrenos: no se han podido leer.")
+        t = j.get("terceros")
+        if t and t.get("llamadas"):
+            L.append(f"  Llamadas por ti: {t['llamadas']} ({t['hablaron']} con conversación"
+                     + (f", {t['citas']} con cita propuesta" if t.get("citas") else "") + ")")
+        g = j.get("gasto")
+        if g:
+            euros = "?" if g.get("euros") is None else f"{g['euros']:.2f} €"
+            extra = " (incompleto: hay modelos sin tarifa)" if g.get("incompleto") else ""
+            L.append(f"  Lo que ha costado: {euros} en {g.get('llamadas') or 0} llamadas a modelos{extra}")
+            if g.get("por_boca"):
+                L.append("    " + " · ".join(f"{b} {e:.2f} €" for b, e in g["por_boca"]))
+        elif j.get("sin_gasto"):
+            L.append("  Lo que ha costado: no se ha podido leer.")
+        f = j.get("fallos")
+        if f:
+            if f.get("total"):
+                L.append(f"  Lo que ha fallado: {f['total']} errores en el registro"
+                         + (" — " + ", ".join(f"{d_} {n}" for d_, n in f.get("donde") or []) if f.get("donde") else ""))
+            else:
+                L.append("  Lo que ha fallado: nada en el registro.")
+        elif j.get("sin_fallos"):
+            L.append("  Lo que ha fallado: no se ha podido leer el registro.")
+    return L
 
 
 def _enviar_informe_si_toca(forzar: bool = False) -> dict:

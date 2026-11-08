@@ -453,6 +453,15 @@ backend está en `docs/BACKEND_PATRONES.md`.
     semana de vacaciones sin el Watch baja todas las medias nocturnas, y sin el
     denominador esa caída se lee como un empeoramiento.
 
+- **La bitácora de la semana** (`_informe_jarvis`, `_render_bitacora`, 2026-11-08): al
+  final del informe, «ESTA SEMANA, CON JARVIS». Lo de esta semana y no la tendencia: tus
+  entrenos contra el plan (`plan_entreno`), a quién llamó Jarvis por ti y con cuántas citas
+  propuestas, lo que ha costado (`get_gasto` de 7 días, con «incompleto» si hay modelos sin
+  tarifa) y lo que ha fallado (errores de `app_logs` por origen). Cada parte por separado:
+  la que no se puede leer lo dice y no se lleva a las demás. Sale también sin datos de salud.
+  Las llamadas a otros viven en memoria (`_terceros`): tras un reinicio del backend, la
+  semana solo cuenta las de después.
+
 - **El interruptor** (`brief_ajustes`, `GET`/`PATCH /brief/ajustes`, panel ⚙ y las
   herramientas `estado_resumen_diario`/`configurar_resumen_diario` de Jarvis): apagar el
   resumen, o pausarlo hasta una fecha. Cuatro cosas que no son decoración:
