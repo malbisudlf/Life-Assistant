@@ -1,5 +1,3 @@
 # La foto se compara byte a byte con caja (comprobar.sh) y cambios.diff se aplica con git apply:
-# en Windows no puede convertirse a CRLF.
-* text eol=lf
-*.wav binary
-*.mp3 binary
+# git no toca los finales de línea (algunos ficheros de caja ya vienen en CRLF).
+* -text

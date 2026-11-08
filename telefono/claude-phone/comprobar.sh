@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 ssh -o BatchMode=yes "${CAJA:-caja}" 'bash -s' < "$AQUI/exportar.sh" > "$TMP/cp.tar"
 mkdir "$TMP/caja"
 tar -xf "$TMP/cp.tar" -C "$TMP/caja"
-if diff -ru --exclude='*.sh' --exclude=README.md "$AQUI" "$TMP/caja"; then
+if diff -ru --exclude='*.sh' --exclude=README.md --exclude=.gitattributes "$AQUI" "$TMP/caja"; then
   echo "caja y el repositorio coinciden."
 else
   echo "caja y el repositorio NO coinciden (arriba, lo distinto)." >&2
