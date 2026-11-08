@@ -1612,6 +1612,12 @@ cotidiano:
   teléfono, además, dónde estás; el dashboard ya lo lleva en el prompt. **El tiempo no**:
   entró y se quitó el mismo día, porque no se pregunta y cada línea se paga en todos los
   turnos de voz; para eso está la herramienta `clima`.
+- **Por teléfono, además, el sueño de anoche y la próxima alarma** (`_contexto_sueno`,
+  `_contexto_alarma`, desde el 2026-11-08). El 2026-11-06 «¿cómo he dormido hoy?» costó
+  una herramienta en una llamada real (3,8 s de Claude frente a 2,1 sin ella). Allí el
+  contexto se manda una vez al abrir la llamada y el resto de turnos lo leen del caché, así
+  que no tiene el coste por turno que sacó al tiempo; en la voz del dashboard no va. Si
+  cualquiera de los dos revienta, la llamada empieza sin él.
 - **Quién lo usa**: la llamada del dashboard y el Atajo (todo turno con `voz: true`), en
   el mismo mensaje de sistema que la hora, **al final**: cambia cada cinco minutos y no
   puede romper el caché del prefijo. Y el teléfono, que lo pide una vez al abrir cada

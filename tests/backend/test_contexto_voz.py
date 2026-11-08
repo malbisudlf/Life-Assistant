@@ -147,3 +147,64 @@ class TestTurno:
         _con_modelo(monkeypatch, [_mensaje("Hola.")])
         r = client.post("/jarvis", json={"mensaje": "hola", "voz": True}, headers=auth_headers)
         assert r.status_code == 200
+
+
+class TestSuenoYAlarmaPorTelefono:
+    """El sueño de anoche y la próxima alarma van solo en el contexto del teléfono: allí se
+    paga una vez por llamada, y eran las dos preguntas que costaban una herramienta."""
+
+    def test_hm(self):
+        assert main._hm(0.97) == "58 min"
+        assert main._hm(5.83) == "5 h 50 min"
+        assert main._hm(8) == "8 h"
+        assert main._hm(48) == "48 min"       # más de 24: venía en minutos
+        assert main._hm(None) == "" and main._hm(0) == ""
+
+    def test_sueno_de_anoche(self, monkeypatch):
+        ahora = datetime.now(main.LOCAL_TZ)
+        monkeypatch.setattr(main, "_j_sueno", lambda n=7: {"noches": [{
+            "fecha": ahora.date().isoformat(), "horas": 5.83, "profundo": 0.97, "rem": 0.8,
+            "despierto": None, "acostado": ahora.strftime("%Y-%m-%d") + "T00:03:00"}]})
+        texto = main._contexto_sueno(ahora)
+        assert texto.startswith("Sueño de anoche: 5 h 50 min (profundo 58 min, REM 48 min)")
+        assert "acostado a las 00:03" in texto
+
+    def test_sin_datos_de_anoche_lo_dice(self, monkeypatch):
+        ahora = datetime.now(main.LOCAL_TZ)
+        vieja = (ahora.date() - timedelta(days=4)).isoformat()
+        monkeypatch.setattr(main, "_j_sueno", lambda n=7: {"noches": [{"fecha": vieja, "horas": 7}]})
+        assert "no hay datos de anoche" in main._contexto_sueno(ahora)
+        monkeypatch.setattr(main, "_j_sueno", lambda n=7: {"noches": []})
+        assert "no hay datos" in main._contexto_sueno(ahora)
+
+    def test_proxima_alarma_y_saltadas(self, monkeypatch):
+        ahora = datetime(2026, 11, 8, 22, 0, tzinfo=main.LOCAL_TZ)
+        monkeypatch.setattr(main, "_alarma_listar", lambda filas=None: [
+            {"cuando": "2026-11-09 07:30", "estado": "armada", "etiqueta": "gimnasio", "saltada": False},
+            {"cuando": "2026-11-09 07:00", "estado": "armada", "etiqueta": "", "saltada": True},
+            {"cuando": "2026-11-12 07:00", "estado": "armada", "etiqueta": "", "saltada": False},
+            {"cuando": "2026-11-09 06:00", "estado": "apagada", "etiqueta": "", "saltada": False},
+        ])
+        assert main._contexto_alarma(ahora) == \
+            "Próxima alarma: mañana a las 07:30 (gimnasio); saltadas: mañana a las 07:00."
+
+    def test_sin_alarmas(self, monkeypatch):
+        monkeypatch.setattr(main, "_alarma_listar", lambda filas=None: [])
+        assert main._contexto_alarma(datetime.now(main.LOCAL_TZ)) == "Alarmas: ninguna en las próximas 36 horas."
+
+    def test_el_telefono_los_lleva_y_si_revientan_empieza_igual(self, client, monkeypatch):
+        monkeypatch.setattr(main, "JARVIS_MCP_TELEFONO_TOKEN", TOKEN)
+        _fuentes(monkeypatch)
+        monkeypatch.setattr(main, "_contexto_sueno", lambda ahora: "Sueño de anoche: 7 h.")
+        monkeypatch.setattr(main, "_contexto_alarma", lambda ahora: (_ for _ in ()).throw(RuntimeError("roto")))
+        r = client.get("/telefono/contexto", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert r.status_code == 200
+        assert "- Sueño de anoche: 7 h." in r.json()["texto"]
+        assert "roto" not in r.json()["texto"]
+
+    def test_la_voz_del_dashboard_no_los_lleva(self, monkeypatch):
+        _fuentes(monkeypatch)
+        monkeypatch.setattr(main, "_contexto_sueno", lambda ahora: (_ for _ in ()).throw(
+            AssertionError("el contexto de voz del dashboard no lleva el sueño")))
+        main._contexto_voz_cache.clear()
+        assert "Sueño" not in main._contexto_de_voz()

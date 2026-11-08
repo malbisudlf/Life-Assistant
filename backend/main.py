@@ -28393,17 +28393,102 @@ def _contexto_de_voz(incluir_lugar: bool = False) -> str:
     return texto
 
 
+def _hm(horas) -> str:
+    """0,97 h → «58 min»; 5,83 → «5 h 50 min». Lo que llega de Health Auto Export va en
+    horas; un valor de más de 24 se toma por minutos (algún export los manda así)."""
+    try:
+        h = float(horas)
+    except (TypeError, ValueError):
+        return ""
+    if h <= 0:
+        return ""
+    minutos = round(h if h > 24 else h * 60)
+    if minutos < 60:
+        return f"{minutos} min"
+    return f"{minutos // 60} h" + (f" {minutos % 60} min" if minutos % 60 else "")
+
+
+def _contexto_sueno(ahora: datetime) -> str:
+    """La noche de hoy, para el teléfono. El 2026-11-06 «¿cómo he dormido hoy?» costó una
+    herramienta (un viaje más al modelo, ~1,5 s); por teléfono se manda UNA vez al abrir
+    la llamada y el resto de turnos lo leen del caché, así que aquí sí compensa. En la voz
+    del dashboard no va: allí se pagaría en cada turno (el mismo motivo por el que el
+    tiempo salió del contexto el 2026-10-15)."""
+    noches = _j_sueno(2).get("noches") or []
+    if not noches:
+        return "Sueño: no hay datos de las últimas noches."
+    n = noches[-1]
+    fecha = str(n.get("fecha") or "")[:10]
+    if fecha not in (ahora.date().isoformat(), (ahora.date() - timedelta(days=1)).isoformat()):
+        return f"Sueño: no hay datos de anoche (lo último es del {fecha})."
+    partes = [p for p in (
+        f"profundo {_hm(n.get('profundo'))}" if _hm(n.get("profundo")) else "",
+        f"REM {_hm(n.get('rem'))}" if _hm(n.get("rem")) else "",
+        f"despierto {_hm(n.get('despierto'))}" if _hm(n.get("despierto")) else "",
+    ) if p]
+    texto = f"Sueño de anoche: {_hm(n.get('horas')) or 'sin dato'}"
+    if partes:
+        texto += f" ({', '.join(partes)})"
+    acostado = str(n.get("acostado") or "")
+    if len(acostado) >= 16:
+        texto += f", acostado a las {acostado[11:16]}"
+    return texto + ". Para más noches o más detalle, la herramienta."
+
+
+def _contexto_alarma(ahora: datetime) -> str:
+    """La próxima alarma que va a sonar en las próximas 36 h, y si alguna está saltada.
+    «¿A qué hora me despiertas?» era la otra pregunta que pagaba una herramienta."""
+    limite = ahora + timedelta(hours=36)
+    proximas, saltadas = [], []
+    for a in _alarma_listar():
+        try:
+            cuando = datetime.strptime(a["cuando"], "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not ahora <= cuando <= limite or a.get("estado") not in ("armada", "pospuesta"):
+            continue
+        if cuando.date() == ahora.date():
+            dia = "hoy"
+        elif cuando.date() == ahora.date() + timedelta(days=1):
+            dia = "mañana"
+        else:
+            dia = DIAS_SEMANA[cuando.weekday()]
+        txt = f"{dia} a las {cuando.strftime('%H:%M')}"
+        if a.get("etiqueta"):
+            txt += f" ({str(a['etiqueta'])[:40]})"
+        (saltadas if a.get("saltada") else proximas).append((cuando, txt))
+    if not proximas and not saltadas:
+        return "Alarmas: ninguna en las próximas 36 horas."
+    texto = ("Próxima alarma: " + min(proximas)[1]) if proximas else "Alarmas: ninguna va a sonar"
+    if saltadas:
+        texto += "; saltadas: " + ", ".join(t for _, t in sorted(saltadas))
+    return texto + "."
+
+
 @app.get("/telefono/contexto")
 def telefono_contexto(request: Request):
     """Lo que la llamada de teléfono sabe al descolgar, para metérselo a Claude al
     empezar la sesión (parche 19). Con el token del MCP del teléfono, como el briefing."""
     if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    ahora = datetime.now(LOCAL_TZ)
+    with ThreadPoolExecutor(max_workers=5) as pool:
         # A la vez: las averías no pueden hacer esperar al resto, ni al revés.
         f_voz, f_averias = pool.submit(_contexto_de_voz, True), pool.submit(_contexto_averias)
         f_casa = pool.submit(_contexto_casa)
+        f_sueno, f_alarma = pool.submit(_contexto_sueno, ahora), pool.submit(_contexto_alarma, ahora)
         texto, averias, casa = f_voz.result(), f_averias.result(), f_casa.result()
+        # El sueño y las alarmas son un extra: si fallan, la llamada empieza sin ellos.
+        cuerpo = []
+        for nombre, fut in (("sueño", f_sueno), ("alarmas", f_alarma)):
+            try:
+                linea = fut.result()
+                if linea:
+                    cuerpo.append(linea)
+            except Exception as e:
+                logger.warning("Contexto del teléfono: %s falló (%s)", nombre, _causa(e))
+    if cuerpo:
+        texto = (f"{texto}\n- " if texto else "- ") + "\n- ".join(cuerpo)
     lectura = _contexto_lectura()
     for extra in (lectura, casa, averias):
         if extra:
