@@ -68,41 +68,60 @@ class TestMcpChat:
 
     def test_lo_que_se_confirma_queda_propuesto_y_no_se_ejecuta(self, client, monkeypatch):
         ejecutado = []
-        _herramienta(monkeypatch, "crear_evento", lambda **kw: ejecutado.append(kw))
+        _herramienta(monkeypatch, "borrar_idea", lambda **kw: ejecutado.append(kw))
         main._chat_turnos[TURNO] = {"ts": main.time.time(), "usadas": [], "pendiente": None}
         sesion = _sesion(client)
-        cena = {"titulo": "Cena", "fecha": "2026-10-30"}
-        r = _rpc(client, "tools/call", {"name": "crear_evento", "arguments": cena},
+        nota = {"idea_id": "11111111-1111-1111-1111-111111111111"}
+        r = _rpc(client, "tools/call", {"name": "borrar_idea", "arguments": nota},
                  sesion=sesion)
         texto = json.loads(r.json()["result"]["content"][0]["text"])
         assert texto["estado"] == "pendiente_de_confirmacion"
         assert ejecutado == []
-        assert main._chat_turnos[TURNO]["pendiente"] == {"herramienta": "crear_evento",
-                                                         "argumentos": cena}
+        assert main._chat_turnos[TURNO]["pendiente"] == {"herramienta": "borrar_idea",
+                                                         "argumentos": nota}
 
     def test_lo_que_se_rechazaria_al_pulsar_no_llega_a_proponerse(self, client, monkeypatch):
-        """Diez pádel hasta Navidad por `reservar_bloques`, que solo llega a 14 días: el
-        «no» tiene que llegarle al modelo en el turno, no a ti después de pulsar."""
+        """Abrir el garaje con el móvil a 12 km: el «no» tiene que llegarle al modelo en el
+        turno, no a ti después de pulsar un botón que no iba a hacer nada."""
+        monkeypatch.setattr(main, "HA_URL", "http://ha.test:8123")
+        monkeypatch.setattr(main, "HA_TOKEN", "ha-token")
+        monkeypatch.setattr(main, "GARAJE_SCRIPT", "script.abrir_garaje")
+        monkeypatch.setattr(main, "GARAJE_SENSOR", "binary_sensor.puerta_garaje")
+        monkeypatch.setattr(main, "GARAJE_MOVIL", "device_tracker.movil")
+        monkeypatch.setattr(main, "_garaje_cerca",
+                            lambda: (False, "Su móvil está a 12,0 km de casa.", 12000))
+        main._chat_turnos[TURNO] = {"ts": main.time.time(), "usadas": [], "pendiente": None}
+        sesion = _sesion(client)
+        r = _rpc(client, "tools/call", {"name": "garaje", "arguments": {"accion": "abrir"}},
+                 sesion=sesion)
+        resultado = r.json()["result"]
+        assert resultado["isError"] is True
+        assert "12,0 km" in resultado["content"][0]["text"]
+        assert main._chat_turnos[TURNO]["pendiente"] is None
+
+    def test_reservar_mas_alla_del_tope_dice_lo_de_repetir(self, client, monkeypatch):
+        """Diez pádel hasta Navidad por `reservar_bloques`, que solo llega a 14 días. Desde
+        que se hace al momento no reserva nada y le sugiere el evento que se repite."""
         monkeypatch.setattr(main, "_ahora_local",
                             lambda: main.datetime(2026, 10, 22, 12, 0, tzinfo=main.LOCAL_TZ))
+        monkeypatch.setattr(main, "_j_crear_evento",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no")))
         main._chat_turnos[TURNO] = {"ts": main.time.time(), "usadas": [], "pendiente": None}
         sesion = _sesion(client)
         bloques = [{"titulo": "Pádel", "fecha": "2026-12-04", "hora_inicio": "10:00",
                     "hora_fin": "12:00"}]
         r = _rpc(client, "tools/call",
                  {"name": "reservar_bloques", "arguments": {"bloques": bloques}}, sesion=sesion)
-        resultado = r.json()["result"]
-        assert resultado["isError"] is True
-        assert "14 días" in resultado["content"][0]["text"]
-        assert "repetir_hasta" in resultado["content"][0]["text"]
+        texto = r.json()["result"]["content"][0]["text"]
+        assert "14 días" in texto and "repetir_hasta" in texto
         assert main._chat_turnos[TURNO]["pendiente"] is None
 
     def test_sin_turno_conocido_no_se_puede_proponer(self, client, monkeypatch):
         """Sin turno no hay respuesta a la que colgar el botón: se dice, no se ejecuta."""
         ejecutado = []
-        _herramienta(monkeypatch, "crear_evento", lambda **kw: ejecutado.append(kw))
+        _herramienta(monkeypatch, "borrar_idea", lambda **kw: ejecutado.append(kw))
         sesion = _sesion(client)
-        r = _rpc(client, "tools/call", {"name": "crear_evento", "arguments": {}},
+        r = _rpc(client, "tools/call", {"name": "borrar_idea", "arguments": {"idea_id": "11111111-1111-1111-1111-111111111111"}},
                  sesion=sesion, turno="no-es-un-uuid")
         assert "error" in r.json()
         assert ejecutado == []

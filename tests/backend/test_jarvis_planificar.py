@@ -300,33 +300,27 @@ def _bloque(titulo, ini, fin, fecha=MANANA):
 
 
 class TestReservarPuerta:
-    def test_el_registro_la_declara_confirmable_con_una_lista(self):
+    def test_el_registro_la_declara_directa_con_una_lista(self):
+        """Directa desde el 2026-11-08: son bloques en SU calendario."""
         h = main._JARVIS_HERRAMIENTAS["reservar_bloques"]
-        assert h["confirmar"] is True
+        assert h["confirmar"] is False
         assert h["obligatorios"] == ["bloques"]
         assert h["parametros"]["bloques"]["type"] == "array"
         assert h["parametros"]["bloques"]["maxItems"] == 6
         assert h["parametros"]["bloques"]["items"]["type"] == "object"
-        # Las confirmables no se anuncian en voz: no se está haciendo nada todavía.
-        assert "reservar_bloques" not in main._JARVIS_RELLENOS
 
-    def test_proponerla_no_crea_nada(self, client, auth_headers, monkeypatch):
+    def test_pedirla_los_crea_al_momento(self, client, auth_headers, monkeypatch, creados):
         from test_jarvis import _con_modelo, _llamada, _mensaje
 
-        def _no_llamar(*a, **k):
-            raise AssertionError("no debería crearse nada sin confirmar")
-
-        monkeypatch.setattr(main, "create_event", _no_llamar)
+        _calendario(monkeypatch, [], [])
         bloques = [_bloque("TFG", "09:00", "11:00"), _bloque("Gimnasio", "18:00", "19:00")]
         _con_modelo(monkeypatch, [
             _mensaje(tool_calls=[_llamada("reservar_bloques", {"bloques": bloques})]),
-            _mensaje("Te propongo estos dos bloques."),
+            _mensaje("Reservado."),
         ])
         r = client.post("/jarvis", json={"mensaje": "bloquéame mañana"}, headers=auth_headers)
-        datos = r.json()
-        assert datos["pendiente"]["herramienta"] == "reservar_bloques"
-        assert datos["pendiente"]["argumentos"]["bloques"] == bloques
-        assert datos["herramientas"] == []
+        assert r.json()["pendiente"] is None
+        assert [c.subject for c in creados] == ["TFG", "Gimnasio"]
 
     def test_mas_alla_del_tope_no_se_propone(self, client, auth_headers, monkeypatch):
         """El pádel de los viernes hasta Navidad: antes salía el botón y el «solo reservo
@@ -343,35 +337,27 @@ class TestReservarPuerta:
                             headers=auth_headers).json()
         assert datos["pendiente"] is None
         devuelto = [m for m in cliente.recibido[-1]["messages"] if m["role"] == "tool"][-1]
-        assert "Solo reservo hasta dentro de 14 días" in devuelto["content"]
-        assert "repetir_hasta" in devuelto["content"]
+        contenido = devuelto["content"].encode().decode("unicode_escape") \
+            if "\\u" in devuelto["content"] else devuelto["content"]
+        assert "Solo reservo hasta dentro de 14" in contenido
+        assert "repetir_hasta" in contenido
 
-    def test_ejecutar_los_crea(self, client, auth_headers, monkeypatch, creados):
+    def test_despacharla_los_crea(self, monkeypatch, creados):
         _calendario(monkeypatch, [], [])
-        r = client.post("/jarvis/ejecutar", headers=auth_headers, json={
-            "herramienta": "reservar_bloques",
-            "argumentos": {"bloques": [_bloque("TFG", "09:00", "11:00"),
-                                       _bloque("Gimnasio", "18:00", "19:00")]},
-        })
-        assert r.status_code == 200
-        cuerpo = r.json()
-        assert cuerpo["ok"] is True
+        cuerpo = {"resultado": main._jarvis_despachar("reservar_bloques", {
+            "bloques": [_bloque("TFG", "09:00", "11:00"), _bloque("Gimnasio", "18:00", "19:00")]})}
+        assert cuerpo["resultado"]["ok"] is True
         assert [c.subject for c in creados] == ["TFG", "Gimnasio"]
         assert creados[0].start == f"{MANANA}T09:00:00"
         assert creados[0].end == f"{MANANA}T11:00:00"
         assert cuerpo["resultado"]["dile_al_usuario_literalmente"] == (
             "Reservado: «TFG» de 9:00 a 11:00 y «Gimnasio» de 18:00 a 19:00.")
 
-    def test_un_argumento_de_mas_no_llega_a_la_funcion(self, client, auth_headers,
-                                                        monkeypatch, creados):
+    def test_un_argumento_de_mas_no_llega_a_la_funcion(self, monkeypatch, creados):
         _calendario(monkeypatch, [], [])
-        r = client.post("/jarvis/ejecutar", headers=auth_headers, json={
-            "herramienta": "reservar_bloques",
-            "argumentos": {"bloques": [_bloque("TFG", "09:00", "11:00")],
-                           "credentials": "robado", "forzar": True},
-        })
-        assert r.status_code == 200
-        assert r.json()["ok"] is True
+        r = main._jarvis_despachar("reservar_bloques", {
+            "bloques": [_bloque("TFG", "09:00", "11:00")], "credentials": "robado", "forzar": True})
+        assert r["ok"] is True
         assert len(creados) == 1
 
 
@@ -569,16 +555,16 @@ class TestTelefono:
                        "clientInfo": {"name": "test", "version": "1"}}})
         return r.headers["mcp-session-id"]
 
-    def test_huecos_si_reservar_no(self, client):
+    def test_huecos_y_reservar_estan(self, client):
         sesion = self._sesion(client)
         r = client.post("/mcp/telefono", headers={**self.TOKEN, "Mcp-Session-Id": sesion},
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         por_nombre = {t["name"]: t for t in r.json()["result"]["tools"]}
         assert por_nombre["huecos_libres"]["annotations"]["readOnlyHint"] is True
-        # Está, pero no se hace sin más: la llamada pregunta y él contesta hablando.
-        assert "linea_para_la_llamada" in por_nombre["reservar_bloques"]["description"]
+        # Desde el 2026-11-08 reservar se hace al momento, también por teléfono.
+        assert "linea_para_la_llamada" not in por_nombre["reservar_bloques"]["description"]
 
-    def test_reservar_por_telefono_no_reserva(self, client, monkeypatch):
+    def test_reservar_por_telefono_reserva(self, client, monkeypatch):
         llamado = []
         monkeypatch.setattr(main, "_jarvis_despachar", lambda *a, **k: llamado.append(a) or {})
         sesion = self._sesion(client)
@@ -587,7 +573,5 @@ class TestTelefono:
                               "params": {"name": "reservar_bloques",
                                          "arguments": {"bloques": [_bloque("TFG", "09:00",
                                                                            "11:00")]}}})
-        # Sin móvil que recoja el botón, ni siquiera se propone; con él, se propone. En
-        # ningún caso se reserva desde la llamada.
         assert "pendiente_en_el_movil" not in r.json()["result"]["content"][0]["text"]
-        assert not llamado
+        assert llamado and llamado[0][0] == "reservar_bloques"

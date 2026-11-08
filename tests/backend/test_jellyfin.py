@@ -151,8 +151,9 @@ class TestJellyfinReproducir:
                                                       else [_sesion()]))
         jellyfin.add("POST", "/Playing", FakeResponse(status_code=204))
 
-    def test_se_confirma(self):
-        assert main._JARVIS_HERRAMIENTAS["jellyfin_reproducir"]["confirmar"] is True
+    def test_es_directa(self):
+        """Desde el 2026-11-08 poner algo en la tele no se confirma, como la tele misma."""
+        assert main._JARVIS_HERRAMIENTAS["jellyfin_reproducir"]["confirmar"] is False
         for leer in ("jellyfin_seguir", "jellyfin_novedades", "jellyfin_buscar"):
             assert main._JARVIS_HERRAMIENTAS[leer]["confirmar"] is False
 

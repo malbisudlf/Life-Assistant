@@ -106,9 +106,10 @@ class TestPelisBuscar:
 
 
 class TestPelisPedir:
-    def test_pedir_y_borrar_se_confirman(self):
+    def test_borrar_se_confirma_y_pedir_no(self):
+        """Pedir es directo desde el 2026-11-08; borrar se lleva el fichero y no hay papelera."""
         h = main._JARVIS_HERRAMIENTAS
-        assert h["pelis_pedir"]["confirmar"] is True and h["pelis_borrar"]["confirmar"] is True
+        assert h["pelis_pedir"]["confirmar"] is False and h["pelis_borrar"]["confirmar"] is True
         for directa in ("pelis_buscar", "pelis_descargas", "indexadores_estado",
                         "indexadores_probar", "indexadores_flaresolverr"):
             assert h[directa]["confirmar"] is False
@@ -445,13 +446,12 @@ class TestPelisTelefono:
         assert aviso["titulo"] == "🎬 ¿Lo hago?"
         assert aviso["texto"] == "Borrar El padrino (1972) con su fichero (no hay papelera)."
 
-    def test_pedir_se_puede_confirmar_hablando(self, client, arr):
+    def test_pedir_por_telefono_se_hace_al_momento(self, client, arr):
         _montar_nueva(arr)
-        arr.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
         r = self._llamar(client, "pelis_pedir", {"tmdb_id": 238, "titulo": "El padrino"})
         salida = json.loads(r["result"]["content"][0]["text"])
-        assert salida["linea_para_la_llamada"] == f"✅ CONFIRMAR: {salida['id']}"
-        assert not arr.called("POST", _r("/movie"))
+        assert "linea_para_la_llamada" not in salida and salida["ok"] is True
+        assert arr.called("POST", _r("/movie"))
 
     def test_un_titulo_que_no_casa_no_llega_al_movil(self, client, arr):
         TestPelisBorrar()._montar(arr)

@@ -322,22 +322,9 @@ class TestJarvisNuncaSeQuedaMudo:
 # ── La frontera de confirmación ───────────────────────────────────────────────
 
 class TestJarvisConfirmacion:
-    def test_crear_evento_no_se_ejecuta_solo(self, client, auth_headers, monkeypatch, graph_token, mock_requests):
-        def _no_llamar(*a, **k):
-            raise AssertionError("no debería crearse el evento sin confirmar")
-
-        monkeypatch.setattr(main, "create_event", _no_llamar)
-        _con_modelo(monkeypatch, [
-            _mensaje(tool_calls=[_llamada("crear_evento", {"titulo": "Dentista", "fecha": "2026-09-01"})]),
-            _mensaje("¿Te lo creo?"),
-        ])
-        r = client.post("/jarvis", json={"mensaje": "apunta dentista el 1"}, headers=auth_headers)
-        datos = r.json()
-        assert datos["pendiente"]["herramienta"] == "crear_evento"
-        assert datos["pendiente"]["argumentos"]["titulo"] == "Dentista"
-        assert datos["herramientas"] == []
-
-    def test_ejecutar_crea_el_evento(self, client, auth_headers, monkeypatch):
+    def test_crear_evento_se_hace_al_momento(self, client, auth_headers, monkeypatch, graph_token, mock_requests):
+        """Desde el 2026-11-08 crear un evento suyo no se confirma: va a su calendario y se
+        borra igual que se crea («quitar la mayoría de permisos»)."""
         creados = []
 
         def _crear(body, credentials=None):
@@ -345,20 +332,40 @@ class TestJarvisConfirmacion:
             return {"status": "ok", "id": "ev-1"}
 
         monkeypatch.setattr(main, "create_event", _crear)
-        r = client.post(
-            "/jarvis/ejecutar",
-            json={
-                "herramienta": "crear_evento",
-                "argumentos": {"titulo": "Dentista", "fecha": "2026-09-01", "hora_inicio": "10:00"},
-            },
-            headers=auth_headers,
-        )
-        assert r.status_code == 200
-        assert r.json()["ok"] is True
+        _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("crear_evento", {"titulo": "Dentista", "fecha": "2026-09-01",
+                                                            "hora_inicio": "10:00"})]),
+            _mensaje("Apuntado."),
+        ])
+        r = client.post("/jarvis", json={"mensaje": "apunta dentista el 1"}, headers=auth_headers)
+        datos = r.json()
+        assert datos.get("pendiente") is None
         assert creados[0].subject == "Dentista"
         assert creados[0].start == "2026-09-01T10:00:00"
         # Sin hora de fin, una hora después.
         assert creados[0].end == "2026-09-01T11:00:00"
+
+    def test_lo_que_sigue_confirmandose_no_se_ejecuta_solo(self, client, auth_headers, monkeypatch):
+        """Borrar una nota no tiene papelera: sigue quedándose propuesta."""
+        monkeypatch.setitem(main._JARVIS_HERRAMIENTAS["borrar_idea"], "fn",
+                            lambda **k: (_ for _ in ()).throw(AssertionError("no sin confirmar")))
+        _con_modelo(monkeypatch, [
+            _mensaje(tool_calls=[_llamada("borrar_idea", {"idea_id": "11111111-1111-1111-1111-111111111111"})]),
+            _mensaje("¿La borro?"),
+        ])
+        r = client.post("/jarvis", json={"mensaje": "borra esa nota"}, headers=auth_headers)
+        assert r.json()["pendiente"]["herramienta"] == "borrar_idea"
+
+    def test_ejecutar_hace_lo_confirmado(self, client, auth_headers, monkeypatch):
+        hechas = []
+        monkeypatch.setitem(main._JARVIS_HERRAMIENTAS["borrar_idea"], "fn",
+                            lambda idea_id: hechas.append(idea_id) or {"ok": True})
+        r = client.post("/jarvis/ejecutar",
+                        json={"herramienta": "borrar_idea",
+                              "argumentos": {"idea_id": "11111111-1111-1111-1111-111111111111"}},
+                        headers=auth_headers)
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert hechas == ["11111111-1111-1111-1111-111111111111"]
 
     def test_ejecutar_rechaza_las_acciones_directas(self, client, auth_headers):
         """El endpoint de confirmación no es un ejecutor genérico de herramientas."""
@@ -451,6 +458,11 @@ class TestJarvisDespachador:
         # Y lo que lee Home Assistant en directo.
         monkeypatch.setattr(main, "HA_URL", "http://ha.test:8123")
         monkeypatch.setattr(main, "HA_TOKEN", "ha-token")
+        # Y el garaje y las cámaras, que sin sus entidades no tienen qué tocar ni mirar.
+        monkeypatch.setattr(main, "GARAJE_SCRIPT", "script.abrir_garaje")
+        monkeypatch.setattr(main, "GARAJE_SENSOR", "binary_sensor.puerta_garaje")
+        monkeypatch.setattr(main, "GARAJE_MOVIL", "device_tracker.movil")
+        monkeypatch.setattr(main, "CAMARAS", "garaje=camera.garaje")
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         assert nombres == set(main._JARVIS_HERRAMIENTAS)

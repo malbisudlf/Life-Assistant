@@ -216,10 +216,11 @@ class TestOrdenar:
         assert borrados[:2] == ["e-padel", "nuevo-padel"]
         assert not calendario_por_ordenar.called("PATCH", "outlook_id=eq.e-padel")
 
-    def test_simular_es_directo_y_mover_se_confirma(self):
+    def test_simular_y_mover_son_directos(self):
+        """Desde el 2026-11-08 mover tampoco se confirma: solo toca lo suyo, sin invitados."""
         h = main._JARVIS_HERRAMIENTAS["ordenar_calendario"]
         assert main._jarvis_confirma(h, {"simular": True}) is False
-        assert main._jarvis_confirma(h, {"simular": False}) is True
+        assert main._jarvis_confirma(h, {"simular": False}) is False
 
     def test_jarvis_solo_la_ve_encendida(self, monkeypatch):
         monkeypatch.setattr(main, "CALENDARIOS_POR_TIPO", False)

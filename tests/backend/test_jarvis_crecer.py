@@ -58,13 +58,13 @@ class TestJarvisModelos:
     def test_el_cierre_lo_redacta_el_pequeno(self, client, auth_headers, monkeypatch, mock_requests):
         """Con los datos ya en el contexto, redactar no necesita al caro."""
         cliente = _con_modelo(monkeypatch, [
-            _mensaje(tool_calls=[_llamada("crear_evento", {"titulo": "Cita", "fecha": "2026-09-01"})]),
-            _mensaje(tool_calls=[_llamada("crear_evento", {"titulo": "Cita", "fecha": "2026-09-01"})]),
-            _mensaje("Cuando lo confirmes, lo creo."),
+            _mensaje(tool_calls=[_llamada("borrar_idea", {"idea_id": "11111111-1111-1111-1111-111111111111"})]),
+            _mensaje(tool_calls=[_llamada("borrar_idea", {"idea_id": "11111111-1111-1111-1111-111111111111"})]),
+            _mensaje("Cuando lo confirmes, la borro."),
         ])
-        datos = client.post("/jarvis", json={"mensaje": "apuntame una cita"},
+        datos = client.post("/jarvis", json={"mensaje": "borra esa nota"},
                             headers=auth_headers).json()
-        assert datos["pendiente"]["herramienta"] == "crear_evento"
+        assert datos["pendiente"]["herramienta"] == "borrar_idea"
         assert [c["model"] for c in cliente.recibido] == [
             "modelo-pequeno", "modelo-grande", "modelo-pequeno"]
 
@@ -234,7 +234,8 @@ class TestJarvisCapacidades:
     def test_distingue_lo_directo_de_lo_que_se_confirma(self, monkeypatch, mock_requests):
         confirma = {h["nombre"]: h["confirma"] for h in main._j_mis_capacidades()["herramientas"]}
         assert confirma["agenda"] == "directa"
-        assert confirma["crear_evento"] == "la aprueba el usuario"
+        assert confirma["crear_evento"] == "directa"
+        assert confirma["borrar_idea"] == "la aprueba el usuario"
         assert confirma["casa_ordenar"] == "depende de la llamada"
 
 
