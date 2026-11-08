@@ -132,6 +132,34 @@ class TestLeer:
         main._j_whatsapp_leer(horas=100000)
         assert wa.called("GET", "/mensajes")[0][2]["params"]["horas"] == 720
 
+    def test_sin_buscar_las_24_horas_de_siempre(self, wa):
+        self._mensajes(wa, [])
+        main._j_whatsapp_leer()
+        params = wa.called("GET", "/mensajes")[0][2]["params"]
+        assert params["horas"] == 24 and "buscar" not in params
+
+    def test_buscar_es_la_memoria_de_30_dias(self, wa):
+        """«¿Qué me dijo Pablo del presupuesto?»: sin horas, todo lo que guarda el puente."""
+        self._mensajes(wa, [{"chat": AIMAR, "chat_nombre": "Aimar", "mio": False, "autor": "Aimar",
+                             "hora": "2026-10-20T16:20:00Z", "texto": "El presupuesto sale a 3.000"}])
+        r = main._j_whatsapp_leer(buscar="  presupuesto   reunión ")
+        params = wa.called("GET", "/mensajes")[0][2]["params"]
+        assert params["buscar"] == "presupuesto reunión" and params["horas"] == 720
+        assert r["buscado"] == "presupuesto reunión"
+        # Lo de otro sigue siendo de otro, y el aviso de siempre va igual.
+        assert r["chats"][0]["mensajes"][0].startswith("20/10 18:20 [otro: Aimar] ")
+        assert r["aviso"].startswith(main._AVISO_WEB)
+
+    def test_buscar_respeta_las_horas_que_le_pidan(self, wa):
+        self._mensajes(wa, [])
+        r = main._j_whatsapp_leer(buscar="pádel", horas=48)
+        assert wa.called("GET", "/mensajes")[0][2]["params"]["horas"] == 48
+        assert r["nota"] == "Ningún mensaje con «pádel» en las últimas 48 horas."
+
+    def test_buscar_sigue_atando_el_turno(self):
+        assert "whatsapp_leer" in main._HERRAMIENTAS_AJENAS
+        assert "buscar" in main._JARVIS_HERRAMIENTAS["whatsapp_leer"]["parametros"]
+
 
 class TestEnviar:
     def test_se_confirma(self):

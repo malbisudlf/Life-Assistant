@@ -32,6 +32,22 @@ backend ── whatsapp_chats      («¿quién es Aimar?»: su chat, de tus chat
         ── whatsapp_programados y whatsapp_cancelar_programado
 ```
 
+## La memoria: buscar en lo que te han dicho
+
+Desde el 2026-11-08, `whatsapp_leer` tiene `buscar`: «¿qué me dijo Pablo del presupuesto la
+semana pasada?» es `buscar="presupuesto"` (con el chat de Pablo si lo sabe). Sin `horas`,
+busca en los 30 días que guarda el puente, y los grupos entran solos (`/mensajes?buscar=`,
+que el puente filtra en Go: todas las palabras, en el texto, el autor o el nombre del chat,
+sin tildes ni mayúsculas, porque el `LIKE` de SQLite solo ignora mayúsculas en ASCII). No es
+una herramienta nueva a propósito: el catálogo ya es grande y el modelo se confunde más
+cuantas más parecidas hay (`docs/EVALS.md`).
+
+Lo que sale sigue siendo texto ajeno con las mismas reglas: «TÚ:» / «[otro: …]», el aviso, y
+el turno queda atado. **Por teléfono todavía no**: allí WhatsApp lo lee la llamada
+(`📖 LEER: whatsapp`), y buscar pediría un parámetro nuevo en `lectura.js` (un parche de la
+voice-app). Embeddings en jacobo para buscar por sentido y no por palabra: cuando haga falta,
+no antes.
+
 ## Los programados
 
 «Mañana a las 9 dile a Aimar que no llego», «el viernes a las 00:00 felicita a Ane».
