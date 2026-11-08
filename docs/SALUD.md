@@ -510,3 +510,26 @@ cambia las referencias y el mapa lo marca con una línea «aparato nuevo».
 
 **Objetivo del usuario**: 4 entrenamientos de gimnasio por semana (registrados en Hevy →
 Apple Health).
+
+
+## El entrenador adaptativo: `plan_entreno` (a modo de prueba, 2026-11-08)
+
+Una herramienta de Jarvis, **solo de consulta y sin avisos**, para «¿qué entreno hoy?» o
+«¿cómo voy esta semana?». Junta tres cosas:
+
+- **Lo hecho desde el lunes** (`_entrenos_desde`), de los `workouts` de Health Auto Export:
+  sin duplicados, con el pádel de la Amazfit («Other») sumado por día y contado como sesión
+  solo desde `PADEL_MIN_SESION` (45 min), porque llega troceado. La duración sale de
+  `start`→`end` (`_minutos_de_entreno`): la regla vieja «≤300 son minutos» de
+  `_minutos_entreno` leía un trozo de 4 min mandado en segundos como 4 horas.
+- **El plan**, de `PLAN_ENTRENO` (`Fuerza:3-4,Natación:3,Pádel:1`).
+- **Cómo viene hoy**: el sueño de anoche (< 6 h), la FC en reposo de HOY contra su media de
+  30 días (> ×1,06) y la HRV de hoy (< ×0,85). Basta una para que hoy toque «Natación
+  (suave)» o descanso. Al revés que la firma de malestar, que pide las tres: aquí no se
+  avisa de nada, solo se elige entre fuerza y piscina. Un dato de ayer no cuenta como de hoy.
+
+Lo que toca, si viene bien: lo que más falta, y a igualdad el pádel (un día fijo) y luego la
+fuerza. Si quedan más sesiones que días, lo dice (`no_da`). La báscula no entra.
+
+**Pendiente de decidir con uso**: si los umbrales valen para Mikel, y si merece un aviso
+(por ejemplo, el domingo, dentro de la bitácora de la semana).

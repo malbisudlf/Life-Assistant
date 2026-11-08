@@ -27438,6 +27438,148 @@ def _j_sueno(noches: int = 7) -> dict:
     return {"noches": fuera}
 
 
+# ── El entrenador adaptativo (a modo de prueba, 2026-11-08) ─────────────────────
+# El plan de Mikel es fijo en la cabeza (3-4 de fuerza, 3 de piscina, 1 de pádel) y la semana
+# real no: se sale una noche, duerme 5 horas, el pádel se cae. Esto junta lo que lleva hecho
+# esta semana con lo que le queda y con cómo viene hoy (sueño, FC en reposo y HRV contra su
+# mes), y dice qué toca HOY. Solo una herramienta de consulta, sin avisos: es una prueba, y un
+# entrenador que regaña sin que se lo pidan es justo el ruido que lo proactivo evita.
+#
+# Lo que no se puede reconstruir y por eso va aquí: en la Amazfit el pádel es «Other», y
+# llega troceado (la importación del cambio de aparato dejó fragmentos de minutos): los de un
+# mismo día se suman, y por debajo de 45 min no es una sesión. La báscula no entra: es barata
+# y solo vale para la tendencia.
+PLAN_ENTRENO = os.getenv("PLAN_ENTRENO", "Fuerza:3-4,Natación:3,Pádel:1")
+_TIPO_ENTRENO = {"Traditional Strength Training": "Fuerza", "Functional Strength Training": "Fuerza",
+                 "Swim": "Natación", "Pool Swim": "Natación", "Other": "Pádel",
+                 "Padel": "Pádel", "Indoor Cycling": "Bici", "Outdoor Walk": "Caminata"}
+PADEL_MIN_SESION = 45
+# Cuándo «hoy, suave»: cada umbral por separado basta, al revés que la firma de malestar
+# (que pide las tres): aquí no se avisa de nada, solo se elige entre fuerza y piscina.
+PLAN_SUENO_CORTO_H = 6.0
+PLAN_FC_ARRIBA     = 1.06     # la de hoy contra la media de 30 días
+PLAN_HRV_ABAJO     = 0.85
+
+
+def _plan_objetivo() -> dict:
+    """«Fuerza:3-4,Natación:3» → {"Fuerza": (3, 4), "Natación": (3, 3)}. Lo que no se
+    entiende se salta."""
+    plan = {}
+    for trozo in PLAN_ENTRENO.split(","):
+        nombre, _, cuantas = trozo.partition(":")
+        m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", cuantas)
+        if nombre.strip() and m:
+            lo = int(m.group(1))
+            plan[nombre.strip()] = (lo, int(m.group(2) or lo))
+    return plan
+
+
+def _minutos_de_entreno(w: dict) -> float:
+    """Minutos de un entreno: de `start` a `end` si vienen los dos (lo fiable), y si no
+    `_minutos_entreno`. Su regla «≤300 son minutos» lee un trozo de pádel de 4 min mandado en
+    segundos (240) como 4 horas, y la Amazfit trocea el pádel: aquí eso inflaba la semana."""
+    def _f(s):
+        s = str(s or "").strip()
+        for formato in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z"):
+            try:
+                return datetime.strptime(s, formato)
+            except ValueError:
+                pass
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    ini, fin = _f(w.get("start")), _f(w.get("end"))
+    if ini and fin and fin > ini and (ini.tzinfo is None) == (fin.tzinfo is None):
+        return round((fin - ini).total_seconds() / 60, 1)
+    return _minutos_entreno(w.get("duration")) or 0
+
+
+def _entrenos_desde(desde: date) -> list:
+    """Las sesiones desde `desde` (incluido): [{fecha, tipo, minutos}], sin duplicados y con
+    el pádel de cada día en una sola sesión."""
+    hoy   = _ahora_local().date()
+    datos = get_health_metrics(days=(hoy - desde).days + 2, credentials=None)
+    metricas = datos.get("metrics") or {}
+    filas = (metricas.get("workouts") or []) + (metricas.get("workout") or [])
+    vistos, sesiones, padel = set(), [], {}
+    for fila in filas:
+        for w in ((fila.get("extra") or {}).get("workouts") or []):
+            if not isinstance(w, dict):
+                continue
+            dia = str(w.get("start") or "")[:10] or str(fila.get("date") or "")[:10]
+            minutos = _minutos_de_entreno(w)
+            nombre = str(w.get("name") or w.get("workoutActivityType") or "")
+            clave = (dia, nombre, round(minutos))
+            if dia < desde.isoformat() or minutos < 1 or clave in vistos:
+                continue
+            vistos.add(clave)
+            tipo = _TIPO_ENTRENO.get(nombre, nombre or "Otro")
+            if tipo == "Pádel":
+                padel[dia] = padel.get(dia, 0) + minutos
+            else:
+                sesiones.append({"fecha": dia, "tipo": tipo, "minutos": round(minutos)})
+    sesiones += [{"fecha": d, "tipo": "Pádel", "minutos": round(m)}
+                 for d, m in padel.items() if m >= PADEL_MIN_SESION]
+    return sorted(sesiones, key=lambda s: s["fecha"])
+
+
+def _j_plan_entreno() -> dict:
+    ahora = _ahora_local()
+    hoy   = ahora.date()
+    lunes = hoy - timedelta(days=hoy.weekday())
+    plan  = _plan_objetivo()
+    sesiones = _entrenos_desde(lunes)
+    hechos = {t: sum(1 for s in sesiones if s["tipo"] == t) for t in plan}
+    hoy_hecho = [s["tipo"] for s in sesiones if s["fecha"] == hoy.isoformat()]
+    # Los días que quedan cuentan hoy solo si hoy no ha entrenado todavía.
+    quedan = 6 - hoy.weekday() + (0 if hoy_hecho else 1)
+    faltan = {t: max(0, lo - hechos.get(t, 0)) for t, (lo, _hi) in plan.items()}
+
+    salud = {}
+    try:
+        salud = _brief_salud() or {}
+    except Exception as e:
+        logger.warning("Plan de entreno: sin salud (%s)", type(e).__name__)
+    recup, motivos = {}, []
+    noches = (_j_sueno(1).get("noches") or [])
+    if noches and str(noches[-1].get("fecha") or "")[:10] in (hoy.isoformat(), (hoy - timedelta(days=1)).isoformat()):
+        recup["sueno_h"] = noches[-1].get("horas")
+        if (recup["sueno_h"] or 0) and recup["sueno_h"] < PLAN_SUENO_CORTO_H:
+            motivos.append(f"ha dormido {_hm(recup['sueno_h'])}")
+    for clave, factor, frase in (("fc_reposo", PLAN_FC_ARRIBA, "la FC en reposo está alta"),
+                                 ("hrv", PLAN_HRV_ABAJO, "la HRV está baja")):
+        m = salud.get(clave) or {}
+        if m.get("dias_atras") == 0 and m.get("ultimo") and m.get("media_30d") and (m.get("n_30d") or 0) >= 7:
+            recup[clave] = {"hoy": m["ultimo"], "media_30d": m["media_30d"]}
+            fuera = m["ultimo"] > m["media_30d"] * factor if factor > 1 else m["ultimo"] < m["media_30d"] * factor
+            if fuera:
+                motivos.append(frase)
+
+    pendientes = sum(faltan.values())
+    if hoy_hecho:
+        hoy_toca, porque = "Ya ha entrenado hoy", f"hoy ya lleva {', '.join(hoy_hecho)}"
+    elif pendientes == 0:
+        hoy_toca, porque = "Libre", "el plan de la semana ya está cumplido"
+    elif motivos:
+        suave = "Natación (suave)" if faltan.get("Natación") else "Descanso o algo suave"
+        hoy_toca, porque = suave, "; ".join(motivos)
+    else:
+        # Lo que más falta, y a igualdad, lo que más cuesta encajar: el pádel (un día fijo)
+        # y luego la fuerza. Si hay más pendientes que días, se dice.
+        orden = sorted((t for t in faltan if faltan[t]),
+                       key=lambda t: (-faltan[t], {"Pádel": 0, "Fuerza": 1}.get(t, 2)))
+        hoy_toca, porque = orden[0], f"le faltan {faltan[orden[0]]} de {orden[0].lower()}"
+    salida = {"semana_desde": lunes.isoformat(), "plan": {t: list(v) for t, v in plan.items()},
+              "hechos": hechos, "faltan": faltan, "dias_que_quedan": quedan,
+              "sesiones": sesiones, "recuperacion": recup, "hoy": hoy_toca, "porque": porque,
+              "prueba": True}
+    if pendientes > quedan:
+        salida["no_da"] = (f"Quedan {pendientes} sesiones y {quedan} días: alguna se queda "
+                           "fuera, o toca doblar (piscina por la mañana y fuerza por la tarde).")
+    return salida
+
+
 def _j_estado_pc() -> dict:
     agente = get_agent(agent_id=PC_AGENT_ID, credentials=None)
     return {
@@ -34327,6 +34469,15 @@ _JARVIS_HERRAMIENTAS = {
         },
         "obligatorios": ["hora"],
     },
+    "plan_entreno": {
+        "confirmar":   False,
+        "fn":          _j_plan_entreno,
+        "descripcion": "Qué le toca entrenar HOY según su plan semanal (fuerza, piscina, pádel), "
+                       "lo que lleva hecho esta semana y cómo viene (sueño, FC en reposo, HRV). "
+                       "Para «¿qué entreno hoy?», «¿cómo voy esta semana?» o «¿voy al gimnasio "
+                       "o a la piscina?». Es una prueba: dilo si da algo raro.",
+        "parametros":  {},
+    },
     "mis_alarmas": {
         "confirmar":   False,
         "fn":          _j_mis_alarmas,
@@ -34679,7 +34830,7 @@ _AJENO_WEB = frozenset({"buscar_en_internet", "leer_pagina"})
 # nadie, así que lo peor que puede pasar es una respuesta torcida, que lees.
 _TRAS_AJENO_SE_PUEDE = frozenset({
     "mis_capacidades", "diagnostico", "agenda", "huecos_libres", "clima", "salud", "sueno",
-    "tareas", "cumpleanos", "donde_estoy", "entrenamiento", "finanzas", "estado_pc", "ideas",
+    "tareas", "cumpleanos", "donde_estoy", "entrenamiento", "plan_entreno", "finanzas", "estado_pc", "ideas",
     "moodle_entregas", "resumen_del_dia", "leer_briefing", "estado_resumen_diario",
     "turno_de_noche", "errores", "jobs", "contar_revision", "respuesta_notificacion",
     "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas",
