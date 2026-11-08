@@ -29055,13 +29055,81 @@ def _tablero_maquinas() -> dict:
             "casa": not ({"home_assistant", "home_assistant_red"} & caidos)}
 
 
+def _tablero_manana(ahora: datetime) -> Optional[dict]:
+    """Lo primero de mañana (sin lo de todo el día), para saber cómo empieza."""
+    todos, _ = _eventos_y_clases()
+    manana = ahora.date() + timedelta(days=1)
+    primeros = []
+    for ev in todos or []:
+        try:
+            ini = _j_local(ev.get("start") or "")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if ini.date() == manana and not ev.get("isAllDay"):
+            titulo, oculto = _titulo_de_evento(ev)
+            primeros.append((ini, "Invitación (título oculto)" if oculto else titulo[:50]))
+    if not primeros:
+        return None
+    ini, titulo = min(primeros)
+    return {"hora": ini.strftime("%H:%M"), "titulo": titulo}
+
+
+def _tablero_entreno() -> Optional[dict]:
+    """Lo de `plan_entreno` que cabe en una pantalla: qué toca hoy y la semana en una línea."""
+    p = _j_plan_entreno()
+    corto = {"Natación": "Piscina"}
+    semana = [f"{corto.get(t, t)} {p['hechos'].get(t, 0)}/{lo if lo == hi else f'{lo}-{hi}'}"
+              for t, (lo, hi) in p["plan"].items()]
+    return {"hoy": p["hoy"], "semana": semana}
+
+
+def _tablero_sueno(ahora: datetime) -> Optional[str]:
+    noches = _j_sueno(2).get("noches") or []
+    if not noches:
+        return None
+    n = noches[-1]
+    if str(n.get("fecha") or "")[:10] not in (ahora.date().isoformat(),
+                                              (ahora.date() - timedelta(days=1)).isoformat()):
+        return None
+    return _hm(n.get("horas")) or None
+
+
+def _tablero_saludo(ahora: datetime, d: dict) -> str:
+    """Una frase de Jarvis, escrita por el backend (ningún modelo): el saludo de la hora y la
+    UNA cosa que más conviene saber ahora, por este orden: lo que empieza en menos de 90
+    minutos, la lluvia, lo que toca entrenar y, por la noche, cómo empieza mañana."""
+    h = ahora.hour
+    saludo = "Buenos días, señor." if 6 <= h < 14 else ("Buenas tardes, señor." if h < 21 else "Buenas noches, señor.")
+    for e in d.get("agenda") or []:
+        if e.get("hora") == "todo el día" or e.get("en_curso"):
+            continue
+        try:
+            hh, mm = (int(x) for x in e["hora"].split(":"))
+        except (KeyError, ValueError):
+            continue
+        faltan = hh * 60 + mm - (ahora.hour * 60 + ahora.minute)
+        if 0 < faltan <= 90:
+            return f"{saludo} En {faltan} minutos, {e['titulo']}."
+    t = d.get("tiempo") or {}
+    if isinstance(t.get("lluvia_prob"), (int, float)) and t["lluvia_prob"] >= 60 and h < 18:
+        return f"{saludo} Hoy llueve: {t['lluvia_prob']} % de probabilidad."
+    e = d.get("entreno") or {}
+    if e.get("hoy") and e["hoy"] not in ("Libre", "Ya ha entrenado hoy") and h < 20:
+        return f"{saludo} Hoy toca {e['hoy'].lower()}."
+    m = d.get("manana")
+    if m and h >= 20:
+        return f"{saludo} Mañana empieza a las {m['hora']}: {m['titulo']}."
+    return saludo
+
+
 def _tablero() -> dict:
     ahora = _ahora_local()
     datos: dict = {"hora": ahora.strftime("%H:%M"), "fecha": ahora.date().isoformat(),
                    "dia": DIAS_SEMANA[ahora.weekday()]}
     partes = {"tiempo": lambda: _brief_clima(), "agenda": lambda: _tablero_agenda(ahora),
               "alarma": lambda: _contexto_alarma(ahora), "maquinas": _tablero_maquinas,
-              "whatsapp_pendientes": _tablero_whatsapp}
+              "whatsapp_pendientes": _tablero_whatsapp, "manana": lambda: _tablero_manana(ahora),
+              "entreno": _tablero_entreno, "sueno": lambda: _tablero_sueno(ahora)}
     with ThreadPoolExecutor(max_workers=len(partes)) as pool:
         futuros = {k: pool.submit(fn) for k, fn in partes.items()}
         for k, f in futuros.items():
@@ -29071,6 +29139,11 @@ def _tablero() -> dict:
                 # Una parte que falla se queda en null y el resto sale: es una pantalla.
                 logger.warning("Tablero: %s falló (%s)", k, type(e).__name__)
                 datos[k] = None
+    try:
+        datos["saludo"] = _tablero_saludo(ahora, datos)
+    except Exception as e:
+        logger.warning("Tablero: el saludo falló (%s)", type(e).__name__)
+        datos["saludo"] = "A su servicio, señor."
     return datos
 
 

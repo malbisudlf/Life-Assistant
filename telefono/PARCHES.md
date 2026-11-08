@@ -1954,6 +1954,14 @@ sigue como antes, así que el orden al desplegar da igual.
   90). Si cuelgan mientras, deja de esperar.
 - Tests: `test/parche39.test.js` (6). Suite entera con el 38 y el 39: 196 de 196.
 
+## El parche 40: «pon el tablero»
+
+Del 2026-11-08 (`telefono/parche-40.diff`, sobre el 39; vuelta atrás: imagen `antes-p40`). En
+`tele.js`, la app «Jarvis» de Life Assistant (`tele/tablero-tizen/`, id `JarvisTabl.Tablero`)
+entre las conocidas, con «tablero», «el tablero», «dashboard» y «panel» como nombres; y en
+`reflejos.js`, esos nombres entre las apps que se abren sin Claude. Tests: `parche40.test.js`;
+suite entera, 198 de 198.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

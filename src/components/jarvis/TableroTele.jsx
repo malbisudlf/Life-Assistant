@@ -60,6 +60,7 @@ export default function TableroTele() {
       <main className="tt-cuerpo">
         <section className="tt-reloj">
           <div className="tt-hora">{datos?.hora || "--:--"}</div>
+          {datos?.saludo && <div className="tt-saludo">{datos.saludo}</div>}
           <div className="tt-tiempo">{lineaTiempo(datos?.tiempo)}</div>
           {datos?.alarma && <div className="tt-alarma">{datos.alarma}</div>}
         </section>
@@ -73,19 +74,29 @@ export default function TableroTele() {
               </li>
             ))}
           </ul>
+          {datos?.manana && (
+            <p className="tt-manana"><span className="tt-h">Mañana</span>{datos.manana.hora} · {datos.manana.titulo}</p>
+          )}
         </section>
-        <section className="tt-panel tt-estrecho">
-          <h2>Sistemas</h2>
-          <ul>
-            {maquinas(datos?.maquinas).map((m) => (
-              <li key={m.nombre}><span className={`tt-led tt-${m.estado}`} />{m.nombre}</li>
-            ))}
-          </ul>
-          {textoWhatsapp(datos?.whatsapp_pendientes) && (
-            <>
-              <h2>WhatsApp</h2>
-              <p>{textoWhatsapp(datos.whatsapp_pendientes)}</p>
-            </>
+        <section className="tt-lateral">
+          <div className="tt-panel">
+            <h2>Sistemas</h2>
+            <ul className="tt-fila">
+              {maquinas(datos?.maquinas).map((m) => (
+                <li key={m.nombre}><span className={`tt-led tt-${m.estado}`} />{m.nombre}</li>
+              ))}
+            </ul>
+            {textoWhatsapp(datos?.whatsapp_pendientes) && (
+              <p><span className="tt-etiqueta">WhatsApp</span>{textoWhatsapp(datos.whatsapp_pendientes)}</p>
+            )}
+          </div>
+          {(datos?.entreno || datos?.sueno) && (
+            <div className="tt-panel">
+              <h2>Cuerpo</h2>
+              {datos?.entreno && <p><span className="tt-etiqueta">Hoy</span>{datos.entreno.hoy}</p>}
+              {datos?.entreno?.semana && <p className="tt-tenue tt-peq">{datos.entreno.semana.join(" · ")}</p>}
+              {datos?.sueno && <p><span className="tt-etiqueta">Anoche</span>{datos.sueno}</p>}
+            </div>
           )}
         </section>
       </main>
@@ -104,10 +115,12 @@ const CSS = `
 .tt-cabecera { display: flex; justify-content: space-between; align-items: center;
   font-size: 2.4vh; letter-spacing: .3em; color: var(--c); text-transform: uppercase; }
 .tt-marca { display: flex; align-items: center; gap: 1vh; }
-.tt-punto { width: 1.2vh; height: 1.2vh; border-radius: 50%; background: var(--c); box-shadow: 0 0 1.5vh var(--c); }
+.tt-punto { width: 1.2vh; height: 1.2vh; border-radius: 50%; background: var(--c); box-shadow: 0 0 1.5vh var(--c); animation: ttLatido 3s ease-in-out infinite; }
+@keyframes ttLatido { 50% { opacity: .35; box-shadow: 0 0 .4vh var(--c); } }
 .tt-dia { color: var(--tenue); letter-spacing: .15em; }
 .tt-cuerpo { flex: 1; display: grid; grid-template-columns: 1.1fr 1.4fr .8fr; gap: 3vw; align-items: center; }
 .tt-hora { font-size: 18vh; font-weight: 600; line-height: 1; color: var(--c); text-shadow: 0 0 4vh rgba(94,231,255,.35); }
+.tt-saludo { font-size: 3vh; margin-top: 2.2vh; color: var(--c); opacity: .85; line-height: 1.3; max-width: 30vw; }
 .tt-tiempo { font-size: 3.6vh; margin-top: 2vh; }
 .tt-alarma { font-size: 2.6vh; margin-top: 2vh; color: var(--amb); }
 .tt-panel { border: 1px solid var(--c3); border-radius: 1vh; padding: 3vh 2vw;
@@ -115,7 +128,15 @@ const CSS = `
 .tt-panel h2 { margin: 0 0 1.5vh; font-size: 2.2vh; letter-spacing: .3em; color: var(--c2); text-transform: uppercase; font-weight: 600; }
 .tt-panel ul { list-style: none; margin: 0 0 3vh; padding: 0; }
 .tt-panel li { font-size: 3.2vh; padding: .8vh 0; border-bottom: 1px solid rgba(94,231,255,.07); display: flex; align-items: center; gap: 1.5vw; }
-.tt-panel p { font-size: 3vh; margin: 0; }
+.tt-panel p { font-size: 3vh; margin: 0 0 1vh; }
+.tt-lateral { display: flex; flex-direction: column; gap: 3vh; }
+.tt-lateral .tt-panel { padding: 2.4vh 1.6vw; }
+.tt-lateral ul { margin-bottom: 1.5vh; }
+.tt-fila li { font-size: 2.8vh; padding: .5vh 0; }
+.tt-etiqueta { color: var(--c2); font-size: 2vh; letter-spacing: .2em; text-transform: uppercase; margin-right: 1vw; }
+.tt-peq { font-size: 2.3vh !important; }
+.tt-manana .tt-h { margin-right: 1.2vw; }
+.tt-manana { margin-top: 2vh !important; color: var(--tenue); font-size: 2.6vh !important; }
 .tt-h { color: var(--c); min-width: 6.5vw; font-variant-numeric: tabular-nums; }
 .tt-ahora { color: var(--c); }
 .tt-tenue { color: var(--tenue); }

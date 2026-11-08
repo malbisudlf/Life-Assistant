@@ -71,3 +71,38 @@ def test_se_guarda_un_minuto(client, tablero, monkeypatch):
     client.get("/tele/tablero", headers=H)
     client.get("/tele/tablero", headers=H)
     assert len(llamadas) == 1
+
+
+class TestLoNuevo:
+    """Lo que se añadió el mismo día: la frase de Jarvis, el entreno, el sueño y mañana."""
+
+    def test_trae_entreno_sueno_y_manana(self, client, tablero, monkeypatch):
+        monkeypatch.setattr(main, "_j_plan_entreno", lambda: {
+            "hoy": "Natación", "hechos": {"Fuerza": 1, "Natación": 0, "Pádel": 1},
+            "plan": {"Fuerza": [3, 4], "Natación": [3, 3], "Pádel": [1, 1]}})
+        monkeypatch.setattr(main, "_j_sueno", lambda n=7: {"noches": [{"fecha": "2026-11-09", "horas": 7.2}]})
+        d = client.get("/tele/tablero", headers=H).json()
+        assert d["entreno"] == {"hoy": "Natación", "semana": ["Fuerza 1/3-4", "Piscina 0/3", "Pádel 1/1"]}
+        assert d["sueno"] == "7 h 12 min"
+        assert d["saludo"].startswith("Buenos días, señor.")
+
+    def test_si_algo_empieza_pronto_lo_dice_antes_que_nada(self, tablero):
+        ahora = tablero
+        d = {"agenda": [{"hora": "09:00", "titulo": "Clase de RL", "en_curso": False}],
+             "tiempo": {"lluvia_prob": 90}, "entreno": {"hoy": "Fuerza"}}
+        assert main._tablero_saludo(ahora, d) == "Buenos días, señor. En 60 minutos, Clase de RL."
+
+    def test_luego_la_lluvia_y_luego_el_entreno(self, tablero):
+        ahora = tablero
+        assert "llueve" in main._tablero_saludo(ahora, {"tiempo": {"lluvia_prob": 80}, "entreno": {"hoy": "Fuerza"}})
+        assert main._tablero_saludo(ahora, {"entreno": {"hoy": "Fuerza"}}) == "Buenos días, señor. Hoy toca fuerza."
+        assert main._tablero_saludo(ahora, {"entreno": {"hoy": "Libre"}}) == "Buenos días, señor."
+
+    def test_por_la_noche_como_empieza_manana(self, tablero):
+        noche = tablero.replace(hour=22)
+        d = {"manana": {"hora": "08:30", "titulo": "Clase de RL"}}
+        assert main._tablero_saludo(noche, d) == "Buenas noches, señor. Mañana empieza a las 08:30: Clase de RL."
+
+    def test_si_el_saludo_revienta_saluda_igual(self, client, tablero, monkeypatch):
+        monkeypatch.setattr(main, "_tablero_saludo", lambda a, d: 1 / 0)
+        assert client.get("/tele/tablero", headers=H).json()["saludo"] == "A su servicio, señor."

@@ -1161,12 +1161,24 @@ en vez del dashboard cuando el fragmento empieza por `#tele`, en diferido).
 - **Lo que no sale, a propósito**: de WhatsApp, ni quién ni qué (solo cuántos); de la agenda,
   solo hoy, y las invitaciones que dan órdenes como «Invitación (título oculto)»; de la familia,
   nada.
-- **Lo que falta, y por qué no se ha hecho sin Mikel**: que salga sola. Esta tele ignora la
-  orden de abrir una URL (`ed.apps.launch`, comprobado el 2026-11-04), así que el camino es
-  abrir la página UNA vez en su navegador y dejarla como inicio; luego, encenderla y lanzar el
-  navegador (`tele.js`, un reflejo «pon el tablero»), que vuelve a la última página. Encenderla
-  sola «al detectar a alguien en la sala» es encender la tele de todos: necesita su visto bueno
-  y una prueba con la tele delante (regla de la casa: nada de encender «para probar»).
+- **Lo que pinta** (ampliado el mismo día): una frase de Jarvis escrita por el backend
+  (`_tablero_saludo`: el saludo de la hora y UNA cosa, por este orden: lo que empieza en
+  menos de 90 min, la lluvia, lo que toca entrenar y, por la noche, cómo empieza mañana), lo
+  primero de mañana, y un panel «Cuerpo» con lo que toca hoy y la semana (`plan_entreno`) y
+  las horas de sueño de anoche. Nada más: es una pantalla para mirar de pasada.
+- **Cómo se abre**: esta tele ignora «abre esta URL» (`ed.apps.launch`, comprobado el
+  2026-11-04) pero obedece «abre esta app», así que el tablero va dentro de una app de Tizen,
+  «Jarvis» (`tele/tablero-tizen/`, se instala desde caja con la imagen de Jellyfin). Jarvis
+  la abre con `tele` / el reflejo «pon el tablero» (parche 40), y eso enciende la tele si
+  está en reposo.
+- **Por la mañana, sola** (idea de Mikel, 2026-11-08): cuando su móvil o su pulsera estén en
+  el salón. El Green tiene adaptador Bluetooth (Realtek, configurado ese día) y lo ve todo a
+  su alrededor: el iPhone cambia de dirección cada pocos minutos (haría falta su IRK, con
+  Private BLE Device), pero la **Amazfit Helio Strap** se anuncia con nombre y dirección fija,
+  y quizá baste. Falta: comprobar que se ve siempre y con la misma dirección, calibrar la
+  señal en el sofá frente a otros cuartos, y la automatización (entre semana, por la mañana,
+  la tele apagada, una vez al día). Encenderla sola es encender la tele de todos: con su visto
+  bueno y probándola con ella delante.
 
 ### La cámara, las manos y los proyectos (2026-10-28)
 

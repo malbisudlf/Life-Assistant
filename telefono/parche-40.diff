@@ -1,0 +1,55 @@
+diff -ruN a/voice-app/lib/reflejos.js b/voice-app/lib/reflejos.js
+--- a/voice-app/lib/reflejos.js	2026-11-08 14:01:32.969927200 +0100
++++ b/voice-app/lib/reflejos.js	2026-11-08 14:01:33.048727800 +0100
+@@ -40,7 +40,7 @@
+ 
+ const TELE = '(?:la )?(?:tele|television|tv)(?: (?:de|del|de la) (?:la )?(?:sala|salon))?';
+ const OBRA = '(?:la (?:peli|pelicula|serie|tele|television|tv)|el (?:video|contenido|capitulo|programa|partido|episodio)|esto|eso)';
+-const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch';
++const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch|el tablero|tablero|el dashboard|dashboard';
+ 
+ const EN_TELE = '(?: (?:en|de|a) ' + TELE + ')?';
+ 
+diff -ruN a/voice-app/lib/tele.js b/voice-app/lib/tele.js
+--- a/voice-app/lib/tele.js	2026-11-08 14:01:32.982097900 +0100
++++ b/voice-app/lib/tele.js	2026-11-08 14:01:33.060808800 +0100
+@@ -52,6 +52,9 @@
+   jellyfin: 'AprZAARz4r.Jellyfin', 'movistar plus+': '3201707014489', twitch: '3202203026841',
+   tiktok: '3202008021577', filmin: '3201703012079', rtve: '3201909019175', atresplayer: '3201710014981',
+   mitele: '3201710015037', pluto: '3201808016802', 'samsung tv plus': '3201707014361',
++  // Parche 40: la app «Jarvis» de Life Assistant (tele/tablero-tizen/), que abre el tablero.
++  // La tele ignora «abre esta URL», pero obedece «abre esta app»: por eso es una app.
++  jarvis: 'JarvisTabl.Tablero',
+ };
+ // Lo que se dice → el nombre con el que se busca
+ const ALIAS = {
+@@ -59,6 +62,7 @@
+   prime: 'prime video', amazon: 'prime video', 'amazon prime': 'prime video',
+   apple: 'apple tv', 'apple tv plus': 'apple tv', movistar: 'movistar plus+', 'movistar plus': 'movistar plus+',
+   'you tube': 'youtube', yutub: 'youtube',
++  tablero: 'jarvis', 'el tablero': 'jarvis', dashboard: 'jarvis', 'el dashboard': 'jarvis', panel: 'jarvis', 'el panel': 'jarvis',
+ };
+ 
+ function normalizar(s) {
+diff -ruN a/voice-app/test/parche40.test.js b/voice-app/test/parche40.test.js
+--- a/voice-app/test/parche40.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche40.test.js	2026-11-08 14:01:33.076442700 +0100
+@@ -0,0 +1,18 @@
++// Parche 40: «pon el tablero» abre la app «Jarvis» de la tele (tele/tablero-tizen/ en Life Assistant).
++const test = require('node:test');
++const assert = require('node:assert');
++const tele = require('../lib/tele');
++const { interpretar } = require('../lib/reflejos');
++
++test('p40: el tablero es una app conocida, y sus nombres van a ella', () => {
++  for (const dicho of ['tablero', 'el tablero', 'dashboard', 'Jarvis']) {
++    assert.ok(tele.esAppConocida(dicho), dicho);
++  }
++});
++
++test('p40: «pon el tablero» y «enciende la tele y pon el tablero» abren la app', () => {
++  const a = interpretar('Pon el tablero.');
++  assert.ok(a && JSON.stringify(a).includes('abrir') && JSON.stringify(a).includes('tablero'), JSON.stringify(a));
++  const b = interpretar('Enciende la tele y pon el tablero.');
++  assert.ok(b && JSON.stringify(b).includes('tablero'), JSON.stringify(b));
++});
