@@ -32881,6 +32881,12 @@ def _wa_vig_pasada() -> dict:
                for t, m in nuevos):
             continue
         try:
+            # Antes de clasificar: contestar no depende de lo que diga, y el aviso, si lo
+            # hay, sigue su camino de siempre.
+            _wa_no_molestar(chat, [m for _, m in nuevos])
+        except Exception as e:
+            logger.warning("WhatsApp: el no molestar falló (%s)", type(e).__name__)
+        try:
             if _wa_vig_rafaga(chat, [m for t, m in filas if t <= visto], [m for _, m in nuevos]):
                 avisos += 1
         except WhatsappNoContesta:
@@ -32892,6 +32898,59 @@ def _wa_vig_pasada() -> dict:
             continue
         _wa_vig_visto[chat] = nuevos[-1][0]
     return {"whatsapp_avisos": avisos} if avisos else {}
+
+
+# ── No molestar: Jarvis contesta por ti en clase y en el gimnasio (2026-11-08) ──
+# «Mikel está en clase hasta las 12:00. Si es urgente, dímelo y se lo paso.» Es mandar un
+# mensaje en su nombre sin que pulse nada, así que tiene tres candados:
+#  - **Apagado por defecto y por lista**: solo a los chats de `WHATSAPP_NO_MOLESTAR` (ids de
+#    chats individuales, uno a uno). Vacío, no contesta a nadie. Nunca a un grupo.
+#  - **El texto lo escribe el backend**, no un modelo, y no repite nada de lo que te dijeron:
+#    solo dónde estás y hasta cuándo (la hora de fin de la clase del calendario).
+#  - **Una vez por chat cada `WA_NM_CADA_H` horas** y `WA_NM_DIA_MAX` al día, y nunca si en
+#    esa ráfaga ya has contestado tú (estás con el móvil).
+# Lo que te dicen después («sí, es urgente») lo sigue mirando la vigilancia: en el gimnasio
+# te avisa al momento, y en clase espera al final, que es lo que pediste el 2026-11-05.
+WHATSAPP_NO_MOLESTAR = frozenset(
+    c.strip() for c in os.getenv("WHATSAPP_NO_MOLESTAR", "").split(",")
+    if c.strip() and not c.strip().endswith("@g.us") and _wa_chat_valido(c.strip()))
+WA_NM_CADA_H = 3
+WA_NM_DIA_MAX = 10
+_WA_NM_FIRMA = "(Jarvis, su asistente)"
+_wa_nm_enviados: dict = {}
+
+
+def _wa_no_molestar_texto() -> Optional[str]:
+    clase = _en_clase()
+    if clase:
+        return (f"Mikel está en clase hasta las {clase['fin'].strftime('%H:%M')} y no mira el móvil. "
+                f"Si es urgente, dímelo y se lo paso. {_WA_NM_FIRMA}")
+    if (_lugar_actual_seguro() or {}).get("lugar") == LUGAR_GIMNASIO:
+        return f"Mikel está entrenando y no mira el móvil. Si es urgente, dímelo y se lo paso. {_WA_NM_FIRMA}"
+    return None
+
+
+def _wa_no_molestar(chat: str, nuevos: list) -> bool:
+    """Contesta por ti si toca (ver arriba). True si ha mandado algo."""
+    if chat not in WHATSAPP_NO_MOLESTAR or chat.endswith("@g.us"):
+        return False
+    if any(m.get("mio") and _WA_NM_FIRMA not in str(m.get("texto") or "") for m in nuevos):
+        return False
+    ahora = time.time()
+    if ahora - _wa_nm_enviados.get(chat, 0) < WA_NM_CADA_H * 3600:
+        return False
+    if sum(1 for t in _wa_nm_enviados.values() if ahora - t < 86400) >= WA_NM_DIA_MAX:
+        return False
+    texto = _wa_no_molestar_texto()
+    if not texto:
+        return False
+    r = _j_whatsapp_enviar(chat, texto)
+    if not r.get("ok"):
+        logger.warning("WhatsApp: el no molestar no pudo contestar (%s)", str(r.get("error"))[:80])
+        return False
+    _wa_nm_enviados[chat] = ahora
+    logger.info("WhatsApp: no molestar, contestado por ti a un chat de la lista")
+    return True
 
 
 def _wa_vig_hilo() -> None:

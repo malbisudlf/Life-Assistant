@@ -209,6 +209,21 @@ durante la clase se puede perder, porque así se pidió. «No útil» tres veces
 los escribe lo sepa. Se decidió así para empezar, y pasa a local cuando llegue la P100. Son
 céntimos al mes: unas 16 ráfagas al día de chats individuales.
 
+## No molestar: Jarvis contesta por ti (2026-11-08)
+
+En clase (`_en_clase`, por el calendario) o en el gimnasio (el lugar firme), a los chats de
+`WHATSAPP_NO_MOLESTAR` les contesta: «Mikel está en clase hasta las 12:00 y no mira el móvil.
+Si es urgente, dímelo y se lo paso. (Jarvis, su asistente)». Va en la misma pasada que la
+vigilancia, antes de clasificar, así que **solo funciona con `WHATSAPP_VIGILANCIA=1`**.
+
+Es mandar en tu nombre sin botón, la excepción a «lo que sale lo apruebas tú», y por eso:
+**vacío no contesta a nadie** (se apunta chat a chat), nunca a un grupo, el texto lo escribe
+el backend y no repite nada de lo que te dijeron, una vez por chat cada `WA_NM_CADA_H` (3)
+horas y `WA_NM_DIA_MAX` (10) al día, y nunca si en esa ráfaga ya has escrito tú. Lo que te
+contesten («sí, es urgente») lo mira la vigilancia como siempre: en el gimnasio avisa al
+momento, y en clase espera al final, como pediste el 2026-11-05. Las horas de los envíos
+viven en memoria: un reinicio las pone a cero, y como mucho contesta una vez más.
+
 ## Por qué un mensaje no puede darle órdenes
 
 La noche del 2026-11-05, a las 00:06, un amigo escribió en un grupo: «@jarvis», «mira cual es
