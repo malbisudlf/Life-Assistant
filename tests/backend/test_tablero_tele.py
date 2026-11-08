@@ -106,3 +106,23 @@ class TestLoNuevo:
     def test_si_el_saludo_revienta_saluda_igual(self, client, tablero, monkeypatch):
         monkeypatch.setattr(main, "_tablero_saludo", lambda a, d: 1 / 0)
         assert client.get("/tele/tablero", headers=H).json()["saludo"] == "A su servicio, señor."
+
+
+class TestDesdeLaAppDeLaTele:
+    """La app de la tele no es ningún origen de CORS_ORIGINS: esa ruta, y solo esa, le contesta."""
+
+    def test_el_preflight_de_cualquier_origen(self, client, tablero):
+        r = client.options("/tele/tablero", headers={"Origin": "null", "Access-Control-Request-Method": "GET",
+                                                     "Access-Control-Request-Headers": "X-Auth-Token"})
+        assert r.status_code == 204
+        assert r.headers["access-control-allow-origin"] == "*"
+        assert "X-Auth-Token" in r.headers["access-control-allow-headers"]
+
+    def test_el_get_lleva_la_cabecera_y_sigue_pidiendo_llave(self, client, tablero):
+        r = client.get("/tele/tablero", headers={**H, "Origin": "file://"})
+        assert r.status_code == 200 and r.headers["access-control-allow-origin"] == "*"
+        assert client.get("/tele/tablero", headers={"Origin": "file://"}).status_code == 401
+
+    def test_las_demas_rutas_no_se_abren(self, client):
+        r = client.options("/jarvis", headers={"Origin": "https://malo.example", "Access-Control-Request-Method": "POST"})
+        assert r.headers.get("access-control-allow-origin") != "*"

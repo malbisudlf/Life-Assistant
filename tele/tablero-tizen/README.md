@@ -9,14 +9,14 @@ URL del tablero con su llave.
 | Fichero | Qué es |
 |---|---|
 | `config.xml` | La app: id `JarvisTabl.Tablero`, nombre «Jarvis», permiso de internet |
-| `index.html` | Salta al tablero. `__URL__` lo rellena `instalar.sh` |
+| `index.html` | **El tablero entero**, en JavaScript ES5 y CSS sin nada posterior a 2018, que pide `GET /tele/tablero` él mismo. `__API__` y `__LLAVE__` los rellena `instalar.sh`. Atrás cierra la app |
 | `icon.png` | El icono (el reactor, en el azul del HUD) |
 | `instalar.sh` | Empaqueta, firma e instala. **En caja**, con la imagen `ghcr.io/georift/install-jellyfin-tizen` que ya se usó para Jellyfin (Tizen Studio y su certificado de desarrollo dentro) |
 
 **La llave no está aquí**: `instalar.sh` la lee de `~/stack/backend.env` y la mete en el paquete,
 que se hace en un directorio temporal y se borra.
 
-**Instalada el 2026-11-08** (`JarvisTabl.Tablero`, 1.0.0) y comprobada: «pon el tablero» la abre y carga el tablero.
+**La 1.0.0 (2026-11-08) se quedó en negro y el mando sin respuesta**: saltaba al frontend de Vercel, que es la app web entera (500 KB de React, CSS con `inset` y `gap`), en el navegador de una tele de 2020; y fuera de la app la tecla Atrás no tenía quién la atendiera. Se cerró desde caja (`DELETE /api/v2/applications/JarvisTabl.Tablero`, que es lo que hay que hacer si se vuelve a colgar). Desde la 1.0.1 el tablero va dentro de la app y el backend le contesta desde cualquier origen solo en esa ruta (`_CorsDelTablero`).
 
 ## Instalar (con la tele encendida)
 

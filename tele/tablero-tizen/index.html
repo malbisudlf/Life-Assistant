@@ -1,13 +1,135 @@
 <!doctype html>
 <html lang="es">
-<head><meta charset="utf-8"><title>Jarvis</title>
-<style>html,body{margin:0;height:100%;background:#02060b;color:#5ee7ff;font:600 4vh sans-serif;display:flex;align-items:center;justify-content:center;letter-spacing:.3em}</style>
+<head>
+<meta charset="utf-8">
+<title>Jarvis</title>
+<!--
+  El tablero de la tele, DENTRO de la app (2026-11-08). La primera versión saltaba al
+  frontend de Vercel: la app web entera (500 KB de React) y CSS moderno (inset, gap) en el
+  navegador de una tele de 2020, que se quedó en negro; y al salir de la app, el mando
+  perdía la tecla Atrás. Aquí: JavaScript de los de antes (var, XHR, nada de => ni ?.),
+  CSS sin nada posterior a 2018, y Atrás cierra la app.
+  __API__ y __LLAVE__ los pone instalar.sh: la llave solo vive en la app instalada.
+-->
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #02060b; color: #d9f6ff;
+    font-family: sans-serif; overflow: hidden; }
+  #tt { position: absolute; top: 0; left: 0; width: 100%; height: 100%; padding: 4vh 4vw; box-sizing: border-box; }
+  .cab { height: 5vh; font-size: 2.4vh; letter-spacing: .3em; color: #5ee7ff; text-transform: uppercase; }
+  .cab .dia { float: right; color: rgba(190,235,250,.55); letter-spacing: .15em; }
+  .punto { display: inline-block; width: 1.2vh; height: 1.2vh; border-radius: 50%; background: #5ee7ff;
+    box-shadow: 0 0 1.5vh #5ee7ff; margin-right: 1vh; vertical-align: middle; }
+  .col { position: absolute; top: 14vh; bottom: 6vh; }
+  #izq { left: 4vw; width: 30vw; }
+  #cen { left: 37vw; width: 33vw; }
+  #der { left: 73vw; width: 23vw; }
+  .hora { font-size: 17vh; font-weight: bold; line-height: 1; color: #5ee7ff; text-shadow: 0 0 4vh rgba(94,231,255,.35); }
+  .saludo { font-size: 3vh; margin-top: 2.5vh; color: #5ee7ff; line-height: 1.3; }
+  .tiempo { font-size: 3.4vh; margin-top: 2.5vh; }
+  .alarma { font-size: 2.6vh; margin-top: 2vh; color: #ffb547; }
+  .panel { border: 1px solid rgba(94,231,255,.16); border-radius: 1vh; padding: 2.6vh 1.6vw; margin-bottom: 3vh;
+    background: rgba(94,231,255,.04); }
+  h2 { margin: 0 0 1.4vh 0; font-size: 2.1vh; letter-spacing: .3em; color: rgba(94,231,255,.6); text-transform: uppercase; font-weight: normal; }
+  .fila { font-size: 3.1vh; padding: .7vh 0; border-bottom: 1px solid rgba(94,231,255,.07); }
+  .h { display: inline-block; min-width: 6vw; color: #5ee7ff; }
+  .ahora { color: #5ee7ff; }
+  .tenue { color: rgba(190,235,250,.55); }
+  .peq { font-size: 2.3vh; }
+  .et { color: rgba(94,231,255,.6); font-size: 2vh; letter-spacing: .2em; text-transform: uppercase; margin-right: 1vw; }
+  .led { display: inline-block; width: 1.4vh; height: 1.4vh; border-radius: 50%; margin-right: 1vw; vertical-align: middle; }
+  .ok { background: #3ddc84; } .caida { background: #ff5f57; } .nose { background: rgba(190,235,250,.55); }
+  .p { font-size: 2.9vh; margin: 0 0 1vh 0; }
+  #error { position: absolute; bottom: 2vh; left: 0; width: 100%; text-align: center; color: #ffb547; font-size: 2.4vh; }
+</style>
 </head>
-<body>J.A.R.V.I.S.
+<body>
+<div id="tt">
+  <div class="cab"><span class="punto"></span>J.A.R.V.I.S.<span class="dia" id="dia"></span></div>
+  <div class="col" id="izq">
+    <div class="hora" id="hora">--:--</div>
+    <div class="saludo" id="saludo"></div>
+    <div class="tiempo" id="tiempo"></div>
+    <div class="alarma" id="alarma"></div>
+  </div>
+  <div class="col" id="cen"><div class="panel"><h2>Hoy</h2><div id="agenda"></div><div id="manana"></div></div></div>
+  <div class="col" id="der">
+    <div class="panel"><h2>Sistemas</h2><div id="maquinas"></div><div id="whatsapp"></div></div>
+    <div class="panel" id="cuerpo" style="display:none"><h2>Cuerpo</h2><div id="cuerpo-dentro"></div></div>
+  </div>
+  <div id="error"></div>
+</div>
 <script>
-  // __URL__ lo pone instalar.sh al empaquetar (la del tablero, con su llave): la llave no
-  // está en el repositorio, solo dentro de la app instalada en la tele.
-  window.location.replace("__URL__");
+  var API = "__API__";
+  var LLAVE = "__LLAVE__";
+
+  // Atrás (10009) y Salir cierran la app: sin esto, el mando se quedaba sin respuesta.
+  function salir() {
+    try { tizen.application.getCurrentApplication().exit(); } catch (e) { try { window.close(); } catch (e2) {} }
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.keyCode === 10009 || ev.keyCode === 10182 || ev.keyCode === 27 || ev.keyCode === 8) salir();
+  });
+  window.addEventListener("tizenhwkey", function (ev) { if (ev.keyName === "back") salir(); });
+
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function $(id) { return document.getElementById(id); }
+  function pintar(d) {
+    $("dia").innerHTML = esc(d.dia + " " + Number(String(d.fecha).slice(8, 10)));
+    $("hora").innerHTML = esc(d.hora);
+    $("saludo").innerHTML = esc(d.saludo || "");
+    var t = d.tiempo, linea = "";
+    if (t && typeof t.ahora === "number") {
+      linea = t.ahora + " °C";
+      if (typeof t.min === "number" && typeof t.max === "number") linea += " · " + t.min + "–" + t.max;
+      if (typeof t.lluvia_prob === "number" && t.lluvia_prob >= 20) linea += " · lluvia " + t.lluvia_prob + " %";
+    }
+    $("tiempo").innerHTML = esc(linea);
+    $("alarma").innerHTML = esc(d.alarma || "");
+    var ag = d.agenda || [], html = "", i;
+    if (!ag.length) html = '<div class="fila tenue">Nada más en la agenda.</div>';
+    for (i = 0; i < ag.length; i++) {
+      html += '<div class="fila' + (ag[i].en_curso ? " ahora" : "") + '"><span class="h">' + esc(ag[i].hora) + "</span>" + esc(ag[i].titulo) + "</div>";
+    }
+    $("agenda").innerHTML = html;
+    $("manana").innerHTML = d.manana ? '<div class="p tenue peq" style="margin-top:2vh">Mañana · ' + esc(d.manana.hora) + " · " + esc(d.manana.titulo) + "</div>" : "";
+    var m = d.maquinas || {}, nombres = [["caja", "caja"], ["jacobo", "jacobo"], ["casa", "la casa"]], mh = "";
+    for (i = 0; i < nombres.length; i++) {
+      var v = m[nombres[i][0]], c = v === true ? "ok" : (v === false ? "caida" : "nose");
+      mh += '<div class="fila"><span class="led ' + c + '"></span>' + nombres[i][1] + "</div>";
+    }
+    $("maquinas").innerHTML = mh;
+    var n = d.whatsapp_pendientes, w = "";
+    if (typeof n === "number") w = n === 0 ? "Nadie espera respuesta" : (n === 1 ? "1 chat espera respuesta" : n + " chats esperan respuesta");
+    $("whatsapp").innerHTML = w ? '<div class="p" style="margin-top:1.5vh"><span class="et">WhatsApp</span>' + esc(w) + "</div>" : "";
+    var cu = "";
+    if (d.entreno) {
+      cu += '<div class="p"><span class="et">Hoy</span>' + esc(d.entreno.hoy) + "</div>";
+      if (d.entreno.semana) cu += '<div class="p tenue peq">' + esc(d.entreno.semana.join(" · ")) + "</div>";
+    }
+    if (d.sueno) cu += '<div class="p"><span class="et">Anoche</span>' + esc(d.sueno) + "</div>";
+    $("cuerpo-dentro").innerHTML = cu;
+    $("cuerpo").style.display = cu ? "block" : "none";
+  }
+  function pedir() {
+    var x = new XMLHttpRequest();
+    x.open("GET", API + "/tele/tablero", true);
+    x.setRequestHeader("X-Auth-Token", LLAVE);
+    x.timeout = 20000;
+    x.onload = function () {
+      if (x.status === 200) {
+        try { pintar(JSON.parse(x.responseText)); $("error").innerHTML = ""; }
+        catch (e) { $("error").innerHTML = "No he podido pintar el tablero (" + esc(e.message) + ")."; }
+      } else {
+        $("error").innerHTML = x.status === 401 ? "La llave del tablero no vale." : "El backend contesta " + x.status + ".";
+      }
+    };
+    x.onerror = x.ontimeout = function () { $("error").innerHTML = "Sin conexión con caja. Atrás para salir."; };
+    x.send();
+  }
+  pedir();
+  setInterval(pedir, 60000);
 </script>
 </body>
 </html>

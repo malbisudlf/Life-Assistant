@@ -173,6 +173,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# El tablero de la tele lo pide la app «Jarvis» de la tele (tele/tablero-tizen/), que no es
+# ninguno de CORS_ORIGINS (es una app empaquetada; su origen ni siquiera es una web). Solo esa
+# ruta contesta a cualquier origen: se autentica con una llave de solo lectura en cabecera y sin
+# cookies, así que abrirla no le da a nadie nada que no tuviera ya con la llave. Va por fuera del
+# CORSMiddleware (registrada después = envuelve a las anteriores) para atender su preflight.
+_TABLERO_CORS = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS",
+                 "Access-Control-Allow-Headers": "X-Auth-Token", "Access-Control-Max-Age": "600"}
+
+
+class _CorsDelTablero:
+    """ASGI puro y no `@app.middleware("http")`, como `_TopeDeCuerpo`: un BaseHTTPMiddleware
+    más cambia cómo suben las excepciones hasta el middleware del registro."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != "/tele/tablero":
+            return await self.app(scope, receive, send)
+        if scope.get("method") == "OPTIONS":
+            return await Response(status_code=204, headers=_TABLERO_CORS)(scope, receive, send)
+
+        async def enviar(mensaje):
+            if mensaje.get("type") == "http.response.start":
+                cabeceras = list(mensaje.get("headers") or [])
+                if not any(k.lower() == b"access-control-allow-origin" for k, _ in cabeceras):
+                    cabeceras.append((b"access-control-allow-origin", b"*"))
+                mensaje = {**mensaje, "headers": cabeceras}
+            await send(mensaje)
+
+        await self.app(scope, receive, enviar)
+
+
+app.add_middleware(_CorsDelTablero)
+
 CLIENT_ID = os.getenv("CLIENT_ID")
 TENANT_ID = os.getenv("TENANT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")

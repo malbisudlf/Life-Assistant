@@ -12,7 +12,7 @@
 set -euo pipefail
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 IMAGEN="${IMAGEN_TIZEN:-ghcr.io/georift/install-jellyfin-tizen:latest}"
-FRONTEND="${FRONTEND_URL:-https://life-assistant-smoky.vercel.app}"
+API="${API_URL:-https://api.lifeassistantbackend.bid}"
 TELE="${TELE_IP:-$(grep -E '^TELE_IP=' "$HOME/.claude-phone/.env" | cut -d= -f2-)}"
 LLAVE="$(grep -E '^TELE_TABLERO_TOKEN=' "$HOME/stack/backend.env" | cut -d= -f2-)"
 [ -n "$LLAVE" ] || { echo "instalar.sh: falta TELE_TABLERO_TOKEN en ~/stack/backend.env" >&2; exit 1; }
@@ -22,7 +22,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir "$TMP/app" "$TMP/salida"
 cp "$AQUI/config.xml" "$AQUI/icon.png" "$TMP/app/"
-sed "s#__URL__#${FRONTEND}/\#tele=${LLAVE}#" "$AQUI/index.html" > "$TMP/app/index.html"
+# El tablero lo pinta la propia app (ver la cabecera de index.html): solo le falta a quién
+# preguntar y con qué llave.
+sed -e "s#__API__#${API}#" -e "s#__LLAVE__#${LLAVE}#" "$AQUI/index.html" > "$TMP/app/index.html"
 chmod -R a+rwX "$TMP"
 
 docker run --rm --network host -v "$TMP:/trabajo" --entrypoint bash "$IMAGEN" -c '
