@@ -40,7 +40,7 @@ TRAMPAS = [
 # Títulos normales de invitaciones que le llegan a un estudiante. Ninguno se esconde.
 INOCENTES = [
     "Reunión de equipo", "Sistemas Operativos: tutoría", "Borrador del TFG", "Cena con Aimar",
-    "Partido de pádel", "Entrega práctica 3", "Revisión de notas", "Cumpleaños de Saioa",
+    "Partido de pádel", "Entrega práctica 3", "Revisión de notas", "Cumpleaños de Ane",
     "Daily del proyecto", "Defensa de prácticas (sala 2)", "Café", "Videollamada con el tutor",
     "Ordenador nuevo: comparar ofertas", "Clase de recuperación",
 ]

@@ -34027,8 +34027,8 @@ _JARVIS_HERRAMIENTAS = {
                          "X?»: busca lo que le piden al usuario, lo que él prometió y las "
                          "preguntas sin contestar (`ultimo_es_tuyo: false`). Los grupos solo "
                          "con grupos=true o pidiendo uno por su chat. Guarda 30 días. Con "
-                         "`buscar` es la memoria: «¿qué me dijo Pablo del presupuesto?» → "
-                         "buscar='presupuesto' (y el chat de Pablo si lo tienes); busca en los "
+                         "`buscar` es la memoria: «¿qué me dijo Ane del presupuesto?» → "
+                         "buscar='presupuesto' (y el chat de Ane si lo tienes); busca en los "
                          "30 días y en los grupos también, salvo que pongas `horas` o `chat`.",
         "parametros":    {"chat":   {"type": "string",
                                      "description": "El chat; vacío = todos los individuales."},

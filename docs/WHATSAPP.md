@@ -34,8 +34,8 @@ backend ── whatsapp_chats      («¿quién es Aimar?»: su chat, de tus chat
 
 ## La memoria: buscar en lo que te han dicho
 
-Desde el 2026-11-08, `whatsapp_leer` tiene `buscar`: «¿qué me dijo Pablo del presupuesto la
-semana pasada?» es `buscar="presupuesto"` (con el chat de Pablo si lo sabe). Sin `horas`,
+Desde el 2026-11-08, `whatsapp_leer` tiene `buscar`: «¿qué me dijo Ane del presupuesto la
+semana pasada?» es `buscar="presupuesto"` (con el chat de Ane si lo sabe). Sin `horas`,
 busca en los 30 días que guarda el puente, y los grupos entran solos (`/mensajes?buscar=`,
 que el puente filtra en Go: todas las palabras, en el texto, el autor o el nombre del chat,
 sin tildes ni mayúsculas, porque el `LIKE` de SQLite solo ignora mayúsculas en ASCII). No es
