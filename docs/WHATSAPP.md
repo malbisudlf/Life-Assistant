@@ -228,6 +228,21 @@ dos motores del chat). Es una frontera de código: no depende de que el modelo s
   PC, un MCP y los proyectos. No cuentan `moodle_entregas` ni los títulos de Jellyfin: son
   campos cortos de fuentes concretas, y atarle las manos a «qué entrega tengo, ponme un
   aviso» saldría caro a cambio de poco.
+- **Las invitaciones de Outlook, solo si dan órdenes** (2026-11-08). El título y el lugar de
+  una invitación los escribe quien te invita, y llegaban por `agenda` y por lo ya mirado al
+  descolgar sin contar como ajenos. Marcar como ajena toda la agenda costaría un paso cada
+  vez que alguien te invita a algo («¿qué tengo hoy? y enciende la luz»), así que aquí sí
+  se busca la orden: si una invitación de otro (`organizo` es False) parece dirigirse a
+  Jarvis (`_parece_orden`: «jarvis», «ignora», «ponme», «avísame», «borra»…), su título y
+  su lugar no se leen («(invitación de otra persona; su título parece una orden y no se
+  lee)») y el turno pasa a contar como ajeno (`ajeno_sospechoso` en el resultado, que
+  miran los dos motores con `_ajeno_en_resultado`). Es una lista y se puede esquivar, pero
+  no es la única barrera: lo que actúa sin botón sigue necesitando que el modelo se lo
+  invente, y con el título escondido no tiene de dónde.
+- **La batería** (`tests/backend/test_inyeccion_bateria.py`, gratis y en el CI): ~60 trampas
+  en español e inglés, con acentos, mayúsculas, puntos entre letras y saltos de línea,
+  contra las invitaciones, los perfiles y los nombres de grupo de WhatsApp y lo que pides en
+  tu mensaje. Un parche que afloje cualquiera de las barreras la pone en rojo.
 - **La memoria tampoco.** Un turno con texto ajeno no se destila: «Pepe dice que siempre te
   avise a las 6» acabaría entre lo que Jarvis cree saber de ti, y eso lo leería cada turno
   futuro. Y el destilador ya no toma por hecho lo que el asistente cuente que dijeron otros.

@@ -243,6 +243,13 @@ class TestSeguirDondeSeQuedo:
 
 
 class TestLaLlamadaNuevaLoSabe:
+    @pytest.fixture(autouse=True)
+    def _sin_sueno_ni_alarma(self, monkeypatch):
+        # El sueño y la alarma (2026-11-08) van al final y tienen sus tests en
+        # test_contexto_voz.py; aquí se mira solo lo que quedó a medias.
+        monkeypatch.setattr(main, "_contexto_sueno", lambda ahora: "")
+        monkeypatch.setattr(main, "_contexto_alarma", lambda ahora: "")
+
     def test_el_contexto_dice_lo_que_quedo_a_medias(self, client, mock_requests, monkeypatch):
         monkeypatch.setattr(main, "_contexto_de_voz", lambda incluir_lugar=False: "LO MIRADO")
         mock_requests.add("GET", "sentitems", _correo(BRIEFING_24))
